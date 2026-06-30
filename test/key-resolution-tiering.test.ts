@@ -395,6 +395,53 @@ describe("Alpaca market-data credential (shared data, per-user trading)", () => 
     });
   });
 
+  it("prefers an operator connected key-only Alpaca credential over stored operator keys for news", async () => {
+    const { resolveAlpacaMarketData, upsertConnectedAccount, upsertUserApiKey } = await import("../src/lib/db");
+
+    upsertConnectedAccount({
+      id: "local-oauth-current",
+      userId: "local",
+      broker: "alpaca",
+      environment: "paper",
+      accountNumber: "PA-LOCAL",
+      label: "Operator OAuth",
+      apiKey: "local-current-token",
+      isActive: true
+    });
+    upsertUserApiKey("local", "alpaca_paper_api_key", "stale-operator-key");
+    upsertUserApiKey("local", "alpaca_paper_secret_key", "stale-operator-secret");
+
+    expect(resolveAlpacaMarketData()).toMatchObject({
+      apiKey: "local-current-token",
+      source: "env"
+    });
+    expect(resolveAlpacaMarketData().secretKey).toBeUndefined();
+  });
+
+  it("ignores Alpaca MCP connected accounts for REST market-data resolution", async () => {
+    vi.stubEnv("ALPACA_PAPER_API_KEY", "op-alpaca-key");
+    vi.stubEnv("ALPACA_PAPER_SECRET_KEY", "op-alpaca-secret");
+    const { resolveAlpacaMarketData, upsertConnectedAccount } = await import("../src/lib/db");
+
+    upsertConnectedAccount({
+      id: "local-alpaca-mcp",
+      userId: "local",
+      broker: "alpaca-mcp",
+      environment: "paper",
+      accountNumber: "MCP-LOCAL",
+      label: "Operator MCP",
+      apiKey: "mcp-token",
+      apiSecret: "mcp-secret",
+      isActive: true
+    });
+
+    expect(resolveAlpacaMarketData()).toMatchObject({
+      apiKey: "op-alpaca-key",
+      secretKey: "op-alpaca-secret",
+      source: "env"
+    });
+  });
+
   it("trading resolution is unaffected — a tenant never gets the operator's Alpaca key to trade", async () => {
     vi.stubEnv("ALPACA_PAPER_API_KEY", "op-alpaca-key");
     const { resolveApiKeyWithSource } = await import("../src/lib/db");

@@ -11,7 +11,11 @@ account for read-only shared/background snapshot market data, scanning alternate
 connected Alpaca accounts before falling back, while preserving a tenant's
 key-only Alpaca credential for the news tier when no shared fallback is
 configured, and preserving operator key-only connected credentials for shared
-news enrichment. Trading credential resolution remains per-user/fail-closed.
+news enrichment. Follow-up fixes keep REST market data off `alpaca-mcp`
+accounts, prefer current connected operator key-only credentials before stale
+stored/env operator keys, and keep FMP health logging for optional endpoint
+failures while suppressing expected premium 403s. Trading credential resolution
+remains per-user/fail-closed.
 Also updated `eslint.config.mjs` ignores list to skip `.claude/`, `.agents/`, `.tools/`,
 `**/worktrees/**`, and `scratch/` folders to prevent local verification linting errors.
 Verification: `npm test`, `npx tsc --noEmit`, and `npm run lint`.

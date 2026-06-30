@@ -8,8 +8,11 @@ filling the missing pieces.
 > 2026-06-30 (`fix/merge-pr-205` / PR #237): Alpaca shared market-data fallback —
 > review-thread follow-up now lets shared/background scans use the operator's
 > connected Alpaca account when a tenant has no complete Alpaca market-data
-> credential. Also ignores hidden worktree and build directories in ESLint config
-> to prevent local linting errors. Trading resolution remains per-user/fail-closed.
+> credential, keeps REST market data off `alpaca-mcp` execution rows, prefers
+> current connected operator key-only credentials before stale stored/env keys,
+> and preserves FMP health logging for non-403 optional endpoint failures. Also
+> ignores hidden worktree and build directories in ESLint config to prevent local
+> linting errors. Trading resolution remains per-user/fail-closed.
 > No roadmap change; see `docs/rollouts/2026-06-27-alpaca-key-fallback-fmp-warnings.md`
 > and `docs/rollouts/2026-06-30-ci-worktree-eslint-ignores.md`.
 > 2026-06-30 (`codex/notification-direct-bridge`): direct notification delivery

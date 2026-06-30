@@ -29,6 +29,9 @@ The following commands were run in the worktree root:
 - Preserved key-only tenant Alpaca credentials as the final user fallback when no complete shared/operator credential exists, so the Alpaca news tier can still use bearer-token auth.
 - Scanned ranked alternate connected Alpaca accounts before falling back when the preferred connected account is key-only.
 - Preserved key-only operator/local connected Alpaca credentials for shared background/tenant news enrichment when no complete shared credential exists.
+- Kept Alpaca REST market-data resolution scoped to `alpaca` connected accounts, excluding `alpaca-mcp` broker rows that belong to MCP execution.
+- Preferred current operator connected key-only Alpaca credentials before older stored/env operator keys when no complete connected credential exists.
+- Preserved FMP health logging for optional endpoint failures while suppressing only expected premium `403` rows from optional endpoints.
 - Left trading resolution unchanged: `resolveApiKeyWithSource("alpaca_paper_api_key", "u_tenant")` still fails closed instead of borrowing the operator's account.
 
 ### Why
@@ -36,6 +39,8 @@ The following commands were run in the worktree root:
 
 ### Files
 - `src/lib/db-api-keys.ts`
+- `src/lib/data-providers.ts`
+- `test/data-providers.test.ts`
 - `test/key-resolution-tiering.test.ts`
 - `STATUS.md`
 - `PLAN.md`
@@ -43,9 +48,10 @@ The following commands were run in the worktree root:
 
 ### Verification
 - `npm ci` - passed in the temporary PR worktree.
-- `npm test -- test/key-resolution-tiering.test.ts` - passed, 20 tests after the operator key-only shared-news follow-up.
-- `npx tsc --noEmit` - passed cleanly after the operator key-only shared-news follow-up.
-- `npm run lint` - passed with 0 errors and 256 existing warnings after the operator key-only shared-news follow-up.
+- `npm test -- test/key-resolution-tiering.test.ts` - passed, 22 tests after the FMP health and Alpaca MCP follow-ups.
+- `npm test -- test/data-providers.test.ts` - passed, 57 tests after the FMP health follow-up.
+- `npx tsc --noEmit` - passed cleanly after the FMP health and Alpaca MCP follow-ups.
+- `npm run lint` - passed with 0 errors and 256 existing warnings after the FMP health and Alpaca MCP follow-ups.
 
 ### Follow-ups
 - Full PR verify/smoke/gitleaks will rerun on GitHub after this branch is pushed.

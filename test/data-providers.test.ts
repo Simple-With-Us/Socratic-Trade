@@ -403,6 +403,32 @@ describe("Finnhub & FMP Cache Poisoning Protection", () => {
     expect(fetchCount).toBe(8);
   });
 
+  it("logs non-premium optional FMP failures while suppressing expected premium 403s", async () => {
+    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    const { getDb } = await import("../src/lib/db");
+    clearEnrichmentCache();
+    getDb().prepare("DELETE FROM api_health_log WHERE service = ?").run("fmp");
+
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("insider-trading")) {
+        return new Response("server error", { status: 500 });
+      }
+      if (url.includes("senate-trading")) {
+        return new Response("premium endpoint", { status: 403 });
+      }
+      return new Response(JSON.stringify([]));
+    });
+
+    const provider = new FmpEnrichmentProvider("test-key");
+    await provider.enrich(["AAPL"]);
+
+    const rows = getDb()
+      .prepare("SELECT ok, error_text FROM api_health_log WHERE service = ? ORDER BY ts")
+      .all("fmp") as Array<{ ok: number; error_text: string | null }>;
+    expect(rows.some((row) => row.ok === 0 && row.error_text === "HTTP 500")).toBe(true);
+    expect(rows.some((row) => row.error_text === "HTTP 403")).toBe(false);
+  });
+
   it("caches normally on FMP when all queries succeed", async () => {
     const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
     clearEnrichmentCache();

@@ -311,7 +311,15 @@ function maxSymbols(): number {
 async function fetchWithRetry(
   url: string,
   init: RequestInit,
-  options: { retries?: number; backoffMs?: number; service?: string; keySource?: string; userId?: string; deferSuccessLog?: boolean } = {}
+  options: {
+    retries?: number;
+    backoffMs?: number;
+    service?: string;
+    keySource?: string;
+    userId?: string;
+    deferSuccessLog?: boolean;
+    suppressHealthStatuses?: number[];
+  } = {}
 ): Promise<Response> {
   const retries = options.retries ?? 1;
   const backoffMs = options.backoffMs ?? 600;
@@ -336,7 +344,8 @@ async function fetchWithRetry(
       // When deferSuccessLog is set, skip the auto-success row so the caller can log
       // after validating the response body (e.g. providers that embed errors in HTTP 200).
       // HTTP failure rows are still written here regardless of the flag.
-      if (options.service && !(response.ok && options.deferSuccessLog)) {
+      const suppressHealth = !response.ok && (options.suppressHealthStatuses ?? []).includes(response.status);
+      if (options.service && !(response.ok && options.deferSuccessLog) && !suppressHealth) {
         logApiHealth({
           service: options.service,
           ok: response.ok,
@@ -1909,7 +1918,12 @@ export class FmpEnrichmentProvider implements MarketEnrichmentProvider {
       const response = await fetchWithRetry(
         url,
         { cache: "no-store", signal: controller.signal },
-        logHealth ? { service: this.name, keySource: this.keySource, userId: this.userId } : undefined
+        {
+          service: this.name,
+          keySource: this.keySource,
+          userId: this.userId,
+          suppressHealthStatuses: logHealth ? undefined : [403]
+        }
       );
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return await response.json();
