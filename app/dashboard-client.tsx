@@ -149,6 +149,10 @@ const STRATEGY_MODEL_IDS = [
   "mistral-small-latest", "mistral-medium-latest", "mistral-large-latest",
   "deepseek-chat", "deepseek-reasoner"
 ];
+const STRATEGY_TUNING_MODEL_IDS = [
+  ...STRATEGY_MODEL_IDS,
+  "gpt-4o-mini", "gpt-4o", "o1-mini", "o3-mini", "o1"
+];
 const CUSTOM_STRATEGY_MODEL_SEED = "gpt-4o-mini";
 type FeedTab = "activity" | "runs" | "notifications" | "audit";
 type SettingsSection = "operate" | "risk" | "connections" | "display" | "tax" | "tuning" | "notifications" | "data";
@@ -3516,46 +3520,37 @@ function StrategyView({
           title="LLM Strategy Review"
           subtitle="Advisory — review past performance & suggest tuning"
           icon={<Sparkles size={16} />}
-          actions={
-            <div className="flex items-center gap-2">
-              <select
-                className={cn(inputClass, "w-44 text-[12px] py-1 h-8 bg-surface-3 border-line")}
-                value={tuningModel}
-                onChange={(e) => setTuningModel(e.target.value)}
-              >
-                <optgroup label="OpenAI">
-                  <option value="gpt-4o-mini">gpt-4o-mini (default)</option>
-                  <option value="gpt-4o">gpt-4o</option>
-                  <option value="o1-mini">o1-mini</option>
-                  <option value="o3-mini">o3-mini</option>
-                  <option value="o1">o1</option>
-                </optgroup>
-                <optgroup label="xAI (Grok)">
-                  <option value="grok-build-0.1">grok-build-0.1</option>
-                  <option value="grok-4.3">grok-4.3</option>
-                </optgroup>
-                <optgroup label="Google Gemini">
-                  <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
-                  <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-                  <option value="gemini-3.5-flash">gemini-3.5-flash</option>
-                </optgroup>
-                <optgroup label="Mistral">
-                  <option value="mistral-small-latest">mistral-small-latest</option>
-                  <option value="mistral-medium-latest">mistral-medium-latest</option>
-                  <option value="mistral-large-latest">mistral-large-latest</option>
-                </optgroup>
-                <optgroup label="DeepSeek">
-                  <option value="deepseek-chat">deepseek-chat</option>
-                  <option value="deepseek-reasoner">deepseek-reasoner</option>
-                </optgroup>
-              </select>
-              <Button size="sm" onClick={() => requestStrategyTuning(tuningModel)} disabled={tuningBusy}>
-                <Zap size={14} /> {tuningBusy ? "Reviewing…" : "Review"}
-              </Button>
-            </div>
-          }
         />
-        <div className="p-4 pt-3">
+        <div className="space-y-3 p-4 pt-3">
+          <div className="rounded-lg border border-line bg-bg/55 px-3 py-3">
+            <div className="flex items-start gap-3">
+              <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent/15 text-accent">
+                <Zap size={15} />
+              </span>
+              <div className="min-w-0 flex-1 space-y-3">
+                <div>
+                  <div className="text-sm font-semibold text-fg">Generate a tuning proposal</div>
+                  <p className="mt-0.5 text-xs text-faint">Creates an advisory review below. Nothing changes until you apply reviewed changes.</p>
+                </div>
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <StrategyTuningModelSelect
+                    value={tuningModel}
+                    onChange={setTuningModel}
+                    className="w-full sm:w-60"
+                  />
+                  <Button
+                    size="sm"
+                    variant="accentSoft"
+                    className="w-full sm:w-auto"
+                    onClick={() => requestStrategyTuning(tuningModel)}
+                    disabled={tuningBusy}
+                  >
+                    <Zap size={14} /> {tuningBusy ? "Reviewing…" : "Review strategy"}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
           {tuningError && <p className="mb-2 rounded-lg border border-down/30 bg-down/10 px-3 py-2 text-[13px] text-down">{tuningError}</p>}
           {strategyTuning ? <TuningCard proposal={strategyTuning} onApply={applyStrategyTuning} /> : <p className="text-[13px] text-faint">No review yet. Run a review to get suggested prompt, scoring, and risk changes (you apply them manually).</p>}
         </div>
@@ -4070,56 +4065,98 @@ function StrategyStudio({
       </div>
 
       <div className="lg:col-span-2">
-        <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h4 className="text-sm font-semibold text-fg">LLM Strategy Review</h4>
-            <p className="text-xs text-faint">Reviews performance, scan context, macro & current prompt. Advisory — apply is manual.</p>
+        <div className="rounded-lg border border-line bg-surface-2/45 p-3">
+          <div className="flex items-start gap-3">
+            <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent/15 text-accent">
+              <Sparkles size={15} />
+            </span>
+            <div className="min-w-0 flex-1 space-y-3">
+              <div>
+                <h4 className="text-sm font-semibold text-fg">LLM Strategy Review</h4>
+                <p className="mt-0.5 text-xs text-faint">Reviews performance, scan context, macro, and current prompt. Advisory only.</p>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <StrategyTuningModelSelect
+                  value={tuningModel}
+                  onChange={setTuningModel}
+                  className="w-full sm:w-60"
+                />
+                <Button
+                  size="sm"
+                  variant="accentSoft"
+                  className="w-full sm:w-auto"
+                  onClick={() => requestStrategyTuning(tuningModel)}
+                  disabled={tuningBusy}
+                >
+                  <Zap size={14} /> {tuningBusy ? "Reviewing…" : "Review strategy"}
+                </Button>
+              </div>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <select
-              className={cn(inputClass, "w-44 text-[12px] py-1 h-8 bg-surface-3 border-line")}
-              value={tuningModel}
-              onChange={(e) => setTuningModel(e.target.value)}
-            >
-              <optgroup label="OpenAI">
-                <option value="gpt-5.4-nano">gpt-5.4-nano</option>
-                <option value="gpt-5.4-mini">gpt-5.4-mini (default)</option>
-                <option value="gpt-5.4">gpt-5.4</option>
-                <option value="gpt-5.5">gpt-5.5</option>
-                <option value="gpt-4o-mini">gpt-4o-mini</option>
-                <option value="gpt-4o">gpt-4o</option>
-                <option value="o1-mini">o1-mini</option>
-                <option value="o3-mini">o3-mini</option>
-                <option value="o1">o1</option>
-              </optgroup>
-              <optgroup label="xAI (Grok)">
-                <option value="grok-build-0.1">grok-build-0.1</option>
-                <option value="grok-4.3">grok-4.3</option>
-              </optgroup>
-              <optgroup label="Google Gemini">
-                <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
-                <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-                <option value="gemini-3.5-flash">gemini-3.5-flash</option>
-              </optgroup>
-              <optgroup label="Mistral">
-                <option value="mistral-small-latest">mistral-small-latest</option>
-                <option value="mistral-medium-latest">mistral-medium-latest</option>
-                <option value="mistral-large-latest">mistral-large-latest</option>
-              </optgroup>
-              <optgroup label="DeepSeek">
-                <option value="deepseek-chat">deepseek-chat</option>
-                <option value="deepseek-reasoner">deepseek-reasoner</option>
-              </optgroup>
-            </select>
-            <Button size="sm" onClick={() => requestStrategyTuning(tuningModel)} disabled={tuningBusy}>
-              <Zap size={14} /> {tuningBusy ? "Reviewing…" : "Review strategy"}
-            </Button>
+          {tuningError && <p className="mt-3 rounded-lg border border-down/30 bg-down/10 px-3 py-2 text-[13px] text-down">{tuningError}</p>}
+          <div className="mt-3">
+            {strategyTuning ? <TuningCard proposal={strategyTuning} onApply={applyStrategyTuning} /> : <p className="text-[13px] text-faint">Run a review to get suggested prompt, scoring, and risk changes.</p>}
           </div>
         </div>
-        {tuningError && <p className="mb-2 rounded-lg border border-down/30 bg-down/10 px-3 py-2 text-[13px] text-down">{tuningError}</p>}
-        {strategyTuning ? <TuningCard proposal={strategyTuning} onApply={applyStrategyTuning} /> : <p className="text-[13px] text-faint">Run a review to get suggested prompt, scoring, and risk changes.</p>}
       </div>
     </div>
+  );
+}
+
+function StrategyTuningModelSelect({
+  value,
+  onChange,
+  className
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  className?: string;
+}) {
+  return (
+    <select
+      aria-label="Strategy review model"
+      className={cn(inputClass, "h-8 border-line bg-surface-3 py-1 text-[12px]", className)}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+    >
+      {value && !STRATEGY_TUNING_MODEL_IDS.includes(value) && (
+        <option value={value}>{value} (current custom)</option>
+      )}
+      <optgroup label="OpenAI">
+        <option value="gpt-5.4-nano">gpt-5.4-nano</option>
+        <option value="gpt-5.4-mini">gpt-5.4-mini (default)</option>
+        <option value="gpt-5.4">gpt-5.4</option>
+        <option value="gpt-5.5">gpt-5.5</option>
+        <option value="gpt-4o-mini">gpt-4o-mini</option>
+        <option value="gpt-4o">gpt-4o</option>
+        <option value="o1-mini">o1-mini</option>
+        <option value="o3-mini">o3-mini</option>
+        <option value="o1">o1</option>
+      </optgroup>
+      <optgroup label="Anthropic (Claude)">
+        <option value="claude-haiku-4-5">claude-haiku-4-5</option>
+        <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+        <option value="claude-opus-4-8">claude-opus-4-8</option>
+      </optgroup>
+      <optgroup label="xAI (Grok)">
+        <option value="grok-build-0.1">grok-build-0.1</option>
+        <option value="grok-4.3">grok-4.3</option>
+      </optgroup>
+      <optgroup label="Google Gemini">
+        <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
+        <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+        <option value="gemini-3.5-flash">gemini-3.5-flash</option>
+      </optgroup>
+      <optgroup label="Mistral">
+        <option value="mistral-small-latest">mistral-small-latest</option>
+        <option value="mistral-medium-latest">mistral-medium-latest</option>
+        <option value="mistral-large-latest">mistral-large-latest</option>
+      </optgroup>
+      <optgroup label="DeepSeek">
+        <option value="deepseek-chat">deepseek-chat</option>
+        <option value="deepseek-reasoner">deepseek-reasoner</option>
+      </optgroup>
+    </select>
   );
 }
 
@@ -4324,13 +4361,27 @@ function SettingsContent({
     updatePolicy({ paperMode: true });
   }
 
+  async function setAutoResumeOnBoot(enabled: boolean) {
+    try {
+      const res = await fetch("/api/settings/auto-resume", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled })
+      });
+      if (!res.ok) throw new Error("Failed to save setting");
+      await load({ quiet: true });
+    } catch {
+      toast.error("Could not save auto-resume setting.");
+    }
+  }
+
   return (
     <>
       <div className="min-h-[60vh] space-y-4">
-        <div className="space-y-2 rounded-lg border border-line bg-surface/55 p-2.5 shadow-[var(--shadow)]">
+        <div className="space-y-3 rounded-lg border border-line bg-surface/60 p-3 shadow-[var(--shadow)]">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex min-w-0 items-center gap-2.5">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent/15 text-accent">
+            <div className="flex min-w-0 flex-1 items-center gap-2.5">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-accent/15 text-accent">
                 {settingsTier === "user" ? <SettingsIcon size={15} /> : <Wallet size={15} />}
               </span>
               <div className="min-w-0">
@@ -4338,7 +4389,7 @@ function SettingsContent({
                 <div className="truncate text-xs text-faint" title={settingsScopeDetail}>{settingsScopeDetail}</div>
               </div>
             </div>
-            <div className="overflow-x-auto overscroll-x-contain">
+            <div className="overflow-x-auto overscroll-x-contain sm:shrink-0">
               <Segmented<"user" | "account">
                 value={settingsTier}
                 onChange={(v) => {
@@ -4358,14 +4409,16 @@ function SettingsContent({
           {settingsTier === "account" && (() => {
             const accounts = (snapshot.connectedAccounts ?? []).filter((a) => a.broker !== "test" || a.id === snapshot.policy.connectedAccountId);
             return (
-              <div className="flex flex-col gap-2 rounded-lg border border-line/70 bg-bg/35 px-3 py-2.5 sm:flex-row sm:items-center">
-                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent/15 text-accent">
-                  <Wallet size={14} />
-                </span>
-                <span className="text-sm font-medium text-fg">Editing</span>
+              <div className="flex flex-col gap-2 rounded-lg border border-line/70 bg-bg/35 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent/15 text-accent">
+                    <Wallet size={14} />
+                  </span>
+                  <span className="text-sm font-medium text-fg">Account</span>
+                </div>
                 {accounts.length > 0 ? (
                   <select
-                    className="h-9 min-w-0 flex-1 rounded-lg border border-line bg-surface/70 px-2 text-sm text-fg outline-none focus:border-accent focus:ring-1 focus:ring-accent sm:max-w-xs"
+                    className="h-9 w-full min-w-0 rounded-lg border border-line bg-surface/70 px-2 text-sm text-fg outline-none focus:border-accent focus:ring-1 focus:ring-accent sm:max-w-xs"
                     value={activeAccount?.id ?? ""}
                     onChange={async (e) => {
                       const id = e.target.value;
@@ -4390,30 +4443,39 @@ function SettingsContent({
           })()}
 
           {settingsTier === "user" && (
-            <label className="flex items-center justify-between gap-3 rounded-lg border border-line/70 bg-bg/35 px-3 py-2.5 max-sm:flex-col max-sm:items-start">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={snapshot.autoResumeOnBoot}
+              onClick={() => void setAutoResumeOnBoot(!snapshot.autoResumeOnBoot)}
+              className={cn(
+                "group flex w-full cursor-pointer select-none items-center justify-between gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 max-sm:flex-col max-sm:items-start",
+                snapshot.autoResumeOnBoot
+                  ? "border-accent/45 bg-accent/10 hover:bg-accent/15 active:bg-accent/20"
+                  : "border-line/70 bg-bg/35 hover:border-accent/45 hover:bg-accent/8 active:bg-accent/12"
+              )}
+            >
               <span className="min-w-0 leading-snug">
-                <span className="block text-sm font-medium text-fg">Resume strategy on server restart</span>
-                <span className="block text-xs text-faint">
+                <span className={cn("block text-sm font-medium transition-colors", snapshot.autoResumeOnBoot ? "text-accent" : "text-fg group-hover:text-accent")}>Resume strategy on server restart</span>
+                <span className="block text-xs text-faint transition-colors group-hover:text-muted">
                   When enabled, accounts left in &ldquo;active&rdquo; state will auto-resume on server boot. When off (default), every restart requires manually re-arming autonomy.
                 </span>
               </span>
-              <Switch
-                checked={snapshot.autoResumeOnBoot}
-                onChange={async (v) => {
-                  try {
-                    const res = await fetch("/api/settings/auto-resume", {
-                      method: "POST",
-                      headers: { "content-type": "application/json" },
-                      body: JSON.stringify({ enabled: v })
-                    });
-                    if (!res.ok) throw new Error("Failed to save setting");
-                    await load({ quiet: true });
-                  } catch {
-                    toast.error("Could not save auto-resume setting.");
-                  }
-                }}
-              />
-            </label>
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors",
+                  snapshot.autoResumeOnBoot ? "bg-accent" : "bg-surface-3 group-hover:bg-surface-2"
+                )}
+              >
+                <span
+                  className={cn(
+                    "inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform",
+                    snapshot.autoResumeOnBoot ? "translate-x-6" : "translate-x-1"
+                  )}
+                />
+              </span>
+            </button>
           )}
 
           <div className="overflow-x-auto overscroll-x-contain">

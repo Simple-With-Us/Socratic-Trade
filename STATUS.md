@@ -4,6 +4,19 @@ Current snapshot for fast handoff across Codex, Claude, Cursor, Gemini, or a
 human contributor. Update this when active focus, risks, or near-term next
 steps materially change.
 
+## 2026-06-30 - Settings review-action polish
+Branch `codex/settings-review-polish`. Moved the LLM Strategy Review action out
+of the header/corner action pattern in both the Strategy tab and Strategy Studio,
+placing it in a left-aligned advisory panel so it no longer reads like an OK,
+Save, or submit button for surrounding settings. The review model picker is now
+shared between both surfaces, includes the newer provider/model families, and
+shows a current custom model instead of rendering blank. The Settings scope
+header/account picker also got spacing and alignment polish; the auto-resume row
+is now an explicit whole-row switch with hover, active, and focus affordance
+instead of a silent label-click area. Verification: `npm run lint` (0 errors,
+existing 256 warnings), `npx tsc --noEmit`, `npm test` (160 files / 1555 tests),
+and `npm run build` all pass. See `docs/rollouts/2026-06-30-settings-review-polish.md`.
+
 ## 2026-06-30 - Test account readiness ignores local portfolio display errors
 Branch `codex/test-account-readiness`. Fixed the Test/local Start blocker where a
 recoverable dashboard portfolio read issue produced `Test account data check
