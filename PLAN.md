@@ -35,6 +35,14 @@ filling the missing pieces.
 > do not follow it. See `docs/EFFORT-LOG.md` +
 > `docs/rollouts/2026-07-03-remove-paper-default-test-mode.md`.
 
+> **2026-07-04 - Codex console/UI swimlane.** Branch `codex/console-ui-swimlane` executes the sync-21
+> console assignment without using the sovereign review branch: approval receipt provenance
+> (served model/failover, red-team trigger, sizing inputs, R:R geometry, linked citations), mobile
+> LIVE phrase-gate parity, Sheet focus trap, read-only `/console/decisions/[id]` trace inspector with
+> coach notes/framework `ownerResponse`, high-signal ticker drawer affordances, and Strategy custom
+> model select parity. No roadmap scope change; this hardens the existing Autonomy Desk/console
+> parity track. See `docs/rollouts/2026-07-04-console-ui-swimlane.md`.
+
 > **2026-07-03 - Socratic admin/RAG/settings parity pass (Codex).** The
 > branch `codex/live-thesis-portfolio-framing` is the current broad follow-up
 > for owner feedback after the Socratic UI launch: Pinecone index default

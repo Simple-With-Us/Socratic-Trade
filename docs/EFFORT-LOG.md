@@ -198,6 +198,17 @@ to `socratictrade.com`, record the release commit + date here._
 
 ## 🔨 In Progress
 
+- **CODEX console/UI swimlane (Codex, worktree `/Users/jay/apps/trading-codex-ui-swimlane`,
+  branch `codex/console-ui-swimlane`) — claimed 2026-07-04 from sync-21.** Priority:
+  approvals surface pack first (approval-card provenance, red-team trigger chip, R:R geometry,
+  mobile LIVE phrase-gate parity, Sheet focus-trap), then `/console/decisions/[id]` decision-trace
+  inspector over W2 case shapes, coach-on-trace UI, and the reserved ticker/settings/model parity
+  trio. KEEPOUT: Claude memory/RAG internals and Monet risk gates. **Status 2026-07-04:** implemented
+  and locally verified on branch; PR pending. Delivered approval provenance/citations, mobile LIVE
+  phrase parity, Sheet focus trap, read-only decision trace + coach notes/framework `ownerResponse`,
+  top ticker drawer gaps, and Strategy custom-model select parity. Verification: lint 0 errors / 308
+  warnings, tsc, 253-file/2457-test suite, build.
+
 - **Wave-2 composite-review — Outcome Engine lane** (Claude, branch `claude/w2-outcome-engine`,
   worktree `~/apps/trading-wt-w2-outcome`, based on `claude/w1-learning-loops`) — four §A items:
   (1) THE OUTCOME WRITER: new scheduled job `src/lib/outcome-engine.ts` on the counterfactual
@@ -214,6 +225,7 @@ to `socratictrade.com`, record the release commit + date here._
   routed through `ingestLearned` origin `autonomous`; all skips receipted. Gate green: lint 0
   errors, tsc clean, 2383 tests / 246 files, build green. **Pushed; NO PR — lands via the
   landing train after the base branch.** See `docs/rollouts/2026-07-04-w2-outcome-engine.md`.
+
 
 - **`claude/ci-actions-efficiency` (Claude, worktree `~/apps/trading-wt-ci-efficiency`) → PR #370.**
   GitHub Actions minutes efficiency pass — personal Pro-plan quota (3,000 min/mo) was exhausted.
@@ -446,12 +458,14 @@ to `socratictrade.com`, record the release commit + date here._
 - **Universal ticker detail drawer parity** — restore old-site discoverability by making ticker symbols
   open the shared drilldown/drawer consistently across scan, home, evidence cards, proposals, orders,
   and other console surfaces. Reserved under the broader Codex parity effort so parallel agents do not
-  start a duplicate ticker-detail lane.
+  start a duplicate ticker-detail lane. Initial high-signal gaps covered by `codex/console-ui-swimlane`;
+  new console surfaces should default to `SymbolButton` for actionable tickers.
 - **Settings affordance and tooltip pass** — add clearer option descriptions/tooltips, replace confusing
   loose/tight wording with lock/unlock-style affordances, and turn absolute-vs-percent pairs into a
   polished mode switch where the pair represents alternative ways to express one constraint.
 - **Model/provider control parity** — move strategy model controls toward curated dropdowns with
   provider-aware settings, showing reasoning controls only for models that actually support them.
+  Initial Strategy custom-model selected-state parity covered by `codex/console-ui-swimlane`.
 - **Admin connection health and backend-failure notification pass** — surface every backend dependency
   including Pinecone/Voyage, distinguish global backend failures from user-key failures, and route
   global failures to admin email/health while user-key failures become user notifications.

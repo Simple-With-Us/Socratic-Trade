@@ -88,4 +88,31 @@ describe("Socratic decision persistence", () => {
     expect(updated?.status).toBe("accepted");
     expect(updated?.ownerResponse).toContain("flash-crash");
   });
+
+  it("serves one decision case by id through the read-only route", async () => {
+    const { upsertSocraticDecisionCase } = await import("../src/lib/db");
+    const { GET } = await import("../app/api/socratic/decisions/[id]/route");
+
+    const decisionId = upsertSocraticDecisionCase({
+      status: "observed",
+      authority: "propose",
+      thesis: "Portfolio posture",
+      rationale: "No single-name action was warranted.",
+      action: "Observe",
+      evidence: [],
+      ragAttributions: [],
+      dissent: []
+    });
+
+    const response = await GET(new Request(`http://localhost/api/socratic/decisions/${decisionId}`), {
+      params: Promise.resolve({ id: decisionId })
+    });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ id: decisionId, thesis: "Portfolio posture" });
+
+    const missing = await GET(new Request("http://localhost/api/socratic/decisions/missing"), {
+      params: Promise.resolve({ id: "missing" })
+    });
+    expect(missing.status).toBe(404);
+  });
 });

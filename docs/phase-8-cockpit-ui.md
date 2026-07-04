@@ -49,6 +49,12 @@
 > proposal review actions, coach notes, and explicit autonomous override semantics
 > for owner preference gates. `/design/socratic-trade` is now a coded public product
 > overview rather than a static mockup. See `docs/rollouts/2026-07-03-socratic-autonomy-ui.md`.
+>
+> 2026-07-04: `codex/console-ui-swimlane` extends the Autonomy Desk's inspection surfaces:
+> approval cards expose served-model/failover provenance, red-team triggers, sizing/R:R receipt
+> data, and linked citations; `/console/decisions/[id]` is the read-only trace inspector for
+> decision cases, coach notes, and linked framework proposals; mobile LIVE approval uses the same
+> phrase gate as desktop. See `docs/rollouts/2026-07-04-console-ui-swimlane.md`.
 
 
 This phase restructures the dashboard from a long vertical page into a

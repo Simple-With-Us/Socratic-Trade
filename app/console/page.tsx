@@ -297,6 +297,7 @@ type DecisionRowData = {
   size: string;
   status: string;
   rationale: string;
+  href?: string;
   title?: string;
   confidence?: number;
 };
@@ -366,6 +367,7 @@ function decisionFromSocratic(decision: SocraticDecisionCase): DecisionRowData {
     size: decision.notional ? fmtMoney(decision.notional) : EM_DASH,
     status: decision.status,
     rationale: withBlockReasons(rationale, decision.status, reasons),
+    href: `/console/decisions/${encodeURIComponent(decision.id)}`,
     title: reasons.length > 0 ? `Policy reasons:\n${reasons.join("\n")}` : undefined,
     confidence: decision.confidenceScore
   };
@@ -557,6 +559,11 @@ function DecisionRow({ row }: { row: DecisionRowData }) {
       <div className="text-right">
         <div className="con-num font-semibold">{row.size}</div>
         {typeof row.confidence === "number" && <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">conf {row.confidence}</div>}
+        {row.href && (
+          <Link href={row.href} className="mt-1 inline-flex text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]">
+            Trace
+          </Link>
+        )}
       </div>
     </article>
   );

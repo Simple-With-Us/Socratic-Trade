@@ -300,7 +300,7 @@ function TaxBlock() {
           <div className="flex flex-wrap gap-1.5">
             {tax.lockedSymbols.map((s) => (
               <Chip key={s} tone="warn" title="Rebuying within 30 days of the loss would forfeit the loss deduction. The buy gate enforces this automatically.">
-                {s} locked
+                <SymbolButton symbol={s} showLogo={false} className="text-inherit" /> locked
               </Chip>
             ))}
           </div>

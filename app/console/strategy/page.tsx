@@ -57,7 +57,7 @@ function isCuratedModel(model: string | undefined): boolean {
 
 function modelSelectValue(model: string | undefined): string {
   if (!model) return "";
-  return isCuratedModel(model) ? model : CUSTOM_MODEL_OPTION;
+  return model;
 }
 
 function modelProviderLabel(model: string | undefined): string {
@@ -139,6 +139,7 @@ function ModelSelect({
 }) {
   const selectValue = modelSelectValue(value);
   const custom = selectValue === CUSTOM_MODEL_OPTION;
+  const customCurrent = value && !isCuratedModel(value) && value !== CUSTOM_MODEL_OPTION ? value : null;
   return (
     <div className="flex flex-col gap-2">
       <Select
@@ -150,6 +151,11 @@ function ModelSelect({
         }}
       >
         {allowBlank && <option value="">{blankLabel ?? "Not Set"}</option>}
+        {customCurrent && (
+          <option value={customCurrent} title="A model id outside the curated list, kept exactly as stored.">
+            {customCurrent} - custom id
+          </option>
+        )}
         {CURATED_LLM_MODEL_GROUPS.map((group) => (
           <optgroup key={group.provider} label={group.label}>
             {group.options.map((option) => (

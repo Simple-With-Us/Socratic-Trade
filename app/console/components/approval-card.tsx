@@ -7,8 +7,9 @@
  *  server's typed-confirmation contract (LIVE_CONFIRMATION_REQUIRED). */
 
 import { useMemo, useState } from "react";
-import { ShieldCheck, Swords } from "lucide-react";
-import type { PendingProposal, TradingPolicy } from "@/lib/types";
+import { Database, Ruler, ShieldCheck, Swords, TrendingUp } from "lucide-react";
+import type { PendingProposal, SocraticDecisionCase, SocraticRagAttribution, TradingPolicy, TradeProposal } from "@/lib/types";
+import type { DashboardSnapshot } from "../../dashboard-types";
 import {
   approveProposal,
   rejectProposal,
@@ -17,7 +18,7 @@ import {
   type ApproveResult
 } from "../lib/api";
 import { realityForMode } from "../lib/derive";
-import { cx, fmtMoney, fmtPct, fmtQty, timeUntil, EM_DASH } from "../lib/format";
+import { cx, fmtMoney, fmtNum, fmtPct, fmtQty, timeUntil, EM_DASH } from "../lib/format";
 import { DEFAULT_GREEN_MODEL_ID } from "../lib/models";
 import { useConsoleData } from "../lib/useConsoleData";
 import { useToast } from "../ui/toast";
@@ -35,6 +36,68 @@ function isExit(side: string): boolean {
 function estNotional(p: PendingProposal): number | undefined {
   const v = p.estimatedNotional ?? p.review?.estimatedNotional ?? p.proposal.dollarAmount;
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+function finite(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+type RedTeamTrigger = NonNullable<NonNullable<TradeProposal["redTeamVerdict"]>["trigger"]>;
+
+function redTeamTriggerMeta(trigger?: RedTeamTrigger) {
+  switch (trigger) {
+    case "confidence":
+      return { label: "confidence", title: "The proposer confidence cleared the configured Red Team conviction threshold." };
+    case "notional":
+      return { label: "large notional", title: "The order was large enough as a percentage of NAV to require adversarial review." };
+    case "live_opening":
+      return { label: "live opening", title: "A live opening order always gets the Red Team receipt when the debate path is available." };
+    case "override_requested":
+      return { label: "override request", title: "The proposal asked to override an owner preference, so the Red Team reviewed the dissent." };
+    case "escalation_regime":
+      return { label: "risk regime", title: "The entry regime was Risk-Off, Crisis, or Inverted, so the Red Team reviewed the setup." };
+    default:
+      return { label: "legacy confidence", title: "Older persisted verdicts predate the trigger field; they came from the original confidence threshold." };
+  }
+}
+
+function rewardRiskFor(pending: PendingProposal) {
+  const p = pending.proposal;
+  if (p.side !== "buy" && p.side !== "short") return null;
+  const entry = p.referencePrice ?? pending.proposalReferencePrice ?? p.limitPrice;
+  const stop = p.bracketStopLoss;
+  const target = p.bracketTakeProfit;
+  if (!finite(entry) || !finite(stop) || !finite(target) || entry <= 0) return null;
+
+  const reward = p.side === "short" ? entry - target : target - entry;
+  const risk = p.side === "short" ? stop - entry : entry - stop;
+  if (reward <= 0 || risk <= 0) return null;
+  return { entry, stop, target, reward, risk, ratio: reward / risk };
+}
+
+function matchedDecision(snapshot: DashboardSnapshot | null, pending: PendingProposal): SocraticDecisionCase | undefined {
+  return snapshot?.socratic?.decisions?.find((decision) => decision.proposalId === pending.id);
+}
+
+function modelProvenance(p: TradeProposal, policy: TradingPolicy | undefined): string {
+  const configured = policy?.llmModel?.trim();
+  const served = p.proposedByModel?.trim();
+  if (served && configured && served !== configured) return `served ${served}; configured primary was ${configured}`;
+  if (served) return `served ${served}`;
+  if (configured) return `configured primary ${configured}; served model not persisted on this legacy proposal`;
+  return "served model not exposed on this proposal";
+}
+
+function fallbackProvenance(p: TradeProposal, policy: TradingPolicy | undefined): string {
+  const fallbackModels = policy?.llmFallbackModels?.filter(Boolean) ?? [];
+  if (p.proposedByModel && fallbackModels.includes(p.proposedByModel)) return `served by configured fallback ${p.proposedByModel}`;
+  if (p.proposedByModel && policy?.llmModel && p.proposedByModel !== policy.llmModel) return "served model differs from configured primary";
+  if (fallbackModels.length > 0) return `fallback chain configured (${fallbackModels.length}); no per-hop history on this card`;
+  return "no fallback chain configured";
+}
+
+function evidenceLabel(item: SocraticRagAttribution): string {
+  return [item.docType, item.source, finite(item.score) ? `score ${item.score.toFixed(2)}` : undefined].filter(Boolean).join(" · ") || "retrieved evidence";
 }
 
 function expiryIso(p: PendingProposal, policy: TradingPolicy): string | null {
@@ -56,6 +119,17 @@ export function ApprovalCard({ pending }: { pending: PendingProposal }) {
   const live = reality.tone === "live";
   const notional = estNotional(pending);
   const expiresAt = snapshot ? expiryIso(pending, snapshot.policy) : null;
+  const decisionCase = matchedDecision(snapshot, pending);
+  const rewardRisk = rewardRiskFor(pending);
+  const redTrigger = redTeamTriggerMeta(p.redTeamVerdict?.trigger);
+  const policy = snapshot?.policy;
+  const dailyUsed = finite(pending.decision.dailyNotionalUsed) ? pending.decision.dailyNotionalUsed : snapshot?.dailyStats.notional;
+  const dailyRemaining = finite(policy?.maxDailyNotional) && finite(dailyUsed) ? Math.max(0, policy.maxDailyNotional - dailyUsed) : undefined;
+  const referencePrice = p.referencePrice ?? pending.proposalReferencePrice;
+  const currentDrift =
+    finite(referencePrice) && finite(pending.proposalCurrentPrice) && referencePrice > 0
+      ? ((pending.proposalCurrentPrice - referencePrice) / referencePrice) * 100
+      : undefined;
 
   // Model attribution prefers the PERSISTED per-proposal values (p.proposedByModel /
   // p.redTeamVerdict.model — stamped failover-aware by src/lib/strategy.ts), falling back
@@ -180,6 +254,12 @@ export function ApprovalCard({ pending }: { pending: PendingProposal }) {
             <span className="text-[color:var(--con-faint)]">
               Proposed <Ago iso={pending.createdAt} />
             </span>
+            <Chip tone="muted" title={modelProvenance(p, policy)}>
+              {p.proposedByModel ? "served model" : "model legacy"}
+            </Chip>
+            <Chip tone="muted" title={fallbackProvenance(p, policy)}>
+              failover
+            </Chip>
           </div>
           <p className="mt-2 leading-relaxed text-[color:var(--con-muted)]">{p.rationale}</p>
         </div>
@@ -197,11 +277,117 @@ export function ApprovalCard({ pending }: { pending: PendingProposal }) {
               <ModelBadge modelId={redModel} title="The adversarial reviewer model that critiqued this proposal" />
             </div>
             <p className="mt-1.5 leading-relaxed text-[color:var(--con-muted)]">{p.redTeamVerdict.reason}</p>
-            <p className="mt-1 text-[length:var(--con-fs-xs)] font-semibold" style={{ color: p.redTeamVerdict.rejected ? "var(--con-neg)" : "var(--con-pos)" }}>
-              {p.redTeamVerdict.rejected ? "Verdict: rejected" : "Verdict: survived review"}
-            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-[length:var(--con-fs-xs)]">
+              <span className="font-semibold" style={{ color: p.redTeamVerdict.rejected ? "var(--con-neg)" : "var(--con-pos)" }}>
+                {p.redTeamVerdict.rejected ? "Verdict: rejected" : "Verdict: survived review"}
+              </span>
+              <Chip tone="warn" title={redTrigger.title}>
+                trigger: {redTrigger.label}
+              </Chip>
+            </div>
           </div>
         )}
+
+        {/* Provenance + sizing receipt */}
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,1.05fr)_minmax(260px,0.95fr)]">
+          <div className="rounded-lg border border-[color:var(--con-line)] p-3">
+            <div className="con-card-title mb-2 flex items-center gap-1.5" title="Sizing inputs already available on the approval snapshot; missing values stay blank instead of being inferred.">
+              <Ruler size={12} /> Sizing provenance
+            </div>
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-[length:var(--con-fs-xs)]">
+              <dt className="text-[color:var(--con-faint)]">Advised size</dt>
+              <dd className="con-num text-right text-[color:var(--con-fg)]">{sizeText}</dd>
+              <dt className="text-[color:var(--con-faint)]">Broker review notional</dt>
+              <dd className="con-num text-right text-[color:var(--con-fg)]">{fmtMoney(pending.review?.estimatedNotional ?? notional)}</dd>
+              <dt className="text-[color:var(--con-faint)]">Per-order cap</dt>
+              <dd className="con-num text-right text-[color:var(--con-fg)]">{fmtMoney(policy?.maxOrderNotional)}</dd>
+              <dt className="text-[color:var(--con-faint)]">Daily cap remaining</dt>
+              <dd className="con-num text-right text-[color:var(--con-fg)]">{fmtMoney(dailyRemaining)}</dd>
+              <dt className="text-[color:var(--con-faint)]">Projected symbol exposure</dt>
+              <dd className="con-num text-right text-[color:var(--con-fg)]">{fmtPct(pending.decision.projectedSymbolExposurePct, 1)}</dd>
+              <dt className="text-[color:var(--con-faint)]">ADV cap</dt>
+              <dd className="con-num text-right text-[color:var(--con-fg)]">{fmtPct(policy?.maxOrderPctOfAdv, 1)}</dd>
+              <dt className="text-[color:var(--con-faint)]">Sizer band</dt>
+              <dd className="con-num text-right text-[color:var(--con-fg)]">
+                {finite(policy?.tuning?.sizingFloorPct) || finite(policy?.tuning?.sizingCeilingPct)
+                  ? `${fmtPct(policy?.tuning?.sizingFloorPct, 0)}-${fmtPct(policy?.tuning?.sizingCeilingPct, 0)}`
+                  : EM_DASH}
+              </dd>
+              <dt className="text-[color:var(--con-faint)]">Entry drift</dt>
+              <dd className="con-num text-right text-[color:var(--con-fg)]">
+                {finite(currentDrift) ? `${fmtPct(currentDrift, 2, true)} / max ${fmtPct(policy?.maxEntryDriftPct, 1)}` : EM_DASH}
+              </dd>
+            </dl>
+            {pending.review?.alerts?.length ? (
+              <ul className="mt-2 list-disc pl-4 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+                {pending.review.alerts.slice(0, 3).map((alert, i) => (
+                  <li key={i}>{alert}</li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+
+          <div className="rounded-lg border border-[color:var(--con-line)] p-3">
+            <div className="con-card-title mb-2 flex items-center gap-1.5" title="Bracket reward:risk geometry from the persisted entry anchor, stop, and take-profit.">
+              <TrendingUp size={12} /> Reward:risk geometry
+            </div>
+            {rewardRisk ? (
+              <>
+                <div className="mb-2 flex h-2 overflow-hidden rounded-full bg-[color:var(--con-line)]" aria-hidden>
+                  <div className="bg-[color:var(--con-neg)]" style={{ flex: 1 }} />
+                  <div className="bg-[color:var(--con-pos)]" style={{ flex: Math.min(4, rewardRisk.ratio) }} />
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-[length:var(--con-fs-xs)]">
+                  <div title="Persisted decision-time entry/reference price.">
+                    <div className="text-[color:var(--con-faint)]">Entry</div>
+                    <div className="con-num font-semibold">{fmtMoney(rewardRisk.entry)}</div>
+                  </div>
+                  <div title="Loss side of the bracket.">
+                    <div className="text-[color:var(--con-faint)]">Risk</div>
+                    <div className="con-num font-semibold text-[color:var(--con-neg)]">{fmtMoney(rewardRisk.risk)}</div>
+                  </div>
+                  <div title="Profit side of the bracket.">
+                    <div className="text-[color:var(--con-faint)]">Reward</div>
+                    <div className="con-num font-semibold text-[color:var(--con-pos)]">{fmtMoney(rewardRisk.reward)}</div>
+                  </div>
+                </div>
+                <p className="mt-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+                  R:R <strong className="con-num text-[color:var(--con-fg)]">{fmtNum(rewardRisk.ratio)}:1</strong> from stop{" "}
+                  {fmtMoney(rewardRisk.stop)} to target {fmtMoney(rewardRisk.target)}.
+                </p>
+              </>
+            ) : (
+              <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+                No complete opening bracket is attached to this proposal, so reward:risk is not computed.
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-[color:var(--con-line)] p-3">
+          <div className="con-card-title mb-2 flex items-center gap-1.5" title="Decision-case evidence linked by proposal id.">
+            <Database size={12} /> Evidence citations
+          </div>
+          {decisionCase?.ragAttributions?.length ? (
+            <div className="flex flex-col gap-2">
+              {decisionCase.ragAttributions.slice(0, 3).map((item, i) => (
+                <div key={`${item.chunkId ?? item.title ?? item.source ?? "rag"}-${i}`} className="text-[length:var(--con-fs-xs)]">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Chip tone="accent" title={item.chunkId ? `Chunk ${item.chunkId}` : undefined}>
+                      {evidenceLabel(item)}
+                    </Chip>
+                    {item.publishedAt && <span className="text-[color:var(--con-faint)]">{item.publishedAt}</span>}
+                  </div>
+                  <p className="mt-1 leading-relaxed text-[color:var(--con-muted)]">{item.contribution || item.title || item.text.slice(0, 160)}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+              No proposal-linked RAG citations are attached to this card yet. Served model and policy evidence are still persisted above.
+            </p>
+          )}
+        </div>
 
         {/* Since proposed + revalidation */}
         <div className="grid gap-2 sm:grid-cols-2">

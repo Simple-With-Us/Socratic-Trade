@@ -11,6 +11,9 @@ for evidence contribution, dissent, outcome learning, coaching, and agent-author
 framework improvements; `/design/socratic-trade` is now a coded public overview of those
 surfaces rather than a standalone mockup.
 See `docs/rollouts/2026-07-03-socratic-autonomy-ui.md`.
+As of 2026-07-04, `codex/console-ui-swimlane` adds the read-only decision trace inspector,
+coach-on-trace notes, approval receipt provenance/citations, and mobile LIVE phrase parity for
+those Socratic decision surfaces. See `docs/rollouts/2026-07-04-console-ui-swimlane.md`.
 
 ## Status legend
 `[done]` shipped · `[todo]` not started · `[partial]` partly done.

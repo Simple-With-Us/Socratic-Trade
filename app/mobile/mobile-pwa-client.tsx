@@ -103,6 +103,10 @@ function commandLabel(value: string): string {
   return value.replaceAll(".", " / ").replaceAll("_", " ");
 }
 
+function liveApprovalText(symbol: string): string {
+  return `APPROVE LIVE ${symbol.trim().toUpperCase()}`;
+}
+
 export function MobilePwaClient() {
   const [snapshot, setSnapshot] = useState<MobileSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
@@ -331,6 +335,8 @@ export function MobilePwaClient() {
             pendingProposals.map((proposal) => {
               const live = proposal.executionMode === "broker/live";
               const typedText = liveTextByProposal[proposal.id] ?? "";
+              const expectedLiveText = liveApprovalText(proposal.proposal.symbol);
+              const livePhraseMatches = !live || typedText.trim().toUpperCase() === expectedLiveText;
               return (
                 <div key={proposal.id} className="rounded-md border border-line bg-surface p-3">
                   <div className="flex items-start justify-between gap-3">
@@ -346,17 +352,31 @@ export function MobilePwaClient() {
                     <p className="mt-2 line-clamp-3 text-sm leading-relaxed text-muted">{proposal.proposal.rationale}</p>
                   )}
                   {live && (
-                    <input
-                      className="mt-3 min-h-11 w-full rounded-md border border-line bg-bg px-3 text-base text-fg outline-none focus:border-accent"
-                      placeholder={`APPROVE LIVE ${proposal.proposal.symbol}`}
-                      value={typedText}
-                      onChange={(event) => setLiveTextByProposal((prev) => ({ ...prev, [proposal.id]: event.target.value }))}
-                    />
+                    <div className="mt-3">
+                      <label className="text-xs font-semibold uppercase tracking-wide text-faint" htmlFor={`mobile-live-${proposal.id}`}>
+                        Type exactly: <span className="font-mono text-fg">{expectedLiveText}</span>
+                      </label>
+                      <input
+                        id={`mobile-live-${proposal.id}`}
+                        className="mt-1 min-h-11 w-full rounded-md border border-line bg-bg px-3 font-mono text-base text-fg outline-none focus:border-accent"
+                        placeholder={expectedLiveText}
+                        value={typedText}
+                        autoComplete="off"
+                        autoCorrect="off"
+                        autoCapitalize="characters"
+                        spellCheck={false}
+                        onPaste={(event) => event.preventDefault()}
+                        onChange={(event) => setLiveTextByProposal((prev) => ({ ...prev, [proposal.id]: event.target.value }))}
+                      />
+                      <p className="mt-1 text-xs text-faint">
+                        Paste is disabled; mobile approvals use the same broker check as console.
+                      </p>
+                    </div>
                   )}
                   <div className="mt-3 grid grid-cols-2 gap-2">
                     <button
                       className="min-h-11 rounded-md bg-emerald-500 px-3 text-sm font-semibold text-black disabled:opacity-50"
-                      disabled={busyCommand !== null}
+                      disabled={busyCommand !== null || !livePhraseMatches}
                       onClick={() =>
                         void submitCommand("proposal.approve", {
                           proposalId: proposal.id,
@@ -367,7 +387,7 @@ export function MobilePwaClient() {
                                   accountNumber: proposal.accountNumber,
                                   executionMode: "broker/live",
                                   estimatedNotional: proposal.estimatedNotional ?? null,
-                                  typedText
+                                  typedText: typedText.trim().toUpperCase()
                                 }
                               }
                             : {})

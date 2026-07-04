@@ -17,6 +17,7 @@ import type { RealityInfo } from "../lib/derive";
 import { fmtMoney } from "../lib/format";
 import { useConsoleData } from "../lib/useConsoleData";
 import { Btn, Chip } from "../ui/primitives";
+import { SymbolButton } from "../ui/symbol-drilldown";
 import { useToast } from "../ui/toast";
 
 interface Decision {
@@ -181,9 +182,7 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
   }
 
   const sideUp = draft.side.toUpperCase();
-  const orderLine = `${sideUp} ${draft.qty} ${draft.symbol} · ${draft.order_type}${
-    draft.order_type === "limit" && draft.limit_usd != null ? ` @ ${fmtMoney(draft.limit_usd)}` : ""
-  }`;
+  const limitText = draft.order_type === "limit" && draft.limit_usd != null ? ` @ ${fmtMoney(draft.limit_usd)}` : "";
   const blocked = decision !== null && !decision.approved;
   // Once staged, the ticket describes the scope it was staged under (frozen at
   // stage() time) — never the console's current scope.
@@ -202,7 +201,8 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
     <div className="mt-2 rounded-lg border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="con-mono text-[length:var(--con-fs-sm)] font-semibold" title="The order the assistant drafted. It is only a draft until you stage and then approve it.">
-          {orderLine}
+          {sideUp} {draft.qty} <SymbolButton symbol={draft.symbol} showLogo={false} className="font-mono text-inherit" /> · {draft.order_type}
+          {limitText}
         </span>
         <Chip
           tone={shownScope.tone}

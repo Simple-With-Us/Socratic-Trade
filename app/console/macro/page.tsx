@@ -14,6 +14,7 @@ import type { MarketNewsItem } from "@/lib/market-signals/massive";
 import { fmtPct, EM_DASH } from "../lib/format";
 import { useConsoleData } from "../lib/useConsoleData";
 import { Ago, Card, Chip, Empty } from "../ui/primitives";
+import { SymbolButton } from "../ui/symbol-drilldown";
 import {
   buildSections,
   macroSourcing,
@@ -430,9 +431,9 @@ function NewsCard({ news }: { news?: MarketNewsItem[] }) {
                 <span
                   key={t}
                   className="con-chip"
-                  title={`This story mentions ${t}. Symbol details live on the Scan screen.`}
+                  title={`This story mentions ${t}.`}
                 >
-                  {t}
+                  <SymbolButton symbol={t} showLogo={false} className="text-inherit" />
                 </span>
               ))}
             </div>

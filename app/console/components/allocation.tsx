@@ -12,6 +12,7 @@ import type { DashboardSnapshot } from "../../dashboard-types";
 import { deriveReality } from "../lib/derive";
 import { cx, fmtMoney, fmtPct } from "../lib/format";
 import { Btn, Card, Chip, Empty } from "../ui/primitives";
+import { SymbolButton } from "../ui/symbol-drilldown";
 
 interface Segment {
   label: string;
@@ -21,6 +22,7 @@ interface Segment {
   kind: "position" | "sector" | "cash";
   /** For sector rows: how many positions the bucket contains. */
   count?: number;
+  symbol?: string;
   detail?: string;
 }
 
@@ -69,6 +71,7 @@ export function AllocationCard({ snapshot }: { snapshot: DashboardSnapshot }) {
         value: p.marketValue,
         pct: pctOf(p.marketValue),
         kind: "position" as const,
+        symbol: p.symbol,
         detail: `${p.symbol}: ${fmtMoney(p.marketValue)} market value${p.sector ? ` · ${p.sector}` : ""}.`
       }));
     }
@@ -136,7 +139,7 @@ export function AllocationCard({ snapshot }: { snapshot: DashboardSnapshot }) {
             >
               <div className="flex items-baseline justify-between gap-3 text-[length:var(--con-fs-sm)]">
                 <span className={cx("truncate font-semibold", s.kind === "cash" && "text-[color:var(--con-muted)]")}>
-                  {s.label}
+                  {s.symbol ? <SymbolButton symbol={s.symbol} showLogo={false} className="text-inherit" /> : s.label}
                   {s.kind === "sector" && typeof s.count === "number" && (
                     <span className="ml-1.5 font-normal text-[color:var(--con-faint)]">×{s.count}</span>
                   )}
