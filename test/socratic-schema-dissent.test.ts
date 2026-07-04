@@ -171,7 +171,7 @@ describe("2. Structured Red Team verdict on both adversary paths", () => {
 });
 
 describe("3+5. Debate annotation: verdict persisted, rationale untouched, transcript immutable", () => {
-  const baseProposal = () => ({
+  const baseProposal = (): import("../src/lib/types").TradeProposal => ({
     symbol: "AAPL",
     side: "buy" as const,
     type: "market" as const,
