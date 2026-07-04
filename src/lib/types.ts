@@ -848,6 +848,51 @@ export interface TradingPolicy {
   maxFundamentalsAgeSec?: number;
 }
 
+/** Concrete reversal/invalidation trigger — metric+level present only where statable. Shared by the
+ *  Bull's `reversalTriggers`, the Red Team's `invalidationTriggers`, and the debate verdict schema
+ *  (red-team.ts REVERSAL_TRIGGER_SCHEMA), so both sides of the debate speak one trigger vocabulary. */
+export interface SocraticReversalTrigger {
+  condition: string;
+  metric?: string;
+  level?: number;
+}
+
+/** Per-evidence-item verdict on how a cited piece of evidence entered the decision (composite
+ *  review B/high — the "what I consulted and what it did to my view" receipt). */
+export interface SocraticUsedEvidence {
+  ref: string;
+  effect: "used" | "ignored" | "changed_view" | "contradicted";
+  why?: string;
+}
+
+/** A candidate the Bull seriously considered but deliberately passed on — a first-class non-action
+ *  receipt (composite review A/high "Non-actions become first-class case files"). */
+export interface SocraticPassedOn {
+  symbol: string;
+  reason: string;
+  wouldReconsiderIf?: string;
+}
+
+/** Immutable structured record of a Bull-vs-Bear debate — written ONCE at debate time and never
+ *  mutated afterward (composite review A/medium "Persist the debate transcript, not just the
+ *  verdict"). Replaces the old in-place "Red Team Debate Survived:" rationale appends, which
+ *  corrupted the thesis text that gets embedded for retrieval. */
+export interface SocraticDebateTranscript {
+  /** The Bull thesis under debate (full rationale as it stood at debate time). */
+  bullThesis: string;
+  /** The Bull's one-sentence belief, when stated. */
+  bullBelief?: string;
+  /** The Bear's full response (counter-argument or approval reasoning). */
+  bearResponse: string;
+  /** Any revision the exchange produced (reserved — the current debate is single-round). */
+  revision?: string;
+  /** Which stakes-scaled-dissent condition demanded the debate. */
+  trigger?: string;
+  /** Model + token spend per side (bull tokens are not re-measured at debate time). */
+  sides: Array<{ role: "bull" | "bear"; model?: string; promptTokens?: number; completionTokens?: number }>;
+  at: string;
+}
+
 export interface TradeProposal {
   symbol: string;
   side: OrderSide;
@@ -870,6 +915,34 @@ export interface TradeProposal {
    * fall back to the snapshot policy's configured model.
    */
   proposedByModel?: string;
+  /**
+   * Socratic first-class fields (2026-07-04 composite review B/high): steps 1 (belief) and 4
+   * (self-dissent / evidence attribution) of the Socratic loop, emitted by the Bull schema and
+   * ROUND-TRIPPED through the Bear's strict review schema — see buildBearReviewSchema in
+   * strategy.ts and the parity regression test (the Bear-schema confidenceScore-stripping
+   * pattern: any Bull field the Bear schema omits under `additionalProperties:false` is silently
+   * destroyed). All optional: legacy persisted proposals predate them. Persisted with the
+   * proposal JSON; threaded onto the decision case (socratic_decisions.socratic_ext) and rendered
+   * into the case's memory vector text.
+   */
+  belief?: string;
+  iMayBeWrongIf?: string[];
+  reversalTriggers?: SocraticReversalTrigger[];
+  /** Ids of RAG chunks (provenance-header ids — stable since w1-rag-quickwins) and/or structured
+   *  evidence field names that moved the decision. */
+  evidenceRefs?: string[];
+  usedEvidence?: SocraticUsedEvidence[];
+  /** Best OPPOSING read of the same cited evidence + why it was rejected (deliberate self-dissent). */
+  strongestCounterRead?: string;
+  /**
+   * Review-lane annotations (Red Team survived-notes, ADVISORY suggested-change receipts). Kept
+   * separate from `rationale` so review outcomes STOP corrupting the Bull's thesis text — the old
+   * "Red Team Debate Survived:" appends polluted the exact string that gets embedded for
+   * retrieval (composite review A/medium).
+   */
+  reviewNotes?: string[];
+  /** Immutable debate record, written once when the approval-time Red Team debate runs. */
+  debateTranscript?: SocraticDebateTranscript;
   /**
    * Decision-time market price captured when the proposal was generated. Serves as the entry anchor
    * for the deterministic entry-drift guard (policy.maxEntryDriftPct) at approval time. Persisted with
@@ -920,6 +993,21 @@ export interface TradeProposal {
     reason: string;
     model?: string;
     trigger?: "confidence" | "notional" | "live_opening" | "override_requested" | "escalation_regime";
+    /**
+     * Structured dissent (composite review A/B high, 2026-07-05): the graded verdict + keyed
+     * risks + invalidation triggers the boolean could never carry. Present on verdicts produced
+     * by the upgraded RED_TEAM_VERDICT_SCHEMA (debate path) and the inline Bear's per-survivor
+     * `bearVerdict`; legacy persisted verdicts predate these fields.
+     */
+    verdict?: "approve" | "approve_with_changes" | "reject";
+    keyRisks?: string[];
+    invalidationTriggers?: SocraticReversalTrigger[];
+    /** ADVISORY-ONLY suggested modification — recorded as a receipt (reviewNotes), NEVER auto-applied. */
+    suggestedChange?: { sizeMultiplier?: number; stopPrice?: number; limitPrice?: number } | null;
+    /** What evidence/condition would flip the verdict to a clean approve. */
+    wouldApproveIf?: string;
+    /** The Bear's own conviction in its verdict, 1-100. */
+    confidence?: number;
   };
   /**
    * Explicit agent-authored request to override owner preference gates for this decision.
@@ -946,7 +1034,13 @@ export type SocraticDecisionStatus =
   | "blocked"
   | "rejected"
   | "error"
-  | "observed";
+  | "observed"
+  /** Removed by the Red Team (inline Bear removed[] / debate reject) or the deterministic pre-filter. */
+  | "vetoed"
+  /** Run-level non-action: the run deliberately proposed nothing (threshold/budget/model-declined). */
+  | "waited"
+  /** Per-symbol non-action: the Bull seriously considered the name and deliberately passed. */
+  | "passed";
 
 /** Forward-return measurement horizons for decision outcomes. 15m/1h resolve only when a live-quote
  * sampling window was actually hit (no intraday history source exists); 1d/1w resolve from daily
@@ -1064,6 +1158,22 @@ export interface SocraticDecisionCase {
   };
   lessons: string[];
   coachNotes: string[];
+  /**
+   * Socratic first-class fields threaded from the proposal (composite review B/high) — persisted
+   * together in socratic_decisions.socratic_ext (one JSON column; see db-socratic.ts) and rendered
+   * into the case's memory vector text for retrieval.
+   */
+  belief?: string;
+  iMayBeWrongIf?: string[];
+  reversalTriggers?: SocraticReversalTrigger[];
+  evidenceRefs?: string[];
+  usedEvidence?: SocraticUsedEvidence[];
+  strongestCounterRead?: string;
+  reviewNotes?: string[];
+  /** Immutable debate record (written once at debate time; case updates must preserve it). */
+  debateTranscript?: SocraticDebateTranscript;
+  /** For status "passed" cases: the Bull's stated reconsideration condition. */
+  wouldReconsiderIf?: string;
 }
 
 export type SocraticFrameworkProposalStatus = "pending" | "accepted" | "rejected" | "applied";

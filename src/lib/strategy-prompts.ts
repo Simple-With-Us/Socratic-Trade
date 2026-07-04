@@ -15,8 +15,13 @@ import type { WashSaleHandling } from "./types";
  * that need the constant without the prompt builders. (Two lanes briefly defined competing
  * constants "strategy@1.0.0" / "agentic-strategy@0.1.0"; unified 2026-07-01 to the repo's
  * `agentic-*@` naming convention.)
+ *
+ * 1.5.0 (2026-07-05, w3-schema-dissent): Socratic first-class fields on the Bull (belief /
+ * iMayBeWrongIf / reversalTriggers / evidenceRefs / usedEvidence / strongestCounterRead + top-level
+ * passedOn), the Bear two-list contract ({proposals, removed}) with per-survivor structured
+ * bearVerdict, and the explicit round-trip-preservation instruction.
  */
-export const STRATEGY_PROMPT_VERSION = "agentic-strategy@1.4.0";
+export const STRATEGY_PROMPT_VERSION = "agentic-strategy@1.5.0";
 
 /**
  * Fixed thesis "playbook" the agent must choose from. A bounded vocabulary keeps
@@ -152,6 +157,16 @@ export function buildBullSystem(p: BullSystemParams): string {
     "`signalEfficacy` (when present) is YOUR OWN realized track record: the win rate of past buys that had each evidence signal at entry vs the 'All buys (baseline)'. If a signal's shrunkWinRate is at/below baseline, stop over-weighting it; if it beats baseline, lean into it. Let this calibrate how much each evidence type moves your conviction.",
     "`confidenceCalibration` (when present) is your realized win rate grouped by the confidenceScore you assigned at entry. If your high-confidence band does NOT win more than your low-confidence band, you are over-confident — compress your scores toward the middle. Aim for monotonic calibration (higher confidence → higher realized win rate), since confidence informs backend risk caps.",
     "Your `confidenceScore` (1–100) informs backend risk sizing limits, but it is not a substitute for choosing `dollarAmount`/`quantity`. Calibrate it honestly and choose the actual advised size yourself.",
+    "",
+    "Socratic first-class fields — every proposal MUST carry all of these (steps 1 and 4 of the Socratic loop):",
+    "- `belief`: the one-sentence market story this trade expresses — the underlying belief that, if wrong, kills the trade. Not a restatement of the rationale.",
+    "- `iMayBeWrongIf`: 1-4 short statements of the most plausible ways this thesis is wrong. Honest self-dissent, not boilerplate.",
+    "- `reversalTriggers`: concrete conditions that would REVERSE the thesis. Where statable, include the metric and level (e.g. condition 'VIX spikes above 25', metric 'VIX', level 25; or metric 'price' with the breakdown level). Set metric/level to null when the condition is not numeric.",
+    "- `evidenceRefs`: the ids of the evidence that actually moved this decision — RAG chunk ids from the provenance headers in `retrievedFinancialContext`, and/or structured evidence field names from the candidate data (e.g. 'fcf', 'senateNet', 'techScore').",
+    "- `usedEvidence`: for each consequential piece of evidence you weighed, {ref, effect, why} — effect is 'used' (supported the decision), 'ignored' (saw it, judged it immaterial — say why), 'changed_view' (moved you from your initial read), or 'contradicted' (cut against the trade and you proceeded anyway — say why).",
+    "- `strongestCounterRead`: the single BEST opposing interpretation (bearish for buys, bullish for sells/shorts) of the SAME evidence you cited, and why you rejected it. 1-2 sentences; your own strongest opposing case, not a strawman.",
+    "",
+    "`passedOn` (top-level, up to 5 entries): candidates you seriously considered but deliberately passed on. For each: the symbol, WHY you passed, and `wouldReconsiderIf` — the condition that would change your mind (null if none). Deliberate restraint is a decision worth remembering — record it, but do not pad with names you never really weighed. Return an empty array when none apply.",
     THESIS_PLAYBOOK_GUIDE,
     "",
     "Returning ZERO proposals is a CORRECT and often the RIGHT outcome when nothing in today's evidence clears your conviction bar — it is not a failure to justify or pad with a marginal idea. Do not manufacture a proposal just to have output.",
@@ -181,7 +196,10 @@ export function buildBearSystem(p: BearSystemParams): string {
     "Preserve or refine `autonomyOverride` when the Bull Agent made a serious, evidence-backed case to challenge owner-preference gates; remove it by setting null when the override thesis is weak, self-serving, or tries to bypass broker/account/integrity constraints.",
     "Every surviving proposal MUST re-emit `confidenceScore` (1-100). PRESERVE the Bull Agent's original confidenceScore unchanged unless you are deliberately REVISING conviction (e.g. the evidence is weaker or stronger than the Bull judged) — in that case set your own revised score and say so explicitly in the rationale. Never drop or default this field.",
     `If you approve a trade, you MUST set 'tradeThesisTag' to exactly one playbook tag (${THESIS_PLAYBOOK.join(", ")}).`,
-    "Return strict JSON matching the schema, containing ONLY the surviving, approved proposals.",
-    "If none survive, return an empty array."
+    "ROUND-TRIP CONTRACT: every surviving proposal MUST re-emit ALL of the Bull's Socratic fields — `belief`, `iMayBeWrongIf`, `reversalTriggers`, `evidenceRefs`, `usedEvidence`, `strongestCounterRead` — PRESERVED unchanged unless you are deliberately revising one (e.g. you found a better invalidation trigger, or the Bull mis-cited evidence); state any revision in the rationale. Never drop or blank these fields: your output schema is strict, and whatever you omit is silently destroyed downstream.",
+    "Every surviving proposal MUST also carry YOUR `bearVerdict`: verdict 'approve' or 'approve_with_changes' (use approve_with_changes when you modified the proposal or want a size/stop/limit change considered — put concrete numbers in suggestedChange; it is ADVISORY, logged as a receipt for the owner, never auto-applied), your keyRisks (most severe first), invalidationTriggers ({condition, metric, level} — metric/level null when not numeric), suggestedChange (or null), wouldApproveIf (null on a clean approve), your confidence (1-100) in the verdict, and a reason.",
+    "TWO-LIST CONTRACT: return {\"proposals\": [...], \"removed\": [...]}. EVERY proposal under review must appear in EXACTLY ONE of the two lists — survivors (possibly modified) in `proposals`, and every trade you remove in `removed` as {symbol, side, reason, severity} where severity ('low' | 'medium' | 'high' | 'critical') grades how badly the trade would likely have gone. A removal with no reason is not a decision, it is an evasion — always say WHY.",
+    "Return strict JSON matching the schema.",
+    "If none survive, return an empty `proposals` array with every reviewed trade in `removed`."
   ].join("\n");
 }

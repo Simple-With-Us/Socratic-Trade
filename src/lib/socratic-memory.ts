@@ -32,9 +32,16 @@ function finalAction(decision: SocraticDecisionCase): string {
 
 export function buildSocraticMemoryDocument(decision: SocraticDecisionCase): ContextDocument {
   const symbol = decision.symbol ?? "PORTFOLIO";
-  const criticCounterArgument =
-    decision.redTeamVerdict?.reason ??
-    summarizeEvidence(decision.dissent, "No explicit critic objection was recorded.");
+  // Structured-verdict-aware: the Red Team's keyed risks ride along with its reason so retrieval
+  // sees the full dissent, not just the one-line verdict (composite review A/B high, 2026-07-05).
+  const criticCounterArgument = decision.redTeamVerdict
+    ? [
+        decision.redTeamVerdict.reason,
+        decision.redTeamVerdict.keyRisks?.length ? `key_risks: ${decision.redTeamVerdict.keyRisks.join(" | ")}` : ""
+      ]
+        .filter(Boolean)
+        .join(" -- ")
+    : summarizeEvidence(decision.dissent, "No explicit critic objection was recorded.");
   const policyOutcome = decision.policyDecision?.approved
     ? "approved"
     : `blocked: ${(decision.policyDecision?.reasons ?? []).join(" | ") || "n/a"}`;
@@ -74,7 +81,29 @@ export function buildSocraticMemoryDocument(decision: SocraticDecisionCase): Con
     `evidence: ${summarizeEvidence(decision.evidence, "No structured evidence was attached.")}`,
     `outcome: ${outcome}`,
     `lessons: ${decision.lessons.length > 0 ? decision.lessons.map((lesson) => compact(lesson)).join(" | ") : "pending"}`,
-    `coach_notes: ${decision.coachNotes.length > 0 ? decision.coachNotes.map((note) => compact(note)).join(" | ") : "none"}`
+    `coach_notes: ${decision.coachNotes.length > 0 ? decision.coachNotes.map((note) => compact(note)).join(" | ") : "none"}`,
+    // Socratic first-class fields (w3-schema-dissent): rendered ONLY when present so legacy cases
+    // and non-action cases embed without noise — belief/self-dissent/reversal-triggers/evidence
+    // attribution become retrievable text, which is the whole point of giving them a schema home.
+    ...(decision.belief ? [`belief: ${compact(decision.belief)}`] : []),
+    ...(decision.strongestCounterRead ? [`strongest_counter_read: ${compact(decision.strongestCounterRead)}`] : []),
+    ...(decision.iMayBeWrongIf?.length ? [`i_may_be_wrong_if: ${decision.iMayBeWrongIf.map((row) => compact(row)).join(" | ")}`] : []),
+    ...(decision.reversalTriggers?.length
+      ? [
+          `reversal_triggers: ${decision.reversalTriggers
+            .map((t) => (t.metric || typeof t.level === "number" ? `${t.condition} [${t.metric ?? "?"} @ ${t.level ?? "?"}]` : t.condition))
+            .join(" | ")}`
+        ]
+      : []),
+    ...(decision.evidenceRefs?.length ? [`evidence_refs: ${decision.evidenceRefs.join(", ")}`] : []),
+    ...(decision.usedEvidence?.length
+      ? [`used_evidence: ${decision.usedEvidence.map((u) => `${u.ref}=${u.effect}${u.why ? ` (${compact(u.why)})` : ""}`).join(" | ")}`]
+      : []),
+    ...(decision.reviewNotes?.length ? [`review_notes: ${decision.reviewNotes.map((note) => compact(note)).join(" | ")}`] : []),
+    ...(decision.debateTranscript
+      ? [`debate: trigger=${decision.debateTranscript.trigger ?? "n/a"}; bear=${compact(decision.debateTranscript.bearResponse).slice(0, 400)}`]
+      : []),
+    ...(decision.wouldReconsiderIf ? [`would_reconsider_if: ${compact(decision.wouldReconsiderIf)}`] : [])
   ].join("\n");
 
   return {

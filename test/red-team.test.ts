@@ -105,7 +105,18 @@ describe("debateProposal LLM request bounds", () => {
       true
     );
 
-    expect(result).toEqual({ rejected: false, available: true, reason: "No fatal flaw found.", model: "gpt-4.1-mini" });
+    // w3-schema-dissent: the verdict is structured now — the legacy `{rejected:false}` mock payload
+    // normalizes to verdict "approve" with empty risk/trigger lists and a null advisory change.
+    expect(result).toMatchObject({
+      rejected: false,
+      available: true,
+      reason: "No fatal flaw found.",
+      model: "gpt-4.1-mini",
+      verdict: "approve",
+      keyRisks: [],
+      invalidationTriggers: [],
+      suggestedChange: null
+    });
     expect(bodies).toHaveLength(1);
     expect(bodies[0].max_completion_tokens).toBe(LLM_OUTPUT_TOKEN_CAPS.redTeamDebate);
     // Per-role sampling (composite review B/medium/S): the adversary (Bear/debate) role now samples
@@ -164,7 +175,16 @@ describe("debateProposal — Claude Red Team (first-class anthropic routing)", (
       true
     );
 
-    expect(result).toEqual({ rejected: true, available: true, reason: "Overbought into earnings.", model: "claude-opus-4-8" });
+    expect(result).toMatchObject({
+      rejected: true,
+      available: true,
+      reason: "Overbought into earnings.",
+      model: "claude-opus-4-8",
+      verdict: "reject",
+      suggestedChange: null
+    });
+    // Token usage now rides along for the persisted debate transcript (w3-schema-dissent).
+    expect(result.usage).toEqual({ promptTokens: 100, completionTokens: 20 });
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toContain("api.anthropic.com");
     expect(calls[0].headers["x-api-key"]).toBe("sk-ant-test");

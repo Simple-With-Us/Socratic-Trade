@@ -88,12 +88,16 @@ import type { TakeProfitTrimBand } from "./db";
 import { recordLlmUsage, extractLlmUsage } from "./llm-usage";
 import { withLlmGeneration, recordDecisionObservation } from "./observability";
 import { retrieveLearnedContext } from "./learned-context/store";
-import { debateProposal } from "./red-team";
+import { debateProposal, normalizeRedTeamVerdict, RED_TEAM_SUGGESTED_CHANGE_SCHEMA, REVERSAL_TRIGGER_SCHEMA } from "./red-team";
+import type { RedTeamVerdictKind } from "./red-team";
 import { isEscalationRegime } from "./regime-watch";
 import { summarizeOpenAiRequest, summarizeOpenAiResponseText, summarizeTradeProposals } from "./telemetry-sanitize";
 import {
+  annotateProposalWithDebate,
   applySocraticOverrideSizing,
   buildSocraticDecisionCase,
+  buildSocraticNonActionCase,
+  describeSuggestedChange,
   frameworkProposalFromDecision,
   ragAttributionsFromChunks,
   resolveSocraticOverride,
@@ -101,7 +105,7 @@ import {
   type SocraticOverrideResolution
 } from "./socratic-runtime";
 import { indexSocraticDecisionMemory } from "./socratic-memory";
-import type { ApprovedEscalation, EquityOrder, EquityPosition, ExecutionMode, FillSource, MarketFactorBreakdown, MarketQuote, MarketScan, OrderSide, PolicyDecision, Portfolio, RationaleDiversity, ReviewedOrder, ScoringWeights, SocraticDecisionCase, SocraticRagAttribution, TradingPolicy, TradeProposal } from "./types";
+import type { ApprovedEscalation, EquityOrder, EquityPosition, ExecutionMode, FillSource, MarketFactorBreakdown, MarketQuote, MarketScan, OrderSide, PolicyDecision, Portfolio, RationaleDiversity, ReviewedOrder, ScoringWeights, SocraticDecisionCase, SocraticPassedOn, SocraticRagAttribution, SocraticReversalTrigger, SocraticUsedEvidence, TradingPolicy, TradeProposal } from "./types";
 import { computeRationaleDiversity } from "./rationale-diversity";
 import { isMarketOpen } from "./market-calendar";
 import { isTradingDay } from "./market-calendar";
@@ -691,11 +695,58 @@ export async function runStrategyOnce(
         );
       }
     }
+    // Socratic case recorder — defined BEFORE proposal generation (moved up 2026-07-05) so the
+    // Bear-veto (removed[]/debate-reject) and non-action paths can file 'vetoed' cases the moment
+    // they happen, not only proposals that reach the placement loop below.
+    const recordSocraticDecision = (input: {
+      proposalId: string;
+      proposal: TradeProposal;
+      decision: PolicyDecision;
+      status: string;
+      review?: ReviewedOrder;
+      overrideResolution?: SocraticOverrideResolution;
+    }) => {
+      try {
+        const now = new Date().toISOString();
+        const caseFile = {
+          ...buildSocraticDecisionCase({
+            userId,
+            connectedAccountId,
+            runId,
+            proposalId: input.proposalId,
+            accountNumber: policy.accountNumber,
+            proposal: input.proposal,
+            status: socraticStatusFromProposalStatus(input.status),
+            authority: policy.strategyAuthority,
+            decision: input.decision,
+            review: input.review,
+            marketScan,
+            ragAttributions: socraticRagAttributions,
+            overrideResolution: input.overrideResolution
+          }),
+          createdAt: now,
+          updatedAt: now
+        } satisfies SocraticDecisionCase;
+        upsertSocraticDecisionCase(caseFile);
+        void indexSocraticDecisionMemory(caseFile).catch((err) => {
+          console.warn("[strategy] Socratic memory indexing failed:", err instanceof Error ? err.message : String(err));
+        });
+        const framework = frameworkProposalFromDecision(caseFile);
+        if (framework) createSocraticFrameworkProposal(framework);
+      } catch (err) {
+        console.warn("[strategy] Socratic decision recording failed:", err instanceof Error ? err.message : String(err));
+      }
+    };
+
     let llmProposals: TradeProposal[] = [];
     // FAIL-CLOSED signal from the inline Bear (Red Team): when its review could not run, these
     // Bull proposals were NOT critiqued — route them to human review below instead of auto-executing.
     let bearReviewUnavailable = false;
     let bearReviewReason: string | undefined;
+    // Wave-3 receipts: reviewed-but-removed proposals (inline Bear removed[] + deterministic
+    // vetoes) and the Bull's deliberate passes — persisted as 'vetoed'/'passed' cases below.
+    let proposalRemovals: ProposedRemoval[] = [];
+    let runPassedOn: SocraticPassedOn[] = [];
     if (!skipLlmDueToScoreThreshold && !skipLlmDueToBudget) {
       const proposed = await proposeTrades({
         runId,
@@ -720,6 +771,44 @@ export async function runStrategyOnce(
       llmSteps = proposed.llmSteps;
       bearReviewUnavailable = proposed.bearReviewUnavailable === true;
       bearReviewReason = proposed.bearReviewReason;
+      proposalRemovals = proposed.removed ?? [];
+      runPassedOn = proposed.passedOn ?? [];
+    }
+
+    // ── Bear removed[] -> 'vetoed' case files + veto counterfactuals ──────────
+    // (composite review B/high "Bear removed[]".) Every reviewed-but-removed proposal — the inline
+    // Bear's explicit removals, unaccounted disappearances, and deterministic pre-filter vetoes —
+    // becomes a durable Socratic case with status 'vetoed', so the console can show what was
+    // considered and rejected and the learning loop can score vetoes. Inline-Bear-removed OPENINGS
+    // also enter the same counterfactual pipeline as debate vetoes/policy blocks/human rejections
+    // (the w1 debate-path recordRejectedProposalCounterfactual call below is untouched).
+    for (const removal of proposalRemovals) {
+      recordSocraticDecision({
+        proposalId: crypto.randomUUID(),
+        proposal: removal.proposal,
+        decision: {
+          approved: false,
+          reasons: [
+            `${removal.source === "deterministic" ? "Deterministic pre-filter veto" : "Red Team (inline Bear) veto"} [severity=${removal.severity}]: ${removal.reason}`
+          ]
+        },
+        status: "vetoed"
+      });
+      if (removal.source === "bear_inline" && (removal.proposal.side === "buy" || removal.proposal.side === "short")) {
+        try {
+          recordRejectedProposalCounterfactual({
+            userId,
+            connectedAccountId,
+            runId,
+            symbol: removal.proposal.symbol,
+            refPrice: removal.proposal.referencePrice ?? currentPrices[normalizeSymbol(removal.proposal.symbol)],
+            createdAt: new Date().toISOString(),
+            regime: removal.proposal.entryMarketRegime
+          });
+        } catch (err) {
+          console.warn("[strategy] inline-bear-removed counterfactual failed:", err instanceof Error ? err.message : String(err));
+        }
+      }
     }
 
     // Item 6: compute the confidence-calibration curve ONCE per run (not per-proposal) when the flag is on,
@@ -788,18 +877,12 @@ export async function runStrategyOnce(
         const isBullish = proposal.side === "buy" || proposal.side === "cover";
         const quote = marketScan.topCandidates.find(c => normalizeSymbol(c.symbol) === normalizeSymbol(proposal.symbol));
         const redTeamResult = await debateProposal(proposal, quote, isBullish, userId);
-        // First-class verdict for the dashboard's "Bear Review" block (Agent A renders this). Keep the
-        // rationale-append text below too for backward compatibility with anything reading the string.
-        proposal.redTeamVerdict = {
-          rejected: redTeamResult.rejected,
-          available: redTeamResult.available,
-          reason: redTeamResult.reason,
-          // The model that actually served the debate (incl. the cross-provider Anthropic path) —
-          // persisted so the approval card's red-team badge doesn't drift with later policy edits.
-          ...(redTeamResult.model ? { model: redTeamResult.model } : {}),
-          // WHICH stakes-scaled-dissent condition demanded this debate, for the verdict receipt.
-          ...(redTeamDebateTrigger(proposal, policy, dissentContext) ? { trigger: redTeamDebateTrigger(proposal, policy, dissentContext) } : {})
-        };
+        // Persist the FULL structured verdict (verdict/keyRisks/invalidationTriggers/suggestedChange
+        // — composite review A/B high), the immutable debate transcript, and the survived-note as a
+        // separate reviewNotes receipt. The old in-place "Red Team Debate Survived:" rationale
+        // append is GONE — the Bull thesis text stays clean for embedding (A/medium). Any
+        // suggestedChange lands as an ADVISORY reviewNotes annotation, never an auto-apply.
+        annotateProposalWithDebate(proposal, redTeamResult, redTeamDebateTrigger(proposal, policy, dissentContext));
         if (redTeamResult.rejected) {
           console.log(`[Debate] Rejected ${proposal.symbol} ${proposal.side}: ${redTeamResult.reason}`);
           // Audit the Bear veto (parity with proposal_skipped_negative_ev / proposal_skipped_correlation)
@@ -834,15 +917,25 @@ export async function runStrategyOnce(
               console.warn("[strategy] red-team-vetoed counterfactual failed:", err instanceof Error ? err.message : String(err));
             }
           }
+          // Durable receipt: the debate veto becomes a Socratic case with status 'vetoed' (same
+          // contract as inline-Bear removed[] entries) so the console shows what was considered
+          // and rejected — the full structured verdict + transcript ride on proposal.redTeamVerdict
+          // / proposal.debateTranscript via annotateProposalWithDebate above.
+          recordSocraticDecision({
+            proposalId: crypto.randomUUID(),
+            proposal,
+            decision: { approved: false, reasons: [`Red Team debate veto: ${redTeamResult.reason}`] },
+            status: "vetoed"
+          });
           // Skip this proposal completely, as the Red Team found a critical flaw
           continue;
         } else if (!redTeamResult.available) {
           console.warn(`[Debate] Red Team unavailable for ${proposal.symbol} ${proposal.side} (${redTeamResult.reason}); routing to human review.`);
           proposal.rationale += `\n\nRed Team review was REQUIRED (high conviction) but unavailable (${redTeamResult.reason}); routed to human approval.`;
           requiresHumanReview.add(proposal);
-        } else {
-          proposal.rationale += `\n\nRed Team Debate Survived: ${redTeamResult.reason}`;
         }
+        // (Survived-note now lives in proposal.reviewNotes via annotateProposalWithDebate — the
+        // rationale is deliberately no longer mutated.)
       }
       debatedProposals.push(proposal);
     }
@@ -954,45 +1047,6 @@ export async function runStrategyOnce(
     // full-set warning above remains here.)
 
     const results: StrategyResult["proposals"] = [];
-    const recordSocraticDecision = (input: {
-      proposalId: string;
-      proposal: TradeProposal;
-      decision: PolicyDecision;
-      status: string;
-      review?: ReviewedOrder;
-      overrideResolution?: SocraticOverrideResolution;
-    }) => {
-      try {
-        const now = new Date().toISOString();
-        const caseFile = {
-          ...buildSocraticDecisionCase({
-            userId,
-            connectedAccountId,
-            runId,
-            proposalId: input.proposalId,
-            accountNumber: policy.accountNumber,
-            proposal: input.proposal,
-            status: socraticStatusFromProposalStatus(input.status),
-            authority: policy.strategyAuthority,
-            decision: input.decision,
-            review: input.review,
-            marketScan,
-            ragAttributions: socraticRagAttributions,
-            overrideResolution: input.overrideResolution
-          }),
-          createdAt: now,
-          updatedAt: now
-        } satisfies SocraticDecisionCase;
-        upsertSocraticDecisionCase(caseFile);
-        void indexSocraticDecisionMemory(caseFile).catch((err) => {
-          console.warn("[strategy] Socratic memory indexing failed:", err instanceof Error ? err.message : String(err));
-        });
-        const framework = frameworkProposalFromDecision(caseFile);
-        if (framework) createSocraticFrameworkProposal(framework);
-      } catch (err) {
-        console.warn("[strategy] Socratic decision recording failed:", err instanceof Error ? err.message : String(err));
-      }
-    };
 
     for (const proposal of proposals) {
       const normalizedProposal = { ...proposal, symbol: normalizeSymbol(proposal.symbol) };
@@ -1425,6 +1479,74 @@ export async function runStrategyOnce(
     void import("./outcome-engine")
       .then(({ matureSocraticDecisionOutcomes }) => matureSocraticDecisionOutcomes(userId, { connectedAccountId }))
       .catch((e) => console.error("[outcome-engine] maturation error:", e));
+
+    // ── Non-actions as first-class case files (composite review A/high) ─────────
+    // Per-symbol 'passed' cases from the Bull's passedOn[] and a run-level 'waited' case when the
+    // run proposes nothing (threshold / budget / model-declined). Indexed into decision memory like
+    // every other case; deterministic per-run ids make re-upserts idempotent. Best-effort: a case
+    // failure must never fail the run.
+    {
+      const nonActionNow = new Date().toISOString();
+      for (const pass of runPassedOn) {
+        try {
+          const passCase = {
+            ...buildSocraticNonActionCase({
+              userId,
+              connectedAccountId,
+              runId,
+              accountNumber: policy.accountNumber,
+              kind: "passed",
+              symbol: pass.symbol,
+              reason: pass.reason,
+              wouldReconsiderIf: pass.wouldReconsiderIf,
+              regime: runRegime,
+              authority: policy.strategyAuthority
+            }),
+            createdAt: nonActionNow,
+            updatedAt: nonActionNow
+          } satisfies SocraticDecisionCase;
+          upsertSocraticDecisionCase(passCase);
+          void indexSocraticDecisionMemory(passCase).catch((err) => {
+            console.warn("[strategy] passed-on memory indexing failed:", err instanceof Error ? err.message : String(err));
+          });
+        } catch (err) {
+          console.warn("[strategy] passed-on case recording failed:", err instanceof Error ? err.message : String(err));
+        }
+      }
+      if (results.length === 0) {
+        const waitedReason = skipLlmDueToScoreThreshold
+          ? `threshold: no candidate met minProposalScoreThreshold (${policy.tuning?.minProposalScoreThreshold}); the run deliberately waited.`
+          : skipLlmDueToBudget
+            ? "budget: LLM proposal generation was suppressed by the daily budget/reservation; the run waited."
+            : `model-declined: the strategy model reviewed the evidence and proposed nothing${
+                runPassedOn.length > 0 ? ` (explicitly passed on ${runPassedOn.map((entry) => entry.symbol).join(", ")})` : ""
+              }.`;
+        try {
+          const waitedCase = {
+            ...buildSocraticNonActionCase({
+              id: runId,
+              userId,
+              connectedAccountId,
+              runId,
+              accountNumber: policy.accountNumber,
+              kind: "waited",
+              reason: waitedReason,
+              regime: runRegime,
+              authority: policy.strategyAuthority
+            }),
+            createdAt: nonActionNow,
+            updatedAt: nonActionNow
+          } satisfies SocraticDecisionCase;
+          upsertSocraticDecisionCase(waitedCase);
+          void indexSocraticDecisionMemory(waitedCase).catch((err) => {
+            console.warn("[strategy] waited-case memory indexing failed:", err instanceof Error ? err.message : String(err));
+          });
+          audit("socratic_waited_case", { runId, reason: waitedReason }, userId, connectedAccountId);
+        } catch (err) {
+          console.warn("[strategy] waited-case recording failed:", err instanceof Error ? err.message : String(err));
+        }
+      }
+    }
 
     const placed = results.filter((r) => r.status === "placed").length;
     const proposed = results.filter((r) => r.status === "proposed").length;
@@ -2616,9 +2738,266 @@ export function rejectProposal(proposalId: string, userId: string = "local"): vo
 // consumers of `import { THESIS_PLAYBOOK } from "./strategy"` keep working.
 export { THESIS_PLAYBOOK };
 
+// ── Bull/Bear proposal schemas (w3-schema-dissent, 2026-07-05) ────────────────────────────────
+// Exported module-scope builders so (a) the Bull item schema and the Bear review item schema are
+// built from ONE shared definition and cannot drift, and (b) tests can assert the round-trip
+// parity directly: EVERY property the Bull emits must be present AND required in the Bear item,
+// because both schemas are strict (`additionalProperties: false`) — a field the Bear schema omits
+// is silently DESTROYED on every surviving proposal. That exact failure shipped once as the
+// Bear-schema confidenceScore bug (killed the approval-time debate trigger and degraded sizing to
+// a neutral 50); the parity test in test/socratic-schema-dissent.test.ts is its regression guard.
+
+const AUTONOMY_OVERRIDE_SCHEMA: Record<string, unknown> = {
+  anyOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["requested", "thesis", "preferenceConflicts", "invalidation", "cashDeploymentPct"],
+      properties: {
+        requested: { type: "boolean" },
+        thesis: { type: "string" },
+        preferenceConflicts: { type: "array", items: { type: "string" } },
+        invalidation: { type: ["string", "null"] },
+        cashDeploymentPct: { type: ["number", "null"] }
+      }
+    },
+    { type: "null" }
+  ]
+};
+
+/** Socratic first-class fields (composite review B/high): steps 1 and 4 of the loop get a schema
+ *  home. Shared verbatim between the Bull and Bear item schemas. */
+function socraticProposalFieldSchemas(): Record<string, unknown> {
+  return {
+    belief: {
+      type: "string",
+      description: "One-sentence market story this trade expresses — the belief that, if wrong, kills the trade."
+    },
+    iMayBeWrongIf: {
+      type: "array",
+      maxItems: 4,
+      items: { type: "string" },
+      description: "The most plausible ways this thesis is wrong (honest self-dissent, not boilerplate)."
+    },
+    reversalTriggers: {
+      type: "array",
+      maxItems: 4,
+      items: REVERSAL_TRIGGER_SCHEMA,
+      description: "Concrete conditions that would REVERSE the thesis; include metric+level where statable."
+    },
+    evidenceRefs: {
+      type: "array",
+      maxItems: 8,
+      items: { type: "string" },
+      description:
+        "Ids of the RAG chunks (provenance-header ids) and/or structured evidence field names that moved this decision."
+    },
+    usedEvidence: {
+      type: "array",
+      maxItems: 8,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["ref", "effect", "why"],
+        properties: {
+          ref: { type: "string" },
+          effect: { enum: ["used", "ignored", "changed_view", "contradicted"] },
+          why: { type: ["string", "null"] }
+        }
+      },
+      description: "Per consequential evidence item: how it entered the decision (and why, for ignored/contradicted)."
+    },
+    strongestCounterRead: {
+      type: "string",
+      description: "The best OPPOSING read of the same cited evidence and why it was rejected (1-2 sentences)."
+    }
+  };
+}
+
+/** The shared per-proposal item schema (Bull emits it; Bear must round-trip every field of it). */
+function proposalItemSchema(allowedSides: OrderSide[]): { required: string[]; properties: Record<string, unknown> } {
+  return {
+    required: [
+      "symbol",
+      "side",
+      "type",
+      "quantity",
+      "dollarAmount",
+      "limitPrice",
+      "stopPrice",
+      "timeInForce",
+      "marketHours",
+      "rationale",
+      "tradeThesisTag",
+      "confidenceScore",
+      "autonomyOverride",
+      "belief",
+      "iMayBeWrongIf",
+      "reversalTriggers",
+      "evidenceRefs",
+      "usedEvidence",
+      "strongestCounterRead"
+    ],
+    properties: {
+      symbol: { type: "string" },
+      // SHORT_SELLING: short/cover included only when `allowedSides` permits — i.e.
+      // policy.shortSellingEnabled AND the connected account reports shortSelling. Default long-only.
+      side: { enum: allowedSides },
+      type: { enum: ["market", "limit", "stop_market", "stop_limit"] },
+      quantity: { type: ["number", "null"] },
+      dollarAmount: { type: ["number", "null"] },
+      limitPrice: { type: ["number", "null"] },
+      stopPrice: { type: ["number", "null"] },
+      timeInForce: { enum: ["gfd", "gtc"] },
+      marketHours: { enum: ["regular_hours", "extended_hours", "all_day_hours"] },
+      rationale: { type: "string" },
+      tradeThesisTag: { enum: THESIS_PLAYBOOK },
+      // FIX (composite review B/high/S): the Bear schema previously omitted confidenceScore from
+      // both `properties` and `required` while `additionalProperties:false` forbid re-emitting it —
+      // strict structured output silently stripped every Bear-surviving proposal's confidence to
+      // undefined, which zeroed shouldRunRedTeamDebate's approval-time trigger (`?? 0`), degraded
+      // sizing to a neutral `?? 50`, and fed the wash-sale auto-edge math the same undefined.
+      // Sharing ONE item schema between Bull and Bear makes that whole failure class structurally
+      // impossible; the Bear system prompt instructs preserve-unless-deliberately-revising.
+      confidenceScore: {
+        type: "number",
+        minimum: 1,
+        maximum: 100,
+        description:
+          "Conviction score from 1 to 100 — Bear: preserve the Bull's score unless you are deliberately revising conviction; state why in the rationale if you change it."
+      },
+      autonomyOverride: AUTONOMY_OVERRIDE_SCHEMA,
+      ...socraticProposalFieldSchemas()
+    }
+  };
+}
+
+/** The Bull's full structured-output schema: proposals + top-level passedOn (non-actions, cap 5). */
+export function buildBullProposalSchema(allowedSides: OrderSide[], maxProposals: number): Record<string, unknown> {
+  const item = proposalItemSchema(allowedSides);
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["proposals", "passedOn"],
+    properties: {
+      proposals: {
+        type: "array",
+        maxItems: maxProposals,
+        items: { type: "object", additionalProperties: false, required: item.required, properties: item.properties }
+      },
+      passedOn: {
+        type: "array",
+        maxItems: 5,
+        description:
+          "Candidates seriously considered but deliberately passed on (non-actions worth remembering). Empty array when none.",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["symbol", "reason", "wouldReconsiderIf"],
+          properties: {
+            symbol: { type: "string" },
+            reason: { type: "string" },
+            wouldReconsiderIf: { type: ["string", "null"] }
+          }
+        }
+      }
+    }
+  };
+}
+
+/** Per-survivor structured verdict the inline Bear must attach — the same dissent vocabulary as
+ *  the debate path's RED_TEAM_VERDICT_SCHEMA (red-team.ts) minus "reject": rejects go to removed[]. */
+const BEAR_ITEM_VERDICT_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["verdict", "keyRisks", "invalidationTriggers", "suggestedChange", "wouldApproveIf", "confidence", "reason"],
+  properties: {
+    verdict: {
+      enum: ["approve", "approve_with_changes"],
+      description:
+        "approve_with_changes when you modified the proposal or want a size/stop/limit change considered (ADVISORY — put concrete numbers in suggestedChange)."
+    },
+    keyRisks: { type: "array", maxItems: 6, items: { type: "string" }, description: "Keyed risks, most severe first." },
+    invalidationTriggers: {
+      type: "array",
+      maxItems: 5,
+      items: REVERSAL_TRIGGER_SCHEMA,
+      description: "Conditions that would invalidate this trade; metric+level where statable."
+    },
+    suggestedChange: RED_TEAM_SUGGESTED_CHANGE_SCHEMA,
+    wouldApproveIf: { type: ["string", "null"], description: "What would earn a clean approve. Null on a clean approve." },
+    confidence: { type: ["number", "null"], description: "Your conviction in this verdict, 1-100." },
+    reason: { type: "string", description: "Your approval reasoning for this survivor." }
+  }
+};
+
+/** The inline Bear's full structured-output schema: two-list contract (proposals + removed) with
+ *  the Bull item schema round-tripped per survivor plus the per-survivor bearVerdict. */
+export function buildBearReviewSchema(allowedSides: OrderSide[]): Record<string, unknown> {
+  const item = proposalItemSchema(allowedSides);
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["proposals", "removed"],
+    properties: {
+      proposals: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [...item.required, "bearVerdict"],
+          properties: { ...item.properties, bearVerdict: BEAR_ITEM_VERDICT_SCHEMA }
+        }
+      },
+      removed: {
+        type: "array",
+        description:
+          "Every reviewed proposal you removed — two-list contract: each reviewed proposal appears in exactly one of proposals/removed.",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["symbol", "side", "reason", "severity"],
+          properties: {
+            symbol: { type: "string" },
+            side: { enum: allowedSides },
+            reason: { type: "string" },
+            severity: {
+              enum: ["low", "medium", "high", "critical"],
+              description: "How badly wrong the removed trade would likely have gone."
+            }
+          }
+        }
+      }
+    }
+  };
+}
+
+/** Severity grade the Bear assigns each removal (how badly the trade would likely have gone). */
+export type BearRemovedSeverity = "low" | "medium" | "high" | "critical";
+
+/** One removed-by-review proposal: the ORIGINAL reviewed proposal plus the reviewer's receipt.
+ *  `source` distinguishes the deterministic pre-filter from the inline Bear's removed[] list. */
+export interface ProposedRemoval {
+  proposal: TradeProposal;
+  reason: string;
+  severity: BearRemovedSeverity;
+  source: "bear_inline" | "deterministic";
+}
+
 interface ProposeTradesResult {
   proposals: TradeProposal[];
   llmSteps: StrategyLlmStep[];
+  /**
+   * Every reviewed proposal that did NOT survive (two-list contract, composite review B/high
+   * "Bear removed[]"): the inline Bear's explicit removed[] entries, synthesized entries for
+   * proposals that disappeared without being listed (an unaccounted drop is still a veto — the
+   * receipt just says so), and deterministic pre-filter vetoes. The caller persists each as a
+   * Socratic case with status 'vetoed' and feeds opening-side inline-Bear removals into the
+   * counterfactual pipeline.
+   */
+  removed?: ProposedRemoval[];
+  /** Candidates the Bull deliberately passed on (non-actions; persisted as status-'passed' cases). */
+  passedOn?: SocraticPassedOn[];
   /**
    * Set when the inline Bear (Red Team) review could NOT run — missing key, transport
    * error/timeout, or an unparseable response. The caller FAILS CLOSED: in autonomous
@@ -2905,71 +3284,7 @@ async function proposeTrades(input: {
     audit("llm_step", { runId: input.runId, ...step }, input.userId, input.policy.connectedAccountId);
   };
 
-  const autonomyOverrideSchema = {
-    anyOf: [
-      {
-        type: "object",
-        additionalProperties: false,
-        required: ["requested", "thesis", "preferenceConflicts", "invalidation", "cashDeploymentPct"],
-        properties: {
-          requested: { type: "boolean" },
-          thesis: { type: "string" },
-          preferenceConflicts: { type: "array", items: { type: "string" } },
-          invalidation: { type: ["string", "null"] },
-          cashDeploymentPct: { type: ["number", "null"] }
-        }
-      },
-      { type: "null" }
-    ]
-  };
-
-  const schema = {
-    type: "object",
-    additionalProperties: false,
-    required: ["proposals"],
-    properties: {
-      proposals: {
-        type: "array",
-        maxItems: maxProposals,
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: [
-            "symbol",
-            "side",
-            "type",
-            "quantity",
-            "dollarAmount",
-            "limitPrice",
-            "stopPrice",
-            "timeInForce",
-            "marketHours",
-            "rationale",
-            "tradeThesisTag",
-            "confidenceScore",
-            "autonomyOverride"
-          ],
-          properties: {
-            symbol: { type: "string" },
-            // SHORT_SELLING: short/cover included only when `allowedSides` (computed above) permits —
-            // i.e. policy.shortSellingEnabled AND the connected account reports shortSelling. Default long-only.
-            side: { enum: allowedSides },
-            type: { enum: ["market", "limit", "stop_market", "stop_limit"] },
-            quantity: { type: ["number", "null"] },
-            dollarAmount: { type: ["number", "null"] },
-            limitPrice: { type: ["number", "null"] },
-            stopPrice: { type: ["number", "null"] },
-            timeInForce: { enum: ["gfd", "gtc"] },
-            marketHours: { enum: ["regular_hours", "extended_hours", "all_day_hours"] },
-            rationale: { type: "string" },
-            tradeThesisTag: { enum: THESIS_PLAYBOOK },
-            confidenceScore: { type: "number", minimum: 1, maximum: 100, description: "Conviction score from 1 to 100" },
-            autonomyOverride: autonomyOverrideSchema
-          }
-        }
-      }
-    }
-  };
+  const schema = buildBullProposalSchema(allowedSides, maxProposals);
 
   const bullReasoningEffort = interactiveStrategyReasoningEffort(model, input.policy.llmReasoningEffort);
   const body = buildLlmRequestBody(
@@ -3033,7 +3348,7 @@ async function proposeTrades(input: {
     keySource: llmKeySource
   };
   recordStep({ ...bullStepBase, status: "started" }, { includeInResult: false });
-  let bullResult: { text?: string; proposals: TradeProposal[]; truncated?: boolean };
+  let bullResult: { text?: string; proposals: TradeProposal[]; passedOn?: unknown; truncated?: boolean };
   try {
     bullResult = await withLlmGeneration(
       {
@@ -3096,8 +3411,8 @@ async function proposeTrades(input: {
             }
 
             try {
-              const parsed = JSON.parse(text) as { proposals?: TradeProposal[] };
-              return { text, proposals: parsed.proposals ?? [], truncated };
+              const parsed = JSON.parse(text) as { proposals?: TradeProposal[]; passedOn?: unknown };
+              return { text, proposals: parsed.proposals ?? [], passedOn: parsed.passedOn, truncated };
             } catch (parseError) {
               // A truncated/malformed model response must not crash the whole autonomous
               // run; degrade to zero proposals for this tick. The `truncated` flag lets the caller
@@ -3133,6 +3448,10 @@ async function proposeTrades(input: {
     // policy.llmModel). Persisted with the proposal so approval-time attribution stays accurate.
     proposedByModel: bullServedModel
   }));
+  // Non-actions (composite review A/high): candidates the Bull deliberately passed on. Sanitized
+  // (cap 5, bounded strings, null -> undefined) and returned to the caller, which persists each as
+  // a status-'passed' Socratic case and folds them into the run-level 'waited' receipt.
+  const bullPassedOn = sanitizePassedOn(bullResult.passedOn);
   // TRUNCATION-AWARE: if the Bull answer hit the output-token cap, a zero/partial parse is NOT a
   // genuine "do nothing" — record a DISTINCT reason + audit so it's diagnosable and never a silent
   // no-op. (See Chat A item 5; raise LLM_OUTPUT_TOKEN_CAPS.strategyProposal if this recurs.)
@@ -3178,63 +3497,25 @@ async function proposeTrades(input: {
   if (deterministicVetoed.length > 0) {
     console.log("[DeterministicBear] Vetoed before Bear LLM:", deterministicVetoed.map(v => `${v.symbol} ${v.side}: ${v.reason}`).join(" | "));
   }
+  // Deterministic vetoes become ProposedRemoval receipts too (composite review B/high: "persist
+  // each removal (and each deterministic veto) as a Socratic case with status 'vetoed'"). Matched
+  // back to the ORIGINAL raw proposal so the vetoed case carries the full Bull argument.
+  const deterministicRemoved: ProposedRemoval[] = deterministicVetoed
+    .map((veto): ProposedRemoval | undefined => {
+      const original = rawBullProposals.find(
+        (p) => normalizeSymbol(p.symbol) === normalizeSymbol(veto.symbol) && p.side === veto.side
+      );
+      return original ? { proposal: original, reason: veto.reason, severity: "high", source: "deterministic" } : undefined;
+    })
+    .filter((removal): removal is ProposedRemoval => removal !== undefined);
 
   // Phase 7: Bear Agent (Red Team) Critique (prompt in ./strategy-prompts, Chat A item 2)
   const bearSystemPrompt = buildBearSystem({ shortAllowed });
 
-  const bearSchema = {
-    type: "object",
-    additionalProperties: false,
-    required: ["proposals"],
-    properties: {
-      proposals: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: [
-            "symbol",
-            "side",
-            "type",
-            "quantity",
-            "dollarAmount",
-            "limitPrice",
-            "stopPrice",
-            "timeInForce",
-            "marketHours",
-            "rationale",
-            "tradeThesisTag",
-            "confidenceScore",
-            "autonomyOverride"
-          ],
-          properties: {
-            symbol: { type: "string" },
-            // SHORT_SELLING: short/cover included only when `allowedSides` (computed above) permits —
-            // i.e. policy.shortSellingEnabled AND the connected account reports shortSelling. Default long-only.
-            side: { enum: allowedSides },
-            type: { enum: ["market", "limit", "stop_market", "stop_limit"] },
-            quantity: { type: ["number", "null"] },
-            dollarAmount: { type: ["number", "null"] },
-            limitPrice: { type: ["number", "null"] },
-            stopPrice: { type: ["number", "null"] },
-            timeInForce: { enum: ["gfd", "gtc"] },
-            marketHours: { enum: ["regular_hours", "extended_hours", "all_day_hours"] },
-            rationale: { type: "string" },
-            tradeThesisTag: { enum: THESIS_PLAYBOOK },
-            // FIX (composite review B/high/S): the Bear schema previously omitted confidenceScore from
-            // both `properties` and `required` while `additionalProperties:false` forbid re-emitting it —
-            // strict structured output silently stripped every Bear-surviving proposal's confidence to
-            // undefined, which zeroed shouldRunRedTeamDebate's approval-time trigger (`?? 0`), degraded
-            // sizing to a neutral `?? 50`, and fed the wash-sale auto-edge math the same undefined. The
-            // Bear system prompt (buildBearSystem) now instructs it to preserve the Bull's score unless it
-            // is REVISING conviction, so this is restored as a required, re-emitted field.
-            confidenceScore: { type: "number", minimum: 1, maximum: 100, description: "Conviction score from 1 to 100 — preserve the Bull's score unless you are deliberately revising conviction; state why in the rationale if you change it." },
-            autonomyOverride: autonomyOverrideSchema
-          }
-        }
-      }
-    }
-  };
+  // Bear review schema: shares the Bull's per-item schema (ROUND-TRIP parity — see
+  // buildBearReviewSchema for the confidenceScore-stripping regression note) plus the per-survivor
+  // structured bearVerdict and the top-level removed[] two-list contract.
+  const bearSchema = buildBearReviewSchema(allowedSides);
 
   // review plus risk context — not a second copy of the full market scan / allowlist.
   const proposedSymbols = new Set(bullProposals.map((proposal) => normalizeSymbol(proposal.symbol)));
@@ -3333,7 +3614,15 @@ async function proposeTrades(input: {
       kind: "provider_degraded",
       data: { runId: input.runId, provider: bearProvider, model: bearModel, reason, proposalCount: bullProposals.length, routedToHumanReview: true }
     }).catch((err) => console.error("[Bear] notify error:", err));
-    return { proposals: bullProposals, llmSteps, bearReviewUnavailable: true, bearReviewReason: reason };
+    return {
+      proposals: bullProposals,
+      llmSteps,
+      bearReviewUnavailable: true,
+      bearReviewReason: reason,
+      // Deterministic vetoes still become 'vetoed' receipts even when the Bear itself was down.
+      ...(deterministicRemoved.length > 0 ? { removed: deterministicRemoved } : {}),
+      ...(bullPassedOn.length > 0 ? { passedOn: bullPassedOn } : {})
+    };
   };
 
   if (!bearKey) {
@@ -3367,7 +3656,7 @@ async function proposeTrades(input: {
     keySource: bearKeySource
   };
   recordStep({ ...bearStepBase, status: "started" }, { includeInResult: false });
-  let bearResult: { text?: string; proposals: TradeProposal[]; fallbackToBull?: boolean };
+  let bearResult: { text?: string; proposals: TradeProposal[]; removed?: unknown; fallbackToBull?: boolean };
   try {
     bearResult = await withLlmGeneration(
       {
@@ -3421,8 +3710,8 @@ async function proposeTrades(input: {
         }
 
         try {
-          const parsedBear = JSON.parse(bearText) as { proposals?: TradeProposal[] };
-          return { text: bearText, proposals: parsedBear.proposals ?? [], fallbackToBull: false };
+          const parsedBear = JSON.parse(bearText) as { proposals?: TradeProposal[]; removed?: unknown };
+          return { text: bearText, proposals: parsedBear.proposals ?? [], removed: parsedBear.removed, fallbackToBull: false };
         } catch (error) {
           // Don't discard already-valid Bull proposals because the Bear critique came
           // back as malformed JSON — reuse the existing fall-back-to-Bull path.
@@ -3440,19 +3729,136 @@ async function proposeTrades(input: {
     return bearUnavailable("Red Team review was unavailable or unparseable.", "fallback");
   }
 
-  const bearProposals = sanitizeProposals(bearResult.proposals, maxProposals).map(p => ({
-    ...p,
-    entryMarketRegime: currentMarketRegime,
-    // Re-stamp after the Bear pass: survivors are re-emitted through the Bear's strict schema,
-    // which strips proposedByModel — the ORIGIN model is still the Bull's served model.
-    proposedByModel: bullServedModel
-  }));
+  // Per-survivor raw bearVerdict shape as emitted by BEAR_ITEM_VERDICT_SCHEMA (stripped off the
+  // proposal after mapping into the persisted redTeamVerdict).
+  type RawBearSurvivor = TradeProposal & {
+    bearVerdict?: {
+      verdict?: string;
+      keyRisks?: unknown;
+      invalidationTriggers?: unknown;
+      suggestedChange?: { sizeMultiplier?: number; stopPrice?: number; limitPrice?: number } | null;
+      wouldApproveIf?: string | null;
+      confidence?: number | null;
+      reason?: string;
+    };
+  };
+
+  const bearProposals = sanitizeProposals(bearResult.proposals, maxProposals).map((p) => {
+    const { bearVerdict, ...rest } = p as RawBearSurvivor;
+    const survivor: TradeProposal = {
+      ...rest,
+      entryMarketRegime: currentMarketRegime,
+      // Re-stamp after the Bear pass: survivors are re-emitted through the Bear's strict schema,
+      // which strips proposedByModel — the ORIGIN model is still the Bull's served model.
+      proposedByModel: bullServedModel
+    };
+    // Structured inline-Bear verdict (composite review A/B high): persist the FULL dissent object
+    // on redTeamVerdict for every survivor — reuse the debate path's normalizer so both adversary
+    // paths speak one verdict vocabulary. suggestedChange is an ADVISORY receipt, never applied.
+    if (bearVerdict && (bearVerdict.verdict === "approve" || bearVerdict.verdict === "approve_with_changes")) {
+      const normalized = normalizeRedTeamVerdict(
+        {
+          ...bearVerdict,
+          verdict: bearVerdict.verdict as RedTeamVerdictKind,
+          keyRisks: Array.isArray(bearVerdict.keyRisks) ? (bearVerdict.keyRisks as string[]) : [],
+          invalidationTriggers: Array.isArray(bearVerdict.invalidationTriggers)
+            ? (bearVerdict.invalidationTriggers as SocraticReversalTrigger[])
+            : [],
+          wouldApproveIf: bearVerdict.wouldApproveIf ?? undefined,
+          confidence: bearVerdict.confidence ?? undefined,
+          reason: bearVerdict.reason || "Approved by inline Bear review."
+        },
+        bearModel
+      );
+      if (normalized.available) {
+        survivor.redTeamVerdict = {
+          rejected: false,
+          available: true,
+          reason: normalized.reason,
+          model: bearModel,
+          ...(normalized.verdict ? { verdict: normalized.verdict } : {}),
+          ...(normalized.keyRisks?.length ? { keyRisks: normalized.keyRisks } : {}),
+          ...(normalized.invalidationTriggers?.length ? { invalidationTriggers: normalized.invalidationTriggers } : {}),
+          ...(normalized.suggestedChange !== undefined ? { suggestedChange: normalized.suggestedChange } : {}),
+          ...(normalized.wouldApproveIf ? { wouldApproveIf: normalized.wouldApproveIf } : {}),
+          ...(typeof normalized.confidence === "number" ? { confidence: normalized.confidence } : {})
+        };
+        if (normalized.suggestedChange) {
+          survivor.reviewNotes = [
+            ...(survivor.reviewNotes ?? []),
+            `Inline Bear suggested change (ADVISORY receipt — not applied): ${describeSuggestedChange(normalized.suggestedChange)}`
+          ];
+        }
+      }
+    }
+    return survivor;
+  });
+
+  // Two-list reconciliation (composite review B/high "Bear removed[]"): every reviewed proposal
+  // lands in exactly one list. The Bear's explicit removed[] entries are matched back to the
+  // reviewed originals; a proposal in BOTH lists resolves to the survivor; a proposal in NEITHER
+  // list is synthesized as removed — an unaccounted disappearance is still a veto, the receipt
+  // just says so honestly instead of letting the name vanish (the pre-2026-07-05 behavior).
+  const reviewedKeyOf = (p: { symbol: string; side: string }) => `${normalizeSymbol(p.symbol)}|${p.side}`;
+  const survivorKeys = new Set(bearProposals.map(reviewedKeyOf));
+  const rawRemoved = Array.isArray(bearResult.removed)
+    ? (bearResult.removed as Array<{ symbol?: unknown; side?: unknown; reason?: unknown; severity?: unknown }>)
+    : [];
+  const bearRemoved: ProposedRemoval[] = [];
+  for (const entry of rawRemoved) {
+    if (typeof entry?.symbol !== "string") continue;
+    const original = bullProposals.find(
+      (bp) =>
+        normalizeSymbol(bp.symbol) === normalizeSymbol(entry.symbol as string) &&
+        (typeof entry.side !== "string" || bp.side === entry.side)
+    );
+    if (!original || survivorKeys.has(reviewedKeyOf(original)) || bearRemoved.some((r) => r.proposal === original)) continue;
+    bearRemoved.push({
+      proposal: original,
+      reason: typeof entry.reason === "string" && entry.reason.trim().length > 0 ? entry.reason.trim() : "No reason provided.",
+      severity:
+        entry.severity === "low" || entry.severity === "medium" || entry.severity === "high" || entry.severity === "critical"
+          ? entry.severity
+          : "medium",
+      source: "bear_inline"
+    });
+  }
+  for (const bp of bullProposals) {
+    if (!survivorKeys.has(reviewedKeyOf(bp)) && !bearRemoved.some((r) => r.proposal === bp)) {
+      bearRemoved.push({
+        proposal: bp,
+        reason: "Bear review did not re-emit this proposal in either list (unaccounted); treated as removed.",
+        severity: "medium",
+        source: "bear_inline"
+      });
+    }
+  }
+  if (bearRemoved.length > 0) {
+    audit(
+      "strategy_bear_removed",
+      {
+        runId: input.runId,
+        model: bearModel,
+        removed: bearRemoved.map((r) => ({ symbol: r.proposal.symbol, side: r.proposal.side, reason: r.reason, severity: r.severity }))
+      },
+      input.userId,
+      input.policy.connectedAccountId
+    );
+  }
   recordStep({
     ...bearStepBase,
     status: "completed",
-    proposalCount: bearProposals.length
+    proposalCount: bearProposals.length,
+    ...(bearRemoved.length > 0
+      ? { reason: `Removed ${bearRemoved.length} proposal(s): ${bearRemoved.map((r) => `${r.proposal.symbol} (${r.severity})`).join(", ")}.` }
+      : {})
   });
-  return { proposals: bearProposals, llmSteps };
+  return {
+    proposals: bearProposals,
+    llmSteps,
+    ...(deterministicRemoved.length > 0 || bearRemoved.length > 0 ? { removed: [...deterministicRemoved, ...bearRemoved] } : {}),
+    ...(bullPassedOn.length > 0 ? { passedOn: bullPassedOn } : {})
+  };
 }
 
 function currentPricesFromScan(scan?: MarketScan): Record<string, number> {
@@ -3592,7 +3998,77 @@ function clampConfidence(score: number | undefined): number | undefined {
   return Math.min(100, Math.max(1, score));
 }
 
-function sanitizeProposals(proposals: TradeProposal[], max = 3): TradeProposal[] {
+/** Bounded, trimmed string or undefined (LLM-emitted nulls/blanks collapse to undefined). */
+function boundedString(value: unknown, max: number): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim().slice(0, max) : undefined;
+}
+
+function boundedStringArray(value: unknown, maxItems: number, maxLen: number): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const rows = value
+    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    .map((v) => v.trim().slice(0, maxLen))
+    .slice(0, maxItems);
+  return rows.length > 0 ? rows : undefined;
+}
+
+function sanitizeReversalTriggers(value: unknown): SocraticReversalTrigger[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const rows = value
+    .filter((t): t is { condition?: unknown; metric?: unknown; level?: unknown } => !!t && typeof t === "object")
+    .map((t) => {
+      const condition = boundedString(t.condition, 300);
+      if (!condition) return undefined;
+      return {
+        condition,
+        ...(boundedString(t.metric, 60) ? { metric: boundedString(t.metric, 60) } : {}),
+        ...(typeof t.level === "number" && Number.isFinite(t.level) ? { level: t.level } : {})
+      };
+    })
+    .filter((t): t is SocraticReversalTrigger => t !== undefined)
+    .slice(0, 4);
+  return rows.length > 0 ? rows : undefined;
+}
+
+function sanitizeUsedEvidence(value: unknown): SocraticUsedEvidence[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const rows = value
+    .filter((u): u is { ref?: unknown; effect?: unknown; why?: unknown } => !!u && typeof u === "object")
+    .map((u) => {
+      const ref = boundedString(u.ref, 200);
+      const effect =
+        u.effect === "used" || u.effect === "ignored" || u.effect === "changed_view" || u.effect === "contradicted"
+          ? u.effect
+          : undefined;
+      if (!ref || !effect) return undefined;
+      const why = boundedString(u.why, 300);
+      return { ref, effect, ...(why ? { why } : {}) };
+    })
+    .filter((u): u is SocraticUsedEvidence => u !== undefined)
+    .slice(0, 8);
+  return rows.length > 0 ? rows : undefined;
+}
+
+/** Sanitize the Bull's top-level passedOn[] (non-actions): cap 5, bounded strings, null -> undefined. */
+export function sanitizePassedOn(value: unknown): SocraticPassedOn[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is { symbol?: unknown; reason?: unknown; wouldReconsiderIf?: unknown } => !!entry && typeof entry === "object")
+    .map((entry) => {
+      const symbol = boundedString(entry.symbol, 12);
+      if (!symbol) return undefined;
+      const reconsider = boundedString(entry.wouldReconsiderIf, 500);
+      return {
+        symbol: normalizeSymbol(symbol),
+        reason: boundedString(entry.reason, 800) ?? "No reason provided.",
+        ...(reconsider ? { wouldReconsiderIf: reconsider } : {})
+      };
+    })
+    .filter((entry): entry is SocraticPassedOn => entry !== undefined)
+    .slice(0, 5);
+}
+
+export function sanitizeProposals(proposals: TradeProposal[], max = 3): TradeProposal[] {
   return proposals
     .filter((proposal) => proposal.symbol && proposal.side && proposal.type)
     .slice(0, max)
@@ -3600,6 +4076,14 @@ function sanitizeProposals(proposals: TradeProposal[], max = 3): TradeProposal[]
       ...proposal,
       symbol: normalizeSymbol(proposal.symbol),
       confidenceScore: clampConfidence(proposal.confidenceScore),
+      // Socratic first-class fields (w3-schema-dissent): bound lengths/counts and collapse the
+      // strict schema's mandatory nulls back to undefined so persisted JSON stays clean.
+      belief: boundedString(proposal.belief, 500),
+      iMayBeWrongIf: boundedStringArray(proposal.iMayBeWrongIf, 4, 300),
+      reversalTriggers: sanitizeReversalTriggers(proposal.reversalTriggers),
+      evidenceRefs: boundedStringArray(proposal.evidenceRefs, 8, 200),
+      usedEvidence: sanitizeUsedEvidence(proposal.usedEvidence),
+      strongestCounterRead: boundedString(proposal.strongestCounterRead, 800),
       quantity: proposal.quantity ?? undefined,
       dollarAmount: proposal.dollarAmount ?? undefined,
       limitPrice: proposal.limitPrice ?? undefined,

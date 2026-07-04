@@ -933,6 +933,7 @@ function migrate(database: Database.Database): void {
       autonomy_override TEXT,
       lessons TEXT NOT NULL DEFAULT '[]',
       coach_notes TEXT NOT NULL DEFAULT '[]',
+      socratic_ext TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -1087,6 +1088,14 @@ function migrate(database: Database.Database): void {
   }
   if (!skippedCfColumns.some((c) => c.name === "resolution_reason")) {
     database.exec("ALTER TABLE skipped_candidate_counterfactuals ADD COLUMN resolution_reason TEXT");
+  }
+
+  // Wave-3 schema & dissent: Socratic first-class case fields (belief/self-dissent/reversal
+  // triggers/evidence attribution/reviewNotes/debateTranscript/wouldReconsiderIf) persisted as ONE
+  // JSON column on socratic_decisions (additive, guarded). See db-socratic.ts SocraticCaseExt.
+  const socraticDecisionColumns = database.prepare("PRAGMA table_info(socratic_decisions)").all() as Array<{ name: string }>;
+  if (socraticDecisionColumns.length > 0 && !socraticDecisionColumns.some((c) => c.name === "socratic_ext")) {
+    database.exec("ALTER TABLE socratic_decisions ADD COLUMN socratic_ext TEXT");
   }
 
   // R3: per-account tax treatment (taxable vs Roth/Traditional IRA) on existing DBs.

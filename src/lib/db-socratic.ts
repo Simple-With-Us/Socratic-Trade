@@ -42,9 +42,45 @@ type DecisionRow = {
   autonomy_override: string | null;
   lessons: string;
   coach_notes: string;
+  socratic_ext: string | null;
   created_at: string;
   updated_at: string;
 };
+
+/**
+ * Socratic first-class case fields (w3-schema-dissent, 2026-07-05) — persisted together in ONE
+ * JSON column (`socratic_decisions.socratic_ext`) instead of nine new columns: they always travel
+ * as a unit from the proposal, and a single column keeps the migration additive and
+ * merge-friendly. `debateTranscript` inside it is IMMUTABLE by contract: it is written once at
+ * debate time and every later upsert round-trips it unchanged (regression-tested).
+ */
+type SocraticCaseExt = Pick<
+  SocraticDecisionCase,
+  | "belief"
+  | "iMayBeWrongIf"
+  | "reversalTriggers"
+  | "evidenceRefs"
+  | "usedEvidence"
+  | "strongestCounterRead"
+  | "reviewNotes"
+  | "debateTranscript"
+  | "wouldReconsiderIf"
+>;
+
+function socraticExtJson(input: SocraticCaseExt): string | null {
+  const ext: SocraticCaseExt = {
+    ...(input.belief ? { belief: input.belief } : {}),
+    ...(input.iMayBeWrongIf?.length ? { iMayBeWrongIf: input.iMayBeWrongIf } : {}),
+    ...(input.reversalTriggers?.length ? { reversalTriggers: input.reversalTriggers } : {}),
+    ...(input.evidenceRefs?.length ? { evidenceRefs: input.evidenceRefs } : {}),
+    ...(input.usedEvidence?.length ? { usedEvidence: input.usedEvidence } : {}),
+    ...(input.strongestCounterRead ? { strongestCounterRead: input.strongestCounterRead } : {}),
+    ...(input.reviewNotes?.length ? { reviewNotes: input.reviewNotes } : {}),
+    ...(input.debateTranscript ? { debateTranscript: input.debateTranscript } : {}),
+    ...(input.wouldReconsiderIf ? { wouldReconsiderIf: input.wouldReconsiderIf } : {})
+  };
+  return Object.keys(ext).length > 0 ? JSON.stringify(ext) : null;
+}
 
 type FrameworkRow = {
   id: string;
@@ -105,7 +141,8 @@ function rowToDecision(row: DecisionRow): SocraticDecisionCase {
       ? { autonomyOverride: parseJson<SocraticDecisionCase["autonomyOverride"] | undefined>(row.autonomy_override, undefined) }
       : {}),
     lessons: parseJson<string[]>(row.lessons, []),
-    coachNotes: parseJson<string[]>(row.coach_notes, [])
+    coachNotes: parseJson<string[]>(row.coach_notes, []),
+    ...(row.socratic_ext ? parseJson<SocraticCaseExt>(row.socratic_ext, {}) : {})
   };
 }
 
@@ -157,6 +194,15 @@ export function upsertSocraticDecisionCase(input: {
   autonomyOverride?: SocraticDecisionCase["autonomyOverride"];
   lessons?: string[];
   coachNotes?: string[];
+  belief?: string;
+  iMayBeWrongIf?: SocraticDecisionCase["iMayBeWrongIf"];
+  reversalTriggers?: SocraticDecisionCase["reversalTriggers"];
+  evidenceRefs?: SocraticDecisionCase["evidenceRefs"];
+  usedEvidence?: SocraticDecisionCase["usedEvidence"];
+  strongestCounterRead?: string;
+  reviewNotes?: SocraticDecisionCase["reviewNotes"];
+  debateTranscript?: SocraticDecisionCase["debateTranscript"];
+  wouldReconsiderIf?: string;
 }): string {
   const now = new Date().toISOString();
   const id = input.id ?? input.proposalId ?? crypto.randomUUID();
@@ -166,8 +212,8 @@ export function upsertSocraticDecisionCase(input: {
         id, user_id, connected_account_id, run_id, proposal_id, account_number, symbol, side, status,
         authority, thesis, rationale, action, thesis_tag, regime, confidence_score, notional, model,
         red_team, policy_decision, evidence, rag_attributions, dissent, outcome, autonomy_override,
-        lessons, coach_notes, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        lessons, coach_notes, socratic_ext, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         connected_account_id = excluded.connected_account_id,
         run_id = excluded.run_id,
@@ -194,6 +240,7 @@ export function upsertSocraticDecisionCase(input: {
         autonomy_override = excluded.autonomy_override,
         lessons = excluded.lessons,
         coach_notes = excluded.coach_notes,
+        socratic_ext = excluded.socratic_ext,
         updated_at = excluded.updated_at`
     )
     .run(
@@ -224,6 +271,7 @@ export function upsertSocraticDecisionCase(input: {
       input.autonomyOverride ? JSON.stringify(input.autonomyOverride) : null,
       JSON.stringify(input.lessons ?? []),
       JSON.stringify(input.coachNotes ?? []),
+      socraticExtJson(input),
       now,
       now
     );

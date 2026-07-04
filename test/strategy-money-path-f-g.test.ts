@@ -159,19 +159,26 @@ describe("strategy money-path (broker/paper via the Test-broker gateway) — G7 
 
     // F1: the redTeamVerdict field round-trips through the persisted JSON payload (no migration),
     // including the served red-team model attribution (t3) and the stakes-scaled-dissent trigger
-    // (E/high/S) — this proposal's confidenceScore (90) alone clears the threshold.
-    expect(aaplProposal?.proposal.redTeamVerdict).toEqual({
+    // (E/high/S) — this proposal's confidenceScore (90) alone clears the threshold. The verdict is
+    // now the STRUCTURED shape (w3-schema-dissent): the mocked legacy `{rejected:false}` payload
+    // normalizes to verdict "approve" with an explicit advisory suggestedChange of null.
+    expect(aaplProposal?.proposal.redTeamVerdict).toMatchObject({
       rejected: false,
       available: true,
       reason: "No fatal flaw found.",
       model: "gpt-4.1-mini",
-      trigger: "confidence"
+      trigger: "confidence",
+      verdict: "approve"
     });
     // t3: the persisted proposal carries the FAILOVER-AWARE served Green model (here the primary),
     // so approval-time attribution doesn't drift with later policy edits.
     expect(aaplProposal?.proposal.proposedByModel).toBe("gpt-4.1-mini");
-    // Backward-compat rationale text is still appended.
-    expect(aaplProposal?.proposal.rationale).toContain("Red Team Debate Survived");
+    // w3-schema-dissent: the survived-note lives in the SEPARATE reviewNotes field now — the Bull
+    // rationale is deliberately no longer mutated (it is the thesis text that gets embedded), and
+    // the immutable debate transcript is persisted alongside.
+    expect(aaplProposal?.proposal.rationale).not.toContain("Red Team Debate Survived");
+    expect(aaplProposal?.proposal.reviewNotes?.some((note: string) => note.includes("Red Team debate survived"))).toBe(true);
+    expect(aaplProposal?.proposal.debateTranscript?.bearResponse).toBe("No fatal flaw found.");
     // Regression (composite review B/high/S): the Bear schema now round-trips confidenceScore — a
     // Bear-surviving proposal must retain the Bull's numeric conviction score, not degrade to
     // undefined (which previously zeroed shouldRunRedTeamDebate/sizing downstream).

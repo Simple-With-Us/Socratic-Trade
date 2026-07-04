@@ -1,4 +1,5 @@
 import { normalizeSymbol } from "./money";
+import type { RedTeamDebateResult } from "./red-team";
 import type { RetrievedChunk } from "./vector-db";
 import type {
   MarketQuote,
@@ -177,6 +178,120 @@ export function applySocraticOverrideSizing(proposal: TradeProposal, policy: Tra
   };
 }
 
+/** Human-readable one-liner for an ADVISORY Red Team suggested change (receipt text — never applied). */
+export function describeSuggestedChange(change: { sizeMultiplier?: number; stopPrice?: number; limitPrice?: number }): string {
+  const parts: string[] = [];
+  if (typeof change.sizeMultiplier === "number") parts.push(`size x${change.sizeMultiplier}`);
+  if (typeof change.stopPrice === "number") parts.push(`stop $${change.stopPrice}`);
+  if (typeof change.limitPrice === "number") parts.push(`limit $${change.limitPrice}`);
+  return parts.length > 0 ? parts.join(", ") : "no concrete change stated";
+}
+
+/**
+ * Apply an approval-time Red Team debate result to a proposal WITHOUT mutating its rationale
+ * (composite review A/medium: the old "Red Team Debate Survived:" appends corrupted the exact
+ * thesis text that gets embedded for retrieval). Persists three receipts:
+ *   1. the FULL structured verdict on `redTeamVerdict` (verdict/keyRisks/invalidationTriggers/
+ *      suggestedChange/wouldApproveIf/confidence — composite review A/B high);
+ *   2. survived-notes + the ADVISORY suggestedChange annotation on the separate `reviewNotes`
+ *      field — suggestedChange is a receipt for the owner, NEVER auto-applied to size/stop/limit;
+ *   3. the immutable `debateTranscript` (bull thesis, full bear response, trigger, model+tokens
+ *      per side), written once here and never mutated afterward.
+ */
+export function annotateProposalWithDebate(
+  proposal: TradeProposal,
+  result: RedTeamDebateResult,
+  trigger?: NonNullable<TradeProposal["redTeamVerdict"]>["trigger"]
+): void {
+  proposal.redTeamVerdict = {
+    rejected: result.rejected,
+    available: result.available,
+    reason: result.reason,
+    ...(result.model ? { model: result.model } : {}),
+    ...(trigger ? { trigger } : {}),
+    ...(result.verdict ? { verdict: result.verdict } : {}),
+    ...(result.keyRisks && result.keyRisks.length > 0 ? { keyRisks: result.keyRisks } : {}),
+    ...(result.invalidationTriggers && result.invalidationTriggers.length > 0 ? { invalidationTriggers: result.invalidationTriggers } : {}),
+    ...(result.suggestedChange !== undefined ? { suggestedChange: result.suggestedChange } : {}),
+    ...(result.wouldApproveIf ? { wouldApproveIf: result.wouldApproveIf } : {}),
+    ...(typeof result.confidence === "number" ? { confidence: result.confidence } : {})
+  };
+  if (!result.available) return;
+  proposal.debateTranscript = {
+    bullThesis: proposal.rationale,
+    ...(proposal.belief ? { bullBelief: proposal.belief } : {}),
+    bearResponse: result.reason,
+    ...(trigger ? { trigger } : {}),
+    sides: [
+      { role: "bull", ...(proposal.proposedByModel ? { model: proposal.proposedByModel } : {}) },
+      {
+        role: "bear",
+        ...(result.model ? { model: result.model } : {}),
+        ...(typeof result.usage?.promptTokens === "number" ? { promptTokens: result.usage.promptTokens } : {}),
+        ...(typeof result.usage?.completionTokens === "number" ? { completionTokens: result.usage.completionTokens } : {})
+      }
+    ],
+    at: new Date().toISOString()
+  };
+  if (!result.rejected) {
+    const notes = [...(proposal.reviewNotes ?? [])];
+    notes.push(`Red Team debate survived${result.verdict === "approve_with_changes" ? " (approve_with_changes)" : ""}: ${result.reason}`);
+    if (result.suggestedChange && Object.keys(result.suggestedChange).length > 0) {
+      notes.push(`Red Team suggested change (ADVISORY receipt — not applied): ${describeSuggestedChange(result.suggestedChange)}`);
+    }
+    proposal.reviewNotes = notes;
+  }
+}
+
+/**
+ * Non-actions as first-class case files (composite review A/high): per-symbol "passed" cases from
+ * the Bull's passedOn[] and a run-level "waited" case when a run proposes nothing. Ids are
+ * deterministic per run (idempotent re-upserts, no crypto dependency in this leaf module).
+ */
+export function buildSocraticNonActionCase(input: {
+  id?: string;
+  userId: string;
+  connectedAccountId?: string;
+  runId: string;
+  accountNumber?: string;
+  kind: "passed" | "waited";
+  symbol?: string;
+  reason: string;
+  wouldReconsiderIf?: string;
+  regime?: string;
+  authority: StrategyAuthority;
+}): Omit<SocraticDecisionCase, "createdAt" | "updatedAt"> {
+  const symbol = input.symbol ? normalizeSymbol(input.symbol) : undefined;
+  return {
+    id: input.id ?? `${input.runId}:${input.kind}${symbol ? `:${symbol}` : ""}`,
+    userId: input.userId,
+    ...(input.connectedAccountId ? { connectedAccountId: input.connectedAccountId } : {}),
+    runId: input.runId,
+    ...(input.accountNumber ? { accountNumber: input.accountNumber } : {}),
+    ...(symbol ? { symbol } : {}),
+    status: input.kind,
+    authority: input.authority,
+    thesis: input.kind === "passed" ? `Deliberately passed on ${symbol}` : "Deliberately waited — no trades this run",
+    rationale: input.reason,
+    action: input.kind === "passed" ? `PASSED ${symbol}` : "WAITED",
+    ...(input.regime ? { regime: input.regime } : {}),
+    evidence: [
+      {
+        kind: "learning",
+        title: input.kind === "passed" ? "Pass reason" : "Wait reason",
+        summary: input.reason,
+        ...(symbol ? { symbol } : {}),
+        tone: "neutral"
+      }
+    ],
+    ragAttributions: [],
+    dissent: [],
+    lessons: [],
+    coachNotes: [],
+    ...(input.wouldReconsiderIf ? { wouldReconsiderIf: input.wouldReconsiderIf } : {})
+  };
+}
+
 export function ragAttributionsFromChunks(symbol: string, query: string, chunks: RetrievedChunk[]): SocraticRagAttribution[] {
   return chunks.slice(0, 5).map((chunk) => ({
     symbol: normalizeSymbol(symbol),
@@ -302,6 +417,27 @@ function dissentForDecision(proposal: TradeProposal, decision: PolicyDecision, o
       tone: "warning"
     });
   }
+  // Deliberate self-dissent (composite review B/medium strongestCounterRead) + the Red Team's
+  // keyed risks (structured verdict) — receipts-first: the case's Dissent block should show every
+  // opposing read that was on the table, not just the boolean outcome.
+  if (proposal.strongestCounterRead) {
+    rows.push({
+      kind: "red_team",
+      title: "Strongest counter-read (Bull self-dissent)",
+      summary: proposal.strongestCounterRead,
+      symbol: normalizeSymbol(proposal.symbol),
+      tone: "warning"
+    });
+  }
+  for (const risk of proposal.redTeamVerdict?.keyRisks?.slice(0, 3) ?? []) {
+    rows.push({
+      kind: "red_team",
+      title: "Red Team key risk",
+      summary: risk,
+      symbol: normalizeSymbol(proposal.symbol),
+      tone: "warning"
+    });
+  }
   if (proposal.autonomyOverride?.invalidation) {
     rows.push({
       kind: "override",
@@ -311,7 +447,7 @@ function dissentForDecision(proposal: TradeProposal, decision: PolicyDecision, o
       tone: "neutral"
     });
   }
-  return rows.slice(0, 6);
+  return rows.slice(0, 8);
 }
 
 export function buildSocraticDecisionCase(input: {
@@ -377,7 +513,17 @@ export function buildSocraticDecisionCase(input: {
       input.status === "blocked" && input.proposal.autonomyOverride?.requested ? "Override request did not clear the hard/preference split; review classifier or mandate." : "",
       input.overrideResolution?.applied ? "Owner preference gate was explicitly overridden; measure whether the autonomy judgment improved returns." : ""
     ].filter(Boolean),
-    coachNotes: []
+    coachNotes: [],
+    // Socratic first-class fields (composite review B/high): thread every field the schemas
+    // round-trip onto the case so it persists (socratic_ext) and reaches the memory vector text.
+    ...(input.proposal.belief ? { belief: input.proposal.belief } : {}),
+    ...(input.proposal.iMayBeWrongIf?.length ? { iMayBeWrongIf: input.proposal.iMayBeWrongIf } : {}),
+    ...(input.proposal.reversalTriggers?.length ? { reversalTriggers: input.proposal.reversalTriggers } : {}),
+    ...(input.proposal.evidenceRefs?.length ? { evidenceRefs: input.proposal.evidenceRefs } : {}),
+    ...(input.proposal.usedEvidence?.length ? { usedEvidence: input.proposal.usedEvidence } : {}),
+    ...(input.proposal.strongestCounterRead ? { strongestCounterRead: input.proposal.strongestCounterRead } : {}),
+    ...(input.proposal.reviewNotes?.length ? { reviewNotes: input.proposal.reviewNotes } : {}),
+    ...(input.proposal.debateTranscript ? { debateTranscript: input.proposal.debateTranscript } : {})
   };
 }
 
@@ -421,5 +567,9 @@ export function socraticStatusFromProposalStatus(status: string): SocraticDecisi
   if (status === "blocked") return "blocked";
   if (status === "rejected" || status === "rejected_by_broker") return "rejected";
   if (status === "error" || status === "placing_failed") return "error";
+  // Wave-3 schema & dissent statuses: Red-Team/deterministic vetoes and non-action case files.
+  if (status === "vetoed") return "vetoed";
+  if (status === "waited") return "waited";
+  if (status === "passed") return "passed";
   return "planned";
 }
