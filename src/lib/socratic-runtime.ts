@@ -1,4 +1,5 @@
 import { normalizeSymbol } from "./money";
+import { isHardGateReason } from "./policy";
 import type { RetrievedChunk } from "./vector-db";
 import type {
   MarketQuote,
@@ -26,60 +27,16 @@ export interface SocraticOverrideResolution {
   decision: PolicyDecision;
 }
 
-const OVERRIDEABLE_PATTERNS = [
-  "System is halted.",
-  "System is close-only.",
-  "Allowed universe is required.",
-  "is not in the allowed universe",
-  "orders are not permitted",
-  "Extended-hours orders are disabled.",
-  "entry_drift:",
-  "staleness_gate:",
-  "exceeds the maximum order limit",
-  "leaves less than",
-  "Daily notional limit",
-  "Hourly notional limit",
-  "Daily opening-order count limit",
-  "ADV cap",
-  "crisis/inverted-regime cap",
-  "maxShortExposurePct",
-  "Projected total short exposure",
-  "Projected gross exposure",
-  "Projected net exposure",
-  "Projected portfolio beta",
-  "Projected",
-  "Stop-loss rule blocks adding",
-  "Take-profit rule blocks adding",
-  "Cannot average up on short"
-];
-
-const HARD_PATTERNS = [
-  "No Robinhood account is selected.",
-  "not tradable",
-  "buying power",
-  "Sell quantity exceeds",
-  "Cover quantity exceeds",
-  "exit must specify",
-  "margin_minimum:",
-  "wash-sale",
-  "wash sale",
-  "Fractional or dollar-based orders must be regular-hours only.",
-  "connected account does not support short selling",
-  "short-selling is disabled",
-  "Short proposals must carry a mandatory stop-loss",
-  "broker",
-  "PERMANENTLY",
-  "Bracket orders require"
-];
-
-function reasonMatches(reason: string, patterns: string[]): boolean {
-  const lower = reason.toLowerCase();
-  return patterns.some((pattern) => lower.includes(pattern.toLowerCase()));
-}
-
+/**
+ * Owner guardrail philosophy (2026-07-05): a policy block is overridable by the agent's logged
+ * `autonomyOverride` thesis UNLESS it is a hard gate — the account boundary or a physical / broker /
+ * regulatory / accounting impossibility. This is a DENYLIST (overridable-by-default), inverted from the
+ * former hand-maintained allowlist so a new risk-preference gate is overridable automatically instead
+ * of silently un-overridable. The hard/preference split is the single source of truth in the risk
+ * engine (policy.isHardGateReason), co-located with the gates that produce the reasons.
+ */
 function overrideableReason(reason: string): boolean {
-  if (reasonMatches(reason, HARD_PATTERNS)) return false;
-  return reasonMatches(reason, OVERRIDEABLE_PATTERNS);
+  return !isHardGateReason(reason);
 }
 
 export function resolveSocraticOverride(input: {

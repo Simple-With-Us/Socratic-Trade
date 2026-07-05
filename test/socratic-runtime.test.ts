@@ -83,4 +83,33 @@ describe("Socratic runtime override semantics", () => {
     expect(sized.quantity).toBeUndefined();
     expect(sized.rationale).toContain("Socratic override sizing");
   });
+
+  it("applies the override for gates reclassified from hard to preference (short-stop-required, bracket-required)", () => {
+    const decision: PolicyDecision = {
+      approved: false,
+      reasons: [
+        "Short proposals must carry a mandatory stop-loss (policy.riskRules.shortStopLossPct).",
+        'Bracket orders require "bracket" in permittedOrderTypes or a stopLossPct risk rule.'
+      ]
+    };
+
+    const result = resolveSocraticOverride({ proposal, policy, portfolio, estimatedNotional: 900, decision });
+
+    expect(result.applied).toBe(true);
+    expect(result.decision.approved).toBe(true);
+    expect(result.hardReasons).toHaveLength(0);
+  });
+
+  it("still refuses the regulatory margin-minimum (FINRA 26-10 / PDT successor) hard gate", () => {
+    const decision: PolicyDecision = {
+      approved: false,
+      reasons: ["margin_minimum: this LIVE margin account's equity $1000.00 is below the $2,000 margin minimum."]
+    };
+
+    const result = resolveSocraticOverride({ proposal, policy, portfolio, estimatedNotional: 900, decision });
+
+    expect(result.applied).toBe(false);
+    expect(result.decision.approved).toBe(false);
+    expect(result.hardReasons[0]).toContain("margin_minimum");
+  });
 });

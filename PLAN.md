@@ -19,6 +19,15 @@ filling the missing pieces.
 > `NODE_OPTIONS=--max-old-space-size=8192 ./node_modules/.bin/tsc --noEmit --pretty false`,
 > `npm run lint -- --quiet`, and `git diff --check` all pass. Remaining low-risk native `title`
 > usage is intentionally deferred to a broader follow-up slice after this primitive lands.
+> **2026-07-04 - Approvals triage + alert center focused slice (Codex).** No roadmap scope change.
+> `/console/approvals` now covers the first operational triage layer from issue #470: sort/filter,
+> visible-row multi-select, bulk reject, and safe non-LIVE bulk approve through the existing
+> proposal endpoints; LIVE typed-confirm remains per-item only. The console's alert history also
+> graduates into a reusable alert-center surface (summary buckets + search + better notification
+> labeling) backed by existing notification/activity data, shown compactly on Approvals and fully on
+> `Activity -> Alert center`. Remaining scope for the larger backlog row stays separate: unified
+> owner inbox across more object types, keyboard triage, and any broader console/live-data/settings
+> work.
 
 > 2026-07-03 (`claude/washsale-advisory-defaults`, Claude): **Wash-sale gate defaults flipped to
 > non-blocking** — owner decision: `taxSettings.washSaleHandling` default `"block"` → `"auto"`,

@@ -374,7 +374,7 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
     : undefined;
   const profiles = listStrategyProfiles(userId);
   const activeProfile = getActiveStrategyProfile(userId);
-  const notifications = listNotificationEvents(userId, 50);
+  const notifications = listNotificationEvents(userId, 100);
   const latestRunAudit = policy.connectedAccountId
     ? latestAuditByKind("strategy_run", userId, policy.connectedAccountId)
     : latestAuditByKind("strategy_run", userId);

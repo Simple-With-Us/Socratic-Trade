@@ -72,6 +72,35 @@ to `socratictrade.com`, record the release commit + date here._
 
 ## ✅ Completed (merged to `main`, on beta/integration)
 
+- **PR #798 - Slack coordination sync on by default for all sessions/repos (Monet, cloud;
+  landing by CLAUDE-CLOUD, owner-directed).** Merged to `main` 2026-07-05 as squash `546c451`
+  (verify x2/smoke/gitleaks green; relands #367, whose branch heads never received CI runs from
+  cloud-proxy pushes). Ships `scripts/slack-sync.sh` (curl engine: read/thread/post/reply/test/
+  hook; 0600 `curl --config` token handling; untrusted-data envelope; silent no-op without
+  `SLACK_BOT_TOKEN`; per-session hook dedup), `scripts/setup-slack-sync.sh` (idempotent global
+  installer), `cloud-setup.sh` wiring (verified end-to-end in a cloud container: npm ci +
+  `.env.local` seed + hook install with valid JSON), `docs/slack-coordination.md`, and a
+  `workflow_dispatch` re-kick lever on ci.yml (cloud-proxy pushes were firing no pull_request
+  workflow runs, stranding the required `verify` check). Owner state: `SLACK_BOT_TOKEN` set as a
+  cloud Runtime Secret; env setup-script field points at `bash scripts/cloud-setup.sh`.
+  **Follow-ups (Monet lane): 8 resolved-to-land Codex P2 threads on #798** (no-python3 JSON
+  fallback escaping, unrelated-hook preservation, cross-repo hook help path, non-zero exit for
+  token-less writes, envelope-delimiter escaping, thread visibility/order/pagination in reads) +
+  Mac-side installer run + bot `/invite`. Rollouts:
+  `docs/rollouts/2026-07-04-slack-sync-default-setup.md`,
+  `docs/rollouts/2026-07-05-slack-sync-pr367-landing.md`.
+- **PR #694 - Effort-issues sync secondary-rate-limit hardening (CLAUDE).** Merged to `main`
+  2026-07-05 (verify/smoke/gitleaks green, auto-merge). `scripts/sync-effort-issues.py` now
+  survives GitHub secondary rate limits: 2.5s creation throttle, Retry-After/exponential-backoff
+  retries under a bounded 300s per-run retry budget, and exit-0 "PARTIAL SYNC - resume on next
+  run" summary on budget exhaustion instead of a red workflow run (the sync is idempotent, so
+  the next run resumes cleanly; non-rate-limit failures still exit 1). Validated live on merge:
+  the previously hard-failing bulk run completed green (created=101 updated=305, exit 0).
+  Follow-up refinements from Codex PR review (Congress.Trade #162): initial issue listing
+  covered by the same partial handling, server-sent Retry-After honored uncapped, 1s update
+  throttle for bulk PATCH runs. Propagated verbatim to congress-trading-shared (PR #27),
+  api-usage-monitor (PR #38), and Congress.Trade (PR #162). Rollout:
+  `docs/rollouts/2026-07-04-effort-sync-rate-limit-hardening.md`.
 ### Console parity port — legacy `app/ui/*` rebuilt as `/console` (2026-07-02)
 - **#321** — parity-port foundation: logo/model/drilldown primitives, nav scaffolding, model-attribution approval card.
 - **#322** — Settings expansions: brokers, API keys, LLM model picker, delivery channels, glossary.
@@ -208,6 +237,27 @@ to `socratictrade.com`, record the release commit + date here._
 ---
 
 ## 🔨 In Progress
+- **Guardrails → overridable preferences (denylist)** (MONET risk lane, worktree
+  `~/apps/trading-monet`, branch `monet/guardrail-overridable-denylist`) — **PR open**. Owner directive:
+  only the account boundary + physical/broker/regulatory/accounting impossibilities stay hard; every other
+  policy block is a light preference the agent may self-override with a logged `autonomyOverride` thesis.
+  Inverted the Socratic override classifier allowlist → **denylist**: new `HARD_GATE_REASON_PATTERNS` +
+  `isHardGateReason` source-of-truth in `policy.ts` (risk engine); `socratic-runtime.ts` `overrideableReason`
+  = `!isHardGateReason`. Reclassified short-stop-required / bracket-required / policy-level short-disabled
+  from hard → overridable; unlisted/new gates now default overridable. Advisory-only (nothing
+  auto-overrides; broker/account/regulatory hard gates untouched). New `test/hard-gate-classification.test.ts`
+  pins the matrix. Cross-lane touch to `socratic-runtime.ts` (Claude's file) coordinated on `#agent-sync`.
+  Follow-ups: extend override to exits; make the pre-policy vetoes (bear filter, Red Team) advisory. See
+  `docs/rollouts/2026-07-05-guardrail-denylist-overridable-preferences.md`.
+
+- **Approvals triage upgrades + alert center (CODEX, M) — IN PROGRESS 2026-07-04.** Worktree
+  `/Users/jay/.codex/worktrees/socratic-approvals-alert-center`, branch
+  `codex/approvals-alert-center`. Focused slice only: pending-approval sort/filter, bulk safe
+  actions via existing per-item proposal endpoints, and a console alert center built from existing
+  notifications/activity data. Keepout: settings/model/live-data/coach/tooltip broad conversions,
+  Monet risk files, Claude memory/RAG files, workflows, AGENTS, and Slack scripts. Verification
+  green: tsc clean, focused approvals/dashboard tests 24, full suite 2467 tests / 255 files, lint
+  0 errors, build green.
 
 - **Accessible tooltip/popover primitive everywhere (CODEX, S)** — issue #474, branch
   `codex/console-tooltip-primitive`, worktree
@@ -220,7 +270,7 @@ to `socratictrade.com`, record the release commit + date here._
   `app/console/scan/scan-table.tsx`.
 
 - **Regime-enum adoption inside the risk gates** (MONET risk lane, branch
-  `claude/regime-enum-risk-gates`, isolated worktree `nice-heyrovsky-b9d0bd`) — **PR open**. The
+  `claude/regime-enum-risk-gates`) — **merged as PR #449 (`c3553ebb`); moved to Completed on the live board**. The
   three deterministic risk gates now classify the persisted regime label through the shared typed
   `MarketRegime` source of truth (`market-regime.ts`) instead of three independent
   substring/`startsWith` rules: crisis/inverted opening-exposure cap (`policy.ts`
@@ -574,8 +624,6 @@ locks — re-negotiate in #agent-sync._
 #### CODEX lane (adds to the annotated parity rows above)
 - **Scan table column customization parity (CODEX, M)** — visibility/ordering/reset/saved state vs
   the legacy dashboard. (console-parity-open-items)
-- **Approvals triage upgrades + alert center (CODEX, M)** — bulk actions, sort/filter, and a
-  console alert center. (expert reviews)
 - **Console live-data build-out (CODEX, L)** — SSE wiring + mark-to-market, positions blotter
   streaming, live risk-utilization board, intraday charts (lightweight-charts adoption). Subsumes
   the SSE learned-context-inbox row above. (expert reviews)

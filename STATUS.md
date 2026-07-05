@@ -8,6 +8,84 @@ steps materially change.
 > (Planned / In Progress / Completed / Deployed-to-prod). Every agent keeps it
 > current per the `AGENTS.md` handoff protocol.
 
+## 2026-07-04 — Slack coordination sync on by default for all sessions/repos (Monet, cloud)
+Branch `claude/slack-sync-default-setup` (off `origin/main` @ `c2ee3f0`). Makes the two-Claude
+Slack coordination (Monet = cloud, Fable = local Mac) work by default in every session/repo
+without the flaky Slack MCP. Three committed scripts + a doc:
+- `scripts/slack-sync.sh` — curl engine: `read`/`thread`/`post`/`reply`/`test`/`hook`. Token via
+  `curl --config` 0600 temp file (never on argv/`ps`, never logged); fetched content in an
+  UNTRUSTED-EXTERNAL-DATA envelope; **silent no-op + exit 0 without `SLACK_BOT_TOKEN`** (safe in
+  any repo); `hook` self-dedupes per session so global + repo hooks can't double-inject.
+- `scripts/setup-slack-sync.sh` — idempotent global installer: copies the engine to
+  `~/.claude/slack-sync.sh` and merges a `SessionStart` hook into `~/.claude/settings.json`
+  (python3 JSON merge; preserves existing keys/hooks; upgrades in place on re-run).
+- `scripts/cloud-setup.sh` — now runs the installer (non-fatal) so any cloud env pointed at it
+  gets the hook. `docs/slack-coordination.md` — full owner/Fable guide + FAQ.
+
+Verified: bash -n + pure-ASCII on all three; stubbed-curl functional test (dedup, envelope, post);
+sandbox-HOME idempotent-merge test (preserves unrelated model/hooks; one slack entry on re-run);
+tsc clean (no TS changed).
+
+**Blocker / owner actions:** this cloud container has **no `SLACK_BOT_TOKEN`**, so Monet cannot
+post to Slack from here yet. Add it as a cloud **Runtime Secret**; `export` it on the Mac; `/invite`
+the bot (scopes `channels:history` + `channels:read` + `chat:write`); run
+`bash scripts/setup-slack-sync.sh` once per machine. Rotate any raw token pasted earlier.
+**Next:** open PR + squash auto-merge; once the token secret exists, post the setup how-to to Fable.
+
+**Update 2026-07-05 (CLAUDE-CLOUD takeover, owner-directed):** PR #367 sat unmerged because
+`verify` never ran on head `fb14f10` (zero check runs, so the armed auto-merge could not fire) and
+the branch fell behind `main`. Monet hit technical issues, so the owner asked CLAUDE-CLOUD to land
+it: merged `origin/main` back in (the merge restored plain `npm ci` in `cloud-setup.sh` — `main`
+deleted `scripts/npm-ci-with-shared-deps.sh` when the shared dep went public git+https in #444),
+scrubbed the stale Test-mode/`paperMode` header comments (removed from the product 2026-07-03),
+resolved keep-both conflicts in `AGENTS.md`/`docs/EFFORT-LOG.md`, and pushed to re-kick `verify`.
+Owner actions now done: `SLACK_BOT_TOKEN` added as a cloud Runtime Secret; the cloud env
+setup-script field points at `bash scripts/cloud-setup.sh`. See
+`docs/rollouts/2026-07-05-slack-sync-pr367-landing.md`.
+
+**MERGED 2026-07-05:** relanded as **PR #798** → squash `546c451` on `main` (verify x2 + smoke +
+gitleaks green; #367 closed superseded — cloud-proxy pushes were generating no pull_request
+workflow runs, so a fresh PR + a new `workflow_dispatch` re-kick lever on ci.yml were needed).
+`cloud-setup.sh` verified end-to-end in a cloud container (npm ci, `.env.local` seed, hook
+install valid-JSON). Follow-up for the Monet lane: 8 resolved-to-land Codex P2 threads on #798
+(engine edge cases; list in the effort-log row and the #798 summary comment).
+
+## 2026-07-05 — Guardrails → overridable preferences (denylist) (Monet risk lane)
+Worktree `~/apps/trading-monet`, branch `monet/guardrail-overridable-denylist`, PR open.
+Owner directive: only the account boundary (+ physical/broker/regulatory/accounting impossibilities)
+stays hard; every other policy block is a light preference the agent may self-override with a logged
+`autonomyOverride` thesis. Inverted the Socratic override classifier from an allowlist to a **denylist**:
+new `HARD_GATE_REASON_PATTERNS` + `isHardGateReason` source-of-truth in `policy.ts` (risk engine); the
+`socratic-runtime.ts` `overrideableReason` is now `!isHardGateReason`. Reclassified short-stop-required,
+bracket-required, and policy-level short-disabled from hard → overridable; any unlisted/new gate now
+defaults overridable instead of silently hard. Advisory-only (nothing auto-overrides; broker / account /
+regulatory hard gates untouched). New `test/hard-gate-classification.test.ts` pins the full matrix; the
+one cross-lane touch (`socratic-runtime.ts`, Claude's file) was coordinated on `#agent-sync`. Follow-ups:
+extend override to exits; make the pre-policy vetoes (bear filter, Red Team) advisory. Gate: tsc clean,
+2504 tests green (the earlier "4 failed" were flakes; clean on re-run). See
+`docs/rollouts/2026-07-05-guardrail-denylist-overridable-preferences.md`.
+
+## 2026-07-04 — Effort-issues sync: secondary-rate-limit hardening (Claude)
+The first bulk run of `scripts/sync-effort-issues.py` (~100 issue creations after the
+itemization pass) tripped GitHub's secondary rate limit — 403 "secondary rate limit ...
+temporarily blocked from content creation" — and the workflow hard-failed mid-sync. Hardened
+the script: (a) 2.5s throttle after every issue creation; (b) on a rate-limit response
+(403/429 with a rate-limit/abuse message or `Retry-After`), retry honoring `Retry-After`
+else exponential backoff (15s base, 120s cap), all retry sleeps drawn from a bounded 300s
+per-run budget; (c) when the budget is exhausted, exit 0 with an explicit "PARTIAL SYNC —
+resume on next run" summary instead of exit 1 (the sync is idempotent; the daily cron +
+next push re-run resume cleanly, and a red run for an expected partial pass is noise).
+Verified with an offline monkeypatched harness (19 checks: detection, Retry-After
+vs. backoff, budget accounting, all partial-exit paths) plus a live `--dry-run`.
+**Done 2026-07-05:** merged as PR #694 and validated live on `main` — the previously
+hard-failing bulk run completed green (created=101 updated=305, exit 0). Propagated
+verbatim to congress-trading-shared (PR #27, merged), api-usage-monitor (PR #38, merged),
+and Congress.Trade (PR #162). Codex's PR-review pass on #162 produced three refinements,
+folded back into the canonical file and re-propagated: the initial issue listing is now
+inside the same partial handling, a server-sent `Retry-After` is honored uncapped (only
+our own backoff guess is capped at 120s), and bulk updates get a 1s throttle. See
+`docs/rollouts/2026-07-04-effort-sync-rate-limit-hardening.md`.
+
 ## 2026-07-04 — Backlog exhaustiveness + cross-agent assignment pass (Claude, docs-only)
 Owner-directed: promoted every still-open item from the review docs
 (`docs/reviews/2026-06-30-improvement-audit.md`, both 2026-07-04 expert/composite reviews,
@@ -43,6 +121,23 @@ AGENTS, and shared `app/ui` lanes. 2026-07-05 verification after local deps inst
 finds low-risk wrapper/primitive `title` props and a few dense approval geometry labels; those are
 left for a later broad conversion pass. Next action: merge-forward after the scan-column branch
 lands because both slices touch `app/console/scan/scan-table.tsx`, then push a PR.
+## 2026-07-04 — Approvals triage upgrades + alert center focused slice (Codex)
+Branch `codex/approvals-alert-center`, worktree
+`/Users/jay/.codex/worktrees/socratic-approvals-alert-center`. Implemented the narrow issue #470
+slice only: `/console/approvals` now has client-side triage controls (search, opening-vs-exit,
+paper-vs-live, sort by newest/confidence/notional/drift), visible-row multi-select, bulk reject,
+and bulk approve for safe non-LIVE proposals by reusing the existing per-item proposal endpoints.
+LIVE proposals stay single-item only and keep the typed-confirm broker path unchanged. The console
+also now has a reusable alert-center surface backed by existing `notification_events` snapshot data:
+summary buckets (attention / deliveries / approvals / all), search, account scoping, better
+notification titles/details via the existing formatter, and a compact version on Approvals plus the
+full version on `Activity -> Alert center`. Snapshot notification history was widened from 50 to 100
+rows for the alert view. Verification in this worktree after `npm ci`: `npm run lint` (0 errors,
+311 existing warnings), `./node_modules/.bin/tsc --noEmit`, `npm test` (255 files / 2467 tests),
+`npm run build` (passes with the existing Next middleware deprecation + Edge-runtime warning from
+Sentry/Next internals). Remaining follow-up inside the broader row: no bulk LIVE typed-confirm flow,
+no unified trade+learned-context+framework inbox yet, and no keyboard triage shortcuts. See
+`docs/rollouts/2026-07-04-approvals-alert-center-slice.md`.
 
 ## 2026-07-04 — Regime-enum adoption inside the risk gates (Monet risk lane)
 Branch `claude/regime-enum-risk-gates` (isolated worktree `nice-heyrovsky-b9d0bd`), PR open.

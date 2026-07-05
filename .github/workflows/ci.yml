@@ -23,6 +23,15 @@ on:
     branches:
       - main
       - "agent/**"
+  # Manual re-kick lever. Pushes/PRs made through the Claude cloud git proxy
+  # generate NO pull_request/synchronize workflow runs (observed on PR #367/#798:
+  # zero check runs on any head after the proxy pushed), which strands the
+  # required `verify` check as "expected" forever and auto-merge never fires.
+  # Dispatching this workflow on the PR branch attaches a `verify` check run to
+  # the branch-head SHA, which satisfies the ruleset. Trigger from a cloud
+  # session with the GitHub MCP actions_run_trigger tool, or:
+  #   gh workflow run ci.yml --ref <branch>
+  workflow_dispatch:
 
 # Cancel a superseded run for the same branch/PR instead of letting it queue
 # behind newer pushes — the single trading-live-mac runner was serializing a

@@ -6,12 +6,13 @@
  *  provides — no invented data. */
 
 import { useMemo, useState } from "react";
-import type { FillEvent, NotificationEvent, RecentProposal, StrategyRunRow } from "@/lib/types";
+import type { FillEvent, RecentProposal, StrategyRunRow } from "@/lib/types";
 import { OPS_AUDIT_KINDS, type UnifiedActivitySubEvent } from "@/lib/dashboard-feed";
 import type { UnifiedActivityGroup } from "../../dashboard-types";
 import { activeConnectedAccount, realityForMode } from "../lib/derive";
 import { cx, dayKey, fmtDay, fmtMoney, fmtPct, fmtQty, EM_DASH } from "../lib/format";
 import { useConsoleData } from "../lib/useConsoleData";
+import { AlertCenter } from "../components/alert-center";
 import { Ago, Card, Chip, Empty, SignedText, type ChipTone } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 
@@ -21,7 +22,7 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: "all", label: "All" },
   { id: "runs", label: "Runs" },
   { id: "fills", label: "Fills" },
-  { id: "alerts", label: "Alerts" }
+  { id: "alerts", label: "Alert center" }
 ];
 
 export default function ActivityPage() {
@@ -55,7 +56,15 @@ export default function ActivityPage() {
       {tab === "all" && <UnifiedFeed groups={snapshot.unifiedFeed ?? []} />}
       {tab === "runs" && <RunsList runs={snapshot.strategyRuns ?? []} recentProposals={snapshot.recentProposals ?? []} />}
       {tab === "fills" && <FillsList fills={snapshot.performance?.fills ?? []} />}
-      {tab === "alerts" && <AlertsList notifications={snapshot.notifications ?? []} />}
+      {tab === "alerts" && (
+        <AlertCenter
+          notifications={snapshot.notifications ?? []}
+          connectedAccounts={snapshot.connectedAccounts}
+          symbolMetaBySymbol={snapshot.symbolMetaBySymbol}
+          activeAccountId={activeConnectedAccount(snapshot)?.id}
+          maxItems={100}
+        />
+      )}
     </div>
   );
 }
@@ -414,52 +423,5 @@ function FillsList({ fills }: { fills: FillEvent[] }) {
         );
       }}
     />
-  );
-}
-
-// ── Alerts / notifications ───────────────────────────────────────────────────
-
-function AlertsList({ notifications }: { notifications: NotificationEvent[] }) {
-  const { snapshot } = useConsoleData();
-  const activeAccountId = snapshot ? activeConnectedAccount(snapshot)?.id : undefined;
-  const multiAccount = (snapshot?.connectedAccounts.length ?? 0) > 1;
-  const { sorted, hiddenOtherAccount } = useMemo(() => {
-    const all = [...notifications].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    // Notifications are user-wide rows (#10): show this account's and untagged legacy
-    // ones (labeled), never another account's.
-    const inScope = all.filter((n) => !n.connectedAccountId || n.connectedAccountId === activeAccountId);
-    return { sorted: inScope.slice(0, 100), hiddenOtherAccount: all.length - inScope.length };
-  }, [notifications, activeAccountId]);
-  return (
-    <div className="flex flex-col gap-4">
-      {hiddenOtherAccount > 0 && (
-        <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-          {hiddenOtherAccount} alert{hiddenOtherAccount === 1 ? "" : "s"} from your other accounts{" "}
-          {hiddenOtherAccount === 1 ? "is" : "are"} not shown — switch the account scope to see them.
-        </p>
-      )}
-      <DayGroups
-        items={sorted}
-        timestamp={(n) => n.createdAt}
-        emptyText="No notification events yet."
-        renderItem={(n) => (
-          <div key={n.id} className="con-card flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 text-[length:var(--con-fs-sm)]">
-            <Chip tone={n.type === "kill_switch" ? "neg" : n.type === "pending_approval" ? "accent" : "muted"}>{n.type}</Chip>
-            <span className="min-w-0 flex-1 truncate font-semibold">{n.title}</span>
-            {!n.connectedAccountId && multiAccount && (
-              <Chip tone="muted" title="Recorded without an account tag — it may concern any of your accounts.">
-                account unknown
-              </Chip>
-            )}
-            <Chip tone={statusTone(n.status)} title={n.error ?? undefined}>
-              {n.status}
-            </Chip>
-            <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-              <Ago iso={n.createdAt} />
-            </span>
-          </div>
-        )}
-      />
-    </div>
   );
 }

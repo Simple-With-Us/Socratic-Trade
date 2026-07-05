@@ -236,6 +236,59 @@ export function applyOpeningOrderHeadroom(value: number): number {
   return Math.floor(value * (100 - OPENING_ORDER_HEADROOM_PCT)) / 100;
 }
 
+/**
+ * Owner guardrail philosophy (2026-07-05): the ONLY hard rules are the account boundary and the
+ * physical / broker / regulatory / accounting IMPOSSIBILITIES below — orders that literally cannot be
+ * placed, or that the broker or IRS would reject regardless of the agent's intent. EVERYTHING else the
+ * policy engine blocks is a RISK PREFERENCE the agent may self-override with a logged `autonomyOverride`
+ * thesis (see resolveSocraticOverride). This is the single source of truth for that hard/preference
+ * split, co-located with the gates that produce the reasons: a reason matching a hard pattern is never
+ * overridable; every OTHER block is overridable by DEFAULT, so a new preference gate added later is
+ * overridable automatically instead of accidentally hard (the old allowlist had the opposite,
+ * fail-restrictive default).
+ *
+ * Stays HARD (a "can't-do-it" fact, not a guardrail restraining the agent):
+ *  - account boundary — no account selected;
+ *  - accounting truths — can't sell/cover more than held/short; malformed order missing qty;
+ *  - broker rejections — insufficient buying power, symbol not tradable, "broker" errors,
+ *    account can't short, fractional/dollar orders outside regular hours;
+ *  - regulatory — the live margin-account minimum (FINRA Notice 26-10, the PDT successor);
+ *  - IRA wash-sale permanent-harm lockout — it has its OWN owner control
+ *    (taxSettings.iraWashSaleHandling), so it is governed there, not double-overridden ad hoc.
+ *
+ * Deliberately NOT hard (agent-overridable preferences): every exposure / notional / count / ADV /
+ * beta / sector cap, the crisis cap, universe & order-type limits, extended-hours, entry-drift /
+ * staleness, stop / take-profit rules, short-stop-required, policy-level "short-selling disabled",
+ * and systemState (halted / close-only / liquidating).
+ */
+export const HARD_GATE_REASON_PATTERNS: readonly string[] = [
+  "No Robinhood account is selected.", // account boundary — the one absolute rule
+  "not tradable", // broker: symbol not tradable
+  "buying power", // broker/accounting: can't spend more than available
+  "Sell quantity exceeds", // accounting: can't sell more than held
+  "Cover quantity exceeds", // accounting: can't cover more than short
+  "exit must specify", // malformed order
+  "margin_minimum:", // regulatory: live margin minimum (FINRA 26-10 / PDT successor)
+  "does not support short selling", // broker capability (NOT the policy toggle "short-selling is disabled in policy")
+  "Fractional or dollar-based orders must be regular-hours only.", // broker execution constraint
+  "broker", // any broker-originated rejection
+  "wash-sale", // IRA wash-sale — governed by taxSettings.iraWashSaleHandling (its own override)
+  "wash sale",
+  "PERMANENTLY" // IRA wash-sale permanent-harm lockout
+];
+
+/**
+ * True when a policy block is a HARD, non-overridable gate (account boundary + physical / broker /
+ * regulatory / accounting impossibility). Everything else is an overridable risk preference. Used by
+ * the Socratic self-override path (socratic-runtime.resolveSocraticOverride) to decide which blocks an
+ * `autonomyOverride` thesis may pass. Substring, case-insensitive — the reason strings are produced
+ * right here in evaluateTradeProposal.
+ */
+export function isHardGateReason(reason: string): boolean {
+  const lower = reason.toLowerCase();
+  return HARD_GATE_REASON_PATTERNS.some((pattern) => lower.includes(pattern.toLowerCase()));
+}
+
 export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyContext): PolicyDecision {
   const reasons: string[] = [];
   // Escalatable failures (closed allowlist — see GateEscalationKind). Only the reasons pushed

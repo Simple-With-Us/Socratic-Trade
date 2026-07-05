@@ -88,6 +88,27 @@ read from `GITHUB_REPOSITORY` (e.g. "owner/repo"), which Actions sets
 automatically; this makes the script identical across all three repos it
 runs in.
 
+Rate limiting
+-------------
+Bulk creation (e.g. ~100 issues the first time a repo's board is mirrored) can
+trip GitHub's *secondary* rate limit: the API 403s with "secondary rate limit
+... temporarily blocked from content creation". Three mitigations:
+
+  - Every successful issue creation is followed by a small throttle sleep
+    (CREATE_THROTTLE_SECONDS), and every successful update by a lighter one
+    (UPDATE_THROTTLE_SECONDS), to stay under the content-creation rate.
+  - On a rate-limit response (403/429 with a rate-limit/abuse message or a
+    Retry-After header), the request is retried: we sleep Retry-After when the
+    server sent one (honored as-is, never shortened), else exponential backoff.
+    All retry sleeps draw from a single bounded per-run budget
+    (RATE_LIMIT_RETRY_BUDGET_SECONDS). This covers every API call, including
+    the initial issue listing.
+  - If that budget runs out, the run stops early and exits 0 with an explicit
+    "partial sync — resume on next run" summary instead of failing. The sync
+    is idempotent and board-driven, so the next scheduled/triggered run picks
+    up exactly where this one stopped; a red workflow run for an expected
+    partial pass would be noise.
+
 Local testing: export GITHUB_TOKEN and GITHUB_REPOSITORY yourself, then run
 `python3 scripts/sync-effort-issues.py [--dry-run]`.
 """
@@ -100,12 +121,26 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
 BOARD_PATH = "docs/EFFORT-LOG.md"
 API_BASE = "https://api.github.com"
+
+# Pause after every successful issue creation — bulk creation without pacing
+# trips GitHub's secondary ("content creation") rate limit.
+CREATE_THROTTLE_SECONDS = 2.5
+# Lighter pause after every successful issue update: GitHub's guidance is >=1s
+# between mutating requests, and a body-churn run can PATCH hundreds of issues.
+UPDATE_THROTTLE_SECONDS = 1.0
+# Total per-run budget for rate-limit retry sleeps. When it is exhausted the
+# run ends as a PARTIAL sync (exit 0) and the next run resumes idempotently.
+RATE_LIMIT_RETRY_BUDGET_SECONDS = 300.0
+# Backoff for rate-limited requests when the server sends no Retry-After.
+RATE_LIMIT_BACKOFF_BASE_SECONDS = 15.0
+RATE_LIMIT_BACKOFF_MAX_SECONDS = 120.0
 
 MIRROR_LABEL = "effort-board"
 STATE_LABELS = {
@@ -237,7 +272,9 @@ def parse_board(text: str) -> list[BoardItem]:
     return items
 
 
-def http_request(method: str, url: str, token: str, body: dict | None = None) -> tuple[int, dict | list]:
+def http_request(
+    method: str, url: str, token: str, body: dict | None = None
+) -> tuple[int, dict | list, dict[str, str]]:
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", f"Bearer {token}")
@@ -248,14 +285,40 @@ def http_request(method: str, url: str, token: str, body: dict | None = None) ->
     try:
         with urllib.request.urlopen(req) as resp:
             raw = resp.read()
-            return resp.status, (json.loads(raw) if raw else {})
+            return resp.status, (json.loads(raw) if raw else {}), dict(resp.headers)
     except urllib.error.HTTPError as e:
         raw = e.read()
         try:
             parsed = json.loads(raw) if raw else {}
         except json.JSONDecodeError:
             parsed = {"message": raw.decode("utf-8", errors="replace")}
-        return e.code, parsed
+        return e.code, parsed, dict(e.headers or {})
+
+
+class RateLimitBudgetExhausted(Exception):
+    """Raised when the per-run rate-limit retry budget can't cover the next wait."""
+
+
+def _rate_limited(status: int, payload: dict | list, headers: dict[str, str]) -> bool:
+    if status not in (403, 429):
+        return False
+    message = str(payload.get("message", "")).lower() if isinstance(payload, dict) else ""
+    return (
+        "rate limit" in message
+        or "abuse" in message
+        or "temporarily blocked" in message
+        or _retry_after_seconds(headers) is not None
+    )
+
+
+def _retry_after_seconds(headers: dict[str, str]) -> float | None:
+    for name, value in headers.items():
+        if name.lower() == "retry-after":
+            try:
+                return max(0.0, float(value))
+            except ValueError:
+                return None
+    return None
 
 
 class GitHubClient:
@@ -263,6 +326,37 @@ class GitHubClient:
         self.repo = repo
         self.token = token
         self.dry_run = dry_run
+        self.retry_budget_remaining = RATE_LIMIT_RETRY_BUDGET_SECONDS
+
+    def _request(self, method: str, url: str, body: dict | None = None) -> tuple[int, dict | list]:
+        """http_request + secondary-rate-limit retries against a bounded per-run budget."""
+        attempt = 0
+        while True:
+            status, payload, headers = http_request(method, url, self.token, body)
+            if not _rate_limited(status, payload, headers):
+                return status, payload
+            attempt += 1
+            wait = _retry_after_seconds(headers)
+            if wait is None:
+                # Cap only our own guess — a server-sent Retry-After is honored
+                # as-is (retrying sooner would just re-trip the limit and burn
+                # budget; if it exceeds the remaining budget we go partial now).
+                wait = min(
+                    RATE_LIMIT_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
+                    RATE_LIMIT_BACKOFF_MAX_SECONDS,
+                )
+            if wait > self.retry_budget_remaining:
+                raise RateLimitBudgetExhausted(
+                    f"rate limited on {method} {url} and the next wait ({wait:.0f}s) exceeds the "
+                    f"remaining retry budget ({self.retry_budget_remaining:.0f}s of "
+                    f"{RATE_LIMIT_RETRY_BUDGET_SECONDS:.0f}s)"
+                )
+            self.retry_budget_remaining -= wait
+            print(
+                f"rate limited ({status}) on {method} {url} — sleeping {wait:.0f}s "
+                f"(retry budget left: {self.retry_budget_remaining:.0f}s)"
+            )
+            time.sleep(wait)
 
     def _get_all_pages(self, path: str, params: str = "") -> list[dict]:
         results: list[dict] = []
@@ -270,7 +364,7 @@ class GitHubClient:
         while True:
             sep = "&" if params else ""
             url = f"{API_BASE}/repos/{self.repo}/{path}?per_page=100&page={page}{sep}{params}"
-            status, payload = http_request("GET", url, self.token)
+            status, payload = self._request("GET", url)
             if status >= 300:
                 raise RuntimeError(f"GET {path} failed: {status} {payload}")
             if not payload:
@@ -289,10 +383,9 @@ class GitHubClient:
         if self.dry_run:
             print(f"[dry-run] would create label {name!r}")
             return
-        status, payload = http_request(
+        status, payload = self._request(
             "POST",
             f"{API_BASE}/repos/{self.repo}/labels",
-            self.token,
             {"name": name, "color": color, "description": description},
         )
         if status >= 300 and status != 422:  # 422 = already exists (race), fine.
@@ -309,18 +402,22 @@ class GitHubClient:
         payload: dict = {"title": title, "body": body, "labels": labels}
         if assignee:
             payload["assignees"] = [assignee]
-        status, resp = http_request("POST", f"{API_BASE}/repos/{self.repo}/issues", self.token, payload)
+        status, resp = self._request("POST", f"{API_BASE}/repos/{self.repo}/issues", payload)
         if status >= 300:
             raise RuntimeError(f"create issue failed: {status} {resp}")
+        # Pace content creation so a bulk run (fresh repo, ~100 issues) stays
+        # under GitHub's secondary rate limit instead of tripping it.
+        time.sleep(CREATE_THROTTLE_SECONDS)
         return resp
 
     def update_issue(self, number: int, fields: dict) -> None:
         if self.dry_run:
             print(f"[dry-run] would update issue #{number}: {fields}")
             return
-        status, resp = http_request("PATCH", f"{API_BASE}/repos/{self.repo}/issues/{number}", self.token, fields)
+        status, resp = self._request("PATCH", f"{API_BASE}/repos/{self.repo}/issues/{number}", fields)
         if status >= 300:
             raise RuntimeError(f"update issue #{number} failed: {status} {resp}")
+        time.sleep(UPDATE_THROTTLE_SECONDS)
 
 
 def build_body(item: BoardItem, repo: str, ref: str) -> str:
@@ -356,16 +453,44 @@ def issue_label_names(issue: dict) -> set[str]:
 
 
 def reconcile(items: list[BoardItem], client: GitHubClient, repo: str, ref: str, assignee: str | None) -> dict:
-    stats = {"created": 0, "updated": 0, "unchanged": 0, "reopened": 0, "closed": 0}
+    stats = {"created": 0, "updated": 0, "unchanged": 0, "reopened": 0, "closed": 0, "partial": None}
 
-    existing_issues = client.list_all_issues()
     by_key: dict[str, dict] = {}
-    for issue in existing_issues:
-        key = issue_marker_key(issue)
-        if key:
-            by_key[key] = issue
-
     seen_keys: set[str] = set()
+    try:
+        # The initial issue listing is inside the partial handling too: budget
+        # exhaustion while paging GET /issues must also end as a partial sync,
+        # not an exception that turns the workflow red.
+        for issue in client.list_all_issues():
+            key = issue_marker_key(issue)
+            if key:
+                by_key[key] = issue
+        _reconcile_items(items, client, repo, ref, assignee, by_key, seen_keys, stats)
+    except RateLimitBudgetExhausted as e:
+        stats["partial"] = str(e)
+        # Skip the orphan report: items not yet processed this run would look
+        # like orphans and produce a misleading note.
+        return stats
+
+    orphaned = [k for k in by_key if k not in seen_keys]
+    if orphaned:
+        print(f"note: {len(orphaned)} previously-mirrored issue(s) no longer match a board row "
+              f"(row removed/reworded) — left untouched: "
+              f"{', '.join('#' + str(by_key[k]['number']) for k in orphaned)}")
+
+    return stats
+
+
+def _reconcile_items(
+    items: list[BoardItem],
+    client: GitHubClient,
+    repo: str,
+    ref: str,
+    assignee: str | None,
+    by_key: dict[str, dict],
+    seen_keys: set[str],
+    stats: dict,
+) -> None:
     for item in items:
         key = item.key
         if key in seen_keys:
@@ -418,14 +543,6 @@ def reconcile(items: list[BoardItem], client: GitHubClient, repo: str, ref: str,
         else:
             stats["unchanged"] += 1
 
-    orphaned = [k for k in by_key if k not in seen_keys]
-    if orphaned:
-        print(f"note: {len(orphaned)} previously-mirrored issue(s) no longer match a board row "
-              f"(row removed/reworded) — left untouched: "
-              f"{', '.join('#' + str(by_key[k]['number']) for k in orphaned)}")
-
-    return stats
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -457,18 +574,31 @@ def main() -> int:
 
     client = GitHubClient(repo, token, dry_run=args.dry_run)
 
-    existing_labels = client.list_labels()
-    for name, (color, description) in LABEL_DEFS.items():
-        if name not in existing_labels:
-            print(f"creating missing label: {name}")
-            client.create_label(name, color, description)
+    try:
+        existing_labels = client.list_labels()
+        for name, (color, description) in LABEL_DEFS.items():
+            if name not in existing_labels:
+                print(f"creating missing label: {name}")
+                client.create_label(name, color, description)
+    except RateLimitBudgetExhausted as e:
+        print(f"PARTIAL SYNC — rate-limit retry budget exhausted during label setup: {e}")
+        print("The sync is idempotent and board-driven; the next run resumes where this one "
+              "stopped. Exiting 0 — an expected partial pass is not a failure.")
+        return 0
 
     stats = reconcile(items, client, repo, ref, assignee)
-    print(
-        "done: "
+    summary = (
         f"created={stats['created']} updated={stats['updated']} "
         f"unchanged={stats['unchanged']} reopened={stats['reopened']} closed={stats['closed']}"
     )
+    if stats["partial"]:
+        print(f"PARTIAL SYNC — rate-limit retry budget exhausted: {stats['partial']}")
+        print(f"partial progress this run: {summary}")
+        print("The sync is idempotent and board-driven; the next run resumes where this one "
+              "stopped. Exiting 0 — an expected partial pass is not a failure.")
+        return 0
+
+    print(f"done: {summary}")
     return 0
 
 
