@@ -12,6 +12,7 @@ import { useMemo, useState } from "react";
 import type { MarketScan } from "@/lib/types";
 import { receivedLabel } from "@/lib/dashboard-ui";
 import { cx } from "../lib/format";
+import { InfoTip, TooltipText } from "../ui/primitives";
 import { SCAN_COLUMNS } from "./columns";
 
 type SortDir = "asc" | "desc";
@@ -66,22 +67,27 @@ export function ScanTable({ scan }: { scan: MarketScan }) {
                   aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : undefined}
                   className={cx(c.num && "num", i === 0 && STICKY_CELL)}
                 >
-                  <button
-                    type="button"
-                    title={`${c.headerTitle}\nClick to sort by ${c.label.toLowerCase()}${active ? ` (currently ${sort.dir === "asc" ? "ascending" : "descending"})` : ""}.`}
-                    onClick={() =>
-                      setSort((s) => ({ col: c.id, dir: s.col === c.id && s.dir === "desc" ? "asc" : "desc" }))
-                    }
-                    className={cx(
-                      "inline-flex cursor-pointer select-none items-center gap-1 font-semibold uppercase tracking-[0.07em] transition-colors",
-                      active ? "text-[color:var(--con-fg)]" : "hover:text-[color:var(--con-fg)]"
-                    )}
-                  >
-                    {c.label}
-                    <span aria-hidden className={cx("text-[9px]", !active && "opacity-0")}>
-                      {active && sort.dir === "asc" ? "▲" : "▼"}
-                    </span>
-                  </button>
+                  <span className="inline-flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSort((s) => ({ col: c.id, dir: s.col === c.id && s.dir === "desc" ? "asc" : "desc" }))
+                      }
+                      className={cx(
+                        "inline-flex cursor-pointer select-none items-center gap-1 font-semibold uppercase tracking-[0.07em] transition-colors",
+                        active ? "text-[color:var(--con-fg)]" : "hover:text-[color:var(--con-fg)]"
+                      )}
+                    >
+                      {c.label}
+                      <span aria-hidden className={cx("text-[9px]", !active && "opacity-0")}>
+                        {active && sort.dir === "asc" ? "▲" : "▼"}
+                      </span>
+                    </button>
+                    <InfoTip
+                      label={c.label}
+                      content={`${c.headerTitle}\nClick to sort by ${c.label.toLowerCase()}${active ? ` (currently ${sort.dir === "asc" ? "ascending" : "descending"})` : ""}.`}
+                    />
+                  </span>
                 </th>
               );
             })}
@@ -97,12 +103,8 @@ export function ScanTable({ scan }: { scan: MarketScan }) {
                 const title =
                   [own, own?.includes("Received ") ? undefined : received].filter(Boolean).join("\n") || undefined;
                 return (
-                  <td
-                    key={c.id}
-                    title={title}
-                    className={cx("cursor-default whitespace-nowrap", c.num && "num con-num", i === 0 && cx(STICKY_CELL, STICKY_CELL_HOVER))}
-                  >
-                    {c.render(q)}
+                  <td key={c.id} className={cx("whitespace-nowrap", c.num && "num con-num", i === 0 && cx(STICKY_CELL, STICKY_CELL_HOVER))}>
+                    {i === 0 ? c.render(q) : <TooltipText content={title} block className="cursor-default whitespace-nowrap">{c.render(q)}</TooltipText>}
                   </td>
                 );
               })}

@@ -11,6 +11,15 @@ filling the missing pieces.
 > the shared contract dependency while preserving the cross-app pin check. Merged as PR #444 and
 > deployed to production at `1e1a15bc`.
 
+> **2026-07-04 - Accessible console tooltip/popover primitive (Codex issue #474).** No roadmap
+> scope change. This lane adds a reusable console-scoped accessible tooltip/popover primitive in
+> `app/console/ui/primitives.tsx` and applies it to a focused first slice of high-value console
+> controls/metrics/cells (scan, orders, learned-context, approval cards) to begin retiring native
+> `title` usage without broad app/ui churn. 2026-07-05 verification after local deps install:
+> `NODE_OPTIONS=--max-old-space-size=8192 ./node_modules/.bin/tsc --noEmit --pretty false`,
+> `npm run lint -- --quiet`, and `git diff --check` all pass. Remaining low-risk native `title`
+> usage is intentionally deferred to a broader follow-up slice after this primitive lands.
+
 > 2026-07-03 (`claude/washsale-advisory-defaults`, Claude): **Wash-sale gate defaults flipped to
 > non-blocking** — owner decision: `taxSettings.washSaleHandling` default `"block"` → `"auto"`,
 > `taxSettings.iraWashSaleHandling` default `"block"` → `"disregard"`. Mid-task correction: "auto"

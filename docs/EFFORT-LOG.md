@@ -209,6 +209,16 @@ to `socratictrade.com`, record the release commit + date here._
 
 ## 🔨 In Progress
 
+- **Accessible tooltip/popover primitive everywhere (CODEX, S)** — issue #474, branch
+  `codex/console-tooltip-primitive`, worktree
+  `/Users/jay/.codex/worktrees/socratic-console-tooltip-primitive`. Implement a reusable accessible
+  console tooltip/popover primitive in `app/console/ui/primitives.tsx`, then replace a focused
+  high-value set of native `title` usages in console controls/metrics/cells without touching Monet
+  risk files, Claude memory/RAG files, workflows, or shared `app/ui` lanes unless expansion proves
+  necessary. Verification 2026-07-05: tsc clean, `npm run lint -- --quiet` clean, and
+  `git diff --check` clean; merge-forward after scan-column PR #806 lands because both touch
+  `app/console/scan/scan-table.tsx`.
+
 - **Regime-enum adoption inside the risk gates** (MONET risk lane, branch
   `claude/regime-enum-risk-gates`, isolated worktree `nice-heyrovsky-b9d0bd`) — **PR open**. The
   three deterministic risk gates now classify the persisted regime label through the shared typed
@@ -573,8 +583,6 @@ locks — re-negotiate in #agent-sync._
   notifications/admin-links reorg. (console-parity-open-items)
 - **Coach chat → framework primitives (CODEX, M)** — attach note to decision, promote lesson, show
   consuming run; framework `rewrite` verb + ownerResponse. (console-parity + composite review)
-- **Accessible tooltip/popover primitive everywhere (CODEX, S)** — retire native `title`;
-  universal coverage across controls/metrics/cells. (expert reviews + console-parity)
 
 #### AG (Antigravity/Gemini) lane
 - **Eliminate redundant fill-history fetch/replay (AG, M)** — fills fetched/replayed 7-9x per

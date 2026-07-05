@@ -31,6 +31,19 @@ three enumeration agents then classified EVERY finding in the two 2026-07-04 pan
 (partial-day ADV in the impact model; checkRegimeFlip 'local' non-atomic RMW) and the
 safety-critical prerequisites of the factor-weight auto-apply lane.
 
+## 2026-07-04 — Accessible console tooltip/popover primitive (Codex issue #474)
+Branch `codex/console-tooltip-primitive`, worktree
+`/Users/jay/.codex/worktrees/socratic-console-tooltip-primitive`. Added a reusable console-scoped
+tooltip/popover primitive in `app/console/ui/primitives.tsx` (`Tooltip`, `TooltipText`, `InfoTip`)
+and used it on a focused set of high-value console surfaces: scan sort headers/cells,
+orders-table headers/state/action controls, learned-context provenance/actions, and approval-card
+receipt chips/labels. Scope stayed out of Monet risk files, Claude memory/RAG files, workflows,
+AGENTS, and shared `app/ui` lanes. 2026-07-05 verification after local deps install: tsc clean,
+`npm run lint -- --quiet` clean, and `git diff --check` clean. Targeted native-title audit still
+finds low-risk wrapper/primitive `title` props and a few dense approval geometry labels; those are
+left for a later broad conversion pass. Next action: merge-forward after the scan-column branch
+lands because both slices touch `app/console/scan/scan-table.tsx`, then push a PR.
+
 ## 2026-07-04 — Regime-enum adoption inside the risk gates (Monet risk lane)
 Branch `claude/regime-enum-risk-gates` (isolated worktree `nice-heyrovsky-b9d0bd`), PR open.
 The three deterministic risk gates now classify the persisted regime label through the shared

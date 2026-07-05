@@ -2,7 +2,24 @@
 
 /** Console UI primitives. Own design system — no imports from app/ui/*. */
 
-import { useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import { HelpCircle } from "lucide-react";
+import { createPortal } from "react-dom";
+import {
+  cloneElement,
+  isValidElement,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ButtonHTMLAttributes,
+  type InputHTMLAttributes,
+  type ReactElement,
+  type ReactNode,
+  type SelectHTMLAttributes,
+  type TextareaHTMLAttributes
+} from "react";
 import { cx, fmtExact, timeAgo, EM_DASH } from "../lib/format";
 
 // ── Card ─────────────────────────────────────────────────────────────────────
@@ -59,6 +76,176 @@ export function Btn({
       className={cx("con-btn", BTN_CLASS[variant], size === "sm" && "con-btn-sm", className)}
       {...rest}
     />
+  );
+}
+
+// ── Tooltip / popover primitives ────────────────────────────────────────────
+
+type TooltipSide = "top" | "bottom";
+type TooltipAlign = "start" | "center" | "end";
+
+function tooltipLines(content: ReactNode): ReactNode {
+  if (typeof content !== "string" || !content.includes("\n")) return content;
+  return content.split("\n").map((line, i) => (
+    <span key={`${line}-${i}`} className="block">
+      {line}
+    </span>
+  ));
+}
+
+function useTooltipPosition(open: boolean, side: TooltipSide, align: TooltipAlign) {
+  const triggerRef = useRef<HTMLElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const [style, setStyle] = useState<{ top: number; left: number }>({ top: -9999, left: -9999 });
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const trigger = triggerRef.current;
+      const content = contentRef.current;
+      if (!trigger || !content) return;
+      const gap = 10;
+      const pad = 12;
+      const triggerBox = trigger.getBoundingClientRect();
+      const contentBox = content.getBoundingClientRect();
+
+      let top = side === "top" ? triggerBox.top - contentBox.height - gap : triggerBox.bottom + gap;
+      const topFits = triggerBox.top - contentBox.height - gap >= pad;
+      const bottomFits = triggerBox.bottom + gap + contentBox.height <= window.innerHeight - pad;
+      if (side === "top" && !topFits && bottomFits) top = triggerBox.bottom + gap;
+      if (side === "bottom" && !bottomFits && topFits) top = triggerBox.top - contentBox.height - gap;
+
+      let left =
+        align === "start"
+          ? triggerBox.left
+          : align === "end"
+            ? triggerBox.right - contentBox.width
+            : triggerBox.left + (triggerBox.width - contentBox.width) / 2;
+      left = Math.max(pad, Math.min(left, window.innerWidth - contentBox.width - pad));
+      setStyle({ top: Math.max(pad, top), left });
+    };
+
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [align, open, side]);
+
+  return { triggerRef, contentRef, style };
+}
+
+export function Tooltip({
+  content,
+  children,
+  side = "top",
+  align = "center"
+}: {
+  content?: ReactNode;
+  children: ReactElement;
+  side?: TooltipSide;
+  align?: TooltipAlign;
+}) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const { triggerRef, contentRef, style } = useTooltipPosition(open, side, align);
+  const setTriggerNode = useCallback(
+    (node: HTMLElement | null) => {
+      triggerRef.current = node;
+    },
+    [triggerRef]
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open]);
+
+  if (!content || !isValidElement(children)) return children;
+
+  const child = children as ReactElement<Record<string, unknown>>;
+  const childProps = child.props as {
+    ["aria-describedby"]?: string;
+  };
+
+  return (
+    <>
+      <span
+        ref={setTriggerNode}
+        className="inline-flex max-w-full"
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+      >
+        {cloneElement(child, { "aria-describedby": open ? id : childProps["aria-describedby"] } as Record<string, unknown>)}
+      </span>
+      {open &&
+        createPortal(
+          <div
+            id={id}
+            ref={contentRef}
+            role="tooltip"
+            className="pointer-events-none fixed z-[1400] max-w-[min(22rem,calc(100vw-1.5rem))] rounded-[var(--con-radius-sm)] border border-[color:var(--con-line)] bg-[color:var(--con-panel)] px-3 py-2 text-left text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)] shadow-[var(--shadow-lg)]"
+            style={style}
+          >
+            {tooltipLines(content)}
+          </div>,
+          document.body
+        )}
+    </>
+  );
+}
+
+export function TooltipText({
+  content,
+  label,
+  children,
+  className,
+  block = false
+}: {
+  content?: ReactNode;
+  label?: string;
+  children: ReactNode;
+  className?: string;
+  block?: boolean;
+}) {
+  const trigger = (
+    <button
+      type="button"
+      aria-label={label}
+      className={cx(
+        "cursor-help rounded-[var(--con-radius-sm)] text-left text-inherit outline-none transition-colors hover:text-[color:var(--con-fg)] focus-visible:ring-2 focus-visible:ring-[color:var(--con-accent)]",
+        block ? "flex w-full items-center gap-1" : "inline-flex items-center gap-1 align-baseline",
+        className
+      )}
+    >
+      {children}
+    </button>
+  );
+  return content ? <Tooltip content={content}>{trigger}</Tooltip> : trigger;
+}
+
+export function InfoTip({ label, content, className }: { label: string; content: ReactNode; className?: string }) {
+  return (
+    <Tooltip content={content}>
+      <button
+        type="button"
+        aria-label={`More info about ${label}`}
+        className={cx(
+          "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[color:var(--con-faint)] outline-none transition-colors hover:text-[color:var(--con-fg)] focus-visible:ring-2 focus-visible:ring-[color:var(--con-accent)]",
+          className
+        )}
+      >
+        <HelpCircle size={13} aria-hidden />
+      </button>
+    </Tooltip>
   );
 }
 

@@ -13,7 +13,7 @@ import type { EquityOrder } from "@/lib/types";
 import { deriveReality } from "../lib/derive";
 import { fmtExact, fmtMoney, fmtPct, fmtQty, EM_DASH } from "../lib/format";
 import { useConsoleData } from "../lib/useConsoleData";
-import { Ago, Btn, Card, Chip, Dash, Empty, type ChipTone } from "../ui/primitives";
+import { Ago, Btn, Card, Chip, Dash, Empty, InfoTip, Tooltip, TooltipText, type ChipTone } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 import { CancelOrderSheet } from "./cancel-sheet";
 import { ReplaceMarketSheet } from "./replace-market-sheet";
@@ -110,6 +110,15 @@ function sizeText(order: EquityOrder): string {
   return EM_DASH;
 }
 
+function HeaderLabel({ label, tip }: { label: string; tip: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 align-middle">
+      <span>{label}</span>
+      <InfoTip label={label} content={tip} />
+    </span>
+  );
+}
+
 export default function OrdersPage() {
   const { snapshot, refresh } = useConsoleData();
   const [replaceRow, setReplaceRow] = useState<OpenOrderRow | null>(null);
@@ -155,23 +164,22 @@ export default function OrdersPage() {
     <div className="mx-auto flex max-w-5xl flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2">
         <h1 className="text-[length:var(--con-fs-lg)] font-bold">Orders</h1>
-        <Chip tone={reality.tone} title={reality.clarification}>
-          {reality.word} · {reality.phrase}
-        </Chip>
-        {accountLabel && (
-          <Chip tone="muted" title="Orders are read from the broker for the active account only.">
-            {accountLabel}
+        <Tooltip content={reality.clarification}>
+          <Chip tone={reality.tone}>
+            {reality.word} · {reality.phrase}
           </Chip>
+        </Tooltip>
+        {accountLabel && (
+          <Tooltip content="Orders are read from the broker for the active account only.">
+            <Chip tone="muted">{accountLabel}</Chip>
+          </Tooltip>
         )}
         <div className="flex-1" />
-        <Btn
-          size="sm"
-          onClick={() => void doRefresh()}
-          disabled={refreshing}
-          title="Fetch the latest orders from the broker now. The console also refreshes automatically every 15 seconds."
-        >
-          {refreshing ? "Refreshing…" : "Refresh"}
-        </Btn>
+        <Tooltip content="Fetch the latest orders from the broker now. The console also refreshes automatically every 15 seconds.">
+          <Btn size="sm" onClick={() => void doRefresh()} disabled={refreshing}>
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </Btn>
+        </Tooltip>
       </div>
 
       {multiAccount && (
@@ -181,10 +189,7 @@ export default function OrdersPage() {
       )}
 
       {staleCount > 0 && (
-        <div
-          className="rounded-lg border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] px-3 py-2 text-[length:var(--con-fs-sm)]"
-          title={`Your policy's stale threshold is ${thresholdMinutes} minutes (Settings → "Stale limit alert").`}
-        >
+        <div className="rounded-lg border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] px-3 py-2 text-[length:var(--con-fs-sm)]">
           <span className="font-semibold text-[color:var(--con-warn)]">
             {staleCount} limit order{staleCount === 1 ? "" : "s"} working longer than {thresholdMinutes} minutes without
             filling.
@@ -193,6 +198,11 @@ export default function OrdersPage() {
             The market may have moved away from the limit price. Review each: keep waiting, cancel, or replace the
             remainder at market.
           </span>
+          <InfoTip
+            label="stale limit orders"
+            content={`Your policy's stale threshold is ${thresholdMinutes} minutes (Settings -> "Stale limit alert").`}
+            className="ml-2 align-middle"
+          />
         </div>
       )}
 
@@ -208,34 +218,17 @@ export default function OrdersPage() {
             <table className="con-table">
               <thead>
                 <tr>
-                  <th title="Ticker — click a symbol to open its price history and details.">Symbol</th>
-                  <th title="Order direction: buy, sell, short, or cover.">Side</th>
-                  <th title="Order type. Limit and stop-limit orders can sit unfilled and go stale; market orders execute immediately.">
-                    Type
-                  </th>
-                  <th className="num" title="Order size as the broker holds it: share quantity, or an approximate dollar amount for notional orders. Partial fills show how much already executed.">
-                    Size
-                  </th>
-                  <th className="num" title="Resting limit price and/or stop trigger price the broker holds for this order. '—' when the broker reported neither (e.g. a market order).">
-                    Limit / Stop
-                  </th>
-                  <th className="num" title="Latest price this app has for the symbol — from the most recent market scan, so it can be minutes old. '—' when the last scan didn't cover it. Where the order has a limit price, the gap between this price and the limit is shown underneath.">
-                    Last price
-                  </th>
-                  <th title="Time-in-force: how long the order stays working. DAY/GFD expires at market close; GTC rests until cancelled.">
-                    TIF
-                  </th>
-                  <th
-                    title={
-                      thresholdMinutes > 0
-                        ? `How long the order has been working. Limit/stop-limit orders older than your ${thresholdMinutes}-minute policy threshold with an unfilled remainder are flagged stale.`
-                        : "How long the order has been working. Stale-limit detection is disabled (policy stale threshold is 0)."
-                    }
-                  >
-                    Age
-                  </th>
-                  <th title="The order's state as last reported by the broker.">Status</th>
-                  <th title="Actions: replace a stale limit order's remainder at market, or cancel the order.">
+                  <th><HeaderLabel label="Symbol" tip="Ticker — click a symbol to open its price history and details." /></th>
+                  <th><HeaderLabel label="Side" tip="Order direction: buy, sell, short, or cover." /></th>
+                  <th><HeaderLabel label="Type" tip="Order type. Limit and stop-limit orders can sit unfilled and go stale; market orders execute immediately." /></th>
+                  <th className="num"><HeaderLabel label="Size" tip="Order size as the broker holds it: share quantity, or an approximate dollar amount for notional orders. Partial fills show how much already executed." /></th>
+                  <th className="num"><HeaderLabel label="Limit / Stop" tip="Resting limit price and/or stop trigger price the broker holds for this order. '—' when the broker reported neither (e.g. a market order)." /></th>
+                  <th className="num"><HeaderLabel label="Last price" tip="Latest price this app has for the symbol — from the most recent market scan, so it can be minutes old. '—' when the last scan didn't cover it. Where the order has a limit price, the gap between this price and the limit is shown underneath." /></th>
+                  <th><HeaderLabel label="TIF" tip="Time-in-force: how long the order stays working. DAY/GFD expires at market close; GTC rests until cancelled." /></th>
+                  <th><HeaderLabel label="Age" tip={thresholdMinutes > 0 ? `How long the order has been working. Limit/stop-limit orders older than your ${thresholdMinutes}-minute policy threshold with an unfilled remainder are flagged stale.` : "How long the order has been working. Stale-limit detection is disabled (policy stale threshold is 0)."} /></th>
+                  <th><HeaderLabel label="Status" tip="The order's state as last reported by the broker." /></th>
+                  <th>
+                    <InfoTip label="Actions" content="Actions: replace a stale limit order's remainder at market, or cancel the order." />
                     <span className="sr-only">Actions</span>
                   </th>
                 </tr>
@@ -273,16 +266,14 @@ export default function OrdersPage() {
               <table className="con-table">
                 <thead>
                   <tr>
-                    <th title="Ticker — click a symbol to open its price history and details.">Symbol</th>
-                    <th title="Order direction: buy, sell, short, or cover.">Side</th>
-                    <th title="Order type as placed.">Type</th>
-                    <th title="Time-in-force as placed. DAY/GFD expires at market close; GTC rests until cancelled.">TIF</th>
-                    <th className="num" title="Order size: share quantity or approximate dollar amount.">Size</th>
-                    <th className="num" title="Average price the broker reports for the executed part; '—' when nothing executed.">
-                      Avg fill
-                    </th>
-                    <th title="Final state the broker reported.">Status</th>
-                    <th title="When the broker last updated the order.">Updated</th>
+                    <th><HeaderLabel label="Symbol" tip="Ticker — click a symbol to open its price history and details." /></th>
+                    <th><HeaderLabel label="Side" tip="Order direction: buy, sell, short, or cover." /></th>
+                    <th><HeaderLabel label="Type" tip="Order type as placed." /></th>
+                    <th><HeaderLabel label="TIF" tip="Time-in-force as placed. DAY/GFD expires at market close; GTC rests until cancelled." /></th>
+                    <th className="num"><HeaderLabel label="Size" tip="Order size: share quantity or approximate dollar amount." /></th>
+                    <th className="num"><HeaderLabel label="Avg fill" tip="Average price the broker reports for the executed part; '—' when nothing executed." /></th>
+                    <th><HeaderLabel label="Status" tip="Final state the broker reported." /></th>
+                    <th><HeaderLabel label="Updated" tip="When the broker last updated the order." /></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -291,28 +282,25 @@ export default function OrdersPage() {
                       <td>
                         <SymbolButton symbol={order.symbol} />
                       </td>
-                      <td
-                        className={isExit(order.side) ? "font-semibold text-[color:var(--con-warn)]" : "font-semibold"}
-                        title={SIDE_TITLE[order.side] ?? "Order direction."}
-                      >
-                        {SIDE_LABEL[order.side] ?? String(order.side).toUpperCase()}
+                      <td className={isExit(order.side) ? "font-semibold text-[color:var(--con-warn)]" : "font-semibold"}>
+                        <TooltipText content={SIDE_TITLE[order.side] ?? "Order direction."}>
+                          {SIDE_LABEL[order.side] ?? String(order.side).toUpperCase()}
+                        </TooltipText>
                       </td>
-                      <td title={TYPE_TITLE[String(order.type)] ?? "Order type."}>{orderTypeLabel(order.type)}</td>
-                      <td title={tifTitle(order.timeInForce)}>{tifLabel(order.timeInForce) ?? <Dash />}</td>
-                      <td className="num con-num" title="Order size as placed.">
-                        {sizeText(order)}
-                      </td>
-                      <td className="num con-num" title="Average executed price reported by the broker.">
+                      <td><TooltipText content={TYPE_TITLE[String(order.type)] ?? "Order type."}>{orderTypeLabel(order.type)}</TooltipText></td>
+                      <td><TooltipText content={tifTitle(order.timeInForce)}>{tifLabel(order.timeInForce) ?? <Dash />}</TooltipText></td>
+                      <td className="num con-num"><TooltipText content="Order size as placed.">{sizeText(order)}</TooltipText></td>
+                      <td className="num con-num"><TooltipText content="Average executed price reported by the broker.">
                         {typeof order.averagePrice === "number" && Number.isFinite(order.averagePrice) ? (
                           fmtMoney(order.averagePrice)
                         ) : (
                           <Dash />
                         )}
-                      </td>
+                      </TooltipText></td>
                       <td>
-                        <Chip tone={stateTone(order.state)} title="Final state the broker reported for this order.">
-                          {readableState(order.state)}
-                        </Chip>
+                        <Tooltip content="Final state the broker reported for this order.">
+                          <Chip tone={stateTone(order.state)}>{readableState(order.state)}</Chip>
+                        </Tooltip>
                       </td>
                       <td className="whitespace-nowrap text-[color:var(--con-faint)]">
                         <Ago iso={order.updatedAt ?? order.createdAt} />
@@ -388,24 +376,24 @@ function OpenOrderTr({
           </span>
         )}
       </td>
-      <td
-        className={isExit(order.side) ? "font-semibold text-[color:var(--con-warn)]" : "font-semibold"}
-        title={SIDE_TITLE[order.side] ?? "Order direction."}
-      >
-        {SIDE_LABEL[order.side] ?? String(order.side).toUpperCase()}
+      <td className={isExit(order.side) ? "font-semibold text-[color:var(--con-warn)]" : "font-semibold"}>
+        <TooltipText content={SIDE_TITLE[order.side] ?? "Order direction."}>{SIDE_LABEL[order.side] ?? String(order.side).toUpperCase()}</TooltipText>
       </td>
-      <td title={TYPE_TITLE[String(order.type)] ?? "Order type."}>{orderTypeLabel(order.type)}</td>
-      <td className="num con-num" title="Order size as the broker holds it; partial fills shown underneath.">
-        {sizeText(order)}
-        {filled > 0 && row.remaining > 0 && (
-          <span className="block text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-            {fmtQty(filled)} filled · {fmtQty(row.remaining)} left
-          </span>
-        )}
+      <td><TooltipText content={TYPE_TITLE[String(order.type)] ?? "Order type."}>{orderTypeLabel(order.type)}</TooltipText></td>
+      <td className="num con-num">
+        <TooltipText content="Order size as the broker holds it; partial fills shown underneath." block className="justify-between">
+          <span>{sizeText(order)}</span>
+          {filled > 0 && row.remaining > 0 && (
+            <span className="block text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+              {fmtQty(filled)} filled · {fmtQty(row.remaining)} left
+            </span>
+          )}
+        </TooltipText>
       </td>
-      <td
-        className="num con-num"
-        title={
+      <td className="num con-num">
+        <TooltipText
+          block
+          content={
           limit !== undefined && stop !== undefined
             ? `Stop-limit: triggers at the ${fmtMoney(stop)} stop, then rests as a ${fmtMoney(limit)} limit.`
             : limit !== undefined
@@ -413,8 +401,9 @@ function OpenOrderTr({
               : stop !== undefined
                 ? "The stop trigger price, as the broker holds it."
                 : "The broker reported no limit or stop price for this order."
-        }
-      >
+          }
+          className="justify-between"
+        >
         {limit === undefined && stop === undefined ? (
           <Dash />
         ) : (
@@ -427,58 +416,56 @@ function OpenOrderTr({
             )}
           </>
         )}
+        </TooltipText>
       </td>
-      <td
-        className="num con-num"
-        title={
+      <td className="num con-num">
+        <TooltipText
+          block
+          content={
           scan
             ? `From the latest market scan${scan.provider ? ` (${scan.provider})` : ""}${scan.asOf ? `, as of ${fmtExact(scan.asOf)}` : ""} — not a live broker quote.`
             : "The latest market scan didn't cover this symbol, so no recent price is available here."
-        }
-      >
+          }
+          className="justify-between"
+        >
         {scan ? fmtMoney(scan.price) : <Dash />}
         {limitGapPct !== undefined && (
-          <span
-            className="block text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]"
-            title="How far the latest scan price sits from the resting limit price. Positive = market above the limit."
-          >
+          <span className="block text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
             {fmtPct(limitGapPct, 1, true)} vs limit
           </span>
         )}
+        </TooltipText>
       </td>
-      <td title={tifTitle(order.timeInForce)}>{tif ?? <Dash />}</td>
+      <td><TooltipText content={tifTitle(order.timeInForce)}>{tif ?? <Dash />}</TooltipText></td>
       <td className="whitespace-nowrap">
         <Ago iso={order.createdAt} />
         {row.stale && (
-          <Chip
-            tone="warn"
-            className="ml-1.5"
-            title={`Working ${fmtMinutes(row.ageMinutes)} without filling — past your ${row.thresholdMinutes}-minute stale threshold. Heuristic, not an error: the market has likely moved away from the limit price, so it may never fill. You can keep waiting, cancel, or replace the remainder at market.`}
-          >
-            stale {fmtMinutes(row.ageMinutes)}
-          </Chip>
+          <Tooltip content={`Working ${fmtMinutes(row.ageMinutes)} without filling — past your ${row.thresholdMinutes}-minute stale threshold. Heuristic, not an error: the market has likely moved away from the limit price, so it may never fill. You can keep waiting, cancel, or replace the remainder at market.`}>
+            <Chip tone="warn" className="ml-1.5">
+              stale {fmtMinutes(row.ageMinutes)}
+            </Chip>
+          </Tooltip>
         )}
       </td>
       <td>
-        <Chip tone={stateTone(order.state)} title="The order's state as last reported by the broker.">
-          {readableState(order.state)}
-        </Chip>
+        <Tooltip content="The order's state as last reported by the broker.">
+          <Chip tone={stateTone(order.state)}>{readableState(order.state)}</Chip>
+        </Tooltip>
       </td>
       <td>
         <div className="flex justify-end gap-1.5 whitespace-nowrap">
           {showReplace && (
-            <Btn size="sm" variant="outline" disabled={!replaceEnabled} onClick={onReplace} title={replaceTitle}>
-              Replace at market
-            </Btn>
+            <Tooltip content={replaceTitle}>
+              <Btn size="sm" variant="outline" disabled={!replaceEnabled} onClick={onReplace}>
+                Replace at market
+              </Btn>
+            </Tooltip>
           )}
-          <Btn
-            size="sm"
-            variant="dangerOutline"
-            onClick={onCancel}
-            title="Ask the broker to cancel this order. Risk-reducing — allowed even while the system is stopped; fills that already happened stand."
-          >
-            Cancel
-          </Btn>
+          <Tooltip content="Ask the broker to cancel this order. Risk-reducing — allowed even while the system is stopped; fills that already happened stand.">
+            <Btn size="sm" variant="dangerOutline" onClick={onCancel}>
+              Cancel
+            </Btn>
+          </Tooltip>
         </div>
       </td>
     </tr>

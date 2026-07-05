@@ -22,7 +22,7 @@ import { cx, fmtMoney, fmtNum, fmtPct, fmtQty, timeUntil, EM_DASH } from "../lib
 import { DEFAULT_GREEN_MODEL_ID } from "../lib/models";
 import { useConsoleData } from "../lib/useConsoleData";
 import { useToast } from "../ui/toast";
-import { Ago, Btn, Chip, Dash, LiveTag, SignedText, TextInput } from "../ui/primitives";
+import { Ago, Btn, Chip, Dash, InfoTip, LiveTag, SignedText, TextInput, Tooltip, TooltipText } from "../ui/primitives";
 import { ModelBadge } from "../ui/provider-logo";
 import { Sheet } from "../ui/sheet";
 import { SymbolButton } from "../ui/symbol-drilldown";
@@ -196,18 +196,22 @@ export function ApprovalCard({ pending }: { pending: PendingProposal }) {
           {SIDE_LABEL[p.side] ?? p.side.toUpperCase()}
           <SymbolButton symbol={p.symbol} logoSize="sm" className="text-inherit" />
         </span>
-        <span className="con-num cursor-default text-[length:var(--con-fs-md)] font-semibold" title="Proposed order size (approximate notional or share count).">
+        <TooltipText content="Proposed order size (approximate notional or share count)." className="con-num text-[length:var(--con-fs-md)] font-semibold">
           {sizeText}
-        </span>
+        </TooltipText>
         {isExit(p.side) && (
-          <Chip tone="warn" title="Risk-reducing exits are never trapped by caps or universe rules.">
-            <ShieldCheck size={11} /> risk-reducing
-          </Chip>
+          <Tooltip content="Risk-reducing exits are never trapped by caps or universe rules.">
+            <Chip tone="warn">
+              <ShieldCheck size={11} /> risk-reducing
+            </Chip>
+          </Tooltip>
         )}
         <div className="flex-1" />
-        <Chip tone={reality.tone} title={reality.clarification}>
-          {reality.word} · {reality.phrase}
-        </Chip>
+        <Tooltip content={reality.clarification}>
+          <Chip tone={reality.tone}>
+            {reality.word} · {reality.phrase}
+          </Chip>
+        </Tooltip>
       </header>
 
       <div className="flex flex-col gap-3 px-4 py-3 text-[length:var(--con-fs-sm)]">
@@ -215,51 +219,49 @@ export function ApprovalCard({ pending }: { pending: PendingProposal }) {
         <div className="con-team con-team-green">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <div
-                className="con-card-title mb-1.5"
-                title="Green team = the proposer (bull): the model that generated this trade idea and argues for it."
-              >
+              <div className="con-card-title mb-1.5 flex items-center gap-1.5">
                 Proposed by (green team)
+                <InfoTip label="green team" content="Green team = the proposer (bull): the model that generated this trade idea and argues for it." />
               </div>
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <ModelBadge modelId={greenModel} size="md" title="The model that generated this proposal" />
+                <Tooltip content="The model that generated this proposal">
+                  <ModelBadge modelId={greenModel} size="md" />
+                </Tooltip>
                 {!greenModelPersisted && !greenModelConfigured && (
-                  <span
-                    className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]"
-                    title="No model is set on the policy; the server uses its default (which an OPENAI_MODEL env override could change)."
-                  >
+                  <TooltipText content="No model is set on the policy; the server uses its default (which an OPENAI_MODEL env override could change)." className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
                     (policy default)
-                  </span>
+                  </TooltipText>
                 )}
               </div>
             </div>
             {typeof p.confidenceScore === "number" && (
-              <div
-                className="shrink-0 cursor-default text-right"
-                title="The proposing model's stated conviction in this trade, on a 0–100 scale. Higher = stronger conviction; high scores can trigger the red-team debate and influence sizing."
+              <TooltipText
+                block
+                content="The proposing model's stated conviction in this trade, on a 0–100 scale. Higher = stronger conviction; high scores can trigger the red-team debate and influence sizing."
+                className="shrink-0 justify-end text-right"
               >
                 <span className="con-confidence-num">{p.confidenceScore}</span>
                 <span className="con-num text-[length:var(--con-fs-sm)] font-semibold text-[color:var(--con-faint)]">/100</span>
                 <div className="con-card-title">confidence</div>
-              </div>
+              </TooltipText>
             )}
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <Chip tone="accent" title="The thesis tag this idea is filed under — its long-run hit rate is tracked on the Results screen.">
-              {p.tradeThesisTag}
-            </Chip>
-            <span className="cursor-default text-[color:var(--con-faint)]" title="The market regime the strategist saw when it proposed this trade.">
+            <Tooltip content="The thesis tag this idea is filed under — its long-run hit rate is tracked on the Results screen.">
+              <Chip tone="accent">{p.tradeThesisTag}</Chip>
+            </Tooltip>
+            <TooltipText content="The market regime the strategist saw when it proposed this trade." className="text-[color:var(--con-faint)]">
               Regime at proposal: {p.entryMarketRegime || EM_DASH}
-            </span>
+            </TooltipText>
             <span className="text-[color:var(--con-faint)]">
               Proposed <Ago iso={pending.createdAt} />
             </span>
-            <Chip tone="muted" title={modelProvenance(p, policy)}>
-              {p.proposedByModel ? "served model" : "model legacy"}
-            </Chip>
-            <Chip tone="muted" title={fallbackProvenance(p, policy)}>
-              failover
-            </Chip>
+            <Tooltip content={modelProvenance(p, policy)}>
+              <Chip tone="muted">{p.proposedByModel ? "served model" : "model legacy"}</Chip>
+            </Tooltip>
+            <Tooltip content={fallbackProvenance(p, policy)}>
+              <Chip tone="muted">failover</Chip>
+            </Tooltip>
           </div>
           <p className="mt-2 leading-relaxed text-[color:var(--con-muted)]">{p.rationale}</p>
         </div>
@@ -268,22 +270,22 @@ export function ApprovalCard({ pending }: { pending: PendingProposal }) {
         {p.redTeamVerdict?.available && (
           <div className="con-team con-team-red">
             <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-              <div
-                className="con-card-title flex items-center gap-1.5"
-                title="Red team = the adversarial reviewer (bear): a model tasked with attacking the proposal before you see it."
-              >
+              <div className="con-card-title flex items-center gap-1.5">
                 <Swords size={12} /> Devil&apos;s advocate (red team)
+                <InfoTip label="red team" content="Red team = the adversarial reviewer (bear): a model tasked with attacking the proposal before you see it." />
               </div>
-              <ModelBadge modelId={redModel} title="The adversarial reviewer model that critiqued this proposal" />
+              <Tooltip content="The adversarial reviewer model that critiqued this proposal">
+                <ModelBadge modelId={redModel} />
+              </Tooltip>
             </div>
             <p className="mt-1.5 leading-relaxed text-[color:var(--con-muted)]">{p.redTeamVerdict.reason}</p>
             <div className="mt-2 flex flex-wrap items-center gap-2 text-[length:var(--con-fs-xs)]">
               <span className="font-semibold" style={{ color: p.redTeamVerdict.rejected ? "var(--con-neg)" : "var(--con-pos)" }}>
                 {p.redTeamVerdict.rejected ? "Verdict: rejected" : "Verdict: survived review"}
               </span>
-              <Chip tone="warn" title={redTrigger.title}>
-                trigger: {redTrigger.label}
-              </Chip>
+              <Tooltip content={redTrigger.title}>
+                <Chip tone="warn">trigger: {redTrigger.label}</Chip>
+              </Tooltip>
             </div>
           </div>
         )}
@@ -291,8 +293,9 @@ export function ApprovalCard({ pending }: { pending: PendingProposal }) {
         {/* Provenance + sizing receipt */}
         <div className="grid gap-3 lg:grid-cols-[minmax(0,1.05fr)_minmax(260px,0.95fr)]">
           <div className="rounded-lg border border-[color:var(--con-line)] p-3">
-            <div className="con-card-title mb-2 flex items-center gap-1.5" title="Sizing inputs already available on the approval snapshot; missing values stay blank instead of being inferred.">
+            <div className="con-card-title mb-2 flex items-center gap-1.5">
               <Ruler size={12} /> Sizing provenance
+              <InfoTip label="sizing provenance" content="Sizing inputs already available on the approval snapshot; missing values stay blank instead of being inferred." />
             </div>
             <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-[length:var(--con-fs-xs)]">
               <dt className="text-[color:var(--con-faint)]">Advised size</dt>
@@ -328,8 +331,9 @@ export function ApprovalCard({ pending }: { pending: PendingProposal }) {
           </div>
 
           <div className="rounded-lg border border-[color:var(--con-line)] p-3">
-            <div className="con-card-title mb-2 flex items-center gap-1.5" title="Bracket reward:risk geometry from the persisted entry anchor, stop, and take-profit.">
+            <div className="con-card-title mb-2 flex items-center gap-1.5">
               <TrendingUp size={12} /> Reward:risk geometry
+              <InfoTip label="reward risk geometry" content="Bracket reward:risk geometry from the persisted entry anchor, stop, and take-profit." />
             </div>
             {rewardRisk ? (
               <>
@@ -365,17 +369,18 @@ export function ApprovalCard({ pending }: { pending: PendingProposal }) {
         </div>
 
         <div className="rounded-lg border border-[color:var(--con-line)] p-3">
-          <div className="con-card-title mb-2 flex items-center gap-1.5" title="Decision-case evidence linked by proposal id.">
+          <div className="con-card-title mb-2 flex items-center gap-1.5">
             <Database size={12} /> Evidence citations
+            <InfoTip label="evidence citations" content="Decision-case evidence linked by proposal id." />
           </div>
           {decisionCase?.ragAttributions?.length ? (
             <div className="flex flex-col gap-2">
               {decisionCase.ragAttributions.slice(0, 3).map((item, i) => (
                 <div key={`${item.chunkId ?? item.title ?? item.source ?? "rag"}-${i}`} className="text-[length:var(--con-fs-xs)]">
                   <div className="flex flex-wrap items-center gap-2">
-                    <Chip tone="accent" title={item.chunkId ? `Chunk ${item.chunkId}` : undefined}>
-                      {evidenceLabel(item)}
-                    </Chip>
+                    <Tooltip content={item.chunkId ? `Chunk ${item.chunkId}` : evidenceLabel(item)}>
+                      <Chip tone="accent">{evidenceLabel(item)}</Chip>
+                    </Tooltip>
                     {item.publishedAt && <span className="text-[color:var(--con-faint)]">{item.publishedAt}</span>}
                   </div>
                   <p className="mt-1 leading-relaxed text-[color:var(--con-muted)]">{item.contribution || item.title || item.text.slice(0, 160)}</p>
@@ -392,8 +397,9 @@ export function ApprovalCard({ pending }: { pending: PendingProposal }) {
         {/* Since proposed + revalidation */}
         <div className="grid gap-2 sm:grid-cols-2">
           <div>
-            <div className="con-card-title mb-1" title="Raw side-adjusted move since the proposal's reference price, not benchmark-relative. Positive means the idea has moved in the proposed direction.">
+            <div className="con-card-title mb-1 flex items-center gap-1.5">
               Since proposed
+              <InfoTip label="since proposed" content="Raw side-adjusted move since the proposal's reference price, not benchmark-relative. Positive means the idea has moved in the proposed direction." />
             </div>
             {typeof pending.performanceSinceProposalPct === "number" ? (
               <p title="Raw proposal return since the decision-time reference price. It is not adjusted for SPY; benchmark-relative learning is handled separately in Results.">
@@ -440,12 +446,9 @@ export function ApprovalCard({ pending }: { pending: PendingProposal }) {
             </p>
           )}
           {pending.decision.washSale?.note && (
-            <p
-              className="mt-1 font-semibold text-[color:var(--con-warn)]"
-              title="This account's Tax rules disregard IRA wash sales (Rev. Rul. 2008-5 would otherwise block this rebuy). The purchase is annotated and audited; disregarding is an audit-risk acceptance."
-            >
+            <TooltipText content="This account's Tax rules disregard IRA wash sales (Rev. Rul. 2008-5 would otherwise block this rebuy). The purchase is annotated and audited; disregarding is an audit-risk acceptance." className="mt-1 font-semibold text-[color:var(--con-warn)]">
               {pending.decision.washSale.note}
-            </p>
+            </TooltipText>
           )}
         </div>
 

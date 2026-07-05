@@ -25,7 +25,7 @@ import {
 } from "../lib/learned-context";
 import { useConsoleData } from "../lib/useConsoleData";
 import { useToast } from "../ui/toast";
-import { Ago, Btn, Card, Chip } from "../ui/primitives";
+import { Ago, Btn, Card, Chip, InfoTip, Tooltip, TooltipText } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
 import { SymbolButton } from "../ui/symbol-drilldown";
 
@@ -58,19 +58,19 @@ function tierMeta(tier: PendingLearnedItem["riskTier"]): { label: string; tone: 
 function Provenance({ item }: { item: PendingLearnedItem }) {
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-      <span title="Which part of the system produced this candidate.">
+      <TooltipText content="Which part of the system produced this candidate.">
         From <span className="text-[color:var(--con-muted)]">{ORIGIN_LABEL[item.origin] ?? item.origin}</span>
-      </span>
-      <span title="What the producer cited as the basis for this item.">
+      </TooltipText>
+      <TooltipText content="What the producer cited as the basis for this item.">
         Source <span className="text-[color:var(--con-muted)]">{item.source}</span>
-      </span>
-      <span title="The type of learned item: a pattern, a decision, or a fact.">
+      </TooltipText>
+      <TooltipText content="The type of learned item: a pattern, a decision, or a fact.">
         Kind <span className="text-[color:var(--con-muted)]">{item.kind}</span>
-      </span>
+      </TooltipText>
       {item.classifierReason && (
-        <span title="Why the fail-closed classifier routed this to your confirmation queue instead of storing it automatically.">
+        <TooltipText content="Why the fail-closed classifier routed this to your confirmation queue instead of storing it automatically.">
           Why it queued <span className="text-[color:var(--con-muted)]">{item.classifierReason}</span>
-        </span>
+        </TooltipText>
       )}
     </div>
   );
@@ -88,12 +88,15 @@ function ApprovalEffect({ item, withPreview }: { item: PendingLearnedItem; withP
           approval time.
         </p>
         {withPreview && (
-          <pre
-            title="The exact block approval appends to your strategy prompt. The date is stamped at approval time."
-            className="con-mono overflow-x-auto whitespace-pre-wrap break-words rounded-[var(--con-radius-sm)] border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] p-3 text-[11px] leading-relaxed text-[color:var(--con-muted)]"
-          >
-            {directiveBlockPreview(item)}
-          </pre>
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+              Exact prompt block
+              <InfoTip label="exact prompt block" content="The exact block approval appends to your strategy prompt. The date is stamped at approval time." />
+            </div>
+            <pre className="con-mono overflow-x-auto whitespace-pre-wrap break-words rounded-[var(--con-radius-sm)] border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] p-3 text-[11px] leading-relaxed text-[color:var(--con-muted)]">
+              {directiveBlockPreview(item)}
+            </pre>
+          </div>
         )}
       </div>
     );
@@ -126,19 +129,20 @@ function LearnedItemCard({
   return (
     <article className="con-card overflow-hidden transition-colors hover:bg-[color:var(--con-surface-2)] focus-within:bg-[color:var(--con-surface-2)]">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-[color:var(--con-line)] px-4 py-3">
-        <Chip tone={tier.tone} title={tier.explain}>
-          <Brain size={11} /> {tier.label}
-        </Chip>
-        <span
-          className="min-w-0 break-words text-[length:var(--con-fs-sm)] font-semibold"
-          title="What this learned item is about."
-        >
+        <Tooltip content={tier.explain}>
+          <Chip tone={tier.tone}>
+            <Brain size={11} /> {tier.label}
+          </Chip>
+        </Tooltip>
+        <span className="min-w-0 break-words text-[length:var(--con-fs-sm)] font-semibold">
           {item.subject}
         </span>
         {item.symbol && (
-          <span className="con-mono text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]" title="The ticker this item is about.">
-            <SymbolButton symbol={item.symbol} showLogo={false} />
-          </span>
+          <Tooltip content="The ticker this item is about.">
+            <span className="con-mono text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+              <SymbolButton symbol={item.symbol} showLogo={false} />
+            </span>
+          </Tooltip>
         )}
         <div className="flex-1" />
         <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
@@ -147,38 +151,25 @@ function LearnedItemCard({
       </header>
 
       <div className="flex flex-col gap-3 px-4 py-3">
-        <p className="text-[length:var(--con-fs-sm)] leading-relaxed" title="The learned statement, verbatim.">
-          {item.value}
-        </p>
+        <p className="text-[length:var(--con-fs-sm)] leading-relaxed">{item.value}</p>
         <ApprovalEffect item={item} withPreview={false} />
         <Provenance item={item} />
       </div>
 
       <footer className="flex items-center gap-2 border-t border-[color:var(--con-line)] px-4 py-3">
-        <Btn
-          variant="primary"
-          size="sm"
-          disabled={busy}
-          onClick={onApprove}
-          title="Opens a confirmation showing exactly what approving applies — nothing commits yet."
-        >
-          Approve…
-        </Btn>
-        <Btn
-          variant="ghost"
-          size="sm"
-          disabled={busy}
-          onClick={onReject}
-          title="Discard this candidate immediately. Nothing is applied anywhere."
-        >
-          Reject
-        </Btn>
-        <span
-          className="ml-auto text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]"
-          title="A queued item sits outside the AI's memory. It only takes effect if you approve it."
-        >
+        <Tooltip content="Opens a confirmation showing exactly what approving applies — nothing commits yet.">
+          <Btn variant="primary" size="sm" disabled={busy} onClick={onApprove}>
+            Approve…
+          </Btn>
+        </Tooltip>
+        <Tooltip content="Discard this candidate immediately. Nothing is applied anywhere.">
+          <Btn variant="ghost" size="sm" disabled={busy} onClick={onReject}>
+            Reject
+          </Btn>
+        </Tooltip>
+        <TooltipText content="A queued item sits outside the AI's memory. It only takes effect if you approve it." className="ml-auto text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
           Not applied until you approve
-        </span>
+        </TooltipText>
       </footer>
     </article>
   );
@@ -285,30 +276,26 @@ export function LearnedContextInbox() {
   return (
     <section className="mt-2 flex flex-col gap-3" aria-label="Learned context awaiting review">
       <div className="flex items-center justify-between gap-3">
-        <h2
-          className="flex items-center gap-2 text-[length:var(--con-fs-md)] font-bold"
-          title="Things the system inferred it wants to remember — risk observations and strategy directives. They wait here until you approve or reject each one; nothing influences the AI until you approve it."
-        >
+        <h2 className="flex items-center gap-2 text-[length:var(--con-fs-md)] font-bold">
           <Brain size={16} aria-hidden />
-          Learned context{" "}
+          Learned context
+          <InfoTip label="learned context" content="Things the system inferred it wants to remember — risk observations and strategy directives. They wait here until you approve or reject each one; nothing influences the AI until you approve it." />
           {count > 0 && (
-            <span
-              className="con-num text-[color:var(--con-accent)]"
-              title={`${count} learned item${count === 1 ? "" : "s"} awaiting your decision.`}
-            >
+            <TooltipText content={`${count} learned item${count === 1 ? "" : "s"} awaiting your decision.`} className="con-num text-[color:var(--con-accent)]">
               ({count})
-            </span>
+            </TooltipText>
           )}
         </h2>
-        <button
-          type="button"
-          className="flex items-center gap-1.5 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-faint)] transition-colors hover:text-[color:var(--con-fg)]"
-          onClick={() => void load()}
-          aria-label="Refresh learned-context queue"
-          title="Re-check the server for pending learned context now (it also refreshes automatically)."
-        >
-          <RefreshCw size={12} aria-hidden /> Refresh
-        </button>
+        <Tooltip content="Re-check the server for pending learned context now (it also refreshes automatically).">
+          <button
+            type="button"
+            className="flex items-center gap-1.5 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-faint)] transition-colors hover:text-[color:var(--con-fg)]"
+            onClick={() => void load()}
+            aria-label="Refresh learned-context queue"
+          >
+            <RefreshCw size={12} aria-hidden /> Refresh
+          </button>
+        </Tooltip>
       </div>
 
       {error && (
@@ -356,36 +343,35 @@ export function LearnedContextInbox() {
       >
         {confirming && (
           <div className="flex flex-col gap-3">
-            <p className="text-[length:var(--con-fs-sm)] leading-relaxed" title="What this learned item is about.">
+            <p className="text-[length:var(--con-fs-sm)] leading-relaxed">
               <span className="font-semibold">{confirming.subject}</span>
               {confirming.symbol ? (
-                <span className="con-mono text-[color:var(--con-muted)]" title="The ticker this item is about.">
+                <span className="con-mono text-[color:var(--con-muted)]">
                   {" "}
                   · <SymbolButton symbol={confirming.symbol} showLogo={false} />
                 </span>
               ) : null}
             </p>
-            <p className="text-[length:var(--con-fs-sm)] leading-relaxed text-[color:var(--con-muted)]" title="The learned statement, verbatim.">
-              {confirming.value}
-            </p>
+            <p className="text-[length:var(--con-fs-sm)] leading-relaxed text-[color:var(--con-muted)]">{confirming.value}</p>
             <ApprovalEffect item={confirming} withPreview />
             <Provenance item={confirming} />
             <div className="mt-1 flex items-center justify-end gap-2">
-              <Btn variant="ghost" onClick={() => setConfirming(null)} title="Close without applying anything. The item stays in the queue.">
-                Cancel
-              </Btn>
-              <Btn
-                variant="primary"
-                disabled={busyId === confirming.id}
-                onClick={() => void approve(confirming)}
-                title={
+              <Tooltip content="Close without applying anything. The item stays in the queue.">
+                <Btn variant="ghost" onClick={() => setConfirming(null)}>
+                  Cancel
+                </Btn>
+              </Tooltip>
+              <Tooltip
+                content={
                   confirming.riskTier === "strategy-directive"
                     ? "Append the block above to your strategy prompt now."
                     : "Record this observation durably now. It is not yet fed into runs; numeric risk limits are unchanged."
                 }
               >
-                Approve
-              </Btn>
+                <Btn variant="primary" disabled={busyId === confirming.id} onClick={() => void approve(confirming)}>
+                  Approve
+                </Btn>
+              </Tooltip>
             </div>
           </div>
         )}
