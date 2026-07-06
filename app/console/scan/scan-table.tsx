@@ -173,48 +173,47 @@ export function ScanTable({ scan }: { scan: MarketScan }) {
                     const isVisible = visible.includes(column.id);
                     const index = visible.indexOf(column.id);
                     return (
-                      <div
-                        key={column.id}
-                        title={column.headerTitle}
-                        className={cx(
-                          "grid grid-cols-[1fr_auto] items-center gap-2 rounded-md px-2 py-1.5 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)] hover:bg-[color:var(--con-surface-2)]",
-                          !isVisible && "opacity-70"
-                        )}
-                      >
-                        <label className={cx("flex min-w-0 items-center gap-2", column.id === SYMBOL_COLUMN_ID ? "opacity-70" : "cursor-pointer")}>
-                          <input
-                            type="checkbox"
-                            checked={isVisible}
-                            onChange={() => saveVisibleColumns(toggleVisibleScanColumn(visible, column.id))}
-                            disabled={column.id === SYMBOL_COLUMN_ID}
-                            className="accent-[var(--con-accent)]"
-                          />
-                          <span className="truncate">{column.label}</span>
-                        </label>
-                        {isVisible ? (
-                          <div className="flex items-center gap-1">
-                            <button
-                              type="button"
-                              aria-label={`Move ${column.label} earlier`}
-                              onClick={() => saveVisibleColumns(moveVisibleScanColumn(visible, column.id, -1))}
-                              disabled={index <= 0}
-                              className="inline-flex h-6 w-6 items-center justify-center rounded text-[color:var(--con-faint)] hover:bg-[color:var(--con-surface-2)] hover:text-[color:var(--con-fg)] disabled:opacity-30"
-                            >
-                              <ArrowUp size={14} aria-hidden />
-                            </button>
-                            <button
-                              type="button"
-                              aria-label={`Move ${column.label} later`}
-                              onClick={() => saveVisibleColumns(moveVisibleScanColumn(visible, column.id, 1))}
-                              disabled={index === visible.length - 1}
-                              className="inline-flex h-6 w-6 items-center justify-center rounded text-[color:var(--con-faint)] hover:bg-[color:var(--con-surface-2)] hover:text-[color:var(--con-fg)] disabled:opacity-30"
-                            >
-                              <ArrowDown size={14} aria-hidden />
-                            </button>
-                          </div>
-                        ) : (
-                          <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">hidden</span>
-                        )}
+                      <div title={column.headerTitle} key={column.id}>
+                        <div
+                          className={cx(
+                            "grid grid-cols-[1fr_auto] items-center gap-2 rounded-md px-2 py-1.5 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)] hover:bg-[color:var(--con-surface-2)]",
+                            !isVisible && "opacity-70"
+                          )}>
+                          <label className={cx("flex min-w-0 items-center gap-2", column.id === SYMBOL_COLUMN_ID ? "opacity-70" : "cursor-pointer")}>
+                            <input
+                              type="checkbox"
+                              checked={isVisible}
+                              onChange={() => saveVisibleColumns(toggleVisibleScanColumn(visible, column.id))}
+                              disabled={column.id === SYMBOL_COLUMN_ID}
+                              className="accent-[var(--con-accent)]"
+                            />
+                            <span className="truncate">{column.label}</span>
+                          </label>
+                          {isVisible ? (
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                aria-label={`Move ${column.label} earlier`}
+                                onClick={() => saveVisibleColumns(moveVisibleScanColumn(visible, column.id, -1))}
+                                disabled={index <= 0}
+                                className="inline-flex h-6 w-6 items-center justify-center rounded text-[color:var(--con-faint)] hover:bg-[color:var(--con-surface-2)] hover:text-[color:var(--con-fg)] disabled:opacity-30"
+                              >
+                                <ArrowUp size={14} aria-hidden />
+                              </button>
+                              <button
+                                type="button"
+                                aria-label={`Move ${column.label} later`}
+                                onClick={() => saveVisibleColumns(moveVisibleScanColumn(visible, column.id, 1))}
+                                disabled={index === visible.length - 1}
+                                className="inline-flex h-6 w-6 items-center justify-center rounded text-[color:var(--con-faint)] hover:bg-[color:var(--con-surface-2)] hover:text-[color:var(--con-fg)] disabled:opacity-30"
+                              >
+                                <ArrowDown size={14} aria-hidden />
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">hidden</span>
+                          )}
+                        </div>
                       </div>
                     );
                   })}
@@ -237,20 +236,20 @@ export function ScanTable({ scan }: { scan: MarketScan }) {
                   aria-sort={active ? (activeSort.dir === "asc" ? "ascending" : "descending") : undefined}
                   className={cx(c.num && "num", i === 0 && STICKY_CELL)}
                 >
-                  <button
-                    type="button"
-                    title={`${c.headerTitle}\nClick to sort by ${c.label.toLowerCase()}${active ? ` (currently ${activeSort.dir === "asc" ? "ascending" : "descending"})` : ""}.`}
-                    onClick={() => setSort({ col: c.id, dir: activeSort.col === c.id && activeSort.dir === "desc" ? "asc" : "desc" })}
-                    className={cx(
-                      "inline-flex cursor-pointer select-none items-center gap-1 font-semibold uppercase tracking-[0.07em] transition-colors",
-                      active ? "text-[color:var(--con-fg)]" : "hover:text-[color:var(--con-fg)]"
-                    )}
-                  >
-                    {c.label}
-                    <span aria-hidden className={cx("text-[9px]", !active && "opacity-0")}>
-                      {active && activeSort.dir === "asc" ? "▲" : "▼"}
-                    </span>
-                  </button>
+                  <div title={`${c.headerTitle}\nClick to sort by ${c.label.toLowerCase()}${active ? ` (currently ${activeSort.dir === "asc" ? "ascending" : "descending"})` : ""}.`}>
+                    <button
+                      type="button"
+                      onClick={() => setSort({ col: c.id, dir: activeSort.col === c.id && activeSort.dir === "desc" ? "asc" : "desc" })}
+                      className={cx(
+                        "inline-flex cursor-pointer select-none items-center gap-1 font-semibold uppercase tracking-[0.07em] transition-colors",
+                        active ? "text-[color:var(--con-fg)]" : "hover:text-[color:var(--con-fg)]"
+                      )}>
+                      {c.label}
+                      <span aria-hidden className={cx("text-[9px]", !active && "opacity-0")}>
+                        {active && activeSort.dir === "asc" ? "▲" : "▼"}
+                      </span>
+                    </button>
+                  </div>
                 </th>
               );
             })}
@@ -269,8 +268,7 @@ export function ScanTable({ scan }: { scan: MarketScan }) {
                   <td
                     key={c.id}
                     title={title}
-                    className={cx("cursor-default whitespace-nowrap", c.num && "num con-num", i === 0 && cx(STICKY_CELL, STICKY_CELL_HOVER))}
-                  >
+                    className={cx("cursor-default whitespace-nowrap", c.num && "num con-num", i === 0 && cx(STICKY_CELL, STICKY_CELL_HOVER))}>
                     {c.render(q)}
                   </td>
                 );

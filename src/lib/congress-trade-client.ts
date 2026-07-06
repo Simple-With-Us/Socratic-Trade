@@ -37,6 +37,7 @@ import type {
 } from "@jaywedgeworth22/congress-trading-shared";
 import {
   API_PATHS,
+  CongressTradeClient,
   MAX_REFS_BATCH,
   TransactionsPageSchema,
 } from "@jaywedgeworth22/congress-trading-shared";
@@ -106,37 +107,31 @@ function timeoutMs(): number {
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_TIMEOUT_MS;
 }
 
-/** GET a path on App A and return parsed JSON, or null on error/non-2xx. Never throws. (Ungated.) */
-async function getJson<T>(path: string, token?: string): Promise<T | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs());
-  const start = Date.now();
-  try {
-    const res = await fetch(`${baseUrl()}${path}`, {
-      headers: {
-        accept: "application/json",
-        ...(token ? { authorization: `Bearer ${token}` } : {})
-      },
-      signal: controller.signal,
-      cache: "no-store"
-    });
-    logApiHealth({ service: "congress.trade", ok: res.ok, latencyMs: Date.now() - start, errorText: res.ok ? undefined : `HTTP ${res.status}` });
-    if (!res.ok) return null;
-    return (await res.json()) as T;
-  } catch (err) {
-    logApiHealth({ service: "congress.trade", ok: false, latencyMs: Date.now() - start, errorText: err instanceof Error ? err.message : String(err) });
-    return null; // fall through to App B's own providers
-  } finally {
-    clearTimeout(timer);
-  }
+function createTimedHealthFetch(timeout: number): typeof fetch {
+  return async (input, init) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    const start = Date.now();
+    try {
+      const res = await fetch(input, { ...init, signal: controller.signal });
+      logApiHealth({ service: "congress.trade", ok: res.ok, latencyMs: Date.now() - start, errorText: res.ok ? undefined : `HTTP ${res.status}` });
+      return res;
+    } catch (err) {
+      logApiHealth({ service: "congress.trade", ok: false, latencyMs: Date.now() - start, errorText: err instanceof Error ? err.message : String(err) });
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 }
 
-function dateRangeQuery(opts?: { from?: string; to?: string }): string {
-  const params = new URLSearchParams();
-  if (opts?.from) params.set("from", opts.from);
-  if (opts?.to) params.set("to", opts.to);
-  const s = params.toString();
-  return s ? `?${s}` : "";
+/** Get a shared CongressTradeClient configured with health logging, timeouts, and auth. */
+function getClient(): CongressTradeClient {
+  return new CongressTradeClient({
+    baseUrl: baseUrl(),
+    token: readToken(),
+    fetch: createTimedHealthFetch(timeoutMs()),
+  });
 }
 
 /** One round-trip: ref + closes + spx for a ticker. Null when reads are off / on any error. */
@@ -144,42 +139,54 @@ export async function getAppABundle(ticker: string, opts?: { from?: string; to?:
   if (!congressReadsEnabled()) return null;
   const sym = normalizeSymbol(ticker);
   if (!sym) return null;
-  const json = await getJson<{ ref?: CongressRef | null; prices?: PriceSeries | null; spx?: PriceClose[] }>(
-    `${API_PATHS.MARKET_BUNDLE}/${encodeURIComponent(sym)}${dateRangeQuery(opts)}`,
-    readToken()
-  );
-  if (!json) return null;
-  return { ref: json.ref ?? null, prices: json.prices ?? null, spx: Array.isArray(json.spx) ? json.spx : [] };
+  try {
+    const bundle = await getClient().getBundle(sym, opts);
+    return { ref: bundle.ref as CongressRef | null, prices: bundle.prices, spx: bundle.spx };
+  } catch {
+    return null;
+  }
 }
 
 export async function getAppARef(ticker: string): Promise<CongressRef | null> {
   if (!congressReadsEnabled()) return null;
   const sym = normalizeSymbol(ticker);
   if (!sym) return null;
-  const json = await getJson<{ ref?: CongressRef | null }>(`${API_PATHS.MARKET_REF}/${encodeURIComponent(sym)}`, readToken());
-  return json?.ref ?? null;
+  try {
+    return (await getClient().getRef(sym)) as CongressRef | null;
+  } catch {
+    return null;
+  }
 }
 
 export async function getAppARefs(tickers: string[]): Promise<CongressRef[]> {
   if (!congressReadsEnabled()) return [];
-  const syms = Array.from(new Set(tickers.map(normalizeSymbol).filter(Boolean))).slice(0, MAX_REFS_BATCH);
+  const syms = Array.from(new Set(tickers.map(normalizeSymbol).filter(Boolean)));
   if (syms.length === 0) return [];
-  const json = await getJson<{ refs?: CongressRef[] }>(`${API_PATHS.MARKET_REFS}?tickers=${encodeURIComponent(syms.join(","))}`, readToken());
-  return Array.isArray(json?.refs) ? json!.refs : [];
+  try {
+    return (await getClient().getRefs(syms)) as unknown as CongressRef[];
+  } catch {
+    return [];
+  }
 }
 
 export async function getAppAPrices(ticker: string, opts?: { from?: string; to?: string }): Promise<PriceSeries | null> {
   if (!congressReadsEnabled()) return null;
   const sym = normalizeSymbol(ticker);
   if (!sym) return null;
-  const json = await getJson<PriceSeries>(`${API_PATHS.MARKET_PRICES}/${encodeURIComponent(sym)}${dateRangeQuery(opts)}`, readToken());
-  return json && Array.isArray(json.closes) ? json : null;
+  try {
+    return await getClient().getPrices(sym, opts);
+  } catch {
+    return null;
+  }
 }
 
 export async function getAppASpx(opts?: { from?: string; to?: string }): Promise<PriceClose[]> {
   if (!congressReadsEnabled()) return [];
-  const json = await getJson<{ closes?: PriceClose[] }>(`${API_PATHS.MARKET_SPX}${dateRangeQuery(opts)}`, readToken());
-  return Array.isArray(json?.closes) ? json!.closes : [];
+  try {
+    return await getClient().getSpx(opts);
+  } catch {
+    return [];
+  }
 }
 
 /** Read App A's cached fundamentals (P/E, EPS, beta, 52w, FCF, debt/equity…) so App B
@@ -188,11 +195,11 @@ export async function getAppAFundamentals(ticker: string, opts?: { from?: string
   if (!congressFundamentalsEnabled()) return [];
   const sym = normalizeSymbol(ticker);
   if (!sym) return [];
-  const json = await getJson<{ rows?: AppAFundamental[] }>(
-    `${API_PATHS.MARKET_FUNDAMENTALS}/${encodeURIComponent(sym)}${dateRangeQuery(opts)}`,
-    readToken()
-  );
-  return Array.isArray(json?.rows) ? json!.rows : [];
+  try {
+    return await getClient().getFundamentals(sym, opts) as AppAFundamental[];
+  } catch {
+    return [];
+  }
 }
 
 /** Read App A's cached analyst consensus + price targets. [] when off / on error. */
@@ -200,37 +207,28 @@ export async function getAppAAnalyst(ticker: string, opts?: { from?: string; to?
   if (!congressFundamentalsEnabled()) return [];
   const sym = normalizeSymbol(ticker);
   if (!sym) return [];
-  const json = await getJson<{ rows?: AppAAnalyst[] }>(
-    `${API_PATHS.MARKET_ANALYST}/${encodeURIComponent(sym)}${dateRangeQuery(opts)}`,
-    readToken()
-  );
-  return Array.isArray(json?.rows) ? json!.rows : [];
+  try {
+    return await getClient().getAnalyst(sym, opts) as AppAAnalyst[];
+  } catch {
+    return [];
+  }
 }
 
 /** Pull a page of congressional transactions. Null when the congress-source gate is off / on error. */
 export async function getAppATransactions(query: AppATransactionsQuery = {}): Promise<AppATransactionsPage | null> {
   if (!congressAsCongressSourceEnabled()) return null;
-  const params = new URLSearchParams();
-  if (query.since) params.set("since", query.since);
-  if (query.from) params.set("from", query.from);
-  if (query.to) params.set("to", query.to);
-  if (query.ticker) params.set("ticker", query.ticker);
-  if (query.member) params.set("member", query.member);
-  if (query.chamber) params.set("chamber", query.chamber);
-  if (query.type) params.set("type", query.type);
-  if (query.limit) params.set("limit", String(query.limit));
-  const qs = params.toString();
-  // The /api/transactions feed is fully public (no gating) — page forward with `cursor` and stop at
-  // the rolling window. Sends the optional read token only if App A later gates it.
-  const json = await getJson<TransactionsPage>(`${API_PATHS.TRANSACTIONS}${qs ? `?${qs}` : ""}`, readToken());
-  if (!json || !Array.isArray(json.transactions)) return null;
-  // Validate response shape at runtime.
-  const parsed = TransactionsPageSchema.safeParse(json);
-  if (!parsed.success) {
-    console.warn("[congress-trade-client] transactions page validation failed:", parsed.error.flatten());
-    // Fall through: return the unvalidated response; the data is still usable.
+  try {
+    const json = await getClient().getTransactions(query);
+    if (!json || !Array.isArray(json.transactions)) return null;
+    // Validate response shape at runtime.
+    const parsed = TransactionsPageSchema.safeParse(json);
+    if (!parsed.success) {
+      console.warn("[congress-trade-client] transactions page validation failed:", parsed.error.flatten());
+    }
+    return json;
+  } catch {
+    return null;
   }
-  return json;
 }
 
 // ── App A analytics (the public "Trends" composite) ──────────────────────────
@@ -243,43 +241,42 @@ export function congressAnalyticsEnabled(): boolean {
   return flagOn(process.env.CONGRESS_ANALYTICS_ENABLED);
 }
 
-function analyticsQuery(opts: { window?: string; limit?: number; chamber?: string; party?: string }): string {
-  const p = new URLSearchParams();
-  if (opts.window) p.set("window", opts.window);
-  if (opts.limit) p.set("limit", String(opts.limit));
-  if (opts.chamber) p.set("chamber", opts.chamber);
-  if (opts.party) p.set("party", opts.party);
-  const s = p.toString();
-  return s ? `?${s}` : "";
-}
-
 export async function getAppATickerLeaderboard(opts: { window?: string; limit?: number } = {}): Promise<AppATickerLeader[]> {
   if (!congressAnalyticsEnabled()) return [];
-  const json = await getJson<{ tickers?: AppATickerLeader[] }>(`${API_PATHS.ANALYTICS_TICKER_LEADERBOARD}${analyticsQuery(opts)}`, readToken());
-  return Array.isArray(json?.tickers) ? json!.tickers : [];
+  try {
+    return await getClient().getTickerLeaderboard(opts);
+  } catch {
+    return [];
+  }
 }
 
 export async function getAppAClusterBuys(opts: { window?: string; limit?: number } = {}): Promise<AppAClusterRow[]> {
   if (!congressAnalyticsEnabled()) return [];
-  const json = await getJson<{ clusters?: AppAClusterRow[] }>(`${API_PATHS.ANALYTICS_CLUSTER_BUYS}${analyticsQuery(opts)}`, readToken());
-  return Array.isArray(json?.clusters) ? json!.clusters : [];
+  try {
+    return await getClient().getClusterBuys(opts);
+  } catch {
+    return [];
+  }
 }
 
 export async function getAppAMemberLeaderboard(opts: { window?: string; limit?: number } = {}): Promise<AppAMemberRow[]> {
   if (!congressAnalyticsEnabled()) return [];
-  const json = await getJson<{ members?: AppAMemberRow[] }>(`${API_PATHS.ANALYTICS_MEMBER_LEADERBOARD}${analyticsQuery(opts)}`, readToken());
-  return Array.isArray(json?.members) ? json!.members : [];
+  try {
+    return await getClient().getMemberLeaderboard(opts);
+  } catch {
+    return [];
+  }
 }
 
 /** Per-member realized performance (return / win-rate / alpha vs S&P). `scoredCount`=0 → all nulls.
  *  Now a type alias for MemberPerformance from the shared package. */
 export async function getAppAMemberPerformance(filerId: string): Promise<AppAMemberPerformance | null> {
   if (!congressAnalyticsEnabled() || !filerId) return null;
-  const json = await getJson<{ performance?: AppAMemberPerformance }>(
-    `${API_PATHS.ANALYTICS_MEMBER_PERFORMANCE}/${encodeURIComponent(filerId)}/performance`,
-    readToken()
-  );
-  return json?.performance ?? null;
+  try {
+    return await getClient().getMemberPerformance(filerId);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -313,8 +310,11 @@ export function appAClosesToBars(closes: PriceClose[] | null | undefined): OHLCB
 
 export async function getAppAConviction(opts: { window?: string; limit?: number } = {}): Promise<AppAConvictionTicker[]> {
   if (!congressAnalyticsEnabled()) return [];
-  const json = await getJson<{ tickers?: AppAConvictionTicker[] }>(`${API_PATHS.ANALYTICS_CONVICTION}${analyticsQuery(opts)}`, readToken());
-  return Array.isArray(json?.tickers) ? json!.tickers : [];
+  try {
+    return await getClient().getConviction(opts);
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -330,16 +330,11 @@ export async function getAppATickerBacktest(
   if (!congressAnalyticsEnabled()) return null;
   const sym = normalizeSymbol(ticker);
   if (!sym) return null;
-  const p = new URLSearchParams();
-  if (opts.window) p.set("window", opts.window);
-  if (opts.horizons) p.set("horizons", opts.horizons);
-  if (opts.filerId) p.set("filerId", opts.filerId);
-  const qs = p.toString();
-  const json = await getJson<AppATickerBacktest>(
-    `${API_PATHS.ANALYTICS_TICKER_BACKTEST}/${encodeURIComponent(sym)}/backtest${qs ? `?${qs}` : ""}`,
-    readToken()
-  );
-  return json?.horizons?.length ? json : null;
+  try {
+    return await getClient().getTickerBacktest(sym, opts);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -352,6 +347,9 @@ export async function getAppAConflicts(
   opts: { window?: string; limit?: number; chamber?: string; party?: string } = {}
 ): Promise<AppAConflict[]> {
   if (!congressAnalyticsEnabled()) return [];
-  const json = await getJson<{ conflicts?: AppAConflict[] }>(`${API_PATHS.ANALYTICS_CONFLICTS}${analyticsQuery(opts)}`, readToken());
-  return Array.isArray(json?.conflicts) ? json!.conflicts : [];
+  try {
+    return await getClient().getConflicts(opts);
+  } catch {
+    return [];
+  }
 }
