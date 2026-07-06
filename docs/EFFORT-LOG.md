@@ -298,6 +298,12 @@ to `socratictrade.com`, record the release commit + date here._
 ---
 
 ## 🔨 In Progress
+- **Codex autofix storm guard (CODEX, workflow/fleet-infra) — DONE-local 2026-07-05; awaiting push/PR.**
+  Scope: reduce `codex-autofix.yml` storm odds/frequency by running the autofix loop once per
+  Codex submitted review plus manual `workflow_dispatch`, not on every Codex inline/issue
+  comment. Touch workflow callers only in clean Codex worktrees; preserve manual dispatch and
+  round-cap behavior.
+
 - **HyDE + evidence-derived multi-query retrieval for filings RAG** (CLAUDE, worktree
   `~/apps/trading-wt-hyde`, branch `claude/hyde-multiquery`) — **IN PROGRESS 2026-07-05, review
   fixes applied same day (second commit).** New `src/lib/rag/multi-query.ts`: pure
