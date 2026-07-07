@@ -20,6 +20,7 @@ import { getUserWashSaleLockProvenance, type WashSaleLockMap } from "./tax";
 import { DEFAULT_TAX_SETTINGS } from "./defaults";
 import { getDb } from "./db";
 import { isCrisisOrInvertedMarketRegime, regimeFromLabel } from "./market-regime";
+import type { RegimeSeverityResult } from "./regime-severity";
 
 export interface PolicyContext {
   policy: TradingPolicy;
@@ -81,6 +82,14 @@ export interface PolicyContext {
    */
   priorDayTradeCount?: number;
   now?: Date;
+  /**
+   * Multi-signal continuous regime severity (src/lib/regime-severity.ts scoreRegimeSeverity),
+   * populated by the run-loop caller from the same macro/breadth feeds already gathered for the
+   * prompt. OPTIONAL and purely additive: only read by deRiskInCrisisReason's opt-in taper below,
+   * gated behind policy.riskRules.severityTaperEnabled (default false/off). Absent ⇒ no behavior
+   * change anywhere in this file.
+   */
+  regimeSeverity?: RegimeSeverityResult;
 }
 
 /**
@@ -897,10 +906,52 @@ function deRiskInCrisisReason(
   if (!isCrisisOrInvertedRegime(proposal.entryMarketRegime)) return undefined;
   if (context.portfolio.totalMarketValue <= 0) return undefined;
 
+  // OPT-IN continuous taper (multi-signal-regime-scorer lane, default OFF): alongside the binary
+  // crisis/inverted-regime cap above, an owner who has turned on riskRules.severityTaperEnabled can
+  // have the cap shrink continuously with the scored regime severity instead of only stepping at
+  // the crisis/inverted boundary. This can only ever TIGHTEN the same already-opt-in cap — never
+  // replace it, never introduce a new gate — and a floor prevents it tapering to a zero-exposure
+  // squeeze. Off by default: `effectiveCap` degenerates to `cap` and behavior is byte-identical to
+  // today's binary cap.
+  const effectiveCap = taperedCrisisCap(cap, context);
+
   const openingExposurePct = (estimatedNotional / context.portfolio.totalMarketValue) * 100;
-  if (openingExposurePct <= cap) return undefined;
+  if (openingExposurePct <= effectiveCap) return undefined;
+
+  if (effectiveCap !== cap) {
+    const severity = context.regimeSeverity?.severity ?? 0;
+    return (
+      `Opening ${normalizeSymbol(proposal.symbol)} exposure ${openingExposurePct.toFixed(2)}% exceeds crisis cap ` +
+      `tapered to ${effectiveCap.toFixed(2)}% at regime severity ${severity.toFixed(2)} (base cap ${cap}%).`
+    );
+  }
 
   return `Opening ${normalizeSymbol(proposal.symbol)} exposure ${openingExposurePct.toFixed(2)}% exceeds crisis/inverted-regime cap ${cap}%.`;
+}
+
+/**
+ * OPT-IN (default OFF): tapers the crisis/inverted-regime opening-exposure cap continuously with
+ * the scored regime severity, `effectiveCap = max(floor, cap * (1 - k * severity))`. Returns the
+ * unmodified `cap` byte-identically when the toggle is off, severity is unavailable/degraded, or
+ * any input is non-finite — the taper can only ever engage when the owner has explicitly turned it
+ * on AND a trustworthy (non-degraded) severity read is available.
+ */
+function taperedCrisisCap(cap: number, context: PolicyContext): number {
+  const riskRules = context.policy.riskRules;
+  if (riskRules?.severityTaperEnabled !== true) return cap;
+
+  const severityResult = context.regimeSeverity;
+  if (!severityResult || severityResult.degraded) return cap;
+  const severity = severityResult.severity;
+  if (!Number.isFinite(severity)) return cap;
+
+  const slope = riskRules.severityTaperSlope ?? 0.5;
+  if (!Number.isFinite(slope)) return cap;
+  const floor = riskRules.severityTaperFloorPct ?? 0;
+  if (!Number.isFinite(floor) || floor < 0) return cap;
+
+  const tapered = cap * (1 - slope * Math.max(0, Math.min(1, severity)));
+  return Math.max(floor, Math.min(cap, tapered));
 }
 
 // Typed-enum adoption (risk lane): classify the persisted regime label once via the shared source

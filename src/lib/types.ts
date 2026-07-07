@@ -505,6 +505,28 @@ export interface RiskRules {
    * The breaker itself is still opt-in via the thresholds above (unset ⇒ no breaker at all).
    */
   drawdownBreakerAction?: "advisory" | "close_only" | "halt";
+  /**
+   * Multi-signal-regime-scorer lane (advisory-first, docs/reviews/2026-07-04-expert-design-review.md
+   * E1/E4): OPT-IN continuous taper on top of the existing binary `tuning.crisisMaxOpeningExposurePct`
+   * cap. DEFAULT `false`/undefined — off ⇒ `deRiskInCrisisReason` (policy.ts) is byte-identical to
+   * before this lane existed; the binary crisis cap alone governs. When turned on, the cap shrinks
+   * continuously with the scored regime severity (src/lib/regime-severity.ts) instead of only
+   * stepping at the crisis/inverted boundary. Never a new hard gate: it only tightens an
+   * already-opt-in, already-overridable cap, and the resulting block reason stays escalatable
+   * (routes through the same autonomyOverride path as the binary cap).
+   */
+  severityTaperEnabled?: boolean;
+  /**
+   * Taper slope `k` in `effectiveCap = max(floor, cap * (1 - k * severity))`. Default 0.5 (modest,
+   * per the composite review's "expose slope k ... defaulted modestly"). Only consulted when
+   * severityTaperEnabled is true.
+   */
+  severityTaperSlope?: number;
+  /**
+   * Floor (%) the tapered crisis cap can never shrink below, preventing a runaway squeeze to zero
+   * opening exposure even at severity 1. Default 0. Only consulted when severityTaperEnabled is true.
+   */
+  severityTaperFloorPct?: number;
 }
 
 export interface NotificationSettings {

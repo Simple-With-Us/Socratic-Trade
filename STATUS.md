@@ -8,6 +8,18 @@ steps materially change.
 > (Planned / In Progress / Completed / Deployed-to-prod). Every agent keeps it
 > current per the `AGENTS.md` handoff protocol.
 
+## 2026-07-05 — Multi-signal regime severity scorer (MONET risk lane 1/5)
+Branch `monet/multi-signal-regime-scorer`, PR pending. First of the 5 handed-back MONET risk lanes.
+New `src/lib/regime-severity.ts` blends VIX + VIX term structure + HY credit spread + 2s10s curve +
+breadth into a continuous `[0,1]` severity (advisory-first, extends `market-regime.ts`). Scored once
+per run at the existing macro/breadth seam (zero new network calls), audited (`regime_severity_scored`),
+injected as **advisory** prompt context. The only gate touch is an **opt-in, default-OFF** continuous
+taper of the *existing* crisis opening-exposure cap in `policy.ts` (`riskRules.severityTaperEnabled`) —
+it can only ever tighten an already-opt-in, already-overridable cap (bounded by floor + `min(cap,…)`),
+never a new gate; **byte-identical when off (default).** A thin/absent feed degrades to the coarse base
+severity, never a confident high reading. Gate: tsc clean, lint 0 errors, 267 files/2662 tests, build
+ok. See `docs/rollouts/2026-07-05-multi-signal-regime-scorer.md`. Next: fractional-kelly (lane 2).
+
 ## 2026-07-05 — HyDE + evidence-derived multi-query retrieval for filings RAG (CLAUDE, worktree `~/apps/trading-wt-hyde`, branch `claude/hyde-multiquery`)
 New `src/lib/rag/multi-query.ts`: pure `deriveQueryVariants()` (2-4 evidence/sector/dominant-factor
 facet sub-queries — risk/guidance/litigation/supply-chain — deterministic, no I/O, `[]` on a bare

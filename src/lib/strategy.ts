@@ -97,7 +97,8 @@ import {
 } from "./prompt-safety";
 import { debateProposal } from "./red-team";
 import { isEscalationRegime } from "./regime-watch";
-import { isRiskOffFilterRegime, regimeFromLabel } from "./market-regime";
+import { classifyMarketRegime, isRiskOffFilterRegime, regimeFromLabel } from "./market-regime";
+import { scoreRegimeSeverity, type RegimeSeverityResult } from "./regime-severity";
 import { summarizeOpenAiRequest, summarizeOpenAiResponseText, summarizeTradeProposals } from "./telemetry-sanitize";
 import {
   applySocraticOverrideSizing,
@@ -906,6 +907,11 @@ export async function runStrategyOnce(
     // Bull proposals were NOT critiqued — route them to human review below instead of auto-executing.
     let bearReviewUnavailable = false;
     let bearReviewReason: string | undefined;
+    // Multi-signal continuous regime severity, scored once inside proposeTrades at the macro/breadth
+    // assembly seam and threaded back here so evaluateTradeProposal's PolicyContext can carry it (see
+    // policy.ts's opt-in, default-OFF crisis-cap taper). Undefined when the LLM step is skipped this
+    // run — the taper below then no-ops exactly like a degraded/absent read.
+    let regimeSeverity: RegimeSeverityResult | undefined;
     if (!skipLlmDueToScoreThreshold && !skipLlmDueToBudget) {
       const proposed = await proposeTrades({
         runId,
@@ -933,6 +939,7 @@ export async function runStrategyOnce(
       llmSteps = proposed.llmSteps;
       bearReviewUnavailable = proposed.bearReviewUnavailable === true;
       bearReviewReason = proposed.bearReviewReason;
+      regimeSeverity = proposed.regimeSeverity;
       // Advisory injection receipts from the prompt-assembly scan (audited inside proposeTrades):
       // fold into kind-'safety' evidence, one item per flagged field, so every decision case this
       // run records carries the receipt. Never alters proposals or routing.
@@ -1339,7 +1346,11 @@ export async function runStrategyOnce(
         // PDT gate (FINRA Rule 4210): only meaningful for LIVE execution — skip the count entirely otherwise.
         priorDayTradeCount: isLiveExecution
           ? countDayTradesInLastBusinessDays(policy.accountNumber, 5, new Date(), userId)
-          : 0
+          : 0,
+        // Multi-signal continuous regime severity (advisory by default): only ever read by the
+        // opt-in, default-OFF crisis-cap taper in deRiskInCrisisReason. Undefined when this run
+        // skipped the LLM step — the taper then no-ops exactly like a degraded/absent read.
+        regimeSeverity
       });
 
       // Pre-veto fold-in (Option 2): the two PRE-POLICY vetoes (deterministic-bear filter + approval-
@@ -2988,6 +2999,13 @@ interface ProposeTradesResult {
    * decision-case evidence. NEVER affects the proposals themselves.
    */
   promptSafetyFindings?: InjectionFinding[];
+  /**
+   * Multi-signal continuous regime severity scored once per run at the same seam macroDerived/
+   * marketInternals are assembled (see scoreRegimeSeverity call above). Threaded back to
+   * runStrategyOnce so evaluateTradeProposal's PolicyContext.regimeSeverity can be populated for
+   * policy.ts's opt-in (default OFF) crisis-cap taper. Purely additive — advisory-only when unused.
+   */
+  regimeSeverity?: RegimeSeverityResult;
 }
 
 async function proposeTrades(input: {
@@ -3193,6 +3211,33 @@ async function proposeTrades(input: {
   const marketInternals = input.marketScan ? computeMarketInternals(input.marketScan) : undefined;
   const macroDerived = deriveMacroMetrics(macro, { marketEarningsYield: marketInternals?.medianEarnYld });
 
+  // Multi-signal continuous regime SEVERITY (MONET risk lane, additive to the coarse per-bucket
+  // classifyMarketRegime severity): blends VIX, VIX term structure, HY credit spread, the 2s10s
+  // curve, and breadth into one [0,1] read. Purely ADVISORY here — it rides into the prompt as
+  // context (see `regimeSeverity` on userContent below) and is threaded to the caller so the
+  // opt-in (default OFF) crisis-cap taper in policy.ts can optionally read it. Zero new network
+  // calls: every input is already fetched above for the prompt.
+  const regimeSeverity = scoreRegimeSeverity({
+    vix: Number.isFinite(parseFloat(macro.vix)) ? parseFloat(macro.vix) : undefined,
+    vixTermStructure: macroDerived.vixTermStructure,
+    hyCreditSpread: Number.isFinite(parseFloat(macro.hyCreditSpread)) ? parseFloat(macro.hyCreditSpread) : undefined,
+    curve2s10s: macroDerived.curve2s10s,
+    breadthPct: marketInternals?.breadthPct,
+    baseRegime: classifyMarketRegime(macro).regime
+  });
+  audit(
+    "regime_severity_scored",
+    {
+      runId: input.runId,
+      severity: regimeSeverity.severity,
+      regime: regimeSeverity.regime,
+      subScores: regimeSeverity.subScores,
+      contributingSignals: regimeSeverity.contributingSignals,
+      degraded: regimeSeverity.degraded
+    },
+    input.userId
+  );
+
   // Market-wide regime/sentiment from free, no-key sources (Cboe tail-risk, CFTC positioning,
   // Fama-French factor regime). Cached 6h; failure-tolerant — never blocks a run.
   const marketSignals = await getMarketSignals(input.userId).catch(() => undefined);
@@ -3256,6 +3301,10 @@ async function proposeTrades(input: {
     macroeconomicData,
     ...(Object.keys(macroDerived).length > 0 ? { macroDerived } : {}),
     ...(marketInternals ? { marketInternals } : {}),
+    // ADVISORY context only — informs the Bull/Bear debate exactly like macroDerived/marketInternals
+    // above; it cannot block anything on its own. See policy.ts's opt-in (default OFF) taper for the
+    // only place this number can ever tighten a cap.
+    regimeSeverity,
     ...(marketSignals && Object.keys(marketSignals).length > 0 ? { marketSignals } : {}),
     ...(sectorComposition ? { sectorComposition } : {}),
     ...(thesisScorecard.length > 0 ? { thesisOutcomes: thesisScorecard.slice(0, 12) } : {}),
@@ -3771,6 +3820,7 @@ async function proposeTrades(input: {
       llmSteps,
       bearReviewUnavailable: true,
       bearReviewReason: reason,
+      regimeSeverity,
       ...(promptSafetyFindings.length > 0 ? { promptSafetyFindings } : {})
     };
   };
@@ -3891,7 +3941,12 @@ async function proposeTrades(input: {
     status: "completed",
     proposalCount: bearProposals.length
   });
-  return { proposals: bearProposals, llmSteps, ...(promptSafetyFindings.length > 0 ? { promptSafetyFindings } : {}) };
+  return {
+    proposals: bearProposals,
+    llmSteps,
+    regimeSeverity,
+    ...(promptSafetyFindings.length > 0 ? { promptSafetyFindings } : {})
+  };
 }
 
 function currentPricesFromScan(scan?: MarketScan): Record<string, number> {

@@ -237,6 +237,15 @@ to `socratictrade.com`, record the release commit + date here._
 ---
 
 ## 🔨 In Progress
+- **Multi-signal regime severity scorer (MONET risk lane 1/5)** — branch
+  `monet/multi-signal-regime-scorer` — **IN PROGRESS 2026-07-05, PR pending.** First of the 5
+  handed-back MONET risk lanes. New `src/lib/regime-severity.ts` blends VIX + VIX term structure + HY
+  credit spread + 2s10s curve + breadth → continuous `[0,1]` severity (advisory-first). Scored once/run
+  at the existing macro/breadth seam (zero new network calls), audited, injected as advisory prompt
+  context. Only gate touch = opt-in **default-OFF** continuous taper of the existing crisis
+  opening-exposure cap (`riskRules.severityTaperEnabled`) — tightens-only, bounded, never a new gate,
+  byte-identical when off. Thin/absent feed degrades to base severity (never a confident high). Gate:
+  tsc/lint-0/267 files-2662 tests/build. See `docs/rollouts/2026-07-05-multi-signal-regime-scorer.md`.
 - **HyDE + evidence-derived multi-query retrieval for filings RAG** (CLAUDE, worktree
   `~/apps/trading-wt-hyde`, branch `claude/hyde-multiquery`) — **IN PROGRESS 2026-07-05, review
   fixes applied same day (second commit).** New `src/lib/rag/multi-query.ts`: pure
