@@ -1,52 +1,64 @@
 // db-settings.ts — user/global settings, internal settings, DataPoolConsent, MarketDataDemand
 // All functions depend on getDb() and audit() from "./db" (the core barrel).
-import { getDb, audit } from "./db";
+import { audit } from "./db";
+import { getDrizzle } from "./db/client";
+import { settings, userSettings, marketDataDemands } from "./db/schema";
+import { eq, like, and, lte, gt } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 // ── Global settings (legacy/internal) ─────────────────────────────────────────
 
 export function getSetting<T>(key: string, fallback: T): T {
-  const row = getDb().prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
+  const row = getDrizzle().select().from(settings).where(eq(settings.key, key)).get();
   if (!row) return fallback;
   try {
     return JSON.parse(row.value) as T;
   } catch {
-    return row.value as T;
+    return row.value as unknown as T;
   }
 }
 
 export function setSetting(key: string, value: unknown): void {
-  getDb()
-    .prepare(
-      "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
-    )
-    .run(key, JSON.stringify(value), new Date().toISOString());
+  const updated_at = new Date().toISOString();
+  const stringValue = JSON.stringify(value);
+  getDrizzle()
+    .insert(settings)
+    .values({ key, value: stringValue, updated_at })
+    .onConflictDoUpdate({
+      target: settings.key,
+      set: { value: stringValue, updated_at }
+    })
+    .run();
   audit("policy_change", { key, value });
 }
 
 export function getInternalSetting<T>(key: string): T | undefined {
-  const row = getDb().prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
+  const row = getDrizzle().select().from(settings).where(eq(settings.key, key)).get();
   if (!row) return undefined;
   return JSON.parse(row.value) as T;
 }
 
 export function setInternalSetting(key: string, value: unknown): void {
-  getDb()
-    .prepare(
-      "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
-    )
-    .run(key, JSON.stringify(value), new Date().toISOString());
+  const updated_at = new Date().toISOString();
+  const stringValue = JSON.stringify(value);
+  getDrizzle()
+    .insert(settings)
+    .values({ key, value: stringValue, updated_at })
+    .onConflictDoUpdate({
+      target: settings.key,
+      set: { value: stringValue, updated_at }
+    })
+    .run();
 }
 
 export function deleteInternalSetting(key: string): void {
-  getDb().prepare("DELETE FROM settings WHERE key = ?").run(key);
+  getDrizzle().delete(settings).where(eq(settings.key, key)).run();
 }
 
 /** Find the first settings row whose key matches a LIKE pattern.  Used for
  *  state-recovery during OAuth callbacks where userId is not yet in scope. */
 export function findInternalSettingByKeyLike<T>(pattern: string): { key: string; value: T } | undefined {
-  const row = getDb()
-    .prepare("SELECT key, value FROM settings WHERE key LIKE ? LIMIT 1")
-    .get(pattern) as { key: string; value: string } | undefined;
+  const row = getDrizzle().select().from(settings).where(like(settings.key, pattern)).limit(1).get();
   if (!row) return undefined;
   return { key: row.key, value: JSON.parse(row.value) as T };
 }
@@ -54,16 +66,25 @@ export function findInternalSettingByKeyLike<T>(pattern: string): { key: string;
 // ── Per-user settings ──────────────────────────────────────────────────────────
 
 export function getUserSetting<T>(userId: string, key: string, fallback: T): T {
-  const row = getDb().prepare("SELECT value FROM user_settings WHERE user_id = ? AND key = ?").get(userId, key) as { value: string } | undefined;
+  const row = getDrizzle().select().from(userSettings).where(and(eq(userSettings.user_id, userId), eq(userSettings.key, key))).get();
   if (!row) return fallback;
-  try { return JSON.parse(row.value) as T; } catch { return row.value as T; }
+  try { return JSON.parse(row.value) as T; } catch { return row.value as unknown as T; }
 }
 
 export function setUserSetting(userId: string, key: string, value: unknown): void {
   const id = `${userId}_${key}`;
-  getDb().prepare(
-    "INSERT INTO user_settings (id, user_id, key, value, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
-  ).run(id, userId, key, JSON.stringify(value), new Date().toISOString());
+  const updated_at = new Date().toISOString();
+  const stringValue = JSON.stringify(value);
+  getDrizzle().insert(userSettings).values({
+    id,
+    user_id: userId,
+    key,
+    value: stringValue,
+    updated_at
+  }).onConflictDoUpdate({
+    target: [userSettings.user_id, userSettings.key],
+    set: { value: stringValue, updated_at }
+  }).run();
   audit("policy_change", { userId, key, value }, userId);
 }
 
@@ -161,9 +182,10 @@ function isoFromNow(now: number | string | Date): string {
 }
 
 function pruneExpiredMarketDataDemands(nowIso: string): void {
-  getDb()
-    .prepare("UPDATE market_data_demands SET status = 'expired' WHERE status = 'pending' AND expires_at <= ?")
-    .run(nowIso);
+  getDrizzle().update(marketDataDemands)
+    .set({ status: 'expired' })
+    .where(and(eq(marketDataDemands.status, 'pending'), lte(marketDataDemands.expires_at, nowIso)))
+    .run();
 }
 
 export function recordMarketDataDemand(input: {
@@ -181,23 +203,31 @@ export function recordMarketDataDemand(input: {
   const ttlMs = Number.isFinite(input.ttlMs) && input.ttlMs! > 0 ? input.ttlMs! : marketDataDemandTtlMs();
   const expiresAt = new Date(Date.parse(nowIso) + ttlMs).toISOString();
   const id = `${kind}:${symbol}:${userId}`;
+  
   pruneExpiredMarketDataDemands(nowIso);
-  getDb()
-    .prepare(
-      `INSERT INTO market_data_demands (
-        id, kind, symbol, user_id, status, requested_at, last_requested_at, fulfilled_at, expires_at
-      ) VALUES (?, ?, ?, ?, 'pending', ?, ?, NULL, ?)
-      ON CONFLICT(kind, symbol, user_id) DO UPDATE SET
-        status = 'pending',
-        requested_at = CASE
-          WHEN market_data_demands.status = 'pending' THEN market_data_demands.requested_at
-          ELSE excluded.requested_at
-        END,
-        last_requested_at = excluded.last_requested_at,
-        fulfilled_at = NULL,
-        expires_at = excluded.expires_at`
-    )
-    .run(id, kind, symbol, userId, nowIso, nowIso, expiresAt);
+  
+  // Note: ON CONFLICT DO UPDATE SET requested_at = CASE ... END is somewhat complex in Drizzle.
+  // We can use sql\`\` operator to achieve the same result.
+  getDrizzle().insert(marketDataDemands).values({
+    id,
+    kind,
+    symbol,
+    user_id: userId,
+    status: 'pending',
+    requested_at: nowIso,
+    last_requested_at: nowIso,
+    fulfilled_at: null,
+    expires_at: expiresAt
+  }).onConflictDoUpdate({
+    target: [marketDataDemands.kind, marketDataDemands.symbol, marketDataDemands.user_id],
+    set: {
+      status: 'pending',
+      requested_at: sql`CASE WHEN market_data_demands.status = 'pending' THEN market_data_demands.requested_at ELSE ${nowIso} END`,
+      last_requested_at: nowIso,
+      fulfilled_at: null,
+      expires_at: expiresAt
+    }
+  }).run();
 }
 
 export function fulfillMarketDataDemand(input: {
@@ -210,22 +240,30 @@ export function fulfillMarketDataDemand(input: {
   if (!symbol) return undefined;
   const fulfilledAt = isoFromNow(input.now ?? new Date());
   pruneExpiredMarketDataDemands(fulfilledAt);
-  const rows = getDb()
-    .prepare(
-      `SELECT user_id, requested_at, last_requested_at
-       FROM market_data_demands
-       WHERE kind = ? AND symbol = ? AND status = 'pending' AND expires_at > ?`
-    )
-    .all(kind, symbol, fulfilledAt) as Array<{ user_id: string; requested_at: string; last_requested_at: string }>;
+  
+  const rows = getDrizzle()
+    .select({ user_id: marketDataDemands.user_id, requested_at: marketDataDemands.requested_at, last_requested_at: marketDataDemands.last_requested_at })
+    .from(marketDataDemands)
+    .where(and(
+      eq(marketDataDemands.kind, kind),
+      eq(marketDataDemands.symbol, symbol),
+      eq(marketDataDemands.status, 'pending'),
+      gt(marketDataDemands.expires_at, fulfilledAt)
+    ))
+    .all();
+
   if (rows.length === 0) return undefined;
 
-  getDb()
-    .prepare(
-      `UPDATE market_data_demands
-       SET status = 'fulfilled', fulfilled_at = ?
-       WHERE kind = ? AND symbol = ? AND status = 'pending' AND expires_at > ?`
-    )
-    .run(fulfilledAt, kind, symbol, fulfilledAt);
+  getDrizzle()
+    .update(marketDataDemands)
+    .set({ status: 'fulfilled', fulfilled_at: fulfilledAt })
+    .where(and(
+      eq(marketDataDemands.kind, kind),
+      eq(marketDataDemands.symbol, symbol),
+      eq(marketDataDemands.status, 'pending'),
+      gt(marketDataDemands.expires_at, fulfilledAt)
+    ))
+    .run();
 
   return {
     kind,
@@ -238,7 +276,7 @@ export function fulfillMarketDataDemand(input: {
 }
 
 export function clearMarketDataDemandsForTests(): void {
-  getDb().prepare("DELETE FROM market_data_demands").run();
+  getDrizzle().delete(marketDataDemands).run();
 }
 
 // ── Per-user auto-resume-on-boot ─────────────────────────────────────────────
