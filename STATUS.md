@@ -11,6 +11,9 @@ steps materially change.
 ## 2026-07-09 — Reviewed-by-model proposal stamp (AG, branch `agent/antigravity-reviewed-by-model`)
 Resumed and verified the `reviewedByModel` proposal stamp task. Stamped `reviewedByModel` on trade proposals during the Red Team review loop, persisted it in closed lots, propagated it to the model stats API, and aggregated realized performance symmetrically for the Reviewer role. Gate green: tsc clean, lint 0 errors, 727 tests passed, Next.js build clean. PR opened via `land.sh`. See [2026-07-09-reviewed-by-model-proposal-stamp.md](file:///Users/jay/Code/Socratic.Trade/docs/rollouts/2026-07-09-reviewed-by-model-proposal-stamp.md).
 
+## 2026-07-09 — Infinite loading fix for SSE events aborting fetchDashboard (AG)
+Owner reported the app getting stuck on the loading screen. Root cause: frequent server-sent events (`market-data`) triggering `queueRefresh` were constantly aborting `fetchDashboard` requests before they could complete. Modified `useConsoleData` to mark interval and SSE refreshes as `background: true`, preventing them from aborting requests that are already in flight. See `docs/rollouts/2026-07-09-infinite-loading-fix.md`.
+
 ## 2026-07-08 - UI wave 4: scope dropdown + floating Tabs sheet (CLAUDE)
 Branch `claude/ui-polish-wave` (PR pending). ScopeSelector rebuilt Sheet->real anchored dropdown with
 'Configure accounts' item, wider desktop trigger, chevron aligned+rotating; mobile Tabs sheet now floats

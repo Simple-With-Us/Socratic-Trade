@@ -131,7 +131,7 @@ dead after the preview retirement; the pre-push hook they used to install is now
 by `scripts/land.sh`). The "Preview freshness policy" section below is historical.
 
 Hosting is now Coolify on the Hetzner box (`135.181.192.190`, 8 GB `ubuntu-8gb-hel1-2`,
-dashboard `https://jays.services` — direct DNS, no Mac dependency; migrated 2026-07-09
+dashboard `https://host.jays.services` — direct DNS, no Mac dependency; migrated 2026-07-09
 from the 4 GB `91.98.44.8` box, which is kept stopped as rollback until the owner deletes
 it — see `docs/rollouts/2026-07-09-hetzner-8gb-server-migration.md`). The box hosts
 `socratic-trade-prod` (= `socratictrade.com`, see the production stanza below) plus the

@@ -231,6 +231,7 @@ As of 2026-07-08 (assignment-rule update).
   `socratictrade.com`; production health 200 and live Roth IRA Settings page verified.
 
 ## Completed
+- **Infinite loading fix for SSE events aborting fetchDashboard (AG) — ✅ COMPLETED 2026-07-09.** Owner reported the app getting stuck on the loading screen. Root cause: frequent server-sent events (`market-data`) triggering `queueRefresh` were constantly aborting `fetchDashboard` requests before they could complete. Modified `useConsoleData` to mark interval and SSE refreshes as `background: true`, preventing them from aborting requests that are already in flight.
 - **MONET usage-cap pickup (CLAUDE, owner-directed, worktree
   `.claude/worktrees/monet-usage-cap-work-0038cf`) — ✅ COMPLETED 2026-07-09 evening.** MONET hit
   its usage cap ~17:05 CDT mid-merge-shepherding; the owner directed CLAUDE to pick up everything
