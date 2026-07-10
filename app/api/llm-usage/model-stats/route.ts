@@ -38,7 +38,7 @@ export async function GET(request: Request) {
   for (const account of listConnectedAccounts(userId)) {
     if (!account.accountNumber) continue;
     const { closedLots: lots } = calculatePnl(listFillEvents(account.accountNumber, undefined, 500, userId), {});
-    for (const lot of lots) closedLots.push({ entryModel: lot.entryModel, pnl: lot.pnl, returnPct: lot.returnPct });
+    for (const lot of lots) closedLots.push({ entryModel: lot.entryModel, reviewedByModel: lot.reviewedByModel, pnl: lot.pnl, returnPct: lot.returnPct });
   }
 
   const stats = aggregateModelStats({

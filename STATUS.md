@@ -8,6 +8,16 @@ steps materially change.
 > (Planned / In Progress / Completed / Deployed-to-prod). Every agent keeps it
 > current per the `AGENTS.md` handoff protocol.
 
+## 2026-07-10 — Reviewed-by-model proposal stamp (AG, branch `agent/antigravity-reviewed-by-model`)
+Resumed and completed the `reviewedByModel` proposal stamp task. 
+- Added `reviewedByModel` to `TradeProposal` and `ClosedLotLike`.
+- Stamped `reviewedByModel` during the red team review loop in `strategy.ts`.
+- Propagated the model string to `Model Stats` drawer data (`src/lib/model-stats.ts`) to compute realized performance for the Reviewer role.
+- Validated via `tsc`, `lint`, `vitest test/model-stats.test.ts`, and full `npm test`.
+- Rollout note: `docs/rollouts/2026-07-10-reviewed-by-model-proposal-stamp.md`.
+- Next step: wait for full verification and land via `scripts/land.sh`.
+
+
 ## 2026-07-09 — Intro size jump (real AR) + remove loading text (MONET, branch `monet/intro-size-jump-3676f7`)
 Owner (prod, both viewports): wordmark still had a sudden SIZE change ~1s after the candles
 assemble; also remove the "Socratic Trade / Loading the autonomy desk…" text during load. Root

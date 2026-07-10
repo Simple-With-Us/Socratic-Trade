@@ -1345,6 +1345,9 @@ export async function runStrategyOnce(
           // Structured failure classification ("RED TEAM FAILED" flag) — absent when available.
           ...(redTeamResult.failureKind ? { failureKind: redTeamResult.failureKind } : {})
         };
+        if (redTeamResult.model) {
+          proposal.reviewedByModel = redTeamResult.model;
+        }
         if (redTeamResult.rejected) {
           console.log(`[Debate] Rejected ${proposal.symbol} ${proposal.side}: ${redTeamResult.reason}`);
           // Pre-veto override (Veto B): an available-and-rejecting Bear is ADVISORY when the agent

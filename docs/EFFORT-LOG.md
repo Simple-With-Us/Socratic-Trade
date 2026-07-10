@@ -43,23 +43,50 @@ As of 2026-07-08 (assignment-rule update).
 ---
 
 ## Deployed
+- **PROD RELEASE 2026-07-09 (MONET, roth-gemini/runonce session): Coolify deploy gy3sbqag
+  FINISHED + health-verified — production = `main@f9a37611` exactly (container healthy,
+  /api/health ok, scheduler ticking; disk held 9.6G free).** Shipped PR #1190 (Roth IRA
+  Gemini-400 TRUE root cause = maxItems x schema-complexity overflow -> toGeminiJsonSchema
+  strips maxItems; async Run-once = 8s window then 202 started; console HTML-error shield vs
+  raw CF 524) + #1191 single-adversary consolidation (rode along; that lane's payload). Deploy
+  RECOVERY note: first attempt (p11b55w1) WEDGED at 100% disk (67MB free) — reclaimed ~14G of
+  unused Docker images + build cache (volumes/running-app untouched; documented 4GB-box
+  hazard), cancelled the stall, re-triggered clean. Gemini fix confirmed present in the running
+  image; Robinhood sub-$1 min-guard fired once in prod (my alert-triage fix working). Roth's
+  live proof pends the 13:30Z regular open (Roth runDuringExtendedHours=false — correctly gated,
+  NOT a bug); 08:41 CDT auto-confirm scheduled. Rollout:
+  docs/rollouts/2026-07-09-roth-gemini-400-runonce-async.md.
+- **PROD RELEASE 2026-07-09 (FIRST announce-then-deploy run, MONET ui-sweep session):
+  Coolify deploy FINISHED + health-verified — `/api/health` ok:true, db ok, scheduler
+  ticking (15s age); production = `main` HEAD as of trigger (>= `f849c342`).** Shipped the
+  undeployed batch: CODEX #1181 (Home evidence SymbolButton drawer parity) + #1184
+  (guardrails tooltip titles) + docs close-outs #1183/#1185/#1186 (+ docs-only #1188
+  AGENTS.md ANNOUNCE-THEN-DEPLOY reconcile if it merged in-window). First release under the
+  2026-07-09 owner ruling: single claim line + 10-min no-objection window + deployer owns
+  verify/boards — no double-trigger (contrast the 8bc0967f release below). Disk-cleanup lane
+  ran in parallel; build did not wedge.
 - **PROD RELEASE 2026-07-09 (owner-directed in-session, MONET prod-release): Coolify
   deploy `krk1db6x` FINISHED + verified — production = `main@8bc0967f` EXACTLY.**
   Ships Codex PR #1175 (Red Team efficacy Results card) and PR #1174 (LIVE bulk
   typed-confirm approval flow) on top of prior production `6a59a7eb`. Verified by
   MONET via Coolify/container health plus `/api/health` ok and scheduler ticking; Codex
   independently checked `/api/health` 200 during the deploy watch.
-- **Wire the getRedTeamEfficacy scorecard into the console (CODEX, M) — IN PROGRESS 2026-07-08.**
-  STATE CORRECTION 2026-07-09: deployed to production via Coolify deploy `krk1db6x`
-  at `main@8bc0967f` after PR #1175 (`9cc99963`) merged. The deployed Results card
-  surfaces the veto-efficacy snapshot, sample gating, override splits, and
-  `unattributed` reviewer history described in the rollout note.
-- **Batch typed-confirm flow for LIVE proposals in approvals triage (CODEX, M) — IN PROGRESS 2026-07-08.**
-  STATE CORRECTION 2026-07-09: deployed to production via Coolify deploy `krk1db6x`
-  at `main@8bc0967f` after PR #1174 (`8bc0967f`) merged. The deployed approval flow
-  uses the server-side bulk route, server-derived live batch membership, 20-row cap,
-  row-honest partial outcomes, and aggregate typed phrase when the owner setting
-  requires it.
+- **Wire the getRedTeamEfficacy scorecard into the console (CODEX, M) — DEPLOYED
+  2026-07-09 via PR #1175 (`9cc99963`) and Coolify deploy `krk1db6x`
+  (`main@8bc0967f`).** Results now surfaces veto-efficacy snapshot data, sample
+  gating, override splits, and `unattributed` reviewer history in production.
+- **Batch typed-confirm flow for LIVE proposals in approvals triage (CODEX, M) —
+  DEPLOYED 2026-07-09 via PR #1174 (`8bc0967f`) and Coolify deploy `krk1db6x`
+  (`main@8bc0967f`).** LIVE bulk approve now uses the server-side batch route,
+  server-derived live membership, 20-row cap, row-honest partial outcomes, and one
+  aggregate typed phrase when the owner setting requires it.
+- **PROD RELEASE 2026-07-08 (owner-directed in-session, MONET intro-anim session): Coolify
+  deploy `nitgo442` FINISHED + verified — production = `main@6a59a7eb` EXACTLY.** Ships #1170
+  (intro landing fixes) + #1171 (shared-dep cleanup) + #1173 (mobile chrome bar) + #873
+  (motion bump) + #1178 (mobile nav/drawer wave). Verified: deployment-record commit
+  6a59a7eb, app running:healthy, edge 307->/login 200, /api/health ok:true scheduler
+  ticking. All merged work is in production as of this stanza. (Lane owners: flip your own
+  Completed rows for #1178/#1171 to Deployed.)
 - **Intro->logo handoff polish + mobile brand row (MONET) — DEPLOYED 2026-07-08 (merged as
   PR #1112 = `7209f0f3`; in production via the SSE-fix Coolify RESTART `y8ie6lgx`, whose
   deployment record shows commit 7209f0f3 exactly — a Coolify "restart" on this git-sourced
@@ -204,23 +231,80 @@ As of 2026-07-08 (assignment-rule update).
   `socratictrade.com`; production health 200 and live Roth IRA Settings page verified.
 
 ## Completed
-- **Scoring-factor weight tooltips (MONET, S) — COMPLETED 2026-07-09, branch
-  `monet/scoring-factor-tooltips`.** Owner-directed display-only pass: added a
-  hover tooltip (existing `Tooltip` primitive, `app/console/ui/primitives.tsx`)
-  to each of the 8 "Scoring-factor weights" controls on the Strategy console
-  page explaining what the factor measures and which direction more weight
-  pushes candidate ranking, plus one sentence in the card intro clarifying the
-  weights are relative (ratios matter, not absolute numbers). No scoring-math
-  changes. Gate green: tsc clean, lint 0 errors, 3168 tests, build clean.
-  PR #1205 (auto-merge armed). See
+- **Infinite loading fix for SSE events aborting fetchDashboard (AG) — ✅ COMPLETED 2026-07-09.** Owner reported the app getting stuck on the loading screen. Root cause: frequent server-sent events (`market-data`) triggering `queueRefresh` were constantly aborting `fetchDashboard` requests before they could complete. Modified `useConsoleData` to mark interval and SSE refreshes as `background: true`, preventing them from aborting requests that are already in flight.
+- **Reviewed-by-model proposal stamp (AG, branch `agent/antigravity-reviewed-by-model`) — ✅ COMPLETED 2026-07-10.** Resumed and verified the `reviewedByModel` proposal stamp task. Stamped `reviewedByModel` on trade proposals during the Red Team review loop, persisted it in closed lots, propagated it to the model stats API, and aggregated realized performance symmetrically for the Reviewer role. Gate green: tsc clean, lint 0 errors, 3168 tests passed, Next.js build clean. PR opened via `land.sh`. See [2026-07-10-reviewed-by-model-proposal-stamp.md](file:///Users/jay/Code/Socratic.Trade/docs/rollouts/2026-07-10-reviewed-by-model-proposal-stamp.md).
+- **MONET usage-cap pickup (CLAUDE, owner-directed, worktree
+  `.claude/worktrees/monet-usage-cap-work-0038cf`) — ✅ COMPLETED 2026-07-09 evening.** MONET
+  capped ~17:05 CDT mid-merge-shepherding; CLAUDE picked up everything in flight. (a) All 6
+  blocked MONET PRs landed: #1229/#1222/#1221/#1215/#1193 MERGED, #1228 armed post round-2 +
+  conflict resolution. 38 codex findings across two review rounds triaged with adversarial
+  verification — every real one fixed with regression tests, money-path diffs independently
+  diff-reviewed pre-push; late fixes ride follow-ups #1265 (MERGED) /#1266/#1267/#1269 (armed).
+  (b) Un-landed lanes recovered: vitest tmpdir-leak #1268 MERGED, settings-UX #1270 MERGED
+  (incl. real policy-diff looser/tighter bug), enrichment-starvation #1272 armed. (c) Verified
+  merged pre-cap: #1224, #1227, #1209 (+LoadingBrand), #1217. (d) Deferred: activity audit
+  (MONET's to resume), broker-min bump-to-floor (unstarted), PR #1083 close (owner call, dup of
+  #1082). NO deploys (migration hold honored) — next release also activates TwelveData fix +
+  6 AV keys. Rollout: `docs/rollouts/2026-07-09-monet-usage-cap-pickup.md`. _(An earlier
+  In-Progress row for this pickup was clobbered by the 18:22 board union-merge job — live-only
+  rows don't survive it; worth a job fix.)_
+- **Short stop-loss default (8%) + surface short settings in main Essentials (MONET, branch
+  `monet/short-stop-default-and-surface`) — ✅ COMPLETED 2026-07-09: PR #1221 squash-merged to
+  `main` (codex threads fixed+resolved by the CLAUDE usage-cap pickup; spec-copy follow-up
+  #1265 also merged).**
+  Owner-directed fix: enabling short selling with
+  otherwise-default settings rejected every short proposal because the mandatory short-stop gate
+  (`policy.ts:433`) had nothing to pass by default. `DEFAULT_RISK_RULES` (`src/lib/defaults.ts`)
+  now sets `shortStopLossPct: 8` — a real default (not a `?? stopLossPct` gate fallback, per
+  owner's explicit instruction) that flows through `mergePolicy`'s `riskRules` deep-merge to every
+  policy without an override. Gate logic itself unchanged. Also moved the four `SHORTS` fields
+  (`app/console/guardrails/page.tsx`) from a collapsed "Short selling" `AdvancedGroup` in the
+  Advanced rulebook card to the bottom of the main Essentials card, and updated the
+  `shortStopLossPct` hint copy (`field-defs.ts`) to reflect the new default. Sanity-checked:
+  `evaluateTradeProposal` against a default policy with `shortSellingEnabled: true` (no explicit
+  stop override) now approves a well-sized short. Gate green: tsc clean, lint 0 errors, 3168
+  tests, build clean. See `docs/rollouts/2026-07-09-short-stop-default-and-surface.md`.
+- **Model Stats drawer widened on desktop (MONET, branch `monet/model-stats-drawer-wide`) — COMPLETED
+  2026-07-09, merged to `main` via PR #1213 (auto-merge armed).** Owner-directed console-UI fix: the Model Stats drawer's 4-column
+  table (Model / Cost / Latency / Realized performance) was cramped inside the shared `Sheet`
+  dialog's fixed 560px desktop width. Added an opt-in `wide?: boolean` prop on `Sheet`
+  (`app/console/ui/sheet.tsx`) driving a new `.con-sheet-wide` class (`app/console/console.css`,
+  `min(920px, calc(100vw - 32px))` on desktop; explicitly re-pinned to `width: 100%` inside the
+  existing mobile `@media (max-width: 767px)` block so the bottom-sheet is unaffected). Only
+  `ModelStatsButton` (`app/console/components/model-stats-drawer.tsx`) opts in — the other ~12
+  `Sheet` call-sites (broker connect, policy review, order cancel/replace, approvals, account-scope
+  sheet, etc.) are untouched. Gate green: tsc clean, lint 0 errors, 3168 tests, build clean. See
+  `docs/rollouts/2026-07-09-model-stats-drawer-wide.md`.
+- **Intro size-jump + loading-text fix (MONET) — COMPLETED 2026-07-09, merged to `main` as PR #1209.** Owner (prod, both viewports):
+  wordmark still has a sudden SIZE change ~1s after the candles assemble; also remove the
+  "Socratic Trade / Loading the autonomy desk..." text during load. Diagnosis: (a) the real
+  HeaderLogo's canvas starts at width=height*13.8 (magic estimate) then JUMPS to
+  height*wm.ar when its own effect runs -> width-only size change; the `13.8` estimate is
+  used in header-logo.tsx initial width + shell MobileBrandRow, drifting from the real
+  sampler AR; (b) intro-canvas `curHeader` is a per-effect local so a loading->loaded remount
+  snaps the box. Fix: export single-source WORDMARK_AR from candle-ticker, use everywhere;
+  persist curHeader; drop loading text. Fileset: app/console/ui/candle-ticker.ts,
+  app/console/ui/header-logo.tsx, app/console/components/shell.tsx, app/console/components/intro-canvas.tsx.
+- **Scoring-factor weight tooltips (MONET, S, branch `monet/scoring-factor-tooltips`) — COMPLETED
+  2026-07-09.** Owner-directed display-only pass: added a hover tooltip (existing `Tooltip`
+  primitive, `app/console/ui/primitives.tsx`) to each of the 8 "Scoring-factor weights" controls on
+  the Strategy console page explaining what the factor measures and which direction more weight
+  pushes candidate ranking, plus one sentence in the card intro clarifying the weights are relative
+  (ratios matter, not absolute numbers). No scoring-math changes. Gate green: tsc clean, lint 0
+  errors, 3168 tests, build clean. PR #1205 (auto-merge armed). See
   `docs/rollouts/2026-07-09-scoring-factor-tooltips.md`.
-- **Shared-dep proper-usage cleanup refresh (CODEX, S) — completed 2026-07-08 via PR #1171.**
-  Replaced dirty Cursor PR #1105 without editing the Cursor branch. Merged to `main`
-  as `54b6d722`; #1105 closed as superseded and stale PR #856 closed as obsolete. Cleanup uses
-  shared `CONGRESS_EVENT_TYPES` for event-type checks, derives outbound payload typing from shared
-  `SharePayload`, and drops unused `API_PATHS`/`MAX_REFS_BATCH` imports. Verified locally and in CI:
-  lint 0 errors, tsc clean, 3101 tests, build, smoke, verify, gitleaks, Cursor Approval all green;
-  zero active unresolved review threads.
+- **Drizzle ORM Migration (AG, branch `ag/drizzle-orm-migration`) — ✅ COMPLETED 2026-07-09 (PR via land.sh).** Refactored the app's database layer to use Drizzle ORM instead of the custom SQLite wrapper. Created schema definition in `src/lib/db/schema.ts` (tables: `settings`, `user_settings`, `market_data_demands` with constraints). Updated `src/lib/db-settings.ts` to fully use Drizzle queries. Verified: linting clean, types pass (`tsc --noEmit`), tests pass (`2970/2970`), and build succeeds. See `docs/rollouts/2026-07-09-drizzle-orm-migration.md`.
+- **Picker copy: "Proposer"/"Reviewer" + AI-review panel "Strategist" (MONET, branch
+  `monet/picker-copy-strategist`) — ✅ COMPLETED via PR #1202 (auto-merge armed).** Owner-directed pure display-copy
+  follow-up to PR #1109 (`monet/model-picker-copy2`, which added "Model" to the picker labels):
+  drops "Model" from both picker labels ("Proposer Model"→"Proposer", "Reviewer Model"→"Reviewer")
+  in `app/console/settings/models.tsx` and `app/console/strategy/page.tsx`. This collided with the
+  separate AI-review (strategy-tuning) panel's own "Reviewer model" field and its "Same As Red
+  Team"/"Same As Green Team" default, so that panel's field is renamed "Strategist" (intro sentence
+  now "A strategist model reads...", inherited-label ternary now renders "Reviewer"/"Proposer"). No
+  functional/variable-name changes; all other Red Team/Green Team concept names untouched. Gate
+  green: tsc clean, lint 0 errors, 3168 tests, build clean. See
+  `docs/rollouts/2026-07-09-picker-copy-strategist.md`.
 - Settings affordance and tooltip pass - add clearer option descriptions/tooltips,
   replace confusing loose/tight wording with lock/unlock-style affordances, and
   turn absolute-vs-percent constraint pairs into polished mode switches where
@@ -235,13 +319,38 @@ As of 2026-07-08 (assignment-rule update).
   making ticker symbols open a shared right-side drilldown drawer consistently
   across scan, home, evidence cards, proposals, orders, activity, outcomes,
   approvals, and watchlist.
-  2026-07-09 CODEX: COMPLETED via PR #1181 (`70c0698e`). Re-claimed on branch
-  `codex/console-parity-next` after read-only audit of `origin/main`. Scope was the
-  smallest remaining gap only: add the existing `SymbolButton` affordance to Home
-  evidence cards in `app/console/page.tsx`. Keepout honored: model-picker files and
-  drawer host/API files remain MONET-owned/adjacent. Full local gate and GitHub
-  `verify`/smoke were green before auto-merge. Not yet production-deployed after
-  `70c0698e`.
+  2026-07-09 CODEX: COMPLETED via PR #1181 (`70c0698e`). Re-claimed on branch `codex/console-parity-next`
+  (`/Users/jay/.codex/worktrees/socratic-codex-console-parity`) after read-only audit of
+  `origin/main`. Scope was the smallest remaining gap only: add the existing `SymbolButton`
+  affordance to Home evidence cards in `app/console/page.tsx`. Keepout honored: model-picker
+  files and drawer host/API files remain MONET-owned/adjacent. Full local gate and GitHub
+  `verify`/smoke were green before auto-merge. Not yet production-deployed after `70c0698e`.
+- **Mobile chrome bar fixes, 6 owner-reported items (MONET) — DEPLOYED 2026-07-08 via
+  `nitgo442` (merged as PR #1173).** Owner (prod phone
+  screenshots): (1) account dropdown wider on mobile; (2) Running/Autopilot indicator
+  unboxed + stacked two-line small on mobile (looked like a second dropdown); (3) profile
+  button 44px tap target on mobile; (4) theme toggle moves INTO the profile menu (off the
+  bar); (5) profile menu becomes a slide-DOWN dropdown under the header (old bottom Sheet
+  was covered by the mobile tab bar -> sign-out unreachable); (6) profile button shows the
+  Google/GitHub avatar (snapshot.currentUser.imageUrl already wired, never rendered); plus
+  STOP button squeeze fix (shrink-0 + centered content). Fileset:
+  app/console/components/chrome.tsx, app/console/components/shell.tsx (ChromeBar),
+  app/console/console.css.
+- **Intro landing fixes: viewport-true fallback box + eased retarget + fade gated on real
+  logo (MONET) — DEPLOYED 2026-07-08 via `nitgo442` (merged as PR #1170).** Owner-reported on prod: mobile wordmark assembled a few sizes too small then
+  popped larger; desktop logo vanished ~1s between overlay fade and full page load. Root
+  cause: intro can finish against the loading shell and lands on a stale hard-coded fallback
+  box; reveal then has no mounted logo. Fix in `intro-canvas.tsx` only: fallback box now
+  matches the real logo geometry per viewport (<lg = MobileBrandRow formula, >=lg = bar
+  logo), landing box eases to the measured target instead of snapping, natural fade waits
+  for a settled measured target (8s timeout safety; skip stays immediate).
+- **Shared-dep proper-usage cleanup refresh (CODEX, S) — completed 2026-07-08 via PR #1171.**
+  Replaced dirty Cursor PR #1105 without editing the Cursor branch. Merged to `main`
+  as `54b6d722`; #1105 closed as superseded and stale PR #856 closed as obsolete. Cleanup uses
+  shared `CONGRESS_EVENT_TYPES` for event-type checks, derives outbound payload typing from shared
+  `SharePayload`, and drops unused `API_PATHS`/`MAX_REFS_BATCH` imports. Verified locally and in CI:
+  lint 0 errors, tsc clean, 3101 tests, build, smoke, verify, gitleaks, Cursor Approval all green;
+  zero active unresolved review threads.
 - **Centralize Congress API Client Factory (AG) — COMPLETED 2026-07-08.** Refactored Congress Trade API interaction into a central factory `src/lib/api-clients/congress.ts`. Replaced `src/lib/congress-trade-client.ts`. Updated features to reliably check `CONGRESS_TRADE_READS_ENABLED` and `CONGRESS_TRADE_ANALYTICS_ENABLED` gating flags. Verified: tests pass 2970/2970, build green. PR via land.sh.
 - **Consolidate usage telemetry clients in consumer apps (AG) — ✅ COMPLETED 2026-07-06 (PR #1005).** Replaced `postBatch` telemetry sending logic with `@jaywedgeworth22/congress-trading-shared` in Socratic.Trade.
 
@@ -318,422 +427,13 @@ As of 2026-07-08 (assignment-rule update).
   Rollout doc: `docs/rollouts/2026-07-05-cursor-session.md` (describes intended scope; now
   confirmed-merged via #844).
 
----
-
-## 🚧 In Progress
-
-- **Connected-accounts UI: "Currently Loaded / Other Accounts" restructure + kill Test-Account
-  mock-label spam (MONET, worktree `~/apps/trading-monet-acct-ui`, branch
-  `monet/account-mgmt-ui`) — IN PROGRESS 2026-07-09.** Display-copy + JSX only; no execution/data
-  model/`isActive` changes. (A) partition account list into loaded-first + Other Accounts headings,
-  remove ambiguous `active` chip, rename "Make active" → "Load"; (B) shorten `TEST_ACCOUNT_LABEL`
-  to "Test Account", drop the `broker === "test"` special-case in `realityForAccount` so it reads as
-  a normal paper account, delete the "local mock" chips + repeated "simulated/local" wording (keep
-  one terse "excluded from wash-sale accounting" note — verified real via `tax.ts:197`). Preserves
-  live/paper reality correctness for real broker accounts.
-- **Single-adversary consolidation — ✅ COMPLETED via PR #1191 (merged 2026-07-09, squash `f9a37611`;
-  feature author = Cowork Claude session, landing operator = MONET Mac session).**
-  _2026-07-09 (MONET landing): merged `origin/main` into the branch and resolved the conflicts per
-  `/Users/jay/apps/monet-handoff-2026-07-09.md` — deleted dead inline-Bear stopgaps
-  (`parseBearSurvivors`, orphaned `BEAR_UNAVAILABLE_*` alert constants + the
-  `inline-bear-parse`/`strategy-bear-alert-cooldown` tests), kept main's Proposer/Reviewer naming +
-  ModelStatsButton with the consolidation's no-defaults fail-closed semantics, fixed the e2e
-  money-path test + benchmark script to the single-reviewer API. Landing operator also integrated a
-  late `origin/main` (#1190, async run-once + Gemini maxItems schema): clean re-merge, one semantic
-  fix (the async-route + tuning fixtures had to satisfy the branch's new no-defaults Green-model
-  gate). 4 codex threads resolved: 1 FIXED (tuning blank-model → local-rules, commit `4d4812b0`); 3
-  documented-accepted/intentional (isRiskAddingOpening §3.5 flip-edge, chat MockLLM offline
-  fallthrough, approve-at-half hold label) with owner follow-ups filed. Gate green: tsc 0 / lint
-  0-err / full vitest / build ok. Migration v15 (main took v14). Post-merge: closed PR #1035
-  (superseded), deleted remote `claude/single-adversary-consolidation-wip`. See
-  `docs/rollouts/2026-07-09-single-adversary-landing.md` +
-  `docs/rollouts/2026-07-07-single-adversary-consolidation-impl.md`._
-- **Proposer/Reviewer Model naming + accurate Red-team role description (MONET, branch
-  `monet/model-picker-copy2`) — ✅ COMPLETED via PR #1109 (merged).** Copy-only on both model
-  pickers; the `reviewedByModel` Red attribution gap was carried into the single-adversary lane
-  (now a filed follow-up post-#1191). Follow-up 2026-07-09: see "Picker copy" row below —
-  owner asked to drop "Model" from these labels and disambiguate the AI-review panel.
-- **Picker copy: "Proposer"/"Reviewer" + AI-review panel "Strategist" (MONET, branch
-  `monet/picker-copy-strategist`) — ✅ COMPLETED via PR #1202 (auto-merge armed).** Owner-directed pure
-  display-copy follow-up to PR #1109 above: drops "Model" from both picker labels
-  ("Proposer Model"→"Proposer", "Reviewer Model"→"Reviewer") in
-  `app/console/settings/models.tsx` and `app/console/strategy/page.tsx`. This collided with
-  the separate AI-review (strategy-tuning) panel's own "Reviewer model" field and its "Same
-  As Red Team"/"Same As Green Team" default, so that panel's field is renamed "Strategist"
-  (intro sentence now "A strategist model reads...", inherited-label ternary now renders
-  "Reviewer"/"Proposer"). No functional/variable-name changes; all other Red Team/Green Team
-  concept names untouched. Gate green: tsc clean, lint 0 errors, 3168 tests, build clean. See
-  `docs/rollouts/2026-07-09-picker-copy-strategist.md`.
-- **Run the as-of epoch Pinecone backfill (ops, MONET, session worktree
-  `~/.claude/projects/Socratic.Trade/backfill-asof-epoch-09e06b`, branch
-  `monet/backfill-asof-epoch-09e06b`) — OPS RUN DONE 2026-07-07, docs-only PR landing (this row
-  moves to Completed on merge).** Executed the deferred operational follow-up from CLAUDE's #1019:
-  `scripts/backfill-asof-epoch.ts` vs the shared default Pinecone index, operator ("local") key —
-  dry-run → real run → idempotency re-run. Counts: 341 scanned / **309 updated** / 32 already
-  epoch'd (post-#1019 ingests) / **0 undated / 0 errors**; re-run = 341/341 skippedHasEpoch,
-  0 updated. Corpus fully epoch-stamped: `VECTOR_ASOF_SERVER_FILTER=on` is now safe AND effective;
-  `VECTOR_ASOF_STRICT=on` would currently drop nothing (no undated vectors). NOT done here (owner
-  prod step): flipping either flag — both remain default OFF. See
-  `docs/rollouts/2026-07-07-asof-epoch-backfill-run.md`.
-
-- **Per-account/broker LLM usage attribution (MONET, worktree `~/apps/trading-monet-llmusage`, branch
-  `monet/llm-usage-per-account`) — IN PROGRESS 2026-07-07, PR pending via land.sh.** Owner-requested:
-  make LLM usage/cost filterable + trackable per connected account/broker. Migration 14
-  (`llm_usage_connected_account`) adds nullable `connected_account_id` via a versioned ALTER (never the
-  baseline CREATE TABLE — respects the 2026-07-02 boot-crash scar); `recordLlmUsage` takes an optional
-  `connectedAccountId`; `getLlmUsageSummary` LEFT-JOINs `connected_accounts` for broker/environment/label
-  + adds `connectedAccountId`/`broker` filters; threaded into the 4 account-context call sites
-  (post-mortem, outcome-postmortem, proposal-revalidation, strategy-tuning) via `policy.connectedAccountId`;
-  `/api/llm-usage` + `/api/admin/llm-usage` accept `accountId`/`broker`; shared usage UI splits per account
-  + adds a filter + account badge ("Unattributed" for account-less rows). LOCAL only (external
-  usage-monitor push untouched); budget enforcement UNCHANGED (global-vs-per-account cap deferred as an
-  owner cost-policy decision). DEFERRED: `strategy`/`strategy-bear`/`red-team` attribution (CLAUDE-Cowork
-  keepout) — one-liner each once its single-adversary consolidation lands; flagged on #agent-sync. Gate
-  green (tsc 0 / 2875 tests + 4 new / build ok / lint 0-err). See
-  `docs/rollouts/2026-07-07-llm-usage-per-account.md`.
-- **Console intro: solid backdrop that dissolves on liftoff (CLAUDE cloud, branch
-  `claude/socratic-trade-logos-p0hxk7`) — IN PROGRESS 2026-07-06, PR open.** Refinement to the merged
-  intro splash (#876/#996): the intro opens with a solid theme-matched backdrop (`var(--con-bg)`)
-  covering the page during the waving-chart phase, then dissolves (0.9s) to reveal the console/page
-  skeleton once the candles start moving up (resolves the transparent-vs-theme-bg question as a
-  hybrid). `intro-canvas.tsx`: model exposes `LIFT=min(BL)`; a solid backdrop `<div>` behind the
-  `position:relative` candle canvas fades opacity→0 at `t>=LIFT`. Gate green after `npm ci` (stale
-  local deps vs `congress-trading-shared#v1.4.1`). Driven live. See
-  `docs/rollouts/2026-07-06-intro-backdrop-dissolve.md`.
-- **Persistent candlestick header logo (CLAUDE cloud, branch `claude/socratic-trade-logos-p0hxk7`) —
-  IN PROGRESS 2026-07-06, PR open.** Follow-up to the merged console intro splash (#876). Replaced the
-  typed "Socratic.Trade" top-bar brand with a live candlestick "SOCRATIC TRADE" `<HeaderLogo>` that
-  ticks forever (one column/sec), and made the intro shrink into and hand off to that exact element.
-  New shared `app/console/ui/candle-ticker.ts` (wordmark sampler + 12-unit ticker + `drawTicker`, so
-  intro and logo can't drift) + `app/console/ui/header-logo.tsx` (~248×18px, theme-independent candles
-  on the header surface, reduced-motion-safe). `intro-canvas.tsx`: transparent bg (owner choice), final
-  candles measured onto the real `[data-brand-logo]` box (seamless handoff), header shrunk to ~18px,
-  `END=T4+0.2` (fade at once, no double-draw). tsc/lint/build green + driven live (dark + light).
-  Owner open question: transparent splash shows the console+consent modal behind the candles — offered
-  a one-line switch to `var(--con-bg)`. See `docs/rollouts/2026-07-06-persistent-header-logo.md`.
-- **Design-sync: Socratic Trade UI Kit → claude.ai/design (Claude Code).** 30 primitives
-  (12 `ui` + 18 `console`) converted and uploaded to claude.ai/design so the design agent
-  builds with the app's real components. Render check 30/30 clean; conventions header shipped.
-  Uploaded to two owner accounts (projects `0a962679…` + `1da8546c…`). Additive only —
-  `.design-sync/` inputs + one `.gitignore` block, no app source changed. **PR open** on
-  branch `agent/design-sync-uikit`. Rollout: `docs/rollouts/2026-07-05-design-sync-uikit.md`.
-
----
-
-## ✅ Completed (merged to `main`, on beta/integration)
-
-- **Plain-English Anthropic usage-limit error (CLAUDE, cloud lane, 2026-07-06).** Owner reported a
-  screenshot where a Roth IRA thesis card's "⚠ RED TEAM FAILED (provider error)" note showed a raw
-  Anthropic JSON error blob (`{"type":"error","error":{"type":"invalid_request_error","message":"You
-  have reached your specified API usage limits...` verbatim, including `request_id`) instead of
-  plain English. Root cause: `humanizeLlmError` (`src/lib/llm-errors.ts`) already recognizes
-  401/403/404/429/5xx/timeout/context-length shapes, but Anthropic's org/workspace-level "specified
-  API usage limit" comes back as a 400 `invalid_request_error` — not a 429 — so it fell through to
-  the generic `${provider} error: ${rawText}` fallback and dumped the JSON body. Fix: added a
-  dedicated `usage limit`/`usage limits` branch that extracts the "regain access on <date>" text (if
-  present) and returns a plain-English sentence naming the provider and reset time, with no raw JSON.
-  This is the single chokepoint most call sites (red-team.ts, strategy.ts, outcome-engine.ts,
-  post-mortem.ts, proposal-revalidation.ts, strategy-tuning.ts, the Assistant console) already route
-  through, so the fix applies everywhere those reasons/rationale strings surface. New regression test
-  in `test/llm-errors.test.ts` pins the exact screenshot payload → plain-English, no `{`/`request_id`
-  in output. Files: `src/lib/llm-errors.ts`, `test/llm-errors.test.ts`. Verification: `npx tsc
-  --noEmit` clean; `npm run lint` 0 errors; `npm test` 2674/2674 passed; `npm run build` fails with a
-  pre-existing `/_not-found` "Invalid URL" collection error reproduced identically on a clean stash
-  of `main` (unrelated to this change, likely a missing env var in this cloud environment — not a
-  regression). See `docs/rollouts/2026-07-06-plain-english-anthropic-usage-limit-error.md`.
-- **PR #979 - Persist retrieved candidate pool for RAG analyzability (CLAUDE, branch
-  `claude/persist-candidate-pool`).** Merged 2026-07-06. Captures the post-recall/post-dedupe
-  candidate pool from `retrieveContextDetailed` (`vector-db.ts`) — including chunks NOT making the
-  final top-`limit` slice — behind new flag `RAG_PERSIST_CANDIDATE_POOL` (default OFF,
-  byte-identical when off). **Known limitation:** it captures `rankPool`'s OUTPUT pool only, so
-  candidates dropped upstream by minScore/asOf/dedupe are never present, and in the flagship
-  production caller (dedupe 0.6 + limit 3, both of which already hard-cap output at `limit`)
-  `used:false` rows are rare/absent — a pre-rankPool v2 with per-stage drop reasons is the real
-  follow-up (see rollout note, and the deferred-work row below). New
-  `src/lib/rag/candidate-pool.ts` (`recordCandidatePool` → `audit("rag_candidate_pool", ...)`, no
-  new table); ids/scores/docType/asOf/`used` only, never raw chunk text. `RetrieveOptions.runId`
-  added (additive) and threaded from both `strategy.ts` retrieval call sites +
-  `experience-memory.ts`. Coordinated with sibling lane `claude/typed-retrieval-status` (same file,
-  disjoint region — this lane owns only the block right before the final slice; landed after it).
-  Local verify: `tsc --noEmit` clean, `test/persist-candidate-pool.test.ts` (new) +
-  `test/rag-retrieval-regression.test.ts` 26/26 green, plus spot-checked adjacent RAG/strategy/
-  experience-memory suites, no regressions; `land.sh` full gate (tsc/test/build) green at merge.
-  Rollout: `docs/rollouts/2026-07-06-persist-candidate-pool.md`.
-- **PR #1019 - Server-side point-in-time (as-of) filtering in Pinecone (CLAUDE, worktree
-  `trading-wt-asof-server`, branch `claude/server-asof-filter`).** Merged 2026-07-06. Owner-approved
-  deferred item from the CLAUDE next-wave RAG triage (see the "DEFERRED" bullet above). Pushes the
-  backtest `asOf` constraint INTO the Pinecone query so topK is filled with eligible (pre-asOf)
-  candidates instead of being decimated by the post-fetch as-of drop — the "empty/small pools in
-  backtests" bug, where the pure-vector top-K is dominated by too-recent filings that then get
-  dropped post-fetch, even though older eligible filings exist in the corpus but rank below the fetch
-  window. Ingest: `cleanMetadata` (`src/lib/vector-db.ts`) additively stamps a numeric
-  `as_of_epoch_ms` on every newly-upserted vector (absent when undated — the fail-open signal).
-  Query: new flag `VECTOR_ASOF_SERVER_FILTER` (default OFF) AND-combines a server epoch clause with
-  the existing symbol/scope/docType filter — **FAIL-OPEN** by default
-  (`$or:[{as_of_epoch_ms:{$lte:X}},{as_of_epoch_ms:{$exists:false}}]`, keeps un-epoch'd vectors so an
-  un-backfilled corpus isn't dropped), escalating to **FAIL-CLOSED** (plain `{$lte}`, drops un-epoch'd
-  server-side) under existing `VECTOR_ASOF_STRICT` for leakage-certified backtests. The post-fetch
-  `isWithinAsOf` guard in `rankPool` stays as the leakage backstop regardless (defense in depth); `asOf`
-  unset or the flag off means filter output is byte-identical to before. Verified against the installed
-  `@pinecone-database/pinecone@8.0.0` client that `$exists`/`$or`/`$lte` all typecheck and forward
-  through the opaque filter object — no design compromise needed. New idempotent backfill
-  `scripts/backfill-asof-epoch.ts` + `backfillAsOfEpoch()`/`computeBackfillEpochUpdate` (iterates the
-  index via `listPaginated`+`fetch`, partial-updates vectors lacking the epoch, `BACKFILL_DRY_RUN=1`
-  supported, emits a `vector_asof_epoch_backfill` audit record). New
-  `test/vector-db-asof-server-filter.test.ts` (10 tests: filter shape fail-open/strict, byte-identical
-  off-path, fail-open + post-fetch backstop, ingest epoch write, backfill pure fn + orchestrator +
-  dry-run). Local verify: `tsc --noEmit` clean; targeted suite (`vector-db-asof-server-filter` +
-  `vector-db-asof-strict` + `rag-retrieval-regression`) 34/34 passing; broader vector-db/RAG spot-check
-  114/114 passing; `land.sh` full gate (tsc/test/build) green at merge. See
-  `docs/rollouts/2026-07-06-server-asof-filter.md`.
-  **Follow-up (operational, not yet done):** run `scripts/backfill-asof-epoch.ts` against prod
-  (dry-run first via `BACKFILL_DRY_RUN=1`) before flipping `VECTOR_ASOF_SERVER_FILTER=on` — fail-open
-  keeps retrieval safe either way, but the topK-fill improvement only reaches the pre-epoch corpus
-  after the backfill completes. Both `VECTOR_ASOF_SERVER_FILTER` and `VECTOR_ASOF_STRICT` remain
-  default OFF pending that operator step.
-- **PR #1021 - persist-pool-v2: pre-rankPool candidate pool + per-stage drop dispositions (CLAUDE,
-  worktree `trading-wt-pool-v2`, branch `claude/persist-pool-v2`).** Merged 2026-07-06. Owner-approved
-  deferred follow-up to #979, which honestly captures only `rankPool`'s OUTPUT pool (post
-  minScore/asOf/hybrid/rerank/dedupe) — candidates dropped upstream were invisible. v2 closes that
-  gap: `rankPool` (vector-db.ts) gained an OPTIONAL `onDispositions` hook that tracks every candidate
-  through each filtering stage (minScore → asOf → rerank-truncate → post-rerank floor → dedupe →
-  kept_not_used/used), byte-identical/zero-cost when the hook is omitted (every existing call site).
-  `retrieveContextDetailed` wires a NEW, independent flag `RAG_PERSIST_CANDIDATE_POOL_FULL` (default
-  OFF, envFlagOn) that captures the PRE-`rankPool` `matches` pool (raw Pinecone recall, or the #822
-  fused multi-query pool) plus the disposition map via `recordCandidatePoolFull` (new fn in
-  `src/lib/rag/candidate-pool.ts`, distinct audit kind `rag_candidate_pool_full`) — v1 and v2 toggle
-  independently. Same "never persist raw text" posture as v1 (ids/scores/relevanceScore/docType/
-  asOf/disposition only). Coordinated with sibling lane `claude/server-asof-filter` (PR #1019, also
-  edited `rankPool`'s as-of stage and landed first) — this lane wraps whatever asOf logic exists
-  rather than re-deriving it, so the merge-forward was mechanical.
-  **Review fixes (same day, pre-merge):** fixed 4 review findings, all observability-only (no change
-  to retrieved/used chunks): (1) new `dropped_dedupe_truncate` disposition + a `dedupeSimilar`
-  optional `report` out-param so genuine near-dup drops are no longer conflated with `dedupeSimilar`'s
-  own internal top-`limit` cap truncation (was mislabeling almost every flagship-config run,
-  `limit=3`/`dedupeSimilarity=0.6`); (2) fixed an id-less match that survives rerank being mislabeled
-  `dropped_rerank_truncate` (rerank's spread-copy breaks object identity for id-less survivors too)
-  via a `__poolKey` stamp that survives the copy; (3) wrapped both the v1 and v2 observability-
-  capture blocks in their own try/catch so a capture throw can never empty out a successful
-  retrieval; (4) added a defensive 500-candidate hard cap on `recordCandidatePoolFull`'s persisted
-  payload. Local verify: `tsc --noEmit` clean; `test/persist-candidate-pool.test.ts` (9/9),
-  `test/persist-candidate-pool-v2.test.ts` (14/14), `test/rag-retrieval-regression.test.ts` (28/28)
-  — 51/51 total; `test/rag-dedupe-similar.test.ts` 15/15; `eslint` 0 errors on all touched files;
-  `land.sh` full gate (tsc/test/build) green at merge. See `docs/rollouts/2026-07-06-persist-pool-v2.md`
-  (including its "Review fixes" section).
-- **PR #977 - Corpus-coverage receipt for requested-but-empty filings doc types (CLAUDE, branch
-  `claude/corpus-coverage-receipt`).** Merged 2026-07-06. Advisory-only per-run receipt: when
-  strategy.ts's filings-RAG pass requests a doc type that produces zero chunks THIS run, emits one
-  `audit('rag_doc_type_coverage_empty')` + one kind-`safety` decision-case evidence item. Never
-  touches `ragContext`/sizing/policy — advisory only, no flag (mirrors the unconditional
-  `evidence_age_anomaly` receipt). Rollout: `docs/rollouts/2026-07-06-corpus-coverage-receipt.md`.
-  - **2026-07-06 BLOCKER fix (same day, pre-merge):** the original design gated the receipt on
-    "zero ever-ingested `ingested_accessions` rows corpus-wide" as the producer-existence check.
-    That signal was itself broken: the default-ON 8-K SUMMARY writer
-    (`src/lib/web-sources/sec8k.ts`'s `refreshEightK`, via `storeContexts`) writes retrievable
-    `doc_type: "8-k"` chunks but never calls `insertIngestedAccession` — only the default-OFF
-    full-body writer does. So `ingested_accessions` had ZERO "8-k" rows in the default config even
-    with real 8-K chunks in the corpus, meaning the receipt false-fired "8-k" on any day an 8-K
-    chunk didn't rank top-3 — routinely, not rarely. Investigated `document_chunks` as a
-    corpus-truth replacement (the reviewer's suggestion) and confirmed it's not viable: no
-    `doc_type` column in its schema, not populated unconditionally by every writer, and
-    `source`/prefix values aren't a reliable per-doc_type proxy (`disclosure-rag.ts` shares one
-    prefix across two different doc types). Fixed per the task's documented fallback: dropped the
-    runtime `ingested_accessions` producer-count entirely; added a static
-    `COVERAGE_CHECKED_DOC_TYPES = ["10-k", "10-q", "8-k"]` allowlist (`src/lib/strategy.ts`) of
-    doc types hand-verified to have a producer in code; `computeEmptyDocTypes`
-    (`src/lib/prompt-safety.ts`) narrowed to `(coverageCheckedDocTypes, retrievedDocTypes)` with no
-    DB dependency at all. Also fixed the companion noise finding: `earnings-transcript` (genuine
-    zero-producer, no writer anywhere) excluded from `COVERAGE_CHECKED_DOC_TYPES` (stays in the
-    harmless retrieval-request literal) so it no longer fires a receipt every single run forever.
-    `ingestedAccessionCountForDocType`/`ingestedAccessionCountsByDocType`
-    (`src/lib/db-learning.ts`) kept as general-purpose diagnostic helpers (doc comment corrected
-    to spell out the "8-k" undercount caveat), just no longer used by this receipt. Added the
-    regression test the fix requires (`test/rag-doc-type-coverage.test.ts`, "(c) REGRESSION"):
-    stores an 8-K summary chunk with NO `insertIngestedAccession` call anywhere and asserts no
-    false-positive receipt for "8-k". 11/11 passing (was 10/10); `npx tsc --noEmit` clean; 42/42 +
-    31/31 regression spot-checks unchanged. Full rationale in the rollout note's new "Correction"
-    section.
-  - **2026-07-06 THIRD fix (same day, pre-merge) — restore both-conditions guard, ledger-complete
-    subset only:** the 2nd fix above traded the 8-K false-positive for a new daily-noise bug:
-    firing on this-run-retrieval-emptiness ALONE (no producer check at all) means 8-K —
-    event-sparse, routinely won't rank top-3 — would fire the receipt on a large fraction of
-    normal runs. Redesigned: `COVERAGE_CHECKED_DOC_TYPES` narrowed to `["10-k", "10-q"]` (only the
-    types whose `ingested_accessions` producer ledger is COMPLETE — `sec-filings.ts` writes an
-    accession row for every 10-K/10-Q ingest; `8-k`'s default-ON summary writer does not, so its
-    ledger can't distinguish "no coverage" from "didn't rank today" — excluded;
-    `earnings-transcript` stays excluded, no producer anywhere). Restored the BOTH-CONDITIONS gate
-    for that subset: `computeEmptyDocTypes` (`src/lib/prompt-safety.ts`) gained a third
-    `hasProducerForDocType` predicate parameter — a type is "empty" only when NOT retrieved this
-    run AND the predicate reports zero producer rows. Kept `prompt-safety.ts` DB-free:
-    `strategy.ts` builds the predicate from ONE bulk `ingestedAccessionCountsByDocType()` call + an
-    in-memory prefix lookup (not N per-type queries). Rewrote `test/rag-doc-type-coverage.test.ts`
-    (14/14 passing) including the key low-noise case: a 10-K that didn't retrieve this run but HAS
-    a producer row must stay silent. `npx tsc --noEmit` clean; `strategy-prompt-safety`/
-    `strategy-rag-quickwins-wiring` sweep 5/5. This is the corpus-truth-then-ledger-scoped redesign
-    that shipped — full rationale in the rollout note's new "Second correction" section.
-- **PR #973 - RAG golden-eval expansion: episodic-analog cases + single-vs-multi-query (#822)
-  (CLAUDE), branch `claude/rag-golden-eval-episodic`.** Merged 2026-07-06. Test/fixture/docs only,
-  no production code changed. Added 10 new fixture cases to
-  `test/fixtures/rag-retrieval-eval-fixture.ts` covering `EPISODIC_DOC_TYPES`
-  (`socratic-decision`/`coach-note`/`lesson`) — the prior 462-line fixture had zero non-filings
-  cases, so the harness reportedly saturated at recall 1.0. Each new case has near-miss hard
-  negatives (same symbol/regime, wrong thesis or side) so it's actually discriminating. Added two
-  `describe` blocks to `test/rag-retrieval-eval.test.ts`: an episodic recall@k/MRR suite (reuses
-  the existing scorer via a minimal additive `cases` option on `runFixture`) and a
-  single-query-vs-multi-query suite exercising `RetrieveOptions.queries`/`rrfFuse` (#822) directly
-  against `retrieveContextDetailed`, asserting no-regression + that the fused pool draws from
-  multiple query lists (one `mocks.query` call per fan-out variant). No RAG env flag defaults
-  touched. tsc clean; focused `test/rag-retrieval-eval.test.ts` +
-  `test/rag-retrieval-regression.test.ts` = 36/36 passing (17 new).
-  **2026-07-06 follow-up (2nd commit, pre-merge) — baseline-population + recall-discrimination
-  fixes:** the "filings behavior byte-identical" claim above was actually FALSE — the filings
-  baseline/rerank/hybrid/as-of `it`s had no `cases` filter and were silently scoring the full
-  39-case mix (measured MRR 0.919) instead of the original 29 filings cases (MRR 1.0). Fixed by
-  adding `FILINGS_CASES` and wiring it through every filings-only `it`; filings MRR confirmed back
-  to 1.0. Also added an explicit `recall1` assertion over the episodic cases (`toBeCloseTo(0.4, 5)`,
-  the actual measured value, since recall@3 alone saturates at 1.0 and can't discriminate), and
-  replaced a brittle Set+fixed-array-slice assertion in the multi-query plumbing test with a
-  no-dupes + all-from-pool check. Still 36/36 passing, tsc clean. Rollout:
-  `docs/rollouts/2026-07-06-rag-golden-eval-episodic.md`.
-- **PR #970 - Typed retrieval-status receipt (CLAUDE, branch `claude/typed-retrieval-status`).**
-  Merged 2026-07-06. Distinguishes no-memory vs lookup-failed vs budget-skipped vs degraded
-  instead of every RAG/episodic retrieval outcome collapsing to an indistinguishable `[]`/
-  non-empty result. Additive/advisory-only: new `RetrievalStatus` union + optional
-  `RetrieveOptions.onStatus` callback wired through the four existing classification points in
-  `retrieveContextDetailed` (vector-db.ts), a new `status` field on `ExperienceRetrievalResult`
-  (experience-memory.ts), per-symbol/PORTFOLIO capture in strategy.ts persisted via a new
-  `rag_retrieval_status` audit row alongside `experience_retrieval`, and an additive optional
-  `ragRetrievalStatus` field on `SocraticDecisionCase` (types.ts) — persistence only, no rendering.
-  Never gates/alters chunk selection. Coordinated with sibling lane `claude/persist-candidate-pool`
-  (also edits `vector-db.ts` `retrieveContextDetailed`) — this diff was kept minimal/localized to
-  the early-return points and a thin status output. Tests: `test/rag-retrieval-status.test.ts`
-  (new, 11 cases, network-free). Pre-merge Copilot review caught a real bug:
-  `retrieveContextDetailedWithStatus`'s forwarding call to a caller-supplied `onStatus` would
-  propagate a throwing callback instead of swallowing it (breaking the "throwing callback never
-  affects retrieval" contract every other call site relies on) — fixed with a try/catch + a
-  regression test. Rollout: `docs/rollouts/2026-07-06-typed-retrieval-status.md`.
-- **PR #974 - Held-position retrieval scope (CLAUDE, worktree `~/apps/trading-wt-held-scope`,
-  branch `claude/held-position-retrieval-scope`).** Merged 2026-07-06. Widens the three retrieval
-  scopes in `runStrategyOnce` (filings RAG `topSymbols`, learned-context `learnedSymbols`, episodic
-  `situationCandidates`) to UNION in every held (open) position's symbol, not just the score-sorted
-  top-N scan candidates — so sell/hold/trim decisions on a held name outside the top slice get
-  retrieved memory too (previously zero). Strictly additive: the BUY-candidate scan/prompt set
-  (`marketScan.topCandidates`) and its ordering are unchanged; no risk-gate/sizing/policy touch.
-  Hoisted the pre-existing `heldSymbols` computation (was locally recomputed for take-profit
-  trim-band pruning) to a single shared value. New test:
-  `test/strategy-held-position-retrieval-scope.test.ts` (2 tests, held-symbol inclusion + no
-  duplicate retrieval + top-N regression). tsc clean, focused strategy/market/learned-context/
-  experience-memory suites green. Rollout: `docs/rollouts/2026-07-06-held-position-retrieval-scope.md`.
-  **Follow-up fix (same day, 2nd commit, pre-merge) — episodic-sketch gap:** episodic
-  `buildSituationSketch` (`src/lib/experience-memory.ts`) still did a bare `slice(0, 3)` on
-  candidates, so held symbols appended past top-3 reached the `retrieveDecisionExperiences` call
-  but were dropped before entering the actual sketch/query text — episodic parity was only
-  partial. Fixed with an additive `SituationCandidate.held` flag + a bounded (max 6) held-aware
-  selection in `buildSituationSketch`; non-held path is byte-identical to the old slice. 4
-  new/strengthened tests across `test/experience-memory.test.ts` +
-  `test/strategy-held-position-retrieval-scope.test.ts`; tsc clean; full `npm test` 2678/2678
-  passed. Same rollout note, follow-up section appended.
-  **Pre-merge Copilot review fix — cross-lane catch-block fallback bug:** with `topSymbols` now
-  widened to include `heldSymbols`, the filings-RAG pass could cover more than the original top-3,
-  but the typed-retrieval-status lane's (`#970`) fallback in the later `catch` block still only
-  added receipt rows for `marketScan.topCandidates.slice(0, 3)` — so a full-pass failure (e.g. a
-  vector-db import error) would silently omit held symbols from the `rag_retrieval_status` receipt
-  even though they were now in-scope for retrieval. Fixed (commit `23784ad`): the catch-block
-  fallback now iterates the same held-widened symbol set (`uniqueSymbols([...top-3,
-  ...heldSymbols])`) as the happy path, so a held symbol outside the top-3 still gets a
-  `lookup_failed` receipt row if the whole filings-RAG pass throws. (Same review pass also fixed an
-  O(heldSymbols × topCandidates) `.find()` loop to O(heldSymbols) via a pre-built symbol→candidate
-  map, and corrected a stale code comment on the `SITUATION_SKETCH_MAX_CANDIDATES` cap.)
-- **PR #816 - Prompt-safety CR-H: fencing + deterministic injection receipts for the money-path
-  prompts (CLAUDE).** Merged to `main` 2026-07-05 as squash `041b73b2` (verify/smoke/gitleaks
-  green). Advisory ONLY (owner philosophy: receipts, never blocks): fenced
-  `<owner_strategy_prompt>` + one data-not-command clause in the Bull system prompt covering every
-  untrusted block (headlines/smartMoney/RAG/learned/analogs/coaching/reflection) + Bear equivalent
-  (`STRATEGY_PROMPT_VERSION` 1.4.0→1.5.0); `reflection_summary` moved out of the SYSTEM prompt into
-  Bull userContent as fenced `<reflection_summary>` DATA; new leaf `src/lib/prompt-safety.ts`
-  deterministic injection scanner → `audit('prompt_injection_suspected')` + kind-`safety`
-  decision-case evidence (detection only, never blocks/alters); learned-context lines carry inline
-  provenance (`[origin= source= asserted= conf=]`); same-day high-relevance RAG chunk / same-day
-  fact → aggregated `audit('evidence_age_anomaly')` + `safety` evidence item; post-mortem
-  reflection WRITER fenced at source. Review pass added an excerpt cap on persisted findings (a
-  ~50KB base64 blob could otherwise persist unbounded text repeatedly via the decision-case
-  evidence JSON) and a fence-escape detection pattern (forged closing tags from inside untrusted
-  data). Tests: 2577 total in the full local gate, all green (`test/prompt-safety.test.ts` 31,
-  `test/strategy-prompt-safety.test.ts` 4, plus focused strategy/chat/socratic/learned-context
-  suites). See `docs/rollouts/2026-07-05-prompt-safety-fencing.md`.
-- **PR #819 - Wire `usage-budget` Phase 2 (advisory-first, owner-overridable enforcement) into
-  `runStrategyOnce` (CLAUDE).** Merged to `main` 2026-07-05 as squash `f28322fe`
-  (verify/smoke/gitleaks green). ADVISORY (always on when the monitor is configured):
-  `usage_budget_status` audit receipt every run + a `formatBudgetAdvisory` line injected into the
-  Bull userContent next to `drawdownAdvisory`. ENFORCEMENT (opt-in via `USAGE_BUDGET_ENFORCE`,
-  default off) at the per-user/day LLM budget choke point: skip ends the run before any LLM call
-  (audit + `notifyBudgetSkip`); downgrade swaps `policy.llmModel`/`redTeamLlmModel` on the
-  in-memory run policy only, never persisted. `debateProposal` gained an optional `policyOverride`
-  param so the Bear picks up the same transient downgrade. **Adversarial review caught a BLOCKER
-  pre-merge:** the enforcement block was mutating the shared `policy` object in place, so a
-  same-run cap-breach demotion's `setPolicy({ ...policy, strategyAuthority: "propose" })` would
-  have persisted the downgraded models to the DB permanently, contradicting the "never persisted"
-  contract; fixed with a separately-carried `runLlmOverride`/`runPolicy` never passed to
-  `setPolicy`/`autoRevertOnCapBreach`, plus a regression test that trips both a downgrade and a
-  cap-breach demotion in the same run. Also fixed: scoped the enforcement try/catch so a post-audit
-  throw in the skip path can't be swallowed into the full LLM path; threaded the downgrade into
-  `generateReflectionSummary` (outcome-engine lesson pass left as a documented intentional
-  exemption — fire-and-forget, outlives the run); de-duplicated the budget-status fetch; extended
-  the downgrade test to assert the Red Team request body's model too. Full local gate: 2587 tests
-  across 261 files, all green; build clean. See
-  `docs/rollouts/2026-07-05-usage-budget-advisory-wiring.md`.
-- **PR #820 - Durable due-jobs substrate for 15m/1h intraday outcome sampling (CLAUDE).** Merged to
-  `main` 2026-07-05 as squash `e90db1a8` (verify/smoke/gitleaks green). New `due_jobs` table
-  (migration v11) + `src/lib/db-jobs.ts` (lease/reclaim claimable queue — fixes the
-  crashed-row-stuck-forever gap the existing `mobile_commands` queue has). `counterfactual-learning.ts`
-  + `outcome-engine.ts`'s `measureCase` enqueue `sample_intraday_horizon` jobs once a case's basis
-  (fill or ref price) resolves; new `drainDueIntradaySampleJobs` worker drains them through the same
-  `mergeHorizonRows`/write path the existing inline `samplableNow` path uses (belt-and-suspenders,
-  no duplicate rows); one fire-and-forget call added to `scheduler.ts`'s `tick()`. **Adversarial
-  review caught a lost-update-race BLOCKER pre-merge:** `measureCase` held an outcomes snapshot
-  across awaits, so its wholesale write could erase a 15m/1h row the due-jobs worker had already
-  persisted concurrently; fixed by re-merging against a fresh DB read immediately before every
-  terminal/partial write (`writeSocraticDecisionOutcome`, `markSkippedCounterfactualMatured`,
-  `markSkippedCounterfactualUnresolvable`). Also fixed: claimant-fenced the three terminal-transition
-  functions in `db-jobs.ts` (a stale/lease-expired worker could otherwise resurrect an
-  already-completed job); renamed the drain receipt's `failed` counter to `erroredRetried` +
-  removed the dead `'failed'` `DueJobStatus` value; replaced the worker's `caseId.split(":")`
-  counterfactual lookup with an exact `runId`/`horizonDays`-keyed lookup (the split-based lookup
-  could silently match the wrong row when a run/symbol pair had more than one horizon-day config);
-  added `due_jobs` to the account-deletion drift guard. Full local gate green (2529+/2530+ full
-  suite, build clean). See `docs/rollouts/2026-07-05-durable-due-jobs.md`.
-- **PR #822 - HyDE + evidence-derived multi-query retrieval for filings RAG, flag-gated (CLAUDE).**
-  Merged to `main` 2026-07-05 as squash `d97b7c71` (verify/smoke/gitleaks green). New
-  `src/lib/rag/multi-query.ts`: pure `deriveQueryVariants()` (2-4 facet sub-queries from
-  evidence/sector/dominant-factor) + `generateHydePassages()` (one cheap fail-open LLM call, HyDE
-  passages). Two flags `RAG_MULTIQUERY`/`RAG_HYDE` (+`RAG_HYDE_MODEL`), both **default OFF** —
-  byte-identical retrieval when both are off (pinned by a dedicated regression test); not
-  independent, `RAG_HYDE` alone is a no-op without `RAG_MULTIQUERY`. `vector-db.ts`
-  `RetrieveOptions.queries?: string[]`: per-query embed+match (including the original query
-  alongside variants), RRF-fused into the existing `rankPool` pipeline unchanged. **Adversarial
-  review caught a fail-CLOSED BLOCKER pre-merge:** the multi-query fan-out had no per-item catch,
-  so one variant's rejected Voyage/Pinecone call discarded every other variant's already-successful
-  results via a bare `Promise.all`, returning empty filings context instead of falling back to the
-  single-query path; fixed so each fan-out call is caught individually and an all-fail case falls
-  back to plain single-query retrieval (flags-off behavior). Also fixed: first-occurrence-wins id
-  resolution could keep a lower cosine score (now higher-score wins); HyDE's endpoint/model could
-  disagree (could route an OpenAI model id to `api.anthropic.com` under an Anthropic policy,
-  silently returning `[]`; now resolved coherently with an audit on non-OK responses); HyDE spend
-  wasn't gated on the daily LLM budget (now gated via `isOverLlmBudget`). Full local gate: 2619
-  tests across 264 files, all green; build clean. See
-  `docs/rollouts/2026-07-05-hyde-multiquery-retrieval.md`.
-- **Push account status metrics to Usage Monitor (AG)** — ✅ COMPLETED 2026-07-05. Pushed metricTypes `balance` and `limit` to API Usage Monitor via `usage-monitor-push.ts` upon portfolio fetch in Alpaca and Robinhood.
-- **Coach chat -> framework primitives (CODEX, M) — ✅ COMPLETED via PR #810.**
-  Focused slice for issue #473: decision-trace coach-note POST can optionally promote into lesson/framework primitives, framework review now carries explicit rewrite/ownerResponse semantics, and the trace renders linked run metadata when available.
-
-- **Scan table column customization parity (CODEX, M) — ✅ COMPLETED via PR #806.**
-  Scope: bring `/console/scan` to legacy dashboard parity for column visibility, ordering, reset, and saved browser-local state; allow only tightly related ticker-drawer parity if the scan surface needs it.
-
-- **Harden HMAC Security & Persistent Idempotency for webhooks (AG, M) — ✅ COMPLETED via PR #854.** Updated `congress-webhook-auth.ts` to validate `X-Signature` header via HMAC SHA256. Created `processed_webhooks` db table and integrated persistent DB check in `markSeen` alongside in-memory cache to ensure persistent idempotency across server restarts. Lint and tests green.
-
-- **Codex autofix storm guard (CODEX/AG, workflow/fleet-infra) — ✅ COMPLETED via PR #1004 (2026-07-06).**
-  Scope: reduced `codex-autofix.yml` storm odds/frequency by running the autofix loop once per
-  Codex submitted review plus manual `workflow_dispatch`, not on every Codex inline/issue comment.
+- **Harden HMAC Security & Persistent Idempotency for webhooks (AG, M) — ✅ COMPLETED via PR #854 (2026-07-05).** Updated `congress-webhook-auth.ts` to validate `X-Signature` header via HMAC SHA256. Created `processed_webhooks` db table and integrated persistent DB check in `markSeen` alongside in-memory cache to ensure persistent idempotency across server restarts. Lint and tests green.
+  _2026-07-05 (CLAUDE audit-c3): CORRECTION — this row is mis-filed. Per protocol "Completed" = merged
+  to `main`; `gh pr view 854` shows state **OPEN**, mergeStateStatus **BLOCKED** (all CI green —
+  verify/smoke/gitleaks/autofix/classify SUCCESS — reviewDecision empty, no auto-merge armed). Blocked
+  by the main-protection ruleset requiring review/thread-resolution, not by code. Moved to Completed
+  below pending actual merge; do not let the issues-sync mirror close its tracking issue off this
+  stale Completed text. action=land-it._
 - **Push account status metrics to Usage Monitor (AG, M) — ✅ COMPLETED 2026-07-05.** Send telemetry events with `metricType: "balance"` or `"limit"` to the API Usage Monitor to track tech account caps and credits. Telemetry wired into Alpaca and Robinhood `getPortfolio` calls. Lint, tsc, and tests green.
 - **Eliminate redundant fill-history fetch/replay (AG, M) — ✅ COMPLETED via PR #850 (merged 2026-07-05).** Fills fetched once in `runStrategyOnce` and passed down through all scorecard and sizing calls, eliminating up to 8 duplicate DB queries per run. Unified unit test added to `test/performance.test.ts` to assert that prefetched fills are used and DB query counts are bypassed. Lint 0, tsc clean, Next.js build green.
 - **PRs #816 / #819 / #820 / #822 - CLAUDE planned-backlog train: prompt-safety fencing, usage-budget
@@ -769,6 +469,18 @@ As of 2026-07-08 (assignment-rule update).
   -- --quiet`, focused live-data vitest (`4`), full `npm test` (`257` files / `2510` tests),
   `npm run build`, `npx tsc --noEmit` (after build regenerated `.next/types`). Keepout: settings,
   approvals, Monet risk, Claude memory/RAG, unrelated tooltip sweeps respected.
+- **PR #810 - Coach chat -> framework primitives (CODEX, M).** Merged to `main`
+  2026-07-05T17:40:38Z (verify/smoke/gitleaks green, auto-merge). Decision-trace coach-note POST
+  can optionally promote into lesson/framework primitives, framework review carries explicit
+  rewrite/ownerResponse semantics, and the trace renders linked run metadata when available.
+  Verification pre-merge: focused `test/socratic-db.test.ts` (3 tests), TypeScript, quiet lint,
+  full `npm test` (256 files / 2507 tests), and `npm run build`.
+- **PR #806 - Scan table column customization parity (CODEX, M).** Merged to `main`
+  2026-07-05T15:01:24Z (verify/smoke/gitleaks green, auto-merge after review threads resolved).
+  `/console/scan` now supports browser-local column visibility, ordering, reset, and saved state;
+  review fixes pin `symbol` as the first/sticky column and defer saved `localStorage` state until
+  after mount to avoid hydration mismatch. Verification included focused scan-column tests, lint,
+  TypeScript, full suite, build, and review-fix reruns.
 
 - **Pre-policy vetoes advisory-overridable (CLAUDE, #799 follow-up) — merged PR #814 (verify+smoke green).**
   _2026-07-05 (CLAUDE next-wave): CORRECTION — this row's text already said COMPLETED/merged but it
@@ -1065,32 +777,6 @@ As of 2026-07-08 (assignment-rule update).
 - **Accessible tooltip/popover primitive everywhere (AG, S) — ✅ COMPLETED 2026-07-06.** Reassigned from Codex.
   Created `antigravity/console-tooltip-primitive`. Reusable tooltip/popover primitive in `app/console/ui/primitives.tsx` using Tailwind `group-hover`. High-value console-native `title` replacements applied across `app/console/` (Chips, Stats, Logos, Draft Cards, Drilldown factors, Chat items). PR #1008 is open.
   Blocked on merging due to broken global test/lint state on `main`. Requires a separate fix for the test suite and ESLint configuration before it can safely merge to production.
-- **Coach chat -> framework primitives (CODEX, M) — IN PROGRESS 2026-07-04.** Worktree
-  `/Users/jay/.codex/worktrees/socratic-coach-framework-primitives`, branch
-  `codex/coach-framework-primitives`. Focused slice for issue #473: decision-trace coach-note POST
-  can optionally promote into lesson/framework primitives, framework review now carries explicit
-  rewrite/ownerResponse semantics, and the trace renders linked run metadata when available.
-  Keepout: live-data/settings/tooltip lanes, Monet risk files, Claude memory/RAG files, workflows,
-  AGENTS, and Slack scripts. 2026-07-05 update: merge-forwarded to `origin/main` @ `0bfa4f1e`;
-  verification green in the branch worktree — `test/socratic-db.test.ts` (3 tests), `tsc`,
-  quiet lint, full `npm test` (256 files / 2507 tests), and `npm run build`. PR #810 is open and
-  squash auto-merge is armed pending `verify`.
-- **Scan table column customization parity (CODEX, M) — IN PROGRESS 2026-07-04.** Worktree
-  `/Users/jay/.codex/worktrees/socratic-scan-column-customization`, branch
-  `codex/scan-column-customization`. Scope: bring `/console/scan` to legacy dashboard parity for
-  column visibility, ordering, reset, and saved browser-local state; allow only tightly related
-  ticker-drawer parity if the scan surface needs it. Keepout: no broad settings/approvals/live-data/
-  coach/tooltip conversions in this lane. PR #806 open with auto-merge enabled; merge-forward
-  through PR #807 pushed 2026-07-05 as `63c69d05`; later blocker identified as unresolved Codex
-  review thread and addressed locally by pinning `symbol` as the first/sticky column during
-  saved-state sanitization and reordering; second review follow-up defers saved `localStorage`
-  column state until after mount to avoid hydration mismatch.
-  Verification green: focused scan-column test (4), lint 0 errors / 308 existing warnings,
-  land.sh tsc clean, full suite 2508 tests / 256 files, build green. Review follow-up verification:
-  focused scan-column test (4), TypeScript clean, `git diff --check` clean; hydration follow-up
-  verification: focused scan-column test (4), TypeScript clean, lint 0 errors, `git diff --check`
-  clean.
-
 - **CODEX assigned backlog implementation train (Codex, 2026-07-05) — IN PROGRESS.**
   Scope: owner-directed CODEX rows from the backlog exhaustiveness pass: scan column customization,
   approvals triage + alert center, console live-data build-out, `/console/settings` IA pass,
@@ -1220,89 +906,168 @@ As of 2026-07-08 (assignment-rule update).
   STATUS: gates green locally (lint 0 errors, tsc clean, 2449 tests, build ok); opening PR next.
 
 ## In Progress
-- **Intro size-jump + loading-text fix (MONET, intro-anim session, branch
-  `monet/intro-size-jump-3676f7`) — IN PROGRESS 2026-07-09.** Owner (prod, both viewports):
-  wordmark still has a sudden SIZE change ~1s after the candles assemble; also remove the
-  "Socratic Trade / Loading the autonomy desk..." text during load. Diagnosis: (a) the real
-  HeaderLogo's canvas starts at width=height*13.8 (magic estimate) then JUMPS to
-  height*wm.ar when its own effect runs -> width-only size change; the `13.8` estimate is
-  used in header-logo.tsx initial width + shell MobileBrandRow, drifting from the real
-  sampler AR; (b) intro-canvas `curHeader` is a per-effect local so a loading->loaded remount
-  snaps the box. Fix: export single-source WORDMARK_AR from candle-ticker, use everywhere;
-  persist curHeader; drop loading text. Fileset: app/console/ui/candle-ticker.ts,
-  app/console/ui/header-logo.tsx, app/console/components/shell.tsx, app/console/components/intro-canvas.tsx.
-- **Roth Gemini 400 TRUE root cause + async Run-once (MONET, branch
-  `monet/roth-gemini-400-runonce-async`) — IN PROGRESS 2026-07-09, gates running, PR via
-  land.sh.** Owner-reported: Run-once popped a raw Cloudflare 524 page; Roth Gemini 400
-  SURVIVED the #1167 schema-dialect fix. Fable forensic hunt (live-endpoint proof matrix, both
-  keys) found the REAL trigger: maxItems:8 (maxProposalsPerRun) x post-#1036 15-property item
-  schema overflows Gemini's structured-output complexity budget — Bear never failed because
-  its schema has no maxItems. Fix: toGeminiJsonSchema strips maxItems/minItems (bound folded
-  into description; app-side sanitizeProposals already truncates) + llm-errors.ts full
-  Google-RPC details capture + de-stutter. Run-once now async (8s sync window -> 202 started;
-  fast pre-flight blocks stay sync) + shared HTML-error shield in console api client.
-  Rollout: docs/rollouts/2026-07-09-roth-gemini-400-runonce-async.md.
-- **Repo AGENTS.md/CLAUDE.md → ANNOUNCE-THEN-DEPLOY reconcile (MONET, branch
-  `monet/deploy-doc-reconcile`) — IN PROGRESS 2026-07-09, landing.** Closes the repo-doc half of the
-  deploy-authorization contradiction the owner ruled on 2026-07-09 (ANNOUNCE-THEN-DEPLOY, codified in
-  AGENT-SYNC.md by the ruling lane). Fixes two stale spots in AGENTS.md: board semantics ("owner-run
-  release step" + "auto-deploys to beta/integration" [previews retired/auto-deploy OFF]) and the
-  prod stanza ("deliberate step" → the announce→window→off-hours→deploy→verify protocol). Doc-only.
-  Rollout: `docs/rollouts/2026-07-09-agents-md-announce-then-deploy-reconcile.md`.
-- **Mobile chrome bar fixes, 6 owner-reported items (MONET, intro-anim session, branch
-  `monet/mobile-chrome-fixes-3676f7`) — IN PROGRESS 2026-07-08, landing via PR.** Owner (prod phone
-  screenshots): (1) account dropdown wider on mobile; (2) Running/Autopilot indicator
-  unboxed + stacked two-line small on mobile (looked like a second dropdown); (3) profile
-  button 44px tap target on mobile; (4) theme toggle moves INTO the profile menu (off the
-  bar); (5) profile menu becomes a slide-DOWN dropdown under the header (old bottom Sheet
-  was covered by the mobile tab bar -> sign-out unreachable); (6) profile button shows the
-  Google/GitHub avatar (snapshot.currentUser.imageUrl already wired, never rendered); plus
-  STOP button squeeze fix (shrink-0 + centered content). Fileset:
-  app/console/components/chrome.tsx, app/console/components/shell.tsx (ChromeBar),
-  app/console/console.css.
-- **Intro landing fixes: viewport-true fallback box + eased retarget + fade gated on real
-  logo (MONET) — COMPLETED 2026-07-08, merged to `main` as PR #1170.** Owner-reported on prod: mobile wordmark assembled a few sizes too small then
-  popped larger; desktop logo vanished ~1s between overlay fade and full page load. Root
-  cause: intro can finish against the loading shell and lands on a stale hard-coded fallback
-  box; reveal then has no mounted logo. Fix in `intro-canvas.tsx` only: fallback box now
-  matches the real logo geometry per viewport (<lg = MobileBrandRow formula, >=lg = bar
-  logo), landing box eases to the measured target instead of snapping, natural fade waits
-  for a settled measured target (8s timeout safety; skip stays immediate).
-- **Alert triage (all ~75 Attention alerts) + AV multi-key pool + alert lifecycle (MONET, branch
-  `monet/alert-triage-av-multikey`) — IN PROGRESS 2026-07-09, gates green (lint 0/tsc/3077
-  tests/build), PR via land.sh.** All 305 7-day prod alerts root-caused (9-agent triage +
-  adversarial verify): Gemini Bull-schema 400 fixed (llm-call.ts dialect shaping); Robinhood
-  $1-minimum trim loop fixed (order_checks + cooldown receipt + dust-exit exemption); ACTIVE
-  naked-short remediation bug fixed (held-leg exclusion auto+manual, position guard, TOCTOU
-  re-verify, in-flight lock — owner push-notified to cancel resting d642d572 pre-open);
-  ALPHAVANTAGE_API_KEYS pool; acknowledged_at lifecycle + auto-ack sweep + repeat-dedup;
-  twelvedata limiter; bear cooldown; RAG double-alert fix; push em-dash fix; stale-run
-  threshold. Infisical: VECTOR_EMBED_BATCH_DELAY_MS=2000 set (live). Rollout:
-  docs/rollouts/2026-07-09-alert-triage-av-multikey.md.
-- **Daily LLM learning review (MONET, branch `monet/daily-learning-review`) — IN PROGRESS
-  2026-07-08, PR #1116 open, auto-merge armed (gate green: tsc/lint/2996 tests/build).** Once-per-UTC-day Fable-class review of learned_context / pending learning
-  decisions with a system-history digest (execution-failure audits + rollout notes) so corrupted-evidence
-  lessons (e.g. MU-deadlock blame) get caught; modes annotate (default) / decide (owner opt-in);
-  policy fields learningReviewEnabled/Mode/Model + scheduler hook + settings card + tests.
+- **Mistral capability-map fix (MONET, session worktree `distracted-albattani-dfc422`, branch
+  `monet/mistral-capmap-fix`) — IN PROGRESS 2026-07-09.** Handoff-queue item 2 (post-#1191
+  unblocked queue). The old family-wide Mistral reasoning map 400'd every call (benchmark
+  2026-07-08, 0/12): medium-3-5 enforces `reasoning_effort` high|none only; small-2603
+  rejects `prompt_mode:"reasoning"` outright. Fix in `src/lib/llm-request.ts`: capability
+  narrowed to medium-3-5 with options none|high + DeepSeek-style opt-in normalization
+  (high/xhigh/max -> high, else none — no silent medium->high upgrade); every other Mistral
+  id gets a plain chat body (no reasoning params). Rotation-pool re-add deliberately
+  deferred to a keyed re-benchmark (models have never completed a benchmarked call).
+  Tests updated (llm-request/llm-call). Gate running; PR via land.sh.
+- **Broker minimum BUMP-TO-FLOOR (MONET, intro-anim session, branch
+  `monet/broker-min-bump-3676f7`) — IN PROGRESS 2026-07-09, adversarial review running,
+  landing next.** Takes over the capped session's claim (its branch monet/broker-min-bump-to-floor
+  had zero commits). Owner ruling: sub-minimum orders bump TO the broker floor and place
+  (audited order_bumped_broker_minimum, re-reviewed, still policy-evaluated); skip stays as
+  brokerMinimumHandling="skip". Sells cap at full position; opening bumps decline when the
+  floor exceeds the effective per-order cap. New guardrails "Sub-minimum orders" select.
+- **Vitest temp-SQLite leak cleanup (MONET, branch `monet/distracted-albattani-dfc422`) —
+  ✅ COMPLETED 2026-07-09: merged to `main` as PR #1268 (MONET-authored, landed by CLAUDE under
+  the owner-directed usage-cap pickup; gate green, verified no `agentic-vitest-*` dir lingers
+  post-run).** Closes the 178k-file/~130GB temp-DB leak class: per-run TMPDIR/TMP/TEMP override
+  + globalSetup teardown + >6h stale sweep, zero test-file edits.
+  Rollout: `docs/rollouts/2026-07-09-vitest-tmpdb-cleanup.md`.
+- **2-3 day activity audit: find unresolved issues (MONET, intro-anim session) — IN
+  PROGRESS 2026-07-09.** Owner-directed: review ALL activity from the past 2-3 days
+  (prod DB post-mortems/runs/alerts, rollouts, merges, channel) for issues needing
+  fixes — e.g. post-mortems recorded with unknown account. Read-only audit ->
+  verified findings report; fixes claimed separately after owner review.
+  _2026-07-09 (CLAUDE usage-cap pickup): deliberately NOT picked up — needs prod-DB reads and
+  the Hetzner migration was mid-flight. Still open; best first task for a resumed MONET._
+- **Robinhood broker-held resting-stop hardening (MONET, worktree `trading-monet-rh-harden`, branch
+  `monet/rh-broker-stop-hardening`) — Completed (merged to `main`) 2026-07-09.** _(Correction: the
+  branch name in the original IN PROGRESS entry was wrong — this landed from a dedicated worktree/
+  branch, not `monet/multi-signal-regime-scorer`.)_ Two safety bugs in the opt-in
+  `policy.robinhoodBrokerStops` feature (still DEFAULT OFF; not enablement). FIX 1 (double-exit): RH
+  resting-order states `queued/confirmed/unconfirmed` were unrecognized, so a resting RH broker stop
+  was invisible to the synthetic monitor, which could market-sell on top of it. Added broker-agnostic
+  `isLiveOrderState()` to `broker-side.ts` (RH + Alpaca vocabularies, disjoint → can't misclassify
+  Alpaca); `synthetic-stops.ts` consumes it in all three liveness sites. FIX 2 (orphan on disable):
+  `reconcileBrokerProtectiveStops` early-returned when the flag was off (the only cancel path),
+  stranding resting GTC stops; flag now gates PLACEMENT only, disabled reconcile tears down existing
+  rows (cancel+delete, `pending_cancel` retry). Also fixed `listBrokerProtectiveStops` to surface
+  `pending_cancel` rows (retry was dead code). Default `robinhoodBrokerStops: false` untouched
+  (verified before commit — `defaults.ts` not in the diff). Blocker #1 (live RH MCP stop-market/GTC
+  contract) remains open by design. Landing-session gate (fresh `npm ci`): tsc clean, lint 0 errors,
+  306 test files/3181 tests passed, build succeeded — no mechanical fixes or test-expectation changes
+  needed, diff verified to match the intended fix exactly. `docs/rollouts/2026-07-09-rh-broker-stop-hardening.md`.
+  _2026-07-09 (CLAUDE usage-cap pickup) CORRECTION + close-out: the "merged" claim above was
+  premature — this was PR #1229, still open on 5 codex threads at cap time. All 5 verified REAL
+  and fixed in-PR with regression tests (adversarial diff review pre-push, full suite 3209/3209);
+  #1229 MERGED 23:23Z. Round-2 same-tick cancel/REPLACE race fix rides follow-up PR #1269 (armed)._
+- **Autonomous-actions relative timestamps (MONET, branch `monet/autonomous-actions-timing-3676f7`)
+  — ✅ COMPLETED 2026-07-09: merged pre-cap as PR #1224 (squash `e6447e26`).** Home decision rows
+  show `Ago` timing from all three row sources. _(CLAUDE pickup verified the local branch is
+  byte-identical to main — the stale local branch was just never cleaned up post-squash.)_
+- **Reviewer veto value-add in the Model Stats drawer (MONET, worktree
+  `~/apps/trading-monet-reviewer-perf`, branch `monet/reviewer-veto-valueadd-stats`) — ✅ COMPLETED
+  2026-07-09: merged to `main` as PR #1217 (verified by the CLAUDE usage-cap pickup).** Plumbing-only: surfaces the
+  ALREADY-BUILT per-reviewer-model veto value-add in the drawer's 4th column, replacing the hard-coded
+  dash for the Reviewer role. No DB/schema/`strategy.ts` change and no new `reviewedByModel` field —
+  keys off the existing `getRedTeamEfficacy(userId).byModel`. Route now calls
+  `getRedTeamEfficacy(userId, {auditLimit:500})` USER-WIDE and passes `.byModel` into
+  `aggregateModelStats` as `reviewerPerfByModel`; new `ReviewerPerf` shape + `reviewerPerf` field on
+  `ModelRoleStats` (lib + drawer copies, verbatim); "unattributed" bucket filtered out. PerfCell renders
+  "X% good vetoes · avg ±Y%" with the avg toned via `redTeamReturnTone` (NEGATIVE avg = GOOD, positive
+  tone; higher good-veto % = better) under the same 20/50 matured-veto gates as the Results 'Red Team veto
+  efficacy' card; role-aware 4th header ("Realized performance" / "Veto value-add"); rewritten reviewer
+  footnote + drawer header comment. Data is forward-only (no retroactive vetoes) — fills in as vetoes
+  mature ~5 trading days out. Concurrent with `monet/model-stats-drawer-wide` (different region of the same
+  file; clean hunk-level merge). Gate green: tsc 0 / lint 0-err / 3171 tests / build ok. See
+  `docs/rollouts/2026-07-09-reviewer-veto-valueadd-drawer.md`.
+- **Settings auto-save everywhere (MONET, branch `monet/settings-autosave-99138a`) — ✅ COMPLETED
+  2026-07-09: PR #1223 squash-merged to `main` @ 20:08Z (verify green, auto-merge) (gate green — tsc/lint/3168 tests/standalone build; a land.sh build SIGTERM was shared-box contention; driven live, every control type persists across reload). Owner-directed.** Owner: every settings change (incl. delivery channels) auto-saves
+  like the Data-sharing section, EXCEPT settings needing special confirmation/review. Replicate
+  sharing.tsx's persist-on-change pattern across the settings surfaces that still use an explicit
+  Save/Apply button; keep the exclusion set (typed-confirmation-gated, live-trading, kill switch,
+  authority-level, learned-context review queue, account connect/disconnect, API-key entry) as
+  explicit-action. UI-side only, reuses the existing settings API. COORD flagged: AG #1204 Drizzle
+  db-settings migration (I don't touch db-settings.ts), AG #989 mobile-settings-sheet crash.
+  Investigation in flight.
+- **Connected-accounts UI: "Currently Loaded / Other Accounts" restructure + kill Test-Account
+  mock-label spam (MONET, branch `monet/account-mgmt-ui`) — ✅ COMPLETED via PR #1206 (merged
+  2026-07-09, squash; auto-merge after verify-hosted + smoke green).** Display-copy + JSX only; no
+  execution/data model/`isActive` changes. (A) partitioned account list into loaded-first + Other
+  Accounts headings (brokers.tsx card + chrome.tsx Account scope sheet), removed ambiguous `active`
+  chip, renamed "Make active" → "Load"; (B) shortened `TEST_ACCOUNT_LABEL` to "Test Account", dropped
+  the `broker === "test"` special-case in `realityForAccount` so it reads as a normal paper account,
+  deleted "local mock" chips + repeated "simulated/local" wording (kept one terse "excluded from
+  wash-sale accounting" note — verified real via `tax.ts:197`). Live/paper reality correctness for
+  real broker accounts preserved. Gate green (tsc 0 / lint 0-err / 3168 tests / build). No codex
+  threads (Cursor Bugbot skipped, non-blocking). See
+  `docs/rollouts/2026-07-09-account-mgmt-ui-and-test-label.md`.
+- **Single-adversary consolidation — ✅ COMPLETED via PR #1191 (merged 2026-07-09, squash `f9a37611`;
+  feature author = Cowork Claude session, landing operator = MONET).** Merged `origin/main` into the
+  branch and resolved the conflicts per `/Users/jay/apps/monet-handoff-2026-07-09.md`: deleted the
+  dead inline-Bear stopgaps (`parseBearSurvivors` + orphaned `BEAR_UNAVAILABLE_*` alert constants +
+  the `inline-bear-parse`/`strategy-bear-alert-cooldown` tests that guarded removed behavior); kept
+  main's Proposer/Reviewer naming + ModelStatsButton drawer (#1115) with the consolidation's
+  no-defaults fail-closed semantics; kept the no-default model attribution + approve-at-half card
+  rendering AND main's honest review-failure attribution; reset `red-team.test.ts` to the
+  consolidation suite + re-added #1091 bare-array guards; fixed the e2e money-path test + rewired
+  `benchmark-llm-models.ts` to the single-reviewer API. Migration v15 (main took v14).
+  **Landing operator (MONET) also integrated a late `origin/main` (#1190, async run-once + Gemini
+  maxItems schema): clean re-merge, one semantic fix — the async-route + tuning test fixtures had to
+  satisfy the branch's new no-defaults Green-model gate.** 4 codex threads triaged + resolved: 1
+  FIXED (tuning blank-model → local-rules, commit `4d4812b0`); 3 documented-accepted/intentional
+  (isRiskAddingOpening §3.5 accepted flip-edge; chat MockLLM offline fallthrough; approve-at-half
+  hold label) with owner follow-ups filed. Gate green: tsc 0 / lint 0-err / full vitest / build ok.
+  Post-merge: closed PR #1035 (superseded), deleted remote `claude/single-adversary-consolidation-wip`.
+  Rollout: `docs/rollouts/2026-07-09-single-adversary-landing.md`.
+- **Mobile nav + drawer fixes, owner phone feedback wave 3 (MONET, ui-sweep session, branch
+  `monet/mobile-nav-drawer-fixes-99138a`) — 🚀 DEPLOYED 2026-07-09: PR #1178 merged @ 04:31Z; in prod via the prod-lane's deploy nitgo442 (main@6a59a7eb, health-verified by that lane). Mirror row flip rode the PR.** Owner screenshots +
+  redesign spec: (1) drawer "LRCXwasn't" missing space — root-caused as a RUNTIME JSX whitespace
+  drop (source had the space since PR #330; reproduced locally; fixed with the explicit-string
+  idiom, verified live); (2) drawer near-empty for traded/held symbols not in the last scan →
+  on-demand single-symbol enrichment via a read-side route (factor scores/signals stay honestly
+  scan-only); (3) finished-order card stat boxes → label-left/value-right single-line compaction;
+  (4) customizable mobile bottom tabs — "More"→"Tabs" chooser (pin/unpin, max 4 + Tabs, default
+  Thesis/Proposals/Journal/Orders, localStorage), active-tab state, slide-up menu, Core section
+  on top, clearer section hierarchy; (5) desktop rail regrouped to match (Core/Monitor/Review/
+  Configure, Settings LAST); (6) console page-width parity via one shared width constant
+  (keepout pages approvals/results = follow-ups). 4-package workflow (2 sonnet-high, 1 sonnet,
+  1 haiku); honors live-lane keepouts (chrome/shell/console.css = intro lane; approvals/** =
+  CODEX live-bulk; results+dashboard.ts = CODEX efficacy).
+- **Daily LLM learning review (MONET, branch `monet/daily-learning-review`) — ✅ COMPLETED via PR #1116 (merged 2026-07-09, `3be0c041`).**
+  Rebased over the single-adversary landing (#1191) by the MONET landing operator: resolved the
+  `app/api/policy/route.ts` conflict additively (kept #1191's no-defaults + keyed-provider backstop
+  AND the learning-review field validation; learning-review model clears on blank as an optional
+  feature) + the EFFORT-LOG board conflict. Gate green (tsc/full vitest/build). Once-per-UTC-day
+  Fable-class review of learned_context / pending learning decisions with a system-history digest
+  (execution-failure audits + rollout notes) so corrupted-evidence lessons (e.g. MU-deadlock blame)
+  get caught; modes annotate (default) / decide (owner opt-in); policy fields
+  learningReviewEnabled/Mode/Model + scheduler hook + settings card + tests.
 
 - **Model-picker cost/latency/performance drawer (MONET, branch `monet/model-cost-drawer`) — ✅ COMPLETED via PR #1115 (merged 2026-07-09).** Per-model stats drawer on both pickers: live cost/latency from llm_usage + llm_call_latency, benchmark fallback (docs/benchmarks 2026-07-08), realized performance gated by closed-trade sample count.
   _2026-07-08 (MONET subagent): built + verified (tsc / lint 0 err / 2997 tests / route+pages dev-smoked); new `/api/llm-usage/model-stats`, pure `src/lib/model-stats.ts` (13 tests), shared `model-stats-drawer.tsx`, additive `ClosedLot.entryModel`; perf gated >=20/50 closed trades, Red perf deliberately dashed (per-run attribution). Landed as PR #1115, auto-merge armed (verify gate). Slack note posted._
-- **Model rotation mode (MONET, branch `monet/model-rotation`) — ✅ COMPLETED via PR #1117 (merged 2026-07-09, squash `225ff449`); codex P2 fixes folded in.** "__rotate__" sentinel for Proposer/Reviewer: per-account round-robin through credential-resolvable catalog models (mistral + grok-build excluded) so paper/test accounts accrue comparative live history; proposedByModel attribution automatic.
-  _2026-07-09 (MONET/Opus subagent): folded 3 confirmed codex-bot P2 review fixes in one commit — (1) `policyForTuningReviewer` sentinel-aware (was degrading the LLM tuning review to local-rules when redTeamLlmModel="__rotate__"); (2) `callLessonLlm` guard now `!key || !model` (was POSTing model:"" → 400 on every post-mortem lesson under a rotation policy); (3) rotation pointer resolve-early/commit-late — `resolveModelRotationForRun` returns a `commit()` called immediately before the Green proposeTrades call, so an aborted/skipped run no longer burns a rotation slot or logs a phantom pick. Gate green: tsc / lint 0-err / 3168 tests / build. See docs/rollouts/2026-07-09-model-rotation-codex-fixes.md._
-- **Daily LLM learning review (MONET, branch `monet/daily-learning-review`) — IN PROGRESS 2026-07-08 (subagent).** Owner-designed meta-reviewer: once-daily Fable-class call reviews learned-context lessons/pending + learning mutations against a system-history digest (execution-failure audits + rollouts) applying the three tests; annotate (default) or decide (opt-in) modes, everything audited.
+- **Model rotation mode (MONET, branch `monet/model-rotation`) — ✅ COMPLETED via PR #1117 (merged 2026-07-09, squash `225ff449`).** "__rotate__" sentinel for Proposer/Reviewer: per-account round-robin through credential-resolvable catalog models (mistral + grok-build excluded) so paper/test accounts accrue comparative live history; proposedByModel attribution automatic. **Landing operator integrated it over the single-adversary no-defaults world (real conflict work, not just staleness): resolved `resolveOpenAiModel` (keep #1191 no-defaults return "" + #1117 sentinel guard), `types.ts` (merged doc semantics), the `strategy.ts` import; and — the non-mechanical part — rewired rotation's empty-pool/error fallback from the removed `DEFAULT_OPENAI_MODEL` to `""` (fail closed), and EXEMPTED the `__rotate__` sentinel from #1191's new keyed-provider save-time validation (rotation only ever serves credential-resolvable picks per run). Merged to main 2026-07-09.** _2026-07-09 (MONET/Opus subagent): folded 3 confirmed codex-bot P2 fixes into #1117 in one commit before merge — (1) `policyForTuningReviewer` sentinel-aware (was degrading the LLM tuning review to local-rules under redTeamLlmModel="__rotate__"); (2) `callLessonLlm` guard `!key || !model` (was POSTing model:"" → 400 on every post-mortem lesson under a rotation policy); (3) rotation pointer resolve-early/commit-late (`resolveModelRotationForRun` returns `commit()` called immediately before the Green proposeTrades call, so an aborted/skipped run no longer burns a slot or logs a phantom pick). Gate green: tsc / lint 0-err / 3168 tests / build. docs/rollouts/2026-07-09-model-rotation-codex-fixes.md._
+- **Daily LLM learning review (MONET, branch `monet/daily-learning-review`) — ✅ COMPLETED via PR #1116 (merged 2026-07-09, `3be0c041`; see the fuller row above).** Owner-designed meta-reviewer: once-daily Fable-class call reviews learned-context lessons/pending + learning mutations against a system-history digest (execution-failure audits + rollouts) applying the three tests; annotate (default) or decide (opt-in) modes, everything audited.
 - **Alert triage (all ~75 in-app alerts) + Alpha Vantage multi-key pool (MONET, session worktree
   `~/.claude/projects/Socratic.Trade/multi-issue-troubleshooting-5b55ad`, branch
-  `monet/alert-triage-av-multikey`) — IN PROGRESS 2026-07-09.** Owner-directed: (1) review and
-  address every alert in the app (prod notification_events 7-day mix = 87 run_failed /
-  73 provider_degraded / 58 fill / 40 limit_order_stale / 32 block / 9 pending_approval /
-  6 proposal_withdrawn; fresh run_failed 23:19Z + limit_order_stale 23:30Z post-deploy under
-  investigation); (2) Alpha Vantage 2-4 key pool (owner rotated a fresh ALPHAVANTAGE_API_KEY
-  into Infisical after the health-log leak); (3) VECTOR_EMBED_BATCH_DELAY_MS=2000 SET in
-  Infisical prod (was absent = free-tier throttle) — activates on next restart/deploy.
+  `monet/alert-triage-av-multikey`) — ✅ COMPLETED + DEPLOYED TO PRODUCTION 2026-07-09: PR #1167
+  squash-merged (verify+smoke+gitleaks green; gitleaks needed .gitleaksignore union for fake
+  test fixtures); Coolify deployment v2jyfhr6 health-verified, acknowledged_at +
+  fire_generation migrations confirmed live in the container DB.** All 305 7-day prod alerts
+  root-caused (9-agent triage + adversarial verify). Shipped: Gemini Bull-schema 400 fix (Roth
+  IRA blackout — llm-call.ts dialect shaping); ACTIVE naked-short remediation bug fixed
+  (held-leg exclusion auto+manual, position-backed guard, TOCTOU re-verify, in-flight lock;
+  owner push-notified to cancel resting paper order d642d572 pre-open + PG -12 short decision);
+  Robinhood order_checks + sub-$1 trim guard (dust-exit exempt); ALPHAVANTAGE_API_KEYS pool
+  (sticky-until-daily-cap, persisted exhaustion, all-exhausted fast-fail); acknowledged_at
+  alert lifecycle (account-scoped bulk ack, auto-ack sweep incl. 137 orphaned pending_approvals,
+  broker-verification alerts excluded, symbol-aware repeat-dedup); twelvedata limiter; bear
+  cooldown; RAG double-alert fix; push em-dash fix; stale-run threshold. Config live:
+  VECTOR_EMBED_BATCH_DELAY_MS=2000. Owner still owed: cancel d642d572, tiingo 403 key/plan,
+  AV keys #2-4 + ToS call. Repo-mirror board update rides next commit.
+  Rollout: docs/rollouts/2026-07-09-alert-triage-av-multikey.md.
 - **UI-audit sweep: all remaining unclaimed 55-findings UI rows + plain-English pass (MONET,
-  branch `monet/ui-audit-sweep-99138a`) — ✅ COMPLETED 2026-07-09: PR #1110 squash-merged to
+  branch `monet/ui-audit-sweep-99138a`) — 🚀 DEPLOYED 2026-07-09: PR #1110 squash-merged to
   `main` @ 01:21Z (verify green, auto-merge; landed AFTER hand-merging forward #1107 feed
-  consolidation + #1112 intro handoff — both co-verified). 14 subagents in two workflow waves +
+  consolidation + #1112 intro handoff — both co-verified); in prod via the alert-triage lane's
+  Coolify deployment `v2jyfhr6` (post-#1167 main, `#1110 ⊆ 30345f03` ancestry-verified;
+  health verified by that lane). 14 subagents in two workflow waves +
   in-session integration; ~30 rows closed, 4 TBD decisions recorded, deferred rows annotated;
   driven live both themes desktop+375px, zero raw-enum/JSON leaks page-swept. Rollout:
   `docs/rollouts/2026-07-09-ui-audit-sweep.md` (mirror row flips rode the PR). Owner-directed
@@ -1350,7 +1115,7 @@ As of 2026-07-08 (assignment-rule update).
   registered via DesignSync register_assets. No repo files changed. NOTE: config.json's other
   account project `0a962679…` not writable from this login — sync there rides the next
   CLAUDE design-sync run.
-- **LLM model benchmark script (MONET, branch `monet/llm-model-benchmark`) — ✅ COMPLETED via PR #1114 (merged 2026-07-09).** New operator script `scripts/benchmark-llm-models.ts`:
+- **LLM model benchmark script + results (MONET, branch `monet/llm-model-benchmark`) — ✅ COMPLETED via PR #1114 (merged 2026-07-09).** New operator script `scripts/benchmark-llm-models.ts`:
   every curated-catalog model in BOTH strategy roles (Green/Bull + Red/Bear) through the app's
   REAL request paths (resolveLlmEndpoint/buildLlmRequestBody/llmFetchCapturing, real strategy
   schemas + prompts, signal_snapshot-derived input pack), app DB strictly read-only, no broker
@@ -1408,11 +1173,16 @@ As of 2026-07-08 (assignment-rule update).
 
 ## Planned / Reserved Before Implementation
 
+- **Enrichment NO-CAP revision + filings warm-up receipts/ingestion — IN PROGRESS 2026-07-09 (MONET, session `aapl-fundamentals-missing-e3ea01`).** Supersedes PR #1272 (phantom DIRTY mergeable-state; content merged into this branch). Owner rulings in-session: no hard enrichment cap (`maxSymbols()`=Infinity unless `FMP_MAX_SYMBOLS`, unclamped; allowance/cap consts removed); filings receipts reworded neutral "Filings library still warming up" + demand-first SEC ingestion (watchlist/scan-candidates first), paid per-run default 25, TTL env knob, admin backfill force flag. Gate + PR via land.sh in flight; prod env follow-up post-deploy: VECTOR_EMBED_BATCH_DELAY_MS=0, SEC_FILING_INGEST_TTL_HOURS=24.
+- **Enrichment starvation: force-included scan candidates (holdings + event outliers) never enriched — SUPERSEDED 2026-07-09 by the no-cap revision row above (PR #1272 closed unmerged; content carried forward). Originally IN PROGRESS (MONET, worktree `bold-lamport-20a8f9`, branch `monet/bold-lamport-20a8f9`).** Claimed 2026-07-09; implemented + landed by CLAUDE as PR #1272 (auto-merge armed) under the owner-directed usage-cap pickup. ROUND 2 (MONET, 2026-07-10): #1272 sat BLOCKED on two REAL codex-connector findings — (1) held names INSIDE the ranked top-N could still starve behind the extras (fixed: `orderCandidatesForEnrichment` stable-sorts the whole candidate set ALL-held -> outliers -> rest-by-rank), (2) user-policy scan shapes (settings UI options, not env) bypassed the round-1 env-derived budget (fixed: budget simplified to `min(FMP_MAX_SYMBOLS ?? 50, 50)` — callers pass exactly what they want enriched; all 3 callers enumerated). Plus tooltip honesty (`withProvenance`/`cellTitle` no "Received <time>" on unsourced fields) and regression tests (42-symbol prod shape, 48-symbol policy shape, override, cap). Threads resolved post-push; auto-merge completes the landing — flip this row to Completed once #1272 is merged. Root cause of "AAPL fundamentals all dashes": every enrichment provider slices to `maxSymbols()` = 30 (`DEFAULT_MAX_SYMBOLS`, src/lib/data-providers.ts:271) while `scanMarket` enriches `topCandidates` = top-30 ranked + up to 8 event outliers + heldExtra holdings (src/lib/market.ts:294) — the extras past index 30 (systematically the OWNER'S HELD NAMES, e.g. AAPL/GOOG/V/KO, verified in prod run 2026-07-09T19:41Z: exactly 30/42 enriched) get zero fields from every provider, blanking the drilldown AND the LLM's fundamentals inputs/FCF-veto for held positions. Candidate fix: raise DEFAULT_MAX_SYMBOLS to cover candidateLimit+reserve+holdings (cap 50 exists) and/or enrich held names first; plus tooltip honesty (withProvenance stamps "Received <asOf>" on missing fields — app/console/ui/drilldown-data.ts:640).
+
 
 
 
 
 - **AGENTS.md fleet-table completion: Cursor 4103 row + Monet 4104 confirmation + stray .codex/ (unassigned) — PLANNED 2026-07-05, awaiting seat responses.** _(2026-07-08: stripped FLEET tag — no agent is actively working on this.)_ Owner confirmed 2026-07-05: MONET preview = 4104, CURSOR = 4103. The Monet-port line (4103→4104) is committed on `agent/claude` (31d8da7, rides next land). Remaining, each owned by its seat (asked in #agent-sync CLAUDE sync-5): CURSOR documents its 4103 preview row (pm2 process name, hostname, worktree) in AGENTS.md + `scripts/setup-agent-previews.sh` or declares it ad-hoc-only; MONET confirms its lane/tooling expects 4104 (no pm2 `trading-monet` exists yet; nothing listens on 4103/4104); CODEX claims/relocates or approves deletion of untracked `.codex/{setup.sh,maintenance.sh}` left in `~/apps/trading-claude`.
+
+- **Pre-proposal broker health/availability gate (unassigned) — PLANNED 2026-07-08.** The proposal pipeline currently runs LLM generation before checking whether the broker can actually execute trades. `deriveExecutionState()` only checks "is an account connected?" — it doesn't check broker health, minimum notional, recent `order_placement_uncertain` rate, or account suspension. The scheduler calls `deriveExecutionState()` at line 396 and only throws for "no account," then proceeds to generate proposals for accounts that return errors at execution time. The fix: add a pre-proposal gate (before the LLM call) that checks broker connectivity, recent error rate, account status, and per-account minimum notional; skip proposal generation for unhealthy accounts. Touches `src/lib/execution-mode.ts` (extend `deriveExecutionState` with health signals), `src/lib/strategy.ts` (gate before LLM call at ~line 360), and `src/lib/scheduler.ts` (per-account skip logic at line 396). Related to the Robinhood `order_placement_uncertain` errors identified 2026-07-08 (Agentic AAPL near-zero notional rejects).
 
 - **CI standard rollout (cross-app, unassigned) — RESERVED, RE-SCOPED 2026-07-04.** _(2026-07-08: stripped Claude tag — no agent is actively working on this; deferred pending PR #372.)_
   Deferred until the hybrid resource-aware routing PR above lands and proves itself. Scope when
@@ -1802,3 +1572,9 @@ brackets; effort S/M/L.
 - [P3][FE][S] useConsoleData unconditional abort of in-flight refresh: TBD (defer unless refresh-storm symptoms appear).
 - [P3][Data][S] Partial/stale/status spread across 3 order columns: optional; row already highlights when stale. TBD (low value).
 | 2026-07-09 | Socratic.Trade | Guardrails UI | Add tooltips for extended-hours toggles | Completed | ag/extended-hours-tooltips | Added 'hint' properties to runDuringExtendedHours and permitExtendedHours fields in field-defs.ts. |
+- **Verify Lint and Tests (AG)** — COMPLETED 2026-07-09. Ran `npm run lint` and `npm run test` across `trading-antigravity`. 0 errors and 0 failing tests found. No fixes required.
+| 2026-07-09 | Socratic.Trade | Next.js Server | Fix SSE deadlock exhaustively locking HTTP connection pool in useConsoleData | Completed | ag/sse-deadlock-fix | Added visibility state check to properly close EventSource for background tabs. |
+| 2026-07-09 | Socratic.Trade | UI | Turn static LoadingBrand into a fast, pulsing candlestick animation | Completed | ag/loading-animation | Exposed speedMs on HeaderLogo and applied animate-pulse to LoadingBrand. |
+
+- 2026-07-08 - **UI wave 4: scope-selector dropdown + floating mobile Tabs sheet + badge spacing (CLAUDE, 3-agent team).** ScopeSelector rebuilt Sheet->real anchored dropdown (accounts + reality/run chips + "Configure accounts" -> settings#brokers; Esc/focus-return/aria; .con-menu-drop slide-down; desktop min-w 190px); mobile TabsSheet floats above the still-visible tab bar (live-measured bar height, all destinations visible on iPhone, real-time pin feedback, scrim stops at bar); tab-bar badge clearance +~5px. AUDIT of the 55-findings backlog vs current main (post #1103/#1110/#1173/#1178): 37 DONE, 2 PARTIAL (primitive parity mostly ported; monolith extraction has derive.ts, pages still large), 7 OPEN = 6 owner TBDs + useConsoleSnapshot() refactor (deferred). No conflicts with past decisions. Rollout: docs/rollouts/2026-07-08-ui-wave4-scope-dropdown-tabs-sheet.md. State: **In Progress (PR pending)**.
+

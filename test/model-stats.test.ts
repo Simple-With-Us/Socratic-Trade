@@ -141,9 +141,9 @@ describe("aggregateModelStats — benchmark fallback", () => {
 });
 
 describe("aggregateModelStats — performance gating", () => {
-  const lots = (model: string, wins: number, losses: number) => [
-    ...Array.from({ length: wins }, () => ({ entryModel: model, pnl: 50, returnPct: 2 })),
-    ...Array.from({ length: losses }, () => ({ entryModel: model, pnl: -25, returnPct: -1 }))
+  const lots = (entryModel: string, reviewedByModel: string | undefined, wins: number, losses: number) => [
+    ...Array.from({ length: wins }, () => ({ entryModel, reviewedByModel, pnl: 50, returnPct: 2 })),
+    ...Array.from({ length: losses }, () => ({ entryModel, reviewedByModel, pnl: -25, returnPct: -1 }))
   ];
 
   it("always reports closedTrades, and includes perf whenever closedTrades >= 1 (UI applies thresholds)", () => {
@@ -151,7 +151,7 @@ describe("aggregateModelStats — performance gating", () => {
       usageRows: [],
       latencyEvents: [],
       benchmarkSummaries: NO_BENCH,
-      closedLots: lots("gpt-5.4-mini", 3, 1)
+      closedLots: lots("gpt-5.4-mini", "claude-sonnet-5", 3, 1)
     });
     const green = statFor(stats, "gpt-5.4-mini", "green");
     expect(green.closedTrades).toBe(4);
@@ -174,16 +174,18 @@ describe("aggregateModelStats — performance gating", () => {
     expect(green.perf).toBeNull();
   });
 
-  it("never attributes closed-trade perf to the red role (Red attribution is per-run)", () => {
+  it("symmetrically attributes closed-trade perf to the red role (reviewer)", () => {
     const stats = aggregateModelStats({
       usageRows: [],
       latencyEvents: [],
       benchmarkSummaries: NO_BENCH,
-      closedLots: lots("gpt-5.4-mini", 30, 30)
+      closedLots: lots("gpt-5.4-mini", "claude-sonnet-5", 30, 30)
     });
-    const red = statFor(stats, "gpt-5.4-mini", "red");
-    expect(red.closedTrades).toBe(0);
-    expect(red.perf).toBeNull();
+    const red = statFor(stats, "claude-sonnet-5", "red");
+    expect(red.closedTrades).toBe(60);
+    expect(red.perf).not.toBeNull();
+    expect(red.perf!.closedTrades).toBe(60);
+    expect(red.perf!.winRate).toBe(50);
   });
 
   it("ignores lots without an entry model (pre-attribution history)", () => {
@@ -191,7 +193,7 @@ describe("aggregateModelStats — performance gating", () => {
       usageRows: [],
       latencyEvents: [],
       benchmarkSummaries: NO_BENCH,
-      closedLots: [{ pnl: 10, returnPct: 1 }, ...lots("gpt-5.4-mini", 1, 0)],
+      closedLots: [{ pnl: 10, returnPct: 1 }, ...lots("gpt-5.4-mini", undefined, 1, 0)],
       models: []
     });
     const green = statFor(stats, "gpt-5.4-mini", "green");

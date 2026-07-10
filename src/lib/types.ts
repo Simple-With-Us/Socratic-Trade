@@ -1012,6 +1012,11 @@ export interface TradeProposal {
    */
   proposedByModel?: string;
   /**
+   * The Red Team model that reviewed this proposal. Stamped by the review loop in runStrategyOnce
+   * so performance attribution can track Red Team efficacy separately from Green Team generation.
+   */
+  reviewedByModel?: string;
+  /**
    * Decision-time market price captured when the proposal was generated. Serves as the entry anchor
    * for the deterministic entry-drift guard (policy.maxEntryDriftPct) at approval time. Persisted with
    * the proposal so the guard can compare it against the fresh price even when approval happens hours
