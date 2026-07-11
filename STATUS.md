@@ -7,13 +7,13 @@ script, workflow, configuration file, or source/test import invokes the separate
 That unused dev dependency was the sole path to four moderate audit findings:
 `drizzle-kit -> @esbuild-kit/esm-loader -> @esbuild-kit/core-utils -> esbuild@0.18.20`
 (`GHSA-67mh-4wv8-2f99`). This branch removes only `drizzle-kit` and its 54 exclusive lock nodes while
-retaining `drizzle-orm@0.45.2`. Node 24 verification so far: full and production-only `npm audit`
-both report zero vulnerabilities; `npm ci --dry-run --ignore-scripts` accepts the lock; the final
-lock is byte-for-byte the prior lock semantically except for the root dependency and exclusive
-subtree; `npx tsc --noEmit` is clean and `npm run lint` passes with 0 errors / 404 inherited warnings.
-Full Vitest/build verification remains pending
-the machine's serialized gate. Rollout: `docs/rollouts/2026-07-11-unused-drizzle-kit-cleanup.md`.
-## 2026-07-11 — Truthful notification delivery status (CODEX, current-main replacement branch)
+retaining `drizzle-orm@0.45.2`. The branch is reconciled through `main@4c5a246b`; package files were
+unchanged by the intervening merges. Independent review found no blocker and proved 54 removals / 0
+additions with every retained lock entry unchanged. Current Node 24 audit and production-only audit
+both report zero vulnerabilities; `npm ci --dry-run --ignore-scripts` accepts the lock and
+`npm ls` reports only `drizzle-orm@0.45.2`. The serialized full lint/TypeScript/Vitest/build gate
+remains. Rollout: `docs/rollouts/2026-07-11-unused-drizzle-kit-cleanup.md`.
+## 2026-07-11 — Truthful notification delivery status (CODEX, merged PR #1451)
 
 Adversarial review rejected unmerged AG PR #1442 because it still discarded results for the
 `price_alert` / `provider_degraded` direct-delivery paths, converted bridge exceptions into neutral
@@ -26,8 +26,9 @@ Historical/raw reasons render as human text. The operator fallback email remains
 never the gate. The branch is reconciled through `main@0dda52db` after strategy PR #1429 merged.
 Final Node 24 verification is green: focused 7 files / 96 tests, touched lint 0 errors / 43 inherited
 warnings, repository lint 0 errors / 404 inherited warnings, TypeScript, full Vitest **342 files /
-3,816 tests**, production build, and `git diff --check`. Push, replacement PR, hosted checks, #1442
-supersession, merge, and production verification remain. Rollout:
+3,816 tests**, production build, and `git diff --check`. Ready PR #1451 passed hosted verify, smoke,
+and gitleaks with zero review threads and merged as `4c5a246b`; unsafe #1442 is closed as superseded.
+Configured auto-deploy and exact production verification remain. Rollout:
 `docs/rollouts/2026-07-11-notification-status-truth.md`.
 
 ## 2026-07-11 — Strategy lease ownership + scheduler default correctness (CODEX, merged PR #1429)

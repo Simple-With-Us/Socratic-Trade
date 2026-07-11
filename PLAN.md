@@ -9,7 +9,9 @@ filling the missing pieces.
 > database change. Keep the actively used `drizzle-orm` runtime and remove only the unused
 > `drizzle-kit` migration CLI, which had no scripts/config/call sites and was the sole source of the
 > remaining four moderate, dev-only audit findings. The lock retains every unrelated package node;
-> full and production-only audits are now clean. See
+> full and production-only audits are now clean. The branch is reconciled through `main@4c5a246b`,
+> and an independent lockfile/usage review found no blocker; the final serialized gate and landing
+> remain. See
 > `docs/rollouts/2026-07-11-unused-drizzle-kit-cleanup.md`.
 > **2026-07-11 - Durable provider/dataset operation leases (CODEX).** No product-roadmap or
 > scheduler-loop change; reliability/cost correctness only. The manual admin guards and background
@@ -31,8 +33,8 @@ filling the missing pieces.
 > policy-webhook lane emits normal channel telemetry. The operator fallback email remains an extra
 > gated lane. The branch is reconciled through strategy merge `main@0dda52db`; the final Node 24 gate
 > is green: focused 7 files / 96 tests, repository lint, TypeScript, full 342 files / 3,816 tests,
-> production build, and diff-check. Ready replacement PR, #1442 supersession, hosted checks, merge,
-> and production verification remain. See
+> production build, and diff-check. PR #1451 passed hosted checks with zero review threads and merged
+> as `4c5a246b`; #1442 is closed as superseded. Exact production verification remains. See
 > `docs/rollouts/2026-07-11-notification-status-truth.md`.
 
 > **2026-07-11 - Runtime release and recovery-path observability (CODEX).** No roadmap scope

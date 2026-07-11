@@ -61,12 +61,17 @@ All commands used Node `v24.18.0` and npm `11.16.0` unless noted.
   - exit 0.
 - `npm run lint`
   - exit 0 with 0 errors / 404 inherited warnings.
+- After notification PR #1451 merged, `origin/main@4c5a246b` merged cleanly; none of the intervening
+  commits touched `package.json` or `package-lock.json`. Current-main audit, production-only audit,
+  `npm ci --dry-run --ignore-scripts`, `npm ls drizzle-kit drizzle-orm --all --package-lock-only`,
+  usage search, and diff-check all passed. `npm ls` retained only `drizzle-orm@0.45.2`.
+- Independent read-only review found no blocker: 963 -> 909 lock entries, exactly 54 removed and 0
+  added, every retained entry unchanged, and every removed entry reachable from `drizzle-kit@0.31.10`.
 
 Notable no-op: an initial `npm uninstall --save-dev drizzle-kit` reified dependencies in the fresh
 worktree but did not modify the manifest, so the explicit `npm pkg delete` path was used instead.
 
 ## Follow-ups
 
-- Run the serialized full Vitest and Next production-build gate after the coordinating session
-  releases it.
-- Commit, push, open a ready PR, merge, and production-verify only from the parent CODEX session.
+- Run the serialized full lint, TypeScript, Vitest, and Next production-build gate.
+- Push, open a ready PR, merge after hosted checks, and production-verify from the parent CODEX session.
