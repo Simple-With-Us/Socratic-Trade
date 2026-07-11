@@ -5,6 +5,12 @@ measurable, customizable, and easier to operate. The current codebase is treated
 as partially complete; implementation should preserve working controls while
 filling the missing pieces.
 
+> **2026-07-11 - Unused drizzle-kit audit-chain cleanup (CODEX).** No product roadmap or runtime
+> database change. Keep the actively used `drizzle-orm` runtime and remove only the unused
+> `drizzle-kit` migration CLI, which had no scripts/config/call sites and was the sole source of the
+> remaining four moderate, dev-only audit findings. The lock retains every unrelated package node;
+> full and production-only audits are now clean. See
+> `docs/rollouts/2026-07-11-unused-drizzle-kit-cleanup.md`.
 > **2026-07-11 - Runtime release and recovery-path observability (CODEX).** No roadmap scope
 > change; this is an operations-observability slice. `/api/health` gains a public-safe source
 > revision/process identity and hard-deadline, size-capped Litestream daemon status/last-sync

@@ -508,6 +508,17 @@ As of 2026-07-08 (assignment-rule update).
 
 ## 🚧 In Progress
 
+- **Remove unused `drizzle-kit` dev dependency and clear its dev-only audit chain (CODEX,
+  branch `codex/remove-unused-drizzle-kit`, worktree
+  `/Users/jay/.codex/worktrees/socratic-drizzle-cleanup`, 2026-07-11) — IN PROGRESS / IMPLEMENTED;
+  NON-FULL CHECKS GREEN, AWAITING SERIALIZED FULL GATE.** No script, workflow, config, source, or
+  test invokes the CLI; active `drizzle-orm@0.45.2` remains. Removed only `drizzle-kit` and its 54
+  exclusive lock nodes. Before: four moderate dev-only findings through
+  `@esbuild-kit/core-utils -> esbuild@0.18.20`; production audit clean. After: full and production
+  audits both zero, `npm ci --dry-run --ignore-scripts` accepts the exact base-minus-chain lock,
+  Node24 TypeScript is clean; lint passes with 0 errors / 404 inherited warnings. Full Vitest/build
+  waits for the serialized-gate coordinator.
+  Rollout: `docs/rollouts/2026-07-11-unused-drizzle-kit-cleanup.md`.
 - **Global learning reads + batched AI review of proposals (CLAUDE cloud, branch
   `claude/socratic-trade-logos-p0hxk7`) — IN PROGRESS 2026-07-07, PR pending.** Lessons (on
   `socratic_decisions`) + framework proposals now read GLOBAL across a user's accounts (dropped the

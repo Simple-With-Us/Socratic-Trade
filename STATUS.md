@@ -1,5 +1,19 @@
 # Status
 
+## 2026-07-11 — Unused drizzle-kit audit-chain cleanup (CODEX, branch `codex/remove-unused-drizzle-kit`)
+
+The application uses `drizzle-orm` directly in `src/lib/db-settings.ts` and `src/lib/db/**`, but no
+script, workflow, configuration file, or source/test import invokes the separate `drizzle-kit` CLI.
+That unused dev dependency was the sole path to four moderate audit findings:
+`drizzle-kit -> @esbuild-kit/esm-loader -> @esbuild-kit/core-utils -> esbuild@0.18.20`
+(`GHSA-67mh-4wv8-2f99`). This branch removes only `drizzle-kit` and its 54 exclusive lock nodes while
+retaining `drizzle-orm@0.45.2`. Node 24 verification so far: full and production-only `npm audit`
+both report zero vulnerabilities; `npm ci --dry-run --ignore-scripts` accepts the lock; the final
+lock is byte-for-byte the prior lock semantically except for the root dependency and exclusive
+subtree; `npx tsc --noEmit` is clean and `npm run lint` passes with 0 errors / 404 inherited warnings.
+Full Vitest/build verification remains pending
+the machine's serialized gate. Rollout: `docs/rollouts/2026-07-11-unused-drizzle-kit-cleanup.md`.
+
 ## 2026-07-10 — FMP request-quota wiring (CLAUDE, branch claude/fmp-rate-limit)
 Extended the unified per-provider request quota (PR #1310) to FMP, the last high-volume enrichment
 provider that was still unmetered. `FmpEnrichmentProvider.enrich` fires up to 5 HTTP calls per miss
