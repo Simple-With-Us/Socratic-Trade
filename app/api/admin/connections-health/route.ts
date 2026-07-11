@@ -21,7 +21,7 @@ const EXPECTED_BACKEND_LANES: Array<{ service: string; keySource: string | null 
   { service: "robinhood-broker", keySource: "user" },
   { service: "finnhub", keySource: "env" },
   { service: "fmp", keySource: "env" },
-  { service: "alphavantage", keySource: "env" },
+  { service: "alpha-vantage", keySource: "env" },
   { service: "twelvedata", keySource: "env" },
   { service: "massive", keySource: "env" },
   { service: "congress.trade", keySource: null },

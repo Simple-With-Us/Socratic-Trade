@@ -1,4 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { ADMIN_OPERATION_LIMITS, resetAdminOperationInFlight } from "../src/lib/admin-operation-guard";
 import { rateLimit, resetRateLimiter } from "../src/lib/rate-limit";
@@ -22,7 +25,10 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/auth/admin", () => ({ requireAdmin: mocks.requireAdmin }));
-vi.mock("@/lib/db", () => ({ listIngestedAccessions: mocks.listIngestedAccessions }));
+vi.mock("@/lib/db", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/lib/db")>(),
+  listIngestedAccessions: mocks.listIngestedAccessions
+}));
 vi.mock("@/lib/web-sources/sec-filings", () => ({ refreshFilingBodies: mocks.refreshFilingBodies }));
 vi.mock("@/lib/vector-db", () => ({ getVectorStoreStats: mocks.getVectorStoreStats }));
 vi.mock("@/lib/web-sources/sec8k", () => ({
@@ -52,6 +58,10 @@ import { GET as probeRobinhood } from "../app/api/admin/robinhood-probe/route";
 
 const EMAIL = "route-budget@example.com";
 const USER_ID = resolveRequestUserFromEmail(EMAIL).userId;
+
+beforeAll(() => {
+  process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-admin-route-behavior-${randomUUID()}.db`)}`;
+});
 
 function request(path: string, init: RequestInit = {}): Request {
   return new Request(`https://socratictrade.com${path}`, {

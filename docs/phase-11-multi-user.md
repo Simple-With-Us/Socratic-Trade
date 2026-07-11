@@ -40,7 +40,9 @@ allowed users map to isolated hashed user IDs only when present in
   broker production accounts.
 - Strategy-run audit lookups for Latest Decisions and Strategy Tuning are scoped
   by `connectedAccountId`, matching the per-account run lock/state model so a
-  stale failure from one account does not appear under another selected account.
+  stale failure from one account does not appear under another selected account. Each approval
+  invocation has its own owner token, and a heartbeat-loss guard refuses broker placement when
+  that account-scoped ownership can no longer be proved.
 - Dashboard Activity/Audit feeds and run history now follow the selected
   connected account as the default view, while retaining user-wide/system audit
   rows in account views for context. Rows display the account label when present,

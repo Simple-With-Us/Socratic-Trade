@@ -78,6 +78,8 @@ export async function expireStalePendingProposals(input: {
   policy: TradingPolicy;
   accountNumber?: string;
   now?: number;
+  /** Strategy-run ownership proof. Scheduler-only hygiene callers intentionally omit it. */
+  assertOwned?: () => void;
 }): Promise<ExpiryResult> {
   const { userId, policy } = input;
   const accountNumber = input.accountNumber ?? policy.accountNumber;
@@ -89,6 +91,7 @@ export async function expireStalePendingProposals(input: {
   if (stale.length === 0) return { expired: 0 };
 
   for (const pending of stale) {
+    input.assertOwned?.();
     const age = ageMinutes(pending.createdAt, now);
     updateProposalStatus(pending.id, "expired", undefined, undefined, undefined, userId);
     audit(
@@ -109,6 +112,7 @@ export async function expireStalePendingProposals(input: {
       },
       { policy, userId }
     );
+    input.assertOwned?.();
     emitDashboardEvent({ type: "proposal", userId, at: new Date(now).toISOString(), detail: { proposalId: pending.id, status: "expired" } });
   }
   return { expired: stale.length };
@@ -155,6 +159,8 @@ export async function revalidatePendingProposals(input: {
   now?: number;
   /** Override the market-hours gate (defaults to "is the regular US session open now"). */
   marketOpen?: boolean;
+  /** Strategy-run ownership proof. Scheduler-only hygiene callers intentionally omit it. */
+  assertOwned?: () => void;
 }): Promise<RevalidationResult> {
   const { userId, policy } = input;
   const accountNumber = input.accountNumber ?? policy.accountNumber;
@@ -182,6 +188,7 @@ export async function revalidatePendingProposals(input: {
   if (!openaiKey) return { checked: pending.length, reaffirmed: 0, withdrawn: 0, skipped: true };
 
   const currentMarketRegime = determineMarketRegime(await fetchMacroData(userId));
+  input.assertOwned?.();
 
   const reviewItems = pending.map((p) => ({
     proposalId: p.id,
@@ -283,8 +290,11 @@ export async function revalidatePendingProposals(input: {
         return { text, assessments: parsed.assessments ?? [] };
       }
     );
+    input.assertOwned?.();
     assessments = result.assessments;
   } catch (error) {
+    // Never let the best-effort LLM fallback swallow a strategy lease loss.
+    input.assertOwned?.();
     console.error("[revalidation] error:", error);
     // On any failure, keep the queue untouched rather than risk withdrawing good ideas.
     return { checked: pending.length, reaffirmed: 0, withdrawn: 0, skipped: true };
@@ -299,6 +309,7 @@ export async function revalidatePendingProposals(input: {
   for (const action of actions) {
     const p = pendingById.get(action.id);
     if (!p) continue;
+    input.assertOwned?.();
     if (action.action === "withdraw") {
       withdrawn++;
       updateProposalStatus(action.id, "withdrawn", undefined, undefined, undefined, userId);
@@ -320,6 +331,7 @@ export async function revalidatePendingProposals(input: {
         },
         { policy, userId }
       );
+      input.assertOwned?.();
       emitDashboardEvent({ type: "proposal", userId, at: nowIso, detail: { proposalId: action.id, status: "withdrawn" } });
     } else {
       reaffirmed++;

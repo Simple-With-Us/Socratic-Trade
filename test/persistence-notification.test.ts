@@ -562,7 +562,7 @@ describe("persistence and notifications", () => {
     const { sendNotification } = await import("../src/lib/notifications");
     const event = await sendNotification({ type: "fill", title: "Fill", payload: { id: "1" } }, { policy: DEFAULT_POLICY });
     expect(event.status).toBe("skipped");
-    expect(event.error).toContain("Notifications Webhook");
+    expect(event.error).toBe("No notification channels enabled.");
   });
 
   it("bridges legacy notification events to direct email delivery", async () => {
@@ -591,8 +591,8 @@ describe("persistence and notifications", () => {
       { policy: DEFAULT_POLICY, userId }
     );
 
-    expect(event.status).toBe("skipped");
-    expect(event.error).toContain("Notifications Webhook");
+    expect(event.status).toBe("sent");
+    expect(event.error).toBeUndefined();
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe("https://api.resend.com/emails");
     const emailBody = calls[0]?.body as { text?: string };

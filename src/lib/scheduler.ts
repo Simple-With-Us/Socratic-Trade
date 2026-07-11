@@ -16,7 +16,7 @@ import { markStaleRunningRuns } from "./db-execution";
 import { checkRegimeFlip } from "./regime-watch";
 import { getBrokerGateway } from "./broker";
 import { deriveExecutionState } from "./execution-mode";
-import { runStrategyOnce } from "./strategy";
+import { runStrategyOnce, type StrategyResult } from "./strategy";
 import { checkMonthlyLlmSpendCeiling } from "./llm-budget";
 import { maybeAutoTuneWeights } from "./auto-tune-scheduler";
 import { notifyStaleLimitOrders } from "./stale-limit-orders";
@@ -32,12 +32,43 @@ import { reconcilePendingFills } from "./strategy-execution";
 const TICK_MS = 60_000; // check every 60s; cadence changes take effect within one tick
 
 /**
- * Returns true iff SCHEDULER_SINGLE_LEADER is set to a truthy value.
- * Truthy: "1", "true", "on", "yes" (case-insensitive, trimmed). Default ON.
+ * Single-leader is the fail-safe default. Unset, empty, and whitespace-only values stay ON;
+ * operators must use an explicit non-truthy value (for example false/off/0/no) to disable it.
  */
-function singleLeaderEnabled(): boolean {
-  const v = String(process.env.SCHEDULER_SINGLE_LEADER ?? "true").trim().toLowerCase();
-  return ["1", "true", "on", "yes"].includes(v);
+export function singleLeaderEnabled(rawValue: string | undefined = process.env.SCHEDULER_SINGLE_LEADER): boolean {
+  const v = String(rawValue ?? "").trim().toLowerCase();
+  return !["0", "false", "off", "no"].includes(v);
+}
+
+/**
+ * A signal-driven shutdown can interrupt detached broker maintenance that the scheduler already
+ * launched. Keep the durable leader lease fenced until its TTL expires; only release once Node's
+ * event loop has actually drained and `beforeExit` proves no such work remains.
+ */
+export const SCHEDULER_LEASE_RELEASE_EVENTS = ["beforeExit"] as const;
+
+export function shouldReleaseSchedulerLeaseOnShutdown(event: "SIGTERM" | "SIGINT" | "beforeExit"): boolean {
+  return (SCHEDULER_LEASE_RELEASE_EVENTS as readonly string[]).includes(event);
+}
+
+/** Auto-tuning is follow-on work for a successfully completed account run only. */
+export function shouldAutoTuneAfterStrategyRun(result: Pick<StrategyResult, "status">): boolean {
+  return result.status === "completed";
+}
+
+/** Account-bound scheduler composition kept exportable for deterministic regression coverage. */
+export async function runScheduledStrategyAndMaybeTune(
+  userId: string,
+  connectedAccountId: string,
+  now?: number
+): Promise<StrategyResult> {
+  const result = await runStrategyOnce(userId, { connectedAccountId });
+  if (shouldAutoTuneAfterStrategyRun(result)) {
+    // Compute after the potentially long run so cadence and daily budget reservation use the
+    // follow-up's real day/time. Tests may inject an explicit clock value.
+    await maybeAutoTuneWeights(userId, now ?? Date.now(), connectedAccountId);
+  }
+  return result;
 }
 
 // ── Health threshold: abdicate leadership after N consecutive heartbeat failures ──
@@ -203,20 +234,17 @@ export function getSchedulerState(userId: string = "local", connectedAccountId?:
 export function startScheduler(): void {
   if (timer) return; // guard against double-start
 
-  // Register SIGTERM / SIGINT / beforeExit handlers (once per process lifetime) to release the
-  // scheduler lease on clean shutdown so a stopped process frees the lease immediately rather than
-  // waiting for TTL expiry. Guarded by a globalThis flag so HMR re-eval can't double-register.
-  // These are registered unconditionally (cheap); releaseLease() no-ops when this process never
-  // acquired the lease (flag OFF ⇒ no lease row owned by us).
+  // Release only after the event loop drains. SIGTERM/SIGINT intentionally retain the lease until
+  // its TTL: signal shutdown can kill detached synthetic-stop/broker work, and immediate release
+  // would let a successor duplicate those protective orders before their outcome is known.
+  // Guarded by globalThis so HMR re-evaluation cannot double-register the beforeExit listener.
   const shutdownHost = globalThis as unknown as { __schedulerLeaseShutdownRegistered?: boolean };
   if (!shutdownHost.__schedulerLeaseShutdownRegistered) {
     shutdownHost.__schedulerLeaseShutdownRegistered = true;
     const release = () => {
       try { releaseLease(LEASE_OWNER); } catch { /* never throw on shutdown */ }
     };
-    process.once("SIGTERM", release);
-    process.once("SIGINT", release);
-    process.on("beforeExit", release);
+    for (const event of SCHEDULER_LEASE_RELEASE_EVENTS) process.on(event, release);
   }
 
   // Boot interlock runs once, before any tick, so a restored/copied DB cannot resume live
@@ -232,13 +260,30 @@ export function startScheduler(): void {
 }
 
 async function tick(): Promise<void> {
-  // Liveness heartbeat for /api/health: a persisted timestamp each tick lets an external
-  // supervisor (PM2/uptime monitor) detect a dead/hung scheduler — i.e. autonomy and the
-  // synthetic-stop monitor silently not running. Self-guarded so it can never break a tick.
-  let heartbeatOk = false;
+  // Crashed-run sweep: mark strategy_runs left in status='running' after a process crash/kill.
+  // Must run BEFORE the single-leader gate so stale rows are always repaired (idempotent: the
+  // UPDATE has a `WHERE status = 'running'` guard, so even two concurrent sweeps won't double-count).
+  try {
+    const repaired = markStaleRunningRuns(Date.now());
+    if (repaired > 0) console.log(`[scheduler] marked ${repaired} stale running run(s) as failed`);
+  } catch (err) {
+    console.error("[scheduler] stale-run sweep error:", err);
+  }
+
+  // Single-leader gate (default ON, including unset/empty). Only an explicit false/off/0/no-style
+  // value disables it; otherwise only the lease holder runs the background updates and per-account tick body
+  // — preventing duplicate API scrapes and broker EXIT orders on multi-process deploys.
+  if (singleLeaderEnabled() && !acquireOrRenewLeadership(new Date())) {
+    return; // not the leader this tick — no side effects
+  }
+
+  // Liveness heartbeat — AFTER the leader gate, so a follower that never runs the tick body cannot
+  // keep /api/health fresh while the leader is wedged (which would let synthetic stops and strategy
+  // runs grow stale without tripping the stale-scheduler check). Also self-guards the health-failure
+  // threshold: only the leader tracks heartbeat failures — a follower with a dead DB won't abdicate
+  // (it never got past the gate anyway), and the leader does.
   try {
     setInternalSetting("scheduler:lastTick", new Date().toISOString());
-    heartbeatOk = true;
     if (getHealthFailures() > 0) resetHealthFailures();
   } catch (err) {
     console.error("[scheduler] heartbeat write error:", err);
@@ -251,23 +296,6 @@ async function tick(): Promise<void> {
       try { releaseLease(LEASE_OWNER); } catch { /* never throw on shutdown */ }
       return; // stop this tick — we can't prove leadership anyway with a dead DB
     }
-  }
-
-  // Crashed-run sweep: mark strategy_runs left in status='running' after a process crash/kill.
-  // Must run BEFORE the single-leader gate so stale rows are always repaired (idempotent: the
-  // UPDATE has a `WHERE status = 'running'` guard, so even two concurrent sweeps won't double-count).
-  try {
-    const repaired = markStaleRunningRuns(Date.now());
-    if (repaired > 0) console.log(`[scheduler] marked ${repaired} stale running run(s) as failed`);
-  } catch (err) {
-    console.error("[scheduler] stale-run sweep error:", err);
-  }
-
-  // Single-leader gate (additive; flag default OFF). When SCHEDULER_SINGLE_LEADER=1 (or
-  // true/on/yes), only the lease holder runs the background updates and per-account tick body
-  // — preventing duplicate API scrapes and broker EXIT orders on multi-process deploys.
-  if (singleLeaderEnabled() && !acquireOrRenewLeadership(new Date())) {
-    return; // not the leader this tick — no side effects
   }
 
   // Sentry Crons check-in (opt-in, see sendSentrySchedulerCheckIn above). Deliberately AFTER the
@@ -541,10 +569,9 @@ async function tick(): Promise<void> {
       // breakers + reconciliation, before proposal generation), NOT here — suppressing the run at this
       // outer gate would also skip the drawdown/volatility breakers + fill reconciliation, disabling
       // safety maintenance for the rest of the day. So we always enter the run; it skips only LLM work.
-      const p = runStrategyOnce(userId, { connectedAccountId: accountId })
-        // Item 1 (opt-in): after a successful cadence run, attempt cadence-gated autonomous weight tuning.
-        // No-op unless policy.tuning.autoApplyWeights is on; fully self-guarded so it can never break the tick.
-        .then(() => maybeAutoTuneWeights(userId))
+      const p = runScheduledStrategyAndMaybeTune(userId, accountId)
+        // Item 1 (opt-in): after a successful cadence run, attempt account-bound, cadence-gated
+        // autonomous weight tuning. Failed/busy runs never tune; the helper owns that invariant.
         .catch((err) => {
           console.error(`[scheduler] error running strategy for ${userId}/${accountId}:`, err);
         })
@@ -563,4 +590,9 @@ async function tick(): Promise<void> {
     // Never let a thrown error kill the timer
     console.error("[scheduler] tick error:", err);
   }
+}
+
+/** Test-only entry point for asserting leader-gate ordering without starting the interval. */
+export async function _runSchedulerTickForTest(): Promise<void> {
+  await tick();
 }

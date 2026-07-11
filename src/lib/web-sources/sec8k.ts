@@ -15,6 +15,14 @@ import { audit, getInternalSetting, setInternalSetting } from "../db";
 import { hasIngestedAccession, insertIngestedAccession } from "../db";
 import { normalizeSymbol } from "../money";
 import { envFlagOn } from "../rag/env-flag";
+import {
+  assertOperationLeaseOwnership,
+  OPERATION_LEASE_GROUPS,
+  runWithOperationLease,
+  throwIfOperationLeaseCancelled,
+  type OperationLeaseAware,
+  type OperationLeaseClaim
+} from "../operation-lease";
 import { retryBackoffMs } from "./congress";
 import { politeFetchText, runRateLimited, secUserAgent, sleep } from "./http";
 import { extractFilingText } from "./sec-filings";
@@ -296,17 +304,46 @@ export function buildEightKContext(event: EightKEvent): string {
  * recover after the Voyage-billing 429 left the Pinecone index empty. Returns the embed/upsert
  * outcome so a caller (e.g. the reindex route) can confirm `indexed > 0`.
  */
+export interface ReindexEightKResult {
+  attempted: number;
+  indexed: number;
+  error?: string;
+  skipped?: boolean;
+}
+
 export async function reindexEightKDataset(
   userId: string = "local",
-  limit: number = Number.POSITIVE_INFINITY
-): Promise<{ attempted: number; indexed: number; error?: string; skipped?: boolean }> {
+  limit: number = Number.POSITIVE_INFINITY,
+  operationLeaseClaim?: OperationLeaseClaim
+): Promise<OperationLeaseAware<ReindexEightKResult>> {
+  const guarded = await runWithOperationLease(
+    {
+      group: OPERATION_LEASE_GROUPS.RAG_REINDEX,
+      operation: "reindex-8k",
+      claim: operationLeaseClaim
+    },
+    async (claim, signal) => reindexEightKDatasetUnlocked(userId, limit, claim, signal)
+  );
+  if (!guarded.acquired) {
+    return { attempted: 0, indexed: 0, skipped: true, operationLease: guarded.busy };
+  }
+  return guarded.value;
+}
+
+async function reindexEightKDatasetUnlocked(
+  userId: string,
+  limit: number,
+  operationLeaseClaim: OperationLeaseClaim,
+  operationLeaseSignal: AbortSignal
+): Promise<ReindexEightKResult> {
+  assertOperationLeaseOwnership(operationLeaseClaim);
   const dataset = getEightKDataset();
   const events = dataset?.events ?? [];
   if (events.length === 0) return { attempted: 0, indexed: 0 };
   const cap = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : events.length;
   const slice = events.slice(0, cap);
   const { storeContexts } = await import("../vector-db");
-  return storeContexts(
+  const result = await storeContexts(
     slice.map((event) => ({
       text: buildEightKContext(event),
       metadata: {
@@ -323,13 +360,57 @@ export async function reindexEightKDataset(
     })),
     userId
   );
+  throwIfOperationLeaseCancelled(operationLeaseSignal);
+  return result;
 }
 
-export async function refreshEightK(now: number = Date.now(), force = false): Promise<import("./types").WebSourceRefreshResult> {
+export async function refreshEightK(
+  now: number = Date.now(),
+  force = false,
+  operationLeaseClaim?: OperationLeaseClaim
+): Promise<OperationLeaseAware<import("./types").WebSourceRefreshResult>> {
   if (!force && !isEightKRefreshDue(now)) {
     const ds = getEightKDataset();
     return { id: "sec8k", ok: true, recordCount: ds?.recordCount ?? 0, sources: ds ? ["sec-edgar"] : [], fetchedAt: ds?.fetchedAt ?? "", skipped: true };
   }
+
+  const guarded = await runWithOperationLease(
+    {
+      group: OPERATION_LEASE_GROUPS.SEC8K_WEB_SOURCE,
+      operation: "refresh-websource:sec8k",
+      claim: operationLeaseClaim
+    },
+    async (claim, signal) => refreshEightKUnlocked(now, force, claim, signal)
+  );
+  if (!guarded.acquired) {
+    const ds = getEightKDataset();
+    return {
+      id: "sec8k",
+      ok: true,
+      recordCount: ds?.recordCount ?? 0,
+      sources: ds ? ["sec-edgar"] : [],
+      fetchedAt: ds?.fetchedAt ?? "",
+      skipped: true,
+      warning: `Skipped because ${guarded.busy.activeOperation} is already refreshing the SEC 8-K dataset.`,
+      operationLease: guarded.busy
+    };
+  }
+  return guarded.value;
+}
+
+async function refreshEightKUnlocked(
+  now: number,
+  force: boolean,
+  operationLeaseClaim: OperationLeaseClaim,
+  operationLeaseSignal: AbortSignal
+): Promise<import("./types").WebSourceRefreshResult> {
+  // Recheck after durable acquisition so a delayed scheduler process cannot repeat a refresh after
+  // the prior owner completed and advanced the dataset/cadence timestamps.
+  if (!force && !isEightKRefreshDue(now)) {
+    const ds = getEightKDataset();
+    return { id: "sec8k", ok: true, recordCount: ds?.recordCount ?? 0, sources: ds ? ["sec-edgar"] : [], fetchedAt: ds?.fetchedAt ?? "", skipped: true };
+  }
+  assertOperationLeaseOwnership(operationLeaseClaim);
   setInternalSetting(ATTEMPT_KEY, new Date(now).toISOString());
 
   let fresh: EightKEvent[] = [];
@@ -348,7 +429,9 @@ export async function refreshEightK(now: number = Date.now(), force = false): Pr
       })
       .filter((event): event is EightKEvent => Boolean(event));
     fresh = await enrichEightKEvents(fresh);
+    throwIfOperationLeaseCancelled(operationLeaseSignal);
   } catch (error) {
+    throwIfOperationLeaseCancelled(operationLeaseSignal);
     warning = error instanceof Error ? error.message : "sec8k failed";
   }
 
@@ -360,6 +443,7 @@ export async function refreshEightK(now: number = Date.now(), force = false): Pr
   }
   const fetchedAt = fresh.length > 0 ? new Date(now).toISOString() : (prior?.fetchedAt ?? new Date(now).toISOString());
   const dataset: EightKDataset = { events: merged, fetchedAt, recordCount: merged.length };
+  assertOperationLeaseOwnership(operationLeaseClaim);
   setInternalSetting(DATASET_KEY, dataset);
   const ok = fresh.length > 0;
   audit("web_source_refresh", { id: "sec8k", ok, recordCount: merged.length, fresh: fresh.length, warning });
@@ -369,6 +453,7 @@ export async function refreshEightK(now: number = Date.now(), force = false): Pr
   // import cycle). Item allowlist per the expert panel — most 8-Ks (5.07/9.01/5.03/routine 8.01)
   // are non-tradeable and must not trigger.
   const materialFresh = fresh.filter(eightKHasMaterialItem);
+  throwIfOperationLeaseCancelled(operationLeaseSignal);
   if (materialFresh.length > 0) {
     import("../triggers")
       .then(({ broadcastMaterialEvent }) => {

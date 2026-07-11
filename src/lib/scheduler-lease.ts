@@ -7,7 +7,8 @@
 // read+write within a process and within SQLite's single-writer model. A two-process TOCTOU
 // window of one tick remains — the same pre-existing limitation shared by acquireStrategyLock.
 // The TTL+steal semantics plus the per-process stopMonitorInFlight guard make a real double-exit
-// vanishingly unlikely. The flag is OFF by default. Fixing the underlying TOCTOU is a SEPARATE PR.
+// vanishingly unlikely. Single-leader operation is ON by default; an operator can still disable it
+// explicitly for diagnostics. Fixing the underlying TOCTOU is a SEPARATE PR.
 //
 // Do NOT use setSetting() here — that calls audit("policy_change") which is noisy for lease ops.
 // Use direct getDb() prepared statements, matching the acquireStrategyLock approach.

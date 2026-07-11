@@ -4,6 +4,8 @@ import { getVectorStoreStats } from "@/lib/vector-db";
 import { resolveRequestUserId } from "@/lib/request-user";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
+import { getOperationLeaseBusy } from "@/lib/operation-lease";
+import { operationLeaseBusyResponse } from "@/lib/operation-guard-response";
 
 export const dynamic = "force-dynamic";
 
@@ -35,9 +37,11 @@ export async function POST(request: Request) {
   } catch {
     // no body / not JSON -> reindex the whole dataset
   }
-  return withAdminOperationGuard(request, "reindex-8k", async () => {
+  return withAdminOperationGuard(request, "reindex-8k", async (operationLeaseClaim) => {
     const before = await getVectorStoreStats(userId);
-    const result = await reindexEightKDataset(userId, limit);
+    const result = await reindexEightKDataset(userId, limit, operationLeaseClaim);
+    const busy = getOperationLeaseBusy(result);
+    if (busy) return operationLeaseBusyResponse("reindex-8k", busy);
     const after = await getVectorStoreStats(userId);
     return NextResponse.json({
       ok: !result.error,

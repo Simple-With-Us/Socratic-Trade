@@ -185,8 +185,28 @@ describe("dashboard feed helpers", () => {
 
     expect(item.title).toBe("Sold PLTR");
     // NotificationStatus decided vocabulary: skipped -> "Not sent".
-    expect(item.detail).toBe("Not sent - Notifications Webhook Not Configured");
+    expect(item.detail).toBe("Not sent - No notification channels enabled.");
     expect(item.companyName).toBe("Palantir Technologies Inc.");
+  });
+
+  it.each([
+    ["not_configured", "Not sent - Notification channel is not configured by the operator."],
+    ["no_target", "Not sent - Notification channel has no delivery target."]
+  ])("maps historical raw delivery reason %s to human UI copy", (error, expected) => {
+    const item = formatNotificationDisplay(
+      {
+        id: `raw-${error}`,
+        createdAt: "2026-07-11T00:00:00.000Z",
+        type: "run_failed",
+        title: "Run failed",
+        status: "skipped",
+        payload: {},
+        error
+      } satisfies NotificationEvent,
+      {}
+    );
+
+    expect(item.detail).toBe(expected);
   });
 
   it("resolves nested proposal ids for blocked notification audits", () => {

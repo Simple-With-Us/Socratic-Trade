@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/admin";
 import { congressTradeToken, isCongressShareAutoEnabled, runCongressDailyShare } from "@/lib/congress-share";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
+import { getOperationLeaseBusy } from "@/lib/operation-lease";
+import { operationLeaseBusyResponse } from "@/lib/operation-guard-response";
 
 export const dynamic = "force-dynamic";
 
@@ -46,8 +48,10 @@ export async function POST(request: Request) {
     // no body -> share the monitored universe
   }
 
-  return withAdminOperationGuard(request, "congress-share", async () => {
-    const summary = await runCongressDailyShare({ now: Date.now(), force: true, symbols, fullHistory, flatFile, allIndexes });
+  return withAdminOperationGuard(request, "congress-share", async (operationLeaseClaim) => {
+    const summary = await runCongressDailyShare({ now: Date.now(), force: true, symbols, fullHistory, flatFile, allIndexes, operationLeaseClaim });
+    const busy = getOperationLeaseBusy(summary);
+    if (busy) return operationLeaseBusyResponse("congress-share", busy);
     return NextResponse.json({ autoEnabled: isCongressShareAutoEnabled(), ...summary });
   });
 }

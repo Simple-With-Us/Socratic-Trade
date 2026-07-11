@@ -65,6 +65,8 @@ export interface BuildFactorObservationsOptions {
   now?: number;
   /** Injectable OHLC fetcher; defaults to fetchDailyOHLC. */
   fetchOHLC?: BacktestOHLCFetcher;
+  /** Restrict signal-snapshot evidence to one connected account. Omitted preserves user-wide tools. */
+  connectedAccountId?: string;
 }
 
 interface SignalSnapshotPayload {
@@ -96,7 +98,7 @@ export async function buildFactorObservations(
   const auditLimit = boundedInteger(options.auditLimit ?? DEFAULT_AUDIT_LIMIT, 1, 5000, DEFAULT_AUDIT_LIMIT);
   const fetchOHLC = options.fetchOHLC ?? fetchDailyOHLC;
 
-  const rows = listSignalSnapshotAuditAfter(userId, undefined, auditLimit);
+  const rows = listSignalSnapshotAuditAfter(userId, undefined, auditLimit, options.connectedAccountId);
   const observations: FactorObservation[] = [];
   // Cache bars per symbol across the whole scan; null means "fetched, none available".
   const barsBySymbol = new Map<string, OHLCBar[] | null>();
@@ -1019,7 +1021,13 @@ export async function runWalkForwardOOS(
   const taxRate = options.taxRate ?? 0.24;
   const fetchOHLC = options.fetchOHLC ?? fetchDailyOHLC;
 
-  const rawObservations = await buildFactorObservations(userId, { horizonDays, auditLimit, now, fetchOHLC });
+  const rawObservations = await buildFactorObservations(userId, {
+    horizonDays,
+    auditLimit,
+    now,
+    fetchOHLC,
+    connectedAccountId: options.connectedAccountId
+  });
 
   const uniqueDates = [...new Set(rawObservations.map((o) => o.date))].sort();
   if (uniqueDates.length < 4) return null;

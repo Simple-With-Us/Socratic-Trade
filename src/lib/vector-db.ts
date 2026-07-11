@@ -14,7 +14,6 @@ import { getRagUsageSummary, hashQuery, meterEmbed, meterPineconeQuery, meterPin
 import { candidatePoolPersistEnabled, recordCandidatePool, candidatePoolFullPersistEnabled, recordCandidatePoolFull, type CandidateDisposition } from "./rag/candidate-pool";
 import { isOverLlmBudget } from "./llm-budget";
 import { sendNotification } from "./notifications";
-import { notify } from "./notify";
 import { alertUsageLimitHit } from "./usage-limit-alerts";
 
 const LAST_INGEST_KEY = "vectorStore:lastIngest";
@@ -550,8 +549,7 @@ async function alertRagConnectionFailure(
       userSpecific: source === "user",
       reason: message
     });
-    await sendNotification({ type: "provider_degraded", title, payload }, { userId: targetUserId }).catch(() => {});
-    await notify(targetUserId, { title, body, kind: "provider_degraded", data: payload }).catch(() => {});
+    await sendNotification({ type: "provider_degraded", title, payload }, { userId: targetUserId, directBody: body }).catch(() => {});
     const limitStatus = ragLimitStatus(message);
     if (limitStatus) {
       await alertUsageLimitHit({

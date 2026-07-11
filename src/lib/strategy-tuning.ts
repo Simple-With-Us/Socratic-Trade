@@ -2,7 +2,7 @@ import {
   audit,
   getPolicy,
   getStrategyPrompt,
-  getActiveConnectedAccount,
+  getConnectedAccount,
   latestAuditByKind,
   listFillEvents,
   listLearningMutations,
@@ -345,23 +345,27 @@ function policyForTuningReviewer(policy: TradingPolicy, modelOverride?: string):
 export async function proposeStrategyTuning(
   userId: string = "local",
   modelOverride?: string,
-  reasoningEffortOverride?: LlmReasoningEffort
+  reasoningEffortOverride?: LlmReasoningEffort,
+  connectedAccountId?: string,
+  assertOwned?: () => void
 ): Promise<StrategyTuningProposal> {
-  const policy = getPolicy(userId);
-  const activeAccount = getActiveConnectedAccount(userId);
+  const policy = getPolicy(userId, connectedAccountId);
+  const accountId = connectedAccountId ?? policy.connectedAccountId;
+  const activeAccount = accountId ? getConnectedAccount(accountId, userId) : undefined;
   const executionState = deriveExecutionState(policy, activeAccount);
-  const prompt = getStrategyPrompt(userId);
-  const latestDecision = (policy.connectedAccountId
-    ? latestAuditByKind("strategy_run", userId, policy.connectedAccountId)
+  const prompt = getStrategyPrompt(userId, accountId);
+  const latestDecision = (accountId
+    ? latestAuditByKind("strategy_run", userId, accountId)
     : latestAuditByKind("strategy_run", userId))?.payload as LatestDecisionPayload | undefined;
   const macro = await fetchMacroData(userId);
+  assertOwned?.();
   const accountNumber = policy.accountNumber;
   const performance = accountNumber ? getPerformanceSummary(accountNumber, {}, userId) : undefined;
   const source = fillSourceForExecutionMode(executionState);
   const fills = accountNumber ? listFillEvents(accountNumber, source, 30, userId) : [];
   const closedLotCount = accountNumber ? getClosedLotCount(accountNumber, source, userId) : 0;
   const minLotsForWeights = policy.tuning?.minClosedLotsForWeightShift ?? MIN_CLOSED_LOTS_FOR_WEIGHT_SHIFT;
-  const runs = listStrategyRuns(10, userId);
+  const runs = listStrategyRuns(10, userId, accountId);
   // Matured skipped-candidate counterfactuals (empty price map => realized rows only,
   // no live quotes needed). Lets the tuner learn from high-scoring names it passed on.
   // Item 4 (opt-in): raise the recurring-factor bar to >=5 and require SPY-beating over each row's OWN
@@ -378,14 +382,15 @@ export async function proposeStrategyTuning(
   let benchmarkReturnBySnapshotDate: Map<string, number> | undefined;
   if (benchmarkRelative) {
     // Pre-scan the snapshot dates the skipped rows will span, then build one SPY entry→now map for them.
-    const preScan = getSkippedCandidateReturns({}, userId, { limit: skippedLimit, maxAgeDays: 30, connectedAccountId: policy.connectedAccountId });
+    const preScan = getSkippedCandidateReturns({}, userId, { limit: skippedLimit, maxAgeDays: 30, connectedAccountId: accountId });
     const dates = Array.from(new Set(preScan.map((r) => r.asOf?.slice(0, 10)).filter((d): d is string => Boolean(d))));
     benchmarkReturnBySnapshotDate = await buildSpyReturnToNowMap(dates).catch(() => new Map<string, number>());
+    assertOwned?.();
   }
-  const skippedRows = getSkippedCandidateReturns({}, userId, { limit: skippedLimit, maxAgeDays: 30, connectedAccountId: policy.connectedAccountId, benchmarkReturnBySnapshotDate });
+  const skippedRows = getSkippedCandidateReturns({}, userId, { limit: skippedLimit, maxAgeDays: 30, connectedAccountId: accountId, benchmarkReturnBySnapshotDate });
   // Kill-survivorship disclosure: the tuner (and anything rendering this summary) sees how many
   // counterfactuals actually resolved vs terminally failed, instead of a silently survivor-thinned list.
-  const missedOpportunityCoverage = getMissedOpportunityCoverage(userId, policy.connectedAccountId);
+  const missedOpportunityCoverage = getMissedOpportunityCoverage(userId, accountId);
   const missedOpportunities = summarizeMissedOpportunities(skippedRows, { limit: 8, benchmarkRelative, minRecurringCount, requireHitRate, coverageDisclosure: missedOpportunityCoverage.disclosure });
   // Factor-outcome history: realized win-rate and avg-return grouped by dominant entry factor.
   // Gated by the same closed-lot minimum — below the gate the sample is too thin to trust
@@ -415,7 +420,7 @@ export async function proposeStrategyTuning(
     accountConfigured: Boolean(accountNumber),
     policy: compactPolicy(policy, executionState),
     strategyPrompt: prompt,
-    performance: compactPerformance(performance, executionState.mode !== "broker/live", getPolicy(userId).tuning?.useEntryRunAttribution ?? false),
+    performance: compactPerformance(performance, executionState.mode !== "broker/live", policy.tuning?.useEntryRunAttribution ?? false),
     closedLotCount,
     minClosedLotsForWeightShift: minLotsForWeights,
     recentFills: fills.slice(0, 20).map((fill) => compactFill(fill, executionState)),
@@ -455,10 +460,11 @@ export async function proposeStrategyTuning(
   // provider 400 for an empty model instead of producing a usable local proposal.
   if (!llmKey || !llmModel) {
     const localProposal = localRulesProposal({ policy, prompt, performance, fills, latestDecision, closedLotCount, missedOpportunities, factorScorecard, showPaperSide: source === "paper" });
-    return applyOosGate(localProposal, userId);
+    return applyOosGate(localProposal, userId, accountId, assertOwned);
   }
 
-  const payload = await requestLlmTuning(context, userId, modelOverride, reasoningEffortOverride);
+  const payload = await requestLlmTuning(context, userId, modelOverride, reasoningEffortOverride, accountId, assertOwned);
+  assertOwned?.();
   const proposedPatch = toPatch(payload, prompt, policy.scoringWeights);
   const cautions = Array.isArray(payload.cautions) ? [...payload.cautions] : [];
   // Hard-enforce the §3.E sample-size guardrail: the system prompt asks the model to
@@ -478,7 +484,7 @@ export async function proposeStrategyTuning(
     confidenceScore: typeof payload.confidenceScore === "number" ? clamp(payload.confidenceScore, 0, 100) : 50,
     generatedBy: "llm"
   };
-  return applyOosGate(llmProposal, userId);
+  return applyOosGate(llmProposal, userId, accountId, assertOwned);
 }
 
 /**
@@ -507,25 +513,32 @@ function withOosUnvalidatedCaution(proposal: StrategyTuningProposal, reason: str
   return { ...proposal, proposedPatch: patch, cautions: [...proposal.cautions, caution] };
 }
 
-async function applyOosGate(proposal: StrategyTuningProposal, userId: string): Promise<StrategyTuningProposal> {
+async function applyOosGate(
+  proposal: StrategyTuningProposal,
+  userId: string,
+  connectedAccountId?: string,
+  assertOwned?: () => void
+): Promise<StrategyTuningProposal> {
   const proposedWeights = proposal.proposedPatch.scoringWeights;
   if (!proposedWeights || Object.keys(proposedWeights).length === 0) return proposal;
 
   // Change C: read the withhold flag (default true = strip unvalidated weight changes).
-  const withhold = getPolicy(userId).tuning?.oosWithholdUnvalidated ?? true;
+  const withhold = getPolicy(userId, connectedAccountId).tuning?.oosWithholdUnvalidated ?? true;
 
   // The status-quo weights this proposal would replace, and the full candidate vector that WOULD be
   // applied. A proposed patch only names the factors it changes, so merge it over the baseline and
   // normalize — exactly mirroring how db-profiles persists a weight patch.
-  const baselineWeights = getPolicy(userId).scoringWeights;
+  const baselineWeights = getPolicy(userId, connectedAccountId).scoringWeights;
   const candidateWeights = normalizeScoringWeights({ ...baselineWeights, ...proposedWeights });
 
   let oosResult;
   try {
     // Validate the ACTUAL proposed weights (and the current baseline) on held-out data — not the
     // data-derived IC weights, which answer a different question.
-    oosResult = await runWalkForwardOOS(userId, { candidateWeights, baselineWeights });
+    oosResult = await runWalkForwardOOS(userId, { candidateWeights, baselineWeights, connectedAccountId });
+    assertOwned?.();
   } catch {
+    assertOwned?.();
     // OOS fetch failed (e.g. network error in test); skip the gate gracefully — but flag non-validation.
     return withOosUnvalidatedCaution(proposal, "the OOS data fetch failed", withhold);
   }
@@ -648,9 +661,11 @@ async function requestLlmTuning(
   context: unknown,
   userId: string,
   modelOverride?: string,
-  reasoningEffortOverride?: LlmReasoningEffort
+  reasoningEffortOverride?: LlmReasoningEffort,
+  connectedAccountId?: string,
+  assertOwned?: () => void
 ): Promise<LlmTuningPayload> {
-  const policy = getPolicy(userId);
+  const policy = getPolicy(userId, connectedAccountId);
   const policyForResolution = policyForTuningReviewer(policy, modelOverride);
   const { url, key: openaiKey, model, provider, keySource, keyRef, transport } = resolveLlmEndpoint(policyForResolution, userId);
   const schema = tuningSchema();
@@ -708,7 +723,8 @@ async function requestLlmTuning(
       }
 
       const payload = await response.json();
-      recordLlmUsage({ userId, provider, model, context: "strategy-tuning", keySource, keyRef, connectedAccountId: policy.connectedAccountId, ...extractLlmUsage(payload) });
+      assertOwned?.();
+      recordLlmUsage({ userId, provider, model, context: "strategy-tuning", keySource, keyRef, connectedAccountId: connectedAccountId ?? policy.connectedAccountId, ...extractLlmUsage(payload) });
       const text = extractLlmText(payload);
       if (!text) throw new Error("Empty strategy tuning response returned from LLM API.");
       // §4.1 defense-in-depth: tolerate a fenced/prose-wrapped reply before parsing.
@@ -716,6 +732,7 @@ async function requestLlmTuning(
     }
   );
 
+  assertOwned?.();
   return traced.payload;
 }
 
@@ -1091,9 +1108,16 @@ export function autonomousOosThresholds(
  * guard is NOT run here (it decides whether to enter the autonomous path at all and emits an audit row on
  * violation); callers run it before consuming a decision when they intend to persist.
  */
-async function evaluateAutonomousWeightTuning(userId: string, modelOverride?: string): Promise<AutonomousWeightDecision> {
-  const policy = getPolicy(userId);
-  const proposal = await proposeStrategyTuning(userId, modelOverride);
+async function evaluateAutonomousWeightTuning(
+  userId: string,
+  modelOverride?: string,
+  connectedAccountId?: string,
+  assertOwned?: () => void
+): Promise<AutonomousWeightDecision> {
+  const policy = getPolicy(userId, connectedAccountId);
+  const accountId = connectedAccountId ?? policy.connectedAccountId;
+  const proposal = await proposeStrategyTuning(userId, modelOverride, undefined, accountId, assertOwned);
+  assertOwned?.();
   // WRITE-SCOPE SAFETY (panel B1): scoringWeights ONLY — never the patch's policy/prompt sub-fields.
   const proposedWeights = proposal.proposedPatch.scoringWeights;
   const proposalMeta = { confidenceScore: proposal.confidenceScore, generatedBy: proposal.generatedBy, cautions: proposal.cautions };
@@ -1129,9 +1153,12 @@ async function evaluateAutonomousWeightTuning(userId: string, modelOverride?: st
       candidateWeights: newWeights,
       baselineWeights: previousWeights,
       purgeEmbargo: policy.tuning?.oosPurgeEmbargo ?? false,
-      icWeightShrinkage: policy.tuning?.icWeightShrinkage ?? 0
+      icWeightShrinkage: policy.tuning?.icWeightShrinkage ?? 0,
+      connectedAccountId: accountId
     });
+    assertOwned?.();
   } catch {
+    assertOwned?.();
     return { ...base, reason: "oos_fetch_failed" };
   }
   if (!oos) return { ...base, reason: "oos_insufficient_history" }; // <4 dates → HARD no-apply
@@ -1206,8 +1233,15 @@ const AUTO_TUNE_DRAWDOWN_GUARD_MIN_TEST_DATES = 8;
  * tuner WOULD have applied + the OOS readout — never touching policy — so an operator can forward-validate
  * the tuner's decisions before trusting autonomy.
  */
-export async function applyAutonomousWeightTuning(userId: string = "local", modelOverride?: string): Promise<AutonomousWeightApplyResult> {
-  const policy = getPolicy(userId);
+export async function applyAutonomousWeightTuning(
+  userId: string = "local",
+  modelOverride?: string,
+  connectedAccountId?: string,
+  assertOwned?: () => void
+): Promise<AutonomousWeightApplyResult> {
+  const policy = getPolicy(userId, connectedAccountId);
+  const accountId = connectedAccountId ?? policy.connectedAccountId;
+  assertOwned?.();
   const shadowEnabled = policy.tuning?.shadowWeightLedger ?? false;
 
   // The invariant guard and the autoApplyWeights flag decide whether a REAL apply may run. The SHADOW ledger
@@ -1225,10 +1259,10 @@ export async function applyAutonomousWeightTuning(userId: string = "local", mode
     if (!invariants.ok) {
       audit("auto_weight_apply_skipped", {
         userId,
-        connectedAccountId: policy.connectedAccountId,
+        connectedAccountId: accountId,
         reason: "invariant_violation",
         violations: invariants.violations
-      }, userId, policy.connectedAccountId);
+      }, userId, accountId);
       // Still allow a shadow row (below) to capture the would-be decision for the operator.
       if (!shadowEnabled) {
         return { applied: false, reason: `invariant_violation (${invariants.violations.map((v) => v.code).join(",")})` };
@@ -1236,7 +1270,8 @@ export async function applyAutonomousWeightTuning(userId: string = "local", mode
     }
   }
 
-  const decision = await evaluateAutonomousWeightTuning(userId, modelOverride);
+  const decision = await evaluateAutonomousWeightTuning(userId, modelOverride, accountId, assertOwned);
+  assertOwned?.();
 
   // Real apply: only when auto-apply is on AND the invariant guard passed AND the gate says wouldApply.
   const invariantsOk = autoApplyOn ? validateTuningInvariants(policy.tuning).ok : false;
@@ -1244,9 +1279,10 @@ export async function applyAutonomousWeightTuning(userId: string = "local", mode
     const newWeights = decision.after;
     // P0-4: capture `before` ATOMICALLY — re-read effective policy immediately before the setPolicy write so a
     // concurrent multi-agent weight write doesn't cause a stale baseline to be recorded/reverted-to.
-    const beforePolicy = getPolicy(userId, policy.connectedAccountId);
+    const beforePolicy = getPolicy(userId, accountId);
     const beforeWeights = normalizeScoringWeights({ ...beforePolicy.scoringWeights });
-    setPolicy({ ...beforePolicy, scoringWeights: newWeights }, userId, policy.connectedAccountId);
+    assertOwned?.();
+    setPolicy({ ...beforePolicy, scoringWeights: newWeights }, userId, accountId);
 
     const evidence = {
       candidateIC: decision.oosICCandidate,
@@ -1269,7 +1305,7 @@ export async function applyAutonomousWeightTuning(userId: string = "local", mode
     recordLearningMutation({
       subsystem: LEARNING_SUBSYSTEM_SCORING_WEIGHTS,
       userId,
-      connectedAccountId: policy.connectedAccountId,
+      connectedAccountId: accountId,
       trigger: AUTO_WEIGHT_APPLY_AUDIT_KIND,
       flag: "autoApplyWeights",
       before: { scoringWeights: beforeWeights },
@@ -1281,7 +1317,7 @@ export async function applyAutonomousWeightTuning(userId: string = "local", mode
     // unified ledger is now the source of truth for revert.
     audit(AUTO_WEIGHT_APPLY_AUDIT_KIND, {
       userId,
-      connectedAccountId: policy.connectedAccountId,
+      connectedAccountId: accountId,
       previousWeights: beforeWeights,
       newWeights,
       changedFactors: decision.changedFactors,
@@ -1298,14 +1334,14 @@ export async function applyAutonomousWeightTuning(userId: string = "local", mode
       confidenceScore: decision.confidenceScore,
       generatedBy: decision.generatedBy,
       cautions: decision.cautions
-    }, userId);
+    }, userId, accountId);
 
     // P2-7 REPRODUCIBILITY / DECISION-PROVENANCE: runWalkForwardOOS is IO + time-dependent, so a later re-run
     // can't reproduce the fold that justified this apply. Record the fold shape, ICs, ICIR, margin/thresholds,
     // and the flags in effect so an operator can audit exactly what evidence authorized the mutation.
     audit(TUNING_APPLY_PROVENANCE_AUDIT_KIND, {
       userId,
-      connectedAccountId: policy.connectedAccountId,
+      connectedAccountId: accountId,
       trainObservations: decision.oosReadout?.trainObservations,
       testObservations: decision.oosReadout?.testObservations,
       trainDates: decision.oosReadout?.trainDates,
@@ -1330,7 +1366,7 @@ export async function applyAutonomousWeightTuning(userId: string = "local", mode
         minOosICImprovement: policy.tuning?.minOosICImprovement ?? 0,
         minOosPairedTStat: policy.tuning?.minOosPairedTStat ?? 0
       }
-    }, userId, policy.connectedAccountId);
+    }, userId, accountId);
 
     return { applied: true, previousWeights: beforeWeights, newWeights, cautions: decision.cautions };
   }
@@ -1339,10 +1375,11 @@ export async function applyAutonomousWeightTuning(userId: string = "local", mode
   // candidate vector was actually built). Passive: it writes ONLY a shadow ledger row (a distinct trigger), so
   // no revert path will restore it and it never mutates policy.
   if (shadowEnabled && decision.after && decision.before) {
+    assertOwned?.();
     recordLearningMutation({
       subsystem: LEARNING_SUBSYSTEM_SCORING_WEIGHTS,
       userId,
-      connectedAccountId: policy.connectedAccountId,
+      connectedAccountId: accountId,
       trigger: AUTO_WEIGHT_SHADOW_TRIGGER,
       flag: "shadowWeightLedger",
       before: { scoringWeights: decision.before, shadow: true },

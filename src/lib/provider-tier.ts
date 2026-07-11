@@ -12,7 +12,6 @@
 
 import { audit, getInternalSetting, resolveApiKey, setInternalSetting } from "./db";
 import { massiveApiBase } from "./market-signals/massive";
-import { notify } from "./notify";
 import { sendNotification } from "./notifications";
 
 export type ProviderTier = "paid" | "free" | "unknown";
@@ -161,11 +160,8 @@ export async function runProviderTierCheck(opts: { userId?: string; now?: number
     if (!msg) continue;
     await sendNotification(
       { type: "provider_degraded", title: msg.title, payload: { provider, fromTier: prevTier ?? "unknown", toTier: cur.tier, reason: cur.reason, detectedAt: nowIso } },
-      { userId }
+      { userId, directBody: msg.body }
     ).catch(() => {});
-    await notify(userId, { title: msg.title, body: msg.body, kind: "provider_degraded", data: { provider, fromTier: prevTier ?? "unknown", toTier: cur.tier, reason: cur.reason } }).catch(
-      (err) => console.error("[provider-tier] notify error:", err)
-    );
   }
   return next;
 }

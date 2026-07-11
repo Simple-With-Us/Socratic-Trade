@@ -596,7 +596,7 @@
 | Parameter | Domain | Type | Typical Range | Notes |
 |-----------|--------|------|----------------|-------|
 | `AUTONOMY_RESUME_ON_BOOT` | Safety (env) | boolean | off/on | Preserve running autonomy state on restart (default off; safe) |
-| `SCHEDULER_SINGLE_LEADER` | Clustering (env) | boolean | off/on | Single-leader lease for multi-process deploys (opt-in, default off) |
+| `SCHEDULER_SINGLE_LEADER` | Clustering (env) | boolean | off/on | Single-leader lease for multi-process deploys (default on; unset/empty is on, explicit false/off/0/no disables) |
 | `SCHEDULER_LEASE_TTL_MS` | Clustering (env) | milliseconds | 30000–180000 | Lease validity window (default 90s) |
 
 #### **Observability & Debug**

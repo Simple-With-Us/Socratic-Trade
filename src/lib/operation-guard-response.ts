@@ -3,6 +3,7 @@ import {
   buildRateLimitedRejection,
   getOperationGuardHttpStatus
 } from "@jaywedgeworth22/congress-trading-shared";
+import type { OperationLeaseBusy } from "./operation-lease";
 
 function jsonResponse(status: number, body: Record<string, unknown>, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify({ ok: false, ...body }), {
@@ -37,4 +38,14 @@ export function operationInFlightResponse(
     error,
     ...extra
   });
+}
+
+/** Map a typed core-boundary busy result through the shared v1.5 rejection contract. */
+export function operationLeaseBusyResponse(operation: string, busy: OperationLeaseBusy): Response {
+  return operationInFlightResponse(
+    operation,
+    busy.activeOperation,
+    `Operation "${operation}" conflicts with "${busy.activeOperation}", which is already running.`,
+    { operationGroup: busy.group, retryAfterSeconds: busy.retryAfterSeconds }
+  );
 }

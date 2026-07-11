@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { getDb, getPolicy, releaseStrategyLock, setPolicy } from "./db";
+import { getDb, getPolicy, setPolicy } from "./db";
 import { clearMcpOAuthForUser } from "./mcp-oauth";
 
 export const ACCOUNT_DELETE_PHRASE = "DELETE MY ACCOUNT";
@@ -228,7 +228,6 @@ export function prepareAccountDeletion(input: { userId: string; email?: string }
   if (policy.systemState !== "halted") {
     setPolicy({ ...policy, systemState: "halted" }, input.userId);
   }
-  releaseStrategyLock(input.userId);
   db.transaction(() => {
     db.prepare("UPDATE account_deletion_requests SET status = 'cancelled' WHERE user_id = ? AND status = 'prepared'").run(input.userId);
     db.prepare(

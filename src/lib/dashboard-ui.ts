@@ -416,7 +416,9 @@ function notificationDetail(event: NotificationEvent): string {
 
 function notificationReason(error?: string): string | undefined {
   if (!error) return undefined;
-  if (error === "Notifications Webhook Not Configured") return "Notifications Webhook Not Configured";
+  if (error === "Notifications Webhook Not Configured") return "No notification channels enabled.";
+  if (error === "not_configured") return "Notification channel is not configured by the operator.";
+  if (error === "no_target") return "Notification channel has no delivery target.";
   if (error === "Notification type is disabled.") return "Type Disabled";
   return error;
 }

@@ -11,12 +11,57 @@ filling the missing pieces.
 > remaining four moderate, dev-only audit findings. The lock retains every unrelated package node;
 > full and production-only audits are now clean. See
 > `docs/rollouts/2026-07-11-unused-drizzle-kit-cleanup.md`.
+> **2026-07-11 - Durable provider/dataset operation leases (CODEX).** No product-roadmap or
+> scheduler-loop change; reliability/cost correctness only. The manual admin guards and background
+> entrants now converge on four durable SQLite owner-token lease groups below the route layer:
+> RAG reindex/filing ingest, Congress daily share, Congress refresh, and SEC 8-K refresh. Claims are
+> acquired before admin rate debit, heartbeated for long operations, owner-checked on release, and
+> passed opaquely into core boundaries. Ownership loss aborts cooperatively, and non-force cadence is
+> rechecked after acquisition. Background contention is a typed benign skip with no cadence marker
+> advancement; admin contention remains a shared-contract HTTP 409. The intentionally detached 8-K
+> embedding tail remains a documented pending/retry-job follow-up. Final current-main Node 24 gate is
+> green (focused 130, lint 0 errors, typecheck, full 3,759 tests, build); ready-PR delivery remains. See
+> `docs/rollouts/2026-07-11-provider-operation-leases.md`.
+
+> **2026-07-11 - Truthful notification delivery status (CODEX).** No product-roadmap change;
+> delivery observability and preference correctness only. One gated orchestration path now owns
+> push/webhook/email/SMS delivery for ordinary, price-alert, and provider-health events; callers
+> supply only their richer body text. Status derives from every actual result, unexpected bridge
+> failures cannot masquerade as neutral skips, partial failures remain visible, and the legacy
+> policy-webhook lane emits normal channel telemetry. The operator fallback email remains an extra
+> gated lane. The branch is reconciled through strategy merge `main@0dda52db`; the final Node 24 gate
+> is green: focused 7 files / 96 tests, repository lint, TypeScript, full 342 files / 3,816 tests,
+> production build, and diff-check. Ready replacement PR, #1442 supersession, hosted checks, merge,
+> and production verification remain. See
+> `docs/rollouts/2026-07-11-notification-status-truth.md`.
+
 > **2026-07-11 - Runtime release and recovery-path observability (CODEX).** No roadmap scope
 > change; this is an operations-observability slice. `/api/health` gains a public-safe source
 > revision/process identity and hard-deadline, size-capped Litestream daemon status/last-sync
 > inspection over its local IPC socket. Production explicitly enables the v0.5.12 socket and skips
 > the non-verifying metadata-file fallback; staleness requires evidence of newer local DB/WAL activity.
 > See `docs/rollouts/2026-07-11-runtime-release-backup-health.md`.
+> **2026-07-11 - Strategy lease correctness + default-on scheduler (CODEX).** No roadmap scope
+> change; this closes a money-path concurrency hole in the existing Phase 1 lock design. Approval
+> and autonomous runs heartbeat unique account leases, snapshot one account for every later read/write,
+> and re-prove ownership after each long await before unrelated persistence. Durable non-placement and
+> broker outcomes remain in failed run receipts when ownership disappears; approval cannot report a
+> persisted block as `busy`. Scheduler signal shutdown retains the leader lease until TTL while detached
+> broker work may exist, and account-scoped auto-tuning runs only after completed strategy runs under its
+> own renewed account lease and LLM reservation. A final independent review additionally fixed the
+> account-bound strategy prompt, propagated account scope into walk-forward evidence, honored a lost
+> proposal-transition race, and computes tuning time only after the strategy run finishes. PR #1429
+> passed local and hosted gates with zero unresolved threads and merged as `0dda52db`; production now
+> reports that exact release with healthy scheduler/Litestream/dependency checks. The final Node 24 gate was green: focused
+> 11 files / 129 tests, repository lint, TypeScript, full 341 files / 3,801 tests, production build,
+> and diff-check. See
+> `docs/rollouts/2026-07-11-strategy-lease-correctness.md`.
+> **2026-07-11 - Alpha Vantage admin health lane canonicalization (CODEX).** No roadmap scope
+> change; operator-observability correctness only. The connections-health expected-lane inventory now
+> uses the provider's canonical `alpha-vantage:env` identity, preventing a synthetic empty
+> `alphavantage:env` card beside the real lane. Authenticated route coverage locks the one-lane
+> invariant. No provider, secret, pacing, rotation, or quota semantics changed. See
+> `docs/rollouts/2026-07-11-alpha-vantage-health-lane-canonicalization.md`.
 > **2026-07-11 - Expensive admin-operation abuse/cost controls (CODEX).** No product-roadmap
 > scope change; operator/security hardening only. Paid reindexes, expensive analysis, forced
 > refresh/share, and broker probes now have named per-admin budgets and single-flight exclusion,
@@ -29,6 +74,9 @@ filling the missing pieces.
 > route wrappers that #1409's merge had dropped. The released, clean-install-verified shared package
 > `v1.5.0` is exact-pinned in follow-up PR #1426, whose app-local HTTP adapter delegates stable
 > rejection body/status construction to the shared builders while retaining HTTP headers and legacy
+> fields. It also keeps real Auth.js provenance coverage instead of a bypass mock. The current-main
+> Node 24 gate is green: focused 29/29, lint 0 errors, tsc, 3,740/3,740 tests, and build. Refreshed
+> hosted checks and the matched Congress.Trade peer pin remain pending. See
 > fields. It also keeps real Auth.js provenance coverage instead of a bypass mock. The final
 > `main@e395e65a` Node 24 gate is green: focused 29/29, lint 0 errors, tsc, 3,746/3,746 tests, and
 > build. Antigravity's ready Congress.Trade PR #296 carries the exact matched pin with 940 tests

@@ -23,6 +23,11 @@ import { notifyStaleLimitOrders } from "./stale-limit-orders";
 import { getUserWashSaleLockProvenance } from "./tax";
 import { ExecutionMode, FillEvent, PolicyDecision, BrokerGateway, TradeProposal, ReviewedOrder, MarketScan, EquityOrder, FillSource } from "./types";
 import { approvedEscalationsFromDecision, shouldEscalateDecision } from "./strategy-risk";
+import {
+  createExecuteProposalLockOwner,
+  startStrategyLockGuard,
+  StrategyLockOwnershipLostError
+} from "./strategy-lock-guard";
 import { assertLiveApprovalConfirmation, uniqueSymbols, currentPricesFromScan, protectiveExitQuoteFromScan, openingPolicyNotionalCap, autoRevertOnCapBreach, auditWashSaleProceed } from "./strategy";
 
 export interface LiveApprovalConfirmation {
@@ -98,10 +103,13 @@ export async function executeProposal(
   // Approve can each read the same pre-cap totals and both place — jointly
   // exceeding maxDailyNotional / maxHourlyNotional / maxDailyOrders. Acquiring
   // the same lock here serialises approval execution against the strategy loop.
-  const lockOwner = `execute-${proposalId}`;
+  // Every invocation gets its own owner token. Two same-proposal approvals must contend like any
+  // other callers; a loser can never share or release the winner's lease.
+  const lockOwner = createExecuteProposalLockOwner(proposalId);
   if (!acquireStrategyLock(lockOwner, userId, policy.connectedAccountId)) {
     return { status: "busy", reasons: ["A strategy run is in progress; try again in a moment."] };
   }
+  const lockGuard = startStrategyLockGuard({ owner: lockOwner, userId, connectedAccountId: policy.connectedAccountId });
 
   try {
     const gateway = getBrokerGateway(policy, userId);
@@ -127,7 +135,9 @@ export async function executeProposal(
     // portfolio and positions for the active account — there is no local-simulation alternative.
     const currentPrices = currentPricesFromScan(approvalScan);
     const account = { portfolio, positions };
+    lockGuard.assertOwned();
     await notifyStaleLimitOrders({ userId, policy, orders });
+    lockGuard.assertOwned();
 
     // Approval-held protective exits: an extended-hours marketable-limit stored on the card was
     // priced off the generation-time quote and goes stale while it waits for a human — a quote that
@@ -195,6 +205,7 @@ export async function executeProposal(
     }
 
     const tradability = await gateway.getEquityTradability(policy.accountNumber, [proposal.symbol]);
+    lockGuard.assertOwned();
     if (!tradability[proposal.symbol]?.tradable) {
       const reason = tradability[proposal.symbol]?.reason ?? "Symbol is not tradable.";
       const tradabilityDecision: PolicyDecision = { approved: false, reasons: [reason] };
@@ -212,6 +223,7 @@ export async function executeProposal(
     }
 
     let review = await gateway.reviewEquityOrder({ accountNumber: policy.accountNumber, ...proposal });
+    lockGuard.assertOwned();
 
     // Same broker-minimum pre-flight guard as the autonomous run loop: NAV/sizing can drift between
     // proposal creation and a human clicking Approve, so re-check here too rather than let a
@@ -263,6 +275,7 @@ export async function executeProposal(
         const originalReview = review;
         Object.assign(proposal, bumpPlan.patch);
         review = await gateway.reviewEquityOrder({ accountNumber: policy.accountNumber, ...proposal });
+        lockGuard.assertOwned();
         const stillBlocked = describeBrokerMinimumOrderBlock(review, policy.activeBroker, { ...proposal, positionQuantity: heldForMinimumGuard?.quantity });
         if (!stillBlocked) {
           proposal.rationale = `${proposal.rationale} [Sized up from $${bumpPlan.fromNotional.toFixed(2)} to meet the broker's minimum order size (brokerMinimumHandling: bump).]`;
@@ -434,7 +447,28 @@ export async function executeProposal(
 
       // Same in-flight window as the re-escalation above: retire the card as blocked only if it
       // is still pending — never overwrite a rejection/expiry that landed during the async review.
-      transitionProposalIfPending(proposalId, "blocked", userId, { review, estimatedNotional: review.estimatedNotional, decision });
+      if (!transitionProposalIfPending(proposalId, "blocked", userId, { review, estimatedNotional: review.estimatedNotional, decision })) {
+        const current = getProposal(proposalId, userId);
+        audit(
+          "proposal_block_skipped",
+          {
+            proposalId,
+            symbol: proposal.symbol,
+            side: proposal.side,
+            reasons: decision.reasons,
+            currentStatus: current?.status ?? "missing"
+          },
+          userId,
+          policy.connectedAccountId
+        );
+        return {
+          status: current?.status ?? "unknown",
+          reasons: [
+            `Proposal is no longer pending (now ${current?.status ?? "missing"}); the policy block was not applied.`,
+            ...decision.reasons
+          ]
+        };
+      }
       audit("proposal_approved", {
         proposalId,
         symbol: proposal.symbol,
@@ -451,8 +485,18 @@ export async function executeProposal(
         },
         { policy, userId }
       );
+      const blockedResult = { status: "blocked", reasons: decision.reasons };
+      try {
+        lockGuard.assertOwned();
+      } catch (error) {
+        // The row is already terminally blocked. Losing the lease while its ancillary notification
+        // was in flight must not misreport that durable outcome as "busy"/still pending; simply skip
+        // the unrelated authority-demotion write that would require current ownership.
+        if (error instanceof StrategyLockOwnershipLostError) return blockedResult;
+        throw error;
+      }
       autoRevertOnCapBreach(decision.reasons, policy, userId, policy.connectedAccountId);
-      return { status: "blocked", reasons: decision.reasons };
+      return blockedResult;
     }
 
     // Re-assert the proposal is still pending immediately before we act on it. The awaits above
@@ -509,6 +553,10 @@ export async function executeProposal(
       );
       return { status: "blocked", reasons: [message] };
     }
+
+    // Re-prove ownership at the final safe boundary. A lost/failed lease leaves the proposal
+    // pending instead of writing an intent or calling the broker.
+    lockGuard.assertOwned();
 
     // Atomic, crash-recoverable placement (mirrors the autonomous path): persist the
     // idempotency-keyed intent (status "placing" + refId) BEFORE the broker call so a crash or
@@ -641,7 +689,13 @@ export async function executeProposal(
     // own response).
     emitDashboardEvent({ type: "order", userId, at: new Date().toISOString(), detail: { proposalId, orderId: execution.orderId, symbol: proposal.symbol } });
     return { status: "placed", orderId: execution.orderId, brokerState: execution.state, fillStatus };
+  } catch (error) {
+    if (error instanceof StrategyLockOwnershipLostError) {
+      return { status: "busy", reasons: [error.message] };
+    }
+    throw error;
   } finally {
+    lockGuard.stop();
     releaseStrategyLock(lockOwner, userId, policy.connectedAccountId);
   }
 }

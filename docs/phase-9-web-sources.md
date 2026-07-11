@@ -64,6 +64,24 @@ Cost per refresh is small and bounded: Senate eFD ≈ 1 search + ≤80 PTR pages
 (capped, rate-limited 350ms); SEC ≈ 1 feed + ≤30 filings × 2 reqs (rate-limited
 250ms). Both run in the background, independent of whether autonomous trading is on.
 
+### Cross-entry single-flight
+
+Manual admin requests and scheduler/background calls converge at durable operation boundaries,
+not only at the route layer. `src/lib/operation-lease.ts` stores owner-token leases in the existing
+SQLite `settings` KV and uses an immediate transaction for atomic acquisition, a TTL heartbeat for
+long work, and owner-checked release. Congress and SEC 8-K refreshes have separate dataset groups;
+Congress daily sharing has its own group; 8-K reindex and 10-K/10-Q filing ingest deliberately share
+the `rag-reindex` group because both spend the same embedding/corpus-write capacity.
+
+Contention in a background caller is a typed benign skip: it performs no provider request and does
+not advance the connector attempt/daily marker. Admin admission acquires the durable lease before
+debiting its per-admin rate budget, passes an opaque claim into the matching core function, and maps
+busy outcomes to the shared operation-guard HTTP 409 contract. The detached best-effort embedding
+started by `refreshEightK` remains detached; its summary/full-body work can continue after the
+primary dataset-refresh lease is released, preserving the established non-blocking refresh contract.
+That detached tail does not currently acquire `rag-reindex`; making it fully exclusive requires a
+durable pending/retry job or awaiting it, and remains an explicit follow-up rather than a silent claim.
+
 ## Wiring into the app
 
 - **Scoring/UI/prompt** — `scanMarket` overlays `getSymbolWebSignals` onto the top

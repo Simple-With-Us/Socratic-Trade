@@ -15,6 +15,14 @@
 //  • Errors: surface via returned error field and audit log — never swallowed silently.
 
 import { audit, getInternalSetting, hasIngestedAccession, insertIngestedAccession, setInternalSetting } from "../db";
+import {
+  assertOperationLeaseOwnership,
+  OPERATION_LEASE_GROUPS,
+  runWithOperationLease,
+  throwIfOperationLeaseCancelled,
+  type OperationLeaseAware,
+  type OperationLeaseClaim
+} from "../operation-lease";
 import { politeFetchText, runRateLimited, secUserAgent, sleep } from "./http";
 import { loadCikMap } from "./sec8k";
 
@@ -388,12 +396,44 @@ export async function refreshFilingBodies(
   symbols: string[],
   now: number = Date.now(),
   maxPerRun?: number,
-  opts?: { force?: boolean }
+  opts?: { force?: boolean; operationLeaseClaim?: OperationLeaseClaim }
+): Promise<OperationLeaseAware<RefreshFilingBodiesResult>> {
+  const empty: RefreshFilingBodiesResult = {
+    attempted: 0,
+    ingested: 0,
+    skipped: 0,
+    deferredForBudget: 0,
+    errors: []
+  };
+  if (symbols.length === 0) return empty;
+  if (!opts?.force && !isFilingIngestDue(now)) return empty;
+
+  const guarded = await runWithOperationLease(
+    {
+      group: OPERATION_LEASE_GROUPS.RAG_REINDEX,
+      operation: opts?.force ? "reindex-10k" : "scheduled-filing-ingest",
+      claim: opts?.operationLeaseClaim
+    },
+    async (claim, signal) => refreshFilingBodiesUnlocked(symbols, now, maxPerRun, opts, claim, signal)
+  );
+  if (!guarded.acquired) return { ...empty, operationLease: guarded.busy };
+  return guarded.value;
+}
+
+async function refreshFilingBodiesUnlocked(
+  symbols: string[],
+  now: number,
+  maxPerRun: number | undefined,
+  opts: { force?: boolean } | undefined,
+  operationLeaseClaim: OperationLeaseClaim,
+  operationLeaseSignal: AbortSignal
 ): Promise<RefreshFilingBodiesResult> {
   const result: RefreshFilingBodiesResult = { attempted: 0, ingested: 0, skipped: 0, deferredForBudget: 0, errors: [] };
 
-  if (symbols.length === 0) return result;
+  // Recheck after durable acquisition so a delayed scheduler process cannot repeat work after the
+  // prior owner completed and advanced the cadence stamp.
   if (!opts?.force && !isFilingIngestDue(now)) return result;
+  assertOperationLeaseOwnership(operationLeaseClaim);
 
   // Mark attempt so the next tick won't immediately retry. Forced runs (admin backfill)
   // deliberately do NOT touch the stamp — a targeted backfill must not push the scheduled
@@ -410,8 +450,10 @@ export async function refreshFilingBodies(
 
   let cikMap: Record<string, string>;
   try {
+    throwIfOperationLeaseCancelled(operationLeaseSignal);
     cikMap = await loadCikMap(now);
   } catch (err) {
+    throwIfOperationLeaseCancelled(operationLeaseSignal);
     const msg = err instanceof Error ? err.message : String(err);
     result.errors.push(`loadCikMap failed: ${msg}`);
     return result;
@@ -428,16 +470,19 @@ export async function refreshFilingBodies(
   const pending: Array<{ ticker: string; ref: FilingRef }> = [];
 
   await runRateLimited(symbols, CIK_POLITE_DELAY_MS, async (symbol) => {
+    throwIfOperationLeaseCancelled(operationLeaseSignal);
     const cik = tickerToCik[symbol];
     if (!cik) return; // symbol not in CIK map — skip silently
     try {
       const filings = await fetchRecentFilings(cik, ["10-K", "10-Q"], 2);
+      throwIfOperationLeaseCancelled(operationLeaseSignal);
       for (const ref of filings) {
         if (!hasIngestedAccession(ref.accession, ref.docType)) {
           pending.push({ ticker: symbol, ref });
         }
       }
     } catch (err) {
+      throwIfOperationLeaseCancelled(operationLeaseSignal);
       const msg = err instanceof Error ? err.message : String(err);
       result.errors.push(`fetchRecentFilings(${symbol}): ${msg}`);
     }
@@ -450,7 +495,9 @@ export async function refreshFilingBodies(
     result.attempted++;
     processed++;
     try {
+      assertOperationLeaseOwnership(operationLeaseClaim);
       const ingestResult = await ingestFiling(ticker, ref);
+      throwIfOperationLeaseCancelled(operationLeaseSignal);
       if (ingestResult.budgetExhausted) {
         // The embed layer is out of capacity for the day (or unconfigured) — every later
         // filing meets the same fate, so stop instead of fetching/chunking doomed documents.
@@ -472,6 +519,7 @@ export async function refreshFilingBodies(
       // chunk-level Voyage batching). Keep at least 300ms between EDGAR fetches.
       if (result.attempted < cap) await sleep(CIK_POLITE_DELAY_MS);
     } catch (err) {
+      throwIfOperationLeaseCancelled(operationLeaseSignal);
       const msg = err instanceof Error ? err.message : String(err);
       result.errors.push(`ingestFiling(${ticker} ${ref.accession}) threw: ${msg}`);
     }

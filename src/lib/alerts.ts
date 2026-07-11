@@ -12,7 +12,6 @@ import {
 } from "./db";
 import { normalizeSymbol } from "./money";
 import { sendNotification } from "./notifications";
-import { notify } from "./notify";
 import type { PriceAlert, PriceAlertOp } from "./types";
 
 const SYMBOL_RE = /^[A-Z.]{1,10}$/;
@@ -106,15 +105,12 @@ export async function checkPriceAlerts(userId: string): Promise<PriceAlert[]> {
           currentPrice
         }
       },
-      { policy, userId }
+      {
+        policy,
+        userId,
+        directBody: `${alert.symbol} ${alert.op} $${alert.price} — now $${currentPrice}.`
+      }
     );
-    // Out-of-app multi-channel delivery (push/webhook/email/SMS) per the user's notify prefs.
-    await notify(userId, {
-      title: `Price alert: ${alert.symbol}`,
-      body: `${alert.symbol} ${alert.op} $${alert.price} — now $${currentPrice}.`,
-      kind: "price_alert",
-      data: { alert: updated, currentPrice }
-    }).catch((err) => console.error(`[alerts] notify error for ${userId}:`, err));
   }
   return triggered;
 }

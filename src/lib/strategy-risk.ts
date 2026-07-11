@@ -248,19 +248,24 @@ export async function applyCorrelationClusterGate(
   proposals: TradeProposal[],
   policy: TradingPolicy,
   positions: EquityPosition[],
-  userId: string = "local"
+  userId: string = "local",
+  assertOwned?: () => void
 ): Promise<TradeProposal[]> {
   const cap = policy.maxAvgCorrelation;
   if (cap == null || !(cap > 0) || positions.length === 0) return proposals;
   const holdings = positions.map((p) => p.symbol);
   const kept: TradeProposal[] = [];
   for (const p of proposals) {
+    assertOwned?.();
     const isOpening = p.side === "buy" || p.side === "short";
     if (!isOpening) {
       kept.push(p);
       continue;
     }
     const corr = await avgReturnCorrelation(p.symbol, holdings, userId);
+    // The correlation fetch can outlive the caller's account lease. Prove ownership before an
+    // audit, mutation, or advancing to another proposal; non-strategy callers omit the callback.
+    assertOwned?.();
     if (corr != null && corr > cap) {
       console.log(`[Corr] Skipped ${p.symbol} ${p.side}: avg correlation ${corr.toFixed(2)} > cap ${cap}`);
       audit("proposal_skipped_correlation", { symbol: p.symbol, side: p.side, avgCorrelation: Number(corr.toFixed(4)), cap }, userId, policy.connectedAccountId);
@@ -315,7 +320,8 @@ export async function applyRiskReceipts(
   positions: EquityPosition[],
   portfolio: Portfolio,
   marketScan: MarketScan,
-  userId: string = "local"
+  userId: string = "local",
+  assertOwned?: () => void
 ): Promise<TradeProposal[]> {
   const riskReceiptsOn = policy.tuning?.riskReceipts === true;
 
@@ -329,6 +335,7 @@ export async function applyRiskReceipts(
 
   const out: TradeProposal[] = [];
   for (const p of proposals) {
+    assertOwned?.();
     const isOpening = p.side === "buy" || p.side === "short";
     if (!isOpening) {
       out.push(p);
@@ -348,6 +355,7 @@ export async function applyRiskReceipts(
     // Part 2 — correlation receipt (gated on riskReceipts; costs extra fetchDailyOHLC calls).
     if (riskReceiptsOn && equity > 0) {
       const profile = await correlationProfile(proposal.symbol, holdingsForCorrelation, equity, userId);
+      assertOwned?.();
       if (profile) {
         const max = profile.maxPairwise;
         const maxIsDownsideDriven = profile.holdings.some(
@@ -410,6 +418,7 @@ export async function applyRiskReceipts(
   // Part 3 — earnings-proximity advisory. Idempotent: a no-op for any proposal already tagged by an
   // earlier `applyEarningsBlackoutTag` call in this run (see that function's doc comment for why
   // `runStrategyOnce` calls it early, before this function runs).
+  assertOwned?.();
   applyEarningsBlackoutTag(out, policy, marketScan, userId);
 
   return out;

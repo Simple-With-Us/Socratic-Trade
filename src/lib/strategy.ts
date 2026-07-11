@@ -3,13 +3,11 @@ export * from "./strategy-risk";
 
 import {
   acquireStrategyLock,
-  renewStrategyLock,
   audit,
   claimProposalForExecution,
   countDayTradesInLastBusinessDays,
   dailyExecutionStats,
   finishStrategyRun,
-  getActiveConnectedAccount,
   getConnectedAccount,
   getPolicy,
   getProposal,
@@ -95,6 +93,7 @@ import { checkBudgetAndAlert, evaluateBudgetForRun, formatBudgetAdvisory, getBud
 import { avgReturnCorrelation, correlationProfile } from "./correlation";
 import { stressScenario, type StressPositionInput } from "./stress-scenario";
 import { assertLivePreflight } from "./preflight-live-guard";
+import { startStrategyLockGuard, StrategyLockOwnershipLostError } from "./strategy-lock-guard";
 import { checkLlmDailyBudget, checkMonthlyLlmSpendCeiling, releaseLlmReservation, reserveLlmRunBudget } from "./llm-budget";
 // (STRATEGY_PROMPT_VERSION comes with the prompt builders from ./strategy-prompts above —
 // ./strategy-prompt-version is a thin re-export kept for red-team.ts's cycle-free import.)
@@ -293,26 +292,22 @@ export async function runStrategyOnce(
   userId: string = "local",
   options: { manual?: boolean; connectedAccountId?: string } = {}
 ): Promise<StrategyResult> {
-  // Target account: an explicit override (scheduler running a non-active account) or the active
-  // account. Everything below derives from this account's policy, so a single override here runs
-  // the whole loop against the targeted account.
-  const targetAccountId = options.connectedAccountId;
+  // Snapshot the target account exactly once. An explicit override targets a scheduler-selected
+  // account; otherwise the active policy supplies the id. Every later read/write stays bound to
+  // this id even if the user switches the active account while this long-running invocation awaits.
   // Per-account run lock: prevent overlapping runs from double-counting daily limits,
   // scoped to the target account so a different account isn't blocked.
-  const connectedAccountId = targetAccountId ?? getPolicy(userId).connectedAccountId;
+  const connectedAccountId = options.connectedAccountId ?? getPolicy(userId).connectedAccountId;
   
   const runId = crypto.randomUUID();
   if (!acquireStrategyLock(runId, userId, connectedAccountId)) {
     return { runId: "", status: "failed", summary: "A strategy run is already in progress.", proposals: [] };
   }
 
-  // Heartbeat lease every 1 minute
-  const heartbeatTimer = setInterval(() => {
-    renewStrategyLock(runId, userId, connectedAccountId);
-  }, 60_000);
+  const lockGuard = startStrategyLockGuard({ owner: runId, userId, connectedAccountId });
 
-  insertStrategyRun(runId, userId, connectedAccountId);
   let result: StrategyResult;
+  const completedProposalResults: StrategyResult["proposals"] = [];
   let llmSteps: StrategyLlmStep[] = [];
   // Per-USER LLM budget reservation id (set at the budget gate below, released in the finally). Held
   // for the run so a CONCURRENT same-user account run's reserve sees this hold and skips LLM instead of
@@ -324,19 +319,25 @@ export async function runStrategyOnce(
   const manualRun = Boolean(options.manual);
 
   try {
-    const savedPolicy = getPolicy(userId, targetAccountId);
+    // Keep all post-acquire setup inside the protected region. If the run receipt cannot be
+    // inserted, the finally block must still stop the heartbeat and release this owner token.
+    insertStrategyRun(runId, userId, connectedAccountId);
+    const savedPolicy = getPolicy(userId, connectedAccountId);
     const accountNumber = savedPolicy.accountNumber;
     if (!accountNumber) throw new Error("No account selected.");
     if (savedPolicy.systemState === "halted" && !manualRun) throw new Error("System is halted.");
     const policy: RunnablePolicy = manualRun
       ? { ...savedPolicy, accountNumber, systemState: "active" as const, strategyAuthority: "propose" as const }
       : { ...savedPolicy, accountNumber };
-    const activeAccount = targetAccountId ? getConnectedAccount(targetAccountId, userId) : getActiveConnectedAccount(userId);
+    const activeAccount = connectedAccountId ? getConnectedAccount(connectedAccountId, userId) : undefined;
     
     // Check broker health before determining execution state (and before making LLM calls).
     // The gateway is required for live broker checks; if missing, checkBrokerHealth safely returns healthy=true.
     const brokerGateway = activeAccount ? getBrokerGateway(policy, userId) : undefined;
     const healthSignals = activeAccount ? await checkBrokerHealth(userId, activeAccount, brokerGateway) : undefined;
+    // Broker health performs network reads. Re-prove this invocation still owns the account lease
+    // before it records a skip or proceeds into any more run work.
+    lockGuard.assertOwned();
     
     if (healthSignals && !healthSignals.isHealthy) {
       const reason = `Broker health check failed: ${healthSignals.reason}. Skipping strategy run to avoid consuming budget.`;
@@ -344,8 +345,6 @@ export async function runStrategyOnce(
       audit("run_skipped_broker_unhealthy", { runId, userId, reason }, userId, connectedAccountId);
       result = { runId, status: "completed", summary: reason, proposals: [] };
       finishStrategyRun(runId, "completed", reason, userId);
-      clearInterval(heartbeatTimer);
-      releaseStrategyLock(runId, userId, connectedAccountId);
       return result;
     }
 
@@ -363,8 +362,6 @@ export async function runStrategyOnce(
       audit("run_skipped_market_closed", { runId, userId, reason }, userId, connectedAccountId);
       result = { runId, status: "completed", summary: reason, proposals: [] };
       finishStrategyRun(runId, "completed", reason, userId);
-      clearInterval(heartbeatTimer);
-      releaseStrategyLock(runId, userId, connectedAccountId);
       return result;
     }
 
@@ -407,6 +404,7 @@ export async function runStrategyOnce(
         // Rotation-resolved view: the preview must reason about the CONCRETE models this run
         // will serve, not the "__rotate__" sentinel (which has no price entry).
         const wouldDecide = await previewBudgetDecision(userId, { ...policy, ...rotationOverride }, { status: budgetStatus });
+        lockGuard.assertOwned();
         audit(
           "usage_budget_status",
           {
@@ -425,21 +423,26 @@ export async function runStrategyOnce(
         );
         budgetAdvisory = formatBudgetAdvisory(budgetStatus);
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof StrategyLockOwnershipLostError) throw error;
       /* advisory is best-effort — never break the run */
     }
 
     const gateway = getBrokerGateway(policy, userId);
+    lockGuard.assertOwned();
     await reconcilePendingFills(gateway, policy.accountNumber, userId, connectedAccountId);
+    lockGuard.assertOwned();
     // Broker-truth reconcile any order-placement intent left "placing" by a prior run that crashed
     // mid-call: match it against the broker by clientOrderId and recover or abandon it.
     await flagStalePlacingIntents(gateway, policy.accountNumber, userId, connectedAccountId);
+    lockGuard.assertOwned();
     const [accounts, portfolio, positions, orders] = await Promise.all([
       gateway.getAccounts(),
       gateway.getPortfolio(policy.accountNumber),
       gateway.getEquityPositions(policy.accountNumber),
       gateway.getEquityOrders(policy.accountNumber)
     ]);
+    lockGuard.assertOwned();
     const selected = accounts.find((account) => account.accountNumber === policy.accountNumber);
     if (!selected) throw new Error("Selected account is not available.");
     if (!selected.agenticAllowed) throw new Error("Selected account is not agentic_allowed.");
@@ -487,7 +490,13 @@ export async function runStrategyOnce(
     const runLiveFills = listFillEvents(policy.accountNumber, "live", 500, userId);
     const runPaperFills = listFillEvents(policy.accountNumber, "paper", 500, userId);
     const prefetchedFills: PrefetchedFills = { liveFills: runLiveFills, paperFills: runPaperFills };
+    lockGuard.assertOwned();
     await notifyStaleLimitOrders({ userId, policy, orders });
+
+    // Re-prove ownership before entering the first stateful maintenance phase. The awaited setup
+    // above takes real wall time; if its heartbeat failed, snapshots and breaker mutations must not
+    // run under a successor's account lease.
+    lockGuard.assertOwned();
 
     // Pre-run snapshot: record the account state BEFORE any proposals execute so that
     // post-mortem / reconciliation always has a pre-execution baseline even if the run
@@ -523,11 +532,11 @@ export async function runStrategyOnce(
           audit("policy_violation_drawdown", { runId, reason: breaker.reason, equity, highWaterMark: breaker.highWaterMark, startOfDayEquity: breaker.startOfDayEquity, from: "active", action: "advisory" }, userId, connectedAccountId);
         } else {
           // Owner opted into hard enforcement: flip systemState. Persist to the SAME account the run
-          // targeted (read via getPolicy(userId, targetAccountId)); omitting it would resolve the ACTIVE
+          // targeted (read via getPolicy(userId, connectedAccountId)); omitting it would resolve the ACTIVE
           // account, so a scheduler run of a non-active account could halt the wrong account.
           const revertedTo = breakerAction === "close_only" ? "close_only" : "halted";
           policy.systemState = revertedTo;
-          setPolicy(policy, userId, targetAccountId);
+          setPolicy(policy, userId, connectedAccountId);
           audit("policy_violation_drawdown", { runId, reason: breaker.reason, equity, highWaterMark: breaker.highWaterMark, startOfDayEquity: breaker.startOfDayEquity, from: "active", revertedTo, action: breakerAction }, userId, connectedAccountId);
           await sendNotification(
             {
@@ -554,11 +563,12 @@ export async function runStrategyOnce(
         fetchMacroDataWithLiveVix(userId).catch(() => undefined),
         getMarketSignals(userId).catch(() => undefined)
       ]);
+      lockGuard.assertOwned();
       const volBrake = evaluateVolatilityBrake(brakeMacro, brakeSignals, policy);
       if (volBrake.brake) {
         policy.systemState = "close_only";
         // Persist to the run's TARGET account (same reason as the drawdown breaker above).
-        setPolicy(policy, userId, targetAccountId);
+        setPolicy(policy, userId, connectedAccountId);
         audit(
           "policy_violation_vol_panic",
           { runId, reason: volBrake.reason, from: "active", revertedTo: "close_only", vixAsOf: brakeMacro?.vixAsOf },
@@ -596,14 +606,15 @@ export async function runStrategyOnce(
     } catch {
       /* fail-open — never let usage-budget enforcement break a run */
     }
+    lockGuard.assertOwned();
     if (enforceDecision.skip) {
       const reason = enforceDecision.reason ?? "Over budget.";
       audit("usage_budget_enforced", { runId, userId, action: "skip", reason }, userId, connectedAccountId);
       await notifyBudgetSkip(userId, policy, runId, reason);
+      lockGuard.assertOwned();
       const summary = `Strategy run skipped — over usage budget. ${reason}`;
       result = { runId, status: "completed", summary, proposals: [] };
       finishStrategyRun(runId, "completed", summary, userId);
-      releaseStrategyLock(userId, connectedAccountId);
       return result;
     }
     // Run-scoped model override: carried SEPARATELY from `policy` so nothing that persists (setPolicy,
@@ -702,19 +713,25 @@ export async function runStrategyOnce(
     //       runs, it's safety hygiene), then
     //   (2) an LLM re-check ("does this still stand?") of pending proposals due on their cadence —
     //       SKIPPED when over the LLM budget, since it calls the model (records usage).
-    const expiry = await expireStalePendingProposals({ userId, policy, accountNumber: policy.accountNumber })
+    const assertOwned = () => lockGuard.assertOwned();
+    const expiry = await expireStalePendingProposals({ userId, policy, accountNumber: policy.accountNumber, assertOwned })
       .catch((e) => {
+        if (e instanceof StrategyLockOwnershipLostError) throw e;
         console.error("[expiry] run error:", e);
         return { expired: 0 };
       });
     const revalidation = skipLlmDueToBudget
       ? null
       // runPolicy (not policy): this LLM re-check must see the run-scoped usage-budget downgrade too.
-      : await revalidatePendingProposals({ userId, policy: runPolicy, accountNumber: policy.accountNumber, marketScan })
+      : await revalidatePendingProposals({ userId, policy: runPolicy, accountNumber: policy.accountNumber, marketScan, assertOwned })
           .catch((e) => {
+            if (e instanceof StrategyLockOwnershipLostError) throw e;
             console.error("[revalidation] run error:", e);
             return null;
           });
+    // Both helpers can spend meaningful wall time and mutate queue state. Re-prove even when they
+    // short-circuit so the next phase never inherits an ownership loss hidden by best-effort logic.
+    lockGuard.assertOwned();
 
     const betaBySymbol: Record<string, number> = {};
     for (const [sym, q] of Object.entries(marketScan.quotesBySymbol)) {
@@ -775,6 +792,7 @@ export async function runStrategyOnce(
             }
           })
       );
+      lockGuard.assertOwned();
     }
     // Extended-hours protective-exit routing is decided ONCE here (the run knows the wall-clock
     // session); the pure generator just receives the buffer (undefined ⇒ default market/queue-to-open)
@@ -938,6 +956,7 @@ export async function runStrategyOnce(
             .join("\n\n");
         }
       } catch (e) {
+        if (e instanceof StrategyLockOwnershipLostError) throw e;
         console.warn("[Strategy] Skipping RAG context, vector-db or keys might not be available.");
         // Typed retrieval-status receipt: this catch covers the WHOLE filings pass (e.g. the
         // dynamic `import("./vector-db")` itself throwing), so no per-symbol onStatus callback may
@@ -950,6 +969,9 @@ export async function runStrategyOnce(
         }
       }
     }
+    // Dynamic imports, HyDE generation, and vector retrieval all await remote work. Ownership must
+    // still be current before any evidence audit or cleanup mutates durable run state.
+    lockGuard.assertOwned();
 
     // Parallel to RAG: pull advisory learned-context FACTS (private fact-tier only in this slice).
     // ADVISORY DATA ONLY — this string reaches the prompt beside retrievedFinancialContext and is
@@ -1118,6 +1140,7 @@ export async function runStrategyOnce(
           candidates: situationCandidates,
           connectedAccountId: policy.connectedAccountId
         });
+        lockGuard.assertOwned();
         experienceAnalogs = episodic.analogsBlock ?? "";
         ownerCoaching = episodic.coachingBlock ?? "";
         // Typed retrieval-status receipt (typed-retrieval-status, 2026-07-06): the episodic pass is
@@ -1147,6 +1170,7 @@ export async function runStrategyOnce(
           );
         }
       } catch (e) {
+        if (e instanceof StrategyLockOwnershipLostError) throw e;
         console.warn("[Strategy] Skipping episodic decision memory, retrieval unavailable:", e instanceof Error ? e.message : String(e));
         // Typed retrieval-status receipt fallback: retrieveDecisionExperiences itself never throws
         // (its own try/catch always resolves to a status-carrying result), but this outer catch
@@ -1226,7 +1250,7 @@ export async function runStrategyOnce(
         runId,
         userId,
         policyAllowlist: allowedSymbols,
-        prompt: getStrategyPrompt(userId),
+        prompt: getStrategyPrompt(userId, connectedAccountId),
         // runPolicy (not policy): carries the run-scoped usage-budget model downgrade (if any) into
         // resolveLlmEndpoint without ever mutating/persisting the owner's configured policy.
         policy: runPolicy,
@@ -1245,6 +1269,7 @@ export async function runStrategyOnce(
         budgetAdvisory,
         prefetched: prefetchedFills
       });
+      lockGuard.assertOwned();
       llmProposals = proposed.proposals;
       llmSteps = proposed.llmSteps;
       adversaryContext = proposed.adversaryContext;
@@ -1305,6 +1330,7 @@ export async function runStrategyOnce(
           }
         })
       );
+      lockGuard.assertOwned();
     }
 
     // Extend the ATR stop-DISTANCE precompute to OPENING candidates too (not just held positions),
@@ -1361,6 +1387,7 @@ export async function runStrategyOnce(
           }
         })
       );
+      lockGuard.assertOwned();
     }
 
     // Portfolio-heat budget (opt-in, default off): compute the CURRENT book's heat ONCE per run (not
@@ -1486,6 +1513,7 @@ export async function runStrategyOnce(
         });
       }
     });
+    lockGuard.assertOwned();
 
     for (const proposal of sizedProposals) {
       const redTeamResult = reviewResults.get(proposal);
@@ -1778,12 +1806,15 @@ export async function runStrategyOnce(
       [...fundingSells, ...proactiveProposals, ...debatedProposals],
       policy,
       workingPositions,
-      userId
+      userId,
+      assertOwned
     );
+    lockGuard.assertOwned();
 
     // Advisory correlation/stress/earnings-proximity receipts on the final opening proposal set —
     // receipts only, never a gate. See applyRiskReceipts's doc comment for the flag semantics.
-    const proposals = await applyRiskReceipts(gatedProposals, policy, workingPositions, workingPortfolio, marketScan, userId);
+    const proposals = await applyRiskReceipts(gatedProposals, policy, workingPositions, workingPortfolio, marketScan, userId, assertOwned);
+    lockGuard.assertOwned();
 
     // Rationale-diversity check (improvement-program item #8). Computed on the final post-debate,
     // post-gate proposal set. Advisory by default; an optional default-off gate can route collapsed
@@ -1807,12 +1838,13 @@ export async function runStrategyOnce(
         },
         tags: ["strategy", "diversity-collapse"]
       });
+      lockGuard.assertOwned();
     }
     // (The rationale-collapse GATE that routes collapsed openings to human review runs EARLIER — before
     // sell-to-fund planning — so a gated buy can't drive automated funding sells. Only the advisory
     // full-set warning above remains here.)
 
-    const results: StrategyResult["proposals"] = [];
+    const results = completedProposalResults;
     const recordSocraticDecision = (input: {
       proposalId: string;
       proposal: TradeProposal;
@@ -1867,13 +1899,18 @@ export async function runStrategyOnce(
     };
 
     for (const proposal of proposals) {
+      // A failed heartbeat is sticky for this invocation. Stop before doing any more proposal work,
+      // then re-prove ownership again immediately before a broker placement below.
+      lockGuard.assertOwned();
       const normalizedProposal = { ...proposal, symbol: normalizeSymbol(proposal.symbol) };
       const tradability = await gateway.getEquityTradability(policy.accountNumber, [normalizedProposal.symbol]);
+      lockGuard.assertOwned();
       if (!tradability[normalizedProposal.symbol]?.tradable) {
         const decision = { approved: false, reasons: [tradability[normalizedProposal.symbol]?.reason ?? "Symbol is not tradable."] };
         const proposalId = crypto.randomUUID();
         insertProposal({ userId, executionMode, promptVersion: STRATEGY_PROMPT_VERSION, id: proposalId, runId, accountNumber: policy.accountNumber, proposal: normalizedProposal, decision, status: "blocked" });
         recordSocraticDecision({ proposalId, proposal: normalizedProposal, decision, status: "blocked" });
+        results.push({ proposal: normalizedProposal, status: "blocked", reasons: decision.reasons });
         await sendNotification(
           {
             type: "block",
@@ -1882,12 +1919,13 @@ export async function runStrategyOnce(
           },
           { policy, userId }
         );
+        lockGuard.assertOwned();
         autoRevertOnCapBreach(decision.reasons, policy, userId, connectedAccountId);
-        results.push({ proposal: normalizedProposal, status: "blocked", reasons: decision.reasons });
         continue;
       }
 
       let review = await gateway.reviewEquityOrder({ accountNumber: policy.accountNumber, ...normalizedProposal });
+      lockGuard.assertOwned();
 
       // Hoisted above the broker-minimum guard: the bump planner bounds opening bumps by the
       // remaining daily/hourly budget. Values are unchanged for the post-guard consumers (the
@@ -1947,6 +1985,7 @@ export async function runStrategyOnce(
           const originalReview = review;
           Object.assign(normalizedProposal, bumpPlan.patch);
           review = await gateway.reviewEquityOrder({ accountNumber: policy.accountNumber, ...normalizedProposal });
+          lockGuard.assertOwned();
           const stillBlocked = describeBrokerMinimumOrderBlock(review, policy.activeBroker, { ...normalizedProposal, positionQuantity: heldForMinimumGuard?.quantity });
           if (!stillBlocked) {
             // Receipt honesty: the rationale narrates the pre-bump size, so annotate the
@@ -1979,6 +2018,7 @@ export async function runStrategyOnce(
           userId,
           connectedAccountId
         );
+        results.push({ proposal: normalizedProposal, status: "blocked", reasons: [brokerMinimumBlockReason] });
         if (shouldAlertBrokerMinimumOrderBlock(policy.accountNumber, normalizedProposal.symbol)) {
           await sendNotification(
             {
@@ -1988,8 +2028,8 @@ export async function runStrategyOnce(
             },
             { policy, userId }
           );
+          lockGuard.assertOwned();
         }
-        results.push({ proposal: normalizedProposal, status: "blocked", reasons: [brokerMinimumBlockReason] });
         continue;
       }
 
@@ -2139,6 +2179,7 @@ export async function runStrategyOnce(
           );
           const washAsk = escalatedDecision.escalations?.find((entry) => entry.kind === "wash_sale_ask");
           const askCost = washAsk?.washSale?.estimatedTaxCostUsd;
+          results.push({ proposal: normalizedProposal, status: "proposed", reasons: decision.reasons });
           await sendNotification(
             {
               type: "pending_approval",
@@ -2149,16 +2190,18 @@ export async function runStrategyOnce(
             },
             { policy, userId }
           );
+          lockGuard.assertOwned();
           // R1 §1.4.3 still applies: an autonomous run that TRIPPED a notional/order cap demotes
           // the account back to Ask-first even though the tripping proposal survives as a card.
           autoRevertOnCapBreach(decision.reasons, policy, userId, connectedAccountId);
-          results.push({ proposal: normalizedProposal, status: "proposed", reasons: decision.reasons });
           continue;
         }
 
         const proposalId = crypto.randomUUID();
+        lockGuard.assertOwned();
         insertProposal({ userId, executionMode, promptVersion: STRATEGY_PROMPT_VERSION, id: proposalId, runId, accountNumber: policy.accountNumber, proposal: normalizedProposal, decision, review, estimatedNotional: review.estimatedNotional, status: "blocked" });
         recordSocraticDecision({ proposalId, proposal: normalizedProposal, decision, status: "blocked", review, overrideResolution });
+        results.push({ proposal: normalizedProposal, status: "blocked", reasons: decision.reasons });
         await sendNotification(
           {
             type: "block",
@@ -2167,6 +2210,7 @@ export async function runStrategyOnce(
           },
           { policy, userId }
         );
+        lockGuard.assertOwned();
         autoRevertOnCapBreach(decision.reasons, policy, userId, connectedAccountId);
         // Feed a policy-BLOCKED OPENING proposal into the counterfactual pipeline (same path as a user
         // rejection) so its post-block return matures into missed-opportunity analytics — closing the
@@ -2187,7 +2231,6 @@ export async function runStrategyOnce(
             console.warn("[strategy] policy-blocked counterfactual failed:", err instanceof Error ? err.message : String(err));
           }
         }
-        results.push({ proposal: normalizedProposal, status: "blocked", reasons: decision.reasons });
         continue;
       }
 
@@ -2216,6 +2259,7 @@ export async function runStrategyOnce(
           userId,
           connectedAccountId
         );
+        results.push({ proposal: normalizedProposal, status: "blocked", reasons: heldDecision.reasons });
         await sendNotification(
           {
             type: "block",
@@ -2224,7 +2268,7 @@ export async function runStrategyOnce(
           },
           { policy, userId }
         );
-        results.push({ proposal: normalizedProposal, status: "blocked", reasons: heldDecision.reasons });
+        lockGuard.assertOwned();
         continue;
       }
 
@@ -2235,11 +2279,12 @@ export async function runStrategyOnce(
         const proposalId = crypto.randomUUID();
         insertProposal({ userId, executionMode, promptVersion: STRATEGY_PROMPT_VERSION, id: proposalId, runId, accountNumber: policy.accountNumber, proposal: normalizedProposal, decision, review, estimatedNotional: review.estimatedNotional, status: "proposed" });
         recordSocraticDecision({ proposalId, proposal: normalizedProposal, decision, status: "proposed", review, overrideResolution });
+        results.push({ proposal: normalizedProposal, status: "proposed", reasons: ["Sell-to-fund-buy: queued for approval."] });
         await sendNotification(
           { type: "pending_approval", title: `${normalizedProposal.symbol} funding sell awaiting approval`, payload: { runId, proposalId, proposal: normalizedProposal, review } },
           { policy, userId }
         );
-        results.push({ proposal: normalizedProposal, status: "proposed", reasons: ["Sell-to-fund-buy: queued for approval."] });
+        lockGuard.assertOwned();
         continue;
       }
 
@@ -2253,6 +2298,7 @@ export async function runStrategyOnce(
         const proposalId = crypto.randomUUID();
         insertProposal({ userId, executionMode, promptVersion: STRATEGY_PROMPT_VERSION, id: proposalId, runId, accountNumber: policy.accountNumber, proposal: normalizedProposal, decision, review, estimatedNotional: review.estimatedNotional, status: "proposed" });
         recordSocraticDecision({ proposalId, proposal: normalizedProposal, decision, status: "proposed", review, overrideResolution });
+        results.push({ proposal: normalizedProposal, status: "proposed", reasons: [] });
         await sendNotification(
           {
             type: "pending_approval",
@@ -2272,7 +2318,7 @@ export async function runStrategyOnce(
           },
           { policy, userId }
         );
-        results.push({ proposal: normalizedProposal, status: "proposed", reasons: [] });
+        lockGuard.assertOwned();
         continue;
       }
 
@@ -2285,6 +2331,7 @@ export async function runStrategyOnce(
           : "";
         insertProposal({ userId, executionMode, promptVersion: STRATEGY_PROMPT_VERSION, id: proposalId, runId, accountNumber: policy.accountNumber, proposal: normalizedProposal, decision, review, estimatedNotional: review.estimatedNotional, status: "proposed" });
         recordSocraticDecision({ proposalId, proposal: normalizedProposal, decision, status: "proposed", review, overrideResolution });
+        results.push({ proposal: normalizedProposal, status: "proposed", reasons: [`Red Team review unavailable${failureKindSuffix}; routed to human approval.`] });
         await sendNotification(
           {
             type: "pending_approval",
@@ -2303,7 +2350,7 @@ export async function runStrategyOnce(
           },
           { policy, userId }
         );
-        results.push({ proposal: normalizedProposal, status: "proposed", reasons: [`Red Team review unavailable${failureKindSuffix}; routed to human approval.`] });
+        lockGuard.assertOwned();
         continue;
       }
 
@@ -2327,13 +2374,18 @@ export async function runStrategyOnce(
         insertProposal({ userId, executionMode, id: proposalId, runId, accountNumber: policy.accountNumber, proposal: normalizedProposal, decision: blockedDecision, review, estimatedNotional: review.estimatedNotional, status: "blocked" });
         recordSocraticDecision({ proposalId, proposal: normalizedProposal, decision: blockedDecision, status: "blocked", review, overrideResolution });
         audit("order_blocked_live_preflight", { runId, proposalId, symbol: normalizedProposal.symbol, side: normalizedProposal.side, reason: message }, userId, connectedAccountId);
+        results.push({ proposal: normalizedProposal, status: "blocked", reasons: [message] });
         await sendNotification(
           { type: "block", title: `${normalizedProposal.symbol} live order blocked (pre-flight)`, payload: { runId, proposalId, decision: blockedDecision, review, proposal: normalizedProposal, reason: message } },
           { policy, userId }
         );
-        results.push({ proposal: normalizedProposal, status: "blocked", reasons: [message] });
+        lockGuard.assertOwned();
         continue;
       }
+
+      // Renew synchronously at the last safe boundary. If another invocation stole the lease (or
+      // the DB cannot prove ownership), do not write a placing intent or call the broker.
+      lockGuard.assertOwned();
 
       // Atomic, crash-recoverable placement. Persist an idempotency-keyed INTENT row BEFORE the
       // broker call. If the process dies — or the broker accepts the order but the response is
@@ -2386,12 +2438,13 @@ export async function runStrategyOnce(
           auditWashSaleProceed(decision, { runId, proposalId, symbol: sym, side: normalizedProposal.side, estimatedNotional: review.estimatedNotional, userId, connectedAccountId });
           audit("order_placement_recovered_inline", { runId, proposalId, refId, orderId: outcome.orderId, state: outcome.state, alreadyBooked: outcome.alreadyBooked, symbol: sym, side: normalizedProposal.side }, userId, connectedAccountId);
           resolveBrokerVerificationNotifications(userId, { proposalId, refId, resolution: "recovered" });
+          results.push({ proposal: normalizedProposal, status: "placed", reasons: [], orderId: outcome.orderId });
           await sendNotification(
             { type: "fill", title: `${sym} live order ${outcome.state} (recovered after placement error)`, payload: { runId, proposalId, refId, fill: outcome.fill, reconcile: "recovered" } },
             { policy, userId }
           );
           emitDashboardEvent({ type: "order", userId, at: new Date().toISOString(), detail: { runId, proposalId, symbol: sym, orderId: outcome.orderId } });
-          results.push({ proposal: normalizedProposal, status: "placed", reasons: [], orderId: outcome.orderId });
+          lockGuard.assertOwned();
           continue;
         }
         if (outcome.kind === "declined") {
@@ -2399,11 +2452,12 @@ export async function runStrategyOnce(
           updateProposalStatus(proposalId, "rejected_by_broker", outcome.orderId, review, review.estimatedNotional, userId, undefined, declinedMsg);
           recordSocraticDecision({ proposalId, proposal: normalizedProposal, decision: { ...decision, approved: false, reasons: [...decision.reasons, declinedMsg] }, status: "rejected_by_broker", review, overrideResolution });
           audit("order_rejected_by_broker", { runId, proposalId, refId, symbol: sym, side: normalizedProposal.side, orderId: outcome.orderId, brokerState: outcome.state, via: "inline_reconcile" }, userId, connectedAccountId);
+          results.push({ proposal: normalizedProposal, status: "error", reasons: [declinedMsg] });
           await sendNotification(
             { type: "run_failed", title: `${sym} order declined by broker (${outcome.state})`, payload: { runId, proposalId, refId, orderId: outcome.orderId, state: outcome.state, reconcile: "declined" } },
             { policy, userId }
           );
-          results.push({ proposal: normalizedProposal, status: "error", reasons: [declinedMsg] });
+          lockGuard.assertOwned();
           continue;
         }
         if (outcome.kind === "not_placed") {
@@ -2411,11 +2465,12 @@ export async function runStrategyOnce(
           updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, note);
           recordSocraticDecision({ proposalId, proposal: normalizedProposal, decision, status: "placing_failed", review, overrideResolution });
           audit("order_confirmed_not_placed", { runId, proposalId, refId, symbol: sym, side: normalizedProposal.side, error: message }, userId, connectedAccountId);
+          results.push({ proposal: normalizedProposal, status: "error", reasons: [`Order not placed (safe to retry): ${message}`] });
           await sendNotification(
             { type: "run_failed", title: `${sym} order was NOT placed — safe to retry`, payload: { runId, proposalId, refId, error: message, reconcile: "not_placed" } },
             { policy, userId }
           );
-          results.push({ proposal: normalizedProposal, status: "error", reasons: [`Order not placed (safe to retry): ${message}`] });
+          lockGuard.assertOwned();
           continue;
         }
         // uncertain: broker unreachable — KEEP status 'placing' (not 'placing_failed') so the sweep
@@ -2424,11 +2479,12 @@ export async function runStrategyOnce(
         updateProposalStatus(proposalId, "placing", undefined, review, review.estimatedNotional, userId, undefined, outcome.error);
         recordSocraticDecision({ proposalId, proposal: normalizedProposal, decision, status: "placing_failed", review, overrideResolution });
         audit("order_placement_uncertain", { runId, proposalId, refId, symbol: sym, side: normalizedProposal.side, estimatedNotional: review.estimatedNotional, error: outcome.error, brokerUnreachable: true }, userId, connectedAccountId);
+        results.push({ proposal: normalizedProposal, status: "error", reasons: [`Order placement failed/uncertain: ${outcome.error}`] });
         await sendNotification(
           { type: "run_failed", title: `${sym} order placement uncertain — verify with broker`, payload: { runId, proposalId, refId, error: outcome.error, reconcile: "uncertain" } },
           { policy, userId }
         );
-        results.push({ proposal: normalizedProposal, status: "error", reasons: [`Order placement failed/uncertain: ${outcome.error}`] });
+        lockGuard.assertOwned();
         continue;
       }
 
@@ -2450,11 +2506,12 @@ export async function runStrategyOnce(
           overrideResolution
         });
         audit("order_rejected_by_broker", { runId, proposalId, refId, symbol: normalizedProposal.symbol, side: normalizedProposal.side, orderId: execution.orderId, brokerState: execution.state }, userId, connectedAccountId);
+        results.push({ proposal: normalizedProposal, status: "error", reasons: [message] });
         await sendNotification(
           { type: "run_failed", title: `${normalizedProposal.symbol} order declined by broker (${execution.state})`, payload: { runId, proposalId, refId, orderId: execution.orderId, state: execution.state } },
           { policy, userId }
         );
-        results.push({ proposal: normalizedProposal, status: "error", reasons: [message] });
+        lockGuard.assertOwned();
         continue;
       }
 
@@ -2477,6 +2534,7 @@ export async function runStrategyOnce(
         status: execution.state === "filled" ? "filled" : "pending_reconciliation",
         existingPosition: preFillPosition ? { averageCost: preFillPosition.averageCost, quantity: preFillPosition.quantity } : undefined
       });
+      results.push({ proposal: normalizedProposal, status: "placed", reasons: [], orderId: execution.orderId });
       await sendNotification(
         { type: "fill", title: `${normalizedProposal.symbol} live order ${execution.state}`, payload: { runId, proposalId, fill } },
         { policy, userId }
@@ -2484,7 +2542,7 @@ export async function runStrategyOnce(
       // Push so open dashboards refresh on an autonomously-placed order (the approval path
       // already emits this; the run-loop placement previously did not).
       emitDashboardEvent({ type: "order", userId, at: new Date().toISOString(), detail: { runId, proposalId, symbol: normalizedProposal.symbol, orderId: execution.orderId } });
-      results.push({ proposal: normalizedProposal, status: "placed", reasons: [], orderId: execution.orderId });
+      lockGuard.assertOwned();
     }
 
     // Phase 10 B2 — full EvidenceDigest for the WHOLE scored set (chosen AND skipped):
@@ -2493,6 +2551,9 @@ export async function runStrategyOnce(
     // later learning run counterfactuals ("names you passed that then ran") and attribute
     // outcomes to factors. The run regime is deterministic and shared across candidates.
     const runRegime = determineMarketRegime(await fetchMacroData(userId));
+    // Preserve any fully-durable placement result in the failed receipt, but do not continue into
+    // evidence/snapshot writes after a successor has taken the account lease.
+    lockGuard.assertOwned();
     const quoteBySymbol = new Map((marketScan?.topCandidates ?? []).map((q) => [normalizeSymbol(q.symbol), q]));
     const chosenSymbols = new Set(results.map((r) => normalizeSymbol(r.proposal.symbol)));
 
@@ -2588,20 +2649,30 @@ export async function runStrategyOnce(
       : generateReflectionSummary(policy.accountNumber, userId, runPolicy).catch((e) => console.error("Post-mortem error:", e));
 
   } catch (error) {
-    const summary = error instanceof Error ? error.message : "Strategy failed.";
+    const baseSummary = error instanceof Error ? error.message : "Strategy failed.";
+    const summary = error instanceof StrategyLockOwnershipLostError && completedProposalResults.length > 0
+      ? `${baseSummary} ${completedProposalResults.length} proposal result(s) completed before ownership was lost.`
+      : baseSummary;
     if (error instanceof StrategyLlmStepFailure) {
       llmSteps = error.llmSteps;
     }
     finishStrategyRun(runId, "failed", summary, userId);
-    const policy = getPolicy(userId, targetAccountId);
-    result = { runId, status: "failed", summary, proposals: [], accountNumber: policy.accountNumber, ...(llmSteps.length > 0 ? { llmSteps } : {}) };
+    const policy = getPolicy(userId, connectedAccountId);
+    result = {
+      runId,
+      status: "failed",
+      summary,
+      proposals: completedProposalResults,
+      accountNumber: policy.accountNumber,
+      ...(llmSteps.length > 0 ? { llmSteps } : {})
+    };
     if (summary === "Kill switch is active.") {
       await sendNotification({ type: "kill_switch", title: "Kill switch blocked strategy run", payload: { runId, summary } }, { policy, userId });
     } else {
       await sendNotification({ type: "run_failed", title: "Strategy run failed", payload: { runId, summary } }, { policy, userId });
     }
   } finally {
-    clearInterval(heartbeatTimer);
+    lockGuard.stop();
     // Release the strategy lock promptly so this account can run again. The LLM reservation is held a bit
     // longer — until the fire-and-forget post-mortem reflection settles — so that background spend stays
     // inside the reserved headroom instead of racing a queued same-user run (the TTL is the crash backstop).

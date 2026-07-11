@@ -175,6 +175,33 @@ describe("applyRiskReceipts — riskReceipts ON", () => {
     expect(out[0].rationale).toBe("base rationale");
     expect(out[0].preVetoReasons ?? []).toHaveLength(0);
   });
+
+  it("re-proves ownership after correlation IO before mutating rationale or auditing", async () => {
+    const { fetchDailyOHLC } = await import("../src/lib/history");
+    const candBars = barsFromReturns(R);
+    (fetchDailyOHLC as Mock).mockImplementation(async () => candBars);
+    const dbModule = await import("../src/lib/db");
+    const auditSpy = vi.spyOn(dbModule, "audit");
+    const { applyRiskReceipts } = await import("../src/lib/strategy");
+    const proposal = buy("AAA");
+    let checks = 0;
+    const assertOwned = () => {
+      checks++;
+      if (checks === 2) throw new Error("lease lost after risk IO");
+    };
+
+    await expect(applyRiskReceipts(
+      [proposal],
+      { ...DEFAULT_POLICY, accountNumber: "X", tuning: { riskReceipts: true } },
+      held,
+      portfolio,
+      scan([quote("AAA")]),
+      "local",
+      assertOwned
+    )).rejects.toThrow("lease lost after risk IO");
+    expect(proposal.rationale).toBe("base rationale");
+    expect(auditSpy).not.toHaveBeenCalledWith("correlation_receipt", expect.anything(), expect.anything(), expect.anything());
+  });
 });
 
 describe("applyRiskReceipts — earnings blackout", () => {

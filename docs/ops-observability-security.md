@@ -32,6 +32,12 @@ This app now has opt-in scaffolding for the seven selected tools:
   break trading. The monitor is auto-created via the upsert config on first check-in
   (interval 1 minute, 5-minute checkin margin). Inertness is asserted by
   `test/sentry-inert.test.ts`.
+- **Scheduler and strategy ownership leases**: scheduler single-leader coordination is ON by
+  default, including when `SCHEDULER_SINGLE_LEADER` is unset or empty; only an explicit
+  `false`/`off`/`0`/`no` disables it. Each strategy/approval invocation owns its account-scoped
+  lease with a unique token. A 60-second heartbeat renews the five-minute strategy lease; refused
+  or thrown renewals are caught and become sticky ownership loss, and the code synchronously
+  re-proves ownership before it writes a placing intent or calls the broker.
 - **Langfuse**: add `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY`. LLM calls are
   traced around Bull, Bear, Red Team, post-mortem, and strategy-tuning requests.
   The default `LANGFUSE_CAPTURE_IO=summary` captures model/schema/counts and

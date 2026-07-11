@@ -479,23 +479,26 @@ export async function alertConnectionFailure(
       const fallbackEmail = operatorAlertEmail();
       const config = loadNotifyConfig();
 
-      // ALWAYS notify via the operator's own configured prefs (push/SMS/email/etc.) — the fallback
-      // email is an EXTRA channel, never the gate. Previously the whole notify() was skipped when no
-      // Resend fallback was configured, and sendNotification below treats provider_degraded as
-      // already-direct-sent, so an install relying on local direct channels got NO alert at all.
-      await notify("local", { title, body, kind: "provider_degraded", data: payload }, { config }).catch(() => {});
-
-      // Additionally force the operator fallback email when it's configured AND the operator's own
-      // prefs don't already carry an email channel (so we don't double-send to the same address).
-      if (fallbackEmail && config.email.resendKey && config.email.from && (!prefs.channels.includes("email") || !prefs.email.trim())) {
-        const forcedPrefs = {
-          ...prefs,
-          channels: ["email" as any],
-          email: fallbackEmail,
-          updatedAt: prefs.updatedAt
-        };
-        await notify("local", { title, body, kind: "provider_degraded", data: payload }, { config, prefs: forcedPrefs }).catch(() => {});
-      }
+      // The operator's own channels are delivered by sendNotification inside the enabled-event
+      // gate. The fallback email remains an EXTRA lazy lane when the operator has no usable email
+      // preference, so it cannot double-send or bypass that gate.
+      const additionalDelivery =
+        fallbackEmail && config.email.resendKey && config.email.from && (!prefs.channels.includes("email") || !prefs.email.trim())
+          ? () =>
+              notify(
+                "local",
+                { title, body, kind: "provider_degraded", data: payload },
+                {
+                  config,
+                  prefs: {
+                    ...prefs,
+                    channels: ["email" as any],
+                    email: fallbackEmail,
+                    updatedAt: prefs.updatedAt
+                  }
+                }
+              )
+          : undefined;
 
       // Also send standard notification
       const { sendNotification } = await import("./notifications");
@@ -508,7 +511,10 @@ export async function alertConnectionFailure(
           enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "provider_degraded" as const])) as any
         }
       };
-      await sendNotification({ type: "provider_degraded", title, payload }, { userId: "local", policy: forcedPolicy as any }).catch(() => {});
+      await sendNotification(
+        { type: "provider_degraded", title, payload },
+        { userId: "local", policy: forcedPolicy as any, directBody: body, notifyDeps: { config }, additionalDelivery }
+      ).catch(() => {});
     } else {
       // User-key failures: Route to user notifications only
       const { sendNotification } = await import("./notifications");
@@ -521,10 +527,10 @@ export async function alertConnectionFailure(
           enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "provider_degraded" as const])) as any
         }
       };
-      await sendNotification({ type: "provider_degraded", title, payload }, { userId: targetUserId, policy: forcedPolicy as any }).catch(() => {});
-
-      const { notify } = await import("./notify");
-      await notify(targetUserId, { title, body, kind: "provider_degraded", data: payload }).catch(() => {});
+      await sendNotification(
+        { type: "provider_degraded", title, payload },
+        { userId: targetUserId, policy: forcedPolicy as any, directBody: body }
+      ).catch(() => {});
     }
   } catch {
     // Health alerts must never throw
@@ -553,19 +559,23 @@ export async function alertStorageWarning(warningType: string, message: string):
     const fallbackEmail = operatorAlertEmail();
     const config = loadNotifyConfig();
 
-    if (fallbackEmail && config.email.resendKey && config.email.from) {
-      if (!prefs.channels.includes("email") || !prefs.email.trim()) {
-        const forcedPrefs = {
-          ...prefs,
-          channels: ["email" as any],
-          email: fallbackEmail,
-          updatedAt: prefs.updatedAt
-        };
-        await notify("local", { title, body, kind: "provider_degraded", data: payload }, { config, prefs: forcedPrefs }).catch(() => {});
-      } else {
-        await notify("local", { title, body, kind: "provider_degraded", data: payload }, { config }).catch(() => {});
-      }
-    }
+    const additionalDelivery =
+      fallbackEmail && config.email.resendKey && config.email.from && (!prefs.channels.includes("email") || !prefs.email.trim())
+        ? () =>
+            notify(
+              "local",
+              { title, body, kind: "provider_degraded", data: payload },
+              {
+                config,
+                prefs: {
+                  ...prefs,
+                  channels: ["email" as any],
+                  email: fallbackEmail,
+                  updatedAt: prefs.updatedAt
+                }
+              }
+            )
+        : undefined;
 
     // Also send standard notification
     const { sendNotification } = await import("./notifications");
@@ -578,7 +588,10 @@ export async function alertStorageWarning(warningType: string, message: string):
         enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "provider_degraded" as const])) as any
       }
     };
-    await sendNotification({ type: "provider_degraded", title, payload }, { userId: "local", policy: forcedPolicy as any }).catch(() => {});
+    await sendNotification(
+      { type: "provider_degraded", title, payload },
+      { userId: "local", policy: forcedPolicy as any, directBody: body, notifyDeps: { config }, additionalDelivery }
+    ).catch(() => {});
   } catch {
     // never throw on warnings
   }
