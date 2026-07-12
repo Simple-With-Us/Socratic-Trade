@@ -42,6 +42,50 @@ As of 2026-07-08 (assignment-rule update).
 
 ---
 
+## Canonical app-wide audit inventory
+
+Audit opened 2026-07-11 and reconciled against `main@17b707ff` plus production on 2026-07-12.
+All 34 verified findings remain individually visible here because umbrella completion rows are not a
+substitute for issue-level state. Current result: **8 resolved and production-verified; 13 partially
+mitigated but still open; 13 unresolved**. PR #1459 (`f066ea9d`) passed hosted verify, smoke, and
+gitleaks; production release `17b707ff` contains it.
+
+- **[A01][P0][Money path] Synthetic stops used the UI-active account instead of the policy account — RESOLVED / DEPLOYED / VERIFIED.** PR #1459 now requires an owned `connectedAccountId`, fails closed, and rebinds broker/account routing from the owned row.
+- **[A02][P1][Mobile truth] Initial dashboard failures rendered fabricated empty state — RESOLVED / DEPLOYED / VERIFIED.** Mobile now preserves unknown/unavailable state with explicit retry.
+- **[A03][P2][Mobile commands] Failed commands cleared input and controls ignored readiness — RESOLVED / DEPLOYED / VERIFIED.** Drafts clear only after accepted unchanged submissions; account/universe/freshness gates are explicit and STOP remains available.
+- **[A04][P1][Mobile reliability] Snapshot refreshes could overlap and an SSE outage has no fallback — PARTIAL / OPEN.** PR #1459 added a 45-second deadline, coalesced trailing refresh, stale gating, and focus/visibility/online recovery. EventSource health detection and fallback polling remain.
+- **[A05][P1][OAuth integrity] Robinhood callback state/origin/session binding was inexact — RESOLVED / DEPLOYED / VERIFIED.** PR #1459 added canonical exact state, atomic one-use consumption, trusted public origin, and optional verified-session binding.
+- **[A06][P0][Policy correctness] Account-scoped drafts/autosaves could land on another active account — RESOLVED / DEPLOYED / VERIFIED.** PR #1459 added owned origin targeting, guarded scope changes, keyed remounts, same-tab serialization, and atomic validation-first persistence.
+- **[A07][P1][Congress ingest] Webhook/SSE delivery can acknowledge and permanently lose failed events — UNRESOLVED / PLANNED.** Dedupe/checkpoint advances before durable apply and failed batch items still receive an OK envelope.
+- **[A08][P1][Public ingress] Congress/TradingView webhooks permit body/disk denial of service and unsafe proxy-IP trust — UNRESOLVED / PLANNED.** Add streaming limits, trusted-proxy resolution, and bounded rejection telemetry.
+- **[A09][P1][Cross-app auth] Bearer securities import is blocked by production middleware — PARTIAL / OPEN.** Handler bearer validation fails closed, but middleware has no exact self-authenticated exemption, so token-only App A calls cannot reach it.
+- **[A10][P2][Admin auth contract] Documented token-only admin access is blocked by middleware — PARTIAL / NEEDS CONTRACT DECISION.** Handlers accept timing-safe `x-admin-token`, but middleware still requires app identity first.
+- **[A11][P1][Health truth] Readiness can report healthy while SQLite is unwritable or free space is exactly zero — PARTIAL / OPEN.** Release/Litestream proof exists; DB health is still read-only and storage measurement failure is conflated with zero.
+- **[A12][P1][Broker endpoint trust] Arbitrary Alpaca endpoints can receive stored broker credentials — UNRESOLVED / PLANNED.** Require canonical hosts or explicit HTTPS/public-network validation with DNS/redirect revalidation.
+- **[A13][P1][Scheduler reliability] Unbounded broker I/O plus reentrant interval ticks can multiply hangs — UNRESOLVED / PLANNED.** Durable leases do not replace whole-tick singleflight or broker request deadlines.
+- **[A14][P1][Account onboarding] Rejected multi-account Tradier onboarding can leave a credential row — UNRESOLVED / PLANNED.** Persistence precedes ambiguity validation and failure has no transactional compensation.
+- **[A15][P2][Notification security] Webhook URLs permit SSRF and remain plaintext at rest/audit boundaries — PARTIAL / OPEN.** HTTPS-only delivery and display masking exist; public-network/DNS/redirect validation plus encrypted/redacted persistence do not.
+- **[A16][P2][Content security] Admin transcript Markdown auto-fetches untrusted remote images — UNRESOLVED / PLANNED.** Override images as non-fetching links and add a DOM regression.
+- **[A17][P2][Abuse controls] Paid test notifications have no rate, concurrency, or spend limit — UNRESOLVED / PLANNED.**
+- **[A18][P2][Public ingress] Massive flatfile retrieval has no request, decompression, row, time, or response bound — UNRESOLVED / PLANNED.**
+- **[A19][P2][Resource bounds] Ticker-logo proxy has unbounded upstream buffering and persistent cache growth — PARTIAL / OPEN.** Timeout/content-type checks exist; byte caps and cache quota/eviction do not.
+- **[A20][P1][Policy concurrency] Separate-tab/process policy PUTs can lose sibling fields — PARTIAL / OPEN.** PR #1459 fixes account targeting and same-tab ordering, but server read/merge occurs before awaited validation and writes a stale whole-policy snapshot without CAS/account-keyed exclusion.
+- **[A21][P0][Money path] Broker-health admission can skip protective/reconciliation maintenance — PARTIAL / OPEN.** PR #1459 moved pending fills, stale exits, and synthetic stops before admission, but sustained health rejection still prevents `flagStalePlacingIntents`.
+- **[A22][P0][Money path] A first partial fill permanently ended reconciliation — RESOLVED / DEPLOYED / VERIFIED.** PR #1459 preserves `partially_filled`, reselects it, and cumulatively updates the same fill row until terminal.
+- **[A23][P1][Money path] Inactive-account Red Team review uses active-account doctrine/environment — UNRESOLVED / PLANNED.** Scoped policy is still combined with `getActiveConnectedAccount` and an unscoped strategy prompt.
+- **[A24][P1][Money path] Inactive-account post-mortem uses the active account's fill source — UNRESOLVED / PLANNED.** The scoped policy/account input is still combined with `getActiveConnectedAccount`.
+- **[A25][P0][Risk caps] Daily/hourly caps used proposal creation time instead of placement time — RESOLVED / DEPLOYED / VERIFIED.** PR #1459 persists `placed_at` and queries the placement window.
+- **[A26][P0][Risk caps] `placing` intents reserved neither notional nor order count — RESOLVED / DEPLOYED / VERIFIED.** PR #1459 stamps and includes `placing` rows in both cap queries.
+- **[A27][P0][Money path] Account deletion could erase state while an order was in flight — PARTIAL / OPEN.** PR #1459 added durable draining, cancel/reconcile, and delayed purge, but an already-running strategy does not re-check draining immediately before placement.
+- **[A28][P0][Money path] Rejected/canceled stale-exit replacements could be recorded as success — PARTIAL / OPEN.** PR #1459 rejects terminal responses/missing IDs, but `pending_cancel` can still increment the remediated count before completion.
+- **[A29][P1][Accounting] Bounded fill/snapshot readers return oldest rows and eventually freeze current accounting — UNRESOLVED / PLANNED.** Select the newest bounded window, then restore chronological order.
+- **[A30][P1][Loading/a11y] Legitimate slow dashboard loads can show a false timeout and remain screen-reader silent — PARTIAL / OPEN.** Server/client deadline alignment improved, but the 15-second watchdog can precede a valid response and the loading shell remains textless/`aria-hidden`.
+- **[A31][P1][Accessibility] Tooltip help lacks complete keyboard/programmatic association — PARTIAL / OPEN.** Focus/Escape/`role=tooltip` exist; stable IDs, `aria-describedby`, and non-focusable-child support remain.
+- **[A32][P1][Accessibility] Command palette lacks focus trap/return and complete combobox semantics — UNRESOLVED / PLANNED.**
+- **[A33][P1][Data-loss prevention] Browser back/forward navigation bypasses `DirtyGuard` — UNRESOLVED / PLANNED.**
+- **[A34][P2][Accessibility] Selected-state and form-label relationships remain incomplete — PARTIAL / OPEN.** Targeted fixes exist, but no systematic DOM/keyboard/axe closure has been completed.
+
+
 ## Deployed
 - **PROD RELEASE 2026-07-09 (MONET, roth-gemini/runonce session): Coolify deploy gy3sbqag
   FINISHED + health-verified — production = `main@f9a37611` exactly (container healthy,
@@ -1621,6 +1665,11 @@ As of 2026-07-08 (assignment-rule update).
   STATUS: gates green locally (lint 0 errors, tsc clean, 2449 tests, build ok); opening PR next.
 
 ## In Progress
+- **Whole-app audit ledger reconciliation and production closeout (CODEX, branch
+  `codex/app-wide-audit-closeout-20260712`, 2026-07-12) — IN PROGRESS.** PR #1459 is merged,
+  all hosted checks passed, and production release `17b707ff` contains the audit merge. Reconcile
+  all 34 audit findings against current `main`, correct stale awaiting-gate states, identify fixes
+  independently landed by peer lanes, and preserve genuinely open follow-ups without duplicating work.
 - **Fleet-procedure skills: land-lane/unstick-pr/codex-triage/pickup-seat/deploy-verify (CLAUDE, branch `claude/fleet-skills`) — owner-directed, IN PROGRESS 2026-07-11, landing.** Five Claude Code skills under `.claude/skills/` encode the pickup-era fleet procedures (landing a branch via `land.sh`, unsticking a blocked PR, triaging codex-connector review threads, picking up a capped peer seat's work, verifying a post-deploy state) as on-demand skills instead of per-prompt re-spelling. `.claude/` stays git-ignored for per-agent/per-machine local settings and session hooks; `.gitignore` now carves out `!.claude/skills/` specifically so these five files are tracked. Skills are Claude Code-only — cross-agent rules (all tools) remain in `AGENTS.md`, which every skill cites as canon. Rollout: `docs/rollouts/2026-07-10-fleet-procedure-skills.md`.
 - **Settings + LLM telemetry sweep (CLAUDE, branch `claude/settings-llm-usage-sweep`, scratchpad worktree (session-managed)) — IMPLEMENTATION COMPLETE, GATES RUNNING, PR OPENING 2026-07-11.** Seven-item batch: unified LLM usage labels via centralized `app/ui/llm-usage-labels.ts` (all contexts sentence-case + humanizer fallback), strategy reviews persisted server-side (new `strategy_tuning_reviews` table + `db-tuning-reviews.ts` CRUD + GET latest-open + PATCH applied/dismissed handlers; AiReviewPanel restores unapplied on mount with dismissible banner), account-attribution fix (review-cost and review evidence now tied to initiating `targetConnectedAccountId` not global `is_active` — root cause of owner's "missing" Fable Roth-IRA cost), cross-account settings import (new `importAccountSettings()` + POST `/api/connected-accounts/[id]/import-settings`, ownership both sides, strips identity + user fields, preserves target systemState, carries lineage tracking), framework-page grid width fixes (removed max-w-xl / w-64 / w-56 caps from input/selects in `app/console/strategy/page.tsx`; now min-w-0 flex-1), strategist model-stats drawer (ModelStatsButton gets `role="strategist"`, shows Cost/call + Runs + Total historical cost per model), LLM telemetry closure (scripts benchmark/eval/salience now all record via `recordLlmUsage()`; `strategy_tuning_reviews` added to DELETE_TABLES_BY_USER_ID). Verification: `npx tsc --noEmit` clean, lint 0 errors, focused suites 10+8+21+118 all green, full gate running at doc-write time. Rollout: `docs/rollouts/2026-07-11-settings-llm-usage-sweep.md`.
 - **Team display names back to Green Team / Red Team (CLAUDE, branch `claude/team-names-green-red`) — IN PROGRESS 2026-07-11, landing.** Owner-directed copy rename across console UI (Framework model pickers, stats drawer, results columns, policy/llm-required error copy, help) — display strings only; plus a factual help fix (blank Red Team fails closed, never self-reviews). Rollout: `docs/rollouts/2026-07-11-team-names-green-red.md`.

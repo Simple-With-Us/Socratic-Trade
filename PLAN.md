@@ -5,6 +5,15 @@ measurable, customizable, and easier to operate. The current codebase is treated
 as partially complete; implementation should preserve working controls while
 filling the missing pieces.
 
+> **2026-07-12 - Whole-app audit production closeout and backlog truth (CODEX).** No roadmap
+> phase change. PR #1459 is merged and ancestor-verified in production release `17b707ff`; its
+> hosted verify/smoke/gitleaks checks passed. The 34-finding inventory is restored and reconciled:
+> 8 resolved/live, 13 partially mitigated but open, and 13 unresolved. Five of eight P0s are fully
+> resolved; broker-health admission, account draining, and stale-exit replacement retain explicit
+> P0 follow-ups. Node 24 remains the production/CI LTS line; assess Node 26 through a clean-install
+> canary and coordinated migration after LTS. See
+> `docs/rollouts/2026-07-12-app-wide-audit-closeout.md`.
+>
 > **2026-07-11 - Team names back to Green Team / Red Team (CLAUDE).** Copy-only rename: console
 > surfaces that had drifted to "Proposer"/"Reviewer" seat labels now lead with Green Team / Red
 > Team everywhere user-visible; internal identifiers and prompts untouched. Also fixed stale help

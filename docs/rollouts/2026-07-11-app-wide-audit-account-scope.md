@@ -90,3 +90,16 @@
   package/build/cleanup lanes then overlapped despite fleet HEADS-UP messages. The first full-test run
   hit load 150; macOS `secd`/`syspolicyd`/`trustd` indexing remains load-dominant after those commands
   stopped. Wait for load below ~30, post a fresh gate claim, then rerun test/build before push/PR.
+
+## 2026-07-12 reconciliation
+
+- PR #1459 merged as `f066ea9d`; hosted verify, smoke, and gitleaks passed.
+- Production release `17b707ff` contains the merge and reports healthy DB, scheduler, and
+  Litestream state.
+- A follow-up commit on the branch deleted the 34 issue-level effort rows and substituted an
+  umbrella completion row. The canonical numbered inventory has been restored to both boards.
+- Current state after independent source review: 8 resolved/live, 13 partially mitigated but open,
+  and 13 unresolved. In particular, broker-health admission, account draining, and stale-exit
+  replacement remain partial P0s; they are not complete.
+- The earlier local gate blockers are superseded by the successful hosted checks and deployed
+  descendant proof. Node 24 is the canonical CI/production runtime.

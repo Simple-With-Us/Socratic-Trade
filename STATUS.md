@@ -1,5 +1,19 @@
 # Current Status
 
+## 2026-07-12 — Whole-app audit reconciled, merged, and production-verified (CODEX)
+
+The canonical 34-finding inventory is restored in both effort boards after PR #1459's follow-up
+commit incorrectly deleted the issue-level rows. PR #1459 merged as `f066ea9d`; hosted verify,
+smoke, and gitleaks passed. Production release `17b707ff` contains that merge and reports healthy
+DB, scheduler lease/tick, and Litestream replication; Alpha Vantage remains the known noncritical
+daily-cap degradation.
+
+Current issue truth is **8 resolved/live, 13 partially mitigated but open, and 13 unresolved**. Five
+of eight P0s are resolved; broker-health admission, account draining, and stale-exit replacement
+remain partially mitigated and explicitly open. Node stays on 24 LTS; Node 26 remains a future
+coordinated canary/migration after it reaches LTS, not a fix for mixed native-module artifacts.
+Rollout: `docs/rollouts/2026-07-12-app-wide-audit-closeout.md`.
+
 ## 2026-07-12 — Raise RAG Ingestion Limits and Deepen Filing Lookback (Antigravity, branch `agent/antigravity-rag`)
 
 Raised RAG ingestion daily caps (`RAG_INGEST_MAX_TEXTS_PER_DAY` to 1,000,000, `RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY` to 10,000,000) and deepened the SEC filing lookback depth (`fetchRecentFilings` pulls 10 historical 10-K and 10-Qs, `DEFAULT_PAID_MAX_FILINGS_PER_RUN` bumped to 200) to allow massive historical ingestion of information into Pinecone.
