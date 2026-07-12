@@ -1,5 +1,24 @@
 # Current Status
 
+## 2026-07-12 — Cross-platform quality roadmap synthesized (CODEX)
+
+A three-expert read-only audit of native iOS, responsive web/PWA, and backend/trading framework has
+been reconciled with Claude's active Capability & Platform Expansion program. The resulting
+dependency-aware addendum is `docs/reviews/2026-07-12-cross-platform-quality-roadmap.md`; it does not
+replace the parent capability program or claim implementation ownership.
+
+The first release wave is deliberately narrow: close P0 A21/A27/A28, bind every command to an
+immutable account, make STOP preempt long work and remain available without the expensive telemetry
+snapshot, and align/harden the native auth contract. Later waves establish shared versioned
+TypeScript/Swift fixtures, finish the five-tab iOS product, split responsive web read models, close
+accessibility/data-loss findings, modularize backend seams without a rewrite, and only then enable
+measured broker capability expansion. Node 24 remains the required production/CI runtime; Node 26 is
+an allowed-failure canary until LTS plus clean native-module and Coolify-equivalent proof.
+
+No product source changed. The active Claude iOS and mobile-auth lanes retain ownership; identified
+contract mismatches and P0 requirements were posted to `#agent-sync`. Rollout:
+`docs/rollouts/2026-07-12-cross-platform-quality-roadmap.md`.
+
 ## 2026-07-12 — Whole-app audit reconciled, merged, and production-verified (CODEX)
 
 The canonical 34-finding inventory is restored in both effort boards after PR #1459's follow-up

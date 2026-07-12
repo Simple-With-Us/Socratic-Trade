@@ -14,6 +14,18 @@ filling the missing pieces.
 > canary and coordinated migration after LTS. See
 > `docs/rollouts/2026-07-12-app-wide-audit-closeout.md`.
 >
+> **2026-07-12 - Cross-platform quality roadmap (CODEX, expert-team synthesis).** The active
+> capability program remains the parent for iOS, web, framework, and broker expansion. A new
+> complementary roadmap now defines the missing dependency order, shared client contracts,
+> release gates, metrics, and acceptance tests across native iOS, responsive desktop/mobile web,
+> backend reliability, trading correctness, data, accessibility, security, operations, and
+> learning quality. Wave 0 closes A21/A27/A28 plus account-bound mobile commands, genuinely
+> preemptive STOP, a lightweight control bootstrap, and hardened native auth before new execution
+> capability is enabled. Node 24 remains required; Node 26 is a non-blocking canary until LTS and
+> full native-module/deploy proof. See
+> `docs/reviews/2026-07-12-cross-platform-quality-roadmap.md` and
+> `docs/rollouts/2026-07-12-cross-platform-quality-roadmap.md`.
+>
 > **2026-07-11 - Team names back to Green Team / Red Team (CLAUDE).** Copy-only rename: console
 > surfaces that had drifted to "Proposer"/"Reviewer" seat labels now lead with Green Team / Red
 > Team everywhere user-visible; internal identifiers and prompts untouched. Also fixed stale help
