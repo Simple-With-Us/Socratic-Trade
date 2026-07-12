@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { getDb, getPolicy, setPolicy } from "./db";
+import { getDb, getPolicy, releaseStrategyLock, setPolicy } from "./db";
 import { clearMcpOAuthForUser } from "./mcp-oauth";
 
 export const ACCOUNT_DELETE_PHRASE = "DELETE MY ACCOUNT";
@@ -47,13 +47,7 @@ const DELETE_TABLES_BY_USER_ID = [
   "take_profit_trims",
   // Added 2026-07-05: due_jobs (src/lib/db-jobs.ts) is user-scoped (nullable user_id — system-wide
   // jobs have none, matching the generic loop's `WHERE user_id = ?` no-op for those rows).
-  "due_jobs",
-  // Added 2026-07-10: position_stop_plans (src/lib/db-api-keys.ts) — per-position stop-plan rows,
-  // user-scoped like take_profit_trims.
-  "position_stop_plans",
-  // Added 2026-07-11: strategy_tuning_reviews (src/lib/db-tuning-reviews.ts) — persisted AI
-  // strategy-review results, user-scoped.
-  "strategy_tuning_reviews"
+  "due_jobs"
 ] as const;
 
 type DeleteTable = (typeof DELETE_TABLES_BY_USER_ID)[number];
@@ -231,6 +225,7 @@ export function prepareAccountDeletion(input: { userId: string; email?: string }
   if (policy.systemState !== "halted") {
     setPolicy({ ...policy, systemState: "halted" }, input.userId);
   }
+  releaseStrategyLock(input.userId);
   db.transaction(() => {
     db.prepare("UPDATE account_deletion_requests SET status = 'cancelled' WHERE user_id = ? AND status = 'prepared'").run(input.userId);
     db.prepare(

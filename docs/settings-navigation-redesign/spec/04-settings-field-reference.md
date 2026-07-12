@@ -193,7 +193,7 @@ The design flagged this as ambiguous: *"position size" (total holding) and "orde
 | `riskRules.takeProfitTrimPct` | ACCOUNT | Advanced | number / slider (%) | `50` | `1 ≤ x ≤ 100` (% of position sold at target) | none | frictionless |
 | `riskRules.takeProfitNotional` | ACCOUNT | Advanced | number+unit ($) | `undefined` | `> 0` | none | frictionless |
 | `riskRules.trailingStopPct` | ACCOUNT | Advanced | number+unit (%) | `0` (off) | `0 ≤ x ≤ 100`; `0` = disabled | none | frictionless |
-| `riskRules.shortStopLossPct` | ACCOUNT | Advanced | number+unit (%) | `8` | `> 0`; gate rejects unset/`≤ 0` — auto-satisfied by the default, only an explicit clear re-arms it | greyed unless `capabilities.shortSelling` | **inline-confirm** (mandatory-when-shorting) |
+| `riskRules.shortStopLossPct` | ACCOUNT | Advanced | number+unit (%) | `undefined` | `> 0`; **required when `shortSellingEnabled`** | greyed unless `capabilities.shortSelling` | **inline-confirm** (mandatory-when-shorting) |
 | `riskRules.atrStopPeriod` | ACCOUNT | Advanced | number (bars) | `undefined` (fn default 14) | integer `≥ 1` | none | frictionless |
 | `riskRules.atrStopMultiple` | ACCOUNT | Advanced | number (×) | `undefined` (fn default 2.0) | `> 0` | none | frictionless |
 | `atrStops` (toggle) | ACCOUNT | Advanced | toggle | `undefined` (off) | boolean | none | frictionless |
@@ -201,17 +201,11 @@ The design flagged this as ambiguous: *"position size" (total holding) and "orde
 | `brokerBracketsEnabled` | ACCOUNT | Advanced | toggle | `true` | boolean | broker must support native brackets (Alpaca); greyed elsewhere | disable = inline-confirm |
 | `robinhoodBrokerStops` | ACCOUNT | Advanced | toggle | `false` | boolean | only on Robinhood live; greyed otherwise | enable = **inline-confirm** (verify RH stop semantics) |
 | `marketableLimitEntries` | ACCOUNT | Advanced | toggle | `undefined` (off) | boolean | none | frictionless |
-| `shortSellingEnabled` | ACCOUNT | Advanced | toggle | `undefined` (off) | boolean; the short-stop gate is auto-satisfied by `shortStopLossPct`'s 8% default — only blocks save if the user explicitly clears it | **greyed unless `capabilities.shortSelling === true`**; hard-blocked on IRA account types | enable = **type-to-confirm** |
+| `shortSellingEnabled` | ACCOUNT | Advanced | toggle | `undefined` (off) | boolean; enabling requires `shortStopLossPct` set | **greyed unless `capabilities.shortSelling === true`**; hard-blocked on IRA account types | enable = **type-to-confirm** |
 | `maxShortOrderNotional` | ACCOUNT | Advanced | number+unit ($) | `undefined` | `> 0` | greyed unless shorting enabled | raise = inline-confirm |
 | `maxShortExposurePct` | ACCOUNT | Advanced | number+unit (%) | `undefined` | `0 < x ≤ 100` | greyed unless shorting enabled | raise = inline-confirm |
 
 **Capability-gate note (shorting):** `AccountCapabilities.shortSelling` is `false` for Robinhood MCP always and parsed from `account.shorting_enabled` for Alpaca (`types.ts:106`). When `false`, grey `shortSellingEnabled`, `maxShortOrderNotional`, `maxShortExposurePct`, and `riskRules.shortStopLossPct` with the explainer "This broker/account doesn't allow short selling." Preset-apply onto an IRA (`accountType ∈ {traditional_ira, roth_ira}`) hard-warns/blocks any short/margin field (§Presets guard).
-
-**Pre-redesign note (2026-07-09):** ahead of this spec landing, all four `SHORTS` fields
-(`shortSellingEnabled`, `maxShortOrderNotional`, `maxShortExposurePct`, `riskRules.shortStopLossPct`)
-already shipped in the current `app/console/guardrails/page.tsx` Essentials card, not Advanced — see
-`docs/rollouts/2026-07-09-short-stop-default-and-surface.md`. This spec's own Advanced placement for
-the v2 IA is unchanged; reconcile the two when this spec is actually built.
 
 ---
 

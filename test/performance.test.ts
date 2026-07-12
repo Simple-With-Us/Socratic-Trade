@@ -344,29 +344,6 @@ describe("getThesisScorecard", () => {
     expect(efficacy.vetoValueAddRate).toBe(100);
   });
 
-  it("getRedTeamEfficacy computes unattributed model rollups from full history, not the recent record slice", async () => {
-    const { audit, insertSkippedCounterfactualCandidate, markSkippedCounterfactualMatured } = await import("../src/lib/db");
-    const userId = `redteam-eff-unattributed-${randomUUID()}`;
-
-    for (let i = 0; i < 13; i += 1) {
-      const runId = `run-rt-unattributed-${i}`;
-      const symbol = `T${i}`;
-      audit("proposal_rejected_by_red_team", { runId, symbol, side: "buy", thesisTag: "Momentum", reason: "Legacy unstamped veto." }, userId);
-      insertSkippedCounterfactualCandidate({ userId, runId, symbol, snapshotAt: "2026-06-01T00:00:00.000Z", refPrice: 100, horizonDays: 5, targetDate: "2026-06-06" });
-      markSkippedCounterfactualMatured({ id: `${userId}:${runId}:${symbol}:5`, userId, exitDate: "2026-06-06", exitPrice: 90, returnPct: -10 });
-    }
-
-    const efficacy = getRedTeamEfficacy(userId, { limit: 2 });
-
-    expect(efficacy.records).toHaveLength(2);
-    expect(efficacy.byModel.find((m) => m.model === "unattributed")).toMatchObject({
-      maturedVetoes: 13,
-      vetoValueAddRate: 100,
-      survivorRiskHitRate: 0,
-      avgReturnPct: -10
-    });
-  });
-
   it("getRedTeamEfficacy scans audits BY KIND — a flood of newer other-kind audits cannot evict veto history", async () => {
     const { audit } = await import("../src/lib/db");
     const userId = `redteam-eff-kind-${randomUUID()}`;

@@ -31,9 +31,7 @@
   --con-muted: #46556b;   /* ≥7:1 on surface */
   --con-faint: #566478;   /* ≥5.5:1 on surface */
 
-  /* Sourced from the shared --brand-accent token (app/globals.css) — console
-     is the canonical value the whole app's brand accent derives from. */
-  --con-accent: var(--brand-accent);
+  --con-accent: #12616f;
   --con-accent-contrast: #ffffff;
   --con-pos: #157f4e;
   --con-pos-contrast: #ffffff;
@@ -41,8 +39,6 @@
   --con-neg-contrast: #ffffff;
   --con-warn: #9a6209;
   --con-warn-contrast: #ffffff;
-  --con-info: #0891b2;
-  --con-info-contrast: #ffffff;
 
   /* Money-reality tones (reinforcement only — the word is load-bearing) */
   --con-none: #64748b;
@@ -64,8 +60,6 @@
   --con-neg-border: color-mix(in oklab, var(--con-neg) 50%, transparent);
   --con-warn-soft: color-mix(in oklab, var(--con-warn) 12%, transparent);
   --con-warn-border: color-mix(in oklab, var(--con-warn) 45%, transparent);
-  --con-info-soft: color-mix(in oklab, var(--con-info) 12%, transparent);
-  --con-info-border: color-mix(in oklab, var(--con-info) 45%, transparent);
   --con-none-soft: color-mix(in oklab, var(--con-none) 10%, transparent);
   --con-none-border: color-mix(in oklab, var(--con-none) 45%, transparent);
   --con-paper-soft: color-mix(in oklab, var(--con-paper) 10%, transparent);
@@ -73,11 +67,9 @@
   --con-live-soft: color-mix(in oklab, var(--con-live) 11%, transparent);
   --con-live-border: color-mix(in oklab, var(--con-live) 55%, transparent);
 
-  /* Shape — canonical shared with ui via --radius-card/--radius-control
-     (app/globals.css). Console's own values ARE the canon; this just points
-     back at the shared vars so both systems stay in lockstep. */
-  --con-radius: var(--radius-card);
-  --con-radius-sm: var(--radius-control);
+  /* Shape */
+  --con-radius: 12px;
+  --con-radius-sm: 8px;
 
   /* Type scale */
   --con-fs-xs: 11px;
@@ -94,13 +86,12 @@
   --con-font-serif: Georgia, "Times New Roman", serif;
   --con-font-mono: ui-monospace, "SF Mono", Menlo, monospace;
   --con-control-font: var(--con-font-ui);
-  --con-body-font: var(--con-font-ui);
 
   background: var(--con-bg);
   color: var(--con-fg);
   font-size: var(--con-fs-base);
   line-height: 1.5;
-  font-family: var(--con-body-font);
+  font-family: var(--con-font-ui);
   -webkit-font-smoothing: antialiased;
   min-height: 100dvh;
 }
@@ -113,19 +104,6 @@
 }
 .console-root[data-textbox-font="mono"] {
   --con-control-font: var(--con-font-mono);
-}
-
-/* Console font: the whole console UI's font (nav, chrome, cards, copy) — kept
-   independent from --con-control-font/[data-textbox-font] above, which only
-   governs editable inputs/textareas. */
-.console-root[data-console-font="system"] {
-  --con-body-font: var(--con-font-system);
-}
-.console-root[data-console-font="serif"] {
-  --con-body-font: var(--con-font-serif);
-}
-.console-root[data-console-font="mono"] {
-  --con-body-font: var(--con-font-mono);
 }
 
 /* ── DARK (explicit choice) — keep IDENTICAL to the media-query block below ── */
@@ -141,7 +119,7 @@
   --con-muted: #a5b2c4;
   --con-faint: #8492a6;
 
-  --con-accent: var(--brand-accent-dark);
+  --con-accent: #58c7d3;
   --con-accent-contrast: #071316;
   --con-pos: #37c58c;
   --con-pos-contrast: #04170e;
@@ -149,8 +127,6 @@
   --con-neg-contrast: #1c0605;
   --con-warn: #e5aa4b;
   --con-warn-contrast: #201302;
-  --con-info: #22d3ee;
-  --con-info-contrast: #061f26;
 
   --con-none: #94a3b8;
   --con-paper: #98a3ff;
@@ -178,7 +154,7 @@
     --con-muted: #a5b2c4;
     --con-faint: #8492a6;
 
-    --con-accent: var(--brand-accent-dark);
+    --con-accent: #58c7d3;
     --con-accent-contrast: #071316;
     --con-pos: #37c58c;
     --con-pos-contrast: #04170e;
@@ -186,8 +162,6 @@
     --con-neg-contrast: #1c0605;
     --con-warn: #e5aa4b;
     --con-warn-contrast: #201302;
-    --con-info: #22d3ee;
-    --con-info-contrast: #061f26;
 
     --con-none: #94a3b8;
     --con-paper: #98a3ff;
@@ -244,11 +218,10 @@
   gap: 16px;
   align-items: stretch;
   border: 1px solid var(--con-line);
-  /* Flat surface + accent left-rule, not a gradient wash (2026-07-08 UI-audit,
-     Package G item 4) — the gradient read as decoration without meaning. */
-  border-left: 3px solid var(--con-accent);
   border-radius: var(--con-radius);
-  background: var(--con-surface);
+  background:
+    linear-gradient(135deg, color-mix(in oklab, var(--con-accent) 10%, transparent), transparent 46%),
+    var(--con-surface);
   box-shadow: var(--con-shadow);
   padding: 18px;
 }
@@ -464,31 +437,11 @@
   font-size: var(--con-fs-xs);
 }
 
-/* Coarse-pointer (touch) 44px minimum target — WCAG 2.5.8/2.5.5. Mirrors the
-   `max-sm:min-h-11` floor app/ui/primitives.tsx already bakes in. Covers every
-   .con-btn variant (incl. .con-btn-sm) and the header run-state control below;
-   other chrome triggers (ScopeSelector/StateChip/UserMenu buttons in
-   chrome.tsx) are raw Tailwind utilities with no class hook here — see
-   followUps. */
-@media (pointer: coarse) {
-  .con-btn,
-  .con-start-btn,
-  .con-stop-btn {
-    min-height: 44px;
-    min-width: 44px;
-  }
-}
-
-/* The header run-state control: Start/Resume when paused, STOP when stopping.
-   justify-content + flex-shrink matter: in the crowded phone bar the button was
-   getting flex-squeezed and its start-aligned content read as "STOP shoved
-   right with a missing symbol on the left" (owner report). */
+/* The header run-state control: Start/Resume when paused, STOP when stopping. */
 .con-stop-btn,
 .con-start-btn {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
   gap: 6px;
   border-radius: var(--con-radius-sm);
   font-weight: 700;
@@ -515,47 +468,6 @@
   background: color-mix(in oklab, var(--con-pos) 18%, transparent);
 }
 
-/* Profile menu: slide-down entrance for the header dropdown (chrome.tsx UserMenu). */
-@keyframes con-menu-drop {
-  from {
-    opacity: 0;
-    transform: translateY(-8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-.con-menu-drop {
-  animation: con-menu-drop 160ms ease;
-}
-@media (prefers-reduced-motion: reduce) {
-  .con-menu-drop {
-    animation: none;
-  }
-}
-
-/* Account scope dropdown rows (chrome.tsx ScopeSelector). The panel itself
-   reuses .con-menu-drop for the slide-down entrance; these are the row
-   hover/selected states. The loaded account row is aria-checked + disabled and
-   keeps a soft accent tint; switchable rows light up on hover/focus. */
-.con-scope-row {
-  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
-}
-.con-scope-row[aria-checked="true"] {
-  background: var(--con-accent-soft);
-}
-.con-scope-row:not([aria-checked="true"]):not([disabled]):hover,
-.con-scope-row:not([aria-checked="true"]):not([disabled]):focus-visible {
-  background: var(--con-surface-2);
-  border-color: var(--con-accent);
-}
-@media (pointer: coarse) {
-  .con-scope-row {
-    min-height: 44px;
-  }
-}
-
 /* ── Chips ── */
 .con-chip {
   display: inline-flex;
@@ -574,7 +486,6 @@
 .con-chip-pos { border-color: var(--con-pos-border); color: var(--con-pos); background: var(--con-pos-soft); }
 .con-chip-neg { border-color: var(--con-neg-border); color: var(--con-neg); background: var(--con-neg-soft); }
 .con-chip-warn { border-color: var(--con-warn-border); color: var(--con-warn); background: var(--con-warn-soft); }
-.con-chip-info { border-color: var(--con-info-border); color: var(--con-info); background: var(--con-info-soft); }
 .con-chip-none { border-color: var(--con-none-border); color: var(--con-none); background: var(--con-none-soft); }
 .con-chip-paper { border-color: var(--con-paper-border); color: var(--con-paper); background: var(--con-paper-soft); }
 .con-chip-live { border-color: var(--con-accent-border); color: var(--con-accent); background: var(--con-accent-soft); }
@@ -794,10 +705,7 @@
   font-size: 10px;
   font-weight: 600;
   color: var(--con-faint);
-  /* Extra top padding vs. bottom gives the negative-positioned badge (see
-   * .con-badge below) clearance from the bar's top border so it doesn't read
-   * as clipped/cramped — a few px, not a bar-height change. */
-  padding: 9px 0 4px;
+  padding: 6px 0 4px;
   flex: 1;
   position: relative;
 }
@@ -840,11 +748,6 @@
   overflow-y: auto;
   border-radius: var(--con-radius);
 }
-/* Opt-in wider variant for dialogs whose content needs more horizontal room
- * (e.g. a multi-column table) — desktop only, see mobile override below. */
-.con-sheet-wide {
-  width: min(920px, calc(100vw - 32px));
-}
 @media (max-width: 767px) {
   .con-sheet {
     top: auto;
@@ -859,9 +762,6 @@
     border-right: none;
     border-bottom: none;
     padding-bottom: env(safe-area-inset-bottom);
-  }
-  .con-sheet-wide {
-    width: 100%;
   }
 }
 .con-sheet-live {
@@ -1129,131 +1029,4 @@
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
-}
-
-/* ── Command palette (Cmd/Ctrl+K) ── */
-.con-cmdk-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 210;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 12vh 16px 16px;
-  background: var(--con-scrim);
-  backdrop-filter: blur(2px);
-}
-.con-cmdk {
-  width: 100%;
-  max-width: 560px;
-  max-height: 62vh;
-  display: flex;
-  flex-direction: column;
-  background: var(--con-surface);
-  border: 1px solid var(--con-line-strong);
-  border-radius: var(--con-radius);
-  box-shadow: var(--con-shadow-lg);
-  overflow: hidden;
-}
-.con-cmdk-search {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--con-line);
-  color: var(--con-faint);
-}
-.con-cmdk-search input {
-  flex: 1;
-  min-width: 0;
-  border: none;
-  background: transparent;
-  outline: none;
-  font-family: var(--con-font-ui);
-  font-size: var(--con-fs-md);
-  color: var(--con-fg);
-}
-.con-cmdk-search input::placeholder {
-  color: var(--con-faint);
-}
-.con-kbd {
-  font-family: var(--con-font-mono);
-  font-size: 10px;
-  color: var(--con-faint);
-  border: 1px solid var(--con-line-strong);
-  border-radius: 5px;
-  padding: 1px 5px;
-}
-.con-cmdk-list {
-  list-style: none;
-  margin: 0;
-  padding: 6px;
-  overflow-y: auto;
-}
-.con-cmdk-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 11px;
-  border-radius: var(--con-radius-sm);
-  cursor: pointer;
-  color: var(--con-fg);
-}
-.con-cmdk-item[data-active="true"] {
-  background: var(--con-accent-soft);
-}
-.con-cmdk-item-label {
-  font-size: var(--con-fs-sm);
-  font-weight: 600;
-  white-space: nowrap;
-}
-.con-cmdk-item-hint {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--con-fs-xs);
-  color: var(--con-muted);
-}
-.con-cmdk-item[data-active="true"] .con-cmdk-item-hint {
-  color: var(--con-fg);
-}
-.con-cmdk-enter {
-  flex: 0 0 auto;
-  color: var(--con-accent);
-}
-.con-cmdk-empty {
-  padding: 18px;
-  text-align: center;
-  font-size: var(--con-fs-sm);
-  color: var(--con-faint);
-}
-.con-cmdk-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 32px;
-  padding: 0 10px;
-  border: 1px solid var(--con-line-strong);
-  border-radius: var(--con-radius-sm);
-  background: var(--con-surface-2);
-  color: var(--con-muted);
-  font-size: var(--con-fs-xs);
-  cursor: pointer;
-  transition: border-color 120ms ease, color 120ms ease;
-}
-.con-cmdk-trigger:hover {
-  border-color: var(--con-accent);
-  color: var(--con-accent);
-}
-.con-cmdk-trigger kbd {
-  font-family: var(--con-font-mono);
-  font-size: 12px;
-  /* Owner ask: nudge the ⌘/K apart by ~half a space. Applied as letter-spacing
-     (trailing space trimmed with a negative margin-right so the badge padding
-     stays even). */
-  letter-spacing: 0.14em;
-  margin-right: -0.14em;
-  color: var(--con-faint);
 }

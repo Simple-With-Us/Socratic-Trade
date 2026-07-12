@@ -8,7 +8,6 @@
  *  authority, its 409 reasons and expectedText render verbatim. */
 
 import { useMemo, useState } from "react";
-import { shortOrderLabel } from "@/lib/order-labels";
 import type { RealityInfo } from "../lib/derive";
 import { fmtQty } from "../lib/format";
 import { useConsoleData } from "../lib/useConsoleData";
@@ -53,9 +52,6 @@ export function ReplaceMarketSheet({
 
   const order = row.order;
   const live = reality.tone === "live";
-  // Owner preference: with typed confirmation off, a live replace is one-click (the server honors the
-  // same flag via assertMarketReplaceConfirmation).
-  const needsTyped = live && snapshot?.policy.requireTypedConfirmation !== false;
   const sideWord = SIDE_LABEL[order.side] ?? String(order.side).toUpperCase();
   const kind = orderTypeLabel(order.type);
   const remaining = fmtQty(row.remaining);
@@ -97,7 +93,7 @@ export function ReplaceMarketSheet({
           "pos",
           `Market replacement submitted for ${order.symbol}`,
           [
-            result.replacementOrderId ? `Order ${shortOrderLabel(result.replacementOrderId)}.` : undefined,
+            result.replacementOrderId ? `Order ${result.replacementOrderId}.` : undefined,
             result.brokerState ? `Broker state: ${readableState(result.brokerState)}.` : undefined
           ]
             .filter(Boolean)
@@ -188,28 +184,26 @@ export function ReplaceMarketSheet({
             </div>
           )}
 
-          {needsTyped && (
-            <div className="mt-3">
-              <label className="con-label" htmlFor={`replace-typed-${order.id}`}>
-                Type exactly: <span className="con-mono text-[color:var(--con-fg)]">{expectedText}</span>
-              </label>
-              <TextInput
-                id={`replace-typed-${order.id}`}
-                value={typed}
-                onChange={(e) => setTyped(e.target.value)}
-                autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="characters"
-                spellCheck={false}
-                onPaste={(e) => e.preventDefault()}
-                placeholder={expectedText}
-                className="con-mono"
-              />
-              <p className="mt-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-                Paste is disabled on purpose — the words are the consent.
-              </p>
-            </div>
-          )}
+          <div className="mt-3">
+            <label className="con-label" htmlFor={`replace-typed-${order.id}`}>
+              Type exactly: <span className="con-mono text-[color:var(--con-fg)]">{expectedText}</span>
+            </label>
+            <TextInput
+              id={`replace-typed-${order.id}`}
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="characters"
+              spellCheck={false}
+              onPaste={(e) => e.preventDefault()}
+              placeholder={expectedText}
+              className="con-mono"
+            />
+            <p className="mt-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+              Paste is disabled on purpose — the words are the consent.
+            </p>
+          </div>
         </>
       ) : (
         <p className="mt-3 rounded-lg border border-[color:var(--con-line)] p-3 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
@@ -224,10 +218,10 @@ export function ReplaceMarketSheet({
         </Btn>
         <Btn
           variant="primary"
-          disabled={busy || (needsTyped && !matches)}
+          disabled={busy || (live && !matches)}
           onClick={() => void submit()}
           title={
-            needsTyped && !matches
+            live && !matches
               ? "Type the confirmation phrase first."
               : "Cancel the limit order and submit the remainder as a market order."
           }

@@ -1,14 +1,14 @@
 // Resolve the authenticated app userId for a request.
 //
-// SECURITY: identity metadata is established by `middleware.ts`, which strips client-supplied hints
-// and forwards either a verified upstream email or the explicit auth-unconfigured local fallback.
-// We map that middleware-supplied email → a stable userId here. We NEVER trust a client-supplied
-// `x-user-id`, `?userId`, or body `userId` — those were the old IDOR vectors. Security-sensitive role
-// checks must additionally inspect middleware's identity-source provenance; see `auth/admin.ts`.
+// SECURITY: identity is established by `middleware.ts` (verified Auth.js session), which forwards
+// a trusted `x-authenticated-user-email` header and strips client-supplied hints.
+// We map that verified email → a stable userId here. We NEVER trust a client-supplied `x-user-id`,
+// `?userId`, or body `userId` — those were the old IDOR vectors. In production, middleware 401s any
+// request that lacks a verified identity, so the dev fallback below is only reachable in dev/test.
 
 import { DEV_USER_ID, userIdForEmail } from "./auth/identity";
 
-/** Header set by middleware after resolving identity. Client-supplied copies are stripped first. */
+/** Header set by middleware after it verifies identity. Client-supplied copies are stripped by middleware. */
 export const AUTHENTICATED_EMAIL_HEADER = "x-authenticated-user-email";
 
 /** Back-compat: the dev/test fallback identity. */
@@ -34,6 +34,5 @@ export function resolveRequestUser(request: Request): ResolvedRequestUser {
  * `userId` is no longer an identity source.
  */
 export function resolveRequestUserId(request: Request, _body?: unknown): string {
-  void _body;
   return resolveRequestUser(request).userId;
 }

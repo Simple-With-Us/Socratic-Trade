@@ -6,9 +6,11 @@
 
 export type ConsoleProviderId = "openai" | "anthropic" | "xai" | "gemini" | "mistral" | "deepseek";
 
-// DEFAULT_GREEN_MODEL_ID was removed 2026-07-07 (owner directive: no model default for anything,
-// ever). There is no server default when policy.llmModel is unset — the run fails closed until a
-// model is explicitly chosen, so the console must never display a made-up default as if it served.
+/** The documented server default when policy.llmModel is unset (mirrors
+ *  DEFAULT_LLM_MODEL in app/ui/llm-model-catalog.ts). NOTE: the server may
+ *  override this via the OPENAI_MODEL env var, which the client can't see —
+ *  callers should mark this as a default rather than a confirmed choice. */
+export const DEFAULT_GREEN_MODEL_ID = "gpt-5.4-mini";
 
 /** Provider a model id routes to. Unknown/custom ids fall through to OpenAI —
  *  the same behavior as the server-side endpoint resolution. */
@@ -76,9 +78,7 @@ const MODEL_DISPLAY_NAME: Record<string, string> = {
   "mistral-large-2512": "Mistral Large 2512",
   // DeepSeek
   "deepseek-v4-flash": "DeepSeek V4 Flash",
-  "deepseek-v4-pro": "DeepSeek V4 Pro",
-  "deepseek-chat": "DeepSeek Chat",
-  "deepseek-reasoner": "DeepSeek Reasoner"
+  "deepseek-v4-pro": "DeepSeek V4 Pro"
 };
 
 /** Human display name for a model id; falls back to the raw id (trimmed) when

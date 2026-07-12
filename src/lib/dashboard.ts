@@ -3,14 +3,11 @@ import {
   getActiveStrategyProfile,
   getAutoResumeOnBoot,
   getPolicy,
-  peekPolicy,
   getProposalsByIds,
   getStrategyPrompt,
   latestAuditByKind,
   listAudit,
-  listAuditByKind,
   listNotificationEvents,
-  sweepAutoAcknowledgeNotifications,
   listPendingProposals,
   listRecentProposals,
   listStrategyProfiles,
@@ -18,8 +15,6 @@ import {
   listFillEvents,
   listConnectedAccounts,
   getActiveConnectedAccount,
-  filterFullStopPlansByLiveBasis,
-  getStopPlans,
   userHasAnyLlmCredential,
   listSocraticDecisionCases,
   listSocraticFrameworkProposals
@@ -28,7 +23,7 @@ import { buildAuditFeed, buildSymbolMetaBySymbol, buildUnifiedFeed } from "./das
 import type { StrategyDecisionLike } from "./dashboard-feed";
 import { currentMarketSession } from "./market-hours";
 import { normalizeSymbol } from "./money";
-import { getPerformanceSummary, getRedTeamEfficacy, getRegimeScorecard, getThesisScorecard, returnSinceProposalPct } from "./performance";
+import { getPerformanceSummary, getRegimeScorecard, getThesisScorecard, returnSinceProposalPct } from "./performance";
 import { computeSpyBenchmark } from "./benchmark";
 import { getTaxSummary } from "./tax";
 import { getBrokerGateway } from "./broker";
@@ -38,72 +33,18 @@ import { deriveExecutionState, fillSourceForExecutionMode } from "./execution-mo
 import { getSchedulerState } from "./scheduler";
 import { getCongressDataset, getInsiderDataset, getWebSourcesStatus, type CongressTrade } from "./web-sources";
 import { readCongressScoreVerdict } from "./congress-score-gate";
-import { fetchMacroData, determineMarketRegime, type MacroData } from "./macro";
+import { fetchMacroData, determineMarketRegime } from "./macro";
 import { deriveMacroMetrics } from "./macro-metrics";
 import { computeMarketInternals } from "./market-internals";
 import { getMarketSignals, type MarketSignals } from "./market-signals";
 import { fetchMassiveNews } from "./market-signals/massive";
 import { fetchMacroHistory } from "./macro-history";
 import type { PrefetchedFills } from "./performance";
-import type { BrokerageAccount, BrokerQuote, ConnectedAccount, EquityOrder, EquityPosition, FillEvent, MarketQuote, MarketScan, NotificationEvent, NotificationEventType, Portfolio, TradeProposal, TradingPolicy } from "./types";
+import type { BrokerageAccount, ConnectedAccount, EquityOrder, EquityPosition, FillEvent, MarketQuote, MarketScan, Portfolio, TradeProposal, TradingPolicy } from "./types";
 import { isAdminEmail } from "./auth/admin";
 import { messageFromUnknownError, recordRecoverableIssue } from "./recoverable-issue";
 
 const PROPOSAL_PERFORMANCE_MIN_AGE_MS = 15 * 60_000;
-const RED_TEAM_EFFICACY_AUDIT_LIMIT = 500;
-
-// Same "no data" shape fetchMacroData's own internal failure path returns (BLANK_MACRO in
-// macro.ts, not exported) — used only as the deadline fallback below, since fetchMacroData already
-// never rejects on its own.
-const BLANK_MACRO_FALLBACK: MacroData = {
-  fedFundsRate: "",
-  dgs3moTreasury: "",
-  dgs2Treasury: "",
-  dgs10Treasury: "",
-  inflationExpectation10y: "",
-  cpiInflation: "",
-  corePCE: "",
-  realGDPGrowth: "",
-  unemploymentRate: "",
-  initialClaims: "",
-  m2MoneySupply: "",
-  m2GrowthYoY: "",
-  hyCreditSpread: "",
-  usdIndex: "",
-  wtiOil: "",
-  housingStarts: "",
-  consumerSentiment: "",
-  vix: "",
-  vix3m: "",
-  asOf: "unavailable",
-  fredSourced: false
-};
-
-/**
- * Races an upstream promise against a deadline so a single hanging fetch (e.g. the undici
- * IPv6-blackhole failure mode — see docs/rollouts/2026-07-06-api-health-timeouts.md) can never block
- * the whole dashboard snapshot indefinitely. Does NOT abort the underlying promise — it keeps
- * running in the background and its eventual resolution/rejection is simply ignored once the
- * deadline has already produced a fallback. Existing `.catch(...)` fallbacks in this file still
- * handle real rejections; this only guards against a promise that never settles at all.
- */
-function withDeadline<T>(
-  promise: Promise<T>,
-  ms: number,
-  fallback: () => T,
-  label: string,
-  timedOutSections?: string[]
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  const deadline = new Promise<T>((resolve) => {
-    timer = setTimeout(() => {
-      console.warn(`[dashboard] ${label} timed out after ${ms}ms — serving degraded snapshot section`);
-      timedOutSections?.push(label);
-      resolve(fallback());
-    }, ms);
-  });
-  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
-}
 
 export interface AccountReadiness {
   ok: boolean;
@@ -139,8 +80,6 @@ function brokerDisplayName(broker: AccountReadiness["broker"] | undefined): stri
       return "Robinhood";
     case "test":
       return "Test";
-    case "tradier":
-      return "Tradier";
     default:
       return "broker";
   }
@@ -260,53 +199,23 @@ export interface CurrentUserDisplay {
 }
 
 export async function getDashboardSnapshot(userId: string = "local", currentUser?: string | CurrentUserDisplay) {
-  const snapshotStartedAt = Date.now();
-  const timedOutSections: string[] = [];
   const currentUserDisplay: CurrentUserDisplay =
     typeof currentUser === "string" ? { email: currentUser } : currentUser ?? {};
   const policy = getPolicy(userId);
   const activeAccount = getActiveConnectedAccount(userId);
   const connectedAccounts = listConnectedAccounts(userId);
-  // Read-only projection: generating a dashboard snapshot must not seed
-  // account_strategy_state. peekPolicy returns the same effective
-  // systemState/strategyAuthority getPolicy would compute on first touch,
-  // without persisting a row (getPolicy writes one for un-seeded accounts).
-  const connectedAccountPolicies = Object.fromEntries(
-    connectedAccounts.map((account) => {
-      const pol = peekPolicy(userId, account.id);
-      return [account.id, { systemState: pol.systemState, strategyAuthority: pol.strategyAuthority }];
-    })
-  );
   const accountLabelById = Object.fromEntries(connectedAccounts.map((account) => [account.id, account.label || account.broker]));
   // An account is an account: with none connected there is no broker to call. Skip the gateway
   // entirely rather than falling back to any local/simulated broker — the snapshot still renders,
   // it just reports no accounts/portfolio, and accountReadinessForSnapshot reports "no account".
   const gateway = activeAccount ? getBrokerGateway(policy, userId) : undefined;
-
-  // Independent upstream groups now run fully in parallel instead of stacking sequentially (this
-  // used to be ~46s worst-case: accounts 6s -> RH health 4s -> portfolio 8s -> quotes 6s ->
-  // benchmark 4s -> macro 6s -> signals 4s -> history 4s -> news 4s, each awaited before the next
-  // began). Two genuine data dependencies remain sequential and are kept as one chain below: (1)
-  // the broker chain (accounts -> portfolio/positions/orders -> quotes), because accountNumber can
-  // fall back to a discovered live account when policy.accountNumber is unset, and quotes need the
-  // resolved positions; (2) the SPY benchmark, computed further down because it needs the
-  // performance summary built from quotes. Everything else — Robinhood MCP health and the whole
-  // macro board (macro/signals/history/news) — has no dependency on the broker chain or on each
-  // other, so all of it is raced against the chain with one Promise.all.
-  const brokerChainPromise = (async (): Promise<{
-    accounts: BrokerageAccount[];
-    liveAccounts: BrokerageAccount[];
-    brokerAccountReadError?: string;
-    accountNumber?: string;
-    portfolio?: Portfolio;
-    positions: EquityPosition[];
-    orders: EquityOrder[];
-    portfolioReadError?: string;
-    currentPrices: Record<string, number>;
-  }> => {
-    let accounts: BrokerageAccount[] = [];
-    let brokerAccountReadError: string | undefined;
-    const handleAccountsReadFailure = (message: string) => {
+  let accounts: BrokerageAccount[] = [];
+  let brokerAccountReadError: string | undefined;
+  if (gateway) {
+    try {
+      accounts = await gateway.getAccounts();
+    } catch (error) {
+      const message = messageFromUnknownError(error);
       brokerAccountReadError = message;
       console.warn("Failed to fetch accounts:", message);
       recordRecoverableIssue({
@@ -320,67 +229,73 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
         broker: policy.activeBroker,
         accountNumber: policy.accountNumber
       });
-    };
-    if (gateway) {
-      try {
-        accounts = await withDeadline(
-          gateway.getAccounts(),
-          6000,
-          () => {
-            handleAccountsReadFailure("Timed out waiting for gateway.getAccounts after 6000ms.");
-            return [];
-          },
-          "gateway.getAccounts",
-          timedOutSections
-        );
-      } catch (error) {
-        handleAccountsReadFailure(messageFromUnknownError(error));
-      }
     }
-    // Resilience: a live getAccounts() that fails or returns empty (a transient broker/MCP enumeration
-    // miss) must not make the configured account vanish from the snapshot — which made the readiness
-    // badge false-warn "not available for agentic execution". Backfill any stored connected account the
-    // live list didn't return, deriving agenticAllowed from the account type so the selected account
-    // always resolves to a definitive status.
-    const liveAccounts = accounts.slice();
-    const liveAccountNumbers = new Set(liveAccounts.map((account) => account.accountNumber));
-    let storedBackfillCount = 0;
-    let selectedAccountWasBackfilled = false;
-    for (const connected of connectedAccounts) {
-      if (!connected.accountNumber || liveAccountNumbers.has(connected.accountNumber)) continue;
-      storedBackfillCount += 1;
-      if (connected.id === policy.connectedAccountId || connected.accountNumber === policy.accountNumber) {
-        selectedAccountWasBackfilled = true;
-      }
-      accounts.push({
-        accountNumber: connected.accountNumber,
-        label: connected.label,
-        agenticAllowed: connectedAccountAgenticFallback(connected),
-        capabilities: connected.capabilities
-      });
+  }
+  // Resilience: a live getAccounts() that fails or returns empty (a transient broker/MCP enumeration
+  // miss) must not make the configured account vanish from the snapshot — which made the readiness
+  // badge false-warn "not available for agentic execution". Backfill any stored connected account the
+  // live list didn't return, deriving agenticAllowed from the account type so the selected account
+  // always resolves to a definitive status.
+  const liveAccounts = accounts.slice();
+  const liveAccountNumbers = new Set(liveAccounts.map((account) => account.accountNumber));
+  let storedBackfillCount = 0;
+  let selectedAccountWasBackfilled = false;
+  for (const connected of connectedAccounts) {
+    if (!connected.accountNumber || liveAccountNumbers.has(connected.accountNumber)) continue;
+    storedBackfillCount += 1;
+    if (connected.id === policy.connectedAccountId || connected.accountNumber === policy.accountNumber) {
+      selectedAccountWasBackfilled = true;
     }
-    if (storedBackfillCount > 0 && (brokerAccountReadError || selectedAccountWasBackfilled)) {
-      recordRecoverableIssue({
-        source: "broker",
-        operation: "dashboard.connectedAccountBackfill",
-        message: brokerAccountReadError
-          ? "Live broker account enumeration failed, so the dashboard used stored connected-account metadata."
-          : "Live broker account enumeration did not include the selected account.",
-        fallback: "Stored connected-account rows were added to the dashboard snapshot.",
-        userId,
-        connectedAccountId: policy.connectedAccountId,
-        broker: policy.activeBroker,
-        accountNumber: policy.accountNumber,
-        details: { backfilledAccounts: storedBackfillCount, brokerAccountReadFailed: Boolean(brokerAccountReadError), selectedAccountWasBackfilled }
-      });
-    }
-
-    const accountNumber = policy.accountNumber ?? accounts.find((account) => account.agenticAllowed)?.accountNumber;
-    let portfolio: Portfolio | undefined;
-    let positions: EquityPosition[] = [];
-    let orders: EquityOrder[] = [];
-    let portfolioReadError: string | undefined;
-    const handlePortfolioReadFailure = (message: string) => {
+    accounts.push({
+      accountNumber: connected.accountNumber,
+      label: connected.label,
+      agenticAllowed: connectedAccountAgenticFallback(connected),
+      capabilities: connected.capabilities
+    });
+  }
+  if (storedBackfillCount > 0 && (brokerAccountReadError || selectedAccountWasBackfilled)) {
+    recordRecoverableIssue({
+      source: "broker",
+      operation: "dashboard.connectedAccountBackfill",
+      message: brokerAccountReadError
+        ? "Live broker account enumeration failed, so the dashboard used stored connected-account metadata."
+        : "Live broker account enumeration did not include the selected account.",
+      fallback: "Stored connected-account rows were added to the dashboard snapshot.",
+      userId,
+      connectedAccountId: policy.connectedAccountId,
+      broker: policy.activeBroker,
+      accountNumber: policy.accountNumber,
+      details: { backfilledAccounts: storedBackfillCount, brokerAccountReadFailed: Boolean(brokerAccountReadError), selectedAccountWasBackfilled }
+    });
+  }
+  let robinhoodMcpHealth: RobinhoodMcpHealth | undefined;
+  if ((activeAccount?.broker ?? policy.activeBroker) === "robinhood") {
+    robinhoodMcpHealth = await getRobinhoodMcpHealth(userId).catch((error): RobinhoodMcpHealth => ({
+      adapter: "mcp",
+      ok: false,
+      configured: false,
+      authenticated: false,
+      protocolVersion: "",
+      transport: "http+sse",
+      tools: [],
+      checkedAt: new Date().toISOString(),
+      error: messageFromUnknownError(error)
+    }));
+  }
+  const accountNumber = policy.accountNumber ?? accounts.find((account) => account.agenticAllowed)?.accountNumber;
+  let portfolio: Portfolio | undefined;
+  let positions: EquityPosition[] = [];
+  let orders: EquityOrder[] = [];
+  let portfolioReadError: string | undefined;
+  if (accountNumber && gateway) {
+    try {
+      [portfolio, positions, orders] = await Promise.all([
+        gateway.getPortfolio(accountNumber),
+        gateway.getEquityPositions(accountNumber),
+        gateway.getEquityOrders(accountNumber)
+      ]);
+    } catch (error) {
+      const message = messageFromUnknownError(error);
       portfolioReadError = message;
       console.warn("Failed to fetch portfolio:", message);
       recordRecoverableIssue({
@@ -394,123 +309,8 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
         broker: policy.activeBroker,
         accountNumber
       });
-    };
-    if (accountNumber && gateway) {
-      try {
-        [portfolio, positions, orders] = await withDeadline<[Portfolio | undefined, EquityPosition[], EquityOrder[]]>(
-          Promise.all([
-            gateway.getPortfolio(accountNumber),
-            gateway.getEquityPositions(accountNumber),
-            gateway.getEquityOrders(accountNumber)
-          ]),
-          8000,
-          () => {
-            handlePortfolioReadFailure("Timed out waiting for portfolio, positions, and orders after 8000ms.");
-            return [undefined, [], []];
-          },
-          "portfolio/positions/orders",
-          timedOutSections
-        );
-      } catch (error) {
-        handlePortfolioReadFailure(messageFromUnknownError(error));
-      }
     }
-
-    // Live current-price map (broker quotes for held symbols) so P&L is marked to the same prices
-    // the broker reports. An account is an account: `portfolio`/`positions` are always the real
-    // broker-reported values for the active account — there is no locally-projected alternative.
-    let currentPrices: Record<string, number> = {};
-    if (accountNumber && gateway && portfolio) {
-      const priceSymbols = Array.from(new Set(positions.map((p) => normalizeSymbol(p.symbol))));
-      const quotes: Record<string, BrokerQuote> = priceSymbols.length > 0
-        ? await withDeadline(
-            gateway.getEquityQuotes(accountNumber, priceSymbols),
-            6000,
-            () => ({}),
-            "gateway.getEquityQuotes",
-            timedOutSections
-          )
-        : {};
-      currentPrices = Object.fromEntries(
-        Object.values(quotes)
-          .filter((quote) => typeof quote.price === "number" && quote.price > 0)
-          .map((quote) => [normalizeSymbol(quote.symbol), quote.price as number] as const)
-      );
-      // Fall back to the live position's mark when a broker quote is missing.
-      for (const position of positions) {
-        const symbol = normalizeSymbol(position.symbol);
-        if (!(symbol in currentPrices) && position.quantity > 0) currentPrices[symbol] = position.marketValue / position.quantity;
-      }
-    }
-
-    return { accounts, liveAccounts, brokerAccountReadError, accountNumber, portfolio, positions, orders, portfolioReadError, currentPrices };
-  })();
-
-  const robinhoodMcpHealthPromise: Promise<RobinhoodMcpHealth | undefined> =
-    (activeAccount?.broker ?? policy.activeBroker) === "robinhood"
-      ? (() => {
-          const robinhoodMcpHealthFallback = (error: unknown): RobinhoodMcpHealth => ({
-            adapter: "mcp",
-            ok: false,
-            configured: false,
-            authenticated: false,
-            protocolVersion: "",
-            transport: "http+sse",
-            tools: [],
-            checkedAt: new Date().toISOString(),
-            error: messageFromUnknownError(error)
-          });
-          return withDeadline(
-            getRobinhoodMcpHealth(userId).catch(robinhoodMcpHealthFallback),
-            4000,
-            () => robinhoodMcpHealthFallback(new Error("Timed out waiting for Robinhood MCP health check after 4000ms.")),
-            "getRobinhoodMcpHealth",
-            timedOutSections
-          );
-        })()
-      : Promise.resolve(undefined);
-
-  // Macro & market-regime board for the Macro tab (FRED macro + derived metrics + free
-  // market-wide signals). Caches keep this cheap; failures degrade to defaults / omitted. None of
-  // these four depend on the broker chain above, so they're kicked off here and raced alongside it.
-  const macroDataPromise = withDeadline(fetchMacroData(userId), 6000, () => BLANK_MACRO_FALLBACK, "fetchMacroData", timedOutSections);
-  const macroSignalsPromise = withDeadline(
-    getMarketSignals(userId).catch((): MarketSignals => ({})),
-    4000,
-    (): MarketSignals => ({}),
-    "getMarketSignals",
-    timedOutSections
-  );
-  const macroHistoryPromise = withDeadline(
-    fetchMacroHistory(Date.now(), userId).catch(() => ({} as Record<string, number[]>)),
-    4000,
-    () => ({} as Record<string, number[]>),
-    "fetchMacroHistory",
-    timedOutSections
-  );
-  const macroNewsPromise = withDeadline(fetchMassiveNews(8, userId).catch(() => []), 4000, () => [], "fetchMassiveNews", timedOutSections);
-
-  const [brokerChain, robinhoodMcpHealth, macro, signals, history, news] = await Promise.all([
-    brokerChainPromise,
-    robinhoodMcpHealthPromise,
-    macroDataPromise,
-    macroSignalsPromise,
-    macroHistoryPromise,
-    macroNewsPromise
-  ]);
-
-  const {
-    accounts,
-    liveAccounts,
-    brokerAccountReadError,
-    accountNumber,
-    portfolio,
-    positions,
-    orders,
-    portfolioReadError,
-    currentPrices
-  } = brokerChain;
-
+  }
   const accountReadiness = accountReadinessForSnapshot({
     policy,
     activeAccount,
@@ -531,8 +331,24 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
   const paperFills: FillEvent[] = accountNumber ? listFillEvents(accountNumber, "paper", 500, userId) : [];
   const prefetchedFills: PrefetchedFills = { liveFills, paperFills };
 
-  // currentPrices (broker quotes for held symbols, falling back to the live position's mark) was
-  // already computed inside the broker chain above, in parallel with the independent groups.
+  // Live current-price map (broker quotes for held symbols) so P&L is marked to the same prices
+  // the broker reports. An account is an account: `portfolio`/`positions` are always the real
+  // broker-reported values for the active account — there is no locally-projected alternative.
+  let currentPrices: Record<string, number> = {};
+  if (accountNumber && gateway && portfolio) {
+    const priceSymbols = Array.from(new Set(positions.map((p) => normalizeSymbol(p.symbol))));
+    const quotes = priceSymbols.length > 0 ? await gateway.getEquityQuotes(accountNumber, priceSymbols) : {};
+    currentPrices = Object.fromEntries(
+      Object.values(quotes)
+        .filter((quote) => typeof quote.price === "number" && quote.price > 0)
+        .map((quote) => [normalizeSymbol(quote.symbol), quote.price as number] as const)
+    );
+    // Fall back to the live position's mark when a broker quote is missing.
+    for (const position of positions) {
+      const symbol = normalizeSymbol(position.symbol);
+      if (!(symbol in currentPrices) && position.quantity > 0) currentPrices[symbol] = position.marketValue / position.quantity;
+    }
+  }
   const displayPortfolio = portfolio;
   const displayPositions = positions;
 
@@ -548,28 +364,16 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
     // Same-source fills let the benchmark infer deposits/withdrawals (cash delta minus trade
     // cash) so the account return line is time-weighted instead of counting transfers as P&L.
     const benchmarkFills = scorecardSource === "live" ? liveFills : paperFills;
-    const benchmark = await withDeadline(
-      computeSpyBenchmark(curve, userId, Date.now(), benchmarkFills).catch(() => null),
-      4000,
-      () => null,
-      "computeSpyBenchmark",
-      timedOutSections
-    );
+    const benchmark = await computeSpyBenchmark(curve, userId, Date.now(), benchmarkFills).catch(() => null);
     if (benchmark) performance.benchmark = benchmark;
   }
   const thesisScorecard = accountNumber ? getThesisScorecard(accountNumber, scorecardSource, currentPrices, userId, prefetchedFills) : [];
   const regimeScorecard = accountNumber ? getRegimeScorecard(accountNumber, scorecardSource, currentPrices, userId, prefetchedFills) : [];
-  const redTeamEfficacy = accountNumber ? getDashboardRedTeamEfficacy(userId, policy.connectedAccountId) : undefined;
   const tax = accountNumber
     ? getTaxSummary(accountNumber, scorecardSource, currentPrices, { ...policy.taxSettings, taxationType: activeAccount?.taxationType ?? policy.taxSettings?.taxationType }, new Date(), userId, prefetchedFills)
     : undefined;
   const profiles = listStrategyProfiles(userId);
   const activeProfile = getActiveStrategyProfile(userId);
-  // Lazy auto-ack sweep: clears alerts whose condition is provably resolved (a pending_approval
-  // whose proposal left "proposed", or a run_failed whose account has since run successfully)
-  // before the snapshot's Attention count is computed. Cheap, bounded, idempotent — see
-  // sweepAutoAcknowledgeNotifications in db-notifications.ts.
-  sweepAutoAcknowledgeNotifications(userId);
   const notifications = listNotificationEvents(userId, 100);
   const latestRunAudit = policy.connectedAccountId
     ? latestAuditByKind("strategy_run", userId, policy.connectedAccountId)
@@ -577,44 +381,17 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
   const latestStrategyRun = latestRunAudit
     ? ({ ...(latestRunAudit.payload as StrategyDecisionLike), createdAt: latestRunAudit.createdAt } satisfies StrategyDecisionLike)
     : undefined;
-  // Decision cases stay ACCOUNT-SCOPED: they drive the active account's Live thesis,
-  // Autonomous action rows, and coach form (primaryDecision = decisions[0]), which must
-  // reflect the account whose portfolio/capital is shown — not another account's latest trade.
   const socraticDecisions = listSocraticDecisionCases(userId, {
     limit: 50,
     ...(policy.connectedAccountId ? { connectedAccountId: policy.connectedAccountId } : {})
   });
-  // Framework/"learning" proposals ARE read GLOBAL across the user's accounts: they are
-  // generalizable strategy improvements (and the batched reviewer is cross-account), so the
-  // review panel shows the whole backlog. Provenance is preserved via `connectedAccountId`.
-  // This also matches the decision-detail page, which already fetched proposals user-wide.
-  const socraticFrameworkProposals = listSocraticFrameworkProposals(userId, { limit: 25 });
+  const socraticFrameworkProposals = listSocraticFrameworkProposals(userId, {
+    limit: 25,
+    ...(policy.connectedAccountId ? { connectedAccountId: policy.connectedAccountId } : {})
+  });
   const audit = policy.connectedAccountId
     ? listAudit(100, userId, policy.connectedAccountId, true)
     : listAudit(100, userId);
-
-  const advisoryAudits = audit
-    .filter((e) =>
-      [
-        "deterministic_bear_veto",
-        "red_team_veto_overridden",
-        "prompt_injection_suspected",
-        "evidence_age_anomaly"
-      ].includes(e.kind)
-    )
-    .map((e) => ({
-      id: e.id,
-      createdAt: e.createdAt,
-      type: e.kind as NotificationEventType,
-      title: e.kind,
-      status: "sent" as const,
-      payload: e.payload,
-      connectedAccountId: e.connectedAccountId
-    } satisfies NotificationEvent));
-
-  const combinedNotifications = [...notifications, ...advisoryAudits]
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-    .slice(0, 100);
 
   // Unified fills for the feed: merge the pre-fetched live + paper arrays (oldest-first, capped at
   // 500) instead of re-issuing the unfiltered listFillEvents query the feed builder used to trigger.
@@ -642,7 +419,7 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
     addProposalId(asRec(nested.fill).proposalId);
   }
   for (const fill of unifiedFills) addProposalId(fill.proposalId);
-  for (const notification of combinedNotifications) {
+  for (const notification of notifications) {
     const payload = asRec(notification.payload);
     addProposalId(payload.proposalId);
     addProposalId(asRec(payload.fill).proposalId);
@@ -667,27 +444,6 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
     pendingProposals,
     latestStrategyRun
   });
-  // Per-position stop PLANS (LLM-chosen stop TYPE, persisted at fill time) — surfaced in the
-  // Positions table and the stop-flow diagram so a plan is never a hidden override. Best-effort:
-  // a lookup failure just means the UI falls back to the account's own precedence for every symbol.
-  const stopPlanBySymbol = (() => {
-    // The RESOLVED account number (from brokerChain, same one positions/fills/proposals below all
-    // use) — not policy.accountNumber directly. When the selected account is resolved from the
-    // live/stored account list because policy.accountNumber is unset, using the policy field here
-    // returned {} even though this snapshot is otherwise displaying the resolved account's data,
-    // silently dropping plan-only protection/no-stop disclosures until the policy field catches up
-    // (Codex review, PR #1371).
-    if (!accountNumber) return {};
-    try {
-      // Filtered by live basis (avgCost match) — same reasoning as the strategy-run and synthetic-
-      // monitor sides: a symbol closed and re-bought before cleanup swept the old row must not have
-      // its stale plan label the new lot as "No stop (LLM choice)" or an active fixed/ATR/trailing
-      // plan for a position that never made that choice (Codex review, PR #1371).
-      return filterFullStopPlansByLiveBasis(getStopPlans(accountNumber, userId), displayPositions);
-    } catch {
-      return {};
-    }
-  })();
   const auditFeed = buildAuditFeed({
     audit,
     symbolMetaBySymbol,
@@ -695,7 +451,9 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
     getProposalById
   });
 
-  // macro/signals/history/news were already fetched in parallel with the broker chain above.
+  // Macro & market-regime board for the Macro tab (FRED macro + derived metrics + free
+  // market-wide signals). Caches keep this cheap; failures degrade to defaults / omitted.
+  const macro = await fetchMacroData(userId);
   // Only compute internals from a full scan. Some historical/trimmed audit shapes only
   // preserve symbol metadata, which is useful for UI labels but not valuation math.
   const scanForInternals = fullMarketScan(latestStrategyRun?.marketScan);
@@ -735,15 +493,15 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
   const macroBoard = {
     macro,
     derived: deriveMacroMetrics(macro, { marketEarningsYield }),
-    signals,
+    signals: await getMarketSignals(userId).catch((): MarketSignals => ({})),
     regime: determineMarketRegime(macro),
-    history,
-    news
+    history: await fetchMacroHistory(Date.now(), userId).catch(() => ({} as Record<string, number[]>)),
+    news: await fetchMassiveNews(8, userId).catch(() => [])
   };
 
   const unifiedFeed = buildUnifiedFeed({
     audit,
-    notifications: combinedNotifications,
+    notifications,
     fills: unifiedFills,
     orders,
     symbolMetaBySymbol,
@@ -754,19 +512,9 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
     id: event.id,
     createdAt: event.createdAt,
     kind: event.kind,
-    payload: asRec(event.payload),
+    payload: null,
     connectedAccountId: event.connectedAccountId
   }));
-
-  // One summary log per request — only when it's actually slow or something degraded, so normal
-  // requests stay quiet. `timedOutSections` is populated by withDeadline(...) above whenever an
-  // upstream section missed its own deadline and served a fallback.
-  const snapshotElapsedMs = Date.now() - snapshotStartedAt;
-  if (snapshotElapsedMs > 3000 || timedOutSections.length > 0) {
-    console.warn(
-      `[dashboard] snapshot ${snapshotElapsedMs}ms${timedOutSections.length ? ` (timed out: ${timedOutSections.join(",")})` : ""}`
-    );
-  }
 
   return {
     currentUser: {
@@ -785,16 +533,14 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
     strategyPrompt: getStrategyPrompt(userId),
     accounts,
     accountReadiness,
-    connectedAccounts,
-    connectedAccountPolicies,
     portfolio: displayPortfolio,
     positions: displayPositions,
     symbolMetaBySymbol,
-    stopPlanBySymbol,
     orders,
     audit: clientAudit,
     auditFeed,
     unifiedFeed,
+    connectedAccounts,
     latestStrategyRun,
     dailyStats,
     strategyRuns: listStrategyRuns(15, userId, policy.connectedAccountId),
@@ -803,11 +549,10 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
     performance,
     thesisScorecard,
     regimeScorecard,
-    redTeamEfficacy,
     tax,
     profiles,
     activeProfile,
-    notifications: combinedNotifications,
+    notifications,
     notificationStatus: {
       configured: Boolean(policy.notificationSettings.webhookUrl?.trim()),
       enabledEvents: policy.notificationSettings.enabledEvents
@@ -832,43 +577,6 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
     },
     marketSession: currentMarketSession(),
     macroBoard
-  };
-}
-
-function getDashboardRedTeamEfficacy(userId: string, connectedAccountId?: string) {
-  const efficacy = getRedTeamEfficacy(userId, {
-    auditLimit: RED_TEAM_EFFICACY_AUDIT_LIMIT,
-    connectedAccountId,
-    limit: 12
-  });
-  const redTeamOverrideKeys = new Set<string>();
-  for (const event of listAuditByKind("red_team_veto_overridden", RED_TEAM_EFFICACY_AUDIT_LIMIT, userId, connectedAccountId)) {
-    const payload = event.payload as { runId?: string; symbol?: string; side?: string } | undefined;
-    if (!payload?.runId || !payload.symbol) continue;
-    if (payload.side !== undefined && payload.side !== "buy" && payload.side !== "short") continue;
-    redTeamOverrideKeys.add(`${payload.runId}:${normalizeSymbol(payload.symbol)}:${payload.side ?? ""}`);
-  }
-  const appliedOverrideKeys = new Set<string>();
-  for (const event of listAuditByKind("socratic_override_applied", RED_TEAM_EFFICACY_AUDIT_LIMIT, userId, connectedAccountId)) {
-    const payload = event.payload as { runId?: string; symbol?: string; side?: string; conflicts?: unknown } | undefined;
-    if (!payload?.runId || !payload.symbol) continue;
-    if (payload.side !== undefined && payload.side !== "buy" && payload.side !== "short") continue;
-    const conflicts = Array.isArray(payload.conflicts) ? payload.conflicts : [];
-    if (!conflicts.some((conflict) => String(conflict).startsWith("red_team_veto:"))) continue;
-    appliedOverrideKeys.add(`${payload.runId}:${normalizeSymbol(payload.symbol)}:${payload.side ?? ""}`);
-  }
-  let appliedOverrideVetoes = 0;
-  for (const key of redTeamOverrideKeys) {
-    if (appliedOverrideKeys.has(key)) appliedOverrideVetoes += 1;
-  }
-  const overrideVetoes = redTeamOverrideKeys.size;
-  const vetoDecisions = efficacy.totalVetoes + overrideVetoes;
-  return {
-    ...efficacy,
-    overrideVetoes,
-    appliedOverrideVetoes,
-    vetoDecisions,
-    overrideSharePct: vetoDecisions > 0 ? Number(((appliedOverrideVetoes / vetoDecisions) * 100).toFixed(1)) : 0
   };
 }
 

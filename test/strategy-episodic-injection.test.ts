@@ -92,43 +92,15 @@ describe("strategy.ts episodic analogs + owner coaching injection", () => {
     );
 
     process.env.OPENAI_API_KEY = "test-openai-key";
-    const openAiBodies: Array<{
-      input?: Array<{ role: string; content: string }>;
-      messages?: Array<{ role: string; content: string }>;
-    }> = [];
+    const openAiBodies: Array<{ input?: Array<{ role: string; content: string }> }> = [];
     vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
       const href = String(url);
       if (href.includes("api.openai.com")) {
-        const body = JSON.parse(String(init?.body ?? "{}"));
-        openAiBodies.push(body);
-        // The single Red Team review (chat-completions: `messages`) approves; the Bull (responses
-        // API: `input`) proposes one AAPL buy so a review actually runs (evidence-parity subject).
-        if (Array.isArray(body.messages)) {
-          return new Response(
-            JSON.stringify({ choices: [{ message: { content: JSON.stringify({ verdict: "approve", reason: "ok" }) } }] }),
-            { status: 200, headers: { "content-type": "application/json" } }
-          );
-        }
-        return new Response(
-          JSON.stringify({
-            output_text: JSON.stringify({
-              proposals: [
-                {
-                  symbol: "AAPL",
-                  side: "buy",
-                  type: "market",
-                  dollarAmount: 100,
-                  timeInForce: "gfd",
-                  marketHours: "regular_hours",
-                  rationale: "Momentum evidence for AAPL",
-                  tradeThesisTag: "Momentum-Breakout",
-                  confidenceScore: 70
-                }
-              ]
-            })
-          }),
-          { status: 200, headers: { "content-type": "application/json" } }
-        );
+        openAiBodies.push(JSON.parse(String(init?.body ?? "{}")));
+        return new Response(JSON.stringify({ output_text: JSON.stringify({ proposals: [] }) }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
       }
       if (href.includes("nasdaq.com")) return nasdaqRow();
       return new Response("not found", { status: 404 });
@@ -143,7 +115,6 @@ describe("strategy.ts episodic analogs + owner coaching injection", () => {
       ...DEFAULT_POLICY,
       systemState: "active",
       llmModel: "gpt-4.1-mini",
-      redTeamLlmModel: "gpt-4.1-mini",
       includedIndices: [],
       additionalSymbols: ["AAPL"],
       strategyAuthority: "decide"
@@ -171,18 +142,13 @@ describe("strategy.ts episodic analogs + owner coaching injection", () => {
     expect(episodicOptions.matchAllSymbols).toBe(true);
     expect(typeof episodicOptions.asOf).toBe("string");
 
-    // Evidence parity (R7): the Bull payload AND the single Red Team review payload both carry the
-    // labeled blocks — the review's arrive via the adversaryContext threaded from proposeTrades.
-    const bullBody = openAiBodies.find((b) => Array.isArray(b.input));
-    const reviewBody = openAiBodies.find((b) => Array.isArray(b.messages));
-    expect(bullBody).toBeDefined();
-    expect(reviewBody).toBeDefined();
-    const payloads = [
-      JSON.parse(bullBody!.input!.find((item) => item.role === "user")?.content ?? "{}") as Record<string, unknown>,
-      JSON.parse(reviewBody!.messages!.find((item) => item.role === "user")?.content ?? "{}") as Record<string, unknown>
-    ];
+    // Both LLM steps ran: bodies[0] = Bull, bodies[1] = Bear.
+    expect(openAiBodies.length).toBeGreaterThanOrEqual(2);
+    const payloads = openAiBodies.slice(0, 2).map(
+      (body) => JSON.parse(body.input!.find((item) => item.role === "user")?.content ?? "{}") as Record<string, unknown>
+    );
     for (const [index, payload] of payloads.entries()) {
-      const label = index === 0 ? "Bull" : "Red Team review";
+      const label = index === 0 ? "Bull" : "Bear";
       const analogs = String(payload.closestHistoricalAnalogs ?? "");
       const coaching = String(payload.ownerCoaching ?? "");
       expect(analogs, `${label} payload missing analogs block`).toContain("CLOSEST HISTORICAL ANALOGS");

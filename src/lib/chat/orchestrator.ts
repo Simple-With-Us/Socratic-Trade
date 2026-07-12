@@ -8,8 +8,7 @@
 //   5. Return { text, draft?, citations, usedMemories } — never executes a trade.
 // Ported from reference/atlas-public-src/bff/orchestrator.mjs.
 
-import { audit, findChatTurnByClientId, getPolicy, listPendingProposals } from "../db";
-import { getReflectionSummary } from "../post-mortem";
+import { audit, findChatTurnByClientId, getPolicy, getUserSetting, listPendingProposals } from "../db";
 import { getBrokerGateway } from "../broker";
 import { getPerformanceSummary, getRegimeScorecard, getThesisScorecard } from "../performance";
 import { fetchDailyOHLC } from "../history";
@@ -317,10 +316,7 @@ export function buildProductionDeps(): ToolDeps {
       return { byThesis, byRegime };
     },
     getReflection(userId) {
-      // Reflections are keyed per broker account now (with the legacy shared row as a
-      // transitional fallback inside getReflectionSummary); chat answers from the ACTIVE
-      // account's perspective, matching every other account-scoped chat tool here.
-      return getReflectionSummary(userId, getPolicy(userId).accountNumber || undefined);
+      return getUserSetting<string>(userId, "reflection_summary", "");
     },
     // Robinhood MCP-backed read-only research. Each returns a clear "not connected" result (never a
     // thrown error) when the adapter is off or the user has no stored token, so chat degrades to a

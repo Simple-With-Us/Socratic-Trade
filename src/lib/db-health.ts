@@ -7,17 +7,6 @@ import { getDb } from "./db";
 // single cold failure can trip. Exported so consumers key off the condition, not a brittle string.
 export const HEALTH_REASON_CONSECUTIVE_FAILURES = "Last 5 consecutive calls all failed";
 
-// RAG services (Pinecone, Voyage embed, Voyage rerank) already get their OWN explicit,
-// operation-scoped alert from vector-db.ts's withRagApiHealth -> alertRagConnectionFailure (richer
-// message: which operation failed, usage-limit escalation via alertUsageLimitHit, its own 1h
-// cooldown). Without this exclusion, logApiHealth's automatic alertConnectionFailure below ALSO
-// fires for the same failure (generic "<service> connection failed" text, its own separate 6h
-// cooldown clock) — two uncoordinated alerts, ~1s apart, for one underlying event (confirmed
-// 2026-07-07T14:01Z and 22:01Z in prod). Keep the richer vector-db.ts alert as the single source of
-// truth for these three lanes; every OTHER provider (finnhub, tiingo, twelvedata, etc.) has no
-// dedicated alerter, so it still needs this generic automatic path.
-const RAG_SERVICES_WITH_OWN_ALERTING = new Set(["pinecone", "voyage", "voyage-rerank"]);
-
 /**
  * Per-credential-lane health for the API circuit breaker. A "lane" is (service, keySource) — the SAME
  * granularity `getServiceHealthSummaries` and the whole health store already use — NOT per-user, so a
@@ -41,13 +30,13 @@ export function getLaneHealth(
     const userClause = scopeUser ? " AND user_id IS ?" : "";
     const withUser = (params: unknown[]): unknown[] => (scopeUser ? [...params, userId] : params);
     const last5 = db
-      .prepare(`SELECT ok FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} ORDER BY ts DESC, rowid DESC LIMIT 5`)
+      .prepare(`SELECT ok FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} ORDER BY ts DESC LIMIT 5`)
       .all(...withUser([service, keySource])) as Array<{ ok: number }>;
     const lastSuccess = db
-      .prepare(`SELECT ts FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} AND ok = 1 ORDER BY ts DESC, rowid DESC LIMIT 1`)
+      .prepare(`SELECT ts FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} AND ok = 1 ORDER BY ts DESC LIMIT 1`)
       .get(...withUser([service, keySource])) as { ts: string } | undefined;
     const lastFailure = db
-      .prepare(`SELECT ts FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} AND ok = 0 ORDER BY ts DESC, rowid DESC LIMIT 1`)
+      .prepare(`SELECT ts FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} AND ok = 0 ORDER BY ts DESC LIMIT 1`)
       .get(...withUser([service, keySource])) as { ts: string } | undefined;
     const callsLastHour = (
       db.prepare(`SELECT COUNT(*) as cnt FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} AND ts >= ?`).get(...withUser([service, keySource]), hourAgo) as { cnt: number }
@@ -139,7 +128,7 @@ export function logApiHealth(opts: {
            AND id NOT IN (
              SELECT id FROM api_health_log
              WHERE service = ? AND key_source IS ?
-             ORDER BY ts DESC, rowid DESC
+             ORDER BY ts DESC
              LIMIT 500
            )`
       ).run(opts.service, keySource, opts.service, keySource);
@@ -164,7 +153,7 @@ export function logApiHealth(opts: {
       }
     })();
 
-    if (!opts.ok && opts.errorText && !RAG_SERVICES_WITH_OWN_ALERTING.has(opts.service)) {
+    if (!opts.ok && opts.errorText) {
       const keySource = opts.keySource ?? null;
       // Scope the streak that gates the alert to this user's own history for user-key lanes, so
       // tenant A's failures don't fire a provider-degraded alert to tenant B on the shared lane.
@@ -218,7 +207,7 @@ export function getServiceHealthSummaries(): ServiceHealthSummary[] {
         .prepare(
           `SELECT ts, latency_ms FROM api_health_log
            WHERE service = ? AND key_source IS ? AND ok = 1
-           ORDER BY ts DESC, rowid DESC LIMIT 1`
+           ORDER BY ts DESC LIMIT 1`
         )
         .get(service, ks) as { ts: string; latency_ms: number | null } | undefined;
 
@@ -226,7 +215,7 @@ export function getServiceHealthSummaries(): ServiceHealthSummary[] {
         .prepare(
           `SELECT ts, error_text FROM api_health_log
            WHERE service = ? AND key_source IS ? AND ok = 0
-           ORDER BY ts DESC, rowid DESC LIMIT 1`
+           ORDER BY ts DESC LIMIT 1`
         )
         .get(service, ks) as { ts: string; error_text: string | null } | undefined;
 
@@ -253,7 +242,7 @@ export function getServiceHealthSummaries(): ServiceHealthSummary[] {
         .prepare(
           `SELECT ok FROM api_health_log
            WHERE service = ? AND key_source IS ?
-           ORDER BY ts DESC, rowid DESC LIMIT 5`
+           ORDER BY ts DESC LIMIT 5`
         )
         .all(service, ks) as Array<{ ok: number }>;
 
@@ -289,11 +278,6 @@ export function getServiceHealthSummaries(): ServiceHealthSummary[] {
   }
 }
 
-// NOTE: `rowid DESC` tiebreaker — `ts` is ms-resolution, so rows written in the same millisecond
-// otherwise return in arbitrary order and "the newest row" reads become nondeterministic (bit
-// test/data-providers.test.ts's newest-row assertion, 2026-07-10). It must be `rowid` (implicit
-// monotonic insertion order; `id TEXT PRIMARY KEY` does not alias it): `id` is a randomUUID, so
-// ordering by it is a per-run coin flip, not a tiebreak.
 export function getServiceHealthLog(
   service: string,
   limit = 100,
@@ -308,7 +292,7 @@ export function getServiceHealthLog(
           `SELECT id, service, ts, ok, latency_ms, error_text, key_source, user_id
            FROM api_health_log
            WHERE service = ? AND key_source IS ?
-           ORDER BY ts DESC, rowid DESC
+           ORDER BY ts DESC
            LIMIT ? OFFSET ?`
         )
         .all(service, keySource ?? null, limit, offset) as HealthLogRow[];
@@ -318,7 +302,7 @@ export function getServiceHealthLog(
         `SELECT id, service, ts, ok, latency_ms, error_text, key_source, user_id
          FROM api_health_log
          WHERE service = ?
-         ORDER BY ts DESC, rowid DESC
+         ORDER BY ts DESC
          LIMIT ? OFFSET ?`
       )
       .all(service, limit, offset) as HealthLogRow[];
@@ -479,26 +463,23 @@ export async function alertConnectionFailure(
       const fallbackEmail = operatorAlertEmail();
       const config = loadNotifyConfig();
 
-      // The operator's own channels are delivered by sendNotification inside the enabled-event
-      // gate. The fallback email remains an EXTRA lazy lane when the operator has no usable email
-      // preference, so it cannot double-send or bypass that gate.
-      const additionalDelivery =
-        fallbackEmail && config.email.resendKey && config.email.from && (!prefs.channels.includes("email") || !prefs.email.trim())
-          ? () =>
-              notify(
-                "local",
-                { title, body, kind: "provider_degraded", data: payload },
-                {
-                  config,
-                  prefs: {
-                    ...prefs,
-                    channels: ["email" as any],
-                    email: fallbackEmail,
-                    updatedAt: prefs.updatedAt
-                  }
-                }
-              )
-          : undefined;
+      // ALWAYS notify via the operator's own configured prefs (push/SMS/email/etc.) — the fallback
+      // email is an EXTRA channel, never the gate. Previously the whole notify() was skipped when no
+      // Resend fallback was configured, and sendNotification below treats provider_degraded as
+      // already-direct-sent, so an install relying on local direct channels got NO alert at all.
+      await notify("local", { title, body, kind: "provider_degraded", data: payload }, { config }).catch(() => {});
+
+      // Additionally force the operator fallback email when it's configured AND the operator's own
+      // prefs don't already carry an email channel (so we don't double-send to the same address).
+      if (fallbackEmail && config.email.resendKey && config.email.from && (!prefs.channels.includes("email") || !prefs.email.trim())) {
+        const forcedPrefs = {
+          ...prefs,
+          channels: ["email" as any],
+          email: fallbackEmail,
+          updatedAt: prefs.updatedAt
+        };
+        await notify("local", { title, body, kind: "provider_degraded", data: payload }, { config, prefs: forcedPrefs }).catch(() => {});
+      }
 
       // Also send standard notification
       const { sendNotification } = await import("./notifications");
@@ -511,10 +492,7 @@ export async function alertConnectionFailure(
           enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "provider_degraded" as const])) as any
         }
       };
-      await sendNotification(
-        { type: "provider_degraded", title, payload },
-        { userId: "local", policy: forcedPolicy as any, directBody: body, notifyDeps: { config }, additionalDelivery }
-      ).catch(() => {});
+      await sendNotification({ type: "provider_degraded", title, payload }, { userId: "local", policy: forcedPolicy as any }).catch(() => {});
     } else {
       // User-key failures: Route to user notifications only
       const { sendNotification } = await import("./notifications");
@@ -527,10 +505,10 @@ export async function alertConnectionFailure(
           enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "provider_degraded" as const])) as any
         }
       };
-      await sendNotification(
-        { type: "provider_degraded", title, payload },
-        { userId: targetUserId, policy: forcedPolicy as any, directBody: body }
-      ).catch(() => {});
+      await sendNotification({ type: "provider_degraded", title, payload }, { userId: targetUserId, policy: forcedPolicy as any }).catch(() => {});
+
+      const { notify } = await import("./notify");
+      await notify(targetUserId, { title, body, kind: "provider_degraded", data: payload }).catch(() => {});
     }
   } catch {
     // Health alerts must never throw
@@ -559,23 +537,19 @@ export async function alertStorageWarning(warningType: string, message: string):
     const fallbackEmail = operatorAlertEmail();
     const config = loadNotifyConfig();
 
-    const additionalDelivery =
-      fallbackEmail && config.email.resendKey && config.email.from && (!prefs.channels.includes("email") || !prefs.email.trim())
-        ? () =>
-            notify(
-              "local",
-              { title, body, kind: "provider_degraded", data: payload },
-              {
-                config,
-                prefs: {
-                  ...prefs,
-                  channels: ["email" as any],
-                  email: fallbackEmail,
-                  updatedAt: prefs.updatedAt
-                }
-              }
-            )
-        : undefined;
+    if (fallbackEmail && config.email.resendKey && config.email.from) {
+      if (!prefs.channels.includes("email") || !prefs.email.trim()) {
+        const forcedPrefs = {
+          ...prefs,
+          channels: ["email" as any],
+          email: fallbackEmail,
+          updatedAt: prefs.updatedAt
+        };
+        await notify("local", { title, body, kind: "provider_degraded", data: payload }, { config, prefs: forcedPrefs }).catch(() => {});
+      } else {
+        await notify("local", { title, body, kind: "provider_degraded", data: payload }, { config }).catch(() => {});
+      }
+    }
 
     // Also send standard notification
     const { sendNotification } = await import("./notifications");
@@ -588,10 +562,7 @@ export async function alertStorageWarning(warningType: string, message: string):
         enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "provider_degraded" as const])) as any
       }
     };
-    await sendNotification(
-      { type: "provider_degraded", title, payload },
-      { userId: "local", policy: forcedPolicy as any, directBody: body, notifyDeps: { config }, additionalDelivery }
-    ).catch(() => {});
+    await sendNotification({ type: "provider_degraded", title, payload }, { userId: "local", policy: forcedPolicy as any }).catch(() => {});
   } catch {
     // never throw on warnings
   }

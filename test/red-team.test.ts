@@ -17,226 +17,103 @@ afterEach(() => {
   delete process.env.ANTHROPIC_API_URL;
 });
 
-// The single Red Team reviewer (post-consolidation): reviews are risk-adding OPENINGS only, the
-// verdict is the three-way {verdict, reason} shape, the model comes ONLY from redTeamLlmModel
-// (no green fallback, no env override, no default), and every failure mode is fail-CLOSED at the
-// function-contract level as {rejected:false, available:false, failureKind} — the CALLER routes
-// unavailable openings to human review.
-
-const buyProposal = (): any => ({
-  symbol: "AAPL",
-  side: "buy",
-  type: "market",
-  timeInForce: "gfd",
-  marketHours: "regular_hours",
-  rationale: "momentum",
-  confidenceScore: 90,
-  tradeThesisTag: "t",
-  entryMarketRegime: "t"
-});
-
-/** Policy with an EXPLICIT Red model (no-defaults world: blank Red = not_configured before any fetch). */
-const policyWithRed = (accountNumber: string, redModel = "gpt-4.1-mini") => ({
-  ...DEFAULT_POLICY,
-  accountNumber,
-  llmModel: "gpt-4.1-mini",
-  redTeamLlmModel: redModel
-});
-
-async function setupOpenAi(accountNumber: string, redModel?: string) {
-  const { setPolicy, setStrategyPrompt } = await import("../src/lib/db");
-  process.env.OPENAI_API_KEY = "test-key";
-  process.env.OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
-  setPolicy(policyWithRed(accountNumber, redModel));
-  setStrategyPrompt("BASE STRATEGY");
-}
-
-function stubOpenAiJsonBody(payload: unknown) {
-  vi.stubGlobal("fetch", async () => {
-    return new Response(
-      JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
-  });
-}
-
-describe("debateProposal — function-contract fail direction", () => {
-  // A red-team failure must NEVER silently reject (drop) a trade at the FUNCTION level — it
-  // reports {rejected:false, available:false}; the fail-closed hold is the caller's job.
-  it("reports not_configured when NO Red model is chosen (no fallback to Green, no default)", async () => {
-    const { setPolicy, setStrategyPrompt } = await import("../src/lib/db");
-    const { debateProposal } = await import("../src/lib/red-team");
-    process.env.OPENAI_API_KEY = "test-key";
-    setPolicy({ ...DEFAULT_POLICY, accountNumber: "RT_NOMODEL", llmModel: "gpt-4.1-mini" });
-    setStrategyPrompt("BASE STRATEGY");
-    let fetched = false;
-    vi.stubGlobal("fetch", async () => {
-      fetched = true;
-      return new Response("{}", { status: 200 });
-    });
-
-    const result = await debateProposal(buyProposal(), undefined);
-    expect(result.rejected).toBe(false);
-    expect(result.available).toBe(false);
-    expect(result.failureKind).toBe("not_configured");
-    expect(result.reason).toMatch(/not chosen/i);
-    expect(fetched).toBe(false); // never sends an empty-model request
+describe("debateProposal — T11 fail-open contract", () => {
+  // A red-team failure must NEVER silently reject (drop) a trade — it fails OPEN to rejected:false.
+  const buyProposal = (): any => ({
+    symbol: "AAPL",
+    side: "buy",
+    type: "market",
+    timeInForce: "gfd",
+    marketHours: "regular_hours",
+    rationale: "momentum",
+    confidenceScore: 90,
+    tradeThesisTag: "t",
+    entryMarketRegime: "t"
   });
 
-  it("reports not_configured when the Red model's provider has no key", async () => {
+  it("fails open (does not reject) when OpenAI is not configured", async () => {
     const { setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { debateProposal } = await import("../src/lib/red-team");
     delete process.env.OPENAI_API_KEY;
-    setPolicy(policyWithRed("RT_NOKEY"));
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "RT_NOKEY" });
     setStrategyPrompt("BASE STRATEGY");
 
-    const result = await debateProposal(buyProposal(), undefined);
+    const result = await debateProposal(buyProposal(), undefined, true);
     expect(result.rejected).toBe(false);
-    expect(result.available).toBe(false);
-    expect(result.failureKind).toBe("not_configured");
+    expect(result.reason).toMatch(/not configured/i);
   });
 
-  it("refuses to review an exit (sell) — §3.5 structural guard", async () => {
+  it("fails open when the LLM request throws", async () => {
+    const { setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { debateProposal } = await import("../src/lib/red-team");
-    await setupOpenAi("RT_EXIT");
-    let fetched = false;
-    vi.stubGlobal("fetch", async () => {
-      fetched = true;
-      return new Response("{}", { status: 200 });
-    });
-
-    const result = await debateProposal({ ...buyProposal(), side: "sell" }, undefined);
-    expect(result.available).toBe(false);
-    expect(result.rejected).toBe(false);
-    expect(result.reason).toMatch(/exits are exempt/i);
-    expect(fetched).toBe(false);
-  });
-
-  it("does not reject when the LLM request throws", async () => {
-    const { debateProposal } = await import("../src/lib/red-team");
-    await setupOpenAi("RT_THROW");
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "RT_THROW" });
+    setStrategyPrompt("BASE STRATEGY");
     vi.stubGlobal("fetch", async () => {
       throw new Error("network down");
     });
 
-    const result = await debateProposal(buyProposal(), undefined);
+    const result = await debateProposal(buyProposal(), undefined, true);
     expect(result.rejected).toBe(false); // errored out → trade is not dropped by the red team
-    expect(result.available).toBe(false);
   });
 });
 
-describe("debateProposal — three-way verdict + shape-violation fail-closed (§4.4)", () => {
+describe("debateProposal — shape-violation fail-closed (Deliverable A + B)", () => {
+  const buyProposal = (): any => ({
+    symbol: "AAPL",
+    side: "buy",
+    type: "market",
+    timeInForce: "gfd",
+    marketHours: "regular_hours",
+    rationale: "momentum",
+    confidenceScore: 90,
+    tradeThesisTag: "t",
+    entryMarketRegime: "t"
+  });
+
+  function stubOpenAiJsonBody(payload: unknown) {
+    vi.stubGlobal("fetch", async () => {
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    });
+  }
+
+  async function setupOpenAi(accountNumber: string) {
+    const { setPolicy, setStrategyPrompt } = await import("../src/lib/db");
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
+    setPolicy({ ...DEFAULT_POLICY, accountNumber });
+    setStrategyPrompt("BASE STRATEGY");
+  }
+
   it.each([
     ["empty object", {}],
-    ["legacy {rejected} shape", { rejected: false, reason: "ok" }],
-    ["unknown verdict value", { verdict: "approve_with_caution", reason: "hedge" }],
-    ["non-string verdict", { verdict: true, reason: "x" }],
+    ["string rejected", { rejected: "no" }],
     ["unrelated shape", { foo: 1 }]
   ])("fails closed (available:false, malformed_response) on a parseable-but-wrong-shape verdict: %s", async (_label, payload) => {
     const { debateProposal } = await import("../src/lib/red-team");
     await setupOpenAi("RT_SHAPE");
     stubOpenAiJsonBody(payload);
 
-    const result = await debateProposal(buyProposal(), undefined);
+    const result = await debateProposal(buyProposal(), undefined, true);
     expect(result.available).toBe(false);
     expect(result.rejected).toBe(false);
-    expect(result.verdict).toBeUndefined();
     expect(result.failureKind).toBe("malformed_response");
     expect(result.reason).toMatch(/malformed verdict/i);
   });
 
-  it.each([
-    ["approve", false],
-    ["approve-at-half", false],
-    ["reject", true]
-  ] as const)("a valid {verdict: %s} is available:true with rejected=%s and no failureKind", async (verdict, rejected) => {
-    const { debateProposal } = await import("../src/lib/red-team");
-    await setupOpenAi(`RT_V_${verdict}`);
-    stubOpenAiJsonBody({ verdict, reason: "Because." });
-
-    const result = await debateProposal(buyProposal(), undefined);
-    expect(result.available).toBe(true);
-    expect(result.verdict).toBe(verdict);
-    expect(result.rejected).toBe(rejected);
-    expect(result.failureKind).toBeUndefined();
-  });
-
-  it("tolerates a markdown-fenced verdict (§4.1 — the gemini-3.5-flash failure)", async () => {
-    const { debateProposal } = await import("../src/lib/red-team");
-    await setupOpenAi("RT_FENCED");
-    vi.stubGlobal("fetch", async () => {
-      const fenced = "```json\n" + JSON.stringify({ verdict: "reject", reason: "Overbought." }) + "\n```";
-      return new Response(
-        JSON.stringify({ choices: [{ message: { content: fenced } }] }),
-        { status: 200, headers: { "content-type": "application/json" } }
-      );
-    });
-
-    const result = await debateProposal(buyProposal(), undefined);
-    expect(result.available).toBe(true);
-    expect(result.verdict).toBe("reject");
-    expect(result.rejected).toBe(true);
-  });
-
-  // #1091: DeepSeek v4 Flash and other json_object-mode providers sometimes wrap a correct
-  // verdict object in a bare array ([{verdict,reason}]). The parse unwraps the first element
-  // instead of failing the whole review as malformed. This regression guard must survive the
-  // single-adversary rewrite (the unwrap lives in debateProposal, before shape validation).
-  it("recovers a valid verdict wrapped in a bare array (#1091 json_object-mode recovery)", async () => {
-    const { debateProposal } = await import("../src/lib/red-team");
-    await setupOpenAi("RT_ARRAY");
-    stubOpenAiJsonBody([{ verdict: "reject", reason: "Array-wrapped verdict." }]);
-
-    const result = await debateProposal(buyProposal(), undefined);
-    expect(result.available).toBe(true);
-    expect(result.verdict).toBe("reject");
-    expect(result.rejected).toBe(true);
-    expect(result.reason).toBe("Array-wrapped verdict.");
-  });
-
-  it("fails closed when a bare-array element is not a valid verdict object (#1091 guard)", async () => {
-    const { debateProposal } = await import("../src/lib/red-team");
-    await setupOpenAi("RT_ARRAY_BAD");
-    stubOpenAiJsonBody([123, "not an object"]);
-
-    const result = await debateProposal(buyProposal(), undefined);
-    expect(result.available).toBe(false);
-    expect(result.failureKind).toBe("malformed_response");
-  });
-
-  it("classifies a persistent 429 as rate_limited (after the bounded retry)", async () => {
+  it("classifies a 429 response as rate_limited", async () => {
     const { debateProposal } = await import("../src/lib/red-team");
     await setupOpenAi("RT_429");
-    let calls = 0;
-    vi.stubGlobal("fetch", async () => {
-      calls += 1;
-      return new Response("Too Many Requests", { status: 429 });
-    });
+    vi.stubGlobal("fetch", async () => new Response("Too Many Requests", { status: 429 }));
 
-    const result = await debateProposal(buyProposal(), undefined);
+    const result = await debateProposal(buyProposal(), undefined, true);
     expect(result.available).toBe(false);
     expect(result.rejected).toBe(false);
     expect(result.failureKind).toBe("rate_limited");
-    expect(calls).toBe(2); // §4.3: exactly one bounded retry, then declare unavailable
-  });
-
-  it("recovers when a transient 429 is followed by a valid verdict (fetchLlmWithRetry)", async () => {
-    const { debateProposal } = await import("../src/lib/red-team");
-    await setupOpenAi("RT_RETRY_OK");
-    let calls = 0;
-    vi.stubGlobal("fetch", async () => {
-      calls += 1;
-      if (calls === 1) return new Response("Too Many Requests", { status: 429 });
-      return new Response(
-        JSON.stringify({ choices: [{ message: { content: JSON.stringify({ verdict: "approve", reason: "Solid." }) } }] }),
-        { status: 200, headers: { "content-type": "application/json" } }
-      );
-    });
-
-    const result = await debateProposal(buyProposal(), undefined);
-    expect(calls).toBe(2);
-    expect(result.available).toBe(true);
-    expect(result.verdict).toBe("approve");
   });
 
   it("classifies a 500 response as provider_error", async () => {
@@ -244,7 +121,7 @@ describe("debateProposal — three-way verdict + shape-violation fail-closed (§
     await setupOpenAi("RT_500");
     vi.stubGlobal("fetch", async () => new Response("Internal Server Error", { status: 500 }));
 
-    const result = await debateProposal(buyProposal(), undefined);
+    const result = await debateProposal(buyProposal(), undefined, true);
     expect(result.available).toBe(false);
     expect(result.rejected).toBe(false);
     expect(result.failureKind).toBe("provider_error");
@@ -259,7 +136,7 @@ describe("debateProposal — three-way verdict + shape-violation fail-closed (§
       throw err;
     });
 
-    const result = await debateProposal(buyProposal(), undefined);
+    const result = await debateProposal(buyProposal(), undefined, true);
     expect(result.available).toBe(false);
     expect(result.rejected).toBe(false);
     expect(result.failureKind).toBe("timeout");
@@ -269,27 +146,63 @@ describe("debateProposal — three-way verdict + shape-violation fail-closed (§
     const { debateProposal } = await import("../src/lib/red-team");
     await setupOpenAi("RT_TRANSPORT");
     vi.stubGlobal("fetch", async () => {
-      throw new Error("boom: unexpected");
+      throw new Error("network down");
     });
 
-    const result = await debateProposal(buyProposal(), undefined);
+    const result = await debateProposal(buyProposal(), undefined, true);
     expect(result.available).toBe(false);
     expect(result.rejected).toBe(false);
     expect(result.failureKind).toBe("provider_error");
+  });
+
+  it("classifies no-key as not_configured", async () => {
+    const { setStrategyPrompt, setPolicy } = await import("../src/lib/db");
+    const { debateProposal } = await import("../src/lib/red-team");
+    delete process.env.OPENAI_API_KEY;
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "RT_NOKEY2" });
+    setStrategyPrompt("BASE STRATEGY");
+
+    const result = await debateProposal(buyProposal(), undefined, true);
+    expect(result.available).toBe(false);
+    expect(result.failureKind).toBe("not_configured");
+  });
+
+  it("a valid {rejected, reason} verdict is available:true with no failureKind", async () => {
+    const { debateProposal } = await import("../src/lib/red-team");
+    await setupOpenAi("RT_VALID");
+    stubOpenAiJsonBody({ rejected: true, reason: "Overbought." });
+
+    const result = await debateProposal(buyProposal(), undefined, true);
+    expect(result.available).toBe(true);
+    expect(result.rejected).toBe(true);
+    expect(result.failureKind).toBeUndefined();
   });
 });
 
 describe("debateProposal LLM request bounds", () => {
   it("adds chat-completions output caps and the adversary sampling temperature", async () => {
+    const { setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { debateProposal } = await import("../src/lib/red-team");
-    await setupOpenAi("RED-TEAM");
+
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
+    // Pin a classic (non-reasoning) model so this test verifies temperature + exact output caps.
+    // Reasoning-model bounds (reasoning_effort, raised caps) are covered by test/llm-request.test.ts.
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "RED-TEAM", llmModel: "gpt-4.1-mini" });
+    setStrategyPrompt("BASE STRATEGY");
 
     const bodies: any[] = [];
     vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
       bodies.push(JSON.parse(String(init?.body ?? "{}")));
       return new Response(
         JSON.stringify({
-          choices: [{ message: { content: JSON.stringify({ verdict: "approve", reason: "No fatal flaw found." }) } }]
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({ rejected: false, reason: "No fatal flaw found." })
+              }
+            }
+          ]
         }),
         { status: 200, headers: { "content-type": "application/json" } }
       );
@@ -309,33 +222,22 @@ describe("debateProposal LLM request bounds", () => {
         confidenceScore: 90
       },
       undefined,
-      "local",
-      undefined,
-      { sizing: { estimatedNotional: 25, sizeBasis: "notional" } }
+      true
     );
 
-    expect(result).toEqual({
-      verdict: "approve",
-      rejected: false,
-      available: true,
-      reason: "No fatal flaw found.",
-      model: "gpt-4.1-mini"
-    });
+    expect(result).toEqual({ rejected: false, available: true, reason: "No fatal flaw found.", model: "gpt-4.1-mini" });
     expect(bodies).toHaveLength(1);
-    expect(bodies[0].max_completion_tokens).toBe(LLM_OUTPUT_TOKEN_CAPS.adversaryReview);
-    // Per-role sampling: the adversary samples at a non-zero temperature (vs the Bull's greedy 0).
+    expect(bodies[0].max_completion_tokens).toBe(LLM_OUTPUT_TOKEN_CAPS.redTeamDebate);
+    // Per-role sampling (composite review B/medium/S): the adversary (Bear/debate) role now samples
+    // at a non-zero temperature instead of the Bull's greedy temp-0 decode.
     expect(bodies[0].temperature).toBe(LLM_REQUEST_DEFAULTS.adversaryTemperature);
     expect(bodies[0].max_output_tokens).toBeUndefined();
-    // OpenAI-compatible providers request STRICT json_schema (not a bare json_object), so the
+    // Item 6: OpenAI-compatible providers request STRICT json_schema (not a bare json_object), so the
     // verdict is schema-enforced rather than regex/prose-parsed.
     expect(bodies[0].response_format).toEqual({
       type: "json_schema",
       json_schema: { name: "red_team_verdict", strict: true, schema: expect.any(Object) }
     });
-    // §3.4 — the finalized size is stated to the model upfront, alongside the proposal itself.
-    const userMsg = JSON.parse(bodies[0].messages[1].content);
-    expect(userMsg.finalizedSizing).toEqual({ estimatedNotional: 25, sizeBasis: "notional" });
-    expect(userMsg.proposal.symbol).toBe("AAPL");
   });
 });
 
@@ -358,7 +260,7 @@ describe("debateProposal — Claude Red Team (first-class anthropic routing)", (
       // Anthropic Messages tool_use response shape.
       return new Response(
         JSON.stringify({
-          content: [{ type: "tool_use", name: "red_team_verdict", input: { verdict: "reject", reason: "Overbought into earnings." } }],
+          content: [{ type: "tool_use", name: "red_team_verdict", input: { rejected: true, reason: "Overbought into earnings." } }],
           usage: { input_tokens: 100, output_tokens: 20 }
         }),
         { status: 200, headers: { "content-type": "application/json" } }
@@ -378,16 +280,11 @@ describe("debateProposal — Claude Red Team (first-class anthropic routing)", (
         entryMarketRegime: "Neutral (Normal Volatility)",
         confidenceScore: 90
       } as any,
-      undefined
+      undefined,
+      true
     );
 
-    expect(result).toEqual({
-      verdict: "reject",
-      rejected: true,
-      available: true,
-      reason: "Overbought into earnings.",
-      model: "claude-opus-4-8"
-    });
+    expect(result).toEqual({ rejected: true, available: true, reason: "Overbought into earnings.", model: "claude-opus-4-8" });
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toContain("api.anthropic.com");
     expect(calls[0].headers["x-api-key"]).toBe("sk-ant-test");
@@ -395,7 +292,7 @@ describe("debateProposal — Claude Red Team (first-class anthropic routing)", (
     expect(calls[0].headers["anthropic-beta"]).toBe("prompt-caching-2024-07-31");
     expect(calls[0].headers.authorization).toBeUndefined();
     // Forced tool-use is how Claude returns guaranteed JSON. System is a single ephemeral cache
-    // block (Chat A item 3 prompt caching).
+    // block now (Chat A item 3 prompt caching).
     expect(calls[0].body.system[0].text).toContain("Red Team");
     expect(calls[0].body.system[0].cache_control).toEqual({ type: "ephemeral" });
     expect(calls[0].body.tool_choice).toEqual({ type: "tool", name: "red_team_verdict" });

@@ -178,16 +178,7 @@ SECTION_KEYWORDS = [
 ]
 
 PLACEHOLDER_RE = re.compile(
-    r"^\(?\s*(none|n/?a\b.*|seeded empty.*|add rows here.*)\s*\)?\.?$",
-    re.IGNORECASE,
-)
-# Broad imperative prefixes only count as empty-section scaffolding when
-# PARENTHESIZED (e.g. "(record the effort here ...)"); a bare "Record the ..."
-# / "See rollout notes ..." is a real effort row. Kept identical to
-# scripts/effort-log-union-merge.py so the two tools never disagree about what
-# is a placeholder vs a real row.
-PLACEHOLDER_PARENS_RE = re.compile(
-    r"^\(\s*(record the.*|see rollout notes.*)\s*\)\.?$",
+    r"^\(?\s*(none|n/?a\b.*|seeded empty.*|add rows here.*|record the.*|see rollout notes.*)\s*\)?\.?$",
     re.IGNORECASE,
 )
 
@@ -258,7 +249,7 @@ def parse_board(text: str) -> list[BoardItem]:
                 items.append(current_item)
                 current_item = None
             content = bullet_match.group(1).strip()
-            if PLACEHOLDER_RE.match(content) or PLACEHOLDER_PARENS_RE.match(content):
+            if PLACEHOLDER_RE.match(content):
                 continue  # "(none)" etc. — not a real item.
             current_item = BoardItem(bucket=current_bucket, first_line=content)
             continue

@@ -8,7 +8,6 @@
 
 import { useMemo, useState } from "react";
 import { Card, TextInput } from "../ui/primitives";
-import { ListSection, ListRow } from "../../ui/ios-components";
 
 interface GlossaryEntry {
   term: string;
@@ -96,15 +95,15 @@ const GLOSSARY: GlossaryGroup[] = [
       },
       {
         term: "Green team (strategist)",
-        aliases: "proposer bull llmModel green team",
+        aliases: "proposer bull llmModel",
         definition:
-          "The LLM that writes trade proposals from the scan evidence and your written strategy instructions. Its model is the 'Green Team' pick under Framework → Models."
+          "The LLM that writes trade proposals from the scan evidence and your written strategy instructions. Its model is the 'Strategist' pick in LLM models."
       },
       {
         term: "Red team (reviewer)",
-        aliases: "bear reviewer redTeamLlmModel debate red team",
+        aliases: "bear reviewer redTeamLlmModel debate",
         definition:
-          "An adversarial second model that reviews every risk-adding opening at its final size, fact-checking the rationale against the same evidence the Green Team saw. A veto or half-size downgrade is recorded with the proposal. Blank = not configured — openings route to human approval instead of auto-executing (it never silently self-reviews)."
+          "An adversarial second model that argues against high-conviction ideas before they reach you (or the broker). A veto or downgrade is recorded with the proposal. Optional — blank means the strategist model reviews itself."
       },
       {
         term: "Conviction",
@@ -170,7 +169,7 @@ const GLOSSARY: GlossaryGroup[] = [
         term: "Connected account",
         aliases: "broker connection robinhood alpaca",
         definition:
-          "A brokerage login this app can read and trade through (Robinhood via OAuth, Alpaca via API keys, Tradier via access token). Disconnecting removes the connection from this app only — nothing changes at the broker."
+          "A brokerage login this app can read and trade through (Robinhood via OAuth, Alpaca via API keys). Disconnecting removes the connection from this app only — nothing changes at the broker."
       },
       {
         term: "Active account",
@@ -182,7 +181,7 @@ const GLOSSARY: GlossaryGroup[] = [
         term: "THIS ACCOUNT vs ALL YOUR ACCOUNTS",
         aliases: "settings scope user-level account-level",
         definition:
-          "The two storage scopes for configuration. THIS ACCOUNT settings follow the account and live where you configure the account itself — Framework (models, tax treatment, prompt, weights) and Mandates (guardrails). ALL YOUR ACCOUNTS settings follow you (connections, API keys, notifications, scan shape, learning review, typed confirmation) and overlay every account — everything on this Settings page is that kind."
+          "The two tags on this Settings page. THIS ACCOUNT settings follow the account (tax treatment, models, guardrails). ALL YOUR ACCOUNTS settings follow you (connections, API keys, notifications, scan shape) and overlay every account."
       },
       {
         term: "Preset (profile)",
@@ -236,53 +235,49 @@ export function HelpGlossaryCard() {
   }, [query]);
 
   return (
-    <ListSection title="Help & glossary">
-      <div className="px-2 pb-2">
-        <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-          The words this console uses, defined the way the app actually behaves. If a term on any screen is unclear,
-          it&apos;s in here — most controls also explain themselves on hover.
-        </p>
-        <div className="mb-3 max-w-md">
-          <TextInput
-            value={query}
-            placeholder="Search terms — e.g. wash sale, autopilot, red team…"
-            onChange={(e) => setQuery(e.target.value)}
-            aria-label="Search the glossary"
-            title="Filters the glossary by term, synonym, or definition text."
-          />
-        </div>
+    <Card title="Help & glossary">
+      <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+        The words this console uses, defined the way the app actually behaves. If a term on any screen is unclear,
+        it&apos;s in here — most controls also explain themselves on hover.
+      </p>
+      <div className="mb-3 max-w-md">
+        <TextInput
+          value={query}
+          placeholder="Search terms — e.g. wash sale, autopilot, red team…"
+          onChange={(e) => setQuery(e.target.value)}
+          aria-label="Search the glossary"
+          title="Filters the glossary by term, synonym, or definition text."
+        />
       </div>
-      
       {filtered.length === 0 ? (
-        <ListRow>
-          <p className="py-4 text-center w-full text-[length:var(--con-fs-sm)] text-[color:var(--con-faint)]">
-            No term matches &quot;{query.trim()}&quot; — try a shorter word.
-          </p>
-        </ListRow>
+        <p className="py-4 text-center text-[length:var(--con-fs-sm)] text-[color:var(--con-faint)]">
+          No term matches &quot;{query.trim()}&quot; — try a shorter word.
+        </p>
       ) : (
-        <div className="flex flex-col w-full">
+        <div className="flex flex-col">
           {filtered.map((group) => (
-            <details key={group.group} className="con-disclosure !px-2 !pb-2" open={query.trim().length > 0}>
-              <summary title={group.blurb} className="!pl-3 !pr-3">
+            <details key={group.group} className="con-disclosure" open={query.trim().length > 0}>
+              <summary title={group.blurb}>
                 {group.group}
                 <span className="font-normal text-[color:var(--con-faint)]">· {group.entries.length}</span>
               </summary>
-              <dl className="mb-2 flex flex-col rounded-lg overflow-hidden shadow-sm">
+              <dl className="mb-2 flex flex-col divide-y divide-[color:var(--con-line)] rounded-lg border border-[color:var(--con-line)]">
                 {group.entries.map((entry) => (
-                  <ListRow key={entry.term}>
-                    <div className="w-full">
-                      <dt className="text-[length:var(--con-fs-sm)] font-semibold">{entry.term}</dt>
-                      <dd className="mt-0.5 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
-                        {entry.definition}
-                      </dd>
-                    </div>
-                  </ListRow>
+                  <div
+                    key={entry.term}
+                    className="px-3 py-2.5 transition-colors first:rounded-t-lg last:rounded-b-lg hover:bg-[color:var(--con-surface-2)]"
+                  >
+                    <dt className="text-[length:var(--con-fs-sm)] font-semibold">{entry.term}</dt>
+                    <dd className="mt-0.5 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
+                      {entry.definition}
+                    </dd>
+                  </div>
                 ))}
               </dl>
             </details>
           ))}
         </div>
       )}
-    </ListSection>
+    </Card>
   );
 }

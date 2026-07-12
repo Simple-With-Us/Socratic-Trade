@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Card } from "../ui/primitives";
-import { DecisionLoopDiagram } from "./decision-loop-diagram";
 
 export const metadata: Metadata = {
   title: "Decision framework",
@@ -143,9 +142,6 @@ export default function HowItWorksPage() {
 
         <section className="space-y-5">
           <h2 className="text-xl font-semibold text-fg">Core loop</h2>
-          <Card className="p-5 sm:p-8">
-            <DecisionLoopDiagram />
-          </Card>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {CORE_LOOP.map((item) => (
               <Card key={item.title} className="p-5 space-y-2">

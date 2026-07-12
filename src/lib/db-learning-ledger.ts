@@ -135,22 +135,6 @@ export function listLearningMutations(
   return rows.map(mapRow);
 }
 
-/**
- * All of a user's ledger rows created at/after `sinceIso`, ACROSS connected accounts (unlike
- * listLearningMutations, whose default `connected_account_id = ''` filter returns only user-wide
- * rows). Used by the daily learning review's context pack: "what did the system auto-tune recently".
- */
-export function listLearningMutationsSince(
-  userId: string,
-  sinceIso: string,
-  limit = 100
-): LearningMutationRow[] {
-  const rows = getDb()
-    .prepare("SELECT * FROM learning_mutations WHERE user_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT ?")
-    .all(userId, sinceIso, Math.max(1, Math.min(500, limit))) as RawRow[];
-  return rows.map(mapRow);
-}
-
 /** Fetch a single ledger row by id (scoped to the owning user to avoid cross-user reads). */
 export function getLearningMutationById(id: string, userId: string = "local"): LearningMutationRow | undefined {
   const row = getDb()

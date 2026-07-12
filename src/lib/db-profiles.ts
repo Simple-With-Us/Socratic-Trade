@@ -3,7 +3,7 @@
 // and the re-exported getPolicy / setPolicy / getStrategyPrompt / setStrategyPrompt.
 import crypto from "crypto";
 import { getDb, audit } from "./db";
-import { getInternalSetting, getUserSetting, setInternalSetting, setUserSetting } from "./db-settings";
+import { getUserSetting, setUserSetting } from "./db-settings";
 import { getActiveConnectedAccount, getConnectedAccount, listConnectedAccounts } from "./db-api-keys";
 import { DEFAULT_POLICY, DEFAULT_SCORING_WEIGHTS, DEFAULT_STRATEGY_PROMPT } from "./defaults";
 import type {
@@ -20,47 +20,10 @@ import type {
 const USER_LEVEL_POLICY_FIELDS = new Set<keyof TradingPolicy>([
   "notificationSettings",
   "marketScanCandidateLimit",
-  "marketScanOutlierReserve",
-  // The daily learning review runs ONCE per user per day over user-level learned
-  // context (runDailyLearningReviewIfDue keys on userId, not account), so its
-  // config is user-level too — enabling/configuring it applies to your whole
-  // login, and the job reads the same setting regardless of which account is
-  // loaded when the scheduler ticks. (Was account-scoped in #1116; corrected.)
-  "learningReviewEnabled",
-  "learningReviewMode",
-  "learningReviewModel",
-  "learningReviewMinNewLessons",
-  "learningReviewMaxWaitDays",
-  // Typed confirmation for high-impact live actions is an OWNER preference, not a
-  // per-account guardrail: the owner either wants the phrase ceremony or they don't,
-  // regardless of which account the action targets (Settings IA restructure,
-  // 2026-07-10). Was account-scoped before; promotion supersedes any divergent
-  // per-account values — reads strip it from account rows, and with no user-level
-  // value stored yet it falls back to the DEFAULT_POLICY value (true = required),
-  // the safe direction. No legacy seed on purpose (sole-user, no compat tax).
-  "requireTypedConfirmation"
+  "marketScanOutlierReserve"
 ]);
 
 const LEGACY_STRATEGY_MODEL_FIELDS: Array<keyof TradingPolicy> = ["llmModel", "redTeamLlmModel", "llmReasoningEffort"];
-
-/** The learning-review subset of USER_LEVEL_POLICY_FIELDS (used by the one-time legacy seed below). */
-const LEARNING_REVIEW_POLICY_FIELDS: Array<keyof TradingPolicy> = [
-  "learningReviewEnabled",
-  "learningReviewMode",
-  "learningReviewModel",
-  "learningReviewMinNewLessons",
-  "learningReviewMaxWaitDays"
-];
-
-/**
- * Global-settings key (per-user) marking that the one-time legacy learning-review seed has been
- * evaluated for this user. Lives in the global `settings` store (getInternalSetting), mirroring
- * the learning-review runner's own markers (`learning_review:lastRunDate:<userId>`, …); the
- * userId suffix keeps it per-user. Once set, the seed never re-runs — see seedLegacyLearningReviewFields.
- */
-function learningReviewLegacySeedKey(userId: string): string {
-  return `learning_review:legacySeedDone:${userId}`;
-}
 
 /** Extract only the user-level fields from a TradingPolicy. */
 function pickUserFields(policy: TradingPolicy): Partial<TradingPolicy> {
@@ -97,88 +60,10 @@ function stripUserFields(policy: Partial<TradingPolicy>): Partial<TradingPolicy>
   return result;
 }
 
-/**
- * One-time lazy seed (#1278 follow-up, deferred finding #3): the learning-review config shipped
- * account-scoped (#1116) and is user-level now. Reads strip learningReview* from account rows and
- * pre-#1278 tiered saves never wrote those keys to user_settings.policy, so a review enabled before
- * this deploy would silently read as disabled. On the first read after the cutover we copy the
- * account-level value up to user_settings.policy — the reverse-direction companion of
- * migrateLegacyStrategyModelFieldsToAccounts. Returns the seeded fields, or null when there was
- * nothing to seed.
- *
- * TWO guards, because the earlier "bail whenever any review key is already present" was wrong and a
- * naive replacement is dangerous (finding #3):
- *
- *  1. Full-blob vs tiered disambiguation. `user_settings.policy` historically also held a FULL
- *     policy blob (a profile activation via writePolicyBlobPreservingUserFields, a no-account
- *     setPolicy, or a pre-tier DB) that stamps the DEFAULT learningReviewEnabled:false there while
- *     the user's real ENABLED value lived account-scoped. So a review key being *present* does not
- *     mean it is authoritative. A modern TIERED write (pickUserFields → setUserSetting) contains
- *     ONLY user-level keys; a full blob also carries account-level keys. A review key in a tiered
- *     blob is the user's real post-cutover value (leave it); the same key in a full blob is a stale
- *     default (seed over it).
- *  2. One-time marker (the load-bearing guard). Pre-cutover, learningReview* was never a user-level
- *     field, so it could not reach a tiered blob — meaning on the FIRST read a present review key
- *     can only be a stale full-blob default, never a deliberate choice. The marker pins the decision
- *     to that pre-cutover state: after the user starts making post-cutover changes, a deliberate
- *     tiered disable can be folded back into a full blob (the next profile activation runs
- *     writePolicyBlobPreservingUserFields), making its false indistinguishable from a stale default
- *     — but by then the marker is set (the first read necessarily precedes any deliberate change),
- *     so the seed never re-fires and never clobbers that intent.
- */
-function seedLegacyLearningReviewFields(userId: string, stored: Partial<TradingPolicy>): Partial<TradingPolicy> | null {
-  if (getInternalSetting<boolean>(learningReviewLegacySeedKey(userId)) === true) return null;
-  const seeded = computeLegacyLearningReviewSeed(userId, stored);
-  // Set unconditionally, whether or not anything was seeded: the seed is a one-shot cutover
-  // migration that must evaluate only the pre-deploy DB state (guard #2 above).
-  setInternalSetting(learningReviewLegacySeedKey(userId), true);
-  return seeded;
-}
-
-function computeLegacyLearningReviewSeed(userId: string, stored: Partial<TradingPolicy>): Partial<TradingPolicy> | null {
-  // Guard #1: a review key sitting in a TIERED write (only user-level keys present) is the user's
-  // authoritative value — never overwrite it. A review key in a FULL blob (account-level keys also
-  // present) only stamped the default there; the real value still lives account-scoped, so seed.
-  const hasReviewKey = LEARNING_REVIEW_POLICY_FIELDS.some((key) => key in stored);
-  const isTieredWrite = Object.keys(stored).every((key) => USER_LEVEL_POLICY_FIELDS.has(key as keyof TradingPolicy));
-  if (hasReviewKey && isTieredWrite) return null;
-  // Iterate accounts as listed — the legacy seed must NOT depend on the active-account (view)
-  // pointer (PR #7 view/execution decouple guard, test/pr7-merge-gate.test.ts). Learning-review
-  // config is user-level intent that happened to ship account-scoped (#1116), so any account
-  // that carries it is an equally valid source; first-with-keys wins.
-  for (const account of listConnectedAccounts(userId)) {
-    const state = getAccountStrategyStateRow(userId, account.id);
-    if (!state) continue;
-    let accountPolicy: Partial<TradingPolicy>;
-    try {
-      accountPolicy = JSON.parse(state.policy) as Partial<TradingPolicy>;
-    } catch {
-      continue;
-    }
-    const found: Partial<TradingPolicy> = {};
-    for (const key of LEARNING_REVIEW_POLICY_FIELDS) {
-      if (key in accountPolicy) {
-        (found as Record<string, unknown>)[key as string] = accountPolicy[key];
-      }
-    }
-    if (Object.keys(found).length > 0) {
-      // Persist onto the SAME stored object so a legacy full blob stays intact —
-      // readLegacyStrategyModelFields still reads llmModel/redTeamLlmModel/llmReasoningEffort from it.
-      setUserSetting(userId, "policy", { ...stored, ...found });
-      return found;
-    }
-  }
-  return null;
-}
-
 /** Read user-level policy fields from user_settings and return them as a partial policy. */
 function readUserPolicyFields(userId: string): Partial<TradingPolicy> {
-  const raw = getUserSetting<Partial<TradingPolicy>>(userId, "policy", {});
-  let stored: Partial<TradingPolicy> = raw && typeof raw === "object" ? raw : {};
-  // Legacy learning-review settings (account-scoped in #1116) seed into user_settings on
-  // first read after the user-level cutover, so an already-enabled review survives the deploy.
-  const seeded = seedLegacyLearningReviewFields(userId, stored);
-  if (seeded) stored = { ...stored, ...seeded };
+  const stored = getUserSetting<Partial<TradingPolicy>>(userId, "policy", {});
+  if (!stored || typeof stored !== "object") return {};
   // Only pluck the known user-level fields from whatever is stored (backward-compat:
   // existing DBs have the full policy in user_settings — we only care about user fields now).
   const result: Partial<TradingPolicy> = {};
@@ -445,18 +330,6 @@ function setSettingDirect(userId: string, key: string, value: unknown, updatedAt
     .run(`${userId}_${key}`, userId, key, JSON.stringify(value), updatedAt);
 }
 
-/**
- * Write a full policy blob to user_settings.policy while PRESERVING the currently stored
- * user-level fields (notification prefs, market-scan breadth, learning-review config).
- * Profile create/update/activate write the whole profile policy here, and profile rows carry
- * stripped-to-default values for the user-level keys (setPolicy syncs profiles through
- * pickAccountFields + mergePolicy) — without this overlay, activating or editing the active
- * profile would silently reset the user's review/notification/scan settings to defaults.
- */
-function writePolicyBlobPreservingUserFields(userId: string, policy: TradingPolicy, updatedAt: string): void {
-  setSettingDirect(userId, "policy", mergePolicy({ ...policy, ...readUserPolicyFields(userId) }), updatedAt);
-}
-
 function syncActiveProfile(patch: { policy?: TradingPolicy; prompt?: string; scoringWeights?: ScoringWeights }, userId: string = "local"): void {
   const active = getActiveStrategyProfile(userId);
   if (!active) return;
@@ -509,13 +382,7 @@ export function getPolicy(userId: string = "local", connectedAccountId?: string)
     policy.activeBroker = account.broker;
     policy.accountNumber = account.accountNumber;
   } else {
-    // No active account: the user-level overlay still applies. The base can be an active
-    // library profile whose row carries stripped-to-default values for the user-level keys
-    // (setPolicy syncs profiles via pickAccountFields + mergePolicy), so without the overlay
-    // an enabled learning review / notification prefs would silently read as defaults the
-    // moment the user has no active connected account (the scheduler reads getPolicy(userId)).
-    // Idempotent for legacy full-blob users — the plucked keys come from the same blob.
-    policy = mergePolicy({ ...getBasePolicy(userId), ...readUserPolicyFields(userId) });
+    policy = getBasePolicy(userId);
   }
 
   return policy;
@@ -628,7 +495,7 @@ export function createStrategyProfile(input: { name: string; policy?: Partial<Tr
   });
   create();
   if (input.active) {
-    writePolicyBlobPreservingUserFields(userId, policy, now);
+    setSettingDirect(userId, "policy", policy, now);
     setSettingDirect(userId, "strategyPrompt", prompt, now);
     copyPolicyConfigToActiveAccount(userId, policy, prompt, policy.scoringWeights, id);
   }
@@ -654,7 +521,7 @@ export function updateStrategyProfile(id: string, patch: { name?: string; policy
     .prepare("UPDATE strategy_profiles SET name = ?, policy = ?, prompt = ?, scoring_weights = ?, updated_at = ? WHERE id = ? AND user_id = ?")
     .run(patch.name ?? existing.name, JSON.stringify(policy), prompt, JSON.stringify(scoringWeights), now, id, userId);
   if (existing.active) {
-    writePolicyBlobPreservingUserFields(userId, policy, now);
+    setSettingDirect(userId, "policy", policy, now);
     setSettingDirect(userId, "strategyPrompt", prompt, now);
     copyPolicyConfigToActiveAccount(userId, policy, prompt, scoringWeights, id);
   }
@@ -670,7 +537,7 @@ export function activateStrategyProfile(id: string, userId: string = "local"): S
   const activate = database.transaction(() => {
     database.prepare("UPDATE strategy_profiles SET active = 0, updated_at = ? WHERE user_id = ?").run(now, userId);
     database.prepare("UPDATE strategy_profiles SET active = 1, updated_at = ? WHERE id = ? AND user_id = ?").run(now, id, userId);
-    writePolicyBlobPreservingUserFields(userId, mergePolicy({ ...profile.policy, activeProfileId: id }), now);
+    setSettingDirect(userId, "policy", mergePolicy({ ...profile.policy, activeProfileId: id }), now);
     setSettingDirect(userId, "strategyPrompt", profile.prompt, now);
   });
   activate();
@@ -737,160 +604,6 @@ export function applyProfileToAccount(
     connectedAccountId
   );
   return { profileId, connectedAccountId };
-}
-
-/** Distinguishes the expected failure modes of {@link importAccountSettings} so the calling route
- *  can map each to the correct HTTP status without fragile message-string matching. */
-export type ImportAccountSettingsErrorCode = "same_account" | "not_found" | "no_source_state";
-
-/** Thrown by {@link importAccountSettings} for every expected validation failure (never a generic
- *  Error, so callers can `instanceof`-check instead of parsing messages). */
-export class ImportAccountSettingsError extends Error {
-  readonly code: ImportAccountSettingsErrorCode;
-  constructor(code: ImportAccountSettingsErrorCode, message: string) {
-    super(message);
-    this.name = "ImportAccountSettingsError";
-    this.code = code;
-  }
-}
-
-/** Account-identity TradingPolicy fields — always derived from the owning account's own row on
- *  every `getPolicy` read (see the overlay at the end of `getPolicy` above), never copyable data.
- *  Stripped from an imported policy so a stale source-account id can never sit in the target's
- *  stored JSON, mirroring the client-writable-field strip in `PUT /api/policy`. */
-const ACCOUNT_IDENTITY_POLICY_FIELDS: Array<keyof TradingPolicy> = ["connectedAccountId", "accountNumber", "activeBroker"];
-
-function stripIdentityFields(policy: Partial<TradingPolicy>): Partial<TradingPolicy> {
-  const result: Partial<TradingPolicy> = { ...policy };
-  for (const key of ACCOUNT_IDENTITY_POLICY_FIELDS) {
-    delete result[key];
-  }
-  return result;
-}
-
-/**
- * Write an imported account_strategy_state row with a DIRECT (non-preserving) overwrite of
- * `derived_from_profile_id`. Unlike `writeAccountStrategyState` (whose ON CONFLICT clause COALESCEs
- * a missing/null value into the row's existing lineage — the right call for incidental policy edits
- * that shouldn't erase "which profile this account reflects"), an account-to-account import is a
- * deliberate full-replace action: the target's lineage must end up matching the source's, including
- * being cleared to NULL when the source itself has none. Leaving stale lineage behind would let the
- * target silently keep claiming derivation from a profile its just-overwritten config no longer
- * reflects.
- */
-function writeImportedAccountStrategyState(
-  userId: string,
-  connectedAccountId: string,
-  args: { policy: TradingPolicy; prompt: string; scoringWeights: ScoringWeights; derivedFromProfileId: string | null }
-): void {
-  getDb()
-    .prepare(
-      `INSERT INTO account_strategy_state
-         (user_id, connected_account_id, policy, prompt, scoring_weights, system_state, derived_from_profile_id, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(user_id, connected_account_id) DO UPDATE SET
-         policy = excluded.policy, prompt = excluded.prompt, scoring_weights = excluded.scoring_weights,
-         system_state = excluded.system_state,
-         derived_from_profile_id = excluded.derived_from_profile_id,
-         updated_at = excluded.updated_at`
-    )
-    .run(
-      userId,
-      connectedAccountId,
-      JSON.stringify(args.policy),
-      args.prompt,
-      JSON.stringify(args.scoringWeights),
-      args.policy.systemState,
-      args.derivedFromProfileId,
-      new Date().toISOString()
-    );
-}
-
-/**
- * Copy a CHOSEN connected account's own live strategy settings onto another CHOSEN connected
- * account (any→any — e.g. paper→live, or the reverse). Unlike `applyProfileToAccount` (which copies
- * a saved LIBRARY profile), this reads the SOURCE account's live `account_strategy_state` row and
- * writes it onto the TARGET account's row. Same "copy, not link" semantics: this is a one-time
- * snapshot — later edits to either account do not retro-mutate the other, and neither account's
- * identity, active-account pointer, or broker credentials are touched.
- *
- * SAFETY:
- *  - Both accounts must exist and belong to `userId` (write-time ownership re-validation, the PR #7
- *    pattern — see `assertConnectedAccountOwnedByUser`): a stale/malicious id can never read or
- *    target an account the session user does not own, and the failure looks identical whether the
- *    id is missing entirely or owned by someone else.
- *  - User-level fields (`USER_LEVEL_POLICY_FIELDS`) are stripped from the copied policy — those
- *    already apply identically to both accounts via the `getPolicy` overlay, so copying them
- *    account-to-account would duplicate user-scoped state into account-scoped storage.
- *  - Identity fields (`ACCOUNT_IDENTITY_POLICY_FIELDS`) are stripped — `getPolicy` always overwrites
- *    them from the target account's own row after read, but a stale source-account id must never sit
- *    in the target's stored JSON in the meantime.
- *  - The target's own `systemState` (active/halted/close_only/liquidating) is preserved — importing
- *    settings is a config change, never an arm/disarm side effect, mirroring `applyProfileToAccount`.
- *
- * PROVENANCE DECISION: `derived_from_profile_id` is carried over from the SOURCE account's own value
- * (including clearing it to NULL when the source has none), rather than preserved from whatever the
- * target previously had. This extends `applyProfileToAccount`'s "record where this configuration
- * originated" philosophy through one more hop of copying, and — because an import is a deliberate
- * full-replace action, not an incidental edit — a target must not keep silently claiming lineage from
- * a profile its just-overwritten config no longer reflects.
- */
-export function importAccountSettings(
-  userId: string,
-  sourceConnectedAccountId: string,
-  targetConnectedAccountId: string
-): TradingPolicy {
-  if (sourceConnectedAccountId === targetConnectedAccountId) {
-    throw new ImportAccountSettingsError("same_account", "Source and target accounts must be different.");
-  }
-  // Write-time ownership re-validation (PR #7 pattern): missing vs. owned-by-someone-else look
-  // identical, so a probing request learns nothing about accounts it doesn't own.
-  if (!getConnectedAccount(sourceConnectedAccountId, userId)) {
-    throw new ImportAccountSettingsError("not_found", "Source connected account not found for this user.");
-  }
-  if (!getConnectedAccount(targetConnectedAccountId, userId)) {
-    throw new ImportAccountSettingsError("not_found", "Target connected account not found for this user.");
-  }
-
-  const sourceState = getAccountStrategyStateRow(userId, sourceConnectedAccountId);
-  if (!sourceState) {
-    throw new ImportAccountSettingsError("no_source_state", "Source connected account has no strategy settings to import yet.");
-  }
-
-  const sourcePolicyRaw = JSON.parse(sourceState.policy) as Partial<TradingPolicy>;
-  const sourceScoringWeights = normalizeScoringWeights(
-    (sourceState.scoring_weights ? JSON.parse(sourceState.scoring_weights) : sourcePolicyRaw.scoringWeights ?? {}) as Partial<ScoringWeights>
-  );
-  const derivedFromProfileId = sourceState.derived_from_profile_id ?? null;
-
-  // peekPolicy (not getPolicy): read-only, never seeds/writes — we are about to write the target's
-  // row ourselves right below, mirroring copyPolicyConfigToActiveAccount's same "about to overwrite
-  // it anyway" use of peekPolicy.
-  const targetSystemState = peekPolicy(userId, targetConnectedAccountId).systemState;
-
-  const cleaned = stripIdentityFields(stripUserFields(sourcePolicyRaw));
-  const policy = mergePolicy({
-    ...cleaned,
-    scoringWeights: sourceScoringWeights,
-    systemState: targetSystemState,
-    activeProfileId: derivedFromProfileId ?? undefined
-  });
-
-  writeImportedAccountStrategyState(userId, targetConnectedAccountId, {
-    policy,
-    prompt: sourceState.prompt ?? DEFAULT_STRATEGY_PROMPT,
-    scoringWeights: sourceScoringWeights,
-    derivedFromProfileId
-  });
-
-  audit(
-    "profile_change",
-    { action: "import_from_account", sourceConnectedAccountId, targetConnectedAccountId },
-    userId,
-    targetConnectedAccountId
-  );
-
-  return getPolicy(userId, targetConnectedAccountId);
 }
 
 /**

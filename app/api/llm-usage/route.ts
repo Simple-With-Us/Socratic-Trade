@@ -10,12 +10,8 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const sinceDays = Number(url.searchParams.get("sinceDays")) || 30;
   const sinceIso = new Date(Date.now() - sinceDays * 24 * 60 * 60_000).toISOString();
-  // Optional per-account / per-broker filters. Usage rows carry connectedAccountId + broker (via the
-  // connected_accounts join); omit both to see everything, including account-less "unattributed" rows.
-  const connectedAccountId = url.searchParams.get("accountId") || undefined;
-  const broker = url.searchParams.get("broker") || undefined;
 
-  const rows = getLlmUsageSummary({ sinceIso, userId, connectedAccountId, broker }).map((r) => {
+  const rows = getLlmUsageSummary({ sinceIso, userId }).map((r) => {
     const key = describeUsageKey(r);
     return { ...r, keyLabel: key?.label ?? null, keyLast4: key?.last4 ?? null, keyMasked: key?.masked ?? null };
   });

@@ -198,9 +198,6 @@ async function seedTestAccountAndPolicy() {
     ...DEFAULT_POLICY,
     systemState: "active",
     llmModel: "gpt-4.1-mini",
-    // Required explicit Red model (no-defaults world) — the stub answers it with a 429 so the
-    // review is unavailable with failureKind "rate_limited".
-    redTeamLlmModel: "gpt-4.1-mini",
     includedIndices: [],
     additionalSymbols: ["AAPL"],
     strategyAuthority: "decide"
@@ -284,8 +281,8 @@ async function seedExistingAaplLongPosition() {
   });
 }
 
-describe("Red Team unavailable — exits are STRUCTURALLY EXEMPT (§3.5: never reviewed, never holdable)", () => {
-  it("a de-risking SELL of an existing position proceeds to placement with NO review call, no verdict, no unavailable audit — even while the reviewer is down", async () => {
+describe("Red Team unavailable — exit (sell) DEFAULT behavior: still held for human review", () => {
+  it("[default false: byte-identical to main] holds a de-risking SELL for human review when deRiskExitsOnAdversaryUnavailable is NOT set", async () => {
     process.env.OPENAI_API_KEY = "test-openai-key";
     vi.stubGlobal("fetch", makeUnavailableFetchStub([SELL_PROPOSAL]));
 
@@ -298,18 +295,53 @@ describe("Red Team unavailable — exits are STRUCTURALLY EXEMPT (§3.5: never r
     const result = await runStrategyOnce();
     expect(result.status).toBe("completed");
 
-    // Single-adversary consolidation: exits NEVER reach the reviewer, so a reviewer outage can't
-    // freeze a risk-reducing trade behind an approval queue — the sell places.
+    // Default OFF: the sell is held for human review, same as an opening, matching main's
+    // unconditional requiresHumanReview.add for every side when the debate is unavailable.
+    const proposals = listRecentProposals("TEST", 100, "local");
+    const aaplSell = proposals.find((p) => p.proposal.symbol === "AAPL" && p.proposal.side === "sell");
+    expect(aaplSell).toBeDefined();
+    expect(aaplSell?.status).toBe("proposed");
+
+    const unavailableAudits = listAudit(500).filter(
+      (e) => e.kind === "strategy_red_team_unavailable" && (e.payload as { side?: string }).side === "sell"
+    );
+    expect(unavailableAudits.length).toBeGreaterThanOrEqual(1);
+    expect((unavailableAudits[0].payload as { heldForHuman?: boolean }).heldForHuman).toBe(true);
+  }, 30_000);
+});
+
+describe("Red Team unavailable — exit (sell) OPT-IN: de-risk-only routing", () => {
+  it("[deRiskExitsOnAdversaryUnavailable=true] lets a high-conviction SELL of an existing position proceed to placement with a loud RED TEAM FAILED note", async () => {
+    process.env.OPENAI_API_KEY = "test-openai-key";
+    vi.stubGlobal("fetch", makeUnavailableFetchStub([SELL_PROPOSAL]));
+
+    await seedTestAccountAndPolicy();
+    const { setPolicy, getPolicy } = await import("../src/lib/db");
+    setPolicy({
+      ...getPolicy("local"),
+      tuning: { ...getPolicy("local").tuning, deRiskExitsOnAdversaryUnavailable: true }
+    });
+    await seedExistingAaplLongPosition();
+
+    const { runStrategyOnce } = await import("../src/lib/strategy");
+    const { listRecentProposals, listAudit } = await import("../src/lib/db");
+
+    const result = await runStrategyOnce();
+    expect(result.status).toBe("completed");
+
+    // De-risk-only routing: the sell was NOT frozen behind human approval — it placed.
     const proposals = listRecentProposals("TEST", 100, "local");
     const aaplSell = proposals.find((p) => p.proposal.symbol === "AAPL" && p.proposal.side === "sell");
     expect(aaplSell).toBeDefined();
     expect(aaplSell?.status).toBe("placed");
-    // No verdict is ever stamped on an exit (it was never reviewed) and no unavailable audit fires.
-    expect(aaplSell?.proposal.redTeamVerdict).toBeUndefined();
+    expect(aaplSell?.proposal.rationale).toContain("RED TEAM FAILED");
+    expect(aaplSell?.proposal.rationale).toContain("reduces risk");
+
     const unavailableAudits = listAudit(500).filter(
       (e) => e.kind === "strategy_red_team_unavailable" && (e.payload as { side?: string }).side === "sell"
     );
-    expect(unavailableAudits).toHaveLength(0);
+    expect(unavailableAudits.length).toBeGreaterThanOrEqual(1);
+    expect((unavailableAudits[0].payload as { heldForHuman?: boolean }).heldForHuman).toBe(false);
   }, 30_000);
 });
 

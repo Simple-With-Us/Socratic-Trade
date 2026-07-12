@@ -7,6 +7,7 @@ import {
   listAudit
 } from "../src/lib/db";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
+import { applyDeterministicSizing } from "../src/lib/strategy";
 import { classifyRiskTier } from "../src/lib/learned-context/classify";
 import { ingestLearned, retrieveLearnedContext } from "../src/lib/learned-context/store";
 import { extractLearnedCandidates } from "../src/lib/memory/salience";
@@ -17,7 +18,6 @@ import type {
   TradeProposal,
   TradingPolicy
 } from "../src/lib/types";
-import { applyDeterministicSizing } from "../src/lib/strategy-risk";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${process.env.TMPDIR ?? "/tmp"}/learned-context-test-${Date.now()}.db`;

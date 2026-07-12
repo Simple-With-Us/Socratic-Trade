@@ -58,8 +58,8 @@ export interface PolicyContext {
    */
   approvedEscalations?: ApprovedEscalation[];
   /**
-   * The BUYING ConnectedAccount's taxationType (db row, set on the account itself in Settings →
-   * Broker accounts). This is the SOURCE OF TRUTH for the account's tax regime — it wins over
+   * The BUYING ConnectedAccount's taxationType (db row, as configured in Settings → Tax
+   * treatment). This is the SOURCE OF TRUTH for the account's tax regime — it wins over
    * policy.taxSettings.taxationType (see dashboard.ts's tax-summary overlay) and must be
    * threaded here because legacy/manually-configured IRA accounts may have capabilities absent
    * (or reporting "brokerage") AND a policy taxSettings without taxationType; without this the
@@ -331,19 +331,12 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
     reasons.push(`${proposal.type} orders are not permitted.`);
   }
   // Bracket orders: allow when "bracket" is in permittedOrderTypes OR when stop-loss rules are
-  // configured (treating stop-loss rules as an implicit green-light for bracket risk management) OR
-  // when this proposal carries an explicit per-position "fixed"/"atr" stop plan — that plan pins a
-  // bracket stop regardless of the account's own stopLossPct (STOP_PLAN_FALLBACK_STOP_PCT on a bare
-  // account, universal availability), so a bare account with no bracket permission and no base stop
-  // configured would otherwise reject the exact proposal the owner/LLM deliberately chose to protect
-  // (Codex review, PR #1371). Permissive default — brackets should be encouraged when stop rules (or
-  // an explicit per-position plan) are active.
+  // configured (treating stop-loss rules as an implicit green-light for bracket risk management).
+  // Permissive default — brackets should be encouraged when stop rules are active.
   if (proposal.bracketTakeProfit != null || proposal.bracketStopLoss != null) {
     const bracketPermitted =
       context.policy.permittedOrderTypes.includes("bracket" as any) ||
-      (context.policy.riskRules?.stopLossPct != null && context.policy.riskRules.stopLossPct > 0) ||
-      proposal.stopPlan?.style === "fixed" ||
-      proposal.stopPlan?.style === "atr";
+      (context.policy.riskRules?.stopLossPct != null && context.policy.riskRules.stopLossPct > 0);
     if (!bracketPermitted) {
       reasons.push('Bracket orders require "bracket" in permittedOrderTypes or a stopLossPct risk rule.');
     }
@@ -437,17 +430,8 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
         : `the connected account does not support short selling`;
       reasons.push(`Order side "${proposal.side}" rejected: ${why}.`);
     } else {
-      // An explicit per-position "fixed"/"atr"/"trailing" plan satisfies the mandatory-stop
-      // requirement the same way it satisfies the bracket-permission gate above — it guarantees this
-      // short a real stop (via STOP_PLAN_FALLBACK_STOP_PCT or the trailing lane) even on an account
-      // with no account-wide shortStopLossPct configured (Codex review, PR #1371). A "none" plan does
-      // NOT satisfy this gate — that's a deliberate, separate safety invariant for shorts specifically
-      // (unbounded loss direction), not the general "risk-increasing choices aren't gated" rule this
-      // repo applies to per-position stop plans elsewhere; see the PR comment for the open question.
-      const hasExplicitDistancePlan =
-        proposal.stopPlan?.style === "fixed" || proposal.stopPlan?.style === "atr" || proposal.stopPlan?.style === "trailing";
-      if ((!context.policy.riskRules?.shortStopLossPct || context.policy.riskRules.shortStopLossPct <= 0) && !hasExplicitDistancePlan) {
-        reasons.push(`Short proposals must carry a mandatory stop-loss (policy.riskRules.shortStopLossPct, or an explicit fixed/atr/trailing stopPlan).`);
+      if (!context.policy.riskRules?.shortStopLossPct || context.policy.riskRules.shortStopLossPct <= 0) {
+        reasons.push(`Short proposals must carry a mandatory stop-loss (policy.riskRules.shortStopLossPct).`);
       }
       if (context.policy.maxShortOrderNotional && estimatedNotional > context.policy.maxShortOrderNotional) {
         reasons.push(`Order of $${estimatedNotional.toFixed(2)} exceeds the max short order limit of $${context.policy.maxShortOrderNotional}`);

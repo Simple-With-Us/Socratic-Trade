@@ -9,7 +9,7 @@
 import { canonicalTicker } from "../rag/chunk";
 import { resolveLlmCredential } from "../db";
 import { recordLlmUsage, extractLlmUsage } from "../llm-usage";
-import { llmFetch, isReasoningModel } from "../llm-request";
+import { DEFAULT_OPENAI_MODEL, llmFetch, isReasoningModel } from "../llm-request";
 import { DISCLAIMER, SYSTEM_PROMPT } from "./prompt";
 import type { ChatLLM, Citation, LlmResult, LlmRunArgs, ToolCall } from "./types";
 
@@ -634,21 +634,18 @@ export function llmForModel(
  */
 export function getLLM(userId?: string, opts: { transport?: Transport; openAITransport?: OpenAITransport } = {}): ChatLLM {
   const chatLlm = process.env.CHAT_LLM;
-  // No hardcoded chat model default (owner 2026-07-07): the env-default chat path requires an
-  // explicit CHAT_LLM_MODEL. Without it, fall through to MockLLM rather than silently pick a model.
-  const chatModel = process.env.CHAT_LLM_MODEL?.trim();
-  if (chatLlm === "anthropic" && chatModel) {
+  if (chatLlm === "anthropic") {
     const { key, source, keyRef } = resolveLlmCredential("anthropic", userId);
     if (key) {
       const usage: LlmUsageOpts = { userId, keySource: source === "operator" ? "operator" : "user", keyRef, context: "chat" };
-      return new AnthropicLLM(key, chatModel, opts.transport ?? defaultTransport, usage);
+      return new AnthropicLLM(key, process.env.CHAT_LLM_MODEL ?? "claude-opus-4-8", opts.transport ?? defaultTransport, usage);
     }
   }
-  if (chatLlm === "openai" && chatModel) {
+  if (chatLlm === "openai") {
     const { key, source, keyRef } = resolveLlmCredential("openai", userId);
     if (key) {
       const usage: LlmUsageOpts = { userId, keySource: source === "operator" ? "operator" : "user", keyRef, context: "chat" };
-      return new OpenAILLM(key, chatModel, opts.openAITransport ?? defaultOpenAITransport, usage);
+      return new OpenAILLM(key, process.env.CHAT_LLM_MODEL ?? DEFAULT_OPENAI_MODEL, opts.openAITransport ?? defaultOpenAITransport, usage);
     }
   }
   return new MockLLM();

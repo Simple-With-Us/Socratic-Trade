@@ -5,22 +5,15 @@
  *  saved prefs), writes POST /api/notifications, and exercises every enabled
  *  channel via the existing test endpoint. A channel can only be enabled when
  *  the server operator has configured its provider (e.g. email needs a Resend
- *  key) — unavailable ones say so instead of failing silently.
- *
- *  Auto-saves like every other settings card (owner-directed 2026-07-09):
- *  channel toggles save on change, each channel's target field saves on
- *  blur. saveDeliveryPrefs is a whole-object POST, so every write sends the
- *  full merged prefs (saved ∪ any other in-progress local edits) — never
- *  just the one changed field — so a toggle never drops a pending target
- *  edit in a sibling field, and vice versa. */
+ *  key) — unavailable ones say so instead of failing silently. Ports the
+ *  legacy DeliveryChannelsPanel into the console's grammar with a dirty-guard
+ *  draft and per-channel test results. */
 
 import { useCallback, useEffect, useState } from "react";
 import { sendTestNotification, ConsoleApiError } from "../lib/api";
-import { useAutoSave } from "../lib/useAutoSave";
+import { useUnsavedChanges } from "../lib/useDirtyGuard";
 import { useToast } from "../ui/toast";
-import { SaveStatus } from "../ui/save-status";
 import { Btn, Card, Field, TextInput, Toggle } from "../ui/primitives";
-import { ListSection, ListRow, LabeledContent } from "../../ui/ios-components";
 import {
   fetchDeliverySettings,
   saveDeliveryPrefs,
@@ -36,8 +29,6 @@ const CHANNEL_TITLE: Record<DeliveryChannelDescriptor["id"], string> = {
   sms: "A text message per alert. Needs the server operator's Twilio credentials; carrier rates may apply."
 };
 
-type TargetField = "pushTarget" | "webhookUrl" | "email" | "phone";
-
 interface TestResult {
   channel: string;
   ok: boolean;
@@ -47,16 +38,15 @@ interface TestResult {
 
 export function DeliveryChannelsCard() {
   const toast = useToast();
-  const autoSave = useAutoSave();
   const [channels, setChannels] = useState<DeliveryChannelDescriptor[] | null>(null);
   const [saved, setSaved] = useState<DeliveryPrefs>(EMPTY_DELIVERY_PREFS);
-  // Sticky optimistic overlay: seeded from the loaded snapshot, updated
-  // immediately on toggle/blur for instant feedback, reverted per-field by
-  // useAutoSave's onError if a write fails.
-  const [local, setLocal] = useState<DeliveryPrefs | null>(null);
+  const [draft, setDraft] = useState<DeliveryPrefs | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [testBusy, setTestBusy] = useState(false);
+  const [busy, setBusy] = useState<"save" | "test" | null>(null);
   const [results, setResults] = useState<TestResult[] | null>(null);
+
+  const dirty = draft !== null && JSON.stringify(draft) !== JSON.stringify(saved);
+  useUnsavedChanges(dirty);
 
   const load = useCallback(async () => {
     try {
@@ -64,7 +54,7 @@ export function DeliveryChannelsCard() {
       setChannels(body.channels ?? []);
       const prefs = { ...EMPTY_DELIVERY_PREFS, ...body.prefs, channels: body.prefs?.channels ?? [] };
       setSaved(prefs);
-      setLocal(prefs);
+      setDraft(null);
       setLoadError(null);
     } catch (error) {
       setLoadError(error instanceof ConsoleApiError ? error.message : "Could not load delivery channels.");
@@ -75,62 +65,42 @@ export function DeliveryChannelsCard() {
     void load();
   }, [load]);
 
-  const prefs = local ?? saved;
-  const busy = autoSave.saving || testBusy;
+  const prefs = draft ?? saved;
+  const setPrefs = (updater: (p: DeliveryPrefs) => DeliveryPrefs) => setDraft(updater(prefs));
 
-  // Persist the full merged prefs object (whole-object POST) and adopt the
-  // server's response as the new saved/local baseline.
-  const persist = (next: DeliveryPrefs, opts: { onError: () => void; successToast?: { title: string; detail?: string } }) => {
-    autoSave.save(
-      async () => {
-        const { prefs: persisted } = await saveDeliveryPrefs(next);
-        const merged = { ...EMPTY_DELIVERY_PREFS, ...persisted, channels: persisted?.channels ?? [] };
-        setSaved(merged);
-        setLocal(merged);
-      },
-      opts
-    );
-  };
+  const targetValue = (field: string) => (prefs as unknown as Record<string, unknown>)[field];
+  const setTarget = (field: string, value: string) => setPrefs((p) => ({ ...p, [field]: value }));
+  const toggleChannel = (id: string, on: boolean) =>
+    setPrefs((p) => ({
+      ...p,
+      channels: on ? Array.from(new Set([...p.channels, id])) : p.channels.filter((c) => c !== id)
+    }));
 
-  const toggleChannel = (id: string, on: boolean) => {
-    const prevChannels = prefs.channels;
-    const nextChannels = on ? Array.from(new Set([...prefs.channels, id])) : prefs.channels.filter((c) => c !== id);
-    const next = { ...prefs, channels: nextChannels };
-    setLocal(next);
-    const label = channels?.find((c) => c.id === id)?.label ?? id;
-    persist(next, {
-      onError: () => setLocal((l) => (l ? { ...l, channels: prevChannels } : l)),
-      successToast: { title: `${label} delivery ${on ? "on" : "off"}` }
-    });
-  };
-
-  const targetValue = (field: TargetField) => prefs[field];
-  const setTarget = (field: TargetField, value: string) => setLocal((l) => ({ ...(l ?? prefs), [field]: value }));
-
-  const commitTarget = (field: TargetField) => {
-    const raw = targetValue(field);
-    const trimmed = raw.trim();
-    const savedValue = saved[field];
-    if (trimmed === savedValue) {
-      // No real change (or just whitespace trimmed) — no write, but normalize
-      // the visible value.
-      if (trimmed !== raw) setLocal((l) => (l ? { ...l, [field]: trimmed } : l));
-      return;
+  const save = async () => {
+    setBusy("save");
+    try {
+      const { prefs: persisted } = await saveDeliveryPrefs(prefs);
+      setSaved({ ...EMPTY_DELIVERY_PREFS, ...persisted, channels: persisted?.channels ?? [] });
+      setDraft(null);
+      toast.push("pos", "Delivery channels saved");
+    } catch (error) {
+      toast.push("neg", "Not saved", error instanceof ConsoleApiError ? error.message : String(error));
+    } finally {
+      setBusy(null);
     }
-    const next = { ...prefs, [field]: trimmed };
-    setLocal(next);
-    persist(next, {
-      onError: () => setLocal((l) => (l ? { ...l, [field]: savedValue } : l))
-    });
   };
 
   const sendTest = async () => {
-    setTestBusy(true);
+    setBusy("test");
     setResults(null);
     try {
-      // Fires against whatever's already saved on the server — channels now
-      // auto-save on toggle and targets on blur, so there's nothing to
-      // persist first.
+      // The test always uses SAVED prefs — persist the draft first so what you
+      // test is what will actually fire.
+      if (dirty || draft !== null) {
+        const { prefs: persisted } = await saveDeliveryPrefs(prefs);
+        setSaved({ ...EMPTY_DELIVERY_PREFS, ...persisted, channels: persisted?.channels ?? [] });
+        setDraft(null);
+      }
       const { results: r } = await sendTestNotification();
       setResults(r);
       const sent = r.filter((x) => x.ok).length;
@@ -139,121 +109,128 @@ export function DeliveryChannelsCard() {
     } catch (error) {
       toast.push("neg", "Test failed", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
-      setTestBusy(false);
+      setBusy(null);
     }
   };
 
   return (
-    <ListSection
+    <Card
       title="Delivery channels"
       action={
-        <div className="flex items-center gap-3">
-          <SaveStatus status={autoSave.status} />
+        <div className="flex gap-2">
+          {dirty && (
+            <>
+              <Btn variant="ghost" size="sm" onClick={() => setDraft(null)} title="Throw away unsaved channel edits.">
+                Discard
+              </Btn>
+              <Btn variant="primary" size="sm" disabled={busy !== null} onClick={() => void save()} title="Persist these channel choices and targets.">
+                {busy === "save" ? "Saving…" : "Save"}
+              </Btn>
+            </>
+          )}
           <Btn
             size="sm"
-            disabled={busy || channels === null}
+            disabled={busy !== null || channels === null}
             onClick={() => void sendTest()}
-            title="Fires a test alert through every enabled, saved channel so you can confirm it reaches you."
+            title="Saves any pending edits, then fires a test alert through every enabled channel so you can confirm it reaches you."
           >
-            {testBusy ? "Sending…" : "Send test"}
+            {busy === "test" ? "Sending…" : "Send test"}
           </Btn>
         </div>
       }
     >
-      <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] px-2">
+      <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
         Where alerts leave the app — one setup for your whole login, across every account. Which events fire is chosen
         in Event notifications above; this is how they reach you. Without any channel, events are still recorded in
         Activity, just not pushed anywhere.
       </p>
 
       {loadError && (
-        <div className="px-2 mb-3">
-          <p className="rounded-lg border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] p-2.5 text-[length:var(--con-fs-xs)]">
-            {loadError}{" "}
-            <button type="button" className="font-semibold underline" onClick={() => void load()} title="Try loading the channels again.">
-              Retry
-            </button>
-          </p>
-        </div>
+        <p className="mb-3 rounded-lg border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] p-2.5 text-[length:var(--con-fs-xs)]">
+          {loadError}{" "}
+          <button type="button" className="font-semibold underline" onClick={() => void load()} title="Try loading the channels again.">
+            Retry
+          </button>
+        </p>
       )}
 
       {channels === null && !loadError && (
-        <ListRow>
-          <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-faint)] py-1">Loading channels…</p>
-        </ListRow>
+        <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-faint)]">Loading channels…</p>
       )}
 
-      {channels !== null && channels.map((ch) => {
-        const on = prefs.channels.includes(ch.id);
-        const target = targetValue(ch.targetField as TargetField);
-        return (
-          <ListRow key={ch.id}>
-            <div className="flex flex-col gap-2 w-full">
-              <LabeledContent label={
-                <div className="flex flex-wrap items-center gap-2">
-                  <span title={CHANNEL_TITLE[ch.id]}>{ch.label}</span>
-                  {ch.id === "push" && ch.available && (
-                    <span
-                      className="rounded-full border border-[color:var(--con-pos-border)] bg-[color:var(--con-pos-soft)] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[color:var(--con-pos)]"
-                      title="Push via ntfy needs no account or key and is free — the recommended first channel."
-                    >
-                      recommended · free
+      {channels !== null && (
+        <div className="flex flex-col gap-2">
+          {channels.map((ch) => {
+            const on = prefs.channels.includes(ch.id);
+            const target = targetValue(ch.targetField);
+            return (
+              <div
+                key={ch.id}
+                className="rounded-lg border border-[color:var(--con-line)] p-3 transition-colors hover:bg-[color:var(--con-surface-2)] focus-within:bg-[color:var(--con-surface-2)]"
+              >
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[length:var(--con-fs-sm)] font-semibold" title={CHANNEL_TITLE[ch.id]}>
+                      {ch.label}
                     </span>
-                  )}
-                  {!ch.available && (
-                    <span
-                      className="text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)] font-normal"
-                      title="The server operator hasn't configured this channel's provider, so it can't be enabled from here."
-                    >
-                      not configured on the server
-                    </span>
-                  )}
+                    {ch.id === "push" && ch.available && (
+                      <span
+                        className="rounded-full border border-[color:var(--con-pos-border)] bg-[color:var(--con-pos-soft)] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[color:var(--con-pos)]"
+                        title="Push via ntfy needs no account or key and is free — the recommended first channel."
+                      >
+                        recommended · free
+                      </span>
+                    )}
+                    {!ch.available && (
+                      <span
+                        className="text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]"
+                        title="The server operator hasn't configured this channel's provider, so it can't be enabled from here."
+                      >
+                        not configured on the server
+                      </span>
+                    )}
+                  </div>
+                  <Toggle
+                    checked={on}
+                    disabled={!ch.available || busy !== null}
+                    onChange={(next) => toggleChannel(ch.id, next)}
+                    label={`${ch.label} channel`}
+                  />
                 </div>
-              } hint={ch.id === "push" && ch.available ? undefined : ""}>
-                <Toggle
-                  checked={on}
-                  disabled={!ch.available || busy}
-                  onChange={(next) => toggleChannel(ch.id, next)}
-                />
-              </LabeledContent>
-              
-              {on && ch.available && (
-                <div className="pl-2 pr-1 pb-1 mt-1 border-t border-[color:var(--con-border-subtle)] pt-2">
-                  <LabeledContent label={ch.targetLabel} hint={ch.hint}>
-                    <input
-                      id={`ch-${ch.id}`}
-                      className="w-48 text-right bg-transparent text-[length:var(--con-fs-sm)] focus:outline-none placeholder:text-[color:var(--con-muted)]"
-                      value={typeof target === "string" ? target : ""}
-                      placeholder={ch.placeholder}
-                      onChange={(e) => setTarget(ch.targetField as TargetField, e.target.value)}
-                      onBlur={() => commitTarget(ch.targetField as TargetField)}
-                      title={ch.hint}
-                    />
-                  </LabeledContent>
-                </div>
-              )}
-            </div>
-          </ListRow>
-        );
-      })}
+                {on && ch.available && (
+                  <div className="mt-2 max-w-md">
+                    <Field label={ch.targetLabel} hint={ch.hint} htmlFor={`ch-${ch.id}`}>
+                      <TextInput
+                        id={`ch-${ch.id}`}
+                        value={typeof target === "string" ? target : ""}
+                        placeholder={ch.placeholder}
+                        onChange={(e) => setTarget(ch.targetField, e.target.value)}
+                        title={ch.hint}
+                      />
+                    </Field>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {results && (
-        <ListRow>
-          <ul className="flex flex-col gap-1 text-[length:var(--con-fs-xs)] w-full py-2">
-            {results.length === 0 && <li className="text-[color:var(--con-muted)]">No channels enabled — toggle one above first.</li>}
-            {results.map((r, i) => (
-              <li
-                key={i}
-                className={r.ok ? "text-[color:var(--con-pos)]" : "text-[color:var(--con-muted)]"}
-                title={r.ok ? "The test message was accepted by the provider." : r.skipped ? "Skipped — the channel is off, has no target, or its provider isn't configured." : r.error ?? "The provider rejected the test."}
-              >
-                {r.ok ? "✓" : "—"} {r.channel}
-                {r.skipped ? ` (${r.skipped.replace(/_/g, " ")})` : r.ok ? " — sent" : ` — failed${r.error ? `: ${r.error}` : ""}`}
-              </li>
-            ))}
-          </ul>
-        </ListRow>
+        <ul className="mt-3 flex flex-col gap-1 text-[length:var(--con-fs-xs)]">
+          {results.length === 0 && <li className="text-[color:var(--con-muted)]">No channels enabled — toggle one above first.</li>}
+          {results.map((r, i) => (
+            <li
+              key={i}
+              className={r.ok ? "text-[color:var(--con-pos)]" : "text-[color:var(--con-muted)]"}
+              title={r.ok ? "The test message was accepted by the provider." : r.skipped ? "Skipped — the channel is off, has no target, or its provider isn't configured." : r.error ?? "The provider rejected the test."}
+            >
+              {r.ok ? "✓" : "—"} {r.channel}
+              {r.skipped ? ` (${r.skipped.replace(/_/g, " ")})` : r.ok ? " — sent" : ` — failed${r.error ? `: ${r.error}` : ""}`}
+            </li>
+          ))}
+        </ul>
       )}
-    </ListSection>
+    </Card>
   );
 }

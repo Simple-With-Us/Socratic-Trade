@@ -369,14 +369,12 @@ function computeBudgetDecision(
   policy: { llmModel?: string | null; redTeamLlmModel?: string | null },
   status: BudgetStatus
 ): BudgetRunDecision {
-  // Resolve the models that will ACTUALLY serve this run, matching resolveLlmEndpoint. NO MODEL
-  // DEFAULTS (owner directive 2026-07-07): both resolve to the user's explicit choices, or "" when
-  // unchosen — Red NEVER falls back to Green. A run with an unchosen model fails closed before any
-  // spend, so there is nothing here to budget: bail out with NO_DECISION on a blank Green, and treat
-  // a blank Red as "no red call will run" (no downgrade to compute for it).
+  // Resolve the models that will ACTUALLY serve this run, matching resolveLlmEndpoint: the green
+  // model falls back to OPENAI_MODEL/the default when policy.llmModel is unset, and the red model
+  // falls back to the green model. Enforcing on the raw (possibly undefined) policy fields would
+  // silently no-op the common default-model case.
   const greenModel = resolveOpenAiModel(policy);
-  if (!greenModel) return NO_DECISION;
-  const redModel = policy.redTeamLlmModel?.trim() || "";
+  const redModel = (policy.redTeamLlmModel && policy.redTeamLlmModel.trim()) || greenModel;
 
   const statusByProvider = new Map(status.providers.map((p) => [p.name.toLowerCase(), p.status]));
   const primaryProvider = providerForModel(greenModel);
@@ -398,7 +396,7 @@ function computeBudgetDecision(
     };
   }
 
-  const cheaperRed = redModel ? cheaperModel(redModel) : undefined;
+  const cheaperRed = cheaperModel(redModel);
   const redChanged = !!cheaperRed && cheaperRed !== redModel;
   if (greenChanged || redChanged) {
     return {

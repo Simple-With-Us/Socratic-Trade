@@ -90,24 +90,6 @@ export function connectAlpacaAccount(body: AlpacaConnectBody): Promise<{ ok: boo
   });
 }
 
-export interface TradierConnectBody {
-  label?: string;
-  apiKey: string;
-  environment: "paper" | "live";
-  accountNumber?: string;
-  taxationType?: "taxable" | "roth_ira" | "traditional_ira";
-}
-
-/** POST /api/connected-accounts {broker:"tradier", ...}. Single access token (no secret). The
- *  environment is an explicit selector (Sandbox=paper / Production=live) — Tradier tokens carry no
- *  PK/PA-style prefix — and the server derives the sandbox/production endpoint from it. */
-export function connectTradierAccount(body: TradierConnectBody): Promise<{ ok: boolean }> {
-  return request<{ ok: boolean }>("/api/connected-accounts", {
-    method: "POST",
-    body: JSON.stringify({ broker: "tradier", ...body })
-  });
-}
-
 /** POST /api/connected-accounts {broker:"test"} — creates the explicit local
  *  mock paper account. The server keeps it inactive until the user switches to it. */
 export function connectTestAccount(): Promise<{ ok: boolean; accountNumber?: string; label?: string }> {
@@ -141,8 +123,6 @@ export interface ApiKeyEntry {
   /** Set only when YOU have a stored key. */
   updatedAt?: string;
   savedLabel?: string;
-  /** UI text override (default is "key", e.g., "contact" for SEC) */
-  credentialName?: string;
 }
 
 export function listApiKeys(): Promise<{ keys: ApiKeyEntry[] }> {
@@ -162,6 +142,14 @@ export function deleteApiKey(service: string): Promise<{ success: boolean; delet
   return request<{ success: boolean; deleted: boolean }>(`/api/keys?service=${encodeURIComponent(service)}`, {
     method: "DELETE"
   });
+}
+
+// ── LLM provider availability ────────────────────────────────────────────────
+
+/** GET /api/chat/providers — per-provider "a key resolves for this user"
+ *  booleans (never the keys). Same check the server makes before a real call. */
+export function fetchChatProviders(): Promise<{ providers: Record<string, boolean> }> {
+  return request<{ providers: Record<string, boolean> }>("/api/chat/providers");
 }
 
 // ── Delivery channels (out-of-app alert delivery) ────────────────────────────

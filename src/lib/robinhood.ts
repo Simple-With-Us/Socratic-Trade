@@ -46,53 +46,6 @@ export interface RobinhoodMcpHealth {
   warning?: string;
 }
 
-/**
- * Robinhood's minimum dollar-based/fractional equity order size. Below this, `review_equity_order`
- * returns an `order_checks` alertType telling us the order will be rejected outright (see
- * ROBINHOOD_SUB_MINIMUM_ALERT_TYPES). Exposed as a named per-broker constant — never hardcode the
- * literal `1` in a caller for this.
- */
-export const ROBINHOOD_MIN_ORDER_NOTIONAL = 1;
-
-/**
- * `order_checks.alertType` values that mean the order is a GUARANTEED reject for being below
- * Robinhood's minimum order size — not a soft warning, an unconditional floor no sizing/retry can
- * satisfy for the same notional. `review_equity_order` is a genuine pre-flight: if either of these
- * comes back, placing the order anyway will fail every time.
- */
-export const ROBINHOOD_SUB_MINIMUM_ALERT_TYPES = new Set([
-  "EQUITY_DOLLAR_BASED_MINIMUM_AMOUNT_ERROR",
-  "EQUITY_SUB_DOLLAR_SHARE_BASED_ORDER"
-]);
-
-/**
- * Tolerantly normalize Robinhood's `review_equity_order` `order_checks` field, which can come back
- * as a single check object, an array of check objects, or be absent entirely — the MCP server's
- * exact envelope isn't documented, so this is deliberately liberal about shape. Extracts every
- * present alertType-shaped value plus any human-readable message/description/reason so callers can
- * build a pre-flight rejection signal without depending on one exact schema.
- */
-export function parseRobinhoodOrderChecks(raw: unknown): { alertTypes: string[]; messages: string[] } {
-  const root = raw as Record<string, unknown> | undefined;
-  const rawChecks = root?.order_checks ?? (root as Record<string, unknown> | undefined)?.orderChecks;
-  const rows: unknown[] = Array.isArray(rawChecks)
-    ? rawChecks
-    : rawChecks && typeof rawChecks === "object"
-      ? [rawChecks]
-      : [];
-  const alertTypes: string[] = [];
-  const messages: string[] = [];
-  for (const row of rows) {
-    if (!row || typeof row !== "object") continue;
-    const check = row as Record<string, unknown>;
-    const alertType = check.alertType ?? check.alert_type ?? check.type;
-    if (alertType !== undefined && alertType !== null && alertType !== "") alertTypes.push(String(alertType));
-    const message = check.message ?? check.description ?? check.detail ?? check.reason;
-    if (message !== undefined && message !== null && message !== "") messages.push(String(message));
-  }
-  return { alertTypes, messages };
-}
-
 export function getRobinhoodGateway(userId: string): BrokerGateway {
   // Robinhood is MCP-only. When it isn't connected, the MCP gateway surfaces honest
   // errors and the health card shows "not connected" — it never returns fabricated data.
@@ -179,11 +132,6 @@ export function portfolioFromRobinhoodRaw(accountNumber: string, raw: Record<str
 }
 
 class HttpMcpRobinhoodGateway implements BrokerGateway {
-  // ordersListIncludesTerminal is DELIBERATELY left unset (⇒ conservative/false): Robinhood's
-  // get_equity_orders terminal-inclusion window can't be verified without a live token, so
-  // reconcilePlacementError must NOT conclude not_placed from an absent order here (a placed order
-  // that already filled and aged out of a live-only list would be wrongly dropped, then duplicated
-  // next run). Absent-from-list ⇒ uncertain (protected). Flip to `true` only once verified live.
   private readonly userId: string;
 
   constructor(userId: string) {
@@ -310,8 +258,8 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
   }
 
   async getEquityOrders(accountNumber: string): Promise<EquityOrder[]> {
-    const raw = await this.callTool("get_equity_orders", { account_number: accountNumber });
-    const orders = extractRobinhoodOrderCollection(raw);
+    const raw = await this.callTool("get_equity_orders", { account_number: accountNumber }) as Record<string, unknown>;
+    const orders = Array.isArray(raw?.orders) ? raw.orders : Array.isArray(raw?.results) ? raw.results : Array.isArray(raw) ? raw : [];
     return orders.map((item: Record<string, unknown>) => ({
       id: String(item.id ?? item.order_id),
       symbol: normalizeSymbol(String(item.symbol)),
@@ -402,25 +350,11 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
 
   async reviewEquityOrder(input: EquityOrderInput): Promise<ReviewedOrder> {
     const raw = await this.callTool("review_equity_order", toMcpOrder(input)) as Record<string, unknown>;
-    // Robinhood's own pre-flight review already tells us when an order is a guaranteed reject (e.g.
-    // the sub-$1 minimum) via `order_checks`, not the top-level `alerts` array read below — surface
-    // it as a structured signal so callers can skip a doomed order instead of placing (and
-    // rejecting, and alerting on) it anyway.
-    const { alertTypes, messages } = parseRobinhoodOrderChecks(raw);
-    const blockingAlertTypes = alertTypes.filter((alertType) => ROBINHOOD_SUB_MINIMUM_ALERT_TYPES.has(alertType));
     return {
       estimatedNotional: number(
         raw.estimated_cost ?? raw.estimated_notional ?? raw.notional ?? raw.total ?? raw.estimated_amount ?? input.dollarAmount ?? 0
       ),
       alerts: Array.isArray(raw.alerts) ? raw.alerts.map(String) : [],
-      ...(blockingAlertTypes.length > 0
-        ? {
-            preflightBlock: {
-              alertTypes: blockingAlertTypes,
-              message: messages[0] ?? `Robinhood rejects this order (${blockingAlertTypes.join(", ")}).`
-            }
-          }
-        : {}),
       raw
     };
   }
@@ -631,21 +565,6 @@ function parseSseMcpResponse(body: string): { result?: unknown; error?: unknown 
 
 function unpackMcpToolResult(raw: unknown): unknown {
   const rawObj = raw as Record<string, unknown> | undefined;
-  // A tools/call result can report a TOOL-LEVEL failure via `isError: true` on an otherwise-2xx
-  // JSON-RPC success (distinct from a JSON-RPC-level `error`, which callRobinhoodMcpMethod already
-  // throws on). Surface it as a THROW so a broker-side failure (rate limit, auth lapse, upstream
-  // 5xx surfaced by the MCP proxy) can never be silently unwrapped into an error-shaped payload
-  // that a reader (e.g. getEquityOrders) then coalesces to an empty list. Booking a placement
-  // reconcile off a masked error is the phantom-fill / dropped-order money-path hazard this guards.
-  if (rawObj?.isError === true) {
-    const contentText = Array.isArray(rawObj.content)
-      ? (rawObj.content as Array<{ text?: unknown }>)
-          .map((c) => (typeof c?.text === "string" ? c.text : ""))
-          .filter(Boolean)
-          .join("; ")
-      : undefined;
-    throw new Error(`Robinhood MCP tool reported an error${contentText ? `: ${contentText}` : ""}`);
-  }
   const result = rawObj?.structuredContent ?? (rawObj?.content as Array<{ text?: unknown }>)?.[0]?.text ?? raw;
   let parsed: unknown = result;
   if (typeof result === "string") {
@@ -661,36 +580,6 @@ function unpackMcpToolResult(raw: unknown): unknown {
     return (parsed as { data: unknown }).data;
   }
   return parsed;
-}
-
-/**
- * Pull the order array out of Robinhood's get_equity_orders response, distinguishing an
- * AUTHORITATIVE empty list (a real "no orders" account state) from a malformed / error-shaped
- * response. A shape that carries no recognizable orders/results collection must THROW — never
- * coalesce to `[]` — because a placement reconcile (reconcilePlacementError / flagStalePlacingIntents)
- * reads `[]` as "the broker has no such order" and would mark a genuinely-placed order not_placed,
- * drop its durable 'placing' intent, and let the next run DUPLICATE the position. After this guard,
- * a returned `[]` means Robinhood authoritatively returned an empty order list. Tool-level broker
- * errors already throw earlier in unpackMcpToolResult (isError), so a well-formed collection here is
- * a genuine success payload.
- */
-function extractRobinhoodOrderCollection(raw: unknown): Record<string, unknown>[] {
-  if (Array.isArray(raw)) return raw as Record<string, unknown>[];
-  if (raw && typeof raw === "object") {
-    const obj = raw as Record<string, unknown>;
-    if (Array.isArray(obj.orders)) return obj.orders as Record<string, unknown>[];
-    if (Array.isArray(obj.results)) return obj.results as Record<string, unknown>[];
-  }
-  const preview = (() => {
-    try {
-      return JSON.stringify(raw)?.slice(0, 200) ?? String(raw);
-    } catch {
-      return String(raw);
-    }
-  })();
-  throw new Error(
-    `Robinhood get_equity_orders returned an unrecognized shape (no orders/results array) — treating as an error, not an empty account: ${preview}`
-  );
 }
 
 function mcpErrorMessage(payload: { error?: unknown }): string | undefined {
@@ -731,10 +620,6 @@ const MOCK_PRICES: Record<string, number> = {
 };
 
 class TestBrokerGateway implements BrokerGateway {
-  // The local deterministic sim has full knowledge of its own order history (nothing ages out), so
-  // its order list is authoritative for terminal orders. (Moot in practice — TestBroker fills
-  // synchronously and never throws on placement — but correct, and keeps sim reconciles precise.)
-  readonly ordersListIncludesTerminal = true;
   private readonly userId: string;
 
   constructor(userId: string = "local") {
@@ -918,15 +803,6 @@ export function toMcpOrder(input: EquityOrderInput): Record<string, unknown> {
   if (isShortIntent(input.side)) {
     throw new Error(
       `Robinhood does not support short selling (side="${input.side}"). Short/cover orders must not reach the broker.`
-    );
-  }
-  // The Robinhood MCP exposes no verified native trailing-stop parameter. A trailPercent order must
-  // never silently degrade into a plain stop here — the protective-stop reconciler emulates trailing
-  // on Robinhood itself (a stop_market it ratchets upward each tick) and deliberately omits this
-  // field. If Robinhood's MCP adds a trailing peg, translate it here instead of throwing.
-  if (input.trailPercent != null && input.trailPercent > 0) {
-    throw new Error(
-      "Robinhood MCP does not support native trailing stops. Place a stop_market and ratchet it (see broker-protective-stops.ts)."
     );
   }
   // FRACTIONAL / NOTIONAL ENTRIES ARE MARKET-ONLY ON ROBINHOOD. A fractional order -- a dollar_amount

@@ -418,8 +418,6 @@ On success: `{alias} will now auto-trade real money within your guardrails. Drop
     [ Cancel ]   [ Enable shorting ]
 ```
 If `shortStopLossPct` is unset, the confirm button is disabled with helper: `Set a short stop-loss to continue.`
-Since 2026-07-09 `shortStopLossPct` defaults to 8%, so this branch only fires after the user explicitly
-clears the field — it's no longer the common first-enable path.
 
 ### 6.8 Adjust-and-approve size re-confirm (Live)
 

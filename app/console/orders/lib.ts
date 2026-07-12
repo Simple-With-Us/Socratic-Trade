@@ -108,12 +108,8 @@ export function readableState(state: string | undefined): string {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-/** Plain-English order type: "stop_market" -> "Stop-market" (decided vocabulary — leading
- *  capital, hyphenated compound). */
 export function orderTypeLabel(type: string | undefined): string {
-  const hyphenated = String(type ?? "").replace(/_/g, "-");
-  if (!hyphenated) return "—";
-  return hyphenated.charAt(0).toUpperCase() + hyphenated.slice(1);
+  return String(type ?? "").replace(/_/g, "-") || "—";
 }
 
 /** Mirrors marketReplaceText in src/lib/order-replacement.ts. On any mismatch

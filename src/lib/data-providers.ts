@@ -11,15 +11,14 @@
 
 import { fromAlpacaSymbol, normalizeSymbol, toAlpacaSymbol } from "./money";
 import {
+  congressReadsEnabled,
   congressFundamentalsEnabled,
-  getCongressTradeClient
-} from "./api-clients/congress";
-import type { FundamentalRow, AnalystRow } from "@jaywedgeworth22/congress-trading-shared";
-
-export type AppAFundamentalRow = FundamentalRow & { source?: string | null };
-export type AppAAnalystRow = AnalystRow & { source?: string | null };
-
-import { resolveAlpacaMarketData, resolveApiKeyWithSource, resolveAlphaVantageKeyPool, hasDataPoolConsent, type ApiKeySource } from "./db";
+  getAppAFundamentals,
+  getAppAAnalyst,
+  type AppAFundamental,
+  type AppAAnalyst,
+} from "./congress-trade-client";
+import { resolveAlpacaMarketData, resolveApiKeyWithSource, hasDataPoolConsent, type ApiKeySource } from "./db";
 import { logApiHealth, getServiceHealthSummaries, HEALTH_REASON_CONSECUTIVE_FAILURES } from "./db-health";
 import { apiCircuitBreakerShouldSkip, CircuitOpenError } from "./api-circuit-breaker";
 import { recordProviderCall } from "./usage-monitor-push";
@@ -29,8 +28,6 @@ import { getStreamedHeadlines } from "./streams/news-store";
 import { politeFetchText, runRateLimited, secUserAgent } from "./web-sources/http";
 import { loadTickerCikMap } from "./web-sources/sec8k";
 import { padCik } from "./web-sources/sec-filings";
-import { withProviderLimit, admitProviderRequests, refundProviderRequests, resetProviderQuotaState, scrubProviderErrorText, scrubProviderErrorTextForPool, appendErrorCause } from "./provider-rate-limit";
-import { AlphaVantageKeyPool, getPoolForKeys, isAlphaVantageDailyCapMessage } from "./alpha-vantage-key-pool";
 
 // ── Enrichment cache scoping (mirrors src/lib/history.ts) ─────────────────────
 // Data fetched with a user's own stored key is scoped to that user (private) or
@@ -266,6 +263,11 @@ export function analystScoreFromMean(mean: number): number {
 }
 
 const DEFAULT_TTL_MS = 6 * 60 * 60_000; // fundamentals move slowly; cache 6h
+// Cover the default scan candidate set so every row the dashboard displays is
+// enriched — otherwise symbols that climb in rank after enrichment would render
+// blank. The 6h cache means only the first run is heavy.
+const DEFAULT_MAX_SYMBOLS = 30;
+const MAX_SYMBOLS_CAP = 50;
 const CONCURRENCY = 5;
 const cache = new Map<string, { expiresAt: number; data: SymbolEnrichment }>();
 const originalSet = cache.set.bind(cache);
@@ -347,68 +349,10 @@ export function alpacaSnapshotTtlMs(): number {
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_ALPACA_SNAPSHOT_TTL_MS;
 }
 
-// Providers enrich EVERY symbol they're asked for — the scan's candidate list (top-N ranked
-// + event outliers + all held positions) IS the budget. A fixed provider-side cap starved
-// whatever the scan appended past it (all-dash Fundamentals for the owner's own positions,
-// prod 2026-07-09), and any hard ceiling recreates that bug the day the account outgrows it
-// (owner ruling 2026-07-09: no hard cap — >50 positions is a supported future).
-// FMP_MAX_SYMBOLS stays as an EXPLICIT operator throttle for quota thrift — unclamped,
-// because a silently-clamped override is a cage, not a setting. Quota realities live where
-// they belong: the per-provider pacers in provider-rate-limit.ts, TwelveData's credit
-// window, Alpha Vantage's daily key pool, and the 6h fundamentals cache above.
 function maxSymbols(): number {
-  const explicit = Number(process.env.FMP_MAX_SYMBOLS);
-  if (Number.isFinite(explicit) && explicit > 0) return Math.floor(explicit);
-  return Number.POSITIVE_INFINITY;
-}
-
-// djb2 fingerprint of an API key — enough to distinguish per-credential rate-budget lanes; NOT a
-// secret store (in-memory only, never logged or persisted). Used to key the shared request quota
-// (provider-rate-limit.ts) so a per-user stored key with its own upstream quota is never gated by
-// the operator key.
-export function apiKeyFingerprint(apiKey: string): string {
-  let h = 5381;
-  for (let i = 0; i < apiKey.length; i++) h = ((h << 5) + h + apiKey.charCodeAt(i)) | 0;
-  return String(h >>> 0);
-}
-
-// Short negative-cache TTL for symbols a rate-limited provider returns no usable data for, so they
-// don't sit at the FRONT of `misses` forever starving lower-ranked symbols of a scarce free-tier
-// budget. Default 30 min: long enough to rotate a no-data symbol out for several scans, short enough
-// that a symbol which later gains coverage isn't suppressed for long.
-const DEFAULT_PROVIDER_NEGATIVE_TTL_MS = 30 * 60_000;
-function providerNegativeTtlMs(): number {
-  const value = Number(process.env.PROVIDER_NEGATIVE_TTL_MS ?? DEFAULT_PROVIDER_NEGATIVE_TTL_MS);
-  if (!Number.isFinite(value) || value <= 0) return DEFAULT_PROVIDER_NEGATIVE_TTL_MS;
-  return value;
-}
-
-// How many outbound requests one enriched symbol costs a quota'd provider — passed to the request
-// quota (which budgets in REQUESTS, not symbols). Only providers in RATE_QUOTAS need this: tiingo
-// fires up to 3 sub-calls/symbol (iex, daily, [news]); twelvedata costs 1 credit/symbol; fmp fires
-// 2 unconditional (insider + senate) plus up to 3 conditional (ratios-ttm, grades-consensus,
-// price-target-consensus). Non-quota'd providers (finnhub, yahoo, alpha-vantage) are paced instead
-// and never consult this.
-export function callsPerSymbol(
-  provider: string,
-  opts?: { dropExtra?: boolean; skipPe?: boolean; skipConsensus?: boolean; wantTargets?: boolean }
-): number {
-  switch (provider) {
-    case "tiingo": return opts?.dropExtra ? 2 : 3;  // iex, daily, [news]
-    // 2 unconditional (insider + senate) + ratios-ttm (unless skipPe) + grades-consensus (unless
-    // skipConsensus) + price-target-consensus (only when wantTargets). Mirrors the fetch-path
-    // conditions one-for-one; range 2..5. The caller MUST derive skipPe/skipConsensus/wantTargets
-    // from the SAME skipFlagsFor(symbol) + wantTargets formula it dispatches with, so reservation
-    // equals dispatch per symbol.
-    case "fmp": return 2 + (opts?.skipPe ? 0 : 1) + (opts?.skipConsensus ? 0 : 1) + (opts?.wantTargets ? 1 : 0);
-    default: return 1;                               // twelvedata (1 credit/symbol)
-  }
-}
-
-/** Test-only compatibility shim: the unified request quota replaced the old per-provider window
- *  gates, so resetting "the Twelve Data window" now just clears the shared quota state. */
-export function __resetTwelveDataWindowForTests(): void {
-  resetProviderQuotaState();
+  const value = Number(process.env.FMP_MAX_SYMBOLS ?? process.env.MARKET_SCAN_LIMIT ?? DEFAULT_MAX_SYMBOLS);
+  if (!Number.isFinite(value) || value <= 0) return DEFAULT_MAX_SYMBOLS;
+  return Math.min(value, MAX_SYMBOLS_CAP);
 }
 
 // One retry on HTTP 429 (rate limit) with a short backoff before giving up.
@@ -423,9 +367,6 @@ async function fetchWithRetry(
     userId?: string;
     deferSuccessLog?: boolean;
     suppressHealthStatuses?: number[];
-    // This provider's own API key (if any) — scrubbed out of any errorText logged below so
-    // a leaked query-param or echoed-back value never reaches api_health_log verbatim.
-    apiKey?: string;
   } = {}
 ): Promise<Response> {
   const retries = options.retries ?? 1;
@@ -465,7 +406,7 @@ async function fetchWithRetry(
           service: options.service,
           ok: response.ok,
           latencyMs: Date.now() - start,
-          errorText: response.ok ? undefined : scrubProviderErrorText(`HTTP ${response.status}`, options.apiKey),
+          errorText: response.ok ? undefined : `HTTP ${response.status}`,
           keySource: options.keySource,
           userId: options.userId,
         });
@@ -477,16 +418,11 @@ async function fetchWithRetry(
     }
   } catch (err) {
     if (options.service) {
-      const rawMessage = err instanceof Error ? err.message : String(err);
-      // err.cause carries the actual network-layer failure (ECONNREFUSED, DNS, etc.) that
-      // "fetch failed" alone omits — append it (truncated) before scrubbing so the health
-      // row is diagnosable without also leaking a URL-embedded API key.
-      const errorText = scrubProviderErrorText(appendErrorCause(rawMessage, err), options.apiKey);
       logApiHealth({
         service: options.service,
         ok: false,
         latencyMs: Date.now() - start,
-        errorText,
+        errorText: err instanceof Error ? err.message : String(err),
         keySource: options.keySource,
         userId: options.userId,
       });
@@ -581,7 +517,6 @@ export class CongressTradeEnrichmentProvider implements MarketEnrichmentProvider
     }
     if (misses.length === 0) return result;
 
-    const client = getCongressTradeClient();
     await Promise.all(
       misses.map(async (symbol) => {
         // Track whether EITHER read failed at the transport level (timeout/5xx/401 →
@@ -592,39 +527,32 @@ export class CongressTradeEnrichmentProvider implements MarketEnrichmentProvider
         // Bound the pull to the freshness window: rowIsFresh discards anything older than
         // CONGRESS_TRADE_MAX_STALE_DAYS, so there's no point downloading the full history.
         const fromDate = new Date(now - congressMaxStaleMs()).toISOString().slice(0, 10);
-        const [fundamentals, analyst] = await Promise.all([
-          congressFundamentalsEnabled() ? client.getFundamentals(symbol, { from: fromDate }).catch(() => { transportError = true; return [] as FundamentalRow[]; }) : Promise.resolve([] as FundamentalRow[]),
-          congressFundamentalsEnabled() ? client.getAnalyst(symbol, { from: fromDate }).catch(() => { transportError = true; return [] as AnalystRow[]; }) : Promise.resolve([] as AnalystRow[]),
+        const [funds, analysts] = await Promise.all([
+          getAppAFundamentals(symbol, { from: fromDate }).catch(() => { transportError = true; return [] as AppAFundamental[]; }),
+          getAppAAnalyst(symbol, { from: fromDate }).catch(() => { transportError = true; return [] as AppAAnalyst[]; }),
         ]);
-
-        // Do NOT log a synthetic health failure here: the shared getCongressTradeClient()
-        // fetch wrapper already records a `congress.trade` logApiHealth({ ok: false }) for
-        // every failed HTTP/transport call. Adding a per-symbol failure on top would
-        // double-count into the last-N health window and trip the enrichment circuit
-        // breaker earlier than the real upstream request count warrants. The transportError
-        // flag below is retained solely to gate negative-caching.
         // App A may return multiple fresh rows from different sources; merge the LATEST
         // non-null value per field across all of them (rows are date-ascending), so a
         // partial latest row doesn't discard a field an earlier fresh row supplied.
-        const freshFunds = fundamentals.filter((r) => rowIsFresh(r, now));
-        const freshAnalysts = analyst.filter((r) => rowIsFresh(r, now));
-        const latestFund = <K extends keyof FundamentalRow>(
+        const freshFunds = funds.filter((r) => rowIsFresh(r, now));
+        const freshAnalysts = analysts.filter((r) => rowIsFresh(r, now));
+        const latestFund = <K extends keyof AppAFundamental>(
           key: K,
-          valid: (v: NonNullable<FundamentalRow[K]>) => boolean = () => true
-        ): NonNullable<FundamentalRow[K]> | undefined => {
+          valid: (v: NonNullable<AppAFundamental[K]>) => boolean = () => true
+        ): NonNullable<AppAFundamental[K]> | undefined => {
           for (let i = freshFunds.length - 1; i >= 0; i--) {
             const v = freshFunds[i][key];
-            if (v != null && valid(v as NonNullable<FundamentalRow[K]>)) return v as NonNullable<FundamentalRow[K]>;
+            if (v != null && valid(v as NonNullable<AppAFundamental[K]>)) return v as NonNullable<AppAFundamental[K]>;
           }
           return undefined;
         };
-        const latestAnalyst = <K extends keyof AnalystRow>(
+        const latestAnalyst = <K extends keyof AppAAnalyst>(
           key: K,
-          valid: (v: NonNullable<AnalystRow[K]>) => boolean = () => true
-        ): NonNullable<AnalystRow[K]> | undefined => {
+          valid: (v: NonNullable<AppAAnalyst[K]>) => boolean = () => true
+        ): NonNullable<AppAAnalyst[K]> | undefined => {
           for (let i = freshAnalysts.length - 1; i >= 0; i--) {
             const v = freshAnalysts[i][key];
-            if (v != null && valid(v as NonNullable<AnalystRow[K]>)) return v as NonNullable<AnalystRow[K]>;
+            if (v != null && valid(v as NonNullable<AppAAnalyst[K]>)) return v as NonNullable<AppAAnalyst[K]>;
           }
           return undefined;
         };
@@ -657,7 +585,7 @@ export class CongressTradeEnrichmentProvider implements MarketEnrichmentProvider
           // the counts it came from), rather than mixing a rating from one source with
           // counts from another.
           for (let i = freshAnalysts.length - 1; i >= 0; i--) {
-            const a = freshAnalysts[i] as AppAAnalystRow;
+            const a = freshAnalysts[i];
             const counts = {
               strongBuy: a.strongBuy ?? 0,
               buy: a.buy ?? 0,
@@ -737,7 +665,7 @@ function withHealthLane(provider: MarketEnrichmentProvider, source: ApiKeySource
 export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider {
   const providers: MarketEnrichmentProvider[] = [];
   const finnhub = resolveApiKeyWithSource("finnhub", userId);
-  const alphaVantage = resolveAlphaVantageKeyPool(userId);
+  const alphaVantage = resolveApiKeyWithSource("alphavantage", userId);
   const fmp = resolveApiKeyWithSource("fmp", userId);
   const fintech = resolveApiKeyWithSource("fintechstudios", userId);
   const intrinio = resolveApiKeyWithSource("intrinio", userId);
@@ -782,7 +710,7 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   // Alpaca's free Benzinga news (one batched call covers all scan symbols) — placed ahead of
   // Alpha Vantage so it supplies headlines/sentiment, demoting AV's redundant NEWS_SENTIMENT.
   if (alpacaData.apiKey) providers.push(withHealthLane(new AlpacaNewsEnrichmentProvider(alpacaData.apiKey, alpacaData.secretKey || undefined, alpacaData.source, userId), alpacaData.source));
-  if (alphaVantage.keys.length > 0) providers.push(withHealthLane(new AlphaVantageEnrichmentProvider(alphaVantage.keys, alphaVantage.source, userId), alphaVantage.source));
+  if (alphaVantage.key) providers.push(withHealthLane(new AlphaVantageEnrichmentProvider(alphaVantage.key, alphaVantage.source, userId), alphaVantage.source));
   if (fmp.key) providers.push(withHealthLane(new FmpEnrichmentProvider(fmp.key, fmp.source, userId), fmp.source));
   // Massive REST: REAL second short-interest source (FINRA short interest / free float) for the
   // Yahoo-vs-Massive disagreement cross-check. Supplies ONLY the carrier shortPercentOfFloatSecondary
@@ -1227,12 +1155,10 @@ export function finnhubDropRecommendationEnabled(): boolean {
   return flagEnabled(process.env.FINNHUB_DROP_RECOMMENDATION);
 }
 
-// Default 20 is deliberate (unofficial scraping endpoint; burst-sensitive), but the env
-// override is unclamped — an operator raising it is making an explicit decision.
 function webullUnofficialMaxSymbols(): number {
   const value = Number(process.env.WEBULL_UNOFFICIAL_MAX_SYMBOLS ?? DEFAULT_WEBULL_UNOFFICIAL_MAX);
   if (!Number.isFinite(value) || value <= 0) return DEFAULT_WEBULL_UNOFFICIAL_MAX;
-  return Math.floor(value);
+  return Math.min(value, MAX_SYMBOLS_CAP);
 }
 
 function webullUnofficialTimeoutMs(): number {
@@ -1736,9 +1662,6 @@ interface YfCreds { cookie: string; crumb: string; expiresAt: number; }
 let yfCreds: YfCreds | null = null;
 const YF_CRUMB_TTL_MS = 55 * 60_000; // 55 min (crumbs expire ~1 hr)
 const YF_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
-// A single failed cookie/crumb handshake otherwise blanks the ENTIRE Yahoo enrichment batch
-// for every symbol this run — retry once after this short backoff before giving up.
-const YF_CREDS_RETRY_BACKOFF_MS = 500;
 
 class YahooFinanceEnrichmentProvider implements MarketEnrichmentProvider {
   readonly name = "yahoo-finance";
@@ -1761,8 +1684,7 @@ class YahooFinanceEnrichmentProvider implements MarketEnrichmentProvider {
 
     let creds: YfCreds;
     try { creds = await this.getCreds(); } catch (err) {
-      const rawMessage = err instanceof Error ? err.message : String(err);
-      logApiHealth({ service: this.name, ok: false, errorText: scrubProviderErrorText(appendErrorCause(rawMessage, err)) });
+      logApiHealth({ service: this.name, ok: false, errorText: err instanceof Error ? err.message : String(err) });
       return result;
     }
 
@@ -1787,17 +1709,6 @@ class YahooFinanceEnrichmentProvider implements MarketEnrichmentProvider {
     const now = Date.now();
     if (yfCreds && yfCreds.expiresAt > now) return yfCreds;
 
-    try {
-      return await this.fetchCreds(now);
-    } catch {
-      // One retry with a short backoff — a transient network blip or momentary 429 on the
-      // handshake shouldn't blank Yahoo enrichment for every symbol this run.
-      await new Promise((resolve) => setTimeout(resolve, YF_CREDS_RETRY_BACKOFF_MS));
-      return await this.fetchCreds(Date.now());
-    }
-  }
-
-  private async fetchCreds(now: number): Promise<YfCreds> {
     const cookieRes = await fetch("https://fc.yahoo.com", {
       headers: { "user-agent": YF_UA },
       redirect: "follow"
@@ -1826,105 +1737,98 @@ class YahooFinanceEnrichmentProvider implements MarketEnrichmentProvider {
     const modules =
       "summaryDetail,defaultKeyStatistics,financialData,assetProfile,calendarEvents,institutionOwnership,majorHoldersBreakdown";
     const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=${modules}&crumb=${encodeURIComponent(creds.crumb)}`;
-    // The new prod egress IP gets HTTP 429 from Yahoo on a cold/parallel burst; gate through
-    // the shared per-provider pacer (provider-rate-limit.ts) so requests stay gently paced
-    // instead of firing CONCURRENCY-wide. The AbortController/timeout is armed INSIDE the
-    // pacer callback so the 8s HTTP timeout starts counting at actual dispatch time, not
-    // when this call joins the queue — otherwise queue wait eats into the timeout.
-    const res = await withProviderLimit(this.name, async () => {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
-      try {
-        return await fetchWithRetry(url, {
-          headers: { "user-agent": YF_UA, "Cookie": creds.cookie, "accept": "application/json" },
-          cache: "no-store",
-          signal: controller.signal
-        }, { service: this.name });
-      } finally {
-        clearTimeout(timeout);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const res = await fetchWithRetry(url, {
+        headers: { "user-agent": YF_UA, "Cookie": creds.cookie, "accept": "application/json" },
+        cache: "no-store",
+        signal: controller.signal
+      }, { service: this.name });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json() as { quoteSummary?: { result?: Array<Record<string, unknown>> } };
+      const r = json?.quoteSummary?.result?.[0] as Record<string, unknown> | undefined;
+      if (!r) return {};
+
+      const sd = (r.summaryDetail ?? {}) as Record<string, { raw?: number }>;
+      const ks = (r.defaultKeyStatistics ?? {}) as Record<string, { raw?: number }>;
+      const fd = (r.financialData ?? {}) as Record<string, { raw?: number } | string>;
+      const ap = (r.assetProfile ?? {}) as Record<string, unknown>;
+      const ce = (r.calendarEvents ?? {}) as Record<string, unknown>;
+      const io = (r.institutionOwnership ?? {}) as Record<string, unknown>;
+      const mh = (r.majorHoldersBreakdown ?? {}) as Record<string, { raw?: number }>;
+
+      const rawPe = (sd.trailingPE as { raw?: number })?.raw;
+      const rawDiv = (sd.trailingAnnualDividendYield as { raw?: number })?.raw;
+      const rawEps = (ks.trailingEps as { raw?: number })?.raw;
+      const rawRecMean = (fd.recommendationMean as { raw?: number })?.raw;
+      const rawPb = (ks.priceToBook as { raw?: number })?.raw;
+      const rawShortFloat = (ks.shortPercentOfFloat as { raw?: number })?.raw;
+      const rawBeta = (ks.beta as { raw?: number })?.raw;
+      const raw52High = (sd.fiftyTwoWeekHigh as { raw?: number })?.raw;
+      const raw52Low = (sd.fiftyTwoWeekLow as { raw?: number })?.raw;
+      const rawDebtToEquity = (fd.debtToEquity as { raw?: number })?.raw;
+      const rawEarningsGrowth = (fd.earningsGrowth as { raw?: number })?.raw;
+      const rawFcf = (fd.freeCashflow as { raw?: number })?.raw;
+      const rawMarketCap = (sd.marketCap as { raw?: number })?.raw;
+
+      const peRatio = typeof rawPe === "number" && rawPe > 0 ? rawPe : undefined;
+      // Yahoo returns yield as decimal fraction (0.0036 = 0.36%); store as percentage points.
+      const dividendYield = typeof rawDiv === "number" && rawDiv >= 0 ? Math.round(rawDiv * 10000) / 100 : undefined;
+      const eps = typeof rawEps === "number" ? rawEps : undefined;
+      const pbRatio = typeof rawPb === "number" && rawPb > 0 ? rawPb : undefined;
+      const shortPercentOfFloat = typeof rawShortFloat === "number" && rawShortFloat >= 0 ? Math.round(rawShortFloat * 10000) / 100 : undefined;
+      const beta = typeof rawBeta === "number" ? rawBeta : undefined;
+      const fiftyTwoWeekHigh = typeof raw52High === "number" ? raw52High : undefined;
+      const fiftyTwoWeekLow = typeof raw52Low === "number" ? raw52Low : undefined;
+      const debtToEquity = typeof rawDebtToEquity === "number" ? rawDebtToEquity : undefined;
+      const epsGrowth = typeof rawEarningsGrowth === "number" ? rawEarningsGrowth : undefined;
+      let fcfYield: number | undefined;
+      if (typeof rawFcf === "number" && typeof rawMarketCap === "number" && rawMarketCap > 0) {
+        fcfYield = Math.round((rawFcf / rawMarketCap) * 10000) / 100;
       }
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json() as { quoteSummary?: { result?: Array<Record<string, unknown>> } };
-    const r = json?.quoteSummary?.result?.[0] as Record<string, unknown> | undefined;
-    if (!r) return {};
+      const sector = typeof ap.sector === "string" && ap.sector ? ap.sector : undefined;
+      const industry = typeof ap.industry === "string" && ap.industry ? ap.industry : undefined;
 
-    const sd = (r.summaryDetail ?? {}) as Record<string, { raw?: number }>;
-    const ks = (r.defaultKeyStatistics ?? {}) as Record<string, { raw?: number }>;
-    const fd = (r.financialData ?? {}) as Record<string, { raw?: number } | string>;
-    const ap = (r.assetProfile ?? {}) as Record<string, unknown>;
-    const ce = (r.calendarEvents ?? {}) as Record<string, unknown>;
-    const io = (r.institutionOwnership ?? {}) as Record<string, unknown>;
-    const mh = (r.majorHoldersBreakdown ?? {}) as Record<string, { raw?: number }>;
+      // Next-earnings signal: calendarEvents.earnings.earningsDate is an array of {raw:<unix seconds>}
+      // ranges (sometimes a single point, sometimes a lo/hi window). Take the EARLIEST future date
+      // and convert to whole calendar days out. Undefined when there is no future date — never 0/guess.
+      const daysToEarnings = parseDaysToEarnings(ce);
 
-    const rawPe = (sd.trailingPE as { raw?: number })?.raw;
-    const rawDiv = (sd.trailingAnnualDividendYield as { raw?: number })?.raw;
-    const rawEps = (ks.trailingEps as { raw?: number })?.raw;
-    const rawRecMean = (fd.recommendationMean as { raw?: number })?.raw;
-    const rawPb = (ks.priceToBook as { raw?: number })?.raw;
-    const rawShortFloat = (ks.shortPercentOfFloat as { raw?: number })?.raw;
-    const rawBeta = (ks.beta as { raw?: number })?.raw;
-    const raw52High = (sd.fiftyTwoWeekHigh as { raw?: number })?.raw;
-    const raw52Low = (sd.fiftyTwoWeekLow as { raw?: number })?.raw;
-    const rawDebtToEquity = (fd.debtToEquity as { raw?: number })?.raw;
-    const rawEarningsGrowth = (fd.earningsGrowth as { raw?: number })?.raw;
-    const rawFcf = (fd.freeCashflow as { raw?: number })?.raw;
-    const rawMarketCap = (sd.marketCap as { raw?: number })?.raw;
+      // Institutional ownership %: prefer majorHoldersBreakdown.institutionsPercentHeld (0–1 fraction);
+      // fall back to summing institutionOwnership.ownershipList[].pctHeld. Stored as 0–100 percentage.
+      const institutionOwnershipPct = parseInstitutionOwnershipPct(mh, io);
 
-    const peRatio = typeof rawPe === "number" && rawPe > 0 ? rawPe : undefined;
-    // Yahoo returns yield as decimal fraction (0.0036 = 0.36%); store as percentage points.
-    const dividendYield = typeof rawDiv === "number" && rawDiv >= 0 ? Math.round(rawDiv * 10000) / 100 : undefined;
-    const eps = typeof rawEps === "number" ? rawEps : undefined;
-    const pbRatio = typeof rawPb === "number" && rawPb > 0 ? rawPb : undefined;
-    const shortPercentOfFloat = typeof rawShortFloat === "number" && rawShortFloat >= 0 ? Math.round(rawShortFloat * 10000) / 100 : undefined;
-    const beta = typeof rawBeta === "number" ? rawBeta : undefined;
-    const fiftyTwoWeekHigh = typeof raw52High === "number" ? raw52High : undefined;
-    const fiftyTwoWeekLow = typeof raw52Low === "number" ? raw52Low : undefined;
-    const debtToEquity = typeof rawDebtToEquity === "number" ? rawDebtToEquity : undefined;
-    const epsGrowth = typeof rawEarningsGrowth === "number" ? rawEarningsGrowth : undefined;
-    let fcfYield: number | undefined;
-    if (typeof rawFcf === "number" && typeof rawMarketCap === "number" && rawMarketCap > 0) {
-      fcfYield = Math.round((rawFcf / rawMarketCap) * 10000) / 100;
-    }
-    const sector = typeof ap.sector === "string" && ap.sector ? ap.sector : undefined;
-    const industry = typeof ap.industry === "string" && ap.industry ? ap.industry : undefined;
+      // Analyst rating comes from the 1–5 recommendation mean → blended by the cascade.
+      let analystBySource: Record<string, AnalystRatingDetail> | undefined;
+      if (typeof rawRecMean === "number" && rawRecMean > 0) {
+        const score = analystScoreFromMean(rawRecMean);
+        analystBySource = {
+          [this.name]: { score: Math.round(score), label: labelFromAnalystScore(score), mean: Math.round(rawRecMean * 100) / 100 }
+        };
+      }
 
-    // Next-earnings signal: calendarEvents.earnings.earningsDate is an array of {raw:<unix seconds>}
-    // ranges (sometimes a single point, sometimes a lo/hi window). Take the EARLIEST future date
-    // and convert to whole calendar days out. Undefined when there is no future date — never 0/guess.
-    const daysToEarnings = parseDaysToEarnings(ce);
-
-    // Institutional ownership %: prefer majorHoldersBreakdown.institutionsPercentHeld (0–1 fraction);
-    // fall back to summing institutionOwnership.ownershipList[].pctHeld. Stored as 0–100 percentage.
-    const institutionOwnershipPct = parseInstitutionOwnershipPct(mh, io);
-
-    // Analyst rating comes from the 1–5 recommendation mean → blended by the cascade.
-    let analystBySource: Record<string, AnalystRatingDetail> | undefined;
-    if (typeof rawRecMean === "number" && rawRecMean > 0) {
-      const score = analystScoreFromMean(rawRecMean);
-      analystBySource = {
-        [this.name]: { score: Math.round(score), label: labelFromAnalystScore(score), mean: Math.round(rawRecMean * 100) / 100 }
+      return {
+        ...(peRatio !== undefined && { peRatio }),
+        ...(dividendYield !== undefined && { dividendYield }),
+        ...(eps !== undefined && { eps }),
+        ...(sector !== undefined && { sector }),
+        ...(industry !== undefined && { industry }),
+        ...(pbRatio !== undefined && { pbRatio }),
+        ...(shortPercentOfFloat !== undefined && { shortPercentOfFloat }),
+        ...(beta !== undefined && { beta }),
+        ...(fiftyTwoWeekHigh !== undefined && { fiftyTwoWeekHigh }),
+        ...(fiftyTwoWeekLow !== undefined && { fiftyTwoWeekLow }),
+        ...(debtToEquity !== undefined && { debtToEquity }),
+        ...(epsGrowth !== undefined && { epsGrowth }),
+        ...(fcfYield !== undefined && { fcfYield }),
+        ...(daysToEarnings !== undefined && { daysToEarnings }),
+        ...(institutionOwnershipPct !== undefined && { institutionOwnershipPct }),
+        ...(analystBySource !== undefined && { analystBySource })
       };
+    } finally {
+      clearTimeout(timeout);
     }
-
-    return {
-      ...(peRatio !== undefined && { peRatio }),
-      ...(dividendYield !== undefined && { dividendYield }),
-      ...(eps !== undefined && { eps }),
-      ...(sector !== undefined && { sector }),
-      ...(industry !== undefined && { industry }),
-      ...(pbRatio !== undefined && { pbRatio }),
-      ...(shortPercentOfFloat !== undefined && { shortPercentOfFloat }),
-      ...(beta !== undefined && { beta }),
-      ...(fiftyTwoWeekHigh !== undefined && { fiftyTwoWeekHigh }),
-      ...(fiftyTwoWeekLow !== undefined && { fiftyTwoWeekLow }),
-      ...(debtToEquity !== undefined && { debtToEquity }),
-      ...(epsGrowth !== undefined && { epsGrowth }),
-      ...(fcfYield !== undefined && { fcfYield }),
-      ...(daysToEarnings !== undefined && { daysToEarnings }),
-      ...(institutionOwnershipPct !== undefined && { institutionOwnershipPct }),
-      ...(analystBySource !== undefined && { analystBySource })
-    };
   }
 }
 
@@ -2035,13 +1939,6 @@ export class FinnhubEnrichmentProvider implements MarketEnrichmentProvider {
 
     const toDate = new Date(now).toISOString().split("T")[0];
     const fromDate = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-
-    // Finnhub (60/min free) is NOT quota-capped here: each symbol fires separate per-symbol calls, so the
-    // PACER (withProviderLimit minIntervalMs, provider-rate-limit.ts) spaces them under the per-minute cap
-    // while still covering EVERY symbol over time — scan-size-agnostic without dropping coverage. Only
-    // providers with a hard windowed cap you can't space around (twelvedata batch credits, tiingo 50/hour)
-    // go through admitProviderRequests(). See RATE_QUOTAS for the pacer-vs-quota rationale.
-    if (misses.length === 0) return result;
 
     for (let i = 0; i < misses.length; i += CONCURRENCY) {
       const chunk = misses.slice(i, i + CONCURRENCY);
@@ -2164,24 +2061,15 @@ export class FinnhubEnrichmentProvider implements MarketEnrichmentProvider {
   }
 
   private async getJson(url: string): Promise<unknown> {
-    // Finnhub's free tier is 60 req/min; the 5-wide symbol chunking above fires 5
-    // endpoints/symbol, so gate actual dispatch through the shared per-provider pacer
-    // (see provider-rate-limit.ts) instead of bursting 25-wide per chunk. The
-    // AbortController/timeout is armed INSIDE the pacer callback so the 6s HTTP timeout
-    // starts counting at actual dispatch time, not when this call joins the queue —
-    // otherwise queue wait eats into the timeout and every request dispatched after ~6s
-    // arrives already aborted.
-    const response = await withProviderLimit(this.name, async () => {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 6000);
-      try {
-        return await fetchWithRetry(url, { cache: "no-store", signal: controller.signal }, { service: this.name, keySource: this.keySource, userId: this.userId, apiKey: this.apiKey });
-      } finally {
-        clearTimeout(timeout);
-      }
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return await response.json();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    try {
+      const response = await fetchWithRetry(url, { cache: "no-store", signal: controller.signal }, { service: this.name, keySource: this.keySource, userId: this.userId });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 }
 
@@ -2257,49 +2145,19 @@ export class FmpEnrichmentProvider implements MarketEnrichmentProvider {
       } else misses.push(symbol);
     }
 
-    if (misses.length === 0) return result;
-
-    // UNIFORM request quota (provider-rate-limit.ts RATE_QUOTAS): fmp = 290/min account-wide (Starter
-    // is 300/min; 290 leaves headroom). Unlike tiingo/twelvedata, FMP's per-symbol cost is VARIABLE —
-    // 2..5 requests depending on this symbol's skip flags — so we budget per symbol, not scan-uniform.
-    // Build a plan per miss (same skipFlagsFor + wantTargets formula the fetch path uses, so reservation
-    // == dispatch), admit the total, then greedily take a best-first prefix of WHOLE symbols and defer
-    // the rest best-effort (the cascade + shared 6h cache cover them; coverage accretes across scans).
-    const targetsEnabled = fmpPriceTargetsEnabled(); // read once per scan
-    const plans = misses.map((symbol) => {
-      const { skipPe, skipConsensus, skipTargets } = skipFlagsFor(symbol);
-      const wantTargets = targetsEnabled && !skipTargets;
-      const cost = callsPerSymbol("fmp", { skipPe, skipConsensus, wantTargets });
-      return { symbol, skipPe, skipConsensus, wantTargets, cost };
-    });
-    const credKey = apiKeyFingerprint(this.apiKey);
-    const totalWanted = plans.reduce((n, p) => n + p.cost, 0);
-    const allowed = admitProviderRequests("fmp", credKey, totalWanted);
-    // Greedy best-first prefix walk: misses arrive best-first, so take whole symbols in order until the
-    // next one doesn't fit, then defer it AND everything after it (preserves priority; mirrors tiingo's
-    // slice tail). `remaining` after the walk is the sub-symbol leftover admit() over-reserved.
-    let remaining = allowed;
-    const toQuery: typeof plans = [];
-    for (const p of plans) {
-      if (p.cost <= remaining) { toQuery.push(p); remaining -= p.cost; }
-      else break;
-    }
-    refundProviderRequests("fmp", credKey, remaining); // hand back the sub-symbol remainder
-    for (const p of plans.slice(toQuery.length)) result[p.symbol] = {}; // deferred; not queried/cached this run
-    if (toQuery.length === 0) return result; // no minute budget left — best-effort only
-
-    for (let i = 0; i < toQuery.length; i += CONCURRENCY) {
-      const chunk = toQuery.slice(i, i + CONCURRENCY);
+    for (let i = 0; i < misses.length; i += CONCURRENCY) {
+      const chunk = misses.slice(i, i + CONCURRENCY);
       await Promise.all(
-        chunk.map(async (plan) => {
-          // Reuse the reserved plan flags (do NOT recompute) so dispatch == reservation exactly.
-          const { symbol, skipPe, skipConsensus, wantTargets } = plan;
+        chunk.map(async (symbol) => {
           // Coverage hint (short-circuit only): when a free upstream (App A) already
           // supplied P/E, analyst consensus, or price targets for this symbol, skip the
           // matching FMP SUB-call — but always keep fetching insider/senate, which App A
           // never supplies, so nothing FMP uniquely provides is lost. (Same flags are
-          // applied to cache hits above.) skipTargets is folded into wantTargets already.
-          const skipTargets = !wantTargets;
+          // applied to cache hits above.)
+          const { skipPe, skipConsensus, skipTargets } = skipFlagsFor(symbol);
+          // Price-target-consensus is OPT-IN (FMP_PRICE_TARGETS_ENABLED): an extra FMP call per symbol,
+          // and not on every key tier. When off, targets stay undefined and ride null downstream.
+          const wantTargets = fmpPriceTargetsEnabled() && !skipTargets;
           const [peRaw, consensusRaw, insiderRaw, senateRaw, targetRaw] = await Promise.allSettled([
             skipPe
               ? Promise.resolve(undefined)
@@ -2403,28 +2261,6 @@ export class FmpEnrichmentProvider implements MarketEnrichmentProvider {
             ...(targetMedian !== undefined && { targetMedian })
           };
 
-          // Breaker-skip refund: only the sub-calls we ACTUALLY dispatched count (skipped conditional
-          // slots are Promise.resolve(undefined) → "fulfilled", never a real request). When every
-          // dispatched sub-call rejected with CircuitOpenError the breaker threw before any request left
-          // the process — nothing was spent upstream, so hand back this symbol's reservation and don't
-          // cache. The per-service breaker gates all sub-calls of a symbol together, so a partial-symbol
-          // breaker skip can't occur. Mirrors tiingo's `if (breakerSkipped) refund(perSymbol)`.
-          const madeCalls = [
-            ...(skipPe ? [] : [peRaw]),
-            ...(skipConsensus ? [] : [consensusRaw]),
-            insiderRaw,
-            senateRaw,
-            ...(wantTargets ? [targetRaw] : [])
-          ];
-          const breakerSkipped = madeCalls.length > 0 && madeCalls.every(
-            (p) => p.status === "rejected" && p.reason instanceof CircuitOpenError
-          );
-          if (breakerSkipped) {
-            refundProviderRequests("fmp", credKey, plan.cost);
-            result[symbol] = data; // leave a miss to retry once the breaker closes; do NOT cache
-            return;
-          }
-
           const promises = [peRaw, consensusRaw, insiderRaw, senateRaw];
           const allRejected = promises.every((p) => p.status === "rejected");
           const hasTransientError = promises.some((p) => p.status === "rejected" && isTransientError(p.reason));
@@ -2467,10 +2303,6 @@ export class FmpEnrichmentProvider implements MarketEnrichmentProvider {
           service: this.name,
           keySource: this.keySource,
           userId: this.userId,
-          // retries: 0 — each of the up-to-5 endpoints reserves exactly one request in the quota above;
-          // a built-in 429 retry would emit a second UNCOUNTED call and blow past the 290/min reservation
-          // (headroom is only 10). Same rationale as tiingo/twelvedata's getJson.
-          retries: 0,
           // An explicit suppress list wins; otherwise fall back to the old logHealth behavior (403 only).
           suppressHealthStatuses: suppressStatuses ?? (logHealth ? undefined : [403])
         }
@@ -2599,56 +2431,14 @@ export class AlphaVantageEnrichmentProvider implements MarketEnrichmentProvider 
   private readonly base = "https://www.alphavantage.co/query";
   private readonly scope: CacheScope;
   private readonly keySource: ApiKeySource;
-  private readonly pool: AlphaVantageKeyPool;
-  // Guards the all-exhausted health-log row so ONE enrich() call across many symbol chunks
-  // logs at most once, not once per chunk/symbol. Reset at the top of every enrich() call.
-  private allExhaustedLogged = false;
 
-  /**
-   * `apiKeyOrKeys` accepts either a single key — kept for backward compatibility with existing
-   * single-key call sites/tests (e.g. `new AlphaVantageEnrichmentProvider("test-key")`) — or the
-   * full key list from `resolveAlphaVantageKeyPool`. `pool` is injectable for tests (each test
-   * constructs and passes its own instance so exhaustion state never leaks between tests). When
-   * omitted (the production path, e.g. `getEnrichmentProvider()`), the pool is resolved via
-   * `getPoolForKeys(keys)` (alpha-vantage-key-pool.ts): a registry keyed by the exact SET of keys,
-   * so a per-user stored key and the scheduler's env-key pool get DISTINCT, coexisting pool
-   * instances instead of one construction's key set wholesale-replacing another's rotation/
-   * exhaustion state on a single shared singleton (see `getPoolForKeys`'s doc comment for the
-   * incident this replaces). Two constructions with the SAME key set still share one pool
-   * instance, so `AlphaVantageKeyPool.configure`'s idempotent value-diff (see its own doc comment)
-   * keeps exhaustion memory intact across the per-scan provider reconstruction.
-   */
   constructor(
-    apiKeyOrKeys: string | string[],
+    private readonly apiKey: string,
     keySource: ApiKeySource = "env",
-    private readonly userId?: string,
-    pool?: AlphaVantageKeyPool
+    private readonly userId?: string
   ) {
     this.scope = cacheScopeForKeySource(keySource, userId);
     this.keySource = keySource;
-    const keys = Array.isArray(apiKeyOrKeys) ? apiKeyOrKeys : [apiKeyOrKeys];
-    if (pool) {
-      this.pool = pool;
-      this.pool.configure(keys);
-    } else {
-      this.pool = getPoolForKeys(keys);
-    }
-  }
-
-  /** Logs the "entire key pool exhausted" health row AT MOST ONCE per `enrich()` call — shared by
-   *  both the once-per-chunk gate and the per-symbol dispatch-time gate below (see their call
-   *  sites for why exhaustion can newly appear at either checkpoint). */
-  private logAllExhaustedOnce(): void {
-    if (this.allExhaustedLogged) return;
-    this.allExhaustedLogged = true;
-    const total = this.pool.size();
-    logApiHealth({
-      service: this.name,
-      ok: false,
-      errorText: `Alpha Vantage: entire key pool exhausted for today (${total}/${total} keys hit the 25/day cap)`,
-      keySource: this.keySource,
-      userId: this.userId
-    });
   }
 
   async enrich(symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
@@ -2665,102 +2455,38 @@ export class AlphaVantageEnrichmentProvider implements MarketEnrichmentProvider 
       else misses.push(symbol);
     }
 
-    this.allExhaustedLogged = false;
-
     for (let i = 0; i < misses.length; i += CONCURRENCY) {
-      // All-exhausted fast-fail, checked once per CONCURRENCY-sized chunk BEFORE dispatching any
-      // network call: a scan that finds every pool key already capped skips the remaining
-      // per-symbol fetch loop entirely instead of paying N x 1.1s of guaranteed-fail serial-paced
-      // latency and writing N near-identical api_health_log rows per scan cycle — the exact prod
-      // pattern this pool is meant to fix (2026-07-09 grounding: 9-19 wasted failures/minute).
-      if (this.pool.allExhausted(now)) {
-        this.logAllExhaustedOnce();
-        for (let j = i; j < misses.length; j++) result[misses[j]] = {};
-        break;
-      }
-
       const chunk = misses.slice(i, i + CONCURRENCY);
       await Promise.all(
         chunk.map(async (symbol) => {
-          let dispatchKey: string | undefined;
-          let keyIndex = 0;
           try {
-            // deferSuccessLog: true — don't mark 200 healthy until body validates;
-            // Alpha Vantage embeds quota/error messages in HTTP 200 responses. Free tier is
-            // ~1 req/sec — gate through the shared per-provider pacer (provider-rate-limit.ts)
-            // so this stays strictly serial instead of bursting CONCURRENCY-wide. The pool's
-            // CURRENT key is read INSIDE the pacer callback (as close to actual dispatch time
-            // as possible, not captured once at construction) so a rotation triggered by an
-            // earlier symbol in the same chunk/batch is honored by later symbols once the
-            // strictly-serial pacer gets to them. The AbortController/timeout is armed in the
-            // same callback so the 6s HTTP timeout starts counting at actual dispatch time, not
-            // when this call joins the (strictly-serial, so potentially long) queue.
-            const response = await withProviderLimit(this.name, async () => {
-              // Per-symbol re-check AT DISPATCH TIME (in addition to the once-per-chunk gate
-              // above): every symbol in this CONCURRENCY-sized chunk starts together, but the
-              // alpha-vantage pacer forces effectively serial dispatch (concurrency: 1 in
-              // provider-rate-limit.ts's HARD_DEFAULTS) — so by the time THIS symbol's turn to
-              // actually reach the network arrives, an earlier symbol in the SAME chunk may have
-              // just exhausted the last live key. Without this check, `currentKey()` below would
-              // still happily hand back the earliest-to-recover (but still dead) key — it only
-              // returns undefined for an empty pool, never for an all-exhausted one — so every
-              // remaining queued symbol in the chunk would dispatch one more guaranteed-fail call.
-              if (this.pool.allExhausted(Date.now())) {
-                this.logAllExhaustedOnce();
-                throw new Error("Alpha Vantage: key pool exhausted");
-              }
-              const current = this.pool.currentKey(Date.now());
-              // Shouldn't happen — the allExhausted() gate above already skips this chunk when
-              // every key is capped — but never dispatch a request with no key to attach.
-              if (!current) throw new Error("Alpha Vantage: key pool exhausted");
-              dispatchKey = current.key;
-              keyIndex = current.index;
-              const url = `${this.base}?function=NEWS_SENTIMENT&tickers=${symbol}&apikey=${dispatchKey}`;
-              const controller = new AbortController();
-              const timeout = setTimeout(() => controller.abort(), 6000);
-              try {
-                return await fetchWithRetry(url, { cache: "no-store", signal: controller.signal }, { service: this.name, keySource: this.keySource, userId: this.userId, deferSuccessLog: true, apiKey: dispatchKey });
-              } finally {
-                clearTimeout(timeout);
-              }
-            });
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const payload = await response.json() as Record<string, unknown>;
-            // Non-secret key-index tag for health-log visibility (see connections-health / the
-            // ops snapshot) — only shown once the pool actually has >1 key, so a single-key
-            // deployment's log text is byte-identical to before this feature existed.
-            const keyTag = this.pool.size() > 1 ? ` [key ${keyIndex + 1}/${this.pool.size()}]` : "";
+            const url = `${this.base}?function=NEWS_SENTIMENT&tickers=${symbol}&apikey=${this.apiKey}`;
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 6000);
+            let payload: Record<string, unknown>;
+            try {
+              // deferSuccessLog: true — don't mark 200 healthy until body validates;
+              // Alpha Vantage embeds quota/error messages in HTTP 200 responses.
+              const response = await fetchWithRetry(url, { cache: "no-store", signal: controller.signal }, { service: this.name, keySource: this.keySource, userId: this.userId, deferSuccessLog: true });
+              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              payload = await response.json() as Record<string, unknown>;
 
-            if (payload && (payload.Note || payload.Information || payload["Error Message"])) {
-              const rawMsg = String(payload.Note || payload.Information || payload["Error Message"]);
-              // Alpha Vantage's own quota/error text has been observed echoing the caller's
-              // API key (e.g. referencing the request URL) — scrub every pool key (not just the
-              // one that dispatched this call) before it ever reaches api_health_log / the ops
-              // snapshot.
-              const msg = scrubProviderErrorTextForPool(rawMsg, this.pool.allKeys());
-              // Discriminator: ONLY the genuine daily-cap message ("detected your api key")
-              // means this key is dead until the next reset. The transient per-second burst
-              // warning shares the same "25 requests per day" upsell text but never contains
-              // that phrase — leave the sticky key in place for it; the existing 1.1s pacer is
-              // what actually addresses that case.
-              if (dispatchKey && isAlphaVantageDailyCapMessage(rawMsg)) {
-                this.pool.markExhausted(dispatchKey);
+              if (payload && (payload.Note || payload.Information || payload["Error Message"])) {
+                const msg = String(payload.Note || payload.Information || payload["Error Message"]);
+                logApiHealth({ service: this.name, ok: false, errorText: `Alpha Vantage API warning/error: ${msg}`, keySource: this.keySource, userId: this.userId });
+                throw new Error(`Alpha Vantage API warning/error: ${msg}`);
               }
-              logApiHealth({ service: this.name, ok: false, errorText: `Alpha Vantage API warning/error${keyTag}: ${msg}`, keySource: this.keySource, userId: this.userId });
-              throw new Error(`Alpha Vantage API warning/error: ${msg}`);
+              logApiHealth({ service: this.name, ok: true, keySource: this.keySource, userId: this.userId });
+            } finally {
+              clearTimeout(timeout);
             }
-            // Same [key i/N] tag on the success row too (stored in errorText, the only free-form
-            // field logApiHealth offers) — for symmetry when diagnosing which key served a given
-            // request. logApiHealth only feeds api_health_error_patterns when !ok, so this never
-            // creates a spurious error-pattern row.
-            logApiHealth({ service: this.name, ok: true, errorText: keyTag ? `key ${keyIndex + 1}/${this.pool.size()}` : undefined, keySource: this.keySource, userId: this.userId });
 
             let sentiment: number | undefined;
             let headlines: string[] = [];
 
             if (payload && Array.isArray(payload.feed)) {
               const feed = payload.feed as Array<Record<string, unknown>>;
-
+              
               // Extract headlines
               headlines = feed
                 .slice(0, 5)
@@ -2770,7 +2496,7 @@ export class AlphaVantageEnrichmentProvider implements MarketEnrichmentProvider 
               // Calculate average sentiment score from ticker_sentiment
               let scoreSum = 0;
               let scoreCount = 0;
-
+              
               for (const item of feed.slice(0, 20)) { // look at top 20 news items
                 const tickerArr = Array.isArray(item.ticker_sentiment) ? item.ticker_sentiment : [];
                 const targetTicker = tickerArr.find((t: { ticker?: string }) => t.ticker === symbol);
@@ -3155,53 +2881,25 @@ export class TiingoEnrichmentProvider implements MarketEnrichmentProvider {
     const result: Record<string, SymbolEnrichment> = {};
     const misses: string[] = [];
 
-    // Namespace the cache by news-drop mode: a TIINGO_DROP_NEWS row has no headlines/sentiment, so it
-    // must NOT be served once the flag is turned back off (mirrors finnhub's "finnhub-norec" keying).
-    const dropNews = flagEnabled(process.env.TIINGO_DROP_NEWS);
-    const cacheKey = dropNews ? "tiingo-nonews" : "tiingo";
-
     for (const symbol of normalized) {
-      const cached = readEnrichmentCache(cacheKey, symbol, this.userId, consented, now);
+      const cached = readEnrichmentCache("tiingo", symbol, this.userId, consented, now);
       if (cached) result[symbol] = cached.data;
       else misses.push(symbol);
     }
 
     const headers = { "Authorization": `Token ${this.apiKey}`, "Accept": "application/json" };
-    if (misses.length === 0) return result;
 
-    // UNIFORM request quota (provider-rate-limit.ts RATE_QUOTAS): tiingo = 50/hour + 1000/day, and each
-    // symbol costs `perSymbol` requests (iex + daily [+ news]). admit() returns how many REQUESTS fit
-    // right now; we query floor(that / perSymbol) best-first symbols and defer the rest best-effort.
-    // Scan-size-agnostic + per-credential; never stalls. (Owner's Tiingo dashboard showed hourly at
-    // -10/50 — an unpaced 30-symbol scan fires ~90 requests and 403s.)
-    const perSymbol = callsPerSymbol("tiingo", { dropExtra: dropNews });
-    const credKey = apiKeyFingerprint(this.apiKey);
-    const allowedRequests = admitProviderRequests("tiingo", credKey, misses.length * perSymbol);
-    const symbolsAllowed = Math.floor(allowedRequests / perSymbol);
-    // admit() budgets in REQUESTS but we only dispatch whole symbols — hand back the partial remainder
-    // (e.g. 50/hour leaves 2 after 16×3) so those phantom reservations don't drain the daily window or
-    // block the last symbols of a later scan.
-    refundProviderRequests("tiingo", credKey, allowedRequests - symbolsAllowed * perSymbol);
-    const toQuery = misses.slice(0, symbolsAllowed);
-    for (const symbol of misses.slice(symbolsAllowed)) result[symbol] = {}; // deferred; not queried this run
-    if (toQuery.length === 0) return result; // no hourly budget left — best-effort only
-    const negativeCache = (symbol: string) => {
-      writeEnrichmentCache(cacheKey, symbol, this.scope, this.userId, {}, now + providerNegativeTtlMs());
-      result[symbol] = {};
-    };
-
-    for (let i = 0; i < toQuery.length; i += CONCURRENCY) {
-      const chunk = toQuery.slice(i, i + CONCURRENCY);
+    for (let i = 0; i < misses.length; i += CONCURRENCY) {
+      const chunk = misses.slice(i, i + CONCURRENCY);
       await Promise.all(
         chunk.map(async (symbol) => {
           try {
             const ticker = symbol.toLowerCase();
-            const tiingoCalls = [
+            const [iexRaw, metaRaw, newsRaw] = await Promise.allSettled([
               this.getJson(`https://api.tiingo.com/iex/${ticker}?token=${this.apiKey}`, headers),
-              this.getJson(`https://api.tiingo.com/tiingo/daily/${ticker}?token=${this.apiKey}`, headers)
-            ];
-            if (!dropNews) tiingoCalls.push(this.getJson(`https://api.tiingo.com/tiingo/news?tickers=${ticker}&limit=5&token=${this.apiKey}`, headers));
-            const [iexRaw, metaRaw, newsRaw = { status: "rejected" as const, reason: new Error("news skipped") }] = await Promise.allSettled(tiingoCalls);
+              this.getJson(`https://api.tiingo.com/tiingo/daily/${ticker}?token=${this.apiKey}`, headers),
+              this.getJson(`https://api.tiingo.com/tiingo/news?tickers=${ticker}&limit=5&token=${this.apiKey}`, headers)
+            ]);
 
             let price: number | undefined;
             let bid: number | undefined;
@@ -3255,29 +2953,15 @@ export class TiingoEnrichmentProvider implements MarketEnrichmentProvider {
               ...(sentiment !== undefined && { sentiment })
             };
 
-            // Only the calls we actually made count (news is a synthetic "rejected" when dropped).
-            const madeCalls = dropNews ? [iexRaw, metaRaw] : [iexRaw, metaRaw, newsRaw];
-            const allRejected = madeCalls.every((p) => p.status === "rejected");
-            const hasTransientErr = madeCalls.some(
+            const allRejected = [iexRaw, metaRaw, newsRaw].every((p) => p.status === "rejected");
+            const hasTransientErr = [iexRaw, metaRaw, newsRaw].some(
               (p) => p.status === "rejected" && isTransientError(p.reason)
-            );
-            // The circuit breaker throws BEFORE any request is sent, so a breaker-skipped symbol never
-            // touched the upstream — refund its quota reservation and never negative-cache it.
-            const breakerSkipped = allRejected && madeCalls.some(
-              (p) => p.status === "rejected" && p.reason instanceof CircuitOpenError
             );
 
             if (!allRejected && !hasTransientErr && Object.keys(data).length > 0) {
-              writeEnrichmentCache(cacheKey, symbol, this.scope, this.userId, data, now + ttlMs());
-              result[symbol] = data;
-            } else if (!allRejected && !hasTransientErr) {
-              negativeCache(symbol); // provider RESPONDED with no usable data — rotate out; don't burn budget
-            } else {
-              // All sub-calls FAILED (transient 429/5xx, a 401/403 credential/plan error, or a breaker
-              // skip). Don't poison the cache — leave the symbol a miss to retry once the issue clears.
-              if (breakerSkipped) refundProviderRequests("tiingo", credKey, perSymbol);
-              result[symbol] = data;
+              writeEnrichmentCache("tiingo", symbol, this.scope, this.userId, data, now + ttlMs());
             }
+            result[symbol] = data;
           } catch {
             result[symbol] = {};
           }
@@ -3291,9 +2975,7 @@ export class TiingoEnrichmentProvider implements MarketEnrichmentProvider {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
     try {
-      // retries: 0 — the quota reserves exactly one request per endpoint, so a built-in 429 retry
-      // would emit a second uncounted call and re-break the 50/hour cap this gate enforces.
-      const response = await fetchWithRetry(url, { cache: "no-store", signal: controller.signal, headers }, { service: this.name, keySource: this.keySource, userId: this.userId, retries: 0 });
+      const response = await fetchWithRetry(url, { cache: "no-store", signal: controller.signal, headers }, { service: this.name, keySource: this.keySource, userId: this.userId });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return await response.json();
     } finally {
@@ -3339,56 +3021,25 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
 
     if (misses.length === 0) return result;
 
-    // Free-tier CREDIT budget, not symbol count, is the real ceiling: Twelve Data's /quote endpoint
-    // charges ONE credit PER SYMBOL in a comma-separated batch, and the free Basic tier allows only
-    // ~8 credits/minute. The old code sent up to 120 symbols in a single call = 120 credits at once,
-    // which instantly 429s the whole call (observed: 100% failure in prod). So cap a call to at most
-    // `creditsPerMin` symbols (default 8) and make exactly ONE call per enrich() covering the
-    // highest-priority misses (the scan passes candidates best-first). The per-provider pacer
-    // (provider-rate-limit.ts, twelvedata default now 1 call / 60s) then keeps concurrent-account
-    // scans from stacking past the per-minute credit budget. Symbols beyond the budget are left
-    // best-effort — the enrichment cascade fills them from other providers and the shared cache
-    // covers repeats, so coverage accretes across the hourly scans instead of failing outright.
-    // UNIFORM request quota (provider-rate-limit.ts RATE_QUOTAS): twelvedata = 8 credits/min + 800/day,
-    // 1 credit per symbol. admit() returns how many fit RIGHT NOW under both windows — scan-size-agnostic
-    // (works for any number of tickers) and per-credential — and the rest defer best-effort (the cascade
-    // + shared cache cover them; coverage accretes across scans). Never blocks/stalls the scan.
-    const credKey = apiKeyFingerprint(this.apiKey);
-    const symbolsAllowed = admitProviderRequests(this.name, credKey, misses.length);
-    const toQuery = misses.slice(0, symbolsAllowed);
-    const skipped = misses.length - toQuery.length;
-    for (const symbol of misses.slice(symbolsAllowed)) result[symbol] = {}; // deferred; not queried this run
-    if (toQuery.length === 0) return result; // no budget left this window — best-effort only
-    if (skipped > 0) {
-      // Deliberately NOT a logApiHealth(ok:true) row: that would inflate the success ratio and keep
-      // the circuit breaker from ever seeing a genuinely dead Twelve Data lane. Debug-only; the real
-      // call's ok/fail is logged below.
-      console.debug(`[data-providers] TwelveData quota: queried ${toQuery.length}/${misses.length} symbols (${skipped} deferred this scan)`);
-    }
-    for (const batch of [toQuery]) {
+    // Batch all misses in one request (Twelve Data supports comma-separated symbols).
+    // Chunk at 120 symbols (API limit) in case the scan is very large.
+    const BATCH_SIZE = 120;
+    for (let i = 0; i < misses.length; i += BATCH_SIZE) {
+      const batch = misses.slice(i, i + BATCH_SIZE);
       try {
         const url = `https://api.twelvedata.com/quote?symbol=${batch.join(",")}&apikey=${this.apiKey}&country=US`;
-        // `batch` is already capped to the per-minute credit budget above, so this single request
-        // costs at most that many credits. The pacer (provider-rate-limit.ts, twelvedata = 60s
-        // serial) spaces successive calls a full minute apart so concurrent-account scans can't sum
-        // past the budget. The AbortController/timeout is armed INSIDE the pacer callback so the 10s
-        // HTTP timeout starts counting at actual dispatch time, not when this call joins the
-        // (strictly-serial) queue — otherwise queue wait eats into the timeout.
-        const response = await withProviderLimit(this.name, async () => {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 10000);
-          try {
-            // deferSuccessLog: true — Twelve Data embeds errors in HTTP 200 responses
-            // (e.g. {"status":"error","message":"Invalid API key"}); log only after body validates.
-            // retries: 0 — the quota reserved exactly one batch call; a 429 retry would spend a second,
-            // uncounted round of credits and re-break the per-minute budget this gate enforces.
-            return await fetchWithRetry(url, { cache: "no-store", signal: controller.signal }, { service: this.name, keySource: this.keySource, userId: this.userId, deferSuccessLog: true, retries: 0 });
-          } finally {
-            clearTimeout(timeout);
-          }
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const raw: unknown = await response.json();
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        let raw: unknown;
+        try {
+          // deferSuccessLog: true — Twelve Data embeds errors in HTTP 200 responses
+        // (e.g. {"status":"error","message":"Invalid API key"}); log only after body validates.
+          const response = await fetchWithRetry(url, { cache: "no-store", signal: controller.signal }, { service: this.name, keySource: this.keySource, userId: this.userId, deferSuccessLog: true });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          raw = await response.json();
+        } finally {
+          clearTimeout(timeout);
+        }
 
         if (!raw || typeof raw !== "object") continue;
 
@@ -3404,6 +3055,7 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
           logApiHealth({ service: this.name, ok: false, errorText: `TwelveData API error: ${msg}`, keySource: this.keySource, userId: this.userId });
           continue;
         }
+        logApiHealth({ service: this.name, ok: true, keySource: this.keySource, userId: this.userId });
         if (typeof rawObj.symbol === "string") {
           // Single-symbol response
           quoteMap[rawObj.symbol as string] = rawObj;
@@ -3415,40 +3067,12 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
           }
         }
 
-        // Short negative-cache for a symbol Twelve Data returned NO usable data for (not in the
-        // response, an error row, or all-empty fields). Without this it would stay at the FRONT of
-        // `misses` every scan and permanently starve lower-ranked symbols of the tiny credit budget
-        // (they'd be deferred forever). A short TTL rotates it out for a few scans so others get a
-        // turn; it's per-provider so other providers still enrich the symbol.
-        const negativeCache = (symbol: string) => {
-          writeEnrichmentCache("twelvedata", symbol, this.scope, this.userId, {}, now + providerNegativeTtlMs());
-          result[symbol] = {};
-        };
-        // Tracked across the batch so an ALL-transient batch (mis-sized credit budget, upstream
-        // outage) can be flagged below — the ok:true logged above only reflects the outer HTTP
-        // 200/JSON-parse success, not whether any embedded per-symbol data was actually usable.
-        let anyUsableSymbolData = false;
-        let anyEmbeddedTransientError = false;
         for (const symbol of batch) {
           const q = quoteMap[symbol];
-          if (!q) {
-            negativeCache(symbol); // Twelve Data didn't return this symbol at all
-            continue;
-          }
-          // Skip error responses. A per-symbol code of 429 (rate limit) or 5xx (upstream hiccup) is
-          // TRANSIENT, not "this symbol has no data" — same convention as the whole-request error path
-          // above (continues without caching) and the App A provider's transportError flag. Negative-
-          // caching it would suppress a high-priority symbol for the full negative TTL over a condition
-          // that clears on its own. Permanent rows (400/403 plan-restricted/404 not-found, or an error
-          // with no code) still rotate out via the negative cache so they don't starve the credit budget.
+          if (!q) continue;
+          // Skip error responses
           if (q.code || q.status === "error" || q.message) {
-            const code = Number(q.code);
-            if (code === 429 || code >= 500) {
-              result[symbol] = {}; // transient — retry next scan, no cache write
-              anyEmbeddedTransientError = true;
-            } else {
-              negativeCache(symbol);
-            }
+            result[symbol] = {};
             continue;
           }
 
@@ -3485,37 +3109,11 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
 
           if (Object.keys(data).length > 0) {
             writeEnrichmentCache("twelvedata", symbol, this.scope, this.userId, data, now + ttlMs());
-            result[symbol] = data;
-            anyUsableSymbolData = true;
-          } else {
-            negativeCache(symbol); // returned a row but no usable fields — rotate it out briefly
           }
-        }
-
-        // Log exactly ONE health row for this batch, deferred until after per-symbol validation. If the
-        // whole batch surfaced embedded transient errors (429/5xx inside the HTTP 200 body) and produced
-        // NO usable symbol data, log only the failure — logging ok:true here (reflecting only the outer
-        // HTTP/JSON success) AND ok:false below for the same batch would pair them up, and getLaneHealth's
-        // circuit breaker trips only when the LAST 5 rows are all failures: alternating success/failure
-        // rows for repeated all-transient batches would never reach that state, defeating the point of
-        // this health signal. A partial batch (at least one usable symbol) still logs ok:true.
-        if (!anyUsableSymbolData && anyEmbeddedTransientError) {
-          logApiHealth({
-            service: this.name,
-            ok: false,
-            errorText: "TwelveData batch: no usable symbol data, embedded transient error(s) (429/5xx) in HTTP 200 body",
-            keySource: this.keySource,
-            userId: this.userId
-          });
-        } else {
-          logApiHealth({ service: this.name, ok: true, keySource: this.keySource, userId: this.userId });
+          result[symbol] = data;
         }
       } catch (err) {
-        // A tripped circuit breaker throws before any request is sent, so the batch's admitted credits
-        // never reached Twelve Data — hand them back so the breaker cooldown doesn't also drain the
-        // local per-minute/day budget and keep the lane deferred after it half-opens.
-        if (err instanceof CircuitOpenError) refundProviderRequests(this.name, credKey, batch.length);
-        else if (isTransientError(err)) {
+        if (isTransientError(err)) {
           console.warn("[data-providers] TwelveData transient error:", err instanceof Error ? err.message : err);
         }
         for (const symbol of batch) {

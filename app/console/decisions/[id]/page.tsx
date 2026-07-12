@@ -1,15 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
+import { useParams } from "next/navigation";
 import { ArrowLeft, BookOpen, Brain, Database, GitBranch, MessageSquare, Swords, TrendingUp } from "lucide-react";
 import type { SocraticDecisionCase, SocraticDecisionTrace, SocraticEvidenceItem, SocraticFrameworkProposal, SocraticRagAttribution, StrategyRunRow } from "@/lib/types";
 import { fmtMoney, fmtPct, timeAgo, EM_DASH } from "../../lib/format";
-import { authorityLabel, decisionStatusLabel, evidenceKindLabel, feedStatusLabel, frameworkStatusLabel, plainLabel, thesisTagLabel } from "../../lib/labels";
-import { CONSOLE_PAGE_WIDTH } from "../../lib/page-width";
-import { redTeamFailureMeta } from "../../lib/red-team";
 import { Btn, Card, Chip, SignedText, TextArea } from "../../ui/primitives";
-import { ModelBadge } from "../../ui/provider-logo";
 import { SymbolButton } from "../../ui/symbol-drilldown";
 
 type LoadState =
@@ -21,7 +18,6 @@ const SIDE_LABEL: Record<string, string> = { buy: "BUY", sell: "SELL", short: "S
 
 export default function DecisionTracePage() {
   const params = useParams<{ id: string }>();
-  const router = useRouter();
   const decisionId = String(params.id ?? "");
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [note, setNote] = useState("");
@@ -56,17 +52,6 @@ export default function DecisionTracePage() {
   useEffect(() => {
     queueMicrotask(() => void load());
   }, [load]);
-
-  // Prefer real browser back (returns to whatever list/filter the owner was on) —
-  // only fall back to a fixed destination when there's no history to go back to
-  // (e.g. this trace was opened directly, in a new tab, or via a deep link).
-  const goBack = useCallback(() => {
-    if (typeof window !== "undefined" && window.history.length > 1) {
-      router.back();
-    } else {
-      router.push("/console/activity");
-    }
-  }, [router]);
 
   const buildCoachPayload = () => {
     const trimmed = note.trim();
@@ -121,7 +106,7 @@ export default function DecisionTracePage() {
 
   if (state.status === "loading") {
     return (
-      <div className={CONSOLE_PAGE_WIDTH}>
+      <div className="mx-auto max-w-5xl">
         <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">Loading decision trace...</p>
       </div>
     );
@@ -129,14 +114,10 @@ export default function DecisionTracePage() {
 
   if (state.status === "error") {
     return (
-      <div className={CONSOLE_PAGE_WIDTH}>
-        <button
-          type="button"
-          onClick={goBack}
-          className="mb-4 inline-flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]"
-        >
-          <ArrowLeft size={13} /> Back
-        </button>
+      <div className="mx-auto max-w-3xl">
+        <Link href="/console" className="mb-4 inline-flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]">
+          <ArrowLeft size={13} /> Back to console
+        </Link>
         <Card>
           <p className="text-[color:var(--con-warn)]">{state.message}</p>
         </Card>
@@ -147,28 +128,18 @@ export default function DecisionTracePage() {
   const { decision, framework, run } = state;
   const outcome = decision.outcome;
 
-  // Intentionally wider than CONSOLE_PAGE_WIDTH: this page reuses the
-  // con-thesis-hero + xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]
-  // two-column trace/aside layout (same shape as the console home page).
-  // Squeezing that into CONSOLE_PAGE_WIDTH's 768px would starve the main
-  // column to satisfy the aside's 320px floor. See
-  // docs/rollouts/2026-07-08-console-page-width-parity.md.
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <button
-          type="button"
-          onClick={goBack}
-          className="inline-flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]"
-        >
-          <ArrowLeft size={13} /> Back
-        </button>
+        <Link href="/console" className="inline-flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]">
+          <ArrowLeft size={13} /> Back to console
+        </Link>
         <div className="flex flex-wrap gap-2">
           <Chip tone="accent" title="Decision status persisted on the Socratic case file.">
-            {decisionStatusLabel(decision.status)}
+            {decision.status}
           </Chip>
-          <Chip tone="muted" title={authorityLabel(decision.authority).title || "Authority mode at decision time."}>
-            {authorityLabel(decision.authority).label}
+          <Chip tone="muted" title="Authority mode at decision time.">
+            {decision.authority}
           </Chip>
           {decision.updatedAt && (
             <Chip tone="muted" title={new Date(decision.updatedAt).toLocaleString()}>
@@ -192,7 +163,7 @@ export default function DecisionTracePage() {
                 <SymbolButton symbol={decision.symbol} showLogo={false} className="text-inherit" />
               </Chip>
             )}
-            {decision.thesisTag && <Chip tone="muted">{thesisTagLabel(decision.thesisTag)}</Chip>}
+            {decision.thesisTag && <Chip tone="muted">{decision.thesisTag}</Chip>}
             {decision.regime && <Chip tone="muted">{decision.regime}</Chip>}
             {typeof decision.confidenceScore === "number" && <Chip tone="pos">confidence {decision.confidenceScore}</Chip>}
             {run && <Chip tone="muted">run {timeAgo(run.startedAt)}</Chip>}
@@ -202,14 +173,10 @@ export default function DecisionTracePage() {
         <div className="con-autonomy-card">
           <div className="con-card-title">Action</div>
           <div className="mt-1 text-[length:var(--con-fs-xl)] font-semibold">{decision.action || EM_DASH}</div>
-          <p>{fmtMoney(decision.notional)}</p>
-          {decision.model ? (
-            <ModelBadge modelId={decision.model} className="mt-1 text-[length:var(--con-fs-xs)]" title="The model that made this decision" />
-          ) : (
-            <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]" title="Older cases predate served-model persistence; the deciding model was not recorded.">
-              deciding model not recorded
-            </p>
-          )}
+          <p>
+            {fmtMoney(decision.notional)}
+            {decision.model ? ` · ${decision.model}` : ""}
+          </p>
         </div>
       </section>
 
@@ -236,39 +203,14 @@ export default function DecisionTracePage() {
           <TraceSection icon={<Swords size={13} />} title="Dissent">
             {decision.redTeamVerdict?.available && (
               <article className="con-evidence-card con-evidence-warn">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <strong className="flex items-center gap-2">
-                    Red Team
-                    <ModelBadge
-                      modelId={decision.redTeamVerdict.model}
-                      className="text-[length:var(--con-fs-xs)]"
-                      title="The adversarial reviewer model that produced this verdict"
-                    />
-                  </strong>
+                <div className="flex items-start justify-between gap-3">
+                  <strong>Red Team</strong>
                   <span>{redTeamTriggerLabel(decision.redTeamVerdict.trigger)}</span>
                 </div>
                 <p>{decision.redTeamVerdict.reason}</p>
               </article>
             )}
-            {decision.redTeamVerdict && !decision.redTeamVerdict.available && (
-              <article className="con-evidence-card con-evidence-warn">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <strong className="flex items-center gap-2">
-                    Red Team
-                    <ModelBadge
-                      modelId={decision.redTeamVerdict.model}
-                      className="text-[length:var(--con-fs-xs)]"
-                      title="The adversarial reviewer model that failed to produce a verdict"
-                    />
-                  </strong>
-                  <span title={redTeamFailureMeta(decision.redTeamVerdict.failureKind).title}>
-                    review failed ({redTeamFailureMeta(decision.redTeamVerdict.failureKind).label})
-                  </span>
-                </div>
-                <p>{decision.redTeamVerdict.reason}</p>
-              </article>
-            )}
-            <EvidenceList items={decision.dissent} empty={decision.redTeamVerdict ? "" : "No dissent items are attached to this case yet — no adversarial review was triggered."} />
+            <EvidenceList items={decision.dissent} empty={decision.redTeamVerdict?.available ? "" : "No dissent items are attached to this case yet."} />
           </TraceSection>
         </div>
 
@@ -284,7 +226,7 @@ export default function DecisionTracePage() {
               <div className="grid gap-3 text-[length:var(--con-fs-sm)]">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-[color:var(--con-faint)]">Status</span>
-                  <strong>{feedStatusLabel(outcome.status)}</strong>
+                  <strong>{outcome.status}</strong>
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-[color:var(--con-faint)]">Return</span>
@@ -369,7 +311,7 @@ export default function DecisionTracePage() {
                   <article key={proposal.id} className="con-evidence-card con-evidence-accent">
                     <div className="flex items-start justify-between gap-3">
                       <strong>{proposal.title}</strong>
-                      <span>{frameworkStatusLabel(proposal.status)}</span>
+                      <span>{proposal.status}</span>
                     </div>
                     <p>{proposal.proposedChange}</p>
                     {proposal.ownerResponse && (
@@ -429,7 +371,7 @@ function EvidenceList({ items, empty }: { items: SocraticEvidenceItem[]; empty: 
         <article key={`${item.kind}-${item.title}-${index}`} className={`con-evidence-card con-evidence-${toneFromSocratic(item.tone)}`}>
           <div className="flex items-start justify-between gap-3">
             <strong>{item.title}</strong>
-            <span>{[evidenceKindLabel(item.kind), item.source].filter(Boolean).join(" · ")}</span>
+            <span>{[item.kind, item.source].filter(Boolean).join(" · ")}</span>
           </div>
           <p>{item.summary}</p>
         </article>
@@ -439,9 +381,7 @@ function EvidenceList({ items, empty }: { items: SocraticEvidenceItem[]; empty: 
 }
 
 function RagItem({ item }: { item: SocraticRagAttribution }) {
-  const meta = [plainLabel(item.docType), item.source, typeof item.score === "number" ? `score ${item.score.toFixed(2)}` : item.symbol]
-    .filter(Boolean)
-    .join(" · ");
+  const meta = [item.docType, item.source, typeof item.score === "number" ? `score ${item.score.toFixed(2)}` : item.symbol].filter(Boolean).join(" · ");
   return (
     <article className="con-evidence-card con-evidence-accent">
       <div className="flex items-start justify-between gap-3">

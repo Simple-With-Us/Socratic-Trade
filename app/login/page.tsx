@@ -55,7 +55,7 @@ export default function LoginPage() {
               >
                 <button
                   type="submit"
-                  className="inline-flex w-full items-center justify-center gap-2 rounded-md border border-line bg-surface px-5 py-2.5 text-sm font-medium text-fg shadow-sm transition-opacity hover:opacity-80"
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-md border border-border bg-surface px-5 py-2.5 text-sm font-medium text-fg shadow-sm transition-opacity hover:opacity-80"
                 >
                   <GitHubIcon />
                   Sign in with GitHub
@@ -72,7 +72,7 @@ export default function LoginPage() {
                 >
                   <button
                     type="submit"
-                    className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-fg px-5 py-2.5 text-sm font-medium text-bg shadow-sm transition-opacity hover:opacity-80"
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-neutral-900 px-5 py-2.5 text-sm font-medium text-white shadow-sm transition-opacity hover:opacity-80 dark:bg-white dark:text-neutral-900"
                   >
                     <AppleIcon />
                     Sign in with Apple
@@ -89,7 +89,7 @@ export default function LoginPage() {
             )}
           </div>
         ) : (
-          <div className="rounded-md border border-line bg-surface px-4 py-3 text-sm text-muted">
+          <div className="rounded-md border border-border bg-surface px-4 py-3 text-sm text-muted">
             <p>Auth provider not configured.</p>
             <p className="mt-1 text-xs">
               Set <code className="font-mono">AUTH_GOOGLE_ID</code> /{" "}

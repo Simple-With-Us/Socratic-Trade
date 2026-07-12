@@ -24,16 +24,6 @@ import { EquityChart } from "./components/equity-chart";
 import { PositionsCard } from "./components/positions";
 import { deriveDayPnl, deriveMarkToMarket, deriveReality, deriveRiskUtilization, deriveSpend, deriveStateInfo, selectEquityWindow } from "./lib/derive";
 import { EM_DASH, fmtExact, fmtMoney, fmtMoneyWhole, fmtPct, fmtSignedMoney, timeUntil } from "./lib/format";
-import {
-  decisionStatusLabel,
-  evidenceKindLabel,
-  frameworkPriorityLabel,
-  frameworkStatusLabel,
-  frameworkSubsystemLabel,
-  plainLabel,
-  thesisTagLabel
-} from "./lib/labels";
-import { redTeamFailureMeta } from "./lib/red-team";
 import { useConsoleData } from "./lib/useConsoleData";
 import { RunOnceButton } from "./components/chrome";
 import { Ago, Card, Chip, Dash, Meter, SignedText, Stat } from "./ui/primitives";
@@ -66,14 +56,7 @@ export default function ConsoleHomePage() {
   const evidenceRows = deriveEvidenceRows(snapshot, latest, primaryDecision);
   const actionRows = deriveActionRows(snapshot, latest);
   const frameworkRows = deriveFrameworkRows(snapshot);
-  const hasFrameworkProposals = (snapshot.socratic?.frameworkProposals?.length ?? 0) > 0;
 
-  // Intentionally full-bleed (no CONSOLE_PAGE_WIDTH cap, see ./lib/page-width.ts):
-  // this is a two-column dashboard (main column + aside, aside floored at
-  // 320px via xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)] below), not
-  // a single reading column like the other console pages. Capping it to
-  // CONSOLE_PAGE_WIDTH would starve the main column to satisfy the aside's
-  // floor. See docs/rollouts/2026-07-08-console-page-width-parity.md.
   return (
     <div className="flex flex-col gap-4">
       <section className="con-thesis-hero">
@@ -92,7 +75,7 @@ export default function ConsoleHomePage() {
             </Chip>
             {primaryProposal?.tradeThesisTag && (
               <Chip tone="accent" title="The thesis bucket this reasoning is filed under for later outcome scoring.">
-                {thesisTagLabel(primaryProposal.tradeThesisTag)}
+                {primaryProposal.tradeThesisTag}
               </Chip>
             )}
             {primaryProposal?.entryMarketRegime && (
@@ -119,8 +102,8 @@ export default function ConsoleHomePage() {
         </div>
       </section>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]">
-        <div className="flex min-w-0 flex-col gap-4">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]">
+        <div className="flex flex-col gap-4">
           <Card
             title={
               <span className="flex items-center gap-1.5">
@@ -222,7 +205,7 @@ export default function ConsoleHomePage() {
           <PositionsCard snapshot={snapshot} />
         </div>
 
-        <aside className="flex min-w-0 flex-col gap-4">
+        <aside className="flex flex-col gap-4">
           <RiskUtilizationCard risk={risk} />
 
           <Card
@@ -273,18 +256,12 @@ export default function ConsoleHomePage() {
               </span>
             }
             action={
-              // The fallback body below renders thesis/regime scorecard rows, not framework
-              // proposals — that data lives (and is fully rendered) on Results, not Strategy.
-              // Only link to Strategy when framework proposals are actually shown here.
-              <Link
-                href={hasFrameworkProposals ? "/console/strategy" : "/console/results#thesis-regime"}
-                className="flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]"
-              >
-                {hasFrameworkProposals ? "Framework" : "Results"} <ArrowRight size={12} />
+              <Link href="/console/strategy" className="flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]">
+                Framework <ArrowRight size={12} />
               </Link>
             }
           >
-            {hasFrameworkProposals ? (
+            {(snapshot.socratic?.frameworkProposals?.length ?? 0) > 0 ? (
               <FrameworkProposalList proposals={snapshot.socratic?.frameworkProposals ?? []} refresh={refresh} />
             ) : (
               <div className="flex flex-col gap-2">
@@ -419,7 +396,7 @@ function RiskUtilizationCard({ risk }: { risk: ReturnType<typeof deriveRiskUtili
                 {row.pct !== undefined ? ` · ${fmtPct(row.pct, 1)}` : ""}
               </span>
             </div>
-            <Meter value={row.pct !== undefined ? row.pct : 0} max={100} />
+            <Meter value={row.pct !== undefined ? Math.min(row.pct, 100) : 0} max={100} />
           </div>
         ))}
       </div>
@@ -437,9 +414,6 @@ type DecisionRowData = {
   href?: string;
   title?: string;
   confidence?: number;
-  /** ISO timestamp of the decision/proposal — rendered top-right as a relative
-   *  "15m ago" (like Journal entries); absent for rows with no known time. */
-  at?: string;
 };
 
 type EvidenceRow = {
@@ -447,8 +421,6 @@ type EvidenceRow = {
   meta: string;
   metaTitle?: string;
   body: string;
-  symbol?: string;
-  quote?: MarketQuote;
   tone?: "pos" | "warn" | "neg" | "accent";
 };
 
@@ -491,9 +463,8 @@ function deriveActionRows(snapshot: DashboardSnapshot, latest: StrategyDecision 
   const latestRows =
     latest?.proposals
       ?.slice(0, 5)
-      .map((item) =>
-        decisionFromProposal(`${latest.runId}-${item.proposal.symbol}-${item.status}`, item.proposal, item.status, item.reasons, latest.createdAt)
-      ) ?? [];
+      .map((item) => decisionFromProposal(`${latest.runId}-${item.proposal.symbol}-${item.status}`, item.proposal, item.status, item.reasons)) ??
+    [];
   if (latestRows.length > 0) return latestRows;
   return snapshot.pendingProposals.slice(0, 5).map((pending) => decisionFromPending(pending));
 }
@@ -512,12 +483,11 @@ function decisionFromSocratic(decision: SocraticDecisionCase): DecisionRowData {
     rationale: withBlockReasons(rationale, decision.status, reasons),
     href: `/console/decisions/${encodeURIComponent(decision.id)}`,
     title: reasons.length > 0 ? `Policy reasons:\n${reasons.join("\n")}` : undefined,
-    confidence: decision.confidenceScore,
-    at: decision.createdAt
+    confidence: decision.confidenceScore
   };
 }
 
-function decisionFromProposal(id: string, proposal: TradeProposal, status: string, reasons: string[] = [], at?: string): DecisionRowData {
+function decisionFromProposal(id: string, proposal: TradeProposal, status: string, reasons: string[] = []): DecisionRowData {
   return {
     id,
     symbol: proposal.symbol,
@@ -526,15 +496,14 @@ function decisionFromProposal(id: string, proposal: TradeProposal, status: strin
     status,
     rationale: withBlockReasons(proposal.rationale, status, reasons),
     title: reasons.length > 0 ? `Policy reasons:\n${reasons.join("\n")}` : undefined,
-    confidence: proposal.confidenceScore,
-    at
+    confidence: proposal.confidenceScore
   };
 }
 
 function decisionFromPending(pending: PendingProposal): DecisionRowData {
   const proposal = pending.proposal;
   return {
-    ...decisionFromProposal(pending.id, proposal, "pending", [], pending.createdAt),
+    ...decisionFromProposal(pending.id, proposal, "pending"),
     size: pending.estimatedNotional ? fmtMoney(pending.estimatedNotional) : proposal.dollarAmount ? fmtMoney(proposal.dollarAmount) : EM_DASH
   };
 }
@@ -546,7 +515,7 @@ function deriveEvidenceRows(snapshot: DashboardSnapshot, latest: StrategyDecisio
       const source = evidenceSourceLabel(item.source);
       rows.push({
         title: item.title,
-        meta: [evidenceKindLabel(item.kind), source].filter(Boolean).join(" · "),
+        meta: [plainLabel(item.kind), source].filter(Boolean).join(" · "),
         metaTitle: source ? `Source: ${source}` : undefined,
         body: item.summary,
         tone: toneFromSocratic(item.tone)
@@ -589,25 +558,13 @@ function deriveEvidenceRows(snapshot: DashboardSnapshot, latest: StrategyDecisio
       tone: "pos"
     });
   }
-  if (proposal?.redTeamVerdict) {
-    const verdict = proposal.redTeamVerdict;
-    if (verdict.available) {
-      rows.push({
-        title: "Adversarial review",
-        meta: verdict.model ?? "red team",
-        body: verdict.reason,
-        tone: verdict.rejected ? "neg" : "warn"
-      });
-    } else {
-      const failure = redTeamFailureMeta(verdict.failureKind);
-      rows.push({
-        title: "Adversarial review FAILED",
-        meta: [verdict.model, failure.label].filter(Boolean).join(" · ") || failure.label,
-        metaTitle: failure.title,
-        body: verdict.reason,
-        tone: "warn"
-      });
-    }
+  if (proposal?.redTeamVerdict?.available) {
+    rows.push({
+      title: "Adversarial review",
+      meta: proposal.redTeamVerdict.model ?? "red team",
+      body: proposal.redTeamVerdict.reason,
+      tone: proposal.redTeamVerdict.rejected ? "neg" : "warn"
+    });
   }
   return rows.slice(0, 6);
 }
@@ -617,8 +574,6 @@ function evidenceFromCandidate(candidate: MarketQuote): EvidenceRow {
   const sources = sourceListFromQuote(candidate) || evidenceSourceLabel(candidate.provider);
   return {
     title: candidate.symbol,
-    symbol: candidate.symbol,
-    quote: candidate,
     meta: `score ${Math.round(candidate.score)}${sources ? ` · ${sources}` : ""}`,
     metaTitle: sources ? `Data sources: ${sources}` : undefined,
     body:
@@ -633,7 +588,7 @@ function deriveDissentRows(proposal: TradeProposal | undefined, latest: Strategy
   if (decision?.dissent?.length) {
     return decision.dissent.slice(0, 4).map((item) => ({
       title: item.title,
-      meta: [evidenceKindLabel(item.kind), item.source].filter(Boolean).join(" · "),
+      meta: [item.kind, item.source].filter(Boolean).join(" · "),
       body: item.summary,
       tone: toneFromSocratic(item.tone)
     }));
@@ -691,7 +646,7 @@ function deriveFrameworkRows(snapshot: DashboardSnapshot): EvidenceRow[] {
 function frameworkToEvidenceRow(proposal: SocraticFrameworkProposal): EvidenceRow {
   return {
     title: proposal.title,
-    meta: `${frameworkStatusLabel(proposal.status)} · ${frameworkSubsystemLabel(proposal.subsystem)} · ${frameworkPriorityLabel(proposal.priority)}`,
+    meta: `${proposal.status} · ${proposal.subsystem} · ${proposal.priority}`,
     body: proposal.proposedChange,
     tone: proposal.priority === "high" ? "warn" : proposal.status === "accepted" || proposal.status === "applied" ? "pos" : "accent"
   };
@@ -711,19 +666,11 @@ function DecisionRow({ row }: { row: DecisionRowData }) {
         <div className="flex flex-wrap items-center gap-2">
           {row.symbol === "Portfolio" ? <strong>{row.symbol}</strong> : <SymbolButton symbol={row.symbol} showLogo={false} />}
           <span>{row.verb}</span>
-          <Chip tone={row.status === "blocked" || row.status === "failed" ? "warn" : row.status === "pending" ? "accent" : "pos"}>
-            {decisionStatusLabel(row.status)}
-          </Chip>
+          <Chip tone={row.status === "blocked" || row.status === "failed" ? "warn" : row.status === "pending" ? "accent" : "pos"}>{row.status}</Chip>
         </div>
         <p>{row.rationale}</p>
       </div>
       <div className="text-right">
-        {/* relative decision time, top-right — same treatment as Journal entries */}
-        {row.at && (
-          <div className="text-[length:var(--con-fs-xs)] font-normal text-[color:var(--con-faint)]">
-            <Ago iso={row.at} />
-          </div>
-        )}
         <div className="con-num font-semibold">{row.size}</div>
         {typeof row.confidence === "number" && <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">conf {row.confidence}</div>}
         {row.href && (
@@ -736,17 +683,11 @@ function DecisionRow({ row }: { row: DecisionRowData }) {
   );
 }
 
-function EvidenceCard({ title, meta, metaTitle, body, symbol, quote, tone = "accent" }: EvidenceRow) {
+function EvidenceCard({ title, meta, metaTitle, body, tone = "accent" }: EvidenceRow) {
   return (
     <article className={`con-evidence-card con-evidence-${tone}`}>
       <div className="flex items-start justify-between gap-3">
-        {symbol ? (
-          <SymbolButton symbol={symbol} quote={quote} showLogo={false}>
-            {title}
-          </SymbolButton>
-        ) : (
-          <strong>{title}</strong>
-        )}
+        <strong>{title}</strong>
         <span title={metaTitle}>{meta}</span>
       </div>
       <p>{body}</p>
@@ -769,6 +710,15 @@ function sourceListFromQuote(candidate: MarketQuote): string {
   const sources = Object.values(candidate.sources ?? {}).filter(Boolean);
   if (candidate.provider) sources.unshift(candidate.provider);
   return formatSourceList(sources.join("+"));
+}
+
+function plainLabel(raw?: string | null): string {
+  if (!raw) return "";
+  return raw
+    .replace(/[._-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function CoachNoteForm({ decision, refresh }: { decision?: SocraticDecisionCase; refresh: () => Promise<void> }) {
@@ -823,35 +773,6 @@ function FrameworkProposalList({ proposals, refresh }: { proposals: SocraticFram
   const [busyId, setBusyId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [responses, setResponses] = useState<Record<string, string>>({});
-  const [reviewing, setReviewing] = useState(false);
-
-  const pendingCount = proposals.filter((p) => p.status === "pending").length;
-
-  const runAiReview = async () => {
-    setReviewing(true);
-    setMessage(null);
-    try {
-      const res = await fetch("/api/socratic/framework/review", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-      if (!res.ok) throw new Error(await res.text());
-      const data = (await res.json()) as { reviewed?: number; skippedReason?: string };
-      await refresh();
-      setMessage(
-        data.reviewed
-          ? `AI reviewed ${data.reviewed} pending proposal${data.reviewed === 1 ? "" : "s"}.`
-          : data.skippedReason === "no_pending"
-            ? "No pending proposals to review."
-            : data.skippedReason === "no_llm_key"
-              ? "AI review needs an LLM key configured."
-              : data.skippedReason === "over_budget"
-                ? "AI review skipped: LLM budget spent."
-                : "AI review produced no recommendations."
-      );
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Could not run AI review.");
-    } finally {
-      setReviewing(false);
-    }
-  };
 
   const update = async (
     proposal: SocraticFrameworkProposal,
@@ -882,51 +803,13 @@ function FrameworkProposalList({ proposals, refresh }: { proposals: SocraticFram
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
-          Learning proposals across all accounts{pendingCount > 0 ? ` · ${pendingCount} shown pending` : ""}
-        </span>
-        {/* Not gated on the shown pendingCount: this list is truncated to the 25 most recent
-            (mixed status), but the review route works on the FULL pending backlog server-side —
-            so keep the button live whenever we're not already reviewing. */}
-        <button
-          type="button"
-          className="con-btn con-btn-outline con-btn-sm"
-          disabled={reviewing}
-          onClick={() => void runAiReview()}
-          title="Review every pending proposal (across all accounts) in a single LLM call and attach an advisory recommendation to each."
-        >
-          <Brain size={14} /> {reviewing ? "Reviewing…" : "AI review pending"}
-        </button>
-      </div>
       {proposals.slice(0, 5).map((proposal) => (
         <article key={proposal.id} className="con-evidence-card con-evidence-accent">
           <div className="flex items-start justify-between gap-3">
             <strong>{proposal.title}</strong>
-            <span>{frameworkStatusLabel(proposal.status)}</span>
+            <span>{proposal.status}</span>
           </div>
           <p>{proposal.proposedChange}</p>
-          {proposal.aiReview && (
-            <div className="mt-2 rounded-md border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] px-3 py-2 text-[length:var(--con-fs-xs)]">
-              <div className="flex items-center gap-2 font-semibold">
-                <Brain size={13} /> AI recommends: {proposal.aiReview.verdict}
-              </div>
-              <p className="mt-1 text-[color:var(--con-muted)]">{proposal.aiReview.rationale}</p>
-              {proposal.aiReview.verdict === "rewrite" && proposal.aiReview.rewrittenChange && (
-                <div className="mt-2">
-                  <p className="text-[color:var(--con-fg)]">{proposal.aiReview.rewrittenChange}</p>
-                  <button
-                    type="button"
-                    className="con-btn con-btn-outline con-btn-sm mt-2"
-                    disabled={proposal.status !== "pending"}
-                    onClick={() => setResponses((current) => ({ ...current, [proposal.id]: proposal.aiReview!.rewrittenChange ?? "" }))}
-                  >
-                    <MessageSquare size={13} /> Use suggested rewrite
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
           <textarea
             className="con-textarea mt-3"
             rows={3}

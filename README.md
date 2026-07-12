@@ -71,11 +71,28 @@ npm run dev
 
 For one-off local development, open `http://127.0.0.1:3000`.
 
-Previews are **retired** (owner decision, 2026-07-08): there are no per-agent PM2 `next dev`
-lanes and no `*.jays.services` preview hostnames. Production is the only hosted environment
-(`https://socratictrade.com`, Coolify app `socratic-trade-prod` — see `docs/deployment.md`).
-To see in-progress edits, run `npm run dev` in your own worktree and open
-`http://localhost:3000`; the `verify` CI gate covers integrated behavior.
+On the host machine, prefer the PM2-managed previews:
+
+- Production deployed app: `https://socratictrade.com` -> `http://localhost:4000` (`~/apps/trading-live`, pm2 `trading`)
+- Main integration/review beta: `https://trading-beta.jays.services` -> `http://localhost:4001` (`~/Code/Agentic Trading`, pm2 `trading-main`)
+- Codex live preview: `https://codex.jays.services` -> `http://localhost:4101` (`~/apps/trading-codex`, pm2 `trading-codex`)
+
+Do not create a second dev/beta hostname for this lane; use `trading-beta.jays.services`.
+
+Bootstrap or repair those PM2 previews with:
+
+```bash
+bash scripts/setup-agent-previews.sh
+```
+
+For older disposable Codex sessions, the legacy pinned launcher is still available:
+
+```bash
+npm run dev:codex
+```
+
+Open `http://127.0.0.1:3001`. The legacy Codex launcher frees only port `3001` and
+retries there if Next initially falls back to another port.
 
 If the UI appears as plain, unstyled HTML, the dev server is likely serving stale
 `.next` assets after a build. Stop the old listener only on the port your agent
@@ -110,7 +127,7 @@ FINNHUB_API_KEY=...
 
 # Optional: Financial Modeling Prep (adds P/E + analyst consensus; Finnhub preferred).
 FMP_API_KEY=...
-FMP_MAX_SYMBOLS=15               # optional explicit enrichment throttle (free-tier quota thrift); unset, the FULL scan candidate list is enriched — no cap
+FMP_MAX_SYMBOLS=15               # cap enriched candidates per scan (free-tier quota friendly)
 NEWS_CACHE_TTL_MS=21600000       # enrichment cache TTL (default 6h)
 
 # Optional: Alpha Vantage NEWS_SENTIMENT enrichment.

@@ -7,7 +7,7 @@
 //   3. Dev/local fallback to PRIMARY_USER_EMAIL — ONLY when auth is NOT configured.
 //
 // Fail-closed signal ("authConfigured"):
-//   authConfigured = !!AUTH_SECRET || isFlagOn(CF_ACCESS_TRUST_EMAIL_HEADER)
+//   authConfigured = !!AUTH_SECRET || !!CF_ACCESS_TRUST_EMAIL_HEADER
 //
 // This deliberately does NOT use `process.env.NODE_ENV === "production"` because
 // Next.js inlines NODE_ENV at BUILD time in the edge runtime — so at runtime in the
@@ -22,12 +22,7 @@
 
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import {
-  AUTHENTICATED_IDENTITY_SOURCE_HEADER,
-  AUTHENTICATED_IDENTITY_SOURCES,
-  stripClientIdentityHeaders,
-  type AuthenticatedIdentitySource
-} from "./src/lib/auth/strip-identity";
+import { stripClientIdentityHeaders } from "./src/lib/auth/strip-identity";
 import { checkSameOrigin } from "./src/lib/auth/csrf";
 import { getSessionEmail } from "./src/lib/auth/session-edge";
 
@@ -49,23 +44,13 @@ const PUBLIC_PREFIXES = [
   "/api/health",
   "/api/ops",
   "/api/webhooks",
-  "/api/framework",
   "/access-denied",
   "/login",
   "/logout",
-  // Crawler/metadata files: these MUST be anonymously reachable or robots
-  // rules never reach crawlers (a robots.txt that 307s to /login parses as
-  // "no rules"). Discovered live 2026-07-11: production redirected all three.
-  "/robots.txt",
-  "/sitemap.xml",
-  "/manifest.webmanifest",
   "/welcome",
   "/strategy",
-  "/framework",
   "/how-it-works",
-  "/design/socratic-trade",
-  "/privacy-policy",
-  "/terms-and-conditions"
+  "/design/socratic-trade"
 ];
 const AUTHJS_PUBLIC_PATHS = new Set([
   "/api/auth/csrf",
@@ -149,12 +134,12 @@ export function withSecurityHeaders(res: NextResponse): NextResponse {
 // Auth is "configured" (armed) when at least one real identity source is active.
 // This is the reliable fail-closed signal — it does not depend on NODE_ENV.
 function isAuthConfigured(): boolean {
-  return Boolean(process.env.AUTH_SECRET) || isFlagOn(process.env.CF_ACCESS_TRUST_EMAIL_HEADER);
+  return !!(process.env.AUTH_SECRET || process.env.CF_ACCESS_TRUST_EMAIL_HEADER);
 }
 
 /** Extract the verified email from a Cloudflare Access request header, if present. */
 function getCfEmail(req: NextRequest): string | null {
-  if (!isFlagOn(process.env.CF_ACCESS_TRUST_EMAIL_HEADER)) return null;
+  if (!process.env.CF_ACCESS_TRUST_EMAIL_HEADER) return null;
   const email = req.headers.get("cf-access-authenticated-user-email");
   return email ? email.trim().toLowerCase() : null;
 }
@@ -207,14 +192,12 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   // (where empty ALLOWED_EMAILS defers to CF's own allowlist) from Auth.js session
   // identities (where empty ALLOWED_EMAILS means "only the primary user").
   let trustedEmail: string | null = null;
-  let identitySource: AuthenticatedIdentitySource | null = null;
   let fromCf = false;
 
   // Source 1: Cloudflare Access header.
   const cfEmail = getCfEmail(req);
   if (cfEmail) {
     trustedEmail = cfEmail;
-    identitySource = AUTHENTICATED_IDENTITY_SOURCES.cloudflareAccess;
     fromCf = true;
   }
 
@@ -222,13 +205,11 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   if (!trustedEmail && process.env.AUTH_SECRET) {
     const cookieHeader = req.headers.get("cookie");
     trustedEmail = await getSessionEmail(cookieHeader, process.env.AUTH_SECRET);
-    if (trustedEmail) identitySource = AUTHENTICATED_IDENTITY_SOURCES.authJsSession;
   }
 
   // Source 3: Dev/local fallback — ONLY when auth is NOT configured.
   if (!trustedEmail && !isAuthConfigured()) {
     trustedEmail = PRIMARY_EMAIL;
-    identitySource = AUTHENTICATED_IDENTITY_SOURCES.localFallback;
   }
 
   // --- Authorization ---
@@ -251,12 +232,9 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // Strip spoofable client-supplied identity hints, then forward the resolved identity + provenance.
+  // Strip any spoofable client-supplied identity hints, then forward the VERIFIED identity.
   const headers = stripClientIdentityHeaders(new Headers(req.headers));
   headers.set("x-authenticated-user-email", trustedEmail);
-  // Preserve provenance separately from the email. Node handlers use this trusted middleware-set
-  // marker to distinguish verified identities from the auth-unconfigured local fallback.
-  if (identitySource) headers.set(AUTHENTICATED_IDENTITY_SOURCE_HEADER, identitySource);
   return withSecurityHeaders(NextResponse.next({ request: { headers } }));
 }
 

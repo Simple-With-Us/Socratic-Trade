@@ -55,11 +55,11 @@ function relTime(iso: string | null): string {
   return `${Math.round(diff / 86_400_000)}d ago`;
 }
 
-function statusTone(s: ServiceHealthSummary): "pos" | "neg" | "warn" | "neutral" {
-  if (s.stoppedWorking) return "neg";
+function statusTone(s: ServiceHealthSummary): "up" | "down" | "warn" | "neutral" {
+  if (s.stoppedWorking) return "down";
   if (!s.lastSuccessTs) return s.callsLast24h > 0 ? "warn" : "neutral";
   if (s.lastFailureTs && s.lastFailureTs > s.lastSuccessTs) return "warn";
-  return "pos";
+  return "up";
 }
 
 // ── Service card ──────────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ function ServiceCard({
           </span>
         </div>
         {summary.stoppedWorking && (
-          <Chip tone="neg">STOPPED</Chip>
+          <Chip tone="down">STOPPED</Chip>
         )}
       </div>
 
@@ -114,7 +114,7 @@ function ServiceCard({
       )}
 
       {summary.stoppedWorking && summary.stoppedReason && (
-        <div className="mt-2 text-xs text-neg">{summary.stoppedReason}</div>
+        <div className="mt-2 text-xs text-down">{summary.stoppedReason}</div>
       )}
     </button>
   );
@@ -189,15 +189,15 @@ function ServiceDetail({
                     <td className="px-3 py-1.5 text-faint whitespace-nowrap">{relTime(row.ts)}</td>
                     <td className="px-3 py-1.5">
                       {row.ok ? (
-                        <Chip tone="pos">OK</Chip>
+                        <Chip tone="up">OK</Chip>
                       ) : (
-                        <Chip tone="neg">FAIL</Chip>
+                        <Chip tone="down">FAIL</Chip>
                       )}
                     </td>
                     <td className="px-3 py-1.5 text-muted">
                       {row.latency_ms !== null ? `${row.latency_ms}ms` : "—"}
                     </td>
-                    <td className="px-3 py-1.5 text-neg truncate max-w-xs">
+                    <td className="px-3 py-1.5 text-down truncate max-w-xs">
                       {row.error_text ?? "—"}
                     </td>
                   </tr>
@@ -225,7 +225,7 @@ function ServiceDetail({
               <tbody>
                 {errorPatterns.map((p) => (
                   <tr key={p.id} className="border-b border-line/50 hover:bg-surface-2">
-                    <td className="px-3 py-1.5 text-neg font-mono truncate max-w-xs">{p.error_text}</td>
+                    <td className="px-3 py-1.5 text-down font-mono truncate max-w-xs">{p.error_text}</td>
                     <td className="px-3 py-1.5 font-semibold">{p.count}</td>
                     <td className="px-3 py-1.5 text-faint whitespace-nowrap">{relTime(p.first_seen)}</td>
                     <td className="px-3 py-1.5 text-faint whitespace-nowrap">{relTime(p.last_seen)}</td>
@@ -284,7 +284,7 @@ export function ConnectionsHealthClient() {
         </div>
         <div className="flex items-center gap-3">
           {stoppedCount > 0 && (
-            <Chip tone="neg">{stoppedCount} stopped</Chip>
+            <Chip tone="down">{stoppedCount} stopped</Chip>
           )}
           <a
             href="/"
@@ -300,8 +300,8 @@ export function ConnectionsHealthClient() {
       )}
 
       {error && (
-        <Card className="p-4 border-neg/40 bg-neg/5">
-          <p className="text-sm text-neg">{error}</p>
+        <Card className="p-4 border-down/40 bg-down/5">
+          <p className="text-sm text-down">{error}</p>
         </Card>
       )}
 

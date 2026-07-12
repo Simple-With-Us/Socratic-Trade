@@ -88,7 +88,7 @@ function budgetStatusPayload(providers: Array<{ name: string; status: "ok" | "wa
 
 /** Build the fetch stub. Routes OpenAI, the usage-monitor budget-status GET, and the nasdaq scan. */
 function makeFetchStub(opts: {
-  redTeamVerdict: { verdict: "approve" | "approve-at-half" | "reject"; reason: string };
+  redTeamVerdict: { rejected: boolean; reason: string };
   bullProposals?: unknown[];
   onOpenAiBody?: (body: any) => void;
   budgetProviders?: Array<{ name: string; status: "ok" | "warning" | "exceeded" | "unconfigured"; spentUsd?: number; monthlyBudgetUsd?: number }>;
@@ -164,9 +164,6 @@ async function seedTestAccountAndPolicy(overrides: Record<string, unknown> = {})
     ...DEFAULT_POLICY,
     systemState: "active",
     llmModel: "gpt-4o",
-    // Explicit Red model (no-defaults world: it never falls back to Green, and every risk-adding
-    // opening is reviewed — the stubs answer it with an approve verdict).
-    redTeamLlmModel: "gpt-4o",
     includedIndices: [],
     additionalSymbols: ["AAPL"],
     strategyAuthority: "decide",
@@ -181,7 +178,7 @@ describe("usage-budget Phase 2: advisory (USAGE_BUDGET_ENFORCE off)", () => {
     vi.stubGlobal(
       "fetch",
       makeFetchStub({
-        redTeamVerdict: { verdict: "approve", reason: "No fatal flaw found." },
+        redTeamVerdict: { rejected: false, reason: "No fatal flaw found." },
         budgetProviders: [{ name: "openai", status: "exceeded", spentUsd: 150, monthlyBudgetUsd: 100 }],
         onOpenAiBody: (body) => {
           const content = JSON.stringify(body);
@@ -232,7 +229,7 @@ describe("usage-budget Phase 2: enforcement ON + downgrade", () => {
     vi.stubGlobal(
       "fetch",
       makeFetchStub({
-        redTeamVerdict: { verdict: "approve", reason: "No fatal flaw found." },
+        redTeamVerdict: { rejected: false, reason: "No fatal flaw found." },
         budgetProviders: [{ name: "openai", status: "exceeded", spentUsd: 150, monthlyBudgetUsd: 100 }],
         onOpenAiBody: (body) => {
           const content = JSON.stringify(body);
@@ -294,7 +291,7 @@ describe("usage-budget Phase 2: enforcement ON + downgrade", () => {
     vi.stubGlobal(
       "fetch",
       makeFetchStub({
-        redTeamVerdict: { verdict: "approve", reason: "No fatal flaw found." },
+        redTeamVerdict: { rejected: false, reason: "No fatal flaw found." },
         budgetProviders: [{ name: "openai", status: "exceeded", spentUsd: 150, monthlyBudgetUsd: 100 }]
       })
     );
@@ -340,7 +337,7 @@ describe("usage-budget Phase 2: enforcement ON + skip", () => {
     vi.stubGlobal(
       "fetch",
       makeFetchStub({
-        redTeamVerdict: { verdict: "approve", reason: "n/a" },
+        redTeamVerdict: { rejected: false, reason: "n/a" },
         // gpt-4o-mini already the cheapest OpenAI tier in CHEAPER_MODEL -> skip, not downgrade.
         budgetProviders: [{ name: "openai", status: "exceeded", spentUsd: 150, monthlyBudgetUsd: 100 }],
         onOpenAiBody: () => {
@@ -379,7 +376,7 @@ describe("usage-budget Phase 2: evaluator failure fails open", () => {
     vi.stubGlobal(
       "fetch",
       makeFetchStub({
-        redTeamVerdict: { verdict: "approve", reason: "No fatal flaw found." },
+        redTeamVerdict: { rejected: false, reason: "No fatal flaw found." },
         budgetStatusUnavailable: true
       })
     );

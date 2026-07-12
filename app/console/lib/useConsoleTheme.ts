@@ -26,22 +26,11 @@ export function useConsoleTheme(): {
   /** Value for the console root's data-theme attribute (undefined = follow system). */
   dataTheme: "light" | "dark" | undefined;
   cycle: () => void;
-  set: (next: ConsoleTheme) => void;
 } {
-  const [theme, setThemeState] = useState<ConsoleTheme>(readStored);
-
-  const set = useCallback((next: ConsoleTheme) => {
-    setThemeState(next);
-    try {
-      if (next === "system") window.localStorage.removeItem(STORAGE_KEY);
-      else window.localStorage.setItem(STORAGE_KEY, next);
-    } catch {
-      /* private mode etc. — theme still applies for this session */
-    }
-  }, []);
+  const [theme, setTheme] = useState<ConsoleTheme>(readStored);
 
   const cycle = useCallback(() => {
-    setThemeState((prev) => {
+    setTheme((prev) => {
       const next: ConsoleTheme = prev === "system" ? "dark" : prev === "dark" ? "light" : "system";
       try {
         if (next === "system") window.localStorage.removeItem(STORAGE_KEY);
@@ -53,5 +42,5 @@ export function useConsoleTheme(): {
     });
   }, []);
 
-  return { theme, dataTheme: theme === "system" ? undefined : theme, cycle, set };
+  return { theme, dataTheme: theme === "system" ? undefined : theme, cycle };
 }

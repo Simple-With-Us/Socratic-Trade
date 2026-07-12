@@ -12,7 +12,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { BellPlus, Plus, Trash2 } from "lucide-react";
 import type { PriceAlert, WatchlistItem } from "@/lib/types";
 import { fmtMoney, EM_DASH } from "../lib/format";
-import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { useToast } from "../ui/toast";
 import { Ago, Btn, Card, Chip, Dash, Empty, Field, NumInput, Select, TextInput } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
@@ -177,7 +176,7 @@ export default function WatchlistPage() {
   }
 
   return (
-    <div className={`${CONSOLE_PAGE_WIDTH} flex flex-col gap-4`}>
+    <div className="mx-auto flex max-w-3xl flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2">
         <h1 className="text-[length:var(--con-fs-lg)] font-bold">Watchlist</h1>
         <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">

@@ -1,4 +1,4 @@
-import { getActiveConnectedAccount, getDb, getUserSetting, setUserSetting, deleteUserSetting, audit, getInternalSetting, setInternalSetting, deleteInternalSetting, getPolicy, upsertFillExcursionsByKey } from "./db";
+import { getActiveConnectedAccount, getDb, setUserSetting, audit, getInternalSetting, setInternalSetting, getPolicy, upsertFillExcursionsByKey } from "./db";
 import { recordLlmUsage, extractLlmUsage } from "./llm-usage";
 import { getRegimeScorecard, getThesisScorecard, getClosedLotsDetailed } from "./performance";
 import { ingestLearned } from "./learned-context/store";
@@ -36,8 +36,8 @@ export async function generateReflectionSummary(accountNumber: string, userId: s
       f.price,
       f.notional,
       f.filled_at,
-      COALESCE(p.trade_thesis_tag, json_extract(p.proposal, '$.tradeThesisTag')) AS trade_thesis_tag,
-      COALESCE(p.entry_market_regime, json_extract(p.proposal, '$.entryMarketRegime')) AS entry_market_regime,
+      p.trade_thesis_tag,
+      p.entry_market_regime,
       p.proposal
     FROM fill_events f
     LEFT JOIN trade_proposals p ON f.proposal_id = p.id
@@ -52,11 +52,8 @@ export async function generateReflectionSummary(accountNumber: string, userId: s
   // reflection. The signature is (#trades, latest fill time). This skips a whole
   // LLM call on the common run where nothing filled, and keeps the Bull agent's
   // system prompt stable run-to-run so the provider's prompt cache can hit.
-  // Both the signature and the summary are keyed per (user, account): 4 accounts run hourly
-  // for the same user, and a shared per-user key would let one account's run dedupe away —
-  // and, worse, feed its reflection into — every sibling account's prompt (incl. live).
   const signature = `${rows.length}:${rows[0]?.filled_at ?? ""}`;
-  const signatureKey = `reflection_signature:${userId}:${accountNumber}`;
+  const signatureKey = `reflection_signature:${userId}`;
   if (getInternalSetting<string>(signatureKey) === signature) return;
 
   const tradeData = rows.map((r) => ({
@@ -153,7 +150,7 @@ Return a single concise paragraph (<= 130 words) that is specific and directive.
         }
 
         const payload = await response.json();
-        recordLlmUsage({ userId, provider, model, context: "post-mortem", keySource, keyRef, connectedAccountId: policy.connectedAccountId, ...extractLlmUsage(payload) });
+        recordLlmUsage({ userId, provider, model, context: "post-mortem", keySource, keyRef, ...extractLlmUsage(payload) });
         const text = extractLlmText(payload);
 
         return { text: typeof text === "string" ? text : undefined };
@@ -161,28 +158,15 @@ Return a single concise paragraph (<= 130 words) that is specific and directive.
     );
 
     if (traced.text) {
-      // No policy_change audit: this is an hourly machine write, and the dedicated
-      // post_mortem_reflection event below is the attributable record of it.
-      setUserSetting(userId, reflectionSummaryKey(accountNumber), traced.text, { auditPolicyChange: false });
-      // Retire the pre-scoping shared rows once ANY account writes a scoped reflection: the
-      // legacy summary is a single last-writer-wins blob across all of this user's accounts,
-      // so leaving it as a fallback would keep feeding one account's (possibly paper) lessons
-      // into sibling prompts indefinitely. Deleting it degrades siblings to the legal
-      // "no reflection yet" state for at most one run cycle, until they write their own.
-      deleteUserSetting(userId, "reflection_summary");
-      deleteInternalSetting(`reflection_signature:${userId}`);
+      setUserSetting(userId, "reflection_summary", traced.text);
       setInternalSetting(signatureKey, signature);
-      // Attribute only when the resolved policy actually belongs to the reflected account —
-      // with no policyOverride, getPolicy() is the ACTIVE account's policy, which may not be
-      // `accountNumber`; a mismatched account id on the audit is worse than none.
       audit("post_mortem_reflection", {
         summary: traced.text,
-        accountNumber,
         tradeCount: tradeData.length,
         outcomesByThesis,
         outcomesByRegime,
         timingByThesis
-      }, userId, policy.accountNumber === accountNumber ? policy.connectedAccountId : undefined);
+      }, userId);
     }
 
     // Structured learned-context sink — runs IN PARALLEL with (does NOT gate or replace) the
@@ -199,24 +183,6 @@ Return a single concise paragraph (<= 130 words) that is specific and directive.
   // Runs unconditionally (no openaiKey required) in the background — never blocks
   // the reflection LLM call above, never called from any synchronous order path.
   persistExcursionsBackground(accountNumber, source, userId);
-}
-
-/** user_settings key for one account's reflection summary. */
-function reflectionSummaryKey(accountNumber: string): string {
-  return `reflection_summary:${accountNumber}`;
-}
-
-/**
- * Account-scoped reflection read for prompt assembly (Bull agent, etc.). The `accountNumber`
- * here MUST be the broker account number (`policy.accountNumber`) — the same discriminator
- * generateReflectionSummary writes under — never the connectedAccountId UUID. Falls back to the
- * pre-scoping shared "reflection_summary" row only until any account's first scoped write
- * retires it (see the delete in generateReflectionSummary), so existing installs keep their
- * working prompt input across the transition.
- */
-export function getReflectionSummary(userId: string, accountNumber: string | undefined): string {
-  const scoped = accountNumber ? getUserSetting<string>(userId, reflectionSummaryKey(accountNumber), "") : "";
-  return scoped || getUserSetting<string>(userId, "reflection_summary", "");
 }
 
 /**

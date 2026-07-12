@@ -1,34 +1,12 @@
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import dns from "node:dns";
 import { withSentryConfig } from "@sentry/nextjs";
 
-dns.setDefaultResultOrder("ipv4first");
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   outputFileTracingRoot: __dirname,
-  async headers() {
-    return [
-      {
-        // /framework is human-eyes-only: never indexed, cached, archived, or
-        // used for AI training. Enforcement is layered — these headers are the
-        // published opt-out; the route itself gates on user-agent and renders
-        // content client-side only (see app/framework/).
-        source: "/framework",
-        headers: [
-          {
-            key: "X-Robots-Tag",
-            value: "noindex, nofollow, noarchive, nosnippet, noimageindex, noai, noimageai"
-          },
-          { key: "Cache-Control", value: "private, no-store, max-age=0" },
-          // TDM Reservation Protocol (W3C TDMRep): reserve text-and-data-mining rights.
-          { key: "tdm-reservation", value: "1" }
-        ]
-      }
-    ];
-  },
   serverExternalPackages: ["better-sqlite3", "@pinecone-database/pinecone", "voyageai"],
   webpack: (config, { isServer, nextRuntime }) => {
     if (!isServer || nextRuntime === "edge") {

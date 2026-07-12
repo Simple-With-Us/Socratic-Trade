@@ -13,7 +13,6 @@
 import { useEffect, useState } from "react";
 import { useToast } from "../ui/toast";
 import { Card, Toggle } from "../ui/primitives";
-import { ListSection, ListRow, LabeledContent } from "../../ui/ios-components";
 
 interface PoolConsentState {
   accepted: boolean;
@@ -60,13 +59,16 @@ function SharingRow({
   rowTitle: string;
 }) {
   return (
-    <ListRow>
-      <div className="w-full" title={rowTitle}>
-        <LabeledContent label={title} hint={body}>
-          <Toggle checked={checked} onChange={onChange} disabled={loading} />
-        </LabeledContent>
+    <div
+      className="con-row flex items-center justify-between gap-4 rounded-md px-1.5 py-1.5"
+      title={rowTitle}
+    >
+      <div>
+        <div className="text-[length:var(--con-fs-sm)] font-semibold">{title}</div>
+        <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">{body}</p>
       </div>
-    </ListRow>
+      <Toggle checked={checked} onChange={onChange} disabled={loading} label={title} />
+    </div>
   );
 }
 
@@ -127,22 +129,18 @@ export function DataSharingCard() {
   };
 
   return (
-    <ListSection title="Data sharing">
-      <div className="px-2 pb-2">
-        <p className="text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-faint)]">
-          Two separate switches, two separate kinds of data. Neither ever shares your personal account data — positions,
-          orders, balances, P&amp;L, and credentials stay private to you, always.
-        </p>
-      </div>
+    <Card title="Data sharing">
+      <p className="mb-2 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-faint)]">
+        Two separate switches, two separate kinds of data. Neither ever shares your personal account data — positions,
+        orders, balances, P&amp;L, and credentials stay private to you, always.
+      </p>
       {loadFailed && (
-        <ListRow>
-          <p className="py-2 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-warn)]">
-            Sharing state could not be loaded — the affected controls stay locked rather than showing a guess. Reload to
-            retry.
-          </p>
-        </ListRow>
+        <p className="mb-2 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-warn)]">
+          Sharing state could not be loaded — the affected controls stay locked rather than showing a guess. Reload to
+          retry.
+        </p>
       )}
-      <>
+      <div className="flex flex-col gap-1">
         <SharingRow
           title="Shared market-data pool"
           body={
@@ -185,7 +183,7 @@ export function DataSharingCard() {
           onChange={(v) => void setLcSharing({ contributeShared: v })}
           rowTitle="Share your fact-tier learnings back to the pool. Only facts qualify; anything risk-bearing goes to your private confirmation queue instead."
         />
-      </>
-    </ListSection>
+      </div>
+    </Card>
   );
 }

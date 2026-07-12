@@ -57,23 +57,12 @@ adversarial-debate lenses before making a decision.
   requests strict `json_schema` on OpenAI-compatible providers, and the strategy/red-team
   Anthropic calls use prompt caching. See
   `docs/rollouts/2026-07-01-strategy-llm-money-path.md`.
-- **Single-adversary consolidation (IMPLEMENTED 2026-07-07):** `docs/single-adversary-consolidation.md`
-  landed, as amended by the owner's 2026-07-07 revision. The in-flow Bear LLM pass inside
-  `proposeTrades` is DELETED (the model-free `deterministicBearFilter` stays); the single hardened
-  **Red Team** (`debateProposal`) reviews the finalized (post-sizing) trade for EVERY risk-adding
-  opening (universal coverage, concurrent with a 3-wide pool), fact-checks the strategist's claims
-  against the same candidate evidence the Bull saw (R7 `adversaryContext`), returns a discrete
-  down-only `approve`/`approve-at-half`/`reject` verdict (unplaceable half → held for human, never
-  up-sized), fails **closed and visibly** when it can't run (persisted `decision.adversaryUnavailable`
-  + notification flag + amber approval-card badge), and NEVER reviews exits or net-risk-reducing
-  trades (§3.5, net-direction-aware). NO MODEL DEFAULTS anywhere: both `llmModel` and
-  `redTeamLlmModel` are mandatory explicit Settings picks (keyed providers only; same model allowed
-  with a non-blocking independence hint); the `RED_TEAM_LLM_PROVIDER`/`RED_TEAM_LLM_MODEL` env
-  override is deleted (db migration v15 seeds the first-class setting once from a live override).
-  Reliability: `extractJsonPayload` fence-tolerant parsing at every LLM parse site incl. the Bull,
-  strict shape validation (unknown verdict = fail closed), bounded same-model retry
-  (`fetchLlmWithRetry`, no hidden failover). Prompt version bumped to `agentic-strategy@2.0.0`.
-  See `docs/rollouts/2026-07-07-single-adversary-consolidation-impl.md`.
+- **Proposed redesign (design-only, 2026-07-01):** `docs/single-adversary-consolidation.md`
+  proposes collapsing today's *two* adversarial passes (the in-flow Bear inside `proposeTrades`
+  and the standalone `debateProposal`, which run the same model twice) into a single hardened
+  **Red Team** that reviews the finalized (post-sizing) trade, fails **closed and visibly** when
+  it can't run, never blocks a risk-reducing exit, and is provably independent of the proposer.
+  Not yet implemented; decisions resolved in that spec's §9, review refinements in §12.
 - **First-class verdict (2026-07-01):** the Red Team debate result is stored on the proposal as a
   structured `redTeamVerdict?: { rejected; available; reason }` field (`TradeProposal` in
   `src/lib/types.ts`), not just appended to the free-text rationale. It survives the JSON round-trip

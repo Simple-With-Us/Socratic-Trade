@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
+import { applyDeterministicSizing } from "../src/lib/strategy";
 import {
   applyAutonomousWeightTuning,
   revertAutonomousWeightTuning,
@@ -14,7 +15,6 @@ import {
 } from "../src/lib/strategy-tuning";
 import { getConfidenceCalibration, getFactorScorecard, recordFillFromProposal } from "../src/lib/performance";
 import type { EquityPosition, MarketScan, Portfolio, TradeProposal, TradingPolicy } from "../src/lib/types";
-import { applyDeterministicSizing } from "../src/lib/strategy-risk";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-ll-autotune-db-${randomUUID()}.db`)}`;

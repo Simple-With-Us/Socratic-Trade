@@ -99,53 +99,6 @@ export function listAuditByKind(
   }));
 }
 
-/**
- * Fast count of recent audit events of a specific kind, without loading JSON payloads.
- * Used for real-time error rate gating (e.g. order_placement_uncertain checks).
- */
-export function countRecentAuditEvents(
-  kind: string,
-  connectedAccountId: string,
-  minutes: number,
-  userId: string = "local"
-): number {
-  const sinceIso = new Date(Date.now() - minutes * 60000).toISOString();
-  
-  const row = getDb().prepare(
-    `SELECT COUNT(*) as count 
-     FROM audit_events 
-     WHERE kind = ? AND user_id = ? AND (connected_account_id = ? OR connected_account_id IS NULL)
-     AND created_at >= ?`
-  ).get(kind, userId, connectedAccountId, sinceIso) as { count: number };
-  
-  return row.count;
-}
-
-/**
- * Recent audit rows of ANY of `kinds` created at/after `sinceIso`, newest first. One IN-query
- * (not N listAuditByKind calls) so the daily learning review's system-history digest — the set of
- * execution-failure kinds it checks lesson evidence against — is a single cheap read.
- */
-export function listAuditByKindsSince(
-  kinds: string[],
-  sinceIso: string,
-  userId: string = "local",
-  limit = 200
-): Array<{ id: string; createdAt: string; kind: string; payload: unknown }> {
-  if (kinds.length === 0) return [];
-  const placeholders = kinds.map(() => "?").join(",");
-  const rows = getDb()
-    .prepare(
-      `SELECT id, created_at, kind, payload
-       FROM audit_events
-       WHERE user_id = ? AND kind IN (${placeholders}) AND created_at >= ?
-       ORDER BY created_at DESC
-       LIMIT ?`
-    )
-    .all(userId, ...kinds, sinceIso, limit) as Array<{ id: string; created_at: string; kind: string; payload: string }>;
-  return rows.map((row) => ({ id: row.id, createdAt: row.created_at, kind: row.kind, payload: JSON.parse(row.payload) }));
-}
-
 export interface SignalSnapshotAuditRow {
   rowid: number;
   id: string;
@@ -858,31 +811,6 @@ export function supersedeLearnedContext(oldId: string, newId: string): void {
   getDb().prepare("UPDATE learned_context SET superseded_by = ? WHERE id = ?").run(newId, oldId);
 }
 
-/**
- * Set an expiry on a live learned_context row (the daily learning review's 'expire' verdict:
- * "was true, no longer is"). Expired rows stop informing decisions via the existing
- * `expiresAt` filter in listLearnedContextForDecision but remain in the table for provenance —
- * softer than deleteLearnedContext. Ownership-scoped; returns false on a no-op.
- */
-export function expireLearnedContext(id: string, userId: string, expiresAtIso: string = new Date().toISOString()): boolean {
-  const result = getDb()
-    .prepare("UPDATE learned_context SET expires_at = ? WHERE id = ? AND user_id = ?")
-    .run(expiresAtIso, id, userId);
-  return result.changes > 0;
-}
-
-/**
- * Erase a learned-context row the user no longer wants remembered. Scoped to `user_id` — the
- * ORIGINAL contributor, never a reader — so this also serves as the erasure path for a user's own
- * shared-scope contributions (a shared row's `user_id` stays its author; another user who merely
- * reads it via `includeShared` can never delete it). Returns false on a no-op (missing id or
- * foreign ownership) so the route can 404 instead of silently succeeding.
- */
-export function deleteLearnedContext(id: string, userId: string): boolean {
-  const result = getDb().prepare("DELETE FROM learned_context WHERE id = ? AND user_id = ?").run(id, userId);
-  return result.changes > 0;
-}
-
 // ── RAG ingestion de-dup helpers ──────────────────────────────────────────────
 // Keyed by (accession, doc_type) — globally unique for SEC filings, so no user scoping needed.
 
@@ -917,55 +845,6 @@ export function listIngestedAccessions(limit = 200): IngestedAccessionRow[] {
     .prepare("SELECT accession, doc_type, ticker, indexed_at, chunk_count FROM ingested_accessions ORDER BY indexed_at DESC LIMIT ?")
     .all(limit) as Array<{ accession: string; doc_type: string; ticker: string; indexed_at: string; chunk_count: number }>;
   return rows.map((r) => ({ accession: r.accession, docType: r.doc_type, ticker: r.ticker, indexedAt: r.indexed_at, chunkCount: r.chunk_count }));
-}
-
-/**
- * Count ever-ingested `ingested_accessions` rows per doc type (all tickers, all time), keyed by a
- * LOWERCASED doc type — cheap single GROUP BY, no new table/migration. Raw counts only; see
- * `ingestedAccessionCountForDocType` for the prefix-tolerant lookup callers should actually use.
- */
-export function ingestedAccessionCountsByDocType(): Record<string, number> {
-  const rows = getDb()
-    .prepare("SELECT LOWER(doc_type) AS doc_type, COUNT(*) AS n FROM ingested_accessions GROUP BY LOWER(doc_type)")
-    .all() as Array<{ doc_type: string; n: number }>;
-  const counts: Record<string, number> = {};
-  for (const row of rows) counts[row.doc_type] = row.n;
-  return counts;
-}
-
-/**
- * Count ever-ingested rows for ONE requested doc type (all tickers, all time).
- *
- * `doc_type` casing/naming in `ingested_accessions` is NOT uniform across writers — see
- * src/lib/web-sources/sec-filings.ts (stores the raw SEC form letter, e.g. "10-K"/"10-Q") vs.
- * src/lib/web-sources/sec8k.ts's FULL-BODY writer (stores the sentinel "8-K-body", not "8-K").
- * The prefix-tolerant lookup below (any stored type whose lowercased form starts with the
- * requested lowercased type) reconciles that split — e.g. "8-k-body" counts toward requested
- * "8-k"; "10-k" counts toward requested "10-k" exactly (no other stored type shares that prefix).
- *
- * IMPORTANT CAVEAT (found 2026-07-06, see docs/rollouts/2026-07-06-corpus-coverage-receipt.md):
- * this table is NOT a complete producer-existence signal for "8-k". The default-ON 8-K SUMMARY
- * writer (`refreshEightK`'s `storeContexts` call in sec8k.ts) writes retrievable "8-k" chunks to
- * the vector corpus but never calls `insertIngestedAccession` at all — only the default-OFF
- * full-body writer (`ingestEightKBody`) does. So in the default config this function returns 0 for
- * "8-k" even when the corpus has real, retrievable 8-K chunks. That is exactly why
- * `COVERAGE_CHECKED_DOC_TYPES` in strategy.ts (the corpus-coverage receipt's allowlist) EXCLUDES
- * "8-k" — the receipt only both-conditions-checks doc types (currently 10-k/10-q) whose ledger IS
- * complete. strategy.ts builds its own in-memory prefix lookup on top of the bulk
- * `ingestedAccessionCountsByDocType()` (rather than calling this function once per type) and feeds
- * it into `computeEmptyDocTypes` (prompt-safety.ts) as a `hasProducerForDocType` predicate. This
- * function itself remains a correct, useful admin/diagnostic "how many accessions has this
- * pipeline recorded for doc type X" count — including for "8-k", where it still answers "how many
- * full-body accessions" correctly, just not "does 8-k coverage exist at all."
- */
-export function ingestedAccessionCountForDocType(requestedDocType: string): number {
-  const counts = ingestedAccessionCountsByDocType();
-  const requested = requestedDocType.toLowerCase();
-  let total = 0;
-  for (const [storedType, n] of Object.entries(counts)) {
-    if (storedType.startsWith(requested)) total += n;
-  }
-  return total;
 }
 
 // ── document_chunks content-hash dedup ─────────────────────────────────────
@@ -1044,7 +923,6 @@ interface RawLearnedContextPendingRow {
   created_at: string;
   status: string;
   resolved_at: string | null;
-  review_note: string | null;
 }
 
 function mapLearnedContextPending(row: RawLearnedContextPendingRow): LearnedContextPendingRow {
@@ -1062,8 +940,7 @@ function mapLearnedContextPending(row: RawLearnedContextPendingRow): LearnedCont
     classifierReason: row.classifier_reason,
     createdAt: row.created_at,
     status: row.status as LearnedContextPendingRow["status"],
-    resolvedAt: row.resolved_at,
-    reviewNote: row.review_note
+    resolvedAt: row.resolved_at
   };
 }
 
@@ -1071,8 +948,8 @@ export function insertPendingLearnedContext(row: LearnedContextPendingRow): Lear
   getDb()
     .prepare(
       `INSERT INTO learned_context_pending
-        (id, user_id, scope, kind, subject, symbol, value, source, origin, risk_tier, classifier_reason, created_at, status, resolved_at, review_note)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (id, user_id, scope, kind, subject, symbol, value, source, origin, risk_tier, classifier_reason, created_at, status, resolved_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       row.id,
@@ -1088,8 +965,7 @@ export function insertPendingLearnedContext(row: LearnedContextPendingRow): Lear
       row.classifierReason,
       row.createdAt,
       row.status,
-      row.resolvedAt,
-      row.reviewNote ?? null
+      row.resolvedAt
     );
   return row;
 }
@@ -1128,18 +1004,5 @@ export function setPendingLearnedContextStatus(
   const result = getDb()
     .prepare("UPDATE learned_context_pending SET status = ?, resolved_at = ? WHERE id = ? AND user_id = ?")
     .run(status, resolvedAt, id, userId);
-  return result.changes > 0;
-}
-
-/**
- * Ownership-scoped write of the daily Learning Review's "defer" explanation. Deliberately does NOT
- * touch `status`/`resolved_at` — a defer verdict leaves the item exactly as pending (the human queue
- * is unchanged); this only attaches the reviewer's note so the queue UI can show it. Returns true
- * only when a row owned by `userId` was actually updated.
- */
-export function setPendingLearnedContextReviewNote(id: string, userId: string, note: string): boolean {
-  const result = getDb()
-    .prepare("UPDATE learned_context_pending SET review_note = ? WHERE id = ? AND user_id = ?")
-    .run(note, id, userId);
   return result.changes > 0;
 }

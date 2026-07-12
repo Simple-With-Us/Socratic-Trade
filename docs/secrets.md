@@ -32,14 +32,14 @@ Set `REQUIRE_SECRETS_MANAGER=1` on the box. At startup (`instrumentation.ts` →
 unless it was launched via `start:secrets`. This guarantees a credential can't silently
 be served from a forgotten `.env.local`. Default off → no effect on local dev, tests, or CI.
 
-## One-time migration from `.env.local` -> Infisical (legacy Mac rollback lane)
-**Rollback-only TL;DR — run `scripts/infisical-prod-cutover.sh` on the Mac** (idempotent; needs your
+## One-time migration from `.env.local` → Infisical (operator)
+**TL;DR — run `scripts/infisical-prod-cutover.sh` on the box** (idempotent; needs your
 machine-identity `INFISICAL_CLIENT_ID` + `INFISICAL_CLIENT_SECRET`, or run it interactively and it
 prompts — Client Secret hidden). It automates steps 2–3 below: writes the bootstrap to
 `~/.config/agentic-trading/deploy.env`, imports `.env.local` into Infisical, switches PM2 `trading`
-to `start:secrets`, verifies the app boots, and (with `--scrub`) trims `.env.local`. Current Coolify
-production does not use this script or the retired Mac deploy workflow; it injects the same Infisical
-identity through `scripts/coolify-prod-start.sh` as documented in `docs/deployment.md`.
+to `start:secrets`, verifies the app boots, and (with `--scrub`) trims `.env.local`. Afterward
+`deploy.yml` sources that bootstrap and builds via Infisical automatically (it falls back to a plain
+build/restart while the file is absent, so nothing breaks pre-cutover).
 
 Secret values never pass through an agent — run the steps it automates yourself if you prefer:
 ```bash
@@ -70,10 +70,9 @@ The **Client Secret is not an access token** — the runner exchanges the Client
 short-lived token at each launch, so nothing in `deploy.env` expires. (A pre-minted `INFISICAL_TOKEN`
 is accepted as a fallback, but it expires — see the identity's Access Token TTL.)
 Switch the launch command, verify, then scrub `.env.local`:
-- **PM2 rollback only:** the cutover script re-creates `trading` to run `npm run start:secrets` with
-  the bootstrap in `~/.config/agentic-trading/deploy.env`. There is no GitHub Actions deploy workflow;
-  an operator must keep this process stopped unless the Coolify scheduler has been disabled and
-  stopped first.
+- **PM2:** the cutover script re-creates the `trading` process to run `npm run start:secrets`; with
+  the bootstrap in `~/.config/agentic-trading/deploy.env`, `deploy.yml` keeps it on that path (and
+  refreshes the token via `pm2 restart --update-env`) on every deploy.
 - Confirm the app boots and reads its keys (and that, with `REQUIRE_SECRETS_MANAGER=1`, a plain
   `next start` now refuses to boot).
 - Reduce `.env.local` to just the bootstrap above (or nothing) and delete the rest.

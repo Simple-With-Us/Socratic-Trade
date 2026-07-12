@@ -6,69 +6,32 @@
 
 import { checkAllUserPriceAlerts } from "./alerts";
 import { runCongressDailyShareIfDue } from "./congress-share";
-import { audit, getActiveConnectedAccount, getAutoResumeOnBoot, getLastStrategyRunStartedAt, getPolicy, listConnectedAccounts, listUsers, listWatchlistSymbols, setInternalSetting, setPolicy, purgeConnectedAccount } from "./db";
-import { runDailyLearningReviewIfDue } from "./learning-review";
+import { audit, getActiveConnectedAccount, getAutoResumeOnBoot, getLastStrategyRunStartedAt, getPolicy, listConnectedAccounts, listUsers, listWatchlistSymbols, setInternalSetting, setPolicy } from "./db";
 import { isRunAllowedNow } from "./market-hours";
 import { runProviderTierCheckIfDue } from "./provider-tier";
-import { checkBrokerHealth } from "./broker-health";
 import { expireStalePendingProposals } from "./proposal-revalidation";
-import { markStaleRunningRuns } from "./db-execution";
 import { checkRegimeFlip } from "./regime-watch";
 import { getBrokerGateway } from "./broker";
 import { deriveExecutionState } from "./execution-mode";
-import { runStrategyOnce, type StrategyResult } from "./strategy";
+import { reconcilePendingFills, runStrategyOnce } from "./strategy";
 import { checkMonthlyLlmSpendCeiling } from "./llm-budget";
 import { maybeAutoTuneWeights } from "./auto-tune-scheduler";
 import { notifyStaleLimitOrders } from "./stale-limit-orders";
-import { autoRemediateStaleExitOrders } from "./order-replacement";
 import { runSyntheticStopMonitor } from "./synthetic-stops";
-import type { TradingPolicy } from "./types";
 import { triggerEngineEnabled, triggerMode } from "./triggers";
-import { getTechnicalWatchlist, isFilingIngestDue, refreshDueWebSources, refreshFilingBodies } from "./web-sources";
+import { isFilingIngestDue, refreshDueWebSources, refreshFilingBodies } from "./web-sources";
 import { symbolsForPolicyUniverse } from "./index-universes";
 import { acquireOrRenewLeadership, releaseLease, LEASE_OWNER } from "./scheduler-lease";
-import { reconcilePendingFills } from "./strategy-execution";
 
 const TICK_MS = 60_000; // check every 60s; cadence changes take effect within one tick
 
 /**
- * Single-leader is the fail-safe default. Unset, empty, and whitespace-only values stay ON;
- * operators must use an explicit non-truthy value (for example false/off/0/no) to disable it.
+ * Returns true iff SCHEDULER_SINGLE_LEADER is set to a truthy value.
+ * Truthy: "1", "true", "on", "yes" (case-insensitive, trimmed). Default OFF.
  */
-export function singleLeaderEnabled(rawValue: string | undefined = process.env.SCHEDULER_SINGLE_LEADER): boolean {
-  const v = String(rawValue ?? "").trim().toLowerCase();
-  return !["0", "false", "off", "no"].includes(v);
-}
-
-/**
- * A signal-driven shutdown can interrupt detached broker maintenance that the scheduler already
- * launched. Keep the durable leader lease fenced until its TTL expires; only release once Node's
- * event loop has actually drained and `beforeExit` proves no such work remains.
- */
-export const SCHEDULER_LEASE_RELEASE_EVENTS = ["beforeExit"] as const;
-
-export function shouldReleaseSchedulerLeaseOnShutdown(event: "SIGTERM" | "SIGINT" | "beforeExit"): boolean {
-  return (SCHEDULER_LEASE_RELEASE_EVENTS as readonly string[]).includes(event);
-}
-
-/** Auto-tuning is follow-on work for a successfully completed account run only. */
-export function shouldAutoTuneAfterStrategyRun(result: Pick<StrategyResult, "status">): boolean {
-  return result.status === "completed";
-}
-
-/** Account-bound scheduler composition kept exportable for deterministic regression coverage. */
-export async function runScheduledStrategyAndMaybeTune(
-  userId: string,
-  connectedAccountId: string,
-  now?: number
-): Promise<StrategyResult> {
-  const result = await runStrategyOnce(userId, { connectedAccountId });
-  if (shouldAutoTuneAfterStrategyRun(result)) {
-    // Compute after the potentially long run so cadence and daily budget reservation use the
-    // follow-up's real day/time. Tests may inject an explicit clock value.
-    await maybeAutoTuneWeights(userId, now ?? Date.now(), connectedAccountId);
-  }
-  return result;
+function singleLeaderEnabled(): boolean {
+  const v = String(process.env.SCHEDULER_SINGLE_LEADER ?? "").trim().toLowerCase();
+  return ["1", "true", "on", "yes"].includes(v);
 }
 
 // ── Health threshold: abdicate leadership after N consecutive heartbeat failures ──
@@ -170,13 +133,6 @@ const stopGuardHost = globalThis as unknown as { __stopMonitorInFlight?: Set<str
 const stopMonitorInFlight: Set<string> =
   stopGuardHost.__stopMonitorInFlight ?? (stopGuardHost.__stopMonitorInFlight = new Set<string>());
 
-// Per-account in-flight guard for the stale-limit / auto-remediation pass. Without it, a slow broker
-// (the ≥4 sequential round-trips in a cancel-replace can outlast the 60s tick) would let the next tick
-// re-process the SAME stale exit and place a SECOND market sell — a double-sell / accidental short.
-const staleExitGuardHost = globalThis as unknown as { __staleExitInFlight?: Set<string> };
-const staleExitInFlight: Set<string> =
-  staleExitGuardHost.__staleExitInFlight ?? (staleExitGuardHost.__staleExitInFlight = new Set<string>());
-
 /**
  * Boot-time autonomy interlock. A persisted `systemState === "active"` must NOT silently resume
  * live/paper order placement after an unattended restart, crash-loop, or DB restore. Unless an
@@ -234,17 +190,20 @@ export function getSchedulerState(userId: string = "local", connectedAccountId?:
 export function startScheduler(): void {
   if (timer) return; // guard against double-start
 
-  // Release only after the event loop drains. SIGTERM/SIGINT intentionally retain the lease until
-  // its TTL: signal shutdown can kill detached synthetic-stop/broker work, and immediate release
-  // would let a successor duplicate those protective orders before their outcome is known.
-  // Guarded by globalThis so HMR re-evaluation cannot double-register the beforeExit listener.
+  // Register SIGTERM / SIGINT / beforeExit handlers (once per process lifetime) to release the
+  // scheduler lease on clean shutdown so a stopped process frees the lease immediately rather than
+  // waiting for TTL expiry. Guarded by a globalThis flag so HMR re-eval can't double-register.
+  // These are registered unconditionally (cheap); releaseLease() no-ops when this process never
+  // acquired the lease (flag OFF ⇒ no lease row owned by us).
   const shutdownHost = globalThis as unknown as { __schedulerLeaseShutdownRegistered?: boolean };
   if (!shutdownHost.__schedulerLeaseShutdownRegistered) {
     shutdownHost.__schedulerLeaseShutdownRegistered = true;
     const release = () => {
       try { releaseLease(LEASE_OWNER); } catch { /* never throw on shutdown */ }
     };
-    for (const event of SCHEDULER_LEASE_RELEASE_EVENTS) process.on(event, release);
+    process.once("SIGTERM", release);
+    process.once("SIGINT", release);
+    process.on("beforeExit", release);
   }
 
   // Boot interlock runs once, before any tick, so a restored/copied DB cannot resume live
@@ -260,30 +219,13 @@ export function startScheduler(): void {
 }
 
 async function tick(): Promise<void> {
-  // Crashed-run sweep: mark strategy_runs left in status='running' after a process crash/kill.
-  // Must run BEFORE the single-leader gate so stale rows are always repaired (idempotent: the
-  // UPDATE has a `WHERE status = 'running'` guard, so even two concurrent sweeps won't double-count).
-  try {
-    const repaired = markStaleRunningRuns(Date.now());
-    if (repaired > 0) console.log(`[scheduler] marked ${repaired} stale running run(s) as failed`);
-  } catch (err) {
-    console.error("[scheduler] stale-run sweep error:", err);
-  }
-
-  // Single-leader gate (default ON, including unset/empty). Only an explicit false/off/0/no-style
-  // value disables it; otherwise only the lease holder runs the background updates and per-account tick body
-  // — preventing duplicate API scrapes and broker EXIT orders on multi-process deploys.
-  if (singleLeaderEnabled() && !acquireOrRenewLeadership(new Date())) {
-    return; // not the leader this tick — no side effects
-  }
-
-  // Liveness heartbeat — AFTER the leader gate, so a follower that never runs the tick body cannot
-  // keep /api/health fresh while the leader is wedged (which would let synthetic stops and strategy
-  // runs grow stale without tripping the stale-scheduler check). Also self-guards the health-failure
-  // threshold: only the leader tracks heartbeat failures — a follower with a dead DB won't abdicate
-  // (it never got past the gate anyway), and the leader does.
+  // Liveness heartbeat for /api/health: a persisted timestamp each tick lets an external
+  // supervisor (PM2/uptime monitor) detect a dead/hung scheduler — i.e. autonomy and the
+  // synthetic-stop monitor silently not running. Self-guarded so it can never break a tick.
+  let heartbeatOk = false;
   try {
     setInternalSetting("scheduler:lastTick", new Date().toISOString());
+    heartbeatOk = true;
     if (getHealthFailures() > 0) resetHealthFailures();
   } catch (err) {
     console.error("[scheduler] heartbeat write error:", err);
@@ -296,6 +238,13 @@ async function tick(): Promise<void> {
       try { releaseLease(LEASE_OWNER); } catch { /* never throw on shutdown */ }
       return; // stop this tick — we can't prove leadership anyway with a dead DB
     }
+  }
+
+  // Single-leader gate (additive; flag default OFF). When SCHEDULER_SINGLE_LEADER=1 (or
+  // true/on/yes), only the lease holder runs the background updates and per-account tick body
+  // — preventing duplicate API scrapes and broker EXIT orders on multi-process deploys.
+  if (singleLeaderEnabled() && !acquireOrRenewLeadership(new Date())) {
+    return; // not the leader this tick — no side effects
   }
 
   // Sentry Crons check-in (opt-in, see sendSentrySchedulerCheckIn above). Deliberately AFTER the
@@ -314,7 +263,7 @@ async function tick(): Promise<void> {
   // free-safe 5/min so the raised paid default can't 429-storm. No-op until due; fully self-guarded.
   void runProviderTierCheckIfDue().catch((err) => console.error("[scheduler] provider-tier check error:", err));
 
-  // 10-K/10-Q body ingest (TTL cadence, gated on paid Voyage key signal).
+  // 10-K/10-Q body ingest (weekly cadence, gated on paid Voyage key signal).
   // Collects the union of all user watchlists + policy universes so the shared
   // corpus covers every symbol any active user is monitoring. Fire-and-forget;
   // errors are captured inside refreshFilingBodies and audited there.
@@ -322,24 +271,12 @@ async function tick(): Promise<void> {
   // LLM_SPEND_CEILING, and this refresh runs BEFORE the strategy-run ceiling check below, so without
   // this guard a breached ceiling would still let the weekly filing-body ingest spend.
   if (isFilingIngestDue() && checkMonthlyLlmSpendCeiling().ok) {
-    // DEMAND-FIRST ordering: ingestion is capped per run, so queue order decides which
-    // symbols' filings the strategy can actually retrieve against. Watchlist names and the
-    // last scan's candidate set (which force-includes held positions) go first; the broad
-    // index universe fills the tail. Until 2026-07-09 this was one alphabetical Set union,
-    // so the corpus warmed from "A" while the names decisions cite waited years.
     const symbolSet = new Set<string>();
-    for (const userId of listUsers()) {
-      try {
-        for (const item of listWatchlistSymbols(userId)) symbolSet.add(item.symbol);
-      } catch {
-        // don't let a single user's DB error block the others
-      }
-    }
-    for (const s of getTechnicalWatchlist()) symbolSet.add(s);
     for (const userId of listUsers()) {
       try {
         const policy = getPolicy(userId);
         for (const s of symbolsForPolicyUniverse(policy)) symbolSet.add(s);
+        for (const item of listWatchlistSymbols(userId)) symbolSet.add(item.symbol);
       } catch {
         // don't let a single user's DB error block the others
       }
@@ -361,16 +298,6 @@ async function tick(): Promise<void> {
   for (const userId of listUsers()) {
     void checkRegimeFlip(userId).catch((err) =>
       console.error(`[scheduler] regime check error for ${userId}:`, err)
-    );
-  }
-
-  // Once-per-day LLM learning review (default OFF; policy.learningReviewEnabled): a frontier-class
-  // model audits recent learned-context rows + the pending learning queue against a system-history
-  // digest, so lessons built on corrupted evidence (execution defects blamed on theses) get caught.
-  // Annotate-only unless the owner opted into "decide". No-op unless enabled + due; self-guarded.
-  for (const userId of listUsers()) {
-    void runDailyLearningReviewIfDue(userId).catch((err) =>
-      console.error(`[scheduler] learning-review error for ${userId}:`, err)
     );
   }
 
@@ -448,41 +375,11 @@ async function tick(): Promise<void> {
         }
         const executionState = deriveExecutionState(policy, account);
         const brokerGateway = executionState.submitsBrokerOrders ? getBrokerGateway(policy, userId) : undefined;
-        
-        if (account.isDraining) {
-          if (brokerGateway && policy.accountNumber) {
-            void brokerGateway.getEquityOrders(policy.accountNumber).then(async (orders) => {
-              const openOrders = orders.filter(o => o.state === "open" || o.state === "partially_filled");
-              for (const o of openOrders) {
-                await brokerGateway.cancelEquityOrder(policy.accountNumber!, o.id).catch((err: unknown) => {
-                  console.error(`[scheduler] draining account cancel error for order ${o.id}:`, err);
-                });
-              }
-              await reconcilePendingFills(brokerGateway, policy.accountNumber!, userId, policy.connectedAccountId);
-              if (openOrders.length === 0) purgeConnectedAccount(accountId, userId);
-            }).catch((err: unknown) => console.error("[scheduler] draining account order check error:", err));
-          } else {
-            purgeConnectedAccount(accountId, userId);
-          }
-          schedule.nextRunAt = null;
-          continue;
-        }
-        
-        if (brokerGateway && !staleExitInFlight.has(key)) {
-          staleExitInFlight.add(key);
-          const gw = brokerGateway;
-          const stalePolicy = policy as TradingPolicy & { accountNumber: string }; // accountNumber checked non-null above
-          void gw.getEquityOrders(policy.accountNumber)
-            .then(async (orders) => {
-              await notifyStaleLimitOrders({ userId, policy, orders });
-              // Auto-cancel-replace stale EXIT limits with market orders (MU deadlock backstop). No-op
-              // when disabled; defers to the human on a live account with typed confirmation on. The
-              // in-flight guard above + the per-order cooldown inside autoRemediateStaleExitOrders keep
-              // a slow broker cancel from triggering a second market sell on the next tick.
-              await autoRemediateStaleExitOrders({ userId, policy: stalePolicy, activeAccount: account, gateway: gw, orders });
-            })
-            .catch((err) => console.error("[scheduler] stale-limit-order handling error:", err))
-            .finally(() => staleExitInFlight.delete(key));
+
+        if (brokerGateway) {
+          void brokerGateway.getEquityOrders(policy.accountNumber)
+            .then((orders) => notifyStaleLimitOrders({ userId, policy, orders }))
+            .catch((err) => console.error("[scheduler] stale-limit-order alert error:", err));
         }
 
         const protectiveState =
@@ -505,18 +402,8 @@ async function tick(): Promise<void> {
         // pending_reconciliation until the next strategy run. Applies to broker/paper and broker/live;
         // Test/local has no broker order lifecycle.
         if (brokerGateway) {
-          void reconcilePendingFills(brokerGateway, policy.accountNumber, userId, policy.connectedAccountId)
+          void reconcilePendingFills(brokerGateway, policy.accountNumber, userId)
             .catch((err) => console.error("[scheduler] pending-fill reconcile error:", err));
-        }
-
-        // Fast pre-proposal broker health gate.
-        // E.g., skips queuing an LLM strategy run if the broker is unreachable, account is suspended, 
-        // or there's an elevated order_placement_uncertain error rate.
-        const healthSignals = await checkBrokerHealth(userId, account, brokerGateway);
-        if (!healthSignals.isHealthy) {
-          console.warn(`[scheduler] Skipping account ${accountId}: ${healthSignals.reason}`);
-          schedule.nextRunAt = null; // Re-evaluate on next tick without advancing the cadence
-          continue;
         }
 
         if (policy.systemState !== "active") {
@@ -583,23 +470,15 @@ async function tick(): Promise<void> {
       return;
     }
 
-    let jitterMs = 0;
     for (const { userId, accountId } of dueRuns) {
-      // P2.9: Stagger/jitter LLM calls to prevent concurrent-account bursts from blowing QPM.
-      // Offset each simultaneous launch by 2-5s to stagger their LLM phase.
-      const runDelayMs = jitterMs;
-      jitterMs += 2000 + Math.random() * 3000;
-
       // The daily LLM budget ceiling is enforced INSIDE runStrategyOnce (after its non-LLM risk
       // breakers + reconciliation, before proposal generation), NOT here — suppressing the run at this
       // outer gate would also skip the drawdown/volatility breakers + fill reconciliation, disabling
       // safety maintenance for the rest of the day. So we always enter the run; it skips only LLM work.
-      const p = (async () => {
-        if (runDelayMs > 0) await new Promise((r) => setTimeout(r, runDelayMs));
-        await runScheduledStrategyAndMaybeTune(userId, accountId);
-      })()
-        // Item 1 (opt-in): after a successful cadence run, attempt account-bound, cadence-gated
-        // autonomous weight tuning. Failed/busy runs never tune; the helper owns that invariant.
+      const p = runStrategyOnce(userId, { connectedAccountId: accountId })
+        // Item 1 (opt-in): after a successful cadence run, attempt cadence-gated autonomous weight tuning.
+        // No-op unless policy.tuning.autoApplyWeights is on; fully self-guarded so it can never break the tick.
+        .then(() => maybeAutoTuneWeights(userId))
         .catch((err) => {
           console.error(`[scheduler] error running strategy for ${userId}/${accountId}:`, err);
         })
@@ -618,9 +497,4 @@ async function tick(): Promise<void> {
     // Never let a thrown error kill the timer
     console.error("[scheduler] tick error:", err);
   }
-}
-
-/** Test-only entry point for asserting leader-gate ordering without starting the interval. */
-export async function _runSchedulerTickForTest(): Promise<void> {
-  await tick();
 }

@@ -1,4 +1,4 @@
-import type { EnrichmentSources, EquityPosition, MarketQuote, NotificationEvent, NotificationEventType, NotificationStatus, OrderSide } from "./types";
+import type { EnrichmentSources, EquityPosition, MarketQuote, NotificationEvent, OrderSide } from "./types";
 import type { SymbolMeta } from "./dashboard-feed";
 import { formatQuantity } from "./money";
 
@@ -201,13 +201,9 @@ export function receivedLabel(ts?: string): string {
 
 export function cellTitle(label: string, source?: string, asOf?: string): string {
   const parts = [label];
-  // Freshness rides provenance: no recorded source means no provider returned the
-  // field, so a "Received <time>" stamp would claim freshness for data we never got.
-  if (source) {
-    parts.push(`Source: ${friendlySource(source)}`);
-    const received = receivedLabel(asOf);
-    if (received) parts.push(received);
-  }
+  if (source) parts.push(`Source: ${friendlySource(source)}`);
+  const received = receivedLabel(asOf);
+  if (received) parts.push(received);
   return parts.join("\n");
 }
 
@@ -262,89 +258,6 @@ export function formatShareQuantity(value?: number, symbol?: string): string {
   return formatQuantity(value, symbol);
 }
 
-/** Defensive Title-Case de-underscore/de-hyphenate fallback so a raw snake_case or kebab-case
- *  enum value never reaches the user, even for a value not covered by an explicit label map
- *  below. Mirrors `plainLabel` in app/console/lib/labels.ts — that file is a separate package
- *  boundary (this is a server-shared lib and must not import from app/), so this is a small
- *  local mirror, not a cross-import. */
-function plainEnumLabel(raw: string): string {
-  return raw
-    .replace(/[._-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-// ── Feed / proposal / fill statuses (decided vocabulary) ───────────────────────────────────
-
-const FEED_STATUS_LABELS: Record<string, string> = {
-  filled: "Filled",
-  partially_filled: "Partially filled",
-  pending_order: "Order pending",
-  pending_reconciliation: "Awaiting reconciliation",
-  pending_approval: "Awaiting approval",
-  approved: "Approved",
-  blocked: "Blocked",
-  rejected: "Rejected",
-  rejected_by_broker: "Rejected by broker",
-  pending: "Pending",
-  unknown: "Status unknown",
-  proposed: "Proposed",
-  executed: "Executed",
-  expired: "Expired",
-  failed: "Failed",
-  withdrawn: "Withdrawn",
-  placed: "Placed",
-  paper: "Paper trade",
-  completed: "Completed",
-  placing_failed: "Placement failed",
-  not_placed: "Not placed - safe to retry",
-  running: "Running"
-};
-
-/** Plain-English label for a feed/proposal/fill status string. Unknown values fall back to a
- *  defensive Title-Case de-underscore rather than ever showing the raw enum. */
-export function feedStatusLabel(raw?: string | null): string {
-  if (!raw) return "";
-  return FEED_STATUS_LABELS[raw.toLowerCase()] ?? plainEnumLabel(raw);
-}
-
-// ── Notifications (decided vocabulary) ──────────────────────────────────────────────────────
-
-const NOTIFICATION_EVENT_TYPE_LABELS: Record<NotificationEventType, string> = {
-  fill: "Order filled",
-  block: "Trade blocked",
-  run_failed: "Run failed",
-  pending_approval: "Awaiting your approval",
-  kill_switch: "Kill switch",
-  price_alert: "Price alert",
-  proposal_withdrawn: "Proposal withdrawn",
-  limit_order_stale: "Stale limit order",
-  provider_degraded: "Data provider degraded",
-  budget_alert: "Budget alert",
-  learning_review: "Learning review",
-  deterministic_bear_veto: "Vetoed by Bear risk",
-  red_team_veto_overridden: "Red Team veto overridden",
-  prompt_injection_suspected: "Prompt injection suspected",
-  evidence_age_anomaly: "Evidence age anomaly"
-};
-
-export function notificationTypeLabel(type?: string | null): string {
-  if (!type) return "";
-  return NOTIFICATION_EVENT_TYPE_LABELS[type as NotificationEventType] ?? plainEnumLabel(type);
-}
-
-const NOTIFICATION_STATUS_LABELS: Record<NotificationStatus, string> = {
-  sent: "Sent",
-  failed: "Delivery failed",
-  skipped: "Not sent"
-};
-
-export function notificationStatusLabel(status?: string | null): string {
-  if (!status) return "";
-  return NOTIFICATION_STATUS_LABELS[status as NotificationStatus] ?? plainEnumLabel(status);
-}
-
 export function formatNotificationDisplay(
   event: NotificationEvent,
   symbolMetaBySymbol: Record<string, SymbolMeta>
@@ -366,12 +279,7 @@ export function formatNotificationDisplay(
   } else if (event.type === "block") {
     title = `${actionLabel(side)} ${symbol ?? "Proposal"} Blocked`;
   } else if (event.type === "pending_approval") {
-    // Single-adversary visibility (§5.2): when the run flagged this pending approval as
-    // "Red Team review unavailable" (payload metadata flag, read defensively via asRecord), the
-    // Red-Team-unavailable signal must survive into the feed — append the indicator instead of
-    // discarding it with the generic overwrite.
-    const adversaryUnavailable = payload.adversaryUnavailable === true;
-    title = `${actionLabel(side)} ${symbol ?? "Proposal"} Awaiting Approval${adversaryUnavailable ? " — Red Team Unavailable" : ""}`;
+    title = `${actionLabel(side)} ${symbol ?? "Proposal"} Awaiting Approval`;
   } else if (event.type === "kill_switch") {
     title = "Kill Switch Triggered";
   } else if (event.type === "run_failed") {
@@ -379,14 +287,6 @@ export function formatNotificationDisplay(
   } else if (event.type === "proposal_withdrawn") {
     const expired = stringValue(payload.source) === "expiry";
     title = `${actionLabel(side)} ${symbol ?? "Proposal"} ${expired ? "Expired" : "Withdrawn"}`;
-  } else if (event.type === "deterministic_bear_veto") {
-    title = `${actionLabel(side)} ${symbol ?? "Trade"} Vetoed by Bear Risk`;
-  } else if (event.type === "red_team_veto_overridden") {
-    title = `Red Team Veto Overridden ${symbol ? `for ${symbol}` : ""}`;
-  } else if (event.type === "prompt_injection_suspected") {
-    title = `Prompt Injection Suspected ${symbol ? `for ${symbol}` : ""}`;
-  } else if (event.type === "evidence_age_anomaly") {
-    title = `Evidence Age Anomaly ${symbol ? `for ${symbol}` : ""}`;
   }
 
   return {
@@ -399,26 +299,14 @@ export function formatNotificationDisplay(
 }
 
 function notificationDetail(event: NotificationEvent): string {
-  if (
-    event.type === "deterministic_bear_veto" ||
-    event.type === "red_team_veto_overridden" ||
-    event.type === "prompt_injection_suspected" ||
-    event.type === "evidence_age_anomaly"
-  ) {
-    const payload = asRecord(event.payload);
-    const reason = stringValue(payload.reason) || stringValue(payload.detail);
-    return reason ? `Audit logged: ${reason}` : "Advisory audit logged";
-  }
-  const prefix = notificationStatusLabel(event.status);
+  const prefix = event.status === "sent" ? "Notification Sent" : event.status === "failed" ? "Notification Failed" : "Notification Skipped";
   const reason = notificationReason(event.error);
   return reason ? `${prefix} - ${reason}` : prefix;
 }
 
 function notificationReason(error?: string): string | undefined {
   if (!error) return undefined;
-  if (error === "Notifications Webhook Not Configured") return "No notification channels enabled.";
-  if (error === "not_configured") return "Notification channel is not configured by the operator.";
-  if (error === "no_target") return "Notification channel has no delivery target.";
+  if (error === "Notifications Webhook Not Configured") return "Notifications Webhook Not Configured";
   if (error === "Notification type is disabled.") return "Type Disabled";
   return error;
 }

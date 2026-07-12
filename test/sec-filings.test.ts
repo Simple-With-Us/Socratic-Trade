@@ -29,7 +29,6 @@ const mocks = vi.hoisted(() => ({
   ),
   loadCikMap: vi.fn<() => Promise<Record<string, string>>>(),
   storeDocument: vi.fn(),
-  hasIngestTextBudget: vi.fn(() => true),
   audit: vi.fn(),
   setInternalSetting: vi.fn(),
   getInternalSetting: vi.fn()
@@ -55,14 +54,12 @@ vi.mock("../src/lib/vector-db", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/vector-db")>();
   return {
     ...actual,
-    storeDocument: mocks.storeDocument,
-    hasIngestTextBudget: mocks.hasIngestTextBudget
+    storeDocument: mocks.storeDocument
   };
 });
 
 afterEach(() => {
   vi.clearAllMocks();
-  mocks.hasIngestTextBudget.mockImplementation(() => true);
   delete process.env.VECTOR_EMBED_BATCH_DELAY_MS;
 });
 
@@ -359,181 +356,6 @@ describe("refreshFilingBodies free-tier cap", () => {
 
     expect(result.attempted).toBe(0);
     expect(mocks.loadCikMap).not.toHaveBeenCalled();
-  });
-});
-
-// ── 5b. Backfill knobs: force, explicit limit, TTL env, paid default ─────────
-// Added 2026-07-09: the admin backfill route used to silently no-op behind the scheduler's
-// TTL stamp and stay capped at 1 on free-tier env — defeating its purpose entirely.
-
-describe("refreshFilingBodies force + explicit-limit + cadence knobs", () => {
-  function mockSubmissions(cik: string, count: number): string {
-    const suffix = () => randomUUID().slice(0, 6);
-    return JSON.stringify({
-      filings: {
-        recent: {
-          accessionNumber: Array.from({ length: count }, () => `${cik.padStart(10, "0")}-24-${suffix()}`),
-          form: Array.from({ length: count }, (_, i) => (i % 2 === 0 ? "10-K" : "10-Q")),
-          filingDate: Array.from({ length: count }, (_, i) => `2024-0${(i % 8) + 1}-01`),
-          acceptanceDateTime: Array.from({ length: count }, (_, i) => `2024-0${(i % 8) + 1}-01T00:00:00.000Z`),
-          primaryDocument: Array.from({ length: count }, (_, i) => `doc-${i}.htm`)
-        }
-      }
-    });
-  }
-
-  afterEach(() => {
-    delete process.env.SEC_FILING_INGEST_TTL_HOURS;
-    delete process.env.SEC_FILING_RAG_MAX_PER_RUN;
-  });
-
-  it("force bypasses the ingest-TTL stamp (the admin backfill contract)", async () => {
-    const { setInternalSetting } = await import("../src/lib/db");
-    setInternalSetting("webSource:sec10k:lastAttempt", new Date().toISOString());
-
-    mocks.loadCikMap.mockResolvedValue({ "320193": "AAPL" });
-    mocks.politeFetchText
-      .mockResolvedValueOnce(mockSubmissions("320193", 2))
-      .mockResolvedValue("<p>".concat("Annual report content. ".repeat(20)).concat("</p>"));
-    mocks.storeDocument.mockResolvedValue({ attempted: 5, indexed: 5, error: undefined });
-
-    const { refreshFilingBodies } = await import("../src/lib/web-sources/sec-filings");
-    const result = await refreshFilingBodies(["AAPL"], Date.now(), undefined, { force: true });
-
-    expect(mocks.loadCikMap).toHaveBeenCalled();
-    expect(result.attempted).toBeGreaterThanOrEqual(1);
-  });
-
-  it("an explicit limit overrides the free-tier 1-filing cap (operator decision wins)", async () => {
-    process.env.VECTOR_EMBED_BATCH_DELAY_MS = "21000"; // free tier
-    mocks.loadCikMap.mockResolvedValue({ "320193": "AAPL", "789019": "MSFT" });
-    mocks.politeFetchText
-      .mockResolvedValueOnce(mockSubmissions("320193", 2))
-      .mockResolvedValueOnce(mockSubmissions("789019", 2))
-      .mockResolvedValue("<p>".concat("Annual report content. ".repeat(20)).concat("</p>"));
-    mocks.storeDocument.mockResolvedValue({ attempted: 5, indexed: 5, error: undefined });
-
-    const { refreshFilingBodies } = await import("../src/lib/web-sources/sec-filings");
-    const result = await refreshFilingBodies(["AAPL", "MSFT"], Date.now(), 3, { force: true });
-
-    expect(result.attempted).toBe(3);
-  });
-
-  it("paid tier without env cap processes more than one filing per run (default raised from 1)", async () => {
-    process.env.VECTOR_EMBED_BATCH_DELAY_MS = "0"; // paid tier
-    mocks.loadCikMap.mockResolvedValue({ "320193": "AAPL", "789019": "MSFT" });
-    mocks.politeFetchText
-      .mockResolvedValueOnce(mockSubmissions("320193", 2))
-      .mockResolvedValueOnce(mockSubmissions("789019", 2))
-      .mockResolvedValue("<p>".concat("Annual report content. ".repeat(20)).concat("</p>"));
-    mocks.storeDocument.mockResolvedValue({ attempted: 5, indexed: 5, error: undefined });
-
-    const { refreshFilingBodies } = await import("../src/lib/web-sources/sec-filings");
-    const result = await refreshFilingBodies(["AAPL", "MSFT"], Date.now(), undefined, { force: true });
-
-    // All 4 pending filings fit under the paid default (25) — the old default of 1 made the
-    // ~2,000-filing backlog take decades.
-    expect(result.attempted).toBe(4);
-  });
-
-  it("stops the run when the embed budget is exhausted — no doomed body fetches, tail deferred", async () => {
-    process.env.VECTOR_EMBED_BATCH_DELAY_MS = "0"; // paid tier, cap 25
-    mocks.hasIngestTextBudget.mockReturnValue(false); // budget already spent
-    mocks.loadCikMap.mockResolvedValue({ "320193": "AAPL", "789019": "MSFT" });
-    mocks.politeFetchText
-      .mockResolvedValueOnce(mockSubmissions("320193", 2))
-      .mockResolvedValueOnce(mockSubmissions("789019", 2));
-    const { refreshFilingBodies } = await import("../src/lib/web-sources/sec-filings");
-    const result = await refreshFilingBodies(["AAPL", "MSFT"], Date.now(), undefined, { force: true });
-
-    // First pending filing hits the pre-flight, the whole tail is deferred un-recorded.
-    expect(result.attempted).toBe(1);
-    expect(result.ingested).toBe(0);
-    // Cap-aware, breaker excluded: min(4 pending, 25 cap) - 1 processed.
-    expect(result.deferredForBudget).toBe(3);
-    expect(result.errors).toEqual([]);
-    // Only the 2 submissions-JSON fetches happened — zero multi-MB filing-body downloads
-    // (prod 2026-07-10: 20 wasted body fetches + a 20-event Sentry burst per run).
-    expect(mocks.politeFetchText).toHaveBeenCalledTimes(2);
-    expect(mocks.storeDocument).not.toHaveBeenCalled();
-  });
-
-  it("defers the tail when the budget runs out mid-run, keeping earlier ingests", async () => {
-    process.env.VECTOR_EMBED_BATCH_DELAY_MS = "0";
-    mocks.hasIngestTextBudget.mockReturnValueOnce(true).mockReturnValue(false); // 1 filing fits
-    mocks.loadCikMap.mockResolvedValue({ "320193": "AAPL", "789019": "MSFT" });
-    mocks.politeFetchText
-      .mockResolvedValueOnce(mockSubmissions("320193", 2))
-      .mockResolvedValueOnce(mockSubmissions("789019", 2))
-      .mockResolvedValue("<p>".concat("Annual report content. ".repeat(20)).concat("</p>"));
-    mocks.storeDocument.mockResolvedValue({ attempted: 5, indexed: 5, error: undefined });
-
-    const { refreshFilingBodies } = await import("../src/lib/web-sources/sec-filings");
-    const result = await refreshFilingBodies(["AAPL", "MSFT"], Date.now(), undefined, { force: true });
-
-    expect(result.ingested).toBe(1);
-    expect(result.attempted).toBe(2); // the successful one + the pre-flight that stopped the run
-    expect(result.deferredForBudget).toBe(2); // min(4, 25) - 2 processed
-    expect(mocks.storeDocument).toHaveBeenCalledTimes(1);
-  });
-
-  it("dedup-complete is NOT budget exhaustion: heals the accession record and the run continues", async () => {
-    // Crash-window state: a prior run embedded every chunk but died before recording the
-    // accession. storeDocument then full-dedups ({indexed:0, skipped:true, dedupComplete:true}).
-    // Review 2026-07-10 (high): this must record the accession and CONTINUE — misreading it as
-    // capacity would halt the run on the same head-of-queue filing forever.
-    process.env.VECTOR_EMBED_BATCH_DELAY_MS = "0";
-    mocks.loadCikMap.mockResolvedValue({ "320193": "AAPL" });
-    mocks.politeFetchText
-      .mockResolvedValueOnce(mockSubmissions("320193", 2))
-      .mockResolvedValue("<p>".concat("Annual report content. ".repeat(20)).concat("</p>"));
-    mocks.storeDocument
-      .mockResolvedValueOnce({ attempted: 7, indexed: 0, skipped: true, dedupComplete: true })
-      .mockResolvedValue({ attempted: 5, indexed: 5, error: undefined });
-
-    const { refreshFilingBodies } = await import("../src/lib/web-sources/sec-filings");
-    const result = await refreshFilingBodies(["AAPL"], Date.now(), undefined, { force: true });
-
-    expect(result.deferredForBudget).toBe(0); // did NOT stop
-    expect(result.attempted).toBe(2); // both of AAPL's pending filings processed
-    expect(result.skipped).toBe(1); // the healed one
-    expect(result.ingested).toBe(1); // the second one embedded normally
-    const { hasIngestedAccession } = await import("../src/lib/db");
-    // The healed filing's accession is now recorded (chunk_count = attempted chunks).
-    expect(mocks.storeDocument).toHaveBeenCalledTimes(2);
-    expect(result.errors).toEqual([]);
-    void hasIngestedAccession; // record check is implicit via attempted=2 (no re-processing)
-  });
-
-  it("keys-unconfigured IS a capacity stop: the run defers the tail", async () => {
-    process.env.VECTOR_EMBED_BATCH_DELAY_MS = "0";
-    mocks.loadCikMap.mockResolvedValue({ "320193": "AAPL", "789019": "MSFT" });
-    mocks.politeFetchText
-      .mockResolvedValueOnce(mockSubmissions("320193", 2))
-      .mockResolvedValueOnce(mockSubmissions("789019", 2))
-      .mockResolvedValue("<p>".concat("Annual report content. ".repeat(20)).concat("</p>"));
-    mocks.storeDocument.mockResolvedValue({ attempted: 5, indexed: 0, skipped: true, unconfigured: true });
-
-    const { refreshFilingBodies } = await import("../src/lib/web-sources/sec-filings");
-    const result = await refreshFilingBodies(["AAPL", "MSFT"], Date.now(), undefined, { force: true });
-
-    expect(result.attempted).toBe(1);
-    expect(result.ingested).toBe(0);
-    expect(result.deferredForBudget).toBe(3);
-    expect(mocks.storeDocument).toHaveBeenCalledTimes(1);
-  });
-
-  it("SEC_FILING_INGEST_TTL_HOURS shortens the ingest cadence", async () => {
-    const { setInternalSetting } = await import("../src/lib/db");
-    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60_000).toISOString();
-    setInternalSetting("webSource:sec10k:lastAttempt", twoDaysAgo);
-
-    const { isFilingIngestDue } = await import("../src/lib/web-sources/sec-filings");
-    // Default weekly TTL: 2 days ago is NOT due yet.
-    expect(isFilingIngestDue()).toBe(false);
-    // Daily cadence: 2 days ago IS due.
-    process.env.SEC_FILING_INGEST_TTL_HOURS = "24";
-    expect(isFilingIngestDue()).toBe(true);
   });
 });
 

@@ -1,34 +1,26 @@
 "use client";
 
 /** Strategy — how this account trades: the strategist's written instructions
- *  (prompt), the models, the eight scoring-factor weights, the preset
- *  library, and the account's tax treatment. Always account-scoped; the
- *  header repeats the scope. Presets are copy-not-link and can never arm or
- *  disarm anything (server-enforced). */
+ *  (prompt), the models, the eight scoring-factor weights, and the preset
+ *  library. Always account-scoped; the header repeats the scope. Presets are
+ *  copy-not-link and can never arm or disarm anything (server-enforced). */
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
-import { ArrowRight, Lock, Unlock } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Lock, Unlock } from "lucide-react";
 import type { LlmReasoningEffort, ScoringWeights, StrategyTuningPatch, TradingPolicy } from "@/lib/types";
-import { isDisallowedInteractiveStrategyReasoningConfig, reasoningCapabilityForModel } from "@/lib/llm-request";
-import { reasoningAdviceForModel } from "@/lib/model-reasoning-recommendations";
-import type { DashboardSnapshot } from "../../dashboard-types";
 import {
-  normalizeReasoningValueForControl,
-  reasoningControlForModels,
-  reasoningSummary,
-  seatReasoningPatch,
-  type ReasoningControl
-} from "./reasoning-control";
+  reasoningCapabilityForModel,
+  normalizeReasoningEffortForModel,
+  normalizeReasoningEffortForOptions,
+  type LlmReasoningCapability,
+  type LlmReasoningOption
+} from "@/lib/llm-request";
 // Pure curated-model DATA (no legacy UI components) — the same catalog the rest
 // of the app offers, so the console review picker stays consistent with it.
-import { CURATED_LLM_MODEL_GROUPS, CURATED_LLM_MODEL_IDS, CUSTOM_MODEL_ID_SEED, ROTATE_ALL_MODELS_ID, ROTATE_ALL_MODELS_LABEL } from "../../ui/llm-model-catalog";
+import { CURATED_LLM_MODEL_GROUPS, CURATED_LLM_MODEL_IDS, CUSTOM_MODEL_ID_SEED } from "../../ui/llm-model-catalog";
 import {
   activateProfile,
   copyProfileToAccount,
-  fetchLatestTuneReview,
-  importAccountSettings,
-  resolveTuneReview,
   savePolicy,
   tuneStrategy,
   ConsoleApiError,
@@ -37,18 +29,12 @@ import {
 import { activeConnectedAccount, deriveReality, type RealityInfo } from "../lib/derive";
 import { EM_DASH } from "../lib/format";
 import { classify, getAtPath, type FieldDef } from "../lib/policy-diff";
-import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
-import { useAutoSave } from "../lib/useAutoSave";
 import { useConsoleData } from "../lib/useConsoleData";
 import { useUnsavedChanges } from "../lib/useDirtyGuard";
 import { ALL_DEFS } from "../guardrails/field-defs";
 import { TypedConfirm } from "../components/chrome";
-import { ModelStatsButton } from "../components/model-stats-drawer";
-import { TaxSettingsCard } from "./tax-settings";
 import { useToast } from "../ui/toast";
-import { Ago, Btn, Card, Chip, Empty, Field, LiveTag, RawNumInput, Select, TextArea, TextInput, Tooltip } from "../ui/primitives";
-import { SaveStatus } from "../ui/save-status";
-import { Sheet } from "../ui/sheet";
+import { Ago, Btn, Card, Chip, Empty, Field, LiveTag, RawNumInput, Select, TextArea, TextInput } from "../ui/primitives";
 
 /** Shipped default weights (src/lib/defaults.ts) — shown as ghost reference. */
 const DEFAULT_WEIGHTS: ScoringWeights = {
@@ -63,44 +49,6 @@ const DEFAULT_WEIGHTS: ScoringWeights = {
 };
 
 const WEIGHT_KEYS = Object.keys(DEFAULT_WEIGHTS) as Array<keyof ScoringWeights>;
-
-/** Human-readable name + hover explanation for each scoring factor. Display-only —
- *  does not touch the scoring math in src/lib/scoring.ts (or wherever weights are applied). */
-const FACTOR_META: Record<keyof ScoringWeights, { name: string; tip: string }> = {
-  liquidity: {
-    name: "Liquidity",
-    tip: "How easily you can trade the stock, from recent share volume. More weight favors high-volume names you can enter and exit cleanly, and penalizes thin, illiquid ones."
-  },
-  momentum: {
-    name: "Momentum",
-    tip: "Recent trend strength: intraday move, position within the 52-week range, and technical signals (RSI/MACD/moving averages). More weight favors names that are rising and near their highs."
-  },
-  value: {
-    name: "Value",
-    tip: "Cheapness from P/E and free-cash-flow yield. More weight tilts toward low-multiple, cash-generative names and away from expensive ones."
-  },
-  quality: {
-    name: "Quality",
-    tip: "Financial sturdiness: company size, low debt, and earnings growth. More weight favors large, low-leverage, profitably growing companies."
-  },
-  volatility: {
-    name: "Volatility",
-    tip: "Steadiness, not choppiness — the score is highest for calm, low-beta names. Counter-intuitively, more weight here favors steady stocks and penalizes sharp movers and high-beta risk."
-  },
-  sentiment: {
-    name: "Sentiment",
-    tip: "Aggregate news, analyst, and market sentiment (0–100). More weight favors positively-covered names and discounts negatively-covered ones."
-  },
-  positioning: {
-    name: "Positioning",
-    tip: "Smart-money accumulation: net congressional buying, insider open-market purchases (SEC Form 4), and short-squeeze setups. More weight favors names insiders and Congress are buying."
-  },
-  diversification: {
-    name: "Diversification",
-    tip: "Portfolio fit: a name you don't already hold scores higher than one you do. More weight pushes toward new positions instead of adding to what you already own — it's held-vs-not, not sector spread."
-  }
-};
-
 const CUSTOM_MODEL_OPTION = CUSTOM_MODEL_ID_SEED;
 
 function isCuratedModel(model: string | undefined): boolean {
@@ -114,73 +62,97 @@ function modelSelectValue(model: string | undefined): string {
 
 function modelProviderLabel(model: string | undefined): string {
   if (!model) return "Not Set";
-  if (model === ROTATE_ALL_MODELS_ID) return "Rotating (a different model each run)";
   const group = CURATED_LLM_MODEL_GROUPS.find((g) => g.options.some((option) => option.value === model));
   return group?.label ?? "Custom Provider";
+}
+
+function uniq<T>(items: T[]): T[] {
+  return Array.from(new Set(items));
+}
+
+function reasoningControlForModels(models: string[]): { label: string; hint: string; options: LlmReasoningOption[]; capabilities: LlmReasoningCapability[] } | null {
+  const capabilities = uniq(models.map((model) => model.trim()).filter(Boolean))
+    .map((model) => reasoningCapabilityForModel(model))
+    .filter((capability): capability is LlmReasoningCapability => Boolean(capability));
+  const uniqueCapabilities = Array.from(new Map(capabilities.map((capability) => [capability.label, capability])).values());
+  if (uniqueCapabilities.length === 0) return null;
+
+  const sharedValues = uniqueCapabilities.reduce<LlmReasoningEffort[] | null>((shared, capability) => {
+    const values = capability.options.map((option) => option.value);
+    return shared ? shared.filter((value) => values.includes(value)) : values;
+  }, null);
+  if (!sharedValues || sharedValues.length === 0) return null;
+
+  const firstOptions = uniqueCapabilities[0]?.options ?? [];
+  const options = firstOptions
+    .filter((option) => sharedValues.includes(option.value))
+    .map((option) => {
+      const providerOption = uniqueCapabilities.flatMap((capability) => capability.options).find((candidate) => candidate.value === option.value);
+      return providerOption ?? option;
+    });
+
+  if (uniqueCapabilities.length === 1) {
+    const capability = uniqueCapabilities[0]!;
+    return { label: capability.settingLabel, hint: capability.description, options, capabilities: uniqueCapabilities };
+  }
+
+  const labels = uniqueCapabilities.map((capability) => capability.label).join(" + ");
+  return {
+    label: "Shared Reasoning / Thinking",
+    hint: `${labels} are active. Only values supported by every selected model are shown.`,
+    options,
+    capabilities: uniqueCapabilities
+  };
+}
+
+function reasoningSummary(control: ReturnType<typeof reasoningControlForModels>): string {
+  if (!control) return "These selected models do not expose a provider-specific reasoning or thinking control here.";
+  return `${control.capabilities.map((capability) => capability.label).join(" + ")} active.`;
+}
+
+function normalizeReasoningValueForControl(
+  models: string[],
+  control: ReturnType<typeof reasoningControlForModels>,
+  effort: LlmReasoningEffort | undefined
+): LlmReasoningEffort | undefined {
+  if (!control) return undefined;
+  if (control.capabilities.length === 1) {
+    const provider = control.capabilities[0]!.provider;
+    const model = models.find((candidate) => reasoningCapabilityForModel(candidate)?.provider === provider);
+    return normalizeReasoningEffortForModel(model, effort) ?? normalizeReasoningEffortForOptions(control.options, effort);
+  }
+  return normalizeReasoningEffortForOptions(control.options, effort);
 }
 
 function ModelSelect({
   id,
   value,
-  onPick,
-  onCustomTextChange,
-  onCustomTextBlur,
-  disabled,
+  onChange,
   allowBlank,
   blankLabel,
-  blankDisabled,
   role
 }: {
   id: string;
   value: string | undefined;
-  /** A concrete model choice from the dropdown (curated id, blank, or rotate) — persist immediately. */
-  onPick: (model: string) => void;
-  /** Local-only update per keystroke while typing a custom id — never persists. */
-  onCustomTextChange: (text: string) => void;
-  /** Persist the typed custom id (if any) on blur. */
-  onCustomTextBlur: () => void;
-  disabled?: boolean;
+  onChange: (model: string) => void;
   allowBlank?: boolean;
   blankLabel?: string;
-  /** Render the blank option as an unselectable placeholder (native "choose one" pattern) — for a
-   *  seat where blank is NOT a valid choice to actively pick (the Proposer), only a display state
-   *  for "unconfigured." Without this, a `<select value="">` with no matching `<option value="">`
-   *  falls back to visually showing its FIRST rendered option ("Rotate all models (testing)"),
-   *  making an unconfigured seat look like rotation is on even though nothing was ever chosen. */
-  blankDisabled?: boolean;
   role: "proposer" | "red-team";
 }) {
   const selectValue = modelSelectValue(value);
   const custom = selectValue === CUSTOM_MODEL_OPTION;
-  const customCurrent = value && !isCuratedModel(value) && value !== CUSTOM_MODEL_OPTION && value !== ROTATE_ALL_MODELS_ID ? value : null;
+  const customCurrent = value && !isCuratedModel(value) && value !== CUSTOM_MODEL_OPTION ? value : null;
   return (
     <div className="flex flex-col gap-2">
       <Select
         id={id}
         value={selectValue}
-        disabled={disabled}
         onChange={(event) => {
           const next = event.target.value;
-          if (next === CUSTOM_MODEL_OPTION) {
-            // Entering (or re-entering) custom-id entry mode is a UI-mode switch, not a concrete
-            // model choice — don't persist until a real id is typed and blurred.
-            onCustomTextChange(custom ? (value ?? CUSTOM_MODEL_OPTION) : CUSTOM_MODEL_OPTION);
-            return;
-          }
-          onPick(next);
+          onChange(next === CUSTOM_MODEL_OPTION ? (custom ? (value ?? CUSTOM_MODEL_OPTION) : CUSTOM_MODEL_OPTION) : next);
         }}
       >
-        {allowBlank && (
-          <option value="" disabled={blankDisabled}>
-            {blankLabel ?? "Not Set"}
-          </option>
-        )}
-        <option
-          value={ROTATE_ALL_MODELS_ID}
-          title="Round-robins every curated model with a resolvable key — a different model each run, so comparative history accrues across models. Intended for paper/test accounts."
-        >
-          {ROTATE_ALL_MODELS_LABEL}
-        </option>
+        {allowBlank && <option value="">{blankLabel ?? "Not Set"}</option>}
         {customCurrent && (
           <option value={customCurrent} title="A model id outside the curated list, kept exactly as stored.">
             {customCurrent} - custom id
@@ -190,9 +162,9 @@ function ModelSelect({
           <optgroup key={group.provider} label={group.label}>
             {group.options.map((option) => {
               const label = role === "proposer" && option.recommendedGreen
-                ? `${option.label} (Rec Green Team)`
+                ? `${option.label} (Rec Proposer)`
                 : role === "red-team" && option.recommendedRed
-                ? `${option.label} (Rec Red Team)`
+                ? `${option.label} (Rec Reviewer)`
                 : option.label;
               return (
                 <option key={option.value} value={option.value}>
@@ -208,310 +180,60 @@ function ModelSelect({
         <TextInput
           value={value && value !== CUSTOM_MODEL_OPTION ? value : ""}
           placeholder="provider-model-id"
-          onChange={(event) => onCustomTextChange(event.target.value)}
-          onBlur={onCustomTextBlur}
-          title="Type an exact provider model ID if it is not in the curated list. Saves when you click away."
+          onChange={(event) => onChange(event.target.value)}
+          title="Type an exact provider model ID if it is not in the curated list."
         />
       )}
     </div>
   );
 }
 
-/** One seat's own reasoning/thinking control (per-team split 2026-07-10): rendered under that
- *  seat's model picker, only when THAT model exposes a reasoning knob. The reviewer additionally
- *  gets an `inherit` blank option ("Same as Green Team") representing the unset per-team field.
- *  Disallowed interactive combos (gpt-5.5 + high) are disabled IN the select — the rule surfaces
- *  before any save instead of as a post-save 400 toast — and curated per-model advice
- *  (src/lib/model-reasoning-recommendations.ts) renders underneath. */
-function SeatEffortSelect({
-  id,
-  model,
-  control,
-  value,
-  disabled,
-  onPick,
-  inherit
-}: {
-  id: string;
-  /** The seat's concrete model (drives per-option disallow checks + advice). */
-  model: string;
-  control: ReasoningControl;
-  /** The resolved effort the select shows (same normalization the server applies at call time). */
-  value: LlmReasoningEffort | undefined;
-  disabled?: boolean;
-  onPick: (effort: LlmReasoningEffort) => void;
-  /** Reviewer-only: the "Same as proposer" unset state. `active` = no explicit per-team value is
-   *  stored; `resolvedLabel` names what currently inherits; `onClear` reverts to inheriting. */
-  inherit?: { active: boolean; resolvedLabel?: string; onClear: () => void };
-}) {
-  const advice = reasoningAdviceForModel(model);
-  const hasDisallowedOption = control.options.some((option) => isDisallowedInteractiveStrategyReasoningConfig(model, option.value));
-  return (
-    <div>
-      <Field label={control.label} hint={control.hint} htmlFor={id}>
-        <Select
-          id={id}
-          value={inherit?.active ? "" : (value ?? "")}
-          disabled={disabled}
-          onChange={(event) => {
-            const next = event.target.value;
-            if (!next) {
-              inherit?.onClear();
-              return;
-            }
-            onPick(next as LlmReasoningEffort);
-          }}
-        >
-          {inherit && (
-            <option
-              value=""
-              title="No Red Team-specific effort stored — the Red Team inherits the Green Team's effort, re-clamped to this model's supported range at call time."
-            >
-              Same as Green Team{inherit.resolvedLabel ? ` (${inherit.resolvedLabel})` : ""}
-            </option>
-          )}
-          {control.options.map((option) => {
-            const disallowed = isDisallowedInteractiveStrategyReasoningConfig(model, option.value);
-            return (
-              <option
-                key={option.value}
-                value={option.value}
-                disabled={disallowed}
-                title={disallowed ? "gpt-5.5 with high reasoning is disabled for interactive strategy runs." : option.hint}
-              >
-                {option.label}
-                {disallowed ? " — disabled for interactive runs" : ""}
-              </option>
-            );
-          })}
-        </Select>
-      </Field>
-      {advice && (
-        <p className={`mt-1.5 text-[length:var(--con-fs-xs)] ${hasDisallowedOption ? "text-[color:var(--con-warn)]" : "text-[color:var(--con-muted)]"}`}>
-          {advice}
-        </p>
-      )}
-    </div>
-  );
-}
-
-/** Copy for a rotating seat, where the manual effort control is deliberately hidden. Matches the
- *  server behavior in src/lib/model-rotation.ts (recommendedReasoningEffortForModel). */
-function RotationEffortNote() {
-  return (
-    <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-      Reasoning is auto-set per rotated model at its curated recommended level (models without a
-      curated recommendation run Medium).
-    </p>
-  );
-}
-
 export default function StrategyPage() {
-  const { snapshot } = useConsoleData();
-  if (!snapshot) return null;
-  return <AccountScopedStrategyPage key={snapshot.policy.connectedAccountId ?? "no-account"} />;
-}
-
-function AccountScopedStrategyPage() {
   const { snapshot, refresh } = useConsoleData();
   const toast = useToast();
 
-  // Prompt: local text while typing, persist on blur (see commitPrompt below).
   const [promptDraft, setPromptDraft] = useState<string | null>(null);
-  const autoSavePrompt = useAutoSave();
-  // Models: sticky optimistic overlay per field — each select persists immediately on
-  // change; the custom-id text fields persist on blur. Reverted by useAutoSave's onError.
-  const [localProposerModel, setLocalProposerModel] = useState<string | null>(null);
-  const [localRedTeamModel, setLocalRedTeamModel] = useState<string | null>(null);
-  const [localFallbackModels, setLocalFallbackModels] = useState<string | null>(null);
-  const autoSaveFallback = useAutoSave();
-  // Per-team reasoning overlays (per-team split 2026-07-10). Proposer: plain optimistic value —
-  // llmReasoningEffort always resolves (it has a "medium" default). Reviewer: "cleared" = an
-  // optimistic explicit-unset (the "Same as Green Team" option) awaiting the server round-trip;
-  // null = no local overlay (fall back to the saved policy value).
-  const [localReasoningEffort, setLocalReasoningEffort] = useState<LlmReasoningEffort | null>(null);
-  const [localRedTeamReasoningEffort, setLocalRedTeamReasoningEffort] = useState<LlmReasoningEffort | "cleared" | null>(null);
-  const autoSaveModels = useAutoSave();
-  // Scoring weights: local text while typing each factor, persist on blur (per-field patch —
-  // the server deep-merges scoringWeights, see commitWeight below).
-  const [weightsOverlay, setWeightsOverlay] = useState<Partial<Record<keyof ScoringWeights, number>>>({});
-  const autoSaveWeights = useAutoSave();
-  // Presets ("Apply to this account") is a discrete action button, not auto-saved.
+  const [modelDraft, setModelDraft] = useState<{ llmModel?: string; redTeamLlmModel?: string; llmReasoningEffort?: LlmReasoningEffort } | null>(null);
+  const [weightsDraft, setWeightsDraft] = useState<Partial<Record<keyof ScoringWeights, number>> | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
   const reality = useMemo(() => (snapshot ? deriveReality(snapshot) : null), [snapshot]);
-  const ready = snapshot !== null;
-
-  // Deep links (e.g. Settings' old #models links now route to /console/strategy#models):
-  // the page renders only after the snapshot arrives, so the native anchor jump
-  // misses — scroll once the target section actually exists.
-  useEffect(() => {
-    if (!ready || typeof window === "undefined") return;
-    const hash = window.location.hash.slice(1);
-    if (!hash) return;
-    const timer = setTimeout(() => document.getElementById(hash)?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
-    return () => clearTimeout(timer);
-  }, [ready]);
-
+  // Unsaved-draft registration must run unconditionally (before the null return).
+  useUnsavedChanges(
+    (promptDraft !== null && promptDraft !== snapshot?.strategyPrompt) || modelDraft !== null || weightsDraft !== null
+  );
   if (!snapshot || !reality) return null;
 
   const policy = snapshot.policy;
   const activeAccount = activeConnectedAccount(snapshot);
   const prompt = promptDraft ?? snapshot.strategyPrompt;
-  const proposerModel = localProposerModel ?? policy.llmModel ?? "";
-  const redTeamModel = localRedTeamModel ?? policy.redTeamLlmModel ?? "";
-  // NOTE (2026-07-10 fix): there used to be an `effectiveRedTeamModel = redTeamModel ||
-  // proposerModel` here that every display below read from. That was a false assumption — the
-  // server (`resolveRoleModel(policy, "red")` in src/lib/llm-provider.ts) does NOT fall back to
-  // the Proposer model when the Reviewer is blank; it returns "" and `debateProposal`
-  // (src/lib/red-team.ts) fails CLOSED to human review (`not_configured`). A blank Reviewer never
-  // runs the Proposer's model. Every display below now reads the Reviewer's own `redTeamModel`
-  // directly (blank stays blank) so the UI can't imply an inheritance that doesn't exist. This is
-  // display-only — no save/resolution behavior changed; see docs/rollouts/2026-07-10-per-team-reasoning.md.
-  //
-  // Reasoning EFFORT inheritance (storedReviewerEffort below) is a DIFFERENT, real mechanism —
-  // resolveReviewerReasoningEffort (src/lib/llm-request.ts) genuinely falls back to the Proposer's
-  // effort when redTeamReasoningEffort is unset, but only ever matters once a Reviewer model is
-  // actually configured (debateProposal returns before resolving effort when the model is blank).
-  // The rotation sentinel is neither a custom id (it only ever serves curated models, so the
-  // custom-cost-fallback warning doesn't apply) nor a model with its own reasoning capability.
-  const isRotate = (m: string) => m === ROTATE_ALL_MODELS_ID;
-  const showCustomModelWarning =
-    (proposerModel && !isCuratedModel(proposerModel) && !isRotate(proposerModel)) ||
-    (redTeamModel && !isCuratedModel(redTeamModel) && !isRotate(redTeamModel));
-  const rotationSelected = isRotate(proposerModel) || isRotate(redTeamModel);
-  // Joint control used ONLY for the one-line provider/reasoning summary below. The actual effort
-  // selects are PER SEAT (per-team split 2026-07-10): each picker gets its own control, shown only
-  // when THAT seat's model exposes a reasoning knob; a rotating seat hides the manual control
-  // entirely (rotation auto-sets each served model's recommended effort server-side). A blank
-  // Reviewer model is filtered out here (not substituted with the Proposer's), so the summary
-  // reflects only models that actually resolve.
-  const reasoningControl = reasoningControlForModels([proposerModel, redTeamModel]);
-  const storedProposerEffort = localReasoningEffort ?? policy.llmReasoningEffort;
-  // The reviewer's EXPLICIT per-team value only — undefined = inheriting the proposer's
-  // (mirrors resolveReviewerReasoningEffort server-side).
-  const storedReviewerEffort =
-    localRedTeamReasoningEffort === "cleared" ? undefined : (localRedTeamReasoningEffort ?? policy.redTeamReasoningEffort);
-  const proposerRotates = isRotate(proposerModel);
-  const reviewerRotates = isRotate(redTeamModel);
-  const proposerReasoningControl = proposerRotates ? null : reasoningControlForModels([proposerModel]);
-  // null (not just when rotating) whenever redTeamModel is blank — reasoningControlForModels
-  // filters out empty strings, so an unconfigured Reviewer correctly shows NO reasoning control
-  // at all rather than the Proposer's ladder under the Reviewer's heading.
-  const reviewerReasoningControl = reviewerRotates ? null : reasoningControlForModels([redTeamModel]);
-  const proposerReasoningValue = proposerReasoningControl
-    ? normalizeReasoningValueForControl([proposerModel], proposerReasoningControl, storedProposerEffort)
+  const promptDirty = promptDraft !== null && promptDraft !== snapshot.strategyPrompt;
+  const proposerModel = modelDraft?.llmModel ?? policy.llmModel ?? "";
+  const redTeamModel = modelDraft?.redTeamLlmModel ?? policy.redTeamLlmModel ?? "";
+  const effectiveRedTeamModel = redTeamModel || proposerModel;
+  const showCustomModelWarning = (proposerModel && !isCuratedModel(proposerModel)) || (effectiveRedTeamModel && !isCuratedModel(effectiveRedTeamModel));
+  const reasoningModels = [proposerModel, effectiveRedTeamModel];
+  const reasoningControl = reasoningControlForModels(reasoningModels);
+  const reasoningValue = reasoningControl
+    ? normalizeReasoningValueForControl(reasoningModels, reasoningControl, modelDraft?.llmReasoningEffort ?? policy.llmReasoningEffort)
     : undefined;
-  // What the reviewer would RUN at right now (explicit value, else the inherited proposer effort),
-  // re-normalized to the reviewer model's own supported range — shown inside the "Same as
-  // proposer" option label so inheritance is never a mystery value. Only computed when the
-  // Reviewer actually has a model (reviewerReasoningControl is null otherwise).
-  const reviewerReasoningValue = reviewerReasoningControl
-    ? normalizeReasoningValueForControl([redTeamModel], reviewerReasoningControl, storedReviewerEffort ?? storedProposerEffort)
-    : undefined;
-  const reviewerInheriting = storedReviewerEffort === undefined;
-  const reviewerInheritedLabel = reviewerReasoningControl?.options.find((option) => option.value === reviewerReasoningValue)?.label;
-  // A concrete seat model that takes NO reasoning parameters at all (e.g. mistral-small-2603) —
-  // disclose per seat that reasoning settings don't apply to it.
-  const proposerNoKnob = Boolean(proposerModel) && !proposerRotates && !reasoningCapabilityForModel(proposerModel);
-  const reviewerNoKnob = Boolean(redTeamModel) && !reviewerRotates && !reasoningCapabilityForModel(redTeamModel);
-  // The Reviewer is unconfigured (blank, not rotating) — the real server-side consequence is that
-  // every risk-adding opening fails CLOSED to human review; it does NOT run the Proposer's model.
-  const reviewerNotConfigured = !redTeamModel;
 
-  // Prompt: skip the write if blur leaves it unchanged from the saved copy.
-  const commitPrompt = () => {
-    if (promptDraft === null || promptDraft === snapshot.strategyPrompt) return;
-    const next = promptDraft;
-    const prev = snapshot.strategyPrompt;
-    autoSavePrompt.save(() => savePolicy({ strategyPrompt: next }, policy.connectedAccountId).then(() => refresh()), {
-      onError: () => setPromptDraft(prev),
-      errorTitle: "Prompt not saved"
-    });
-  };
-
-  // Persist one team's model choice (from either the select or a blurred custom-id text field).
-  // Bundles a renormalized effort FOR THAT SEAT into the SAME write whenever its model changes —
-  // see seatReasoningPatch — so a model-only save can never leave the seat's (model, effort)
-  // combo in an invalid state (including the disallowed interactive gpt-5.5+high combo, which is
-  // clamped to medium in the patch instead of bouncing off the server).
-  const commitProposerModel = (model: string, prev: string) => {
-    if (model === (policy.llmModel ?? "")) return; // unchanged from the saved value -> no write
-    const patch = {
-      llmModel: model,
-      ...seatReasoningPatch("llmReasoningEffort", model, storedProposerEffort)
-    };
-    setLocalProposerModel(model);
-    autoSaveModels.save(() => savePolicy(patch, policy.connectedAccountId).then(() => refresh()), {
-      onError: () => setLocalProposerModel(prev),
-      errorTitle: "Green Team not saved"
-    });
-  };
-  const commitRedTeamModel = (model: string, prev: string) => {
-    if (model === (policy.redTeamLlmModel ?? "")) return; // unchanged from the saved value -> no write
-    const patch = {
-      // "" (blank = same as proposer) -> null: the policy route strips nulls back to absent,
-      // which is how this optional field is actually cleared (an empty string is rejected).
-      redTeamLlmModel: model || null,
-      // Renormalize ONLY an explicit reviewer effort against the seat's new effective model — an
-      // inheriting (unset) reviewer stays unset (seatReasoningPatch no-ops on undefined effort).
-      ...seatReasoningPatch("redTeamReasoningEffort", model || proposerModel, storedReviewerEffort)
-    };
-    setLocalRedTeamModel(model);
-    autoSaveModels.save(() => savePolicy(patch, policy.connectedAccountId).then(() => refresh()), {
-      onError: () => setLocalRedTeamModel(prev),
-      errorTitle: "Red Team not saved"
-    });
-  };
-  const commitProposerReasoningEffort = (effort: LlmReasoningEffort) => {
-    const prev = localReasoningEffort;
-    setLocalReasoningEffort(effort);
-    autoSaveModels.save(() => savePolicy({ llmReasoningEffort: effort }, policy.connectedAccountId).then(() => refresh()), {
-      onError: () => setLocalReasoningEffort(prev),
-      errorTitle: "Green Team reasoning not saved"
-    });
-  };
-  const commitReviewerReasoningEffort = (effort: LlmReasoningEffort) => {
-    const prev = localRedTeamReasoningEffort;
-    setLocalRedTeamReasoningEffort(effort);
-    autoSaveModels.save(() => savePolicy({ redTeamReasoningEffort: effort }, policy.connectedAccountId).then(() => refresh()), {
-      onError: () => setLocalRedTeamReasoningEffort(prev),
-      errorTitle: "Red Team reasoning not saved"
-    });
-  };
-  // The reviewer's "Same as Green Team" blank option: clear the explicit per-team value entirely
-  // (the policy route strips the null back to absent), so the reviewer goes back to inheriting
-  // the proposer's effort via resolveReviewerReasoningEffort at call time.
-  const clearReviewerReasoningEffort = () => {
-    const prev = localRedTeamReasoningEffort;
-    setLocalRedTeamReasoningEffort("cleared");
-    autoSaveModels.save(() => savePolicy({ redTeamReasoningEffort: null }, policy.connectedAccountId).then(() => refresh()), {
-      onError: () => setLocalRedTeamReasoningEffort(prev),
-      errorTitle: "Red Team reasoning not saved"
-    });
-  };
-
-  const commitFallbackModels = () => {
-    if (localFallbackModels === null) return;
-    const array = localFallbackModels.split(",").map(s => s.trim()).filter(Boolean);
-    const prevArray = policy.llmFallbackModels || [];
-    if (array.join(",") === prevArray.join(",")) return;
-    autoSaveFallback.save(() => savePolicy({ llmFallbackModels: array }).then(() => refresh()), {
-      onError: () => setLocalFallbackModels(prevArray.join(", ")),
-      errorTitle: "Fallback models not saved"
-    });
-  };
-
-  // Scoring weights: one factor per blur, skip the write if unchanged from the saved value.
-  const commitWeight = (key: keyof ScoringWeights, next: number, saved: number) => {
-    if (next === saved) return;
-    autoSaveWeights.save(() => savePolicy({ scoringWeights: { [key]: next } }, policy.connectedAccountId).then(() => refresh()), {
-      onError: () => setWeightsOverlay((d) => ({ ...d, [key]: saved }))
-    });
+  const save = async (label: string, body: Record<string, unknown>, after?: () => void) => {
+    setBusy(label);
+    try {
+      await savePolicy(body);
+      await refresh();
+      after?.();
+      toast.push("pos", `${label} saved`, "Takes effect on the next run.");
+    } catch (error) {
+      toast.push("neg", `${label} not saved`, error instanceof ConsoleApiError ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
   };
 
   return (
-    <div className={`${CONSOLE_PAGE_WIDTH} flex flex-col gap-4`}>
+    <div className="mx-auto flex max-w-3xl flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2">
         <h1 className="text-[length:var(--con-fs-lg)] font-bold">Strategy</h1>
         <Chip tone={reality.tone}>
@@ -520,175 +242,78 @@ function AccountScopedStrategyPage() {
         <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
           for {reality.account?.label ?? "no connected account"} — each account has its own strategy
         </span>
-        <div className="ml-auto">
-          <ImportFromAccountControl snapshot={snapshot} policy={policy} currentLabel={reality.account?.label} />
-        </div>
       </div>
 
       {/* Prompt */}
-      <Card title="The strategist's written instructions" action={<SaveStatus status={autoSavePrompt.status} />}>
+      <Card
+        title="The strategist's written instructions"
+        action={
+          promptDirty ? (
+            <div className="flex gap-2">
+              <Btn variant="ghost" size="sm" onClick={() => setPromptDraft(null)}>
+                Discard
+              </Btn>
+              <Btn variant="primary" size="sm" disabled={busy !== null} onClick={() => void save("Prompt", { strategyPrompt: promptDraft }, () => setPromptDraft(null))}>
+                {busy === "Prompt" ? "Saving…" : "Save prompt"}
+              </Btn>
+            </div>
+          ) : undefined
+        }
+      >
         <p className="mb-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
           Free-text brief the proposer LLM runs under: objective, selection logic, sell rules, sizing guidance, output
           contract. The deterministic policy gate still constrains everything it proposes.
         </p>
-        <TextArea
-          rows={16}
-          value={prompt}
-          onChange={(e) => setPromptDraft(e.target.value)}
-          onBlur={commitPrompt}
-          spellCheck={false}
-          title="Saves when you click away."
-        />
+        <TextArea rows={16} value={prompt} onChange={(e) => setPromptDraft(e.target.value)} spellCheck={false} />
       </Card>
 
-      {/* Models — id anchor is a deep-link target (old Settings "#models" links
-          retargeted here in the 2026-07-10 Settings IA restructure). */}
-      <div id="models" className="scroll-mt-28">
+      {/* Models */}
       <Card
         title="Models"
         action={
-          <div className="flex items-center gap-3">
-            <Link
-              href="/console/usage"
-              className="flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]"
-              title="What each model actually spends — per-provider and per-context LLM usage and cost."
-            >
-              LLM usage &amp; cost <ArrowRight size={12} />
-            </Link>
-            <SaveStatus status={autoSaveModels.status} />
-          </div>
+          modelDraft ? (
+            <div className="flex gap-2">
+              <Btn variant="ghost" size="sm" onClick={() => setModelDraft(null)}>
+                Discard
+              </Btn>
+              <Btn
+                variant="primary"
+                size="sm"
+                disabled={busy !== null}
+                onClick={() => {
+                  if (!modelDraft) return;
+                  const body = reasoningControl && reasoningValue ? { ...modelDraft, llmReasoningEffort: reasoningValue } : modelDraft;
+                  void save("Models", body, () => setModelDraft(null));
+                }}
+              >
+                {busy === "Models" ? "Saving…" : "Save models"}
+              </Btn>
+            </div>
+          ) : undefined
         }
       >
         <div className="grid gap-4 sm:grid-cols-2">
-          <div className="flex flex-col gap-3">
-            <Field
-              label={
-                <>
-                  <span className="text-[color:var(--con-pos)]">Green Team</span> Model
-                </>
-              }
-              hint="The proposer — writes the trade proposals each run."
-              htmlFor="llm-model"
-            >
-              <div className="flex items-start gap-2">
-                <div className="min-w-0 flex-1">
-                  <ModelSelect
-                    id="llm-model"
-                    value={proposerModel}
-                    role="proposer"
-                    allowBlank
-                    blankDisabled
-                    blankLabel="Not set — choose a model"
-                    disabled={autoSaveModels.saving}
-                    onPick={(model) => commitProposerModel(model, proposerModel)}
-                    onCustomTextChange={(text) => setLocalProposerModel(text)}
-                    onCustomTextBlur={() => {
-                      const typed = (localProposerModel ?? "").trim();
-                      if (!typed || typed === CUSTOM_MODEL_OPTION) return; // nothing concrete typed
-                      commitProposerModel(typed, policy.llmModel ?? "");
-                    }}
-                  />
-                </div>
-                <ModelStatsButton role="proposer" />
-              </div>
-            </Field>
-            {proposerRotates && <RotationEffortNote />}
-            {proposerReasoningControl && (
-              <SeatEffortSelect
-                id="proposer-effort"
-                model={proposerModel}
-                control={proposerReasoningControl}
-                value={proposerReasoningValue}
-                disabled={autoSaveModels.saving}
-                onPick={commitProposerReasoningEffort}
-              />
-            )}
-            {proposerNoKnob && (
-              <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-                {proposerModel} takes no reasoning parameters — reasoning settings don&apos;t apply to it.
-              </p>
-            )}
-          </div>
-          <div className="flex flex-col gap-3">
-            <Field
-              label={
-                <>
-                  <span className="text-[color:var(--con-neg)]">Red Team</span> Model
-                </>
-              }
-              hint="The adversarial reviewer — reviews every proposal each run, and runs a deeper adversarial debate on high-conviction or dissent-flagged ideas. Blank = not configured: it does NOT inherit the Green Team model — every risk-adding opening routes to human review until a Red Team model is set."
-              htmlFor="rt-model"
-            >
-              <div className="flex items-start gap-2">
-                <div className="min-w-0 flex-1">
-                  <ModelSelect
-                    id="rt-model"
-                    value={redTeamModel}
-                    allowBlank
-                    blankLabel="Not set"
-                    role="red-team"
-                    disabled={autoSaveModels.saving}
-                    onPick={(model) => commitRedTeamModel(model, redTeamModel)}
-                    onCustomTextChange={(text) => setLocalRedTeamModel(text)}
-                    onCustomTextBlur={() => {
-                      const typed = (localRedTeamModel ?? "").trim();
-                      if (!typed || typed === CUSTOM_MODEL_OPTION) return; // nothing concrete typed
-                      commitRedTeamModel(typed, policy.redTeamLlmModel ?? "");
-                    }}
-                  />
-                </div>
-                <ModelStatsButton role="red-team" />
-              </div>
-            </Field>
-            {reviewerRotates && <RotationEffortNote />}
-            {reviewerReasoningControl && (
-              <SeatEffortSelect
-                id="reviewer-effort"
-                model={redTeamModel}
-                control={reviewerReasoningControl}
-                value={reviewerReasoningValue}
-                disabled={autoSaveModels.saving}
-                onPick={commitReviewerReasoningEffort}
-                inherit={{
-                  active: reviewerInheriting,
-                  resolvedLabel: reviewerInheritedLabel,
-                  onClear: clearReviewerReasoningEffort
-                }}
-              />
-            )}
-            {reviewerNoKnob && (
-              <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-                {redTeamModel} takes no reasoning parameters — reasoning settings don&apos;t apply to it.
-              </p>
-            )}
-            {reviewerNotConfigured && (
-              <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]">
-                No Reviewer model set — it does not inherit the Proposer. Every risk-adding opening
-                routes to human review until a Reviewer model is chosen.
-              </p>
-            )}
-          </div>
-        </div>
-
-        <div className="mt-4 pt-4 border-t border-[color:var(--con-line)]">
+          <Field label="Proposer model" hint="The bull-side strategist." htmlFor="llm-model">
+            <ModelSelect
+              id="llm-model"
+              value={proposerModel}
+              role="proposer"
+              onChange={(model) => setModelDraft((d) => ({ ...(d ?? {}), llmModel: model }))}
+            />
+          </Field>
           <Field
-            label="Green Team Fallback Models"
-            hint="Comma-separated model IDs. If the primary Green Team model hits a transient error (e.g. rate limit, timeout), these models are tried in order. Does not apply to the Red Team."
-            htmlFor="llm-fallback-models"
+            label="Red-team model"
+            hint="The bear-side reviewer that tries to kill high-conviction ideas. Blank = same as proposer."
+            htmlFor="rt-model"
           >
-            <div className="flex items-center gap-3">
-              <div className="min-w-0 flex-1">
-                <TextInput
-                  id="llm-fallback-models"
-                  value={localFallbackModels ?? (policy.llmFallbackModels || []).join(", ")}
-                  placeholder="e.g. gpt-4o, claude-3-5-sonnet-20240620"
-                  onChange={(e) => setLocalFallbackModels(e.target.value)}
-                  onBlur={commitFallbackModels}
-                  disabled={autoSaveFallback.saving}
-                />
-              </div>
-              <SaveStatus status={autoSaveFallback.status} />
-            </div>
+            <ModelSelect
+              id="rt-model"
+              value={redTeamModel}
+              allowBlank
+              blankLabel="Same As Proposer"
+              role="red-team"
+              onChange={(model) => setModelDraft((d) => ({ ...(d ?? {}), redTeamLlmModel: model }))}
+            />
           </Field>
         </div>
         {showCustomModelWarning && (
@@ -701,59 +326,71 @@ function AccountScopedStrategyPage() {
             </div>
           </div>
         )}
-        {rotationSelected && (
-          <div className="mt-3 rounded-md border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] px-3 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
-            Rotation: each run picks the next curated model whose provider key resolves (round-robin per account,
-            audited). Every proposal records the concrete model that wrote it, so per-model history accrues
-            automatically. Intended for paper/test accounts.
-          </div>
-        )}
         <div className="mt-3 rounded-md border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] px-3 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
-          Green Team: {modelProviderLabel(proposerModel)}. Red Team: {modelProviderLabel(redTeamModel)}.
+          Proposer: {modelProviderLabel(proposerModel)}. Red Team: {modelProviderLabel(effectiveRedTeamModel)}.
           {" "}
           {reasoningSummary(reasoningControl)}
         </div>
+        {reasoningControl && reasoningValue && (
+          <div className="mt-3 max-w-xs">
+            <Field
+              label={reasoningControl.label}
+              hint={reasoningControl.hint}
+              htmlFor="effort"
+            >
+              <Select
+                id="effort"
+                value={reasoningValue}
+                onChange={(e) => setModelDraft((d) => ({ ...(d ?? {}), llmReasoningEffort: e.target.value as LlmReasoningEffort }))}
+              >
+                {reasoningControl.options.map((option) => (
+                  <option key={option.value} value={option.value} title={option.hint}>
+                    {option.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+        )}
       </Card>
-      </div>
 
       {/* Scoring weights */}
-      <Card title="Scoring-factor weights" action={<SaveStatus status={autoSaveWeights.status} />}>
+      <Card
+        title="Scoring-factor weights"
+        action={
+          weightsDraft ? (
+            <div className="flex gap-2">
+              <Btn variant="ghost" size="sm" onClick={() => setWeightsDraft(null)}>
+                Discard
+              </Btn>
+              <Btn
+                variant="primary"
+                size="sm"
+                disabled={busy !== null}
+                onClick={() => void save("Weights", { scoringWeights: weightsDraft }, () => setWeightsDraft(null))}
+              >
+                {busy === "Weights" ? "Saving…" : "Save weights"}
+              </Btn>
+            </div>
+          ) : undefined
+        }
+      >
         <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
           The market scan ranks candidates by these eight factors before the strategist ever sees them. Defaults shown
-          under each field. Weights are relative — raising one factor increases its share of the score and lowers the
-          others&apos;; only the ratios between factors matter, not the absolute numbers.
+          under each field.
         </p>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           {WEIGHT_KEYS.map((key) => {
-            const saved = policy.scoringWeights?.[key] ?? DEFAULT_WEIGHTS[key];
-            const current = weightsOverlay[key] ?? saved;
-            const meta = FACTOR_META[key] ?? { name: key, tip: "A scoring factor used to rank market-scan candidates." };
+            const current = weightsDraft?.[key] ?? policy.scoringWeights?.[key] ?? DEFAULT_WEIGHTS[key];
             return (
-              <Field
-                key={key}
-                label={
-                  <Tooltip content={meta.tip}>
-                    <span className="inline-flex cursor-default items-center gap-1">
-                      {meta.name}
-                      <span aria-hidden className="text-[color:var(--con-faint)]">
-                        ⓘ
-                      </span>
-                      <span className="sr-only">{meta.tip}</span>
-                    </span>
-                  </Tooltip>
-                }
-                hint={`default ${DEFAULT_WEIGHTS[key]}`}
-                htmlFor={`w-${key}`}
-              >
+              <Field key={key} label={key} hint={`default ${DEFAULT_WEIGHTS[key]}`} htmlFor={`w-${key}`}>
                 <RawNumInput
                   id={`w-${key}`}
                   step="0.1"
                   min="0"
                   value={String(current)}
                   emptyValue={DEFAULT_WEIGHTS[key]}
-                  title="Saves when you click away."
-                  onValueChange={(parsed) => setWeightsOverlay((d) => ({ ...d, [key]: parsed }))}
-                  onBlur={() => commitWeight(key, current, saved)}
+                  onValueChange={(parsed) => setWeightsDraft((d) => ({ ...(d ?? {}), [key]: parsed }))}
                 />
               </Field>
             );
@@ -826,102 +463,7 @@ function AccountScopedStrategyPage() {
           </div>
         )}
       </Card>
-
-      {/* Tax treatment — account-scoped like the rest of this page; moved here
-          from Settings in the 2026-07-10 IA restructure (Settings is global-only).
-          The id anchor is a deep-link target. */}
-      <div id="tax" className="scroll-mt-28">
-        <TaxSettingsCard />
-      </div>
     </div>
-  );
-}
-
-// ── Import settings from another account ────────────────────────────────────
-
-/** Header affordance: copy this account's ENTIRE strategy config (models, prompt, guardrails,
- *  weights, watchlist, tax treatment) from any other connected account. Any->any — never
- *  paper-only — and never touches broker connection, credentials, or run state (server-enforced,
- *  see importAccountSettings). Hidden entirely when there's no other account to copy from. */
-function ImportFromAccountControl({
-  snapshot,
-  policy,
-  currentLabel
-}: {
-  snapshot: DashboardSnapshot;
-  policy: TradingPolicy;
-  currentLabel?: string;
-}) {
-  const { refresh } = useConsoleData();
-  const toast = useToast();
-  const [open, setOpen] = useState(false);
-  const [sourceId, setSourceId] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const otherAccounts = snapshot.connectedAccounts.filter((a) => a.id !== policy.connectedAccountId);
-  if (otherAccounts.length === 0) return null;
-
-  const source = otherAccounts.find((a) => a.id === sourceId) ?? null;
-  const closeSheet = () => {
-    setOpen(false);
-    setSourceId("");
-  };
-
-  const doImport = async () => {
-    if (!source || !policy.connectedAccountId) return;
-    setBusy(true);
-    try {
-      await importAccountSettings(policy.connectedAccountId, source.id);
-      await refresh();
-      toast.push("pos", "Settings imported", `Copied strategy settings from “${source.label}” onto this account.`);
-      closeSheet();
-    } catch (error) {
-      toast.push("neg", "Import failed", error instanceof ConsoleApiError ? error.message : String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <>
-      <Btn size="sm" onClick={() => setOpen(true)} title="Copy strategy settings from another connected account onto this one.">
-        Import from account…
-      </Btn>
-      <Sheet open={open} onClose={closeSheet} title="Import settings from another account">
-        <p className="mb-3 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-faint)]">
-          Copies strategy settings — models, prompt, guardrails, weights, watchlist, tax treatment — from another
-          connected account onto {currentLabel ? `“${currentLabel}”` : "this account"}. Does not touch broker
-          connection, credentials, or run state.
-        </p>
-        <Field label="Source account" htmlFor="import-source-account">
-          <Select id="import-source-account" value={sourceId} onChange={(e) => setSourceId(e.target.value)} disabled={busy}>
-            <option value="">Choose an account…</option>
-            {otherAccounts.map((account) => (
-              <option key={account.id} value={account.id}>
-                {account.label} ({account.broker} · {account.environment})
-              </option>
-            ))}
-          </Select>
-        </Field>
-        {source && (
-          <div className="mt-4 rounded-lg border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] p-3">
-            <p className="mb-2 text-[length:var(--con-fs-xs)] leading-relaxed">
-              Copies strategy settings — models, prompt, guardrails, weights, watchlist, tax treatment — from
-              “{source.label}” onto {currentLabel ? `“${currentLabel}”` : "this account"}. Does not touch broker
-              connection, credentials, or run state.
-            </p>
-            <div className="flex justify-end gap-2">
-              <Btn variant="ghost" size="sm" disabled={busy} onClick={() => setSourceId("")}>
-                Cancel
-              </Btn>
-              <Btn variant="primary" size="sm" disabled={busy} onClick={() => void doImport()}>
-                {busy ? "Importing…" : "Import settings"}
-              </Btn>
-            </div>
-          </div>
-        )}
-      </Sheet>
-    </>
   );
 }
 
@@ -1039,91 +581,27 @@ function AiReviewPanel({
   const [reviewReasoning, setReviewReasoning] = useState<LlmReasoningEffort | undefined>(undefined);
   const [busy, setBusy] = useState<"review" | "apply" | null>(null);
   const [review, setReview] = useState<StrategyTuneResult | null>(null);
-  // Id of the persisted review row (from the POST response or a restored review) — passed to
-  // resolveTuneReview so Apply/Discard/dismiss keep the server's record in sync. Null for a review
-  // this session generated but the server hasn't (yet) told us an id for, or once resolved.
-  const [reviewId, setReviewId] = useState<string | null>(null);
-  // Set only when `review` came from fetchLatestTuneReview (not a fresh generate() in this
-  // session) — drives the "Restored unapplied review…" banner. Cleared on dismiss/apply/discard.
-  const [restoredBanner, setRestoredBanner] = useState<{ createdAt: string; model: string } | null>(null);
   const [typed, setTyped] = useState("");
   useUnsavedChanges(review !== null);
 
-  // Restore an unapplied review on mount (e.g. after a reload or lost connection before Apply) —
-  // scoped to THIS account. Resilient by construction: fetchLatestTuneReview swallows its own
-  // errors and resolves null (the server contract may not exist yet / this is a nice-to-have, never
-  // a blocking requirement), and the `reviewRef` guard skips restoring over a review the user
-  // already started generating in the brief window before this resolves.
-  const reviewRef = useRef(review);
-  useEffect(() => {
-    reviewRef.current = review;
-  }, [review]);
-  useEffect(() => {
-    let cancelled = false;
-    fetchLatestTuneReview(policy.connectedAccountId).then((restored) => {
-      if (cancelled || !restored || reviewRef.current !== null) return;
-      setReview(restored.result);
-      setReviewId(restored.id);
-      setModel(restored.model ?? "");
-      if (restored.reasoningEffort) setReviewReasoning(restored.reasoningEffort);
-      setRestoredBanner({ createdAt: restored.createdAt, model: restored.model || "local rules (no LLM)" });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [policy.connectedAccountId]);
-
-  // The rotation sentinel is not a callable model — when a rotating seat would be inherited,
-  // fall through to the next concrete choice (AI review runs once, outside the per-run rotation).
-  const inheritedReviewerModel =
-    [policy.redTeamLlmModel, policy.llmModel].find((m) => m && m !== ROTATE_ALL_MODELS_ID) || "";
-  const inheritedReviewerLabel =
-    policy.redTeamLlmModel && policy.redTeamLlmModel !== ROTATE_ALL_MODELS_ID ? "Red Team" : "Green Team";
-  // With EVERY team seat rotating there is no concrete model to inherit; a blank pick then honestly
-  // degrades server-side to local rules (no LLM) — disclose that upfront instead of only via the
-  // after-the-fact "local rules" chip (see policyForTuningReviewer in src/lib/strategy-tuning.ts).
-  const rotationBlocksInheritance =
-    !inheritedReviewerModel && [policy.redTeamLlmModel, policy.llmModel].some((m) => m === ROTATE_ALL_MODELS_ID);
+  const inheritedReviewerModel = policy.redTeamLlmModel || policy.llmModel || "";
+  const inheritedReviewerLabel = policy.redTeamLlmModel ? "Red Team" : "Green Team";
   const reviewerModel = model || inheritedReviewerModel;
   const reviewerReasoningControl = reasoningControlForModels([reviewerModel]);
-  // Per-team reasoning (2026-07-10): when the seat being inherited is the Reviewer's, its default
-  // effort is the reviewer's own (redTeamReasoningEffort, falling back to the proposer's) —
-  // mirrors policyForTuningReviewer / resolveReviewerReasoningEffort server-side.
-  const inheritedEffort =
-    !model && inheritedReviewerLabel === "Red Team"
-      ? (policy.redTeamReasoningEffort ?? policy.llmReasoningEffort)
-      : policy.llmReasoningEffort;
   const reviewerReasoningValue = reviewerReasoningControl
-    ? normalizeReasoningValueForControl([reviewerModel], reviewerReasoningControl, reviewReasoning ?? inheritedEffort)
+    ? normalizeReasoningValueForControl([reviewerModel], reviewerReasoningControl, reviewReasoning ?? policy.llmReasoningEffort)
     : undefined;
   const changes = useMemo(() => (review ? reviewChanges(review.proposedPatch, policy) : []), [review, policy]);
   const promptChanged = Boolean(review?.proposedPatch.prompt && review.proposedPatch.prompt !== strategyPrompt);
   const hasAnyChange = changes.length > 0 || promptChanged;
   const hasLooser = changes.some((c) => c.direction === "looser");
-  const needsTyped = reality.tone === "live" && hasLooser && policy.requireTypedConfirmation !== false;
-
-  // Best-effort server-side resolve — never blocks or throws into the caller. A failed resolve
-  // just means the review may resurface as "restored" on next load, which is a safe (non-destructive)
-  // fallback rather than a reason to hold up the UI the user is actively dismissing/applying.
-  const resolveReviewSilently = (id: string, status: "applied" | "dismissed") => {
-    resolveTuneReview(id, status).catch(() => {});
-  };
-
-  const discard = () => {
-    if (reviewId) resolveReviewSilently(reviewId, "dismissed");
-    setReview(null);
-    setReviewId(null);
-    setRestoredBanner(null);
-    setTyped("");
-  };
+  const needsTyped = reality.tone === "live" && hasLooser;
 
   const generate = async () => {
     setBusy("review");
     try {
-      const result = await tuneStrategy(model || undefined, reviewerReasoningValue, policy.connectedAccountId);
+      const result = await tuneStrategy(model || undefined, reviewerReasoningValue);
       setReview(result);
-      setReviewId(result.reviewId ?? null);
-      setRestoredBanner(null);
       setTyped("");
     } catch (error) {
       toast.push("neg", "Review failed", error instanceof ConsoleApiError ? error.message : String(error));
@@ -1147,12 +625,9 @@ function AiReviewPanel({
         ...(sectorCaps ? { sectorCaps: { ...policy.sectorCaps, ...sectorCaps } } : {}),
         ...(patch.scoringWeights ? { scoringWeights: patch.scoringWeights } : {}),
         ...(patch.prompt ? { strategyPrompt: patch.prompt } : {})
-      }, policy.connectedAccountId);
+      });
       await refresh();
-      if (reviewId) resolveReviewSilently(reviewId, "applied");
       setReview(null);
-      setReviewId(null);
-      setRestoredBanner(null);
       setTyped("");
       toast.push("pos", "Review changes applied", "Takes effect on the next run.");
     } catch (error) {
@@ -1167,73 +642,42 @@ function AiReviewPanel({
       title="AI review"
       action={
         review ? (
-          <Btn variant="ghost" size="sm" disabled={busy !== null} onClick={discard}>
+          <Btn variant="ghost" size="sm" disabled={busy !== null} onClick={() => { setReview(null); setTyped(""); }}>
             Discard
           </Btn>
         ) : undefined
       }
     >
       <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-        A strategist model reads this account&apos;s recent performance, missed opportunities, factor evidence, and the
+        A reviewer model reads this account&apos;s recent performance, missed opportunities, factor evidence, and the
         market backdrop, then proposes prompt/weight/guardrail changes. Nothing is applied until you review the exact
         diff and commit it — the same rules as editing by hand, including a typed word for LIVE authority expansion.
       </p>
 
-      {review && restoredBanner && (
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] px-3 py-2 text-[length:var(--con-fs-xs)]">
-          <span>
-            Restored unapplied review from <Ago iso={restoredBanner.createdAt} /> ({restoredBanner.model}).
-          </span>
-          <Btn
-            variant="ghost"
-            size="sm"
-            disabled={busy !== null}
-            onClick={() => {
-              if (reviewId) resolveReviewSilently(reviewId, "dismissed");
-              setReview(null);
-              setReviewId(null);
-              setRestoredBanner(null);
-              setTyped("");
-            }}
-          >
-            Dismiss
-          </Btn>
-        </div>
-      )}
-
       {!review ? (
-        <div className="flex flex-col gap-3">
-          <div className="grid gap-4 sm:grid-cols-2">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="w-64">
             <Field
-              label="Strategist"
-              hint={
-                rotationBlocksInheritance
-                  ? "Both team seats rotate, so there is no single model to inherit. Pick a strategist model here — left blank, the review runs on local rules (no LLM)."
-                  : `Blank = same as ${inheritedReviewerLabel}. AI Review has no separate account-level model.`
-              }
+              label="Reviewer model"
+              hint={`Blank = same as ${inheritedReviewerLabel}. AI Review has no separate account-level model.`}
               htmlFor="ai-review-model"
             >
-              <div className="flex items-start gap-2">
-                <div className="min-w-0 flex-1">
-                  <Select id="ai-review-model" value={model} onChange={(e) => { setModel(e.target.value); setReviewReasoning(undefined); }}>
-                    <option value="">
-                      {rotationBlocksInheritance ? "No model — local rules (no LLM)" : `Same As ${inheritedReviewerLabel}`}
-                    </option>
-                    {CURATED_LLM_MODEL_GROUPS.map((group) => (
-                      <optgroup key={group.provider} label={group.label}>
-                        {group.options.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </optgroup>
+              <Select id="ai-review-model" value={model} onChange={(e) => { setModel(e.target.value); setReviewReasoning(undefined); }}>
+                <option value="">Same As {inheritedReviewerLabel}</option>
+                {CURATED_LLM_MODEL_GROUPS.map((group) => (
+                  <optgroup key={group.provider} label={group.label}>
+                    {group.options.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
                     ))}
-                  </Select>
-                </div>
-                <ModelStatsButton role="strategist" />
-              </div>
+                  </optgroup>
+                ))}
+              </Select>
             </Field>
-            {reviewerReasoningControl && reviewerReasoningValue && (
+          </div>
+          {reviewerReasoningControl && reviewerReasoningValue && (
+            <div className="w-56">
               <Field label={reviewerReasoningControl.label} hint={reviewerReasoningControl.hint} htmlFor="ai-review-effort">
                 <Select
                   id="ai-review-effort"
@@ -1247,13 +691,11 @@ function AiReviewPanel({
                   ))}
                 </Select>
               </Field>
-            )}
-          </div>
-          <div className="flex justify-end">
-            <Btn variant="primary" disabled={busy !== null} onClick={() => void generate()}>
-              {busy === "review" ? "Reviewing…" : "Generate review"}
-            </Btn>
-          </div>
+            </div>
+          )}
+          <Btn variant="primary" disabled={busy !== null} onClick={() => void generate()}>
+            {busy === "review" ? "Reviewing…" : "Generate review"}
+          </Btn>
         </div>
       ) : (
         <div className="flex flex-col gap-3 text-[length:var(--con-fs-sm)]">
@@ -1337,7 +779,7 @@ function AiReviewPanel({
               />
             ) : (
               <div className="flex justify-end gap-2">
-                <Btn variant="ghost" disabled={busy !== null} onClick={discard}>
+                <Btn variant="ghost" disabled={busy !== null} onClick={() => { setReview(null); setTyped(""); }}>
                   Discard
                 </Btn>
                 <Btn variant="primary" disabled={busy !== null} onClick={() => void apply()}>

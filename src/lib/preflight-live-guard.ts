@@ -6,15 +6,13 @@
 // guard defends against the code path *itself* being misconfigured — e.g. a run that has somehow
 // reached the live-placement branch while the operator never explicitly enabled live trading.
 //
-// Design contract (owner decision 2026-07-07 — the historic ALLOW_LIVE_TRADING opt-IN gate was
-// retired: "an account is an account; the account boundary is the only hard rule." A connected live
-// account trades on its `environment` alone, with no separate env opt-in required):
+// Design contract:
 //   - For a broker *paper* sandbox account (`mode === "broker/paper"`) this is a hard NO-OP:
 //     `assertLivePreflight` returns immediately. It can never block a paper run.
-//   - On the real-capital path (`mode === "broker/live"`, real money) it now ALLOWS placement by
-//     default. `ALLOW_LIVE_TRADING` survives only as an explicit *escape hatch*: set it to the string
-//     "false" (or pass `allowLive: false`) to re-disable live placement. Any other value — including
-//     unset — permits it. This is an owner-tunable preference with an easy override, not a cage.
+//   - On the real-capital path (`mode === "broker/live"`, real money) it REFUSES to proceed unless
+//     live trading is EXPLICITLY enabled by the operator via the `ALLOW_LIVE_TRADING=true`
+//     environment flag (or the caller passes `allowLive: true`). Absent that opt-in, even a
+//     correctly-configured live run is blocked — real capital is never touched by default.
 //   - It NEVER places, mutates, or enables a trade. It only throws (blocks) or returns (allows).
 //
 // This module has no I/O and no DB access so it is trivially unit-testable and safe to import
@@ -41,13 +39,9 @@ export class LivePreflightError extends Error {
   }
 }
 
-/**
- * Whether live trading is permitted by env. Default ON (owner decision 2026-07-07): a connected live
- * account trades on its environment alone. `ALLOW_LIVE_TRADING` is now an opt-OUT escape hatch —
- * ONLY the exact string "false" disables live placement; unset or any other value permits it.
- */
+/** Whether the operator has explicitly enabled live trading via env. Default OFF. */
 export function liveTradingEnabledByEnv(): boolean {
-  return process.env.ALLOW_LIVE_TRADING !== "false";
+  return process.env.ALLOW_LIVE_TRADING === "true";
 }
 
 /**
@@ -62,14 +56,13 @@ export function assertLivePreflight(input: LivePreflightInput): void {
 
   const where = input.symbol ? ` for ${input.side ?? "order"} ${input.symbol}` : "";
 
-  // Live trading is permitted by default (see module header). The block fires ONLY when it has been
-  // explicitly disabled via the ALLOW_LIVE_TRADING=false escape hatch or a per-call allowLive:false.
+  // Live trading must be explicitly enabled. Default-off: even a correctly-configured live run is
+  // blocked until the operator opts in, so no code path can silently reach real capital.
   const allowLive = input.allowLive ?? liveTradingEnabledByEnv();
   if (!allowLive) {
     throw new LivePreflightError(
-      `Live-order pre-flight BLOCKED${where}: live trading has been explicitly DISABLED for this run ` +
-      `(ALLOW_LIVE_TRADING=false or an allowLive:false override). Unset ALLOW_LIVE_TRADING — or set it to ` +
-      `any value other than "false" — to permit live order placement. (Paper mode is unaffected.)`
+      `Live-order pre-flight BLOCKED${where}: real-capital (broker/live) order attempted but live trading is not ` +
+      `explicitly enabled. Set ALLOW_LIVE_TRADING=true to permit live order placement. (Paper mode is unaffected.)`
     );
   }
 }

@@ -7,7 +7,7 @@
 // best-effort from the provider response (null when the response omits usage).
 
 import crypto from "crypto";
-import { audit, getDb } from "./db";
+import { getDb } from "./db";
 import { apiKeyEnvVarForService, getUserApiKey, keyFingerprint, LOCAL_USER, type LlmKeySource } from "./db-api-keys";
 import { pushLlmUsage } from "./usage-monitor-push";
 export { keyFingerprint };
@@ -23,29 +23,14 @@ export interface LlmUsageEntry {
   /** Non-secret stable fingerprint of the API key that served this call (see keyFingerprint), so
    *  usage/cost can be measured PER ATTACHED KEY — user-provided or operator. */
   keyRef?: string;
-  /** The connected account this call was recorded for, so cost/tokens can be attributed and
-   *  filtered per account (broker/environment derived by joining connected_accounts at read
-   *  time). Undefined for account-less contexts (e.g. chat) — those stay "unattributed". */
-  connectedAccountId?: string;
   promptTokens?: number;
   completionTokens?: number;
-  /** Prompt tokens served from the provider's prompt cache (bill at ~0.1× input). */
-  cachedPromptTokens?: number;
-  /** Anthropic-only: tokens WRITTEN to the cache this call (bill at ~1.25× input). */
-  cacheCreationTokens?: number;
 }
 
 export interface LlmTokenUsage {
   promptTokens?: number;
   completionTokens?: number;
   totalTokens?: number;
-  /** Prompt tokens served from the provider's prompt cache. OpenAI/Gemini-compat:
-   *  usage.prompt_tokens_details.cached_tokens; DeepSeek: usage.prompt_cache_hit_tokens;
-   *  Anthropic: usage.cache_read_input_tokens. Subset of promptTokens. */
-  cachedPromptTokens?: number;
-  /** Anthropic-only: usage.cache_creation_input_tokens (cache-write premium tokens).
-   *  Subset of promptTokens (which is normalized to the FULL prompt across providers). */
-  cacheCreationTokens?: number;
 }
 
 // USD per 1M tokens, [input, output]. Best-effort; unknown models fall back to a
@@ -108,115 +93,56 @@ function priceForModel(model: string | undefined): [number, number] {
   return hit ? MODEL_PRICE_PER_M[hit] : defaultModelPricePerM();
 }
 
-// Cache-read tokens bill at ~0.1× the input rate across providers that report them
-// (OpenAI gpt-5.5: $0.50 vs $5.00; Anthropic cache read: 0.1×; DeepSeek cache hit: ~0.1×).
-// Anthropic cache WRITES bill at 1.25× input (5-minute ephemeral TTL).
-const CACHE_READ_INPUT_MULTIPLIER = 0.1;
-const CACHE_WRITE_INPUT_MULTIPLIER = 1.25;
-
 /** Best-effort cost in USD. Unpriced models fall back to a conservative default
  *  (env LLM_UNPRICED_MODEL_COST_PER_M as a single USD-per-1M-tokens number, split 50/50
- *  between input/output; default 15 → $7.50/$7.50 per 1M). Cache-read tokens are priced
- *  at ~0.1× input and Anthropic cache-creation tokens at 1.25× input, so cached calls no
- *  longer overstate cost (previously ALL prompt tokens billed at the full input rate).
- *  Returns undefined only when token counts are both zero/unknown. */
-export function estimateLlmCostUsd(
-  model: string | undefined,
-  promptTokens?: number,
-  completionTokens?: number,
-  cachedPromptTokens?: number,
-  cacheCreationTokens?: number
-): number | undefined {
+ *  between input/output; default 15 → $7.50/$7.50 per 1M). Returns undefined only when
+ *  token counts are both zero/unknown. */
+export function estimateLlmCostUsd(model: string | undefined, promptTokens?: number, completionTokens?: number): number | undefined {
   const price = priceForModel(model);
   const inTok = promptTokens ?? 0;
   const outTok = completionTokens ?? 0;
   if (inTok === 0 && outTok === 0) return undefined;
-  // Clamp so malformed provider usage (cached > prompt) can never produce a negative cost.
-  const cached = Math.min(Math.max(cachedPromptTokens ?? 0, 0), inTok);
-  const creation = Math.min(Math.max(cacheCreationTokens ?? 0, 0), inTok - cached);
-  const fullRate = inTok - cached - creation;
-  const inputCost = (fullRate + cached * CACHE_READ_INPUT_MULTIPLIER + creation * CACHE_WRITE_INPUT_MULTIPLIER) * price[0];
-  return (inputCost + outTok * price[1]) / 1_000_000;
+  return (inTok * price[0] + outTok * price[1]) / 1_000_000;
 }
 
-/** Normalize OpenAI (chat-completions + responses), Anthropic, DeepSeek, and Gemini-compat
- *  usage shapes, including prompt-cache accounting. `promptTokens` is normalized to the FULL
- *  prompt on every provider: OpenAI/DeepSeek report it that way natively, while Anthropic's
- *  `input_tokens` EXCLUDES cache read/creation tokens — those are added back here. */
+/** Normalize OpenAI (chat-completions + responses) and Anthropic usage shapes. */
 export function extractLlmUsage(responseJson: unknown): LlmTokenUsage {
   const u = (responseJson as { usage?: Record<string, unknown> } | undefined)?.usage;
   if (!u || typeof u !== "object") return {};
   const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
-  const details = (u.prompt_tokens_details ?? {}) as Record<string, unknown>;
-  // Cache reads: OpenAI/Gemini-compat nest under prompt_tokens_details; DeepSeek and Anthropic are top-level.
-  const cachedPromptTokens = num(details.cached_tokens) ?? num(u.prompt_cache_hit_tokens) ?? num(u.cache_read_input_tokens);
-  const cacheCreationTokens = num(u.cache_creation_input_tokens);
-  const anthropicIn = num(u.input_tokens);
-  const promptTokens =
-    num(u.prompt_tokens) ??
-    // Anthropic: input_tokens excludes cache read/creation — normalize to the full prompt.
-    (anthropicIn !== undefined ? anthropicIn + (num(u.cache_read_input_tokens) ?? 0) + (cacheCreationTokens ?? 0) : undefined);
+  const promptTokens = num(u.prompt_tokens) ?? num(u.input_tokens);
   const completionTokens = num(u.completion_tokens) ?? num(u.output_tokens);
   const totalTokens = num(u.total_tokens) ?? (promptTokens !== undefined || completionTokens !== undefined ? (promptTokens ?? 0) + (completionTokens ?? 0) : undefined);
-  return {
-    promptTokens,
-    completionTokens,
-    totalTokens,
-    ...(cachedPromptTokens !== undefined ? { cachedPromptTokens } : {}),
-    ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {})
-  };
+  return { promptTokens, completionTokens, totalTokens };
 }
 
 /** Record one LLM call against a user. Never throws — usage accounting must not break an LLM run. */
 export function recordLlmUsage(entry: LlmUsageEntry): void {
   try {
-    const usageId = crypto.randomUUID();
-    const occurredAt = new Date().toISOString();
     const total =
       entry.promptTokens !== undefined || entry.completionTokens !== undefined ? (entry.promptTokens ?? 0) + (entry.completionTokens ?? 0) : undefined;
-    const cost = estimateLlmCostUsd(entry.model, entry.promptTokens, entry.completionTokens, entry.cachedPromptTokens, entry.cacheCreationTokens);
-    // Prompt-cache visibility (no schema change): when the provider served part of the prompt from
-    // cache, write an audit row so cache hit rates + savings are observable per provider/model/context.
-    if ((entry.cachedPromptTokens ?? 0) > 0 || (entry.cacheCreationTokens ?? 0) > 0) {
-      audit(
-        "llm_cache_usage",
-        {
-          provider: entry.provider,
-          model: entry.model,
-          context: entry.context,
-          promptTokens: entry.promptTokens,
-          cachedPromptTokens: entry.cachedPromptTokens,
-          cacheCreationTokens: entry.cacheCreationTokens,
-          costUsd: cost
-        },
-        entry.userId,
-        entry.connectedAccountId
-      );
-    }
+    const cost = estimateLlmCostUsd(entry.model, entry.promptTokens, entry.completionTokens);
     getDb()
       .prepare(
-        `INSERT INTO llm_usage (id, user_id, provider, model, context, key_source, key_ref, connected_account_id, prompt_tokens, completion_tokens, total_tokens, cost_usd, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO llm_usage (id, user_id, provider, model, context, key_source, key_ref, prompt_tokens, completion_tokens, total_tokens, cost_usd, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
-        usageId,
+        crypto.randomUUID(),
         entry.userId,
         entry.provider,
         entry.model ?? null,
         entry.context ?? "unknown",
         entry.keySource,
         entry.keyRef ?? null,
-        entry.connectedAccountId ?? null,
         entry.promptTokens ?? null,
         entry.completionTokens ?? null,
         total ?? null,
         cost ?? null,
-        occurredAt
+        new Date().toISOString()
       );
     // Fire-and-forget forward to the API Usage Monitor (no-op unless configured; never throws).
     pushLlmUsage({
-      sourceEventId: usageId,
-      occurredAt,
       provider: entry.provider,
       model: entry.model,
       context: entry.context,
@@ -243,15 +169,6 @@ export interface LlmUsageRow {
   keySource: LlmKeySource;
   /** Per-attached-key fingerprint (see keyFingerprint); null for legacy rows without one. */
   keyRef: string | null;
-  /** Connected account this usage is attributed to; null for unattributed / account-less rows. */
-  connectedAccountId: string | null;
-  /** Broker of the attributed account (via join to connected_accounts); null when unattributed
-   *  or the account has since been deleted. */
-  broker: string | null;
-  /** 'paper' | 'live' of the attributed account; null when unattributed. */
-  environment: string | null;
-  /** Human label of the attributed account; null when unattributed. */
-  accountLabel: string | null;
   calls: number;
   promptTokens: number;
   completionTokens: number;
@@ -265,55 +182,32 @@ export interface LlmUsageRow {
  * rows where a NON-`local` tenant spent on the operator key — the figure the operator most cares
  * about while the failover is enabled.
  */
-export function getLlmUsageSummary(opts: {
-  sinceIso?: string;
-  operatorFundedOnly?: boolean;
-  userId?: string;
-  /** Filter to a single connected account. */
-  connectedAccountId?: string;
-  /** Filter to a broker (e.g. "alpaca", "robinhood") — matched via join to connected_accounts. */
-  broker?: string;
-} = {}): LlmUsageRow[] {
+export function getLlmUsageSummary(opts: { sinceIso?: string; operatorFundedOnly?: boolean; userId?: string } = {}): LlmUsageRow[] {
   const where: string[] = [];
   const params: unknown[] = [];
   if (opts.sinceIso) {
-    where.push("lu.created_at >= ?");
+    where.push("created_at >= ?");
     params.push(opts.sinceIso);
   }
   if (opts.userId) {
-    where.push("lu.user_id = ?");
+    where.push("user_id = ?");
     params.push(opts.userId);
   }
-  if (opts.connectedAccountId) {
-    where.push("lu.connected_account_id = ?");
-    params.push(opts.connectedAccountId);
-  }
-  if (opts.broker) {
-    where.push("ca.broker = ?");
-    params.push(opts.broker);
-  }
   if (opts.operatorFundedOnly) {
-    where.push("lu.key_source = 'operator'");
-    where.push("lu.user_id != 'local'");
+    where.push("key_source = 'operator'");
+    where.push("user_id != 'local'");
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  // LEFT JOIN so unattributed rows (null connected_account_id) and rows whose account was since
-  // deleted still appear (broker/environment/label come back null → "unattributed" in the UI).
   const rows = getDb()
     .prepare(
-      `SELECT lu.user_id, lu.provider, lu.model, lu.context, lu.key_source, lu.key_ref,
-              lu.connected_account_id,
-              ca.broker AS broker, ca.environment AS environment, ca.label AS account_label,
+      `SELECT user_id, provider, model, context, key_source, key_ref,
               COUNT(*) AS calls,
-              COALESCE(SUM(lu.prompt_tokens),0) AS prompt_tokens,
-              COALESCE(SUM(lu.completion_tokens),0) AS completion_tokens,
-              COALESCE(SUM(lu.total_tokens),0) AS total_tokens,
-              COALESCE(SUM(lu.cost_usd),0) AS cost_usd
-       FROM llm_usage lu
-       LEFT JOIN connected_accounts ca ON ca.id = lu.connected_account_id
-       ${clause}
-       GROUP BY lu.user_id, lu.provider, lu.model, lu.context, lu.key_source, lu.key_ref,
-                lu.connected_account_id, ca.broker, ca.environment, ca.label
+              COALESCE(SUM(prompt_tokens),0) AS prompt_tokens,
+              COALESCE(SUM(completion_tokens),0) AS completion_tokens,
+              COALESCE(SUM(total_tokens),0) AS total_tokens,
+              COALESCE(SUM(cost_usd),0) AS cost_usd
+       FROM llm_usage ${clause}
+       GROUP BY user_id, provider, model, context, key_source, key_ref
        ORDER BY cost_usd DESC, calls DESC`
     )
     .all(...params) as Array<Record<string, unknown>>;
@@ -324,10 +218,6 @@ export function getLlmUsageSummary(opts: {
     context: r.context == null ? null : String(r.context),
     keySource: r.key_source as LlmKeySource,
     keyRef: r.key_ref == null ? null : String(r.key_ref),
-    connectedAccountId: r.connected_account_id == null ? null : String(r.connected_account_id),
-    broker: r.broker == null ? null : String(r.broker),
-    environment: r.environment == null ? null : String(r.environment),
-    accountLabel: r.account_label == null ? null : String(r.account_label),
     calls: Number(r.calls),
     promptTokens: Number(r.prompt_tokens),
     completionTokens: Number(r.completion_tokens),

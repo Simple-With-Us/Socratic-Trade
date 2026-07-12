@@ -6,7 +6,7 @@ afterEach(() => {
 });
 
 describe("GET /logout", () => {
-  it("ignores forwarded host and uses request origin for local development", async () => {
+  it("routes logout back to the public app login when the app sees localhost internally", async () => {
     vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
     const { GET } = await import("../app/logout/route");
 
@@ -17,7 +17,7 @@ describe("GET /logout", () => {
     );
     const location = response.headers.get("location");
 
-    expect(location).toBe("http://localhost:4000/login");
+    expect(location).toBe("https://socratictrade.com/login");
   });
 
   it("uses the configured public site URL for app logout when forwarded headers are absent", async () => {

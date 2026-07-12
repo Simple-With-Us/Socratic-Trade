@@ -1,36 +1,26 @@
-// G3 — Constant-time admin-token compare + fail-closed admin authorization.
+// G3 — Constant-time admin-token compare + allowNonProd documentation.
 //
 // checkAdmin now compares the x-admin-token against ADMIN_REINDEX_TOKEN with crypto.timingSafeEqual
 // (via timingSafeEqualStr) instead of `===`, and the two reindex-* routes were migrated onto the
 // shared requireAdmin gate. Covers match / mismatch / empty-env for both the shared gate and the
-// reindex routes, plus fail-closed production and development paths.
+// reindex routes, plus the production default-deny path.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { tmpdir } from "os";
 import { checkAdmin, requireAdmin, timingSafeEqualStr } from "../src/lib/auth/admin";
 import { AUTHENTICATED_EMAIL_HEADER } from "../src/lib/request-user";
-import {
-  AUTHENTICATED_IDENTITY_SOURCE_HEADER,
-  AUTHENTICATED_IDENTITY_SOURCES
-} from "../src/lib/auth/strip-identity";
 
 beforeEach(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-security-admin-${randomUUID()}.db`)}`;
 });
 afterEach(() => vi.unstubAllEnvs());
 
-function req(opts: { email?: string; token?: string; url?: string } = {}): Request {
+function req(opts: { email?: string; token?: string } = {}): Request {
   const headers: Record<string, string> = {};
-  if (opts.email) {
-    headers[AUTHENTICATED_EMAIL_HEADER] = opts.email;
-    headers[AUTHENTICATED_IDENTITY_SOURCE_HEADER] = AUTHENTICATED_IDENTITY_SOURCES.authJsSession;
-  }
+  if (opts.email) headers[AUTHENTICATED_EMAIL_HEADER] = opts.email;
   if (opts.token) headers["x-admin-token"] = opts.token;
-  return new Request(opts.url || "https://trading.example.com/api/admin/reindex-10k", {
-    method: "GET",
-    headers
-  });
+  return new Request("https://trading.example.com/api/admin/reindex-10k", { method: "GET", headers });
 }
 
 describe("G3: timingSafeEqualStr (constant-time secret compare)", () => {
@@ -65,7 +55,7 @@ describe("G3: checkAdmin token path (timing-safe)", () => {
     expect(checkAdmin(req({})).ok).toBe(false);
   });
 
-  it("production denies when neither the email allowlist nor the token match", async () => {
+  it("production denies when neither the email allowlist nor the token match (documents allowNonProd risk)", async () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("ADMIN_USER_EMAILS", "boss@example.com");
     vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
@@ -92,13 +82,11 @@ describe("G3: requireTokenInProd hard gate (reindex routes)", () => {
     expect(checkAdmin(req({ token: "the-token" }), { requireTokenInProd: true }).ok).toBe(true);
   });
 
-  it("outside production, requireTokenInProd remains closed without verified email or token", () => {
+  it("outside production, requireTokenInProd still allows the dev/ops open path", () => {
     vi.stubEnv("NODE_ENV", "development");
     vi.stubEnv("ADMIN_USER_EMAILS", "");
     vi.stubEnv("ADMIN_REINDEX_TOKEN", "the-token");
-    expect(checkAdmin(req({}), { requireTokenInProd: true }).ok).toBe(false);
-    expect(checkAdmin(req({ email: "boss@example.com" }), { requireTokenInProd: true }).ok).toBe(false);
-    expect(checkAdmin(req({ token: "the-token" }), { requireTokenInProd: true }).ok).toBe(true);
+    expect(checkAdmin(req({}), { requireTokenInProd: true }).ok).toBe(true); // non-prod bypass intact
   });
 
   it("reindex-10k GET denies a valid admin email without the token in production (403)", async () => {

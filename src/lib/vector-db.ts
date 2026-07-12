@@ -7,13 +7,13 @@ import { logApiHealth } from "./db-health";
 import { CHARS_PER_TOKEN_CEILING, DEFAULT_MAX_TOKENS, canonicalTicker, chunkDocument, hashContent, type ChunkInput, type ChunkOptions } from "./rag/chunk";
 import { envFlagOn } from "./rag/env-flag";
 import { fuseHybrid, rrfFuse } from "./rag/hybrid";
-import { dedupeSimilar, type DedupeSimilarReport } from "./rag/dedupe-similar";
+import { dedupeSimilar } from "./rag/dedupe-similar";
 import { getCachedQueryEmbedding, setCachedQueryEmbedding } from "./rag/query-embed-cache";
 import { recordRagOperation, shouldDegradeForBudget } from "./rag/run-budget";
 import { getRagUsageSummary, hashQuery, meterEmbed, meterPineconeQuery, meterPineconeUpsert, meterRerank, recordRetrievalQuality, retrievalTelemetryEnabled } from "./rag-metering";
-import { candidatePoolPersistEnabled, recordCandidatePool, candidatePoolFullPersistEnabled, recordCandidatePoolFull, type CandidateDisposition } from "./rag/candidate-pool";
 import { isOverLlmBudget } from "./llm-budget";
 import { sendNotification } from "./notifications";
+import { notify } from "./notify";
 import { alertUsageLimitHit } from "./usage-limit-alerts";
 
 const LAST_INGEST_KEY = "vectorStore:lastIngest";
@@ -32,13 +32,8 @@ export interface StoreContextsResult {
   indexed: number;
   /** Set when the embed/upsert flow threw (e.g. Voyage 429) — the failure is no longer silent. */
   error?: string;
-  /** True when nothing was stored for a non-error reason — see unconfigured/dedupComplete for which. */
+  /** True when Pinecone/Voyage keys were missing, so nothing could be stored. */
   skipped?: boolean;
-  /** Set with skipped: Pinecone/Voyage keys missing — nothing can embed until configured. */
-  unconfigured?: boolean;
-  /** Set with skipped: every chunk was already in the index (content-hash dedup) — the content
-   *  is fully stored; the caller may safely treat the document as ingested. */
-  dedupComplete?: boolean;
   /**
    * Count of embeddings dropped by the integrity guard (R2: wrong dimension or non-finite values,
    * e.g. a Voyage model/config drift) instead of being upserted as a degenerate vector. 0 in the
@@ -85,8 +80,8 @@ const DEFAULT_EMBED_BATCH_DELAY_MS = 21_000; // unpaid Voyage limit is 3 RPM; pa
 const DEFAULT_CONTEXT_MAX_CHARS = 2400;
 const DEFAULT_EMBED_RETRY_ATTEMPTS = 2;
 const DEFAULT_EMBED_RETRY_DELAY_MS = 20_000;
-const DEFAULT_INGEST_MAX_TEXTS_PER_DAY = 1_000_000;
-const DEFAULT_PINECONE_WRITE_UNITS_PER_DAY = 10_000_000;
+const DEFAULT_INGEST_MAX_TEXTS_PER_DAY = 1_000;
+const DEFAULT_PINECONE_WRITE_UNITS_PER_DAY = 50_000;
 
 /**
  * Embedding integrity guard (R2, 2026-07-01 expert review): a Voyage model/config drift (partial
@@ -206,16 +201,6 @@ function remainingIngestTexts(userId: string, requested: number): { allowed: num
   }
 }
 
-/** Whether the rolling-24h ingest text budget (RAG_INGEST_MAX_TEXTS_PER_DAY) has any headroom
- *  left for this user scope. Cheap pre-flight for bulk ingest loops (SEC filings): checking
- *  BEFORE fetching/chunking a document avoids downloading multi-MB filing bodies that
- *  storeDocument would only budget-skip — and avoids emitting one budget warning per doomed
- *  document. Fails open (true) when the budget is disabled or unreadable, mirroring
- *  remainingIngestTexts. */
-export function hasIngestTextBudget(userId: string = "local"): boolean {
-  return remainingIngestTexts(userId, 1).allowed > 0;
-}
-
 function pineconeWriteBudgetEnabled(): boolean {
   return envFlagOn("RAG_PINECONE_WRITE_BUDGET_ENABLED", true);
 }
@@ -308,75 +293,6 @@ function hybridRetrievalEnabled(): boolean {
  */
 export function asOfStrictEnabled(): boolean {
   return envFlagOn("VECTOR_ASOF_STRICT", false);
-}
-
-/**
- * server-asof-filter (2026-07-06): push the point-in-time (`asOf`) constraint INTO the Pinecone
- * query so `topK` is filled with ELIGIBLE (pre-asOf) candidates, instead of the current behavior
- * where the pure-vector top-K is dominated by too-recent filings that the POST-fetch `isWithinAsOf`
- * guard then decimates — leaving a tiny/empty pool in a backtest even though the correct older
- * filings exist in the corpus (ranked below the fetch window).
- *
- * OFF by default — set VECTOR_ASOF_SERVER_FILTER=on to enable. It is safe to turn on at any time on
- * the DEFAULT (fail-open) semantics because the server clause keeps un-epoch'd vectors (see
- * `buildAsOfEpochFilter`), so an un-backfilled corpus is NOT dropped; running the backfill first
- * just makes the topK-fill improvement effective for older vectors too. When OFF, the retrieval
- * path is byte-for-byte the current post-fetch-only behavior.
- *
- * DEFENSE IN DEPTH: this NEVER removes the post-fetch `isWithinAsOf` guard in `rankPool` — that
- * stays the authoritative leakage gate regardless of this flag. Server filtering only pre-fills a
- * better candidate pool; the post-fetch guard is what actually enforces no-lookahead.
- */
-export function asOfServerFilterEnabled(): boolean {
-  return envFlagOn("VECTOR_ASOF_SERVER_FILTER", false);
-}
-
-/**
- * server-asof-filter (2026-07-06): build the Pinecone metadata-filter clause that pushes the `asOf`
- * epoch constraint server-side. Returns `undefined` when it should add NO clause (asOf unset/
- * unparseable, or the server-filter flag off) so the caller's existing filter is byte-identical to
- * today. Otherwise returns a single clause to AND-combine with the existing docType/symbol/scope
- * filter.
- *
- * Semantics (owner-approved):
- *  - FAIL-OPEN (default, `strict=false`): keep epoch'd-AND-eligible vectors OR vectors LACKING the
- *    epoch field, via `$or: [{as_of_epoch_ms: {$lte: X}}, {as_of_epoch_ms: {$exists: false}}]`, so
- *    an un-backfilled/undated corpus is NOT dropped server-side. The post-fetch `isWithinAsOf` guard
- *    remains the real leakage gate. `$exists` is a documented Pinecone metadata operator; the JS
- *    client (v8) types `filter` as an opaque `object` and forwards it verbatim, so this composes
- *    cleanly (verified in node_modules — see the server-asof-filter rollout note).
- *  - FAIL-CLOSED (`strict=true`, VECTOR_ASOF_STRICT on): drop un-epoch'd vectors server-side with a
- *    plain `{as_of_epoch_ms: {$lte: X}}` (no `$exists` branch) — only epoch'd-and-eligible return.
- *    Composes with the existing post-fetch strict undated-drop for leakage-certified backtests.
- */
-export function buildAsOfEpochFilter(asOf: string | undefined, strict: boolean): Record<string, unknown> | undefined {
-  if (!asOf || !asOfServerFilterEnabled()) return undefined;
-  const asOfMs = Date.parse(asOf);
-  if (!Number.isFinite(asOfMs)) return undefined; // unparseable asOf -> no server constraint (matches isWithinAsOf's lenient short-circuit)
-  const eligible = { [AS_OF_EPOCH_FIELD]: { $lte: asOfMs } };
-  if (strict) return eligible; // fail-closed: epoch'd-and-eligible only
-  // fail-open: epoch'd-and-eligible OR un-epoch'd (absent field)
-  return { $or: [eligible, { [AS_OF_EPOCH_FIELD]: { $exists: false } }] };
-}
-
-/**
- * server-asof-filter (2026-07-06): AND-combine a base Pinecone metadata filter with the optional
- * server-side `asOf` epoch clause. Returns the base UNCHANGED (same object) when there is no epoch
- * clause, so a call with `epoch === undefined` is byte-identical to not calling this at all.
- *
- * When an epoch clause IS present it merges via `$and: [base, epoch]` rather than spreading epoch's
- * keys onto the base. This is REQUIRED for correctness, not stylistic: the fail-open epoch clause is
- * itself `{$or: [...]}`, and the shared-tier base filter ALSO carries a top-level `$or` (scope/userId
- * coexistence) — a spread would silently drop one `$or` (a JS object can't hold two identical keys),
- * changing which vectors match. `$and` keeps both intact and is the documented Pinecone way to
- * combine independent constraints. The base is not mutated (a fresh object is returned).
- */
-export function mergeAsOfEpoch(
-  base: Record<string, unknown>,
-  epoch: Record<string, unknown> | undefined
-): Record<string, unknown> {
-  if (!epoch) return base;
-  return { $and: [base, epoch] };
 }
 
 /**
@@ -549,7 +465,8 @@ async function alertRagConnectionFailure(
       userSpecific: source === "user",
       reason: message
     });
-    await sendNotification({ type: "provider_degraded", title, payload }, { userId: targetUserId, directBody: body }).catch(() => {});
+    await sendNotification({ type: "provider_degraded", title, payload }, { userId: targetUserId }).catch(() => {});
+    await notify(targetUserId, { title, body, kind: "provider_degraded", data: payload }).catch(() => {});
     const limitStatus = ragLimitStatus(message);
     if (limitStatus) {
       await alertUsageLimitHit({
@@ -726,37 +643,6 @@ async function indexExists(pc: Pinecone, source: ApiKeySource, userId: string): 
   return Boolean(indexes.indexes?.some((i) => i.name === indexName()));
 }
 
-/**
- * server-asof-filter (2026-07-06): the numeric point-in-time metadata field written on every
- * newly-upserted vector so a backtest's `asOf` constraint can be pushed INTO the Pinecone query
- * (server-side) instead of only being applied POST-fetch. Integer epoch milliseconds. Deliberately
- * numeric (not the ISO string in `acceptance_datetime`) because Pinecone's `$lte`/`$gte` range
- * operators only work against numbers — an ISO-string range filter isn't expressible server-side.
- *
- * ABSENCE is meaningful: a vector that lacks this field is UNDATED-for-server-purposes and is the
- * fail-open signal (see `retrieveContextDetailed`'s epoch clause). It is ONLY written when a date
- * actually resolves, so an un-backfilled/undated vector stays absent and is not falsely dated to 0.
- */
-export const AS_OF_EPOCH_FIELD = "as_of_epoch_ms" as const;
-
-/**
- * Derive the numeric point-in-time epoch (ms) for a vector's metadata using the SAME precedence
- * `resolveAsOfStamp`/`isWithinAsOf` use: acceptance_datetime -> published_at -> as_of -> timestamp.
- * Returns `undefined` when none of those keys is present/parseable (NaN-safe) — callers MUST treat
- * `undefined` as "leave the field absent" so absence stays the fail-open signal. Pure/dependency-free
- * so both the ingest write path (`cleanMetadata`) and the backfill path can share one source of truth.
- *
- * NOTE: this intentionally mirrors `resolveAsOfStamp` exactly. It is a separate function only so it
- * can be co-located with the write path (`cleanMetadata` is defined above `resolveAsOfStamp`) and so
- * its "absent means fail-open" contract is documented at the point the field is written.
- */
-export function resolveAsOfEpochMs(metadata: Record<string, unknown> | undefined): number | undefined {
-  const stamp = metadata?.acceptance_datetime ?? metadata?.published_at ?? metadata?.as_of ?? metadata?.timestamp;
-  if (stamp == null) return undefined;
-  const t = typeof stamp === "number" ? stamp : Date.parse(String(stamp));
-  return Number.isFinite(t) ? t : undefined;
-}
-
 function cleanMetadata(metadata: ContextDocument["metadata"], text: string, userId: string): RecordMetadata {
   // Derive scope from the userId sentinel used to signal the shared/public tier.
   // New vectors carry an explicit `scope` field; legacy vectors written before this change
@@ -776,10 +662,6 @@ function cleanMetadata(metadata: ContextDocument["metadata"], text: string, user
   };
   for (const [key, value] of Object.entries(metadata)) {
     if (key === "text" || key === "userId" || key === "scope" || key === "embed_model" || key === "embed_rev") continue;
-    // as_of_epoch_ms is DERIVED below from the date precedence, never copied from a caller-supplied
-    // value — skip any inbound one so a stray/incorrect field can't override the authoritative
-    // derivation (and so the "absent when undated" invariant can't be violated by a caller passing 0).
-    if (key === AS_OF_EPOCH_FIELD) continue;
     if (key === "doc_type" && typeof value === "string") {
       // Normalize doc_type to lowercase AT WRITE TIME so every new vector is consistent, regardless
       // of what casing the caller passed in (some ingesters historically passed "10-K"/"10-Q").
@@ -791,14 +673,6 @@ function cleanMetadata(metadata: ContextDocument["metadata"], text: string, user
     if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") out[key] = value;
     else if (Array.isArray(value)) out[key] = value.map(String).filter(Boolean);
   }
-  // server-asof-filter (2026-07-06): additively stamp a NUMERIC point-in-time epoch (ms) derived
-  // from the SAME acceptance_datetime -> published_at -> as_of -> timestamp precedence the post-fetch
-  // guard uses, so a backtest's asOf can be pushed into the Pinecone query. Written ONLY when a date
-  // actually resolves — an undated document leaves the field ABSENT, which is the fail-open signal
-  // the query path relies on (absent vectors are not dropped server-side under the default). NaN-safe
-  // via resolveAsOfEpochMs. Changes only NEW upserts; existing vectors are handled by the backfill.
-  const asOfEpochMs = resolveAsOfEpochMs(metadata);
-  if (asOfEpochMs != null) out[AS_OF_EPOCH_FIELD] = asOfEpochMs;
   return out as RecordMetadata;
 }
 
@@ -1127,7 +1001,7 @@ export async function storeContexts(
     }));
   }
   if (documentsToStore.length === 0) {
-    return { attempted: validDocuments.length, indexed: 0, skipped: true, dedupComplete: true };
+    return { attempted: validDocuments.length, indexed: 0, skipped: true };
   }
 
   let budgetSkipped = 0;
@@ -1244,7 +1118,7 @@ export async function storeContexts(
       attempted: validDocuments.length
     });
     audit("vector_store", { ok: false, attempted: validDocuments.length, indexed: 0, skipped: true, reason: "missing Pinecone/Voyage keys" }, userId);
-    return { attempted: validDocuments.length, indexed: 0, skipped: true, unconfigured: true };
+    return { attempted: validDocuments.length, indexed: 0, skipped: true };
   }
 
   let indexed = 0;
@@ -1397,7 +1271,7 @@ export async function storeDocument(
     );
   }
   if (freshChunks.length === 0) {
-    return { attempted: chunked.length, indexed: 0, skipped: true, dedupComplete: true };
+    return { attempted: chunked.length, indexed: 0, skipped: true };
   }
 
   const documents: ContextDocument[] = freshChunks.map((c) => ({
@@ -1603,152 +1477,6 @@ export async function getAllVectorStoreStats(userId: string = "local"): Promise<
   }
 }
 
-/**
- * server-asof-filter backfill (2026-07-06): pure per-vector decision for the idempotent backfill of
- * `as_of_epoch_ms` onto EXISTING vectors. Given one vector's current metadata, decide what to do:
- *
- *  - `"skip-has-epoch"`: the vector already carries a (finite numeric) `as_of_epoch_ms` — idempotent
- *    no-op, so re-running the backfill never re-writes it or costs a Pinecone update.
- *  - `"skip-undated"`: no `as_of_epoch_ms` AND no resolvable date in the acceptance_datetime ->
- *    published_at -> as_of -> timestamp chain — leave the field ABSENT (absence is the fail-open
- *    signal; we must NOT stamp 0/NaN onto a genuinely-undated vector).
- *  - `{ action: "update", epochMs }`: no epoch yet but a date resolves — set it via partial update.
- *
- * NaN-safe (reuses `resolveAsOfEpochMs`). No I/O — the orchestrator does the actual Pinecone update.
- */
-export type BackfillEpochDecision =
-  | { action: "skip-has-epoch" }
-  | { action: "skip-undated" }
-  | { action: "update"; epochMs: number };
-
-export function computeBackfillEpochUpdate(metadata: Record<string, unknown> | undefined): BackfillEpochDecision {
-  const existing = metadata?.[AS_OF_EPOCH_FIELD];
-  // Idempotency: a vector already carrying a finite numeric epoch is left untouched. A non-numeric
-  // or non-finite stray value is treated as "not set" so a corrupt write can be corrected by a re-run.
-  if (typeof existing === "number" && Number.isFinite(existing)) return { action: "skip-has-epoch" };
-  const epochMs = resolveAsOfEpochMs(metadata);
-  if (epochMs == null) return { action: "skip-undated" };
-  return { action: "update", epochMs };
-}
-
-export interface BackfillAsOfEpochResult {
-  /** Total vectors scanned across all pages. */
-  scanned: number;
-  /** Vectors that already had a finite epoch (idempotent skips). */
-  skippedHasEpoch: number;
-  /** Vectors with no resolvable date — field intentionally left absent. */
-  skippedUndated: number;
-  /** Vectors updated with a freshly-derived epoch. */
-  updated: number;
-  /** Per-id update failures (non-fatal; the scan continues). */
-  errors: number;
-  /** True when `dryRun` was set — no `update` calls were issued, `updated` counts would-be updates. */
-  dryRun: boolean;
-}
-
-export interface BackfillAsOfEpochOptions {
-  /** userId whose resolved Pinecone key is used (default "local" = operator/env key). */
-  userId?: string;
-  /** When true, compute decisions and counts but issue NO Pinecone `update` calls. Default false. */
-  dryRun?: boolean;
-  /** Restrict the scan to ids under this prefix (Pinecone `listPaginated` prefix). Default: all ids. */
-  prefix?: string;
-  /** Vectors fetched per page (Pinecone fetch batch). Default 100. */
-  batchSize?: number;
-  /** Optional progress callback fired once per page with the running totals. */
-  onProgress?: (progress: BackfillAsOfEpochResult) => void;
-}
-
-/**
- * server-asof-filter backfill orchestrator (2026-07-06): idempotently add `as_of_epoch_ms` to
- * EXISTING Pinecone vectors by recomputing the epoch from each vector's OWN date metadata
- * (acceptance_datetime/published_at/as_of/timestamp) and issuing a partial metadata update
- * (`index.update({ id, metadata: { as_of_epoch_ms } })`) for those lacking it. Vectors that already
- * have it are skipped (idempotent — safe to re-run), and genuinely-undated vectors are left absent.
- *
- * Iterates the whole index via Pinecone `listPaginated` (ids) + `fetch` (metadata) — no local chunk
- * ledger drives this because `document_chunks` stores content_hashes, not Pinecone vector ids, and
- * private-tier ids aren't enumerated there at all; listing the index is the authoritative source of
- * "every vector that exists". Per-id update failures are counted, not thrown, so one bad record
- * doesn't abort a long backfill. Returns aggregate counts for the operator/rollout note.
- */
-export async function backfillAsOfEpoch(options: BackfillAsOfEpochOptions = {}): Promise<BackfillAsOfEpochResult> {
-  const userId = options.userId ?? "local";
-  const dryRun = Boolean(options.dryRun);
-  const batchSize = Math.max(1, Math.min(1000, Math.floor(options.batchSize ?? 100)));
-  const result: BackfillAsOfEpochResult = {
-    scanned: 0,
-    skippedHasEpoch: 0,
-    skippedUndated: 0,
-    updated: 0,
-    errors: 0,
-    dryRun
-  };
-
-  const { pc, pineconeSource } = getClients(userId);
-  if (!pc) throw new Error("backfillAsOfEpoch: Pinecone key not configured");
-  if (!(await indexExists(pc, pineconeSource, userId))) {
-    throw new Error(`backfillAsOfEpoch: index "${indexName()}" does not exist`);
-  }
-  const index = pc.Index(indexName());
-
-  let paginationToken: string | undefined;
-  do {
-    const listResp = await withRagApiHealth("pinecone", pineconeSource, userId, "list", () =>
-      index.listPaginated({
-        ...(options.prefix ? { prefix: options.prefix } : {}),
-        ...(paginationToken ? { paginationToken } : {})
-      })
-    );
-    const ids = (listResp.vectors ?? []).map((v) => v.id).filter((id): id is string => Boolean(id));
-    paginationToken = listResp.pagination?.next;
-    if (ids.length === 0) continue;
-
-    // Fetch metadata in batches so a large page doesn't build one oversized fetch request.
-    for (const idBatch of chunks(ids, batchSize)) {
-      const fetchResp = await withRagApiHealth("pinecone", pineconeSource, userId, "fetch", () =>
-        index.fetch({ ids: idBatch })
-      );
-      const records = fetchResp.records ?? {};
-      for (const id of idBatch) {
-        const record = records[id];
-        if (!record) continue;
-        result.scanned++;
-        const decision = computeBackfillEpochUpdate(record.metadata as Record<string, unknown> | undefined);
-        if (decision.action === "skip-has-epoch") {
-          result.skippedHasEpoch++;
-          continue;
-        }
-        if (decision.action === "skip-undated") {
-          result.skippedUndated++;
-          continue;
-        }
-        if (dryRun) {
-          result.updated++;
-          continue;
-        }
-        try {
-          await withRagApiHealth("pinecone", pineconeSource, userId, "update", () =>
-            index.update({ id, metadata: { [AS_OF_EPOCH_FIELD]: decision.epochMs } })
-          );
-          result.updated++;
-        } catch (err) {
-          result.errors++;
-          console.warn(`[vector-db] backfillAsOfEpoch: update failed for id="${id}":`, err instanceof Error ? err.message : String(err));
-        }
-      }
-    }
-    options.onProgress?.({ ...result });
-  } while (paginationToken);
-
-  try {
-    audit("vector_asof_epoch_backfill", { ...result }, userId);
-  } catch {
-    // best-effort telemetry only
-  }
-  return result;
-}
-
 export interface RetrievedChunk {
   /** Real Pinecone vector id (NOT a fabricated `<SYMBOL>#i`). */
   id: string;
@@ -1842,23 +1570,6 @@ export function formatChunkWithProvenance(chunk: RetrievedChunk, symbol?: string
 }
 
 /**
- * Typed retrieval-status receipt (typed-retrieval-status, 2026-07-06): `retrieveContextDetailed`
- * already computes four distinct reasons an empty (or quality-degraded) result can occur, but
- * previously only surfaced them as Sentry-only warning strings — every caller saw an
- * indistinguishable `[]`/non-empty result. This union names them for callers that opt in via
- * `RetrieveOptions.onStatus`; it is a RECEIPT ONLY and must never gate/alter which chunks are
- * returned (owner philosophy: advisory-only, see AGENTS.md).
- *  - "ok": normal path, chunks returned (possibly empty via `no_memory`, see below).
- *  - "no_memory": pipeline ran cleanly but found zero matching chunks (real empty corpus/query).
- *  - "lookup_failed": missing Pinecone/Voyage keys, or the pipeline threw (outer catch).
- *  - "budget_skipped": skipped before any Voyage/Pinecone call because the daily LLM/RAG budget
- *    (isOverLlmBudget) was already exceeded.
- *  - "degraded": the per-run RAG budget (R16 shouldDegradeForBudget) tripped, so rerank/hybrid were
- *    skipped but core dense-cosine recall still ran — NON-empty, just lower quality.
- */
-export type RetrievalStatus = "ok" | "no_memory" | "lookup_failed" | "budget_skipped" | "degraded";
-
-/**
  * Retrieve relevant chunks from Pinecone with REAL provenance (id/score/as_of/url) so answers can
  * be grounded and honestly cited.
  */
@@ -1920,31 +1631,6 @@ export interface RetrieveOptions {
    * matches are recalled. Omitted/empty = current single-query behavior, byte-for-byte unchanged.
    */
   queries?: string[];
-  /**
-   * persist-candidate-pool (2026-07-06): current strategy run id, threaded through purely so an
-   * opt-in candidate-pool persistence record (see rag/candidate-pool.ts, RAG_PERSIST_CANDIDATE_POOL)
-   * can be joined back to the run that produced it. Additive/optional — omitted has zero effect on
-   * retrieval behavior either way.
-   */
-  runId?: string;
-  /**
-   * Typed retrieval-status receipt (typed-retrieval-status, 2026-07-06, additive/optional). When
-   * supplied, invoked exactly once with the classified `RetrievalStatus` before `retrieveContextDetailed`
-   * returns. Fire-and-forget from the callee's perspective — a throwing callback is swallowed so it
-   * can never break retrieval; never used to alter chunk selection. Omitted = current behavior,
-   * byte-for-byte unchanged (no callback invoked, no extra work performed).
-   */
-  onStatus?: (status: RetrievalStatus) => void;
-}
-
-/** Invoke `options?.onStatus` best-effort; a throwing callback must never affect retrieval. */
-function reportRetrievalStatus(options: RetrieveOptions | undefined, status: RetrievalStatus): void {
-  if (!options?.onStatus) return;
-  try {
-    options.onStatus(status);
-  } catch {
-    // advisory receipt only — never let a callback failure affect retrieval
-  }
 }
 
 /**
@@ -1984,7 +1670,6 @@ export async function retrieveContextDetailed(
       source: userId === "local" ? "operator" : "user",
       connectedAccountId: options?.connectedAccountId ?? null
     });
-    reportRetrievalStatus(options, "budget_skipped");
     return [];
   }
   const vectorUserId = vectorUserIdFor(userId);
@@ -1995,7 +1680,6 @@ export async function retrieveContextDetailed(
       operation: "retrieveContext",
       source: userId === "local" ? "operator" : "user"
     });
-    reportRetrievalStatus(options, "lookup_failed");
     return [];
   }
   // R16 (2026-07-01 RAG backlog): default-off, very-high-ceiling per-run budget check. When
@@ -2022,18 +1706,8 @@ export async function retrieveContextDetailed(
   const fetchK = wantRerank ? rerankOverFetchK(limit) : options?.asOf || wantHybrid ? overFetchK(limit) : limit;
   const extraFilter = buildExtraFilters(options);
 
-  // server-asof-filter (2026-07-06): the optional server-side point-in-time clause. `undefined`
-  // (asOf unset/unparseable, or VECTOR_ASOF_SERVER_FILTER off) means NO clause is added — the
-  // filters below are then byte-identical to today. `mergeAsOfEpoch` AND-combines it with the
-  // existing scope/symbol/docType filter (via `$and` when the base already carries a top-level `$or`,
-  // so the fail-open epoch `$or` cannot collide with the scope-coexistence `$or`).
-  const asOfEpochFilter = buildAsOfEpochFilter(options?.asOf, asOfStrictEnabled());
-
   try {
-    if (!(await indexExists(pc, pineconeSource, userId))) {
-      reportRetrievalStatus(options, "lookup_failed");
-      return [];
-    }
+    if (!(await indexExists(pc, pineconeSource, userId))) return [];
 
     const index = pc.Index(indexName());
 
@@ -2044,14 +1718,14 @@ export async function retrieveContextDetailed(
     // The shared-tier filter uses $or to match BOTH new vectors (scope=='shared') and legacy
     // pre-scope vectors (userId=='local'). This is the backward-compat coexistence strategy:
     // scope is authoritative for new vectors; userId is the fallback for old ones.
-    const sharedTierFilter = mergeAsOfEpoch({
+    const sharedTierFilter = {
       ...symbolFilter,
       ...extraFilter,
       $or: [
         { scope: { $eq: SHARED_SCOPE } },
         { userId: { $eq: "local" } }
       ]
-    }, asOfEpochFilter);
+    };
 
     // Embed ONE query string (via the shared query-embed cache) and run its Pinecone match(es),
     // returning `null` on a malformed embedding (already audited/logged by the caller of `null`).
@@ -2108,22 +1782,16 @@ export async function retrieveContextDetailed(
         return m;
       }
 
-      // server-asof-filter: the user-tier filter gets the SAME epoch clause as the shared tier.
-      // The fail-open epoch clause itself carries an `$or`, so it must go through `mergeAsOfEpoch`
-      // (which promotes to `$and`) rather than a spread — a bare spread would be fine here (no
-      // pre-existing top-level `$or`), but routing both tiers through one helper keeps them identical.
-      const userTierFilter = mergeAsOfEpoch({
-        ...symbolFilter,
-        userId: { $eq: vectorUserId },
-        ...extraFilter
-      }, asOfEpochFilter);
-
       const [userResults, localResults] = await Promise.all([
         withRagApiHealth("pinecone", pineconeSource, userId, "query user tier", () =>
           index.query({
             vector: embedding,
             topK: fetchK,
-            filter: userTierFilter,
+            filter: {
+              ...symbolFilter,
+              userId: { $eq: vectorUserId },
+              ...extraFilter
+            },
             includeMetadata: true,
           })
         ),
@@ -2196,10 +1864,7 @@ export async function retrieveContextDetailed(
         // Every variant (including the original query, always included above) failed or matched
         // nothing — fall back to the plain single-query path rather than returning `[]`.
         const single = await embedAndMatchOneQuery(query);
-        if (single == null) {
-          reportRetrievalStatus(options, "lookup_failed");
-          return [];
-        }
+        if (single == null) return [];
         matches = single;
       } else {
         // Synthetic ids for matches lacking a real Pinecone id are scoped per-list-index (list N /
@@ -2226,10 +1891,7 @@ export async function retrieveContextDetailed(
       }
     } else {
       const single = await embedAndMatchOneQuery(query);
-      if (single == null) {
-        reportRetrievalStatus(options, "lookup_failed");
-        return [];
-      }
+      if (single == null) return [];
       matches = single;
     }
 
@@ -2240,32 +1902,6 @@ export async function retrieveContextDetailed(
     // unchanged, regardless of `applyDefaultFloors`.
     const wantDefaultFloors = Boolean(options?.applyDefaultFloors) || envFlagOn("RAG_APPLY_DEFAULT_FLOORS", false);
     const effectiveMinScore = options?.minScore ?? (wantDefaultFloors ? defaultMinScore() : undefined);
-
-    // persist-pool-v2 (2026-07-06): the flag check happens BEFORE any work (no hook is even
-    // constructed when off), mirroring v1's "no-op, not a suppressed write" posture — off means
-    // `rankPool` gets no `onDispositions` at all, so it runs its exact pre-v2 pure-function path.
-    const wantFullPool = candidatePoolFullPersistEnabled();
-    let capturedDispositions: Map<string, CandidateDisposition> | undefined;
-
-    // Review fix (2026-07-06): id-less rerank-survivor mislabel. `rerankMatches` returns a NEW
-    // spread object `{ ...match, _rerankScore }` for every candidate Voyage assigns a numeric
-    // relevanceScore to — including id-less ones — so an id-less match that SURVIVES rerank loses
-    // its original object identity. The v2 capture block below used to key id-less matches purely
-    // by identity (`finalSliceIdentitySet`/`rerankScoreByIdentity` built against the ORIGINAL
-    // `matches` array), so a surviving-but-rerank-copied id-less match was invisible to both sets
-    // and got mislabeled `dropped_rerank_truncate` with no relevanceScore. Fix: stamp a stable,
-    // own-enumerable `__poolKey` string onto every id-less match BEFORE rankPool/rerank runs — a
-    // plain spread (`{ ...match, ... }`) always copies own enumerable properties, so this key
-    // survives rerank's copy intact and lets every downstream lookup key off `m.id || m.__poolKey`
-    // instead of raw object identity. Only stamped when `wantFullPool` (v2 is the only consumer),
-    // so retrieval is a true no-op — no extra property, no extra work — when the flag is off.
-    if (wantFullPool) {
-      matches.forEach((m, i) => {
-        if (m != null && typeof m === "object" && !(typeof m.id === "string" && m.id.length > 0)) {
-          Object.defineProperty(m, "__poolKey", { value: `__cand_${i}__`, enumerable: true, configurable: true, writable: true });
-        }
-      });
-    }
 
     // Pipeline: cosine recall → score floor → point-in-time guard → hybrid fuse → cross-encoder
     // rerank → post-rerank floor → top-limit. Factored into the pure `rankPool` helper (R4,
@@ -2279,186 +1915,12 @@ export async function retrieveContextDetailed(
       rerank: wantRerank ? (q, m, k) => rerankMatches(voyage, q, m, k, userId, voyageSource) : undefined,
       strictAsOf: asOfStrictEnabled(),
       dedupeSimilarity: options?.dedupeSimilarity,
-      userId,
-      onDispositions: wantFullPool ? (d) => { capturedDispositions = d; } : undefined
+      userId
     });
-    const finalSlice = ordered.slice(0, limit);
-    // persist-candidate-pool (2026-07-06): capture the FULL post-recall/post-dedupe candidate pool
-    // (every candidate that survived floor/asOf/hybrid/rerank/dedupe — including ones NOT making
-    // this final top-`limit` slice), so "what did we retrieve but not inject" is analyzable later.
-    // The flag check is the FIRST thing this block does, before any mapping/hashing, so this is a
-    // true no-op (not just a suppressed write) when RAG_PERSIST_CANDIDATE_POOL is off — default
-    // retrieval is byte-for-byte unchanged. Runs for both the single-query and the #822 fused
-    // multi-query path alike, since `ordered` is already the one fused pool by this point.
-    //
-    // HONESTY NOTE (2026-07-06 hardening pass): this captures rankPool's OUTPUT pool (`ordered`) —
-    // i.e. post floor/asOf/hybrid/rerank/dedupe. Candidates dropped UPSTREAM of `ordered` by
-    // minScore/asOf/dedupe are NOT here; this only ever answers "of what survived the full quality
-    // pipeline, what got cut by the final top-N slice". With the FLAGSHIP production caller
-    // (strategy.ts's filings retrieval pass, ~line 719-731 — dedupeSimilarity=defaultDedupeSimilarity()
-    // = 0.6 non-null, limit=3), both `dedupeSimilar` and `rerankMatches` already hard-cap their
-    // output at `limit`, so in that default config `ordered.length <= limit` — `finalSlice ===
-    // ordered` and every persisted row is `used:true`. The interesting minScore/asOf/dedupe drops
-    // are simply invisible to this feature in exactly the path it's meant to illuminate; `used:false`
-    // rows are rare/absent there. A v2 that instead captures the PRE-rankPool `matches` pool with a
-    // per-stage drop reason (minScore / asOf / dedupe / final-slice) is the real follow-up if "why
-    // did we drop this candidate" is the actual goal — see docs/rollouts/2026-07-06-persist-candidate-pool.md.
-    // Review fix (2026-07-06): capture-never-breaks-retrieval guard. This whole block runs BEFORE
-    // the `return finalChunks` below, and was previously protected only by `retrieveContextDetailed`'s
-    // OUTER catch — which returns `[]`. That means a throw ANYWHERE in this observability capture
-    // (mapping, hashing, the id-less key computation, etc.) would silently turn a SUCCESSFUL
-    // retrieval into an empty result, which is exactly backwards for an advisory-only feature. Wrap
-    // the whole block in its own try/catch that swallows any throw so retrieval proceeds normally
-    // regardless — `recordCandidatePool` itself already has an internal try/catch around the
-    // `audit()` call, but this defends the mapping/key-computation code ABOVE that call too.
-    try {
-      if (candidatePoolPersistEnabled()) {
-        // Id-less collision hardening (2026-07-06 hardening pass): a Pinecone match without a real
-        // `id` would otherwise key on the literal empty string `""`, so multiple id-less matches in
-        // `ordered` would collapse onto the same `finalIds` membership test and a non-sliced id-less
-        // candidate could be mislabeled `used:true` just because SOME id-less candidate happened to
-        // land in `finalSlice`. Mirror the #822 fan-out fusion code's guard above (`rankedIdLists`):
-        // when a match's id is empty, use a per-position synthetic key instead, scoped to `ordered`'s
-        // own indices so it won't collide with another id-less candidate. (Pinecone ids are arbitrary
-        // strings, so a real id shaped like `__cand_${i}__` is not impossible — just vanishingly
-        // unlikely; this guard disambiguates id-less matches, it is not a hard uniqueness proof.)
-        const orderedKeys = ordered.map((m, i) => (typeof m?.id === "string" && m.id.length > 0 ? m.id : `__cand_${i}__`));
-        const finalSliceKeySet = new Set(orderedKeys.slice(0, finalSlice.length));
-        recordCandidatePool(
-          {
-            runId: options?.runId,
-            symbol,
-            queryHash: hashQuery(query),
-            asOf: options?.asOf,
-            candidates: ordered.map((m, i) => {
-              const md = (m?.metadata ?? {}) as Record<string, unknown>;
-              const asOfStamp = md.acceptance_datetime ?? md.as_of ?? md.timestamp;
-              const rerankScore = (m as { _rerankScore?: unknown } | undefined)?._rerankScore;
-              const key = orderedKeys[i]!;
-              const id = String(m?.id ?? "");
-              return {
-                id,
-                score: typeof m?.score === "number" ? m.score : undefined,
-                ...(typeof rerankScore === "number" ? { relevanceScore: rerankScore } : {}),
-                ...(typeof md.doc_type === "string" ? { docType: md.doc_type } : {}),
-                ...(asOfStamp != null ? { asOf: String(asOfStamp) } : {}),
-                used: finalSliceKeySet.has(key)
-              };
-            })
-          },
-          userId
-        );
-      }
-    } catch (captureErr) {
-      // Advisory capture only — never let a throw here affect retrieval. Best-effort log, never
-      // re-thrown.
-      console.warn("[vector-db] candidate-pool v1 capture failed (ignored, retrieval unaffected):", captureErr instanceof Error ? captureErr.message : String(captureErr));
-    }
-
-    // persist-pool-v2 (2026-07-06): capture the PRE-`rankPool` `matches` pool (raw Pinecone
-    // recall, or the #822 fused pool when multi-query fan-out ran — either way, ONE record for the
-    // whole call, matching v1's "one record per retrieveContextDetailed call" contract) together
-    // with the per-candidate DISPOSITION `rankPool` computed via `onDispositions` above. This is
-    // what actually answers "why did we drop this candidate": v1 only ever sees `ordered` (post
-    // floor/asOf/hybrid/rerank/dedupe), so a minScore/asOf/dedupe/rerank-truncate drop is invisible
-    // to it; here every candidate in `matches` gets exactly one disposition, including the ones v1
-    // can never show. Flag-gated by a DISTINCT flag (RAG_PERSIST_CANDIDATE_POOL_FULL, checked via
-    // `wantFullPool` above BEFORE `rankPool` even runs) so v1/v2 toggle independently; `wantFullPool`
-    // false means `capturedDispositions` stays undefined and this block is a pure no-op.
-    // Review fix (2026-07-06): capture-never-breaks-retrieval guard, same posture as the v1 block
-    // above (defense in depth — both blocks run before `return finalChunks` and were previously
-    // protected only by the function's OUTER catch, which returns `[]`; a throw anywhere in this
-    // mapping/key-computation code must never turn a successful retrieval into an empty one).
-    try {
-      if (wantFullPool && capturedDispositions) {
-        const dispositions = capturedDispositions;
-        // Review fix (2026-07-06): key EVERY lookup below (final-slice membership AND relevanceScore
-        // recovery) off `m.id || m.__poolKey` instead of splitting real-id-vs-object-identity. The
-        // previous identity-based split was wrong for an id-less match that SURVIVES rerank: Voyage
-        // assigns it a numeric relevanceScore, so `rerankMatches` returns a NEW spread object
-        // `{ ...match, _rerankScore }` for it — same as a real-id match — which is no longer `===`
-        // its pre-rerank original. That made it invisible to both `finalSliceIdentitySet` and
-        // `rerankScoreByIdentity` (built against the ORIGINAL matches array), so it was mislabeled
-        // `dropped_rerank_truncate` with no relevanceScore even though it was actually `used`.
-        // `__poolKey` is stamped onto every id-less match BEFORE rankPool/rerank runs (see above,
-        // only when `wantFullPool`) as an own-enumerable string property, which a plain object spread
-        // always copies — so it survives rerank's copy intact, giving every id-less match a stable
-        // key exactly like a real Pinecone `id` would. Same key scheme `rankPool`'s own `resolveKey`
-        // uses internally (`m.id` when non-empty, else a synthetic per-original-index key), so this
-        // stays in the same key space `dispositions` was built in.
-        const keyOf = (m: any): string =>
-          typeof m?.id === "string" && m.id.length > 0
-            ? m.id
-            : typeof m?.__poolKey === "string" && m.__poolKey.length > 0
-              ? m.__poolKey
-              : "";
-        const matchKeys = matches.map((m, i) => {
-          const k = keyOf(m);
-          return k.length > 0 ? k : `__cand_${i}__`;
-        });
-        // Final-slice membership: a `finalSlice` entry may be a rerank-produced spread copy (new
-        // object reference, same `id`/`__poolKey` FIELD) — always compare by key, never by `===`.
-        const finalSliceKeySet = new Set(finalSlice.map((m) => keyOf(m)).filter((k) => k.length > 0));
-        // `rerankMatches` (when it ran) returns NEW spread objects carrying `_rerankScore` — the
-        // ORIGINAL `matches` entry never has that field. Recover it from `ordered` (rankPool's
-        // return value, which IS the post-rerank pool) keyed the same way, so a candidate that
-        // survived to be reranked reports its real relevanceScore instead of silently omitting it.
-        const rerankScoreByKey = new Map<string, number>();
-        for (const m of ordered) {
-          const s = (m as { _rerankScore?: unknown } | undefined)?._rerankScore;
-          if (typeof s !== "number") continue;
-          const k = keyOf(m);
-          if (k.length > 0) rerankScoreByKey.set(k, s);
-        }
-        // `used` is a strictly finer-grained disposition than `kept_not_used`: rankPool can only ever
-        // report a survivor as `kept_not_used` (it doesn't know the caller's final top-`limit`
-        // slice) — upgrade the ones actually present in `finalSlice` here, mirroring v1's
-        // `finalSliceKeySet` upgrade logic but against the PRE-rankPool `matches` pool.
-        recordCandidatePoolFull(
-          {
-            runId: options?.runId,
-            symbol,
-            queryHash: hashQuery(query),
-            asOf: options?.asOf,
-            candidates: matches.map((m, i) => {
-              const md = (m?.metadata ?? {}) as Record<string, unknown>;
-              const asOfStamp = md.acceptance_datetime ?? md.as_of ?? md.timestamp;
-              const key = matchKeys[i]!;
-              // Persisted `id` is ALWAYS the real Pinecone id (or "" when absent) — `__poolKey` is a
-              // purely internal disambiguation key and must never leak into the persisted payload.
-              const id = String(m?.id ?? "");
-              const inFinalSlice = finalSliceKeySet.has(key);
-              const rerankScore = rerankScoreByKey.get(key);
-              const stageDisposition = dispositions.get(key);
-              const disposition: CandidateDisposition = stageDisposition === "kept_not_used" && inFinalSlice
-                ? "used"
-                : (stageDisposition ?? "kept_not_used");
-              return {
-                id,
-                score: typeof m?.score === "number" ? m.score : undefined,
-                ...(typeof rerankScore === "number" ? { relevanceScore: rerankScore } : {}),
-                ...(typeof md.doc_type === "string" ? { docType: md.doc_type } : {}),
-                ...(asOfStamp != null ? { asOf: String(asOfStamp) } : {}),
-                disposition
-              };
-            })
-          },
-          userId
-        );
-      }
-    } catch (captureErr) {
-      // Advisory capture only — never let a throw here affect retrieval. Best-effort log, never
-      // re-thrown.
-      console.warn("[vector-db] candidate-pool v2 capture failed (ignored, retrieval unaffected):", captureErr instanceof Error ? captureErr.message : String(captureErr));
-    }
-    const finalChunks = finalSlice
+    return ordered
+      .slice(0, limit)
       .map(matchToChunk)
       .filter((c) => c.text);
-    // Final status classification (receipt only — never changes `finalChunks`): a real zero-match
-    // result is "no_memory" (pipeline ran cleanly, nothing relevant found); a non-empty result under
-    // the R16 per-run budget degrade is "degraded" (lower quality, not absent); everything else "ok".
-    reportRetrievalStatus(options, finalChunks.length === 0 ? "no_memory" : budgetDegraded ? "degraded" : "ok");
-    return finalChunks;
   } catch (err) {
     console.error("[vector-db] Error retrieving context:", err);
     if (!wasRagSentryCaptured(err)) {
@@ -2470,41 +1932,8 @@ export async function retrieveContextDetailed(
         reason: err instanceof Error ? err.message : String(err)
       });
     }
-    reportRetrievalStatus(options, "lookup_failed");
     return [];
   }
-}
-
-/**
- * Thin convenience wrapper (typed-retrieval-status, 2026-07-06) for callers that want the typed
- * status alongside the chunks without wiring their own `onStatus` callback. Purely additive — does
- * not change `retrieveContextDetailed` itself, and a caller-supplied `options.onStatus` (if any)
- * still fires exactly as it would calling `retrieveContextDetailed` directly.
- */
-export async function retrieveContextDetailedWithStatus(
-  query: string,
-  symbol: string,
-  limit: number = 3,
-  userId: string = "local",
-  options?: RetrieveOptions
-): Promise<{ chunks: RetrievedChunk[]; status: RetrievalStatus }> {
-  let status: RetrievalStatus = "ok";
-  const chunks = await retrieveContextDetailed(query, symbol, limit, userId, {
-    ...options,
-    onStatus: (s) => {
-      status = s;
-      // Forward to the caller-supplied callback best-effort — a throwing callback must never
-      // break retrieval. This mirrors the same guarantee `reportRetrievalStatus` already gives
-      // internally; guarded explicitly here too since this closure is itself what gets invoked
-      // through that internal call chain, and a receipt callback must never propagate a throw.
-      try {
-        options?.onStatus?.(s);
-      } catch {
-        // advisory receipt only — never let a callback failure affect retrieval
-      }
-    }
-  });
-  return { chunks, status };
 }
 
 /** Injectable rerank function shape `rankPool` accepts — matches `rerankMatches`'s signature minus the `voyage` client. */
@@ -2532,22 +1961,6 @@ export interface RankPoolOptions {
    * back-filled from later candidates. Omitted (undefined) = current behavior, no dedup pass.
    */
   dedupeSimilarity?: number;
-  /**
-   * persist-pool-v2 (2026-07-06): OPTIONAL per-candidate disposition capture hook. When supplied,
-   * `rankPool` tracks every input candidate through each filtering stage (minScore -> asOf ->
-   * rerank-truncate -> post-rerank floor -> dedupe) and invokes this callback exactly once with a
-   * `Map` from a stable per-candidate key (the match's real Pinecone `id`, or a synthetic
-   * `__cand_<inputIndex>__` key when the id is empty/missing — same id-less collision hardening
-   * `retrieveContextDetailed`'s v1 capture already uses) to its `CandidateDisposition`. Every
-   * candidate present in the original `matches` input gets exactly one entry; candidates that
-   * survive every stage are recorded as `kept_not_used` here (the caller, which alone knows the
-   * final top-`limit` slice, upgrades the ones actually used to `used`).
-   *
-   * Omitted (the default for every existing call site): zero extra work — no map allocation, no
-   * key computation, no extra pass over the pool. `rankPool` remains a pure function with
-   * byte-identical behavior/return value whether or not this option existed.
-   */
-  onDispositions?: (dispositions: Map<string, CandidateDisposition>) => void;
 }
 
 /**
@@ -2569,70 +1982,11 @@ export async function rankPool(
   options: RankPoolOptions = {}
 ): Promise<any[]> {
   const candidates = matches.length;
-
-  // persist-pool-v2 (2026-07-06): disposition tracking is entirely opt-in via `onDispositions`.
-  // When absent (every existing call site), none of this block's code runs — `trackDrop`/
-  // `keyFor` are never called, no Map is allocated — so `rankPool` is byte-identical in behavior
-  // and cost to its pre-v2 form. Keys mirror the id-less collision hardening the v1 capture site
-  // in `retrieveContextDetailed` already uses: a match's real Pinecone `id` when non-empty,
-  // else a synthetic `__cand_<originalInputIndex>__` key scoped to the ORIGINAL `matches` array
-  // position (stable across every filtering stage, unlike a re-computed post-filter index).
-  const wantDispositions = typeof options.onDispositions === "function";
-  const keyFor = (match: any, originalIndex: number): string =>
-    typeof match?.id === "string" && match.id.length > 0 ? match.id : `__cand_${originalIndex}__`;
-  // Two lookup tables, both built once up front (only when a hook is supplied): object identity
-  // -> key, for matches that still carry their ORIGINAL object reference (true through minScore/
-  // asOf filtering and `fuseHybrid`'s reordering, which reuses the same objects — see
-  // `fuseHybrid`'s `idToMatch.get(id)` returning `matches[i]` directly, never a copy); and real-id
-  // -> key, for post-rerank objects whose `id` field survives the copy.
-  //
-  // Review fix (2026-07-06): an id-less match that SURVIVES rerank is also returned as a NEW
-  // spread object (`rerankMatches` copies `{ ...matches[idx], _rerankScore }` for every candidate
-  // Voyage assigns a numeric relevanceScore to, real-id or not) — so the identity map alone is
-  // NOT sufficient for id-less rerank survivors; they lose their original identity same as a
-  // real-id match would, but have no `id` field for the real-id map to recover them by either.
-  // `retrieveContextDetailed` (the only caller that ever supplies `onDispositions`) stamps a
-  // stable own-enumerable `__poolKey` onto every id-less match in `matches` BEFORE calling
-  // `rankPool` — a plain spread always copies own enumerable props, so `__poolKey` survives
-  // rerank's copy intact. A third lookup table recovers those by that stamped key.
-  const keyByIdentity = new Map<any, string>();
-  const keyByRealId = new Map<string, string>();
-  const keyByPoolKey = new Map<string, string>();
-  if (wantDispositions) {
-    matches.forEach((m, i) => {
-      const key = keyFor(m, i);
-      keyByIdentity.set(m, key);
-      if (typeof m?.id === "string" && m.id.length > 0) keyByRealId.set(m.id, key);
-      else if (typeof m?.__poolKey === "string" && m.__poolKey.length > 0) keyByPoolKey.set(m.__poolKey, key);
-    });
-  }
-  const resolveKey = (match: any): string => {
-    const byIdentity = keyByIdentity.get(match);
-    if (byIdentity) return byIdentity;
-    const byId = typeof match?.id === "string" && match.id.length > 0 ? keyByRealId.get(match.id) : undefined;
-    if (byId) return byId;
-    const byPoolKey = typeof match?.__poolKey === "string" && match.__poolKey.length > 0 ? keyByPoolKey.get(match.__poolKey) : undefined;
-    if (byPoolKey) return byPoolKey;
-    // Should be unreachable for any candidate that originated in `matches`, but fail safe rather
-    // than throw: fall back to the id itself (still stable/unique in practice) if somehow neither
-    // lookup hits.
-    return String(match?.id ?? "");
-  };
-  const dispositions = wantDispositions ? new Map<string, CandidateDisposition>() : undefined;
-  const trackDrop = (match: any, disposition: CandidateDisposition) => {
-    if (!dispositions) return;
-    dispositions.set(resolveKey(match), disposition);
-  };
-
   let pool = matches;
   let droppedByMinScore = 0;
   if (options.minScore != null) {
     const before = pool.length;
-    pool = pool.filter((match) => {
-      const kept = (typeof match?.score === "number" ? match.score : 0) >= options.minScore!;
-      if (!kept) trackDrop(match, "dropped_minscore");
-      return kept;
-    });
+    pool = pool.filter((match) => (typeof match?.score === "number" ? match.score : 0) >= options.minScore!);
     droppedByMinScore = before - pool.length;
   }
   let droppedByAsOf = 0;
@@ -2643,10 +1997,7 @@ export async function rankPool(
     pool = pool.filter((match) => {
       const md = match?.metadata as Record<string, unknown> | undefined;
       const kept = isWithinAsOf(md, options.asOf, strict);
-      if (!kept) {
-        if (strict && resolveAsOfStamp(md) == null) droppedUndated++;
-        trackDrop(match, "dropped_asof");
-      }
+      if (!kept && strict && resolveAsOfStamp(md) == null) droppedUndated++;
       return kept;
     });
     droppedByAsOf = before - pool.length;
@@ -2664,21 +2015,10 @@ export async function rankPool(
   }
   // Hybrid BM25 fusion (flag-gated): reorder the candidate pool by RRF(dense, BM25) before
   // cross-encoder rerank. Falls back to dense order when off or on error. Does not change
-  // overFetchK or the Pinecone query — purely a post-retrieval reordering step. Never drops.
+  // overFetchK or the Pinecone query — purely a post-retrieval reordering step.
   const fusedPool = options.hybrid && pool.length > 1 ? fuseHybrid(query, pool) : pool;
   const rerankRan = Boolean(options.rerank) && fusedPool.length > limit;
   const ordered = rerankRan ? await options.rerank!(query, fusedPool, limit) : fusedPool;
-  if (wantDispositions && rerankRan) {
-    // Voyage's rerank call is itself invoked with `topK: Math.min(limit, fusedPool.length)`
-    // (see `rerankMatches`), so any candidate in `fusedPool` that did NOT come back in `ordered`
-    // was truncated by that top-K cut, not by a relevance-floor comparison (the floor runs next,
-    // against `ordered` only). Compare by `resolveKey` (not `===`) since `rerankMatches` returns
-    // NEW spread objects for reordered items — see the identity/real-id lookup note above.
-    const orderedKeys = new Set(ordered.map((m: any) => resolveKey(m)));
-    for (const match of fusedPool) {
-      if (!orderedKeys.has(resolveKey(match))) trackDrop(match, "dropped_rerank_truncate");
-    }
-  }
   // Post-rerank relevance floor (opt-in via minRelevanceScore), applied AFTER rerank but BEFORE the
   // final slice-to-limit — matches carrying no relevanceScore (rerank off/failed/didn't return one
   // for this item) are FAIL-OPEN kept, never treated as a 0: a transient Voyage 429 (which makes
@@ -2688,9 +2028,7 @@ export async function rankPool(
   const floored = options.minRelevanceScore != null
     ? ordered.filter((match) => {
         const s = (match as { _rerankScore?: unknown } | undefined)?._rerankScore;
-        const kept = typeof s !== "number" || s >= options.minRelevanceScore!;
-        if (!kept) trackDrop(match, "dropped_rerank_floor");
-        return kept;
+        return typeof s !== "number" || s >= options.minRelevanceScore!;
       })
     : ordered;
 
@@ -2698,33 +2036,7 @@ export async function rankPool(
   // post-rerank relevance floor but BEFORE the final slice-to-limit (callers `.slice(0, limit)`
   // the RETURNED pool, so dedup must have already narrowed it here to have any effect). No-op
   // unless `dedupeSimilarity` is set.
-  //
-  // Disposition review fix (2026-07-06): `dedupeSimilar` drops candidates for TWO distinct
-  // reasons — a genuine near-duplicate judgment, and its OWN internal top-`limit` cap (see the
-  // `CandidateDisposition` doc comment in rag/candidate-pool.ts). Only ask for the (otherwise-free)
-  // `report` out-param when a disposition hook is actually attached, so every existing caller pays
-  // zero extra cost.
-  const dedupeReport: DedupeSimilarReport | undefined = wantDispositions && options.dedupeSimilarity != null ? { genuineDuplicateIndices: [], neverReachedIndices: [] } : undefined;
-  const deduped = options.dedupeSimilarity != null ? dedupeSimilar(floored, limit, options.dedupeSimilarity, dedupeReport) : floored;
-  if (wantDispositions && options.dedupeSimilarity != null && dedupeReport) {
-    for (const idx of dedupeReport.genuineDuplicateIndices) {
-      trackDrop(floored[idx]!, "dropped_dedupe");
-    }
-    for (const idx of dedupeReport.neverReachedIndices) {
-      trackDrop(floored[idx]!, "dropped_dedupe_truncate");
-    }
-  }
-
-  if (dispositions) {
-    // Everything still in `deduped` survived every rankPool-internal filter. `rankPool` itself
-    // doesn't know the final top-`limit` slice (the caller applies that), so record every
-    // survivor as `kept_not_used` here — the caller's `onDispositions` handler upgrades the ones
-    // actually in its final slice to `used`.
-    for (const match of deduped) {
-      dispositions.set(resolveKey(match), "kept_not_used");
-    }
-    options.onDispositions!(dispositions);
-  }
+  const deduped = options.dedupeSimilarity != null ? dedupeSimilar(floored, limit, options.dedupeSimilarity) : floored;
 
   // R5 consolidated retrieval-quality telemetry (2026-07-01 RAG backlog): default OFF via
   // RAG_RETRIEVAL_TELEMETRY. The flag check happens BEFORE any work (hashing, score scanning) so

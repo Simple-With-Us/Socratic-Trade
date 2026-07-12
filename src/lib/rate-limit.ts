@@ -27,58 +27,12 @@ export interface RateLimitResult {
   retryAfterSeconds: number;
 }
 
-interface RateLimitBucket {
-  /** Ascending hit timestamps still inside this bucket's window. */
-  hits: number[];
-  /** When every hit in this bucket is guaranteed to have expired. */
-  expiresAt: number;
-}
-
-/** Hard bound against attacker-controlled subjects creating an unbounded process-memory map. */
-export const RATE_LIMIT_BUCKET_CAP = 10_000;
-
-// Map insertion order is also LRU order: every access deletes+re-inserts the bucket.
-const buckets = new Map<string, RateLimitBucket>();
-let nextExpirySweepAt = Number.POSITIVE_INFINITY;
-
-function sweepExpiredBuckets(now: number): void {
-  if (now < nextExpirySweepAt) return;
-  let nextExpiry = Number.POSITIVE_INFINITY;
-  for (const [key, bucket] of buckets) {
-    if (bucket.expiresAt <= now) {
-      buckets.delete(key);
-    } else {
-      nextExpiry = Math.min(nextExpiry, bucket.expiresAt);
-    }
-  }
-  nextExpirySweepAt = nextExpiry;
-}
-
-function storeBucket(key: string, bucket: RateLimitBucket): void {
-  const existed = buckets.delete(key);
-  if (!existed) {
-    // rateLimit() already performed the expiry sweep when its next-expiry watermark was due. If
-    // every bucket is still live, evict the least-recently-used entry in O(1) before admitting the
-    // new subject. Never rescan all 10k buckets on capped unique-key churn.
-    while (buckets.size >= RATE_LIMIT_BUCKET_CAP) {
-      const oldest = buckets.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      buckets.delete(oldest);
-    }
-  }
-  buckets.set(key, bucket);
-  nextExpirySweepAt = Math.min(nextExpirySweepAt, bucket.expiresAt);
-}
+// key -> ascending list of hit timestamps (ms) still inside the window.
+const buckets = new Map<string, number[]>();
 
 /** Test/maintenance hook: drop all recorded hits. */
 export function resetRateLimiter(): void {
   buckets.clear();
-  nextExpirySweepAt = Number.POSITIVE_INFINITY;
-}
-
-/** Test/maintenance visibility without exposing bucket contents or rate-limit subjects. */
-export function rateLimiterBucketCount(): number {
-  return buckets.size;
 }
 
 /**
@@ -91,20 +45,19 @@ export function rateLimit(key: string, options: RateLimitOptions, now: number = 
     const windowMs = Math.max(1, Math.floor(options.windowMs));
     const cutoff = now - windowMs;
 
-    sweepExpiredBuckets(now);
     const existing = buckets.get(key);
-    const recent = existing ? existing.hits.filter((t) => t > cutoff) : [];
+    const recent = existing ? existing.filter((t) => t > cutoff) : [];
 
     if (recent.length >= limit) {
+      buckets.set(key, recent);
       const oldest = recent[0] ?? now;
       const resetAt = oldest + windowMs;
       const retryAfterSeconds = Math.max(1, Math.ceil((resetAt - now) / 1000));
-      storeBucket(key, { hits: recent, expiresAt: (recent.at(-1) ?? now) + windowMs });
       return { allowed: false, remaining: 0, resetAt, retryAfterSeconds };
     }
 
     recent.push(now);
-    storeBucket(key, { hits: recent, expiresAt: now + windowMs });
+    buckets.set(key, recent);
     return {
       allowed: true,
       remaining: Math.max(0, limit - recent.length),
@@ -128,9 +81,7 @@ export const RATE_LIMITS = {
   chat: { limit: 30, windowMs: 60_000 },
   /** Market scan: read-only but fans out to several data providers (Yahoo, Massive, broker quotes),
    *  so a tight-loop refresh can hammer upstreams. 30/min covers manual refreshes with headroom. */
-  scan: { limit: 30, windowMs: 60_000 },
-  /** Paid strategy tuning performs a full LLM review; contain retries and compromised-session spend. */
-  strategyTuning: { limit: 10, windowMs: 60_000 }
+  scan: { limit: 30, windowMs: 60_000 }
 } as const satisfies Record<string, RateLimitOptions>;
 
 /**

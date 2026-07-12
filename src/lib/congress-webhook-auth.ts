@@ -14,35 +14,20 @@ export function verifyCongressWebhookSignature(req: Request, bodyText: string): 
   const expectedSecret = (process.env.CONGRESS_WEBHOOK_SECRET ?? "").trim();
   if (!expectedSecret) return false; // no secret configured → reject all writes
 
-  // Try signature verification first (modern path)
   const signatureHeader = req.headers.get("x-signature")?.trim() ?? "";
-  if (signatureHeader) {
-    try {
-      const hmac = crypto.createHmac("sha256", expectedSecret);
-      hmac.update(bodyText);
-      const expectedSignature = hmac.digest("hex");
+  if (!signatureHeader) return false;
 
-      const provided = Buffer.from(signatureHeader);
-      const expected = Buffer.from(expectedSignature);
+  try {
+    const hmac = crypto.createHmac("sha256", expectedSecret);
+    hmac.update(bodyText);
+    const expectedSignature = hmac.digest("hex");
 
-      if (provided.length === expected.length && crypto.timingSafeEqual(provided, expected)) {
-        return true;
-      }
-    } catch {
-      // signature check failed or threw, fall through to bearer check
-    }
+    const provided = Buffer.from(signatureHeader);
+    const expected = Buffer.from(expectedSignature);
+
+    if (provided.length !== expected.length) return false;
+    return crypto.timingSafeEqual(provided, expected);
+  } catch {
+    return false;
   }
-
-  // Fall back to legacy bearer token authentication
-  const authHeader = req.headers.get("authorization")?.trim() ?? "";
-  if (authHeader.toLowerCase().startsWith("bearer ")) {
-    const bearerToken = authHeader.slice(7).trim();
-    if (bearerToken.length === expectedSecret.length) {
-      const provided = Buffer.from(bearerToken);
-      const expected = Buffer.from(expectedSecret);
-      return crypto.timingSafeEqual(provided, expected);
-    }
-  }
-
-  return false;
 }

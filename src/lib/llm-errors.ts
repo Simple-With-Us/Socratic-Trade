@@ -38,43 +38,6 @@ export function providerFromText(raw: string): LlmProviderName {
 }
 
 /**
- * Structured provider-error envelope pulled out of a raw response body. Covers both Google-RPC
- * shapes (`{error:{code,message,status,details?}}` and the array-wrapped `[{error:{...}}]` the
- * Gemini endpoint emits) and the OpenAI-style `{error:{message,type,code}}`.
- */
-function extractStructuredProviderError(
-  raw: string
-): { message: string; status?: string; code?: number | string; details?: unknown } | undefined {
-  const trimmed = raw.trim();
-  if (!/^[[{]/.test(trimmed)) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch {
-    return undefined;
-  }
-  const candidates = Array.isArray(parsed) ? parsed : [parsed];
-  for (const candidate of candidates) {
-    const err = (candidate as { error?: unknown } | null)?.error;
-    if (!err || typeof err !== "object") continue;
-    const e = err as { code?: unknown; status?: unknown; type?: unknown; message?: unknown; details?: unknown };
-    if (typeof e.message !== "string" || e.message.length === 0) continue;
-    return {
-      message: e.message,
-      status: typeof e.status === "string" ? e.status : typeof e.type === "string" ? e.type : undefined,
-      code: typeof e.code === "number" || typeof e.code === "string" ? e.code : undefined,
-      details: e.details
-    };
-  }
-  return undefined;
-}
-
-/** Matches text that is ALREADY a humanizeLlmError output ("<Provider label> error ...: ...") so a
- *  second pass (e.g. humanizeLlmTransportError re-wrapping an Error whose message was humanized at
- *  the throw site) returns it unchanged instead of stuttering "Gemini error: Gemini error: ...". */
-const ALREADY_HUMANIZED = /^(?:OpenAI|Anthropic \(Claude\)|xAI \(Grok\)|Google \(Gemini\)|Mistral|DeepSeek|the LLM) error\b/;
-
-/**
  * Convert a raw LLM error (and optional HTTP status) into a plain-English, actionable message.
  * Pass `status` explicitly when you have it (avoids mis-reading numbers in the body); pass `provider`
  * (internal id, e.g. "gemini") when the caller already knows it (more reliable than text sniffing).
@@ -83,7 +46,6 @@ export function humanizeLlmError(raw: string | undefined | null, opts: { provide
   const text = (raw ?? "").toString().trim();
   const provider = opts.provider ? providerLabel(opts.provider) : text ? providerFromText(text) : "the LLM";
   if (!text && opts.status === undefined) return `${provider} request failed for an unknown reason. Try again.`;
-  if (ALREADY_HUMANIZED.test(text)) return text;
   const s = text.toLowerCase();
   const has = (...needles: string[]) => needles.some((n) => s.includes(n));
   // Trust an explicit status; otherwise read a leading 3-digit HTTP code from the text.
@@ -104,15 +66,6 @@ export function humanizeLlmError(raw: string | undefined | null, opts: { provide
   if (status === 429 || has("rate limit", "rate_limit", "too many requests", "quota", "insufficient_quota", "billing", "credit balance", "out of credit", "payment required"))
     return `Your ${provider} account hit a rate limit or is out of quota/credits. Wait and retry, or check ${provider} billing.`;
 
-  // Anthropic's org/workspace-level "specified API usage limit" (distinct from a 429 rate limit —
-  // this is an admin-configured spend cap) comes back as a 400 invalid_request_error, so it doesn't
-  // match the 429/quota branch above and previously fell through to a raw-JSON dump.
-  if (has("usage limit", "usage limits")) {
-    const regainMatch = text.match(/regain access ((?:on )?[^."]+)/i);
-    const when = regainMatch ? ` You'll regain access ${regainMatch[1].trim()}.` : "";
-    return `${provider} has hit its configured API usage limit for this account.${when} Raise the limit with your ${provider} plan/console, or wait for it to reset.`;
-  }
-
   if ((status !== undefined && status >= 500) || has("overloaded", "service unavailable", "internal server error", "bad gateway", "gateway timeout"))
     return `${provider} is temporarily unavailable (server error). Try again in a moment.`;
 
@@ -121,35 +74,6 @@ export function humanizeLlmError(raw: string | undefined | null, opts: { provide
 
   if (has("context length", "maximum context", "too many tokens", "token limit", "string too long"))
     return `The request was too long for ${provider}'s context window. Shorten the input or pick a larger-context model.`;
-
-  // Unrecognized but STRUCTURED (a provider JSON error envelope): surface the provider's own
-  // message, status/code, and — critically — the `details` array when present, WITHOUT the 240-char
-  // truncation below. Gemini's INVALID_ARGUMENT 400s are the motivating case: the generic message
-  // ("Request contains an invalid argument.") is useless on its own, so when Google attaches a
-  // details array (field violations etc.) it must survive into the persisted run summary/audit
-  // instead of being sliced off.
-  const structured = extractStructuredProviderError(text);
-  if (structured) {
-    const label = [
-      typeof structured.code === "number" || typeof structured.code === "string" ? String(structured.code) : undefined,
-      structured.status
-    ]
-      .filter(Boolean)
-      .join(" ");
-    let out = `${provider} error${label ? ` ${label}` : ""}: ${structured.message.replace(/\s+/g, " ").trim()}`;
-    if (structured.details !== undefined) {
-      let detailsJson: string;
-      try {
-        detailsJson = JSON.stringify(structured.details);
-      } catch {
-        detailsJson = String(structured.details);
-      }
-      // Generous (not unbounded) cap — big enough for any realistic google.rpc details array,
-      // small enough to keep audit/notification rows sane.
-      out += `; details: ${detailsJson.slice(0, 2000)}`;
-    }
-    return out;
-  }
 
   // Unrecognized — surface the raw provider text (single-line, trimmed) rather than hide it.
   return text ? `${provider} error: ${text.replace(/\s+/g, " ").slice(0, 240)}` : `${provider} request failed (HTTP ${status}).`;

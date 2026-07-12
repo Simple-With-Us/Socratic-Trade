@@ -19,15 +19,6 @@ export async function register() {
 
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
 
-  // next.config.mjs also sets this, but instrumentation is the guaranteed server-boot hook across
-  // build modes/containers (the prod box moved to Coolify; the 2026-07-06 IPv6-blackhole fix — see
-  // docs/rollouts/2026-07-06-api-health-timeouts.md — must hold there too). Run this FIRST, before
-  // any other import below can trigger a network call. webpackIgnore: this file is also compiled for
-  // the edge runtime above, and webpack has no "node:dns" handling for that target's bundle — the
-  // comment keeps this a real runtime dynamic import instead of a build-time bundle attempt.
-  const dns = await import(/* webpackIgnore: true */ "node:dns");
-  dns.setDefaultResultOrder("ipv4first");
-
   // Fail fast if this deployment requires a secrets manager but wasn't launched through one
   // (REQUIRE_SECRETS_MANAGER set, but not started via start:secrets). Default off →
   // no effect on local dev / tests / CI. Runs before anything reads a credential.

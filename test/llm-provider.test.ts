@@ -64,21 +64,24 @@ describe("resolveLlmEndpoint", () => {
     expect(endpoint.transport).toBe("chat-completions");
   });
 
-  it("resolves the Red Team to \"\" (unconfigured) when no redTeamLlmModel is set — never falls back to Green (owner 2026-07-07)", () => {
+  it("falls Red Team back to the Green model when no red override is set AND no cross-family credential exists", () => {
+    // No Anthropic credential configured in this DB/env, so the cross-family default (below) cannot
+    // be honored — same-family fallback preserves today's behavior for a single-provider setup.
     const endpoint = resolveLlmEndpoint(
       { llmModel: "gpt-5.4-mini" },
       "local",
       "https://api.openai.com/v1/responses",
       "red"
     );
-    // No default for anything: an unset Red model is unconfigured (""), NOT the Green model.
-    // The caller must fail closed on "".
-    expect(endpoint.model).toBe("");
+    expect(endpoint.provider).toBe("openai");
+    expect(endpoint.model).toBe("gpt-5.4-mini");
   });
 
-  it("does NOT auto-default the Red Team to a cross-family model even when a second-provider key exists (owner 2026-07-07)", async () => {
-    // The cross-family auto-default was removed — an unset Red model stays "" regardless of which
-    // provider keys are configured. Independence is the user's explicit choice, not an auto-default.
+  it("defaults the Red Team to a cross-family model when no override is set but a cross-family credential IS available", async () => {
+    // Composite review B/medium/S: "Green and Red resolve to the same model by default ... one
+    // greedy same-family Bear surfaces one failure mode." When the owner configures an Anthropic key
+    // (without setting redTeamLlmModel explicitly), an OpenAI Bull's Bear now defaults to Claude
+    // instead of silently echoing gpt-5.4-mini.
     const { upsertUserApiKey, deleteUserApiKey } = await import("../src/lib/db");
     upsertUserApiKey("cross-family-user", "anthropic", "test-anthropic-key", "test fixture");
     try {
@@ -88,32 +91,40 @@ describe("resolveLlmEndpoint", () => {
         "https://api.openai.com/v1/responses",
         "red"
       );
-      expect(endpoint.model).toBe("");
+      expect(endpoint.provider).toBe("anthropic");
+      expect(endpoint.model).toBe("claude-haiku-4-5");
+
+      // Green role with the same policy is unaffected — only the red role's default changes.
+      const green = resolveLlmEndpoint({ llmModel: "gpt-5.4-mini" }, "cross-family-user");
+      expect(green.provider).toBe("openai");
     } finally {
       deleteUserApiKey("cross-family-user", "anthropic");
     }
   });
 
-  it("allows the SAME model for Green and Red when the user explicitly chooses it (owner 2026-07-07)", () => {
-    const endpoint = resolveLlmEndpoint(
-      { llmModel: "gpt-5.4-mini", redTeamLlmModel: "gpt-5.4-mini" },
-      "local",
-      "https://api.openai.com/v1/responses",
-      "red"
-    );
-    expect(endpoint.provider).toBe("openai");
-    expect(endpoint.model).toBe("gpt-5.4-mini");
+  it("cross-family default for an Anthropic Bull is a cheap OpenAI reviewer", async () => {
+    const { upsertUserApiKey, deleteUserApiKey } = await import("../src/lib/db");
+    upsertUserApiKey("cross-family-user-2", "openai", "test-openai-key", "test fixture");
+    try {
+      const endpoint = resolveLlmEndpoint(
+        { llmModel: "claude-opus-4-8" },
+        "cross-family-user-2",
+        "https://api.openai.com/v1/responses",
+        "red"
+      );
+      expect(endpoint.provider).toBe("openai");
+      expect(endpoint.model).toBe("gpt-5.4-mini");
+    } finally {
+      deleteUserApiKey("cross-family-user-2", "openai");
+    }
   });
 
-  it("routes empty/no policy to the OpenAI branch with an unconfigured (\"\") model (owner 2026-07-07)", () => {
+  it("routes empty/no policy to OpenAI (default model unchanged)", () => {
     const savedUrl = process.env.OPENAI_API_URL;
     delete process.env.OPENAI_API_URL;
     try {
       const endpoint = resolveLlmEndpoint({});
-      // An unset model has no provider prefix, so it falls through to the OpenAI transport — but the
-      // model is "" (unconfigured); there is no default. The strategy caller fails closed on "".
       expect(endpoint.provider).toBe("openai");
-      expect(endpoint.model).toBe("");
     } finally {
       if (savedUrl !== undefined) process.env.OPENAI_API_URL = savedUrl;
     }

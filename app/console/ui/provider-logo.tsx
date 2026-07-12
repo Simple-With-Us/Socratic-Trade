@@ -9,7 +9,6 @@
 
 import { useEffect, useState } from "react";
 import { cx } from "../lib/format";
-import { Tooltip } from "./primitives";
 import {
   modelDisplayName,
   providerForModel,
@@ -42,40 +41,38 @@ export function ProviderLogo({
 
   if (failed) {
     return (
-      <Tooltip content={title ?? providerLabel(provider)}>
-        <span
-          className={cx("inline-flex shrink-0 select-none items-center justify-center rounded-full font-bold text-white", className)}
-          style={{ width: px, height: px, background: meta.color, fontSize: Math.round(px * 0.55) }}
-          aria-hidden="true"
-        >
-          {meta.initial}
-        </span>
-      </Tooltip>
+      <span
+        className={cx("inline-flex shrink-0 select-none items-center justify-center rounded-full font-bold text-white", className)}
+        style={{ width: px, height: px, background: meta.color, fontSize: Math.round(px * 0.55) }}
+        title={title ?? providerLabel(provider)}
+        aria-hidden="true"
+      >
+        {meta.initial}
+      </span>
     );
   }
 
   // White tile behind every mark: several vendor SVGs are near-black and would
   // vanish on the console's dark surfaces; a white tile reads in both themes.
   return (
-    <Tooltip content={title ?? providerLabel(provider)}>
-      <span
-        className={cx("inline-flex shrink-0 items-center justify-center rounded border border-[color:var(--con-line)] bg-white", className)}
-        style={{ width: px, height: px }}
-        aria-hidden="true"
-      >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={`/model-logos/${provider}.svg`}
-          alt=""
-          width={px - 4}
-          height={px - 4}
-          className="object-contain"
-          loading="lazy"
-          decoding="async"
-          onError={() => setFailed(true)}
-        />
-      </span>
-    </Tooltip>
+    <span
+      className={cx("inline-flex shrink-0 items-center justify-center rounded border border-[color:var(--con-line)] bg-white", className)}
+      style={{ width: px, height: px }}
+      title={title ?? providerLabel(provider)}
+      aria-hidden="true"
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={`/model-logos/${provider}.svg`}
+        alt=""
+        width={px - 4}
+        height={px - 4}
+        className="object-contain"
+        loading="lazy"
+        decoding="async"
+        onError={() => setFailed(true)}
+      />
+    </span>
   );
 }
 
@@ -102,12 +99,13 @@ export function ModelBadge({
   if (!id) return null;
   const provider = providerForModel(id);
   return (
-    <Tooltip content={title ?? `${modelDisplayName(id)} (${id}) — ${providerLabel(provider)}`}>
-      <span className={cx("inline-flex min-w-0 items-center gap-1.5 font-semibold", className)}>
-        <ProviderLogo provider={provider} size={size} title={title ? `${title} (${providerLabel(provider)})` : undefined} />
-        <span className="truncate">{modelDisplayName(id)}</span>
-        {showProvider && <span className="shrink-0 font-normal text-[color:var(--con-faint)]">· {providerLabel(provider)}</span>}
-      </span>
-    </Tooltip>
+    <span
+      className={cx("inline-flex min-w-0 items-center gap-1.5 font-semibold", className)}
+      title={title ?? `${modelDisplayName(id)} (${id}) — ${providerLabel(provider)}`}
+    >
+      <ProviderLogo provider={provider} size={size} title={title ? `${title} (${providerLabel(provider)})` : undefined} />
+      <span className="truncate">{modelDisplayName(id)}</span>
+      {showProvider && <span className="shrink-0 font-normal text-[color:var(--con-faint)]">· {providerLabel(provider)}</span>}
+    </span>
   );
 }

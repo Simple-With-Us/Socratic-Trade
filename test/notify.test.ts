@@ -4,8 +4,6 @@ import { describeChannels, notify, type NotifyConfig } from "../src/lib/notify";
 
 const baseCfg = (): NotifyConfig => ({
   timeoutMs: 1000,
-  retryAttempts: 3,
-  retryDelayMs: 0, // no real backoff waits in tests
   push: { provider: "ntfy", ntfyServer: "https://ntfy.example", pushoverToken: "" },
   email: { provider: "resend", resendKey: "rk_test", from: "alerts@example.com" },
   sms: { twilioSid: "AC1", twilioToken: "tok", twilioFrom: "+10000000000" }
@@ -57,31 +55,6 @@ describe("notify multi-channel delivery", () => {
     const results = await notify("u3", { title: "T", body: "B" }, { config: baseCfg(), fetchImpl });
     expect(results[0]!.ok).toBe(false);
     expect(results[0]!.error).toContain("HTTP 500");
-  });
-
-  it("retries a transient delivery failure and then succeeds (no dropped alert)", async () => {
-    setNotifyPrefs("u4", { channels: ["webhook"], webhookUrl: "https://h.example/hook" });
-    let attempts = 0;
-    const fetchImpl = (async () => {
-      attempts++;
-      if (attempts < 3) throw new TypeError("fetch failed"); // the exact transient prod error
-      return new Response("ok", { status: 200 });
-    }) as unknown as typeof fetch;
-    const results = await notify("u4", { title: "T", body: "B", kind: "block" }, { config: baseCfg(), fetchImpl });
-    expect(results[0]!.ok).toBe(true);
-    expect(attempts).toBe(3); // failed twice, delivered on the third — the alert is NOT dropped
-  });
-
-  it("does NOT retry a permanent (4xx) delivery failure", async () => {
-    setNotifyPrefs("u5", { channels: ["webhook"], webhookUrl: "https://h.example/hook" });
-    let attempts = 0;
-    const fetchImpl = (async () => {
-      attempts++;
-      return new Response("bad", { status: 400 });
-    }) as unknown as typeof fetch;
-    const results = await notify("u5", { title: "T", body: "B", kind: "block" }, { config: baseCfg(), fetchImpl });
-    expect(results[0]!.ok).toBe(false);
-    expect(attempts).toBe(1); // 4xx is permanent — retrying just wastes attempts
   });
 
   it("describeChannels reflects admin availability", () => {

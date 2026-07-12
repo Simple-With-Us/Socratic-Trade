@@ -36,15 +36,13 @@ markup themes automatically.
 | `--muted` | `text-muted` | Secondary text (labels, subtitles). |
 | `--faint` | `text-faint` | Tertiary text (hints, meta). |
 | `--accent` / `--accent-fg` | `text-accent` / `bg-accent` / `text-accent-fg` | Brand/CTA green + its on-color. |
-| `--pos` / `--neg` / `--neg-fg` | `text-pos` / `text-neg` / `text-neg-fg` | Gains / losses (and the loss on-color for danger buttons). |
+| `--up` / `--down` / `--down-fg` | `text-up` / `text-down` / `text-down-fg` | Gains / losses (and the loss on-color for danger buttons). |
 | `--warn` / `--info` | `text-warn` / `text-info` | Warning / informational status. |
 | `--ring` | `focus-visible:ring-[var(--ring)]` | Focus ring. |
 
 Status tones are also wrapped by the `Chip`/`Dot`/`StatTile` primitives
-(`neutral | pos | neg | warn | info | accent`) — use those instead of hand-rolling
-tinted badges. (Tone vocabulary standardized on `pos/neg` per the 2026-07-05 UI audit,
-finding 1.2 — `up/down` collided with price-direction language, and the console system
-already used `pos/neg`.)
+(`neutral | up | down | warn | info | accent`) — use those instead of hand-rolling
+tinted badges.
 
 ### WCAG-AA contrast — source of truth
 
@@ -55,8 +53,8 @@ defined:
   `--faint` are chosen to meet **4.5:1 (normal text)** on every surface tier.
   Recorded worst cases: **≥7.3:1** on `surface-3` in light mode, **≥5.5:1** on
   `surface-3` in dark mode.
-- `--neg-fg` exists specifically so danger buttons pass AA in dark mode
-  (`text-white` on `--neg` measured ≈4.07:1, below 4.5:1). History:
+- `--down-fg` exists specifically so danger buttons pass AA in dark mode
+  (`text-white` on `--down` measured ≈4.07:1, below 4.5:1). History:
   `docs/reviews/2026-06-21-ui-ux-issue-register.md:89` (issue A11Y-7) and
   `docs/reviews/2026-06-20-ui-ux-and-mobile-audit.md:245`.
 
@@ -65,56 +63,11 @@ so any new faint-on-surface combination must still clear 4.5:1. When adding or
 retinting a text token, re-check it against `surface-3` (the worst-case
 background) in both themes before committing.
 
-## Brand accent (2026-07-08, UI-audit Package G)
-
-The app ships two design systems — `app/ui` (legacy/marketing surfaces) and
-`app/console` (the `/console` cockpit) — that previously carried two distinct
-brand accents (`app/ui` green `#0e9f6e`/`#10b981`, console teal `#12616f`/
-`#58c7d3`). **Console teal is now the single brand accent both systems derive
-from**, per `docs/reviews/2026-07-05-ui-audit-and-design-system-unification.md`.
-
-- `app/globals.css` `:root` defines two invariant constants —
-  `--brand-accent: #12616f` (light) and `--brand-accent-dark: #58c7d3` (dark).
-  They're plain, non-flipping values (not a `:root`/`.dark`-switching pair)
-  because `app/console/console.css` themes itself independently via
-  `[data-theme]`, not the `.dark` class, so it needs to resolve either one
-  directly regardless of ancestor `.dark` state.
-- `app/globals.css` `--accent` (light) / `.dark --accent` (dark) now read
-  `var(--brand-accent)` / `var(--brand-accent-dark)` — `app/ui`'s accent moved
-  green → teal. `--accent-fg` (`#ffffff` light, `#04130d` dark) already clears
-  WCAG AA against the new teal (~7.1:1 light, ~9.5:1 dark) — no change needed,
-  and it mirrors console's own `--con-accent-contrast` pairing (`#ffffff` /
-  `#071316`). `--ring` is now derived (`color-mix(in oklab, var(--accent) …%,
-  transparent)`) instead of a hardcoded rgba, so the focus ring always tracks
-  brand accent.
-- `app/console/console.css` `--con-accent` (light) and both dark blocks now
-  read `var(--brand-accent)` / `var(--brand-accent-dark)` — same visual values
-  as before, console is simply the canonical source the shared tokens were
-  read from. Every `--con-*-soft`/`--con-*-border` derived tint is unaffected
-  (they `color-mix` off `--con-accent` already).
-- `--accent` stays distinct from `--pos` (gain/green) in both systems by
-  design — accent is brand/CTA, not a P&L signal.
-
-## Radius canon (2026-07-08, UI-audit Package G)
-
-Console's card/control radii are canonical. `app/globals.css` `@theme inline`
-defines `--radius-card: 12px` and `--radius-control: 8px` (sourced from
-console's own `--con-radius`/`--con-radius-sm`), and
-`app/console/console.css` maps `--con-radius`/`--con-radius-sm` back to them
-so both stay in lockstep. This does **not** retarget `app/ui`'s existing
-`rounded-xl`/`rounded-2xl` usage — those are unchanged. Future `app/ui` work
-that wants to align with the console radius scale should reach for the new
-`rounded-card`/`rounded-control` Tailwind utilities (generated from the
-`--radius-card`/`--radius-control` `@theme inline` vars) rather than
-`rounded-xl`/`rounded-2xl` or an arbitrary value.
-
 ## Radius & typography
 
 - Radius tokens: `--radius-xl: 16px`, `--radius-2xl: 20px` (`@theme inline`),
   surfaced as `rounded-xl` / `rounded-2xl`. Cards use `rounded-2xl`; inputs,
-  buttons, chips, and menu items use `rounded-lg`/`rounded-md`. See "Radius
-  canon" above for the separate `--radius-card`/`--radius-control` pair
-  console.css sources from.
+  buttons, chips, and menu items use `rounded-lg`/`rounded-md`.
 - Fonts: `--font-sans` (Inter) for UI, `--font-mono` (JetBrains Mono) for code.
   Numeric/tabular data uses the `.tnum` helper (`font-variant-numeric:
   tabular-nums`) so digits align in tables.

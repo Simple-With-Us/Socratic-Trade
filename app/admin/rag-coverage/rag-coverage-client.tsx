@@ -155,7 +155,7 @@ function SummaryCard({ label, value, sub }: { label: string; value: string; sub?
 function StatusNotice({ tone, title, children }: { tone: "warning" | "danger" | "info"; title: string; children: React.ReactNode }) {
   const styles = {
     warning: "text-amber-900 bg-amber-50 border-amber-200",
-    danger: "text-neg bg-neg/10 border-neg/20",
+    danger: "text-down bg-down/10 border-down/20",
     info: "text-fg bg-surface-2 border-line"
   }[tone];
   return (
@@ -284,7 +284,7 @@ export function RagCoverageClient() {
       </div>
 
       {error && (
-        <div className="text-sm text-neg bg-neg/10 border border-neg/20 rounded-lg p-3 mb-4">
+        <div className="text-sm text-down bg-down/10 border border-down/20 rounded-lg p-3 mb-4">
           {error}
         </div>
       )}
@@ -387,7 +387,7 @@ export function RagCoverageClient() {
 
           {/* Coverage gaps warning */}
           {data.coverageGaps.length > 0 && (
-            <div className="text-sm text-neg bg-neg/10 border border-neg/20 rounded-lg p-3 mb-4">
+            <div className="text-sm text-down bg-down/10 border border-down/20 rounded-lg p-3 mb-4">
               <strong>{data.coverageGaps.length} ticker{data.coverageGaps.length !== 1 ? "s" : ""} have filing records but zero chunks in the index:</strong>{" "}
               {data.coverageGaps.join(", ")}
             </div>

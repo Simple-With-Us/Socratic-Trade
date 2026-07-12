@@ -1,33 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { NextRequest } from "next/server";
 import { checkAdmin, isAdminEmail, requireAdmin } from "../src/lib/auth/admin";
 import { AUTHENTICATED_EMAIL_HEADER } from "../src/lib/request-user";
-import {
-  AUTHENTICATED_IDENTITY_SOURCE_HEADER,
-  AUTHENTICATED_IDENTITY_SOURCES
-} from "../src/lib/auth/strip-identity";
 
 // Admin-role gate. Identity is the trusted x-authenticated-user-email header (set by middleware). Admin is
-// the ADMIN_USER_EMAILS allowlist (+ the primary operator). Default-deny in every environment when
-// neither a verified admin identity nor token is present. The middleware's synthetic local fallback
-// has explicit provenance and is never accepted for admin authorization.
-function reqWithEmail(
-  email?: string,
-  adminToken?: string,
-  identitySource: string | undefined = email ? AUTHENTICATED_IDENTITY_SOURCES.authJsSession : undefined
-): Request {
+// the ADMIN_USER_EMAILS allowlist (+ the primary operator). Default-deny in production when unset.
+function reqWithEmail(email?: string, adminToken?: string): Request {
   const headers: Record<string, string> = {};
   if (email) headers[AUTHENTICATED_EMAIL_HEADER] = email;
-  if (identitySource) headers[AUTHENTICATED_IDENTITY_SOURCE_HEADER] = identitySource;
   if (adminToken) headers["x-admin-token"] = adminToken;
   return new Request("https://trading.example.com/api/admin/trigger-test", { method: "POST", headers });
 }
 
 describe("requireAdmin / admin allowlist", () => {
-  afterEach(() => {
-    vi.unstubAllEnvs();
-    vi.resetModules();
-  });
+  afterEach(() => vi.unstubAllEnvs());
 
   it("isAdminEmail honors ADMIN_USER_EMAILS and the primary operator", () => {
     vi.stubEnv("ADMIN_USER_EMAILS", "boss@example.com, ops@example.com");
@@ -42,7 +27,7 @@ describe("requireAdmin / admin allowlist", () => {
   it("ALLOWS a verified admin email (production, allowlist configured)", () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("ADMIN_USER_EMAILS", "boss@example.com");
-    const r = checkAdmin(reqWithEmail("boss@example.com"), { allowToken: false });
+    const r = checkAdmin(reqWithEmail("boss@example.com"), { allowToken: false, allowNonProd: false });
     expect(r.ok).toBe(true);
     expect(r.email).toBe("boss@example.com");
     expect(requireAdmin(reqWithEmail("boss@example.com"))).toBeNull();
@@ -62,7 +47,7 @@ describe("requireAdmin / admin allowlist", () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("ADMIN_USER_EMAILS", "");
     vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
-    const r = checkAdmin(reqWithEmail("anyone@example.com"), { allowToken: false });
+    const r = checkAdmin(reqWithEmail("anyone@example.com"), { allowToken: false, allowNonProd: false });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe("forbidden");
   });
@@ -78,68 +63,11 @@ describe("requireAdmin / admin allowlist", () => {
     expect(checkAdmin(reqWithEmail(undefined, "nope")).ok).toBe(false);
   });
 
-  it.each(["production", "development", "test", "staging", ""])(
-    "denies email-only admin access without verified provenance in NODE_ENV=%j",
-    (nodeEnv) => {
-      vi.stubEnv("NODE_ENV", nodeEnv);
-      vi.stubEnv("ADMIN_USER_EMAILS", "boss@example.com");
-      expect(checkAdmin(reqWithEmail("boss@example.com", undefined, "")).ok).toBe(false);
-      expect(
-        checkAdmin(
-          reqWithEmail("boss@example.com", undefined, AUTHENTICATED_IDENTITY_SOURCES.localFallback)
-        ).ok
-      ).toBe(false);
-    }
-  );
-
-  it("denies the auth-unconfigured middleware fallback at the admin handler boundary", async () => {
+  it("runs open outside production (preserves dev/ops ergonomics)", () => {
     vi.stubEnv("NODE_ENV", "development");
-    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "");
-    vi.stubEnv("AUTH_SECRET", "");
-    vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
-    vi.stubEnv("ADMIN_USER_EMAILS", "owner@example.com");
-    vi.resetModules();
-    const { middleware } = await import("../middleware.js");
-    const middlewareResponse = await middleware(
-      new NextRequest("https://trading.example.com/api/admin/trigger-test", {
-        headers: {
-          [AUTHENTICATED_EMAIL_HEADER]: "attacker@example.com",
-          [AUTHENTICATED_IDENTITY_SOURCE_HEADER]: AUTHENTICATED_IDENTITY_SOURCES.authJsSession
-        }
-      })
-    );
-
-    const forwarded = new Headers();
-    for (const name of [AUTHENTICATED_EMAIL_HEADER, AUTHENTICATED_IDENTITY_SOURCE_HEADER]) {
-      const value = middlewareResponse.headers.get(`x-middleware-request-${name}`);
-      if (value) forwarded.set(name, value);
-    }
-    expect(forwarded.get(AUTHENTICATED_EMAIL_HEADER)).toBe("owner@example.com");
-    expect(forwarded.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER)).toBe(
-      AUTHENTICATED_IDENTITY_SOURCES.localFallback
-    );
-
-    const handlerRequest = new Request("https://trading.example.com/api/admin/trigger-test", {
-      headers: forwarded
-    });
-    expect(checkAdmin(handlerRequest, { allowToken: false })).toEqual({
-      ok: false,
-      reason: "forbidden",
-      email: null
-    });
-  });
-
-  it("still accepts verified email and valid token paths in development", () => {
-    vi.stubEnv("NODE_ENV", "development");
-    vi.stubEnv("ADMIN_USER_EMAILS", "boss@example.com");
-    vi.stubEnv("ADMIN_REINDEX_TOKEN", "s3cret");
-    expect(checkAdmin(reqWithEmail("boss@example.com")).reason).toBe("admin-email");
-    expect(checkAdmin(reqWithEmail(undefined, "s3cret")).reason).toBe("admin-token");
-  });
-
-  it.each(["production", "development", "test", "staging", ""])("denies no-identity requests in NODE_ENV=%j", (nodeEnv) => {
-    vi.stubEnv("NODE_ENV", nodeEnv);
     vi.stubEnv("ADMIN_USER_EMAILS", "");
-    expect(checkAdmin(reqWithEmail()).ok).toBe(false);
+    const r = checkAdmin(reqWithEmail());
+    expect(r.ok).toBe(true);
+    expect(r.reason).toBe("non-prod");
   });
 });

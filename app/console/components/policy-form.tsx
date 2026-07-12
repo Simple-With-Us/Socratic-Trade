@@ -28,7 +28,7 @@ import { fmtNum, EM_DASH } from "../lib/format";
 import { useConsoleData } from "../lib/useConsoleData";
 import { useUnsavedChanges } from "../lib/useDirtyGuard";
 import { useToast } from "../ui/toast";
-import { Btn, Chip, LiveTag, NumInput, Segmented, Select, TextInput, Toggle } from "../ui/primitives";
+import { Btn, Chip, LiveTag, NumInput, Select, TextInput, Toggle } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
 import { TypedConfirm } from "./chrome";
 
@@ -214,15 +214,24 @@ export function PolicyDualModeRow({
           {hint && <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">{hint}</p>}
         </div>
         <div className="flex min-w-[18rem] flex-wrap items-center justify-end gap-2">
-          <Segmented
-            value={mode}
-            onChange={setMode}
-            ariaLabel={`${label} mode`}
-            options={[
-              { value: "money", label: "Dollar", title: moneyDef.hint ?? `Use a dollar cap for ${label}.` },
-              { value: "pct", label: "Percent", title: pctDef.hint ?? `Use a portfolio percentage cap for ${label}.` }
-            ]}
-          />
+          <div className="inline-flex rounded-md border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] p-0.5" role="group" aria-label={`${label} mode`}>
+            <button
+              type="button"
+              className={mode === "money" ? "rounded px-2 py-1 text-[length:var(--con-fs-xs)] font-bold text-[color:var(--con-fg)] bg-[color:var(--con-surface)]" : "rounded px-2 py-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]"}
+              onClick={() => setMode("money")}
+              title={moneyDef.hint ?? `Use a dollar cap for ${label}.`}
+            >
+              Dollar
+            </button>
+            <button
+              type="button"
+              className={mode === "pct" ? "rounded px-2 py-1 text-[length:var(--con-fs-xs)] font-bold text-[color:var(--con-fg)] bg-[color:var(--con-surface)]" : "rounded px-2 py-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]"}
+              onClick={() => setMode("pct")}
+              title={pctDef.hint ?? `Use a portfolio percentage cap for ${label}.`}
+            >
+              Percent
+            </button>
+          </div>
           <div className="flex w-36 items-center gap-1.5">
             {unit === "$" && <span className="text-[color:var(--con-faint)]">$</span>}
             <NumInput
@@ -293,26 +302,20 @@ export function PolicySaveBar({
   const diff = useMemo(() => computeDiff(policy, draft.values, defs), [policy, draft, defs]);
   const extraEntries: ExtraDiffEntry[] = useMemo(() => classifyExtraPatch(policy, extraPatch), [policy, extraPatch]);
   const changeCount = diff.length + extraEntries.length;
-  // Register the uncommitted draft with the shell's unsaved-changes guard (beforeunload + nav
-  // interception). The onReview opener powers the nav prompt's "Review & save" option. Must run
-  // before the early return.
-  useUnsavedChanges(changeCount > 0, () => setReviewOpen(true));
+  // Register the uncommitted draft with the shell's unsaved-changes guard
+  // (beforeunload + nav interception). Must run before the early return.
+  useUnsavedChanges(changeCount > 0);
   if (changeCount === 0) return null;
 
   // extraPatch changes (universe, blocklist, order types, sell-to-fund-buy) can
   // loosen the cage too — they must cost the typed word on brokerage accounts like any field.
   const hasLooser = diff.some((d) => d.direction === "looser") || extraEntries.some((e) => e.direction === "looser");
-  // Loosening a guardrail on a live account normally costs a typed word; the owner can turn that off
-  // in Settings → Advanced action confirmation (policy.requireTypedConfirmation).
-  const needsTyped = reality.tone === "live" && hasLooser && policy.requireTypedConfirmation !== false;
+  const needsTyped = reality.tone === "live" && hasLooser;
 
   const commit = async () => {
     setBusy(true);
     try {
-      await savePolicy(
-        { ...buildPatch(diff, policy), ...(extraPatch ?? {}) },
-        policy.connectedAccountId
-      );
+      await savePolicy({ ...buildPatch(diff, policy), ...(extraPatch ?? {}) });
       await refresh();
       draft.clear();
       setReviewOpen(false);

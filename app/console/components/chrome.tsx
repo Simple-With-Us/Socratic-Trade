@@ -8,13 +8,9 @@
  *  - Run once (wired; disabled with a reason when blocked)
  *  - data freshness strip */
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { Check, ChevronDown, LogOut, Monitor, Moon, OctagonMinus, Play, ShieldCheck, SlidersHorizontal, Sun, UserRound } from "lucide-react";
-import type { ConnectedAccount } from "@/lib/types";
-// llm-required is PURE (no node/server imports — see its header), so its message constants are
-// safe to import here: classifyRunFailure matches the server's own 412 summary strings.
-import { LLM_MODEL_REQUIRED_STRATEGY_MESSAGE } from "@/lib/llm-required";
+import { ChevronDown, LogOut, OctagonMinus, Play, ShieldCheck, UserRound } from "lucide-react";
 import type { DashboardSnapshot } from "../../dashboard-types";
 import {
   activeConnectedAccount,
@@ -34,8 +30,6 @@ import {
 import { cx, fmtClock, fmtMoney, fmtMoneyWhole, timeAgo, timeUntil, EM_DASH, fmtExact } from "../lib/format";
 import type { ConsoleStreamHealth } from "../lib/useConsoleData";
 import { useConsoleData } from "../lib/useConsoleData";
-import { useDirtyActionGuard, useNextUnloadBypass } from "../lib/useDirtyGuard";
-import type { ConsoleTheme } from "../lib/useConsoleTheme";
 import { useToast } from "../ui/toast";
 import { Btn, Chip, Dot, Meter, TextInput } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
@@ -67,140 +61,46 @@ function brokerName(broker: string | undefined): string {
       return "Robinhood";
     case "test":
       return "Test Account";
-    case "tradier":
-      return "Tradier";
     default:
       return broker ?? "";
   }
 }
 
 export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapshot; compact?: boolean }) {
+  const { refresh } = useConsoleData();
   const toast = useToast();
-  const guardAction = useDirtyActionGuard();
-  const allowNextUnload = useNextUnloadBypass();
   const [open, setOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
   const reality = deriveReality(snapshot);
   const active = activeConnectedAccount(snapshot);
-  // Active account hoisted first, the rest after — same order the switch list
-  // reads top-to-bottom. Mirrors the Broker connections settings card.
-  const others = snapshot.connectedAccounts.filter((a) => !a.isActive);
-  const ordered = active ? [active, ...others] : others;
 
   const label = active
     ? `${active.label || brokerName(active.broker)}${active.accountNumber ? ` ·· ${active.accountNumber.slice(-4)}` : ""}`
     : "No connected account";
 
-  const close = () => {
-    setOpen(false);
-    // Return focus to the trigger so keyboard users aren't dropped at page top.
-    requestAnimationFrame(() => triggerRef.current?.focus());
-  };
-
-  // Escape closes and returns focus to the trigger (menu-button pattern).
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        close();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-
   const switchTo = async (id: string) => {
     setBusyId(id);
     try {
       await activateAccount(id);
-      // Activation changes the server-side scope used by run-state and broker actions. A full reload
-      // removes any window where stale Account A UI could remain interactive while the server points
-      // at Account B, and remounts every account-scoped editor from B's snapshot.
-      allowNextUnload();
-      window.location.reload();
+      await refresh();
+      toast.push("info", "Scope switched", "The whole console now shows this account.");
+      setOpen(false);
     } catch (error) {
-      toast.push("neg", "Could not load account", error instanceof ConsoleApiError ? error.message : undefined);
+      toast.push("neg", "Could not switch accounts", error instanceof ConsoleApiError ? error.message : undefined);
+    } finally {
       setBusyId(null);
     }
   };
 
-  // Compact switch row: name + reality/run-state chips on line one, broker ··last4
-  // on a faint second line. The whole row is the switch affordance; the loaded
-  // account is a non-interactive current-state marker (checkmark, accent tint).
-  const renderRow = (account: ConnectedAccount) => {
-    const r = realityForAccount(account);
-    const policy = snapshot.connectedAccountPolicies?.[account.id];
-    const st = policy ? deriveStateInfo(policy) : null;
-    const isActive = account.isActive;
-    const last4 = account.accountNumber ? account.accountNumber.slice(-4) : null;
-    return (
-      <button
-        key={account.id}
-        type="button"
-        role="menuitemradio"
-        aria-checked={isActive}
-        disabled={isActive || busyId !== null}
-        onClick={() => guardAction(() => void switchTo(account.id))}
-        className={cx(
-          "con-scope-row flex w-full items-start gap-2 rounded-lg border px-3 py-2 text-left",
-          isActive ? "border-[color:var(--con-accent-border)]" : "border-[color:var(--con-line)]"
-        )}
-      >
-        <span className="min-w-0 flex-1">
-          <span className="flex flex-wrap items-center gap-1.5">
-            <span className="truncate text-[length:var(--con-fs-sm)] font-semibold">
-              {account.label || brokerName(account.broker)}
-            </span>
-            {r.tone !== "live" && <Chip tone={r.tone}>{r.word}</Chip>}
-            {st && st.state !== "halted" && <Chip tone={st.tone}>{st.label}</Chip>}
-          </span>
-          <span className="mt-0.5 block truncate text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-            {brokerName(account.broker)}
-            {last4 ? ` · ·· ${last4}` : ""}
-            {r.tone !== "live" ? ` · ${r.phrase}` : ""}
-          </span>
-        </span>
-        <span
-          className={cx(
-            "flex shrink-0 items-center gap-1 self-center text-[length:var(--con-fs-xs)] font-semibold",
-            isActive ? "text-[color:var(--con-accent)]" : "text-[color:var(--con-muted)]"
-          )}
-        >
-          {isActive ? (
-            <>
-              <Check size={13} /> Loaded
-            </>
-          ) : busyId === account.id ? (
-            "Loading…"
-          ) : (
-            "Switch"
-          )}
-        </span>
-      </button>
-    );
-  };
-
   return (
-    // relative wrapper: the dropdown anchors to the trigger's own left edge (the
-    // scope sits at the LEFT of the bar, so anchoring here can't overflow off the
-    // left the way a right-aligned menu would). flex sizing lives on the wrapper
-    // so the trigger fills it.
-    <div className="relative min-w-0 flex-1 sm:flex-none sm:min-w-[190px] sm:max-w-[300px]">
+    <>
       <button
-        ref={triggerRef}
         type="button"
-        onClick={() => (open ? close() : setOpen(true))}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        // items-start + a small chevron nudge aligns the chevron with the first
-        // (account-name) line rather than floating between the two label lines.
-        className="flex w-full items-start gap-2 overflow-hidden rounded-lg border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface-2)] px-3 py-1.5 text-left transition-colors hover:border-[color:var(--con-accent)]"
+        onClick={() => setOpen(true)}
+        className="flex min-w-[112px] max-w-[44vw] items-center gap-2 overflow-hidden rounded-lg border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface-2)] px-3 py-1.5 text-left transition-colors hover:border-[color:var(--con-accent)] sm:max-w-none"
         title="Switch which account this console shows"
       >
-        <span className="min-w-0 flex-1">
+        <span className="min-w-0">
           <span className="block truncate text-[length:var(--con-fs-sm)] font-semibold leading-tight">{label}</span>
           {!compact && (
             <span className="hidden truncate text-[length:var(--con-fs-xs)] leading-tight text-[color:var(--con-faint)] sm:block">
@@ -208,53 +108,66 @@ export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapsh
             </span>
           )}
         </span>
-        <ChevronDown
-          size={14}
-          className={cx("mt-0.5 shrink-0 text-[color:var(--con-faint)] transition-transform", open && "rotate-180")}
-        />
+        <ChevronDown size={14} className="shrink-0 text-[color:var(--con-faint)]" />
       </button>
 
-      {open && (
-        <>
-          {/* invisible click-away backdrop; the panel sits above it */}
-          <div className="fixed inset-0 z-40" onClick={close} aria-hidden />
-          <div
-            role="menu"
-            aria-label="Account scope"
-            className="con-menu-drop absolute left-0 top-[calc(100%+4px)] z-50 flex max-h-[min(70vh,480px)] w-[min(92vw,360px)] flex-col gap-2 overflow-y-auto rounded-xl border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-3 shadow-xl"
-          >
-            <p className="text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
-              One account is loaded at a time. Switching rescopes everything — balances, guardrails, approvals, run
-              state, and decision history.
-            </p>
-            {ordered.length === 0 ? (
-              <div className="rounded-lg border border-[color:var(--con-line)] p-3 text-[length:var(--con-fs-sm)]">
-                <div className="flex items-center gap-2">
-                  <span className="font-semibold">No account connected</span>
-                  <Chip tone="none">NO ACCOUNT</Chip>
+      <Sheet open={open} onClose={() => setOpen(false)} title="Account scope">
+        <p className="mb-3 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
+          Exactly one account is active at a time. Switching rescopes everything — balances, guardrails, approvals,
+          the run state, and decision history.
+        </p>
+        <div className="flex flex-col gap-2">
+          {snapshot.connectedAccounts.length === 0 && (
+            <div className="rounded-lg border border-[color:var(--con-line)] p-3 text-[length:var(--con-fs-sm)]">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold">No account connected</span>
+                <Chip tone="none">NO ACCOUNT · no account connected</Chip>
+              </div>
+              <p className="mt-1 text-[color:var(--con-muted)]">
+                Connect a broker account before the app can place orders.
+              </p>
+            </div>
+          )}
+          {snapshot.connectedAccounts.map((account) => {
+            const r = realityForAccount(account);
+            return (
+              <div
+                key={account.id}
+                className={cx(
+                  "rounded-lg border p-3",
+                  account.isActive ? "border-[color:var(--con-accent)]" : "border-[color:var(--con-line)]"
+                )}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="truncate font-semibold">{account.label || brokerName(account.broker)}</span>
+                    {account.broker === "test" && <Chip tone="paper">local mock</Chip>}
+                    {r.tone !== "live" && (
+                      <Chip tone={r.tone}>
+                        {r.word} · {r.phrase}
+                      </Chip>
+                    )}
+                    {account.isActive && <Chip tone="accent">active</Chip>}
+                  </div>
+                  {!account.isActive && (
+                    <Btn size="sm" variant="outline" disabled={busyId !== null} onClick={() => void switchTo(account.id)}>
+                      {busyId === account.id ? "Switching…" : "Switch"}
+                    </Btn>
+                  )}
                 </div>
-                <p className="mt-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
-                  Connect a broker account before the app can place orders.
+                <p className="mt-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+                  {account.broker === "test"
+                    ? "Local Mock Paper Account - simulated fills, not real money"
+                    : `${brokerName(account.broker)} · ${r.tone === "paper" ? "paper account, not real money" : "brokerage account"}`}
+                  {account.accountNumber ? ` · ·· ${account.accountNumber.slice(-4)}` : ""}
+                  {r.tone !== "live" ? ` — ${r.clarification}` : ""}
                 </p>
               </div>
-            ) : (
-              <div className="flex flex-col gap-1.5">{ordered.map(renderRow)}</div>
-            )}
-            <div className="my-0.5 h-px bg-[color:var(--con-line)]" />
-            <Link
-              href="/console/settings#brokers"
-              role="menuitem"
-              onClick={close}
-              className="con-scope-row flex w-full items-center gap-2 rounded-lg border border-[color:var(--con-line)] px-3 py-2 text-[length:var(--con-fs-sm)] font-medium"
-              title="Add, remove, or reconnect broker accounts"
-            >
-              <SlidersHorizontal size={14} className="shrink-0 text-[color:var(--con-faint)]" />
-              Configure accounts
-            </Link>
-          </div>
-        </>
-      )}
-    </div>
+            );
+          })}
+        </div>
+      </Sheet>
+    </>
   );
 }
 
@@ -270,28 +183,16 @@ const STATE_TONE: Record<string, "pos" | "warn" | "neg" | "muted"> = {
 export function StateChip({ snapshot }: { snapshot: DashboardSnapshot }) {
   const [open, setOpen] = useState(false);
   const info = deriveStateInfo(snapshot.policy);
-  // On phones the boxed single-line chip read as a second dropdown next to the
-  // account selector and crowded the bar (owner report) — below sm it renders
-  // unboxed with the state stacked over the authority in smaller type. Desktop
-  // keeps the boxed single-line form.
-  const [word, mode] = info.label.split(" · ");
   return (
     <>
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="flex shrink-0 items-center gap-2 rounded-lg border border-transparent px-1.5 py-1 text-left transition-colors sm:border-[color:var(--con-line-strong)] sm:bg-[color:var(--con-surface-2)] sm:px-3 sm:py-1.5 sm:hover:border-[color:var(--con-accent)]"
+        className="flex items-center gap-2 rounded-lg border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface-2)] px-3 py-1.5 transition-colors hover:border-[color:var(--con-accent)]"
         title={info.detail}
       >
         <Dot tone={STATE_TONE[info.tone]} pulse={info.state === "active" && snapshot.policy.strategyAuthority === "decide"} />
-        <span className="flex flex-col leading-tight sm:flex-row sm:items-center sm:gap-1">
-          <span className="whitespace-nowrap text-[length:var(--con-fs-xs)] font-semibold sm:text-[length:var(--con-fs-sm)]">{word}</span>
-          {mode && (
-            <span className="whitespace-nowrap text-[10px] text-[color:var(--con-muted)] sm:text-[length:var(--con-fs-sm)] sm:font-semibold sm:text-inherit sm:before:content-['·_']">
-              {mode}
-            </span>
-          )}
-        </span>
+        <span className="whitespace-nowrap text-[length:var(--con-fs-sm)] font-semibold">{info.label}</span>
       </button>
       <ControlSheet snapshot={snapshot} open={open} onClose={() => setOpen(false)} />
     </>
@@ -326,10 +227,9 @@ export function RunStateButton({ snapshot }: { snapshot: DashboardSnapshot }) {
   );
 }
 
-/** One control surface for run-state changes. Friction is reserved for what SELLS or halts
- *  the world: stopping = one tap + one confirm; winding down (the one stop verb that SELLS) =
- *  typed ritual. Starting scheduled runs is ONE TAP for every account — a live broker account
- *  is the app's normal, in-domain case, not a scary exception that needs a typed ritual. */
+/** One control surface for run-state changes. Asymmetric friction:
+ *  stopping = one tap + one confirm, no typing; starting a broker-connected account =
+ *  typed ritual; winding down (the one stop verb that SELLS) = typed ritual. */
 function ControlSheet({
   snapshot,
   open,
@@ -353,6 +253,7 @@ function ControlSheet({
   const startLabel = state === "close_only" ? "Resume" : "Start";
   const startGerund = state === "close_only" ? "Resuming" : "Starting";
   const startProgressLabel = `${startGerund}…`;
+  const startPhrase = reality.tone === "live" ? (state === "close_only" ? "RESUME LIVE" : "START LIVE") : null;
   const liquidatePhrase = "WIND DOWN";
   const sheetTitle = emergency
     ? "Stop the strategy"
@@ -457,7 +358,7 @@ function ControlSheet({
                   </Btn>
                 )}
                 {o.id === "close_only" && (
-                  <Btn variant="outline" size="sm" disabled={busy !== null} onClick={() => void act("close_only", () => setSystemState("close_only", snapshot.policy.connectedAccountId), "Close-only", "No new buys. Protective exits keep working.")}>
+                  <Btn variant="outline" size="sm" disabled={busy !== null} onClick={() => void act("close_only", () => setSystemState("close_only"), "Close-only", "No new buys. Protective exits keep working.")}>
                     {busy === "close_only" ? "Switching…" : "Confirm"}
                   </Btn>
                 )}
@@ -466,11 +367,16 @@ function ControlSheet({
                     Wind down…
                   </Btn>
                 )}
-                {o.id === "start" && (
-                  <Btn variant="pos" size="sm" disabled={busy !== null} onClick={() => void act("start", startStrategy, "Running", "Scheduled runs are on.")}>
-                    {busy === "start" ? startProgressLabel : startLabel}
-                  </Btn>
-                )}
+                {o.id === "start" &&
+                  (startPhrase ? (
+                    <Btn variant="primary" size="sm" disabled={busy !== null} onClick={() => setConfirmVerb(confirmVerb === "start" ? null : "start")}>
+                      {startLabel}…
+                    </Btn>
+                  ) : (
+                    <Btn variant="pos" size="sm" disabled={busy !== null} onClick={() => void act("start", startStrategy, "Running", "Scheduled runs are on.")}>
+                      {busy === "start" ? startProgressLabel : startLabel}
+                    </Btn>
+                  ))}
               </div>
               <p className="mt-1.5 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">{o.body}</p>
 
@@ -483,8 +389,24 @@ function ControlSheet({
                   confirmLabel="Wind down — this sells"
                   variant="danger"
                   onConfirm={() =>
-                    void act("liquidating", () => setSystemState("liquidating", snapshot.policy.connectedAccountId), "Winding down", "Only sell orders until the account is in cash.")
+                    void act("liquidating", () => setSystemState("liquidating"), "Winding down", "Only sell orders until the account is in cash.")
                   }
+                />
+              )}
+              {o.id === "start" && confirmVerb === "start" && startPhrase && (
+                <TypedConfirm
+                  phrase={startPhrase}
+                  value={armText}
+                  onChange={setArmText}
+                  busy={busy === "start"}
+                  confirmLabel={
+                    <>
+                      {startLabel} scheduled runs
+                    </>
+                  }
+                  variant="primary"
+                  note={`${startGerund} a broker-connected account changes automation state, so it costs the typed confirmation phrase — stopping never does.`}
+                  onConfirm={() => void act("start", startStrategy, "Running", "Scheduled runs are on.")}
                 />
               )}
             </div>
@@ -588,20 +510,7 @@ function deriveRunBlock(snapshot: DashboardSnapshot): RunBlock | null {
  *  summary strings (src/lib/strategy.ts / llm-required.ts). */
 function classifyRunFailure(message: string, status?: number): RunBlock {
   const m = message.toLowerCase();
-  // A 412 fires for two DIFFERENT reasons the sheet must not conflate: the team-model CHOICE is
-  // missing (LLM_MODEL_REQUIRED_STRATEGY_MESSAGE — fix under the model pickers), or a provider KEY
-  // is missing (everything else — fix under API keys). Titling a model-choice refusal "No LLM key
-  // is configured" sent the owner hunting through API keys that were fine — match the choice
-  // message FIRST, on the server's own string.
-  if (m.includes(LLM_MODEL_REQUIRED_STRATEGY_MESSAGE.toLowerCase())) {
-    return {
-      title: "Choose your team models",
-      detail: message,
-      fixHref: "/console/strategy#models",
-      fixLabel: "Open Framework → Models"
-    };
-  }
-  if (status === 412 || m.includes("llm provider") || m.includes("llm key") || m.includes("provider key")) {
+  if (status === 412 || m.includes("llm provider") || m.includes("llm key")) {
     return {
       title: "No LLM key is configured",
       detail: message,
@@ -680,11 +589,6 @@ export function RunOnceButton({ snapshot, size }: { snapshot: DashboardSnapshot;
       await refresh();
       if (result.status === "failed") {
         setBlock(classifyRunFailure(result.summary || "The run failed."));
-      } else if (result.status === "started") {
-        // The route launched the run and returned before it finished (real runs can take several
-        // minutes on LLM-heavy steps) — reflect "started", not "complete". Activity/snapshot
-        // polling already renders the strategy_runs row this created as it progresses.
-        toast.push("pos", "Run started", result.summary || "Check Activity for progress.");
       } else {
         toast.push("pos", "Run complete", result.summary);
       }
@@ -752,192 +656,64 @@ export function RunOnceButton({ snapshot, size }: { snapshot: DashboardSnapshot;
 
 // ── Signed-in identity + sign out ────────────────────────────────────────────
 
-// Labels removed since we don't cycle anymore
-const THEME_WORD: Record<ConsoleTheme, string> = { system: "System", dark: "Dark", light: "Light" };
-
-function Avatar({ imageUrl, size, iconSize }: { imageUrl?: string; size: string; iconSize: number }) {
-  // Google/GitHub profile photo when the session has one (imageUrl comes from
-  // the Auth.js session via snapshot.currentUser); generic icon otherwise.
-  // no-referrer: googleusercontent 403s avatar requests with a referrer.
-  return imageUrl ? (
-    // eslint-disable-next-line @next/next/no-img-element -- external avatar host; next/image needs remotePatterns per provider
-    <img src={imageUrl} alt="" referrerPolicy="no-referrer" className={cx(size, "rounded-[inherit] object-cover")} />
-  ) : (
-    <UserRound size={iconSize} />
-  );
-}
-
-/** Profile menu: a slide-DOWN dropdown anchored under the header button — NOT a
- *  bottom sheet, which the fixed mobile tab bar covered (sign out was
- *  unreachable on phones). Holds identity, the theme control (moved off the
- *  bar), and sign out. Button is a 44px target on phones and shows the
- *  provider avatar when the session has one. */
-export function UserMenu({
-  snapshot,
-  theme,
-  setTheme
-}: {
-  snapshot: DashboardSnapshot;
-  theme: ConsoleTheme;
-  setTheme: (theme: ConsoleTheme) => void;
-}) {
+export function UserMenu({ snapshot }: { snapshot: DashboardSnapshot }) {
   const [open, setOpen] = useState(false);
-  const triggerRef = useRef<HTMLButtonElement>(null);
   const user = snapshot.currentUser;
-
-  const close = () => {
-    setOpen(false);
-    // Return focus to the trigger so keyboard users land back on the button.
-    requestAnimationFrame(() => triggerRef.current?.focus());
-  };
-
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-
   // No session identity (single-user/local operation) → nothing to sign out of.
   if (!user) return null;
 
   const who = user.name ?? user.email ?? user.userId;
 
   return (
-    // Not position:relative — the dropdown anchors to the bar row (the nearest
-    // positioned ancestor, set in shell.tsx) so it hugs the viewport-right edge
-    // instead of overflowing left off small screens.
-    <div className="shrink-0">
+    <>
       <button
-        ref={triggerRef}
         type="button"
-        onClick={() => (open ? close() : setOpen(true))}
-        title={`Signed in as ${user.email ?? who}. Click for account, theme, and sign out.`}
+        onClick={() => setOpen(true)}
+        title={`Signed in as ${user.email ?? who}. Click for account and sign out.`}
         aria-label={`Signed in as ${user.email ?? who} — account menu`}
-        aria-expanded={open}
-        aria-haspopup="menu"
-        className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-lg border border-[color:var(--con-line-strong)] text-[color:var(--con-muted)] transition-colors hover:border-[color:var(--con-accent)] hover:text-[color:var(--con-accent)] sm:h-8 sm:w-8"
+        className="flex h-8 w-8 items-center justify-center rounded-lg border border-[color:var(--con-line-strong)] text-[color:var(--con-muted)] transition-colors hover:border-[color:var(--con-accent)] hover:text-[color:var(--con-accent)]"
       >
-        <Avatar imageUrl={user.imageUrl} size="h-full w-full" iconSize={15} />
+        <UserRound size={15} />
       </button>
 
-      {open && (
-        <>
-          {/* invisible click-away backdrop; the panel sits above it */}
-          <div className="fixed inset-0 z-40" onClick={close} aria-hidden />
-          <div className="con-menu-drop absolute right-2 top-[calc(100%+2px)] z-50 w-[min(92vw,340px)] rounded-xl border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-4 shadow-xl">
-            <div className="flex flex-col gap-3 text-[length:var(--con-fs-sm)]">
-              <div className="flex items-center gap-3">
-                <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-[color:var(--con-line)] text-[color:var(--con-muted)]">
-                  <Avatar imageUrl={user.imageUrl} size="h-full w-full" iconSize={18} />
-                </span>
-                <div className="min-w-0">
-                  <div className="truncate font-semibold">{who}</div>
-                  {user.email && user.name && <div className="truncate text-[color:var(--con-muted)]">{user.email}</div>}
-                  <div className="mt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-                    {user.loginProvider ? `Signed in via ${user.loginProvider}` : "Signed in"}
-                    {user.isAdmin ? " · operator/admin rights" : ""}
-                  </div>
-                </div>
-              </div>
-              <div className="flex items-center justify-between gap-3 rounded-lg border border-[color:var(--con-line)] px-3 py-2">
-                <span className="text-[color:var(--con-muted)]">Theme</span>
-                <div className="flex items-center gap-1 rounded-lg border border-[color:var(--con-line-strong)] bg-[color:var(--con-bg)] p-0.5">
-                  {(["light", "dark", "system"] as const).map((t) => {
-                    const active = theme === t;
-                    const Icon = t === "dark" ? Moon : t === "light" ? Sun : Monitor;
-                    return (
-                      <button
-                        key={t}
-                        type="button"
-                        onClick={() => setTheme(t)}
-                        title={THEME_WORD[t]}
-                        aria-label={`Set theme to ${THEME_WORD[t]}`}
-                        className={cx(
-                          "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[length:var(--con-fs-xs)] transition-colors",
-                          active
-                            ? "bg-[color:var(--con-surface)] text-[color:var(--con-text)] font-medium shadow-sm border border-[color:var(--con-line)]"
-                            : "text-[color:var(--con-muted)] hover:text-[color:var(--con-text)] border border-transparent"
-                        )}
-                      >
-                        <Icon size={13} />
-                        {THEME_WORD[t]}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              <p className="text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-faint)]">
-                Signing out only ends this browser session. The strategy keeps its current run state on the server —
-                it does not stop, start, or sell anything.
-              </p>
-              {/* Server route: clears the Auth.js session cookies and redirects to /login. */}
-              <a
-                href="/logout"
-                className="con-btn con-btn-outline self-start"
-                title="End this browser session and return to the sign-in page. Does not change the strategy's run state."
-              >
-                <LogOut size={14} />
-                Sign out
-              </a>
+      <Sheet open={open} onClose={() => setOpen(false)} title="Your session">
+        <div className="flex flex-col gap-3 text-[length:var(--con-fs-sm)]">
+          <div>
+            <div className="font-semibold">{who}</div>
+            {user.email && user.name && <div className="text-[color:var(--con-muted)]">{user.email}</div>}
+            <div className="mt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+              {user.loginProvider ? `Signed in via ${user.loginProvider}` : "Signed in"}
+              {user.isAdmin ? " · operator/admin rights" : ""}
             </div>
           </div>
-        </>
-      )}
-    </div>
+          <p className="text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-faint)]">
+            Signing out only ends this browser session. The strategy keeps its current run state on the server — it
+            does not stop, start, or sell anything.
+          </p>
+          <Link
+            href="/old"
+            className="con-btn con-btn-outline self-start"
+            title="Open the legacy dashboard at /old. The new Socratic console is the primary app."
+            onClick={() => setOpen(false)}
+          >
+            Old dashboard
+          </Link>
+          {/* Server route: clears the Auth.js session cookies and redirects to /login. */}
+          <a
+            href="/logout"
+            className="con-btn con-btn-outline self-start"
+            title="End this browser session and return to the sign-in page. Does not change the strategy's run state."
+          >
+            <LogOut size={14} />
+            Sign out
+          </a>
+        </div>
+      </Sheet>
+    </>
   );
 }
 
 // ── Freshness strip ──────────────────────────────────────────────────────────
-
-/** Freshness label shared by the desktop strip and the mobile bar: "delayed"
- *  while the last refresh errored, "loading" before the first fetch lands,
- *  "aging" while the push stream is reconnecting, otherwise "fresh". */
-function deriveFreshnessLabel(fetchedAt: Date | null, error: string | null, stream: ConsoleStreamHealth): string {
-  return error ? "delayed"
-    : fetchedAt == null ? "loading"
-    : stream.status === "reconnecting" ? "aging"
-    : "fresh";
-}
-
-/** Compact one-line freshness + today's spend, rendered in the STICKY TOP
- *  chrome (below ChromeBar) on phones — the fixed bottom tab bar (nav.tsx)
- *  overlays anything at document end there, so a bottom-anchored strip is
- *  invisible on mobile. This is the only mobile freshness surface; the
- *  desktop-only FreshnessStrip below no longer renders a mobile variant. */
-export function MobileFreshnessBar({
-  snapshot,
-  fetchedAt,
-  error,
-  stream
-}: {
-  snapshot: DashboardSnapshot;
-  fetchedAt: Date | null;
-  error: string | null;
-  stream: ConsoleStreamHealth;
-}) {
-  const spend = deriveSpend(snapshot);
-  const freshnessLabel = deriveFreshnessLabel(fetchedAt, error, stream);
-  return (
-    <div className="flex items-center gap-3 border-t border-[color:var(--con-line)] bg-[color:var(--con-surface)] px-4 py-1.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] lg:hidden">
-      <span title="When this console last fetched data. It refreshes about every 15 seconds.">
-        Data as of {fetchedAt ? fmtClock(fetchedAt) : EM_DASH} · {freshnessLabel}
-      </span>
-      <span className="con-num ml-auto flex items-center gap-1.5" title="Opening orders only. Exits never consume the daily cap.">
-        <ShieldCheck size={12} />
-        Today: {fmtMoney(spend.usedNotional)}
-      </span>
-      {error && (
-        <span className="shrink-0 font-semibold text-[color:var(--con-warn)]" title={error}>
-          delayed
-        </span>
-      )}
-    </div>
-  );
-}
 
 export function FreshnessStrip({
   snapshot,
@@ -953,7 +729,11 @@ export function FreshnessStrip({
   const spend = deriveSpend(snapshot);
   const scanAt = snapshot.latestStrategyRun?.marketScan?.generatedAt;
   const nextRun = snapshot.scheduler?.nextRunAt;
-  const freshnessLabel = deriveFreshnessLabel(fetchedAt, error, stream);
+  const freshnessLabel =
+    error ? "delayed"
+    : fetchedAt == null ? "loading"
+    : stream.status === "reconnecting" ? "aging"
+    : "fresh";
   const streamLabel =
     stream.status === "live"
       ? "stream live"
@@ -971,11 +751,7 @@ export function FreshnessStrip({
           ? "Opening the push stream now."
           : "This browser does not expose EventSource, so the console is using polling only.";
   return (
-    // Desktop only — the mobile equivalent is MobileFreshnessBar, rendered in
-    // the sticky TOP chrome (shell.tsx) instead of a bottom-anchored strip,
-    // since the fixed bottom tab bar (nav.tsx) overlays anything at document
-    // end on phones.
-    <div className="hidden border-t border-[color:var(--con-line)] bg-[color:var(--con-surface)] text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] lg:block">
+    <div className="border-t border-[color:var(--con-line)] bg-[color:var(--con-surface)] text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-x-4 gap-y-1 px-4 py-1.5">
         <span title="When this console last fetched data. It refreshes about every 15 seconds.">
           Data as of {fetchedAt ? fmtClock(fetchedAt) : EM_DASH} · {freshnessLabel} · quotes may be delayed

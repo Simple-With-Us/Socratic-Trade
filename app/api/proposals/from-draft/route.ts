@@ -19,12 +19,12 @@ import {
 import { getBrokerGateway } from "@/lib/broker";
 import { dynamicIndexUniversesForPolicy } from "@/lib/index-universes";
 import { allowedSymbolsForPolicy, evaluateTradeProposal } from "@/lib/policy";
+import { shouldEscalateDecision } from "@/lib/strategy";
 import { emitDashboardEvent } from "@/lib/events";
 import { chatDraftToProposal } from "@/lib/chat/promote-draft";
 import { deriveExecutionState } from "@/lib/execution-mode";
 import type { ChatDraft } from "@/lib/chat/types";
 import type { PolicyDecision, ReviewedOrder } from "@/lib/types";
-import { shouldEscalateDecision } from "@/lib/strategy-risk";
 
 export const dynamic = "force-dynamic";
 

@@ -16,12 +16,6 @@ import type {
 
 export interface NotifyConfig {
   timeoutMs: number;
-  /** Total delivery attempts per channel (>=1). A transient failure ("fetch failed"/timeout/5xx/429)
-   *  is retried up to this many times so a single network blip never silently drops a critical alert
-   *  (block / run_failed / LLM-timeout). Non-transient failures (4xx, bad URL) are NOT retried. */
-  retryAttempts: number;
-  /** Base backoff between retries in ms (multiplied by the attempt number). 0 disables the wait. */
-  retryDelayMs: number;
   push: { provider: "ntfy" | "pushover"; ntfyServer: string; pushoverToken: string };
   email: { provider: "resend"; resendKey: string; from: string };
   sms: { twilioSid: string; twilioToken: string; twilioFrom: string };
@@ -31,12 +25,8 @@ export interface NotifyConfig {
 export function loadNotifyConfig(): NotifyConfig {
   const provider = process.env.NOTIFY_PUSH_PROVIDER === "pushover" ? "pushover" : "ntfy";
   const timeoutMs = Number(process.env.NOTIFY_TIMEOUT_MS ?? 5000);
-  const retryAttempts = Number(process.env.NOTIFY_RETRY_ATTEMPTS ?? 3);
-  const retryDelayMs = Number(process.env.NOTIFY_RETRY_DELAY_MS ?? 400);
   return {
     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 5000,
-    retryAttempts: Number.isFinite(retryAttempts) && retryAttempts >= 1 ? Math.floor(retryAttempts) : 3,
-    retryDelayMs: Number.isFinite(retryDelayMs) && retryDelayMs >= 0 ? retryDelayMs : 400,
     push: {
       provider,
       ntfyServer: process.env.NOTIFY_NTFY_SERVER ?? "https://ntfy.sh",
@@ -66,16 +56,6 @@ function abortSignal(ms: number): AbortSignal | undefined {
   return typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(ms) : undefined;
 }
 
-/** Delivery failures worth retrying: transient network/timeout errors and 5xx/429 upstreams. A 4xx
- *  (bad target, auth) or a malformed-URL throw is permanent — retrying it just wastes attempts. */
-function isTransientDeliveryError(message: string): boolean {
-  return /fetch failed|timed? ?out|timeout|abort|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network|socket|HTTP 429|HTTP 5\d\d/i.test(message);
-}
-
-function sleep(ms: number): Promise<void> {
-  return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
-}
-
 async function postOrThrow(fetchImpl: typeof fetch, url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const res = await fetchImpl(url, { ...init, signal: abortSignal(timeoutMs) });
   if (!res.ok) {
@@ -83,28 +63,6 @@ async function postOrThrow(fetchImpl: typeof fetch, url: string, init: RequestIn
     throw new Error(`HTTP ${res.status}${detail ? ": " + detail.slice(0, 200) : ""}`);
   }
   return res;
-}
-
-// Duplicated (not imported) from notifications.ts's sanitizePushHeaderText to avoid a
-// notify.ts <-> notifications.ts import cycle (notifications.ts already imports `notify` from
-// this file). Keep the two copies in sync if the character set changes. See the ntfy branch of
-// CHANNELS.push.send below for why this exists (ByteString-only HTTP header values).
-const NTFY_TITLE_TRANSLITERATIONS: ReadonlyArray<readonly [RegExp, string]> = [
-  [/[\u2012\u2013\u2014\u2015]/g, "-"], // figure/en/em/horizontal-bar dashes
-  [/\u2026/g, "..."], // horizontal ellipsis
-  [/[\u2192\u21D2\u27F6\u279D\u27A1]/g, "->"], // rightwards arrow variants
-  [/[\u2190\u21D0\u27F5]/g, "<-"], // leftwards arrow variants
-  [/[\u2018\u2019]/g, "'"], // curly single quotes
-  [/[\u201C\u201D]/g, '"'] // curly double quotes
-];
-
-function sanitizeNtfyTitleHeader(text: string): string {
-  if (!text) return text;
-  let out = text;
-  for (const [pattern, replacement] of NTFY_TITLE_TRANSLITERATIONS) {
-    out = out.replace(pattern, replacement);
-  }
-  return out.replace(/[^\u0000-\u00FF]/g, "");
 }
 
 const CHANNELS: Record<NotifyChannelId, ChannelDef> = {
@@ -175,12 +133,7 @@ const CHANNELS: Record<NotifyChannelId, ChannelDef> = {
         await postOrThrow(
           fetchImpl,
           `${base}/${topic}`,
-          // ntfy carries the title as a raw HTTP header value, which the Fetch/Headers spec requires
-          // to be ByteString (Latin-1 only) — an em dash or other non-Latin-1 char in msg.title (e.g.
-          // from a provider-health alert string) throws `TypeError: Cannot convert argument to a
-          // ByteString` here and silently drops the whole push send. Sanitize just the header value
-          // (the body isn't header-encoded, so it can stay as-is).
-          { method: "POST", headers: { "content-type": "text/plain", title: sanitizeNtfyTitleHeader(msg.title) }, body: msg.body },
+          { method: "POST", headers: { "content-type": "text/plain", title: msg.title }, body: msg.body },
           timeoutMs
         );
       }
@@ -229,20 +182,12 @@ const CHANNELS: Record<NotifyChannelId, ChannelDef> = {
       const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(cfg.sms.twilioSid)}/Messages.json`;
       const authToken = Buffer.from(`${cfg.sms.twilioSid}:${cfg.sms.twilioToken}`).toString("base64");
       const form = new URLSearchParams({ From: cfg.sms.twilioFrom, To: to, Body: `${msg.title}\n${msg.body}`.slice(0, 1500) });
-      try {
-        await postOrThrow(
-          fetchImpl,
-          url,
-          { method: "POST", headers: { authorization: `Basic ${authToken}`, "content-type": "application/x-www-form-urlencoded" }, body: form.toString() },
-          timeoutMs
-        );
-      } catch (e) {
-        const errStr = e instanceof Error ? e.message : String(e);
-        if (errStr.includes("30034") || errStr.includes("Message cannot be sent")) {
-          throw new Error("Twilio A2P 10DLC restriction: SMS blocked until sender registration is verified. " + errStr);
-        }
-        throw e;
-      }
+      await postOrThrow(
+        fetchImpl,
+        url,
+        { method: "POST", headers: { authorization: `Basic ${authToken}`, "content-type": "application/x-www-form-urlencoded" }, body: form.toString() },
+        timeoutMs
+      );
     }
   }
 };
@@ -278,33 +223,14 @@ export async function notify(
       results.push({ channel: id, ok: false, skipped: "no_target" });
       continue;
     }
-    // Deliver with bounded retry: a transient blip (the ~7% "fetch failed"/timeout to ntfy/resend seen
-    // in prod) must not silently drop a critical alert. Permanent failures (4xx/bad target) fail fast.
-    const attempts = Math.max(1, cfg.retryAttempts);
-    let lastError = "";
-    let delivered = false;
-    let usedAttempts = 0;
-    for (let attempt = 1; attempt <= attempts; attempt++) {
-      usedAttempts = attempt;
-      try {
-        await channel.send(target, msg, { cfg, fetchImpl, timeoutMs: cfg.timeoutMs });
-        delivered = true;
-        break;
-      } catch (e) {
-        lastError = e instanceof Error ? e.message : String(e);
-        if (attempt < attempts && isTransientDeliveryError(lastError)) {
-          await sleep(cfg.retryDelayMs * attempt);
-          continue;
-        }
-        break;
-      }
-    }
-    if (delivered) {
+    try {
+      await channel.send(target, msg, { cfg, fetchImpl, timeoutMs: cfg.timeoutMs });
       results.push({ channel: id, ok: true });
-      audit("notify.sent", { userId, channel: id, kind: msg.kind ?? "alert", ...(usedAttempts > 1 ? { attempts: usedAttempts } : {}) }, userId);
-    } else {
-      results.push({ channel: id, ok: false, error: lastError });
-      audit("notify.error", { userId, channel: id, error: lastError, attempts: usedAttempts }, userId);
+      audit("notify.sent", { userId, channel: id, kind: msg.kind ?? "alert" }, userId);
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      results.push({ channel: id, ok: false, error });
+      audit("notify.error", { userId, channel: id, error }, userId);
     }
   }
   return results;

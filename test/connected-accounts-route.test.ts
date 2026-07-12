@@ -58,90 +58,6 @@ describe("connected accounts route", () => {
     });
   });
 
-  it("connects a Tradier SANDBOX account (paper) from an explicit environment selector", async () => {
-    const { POST } = await import("../app/api/connected-accounts/route");
-    const response = await POST(new Request("http://localhost/api/connected-accounts", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ broker: "tradier", apiKey: "tok-sandbox", environment: "paper", isActive: true })
-    }));
-
-    expect(response.status).toBe(200);
-    const { getActiveConnectedAccount } = await import("../src/lib/db");
-    const account = getActiveConnectedAccount();
-    expect(account).toMatchObject({
-      broker: "tradier",
-      environment: "paper",
-      baseUrl: "https://sandbox.tradier.com/v1"
-    });
-    // Single-token broker: the token is stored (encrypted then decrypted on read) and no secret.
-    expect(account?.apiKey).toBe("tok-sandbox");
-    expect(account?.apiSecret).toBeUndefined();
-  });
-
-  it("connects a Tradier PRODUCTION account (live) and picks api.tradier.com", async () => {
-    const { POST } = await import("../app/api/connected-accounts/route");
-    const response = await POST(new Request("http://localhost/api/connected-accounts", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ broker: "tradier", apiKey: "tok-live", environment: "live" })
-    }));
-
-    expect(response.status).toBe(200);
-    const { listConnectedAccounts } = await import("../src/lib/db");
-    expect(listConnectedAccounts()[0]).toMatchObject({
-      broker: "tradier",
-      environment: "live",
-      baseUrl: "https://api.tradier.com/v1"
-    });
-  });
-
-  it("rejects a Tradier connect with no access token (400)", async () => {
-    const { POST } = await import("../app/api/connected-accounts/route");
-    const response = await POST(new Request("http://localhost/api/connected-accounts", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ broker: "tradier", environment: "paper" })
-    }));
-    expect(response.status).toBe(400);
-  });
-
-  // Finding #3: environment is the venue authority. A paper connect carrying a live-host baseUrl must
-  // be REJECTED (400) so a paper-labeled account can never persist a route to the live api.tradier.com.
-  it("rejects a Tradier PAPER connect whose baseUrl host is api.tradier.com (400)", async () => {
-    const { POST } = await import("../app/api/connected-accounts/route");
-    const response = await POST(new Request("http://localhost/api/connected-accounts", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ broker: "tradier", apiKey: "tok-sandbox", environment: "paper", baseUrl: "https://api.tradier.com/v1" })
-    }));
-    expect(response.status).toBe(400);
-    const { listConnectedAccounts } = await import("../src/lib/db");
-    expect(listConnectedAccounts()).toHaveLength(0); // nothing persisted
-  });
-
-  it("rejects a Tradier LIVE connect whose baseUrl host is sandbox.tradier.com (400)", async () => {
-    const { POST } = await import("../app/api/connected-accounts/route");
-    const response = await POST(new Request("http://localhost/api/connected-accounts", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ broker: "tradier", apiKey: "tok-live", environment: "live", baseUrl: "https://sandbox.tradier.com/v1" })
-    }));
-    expect(response.status).toBe(400);
-  });
-
-  it("accepts a Tradier PAPER connect whose baseUrl host matches (sandbox.tradier.com)", async () => {
-    const { POST } = await import("../app/api/connected-accounts/route");
-    const response = await POST(new Request("http://localhost/api/connected-accounts", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ broker: "tradier", apiKey: "tok-sandbox", environment: "paper", baseUrl: "https://sandbox.tradier.com/v1", isActive: true })
-    }));
-    expect(response.status).toBe(200);
-    const { getActiveConnectedAccount } = await import("../src/lib/db");
-    expect(getActiveConnectedAccount()).toMatchObject({ broker: "tradier", environment: "paper", baseUrl: "https://sandbox.tradier.com/v1" });
-  });
-
   it("creates an explicit inactive local mock Test Account", async () => {
     const { POST } = await import("../app/api/connected-accounts/route");
     const { getActiveConnectedAccount, listConnectedAccounts } = await import("../src/lib/db");
@@ -156,7 +72,7 @@ describe("connected accounts route", () => {
     expect(await response.json()).toMatchObject({
       ok: true,
       accountNumber: "TEST",
-      label: "Test Account"
+      label: "Test Account - Local Mock Paper Account"
     });
     expect(getActiveConnectedAccount()).toBeUndefined();
     expect(listConnectedAccounts()).toEqual([
@@ -164,7 +80,7 @@ describe("connected accounts route", () => {
         broker: "test",
         environment: "paper",
         accountNumber: "TEST",
-        label: "Test Account",
+        label: "Test Account - Local Mock Paper Account",
         isActive: false
       })
     ]);

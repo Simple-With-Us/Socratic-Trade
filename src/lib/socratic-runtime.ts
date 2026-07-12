@@ -299,9 +299,6 @@ export function buildSocraticDecisionCase(input: {
   /** Run-level advisory receipts appended to the evidence list (e.g. kind 'safety'
    * prompt-injection / evidence-age items from src/lib/prompt-safety.ts). */
   extraEvidence?: SocraticEvidenceItem[];
-  /** Typed retrieval-status receipt for this run (typed-retrieval-status, 2026-07-06) — see
-   * `SocraticDecisionCase.ragRetrievalStatus`. Persistence only, never rendered. */
-  ragRetrievalStatus?: { symbol: string; status: string; reason?: string }[];
 }): Omit<SocraticDecisionCase, "createdAt" | "updatedAt"> {
   const ragAttributions = input.ragAttributions ?? [];
   const notional = input.review?.estimatedNotional ?? input.proposal.dollarAmount;
@@ -360,7 +357,6 @@ export function buildSocraticDecisionCase(input: {
       ...(input.extraEvidence ?? [])
     ],
     ragAttributions: ragAttributions.filter((row) => normalizeSymbol(row.symbol) === normalizeSymbol(input.proposal.symbol)),
-    ...(input.ragRetrievalStatus && input.ragRetrievalStatus.length > 0 ? { ragRetrievalStatus: input.ragRetrievalStatus } : {}),
     dissent: dissentForDecision(input.proposal, input.decision, input.overrideResolution),
     ...(override ? { autonomyOverride: override } : {}),
     lessons: [

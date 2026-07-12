@@ -4,7 +4,7 @@
  *  non-blocking notice. The live-approval typed-confirmation contract mirrors
  *  app/api/proposals/[id]/approve/route.ts exactly. */
 
-import type { LlmReasoningEffort, PerformanceSummary, StrategyTuningProposal, SystemState, TradingPolicy } from "@/lib/types";
+import type { LlmReasoningEffort, StrategyTuningProposal, SystemState, TradingPolicy } from "@/lib/types";
 
 export class ConsoleApiError extends Error {
   status: number;
@@ -51,45 +51,6 @@ function messageFrom(payload: unknown, fallback: string): string {
   return fallback;
 }
 
-/** True when a non-ok response's body is an HTML error page rather than this API's normal
- *  JSON/plain-text contract — e.g. Cloudflare's raw 524 "edge timeout" interstitial, or any other
- *  proxy/edge error page. Checked on BOTH the header and the body's own leading bytes: an edge
- *  proxy's error page can arrive with a missing or misleading content-type, so header-only
- *  detection isn't enough — this is what let a raw Cloudflare 524 page reach `messageFrom` before
- *  (a non-empty string payload was returned verbatim as the "message"). */
-function looksLikeHtml(contentType: string, payload: unknown): boolean {
-  if (contentType.includes("text/html")) return true;
-  if (typeof payload !== "string") return false;
-  const head = payload.trimStart().slice(0, 15).toLowerCase();
-  return head.startsWith("<!doctype") || head.startsWith("<html");
-}
-
-/** Clean, human message for a non-2xx response whose body is a raw HTML error page — this is
- *  NEVER rendered verbatim to the user. Cloudflare's edge timeout (524) is called out by name
- *  since a slow LLM-driven strategy run routinely triggers it in production (Coolify migration —
- *  the origin keeps running past the ~100s edge budget); other 5xx-range edge statuses and any
- *  other HTML error page get a generic "edge/proxy error" framing that still surfaces the code. */
-function edgeErrorMessage(status: number): string {
-  if (status === 524) {
-    return "The server took too long to respond at the edge (524). The operation may still be running — check the Activity feed.";
-  }
-  if (status >= 520 && status <= 530) {
-    return `The edge network returned an error (${status}) instead of reaching the app. The operation may still be running — check the Activity feed.`;
-  }
-  return `The server returned an unexpected error page (${status}) instead of a normal response. The operation may still be running — check the Activity feed.`;
-}
-
-/** Shared by every helper below so a raw HTML error page is never surfaced as an error message —
- *  applying this at the ONE shared response-error builder (rather than per-caller) means every
- *  dialog that goes through `request<T>` or `fetchDashboard` benefits automatically. */
-function buildResponseError(res: Response, payload: unknown, fallback: string): ConsoleApiError {
-  const contentType = res.headers.get("content-type") ?? "";
-  if (looksLikeHtml(contentType, payload)) {
-    return new ConsoleApiError(edgeErrorMessage(res.status), res.status, payload);
-  }
-  return new ConsoleApiError(messageFrom(payload, fallback), res.status, payload);
-}
-
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
@@ -103,7 +64,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   }
   const payload = await parseBody(res);
   if (!res.ok) {
-    throw buildResponseError(res, payload, `Request failed (${res.status}).`);
+    throw new ConsoleApiError(messageFrom(payload, `Request failed (${res.status}).`), res.status, payload);
   }
   return payload as T;
 }
@@ -120,7 +81,7 @@ export async function fetchDashboard<T>(signal?: AbortSignal): Promise<T> {
   }
   if (!res.ok) {
     const payload = await parseBody(res);
-    throw buildResponseError(res, payload, `Snapshot failed (${res.status}).`);
+    throw new ConsoleApiError(messageFrom(payload, `Snapshot failed (${res.status}).`), res.status, payload);
   }
   return (await res.json()) as T;
 }
@@ -129,16 +90,11 @@ export async function fetchDashboard<T>(signal?: AbortSignal): Promise<T> {
 
 export interface RunOnceResult {
   runId: string;
-  /** "started": the route launched the run and returned before it finished (real runs can take
-   *  several minutes on LLM-heavy steps) — the run keeps executing server-side; track it via the
-   *  existing Activity/snapshot polling, not this response. */
-  status: "completed" | "failed" | "started";
+  status: "completed" | "failed";
   summary: string;
 }
 
-/** Manual run — the server forces manual runs to propose-only authority. Async: the route races
- *  the run against a bounded window and may return `status: "started"` (202) instead of waiting
- *  for the whole run to finish — see app/api/strategy/run/route.ts. */
+/** Manual run — the server forces manual runs to propose-only authority. */
 export function runOnce(): Promise<RunOnceResult> {
   return request<RunOnceResult>("/api/strategy/run", { method: "POST", body: JSON.stringify({ manual: true }) });
 }
@@ -155,122 +111,31 @@ export function startStrategy(): Promise<TradingPolicy> {
 
 /** Set close_only / liquidating via the policy endpoint (halted goes through stopEverything,
  *  active through startStrategy so the server's arming preconditions run). */
-let policyWriteTail: Promise<void> = Promise.resolve();
-
-/** Serialize every policy PUT in this browser module, not merely saves issued by one card's
- *  useAutoSave instance. The endpoint performs a read/merge/write; cross-card concurrency would
- *  otherwise let the last response overwrite a sibling card's freshly persisted field. */
-function enqueuePolicyWrite<T>(run: () => Promise<T>): Promise<T> {
-  const result = policyWriteTail.then(run, run);
-  policyWriteTail = result.then(
-    () => undefined,
-    () => undefined
-  );
-  return result;
-}
-
-function targetedPolicyBody(patch: PolicyPatchBody, targetConnectedAccountId?: string): string {
-  return JSON.stringify({
-    ...patch,
-    ...(targetConnectedAccountId ? { targetConnectedAccountId } : {})
-  });
-}
-
-export function setSystemState(
-  state: Exclude<SystemState, "active" | "halted">,
-  targetConnectedAccountId?: string
-): Promise<TradingPolicy> {
-  return enqueuePolicyWrite(() =>
-    request<TradingPolicy>("/api/policy", {
-      method: "PUT",
-      body: targetedPolicyBody({ systemState: state }, targetConnectedAccountId)
-    })
-  );
+export function setSystemState(state: Exclude<SystemState, "active" | "halted">): Promise<TradingPolicy> {
+  return request<TradingPolicy>("/api/policy", { method: "PUT", body: JSON.stringify({ systemState: state }) });
 }
 
 // ── Policy / prompt ──────────────────────────────────────────────────────────
 
 export type PolicyPatchBody = Record<string, unknown> & { strategyPrompt?: string };
 
-export function savePolicy(patch: PolicyPatchBody, targetConnectedAccountId?: string): Promise<TradingPolicy> {
-  return enqueuePolicyWrite(() =>
-    request<TradingPolicy>("/api/policy", {
-      method: "PUT",
-      body: targetedPolicyBody(patch, targetConnectedAccountId)
-    })
-  );
+export function savePolicy(patch: PolicyPatchBody): Promise<TradingPolicy> {
+  return request<TradingPolicy>("/api/policy", { method: "PUT", body: JSON.stringify(patch) });
 }
 
 /** AI strategy review (#12): POST the existing tune endpoint. The server builds
  *  the evidence pack (performance, missed opportunities, factor scorecard,
  *  macro) and returns a reviewed proposal; nothing is applied until the user
  *  commits it through savePolicy. `tuningConfigWarnings` piggybacks on the
- *  manual path as cautions (never blocks). The server now ALSO persists every
- *  generated review (so an unapplied one can be restored after a reload/crash —
- *  see fetchLatestTuneReview/resolveTuneReview below) and returns its id as
- *  `reviewId`. */
+ *  manual path as cautions (never blocks). */
 export interface StrategyTuneResult extends StrategyTuningProposal {
   tuningConfigWarnings?: Array<{ message: string }>;
-  /** Id of the persisted review row — pass to resolveTuneReview once the user applies or
-   *  dismisses it (including a review restored via fetchLatestTuneReview). */
-  /** Present on fresh POST /api/strategy/tune responses; ABSENT inside the persisted `result`
-   *  blob returned by GET (the row id is `LatestTuneReview.id` there). */
-  reviewId?: string;
 }
 
-/** `targetConnectedAccountId` pins the review to the account it was actually generated for — the
- *  same evidence/cost/account-scoping every other strategy write already applies (savePolicy,
- *  copyProfileToAccount, etc.). Without it the server used to default to whichever account was
- *  globally active, which could silently attribute cost/evidence to the wrong account. */
-export function tuneStrategy(
-  model?: string,
-  reasoningEffort?: LlmReasoningEffort,
-  targetConnectedAccountId?: string
-): Promise<StrategyTuneResult> {
+export function tuneStrategy(model?: string, reasoningEffort?: LlmReasoningEffort): Promise<StrategyTuneResult> {
   return request<StrategyTuneResult>("/api/strategy/tune", {
     method: "POST",
-    body: JSON.stringify({
-      ...(model ? { model } : {}),
-      ...(reasoningEffort ? { reasoningEffort } : {}),
-      ...(targetConnectedAccountId ? { targetConnectedAccountId } : {})
-    })
-  });
-}
-
-/** One persisted-but-not-yet-resolved (or just-resolved) AI review row, as returned by
- *  GET /api/strategy/tune. `result` is the exact same shape tuneStrategy's POST resolves with. */
-export interface LatestTuneReview {
-  id: string;
-  createdAt: string;
-  model: string;
-  reasoningEffort?: LlmReasoningEffort;
-  generatedBy: StrategyTuneResult["generatedBy"];
-  status: string;
-  result: StrategyTuneResult;
-}
-
-/** Fetch the latest OPEN (unapplied, undismissed) AI review for an account, if any — used to
- *  restore an in-progress review after a reload/crash so it isn't silently lost. Resilient by
- *  design: the server side of this contract may not exist yet / may be mid-rollout, and a restore
- *  is a nice-to-have, not a blocking requirement — any failure (network, 404, 500) resolves to
- *  `null` rather than throwing, so callers never need their own try/catch for this. */
-export async function fetchLatestTuneReview(connectedAccountId?: string): Promise<LatestTuneReview | null> {
-  try {
-    const qs = connectedAccountId ? `?connectedAccountId=${encodeURIComponent(connectedAccountId)}` : "";
-    const { review } = await request<{ review: LatestTuneReview | null }>(`/api/strategy/tune${qs}`);
-    return review ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/** Mark a persisted AI review applied or dismissed (Discard, or dismissing the "restored review"
- *  banner). Best-effort from the caller's perspective — see page.tsx, which never blocks the UI
- *  on this resolving. */
-export function resolveTuneReview(reviewId: string, status: "applied" | "dismissed"): Promise<{ ok: boolean }> {
-  return request<{ ok: boolean }>("/api/strategy/tune", {
-    method: "PATCH",
-    body: JSON.stringify({ reviewId, status })
+    body: JSON.stringify({ ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) })
   });
 }
 
@@ -312,31 +177,6 @@ export async function approveProposal(
   }
 }
 
-export interface BulkApproveResult extends ApproveResult {
-  proposalId: string;
-  symbol?: string;
-}
-
-export async function bulkApproveProposals(
-  proposalIds: string[],
-  liveConfirmation?: { typedText: string }
-): Promise<{ results: BulkApproveResult[] }> {
-  try {
-    return await request<{ results: BulkApproveResult[] }>("/api/proposals/bulk-approve", {
-      method: "POST",
-      body: JSON.stringify({ proposalIds, ...(liveConfirmation ? { liveConfirmation } : {}) })
-    });
-  } catch (error) {
-    if (error instanceof ConsoleApiError && error.status === 409 && error.payload && typeof error.payload === "object") {
-      const p = error.payload as { error?: string; reasons?: string[]; expectedText?: string; message?: string };
-      if (p.error === "LIVE_CONFIRMATION_REQUIRED" && typeof p.expectedText === "string") {
-        throw new LiveConfirmationRequiredError(Array.isArray(p.reasons) ? p.reasons : [], p.expectedText);
-      }
-    }
-    throw error;
-  }
-}
-
 export function rejectProposal(id: string): Promise<{ status: string }> {
   return request<{ status: string }>(`/api/proposals/${encodeURIComponent(id)}/reject`, { method: "POST" });
 }
@@ -345,36 +185,6 @@ export function rejectProposal(id: string): Promise<{ status: string }> {
 
 export function activateAccount(id: string): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(`/api/connected-accounts/${encodeURIComponent(id)}/activate`, { method: "POST" });
-}
-
-export interface AccountPerformanceResult {
-  account: { id: string; label: string; broker: string; environment: "paper" | "live" };
-  performance: PerformanceSummary | null;
-  /** True when `performance`'s unrealized-P&L fields were computed with no live quotes
-   *  (this endpoint never fetches them) -- render unrealized as unavailable ("-"), not
-   *  as the real $0.00 it would be for an account with genuinely no open positions. */
-  pricesUnavailable: boolean;
-}
-
-/** Results-page comparison picker: performance for ONE OTHER connected account, by id.
- *  The server resolves accountNumber itself (scoped to the requesting user) — this never
- *  sends an accountNumber from the client. */
-export function fetchAccountPerformance(id: string): Promise<AccountPerformanceResult> {
-  return request<AccountPerformanceResult>(`/api/connected-accounts/${encodeURIComponent(id)}/performance`);
-}
-
-/** "Import settings from another account" (Strategy page): copies strategy settings — models,
- *  prompt, guardrails, weights, watchlist, tax treatment — from `sourceConnectedAccountId` onto
- *  `targetConnectedAccountId`. Any->any (not paper-only); never touches broker connection,
- *  credentials, or run state. Both accounts are resolved/ownership-checked server-side. */
-export function importAccountSettings(
-  targetConnectedAccountId: string,
-  sourceConnectedAccountId: string
-): Promise<{ ok: true }> {
-  return request<{ ok: true }>(`/api/connected-accounts/${encodeURIComponent(targetConnectedAccountId)}/import-settings`, {
-    method: "POST",
-    body: JSON.stringify({ sourceConnectedAccountId })
-  });
 }
 
 /** Library-activate a preset (flips the library's active flag and writes the
@@ -413,29 +223,4 @@ export interface NotifyTestResult {
 
 export function sendTestNotification(): Promise<NotifyTestResult> {
   return request<NotifyTestResult>("/api/notifications/test", { method: "POST", body: JSON.stringify({}) });
-}
-
-// ── Alert lifecycle (acknowledge) ───────────────────────────────────────────
-
-export interface AcknowledgeNotificationsResult {
-  acknowledged: number;
-}
-
-/** Acknowledge specific Alert Center rows by id. */
-export function acknowledgeNotifications(ids: string[]): Promise<AcknowledgeNotificationsResult> {
-  return request<AcknowledgeNotificationsResult>("/api/notifications/ack", {
-    method: "POST",
-    body: JSON.stringify({ ids })
-  });
-}
-
-/** Bulk-acknowledge every currently-unacknowledged row matching the Attention filter. Pass the
- *  active connected account id so the ack is scoped to what the Alert Center is actually showing
- *  (that account + account-less rows) — otherwise a hidden other-account alert the user never saw
- *  would get silently acknowledged too. */
-export function acknowledgeAllAttention(connectedAccountId?: string): Promise<AcknowledgeNotificationsResult> {
-  return request<AcknowledgeNotificationsResult>("/api/notifications/ack", {
-    method: "POST",
-    body: JSON.stringify({ all: true, filter: "attention", ...(connectedAccountId ? { connectedAccountId } : {}) })
-  });
 }

@@ -25,7 +25,6 @@ import {
   type ShortVolumeRow,
   type FundamentalRow,
   type AnalystRow,
-  type SharePayload,
   resolveTickerAlias,
   SecurityRefInputSchema,
   PriceSeriesSchema,
@@ -35,14 +34,6 @@ import {
   FundamentalRowSchema,
   AnalystRowSchema,
 } from "@jaywedgeworth22/congress-trading-shared";
-import {
-  assertOperationLeaseOwnership,
-  OPERATION_LEASE_GROUPS,
-  runWithOperationLease,
-  throwIfOperationLeaseCancelled,
-  type OperationLeaseAware,
-  type OperationLeaseClaim
-} from "./operation-lease";
 import { audit, getInternalSetting, getPolicy, listUsers, listWatchlistSymbols, setInternalSetting } from "./db";
 import { fetchDailyOHLC, toBusinessDay } from "./history";
 import { INDEX_UNIVERSES, symbolsForPolicyUniverse } from "./index-universes";
@@ -168,14 +159,17 @@ export type CongressShortVol = ShortVolumeRow;
 export type CongressFundamental = FundamentalRow;
 export type CongressAnalyst = AnalystRow;
 
-/**
- * Outbound share payload. Same wire shape as shared `SharePayload`; `refs` may
- * use the local optional-field builder (`CongressRef`) before schema validation
- * coerces them to `SecurityRefInput`.
- */
-export type CongressSharePayload = Omit<SharePayload, "refs"> & {
+export interface CongressSharePayload {
   refs?: CongressRef[];
-};
+  spx?: PriceClose[];
+  prices?: PriceSeries[];
+  insider?: InsiderRow[];
+  shortVolume?: ShortVolumeRow[];
+  fundamentals?: FundamentalRow[];
+  analyst?: AnalystRow[];
+  /** Provenance tag (defaults to APP_B_ORIGIN on send). Lets a receiver skip rows it originated. */
+  origin?: string;
+}
 
 export interface CongressShareResult {
   ok: boolean;
@@ -592,16 +586,10 @@ function utcDate(now: number): string {
   return new Date(now).toISOString().slice(0, 10);
 }
 
-/** True when the once-per-day batch has not yet run for `now`'s UTC date and isn't in failure backoff. Pure (no env gate). */
+/** True when the once-per-day batch has not yet run for `now`'s UTC date. Pure (no env gate). */
 export function isCongressDailyShareDue(now: number): boolean {
   const last = getInternalSetting<string>(LAST_DAILY_RUN_KEY);
-  if (last === utcDate(now)) return false;
-  
-  // 60-minute backoff after a failure to prevent unbounded retry storms
-  const lastFailure = getInternalSetting<number>("congress_share_last_failure_ms");
-  if (lastFailure && now - lastFailure < 60 * 60 * 1000) return false;
-  
-  return true;
+  return last !== utcDate(now);
 }
 
 /** Union of every user's watchlist symbols + policy-universe symbols (what this app monitors). */
@@ -675,8 +663,6 @@ export interface RunCongressDailyShareOptions {
    * Dow 30, …) plus the monitored symbols — for a broad cross-index backfill. Still capped by maxDailyTickers.
    */
   allIndexes?: boolean;
-  /** Opaque durable claim supplied by the outer admin guard; background callers omit it. */
-  operationLeaseClaim?: OperationLeaseClaim;
 }
 
 export interface CongressDailyShareSummary {
@@ -700,9 +686,7 @@ export interface CongressDailyShareSummary {
  * Self-guarded; safe to fire-and-forget. The scheduler calls the gated wrapper below; the admin
  * route calls this with force:true.
  */
-export async function runCongressDailyShare(
-  options: RunCongressDailyShareOptions = {}
-): Promise<OperationLeaseAware<CongressDailyShareSummary>> {
+export async function runCongressDailyShare(options: RunCongressDailyShareOptions = {}): Promise<CongressDailyShareSummary> {
   const now = options.now ?? Date.now();
   const empty = {
     tickers: 0, priced: 0, spxRows: 0, insiderRows: 0, shortVolRows: 0,
@@ -715,44 +699,6 @@ export async function runCongressDailyShare(
     return { ok: false, skipped: true, reason: "not-due", ...empty };
   }
 
-  const guarded = await runWithOperationLease(
-    {
-      group: OPERATION_LEASE_GROUPS.CONGRESS_SHARE,
-      operation: "congress-share",
-      claim: options.operationLeaseClaim
-    },
-    async (claim, signal) => runCongressDailyShareUnlocked(options, claim, signal)
-  );
-  if (!guarded.acquired) {
-    return {
-      ok: true,
-      skipped: true,
-      reason: "operation-in-flight",
-      ...empty,
-      operationLease: guarded.busy
-    };
-  }
-  return guarded.value;
-}
-
-async function runCongressDailyShareUnlocked(
-  options: RunCongressDailyShareOptions,
-  operationLeaseClaim: OperationLeaseClaim,
-  operationLeaseSignal: AbortSignal
-): Promise<CongressDailyShareSummary> {
-  const now = options.now ?? Date.now();
-  const empty = {
-    tickers: 0, priced: 0, spxRows: 0, insiderRows: 0, shortVolRows: 0,
-    posts: 0, failedPosts: 0, sent: { spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0 }
-  };
-  if (!congressTradeToken()) return { ok: false, skipped: true, reason: "no-token", ...empty };
-  const customUniverse = Array.isArray(options.symbols) && options.symbols.length > 0;
-  // Recheck after durable acquisition: another process may have completed and advanced the daily
-  // marker after this caller's cheap pre-check but before it won the lease.
-  if (!options.force && !customUniverse && !isCongressDailyShareDue(now)) {
-    return { ok: false, skipped: true, reason: "not-due", ...empty };
-  }
-  assertOperationLeaseOwnership(operationLeaseClaim);
   const baseUniverse = customUniverse
     ? options.symbols!
     : options.allIndexes
@@ -762,7 +708,6 @@ async function runCongressDailyShareUnlocked(
 
   // S&P-500 daily closes (^GSPC) — sent once per day regardless of the ticker universe.
   let spx: CongressClose[] = [];
-  throwIfOperationLeaseCancelled(operationLeaseSignal);
   try {
     spx = ohlcBarsToCloses(await fetchDailyOHLC("^GSPC", now));
   } catch (err) {
@@ -780,7 +725,6 @@ async function runCongressDailyShareUnlocked(
   const perTicker = async (symbols: string[]): Promise<CongressPrice[]> =>
     (
       await mapPool(symbols, concurrency, async (symbol) => {
-        throwIfOperationLeaseCancelled(operationLeaseSignal);
         try {
           return capCloses(ohlcBarsToPriceEntry(symbol, await fetchDailyOHLC(symbol, now)));
         } catch {
@@ -797,7 +741,6 @@ async function runCongressDailyShareUnlocked(
     const toISO = toBusinessDay(now) ?? new Date(now).toISOString().slice(0, 10);
     const fromISO = new Date(now - years * 365 * 86_400_000).toISOString().slice(0, 10);
     let seriesBySymbol = new Map<string, OHLCBar[]>();
-    throwIfOperationLeaseCancelled(operationLeaseSignal);
     try {
       seriesBySymbol = await fetchGroupedDailyBarsRange(fromISO, toISO, { tickers: universe });
     } catch (err) {
@@ -834,9 +777,7 @@ async function runCongressDailyShareUnlocked(
   let failedPosts = 0;
   const sent = { spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0 };
   for (const payload of payloads) {
-    assertOperationLeaseOwnership(operationLeaseClaim);
     const result = await shareWithCongressTrade(payload);
-    throwIfOperationLeaseCancelled(operationLeaseSignal);
     posts++;
     if (result.ok) {
       responses.push(result.response);
@@ -852,16 +793,11 @@ async function runCongressDailyShareUnlocked(
 
   const ok = posts > 0 && failedPosts === 0;
   // Advance the once-per-day marker only for the real scheduled universe (not admin custom-symbol tests).
-  if (!customUniverse) {
-    assertOperationLeaseOwnership(operationLeaseClaim);
+  if (ok && !customUniverse) {
     try {
-      if (ok) {
-        setInternalSetting(LAST_DAILY_RUN_KEY, utcDate(now));
-      } else {
-        setInternalSetting("congress_share_last_failure_ms", now);
-      }
+      setInternalSetting(LAST_DAILY_RUN_KEY, utcDate(now));
     } catch (err) {
-      console.error("[congress-share] failed to persist daily-run or failure marker:", err);
+      console.error("[congress-share] failed to persist daily-run marker:", err);
     }
   }
 
@@ -901,9 +837,7 @@ async function runCongressDailyShareUnlocked(
  * Scheduler entry point: run the nightly batch at most once per UTC day, only when automatic
  * sharing is enabled. Self-guarded; returns null when disabled/not due so the tick stays clean.
  */
-export async function runCongressDailyShareIfDue(
-  now: number = Date.now()
-): Promise<OperationLeaseAware<CongressDailyShareSummary> | null> {
+export async function runCongressDailyShareIfDue(now: number = Date.now()): Promise<CongressDailyShareSummary | null> {
   try {
     if (!isCongressShareAutoEnabled()) return null;
     if (!isCongressDailyShareDue(now)) return null;

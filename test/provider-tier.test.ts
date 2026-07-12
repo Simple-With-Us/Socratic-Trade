@@ -73,21 +73,21 @@ describe("probeFmpTier", () => {
 });
 
 describe("isProviderTierCheckDue", () => {
-  // Note: nothing earlier in this file sets providerTier:lastCheckAt:local, so the first case sees it absent.
+  // Note: nothing earlier in this file sets providerTier:lastCheckAt, so the first case sees it absent.
   it("is due when never run", () => {
-    expect(isProviderTierCheckDue(Date.now(), "local")).toBe(true);
+    expect(isProviderTierCheckDue(Date.now())).toBe(true);
   });
   it("is not due before the interval elapses", async () => {
     const { setInternalSetting } = await import("../src/lib/db");
     const now = Date.now();
-    setInternalSetting("providerTier:lastCheckAt:local", new Date(now - 3 * 3600_000).toISOString()); // 3h ago
-    expect(isProviderTierCheckDue(now, "local")).toBe(false);
+    setInternalSetting("providerTier:lastCheckAt", new Date(now - 3 * 3600_000).toISOString()); // 3h ago
+    expect(isProviderTierCheckDue(now)).toBe(false);
   });
   it("catches up (runs regardless of hour) once 1.5x the interval has elapsed", async () => {
     const { setInternalSetting } = await import("../src/lib/db");
     const now = Date.now();
-    setInternalSetting("providerTier:lastCheckAt:local", new Date(now - 40 * 3600_000).toISOString()); // 40h ago > 36h
-    expect(isProviderTierCheckDue(now, "local")).toBe(true);
+    setInternalSetting("providerTier:lastCheckAt", new Date(now - 40 * 3600_000).toISOString()); // 40h ago > 36h
+    expect(isProviderTierCheckDue(now)).toBe(true);
   });
 });
 
@@ -110,7 +110,7 @@ describe("runProviderTierCheck", () => {
     }) as unknown as typeof fetch;
 
     await runProviderTierCheck({ userId: "local", fetcher });
-    const status = getProviderTierStatus("local");
+    const status = getProviderTierStatus();
     expect(status.massive?.tier).toBe("free");
     expect(status.fmp?.tier).toBe("paid");
 
@@ -127,7 +127,7 @@ describe("runProviderTierCheck", () => {
     }) as unknown as typeof fetch;
 
     await runProviderTierCheck({ userId: "local", fetcher });
-    expect(getProviderTierStatus("local").massive?.tier).toBe("paid");
+    expect(getProviderTierStatus().massive?.tier).toBe("paid");
     const restored = listNotificationEvents("local", 50).filter((e) => e.type === "provider_degraded" && e.title.includes("PAID"));
     expect(restored.length).toBeGreaterThanOrEqual(1);
   });
@@ -145,7 +145,7 @@ describe("massive limiter auto-clamp on detected free tier", () => {
   it("clamps to 5/min when the watchdog flagged Massive as free, despite env=100", async () => {
     const { setInternalSetting } = await import("../src/lib/db");
     const massive = await import("../src/lib/market-signals/massive");
-    setInternalSetting("providerTier:status:local", { massive: { tier: "free", at: new Date().toISOString(), reason: "test" } });
+    setInternalSetting("providerTier:status", { massive: { tier: "free", at: new Date().toISOString(), reason: "test" } });
     massive.clearMassiveTierClampCacheForTests();
     massive.clearMassiveRestBudgetForTests();
     const now = Date.now();
@@ -157,7 +157,7 @@ describe("massive limiter auto-clamp on detected free tier", () => {
   it("allows the full env limit when Massive is paid", async () => {
     const { setInternalSetting } = await import("../src/lib/db");
     const massive = await import("../src/lib/market-signals/massive");
-    setInternalSetting("providerTier:status:local", { massive: { tier: "paid", at: new Date().toISOString(), reason: "test" } });
+    setInternalSetting("providerTier:status", { massive: { tier: "paid", at: new Date().toISOString(), reason: "test" } });
     massive.clearMassiveTierClampCacheForTests();
     massive.clearMassiveRestBudgetForTests();
     const now = Date.now();

@@ -1,6 +1,6 @@
-// Multi-user identity (Q3). The app derives a per-user id from middleware-supplied email metadata —
-// never from a client-supplied hint. Middleware separately forwards identity-source provenance so
-// role-sensitive gates can distinguish verified upstream identities from the local fallback.
+// Multi-user identity (Q3). The app derives a per-user id from a VERIFIED email — never from a
+// client-supplied hint. In production, `middleware.ts` verifies the Auth.js session at the edge
+// and forwards a trusted `x-authenticated-user-email` header that this module maps to a stable userId.
 // See docs/chat-multiuser-learning-design.md §2.
 //
 // NOTE: this module uses node `crypto` and must only be imported from the Node runtime (route handlers,
@@ -8,7 +8,7 @@
 
 import { createHash } from "crypto";
 
-/** Back-compatible identity used when auth is unconfigured or an email input is invalid. */
+/** Dev/test fallback identity, used only when NOT in production (middleware 401s unauth prod requests). */
 export const DEV_USER_ID = (process.env.DEV_USER_ID || "local").trim();
 
 /** Default primary email when PRIMARY_USER_EMAIL is unset. */
@@ -48,7 +48,7 @@ export function isPrimaryEmail(email: string): boolean {
 /**
  * Deterministic, stable app userId for a verified email. The primary user (and any of their configured
  * aliases) keep the legacy `"local"` id (no migration); everyone else gets an opaque `u_<hash>` id. Invalid
- * input falls back to the configured development user id.
+ * input falls back to the dev user (only reachable in non-production — see middleware).
  */
 export function userIdForEmail(email: string): string {
   const e = normalizeEmail(email);

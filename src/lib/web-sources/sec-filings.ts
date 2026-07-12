@@ -15,14 +15,6 @@
 //  • Errors: surface via returned error field and audit log — never swallowed silently.
 
 import { audit, getInternalSetting, hasIngestedAccession, insertIngestedAccession, setInternalSetting } from "../db";
-import {
-  assertOperationLeaseOwnership,
-  OPERATION_LEASE_GROUPS,
-  runWithOperationLease,
-  throwIfOperationLeaseCancelled,
-  type OperationLeaseAware,
-  type OperationLeaseClaim
-} from "../operation-lease";
 import { politeFetchText, runRateLimited, secUserAgent, sleep } from "./http";
 import { loadCikMap } from "./sec8k";
 
@@ -30,14 +22,8 @@ const SEC_BASE = "https://www.sec.gov";
 const EDGAR_DATA_BASE = "https://data.sec.gov";
 
 // The TTL for the per-symbol "last attempted filing ingest" stamp.
-// Weekly by default: 10-K/10-Q cadence is quarterly, so a free-tier corpus doesn't need
-// re-checking sooner. Operators draining the ingest backlog (paid Voyage key) lower it via
-// SEC_FILING_INGEST_TTL_HOURS (e.g. 24) so the capped per-run ingest runs daily instead.
-const DEFAULT_FILING_INGEST_TTL_HOURS = 7 * 24;
-function filingIngestTtlMs(): number {
-  const hours = Number(process.env.SEC_FILING_INGEST_TTL_HOURS ?? DEFAULT_FILING_INGEST_TTL_HOURS);
-  return (Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_FILING_INGEST_TTL_HOURS) * 60 * 60_000;
-}
+// Weekly: 10-K/10-Q cadence is quarterly; no need to re-check before 7 days.
+const FILING_INGEST_TTL_MS = 7 * 24 * 60 * 60_000;
 const ATTEMPT_KEY = "webSource:sec10k:lastAttempt";
 
 // Polite delay between per-CIK submissions-JSON fetches (300 ms per EDGAR fair-use guidance).
@@ -46,12 +32,7 @@ const CIK_POLITE_DELAY_MS = 300;
 // Threshold above which we treat VECTOR_EMBED_BATCH_DELAY_MS as free-tier (unpaid Voyage).
 // Default is 21_000 ms; operators with a paid key set this to 0 (or very low).
 const PAID_KEY_THRESHOLD_MS = 5_000;
-// Free tier: 1 filing/run — at 21s per 8-chunk embed batch a single 10-K takes minutes, so a
-// bigger cap would stall the scheduler tick for hours. Paid tier: a cap of 1 made the ~2,000
-// filing backlog take decades (prod 2026-07-09: two filings ever ingested); 25/run at the paid
-// embed pace is minutes of work, and RAG_INGEST_MAX_TEXTS_PER_DAY still bounds daily spend.
 const DEFAULT_MAX_FILINGS_PER_RUN = 1;
-const DEFAULT_PAID_MAX_FILINGS_PER_RUN = 200;
 
 export interface FilingRef {
   accession: string;   // dashed form: NNNNNNNNNN-YY-NNNNNN
@@ -66,19 +47,12 @@ export interface IngestResult {
   skipped: boolean;
   chunks: number;
   error?: string;
-  /** The embed layer has no capacity left (daily text budget exhausted or vector store
-   *  unconfigured) — every later filing in this run would meet the same fate, so bulk
-   *  loops should stop instead of fetching/chunking documents that cannot embed. */
-  budgetExhausted?: boolean;
 }
 
 export interface RefreshFilingBodiesResult {
   attempted: number;
   ingested: number;
   skipped: number;
-  /** Filings within this run's cap left un-attempted because the embed budget ran out
-   *  mid-run; they are NOT recorded as ingested and retry at the next tick. */
-  deferredForBudget: number;
   errors: string[];
 }
 
@@ -259,16 +233,6 @@ export async function ingestFiling(
     return { skipped: true, chunks: 0 };
   }
 
-  // Budget pre-flight BEFORE the EDGAR fetch: a filing body is 2–10 MB and chunking it is
-  // pure waste when the daily embed budget is already spent — storeDocument would only
-  // budget-skip it (and emit a budget warning per filing; prod 2026-07-10 saw a 20-event
-  // burst from exactly this). Deferring here costs nothing: the accession stays
-  // un-recorded and retries at the next tick.
-  const { hasIngestTextBudget } = await import("../vector-db");
-  if (!hasIngestTextBudget(userId)) {
-    return { skipped: true, chunks: 0, budgetExhausted: true };
-  }
-
   let html: string;
   try {
     html = await fetchFilingHtml(filingRef.url);
@@ -302,41 +266,6 @@ export async function ingestFiling(
     return { skipped: false, chunks: result.indexed, error: result.error };
   }
 
-  // storeDocument can come back with indexed: 0 (or a truncated count with budgetSkipped > 0)
-  // and NO error — daily chunk budget (RAG_INGEST_MAX_TEXTS_PER_DAY) crossed mid-document or
-  // vector keys unconfigured. Recording the accession then would mark the filing "ingested"
-  // forever with zero/partial retrievable chunks, inflate the ingested-count receipts, and
-  // suppress the corpus-coverage receipt while retrieval finds nothing. Budget exhaustion
-  // mid-run is an EXPECTED state during the backlog drain — leave the filing un-recorded so
-  // a later run retries it (content-hash dedup makes the re-embed cheap), and flag
-  // budgetExhausted so the bulk loop stops instead of grinding through doomed filings.
-  // Every chunk was already in the index (content-hash dedup) — the crash-window state where a
-  // prior run embedded everything but died before recording the accession. The content is fully
-  // stored, so RECORD it now: without this, the filing re-fetches every run, and (worse) sits at
-  // the head of the deterministic demand-first queue forever. Review 2026-07-10: this state must
-  // never be confused with budget exhaustion, or it halts the whole backlog behind it.
-  if (result.dedupComplete) {
-    insertIngestedAccession(filingRef.accession, filingRef.docType, ticker, result.attempted);
-    audit("sec_filing_ingest", {
-      ticker,
-      accession: filingRef.accession,
-      docType: filingRef.docType,
-      filedAt: filingRef.filedAt,
-      chunks: result.attempted,
-      dedupHealed: true
-    });
-    return { skipped: true, chunks: 0 };
-  }
-
-  // budgetExhausted only on genuine capacity signals — the explicit budget counters or the
-  // store's keys-unconfigured skip. A single pathological document that chunks to nothing
-  // must not stop the whole run.
-  const outOfCapacity =
-    (result.budgetSkipped ?? 0) > 0 || (result.writeUnitBudgetSkipped ?? 0) > 0 || result.unconfigured === true;
-  if (result.indexed <= 0 || outOfCapacity) {
-    return { skipped: true, chunks: result.indexed, ...(outOfCapacity ? { budgetExhausted: true } : {}) };
-  }
-
   // Persist de-dup record only after successful embedding so a partial failure doesn't
   // permanently block re-ingest of the same filing.
   insertIngestedAccession(filingRef.accession, filingRef.docType, ticker, result.indexed);
@@ -361,99 +290,49 @@ function isFreeTier(): boolean {
 }
 
 function maxFilingsPerRunFromEnv(): number {
-  const parsed = Number(process.env.SEC_FILING_RAG_MAX_PER_RUN);
-  if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
-  return isFreeTier() ? DEFAULT_MAX_FILINGS_PER_RUN : DEFAULT_PAID_MAX_FILINGS_PER_RUN;
+  const parsed = Number(process.env.SEC_FILING_RAG_MAX_PER_RUN ?? DEFAULT_MAX_FILINGS_PER_RUN);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_MAX_FILINGS_PER_RUN;
 }
 
-/** Whether we're due for a filing ingest check (TTL per SEC_FILING_INGEST_TTL_HOURS, default weekly). */
+/** Whether we're due for a filing ingest check (weekly TTL). */
 export function isFilingIngestDue(now: number = Date.now()): boolean {
   const last = getInternalSetting<string>(ATTEMPT_KEY);
   if (!last) return true;
-  return now - Date.parse(last) >= filingIngestTtlMs();
+  return now - Date.parse(last) >= FILING_INGEST_TTL_MS;
 }
 
 /**
- * Refresh 10-K/10-Q body ingestion for the given symbol list. Symbols are processed in the
- * order given — callers put the highest-demand names (held positions, watchlists) FIRST so a
- * capped run ingests the filings decisions actually retrieve against.
+ * Refresh 10-K/10-Q body ingestion for the given symbol list.
  *
  * Free-tier (VECTOR_EMBED_BATCH_DELAY_MS > 5000): processes at most 1 filing total per
  * invocation to avoid multi-hour scheduler stalls. The function is still called every tick but
- * the TTL gate (isFilingIngestDue) means it's a no-op until the TTL has passed.
+ * the TTL gate (isFilingIngestDue) means it's a no-op until a week has passed.
  *
- * Paid-tier (VECTOR_EMBED_BATCH_DELAY_MS <= 5000): processes up to SEC_FILING_RAG_MAX_PER_RUN
- * filings per invocation (default 25).
- *
- * An EXPLICIT `maxPerRun` (the admin backfill route's `limit`) is an operator decision and wins
- * outright — including on free-tier env, where the caller is accepting the slow embed pacing.
- * `opts.force` skips the TTL gate (again: the admin backfill route, which used to silently
- * no-op for up to a week after any scheduler attempt).
+ * Paid-tier (VECTOR_EMBED_BATCH_DELAY_MS <= 5000): processes up to `maxPerRun` filings per
+ * invocation (default: SEC_FILING_RAG_MAX_PER_RUN, or 1).
  *
  * Never throws — all errors are captured in the returned result and the audit log.
  */
 export async function refreshFilingBodies(
   symbols: string[],
   now: number = Date.now(),
-  maxPerRun?: number,
-  opts?: { force?: boolean; operationLeaseClaim?: OperationLeaseClaim }
-): Promise<OperationLeaseAware<RefreshFilingBodiesResult>> {
-  const empty: RefreshFilingBodiesResult = {
-    attempted: 0,
-    ingested: 0,
-    skipped: 0,
-    deferredForBudget: 0,
-    errors: []
-  };
-  if (symbols.length === 0) return empty;
-  if (!opts?.force && !isFilingIngestDue(now)) return empty;
-
-  const guarded = await runWithOperationLease(
-    {
-      group: OPERATION_LEASE_GROUPS.RAG_REINDEX,
-      operation: opts?.force ? "reindex-10k" : "scheduled-filing-ingest",
-      claim: opts?.operationLeaseClaim
-    },
-    async (claim, signal) => refreshFilingBodiesUnlocked(symbols, now, maxPerRun, opts, claim, signal)
-  );
-  if (!guarded.acquired) return { ...empty, operationLease: guarded.busy };
-  return guarded.value;
-}
-
-async function refreshFilingBodiesUnlocked(
-  symbols: string[],
-  now: number,
-  maxPerRun: number | undefined,
-  opts: { force?: boolean } | undefined,
-  operationLeaseClaim: OperationLeaseClaim,
-  operationLeaseSignal: AbortSignal
+  maxPerRun = maxFilingsPerRunFromEnv()
 ): Promise<RefreshFilingBodiesResult> {
-  const result: RefreshFilingBodiesResult = { attempted: 0, ingested: 0, skipped: 0, deferredForBudget: 0, errors: [] };
+  const result: RefreshFilingBodiesResult = { attempted: 0, ingested: 0, skipped: 0, errors: [] };
 
-  // Recheck after durable acquisition so a delayed scheduler process cannot repeat work after the
-  // prior owner completed and advanced the cadence stamp.
-  if (!opts?.force && !isFilingIngestDue(now)) return result;
-  assertOperationLeaseOwnership(operationLeaseClaim);
+  if (symbols.length === 0) return result;
+  if (!isFilingIngestDue(now)) return result;
 
-  // Mark attempt so the next tick won't immediately retry. Forced runs (admin backfill)
-  // deliberately do NOT touch the stamp — a targeted backfill must not push the scheduled
-  // corpus-wide demand-first ingest back by a full TTL window.
-  if (!opts?.force) setInternalSetting(ATTEMPT_KEY, new Date(now).toISOString());
+  // Mark attempt so the next tick won't immediately retry
+  setInternalSetting(ATTEMPT_KEY, new Date(now).toISOString());
 
   const freeTier = isFreeTier();
-  const cap =
-    typeof maxPerRun === "number" && Number.isFinite(maxPerRun) && maxPerRun > 0
-      ? Math.floor(maxPerRun)
-      : freeTier
-        ? DEFAULT_MAX_FILINGS_PER_RUN
-        : maxFilingsPerRunFromEnv();
+  const cap = freeTier ? 1 : (Number.isFinite(maxPerRun) ? maxPerRun : Number.POSITIVE_INFINITY);
 
   let cikMap: Record<string, string>;
   try {
-    throwIfOperationLeaseCancelled(operationLeaseSignal);
     cikMap = await loadCikMap(now);
   } catch (err) {
-    throwIfOperationLeaseCancelled(operationLeaseSignal);
     const msg = err instanceof Error ? err.message : String(err);
     result.errors.push(`loadCikMap failed: ${msg}`);
     return result;
@@ -470,44 +349,27 @@ async function refreshFilingBodiesUnlocked(
   const pending: Array<{ ticker: string; ref: FilingRef }> = [];
 
   await runRateLimited(symbols, CIK_POLITE_DELAY_MS, async (symbol) => {
-    throwIfOperationLeaseCancelled(operationLeaseSignal);
     const cik = tickerToCik[symbol];
     if (!cik) return; // symbol not in CIK map — skip silently
     try {
-      const filings = await fetchRecentFilings(cik, ["10-K", "10-Q"], 10);
-      throwIfOperationLeaseCancelled(operationLeaseSignal);
+      const filings = await fetchRecentFilings(cik, ["10-K", "10-Q"], 2);
       for (const ref of filings) {
         if (!hasIngestedAccession(ref.accession, ref.docType)) {
           pending.push({ ticker: symbol, ref });
         }
       }
     } catch (err) {
-      throwIfOperationLeaseCancelled(operationLeaseSignal);
       const msg = err instanceof Error ? err.message : String(err);
       result.errors.push(`fetchRecentFilings(${symbol}): ${msg}`);
     }
   });
 
   // Process pending filings sequentially (EDGAR + Voyage both require polite pacing).
-  let processed = 0;
   for (const { ticker, ref } of pending) {
     if (result.attempted >= cap) break;
     result.attempted++;
-    processed++;
     try {
-      assertOperationLeaseOwnership(operationLeaseClaim);
       const ingestResult = await ingestFiling(ticker, ref);
-      throwIfOperationLeaseCancelled(operationLeaseSignal);
-      if (ingestResult.budgetExhausted) {
-        // The embed layer is out of capacity for the day (or unconfigured) — every later
-        // filing meets the same fate, so stop instead of fetching/chunking doomed documents.
-        // Everything not embedded stays un-recorded and retries at the next tick. The count
-        // is cap-aware: only filings this run WOULD have attempted, excluding the breaker
-        // (which is already counted in attempted/skipped).
-        result.skipped++;
-        result.deferredForBudget = Math.max(0, Math.min(pending.length, cap) - processed);
-        break;
-      }
       if (ingestResult.skipped) {
         result.skipped++;
       } else if (ingestResult.error) {
@@ -519,12 +381,11 @@ async function refreshFilingBodiesUnlocked(
       // chunk-level Voyage batching). Keep at least 300ms between EDGAR fetches.
       if (result.attempted < cap) await sleep(CIK_POLITE_DELAY_MS);
     } catch (err) {
-      throwIfOperationLeaseCancelled(operationLeaseSignal);
       const msg = err instanceof Error ? err.message : String(err);
       result.errors.push(`ingestFiling(${ticker} ${ref.accession}) threw: ${msg}`);
     }
   }
 
-  audit("sec_filing_refresh", { symbols: symbols.length, ...result, freeTier, forced: Boolean(opts?.force) });
+  audit("sec_filing_refresh", { symbols: symbols.length, ...result, freeTier });
   return result;
 }

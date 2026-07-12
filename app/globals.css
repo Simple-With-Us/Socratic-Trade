@@ -10,20 +10,9 @@
 
 /* ── Semantic design tokens ───────────────────────────────────────────────
    Components reference these via Tailwind utilities (bg-surface, text-fg,
-   border-line, text-pos …). The values flip between light and dark, so the
+   border-line, text-up …). The values flip between light and dark, so the
    same markup themes automatically. */
 :root {
-  /* Brand accent — the single shared source console and ui both derive their
-     accent from (2026-07-08 UI-audit brand-accent unification, Package G).
-     Two invariant (non-flipping) constants, not a light/dark-switching pair:
-     console.css themes itself independently via [data-theme] rather than the
-     `.dark` class, so it can't rely on cascade-flip — it reads whichever of
-     these two it needs directly. Values = console's existing --con-accent
-     (light) / dark --con-accent (console.css:34,136,171). See
-     docs/design/visual-system.md. */
-  --brand-accent: #12616f;
-  --brand-accent-dark: #58c7d3;
-
   --bg: #eef1f5;
   --surface: rgba(255, 255, 255, 0.65);
   --surface-2: rgba(244, 246, 249, 0.55);
@@ -35,20 +24,14 @@
      The values below achieve ≥7.3:1 on surface-3 (worst-case light-mode background). */
   --muted: #3f4f60;
   --faint: #3d4d62;
-  /* ui's accent goes green -> teal by design so it shares one brand accent with
-     console, staying distinct from --pos gain semantics. --accent-fg (#ffffff)
-     still clears AA on --brand-accent (~7.1:1) — verified against console's own
-     --con-accent-contrast pairing, no change needed there. */
-  --accent: var(--brand-accent);
+  --accent: #0e9f6e;
   --accent-fg: #ffffff;
-  --pos: #15803d;
-  --neg: #e11d48;
-  --neg-fg: #ffffff;
+  --up: #15803d;
+  --down: #e11d48;
+  --down-fg: #ffffff;
   --warn: #a16207;
   --info: #2563eb;
-  /* Derived from --accent (previously a hardcoded rgba that happened to match
-     the old green accent hex) so the focus ring always tracks brand accent. */
-  --ring: color-mix(in oklab, var(--accent) 45%, transparent);
+  --ring: rgba(14, 159, 110, 0.45);
   --shadow: 0 12px 32px -8px rgba(15, 23, 34, 0.18), inset 0 1px 1px rgba(255, 255, 255, 0.6);
   --shadow-lg: 0 24px 60px -12px rgba(15, 23, 34, 0.28), inset 0 1px 1px rgba(255, 255, 255, 0.8);
   /* ── Named elevation scale (see docs/design/visual-system.md) ──────────────
@@ -78,14 +61,14 @@
      The values below achieve ≥5.5:1 on surface-3 (worst-case dark-mode background). */
   --muted: #b8c3d0;
   --faint: #a0b0c0;
-  --accent: var(--brand-accent-dark);
+  --accent: #10b981;
   --accent-fg: #04130d;
-  --pos: #34d399;
-  --neg: #fb5e74;
-  --neg-fg: #2b0a10;
+  --up: #34d399;
+  --down: #fb5e74;
+  --down-fg: #2b0a10;
   --warn: #fbbf24;
   --info: #60a5fa;
-  --ring: color-mix(in oklab, var(--accent) 50%, transparent);
+  --ring: rgba(16, 185, 129, 0.5);
   --shadow: 0 18px 45px -12px rgba(0, 0, 0, 0.6), inset 0 1px 1px rgba(255, 255, 255, 0.08);
   --shadow-lg: 0 30px 70px -15px rgba(0, 0, 0, 0.7), inset 0 1px 1px rgba(255, 255, 255, 0.12);
   color-scheme: dark;
@@ -103,20 +86,15 @@
   --color-faint: var(--faint);
   --color-accent: var(--accent);
   --color-accent-fg: var(--accent-fg);
-  --color-pos: var(--pos);
-  --color-neg: var(--neg);
-  --color-neg-fg: var(--neg-fg);
+  --color-up: var(--up);
+  --color-down: var(--down);
+  --color-down-fg: var(--down-fg);
   --color-warn: var(--warn);
   --color-info: var(--info);
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "Menlo", monospace;
   --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --radius-xl: 16px;
   --radius-2xl: 20px;
-  /* Shared card/control radius canon (console values are canonical — console.css
-     maps its own --con-radius/--con-radius-sm back to these). See
-     docs/design/visual-system.md "Radius canon". */
-  --radius-card: 12px;
-  --radius-control: 8px;
 }
 
 * {

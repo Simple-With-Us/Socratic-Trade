@@ -2,19 +2,8 @@
 # Canonical setup for a fresh, isolated checkout (Claude Code cloud/remote sandbox,
 # Codespaces, devcontainer, or any throwaway clone). Idempotent - safe to re-run.
 #
-# IMPORTANT (Claude Code Cloud environments specifically): the container's working
-# directory when the "Setup script" field runs is the PARENT of the cloned repo
-# (e.g. /home/user), NOT the repo root - `git clone` creates a `Socratic.Trade/`
-# subdirectory and the sandbox drops you one level above it. A bare
-# `bash scripts/cloud-setup.sh` therefore fails with
-# `bash: scripts/cloud-setup.sh: No such file or directory` (exit 127) because
-# that path doesn't resolve from the parent directory. Point the environment's
-# "setup script" field at this instead:
-#   cd Socratic.Trade && bash scripts/cloud-setup.sh
-#
-# (`.devcontainer/devcontainer.json`'s `postCreateCommand` does NOT need the `cd`
-# - devcontainers set `workspaceFolder` to the repo root automatically. This `cd`
-# is only required for the plain Claude Code Cloud "Setup script" text field.)
+# Point your environment's "setup script" field at this file:
+#   bash scripts/cloud-setup.sh
 #
 # The app boots keyless: local SQLite at data/app.db is infrastructure (settings,
 # proposals, users), not an execution mode. No secrets are required for the UI,

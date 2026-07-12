@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cellTitle, formatSourceList, friendlySource, orderedSourceEntries, provenanceLabel } from "../src/lib/dashboard-ui";
+import { formatSourceList, friendlySource, orderedSourceEntries, provenanceLabel } from "../src/lib/dashboard-ui";
 
 describe("dashboard UI provenance helpers", () => {
   it("orders provenance entries in presentation order and keeps unknown fields at the end", () => {
@@ -28,16 +28,6 @@ describe("dashboard UI provenance helpers", () => {
     expect(friendlySource("congress.trade")).toBe("Congress.Trade");
     expect(friendlySource("yahoo-finance-delayed-quotes")).toBe("Yahoo Finance Delayed Quotes");
     expect(friendlySource("alpha-vantage")).toBe("alpha-vantage");
-  });
-
-  it("only stamps 'Received' freshness on cells with a recorded source", () => {
-    const asOf = new Date().toISOString();
-    const sourced = cellTitle("News tone 62/100", "finnhub", asOf);
-    expect(sourced).toContain("Source: Finnhub");
-    expect(sourced).toContain("Received");
-    // No source recorded → no provider returned the field; stamping "Received <time>"
-    // would claim freshness for data we never got.
-    expect(cellTitle("News tone", undefined, asOf)).toBe("News tone");
   });
 
   it("dedupes aliased Market Scan source labels", () => {

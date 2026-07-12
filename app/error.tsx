@@ -13,7 +13,7 @@ export default function Error({ error, reset }: { error: Error & { digest?: stri
   return (
     <main className="flex min-h-dvh items-center justify-center bg-bg px-4 text-fg">
       <section className="w-full max-w-lg rounded-lg border border-line bg-surface/80 p-5 text-center shadow-[var(--shadow-lg)]">
-        <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-lg border border-neg/30 bg-neg/10 text-neg">
+        <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-lg border border-down/30 bg-down/10 text-down">
           <AlertTriangle size={20} />
         </div>
         <h1 className="text-lg font-semibold">Dashboard error</h1>

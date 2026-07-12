@@ -7,7 +7,7 @@ beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-acctdel-${randomUUID()}.db`)}`;
 });
 
-describe("purgeConnectedAccount — FK pragma + cascade cleanup", () => {
+describe("deleteConnectedAccount — FK pragma + cascade cleanup", () => {
   it("enables foreign_keys enforcement", async () => {
     const { getDb } = await import("../src/lib/db");
     expect(Number(getDb().pragma("foreign_keys", { simple: true }))).toBe(1);
@@ -33,7 +33,7 @@ describe("purgeConnectedAccount — FK pragma + cascade cleanup", () => {
     expect(db.getProposal(pid, "local")).toBeTruthy();
     expect(db.listSyntheticStops(acct, "local")).toHaveLength(1);
 
-    expect(db.purgeConnectedAccount(accId, "local")).toBe(true);
+    expect(db.deleteConnectedAccount(accId, "local")).toBe(true);
 
     // All purged.
     expect(db.listFillEvents(acct, "live", 10, "local")).toHaveLength(0);
@@ -43,26 +43,8 @@ describe("purgeConnectedAccount — FK pragma + cascade cleanup", () => {
   });
 
   it("returns false for a non-existent account and touches nothing", async () => {
-    const { purgeConnectedAccount } = await import("../src/lib/db");
-    expect(purgeConnectedAccount("does-not-exist", "local")).toBe(false);
-  });
-
-  // Codex review, PR #1371: account deletion must purge the account's per-position stop plans, or a
-  // connected account removed and later re-added with the same broker account number could have an
-  // old "none"/"trailing"/fixed/ATR plan silently reappear and govern a brand-new position.
-  it("purges the account's position_stop_plans rows when the account is deleted", async () => {
-    const db = await import("../src/lib/db");
-    const acct = "STOPPLANDEL";
-    const accId = randomUUID();
-    db.upsertConnectedAccount({
-      id: accId, userId: "local", broker: "alpaca", environment: "paper",
-      accountNumber: acct, label: "x", isActive: true
-    });
-    db.recordStopPlan(acct, "AAPL", "none", "high-conviction hold", 100, "local");
-    expect(db.getStopPlans(acct, "local")).toHaveProperty("AAPL");
-
-    expect(db.purgeConnectedAccount(accId, "local")).toBe(true);
-    expect(db.getStopPlans(acct, "local")).not.toHaveProperty("AAPL");
+    const { deleteConnectedAccount } = await import("../src/lib/db");
+    expect(deleteConnectedAccount("does-not-exist", "local")).toBe(false);
   });
 
   // Codex finding #8: account deletion must purge the account's learning-mutation ledger rows.
@@ -80,7 +62,7 @@ describe("purgeConnectedAccount — FK pragma + cascade cleanup", () => {
     });
     expect(db.listLearningMutations("local", { connectedAccountId: accId }).length).toBe(1);
 
-    expect(db.purgeConnectedAccount(accId, "local")).toBe(true);
+    expect(db.deleteConnectedAccount(accId, "local")).toBe(true);
     expect(db.listLearningMutations("local", { connectedAccountId: accId }).length).toBe(0);
   });
 });

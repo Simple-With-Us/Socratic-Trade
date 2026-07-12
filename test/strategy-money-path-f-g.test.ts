@@ -40,7 +40,7 @@ afterEach(() => {
   delete process.env.OPENAI_API_KEY;
 });
 
-/** A buy the Bull proposes — every risk-adding opening triggers the single Red Team review now. */
+/** A high-conviction (>=80) buy the Bull proposes and the Bear keeps — triggers the Red Team debate. */
 const BULL_PROPOSAL = {
   symbol: "AAPL",
   side: "buy",
@@ -54,9 +54,9 @@ const BULL_PROPOSAL = {
   confidenceScore: 90
 };
 
-/** Build the fetch stub. `redTeamVerdict` decides the single Red Team review response. */
+/** Build the fetch stub. `redTeamVerdict` decides the Bear (Red Team) debate response. */
 function makeFetchStub(opts: {
-  redTeamVerdict: { verdict: "approve" | "approve-at-half" | "reject"; reason: string };
+  redTeamVerdict: { rejected: boolean; reason: string };
   bullProposals?: unknown[];
   onOpenAiBody?: (body: any) => void;
 }) {
@@ -66,8 +66,8 @@ function makeFetchStub(opts: {
     if (href.includes("api.openai.com")) {
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       opts.onOpenAiBody?.(body);
-      // The Red Team review (debateProposal) system prompt contains "Red Team Risk Agent";
-      // the Bull strategy call doesn't. Route by that marker.
+      // The Red Team debate (debateProposal) system prompt contains "Red Team Risk Agent";
+      // the Bull/Bear strategy calls don't. Route by that marker.
       const systemContent = JSON.stringify(body);
       if (systemContent.includes("Red Team Risk Agent")) {
         return new Response(
@@ -75,7 +75,7 @@ function makeFetchStub(opts: {
           { status: 200, headers: { "content-type": "application/json" } }
         );
       }
-      // The Bull returns the proposal set (there is no second in-flow Bear pass anymore).
+      // Bull and Bear both return the same proposal set (bear "keeps" the bull proposal).
       return new Response(JSON.stringify({ output_text: JSON.stringify({ proposals }) }), {
         status: 200,
         headers: { "content-type": "application/json" }
@@ -126,7 +126,6 @@ async function seedTestAccountAndPolicy() {
     ...DEFAULT_POLICY,
     systemState: "active",
     llmModel: "gpt-4.1-mini",
-    redTeamLlmModel: "gpt-4.1-mini",
     includedIndices: [],
     additionalSymbols: ["AAPL"],
     strategyAuthority: "decide"
@@ -136,7 +135,7 @@ async function seedTestAccountAndPolicy() {
 describe("strategy money-path (broker/paper via the Test-broker gateway) — G7 + F1", () => {
   it("books a broker-paper fill and persists a proposal + fill_event with the redTeamVerdict field (survived)", async () => {
     process.env.OPENAI_API_KEY = "test-openai-key";
-    vi.stubGlobal("fetch", makeFetchStub({ redTeamVerdict: { verdict: "approve", reason: "No fatal flaw found." } }));
+    vi.stubGlobal("fetch", makeFetchStub({ redTeamVerdict: { rejected: false, reason: "No fatal flaw found." } }));
 
     await seedTestAccountAndPolicy();
     const { runStrategyOnce } = await import("../src/lib/strategy");
@@ -159,21 +158,23 @@ describe("strategy money-path (broker/paper via the Test-broker gateway) — G7 
     expect(aaplProposal?.status).toBe("placed");
 
     // F1: the redTeamVerdict field round-trips through the persisted JSON payload (no migration),
-    // including the served red-team model attribution (t3) and the universal-coverage trigger.
+    // including the served red-team model attribution (t3) and the stakes-scaled-dissent trigger
+    // (E/high/S) — this proposal's confidenceScore (90) alone clears the threshold.
     expect(aaplProposal?.proposal.redTeamVerdict).toEqual({
-      verdict: "approve",
       rejected: false,
       available: true,
       reason: "No fatal flaw found.",
       model: "gpt-4.1-mini",
-      trigger: "all_openings"
+      trigger: "confidence"
     });
     // t3: the persisted proposal carries the FAILOVER-AWARE served Green model (here the primary),
     // so approval-time attribution doesn't drift with later policy edits.
     expect(aaplProposal?.proposal.proposedByModel).toBe("gpt-4.1-mini");
     // Backward-compat rationale text is still appended.
-    expect(aaplProposal?.proposal.rationale).toContain("Red Team Review Survived");
-    // The proposal's numeric conviction score survives end-to-end (no second schema pass anymore).
+    expect(aaplProposal?.proposal.rationale).toContain("Red Team Debate Survived");
+    // Regression (composite review B/high/S): the Bear schema now round-trips confidenceScore — a
+    // Bear-surviving proposal must retain the Bull's numeric conviction score, not degrade to
+    // undefined (which previously zeroed shouldRunRedTeamDebate/sizing downstream).
     expect(aaplProposal?.proposal.confidenceScore).toBe(90);
   }, 30_000);
 });
@@ -185,7 +186,7 @@ describe("strategy LLM budget ceiling — choke point AFTER risk breakers", () =
     let openAiCalled = false;
     vi.stubGlobal(
       "fetch",
-      makeFetchStub({ redTeamVerdict: { verdict: "approve", reason: "n/a" }, onOpenAiBody: () => { openAiCalled = true; } })
+      makeFetchStub({ redTeamVerdict: { rejected: false, reason: "n/a" }, onOpenAiBody: () => { openAiCalled = true; } })
     );
 
     await seedTestAccountAndPolicy();
@@ -213,11 +214,11 @@ describe("strategy LLM budget ceiling — choke point AFTER risk breakers", () =
 });
 
 describe("strategy Red Team rejection — F2 audit", () => {
-  it("writes an audit('proposal_rejected_by_red_team') row and drops the proposal on a reviewer veto", async () => {
+  it("writes an audit('proposal_rejected_by_red_team') row and drops the proposal on a Bear veto", async () => {
     process.env.OPENAI_API_KEY = "test-openai-key";
     vi.stubGlobal(
       "fetch",
-      makeFetchStub({ redTeamVerdict: { verdict: "reject", reason: "Overbought into earnings; asymmetric downside." } })
+      makeFetchStub({ redTeamVerdict: { rejected: true, reason: "Overbought into earnings; asymmetric downside." } })
     );
 
     await seedTestAccountAndPolicy();

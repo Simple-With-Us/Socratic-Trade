@@ -65,12 +65,6 @@ const PREFERENCE_REASONS: Array<[string, string]> = [
   ["deterministic-bear regime veto", "deterministic_bear_veto: Crisis (Extreme Volatility) regime with below-median scan score (40.0 < median 70.0); risk-on entry too weak"],
   ["deterministic-bear fundamentals veto", "deterministic_bear_veto: Fundamentals veto: FCF yield -3.10% below floor 0% (cash-burning)"],
   ["red-team veto", "red_team_veto: The bull thesis ignores a deteriorating balance sheet and a fresh guidance cut."],
-  // Earnings-proximity advisory blackout (lane 3, correlation/event/stress gates): tags an opening
-  // within the configured window of its next earnings date via the SAME preVetoReasons fold-in
-  // mechanism as the pre-policy vetoes above. Falls through to the denylist default (no special
-  // prefix carve-out needed — the free text contains no hard-gate substring) and must classify as an
-  // overridable preference so an autonomyOverride thesis can still pass it.
-  ["earnings blackout advisory tag", "earnings_blackout: opening within 2 day(s) of earnings (window 3)"],
   // the DENYLIST default: an unrecognized / future gate must be overridable, not hard
   ["novel unlisted future gate", "Some brand-new risk preference gate the agent has never seen would be exceeded."]
 ];

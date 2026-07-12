@@ -114,10 +114,8 @@ describe("approvals triage helpers", () => {
 
     expect(summarizeBulkSelection(rows, ["paper-buy", "live-buy", "paper-exit"])).toEqual({
       selectedCount: 3,
-      approveCount: 3,
       safeApproveCount: 2,
       liveCount: 1,
-      liveEstimatedNotional: 3400,
       rejectCount: 3
     });
   });

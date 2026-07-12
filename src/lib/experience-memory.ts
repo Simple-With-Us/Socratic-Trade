@@ -29,7 +29,7 @@
  */
 import { envFlagOn } from "./rag/env-flag";
 import { normalizeSymbol } from "./money";
-import type { ContextDocument, RetrievalStatus, RetrievedChunk, StoreContextsResult } from "./vector-db";
+import type { ContextDocument, RetrievedChunk, StoreContextsResult } from "./vector-db";
 import type { FillEvent, FillSource, MarketFactorBreakdown, TradeProposal } from "./types";
 
 /** Source tag for closed-lot experience vectors — the "dedicated namespace" within the index. */
@@ -323,41 +323,16 @@ export interface SituationCandidate {
   dominantFactor?: string;
   /** 1-line evidence bulletins from the scan (congress/insider/technical etc.). */
   evidence?: string[];
-  /**
-   * Set by callers for candidates appended past the top-N scan slice specifically because the
-   * symbol is a held (open) position — not because it scored into the top-N. Lets the sketch
-   * builder below include held names beyond its top-3 cutoff without widening the cutoff for
-   * ordinary (non-held) scan candidates.
-   */
-  held?: boolean;
 }
-
-/** Hard cap on candidates folded into the sketch text, so a large held-position book can never
- *  make the situation-sketch query unbounded: total selected (top-3 scan + held overflow) never
- *  exceeds this cap. In the common case (3+ scan candidates) that's top-3 + up to 3 extra held
- *  names; if fewer than 3 scan candidates are passed, the held budget grows to fill the cap
- *  (e.g. 1 scan candidate leaves room for up to 5 held names). */
-const SITUATION_SKETCH_MAX_CANDIDATES = 6;
 
 /**
  * Build the SITUATION SKETCH query for episodic retrieval: current regime + candidate factor/
  * sector hints + evidence summary. Deliberately NOT the generic "significant financial events,
  * SEC filings" query the filings pass uses — the point is to match past decision SITUATIONS,
  * not filing content.
- *
- * Candidate selection: the top-3 (by input order — callers pass scan-ranked candidates first)
- * PLUS any `held: true` candidates beyond that cutoff, so sell/hold/trim decisions on a held
- * position outside the top-3 still reach the episodic query text — capped at
- * SITUATION_SKETCH_MAX_CANDIDATES total so query length stays bounded regardless of book size.
- * Non-held callers (or callers that never set `held`) see byte-identical behavior to a plain
- * slice(0, 3).
  */
 export function buildSituationSketch(input: { regime: string; candidates: SituationCandidate[] }): string {
-  const topThree = input.candidates.slice(0, 3);
-  const extraHeld = input.candidates.slice(3).filter((candidate) => candidate.held);
-  const budget = Math.max(0, SITUATION_SKETCH_MAX_CANDIDATES - topThree.length);
-  const selected = [...topThree, ...extraHeld.slice(0, budget)];
-  const candidateLines = selected.map((candidate) => {
+  const candidateLines = input.candidates.slice(0, 3).map((candidate) => {
     const parts = [normalizeSymbol(candidate.symbol)];
     if (candidate.sector) parts.push(`sector ${candidate.sector}`);
     if (candidate.dominantFactor) parts.push(`dominant factor ${candidate.dominantFactor}`);
@@ -383,16 +358,6 @@ export interface InjectedMemoryRef {
   relevanceScore?: number;
 }
 
-/**
- * Typed retrieval-status receipt (typed-retrieval-status, 2026-07-06) — mirrors
- * `RetrievalStatus` from vector-db.ts but adds the two conditions specific to THIS caller:
- * `flag_off` (experienceMemoryEnabled() is false, so retrieval never ran) and `ok_empty` (the
- * pipeline ran and returned "ok"/"no_memory" from vector-db but same-run exclusion or the
- * analog/coaching split left nothing to inject). Advisory receipt only — never changes which
- * chunks are injected.
- */
-export type ExperienceRetrievalStatus = "flag_off" | "budget_skipped" | "lookup_failed" | "ok_empty" | "ok";
-
 export interface ExperienceRetrievalResult {
   /** Labeled prompt block for Bull AND Bear, or undefined when nothing was retrieved. */
   analogsBlock?: string;
@@ -408,8 +373,6 @@ export interface ExperienceRetrievalResult {
   /** The situation-sketch query used (recoverable for replay/debug). */
   query: string;
   topAnalogSimilarity?: number;
-  /** Typed retrieval-status receipt — see `ExperienceRetrievalStatus`. */
-  status: ExperienceRetrievalStatus;
 }
 
 function chunkMeta(chunk: RetrievedChunk, key: string): unknown {
@@ -450,18 +413,12 @@ export async function retrieveDecisionExperiences(
     coachingChunks: [],
     injected: [],
     asOf,
-    query,
-    status: "flag_off"
+    query
   };
   if (!experienceMemoryEnabled()) return empty;
 
   const k = Math.min(10, Math.max(5, input.k ?? 8));
   let chunks: RetrievedChunk[] = [];
-  // Typed retrieval-status receipt (typed-retrieval-status, 2026-07-06): populated by
-  // retrieveContextDetailed's onStatus callback below. Advisory only — never affects `chunks`.
-  // Held in an object (not a bare `let`) so TS doesn't narrow the read below to the closure's
-  // capture-time literal type across the intervening `await`.
-  const vectorStatusRef: { value: RetrievalStatus } = { value: "ok" };
   try {
     const { retrieveContextDetailed, defaultMinScore, formatChunkWithProvenance } = await import("./vector-db");
     // Over-ask by a small margin so same-run exclusion below doesn't leave us short of k.
@@ -477,11 +434,7 @@ export async function retrieveDecisionExperiences(
         matchAllSymbols: true,
         asOf,
         minScore: defaultMinScore(),
-        connectedAccountId: input.connectedAccountId,
-        runId: input.runId,
-        onStatus: (s) => {
-          vectorStatusRef.value = s;
-        }
+        connectedAccountId: input.connectedAccountId
       }
     );
     // Same-run / future-neighbor exclusion: a case this run just indexed (decision run OR exit
@@ -543,19 +496,6 @@ export async function retrieveDecisionExperiences(
           ].join("\n\n")
         : undefined;
 
-    // Map vector-db's typed status onto this caller's status union. `budget_skipped`/`lookup_failed`
-    // pass through unchanged; vector-db's "no_memory"/"degraded"/"ok" all collapse to this caller's
-    // own "ok"/"ok_empty" split — `injected.length` is the ground truth for THIS caller (same-run
-    // exclusion can empty out an otherwise-"ok" vector-db result, which "no_memory" alone wouldn't
-    // capture).
-    const vectorStatus = vectorStatusRef.value;
-    const status: ExperienceRetrievalStatus =
-      vectorStatus === "budget_skipped" || vectorStatus === "lookup_failed"
-        ? vectorStatus
-        : injected.length > 0
-          ? "ok"
-          : "ok_empty";
-
     return {
       analogsBlock,
       coachingBlock,
@@ -564,14 +504,13 @@ export async function retrieveDecisionExperiences(
       injected,
       asOf,
       query,
-      topAnalogSimilarity,
-      status
+      topAnalogSimilarity
     };
   } catch (err) {
     console.warn(
       "[experience-memory] decision-time retrieval failed; continuing without analogs:",
       err instanceof Error ? err.message : String(err)
     );
-    return { ...empty, status: "lookup_failed" };
+    return empty;
   }
 }

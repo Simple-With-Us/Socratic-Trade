@@ -337,141 +337,6 @@ const MIGRATIONS: Migration[] = [
         );
       `);
     }
-  },
-  {
-    // Per-account/broker LLM usage attribution: tag each usage row with the connected account it
-    // was recorded for, so cost/tokens can be filtered by account (broker/environment derived via
-    // join to connected_accounts). Nullable — pre-existing rows and account-less contexts stay
-    // unattributed. Versioned ALTER (not a CREATE-only column add) per the 2026-07-02 "no such
-    // column" boot-crash scar noted on the llm_usage CREATE TABLE below.
-    version: 14,
-    name: "llm_usage_connected_account",
-    up: (database) => {
-      const cols = database.prepare("PRAGMA table_info(llm_usage)").all() as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === "connected_account_id")) {
-        database.exec("ALTER TABLE llm_usage ADD COLUMN connected_account_id TEXT");
-      }
-      database.exec(
-        "CREATE INDEX IF NOT EXISTS idx_llm_usage_account ON llm_usage (connected_account_id, created_at)"
-      );
-    }
-  },
-  {
-    // Single-adversary consolidation R15: the hidden RED_TEAM_LLM_PROVIDER/RED_TEAM_LLM_MODEL env
-    // override is being DELETED (owner directive 2026-07-07: Settings must tell the truth; no hidden
-    // routing). A deployment that was actually serving its Red Team via that override — with a blank
-    // per-account `redTeamLlmModel` — would silently flip to fail-closed (every opening routed to
-    // human review) the moment the env reads disappear. Seed the first-class setting ONCE from the
-    // env override that was serving, so a working safety setup keeps working and the owner can see —
-    // and change — the real model in Settings. Only rows with a BLANK redTeamLlmModel are touched
-    // (an explicit choice always wins), and nothing is seeded when the override was never active.
-    // This is a migration of an operator's own explicit env configuration, NOT a new default: with
-    // no env override set, blank stays blank and fails closed legibly.
-    version: 15,
-    name: "seed_red_team_model_from_env_override",
-    up: (database) => {
-      const envProvider = (process.env.RED_TEAM_LLM_PROVIDER ?? "").trim().toLowerCase();
-      if (envProvider !== "anthropic") return;
-      // The exact model the deleted override path was running (red-team.ts's debateViaAnthropic):
-      // RED_TEAM_LLM_MODEL when set, else its hardcoded claude-haiku default.
-      const servedModel = (process.env.RED_TEAM_LLM_MODEL ?? "").trim() || "claude-haiku-4-5-20251001";
-      const rows = database
-        .prepare("SELECT user_id, connected_account_id, policy FROM account_strategy_state")
-        .all() as Array<{ user_id: string; connected_account_id: string; policy: string }>;
-      const update = database.prepare(
-        "UPDATE account_strategy_state SET policy = ? WHERE user_id = ? AND connected_account_id = ?"
-      );
-      for (const row of rows) {
-        let policy: Record<string, unknown>;
-        try {
-          policy = JSON.parse(row.policy) as Record<string, unknown>;
-        } catch {
-          continue;
-        }
-        if (!policy || typeof policy !== "object") continue;
-        const existing = typeof policy.redTeamLlmModel === "string" ? policy.redTeamLlmModel.trim() : "";
-        if (existing) continue; // explicit choice wins — never overwrite
-        policy.redTeamLlmModel = servedModel;
-        update.run(JSON.stringify(policy), row.user_id, row.connected_account_id);
-        console.log(
-          `[db] migration 15: seeded redTeamLlmModel="${servedModel}" for account ${row.connected_account_id} (user ${row.user_id}) from the retired RED_TEAM_LLM_PROVIDER env override — review it under Framework → Models.`
-        );
-      }
-    }
-  },
-  {
-    // Durable double-fill backstop: a partial UNIQUE index on fill_events (proposal_id,
-    // broker_order_id) so the inline/sweep check-then-insert can't double-book the same physical
-    // broker order even if the single-process invariant is ever violated (concurrent scheduler +
-    // approval, or a crash-retry across processes). Partial (WHERE both non-null) so pre-placement
-    // rows and non-broker fills — which legitimately share NULLs — are never constrained. Existing
-    // duplicate (proposal_id, broker_order_id) rows are collapsed FIRST (keep the earliest by rowid,
-    // delete the rest, logged loudly) so the index can't fail to build on legacy double-books — a
-    // duplicate for the same physical order IS a double-count bug, so collapsing it is the intended
-    // consistency fix, not data loss. insertFillEvent treats the constraint violation as an
-    // idempotent no-op (returns the already-booked fill).
-    version: 16,
-    name: "fill_events_dedupe_unique_index",
-    up: (database) => {
-      const dupGroups = database
-        .prepare(
-          `SELECT proposal_id, broker_order_id, COUNT(*) AS c, MIN(rowid) AS keep_rowid
-           FROM fill_events
-           WHERE proposal_id IS NOT NULL AND broker_order_id IS NOT NULL
-           GROUP BY proposal_id, broker_order_id
-           HAVING c > 1`
-        )
-        .all() as Array<{ proposal_id: string; broker_order_id: string; c: number; keep_rowid: number }>;
-      const deleteExtras = database.prepare(
-        `DELETE FROM fill_events
-         WHERE proposal_id = ? AND broker_order_id = ? AND rowid != ?`
-      );
-      for (const g of dupGroups) {
-        const info = deleteExtras.run(g.proposal_id, g.broker_order_id, g.keep_rowid);
-        console.warn(
-          `[db] migration 16: collapsed ${info.changes} duplicate fill_events row(s) for (proposal_id=${g.proposal_id}, broker_order_id=${g.broker_order_id}) — kept rowid ${g.keep_rowid}. A duplicate for the same physical broker order is a double-count bug; the new UNIQUE index prevents recurrence.`
-        );
-      }
-      database.exec(
-        `CREATE UNIQUE INDEX IF NOT EXISTS idx_fill_events_proposal_broker_order
-         ON fill_events (proposal_id, broker_order_id)
-         WHERE proposal_id IS NOT NULL AND broker_order_id IS NOT NULL`
-      );
-    }
-  },
-  {
-    // Broker-held TRAILING stops: broker_protective_stops rows grow a `kind` ('fixed' | 'trailing')
-    // and, for trailing rows, the configured `trail_percent`. Pre-existing rows are all the
-    // Robinhood fixed stops — the 'fixed' default is exactly right for them. Idempotent — skips
-    // each column when already present (fresh DBs get both from CREATE TABLE).
-    version: 17,
-    name: "broker_protective_stops_trailing_columns",
-    up: (database) => {
-      const cols = database.prepare("PRAGMA table_info(broker_protective_stops)").all() as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === "kind")) {
-        database.exec("ALTER TABLE broker_protective_stops ADD COLUMN kind TEXT NOT NULL DEFAULT 'fixed'");
-      }
-      if (!cols.some((c) => c.name === "trail_percent")) {
-        database.exec("ALTER TABLE broker_protective_stops ADD COLUMN trail_percent REAL");
-      }
-
-    }
-  },
-  {
-    // position_stop_plans grows a `side` column ('long' | 'short') so filterFullStopPlansByLiveBasis
-    // can distinguish a closed long from a same-symbol short opened later at a similar cost basis —
-    // matching on symbol+avgCost alone let a long's plan leak onto an unrelated short lot (Codex
-    // review, PR #1371). Existing rows default to 'long' (every row written before this field existed
-    // came from an opening buy — "none"/"trailing" plans on shorts came later); idempotent (skips
-    // when already present — fresh DBs get it from CREATE TABLE).
-    version: 18,
-    name: "position_stop_plans_side_column",
-    up: (database) => {
-      const cols = database.prepare("PRAGMA table_info(position_stop_plans)").all() as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === "side")) {
-        database.exec("ALTER TABLE position_stop_plans ADD COLUMN side TEXT NOT NULL DEFAULT 'long'");
-      }
-    }
   }
 ];
 
@@ -828,12 +693,9 @@ function migrate(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_synthetic_stops_account ON synthetic_trailing_stops (user_id, account_number);
 
-    -- Broker-held protective stops: the resting protective order id placed at the broker for an open
-    -- position, so it can be cancelled when the position closes (no orphaned stops). One per (user,
-    -- account, symbol). Distinct from synthetic_trailing_stops, which is the app-side monitor.
-    -- kind 'fixed' = stop-market at stopLossPct below entry (Robinhood, opt-in);
-    -- kind 'trailing' = native Alpaca trailing_stop (trail_percent) or a Robinhood stop-market the
-    -- reconciler ratchets upward each tick (trail_percent records the configured trail distance).
+    -- Broker-held protective stops (Robinhood): the resting stop-market order id placed at the broker
+    -- for an open position, so it can be cancelled when the position closes (no orphaned stops). One
+    -- per (user, account, symbol). Distinct from synthetic_trailing_stops, which is the app-side monitor.
     CREATE TABLE IF NOT EXISTS broker_protective_stops (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -843,8 +705,6 @@ function migrate(database: Database.Database): void {
       quantity REAL NOT NULL,
       stop_price REAL NOT NULL,
       status TEXT NOT NULL DEFAULT 'resting',
-      kind TEXT NOT NULL DEFAULT 'fixed',
-      trail_percent REAL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       UNIQUE(user_id, account_number, symbol)
@@ -864,23 +724,6 @@ function migrate(database: Database.Database): void {
       -- current position's average cost no longer matches, it's a new lot (close+rebuy) and the band resets.
       avg_cost REAL NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL,
-      PRIMARY KEY (user_id, account_number, symbol)
-    );
-
-    -- Per-position stop plan: the LLM's chosen stop-loss TYPE (StopPlanStyle) for an open position,
-    -- set at opening-fill time and read by every stop-enforcement layer for the position's life.
-    -- Monotonic per (user, account, symbol) like take_profit_trims above; keyed to the lot's cost
-    -- basis so a close+rebuy starts fresh instead of inheriting a stale plan. Cleared when the
-    -- position closes. One row per open position that has an explicit (non-"default") plan.
-    CREATE TABLE IF NOT EXISTS position_stop_plans (
-      user_id TEXT NOT NULL,
-      account_number TEXT NOT NULL,
-      symbol TEXT NOT NULL,
-      style TEXT NOT NULL,
-      rationale TEXT,
-      avg_cost REAL NOT NULL DEFAULT 0,
-      updated_at TEXT NOT NULL,
-      side TEXT NOT NULL DEFAULT 'long',
       PRIMARY KEY (user_id, account_number, symbol)
     );
 
@@ -1119,8 +962,7 @@ function migrate(database: Database.Database): void {
       classifier_reason TEXT,
       created_at TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
-      resolved_at TEXT,
-      review_note TEXT
+      resolved_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_learned_context_pending_user ON learned_context_pending (user_id, status, created_at);
 
@@ -1241,25 +1083,6 @@ function migrate(database: Database.Database): void {
       origin TEXT NOT NULL DEFAULT 'app-a',
       updated_at TEXT NOT NULL
     );
-
-    -- Server-side persistence for a POST /api/strategy/tune review (the paid LLM
-    -- proposeStrategyTuning output): previously lived only in client React state, so a closed
-    -- browser (or a disconnect before Apply) silently lost it. 'result' is the FULL response JSON
-    -- (StrategyTuningProposal plus any appended tuning-invariant warnings). See db-tuning-reviews.ts.
-    CREATE TABLE IF NOT EXISTS strategy_tuning_reviews (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      connected_account_id TEXT,
-      model TEXT,
-      reasoning_effort TEXT,
-      generated_by TEXT NOT NULL,
-      result TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','applied','dismissed')),
-      created_at TEXT NOT NULL,
-      resolved_at TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_strategy_tuning_reviews_user_account_status
-      ON strategy_tuning_reviews (user_id, connected_account_id, status);
   `);
 
   // Migrate tables to include user_id
@@ -1299,17 +1122,6 @@ function migrate(database: Database.Database): void {
     database.exec("ALTER TABLE trade_proposals ADD COLUMN trade_thesis_tag TEXT");
     database.exec("ALTER TABLE trade_proposals ADD COLUMN entry_market_regime TEXT");
   }
-  // Thesis-tag split-brain backfill (2026-07-10 audit fix): insertProposal historically left
-  // these columns NULL while the same tags were already embedded in the proposal JSON, so the
-  // learning loop's SQL reads saw an empty column even though the data existed. Self-guarding via
-  // the WHERE clause (only touches rows still NULL with a JSON value present) -- safe to re-run
-  // every startup, no separate "already applied" marker needed.
-  database.exec(
-    "UPDATE trade_proposals SET trade_thesis_tag = json_extract(proposal, '$.tradeThesisTag') WHERE trade_thesis_tag IS NULL AND json_extract(proposal, '$.tradeThesisTag') IS NOT NULL"
-  );
-  database.exec(
-    "UPDATE trade_proposals SET entry_market_regime = json_extract(proposal, '$.entryMarketRegime') WHERE entry_market_regime IS NULL AND json_extract(proposal, '$.entryMarketRegime') IS NOT NULL"
-  );
   // Proposal staleness: when a run's LLM re-validation re-checks a still-pending proposal,
   // stamp when and why it still stands so the queue can show "re-checked X ago" rather than
   // implying an old idea is still freshly recommended.
@@ -1327,23 +1139,6 @@ function migrate(database: Database.Database): void {
   }
   if (!fillEventColumns.some((c) => c.name === "mfe")) {
     database.exec("ALTER TABLE fill_events ADD COLUMN mfe REAL");
-  }
-
-  // Synthetic-stop refire hardening (2026-07-08 MU incident, round 2): per-row exit-attempt state
-  // (additive, guarded). fire_generation counts prior protective-exit attempts whose broker order
-  // was POSITIVELY confirmed dead — it is monotonic (advance-only; nothing ever resets it back), and
-  // the fire path appends "-g<generation>" to the deterministic client_order_id when it is > 0, so a
-  // legitimately re-armed stop places under a fresh id instead of 422-colliding forever with a dead
-  // order's id. last_attempt_ref_id remembers the client_order_id of the most recent attempt whose
-  // outcome is NOT yet confirmed dead (e.g. placement threw after the broker accepted), so an
-  // ambiguous retry reuses it verbatim and the broker's own dedupe fails safe toward a 422 instead
-  // of a duplicate protective sell.
-  const syntheticStopColumns = database.prepare("PRAGMA table_info(synthetic_trailing_stops)").all() as Array<{ name: string }>;
-  if (!syntheticStopColumns.some((c) => c.name === "fire_generation")) {
-    database.exec("ALTER TABLE synthetic_trailing_stops ADD COLUMN fire_generation INTEGER NOT NULL DEFAULT 0");
-  }
-  if (!syntheticStopColumns.some((c) => c.name === "last_attempt_ref_id")) {
-    database.exec("ALTER TABLE synthetic_trailing_stops ADD COLUMN last_attempt_ref_id TEXT");
   }
 
   // Outcome engine (Wave 2): multi-horizon outcome rows + terminal-unresolvable reason on
@@ -1387,27 +1182,6 @@ function migrate(database: Database.Database): void {
     "notification_events"
   ]) {
     addAccountColumn(table);
-  }
-
-  // AI-review advisory column: a single-LLM-call reviewer attaches a per-proposal
-  // recommendation (verdict + rationale + optional rewrite) to a pending framework
-  // proposal WITHOUT changing the owner verb/status — the owner still makes the final
-  // accept/reject/rewrite call. Nullable JSON; absent means "not yet AI-reviewed".
-  {
-    const cols = database.prepare("PRAGMA table_info(socratic_framework_proposals)").all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === "ai_review")) {
-      database.exec("ALTER TABLE socratic_framework_proposals ADD COLUMN ai_review TEXT");
-    }
-  }
-
-  // Alert lifecycle (2026-07-09): acknowledge state on notification_events, so the Alert Center's
-  // "Attention" pill can be cleared instead of growing forever (see docs/rollouts for the
-  // triage that motivated this). Additive, guarded — existing rows keep acknowledged_at NULL
-  // (unacknowledged) until acted on or resolved by the auto-ack sweep in db-notifications.ts.
-  const notificationEventColumns = database.prepare("PRAGMA table_info(notification_events)").all() as Array<{ name: string }>;
-  if (!notificationEventColumns.some((c) => c.name === "acknowledged_at")) {
-    database.exec("ALTER TABLE notification_events ADD COLUMN acknowledged_at TEXT");
-    database.exec("CREATE INDEX IF NOT EXISTS idx_notification_events_unacked ON notification_events (user_id, acknowledged_at)");
   }
 
   // Per-account watermarks need (user_id, connected_account_id) as the PK, but the original table
@@ -1494,26 +1268,6 @@ function migrate(database: Database.Database): void {
         CREATE INDEX IF NOT EXISTS idx_api_health_error_patterns_service ON api_health_error_patterns (service, last_seen DESC);
       `);
     }
-  }
-
-  // Learning Review "defer" verdict (2026-07-10): the daily reviewer LLM can now leave a pending
-  // risk-tier candidate exactly as pending while explaining why it couldn't confidently decide.
-  // Additive, guarded — existing rows keep review_note NULL until a review actually defers them.
-  const learnedContextPendingColumns = database.prepare("PRAGMA table_info(learned_context_pending)").all() as Array<{ name: string }>;
-  if (!learnedContextPendingColumns.some((c) => c.name === "review_note")) {
-    database.exec("ALTER TABLE learned_context_pending ADD COLUMN review_note TEXT");
-  }
-
-  // Risk cap fix: track when orders were actually placed, not just proposed.
-  const tradeProposalColumns = database.prepare("PRAGMA table_info(trade_proposals)").all() as Array<{ name: string }>;
-  if (!tradeProposalColumns.some((c) => c.name === "placed_at")) {
-    database.exec("ALTER TABLE trade_proposals ADD COLUMN placed_at TEXT");
-  }
-
-  // Account deletion race condition: require a draining state to clear broker lock/fills first.
-  const connectedAccountDrainingColumns = database.prepare("PRAGMA table_info(connected_accounts)").all() as Array<{ name: string }>;
-  if (!connectedAccountDrainingColumns.some((c) => c.name === "is_draining")) {
-    database.exec("ALTER TABLE connected_accounts ADD COLUMN is_draining INTEGER DEFAULT 0");
   }
 
   const now = new Date().toISOString();
@@ -1706,4 +1460,3 @@ export * from "./db-health";
 export * from "./db-securities-import";
 export * from "./db-socratic";
 export * from "./db-jobs";
-export * from "./db-tuning-reviews";

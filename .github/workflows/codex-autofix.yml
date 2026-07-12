@@ -9,9 +9,7 @@ name: Codex Autofix
 #                         clean ping-pong, capped to avoid an infinite loop.
 #
 # Prerequisites (one-time, see the PR description):
-#   1. Secret  DEEPSEEK_API_KEY  (Settings → Secrets and variables → Actions).
-#      Routed through DeepSeek's Anthropic-compatible endpoint (see the step below)
-#      to control cost; the old ANTHROPIC_API_KEY secret is no longer used here.
+#   1. Secret  ANTHROPIC_API_KEY  (Settings → Secrets and variables → Actions).
 #   2. A token whose pushes RE-TRIGGER CI + Codex. The default GITHUB_TOKEN does
 #      NOT re-trigger workflows, so EITHER install the Claude GitHub App
 #      (github.com/apps/claude) OR add a PAT secret named GH_PAT (repo + workflow
@@ -20,6 +18,10 @@ name: Codex Autofix
 on:
   pull_request_review:
     types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+  issue_comment:
+    types: [created]
   workflow_dispatch:
     inputs:
       pr:
@@ -43,7 +45,9 @@ jobs:
     # a PR (issue.pull_request != null), never a plain issue.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request_review' && github.event.review.user.login == 'chatgpt-codex-connector[bot]')
+      (github.event_name == 'pull_request_review' && github.event.review.user.login == 'chatgpt-codex-connector[bot]') ||
+      (github.event_name == 'pull_request_review_comment' && github.event.comment.user.login == 'chatgpt-codex-connector[bot]') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && github.event.comment.user.login == 'chatgpt-codex-connector[bot]')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -53,19 +57,8 @@ jobs:
           token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
       - uses: anthropics/claude-code-action@v1
-        # Routed to DeepSeek via its Anthropic-compatible endpoint to control cost:
-        # this action drives the Claude Code CLI in a 60-turn loop, and on Opus 4.8
-        # that was ~$15/day. The CLI honors ANTHROPIC_BASE_URL / _AUTH_TOKEN / _MODEL,
-        # so pointing them at api.deepseek.com/anthropic bills the DeepSeek key
-        # instead. Revert to Anthropic by removing this env block and pointing
-        # anthropic_api_key back at a real Anthropic key.
-        env:
-          ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.DEEPSEEK_API_KEY }}
-          ANTHROPIC_MODEL: deepseek-v4-flash
-          ANTHROPIC_SMALL_FAST_MODEL: deepseek-v4-flash
         with:
-          anthropic_api_key: ${{ secrets.DEEPSEEK_API_KEY }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           # This workflow EXISTS to respond to a bot. claude-code-action's default
           # human-actor gate aborts (~11s) on any non-User trigger with

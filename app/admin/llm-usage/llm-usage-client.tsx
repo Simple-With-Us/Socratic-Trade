@@ -2,7 +2,6 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Card } from "../../ui/primitives";
-import { llmUsageContextLabel } from "../../ui/llm-usage-labels";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -18,10 +17,6 @@ interface UsageRow {
   completionTokens: number;
   totalTokens: number;
   costUsd: number;
-  connectedAccountId: string | null;
-  broker: string | null;
-  environment: string | null;
-  accountLabel: string | null;
   keyLabel: string | null;
   keyLast4: string | null;
   keyMasked: string | null;
@@ -50,6 +45,20 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
+function contextLabel(ctx: string | null): string {
+  if (!ctx) return "unknown";
+  const map: Record<string, string> = {
+    chat: "Chat",
+    strategy: "Strategy",
+    "strategy-bear": "Strategy (bear)",
+    "strategy-tuning": "Tuning",
+    "red-team": "Red-team",
+    "post-mortem": "Post-mortem",
+    "proposal-revalidation": "Revalidation",
+  };
+  return map[ctx] ?? ctx;
+}
+
 function providerLabel(provider: string): string {
   const map: Record<string, string> = {
     openai: "OpenAI",
@@ -74,21 +83,11 @@ function keySourceLabel(source: string): string {
   return map[source] ?? source;
 }
 
-// Human label for the account a usage row is attributed to. Account-less rows (e.g. chat, or
-// pre-attribution history) read "Unattributed" rather than being hidden or mislabeled.
-function accountLabelText(row: UsageRow): string {
-  if (!row.connectedAccountId) return "Unattributed";
-  const name = row.accountLabel ?? `acct ${row.connectedAccountId.slice(0, 8)}`;
-  const broker = row.broker ? (row.environment ? `${row.broker} · ${row.environment}` : row.broker) : null;
-  return broker ? `${name} (${broker})` : name;
-}
-
-// Group rows by (userId, provider, keyRef, account) → list of (model, context, ...) sub-rows, so
-// spend is broken out per connected account/broker as well as per key.
+// Group rows by (userId, provider, keyRef) → list of (model, context, ...) sub-rows.
 function groupRows(rows: UsageRow[]): Map<string, UsageRow[]> {
   const groups = new Map<string, UsageRow[]>();
   for (const row of rows) {
-    const key = `${row.userId}||${row.provider}||${row.keyRef ?? "none"}||${row.connectedAccountId ?? "none"}`;
+    const key = `${row.userId}||${row.provider}||${row.keyRef ?? "none"}`;
     const existing = groups.get(key) ?? [];
     existing.push(row);
     groups.set(key, existing);
@@ -129,19 +128,6 @@ function KeyBadge({ row }: { row: UsageRow }) {
   );
 }
 
-function AccountBadge({ row }: { row: UsageRow }) {
-  const unattributed = !row.connectedAccountId;
-  return (
-    <span
-      className={`inline-flex items-center gap-1 text-xs rounded px-2 py-0.5 border border-line bg-surface-2 ${unattributed ? "text-muted/70" : "text-fg"}`}
-      title={unattributed ? "Not attributed to a connected account" : `Account: ${accountLabelText(row)}`}
-    >
-      <span className="text-muted">acct</span>
-      <span className={unattributed ? "italic" : "font-medium"}>{accountLabelText(row)}</span>
-    </span>
-  );
-}
-
 function UsageGroupCard({ groupRows: rows }: { groupRows: UsageRow[] }) {
   const first = rows[0];
   const totalCost = rows.reduce((s, r) => s + r.costUsd, 0);
@@ -159,7 +145,6 @@ function UsageGroupCard({ groupRows: rows }: { groupRows: UsageRow[] }) {
               {providerLabel(first.provider)}
             </span>
             <KeyBadge row={first} />
-            <AccountBadge row={first} />
           </div>
         </div>
         <div className="text-right shrink-0">
@@ -184,7 +169,7 @@ function UsageGroupCard({ groupRows: rows }: { groupRows: UsageRow[] }) {
               <div className="flex items-center gap-2 text-muted">
                 <span className="font-mono text-fg/80">{r.model ?? "—"}</span>
                 <span className="text-muted/75">·</span>
-                <span title={r.context ?? "unknown"}>{llmUsageContextLabel(r.context ?? "unknown")}</span>
+                <span>{contextLabel(r.context)}</span>
                 <span className="text-muted/60">·</span>
                 <span>{r.calls} call{r.calls !== 1 ? "s" : ""}</span>
               </div>
@@ -218,7 +203,6 @@ export function LlmUsageClient({
 }) {
   const [days, setDays] = useState(30);
   const [operatorOnly, setOperatorOnly] = useState(false);
-  const [accountFilter, setAccountFilter] = useState<string>("all");
   const [data, setData] = useState<UsageData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -241,30 +225,13 @@ export function LlmUsageClient({
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // Distinct accounts present in this window (incl. an "Unattributed" bucket) drive the filter.
-  const accountOptions = data
-    ? Array.from(new Map(data.rows.map((r) => [r.connectedAccountId ?? "unattributed", r] as const)).values())
-        .map((r) => ({ value: r.connectedAccountId ?? "unattributed", label: accountLabelText(r) }))
-        .sort((a, b) => a.label.localeCompare(b.label))
-    : [];
-  const filteredRows = data
-    ? data.rows.filter(
-        (r) =>
-          accountFilter === "all" ||
-          (accountFilter === "unattributed" ? !r.connectedAccountId : r.connectedAccountId === accountFilter)
-      )
-    : [];
-  const groups = groupRows(filteredRows);
+  const groups = data ? groupRows(data.rows) : new Map<string, UsageRow[]>();
   const groupList = Array.from(groups.entries())
     .map(([, rows]) => rows)
     .sort((a, b) =>
       b.reduce((s: number, r: UsageRow) => s + r.costUsd, 0) -
       a.reduce((s: number, r: UsageRow) => s + r.costUsd, 0)
     );
-  const filteredTotalCost = filteredRows.reduce((s, r) => s + r.costUsd, 0);
-  const filteredFailoverCost = filteredRows.filter((r) => r.keySource === "operator").reduce((s, r) => s + r.costUsd, 0);
-  const filteredCalls = filteredRows.reduce((s, r) => s + r.calls, 0);
-  const filteredTokens = filteredRows.reduce((s, r) => s + r.totalTokens, 0);
 
   return (
     <div className="min-h-screen bg-base text-fg p-6 max-w-5xl mx-auto">
@@ -303,19 +270,6 @@ export function LlmUsageClient({
             Server-failover only
           </label>
         )}
-        {accountOptions.length > 1 && (
-          <select
-            value={accountFilter}
-            onChange={(e) => setAccountFilter(e.target.value)}
-            className="text-xs bg-surface-2 border border-line rounded-lg px-2 py-1.5 text-fg"
-            aria-label="Filter by account"
-          >
-            <option value="all">All accounts</option>
-            {accountOptions.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-        )}
         <button
           onClick={fetchData}
           disabled={loading}
@@ -326,7 +280,7 @@ export function LlmUsageClient({
       </div>
 
       {error && (
-        <div className="text-sm text-neg bg-neg/10 border border-neg/20 rounded-lg p-3 mb-4">
+        <div className="text-sm text-down bg-down/10 border border-down/20 rounded-lg p-3 mb-4">
           {error}
         </div>
       )}
@@ -337,23 +291,23 @@ export function LlmUsageClient({
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
             <SummaryCard
               label="Total cost"
-              value={fmtCost(filteredTotalCost)}
-              sub={accountFilter === "all" ? `last ${days}d` : `filtered · ${days}d`}
+              value={fmtCost(data.totalCostUsd)}
+              sub={`last ${days}d`}
             />
             <SummaryCard
               label="Server failover"
-              value={fmtCost(filteredFailoverCost)}
+              value={fmtCost(data.operatorFundedCostUsd)}
               sub={data.operatorFallbackEnabled ? "failover on" : "failover off"}
             />
             <SummaryCard
-              label="Key × account"
+              label="Unique keys"
               value={String(groups.size)}
-              sub={scope === "admin" ? "all visible" : "yours"}
+              sub={scope === "admin" ? "all visible keys" : "your keys"}
             />
             <SummaryCard
               label="Total calls"
-              value={fmtTokens(filteredCalls)}
-              sub={`${fmtTokens(filteredTokens)} tokens`}
+              value={fmtTokens(data.rows.reduce((s, r) => s + r.calls, 0))}
+              sub={`${fmtTokens(data.rows.reduce((s, r) => s + r.totalTokens, 0))} tokens`}
             />
           </div>
 

@@ -16,7 +16,7 @@ import type { ChatDraft } from "@/lib/chat/types";
 import type { RealityInfo } from "../lib/derive";
 import { fmtMoney } from "../lib/format";
 import { useConsoleData } from "../lib/useConsoleData";
-import { Btn, Chip, Tooltip } from "../ui/primitives";
+import { Btn, Chip } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 import { useToast } from "../ui/toast";
 
@@ -200,10 +200,10 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
   return (
     <div className="mt-2 rounded-lg border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <Tooltip className="con-mono text-[length:var(--con-fs-sm)] font-semibold" content="The order the assistant drafted. It is only a draft until you stage and then approve it.">
+        <span className="con-mono text-[length:var(--con-fs-sm)] font-semibold" title="The order the assistant drafted. It is only a draft until you stage and then approve it.">
           {sideUp} {draft.qty} <SymbolButton symbol={draft.symbol} showLogo={false} className="font-mono text-inherit" /> · {draft.order_type}
           {limitText}
-        </Tooltip>
+        </span>
         <Chip
           tone={shownScope.tone}
           title={
@@ -217,16 +217,14 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
       </div>
       {draft.rationale && <p className="mt-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">{draft.rationale}</p>}
       {draft.warnings.length > 0 && (
-        <Tooltip
-          className="mt-1.5"
-          content="Cautions the assistant itself attached to this draft."
+        <ul
+          className="mt-1.5 space-y-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]"
+          title="Cautions the assistant itself attached to this draft."
         >
-          <ul className="space-y-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]">
-            {draft.warnings.map((w, i) => (
-              <li key={i}>⚠ {w}</li>
-            ))}
-          </ul>
-        </Tooltip>
+          {draft.warnings.map((w, i) => (
+            <li key={i}>⚠ {w}</li>
+          ))}
+        </ul>
       )}
 
       {/* Policy preview result */}
@@ -236,65 +234,60 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
         </div>
       )}
       {phase !== "checking" && decision && (
-        <Tooltip
-          className="mt-2"
-          content={
+        <div
+          className="mt-2 rounded-md px-2.5 py-1.5 text-[length:var(--con-fs-xs)]"
+          style={{
+            background: blocked ? "var(--con-neg-soft)" : "var(--con-pos-soft)",
+            color: blocked ? "var(--con-neg)" : "var(--con-pos)"
+          }}
+          title={
             blocked
               ? "Your policy guardrails would refuse this order as things stand now."
               : "A preview check against your policy guardrails. The authoritative check re-runs when you approve."
           }
         >
-          <div
-            className="rounded-md px-2.5 py-1.5 text-[length:var(--con-fs-xs)]"
-            style={{
-              background: blocked ? "var(--con-neg-soft)" : "var(--con-pos-soft)",
-              color: blocked ? "var(--con-neg)" : "var(--con-pos)"
-            }}
-          >
-            <div className="flex flex-wrap items-center gap-1.5 font-semibold">
-              {blocked ? <AlertTriangle size={13} /> : <ShieldCheck size={13} />}
-              {blocked ? "Blocked by policy" : "Passes policy preview"}
-              {estimatedNotional !== undefined && (
-                <Tooltip
-                  className="con-num font-normal text-[color:var(--con-muted)]"
-                  content="Estimated order value from the broker's pre-trade review. Final numbers are re-checked at approval time."
-                >
-                  · est. {fmtMoney(estimatedNotional)}
-                </Tooltip>
-              )}
-            </div>
-            {blocked && decision.reasons.length > 0 && (
-              <ul className="mt-1 list-disc space-y-0.5 pl-4">
-                {decision.reasons.map((r, i) => (
-                  <li key={i}>{r}</li>
-                ))}
-              </ul>
+          <div className="flex flex-wrap items-center gap-1.5 font-semibold">
+            {blocked ? <AlertTriangle size={13} /> : <ShieldCheck size={13} />}
+            {blocked ? "Blocked by policy" : "Passes policy preview"}
+            {estimatedNotional !== undefined && (
+              <span
+                className="con-num font-normal text-[color:var(--con-muted)]"
+                title="Estimated order value from the broker's pre-trade review. Final numbers are re-checked at approval time."
+              >
+                · est. {fmtMoney(estimatedNotional)}
+              </span>
             )}
           </div>
-        </Tooltip>
+          {blocked && decision.reasons.length > 0 && (
+            <ul className="mt-1 list-disc space-y-0.5 pl-4">
+              {decision.reasons.map((r, i) => (
+                <li key={i}>{r}</li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
       {phase !== "checking" && previewError && (
-        <Tooltip
+        <div
           className="mt-2 rounded-md bg-[color:var(--con-warn-soft)] px-2.5 py-1.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]"
-          content="Only the preview failed. Staging still runs the real policy check on the server."
+          title="Only the preview failed. Staging still runs the real policy check on the server."
         >
           <AlertTriangle size={13} className="mr-1.5 inline-block align-[-2px]" />
           {previewError}
-        </Tooltip>
+        </div>
       )}
 
       {/* Actions */}
       <div className="mt-2.5 flex flex-wrap items-center gap-2">
         {phase === "ready" && !blocked && (
-          <Tooltip content="Creates a pending proposal in Approvals. Nothing is bought or sold until you approve it there.">
-            <Btn
-              size="sm"
-              variant="primary"
-              onClick={() => void stage()}
-            >
-              Stage for approval <ArrowRight size={13} />
-            </Btn>
-          </Tooltip>
+          <Btn
+            size="sm"
+            variant="primary"
+            onClick={() => void stage()}
+            title="Creates a pending proposal in Approvals. Nothing is bought or sold until you approve it there."
+          >
+            Stage for approval <ArrowRight size={13} />
+          </Btn>
         )}
         {phase === "staging" && (
           <span className="flex items-center gap-1.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
@@ -302,55 +295,50 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
           </span>
         )}
         {phase === "ready" && (
-          <Tooltip content="Run the policy preview again — guardrails, account state, or prices may have changed.">
-            <Btn
-              size="sm"
-              variant="ghost"
-              onClick={() => void runPreview()}
-            >
-              <RefreshCw size={13} /> Re-check
-            </Btn>
-          </Tooltip>
+          <Btn
+            size="sm"
+            variant="ghost"
+            onClick={() => void runPreview()}
+            title="Run the policy preview again — guardrails, account state, or prices may have changed."
+          >
+            <RefreshCw size={13} /> Re-check
+          </Btn>
         )}
         {(phase === "ready" || phase === "staging") && (
-          <Tooltip content="Dismiss this draft. It only removes the card — nothing was created yet.">
-            <Btn
-              size="sm"
-              variant="ghost"
-              disabled={phase === "staging"}
-              onClick={discard}
-            >
-              <X size={13} /> Discard
-            </Btn>
-          </Tooltip>
+          <Btn
+            size="sm"
+            variant="ghost"
+            disabled={phase === "staging"}
+            onClick={discard}
+            title="Dismiss this draft. It only removes the card — nothing was created yet."
+          >
+            <X size={13} /> Discard
+          </Btn>
         )}
         {phase === "staged" && proposalId && (
           <>
             <span className="flex items-center gap-1.5 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-pos)]">
               <Check size={13} /> Staged for approval
             </span>
-            <Tooltip
-              content={
+            <Link
+              href="/console/approvals"
+              className="con-btn con-btn-outline con-btn-sm"
+              title={
                 stagedLive
                   ? "Open the Approvals screen. Approving there places a broker order."
                   : "Open the Approvals screen to approve or reject this proposal."
               }
             >
-              <Link
-                href="/console/approvals"
-                className="con-btn con-btn-outline con-btn-sm"
-              >
-                Review in Approvals <ArrowRight size={13} />
-              </Link>
-            </Tooltip>
+              Review in Approvals <ArrowRight size={13} />
+            </Link>
             {stagedElsewhere ? (
-              <Tooltip
+              <span
                 className="text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-warn)]"
-                content="Approvals shows the ACTIVE account's proposals, so this one is not visible under the account the console is currently scoped to."
+                title="Approvals shows the ACTIVE account's proposals, so this one is not visible under the account the console is currently scoped to."
               >
                 Staged on {shownScope.accountLabel} ({shownScope.word} · {shownScope.phrase}) — the console has since
                 switched accounts. Switch back to that account to review it in Approvals.
-              </Tooltip>
+              </span>
             ) : (
               <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
                 {stagedLive ? "Approving there places a real-money order." : "Nothing places until you approve it there."}

@@ -29,24 +29,48 @@ export function llmModelFamily(model: string | undefined): LlmModelFamily {
   return "openai";
 }
 
-// Cross-family Red Team DEFAULT removed 2026-07-07 (owner directive: no model is a default for
-// anything, ever). The Red Team model is the user's explicit `redTeamLlmModel` or nothing;
-// resolveRoleModel returns "" when unset and the caller fails closed. Independence (a different
-// model/provider from Green) is the user's choice, nudged by a non-blocking Settings hint, never
-// auto-defaulted.
-
 /**
- * Resolve the model for a team role. NO DEFAULTS (owner directive 2026-07-07): the Red Team is the
- * user's explicit `redTeamLlmModel` or "" (unconfigured — the caller MUST fail closed); it NEVER
- * falls back to the Green model or a cross-family default. Green/support resolve to the user's
- * `llmModel` or "".
+ * Cross-family default Bear/reviewer model for each Bull family (composite review B/medium/S: "Green
+ * and Red resolve to the same model by default ... one greedy same-family Bear surfaces one failure
+ * mode"). Picked as a cheap, fast, widely-available model from a DIFFERENT provider than the given
+ * family, so an unconfigured `redTeamLlmModel` no longer echoes the Bull's own blind spots. Anthropic
+ * Bulls default to a cheap OpenAI reviewer (mirrors the same cross-family intent in the other
+ * direction); every non-Anthropic Bull defaults to Claude Haiku (the same model
+ * `debateProposal`'s Anthropic path already uses by default).
  */
+const CROSS_FAMILY_RED_TEAM_DEFAULT: Record<LlmModelFamily, string> = {
+  openai: "claude-haiku-4-5",
+  anthropic: "gpt-5.4-mini",
+  xai: "claude-haiku-4-5",
+  gemini: "claude-haiku-4-5",
+  mistral: "claude-haiku-4-5",
+  deepseek: "claude-haiku-4-5"
+};
+
+/** The default Bear/reviewer model when the policy hasn't set an explicit `redTeamLlmModel`. */
+export function defaultCrossFamilyRedTeamModel(bullModel: string | undefined): string {
+  return CROSS_FAMILY_RED_TEAM_DEFAULT[llmModelFamily(bullModel)];
+}
+
 function resolveRoleModel(
   policy: { llmModel?: string | null; redTeamLlmModel?: string | null } | undefined | null,
-  role: LlmTeamRole
+  role: LlmTeamRole,
+  userId: string
 ): string {
-  if (role === "red") return policy?.redTeamLlmModel?.trim() || "";
-  return resolveOpenAiModel(policy);
+  const redModel = role === "red" ? policy?.redTeamLlmModel?.trim() : undefined;
+  if (redModel) return redModel;
+  const bullModel = resolveOpenAiModel(policy);
+  if (role !== "red") return bullModel;
+  // Cross-family Bear default: only when the owner hasn't set an explicit redTeamLlmModel. Redirect
+  // ONLY when a credential for the cross-family model's provider is actually available — an
+  // environment/account with just one provider key configured keeps today's same-family fallback
+  // (no silent fail-closed routing-to-human-review from defaulting to a provider nobody connected;
+  // this app's guardrails are advisory, never a paternalistic default that breaks unconfigured
+  // setups). Falls back to the Bull's own model when the cross-family provider has no credential.
+  const crossFamilyModel = defaultCrossFamilyRedTeamModel(bullModel);
+  const crossFamilyProvider = llmModelFamily(crossFamilyModel);
+  const hasCrossFamilyCredential = Boolean(resolveLlmCredential(crossFamilyProvider, userId).key);
+  return hasCrossFamilyCredential ? crossFamilyModel : bullModel;
 }
 
 /**
@@ -67,7 +91,7 @@ export function resolveLlmEndpoint(
   role: LlmTeamRole = "green"
 ): LlmEndpoint {
 
-  const model = resolveRoleModel(policy, role);
+  const model = resolveRoleModel(policy, role, userId);
 
   if (/^claude/i.test(model)) {
     const url =

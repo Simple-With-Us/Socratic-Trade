@@ -75,9 +75,9 @@ if [[ -z "${LAND_ALLOW_DIRTY:-}" ]]; then
 fi
 
 # ── 1b. self-heal the pre-push hook ────────────────────────────────────────
-# core.hooksPath is per-worktree and NOT inherited, so a freshly-created worktree
-# would silently have NO hooks — the direct-push-to-main guard would never fire.
-# land.sh is the canonical installer: make every land path self-heal it.
+# core.hooksPath is per-worktree and NOT inherited, so a worktree created outside
+# setup-agent-previews.sh would silently have NO hooks — the direct-push-to-main
+# guard would never fire. Make every land path self-heal it.
 EXPECTED_HOOKS="scripts/githooks"
 CURRENT_HOOKS="$(git config core.hooksPath 2>/dev/null || echo "")"
 if [[ "$CURRENT_HOOKS" != "$EXPECTED_HOOKS" ]]; then

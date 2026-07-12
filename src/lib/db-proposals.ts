@@ -10,27 +10,6 @@ import type {
   TradeProposal
 } from "./types";
 
-/**
- * Thesis-tag split-brain fallback (2026-07-10 audit fix): `trade_thesis_tag` / `entry_market_regime`
- * are dedicated columns, but historically insertProposal left them NULL while the same values were
- * already embedded on the `proposal` object. Every reader that surfaces these fields falls back to
- * extracting them off the (already-parsed) proposal payload so a NULL column doesn't hide data that
- * exists right next to it. `parsedProposal` is untyped on purpose -- callers pass either the raw
- * pre-JSON.stringify object (insertProposal) or the JSON.parse'd row (readers), neither of which is
- * safely assignable to `TradeProposal` at this point.
- */
-function nonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function proposalTagFallbacks(parsedProposal: unknown): { tradeThesisTag?: string; entryMarketRegime?: string } {
-  const record = parsedProposal as { tradeThesisTag?: unknown; entryMarketRegime?: unknown } | null | undefined;
-  return {
-    tradeThesisTag: nonEmptyString(record?.tradeThesisTag),
-    entryMarketRegime: nonEmptyString(record?.entryMarketRegime)
-  };
-}
-
 export function listPendingProposals(accountNumber: string, userId: string = "local"): PendingProposal[] {
   type RawRow = {
     id: string;
@@ -150,20 +129,18 @@ export function getProposal(id: string, userId: string = "local"):
     .prepare("SELECT id, run_id, account_number, created_at, proposal, decision, review, estimated_notional, status, trade_thesis_tag, entry_market_regime, execution_mode FROM trade_proposals WHERE id = ? AND user_id = ?")
     .get(id, userId) as RawRow | undefined;
   if (!row) return undefined;
-  const parsedProposal = JSON.parse(row.proposal) as TradeProposal;
-  const fallback = proposalTagFallbacks(parsedProposal);
   return {
     id: row.id,
     runId: row.run_id,
     accountNumber: row.account_number,
     createdAt: row.created_at,
-    proposal: parsedProposal,
+    proposal: JSON.parse(row.proposal) as TradeProposal,
     decision: JSON.parse(row.decision) as PolicyDecision,
     review: row.review ? (JSON.parse(row.review) as ReviewedOrder) : undefined,
     estimatedNotional: row.estimated_notional ?? undefined,
     status: row.status,
-    tradeThesisTag: row.trade_thesis_tag ?? fallback.tradeThesisTag ?? undefined,
-    entryMarketRegime: row.entry_market_regime ?? fallback.entryMarketRegime ?? undefined,
+    tradeThesisTag: row.trade_thesis_tag ?? undefined,
+    entryMarketRegime: row.entry_market_regime ?? undefined,
     executionMode: row.execution_mode ? (row.execution_mode as ExecutionMode) : undefined
   };
 }
@@ -202,20 +179,18 @@ export function getProposalsByIds(ids: string[], userId: string = "local"): Map<
     )
     .all(userId, ...distinct) as RawRow[];
   for (const row of rows) {
-    const parsedProposal = JSON.parse(row.proposal) as TradeProposal;
-    const fallback = proposalTagFallbacks(parsedProposal);
     result.set(row.id, {
       id: row.id,
       runId: row.run_id,
       accountNumber: row.account_number,
       createdAt: row.created_at,
-      proposal: parsedProposal,
+      proposal: JSON.parse(row.proposal) as TradeProposal,
       decision: JSON.parse(row.decision) as PolicyDecision,
       review: row.review ? (JSON.parse(row.review) as ReviewedOrder) : undefined,
       estimatedNotional: row.estimated_notional ?? undefined,
       status: row.status,
-      tradeThesisTag: row.trade_thesis_tag ?? fallback.tradeThesisTag ?? undefined,
-      entryMarketRegime: row.entry_market_regime ?? fallback.entryMarketRegime ?? undefined,
+      tradeThesisTag: row.trade_thesis_tag ?? undefined,
+      entryMarketRegime: row.entry_market_regime ?? undefined,
       executionMode: row.execution_mode ? (row.execution_mode as ExecutionMode) : undefined
     });
   }
@@ -235,7 +210,7 @@ export function updateProposalStatus(
 ): void {
   getDb()
     .prepare(
-      "UPDATE trade_proposals SET status = ?, order_id = COALESCE(?, order_id), review = COALESCE(?, review), estimated_notional = COALESCE(?, estimated_notional), ref_id = COALESCE(?, ref_id), error_message = COALESCE(?, error_message), decision = COALESCE(?, decision), placed_at = CASE WHEN ? IN ('placed', 'paper', 'placing') THEN COALESCE(placed_at, CURRENT_TIMESTAMP) ELSE placed_at END WHERE id = ? AND user_id = ?"
+      "UPDATE trade_proposals SET status = ?, order_id = COALESCE(?, order_id), review = COALESCE(?, review), estimated_notional = COALESCE(?, estimated_notional), ref_id = COALESCE(?, ref_id), error_message = COALESCE(?, error_message), decision = COALESCE(?, decision) WHERE id = ? AND user_id = ?"
     )
     .run(
       status,
@@ -245,7 +220,6 @@ export function updateProposalStatus(
       refId ?? null,
       errorMessage ?? null,
       decision ? JSON.stringify(decision) : null,
-      status,
       id,
       userId
     );
@@ -264,15 +238,11 @@ export function claimProposalForExecution(
   id: string,
   toStatus: string,
   userId: string = "local",
-  opts: { review?: ReviewedOrder; estimatedNotional?: number; refId?: string; executionMode?: ExecutionMode; proposal?: TradeProposal } = {}
+  opts: { review?: ReviewedOrder; estimatedNotional?: number; refId?: string; executionMode?: ExecutionMode } = {}
 ): boolean {
-  // `proposal` lets the approval path persist EXECUTION-TIME sizing (a broker-minimum bump, an
-  // approval-time protective-exit reprice) into the row before placement. Crash-recovery
-  // (flagStalePlacingIntents) books fills from this stored JSON, so it must reflect the order
-  // actually sent to the broker, not the original ask — and Recent/Activity hydrate from it too.
   const info = getDb()
     .prepare(
-      "UPDATE trade_proposals SET status = ?, review = COALESCE(?, review), estimated_notional = COALESCE(?, estimated_notional), ref_id = COALESCE(?, ref_id), execution_mode = COALESCE(?, execution_mode), proposal = COALESCE(?, proposal) WHERE id = ? AND user_id = ? AND status = 'proposed'"
+      "UPDATE trade_proposals SET status = ?, review = COALESCE(?, review), estimated_notional = COALESCE(?, estimated_notional), ref_id = COALESCE(?, ref_id), execution_mode = COALESCE(?, execution_mode) WHERE id = ? AND user_id = ? AND status = 'proposed'"
     )
     .run(
       toStatus,
@@ -280,7 +250,6 @@ export function claimProposalForExecution(
       opts.estimatedNotional ?? null,
       opts.refId ?? null,
       opts.executionMode ?? null,
-      opts.proposal ? JSON.stringify(opts.proposal) : null,
       id,
       userId
     );
@@ -313,29 +282,6 @@ export function transitionProposalIfPending(
       id,
       userId
     );
-  return info.changes === 1;
-}
-
-/**
- * Persist an APPROVAL-TIME repriced order back onto a still-pending proposal row, so
- * Recent/Activity and getProposal show the order the broker actually received (or will receive on
- * re-approval) rather than the stale generation-time price the reprice replaced. Atomic CAS on
- * status='proposed' (same shape as claimProposalForExecution): a card that expired or was rejected
- * while the approval was in flight is never rewritten — the caller must treat `false` as
- * "no longer pending" and stop. `estimatedNotional` refreshes alongside the JSON so a live typed
- * confirmation re-check matches the repriced order, COALESCE-kept when the caller cannot estimate
- * (e.g. a degrade to a market order with no fresh limit price).
- */
-export function updatePendingProposalReprice(
-  id: string,
-  input: { proposal: TradeProposal; estimatedNotional?: number },
-  userId: string = "local"
-): boolean {
-  const info = getDb()
-    .prepare(
-      "UPDATE trade_proposals SET proposal = ?, estimated_notional = COALESCE(?, estimated_notional) WHERE id = ? AND user_id = ? AND status = 'proposed'"
-    )
-    .run(JSON.stringify(input.proposal), input.estimatedNotional ?? null, id, userId);
   return info.changes === 1;
 }
 
@@ -406,13 +352,6 @@ export function insertProposal(input: {
   /** The versioned strategy prompt (STRATEGY_PROMPT_VERSION) that produced this proposal. */
   promptVersion?: string;
 }): void {
-  // input.proposal arrives as `unknown` (it's whatever the caller assembled), but the LLM/strategy
-  // path routinely stamps tradeThesisTag/entryMarketRegime directly on the proposal object without
-  // threading them through as separate insertProposal args. Fall back to extracting them from the
-  // proposal object itself so the dedicated columns (which the learning loop's SQL reads) don't stay
-  // NULL forever while the same data sits unread inside the `proposal` blob.
-  const { tradeThesisTag: derivedThesisTag, entryMarketRegime: derivedRegime } = proposalTagFallbacks(input.proposal);
-
   getDb()
     .prepare(
       "INSERT INTO trade_proposals (id, user_id, run_id, account_number, created_at, proposal, decision, review, estimated_notional, ref_id, order_id, status, trade_thesis_tag, entry_market_regime, execution_mode, prompt_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -430,8 +369,8 @@ export function insertProposal(input: {
       input.refId ?? null,
       input.orderId ?? null,
       input.status,
-      input.tradeThesisTag ?? derivedThesisTag ?? null,
-      input.entryMarketRegime ?? derivedRegime ?? null,
+      input.tradeThesisTag ?? null,
+      input.entryMarketRegime ?? null,
       input.executionMode ?? null,
       input.promptVersion ?? null
     );

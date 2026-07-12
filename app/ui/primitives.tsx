@@ -23,7 +23,7 @@ const buttonBase =
 
 const buttonVariants: Record<ButtonVariant, string> = {
   primary: "bg-accent text-accent-fg hover:brightness-110 shadow-sm",
-  danger: "bg-neg text-neg-fg hover:brightness-110 shadow-sm",
+  danger: "bg-down text-down-fg hover:brightness-110 shadow-sm",
   ghost: "border border-line bg-surface text-fg hover:bg-surface-2",
   subtle: "bg-surface-2 text-fg hover:bg-surface-3",
   accentSoft: "bg-accent/12 text-accent hover:bg-accent/20 border border-accent/20"
@@ -106,13 +106,11 @@ export function PanelHeader({
 }
 
 /* ── Chip / Badge ────────────────────────────────────────────────────────── */
-/* Tone vocabulary standardized on pos/neg (UI-audit finding 1.2): "up/down" collided with
- * price-direction language, and the console system already used pos/neg. */
-type Tone = "neutral" | "pos" | "neg" | "warn" | "info" | "accent";
+type Tone = "neutral" | "up" | "down" | "warn" | "info" | "accent";
 const toneClasses: Record<Tone, string> = {
   neutral: "bg-surface-3 text-muted",
-  pos: "bg-pos/15 text-pos",
-  neg: "bg-neg/15 text-neg",
+  up: "bg-up/15 text-up",
+  down: "bg-down/15 text-down",
   warn: "bg-warn/15 text-warn",
   info: "bg-info/15 text-info",
   accent: "bg-accent/15 text-accent"
@@ -140,8 +138,8 @@ export function Chip({
   );
 }
 
-export function Dot({ tone = "pos", pulse }: { tone?: Tone; pulse?: boolean }) {
-  const color = { pos: "bg-pos", neg: "bg-neg", warn: "bg-warn", info: "bg-info", accent: "bg-accent", neutral: "bg-faint" }[tone];
+export function Dot({ tone = "up", pulse }: { tone?: Tone; pulse?: boolean }) {
+  const color = { up: "bg-up", down: "bg-down", warn: "bg-warn", info: "bg-info", accent: "bg-accent", neutral: "bg-faint" }[tone];
   return (
     <span className="relative flex h-2 w-2">
       {pulse && <span className={cn("absolute inline-flex h-full w-full animate-ping rounded-full opacity-70", color)} />}
@@ -154,12 +152,10 @@ export function Dot({ tone = "pos", pulse }: { tone?: Tone; pulse?: boolean }) {
 export function Switch({
   checked,
   onChange,
-  disabled,
   label
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
-  disabled?: boolean;
   label?: string;
 }) {
   return (
@@ -168,13 +164,18 @@ export function Switch({
       role="switch"
       aria-checked={checked}
       aria-label={label}
-      disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(
-        "group relative inline-flex h-6 w-11 shrink-0 items-center rounded-full bg-surface-3 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 aria-checked:bg-accent disabled:opacity-50 disabled:pointer-events-none"
+        "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2",
+        checked ? "bg-accent" : "bg-surface-3"
       )}
     >
-      <span className="inline-block h-4 w-4 translate-x-1 transform rounded-full bg-white shadow transition-transform group-aria-checked:translate-x-6" />
+      <span
+        className={cn(
+          "inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform",
+          checked ? "translate-x-6" : "translate-x-1"
+        )}
+      />
     </button>
   );
 }
@@ -197,7 +198,7 @@ export function Segmented<T extends string>({
       {options.map((opt) => {
         const active = value === opt.value;
         const activeTone =
-          opt.tone === "neg" ? "bg-neg/20 text-neg" : opt.tone === "warn" ? "bg-warn/20 text-warn" : "bg-surface-3 text-fg";
+          opt.tone === "down" ? "bg-down/20 text-down" : opt.tone === "warn" ? "bg-warn/20 text-warn" : "bg-surface-3 text-fg";
         return (
           <button
             key={opt.value}
@@ -359,57 +360,6 @@ function HelpTip({
 export const inputClass =
   "w-full rounded-lg border border-line bg-bg/60 px-3 py-2 text-sm text-fg outline-none transition-colors placeholder:text-faint focus:border-accent focus:ring-1 focus:ring-accent";
 
-/**
- * Controlled numeric input that fixes the "0."-collapse bug: a plain
- * `value={Number(...)}` input re-renders `"0."` or `"12."` back to `"0"`/`"12"`
- * on every keystroke because `Number("0.")` is a whole number, so the trailing
- * `.` (or `-`, or a mid-typed decimal) can never be typed. This component keeps
- * the raw typed text in local state while focused — so those transient strings
- * survive — while still committing the PARSED number to the caller on every
- * keystroke via `onValueChange`. On blur it drops the raw text and snaps back
- * to whatever canonical string the caller derives from its own committed value
- * (`value` prop), matching the commit-on-blur pattern this replaces.
- */
-export function RawNumInput({
-  value,
-  onValueChange,
-  emptyValue,
-  className,
-  ...props
-}: Omit<React.InputHTMLAttributes<HTMLInputElement>, "value" | "onChange"> & {
-  /** Canonical display value (e.g. `String(current)`), shown whenever not focused. */
-  value: string;
-  /** Called with the parsed number on every keystroke; NaN/empty becomes `emptyValue`. */
-  onValueChange: (parsed: number, raw: string) => void;
-  /** Value passed to `onValueChange` when the field is empty or unparsable. */
-  emptyValue: number;
-}) {
-  const [editText, setEditText] = useState<string | null>(null);
-  return (
-    <input
-      type="number"
-      inputMode="decimal"
-      {...props}
-      value={editText ?? value}
-      className={cn(inputClass, className)}
-      onFocus={(e) => {
-        setEditText(value);
-        props.onFocus?.(e);
-      }}
-      onBlur={(e) => {
-        setEditText(null);
-        props.onBlur?.(e);
-      }}
-      onChange={(e) => {
-        const raw = e.target.value;
-        setEditText(raw);
-        const parsed = Number(raw);
-        onValueChange(raw === "" || !Number.isFinite(parsed) ? emptyValue : parsed, raw);
-      }}
-    />
-  );
-}
-
 export function StatTile({
   label,
   value,
@@ -431,7 +381,7 @@ export function StatTile({
    */
   title?: string;
 }) {
-  const valueTone = tone === "pos" ? "text-pos" : tone === "neg" ? "text-neg" : tone === "warn" ? "text-warn" : "text-fg";
+  const valueTone = tone === "up" ? "text-up" : tone === "down" ? "text-down" : tone === "warn" ? "text-warn" : "text-fg";
   return (
     <Card className="px-4 py-3" title={title}>
       <div className="flex items-center justify-between text-muted">

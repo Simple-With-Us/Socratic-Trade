@@ -12,24 +12,6 @@ export const LLM_REQUIRED_STRATEGY_MESSAGE = "Connect an LLM provider in Setting
 export const LLM_REQUIRED_CHAT_MESSAGE = "Connect an LLM provider in Settings to chat.";
 
 /**
- * Shown when a strategy session is attempted with either team model unchosen. NO MODEL DEFAULTS
- * (owner directive 2026-07-07): both the Green (strategist) and Red (reviewer) models must be
- * explicitly chosen on the Framework page — the strategy never invents one, so it fails closed
- * with this actionable message instead of sending an empty-model request.
- */
-export const LLM_MODEL_REQUIRED_STRATEGY_MESSAGE =
-  "Choose both the Green Team (strategist) and Red Team (reviewer) models under Framework → Models to run a strategy session.";
-
-/**
- * Shown when the Strategist model is the rotation sentinel ("__rotate__") but no provider
- * credential resolves for ANY catalog model, so rotation has nothing concrete to serve
- * (eligibleRotationPool is empty). Distinct from LLM_MODEL_REQUIRED_STRATEGY_MESSAGE: the model
- * CHOICE is made (rotate); it's the provider KEYS that are missing.
- */
-export const LLM_ROTATION_EMPTY_POOL_STRATEGY_MESSAGE =
-  "Rotation is selected, but no provider key resolves for any catalog model, so rotation has nothing to serve. Add a provider key under Settings → API keys (or choose a specific model) to run a strategy session.";
-
-/**
  * Thrown deep in the strategy path (the old silent no-key fallback site) so the no-LLM-credential
  * state surfaces as a real failure rather than a fabricated rule-based proposal. The API/UI layers
  * also pre-check with userHasAnyLlmCredential and 4xx early; this is the defense-in-depth backstop.

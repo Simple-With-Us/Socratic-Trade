@@ -14,7 +14,7 @@ import { fulfillMarketDataDemand, getImportedPriceCloses, getImportedSpxCloses, 
 import { emitDashboardEvent } from "./events";
 import { massiveApiBase, reserveMassiveRestCall } from "./market-signals/massive";
 import { fetchRobinhoodHistoricals } from "./robinhood";
-import { appAClosesToBars, congressReadsEnabled, getCongressTradeClient } from "./api-clients/congress";
+import { appAClosesToBars, getAppAPrices, getAppASpx } from "./congress-trade-client";
 import { BROWSER_UA, politeFetchJson, politeFetchText } from "./web-sources/http";
 
 const DEFAULT_TTL_MS = 30 * 60_000; // daily bars only move intraday on the last candle
@@ -354,20 +354,7 @@ export function clearHistoryCache(): void {
  * so the cascade falls through to App B's own providers on a miss. Self-guarded inside the client.
  */
 async function fetchAppAHistory(symbol: string): Promise<OHLCBar[] | null> {
-  if (!congressReadsEnabled()) return null;
-
-  let closes: any[] = [];
-  try {
-    const client = getCongressTradeClient();
-    if (symbol === "^GSPC") {
-      closes = await client.getSpx();
-    } else {
-      const resp = await client.getPrices(symbol);
-      closes = resp?.closes ?? [];
-    }
-  } catch (err) {
-    // Ignore error, fallback logic kicks in
-  }
+  const closes = symbol === "^GSPC" ? await getAppASpx() : (await getAppAPrices(symbol))?.closes ?? [];
   const bars = appAClosesToBars(closes);
   return bars.length >= 2 ? bars : null;
 }

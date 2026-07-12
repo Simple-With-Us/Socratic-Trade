@@ -50,19 +50,15 @@ export function massiveApiBase(): string {
 // If the provider-tier watchdog (provider-tier.ts) detected the Massive key is on the FREE tier
 // (e.g. the paid sub lapsed), clamp the effective limit to the free-safe 5/min so we don't 429-storm
 // the raised paid default. Read from the persisted tier status, cached 60s to keep the reserve path
-// cheap. Checks the "local" user's per-user key first (the scheduler runs the tier check for "local"),
-// then falls back to the legacy shared key for backward compat with pre-per-user-scoping data.
-// Defaults to "not free" on any read error, so detection can only ever lower the cap.
+// cheap. Key string mirrors PROVIDER_TIER_STATUS_KEY (kept literal to avoid a massive↔provider-tier
+// import cycle). Defaults to "not free" on any read error, so detection can only ever lower the cap.
 const FREE_SAFE_MAX_CALLS_PER_MINUTE = 5;
 let tierClampCache = { at: 0, free: false };
 function massiveDetectedFree(now: number): boolean {
   if (now - tierClampCache.at < 60_000) return tierClampCache.free;
   let free = false;
   try {
-    // Per-user key (new — the scheduler writes this for "local")
-    let status = getInternalSetting<Record<string, { tier?: string }>>("providerTier:status:local");
-    // Legacy shared key (pre-2026-07-06) — fallback so existing data still clamps
-    if (!status) status = getInternalSetting<Record<string, { tier?: string }>>("providerTier:status");
+    const status = getInternalSetting<Record<string, { tier?: string }>>("providerTier:status");
     free = status?.massive?.tier === "free";
   } catch {
     free = false;

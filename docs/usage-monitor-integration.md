@@ -72,17 +72,6 @@ runStrategyOnce entry ──► usage-budget.ts ──GET /api/budget-status─�
   `service:"broker"`; market-data providers use their `fetchWithRetry` service label
   (finnhub, fmp, yahoo-finance, tradier, …).
 
-Every delivery now carries a fixed-length explicit idempotency key: SHA-256 over
-the event kind plus its source identity. LLM and RAG source identities and
-`occurredAt` values come from the same durable local ledger row; broker balance
-metrics share one snapshot identity with metric suffixes; each call-volume lane
-gets a UUID when its aggregate window opens. A failed or ambiguous POST is kept in
-memory and retried with the exact original payload (including key and timestamp),
-using bounded exponential backoff. This preserves transport retry deduplication
-and prevents distinct lanes in one flush from colliding just because they share
-`provider`, `metricType`, and `occurredAt`. The shared five-field fallback remains
-unchanged for other producers.
-
 The event shape mirrors `@jaywedgeworth22/congress-trading-shared`'s
 `UsageTelemetryEventSchema` and the monitor's server parser
 (`src/lib/usage-telemetry.ts`).
@@ -103,9 +92,7 @@ both channels.
 double-counting**:
 
 ```
-spentUsd = fixedMonthlyCostUsd
-         + max(latestSnapshot.totalCost, pushedMeteredMonthToDateUsd)
-         + materializedSubscriptionMonthToDateUsd
+spentUsd = fixedMonthlyCostUsd + max(latestSnapshot.totalCost, pushedMonthToDateUsd)
 ```
 
 `max()` is deliberate: push-primary providers have no poll snapshot (so
@@ -156,16 +143,23 @@ cost even if App B also pushes some events for them. Budget alerts reuse
   e2e coverage of advisory-only / enforced-downgrade / enforced-skip /
   evaluator-failure-fail-open).
 
-## Shared client and idempotency contract
+## Migration to the shared client
 
-`src/lib/usage-monitor-push.ts` uses `createUsageTelemetryClient` from
-`@jaywedgeworth22/congress-trading-shared`. The monitor persists explicit keys and
-deduplicates identical retries. Its deterministic five-field fallback is retained
-for producers that omit a key, but lane/detail fields are deliberately outside
-that compatibility basis. This producer therefore supplies explicit source IDs
-where it has stronger event identity instead of changing the shared algorithm.
-Source IDs are hashed before transmission, which keeps keys below the ingest
-length cap even if an upstream identifier is unexpectedly large.
+The push is hand-rolled here rather than importing `createUsageTelemetryClient`
+because App B's pinned `@jaywedgeworth22/congress-trading-shared@1.0.0` predates
+the `usageTelemetry` export (it landed on the shared repo's
+`feat/usage-telemetry-idempotency-key` branch, v1.1.0). The event shape is already
+the shared contract. To migrate once shared 1.1.0 is published to GitHub Packages
+and App B's pin is bumped:
+
+1. `import { createUsageTelemetryClient } from "@jaywedgeworth22/congress-trading-shared"`.
+2. Replace `postBatch()` in `src/lib/usage-monitor-push.ts` with
+   `createUsageTelemetryClient({ baseUrl, token }).send(events)` — that also gives
+   the deterministic idempotency key for free.
+
+(Note: the monitor's ingest route currently discards `idempotencyKey` — there is no
+dedup column on `ExternalUsageEvent` — so idempotency is a no-op server-side today.
+The push therefore does not retry, to avoid duplicate rows.)
 
 ## Operator setup notes
 
@@ -179,13 +173,11 @@ length cap even if an upstream identifier is unexpectedly large.
 
 ## Known follow-ups (from the 2026-07-01 adversarial review)
 
-- **Dashboard parity (being addressed on API Usage Monitor branch
-  `codex-app-wide-hardening`):** `/api/providers` + `/api/providers/[id]` compute alerts from
+- **Dashboard parity:** `/api/providers` + `/api/providers/[id]` compute alerts from
   the poll snapshot only, so a push-primary provider shows budget alerts in
   `/api/budget-status` but not on its dashboard card. Merging month-to-date
   `ExternalUsageEvent` cost into those endpoints (as `/api/budget-status` already
-  does) aligns them; do not treat this as production-live until that monitor PR is merged and
-  its Render revision is verified.
+  does) would align them. Deferred — it's dashboard-UI scope, explicitly out of C2.
 - **Orphaned pushed providers:** a pushed `provider` string with no matching Provider
   row is silently excluded from budget math (fails safe to 0). Consider surfacing
   unmatched providers for operator visibility.

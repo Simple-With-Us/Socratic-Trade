@@ -43,33 +43,6 @@ export function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
 }
 
 /**
- * Optional out-param (review fix, 2026-07-06): when passed, `dedupeSimilar` reports which INPUT
- * indices it dropped for each of the two genuinely-different reasons a candidate can be absent
- * from the return value:
- *  - `genuineDuplicateIndices` — the candidate was, AT LEAST ONCE (first pass or back-fill),
- *    compared via Jaccard similarity against the kept set and found >= `threshold` similar to an
- *    already-kept chunk. This is a real near-dup judgment — it can happen in the first pass (where
- *    the candidate is `deferred` for a possible back-fill retry) or be reconfirmed in back-fill;
- *    either way it counts once it has ever been judged similar.
- *  - `neverReachedIndices` — the candidate was NEVER compared at all, in either pass, because
- *    `kept.length >= limit` had already been hit before its turn came up. This is pure
- *    top-`limit` cap truncation, NOT a duplicate judgment — `dedupeSimilar` would have kept it (or
- *    judged it a dup) if `limit` had been higher, but it never got the chance to say which. Note
- *    this can ONLY happen on a candidate's FIRST visit: a `deferred` candidate (already judged a
- *    duplicate once in the first pass) that hits a full cap during back-fill is still a genuine
- *    duplicate — it was compared, just never re-confirmed — so it stays in
- *    `genuineDuplicateIndices`, not `neverReachedIndices`.
- *
- * Every input index ends up in exactly one of: the returned `kept` array, `genuineDuplicateIndices`,
- * or `neverReachedIndices`. Passing this param does not change `dedupeSimilar`'s return value or
- * behavior in any way — it only adds bookkeeping around the existing loops.
- */
-export interface DedupeSimilarReport {
-  genuineDuplicateIndices: number[];
-  neverReachedIndices: number[];
-}
-
-/**
  * Greedy near-duplicate suppression with back-fill. Walks `pool` (already ranked; earlier =
  * higher priority) and keeps each candidate unless it's >= `threshold` Jaccard-similar to a chunk
  * already kept. A first pass fills up to `limit` distinct (non-duplicate) chunks; a second pass
@@ -81,25 +54,13 @@ export interface DedupeSimilarReport {
  * @param limit     Target result count (same `limit` the caller will `.slice(0, limit)` to).
  * @param threshold Jaccard similarity at/above which a candidate is considered a near-duplicate
  *                  of an already-kept chunk and is dropped (back-filled from later candidates).
- * @param report    Optional out-param (see `DedupeSimilarReport`) — when supplied, populated with
- *                  which input indices were dropped as genuine near-duplicates vs never reached
- *                  due to the `limit` cap. Omitted by every pre-existing caller; purely additive.
  */
 export function dedupeSimilar<T extends { metadata?: { text?: unknown } }>(
   pool: T[],
   limit: number,
-  threshold: number,
-  report?: DedupeSimilarReport
+  threshold: number
 ): T[] {
-  if (!Array.isArray(pool) || pool.length <= 1 || limit <= 0) {
-    // Nothing is dropped in this early-return shape (pool passed through unchanged) — populate an
-    // empty report for a caller that unconditionally reads it.
-    if (report) {
-      report.genuineDuplicateIndices = [];
-      report.neverReachedIndices = [];
-    }
-    return pool;
-  }
+  if (!Array.isArray(pool) || pool.length <= 1 || limit <= 0) return pool;
 
   const shingles = pool.map((m) => {
     const text = typeof m?.metadata?.text === "string" ? m.metadata.text : "";
@@ -109,26 +70,12 @@ export function dedupeSimilar<T extends { metadata?: { text?: unknown } }>(
   const kept: T[] = [];
   const keptShingles: Set<string>[] = [];
   const deferred: number[] = [];
-  const genuineDuplicateIndices: number[] = [];
-  const neverReachedIndices: number[] = [];
 
   for (let i = 0; i < pool.length; i++) {
-    if (kept.length >= limit) {
-      // The cap was already hit before this candidate was ever compared against the kept set —
-      // pure limit-cap truncation, not a dup judgment. Matches the ORIGINAL (pre-report) loop's
-      // `break`: nothing past this point in the first pass is examined either, same as before.
-      neverReachedIndices.push(i);
-      continue;
-    }
+    if (kept.length >= limit) break;
     const candidateShingles = shingles[i]!;
     const isDuplicate = candidateShingles.size > 0 && keptShingles.some((k) => jaccardSimilarity(candidateShingles, k) >= threshold);
     if (isDuplicate) {
-      // Judged a duplicate HERE, in the first pass — this candidate has now been compared at
-      // least once and found similar, so it's a genuine duplicate regardless of what happens to
-      // it in back-fill below (a full cap during back-fill means "never re-confirmed", not "never
-      // judged" — see the `deferred` handling below, which does NOT re-add this index to
-      // `neverReachedIndices`).
-      genuineDuplicateIndices.push(i);
       deferred.push(i);
       continue;
     }
@@ -140,27 +87,13 @@ export function dedupeSimilar<T extends { metadata?: { text?: unknown } }>(
   // something kept, allow deferred candidates back in (still checked against the final kept
   // set) rather than returning an artificially short list when the pool actually had more
   // (near-duplicate, but not identical, and still relevant) candidates available.
-  //
-  // Each `deferred` index (already in `genuineDuplicateIndices` from its first-pass judgment
-  // above) gets a SECOND chance here: if it turns out NOT similar to the current kept set, it's
-  // un-classified as a duplicate and kept instead. If the cap fills up before its turn, it stays
-  // exactly as first classified — a genuine duplicate, since that first judgment is still valid
-  // (never re-checked, but never contradicted either).
   for (const i of deferred) {
-    if (kept.length >= limit) continue;
+    if (kept.length >= limit) break;
     const candidateShingles = shingles[i]!;
     const isDuplicate = candidateShingles.size > 0 && keptShingles.some((k) => jaccardSimilarity(candidateShingles, k) >= threshold);
-    if (isDuplicate) continue; // reconfirmed duplicate — already in genuineDuplicateIndices
-    // Not a duplicate against the (possibly grown) kept set after all — un-classify it and keep it.
-    const idx = genuineDuplicateIndices.indexOf(i);
-    if (idx !== -1) genuineDuplicateIndices.splice(idx, 1);
+    if (isDuplicate) continue;
     kept.push(pool[i]!);
     keptShingles.push(candidateShingles);
-  }
-
-  if (report) {
-    report.genuineDuplicateIndices = genuineDuplicateIndices;
-    report.neverReachedIndices = neverReachedIndices;
   }
 
   return kept;

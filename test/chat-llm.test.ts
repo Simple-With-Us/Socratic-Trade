@@ -295,51 +295,28 @@ describe("getLLM provider routing", () => {
     if (savedKey !== undefined) process.env.OPENAI_API_KEY = savedKey;
   });
 
-  it("returns MockLLM when CHAT_LLM=openai + key but NO explicit CHAT_LLM_MODEL (no model defaults)", () => {
+  it("returns OpenAILLM when CHAT_LLM=openai and OPENAI_API_KEY is set", () => {
     const savedLlm = process.env.CHAT_LLM;
     const savedKey = process.env.OPENAI_API_KEY;
-    const savedModel = process.env.CHAT_LLM_MODEL;
     process.env.CHAT_LLM = "openai";
     process.env.OPENAI_API_KEY = "sk-test-key";
-    delete process.env.CHAT_LLM_MODEL;
-    const llm = getLLM();
-    expect(llm).toBeInstanceOf(MockLLM);
-    process.env.CHAT_LLM = savedLlm;
-    if (savedKey !== undefined) process.env.OPENAI_API_KEY = savedKey;
-    else delete process.env.OPENAI_API_KEY;
-    if (savedModel !== undefined) process.env.CHAT_LLM_MODEL = savedModel;
-  });
-
-  it("returns OpenAILLM when CHAT_LLM=openai, OPENAI_API_KEY and CHAT_LLM_MODEL are set", () => {
-    const savedLlm = process.env.CHAT_LLM;
-    const savedKey = process.env.OPENAI_API_KEY;
-    const savedModel = process.env.CHAT_LLM_MODEL;
-    process.env.CHAT_LLM = "openai";
-    process.env.OPENAI_API_KEY = "sk-test-key";
-    process.env.CHAT_LLM_MODEL = "gpt-4.1-mini";
     const llm = getLLM();
     expect(llm).toBeInstanceOf(OpenAILLM);
     process.env.CHAT_LLM = savedLlm;
     if (savedKey !== undefined) process.env.OPENAI_API_KEY = savedKey;
     else delete process.env.OPENAI_API_KEY;
-    if (savedModel !== undefined) process.env.CHAT_LLM_MODEL = savedModel;
-    else delete process.env.CHAT_LLM_MODEL;
   });
 
-  it("returns AnthropicLLM when CHAT_LLM=anthropic, ANTHROPIC_API_KEY and CHAT_LLM_MODEL are set", () => {
+  it("returns AnthropicLLM when CHAT_LLM=anthropic and ANTHROPIC_API_KEY is set", () => {
     const savedLlm = process.env.CHAT_LLM;
     const savedKey = process.env.ANTHROPIC_API_KEY;
-    const savedModel = process.env.CHAT_LLM_MODEL;
     process.env.CHAT_LLM = "anthropic";
     process.env.ANTHROPIC_API_KEY = "ant-test-key";
-    process.env.CHAT_LLM_MODEL = "claude-haiku-4-5";
     const llm = getLLM();
     expect(llm).toBeInstanceOf(AnthropicLLM);
     process.env.CHAT_LLM = savedLlm;
     if (savedKey !== undefined) process.env.ANTHROPIC_API_KEY = savedKey;
     else delete process.env.ANTHROPIC_API_KEY;
-    if (savedModel !== undefined) process.env.CHAT_LLM_MODEL = savedModel;
-    else delete process.env.CHAT_LLM_MODEL;
   });
 });
 

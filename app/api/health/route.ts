@@ -1,29 +1,50 @@
 import { getInternalSetting, getServiceHealthSummaries, databasePath, resolveApiKeyWithSource, alertStorageWarning } from "@/lib/db";
 import { HEALTH_REASON_CONSECUTIVE_FAILURES } from "@/lib/db-health";
 import { getProviderTierStatus } from "@/lib/provider-tier";
-import {
-  assessLitestreamRuntimeHealth,
-  defaultLitestreamStatePath,
-  getLitestreamRuntimeHealth,
-  runtimeReleaseIdentity
-} from "@/lib/runtime-health";
 import { getLease } from "@/lib/scheduler-lease";
-import { statSync, statfsSync } from "fs";
-import { dirname } from "path";
+import { statSync, statfsSync, readdirSync } from "fs";
+import { dirname, join } from "path";
 
 export const dynamic = "force-dynamic";
+
+// Litestream replication freshness. Prod runs `litestream replicate` to R2 (see docs/litestream.md),
+// so there is NO local `<dbPath>-litestream` sidecar dir — the age must be read from a state source
+// that the litestream launcher actually writes. LITESTREAM_STATE_PATH points at that source (a dir or
+// a file whose mtime advances on each successful sync). It falls back to the legacy `<dbPath>-litestream`
+// sidecar only when the env is unset (0.4.x-style local replicas / dev).
+//
+// Returns:
+//   { ageSeconds: number }  — freshness known (state source found).
+//   { unknown: true }       — state source unreadable/absent: freshness is NOT confirmed healthy.
+// The old behavior (silent null) let a stale R2 replica read as healthy; "unknown" is honest instead.
+function getLitestreamFreshness(dbPath: string): { ageSeconds: number } | { unknown: true } {
+  const statePath = process.env.LITESTREAM_STATE_PATH?.trim() || `${dbPath}-litestream`;
+  try {
+    let newestMs = 0;
+    const scan = (target: string) => {
+      const stat = statSync(target);
+      if (stat.isDirectory()) {
+        for (const file of readdirSync(target)) scan(join(target, file));
+      } else if (stat.mtimeMs > newestMs) {
+        newestMs = stat.mtimeMs;
+      }
+    };
+    scan(statePath);
+    if (newestMs === 0) return { unknown: true };
+    return { ageSeconds: Math.round((Date.now() - newestMs) / 1000) };
+  } catch {
+    return { unknown: true };
+  }
+}
 
 // Real liveness probe (was an unconditional {ok:true}). A health check that can never fail is
 // worse than none for a system that can hold real positions — it hides outages. This probes:
 //   - DB reachability (the getInternalSetting read throws if SQLite is unwritable/locked), and
 //   - scheduler liveness (age of the last tick heartbeat; stale ⇒ autonomy/stops aren't running).
 // Returns 503 when a critical check fails so PM2/uptime tooling can act.
-export async function GET() {
+export function GET() {
   const checks: Record<string, unknown> = {};
   let ok = true;
-
-  const release = runtimeReleaseIdentity();
-  checks.release = release;
 
   let lastTick: string | undefined;
   try {
@@ -152,20 +173,15 @@ export async function GET() {
     const dbPath = databasePath();
     const walPath = `${dbPath}-wal`;
     const dbDir = dirname(dbPath);
-    let latestLocalActivityAtMs = 0;
 
     let dbSizeBytes = 0;
     try {
-      const dbStat = statSync(dbPath);
-      dbSizeBytes = dbStat.size;
-      latestLocalActivityAtMs = Math.max(latestLocalActivityAtMs, dbStat.mtimeMs);
+      dbSizeBytes = statSync(dbPath).size;
     } catch {}
 
     let walSizeBytes = 0;
     try {
-      const walStat = statSync(walPath);
-      walSizeBytes = walStat.size;
-      latestLocalActivityAtMs = Math.max(latestLocalActivityAtMs, walStat.mtimeMs);
+      walSizeBytes = statSync(walPath).size;
     } catch {}
 
     let freeBytes = 0;
@@ -176,21 +192,11 @@ export async function GET() {
       totalBytes = stats.blocks * stats.bsize;
     } catch {}
 
-    const liveMode = process.env.DB_BOOTSTRAP === "live";
-    const freshness = await getLitestreamRuntimeHealth({
-      dbPath,
-      statePath: process.env.LITESTREAM_STATE_PATH?.trim() || defaultLitestreamStatePath(dbPath),
-      // File metadata does not prove an R2 upload and may be expensive to scan. In live
-      // mode the bounded IPC source is therefore the only accepted runtime signal.
-      allowFileFallback: !liveMode
-    });
-    const litestreamAgeSeconds = freshness.state === "known" ? freshness.ageSeconds : null;
-    const litestreamState = freshness.state;
-    const litestreamAssessment = assessLitestreamRuntimeHealth(freshness, {
-      liveMode,
-      processUptimeSeconds: release.processUptimeSeconds,
-      latestLocalActivityAtMs: latestLocalActivityAtMs || null
-    });
+    const freshness = getLitestreamFreshness(dbPath);
+    const litestreamAgeSeconds = "ageSeconds" in freshness ? freshness.ageSeconds : null;
+    // "unknown" means the state source couldn't be read — freshness is NOT confirmed healthy
+    // (distinct from a real, fresh age). Surface it honestly rather than as a healthy null.
+    const litestreamState: "known" | "unknown" = "ageSeconds" in freshness ? "known" : "unknown";
 
     checks.storage = {
       dbSizeBytes,
@@ -198,40 +204,28 @@ export async function GET() {
       freeBytes,
       totalBytes,
       litestreamAgeSeconds,
-      litestreamState,
-      litestreamStatus: freshness.state === "known" ? freshness.status : null,
-      litestreamLastSyncAt: freshness.state === "known" ? freshness.lastSyncAt : null,
-      litestreamTimestampState: freshness.state === "known" ? freshness.timestampState : null,
-      litestreamSource: freshness.source,
-      litestreamDegradedReasons: litestreamAssessment.reasons
+      litestreamState
     };
 
     // Thresholds:
     // Disk free space < 1 GB or WAL size > 500 MB or Litestream last-sync age > 1 hour (3600s)
     const diskLow = freeBytes > 0 && freeBytes < 1024 * 1024 * 1024;
     const walLarge = walSizeBytes > 500 * 1024 * 1024;
+    const litestreamStale = litestreamAgeSeconds !== null && litestreamAgeSeconds > 3600;
+    // Only alert on unknown freshness when a state path was explicitly configured — an operator who
+    // pointed us at the real source expects it to be readable, so an unreadable one is a real signal.
+    // Without LITESTREAM_STATE_PATH set, "unknown" is the expected default (R2 replicas leave no local
+    // state file) and must not spam alerts.
+    const litestreamUnknownConfigured = litestreamState === "unknown" && !!process.env.LITESTREAM_STATE_PATH?.trim();
 
-    if (diskLow || walLarge || litestreamAssessment.degraded) {
+    if (diskLow || walLarge || litestreamStale || litestreamUnknownConfigured) {
       checks.storageDegraded = true;
 
       // Send a one-shot needs-attention notification/alert via the notifier if not sent recently
       if (diskLow) void alertStorageWarning("disk_space_low", `Free disk space is low: ${(freeBytes / 1024 / 1024).toFixed(2)} MB remaining.`);
       if (walLarge) void alertStorageWarning("wal_size_large", `SQLite WAL file size is large: ${(walSizeBytes / 1024 / 1024).toFixed(2)} MB.`);
-      for (const reason of litestreamAssessment.reasons) {
-        if (reason === "stale") {
-          void alertStorageWarning("litestream_replication_stale", `Litestream WAL replication has not synced in ${Math.round((litestreamAgeSeconds ?? 0) / 60)} minutes.`);
-        } else if (reason === "stopped") {
-          void alertStorageWarning("litestream_replication_stopped", `Litestream reports replication status '${freshness.state === "known" ? freshness.status : "unknown"}'.`);
-        } else if (reason === "never-synced") {
-          void alertStorageWarning("litestream_replication_never_synced", "Litestream is running but has not reported a successful replica upload after the startup grace period.");
-        } else if (reason === "file-unverified") {
-          void alertStorageWarning("litestream_replication_unverified", "Only local Litestream metadata activity is visible in DB_BOOTSTRAP=live mode; successful R2 replication is not verified.");
-        } else if (reason === "unavailable") {
-          void alertStorageWarning("litestream_state_unreadable", "Litestream runtime status is unavailable in DB_BOOTSTRAP=live mode — replication freshness cannot be confirmed.");
-        } else if (reason === "invalid-sync-time") {
-          void alertStorageWarning("litestream_sync_time_invalid", "Litestream reported an invalid or materially future last-sync timestamp.");
-        }
-      }
+      if (litestreamStale) void alertStorageWarning("litestream_replication_stale", `Litestream WAL replication has not synced in ${Math.round(litestreamAgeSeconds! / 60)} minutes.`);
+      if (litestreamUnknownConfigured) void alertStorageWarning("litestream_state_unreadable", `Litestream state source at ${process.env.LITESTREAM_STATE_PATH?.trim()} is unreadable — replication freshness cannot be confirmed.`);
     }
   } catch {
     // never let storage monitoring break the health probe

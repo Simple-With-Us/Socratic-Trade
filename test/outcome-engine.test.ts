@@ -439,30 +439,3 @@ describe("counterfactual materializer — multi-horizon rows on skipped candidat
     expect(coverage.disclosure).toContain("unresolvable");
   });
 });
-
-describe("callLessonLlm — empty-model guard (rotation sentinel / no-defaults)", () => {
-  it("returns undefined and makes NO fetch when the model resolves empty but a key is present", async () => {
-    const userId = `oe-lesson-nomodel-${randomUUID()}`;
-    const { setPolicy, upsertUserApiKey } = await import("../src/lib/db");
-    const { DEFAULT_POLICY } = await import("../src/lib/defaults");
-    const { callLessonLlm } = await import("../src/lib/outcome-engine");
-
-    // Key present (so the old `if (!key)` guard would fall through and POST model:"" → 400 on every
-    // post-mortem lesson call), but the model resolves to "" because the persisted policy carries the
-    // run-scoped rotation sentinel, which resolveLlmEndpoint maps to "" OUTSIDE a strategy run (rotation
-    // resolves only inside runStrategyOnce). The guard must treat the blank model as unconfigured and
-    // skip cleanly — never issue a request.
-    upsertUserApiKey(userId, "openai", "sk-test", "test");
-    setPolicy({ ...DEFAULT_POLICY, llmModel: "__rotate__" }, userId);
-
-    const fetchSpy = vi.fn(async () => new Response("{}", { status: 200 }));
-    vi.stubGlobal("fetch", fetchSpy);
-    try {
-      const result = await callLessonLlm(userId, JSON.stringify({ probe: true }));
-      expect(result).toBeUndefined();
-      expect(fetchSpy).not.toHaveBeenCalled();
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-});

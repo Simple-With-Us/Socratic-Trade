@@ -25,13 +25,6 @@ export interface ExecutionState {
   /** True once a real (paper or live) broker connection is in play — false only for "No account". */
   submitsBrokerOrders: boolean;
   clarification: string;
-  isHealthy: boolean;
-  healthReason?: string;
-}
-
-export interface HealthSignals {
-  isHealthy: boolean;
-  reason?: string;
 }
 
 type ExecutionPolicy = Pick<TradingPolicy, "accountNumber" | "connectedAccountId" | "activeBroker">;
@@ -42,7 +35,7 @@ type ExecutionPolicy = Pick<TradingPolicy, "accountNumber" | "connectedAccountId
  * (`mode: undefined`, `submitsBrokerOrders: false`) — callers that place orders must check `mode`
  * and refuse to run rather than fall back to any local/simulated fill.
  */
-export function deriveExecutionState(policy: ExecutionPolicy, activeAccount?: ExecutionAccount, health?: HealthSignals): ExecutionState {
+export function deriveExecutionState(policy: ExecutionPolicy, activeAccount?: ExecutionAccount): ExecutionState {
   if (!activeAccount) {
     return {
       mode: undefined,
@@ -51,9 +44,7 @@ export function deriveExecutionState(policy: ExecutionPolicy, activeAccount?: Ex
       accountNumber: policy.accountNumber,
       submitsBrokerOrders: false,
       clarification:
-        "No connected broker account. Connect a broker account (paper or live) before the app can place orders.",
-      isHealthy: false,
-      healthReason: "No account connected"
+        "No connected broker account. Connect a broker account (paper or live) before the app can place orders."
     };
   }
 
@@ -70,10 +61,8 @@ export function deriveExecutionState(policy: ExecutionPolicy, activeAccount?: Ex
       submitsBrokerOrders: true,
       clarification:
         isTestAccount
-          ? "The Test Account uses simulated fills and cannot reach real money."
-          : `${brokerLabel(activeAccount.broker)} Paper is a broker-hosted sandbox account; real capital is not at risk.`,
-      isHealthy: health?.isHealthy ?? true,
-      healthReason: health?.reason
+          ? "Test Account - Local Mock Paper Account uses local simulated fills. It is not a broker account and cannot reach real money."
+          : `${brokerLabel(activeAccount.broker)} Paper is a broker-hosted sandbox account; real capital is not at risk.`
     };
   }
 
@@ -87,9 +76,7 @@ export function deriveExecutionState(policy: ExecutionPolicy, activeAccount?: Ex
     accountLabel: activeAccount.label,
     submitsBrokerOrders: true,
     clarification:
-      `${brokerLabel(activeAccount.broker)} Brokerage is a broker production account. Broker orders can reach real capital only when policy, approval, and risk gates allow them.`,
-    isHealthy: health?.isHealthy ?? true,
-    healthReason: health?.reason
+      `${brokerLabel(activeAccount.broker)} Brokerage is a broker production account. Broker orders can reach real capital only when policy, approval, and risk gates allow them.`
   };
 }
 
@@ -112,5 +99,5 @@ export function fillSourceForExecutionMode(stateOrMode: ExecutionState | Executi
 }
 
 function brokerLabel(broker: ExecutionAccount["broker"]): string {
-  return (broker === "alpaca" || broker === "alpaca-mcp") ? "Alpaca" : broker === "test" ? "Test" : broker === "tradier" ? "Tradier" : "Robinhood";
+  return (broker === "alpaca" || broker === "alpaca-mcp") ? "Alpaca" : broker === "test" ? "Test" : "Robinhood";
 }

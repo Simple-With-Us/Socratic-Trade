@@ -297,20 +297,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     const provider = getEnrichmentProvider(options?.userId);
     if (topCandidates.length > 0) {
       try {
-        // Providers enrich the whole list by default, but an explicit FMP_MAX_SYMBOLS
-        // throttle (and scarce per-scan budgets like TwelveData credits) still consume the
-        // list first-wins. EVERY held position goes first — including ones ranked inside
-        // the top-N, which `heldExtra` deliberately excludes — then event outliers, then
-        // the rest of the ranked cut: a budget shortfall must starve the ranked tail,
-        // never a name the agent owns.
-        const topCut = ranked.slice(0, candidateLimit);
-        const enrichmentOrder = [
-          ...topCut.filter((quote) => heldSymbols.has(quote.symbol)),
-          ...heldExtra,
-          ...eventExtra,
-          ...topCut.filter((quote) => !heldSymbols.has(quote.symbol))
-        ];
-        const enrichment = await provider.enrich(enrichmentOrder.map((quote) => quote.symbol));
+        const enrichment = await provider.enrich(topCandidates.map((quote) => quote.symbol));
         topCandidates = topCandidates
           .map((quote) => {
             const extra = enrichment[quote.symbol];

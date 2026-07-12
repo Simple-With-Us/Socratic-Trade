@@ -1,20 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { ListFilter, ShieldAlert } from "lucide-react";
-import type { PendingProposal } from "@/lib/types";
 import { deriveStateInfo, activeConnectedAccount } from "../lib/derive";
 import { useConsoleData } from "../lib/useConsoleData";
-import { bulkApproveProposals, LiveConfirmationRequiredError, rejectProposal, type ApproveResult } from "../lib/api";
+import { approveProposal, rejectProposal, type ApproveResult } from "../lib/api";
 import { fmtMoney } from "../lib/format";
-import { fetchPendingLearnedContext } from "../lib/learned-context";
 import { ApprovalCard } from "../components/approval-card";
 import { AlertCenter } from "../components/alert-center";
 import { Card, Chip, Btn, Select, TextInput } from "../ui/primitives";
-import { Sheet } from "../ui/sheet";
-import { LearnedContextInbox, LearnedFactsArchive } from "./learned-context";
+import { LearnedContextInbox } from "./learned-context";
 import {
-  approvalEstimatedNotional,
   approvalIsLive,
   summarizeBulkSelection,
   summarizePendingProposals,
@@ -45,47 +41,6 @@ const SORT_OPTIONS: Array<{ value: ApprovalSort; label: string }> = [
   { value: "oldest", label: "Oldest first" }
 ];
 
-/** How long a "Reject N?" arm stays live before it silently disarms — a
- *  mis-click guard, not a ritual: no typed phrase, no modal, just a second
- *  deliberate click within a few seconds. */
-const REJECT_ARM_MS = 4_000;
-const BULK_APPROVE_MAX_REQUESTS = 20;
-
-/** Pending learned-context count for the header's "+N learned" chip — the nav
- *  rail's badge folds trade proposals and learned-context items into one
- *  number, but this page only lists proposals, so the header needs its own
- *  read of the same queue to explain the difference. Same 60s/visibility
- *  polling cadence as the nav rail; kept local rather than shared because
- *  DesktopRail/MobileTabBar's hook isn't exported. */
-function useLearnedPendingCount(): number {
-  const [count, setCount] = useState(0);
-  useEffect(() => {
-    let cancelled = false;
-    const load = () => {
-      void fetchPendingLearnedContext()
-        .then((items) => {
-          if (!cancelled) setCount(items.length);
-        })
-        .catch(() => {});
-    };
-    load();
-    const interval = setInterval(() => {
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      load();
-    }, 60_000);
-    const onVisible = () => {
-      if (document.visibilityState === "visible") load();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, []);
-  return count;
-}
-
 export default function ApprovalsPage() {
   const { snapshot, refresh } = useConsoleData();
   const toast = useToast();
@@ -95,15 +50,6 @@ export default function ApprovalsPage() {
   const [sort, setSort] = useState<ApprovalSort>("newest");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState<"approve" | "reject" | null>(null);
-  const [liveApproveBatch, setLiveApproveBatch] = useState<PendingProposal[] | null>(null);
-  // The reject-count this arm was raised for, or null when disarmed. If the
-  // selection changes underneath an armed button (filter change, checkbox
-  // toggle), rejectArmedEffective below falls false on its own — no effect
-  // needed to keep it in sync, and no ref read during render.
-  const [rejectArmedCount, setRejectArmedCount] = useState<number | null>(null);
-  const rejectArmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const learnedSectionRef = useRef<HTMLDivElement | null>(null);
-  const learnedPendingCount = useLearnedPendingCount();
   const pending = useMemo(() => snapshot?.pendingProposals ?? [], [snapshot]);
   const pendingIdSet = useMemo(() => new Set(pending.map((proposal) => proposal.id)), [pending]);
   const effectiveSelectedIds = useMemo(() => {
@@ -120,32 +66,10 @@ export default function ApprovalsPage() {
   const visibleIdSet = useMemo(() => new Set(filtered.map((proposal) => proposal.id)), [filtered]);
   const summary = useMemo(() => summarizePendingProposals(filtered), [filtered]);
   const selection = useMemo(() => summarizeBulkSelection(filtered, effectiveSelectedIds), [filtered, effectiveSelectedIds]);
-  const bulkApproveOverLimit = selection.approveCount > BULK_APPROVE_MAX_REQUESTS;
   const state = snapshot ? deriveStateInfo(snapshot.policy) : null;
   const stopped = snapshot?.policy.systemState === "halted";
-  const requiresTypedLiveApproval = snapshot?.policy.requireTypedConfirmation !== false;
   const activeAccountId = snapshot ? activeConnectedAccount(snapshot)?.id : undefined;
   const allVisibleSelected = filtered.length > 0 && filtered.every((proposal) => effectiveSelectedIds.has(proposal.id));
-  // A stale arm must never fire against a different set of proposals than the
-  // one the owner saw — falls false automatically the instant the selection
-  // changes, no effect required to keep it in sync.
-  const rejectArmedEffective = rejectArmedCount !== null && rejectArmedCount === selection.rejectCount;
-
-  const clearRejectArm = () => {
-    if (rejectArmTimer.current) {
-      clearTimeout(rejectArmTimer.current);
-      rejectArmTimer.current = null;
-    }
-    setRejectArmedCount(null);
-  };
-
-  // Only cleanup on unmount needed — see rejectArmedEffective above for how
-  // selection changes disarm without an effect.
-  useEffect(() => {
-    return () => {
-      if (rejectArmTimer.current) clearTimeout(rejectArmTimer.current);
-    };
-  }, []);
 
   const toggleSelected = (proposalId: string) => {
     setSelectedIds((current) => {
@@ -172,81 +96,39 @@ export default function ApprovalsPage() {
 
   const finishApproval = (result: ApproveResult) => {
     if (result.status === "placed") return "placed";
-    if (result.status === "paper") return "placed";
     if (result.status === "blocked") return "blocked";
     return "other";
   };
 
-  const runBulkApproveBatch = async (selected: PendingProposal[], liveTypedText?: string) => {
+  const runBulkApprove = async () => {
+    const selected = filtered.filter((proposal) => effectiveSelectedIds.has(proposal.id) && !approvalIsLive(proposal));
     if (selected.length === 0) return;
     setBulkBusy("approve");
     let placed = 0;
     let blocked = 0;
     let failed = 0;
-    const failureDetails: string[] = [];
     try {
-      const symbolById = new Map(selected.map((proposal) => [proposal.id, proposal.proposal.symbol]));
-      const response = await bulkApproveProposals(
-        selected.map((proposal) => proposal.id),
-        liveTypedText ? { typedText: liveTypedText } : undefined
-      );
-      for (const result of response.results) {
-        const status = finishApproval(result);
-        if (status === "placed") placed += 1;
-        else if (status === "blocked") blocked += 1;
-        else {
+      for (const proposal of selected) {
+        try {
+          const result = await approveProposal(proposal.id);
+          const status = finishApproval(result);
+          if (status === "placed") placed += 1;
+          else if (status === "blocked") blocked += 1;
+        } catch {
           failed += 1;
-          const reasons = result.reasons?.filter(Boolean).join("; ");
-          const symbol = result.symbol ?? symbolById.get(result.proposalId) ?? "proposal";
-          failureDetails.push(`${symbol}: ${reasons || result.status || "approval did not place"}`);
         }
       }
       await refresh();
       resetSelection();
-      const detailParts = [`${blocked} blocked on re-check`, failed > 0 ? `${failed} failed` : undefined].filter(Boolean);
-      const detail = [...detailParts, ...failureDetails.slice(0, 3)].join(" · ");
       toast.push(
         failed > 0 ? "warn" : "pos",
-        `Approved ${placed} proposal${placed === 1 ? "" : "s"}`,
-        detail || undefined
+        `Approved ${placed} safe proposal${placed === 1 ? "" : "s"}`,
+        [`${blocked} blocked on re-check`, failed > 0 ? `${failed} failed` : undefined].filter(Boolean).join(" · ") || undefined
       );
-    } catch (error) {
-      failed += selected.length;
-      const reasons =
-        error instanceof LiveConfirmationRequiredError
-          ? error.reasons.join("; ")
-          : error instanceof Error
-            ? error.message
-            : "request failed";
-      toast.push("warn", "Approval batch failed", reasons || "No approvals were submitted.");
     } finally {
       setBulkBusy(null);
     }
   };
-
-  const runBulkApprove = () => {
-    const selected = filtered.filter((proposal) => effectiveSelectedIds.has(proposal.id));
-    if (selected.length === 0) return;
-    if (selected.length > BULK_APPROVE_MAX_REQUESTS) {
-      toast.push("warn", "Too many approvals selected", `Select ${BULK_APPROVE_MAX_REQUESTS} or fewer proposals per batch to stay inside the order rate limit.`);
-      return;
-    }
-    if (requiresTypedLiveApproval && selected.some(approvalIsLive)) {
-      setLiveApproveBatch(selected);
-      return;
-    }
-    void runBulkApproveBatch(selected);
-  };
-
-  const submitLiveApproveBatch = async (typedText: string) => {
-    const selected = liveApproveBatch ?? [];
-    setLiveApproveBatch(null);
-    await runBulkApproveBatch(selected, typedText.trim().toUpperCase());
-  };
-
-  const closeLiveApproveBatch = useCallback(() => {
-    setLiveApproveBatch(null);
-  }, []);
 
   const runBulkReject = async () => {
     const selected = filtered.filter((proposal) => effectiveSelectedIds.has(proposal.id));
@@ -275,47 +157,18 @@ export default function ApprovalsPage() {
     }
   };
 
-  // First click arms a "Reject N? Confirm" state for a few seconds; the
-  // second click within that window actually rejects. Deliberately no typed
-  // phrase and no modal — this is a mis-click guard, not a ritual.
-  const handleBulkRejectClick = () => {
-    if (!rejectArmedEffective) {
-      setRejectArmedCount(selection.rejectCount);
-      rejectArmTimer.current = setTimeout(() => setRejectArmedCount(null), REJECT_ARM_MS);
-      return;
-    }
-    clearRejectArm();
-    void runBulkReject();
-  };
-
-  const jumpToLearnedContext = () => {
-    learnedSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
-
   if (!snapshot || !state) return null;
 
   return (
     <div className="mx-auto grid max-w-6xl gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
       <div className="flex min-w-0 flex-col gap-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-[length:var(--con-fs-lg)] font-bold">
-              Approvals{" "}
-              <span className="con-num text-[color:var(--con-accent)]">
-                ({filtered.length}/{pending.length})
-              </span>
-            </h1>
-            {learnedPendingCount > 0 && (
-              <button
-                type="button"
-                className="con-chip con-chip-accent"
-                onClick={jumpToLearnedContext}
-                title={`${learnedPendingCount} learned-context item${learnedPendingCount === 1 ? "" : "s"} also awaiting your decision, below trade proposals — this count is why the nav badge reads higher than the number above. Click to jump there.`}
-              >
-                +{learnedPendingCount} learned
-              </button>
-            )}
-          </div>
+          <h1 className="text-[length:var(--con-fs-lg)] font-bold">
+            Approvals{" "}
+            <span className="con-num text-[color:var(--con-accent)]">
+              ({filtered.length}/{pending.length})
+            </span>
+          </h1>
           <Chip tone={state.tone === "pos" ? "pos" : state.tone === "neg" ? "neg" : "warn"}>{state.label}</Chip>
         </div>
 
@@ -387,44 +240,25 @@ export default function ApprovalsPage() {
                 Select visible
               </label>
               <Chip tone="muted">{selection.selectedCount} selected</Chip>
-              {selection.liveCount > 0 && (
-                <Chip tone={requiresTypedLiveApproval ? "warn" : "live"}>
-                  {selection.liveCount} live {requiresTypedLiveApproval ? "need typed confirm" : "one-click"}
-                </Chip>
-              )}
-              {bulkApproveOverLimit && <Chip tone="warn">approve max {BULK_APPROVE_MAX_REQUESTS}</Chip>}
+              {selection.liveCount > 0 && <Chip tone="warn">{selection.liveCount} live need typed confirm</Chip>}
               <div className="ml-auto flex flex-wrap gap-2">
                 <Btn
                   variant="pos"
                   size="sm"
-                  disabled={stopped || bulkBusy !== null || selection.approveCount === 0 || bulkApproveOverLimit}
+                  disabled={stopped || bulkBusy !== null || selection.safeApproveCount === 0}
                   onClick={runBulkApprove}
-                  title={
-                    stopped
-                      ? "The system is stopped, so approval actions are refused."
-                      : bulkApproveOverLimit
-                        ? `Select ${BULK_APPROVE_MAX_REQUESTS} or fewer proposals per batch to stay inside the order rate limit.`
-                      : selection.liveCount > 0 && requiresTypedLiveApproval
-                        ? "Approves selected proposals one by one through the existing server path after one batch live-confirm phrase."
-                        : "Approves selected proposals one by one through the existing server path."
-                  }
+                  title={stopped ? "The system is stopped, so approval actions are refused." : "Approves the selected paper-safe ideas one by one through the existing server path."}
                 >
-                  {bulkBusy === "approve" ? "Approving..." : `Approve selected (${selection.approveCount})`}
+                  {bulkBusy === "approve" ? "Approving..." : `Approve safe (${selection.safeApproveCount})`}
                 </Btn>
                 <Btn
                   variant="dangerOutline"
                   size="sm"
                   disabled={stopped || bulkBusy !== null || selection.rejectCount === 0}
-                  onClick={handleBulkRejectClick}
-                  title={
-                    stopped
-                      ? "The system is stopped, so rejection actions are refused."
-                      : rejectArmedEffective
-                        ? "Click again to reject — rejects each selected proposal through the existing server path."
-                        : "Rejects each selected proposal through the existing server path. Click once to arm, then again to confirm."
-                  }
+                  onClick={runBulkReject}
+                  title={stopped ? "The system is stopped, so rejection actions are refused." : "Rejects each selected proposal through the existing server path."}
                 >
-                  {bulkBusy === "reject" ? "Rejecting..." : rejectArmedEffective ? `Reject ${selection.rejectCount}? Confirm` : `Reject selected (${selection.rejectCount})`}
+                  {bulkBusy === "reject" ? "Rejecting..." : `Reject selected (${selection.rejectCount})`}
                 </Btn>
               </div>
             </div>
@@ -470,10 +304,7 @@ export default function ApprovalsPage() {
           </div>
         )}
 
-        <div ref={learnedSectionRef} className="flex scroll-mt-28 flex-col gap-4">
-          <LearnedContextInbox />
-          <LearnedFactsArchive />
-        </div>
+        <LearnedContextInbox />
 
         <p className="text-center text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
           Rejections are data, not failures — every idea you pass on keeps being scored, and Results shows how your
@@ -482,13 +313,13 @@ export default function ApprovalsPage() {
       </div>
 
       <div className="flex min-w-0 flex-col gap-4">
-        {selection.liveCount > 0 && requiresTypedLiveApproval && (
+        {selection.liveCount > 0 && (
           <Card>
             <div className="flex items-start gap-2 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
               <ShieldAlert size={15} className="mt-0.5 shrink-0 text-[color:var(--con-warn)]" />
               <p>
-                Bulk approve now supports LIVE proposals with one batch typed phrase. Each selected order still goes
-                through the existing per-proposal server approval path and can block independently.
+                Bulk approve deliberately skips LIVE proposals. Those still use the server-authoritative typed phrase on the
+                individual receipt so the broker path stays unchanged.
               </p>
             </div>
           </Card>
@@ -501,116 +332,6 @@ export default function ApprovalsPage() {
           maxItems={8}
         />
       </div>
-      <BulkLiveApproveSheet
-        open={liveApproveBatch !== null}
-        proposals={liveApproveBatch ?? []}
-        busy={bulkBusy === "approve"}
-        onClose={closeLiveApproveBatch}
-        onSubmit={(typedText) => void submitLiveApproveBatch(typedText)}
-      />
     </div>
-  );
-}
-
-function liveApprovalText(proposal: PendingProposal): string {
-  return `APPROVE LIVE ${proposal.proposal.symbol.toUpperCase()}`;
-}
-
-function bulkLiveApprovalText(live: PendingProposal[]): string {
-  if (live.length === 1 && live[0]) return liveApprovalText(live[0]);
-  return `APPROVE ${live.length} LIVE ${live.length === 1 ? "ORDER" : "ORDERS"}`;
-}
-
-function BulkLiveApproveSheet({
-  open,
-  proposals,
-  busy,
-  onClose,
-  onSubmit
-}: {
-  open: boolean;
-  proposals: PendingProposal[];
-  busy: boolean;
-  onClose: () => void;
-  onSubmit: (typedText: string) => void;
-}) {
-  const [typed, setTyped] = useState("");
-  const live = useMemo(() => proposals.filter(approvalIsLive), [proposals]);
-  const paperCount = proposals.length - live.length;
-  const expectedText = bulkLiveApprovalText(live);
-  const matches = typed.trim().toUpperCase() === expectedText;
-  const liveNotional = live.reduce((sum, proposal) => sum + approvalEstimatedNotional(proposal), 0);
-
-  const close = useCallback(() => {
-    setTyped("");
-    onClose();
-  }, [onClose]);
-
-  const submit = () => {
-    const typedText = typed.trim().toUpperCase();
-    setTyped("");
-    onSubmit(typedText);
-  };
-
-  return (
-    <Sheet open={open} onClose={close} title="Approve live batch" tone="live">
-      <div className="mb-3 rounded-lg border border-[color:var(--con-live-border)] bg-[color:var(--con-surface-2)] p-3 text-[length:var(--con-fs-sm)]">
-        <div className="font-bold">
-          {live.length} live order{live.length === 1 ? "" : "s"} selected
-        </div>
-        <p className="con-num mt-1">
-          Estimated live notional <strong>{fmtMoney(liveNotional)}</strong>
-          {paperCount > 0 ? ` · plus ${paperCount} paper proposal${paperCount === 1 ? "" : "s"}` : ""}
-        </p>
-        <p className="mt-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
-          The server re-checks each proposal separately at approval time. If one row blocks or expires, the other rows keep
-          their own result.
-        </p>
-      </div>
-
-      <div className="mb-3 max-h-48 overflow-auto rounded-lg border border-[color:var(--con-line)]">
-        {live.map((proposal) => (
-          <div key={proposal.id} className="flex items-center justify-between gap-3 border-b border-[color:var(--con-line)] px-3 py-2 last:border-b-0">
-            <div>
-              <div className="font-semibold">
-                {proposal.proposal.side.toUpperCase()} {proposal.proposal.symbol}
-              </div>
-              <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-                {proposal.accountNumber ? `account ...${proposal.accountNumber.slice(-4)}` : "active live account"}
-              </div>
-            </div>
-            <div className="con-num shrink-0 text-[length:var(--con-fs-sm)]">{fmtMoney(approvalEstimatedNotional(proposal))}</div>
-          </div>
-        ))}
-      </div>
-
-      <label className="con-label" htmlFor="bulk-live-typed-confirm">
-        Type exactly: <span className="con-mono text-[color:var(--con-fg)]">{expectedText}</span>
-      </label>
-      <TextInput
-        id="bulk-live-typed-confirm"
-        value={typed}
-        onChange={(event) => setTyped(event.target.value)}
-        autoComplete="off"
-        autoCorrect="off"
-        autoCapitalize="characters"
-        spellCheck={false}
-        onPaste={(event) => event.preventDefault()}
-        placeholder={expectedText}
-        className="con-mono"
-      />
-      <p className="mt-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-        This is one batch confirmation. The app still submits every proposal through the existing approval endpoint.
-      </p>
-
-      <div className="mt-4 flex justify-end gap-2">
-        <Btn variant="ghost" onClick={close} disabled={busy}>
-          Cancel
-        </Btn>
-        <Btn variant="primary" disabled={!matches || busy || live.length === 0} onClick={submit}>
-          {busy ? "Approving..." : "Approve live batch"}
-        </Btn>
-      </div>
-    </Sheet>
   );
 }

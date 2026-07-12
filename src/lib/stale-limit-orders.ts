@@ -2,7 +2,6 @@ import { audit, getInternalSetting, setInternalSetting } from "./db";
 import { DEFAULT_POLICY } from "./defaults";
 import { isActiveBrokerOrderState } from "./broker-held-orders";
 import { normalizeSymbol } from "./money";
-import { shortOrderLabel } from "./order-labels";
 import { sendNotification } from "./notifications";
 import type { EquityOrder, TradingPolicy } from "./types";
 
@@ -34,11 +33,7 @@ export function listStaleLimitOrders(
     if (!LIMIT_ORDER_TYPES.has(String(order.type ?? "").toLowerCase())) return [];
     if (!isWorkingOrderState(order.state)) return [];
 
-    // P2.7: Measure staleness from bracket-leg ACTIVATION not createdAt.
-    // Bracket exits are created with the entry order but only activate when the entry fills.
-    // Broker updates the order (bumping updatedAt) on state change (e.g., held -> new).
-    // So updatedAt accurately measures how long the exit has been WORKING.
-    const createdMs = order.updatedAt ? Date.parse(order.updatedAt) : Date.parse(order.createdAt);
+    const createdMs = Date.parse(order.createdAt);
     if (!Number.isFinite(createdMs) || createdMs > nowMs) return [];
 
     const quantity = order.quantity ?? 0;
@@ -71,7 +66,7 @@ export async function notifyStaleLimitOrders(input: {
     const side = String(item.order.side ?? "order").toUpperCase();
     const title = `${symbol} ${side} limit order still working`;
     const summary =
-      `${symbol} ${side} ${item.order.type} order ${shortOrderLabel(item.order.id)} is still open after ` +
+      `${symbol} ${side} ${item.order.type} order ${item.order.id} is still open after ` +
       `${item.ageMinutes} minutes (${formatQuantity(item.remainingQuantity)} remaining). ` +
       "Review the order; cancel/reprice it before replacing it with a market order.";
 

@@ -21,7 +21,6 @@
 import { getPolicy } from "../db";
 import { isIndexMemberSymbol } from "../index-universes";
 import { buildLlmRequestBody, extractLlmText, llmAuthHeaders, type LlmJsonSchema } from "../llm-call";
-import { extractLlmUsage, recordLlmUsage } from "../llm-usage";
 import { resolveLlmEndpoint } from "../llm-provider";
 import { LLM_OUTPUT_TOKEN_CAPS, LLM_TIMEOUT_MS } from "../llm-request";
 import type { LearnedContextCandidate } from "../types";
@@ -167,22 +166,6 @@ export async function extractLearnedCandidatesLLM(message: string, userId: strin
     if (!response.ok) return extractLearnedCandidates(message, isIndexMemberSymbol);
 
     const payload = await response.json();
-    // Every LLM call is hardwired into the usage ledger + external telemetry (owner directive):
-    // recordLlmUsage never throws, but this is a chat-turn side-channel, so a failure here must
-    // never surface as a chat error either way.
-    try {
-      recordLlmUsage({
-        userId,
-        provider: endpoint.provider,
-        model: endpoint.model,
-        context: "chat-salience",
-        keySource: endpoint.keySource,
-        keyRef: endpoint.keyRef,
-        ...extractLlmUsage(payload)
-      });
-    } catch {
-      /* usage ledger is best-effort; never break chat memory extraction */
-    }
     const text = extractLlmText(payload);
     const raw = parseRawCandidates(text); // throws on malformed JSON -> caught below -> regex fallback
     if (raw.length === 0) return []; // well-formed "nothing durable" answer, not a failure

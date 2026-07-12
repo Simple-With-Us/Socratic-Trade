@@ -25,7 +25,7 @@ import { deriveReality } from "../lib/derive";
 import { cx, fmtExact } from "../lib/format";
 import { useConsoleData } from "../lib/useConsoleData";
 import { ModelBadge } from "../ui/provider-logo";
-import { Chip, Select, TextInput, Tooltip } from "../ui/primitives";
+import { Chip, Select, TextInput } from "../ui/primitives";
 import { useToast } from "../ui/toast";
 import { DraftTicket } from "./draft-card";
 import { AssistantMarkdown } from "./markdown";
@@ -327,13 +327,12 @@ export function AssistantChat() {
       <header className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-b border-[color:var(--con-line)] px-3 py-2 sm:px-4">
         <Sparkles size={15} className="shrink-0 text-[color:var(--con-accent)]" aria-hidden />
         <h1 className="text-[length:var(--con-fs-md)] font-bold leading-none">Assistant</h1>
-        <Tooltip
-          content="The assistant can answer questions and draft orders, but it has no way to place one — every order goes through Approvals.">
-          <span
-            className="hidden text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] md:inline">
-            drafts orders you approve — it never places on its own
-          </span>
-        </Tooltip>
+        <span
+          className="hidden text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] md:inline"
+          title="The assistant can answer questions and draft orders, but it has no way to place one — every order goes through Approvals."
+        >
+          drafts orders you approve — it never places on its own
+        </span>
         <div className="ml-auto flex items-center gap-2">
           {customPending || !CATALOG_MODEL_IDS.has(model) ? (
             <div className="w-36">
@@ -374,28 +373,28 @@ export function AssistantChat() {
               })}
             </Select>
           </div>
-          <Tooltip
-            content={
+          <button
+            type="button"
+            onClick={() => void clearConversation()}
+            disabled={sending || clearing}
+            className={cx(
+              "flex h-7 items-center gap-1 rounded-lg border px-2 text-[length:var(--con-fs-xs)] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+              clearArmed
+                ? "border-[color:var(--con-neg-border)] bg-[color:var(--con-neg-soft)] text-[color:var(--con-neg)]"
+                : "border-[color:var(--con-line-strong)] text-[color:var(--con-muted)] hover:bg-[color:var(--con-surface-2)] hover:text-[color:var(--con-fg)]"
+            )}
+            title={
               sending
                 ? "Wait for the current reply to finish — clearing mid-reply could orphan it in the saved history."
                 : "Deletes your ENTIRE saved assistant conversation — one transcript shared across all your accounts, not just the one selected. Staged proposals, orders, and positions are untouched. Click twice to confirm."
-            }>
-            <button
-              type="button"
-              onClick={() => void clearConversation()}
-              disabled={sending || clearing}
-              className={cx(
-                "flex h-7 items-center gap-1 rounded-lg border px-2 text-[length:var(--con-fs-xs)] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-                clearArmed
-                  ? "border-[color:var(--con-neg-border)] bg-[color:var(--con-neg-soft)] text-[color:var(--con-neg)]"
-                  : "border-[color:var(--con-line-strong)] text-[color:var(--con-muted)] hover:bg-[color:var(--con-surface-2)] hover:text-[color:var(--con-fg)]"
-              )}>
-              <Trash2 size={13} aria-hidden />
-              {clearArmed ? "Really clear?" : clearing ? "Clearing…" : "Clear"}
-            </button>
-          </Tooltip>
+            }
+          >
+            <Trash2 size={13} aria-hidden />
+            {clearArmed ? "Really clear?" : clearing ? "Clearing…" : "Clear"}
+          </button>
         </div>
       </header>
+
       {/* Transcript */}
       <div ref={listRef} className="flex-1 space-y-3 overflow-y-auto px-3 py-3 sm:px-4" role="log" aria-live="polite" aria-label="Conversation">
         {historyState === "loading" && (
@@ -404,12 +403,12 @@ export function AssistantChat() {
           </div>
         )}
         {historyState === "failed" && (
-          <Tooltip
-            content="Only loading old messages failed — sending new ones still works.">
-            <div
-              className="rounded-md bg-[color:var(--con-warn-soft)] px-3 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]">Couldn't load the earlier conversation. New messages still work; reload the page to retry.
-                        </div>
-          </Tooltip>
+          <div
+            className="rounded-md bg-[color:var(--con-warn-soft)] px-3 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]"
+            title="Only loading old messages failed — sending new ones still works."
+          >
+            Couldn&apos;t load the earlier conversation. New messages still work; reload the page to retry.
+          </div>
         )}
         {historyState === "ready" && messages.length === 0 && (
           <div className="grid h-full place-items-center">
@@ -422,16 +421,17 @@ export function AssistantChat() {
               </p>
               <div className="mt-3 flex flex-wrap justify-center gap-2">
                 {SUGGESTIONS.map((s) => (
-                  <Tooltip key={s.prompt} content={`Sends: "${s.prompt}"`}>
-                    <button
-                      type="button"
-                      onClick={() => void send(s.prompt)}
-                      disabled={sending || keyMissing}
-                      className="rounded-full border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] px-3 py-1.5 text-[length:var(--con-fs-xs)] transition-colors hover:border-[color:var(--con-accent)] hover:bg-[color:var(--con-surface-2)] disabled:cursor-not-allowed disabled:opacity-50">
-                      <span className="uppercase tracking-wide text-[color:var(--con-faint)]">{s.category}</span>
-                      <span className="ml-1.5">{s.prompt}</span>
-                    </button>
-                  </Tooltip>
+                  <button
+                    key={s.prompt}
+                    type="button"
+                    onClick={() => void send(s.prompt)}
+                    disabled={sending || keyMissing}
+                    title={`Sends: "${s.prompt}"`}
+                    className="rounded-full border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] px-3 py-1.5 text-[length:var(--con-fs-xs)] transition-colors hover:border-[color:var(--con-accent)] hover:bg-[color:var(--con-surface-2)] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <span className="uppercase tracking-wide text-[color:var(--con-faint)]">{s.category}</span>
+                    <span className="ml-1.5">{s.prompt}</span>
+                  </button>
                 ))}
               </div>
             </div>
@@ -440,47 +440,43 @@ export function AssistantChat() {
         {messages.map((m) => (
           <div key={m.id} className={cx("flex", m.role === "user" ? "justify-end" : "justify-start")}>
             <div className="max-w-[88%] sm:max-w-[36rem]">
-              <Tooltip content={m.at ? fmtExact(m.at) : undefined}>
-                <div
-                  className={cx(
-                    "rounded-xl px-3 py-2 text-[length:var(--con-fs-sm)]",
-                    m.role === "user" ? "bg-[color:var(--con-accent-soft)]" : "bg-[color:var(--con-surface-2)]",
-                    m.failed && "border border-[color:var(--con-warn-border)]"
-                  )}>
-                  {m.role === "assistant" ? (
-                    <AssistantMarkdown>{m.text}</AssistantMarkdown>
-                  ) : (
-                    <p className="whitespace-pre-wrap leading-relaxed">{m.text}</p>
-                  )}
-                  {m.citations && m.citations.length > 0 && (
-                    <div className="mt-1.5 flex flex-wrap gap-1">
-                      {m.citations.map((c, i) =>
-                        c.url ? (
-                          <Tooltip key={i} content={`Source this answer cited — opens ${c.url}`}>
-                            <a href={c.url} target="_blank" rel="noopener noreferrer">
-                              <Chip tone="muted" className="underline decoration-dotted">
-                                {c.label}
-                              </Chip>
-                            </a>
-                          </Tooltip>
-                        ) : (
-                          <Chip key={i} tone="muted" title="Source this answer cited.">
+              <div
+                className={cx(
+                  "rounded-xl px-3 py-2 text-[length:var(--con-fs-sm)]",
+                  m.role === "user" ? "bg-[color:var(--con-accent-soft)]" : "bg-[color:var(--con-surface-2)]",
+                  m.failed && "border border-[color:var(--con-warn-border)]"
+                )}
+                title={m.at ? fmtExact(m.at) : undefined}
+              >
+                {m.role === "assistant" ? (
+                  <AssistantMarkdown>{m.text}</AssistantMarkdown>
+                ) : (
+                  <p className="whitespace-pre-wrap leading-relaxed">{m.text}</p>
+                )}
+                {m.citations && m.citations.length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    {m.citations.map((c, i) =>
+                      c.url ? (
+                        <a key={i} href={c.url} target="_blank" rel="noopener noreferrer" title={`Source this answer cited — opens ${c.url}`}>
+                          <Chip tone="muted" className="underline decoration-dotted">
                             {c.label}
                           </Chip>
-                        )
-                      )}
-                    </div>
-                  )}
-                  {m.draft && reality && <DraftTicket draft={m.draft} reality={reality} />}
-                </div>
-              </Tooltip>
+                        </a>
+                      ) : (
+                        <Chip key={i} tone="muted" title="Source this answer cited.">
+                          {c.label}
+                        </Chip>
+                      )
+                    )}
+                  </div>
+                )}
+                {m.draft && reality && <DraftTicket draft={m.draft} reality={reality} />}
+              </div>
               {m.role === "assistant" && m.model && (
                 <div className="mt-0.5 px-1 text-[10px] text-[color:var(--con-faint)]">
                   {m.model.trim().toLowerCase() === "mock" ? (
                     // No vendor logo for the offline mock — that would fake a provider.
-                    <Tooltip content="The deterministic offline model produced this answer — no LLM provider was called.">
-                      <span>mock</span>
-                    </Tooltip>
+                    <span title="The deterministic offline model produced this answer — no LLM provider was called.">mock</span>
                   ) : (
                     <ModelBadge modelId={m.model} size="sm" className="font-normal" title="The model that produced this answer." />
                   )}
@@ -489,15 +485,15 @@ export function AssistantChat() {
               {m.failed && (
                 <div className="mt-1 flex items-center justify-end gap-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]">
                   <AlertTriangle size={12} aria-hidden /> Not answered
-                  <Tooltip content="Send this message again.">
-                    <button
-                      type="button"
-                      onClick={() => void send(m.text, m.id)}
-                      disabled={sending || clearing}
-                      className="flex items-center gap-1 rounded border border-[color:var(--con-line-strong)] px-1.5 py-0.5 font-semibold text-[color:var(--con-fg)] transition-colors hover:bg-[color:var(--con-surface-2)] disabled:opacity-50">
-                      <RotateCcw size={11} aria-hidden /> Retry
-                    </button>
-                  </Tooltip>
+                  <button
+                    type="button"
+                    onClick={() => void send(m.text, m.id)}
+                    disabled={sending || clearing}
+                    className="flex items-center gap-1 rounded border border-[color:var(--con-line-strong)] px-1.5 py-0.5 font-semibold text-[color:var(--con-fg)] transition-colors hover:bg-[color:var(--con-surface-2)] disabled:opacity-50"
+                    title="Send this message again."
+                  >
+                    <RotateCcw size={11} aria-hidden /> Retry
+                  </button>
                 </div>
               )}
             </div>
@@ -509,6 +505,7 @@ export function AssistantChat() {
           </div>
         )}
       </div>
+
       {/* Composer */}
       <div className="border-t border-[color:var(--con-line)] px-3 py-2.5 sm:px-4">
         {keyMissing && (
@@ -547,30 +544,26 @@ export function AssistantChat() {
             title="Your message to the assistant. Enter sends; Shift+Enter adds a line break."
             aria-label="Message the assistant"
           />
-          <Tooltip
-            content={
+          <button
+            type="button"
+            onClick={() => void send()}
+            disabled={!canSend}
+            className="con-btn con-btn-primary h-9 shrink-0"
+            title={
               keyMissing
                 ? "Connect a key for this model's provider, or pick another model."
                 : customPending
                   ? "Type a model id next to the picker first."
                   : "Send the message (Enter)."
-            }>
-            <button
-              type="button"
-              onClick={() => void send()}
-              disabled={!canSend}
-              className="con-btn con-btn-primary h-9 shrink-0">
-              <Send size={14} aria-hidden /> Send
-            </button>
-          </Tooltip>
+            }
+          >
+            <Send size={14} aria-hidden /> Send
+          </button>
         </div>
         <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-[10px] text-[color:var(--con-faint)]">
-          <Tooltip
-            content="The assistant reads real quotes and your real account data. When it can't know something, it says so instead of inventing a number.">
-            <span>
-              Answers use live data and your account. Orders come back as drafts — nothing places without your approval.
-            </span>
-          </Tooltip>
+          <span title="The assistant reads real quotes and your real account data. When it can't know something, it says so instead of inventing a number.">
+            Answers use live data and your account. Orders come back as drafts — nothing places without your approval.
+          </span>
           <span className="hidden sm:inline">Enter to send · Shift+Enter for a line break</span>
         </div>
       </div>

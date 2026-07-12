@@ -139,7 +139,7 @@ export function ModelPicker({
                 <div className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-muted">
                   <ProviderLogo provider={g.provider} size={14} />
                   {g.label}
-                  {missing && <span className="font-normal normal-case text-neg">— no key</span>}
+                  {missing && <span className="font-normal normal-case text-down">— no key</span>}
                 </div>
                 {g.options.map((o) => {
                   const active = o.value === value;

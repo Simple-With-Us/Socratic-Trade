@@ -16,7 +16,6 @@ import Link from "next/link";
 import { OctagonAlert, Trash2 } from "lucide-react";
 import { useToast } from "../ui/toast";
 import { Btn, Card, Chip, Field, TextInput } from "../ui/primitives";
-import { ListSection, ListRow, LabeledContent } from "../../ui/ios-components";
 
 const ACCOUNT_DELETE_PHRASE = "DELETE MY ACCOUNT";
 const LOCAL_OPERATOR_DELETE_PHRASE = "DELETE LOCAL OPERATOR ACCOUNT";
@@ -146,111 +145,101 @@ export function AccountDeletionCard() {
   const canDelete = preview !== null && preview.prepared && allAcked && emailMatches && phraseMatches && operatorPhraseMatches && !blocked && !deleting;
 
   return (
-    <ListSection
+    <Card
       title={
         <span className="flex items-center gap-2 text-[color:var(--con-neg)]">
           <OctagonAlert size={15} /> Delete account &amp; data
         </span>
       }
     >
-      <div className="px-3 pb-3">
-        <p className="text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
-          Permanently deletes this login&apos;s data from <strong>this app</strong>: stored API keys, broker connections
-          and OAuth tokens, settings, strategy profiles, watchlists, alerts, chat history, memories, proposals, fills,
-          snapshots, notifications, and private learned context. It does <strong>not</strong> close broker positions,
-          cancel broker orders, or delete your Google/GitHub/Apple account — those live outside this app.
-        </p>
-      </div>
+      <p className="text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
+        Permanently deletes this login&apos;s data from <strong>this app</strong>: stored API keys, broker connections
+        and OAuth tokens, settings, strategy profiles, watchlists, alerts, chat history, memories, proposals, fills,
+        snapshots, notifications, and private learned context. It does <strong>not</strong> close broker positions,
+        cancel broker orders, or delete your Google/GitHub/Apple account — those live outside this app.
+      </p>
 
       {preview === null ? (
-        <ListRow>
-          <div className="py-2 w-full">
-            <Btn
-              variant="dangerOutline"
-              size="sm"
-              disabled={busy}
-              onClick={() => void start()}
-              title="Opens the deletion flow. Nothing is deleted until the final typed confirmation."
-            >
-              <Trash2 size={13} /> {busy ? "Loading…" : "Start deletion…"}
-            </Btn>
-          </div>
-        </ListRow>
+        <div className="mt-3">
+          <Btn
+            variant="dangerOutline"
+            size="sm"
+            disabled={busy}
+            onClick={() => void start()}
+            title="Opens the deletion flow. Nothing is deleted until the final typed confirmation."
+          >
+            <Trash2 size={13} /> {busy ? "Loading…" : "Start deletion…"}
+          </Btn>
+        </div>
       ) : (
-        <div className="flex flex-col gap-4 w-full">
+        <div className="mt-3 flex flex-col gap-3">
           {/* Scope preview */}
-          <div className="px-3">
-            <div className="rounded-lg border border-[color:var(--con-line)] p-3 text-[length:var(--con-fs-xs)] leading-relaxed bg-[color:var(--con-surface-1)]">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-semibold text-[color:var(--con-fg)]">In scope for {preview.email ?? preview.userId}:</span>
-                <span className="con-num text-[color:var(--con-muted)]" title="Sum of the per-table row counts the server reported for this user.">
-                  {preview.connectedAccounts.length} broker connection{preview.connectedAccounts.length === 1 ? "" : "s"} · about {recordTotal(preview)} private app row{recordTotal(preview) === 1 ? "" : "s"}
-                </span>
-                {preview.prepared ? (
-                  <Chip tone="warn" title="Preparing stopped this login's strategy and cleared its run lock. Nothing is deleted yet.">
-                    prepared — strategy stopped
-                  </Chip>
-                ) : (
-                  <Chip tone="muted">not prepared yet</Chip>
-                )}
-              </div>
-              {preview.isLocalOperatorAccount && (
-                <p className="mt-2 text-[color:var(--con-warn)]">
-                  This is the local operator dataset shared by the primary email aliases — it includes legacy app data
-                  and needs one extra typed phrase.
-                </p>
-              )}
-              {(preview.counts.learned_context_pending ?? 0) > 0 && (
-                <p className="mt-2 text-[color:var(--con-warn)]">
-                  {preview.counts.learned_context_pending} pending learned-context item
-                  {preview.counts.learned_context_pending === 1 ? "" : "s"} awaiting your approval will be discarded —
-                  review them on the{" "}
-                  <Link href="/console/approvals" className="text-[color:var(--con-accent)] hover:underline">
-                    Approvals
-                  </Link>{" "}
-                  screen before deleting.
-                </p>
+          <div className="rounded-lg border border-[color:var(--con-line)] p-3 text-[length:var(--con-fs-xs)] leading-relaxed">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-[color:var(--con-fg)]">In scope for {preview.email ?? preview.userId}:</span>
+              <span className="con-num text-[color:var(--con-muted)]" title="Sum of the per-table row counts the server reported for this user.">
+                {preview.connectedAccounts.length} broker connection{preview.connectedAccounts.length === 1 ? "" : "s"} · about {recordTotal(preview)} private app row{recordTotal(preview) === 1 ? "" : "s"}
+              </span>
+              {preview.prepared ? (
+                <Chip tone="warn" title="Preparing stopped this login's strategy and cleared its run lock. Nothing is deleted yet.">
+                  prepared — strategy stopped
+                </Chip>
+              ) : (
+                <Chip tone="muted">not prepared yet</Chip>
               )}
             </div>
+            {preview.isLocalOperatorAccount && (
+              <p className="mt-2 text-[color:var(--con-warn)]">
+                This is the local operator dataset shared by the primary email aliases — it includes legacy app data
+                and needs one extra typed phrase.
+              </p>
+            )}
+            {(preview.counts.learned_context_pending ?? 0) > 0 && (
+              <p className="mt-2 text-[color:var(--con-warn)]">
+                {preview.counts.learned_context_pending} pending learned-context item
+                {preview.counts.learned_context_pending === 1 ? "" : "s"} awaiting your approval will be discarded —
+                review them on the{" "}
+                <Link href="/console/approvals" className="text-[color:var(--con-accent)] hover:underline">
+                  Approvals
+                </Link>{" "}
+                screen before deleting.
+              </p>
+            )}
           </div>
 
           {blocked && (
-            <div className="px-3">
-              <p className="rounded-lg border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] px-3 py-2 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-warn)]">
-                Deletion is blocked until trading activity settles: {preview.blockers.runningStrategyRuns} running
-                strategy run(s), {preview.blockers.placingProposals} placing proposal(s),{" "}
-                {preview.blockers.pendingReconciliationFills} fill(s) pending broker reconciliation, and{" "}
-                {preview.blockers.activeMobileCommands} in-flight mobile command(s). Preparing (below) stops the strategy;
-                in-flight work must drain on its own.
-              </p>
-            </div>
+            <p className="rounded-lg border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] px-3 py-2 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-warn)]">
+              Deletion is blocked until trading activity settles: {preview.blockers.runningStrategyRuns} running
+              strategy run(s), {preview.blockers.placingProposals} placing proposal(s),{" "}
+              {preview.blockers.pendingReconciliationFills} fill(s) pending broker reconciliation, and{" "}
+              {preview.blockers.activeMobileCommands} in-flight mobile command(s). Preparing (below) stops the strategy;
+              in-flight work must drain on its own.
+            </p>
           )}
 
           {!preview.prepared ? (
-            <ListRow>
-              <div className="flex flex-wrap items-center gap-2 py-2 w-full">
-                <Btn
-                  variant="dangerOutline"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => void prepare()}
-                  title="Stops this login's strategy and records the deletion request. Deletes nothing yet — the typed confirmation comes after."
-                >
-                  {busy ? "Preparing…" : "Prepare deletion — stops the strategy"}
-                </Btn>
-                <Btn variant="ghost" size="sm" onClick={cancelFlow} title="Close the flow. Nothing was deleted.">
-                  Cancel
-                </Btn>
-              </div>
-            </ListRow>
+            <div className="flex flex-wrap items-center gap-2">
+              <Btn
+                variant="dangerOutline"
+                size="sm"
+                disabled={busy}
+                onClick={() => void prepare()}
+                title="Stops this login's strategy and records the deletion request. Deletes nothing yet — the typed confirmation comes after."
+              >
+                {busy ? "Preparing…" : "Prepare deletion — stops the strategy"}
+              </Btn>
+              <Btn variant="ghost" size="sm" onClick={cancelFlow} title="Close the flow. Nothing was deleted.">
+                Cancel
+              </Btn>
+            </div>
           ) : (
-            <div className="px-3 pb-3">
+            <>
               {/* Acknowledgements — mirror the server's required booleans exactly. */}
-              <div className="flex flex-col gap-1 mb-4">
+              <div className="flex flex-col gap-1">
                 {ackItems.map((item) => (
                   <label
                     key={item.key}
-                    className="flex cursor-pointer items-start gap-3 rounded-md px-2 py-1.5 text-[length:var(--con-fs-xs)] leading-relaxed transition-colors hover:bg-[color:var(--con-surface-2)]"
+                    className="con-row flex cursor-pointer items-start gap-2 rounded-md px-1.5 py-1 text-[length:var(--con-fs-xs)] leading-relaxed"
                     title="The server refuses deletion unless every acknowledgement is explicitly checked."
                   >
                     <input
@@ -265,7 +254,7 @@ export function AccountDeletionCard() {
               </div>
 
               {/* Typed ritual — destructive, so it gets the red frame. */}
-              <div className="rounded-lg border border-[color:var(--con-live-border)] bg-[color:var(--con-live-soft)] p-4">
+              <div className="rounded-lg border border-[color:var(--con-live-border)] bg-[color:var(--con-live-soft)] p-3">
                 <div className="grid gap-3 sm:grid-cols-2">
                   <Field
                     label="Type your signed-in email"
@@ -315,7 +304,7 @@ export function AccountDeletionCard() {
                     </div>
                   )}
                 </div>
-                <div className="mt-4 flex flex-wrap items-center gap-2">
+                <div className="mt-3 flex flex-wrap items-center gap-2">
                   <Btn
                     variant="danger"
                     disabled={!canDelete}
@@ -333,10 +322,10 @@ export function AccountDeletionCard() {
                   run-state chip if you keep the account.
                 </p>
               </div>
-            </div>
+            </>
           )}
         </div>
       )}
-    </ListSection>
+    </Card>
   );
 }

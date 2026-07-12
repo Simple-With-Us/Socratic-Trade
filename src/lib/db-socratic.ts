@@ -9,7 +9,6 @@ import type {
   SocraticDecisionStatus,
   SocraticEvidenceItem,
   SocraticFrameworkProposal,
-  SocraticFrameworkAiReview,
   SocraticFrameworkOwnerVerb,
   SocraticFrameworkProposalStatus,
   SocraticRagAttribution,
@@ -64,7 +63,6 @@ type FrameworkRow = {
   evidence: string;
   owner_verb: string | null;
   owner_response: string | null;
-  ai_review: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -131,8 +129,7 @@ function rowToFramework(row: FrameworkRow): SocraticFrameworkProposal {
     proposedChange: row.proposed_change,
     evidence: parseJson<SocraticEvidenceItem[]>(row.evidence, []),
     ...(row.owner_verb ? { ownerVerb: row.owner_verb as SocraticFrameworkOwnerVerb } : {}),
-    ...(row.owner_response ? { ownerResponse: row.owner_response } : {}),
-    ...(row.ai_review ? { aiReview: parseJson<SocraticFrameworkAiReview | undefined>(row.ai_review, undefined) } : {})
+    ...(row.owner_response ? { ownerResponse: row.owner_response } : {})
   };
 }
 
@@ -283,7 +280,7 @@ export function listSocraticDecisionCases(
   }
   args.push(limit);
   const rows = getDb()
-    .prepare(`SELECT * FROM socratic_decisions WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC, rowid DESC LIMIT ?`)
+    .prepare(`SELECT * FROM socratic_decisions WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC LIMIT ?`)
     .all(...args) as DecisionRow[];
   return rows.map(rowToDecision);
 }
@@ -384,7 +381,7 @@ export function listSocraticDecisionCasesNeedingOutcome(
   }
   args.push(limit);
   const rows = getDb()
-    .prepare(`SELECT * FROM socratic_decisions WHERE ${clauses.join(" AND ")} ORDER BY created_at ASC, rowid ASC LIMIT ?`)
+    .prepare(`SELECT * FROM socratic_decisions WHERE ${clauses.join(" AND ")} ORDER BY created_at ASC LIMIT ?`)
     .all(...args) as DecisionRow[];
   return rows.map(rowToDecision);
 }
@@ -543,7 +540,7 @@ export function createSocraticFrameworkProposal(input: {
 
 export function listSocraticFrameworkProposals(
   userId: string = "local",
-  opts: { limit?: number; status?: SocraticFrameworkProposalStatus; connectedAccountId?: string; unreviewedOnly?: boolean } = {}
+  opts: { limit?: number; status?: SocraticFrameworkProposalStatus; connectedAccountId?: string } = {}
 ): SocraticFrameworkProposal[] {
   const limit = Math.max(1, Math.min(100, Math.floor(opts.limit ?? 25)));
   const clauses = ["user_id = ?"];
@@ -556,14 +553,9 @@ export function listSocraticFrameworkProposals(
     clauses.push("connected_account_id = ?");
     args.push(opts.connectedAccountId);
   }
-  // Only rows the batched reviewer hasn't touched yet — lets it page through a backlog
-  // larger than any single fetch window instead of re-loading the newest already-reviewed rows.
-  if (opts.unreviewedOnly) {
-    clauses.push("ai_review IS NULL");
-  }
   args.push(limit);
   const rows = getDb()
-    .prepare(`SELECT * FROM socratic_framework_proposals WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC, rowid DESC LIMIT ?`)
+    .prepare(`SELECT * FROM socratic_framework_proposals WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC LIMIT ?`)
     .all(...args) as FrameworkRow[];
   return rows.map(rowToFramework);
 }
@@ -591,19 +583,4 @@ export function updateSocraticFrameworkProposalStatus(
   const framework = rowToFramework(row);
   audit("socratic_framework_proposal_resolved", { id, status, ownerVerb, ownerResponse }, userId, framework.connectedAccountId);
   return framework;
-}
-
-/** Attach (or clear) the advisory AI review on a proposal. Does NOT change status or
- *  owner verb — the owner still decides. Pass `null` to clear. Scoped to the user. */
-export function setSocraticFrameworkProposalAiReview(
-  id: string,
-  userId: string,
-  review: SocraticFrameworkAiReview | null
-): SocraticFrameworkProposal | undefined {
-  const now = new Date().toISOString();
-  getDb()
-    .prepare("UPDATE socratic_framework_proposals SET ai_review = ?, updated_at = ? WHERE id = ? AND user_id = ?")
-    .run(review ? JSON.stringify(review) : null, now, id, userId);
-  const row = getDb().prepare("SELECT * FROM socratic_framework_proposals WHERE id = ? AND user_id = ?").get(id, userId) as FrameworkRow | undefined;
-  return row ? rowToFramework(row) : undefined;
 }

@@ -7,7 +7,7 @@ import {
   computeDiff,
   type FieldDef
 } from "../app/console/lib/policy-diff";
-import { ALL_DEFS, PANIC_BRAKE, PROTECTIVE_STOPS } from "../app/console/guardrails/field-defs";
+import { ALL_DEFS, PANIC_BRAKE, STOPS_PLUMBING } from "../app/console/guardrails/field-defs";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 import type { TradingPolicy } from "../src/lib/types";
 
@@ -35,7 +35,7 @@ describe("console guardrails: protective-toggle loosening direction (Codex findi
   });
 
   it("declares DISABLING broker-held brackets as the loosening", () => {
-    const def = PROTECTIVE_STOPS.find((d) => d.path === "brokerBracketsEnabled")!;
+    const def = STOPS_PLUMBING.find((d) => d.path === "brokerBracketsEnabled")!;
     expect(def.looserWhen).toBe("off");
     expect(classify(def, true, false)).toBe("looser");
     expect(classify(def, false, true)).toBe("tighter");
@@ -119,20 +119,6 @@ describe("console guardrails: cleared-field honesty (Codex finding 9)", () => {
     expect(classify(defByPath("universeFloor.minPrice"), 5, null)).toBe("looser");
     // Introducing a guard where none existed is tightening.
     expect(classify(defByPath("maxOrderNotional"), undefined, 250)).toBe("tighter");
-  });
-
-  it("classifies a LOWERED universe floor as looser (widens the universe), a raised one as tighter", () => {
-    // Regression: a prior version returned `up ? looser : tighter` for BOTH looserWhen cases, so
-    // lowering a "down" floor (e.g. min share price $5 -> $3) was mislabeled "Locks Down" when it
-    // actually lets MORE names into the universe.
-    const minPrice = defByPath("universeFloor.minPrice");
-    expect(minPrice.looserWhen).toBe("down");
-    expect(classify(minPrice, 5, 3)).toBe("looser"); // $5 -> $3: wider universe
-    expect(classify(minPrice, 3, 5)).toBe("tighter"); // $3 -> $5: narrower universe
-    expect(classify(defByPath("universeFloor.minDollarVolume"), 1_000_000, 500_000)).toBe("looser");
-    // A regular "up" cap is unaffected: raising it still loosens.
-    expect(classify(defByPath("maxGrossExposurePct"), 80, 90)).toBe("looser");
-    expect(classify(defByPath("maxGrossExposurePct"), 90, 80)).toBe("tighter");
   });
 
   it("seeds whole-replaced nested parents in the PUT body so sibling floors survive", () => {

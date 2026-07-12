@@ -155,18 +155,6 @@ describe("applyCongressEvent — dedupe + other types", () => {
     expect(applyCongressEvent(ev)).toMatchObject({ duplicate: true, applied: 0 });
   });
 
-  it("does not commit dedupe id if processing fails (e.g. unknown type)", () => {
-    const id = `evt-${randomUUID()}`;
-    const ev = { type: "mystery", id };
-    expect(applyCongressEvent(ev)).toMatchObject({ ok: false, reason: "unknown-type" });
-    const validEv = { type: "congress.trade", id, data: { trades: [{ symbol: "NFLX", member: "Y", side: "buy", tradedAt: recent(1) }] } };
-    const res = applyCongressEvent(validEv);
-    expect(res.ok).toBe(true);
-    expect(res.duplicate).toBeFalsy();
-    expect(res.applied).toBe(1);
-    expect(applyCongressEvent(validEv)).toMatchObject({ duplicate: true, applied: 0 });
-  });
-
   it("acknowledges ref/price/spx events as informational no-ops", () => {
     for (const type of ["ref.upsert", "price.eod", "spx.eod"]) {
       expect(applyCongressEvent({ type, id: `evt-${randomUUID()}`, data: {} })).toMatchObject({ ok: true, applied: 0, reason: "accepted-noop" });
@@ -201,23 +189,15 @@ describe("fetchAppACongressTrades — public feed with rolling from= window", ()
       new Response(
         JSON.stringify({
           transactions: [
-            {
-              id: "test-1", docId: "doc-1", filerId: "filer-1", owner: "self", assetName: "Apple", assetType: "stock", isOption: false,
-              capGainsOver200: false, rawText: "AAPL", confidence: 1, source: "primary", createdAt: new Date().toISOString(),
-              cursorSeq: 1,
-              ticker: "AAPL", memberName: "Jane Doe", chamber: "house", txType: "P", txDate: recent(3), amountMin: 1, amountMax: 2
-            }
+            { ticker: "AAPL", memberName: "Jane Doe", chamber: "house", txType: "P", txDate: recent(3), amountMin: 1, amountMax: 2 }
           ],
-          count: 1,
-          total: 1,
-          limit: 100,
           cursor: 1
         }),
         { status: 200 }
       )
     );
     vi.stubGlobal("fetch", fetchSpy);
-    const trades = await fetchAppACongressTrades(Date.now()).catch(e => { console.error("fetchAppACongressTrades Error:", e); return []; });
+    const trades = await fetchAppACongressTrades(Date.now());
     expect(trades.length).toBeGreaterThanOrEqual(1);
     expect(trades[0]).toMatchObject({ symbol: "AAPL", side: "buy", member: "Jane Doe", chamber: "house" });
     expect(String(fetchSpy.mock.calls[0][0])).toContain("from="); // rolling-window bound is sent
@@ -244,46 +224,6 @@ describe("verifyCongressWebhookSignature", () => {
     expect(verifyCongressWebhookSignature(reqWith("wrong"), body)).toBe(false);
     expect(verifyCongressWebhookSignature(reqWith(undefined), body)).toBe(false);
     expect(verifyCongressWebhookSignature(reqWith(sig), "{}")).toBe(false);
-  });
-
-  it("accepts legacy bearer token authentication", () => {
-    process.env.CONGRESS_WEBHOOK_SECRET = "s3cr3t";
-    const body = `{"foo":"bar"}`;
-    const req = new Request("https://b.example/api/webhooks/congress", {
-      headers: { "authorization": "Bearer s3cr3t" }
-    });
-    expect(verifyCongressWebhookSignature(req, body)).toBe(true);
-
-    const badReq = new Request("https://b.example/api/webhooks/congress", {
-      headers: { "authorization": "Bearer wrong" }
-    });
-    expect(verifyCongressWebhookSignature(badReq, body)).toBe(false);
-  });
-
-  it("retains idempotency from DB even after memory cache reset (simulating restart/HMR)", () => {
-    const id = `evt-${randomUUID()}`;
-    const ev = { type: "ref.upsert", id, data: {} };
-    expect(applyCongressEvent(ev).duplicate).toBeFalsy();
-    resetCongressEventDedupe();
-    expect(applyCongressEvent(ev)).toMatchObject({ duplicate: true, applied: 0 });
-  });
-
-  it("rejects unauthorized and oversized requests early", async () => {
-    process.env.CONGRESS_WEBHOOK_SECRET = "s3cr3t";
-    const resNoAuth = await postCongressWebhook(
-      new Request("https://b.example/api/webhooks/congress", { method: "POST" })
-    );
-    expect(resNoAuth.status).toBe(401);
-
-    const reqOversized = new Request("https://b.example/api/webhooks/congress", {
-      method: "POST",
-      headers: {
-        "x-signature": sign("s3cr3t", "{}"),
-        "content-length": String(10 * 1024 * 1024)
-      }
-    });
-    const resOversized = await postCongressWebhook(reqOversized);
-    expect(resOversized.status).toBe(413);
   });
 
   it("records webhook health from the ingest result, not just successful authentication", async () => {

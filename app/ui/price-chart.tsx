@@ -141,8 +141,8 @@ export function PriceChart({ symbol, onLatestBar }: { symbol: string; onLatestBa
         const lc = await import("lightweight-charts");
         if (disposed || !containerRef.current) return;
 
-        const up = cssVar("--pos", "#10b981");
-        const down = cssVar("--neg", "#ef4444");
+        const up = cssVar("--up", "#10b981");
+        const down = cssVar("--down", "#ef4444");
         const text = cssVar("--faint", "#94a3b8");
         const grid = cssVar("--line", "#1f2937");
         const accent = cssVar("--accent", "#3b82f6");
@@ -258,12 +258,12 @@ export function PriceChart({ symbol, onLatestBar }: { symbol: string; onLatestBa
           <span className="flex items-center gap-1"><span className="inline-block h-0.5 w-3 bg-[var(--warn)]" /> VWAP</span>
         )}
         {vwapMeta && (
-          <span className={vwapMeta.vsPct >= 0 ? "text-pos" : "text-neg"} title="Latest close vs latest bar VWAP">
+          <span className={vwapMeta.vsPct >= 0 ? "text-up" : "text-down"} title="Latest close vs latest bar VWAP">
             {vwapMeta.vsPct >= 0 ? "+" : ""}{vwapMeta.vsPct.toFixed(2)}% vs VWAP
           </span>
         )}
         {meta?.change !== undefined && (
-          <span className={meta.change >= 0 ? "text-pos" : "text-neg"}>
+          <span className={meta.change >= 0 ? "text-up" : "text-down"}>
             {meta.change >= 0 ? "+" : ""}{meta.change.toFixed(1)}% {meta.label}
           </span>
         )}

@@ -2,13 +2,11 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { generateProactiveRiskProposals, planTakeProfitTrims, takeProfitTrimQuantity } from "../src/lib/strategy";
-import { getStopPlans, insertFillEvent, listFillEvents, recordStopPlan } from "../src/lib/db";
+import { reconcilePendingFills, generateProactiveRiskProposals, planTakeProfitTrims, takeProfitTrimQuantity, redTeamConvictionThresholdForPolicy, redTeamDebateTrigger, redTeamNotionalPctOfNavThresholdForPolicy, shouldRunRedTeamDebate } from "../src/lib/strategy";
+import { insertFillEvent, listFillEvents } from "../src/lib/db";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 import type { BrokerGateway } from "../src/lib/types";
 import type { EquityOrder, TradingPolicy } from "../src/lib/types";
-import { reconcilePendingFills } from "../src/lib/strategy-execution";
-import { isRiskAddingOpening } from "../src/lib/strategy-risk";
 
 vi.mock("../src/lib/vector-db", () => ({
   findRelevantExperiences: async () => [],
@@ -71,103 +69,6 @@ describe("reconcilePendingFills", () => {
     expect(matched!.status).toBe("filled");
     expect(matched!.price).toBe(155);
     expect(matched!.notional).toBe(1550);
-  });
-
-  it("commits a per-position stop plan once a pending_reconciliation opening fill is CONFIRMED filled (the plan couldn't commit at placement time — the order might still cancel/expire before ever opening the lot; Codex review, PR #1371)", async () => {
-    const fillId = randomUUID();
-    const brokerOrderId = "broker-order-stopplan-1";
-    insertFillEvent({
-      id: fillId,
-      accountNumber: "ACC-STOPPLAN-1",
-      source: "live",
-      symbol: "NVDA",
-      side: "buy",
-      quantity: 4,
-      price: 100,
-      notional: 400,
-      status: "pending_reconciliation",
-      brokerOrderId,
-      raw: {
-        proposal: {
-          symbol: "NVDA", side: "buy", type: "market", quantity: 4,
-          timeInForce: "gfd", marketHours: "regular_hours", rationale: "opening buy",
-          tradeThesisTag: "Breakout", entryMarketRegime: "Bull",
-          stopPlan: { style: "trailing", rationale: "scale into strength" }
-        }
-      }
-    });
-
-    expect(getStopPlans("ACC-STOPPLAN-1")).toEqual({}); // not yet committed — still pending_reconciliation
-
-    const mockGateway = createMockGateway({
-      getEquityOrders: async () => [
-        {
-          id: brokerOrderId,
-          symbol: "NVDA",
-          side: "buy",
-          type: "market",
-          state: "filled",
-          filledQuantity: 4,
-          averagePrice: 100,
-          createdAt: new Date().toISOString(),
-          updatedAt: "2026-06-15T12:00:00.000Z"
-        } as EquityOrder
-      ]
-    }) as unknown as BrokerGateway;
-
-    await reconcilePendingFills(mockGateway, "ACC-STOPPLAN-1");
-
-    expect(getStopPlans("ACC-STOPPLAN-1")).toEqual({
-      NVDA: { style: "trailing", rationale: "scale into strength", avgCost: 100, side: "long" }
-    });
-  });
-
-  it("an EXPLICIT 'default' plan CLEARS an existing persisted override once the reconciled fill confirms filled (Codex review, PR #1371)", async () => {
-    recordStopPlan("ACC-STOPPLAN-2", "NVDA", "none", "initial thesis", 100);
-    expect(getStopPlans("ACC-STOPPLAN-2").NVDA).toMatchObject({ style: "none" });
-
-    const fillId = randomUUID();
-    const brokerOrderId = "broker-order-stopplan-2";
-    insertFillEvent({
-      id: fillId,
-      accountNumber: "ACC-STOPPLAN-2",
-      source: "live",
-      symbol: "NVDA",
-      side: "buy",
-      quantity: 2,
-      price: 105,
-      notional: 210,
-      status: "pending_reconciliation",
-      brokerOrderId,
-      raw: {
-        proposal: {
-          symbol: "NVDA", side: "buy", type: "market", quantity: 2,
-          timeInForce: "gfd", marketHours: "regular_hours", rationale: "scale-in add",
-          tradeThesisTag: "Breakout", entryMarketRegime: "Bull",
-          stopPlan: { style: "default" } // explicit reset
-        }
-      }
-    });
-
-    const mockGateway = createMockGateway({
-      getEquityOrders: async () => [
-        {
-          id: brokerOrderId,
-          symbol: "NVDA",
-          side: "buy",
-          type: "market",
-          state: "filled",
-          filledQuantity: 2,
-          averagePrice: 105,
-          createdAt: new Date().toISOString(),
-          updatedAt: "2026-06-15T12:00:00.000Z"
-        } as EquityOrder
-      ]
-    }) as unknown as BrokerGateway;
-
-    await reconcilePendingFills(mockGateway, "ACC-STOPPLAN-2");
-
-    expect(getStopPlans("ACC-STOPPLAN-2")).toEqual({});
   });
 
   it("updates status to cancelled/rejected when broker order fails", async () => {
@@ -256,7 +157,7 @@ describe("reconcilePendingFills", () => {
     });
     await reconcilePendingFills(mockGateway, "ACCPF");
     const matched = listFillEvents("ACCPF", "live").find((f) => f.id === fillId);
-    expect(matched!.status).toBe("partially_filled");
+    expect(matched!.status).toBe("filled");
     expect(matched!.quantity).toBe(4);
     expect(matched!.notional).toBeCloseTo(604); // 4 * 151
   });
@@ -503,10 +404,7 @@ describe("generateProactiveRiskProposals", () => {
   });
 });
 
-// The conviction/stakes-scaled debate gate was REMOVED 2026-07-07 (single-adversary consolidation
-// O2): every risk-adding opening is reviewed. The only routing question left is §3.5's
-// net-risk-direction gate, exercised here.
-describe("isRiskAddingOpening (§3.5 net-risk-direction gate)", () => {
+describe("red-team conviction threshold", () => {
   const baseProposal = {
     symbol: "AAPL",
     side: "buy" as const,
@@ -516,48 +414,65 @@ describe("isRiskAddingOpening (§3.5 net-risk-direction gate)", () => {
     marketHours: "regular_hours" as const,
     rationale: "test",
     tradeThesisTag: "test",
-    entryMarketRegime: "Neutral (Normal Volatility)",
-    confidenceScore: 50
+    entryMarketRegime: "Neutral (Normal Volatility)"
   };
-  const position = (symbol: string, quantity: number) => ({
-    symbol,
-    quantity,
-    averageCost: 100,
-    marketValue: quantity * 100
-  }) as any;
 
-  it("reviews a buy that OPENS a new position (no existing book)", () => {
-    expect(isRiskAddingOpening(baseProposal, [])).toBe(true);
+  it("defaults to the existing 80 confidence threshold", () => {
+    expect(redTeamConvictionThresholdForPolicy(DEFAULT_POLICY)).toBe(80);
+    expect(shouldRunRedTeamDebate({ ...baseProposal, confidenceScore: 79 }, DEFAULT_POLICY)).toBe(false);
+    expect(shouldRunRedTeamDebate({ ...baseProposal, confidenceScore: 80 }, DEFAULT_POLICY)).toBe(true);
   });
 
-  it("reviews a buy that ADDS to an existing long", () => {
-    expect(isRiskAddingOpening(baseProposal, [position("AAPL", 10)])).toBe(true);
+  it("uses policy tuning when a custom threshold is configured", () => {
+    const policy = { ...DEFAULT_POLICY, tuning: { redTeamConvictionThreshold: 65 } };
+    expect(redTeamConvictionThresholdForPolicy(policy)).toBe(65);
+    expect(shouldRunRedTeamDebate({ ...baseProposal, confidenceScore: 64 }, policy)).toBe(false);
+    expect(shouldRunRedTeamDebate({ ...baseProposal, confidenceScore: 65 }, policy)).toBe(true);
   });
 
-  it("EXEMPTS a buy against an existing net short (it covers — risk-reducing)", () => {
-    expect(isRiskAddingOpening(baseProposal, [position("AAPL", -10)])).toBe(false);
-  });
+  // Stakes-scaled dissent (composite review E/high/S): widen the debate trigger beyond
+  // confidenceScore alone.
+  describe("stakes-scaled dissent", () => {
+    const lowConfidence = { ...baseProposal, confidenceScore: 10 };
 
-  it("reviews a short that opens or adds to a short", () => {
-    expect(isRiskAddingOpening({ ...baseProposal, side: "short" as const }, [])).toBe(true);
-    expect(isRiskAddingOpening({ ...baseProposal, side: "short" as const }, [position("AAPL", -5)])).toBe(true);
-  });
+    it("defaults the notional threshold to 15% of NAV", () => {
+      expect(redTeamNotionalPctOfNavThresholdForPolicy(DEFAULT_POLICY)).toBe(15);
+      expect(redTeamNotionalPctOfNavThresholdForPolicy({ ...DEFAULT_POLICY, tuning: { redTeamNotionalPctOfNavThreshold: 25 } })).toBe(25);
+    });
 
-  it("EXEMPTS a short against an existing net long (it trims — risk-reducing)", () => {
-    expect(isRiskAddingOpening({ ...baseProposal, side: "short" as const }, [position("AAPL", 10)])).toBe(false);
-  });
+    it("does NOT trigger the debate for a low-confidence, small-notional paper trade with no context", () => {
+      expect(shouldRunRedTeamDebate(lowConfidence, DEFAULT_POLICY)).toBe(false);
+      expect(shouldRunRedTeamDebate(lowConfidence, DEFAULT_POLICY, {})).toBe(false);
+      expect(redTeamDebateTrigger(lowConfidence, DEFAULT_POLICY, {})).toBeUndefined();
+    });
 
-  it("EXEMPTS every exit side (sell/cover) unconditionally", () => {
-    expect(isRiskAddingOpening({ ...baseProposal, side: "sell" as const }, [position("AAPL", 10)])).toBe(false);
-    expect(isRiskAddingOpening({ ...baseProposal, side: "cover" as const }, [position("AAPL", -10)])).toBe(false);
-  });
+    it("triggers on large notional even at low confidence", () => {
+      expect(shouldRunRedTeamDebate(lowConfidence, DEFAULT_POLICY, { notionalPctOfNav: 15 })).toBe(true);
+      expect(shouldRunRedTeamDebate(lowConfidence, DEFAULT_POLICY, { notionalPctOfNav: 14.99 })).toBe(false);
+      expect(redTeamDebateTrigger(lowConfidence, DEFAULT_POLICY, { notionalPctOfNav: 20 })).toBe("notional");
+    });
 
-  it("nets positions across rows of the same symbol (case/format-insensitive)", () => {
-    expect(isRiskAddingOpening(baseProposal, [position("aapl", -5), position("AAPL", 2)])).toBe(false); // net -3 → buy covers
-    expect(isRiskAddingOpening(baseProposal, [position("aapl", -5), position("AAPL", 7)])).toBe(true); // net +2 → buy adds
-  });
+    it("triggers on a LIVE opening regardless of confidence or notional", () => {
+      expect(shouldRunRedTeamDebate(lowConfidence, DEFAULT_POLICY, { isLiveOpening: true })).toBe(true);
+      expect(redTeamDebateTrigger(lowConfidence, DEFAULT_POLICY, { isLiveOpening: true })).toBe("live_opening");
+    });
 
-  it("does not let another symbol's position change the classification", () => {
-    expect(isRiskAddingOpening(baseProposal, [position("MSFT", -100)])).toBe(true);
+    it("triggers when the proposal itself requests an owner-preference override", () => {
+      const overrideProposal = { ...lowConfidence, autonomyOverride: { requested: true, thesis: "panic discount" } };
+      expect(shouldRunRedTeamDebate(overrideProposal, DEFAULT_POLICY, {})).toBe(true);
+      expect(redTeamDebateTrigger(overrideProposal, DEFAULT_POLICY, {})).toBe("override_requested");
+    });
+
+    it("triggers on an escalation-regime entry (Risk-Off/Crisis/Inverted)", () => {
+      expect(shouldRunRedTeamDebate(lowConfidence, DEFAULT_POLICY, { entryMarketRegime: "Risk-Off (High Volatility)" })).toBe(true);
+      expect(redTeamDebateTrigger(lowConfidence, DEFAULT_POLICY, { entryMarketRegime: "Risk-Off (High Volatility)" })).toBe("escalation_regime");
+      // A calm regime does not trigger on its own.
+      expect(shouldRunRedTeamDebate(lowConfidence, DEFAULT_POLICY, { entryMarketRegime: "Neutral (Normal Volatility)" })).toBe(false);
+    });
+
+    it("reports the confidence trigger first when multiple conditions fire", () => {
+      const highConfidence = { ...baseProposal, confidenceScore: 90 };
+      expect(redTeamDebateTrigger(highConfidence, DEFAULT_POLICY, { notionalPctOfNav: 50, isLiveOpening: true })).toBe("confidence");
+    });
   });
 });

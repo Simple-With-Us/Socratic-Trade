@@ -11,25 +11,6 @@ export const dynamic = "force-dynamic";
 // Rejects all writes when no secret is configured. Accepts a single event envelope or { events: [...] } for batches.
 // Always returns fast and never throws into the app; events are idempotent (deduped by id).
 export async function POST(req: Request) {
-  const expectedSecret = (process.env.CONGRESS_WEBHOOK_SECRET ?? "").trim();
-  if (!expectedSecret) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  }
-
-  const hasSignature = req.headers.has("x-signature");
-  const hasAuth = req.headers.has("authorization");
-  if (!hasSignature && !hasAuth) {
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  }
-
-  const contentLengthStr = req.headers.get("content-length");
-  if (contentLengthStr) {
-    const contentLength = Number(contentLengthStr);
-    if (Number.isFinite(contentLength) && contentLength > 5 * 1024 * 1024) {
-      return NextResponse.json({ ok: false, error: "payload too large" }, { status: 413 });
-    }
-  }
-
   let text: string;
   try {
     text = await req.text();

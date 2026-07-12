@@ -7,8 +7,6 @@ export default function sitemap(): MetadataRoute.Sitemap {
   return [
     { url: `${base}/welcome`, changeFrequency: "monthly", priority: 1 },
     { url: `${base}/how-it-works`, changeFrequency: "monthly", priority: 0.8 },
-    { url: `${base}/design/socratic-trade`, changeFrequency: "monthly", priority: 0.7 },
-    { url: `${base}/privacy-policy`, changeFrequency: "yearly", priority: 0.3 },
-    { url: `${base}/terms-and-conditions`, changeFrequency: "yearly", priority: 0.3 }
+    { url: `${base}/design/socratic-trade`, changeFrequency: "monthly", priority: 0.7 }
   ];
 }

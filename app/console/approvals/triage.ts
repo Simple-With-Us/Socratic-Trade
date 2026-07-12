@@ -20,10 +20,8 @@ export interface ApprovalSummary {
 
 export interface BulkSelectionSummary {
   selectedCount: number;
-  approveCount: number;
   safeApproveCount: number;
   liveCount: number;
-  liveEstimatedNotional: number;
   rejectCount: number;
 }
 
@@ -117,23 +115,19 @@ export function summarizeBulkSelection(
   let selectedCount = 0;
   let safeApproveCount = 0;
   let liveCount = 0;
-  let liveEstimatedNotional = 0;
   for (const proposal of proposals) {
     if (!selected.has(proposal.id)) continue;
     selectedCount += 1;
     if (approvalIsLive(proposal)) {
       liveCount += 1;
-      liveEstimatedNotional += approvalEstimatedNotional(proposal);
       continue;
     }
     safeApproveCount += 1;
   }
   return {
     selectedCount,
-    approveCount: selectedCount,
     safeApproveCount,
     liveCount,
-    liveEstimatedNotional,
     rejectCount: selectedCount
   };
 }

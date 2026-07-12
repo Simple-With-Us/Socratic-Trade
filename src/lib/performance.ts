@@ -1,4 +1,4 @@
-import { clearStopPlans, getMaturedSkippedCounterfactualByRunSymbol, getPolicy, getSkippedCounterfactualCoverage, insertFillEvent, insertPortfolioSnapshot, listAudit, listAuditByKind, listFillEvents, listMaturedSkippedCounterfactuals, listPortfolioSnapshots, listSkippedCounterfactualsByStatus, recordStopPlan, recordTakeProfitTrimBand, type SkippedCounterfactualCoverage } from "./db";
+import { getMaturedSkippedCounterfactualByRunSymbol, getPolicy, getSkippedCounterfactualCoverage, insertFillEvent, insertPortfolioSnapshot, listAudit, listAuditByKind, listFillEvents, listMaturedSkippedCounterfactuals, listPortfolioSnapshots, listSkippedCounterfactualsByStatus, recordTakeProfitTrimBand, type SkippedCounterfactualCoverage } from "./db";
 import { applyExecutionCost, estimateExecutionCostBps, executionCostConfig } from "./execution-cost";
 import { normalizeSymbol } from "./money";
 import type {
@@ -62,12 +62,6 @@ export interface ClosedLot {
   mae?: number;
   /** Max Favorable Excursion (% from entry price, typically positive for longs) persisted after post-mortem. */
   mfe?: number;
-  /** Model that proposed the ENTRY (proposedByModel stamped on the opening proposal), for the
-   * per-model realized-performance rollup behind the model pickers (src/lib/model-stats.ts). */
-  entryModel?: string;
-  /** Model that reviewed the ENTRY (reviewedByModel stamped on the opening proposal), for the
-   * per-model realized-performance rollup behind the model pickers (src/lib/model-stats.ts). */
-  reviewedByModel?: string;
 }
 
 /** Realized-outcome stats grouped by the thesis a position was opened under. */
@@ -83,20 +77,6 @@ export interface ThesisStat {
   avgDaysHeld?: number;
   /** % of lots held < 365 days (short-term capital gains); undefined when no timestamp data. */
   shortTermPct?: number;
-  /** Mean returnPct over WINNING lots only (returnPct > 0); undefined when the bucket has no winners. */
-  avgWinPct?: number;
-  /** Mean |returnPct| over LOSING lots only (returnPct < 0), reported POSITIVE; undefined when no losers. */
-  avgLossPct?: number;
-  /**
-   * Downside deviation (%): sqrt(mean(min(returnPct, 0)^2)) over ALL lots in the bucket — the
-   * root-mean-square of negative-clamped returns, i.e. the sigma_down of a 0%-MAR Sortino ratio.
-   * Always defined when trades > 0 (0 when there are no losing lots).
-   */
-  downsideDeviationPct?: number;
-  /** Count of lots with returnPct > 0. */
-  winCount?: number;
-  /** Count of lots with returnPct < 0. */
-  lossCount?: number;
 }
 
 /** Realized-outcome stats grouped by the market regime a position was opened in. */
@@ -164,24 +144,6 @@ export function recordFillFromProposal(input: {
   execution?: ExecutedOrder;
   marketScan?: MarketScan;
   status?: string;
-  /**
-   * The position's PRE-fill state (average cost + quantity), when the caller has it, for blending a
-   * stop plan's recorded basis on a SCALE-IN. Without this, an opening fill's `price` (this ONE
-   * fill's execution price) gets recorded as the plan's `avgCost` even when the position already had
-   * shares — the very next run's `filterStopPlansByLiveBasis` then compares that single-fill price
-   * against the position's true BLENDED averageCost, sees a mismatch beyond tolerance, and discards
-   * the just-recorded plan as stale (Codex review, PR #1371). Omit for a fresh open (no prior
-   * position) — blended cost then correctly reduces to the fill price itself.
-   */
-  existingPosition?: { averageCost: number; quantity: number };
-  /**
-   * Explicit, already-known stop-plan basis that bypasses the pre-fill blend math entirely — for a
-   * caller that already looked up the LIVE (post-fill) position average cost directly (e.g. a
-   * crash-recovery sweep reconciling an order that already executed at the broker, where the broker's
-   * own current averageCost IS the correct blended basis with no arithmetic needed). Takes precedence
-   * over `existingPosition` when both are supplied.
-   */
-  stopPlanBasisOverride?: number;
 }): FillEvent {
   const symbol = normalizeSymbol(input.proposal.symbol);
   const marketPrice = input.marketScan?.quotesBySymbol[symbol]?.price;
@@ -283,58 +245,6 @@ export function recordFillFromProposal(input: {
       recordTakeProfitTrimBand(input.accountNumber, symbol, input.proposal.takeProfitBand, input.proposal.takeProfitBasis ?? 0, input.userId);
     } catch {
       // ratchet bookkeeping must never break fill recording
-    }
-  }
-
-  // Persist the LLM's chosen stop plan for this position, set ONLY on an OPENING (buy/short) fill —
-  // an exit fill closing (or trimming) the position has nothing to set a forward-looking plan for.
-  // No stopPlan at all is a true no-op (the LLM never touched this field this run — whatever's
-  // already on record, if anything, keeps governing). An EXPLICIT "default" is different: it CLEARS
-  // any existing override, since that's the only way a scale-in can ever deliberately reset a
-  // position back to the account's own precedence after an earlier "none"/"trailing"/"fixed"/"atr"
-  // choice (Codex review, PR #1371) — collapsing "default" to a no-op here would make an existing
-  // override permanent for the life of the position, impossible to ever undo.
-  if (
-    input.proposal.stopPlan &&
-    (input.proposal.side === "buy" || input.proposal.side === "short") &&
-    // Only an ACTUALLY EXECUTED fill commits the plan — a live broker order still
-    // `pending_reconciliation` may yet cancel/expire without ever opening the position, and a plan
-    // recorded (or cleared) now would then govern a lot that never existed (Codex review, PR #1371).
-    fill.status === "filled"
-  ) {
-    try {
-      if (input.proposal.stopPlan.style === "default") {
-        clearStopPlans(input.accountNumber, [symbol], input.userId ?? "local");
-      } else {
-        // On a scale-in, `basePrice` is THIS fill's execution price — the plan must record the
-        // resulting BLENDED position basis (what the next run's `position.averageCost` will actually
-        // be), or `filterStopPlansByLiveBasis` discards the plan as stale on the very next run
-        // (Codex review, PR #1371). No prior position (fresh open) reduces to `basePrice` unchanged.
-        // Deliberately `basePrice`, NOT `price` — `price` is net of the paper execution-cost model
-        // (source: "paper" gets ~1bp of synthetic slippage deducted for learning/P&L purposes), but
-        // the BROKER's own reported `position.averageCost` reflects the raw fill, not our synthetic
-        // cost deduction. Using the cost-adjusted `price` here made a paper fill's plan basis drift a
-        // fraction of a cent from what the live-basis filter compares against next run, tripping its
-        // 0.5-cent tolerance and dropping the just-recorded plan as stale (Codex review, PR #1371).
-        const existing = input.existingPosition;
-        const blendedAvgCost =
-          input.stopPlanBasisOverride ??
-          (existing && Math.abs(existing.quantity) > 0.000001
-            ? (existing.averageCost * Math.abs(existing.quantity) + basePrice * quantity) / (Math.abs(existing.quantity) + quantity)
-            : basePrice);
-        recordStopPlan(
-          input.accountNumber,
-          symbol,
-          input.proposal.stopPlan.style,
-          input.proposal.stopPlan.rationale,
-          blendedAvgCost,
-          input.userId,
-          undefined,
-          input.proposal.side === "short" ? "short" : "long"
-        );
-      }
-    } catch {
-      // plan bookkeeping must never break fill recording
     }
   }
 
@@ -446,8 +356,6 @@ export function calculatePnl(fills: FillEvent[], currentPrices: Record<string, n
       sector?: string;
       dominantFactor?: MarketFactor;
       entryAt?: string;
-      entryModel?: string;
-      reviewedByModel?: string;
     }>
   >();
   const closedLots: ClosedLot[] = [];
@@ -470,9 +378,7 @@ export function calculatePnl(fills: FillEvent[], currentPrices: Record<string, n
         confidence: meta.confidence,
         sector: meta.sector,
         dominantFactor: meta.dominantFactor,
-        entryAt: fill.filledAt,
-        entryModel: meta.entryModel,
-        reviewedByModel: meta.reviewedByModel
+        entryAt: fill.filledAt
       });
       addAttribution(attribution, fill, 0);
       continue;
@@ -514,9 +420,7 @@ export function calculatePnl(fills: FillEvent[], currentPrices: Record<string, n
         sector: lot.sector,
         dominantFactor: lot.dominantFactor,
         mae: fill.mae,
-        mfe: fill.mfe,
-        entryModel: lot.entryModel,
-        reviewedByModel: lot.reviewedByModel
+        mfe: fill.mfe
       });
       addAttribution(attribution, fill, pnl);
       // Change A: dual-sided credit — also credit the ENTRY run (the run that opened this lot).
@@ -651,16 +555,6 @@ export interface ThesisRegimeStat {
   shrunkAvgReturnPct: number;
   avgDaysHeld?: number;
   shortTermPct?: number;
-  /** Mean returnPct over WINNING lots only (returnPct > 0); undefined when the bucket has no winners. */
-  avgWinPct?: number;
-  /** Mean |returnPct| over LOSING lots only (returnPct < 0), reported POSITIVE; undefined when no losers. */
-  avgLossPct?: number;
-  /** Downside deviation (%): sqrt(mean(min(returnPct, 0)^2)) over ALL lots — see ThesisStat for detail. */
-  downsideDeviationPct?: number;
-  /** Count of lots with returnPct > 0. */
-  winCount?: number;
-  /** Count of lots with returnPct < 0. */
-  lossCount?: number;
 }
 
 const THESIS_REGIME_SEP = " @ ";
@@ -1006,7 +900,7 @@ export interface RedTeamEfficacy {
   survivorRiskHitRate: number;
   /** Mean counterfactual return (%) across matured vetoes; negative is good (vetoes avoided losses). */
   avgReturnPct: number;
-  /** Per red-team model breakdown (full scanned history; missing model is bucketed as "unattributed"). */
+  /** Per red-team model breakdown (present only for models that stamped ≥1 matured veto). */
   byModel: Array<{
     model: string;
     maturedVetoes: number;
@@ -1092,10 +986,10 @@ export function getRedTeamEfficacy(
 
   const byModelMap = new Map<string, RedTeamVetoRecord[]>();
   for (const record of records) {
-    const model = record.model?.trim() || "unattributed";
-    const bucket = byModelMap.get(model);
+    if (!record.model) continue;
+    const bucket = byModelMap.get(record.model);
     if (bucket) bucket.push(record);
-    else byModelMap.set(model, [record]);
+    else byModelMap.set(record.model, [record]);
   }
 
   const resolvedDenominator = maturedVetoes + unresolvableVetoes;
@@ -1317,16 +1211,6 @@ function aggregateClosedLots(
   avgDaysHeld: number | undefined;
   /** Percentage of lots held < 365 days (short-term for tax purposes). */
   shortTermPct: number | undefined;
-  /** Mean returnPct over lots with returnPct > 0; undefined when the bucket has no winners (never fabricated). */
-  avgWinPct: number | undefined;
-  /** Mean |returnPct| over lots with returnPct < 0, reported POSITIVE; undefined when the bucket has no losers. */
-  avgLossPct: number | undefined;
-  /** Downside deviation (%): sqrt(mean(min(returnPct, 0)^2)) over ALL lots — sigma_down of a 0%-MAR Sortino. */
-  downsideDeviationPct: number | undefined;
-  /** Count of lots with returnPct > 0. */
-  winCount: number | undefined;
-  /** Count of lots with returnPct < 0. */
-  lossCount: number | undefined;
 }> {
   const prior = resolveShrinkPrior(userId);
   const byKey = new Map<string, {
@@ -1337,18 +1221,10 @@ function aggregateClosedLots(
     daysHeldSum: number;
     daysHeldCount: number;
     shortTermCount: number;
-    winReturnSum: number;
-    winCount: number;
-    lossReturnAbsSum: number;
-    lossCount: number;
-    downsideSqSum: number;
   }>();
   for (const lot of closedLots) {
     const key = keyFn(lot);
-    const cur = byKey.get(key) ?? {
-      pnl: 0, returnSum: 0, wins: 0, trades: 0, daysHeldSum: 0, daysHeldCount: 0, shortTermCount: 0,
-      winReturnSum: 0, winCount: 0, lossReturnAbsSum: 0, lossCount: 0, downsideSqSum: 0
-    };
+    const cur = byKey.get(key) ?? { pnl: 0, returnSum: 0, wins: 0, trades: 0, daysHeldSum: 0, daysHeldCount: 0, shortTermCount: 0 };
     cur.pnl += lot.pnl;
     cur.returnSum += lot.returnPct;
     cur.wins += lot.pnl > 0 ? 1 : 0;
@@ -1364,17 +1240,6 @@ function aggregateClosedLots(
         if (daysHeld < 365) cur.shortTermCount += 1;
       }
     }
-    // Payoff-split fields (Fractional-Kelly advisory input; read-only, never fabricated): win/loss
-    // classification here uses returnPct (not pnl) so the split lines up with the % Kelly math needs.
-    if (lot.returnPct > 0) {
-      cur.winReturnSum += lot.returnPct;
-      cur.winCount += 1;
-    } else if (lot.returnPct < 0) {
-      cur.lossReturnAbsSum += Math.abs(lot.returnPct);
-      cur.lossCount += 1;
-    }
-    const downsideClamped = Math.min(lot.returnPct, 0);
-    cur.downsideSqSum += downsideClamped * downsideClamped;
     byKey.set(key, cur);
   }
   return Array.from(byKey.entries())
@@ -1389,13 +1254,7 @@ function aggregateClosedLots(
       shrunkAvgReturnPct: Number((s.returnSum / (s.trades + prior)).toFixed(2)),
       // Holding-period fields: undefined when no lots in this bucket have entryAt/exitAt data.
       avgDaysHeld: s.daysHeldCount > 0 ? Number((s.daysHeldSum / s.daysHeldCount).toFixed(1)) : undefined,
-      shortTermPct: s.daysHeldCount > 0 ? Number(((s.shortTermCount / s.daysHeldCount) * 100).toFixed(1)) : undefined,
-      // Payoff-split fields: undefined (never a fabricated 0) when the bucket has no winners/losers.
-      avgWinPct: s.winCount > 0 ? Number((s.winReturnSum / s.winCount).toFixed(2)) : undefined,
-      avgLossPct: s.lossCount > 0 ? Number((s.lossReturnAbsSum / s.lossCount).toFixed(2)) : undefined,
-      downsideDeviationPct: s.trades > 0 ? Number(Math.sqrt(s.downsideSqSum / s.trades).toFixed(2)) : undefined,
-      winCount: s.trades > 0 ? s.winCount : undefined,
-      lossCount: s.trades > 0 ? s.lossCount : undefined
+      shortTermPct: s.daysHeldCount > 0 ? Number(((s.shortTermCount / s.daysHeldCount) * 100).toFixed(1)) : undefined
     }))
     .sort((a, b) => b.totalPnl - a.totalPnl);
 }
@@ -1416,7 +1275,7 @@ const MARKET_FACTOR_KEYS = new Set<string>([
   "liquidity", "momentum", "value", "quality", "volatility", "sentiment", "positioning", "diversification"
 ]);
 
-function thesisMetaFromFill(fill: FillEvent): { thesisTag?: string; regime?: string; confidence?: number; sector?: string; dominantFactor?: MarketFactor; entryModel?: string; reviewedByModel?: string } {
+function thesisMetaFromFill(fill: FillEvent): { thesisTag?: string; regime?: string; confidence?: number; sector?: string; dominantFactor?: MarketFactor } {
   const raw = fill.raw;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
   const r = raw as Record<string, unknown>;
@@ -1434,9 +1293,7 @@ function thesisMetaFromFill(fill: FillEvent): { thesisTag?: string; regime?: str
     regime: typeof p.entryMarketRegime === "string" ? p.entryMarketRegime : undefined,
     confidence: typeof p.confidenceScore === "number" ? p.confidenceScore : undefined,
     sector,
-    dominantFactor,
-    entryModel: typeof p.proposedByModel === "string" && p.proposedByModel ? p.proposedByModel : undefined,
-    reviewedByModel: typeof p.reviewedByModel === "string" && p.reviewedByModel ? p.reviewedByModel : undefined
+    dominantFactor
   };
 }
 

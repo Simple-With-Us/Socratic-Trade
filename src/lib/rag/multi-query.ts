@@ -252,7 +252,6 @@ export async function generateHydePassages(
         context: "rag-hyde",
         keySource: endpoint.keySource,
         keyRef: endpoint.keyRef,
-        connectedAccountId: opts.connectedAccountId,
         ...extractLlmUsage(payload)
       });
     } catch {

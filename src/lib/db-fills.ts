@@ -148,58 +148,34 @@ export function listPortfolioSnapshots(accountNumber: string, source?: FillSourc
 // ── Fill events ────────────────────────────────────────────────────────────────
 
 export function insertFillEvent(input: Omit<FillEvent, "id" | "filledAt"> & { id?: string; filledAt?: string; userId?: string }): FillEvent {
-  const userId = input.userId ?? "local";
   const fill: FillEvent = {
     ...input,
     id: input.id ?? crypto.randomUUID(),
     filledAt: input.filledAt ?? new Date().toISOString()
   };
-  try {
-    getDb()
-      .prepare(
-        "INSERT INTO fill_events (id, user_id, proposal_id, run_id, account_number, source, execution_mode, symbol, side, quantity, price, notional, status, broker_order_id, raw, filled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-      )
-      .run(
-        fill.id,
-        userId,
-        fill.proposalId ?? null,
-        fill.runId ?? null,
-        fill.accountNumber,
-        fill.source,
-        fill.executionMode ?? null,
-        fill.symbol,
-        fill.side,
-        fill.quantity,
-        fill.price,
-        fill.notional,
-        fill.status,
-        fill.brokerOrderId ?? null,
-        fill.raw === undefined ? null : JSON.stringify(fill.raw),
-        fill.filledAt
-      );
-  } catch (e) {
-    // Durable double-fill backstop (migration 16's partial UNIQUE index on
-    // (proposal_id, broker_order_id)). A second insert of the SAME physical broker order for the
-    // same proposal is an idempotent no-op — return the already-booked fill rather than throwing or
-    // double-booking, even if the single-process dedupe guard was somehow bypassed (concurrent
-    // processes). Only intercept the specific unique-constraint case; anything else re-throws.
-    if (isUniqueConstraintError(e) && fill.proposalId && fill.brokerOrderId) {
-      const existing = getDb()
-        .prepare(
-          "SELECT * FROM fill_events WHERE proposal_id = ? AND broker_order_id = ? AND user_id = ? ORDER BY filled_at ASC LIMIT 1"
-        )
-        .get(fill.proposalId, fill.brokerOrderId, userId) as RawFillEvent | undefined;
-      if (existing) return toFillEvent(existing);
-    }
-    throw e;
-  }
+  getDb()
+    .prepare(
+      "INSERT INTO fill_events (id, user_id, proposal_id, run_id, account_number, source, execution_mode, symbol, side, quantity, price, notional, status, broker_order_id, raw, filled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .run(
+      fill.id,
+      input.userId ?? "local",
+      fill.proposalId ?? null,
+      fill.runId ?? null,
+      fill.accountNumber,
+      fill.source,
+      fill.executionMode ?? null,
+      fill.symbol,
+      fill.side,
+      fill.quantity,
+      fill.price,
+      fill.notional,
+      fill.status,
+      fill.brokerOrderId ?? null,
+      fill.raw === undefined ? null : JSON.stringify(fill.raw),
+      fill.filledAt
+    );
   return fill;
-}
-
-/** better-sqlite3 surfaces a UNIQUE-index violation as SqliteError code SQLITE_CONSTRAINT_UNIQUE. */
-function isUniqueConstraintError(e: unknown): boolean {
-  const code = (e as { code?: unknown })?.code;
-  return typeof code === "string" && code.includes("SQLITE_CONSTRAINT");
 }
 
 export function listFillEvents(accountNumber: string, source?: FillSource, limit = 500, userId: string = "local"): FillEvent[] {
@@ -227,7 +203,7 @@ export function listPendingBrokerReconciliationFills(accountNumber: string, user
       `SELECT * FROM fill_events
        WHERE account_number = ?
          AND user_id = ?
-         AND status IN ('pending_reconciliation', 'partially_filled')
+         AND status = 'pending_reconciliation'
          AND broker_order_id IS NOT NULL
          AND (source = 'live' OR execution_mode IN ('broker/paper', 'broker/live'))
        ORDER BY filled_at ASC`

@@ -10,7 +10,6 @@ import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } 
 import type { TickerLogoDisplay } from "@/lib/ticker-logos";
 import { normalizeTickerLogoSymbol } from "@/lib/ticker-logos";
 import { cx } from "../lib/format";
-import { Tooltip } from "./primitives";
 
 export type { TickerLogoDisplay };
 
@@ -96,45 +95,43 @@ export function TickerLogo({
   if (failed) {
     if (fallback) return <>{fallback}</>;
     return (
-      <Tooltip content={title}>
-        <span
-          ref={ref}
-          className={cx(
-            "con-logo-tile inline-flex shrink-0 select-none items-center justify-center overflow-hidden font-semibold uppercase leading-none",
-            SIZE_CLASS[size],
-            MONOGRAM_FONT_CLASS[size],
-            className
-          )}
-          aria-hidden="true"
-        >
-          {monogram(normalized)}
-        </span>
-      </Tooltip>
+      <span
+        ref={ref}
+        className={cx(
+          "con-logo-tile inline-flex shrink-0 select-none items-center justify-center overflow-hidden font-semibold uppercase leading-none",
+          SIZE_CLASS[size],
+          MONOGRAM_FONT_CLASS[size],
+          className
+        )}
+        title={title}
+        aria-hidden="true"
+      >
+        {monogram(normalized)}
+      </span>
     );
   }
 
   return (
-    <Tooltip content={title}>
-      <span
-        ref={ref}
-        className={cx(
-          "inline-flex shrink-0 items-center justify-center overflow-hidden",
-          SIZE_CLASS[size],
-          display === "tile" ? "con-logo-tile p-0.5" : "rounded-sm",
-          className
-        )}
-        aria-hidden="true"
-      >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={`/api/logos/ticker?symbol=${encodeURIComponent(normalized)}&theme=${theme}`}
-          alt=""
-          className="h-full w-full object-contain"
-          loading="lazy"
-          decoding="async"
-          onError={() => setFailed(true)}
-        />
-      </span>
-    </Tooltip>
+    <span
+      ref={ref}
+      className={cx(
+        "inline-flex shrink-0 items-center justify-center overflow-hidden",
+        SIZE_CLASS[size],
+        display === "tile" ? "con-logo-tile p-0.5" : "rounded-sm",
+        className
+      )}
+      title={title}
+      aria-hidden="true"
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={`/api/logos/ticker?symbol=${encodeURIComponent(normalized)}&theme=${theme}`}
+        alt=""
+        className="h-full w-full object-contain"
+        loading="lazy"
+        decoding="async"
+        onError={() => setFailed(true)}
+      />
+    </span>
   );
 }

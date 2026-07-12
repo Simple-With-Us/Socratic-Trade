@@ -42,9 +42,6 @@ from datetime import datetime, timezone
 # listed here have no `schedule:` trigger and will simply be skipped for the
 # check-in step (they can still send a failure event on other trigger types).
 CRON_SCHEDULES = {
-    "CI": "47 7 * * *",
-    "Cleanup Actions Caches": "5 3 * * *",
-    "Effort Issues Sync": "12 6 * * *",
     "Security": "41 10 * * 1",
     "Playwright Smoke": "17 9 * * 1",
     "Shared package pin check": "0 13 * * 1",
@@ -118,13 +115,7 @@ def main() -> int:
     )
 
     # ── 1. Failure event ────────────────────────────────────────────────────
-    # Only page Sentry for main + merge-queue failures. Feature-branch failures are already
-    # surfaced (and enforced) by the PR's required status checks; fingerprinting on branch
-    # minted one throwaway Sentry error-issue per agent branch (FLEET-INFRA-2N/-2H).
-    pageworthy_branch = branch == "main" or branch.startswith("gh-readonly-queue/")
-    if conclusion == "failure" and not pageworthy_branch:
-        print(f"skip: branch {branch} failure not paged to Sentry (PR checks cover it)")
-    elif conclusion == "failure":
+    if conclusion == "failure":
         event_payload = {
             "event_id": uuid.uuid4().hex,
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

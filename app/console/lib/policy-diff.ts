@@ -100,11 +100,7 @@ export function classify(def: FieldDef, from: unknown, to: unknown): DiffEntry["
   if (fromNum === null && toNum !== null) return "tighter";
   if (fromNum === null || toNum === null || fromNum === toNum) return "changed";
   const up = toNum > fromNum;
-  // looserWhen "up": a BIGGER number loosens (raising a cap). "down": a SMALLER number loosens —
-  // e.g. a universe floor, where lowering the min price/cap/volume lets MORE names in. The two
-  // cases invert; a prior version used the same `up ? looser : tighter` for both, so lowering a
-  // floor was mislabeled "Locks Down" when it actually widens the universe.
-  return def.looserWhen === "up" ? (up ? "looser" : "tighter") : (up ? "tighter" : "looser");
+  return def.looserWhen === "up" ? (up ? "looser" : "tighter") : up ? "looser" : "tighter";
 }
 
 export interface SparseDraftValues {

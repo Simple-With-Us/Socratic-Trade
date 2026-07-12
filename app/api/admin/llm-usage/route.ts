@@ -12,8 +12,6 @@ export const dynamic = "force-dynamic";
 // Query params:
 //   sinceDays         Window in days (default 30)
 //   operatorFundedOnly  "true" → only rows where a non-local tenant spent the operator key
-//   accountId         Filter to a single connected account
-//   broker            Filter to a broker (alpaca | robinhood | ...) via the connected_accounts join
 export async function GET(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
@@ -21,13 +19,11 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const sinceDays = Number(url.searchParams.get("sinceDays")) || 30;
   const operatorFundedOnly = url.searchParams.get("operatorFundedOnly") === "true";
-  const connectedAccountId = url.searchParams.get("accountId") || undefined;
-  const broker = url.searchParams.get("broker") || undefined;
   const sinceIso = new Date(Date.now() - sinceDays * 24 * 60 * 60_000).toISOString();
 
   // Enrich each per-key row with a human-readable label + masked key resolved from the live key
   // store — so the per-key view isn't just an opaque fingerprint. Null when the key is detached.
-  const rows = getLlmUsageSummary({ sinceIso, operatorFundedOnly, connectedAccountId, broker }).map((r) => {
+  const rows = getLlmUsageSummary({ sinceIso, operatorFundedOnly }).map((r) => {
     const key = describeUsageKey(r);
     return { ...r, keyLabel: key?.label ?? null, keyLast4: key?.last4 ?? null, keyMasked: key?.masked ?? null };
   });

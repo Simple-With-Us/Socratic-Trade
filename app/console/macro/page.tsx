@@ -12,7 +12,6 @@ import Link from "next/link";
 import type { MarketSignals } from "@/lib/market-signals";
 import type { MarketNewsItem } from "@/lib/market-signals/massive";
 import { fmtPct, EM_DASH } from "../lib/format";
-import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { useConsoleData } from "../lib/useConsoleData";
 import { Ago, Card, Chip, Empty } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
@@ -35,7 +34,7 @@ export default function MacroPage() {
   const board = snapshot.macroBoard;
 
   return (
-    <div className={`${CONSOLE_PAGE_WIDTH} flex flex-col gap-4`}>
+    <div className="mx-auto flex max-w-5xl flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2">
         <h1 className="text-[length:var(--con-fs-lg)] font-bold">Macro</h1>
         <span

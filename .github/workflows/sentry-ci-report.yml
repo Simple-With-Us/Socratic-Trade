@@ -22,17 +22,13 @@ name: Sentry CI Report
 # ubuntu-latest) — no action marketplace dependency, no new job permissions
 # beyond what's needed to read the triggering run.
 #
-# workflows observed (from `ls .github/workflows/`; see each file's `name:`):
-#   CI, Cleanup Actions Caches, Codex Autofix, Effort Issues Sync,
-#   merge-shepherd, Shared package pin check, Playwright Smoke, Security
-# Reusable-only `_merge-shepherd-impl` executes inside `merge-shepherd` and has no independent
-# workflow_run event; the caller's completion is the observable run.
+# workflows observed (from `ls .github/workflows/` at authoring time — see
+# the `name:` header of each file):
+#   CI, Codex Autofix, Deploy, Sync Preview Lanes, Shared package pin check,
+#   Playwright Smoke, Security
 #
 # Cron schedules mirrored for the check-in step (must match the source
 # workflow's `schedule:` block; keep in sync if those change):
-#   CI                       -> "47 7 * * *"  (ci.yml nightly hosted canary)
-#   Cleanup Actions Caches   -> "5 3 * * *"   (cleanup-caches.yml)
-#   Effort Issues Sync       -> "12 6 * * *"  (effort-issues-sync.yml)
 #   Security                 -> "41 10 * * 1" (security.yml)
 #   Playwright Smoke         -> "17 9 * * 1"  (e2e.yml)
 #   Shared package pin check -> "0 13 * * 1"  (shared-package-pin-check.yml)
@@ -41,10 +37,9 @@ on:
   workflow_run:
     workflows:
       - CI
-      - Cleanup Actions Caches
       - Codex Autofix
-      - Effort Issues Sync
-      - merge-shepherd
+      - Deploy
+      - Sync Preview Lanes
       - Shared package pin check
       - Playwright Smoke
       - Security

@@ -120,7 +120,6 @@ const API_KEY_CATALOG = [
     label: "SEC EDGAR User-Agent",
     category: "Scrapers",
     required: false,
-    credentialName: "contact",
     unlocks: "Polite SEC Form 4 and 8-K requests with your descriptive contact string.",
     docsUrl: "https://www.sec.gov/os/accessing-edgar-data"
   },

@@ -1,15 +1,5 @@
 import { DEFAULT_POLICY, DEFAULT_TAX_SETTINGS } from "@/lib/defaults";
-import {
-  getActiveConnectedAccount,
-  getConnectedAccount,
-  getDb,
-  getPolicy,
-  resolveLlmCredential,
-  setPolicy,
-  setStrategyPrompt
-} from "@/lib/db";
-import { llmModelFamily } from "@/lib/llm-provider";
-import { isModelRotationSentinel } from "@/lib/llm-request";
+import { getPolicy, setPolicy, setStrategyPrompt } from "@/lib/db";
 import { isIndexUniverse, normalizeIncludedIndices } from "@/lib/index-universes";
 import { getBrokerGateway } from "@/lib/broker";
 import { stripNullsDeep } from "@/lib/policy-null-stripping";
@@ -30,7 +20,7 @@ import {
   normalizeMarketScanCandidateLimit,
   normalizeMarketScanOutlierReserve
 } from "@/lib/scan-settings";
-import { ALL_LLM_REASONING_EFFORTS, isDisallowedInteractiveStrategyReasoningConfig, resolveReviewerReasoningEffort } from "@/lib/llm-request";
+import { ALL_LLM_REASONING_EFFORTS, isDisallowedInteractiveStrategyReasoningConfig } from "@/lib/llm-request";
 import { NOTIFICATION_EVENT_TYPES } from "@/lib/types";
 import type { IndexUniverse, NotificationEventType, TradingPolicy } from "@/lib/types";
 import { NextResponse } from "next/server";
@@ -42,24 +32,10 @@ export async function GET(request: Request) {
 }
 
 export async function PUT(request: Request) {
-  const rawBody: unknown = await request.json();
-  if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
-    return new NextResponse("Policy update body must be a JSON object.", { status: 400 });
-  }
-  const body = rawBody as Record<string, unknown>;
+  const body = await request.json();
   const userId = resolveRequestUserId(request, body);
-  const requestedTarget = body.targetConnectedAccountId;
-  if (requestedTarget !== undefined && (typeof requestedTarget !== "string" || requestedTarget.trim().length === 0)) {
-    return new NextResponse("targetConnectedAccountId must be a non-empty string.", { status: 400 });
-  }
-  const explicitTarget = typeof requestedTarget === "string" ? requestedTarget.trim() : undefined;
-  if (explicitTarget && !getConnectedAccount(explicitTarget, userId)) {
-    return new NextResponse("The target connected account was not found.", { status: 404 });
-  }
-  // Snapshot the implicit target once at request entry. Without this, a concurrent account switch
-  // between getPolicy() and setPolicy() can merge Account A's patch and persist it into Account B.
-  const targetConnectedAccountId = explicitTarget ?? getActiveConnectedAccount(userId)?.id;
-  const current = getPolicy(userId, targetConnectedAccountId);
+  if (typeof body.strategyPrompt === "string") setStrategyPrompt(body.strategyPrompt, userId);
+  const current = getPolicy(userId);
   const additionalSymbols = normalizePolicySymbolList(body.additionalSymbols, current.additionalSymbols ?? []);
   const blocklist = normalizePolicySymbolList(body.blocklist, current.blocklist ?? []);
   const invalidNewSymbols = newlyAddedInvalidSymbols([...additionalSymbols, ...blocklist], [
@@ -71,27 +47,10 @@ export async function PUT(request: Request) {
   }
   const customSymbolError = await validateNewCustomPolicySymbols(additionalSymbols, current.additionalSymbols ?? []);
   if (customSymbolError) return new NextResponse(customSymbolError, { status: 400 });
-  const bodyNotificationSettings =
-    typeof body.notificationSettings === "object" && body.notificationSettings
-      ? (body.notificationSettings as Record<string, unknown>)
-      : undefined;
   const policy: TradingPolicy = {
     ...DEFAULT_POLICY,
     ...current,
-    ...Object.fromEntries(
-      Object.entries(body).filter(
-        ([key]) =>
-          ![
-            "strategyPrompt",
-            "userId",
-            "targetConnectedAccountId",
-            // Derived from the owned connected-account row on every read; never client-writable.
-            "connectedAccountId",
-            "activeBroker",
-            "accountNumber"
-          ].includes(key)
-      )
-    ),
+    ...Object.fromEntries(Object.entries(body).filter(([key]) => key !== "strategyPrompt" && key !== "userId")),
     includedIndices: Array.isArray(body.includedIndices)
       ? normalizeIncludedIndices(Array.from(new Set(body.includedIndices.map(String).filter(isIndexUniverse))) as IndexUniverse[])
       : current.includedIndices,
@@ -111,10 +70,12 @@ export async function PUT(request: Request) {
     notificationSettings: {
       ...DEFAULT_POLICY.notificationSettings,
       ...current.notificationSettings,
-      ...(bodyNotificationSettings ?? {}),
+      ...(typeof body.notificationSettings === "object" && body.notificationSettings ? body.notificationSettings : {}),
       enabledEvents:
-        Array.isArray(bodyNotificationSettings?.enabledEvents)
-          ? bodyNotificationSettings.enabledEvents.filter(isNotificationEvent)
+        typeof body.notificationSettings === "object" &&
+        body.notificationSettings &&
+        Array.isArray(body.notificationSettings.enabledEvents)
+          ? body.notificationSettings.enabledEvents.filter(isNotificationEvent)
           : current.notificationSettings.enabledEvents
     },
     taxSettings: {
@@ -127,24 +88,12 @@ export async function PUT(request: Request) {
       ...(typeof body.tuning === "object" && body.tuning ? body.tuning : {})
     }
   };
-  // Owner directive 2026-07-07: an empty/cleared model is NOT silently deleted or substituted — a
-  // blank model id is rejected by validatePolicy so the user must pick one explicitly. This covers
-  // the learning-review model too (#1278): a blank used to be quietly deleted here ("cleared →
-  // feature no-ops"), but mergePolicy now refills the explicit claude-fable-5 default, which would
-  // turn a clear into a silent revert-to-default. Rejecting mirrors the Green/Red model rules; the
-  // runner's "no-model" skip remains only as a backstop for corrupt stored data that bypassed this
-  // route.
+  if (typeof body.redTeamLlmModel === "string" && body.redTeamLlmModel.trim().length === 0) {
+    delete policy.redTeamLlmModel;
+  }
   // The client serializes a CLEARED optional field as `null` (JSON.stringify drops `undefined`, which the
   // `...current` merge above would otherwise silently restore). Strip those nulls back to absent so blanking
   // a field actually turns the guard off / reverts it to its default.
-  // EXCEPTION — learningReviewModel: a cleared model must be REJECTED, not stripped. validatePolicy
-  // rejects a blank STRING below, but a `null` would be deleted by stripNullsDeep before that check
-  // runs, and setPolicy would then merge DEFAULT_POLICY.learningReviewModel (claude-fable-5) back —
-  // the exact silent clear->default this route exists to prevent (owner: require a model be chosen;
-  // no hidden model default). Reject the null clear explicitly, mirroring the blank-string path.
-  if (body.learningReviewModel === null) {
-    return new NextResponse("learningReviewModel must be a non-empty model id.", { status: 400 });
-  }
   stripNullsDeep(policy as unknown as Record<string, unknown>);
   normalizeExclusivePolicyCaps(policy);
   // Only enforce the interactive gpt-5.5/high-reasoning rejection when THIS request actually
@@ -156,55 +105,17 @@ export async function PUT(request: Request) {
   const reasoningConfigChanged =
     policy.llmModel !== current.llmModel ||
     policy.redTeamLlmModel !== current.redTeamLlmModel ||
-    policy.llmReasoningEffort !== current.llmReasoningEffort ||
-    policy.redTeamReasoningEffort !== current.redTeamReasoningEffort;
-  const validationError = await validatePolicy(policy, userId, {
-    enforceInteractiveReasoningRule: reasoningConfigChanged,
-    // Keyed-provider backstop gating mirrors the reasoning rule: validatePolicy runs against the
-    // MERGED policy, so enforcing it on every save would 400 EVERY unrelated write (notification
-    // prefs, caps, ...) for a user whose STORED model's provider key was since removed. A stored
-    // unkeyed model is already safe at run time (proposeTrades throws / the Red review fails
-    // closed); only a write that actually sets/changes that model must prove its provider is keyed.
-    enforceKeyedGreenModelRule: policy.llmModel !== current.llmModel,
-    enforceKeyedRedModelRule: policy.redTeamLlmModel !== current.redTeamLlmModel,
-    // Same MERGED-policy scoping as the rules above: bound tuning.marketableLimitBufferBps only when
-    // THIS request actually sets/changes it — otherwise a stored out-of-range value would 400 EVERY
-    // unrelated save. A stale stored value is already safe at run time (validatedMarketableLimitBufferBps
-    // defaults/clamps it); only a write that changes the field must pass the bound.
-    enforceMarketableLimitBufferRule: policy.tuning?.marketableLimitBufferBps !== current.tuning?.marketableLimitBufferBps
-  });
+    policy.llmReasoningEffort !== current.llmReasoningEffort;
+  const validationError = await validatePolicy(policy, userId, { enforceInteractiveReasoningRule: reasoningConfigChanged });
   if (validationError) return new NextResponse(validationError, { status: 400 });
-  // Validation above is intentionally side-effect free. Apply the policy and optional prompt in one
-  // SQLite transaction so a rejected companion field can never leave the prompt partially changed.
-  let targetDisappeared = false;
-  getDb().transaction(() => {
-    // Account deletion is a separate request and can complete while custom-symbol validation awaits.
-    // Re-check inside the write transaction; setPolicy intentionally falls back to user-level storage
-    // when an account id does not resolve, which would be the wrong failure mode for a deleted target.
-    if (targetConnectedAccountId && !getConnectedAccount(targetConnectedAccountId, userId)) {
-      targetDisappeared = true;
-      return;
-    }
-    setPolicy(policy, userId, targetConnectedAccountId);
-    if (typeof body.strategyPrompt === "string") {
-      setStrategyPrompt(body.strategyPrompt, userId, targetConnectedAccountId);
-    }
-  })();
-  if (targetDisappeared) {
-    return new NextResponse("The target connected account changed before this update could be saved.", { status: 409 });
-  }
-  return NextResponse.json(getPolicy(userId, targetConnectedAccountId));
+  setPolicy(policy, userId);
+  return NextResponse.json(policy);
 }
 
 async function validatePolicy(
   policy: TradingPolicy,
   userId: string,
-  options: {
-    enforceInteractiveReasoningRule?: boolean;
-    enforceKeyedGreenModelRule?: boolean;
-    enforceKeyedRedModelRule?: boolean;
-    enforceMarketableLimitBufferRule?: boolean;
-  } = {}
+  options: { enforceInteractiveReasoningRule?: boolean } = {}
 ): Promise<string | undefined> {
   // Invalid legacy watchlist / ignore-list symbols are sanitized out in the PUT handler above, so stale
   // bad data cannot block unrelated policy updates. Newly added custom Additional Watchlist symbols are
@@ -214,54 +125,16 @@ async function validatePolicy(
   if (policy.socraticOverrideMode !== undefined && !["off", "propose", "execute"].includes(policy.socraticOverrideMode)) return "socraticOverrideMode must be off, propose, or execute.";
   if (policy.socraticOverrideMaxPctOfNav !== undefined && (!Number.isFinite(policy.socraticOverrideMaxPctOfNav) || policy.socraticOverrideMaxPctOfNav <= 0 || policy.socraticOverrideMaxPctOfNav > 100)) return "socraticOverrideMaxPctOfNav must be between 0 and 100.";
   if (policy.sellToFundBuy !== undefined && !["off", "suggest", "propose", "automated"].includes(policy.sellToFundBuy)) return "sellToFundBuy must be off, suggest, propose, or automated.";
-  // NOTE: any non-empty id ≤64 chars is deliberately valid here — this includes custom provider
-  // model ids AND the "__rotate__" rotation sentinel (LLM_MODEL_ROTATION_SENTINEL in
-  // src/lib/llm-request.ts; resolved to a concrete model at run start by src/lib/model-rotation.ts).
-  // Do not add a catalog whitelist.
   if (policy.llmModel !== undefined && (typeof policy.llmModel !== "string" || policy.llmModel.trim().length === 0 || policy.llmModel.length > 64)) return "llmModel must be a non-empty model id.";
   if (policy.redTeamLlmModel !== undefined && (typeof policy.redTeamLlmModel !== "string" || policy.redTeamLlmModel.trim().length === 0 || policy.redTeamLlmModel.length > 64)) return "redTeamLlmModel must be a non-empty model id.";
-  if (policy.learningReviewEnabled !== undefined && typeof policy.learningReviewEnabled !== "boolean") return "learningReviewEnabled must be a boolean.";
-  if (policy.learningReviewMode !== undefined && !["annotate", "decide"].includes(policy.learningReviewMode)) return "learningReviewMode must be annotate or decide.";
-  if (policy.brokerMinimumHandling !== undefined && !["bump", "skip"].includes(policy.brokerMinimumHandling)) return "brokerMinimumHandling must be bump or skip.";
-  if (policy.learningReviewModel !== undefined && (typeof policy.learningReviewModel !== "string" || policy.learningReviewModel.trim().length === 0 || policy.learningReviewModel.length > 64)) return "learningReviewModel must be a non-empty model id.";
-  if (policy.learningReviewMinNewLessons !== undefined && (!Number.isInteger(policy.learningReviewMinNewLessons) || policy.learningReviewMinNewLessons < 1 || policy.learningReviewMinNewLessons > 1000)) return "learningReviewMinNewLessons must be an integer between 1 and 1000.";
-  if (policy.learningReviewMaxWaitDays !== undefined && (!Number.isInteger(policy.learningReviewMaxWaitDays) || policy.learningReviewMaxWaitDays < 1 || policy.learningReviewMaxWaitDays > 365)) return "learningReviewMaxWaitDays must be an integer between 1 and 365.";
-  // Owner directive 2026-07-07: a chosen model must belong to a provider the user holds a key for
-  // (no defaults; only keyed providers are usable). Same-model-for-both is allowed — independence is
-  // the user's choice, not enforced. The Settings UI disables non-keyed options; this is the
-  // server-side backstop. (Mandatory "both models set" is enforced in the Settings UI and at strategy
-  // runtime via fail-closed on an unconfigured model.)
-  // The "__rotate__" rotation sentinel is EXEMPT from the keyed-provider check: it is not a concrete
-  // model with a single provider to key-check — rotation resolves it, per run, to a pick drawn ONLY
-  // from credential-resolvable models (src/lib/model-rotation.ts), so the keyed guarantee is upheld
-  // at serve time, not save time.
-  if ((options.enforceKeyedGreenModelRule ?? true) && typeof policy.llmModel === "string" && policy.llmModel.trim() && !isModelRotationSentinel(policy.llmModel)) {
-    const provider = llmModelFamily(policy.llmModel);
-    if (!resolveLlmCredential(provider, userId).key) return `Add an API key for ${provider} before selecting ${policy.llmModel.trim()} as your strategist (green team) model.`;
-  }
-  if ((options.enforceKeyedRedModelRule ?? true) && typeof policy.redTeamLlmModel === "string" && policy.redTeamLlmModel.trim() && !isModelRotationSentinel(policy.redTeamLlmModel)) {
-    const provider = llmModelFamily(policy.redTeamLlmModel);
-    if (!resolveLlmCredential(provider, userId).key) return `Add an API key for ${provider} before selecting ${policy.redTeamLlmModel.trim()} as your reviewer (red team) model.`;
-  }
   if (policy.llmReasoningEffort !== undefined && !ALL_LLM_REASONING_EFFORTS.includes(policy.llmReasoningEffort)) {
     return "llmReasoningEffort must be none, minimal, low, medium, high, xhigh, or max.";
   }
-  if (policy.redTeamReasoningEffort !== undefined && !ALL_LLM_REASONING_EFFORTS.includes(policy.redTeamReasoningEffort)) {
-    return "redTeamReasoningEffort must be none, minimal, low, medium, high, xhigh, or max.";
-  }
-  // Per-team reasoning (2026-07-10): each team's (model, effort) combo is checked with ITS OWN
-  // effort — the proposer's legacy `llmReasoningEffort`, and the reviewer's `redTeamReasoningEffort`
-  // falling back to the proposer's until explicitly set (resolveReviewerReasoningEffort). A
-  // violating combo on EITHER team rejects, and the message names which team so the owner knows
-  // which control to change.
-  if (options.enforceInteractiveReasoningRule ?? true) {
-    if (isDisallowedInteractiveStrategyReasoningConfig(policy.llmModel, policy.llmReasoningEffort)) {
-      return "Green Team: gpt-5.5 with high reasoning is disabled for interactive strategy runs. Use medium/low reasoning or choose a faster model.";
-    }
-    if (isDisallowedInteractiveStrategyReasoningConfig(policy.redTeamLlmModel, resolveReviewerReasoningEffort(policy))) {
-      return "Red Team: gpt-5.5 with high reasoning is disabled for interactive strategy runs. Use medium/low reasoning or choose a faster model.";
-    }
-  }
+  if (
+    (options.enforceInteractiveReasoningRule ?? true) &&
+    (isDisallowedInteractiveStrategyReasoningConfig(policy.llmModel, policy.llmReasoningEffort) ||
+      isDisallowedInteractiveStrategyReasoningConfig(policy.redTeamLlmModel, policy.llmReasoningEffort))
+  ) return "gpt-5.5 with high reasoning is disabled for interactive strategy runs. Use medium/low reasoning or choose a faster model.";
   if (policy.holdingHorizon && !["intraday", "swing", "position", "longterm"].includes(policy.holdingHorizon)) return "holdingHorizon must be intraday, swing, position, or longterm.";
   if (policy.maxOrderNotional !== undefined && policy.maxOrderNotional <= 0) return "maxOrderNotional must be positive.";
   if (policy.maxOrderPctOfNav !== undefined && (policy.maxOrderPctOfNav <= 0 || policy.maxOrderPctOfNav > 100)) return "maxOrderPctOfNav must be between 0 and 100.";
@@ -273,7 +146,6 @@ async function validatePolicy(
   if (policy.tuning?.llmDailyTokenBudget !== undefined && (!Number.isFinite(policy.tuning.llmDailyTokenBudget) || policy.tuning.llmDailyTokenBudget < 0)) return "tuning.llmDailyTokenBudget must be a non-negative number (0 = no limit).";
   if (policy.tuning?.llmDailyCostBudgetUsd !== undefined && (!Number.isFinite(policy.tuning.llmDailyCostBudgetUsd) || policy.tuning.llmDailyCostBudgetUsd < 0)) return "tuning.llmDailyCostBudgetUsd must be a non-negative number (0 = no limit).";
   if (policy.atrStops !== undefined && typeof policy.atrStops !== "boolean") return "atrStops must be a boolean.";
-  if (policy.brokerTrailingStops !== undefined && typeof policy.brokerTrailingStops !== "boolean") return "brokerTrailingStops must be a boolean.";
   if (policy.riskRules.atrStopPeriod !== undefined && (!Number.isInteger(policy.riskRules.atrStopPeriod) || policy.riskRules.atrStopPeriod < 5 || policy.riskRules.atrStopPeriod > 100)) return "riskRules.atrStopPeriod must be an integer between 5 and 100.";
   if (policy.riskRules.atrStopMultiple !== undefined && (!Number.isFinite(policy.riskRules.atrStopMultiple) || policy.riskRules.atrStopMultiple <= 0 || policy.riskRules.atrStopMultiple > 10)) return "riskRules.atrStopMultiple must be between 0 (exclusive) and 10.";
   if (policy.maxGrossExposurePct !== undefined && (!Number.isFinite(policy.maxGrossExposurePct) || policy.maxGrossExposurePct <= 0 || policy.maxGrossExposurePct > 100)) return "maxGrossExposurePct must be between 0 and 100.";
@@ -339,21 +211,13 @@ async function validatePolicy(
     return "llmFallbackModels must be an array of model-id strings.";
   }
   if (policy.tuning) {
-    // tuning.redTeamConvictionThreshold was removed 2026-07-07 (single-adversary consolidation O2:
-    // the Red Team reviews EVERY risk-adding opening — no conviction gate). Stale values in stored
-    // tuning JSON are ignored by the runtime; nothing to validate for it here.
-    const { shrinkPrior, minClosedLotsForWeightShift, sizingFloorPct, sizingCeilingPct, crisisMaxOpeningExposurePct, bearVetoFcfYieldFloorPct, bearVetoDebtToEquityCeiling, skipNegativeExpectancy, skipNegativeExpectancyEdgePct, gateOnRationaleCollapse, marketableLimitBufferBps } = policy.tuning;
+    const { shrinkPrior, minClosedLotsForWeightShift, sizingFloorPct, sizingCeilingPct, redTeamConvictionThreshold, crisisMaxOpeningExposurePct, bearVetoFcfYieldFloorPct, bearVetoDebtToEquityCeiling, skipNegativeExpectancy, skipNegativeExpectancyEdgePct, gateOnRationaleCollapse } = policy.tuning;
     if (shrinkPrior !== undefined && (!Number.isFinite(shrinkPrior) || shrinkPrior < 0 || shrinkPrior > 100)) return "tuning.shrinkPrior must be between 0 and 100.";
-    // Zero/negative would INVERT the marketable exit/entry price (a SELL limit above the quote rests
-    // unfilled); >500 bps (5% through the quote) is a typo/units mistake. The exit path also clamps
-    // already-stored values (validatedMarketableLimitBufferBps); this keeps new saves honest at the
-    // source. Enforced only when the REQUEST sets/changes the field (see the PUT handler) so a stale
-    // stored value never blocks unrelated policy saves.
-    if ((options.enforceMarketableLimitBufferRule ?? true) && marketableLimitBufferBps !== undefined && (!Number.isFinite(marketableLimitBufferBps) || marketableLimitBufferBps <= 0 || marketableLimitBufferBps > 500)) return "tuning.marketableLimitBufferBps must be greater than 0 and at most 500 (bps).";
     if (minClosedLotsForWeightShift !== undefined && (!Number.isFinite(minClosedLotsForWeightShift) || minClosedLotsForWeightShift < 1 || minClosedLotsForWeightShift > 1000)) return "tuning.minClosedLotsForWeightShift must be between 1 and 1000.";
     if (sizingFloorPct !== undefined && (!Number.isFinite(sizingFloorPct) || sizingFloorPct < 0 || sizingFloorPct > 100)) return "tuning.sizingFloorPct must be between 0 and 100.";
     if (sizingCeilingPct !== undefined && (!Number.isFinite(sizingCeilingPct) || sizingCeilingPct < 1 || sizingCeilingPct > 100)) return "tuning.sizingCeilingPct must be between 1 and 100.";
     if (sizingFloorPct !== undefined && sizingCeilingPct !== undefined && sizingFloorPct > sizingCeilingPct) return "tuning.sizingFloorPct must not exceed sizingCeilingPct.";
+    if (redTeamConvictionThreshold !== undefined && (!Number.isFinite(redTeamConvictionThreshold) || redTeamConvictionThreshold < 0 || redTeamConvictionThreshold > 100)) return "tuning.redTeamConvictionThreshold must be between 0 and 100.";
     if (crisisMaxOpeningExposurePct !== undefined && (!Number.isFinite(crisisMaxOpeningExposurePct) || crisisMaxOpeningExposurePct < 0 || crisisMaxOpeningExposurePct > 100)) return "tuning.crisisMaxOpeningExposurePct must be between 0 and 100.";
     if (bearVetoFcfYieldFloorPct !== undefined && (!Number.isFinite(bearVetoFcfYieldFloorPct) || bearVetoFcfYieldFloorPct < -100 || bearVetoFcfYieldFloorPct > 100)) return "tuning.bearVetoFcfYieldFloorPct must be between -100 and 100.";
     if (bearVetoDebtToEquityCeiling !== undefined && (!Number.isFinite(bearVetoDebtToEquityCeiling) || bearVetoDebtToEquityCeiling < 0)) return "tuning.bearVetoDebtToEquityCeiling must be a non-negative number.";

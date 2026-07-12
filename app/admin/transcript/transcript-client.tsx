@@ -57,7 +57,7 @@ export function TranscriptClient() {
       </div>
 
       {loading && <p className="text-sm text-muted">Loading…</p>}
-      {error && <p className="text-sm text-neg">{error}</p>}
+      {error && <p className="text-sm text-down">{error}</p>}
       {!loading && !error && turns.length === 0 && <p className="text-sm text-muted">No chat turns yet.</p>}
 
       <div className="space-y-3">
@@ -71,7 +71,7 @@ export function TranscriptClient() {
                 <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-muted">{t.model ?? "—"}</span>
               )}
               {t.intent && <span className="text-muted">· {t.intent}</span>}
-              {t.redacted && <span className="text-neg">· redacted</span>}
+              {t.redacted && <span className="text-down">· redacted</span>}
               <span className="ml-auto text-faint">{new Date(t.createdAt).toLocaleString()}</span>
             </div>
             {t.role === "assistant" ? (

@@ -2,14 +2,10 @@ import {
   audit,
   getPolicy,
   getStrategyPrompt,
-  getConnectedAccount,
+  getActiveConnectedAccount,
   latestAuditByKind,
-  listAuditByKind,
-  listConnectedAccounts,
   listFillEvents,
   listLearningMutations,
-  listLearningMutationsSince,
-  listSocraticDecisionCases,
   listStrategyRuns,
   normalizeScoringWeights,
   setPolicy
@@ -17,30 +13,13 @@ import {
 import { recordLlmUsage, extractLlmUsage } from "./llm-usage";
 import { deriveExecutionState, fillSourceForExecutionMode, llmExecutionMode, llmFillSource, llmModeClarification, type ExecutionState } from "./execution-mode";
 import { policyUniverseSymbolCount } from "./index-universes";
-import { LLM_OUTPUT_TOKEN_CAPS, llmFetch, isModelRotationSentinel, resolveReviewerReasoningEffort } from "./llm-request";
-import { buildLlmRequestBody, llmAuthHeaders, extractLlmText, extractJsonPayload } from "./llm-call";
+import { LLM_OUTPUT_TOKEN_CAPS, llmFetch } from "./llm-request";
+import { buildLlmRequestBody, llmAuthHeaders, extractLlmText } from "./llm-call";
 import { resolveLlmEndpoint } from "./llm-provider";
 import { humanizeLlmError } from "./llm-errors";
 import { fetchMacroData } from "./macro";
 import { withLlmGeneration } from "./observability";
-import {
-  calculatePnl,
-  getClosedLotCount,
-  getFactorScorecard,
-  getMissedOpportunityCoverage,
-  getPerformanceSummary,
-  getRegimeScorecard,
-  getSectorScorecard,
-  getSkippedCandidateReturns,
-  getThesisScorecard,
-  MIN_CLOSED_LOTS_FOR_WEIGHT_SHIFT,
-  type FactorScorecardStat,
-  type RegimeStat,
-  type SectorStat,
-  type ThesisStat
-} from "./performance";
-import { getReflectionSummary } from "./post-mortem";
-import { retrieveLearnedContextDetailed } from "./learned-context/store";
+import { calculatePnl, getClosedLotCount, getFactorScorecard, getMissedOpportunityCoverage, getPerformanceSummary, getSkippedCandidateReturns, MIN_CLOSED_LOTS_FOR_WEIGHT_SHIFT, type FactorScorecardStat } from "./performance";
 import { summarizeOpenAiRequest, summarizeOpenAiResponseText } from "./telemetry-sanitize";
 import { runWalkForwardOOS, buildSpyReturnToNowMap } from "./backtest";
 import { validateTuningInvariants } from "./tuning-invariants";
@@ -338,55 +317,32 @@ function currentRegimeFromLots(accountNumber: string, source: "paper" | "live", 
 }
 
 function policyForTuningReviewer(policy: TradingPolicy, modelOverride?: string): TradingPolicy {
-  // Sentinel-aware model inheritance (mirrors the UI panel's inheritedReviewerModel, which SKIPS the
-  // "__rotate__" sentinel when it promises a Green-model review). "__rotate__" is a run-scoped rotation
-  // marker resolved only inside runStrategyOnce; the tuning reviewer runs OUTSIDE a strategy run, so
-  // resolveOpenAiModel would map the raw sentinel to "" and silently degrade this LLM review to local
-  // rules. Fall through the sentinel to the first CONCRETE configured model instead. When BOTH seats are
-  // "__rotate__", no concrete model is found → the downstream `!llmModel` gate honestly falls to local
-  // rules (same no-defaults contract as elsewhere).
   const explicitModel = modelOverride?.trim();
-  if (explicitModel && !isModelRotationSentinel(explicitModel)) return { ...policy, llmModel: explicitModel };
-  const teamModel = [policy.redTeamLlmModel, policy.llmModel]
-    .map((m) => m?.trim())
-    .find((m) => m && !isModelRotationSentinel(m));
-  if (!teamModel) return policy;
-  // Per-team reasoning (2026-07-10): when the inherited model is the RED seat's, carry the
-  // reviewer's effort along with it (redTeamReasoningEffort, falling back to the proposer's —
-  // resolveReviewerReasoningEffort owns that fallback) so the tuning review runs at the effort
-  // the owner configured for that model. Downstream reads policyForResolution.llmReasoningEffort.
-  const inheritedFromRed = teamModel === policy.redTeamLlmModel?.trim();
-  return {
-    ...policy,
-    llmModel: teamModel,
-    ...(inheritedFromRed ? { llmReasoningEffort: resolveReviewerReasoningEffort(policy) } : {})
-  };
+  if (explicitModel) return { ...policy, llmModel: explicitModel };
+  const teamModel = policy.redTeamLlmModel?.trim() || policy.llmModel?.trim();
+  return teamModel ? { ...policy, llmModel: teamModel } : policy;
 }
 
 export async function proposeStrategyTuning(
   userId: string = "local",
   modelOverride?: string,
-  reasoningEffortOverride?: LlmReasoningEffort,
-  connectedAccountId?: string,
-  assertOwned?: () => void
+  reasoningEffortOverride?: LlmReasoningEffort
 ): Promise<StrategyTuningProposal> {
-  const policy = getPolicy(userId, connectedAccountId);
-  const accountId = connectedAccountId ?? policy.connectedAccountId;
-  const activeAccount = accountId ? getConnectedAccount(accountId, userId) : undefined;
+  const policy = getPolicy(userId);
+  const activeAccount = getActiveConnectedAccount(userId);
   const executionState = deriveExecutionState(policy, activeAccount);
-  const prompt = getStrategyPrompt(userId, accountId);
-  const latestDecision = (accountId
-    ? latestAuditByKind("strategy_run", userId, accountId)
+  const prompt = getStrategyPrompt(userId);
+  const latestDecision = (policy.connectedAccountId
+    ? latestAuditByKind("strategy_run", userId, policy.connectedAccountId)
     : latestAuditByKind("strategy_run", userId))?.payload as LatestDecisionPayload | undefined;
   const macro = await fetchMacroData(userId);
-  assertOwned?.();
   const accountNumber = policy.accountNumber;
   const performance = accountNumber ? getPerformanceSummary(accountNumber, {}, userId) : undefined;
   const source = fillSourceForExecutionMode(executionState);
   const fills = accountNumber ? listFillEvents(accountNumber, source, 30, userId) : [];
   const closedLotCount = accountNumber ? getClosedLotCount(accountNumber, source, userId) : 0;
   const minLotsForWeights = policy.tuning?.minClosedLotsForWeightShift ?? MIN_CLOSED_LOTS_FOR_WEIGHT_SHIFT;
-  const runs = listStrategyRuns(10, userId, accountId);
+  const runs = listStrategyRuns(10, userId);
   // Matured skipped-candidate counterfactuals (empty price map => realized rows only,
   // no live quotes needed). Lets the tuner learn from high-scoring names it passed on.
   // Item 4 (opt-in): raise the recurring-factor bar to >=5 and require SPY-beating over each row's OWN
@@ -403,15 +359,14 @@ export async function proposeStrategyTuning(
   let benchmarkReturnBySnapshotDate: Map<string, number> | undefined;
   if (benchmarkRelative) {
     // Pre-scan the snapshot dates the skipped rows will span, then build one SPY entry→now map for them.
-    const preScan = getSkippedCandidateReturns({}, userId, { limit: skippedLimit, maxAgeDays: 30, connectedAccountId: accountId });
+    const preScan = getSkippedCandidateReturns({}, userId, { limit: skippedLimit, maxAgeDays: 30, connectedAccountId: policy.connectedAccountId });
     const dates = Array.from(new Set(preScan.map((r) => r.asOf?.slice(0, 10)).filter((d): d is string => Boolean(d))));
     benchmarkReturnBySnapshotDate = await buildSpyReturnToNowMap(dates).catch(() => new Map<string, number>());
-    assertOwned?.();
   }
-  const skippedRows = getSkippedCandidateReturns({}, userId, { limit: skippedLimit, maxAgeDays: 30, connectedAccountId: accountId, benchmarkReturnBySnapshotDate });
+  const skippedRows = getSkippedCandidateReturns({}, userId, { limit: skippedLimit, maxAgeDays: 30, connectedAccountId: policy.connectedAccountId, benchmarkReturnBySnapshotDate });
   // Kill-survivorship disclosure: the tuner (and anything rendering this summary) sees how many
   // counterfactuals actually resolved vs terminally failed, instead of a silently survivor-thinned list.
-  const missedOpportunityCoverage = getMissedOpportunityCoverage(userId, accountId);
+  const missedOpportunityCoverage = getMissedOpportunityCoverage(userId, policy.connectedAccountId);
   const missedOpportunities = summarizeMissedOpportunities(skippedRows, { limit: 8, benchmarkRelative, minRecurringCount, requireHitRate, coverageDisclosure: missedOpportunityCoverage.disclosure });
   // Factor-outcome history: realized win-rate and avg-return grouped by dominant entry factor.
   // Gated by the same closed-lot minimum — below the gate the sample is too thin to trust
@@ -433,134 +388,6 @@ export async function proposeStrategyTuning(
       })()
     : [];
 
-  // ── Evidence-pack widening (owner-directed, 2026-07-11): the review should draw on everything the
-  // system has learned, not just this one account's realized outcomes — cross-account performance,
-  // global decision memory, learned-context lessons, learning-ledger mutations, and regime history.
-  // Every section below is INDEPENDENTLY try/catch-guarded: a failing store is OMITTED, never
-  // thrown — a paid LLM review must still be produced even when a peripheral learning store errors.
-  let lessons: Array<{ subject: string; text: string; confidence?: number; scope?: string; symbol?: string }> | undefined;
-  try {
-    // No symbol filter (global facts, not tied to any specific ticker) — this review is about the
-    // strategy/account as a whole, not one symbol.
-    const detailed = retrieveLearnedContextDetailed(userId, [], undefined, { limit: 12 });
-    lessons = detailed.rows.length > 0
-      ? detailed.rows.map((row) => ({
-          subject: row.subject,
-          text: row.value,
-          confidence: row.confidence,
-          scope: row.scope,
-          ...(row.symbol ? { symbol: row.symbol } : {})
-        }))
-      : undefined;
-  } catch {
-    lessons = undefined;
-  }
-
-  let reflection: { summary?: string; regimeOutcomes?: RegimeStat[] } | undefined;
-  try {
-    if (accountNumber) {
-      const summary = getReflectionSummary(userId, accountNumber);
-      // Thesis rows are NOT duplicated here — they already ship in the thesisScorecard section
-      // below (same table, same account); repeating them doubled the prompt payload for no signal.
-      const regimeOutcomes = getRegimeScorecard(accountNumber, source, {}, userId);
-      if (summary || regimeOutcomes.length > 0) {
-        reflection = {
-          ...(summary ? { summary } : {}),
-          ...(regimeOutcomes.length > 0 ? { regimeOutcomes: regimeOutcomes.slice(0, 12) } : {})
-        };
-      }
-    }
-  } catch {
-    reflection = undefined;
-  }
-
-  let decisionMemory:
-    | Array<{ symbol?: string; action: string; createdAt: string; thesis: string; outcome?: string; lessons?: string[] }>
-    | undefined;
-  try {
-    // Global across this user's accounts (no connectedAccountId filter) — the owner wants the review
-    // to see the system's whole decision history, not just the reviewed account's slice of it.
-    const cases = listSocraticDecisionCases(userId, { limit: 10 });
-    decisionMemory = cases.length > 0
-      ? cases.map((c) => ({
-          ...(c.symbol ? { symbol: c.symbol } : {}),
-          action: c.action,
-          createdAt: c.createdAt,
-          thesis: c.thesis.length > 200 ? `${c.thesis.slice(0, 200)}…` : c.thesis,
-          ...(c.outcome
-            ? { outcome: `${c.outcome.status}${typeof c.outcome.returnPct === "number" ? ` ${c.outcome.returnPct.toFixed(2)}%` : ""}` }
-            : {}),
-          ...(c.lessons.length > 0 ? { lessons: c.lessons.slice(0, 3) } : {})
-        }))
-      : undefined;
-  } catch {
-    decisionMemory = undefined;
-  }
-
-  let thesisScorecard: ThesisStat[] | undefined;
-  let sectorScorecard: SectorStat[] | undefined;
-  try {
-    if (accountNumber) {
-      const thesisRows = getThesisScorecard(accountNumber, source, {}, userId);
-      const sectorRows = getSectorScorecard(accountNumber, source, {}, userId);
-      thesisScorecard = thesisRows.length > 0 ? thesisRows.slice(0, 12) : undefined;
-      sectorScorecard = sectorRows.length > 0 ? sectorRows.slice(0, 12) : undefined;
-    }
-  } catch {
-    thesisScorecard = undefined;
-    sectorScorecard = undefined;
-  }
-
-  let crossAccountPerformance:
-    | Array<{ label: string; broker: string; environment: string; performance: NonNullable<ReturnType<typeof compactPerformance>> }>
-    | undefined;
-  try {
-    // The user's OTHER connected accounts (never the one under review), capped at 4 — advisory
-    // context on what has worked elsewhere, answering "not only the outcomes of the one account".
-    const others = listConnectedAccounts(userId).filter((a) => a.id !== accountId && a.accountNumber);
-    const rows = others.slice(0, 4).map((a) => {
-      const perf = getPerformanceSummary(a.accountNumber as string, {}, userId);
-      return {
-        label: a.label,
-        broker: a.broker,
-        environment: a.environment,
-        // getPerformanceSummary always returns a defined summary, so compactPerformance(defined, ...)
-        // never actually returns undefined here — the `!` reflects that runtime guarantee to TS.
-        performance: compactPerformance(perf, a.environment === "paper")!
-      };
-    });
-    crossAccountPerformance = rows.length > 0 ? rows : undefined;
-  } catch {
-    crossAccountPerformance = undefined;
-  }
-
-  let learningMutations: Array<{ subsystem: string; description: string; createdAt: string }> | undefined;
-  try {
-    const sinceIso = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const mutations = listLearningMutationsSince(userId, sinceIso, 20);
-    learningMutations = mutations.length > 0
-      ? mutations.map((m) => ({ subsystem: m.subsystem, description: m.trigger ?? m.subsystem, createdAt: m.createdAt }))
-      : undefined;
-  } catch {
-    learningMutations = undefined;
-  }
-
-  let regimeContext: { current?: string; recentFlips?: Array<{ createdAt: string; from?: string; to?: string; escalation?: boolean }> } | undefined;
-  try {
-    const recentFlips = listAuditByKind("regime_flip", 5, userId).map((event) => {
-      const payload = event.payload as { from?: string; to?: string; escalation?: boolean } | undefined;
-      return { createdAt: event.createdAt, from: payload?.from, to: payload?.to, escalation: payload?.escalation };
-    });
-    if (currentRegime || recentFlips.length > 0) {
-      regimeContext = {
-        ...(currentRegime ? { current: currentRegime } : {}),
-        ...(recentFlips.length > 0 ? { recentFlips } : {})
-      };
-    }
-  } catch {
-    regimeContext = undefined;
-  }
-
   const executionMode = llmExecutionMode(executionState);
   const context = {
     currentDate: new Date().toISOString(),
@@ -569,7 +396,7 @@ export async function proposeStrategyTuning(
     accountConfigured: Boolean(accountNumber),
     policy: compactPolicy(policy, executionState),
     strategyPrompt: prompt,
-    performance: compactPerformance(performance, executionState.mode !== "broker/live", policy.tuning?.useEntryRunAttribution ?? false),
+    performance: compactPerformance(performance, executionState.mode !== "broker/live", getPolicy(userId).tuning?.useEntryRunAttribution ?? false),
     closedLotCount,
     minClosedLotsForWeightShift: minLotsForWeights,
     recentFills: fills.slice(0, 20).map((fill) => compactFill(fill, executionState)),
@@ -597,31 +424,17 @@ export async function proposeStrategyTuning(
       : undefined,
     ...(missedOpportunities.count > 0 ? { missedOpportunities } : {}),
     ...(factorScorecard.length > 0 ? { factorScorecard } : {}),
-    ...(lessons ? { lessons } : {}),
-    ...(reflection ? { reflection } : {}),
-    ...(decisionMemory ? { decisionMemory } : {}),
-    ...(thesisScorecard ? { thesisScorecard } : {}),
-    ...(sectorScorecard ? { sectorScorecard } : {}),
-    ...(crossAccountPerformance ? { crossAccountPerformance } : {}),
-    ...(learningMutations ? { learningMutations } : {}),
-    ...(regimeContext ? { regime: regimeContext } : {}),
     macro
   };
 
   const policyForResolution = policyForTuningReviewer(policy, modelOverride);
-  const { key: llmKey, model: llmModel } = resolveLlmEndpoint(policyForResolution, userId);
-  // No-defaults contract (owner 2026-07-07; llm-request.ts `resolveOpenAiModel`): a blank model is
-  // "unconfigured" EXACTLY like a missing key — callers MUST fail closed rather than send `model:""`.
-  // Tuning has a deterministic local-rules fallback, so degrade to it in BOTH cases. Without the
-  // model guard a keyed-but-model-less (un-migrated) policy would reach requestLlmTuning and fire a
-  // provider 400 for an empty model instead of producing a usable local proposal.
-  if (!llmKey || !llmModel) {
+  const { key: llmKey } = resolveLlmEndpoint(policyForResolution, userId);
+  if (!llmKey) {
     const localProposal = localRulesProposal({ policy, prompt, performance, fills, latestDecision, closedLotCount, missedOpportunities, factorScorecard, showPaperSide: source === "paper" });
-    return applyOosGate(localProposal, userId, accountId, assertOwned);
+    return applyOosGate(localProposal, userId);
   }
 
-  const payload = await requestLlmTuning(context, userId, modelOverride, reasoningEffortOverride, accountId, assertOwned);
-  assertOwned?.();
+  const payload = await requestLlmTuning(context, userId, modelOverride, reasoningEffortOverride);
   const proposedPatch = toPatch(payload, prompt, policy.scoringWeights);
   const cautions = Array.isArray(payload.cautions) ? [...payload.cautions] : [];
   // Hard-enforce the §3.E sample-size guardrail: the system prompt asks the model to
@@ -641,7 +454,7 @@ export async function proposeStrategyTuning(
     confidenceScore: typeof payload.confidenceScore === "number" ? clamp(payload.confidenceScore, 0, 100) : 50,
     generatedBy: "llm"
   };
-  return applyOosGate(llmProposal, userId, accountId, assertOwned);
+  return applyOosGate(llmProposal, userId);
 }
 
 /**
@@ -670,32 +483,25 @@ function withOosUnvalidatedCaution(proposal: StrategyTuningProposal, reason: str
   return { ...proposal, proposedPatch: patch, cautions: [...proposal.cautions, caution] };
 }
 
-async function applyOosGate(
-  proposal: StrategyTuningProposal,
-  userId: string,
-  connectedAccountId?: string,
-  assertOwned?: () => void
-): Promise<StrategyTuningProposal> {
+async function applyOosGate(proposal: StrategyTuningProposal, userId: string): Promise<StrategyTuningProposal> {
   const proposedWeights = proposal.proposedPatch.scoringWeights;
   if (!proposedWeights || Object.keys(proposedWeights).length === 0) return proposal;
 
   // Change C: read the withhold flag (default true = strip unvalidated weight changes).
-  const withhold = getPolicy(userId, connectedAccountId).tuning?.oosWithholdUnvalidated ?? true;
+  const withhold = getPolicy(userId).tuning?.oosWithholdUnvalidated ?? true;
 
   // The status-quo weights this proposal would replace, and the full candidate vector that WOULD be
   // applied. A proposed patch only names the factors it changes, so merge it over the baseline and
   // normalize — exactly mirroring how db-profiles persists a weight patch.
-  const baselineWeights = getPolicy(userId, connectedAccountId).scoringWeights;
+  const baselineWeights = getPolicy(userId).scoringWeights;
   const candidateWeights = normalizeScoringWeights({ ...baselineWeights, ...proposedWeights });
 
   let oosResult;
   try {
     // Validate the ACTUAL proposed weights (and the current baseline) on held-out data — not the
     // data-derived IC weights, which answer a different question.
-    oosResult = await runWalkForwardOOS(userId, { candidateWeights, baselineWeights, connectedAccountId });
-    assertOwned?.();
+    oosResult = await runWalkForwardOOS(userId, { candidateWeights, baselineWeights });
   } catch {
-    assertOwned?.();
     // OOS fetch failed (e.g. network error in test); skip the gate gracefully — but flag non-validation.
     return withOosUnvalidatedCaution(proposal, "the OOS data fetch failed", withhold);
   }
@@ -818,11 +624,9 @@ async function requestLlmTuning(
   context: unknown,
   userId: string,
   modelOverride?: string,
-  reasoningEffortOverride?: LlmReasoningEffort,
-  connectedAccountId?: string,
-  assertOwned?: () => void
+  reasoningEffortOverride?: LlmReasoningEffort
 ): Promise<LlmTuningPayload> {
-  const policy = getPolicy(userId, connectedAccountId);
+  const policy = getPolicy(userId);
   const policyForResolution = policyForTuningReviewer(policy, modelOverride);
   const { url, key: openaiKey, model, provider, keySource, keyRef, transport } = resolveLlmEndpoint(policyForResolution, userId);
   const schema = tuningSchema();
@@ -833,12 +637,6 @@ async function requestLlmTuning(
     "Do not propose placing trades. Do not remove explicit safety controls.",
     `Sample-size guardrail: only propose scoringWeights (factor weight) changes when closedLotCount >= minClosedLotsForWeightShift (${MIN_CLOSED_LOTS_FOR_WEIGHT_SHIFT} closed lots). Below that the realized sample is too thin to attribute P&L to factors; return null for every scoringWeights JSON field, but describe that to the user as "no scoring-weight changes until there is enough closed-lot evidence" and focus on prompt clarity and risk sizing.`,
     "`missedOpportunities` (when present): high-scoring candidates the strategy SKIPPED that then rose over their horizon — each with realized returnPct, score, sector, regime, and dominantFactor; `recurringFactor` flags a factor that dominated multiple missed winners. If it appears, weigh whether scoringWeights under-weight that factor, but still obey the sample-size guardrail above before changing any weight.",
-    "The following sections widen the evidence pack beyond this one account's own outcomes — treat them as ADVISORY CONTEXT for producing a better recommendation on the REVIEWED account, never as that account's own realized track record:",
-    "`lessons` (when present): learned-context facts (this user's own plus, when shared, other contributors') with a `confidence` score and `scope` — weigh higher-confidence, more specific facts more heavily; they are advisory and vary in reliability, not guaranteed truths.",
-    "`reflection` (when present): the post-mortem reflection engine's latest summary for the reviewed account plus its thesis/regime realized-outcome breakdown. `thesisScorecard` / `sectorScorecard` (when present): the reviewed account's realized win-rate and avg-return grouped by thesis tag / sector. `decisionMemory` (when present): recent Socratic decision cases GLOBAL across this user's accounts (not only the reviewed one) with thesis, action, and outcome/lessons when matured.",
-    "`crossAccountPerformance` (when present): compact performance from this user's OTHER connected accounts (never the one under review) — context for judging what has worked elsewhere. Do not conflate a different account's P&L, win rate, or sample size with the reviewed account's own.",
-    "`learningMutations` (when present): recent autonomous learning-ledger changes (any account, last 30 days) — useful context on what has already been auto-tuned recently, so you don't recommend re-doing it.",
-    "`regime` (when present): the current market-regime label plus recent regime flips — macro context, not a standalone trading signal.",
     "Return strict JSON only."
   ].join("\n");
 
@@ -886,16 +684,13 @@ async function requestLlmTuning(
       }
 
       const payload = await response.json();
-      assertOwned?.();
-      recordLlmUsage({ userId, provider, model, context: "strategy-tuning", keySource, keyRef, connectedAccountId: connectedAccountId ?? policy.connectedAccountId, ...extractLlmUsage(payload) });
+      recordLlmUsage({ userId, provider, model, context: "strategy-tuning", keySource, keyRef, ...extractLlmUsage(payload) });
       const text = extractLlmText(payload);
       if (!text) throw new Error("Empty strategy tuning response returned from LLM API.");
-      // §4.1 defense-in-depth: tolerate a fenced/prose-wrapped reply before parsing.
-      return { text, payload: JSON.parse(extractJsonPayload(text)) as LlmTuningPayload };
+      return { text, payload: JSON.parse(text) as LlmTuningPayload };
     }
   );
 
-  assertOwned?.();
   return traced.payload;
 }
 
@@ -1271,16 +1066,9 @@ export function autonomousOosThresholds(
  * guard is NOT run here (it decides whether to enter the autonomous path at all and emits an audit row on
  * violation); callers run it before consuming a decision when they intend to persist.
  */
-async function evaluateAutonomousWeightTuning(
-  userId: string,
-  modelOverride?: string,
-  connectedAccountId?: string,
-  assertOwned?: () => void
-): Promise<AutonomousWeightDecision> {
-  const policy = getPolicy(userId, connectedAccountId);
-  const accountId = connectedAccountId ?? policy.connectedAccountId;
-  const proposal = await proposeStrategyTuning(userId, modelOverride, undefined, accountId, assertOwned);
-  assertOwned?.();
+async function evaluateAutonomousWeightTuning(userId: string, modelOverride?: string): Promise<AutonomousWeightDecision> {
+  const policy = getPolicy(userId);
+  const proposal = await proposeStrategyTuning(userId, modelOverride);
   // WRITE-SCOPE SAFETY (panel B1): scoringWeights ONLY — never the patch's policy/prompt sub-fields.
   const proposedWeights = proposal.proposedPatch.scoringWeights;
   const proposalMeta = { confidenceScore: proposal.confidenceScore, generatedBy: proposal.generatedBy, cautions: proposal.cautions };
@@ -1316,12 +1104,9 @@ async function evaluateAutonomousWeightTuning(
       candidateWeights: newWeights,
       baselineWeights: previousWeights,
       purgeEmbargo: policy.tuning?.oosPurgeEmbargo ?? false,
-      icWeightShrinkage: policy.tuning?.icWeightShrinkage ?? 0,
-      connectedAccountId: accountId
+      icWeightShrinkage: policy.tuning?.icWeightShrinkage ?? 0
     });
-    assertOwned?.();
   } catch {
-    assertOwned?.();
     return { ...base, reason: "oos_fetch_failed" };
   }
   if (!oos) return { ...base, reason: "oos_insufficient_history" }; // <4 dates → HARD no-apply
@@ -1396,15 +1181,8 @@ const AUTO_TUNE_DRAWDOWN_GUARD_MIN_TEST_DATES = 8;
  * tuner WOULD have applied + the OOS readout — never touching policy — so an operator can forward-validate
  * the tuner's decisions before trusting autonomy.
  */
-export async function applyAutonomousWeightTuning(
-  userId: string = "local",
-  modelOverride?: string,
-  connectedAccountId?: string,
-  assertOwned?: () => void
-): Promise<AutonomousWeightApplyResult> {
-  const policy = getPolicy(userId, connectedAccountId);
-  const accountId = connectedAccountId ?? policy.connectedAccountId;
-  assertOwned?.();
+export async function applyAutonomousWeightTuning(userId: string = "local", modelOverride?: string): Promise<AutonomousWeightApplyResult> {
+  const policy = getPolicy(userId);
   const shadowEnabled = policy.tuning?.shadowWeightLedger ?? false;
 
   // The invariant guard and the autoApplyWeights flag decide whether a REAL apply may run. The SHADOW ledger
@@ -1422,10 +1200,10 @@ export async function applyAutonomousWeightTuning(
     if (!invariants.ok) {
       audit("auto_weight_apply_skipped", {
         userId,
-        connectedAccountId: accountId,
+        connectedAccountId: policy.connectedAccountId,
         reason: "invariant_violation",
         violations: invariants.violations
-      }, userId, accountId);
+      }, userId, policy.connectedAccountId);
       // Still allow a shadow row (below) to capture the would-be decision for the operator.
       if (!shadowEnabled) {
         return { applied: false, reason: `invariant_violation (${invariants.violations.map((v) => v.code).join(",")})` };
@@ -1433,8 +1211,7 @@ export async function applyAutonomousWeightTuning(
     }
   }
 
-  const decision = await evaluateAutonomousWeightTuning(userId, modelOverride, accountId, assertOwned);
-  assertOwned?.();
+  const decision = await evaluateAutonomousWeightTuning(userId, modelOverride);
 
   // Real apply: only when auto-apply is on AND the invariant guard passed AND the gate says wouldApply.
   const invariantsOk = autoApplyOn ? validateTuningInvariants(policy.tuning).ok : false;
@@ -1442,10 +1219,9 @@ export async function applyAutonomousWeightTuning(
     const newWeights = decision.after;
     // P0-4: capture `before` ATOMICALLY — re-read effective policy immediately before the setPolicy write so a
     // concurrent multi-agent weight write doesn't cause a stale baseline to be recorded/reverted-to.
-    const beforePolicy = getPolicy(userId, accountId);
+    const beforePolicy = getPolicy(userId, policy.connectedAccountId);
     const beforeWeights = normalizeScoringWeights({ ...beforePolicy.scoringWeights });
-    assertOwned?.();
-    setPolicy({ ...beforePolicy, scoringWeights: newWeights }, userId, accountId);
+    setPolicy({ ...beforePolicy, scoringWeights: newWeights }, userId, policy.connectedAccountId);
 
     const evidence = {
       candidateIC: decision.oosICCandidate,
@@ -1468,7 +1244,7 @@ export async function applyAutonomousWeightTuning(
     recordLearningMutation({
       subsystem: LEARNING_SUBSYSTEM_SCORING_WEIGHTS,
       userId,
-      connectedAccountId: accountId,
+      connectedAccountId: policy.connectedAccountId,
       trigger: AUTO_WEIGHT_APPLY_AUDIT_KIND,
       flag: "autoApplyWeights",
       before: { scoringWeights: beforeWeights },
@@ -1480,7 +1256,7 @@ export async function applyAutonomousWeightTuning(
     // unified ledger is now the source of truth for revert.
     audit(AUTO_WEIGHT_APPLY_AUDIT_KIND, {
       userId,
-      connectedAccountId: accountId,
+      connectedAccountId: policy.connectedAccountId,
       previousWeights: beforeWeights,
       newWeights,
       changedFactors: decision.changedFactors,
@@ -1497,14 +1273,14 @@ export async function applyAutonomousWeightTuning(
       confidenceScore: decision.confidenceScore,
       generatedBy: decision.generatedBy,
       cautions: decision.cautions
-    }, userId, accountId);
+    }, userId);
 
     // P2-7 REPRODUCIBILITY / DECISION-PROVENANCE: runWalkForwardOOS is IO + time-dependent, so a later re-run
     // can't reproduce the fold that justified this apply. Record the fold shape, ICs, ICIR, margin/thresholds,
     // and the flags in effect so an operator can audit exactly what evidence authorized the mutation.
     audit(TUNING_APPLY_PROVENANCE_AUDIT_KIND, {
       userId,
-      connectedAccountId: accountId,
+      connectedAccountId: policy.connectedAccountId,
       trainObservations: decision.oosReadout?.trainObservations,
       testObservations: decision.oosReadout?.testObservations,
       trainDates: decision.oosReadout?.trainDates,
@@ -1529,7 +1305,7 @@ export async function applyAutonomousWeightTuning(
         minOosICImprovement: policy.tuning?.minOosICImprovement ?? 0,
         minOosPairedTStat: policy.tuning?.minOosPairedTStat ?? 0
       }
-    }, userId, accountId);
+    }, userId, policy.connectedAccountId);
 
     return { applied: true, previousWeights: beforeWeights, newWeights, cautions: decision.cautions };
   }
@@ -1538,11 +1314,10 @@ export async function applyAutonomousWeightTuning(
   // candidate vector was actually built). Passive: it writes ONLY a shadow ledger row (a distinct trigger), so
   // no revert path will restore it and it never mutates policy.
   if (shadowEnabled && decision.after && decision.before) {
-    assertOwned?.();
     recordLearningMutation({
       subsystem: LEARNING_SUBSYSTEM_SCORING_WEIGHTS,
       userId,
-      connectedAccountId: accountId,
+      connectedAccountId: policy.connectedAccountId,
       trigger: AUTO_WEIGHT_SHADOW_TRIGGER,
       flag: "shadowWeightLedger",
       before: { scoringWeights: decision.before, shadow: true },

@@ -159,27 +159,6 @@ animation (`docs/branding/firefly/console-intro.svg`, 1440x810 stage):
 - Added as card F7 (wide tile) on `shortlist.html`. Not wired into the app;
   wiring it into `/console` page-load is a follow-up if the owner picks it.
 
-## Round 9 (same day) — realistic candle bodies in the word/logo candles
-
-Owner noticed the word-part candles looked like solid bars (body filled almost
-the entire letter-stroke height) while the chart-part candles looked like real
-candlesticks (a fat body in the middle with wicks above and below). Fixed the
-word/logo candle model so it matches the chart's realism:
-
-- For each glyph-column run, the WICK now spans the full run (preserving the
-  letter's height/legibility) and the BODY is a fat middle sub-portion
-  (`frac` ~ 0.58-0.76 of the run, positioned via a per-candle offset), with a
-  small minimum body so short letter features stay solid and readable.
-- Applied to all three generators: `candle-wordmark-upright.svg`,
-  `candle-morph.svg` (both word states + drift), and `console-intro.svg`'s
-  settled-logo endpoint (the chart endpoint was already realistic).
-- Regenerated every derived export for consistency: upright light/dark PNGs;
-  morph MP4/GIF/alpha-WebM/animated-WebP/Live-Photo MOV+JPG; and the embedded
-  data URIs in `shortlist.html`. ProRes 4444 is regenerate-on-demand (not
-  committed). Verified via headless-Chromium screenshots (upright both grounds;
-  morph at t=1/5/7/10s; console-intro chart/flight/settled) and per-frame
-  white/alpha-coverage checks before each encode.
-
 ## Why / decisions
 
 - Palette deliberately reuses the product's existing brand tokens rather than

@@ -225,7 +225,7 @@ const OTHER_FIELD_DEFS: SettingsFieldDef[] = [
   {
     id: "settings.brokerConnections",
     label: "Broker connections",
-    synonyms: ["connections", "broker", "alpaca", "robinhood", "tradier", "test paper live"],
+    synonyms: ["connections", "broker", "alpaca", "robinhood", "test paper live"],
     scope: "user",
     destination: "settings/connections",
     legacySection: "connections",

@@ -5,127 +5,27 @@
  *  figures render as "—" with a reason, not an estimate. Tax figures are
  *  estimates only, clearly labeled. */
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type { RegimeStat, ThesisStat } from "@/lib/performance";
-import type { ConnectedAccount, EquityCurvePoint, PerformanceSummary } from "@/lib/types";
-import type { DashboardSnapshot } from "../../dashboard-types";
-import { ConsoleApiError, fetchAccountPerformance } from "../lib/api";
-import {
-  buildRedTeamModelRows,
-  RED_TEAM_EFFICACY_MIN_RESOLVED,
-  redTeamAttributionLabel,
-  redTeamReturnTone,
-  redTeamSampleGate,
-  redTeamSampleTier
-} from "../lib/red-team-efficacy";
 import { EquityChart } from "../components/equity-chart";
 import { deriveReality } from "../lib/derive";
 import { fmtMoney, fmtPct, fmtQty, fmtSignedMoney, EM_DASH } from "../lib/format";
-import { thesisTagLabel } from "../lib/labels";
 import { useConsoleData } from "../lib/useConsoleData";
-import { Card, Chip, Dash, Empty, Select, SignedText, Stat } from "../ui/primitives";
+import { Btn, Card, Chip, Dash, Empty, SignedText, Stat } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
-
-type CompareAccountSummary = { id: string; label: string; environment: "paper" | "live" };
-type RedTeamEfficacySnapshot = NonNullable<DashboardSnapshot["redTeamEfficacy"]>;
-
-/** Bucket state for the comparison account picker on Results. Mirrors the
- *  loading/empty/error/ready idiom used by the symbol drilldown's history fetch. */
-type CompareState =
-  | { status: "idle" }
-  | { status: "loading" }
-  | { status: "error"; message: string }
-  | { status: "ready"; account: CompareAccountSummary; performance: PerformanceSummary | null; pricesUnavailable: boolean };
-
-function useComparePerformance(accountId: string | null): CompareState {
-  const [state, setState] = useState<CompareState>({ status: "idle" });
-
-  useEffect(() => {
-    if (!accountId) {
-      setState({ status: "idle" });
-      return;
-    }
-    let cancelled = false;
-    setState({ status: "loading" });
-    (async () => {
-      try {
-        const result = await fetchAccountPerformance(accountId);
-        if (cancelled) return;
-        setState({
-          status: "ready",
-          account: result.account,
-          performance: result.performance,
-          pricesUnavailable: result.pricesUnavailable
-        });
-      } catch (error) {
-        if (cancelled) return;
-        setState({
-          status: "error",
-          message: error instanceof ConsoleApiError ? error.message : "Could not load comparison performance."
-        });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [accountId]);
-
-  return state;
-}
-
-/** Pick the bucket (realized/unrealized/winRate/avgReturn/curve) matching an account's
- *  OWN money-reality out of a full PerformanceSummary — same paper-vs-live split the
- *  active account already uses above.
- *
- *  `pricesUnavailable` forces `unrealized` to `undefined` (rendered as "-" by BucketCard)
- *  instead of the comparison endpoint's synthetic $0 — that endpoint never fetches live
- *  quotes, so its unrealized figures aren't real data, just an artifact of an empty
- *  currentPrices map (see app/api/connected-accounts/[id]/performance/route.ts). Realized
- *  P&L, win rate, and avg return don't depend on currentPrices, so they stay untouched. */
-function bucketFor(
-  performance: PerformanceSummary | null,
-  environment: "paper" | "live",
-  pricesUnavailable = false
-): { realized?: number; unrealized?: number; winRate?: number; avgReturn?: number; curve: EquityCurvePoint[] } {
-  if (!performance) {
-    return { realized: undefined, unrealized: undefined, winRate: undefined, avgReturn: undefined, curve: [] };
-  }
-  const bucket =
-    environment === "paper"
-      ? {
-          realized: performance.paperRealizedPnl,
-          unrealized: performance.paperUnrealizedPnl,
-          winRate: performance.paperWinRate,
-          avgReturn: performance.paperAverageReturnPct,
-          curve: performance.paperEquityCurve
-        }
-      : {
-          realized: performance.liveRealizedPnl,
-          unrealized: performance.liveUnrealizedPnl,
-          winRate: performance.liveWinRate,
-          avgReturn: performance.liveAverageReturnPct,
-          curve: performance.liveEquityCurve
-        };
-  return pricesUnavailable ? { ...bucket, unrealized: undefined } : bucket;
-}
 
 export default function ResultsPage() {
   const { snapshot } = useConsoleData();
-  const [compareAccountId, setCompareAccountId] = useState<string | null>(null);
+  const [compare, setCompare] = useState(false);
   const reality = useMemo(() => (snapshot ? deriveReality(snapshot) : null), [snapshot]);
-  const compareState = useComparePerformance(compareAccountId);
   if (!snapshot || !reality) return null;
 
   const perf = snapshot.performance;
   const tax = snapshot.tax;
-  // Real multi-account comparison: every OTHER connected account (any environment) the
-  // user could pick, never a hardcoded paper/live pairing of the same account's own data.
-  const otherAccounts: ConnectedAccount[] = snapshot.connectedAccounts.filter((a) => a.id !== reality.account?.id);
 
   // The selected account lives in exactly ONE money-reality, so only its bucket
-  // shows by default. A comparison account's bucket is one explicit picker
-  // selection away — never silently mixed onto the page as if it belonged to
-  // this account.
+  // shows by default. The other bucket is one explicit toggle away — never
+  // silently mixed onto the page as if it belonged to this account.
   const liveSelected = reality.tone === "live";
   const practiceBucket = (
     <BucketCard
@@ -161,50 +61,23 @@ export default function ResultsPage() {
           for {reality.account?.label ?? "no connected account"}
         </span>
         <div className="flex-1" />
-        {otherAccounts.length > 0 && (
-          <div className="flex items-center gap-2">
-            <label htmlFor="compare-account" className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-              Compare with
-            </label>
-            <Select
-              id="compare-account"
-              value={compareAccountId ?? ""}
-              onChange={(event) => setCompareAccountId(event.target.value || null)}
-            >
-              <option value="">None</option>
-              {otherAccounts.map((account) => (
-                <option key={account.id} value={account.id}>
-                  {account.label} ({account.environment})
-                </option>
-              ))}
-            </Select>
-          </div>
-        )}
+        <Btn size="sm" variant="ghost" onClick={() => setCompare((v) => !v)}>
+          {compare
+            ? "Hide comparison"
+            : liveSelected
+              ? "Compare with paper account"
+              : "Compare with brokerage account"}
+        </Btn>
       </div>
 
-      {/* Buckets: selected reality first; a comparison account's bucket only once picked. */}
-      <div className={compareAccountId ? "grid gap-4 lg:grid-cols-2" : "grid gap-4"}>
+      {/* Buckets: selected reality first; the other only on explicit compare. */}
+      <div className={compare ? "grid gap-4 lg:grid-cols-2" : "grid gap-4"}>
         {liveSelected ? liveBucket : practiceBucket}
-        {compareAccountId &&
-          (compareState.status === "ready" ? (
-            <BucketCard
-              title={compareState.account.label}
-              tone={compareState.account.environment}
-              {...bucketFor(compareState.performance, compareState.account.environment, compareState.pricesUnavailable)}
-            />
-          ) : compareState.status === "error" ? (
-            <Card title="Comparison">
-              <Empty>{compareState.message}</Empty>
-            </Card>
-          ) : (
-            <Card title="Comparison">
-              <Empty>Loading comparison…</Empty>
-            </Card>
-          ))}
+        {compare && (liveSelected ? practiceBucket : liveBucket)}
       </div>
-      {compareAccountId && (
+      {compare && (
         <p className="-mt-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-          Comparison only — these two accounts&apos; results never share an axis or a total.
+          Comparison only — broker-paper and brokerage-account results never share an axis or a total.
         </p>
       )}
 
@@ -251,14 +124,11 @@ export default function ResultsPage() {
       </Card>
 
       {/* Scorecards */}
-      {/* id="thesis-regime" is the deep-link target for the home page's Framework-improvements
-          card when it's showing this same thesis/regime data as its fallback body; scroll-mt
-          clears the app shell's sticky reality/chrome header (see shell.tsx). */}
-      <div id="thesis-regime" className="grid scroll-mt-28 gap-4 lg:grid-cols-2">
+      <div className="grid gap-4 lg:grid-cols-2">
         <ScorecardCard
           title="By thesis"
           rows={(snapshot.thesisScorecard ?? []).map((t: ThesisStat) => ({
-            name: thesisTagLabel(t.thesisTag),
+            name: t.thesisTag,
             trades: t.trades,
             winRate: t.winRate,
             avgReturnPct: t.avgReturnPct,
@@ -278,7 +148,6 @@ export default function ResultsPage() {
           nameLabel="Regime"
         />
       </div>
-      <RedTeamEfficacyCard efficacy={snapshot.redTeamEfficacy} />
 
       {/* Tax */}
       <Card
@@ -292,198 +161,6 @@ export default function ResultsPage() {
         )}
       </Card>
     </div>
-  );
-}
-
-function RedTeamEfficacyCard({ efficacy }: { efficacy: RedTeamEfficacySnapshot | undefined }) {
-  if (!efficacy) {
-    return (
-      <Card title="Red Team veto efficacy">
-        <Empty>Select an account to score Red Team history.</Empty>
-      </Card>
-    );
-  }
-
-  if (efficacy.vetoDecisions === 0) {
-    return (
-      <Card title="Red Team veto efficacy">
-        <Empty>No Red Team veto decisions recorded yet.</Empty>
-      </Card>
-    );
-  }
-
-  const modelRows = buildRedTeamModelRows(efficacy);
-  const sampleLabel = redTeamSampleGate(efficacy.maturedVetoes);
-  const sampleTier = redTeamSampleTier(efficacy.maturedVetoes);
-
-  return (
-    <Card
-      title="Red Team veto efficacy"
-      action={
-        <Chip
-          tone={sampleTier === "ready" ? "pos" : sampleTier === "caution" ? "warn" : "muted"}
-          title="Blocking vetoes are scored from matured counterfactuals; overridden vetoes are tracked separately and never mixed into the payoff metric."
-        >
-          {sampleLabel}
-        </Chip>
-      }
-    >
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        <Stat
-          label="Veto decisions"
-          value={efficacy.vetoDecisions}
-          sub={`${efficacy.totalVetoes} blocking · ${efficacy.appliedOverrideVetoes}/${efficacy.overrideVetoes} overrides applied`}
-          title="Opening-side Red Team veto decisions only. Blocking vetoes keep the trade out; applied overrides proceed on a logged autonomy thesis and are not counted as missed opportunities. Survived Red Team reviews are not persisted in this metric."
-        />
-        <Stat
-          label="Resolved blocking vetoes"
-          value={efficacy.totalVetoes > 0 ? `${efficacy.maturedVetoes}/${efficacy.totalVetoes}` : <Dash />}
-          sub={efficacy.totalVetoes > 0 ? efficacy.coverage : "no blocking vetoes recorded"}
-          title="Blocking vetoes whose forward return actually resolved. Unresolvable names stay disclosed instead of disappearing from the denominator."
-        />
-        <Stat
-          label="Applied override share"
-          value={fmtPct(efficacy.overrideSharePct, 1)}
-          sub={efficacy.appliedOverrideVetoes > 0 ? `${efficacy.appliedOverrideVetoes} applied` : "none applied"}
-          title="Share of opening-side Red Team veto decisions where the Socratic override path actually applied. Refused overrides and later blocks are not counted as applied."
-        />
-        <Stat
-          label="Avoided losers"
-          value={efficacy.maturedVetoes >= RED_TEAM_EFFICACY_MIN_RESOLVED ? fmtPct(efficacy.vetoValueAddRate, 1) : <Dash />}
-          sub={efficacy.maturedVetoes >= RED_TEAM_EFFICACY_MIN_RESOLVED ? "resolved blocking vetoes" : `needs >=${RED_TEAM_EFFICACY_MIN_RESOLVED} resolved vetoes`}
-          tone={efficacy.maturedVetoes >= RED_TEAM_EFFICACY_MIN_RESOLVED ? "pos" : "muted"}
-          title="Among resolved blocking vetoes, how often the vetoed trade would have lost money. Higher is better for the reviewer."
-        />
-        <Stat
-          label="Missed winners"
-          value={efficacy.maturedVetoes >= RED_TEAM_EFFICACY_MIN_RESOLVED ? fmtPct(efficacy.survivorRiskHitRate, 1) : <Dash />}
-          sub={efficacy.maturedVetoes >= RED_TEAM_EFFICACY_MIN_RESOLVED ? "resolved blocking vetoes" : `needs >=${RED_TEAM_EFFICACY_MIN_RESOLVED} resolved vetoes`}
-          tone={efficacy.maturedVetoes >= RED_TEAM_EFFICACY_MIN_RESOLVED ? "neg" : "muted"}
-          title="Among resolved blocking vetoes, how often the veto killed a trade that would have made money."
-        />
-        <Stat
-          label="Avg vetoed trade return"
-          value={efficacy.maturedVetoes >= RED_TEAM_EFFICACY_MIN_RESOLVED ? fmtPct(efficacy.avgReturnPct, 2, true) : <Dash />}
-          sub={efficacy.maturedVetoes >= RED_TEAM_EFFICACY_MIN_RESOLVED ? "negative = good for the veto" : `needs >=${RED_TEAM_EFFICACY_MIN_RESOLVED} resolved vetoes`}
-          tone={efficacy.maturedVetoes >= RED_TEAM_EFFICACY_MIN_RESOLVED ? (efficacy.avgReturnPct < 0 ? "pos" : efficacy.avgReturnPct > 0 ? "neg" : "muted") : "muted"}
-          title="Average side-adjusted forward return of the trades the blocking veto kept out. Negative means the veto avoided losses; positive means it missed winners."
-        />
-      </div>
-
-      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
-        <div>
-          <div className="mb-1.5 flex items-center gap-2">
-            <div className="con-card-title">By reviewer attribution</div>
-            <Chip tone="muted" title="Rows without a persisted reviewer model are shown as unattributed, never backfilled from current settings.">
-              persisted only
-            </Chip>
-          </div>
-          {modelRows.length === 0 ? (
-            <Empty>No resolved blocking vetoes yet.</Empty>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="con-table">
-                <thead>
-                  <tr>
-                    <th>Red Team</th>
-                    <th className="num">n</th>
-                    <th className="num">Avoided</th>
-                    <th className="num">Missed</th>
-                    <th className="num" title="Average side-adjusted vetoed-trade return. Negative is good for the veto.">Avg</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {modelRows.map((row) => {
-                    const tier = redTeamSampleTier(row.maturedVetoes);
-                    const gateLabel =
-                      tier === "hidden"
-                        ? `needs >=20 vetoes (n=${row.maturedVetoes})`
-                        : tier === "caution"
-                          ? `small sample (n=${row.maturedVetoes})`
-                          : `n=${row.maturedVetoes}`;
-                    return (
-                      <tr key={row.model}>
-                        <td className="font-semibold">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span>{redTeamAttributionLabel(row.model)}</span>
-                            {tier !== "ready" ? <Chip tone={tier === "hidden" ? "muted" : "warn"}>{gateLabel}</Chip> : null}
-                          </div>
-                        </td>
-                        <td className="num con-num">{row.maturedVetoes}</td>
-                        <td className="num con-num" title={gateLabel}>
-                          {tier === "hidden" ? EM_DASH : fmtPct(row.vetoValueAddRate, 1)}
-                        </td>
-                        <td className="num con-num" title={gateLabel}>
-                          {tier === "hidden" ? EM_DASH : fmtPct(row.survivorRiskHitRate, 1)}
-                        </td>
-                        <td className="num" title={gateLabel}>
-                          {tier === "hidden" ? (
-                            EM_DASH
-                          ) : (
-                            <span style={{ color: row.avgReturnPct < 0 ? "var(--con-pos)" : row.avgReturnPct > 0 ? "var(--con-neg)" : undefined }}>
-                              {fmtPct(row.avgReturnPct, 2, true)}
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        <div>
-          <div className="mb-1.5 flex items-center gap-2">
-            <div className="con-card-title">Recent resolved vetoes</div>
-            <Chip tone="muted" title="Most recent resolved blocking vetoes first. Positive means the veto killed a would-have-worked trade; negative means it kept out a loser.">
-              blocking only
-            </Chip>
-          </div>
-          {efficacy.records.length === 0 ? (
-            <Empty>No resolved blocking vetoes yet.</Empty>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="con-table">
-                <thead>
-                  <tr>
-                    <th>Symbol</th>
-                    <th>Side</th>
-                    <th>Thesis</th>
-                    <th>Red Team</th>
-                    <th className="num" title="Side-adjusted forward return after the veto. Negative = the veto avoided a loser.">Return</th>
-                    <th>Readout</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {efficacy.records.map((record) => (
-                    <tr key={`${record.runId}:${record.symbol}`}>
-                      <td className="font-semibold">
-                        <SymbolButton symbol={record.symbol} showLogo={false} />
-                      </td>
-                      <td className="capitalize">{record.side ?? EM_DASH}</td>
-                      <td title={record.reason ?? undefined}>{record.thesisTag ? thesisTagLabel(record.thesisTag) : EM_DASH}</td>
-                      <td>{redTeamAttributionLabel(record.model)}</td>
-                      <td className="num">
-                        <span style={{ color: record.returnPct < 0 ? "var(--con-pos)" : record.returnPct > 0 ? "var(--con-neg)" : undefined }}>
-                          {fmtPct(record.returnPct, 2, true)}
-                        </span>
-                      </td>
-                      <td>
-                        <Chip tone={redTeamReturnTone(record.returnPct)}>
-                          {record.returnPct < 0 ? "avoided loser" : record.returnPct > 0 ? "missed winner" : "flat"}
-                        </Chip>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      </div>
-    </Card>
   );
 }
 

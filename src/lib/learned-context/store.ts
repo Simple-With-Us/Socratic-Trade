@@ -291,21 +291,15 @@ export function mergeStrategyDirectiveBlock(currentPrompt: string, id: string, v
  * The caller is responsible for the status transition + 'learned_context.approve' audit so ownership
  * is enforced once at the route layer.
  */
-export function applyApprovedPending(pending: LearnedContextPendingRow, assertedAt: string = new Date().toISOString()): void {
+export function applyApprovedPending(pending: LearnedContextPendingRow): void {
   if (pending.riskTier === "strategy-directive") {
     const current = getStrategyPrompt(pending.userId);
-    const merged = mergeStrategyDirectiveBlock(current, pending.id, pending.value, assertedAt);
+    const merged = mergeStrategyDirectiveBlock(current, pending.id, pending.value, new Date().toISOString());
     setStrategyPrompt(merged, pending.userId);
     return;
   }
 
   // tier 'risk' → advisory promote. Lives in the learned_context store as soft DATA only.
-  // assertedAt is caller-controllable: the daily learning review passes its run-start timestamp
-  // (the same value it persists as lastReviewedAt) so a row it JUST approved is stamped at ==
-  // lastReviewedAt and excluded by evaluateLearningReviewTrigger's strict `> lastReviewedAt` — it
-  // is not miscounted as a brand-new lesson the next day and does not re-trigger a review of
-  // content it just reviewed. The human approve route omits the arg and gets the real approval
-  // time (a human-approved lesson has NOT been through the review board, so it SHOULD trigger one).
   const row: LearnedContextRow = {
     id: randomUUID(),
     userId: pending.userId,
@@ -319,7 +313,7 @@ export function applyApprovedPending(pending: LearnedContextPendingRow, asserted
     riskTier: "risk",
     confidence: 0.5,
     contributorUserId: pending.userId,
-    assertedAt,
+    assertedAt: new Date().toISOString(),
     supersededBy: null,
     expiresAt: null
   };

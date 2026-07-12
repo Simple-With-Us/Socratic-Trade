@@ -17,8 +17,11 @@ import { normalizeSymbol } from "./money";
 import { notify } from "./notify";
 import { DEFAULT_TAX_SETTINGS } from "./defaults";
 import {
+  executeProposal,
+  LiveApprovalConfirmationError,
   rejectProposal,
-  runStrategyOnce
+  runStrategyOnce,
+  type LiveApprovalConfirmation
 } from "./strategy";
 import { addToWatchlist, removeFromWatchlist } from "./watchlist";
 import type {
@@ -31,7 +34,6 @@ import type {
   TaxSettings,
   TradingPolicy
 } from "./types";
-import { executeProposal, LiveApprovalConfirmationError, LiveApprovalConfirmation } from "./strategy-execution";
 
 export const MOBILE_COMMAND_TYPES = [
   "strategy.run_once",

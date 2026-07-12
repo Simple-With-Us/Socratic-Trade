@@ -40,9 +40,7 @@ allowed users map to isolated hashed user IDs only when present in
   broker production accounts.
 - Strategy-run audit lookups for Latest Decisions and Strategy Tuning are scoped
   by `connectedAccountId`, matching the per-account run lock/state model so a
-  stale failure from one account does not appear under another selected account. Each approval
-  invocation has its own owner token, and a heartbeat-loss guard refuses broker placement when
-  that account-scoped ownership can no longer be proved.
+  stale failure from one account does not appear under another selected account.
 - Dashboard Activity/Audit feeds and run history now follow the selected
   connected account as the default view, while retaining user-wide/system audit
   rows in account views for context. Rows display the account label when present,
@@ -240,13 +238,6 @@ Real identity via Auth.js v5 sign-in. Key changes:
   the live deployment `isProd` was always `false`, causing every request to fail open).
   Replaced with: `authConfigured = !!AUTH_SECRET`. This is evaluated at request
   time. The moment `AUTH_SECRET` is set, auth is armed.
-
-- **Admin authorization is independently fail-closed**: middleware forwards an identity-source
-  provenance header together with the authenticated email. `requireAdmin` accepts an allowlisted or
-  primary email only when its source is verified Cloudflare Access or Auth.js; the auth-unconfigured
-  `PRIMARY_USER_EMAIL` fallback never grants admin access. The timing-safe `x-admin-token` remains
-  the explicit non-session operator path. `NODE_ENV` and request hostnames are never authorization
-  signals, and there is no unauthenticated local bypass.
 
 - **Identity sources** (first match wins):
   1. Auth.js v5 session JWT cookie, verified through the shared edge-safe HS256 helper.

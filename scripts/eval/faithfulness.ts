@@ -25,7 +25,6 @@
  */
 
 import { isReasoningModel, LLM_TIMEOUT_MS } from "../../src/lib/llm-request";
-import { extractLlmUsage, recordLlmUsage } from "../../src/lib/llm-usage";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -195,24 +194,7 @@ export async function judgeFaithfulness(evalCase: FaithfulnessCase): Promise<Fai
       const text = await res.text().catch(() => "");
       return { ran: true, pass: false, detail: `judge error ${res.status}: ${text.slice(0, 120)}` };
     }
-    const payload = await res.json();
-    // Every LLM call is hardwired into the usage ledger + external telemetry (owner directive),
-    // including this dev-only faithfulness judge. Runs against whatever DATABASE_URL is set —
-    // intended. recordLlmUsage never throws, but wrapped anyway so a ledger hiccup can never fail
-    // the eval run.
-    try {
-      recordLlmUsage({
-        userId: "local",
-        provider: "openai",
-        model,
-        context: "eval-faithfulness",
-        keySource: "operator",
-        ...extractLlmUsage(payload)
-      });
-    } catch {
-      /* usage ledger is best-effort; never break the eval run */
-    }
-    const data = payload as { choices?: Array<{ message?: { content?: string } }> };
+    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const verdict = (data?.choices?.[0]?.message?.content ?? "").trim();
     const pass = /^PASS\b/i.test(verdict);
     const reason = verdict.replace(/^(PASS|FAIL)\s*/i, "").trim().slice(0, 120) || "(no reason given)";

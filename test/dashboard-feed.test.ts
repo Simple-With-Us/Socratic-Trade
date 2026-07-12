@@ -90,8 +90,7 @@ describe("dashboard feed helpers", () => {
 
     const feed = buildAuditFeed({ audit });
 
-    // NotificationStatus decided vocabulary: skipped -> "Not sent" (never the raw "skipped" word).
-    expect(feed[0]?.title).toBe("Buy PLTR Not sent");
+    expect(feed[0]?.title).toBe("Buy PLTR Skipped");
     expect(feed[0]?.detail).toContain("Notifications Webhook");
   });
 
@@ -119,15 +118,13 @@ describe("dashboard feed helpers", () => {
     expect(feed[0]?.detail).toContain("2 repeats suppressed");
   });
 
-  it("never renders raw JSON inline for an unrecognized audit kind's detail, but keeps it in fullText", () => {
+  it("preserves generic audit payload details when no compact field is available", () => {
     const feed = buildAuditFeed({
       audit: [
         {
           id: "a-generic",
           createdAt: "2026-06-15T00:04:00.000Z",
           kind: "notify.prefs.set",
-          // Only array-valued fields here — none are scalar, so detail falls all the way back
-          // to "Event recorded" rather than ever inlining the raw JSON.
           payload: {
             channels: ["push", "email"]
           }
@@ -135,36 +132,9 @@ describe("dashboard feed helpers", () => {
       ]
     });
 
-    expect(feed[0]?.title).toBe("Notify.prefs.set");
-    expect(feed[0]?.detail).toBe("Event recorded");
-    // The raw payload stays available via the existing fullText/RawToggle affordance.
+    expect(feed[0]?.title).toBe("notify.prefs.set");
+    expect(feed[0]?.detail).toBe('{"channels":["push","email"]}');
     expect(feed[0]?.fullText).toBe('{"channels":["push","email"]}');
-  });
-
-  it("derives a plain 'Key: value' detail from up to 3 scalar payload fields for an unrecognized audit kind", () => {
-    const feed = buildAuditFeed({
-      audit: [
-        {
-          id: "a-generic-scalar",
-          createdAt: "2026-06-15T00:05:00.000Z",
-          kind: "notify.prefs.set",
-          // None of these keys are recognized by the generic-field detail helper, so this
-          // exercises the scalar-fields fallback specifically. A 4th field checks the 3-field cap.
-          payload: {
-            webhookConfigured: false,
-            retryAttempts: 2,
-            target: "push",
-            note: "dropped by the 3-field cap"
-          }
-        }
-      ]
-    });
-
-    expect(feed[0]?.title).toBe("Notify.prefs.set");
-    expect(feed[0]?.detail).toBe("Webhook Configured: false · Retry Attempts: 2 · Target: push");
-    // The 4th field is dropped from the compact detail but nothing is lost — it's still in fullText.
-    expect(feed[0]?.detail).not.toContain("note");
-    expect(feed[0]?.fullText).toContain('"note":"dropped by the 3-field cap"');
   });
 
   it("formats notification panel rows with action title and skipped-webhook detail", () => {
@@ -184,29 +154,8 @@ describe("dashboard feed helpers", () => {
     );
 
     expect(item.title).toBe("Sold PLTR");
-    // NotificationStatus decided vocabulary: skipped -> "Not sent".
-    expect(item.detail).toBe("Not sent - No notification channels enabled.");
+    expect(item.detail).toBe("Notification Skipped - Notifications Webhook Not Configured");
     expect(item.companyName).toBe("Palantir Technologies Inc.");
-  });
-
-  it.each([
-    ["not_configured", "Not sent - Notification channel is not configured by the operator."],
-    ["no_target", "Not sent - Notification channel has no delivery target."]
-  ])("maps historical raw delivery reason %s to human UI copy", (error, expected) => {
-    const item = formatNotificationDisplay(
-      {
-        id: `raw-${error}`,
-        createdAt: "2026-07-11T00:00:00.000Z",
-        type: "run_failed",
-        title: "Run failed",
-        status: "skipped",
-        payload: {},
-        error
-      } satisfies NotificationEvent,
-      {}
-    );
-
-    expect(item.detail).toBe(expected);
   });
 
   it("resolves nested proposal ids for blocked notification audits", () => {
@@ -282,48 +231,6 @@ describe("dashboard feed helpers", () => {
     expect(formatShareQuantity(123.456, "INTC")).toBe("123");
     expect(formatShareQuantity(1234.56, "QCOM")).toBe("1,235");
     expect(formatShareQuantity(12345.6, "NVDA")).toBe("12,346");
-  });
-
-  it("consolidates ALL runId-tagged audit kinds + run-scoped notifications into one run card (owner request 2026-07-08)", () => {
-    const runId = "run-xyz";
-    const feed = buildUnifiedFeed({
-      audit: [
-        { id: "r1", createdAt: "2026-07-08T14:01:40.000Z", kind: "strategy_run", payload: { runId, status: "completed", summary: "Evaluated 1 proposal(s)." } },
-        // Previously NON-allowlisted run-scoped kinds — each used to render as its own card:
-        { id: "r2", createdAt: "2026-07-08T14:01:03.000Z", kind: "rag_retrieval_status", payload: { runId, rows: [] } },
-        { id: "r3", createdAt: "2026-07-08T14:01:05.000Z", kind: "experience_retrieval", payload: { runId } },
-        { id: "r4", createdAt: "2026-07-08T14:01:06.000Z", kind: "evidence_age_anomaly", payload: { runId } },
-        { id: "r5", createdAt: "2026-07-08T14:01:33.000Z", kind: "llm_call_latency", payload: { runId, step: "bull", durationMs: 9700 } },
-        { id: "r6", createdAt: "2026-07-08T14:01:39.000Z", kind: "socratic_outcome_job", payload: { runId } },
-        // Allowlisted-before kinds still join:
-        { id: "r7", createdAt: "2026-07-08T14:01:40.100Z", kind: "candidates_considered", payload: { runId, llmSteps: [] } },
-        // A DIFFERENT run stays its own group:
-        { id: "q1", createdAt: "2026-07-08T13:01:40.000Z", kind: "strategy_run", payload: { runId: "run-other", status: "completed", summary: "ok" } }
-      ],
-      notifications: [
-        // Run-scoped alert (carries runId, no proposalId) — used to be a standalone sibling card.
-        { id: "n-run", createdAt: "2026-07-08T14:01:41.000Z", type: "run_failed", title: "Run failed", status: "sent", payload: { runId, summary: "boom" } }
-      ],
-      fills: [],
-      orders: [],
-      symbolMetaBySymbol: {},
-      getProposalById: () => undefined
-    });
-
-    const runGroup = feed.find((g) => g.id === `run-${runId}`);
-    expect(runGroup).toBeDefined();
-    // ONE card containing all seven audit sub-events plus the run-scoped notification:
-    expect(runGroup!.events).toHaveLength(8);
-    // Title stays anchored on the strategy_run summary event, not a sub-component:
-    expect(runGroup!.events.some((ev) => ev.id === "r1")).toBe(true);
-    const other = feed.find((g) => g.id === "run-run-other");
-    expect(other).toBeDefined();
-    // No stray standalone cards for the consolidated kinds:
-    const strayIds = ["r2", "r3", "r4", "r5", "r6", "r7", "n-run"];
-    for (const g of feed) {
-      if (g.id === `run-${runId}`) continue;
-      for (const ev of g.events) expect(strayIds).not.toContain(ev.id);
-    }
   });
 
   it("applies Paper prefixing, custom notification tags, and grouping correctly in buildUnifiedFeed", () => {
@@ -578,13 +485,8 @@ describe("dashboard feed helpers", () => {
     expect(tradeGroup).toBeDefined();
     expect(tradeGroup!.status).toBe("rejected");
     expect(tradeGroup!.detail).toContain("Broker state Rejected");
-    // The full broker order id is never shown inline in the detail — only the short tag.
-    expect(tradeGroup!.detail).toContain("Order ALPACAOR");
-    expect(tradeGroup!.detail).not.toContain("alpaca-order-rejected");
+    expect(tradeGroup!.detail).toContain("alpaca-order-rejected");
     expect(tradeGroup!.detail).not.toContain("Rejected manually");
-    // ...but it's never lost either — the sub-event's fullText carries the complete raw id.
-    const rejectEvent = tradeGroup!.events.find((ev) => ev.id === "audit-broker-reject");
-    expect(rejectEvent?.fullText).toContain("alpaca-order-rejected");
   });
 
   it("consolidates a strategy run's audit events into ONE run group with sub-rows (#8)", () => {
@@ -681,72 +583,6 @@ describe("dashboard feed helpers", () => {
     expect(feed[0]?.title).toBe("Notification delivery failed");
     expect(feed[0]?.detail).toBe("Could not deliver pending_approval notification · ECONNREFUSED: bridge unreachable");
     expect(feed[0]?.fullText).toContain('"error":"ECONNREFUSED: bridge unreachable"'); // raw JSON stays available behind a toggle
-  });
-
-  it("labels the notification-audit catch-all with the decided NotificationEventType/Status vocabulary", () => {
-    // budget_alert and provider_degraded are two of the types that used to render as a raw,
-    // all-lowercase enum ("budget_alert sent") via humanizeNotificationType.
-    const feed = buildAuditFeed({
-      audit: [
-        {
-          id: "nb-1",
-          createdAt: "2026-07-03T04:00:00.000Z",
-          kind: "notification",
-          payload: { id: "nb-1", createdAt: "2026-07-03T04:00:00.000Z", type: "budget_alert", title: "Strategy run skipped — over budget", status: "sent" }
-        },
-        {
-          id: "nb-2",
-          createdAt: "2026-07-03T04:01:00.000Z",
-          kind: "notification",
-          payload: { id: "nb-2", createdAt: "2026-07-03T04:01:00.000Z", type: "provider_degraded", title: "Finnhub degraded", status: "failed", error: "Timed out" }
-        }
-      ]
-    });
-
-    expect(feed[0]?.title).toBe("Budget alert Sent");
-    expect(feed[1]?.title).toBe("Data provider degraded Delivery failed");
-  });
-
-  it("labels fill and broker-order detail strings with the decided status/order-type vocabulary", () => {
-    const feed = buildUnifiedFeed({
-      audit: [],
-      notifications: [],
-      fills: [
-        {
-          id: "f-partial",
-          accountNumber: "A1",
-          source: "live",
-          symbol: "MSFT",
-          side: "buy",
-          quantity: 5,
-          price: 400,
-          notional: 2000,
-          status: "partially_filled",
-          filledAt: "2026-07-03T00:00:00.000Z"
-        }
-      ],
-      orders: [
-        {
-          id: "order-stop-limit",
-          symbol: "MSFT",
-          side: "buy",
-          type: "stop_limit",
-          state: "accepted",
-          quantity: 5,
-          filledQuantity: 0,
-          createdAt: "2026-07-03T00:00:00.000Z"
-        }
-      ],
-      symbolMetaBySymbol: {}
-    });
-
-    const fillGroup = feed.find((g) => g.id === "fill-f-partial");
-    expect(fillGroup?.detail).toContain("Partially filled");
-    expect(fillGroup?.detail).not.toContain("partially_filled");
-
-    const orderGroup = feed.find((g) => g.id === "order-order-stop-limit");
-    expect(orderGroup?.detail).toContain("Stop-limit");
-    expect(orderGroup?.detail).not.toContain("stop_limit");
   });
 
   it("carries a notification's connectedAccountId onto its unified-feed group (#10)", () => {

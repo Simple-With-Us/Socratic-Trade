@@ -21,16 +21,8 @@
 // is App A's wire format; `coerceCongressTrade()` converts between them.
 
 import { audit, getInternalSetting, resolveApiKey, setInternalSetting } from "../db";
-import { congressAsCongressSourceEnabled, getCongressTradeClient } from "../api-clients/congress";
+import { congressAsCongressSourceEnabled, getAppATransactions } from "../congress-trade-client";
 import { normalizeSymbol } from "../money";
-import {
-  assertOperationLeaseOwnership,
-  OPERATION_LEASE_GROUPS,
-  runWithOperationLease,
-  throwIfOperationLeaseCancelled,
-  type OperationLeaseAware,
-  type OperationLeaseClaim
-} from "../operation-lease";
 import type { CongressSignal, CongressTrade } from "./types";
 import {
   BROWSER_UA,
@@ -564,53 +556,11 @@ export function isCongressRefreshDue(now: number = Date.now()): boolean {
  * gathered; on total failure leaves the previous dataset untouched (never wipes to
  * fake/empty mid-trading-day). Returns a result for auditing.
  */
-export async function refreshCongress(
-  now: number = Date.now(),
-  force = false,
-  operationLeaseClaim?: OperationLeaseClaim
-): Promise<OperationLeaseAware<import("./types").WebSourceRefreshResult>> {
+export async function refreshCongress(now: number = Date.now(), force = false): Promise<import("./types").WebSourceRefreshResult> {
   if (!force && !isCongressRefreshDue(now)) {
     const ds = getCongressDataset();
     return { id: "congress", ok: true, recordCount: ds?.recordCount ?? 0, sources: ds?.sources ?? [], fetchedAt: ds?.fetchedAt ?? "", skipped: true };
   }
-
-  const guarded = await runWithOperationLease(
-    {
-      group: OPERATION_LEASE_GROUPS.CONGRESS_WEB_SOURCE,
-      operation: "refresh-websource:congress",
-      claim: operationLeaseClaim
-    },
-    async (claim, signal) => refreshCongressUnlocked(now, force, claim, signal)
-  );
-  if (!guarded.acquired) {
-    const ds = getCongressDataset();
-    return {
-      id: "congress",
-      ok: true,
-      recordCount: ds?.recordCount ?? 0,
-      sources: ds?.sources ?? [],
-      fetchedAt: ds?.fetchedAt ?? "",
-      skipped: true,
-      warning: `Skipped because ${guarded.busy.activeOperation} is already refreshing the congressional dataset.`,
-      operationLease: guarded.busy
-    };
-  }
-  return guarded.value;
-}
-
-async function refreshCongressUnlocked(
-  now: number,
-  force: boolean,
-  operationLeaseClaim: OperationLeaseClaim,
-  operationLeaseSignal: AbortSignal
-): Promise<import("./types").WebSourceRefreshResult> {
-  // Recheck after durable acquisition: a different process may have refreshed the dataset and
-  // advanced its timestamps after this caller's fast pre-check.
-  if (!force && !isCongressRefreshDue(now)) {
-    const ds = getCongressDataset();
-    return { id: "congress", ok: true, recordCount: ds?.recordCount ?? 0, sources: ds?.sources ?? [], fetchedAt: ds?.fetchedAt ?? "", skipped: true };
-  }
-  assertOperationLeaseOwnership(operationLeaseClaim);
 
   // Record the attempt up front so a failure backs off (retryBackoffMs) instead of
   // re-firing every tick; the dataset's fetchedAt still only advances on success.
@@ -632,21 +582,17 @@ async function refreshCongressUnlocked(
       ];
 
   for (const adapter of adapters) {
-    throwIfOperationLeaseCancelled(operationLeaseSignal);
     try {
       const trades = await adapter.run();
-      throwIfOperationLeaseCancelled(operationLeaseSignal);
       if (trades.length > 0) {
         collected.push(...trades);
         sources.push(adapter.id);
       }
     } catch (error) {
-      throwIfOperationLeaseCancelled(operationLeaseSignal);
       warnings.push(`${adapter.id}: ${error instanceof Error ? error.message : "failed"}`);
     }
   }
 
-  assertOperationLeaseOwnership(operationLeaseClaim);
   const fetchedAt = new Date(now).toISOString();
   if (collected.length === 0) {
     // Don't overwrite a good prior dataset with nothing on a transient outage.
@@ -657,7 +603,6 @@ async function refreshCongressUnlocked(
 
   const trades = dedupeTrades(collected);
   const dataset: CongressDataset = { trades, fetchedAt, sources, recordCount: trades.length };
-  assertOperationLeaseOwnership(operationLeaseClaim);
   setInternalSetting(DATASET_KEY, dataset);
   audit("web_source_refresh", { id: "congress", ok: true, recordCount: trades.length, sources, warnings });
   return { id: "congress", ok: true, recordCount: trades.length, sources, fetchedAt, warning: warnings.join("; ") || undefined };
@@ -772,8 +717,7 @@ export async function fetchAppACongressTrades(now: number = Date.now()): Promise
   const from = new Date(now - (windowDays() + 7) * 24 * 60 * 60_000).toISOString().slice(0, 10);
   let since: string | undefined;
   for (let page = 0; page < APP_A_MAX_PAGES; page++) {
-    const client = getCongressTradeClient();
-    const res = await client.getTransactions({ from, limit: APP_A_PAGE_SIZE, ...(since ? { since } : {}) }).catch(e => { console.error("getTransactions error:", e); return null; });
+    const res = await getAppATransactions({ from, limit: APP_A_PAGE_SIZE, ...(since ? { since } : {}) });
     if (!res || res.transactions.length === 0) break;
     for (const raw of res.transactions) {
       const t = coerceCongressTrade(raw);
