@@ -59,7 +59,7 @@ describe("brokerProtectiveStopsEnabled", () => {
     expect(brokerProtectiveStopsEnabled(rhPolicy("A"), "broker/live")).toBe(true);
     expect(brokerProtectiveStopsEnabled(rhPolicy("A"), "broker/paper")).toBe(false);
     expect(brokerProtectiveStopsEnabled(rhPolicy("A", { robinhoodBrokerStops: false }), "broker/live")).toBe(false);
-    expect(brokerProtectiveStopsEnabled(rhPolicy("A", { activeBroker: "alpaca" }), "broker/live")).toBe(false);
+    expect(brokerProtectiveStopsEnabled(rhPolicy("A", { activeBroker: "alpaca" }), "broker/live")).toBe(true);
     expect(brokerProtectiveStopsEnabled(rhPolicy("A", { riskRules: { stopLossPct: 0 } }), "broker/live")).toBe(false);
   });
 });
@@ -527,7 +527,7 @@ describe("reconcileBrokerProtectiveStops — trailing lane", () => {
     await reconcileBrokerProtectiveStops({ userId: "local", policy: alpacaTrailPolicy("TR-8"), accountNumber: "TR-8", gateway: gw, positions: [longPos("AAPL", 10, 100)], executionMode: "broker/paper", running: true });
     expect(gw.placed).toHaveLength(1);
     const off = await reconcileBrokerProtectiveStops({
-      userId: "local", policy: alpacaTrailPolicy("TR-8", { brokerTrailingStops: false }), accountNumber: "TR-8",
+      userId: "local", policy: alpacaTrailPolicy("TR-8", { brokerTrailingStops: false, riskRules: { trailingStopPct: 8, stopLossPct: 0 } as any }), accountNumber: "TR-8",
       gateway: gw, positions: [longPos("AAPL", 10, 100)], executionMode: "broker/paper", running: true
     });
     expect(off.cancelled).toBe(1);
