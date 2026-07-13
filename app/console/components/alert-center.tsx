@@ -9,6 +9,7 @@ import { acknowledgeAllAttention, acknowledgeNotifications, ConsoleApiError } fr
 import { cx } from "../lib/format";
 import { notificationStatusLabel, notificationTypeLabel } from "../lib/labels";
 import { useConsoleData } from "../lib/useConsoleData";
+import { usePersistedState } from "../lib/usePersistedState";
 import { Ago, Btn, Card, Chip, Empty, TextInput } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 import { useToast } from "../ui/toast";
@@ -114,7 +115,7 @@ export function AlertCenter({
   title?: string;
   maxItems?: number;
 }) {
-  const [filter, setFilter] = useState<AlertCenterFilter>("attention");
+  const [filter, setFilter] = usePersistedState<AlertCenterFilter>("console:alerts:filter", "attention");
   const [query, setQuery] = useState("");
   const [ackingIds, setAckingIds] = useState<Set<string>>(new Set());
   const [bulkAcking, setBulkAcking] = useState(false);

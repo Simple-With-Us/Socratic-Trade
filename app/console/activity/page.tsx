@@ -14,6 +14,7 @@ import { cx, dayKey, fmtDay, fmtMoney, fmtPct, fmtQty, EM_DASH } from "../lib/fo
 import { feedStatusLabel } from "../lib/labels";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { useConsoleData } from "../lib/useConsoleData";
+import { usePersistedState } from "../lib/usePersistedState";
 import { AlertCenter } from "../components/alert-center";
 import { Ago, Card, Chip, Empty, SignedText, Tooltip, type ChipTone } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
@@ -29,7 +30,7 @@ const TABS: Array<{ id: Tab; label: string }> = [
 
 export default function ActivityPage() {
   const { snapshot } = useConsoleData();
-  const [tab, setTab] = useState<Tab>("all");
+  const [tab, setTab] = usePersistedState<Tab>("console:activity:tab", "all");
   if (!snapshot) return null;
 
   return (

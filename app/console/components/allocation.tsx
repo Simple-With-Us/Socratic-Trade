@@ -11,6 +11,7 @@ import { useMemo, useState } from "react";
 import type { DashboardSnapshot } from "../../dashboard-types";
 import { deriveReality } from "../lib/derive";
 import { cx, fmtMoney, fmtPct } from "../lib/format";
+import { usePersistedState } from "../lib/usePersistedState";
 import { Btn, Card, Chip, Empty } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 
@@ -29,7 +30,7 @@ interface Segment {
 const NO_SECTOR = "No sector data";
 
 export function AllocationCard({ snapshot }: { snapshot: DashboardSnapshot }) {
-  const [lens, setLens] = useState<"position" | "sector">("position");
+  const [lens, setLens] = usePersistedState<"position" | "sector">("console:allocation:lens", "position");
   const reality = deriveReality(snapshot);
 
   const { segments, total, hasSectorData } = useMemo(() => {

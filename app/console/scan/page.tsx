@@ -22,6 +22,7 @@ import { activeConnectedAccount } from "../lib/derive";
 import { cx, fmtExact, EM_DASH } from "../lib/format";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { useConsoleData } from "../lib/useConsoleData";
+import { usePersistedState } from "../lib/usePersistedState";
 import { Ago, Btn, Card, Chip, Empty, type ChipTone } from "../ui/primitives";
 import { useToast } from "../ui/toast";
 import { ScanTable } from "./scan-table";
@@ -42,7 +43,7 @@ export default function ScanPage() {
     ? `${activeConnectedAccount(snapshot)?.id ?? ""}:${snapshot.policy.accountNumber ?? ""}`
     : null;
   const live = useLiveScan(scopeKey);
-  const [tab, setTab] = useState<Tab>("scan");
+  const [tab, setTab] = usePersistedState<Tab>("console:scan:tab", "scan");
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
 
   // Validate the run-captured scan before trusting it — historical/compact
