@@ -17,29 +17,30 @@ function row(partial: Partial<UsageLike> & { provider: string; model: string | n
   };
 }
 
-describe("canonicalModelId", () => {
+describe("canonicalModelId (shared with src/lib/model-stats.ts via src/lib/model-identity.ts)", () => {
   it("collapses the OpenRouter vendor prefix onto the bare direct-call id", () => {
     // The whole point: a direct Anthropic call and an OpenRouter-routed one must share a key.
     expect(canonicalModelId("claude-sonnet-5")).toBe("claude-sonnet-5");
     expect(canonicalModelId("anthropic/claude-sonnet-5")).toBe("claude-sonnet-5");
     expect(canonicalModelId("openrouter/anthropic/claude-sonnet-5")).toBe("claude-sonnet-5");
     expect(canonicalModelId("openai/gpt-5.4-mini")).toBe("gpt-5.4-mini");
-    expect(canonicalModelId("GPT-5.4-Mini")).toBe("gpt-5.4-mini"); // case-insensitive key
   });
 
-  it("maps null/blank models to a shared 'unknown' bucket (legacy rows without model tracking)", () => {
-    expect(canonicalModelId(null)).toBe("unknown");
-    expect(canonicalModelId("")).toBe("unknown");
-    expect(canonicalModelId("   ")).toBe("unknown");
+  it("preserves original casing (catalog/benchmark keys are case-sensitive)", () => {
+    expect(canonicalModelId("anthropic/Claude-Sonnet-5")).toBe("Claude-Sonnet-5");
+    expect(canonicalModelId("GPT-5.4-Mini")).toBe("GPT-5.4-Mini");
   });
-});
 
-describe("displayModelName", () => {
-  it("strips the routing prefix but preserves original casing for display", () => {
-    expect(displayModelName("anthropic/Claude-Sonnet-5")).toBe("Claude-Sonnet-5");
+  it("maps null/blank models to '' (legacy rows without model tracking)", () => {
+    expect(canonicalModelId(null)).toBe("");
+    expect(canonicalModelId("")).toBe("");
+    expect(canonicalModelId("   ")).toBe("");
+  });
+
+  it("displayModelName is the same bare-name derivation (single shared definition)", () => {
     expect(displayModelName("openrouter/openai/gpt-5.4-mini")).toBe("gpt-5.4-mini");
     expect(displayModelName("claude-sonnet-5")).toBe("claude-sonnet-5");
-    expect(displayModelName(null)).toBe("unknown");
+    expect(displayModelName).toBe(canonicalModelId);
   });
 });
 
@@ -61,6 +62,19 @@ describe("aggregateUsageByModel", () => {
     expect(agg.providers.map((p) => p.provider)).toEqual(["anthropic", "openrouter"]);
     expect(agg.providers.find((p) => p.provider === "openrouter")!.calls).toBe(400);
     expect(agg.providers.find((p) => p.provider === "anthropic")!.calls).toBe(600);
+  });
+
+  it("merges rows case-insensitively while preserving the first display casing", () => {
+    const rows: UsageLike[] = [
+      row({ provider: "anthropic", model: "Claude-Sonnet-5", calls: 1, costUsd: 1 }),
+      row({ provider: "openrouter", model: "anthropic/claude-sonnet-5", calls: 2, costUsd: 2 })
+    ];
+
+    const [agg] = aggregateUsageByModel(rows);
+    expect(agg.canonicalId).toBe("Claude-Sonnet-5");
+    expect(agg.displayName).toBe("Claude-Sonnet-5");
+    expect(agg.calls).toBe(3);
+    expect(agg.providers.map((p) => p.provider)).toEqual(["openrouter", "anthropic"]);
   });
 
   it("collapses multiple rows of the same (model, provider) — e.g. different contexts — into one slice", () => {

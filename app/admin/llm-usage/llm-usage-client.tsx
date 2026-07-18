@@ -221,7 +221,7 @@ function ModelBreakdownCard({ models }: { models: ModelUsageAggregate[] }) {
               <div className="flex items-center justify-between gap-3 text-[length:var(--con-fs-sm)]">
                 <div className="flex min-w-0 items-center gap-2">
                   <span className="con-mono truncate font-medium text-[color:var(--con-fg)]">
-                    {m.canonicalId === "unknown" ? "—" : m.displayName}
+                    {m.canonicalId === "" ? "—" : m.displayName}
                   </span>
                   {!multiRoute && (
                     <span className="con-chip" title="Only one route recorded for this model in this window">

@@ -58,6 +58,24 @@ consumer loops that run BEFORE section 1's marker cleanup (`cancelBrokerProtecti
 `SYN-HALT-F1RETRY`. Gates: tsc clean, lint 0 errors, synthetic-stops 65 pass + account-delete +
 option-alert-dedupe pass; `npm run build` exit 0. Rollout note round-8 section
 appended.
+## 2026-07-18 — PR #1736 review cleanup (CODEX, branch `monet/model-identity-shared`)
+
+Merged `origin/main`, verified the author-identity review thread is stale because the current PR
+commit uses the required GitHub noreply email, and fixed the remaining review finding: model usage
+aggregation now remains case-insensitive while preserving the first display casing. Focused test:
+`npm test -- test/usage-model-merge.test.ts` (9/9 pass). Rollout updated:
+`docs/rollouts/2026-07-17-model-identity-shared-helper.md`.
+
+## 2026-07-17 — Shared model-identity helper (MONET, branch `monet/model-identity-shared`)
+
+Owner-directed follow-up (AG capped): consolidated the two duplicate model-ID canonicalizers now
+on main — `cleanModelId` (src/lib/model-stats.ts, AG/#1703) and `canonicalModelId`
+(app/admin/llm-usage/model-merge.ts, #1716) — into one shared `src/lib/model-identity.ts`.
+Behavior-preserving: the shared function is AG's verified logic verbatim; model-stats aliases it
+so the benchmark/perf rollup is byte-for-byte unchanged (model-stats + performance tests pass
+untouched). Closes the deferred follow-up from the usage-canonical-model-merge rollout. tsc clean,
+67 focused tests, full gate via land.sh. Rollout:
+`docs/rollouts/2026-07-17-model-identity-shared-helper.md`.
 
 ## 2026-07-18 — Editable account name + legacy-app retirement (MONET, branch `monet/vigilant-fermi-220244`)
 
