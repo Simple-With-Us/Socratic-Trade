@@ -67,7 +67,7 @@ import {
   type OperationLeaseStartResult
 } from "../operation-lease";
 import { EARNINGSCALLS_TRANSCRIPT_SOURCE, EARNINGSCALLS_TRANSCRIPT_DOC_TYPE } from "../earningscalls-gate";
-import { accessionFor as earningsCallsAccessionFor } from "../earningscalls-transcripts";
+import { EARNINGSCALLS_BASE, accessionFor as earningsCallsAccessionFor } from "../earningscalls-transcripts";
 import { EXPERIENCE_MEMORY_SOURCE, listClosedLotExperienceDocumentsForAccount } from "../experience-memory";
 import { loadCikMap } from "../web-sources/sec8k";
 import { padCik } from "../web-sources/sec-filings";
@@ -88,6 +88,22 @@ export const CORPUS_REEMBED_DOC_TYPES = [
   "insider-form4"
 ] as const;
 export type CorpusReembedDocType = (typeof CORPUS_REEMBED_DOC_TYPES)[number];
+
+/**
+ * DocTypes a request with no explicit `docTypes` runs. `insider-form4` is deliberately EXCLUDED
+ * from the default set (2026-07-18 adversarial review, MUST-FIX 3): `sec_insider_transactions`
+ * has no filed-at column, so the re-embedded documents' point-in-time stamp is a documented
+ * approximation (transaction date + 2 business days — see `reembedInsiderForm4`), and the live
+ * insider path (`disclosure-rag.ts`, flag-gated `RAG_EMBED_DISCLOSURES`, default OFF) writes a
+ * differently-shaped/identified document via `storeContexts`, so running both would coexist as
+ * near-duplicates. Run it by explicitly listing `docTypes: ["insider-form4"]` once those
+ * trade-offs are acceptable for the operator's use.
+ */
+export const DEFAULT_CORPUS_REEMBED_DOC_TYPES: CorpusReembedDocType[] = [
+  "sec-filings",
+  "earningscalls-transcripts",
+  "experience-memory"
+];
 
 function isCorpusReembedDocType(value: unknown): value is CorpusReembedDocType {
   return typeof value === "string" && (CORPUS_REEMBED_DOC_TYPES as readonly string[]).includes(value);
@@ -111,12 +127,25 @@ export interface CorpusReembedDocTypeProgress {
   status: ReembedOutcomeStatus;
   /** Opaque, docType-specific resumable cursor. `null` = start from the beginning. */
   watermark: unknown;
+  /**
+   * The embedding-space revision the watermark (and the cumulative counts below) belong to.
+   * A watermark is only meaningful for the scan that produced it; resuming a stale one after a
+   * model flip would skip the entire corpus and instantly report "completed" with zero embeds —
+   * which is exactly the state the legacy purge gate must never trust (2026-07-18 adversarial
+   * review, MUST-FIX 1b). Loading code DISCARDS the watermark and counts when this doesn't match
+   * the current revision.
+   */
+  watermarkEmbedRevision?: string;
+  /** Counts are CUMULATIVE across resumed runs since the current watermark chain started (i.e.
+   *  since the last fresh scan under `watermarkEmbedRevision`), so partial-run failures are never
+   *  forgotten by a later resume (MUST-FIX 1c). */
   candidatesSeen: number;
   embedded: number;
   reusedInSpace: number;
   failed: number;
-  /** The embedding-space revision this docType last reached "completed" under. `purgeLegacy...`
-   *  refuses unless this equals the CURRENT revision for every covered docType. */
+  /** The embedding-space revision this docType last reached "completed" under, stamped ONLY by a
+   *  full-corpus (non-symbol-scoped) scan. `purgeLegacy...` refuses unless this equals the
+   *  CURRENT revision — and cumulative `failed` is zero — for every covered docType. */
   completedForEmbedRevision?: string;
   lastRunAt: string;
 }
@@ -256,6 +285,17 @@ class BudgetExhaustedStop extends Error {
   }
 }
 
+/** Thrown when the ACTIVE embedding model changes underneath a running re-embed (e.g. an operator
+ *  adds/removes the openrouter/siliconflow key mid-run). Everything embedded so far went to the
+ *  space captured at run start; continuing would silently split the run across two spaces, so the
+ *  whole run aborts with status "error" instead (MUST-FIX 1e). */
+class ModelDriftAbort extends Error {
+  constructor(expected: string, actual: string) {
+    super(`corpus-reembed aborted: active embedding model changed mid-run (started under "${expected}", now "${actual}")`);
+    this.name = "ModelDriftAbort";
+  }
+}
+
 // ── docType: sec-filings ─────────────────────────────────────────────────────────
 
 interface SecFilingsWatermark {
@@ -290,8 +330,36 @@ function listSecFilingCandidates(afterRowid: number, symbols: string[] | undefin
   `).all(...params) as SecFilingCandidateRow[];
 }
 
+/**
+ * True when the LIVE sec-filings ingestion path (`ingestFiling`, sec-filings.ts) has already
+ * committed this accession into the CURRENT embedding space. The live path's whole-document
+ * identity — doc_id `${ticker}:${accession}:${docType}` with the full section-derived body and
+ * url — CANNOT be reconstructed from FTS chunk rows, so the backfill cannot dedup onto the same
+ * commit; instead it must SKIP accessions the live path already covered (2026-07-18 adversarial
+ * review, MUST-FIX 2: without this, post-flip filings ingested live AND backfilled here would
+ * exist twice in the corpus under two identities). `vector_ingest_commits.accession` stores the
+ * live path's doc_id verbatim.
+ */
+function liveSecFilingCommittedInCurrentSpace(
+  symbol: string,
+  accession: string,
+  form: string | null,
+  embedRevision: string
+): boolean {
+  const liveDocId = `${symbol}:${accession}:${form ?? "10-K"}`;
+  const row = getDb().prepare(`
+    SELECT 1 FROM vector_ingest_commits
+    WHERE source = 'sec-edgar' AND accession = ? AND embed_revision = ? AND state = 'committed'
+    LIMIT 1
+  `).get(liveDocId, embedRevision);
+  return Boolean(row);
+}
+
 async function reembedSecFilings(ctx: RunContext, state: DocTypeRunState): Promise<void> {
   let afterRowid = ((state.watermark as SecFilingsWatermark | null)?.rowid) ?? 0;
+  // Per-run memo of accessions the live path already committed in the current space — one SQL
+  // probe per accession instead of one per chunk row.
+  const liveCoveredByAccession = new Map<string, boolean>();
   for (;;) {
     ctx.throwIfCancelled();
     const rows = listSecFilingCandidates(afterRowid, ctx.symbols, BATCH_SIZE);
@@ -306,7 +374,17 @@ async function reembedSecFilings(ctx: RunContext, state: DocTypeRunState): Promi
       const docType = (row.form || "10-k").toLowerCase();
       const publishedAt = row.filed_at ?? row.accepted_at ?? new Date().toISOString();
       const acceptanceDatetime = row.accepted_at ?? row.filed_at ?? publishedAt;
-      if (ctx.dryRun) {
+      let liveCovered = liveCoveredByAccession.get(row.accession);
+      if (liveCovered === undefined) {
+        liveCovered = liveSecFilingCommittedInCurrentSpace(row.symbol, row.accession, row.form, ctx.embedRevision);
+        liveCoveredByAccession.set(row.accession, liveCovered);
+      }
+      if (liveCovered) {
+        // The live whole-document ingestion already put this filing into the current space —
+        // its chunks are retrievable there under the live identity. Backfilling the FTS chunk
+        // would create a second, differently-identified copy. Count as in-space reuse.
+        applyOutcome(state, "reused");
+      } else if (ctx.dryRun) {
         applyOutcome(state, classifyDryRun(ctx, "sec-edgar", documentKey));
       } else {
         const doc: ChunkInput & { symbol?: string } = {
@@ -320,9 +398,12 @@ async function reembedSecFilings(ctx: RunContext, state: DocTypeRunState): Promi
           source: "sec-edgar"
         };
         const result = await storeDocument(doc, ctx.userId, {
-          // Same parser revision the live sec-filings.ts ingestion path uses (sec-filings.ts:507),
-          // so a same-space collision between this backfill and normal scheduled ingestion of the
-          // same content dedups onto the identical commit rather than creating a second vector set.
+          // Same parser revision string as the live sec-filings.ts ingestion path — but NOTE:
+          // this backfill's per-chunk identity (doc_id/documentKey `${accession}:${content_hash}`,
+          // no url/sections) is deliberately DISTINCT from the live path's whole-document
+          // identity, so the two never dedup onto the same commit. Coexistence is prevented by
+          // the live-identity skip above, not by commit-id collision (MUST-FIX 2 correction of
+          // an earlier, wrong comment here).
           parserRevision: "sec-edgar-filing-v2",
           documentKey,
           leaseGuard: ctx.leaseGuard
@@ -412,7 +493,15 @@ async function reembedEarningsCallsTranscripts(ctx: RunContext, state: DocTypeRu
           doc_type: EARNINGSCALLS_TRANSCRIPT_DOC_TYPE,
           published_at: row.event_date ?? row.fetched_at,
           acceptance_datetime: row.fetched_at,
-          source: EARNINGSCALLS_TRANSCRIPT_SOURCE
+          source: EARNINGSCALLS_TRANSCRIPT_SOURCE,
+          // MUST-FIX 2: byte-identical to the live `ingestCachedTranscript` document
+          // (earningscalls-transcripts.ts ~line 526) INCLUDING the url — the url feeds
+          // retrievalMetadataVersion, which feeds the commit id, so matching it makes this
+          // backfill's identity EXACTLY the live path's. A transcript ingested by either path
+          // dedups onto the same commit in the same space; no double-embedding is possible.
+          url: row.event_id
+            ? `${EARNINGSCALLS_BASE}/transcripts/${row.event_id}`
+            : `${EARNINGSCALLS_BASE}/search/by_ticker`
         };
         const result = await storeDocument(doc, ctx.userId, {
           // Same parser revision the live earningscalls-transcripts.ts push uses (line ~529).
@@ -510,6 +599,32 @@ function insiderForm4Text(input: {
   );
 }
 
+/**
+ * Conservative point-in-time floor for insider Form-4 documents (2026-07-18 adversarial review,
+ * MUST-FIX 3): `sec_insider_transactions` stores only `period_of_report` — the TRANSACTION date —
+ * and Form 4s are legally filed up to two business days AFTER the transaction (SEC §16 deadline).
+ * Stamping the transaction date as availability would make backfilled vectors retrievable in
+ * backtests BEFORE the public could have seen the filing (look-ahead bias). Stamping transaction
+ * date + 2 business days pushes the availability estimate to the far end of the legal window:
+ * for any filing made before its deadline (the overwhelmingly common case), the vector becomes
+ * retrievable LATER than reality — the safe direction for point-in-time correctness. Weekend-aware
+ * but ignores market holidays; a deadline that crossed a holiday could make the TRUE filing time
+ * later than this stamp — that narrow residual window is accepted and documented in the rollout
+ * note, and is one of the reasons insider-form4 is excluded from DEFAULT_CORPUS_REEMBED_DOC_TYPES.
+ */
+export function insiderForm4AvailabilityFloor(periodOfReport: string): string {
+  const parsed = Date.parse(periodOfReport);
+  if (!Number.isFinite(parsed)) return periodOfReport;
+  const date = new Date(parsed);
+  let added = 0;
+  while (added < 2) {
+    date.setUTCDate(date.getUTCDate() + 1);
+    const day = date.getUTCDay();
+    if (day !== 0 && day !== 6) added += 1;
+  }
+  return date.toISOString();
+}
+
 async function reembedInsiderForm4(ctx: RunContext, state: DocTypeRunState): Promise<void> {
   // cik -> ticker: loadCikMap keys by bare numeric CIK strings; sec_insider_transactions.cik is
   // zero-padded (parseAndSaveForm4 stores `padCik(cik)`). Re-pad the map's keys to match.
@@ -553,6 +668,9 @@ async function reembedInsiderForm4(ctx: RunContext, state: DocTypeRunState): Pro
       if (ctx.dryRun) {
         applyOutcome(state, classifyDryRun(ctx, "insider-filing", documentKey));
       } else {
+        // MUST-FIX 3: availability is stamped at period_of_report + 2 business days — the
+        // conservative far end of the Form-4 filing window — never the transaction date itself.
+        const availabilityFloor = insiderForm4AvailabilityFloor(row.period_of_report);
         const text = insiderForm4Text({
           symbol,
           owner: row.insider_name,
@@ -560,9 +678,9 @@ async function reembedInsiderForm4(ctx: RunContext, state: DocTypeRunState): Pro
           buyShares: row.buy_shares,
           sellTx: row.sell_tx,
           sellShares: row.sell_shares,
-          // period_of_report is the closest available per-transaction date in this table (the
-          // table has no accepted_at column); documented approximation of the original filedAt.
-          filedAt: row.period_of_report,
+          // The table has no filed-at column; the text shows the estimated availability floor,
+          // explicitly labeled as such via the availability-floor helper's contract.
+          filedAt: availabilityFloor,
           accession: row.accession
         });
         const doc: ChunkInput & { symbol?: string } = {
@@ -571,8 +689,8 @@ async function reembedInsiderForm4(ctx: RunContext, state: DocTypeRunState): Pro
           ticker: symbol,
           title: `${symbol} insider filing (${row.accession})`,
           doc_type: "insider-filing",
-          published_at: row.period_of_report,
-          acceptance_datetime: row.period_of_report,
+          published_at: availabilityFloor,
+          acceptance_datetime: availabilityFloor,
           source: "insider-filing"
         };
         const result = await storeDocument(doc, ctx.userId, {
@@ -734,6 +852,8 @@ export interface CorpusReembedRunResult {
   embedRevision: string;
   stoppedForBudget: boolean;
   stoppedForCap: boolean;
+  /** Set when the run aborted because the active embedding model changed mid-run. */
+  error?: string;
   docTypes: CorpusReembedDocTypeResult[];
 }
 
@@ -755,7 +875,7 @@ function normalizedSymbols(symbols?: string[]): string[] | undefined {
 }
 
 function resolveDocTypes(requested: CorpusReembedDocType[] | undefined): CorpusReembedDocType[] {
-  if (!requested || requested.length === 0) return [...CORPUS_REEMBED_DOC_TYPES];
+  if (!requested || requested.length === 0) return [...DEFAULT_CORPUS_REEMBED_DOC_TYPES];
   return [...new Set(requested.filter(isCorpusReembedDocType))];
 }
 
@@ -783,25 +903,43 @@ async function runCorpusReembedLocked(
     : undefined;
   let stoppedForCap = false;
 
+  // Symbol-scoped runs are STATELESS "targeted top-up" operations: they neither read nor write
+  // watermarks or cumulative counts, and they can never stamp completion. A scoped scan only
+  // visits the requested symbols' rows, so any watermark it advanced would leave un-requested
+  // symbols permanently skipped by a later full scan — and any completion it stamped would let
+  // the purge gate believe the whole docType was covered (2026-07-18 adversarial review,
+  // MUST-FIX 1a — proven by test/corpus-reembed-adversarial.test.ts). Idempotency for scoped
+  // reruns comes from storeDocument's committed-receipt reuse, not from watermarks.
+  const scoped = Boolean(symbols && symbols.length > 0);
+
   const priorProgress = readProgress();
   const results: CorpusReembedDocTypeResult[] = [];
   let stoppedForBudget = false;
+  let driftError: string | undefined;
 
-  const persistRunning = (docType: CorpusReembedDocType, docState: DocTypeRunState) => {
-    // Dry runs are strictly read-only: counts come back in the response, and neither watermarks
-    // nor status may advance (a real run afterwards must still process everything).
-    if (opts.dryRun) return;
+  const persistRunning = (docType: CorpusReembedDocType, docState: DocTypeRunState, base: { candidatesSeen: number; embedded: number; reusedInSpace: number; failed: number }) => {
+    // Dry runs and symbol-scoped runs are strictly non-persisting: counts come back in the
+    // response, and neither watermarks, cumulative counts, nor completion stamps may advance.
+    if (opts.dryRun || scoped) return;
     const now = new Date().toISOString();
     const existing = readProgress();
     const nextDocTypes = { ...(existing?.docTypes ?? {}) };
+    const prior = nextDocTypes[docType];
     nextDocTypes[docType] = {
       status: docState.stoppedForBudget ? "stopped-budget" : docState.completed ? "completed" : "running",
       watermark: docState.watermark,
-      candidatesSeen: docState.candidatesSeen,
-      embedded: docState.embedded,
-      reusedInSpace: docState.reusedInSpace,
-      failed: docState.failed,
-      ...(docState.completed ? { completedForEmbedRevision: embedRevision } : {}),
+      watermarkEmbedRevision: embedRevision,
+      candidatesSeen: base.candidatesSeen + docState.candidatesSeen,
+      embedded: base.embedded + docState.embedded,
+      reusedInSpace: base.reusedInSpace + docState.reusedInSpace,
+      failed: base.failed + docState.failed,
+      // Completion is stamped only by a full-corpus scan that reached the end; a stamp from an
+      // earlier revision is dropped once the scan runs under a new one (watermark chain restarts).
+      ...(docState.completed
+        ? { completedForEmbedRevision: embedRevision }
+        : prior?.completedForEmbedRevision === embedRevision
+          ? { completedForEmbedRevision: prior.completedForEmbedRevision }
+          : {}),
       lastRunAt: now
     };
     writeProgress({
@@ -809,14 +947,28 @@ async function runCorpusReembedLocked(
       status: "running",
       embedModel,
       embedRevision,
-      dryRun: opts.dryRun,
+      dryRun: false,
       docTypes: nextDocTypes
     });
   };
 
   for (const docType of docTypes) {
     throwIfOperationLeaseCancelled(signal);
-    const initialWatermark = priorProgress?.docTypes?.[docType]?.watermark ?? null;
+    const prior = priorProgress?.docTypes?.[docType];
+    // Watermarks (and the cumulative counts that belong to the same scan chain) are only valid
+    // under the embedding-space revision that produced them. On mismatch — a model flip since the
+    // last run — discard and rescan from the start (MUST-FIX 1b): resuming a stale end-of-corpus
+    // watermark would "complete" instantly with zero embeds into the new space.
+    const priorIsCurrentRevision = !scoped && !opts.dryRun && prior?.watermarkEmbedRevision === embedRevision;
+    const initialWatermark = priorIsCurrentRevision ? (prior?.watermark ?? null) : null;
+    const base = priorIsCurrentRevision
+      ? {
+          candidatesSeen: prior?.candidatesSeen ?? 0,
+          embedded: prior?.embedded ?? 0,
+          reusedInSpace: prior?.reusedInSpace ?? 0,
+          failed: prior?.failed ?? 0
+        }
+      : { candidatesSeen: 0, embedded: 0, reusedInSpace: 0, failed: 0 };
     const state = freshDocTypeRunState(docType, initialWatermark);
     const ctx: RunContext = {
       userId,
@@ -824,7 +976,14 @@ async function runCorpusReembedLocked(
       dryRun: opts.dryRun,
       embedRevision,
       leaseGuard,
-      throwIfCancelled: () => throwIfOperationLeaseCancelled(signal),
+      throwIfCancelled: () => {
+        throwIfOperationLeaseCancelled(signal);
+        // Model-drift guard (MUST-FIX 1e), re-checked at every per-item boundary: a mid-run
+        // active-model change means subsequent storeDocument calls would target a DIFFERENT
+        // space than this run's watermarks/completion accounting assume. Abort the whole run.
+        const nowActive = activeEmbeddingModel(userId);
+        if (nowActive !== embedModel) throw new ModelDriftAbort(embedModel, nowActive);
+      },
       consumeMaxTexts: (count = 1) => {
         if (remainingMaxTexts === undefined) return;
         remainingMaxTexts -= count;
@@ -834,7 +993,7 @@ async function runCorpusReembedLocked(
           throw new MaxTextsReachedError();
         }
       },
-      persistDocTypeProgress: (s) => persistRunning(docType, s)
+      persistDocTypeProgress: (s) => persistRunning(docType, s, base)
     };
 
     try {
@@ -848,6 +1007,10 @@ async function runCorpusReembedLocked(
       } else if (error instanceof BudgetExhaustedStop) {
         stoppedForBudget = true;
         state.stoppedForBudget = true;
+      } else if (error instanceof ModelDriftAbort) {
+        driftError = error.message;
+        console.error(`[corpus-reembed] ${docType}:`, error.message);
+        audit("corpus_reembed_error", { docType, error: error.message }, userId);
       } else {
         throwIfOperationLeaseCancelled(signal); // rethrow lease loss immediately, unmasked
         console.error(`[corpus-reembed] ${docType} run failed:`, error instanceof Error ? error.message : String(error));
@@ -856,7 +1019,7 @@ async function runCorpusReembedLocked(
       }
     }
 
-    persistRunning(docType, state);
+    persistRunning(docType, state, base);
     results.push({
       docType,
       candidatesSeen: state.candidatesSeen,
@@ -867,13 +1030,21 @@ async function runCorpusReembedLocked(
       stoppedForBudget: state.stoppedForBudget
     });
 
-    if (state.stoppedForBudget || stoppedForCap) break; // shared daily fuses / invocation cap — stop the whole run, not just this docType
+    // Shared daily fuses / invocation cap / model drift — stop the whole run, not just this docType.
+    if (state.stoppedForBudget || stoppedForCap || driftError) break;
   }
 
-  const finalStatus: ReembedOutcomeStatus = stoppedForBudget ? "stopped-budget" : stoppedForCap ? "stopped-cap" : "completed";
-  // Dry runs persist NOTHING (same contract as persistRunning above) — counts return in the
-  // response, and the stored status/watermarks stay exactly as the last real run left them.
-  if (!opts.dryRun) {
+  const finalStatus: ReembedOutcomeStatus = driftError
+    ? "error"
+    : stoppedForBudget
+      ? "stopped-budget"
+      : stoppedForCap
+        ? "stopped-cap"
+        : "completed";
+  // Dry runs and symbol-scoped runs persist NOTHING (same contract as persistRunning above) —
+  // counts return in the response, and the stored status/watermarks stay exactly as the last
+  // full-corpus real run left them.
+  if (!opts.dryRun && !scoped) {
     const now = new Date().toISOString();
     const existing = readProgress();
     writeProgress({
@@ -882,12 +1053,21 @@ async function runCorpusReembedLocked(
       embedModel,
       embedRevision,
       dryRun: false,
-      docTypes: existing?.docTypes ?? {}
+      docTypes: existing?.docTypes ?? {},
+      ...(driftError ? { error: driftError } : {})
     });
   }
-  audit("corpus_reembed_run", { dryRun: opts.dryRun, embedModel, embedRevision, docTypes: results }, userId);
+  audit("corpus_reembed_run", { dryRun: opts.dryRun, scoped, embedModel, embedRevision, docTypes: results, ...(driftError ? { error: driftError } : {}) }, userId);
 
-  return { dryRun: opts.dryRun, embedModel, embedRevision, stoppedForBudget, stoppedForCap, docTypes: results };
+  return {
+    dryRun: opts.dryRun,
+    embedModel,
+    embedRevision,
+    stoppedForBudget,
+    stoppedForCap,
+    ...(driftError ? { error: driftError } : {}),
+    docTypes: results
+  };
 }
 
 /** Fire-and-forget entry point for the admin route's real (non-dry-run) POST. Returns immediately
@@ -958,16 +1138,54 @@ export interface PurgeLegacyEmbeddingSpaceResult {
   docTypes: CorpusReembedDocType[];
 }
 
+/** NOTE ON SCOPE: despite the token's historical name, this purge removes vectors from EVERY
+ *  non-current embedding space for the covered docTypes — anything whose committed
+ *  `embed_revision` differs from the currently-active one — not only voyage-finance-2's. The
+ *  token string is kept for operator/runbook continuity; the docs and refusal messages state the
+ *  real scope (2026-07-18 adversarial review). */
 const PURGE_CONFIRM_TOKEN = "purge-voyage-vectors";
 
-function legacyVectorIdsFor(sourceTag: string, currentEmbedRevision: string): string[] {
-  const rows = getDb().prepare(`
-    SELECT o.vector_id AS vector_id
+interface LegacyReceiptRow {
+  vector_id: string;
+  commit_id: string;
+}
+
+function legacyReceiptsFor(sourceTag: string, currentEmbedRevision: string): LegacyReceiptRow[] {
+  return getDb().prepare(`
+    SELECT o.vector_id AS vector_id, o.commit_id AS commit_id
     FROM chunk_occurrences o
     JOIN vector_ingest_commits c ON c.id = o.commit_id
     WHERE c.state = 'committed' AND c.source = ? AND c.embed_revision != ?
-  `).all(sourceTag, currentEmbedRevision) as Array<{ vector_id: string }>;
-  return rows.map((r) => r.vector_id);
+  `).all(sourceTag, currentEmbedRevision) as LegacyReceiptRow[];
+}
+
+/**
+ * Retire the local ledger receipts of purged commits, atomically per docType (2026-07-18
+ * adversarial review, MUST-FIX 1): once the provider vectors are deleted, leaving the commits
+ * `committed` would (a) make every reconcile/drift report permanently flag receipt-without-vector
+ * ghosts, and (b) let a future flip BACK to a purged space `reusedCommitted` against vectors that
+ * no longer exist — silently completing with nothing retrievable. Marks the commits aborted,
+ * removes their occurrence receipts, and clears their active-head rows so
+ * `committedVectorCommitDisposition` reports not_committed and a re-ingest starts clean.
+ */
+function retirePurgedCommitReceipts(commitIds: string[]): void {
+  if (commitIds.length === 0) return;
+  const db = getDb();
+  const now = new Date().toISOString();
+  const BATCH = 400; // stay under SQLite's 999-variable ceiling
+  db.transaction(() => {
+    for (let i = 0; i < commitIds.length; i += BATCH) {
+      const batch = commitIds.slice(i, i + BATCH);
+      const ph = batch.map(() => "?").join(",");
+      db.prepare(`
+        UPDATE vector_ingest_commits
+        SET state = 'aborted', lease_expires_at = NULL, updated_at = ?
+        WHERE id IN (${ph})
+      `).run(now, ...batch);
+      db.prepare(`DELETE FROM chunk_occurrences WHERE commit_id IN (${ph})`).run(...batch);
+      db.prepare(`DELETE FROM vector_document_heads WHERE commit_id IN (${ph})`).run(...batch);
+    }
+  })();
 }
 
 async function purgeLegacyEmbeddingSpaceLocked(
@@ -997,6 +1215,12 @@ async function purgeLegacyEmbeddingSpaceLocked(
   const purgeableDocTypes = docTypes.filter((docType) => DOC_TYPE_SOURCE_TAG[docType]); // excludes experience-memory
   for (const docType of purgeableDocTypes) {
     const docProgress = progress?.docTypes?.[docType];
+    // The stamp is trustworthy only because full-corpus scans alone can write it: symbol-scoped
+    // runs and dry runs persist nothing (see persistRunning), a model flip restarts the watermark
+    // chain (watermarkEmbedRevision), and `failed` is cumulative across resumes — so this gate
+    // holds unless a genuinely complete, failure-free scan of the WHOLE docType finished under
+    // the currently-active space (2026-07-18 adversarial review, MUST-FIX 1; exploit + fix proven
+    // in test/corpus-reembed-adversarial.test.ts).
     const completeUnderCurrentSpace =
       docProgress?.status === "completed" &&
       docProgress.completedForEmbedRevision === embedRevision &&
@@ -1004,7 +1228,7 @@ async function purgeLegacyEmbeddingSpaceLocked(
     if (!completeUnderCurrentSpace) {
       return {
         ok: false,
-        refused: `docType "${docType}" has not completed a corpus-reembed run under the current embedding space (${embedRevision}); refusing to purge legacy vectors until it does.`,
+        refused: `docType "${docType}" has not completed a FULL corpus-reembed run under the current embedding space (${embedRevision}) with zero failures; refusing to purge non-current-space vectors until it does. (Note: this purge removes ALL non-current embedding spaces for the covered docTypes, not only voyage-finance-2.)`,
         purged: 0,
         docTypes
       };
@@ -1023,14 +1247,17 @@ async function purgeLegacyEmbeddingSpaceLocked(
   for (const docType of purgeableDocTypes) {
     throwIfOperationLeaseCancelled(signal);
     const sourceTag = DOC_TYPE_SOURCE_TAG[docType]!;
-    const ids = legacyVectorIdsFor(sourceTag, embedRevision);
-    if (ids.length === 0) continue;
+    const receipts = legacyReceiptsFor(sourceTag, embedRevision);
+    if (receipts.length === 0) continue;
     if (opts.dryRun) {
-      purged += ids.length;
+      purged += receipts.length;
       continue;
     }
-    const result = await purgeManagedVectorsByIds(ids, { userId, leaseGuard });
+    const result = await purgeManagedVectorsByIds(receipts.map((r) => r.vector_id), { userId, leaseGuard });
     purged += result.deleted;
+    // Retire the ledger receipts ONLY after the provider delete succeeded for this docType —
+    // a provider failure keeps receipts intact so a purge retry re-targets the same exact ids.
+    retirePurgedCommitReceipts([...new Set(receipts.map((r) => r.commit_id))]);
   }
 
   audit("corpus_reembed_purge_legacy", { dryRun: Boolean(opts.dryRun), embedModel, embedRevision, docTypes: purgeableDocTypes, purged }, userId);
@@ -1046,4 +1273,33 @@ export async function purgeLegacyEmbeddingSpace(
   );
   if (!guarded.acquired) return { acquired: false, busy: guarded.busy };
   return { acquired: true, result: guarded.value };
+}
+
+// ── Operator watermark reset (MUST-FIX 1d) ──────────────────────────────────────
+
+/**
+ * Explicitly reset per-docType progress (watermark, cumulative counts, completion stamp) so the
+ * next run performs a fresh full-corpus scan. The intended operator flow after failures:
+ * reset → full run (already-committed content reuses for free; previously-failed content gets
+ * retried) → purge gate re-evaluates against the fresh, failure-free scan. Serialized under the
+ * same durable lease so it can never yank watermarks out from under a live run.
+ */
+export async function resetCorpusReembedWatermarks(
+  docTypes?: CorpusReembedDocType[]
+): Promise<{ acquired: boolean; busy?: OperationLeaseBusy; reset?: CorpusReembedDocType[] }> {
+  const targets = resolveDocTypes(docTypes);
+  const guarded = await runWithOperationLease(
+    { group: OPERATION_LEASE_GROUPS.RAG_REINDEX, operation: "corpus-reembed-reset" },
+    async () => {
+      const existing = readProgress();
+      if (!existing) return targets;
+      const nextDocTypes = { ...existing.docTypes };
+      for (const docType of targets) delete nextDocTypes[docType];
+      writeProgress({ ...existing, updatedAt: new Date().toISOString(), docTypes: nextDocTypes });
+      audit("corpus_reembed_reset", { docTypes: targets });
+      return targets;
+    }
+  );
+  if (!guarded.acquired) return { acquired: false, busy: guarded.busy };
+  return { acquired: true, reset: guarded.value };
 }

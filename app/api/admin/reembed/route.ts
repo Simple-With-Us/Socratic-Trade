@@ -3,8 +3,10 @@ import { requireAdmin } from "@/lib/auth/admin";
 import { operationLeaseBusyResponse } from "@/lib/operation-guard-response";
 import {
   CORPUS_REEMBED_DOC_TYPES,
+  DEFAULT_CORPUS_REEMBED_DOC_TYPES,
   getCorpusReembedProgress,
   purgeLegacyEmbeddingSpace,
+  resetCorpusReembedWatermarks,
   runCorpusReembedDryRun,
   startCorpusReembedRun,
   type CorpusReembedDocType
@@ -30,13 +32,20 @@ export const dynamic = "force-dynamic";
 // returns counts directly in the response — no embedding occurs.
 //
 // POST { action: "purge-legacy", confirm: "purge-voyage-vectors" } — separate, explicit,
-// never-automatic action: deletes vectors from an OLDER embedding space (scoped to the docTypes'
-// local receipts), and refuses unless a corpus-reembed run has already reported "completed" for
-// every covered docType under the CURRENT active embedding space.
+// never-automatic action. SCOPE WARNING: despite the token's historical name it deletes vectors
+// from EVERY non-current embedding space for the covered docTypes (anything whose committed
+// embed_revision differs from the active one), not only voyage-finance-2's. Refuses unless a
+// FULL (non-symbol-scoped) corpus-reembed run has reported "completed" with zero cumulative
+// failures for every covered docType under the CURRENT active embedding space, and retires the
+// purged commits' local ledger receipts in the same operation.
+//
+// POST { action: "reset-watermarks", docTypes? } — clears per-docType watermarks/counts/completion
+// stamps so the next run performs a fresh full-corpus scan (the recovery path after failures).
 //
 // GET — progress/watermarks/per-docType counts (embedded, skipped/reused, failed, budget-deferred)
 // plus the current active embed model/revision, so the operator can see which space is being
-// filled.
+// filled. NOTE: symbol-scoped runs are stateless (no watermarks/completion persisted) and
+// insider-form4 is NOT in the default docTypes (see DEFAULT_CORPUS_REEMBED_DOC_TYPES).
 export async function GET(request: Request) {
   const denied = requireAdmin(request, { requireTokenInProd: true });
   if (denied) return denied;
@@ -78,6 +87,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ action: "purge-legacy", ...result }, { status: result.ok ? 200 : 409 });
   }
 
+  if (body?.action === "reset-watermarks") {
+    const docTypes = parseDocTypes(body.docTypes);
+    const guarded = await resetCorpusReembedWatermarks(docTypes);
+    if (!guarded.acquired) return operationLeaseBusyResponse("corpus-reembed-reset", guarded.busy!);
+    return NextResponse.json({ ok: true, action: "reset-watermarks", reset: guarded.reset });
+  }
+
   const docTypes = parseDocTypes(body.docTypes);
   const symbols = parseSymbols(body.symbols);
   const maxTexts = Number.isFinite(Number(body.maxTexts)) && Number(body.maxTexts) > 0
@@ -93,5 +109,5 @@ export async function POST(request: Request) {
 
   const started = startCorpusReembedRun({ docTypes, symbols, maxTexts });
   if (!started.acquired) return operationLeaseBusyResponse("corpus-reembed", started.busy!);
-  return NextResponse.json({ ok: true, started: true, docTypes: docTypes ?? [...CORPUS_REEMBED_DOC_TYPES], symbols });
+  return NextResponse.json({ ok: true, started: true, docTypes: docTypes ?? [...DEFAULT_CORPUS_REEMBED_DOC_TYPES], symbols });
 }
