@@ -1897,6 +1897,14 @@ As of 2026-07-08 (assignment-rule update).
   → live marketing/legal pages + error boundary, "two renderers" decision) and `/strategy` SEO
   redirect — in use, not legacy. Add-account flow unchanged (auto-fetch of Alpaca/Tradier number is a
   flagged follow-up). Rollout: `docs/rollouts/2026-07-18-account-rename-and-legacy-retirement.md`.
+- **[Socratic.Trade][CLAUDE] OpenRouter post-merge Codex follow-ups (branch
+  `claude/openrouter-codex-followups`, 2026-07-18) — IN PROGRESS.** #1703 (universal OpenRouter
+  routing) merged with Codex threads open (autofix hit its 10-round cap). Fixes the 3 live-in-prod
+  correctness findings: P1 Claude reasoning via OpenRouter uses the unified `reasoning` param (not
+  `reasoning_effort`+temperature); P2 normalize `xai/`→`x-ai/` Grok slug at resolve time; P2 keep
+  billing cooldowns on the OpenRouter credential lane (write+read). Regression tests added. Deferred:
+  4th finding (rotation eligibility → openrouter-credential gate) needs model-rotation test rewrites.
+  Rollout: `docs/rollouts/2026-07-18-openrouter-codex-followups.md`.
 - **[Socratic.Trade][MONET] Usage page canonical-model merge (branch `monet/usage-canonical-model-merge`,
   claimed 2026-07-17) — IN PROGRESS.** Owner-directed: preserve pre-OpenRouter usage stats + merge
   OpenRouter-routed calls with direct-provider calls for the SAME underlying model on the Usage page.

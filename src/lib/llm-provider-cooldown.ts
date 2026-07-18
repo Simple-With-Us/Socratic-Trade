@@ -150,7 +150,13 @@ export function recordLlmProviderFailure(input: {
     ...(input.model ? { model: input.model } : {}),
     ...(input.detail ? { detail: input.detail.replace(/\s+/g, " ").slice(0, 240) } : {})
   };
-  const provider = cooldownProvider(input.provider, input.model);
+  // Transient (rate/5xx) failures cool only the vendor sub-lane so a busy OpenAI-family primary
+  // doesn't cool a healthy Gemini/Anthropic fallback. BILLING/credits failures, however, exhaust the
+  // WHOLE OpenRouter credential (every vendor shares that one key) — so keep them on the credential
+  // lane (input.provider, i.e. "openrouter"), which getLlmProviderCooldown checks for EVERY vendor
+  // attempt. Otherwise the planner cools only the openai lane and immediately retries google/anthropic
+  // on the same dead key (Codex P2, PR #1703).
+  const provider = kind === "billing" ? input.provider : cooldownProvider(input.provider, input.model);
   try {
     cooldowns.set(laneKey(provider, input.keySource, input.userId), record);
     audit(
@@ -187,15 +193,24 @@ export function getLlmProviderCooldown(
   model?: string | null
 ): { record: LlmProviderCooldownRecord; remainingMs: number } | undefined {
   if (llmProviderCooldownDisabled()) return undefined;
-  const mappedProvider = cooldownProvider(provider, model);
-  const key = laneKey(mappedProvider, keySource, userId);
-  const record = cooldowns.get(key);
-  if (!record) return undefined;
-  if (now >= record.until) {
-    cooldowns.delete(key); // lazy prune
-    return undefined;
+  // Check BOTH the OpenRouter credential lane (billing/whole-key cooldowns) and the vendor sub-lane
+  // (transient rate/5xx). The credential lane dominates — a billing cooldown on the shared key must
+  // block EVERY vendor attempt, not just the vendor that happened to trip it (Codex P2, PR #1703).
+  const credLane = laneKey(provider, keySource, userId);
+  const vendorLane = laneKey(cooldownProvider(provider, model), keySource, userId);
+  let best: { record: LlmProviderCooldownRecord; remainingMs: number } | undefined;
+  for (const key of vendorLane === credLane ? [credLane] : [credLane, vendorLane]) {
+    const record = cooldowns.get(key);
+    if (!record) continue;
+    if (now >= record.until) {
+      cooldowns.delete(key); // lazy prune
+      continue;
+    }
+    const remainingMs = record.until - now;
+    // Prefer the lane cooling the longest so the caller waits out the dominant block.
+    if (!best || remainingMs > best.remainingMs) best = { record, remainingMs };
   }
-  return { record, remainingMs: record.until - now };
+  return best;
 }
 
 export interface LlmAttemptLane {

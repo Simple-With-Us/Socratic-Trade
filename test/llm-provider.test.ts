@@ -30,7 +30,7 @@ describe("resolveLlmEndpoint", () => {
     expect(endpoint.provider).toBe("openrouter");
     expect(endpoint.url).toBe(getExpectedUrl());
     expect(endpoint.transport).toBe("chat-completions");
-    expect(endpoint.model).toBe("xai/grok-4.3");
+    expect(endpoint.model).toBe("x-ai/grok-4.3");
   });
 
   it("routes grok-build-0.1 to OpenRouter (case-insensitive prefix match)", () => {
@@ -56,7 +56,7 @@ describe("resolveLlmEndpoint", () => {
       "red"
     );
     expect(endpoint.provider).toBe("openrouter");
-    expect(endpoint.model).toBe("xai/grok-4.3");
+    expect(endpoint.model).toBe("x-ai/grok-4.3");
     expect(endpoint.transport).toBe("chat-completions");
   });
 

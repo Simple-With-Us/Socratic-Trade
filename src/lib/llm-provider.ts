@@ -104,6 +104,12 @@ export function resolveLlmEndpoint(
   // (e.g. "openrouter/google/gemini-2.5-flash" → "google/gemini-2.5-flash").
   model = model.replace(/^openrouter\//i, "");
 
+  // Normalize the legacy `xai/` Grok slug to OpenRouter's `x-ai/` even when the id was ALREADY
+  // namespaced (e.g. a saved `xai/grok-4.3` policy value, or a test fixture). The bare-`grok`
+  // mapping above only fires for un-namespaced ids, so an already-`xai/`-qualified id would
+  // otherwise reach OpenRouter unchanged and hit an invalid-model failure (Codex finding, PR #1703).
+  model = model.replace(/^xai\//i, "x-ai/");
+
   const url = process.env.OPENROUTER_API_URL?.trim() || "https://openrouter.ai/api/v1/chat/completions";
   const cred = resolveLlmCredential(modelCredentialService(rawModel), userId);
 

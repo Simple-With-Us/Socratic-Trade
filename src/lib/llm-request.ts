@@ -666,6 +666,25 @@ export function withLlmRequestBounds<T extends Record<string, unknown>>(
       if (capability.provider === "mistral" && normalizedEffort !== "none") {
         return { ...body, max_completion_tokens: maxCompletionTokens, reasoning_effort: normalizedEffort };
       }
+      if (capability.provider === "anthropic") {
+        // Claude is routed as `anthropic/...` through OpenRouter on the chat-completions transport
+        // (universal OpenRouter routing). OpenRouter maps its UNIFIED `reasoning` parameter to
+        // Anthropic's extended thinking — `reasoning_effort` is OpenAI-only, and Anthropic reasoning
+        // models reject a custom `temperature`. So send `reasoning` (never reasoning_effort), and omit
+        // temperature unless thinking is off (Codex P1, PR #1703).
+        if (normalizedEffort === "none") {
+          return { ...body, max_completion_tokens: maxCompletionTokens, temperature, reasoning: { enabled: false } };
+        }
+        // OpenRouter derives Anthropic's thinking budget as a FRACTION of max_tokens, so a bare
+        // `reasoning: { effort }` at high/xhigh/max would reserve most of the cap for thinking and
+        // starve the visible JSON (truncated/empty proposals — Codex P2). Pin an EXPLICIT thinking
+        // budget = the reasoning headroom already baked into maxCompletionTokens, so the VISIBLE
+        // budget stays == the caller's requested bounds.maxOutputTokens. Anthropic requires
+        // budget >= 1024 and max_tokens > budget, so clamp the budget and widen the cap to match.
+        const thinkingBudget = Math.max(1024, maxCompletionTokens - bounds.maxOutputTokens);
+        const maxTokens = Math.max(maxCompletionTokens, bounds.maxOutputTokens + thinkingBudget);
+        return { ...body, max_completion_tokens: maxTokens, reasoning: { max_tokens: thinkingBudget } };
+      }
       return { ...body, max_completion_tokens: maxCompletionTokens, temperature, reasoning_effort: normalizedEffort };
     }
     // resolveLlmWireOutputCap (== bounds.maxOutputTokens on this non-reasoning path) keeps every

@@ -90,6 +90,17 @@ renderer (primitives/theme/cn power the in-use marketing/legal pages + error bou
 2026-07-16 "two renderers" decision) and the `/strategy` marketing SEO redirect — those are in use,
 not legacy. Add-account flow unchanged (still asks for Alpaca/Tradier account number; auto-fetch is a
 flagged follow-up). Rollout: `docs/rollouts/2026-07-18-account-rename-and-legacy-retirement.md`.
+## 2026-07-18 — OpenRouter post-merge Codex follow-ups (CLAUDE, branch `claude/openrouter-codex-followups`)
+
+#1703 (universal OpenRouter routing) MERGED to `main` with Codex threads still open (codex-autofix
+hit its 10-round/54-commit cap). This branch fixes the 3 live-in-production correctness findings:
+(1) P1 — Claude routed as `anthropic/*` through OpenRouter now uses OpenRouter's unified `reasoning`
+param instead of `reasoning_effort`+`temperature` (medium-effort Claude calls were rejected/no-thinking);
+(2) P2 — normalize an already-namespaced `xai/` Grok slug to `x-ai/` at resolve time; (3) P2 — keep
+billing/credits cooldowns on the OpenRouter credential lane (write + read) so an exhausted key doesn't
+retry other vendors on the same dead credential. Regression tests added; tsc clean, affected suites 39/39.
+Deferred to a focused follow-up: the 4th finding (rotation eligibility should gate on the OpenRouter
+credential). Rollout: `docs/rollouts/2026-07-18-openrouter-codex-followups.md`.
 
 ## 2026-07-17 — OpenRouter Model Stats Canonicalization: prefix-stripping in aggregateModelStats (Antigravity, branch `antigravity/openrouter-universal-routing`)
 
