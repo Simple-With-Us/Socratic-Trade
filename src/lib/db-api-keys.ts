@@ -869,7 +869,8 @@ export function purgeConnectedAccount(id: string, userId: string = "local"): boo
       "counterfactual_learning_watermarks",
       "learning_mutations",
       "audit_events",
-      "notification_events"
+      "notification_events",
+      "option_alert_reservations"
     ]) {
       database.prepare(`DELETE FROM ${table} WHERE connected_account_id = ? AND user_id = ?`).run(id, userId);
     }
@@ -1126,14 +1127,17 @@ export function upsertBrokerProtectiveStop(
 }
 
 export function listBrokerProtectiveStops(accountNumber: string, userId: string = "local"): BrokerProtectiveStop[] {
-  // Include BOTH live-resting stops and stops mid-teardown ('pending_cancel'). Rows are hard-deleted
-  // on a successful cancel, so these are the only two statuses that ever persist — returning both is
-  // effectively "every active row". Filtering to status='resting' (the previous behavior) hid a
-  // pending_cancel row from the reconcile loop's retry pass, so a failed cancel could never be
-  // retried and the stop would orphan at the broker. Callers that must act on resting-only rows
-  // (e.g. mismatch replacement) still check `status === 'resting'` themselves.
+  // Include live-resting stops, stops mid-teardown ('pending_cancel'), and halted right-size retry
+  // markers ('pending_replace'). Rows are hard-deleted on a successful cancel, so these are the only
+  // statuses that ever persist — returning all is effectively "every active row". Filtering to
+  // status='resting' (the original behavior) hid a pending_cancel row from the reconcile loop's retry
+  // pass, so a failed cancel could never be retried and the stop would orphan at the broker; omitting
+  // 'pending_replace' likewise hid the halted right-size marker (Codex review, PR #1738), so section 1
+  // never re-queued the symbol and section 4 never re-placed — the position could stay unprotected
+  // until unhalted. Callers that must act on resting-only rows (e.g. mismatch replacement) still check
+  // `status === 'resting'` themselves.
   const rows = getDb()
-    .prepare("SELECT * FROM broker_protective_stops WHERE user_id = ? AND account_number = ? AND status IN ('resting', 'pending_cancel') ORDER BY created_at ASC")
+    .prepare("SELECT * FROM broker_protective_stops WHERE user_id = ? AND account_number = ? AND status IN ('resting', 'pending_cancel', 'pending_replace') ORDER BY created_at ASC")
     .all(userId, accountNumber) as Record<string, unknown>[];
   return rows.map(mapBrokerProtectiveStop);
 }

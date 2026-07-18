@@ -138,6 +138,14 @@ export async function cancelBrokerProtectiveStop(
   const sym = normalizeSymbol(symbol);
   for (const row of listBrokerProtectiveStops(accountNumber, userId)) {
     if (normalizeSymbol(row.symbol) !== sym) continue;
+    // A 'pending_replace' row is a halted right-size retry MARKER, not a live broker order — its
+    // brokerOrderId is a synthetic `pending-replace-*` placeholder. There is nothing to cancel at
+    // the broker, so drop the marker outright (cancelling the fake id would 404 and then get
+    // re-persisted as a stuck pending_cancel that retries forever).
+    if (row.status === "pending_replace") {
+      deleteBrokerProtectiveStop(row.id, userId);
+      continue;
+    }
     try {
       await gateway.cancelEquityOrder(accountNumber, row.brokerOrderId);
       deleteBrokerProtectiveStop(row.id, userId);
@@ -273,9 +281,31 @@ export async function reconcileBrokerProtectiveStops(args: {
    * → the account's own precedence for that symbol, unchanged from before this param existed.
    */
   stopPlanBySymbol?: Record<string, StopPlanStyle>;
+  /**
+   * Protect-while-halted mode: the account is Stopped but still protecting open positions
+   * (`policy.systemState === "halted"` with the monitor's fire loop running). The rule is: a halt must
+   * not initiate NEW or LOOSER protection, but risk-REDUCING corrections to EXISTING protection are
+   * allowed. Concretely it suppresses section 4 placement for a position that has NO stop (that is new
+   * activity) and the section-3 mismatch cancel-THEN-replace for non-shrink drift
+   * (kind/price/trail/ratchet/quantity-GROWTH — those either loosen or don't reduce exposure). But when
+   * an EXISTING stop is OVERSIZED (its quantity exceeds the current position after an out-of-band
+   * partial exit — resting or pending_cancel), it is RIGHT-SIZED even while halted: the oversized order
+   * is cancelled AND section 4 places a correctly-sized replacement for that symbol the same tick, so
+   * the position is never left over-selling (the oversized order firing) NOR unprotected (a broker-
+   * covered position has no synthetic row, and the synthetic monitor does not register new stops while
+   * halted — Codex review, PR #1738). Pass `running: true` alongside this (the halt gates protection
+   * INITIATION, not the whole reconcile) — sections 1/2/2b (pure cancels) already run regardless of
+   * `running`. Defaults to false.
+   */
+  haltedProtectOnly?: boolean;
 }): Promise<ReconcileResult> {
-  const { userId, policy, accountNumber, gateway, positions, executionMode, running, orders = [], ordersListed = true, extremePriceBySymbol = {}, stopPlanBySymbol = {} } = args;
+  const { userId, policy, accountNumber, gateway, positions, executionMode, running, orders = [], ordersListed = true, extremePriceBySymbol = {}, stopPlanBySymbol = {}, haltedProtectOnly = false } = args;
   const out: ReconcileResult = { placed: 0, cancelled: 0, cancelledOrderIds: [], placedStopSymbols: [], partiallyPlacedStopSymbols: [], partiallyPlacedStopQuantities: {}, filledRecoverySymbols: [] };
+  // Symbols whose OVERSIZED existing stop was cancelled THIS tick while halted (resting shrink or
+  // pending_cancel). Section 4 places a right-sized replacement for exactly these while halted — the
+  // only placement a halt allows (a risk-reducing correction of existing protection, never new
+  // protection for an unprotected position). Codex review, PR #1738.
+  const haltedRightsizeSymbols = new Set<string>();
 
   const kind = desiredBrokerStopKind(policy, executionMode);
   const source: FillSource = executionMode === "broker/live" ? "live" : "paper";
@@ -356,6 +386,13 @@ export async function reconcileBrokerProtectiveStops(args: {
   // not apply here. If no rows exist, this is a true no-op (the common disabled/default case).
   if (kind === null) {
     for (const row of listBrokerProtectiveStops(accountNumber, userId)) {
+      // A 'pending_replace' row is a halted right-size retry MARKER (synthetic brokerOrderId), not a
+      // live order. The plan now wants NO stop, so drop the marker — there is nothing to cancel at
+      // the broker and no replacement is owed (cancelling the fake id would 404 -> stuck pending_cancel).
+      if (row.status === "pending_replace") {
+        deleteBrokerProtectiveStop(row.id, userId);
+        continue;
+      }
       try {
         await gateway.cancelEquityOrder(accountNumber, row.brokerOrderId);
         deleteBrokerProtectiveStop(row.id, userId);
@@ -489,6 +526,23 @@ export async function reconcileBrokerProtectiveStops(args: {
     return nativeTrailing ? mark >= Math.max(pos.averageCost, trackedExtreme) : stopPrice < mark;
   };
 
+  // Would section 4 actually be able to PLACE a right-sized replacement for this symbol THIS tick?
+  // Every HALTED risk-reducing cancel is conditioned on this: while halted the synthetic monitor won't
+  // register a fallback, so cancelling an oversized stop when the replacement can't be placed would
+  // leave the position with NO protection. `null` uncovered qty (order-list fetch failed) or a trailing
+  // trigger that can't arm (mark below the tracked extreme after a rally-then-pullback) both mean
+  // "can't place — keep the existing stop". `qty <= 0` means other live exit orders already cover the
+  // position, so cancelling needs no replacement (safe). Codex review, PR #1738.
+  const replacementPlaceable = (pos: EquityPosition, sym: string, forKind: "fixed" | "trailing", excludeOrderId?: string): boolean => {
+    if (!(pos.averageCost > 0)) return false;
+    const q = desiredStopQuantity(pos, sym, forKind, excludeOrderId);
+    if (q === null) return false;
+    if (q <= 0) return true;
+    if (forKind === "fixed") return true;
+    const trigger = trailingTriggerPrice(pos, sym);
+    return trigger > 0 && canArmTrailingNow(pos, sym, trigger);
+  };
+
   // Long positions only: Robinhood is long-only, and the trailing lane deliberately starts with
   // longs too — Alpaca shorts keep the synthetic monitor's trailing coverage (a short's broker-held
   // trail is a follow-up; note it in the rollout doc before extending). Computed UP FRONT
@@ -510,12 +564,80 @@ export async function reconcileBrokerProtectiveStops(args: {
   //    blocking its retry here just leaves a plan-contradicting stop resting indefinitely while live
   //    placement happens to be disabled (Codex review, PR #1371).
   for (const row of listBrokerProtectiveStops(accountNumber, userId)) {
+    if (row.status === "pending_replace") {
+      // A halted right-size cancel succeeded, but its replacement was rejected
+      // or failed. Remove the durable marker now and let section 4 retry it;
+      // while halted this is the only path allowed to place that replacement.
+      const rowSym = normalizeSymbol(row.symbol);
+      deleteBrokerProtectiveStop(row.id, userId);
+      if (haltedProtectOnly && liveLongs.has(rowSym) && kindForSymbol(rowSym) !== null) {
+        haltedRightsizeSymbols.add(rowSym);
+      }
+      continue;
+    }
     if (row.status === "pending_cancel") {
       const rowSym = normalizeSymbol(row.symbol);
-      if (liveReplaceBlocked && liveLongs.has(rowSym) && kindForSymbol(rowSym) !== null) continue;
+      // Skip the pending_cancel retry for a STILL-OPEN position that still wants a stop when a
+      // replacement can't be placed this tick — either the live-preflight escape hatch
+      // (`liveReplaceBlocked`) OR a halt (`haltedProtectOnly`). The row may track a still-live broker
+      // order (its cancel keeps failing); succeeding here would remove the position's only broker-held
+      // stop and then section 4 would refuse the replacement, stranding it — exactly what the
+      // section-3 non-shrink mismatch guard prevents. Keep it pending_cancel and retry on a later
+      // non-halted/allowed tick; the old stop keeps protecting until then. A symbol whose plan now
+      // excludes every lane (`kindForSymbol === null`) is a risk-reducing teardown and still retries.
+      //
+      // EXCEPTION while halted (not the liveReplaceBlocked escape hatch): if the pending row is
+      // OVERSIZED (its quantity exceeds the current position after an out-of-band partial exit) it
+      // would over-sell/open a short if it fires, so the risk-reducing cancel must run — and section 4
+      // right-sizes the symbol the same tick (`haltedRightsizeSymbols`), so protection is kept, not
+      // stranded. Section 3 only examines `status === "resting"` stops, so this pending_cancel path is
+      // the ONLY place that can clear such an oversized order (Codex review, PR #1738).
+      // Set true only on the halted+oversized fall-through below (after the placeability guard),
+      // so the durable right-size retry marker is authorized ONLY when a live cancel is about to run
+      // for an oversized stop while halted — never on the escape-hatch path or a non-halted cancel.
+      let markRightsizeOnCancel = false;
+      if ((liveReplaceBlocked || haltedProtectOnly) && liveLongs.has(rowSym) && kindForSymbol(rowSym) !== null) {
+        const rowPos = liveLongs.get(rowSym);
+        const rowKind = kindForSymbol(rowSym);
+        // "Oversized" is judged against the UNCOVERED remainder (`desiredStopQuantity`), NOT the whole
+        // position — another live exit order (a bracket leg, a manual sell) may already cover part of
+        // the position, so a pending stop can STACK on top of it and over-sell even when the position
+        // itself never shrank (Codex review, PR #1738). `null` uncovered (order-list fetch failed) ->
+        // not treated as oversized (can't size a replacement anyway; `replacementPlaceable` also fails),
+        // so the still-live stop is kept and the resize deferred to a coverage-known tick.
+        const uncoveredForRow = rowPos && rowKind ? desiredStopQuantity(rowPos, rowSym, rowKind, row.brokerOrderId) : null;
+        const oversized = uncoveredForRow != null && row.quantity > uncoveredForRow + 0.000001;
+        // Backfill this symbol's tracked extreme from the row's OWN recorded terms BEFORE the
+        // placeability check below — the section-3 backfill loop runs LATER, so without this
+        // `replacementPlaceable` -> `canArmTrailingNow` would see `trackedExtreme=0` and wrongly deem a
+        // native trail armable from the depressed mark (looser than the broker's ratcheted peak),
+        // cancelling the ratcheted stop into a looser replacement during a halt (Codex review, PR #1738).
+        // Idempotent (guarded per-symbol); section 3's loop then leaves it as-is.
+        if (rowKind === "trailing" && row.trailPercent && row.trailPercent > 0 && !extremePriceBySymbol[rowSym]) {
+          let e = row.stopPrice / (1 - row.trailPercent / 100);
+          const lo = orders.find((o) => o.id === row.brokerOrderId);
+          if (lo && typeof lo.stopPrice === "number" && lo.stopPrice > 0) {
+            const oe = lo.stopPrice / (1 - row.trailPercent / 100);
+            if (Number.isFinite(oe) && oe > 0) e = Math.max(e, oe);
+          }
+          if (Number.isFinite(e) && e > 0) extremePriceBySymbol[rowSym] = e;
+        }
+        // Halted + oversized: retry the cancel ONLY if a right-sized replacement can actually be placed
+        // this tick (else cancelling would strand the position — no synthetic fallback registers while
+        // halted). Not placeable (fetch failed / trailing can't arm) -> keep the still-live stop; the
+        // over-sell risk of an oversized stop is bounded, being unprotected is not. liveReplaceBlocked
+        // (escape hatch) never touches the broker regardless (Codex review, PR #1738).
+        if (liveReplaceBlocked || !oversized || !(rowPos && rowKind && replacementPlaceable(rowPos, rowSym, rowKind, row.brokerOrderId))) continue;
+        // Reached only when halted + oversized + a right-sized replacement is placeable this tick.
+        markRightsizeOnCancel = haltedProtectOnly;
+      }
       try {
         await gateway.cancelEquityOrder(accountNumber, row.brokerOrderId);
         deleteBrokerProtectiveStop(row.id, userId);
+        // Mark only after the broker confirms the live cancel. A thrown cancel
+        // or terminal no-fill recovery must not authorize new protection while
+        // halted.
+        if (markRightsizeOnCancel) haltedRightsizeSymbols.add(rowSym);
         out.cancelled++;
         out.cancelledOrderIds.push(row.brokerOrderId);
       } catch (err) {
@@ -787,7 +909,11 @@ export async function reconcileBrokerProtectiveStops(args: {
       // orders' coverage stays deferred (Codex review, PR #1331).
       if (qty === null) {
         const posQty = Math.abs(pos.quantity);
-        if (existingStop.quantity > posQty + 0.000001 && !liveReplaceBlocked) {
+        // While halted, coverage is unknown (order fetch failed) so no right-sized replacement can be
+        // computed — cancelling here would strand the position (no synthetic fallback registers while
+        // halted). Keep the oversized stop and defer the resize to a non-halted / order-list-available
+        // tick; a bounded over-sell risk beats no protection at all (Codex review, PR #1738).
+        if (existingStop.quantity > posQty + 0.000001 && !liveReplaceBlocked && !haltedProtectOnly) {
           try {
             await gateway.cancelEquityOrder(accountNumber, existingStop.brokerOrderId);
             deleteBrokerProtectiveStop(existingStop.id, userId);
@@ -838,10 +964,37 @@ export async function reconcileBrokerProtectiveStops(args: {
       // exposure), so this case bypasses the arm-gate and cancels below regardless; section 4's own
       // canArmTrailingNow gate still decides, independently, whether a resize replacement can be
       // placed this same tick (Codex review, PR #1331).
-      const isQuantityShrink = mismatchNote === "quantity drift" && qty < existingStop.quantity;
-      if (mismatchNote && symKind === "trailing" && !isQuantityShrink && !canArmTrailingNow(pos, sym, newStopPrice)) {
+      // "Oversized" is judged by the actual quantities, NOT the mismatch LABEL: when the row also needs
+      // a kind change, `mismatchNote` is "stop kind …" (set first in the chain above) even though the
+      // row is also over-sized, so keying off the label would miss it and keep an over-selling stop
+      // resting (Codex review, PR #1738). Any `qty < existingStop.quantity` is risk-reducing to cancel.
+      const isQuantityShrink = qty < existingStop.quantity;
+      // A trailing mismatch is arm-gated: don't cancel into a replacement section 4 would refuse
+      // (mark below entry/tracked extreme). A pure quantity SHRINK normally BYPASSES this gate because
+      // cancelling the oversized stop is risk-reducing and the always-on synthetic monitor covers the
+      // gap — BUT that fallback does NOT register while halted, so a halted trailing shrink must ALSO
+      // respect the arm-gate WHEN a replacement is actually needed (`qty > 0`): if it can't arm this
+      // tick, keep the oversized stop rather than strand the position. When `qty <= 0` another live exit
+      // order already covers the position, so no replacement is needed and cancelling the redundant
+      // (stacking) oversized stop is strictly safe — don't arm-gate that (Codex review, PR #1738).
+      if (mismatchNote && symKind === "trailing" && (!isQuantityShrink || (haltedProtectOnly && qty > 0)) && !canArmTrailingNow(pos, sym, newStopPrice)) {
         audit("broker_protective_stop_skipped", {
-          symbol: sym, kind: symKind, note: `mismatch (${mismatchNote}) detected but the replacement would be refused this tick — keeping the existing stop rather than cancelling into no protection`
+          symbol: sym, kind: symKind, note: `mismatch (${mismatchNote}) detected but the replacement would be refused this tick${haltedProtectOnly ? " (halted — no synthetic fallback)" : ""} — keeping the existing stop rather than cancelling into no protection`
+        }, userId, policy.connectedAccountId);
+        mismatchNote = undefined;
+      }
+
+      // While halted (protect-only), a mismatch that would cancel-THEN-replace with LOOSER/EQUAL
+      // protection must be kept — cancelling a non-shrink drift would strand the position with no
+      // stop. A pure quantity SHRINK is the exception: the row is oversized relative to the current
+      // position and could over-sell/short if it fires, so that risk-reducing cancel still runs — and
+      // the symbol is marked (`haltedRightsizeSymbols`) so section 4 places a correctly-sized
+      // replacement the SAME tick, keeping the position protected rather than relying on a synthetic
+      // row that a broker-covered position doesn't have and the monitor won't register while halted
+      // (Codex review, PR #1738 — corrects the round-2 "synthetic covers it" assumption).
+      if (mismatchNote && haltedProtectOnly && !isQuantityShrink) {
+        audit("broker_protective_stop_skipped", {
+          symbol: sym, kind: symKind, note: `mismatch (${mismatchNote}) detected but system is halted — keeping the existing stop rather than cancelling into a replacement that can't be placed while halted`
         }, userId, policy.connectedAccountId);
         mismatchNote = undefined;
       }
@@ -862,6 +1015,9 @@ export async function reconcileBrokerProtectiveStops(args: {
           deleteBrokerProtectiveStop(existingStop.id, userId);
           out.cancelled++;
           out.cancelledOrderIds.push(existingStop.brokerOrderId);
+          // Halted shrink cancel just removed the (oversized) only broker stop — let section 4 place
+          // the right-sized replacement this same tick so the position isn't left unprotected.
+          if (haltedProtectOnly && isQuantityShrink) haltedRightsizeSymbols.add(sym);
         } catch (err) {
           audit("broker_protective_stop_cancel_error", { symbol: sym, brokerOrderId: existingStop.brokerOrderId, error: errMsg(err) }, userId, policy.connectedAccountId);
           upsertBrokerProtectiveStop({ ...existingStop, status: "pending_cancel" });
@@ -869,6 +1025,14 @@ export async function reconcileBrokerProtectiveStops(args: {
       }
     }
   }
+
+  // While halted (protect-only), section 4 places ONLY for `haltedRightsizeSymbols` — positions whose
+  // OVERSIZED existing stop a risk-reducing cancel above (section-1 pending_cancel or section-3 shrink)
+  // just removed. That replacement is the smaller half of a right-size, so it keeps protection without
+  // initiating NEW protection for an unprotected position (the per-symbol gate inside the loop below
+  // enforces this). If nothing was right-sized this tick, skip the whole section. Codex review, PR
+  // #1738.
+  if (haltedProtectOnly && haltedRightsizeSymbols.size === 0) return out;
 
   // 4. Place-if-missing for each open long without a stop row. A pending_cancel row BLOCKS
   // placement for its symbol: its broker order may still be live (the cancel keeps failing), and
@@ -880,8 +1044,42 @@ export async function reconcileBrokerProtectiveStops(args: {
   const currentStops = listBrokerProtectiveStops(accountNumber, userId);
   const existing = new Set(currentStops.map((r) => normalizeSymbol(r.symbol)));
 
+  const persistHaltedRightSizeRetry = (
+    sym: string,
+    pos: EquityPosition,
+    kind: "fixed" | "trailing",
+    qty: number,
+    stopPrice: number,
+  ): void => {
+    if (!haltedProtectOnly || !haltedRightsizeSymbols.has(sym)) return;
+    upsertBrokerProtectiveStop({
+      id: `protstop-${userId}-${accountNumber}-${sym}`,
+      userId,
+      accountNumber,
+      symbol: sym,
+      brokerOrderId: `pending-replace-${Date.now()}-${sym}`,
+      quantity: qty,
+      stopPrice,
+      status: "pending_replace",
+      kind,
+      trailPercent: kind === "trailing" ? trailPct : undefined,
+    });
+    audit("broker_protective_stop_retry_queued", {
+      symbol: sym,
+      kind,
+      quantity: qty,
+      stopPrice,
+      positionQuantity: Math.abs(pos.quantity),
+      note: "halted right-size replacement will retry on the next tick",
+    }, userId, policy.connectedAccountId);
+  };
+
   for (const [sym, pos] of liveLongs) {
     if (existing.has(sym)) continue;
+    // While halted, place ONLY for a symbol whose oversized stop was just cancelled for right-sizing.
+    // Any other open long here has no stop (a pending_cancel row keeps it in `existing`, so it was
+    // already filtered out above) — placing for it would be initiating NEW protection during a halt.
+    if (haltedProtectOnly && !haltedRightsizeSymbols.has(sym)) continue;
     const symKind = kindForSymbol(sym);
     // This symbol's own stop plan excludes every lane the account currently has enabled (a "none"
     // plan, or a plan that doesn't match the account's only active lane) — never place a
@@ -956,11 +1154,13 @@ export async function reconcileBrokerProtectiveStops(args: {
         // don't advertise the symbol via placedStopSymbols (that would suppress this tick's
         // synthetic registration for protection that doesn't exist).
         audit("broker_protective_stop_error", { symbol: sym, stopPrice, orderId: exec.orderId, error: `broker declined the protective stop (state: ${exec.state})` }, userId, policy.connectedAccountId);
+        persistHaltedRightSizeRetry(sym, pos, symKind, qty, stopPrice);
         continue;
       }
       if (!exec.orderId) {
         // No broker order id means we couldn't later cancel it — don't record an untrackable stop.
         audit("broker_protective_stop_error", { symbol: sym, stopPrice, error: "broker returned no order id" }, userId, policy.connectedAccountId);
+        persistHaltedRightSizeRetry(sym, pos, symKind, qty, stopPrice);
         continue;
       }
       upsertBrokerProtectiveStop({
@@ -986,6 +1186,7 @@ export async function reconcileBrokerProtectiveStops(args: {
       audit("broker_protective_stop_placed", { symbol: sym, kind: symKind, stopPrice, trailPercent: symKind === "trailing" ? trailPct : undefined, quantity: qty, positionQuantity: Math.abs(pos.quantity), brokerOrderId: exec.orderId }, userId, policy.connectedAccountId);
     } catch (err) {
       audit("broker_protective_stop_error", { symbol: sym, stopPrice, error: errMsg(err) }, userId, policy.connectedAccountId);
+      persistHaltedRightSizeRetry(sym, pos, symKind, qty, stopPrice);
     }
   }
   return out;

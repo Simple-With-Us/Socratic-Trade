@@ -89,7 +89,10 @@ const DELETE_TABLES_BY_USER_ID = [
   "pending_bracket_teardowns",
   // Added 2026-07-16: position_stop_plan_open_brackets (src/lib/db.ts) — tracked, not-yet-torn-down
   // bracket orders are user-scoped like pending_bracket_teardowns.
-  "position_stop_plan_open_brackets"
+  "position_stop_plan_open_brackets",
+  // Added 2026-07-18: option_alert_reservations (src/lib/db.ts) — atomic option-alert dedupe claims
+  // are user-scoped (user_id column) like notification_events.
+  "option_alert_reservations"
 ] as const;
 
 type DeleteTable = (typeof DELETE_TABLES_BY_USER_ID)[number];

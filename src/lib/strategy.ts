@@ -5730,7 +5730,53 @@ export function enrichOpeningProposal(
   // branch runs; the old else-if was unreachable for whole-share Tradier market orders because
   // the preceding whole-share condition always matched first, so the proposal carried brackets
   // that Tradier's gateway then silently ignored (Codex review, PR #1705).
-  const isTradierMarket = policy.activeBroker === "tradier" && next.type === "market";
+  //
+  // BUT: the marketable-limit conversion a few lines below turns a qualifying `market` entry into a
+  // `limit` order — a type Tradier's native bracket DOES support. If that conversion will apply, this
+  // is NOT a "Tradier market entry" for bracket purposes: the legs must survive to the converted limit
+  // order, and the whole-share branch below must run to (re)compute them. Predict the conversion here
+  // and exclude that case, or the entry ends up a limit order with no native broker-held protection
+  // (PR #1701 finding 2 — the strip ran before the conversion). The predicate mirrors the conversion
+  // gate below exactly (including the whole-share qty check).
+  const willBecomeMarketableLimit =
+    policy.marketableLimitEntries === true &&
+    next.type === "market" &&
+    next.dollarAmount != null &&
+    next.dollarAmount > 0 &&
+    (policy.permittedOrderTypes?.includes("limit") ?? true) &&
+    Math.floor(next.dollarAmount / entryPrice) >= 1;
+  // The whole-share quantity and price the marketable-limit conversion below WILL use, computed up
+  // front so the bracket legs anchor to the ACTUAL entry (the converted limit) rather than the
+  // pre-conversion reference. A buy converts to ask+buffer, which can sit meaningfully ABOVE the
+  // reference on a wide/stale spread; a take-profit priced off the lower reference could then land
+  // at/below the real fill, rejecting the OTOCO or arming an instant-loss exit (Codex review, PR
+  // #1738). This is the SINGLE source of truth: the conversion block below reuses these exact values,
+  // so the anchored brackets and the applied limit can never drift apart. `marketableLimitPrice` is
+  // `undefined` when the conversion will NOT actually apply — including the pathological case where a
+  // stored buffer drives the computed limit non-positive (e.g. a legacy `marketableLimitBufferBps` of
+  // 10000 makes a short's `bid*(1-1.0)` = 0), which the policy route can persist on unrelated saves.
+  const marketableLimitQty = willBecomeMarketableLimit && next.dollarAmount != null ? Math.floor(next.dollarAmount / entryPrice) : 0;
+  const marketableLimitPrice: number | undefined = (() => {
+    if (!willBecomeMarketableLimit || marketableLimitQty < 1) return undefined;
+    const quote = marketScan.quotesBySymbol[sym];
+    const bufferBps = policy.tuning?.marketableLimitBufferBps ?? 15;
+    const buffer = bufferBps / 10_000;
+    const realAsk = !quote?.syntheticAsk && quote?.ask && quote.ask > 0 ? quote.ask : undefined;
+    const realBid = !quote?.syntheticBid && quote?.bid && quote.bid > 0 ? quote.bid : undefined;
+    const p = proposal.side === "buy"
+      ? round2((realAsk ?? refPrice) * (1 + buffer))
+      : round2((realBid ?? refPrice) * (1 - buffer));
+    return p > 0 ? p : undefined;
+  })();
+  // A Tradier `market` entry is exempt from the market-bracket strip ONLY when the marketable-limit
+  // conversion will ACTUALLY apply — i.e. `marketableLimitPrice` is defined. Gating on the predicate
+  // alone (`willBecomeMarketableLimit`) wrongly exempted the non-positive-limit case above, so the
+  // order stayed `type: "market"` (the conversion block no-ops) yet its OTOCO legs were preserved and
+  // handed to a Tradier gateway that can't carry brackets on a market entry (Codex review, PR #1738).
+  const isTradierMarket = policy.activeBroker === "tradier" && next.type === "market" && marketableLimitPrice === undefined;
+  // Anchor bracket legs to the converted limit when the conversion applies; otherwise the reference
+  // price, unchanged from before (so the non-converting path keeps identical behavior).
+  const bracketAnchorPrice = marketableLimitPrice ?? entryPrice;
   if (bracketsEnabled && isTradierMarket && (next.bracketStopLoss != null || next.bracketTakeProfit != null)) {
     next = {
       ...next,
@@ -5787,22 +5833,22 @@ export function enrichOpeningProposal(
     } else {
       const llmStop = next.bracketStopLoss;
       const llmStopValid = typeof llmStop === "number" && Number.isFinite(llmStop) && llmStop > 0 &&
-        (proposal.side === "buy" ? llmStop < entryPrice : llmStop > entryPrice);
+        (proposal.side === "buy" ? llmStop < bracketAnchorPrice : llmStop > bracketAnchorPrice);
       if (next.bracketStopLoss != null && !llmStopValid) next = { ...next, bracketStopLoss: undefined };
     }
     if (plan !== "trailing" && plan !== "none") {
       const llmTake = next.bracketTakeProfit;
       const llmTakeValid = typeof llmTake === "number" && Number.isFinite(llmTake) && llmTake > 0 &&
-        (proposal.side === "buy" ? llmTake > entryPrice : llmTake < entryPrice);
+        (proposal.side === "buy" ? llmTake > bracketAnchorPrice : llmTake < bracketAnchorPrice);
       if (next.bracketTakeProfit != null && !llmTakeValid) next = { ...next, bracketTakeProfit: undefined };
     }
     // Long: stop below / take above entry. Short: stop above / take below (price up = loss).
     if (proposal.side === "buy") {
-      if (stopPct > 0 && next.bracketStopLoss == null) next = { ...next, bracketStopLoss: round2(entryPrice * (1 - stopPct / 100)) };
-      if (plan !== "trailing" && plan !== "none" && takePct > 0 && next.bracketTakeProfit == null) next = { ...next, bracketTakeProfit: round2(entryPrice * (1 + takePct / 100)) };
+      if (stopPct > 0 && next.bracketStopLoss == null) next = { ...next, bracketStopLoss: round2(bracketAnchorPrice * (1 - stopPct / 100)) };
+      if (plan !== "trailing" && plan !== "none" && takePct > 0 && next.bracketTakeProfit == null) next = { ...next, bracketTakeProfit: round2(bracketAnchorPrice * (1 + takePct / 100)) };
     } else {
-      if (stopPct > 0 && next.bracketStopLoss == null) next = { ...next, bracketStopLoss: round2(entryPrice * (1 + stopPct / 100)) };
-      if (plan !== "trailing" && plan !== "none" && takePct > 0 && next.bracketTakeProfit == null) next = { ...next, bracketTakeProfit: round2(entryPrice * (1 - takePct / 100)) };
+      if (stopPct > 0 && next.bracketStopLoss == null) next = { ...next, bracketStopLoss: round2(bracketAnchorPrice * (1 + stopPct / 100)) };
+      if (plan !== "trailing" && plan !== "none" && takePct > 0 && next.bracketTakeProfit == null) next = { ...next, bracketTakeProfit: round2(bracketAnchorPrice * (1 - takePct / 100)) };
     }
   } else if (bracketsEnabled && brokerSupportsBrackets && !canUseWholeShareBracket) {
     next = {
@@ -5826,42 +5872,23 @@ export function enrichOpeningProposal(
     };
   }
 
-  // Marketable-limit entries: convert a deterministic OPENING market order into a limit priced
-  // through the quote, so a fast tape can't fill it arbitrarily past the quote. Requires a notional
-  // (dollar-routed) market order and a whole-share quantity ≥ 1 (sub-share notional can't be cleanly
-  // expressed as a quantity-based limit); otherwise we leave it as a market order.
-  if (
-    policy.marketableLimitEntries === true &&
-    next.type === "market" &&
-    next.dollarAmount != null &&
-    next.dollarAmount > 0 &&
-    (policy.permittedOrderTypes?.includes("limit") ?? true)
-  ) {
-    const quote = marketScan.quotesBySymbol[sym];
-    const qty = Math.floor(next.dollarAmount / entryPrice);
-    if (qty >= 1) {
-      const bufferBps = policy.tuning?.marketableLimitBufferBps ?? 15;
-      const buffer = bufferBps / 10_000;
-      // A synthesized (price-derived) Yahoo spread is not a real quote — never anchor the
-      // marketable-limit through it. Judge each side INDEPENDENTLY: a synthetic ask must not discard a
-      // real bid (or vice-versa), e.g. a quote-only ask alongside a later provider's real bid. Fall
-      // back to refPrice only for the side that is actually synthetic so the limit is honest.
-      const realAsk = !quote?.syntheticAsk && quote?.ask && quote.ask > 0 ? quote.ask : undefined;
-      const realBid = !quote?.syntheticBid && quote?.bid && quote.bid > 0 ? quote.bid : undefined;
-      const limitPrice = proposal.side === "buy"
-        ? round2((realAsk ?? refPrice) * (1 + buffer))
-        : round2((realBid ?? refPrice) * (1 - buffer));
-      if (limitPrice > 0) {
-        next = {
-          ...next,
-          type: "limit",
-          limitPrice,
-          quantity: qty,
-          dollarAmount: undefined,
-          rationale: next.rationale + `\n\n[Execution] Marketable-limit entry: ${qty} sh @ limit $${limitPrice} (${bufferBps} bps through the ${proposal.side === "buy" ? "ask" : "bid"}) instead of a raw market order, to cap fast-tape slippage.`
-        };
-      }
-    }
+  // Marketable-limit entries: apply the conversion computed up front (marketableLimitPrice/Qty) — the
+  // SAME price the bracket legs above were anchored to, so the OTOCO legs and the entry limit can
+  // never disagree (Codex review, PR #1738). Converts a deterministic OPENING market order into a
+  // limit priced through the quote so a fast tape can't fill it arbitrarily past the quote; requires a
+  // notional (dollar-routed) market order and a whole-share quantity >= 1 (sub-share notional can't be
+  // cleanly expressed as a quantity-based limit). When those don't hold, marketableLimitPrice is
+  // undefined and this no-ops, leaving the raw market order — identical to before this refactor.
+  if (marketableLimitPrice !== undefined && marketableLimitQty >= 1) {
+    const bufferBps = policy.tuning?.marketableLimitBufferBps ?? 15;
+    next = {
+      ...next,
+      type: "limit",
+      limitPrice: marketableLimitPrice,
+      quantity: marketableLimitQty,
+      dollarAmount: undefined,
+      rationale: next.rationale + `\n\n[Execution] Marketable-limit entry: ${marketableLimitQty} sh @ limit $${marketableLimitPrice} (${bufferBps} bps through the ${proposal.side === "buy" ? "ask" : "bid"}) instead of a raw market order, to cap fast-tape slippage.`
+    };
   }
   return next;
 }

@@ -7,6 +7,57 @@ OpenRouter attribution assertions with the branch's canonical bare-model telemet
 test command passed: `npm test -- test/llm-provider-cooldown.test.ts test/strategy-llm-failover.test.ts
 test/persistence-notification.test.ts test/strategy-money-path-f-g.test.ts` (34/34 pass). Rollout:
 `docs/rollouts/2026-07-18-ag-recovery-v48-verify-cleanup.md`.
+## 2026-07-18 — Money-path/reliability follow-ups from PR #1705 (CLAUDE, branch `claude/money-path-followups-1701`)
+
+Fixed 4 money-path/reliability findings that merged into `main` UNFIXED via PR #1705 (a 5th was
+already resolved by PR #1713 and is skipped). Each fix is minimal + carries a regression test
+verified to fail pre-fix.
+
+1. **Halted broker-stop placement** (`synthetic-stops.ts`): a halted+`protectWhileHalted` tick passed
+   `running=true` into `reconcileBrokerProtectiveStops`, letting a HALTED account PLACE/REPLACE new
+   broker-held protective stops. Now gated so halted protection only FIRES existing exits + runs
+   risk-reducing cancels, never places/replaces. **Codex round-2 (PR #1738): the first cut passed
+   `running=false`, which ALSO killed the section-3 oversized-stop CANCEL (an out-of-band-shrunk
+   position could keep an over-selling stop resting). Re-fixed with a `haltedProtectOnly` flag that
+   blocks only placement + non-shrink replacement; the oversized/shrink cancel still runs.**
+2. **Tradier bracket strip vs limit conversion** (`strategy.ts` `enrichOpeningProposal`): a Tradier
+   `market` entry that the marketable-limit conversion turns into a `limit` (a type Tradier's native
+   bracket supports) had its brackets stripped BEFORE the conversion → limit with no protection. The
+   strip now skips when the conversion will apply (`willBecomeMarketableLimit`). **Codex round-2 (PR
+   #1738): the surviving legs were still priced off the pre-conversion `entryPrice`; a converted buy
+   limit above the reference could carry a take-profit at/below the fill. Now the converted limit is
+   computed once up front and the legs anchor to it (`bracketAnchorPrice`), reused by the conversion
+   block (single source of truth).**
+3. **Active-protection live-exit semantics** (`strategy.ts`): ALREADY FIXED on main by PR #1713
+   (`isLiveExitOrder`/`isLiveOrderState`). Skipped.
+4. **Atomic option-alert reservation** (`notifications.ts` + `db-notifications.ts` + `db.ts`):
+   concurrent dashboard snapshots could both deliver the same option alert. Added an atomic
+   `option_alert_reservations` UNIQUE-constraint claim (new table), released on non-delivery.
+5. **Dashboard option-fetch deadline** (`dashboard.ts`): best-effort `getOptionPositions` await sat
+   outside `withDeadline`; a hung options/MCP endpoint hung the whole snapshot. Now wrapped (8s →
+   `[]`).
+
+Gates (round 2): `npx tsc --noEmit` clean; `npm run lint` 0 errors; `npx vitest run` 413 files /
+**4802 tests pass**; `npm run build` exit 0. Rollout:
+`docs/rollouts/2026-07-18-money-path-followups.md` (round-2 section appended). **PR #1738 open,
+auto-merge (squash) armed.** BLOCKED on merge ONLY by an account-level GitHub Actions
+runner-provisioning outage (every open PR's `verify` fails at job startup, `runner_id:0`, 404 logs —
+needs the owner to raise the Actions spending limit / minutes; not code).
+
+**Round 8 (2026-07-18):** codex-autofix pushed `4425b1a` implementing the round-8 findings (durable
+`pending_replace` halted right-size retry marker; mark `haltedRightsizeSymbols` only after a confirmed
+cancel; purge `option_alert_reservations` on account deletion). It did NOT compile (TS2304 `oversized`
+out of scope in the section-1 `try`) and its F1 marker was never read back
+(`listBrokerProtectiveStops` still filtered `resting`/`pending_cancel` only → section 1 never re-queued
+→ section 4 never retried → position could stay unprotected until unhalted). Repaired: (a) hoisted the
+mark-intent into a `markRightsizeOnCancel` flag (fixes tsc; preserves "mark only after a live cancel");
+(b) added `pending_replace` to the `listBrokerProtectiveStops` status filter; (c) guarded the two
+consumer loops that run BEFORE section 1's marker cleanup (`cancelBrokerProtectiveStop` + the
+`kind===null` teardown) to DROP a `pending_replace` marker rather than cancel its synthetic
+`pending-replace-*` id (which would 404 → stuck `pending_cancel`). Added F1 regression
+`SYN-HALT-F1RETRY`. Gates: tsc clean, lint 0 errors, synthetic-stops 65 pass + account-delete +
+option-alert-dedupe pass; `npm run build` exit 0. Rollout note round-8 section
+appended.
 
 ## 2026-07-18 — Editable account name + legacy-app retirement (MONET, branch `monet/vigilant-fermi-220244`)
 

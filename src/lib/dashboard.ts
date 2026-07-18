@@ -418,10 +418,20 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
         handlePortfolioReadFailure(messageFromUnknownError(error));
       }
       // Option positions are best-effort: a transient failure (notably an MCP
-      // tool error) must not crash the whole dashboard bundle.
+      // tool error) must not crash the whole dashboard bundle. Wrap the fetch in
+      // the same withDeadline guard the portfolio/positions/orders legs use — the
+      // try/catch only handles a REJECTION, so a HUNG options/MCP endpoint would
+      // otherwise hang the whole snapshot forever (the catch never runs and the
+      // dashboard never renders). Time out to an empty list like the other legs.
       if (gateway.getOptionPositions) {
         try {
-          options = await gateway.getOptionPositions(accountNumber);
+          options = await withDeadline<OptionPosition[]>(
+            gateway.getOptionPositions(accountNumber),
+            8000,
+            () => [],
+            "gateway.getOptionPositions",
+            timedOutSections
+          );
         } catch (err) {
           console.warn("[Dashboard] options positions unavailable (non-fatal):", err);
         }
