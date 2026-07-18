@@ -88,6 +88,16 @@ function matchedDecision(snapshot: DashboardSnapshot | null, pending: PendingPro
   return snapshot?.socratic?.decisions?.find((decision) => decision.proposalId === pending.id);
 }
 
+export function normalizeModelId(model: string | null | undefined): string {
+  if (!model) return "";
+  let cleaned = model.trim().toLowerCase().replace(/^openrouter\//i, "");
+  const slashIdx = cleaned.indexOf("/");
+  if (slashIdx !== -1) {
+    cleaned = cleaned.slice(slashIdx + 1);
+  }
+  return cleaned;
+}
+
 function modelProvenance(p: TradeProposal, policy: TradingPolicy | undefined): string {
   const configured = policy?.llmModel?.trim();
   const served = p.proposedByModel?.trim();
@@ -95,7 +105,9 @@ function modelProvenance(p: TradeProposal, policy: TradingPolicy | undefined): s
   // leaking the raw "__rotate__" sentinel and framing the rotation pick as an anomaly.
   const rotating = isModelRotationSentinel(configured);
   if (served && rotating) return `configured to rotate; served ${served} (this run's rotation pick)`;
-  if (served && configured && served !== configured) return `served ${served}; configured primary was ${configured}`;
+  const normConfigured = normalizeModelId(configured);
+  const normServed = normalizeModelId(served);
+  if (served && configured && normServed !== normConfigured) return `served ${served}; configured primary was ${configured}`;
   if (served) return `served ${served}`;
   if (rotating) return "policy rotates models each run; the concrete pick was not persisted on this legacy proposal";
   if (configured) return `configured primary ${configured}; served model not persisted on this legacy proposal`;
@@ -104,11 +116,14 @@ function modelProvenance(p: TradeProposal, policy: TradingPolicy | undefined): s
 
 function fallbackProvenance(p: TradeProposal, policy: TradingPolicy | undefined): string {
   const fallbackModels = policy?.llmFallbackModels?.filter(Boolean) ?? [];
-  if (p.proposedByModel && fallbackModels.includes(p.proposedByModel)) return `served by configured fallback ${p.proposedByModel}`;
+  const normServed = normalizeModelId(p.proposedByModel);
+  const normFallbackModels = fallbackModels.map(normalizeModelId);
+  if (p.proposedByModel && normFallbackModels.includes(normServed)) return `served by configured fallback ${p.proposedByModel}`;
   if (p.proposedByModel && isModelRotationSentinel(policy?.llmModel)) {
     return "policy rotates models — the served model is this run's rotation pick, not a failover";
   }
-  if (p.proposedByModel && policy?.llmModel && p.proposedByModel !== policy.llmModel) return "served model differs from configured primary";
+  const normConfigured = normalizeModelId(policy?.llmModel);
+  if (p.proposedByModel && policy?.llmModel && normServed !== normConfigured) return "served model differs from configured primary";
   if (fallbackModels.length > 0) return `fallback chain configured (${fallbackModels.length}); no per-hop history on this card`;
   return "no fallback chain configured";
 }

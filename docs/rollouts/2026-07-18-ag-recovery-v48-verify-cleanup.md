@@ -97,7 +97,14 @@ the two focused verification commands used a temporary local-only 90-second time
 committed tests retain their normal 30-second limits. Both regression paths passed: OpenRouter
 fallback identity and OpenRouter primary identity respectively.
 
-### Follow-up
+The approval card also canonicalizes both sides of its primary/fallback comparisons so legacy
+proposals that already stored a bare telemetry identity render correctly. Regression coverage in
+`test/approvals-triage-model.test.ts` exercises qualified and bare IDs.
 
-This work is intentionally committed locally only. Do not push, reply to, or resolve the PR thread
-without owner direction.
+Additional verification:
+
+```bash
+npx vitest run test/approvals-triage-model.test.ts
+```
+
+Result: all 4 tests passed, including qualified-model normalization coverage.
