@@ -1,5 +1,11 @@
 # Active Implementation Plan
 
+> **2026-07-18 - PR #1735 proposed-model attribution P2 (CODEX, local-only branch `codex/pr1735-proposal-attribution`).**
+> Preserve the exact policy/OpenRouter identifier for `TradeProposal.proposedByModel`, separately
+> from canonicalized usage telemetry, so approval-card primary and fallback provenance remains
+> truthful. Focused primary/fallback strategy regressions, TypeScript, and scoped lint pass; keep
+> the resulting commit local and unpushed pending owner direction.
+
 > **2026-07-18 - PR #1735 review cleanup round 2 (CODEX on `agent/ag-recovery-v48-migration`).**
 > Address the fresh Codex comments by preserving company-name display casing in securities imports
 > and restoring the missing lockfile peer dependency entries. Focused import tests and clean-install

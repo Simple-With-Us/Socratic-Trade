@@ -1,5 +1,16 @@
 # Current Status
 
+## 2026-07-18 — PR #1735 proposed-model attribution P2 (CODEX, local-only branch `codex/pr1735-proposal-attribution`)
+
+Resolved the remaining P2 without changing telemetry semantics: proposal persistence now retains the
+exact primary/fallback policy identifier (including `openrouter/`), while usage telemetry still
+canonicalizes provider/model identity for merged statistics. This restores the approval card's direct
+primary/fallback comparisons. Targeted primary and fallback strategy regressions pass with normal
+test code (the local machine required a one-off extended timeout while each isolated test database
+replayed migrations 2–52); TypeScript and scoped lint pass. The commit is intentionally local-only
+and has not been pushed or applied to PR #1735. Rollout:
+`docs/rollouts/2026-07-18-ag-recovery-v48-verify-cleanup.md`.
+
 ## 2026-07-18 — PR #1735 review cleanup round 2 (CODEX, branch `agent/ag-recovery-v48-migration`)
 
 Resolved two fresh Codex review findings on PR #1735: preserved imported company-name display casing

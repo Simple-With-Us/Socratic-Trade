@@ -55,3 +55,49 @@ npm test -- test/securities-import.test.ts
 ```
 
 Result: clean-install dry-run passed; focused securities import suite passed, 17/17 tests.
+
+## Round 3 — proposed-model attribution P2
+
+### Summary
+
+Separated proposal-attribution identity from telemetry canonicalization. `TradeProposal.proposedByModel`
+now retains the exact configured primary/fallback identifier, including the `openrouter/` namespace.
+
+### Why
+
+Usage/benchmark aggregation correctly canonicalizes an OpenRouter route such as
+`openrouter/google/gemini-2.5-flash` to a bare model identity. The proposal writer had reused that
+telemetry value, but approval-card provenance compares persisted proposal identity directly to
+`policy.llmModel` and `policy.llmFallbackModels`. The mismatch falsely labelled a configured primary
+as different and concealed a configured fallback.
+
+### Files
+
+- `src/lib/strategy.ts`
+- `test/strategy-llm-failover.test.ts`
+- `test/strategy-money-path-f-g.test.ts`
+- `STATUS.md`
+- `PLAN.md`
+- `docs/EFFORT-LOG.md`
+
+### Verification
+
+Passed:
+
+```bash
+npx tsc --noEmit
+npx eslint src/lib/strategy.ts test/strategy-llm-failover.test.ts test/strategy-money-path-f-g.test.ts
+npx vitest run test/strategy-llm-failover.test.ts --reporter=dot
+npx vitest run test/strategy-money-path-f-g.test.ts -t 'books a broker-paper fill' --reporter=dot
+```
+
+The strategy fixture creates a fresh SQLite database and replays migrations 2–52 per test. Under
+shared-machine load, its normal explicit 30-second test limits expired during migration setup, so
+the two focused verification commands used a temporary local-only 90-second timeout patch; the
+committed tests retain their normal 30-second limits. Both regression paths passed: OpenRouter
+fallback identity and OpenRouter primary identity respectively.
+
+### Follow-up
+
+This work is intentionally committed locally only. Do not push, reply to, or resolve the PR thread
+without owner direction.

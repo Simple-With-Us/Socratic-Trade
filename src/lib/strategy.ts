@@ -4747,7 +4747,20 @@ async function proposeTrades(input: {
   // entry that has a credential. Empty list => primary only (default; byte-identical behavior). On a
   // TRANSIENT failure (HTTP 429/5xx or timeout) the SAME request is re-issued against the next model.
   const bullAttempts = [
-    { url, provider, model, transport, key: openaiKey, keySource: llmKeySource, keyRef: llmKeyRef, body }
+    {
+      url,
+      provider,
+      model,
+      transport,
+      key: openaiKey,
+      keySource: llmKeySource,
+      keyRef: llmKeyRef,
+      body,
+      // Proposal attribution is a policy/display contract: retain the exact configured
+      // identifier (including an `openrouter/` namespace) so approval readers can compare
+      // it directly to the primary and fallback chain. `model` stays API-normalized.
+      proposalModel: input.policy.llmModel?.trim() || model
+    }
   ];
   const fallbackModelList = Array.isArray(input.policy.llmFallbackModels) ? input.policy.llmFallbackModels : [];
   for (const fallbackModel of fallbackModelList.filter((m): m is string => typeof m === "string").map((m) => m.trim()).filter(Boolean)) {
@@ -4761,6 +4774,7 @@ async function proposeTrades(input: {
       key: ep.key,
       keySource: ep.keySource,
       keyRef: ep.keyRef,
+      proposalModel: fallbackModel,
       body: buildLlmRequestBody(
         { provider: ep.provider, transport: ep.transport },
         {
@@ -4788,6 +4802,9 @@ async function proposeTrades(input: {
   // and keySource are tracked too so the served step/audit trail reports the FALLBACK's transport
   // (e.g. anthropic-messages vs the primary's responses), not the primary's — accurate money-path tracing.
   let { provider: bullServedProvider, model: bullServedModel } = remapOpenRouterTelemetry(provider, model);
+  // Keep proposal attribution in policy namespace; telemetry below intentionally uses its
+  // canonical provider/model pair so usage and benchmark history remain mergeable.
+  let bullServedProposalModel = bullAttempts[0].proposalModel;
   let bullServedTransport = transport;
   let bullServedKeySource = llmKeySource;
   let bullFailoverNote: string | undefined;
@@ -4895,6 +4912,7 @@ async function proposeTrades(input: {
             }
             const payload = await response.json();
             recordLlmUsage({ userId: input.userId, provider: attempt.provider, model: attempt.model, context: "strategy", keySource: attempt.keySource, keyRef: attempt.keyRef, connectedAccountId: input.policy.connectedAccountId, ...extractLlmUsage(payload) });
+            bullServedProposalModel = attempt.proposalModel;
             // Served-by-fallback detection compares the ATTEMPT to the configured primary (not
             // `i > 0`): cooldown planning can drop the primary from the chain entirely, making a
             // fallback the first attempt.
@@ -5023,9 +5041,10 @@ async function proposeTrades(input: {
     greenTeamRationale: p.rationale,
     entryMarketRegime: currentMarketRegime,
     ...(regimeSeverity ? { entryRegimeSeverity: Number(regimeSeverity.severity.toFixed(2)) } : {}),
-    // FAILOVER-AWARE attribution: the model that actually served this run (not necessarily
-    // policy.llmModel). Persisted with the proposal so approval-time attribution stays accurate.
-    proposedByModel: bullServedModel
+    // FAILOVER-AWARE attribution: the policy-namespaced model that actually served this run
+    // (not necessarily policy.llmModel). Preserve that namespace so approval-time primary and
+    // fallback comparisons remain exact; telemetry above is canonicalized independently.
+    proposedByModel: bullServedProposalModel
   }));
   // TRUNCATION-AWARE: if the Bull answer hit the output-token cap, a zero/partial parse is NOT a
   // genuine "do nothing" — record a DISTINCT reason + audit so it's diagnosable and never a silent

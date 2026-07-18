@@ -63,13 +63,18 @@ async function setup(withFallback: boolean): Promise<void> {
   setPolicy({
     ...DEFAULT_POLICY,
     systemState: "active",
-    llmModel: "openai/gpt-4.1-mini",
+    llmModel: "openrouter/openai/gpt-4.1-mini",
     includedIndices: [],
     additionalSymbols: ["AAPL"],
     strategyAuthority: "decide",
     // With fallback: the Bull fails over to gemini, and the Bear also uses gemini so it isn't hit by
     // the primary's 429. Without fallback: single primary endpoint (default behavior).
-    ...(withFallback ? { llmFallbackModels: ["gemini-2.5-flash"], redTeamLlmModel: "gemini-2.5-flash" } : {})
+    ...(withFallback
+      ? {
+          llmFallbackModels: ["openrouter/google/gemini-2.5-flash"],
+          redTeamLlmModel: "openrouter/google/gemini-2.5-flash"
+        }
+      : {})
   });
 }
 
@@ -103,11 +108,12 @@ describe("cross-provider Bull failover (Chat A item 4)", () => {
     const bullStep = result.llmSteps?.find((s) => s.step === "bull");
     expect(bullStep?.provider).toBe("gemini");
     expect(bullStep?.reason ?? "").toMatch(/fallback|served|failed/i);
-    // t3: each proposal is stamped with the FAILOVER-AWARE served model — the fallback that
-    // actually generated it, not the configured primary (gpt-4.1-mini).
+    // t3: each proposal is stamped with the FAILOVER-AWARE policy model — the fallback that
+    // actually generated it, in the exact OpenRouter namespace the approval card compares
+    // against `llmFallbackModels`.
     expect(result.proposals.length).toBeGreaterThan(0);
     for (const p of result.proposals) {
-      expect(p.proposal.proposedByModel).toBe("gemini-2.5-flash");
+      expect(p.proposal.proposedByModel).toBe("openrouter/google/gemini-2.5-flash");
     }
   }, 30_000);
 

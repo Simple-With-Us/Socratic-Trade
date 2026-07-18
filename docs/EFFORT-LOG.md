@@ -42,6 +42,12 @@ As of 2026-07-08 (assignment-rule update).
 
 ---
 
+## In Progress
+
+- **[Socratic.Trade][CODEX] PR #1735 proposed-model attribution display contract (branch `codex/pr1735-proposal-attribution`, worktree `/Users/jay/.codex/worktrees/socratic-pr1735-proposal-attribution`, 2026-07-18) — LOCAL VERIFIED / UNPUSHED.** `TradeProposal.proposedByModel` now preserves the exact configured primary/fallback identifier while telemetry remains canonical for usage statistics. Regression coverage passes for `openrouter/openai/...` primary and `openrouter/google/...` fallback identity; TypeScript and scoped lint pass. Commit is intentionally local-only pending owner direction.
+
+---
+
 ## Deployed
 - **SEC/RAG Advanced RAG Backfill Improvements (RAG-B08, RAG-B09, RAG-B10, RAG-B13, RAG-B14) (Antigravity/AG, branch `agent/ag-rag-backfill-p3`) — COMPLETED 2026-07-17.** Optimized the SEC filings discovery pipeline to check stashed SQLite filings first, dynamically skip online discovery if enough stashed filings satisfy the run's cap, and globally sort the queue breadth-first (Grouped by ticker: newest 10-K, then newest 10-Q). Implemented dynamic raw-artifact local caching in the queue worker to bypass duplicate network fetches. Added a two-stage RAG query (scouting all candidates with `limit = 1` and deep-scanning finalists + holdings with `limit = 8`), grouping narrative chunks and structured facts/Form-4 transactions cards into prompt-injected symbol dossiers. Expanded the admin coverage dashboard at `/api/admin/rag-coverage` to query the entire database directly and report model, parser, and date ranges. Fully verified with typechecks, 100% green tests (51/51), and successful Next.js production build.
 - **SEC/RAG P0 historical discovery + raw archive + aggregate SEC limiter / Phase 2 (Antigravity/AG) — COMPLETED 2026-07-16.** Implemented dynamic token-bucket rate limiter for `.sec.gov` requests (4 req/sec default with dynamic 429 Retry-After backoff), raw-artifact HTML/JSON caching layer, and historical submissions JSON shard discovery in `sec-filings.ts`. Merged as PR #1665. Rollout note: `docs/rollouts/2026-07-15-rag-backfill-p2.md`.
