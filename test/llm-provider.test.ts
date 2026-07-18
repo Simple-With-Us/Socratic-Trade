@@ -3,7 +3,7 @@
  * All tests run entirely offline (no real API key or network call required).
  */
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import os from "os";
 import path from "path";
 
@@ -154,5 +154,22 @@ describe("resolveLlmEndpoint", () => {
     const green = resolveLlmEndpoint({ llmModel: "gpt-5.4-mini", redTeamLlmModel: "anthropic/claude-opus-4-8" }, "local");
     expect(green.provider).toBe("openrouter");
     expect(green.model).toBe("openai/gpt-5.4-mini");
+  });
+});
+
+describe("modelCredentialService (universal-OpenRouter eligibility/save-gate)", () => {
+  it("keys on the OpenRouter credential in production, the native family under test", async () => {
+    const { modelCredentialService } = await import("../src/lib/llm-provider");
+    // Production: EVERY model is served through the OpenRouter credential, so eligibility and the
+    // policy save-gate must require the OpenRouter key — not an unused native key (Codex #1703).
+    vi.stubEnv("NODE_ENV", "production");
+    expect(modelCredentialService("gpt-5.4-mini")).toBe("openrouter");
+    expect(modelCredentialService("claude-opus-4-8")).toBe("openrouter");
+    expect(modelCredentialService("x-ai/grok-4.3")).toBe("openrouter");
+    vi.unstubAllEnvs();
+    // Test mode mirrors resolveLlmEndpoint's shim so native-key fixtures keep resolving.
+    expect(modelCredentialService("gpt-5.4-mini")).toBe("openai");
+    expect(modelCredentialService("claude-opus-4-8")).toBe("anthropic");
+    expect(modelCredentialService("grok-4.3")).toBe("xai");
   });
 });

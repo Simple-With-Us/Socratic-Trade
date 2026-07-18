@@ -35,7 +35,7 @@
 // generated no proposal (no `proposedByModel` to match). Per-account run locks serialize same-account
 // runs, so the read-early / commit-late window has no TOCTOU.
 import { audit, getInternalSetting, resolveLlmCredential, setInternalSetting } from "./db";
-import { llmModelFamily } from "./llm-provider";
+import { modelCredentialService } from "./llm-provider";
 import { isModelRotationSentinel, LLM_MODEL_ROTATION_SENTINEL } from "./llm-request";
 import { recommendedReasoningEffortForModel } from "./model-reasoning-recommendations";
 import type { LlmReasoningEffort } from "./types";
@@ -162,7 +162,10 @@ export function eligibleRotationPool(userId: string): { pool: string[]; skipped:
   const pool: string[] = [];
   const skipped: string[] = [];
   for (const model of MODEL_ROTATION_POOL) {
-    if (resolveLlmCredential(llmModelFamily(model), userId).key) pool.push(model);
+    // Gate on the SAME credential resolveLlmEndpoint uses to serve each model — the OpenRouter key
+    // in production (an OpenRouter-only account must get the full curated pool, not an empty one),
+    // the native family under NODE_ENV=test (keeps native-key fixtures working). #1703 follow-up.
+    if (resolveLlmCredential(modelCredentialService(model), userId).key) pool.push(model);
     else skipped.push(model);
   }
   return { pool, skipped };

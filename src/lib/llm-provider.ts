@@ -30,6 +30,18 @@ export function llmModelFamily(model: string | undefined): LlmModelFamily {
   return "openai";
 }
 
+/**
+ * The credential SERVICE whose key must resolve for a model under universal OpenRouter routing.
+ * Production serves EVERY model through the OpenRouter credential (see `resolveLlmEndpoint`), so
+ * that's what eligibility/save-gate checks must key on — an OpenRouter-only account must not be
+ * rejected for lacking an (unused) native key. Under NODE_ENV=test we key the native family so the
+ * existing native-key test fixtures keep resolving. Single source of truth so `resolveLlmEndpoint`,
+ * rotation eligibility, and the policy save-gate never drift.
+ */
+export function modelCredentialService(model: string | undefined): LlmModelFamily {
+  return process.env.NODE_ENV === "test" ? llmModelFamily(model) : "openrouter";
+}
+
 // Cross-family Red Team DEFAULT removed 2026-07-07 (owner directive: no model is a default for
 // anything, ever). The Red Team model is the user's explicit `redTeamLlmModel` or nothing;
 // resolveRoleModel returns "" when unset and the caller fails closed. Independence (a different
@@ -93,8 +105,7 @@ export function resolveLlmEndpoint(
   model = model.replace(/^openrouter\//i, "");
 
   const url = process.env.OPENROUTER_API_URL?.trim() || "https://openrouter.ai/api/v1/chat/completions";
-  const nativeProvider = llmModelFamily(rawModel);
-  const cred = resolveLlmCredential(process.env.NODE_ENV === "test" ? nativeProvider : "openrouter", userId);
+  const cred = resolveLlmCredential(modelCredentialService(rawModel), userId);
 
   return {
     provider: "openrouter",
