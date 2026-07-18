@@ -89,8 +89,8 @@ export function getDb(): Database.Database {
   db.function("account_setting_matches_subject", { deterministic: true }, accountSettingMatchesSubject);
   db.pragma("journal_mode = WAL");
   // With WAL, a concurrent writer otherwise throws SQLITE_BUSY immediately; wait
-  // up to 5s for the lock instead. NORMAL durability is the WAL-recommended pairing.
-  db.pragma("busy_timeout = 5000");
+  // up to 30s for the lock instead. NORMAL durability is the WAL-recommended pairing.
+  db.pragma("busy_timeout = 30000");
   db.pragma("synchronous = NORMAL");
   // Larger page cache + memory-mapped I/O: the dashboard replays fill/proposal history on every
   // request, so a ~20MB page cache (negative = KB) and 256MB mmap keep those hot reads off the
@@ -105,6 +105,15 @@ export function getDb(): Database.Database {
   installAccountWriteFenceTriggers(db);
   assertEncryptionKeyAvailable(db);
   return db;
+}
+
+export function resetDbForTesting(): void {
+  if (db) {
+    try {
+      db.close();
+    } catch {}
+    db = undefined;
+  }
 }
 
 // ── Versioned migrations ─────────────────────────────────────────────────────

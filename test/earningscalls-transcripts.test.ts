@@ -261,6 +261,21 @@ describe("dormancy", () => {
     process.env.EARNINGSCALLS_API_KEY = "direct-test-key";
     expect(earningsCallsCredential()).toEqual({ channel: "direct", key: "direct-test-key" });
 
+    // Test dummy/placeholder keys
+    process.env.EARNINGSCALLS_API_KEY = "placeholder";
+    expect(earningsCallsCredential()).toEqual({ channel: "rapidapi", key: "rapid-test-key" });
+
+    process.env.EARNINGSCALLS_API_KEY = "DUMMY  ";
+    expect(earningsCallsCredential()).toEqual({ channel: "rapidapi", key: "rapid-test-key" });
+
+    process.env.EARNINGSCALLS_API_KEY = "direct-test-key";
+    process.env.EARNINGSCALLS_RAPIDAPI_KEY = "none";
+    expect(earningsCallsCredential()).toEqual({ channel: "direct", key: "direct-test-key" });
+
+    process.env.EARNINGSCALLS_API_KEY = "false";
+    expect(earningsCallsCredential()).toBeNull();
+    expect(earningsCallsTranscriptsEnabled()).toBe(false);
+
     delete process.env.EARNINGSCALLS_RAPIDAPI_KEY;
     delete process.env.EARNINGSCALLS_API_KEY;
     expect(earningsCallsTranscriptsEnabled()).toBe(false);

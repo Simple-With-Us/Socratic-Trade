@@ -42,10 +42,15 @@ export function earningsCallsKillSwitchOn(): boolean {
 /** The active credential (direct first-party preferred over RapidAPI), or null when neither
  *  env is set. Kill-switch is NOT consulted here — enablement composes it below. */
 export function earningsCallsCredential(): { channel: "direct" | "rapidapi"; key: string } | null {
+  const isDummy = (k: string) => {
+    const normalized = k.toLowerCase().trim();
+    return normalized === "" || normalized === "dummy" || normalized === "placeholder" || normalized === "false" || normalized === "none";
+  };
+
   const direct = process.env.EARNINGSCALLS_API_KEY?.trim();
-  if (direct) return { channel: "direct", key: direct };
+  if (direct && !isDummy(direct)) return { channel: "direct", key: direct };
   const rapid = process.env.EARNINGSCALLS_RAPIDAPI_KEY?.trim();
-  if (rapid) return { channel: "rapidapi", key: rapid };
+  if (rapid && !isDummy(rapid)) return { channel: "rapidapi", key: rapid };
   return null;
 }
 

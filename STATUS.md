@@ -118,6 +118,21 @@ The sole remaining unresolved thread:
 - **P2 — Wire FMP toggles into provider execution (QUESTION ASKED):** The four FMP toggle flags (`fmpRealTimeDataEnabled`, `fmpMacroDataEnabled`, `fmpEventsDataEnabled`, `fmpFundamentalsDataEnabled`) are persisted in settings and defaults but not yet consumed by the FMP provider runtime code. Asked maintainer whether to wire them in this PR or leave as settings-first follow-up, and what behavior is expected when a toggle is off. Thread stays open pending answer.
 
 Auto-merge already enabled. No code changes this round.
+## 2026-07-18 — earningscalls Sentry alert suppression, SQLite busy_timeout, + priceForModel OpenRouter prefix fix (Antigravity/AG, PR #1728)
+
+Resolved Sentry connection-failed alerts from the dormant `earningscalls` integration (RapidAPI subscription inactive in prod) and made database writes resilient to transient disk-load thrashing. Also fixed a silent cost-accounting bug where 3-part OpenRouter model IDs were priced at the fallback default instead of their actual rates.
+
+Changes included in PR #1728:
+- `src/lib/earningscalls-transcripts.ts`: `keySource: "env"` + add 401/403 to `suppressHealthStatuses`.
+- `src/lib/db.ts`: SQLite `busy_timeout` 5s → 30s.
+- `src/lib/llm-provider.ts` + `test/model-rotation.test.ts`: `llmModelFamily` strips `openrouter/` prefix; tests use explicit model assertions instead of brittle regex loops.
+- `test/market-custom-symbol.test.ts`: database isolation fix.
+- `src/lib/llm-usage.ts` `priceForModel()`: fixed single-slash strip that failed for `openrouter/vendor/model` 3-part IDs — was producing `vendor/model` (no price-table hit, $15/M fallback); now mirrors `stripRoutingPrefix()` in `model-merge.ts`.
+- `test/llm-cache-usage.test.ts`: new regression test proving all three model name forms price identically.
+
+Full land.sh gate: tsc clean, lint clean, 4,794/4,794 tests green (412 files), build clean. PR #1728 pushed and ready to merge.
+Rollout: `docs/rollouts/2026-07-18-earningscalls-sentry-and-sqlite-fixes.md`.
+
 ## 2026-07-17 — PR #1669 Merged & Deployed: SEC/RAG Advanced RAG Backfill & SiliconFlow Integration (Antigravity/AG)
 
 Successfully resolved all 11 remaining Codex review thread issues on PR #1669, including:

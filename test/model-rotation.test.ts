@@ -13,12 +13,18 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { resetDbForTesting } from "../src/lib/db";
 
 beforeAll(() => {
+  resetDbForTesting();
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-model-rotation-${randomUUID()}.db`)}`;
 });
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  resetDbForTesting();
+  vi.resetModules();
+  vi.unstubAllEnvs();
+});
 
 const LLM_ENV = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY", "GEMINI_API_KEY", "MISTRAL_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"];
 
@@ -142,10 +148,18 @@ describe("eligibleRotationPool (credential-missing skip)", () => {
     upsertUserApiKey(userId, "anthropic", "sk-test-anthropic", "test");
     const { pool, skipped } = eligibleRotationPool(userId);
     expect(pool.length).toBeGreaterThan(0);
-    for (const model of pool) expect(model).toMatch(/^((gpt-|claude-)|openrouter\/)/);
-    for (const model of skipped) expect(model).not.toMatch(/^((gpt-|claude-)|openrouter\/)/);
+    
+    // GPT and Claude models should be kept (in pool) since openai/anthropic keys are active
+    expect(pool).toContain("gpt-5.4-mini");
+    expect(pool).toContain("claude-opus-4-8");
+    expect(pool).toContain("openrouter/openai/gpt-4o");
+    expect(pool).toContain("openrouter/anthropic/claude-3.5-sonnet");
+    
+    // Gemini and DeepSeek models should be skipped since gemini/deepseek keys are missing
     expect(skipped).toContain("gemini-3.5-flash");
     expect(skipped).toContain("deepseek-v4-pro");
+    expect(skipped).toContain("openrouter/google/gemini-2.5-pro");
+    expect(skipped).toContain("openrouter/deepseek/deepseek-r1");
   });
 });
 

@@ -101,4 +101,16 @@ describe("estimateLlmCostUsd — cache-aware pricing", () => {
   it("back-compat: two-arg call unchanged", () => {
     expect(estimateLlmCostUsd("openai/gpt-5.5", 1000, 100)).toBeCloseTo((1000 * 5 + 100 * 30) / 1_000_000, 10);
   });
+
+  it("openrouter/vendor/model 3-part form prices identically to bare model name", () => {
+    // Before the fix, priceForModel stripped only ONE slash:
+    //   "openrouter/openai/gpt-5.5" → "openai/gpt-5.5" (no price-table hit → fallback rate).
+    // After the fix it strips "openrouter/" first, then "openai/" → "gpt-5.5" (correct rate).
+    const bare = estimateLlmCostUsd("gpt-5.5", 1000, 100);
+    const twopart = estimateLlmCostUsd("openai/gpt-5.5", 1000, 100);
+    const threepart = estimateLlmCostUsd("openrouter/openai/gpt-5.5", 1000, 100);
+    expect(bare).toBeCloseTo((1000 * 5 + 100 * 30) / 1_000_000, 10);
+    expect(twopart).toBe(bare);
+    expect(threepart).toBe(bare);
+  });
 });

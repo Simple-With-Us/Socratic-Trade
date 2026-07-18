@@ -20,13 +20,14 @@ export interface LlmEndpoint {
  * default below) can compare families without duplicating the regexes.
  */
 export function llmModelFamily(model: string | undefined): LlmModelFamily {
-  const normalized = (model ?? "").trim();
-  if (/^claude/i.test(normalized)) return "anthropic";
-  if (/^grok/i.test(normalized)) return "xai";
-  if (/^gemini/i.test(normalized)) return "gemini";
-  if (/^(mistral|ministral|magistral|codestral|devstral|pixtral|open-mistral|open-mixtral)/i.test(normalized)) return "mistral";
-  if (/^openrouter\//i.test(normalized)) return "openrouter";
-  if (/^deepseek/i.test(normalized)) return "deepseek";
+  let normalized = (model ?? "").trim().toLowerCase();
+  normalized = normalized.replace(/^openrouter\//i, "");
+
+  if (/claude/i.test(normalized)) return "anthropic";
+  if (/grok/i.test(normalized)) return "xai";
+  if (/gemini/i.test(normalized)) return "gemini";
+  if (/(mistral|ministral|magistral|codestral|devstral|pixtral|open-mistral|open-mixtral)/i.test(normalized)) return "mistral";
+  if (/deepseek/i.test(normalized)) return "deepseek";
   return "openai";
 }
 

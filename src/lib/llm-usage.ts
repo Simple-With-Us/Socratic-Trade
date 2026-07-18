@@ -105,11 +105,16 @@ function defaultModelPricePerM(): [number, number] {
 
 function priceForModel(model: string | undefined): [number, number] {
   if (!model) return defaultModelPricePerM();
-  // Strip OpenRouter routing prefix (e.g. "openai/gpt-5.4-mini" → "gpt-5.4-mini")
-  // so the price table's bare model IDs can match the outbound model.
+  // Strip the full OpenRouter routing prefix so price-table bare IDs match outbound model names.
+  // Handles three forms:
+  //   "gpt-5.4-mini"                → unchanged
+  //   "openai/gpt-5.4-mini"         → "gpt-5.4-mini"  (vendor/model)
+  //   "openrouter/openai/gpt-5.4-mini" → "gpt-5.4-mini"  (full 3-part OR prefix)
+  // Mirrors stripRoutingPrefix() in app/admin/llm-usage/model-merge.ts.
   let m = model.toLowerCase();
+  m = m.replace(/^openrouter\//, ""); // strip leading "openrouter/" if present
   const slashIdx = m.indexOf("/");
-  if (slashIdx !== -1) m = m.slice(slashIdx + 1);
+  if (slashIdx !== -1) m = m.slice(slashIdx + 1); // strip one vendor segment (e.g. "openai/")
   if (MODEL_PRICE_PER_M[m]) return MODEL_PRICE_PER_M[m];
   // Prefix match (e.g. dated suffixes like claude-haiku-4-5-20251001).
   // Longest-prefix wins so family aliases cannot shadow a more specific tier snapshot

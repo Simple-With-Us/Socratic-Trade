@@ -1,6 +1,16 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { resetDbForTesting } from "../src/lib/db";
+
+beforeAll(() => {
+  resetDbForTesting();
+  process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-market-custom-symbol-${randomUUID()}.db`)}`;
+});
 
 afterEach(() => {
+  resetDbForTesting();
   vi.unstubAllGlobals();
   vi.resetModules();
   delete process.env.FINNHUB_API_KEY;

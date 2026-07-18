@@ -161,6 +161,7 @@ export function advanceRotationPointers(input: {
 export function eligibleRotationPool(userId: string): { pool: string[]; skipped: string[] } {
   const pool: string[] = [];
   const skipped: string[] = [];
+  const isTest = process.env.NODE_ENV === "test";
   for (const model of MODEL_ROTATION_POOL) {
     // Gate on the SAME credential resolveLlmEndpoint uses to serve each model — the OpenRouter key
     // in production (an OpenRouter-only account must get the full curated pool, not an empty one),
