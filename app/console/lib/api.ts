@@ -110,13 +110,36 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 // ── Snapshot ─────────────────────────────────────────────────────────────────
 
+const DASHBOARD_FETCH_TIMEOUT_MS = 30_000;
+
 export async function fetchDashboard<T>(signal?: AbortSignal): Promise<T> {
   let res: Response;
+  // Combine the caller's abort signal with a hard 30s timeout so a hung fetch
+  // never leaves the console stuck in the loading state forever.  The timeout
+  // is surfaced as a ConsoleApiError (408) rather than an AbortError so the
+  // caller can distinguish "user navigated away" from "server not responding".
+  const timeoutController = new AbortController();
+  const timer = setTimeout(() => timeoutController.abort(), DASHBOARD_FETCH_TIMEOUT_MS);
+  const onExternalAbort = () => {
+    clearTimeout(timer);
+    timeoutController.abort();
+  };
+  signal?.addEventListener("abort", onExternalAbort, { once: true });
+
   try {
-    res = await fetch("/api/dashboard", { cache: "no-store", signal });
+    res = await fetch("/api/dashboard", { cache: "no-store", signal: timeoutController.signal });
   } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    if (error instanceof DOMException && error.name === "AbortError") {
+      // If the *caller* requested the abort (navigation, unmount) rethrow it
+      // so the caller can silently discard the result.  Otherwise it was our
+      // timeout — surface it as a user-visible error.
+      if (signal?.aborted) throw error;
+      throw new ConsoleApiError("Dashboard data timed out — the server may be overloaded.", 408);
+    }
     throw new ConsoleApiError("Network error — the server could not be reached.", 0);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onExternalAbort);
   }
   if (!res.ok) {
     const payload = await parseBody(res);

@@ -64,6 +64,7 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
   const inFlight = useRef<AbortController | null>(null);
   const mounted = useRef(true);
   const queuedRefresh = useRef<number | null>(null);
+  const [readyForStream, setReadyForStream] = useState(false);
 
   const refresh = useCallback(async () => {
     inFlight.current?.abort();
@@ -94,7 +95,9 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     mounted.current = true;
-    void refresh();
+    void refresh().finally(() => {
+      if (mounted.current) setReadyForStream(true);
+    });
     const interval = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       void refresh();
@@ -113,6 +116,7 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   useEffect(() => {
+    if (!readyForStream) return; // delay SSE until initial fetch completes (avoids connection-pool deadlock)
     if (typeof window === "undefined" || typeof EventSource === "undefined") {
       setStream(UNSUPPORTED_STREAM);
       return;
@@ -177,7 +181,7 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
       for (const { type, handler } of handlers) events.removeEventListener(type, handler);
       events.close();
     };
-  }, [queueRefresh]);
+  }, [queueRefresh, readyForStream]);
 
   const value = useMemo<ConsoleData>(
     () => ({ snapshot, fetchedAt, loading: snapshot === null && error === null, error, stream, refresh }),
