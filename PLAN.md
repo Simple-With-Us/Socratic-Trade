@@ -1,12 +1,20 @@
 # Active Implementation Plan
 
+> **2026-07-18 - Current unfinished-work handoff (CODEX).** The authoritative snapshot is
+> `docs/rollouts/2026-07-18-codex-task-inventory-handoff.md`: finish green #1771; fix four #1773
+> threads; close or refresh stale draft #1774; audit the required-check merge anomaly; preserve the
+> serial corpus-reembed/RAG and money-path landing order; then reconstruct the missing server-panel
+> worktree and reconcile stale local worktrees/ledgers. Production is healthy at exact
+> `main@7be71390`.
+
 > **2026-07-18 - PR #1760 review closeout (CODEX, branch `codex/pr1760-review-fixes`).** Resolve all
 > four actionable review threads in an isolated Codex lane: retain both shared-package HMAC and
 > documented bearer webhook authentication, keep proposal attribution in policy namespace and align
 > the missed usage-budget assertions, and delete unsafe review/worktree artifacts. PR #1760 raced to
 > auto-merge as `b2f22ccf`; all four threads are answered/resolved and corrective PR #1761 now carries
 > the fixes on top of that exact main. Local Node 24 gates are green (lint, TypeScript, 4,837 tests,
-> build). Finish self-hosted checks, merge #1761, and production-verify the exact auto-deployed SHA.
+> build). #1761 merged as `01f512a9`, and healthy production `7be71390` contains the corrective
+> release. This item is complete; remaining work is in the current handoff above.
 
 > **2026-07-18 - Admin Server Stats reliability (CODEX, branch `codex/socratic-infra-panel-reliability`).** No roadmap scope change; infrastructure observability only. Final hardening adds bounded provider JSON and Coolify normalization, validated Hetzner metric envelopes with stale-series retention, strict client-envelope validation, and the coordinated `Server Stats` naming. Focused Node 24 tests are 19/19; the independent P2 warning-expansion finding is fixed and re-review is pending. Serialize the exact-tree full gate, then publish through PR/required checks/protected merge, Coolify auto-deploy, and exact production-SHA health verification. In-app Browser QA remains unavailable because the listed browser-control runtime was not callable; local SSR smoke returned HTTP 200 with `Server Stats` content.
 > **2026-07-18 - Admin smoke memory headroom (CODEX).** Lower the CI-only Playwright Node heap

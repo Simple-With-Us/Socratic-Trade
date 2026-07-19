@@ -52,13 +52,12 @@ As of 2026-07-08 (assignment-rule update).
   fail-open, threshold `OPENROUTER_LOW_CREDIT_USD` default $10; DEGRADE-not-503). UR keyword monitor on
   `"openrouterCredits":{"ok":false` → mail@jays.services. tsc clean, 5/5 tests, full gate via land.sh.
   NEXT: create the UR monitor (needs UR API key via secret handoff, or owner does it in the dashboard).
-- **[Socratic.Trade][CODEX] PR #1760 review/comment/conflict closeout (branch `codex/pr1760-review-fixes`, worktree `/Users/jay/.codex/worktrees/socratic-pr-queue-closeout-20260718`, 2026-07-18) — IN PROGRESS / CORRECTIVE PR #1761 READY.** PR #1760 raced to auto-merge as `b2f22ccf` while its review-fix gate ran. All four threads are answered/resolved; #1761 restores bearer compatibility, aligns policy-namespace attribution tests, removes unsafe one-off artifacts, and is merged with that exact main. Local Node 24 gates pass lint, TypeScript, 412 files / 4,837 tests, and build. Await self-hosted checks, corrective merge, and exact production verification.
-
 - **[Socratic.Trade][CODEX] PR #1735 proposed-model attribution display contract (branch `codex/pr1735-proposal-attribution`, worktree `/Users/jay/.codex/worktrees/socratic-pr1735-proposal-attribution`, 2026-07-18) — LOCAL VERIFIED / UNPUSHED.** `TradeProposal.proposedByModel` now preserves the exact configured primary/fallback identifier while telemetry remains canonical for usage statistics. Regression coverage passes for `openrouter/openai/...` primary and `openrouter/google/...` fallback identity; TypeScript and scoped lint pass. Commit is intentionally local-only pending owner direction.
 
 ---
 
 ## Deployed
+- **[Socratic.Trade][CODEX] PR #1760/#1761 review/comment/conflict closeout — DEPLOYED / PRODUCTION VERIFIED 2026-07-18.** PR #1760 merged as `b2f22ccf`; all four review threads were answered/resolved; corrective PR #1761 merged as `01f512a9` with bearer compatibility, policy-namespace attribution tests, and unsafe artifact removal. Current production `7be71390` is healthy and contains both releases. Local gate: lint 0 errors, TypeScript, 412 files / 4,837 tests, and build. Current unfinished-work inventory: `docs/rollouts/2026-07-18-codex-task-inventory-handoff.md`.
 - **[Socratic.Trade][MONET] Editable connected-account name + legacy-app retirement (branch
   `monet/vigilant-fermi-220244`, cloud session, owner-directed) — DEPLOYED TO PRODUCTION 2026-07-18
   (merged to `main` as `b0063a7`, PR #1727).** Deploy confirmed after the fleet-wide auto-deploy stall

@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-07-18 — Current unfinished-work inventory and handoff (CODEX)
+
+Production is healthy and exact at `main@7be71390` (HTTP 200; DB, scheduler lease, 3 active / 0
+degraded accounts, Litestream, active OpenRouter RAG route, and all critical dependencies green).
+The original #1760/#1761 review closeout is merged and live. Immediate open work is PR #1771
+(green/auto-merge armed), PR #1773 (four unresolved documentation threads), and stale draft #1774.
+The broader partial/not-started inventory, active fleet lanes, corpus-reembed hold, missing
+server-panel worktree, CI/ruleset follow-up, and local-worktree disposition are recorded in
+`docs/rollouts/2026-07-18-codex-task-inventory-handoff.md`.
+
 ## 2026-07-18 — OpenRouter credit signal on /api/health for external monitoring (MONET, branch `monet/openrouter-credit-health`)
 
 Owner-directed follow-up to the OpenRouter-exhaustion outage. Since universal routing (#1703)
@@ -57,7 +67,7 @@ Details: `docs/rollouts/2026-07-18-bge-m3-reindexing.md` ("Landing retry" sectio
 ## 2026-07-18 — BGE-M3 SEC Filings Reindexing & API Support (Antigravity/AG, branch `agent/ag-reindex-bge-m3`)
 
 Extended POST endpoint in `app/api/admin/reindex-10k/route.ts` to support `{ all: true }` or `symbols: ["*"]` in the payload to resolve all tickers in the database and clear their RAG chunk caches. Created the `scripts/reindex-all.ts` CLI tool to enable command-line cache clearing and immediate ingestion under `baai/bge-m3` embedding model. Added unit testing suite `test/reindex-all.test.ts` to verify cache deletions. Fixed pre-existing failures in `test/securities-import.test.ts` (companyName casing) and `test/token-budget-ceiling.test.ts` (race conditions on debounced timers). Installed missing `@opentelemetry` helper packages (`@opentelemetry/core`, `@opentelemetry/sdk-trace-base`, `@opentelemetry/resources`) to resolve the Next.js production build compiler issues. Typecheck, tests, and production build all verify green. Next: Land changes using landing script.
-## 2026-07-18 — PR #1760 review closeout (CODEX, branch `codex/pr1760-review-fixes`)
+## 2026-07-18 — PR #1760 review closeout (CODEX, branch `codex/pr1760-review-fixes`) — DEPLOYED
 
 Addressed all four actionable review findings without editing the AG-owned worktree. The Congress
 webhook route keeps the shared-package HMAC verifier and restores the documented bearer fallback
@@ -69,7 +79,8 @@ tests across the webhook, usage-budget, failover, and money-path suites. The ser
 passes lint (0 errors), TypeScript, 412 Vitest files / 4,837 tests, and the production build. PR
 #1760 auto-merged as `b2f22ccf` while that gate ran; all four threads were then answered and
 resolved, and corrective PR #1761 carries the fixes. Its branch is merged with that exact new main;
-self-hosted checks, corrective merge, and exact production verification remain.
+self-hosted corrective PR #1761 merged as `01f512a9`; current healthy production `7be71390`
+contains both #1760 and #1761. All four original review threads remain resolved.
 ## 2026-07-18 — Remove tracked lint/verify artifacts from main (MONET, branch `monet/rm-tracked-lint-artifacts`)
 
 Repo-hygiene cleanup. PR #1735 accidentally merged ~9 MB of generated, machine-specific
