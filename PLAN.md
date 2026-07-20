@@ -1,5 +1,15 @@
 # Active Implementation Plan
 
+> **2026-07-19 - Three new RapidAPI-backed enrichment providers (CLAUDE, branch
+> `claude/model-availability-session-handoff-362fd3`).** No roadmap scope change; market-data
+> redundancy only. Owner-directed: add Mboum Finance, YH Finance 15, and an Alpha Vantage
+> RapidAPI transport (OVERVIEW fundamentals) as a dormant-unless-`RAPIDAPI_KEY`-set, quota-safe
+> failover tier registered AFTER the free Yahoo scrape in `getEnrichmentProvider`. New
+> `src/lib/rapidapi-quota.ts` enforces a per-provider daily cap (Mboum 16/day, YH Finance 15
+> 3/day, AV-RapidAPI 500/day) AND a combined 900/day ceiling across all three, mirroring
+> `alpha-vantage-key-pool.ts`'s persisted budget pattern. tsc clean, lint 0 new warnings, 33 + 13
+> new tests green. Not yet landed — `scripts/land.sh` is a separate phase. Details:
+> `docs/rollouts/2026-07-19-rapidapi-yahoo-av-providers.md`.
 > **2026-07-19 - Land the #1771/#1773/#1777 chain, then run the corpus re-embed to completion
 > (owner-directed pickup, multiple lanes).** Next actions, in order: (1) land **#1771**
 > (SiliconFlow bge-m3 embed-price 10x undercount fix — auto-merge armed, no open findings,

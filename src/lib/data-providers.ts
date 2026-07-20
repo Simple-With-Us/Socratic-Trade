@@ -8,6 +8,11 @@
 //
 // Each keyed provider is only instantiated when its env key is set. Yahoo Finance is always
 // the final real tier — no API key required, uses session crumb auth.
+//
+// A quota-scarce RapidAPI-hosted FAILOVER tier (Mboum Finance, YH Finance 15, Alpha Vantage's
+// RapidAPI transport) is registered AFTER Yahoo Finance, gated on RAPIDAPI_KEY — see the doc
+// comment on SteadyApiEnrichmentProvider / AlphaVantageRapidApiEnrichmentProvider below and
+// rapidapi-quota.ts for the persisted daily-budget mechanism that keeps it safe.
 
 import { fromAlpacaSymbol, normalizeSymbol, toAlpacaSymbol } from "./money";
 import {
@@ -42,6 +47,7 @@ import { loadTickerCikMap } from "./web-sources/sec8k";
 import { padCik } from "./web-sources/sec-filings";
 import { withProviderLimit, admitProviderRequests, refundProviderRequests, resetProviderQuotaState, resolveProviderQuota, scrubProviderErrorText, scrubProviderErrorTextForPool, appendErrorCause } from "./provider-rate-limit";
 import { AlphaVantageKeyPool, getPoolForKeys, isAlphaVantageDailyCapMessage, millisUntilNextAlphaVantageDailyReset, tryReserveAlphaVantageCalls, refundAlphaVantageCalls, alphaVantageDailyCallBudget } from "./alpha-vantage-key-pool";
+import { tryReserveRapidApiCalls, refundRapidApiCalls, type RapidApiProviderKey } from "./rapidapi-quota";
 import {
   arbitrateFieldObservation,
   dedupeUpstreamFamilies,
@@ -264,6 +270,23 @@ export interface MarketEnrichmentProvider {
    *  "paid" providers receive a coverage hint so they can skip redundant sub-calls
    *  for symbols a free upstream (App A) already covered. */
   costTier?: "free" | "paid";
+  /** Opt-in: this provider's quota is SCARCE enough that dispatching it against symbols a
+   *  cheaper source already covered is self-defeating (e.g. YH Finance 15's real cap is 100
+   *  requests per MONTH). Setting this — together with a non-empty `suppliesFields` — moves the
+   *  provider out of the cascade's single concurrent wave into a SECOND wave that runs only after
+   *  the free/cheap providers have resolved, and only over the symbols still missing at least one
+   *  of the fields this provider can actually supply. See CascadingEnrichmentProvider.enrich and
+   *  `scarceEnrichmentGateEnabled()`. Providers without this flag keep today's behavior exactly
+   *  (dispatched concurrently over the full batch). */
+  quotaScarce?: boolean;
+  /** The `SymbolEnrichment` keys this provider is CAPABLE of supplying. Load-bearing only for a
+   *  `quotaScarce` provider: the wave-two gate compares this against what wave one actually filled
+   *  per symbol, so a scarce provider is never spent on a symbol where it could not add anything.
+   *  Declaring it wider than reality only costs calls; declaring it NARROWER than reality can lose
+   *  data (a field it uniquely supplies would never trigger a call) — so keep it in sync with the
+   *  provider's parser. A `quotaScarce` provider with this unset/empty is treated as ungated (it
+   *  stays in wave one) rather than silently never running. */
+  suppliesFields?: readonly (keyof SymbolEnrichment)[];
   /** Credential lane this provider instance actually runs on ("user" | "env").
    *  When set, the circuit breaker only trips this provider when the health lane
    *  matching BOTH its service AND this key source is hard-stopped — so a dead
@@ -284,6 +307,22 @@ function flagEnabled(value: string | undefined): boolean {
 function enrichmentShortCircuitEnabled(): boolean {
   // Needs the fundamentals tier (it supplies the coverage hint), not just price reads.
   return flagEnabled(process.env.ENRICHMENT_SHORT_CIRCUIT_ENABLED) && congressFundamentalsEnabled();
+}
+
+/**
+ * Per-symbol coverage gate for `quotaScarce` providers — DEFAULT ON, and scoped strictly to
+ * providers that opt in via `quotaScarce` + `suppliesFields`. Today that is only the RapidAPI
+ * failover tier (Mboum / YH Finance 15 / Alpha Vantage-RapidAPI), which is new and currently
+ * spends a MONTHLY-backed quota on whichever symbols happen to be cache-misses first with no
+ * regard for whether the free keyless Yahoo scrape already supplied that exact data. Every
+ * pre-existing provider is unaffected (they never set the flag), so defaulting this ON has no
+ * regression surface for them. Set `ENRICHMENT_SCARCE_TIER_GATE_ENABLED=0` to restore the old
+ * all-providers-in-one-concurrent-wave behavior for the scarce tier too.
+ */
+export function scarceEnrichmentGateEnabled(): boolean {
+  const raw = process.env.ENRICHMENT_SCARCE_TIER_GATE_ENABLED;
+  if (raw === undefined || raw.trim() === "") return true;
+  return flagEnabled(raw);
 }
 
 // ── Analyst scoring helpers ───────────────────────────────────────────────────
@@ -895,6 +934,10 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   const tiingo = resolveApiKeyWithSource("tiingo", userId);
   const twelvedata = resolveApiKeyWithSource("twelvedata", userId);
   const massive = resolveApiKeyWithSource("massive", userId);
+  // Single shared operator credential for all three RapidAPI-hosted providers below (Mboum
+  // Finance, YH Finance 15, Alpha Vantage RapidAPI transport) — no per-user variant, matching how
+  // the owner provisioned it (one RAPIDAPI_KEY env var covers every RapidAPI-hosted product).
+  const rapidApiKey = resolveRapidApiKey();
   // Alpaca MARKET DATA: own key (individual) → operator's paper key (shared) for background/tenants.
   // Trading is unaffected (alpaca.ts resolves Alpaca strictly per-user).
   const alpacaData = resolveAlpacaMarketData(userId);
@@ -966,6 +1009,27 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   const quiverKey = resolveQuiverApiKey();
   if (quiverKey) providers.push(withHealthLane(new QuiverEnrichmentProvider(quiverKey), "env"));
   providers.push(new YahooFinanceEnrichmentProvider());
+  // Tier LAST — RapidAPI-hosted FAILOVER redundancy for the free scrape above (see the big doc
+  // comment on the provider classes for why this ordering, and rapidapi-quota.ts for the quota
+  // math). All three are dormant unless RAPIDAPI_KEY is set; each self-limits to a tiny persisted
+  // daily budget far below its real plan cap, so registering them here is safe even though the
+  // cascade calls every provider's enrich() with the FULL per-run symbol batch regardless of
+  // whether an earlier tier already filled a symbol's fields (no such per-provider narrowing
+  // mechanism exists in CascadingEnrichmentProvider outside the opt-in congress.trade coverage
+  // hint above) — the budget gate, not field-coverage narrowing, is what keeps this safe.
+  if (rapidApiKey) {
+    // Mboum first (owner: prioritize by lowest disclosed RapidAPI-listing latency, 1663ms vs YH
+    // Finance 15's 1757ms) — near-identical, so this is a tie-break, not a meaningful difference.
+    providers.push(withHealthLane(
+      new SteadyApiEnrichmentProvider("mboum-finance", "mboum-finance.p.rapidapi.com", "", "symbol", "symbol", false, rapidApiKey, "env", userId),
+      "env"
+    ));
+    providers.push(withHealthLane(
+      new SteadyApiEnrichmentProvider("yahoo-finance15", "yahoo-finance15.p.rapidapi.com", "/api", "ticker", "ticker", true, rapidApiKey, "env", userId),
+      "env"
+    ));
+    providers.push(withHealthLane(new AlphaVantageRapidApiEnrichmentProvider(rapidApiKey, "env", userId), "env"));
+  }
   // Opt-in active circuit breaker: skip a lane whose db-health lane is currently `stoppedWorking`,
   // re-probing only after the backoff window. Default OFF so it can't silently black out a
   // currently-working provider. When off, the raw provider list runs exactly as before.
@@ -1106,7 +1170,29 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
           }
         }));
 
-    let results: ProviderRun[];
+    // ── Wave split ────────────────────────────────────────────────────────────
+    // WAVE ONE = every provider that has NOT declared itself quota-scarce. It is dispatched
+    // exactly as before (one concurrent Promise.all over the full symbol batch, or the App A
+    // short-circuit variant below) — no latency regression for the many providers where
+    // concurrency is correct and free.
+    // WAVE TWO = providers that declared `quotaScarce` + a non-empty `suppliesFields`. They run
+    // only AFTER wave one settles, and only over the symbols where wave one left at least one of
+    // their declared fields empty. A scarce provider with nothing to add is not called at all, so
+    // it reserves no quota (its reservation happens inside its own enrich()).
+    const gateOn = scarceEnrichmentGateEnabled();
+    const isGatedScarce = (p: MarketEnrichmentProvider): boolean =>
+      gateOn && p.quotaScarce === true && (p.suppliesFields?.length ?? 0) > 0;
+    const waveOneIndexes: number[] = [];
+    const scarceIndexes: number[] = [];
+    this.providers.forEach((p, i) => {
+      (isGatedScarce(p) ? scarceIndexes : waveOneIndexes).push(i);
+    });
+    const waveOneProviders = waveOneIndexes.map((i) => this.providers[i]);
+    // Positional, so the first-wins merge precedence below is registration order regardless of
+    // which wave a provider ran in (and regardless of duplicate provider names).
+    const results: ProviderRun[] = this.providers.map((p) => ({ name: p.name, data: {} }));
+
+    let waveOneRuns: ProviderRun[];
     if (enrichmentShortCircuitEnabled()) {
       // Short-circuit: ONLY the Congress.Trade tier feeds the coverage hint, so await
       // just it first, then run EVERY other provider (free AND paid) in parallel. Paid
@@ -1116,7 +1202,7 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
       // quotes. No whole provider is skipped, so no field is lost; only duplicate upstream
       // calls are eliminated. Crucially, paid providers are NOT serialized behind
       // unrelated free tiers (Yahoo/Alpaca/SEC) — only behind the single App A read.
-      const congressProvider = this.providers.find((p) => p.name === "congress.trade");
+      const congressProvider = waveOneProviders.find((p) => p.name === "congress.trade");
       const appAResult = congressProvider
         ? await run(congressProvider, normalized)
         : { name: "congress.trade", data: {} as Record<string, SymbolEnrichment> } satisfies ProviderRun;
@@ -1135,17 +1221,60 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
         }
       }
       const context: EnrichmentContext = { coveredFields, analystSource };
-      const otherProviders = this.providers.filter((p) => p.name !== "congress.trade");
+      const otherProviders = waveOneProviders.filter((p) => p.name !== "congress.trade");
       const otherResults = await Promise.all(
         otherProviders.map((p) => run(p, normalized, p.costTier === "paid" ? context : undefined))
       );
-      // Reassemble in registration order so the merge precedence is identical.
+      // Reassemble in wave-one registration order so the merge precedence is identical.
       const byName = new Map<string, ProviderRun>();
       for (const r of [appAResult, ...otherResults]) byName.set(r.name, r);
-      results = this.providers.map((p) => byName.get(p.name) ?? { name: p.name, data: {} });
+      waveOneRuns = waveOneProviders.map((p) => byName.get(p.name) ?? { name: p.name, data: {} });
     } else {
-      // Default: run every provider over every symbol in parallel.
-      results = await Promise.all(this.providers.map((p) => run(p, normalized)));
+      // Default: run every wave-one provider over every symbol in parallel.
+      waveOneRuns = await Promise.all(waveOneProviders.map((p) => run(p, normalized)));
+    }
+    waveOneIndexes.forEach((providerIndex, k) => {
+      results[providerIndex] = waveOneRuns[k];
+    });
+
+    if (scarceIndexes.length > 0) {
+      // What wave one ACTUALLY filled, per symbol. A wave-one provider that threw or timed out
+      // contributed `{}` (see `run`'s catch), so its fields correctly read as NOT covered and the
+      // scarce tier can still step in — a failure upstream must never suppress the failover tier.
+      const filledBySymbol = new Map<string, Set<string>>();
+      for (const symbol of normalized) {
+        const filled = new Set<string>();
+        for (const providerIndex of waveOneIndexes) {
+          const record = results[providerIndex].data[symbol];
+          if (!record) continue;
+          for (const [key, value] of Object.entries(record)) {
+            // `undefined` and an EMPTY array (e.g. `headlines: []`) are not coverage — a provider
+            // that returned the key with no usable value left the gap open.
+            if (value === undefined) continue;
+            if (Array.isArray(value) && value.length === 0) continue;
+            filled.add(key);
+          }
+        }
+        filledBySymbol.set(symbol, filled);
+      }
+      const coveredFields: Record<string, ReadonlySet<string>> = {};
+      for (const [symbol, filled] of filledBySymbol) coveredFields[symbol] = filled;
+      const scarceContext: EnrichmentContext = { coveredFields };
+      const scarceRuns = await Promise.all(
+        scarceIndexes.map(async (providerIndex) => {
+          const provider = this.providers[providerIndex];
+          const fields = provider.suppliesFields ?? [];
+          const gaps = normalized.filter((symbol) => {
+            const filled = filledBySymbol.get(symbol);
+            return fields.some((field) => !filled?.has(field as string));
+          });
+          // Nothing this provider supplies is missing anywhere → do not call it at all. No
+          // request, and therefore no quota reservation (reservations live inside enrich()).
+          if (gaps.length === 0) return { providerIndex, run: { name: provider.name, data: {} } as ProviderRun };
+          return { providerIndex, run: await run(provider, gaps, scarceContext) };
+        })
+      );
+      for (const { providerIndex, run: providerRun } of scarceRuns) results[providerIndex] = providerRun;
     }
     const merged: Record<string, SymbolEnrichment> = {};
 
@@ -3315,6 +3444,516 @@ export class AlphaVantageEnrichmentProvider implements MarketEnrichmentProvider 
             // that DID reach the network (dispatchedToNetwork === true) is never refunded here,
             // even though it went on to fail/error — it already spent AV's real quota.
             if (!dispatchedToNetwork) refundAlphaVantageCalls(1);
+            result[symbol] = {};
+          }
+        })
+      );
+    }
+    return result;
+  }
+}
+
+// ── RapidAPI-hosted enrichment providers (Mboum Finance, YH Finance 15, Alpha Vantage OVERVIEW) ──
+// Three additional REDUNDANT/FAILOVER sources for the SAME fundamentals fields the free keyless
+// Yahoo scrape (registered last, unconditionally, above) already fills reasonably well — added for
+// extra throughput against a single shared RapidAPI subscription (owner: "request as often as we
+// want almost" for data this app already gets elsewhere; NOT new fields — see the 2026-07-19
+// rollout note's MVP SCOPE). All three are dormant unless RAPIDAPI_KEY is set (resolveRapidApiKey /
+// getEnrichmentProvider), and each self-limits to a tiny persisted daily call budget
+// (rapidapi-quota.ts) far below its real plan cap: Mboum's and YH Finance 15's real limits are
+// MONTHLY (500/mo and 100/mo respectively, NOT daily), so a naive per-scan dispatch against a
+// normal watchlist could exhaust an entire MONTH's quota in one run — the persisted budget divides
+// that monthly cap into a small daily allowance instead. See rapidapi-quota.ts's module doc comment
+// for the exact numbers/provenance and the combined 900/day safety ceiling across all three.
+//
+// Ordering (see getEnrichmentProvider): all three are registered AFTER YahooFinanceEnrichmentProvider
+// — first-wins per field (takeScalar) means they only actually WIN a field the free scrape (and
+// every earlier paid tier) left empty for that symbol. This deliberately makes them a deep failover
+// tier rather than competing with the free source for fields it already covers well.
+
+export function resolveRapidApiKey(): string | undefined {
+  const key = (process.env.RAPIDAPI_KEY ?? "").trim();
+  return key || undefined;
+}
+
+/** Mboum Finance and YH Finance 15 (RapidAPI's own listing describes both as fronting the same
+ *  "steadyapi.com" backend) return every numeric quote field as a FORMATTED STRING ("$333.74",
+ *  "+0.48", "+0.14%", "63,407,283") rather than a JSON number. Strips "$", ",", "%", and a leading
+ *  "+" before parsing. Returns undefined for anything that doesn't parse to a finite number (never
+ *  fabricates 0). */
+export function parseRapidApiNumberString(raw: unknown): number | undefined {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : undefined;
+  if (typeof raw !== "string") return undefined;
+  const cleaned = raw.replace(/[$,%\s]/g, "").replace(/^\+/, "");
+  if (!cleaned) return undefined;
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * Shared RapidAPI HTTP helper: attaches the `x-rapidapi-host`/`x-rapidapi-key` headers every
+ * RapidAPI-hosted product requires (auth via HEADERS, never a query param — see SECRET HANDLING in
+ * the 2026-07-19 rollout note), goes through the same fetchWithRetry telemetry/circuit-breaker/
+ * health-log boundary every other provider in this file uses, and scrubs the key out of any error
+ * text via fetchWithRetry's own `apiKey` scrub param.
+ *
+ * `dispatchTracker`, when passed, is flipped true the instant the real network `fetch()` is about
+ * to fire (fetchWithRetry's `durableAttempt.onDispatch`) — mirroring AlphaVantageEnrichmentProvider's
+ * `dispatchedToNetwork` pattern above, so a caller's persisted-budget reservation is refunded ONLY
+ * when the call never actually reached the network (a circuit-breaker skip, etc.), never when it
+ * reached the network and merely failed/errored (that already spent real RapidAPI quota). Passing a
+ * tracker switches usage-monitor call-volume telemetry to durable self-recording (matching AV's
+ * `durableAttempt` contract — fetchWithRetry suppresses its own default `recordProviderCall` for any
+ * durable caller), so it is recorded explicitly in `onResponse`/`onTransportError` below instead.
+ */
+async function rapidApiGetJson(
+  host: string,
+  path: string,
+  apiKey: string,
+  options: { service: string; keySource: ApiKeySource; userId?: string; timeoutMs?: number },
+  dispatchTracker?: { dispatched: boolean }
+): Promise<unknown> {
+  // Gated through the shared per-provider pacer (provider-rate-limit.ts — see the
+  // mboum-finance/yahoo-finance15/alpha-vantage-rapidapi HARD_DEFAULTS entries) so requests stay
+  // within each host's real Basic-tier rate limit (1 req/sec for the steadyapi hosts, 5 req/min for
+  // Alpha Vantage's RapidAPI plan) instead of bursting CONCURRENCY-wide. The AbortController/timeout
+  // is armed INSIDE the pacer callback, same as YahooFinanceEnrichmentProvider/
+  // AlphaVantageEnrichmentProvider above, so the timeout starts counting at actual dispatch time,
+  // not when this call joins the (potentially long, strictly-serial) pacer queue.
+  const response = await withProviderLimit(options.service, async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 8000);
+    try {
+      return await fetchWithRetry(
+        `https://${host}${path}`,
+        {
+          cache: "no-store",
+          signal: controller.signal,
+          headers: { "x-rapidapi-host": host, "x-rapidapi-key": apiKey }
+        },
+        {
+          service: options.service,
+          keySource: options.keySource,
+          userId: options.userId,
+          apiKey,
+          // retries: 0 — every caller here reserves exactly one unit via tryReserveRapidApiCalls
+          // before invoking this helper (see fetchWithRetry's own doc comment on this convention,
+          // and the AlphaVantageEnrichmentProvider call sites above). A built-in 429 retry would
+          // fire a second real fetch() against the RapidAPI host while the persisted daily budget
+          // only ever gets decremented by 1, silently letting a single admitted reservation spend
+          // two real upstream calls right when the scarce monthly-backed quota is closest to empty.
+          retries: 0,
+          durableAttempt: {
+            onDispatch: () => { if (dispatchTracker) dispatchTracker.dispatched = true; },
+            onResponse: (r) => recordProviderCall(options.service, { ok: r.ok, keySource: options.keySource, userId: options.userId }),
+            onTransportError: () => recordProviderCall(options.service, { ok: false, keySource: options.keySource, userId: options.userId })
+          }
+        }
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return await response.json();
+}
+
+interface SteadyApiQuoteBody {
+  symbol?: string;
+  companyName?: string;
+  primaryData?: { lastSalePrice?: string; netChange?: string; percentageChange?: string; volume?: string };
+  keyStats?: { fiftyTwoWeekHighLow?: { value?: string } };
+}
+
+/** Parses the shared Mboum/YH-Finance-15 quote response shape into the price-family + companyName
+ *  + 52-week-range fields. Every numeric leaf is a formatted string — see parseRapidApiNumberString.
+ *  Tolerant of a missing/malformed body: returns {} rather than throwing, so one odd response never
+ *  takes down the whole symbol's enrichment. */
+export function parseSteadyApiQuote(payload: unknown): SymbolEnrichment {
+  const body = (payload as { body?: SteadyApiQuoteBody } | undefined)?.body;
+  if (!body) return {};
+  const pd = body.primaryData ?? {};
+  const price = parseRapidApiNumberString(pd.lastSalePrice);
+  const intradayChangePct = parseRapidApiNumberString(pd.percentageChange);
+  const volume = parseRapidApiNumberString(pd.volume);
+  const companyName = typeof body.companyName === "string" && body.companyName ? body.companyName : undefined;
+
+  let fiftyTwoWeekHigh: number | undefined;
+  let fiftyTwoWeekLow: number | undefined;
+  const range = body.keyStats?.fiftyTwoWeekHighLow?.value;
+  if (typeof range === "string" && range.includes("-")) {
+    // Split only on a "-" with whitespace on both sides (the observed separator, e.g.
+    // "201.50 - 334.68"), not on a bare "-" — a naive `split("-")` would mis-tokenize a
+    // negative bound (e.g. "-5.00 - 10.00") into 3 parts and silently misassign lo/hi.
+    const parts = range.split(/\s+-\s+/).map((part) => parseRapidApiNumberString(part.trim()));
+    const [lo, hi] = parts;
+    if (typeof lo === "number") fiftyTwoWeekLow = lo;
+    if (typeof hi === "number") fiftyTwoWeekHigh = hi;
+  }
+
+  return {
+    ...(price !== undefined && price > 0 && { price }),
+    ...(intradayChangePct !== undefined && { intradayChangePct }),
+    ...(volume !== undefined && volume >= 0 && { volume }),
+    ...(companyName !== undefined && { companyName }),
+    ...(fiftyTwoWeekHigh !== undefined && { fiftyTwoWeekHigh }),
+    ...(fiftyTwoWeekLow !== undefined && { fiftyTwoWeekLow })
+  };
+}
+
+/** Tolerant extraction of sector/industry from the "asset-profile" module response — the ONLY
+ *  module name confirmed live against either host (multi-module and other module names are
+ *  explicitly UNCONFIRMED — see the 2026-07-19 rollout note). The exact wrapper shape around
+ *  `{sector, industry}` was only directly observed on the YH Finance 15 host; this scans several
+ *  plausible nesting levels (bare, `.body`, `.assetProfile`, `.body.assetProfile`) rather than
+ *  assuming one, so a shape difference on the Mboum host degrades to {} instead of throwing. */
+export function parseSteadyApiAssetProfile(payload: unknown): SymbolEnrichment {
+  const root = payload as Record<string, unknown> | undefined;
+  if (!root) return {};
+  const bodyRec = root.body as Record<string, unknown> | undefined;
+  const candidates: Array<Record<string, unknown> | undefined> = [
+    root,
+    bodyRec,
+    root.assetProfile as Record<string, unknown> | undefined,
+    bodyRec?.assetProfile as Record<string, unknown> | undefined
+  ];
+  for (const candidate of candidates) {
+    const sector = typeof candidate?.sector === "string" && candidate.sector ? candidate.sector : undefined;
+    const industry = typeof candidate?.industry === "string" && candidate.industry ? candidate.industry : undefined;
+    if (sector || industry) {
+      return { ...(sector !== undefined && { sector }), ...(industry !== undefined && { industry }) };
+    }
+  }
+  return {};
+}
+
+/**
+ * Shared implementation for Mboum Finance and YH Finance 15 — RapidAPI's own listing describes both
+ * as fronting the same "steadyapi.com" backend, and their confirmed response shapes are byte-
+ * identical (2026-07-19 ground truth). Only the host, the "/api" path prefix (YH Finance 15 only),
+ * and the quote endpoint's symbol query-param name (`symbol` vs `ticker`) differ between the two.
+ *
+ * MVP-narrow by design: only the confirmed "quote" (price-family + companyName + 52-week range)
+ * and "asset-profile" (sector/industry) calls are made — up to 2 requests/symbol, EACH gated by
+ * this provider's own tiny persisted daily budget (rapidapi-quota.ts) before it dispatches. A
+ * symbol that doesn't clear the budget gate is simply left unenriched by this provider this run and
+ * falls through to whatever else in the cascade can fill it (the free Yahoo scrape, in practice).
+ */
+export class SteadyApiEnrichmentProvider implements MarketEnrichmentProvider {
+  readonly configured = true;
+  readonly costTier = "paid" as const;
+  // Quota-scarce: YH Finance 15's Basic tier is 100 requests per MONTH (Mboum ~500/month), so this
+  // lane must only ever be spent on symbols the free keyless Yahoo scrape (and every earlier tier)
+  // left with a real gap. See the cascade's wave-two gate in CascadingEnrichmentProvider.enrich.
+  readonly quotaScarce = true;
+  // Exactly the keys parseSteadyApiQuote + parseSteadyApiAssetProfile can produce — keep in sync
+  // with those two parsers (a field omitted here would never trigger a call and would be lost).
+  readonly suppliesFields = [
+    "price",
+    "intradayChangePct",
+    "volume",
+    "companyName",
+    "fiftyTwoWeekHigh",
+    "fiftyTwoWeekLow",
+    "sector",
+    "industry"
+  ] as const;
+  private readonly scope: CacheScope;
+  private readonly keySource: ApiKeySource;
+  // Mboum's modules-endpoint param name is UNCONFIRMED (only Mboum's OWN quote endpoint —
+  // `symbol=` — and the sibling YH Finance host's modules endpoint — `ticker=` — were directly
+  // tested; see the rollout note). Rather than hardcode a guess, the first modules call this
+  // process makes tries `initialModuleParam`; if that response yields neither sector nor industry,
+  // it retries ONCE with the other param name and remembers whichever one worked for the rest of
+  // this process's lifetime (cheap to re-learn after a restart — this is a low-volume failover
+  // source, and `moduleParamConfirmed` skips the guesswork entirely on the host where it's known).
+  private resolvedModuleParam: string | undefined;
+
+  constructor(
+    readonly name: RapidApiProviderKey,
+    private readonly host: string,
+    private readonly apiPathPrefix: string,
+    private readonly quoteSymbolParam: string,
+    private readonly initialModuleParam: string,
+    private readonly moduleParamConfirmed: boolean,
+    private readonly apiKey: string,
+    keySource: ApiKeySource,
+    private readonly userId?: string
+  ) {
+    this.scope = cacheScopeForKeySource(keySource, userId);
+    this.keySource = keySource;
+  }
+
+  async enrich(symbols: string[], context?: EnrichmentContext): Promise<Record<string, SymbolEnrichment>> {
+    const normalized = Array.from(new Set(symbols.map(normalizeSymbol))).filter(Boolean).slice(0, maxSymbols());
+    if (normalized.length === 0) return {};
+
+    const now = Date.now();
+    const consented = hasDataPoolConsent(this.userId ?? "local");
+    const result: Record<string, SymbolEnrichment> = {};
+    const misses: string[] = [];
+    for (const symbol of normalized) {
+      const cached = readEnrichmentCache(this.name, symbol, this.userId, consented, now);
+      if (cached) result[symbol] = cached.data;
+      else misses.push(symbol);
+    }
+    if (misses.length === 0) return result;
+
+    for (let i = 0; i < misses.length; i += CONCURRENCY) {
+      const chunk = misses.slice(i, i + CONCURRENCY);
+      await Promise.all(chunk.map((symbol) => this.enrichOne(symbol, context, now, result)));
+    }
+    return result;
+  }
+
+  private async enrichOne(
+    symbol: string,
+    context: EnrichmentContext | undefined,
+    now: number,
+    result: Record<string, SymbolEnrichment>
+  ): Promise<void> {
+    // Short-circuit coverage hint (see EnrichmentContext doc comment): only skip the modules call
+    // when a free upstream already filled BOTH fields it would supply. The quote call has no such
+    // skip — App A's coverage hint never includes price-family fields, so checking would be a no-op.
+    const covered = context?.coveredFields?.[symbol];
+    const wantModules = !covered || !covered.has("sector") || !covered.has("industry");
+
+    let quoteData: SymbolEnrichment = {};
+    const quoteAdmitted = tryReserveRapidApiCalls(this.name, 1, now) > 0;
+    if (quoteAdmitted) {
+      const tracker = { dispatched: false };
+      try {
+        const payload = await rapidApiGetJson(
+          this.host,
+          `${this.apiPathPrefix}/v1/markets/quote?${this.quoteSymbolParam}=${encodeURIComponent(symbol)}&type=STOCKS`,
+          this.apiKey,
+          { service: this.name, keySource: this.keySource, userId: this.userId },
+          tracker
+        );
+        quoteData = parseSteadyApiQuote(payload);
+      } catch {
+        if (!tracker.dispatched) refundRapidApiCalls(this.name, 1, now);
+      }
+    }
+
+    const moduleData = wantModules ? await this.fetchAssetProfile(symbol, now) : {};
+
+    const merged: SymbolEnrichment = { ...quoteData, ...moduleData };
+    if (Object.keys(merged).length > 0) {
+      writeEnrichmentCache(this.name, symbol, this.scope, this.userId, merged, now + ttlMs());
+    }
+    result[symbol] = merged;
+  }
+
+  private async fetchAssetProfile(symbol: string, now: number): Promise<SymbolEnrichment> {
+    const firstParam = this.resolvedModuleParam ?? this.initialModuleParam;
+    const params = this.moduleParamConfirmed || this.resolvedModuleParam
+      ? [firstParam]
+      : [firstParam, this.otherParam(firstParam)];
+
+    for (const param of params) {
+      const admitted = tryReserveRapidApiCalls(this.name, 1, now) > 0;
+      if (!admitted) return {};
+      const tracker = { dispatched: false };
+      try {
+        const payload = await rapidApiGetJson(
+          this.host,
+          `${this.apiPathPrefix}/v1/markets/stock/modules?${param}=${encodeURIComponent(symbol)}&module=asset-profile`,
+          this.apiKey,
+          { service: this.name, keySource: this.keySource, userId: this.userId },
+          tracker
+        );
+        const parsed = parseSteadyApiAssetProfile(payload);
+        if (Object.keys(parsed).length > 0) {
+          this.resolvedModuleParam = param; // remember what worked — skip the guesswork next time
+          return parsed;
+        }
+        // Reached the network and got a response, but neither sector nor industry was present —
+        // worth trying the other param name once on an unconfirmed host before giving up.
+      } catch {
+        if (!tracker.dispatched) refundRapidApiCalls(this.name, 1, now);
+      }
+    }
+    return {};
+  }
+
+  private otherParam(param: string): string {
+    return param === "symbol" ? "ticker" : "symbol";
+  }
+}
+
+function alphaVantageOverviewErrorMessage(payload: unknown): string | undefined {
+  const p = payload as Record<string, unknown> | undefined;
+  if (!p) return undefined;
+  const raw = p.Note || p.Information || p["Error Message"];
+  return typeof raw === "string" && raw ? raw : undefined;
+}
+
+function avOverviewNumber(raw: unknown): number | undefined {
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === "None" || trimmed === "-") return undefined;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function avOverviewString(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  return trimmed && trimmed !== "None" ? trimmed : undefined;
+}
+
+/**
+ * Maps Alpha Vantage's OVERVIEW response into EXISTING SymbolEnrichment fundamentals fields ONLY
+ * (owner instruction: no new schema fields this pass) — restricted to fields whose scale AV's
+ * documented schema makes unambiguous, cross-checked against how YahooFinanceEnrichmentProvider
+ * already stores the SAME field so the two sources stay unit-consistent under first-wins merging:
+ *   - dividendYield: AV's `DividendYield` is a decimal fraction (e.g. "0.0068"), same convention as
+ *     Yahoo's `trailingAnnualDividendYield` — converted to percentage points (*100), matching Yahoo.
+ *   - epsGrowth: AV's `QuarterlyEarningsGrowthYOY` is also a decimal fraction, but
+ *     YahooFinanceEnrichmentProvider stores its `epsGrowth` as the RAW fraction with NO *100
+ *     conversion (see `fetchSymbol` above) — mirrored here unconverted so the two sources can't
+ *     disagree by a factor of 100 depending on which one wins first-wins for a given symbol.
+ * Deliberately SKIPS a few OVERVIEW fields that would otherwise map onto existing SymbolEnrichment
+ * properties:
+ *   - PercentInstitutions → institutionOwnershipPct: AV's documented scale for this field could not
+ *     be confirmed (unlike Yahoo's institutionOwnership, an unambiguous 0-1 fraction) — mapping it
+ *     on an unverified assumption risks silently reporting institutional ownership off by 100x.
+ *     Left unmapped until confirmed against a real response.
+ *   - ReturnOnEquityTTM/ReturnOnAssetsTTM/AnalystTargetPrice: OVERVIEW does supply these, but they're
+ *     outside the MVP field list this pass targets — kept out to hold the surface area to what was
+ *     actually scoped, not because AV lacks them.
+ *   - shortPercentOfFloat/debtToEquity/fcfYield/daysToEarnings: OVERVIEW has no equivalent field at
+ *     all (no short-interest, no leverage ratio, no FCF, no calendar) — never fabricated.
+ */
+export function parseAlphaVantageOverview(payload: Record<string, unknown>): SymbolEnrichment {
+  const peRatio = avOverviewNumber(payload.PERatio);
+  const dividendYieldRaw = avOverviewNumber(payload.DividendYield);
+  const eps = avOverviewNumber(payload.EPS);
+  const sector = avOverviewString(payload.Sector);
+  const industry = avOverviewString(payload.Industry);
+  const pbRatio = avOverviewNumber(payload.PriceToBookRatio);
+  const beta = avOverviewNumber(payload.Beta);
+  const fiftyTwoWeekHigh = avOverviewNumber(payload["52WeekHigh"]);
+  const fiftyTwoWeekLow = avOverviewNumber(payload["52WeekLow"]);
+  const epsGrowthRaw = avOverviewNumber(payload.QuarterlyEarningsGrowthYOY);
+
+  const strongBuy = avOverviewNumber(payload.AnalystRatingStrongBuy);
+  const buy = avOverviewNumber(payload.AnalystRatingBuy);
+  const hold = avOverviewNumber(payload.AnalystRatingHold);
+  const sell = avOverviewNumber(payload.AnalystRatingSell);
+  const strongSell = avOverviewNumber(payload.AnalystRatingStrongSell);
+  let analystBySource: Record<string, AnalystRatingDetail> | undefined;
+  if ([strongBuy, buy, hold, sell, strongSell].some((v) => typeof v === "number")) {
+    const counts = { strongBuy: strongBuy ?? 0, buy: buy ?? 0, hold: hold ?? 0, sell: sell ?? 0, strongSell: strongSell ?? 0 };
+    const score = analystScoreFromCounts(counts);
+    if (score !== undefined) {
+      analystBySource = { "alpha-vantage-rapidapi": { score: Math.round(score), label: labelFromAnalystScore(score), counts } };
+    }
+  }
+
+  return {
+    ...(peRatio !== undefined && peRatio > 0 && { peRatio }),
+    ...(dividendYieldRaw !== undefined && dividendYieldRaw >= 0 && { dividendYield: Math.round(dividendYieldRaw * 10000) / 100 }),
+    ...(eps !== undefined && { eps }),
+    ...(sector !== undefined && { sector }),
+    ...(industry !== undefined && { industry }),
+    ...(pbRatio !== undefined && pbRatio > 0 && { pbRatio }),
+    ...(beta !== undefined && { beta }),
+    ...(fiftyTwoWeekHigh !== undefined && { fiftyTwoWeekHigh }),
+    ...(fiftyTwoWeekLow !== undefined && { fiftyTwoWeekLow }),
+    ...(epsGrowthRaw !== undefined && { epsGrowth: epsGrowthRaw }),
+    ...(analystBySource !== undefined && { analystBySource })
+  };
+}
+
+/**
+ * Alpha Vantage via RapidAPI (host alpha-vantage.p.rapidapi.com) — a DIFFERENT credential/transport
+ * from the native AlphaVantageEnrichmentProvider above (query-param `apikey=`, own key pool, 25/day
+ * native per-source-IP cap). This lane authenticates via the x-rapidapi-host/x-rapidapi-key headers
+ * instead, and its real quota shape is a flat 500/day (RapidAPI dashboard, owner-confirmed) + 5
+ * req/min — nothing like the native key-pool's daily cap, so it gets its OWN persisted budget
+ * (rapidapi-quota.ts) rather than sharing tryReserveAlphaVantageCalls. Confirmed byte-identical JSON
+ * shape to native (2026-07-19 ground truth), but this provider only wires up OVERVIEW
+ * (fundamentals) — NOT NEWS_SENTIMENT, which the native lane above already covers when configured,
+ * and which isn't worth spending this separate quota on redundantly.
+ */
+export class AlphaVantageRapidApiEnrichmentProvider implements MarketEnrichmentProvider {
+  readonly name = "alpha-vantage-rapidapi";
+  readonly costTier = "paid" as const;
+  readonly configured = true;
+  // Quota-scarce (500/day shared against the 900/day combined ceiling) — gated into the cascade's
+  // second wave so it is never spent on a symbol every field it supplies is already filled for.
+  readonly quotaScarce = true;
+  // Exactly the keys parseAlphaVantageOverview can produce — keep in sync with that parser.
+  readonly suppliesFields = [
+    "peRatio",
+    "dividendYield",
+    "eps",
+    "sector",
+    "industry",
+    "pbRatio",
+    "beta",
+    "fiftyTwoWeekHigh",
+    "fiftyTwoWeekLow",
+    "epsGrowth",
+    "analystBySource"
+  ] as const;
+  private readonly host = "alpha-vantage.p.rapidapi.com";
+  private readonly scope: CacheScope;
+  private readonly keySource: ApiKeySource;
+
+  constructor(private readonly apiKey: string, keySource: ApiKeySource = "env", private readonly userId?: string) {
+    this.scope = cacheScopeForKeySource(keySource, userId);
+    this.keySource = keySource;
+  }
+
+  async enrich(symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
+    const normalized = Array.from(new Set(symbols.map(normalizeSymbol))).filter(Boolean).slice(0, maxSymbols());
+    if (normalized.length === 0) return {};
+
+    const now = Date.now();
+    const consented = hasDataPoolConsent(this.userId ?? "local");
+    const result: Record<string, SymbolEnrichment> = {};
+    const misses: string[] = [];
+    for (const symbol of normalized) {
+      const cached = readEnrichmentCache(this.name, symbol, this.userId, consented, now);
+      if (cached) result[symbol] = cached.data;
+      else misses.push(symbol);
+    }
+    if (misses.length === 0) return result;
+
+    for (let i = 0; i < misses.length; i += CONCURRENCY) {
+      const chunk = misses.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        chunk.map(async (symbol) => {
+          const admitted = tryReserveRapidApiCalls("alpha-vantage-rapidapi", 1, now) > 0;
+          if (!admitted) { result[symbol] = {}; return; }
+          const tracker = { dispatched: false };
+          try {
+            const payload = await rapidApiGetJson(
+              this.host,
+              `/query?function=OVERVIEW&symbol=${encodeURIComponent(symbol)}`,
+              this.apiKey,
+              { service: this.name, keySource: this.keySource, userId: this.userId },
+              tracker
+            );
+            const errorMessage = alphaVantageOverviewErrorMessage(payload);
+            if (errorMessage) {
+              logApiHealth({
+                service: this.name,
+                ok: false,
+                errorText: scrubProviderErrorText(`Alpha Vantage (RapidAPI) API warning/error: ${errorMessage}`, this.apiKey),
+                keySource: this.keySource,
+                userId: this.userId
+              });
+              throw new Error("Alpha Vantage (RapidAPI) API warning/error");
+            }
+            const data = parseAlphaVantageOverview(payload as Record<string, unknown>);
+            writeEnrichmentCache(this.name, symbol, this.scope, this.userId, data, now + ttlMs());
+            result[symbol] = data;
+          } catch {
+            if (!tracker.dispatched) refundRapidApiCalls("alpha-vantage-rapidapi", 1, now);
             result[symbol] = {};
           }
         })

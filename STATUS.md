@@ -30,6 +30,106 @@ filled-order fill-loss must-fix (visible-but-terminal WITH fills) applied + regr
 8 suites / 250 tests green on the merged tree (contains main `b4dd8a54`, #1738 both-mechanisms
 merge). Next: land.sh, PR, auto-merge, deploy-verify. Rollout:
 `docs/rollouts/2026-07-18-stop-intent-idempotency.md`.
+## 2026-07-19 — Three new RapidAPI-backed enrichment providers: Mboum Finance, YH Finance 15, Alpha Vantage RapidAPI (CLAUDE, branch `claude/model-availability-session-handoff-362fd3`)
+
+Owner-directed expansion of market-data enrichment redundancy against one shared RapidAPI
+subscription (`RAPIDAPI_KEY`). Implements three new `MarketEnrichmentProvider`s in
+`src/lib/data-providers.ts`, all dormant unless `RAPIDAPI_KEY` is set:
+
+- **Mboum Finance** (`mboum-finance.p.rapidapi.com`) and **YH Finance 15**
+  (`yahoo-finance15.p.rapidapi.com`) share one `SteadyApiEnrichmentProvider` implementation (near-
+  identical "steadyapi.com" backend per RapidAPI's own listing) — quote (price-family +
+  companyName + 52-week range) + "asset-profile" module (sector/industry), MVP-narrow by design.
+- **Alpha Vantage via RapidAPI** (`alpha-vantage.p.rapidapi.com`) — new
+  `AlphaVantageRapidApiEnrichmentProvider`, a separate transport/credential from the existing
+  native `AlphaVantageEnrichmentProvider` (query-param auth, own 25/day key pool). Wires up the
+  OVERVIEW function, mapped into EXISTING `SymbolEnrichment` fundamentals fields only (peRatio,
+  dividendYield, eps, sector, industry, pbRatio, beta, fiftyTwoWeekHigh/Low, epsGrowth,
+  analystBySource) — deliberately skips `institutionOwnershipPct` (AV's `PercentInstitutions`
+  scale could not be confirmed) and a few in-scope-but-unlisted fields (ROE/ROA, target price) to
+  hold the surface area to what was actually scoped.
+
+**Quota safety (owner's explicit "900/day max" instruction):** new `src/lib/rapidapi-quota.ts`
+mirrors `alpha-vantage-key-pool.ts`'s persisted daily-budget pattern (`tryReserve`/`refund`,
+survives Coolify restarts). Two ceilings, binding is whichever is LOWER: each provider's own cap
+(Mboum 16/day ← 500/mo÷30, YH Finance 15 3/day ← 100/mo÷30, AV-RapidAPI 500/day — all real caps,
+all env-overridable) AND a combined 900/day ceiling shared across all three
+(`PROVIDER_QUOTA_RAPIDAPI_COMBINED_PER_DAY`).
+
+**Cascade wiring:** the cascade (`CascadingEnrichmentProvider`) calls every registered provider's
+`enrich()` with the FULL per-run symbol batch regardless of what an earlier tier already filled
+(confirmed by reading the merge logic — no per-provider field-coverage narrowing exists outside
+the opt-in `congress.trade` coverage hint, which only engages when `ENRICHMENT_SHORT_CIRCUIT_ENABLED`
++ congress fundamentals are both on). Given that, the three new providers are registered AFTER the
+free keyless Yahoo scrape as a deep FAILOVER tier (first-wins per field means they only actually
+win a field Yahoo left empty), and safety comes entirely from the persisted per-call budget gate —
+NOT from any assumption that they'll be asked for fewer calls than symbols in the batch.
+
+33 new provider tests (`test/rapidapi-providers.test.ts`) + 13 quota tests
+(`test/rapidapi-quota.test.ts`). Full gate green: `npx tsc --noEmit` clean, `npm run lint` 0
+errors / 0 new warnings, `npm test` 420 files / 4927 tests pass, `npm run build` exit 0.
+
+**Note on environment quirk hit during verification:** this Mac's ambient `node` is v26
+(homebrew default), but `better-sqlite3`'s prebuilt binary targets a different ABI — any command
+that touches the DB (including `getInternalSetting`/`setInternalSetting`, which this feature's
+persisted budget relies on) must run with `/opt/homebrew/opt/node@24/bin` prepended to `PATH`, or
+every DB call silently fails inside its own try/catch and every quota reservation looks like a
+fresh, always-successful state. Caught this via a genuinely confusing first test run (see rollout
+note) — a good trap for the next agent to know about up front.
+
+Files: `src/lib/rapidapi-quota.ts` (new), `src/lib/data-providers.ts`,
+`src/lib/provider-rate-limit.ts` (three new `HARD_DEFAULTS` pacer entries),
+`test/rapidapi-quota.test.ts` (new), `test/rapidapi-providers.test.ts` (new). Rollout:
+`docs/rollouts/2026-07-19-rapidapi-yahoo-av-providers.md`. Verified but NOT YET LANDED —
+`scripts/land.sh` is a separate phase per this session's instructions.
+
+**Post-implementation verification fixes (same day):** an independent review found `rapidApiGetJson`
+passed `retries: 1` instead of the codebase's own `retries: 0` quota-reservation convention — a 429
+could fire a second real fetch while the persisted budget only counted one, silently letting the
+budget under-count real network calls 2x. Fixed. Also tightened `parseSteadyApiQuote`'s 52-week-range
+split (`range.split("-")` → `range.split(/\s+-\s+/)`) to not mis-tokenize a hypothetical negative
+bound. The cascade-concurrency gap (all providers, including these three, race the free Yahoo scrape
+concurrently by default; no general per-symbol coverage narrowing exists) was reconfirmed as real and
+already disclosed — not fixed in this pass (needs its own design work touching shared cascade code),
+flagged as a follow-up task instead. Re-verified: `npx tsc --noEmit` clean, targeted vitest run
+210/210 pass, `npm run lint` 0 errors/0 new warnings. See the rollout note's "Post-implementation
+verification pass" section for full detail.
+
+**Per-symbol coverage-narrowing gate (same day, follow-up pass — the deferred P0 is now CLOSED):**
+`CascadingEnrichmentProvider.enrich` now dispatches in TWO waves. Wave one is every provider that
+has not opted in — dispatched byte-for-byte as before (one concurrent `Promise.all` over the full
+batch, or the App A short-circuit variant), so no pre-existing provider changes behavior or
+latency. Wave two runs only after wave one settles and only over the symbols where wave one left a
+gap in the fields that provider declares it can supply; a scarce provider with nothing to add is
+not called at all and therefore reserves no quota. Providers opt in via two new
+`MarketEnrichmentProvider` fields following the existing `costTier`/`coveredFields` idiom:
+`quotaScarce: boolean` and `suppliesFields: readonly (keyof SymbolEnrichment)[]` (unset/empty →
+fails OPEN into wave one rather than silently never running). Declared on all three RapidAPI
+providers. Results are reassembled POSITIONALLY into registration order, so first-wins merge,
+field arbitration, analyst blending, and `MarketScan.source` attribution are unchanged. A wave-one
+provider that throws contributes `{}` → its fields read as uncovered → the scarce tier still runs
+(pinned by tests). Gated by `ENRICHMENT_SCARCE_TIER_GATE_ENABLED`, **default ON** and scoped only
+to opted-in providers (the RapidAPI tier is new and currently wasteful, so there is no regression
+surface). New `test/enrichment-scarce-tier-gate.test.ts` — 13 tests including a real
+`SteadyApiEnrichmentProvider` + persisted-budget check that a skipped call costs zero quota.
+Verified (with `/opt/homebrew/opt/node@24/bin` on `PATH`): `npx tsc --noEmit` clean; 13/13 new
+tests; 292/292 across the 8 provider/quota test files; 100/100 across the 5 remaining
+cascade-touching files; `npm run lint` 0 errors / 0 new warnings. Full `npm test` + `npm run build`
+deferred to the landing gate. Still NOT LANDED — reported back for review.
+
+## 2026-07-19 — Four-handoff conquest: reconciliation + shepherding + hardening landed (CLAUDE, branch `claude/model-availability-session-handoff-362fd3`)
+
+All four owner-linked handoff docs executed/dispositioned: missing model-availability rollout
+authored as a stamped reconstruction (underlying work verified landed via #1703-#1737);
+bge-m3 corpus re-embed verified INCOMPLETE (legacy 8,688 vs managed 1,418 vectors; voyage
+space intact) with the gating `claude/corpus-reembed-hardening` branch found unpushed and
+landed (PR auto-merge armed — 2026-07-18 fleet hold lifts on merge+deploy); AG's concurrent
+"prod reindex triggered" flagged as a hold conflict in #agent-sync; PRs #1771/#1773/#1774
+shepherded (Codex threads triaged, 2 real #1773 findings fixed via `b3f05425`); dual-workspace
+OpenRouter MCP OAuth verified broken (both on Socratic workspace — owner re-auth needed);
+alpha-vantage health red confirmed deliberate (deregistered lane, not a dead key). Owner
+ruling codified fleet-wide: OpenRouter MCP is research-only. Details:
+`docs/rollouts/2026-07-19-four-handoff-conquest.md`.
 ## 2026-07-19 — PR #1773 Codex-review fix pass: 6 real findings fixed, verified individually (CLAUDE, on branch `monet/session-handoff-2026-07-19`)
 
 Owner-directed fix of 6 Codex P2 findings on PR #1773 (docs-only), each checked against live

@@ -50,7 +50,19 @@ const HARD_DEFAULTS: Record<string, { perMin?: number; minIntervalMs?: number; c
   // for any cross-path race; it deliberately does NOT use a 60s interval, which would re-introduce
   // the multi-minute scan stall the window-gate exists to avoid. The old 10s/120-symbol config
   // burst ~120 credits in one call and was 100% HTTP 429 in prod.
-  twelvedata: { minIntervalMs: 2_000, concurrency: 1 }
+  twelvedata: { minIntervalMs: 2_000, concurrency: 1 },
+  // RapidAPI "Basic" tier for both Mboum Finance and YH Finance 15 is documented as 1 req/sec —
+  // strictly serial with >1s spacing, same shape as the alpha-vantage entry above. The REAL
+  // throttle for these two is their tiny persisted daily budget (see rapidapi-quota.ts —
+  // Mboum ~16/day, YH Finance ~3/day); this pacer just keeps whatever few calls DO fire from
+  // bursting past the per-second gate within one scan.
+  "mboum-finance": { minIntervalMs: 1100, concurrency: 1 },
+  "yahoo-finance15": { minIntervalMs: 1100, concurrency: 1 },
+  // Alpha Vantage's RapidAPI-hosted plan is a separate subscription/quota shape from the native
+  // key pool above (500/day, 5/min — NOT the native 25/day) — see alpha-vantage-key-pool.ts's
+  // own doc comment for why native pacing stays keyed by provider name only; this is a distinct
+  // provider name so the two transports never share one pacer/quota by accident.
+  "alpha-vantage-rapidapi": { perMin: 5, concurrency: 1 }
 };
 
 function envKeyFor(provider: string): string {

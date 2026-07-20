@@ -53,6 +53,39 @@ As of 2026-07-08 (assignment-rule update).
   renders it; (D) owner ruling codified in `AGENTS.md` "Don't" — NO agent on ANY platform ever
   creates a provider API key — and broadcast to #agent-sync. Diagnosis of the owner's
   "no credits / API key failed" strategy-run error is in the rollout note.
+- **[Socratic.Trade][CLAUDE] Three new RapidAPI-backed enrichment providers: Mboum Finance, YH
+  Finance 15, Alpha Vantage RapidAPI transport (worktree
+  `model-availability-session-handoff-362fd3`, branch
+  `claude/model-availability-session-handoff-362fd3`, claimed 2026-07-19) — IN PROGRESS
+  (implementation + tests complete, FULL VERIFY GATE GREEN — tsc/lint/4927 tests/build — not yet landed).** Owner-directed
+  expansion of market enrichment redundancy against one shared RapidAPI subscription. New
+  `src/lib/rapidapi-quota.ts` (persisted daily budget, mirrors alpha-vantage-key-pool.ts's
+  tryReserve/refund pattern) enforces BOTH a per-provider cap (Mboum 16/day, YH Finance 15 3/day,
+  AV-RapidAPI 500/day — env-overridable via `PROVIDER_QUOTA_*_PER_DAY`) AND a combined 900/day
+  safety ceiling (`PROVIDER_QUOTA_RAPIDAPI_COMBINED_PER_DAY`) across all three, since Mboum/YHF's
+  real limits are MONTHLY (500/mo, 100/mo) and a naive per-scan dispatch could exhaust a month's
+  quota in one run. New `SteadyApiEnrichmentProvider` (shared by Mboum + YH Finance 15) +
+  `AlphaVantageRapidApiEnrichmentProvider` in `src/lib/data-providers.ts`, registered in
+  `getEnrichmentProvider` AFTER the free Yahoo scrape (deep failover tier — first-wins per field
+  means they only fill gaps the free scrape left empty), dormant unless `RAPIDAPI_KEY` is set. 33
+  new provider tests + 13 quota tests; full suite 420 files/4927 tests pass, build exit 0. Rollout:
+  `docs/rollouts/2026-07-19-rapidapi-yahoo-av-providers.md`.
+  *Correction (2026-07-19, in place per board rules): this work now lives on branch
+  `claude/rapidapi-yahoo-av-providers` (PR #1796), not
+  `claude/model-availability-session-handoff-362fd3` as the row originally read.*
+  **Update 2026-07-19 — per-symbol coverage-narrowing gate added (the deferred P0 is CLOSED).**
+  `CascadingEnrichmentProvider.enrich` now runs a TWO-WAVE dispatch: wave one is every provider that
+  has not opted in (unchanged — same single concurrent `Promise.all` over the full batch, so zero
+  latency/behavior regression for pre-existing providers), then wave two runs only the providers
+  that declare `quotaScarce` + `suppliesFields`, and only over the symbols where wave one left one
+  of their declared fields empty. A scarce provider with nothing to add is not called at all and so
+  reserves no quota. Declared on all three RapidAPI providers; results reassembled positionally so
+  first-wins merge precedence / attribution are identical; a wave-one provider that throws counts as
+  "did not cover" so it can never suppress the failover tier. Flag
+  `ENRICHMENT_SCARCE_TIER_GATE_ENABLED`, default ON, scoped only to opted-in providers. New
+  `test/enrichment-scarce-tier-gate.test.ts` (13 tests, incl. a real-provider zero-quota check).
+  tsc clean, lint 0 errors, 405 targeted tests green across every cascade-touching file; full
+  `npm test`/`npm run build` deferred to the landing gate.
 - **[Socratic.Trade][CLAUDE] Shared package bump to 904ea96a (Congress.Trade PR #626 compat, 2026-07-19) — IN PROGRESS.** Bumps shared pin to v1.10.0 to provide `callClassifier` exports; additive only. Branch `antigravity/bump-shared-904ea96a`, committed & pushed, PR opening. Gates Congress.Trade #626 merge & check-pin CI unblock.
 
 - **[Socratic.Trade][CLAUDE] Usage-compliance Wave 2 (ST lane): telemetry gaps + OpenRouter classifier
@@ -3712,6 +3745,10 @@ brackets; effort S/M/L.
 
 - **Repo Hygiene (AG, S) — COMPLETED 2026-07-18.** Merged PR #1754 (deleted tracked lint artifacts) and deployed Socratic.Trade to production on Coolify.
 - **2026-07-18 Merged-worktree cleanup sweep + Voyage /api/health RCA (CLAUDE, branch `claude/cleanup-merged-worktrees-bdbc08`).** Removed 5 verified merged worktree checkouts (#1740-tmp/#1587/#1559/#1624/#1563; ancestry-verified, branches retained); kept `codex/reconcile-pr1745` (7 unlanded commits, NO PR — CODEX disposition), `socratic-admin-console-shell` (dirty), `trading-ag-rag` (standing lane). Voyage RCA: /api/health 200 ok; red `voyage` lane = prod bge-m3 embeds via OpenRouter failing 402 — OpenRouter account EXHAUSTED (25.00/25.31); Voyage key valid; RAG ingestion stalled pending owner credit top-up (or SiliconFlow key — RAG-embed-only; LLM paths still need OpenRouter credits). Rollout: `docs/rollouts/2026-07-18-worktree-cleanup-voyage-rca.md`. State: **PR #1765 open (docs) — landing via MONET cap-handoff; INCIDENT RESOLVED (OpenRouter topped up 75/25.31, voyage.ok=true, prod recovered — verified). Flip to Completed on merge.**
+
+- **2026-07-19 Four-handoff conquest (CLAUDE, branch `claude/model-availability-session-handoff-362fd3`).** Owner-directed team-of-agents pickup of 4 handoff docs. (1) Missing `2026-07-18-model-availability-openrouter-unify.md` reconciled: work fully landed via #1703/#1705/#1716/#1733/#1736/#1737; doc authored as provenance-stamped reconstruction at the linked path. (2) MONET handoff executed: bge-m3 re-embed verified INCOMPLETE (Pinecone legacy 8,688 vs managed 1,418; voyage space intact, no purge); the gating `claude/corpus-reembed-hardening` branch found local-only/no-PR and LANDED via land.sh (auto-merge armed — hold lifts on merge+deploy); AG's mid-session "prod reindex triggered" (#1775) flagged as hold conflict; #1771 healthy; #1773's 4 Codex threads triaged (2 resolved as non-actionable with evidence, 2 REAL fixed via `b3f05425` on the MONET branch under amended claim: earningscalls-transcripts docType + ledger rows); alpha-vantage red = deliberate deregistration, not a dead key. (3) MCP-secrets handoff: dual-workspace OpenRouter OAuth verified BROKEN (both servers on Socratic workspace, identical credits matching prod health) — owner re-auth steps delivered; owner rotation/restart checklist surfaced. (4) Mobile/PR-integration handoff reconciled (sweep overtook it; migration collision confirmed cleanly resolved v1–52 unique); #1774 marked ready + auto-merge armed. Owner ruling codified: OpenRouter MCP = research-only (AGENT-SYNC.md stanza + memory + fleet announce). Rollout: `docs/rollouts/2026-07-19-four-handoff-conquest.md`. State: **In Progress (landing; #1771/#1773/#1774/hardening-PR auto-merges in flight).**
+- **2026-07-18 PR-queue closeout status (CLAUDE; corrected in place — first draft misattributed #1741/#1742 and misnamed #1735's branch).** PRs #1728, #1733, #1736, #1737, #1738 merged to `main` and auto-deployed via Coolify. CI required-check failures across all open PRs (GitHub hosted-runner billing block) resolved by CODEX PR #1739 (retarget to self-hosted Coolify runner) plus CODEX follow-ups #1741/#1742 (lightweight checkout + event-SHA pin). Remaining open: PR #1735 (`agent/ag-recovery-v48-migration`, SEC RAG table recovery migration v52 + companyName-casing and @opentelemetry lockfile fixes) and PR #1740 (`codex/admin-console-shell`) — both 0 unresolved threads, auto-merge armed, branch-updates in progress (CLAUDE sonnet agent). `agent/ag-reindex-bge-m3` first landing aborted on 12 test failures under fleet-contention load-60; retriage in progress (CLAUDE/Fable agent). Owner action open: GitHub Actions billing (Settings -> Billing & plans) if hosted runners are ever wanted again.
+- **2026-07-18 BGE-M3 reindex branch landing retry (CLAUDE).** `agent/ag-reindex-bge-m3` first land aborted at test gate (12 failures/6 files under load 60-67). Triage: 2 real fixes (reindex-all test DB isolation 73929f83; securities-import casing expectation superseded by #1735 preserve-case fix via merge 339676a5), remainder load-flakes clean on serial rerun. Branch synced to post-#1761 main (atop the landed bge-m3 metering/reembed/worker program 545da7c0). Re-landing via land.sh; PR + auto-merge to follow.
 
 - **2026-07-19 MONET cloud-session: PR sweep + SiliconFlow bge-m3 metering fix + handoff (MONET, branches `monet/fix-siliconflow-bge-m3-price` + `monet/session-handoff-2026-07-19`).** Owner-directed "all open PRs resolved/merged/deployed" sweep: #1745, #1736, #1735 (owner-merged), #1740, #1754 merged + auto-deployed (prod healthy throughout; #1727 merged earlier). PR **#1771** fixes the SiliconFlow bge-m3 embed price 10x undercount (regression-guard proven; auto-merge armed). PR **#1773** is the session handoff note — incl. the verified bge-m3-vs-voyage answer and the corpus re-embed-PENDING warning. State: **In Progress (#1771/#1773 auto-merge armed).** *(Ledger row appended by CLAUDE during owner-directed handoff execution — addresses the #1773 Codex protocol finding; MONET session had ended.)*
 - **2026-07-18 PR-queue closeout status (CLAUDE; corrected in place — first draft misattributed #1741/#1742 and misnamed #1735's branch).** PRs #1728, #1733, #1736, #1737, #1738 merged to `main` and auto-deployed via Coolify. CI required-check failures across all open PRs (GitHub hosted-runner billing block) resolved by CODEX PR #1739 (retarget to self-hosted Coolify runner) plus CODEX follow-ups #1741/#1742 (lightweight checkout + event-SHA pin). Remaining open: PR #1735 (`agent/ag-recovery-v48-migration`, SEC RAG table recovery migration v52 + companyName-casing and @opentelemetry lockfile fixes) and PR #1740 (`codex/admin-console-shell`) — both 0 unresolved threads, auto-merge armed, branch-updates in progress (CLAUDE sonnet agent). `agent/ag-reindex-bge-m3` first landing aborted on 12 test failures under fleet-contention load-60; retriage in progress (CLAUDE/Fable agent). Owner action open: GitHub Actions billing (Settings -> Billing & plans) if hosted runners are ever wanted again.
