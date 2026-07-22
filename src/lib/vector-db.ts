@@ -3280,13 +3280,20 @@ async function storeDocumentImpl(
   // authority before creating any local commit row, so a control-plane/configuration failure cannot
   // leave a deterministic receipt for a provider that was never identified.
   const providerClients = await getClients(userId, options?.leaseGuard);
-  if (!providerClients.pc || !providerClients.voyage || !providerClients.initCacheKey) {
+  const activeProvider = activeEmbeddingProvider(userId);
+  // Voyage is intentionally test-only after the production BGE-M3 migration. A managed document
+  // must therefore require the credential that will actually embed it, not the optional test
+  // client returned by getClients(). Keep the Voyage client check for its explicit test provider.
+  const hasActiveEmbeddingAuthority = activeProvider === ("voyage" as any)
+    ? Boolean(providerClients.voyage)
+    : Boolean(resolveApiKey(activeProvider, userId));
+  if (!providerClients.pc || !providerClients.initCacheKey || !hasActiveEmbeddingAuthority) {
     audit("vector_store", {
       ok: false,
       attempted: chunked.length,
       indexed: 0,
       skipped: true,
-      reason: "missing Pinecone/Voyage keys before managed commit"
+      reason: `missing Pinecone or ${activeProvider} embedding authority before managed commit`
     }, userId);
     return { attempted: chunked.length, indexed: 0, skipped: true, unconfigured: true };
   }

@@ -167,6 +167,56 @@ function buildLargeAtomicTableDoc(): string {
 }
 
 describe("storeDocument: per-chunk char cap aligned with the token chunker (item 5)", () => {
+  it("uses the active OpenRouter embedding authority in production when Voyage is unavailable", async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalFetch = globalThis.fetch;
+    process.env.NODE_ENV = "production";
+    process.env.RAG_EMBED_PROVIDER = "openrouter";
+    process.env.OPENROUTER_API_KEY = "openrouter-test";
+    delete process.env.VOYAGE_API_KEY;
+    mocks.resolveApiKey.mockImplementation((service: string) => {
+      if (service === "pinecone") return process.env.PINECONE_API_KEY;
+      if (service === "openrouter") return process.env.OPENROUTER_API_KEY;
+      return undefined;
+    });
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      data: [{ embedding: Array.from({ length: 1024 }, (_, index) => index / 1024) }]
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetch);
+
+    try {
+      const { storeDocument } = await import("../src/lib/vector-db");
+      const stored = await storeDocument({
+        text: "OpenRouter managed-ingestion regression with material filing context.",
+        doc_id: "OPENROUTER-MANAGED-INGESTION-REGRESSION",
+        ticker: "AAPL",
+        title: "AAPL managed filing",
+        doc_type: "10-q",
+        source: "sec-edgar",
+        published_at: "2026-07-21T12:00:00.000Z"
+      });
+
+      expect(stored).toMatchObject({ indexed: 1, documentComplete: true });
+      expect(mocks.embed).not.toHaveBeenCalled();
+      expect(fetch).toHaveBeenCalledWith(
+        "https://openrouter.ai/api/v1/embeddings",
+        expect.objectContaining({ method: "POST" })
+      );
+      // Managed documents write pending records, persist relational receipts, then mark the
+      // provider records committed. Reaching both calls proves this did not return unconfigured.
+      expect(mocks.upsert).toHaveBeenCalledTimes(2);
+      expect(mocks.upsert.mock.calls[0]![0].records[0].metadata.ingest_state).toBe("pending");
+      expect(mocks.upsert.mock.calls[1]![0].records[0].metadata.ingest_state).toBe("committed");
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv;
+      delete process.env.RAG_EMBED_PROVIDER;
+      delete process.env.OPENROUTER_API_KEY;
+      process.env.VOYAGE_API_KEY = "voyage-test";
+      vi.stubGlobal("fetch", originalFetch);
+      vi.resetModules();
+    }
+  });
+
   it("does not truncate a large atomic (table) chunk that fits the chunker's token budget", async () => {
     const tableText = buildLargeAtomicTableDoc();
     expect(tableText.length).toBeGreaterThan(2400); // would have hit the OLD fixed cap

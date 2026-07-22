@@ -6,6 +6,16 @@ Purged the Voyage AI SDK and its dependencies, standardizing the production RAG 
 Synchronized 40 pending Socratic.Trade PRs and 6 pending Congress.Trade PRs with the stabilized main branches to propagate the Linux X64 Coolify CI runner configuration fix. All Dependabot PRs were triggered to rebase via comments, and human/agent PRs had main cleanly merged to force CI runs on the operational runner pool, unlocking the merge backlog.
 # Current Status
 
+## 2026-07-21 — Managed OpenRouter RAG ingestion authority gate (CODEX, local branch `codex/rag-ingestion-gate-20260721`)
+
+`storeDocument` no longer treats the test-only Voyage client as a production prerequisite. Managed
+commits now require Pinecone initialization plus the credential for `activeEmbeddingProvider()`;
+the explicit Voyage client remains the test-provider path. A production-mode regression uses mocked
+OpenRouter embeddings and Pinecone writes, with no live provider call. This lane does not re-embed,
+purge vectors, change secrets, or alter production configuration. Next: repeat the focused test and
+TypeScript gate when shared-host capacity permits, then hand the isolated commit to the RAG
+implementation program for review/landing.
+
 ## 2026-07-19 — Four-handoff conquest: reconciliation + shepherding + hardening landed (CLAUDE, branch `claude/model-availability-session-handoff-362fd3`)
 
 All four owner-linked handoff docs executed/dispositioned: missing model-availability rollout

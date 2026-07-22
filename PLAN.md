@@ -1,5 +1,11 @@
 # Active Implementation Plan
 
+> **2026-07-21 — Managed RAG ingestion authority repair (CODEX, branch `codex/rag-ingestion-gate-20260721`).**
+> Repair the stale `storeDocument` provider gate left by the Voyage SDK purge: require Pinecone
+> initialization plus the actual active embedding provider credential, while preserving the explicit
+> test-only Voyage path. Add a production-mode OpenRouter/Pinecone regression. This is a code-path
+> prerequisite only; no re-embed, purge, secret, or production operation is included.
+
 > **2026-07-21 - CI Runner Migration (Antigravity, branch `agent/antigravity-ci-fix`).** Replaced failing self-hosted runner `trading-live` with `ubuntu-latest` across all CI workflows (`.github/workflows/*.yml`) in Socratic.Trade. The Mac self-hosted runner environment was corrupted after Hetzner failure. Scheduled to land via `scripts/land.sh` to unblock 38 pending PRs.
 > **2026-07-19 - Land the #1771/#1773/#1777 chain, then run the corpus re-embed to completion
 > (owner-directed pickup, multiple lanes).** Next actions, in order: (1) land **#1771**
