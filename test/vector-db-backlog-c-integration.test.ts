@@ -386,6 +386,24 @@ describe("R16: per-run RAG budget ceiling with graceful degradation", () => {
     expect(second.length).toBeGreaterThan(0); // still returns core dense-cosine results
     expect(mocks.rerank).not.toHaveBeenCalled(); // degraded: rerank skipped
   });
+
+  it("keeps local corpus-wide lexical over-fetch enabled during budget degradation", async () => {
+    process.env.RAG_RUN_BUDGET_ENABLED = "on";
+    process.env.RAG_RUN_BUDGET_CEILING = "1";
+    process.env.RAG_CORPUS_WIDE_LEXICAL = "on";
+    process.env.VECTOR_ENABLE_RERANK = "on";
+    mocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
+    mocks.query.mockResolvedValue({ matches: [{ id: "c0", score: 0.9, metadata: { text: "chunk", userId: "local", scope: "shared" } }] });
+    const { retrieveContextDetailed } = await import("../src/lib/vector-db");
+    const { resetRunBudget } = await import("../src/lib/rag/run-budget");
+    resetRunBudget();
+
+    await retrieveContextDetailed("q1", "AAPL", 2, "local");
+    mocks.query.mockClear();
+    await retrieveContextDetailed("q2", "AAPL", 2, "local");
+
+    expect(mocks.query.mock.calls.some(([request]) => request.topK === 10)).toBe(true);
+  });
 });
 
 // ── R5: consolidated per-retrieval telemetry ────────────────────────────────

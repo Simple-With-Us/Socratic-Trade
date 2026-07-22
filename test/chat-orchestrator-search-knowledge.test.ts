@@ -61,6 +61,41 @@ describe("buildProductionDeps().searchKnowledge — R13 provenance payload", () 
     expect("isStale" in chunk).toBe(false); // never present when the flag is off — not even as undefined-valued key noise
   });
 
+  it("uses immutable occurrence coordinates for id-less citation refs", async () => {
+    mocks.retrieveContextDetailed.mockResolvedValue([
+      {
+        id: "",
+        text: "Repeated boilerplate",
+        score: 0.8,
+        source: "sec-edgar",
+        doc_type: "10-k",
+        section: "MD&A",
+        metadata: {
+          accession: "0001",
+          chunk_ordinal: 3,
+          content_hash: "same-text"
+        }
+      },
+      {
+        id: "",
+        text: "Repeated boilerplate",
+        score: 0.7,
+        source: "sec-edgar",
+        doc_type: "10-k",
+        section: "Risk Factors",
+        metadata: {
+          accession: "0001",
+          chunk_ordinal: 4,
+          content_hash: "same-text"
+        }
+      }
+    ]);
+    const deps = orchestrator.buildProductionDeps();
+    const results = await deps.searchKnowledge({ query: "boilerplate", ticker: "AAPL", k: 2 }, "local");
+
+    expect(results[0]!.evidence_ref).not.toBe(results[1]!.evidence_ref);
+  });
+
   // 2026-07-04 RAG quick-wins: wire the previously-dormant post-rerank relevance floor + near-dup
   // suppression into this call site — both existed since 2026-07-01 but no caller ever passed them.
   it("passes minRelevanceScore and dedupeSimilarity through to retrieveContextDetailed", async () => {

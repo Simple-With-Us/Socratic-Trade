@@ -246,6 +246,26 @@ describe("searchCorpusWideLexicalCandidates", () => {
     expect(searchCorpusWideLexicalCandidates({ symbol: "AAPL", query: "AAPL" })).toEqual([]);
   });
 
+  it("classifies sec-8k FTS rows without requiring a sec_filings row", () => {
+    seed({
+      vectorId: "vec-8k-body",
+      hash: "hash-8k-body",
+      source: "sec-8k",
+      accession: "0000320193-26-000008",
+      acceptedAt: "2026-02-01T12:00:00.000Z",
+      text: "The company entered a material agreement."
+    });
+    // Full-body 8-K ingestion owns the occurrence/FTS row but does not synthesize sec_filings.
+    getDb().prepare("DELETE FROM sec_filings WHERE accession = ?").run("0000320193-26-000008");
+
+    const rows = searchCorpusWideLexicalCandidates({
+      symbol: "AAPL",
+      query: "material agreement",
+      docTypes: ["8-k"]
+    });
+    expect(rows.map((row) => row.id)).toEqual(["vec-8k-body"]);
+  });
+
   it("uses occurrence accepted_at for PIT and makes strict-undated explicit", () => {
     seed({
       vectorId: "vec-old",

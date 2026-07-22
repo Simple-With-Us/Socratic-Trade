@@ -124,9 +124,28 @@ function uniqueCandidates(candidates: readonly PromptRagCandidate[]): PromptRagC
  * candidate header makes normal chunk boundaries unique, while the tail guard
  * prevents a coincidental phrase elsewhere in the prompt from receiving credit.
  */
-function consumedCharacters(candidateText: string, promptText: string): number {
-  const whole = promptText.indexOf(candidateText);
-  if (whole >= 0) return candidateText.length;
+type PromptRange = { start: number; end: number };
+
+function overlapsUsedRange(start: number, end: number, usedRanges: readonly PromptRange[]): boolean {
+  return usedRanges.some((range) => start < range.end && end > range.start);
+}
+
+function consumedCharacters(
+  candidateText: string,
+  promptText: string,
+  usedRanges: PromptRange[]
+): number {
+  let wholeFrom = 0;
+  while (wholeFrom < promptText.length) {
+    const whole = promptText.indexOf(candidateText, wholeFrom);
+    if (whole < 0) break;
+    const wholeEnd = whole + candidateText.length;
+    if (!overlapsUsedRange(whole, wholeEnd, usedRanges)) {
+      usedRanges.push({ start: whole, end: wholeEnd });
+      return candidateText.length;
+    }
+    wholeFrom = whole + 1;
+  }
 
   // Keep the anchor short enough to recognize a useful budget-tail prefix
   // (the evidence budget can cut before 32 characters), while the end-of-prompt
@@ -144,7 +163,8 @@ function consumedCharacters(candidateText: string, promptText: string): number {
     // A partial match is evidence only when the serialized prompt ends inside
     // this chunk. Otherwise containment changed it and the exact consumed span
     // cannot be proven from text alone, so fail closed to not-consumed.
-    if (matched > 0 && start + matched === promptText.length) {
+    const matchedEnd = start + matched;
+    if (matched > 0 && matchedEnd === promptText.length && !overlapsUsedRange(start, matchedEnd, usedRanges)) {
       // `formatChunkWithProvenance` prefixes chunks with a short metadata header. Do not credit
       // a tail that reaches only that header: it establishes neither the evidence body nor a
       // useful partial quote. For short body-only serializations, require their whole body.
@@ -153,7 +173,10 @@ function consumedCharacters(candidateText: string, promptText: string): number {
       const bodyLength = candidateText.length - bodyOffset;
       const bodyMatched = Math.max(0, matched - bodyOffset);
       const requiredBody = Math.min(MIN_TRUNCATED_BODY_CHARACTERS, bodyLength);
-      if (bodyMatched >= requiredBody) return matched;
+      if (bodyMatched >= requiredBody) {
+        usedRanges.push({ start, end: matchedEnd });
+        return matched;
+      }
     }
     from = start + 1;
   }
@@ -183,8 +206,9 @@ export function derivePromptRagConsumption(
         : "empty";
   const consumed: PromptRagConsumptionReceipt[] = [];
   const retrievedButNotConsumed: PromptRagConsumptionReceipt[] = [];
+  const usedRanges: PromptRange[] = [];
   for (const candidate of unique) {
-    const consumedCharactersCount = consumedCharacters(candidate.serializedText, promptText);
+    const consumedCharactersCount = consumedCharacters(candidate.serializedText, promptText, usedRanges);
     const state: PromptConsumptionState = consumedCharactersCount === candidate.serializedText.length
       ? "consumed"
       : consumedCharactersCount > 0

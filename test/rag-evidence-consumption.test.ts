@@ -90,6 +90,28 @@ describe("RAG prompt-consumption receipts", () => {
     expect(receipt.consumed).toHaveLength(2);
   });
 
+  it("credits only one of two distinct identical-text occurrences when one was budgeted out", () => {
+    const first = candidate({
+      chunkId: undefined,
+      accession: "0000123-26-000001",
+      section: "MD&A",
+      ordinal: 3,
+      contentHash: "same-boilerplate"
+    });
+    const second = candidate({
+      chunkId: undefined,
+      accession: "0000123-26-000001",
+      section: "Risk Factors",
+      ordinal: 4,
+      contentHash: "same-boilerplate"
+    });
+    const receipt = derivePromptRagConsumption([first, second], [first.serializedText]);
+
+    expect(receipt.uniqueCandidateCount).toBe(2);
+    expect(receipt.consumed).toHaveLength(1);
+    expect(receipt.retrievedButNotConsumed).toHaveLength(1);
+  });
+
   it("makes empty, failed, and skipped retrieval outcomes explicit without persisting error text", () => {
     const empty = derivePromptRagConsumption([], [], { retrievalAttempted: true });
     const failed = derivePromptRagConsumption([], [], { retrievalAttempted: true, retrievalFailureCount: 2 });

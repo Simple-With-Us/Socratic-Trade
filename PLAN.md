@@ -1,5 +1,12 @@
 # Active Implementation Plan
 
+> **2026-07-22 - RAG review remediation follow-up (CODEX).** PR #1892's latest review pass found
+> five correctness gaps. Keep local FTS recall active when paid rerank/hybrid budget degradation
+> trips; classify source-backed 8-K rows without a `sec_filings` join; include immutable occurrence
+> coordinates in chat evidence refs; require vector IDs or accession coordinates in golden selectors;
+> and allocate identical serialized evidence to one occurrence. Verify focused tests, TypeScript,
+> lint, then the full required gate before pushing the existing PR ref.
+
 > **2026-07-21 - RAG strategic-performance implementation (CODEX team).** Execute in ordered,
 > isolated PRs: (1) repair the managed-ingestion stale Voyage prerequisite and add a production-mode
 > OpenRouter regression; (2) add a production-path point-in-time financial retrieval evaluator; (3)

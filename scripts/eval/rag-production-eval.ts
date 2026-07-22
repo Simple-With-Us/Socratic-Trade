@@ -407,8 +407,8 @@ function parseEvidenceRefs(value: unknown, field: string): ExpectedEvidenceRef[]
       if (typeof row.ordinal !== "number" || !Number.isInteger(row.ordinal) || row.ordinal < 0) throw new Error(`${field}[${index}].ordinal must be a non-negative integer.`);
       ref.ordinal = row.ordinal;
     }
-    if (!ref.contentHash && !(ref.accession && (ref.section || ref.ordinal != null))) {
-      throw new Error(`${field}[${index}] requires contentHash or accession plus section/ordinal; broad source-only selectors are not stable chunk identities.`);
+    if (!(ref.vectorId || (ref.accession && (ref.section || ref.ordinal != null)))) {
+      throw new Error(`${field}[${index}] requires vectorId or accession plus section/ordinal; contentHash must be paired with occurrence coordinates.`);
     }
     return ref;
   });
