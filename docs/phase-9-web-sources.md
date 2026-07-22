@@ -135,7 +135,9 @@ held corpus rows into the active embedding space before any legacy vectors are d
 symbol-scoped run is useful for testing or targeted repair, but it is not proof that an entire
 docType has been backfilled. `purge-legacy` must remain blocked until an unscoped docType run
 records completion under the active embed revision; scoped runs deliberately do not write
-`completedForEmbedRevision`.
+`completedForEmbedRevision`. Scoped and full-corpus cursors are persisted separately, and every
+cursor is bound to its embedding revision, so neither a scoped watermark nor an older embedding
+space can make a later full migration skip rows or mint false completion proof.
 
 ## Wiring into the app
 

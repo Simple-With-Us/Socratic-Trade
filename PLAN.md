@@ -4,9 +4,11 @@
 > `cursor/critical-bug-management-0770`).** Critical-bug sweep found that a symbol-scoped
 > corpus re-embed could persist a full-docType completion stamp and thereby authorize
 > `purge-legacy` to delete all legacy vectors for that docType. Patch `corpus-reembed` so
-> scoped runs never stamp full-corpus completion; keep purge blocked until an unscoped run
-> completes under the active embedding revision. Focused regression added in
-> `test/corpus-reembed.test.ts`; run the ordered local gate, open PR, and do not run
+> scoped runs use isolated cursors and never stamp or erase full-corpus completion; every watermark
+> is revision-bound. Keep purge blocked until an unscoped run completes under the active embedding revision. Focused regressions added in
+> `test/corpus-reembed.test.ts`; focused review-remediation run passes (10 tests). Hold the local
+> closeout commit behind PR #1857, then update the existing PR #1840 head, resolve both exact review
+> threads, and obtain fresh required checks. Do not run
 > production `purge-legacy` until this fix is live and full-corpus completion is independently
 > verified.
 

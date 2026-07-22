@@ -95,6 +95,13 @@ beforeEach(async () => {
   mocks.upsert.mockClear();
   mocks.embed.mockClear();
   mocks.deleteMany.mockClear();
+  const { getDb } = await import("../src/lib/db");
+  const db = getDb();
+  // This suite intentionally reuses one temp database so a single test can exercise resume and
+  // receipt reuse. Keep each test's source corpus isolated, though: unscoped runs must not inherit
+  // SEC rows inserted by earlier cases in this file.
+  db.prepare("DELETE FROM document_chunks_fts").run();
+  db.prepare("DELETE FROM sec_filings").run();
   const { resetOperationLeaseForTest } = await import("../src/lib/operation-lease");
   resetOperationLeaseForTest();
 });
@@ -244,8 +251,9 @@ describe("corpus-reembed", () => {
 
     // Watermark persisted at the last successfully processed row — consistent, resumable state.
     const progressAfterStop = getCorpusReembedProgress().persisted;
-    expect(progressAfterStop?.docTypes?.["sec-filings"]?.status).toBe("stopped-budget");
-    const watermark = progressAfterStop?.docTypes?.["sec-filings"]?.watermark as { rowid: number } | null;
+    const scopedProgress = Object.values(progressAfterStop?.scopedRuns ?? {})[0]?.docTypes?.["sec-filings"];
+    expect(scopedProgress?.status).toBe("stopped-budget");
+    const watermark = scopedProgress?.watermark as { rowid: number } | null;
     expect(watermark?.rowid).toBeGreaterThan(0);
 
     // Lift the fuse and rerun: only the deferred second chunk embeds (the first is already
@@ -346,6 +354,61 @@ describe("corpus-reembed", () => {
     expect(purge.result!.refused).toMatch(/has not completed/);
     expect(purge.result!.purged).toBe(0);
     expect(mocks.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps scoped watermarks separate so a later full run cannot skip earlier symbols", async () => {
+    const { resetCorpusReembedStateForTest, runCorpusReembedForTest, getCorpusReembedProgress } =
+      await import("../src/lib/rag/corpus-reembed");
+    resetCorpusReembedStateForTest();
+    await insertSecFilingChunk({
+      contentHash: "hash-full-before-scope",
+      symbol: "MSFT",
+      accession: "0000320193-26-000009",
+      text: "Earlier full-corpus row that a later AAPL-scoped watermark must never skip.",
+      form: "10-K",
+      filedAt: "2026-02-09T00:00:00.000Z"
+    });
+    await insertSecFilingChunk({
+      contentHash: "hash-scope-after-full",
+      symbol: "AAPL",
+      accession: "0000320193-26-000010",
+      text: "Later AAPL row used to prove scoped progress is isolated from the full corpus.",
+      form: "10-K",
+      filedAt: "2026-02-10T00:00:00.000Z"
+    });
+    await activateBgeM3();
+
+    const scoped = await runCorpusReembedForTest({ docTypes: ["sec-filings"], symbols: ["AAPL"] });
+    expect(scoped.result!.docTypes[0].candidatesSeen).toBe(1);
+
+    const full = await runCorpusReembedForTest({ docTypes: ["sec-filings"] });
+    expect(full.result!.docTypes[0]).toMatchObject({ candidatesSeen: 2, embedded: 1, reusedInSpace: 1, completed: true });
+    const progress = getCorpusReembedProgress().persisted!;
+    expect(progress.docTypes["sec-filings"]?.completedForEmbedRevision).toBe("v1-baai-bge-m3");
+    expect(Object.values(progress.scopedRuns ?? {})).toHaveLength(1);
+  });
+
+  it("preserves valid full-corpus completion proof across later scoped maintenance", async () => {
+    const { resetCorpusReembedStateForTest, runCorpusReembedForTest, getCorpusReembedProgress } =
+      await import("../src/lib/rag/corpus-reembed");
+    resetCorpusReembedStateForTest();
+    await insertSecFilingChunk({
+      contentHash: "hash-preserve-full-proof",
+      symbol: "KEEP",
+      accession: "0000320193-26-000011",
+      text: "A completed full-corpus row whose purge proof must survive scoped maintenance.",
+      form: "10-K",
+      filedAt: "2026-02-11T00:00:00.000Z"
+    });
+    await activateBgeM3();
+
+    await runCorpusReembedForTest({ docTypes: ["sec-filings"] });
+    const before = getCorpusReembedProgress().persisted!.docTypes["sec-filings"]!;
+    await runCorpusReembedForTest({ docTypes: ["sec-filings"], symbols: ["KEEP"] });
+    const after = getCorpusReembedProgress().persisted!.docTypes["sec-filings"]!;
+
+    expect(after).toEqual(before);
+    expect(after.completedForEmbedRevision).toBe("v1-baai-bge-m3");
   });
 
   it("refuses purge on wrong confirm token and while Voyage is still the active model", async () => {

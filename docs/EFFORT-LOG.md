@@ -45,13 +45,16 @@ As of 2026-07-08 (assignment-rule update).
 ---
 
 ## In Progress
-- **[Socratic.Trade][CURSOR] Corpus re-embed scoped-run purge gate fix (branch
-  `cursor/critical-bug-management-0770`, claimed 2026-07-20) — IN PROGRESS.**
+- **[Socratic.Trade][CODEX team] Corpus re-embed scoped-run purge gate fix (PR #1840; remote branch
+  `cursor/critical-bug-management-0770`; local review branch `codex/pr1840-review-fixes-20260721`,
+  worktree `/Users/jay/.codex/worktrees/socratic-pr1840-critical`) — IN PROGRESS / LOCAL ONLY.**
   Critical-bug automation found that a symbol-scoped `POST /api/admin/reembed` could persist a
   full-docType `completedForEmbedRevision` stamp; the explicit `purge-legacy` action then trusted
   that stamp and could delete all legacy vectors for the docType even though only the scoped symbols
-  were backfilled. Patch withholds full-corpus completion stamps on scoped runs and adds a focused
-  regression. Local gate passed: lint, TypeScript, 420-file/4,901-test Vitest suite, and build. PR pending.
+  were backfilled. Review remediation isolates scoped/full watermarks, binds cursors to embedding
+  revisions, preserves valid prior full proof, and adds focused regressions. Original local gate
+  passed; current focused suite (10 tests), scoped lint (0 errors), and TypeScript all pass. No push
+  until #1857 releases the queue.
 - **[Socratic.Trade][AG] Purge Voyage AI SDK and standardize RAG on OpenRouter BAAI bge-m3 / Cohere reranker (branch `agent/antigravity-docs-update`) — COMPLETED 2026-07-21.** Purged Voyage AI SDK and standardized the production RAG engine on OpenRouter BAAI bge-m3 / Cohere reranker. Isolated Voyage client instantiation to test mode via dynamic imports, ensuring complete isolation from production while maintaining compatibility with the unit test suite. Verified green via `tsc`, `lint`, the 4,898 vitest suite, and a production Next.js build.
 - **[Socratic.Trade][GROK4] Multi-wave expert-review implementation (claimed 2026-07-20) — IN PROGRESS.** PR #1847. Waves A/C partial + coach/lesson writers + **Wave D partial** (chat directives/URLs → learned_context). Prod bge-m3 re-embed running (sec-filings in progress after dry-run 2644 candidates).
 - **[Socratic.Trade][GROK4] Full multi-expert app review (claimed 2026-07-20) — DONE (read-only).** 12-specialist panel complete. Deliverable: `docs/reviews/2026-07-20-grok4-multi-expert-full-app-review.md`. Headline P0s: (1) budget skips as status=completed (2) Usage-Monitor enforce mis-keyed vs openrouter (3) incomplete bge-m3 re-embed (4) iOS SIWA/live-confirm/deletion broken (5) shorts no continuous cover stops (6) CF Access header / SSRF class (7) coach-note slice(-20)+missing lesson writers (8) api-circuit-breaker null byte in worktree. No code landed. Read-only panel: UI/UX, iOS, mobile/desktop web, LLM cost/OpenRouter, API budgets, alert storms/cross-app coordination, Hetzner/Coolify, RAG/embeddings, trading/broker/signals, ML learning loops, cascading data APIs. Deliverable: docs/reviews/2026-07-20-grok4-multi-expert-full-app-review.md. No code edits, no prod mutations. Worktree: code-socratictrade/grok.

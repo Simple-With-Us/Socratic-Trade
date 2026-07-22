@@ -3,7 +3,8 @@
 ## Summary
 
 Fixed a critical RAG data-loss path in `src/lib/rag/corpus-reembed.ts`: symbol-scoped re-embed
-runs no longer persist a full-docType `completedForEmbedRevision` stamp. The explicit
+runs now persist in a separate scope-keyed progress map, never overwrite full-corpus watermarks or
+`completedForEmbedRevision`, and every cursor is bound to its embedding revision. The explicit
 `purge-legacy` action therefore stays blocked until an unscoped docType run completes under the
 current embedding revision.
 
@@ -29,10 +30,10 @@ data loss.
 
 ## Files
 
-- `src/lib/rag/corpus-reembed.ts` — withhold full-corpus completion stamps when `symbols` scopes
-  the run.
-- `test/corpus-reembed.test.ts` — regression: scoped completion does not authorize
-  `purge-legacy`.
+- `src/lib/rag/corpus-reembed.ts` — isolate scoped/full cursors and bind watermarks to the active
+  embedding revision.
+- `test/corpus-reembed.test.ts` — regressions for purge refusal, scoped-to-full watermark isolation,
+  and preservation of prior valid full completion proof.
 - `STATUS.md` — current state and validation note.
 - `PLAN.md` — active plan item for the narrow purge-gate fix.
 - `docs/EFFORT-LOG.md` — Cursor effort row.
@@ -61,13 +62,20 @@ npm test            # passed: 420 files / 4,901 tests
 npm run build       # passed; existing middleware/proxy and Sentry Edge warnings only
 ```
 
-The focused regression is included in `test/corpus-reembed.test.ts` and was exercised by the full
-Vitest suite.
+Review remediation adds focused proof that a scoped watermark cannot skip earlier rows in a later
+full run and that scoped maintenance cannot erase an existing valid full-corpus completion stamp.
+`npx vitest run test/corpus-reembed.test.ts` passed all 10 tests in the isolated review worktree;
+`npx tsc --noEmit` passed, and
+`npx eslint src/lib/rag/corpus-reembed.ts test/corpus-reembed.test.ts` passed with no errors (one
+pre-existing unused-parameter warning in the test mock).
 
 ## Follow-ups
 
 - Do not run production `purge-legacy` until this fix is live and an unscoped full-corpus
   re-embed has independently completed for the covered docTypes.
-- If a prior symbol-scoped run already poisoned progress state, run the fixed scoped path again
-  or, preferably, the full unscoped re-embed before considering purge. The fixed scoped write
-  replaces the docType progress without `completedForEmbedRevision`.
+- If a prior symbol-scoped run already poisoned the legacy shared progress state, run a full
+  unscoped re-embed after this fix. Legacy partial progress without an embedding revision restarts
+  conservatively; new scoped progress cannot mutate the full-corpus proof.
+- Hold the local closeout behind PR #1857. Once released, push it to PR #1840's existing head,
+  resolve the two review threads, obtain fresh required checks, merge, and verify the exact
+  auto-deployed production SHA before any production corpus operation.

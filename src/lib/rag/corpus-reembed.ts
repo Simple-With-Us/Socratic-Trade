@@ -111,6 +111,8 @@ export interface CorpusReembedDocTypeProgress {
   status: ReembedOutcomeStatus;
   /** Opaque, docType-specific resumable cursor. `null` = start from the beginning. */
   watermark: unknown;
+  /** Embedding-space revision that owns this watermark. A different active revision must restart. */
+  embedRevision?: string;
   candidatesSeen: number;
   embedded: number;
   reusedInSpace: number;
@@ -121,13 +123,22 @@ export interface CorpusReembedDocTypeProgress {
   lastRunAt: string;
 }
 
+export interface CorpusReembedScopedProgress {
+  symbols: string[];
+  updatedAt: string;
+  docTypes: Partial<Record<CorpusReembedDocType, CorpusReembedDocTypeProgress>>;
+}
+
 export interface CorpusReembedProgressState {
   updatedAt: string;
   status: ReembedOutcomeStatus;
   embedModel: string;
   embedRevision: string;
   dryRun: boolean;
+  /** Full-corpus progress only. Purge authorization reads exclusively from this map. */
   docTypes: Partial<Record<CorpusReembedDocType, CorpusReembedDocTypeProgress>>;
+  /** Symbol-scoped resumable cursors, isolated so they cannot advance or erase full-corpus proof. */
+  scopedRuns?: Record<string, CorpusReembedScopedProgress>;
   error?: string;
 }
 
@@ -751,7 +762,11 @@ interface RunContext {
 function normalizedSymbols(symbols?: string[]): string[] | undefined {
   if (!symbols || symbols.length === 0) return undefined;
   const set = new Set(symbols.map((s) => normalizeSymbol(s)).filter(Boolean));
-  return set.size > 0 ? [...set] : undefined;
+  return set.size > 0 ? [...set].sort() : undefined;
+}
+
+function scopedRunKey(symbols: string[] | undefined): string | undefined {
+  return symbols ? JSON.stringify(symbols) : undefined;
 }
 
 function resolveDocTypes(requested: CorpusReembedDocType[] | undefined): CorpusReembedDocType[] {
@@ -786,7 +801,7 @@ async function runCorpusReembedLocked(
   const priorProgress = readProgress();
   const results: CorpusReembedDocTypeResult[] = [];
   let stoppedForBudget = false;
-  const isSymbolScopedRun = Boolean(symbols?.length);
+  const scopeKey = scopedRunKey(symbols);
 
   const persistRunning = (docType: CorpusReembedDocType, docState: DocTypeRunState) => {
     // Dry runs are strictly read-only: counts come back in the response, and neither watermarks
@@ -794,32 +809,52 @@ async function runCorpusReembedLocked(
     if (opts.dryRun) return;
     const now = new Date().toISOString();
     const existing = readProgress();
-    const nextDocTypes = { ...(existing?.docTypes ?? {}) };
-    nextDocTypes[docType] = {
+    const nextDocProgress: CorpusReembedDocTypeProgress = {
       status: docState.stoppedForBudget ? "stopped-budget" : docState.completed ? "completed" : "running",
       watermark: docState.watermark,
+      embedRevision,
       candidatesSeen: docState.candidatesSeen,
       embedded: docState.embedded,
       reusedInSpace: docState.reusedInSpace,
       failed: docState.failed,
-      // A symbol-filtered run only proves the requested symbols were backfilled. Do not stamp
-      // full-docType completion, because purge-legacy deletes every old vector for the docType.
-      ...(docState.completed && !isSymbolScopedRun ? { completedForEmbedRevision: embedRevision } : {}),
+      // Only an unscoped run proves the full docType was backfilled. Scoped progress lives in a
+      // separate map and can neither mint nor erase the proof purge-legacy relies on.
+      ...(docState.completed && !scopeKey ? { completedForEmbedRevision: embedRevision } : {}),
       lastRunAt: now
     };
+    const nextDocTypes = { ...(existing?.docTypes ?? {}) };
+    const nextScopedRuns = { ...(existing?.scopedRuns ?? {}) };
+    if (scopeKey && symbols) {
+      const existingScope = nextScopedRuns[scopeKey];
+      nextScopedRuns[scopeKey] = {
+        symbols: [...symbols],
+        updatedAt: now,
+        docTypes: { ...(existingScope?.docTypes ?? {}), [docType]: nextDocProgress }
+      };
+    } else {
+      nextDocTypes[docType] = nextDocProgress;
+    }
     writeProgress({
       updatedAt: now,
       status: "running",
       embedModel,
       embedRevision,
       dryRun: opts.dryRun,
-      docTypes: nextDocTypes
+      docTypes: nextDocTypes,
+      scopedRuns: nextScopedRuns
     });
   };
 
   for (const docType of docTypes) {
     throwIfOperationLeaseCancelled(signal);
-    const initialWatermark = priorProgress?.docTypes?.[docType]?.watermark ?? null;
+    const priorDocProgress = scopeKey
+      ? priorProgress?.scopedRuns?.[scopeKey]?.docTypes?.[docType]
+      : priorProgress?.docTypes?.[docType];
+    // A watermark from another embedding space must never make a new migration appear complete.
+    // Legacy completed rows are safe to resume when their existing completion stamp proves the
+    // revision; legacy partial rows without a revision restart conservatively.
+    const priorDocRevision = priorDocProgress?.embedRevision ?? priorDocProgress?.completedForEmbedRevision;
+    const initialWatermark = priorDocRevision === embedRevision ? priorDocProgress?.watermark ?? null : null;
     const state = freshDocTypeRunState(docType, initialWatermark);
     const ctx: RunContext = {
       userId,
@@ -885,7 +920,8 @@ async function runCorpusReembedLocked(
       embedModel,
       embedRevision,
       dryRun: false,
-      docTypes: existing?.docTypes ?? {}
+      docTypes: existing?.docTypes ?? {},
+      scopedRuns: existing?.scopedRuns
     });
   }
   audit("corpus_reembed_run", { dryRun: opts.dryRun, embedModel, embedRevision, docTypes: results }, userId);

@@ -14,7 +14,9 @@ could mark the whole docType `completedForEmbedRevision`; the separate `purge-le
 trusted that stamp and would delete every legacy vector for the docType even though only the scoped
 symbol was backfilled into the active bge-m3 space. The fix keeps scoped runs resumable but withholds
 the full-corpus completion stamp, so purge remains blocked until an unscoped docType run completes.
-Added a focused regression in `test/corpus-reembed.test.ts`. Verification passed:
+Review remediation now isolates scoped/full watermarks and binds each cursor to its embedding
+revision, preserving prior valid full proof while preventing scoped or old-space cursor poisoning.
+Added focused regressions in `test/corpus-reembed.test.ts`. Original verification passed:
 `npm run lint`, `npx tsc --noEmit`, `npm test` (420 files / 4,901 tests), and
 `npm run build`. Rollout:
 `docs/rollouts/2026-07-20-corpus-reembed-scoped-purge-gate.md`.
