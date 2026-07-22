@@ -3284,7 +3284,7 @@ async function storeDocumentImpl(
   // Voyage is intentionally test-only after the production BGE-M3 migration. A managed document
   // must therefore require the credential that will actually embed it, not the optional test
   // client returned by getClients(). Keep the Voyage client check for its explicit test provider.
-  const hasActiveEmbeddingAuthority = activeProvider === ("voyage" as any)
+  const hasActiveEmbeddingAuthority = activeProvider === "voyage"
     ? Boolean(providerClients.voyage)
     : Boolean(resolveApiKey(activeProvider, userId));
   if (!providerClients.pc || !providerClients.initCacheKey || !hasActiveEmbeddingAuthority) {

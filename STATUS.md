@@ -12,9 +12,9 @@ Synchronized 40 pending Socratic.Trade PRs and 6 pending Congress.Trade PRs with
 commits now require Pinecone initialization plus the credential for `activeEmbeddingProvider()`;
 the explicit Voyage client remains the test-provider path. A production-mode regression uses mocked
 OpenRouter embeddings and Pinecone writes, with no live provider call. This lane does not re-embed,
-purge vectors, change secrets, or alter production configuration. Next: repeat the focused test and
-TypeScript gate when shared-host capacity permits, then hand the isolated commit to the RAG
-implementation program for review/landing.
+purge vectors, change secrets, or alter production configuration. Scoped lint (0 errors, existing
+warnings only), the focused mocked OpenRouter test, and `tsc --noEmit` pass. Next: hand the isolated
+commit to the RAG implementation program for review/landing.
 
 ## 2026-07-19 — Four-handoff conquest: reconciliation + shepherding + hardening landed (CLAUDE, branch `claude/model-availability-session-handoff-362fd3`)
 

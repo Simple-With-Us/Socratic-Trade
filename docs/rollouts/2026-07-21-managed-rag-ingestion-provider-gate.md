@@ -15,7 +15,7 @@ therefore returned `unconfigured` before embedding or Pinecone upsert.
 ## Files
 
 - `src/lib/vector-db.ts`
-- `test/vector-db-document-receipts.test.ts`
+- `test/vector-db-chunk-cap.test.ts`
 - `STATUS.md`
 - `PLAN.md`
 - `docs/design/full-filing-rag.md`
@@ -25,11 +25,10 @@ therefore returned `unconfigured` before embedding or Pinecone upsert.
 
 - `git diff --check`
 - Scoped ESLint: `node_modules/.bin/eslint src/lib/vector-db.ts test/vector-db-chunk-cap.test.ts`
-  (no errors).
+  (0 errors; existing warnings only).
 - Focused Vitest: `node_modules/.bin/vitest run test/vector-db-chunk-cap.test.ts -t 'uses the active OpenRouter' --reporter=verbose`
-  was started with mocked OpenRouter and Pinecone only, but did not complete before the shared host
-  saturated (load average above 85; no assertion result claimed).
-- TypeScript: deferred for the same shared-host saturation; it remains required before landing.
+  passed (1 passed, 14 skipped), using mocked OpenRouter and Pinecone only.
+- TypeScript: `node_modules/.bin/tsc --noEmit` passed.
 
 ## Follow-ups
 
