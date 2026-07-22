@@ -182,7 +182,10 @@ Codex: "make prompt compaction adaptive."
   state, historical/exhibit discovery, DOM/iXBRL tables, exact PIT dates, true corpus-wide
   lexical recall, wide reranking/diversity, and real-EDGAR evaluation prerequisites to any
   bulk backfill; raised caps alone do not satisfy this item. See
-  `docs/reviews/2026-07-12-sec-rag-1000-stock-backfill-plan.md`.
+  `docs/reviews/2026-07-12-sec-rag-1000-stock-backfill-plan.md`. The 2026-07-21
+  `corpus-wide-lexical.ts` foundation safely queries the existing FTS5 occurrence corpus with
+  strict `accepted_at` point-in-time behavior; it is not yet strategy-wired or fused with dense
+  retrieval, so it does not authorize a corpus write or broad backfill.
 - **D4 `[todo]` Cross-source agreement flags** when providers disagree on a value.
 
 ## Phase E — UI

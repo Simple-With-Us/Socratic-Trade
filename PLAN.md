@@ -417,9 +417,11 @@ Added OpenRouter models to `app/ui/llm-model-catalog.ts` so they can be selected
 - **[~] Wave B — source correctness:** discover recent plus historical submission shards and filing exhibits;
   archive immutable raw artifacts; enforce one aggregate SEC limiter; parse DOM/iXBRL sections, tables, units,
   contexts, and footnotes; chunk against provider token budgets.
-- **[ ] Wave C — structured and searchable evidence:** normalize XBRL, insider, ownership, offering, and event
+- **[~] Wave C — structured and searchable evidence:** normalize XBRL, insider, ownership, offering, and event
   facts; add a true corpus-wide lexical index; fuse dense/lexical recall, rerank wide, diversify, and return
-  typed evidence packets with strict point-in-time filtering.
+  typed evidence packets with strict point-in-time filtering. The read-only FTS5 candidate foundation now lives in
+  `src/lib/rag/corpus-wide-lexical.ts` (2026-07-21): it is PIT-aware and intentionally not yet wired into strategy
+  retrieval, so dense/lexical fusion remains a separately gated follow-up.
 - **[ ] Wave D — evaluation and consumption:** build real-EDGAR parser/fact/retrieval/grounding fixtures and
   metrics; replace the generic three-chunk strategy blob with issuer-scoped scout/deep dossiers and verified
   evidence references.
