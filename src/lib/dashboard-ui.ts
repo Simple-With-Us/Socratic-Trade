@@ -29,7 +29,17 @@ const SOURCE_LABELS: Record<string, string> = {
   "sp500-universe": "S&P 500 Universe",
   "sp100-universe": "S&P 100 Universe",
   "nasdaq100-universe": "NASDAQ 100 Universe",
-  "nasdaq-composite-universe": "NASDAQ Composite Universe",
+  // The dynamic-universe source tags below are built in market.ts as `${universe}-universe`
+  // straight from the IndexUniverse config id — for the three camelCase compound ids
+  // (nasdaqComposite, nyseComposite, ftWilshire5000) that produces e.g. "nasdaqComposite-
+  // universe", which normalizeSourceKey only lowercases (never re-hyphenates) to
+  // "nasdaqcomposite-universe". A key with a hyphen between the words never matched, so these
+  // fell through to titleizeSource's raw-string fallback and rendered as "Nasdaqcomposite
+  // Universe" / "Nysecomposite Universe" / (unlabeled) "Ftwilshire5000 Universe". Keys here MUST
+  // match the id's own casing verbatim, not "properly" kebab-cased.
+  "nasdaqcomposite-universe": "NASDAQ Composite Universe",
+  "nysecomposite-universe": "NYSE Composite Universe",
+  "ftwilshire5000-universe": "FT Wilshire 5000 Universe",
   "alpaca-quotes": "Alpaca Quotes",
   "alpaca-snapshot": "Alpaca Snapshot",
   "alpaca-news": "Alpaca News",

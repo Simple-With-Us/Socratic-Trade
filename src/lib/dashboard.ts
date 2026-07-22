@@ -275,7 +275,17 @@ export async function getDashboardSnapshot(userId: string = "local", currentUser
   const connectedAccountPolicies = Object.fromEntries(
     connectedAccounts.map((account) => {
       const pol = peekPolicy(userId, account.id);
-      return [account.id, { systemState: pol.systemState, strategyAuthority: pol.strategyAuthority }];
+      // runDuringExtendedHours rides along so the account-switcher's market-aware run-state chip
+      // can honor each account's extended-hours setting — without it, an extended-hours account
+      // would read "Paused · market closed" during pre/post sessions while genuinely running.
+      return [
+        account.id,
+        {
+          systemState: pol.systemState,
+          strategyAuthority: pol.strategyAuthority,
+          runDuringExtendedHours: pol.runDuringExtendedHours
+        }
+      ];
     })
   );
   const accountLabelById = Object.fromEntries(connectedAccounts.map((account) => [account.id, account.label || account.broker]));

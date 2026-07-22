@@ -62,7 +62,13 @@ export interface DashboardSnapshot {
   accounts: BrokerageAccount[];
   accountReadiness?: AccountReadiness;
   connectedAccounts: ConnectedAccount[];
-  connectedAccountPolicies?: Record<string, Pick<TradingPolicy, "systemState" | "strategyAuthority">>;
+  /** Per-account run-state projection for the account switcher. `runDuringExtendedHours` is
+   *  optional (older payloads predate it): deriveStateInfo treats undefined as "can't know" and
+   *  skips the market-open/paused split rather than mislabeling an extended-hours account. */
+  connectedAccountPolicies?: Record<
+    string,
+    Pick<TradingPolicy, "systemState" | "strategyAuthority"> & Partial<Pick<TradingPolicy, "runDuringExtendedHours">>
+  >;
   portfolio?: Portfolio;
   positions: EquityPosition[];
   options?: OptionPosition[];

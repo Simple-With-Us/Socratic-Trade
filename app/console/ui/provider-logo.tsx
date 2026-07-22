@@ -11,6 +11,7 @@ import { useEffect, useState } from "react";
 import { cx } from "../lib/format";
 import { Tooltip } from "./primitives";
 import {
+  isOpenRouterRouted,
   modelDisplayName,
   providerForModel,
   providerLabel,
@@ -101,12 +102,22 @@ export function ModelBadge({
   const id = (modelId ?? "").trim();
   if (!id) return null;
   const provider = providerForModel(id);
+  // "via OpenRouter" is a TRANSPORT fact (which vendor API call actually went over the wire),
+  // kept separate from the vendor brand above — an OpenRouter-routed Claude call still brands
+  // as Anthropic, it just also discloses the routing.
+  const viaOpenRouter = isOpenRouterRouted(id);
+  const routingSuffix = viaOpenRouter ? " · via OpenRouter" : "";
   return (
-    <Tooltip content={title ?? `${modelDisplayName(id)} (${id}) — ${providerLabel(provider)}`}>
+    <Tooltip content={title ?? `${modelDisplayName(id)} (${id}) — ${providerLabel(provider)}${routingSuffix}`}>
       <span className={cx("inline-flex min-w-0 items-center gap-1.5 font-semibold", className)}>
         <ProviderLogo provider={provider} size={size} title={title ? `${title} (${providerLabel(provider)})` : undefined} />
         <span className="truncate">{modelDisplayName(id)}</span>
-        {showProvider && <span className="shrink-0 font-normal text-[color:var(--con-faint)]">· {providerLabel(provider)}</span>}
+        {showProvider && (
+          <span className="shrink-0 font-normal text-[color:var(--con-faint)]">
+            · {providerLabel(provider)}
+            {routingSuffix}
+          </span>
+        )}
       </span>
     </Tooltip>
   );

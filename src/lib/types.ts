@@ -1690,6 +1690,12 @@ export interface MarketScan {
   outlierReserve?: number;
   /** Number of notable below-cutoff candidates included in `topCandidates`. */
   outlierCandidateCount?: number;
+  /** Number of forced-held-position candidates in `topCandidates` beyond the ranked cut and the
+   *  outlier reserve — held positions are never hidden regardless of rank, so `topCandidates.length`
+   *  can legitimately exceed `candidateLimit` by this much (plus outliers). Undefined on scans
+   *  persisted before this field existed; the UI falls back to a coarser breakdown rather than
+   *  guessing a count. */
+  heldCandidateCount?: number;
   /** Market breadth: % of the full screener advancing today (risk-on/off gauge). */
   breadthPct?: number;
   topCandidates: MarketQuote[];

@@ -312,27 +312,34 @@ export function RagCoverageClient() {
           {/* Summary row */}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <div className="con-tile">
-              <Stat label="Tickers indexed" value={String(data.totalTickers)} />
+              <Stat
+                label="Tickers with coverage"
+                value={String(data.totalTickers)}
+                title="Distinct symbols with at least one indexed chunk in this app's local document_chunks ledger."
+              />
             </div>
             <div className="con-tile">
               <Stat
-                label="Total chunks"
+                label="Chunks (local ledger)"
                 value={String(data.totalChunks)}
                 sub={`${data.totalFilings} filing${data.totalFilings !== 1 ? "s" : ""}`}
+                title="Text chunks recorded in this app's own document_chunks table — the ledger the per-ticker coverage list below reads from, not Pinecone's own count."
               />
             </div>
             <div className="con-tile">
               <Stat
-                label="Pinecone vectors"
+                label="Vectors (Pinecone index)"
                 value={String(data.vectorStoreTotalVectors)}
                 sub={data.vectorStore?.indexName ?? "No index"}
+                title="Pinecone's own reported vector count for the configured index — a separate system from the local chunk ledger; the two can legitimately differ."
               />
             </div>
             <div className="con-tile">
               <Stat
-                label="App-recorded RAG"
+                label="App-recorded RAG spend"
                 value={fmtTotalCost(data.ragUsage.totalCostUsd)}
                 sub={`estimated Voyage cost, last ${data.sinceDays}d`}
+                title="Estimated Voyage embedding cost this app recorded for RAG ingestion — not a chunk or vector count."
               />
             </div>
           </div>

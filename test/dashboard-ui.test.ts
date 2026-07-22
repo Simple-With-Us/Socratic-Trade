@@ -47,4 +47,14 @@ describe("dashboard UI provenance helpers", () => {
       )
     ).toBe("NASDAQ Delayed Screener, Congress.Trade, Tiingo, Finnhub, FMP, Yahoo Finance, FINRA, Computed, SEC EDGAR, BlackRock Holdings, Yahoo Finance Delayed Quotes");
   });
+
+  it("labels the camelCase dynamic-universe source tags market.ts actually emits, not a garbled title-case fallback", () => {
+    // market.ts builds these as `${universe}-universe` from the raw IndexUniverse config id
+    // (see loadDynamicUniverseQuotes) — nasdaqComposite/nyseComposite/ftWilshire5000 are the only
+    // camelCase compound ids, and a mismatched/missing label-map key used to fall through to
+    // titleizeSource's raw-string fallback ("Nasdaqcomposite Universe").
+    expect(formatSourceList("nasdaqComposite-universe")).toBe("NASDAQ Composite Universe");
+    expect(formatSourceList("nyseComposite-universe")).toBe("NYSE Composite Universe");
+    expect(formatSourceList("ftWilshire5000-universe")).toBe("FT Wilshire 5000 Universe");
+  });
 });

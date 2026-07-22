@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { currentMarketSession, isRunAllowedNow } from "../src/lib/market-hours";
+import {
+  currentMarketSession,
+  isRunAllowedNow,
+  isTradingDay,
+  nextMarketOpenHint,
+  nextTradingDayStart,
+  previousTradingDayStart
+} from "../src/lib/market-hours";
 
 // Helper: build a UTC Date that lands at a specific ET wall-clock time.
 // EDT (summer, UTC-4): utcHour = etHour + 4
@@ -107,5 +114,72 @@ describe("isRunAllowedNow", () => {
     const d = etDate("2026-06-13", 12, 0);
     expect(isRunAllowedNow(false, d)).toBe(false);
     expect(isRunAllowedNow(true, d)).toBe(false);
+  });
+});
+
+// Trading-day calendar helpers (item 23 stale-baseline detection + item 29 run-state display).
+// These compare by LOCAL calendar day (not ET wall-clock — see the doc comment in
+// src/lib/market-hours.ts), so tests anchor at UTC noon: that instant falls on the same calendar
+// date in every timezone a real CI runner or dev machine actually uses.
+describe("isTradingDay", () => {
+  it("a plain weekday is a trading day", () => {
+    expect(isTradingDay(new Date("2026-06-10T12:00:00Z"))).toBe(true); // Wednesday
+  });
+
+  it("weekends are not trading days", () => {
+    expect(isTradingDay(new Date("2026-06-13T12:00:00Z"))).toBe(false); // Saturday
+    expect(isTradingDay(new Date("2026-06-14T12:00:00Z"))).toBe(false); // Sunday
+  });
+
+  it("a market holiday landing on a weekday is not a trading day", () => {
+    expect(isTradingDay(new Date("2026-12-25T12:00:00Z"))).toBe(false); // Christmas, a Friday in 2026
+  });
+});
+
+describe("previousTradingDayStart (item 23: detect a stale day-P&L baseline)", () => {
+  it("steps back exactly one day across a normal weekday gap", () => {
+    const prev = previousTradingDayStart(new Date("2026-06-11T12:00:00Z")); // Thursday
+    expect([prev.getFullYear(), prev.getMonth(), prev.getDate()]).toEqual([2026, 5, 10]); // Wed Jun 10
+  });
+
+  it("skips back over a weekend to the prior Friday", () => {
+    const prev = previousTradingDayStart(new Date("2026-06-15T12:00:00Z")); // Monday
+    expect([prev.getMonth(), prev.getDate()]).toEqual([5, 12]); // Fri Jun 12
+  });
+
+  it("skips a weekday holiday plus the surrounding weekend", () => {
+    const prev = previousTradingDayStart(new Date("2026-12-28T12:00:00Z")); // Monday after Christmas
+    expect([prev.getMonth(), prev.getDate()]).toEqual([11, 24]); // Thu Dec 24 (skips Fri Dec 25 holiday + weekend)
+  });
+});
+
+describe("nextTradingDayStart", () => {
+  it("steps forward exactly one day across a normal weekday gap", () => {
+    const next = nextTradingDayStart(new Date("2026-06-10T12:00:00Z")); // Wednesday
+    expect([next.getMonth(), next.getDate()]).toEqual([5, 11]); // Thu Jun 11
+  });
+
+  it("skips forward over a weekend to the following Monday", () => {
+    const next = nextTradingDayStart(new Date("2026-06-12T12:00:00Z")); // Friday
+    expect([next.getMonth(), next.getDate()]).toEqual([5, 15]); // Mon Jun 15
+  });
+});
+
+describe("nextMarketOpenHint (item 29: cheap next-open hint for the paused/market-closed display)", () => {
+  it("says 'today' when the pre-market window is already underway", () => {
+    expect(nextMarketOpenHint(etDate("2026-06-10", 8, 0), false)).toBe("today, 9:30 AM ET");
+  });
+
+  it("reflects the extended-hours open clock when the policy allows it", () => {
+    expect(nextMarketOpenHint(etDate("2026-06-10", 8, 0), true)).toBe("today, 4:00 AM ET (extended hours)");
+  });
+
+  it("names the next trading day once today's session has already ended", () => {
+    // 18:00 ET Wed is post-market; the next open (non-extended) is Thursday's regular session.
+    expect(nextMarketOpenHint(etDate("2026-06-10", 18, 0), false)).toBe("Thu, Jun 11, 9:30 AM ET");
+  });
+
+  it("skips the weekend for a Friday-evening check", () => {
+    expect(nextMarketOpenHint(etDate("2026-06-12", 18, 0), false)).toBe("Mon, Jun 15, 9:30 AM ET");
   });
 });

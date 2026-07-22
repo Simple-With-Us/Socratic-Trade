@@ -287,7 +287,7 @@ export function StateChip({ snapshot }: { snapshot: DashboardSnapshot }) {
         className="flex shrink-0 items-center gap-2 rounded-control border border-transparent px-1.5 py-1 text-left transition-colors sm:border-[color:var(--con-line-strong)] sm:bg-[color:var(--con-surface-2)] sm:px-3 sm:py-1.5 sm:hover:border-[color:var(--con-accent)]"
         title={info.detail}
       >
-        <Dot tone={STATE_TONE[info.tone]} pulse={info.state === "active" && snapshot.policy.strategyAuthority === "decide"} />
+        <Dot tone={STATE_TONE[info.tone]} pulse={info.state === "active" && info.marketOpen !== false && snapshot.policy.strategyAuthority === "decide"} />
         <span className="flex flex-col leading-tight sm:flex-row sm:items-center sm:gap-1">
           <span className="whitespace-nowrap text-[length:var(--con-fs-xs)] font-semibold sm:text-[length:var(--con-fs-sm)]">{word}</span>
           {mode && (

@@ -17,6 +17,7 @@ import type {
   TradingPolicy
 } from "@/lib/types";
 import { resolveDailyOpeningCap, type DailyOpeningCapMode } from "@/lib/policy-caps";
+import { isRunAllowedNow, nextMarketOpenHint, previousTradingDayStart } from "@/lib/market-hours";
 
 // ── Money-reality ────────────────────────────────────────────────────────────
 
@@ -93,12 +94,45 @@ export interface StateInfo {
   /** One-line honest explanation. */
   detail: string;
   tone: "pos" | "warn" | "neg" | "muted";
+  /** Only meaningful when state === "active" — whether the market (per current session + the
+   *  account's extended-hours policy) is open right now. undefined for every other state (those
+   *  don't run on a market clock) AND for active policies whose `runDuringExtendedHours` wasn't
+   *  in the payload — without it the answer isn't knowable, so no paused/running split is made. A
+   *  configured-running account with the market closed is still `state: "active"` (nothing about
+   *  the underlying run-state changed) — only the label/detail/tone reflect the pause, so this is
+   *  purely a display fix, never a behavior change. */
+  marketOpen?: boolean;
 }
 
-export function deriveStateInfo(policy: Pick<TradingPolicy, "systemState" | "strategyAuthority">): StateInfo {
+/** `now` is injectable for tests; every real caller uses the default (current time). */
+export function deriveStateInfo(
+  policy: Pick<TradingPolicy, "systemState" | "strategyAuthority"> & { runDuringExtendedHours?: boolean },
+  now: Date = new Date()
+): StateInfo {
   const authority = policy.strategyAuthority === "decide" ? "Autopilot" : "Ask-first";
   switch (policy.systemState) {
-    case "active":
+    case "active": {
+      // undefined ≠ false: a payload that doesn't carry runDuringExtendedHours (older snapshot
+      // shapes, or a projection that forgot the field) cannot answer "is this account's market
+      // window open?" — an extended-hours account would be mislabeled "Paused · market closed"
+      // while genuinely running a pre/post session. In that case skip the split entirely and
+      // keep the plain "Running" claim. Only a real boolean opts into the market-aware display.
+      const marketOpen =
+        policy.runDuringExtendedHours === undefined ? undefined : isRunAllowedNow(policy.runDuringExtendedHours, now);
+      if (marketOpen === false) {
+        return {
+          state: "active",
+          label: "Paused · market closed",
+          detail:
+            `Scheduled runs pause while the market is closed and resume automatically once it reopens ` +
+            `(next open ${nextMarketOpenHint(now, policy.runDuringExtendedHours === true)}). ` +
+            (policy.strategyAuthority === "decide"
+              ? "Autonomous placement is paused too — nothing places itself outside market hours."
+              : "Every trade still waits for your approval once runs resume."),
+          tone: "muted",
+          marketOpen: false
+        };
+      }
       return {
         state: "active",
         label: `Running · ${authority}`,
@@ -106,8 +140,10 @@ export function deriveStateInfo(policy: Pick<TradingPolicy, "systemState" | "str
           policy.strategyAuthority === "decide"
             ? "The strategy runs on schedule and may place orders itself, inside your guardrails."
             : "The strategy runs on schedule. Every trade waits for your approval.",
-        tone: policy.strategyAuthority === "decide" ? "warn" : "pos"
+        tone: policy.strategyAuthority === "decide" ? "warn" : "pos",
+        ...(marketOpen === undefined ? {} : { marketOpen: true })
       };
+    }
     case "close_only":
       return {
         state: "close_only",
@@ -298,20 +334,25 @@ export interface DayPnl {
   pct: number;
   baselineAt: string;
   baselineEquity: number;
+  /** False when `baselineAt` is dated on (or after) the most recent prior trading session — the
+   *  normal case. True when the baseline predates that session, meaning one or more daily
+   *  snapshots are missing (the strategy didn't run/snapshot for a stretch) and this P&L is being
+   *  compared across a real gap (e.g. a July 7 baseline read on July 17), not just "yesterday". */
+  isStaleBaseline: boolean;
 }
 
 /** Change in equity vs the last persisted snapshot before today (local time)
  *  in the current mode's bucket. Null when there is no prior-day snapshot or
- *  no current equity — render "—", never invent. */
+ *  no current equity — render "—", never invent. `now` is injectable for tests. */
 export function deriveDayPnl(
   performance: PerformanceSummary | undefined,
   mode: ExecutionMode | undefined,
-  currentEquity: number | undefined
+  currentEquity: number | undefined,
+  now: Date = new Date()
 ): DayPnl | null {
   if (!performance || typeof currentEquity !== "number" || !Number.isFinite(currentEquity)) return null;
   const curve = mode === "broker/live" ? performance.liveEquityCurve : performance.paperEquityCurve;
   if (!curve || curve.length === 0) return null;
-  const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   let baseline: { timestamp: string; equity: number } | undefined;
   for (const point of curve) {
@@ -320,7 +361,17 @@ export function deriveDayPnl(
   }
   if (!baseline || !Number.isFinite(baseline.equity) || baseline.equity === 0) return null;
   const pnl = currentEquity - baseline.equity;
-  return { pnl, pct: (pnl / baseline.equity) * 100, baselineAt: baseline.timestamp, baselineEquity: baseline.equity };
+  const baselineDay = new Date(baseline.timestamp);
+  const baselineDayStart = new Date(baselineDay.getFullYear(), baselineDay.getMonth(), baselineDay.getDate()).getTime();
+  const priorSessionStart = previousTradingDayStart(now).getTime();
+  const isStaleBaseline = Number.isFinite(baselineDayStart) && baselineDayStart < priorSessionStart;
+  return {
+    pnl,
+    pct: (pnl / baseline.equity) * 100,
+    baselineAt: baseline.timestamp,
+    baselineEquity: baseline.equity,
+    isStaleBaseline
+  };
 }
 
 // ── Needs-attention inbox ────────────────────────────────────────────────────

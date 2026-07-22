@@ -279,7 +279,12 @@ export default function DecisionTracePage() {
                     />
                   </strong>
                   <span title={redTeamFailureMeta(decision.redTeamVerdict.failureKind).title}>
-                    review failed ({redTeamFailureMeta(decision.redTeamVerdict.failureKind).label})
+                    {redTeamVerdictLabel(
+                      decision.redTeamVerdict,
+                      decision.policyDecision?.socraticOverride?.applied,
+                      decision.status
+                    )}{" "}
+                    ({redTeamFailureMeta(decision.redTeamVerdict.failureKind).label})
                   </span>
                 </div>
                 <p>{decision.redTeamVerdict.reason}</p>

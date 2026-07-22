@@ -49,6 +49,67 @@ export function isRunAllowedNow(runDuringExtendedHours: boolean, now = new Date(
   return false;
 }
 
+// ── Trading-day calendar helpers ────────────────────────────────────────────
+// These compare by the caller's LOCAL calendar day (not America/New_York wall-clock) — same
+// convention already used by deriveDayPnl's "today" boundary (app/console/lib/derive.ts). US
+// market holidays are NOT fixed dates (nth-weekday rules, Good Friday's computus, weekend
+// observation shifts) — but getMarketHolidays resolves each year's set to concrete Y-M-D
+// strings, so once resolved they compare as plain calendar days. A local calendar day can
+// differ from the ET date near midnight for timezones far from ET; that's an accepted
+// coarseness for these DISPLAY helpers (baseline-staleness flag, next-open hint) — anything
+// needing exact session boundaries must use the ET session classifier above instead.
+
+function localDateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+/** True when `date`'s local calendar day is a US equity trading day: not a weekend, and not one
+ *  of the fixed-calendar holidays from getMarketHolidays. */
+export function isTradingDay(date: Date): boolean {
+  const day = date.getDay();
+  if (day === 0 || day === 6) return false;
+  return !getMarketHolidays(date.getFullYear()).has(localDateKey(date));
+}
+
+/** Walks from `date`'s local calendar day, one day at a time in `direction` (+1 forward, -1
+ *  backward), until it lands on a trading day. Bounded to 10 iterations — comfortably more than
+ *  any real holiday cluster — so a bug here can never spin into an infinite loop. */
+function adjacentTradingDayStart(date: Date, direction: 1 | -1): Date {
+  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  for (let i = 0; i < 10; i++) {
+    d.setDate(d.getDate() + direction);
+    if (isTradingDay(d)) return d;
+  }
+  return d;
+}
+
+/** Local-midnight start of the most recent trading day strictly BEFORE `now`'s calendar date —
+ *  i.e., the prior market session's date (yesterday's close, or last Friday's after a weekend).
+ *  Used to detect a stale day-P&L baseline: if the last persisted snapshot predates this, there's
+ *  a real gap, not just "yesterday". */
+export function previousTradingDayStart(now: Date = new Date()): Date {
+  return adjacentTradingDayStart(now, -1);
+}
+
+/** Local-midnight start of the next trading day strictly AFTER `now`'s calendar date. */
+export function nextTradingDayStart(now: Date = new Date()): Date {
+  return adjacentTradingDayStart(now, 1);
+}
+
+/** Cheap, best-effort "next open" hint for a paused (market-closed) run-state display. Deliberately
+ *  coarse: it distinguishes "later today" (pre-market, still waiting for today's open) from "a
+ *  future trading day" using the same ET session classifier as currentMarketSession, but does NOT
+ *  special-case the narrow weekday 00:00–04:00 ET gap (it will say "next open" is the *following*
+ *  day during those few hours, when the current calendar day would technically still qualify) —
+ *  acceptable for a tooltip hint, not a scheduling primitive. */
+export function nextMarketOpenHint(now: Date = new Date(), allowExtendedHours: boolean): string {
+  const openClock = allowExtendedHours ? "4:00 AM ET (extended hours)" : "9:30 AM ET";
+  if (currentMarketSession(now) === "pre") return `today, ${openClock}`;
+  const next = nextTradingDayStart(now);
+  const label = next.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  return `${label}, ${openClock}`;
+}
+
 export function getMarketHolidays(year: number): Set<string> {
   const holidays = new Set<string>();
 

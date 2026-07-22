@@ -91,6 +91,38 @@ describe("redTeamVerdictLabel", () => {
   });
 });
 
+describe("redTeamVerdictLabel outcome-status temporality (item 22: no stale 'held for approval' next to a resolved outcome)", () => {
+  it("keeps the live 'held for human approval' framing while no resolved outcome exists", () => {
+    for (const status of [undefined, "proposed", "pending", "planned", "observed", "some-unrecognized-status"]) {
+      expect(redTeamVerdictLabel(verdict({ available: false }), undefined, status)).toBe("Review unavailable — held for human approval");
+    }
+  });
+
+  it("switches to a past-tense outcome once the proposal was subsequently filled or placed", () => {
+    expect(redTeamVerdictLabel(verdict({ available: false }), undefined, "filled")).toBe("Review unavailable; subsequently approved and executed");
+    expect(redTeamVerdictLabel(verdict({ available: false }), undefined, "placed")).toBe("Review unavailable; subsequently approved and executed");
+    // "placing" means the approval already happened — only broker confirmation is outstanding.
+    expect(redTeamVerdictLabel(verdict({ available: false }), undefined, "placing")).toBe("Review unavailable; subsequently approved; execution pending confirmation");
+  });
+
+  it("reports a subsequent rejection/block accurately instead of claiming it's still pending", () => {
+    expect(redTeamVerdictLabel(verdict({ available: false }), undefined, "blocked")).toBe("Review unavailable; subsequently blocked by policy before placement");
+    expect(redTeamVerdictLabel(verdict({ available: false }), undefined, "rejected")).toBe("Review unavailable; subsequently rejected by the user");
+    expect(redTeamVerdictLabel(verdict({ available: false }), undefined, "rejected_by_broker")).toBe("Review unavailable; subsequently approved, but rejected by the broker");
+    expect(redTeamVerdictLabel(verdict({ available: false }), undefined, "not_placed")).toBe("Review unavailable; subsequently approved, but never placed");
+    expect(redTeamVerdictLabel(verdict({ available: false }), undefined, "expired")).toBe("Review unavailable; left pending until it expired, unreviewed");
+    expect(redTeamVerdictLabel(verdict({ available: false }), undefined, "withdrawn")).toBe("Review unavailable; subsequently withdrawn before a decision");
+  });
+
+  it("never applies the outcome-status phrase to an AVAILABLE verdict (only the failed-review path is outcome-aware)", () => {
+    expect(redTeamVerdictLabel(verdict({ available: true, verdict: "approve" }), undefined, "filled")).toBe("Approved at full size");
+  });
+
+  it("a human-override-approved FAILED review keeps its own wording regardless of outcome status", () => {
+    expect(redTeamVerdictLabel(verdict({ available: false, humanOverrideApplied: true }), undefined, "filled")).toBe("Review unavailable — approved by user");
+  });
+});
+
 describe("redTeamCardState (exactly one Red Team section — no double-render)", () => {
   it("a FAILED verdict is owned solely by the verdict panel (regression: adversary-review-duplication)", () => {
     // The bug: a failed review satisfied BOTH the verdict panel AND a separate "unavailable"

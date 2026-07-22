@@ -15,10 +15,36 @@ import { massiveApiBase } from "./market-signals/massive";
 import { sendNotification } from "./notifications";
 
 export type ProviderTier = "paid" | "free" | "unknown";
+
+/** What kind of evidence backed a tier classification — decoupled from the human-readable
+ *  `reason` prose so a consumer can tell WHAT WAS TESTED without parsing English. Every one of
+ *  these is a CAPABILITY/plan-access probe (rate limit headroom, historical-depth access): none
+ *  of them measures how fresh today's live market data is. That distinction matters because
+ *  `history_depth_confirmed`/`history_cap_blocked` read, out of context, like a claim about the
+ *  CURRENCY of served data ("returned >2-year-old history") when they're actually only checking
+ *  whether the key CAN reach 2-year-old history at all (a paid-tier feature) — see item 24,
+ *  docs/rollouts/2026-07-18-decision-status-truth.md. */
+export type ProviderTierSignal =
+  | "no_key"
+  | "rate_limited_429"
+  | "history_depth_confirmed"
+  | "history_cap_blocked"
+  | "history_cap_empty"
+  | "premium_gated_error"
+  | "data_returned"
+  | "probe_error"
+  | "ambiguous";
+
 export interface ProviderTierEntry {
   tier: ProviderTier;
   at: string;
+  /** Human-readable capability-probe explanation for notifications/audit — NEVER a claim about
+   *  how fresh today's live market data is; see `signal` for a structured, prose-free version of
+   *  the same distinction. */
   reason: string;
+  /** Structured evidence kind behind `reason` (see ProviderTierSignal). Optional because rows
+   *  persisted before this field existed won't have it. */
+  signal?: ProviderTierSignal;
 }
 export type ProviderTierStatus = Partial<Record<"massive" | "fmp", ProviderTierEntry>>;
 
@@ -77,21 +103,41 @@ async function massiveAgg(key: string, from: string, to: string, fetcher: Fetche
   }
 }
 
-export async function probeMassiveTier(key: string | undefined, now: number = Date.now(), fetcher: Fetcher = fetch): Promise<{ tier: ProviderTier; reason: string }> {
-  if (!key) return { tier: "unknown", reason: "no Massive key configured" };
+export async function probeMassiveTier(
+  key: string | undefined,
+  now: number = Date.now(),
+  fetcher: Fetcher = fetch
+): Promise<{ tier: ProviderTier; reason: string; signal: ProviderTierSignal }> {
+  if (!key) return { tier: "unknown", reason: "no Massive key configured", signal: "no_key" };
   const recent = await massiveAgg(key, ymd(now - 10 * DAY_MS), ymd(now), fetcher);
-  if (!recent) return { tier: "unknown", reason: "recent probe network/timeout error" };
-  if (recent.status === 429) return { tier: "free", reason: "429 on a single call (free tier is 5 req/min)" };
-  if (!recent.ok) return { tier: "unknown", reason: `recent probe HTTP ${recent.status} (likely a bad key, not a tier signal)` };
+  if (!recent) return { tier: "unknown", reason: "recent probe network/timeout error", signal: "probe_error" };
+  if (recent.status === 429) return { tier: "free", reason: "429 on a single call (free tier is 5 req/min)", signal: "rate_limited_429" };
+  if (!recent.ok) return { tier: "unknown", reason: `recent probe HTTP ${recent.status} (likely a bad key, not a tier signal)`, signal: "probe_error" };
 
   const oldFrom = ymd(now - Math.round(2.5 * 365) * DAY_MS);
   const oldTo = ymd(now - Math.round(2.5 * 365 - 6) * DAY_MS);
   const old = await massiveAgg(key, oldFrom, oldTo, fetcher);
-  if (!old) return { tier: "unknown", reason: "history probe network/timeout error" };
-  if (old.status === 429 || old.status === 403) return { tier: "free", reason: `>2yr history blocked (HTTP ${old.status}) — free 2-year cap` };
-  if (!old.ok) return { tier: "unknown", reason: `history probe HTTP ${old.status}` };
-  if (old.results > 0) return { tier: "paid", reason: "returned >2-year-old history (paid)" };
-  return { tier: "free", reason: "no >2yr history returned — free 2-year cap" };
+  if (!old) return { tier: "unknown", reason: "history probe network/timeout error", signal: "probe_error" };
+  if (old.status === 429 || old.status === 403) {
+    return {
+      tier: "free",
+      reason: `plan-access probe: a ~2.5-year-old history window was blocked (HTTP ${old.status}) — free tier caps history at ~2 years (this checks plan access, not today's data freshness)`,
+      signal: "history_cap_blocked"
+    };
+  }
+  if (!old.ok) return { tier: "unknown", reason: `history probe HTTP ${old.status}`, signal: "probe_error" };
+  if (old.results > 0) {
+    return {
+      tier: "paid",
+      reason: "plan-access probe: a ~2.5-year-old history window was fetched successfully — confirms unlimited-history (paid) plan access; this checks plan capability, not today's data freshness",
+      signal: "history_depth_confirmed"
+    };
+  }
+  return {
+    tier: "free",
+    reason: "plan-access probe: a ~2.5-year-old history window came back empty — free tier caps history at ~2 years (this checks plan access, not today's data freshness)",
+    signal: "history_cap_empty"
+  };
 }
 
 // ── FMP probe ──────────────────────────────────────────────────────────────────
@@ -100,30 +146,33 @@ export async function probeMassiveTier(key: string | undefined, now: number = Da
 // otherwise "unknown" — FMP's action is notify-only (no auto-clamp), so a miss just skips an alert.
 const FMP_FREE_SIGNAL = /exclusive|premium|upgrade|limit reach|special endpoint|not available under your/i;
 
-export async function probeFmpTier(key: string | undefined, fetcher: Fetcher = fetch): Promise<{ tier: ProviderTier; reason: string }> {
-  if (!key) return { tier: "unknown", reason: "no FMP key configured" };
+export async function probeFmpTier(
+  key: string | undefined,
+  fetcher: Fetcher = fetch
+): Promise<{ tier: ProviderTier; reason: string; signal: ProviderTierSignal }> {
+  if (!key) return { tier: "unknown", reason: "no FMP key configured", signal: "no_key" };
   const url = `https://financialmodelingprep.com/stable/ratios-ttm?symbol=AAPL&apikey=${encodeURIComponent(key)}`;
   let res: Response;
   try {
     res = await fetcher(url, { cache: "no-store", signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
   } catch {
-    return { tier: "unknown", reason: "network/timeout error" };
+    return { tier: "unknown", reason: "network/timeout error", signal: "probe_error" };
   }
-  if (res.status === 429) return { tier: "free", reason: "429 (free tier 250 calls/day cap)" };
+  if (res.status === 429) return { tier: "free", reason: "429 (free tier 250 calls/day cap)", signal: "rate_limited_429" };
   const text = await res.text().catch(() => "");
   if (!res.ok) {
     return FMP_FREE_SIGNAL.test(text)
-      ? { tier: "free", reason: `premium-gated error (HTTP ${res.status})` }
-      : { tier: "unknown", reason: `HTTP ${res.status}` };
+      ? { tier: "free", reason: `premium-gated error (HTTP ${res.status})`, signal: "premium_gated_error" }
+      : { tier: "unknown", reason: `HTTP ${res.status}`, signal: "probe_error" };
   }
   let json: unknown = null;
-  try { json = JSON.parse(text); } catch { return { tier: "unknown", reason: "unparseable response" }; }
+  try { json = JSON.parse(text); } catch { return { tier: "unknown", reason: "unparseable response", signal: "probe_error" }; }
   if (json && typeof json === "object" && !Array.isArray(json)) {
     const msg = String((json as Record<string, unknown>)["Error Message"] ?? (json as Record<string, unknown>).message ?? "");
-    if (FMP_FREE_SIGNAL.test(msg)) return { tier: "free", reason: `error envelope: ${msg.slice(0, 80)}` };
+    if (FMP_FREE_SIGNAL.test(msg)) return { tier: "free", reason: `error envelope: ${msg.slice(0, 80)}`, signal: "premium_gated_error" };
   }
-  if (Array.isArray(json) && json.length > 0) return { tier: "paid", reason: "ratios-ttm returned data" };
-  return { tier: "unknown", reason: "ambiguous response (no premium signal, no data)" };
+  if (Array.isArray(json) && json.length > 0) return { tier: "paid", reason: "plan-access probe: ratios-ttm returned data (checks endpoint access, not today's data freshness)", signal: "data_returned" };
+  return { tier: "unknown", reason: "ambiguous response (no premium signal, no data)", signal: "ambiguous" };
 }
 
 // ── Orchestration ──────────────────────────────────────────────────────────────
@@ -138,12 +187,12 @@ export async function runProviderTierCheck(opts: { userId?: string; now?: number
   const massiveKey = resolveApiKey("massive", userId);
   if (massiveKey) {
     const r = await probeMassiveTier(massiveKey, now, fetcher);
-    next.massive = { tier: r.tier, at: nowIso, reason: r.reason };
+    next.massive = { tier: r.tier, at: nowIso, reason: r.reason, signal: r.signal };
   }
   const fmpKey = resolveApiKey("fmp", userId);
   if (fmpKey) {
     const r = await probeFmpTier(fmpKey, fetcher);
-    next.fmp = { tier: r.tier, at: nowIso, reason: r.reason };
+    next.fmp = { tier: r.tier, at: nowIso, reason: r.reason, signal: r.signal };
   }
 
   setInternalSetting(providerTierStatusKey(userId), next);

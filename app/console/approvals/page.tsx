@@ -329,7 +329,7 @@ export default function ApprovalsPage() {
               </button>
             )}
           </div>
-          <Chip tone={state.tone === "pos" ? "pos" : state.tone === "neg" ? "neg" : "warn"}>{state.label}</Chip>
+          <Chip tone={state.tone === "pos" ? "pos" : state.tone === "neg" ? "neg" : state.tone === "muted" ? "muted" : "warn"}>{state.label}</Chip>
         </div>
 
         {/* Triage apparatus (stat tiles, search, filters, bulk actions) only earns its

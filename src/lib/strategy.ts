@@ -273,6 +273,17 @@ export function liveBatchApprovalText(count: number): string {
   return `APPROVE ${count} LIVE ${count === 1 ? "ORDER" : "ORDERS"}`;
 }
 
+/** Appends `next` after `sentence` with exactly one separating period — never two. Red Team
+ *  unavailable/error reasons (red-team.ts's `unavailable(...)` helper) always end their own
+ *  message with a period, so templating a hard-coded "." right after one produced a doubled
+ *  "..' in the "Why your approval is required" card (e.g. "...key in Connections.. No model
+ *  critiqued..."). Trims `sentence` first so trailing whitespace before the period doesn't slip
+ *  through the endsWith check. */
+function appendSentence(sentence: string, next: string): string {
+  const trimmed = sentence.trim();
+  return `${trimmed}${/[.!?]$/.test(trimmed) ? "" : "."} ${next}`;
+}
+
 /**
  * Item 3 (opt-in): return the scan-scoring weights for THIS run, applying a small clamped nudge for a
  * factor that keeps showing up among matured missed winners. Transient — the nudge affects only this run's
@@ -1983,7 +1994,10 @@ export async function runStrategyOnce(
             requireHumanReview(proposal, {
               code: "initial_red_team",
               title: "Red Team review unavailable",
-              summary: `The adversarial review could not run (${describeRedTeamFailureKind(redTeamResult.failureKind)}): ${redTeamResult.reason}. No model critiqued this opening, so it requires your review.`
+              summary: appendSentence(
+                `The adversarial review could not run (${describeRedTeamFailureKind(redTeamResult.failureKind)}): ${redTeamResult.reason}`,
+                "No model critiqued this opening, so it requires your review."
+              )
             });
           }
           audit(

@@ -236,6 +236,16 @@ describe("Red Team unavailable — opening routing + audit parity (decide author
     // "unavailable" message.
     expect(aaplProposal?.proposal.rationale).toMatch(/rate limited/i);
 
+    // Regression: the "Why your approval is required" summary used to double its terminal
+    // punctuation whenever the Red Team's own reason string already ended in a period (which it
+    // always does — humanizeLlmError's rate-limit message ends "...check OpenRouter billing.").
+    // The old template hard-appended another "." right after it: "...billing.. No model
+    // critiqued...".
+    const initialRedTeamReason = aaplProposal?.proposal.humanReviewReasons?.find((r) => r.code === "initial_red_team");
+    expect(initialRedTeamReason?.summary).toBeDefined();
+    expect(initialRedTeamReason?.summary).not.toMatch(/\.\./);
+    expect(initialRedTeamReason?.summary).toContain("No model critiqued this opening");
+
     // Deliverable B: audit parity with strategy_bear_review_unavailable.
     const unavailableAudits = listAudit(500).filter((e) => e.kind === "strategy_red_team_unavailable");
     expect(unavailableAudits.length).toBeGreaterThanOrEqual(1);

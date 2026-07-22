@@ -224,6 +224,18 @@ function sizeText(order: EquityOrder): string {
   return EM_DASH;
 }
 
+/** What actually EXECUTED, distinct from sizeText (what was PLACED) — "8 sh · $412.16" when the
+ *  broker reports both a filled quantity and an average price, "8 sh" alone when only the
+ *  quantity is known. Undefined (never rendered) when nothing filled — rejected, expired, or
+ *  cancelled before any execution — so the finished-orders list never shows a false "0 sh". */
+function executedText(order: EquityOrder): string | undefined {
+  const filled = order.filledQuantity;
+  if (typeof filled !== "number" || !Number.isFinite(filled) || filled <= 0) return undefined;
+  const avg = order.averagePrice;
+  const notional = typeof avg === "number" && Number.isFinite(avg) ? fmtMoney(avg * filled) : undefined;
+  return notional ? `${fmtQty(filled)} sh · ${notional} executed` : `${fmtQty(filled)} sh executed`;
+}
+
 export default function OrdersPage() {
   const { snapshot, refresh } = useConsoleData();
   const [replaceRow, setReplaceRow] = useState<OpenOrderRow | null>(null);
@@ -441,6 +453,11 @@ export default function OrdersPage() {
                       <td title={tifTitle(order.timeInForce)}>{tifLabel(order.timeInForce) ?? <Dash />}</td>
                       <td className="num con-num" title="Order size as placed.">
                         {sizeText(order)}
+                        {executedText(order) && (
+                          <span className="block text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+                            {executedText(order)}
+                          </span>
+                        )}
                       </td>
                       <td className="num con-num" title="Average executed price reported by the broker.">
                         {typeof order.averagePrice === "number" && Number.isFinite(order.averagePrice) ? (
@@ -735,7 +752,12 @@ function FinishedOrderCard({ order }: { order: EquityOrder }) {
         <div className="rounded-control bg-[color:var(--con-surface-2)] px-1.5 py-0.5" title="Order size: share quantity or approximate dollar amount.">
           <div className="flex justify-between items-baseline gap-0.5">
             <span className="text-[length:var(--con-fs-xs)] uppercase tracking-[0.06em] text-[color:var(--con-faint)]">Size</span>
-            <div className="con-num truncate">{sizeText(order)}</div>
+            <div className="con-num truncate">
+              {sizeText(order)}
+              {executedText(order) && (
+                <span className="block text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">{executedText(order)}</span>
+              )}
+            </div>
           </div>
         </div>
         <div className="rounded-control bg-[color:var(--con-surface-2)] px-1.5 py-0.5" title="Average price the broker reports for the executed part; '—' when nothing executed.">

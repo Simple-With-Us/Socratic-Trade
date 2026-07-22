@@ -10,17 +10,62 @@ import type { TradeProposal } from "@/lib/types";
 
 export type RedTeamVerdict = NonNullable<TradeProposal["redTeamVerdict"]>;
 
+/** A FAILED review (verdict.available === false) is a snapshot of the moment the review couldn't
+ *  run — it says nothing about what happened afterward. `redTeamVerdictLabel` needs the LATER
+ *  deterministic/broker outcome status (e.g. the persisted `SocraticDecisionStatus` /
+ *  `RecentProposal.status`) so it can stop asserting "held for human approval" once that approval
+ *  has already happened (or the proposal was otherwise resolved) — the live thesis used to show
+ *  the stale claim right next to a deterministic-outcome section reading "Order filled"
+ *  simultaneously. Undefined/unrecognized status values are treated as "still pending" — the
+ *  honest default when the outcome isn't known yet. */
+function subsequentOutcomePhrase(outcomeStatus?: string): string | undefined {
+  switch (outcomeStatus) {
+    case "filled":
+    case "placed":
+      return "subsequently approved and executed";
+    case "placing":
+      return "subsequently approved; execution pending confirmation";
+    case "blocked":
+      return "subsequently blocked by policy before placement";
+    case "rejected":
+      return "subsequently rejected by the user";
+    case "rejected_by_broker":
+      return "subsequently approved, but rejected by the broker";
+    case "not_placed":
+    case "placing_failed":
+    case "error":
+    case "failed":
+      return "subsequently approved, but never placed";
+    case "expired":
+      return "left pending until it expired, unreviewed";
+    case "withdrawn":
+      return "subsequently withdrawn before a decision";
+    // "proposed" | "pending" | "planned" | "observed" | undefined | anything else: no resolved
+    // outcome exists yet — the original "held for human approval" framing is still accurate.
+    default:
+      return undefined;
+  }
+}
+
 /** Plain-language outcome of the review itself — deliberately distinct from the later deterministic
  * policy/broker outcome. "Approved" means the reviewer found no reason to shrink/veto the thesis;
  * it does not claim the order was placed. A model-requested override is only called overridden when
- * the final policy decision confirms it was applied. */
-export function redTeamVerdictLabel(verdict: RedTeamVerdict, overrideApplied?: boolean): string {
+ * the final policy decision confirms it was applied.
+ *
+ * `outcomeStatus` (optional) is the deterministic decision/proposal status recorded AFTER the
+ * review — pass it whenever it's in scope. It only changes the output when the verdict itself is
+ * unavailable: a FAILED review that was nonetheless followed by an approval/execution must say so
+ * in the past tense instead of leaving a live "held for human approval" claim standing. */
+export function redTeamVerdictLabel(verdict: RedTeamVerdict, overrideApplied?: boolean, outcomeStatus?: string): string {
   if (verdict.humanOverrideApplied) {
     if (!verdict.available) return "Review unavailable — approved by user";
     if (verdict.verdict === "approve-at-half") return "Half-size advice overridden by user";
     if (verdict.rejected || verdict.verdict === "reject") return "Objection overridden by user";
   }
-  if (!verdict.available) return "Review unavailable — held for human approval";
+  if (!verdict.available) {
+    const subsequent = subsequentOutcomePhrase(outcomeStatus);
+    return subsequent ? `Review unavailable; ${subsequent}` : "Review unavailable — held for human approval";
+  }
   if (verdict.rejected && overrideApplied === true) return "Objection overridden";
   if (verdict.rejected && verdict.overridden && overrideApplied === undefined) return "Rejected — override requested";
   // The reviewer verdict and the deterministic/broker outcome are separate sections. A Red reject

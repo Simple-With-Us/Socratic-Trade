@@ -428,6 +428,15 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     // by enrichment; only the normal top-N boundary is allowed to move.
     const rescoredBySymbol = new Map(rescoredRanked.map((quote) => [quote.symbol, quote]));
     const finalTop = rescoredRanked.slice(0, candidateLimit);
+    const finalTopSymbols = new Set(finalTop.map((quote) => quote.symbol));
+    const eventExtraSymbols = new Set(eventExtra.map((quote) => quote.symbol));
+    // Honest decomposition (item 26): a held position forced additively into the candidate set,
+    // beyond the ranked cut AND beyond the already-counted outlier reserve. This is what actually
+    // lets topCandidates.length exceed candidateLimit — surfaced so the UI can say "50 ranked + 14
+    // held + 11 outliers" instead of a bare "75/50 candidates" that reads like the cap was ignored.
+    const heldCandidateCount = rescoredRanked.filter(
+      (quote) => heldSymbols.has(quote.symbol) && !finalTopSymbols.has(quote.symbol) && !eventExtraSymbols.has(quote.symbol)
+    ).length;
     let topCandidates = uniqueQuotesBySymbol([
       ...finalTop,
       ...eventExtra.map((quote) => rescoredBySymbol.get(quote.symbol) ?? quote),
@@ -562,6 +571,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       candidateLimit,
       outlierReserve,
       outlierCandidateCount: eventExtra.length,
+      heldCandidateCount,
       breadthPct,
       topCandidates,
       sectorBySymbol: sectorBySymbol(mergedRanked),
@@ -908,7 +918,7 @@ function toMarketQuote(row: RawNasdaqRow, positions: EquityPosition[], provider:
   const netChange = number(row.netchange);
   const sector = text(row.sector);
   const industry = text(row.industry);
-  const companyName = text(row.name);
+  const companyName = sanitizeCompanyName(text(row.name));
   const position = positions.find((p) => normalizeSymbol(p.symbol) === symbol);
 
   return [
@@ -1415,4 +1425,15 @@ function positiveNumber(value: unknown): number | undefined {
 
 function text(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/** Strips a trailing "(Representing ...)" ADR/depositary-receipt annotation from the Nasdaq
+ *  screener's raw company name ONLY when the placeholder never actually got filled in — e.g.
+ *  "Shell Plc ADR (Representing - )" — a screener data-quality artifact, not real information.
+ *  A genuinely populated annotation (e.g. "(Representing 2 Ordinary Shares)") is left alone; it's
+ *  real, not dirty. Falls back to the original name if stripping would leave nothing. */
+function sanitizeCompanyName(name: string | undefined): string | undefined {
+  if (!name) return name;
+  const cleaned = name.replace(/\s*\(Representing\s*[-–—]*\s*\)\s*$/i, "").trim();
+  return cleaned || name;
 }
