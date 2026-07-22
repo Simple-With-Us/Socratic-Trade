@@ -23,12 +23,20 @@ export interface CaseResult {
   reciprocalRank: number;
   ndcgAtK: number;
   latencyMs: number;
+  usage: ProviderUsageReceipt;
+}
+/** Provider-reported units where available; requestCount is always measured locally. */
+export interface ProviderUsageReceipt {
+  requestCount: number;
+  embeddingTokens?: number;
+  rerankUnits?: number;
 }
 export interface ModelResult {
   kind: "dense" | "rerank";
   model: string;
   latencyMs: number;
   metrics: { recallAtK: number; mrr: number; ndcgAtK: number };
+  usage: ProviderUsageReceipt;
   cases: CaseResult[];
 }
 export interface BenchmarkReport {
@@ -58,6 +66,7 @@ export function loadPineconeBenchmarkCases(path: string): BenchmarkCase[] {
 
 /** All output is ids/scores/metrics only; candidate text is never retained in the report. */
 export async function runPineconeInferenceBenchmark(cases: BenchmarkCase[], options: BenchmarkOptions): Promise<BenchmarkReport> {
+  if (cases.length === 0) throw new Error("Pinecone inference benchmark refuses an empty golden set.");
   const limit = positiveInteger(options.limit, 10);
   const now = options.now ?? Date.now;
   const candidates: ModelResult[] = [];
@@ -72,11 +81,11 @@ export async function benchmarkDense(model: string, cases: BenchmarkCase[], limi
   for (const testCase of cases) {
     const caseStarted = now();
     const passages = await embed(model, testCase.candidates.map((candidate) => candidate.text), "passage", transport);
-    const [query] = await embed(model, [testCase.query], "query", transport);
-    if (!query || passages.length !== testCase.candidates.length) throw new Error(`Dense model ${model}: malformed embedding response for ${testCase.id}.`);
-    const ranking = testCase.candidates.map((candidate, index) => ({ id: candidate.id, score: cosine(query, passages[index]!) }))
+    const query = await embed(model, [testCase.query], "query", transport);
+    if (!query.vectors[0] || passages.vectors.length !== testCase.candidates.length) throw new Error(`Dense model ${model}: malformed embedding response for ${testCase.id}.`);
+    const ranking = testCase.candidates.map((candidate, index) => ({ id: candidate.id, score: cosine(query.vectors[0]!, passages.vectors[index]!) }))
       .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
-    results.push(scoreRanking(testCase, ranking, limit, Math.max(0, now() - caseStarted)));
+    results.push(scoreRanking(testCase, ranking, limit, Math.max(0, now() - caseStarted), sumUsage([passages.usage, query.usage])));
   }
   return summarize("dense", model, results, Math.max(0, now() - started));
 }
@@ -92,10 +101,10 @@ export async function benchmarkRerank(model: string, cases: BenchmarkCase[], lim
         documents: testCase.candidates.map((candidate) => ({ id: candidate.id, text: candidate.text })),
         top_n: testCase.candidates.length,
         // Ensure the response never carries document text into the report.
-        return_documents: false, parameters: { truncate: "END" }
+        return_documents: false
       }
     });
-    results.push(scoreRanking(testCase, parseRerank(payload, testCase, model), limit, Math.max(0, now() - caseStarted)));
+    results.push(scoreRanking(testCase, parseRerank(payload, testCase, model), limit, Math.max(0, now() - caseStarted), usageReceipt(payload, 1)));
   }
   return summarize("rerank", model, results, Math.max(0, now() - started));
 }
@@ -156,15 +165,16 @@ function parseCase(value: unknown, label: string): BenchmarkCase {
   return { id: string("id"), query: string("query"), candidates };
 }
 
-async function embed(model: string, texts: string[], inputType: "query" | "passage", transport: Transport): Promise<number[][]> {
+async function embed(model: string, texts: string[], inputType: "query" | "passage", transport: Transport): Promise<{ vectors: number[][]; usage: ProviderUsageReceipt }> {
   const payload = await transport.request("/embed", { method: "POST", body: { model, parameters: { input_type: inputType, truncate: "END" }, inputs: texts.map((text) => ({ text })) } });
   const data = (payload as { data?: unknown })?.data;
   if (!Array.isArray(data)) throw new Error(`Pinecone /embed response for ${model} did not contain data.`);
-  return data.map((item, index) => {
+  const vectors = data.map((item, index) => {
     const values = (item as { values?: unknown })?.values;
     if (!Array.isArray(values) || values.length === 0 || values.some((value) => typeof value !== "number" || !Number.isFinite(value))) throw new Error(`Pinecone /embed response for ${model} has invalid vector ${index}.`);
     return values;
   });
+  return { vectors, usage: usageReceipt(payload, 1) };
 }
 
 function parseRerank(payload: unknown, testCase: BenchmarkCase, model: string): Array<{ id: string; score: number }> {
@@ -183,17 +193,34 @@ function parseRerank(payload: unknown, testCase: BenchmarkCase, model: string): 
   });
 }
 
-function scoreRanking(testCase: BenchmarkCase, ranking: Array<{ id: string; score: number }>, limit: number, latencyMs: number): CaseResult {
+function scoreRanking(testCase: BenchmarkCase, ranking: Array<{ id: string; score: number }>, limit: number, latencyMs: number, usage: ProviderUsageReceipt): CaseResult {
   const relevant = new Set(testCase.candidates.filter((candidate) => candidate.relevant).map((candidate) => candidate.id));
   const atK = ranking.slice(0, limit);
   const ranks = ranking.flatMap((item, index) => relevant.has(item.id) ? [index + 1] : []);
   const dcg = atK.reduce((sum, item, index) => sum + (relevant.has(item.id) ? 1 / Math.log2(index + 2) : 0), 0);
   const ideal = Array.from({ length: Math.min(relevant.size, limit) }, (_, index) => 1 / Math.log2(index + 2)).reduce((sum, value) => sum + value, 0);
-  return { caseId: testCase.id, ranking: atK, recallAtK: atK.filter((item) => relevant.has(item.id)).length / relevant.size, reciprocalRank: ranks[0] ? 1 / ranks[0] : 0, ndcgAtK: ideal === 0 ? 0 : dcg / ideal, latencyMs };
+  return { caseId: testCase.id, ranking: atK, recallAtK: atK.filter((item) => relevant.has(item.id)).length / relevant.size, reciprocalRank: ranks[0] ? 1 / ranks[0] : 0, ndcgAtK: ideal === 0 ? 0 : dcg / ideal, latencyMs, usage };
 }
 function summarize(kind: "dense" | "rerank", model: string, cases: CaseResult[], latencyMs: number): ModelResult {
-  return { kind, model, latencyMs, metrics: { recallAtK: average(cases.map((item) => item.recallAtK)), mrr: average(cases.map((item) => item.reciprocalRank)), ndcgAtK: average(cases.map((item) => item.ndcgAtK)) }, cases };
+  return { kind, model, latencyMs, metrics: { recallAtK: average(cases.map((item) => item.recallAtK)), mrr: average(cases.map((item) => item.reciprocalRank)), ndcgAtK: average(cases.map((item) => item.ndcgAtK)) }, usage: sumUsage(cases.map((item) => item.usage)), cases };
 }
+function usageReceipt(payload: unknown, requestCount: number): ProviderUsageReceipt {
+  const usage = (payload as { usage?: unknown })?.usage;
+  const row = usage && typeof usage === "object" ? usage as Record<string, unknown> : {};
+  const embeddingTokens = nonNegativeNumber(row.total_tokens);
+  const rerankUnits = nonNegativeNumber(row.rerank_units);
+  return { requestCount, ...(embeddingTokens == null ? {} : { embeddingTokens }), ...(rerankUnits == null ? {} : { rerankUnits }) };
+}
+function sumUsage(receipts: ProviderUsageReceipt[]): ProviderUsageReceipt {
+  const embeddingTokens = receipts.flatMap((receipt) => receipt.embeddingTokens == null ? [] : [receipt.embeddingTokens]);
+  const rerankUnits = receipts.flatMap((receipt) => receipt.rerankUnits == null ? [] : [receipt.rerankUnits]);
+  return {
+    requestCount: receipts.reduce((sum, receipt) => sum + receipt.requestCount, 0),
+    ...(embeddingTokens.length ? { embeddingTokens: embeddingTokens.reduce((sum, value) => sum + value, 0) } : {}),
+    ...(rerankUnits.length ? { rerankUnits: rerankUnits.reduce((sum, value) => sum + value, 0) } : {})
+  };
+}
+function nonNegativeNumber(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined; }
 function cosine(a: number[], b: number[]): number {
   if (a.length !== b.length) throw new Error("Embedding dimensions differ.");
   let dot = 0; let aNorm = 0; let bNorm = 0;
@@ -204,16 +231,20 @@ function average(values: number[]): number { return values.length === 0 ? 0 : va
 function positiveInteger(value: number | undefined, fallback: number): number { const parsed = Math.floor(value ?? fallback); return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback; }
 function uniqueModels(models: string[]): string[] { return [...new Set(models.map((model) => model.trim()).filter(Boolean))]; }
 
+const MAX_LIMIT = 100;
+const MAX_CASES = 100;
+const MAX_CANDIDATES = 100;
+const MAX_MODELS_PER_KIND = 10;
 interface CliArgs { input?: string; output?: string; allowLive: boolean; inventory: boolean; limit: number; maxCases: number; maxCandidates: number; embedModels: string[]; rerankModels: string[]; }
-function parseArgs(argv: string[]): CliArgs {
+export function parsePineconeInferenceBenchmarkArgs(argv: string[]): CliArgs {
   const args: CliArgs = { allowLive: false, inventory: false, limit: 10, maxCases: 25, maxCandidates: 50, embedModels: [], rerankModels: [] };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]; const next = argv[i + 1];
     if (arg === "--input" && next) { args.input = next; i++; }
     else if (arg === "--output" && next) { args.output = next; i++; }
-    else if (arg === "--limit" && next) { args.limit = positiveInteger(Number(next), args.limit); i++; }
-    else if (arg === "--max-cases" && next) { args.maxCases = positiveInteger(Number(next), args.maxCases); i++; }
-    else if (arg === "--max-candidates" && next) { args.maxCandidates = positiveInteger(Number(next), args.maxCandidates); i++; }
+    else if (arg === "--limit" && next) { args.limit = boundedCliInteger(next, "--limit", MAX_LIMIT); i++; }
+    else if (arg === "--max-cases" && next) { args.maxCases = boundedCliInteger(next, "--max-cases", MAX_CASES); i++; }
+    else if (arg === "--max-candidates" && next) { args.maxCandidates = boundedCliInteger(next, "--max-candidates", MAX_CANDIDATES); i++; }
     else if (arg === "--embed-model" && next) { args.embedModels.push(next); i++; }
     else if (arg === "--rerank-model" && next) { args.rerankModels.push(next); i++; }
     else if (arg === "--inventory") args.inventory = true;
@@ -222,7 +253,16 @@ function parseArgs(argv: string[]): CliArgs {
     else throw new Error(`Unknown or incomplete argument: ${arg}`);
   }
   if (!args.input) throw new Error("--input <frozen-cases.json> is required.");
+  args.embedModels = uniqueModels(args.embedModels);
+  args.rerankModels = uniqueModels(args.rerankModels);
+  if (args.embedModels.length > MAX_MODELS_PER_KIND || args.rerankModels.length > MAX_MODELS_PER_KIND) throw new Error(`At most ${MAX_MODELS_PER_KIND} distinct models are allowed per inference kind.`);
   return args;
+}
+function boundedCliInteger(value: string, flag: string, maximum: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) throw new Error(`${flag} must be a positive integer.`);
+  if (parsed > maximum) throw new Error(`${flag} cannot exceed ${maximum}.`);
+  return parsed;
 }
 function printHelp(): void {
   console.log(`Usage: npm run eval:pinecone-inference -- --allow-live --input cases.json [options]
@@ -230,10 +270,11 @@ Read-only hosted inference: no index, namespace, or corpus operation; output has
   --embed-model MODEL   repeatable, default llama-text-embed-v2
   --rerank-model MODEL  repeatable, default bge-reranker-v2-m3; arbitrary model names accepted
   --limit N --max-cases N --max-candidates N --inventory --output result.json
+  hard caps: limit/cases/candidates <= 100; distinct models per kind <= 10
   --allow-live           required for every network call`);
 }
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parsePineconeInferenceBenchmarkArgs(process.argv.slice(2));
   const transport = await createLivePineconeInferenceTransport(args.allowLive);
   const cases = loadPineconeBenchmarkCases(resolve(args.input!)).slice(0, args.maxCases).map((item) => ({ ...item, candidates: item.candidates.slice(0, args.maxCandidates) }));
   if (cases.some((item) => !item.candidates.some((candidate) => candidate.relevant))) throw new Error("max-candidates removed all relevant candidates; reduce the bound or reorder the frozen case.");

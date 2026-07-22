@@ -156,7 +156,8 @@ SQLite, no Pinecone key required) — a richer **dashboard UI** surfacing the sa
 (note: `/api/admin/rag-coverage` + `app/admin/rag-coverage/` already exist as a related, separate
 live-API/UI capability — not touched by this pass, owned by the dashboard-redesign thread). A separate
 **production-path retrieval evaluator** now runs `retrieveContextDetailedWithStatus` against frozen JSON or
-DB-backed cases carrying authoritative availability timestamps and real vector ids. It emits machine-readable
+DB-backed cases carrying authoritative availability timestamps and stable evidence provenance selectors (with
+vector ids retained only as diagnostics). It emits machine-readable
 recall/MRR/nDCG, future/undated-evidence, duplicate, source/section, latency, status, and usage receipts;
 live provider reads require an explicit `--allow-live`, and comparison labels never mutate production defaults.
 The DB golden set must be curated from frozen EDGAR evidence before it can select a model; typed
@@ -167,7 +168,9 @@ ask?" popover.
 through Pinecone's standalone `/embed` and `/rerank` inference APIs, with live calls opt-in and bounded. It
 supports `llama-text-embed-v2`/`multilingual-e5-large`, `bge-reranker-v2-m3`/`pinecone-rerank-v0`, and any
 other account-exposed reranker such as Cohere; optional `/models` inventory is read-only. Results retain only
-case/candidate ids, scores, metrics, and latency—never candidate text—and do not access a Pinecone index.
+case/candidate ids, scores, metrics, latency, and provider usage receipts—never candidate text—and do not access
+a Pinecone index. CLI inputs are hard-capped at 100 cases, 100 candidates/case, 100 results, and 10 distinct
+models per inference kind.
 
 **Follow-on, 2026-07-01** (`docs/rollouts/2026-07-01-rag-followon.md`): the two items the Workstream
 C rollout note deferred are now DONE — a **retrieval regression net** (R4) pins the as-of/rerank/

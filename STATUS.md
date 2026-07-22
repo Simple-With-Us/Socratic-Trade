@@ -19,7 +19,8 @@ integration/PR still pending.
 **Follow-up:** added a second, bounded Pinecone hosted-inference benchmark for frozen candidate pools. It is
 separate from the production corpus evaluator, requires `--allow-live` for `/embed`, `/rerank`, or `/models`,
 uses no index/namespace/corpus operation, and retains only ids/scores/metrics. Focused verification and local
-commit are green; second local commit created, with parent integration/PR pending.
+commit are green; a local-only follow-up adds empty-set refusal, hard CLI caps, model-default reranking, and
+provider usage receipts. Parent integration/PR remains pending.
 
 ## 2026-07-19 — Four-handoff conquest: reconciliation + shepherding + hardening landed (CLAUDE, branch `claude/model-availability-session-handoff-362fd3`)
 

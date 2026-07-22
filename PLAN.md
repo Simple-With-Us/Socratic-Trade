@@ -425,11 +425,11 @@ Added OpenRouter models to `app/ui/llm-model-catalog.ts` so they can be selected
   evidence references.
   - **[~] Production-path retrieval evaluator (2026-07-21):** `eval:rag-production` calls
     `retrieveContextDetailedWithStatus` with immutable authoritative-as-of timestamps, real vector-id
-    assertions, machine-readable relevance/PIT/coverage/latency/usage receipts, and explicit comparison labels.
+    diagnostics plus stable provenance relevance selectors, machine-readable relevance/PIT/coverage/latency/usage receipts, and explicit comparison labels.
     Curate DB cases from frozen EDGAR evidence and run controlled shadow comparisons before changing defaults.
   - **[~] Hosted-inference candidate (2026-07-21):** benchmark Pinecone `/embed` and `/rerank` directly
-    against frozen candidate pools before assuming self-hosted or routed BGE/Cohere is best. This is bounded,
-    read-only, and account-availability-gated; it never touches the production index.
+    against frozen candidate pools before assuming self-hosted or routed BGE/Cohere is best. This is bounded
+    by absolute CLI caps, read-only, account-availability-gated, and it never touches the production index.
 - **[ ] Wave E — controlled operations:** only after gates, run shadow 10 -> 25 -> 100 -> 300 -> 1,000 breadth-
   first waves with cost/rate/failure breakers, reconciliation, dual-read/write, rollback, and freshness SLOs.
 

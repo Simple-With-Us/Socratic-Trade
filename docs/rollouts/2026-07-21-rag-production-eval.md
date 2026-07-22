@@ -63,6 +63,10 @@ account-exposed Cohere), and can list `/models` only when `--inventory` is selec
 by `--allow-live`; the provider key is resolved without printing it. The script never creates, queries, or writes
 an index/namespace/corpus, and its persisted JSON report excludes candidate text.
 
-The default bounds are 25 cases and 50 candidates/case; tune only deliberately. Run the inventory first, then
+The default bounds are 25 cases and 50 candidates/case. Hard CLI caps refuse runs above 100 cases, 100
+candidates/case, or 100 ranked results, and more than 10 distinct models of either kind. An empty golden set is
+also refused. Rerank requests omit model-specific `parameters`, so Cohere and other account-exposed models use
+their own defaults. Every report carries locally counted requests plus provider `usage.total_tokens` for embedding
+and `usage.rerank_units` when supplied; dollar prices are deliberately not baked in. Run the inventory first, then
 compare each candidate model under a distinct output file rather than treating public model-gallery availability
 as account availability.
