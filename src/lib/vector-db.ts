@@ -7,6 +7,7 @@ import { logApiHealth } from "./db-health";
 import { CHARS_PER_TOKEN_CEILING, DEFAULT_MAX_TOKENS, canonicalTicker, chunkDocument, hashContent, type ChunkInput, type ChunkOptions } from "./rag/chunk";
 import { EARNINGSCALLS_TRANSCRIPT_SOURCE, earningsCallsTranscriptsEnabled } from "./earningscalls-gate";
 import { envFlagOn } from "./rag/env-flag";
+import { expandPostRerankParentContext } from "./rag/parent-context";
 import { fuseHybrid, rrfFuse } from "./rag/hybrid";
 import { dedupeSimilar, type DedupeSimilarReport } from "./rag/dedupe-similar";
 import { getCachedQueryEmbedding, setCachedQueryEmbedding } from "./rag/query-embed-cache";
@@ -433,6 +434,19 @@ function embedBatchDelayMs(): number {
 
 function contextMaxChars(): number {
   return Math.floor(numericEnv("VECTOR_CONTEXT_MAX_CHARS", DEFAULT_CONTEXT_MAX_CHARS, 256));
+}
+
+/** Default OFF: retain legacy parent-text mapping until the bounded post-rerank path is enabled. */
+function parentContextExpansionEnabled(): boolean {
+  return envFlagOn("RAG_PARENT_CONTEXT_EXPANSION", false);
+}
+
+function parentContextMaxChars(): number {
+  return Math.floor(numericEnv("RAG_PARENT_CONTEXT_MAX_CHARS", 6_000, 0));
+}
+
+function parentContextMaxTotalChars(): number {
+  return Math.floor(numericEnv("RAG_PARENT_CONTEXT_MAX_TOTAL_CHARS", 12_000, 0));
 }
 
 function ingestBudgetEnabled(): boolean {
@@ -5215,6 +5229,15 @@ export interface RetrievedChunk {
 
 /** Map a raw Pinecone match to a chunk carrying REAL provenance (id, score, acceptance date, url). */
 export function matchToChunk(match: any): RetrievedChunk {
+  return matchToChunkWithOptions(match);
+}
+
+/**
+ * Internal/advanced mapper variant for post-rerank parent expansion. Kept separate from
+ * `matchToChunk` so the long-standing `.map(matchToChunk)` call sites retain their normal
+ * Array callback signature.
+ */
+export function matchToChunkWithOptions(match: any, options: { includeParentText?: boolean } = {}): RetrievedChunk {
   const md = (match?.metadata ?? {}) as Record<string, unknown>;
   const asOf = md.acceptance_datetime ?? md.as_of ?? md.timestamp;
   const rawScope = md.scope;
@@ -5232,7 +5255,7 @@ export function matchToChunk(match: any): RetrievedChunk {
     text: (() => {
       const parentText = md.parent_text;
       const rawText = typeof md.text === "string" ? md.text : "";
-      if (typeof parentText === "string" && parentText) {
+      if (options.includeParentText !== false && typeof parentText === "string" && parentText) {
         const headerIndex = rawText.indexOf("\n\n");
         const header = headerIndex >= 0 ? rawText.slice(0, headerIndex) : "";
         return header ? `${header}\n\n${parentText}` : parentText;
@@ -6467,9 +6490,23 @@ export async function retrieveContextDetailed(
       // re-thrown.
       console.warn("[vector-db] candidate-pool v2 capture failed (ignored, retrieval unaffected):", captureErr instanceof Error ? captureErr.message : String(captureErr));
     }
-    const finalChunks = finalSlice
-      .map(matchToChunk)
+    // Child chunks are selected/reranked first. The default retains the legacy one-chunk parent
+    // substitution exactly; the opt-in path maps raw child text, then attaches each surviving
+    // parent once under deterministic per-parent/global caps. It never feeds parent text into
+    // recall/rerank or creates another candidate.
+    const wantParentContextExpansion = parentContextExpansionEnabled();
+    const mappedFinalChunks = finalSlice
+      .map((match) => matchToChunkWithOptions(match, { includeParentText: !wantParentContextExpansion }))
       .filter((c) => c.text);
+    const finalChunks = wantParentContextExpansion
+      ? expandPostRerankParentContext(mappedFinalChunks, {
+          enabled: true,
+          asOf: options?.asOf,
+          strictAsOf: asOfStrictEnabled(),
+          maxParentChars: parentContextMaxChars(),
+          maxTotalParentChars: parentContextMaxTotalChars()
+        }).chunks
+      : mappedFinalChunks;
     // Final status classification (receipt only — never changes `finalChunks`): a real zero-match
     // result is "no_memory" (pipeline ran cleanly, nothing relevant found); a non-empty result under
     // the R16 per-run budget degrade is "degraded" (lower quality, not absent); everything else "ok".

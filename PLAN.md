@@ -1,5 +1,13 @@
 # Active Implementation Plan
 
+> **2026-07-22 - RAG parent-context expansion (CODEX, branch `codex/rag-parent-expansion-20260722`).**
+> Keep child chunks as the only dense/lexical/rerank candidates. Default-off
+> `RAG_PARENT_CONTEXT_EXPANSION` maps final survivors back to their bounded parent context only
+> after ranking, deduping sibling parents deterministically and preserving child id, score, metadata,
+> and strict point-in-time semantics. The local helper and retrieval wiring are focused-test/TS/lint
+> verified; tune only after the production-path evaluator shows an evidence gain within the global
+> prompt budget. Do not alter the external corpus/re-embed train for this work.
+
 > **2026-07-21 - CI Runner Migration (Antigravity, branch `agent/antigravity-ci-fix`).** Replaced failing self-hosted runner `trading-live` with `ubuntu-latest` across all CI workflows (`.github/workflows/*.yml`) in Socratic.Trade. The Mac self-hosted runner environment was corrupted after Hetzner failure. Scheduled to land via `scripts/land.sh` to unblock 38 pending PRs.
 > **2026-07-19 - Land the #1771/#1773/#1777 chain, then run the corpus re-embed to completion
 > (owner-directed pickup, multiple lanes).** Next actions, in order: (1) land **#1771**

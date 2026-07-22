@@ -29,6 +29,18 @@ consume evidence through the same primitives as the trading strategy:
 This closes the previously tracked RAG prompt-injection gap (I8) for the active chat tool loop. It
 does not give free-text chat authority to mutate strategy weights or risk policy.
 
+## 2026-07-22 parent-context expansion boundary
+
+Long filing sections are stored as child chunks with their source parent text. `RAG_PARENT_CONTEXT_EXPANSION`
+is default-off: child text is the only recall/rerank unit, then the final survivors may receive one
+deduplicated parent-context attachment under `RAG_PARENT_CONTEXT_MAX_CHARS` (default 6,000) and
+`RAG_PARENT_CONTEXT_MAX_TOTAL_CHARS` (default 12,000). It never creates a candidate, inflates a score,
+or changes child provenance/order. Where the selected child is verbatim inside its parent, the helper
+attaches only surrounding parent prose rather than duplicating prompt text. Under an active strict
+`asOf`, an undated or future parent is not attached. This is a context-quality experiment, not an
+ingestion or re-embedding change; evaluate it against prompt consumption and production-path PIT results
+before enabling it.
+
 ## 1. Core decision — HYBRID: separate WRITE surfaces, one shared READ substrate
 
 The question is not "one brain or two." Decompose "separation" into **read** and **write**; the

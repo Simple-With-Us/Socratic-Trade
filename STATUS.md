@@ -1,3 +1,16 @@
+## 2026-07-22 — Bounded post-rerank parent-context expansion (CODEX, local branch `codex/rag-parent-expansion-20260722`)
+
+Locally verified a default-off parent-context attachment stage for final RAG survivors. It preserves legacy output
+when disabled; when `RAG_PARENT_CONTEXT_EXPANSION=true`, reranking still sees child chunks only, then
+the selected result list receives at most one bounded parent attachment per document/provenance key.
+Per-parent and total caps are configurable; repeated siblings, missing parents, future/undated strict-PIT
+parents, and exhausted budgets are all handled without changing candidate ids, scores, order, or metadata.
+The attachment removes an exact selected-child passage from the parent context, so activation cannot
+duplicate that passage in a prompt. Focused tests: 7/7; scoped ESLint: 0 errors (64 pre-existing
+`vector-db.ts` warnings); TypeScript and diff check pass. No chunking, ingestion, re-embed, corpus,
+provider, or production operation was performed. Rollout:
+`docs/rollouts/2026-07-22-rag-parent-context-expansion.md`.
+
 ## 2026-07-21 — Voyage AI Purge and OpenRouter Standardization (ANTIGRAVITY, branch `agent/antigravity-docs-update`)
 
 Purged the Voyage AI SDK and its dependencies, standardizing the production RAG engine on OpenRouter BAAI bge-m3 / Cohere reranker. Dynamic imports and test-only shims maintain test suite compatibility while completely isolating Voyage from production. All 4,898 tests and the production Next.js build are fully green. Rollout: `docs/rollouts/2026-07-21-voyage-ai-purge.md`.
