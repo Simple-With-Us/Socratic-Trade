@@ -17,7 +17,7 @@ export async function GET(request: Request) {
 
   const rows = getLlmUsageSummary({ sinceIso, userId, connectedAccountId, broker }).map((r) => {
     const key = describeUsageKey(r);
-    return { ...r, keyLabel: key?.label ?? null, keyLast4: key?.last4 ?? null, keyMasked: key?.masked ?? null };
+    return { ...r, keyLabel: key?.label ?? null, keyFingerprint: key?.fingerprint ?? null };
   });
   const serverFailoverRows = rows.filter((r) => r.keySource === "operator");
 

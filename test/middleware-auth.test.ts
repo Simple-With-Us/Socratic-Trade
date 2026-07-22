@@ -13,6 +13,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import { encodeSessionToken } from "../src/lib/auth/session-token";
 
 // Dynamic import lets us re-import with fresh module state after stubbing env.
@@ -39,15 +40,57 @@ async function mintSessionJwt(email: string, secret: string, loginAt?: number): 
   });
 }
 
-function fakeCfAccessAssertion(email: string, issuedAtMs: number): string {
-  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
-  const payload = Buffer.from(JSON.stringify({ email, iat: Math.floor(issuedAtMs / 1_000) })).toString("base64url");
-  return `${header}.${payload}.test-signature`;
+/**
+ * Cloudflare Access JWT test harness (Item 12 fix): generates a real RSA keypair, serves it as the
+ * mocked `/cdn-cgi/access/certs` JWKS endpoint (via a stubbed global `fetch`), and mints assertions
+ * signed against it. This exercises the REAL verification path in middleware.ts (issuer, audience,
+ * signature) — unlike the old unsigned `fakeCfAccessAssertion` fixture this replaces, which the
+ * pre-fix code never actually verified.
+ */
+async function armCfAccessJwks(teamDomain: string): Promise<{
+  mintAssertion: (
+    email: string,
+    opts?: { audience?: string; issuedAtMs?: number; expiresInSec?: number; badSignature?: boolean }
+  ) => Promise<string>;
+}> {
+  const { publicKey, privateKey } = await generateKeyPair("RS256");
+  const kid = "test-key-1";
+  const jwk = { ...(await exportJWK(publicKey)), kid, alg: "RS256", use: "sig" };
+  const certsUrl = `https://${teamDomain}/cdn-cgi/access/certs`;
+
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: unknown) => {
+      const url =
+        input instanceof URL ? input.toString() : typeof input === "string" ? input : (input as Request).url;
+      if (url === certsUrl) {
+        return new Response(JSON.stringify({ keys: [jwk] }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      throw new Error(`Unexpected fetch in test: ${url}`);
+    })
+  );
+
+  return {
+    async mintAssertion(email, opts = {}) {
+      const signingKey = opts.badSignature ? (await generateKeyPair("RS256")).privateKey : privateKey;
+      let builder = new SignJWT({ email })
+        .setProtectedHeader({ alg: "RS256", kid })
+        .setIssuer(`https://${teamDomain}`)
+        .setAudience(opts.audience ?? "test-audience-tag")
+        .setExpirationTime(Math.floor(Date.now() / 1_000) + (opts.expiresInSec ?? 3600));
+      builder = opts.issuedAtMs !== undefined ? builder.setIssuedAt(Math.floor(opts.issuedAtMs / 1_000)) : builder.setIssuedAt();
+      return builder.sign(signingKey);
+    }
+  };
 }
 
 describe("middleware — fail-closed arming (Phase-11 M6)", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     vi.resetModules();
   });
 
@@ -73,29 +116,41 @@ describe("middleware — fail-closed arming (Phase-11 M6)", () => {
     expect(res.headers.get("location")).toContain("/login");
   });
 
-  // ── Test 2: Cloudflare Access header trust is explicitly enabled only ─────────
-  it("trusts the CF header when the explicit flag is enabled alongside Auth.js", async () => {
+  // ── Test 2: Cloudflare Access header trust requires team-domain + audience + a verified JWT ──
+  it("trusts the CF header only when armed with team domain + audience + a verified JWT assertion", async () => {
+    const teamDomain = "test-team.cloudflareaccess.com";
     vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("CF_ACCESS_TEAM_DOMAIN", teamDomain);
+    vi.stubEnv("CF_ACCESS_AUD", "test-audience-tag");
     vi.stubEnv("AUTH_SECRET", "test-secret-at-least-32-bytes-long!!");
     vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
+    const { mintAssertion } = await armCfAccessJwks(teamDomain);
+    const assertion = await mintAssertion("verified@example.com");
     const middleware = await loadMiddleware();
     const req = makeRequest("/api/dashboard", {
-      "cf-access-authenticated-user-email": "verified@example.com"
+      "cf-access-authenticated-user-email": "verified@example.com",
+      "cf-access-jwt-assertion": assertion
     });
     const res = await middleware(req);
     expect(res.status).toBe(200);
     expect(res.headers.get("x-middleware-request-x-authenticated-user-email")).toBe("verified@example.com");
+    expect(res.headers.get("x-middleware-request-x-authenticated-identity-source")).toBe("cloudflare-access");
   });
 
   it("does not treat a Cloudflare application-token issue time as a fresh provider login", async () => {
+    const teamDomain = "test-team.cloudflareaccess.com";
     const issuedAt = Date.parse("2026-07-14T20:00:00.000Z");
     vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("CF_ACCESS_TEAM_DOMAIN", teamDomain);
+    vi.stubEnv("CF_ACCESS_AUD", "test-audience-tag");
     vi.stubEnv("AUTH_SECRET", "");
     vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
+    const { mintAssertion } = await armCfAccessJwks(teamDomain);
+    const assertion = await mintAssertion("verified@example.com", { issuedAtMs: issuedAt });
     const middleware = await loadMiddleware();
     const req = makeRequest("/api/dashboard", {
       "cf-access-authenticated-user-email": "verified@example.com",
-      "cf-access-jwt-assertion": fakeCfAccessAssertion("verified@example.com", issuedAt)
+      "cf-access-jwt-assertion": assertion
     });
     const res = await middleware(req);
     expect(res.status).toBe(200);
@@ -105,15 +160,21 @@ describe("middleware — fail-closed arming (Phase-11 M6)", () => {
   });
 
   it("uses a matching signed Auth.js login proof alongside Cloudflare Access", async () => {
+    const teamDomain = "test-team.cloudflareaccess.com";
     const secret = "test-secret-at-least-32-bytes-long!!";
     const loginAt = Date.parse("2026-07-14T20:00:00.000Z");
     vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("CF_ACCESS_TEAM_DOMAIN", teamDomain);
+    vi.stubEnv("CF_ACCESS_AUD", "test-audience-tag");
     vi.stubEnv("AUTH_SECRET", secret);
     vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
+    const { mintAssertion } = await armCfAccessJwks(teamDomain);
+    const assertion = await mintAssertion("verified@example.com");
     const jwt = await mintSessionJwt("verified@example.com", secret, loginAt);
     const middleware = await loadMiddleware();
     const req = makeRequest("/api/dashboard", {
       "cf-access-authenticated-user-email": "verified@example.com",
+      "cf-access-jwt-assertion": assertion,
       cookie: `authjs.session-token=${jwt}`
     });
     const res = await middleware(req);
@@ -125,14 +186,20 @@ describe("middleware — fail-closed arming (Phase-11 M6)", () => {
   });
 
   it("ignores a signed Auth.js login proof for a different Cloudflare identity", async () => {
+    const teamDomain = "test-team.cloudflareaccess.com";
     const secret = "test-secret-at-least-32-bytes-long!!";
     vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("CF_ACCESS_TEAM_DOMAIN", teamDomain);
+    vi.stubEnv("CF_ACCESS_AUD", "test-audience-tag");
     vi.stubEnv("AUTH_SECRET", secret);
     vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
+    const { mintAssertion } = await armCfAccessJwks(teamDomain);
+    const assertion = await mintAssertion("verified@example.com");
     const jwt = await mintSessionJwt("other@example.com", secret, Date.parse("2026-07-14T20:00:00.000Z"));
     const middleware = await loadMiddleware();
     const req = makeRequest("/api/dashboard", {
       "cf-access-authenticated-user-email": "verified@example.com",
+      "cf-access-jwt-assertion": assertion,
       cookie: `authjs.session-token=${jwt}`
     });
     const res = await middleware(req);
@@ -144,7 +211,13 @@ describe("middleware — fail-closed arming (Phase-11 M6)", () => {
       .toBe("cloudflare-access");
   });
 
-  it("explicit CF flag alone arms CF identity", async () => {
+  // ── Item 12 fix: the flag alone must never trust the header (fail-closed regression suite) ──
+  it("FIXED: flag alone (no team-domain/aud/JWT) no longer trusts a spoofed header", async () => {
+    // Regression test for the vulnerability this fix closes: previously CF_ACCESS_TRUST_EMAIL_HEADER=1
+    // trusted `cf-access-authenticated-user-email` outright with no verification. Since the origin is
+    // directly reachable, that header is a plain, attacker-settable HTTP header — a spoofed value was
+    // a full auth bypass. Now the flag alone arms nothing: CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD must
+    // also be set, and the header is only trusted alongside a verified Cf-Access-Jwt-Assertion.
     vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
     vi.stubEnv("AUTH_SECRET", "");
     vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
@@ -153,9 +226,112 @@ describe("middleware — fail-closed arming (Phase-11 M6)", () => {
       "cf-access-authenticated-user-email": "attacker@evil.example"
     });
     const res = await middleware(req);
-    expect(res.status).toBe(200);
-    const fwd = res.headers.get("x-middleware-request-x-authenticated-user-email");
-    expect(fwd).toBe("attacker@evil.example");
+    // authConfigured is still true (flag on) so this fails closed (401) rather than trusting the
+    // spoofed header OR falling open to the PRIMARY_EMAIL dev fallback.
+    expect(res.status).toBe(401);
+  });
+
+  it("flag on + team-domain/aud configured but NO JWT assertion → header ignored, fails closed", async () => {
+    const teamDomain = "test-team.cloudflareaccess.com";
+    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("CF_ACCESS_TEAM_DOMAIN", teamDomain);
+    vi.stubEnv("CF_ACCESS_AUD", "test-audience-tag");
+    vi.stubEnv("AUTH_SECRET", "");
+    vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
+    const middleware = await loadMiddleware();
+    const req = makeRequest("/api/dashboard", {
+      "cf-access-authenticated-user-email": "attacker@evil.example"
+      // deliberately no cf-access-jwt-assertion header
+    });
+    const res = await middleware(req);
+    expect(res.status).toBe(401);
+  });
+
+  it("flag on + team-domain/aud configured but a garbage JWT assertion → header ignored, fails closed", async () => {
+    const teamDomain = "test-team.cloudflareaccess.com";
+    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("CF_ACCESS_TEAM_DOMAIN", teamDomain);
+    vi.stubEnv("CF_ACCESS_AUD", "test-audience-tag");
+    vi.stubEnv("AUTH_SECRET", "");
+    vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
+    await armCfAccessJwks(teamDomain);
+    const middleware = await loadMiddleware();
+    const req = makeRequest("/api/dashboard", {
+      "cf-access-authenticated-user-email": "attacker@evil.example",
+      "cf-access-jwt-assertion": "not.a.validjwt"
+    });
+    const res = await middleware(req);
+    expect(res.status).toBe(401);
+  });
+
+  it("flag on + JWT signed by an untrusted key → header ignored, fails closed", async () => {
+    const teamDomain = "test-team.cloudflareaccess.com";
+    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("CF_ACCESS_TEAM_DOMAIN", teamDomain);
+    vi.stubEnv("CF_ACCESS_AUD", "test-audience-tag");
+    vi.stubEnv("AUTH_SECRET", "");
+    vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
+    const { mintAssertion } = await armCfAccessJwks(teamDomain);
+    const forged = await mintAssertion("attacker@evil.example", { badSignature: true });
+    const middleware = await loadMiddleware();
+    const req = makeRequest("/api/dashboard", {
+      "cf-access-authenticated-user-email": "attacker@evil.example",
+      "cf-access-jwt-assertion": forged
+    });
+    const res = await middleware(req);
+    expect(res.status).toBe(401);
+  });
+
+  it("flag on + valid JWT but WRONG audience → header ignored, fails closed", async () => {
+    const teamDomain = "test-team.cloudflareaccess.com";
+    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("CF_ACCESS_TEAM_DOMAIN", teamDomain);
+    vi.stubEnv("CF_ACCESS_AUD", "test-audience-tag");
+    vi.stubEnv("AUTH_SECRET", "");
+    vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
+    const { mintAssertion } = await armCfAccessJwks(teamDomain);
+    const wrongAud = await mintAssertion("verified@example.com", { audience: "some-other-app" });
+    const middleware = await loadMiddleware();
+    const req = makeRequest("/api/dashboard", {
+      "cf-access-authenticated-user-email": "verified@example.com",
+      "cf-access-jwt-assertion": wrongAud
+    });
+    const res = await middleware(req);
+    expect(res.status).toBe(401);
+  });
+
+  it("flag on + valid JWT but header/JWT email MISMATCH → header ignored, fails closed", async () => {
+    const teamDomain = "test-team.cloudflareaccess.com";
+    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("CF_ACCESS_TEAM_DOMAIN", teamDomain);
+    vi.stubEnv("CF_ACCESS_AUD", "test-audience-tag");
+    vi.stubEnv("AUTH_SECRET", "");
+    vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
+    const { mintAssertion } = await armCfAccessJwks(teamDomain);
+    const assertion = await mintAssertion("verified@example.com");
+    const middleware = await loadMiddleware();
+    const req = makeRequest("/api/dashboard", {
+      // header claims a DIFFERENT email than the one the verified JWT actually attests to
+      "cf-access-authenticated-user-email": "attacker@evil.example",
+      "cf-access-jwt-assertion": assertion
+    });
+    const res = await middleware(req);
+    expect(res.status).toBe(401);
+  });
+
+  it("flag on + CF_ACCESS_TEAM_DOMAIN set but CF_ACCESS_AUD missing → not armed, header ignored", async () => {
+    const teamDomain = "test-team.cloudflareaccess.com";
+    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("CF_ACCESS_TEAM_DOMAIN", teamDomain);
+    vi.stubEnv("CF_ACCESS_AUD", "");
+    vi.stubEnv("AUTH_SECRET", "");
+    vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
+    const middleware = await loadMiddleware();
+    const req = makeRequest("/api/dashboard", {
+      "cf-access-authenticated-user-email": "attacker@evil.example"
+    });
+    const res = await middleware(req);
+    expect(res.status).toBe(401);
   });
 
   it.each(["0", "false", "no", "off"])("treats CF_ACCESS_TRUST_EMAIL_HEADER=%s as disabled", async (flag) => {

@@ -34,6 +34,13 @@ export async function register() {
   const { assertSecretsManagerIfRequired } = await import("./src/lib/secrets-source");
   assertSecretsManagerIfRequired();
 
+  // Fail fast in PRODUCTION if ENCRYPTION_KEY is missing/malformed — a trading app must never
+  // silently mint a per-process ephemeral encryption key (stored credentials would become
+  // unreadable after every restart). No effect in dev/test (a deterministic warning fires there
+  // instead — see db-api-keys.ts). Runs before anything reads/writes a credential.
+  const { assertEncryptionKeyConfiguredInProduction } = await import("./src/lib/db-api-keys");
+  assertEncryptionKeyConfiguredInProduction();
+
   if (process.env.SENTRY_DSN) {
     await import("./sentry.server.config");
   }
@@ -44,6 +51,13 @@ export async function register() {
   migrateLocalEnvCredentials();
   const { migrateLocalRobinhoodToken } = await import("./src/lib/mcp-oauth");
   migrateLocalRobinhoodToken();
+
+  // One-time, idempotent re-encryption of any legacy PLAINTEXT credential rows now that a real
+  // (non-ephemeral) ENCRYPTION_KEY is confirmed available. No-ops silently when only the
+  // per-process ephemeral fallback key is active (dev without ENCRYPTION_KEY set) — re-encrypting
+  // under a throwaway key would make that data less recoverable, not more.
+  const { migrateLegacyPlaintextCredentialsIfKeyConfigured } = await import("./src/lib/db-api-keys");
+  migrateLegacyPlaintextCredentialsIfKeyConfigured();
 
   const { startObservability } = await import("./src/lib/observability");
   await startObservability();

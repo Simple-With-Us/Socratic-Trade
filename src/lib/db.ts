@@ -2406,8 +2406,10 @@ export function hasEncryptedCredentials(database: Database.Database): boolean {
     .get() as { n: number };
   if (row.n > 0) return true;
   // Robinhood OAuth token blobs are JSON in settings; the JSON itself contains colons, so match the
-  // SECRET fields against the iv:tag:ct hex envelope rather than GLOB-ing the whole value.
-  const envelope = /^[0-9a-f]{24}:[0-9a-f]{32}:[0-9a-f]+$/i;
+  // SECRET fields against the iv:tag:ct hex envelope rather than GLOB-ing the whole value. The
+  // optional "v1:" prefix covers the versioned envelope format (see db-api-keys.ts's
+  // CIPHERTEXT_VERSION_PREFIX) alongside the pre-versioning bare envelope still on disk.
+  const envelope = /^(?:v1:)?[0-9a-f]{24}:[0-9a-f]{32}:[0-9a-f]+$/i;
   const oauthRows = database
     .prepare("SELECT value FROM settings WHERE key GLOB 'robinhood_mcp_oauth_token:*'")
     .all() as { value: string }[];

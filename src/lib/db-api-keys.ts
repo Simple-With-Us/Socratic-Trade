@@ -46,16 +46,69 @@ if (!process.env.ENCRYPTION_KEY && process.env.NODE_ENV !== "test" && !process.e
   }
 }
 
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY
-  ? Buffer.from(process.env.ENCRYPTION_KEY, "hex")
-  : crypto.randomBytes(32); // Fallback to memory-only key if not set (keys will be lost on restart!)
+const IS_TEST_ENV = process.env.NODE_ENV === "test" || !!process.env.VITEST;
+
+/** A valid ENCRYPTION_KEY is a 64-char hex string (32 bytes) — anything else can't key AES-256-GCM. */
+export function isValidEncryptionKeyHex(value: string | undefined): value is string {
+  return !!value && /^[0-9a-f]{64}$/i.test(value.trim());
+}
+
+const RAW_ENCRYPTION_KEY = process.env.ENCRYPTION_KEY?.trim();
+const ENCRYPTION_KEY_CONFIGURED = isValidEncryptionKeyHex(RAW_ENCRYPTION_KEY);
+
+if (!IS_TEST_ENV && !ENCRYPTION_KEY_CONFIGURED) {
+  // Deterministic dev/local warning path. PRODUCTION instead REFUSES to boot for this same
+  // condition — see assertEncryptionKeyConfiguredInProduction below, called from
+  // instrumentation.ts before any request is served. A per-process random key here means every
+  // credential encrypted during this run becomes unreadable the moment the process restarts.
+  console.warn(
+    RAW_ENCRYPTION_KEY
+      ? "[db-api-keys] ENCRYPTION_KEY is set but is not a valid 64-char hex string (32 bytes) — " +
+        "falling back to a per-process random key for THIS RUN ONLY. Credentials encrypted now " +
+        "will be UNREADABLE after restart. Regenerate with: openssl rand -hex 32."
+      : "[db-api-keys] ENCRYPTION_KEY is not set — using a per-process random key for THIS RUN " +
+        "ONLY. Credentials encrypted now will be UNREADABLE after restart. Set ENCRYPTION_KEY " +
+        "(openssl rand -hex 32) for any environment where data must persist across restarts."
+  );
+}
+
+// Fallback to a memory-only key when unset/invalid (keys will be lost on restart!). Production
+// never reaches this silently — see assertEncryptionKeyConfiguredInProduction. (Calls
+// isValidEncryptionKeyHex directly, rather than reusing ENCRYPTION_KEY_CONFIGURED, so TS narrows
+// RAW_ENCRYPTION_KEY to `string` in the true branch.)
+const ENCRYPTION_KEY = isValidEncryptionKeyHex(RAW_ENCRYPTION_KEY) ? Buffer.from(RAW_ENCRYPTION_KEY, "hex") : crypto.randomBytes(32);
 const ALGORITHM = "aes-256-gcm";
 
 /**
- * AES-256-GCM encrypt a string to the compact `iv:authTag:ciphertext` (all hex) envelope. Uses the
- * process `ENCRYPTION_KEY` (or a memory-only key when unset). Exported so other at-rest secrets
- * (e.g. Robinhood OAuth tokens in mcp-oauth.ts) reuse the SAME field-level encryption + the
- * legacy-plaintext-tolerant `decryptValue` below, rather than duplicating the crypto.
+ * Refuse to boot in PRODUCTION when ENCRYPTION_KEY is missing or malformed. A real-money trading
+ * app must never silently mint a per-process ephemeral encryption key: stored broker
+ * credentials/OAuth tokens would become unreadable after every restart, and any legacy plaintext
+ * rows would have no path to ever get encrypted. Call from the Node-runtime boot hook
+ * (instrumentation.ts's `register()`), before any request is served or any credential is read.
+ * Intentionally independent of whether the DB already holds ciphertext — see the separate,
+ * broader-than-production `assertEncryptionKeyAvailable` in db.ts for that (dev+prod) check.
+ */
+export function assertEncryptionKeyConfiguredInProduction(env: NodeJS.ProcessEnv = process.env): void {
+  if (env.NODE_ENV !== "production") return;
+  if (isValidEncryptionKeyHex(env.ENCRYPTION_KEY?.trim())) return;
+  throw new Error(
+    "ENCRYPTION_KEY is missing or invalid in production. Refusing to boot: a per-process " +
+    "ephemeral encryption key would make stored broker/API credentials unreadable after every " +
+    "restart. Set ENCRYPTION_KEY to a 64-char hex string (openssl rand -hex 32) before starting."
+  );
+}
+
+/** Prefix marking the current (v1) ciphertext envelope, so a future key-rotation/format change can
+ *  add v2 alongside it without breaking existing rows. Bump this (and add a v2 branch to
+ *  decryptValue) the next time the envelope format changes — never repurpose v1. */
+const CIPHERTEXT_VERSION_PREFIX = "v1:";
+
+/**
+ * AES-256-GCM encrypt a string to the versioned `v1:iv:authTag:ciphertext` (all hex after the
+ * prefix) envelope. Uses the process `ENCRYPTION_KEY` (or a memory-only key when unset/invalid).
+ * Exported so other at-rest secrets (e.g. Robinhood OAuth tokens in mcp-oauth.ts) reuse the SAME
+ * field-level encryption + the legacy-plaintext-tolerant `decryptValue` below, rather than
+ * duplicating the crypto.
  */
 export function encryptValue(text: string): string {
   const iv = crypto.randomBytes(12);
@@ -63,17 +116,25 @@ export function encryptValue(text: string): string {
   let encrypted = cipher.update(text, "utf8", "hex");
   encrypted += cipher.final("hex");
   const authTag = cipher.getAuthTag().toString("hex");
-  return `${iv.toString("hex")}:${authTag}:${encrypted}`;
+  return `${CIPHERTEXT_VERSION_PREFIX}${iv.toString("hex")}:${authTag}:${encrypted}`;
 }
 
 /**
- * Decrypt a value produced by `encryptValue`. Values that are NOT the 3-part `iv:tag:ct` envelope are
- * returned unchanged — the legacy-plaintext fallback that lets pre-encryption rows still load. Exported
- * for reuse by other at-rest secret stores (see encryptValue).
+ * Decrypt a value produced by `encryptValue`. Handles THREE shapes, oldest-compatible-first:
+ *   1. Current `v1:iv:tag:ct` envelope (the CIPHERTEXT_VERSION_PREFIX above).
+ *   2. The PRE-VERSIONING bare `iv:tag:ct` envelope (no prefix) — every row encrypted before this
+ *      change used this exact shape. MUST keep decrypting unchanged: same algorithm/key
+ *      derivation, same 3-part split, so the owner's existing prod ENCRYPTION_KEY keeps reading
+ *      every already-encrypted row with zero re-encryption required.
+ *   3. Anything else (no version prefix AND not a 3-part hex envelope) → legacy PLAINTEXT
+ *      fallback, returned unchanged (pre-encryption rows).
+ * Exported for reuse by other at-rest secret stores (see encryptValue).
  */
 export function decryptValue(encryptedText: string): string {
   try {
-    const parts = encryptedText.split(":");
+    const versioned = encryptedText.startsWith(CIPHERTEXT_VERSION_PREFIX);
+    const body = versioned ? encryptedText.slice(CIPHERTEXT_VERSION_PREFIX.length) : encryptedText;
+    const parts = body.split(":");
     if (parts.length !== 3) return encryptedText; // Legacy unencrypted fallback
     const iv = Buffer.from(parts[0], "hex");
     const authTag = Buffer.from(parts[1], "hex");
@@ -87,6 +148,90 @@ export function decryptValue(encryptedText: string): string {
     console.error("Failed to decrypt field:", e);
     return "";
   }
+}
+
+/**
+ * Strict (unlike decryptValue's lenient 3-part-split heuristic) detector for "is this value already
+ * one of our AES-GCM envelopes" — versioned or legacy-bare — used ONLY to decide whether the
+ * plaintext migration sweep below should re-encrypt a row. Validates each part's exact hex shape
+ * (12-byte iv, 16-byte authTag, hex ciphertext) rather than just counting colons, so a plaintext
+ * secret that happens to contain two colons is never mistaken for already-encrypted and left
+ * unmigrated.
+ */
+export function isEncryptedValue(value: string): boolean {
+  const body = value.startsWith(CIPHERTEXT_VERSION_PREFIX) ? value.slice(CIPHERTEXT_VERSION_PREFIX.length) : value;
+  const parts = body.split(":");
+  return (
+    parts.length === 3 &&
+    /^[0-9a-f]{24}$/i.test(parts[0]) &&
+    /^[0-9a-f]{32}$/i.test(parts[1]) &&
+    /^[0-9a-f]+$/i.test(parts[2])
+  );
+}
+
+export interface CredentialEncryptionMigrationResult {
+  apiKeysMigrated: number;
+  connectedAccountFieldsMigrated: number;
+}
+
+/**
+ * One-time, idempotent sweep that re-encrypts any legacy PLAINTEXT credential rows in place, now
+ * that a valid ENCRYPTION_KEY is available. Safe to call on every boot: already-encrypted rows
+ * (current `v1:` envelope OR the pre-versioning bare envelope) are left untouched via
+ * isEncryptedValue; only genuine plaintext rows (from before field-level encryption existed) are
+ * re-written. Every run that actually migrates something is audited. Covers the two tables this
+ * module owns (`user_api_keys`, `connected_accounts`); Robinhood OAuth token blobs in `settings`
+ * are re-encrypted by mcp-oauth.ts's own migration using the same encryptValue/decryptValue.
+ */
+export function migrateLegacyPlaintextCredentials(): CredentialEncryptionMigrationResult {
+  const db = getDb();
+  let apiKeysMigrated = 0;
+  let connectedAccountFieldsMigrated = 0;
+
+  const apiKeyRows = db.prepare("SELECT id, api_key FROM user_api_keys").all() as { id: string; api_key: string }[];
+  for (const row of apiKeyRows) {
+    if (!row.api_key || isEncryptedValue(row.api_key)) continue;
+    db.prepare("UPDATE user_api_keys SET api_key = ? WHERE id = ?").run(encryptValue(row.api_key), row.id);
+    apiKeysMigrated++;
+  }
+
+  const accountRows = db
+    .prepare("SELECT id, api_key, api_secret FROM connected_accounts")
+    .all() as { id: string; api_key: string | null; api_secret: string | null }[];
+  for (const row of accountRows) {
+    const sets: string[] = [];
+    const params: string[] = [];
+    if (row.api_key && !isEncryptedValue(row.api_key)) {
+      sets.push("api_key = ?");
+      params.push(encryptValue(row.api_key));
+      connectedAccountFieldsMigrated++;
+    }
+    if (row.api_secret && !isEncryptedValue(row.api_secret)) {
+      sets.push("api_secret = ?");
+      params.push(encryptValue(row.api_secret));
+      connectedAccountFieldsMigrated++;
+    }
+    if (sets.length > 0) {
+      params.push(row.id);
+      db.prepare(`UPDATE connected_accounts SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+    }
+  }
+
+  if (apiKeysMigrated > 0 || connectedAccountFieldsMigrated > 0) {
+    audit("credential_encryption_migration", { apiKeysMigrated, connectedAccountFieldsMigrated });
+  }
+  return { apiKeysMigrated, connectedAccountFieldsMigrated };
+}
+
+/**
+ * Boot-time entry point for the sweep above: only runs when a REAL (non-ephemeral) ENCRYPTION_KEY
+ * is configured. Re-encrypting plaintext rows under a throwaway per-process key would make that
+ * data LESS recoverable, not more (the key vanishes on the next restart) — so this deliberately
+ * no-ops on the ephemeral fallback rather than migrating anything.
+ */
+export function migrateLegacyPlaintextCredentialsIfKeyConfigured(): CredentialEncryptionMigrationResult | null {
+  if (!ENCRYPTION_KEY_CONFIGURED) return null;
+  return migrateLegacyPlaintextCredentials();
 }
 
 // ── Multi-User API Key Storage ──────────────────────────────────────────────

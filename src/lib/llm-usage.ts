@@ -400,26 +400,38 @@ export function getLlmUsageSummary(opts: {
 }
 
 export interface KeyDescriptor {
-  /** Last 4 chars of the key — a safe display convention (computed at read time, never persisted). */
-  last4: string;
-  /** Display-safe mask: first 8 chars + "..." + last 4 chars (e.g. "sk-proj-...abcd"). */
-  masked: string;
+  /** Irreversible, non-secret short fingerprint (first 8 hex chars of SHA-256(key)) — safe to ship
+   *  to the client. NEVER a prefix/suffix of the raw key: Connections promises a key is never
+   *  displayed again once stored, and this must hold for the usage/admin surfaces too. */
+  fingerprint: string;
   /** Human label, e.g. "operator (openai)", "u_abc (anthropic)", "operator env (openai)". */
   label: string;
 }
 
+/**
+ * A short, irreversible display fingerprint for a raw API key: the first 8 hex chars of
+ * SHA-256(key). Distinct from `keyFingerprint` in db-api-keys.ts (16 hex chars, used as the
+ * usage-ledger's `key_ref` grouping key) — this one exists purely so a human can recognize "is
+ * this the same key" in the UI without ever reconstructing or partially exposing the secret.
+ */
+export function displayKeyFingerprint(rawKey: string): string {
+  return crypto.createHash("sha256").update(rawKey).digest("hex").slice(0, 8);
+}
+
 /** Produce a display-safe masked representation of a raw API key. Delegates to the canonical
  *  `maskApiKeyPreview` (db-api-keys.ts) — the same mask the Connections page shows — and degrades to
- *  a head-only form for a key too short to elide, since this descriptor always needs a string. */
+ *  a head-only form for a key too short to elide, since this descriptor always needs a string.
+ *  Usage/admin descriptors use `displayKeyFingerprint` instead; this remains for Connections-style
+ *  previews and tests that share the same mask helper. */
 export function maskApiKey(rawKey: string): string {
   return maskApiKeyPreview(rawKey) ?? `${rawKey.slice(0, 4)}...`;
 }
 
 /**
- * Resolve a non-secret, human-readable descriptor (last-4 + label) for a usage row's opaque
+ * Resolve a non-secret, human-readable descriptor (fingerprint + label) for a usage row's opaque
  * `keyRef`, by matching the fingerprint against the LIVE key stores. Returns undefined once the key
  * is detached — the ledger keeps the fingerprint, but a friendly label is only available while the
- * key is still attached. The last-4 is computed at read time and never stored.
+ * key is still attached. Never returns any prefix/suffix of the raw key.
  */
 export function describeUsageKey(row: { keyRef: string | null; userId: string; provider: string }): KeyDescriptor | undefined {
   if (!row.keyRef) return undefined;
@@ -427,13 +439,13 @@ export function describeUsageKey(row: { keyRef: string | null; userId: string; p
   const own = getUserApiKey(row.userId, row.provider)?.apiKey;
   if (own && keyFingerprint(own) === row.keyRef) {
     const label = row.userId === LOCAL_USER ? `primary user (${row.provider})` : `${row.userId} (${row.provider})`;
-    return { last4: own.slice(-4), masked: maskApiKey(own), label };
+    return { fingerprint: displayKeyFingerprint(own), label };
   }
   // The operator's env key (the failover that served a tenant).
   const envVar = apiKeyEnvVarForService(row.provider);
   const envKey = envVar ? process.env[envVar]?.trim() : undefined;
   if (envKey && keyFingerprint(envKey) === row.keyRef) {
-    return { last4: envKey.slice(-4), masked: maskApiKey(envKey), label: `server failover (${row.provider})` };
+    return { fingerprint: displayKeyFingerprint(envKey), label: `server failover (${row.provider})` };
   }
   return undefined;
 }

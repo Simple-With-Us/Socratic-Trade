@@ -1,4 +1,12 @@
-import { decryptValue, deleteInternalSetting, encryptValue, getDb, getInternalSetting, setInternalSetting } from "./db";
+import {
+  decryptValue,
+  deleteInternalSetting,
+  encryptValue,
+  getDb,
+  getInternalSetting,
+  isValidEncryptionKeyHex,
+  setInternalSetting
+} from "./db";
 import { isLoopbackUrl, resolvePublicAppOrigin } from "./public-origin";
 import {
   captureUserWriteEpoch,
@@ -286,7 +294,11 @@ export function migrateLocalRobinhoodToken(): boolean {
  * those that don't.
  */
 function encryptionKeyConfigured(): boolean {
-  return Boolean(process.env.ENCRYPTION_KEY);
+  // Validity, not just presence: a SET-but-malformed ENCRYPTION_KEY makes db-api-keys.ts fall back
+  // to its own per-process ephemeral key, so treating "set" as "configured" here would silently
+  // encrypt tokens with that ephemeral key too (Item 14) — exactly the outcome this function's own
+  // docstring says to avoid.
+  return isValidEncryptionKeyHex(process.env.ENCRYPTION_KEY?.trim());
 }
 
 function encryptStoredTokens(tokens: McpOAuthTokens): McpOAuthTokens {

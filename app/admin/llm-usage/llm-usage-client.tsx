@@ -25,8 +25,8 @@ interface UsageRow {
   environment: string | null;
   accountLabel: string | null;
   keyLabel: string | null;
-  keyLast4: string | null;
-  keyMasked: string | null;
+  /** Irreversible short fingerprint (first 8 hex chars of SHA-256) — never a raw-key prefix/suffix. */
+  keyFingerprint: string | null;
 }
 
 interface UsageData {
@@ -107,7 +107,9 @@ function groupRows(rows: UsageRow[]): Map<string, UsageRow[]> {
 // ── Components ────────────────────────────────────────────────────────────────
 
 function KeyBadge({ row }: { row: UsageRow }) {
-  const display = row.keyMasked ?? (row.keyLast4 ? `...${row.keyLast4}` : null);
+  // `keyFingerprint` is an irreversible SHA-256-derived hint, never a raw-key prefix/suffix —
+  // Connections promises a stored key is never displayed again, and this view must honor that too.
+  const display = row.keyFingerprint ? `#${row.keyFingerprint}` : null;
   const label = row.keyLabel ?? keySourceLabel(row.keySource);
   if (!display) {
     return (

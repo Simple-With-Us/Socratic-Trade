@@ -1,7 +1,10 @@
 // Edge auth gate (Phase-11 M6). Runs before every non-static request.
 //
 // Identity sources (first match wins):
-//   1. Cloudflare Access header (when CF_ACCESS_TRUST_EMAIL_HEADER=1).
+//   1. Cloudflare Access header (when CF_ACCESS_TRUST_EMAIL_HEADER=1) — the header is NEVER
+//      trusted on its own: CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD must also be configured, and the
+//      request's Cf-Access-Jwt-Assertion is verified against the team's JWKS (audience-checked)
+//      before the header email is trusted. See getCfEmail / verifyCfAccessAssertion below.
 //   2. Auth.js v5 session JWT cookie — verified with the same edge-safe HS256
 //      helper configured in src/lib/auth/auth.ts.
 //   3. Dev/local fallback to PRIMARY_USER_EMAIL — ONLY when auth is NOT configured.
@@ -22,6 +25,8 @@
 
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { createRemoteJWKSet } from "jose/jwks/remote";
+import { jwtVerify } from "jose/jwt/verify";
 import {
   AUTHENTICATED_IDENTITY_SOURCE_HEADER,
   AUTHENTICATED_SESSION_ISSUED_AT_HEADER,
@@ -154,11 +159,92 @@ function isAuthConfigured(): boolean {
   return Boolean(process.env.AUTH_SECRET) || isFlagOn(process.env.CF_ACCESS_TRUST_EMAIL_HEADER);
 }
 
-/** Extract the verified email from a Cloudflare Access request header, if present. */
-function getCfEmail(req: NextRequest): string | null {
+// --- Cloudflare Access JWT verification -----------------------------------------
+//
+// `cf-access-authenticated-user-email` is a PLAIN, spoofable HTTP header. It is only trustworthy
+// when Cloudflare Access itself terminates the connection and the origin is unreachable any other
+// way (e.g. a Tunnel with no public IP). This origin IS directly reachable, so the header alone is
+// NEVER trusted: CF_ACCESS_TRUST_EMAIL_HEADER additionally requires CF_ACCESS_TEAM_DOMAIN +
+// CF_ACCESS_AUD to be configured, and every request must carry a `Cf-Access-Jwt-Assertion` that
+// verifies against the team's JWKS (https://<team>.cloudflareaccess.com/cdn-cgi/access/certs) with
+// a matching audience. Any missing config or failed verification makes the header IGNORED — fail
+// closed, never a degraded/partial trust.
+
+/** Whether Cloudflare Access header trust is fully armed: the trust flag AND both pieces of config
+ *  needed to validate the accompanying JWT. The flag alone is intentionally not sufficient. */
+function isCfAccessConfigured(): boolean {
+  return Boolean(process.env.CF_ACCESS_TEAM_DOMAIN?.trim()) && Boolean(process.env.CF_ACCESS_AUD?.trim());
+}
+
+/** Normalize a team domain to the full JWKS host: a bare team name ("acme") becomes
+ *  "acme.cloudflareaccess.com"; anything that already looks like a domain is used as-is (covers
+ *  Cloudflare Access custom hostnames). */
+function normalizeCfTeamDomain(raw: string): string {
+  const trimmed = raw.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  return trimmed.includes(".") ? trimmed : `${trimmed}.cloudflareaccess.com`;
+}
+
+// Cache the remote JWKS resolver at module scope (survives across requests within the same warm
+// edge isolate) so every request doesn't re-create a fresh jose JWKS fetcher; jose's own resolver
+// additionally caches the fetched key set internally.
+const cfAccessJwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
+
+function getCfAccessJwks(teamDomain: string): ReturnType<typeof createRemoteJWKSet> {
+  let jwks = cfAccessJwksCache.get(teamDomain);
+  if (!jwks) {
+    jwks = createRemoteJWKSet(new URL(`https://${teamDomain}/cdn-cgi/access/certs`));
+    cfAccessJwksCache.set(teamDomain, jwks);
+  }
+  return jwks;
+}
+
+/** Verify a `Cf-Access-Jwt-Assertion` against the configured team's JWKS with an audience check.
+ *  Returns the verified email claim, or null on ANY failure (missing config, expired/invalid
+ *  signature, wrong issuer/audience, network error) — every failure path ignores the assertion
+ *  rather than trusting it. */
+async function verifyCfAccessAssertion(assertion: string): Promise<string | null> {
+  const teamDomainRaw = process.env.CF_ACCESS_TEAM_DOMAIN?.trim();
+  const aud = process.env.CF_ACCESS_AUD?.trim();
+  if (!teamDomainRaw || !aud) return null;
+  const teamDomain = normalizeCfTeamDomain(teamDomainRaw);
+  try {
+    const jwks = getCfAccessJwks(teamDomain);
+    const { payload } = await jwtVerify(assertion, jwks, {
+      issuer: `https://${teamDomain}`,
+      audience: aud
+    });
+    const email = payload.email;
+    return typeof email === "string" && email.includes("@") ? email.trim().toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Extract the verified email from a Cloudflare Access request, if present. Requires
+ *  CF_ACCESS_TRUST_EMAIL_HEADER on AND CF_ACCESS_TEAM_DOMAIN/CF_ACCESS_AUD configured AND a
+ *  Cf-Access-Jwt-Assertion that verifies against the team's JWKS with the configured audience —
+ *  the cf-access-authenticated-user-email header is NEVER trusted by itself. */
+async function getCfEmail(req: NextRequest): Promise<string | null> {
   if (!isFlagOn(process.env.CF_ACCESS_TRUST_EMAIL_HEADER)) return null;
-  const email = req.headers.get("cf-access-authenticated-user-email");
-  return email ? email.trim().toLowerCase() : null;
+  const headerEmail = req.headers.get("cf-access-authenticated-user-email");
+  if (!headerEmail) return null;
+  if (!isCfAccessConfigured()) {
+    // Flag on but not fully configured: fail closed by ignoring the header entirely, rather than
+    // falling back to a degraded/partial trust of an unverifiable claim.
+    console.error(
+      "CF_ACCESS_TRUST_EMAIL_HEADER is on but CF_ACCESS_TEAM_DOMAIN/CF_ACCESS_AUD are not both set " +
+        "— ignoring the cf-access-authenticated-user-email header (fail closed)."
+    );
+    return null;
+  }
+  const assertion = req.headers.get("cf-access-jwt-assertion");
+  if (!assertion) return null;
+  const verifiedEmail = await verifyCfAccessAssertion(assertion);
+  if (!verifiedEmail) return null;
+  // Defense in depth: the verified JWT's own email claim must match the header Access also set —
+  // the JWT is the source of truth, the header is corroboration, not an independent trust source.
+  if (verifiedEmail !== headerEmail.trim().toLowerCase()) return null;
+  return verifiedEmail;
 }
 
 function isEmailAllowed(email: string, fromCf: boolean): boolean {
@@ -214,7 +300,7 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   let fromCf = false;
 
   // Source 1: Cloudflare Access header.
-  const cfEmail = getCfEmail(req);
+  const cfEmail = await getCfEmail(req);
   if (cfEmail) {
     trustedEmail = cfEmail;
     identitySource = AUTHENTICATED_IDENTITY_SOURCES.cloudflareAccess;
