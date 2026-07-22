@@ -1,5 +1,11 @@
 # Active Implementation Plan
 
+> **2026-07-21 - PR #1776 fresh parser review fixes (CODEX, local only).** Preserve visible
+> font-size overrides beneath zero-font wrappers and preserve document order across wrapper-table
+> content plus nested Item headings. Keep ordinary nested data tables on the existing Markdown
+> conversion path. Verify parser, chunking, and SEC ingestion slices; keep the commit local until
+> the parent releases after #1857. This lane is merge-order independent from #1775/#1777.
+
 > **2026-07-21 - CI Runner Migration (Antigravity, branch `agent/antigravity-ci-fix`).** Replaced failing self-hosted runner `trading-live` with `ubuntu-latest` across all CI workflows (`.github/workflows/*.yml`) in Socratic.Trade. The Mac self-hosted runner environment was corrupted after Hetzner failure. Scheduled to land via `scripts/land.sh` to unblock 38 pending PRs.
 > **2026-07-19 - Land the #1771/#1773/#1777 chain, then run the corpus re-embed to completion
 > (owner-directed pickup, multiple lanes).** Next actions, in order: (1) land **#1771**

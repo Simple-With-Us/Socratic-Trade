@@ -247,20 +247,67 @@ function splitTableRows(rows: string[][], firstRowHasHeaders: boolean = false): 
  * tables in inline-styled elements, so whole sections could vanish from parsed evidence with no
  * error anywhere. Only an exact zero (`0`, `0.0`, `.0`, `0px`, …) means hidden.
  */
-export function isHiddenStyle(style: string): boolean {
-  if (/display\s*:\s*none/i.test(style)) return true;
-  if (/visibility\s*:\s*hidden/i.test(style)) return true;
-  // Capture the numeric value (with optional unit) and test it as a number.
-  const zeroValued = (property: string): boolean => {
-    const match = new RegExp(`${property}\\s*:\\s*(-?[0-9]*\\.?[0-9]+)\\s*[a-z%]*`, "i").exec(style);
-    if (!match) return false;
-    const value = Number.parseFloat(match[1]!);
-    return Number.isFinite(value) && value === 0;
-  };
-  return zeroValued("opacity") || zeroValued("font-size");
+function stylePropertyValue(style: string, property: string): string | undefined {
+  const escaped = property.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const declarations = new RegExp(`(?:^|;)\\s*${escaped}\\s*:\\s*([^;]+)`, "gi");
+  let value: string | undefined;
+  for (let match = declarations.exec(style); match; match = declarations.exec(style)) {
+    value = match[1]?.trim();
+  }
+  return value;
 }
 
-function collectBlocks($: any, node: any, blocks: ParsedBlock[], formType?: string) {
+function numericStyleValue(style: string, property: string): number | undefined {
+  const raw = stylePropertyValue(style, property);
+  if (!raw) return undefined;
+  const match = /^(-?(?:\d+(?:\.\d*)?|\.\d+))\s*[a-z%]*(?:\s*!important)?$/i.exec(raw);
+  if (!match) return undefined;
+  const value = Number.parseFloat(match[1]!);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function hidesEntireSubtree(style: string): boolean {
+  const display = stylePropertyValue(style, "display")?.replace(/\s*!important\s*$/i, "").toLowerCase();
+  const visibility = stylePropertyValue(style, "visibility")?.replace(/\s*!important\s*$/i, "").toLowerCase();
+  return (
+    display === "none" ||
+    visibility === "hidden" ||
+    numericStyleValue(style, "opacity") === 0
+  );
+}
+
+function hasEffectiveZeroFontSize(style: string, inheritedZeroFontSize: boolean): boolean {
+  const raw = stylePropertyValue(style, "font-size");
+  if (!raw) return inheritedZeroFontSize;
+  const numeric = numericStyleValue(style, "font-size");
+  if (numeric !== undefined) return numeric === 0;
+  // CSS-wide values that continue inheritance keep the ancestor's zero-size state. Any other
+  // explicit declaration (e.g. medium/initial/revert) restores a visible font size.
+  return /^(?:inherit|unset)(?:\s*!important)?$/i.test(raw) ? inheritedZeroFontSize : false;
+}
+
+export function isHiddenStyle(style: string): boolean {
+  return hidesEntireSubtree(style) || numericStyleValue(style, "font-size") === 0;
+}
+
+function headingBlockForSmallTable($: any, node: any, formType?: string): ParsedBlock | null {
+  const cellText = $(node).text().trim();
+  if (!isHeadingBlock(cellText) || $(node).find("tr").length > 1 || $(node).find("td, th").length > 2) {
+    return null;
+  }
+  const norm = normalizeItemCode(cellText, formType);
+  return norm
+    ? { type: "heading", text: cellText, itemCode: norm.code, itemTitle: norm.title }
+    : null;
+}
+
+function collectBlocks(
+  $: any,
+  node: any,
+  blocks: ParsedBlock[],
+  formType?: string,
+  inheritedZeroFontSize: boolean = false
+) {
   if (node.type !== "tag") return;
 
   const name = node.name.toLowerCase();
@@ -268,23 +315,49 @@ function collectBlocks($: any, node: any, blocks: ParsedBlock[], formType?: stri
     return;
   }
 
-  // Remove display: none or visibility: hidden elements
-  const style = $(node).attr("style");
-  if (style) {
-    if (isHiddenStyle(style)) return;
+  const style = $(node).attr("style") || "";
+  if (hidesEntireSubtree(style)) return;
+
+  // `font-size:0` hides this node's inherited text but is not an unconditional subtree hide: a
+  // descendant may restore a visible size. Skip zero-sized text nodes while continuing to walk
+  // element descendants, carrying the inherited state until an explicit non-zero size overrides it.
+  const zeroFontSize = hasEffectiveZeroFontSize(style, inheritedZeroFontSize);
+  if (zeroFontSize) {
+    if (node.children) {
+      for (const child of node.children) {
+        if (child.type === "tag") collectBlocks($, child, blocks, formType, true);
+      }
+    }
+    return;
   }
 
   // If table, convert and do not recurse into rows/cells
   if (name === "table") {
     // Check for heading text in small layout tables (EDGAR sometimes encodes Item
     // headings as single-cell layout tables). If detected, treat as heading.
-    const cellText = $(node).text().trim();
-    if (isHeadingBlock(cellText) && $(node).find("tr").length <= 1 && $(node).find("td, th").length <= 2) {
-      const norm = normalizeItemCode(cellText, formType);
-      if (norm) {
-        blocks.push({ type: "heading", text: cellText, itemCode: norm.code, itemTitle: norm.title });
-        return;
-      }
+    const tableHeading = headingBlockForSmallTable($, node, formType);
+    if (tableHeading) {
+      blocks.push(tableHeading);
+      return;
+    }
+
+    // A table containing a nested Item-heading table is an EDGAR layout wrapper, not one atomic
+    // data table. Walk its direct cells in DOM order so content in earlier rows is emitted BEFORE
+    // the nested heading and content after it stays after it. Building one outer grid while pushing
+    // nested headings immediately would reorder the whole grid behind the heading and attribute
+    // earlier evidence to the later SEC Item.
+    const containsNestedHeading = $(node)
+      .find("table")
+      .toArray()
+      .some((nested: any) => nested !== node && headingBlockForSmallTable($, nested, formType) !== null);
+    if (containsNestedHeading) {
+      $(node).find("tr").each((_: any, tr: any) => {
+        if ($(tr).closest("table").get(0) !== node) return;
+        $(tr).children("td, th").each((__: any, cell: any) => {
+          collectBlocks($, cell, blocks, formType);
+        });
+      });
+      return;
     }
     const grid: string[][] = [];
     let r = 0;

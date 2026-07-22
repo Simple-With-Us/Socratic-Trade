@@ -294,7 +294,9 @@ describe("SEC Parser and Chunker (Phase 3)", () => {
   it("only treats an EXACT zero opacity/font-size as hidden (decimal styles stay visible)", () => {
     // Hidden — genuine zero in its various spellings.
     expect(isHiddenStyle("display:none")).toBe(true);
+    expect(isHiddenStyle("display:none !important")).toBe(true);
     expect(isHiddenStyle("visibility: hidden")).toBe(true);
+    expect(isHiddenStyle("visibility: hidden !important")).toBe(true);
     expect(isHiddenStyle("opacity:0")).toBe(true);
     expect(isHiddenStyle("opacity: 0.0")).toBe(true);
     expect(isHiddenStyle("font-size:0")).toBe(true);
@@ -307,6 +309,7 @@ describe("SEC Parser and Chunker (Phase 3)", () => {
     expect(isHiddenStyle("opacity: 0.875")).toBe(false);
     expect(isHiddenStyle("font-size:0.875rem")).toBe(false);
     expect(isHiddenStyle("font-size: 0.9em")).toBe(false);
+    expect(isHiddenStyle("font-size:0; font-size:10pt")).toBe(false);
   });
 
   it("keeps content that is merely styled with a decimal opacity/font-size", () => {
@@ -320,6 +323,24 @@ describe("SEC Parser and Chunker (Phase 3)", () => {
     expect(parsed.text).toContain("Half opacity risk disclosure");
     expect(parsed.text).toContain("Small-print revenue commentary");
     expect(parsed.text).not.toContain("Truly invisible marker text");
+  });
+
+  it("keeps descendants that restore a visible font size under a zero-font wrapper", () => {
+    const html = `
+      <html><body>
+        <div style="font-size:0">
+          Hidden wrapper marker.
+          <span>Still hidden inherited text.</span>
+          <span style="font-size:10pt">Item 1A. Risk Factors</span>
+          <p style="font-size:12px">Visible descendant disclosure that must survive parsing.</p>
+        </div>
+      </body></html>`;
+    const parsed = parseFilingHtml(html, { formType: "10-K" });
+    const risks = parsed.sections.find((section) => section.itemCode === "1A");
+
+    expect(risks?.text).toContain("Visible descendant disclosure that must survive parsing.");
+    expect(parsed.text).not.toContain("Hidden wrapper marker");
+    expect(parsed.text).not.toContain("Still hidden inherited text");
   });
 
   it("escapes pipes from a nested table so the outer row keeps its column count", () => {
@@ -382,6 +403,28 @@ describe("SEC Parser and Chunker (Phase 3)", () => {
     expect(business?.text).toContain("Business overview text.");
     // Sections after the nested-table heading must still parse normally.
     expect(properties?.text).toContain("Properties details.");
+  });
+
+  it("emits wrapper-table content before a later nested Item heading", () => {
+    const html = `
+      <html><body>
+        <div>Item 1. Business</div>
+        <table>
+          <tr><td><p>Earlier wrapper-row business evidence.</p></td></tr>
+          <tr><td>
+            <table><tr><td>Item 1A. Risk Factors</td></tr></table>
+            <p>Later wrapper-row risk evidence.</p>
+          </td></tr>
+        </table>
+      </body></html>`;
+    const parsed = parseFilingHtml(html, { formType: "10-K" });
+    const business = parsed.sections.find((section) => section.itemCode === "1");
+    const risks = parsed.sections.find((section) => section.itemCode === "1A");
+
+    expect(business?.text).toContain("Earlier wrapper-row business evidence.");
+    expect(business?.text).not.toContain("Later wrapper-row risk evidence.");
+    expect(risks?.text).toContain("Later wrapper-row risk evidence.");
+    expect(risks?.text).not.toContain("Earlier wrapper-row business evidence.");
   });
 
   it("does not leave the nested heading's own marker text duplicated as stray table prose", () => {

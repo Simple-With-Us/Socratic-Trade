@@ -113,3 +113,36 @@ Run from `.claude/worktrees/fix-pr1776-sec-parser` with
   fixture ever demonstrates it matters in practice. Not blocking — it is strictly better than the
   pre-fix behavior (heading silently dropped, no section change ever happened) in the common case.
 - Coordinated with the earlier session's PR-thread replies via `docs/rollouts/2026-07-18-sec-parser-hardening.md`'s "2026-07-19 review-thread closeout" section, which remains accurate for findings #1/#4 and for the *original* reasoning on #2/#3 before this session's re-investigation.
+
+## 2026-07-21 current-review addendum — descendant visibility and block order
+
+The exact PR head was refreshed after the prior closeout and had two new unresolved P2s. Both are
+real, and this addendum supersedes the documented ordering limitation above without rewriting the
+historical investigation.
+
+1. `font-size:0` is inherited but overridable. Returning at the wrapper dropped descendants that
+   explicitly restored a visible font size. The parser now distinguishes styles that hide the
+   entire subtree (`display:none`, `visibility:hidden`, exact-zero opacity) from a zero-font
+   inheritance state. It skips zero-sized text while walking descendants, carries that state
+   through undeclared/inheriting children, and clears it on an explicit visible font size.
+2. Pushing a nested table heading while waiting to append one atomic outer-table block reordered
+   earlier rows behind the heading. A table containing a nested Item-heading table is now treated
+   as an EDGAR layout wrapper: its direct cells are traversed in DOM order, so prior content is
+   emitted before the heading and following content remains after it. Ordinary nested tables with
+   no heading retain the existing grid/Markdown conversion and pipe escaping.
+
+Files changed in this addendum:
+
+- `src/lib/web-sources/sec-parser.ts`
+- `test/sec-parser.test.ts`
+- `STATUS.md`, `PLAN.md`, `docs/EFFORT-LOG.md`
+- `docs/rollouts/2026-07-19-pr1776-review-thread-closeout.md`
+
+Verification in `/Users/jay/.codex/worktrees/socratic-pr1776-reviewfix` on Node 24:
+
+- `npx vitest run test/sec-parser.test.ts --no-file-parallelism` — 1 file, 18 tests passed.
+- `npx vitest run test/rag-chunk.test.ts test/sec-parser.test.ts test/sec-filings.test.ts test/sec-ingest-worker.test.ts --no-file-parallelism` — 4 files, 71 tests passed.
+- `npx eslint src/lib/web-sources/sec-parser.ts test/sec-parser.test.ts` — exit 0 (17 inherited `no-explicit-any` warnings, 0 errors).
+- `npx tsc --noEmit` — exit 0.
+
+External actions remain intentionally held until the parent PR sweep releases after #1857.

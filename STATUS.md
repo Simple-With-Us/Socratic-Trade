@@ -2681,3 +2681,11 @@ Completed the SEC/RAG parser and chunker hardening by resolving outstanding stru
 
 ## 2026-07-21 — Switch RAG Default Embedding Provider from Voyage to OpenRouter (BAAI bge-m3)
 Switched the default fallback RAG embedding and rerank provider in `src/lib/vector-db.ts` to OpenRouter using BAAI's `baai/bge-m3` embedding model and Cohere reranker. Updated tests in `test/rag-embed-provider-gate.test.ts` and `test/connection-health-routing.test.ts`.
+## 2026-07-21 — PR #1776 fresh SEC parser review fixes prepared locally (CODEX)
+
+Current head `bd5c5da2` has two unresolved P2s beyond the earlier closeout. Zero-font wrappers now
+suppress only text that remains at inherited size zero while retaining descendants that explicitly
+restore a visible font size. Outer tables containing nested Item-heading tables are parsed as
+ordered EDGAR layout wrappers, so earlier rows remain before the heading and later evidence remains
+after it. Focused parser and SEC ingestion regressions are green; no push/thread/CI/merge/deploy
+action is authorized until the parent PR sweep releases after #1857.
