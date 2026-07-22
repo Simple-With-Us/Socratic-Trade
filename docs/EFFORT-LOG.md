@@ -45,6 +45,8 @@ As of 2026-07-08 (assignment-rule update).
 ---
 
 ## In Progress
+- **[Socratic.Trade][CODEX sublane] Read-only Turso/libSQL and Pinecone Assistant shadow benchmarks (branch `codex/rag-shadow-benchmarks-20260722`, worktree `/Users/jay/.codex/worktrees/rag-shadow-benchmarks-20260722`, claimed 2026-07-22) — LOCALLY READY / UNMERGED.** Default-off comparison harnesses: local capability receipt for installed libSQL/vector functions, plus an explicit-gated pre-existing Pinecone Assistant context probe (≤100 serial queries; 30-second timeout cap) with latency/citation/usage/error-only receipts. No file/upload/delete/index/corpus/provider or production writes. Focused Vitest 4/4, scoped ESLint, TypeScript, and default-safe harness receipt pass; exact commands are in the rollout note.
+
 - **[Socratic.Trade][CLAUDE] check-pin required-status-context merge deadlock fix (branch
   `claude/checkpin-always-on-prs`, worktree `/private/tmp/socratic-checkpin-work/repo`, claimed
   2026-07-19) — IN PROGRESS.** Root cause: main's classic branch protection requires status contexts

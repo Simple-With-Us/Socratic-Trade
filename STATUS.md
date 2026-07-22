@@ -1,5 +1,9 @@
 # Current Status
 
+## 2026-07-22 — RAG Turso/libSQL + Pinecone Assistant shadow benchmarks (CODEX, `codex/rag-shadow-benchmarks-20260722`)
+
+Added a default-off, read-only evaluation harness. The local Turso/libSQL probe reports installed-client and vector-SQL capability without a network/database write; this checkout has no direct `@libsql/client` dependency, so a real remote Turso benchmark is intentionally not attempted. The Pinecone path requires an explicit live flag, a named pre-existing Assistant, an API key, externally supplied frozen cases, a 100-query cap, and a 30-second timeout cap. It calls only Assistant context retrieval and emits redacted latency/citation/usage/error receipts—never prompts, snippets, file names, answers, keys, or provider errors. No provider, corpus, index, file, broker, or production mutation was made. Rollout: `docs/rollouts/2026-07-22-rag-shadow-benchmarks.md`.
+
 ## 2026-07-21 — LLM cooldown + draining-account purge safety (cursor/critical-bug-management-2b05, PR #1845)
 
 Fixes: durable LLM provider cooldown bookkeeping; safe purge path when an account is draining so we do not wipe live state incorrectly. Handoff docs (this file + `docs/EFFORT-LOG.md`) updated to satisfy Pre-Commit protocol. Rollout: `docs/rollouts/2026-07-21-critical-cooldown-draining-fixes.md`.

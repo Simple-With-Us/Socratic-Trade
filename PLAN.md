@@ -1,5 +1,7 @@
 # Active Implementation Plan
 
+> **2026-07-22 — RAG Turso/libSQL + Pinecone Assistant shadow benchmarks (CODEX, branch `codex/rag-shadow-benchmarks-20260722`).** Land the default-off read-only harness only after focused test/lint/TypeScript checks. Do not add a libSQL runtime dependency or route production retrieval to Turso until an explicit shadow comparison has a configured remote target and measured recall/latency/cost receipt. Pinecone Assistant remains a pre-existing-assistant contextual-retrieval baseline; no file/corpus migration or production use follows from this work without evidence/PIT/tenant-erasure acceptance.
+
 > **2026-07-20 - Corpus re-embed scoped-purge gate fix (CURSOR, branch
 > `cursor/critical-bug-management-0770`).** Critical-bug sweep found that a symbol-scoped
 > corpus re-embed could persist a full-docType completion stamp and thereby authorize
@@ -1946,4 +1948,3 @@ scope, timeline, or approach changed.
 
 ## 2026-07-21 PR #1845
 LLM cooldown + draining purge safety — see rollout note.
-
