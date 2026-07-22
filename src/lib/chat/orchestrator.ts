@@ -564,7 +564,17 @@ export function buildProductionDeps(): ToolDeps {
           symbol,
           ...(c.source ? { source: c.source } : {}),
           ...(c.doc_type ? { docType: c.doc_type } : {}),
-          ...(c.section ? { title: c.section } : {}),
+          ...(typeof c.metadata?.accession === "string" ? { accession: c.metadata.accession } : {}),
+          ...(c.section ? { section: c.section, title: c.section } : {}),
+          ...(typeof c.metadata?.chunk_ordinal === "number"
+            ? { ordinal: c.metadata.chunk_ordinal }
+            : typeof c.metadata?.ordinal === "number"
+              ? { ordinal: c.metadata.ordinal }
+              : {}),
+          ...(typeof c.metadata?.content_hash === "string" ? { contentHash: c.metadata.content_hash } : {}),
+          ...(typeof c.metadata?.vector_namespace === "string" ? { vectorNamespace: c.metadata.vector_namespace } : {}),
+          ...(c.scope ? { scope: c.scope } : {}),
+          ...(typeof c.metadata?.tenant_scope === "string" ? { tenantScope: c.metadata.tenant_scope } : {}),
           ...(c.url ? { url: c.url } : {}),
           ...(c.as_of ? { publishedAt: c.as_of } : {}),
           ...(typeof c.score === "number" ? { score: c.score } : {}),

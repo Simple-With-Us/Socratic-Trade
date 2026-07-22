@@ -107,10 +107,12 @@ describe("production RAG evaluator", () => {
     expect(loadFrozenProductionRagGoldenSet(path)).toEqual([golden]);
     writeFileSync(path, JSON.stringify([{ ...golden, authoritativeAsOf: "not-a-date" }]));
     expect(() => loadFrozenProductionRagGoldenSet(path)).toThrow("authoritativeAsOf");
-    writeFileSync(path, JSON.stringify([{ ...golden, expectedEvidenceRefs: [{ vectorId: "legacy-only" }] }]));
-    expect(() => loadFrozenProductionRagGoldenSet(path)).toThrow("contentHash or accession");
+    writeFileSync(path, JSON.stringify([{ ...golden, expectedEvidenceRefs: [{ vectorId: "stable-vector-id" }] }]));
+    expect(loadFrozenProductionRagGoldenSet(path)[0]!.expectedEvidenceRefs[0]!.vectorId).toBe("stable-vector-id");
+    writeFileSync(path, JSON.stringify([{ ...golden, expectedEvidenceRefs: [{ source: "sec-edgar", contentHash: "hash-only" }] }]));
+    expect(() => loadFrozenProductionRagGoldenSet(path)).toThrow("contentHash must be paired");
     writeFileSync(path, JSON.stringify([{ ...golden, expectedEvidenceRefs: [{ source: "sec-edgar", section: "MD&A" }] }]));
-    expect(() => loadFrozenProductionRagGoldenSet(path)).toThrow("contentHash or accession");
+    expect(() => loadFrozenProductionRagGoldenSet(path)).toThrow("vectorId or accession");
   });
 
   it("hard-caps case count and per-query result depth", async () => {

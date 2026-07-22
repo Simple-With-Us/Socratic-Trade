@@ -1,3 +1,12 @@
+## 2026-07-22 — RAG review remediation (PR #1892)
+
+Addressed the latest connector findings: local FTS recall remains enabled during paid-stage budget
+degradation; sec-8k occurrences classify as 8-K without requiring a `sec_filings` row; chat citation
+refs include accession/section/ordinal/content-hash coordinates; golden eval selectors reject
+content-hash-only identities; and prompt-consumption receipts allocate identical serialized text to
+at most one occurrence. Focused verification: 5 files / 60 tests green. Full ordered gate and hosted
+verification remain before merge; all RAG activation flags remain off.
+
 ## 2026-07-22 — RAG strategic-performance integration (CODEX team)
 
 The full default-off program is integrated on current `main`: tenant-safe/current-or-PIT FTS5 recall

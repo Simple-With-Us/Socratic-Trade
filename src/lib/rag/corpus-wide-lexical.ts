@@ -151,7 +151,10 @@ export function searchCorpusWideLexicalCandidates(
       .map((docType) => docType.trim().toLowerCase())
   ));
   if (docTypes.length > 0) {
-    metadataFilters.push(`LOWER(TRIM(sf.form)) IN (${docTypes.map(() => "?").join(", ")})`);
+    // Full-body 8-K ingestion mirrors chunks into FTS without creating a sec_filings row. Treat
+    // its authoritative occurrence source as the document type for filtering instead of dropping
+    // every otherwise-visible 8-K row on the NULL left join.
+    metadataFilters.push(`LOWER(TRIM(CASE WHEN o.source = 'sec-8k' THEN '8-k' ELSE sf.form END)) IN (${docTypes.map(() => "?").join(", ")})`);
     metadataFilterParams.push(...docTypes);
   }
   if (options.source?.trim()) {

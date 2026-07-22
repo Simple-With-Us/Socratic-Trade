@@ -5930,7 +5930,10 @@ export async function retrieveContextDetailed(
     });
   }
   const wantHybrid = hybridRetrievalEnabled() && !budgetDegraded;
-  const wantCorpusWideLexical = corpusWideLexicalRetrievalEnabled() && !budgetDegraded && !options?.matchAllSymbols;
+  // Corpus-wide lexical recall is a local SQLite FTS read, not a paid provider operation. Keep it
+  // available when the per-run budget degrades rerank/hybrid so exact filing evidence is not lost;
+  // only the quality stages are budget-gated.
+  const wantCorpusWideLexical = corpusWideLexicalRetrievalEnabled() && !options?.matchAllSymbols;
   const useAdaptiveRerank = adaptiveRerankEnabled();
   // Over-fetch when we'll post-filter (as-of), rerank, OR hybrid-fuse — so the final top-`limit` is
   // high quality. Hybrid must be included even when rerank is off: otherwise fetchK == limit and the
