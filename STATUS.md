@@ -6,6 +6,17 @@ Purged the Voyage AI SDK and its dependencies, standardizing the production RAG 
 Synchronized 40 pending Socratic.Trade PRs and 6 pending Congress.Trade PRs with the stabilized main branches to propagate the Linux X64 Coolify CI runner configuration fix. All Dependabot PRs were triggered to rebase via comments, and human/agent PRs had main cleanly merged to force CI runs on the operational runner pool, unlocking the merge backlog.
 # Current Status
 
+## 2026-07-22 — RAG structured-vs-narrative routing boundary (CODEX, local branch `codex/rag-data-routing-20260722`)
+
+Added a typed, fail-closed information-needs contract. Strategy now declares current market data,
+portfolio/order state, SEC company facts, and Form 4 transactions as deterministic inputs; only
+filing and rights-gated transcript narrative document types can enter semantic retrieval. The
+strategy request no longer includes the `fundamentals` vector doc type, eliminating a duplicate
+semantic path for structured financial facts. Focused routing tests (4/4), scoped lint, TypeScript,
+and diff hygiene are green; the slow strategy integration part of the existing coverage file is
+deferred under current host saturation. Local commit/PR/landing remain pending; no provider,
+corpus, broker, or production writes occurred.
+
 ## 2026-07-19 — Four-handoff conquest: reconciliation + shepherding + hardening landed (CLAUDE, branch `claude/model-availability-session-handoff-362fd3`)
 
 All four owner-linked handoff docs executed/dispositioned: missing model-availability rollout

@@ -46,6 +46,15 @@ human-gated `from-draft` bridge).
 | User preferences/constraints (`user_memory`) | **SHARE** | Already injected into the chat prompt; the legitimate personalization that honors `[HARD]` constraints. |
 | Trade outcomes + app state (positions/P&L/proposals/watchlist/regime/scorecards) | **SHARE (read-only)** | The **biggest gap + cheapest win** — see I6. Zero execution risk. |
 
+### Structured-vs-narrative retrieval boundary (2026-07-22)
+
+RAG is only for caller-declared narrative needs: filings, entitled transcript narrative, lessons,
+and research prose. Current market quotes, positions/portfolio state, open orders, and normalized
+financial/insider facts remain deterministic tool or SQLite inputs. `src/lib/rag/information-routing.ts`
+is fail-closed: it does not infer a route from free text, and unknown need kinds create neither a
+semantic retrieval request nor a synthetic substitute. Strategy uses this contract now; chat and
+evidence-consumption should adopt it before adding new retrieval callers.
+
 **One-way data flow:** outcomes/app-state/corpus flow **into** chat as grounded context; chat
 opinions **never** flow into the trading brain except through one explicit, human-confirmed path
 (constraints → policy, §2).

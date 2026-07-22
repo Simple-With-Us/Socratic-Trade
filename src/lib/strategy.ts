@@ -116,6 +116,7 @@ import {
   type FmpTranscriptRightsGenerationClaim
 } from "./web-sources/fmp-transcripts";
 import { earningsCallsTranscriptsEnabled } from "./earningscalls-gate";
+import { strategyInformationRouting } from "./rag/information-routing";
 // (STRATEGY_PROMPT_VERSION comes with the prompt builders from ./strategy-prompts above —
 // ./strategy-prompt-version is a thin re-export kept for red-team.ts's cycle-free import.)
 import type { BrokerGateway } from "./types";
@@ -981,25 +982,15 @@ export async function runStrategyOnce(
     // injection scan inside proposeTrades. Receipts only — never a gate on generation/placement.
     const promptSafetyEvidence: SocraticEvidenceItem[] = [];
     const evidenceAgeInputs: EvidenceAgeInput[] = [];
-    // corpus-coverage-receipt (2026-07-06): the filings doc types requested below, hoisted so the
-    // coverage receipt after this block can report "requested" alongside "retrieved this run" /
-    // "empty" without re-declaring the literal. Advisory only — never affects the retrieval call
-    // itself. NOTE: the coverage receipt only checks ledger-complete types. 10-k/10-q always
-    // participate; earnings-transcript joins only while its default-off producer is explicitly on.
-    // 8-K/fundamentals remain retrieval-only because their ledgers are incomplete. Transcript
-    // retrieval is independently rights-gated: turning off future refresh keeps existing evidence
-    // usable, while withdrawing storage/display confirmation removes it from every RAG consumer.
-    const requestedFilingsDocTypes = [
-      "10-k",
-      "10-q",
-      "8-k",
-      // Transcript retrieval joins when EITHER transcript producer's gate is active: FMP's
-      // durable rights claim, or the EarningsCalls.dev source (key = opt-in, kill-switch off —
-      // see earningscalls-gate.ts). Per-source enforcement stays inside vector-db's
-      // buildExtraFilters/filterMatchesForTranscriptRights; this only controls the REQUEST.
-      ...(fmpRightsClaim || earningsCallsTranscriptsEnabled() ? ["earnings-transcript"] : []),
-      "fundamentals"
-    ];
+    // corpus-coverage-receipt (2026-07-06): an explicit information-needs route owns the
+    // document types requested below. Current quotes, portfolio/orders, SEC company facts, and
+    // Form 4 transactions stay on their deterministic sources; they must never be smuggled into
+    // semantic retrieval via a free-text prompt. The coverage receipt after this block reports the
+    // declared semantic sources alongside retrieval results. 10-k/10-q always participate;
+    // transcript narrative joins only while its producer/rights gate is active. 8-K remains
+    // retrieval-only because its ledger is incomplete.
+    const informationRouting = strategyInformationRouting(Boolean(fmpRightsClaim || earningsCallsTranscriptsEnabled()));
+    const requestedFilingsDocTypes = informationRouting.semantic.documentTypes;
     const coverageCheckedDocTypes = coverageCheckedFilingsDocTypes();
     const retrievedFilingsDocTypes = new Set<string>();
     // Typed retrieval-status receipt (typed-retrieval-status, 2026-07-06): one row per symbol (filings
@@ -1096,15 +1087,21 @@ export async function runStrategyOnce(
                 }
               });
 
-              // Retrieve structured facts & Form 4 transactions (RAG-B10)
+              // Structured facts and Form 4 transactions use SQLite, not semantic retrieval.
+              // Their inclusion is declared by the routing plan above, so a future caller cannot
+              // accidentally turn a current financial fact into an embedding query.
               const { formatCompanyFactsEvidenceCard, formatInsiderTransactionsEvidenceCard } = await import("./web-sources/sec-facts");
               let factsCard = "";
               let insiderCard = "";
               try {
                 const cik = tickerToCik[sym.toUpperCase()];
                 if (cik) {
-                  factsCard = formatCompanyFactsEvidenceCard(cik);
-                  insiderCard = formatInsiderTransactionsEvidenceCard(cik);
+                  if (informationRouting.structured.needs.includes("financial_facts")) {
+                    factsCard = formatCompanyFactsEvidenceCard(cik);
+                  }
+                  if (informationRouting.structured.needs.includes("insider_transactions")) {
+                    insiderCard = formatInsiderTransactionsEvidenceCard(cik);
+                  }
                 }
               } catch (err) {
                 console.warn(`[Strategy] failed to fetch structured facts for ${sym}:`, err);

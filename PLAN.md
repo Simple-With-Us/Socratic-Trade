@@ -408,6 +408,12 @@ Added OpenRouter models to `app/ui/llm-model-catalog.ts` so they can be selected
 
 **Status: In progress; corpus writes gated**
 
+**2026-07-22 routing boundary:** strategy callers must declare information needs. Current
+prices, portfolio/positions, orders, SEC XBRL facts, and Form 4 transactions stay deterministic;
+only filing/transcript/lesson/research narrative is eligible for semantic retrieval. Unknown needs
+fail closed. Next integration is to make the same contract the shared entry point for chat and the
+evidence-consumption receipt, without changing the trading verdict path.
+
 - **[~] Wave A — prerequisite truth:** the versioned/checksummed universe acceptance contract and durable
   job/task state with leases, strict transitions, retries, dead-letter/quarantine, verification receipts, and
   replay invariants merged in PR #1543 after local/hosted gates. Corrected universe selection, census truth, and
