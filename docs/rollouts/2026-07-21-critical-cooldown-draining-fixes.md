@@ -9,6 +9,10 @@ Scheduled critical-bug automation found and fixed two high-impact correctness bu
 - Scheduler draining-account cleanup now treats every broker-live order state as still live before
   deciding an account can be purged.
 
+The 2026-07-21 review closeout also restores the three living-doc updates this rollout already
+listed and records the current commit-identity audit. The product-code fixes themselves did not
+need further changes.
+
 ## Why
 
 The cooldown module's design says a non-empty failover chain is never refused. The implementation
@@ -38,6 +42,23 @@ was deleted.
 
 ## Verification
 
+### Review closeout
+
+- `git log --format='%h %an <%ae> %s' origin/main..HEAD` - every commit unique to the current PR
+  head uses `12656028+jaywedgeworth22@users.noreply.github.com`.
+- `git show b0ae671` - the reported transient commit is not resolvable or reachable in the current
+  repository. A generic GitHub/OpenAI noreply identity would not expose the owner's private email in
+  any case; no history rewrite was performed without a reachable non-noreply violation.
+- First concurrent focused rerun: 9/10 tests passed and one `beforeEach` hook timed out at 60s while
+  multiple other worktree compilers/tests were contending for the host; no assertion failed.
+- Isolated retry: `npx vitest run test/llm-provider-cooldown.test.ts test/scheduler-draining.test.ts`
+  passed (2 files, 10 tests).
+- `npx eslint src/lib/llm-provider-cooldown.ts src/lib/scheduler.ts test/llm-provider-cooldown.test.ts test/scheduler-draining.test.ts`
+  passed with no errors or warnings.
+- `npx tsc --noEmit` passed.
+
+### Original implementation
+
 - Initial `npx vitest run test/llm-provider-cooldown.test.ts test/scheduler-draining.test.ts`
   failed before tests loaded because `node_modules` was absent and `vitest/config` could not be
   resolved.
@@ -53,4 +74,7 @@ was deleted.
 
 ## Follow-ups
 
+- Hold this local closeout behind PR #1857. Once released, push it to PR #1845's existing head,
+  resolve the two review threads, obtain fresh required checks, merge, and verify the exact
+  auto-deployed production SHA.
 - Automation memory updated with the two PR #1845 bug records.

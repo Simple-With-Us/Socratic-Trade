@@ -1,3 +1,13 @@
+## 2026-07-21 - PR #1845 review closeout prepared locally (CODEX, branch `codex/pr1845-review-fixes-20260721`)
+
+The two unresolved review threads were re-audited against the current remote PR head. The rollout's
+claimed living-doc updates are now present on this branch (`STATUS.md`, `PLAN.md`, and
+`docs/EFFORT-LOG.md`). The reported transient commit `b0ae671` is not reachable or resolvable in the
+current repository, and every commit unique to the current PR head resolves to the owner's GitHub
+noreply address; no history rewrite is warranted. This closeout remains local-only pending the
+owner-directed PR #1857 landing order. Rollout:
+`docs/rollouts/2026-07-21-critical-cooldown-draining-fixes.md`.
+
 ## 2026-07-21 — Voyage AI Purge and OpenRouter Standardization (ANTIGRAVITY, branch `agent/antigravity-docs-update`)
 
 Purged the Voyage AI SDK and its dependencies, standardizing the production RAG engine on OpenRouter BAAI bge-m3 / Cohere reranker. Dynamic imports and test-only shims maintain test suite compatibility while completely isolating Voyage from production. All 4,898 tests and the production Next.js build are fully green. Rollout: `docs/rollouts/2026-07-21-voyage-ai-purge.md`.
