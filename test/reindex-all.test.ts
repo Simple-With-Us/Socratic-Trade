@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { getDb } from "../src/lib/db";
 import { normalizeSymbol } from "../src/lib/money";
 
@@ -137,5 +138,48 @@ describe("Reindex All Filings and API routing", () => {
 
     const occurrenceCount = db.prepare("SELECT COUNT(*) as count FROM chunk_occurrences WHERE accession = 'acc-abc'").get() as { count: number };
     expect(occurrenceCount.count).toBe(0);
+  });
+});
+
+describe("reindex-all CLI fail-closed argument handling", () => {
+  it("rejects an unknown mode flag before the default live run can start", () => {
+    const result = spawnSync(
+      process.execPath,
+      [join(process.cwd(), "node_modules/tsx/dist/cli.mjs"), "scripts/reindex-all.ts", "--dryrun", "--yes"],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          DATABASE_URL: `file:${join(tmpdir(), `agentic-reindex-all-cli-${randomUUID()}.db`)}`,
+          NODE_ENV: "test"
+        }
+      }
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('unknown argument "--dryrun"');
+    expect(result.stdout).not.toContain("Migrating environment credentials");
+    expect(result.stdout).not.toContain("Background run started");
+  });
+
+  it("rejects stray positional arguments instead of ignoring them", () => {
+    const result = spawnSync(
+      process.execPath,
+      [join(process.cwd(), "node_modules/tsx/dist/cli.mjs"), "scripts/reindex-all.ts", "dry-run", "--yes"],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          DATABASE_URL: `file:${join(tmpdir(), `agentic-reindex-all-cli-${randomUUID()}.db`)}`,
+          NODE_ENV: "test"
+        }
+      }
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('unknown argument "dry-run"');
+    expect(result.stdout).not.toContain("Migrating environment credentials");
   });
 });

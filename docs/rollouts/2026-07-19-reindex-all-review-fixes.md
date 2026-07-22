@@ -112,3 +112,25 @@ PATH override (system node is v26 and ABI-breaks `better-sqlite3`):
 - `test/reindex-all.test.ts` is now partly vestigial — it re-implements the *old* script's
   cache-clearing SQL inline rather than exercising the CLI, and that `--clear-only` path no
   longer exists. Worth replacing with real CLI coverage (subprocess-invoked) or retiring.
+
+## 2026-07-21 current-review addendum — unknown arguments fail closed
+
+The exact PR head was refreshed after the earlier six-thread closeout and had one new unresolved
+P2. The retired-flag checks still allowed any other unknown option, so `--dryrun --yes` set no mode
+and fell through to the default real full-corpus re-embed while `--yes` skipped confirmation.
+
+`scripts/reindex-all.ts` now validates the entire argument vector before `run()` performs any
+credential, model, DB, or corpus work. It accepts only the documented boolean/value flags, consumes
+exactly one value for value-taking flags, and rejects unknown options plus stray positional
+arguments. `test/reindex-all.test.ts` now invokes the real TypeScript CLI in subprocesses and proves
+both typo shapes exit 1 before credential migration or background-run startup.
+
+Verification in `/Users/jay/.codex/worktrees/socratic-pr1775-reviewfix` on Node 24:
+
+- `npx vitest run test/reindex-all.test.ts` — 1 file, 4 tests passed.
+- `npx eslint scripts/reindex-all.ts test/reindex-all.test.ts` — exit 0.
+- `npx tsc --noEmit` — exit 0.
+
+External actions remain intentionally held: this change is a local preparation commit only until
+the parent PR sweep releases after #1857. PR #1777 remains the required library-level hardening
+before any corpus operation or legacy purge is authorized.

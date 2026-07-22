@@ -2671,3 +2671,11 @@ The full-gate test suite has now cleanly passed: `npm run lint` (0 errors / 402 
 
 ## 2026-07-21 — Switch RAG Default Embedding Provider from Voyage to OpenRouter (BAAI bge-m3)
 Switched the default fallback RAG embedding and rerank provider in `src/lib/vector-db.ts` to OpenRouter using BAAI's `baai/bge-m3` embedding model and Cohere reranker. Updated tests in `test/rag-embed-provider-gate.test.ts` and `test/connection-health-routing.test.ts`.
+## 2026-07-21 — PR #1775 fresh unknown-flag review fix prepared locally (CODEX)
+
+Current head `bc910322` gained one unresolved P2 after the earlier closeout: an unknown CLI flag
+could still fall through to the default real full-corpus re-embed, with `--yes` bypassing the only
+prompt. The local-only `codex/local-pr1775-reviewfix` lane now validates every boolean/value flag
+and rejects stray positional arguments before any credential migration, model lookup, or corpus
+operation. Subprocess regressions cover `--dryrun --yes` and a missing-prefix positional typo.
+Push/thread/CI/merge/deploy actions remain held until the parent PR sweep releases after #1857.

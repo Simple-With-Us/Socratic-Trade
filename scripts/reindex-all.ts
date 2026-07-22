@@ -26,6 +26,30 @@ const isPurgeLegacy = args.includes("--purge-legacy");
 const force = args.includes("--force");
 const autoYes = args.includes("--yes") || args.includes("-y");
 
+const VALUE_FLAGS = new Set(["--ticker", "--max-texts", "--doc-types", "--purge-token"]);
+const BOOLEAN_FLAGS = new Set(["--status", "--dry-run", "--purge-legacy", "--force", "--yes", "-y"]);
+
+// The default mode is a real, budget-spending full-corpus run. Validate the entire argv shape
+// before deriving that mode so a typo such as `--dryrun --yes` cannot silently fall through to it.
+// Reject stray positional arguments too: a missing `--` prefix must not broaden the operation.
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i]!;
+  if (BOOLEAN_FLAGS.has(arg)) continue;
+  if (VALUE_FLAGS.has(arg)) {
+    const value = args[i + 1];
+    if (!value || value.startsWith("-")) {
+      fail(`${arg} requires a value.`);
+    }
+    i += 1;
+    continue;
+  }
+  fail(
+    `unknown argument "${arg}". Supported flags:\n` +
+      `   --status | --dry-run | --purge-legacy [--purge-token <token>] | --ticker <SYM>\n` +
+      `   --doc-types <a,b> | --max-texts <n> | --force | --yes`
+  );
+}
+
 // This script replaced an older reindex CLI that shared its name/path. Operator muscle memory and
 // any unmigrated automation may still pass the old flags, which this version does not implement —
 // silently ignoring them would let e.g. `--clear-only --yes` fall through and start a real,
