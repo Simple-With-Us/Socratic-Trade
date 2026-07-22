@@ -1914,6 +1914,16 @@ export function getBrokerStopPlacementIntent(accountNumber: string, symbol: stri
   };
 }
 
+export function listBrokerStopPlacementIntents(accountNumber: string, userId: string = "local"): BrokerStopPlacementIntent[] {
+  const rows = getDb()
+    .prepare("SELECT symbol FROM broker_stop_placement_intents WHERE user_id = ? AND account_number = ? ORDER BY created_at ASC")
+    .all(userId, accountNumber) as Array<{ symbol: string }>;
+  return rows.flatMap((row) => {
+    const intent = getBrokerStopPlacementIntent(accountNumber, row.symbol, userId);
+    return intent ? [intent] : [];
+  });
+}
+
 export function deleteBrokerStopPlacementIntent(accountNumber: string, symbol: string, userId: string = "local"): void {
   getDb().prepare("DELETE FROM broker_stop_placement_intents WHERE user_id = ? AND account_number = ? AND symbol = ?").run(userId, accountNumber, symbol);
 }

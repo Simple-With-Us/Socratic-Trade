@@ -1,3 +1,13 @@
+## 2026-07-21 - PR #1844 review remediation prepared locally (CODEX, branch `codex/pr1844-review-fixes-20260721`)
+
+All three unresolved money-path findings are addressed locally: non-authoritative absent intents
+retire after a bounded successful-list grace instead of blocking a later position forever;
+unresolved placement outcomes suppress both synthetic registration and fire; and closed,
+feature-disabled, kind-changed, or plan-excluded intents reconcile before every early return.
+Focused broker/synthetic suites pass (143 tests). Push, thread resolution, fresh hosted checks,
+merge, and deployment remain held behind PR #1857. Rollout:
+`docs/rollouts/2026-07-21-stop-intent-authoritative-absence.md`.
+
 ## 2026-07-21 — Voyage AI Purge and OpenRouter Standardization (ANTIGRAVITY, branch `agent/antigravity-docs-update`)
 
 Purged the Voyage AI SDK and its dependencies, standardizing the production RAG engine on OpenRouter BAAI bge-m3 / Cohere reranker. Dynamic imports and test-only shims maintain test suite compatibility while completely isolating Voyage from production. All 4,898 tests and the production Next.js build are fully green. Rollout: `docs/rollouts/2026-07-21-voyage-ai-purge.md`.

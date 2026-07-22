@@ -10,7 +10,13 @@ import {
   desiredBrokerStopKind,
   reconcileBrokerProtectiveStops
 } from "../src/lib/broker-protective-stops";
-import { getDb, listBrokerProtectiveStops, listFillEvents, upsertBrokerProtectiveStop } from "../src/lib/db";
+import {
+  getDb,
+  listBrokerProtectiveStops,
+  listFillEvents,
+  upsertBrokerProtectiveStop,
+  upsertBrokerStopPlacementIntent
+} from "../src/lib/db";
 import type { BrokerGateway, EquityOrder, EquityPosition, TradingPolicy } from "../src/lib/types";
 
 beforeAll(() => {
@@ -116,7 +122,7 @@ describe("reconcileBrokerProtectiveStops", () => {
 
   it("no-ops entirely when disabled (paper mode / flag off / wrong broker)", async () => {
     const r = await reconcileBrokerProtectiveStops({ userId: "local", policy: rhPolicy("PS-5"), accountNumber: "PS-5", gateway: gw, positions: [longPos("AAPL", 10, 100)], executionMode: "broker/paper", running: true });
-    expect(r).toEqual({ placed: 0, cancelled: 0, cancelledOrderIds: [], placedStopSymbols: [], partiallyPlacedStopSymbols: [], partiallyPlacedStopQuantities: {}, filledRecoverySymbols: [] });
+    expect(r).toEqual({ placed: 0, cancelled: 0, cancelledOrderIds: [], placedStopSymbols: [], partiallyPlacedStopSymbols: [], partiallyPlacedStopQuantities: {}, filledRecoverySymbols: [], unresolvedIntentSymbols: [] });
     expect(gw.placed).toHaveLength(0);
   });
 
@@ -1197,6 +1203,7 @@ describe("reconcileBrokerProtectiveStops — round-9 (Codex review, PR #1331)", 
     // durable "placing" intent MUST persist — that's the only trace a request was ever sent.
     const r1 = await reconcileBrokerProtectiveStops(args);
     expect(r1.placed).toBe(0);
+    expect(r1.unresolvedIntentSymbols).toEqual(["AAPL"]);
     expect(listBrokerProtectiveStops(account, "local")).toHaveLength(0); // no zombie 'resting' row
     expect(placeCallCount).toBe(1);
     expect(capturedRefId).toBeTruthy();
@@ -1250,9 +1257,91 @@ describe("reconcileBrokerProtectiveStops — round-9 (Codex review, PR #1331)", 
     gw.nextOrderId = "ord-duplicate";
     const r2 = await reconcileBrokerProtectiveStops({ ...args, orders: [], ordersListed: true });
     expect(r2.placed).toBe(0);
+    expect(r2.unresolvedIntentSymbols).toEqual(["AAPL"]);
     expect(placeCallCount).toBe(1);
     expect(listBrokerProtectiveStops(account, "local")).toHaveLength(0);
     expect(getBrokerStopPlacementIntent(account, "AAPL", "local")).toBeTruthy();
+  });
+
+  it("Item 5: retires an aged intent after a successful non-authoritative absence so a reopened symbol cannot stay blocked forever", async () => {
+    let placeCallCount = 0;
+    let throwOnPlace = true;
+    (gw as unknown as { placeEquityOrder: (order: Record<string, unknown>) => Promise<unknown> }).placeEquityOrder = async (order: Record<string, unknown>) => {
+      placeCallCount++;
+      if (throwOnPlace) throw new Error("simulated network timeout after broker accept");
+      return { orderId: gw.nextOrderId, refId: order.refId, state: gw.placeState, raw: {} };
+    };
+    const account = "PS-CRASH-NONAUTH-AGED";
+    const args = {
+      userId: "local", policy: rhPolicy(account), accountNumber: account, gateway: gw,
+      positions: [longPos("AAPL", 10, 100)], executionMode: "broker/live" as const, running: true
+    };
+    await reconcileBrokerProtectiveStops(args);
+    // The old position closes while the successful live-only list remains empty. During the short
+    // eventual-consistency grace, keep the intent rather than assuming the broker never accepted it.
+    await reconcileBrokerProtectiveStops({ ...args, positions: [], orders: [], ordersListed: true });
+    const { getBrokerStopPlacementIntent } = await import("../src/lib/db");
+    expect(getBrokerStopPlacementIntent(account, "AAPL", "local")).toBeTruthy();
+    getDb()
+      .prepare("UPDATE broker_stop_placement_intents SET created_at = ? WHERE user_id = ? AND account_number = ? AND symbol = ?")
+      .run(new Date(Date.now() - 10 * 60_000).toISOString(), "local", account, "AAPL");
+
+    // A new AAPL lifecycle must not inherit the old ambiguity forever. Once the grace has elapsed,
+    // the next successful live-only absence retires the old intent and allows fresh protection.
+    throwOnPlace = false;
+    gw.nextOrderId = "ord-after-grace";
+    const recovered = await reconcileBrokerProtectiveStops({ ...args, orders: [], ordersListed: true });
+
+    expect(recovered.placed).toBe(1);
+    expect(recovered.unresolvedIntentSymbols).toEqual([]);
+    expect(placeCallCount).toBe(2);
+    expect(listBrokerProtectiveStops(account, "local")[0]).toMatchObject({ brokerOrderId: "ord-after-grace" });
+    expect(getBrokerStopPlacementIntent(account, "AAPL", "local")).toBeUndefined();
+  });
+
+  it.each([
+    { label: "closed position", account: "INTENT-CLOSED", positions: [] as EquityPosition[], policy: rhPolicy("INTENT-CLOSED"), stopPlanBySymbol: undefined, running: true },
+    { label: "disabled feature", account: "INTENT-DISABLED", positions: [longPos("AAPL", 10, 100)], policy: rhPolicy("INTENT-DISABLED", { robinhoodBrokerStops: false }), stopPlanBySymbol: undefined, running: true },
+    { label: "plan-excluded stopped position", account: "INTENT-PLAN", positions: [longPos("AAPL", 10, 100)], policy: rhPolicy("INTENT-PLAN"), stopPlanBySymbol: { AAPL: "none" as const }, running: false }
+  ])("tears down a visible unresolved placement intent before the $label early return", async ({ account, positions, policy, stopPlanBySymbol, running }) => {
+    upsertBrokerStopPlacementIntent({
+      userId: "local",
+      accountNumber: account,
+      symbol: "AAPL",
+      clientOrderId: `intent-${account}`,
+      quantity: 10,
+      stopPrice: 92,
+      kind: "fixed"
+    });
+    const liveIntentOrder: EquityOrder = {
+      id: `order-${account}`,
+      clientOrderId: `intent-${account}`,
+      symbol: "AAPL",
+      side: "sell",
+      type: "stop_market",
+      state: "new",
+      quantity: 10,
+      stopPrice: 92,
+      createdAt: new Date().toISOString()
+    };
+
+    const result = await reconcileBrokerProtectiveStops({
+      userId: "local",
+      policy,
+      accountNumber: account,
+      gateway: gw,
+      positions,
+      executionMode: "broker/live",
+      running,
+      orders: [liveIntentOrder],
+      stopPlanBySymbol
+    });
+
+    expect(result.cancelled).toBe(1);
+    expect(result.cancelledOrderIds).toEqual([`order-${account}`]);
+    expect(gw.cancelled).toContain(`order-${account}`);
+    const { getBrokerStopPlacementIntent } = await import("../src/lib/db");
+    expect(getBrokerStopPlacementIntent(account, "AAPL", "local")).toBeUndefined();
   });
 
   it("Item 5: clears a confirmed-dead intent and places fresh on authoritative absent evidence", async () => {

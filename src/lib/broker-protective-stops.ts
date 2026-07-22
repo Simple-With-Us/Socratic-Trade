@@ -56,6 +56,7 @@ import {
   removePendingBracketTeardown,
   bumpPendingBracketTeardownAttempts,
   getBrokerStopPlacementIntent,
+  listBrokerStopPlacementIntents,
   upsertBrokerStopPlacementIntent,
   deleteBrokerStopPlacementIntent,
   type BrokerStopPlacementIntent
@@ -87,6 +88,11 @@ function round2(n: number): number {
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+// A successful live-order listing proves a placement is not still resting, even when the broker
+// omits terminal history. Keep a short grace for eventual consistency, then retire the intent so a
+// later position lifecycle cannot inherit an immortal, no-longer-actionable placement attempt.
+const NON_AUTHORITATIVE_INTENT_GRACE_MS = 5 * 60_000;
 
 export function brokerProtectiveStopsEnabled(policy: TradingPolicy, executionMode: ExecutionMode): boolean {
   if ((policy.riskRules?.stopLossPct ?? 0) <= 0) return false;
@@ -252,6 +258,12 @@ export interface ReconcileResult {
    * market exit against a stale, larger-than-actual position (Codex review, PR #1331).
    */
   filledRecoverySymbols: string[];
+  /**
+   * Symbols with a placement request whose outcome is still genuinely unknown this tick. The
+   * caller must suppress synthetic registration and fire for these symbols: the broker may already
+   * hold the otherwise-invisible stop, so a synthetic sell could duplicate that exit.
+   */
+  unresolvedIntentSymbols: string[];
 }
 
 /**
@@ -344,7 +356,7 @@ export async function reconcileBrokerProtectiveStops(args: {
   haltedProtectOnly?: boolean;
 }): Promise<ReconcileResult> {
   const { userId, policy, accountNumber, gateway, positions, executionMode, running, orders = [], ordersListed = true, extremePriceBySymbol = {}, stopPlanBySymbol = {}, haltedProtectOnly = false } = args;
-  const out: ReconcileResult = { placed: 0, cancelled: 0, cancelledOrderIds: [], placedStopSymbols: [], partiallyPlacedStopSymbols: [], partiallyPlacedStopQuantities: {}, filledRecoverySymbols: [] };
+  const out: ReconcileResult = { placed: 0, cancelled: 0, cancelledOrderIds: [], placedStopSymbols: [], partiallyPlacedStopSymbols: [], partiallyPlacedStopQuantities: {}, filledRecoverySymbols: [], unresolvedIntentSymbols: [] };
   // Symbols whose OVERSIZED existing stop was cancelled THIS tick while halted (resting shrink or
   // pending_cancel). Section 4 places a right-sized replacement for exactly these while halted — the
   // only placement a halt allows (a risk-reducing correction of existing protection, never new
@@ -461,6 +473,86 @@ export async function reconcileBrokerProtectiveStops(args: {
   // so only "filled" recoveries defer — placement resumes next call once a fresh position read is
   // in hand (the synthetic monitor still protects the position in the meantime).
   const filledRecoverySymbols = new Set<string>();
+  const intentTeardownPendingSymbols = new Set<string>();
+  const markIntentUnresolved = (sym: string): void => {
+    if (!out.unresolvedIntentSymbols.includes(sym)) out.unresolvedIntentSymbols.push(sym);
+  };
+  const intentPastNonAuthoritativeGrace = (intent: BrokerStopPlacementIntent): boolean => {
+    const createdAt = Date.parse(intent.createdAt);
+    return Number.isFinite(createdAt) && Date.now() - createdAt >= NON_AUTHORITATIVE_INTENT_GRACE_MS;
+  };
+
+  // Long positions only: Robinhood is long-only, and the trailing lane deliberately starts with
+  // longs too. Compute this before every early return so placement intents can be reconciled across
+  // close/disable/plan-change lifecycles instead of surviving forever outside section 4.
+  const liveLongs = new Map<string, EquityPosition>();
+  for (const p of positions) {
+    if (p.quantity > 0.000001) liveLongs.set(normalizeSymbol(p.symbol), p);
+  }
+
+  // A pre-network intent can outlive the position or policy that created it. Reconcile those
+  // no-longer-desired intents before the disabled/stopped/preflight early exits: cancel a visible
+  // live order, book a visible executed fill, or clear an absent intent once the successful list is
+  // authoritative (immediately) or past the eventual-consistency grace. Anything still ambiguous
+  // remains durable and suppresses the synthetic exit path this tick.
+  for (const intent of listBrokerStopPlacementIntents(accountNumber, userId)) {
+    const sym = normalizeSymbol(intent.symbol);
+    const targetKind = liveLongs.has(sym) ? kindForSymbol(sym) : null;
+    if (targetKind === intent.kind) continue;
+
+    const matched = orders.find((order) => order.clientOrderId === intent.clientOrderId);
+    if (matched && isDoneRestingState(matched.state)) {
+      if (hadExecutedFill(matched)) {
+        deleteIntentAndBookStopFill(intent, matched);
+        filledRecoverySymbols.add(sym);
+        out.filledRecoverySymbols.push(sym);
+      } else {
+        deleteBrokerStopPlacementIntent(accountNumber, sym, userId);
+      }
+      continue;
+    }
+    if (matched?.id) {
+      try {
+        await gateway.cancelEquityOrder(accountNumber, matched.id);
+        if (hadExecutedFill(matched)) {
+          deleteIntentAndBookStopFill(intent, matched);
+          filledRecoverySymbols.add(sym);
+          out.filledRecoverySymbols.push(sym);
+        } else {
+          deleteBrokerStopPlacementIntent(accountNumber, sym, userId);
+        }
+        out.cancelled++;
+        out.cancelledOrderIds.push(matched.id);
+      } catch (err) {
+        intentTeardownPendingSymbols.add(sym);
+        if (liveLongs.has(sym)) markIntentUnresolved(sym);
+        audit("broker_protective_stop_cancel_error", {
+          symbol: sym,
+          brokerOrderId: matched.id,
+          clientOrderId: intent.clientOrderId,
+          error: errMsg(err),
+          context: "placement_intent_teardown"
+        }, userId, policy.connectedAccountId);
+      }
+      continue;
+    }
+
+    const confirmedAbsent = ordersListed && (
+      gateway.ordersListIncludesTerminal === true || intentPastNonAuthoritativeGrace(intent)
+    );
+    if (confirmedAbsent) {
+      deleteBrokerStopPlacementIntent(accountNumber, sym, userId);
+      audit("broker_protective_stop_intent_retired", {
+        symbol: sym,
+        clientOrderId: intent.clientOrderId,
+        reason: gateway.ordersListIncludesTerminal === true ? "authoritative_absence" : "non_authoritative_absence_after_grace",
+        context: "placement_intent_teardown"
+      }, userId, policy.connectedAccountId);
+    } else {
+      intentTeardownPendingSymbols.add(sym);
+      if (liveLongs.has(sym)) markIntentUnresolved(sym);
+    }
+  }
 
   // The flags gate only PLACEMENT of new stops — never CANCELLATION. When no lane is enabled any
   // more (flags off / not the applicable broker/environment / no configured %), any stop previously
@@ -630,14 +722,8 @@ export async function reconcileBrokerProtectiveStops(args: {
     return trigger > 0 && canArmTrailingNow(pos, sym, trigger);
   };
 
-  // Long positions only: Robinhood is long-only, and the trailing lane deliberately starts with
-  // longs too — Alpaca shorts keep the synthetic monitor's trailing coverage (a short's broker-held
-  // trail is a follow-up; note it in the rollout doc before extending). Computed UP FRONT
-  // (before any cancel) so the guards below know which positions are still open.
-  const liveLongs = new Map<string, EquityPosition>();
-  for (const p of positions) {
-    if (p.quantity > 0.000001) liveLongs.set(normalizeSymbol(p.symbol), p);
-  }
+  // Alpaca shorts keep the synthetic monitor's trailing coverage; broker-held short trails remain
+  // a follow-up. `liveLongs` was computed above so intent cleanup also runs before early returns.
   // Would a live REPLACEMENT stop be blocked (broker/live without ALLOW_LIVE_TRADING)? If so, we must
   // not cancel an OPEN position's only stop with no replacement — that would leave it unprotected.
   // Cancels for CLOSED positions stay risk-reducing and are never blocked.
@@ -1269,6 +1355,9 @@ export async function reconcileBrokerProtectiveStops(args: {
 
   for (const [sym, pos] of liveLongs) {
     if (existing.has(sym)) continue;
+    // A stale intent from another position/policy lifecycle is still being cancelled or observed.
+    // Never adopt it as the current position's stop or submit a replacement on top of it.
+    if (intentTeardownPendingSymbols.has(sym)) continue;
     // While halted, place ONLY for a symbol whose oversized stop was just cancelled for right-sizing.
     // Any other open long here has no stop (a pending_cancel row keeps it in `existing`, so it was
     // already filtered out above) — placing for it would be initiating NEW protection during a halt.
@@ -1348,10 +1437,14 @@ export async function reconcileBrokerProtectiveStops(args: {
           continue;
         }
         deleteBrokerStopPlacementIntent(accountNumber, sym, userId);
-      } else if (ordersListed && gateway.ordersListIncludesTerminal === true) {
+      } else if (ordersListed && (
+        gateway.ordersListIncludesTerminal === true || intentPastNonAuthoritativeGrace(priorIntent)
+      )) {
         // An AUTHORITATIVE fetch succeeded and shows no order for this client_order_id — the earlier
-        // submission is confirmed dead (rejected or never reached the broker). Clear it; the
-        // placement below runs fresh with a new id.
+        // submission is confirmed dead (rejected or never reached the broker). A live-only list
+        // reaches the same conclusion only after the eventual-consistency grace; this keeps an
+        // unresolved request bounded so a reopened position is never blocked forever. Clear it;
+        // the placement below runs fresh with a new id.
         deleteBrokerStopPlacementIntent(accountNumber, sym, userId);
       } else {
         if (priorRef === priorIntent.clientOrderId) {
@@ -1373,6 +1466,7 @@ export async function reconcileBrokerProtectiveStops(args: {
               ? "a prior placement's outcome is still unresolved and the broker order list is not authoritative for terminal orders — waiting rather than risking a duplicate"
               : "a prior placement's outcome is still unresolved and the order list is unavailable this tick — waiting rather than risking a duplicate"
           }, userId, policy.connectedAccountId);
+          markIntentUnresolved(sym);
           continue;
         }
       }
@@ -1519,6 +1613,7 @@ export async function reconcileBrokerProtectiveStops(args: {
       // no-id paths above pass NO ref: those orders are definitively not resting, and reusing a
       // broker-rejected client-order-id could get the retry itself rejected as a duplicate.
       audit("broker_protective_stop_error", { symbol: sym, stopPrice, error: errMsg(err) }, userId, policy.connectedAccountId);
+      markIntentUnresolved(sym);
       persistHaltedRightSizeRetry(sym, pos, symKind, qty, stopPrice, refId);
     }
   }

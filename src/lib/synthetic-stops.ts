@@ -344,6 +344,7 @@ export async function runSyntheticStopMonitor(userId: string, policy: TradingPol
   // the uncovered remainder this same tick instead of leaving it naked until the next tick's fresh
   // order fetch (Codex review, PR #1331).
   const justPlacedBrokerStopSymbols = new Set<string>();
+  const unresolvedBrokerStopIntentSymbols = new Set<string>();
   const justPlacedPartialBrokerStopQty = new Map<string, number>();
   // The app's own already-tracked high-water mark per symbol (ACTIVE rows only — a purged/triggered
   // row's extreme isn't live protection). Passed into reconcile so a broker-held trail is never
@@ -374,6 +375,14 @@ export async function runSyntheticStopMonitor(userId: string, policy: TradingPol
       registrationOrders = brokerOrders.filter((o) => !cancelledIds.has(o.id));
     }
     for (const sym of reconciled.placedStopSymbols) justPlacedBrokerStopSymbols.add(normalizeSymbol(sym));
+    // A thrown broker placement may already have been accepted even though the fresh order list
+    // cannot see it. Treat that uncertainty exactly like same-tick resting coverage: neither arm nor
+    // fire a synthetic exit on top of a possibly-live full-size broker stop.
+    for (const sym of reconciled.unresolvedIntentSymbols) {
+      const normalized = normalizeSymbol(sym);
+      unresolvedBrokerStopIntentSymbols.add(normalized);
+      justPlacedBrokerStopSymbols.add(normalized);
+    }
     for (const sym of reconciled.partiallyPlacedStopSymbols) {
       const s = normalizeSymbol(sym);
       justPlacedPartialBrokerStopQty.set(s, reconciled.partiallyPlacedStopQuantities[sym] ?? reconciled.partiallyPlacedStopQuantities[s] ?? 0);
@@ -636,7 +645,9 @@ export async function runSyntheticStopMonitor(userId: string, policy: TradingPol
       audit("synthetic_stop_skipped_resting_exit", {
         symbol: stop.symbol,
         positionQty,
-        note: "broker-held protective stop placed this tick — resting protection the stale coverage list can't see; deferring fire to next tick's fresh coverage"
+        note: unresolvedBrokerStopIntentSymbols.has(stopSym)
+          ? "broker-held protective stop placement remains unresolved — deferring fire rather than stacking a synthetic exit on a possibly-live order"
+          : "broker-held protective stop placed this tick — resting protection the stale coverage list can't see; deferring fire to next tick's fresh coverage"
       }, userId, policy.connectedAccountId);
       continue;
     }

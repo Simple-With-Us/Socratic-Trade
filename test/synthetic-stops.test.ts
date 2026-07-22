@@ -13,6 +13,7 @@ import {
   recordStopPlan,
   revertSyntheticStopClaim,
   upsertBrokerProtectiveStop,
+  upsertBrokerStopPlacementIntent,
   upsertConnectedAccount,
   upsertSyntheticStop
 } from "../src/lib/db";
@@ -527,6 +528,37 @@ describe("runSyntheticStopMonitor (orchestration)", () => {
     expect(broker.placed).toHaveLength(1);
     expect(broker.cancelled).toEqual([]);
     expect(listSyntheticStops("SYN-JUSTPLACED", "local")).toHaveLength(1);
+  });
+
+  it("ACTIVE row + unresolved broker-stop intent: synthetic fire defers instead of stacking a duplicate exit", async () => {
+    upsertSyntheticStop({
+      id: "stop-unresolved-intent", userId: "local", accountNumber: "SYN-UNRESOLVED", symbol: "UNRS",
+      side: "long", quantity: 10, entryPrice: 100, extremePrice: 100, lastPrice: 100,
+      trailPercent: 5, status: "active"
+    });
+    upsertBrokerStopPlacementIntent({
+      userId: "local", accountNumber: "SYN-UNRESOLVED", symbol: "UNRS",
+      clientOrderId: "possibly-live-stop", quantity: 10, stopPrice: 95,
+      kind: "trailing", trailPercent: 5
+    });
+    broker.positions = [{ symbol: "UNRS", quantity: 10, averageCost: 100, marketValue: 940 }];
+    broker.quotes = { UNRS: { price: 94 } };
+    broker.orders = []; // successful Robinhood-style live-only list; the fresh intent is ambiguous
+    connectTestAccount("SYN-UNRESOLVED", "live", "robinhood");
+    const policy: TradingPolicy = {
+      ...policyFor("SYN-UNRESOLVED"),
+      activeBroker: "robinhood",
+      robinhoodBrokerStops: true,
+      riskRules: { ...DEFAULT_POLICY.riskRules, trailingStopPct: 5, stopLossPct: 8 }
+    };
+
+    const result = await runSyntheticStopMonitor("local", policy, true);
+
+    expect(result.triggered).toBe(1);
+    expect(result.exited).toBe(0);
+    expect(broker.placed).toHaveLength(0);
+    expect(listSyntheticStops("SYN-UNRESOLVED", "local")).toHaveLength(1);
+    expect(auditPayloads("synthetic_stop_skipped_resting_exit", "UNRS")[0]?.note).toContain("remains unresolved");
   });
 
   it("registration folds a SAME-TICK PARTIAL broker-stop placement into coverage — no needless synthetic row when combined coverage is already full (Codex review, PR #1331)", async () => {

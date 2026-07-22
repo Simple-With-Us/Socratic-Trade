@@ -1,5 +1,13 @@
 # Active Implementation Plan
 
+> **2026-07-21 - PR #1844 review remediation (CODEX, local-only branch
+> `codex/pr1844-review-fixes-20260721`).** Close the three unresolved lifecycle/idempotency gaps:
+> bound successful live-only-list absence, expose unresolved symbols to the synthetic monitor, and
+> reconcile stale intents before close/disable/plan/running/preflight early returns. Focused tests,
+> TypeScript, and scoped lint precede a local commit. Hold push and all GitHub mutations behind
+> PR #1857; once released, update the existing PR head, resolve the exact threads, obtain fresh
+> required checks, merge, and verify the deployed SHA.
+
 > **2026-07-21 - Stop placement intent authoritative-absence fix (CURSOR,
 > branch `cursor/critical-bug-management-8edd`).** Narrow money-path repair from the hourly
 > high-severity bug scan: a broker protective-stop placement intent created before a timed-out broker

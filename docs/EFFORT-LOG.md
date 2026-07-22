@@ -45,6 +45,7 @@ As of 2026-07-08 (assignment-rule update).
 ---
 
 ## In Progress
+- **[Socratic.Trade][CODEX] PR #1844 protective-stop intent review remediation (worktree `/Users/jay/.codex/worktrees/socratic-pr1844-critical`, branch `codex/pr1844-review-fixes-20260721`, claimed 2026-07-21) - IN PROGRESS, LOCAL ONLY.** All three unresolved findings are implemented: bounded live-list-only intent retirement, same-tick synthetic suppression for unresolved outcomes, and pre-early-return teardown across close/disable/plan changes. Focused broker/synthetic suites pass (143 tests), scoped lint has 0 errors, and TypeScript passes; hold push/thread resolution/check reruns/merge/deploy behind PR #1857.
 - **[Socratic.Trade][CURSOR] Stop placement intent authoritative-absence fix (branch
   `cursor/critical-bug-management-8edd`, claimed 2026-07-21) — IN PROGRESS.** Hourly
   high-severity scan found a money-path duplicate-stop risk: a durable broker stop placement intent
