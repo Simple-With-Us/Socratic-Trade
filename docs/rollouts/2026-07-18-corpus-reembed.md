@@ -266,3 +266,43 @@ change with its own blast radius. Recorded in-module at `legacyReceiptsFor`.
 **Follow-up (open):** reconcile `providerAuthorityForInitKey` vs `stableProviderAuthorityForInitKey`
 in `vector-db.ts`, then re-apply the authority filter to `legacyReceiptsFor` with coverage for the
 changed-authority case.
+
+## 2026-07-21 current-review addendum — stale stamps are invalidated on resume
+
+The exact PR head was refreshed after the prior review follow-up and had one new unresolved P2.
+The post-write model check withheld a new completion stamp, but the persistence branch copied an
+older `completedForEmbedRevision` forward. If a completed docType later gained a candidate and the
+resumed scan lost its active model during the final async write, flipping back could therefore make
+the purge gate trust the old full-scan boundary and delete legacy vectors before the new candidate
+was safely covered.
+
+The fix treats the completion stamp as purge authorization, not historical decoration:
+
+- A resumed full scan clears any prior current-revision stamp before its first async provider
+  write, closing the process-crash window as well as the reported post-write drift window.
+- Every non-completing persistence omits the stamp. Only a full scan that reaches the end while its
+  captured embedding model is still active can issue a fresh one.
+- `test/corpus-reembed-adversarial.test.ts` establishes a valid stamp, adds a new candidate,
+  observes that the stamp is already absent inside the final provider write, flips the model there,
+  flips back afterward, and proves `purgeLegacyEmbeddingSpace` refuses without provider deletes.
+
+Files changed in this addendum:
+
+- `src/lib/rag/corpus-reembed.ts`
+- `test/corpus-reembed-adversarial.test.ts`
+- `STATUS.md`, `PLAN.md`, `docs/EFFORT-LOG.md`
+- `docs/rollouts/2026-07-18-corpus-reembed.md`
+
+Verification for this addendum:
+
+- `npx vitest run test/corpus-reembed-adversarial.test.ts` — 1 file, 3 tests passed.
+- `npx vitest run test/corpus-reembed.test.ts test/corpus-reembed-adversarial.test.ts` —
+  2 files, 13 tests passed.
+- `npx eslint src/lib/rag/corpus-reembed.ts test/corpus-reembed-adversarial.test.ts` —
+  exit 0 with two inherited `_input` warnings in the adversarial test.
+- `npx tsc --noEmit` — exit 0.
+
+External actions remain intentionally held until the parent PR sweep releases after #1857. This
+PR must land before any further corpus operation. The provider-authority follow-up above also
+remains operationally relevant: do not purge after a Pinecone key/index authority change until that
+identity is reconciled or the authority is independently proven unchanged.

@@ -934,7 +934,6 @@ async function runCorpusReembedLocked(
     const now = new Date().toISOString();
     const existing = readProgress();
     const nextDocTypes = { ...(existing?.docTypes ?? {}) };
-    const prior = nextDocTypes[docType];
     nextDocTypes[docType] = {
       status: docState.stoppedForBudget ? "stopped-budget" : docState.completed ? "completed" : "running",
       watermark: docState.watermark,
@@ -944,13 +943,11 @@ async function runCorpusReembedLocked(
       reusedInSpace: base.reusedInSpace + docState.reusedInSpace,
       failed: base.failed + docState.failed,
       // Completion is stamped only by a full-corpus scan that reached the end WHILE the space it
-      // names is still active; a stamp from an earlier revision is dropped once the scan runs under
-      // a new one (watermark chain restarts).
-      ...(stampCompletion
-        ? { completedForEmbedRevision: embedRevision }
-        : prior?.completedForEmbedRevision === embedRevision
-          ? { completedForEmbedRevision: prior.completedForEmbedRevision }
-          : {}),
+      // names is still active. Any resumed full run invalidates the prior delete-authorizing stamp
+      // as soon as it persists new progress; only a fresh safe completion can reissue it. Preserving
+      // the old stamp here would let a final-write model drift (or a crash/budget stop after newly
+      // discovered candidates) leave purge authorization covering less than the current corpus.
+      ...(stampCompletion ? { completedForEmbedRevision: embedRevision } : {}),
       lastRunAt: now
     };
     writeProgress({
@@ -981,6 +978,15 @@ async function runCorpusReembedLocked(
         }
       : { candidatesSeen: 0, embedded: 0, reusedInSpace: 0, failed: 0 };
     const state = freshDocTypeRunState(docType, initialWatermark);
+
+    // A completion stamp describes the corpus as it existed at the end of the previous scan. The
+    // moment a new full scan starts, invalidate that delete authorization BEFORE its first async
+    // provider write. Otherwise a process crash during that write could leave the old stamp behind
+    // while newly-discovered candidates remain unembedded. A safe end-of-scan persist reissues it.
+    if (priorIsCurrentRevision && prior?.completedForEmbedRevision === embedRevision) {
+      persistRunning(docType, state, base);
+    }
+
     const ctx: RunContext = {
       userId,
       symbols,

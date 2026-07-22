@@ -2642,3 +2642,13 @@ The full-gate test suite has now cleanly passed: `npm run lint` (0 errors / 402 
 
 ## 2026-07-21 — Switch RAG Default Embedding Provider from Voyage to OpenRouter (BAAI bge-m3)
 Switched the default fallback RAG embedding and rerank provider in `src/lib/vector-db.ts` to OpenRouter using BAAI's `baai/bge-m3` embedding model and Cohere reranker. Updated tests in `test/rag-embed-provider-gate.test.ts` and `test/connection-health-routing.test.ts`.
+## 2026-07-21 — PR #1777 stale completion-stamp fix prepared locally (CODEX)
+
+Current head `3c9e8601` has one fresh unresolved P2: a resumed full scan that discovers new
+candidates but drifts during its final async write preserves the previous completion stamp, so a
+later flip back can authorize a legacy purge against stale coverage. The local-only
+`codex/local-pr1777-reviewfix` lane now invalidates prior purge authorization before the resumed
+scan's first provider write and reissues it only after a safe full completion. An adversarial
+regression observes the stamp absent during the write, forces final-write drift, flips back, and
+proves purge refusal. No push/thread/CI/merge/deploy or corpus operation is authorized until the
+parent PR sweep releases after #1857.

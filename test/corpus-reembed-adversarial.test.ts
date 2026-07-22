@@ -295,4 +295,61 @@ describe("corpus-reembed adversarial: symbol-scoped runs can never unlock the le
     expect(guarded.result!.purged).toBe(0);
     expect(mocks.deleteMany).not.toHaveBeenCalled();
   }, 120_000);
+
+  it("drops a prior completion stamp when a resumed scan drifts during its final write", async () => {
+    const {
+      getCorpusReembedProgress,
+      purgeLegacyEmbeddingSpace,
+      resetCorpusReembedStateForTest,
+      runCorpusReembedForTest
+    } = await import("../src/lib/rag/corpus-reembed");
+    resetCorpusReembedStateForTest();
+    await activateBgeM3();
+
+    await insertSecFilingChunk({
+      contentHash: "hash-drift-initial",
+      symbol: "DRFT",
+      accession: "0000320193-26-200001",
+      text: "Initial DRFT filing content used to establish a safe full-corpus completion stamp."
+    });
+    const initialRun = await runCorpusReembedForTest({ docTypes: ["sec-filings"] });
+    expect(initialRun.result?.docTypes[0]?.completed).toBe(true);
+    expect(
+      getCorpusReembedProgress().persisted?.docTypes?.["sec-filings"]?.completedForEmbedRevision
+    ).toBe("v1-baai-bge-m3");
+
+    // A newly-arrived filing makes the previous full-scan receipt stale. Flip the active model from
+    // inside its provider write so there is no later per-item boundary at which ModelDriftAbort can
+    // fire: this is the exact final-write window from the review finding.
+    await insertSecFilingChunk({
+      contentHash: "hash-drift-new-final",
+      symbol: "DRFT",
+      accession: "0000320193-26-200002",
+      text: "New DRFT filing content whose final vector write races an embedding-model change."
+    });
+    let stampObservedDuringFinalWrite: string | undefined;
+    mocks.upsert.mockImplementationOnce(async () => {
+      stampObservedDuringFinalWrite =
+        getCorpusReembedProgress().persisted?.docTypes?.["sec-filings"]?.completedForEmbedRevision;
+      await deactivateBgeM3();
+    });
+
+    const driftedResume = await runCorpusReembedForTest({ docTypes: ["sec-filings"] });
+    expect(driftedResume.result?.docTypes[0]?.completed).toBe(true);
+    expect(stampObservedDuringFinalWrite).toBeUndefined();
+    const driftedProgress = getCorpusReembedProgress().persisted?.docTypes?.["sec-filings"];
+    expect(driftedProgress?.watermarkEmbedRevision).toBe("v1-baai-bge-m3");
+    expect(driftedProgress?.completedForEmbedRevision).toBeUndefined();
+
+    // Flipping back must not revive the stale stamp and authorize deletion of legacy vectors.
+    await activateBgeM3();
+    mocks.deleteMany.mockClear();
+    const purge = await purgeLegacyEmbeddingSpace({
+      docTypes: ["sec-filings"],
+      confirm: "purge-voyage-vectors"
+    });
+    expect(purge.result?.ok).toBe(false);
+    expect(purge.result?.refused).toMatch(/has not completed a FULL corpus-reembed run/);
+    expect(mocks.deleteMany).not.toHaveBeenCalled();
+  }, 120_000);
 });

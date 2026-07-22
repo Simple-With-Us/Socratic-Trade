@@ -1,5 +1,13 @@
 # Active Implementation Plan
 
+> **2026-07-21 - PR #1777 fresh purge-safety review fix (CODEX, local only).** Invalidate any
+> previous full-scan completion stamp before a resumed scan's first async provider write, and issue
+> a new stamp only after safe completion under the still-active embedding model. Prove final-write
+> drift plus flip-back cannot authorize purge. Keep the commit local until parent release after
+> #1857; land this core hardening before #1775 and before authorizing any re-embed/purge operation.
+> Legacy receipt/provider-authority reconciliation remains a separate prerequisite for a purge if
+> the Pinecone authority changed between vector write and purge time.
+
 > **2026-07-21 - CI Runner Migration (Antigravity, branch `agent/antigravity-ci-fix`).** Replaced failing self-hosted runner `trading-live` with `ubuntu-latest` across all CI workflows (`.github/workflows/*.yml`) in Socratic.Trade. The Mac self-hosted runner environment was corrupted after Hetzner failure. Scheduled to land via `scripts/land.sh` to unblock 38 pending PRs.
 > **2026-07-19 - Land the #1771/#1773/#1777 chain, then run the corpus re-embed to completion
 > (owner-directed pickup, multiple lanes).** Next actions, in order: (1) land **#1771**
