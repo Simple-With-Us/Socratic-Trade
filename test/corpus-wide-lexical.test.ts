@@ -60,8 +60,9 @@ function seed(input: {
 
 describe("compileCorpusWideLexicalQuery", () => {
   it("quotes terms so FTS operators cannot alter the search grammar", () => {
-    expect(compileCorpusWideLexicalQuery('" OR NEAR/10 * (revenue)')).toBe('"OR" AND "NEAR/10" AND "revenue"');
-    expect(compileCorpusWideLexicalQuery("---***()")) .toBeNull();
+    expect(compileCorpusWideLexicalQuery('" OR NEAR/10 * (revenue)')).toBe('"OR" OR "NEAR/10" OR "revenue"');
+    expect(compileCorpusWideLexicalQuery("Dividend dividend DIVIDEND")).toBe('"Dividend"');
+    expect(compileCorpusWideLexicalQuery("---***()")).toBeNull();
     expect(compileCorpusWideLexicalQuery("x".repeat(8_193))).toBeNull();
   });
 });
@@ -120,6 +121,23 @@ describe("searchCorpusWideLexicalCandidates", () => {
     expect(searchCorpusWideLexicalCandidates({ symbol: "AAPL", query: "---***()" })).toEqual([]);
     expect(searchCorpusWideLexicalCandidates({ symbol: "AAPL", query: '" OR * NEAR/10' })).toEqual([]);
     expect(searchCorpusWideLexicalCandidates({ symbol: "***", query: "revenue" })).toEqual([]);
+  });
+
+  it("recalls a filing that matches only the discriminative subset of a natural-language question", () => {
+    seed({
+      vectorId: "vec-dividend-policy",
+      hash: "hash-dividend-policy",
+      accession: "0000320193-25-000096",
+      acceptedAt: "2025-11-01T18:00:00.000Z",
+      text: "The board declared a quarterly cash dividend and reaffirmed its capital return policy."
+    });
+
+    const rows = searchCorpusWideLexicalCandidates({
+      symbol: "AAPL",
+      query: "How did management's capital allocation and quarterly dividend policy evolve amid demand softness?"
+    });
+
+    expect(rows.map((row) => row.id)).toContain("vec-dividend-policy");
   });
 
   it("uses occurrence accepted_at for PIT and makes strict-undated explicit", () => {

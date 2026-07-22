@@ -16,9 +16,10 @@ corpus safely without changing retrieval behavior yet.
 
 ## Contract and decisions
 
-- The adapter tokenizes and quotes every untrusted query term before FTS5. Operators and punctuation
-  cannot change the FTS grammar; empty, oversized, invalid-symbol, and invalid-as-of inputs return
-  no candidates.
+- The adapter tokenizes, case-insensitively de-duplicates, and quotes every untrusted query term
+  before emitting an FTS5 OR expression. Operators and punctuation cannot change the FTS grammar;
+  empty, oversized, invalid-symbol, and invalid-as-of inputs return no candidates. OR preserves
+  recall when a natural-language question matches only a filing's discriminative terms.
 - The join uses all FTS occurrence coordinates (`content_hash`, `symbol`, `source`, `accession`) to
   retain identical boilerplate in different filings as separate candidates.
 - `chunk_occurrences.accepted_at` is the point-in-time authority. With `asOf`, strict undated

@@ -86,19 +86,25 @@ function canonicalAcceptedAt(value: unknown): string | undefined {
 }
 
 /**
- * Compile arbitrary text to a conservative FTS5 AND query. Every user-controlled token is quoted,
+ * Compile arbitrary text to a conservative FTS5 OR query. Every user-controlled token is quoted,
  * so FTS operators (`OR`, `NEAR`, `*`, column filters, parentheses) remain literal text rather
- * than altering the query plan. `null` means there was no searchable token.
+ * than altering the query plan. This preserves recall for natural-language questions, where a
+ * relevant filing may contain only its discriminative terms. `null` means no searchable token.
  */
 export function compileCorpusWideLexicalQuery(query: string): string | null {
   if (typeof query !== "string" || query.length === 0 || query.length > MAX_QUERY_CHARS) return null;
-  const terms = query
-    .match(/[\p{L}\p{N}][\p{L}\p{N}._/-]*/gu)
-    ?.map((term) => term.slice(0, MAX_QUERY_TERM_CHARS))
-    .filter(Boolean)
-    .slice(0, MAX_QUERY_TERMS) ?? [];
+  const terms: string[] = [];
+  const seenTerms = new Set<string>();
+  for (const rawTerm of query.match(/[\p{L}\p{N}][\p{L}\p{N}._/-]*/gu) ?? []) {
+    const term = rawTerm.slice(0, MAX_QUERY_TERM_CHARS);
+    const normalizedTerm = term.toLocaleLowerCase();
+    if (seenTerms.has(normalizedTerm)) continue;
+    seenTerms.add(normalizedTerm);
+    terms.push(term);
+    if (terms.length >= MAX_QUERY_TERMS) break;
+  }
   if (terms.length === 0) return null;
-  return terms.map((term) => `"${term.replace(/"/g, '""')}"`).join(" AND ");
+  return terms.map((term) => `"${term.replace(/"/g, '""')}"`).join(" OR ");
 }
 
 /**
