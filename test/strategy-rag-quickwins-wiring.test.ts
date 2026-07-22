@@ -91,7 +91,7 @@ describe("strategy.ts RAG retrieval wiring (2026-07-04 quick-wins)", () => {
     });
 
     const { runStrategyOnce } = await import("../src/lib/strategy");
-    await runStrategyOnce();
+    const result = await runStrategyOnce();
 
     expect(mocks.retrieveContextDetailed).toHaveBeenCalled();
     const [, , , , options] = mocks.retrieveContextDetailed.mock.calls[0]!;
@@ -101,5 +101,27 @@ describe("strategy.ts RAG retrieval wiring (2026-07-04 quick-wins)", () => {
     const userContent = JSON.parse(bullBody.input!.find((item) => item.role === "user")?.content ?? "{}");
     expect(userContent.retrievedFinancialContext).toContain("[10-K · risk-factors · AAPL · 2026-02-01 · rel 0.80]");
     expect(userContent.retrievedFinancialContext).toContain("Apple faces supply-chain risk.");
+
+    // Prompt consumption is captured only after containment + the shared evidence budget. The
+    // receipt propagates a stable ref and intentionally never persists the raw retrieval query or
+    // prompt excerpt.
+    const { listAudit } = await import("../src/lib/db");
+    const consumption = listAudit(200).findLast(
+      (entry) => entry.kind === "strategy_rag_prompt_consumption" && (entry.payload as { runId?: string }).runId === result.runId
+    );
+    expect(consumption).toBeTruthy();
+    const payload = consumption!.payload as {
+      outcome?: string;
+      retrievedCandidateCount?: number;
+      retrievalFailureCount?: number;
+      consumed?: Array<{ chunkId?: string; evidenceRef?: string; state?: string }>;
+      retrievedButNotConsumed?: unknown[];
+    };
+    expect(payload).toMatchObject({ outcome: "assembled", retrievalFailureCount: 0 });
+    expect(payload.retrievedCandidateCount).toBeGreaterThan(0);
+    expect(payload.consumed).toEqual([expect.objectContaining({ chunkId: "c1", state: "consumed", evidenceRef: expect.stringMatching(/^rag_[a-f0-9]{24}$/) })]);
+    expect(payload.retrievedButNotConsumed).toEqual([]);
+    expect(JSON.stringify(payload)).not.toContain("Significant financial events");
+    expect(JSON.stringify(payload)).not.toContain("Apple faces supply-chain risk");
   }, 30_000);
 });

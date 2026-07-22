@@ -1,5 +1,7 @@
+import { createHash } from "crypto";
 import { normalizeSymbol } from "./money";
 import { isHardGateReason } from "./policy";
+import { stableRagEvidenceRef } from "./rag/evidence-consumption";
 import type { RetrievedChunk } from "./vector-db";
 import type {
   MarketQuote,
@@ -135,9 +137,20 @@ export function applySocraticOverrideSizing(proposal: TradeProposal, policy: Tra
 }
 
 export function ragAttributionsFromChunks(symbol: string, query: string, chunks: RetrievedChunk[]): SocraticRagAttribution[] {
-  return chunks.slice(0, 5).map((chunk) => ({
+  return chunks.map((chunk) => ({
     symbol: normalizeSymbol(symbol),
-    query,
+    evidenceRef: stableRagEvidenceRef({
+      ...(chunk.id ? { chunkId: chunk.id } : {}),
+      symbol: normalizeSymbol(symbol),
+      ...(chunk.source ? { source: chunk.source } : {}),
+      ...(chunk.doc_type ? { docType: chunk.doc_type } : {}),
+      ...(chunk.section ? { title: chunk.section } : {}),
+      ...(chunk.url ? { url: chunk.url } : {}),
+      ...(chunk.as_of ? { publishedAt: chunk.as_of } : {}),
+      ...(typeof chunk.score === "number" ? { score: chunk.score } : {}),
+      ...(typeof chunk.relevanceScore === "number" ? { relevanceScore: chunk.relevanceScore } : {})
+    }),
+    queryHash: createHash("sha256").update(query, "utf8").digest("hex").slice(0, 24),
     ...(chunk.id ? { chunkId: chunk.id } : {}),
     ...(chunk.source ? { source: chunk.source } : {}),
     ...(chunk.doc_type ? { docType: chunk.doc_type } : {}),

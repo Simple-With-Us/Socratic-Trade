@@ -1,5 +1,7 @@
 # Active Implementation Plan
 
+> **2026-07-22 — RAG evidence-consumption receipt correction (CODEX evidence sublane).** Complete locally: strategy derives durable use only from the post-containment/post-budget prompt serialization; retrieved-but-not-consumed chunks remain diagnostic-only; stable refs propagate through strategy/chat without new raw query/prompt telemetry. Next: umbrella RAG lane reviews and lands this isolated commit after its current integration sequencing.
+
 > **2026-07-21 - CI Runner Migration (Antigravity, branch `agent/antigravity-ci-fix`).** Replaced failing self-hosted runner `trading-live` with `ubuntu-latest` across all CI workflows (`.github/workflows/*.yml`) in Socratic.Trade. The Mac self-hosted runner environment was corrupted after Hetzner failure. Scheduled to land via `scripts/land.sh` to unblock 38 pending PRs.
 > **2026-07-19 - Land the #1771/#1773/#1777 chain, then run the corpus re-embed to completion
 > (owner-directed pickup, multiple lanes).** Next actions, in order: (1) land **#1771**

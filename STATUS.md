@@ -1,3 +1,15 @@
+## 2026-07-22 — Exact RAG prompt-consumption receipts (CODEX evidence sublane, locally ready for umbrella integration)
+
+Strategy decision-case `ragAttributions` are now selected only after prompt containment and the
+shared evidence budget prove which retrieved chunks reached the Bull/Red payload. Retrieval-only
+and budget-omitted chunks remain in a separate identifier-only receipt, so usefulness learning
+cannot credit unseen evidence. Stable `rag_*` refs flow through strategy attributions and chat KB
+tool results/citations; new strategy attributions persist a query hash rather than raw query text.
+The receipt records text-free empty/error/skipped/dedupe outcomes as well. No trading decision logic
+changed. Focused tests (14/14), scoped lint (0 errors; 39 existing warnings), and TypeScript pass;
+full suite/build are deferred to the umbrella integration gate. Rollout:
+`docs/rollouts/2026-07-22-rag-prompt-consumption-receipts.md`.
+
 ## 2026-07-21 — Voyage AI Purge and OpenRouter Standardization (ANTIGRAVITY, branch `agent/antigravity-docs-update`)
 
 Purged the Voyage AI SDK and its dependencies, standardizing the production RAG engine on OpenRouter BAAI bge-m3 / Cohere reranker. Dynamic imports and test-only shims maintain test suite compatibility while completely isolating Voyage from production. All 4,898 tests and the production Next.js build are fully green. Rollout: `docs/rollouts/2026-07-21-voyage-ai-purge.md`.

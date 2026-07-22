@@ -42,6 +42,7 @@ import { fetchMacroData, fetchMacroDataWithLiveVix, pruneMacro, determineMarketR
 import { buildCandidateEvidence } from "./evidence";
 import { applyEvidenceBudget } from "./evidence-budget";
 import { createEvidencePack, createEvidenceRef } from "./evidence-pack";
+import { derivePromptRagConsumption, type PromptRagCandidate, type PromptRagConsumptionResult } from "./rag/evidence-consumption";
 import { summarizeSourceCoverage } from "./source-value";
 import { deriveExecutionState, fillSourceForExecutionMode, llmExecutionMode, llmModeClarification, type ExecutionAccount } from "./execution-mode";
 import { checkBrokerHealth } from "./broker-health";
@@ -974,6 +975,11 @@ export async function runStrategyOnce(
 
     let ragContext = "";
     let socraticRagAttributions: SocraticRagAttribution[] = [];
+    // Retrieval is deliberately distinct from prompt consumption. Candidates stay local until
+    // proposeTrades has applied containment + the final evidence budget and can prove what the
+    // model actually received.
+    let retrievedRagAttributions: SocraticRagAttribution[] = [];
+    const ragPromptCandidates: PromptRagCandidate[] = [];
     const fmpRightsClaim = captureFmpTranscriptRightsGeneration();
     const fmpDerivedProvenance: FmpTranscriptDerivedProvenance[] = [];
     // Advisory prompt-safety receipts (CR-H lane): kind-'safety' evidence items attached to every
@@ -1117,11 +1123,11 @@ export async function runStrategyOnce(
         }
 
         const validContexts = contexts.flatMap((context) => context.chunks).filter(Boolean);
-        socraticRagAttributions = contexts.flatMap((context) => ragAttributionsFromChunks(context.sym, context.query, context.chunks));
+        retrievedRagAttributions = contexts.flatMap((context) => ragAttributionsFromChunks(context.sym, context.query, context.chunks));
         fmpDerivedProvenance.splice(
           0,
           fmpDerivedProvenance.length,
-          ...fmpTranscriptDerivedProvenance(socraticRagAttributions)
+          ...fmpTranscriptDerivedProvenance(retrievedRagAttributions)
         );
         if (fmpDerivedProvenance.length > 0) {
           if (!fmpRightsClaim) throw new Error("FMP-derived strategy context has no active rights generation.");
@@ -1148,7 +1154,23 @@ export async function runStrategyOnce(
           ragContext = contexts
             .map((context) => {
               const formattedChunks = context.chunks
-                .map((chunk) => formatChunkWithProvenance(chunk, context.sym))
+                .map((chunk) => {
+                  const serializedText = formatChunkWithProvenance(chunk, context.sym);
+                  ragPromptCandidates.push({
+                    ...(chunk.id ? { chunkId: chunk.id } : {}),
+                    symbol: normalizeSymbol(context.sym),
+                    ...(chunk.source ? { source: chunk.source } : {}),
+                    ...(chunk.doc_type ? { docType: chunk.doc_type } : {}),
+                    ...(chunk.section ? { title: chunk.section } : {}),
+                    ...(chunk.url ? { url: chunk.url } : {}),
+                    ...(chunk.as_of ? { publishedAt: chunk.as_of } : {}),
+                    ...(typeof chunk.score === "number" ? { score: chunk.score } : {}),
+                    ...(typeof chunk.relevanceScore === "number" ? { relevanceScore: chunk.relevanceScore } : {}),
+                    text: chunk.text,
+                    serializedText
+                  });
+                  return serializedText;
+                })
                 .join("\n\n");
 
               const parts = [`### RAG Dossier for ${context.sym}`];
@@ -1411,9 +1433,23 @@ export async function runStrategyOnce(
             userId,
             connectedAccountId
           );
-          socraticRagAttributions.push(
-            ...ragAttributionsFromChunks("PORTFOLIO", episodic.query, [...episodic.analogChunks, ...episodic.coachingChunks])
-          );
+          const episodicChunks = [...episodic.analogChunks, ...episodic.coachingChunks];
+          retrievedRagAttributions.push(...ragAttributionsFromChunks("PORTFOLIO", episodic.query, episodicChunks));
+          for (const chunk of episodicChunks) {
+            ragPromptCandidates.push({
+              ...(chunk.id ? { chunkId: chunk.id } : {}),
+              symbol: "PORTFOLIO",
+              ...(chunk.source ? { source: chunk.source } : {}),
+              ...(chunk.doc_type ? { docType: chunk.doc_type } : {}),
+              ...(chunk.section ? { title: chunk.section } : {}),
+              ...(chunk.url ? { url: chunk.url } : {}),
+              ...(chunk.as_of ? { publishedAt: chunk.as_of } : {}),
+              ...(typeof chunk.score === "number" ? { score: chunk.score } : {}),
+              ...(typeof chunk.relevanceScore === "number" ? { relevanceScore: chunk.relevanceScore } : {}),
+              text: chunk.text,
+              serializedText: chunk.text
+            });
+          }
         }
       } catch (e) {
         if (e instanceof StrategyLockOwnershipLostError) throw e;
@@ -1511,6 +1547,9 @@ export async function runStrategyOnce(
         dailyNotionalUsed: daily.notional,
         dailyOrderCount: daily.openingOrderCount,
         ragContext,
+        ragPromptCandidates,
+        ragRetrievalAttempted: !skipLlmDueToBudget,
+        ragRetrievalFailureCount: ragRetrievalStatusRows.filter((row) => row.status === "lookup_failed").length,
         learnedContext,
         ...(experienceAnalogs ? { experienceAnalogs } : {}),
         ...(ownerCoaching ? { ownerCoaching } : {}),
@@ -1525,6 +1564,10 @@ export async function runStrategyOnce(
       llmProposals = proposed.proposals;
       llmSteps = proposed.llmSteps;
       adversaryContext = proposed.adversaryContext;
+      const consumedEvidenceRefs = new Set(proposed.ragPromptConsumption?.consumed.map((receipt) => receipt.evidenceRef) ?? []);
+      socraticRagAttributions = retrievedRagAttributions.filter((attribution) =>
+        attribution.evidenceRef ? consumedEvidenceRefs.has(attribution.evidenceRef) : false
+      );
       // Advisory injection receipts from the prompt-assembly scan (audited inside proposeTrades):
       // fold into kind-'safety' evidence, one item per flagged field, so every decision case this
       // run records carries the receipt. Never alters proposals or routing.
@@ -3815,6 +3858,8 @@ interface ProposeTradesResult {
   promptSafetyFindings?: InjectionFinding[];
   /** Fields whose untrusted instruction-like spans were quarantined before either model saw them. */
   promptContainmentFields?: string[];
+  /** Receipts from the final, post-containment/post-budget prompt serialization. */
+  ragPromptConsumption?: PromptRagConsumptionResult;
 }
 
 async function proposeTrades(input: {
@@ -3833,6 +3878,12 @@ async function proposeTrades(input: {
   dailyNotionalUsed: number;
   dailyOrderCount: number;
   ragContext?: string;
+  /** Retrieved chunks awaiting an exact prompt-consumption decision. Never contains query text. */
+  ragPromptCandidates?: PromptRagCandidate[];
+  /** Text-free retrieval state for an empty/error/not-attempted consumption receipt. */
+  ragRetrievalAttempted?: boolean;
+  /** Count only; error detail remains in the typed retrieval-status audit. */
+  ragRetrievalFailureCount?: number;
   learnedContext?: string;
   /** Exact licensed provenance plus the durable generation captured before retrieval. */
   fmpRightsClaim?: FmpTranscriptRightsGenerationClaim;
@@ -4289,6 +4340,17 @@ async function proposeTrades(input: {
   const budgetedReflection = budgetedText("reflection");
   const budgetedExperienceAnalogs = budgetedText("analogs");
   const budgetedOwnerCoaching = budgetedText("coaching");
+  // This is the sole point at which "used RAG" is determined. Retrieval can return candidates
+  // that containment or the shared evidence budget subsequently removes; those stay in the
+  // retrieved-but-not-consumed receipt and must never enter decision attribution/usefulness.
+  const ragPromptConsumption = derivePromptRagConsumption(input.ragPromptCandidates ?? [], [
+    budgetedRagContext,
+    budgetedExperienceAnalogs,
+    budgetedOwnerCoaching
+  ], {
+    retrievalAttempted: input.ragRetrievalAttempted,
+    retrievalFailureCount: input.ragRetrievalFailureCount
+  });
 
   const structuredEvidence = [
     createEvidenceRef({
@@ -4402,6 +4464,21 @@ async function proposeTrades(input: {
         usedTokenEstimate: evidenceBudget.usedTokenEstimate,
         receipts: evidenceBudget.receipts.filter((receipt) => receipt.originalCharacters > 0)
       }
+    },
+    input.userId,
+    input.policy.connectedAccountId
+  );
+  audit(
+    "strategy_rag_prompt_consumption",
+    {
+      runId: input.runId,
+      outcome: ragPromptConsumption.outcome,
+      retrievedCandidateCount: ragPromptConsumption.retrievedCandidateCount,
+      uniqueCandidateCount: ragPromptConsumption.uniqueCandidateCount,
+      duplicateCandidateCount: ragPromptConsumption.duplicateCandidateCount,
+      retrievalFailureCount: ragPromptConsumption.retrievalFailureCount,
+      consumed: ragPromptConsumption.consumed,
+      retrievedButNotConsumed: ragPromptConsumption.retrievedButNotConsumed
     },
     input.userId,
     input.policy.connectedAccountId
@@ -5239,6 +5316,9 @@ async function proposeTrades(input: {
     proposals: bullProposals,
     llmSteps,
     adversaryContext,
+    ...(ragPromptConsumption.consumed.length > 0 || ragPromptConsumption.retrievedButNotConsumed.length > 0
+      ? { ragPromptConsumption }
+      : {}),
     ...(promptSafetyFindings.length > 0 ? { promptSafetyFindings } : {}),
     ...(promptContainmentReceipts.length > 0
       ? { promptContainmentFields: [...new Set(promptContainmentReceipts.map(({ field }) => field))] }

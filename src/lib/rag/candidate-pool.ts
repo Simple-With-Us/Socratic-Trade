@@ -7,10 +7,10 @@
  * minScore / as-of / dedupe are NOT here — only survivors. With the default strategy caller
  * (dedupe 0.6, limit 3) `ordered` is already <= limit, so `used:false` rows are rare/absent there;
  * a v2 capturing the pre-`rankPool` `matches` pool with per-stage drop reasons is the follow-up if
- * "why did we drop this" is the goal. Today only the post-selection top-N chunks that actually
- * reach a prompt get persisted (`ragAttributionsFromChunks` in socratic-runtime.ts slices to 5,
- * and `socraticRagAttributions` in strategy.ts is built from the already-final `context.chunks`).
- * The pre-slice candidate pool `rankPool` produces is otherwise discarded in-function.
+ * "why did we drop this" is the goal. This is a RETRIEVAL selection receipt, not a prompt-use
+ * receipt: final model consumption is separately derived after strategy containment and evidence
+ * budgeting (`strategy_rag_prompt_consumption`). The pre-slice candidate pool `rankPool` produces
+ * is otherwise discarded in-function.
  *
  * Flag-gated via RAG_PERSIST_CANDIDATE_POOL (default OFF, envFlagOn-parsed) — mirrors the
  * RAG_RETRIEVAL_TELEMETRY / recordRetrievalQuality precedent in rag-metering.ts: the flag check

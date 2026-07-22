@@ -1422,7 +1422,12 @@ export interface SocraticOutcomeHorizonRow {
 
 export interface SocraticRagAttribution {
   symbol: string;
-  query: string;
+  /** Stable ref to the exact retrieved chunk; safe to persist/audit without prompt or query text. */
+  evidenceRef?: string;
+  /** Legacy rows may retain this raw query. New writes use queryHash instead. */
+  query?: string;
+  /** SHA-256 query fingerprint for new attribution rows; raw queries are not persisted. */
+  queryHash?: string;
   chunkId?: string;
   source?: string;
   docType?: string;

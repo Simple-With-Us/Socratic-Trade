@@ -16,6 +16,7 @@ import { fetchDailyOHLC } from "../history";
 import { fetchYahooFinanceQuote } from "../yahoo-finance";
 import { citationStalenessEnabled, defaultDedupeSimilarity, defaultMinScore, defaultRelevanceFloor, isStale, retrieveContextDetailed } from "../vector-db";
 import type { RetrieveOptions } from "../vector-db";
+import { derivePromptRagConsumption, stableRagEvidenceRef } from "../rag/evidence-consumption";
 import { createAlert as alertsCreateAlert, listAlerts as alertsListAlerts } from "../alerts";
 import { getEnrichmentProvider } from "../data-providers";
 import { getMarketSignals } from "../market-signals";
@@ -289,8 +290,15 @@ export function makeOrchestrator(deps: ToolDeps, llm?: ChatLLM) {
       const containment: Array<{ path: string; result: PromptContainmentResult }> = [];
       const source: PromptTextSource = name === "kb_search" ? "rag" : "unknown";
       let sanitized = containPromptData(raw, source, `tool.${name}`, containment);
-      if (name === "kb_search" && Array.isArray(sanitized)) {
-        const exactFmp = fmpTranscriptDerivedProvenance(sanitized);
+      const kbChunks = (value: unknown): Array<Record<string, unknown>> => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+        const chunks = (value as Record<string, unknown>).chunks;
+        return Array.isArray(chunks)
+          ? chunks.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+          : [];
+      };
+      if (name === "kb_search" && kbChunks(sanitized).length > 0) {
+        const exactFmp = fmpTranscriptDerivedProvenance(kbChunks(sanitized));
         if (exactFmp.length > 0) {
           let generationActive = Boolean(fmpRightsClaim);
           if (fmpRightsClaim) {
@@ -306,13 +314,12 @@ export function makeOrchestrator(deps: ToolDeps, llm?: ChatLLM) {
             // rows share the doc type but are gated by their OWN predicate (key + kill-switch,
             // already enforced by vector-db's post-fetch guard) — a stale FMP generation must not
             // collaterally strip them.
-            sanitized = sanitized.filter((item) => {
-              if (!item || typeof item !== "object" || Array.isArray(item)) return true;
-              const row = item as Record<string, unknown>;
+            const safeChunks = kbChunks(sanitized).filter((row) => {
               if (row.source === EARNINGSCALLS_TRANSCRIPT_SOURCE) return earningsCallsTranscriptsEnabled();
               return row.source !== FMP_TRANSCRIPT_SOURCE &&
                 String(row.doc_type ?? "").toLowerCase() !== FMP_TRANSCRIPT_DOC_TYPE;
             });
+            sanitized = { ...(sanitized as Record<string, unknown>), chunks: safeChunks };
           } else {
             rememberFmpProvenance(exactFmp);
           }
@@ -337,6 +344,35 @@ export function makeOrchestrator(deps: ToolDeps, llm?: ChatLLM) {
         content: JSON.stringify(sanitized)
       });
       const pack = createEvidencePack({ decisionKey: `${turnKey}:tool:${name}:${retrievedAt}`, evidence: [ref] });
+      // Tool results are serialized into the model's next turn. For KB search, derive the
+      // receipt from the sanitized rows actually returned to that tool loop, not from the broader
+      // retrieval candidate pool. The audit stays identifier/count-only.
+      const ragPromptConsumption = name === "kb_search" && kbChunks(sanitized).length > 0
+        ? derivePromptRagConsumption(
+            kbChunks(sanitized).flatMap((row) => {
+              const text = typeof row.text === "string" ? row.text : "";
+              const symbol = typeof row.symbol === "string" ? row.symbol : "CHAT";
+              return text
+                ? [{
+                    ...(typeof row.chunk_id === "string" ? { chunkId: row.chunk_id } : {}),
+                    symbol,
+                    ...(typeof row.source === "string" ? { source: row.source } : {}),
+                    ...(typeof row.doc_type === "string" ? { docType: row.doc_type } : {}),
+                    ...(typeof row.section === "string" ? { title: row.section } : {}),
+                    ...(typeof row.url === "string" ? { url: row.url } : {}),
+                    ...(typeof row.as_of === "string" ? { publishedAt: row.as_of } : {}),
+                    ...(typeof row.score === "number" ? { score: row.score } : {}),
+                    text,
+                    serializedText: text
+                  }]
+                : [];
+            }),
+            kbChunks(sanitized).flatMap((row) => typeof row.text === "string"
+              ? [row.text]
+              : []),
+            { retrievalAttempted: true }
+          )
+        : undefined;
       writeAudit(
         "chat.tool_evidence_pack",
         {
@@ -344,6 +380,19 @@ export function makeOrchestrator(deps: ToolDeps, llm?: ChatLLM) {
           tool: name,
           packHash: pack.packHash,
           ref: { id: ref.id, contentHash: ref.contentHash, family: ref.source.family, status: ref.source.status },
+          ...(ragPromptConsumption
+            ? {
+                ragPromptConsumption: {
+                  outcome: ragPromptConsumption.outcome,
+                  retrievedCandidateCount: ragPromptConsumption.retrievedCandidateCount,
+                  uniqueCandidateCount: ragPromptConsumption.uniqueCandidateCount,
+                  duplicateCandidateCount: ragPromptConsumption.duplicateCandidateCount,
+                  retrievalFailureCount: ragPromptConsumption.retrievalFailureCount,
+                  consumed: ragPromptConsumption.consumed,
+                  retrievedButNotConsumed: ragPromptConsumption.retrievedButNotConsumed
+                }
+              }
+            : {}),
           containment: containment.map(({ path, result }) => ({
             path,
             status: result.status,
@@ -510,6 +559,17 @@ export function buildProductionDeps(): ToolDeps {
       const staleness = citationStalenessEnabled();
       return chunks.map((c) => ({
         chunk_id: c.id,
+        evidence_ref: stableRagEvidenceRef({
+          ...(c.id ? { chunkId: c.id } : {}),
+          symbol,
+          ...(c.source ? { source: c.source } : {}),
+          ...(c.doc_type ? { docType: c.doc_type } : {}),
+          ...(c.section ? { title: c.section } : {}),
+          ...(c.url ? { url: c.url } : {}),
+          ...(c.as_of ? { publishedAt: c.as_of } : {}),
+          ...(typeof c.score === "number" ? { score: c.score } : {}),
+          ...(typeof c.relevanceScore === "number" ? { relevanceScore: c.relevanceScore } : {})
+        }),
         text: c.text,
         source: c.source ?? "kb",
         as_of: c.as_of,

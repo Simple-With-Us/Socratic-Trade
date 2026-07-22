@@ -14,6 +14,8 @@ export interface ChatQuote {
 
 export interface KbChunk {
   chunk_id: string;
+  /** Stable evidence ref for this exact retrieved chunk; safe to expose without query/prompt text. */
+  evidence_ref?: string;
   text: string;
   source: string;
   as_of?: string;
@@ -57,6 +59,7 @@ export interface ChatDraft {
 
 export interface Citation {
   source: string;
+  evidence_ref?: string;
   chunk_id?: string;
   as_of?: string;
   url?: string;

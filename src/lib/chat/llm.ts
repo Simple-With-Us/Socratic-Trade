@@ -269,7 +269,7 @@ export class MockLLM implements ChatLLM {
       return {
         text: `${lines.join("\n")}\n\n${DISCLAIMER}`,
         toolCalls,
-        citations: chunks.map((c: any) => ({ source: c.source, chunk_id: c.chunk_id, as_of: c.as_of, url: c.url }))
+        citations: chunks.map((c: any) => ({ source: c.source, chunk_id: c.chunk_id, evidence_ref: c.evidence_ref, as_of: c.as_of, url: c.url }))
       };
     }
 
@@ -425,7 +425,7 @@ export class AnthropicLLM implements ChatLLM {
       .filter((c) => c.name === "get_quote" && c.result && !c.result.error)
       .map((c) => ({ source: "get_quote", as_of: c.result.as_of }));
     for (const c of toolCalls.filter((tc) => tc.name === "kb_search" && tc.result?.chunks?.length)) {
-      for (const chunk of c.result.chunks) citations.push({ source: chunk.source, chunk_id: chunk.chunk_id, as_of: chunk.as_of, url: chunk.url });
+      for (const chunk of c.result.chunks) citations.push({ source: chunk.source, chunk_id: chunk.chunk_id, evidence_ref: chunk.evidence_ref, as_of: chunk.as_of, url: chunk.url });
     }
     recordChatUsage(this.usage, "anthropic", this.model, promptTokens, completionTokens, sawUsage);
     return { text: withDisclaimer(text), toolCalls, citations };
@@ -575,7 +575,7 @@ export class OpenAILLM implements ChatLLM {
       .filter((c) => c.name === "get_quote" && c.result && !c.result.error)
       .map((c) => ({ source: "get_quote", as_of: c.result.as_of }));
     for (const c of toolCalls.filter((tc) => tc.name === "kb_search" && tc.result?.chunks?.length)) {
-      for (const chunk of c.result.chunks) citations.push({ source: chunk.source, chunk_id: chunk.chunk_id, as_of: chunk.as_of, url: chunk.url });
+      for (const chunk of c.result.chunks) citations.push({ source: chunk.source, chunk_id: chunk.chunk_id, evidence_ref: chunk.evidence_ref, as_of: chunk.as_of, url: chunk.url });
     }
     recordChatUsage(this.usage, this.provider, this.model, promptTokens, completionTokens, sawUsage);
     return { text: text || DISCLAIMER, toolCalls, citations };

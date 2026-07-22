@@ -44,6 +44,10 @@ As of 2026-07-08 (assignment-rule update).
 
 ---
 
+## 2026-07-22 — CODEX evidence-receipt sublane
+
+- **[Socratic.Trade][CODEX evidence sublane] Exact prompt-consumption evidence receipts (worktree `/Users/jay/.codex/worktrees/rag-evidence-consumption-20260722`, branch `codex/rag-evidence-consumption-20260722`) — LOCALLY READY / umbrella integration pending.** Deterministic used-evidence manifests now reflect only chunks serialized into strategy/chat prompts; retrieved-but-not-consumed diagnostics remain separate, with stable refs and text-free empty/error/skipped/dedupe outcomes. Focused 14/14, scoped ESLint 0 errors (39 existing warnings), TypeScript, and diff check pass. No trading-decision, provider, corpus, broker, or production writes.
+
 ## In Progress
 - **[Socratic.Trade][AG] Purge Voyage AI SDK and standardize RAG on OpenRouter BAAI bge-m3 / Cohere reranker (branch `agent/antigravity-docs-update`) — COMPLETED 2026-07-21.** Purged Voyage AI SDK and standardized the production RAG engine on OpenRouter BAAI bge-m3 / Cohere reranker. Isolated Voyage client instantiation to test mode via dynamic imports, ensuring complete isolation from production while maintaining compatibility with the unit test suite. Verified green via `tsc`, `lint`, the 4,898 vitest suite, and a production Next.js build.
 - **[Socratic.Trade][GROK4] Multi-wave expert-review implementation (claimed 2026-07-20) — IN PROGRESS.** PR #1847. Waves A/C partial + coach/lesson writers + **Wave D partial** (chat directives/URLs → learned_context). Prod bge-m3 re-embed running (sec-filings in progress after dry-run 2644 candidates).
