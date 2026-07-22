@@ -154,7 +154,12 @@ default-off LLM judge); an offline **corpus coverage/freshness report** shipped 
 `scripts/eval/corpus-coverage.ts` (doc_type/symbol breakdown + watchlist zero-coverage check from
 SQLite, no Pinecone key required) — a richer **dashboard UI** surfacing the same data is still open
 (note: `/api/admin/rag-coverage` + `app/admin/rag-coverage/` already exist as a related, separate
-live-API/UI capability — not touched by this pass, owned by the dashboard-redesign thread); typed
+live-API/UI capability — not touched by this pass, owned by the dashboard-redesign thread). A separate
+**production-path retrieval evaluator** now runs `retrieveContextDetailedWithStatus` against frozen JSON or
+DB-backed cases carrying authoritative availability timestamps and real vector ids. It emits machine-readable
+recall/MRR/nDCG, future/undated-evidence, duplicate, source/section, latency, status, and usage receipts;
+live provider reads require an explicit `--allow-live`, and comparison labels never mutate production defaults.
+The DB golden set must be curated from frozen EDGAR evidence before it can select a model; typed
 second gate on **BROKERAGE·LIVE** confirm only (keep paper/test one-click); persistent "what can I
 ask?" popover.
 

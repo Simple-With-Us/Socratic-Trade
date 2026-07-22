@@ -423,6 +423,10 @@ Added OpenRouter models to `app/ui/llm-model-catalog.ts` so they can be selected
 - **[ ] Wave D — evaluation and consumption:** build real-EDGAR parser/fact/retrieval/grounding fixtures and
   metrics; replace the generic three-chunk strategy blob with issuer-scoped scout/deep dossiers and verified
   evidence references.
+  - **[~] Production-path retrieval evaluator (2026-07-21):** `eval:rag-production` calls
+    `retrieveContextDetailedWithStatus` with immutable authoritative-as-of timestamps, real vector-id
+    assertions, machine-readable relevance/PIT/coverage/latency/usage receipts, and explicit comparison labels.
+    Curate DB cases from frozen EDGAR evidence and run controlled shadow comparisons before changing defaults.
 - **[ ] Wave E — controlled operations:** only after gates, run shadow 10 -> 25 -> 100 -> 300 -> 1,000 breadth-
   first waves with cost/rate/failure breakers, reconciliation, dual-read/write, rollback, and freshness SLOs.
 

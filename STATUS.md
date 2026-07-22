@@ -6,6 +6,16 @@ Purged the Voyage AI SDK and its dependencies, standardizing the production RAG 
 Synchronized 40 pending Socratic.Trade PRs and 6 pending Congress.Trade PRs with the stabilized main branches to propagate the Linux X64 Coolify CI runner configuration fix. All Dependabot PRs were triggered to rebase via comments, and human/agent PRs had main cleanly merged to force CI runs on the operational runner pool, unlocking the merge backlog.
 # Current Status
 
+## 2026-07-21 — Production-path RAG evaluation framework (CODEX, branch `codex/rag-production-eval-20260721`)
+
+Added a read-only corpus evaluator that exercises `retrieveContextDetailedWithStatus`, not the FTS-only
+search-fusion helper. It accepts frozen JSON or DB-backed cases with authoritative source-availability timestamps
+and expected real vector ids, emits machine-readable relevance/PIT/coverage/latency/status/usage receipts, and
+requires `--allow-live` before any provider read. No corpus or provider writes were run. Next: curate frozen
+EDGAR cases into `rag_production_eval_cases`, then run labeled shadow comparisons before changing embed/rerank
+defaults. Focused tests, scoped lint, TypeScript, and CLI help are green; committed locally, with parent
+integration/PR still pending.
+
 ## 2026-07-19 — Four-handoff conquest: reconciliation + shepherding + hardening landed (CLAUDE, branch `claude/model-availability-session-handoff-362fd3`)
 
 All four owner-linked handoff docs executed/dispositioned: missing model-availability rollout
