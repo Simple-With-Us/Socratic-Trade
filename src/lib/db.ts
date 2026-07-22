@@ -2267,9 +2267,9 @@ const MIGRATIONS: Migration[] = [
     }
   },
   {
-    // Production-path RAG evaluation cases intentionally keep an authoritative query-time
-    // timestamp and real vector ids. The existing sec_eval_golden_set table is retained for the
-    // FTS-only evaluator; it cannot express point-in-time or vector-id assertions.
+    // Production-path RAG evaluation cases intentionally keep authoritative query-time
+    // timestamps and stable source provenance selectors. Vector ids are embedding/index-specific
+    // diagnostics, never the primary model-comparison key.
     version: 55,
     name: "rag_production_eval_cases",
     up: (database) => {
@@ -2279,7 +2279,7 @@ const MIGRATIONS: Migration[] = [
           query TEXT NOT NULL,
           symbol TEXT NOT NULL,
           authoritative_as_of TEXT NOT NULL,
-          expected_evidence_ids TEXT NOT NULL,
+          expected_evidence_refs TEXT NOT NULL,
           category TEXT NOT NULL DEFAULT 'uncategorized',
           expected_sources TEXT,
           expected_sections TEXT,

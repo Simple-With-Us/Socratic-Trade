@@ -14,7 +14,7 @@ const golden: ProductionRagGoldenCase = {
   query: "What did Apple say about services growth?",
   symbol: "AAPL",
   authoritativeAsOf: "2026-05-01T23:59:59.000Z",
-  expectedEvidenceIds: ["expected"],
+  expectedEvidenceRefs: [{ source: "sec-edgar", accession: "0001", section: "MD&A", ordinal: 7, contentHash: "same", vectorId: "historical-vector-id" }],
   category: "earnings",
   expectedSources: ["sec-edgar"],
   expectedSections: ["MD&A"]
@@ -23,11 +23,11 @@ const golden: ProductionRagGoldenCase = {
 const chunks: RetrievedChunk[] = [
   {
     id: "expected", text: "Services revenue grew.", score: 0.9, source: "sec-edgar", section: "MD&A",
-    metadata: { acceptance_datetime: "2026-05-01T20:00:00.000Z", content_hash: "same" }
+    metadata: { acceptance_datetime: "2026-05-01T20:00:00.000Z", content_hash: "same", accession: "0001", chunk_ordinal: 7 }
   },
   {
     id: "duplicate", text: "Services revenue grew.", score: 0.8, source: "sec-edgar", section: "MD&A",
-    metadata: { acceptance_datetime: "2026-05-01T20:00:00.000Z", content_hash: "same" }
+    metadata: { acceptance_datetime: "2026-05-01T20:00:00.000Z", content_hash: "same", accession: "0001", chunk_ordinal: 7 }
   },
   {
     id: "future", text: "Future filing.", score: 0.7, source: "sec-edgar", section: "Risk Factors",
@@ -37,7 +37,7 @@ const chunks: RetrievedChunk[] = [
 ];
 
 describe("production RAG evaluator", () => {
-  it("scores real-vector-id relevance, PIT leakage, undated evidence, duplicate and coverage receipts", () => {
+  it("scores stable provenance relevance despite a changed vector id, plus PIT/duplicate/coverage receipts", () => {
     const result = scoreProductionRagCase(golden, chunks, "ok", 17, 4);
     expect(result.recallAtK).toBe(1);
     expect(result.reciprocalRank).toBe(1);
@@ -47,6 +47,7 @@ describe("production RAG evaluator", () => {
     expect(result.duplicateRate).toBe(0.25);
     expect(result.expectedSourceCoverage).toBe(1);
     expect(result.expectedSectionCoverage).toBe(1);
+    expect(result.diagnosticVectorIdMatches).toEqual([]);
   });
 
   it("drives the evaluator through an injectable production-shaped retriever without a network call", async () => {
@@ -66,13 +67,18 @@ describe("production RAG evaluator", () => {
     expect(report.usageReceipt?.costEstUsd).toBe(0.001);
   });
 
+  it("refuses an empty golden set instead of producing all-zero metrics", async () => {
+    await expect(runProductionRagEvaluation([], { retriever: { retrieve: async () => ({ chunks: [], status: "no_memory" }) } }))
+      .rejects.toThrow("empty golden set");
+  });
+
   it("loads frozen case files and rejects a case without an authoritative timestamp", () => {
     const path = join(process.env.TMPDIR!, "rag-production-eval-cases.json");
     writeFileSync(path, JSON.stringify({ cases: [golden] }));
     expect(loadFrozenProductionRagGoldenSet(path)).toEqual([golden]);
     writeFileSync(path, JSON.stringify([{ ...golden, authoritativeAsOf: "not-a-date" }]));
     expect(() => loadFrozenProductionRagGoldenSet(path)).toThrow("authoritativeAsOf");
-    writeFileSync(path, JSON.stringify([{ ...golden, expectedEvidenceIds: [] }]));
-    expect(() => loadFrozenProductionRagGoldenSet(path)).toThrow("expectedEvidenceIds");
+    writeFileSync(path, JSON.stringify([{ ...golden, expectedEvidenceRefs: [{ vectorId: "legacy-only" }] }]));
+    expect(() => loadFrozenProductionRagGoldenSet(path)).toThrow("stable selector");
   });
 });

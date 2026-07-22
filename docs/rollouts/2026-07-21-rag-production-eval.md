@@ -15,9 +15,11 @@ make relevance, leakage, duplicates, coverage, latency, status, and spend observ
 
 - Golden cases are either frozen JSON (`--source file --input cases.json`) or enabled rows in
   `rag_production_eval_cases`.
-- Every case requires `authoritativeAsOf` and `expectedEvidenceIds`. The DB stores the equivalent fields as
-  `authoritative_as_of` and JSON `expected_evidence_ids`; optional expected source/section arrays make coverage
-  assertions explicit.
+- Every case requires `authoritativeAsOf` and non-empty `expectedEvidenceRefs`. Each reference must carry at
+  least one stable source/accession/section/ordinal/content-hash selector; all supplied selectors must match.
+  The DB stores the equivalent fields as `authoritative_as_of` and JSON `expected_evidence_refs`. A vector id
+  can be retained only as an optional diagnostic: it never establishes relevance, so re-embedding or an index
+  rebuild cannot alter the ground truth.
 - The CLI requires `--allow-live` before it imports and calls `retrieveContextDetailedWithStatus`. It performs
   retrieval reads only; it never writes embeddings or vectors. Native retrieval metering/audit receipts may still
   be emitted by the production function and are reported best-effort.
@@ -50,3 +52,17 @@ production calls were made.
    the emitted JSON receipts.
 3. Keep usage receipt interpretation scoped to the run window; concurrent same-user production retrieval can share
    that ledger window.
+4. The evaluator refuses an empty golden set rather than emitting misleading all-zero quality metrics.
+
+## Follow-up - Pinecone hosted inference candidate
+
+`npm run eval:pinecone-inference -- --allow-live --input cases.json` is a separate frozen-pool benchmark for
+Pinecone's standalone hosted `/embed` and `/rerank` APIs. It defaults to `llama-text-embed-v2` and
+`bge-reranker-v2-m3`, accepts repeatable arbitrary `--embed-model`/`--rerank-model` values (including
+account-exposed Cohere), and can list `/models` only when `--inventory` is selected. Every network path is gated
+by `--allow-live`; the provider key is resolved without printing it. The script never creates, queries, or writes
+an index/namespace/corpus, and its persisted JSON report excludes candidate text.
+
+The default bounds are 25 cases and 50 candidates/case; tune only deliberately. Run the inventory first, then
+compare each candidate model under a distinct output file rather than treating public model-gallery availability
+as account availability.

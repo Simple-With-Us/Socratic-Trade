@@ -163,6 +163,12 @@ The DB golden set must be curated from frozen EDGAR evidence before it can selec
 second gate on **BROKERAGE·LIVE** confirm only (keep paper/test one-click); persistent "what can I
 ask?" popover.
 
+**Hosted-inference comparison (2026-07-21):** `eval:pinecone-inference` evaluates frozen candidate pools
+through Pinecone's standalone `/embed` and `/rerank` inference APIs, with live calls opt-in and bounded. It
+supports `llama-text-embed-v2`/`multilingual-e5-large`, `bge-reranker-v2-m3`/`pinecone-rerank-v0`, and any
+other account-exposed reranker such as Cohere; optional `/models` inventory is read-only. Results retain only
+case/candidate ids, scores, metrics, and latency—never candidate text—and do not access a Pinecone index.
+
 **Follow-on, 2026-07-01** (`docs/rollouts/2026-07-01-rag-followon.md`): the two items the Workstream
 C rollout note deferred are now DONE — a **retrieval regression net** (R4) pins the as-of/rerank/
 hybrid fail-safes as network-free unit tests (`test/rag-retrieval-regression.test.ts`) driven through

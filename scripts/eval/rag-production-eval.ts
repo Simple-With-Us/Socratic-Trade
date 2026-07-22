@@ -18,11 +18,22 @@ export interface ProductionRagGoldenCase {
   symbol: string;
   /** Source-publication timestamp, never an indexing timestamp. */
   authoritativeAsOf: string;
-  expectedEvidenceIds: string[];
+  /** Stable provenance selectors. `vectorId` is diagnostic-only and never establishes relevance. */
+  expectedEvidenceRefs: ExpectedEvidenceRef[];
   category?: string;
   expectedSources?: string[];
   expectedSections?: string[];
   notes?: string;
+}
+
+export interface ExpectedEvidenceRef {
+  source?: string;
+  accession?: string;
+  section?: string;
+  ordinal?: number;
+  contentHash?: string;
+  /** Optional historical diagnostic, deliberately excluded from relevance matching. */
+  vectorId?: string;
 }
 
 export interface EvaluationModelConfiguration {
@@ -79,8 +90,10 @@ export interface ProductionRagEvalCaseResult {
   status: RetrievalStatus;
   latencyMs: number;
   returnedCount: number;
-  expectedEvidenceIds: string[];
+  expectedEvidenceRefs: ExpectedEvidenceRef[];
   returnedEvidenceIds: string[];
+  matchedExpectedRefIndices: number[];
+  diagnosticVectorIdMatches: Array<{ refIndex: number; vectorId: string }>;
   relevantRanks: number[];
   recallAtK: number;
   reciprocalRank: number;
@@ -149,7 +162,7 @@ export async function loadDbProductionRagGoldenSet(): Promise<ProductionRagGolde
   const { getDb } = await import("../../src/lib/db");
   const rows = getDb()
     .prepare(
-      `SELECT id, query, symbol, authoritative_as_of, expected_evidence_ids,
+      `SELECT id, query, symbol, authoritative_as_of, expected_evidence_refs,
               category, expected_sources, expected_sections, notes
        FROM rag_production_eval_cases WHERE enabled = 1 ORDER BY id`
     )
@@ -159,7 +172,7 @@ export async function loadDbProductionRagGoldenSet(): Promise<ProductionRagGolde
     query: row.query,
     symbol: row.symbol,
     authoritativeAsOf: row.authoritative_as_of,
-    expectedEvidenceIds: parseJsonArray(row.expected_evidence_ids, "expected_evidence_ids"),
+    expectedEvidenceRefs: parseEvidenceRefs(row.expected_evidence_refs, "expected_evidence_refs"),
     category: row.category,
     expectedSources: parseOptionalJsonArray(row.expected_sources, "expected_sources"),
     expectedSections: parseOptionalJsonArray(row.expected_sections, "expected_sections"),
@@ -171,6 +184,7 @@ export async function runProductionRagEvaluation(
   cases: ProductionRagGoldenCase[],
   options: ProductionRagEvalOptions = {}
 ): Promise<ProductionRagEvalReport> {
+  if (cases.length === 0) throw new Error("Production RAG evaluation refuses an empty golden set.");
   const limit = positiveInteger(options.limit, 20);
   const userId = options.userId ?? "local";
   const now = options.now ?? Date.now;
@@ -234,9 +248,18 @@ export function scoreProductionRagCase(
   latencyMs: number,
   limit: number
 ): ProductionRagEvalCaseResult {
-  const expected = new Set(evalCase.expectedEvidenceIds);
   const ids = chunks.map((chunk) => chunk.id);
-  const relevantRanks = ids.flatMap((id, index) => expected.has(id) ? [index + 1] : []);
+  const matchedRefsByRank = chunks.map((chunk) => evalCase.expectedEvidenceRefs
+    .flatMap((ref, refIndex) => stableRefMatchesChunk(ref, chunk) ? [refIndex] : []));
+  // A duplicate chunk must not improve nDCG. Record only each reference's first retrieval rank.
+  const firstRankByRef = new Map<number, number>();
+  matchedRefsByRank.forEach((refIndices, index) => {
+    for (const refIndex of refIndices) if (!firstRankByRef.has(refIndex)) firstRankByRef.set(refIndex, index + 1);
+  });
+  const relevantRanks = [...firstRankByRef.values()].sort((a, b) => a - b);
+  const matchedExpectedRefIndices = [...new Set(matchedRefsByRank.flat())].sort((a, b) => a - b);
+  const diagnosticVectorIdMatches = evalCase.expectedEvidenceRefs.flatMap((ref, refIndex) =>
+    ref.vectorId && ids.includes(ref.vectorId) ? [{ refIndex, vectorId: ref.vectorId }] : []);
   const firstRank = relevantRanks[0];
   const sourceSet = new Set(chunks.flatMap((chunk) => chunk.source ? [chunk.source] : []));
   const sectionSet = new Set(chunks.flatMap((chunk) => chunk.section ? [chunk.section] : []));
@@ -250,8 +273,8 @@ export function scoreProductionRagCase(
     else if (stamp > asOfMs) future.push(chunk.id);
     duplicateKeys.push(chunkDuplicateKey(chunk));
   }
-  const relevantAtK = relevantRanks.filter((rank) => rank <= limit).length;
-  const idealRelevant = Math.min(expected.size, limit);
+  const relevantAtK = new Set(matchedRefsByRank.slice(0, limit).flat()).size;
+  const idealRelevant = Math.min(evalCase.expectedEvidenceRefs.length, limit);
   const dcg = relevantRanks.filter((rank) => rank <= limit).reduce((sum, rank) => sum + 1 / Math.log2(rank + 1), 0);
   const idealDcg = Array.from({ length: idealRelevant }, (_, index) => 1 / Math.log2(index + 2)).reduce((sum, value) => sum + value, 0);
 
@@ -264,10 +287,12 @@ export function scoreProductionRagCase(
     status,
     latencyMs,
     returnedCount: chunks.length,
-    expectedEvidenceIds: [...expected],
+    expectedEvidenceRefs: evalCase.expectedEvidenceRefs,
     returnedEvidenceIds: ids,
+    matchedExpectedRefIndices,
+    diagnosticVectorIdMatches,
     relevantRanks,
-    recallAtK: ratio(relevantAtK, expected.size),
+    recallAtK: ratio(relevantAtK, evalCase.expectedEvidenceRefs.length),
     reciprocalRank: firstRank ? 1 / firstRank : 0,
     ndcgAtK: idealDcg === 0 ? 0 : dcg / idealDcg,
     pitFutureEvidenceIds: future,
@@ -327,7 +352,7 @@ function parseGoldenCase(value: unknown, label: string): ProductionRagGoldenCase
   };
   const golden: ProductionRagGoldenCase = {
     id: requiredString("id"), query: requiredString("query"), symbol: requiredString("symbol").toUpperCase(),
-    authoritativeAsOf: requiredString("authoritativeAsOf"), expectedEvidenceIds: asStringArray("expectedEvidenceIds")!,
+    authoritativeAsOf: requiredString("authoritativeAsOf"), expectedEvidenceRefs: parseEvidenceRefs(row.expectedEvidenceRefs, "expectedEvidenceRefs"),
     ...(typeof row.category === "string" && row.category.trim() ? { category: row.category.trim() } : {}),
     ...(asStringArray("expectedSources", true) ? { expectedSources: asStringArray("expectedSources", true) } : {}),
     ...(asStringArray("expectedSections", true) ? { expectedSections: asStringArray("expectedSections", true) } : {}),
@@ -344,8 +369,50 @@ function parseJsonArray(value: unknown, field: string): string[] {
   return parsed;
 }
 
-function parseOptionalJsonArray(value: unknown, field: string): string[] | undefined {
-  return value == null ? undefined : parseJsonArray(value, field);
+function parseOptionalJsonArray(value: unknown, field: string): string[] | undefined { return value == null ? undefined : parseJsonArray(value, field); }
+
+function parseEvidenceRefs(value: unknown, field: string): ExpectedEvidenceRef[] {
+  const parsed = typeof value === "string" ? JSON.parse(value) as unknown : value;
+  if (!Array.isArray(parsed) || parsed.length === 0) throw new Error(`${field} must be a non-empty array.`);
+  return parsed.map((item, index) => {
+    if (!item || typeof item !== "object") throw new Error(`${field}[${index}] must be an object.`);
+    const row = item as Record<string, unknown>;
+    const ref: ExpectedEvidenceRef = {
+      ...(optionalString(row.source, field, index, "source") ? { source: optionalString(row.source, field, index, "source") } : {}),
+      ...(optionalString(row.accession, field, index, "accession") ? { accession: optionalString(row.accession, field, index, "accession") } : {}),
+      ...(optionalString(row.section, field, index, "section") ? { section: optionalString(row.section, field, index, "section") } : {}),
+      ...(optionalString(row.contentHash, field, index, "contentHash") ? { contentHash: optionalString(row.contentHash, field, index, "contentHash") } : {}),
+      ...(optionalString(row.vectorId, field, index, "vectorId") ? { vectorId: optionalString(row.vectorId, field, index, "vectorId") } : {})
+    };
+    if (row.ordinal != null) {
+      if (typeof row.ordinal !== "number" || !Number.isInteger(row.ordinal) || row.ordinal < 0) throw new Error(`${field}[${index}].ordinal must be a non-negative integer.`);
+      ref.ordinal = row.ordinal;
+    }
+    if (!ref.source && !ref.accession && !ref.section && ref.ordinal == null && !ref.contentHash) {
+      throw new Error(`${field}[${index}] requires at least one stable selector (source, accession, section, ordinal, contentHash).`);
+    }
+    return ref;
+  });
+}
+
+function optionalString(value: unknown, field: string, index: number, key: string): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${field}[${index}].${key} must be a non-empty string.`);
+  return value.trim();
+}
+
+function stableRefMatchesChunk(ref: ExpectedEvidenceRef, chunk: RetrievedChunk): boolean {
+  const metadata = chunk.metadata ?? {};
+  const source = chunk.source ?? (typeof metadata.source === "string" ? metadata.source : undefined);
+  const section = chunk.section ?? (typeof metadata.section === "string" ? metadata.section : undefined);
+  const accession = typeof metadata.accession === "string" ? metadata.accession : undefined;
+  const contentHash = typeof metadata.content_hash === "string" ? metadata.content_hash : undefined;
+  const ordinal = typeof metadata.chunk_ordinal === "number" ? metadata.chunk_ordinal : typeof metadata.ordinal === "number" ? metadata.ordinal : undefined;
+  return (!ref.source || ref.source === source)
+    && (!ref.accession || ref.accession === accession)
+    && (!ref.section || ref.section === section)
+    && (ref.ordinal == null || ref.ordinal === ordinal)
+    && (!ref.contentHash || ref.contentHash === contentHash);
 }
 
 function assertAuthoritativeAsOf(asOf: string, id: string): void {

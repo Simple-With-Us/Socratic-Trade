@@ -10,11 +10,16 @@ Synchronized 40 pending Socratic.Trade PRs and 6 pending Congress.Trade PRs with
 
 Added a read-only corpus evaluator that exercises `retrieveContextDetailedWithStatus`, not the FTS-only
 search-fusion helper. It accepts frozen JSON or DB-backed cases with authoritative source-availability timestamps
-and expected real vector ids, emits machine-readable relevance/PIT/coverage/latency/status/usage receipts, and
+and stable evidence provenance selectors (with vector ids as diagnostics only), emits machine-readable relevance/PIT/coverage/latency/status/usage receipts, and
 requires `--allow-live` before any provider read. No corpus or provider writes were run. Next: curate frozen
-EDGAR cases into `rag_production_eval_cases`, then run labeled shadow comparisons before changing embed/rerank
+EDGAR cases into `rag_production_eval_cases` using stable provenance selectors (not vector ids), then run labeled shadow comparisons before changing embed/rerank
 defaults. Focused tests, scoped lint, TypeScript, and CLI help are green; committed locally, with parent
 integration/PR still pending.
+
+**Follow-up:** added a second, bounded Pinecone hosted-inference benchmark for frozen candidate pools. It is
+separate from the production corpus evaluator, requires `--allow-live` for `/embed`, `/rerank`, or `/models`,
+uses no index/namespace/corpus operation, and retains only ids/scores/metrics. Focused verification and local
+commit are green; second local commit created, with parent integration/PR pending.
 
 ## 2026-07-19 — Four-handoff conquest: reconciliation + shepherding + hardening landed (CLAUDE, branch `claude/model-availability-session-handoff-362fd3`)
 

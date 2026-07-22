@@ -27,6 +27,7 @@
     "eval:corpus-coverage": "tsx scripts/eval/corpus-coverage.ts",
     "eval:rag-census": "tsx scripts/eval/rag-census.ts",
     "eval:rag-production": "tsx scripts/eval/rag-production-eval.ts",
+    "eval:pinecone-inference": "tsx scripts/eval/pinecone-inference-benchmark.ts",
     "eval:generate-universe": "tsx scripts/eval/generate-universe-manifest.ts",
     "eval:validate-universe": "tsx scripts/eval/validate-rag-universe.ts",
     "ops:snapshot": "bash scripts/fetch-prod-ops-snapshot.sh"
