@@ -261,15 +261,15 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .next/cache
-          key: ${{ runner.os }}-nextjs-${{ hashFiles('package.json') }}-${{ hashFiles('src/**', 'app/**') }}
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**', 'app/**') }}
           restore-keys: |
-            ${{ runner.os }}-nextjs-${{ hashFiles('package.json') }}-
+            ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json') }}-
             ${{ runner.os }}-nextjs-
       # Everything on the self path runs under `nice -n 19` so a live trading process always
-      # outbids CI for CPU on the production box. Install is tokenless `npm install` (the shared
+      # outbids CI for CPU on the production box. Install is tokenless `npm ci` (the shared
       # dependency resolves over public HTTPS now — no deploy key needed, matching deploy.yml).
       - name: Install dependencies (nice -19)
-        run: nice -n 19 npm install --no-audit --no-fund
+        run: nice -n 19 npm ci --no-audit --no-fund
       - run: nice -n 19 npm run lint
       - run: nice -n 19 npx tsc --noEmit
       # maxWorkers=2 (below the config default of 4) to further bound peak memory on the Mac.
@@ -280,7 +280,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .next/cache
-          key: ${{ runner.os }}-nextjs-${{ hashFiles('package.json') }}-${{ hashFiles('src/**', 'app/**') }}
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**', 'app/**') }}
 
   # Coolify CI lane: the deterministic Linux baseline. This keeps the historic job id
   # `verify-hosted` for branch-protection/status continuity, but it now runs on the online
@@ -321,6 +321,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
       # Split restore/save (2026-07-04, cache-hygiene): PR/merge_group runs only restore;
       # a new entry is saved only on main pushes and the nightly schedule so cache storage
       # stays a single rolling lineage per OS instead of one throwaway entry per PR push.
@@ -330,15 +331,15 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .next/cache
-          key: ${{ runner.os }}-nextjs-${{ hashFiles('package.json') }}-${{ hashFiles('src/**', 'app/**') }}
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**', 'app/**') }}
           restore-keys: |
-            ${{ runner.os }}-nextjs-${{ hashFiles('package.json') }}-
+            ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json') }}-
             ${{ runner.os }}-nextjs-
       # verify-hosted only runs when docs-only is false (job-level `if` above), so per-step
-      # docs-only guards are unnecessary here. Tokenless `npm install` — the shared dependency
+      # docs-only guards are unnecessary here. Tokenless `npm ci` — the shared dependency
       # resolves over public HTTPS now (no deploy key), matching main's verify + deploy.yml.
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
       - run: npm run lint
       - run: npx tsc --noEmit
       - run: npm test
@@ -352,7 +353,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .next/cache
-          key: ${{ runner.os }}-nextjs-${{ hashFiles('package.json') }}-${{ hashFiles('src/**', 'app/**') }}
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**', 'app/**') }}
 
   # THE required check. Pure gate: interprets the lanes above and reports under the exact
   # context name the ruleset requires. Fail-closed in every ambiguous state; annotates which

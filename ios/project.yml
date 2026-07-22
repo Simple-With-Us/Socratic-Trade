@@ -10,8 +10,12 @@ targets:
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: trade.socratic.app
       CODE_SIGN_ENTITLEMENTS: SocraticTrade/SocraticTrade.entitlements
+      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     entitlements:
       path: SocraticTrade/SocraticTrade.entitlements
+      properties:
+        com.apple.developer.applesignin:
+          - Default
     info:
       path: SocraticTrade/Info.plist
       properties:
@@ -20,7 +24,7 @@ targets:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
-        UIBackgroundModes: 
+        UIBackgroundModes:
           - fetch
           - remote-notification
         UISupportedInterfaceOrientations~ipad:

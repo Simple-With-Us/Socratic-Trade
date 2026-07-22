@@ -1,5 +1,13 @@
 # Unified Authentication Rollout
 
+> **2026-07-21 review correction (CODEX):** The implementation and release claims below describe
+> the original branch state, not a merged deployment. PRs #1851/#1856 remain open. The raw-JWT
+> custom-scheme handoff, empty Apple entitlement, missing AppIcon catalog, and provider-specific
+> Auth.js GET initiation were review blockers. A local-only remediation now sends only a short-lived,
+> state- and PKCE-bound one-time code to `socratictrade://`, consumes it over HTTPS to set an
+> HttpOnly cookie, invokes Auth.js through its server `signIn` action, and supplies the entitlement
+> and icon catalog. See `2026-07-21-pr-1856-review-remediation.md`; no corrected code is live yet.
+
 - **Summary**: Implemented Unified Authentication across iOS and Web, bridging Google, GitHub, and Apple Sign-In seamlessly. Corrected iOS bundle identifier to `trade.socratic.app`, added Apple Sign-In entitlements, and fixed Next.js `metadataBase` fallback logic.
 - **Why**: The iOS app previously only supported Apple Sign-In natively. To support Google and GitHub, we used `ASWebAuthenticationSession` to initiate an OAuth flow on the web backend, capturing and injecting the resulting stateless JWT back into the iOS native cookie jar. The bundle ID mismatch and missing entitlements previously caused `AKAuthenticationError Code=-7026`.
 - **Files Touched**:

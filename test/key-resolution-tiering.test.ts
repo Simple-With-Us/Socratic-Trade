@@ -133,6 +133,42 @@ describe("deletion tombstone — explicit key deletion prevents env auto-reseedi
     expect(getUserApiKey("local", "deepseek")).toBeUndefined();
     expect(resolveLlmCredential("gemini", "local")).toEqual({ source: "none" });
   });
+
+  it("hard-deletes a tenant LLM key and preserves operator-funded fallback", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "env-openai-key");
+    vi.stubEnv("LLM_OPERATOR_FALLBACK", "on");
+
+    const { deleteUserApiKey, getUserApiKey, resolveLlmCredential, upsertUserApiKey } = await import("../src/lib/db");
+
+    upsertUserApiKey("u_tenant", "openai", "tenant-openai-key");
+    expect(resolveLlmCredential("openai", "u_tenant")).toMatchObject({
+      key: "tenant-openai-key",
+      source: "user"
+    });
+
+    deleteUserApiKey("u_tenant", "openai");
+
+    expect(getUserApiKey("u_tenant", "openai", { includeDeleted: true })).toBeUndefined();
+    expect(resolveLlmCredential("openai", "u_tenant")).toMatchObject({
+      key: "env-openai-key",
+      source: "operator"
+    });
+  });
+
+  it("ignores a legacy tenant tombstone when resolving operator-funded fallback", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "env-openai-key");
+    vi.stubEnv("LLM_OPERATOR_FALLBACK", "on");
+
+    const { resolveLlmCredential, upsertUserApiKey, USER_API_KEY_DELETION_TOMBSTONE } = await import("../src/lib/db");
+
+    // Briefly-written by the original PR implementation before tenant tombstones were restricted.
+    upsertUserApiKey("u_tenant", "openai", USER_API_KEY_DELETION_TOMBSTONE, "deleted by user");
+
+    expect(resolveLlmCredential("openai", "u_tenant")).toMatchObject({
+      key: "env-openai-key",
+      source: "operator"
+    });
+  });
 });
 
 describe("LLM usage ledger", () => {

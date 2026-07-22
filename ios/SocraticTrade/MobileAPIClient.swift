@@ -65,6 +65,20 @@ struct MobileAPIClient {
         return try await send(request)
     }
 
+    func completeWebAuth(code: String, state: String, codeVerifier: String) async throws -> WebAuthExchangeResponse {
+        var request = URLRequest(url: baseURL.appending(path: "/api/mobile/auth/exchange"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "code": code,
+            "state": state,
+            "codeVerifier": codeVerifier
+        ])
+        // The exchange response sets the HttpOnly Auth.js cookie over HTTPS. The JWT is never
+        // returned in JSON or exposed through the app's custom URL scheme.
+        return try await send(request)
+    }
+
     func events(onEvent: @escaping () -> Void) async throws {
         let request = URLRequest(url: baseURL.appending(path: "/api/mobile/events"))
         let (bytes, response) = try await session.bytes(for: request)
@@ -95,6 +109,10 @@ struct MobileAPIClient {
 struct AppleLoginResponse: Decodable {
     let success: Bool
     let email: String?
+}
+
+struct WebAuthExchangeResponse: Decodable {
+    let success: Bool
 }
 
 private extension Bundle {

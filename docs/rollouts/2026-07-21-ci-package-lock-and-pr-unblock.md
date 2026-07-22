@@ -1,5 +1,13 @@
 # Rollout Note: 2026-07-21 — CI Workflow Fix & Unblocking Open PRs
 
+> **2026-07-21 review correction (CODEX):** `package-lock.json` is tracked on this branch and on
+> current main. Replacing `npm ci` with `npm install` and hashing only `package.json` weakened the
+> dependency-integrity gate; it did not solve the missing `trading-live` runner or concurrency
+> cancellation thrash. The local PR #1856 remediation restores `npm ci`, setup-node npm caching, and
+> lockfile-based cache keys. PR #1857 owns runner routing and cancellation behavior and must land
+> first; #1856 must then be refreshed over it. The original text below is retained as the historical
+> branch claim, not current verified truth.
+
 ## Summary
 - Fixed `.github/workflows/ci.yml`, `e2e.yml`, and `shared-package-pin-check.yml` to remove dependencies on gitignored `package-lock.json` (`cache: npm` -> removed, `npm ci` -> `npm install --no-audit --no-fund`, `hashFiles('package-lock.json')` -> `hashFiles('package.json')`).
 - Closed PR #1849 (`antigravity/revert-runners`) which improperly pointed workflow runners to `socratic-ci` (an offline runner).

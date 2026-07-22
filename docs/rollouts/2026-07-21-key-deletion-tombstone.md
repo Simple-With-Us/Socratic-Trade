@@ -1,5 +1,13 @@
 # Key Deletion Tombstone & Auto-Reseeding Fix
 
+> **2026-07-21 review correction (CODEX):** PR #1856 is still open, and its remote head replaced
+> `src/lib/db-api-keys.ts` with a two-line placeholder instead of the implementation described
+> below. The local-only review remediation restores the complete module. Tombstones are intentionally
+> limited to the primary `local` user's environment-migrated services; tenant deletion remains a
+> hard delete so tenant users retain operator-funded LLM fallback, and legacy tenant tombstones are
+> ignored by the fallback resolvers. See `2026-07-21-pr-1856-review-remediation.md` for current
+> verification and ordering. Nothing from the remediation is merged or deployed yet.
+
 **Date:** 2026-07-21
 **Author:** Antigravity
 **Branch:** `agent/antigravity-key-deletion-tombstone`

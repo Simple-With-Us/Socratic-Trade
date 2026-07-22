@@ -143,9 +143,10 @@ jobs:
         if: needs.classify.outputs.docs-only != 'true'
         with:
           node-version: 24
+          cache: npm
       - name: Install dependencies
         if: needs.classify.outputs.docs-only != 'true'
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
       # Cache the Playwright browser download (chromium, ~130MB) keyed on the lockfile
       # (which pins the playwright version). On a hit, the install step below skips the
       # multi-minute download and only re-applies system deps.
@@ -154,7 +155,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('package.json') }}
+          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-playwright-
       - name: Install Playwright browser
@@ -173,9 +174,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .next/cache
-          key: ${{ runner.os }}-nextjs-${{ hashFiles('package.json') }}-${{ hashFiles('src/**', 'app/**') }}
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**', 'app/**') }}
           restore-keys: |
-            ${{ runner.os }}-nextjs-${{ hashFiles('package.json') }}-
+            ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json') }}-
             ${{ runner.os }}-nextjs-
       - name: Run smoke tests
         if: needs.classify.outputs.docs-only != 'true'

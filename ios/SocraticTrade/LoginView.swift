@@ -1,5 +1,7 @@
 import SwiftUI
 import AuthenticationServices
+import CryptoKit
+import Security
 
 struct LoginView: View {
     @EnvironmentObject private var store: MobileStore
@@ -79,45 +81,52 @@ struct LoginView: View {
     }
     
     private func initiateWebAuth(provider: String) {
-        guard let url = URL(string: "https://socratictrade.com/api/auth/signin/\(provider)?callbackUrl=https://socratictrade.com/api/mobile/auth-redirect") else { return }
-        
-        let scheme = "socratictrade"
-        
-        let session = ASWebAuthenticationSession(url: url, callbackURLScheme: scheme) { callbackURL, error in
-            if let error = error {
-                if let asError = error as? ASWebAuthenticationSessionError, asError.code == .canceledLogin {
-                    // user canceled, ignore
-                } else {
+        guard let state = secureURLSafeRandomString(),
+              let codeVerifier = secureURLSafeRandomString() else {
+            store.error = "Could not create a secure authentication request."
+            return
+        }
+        let codeChallenge = pkceChallenge(for: codeVerifier)
+        var components = URLComponents(string: "https://socratictrade.com/api/mobile/auth/start")
+        components?.queryItems = [
+            URLQueryItem(name: "provider", value: provider),
+            URLQueryItem(name: "state", value: state),
+            URLQueryItem(name: "code_challenge", value: codeChallenge)
+        ]
+        guard let url = components?.url else {
+            store.error = "Could not create the authentication URL."
+            return
+        }
+
+        let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "socratictrade") { callbackURL, error in
+            Task { @MainActor in
+                if let error = error {
+                    if let asError = error as? ASWebAuthenticationSessionError, asError.code == .canceledLogin {
+                        return
+                    }
                     store.error = error.localizedDescription
+                    return
                 }
-                return
-            }
-            
-            guard let callbackURL = callbackURL else { return }
-            
-            // Extract the token from the URL query params: socratictrade://auth?token=<jwt>
-            guard let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false),
-                  let queryItems = components.queryItems,
-                  let token = queryItems.first(where: { $0.name == "token" })?.value else {
-                store.error = "Invalid callback URL from web auth."
-                return
-            }
-            
-            Task {
-                await store.loginWithToken(jwt: token)
+
+                guard let callbackURL,
+                      let callback = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false),
+                      let returnedState = callback.queryItems?.first(where: { $0.name == "state" })?.value,
+                      let code = callback.queryItems?.first(where: { $0.name == "code" })?.value,
+                      returnedState == state else {
+                    store.error = "Invalid callback from web authentication."
+                    return
+                }
+
+                await store.completeWebAuth(code: code, state: state, codeVerifier: codeVerifier)
             }
         }
-        
+
         let contextProvider = ContextProvider()
         session.presentationContextProvider = contextProvider
-        session.prefersEphemeralWebBrowserSession = false 
-        
-        // Retain the context provider by storing it locally or letting it live during the call.
-        // Actually, ASWebAuthenticationSession keeps a weak reference to presentationContextProvider!
-        // We need to keep a strong reference. We can use a small hack or bind it to the view.
-        // Let's create an instance property or a global temporary holder.
+        session.prefersEphemeralWebBrowserSession = false
         WebAuthSessionManager.shared.start(session: session, provider: contextProvider)
     }
+
     private func handleAuthorization(_ authorization: ASAuthorization) {
         guard let appleIDCredential = authorization.credential as? ASAuthorizationAppleIDCredential,
               let identityTokenData = appleIDCredential.identityToken,
@@ -137,6 +146,25 @@ struct LoginView: View {
         Task {
             await store.loginWithApple(identityToken: identityToken, name: name)
         }
+    }
+}
+
+private func secureURLSafeRandomString(byteCount: Int = 32) -> String? {
+    var bytes = [UInt8](repeating: 0, count: byteCount)
+    guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else { return nil }
+    return Data(bytes).base64URLEncodedString()
+}
+
+private func pkceChallenge(for verifier: String) -> String {
+    Data(SHA256.hash(data: Data(verifier.utf8))).base64URLEncodedString()
+}
+
+private extension Data {
+    func base64URLEncodedString() -> String {
+        base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }
 

@@ -98,40 +98,17 @@ final class MobileStore: ObservableObject {
         }
     }
 
-    func loginWithToken(jwt: String) async {
-        guard let url = URL(string: "https://socratictrade.com"),
-              let cookie = HTTPCookie(properties: [
-                  .domain: "socratictrade.com",
-                  .path: "/",
-                  .name: "__Secure-authjs.session-token",
-                  .value: jwt,
-                  .secure: "TRUE",
-                  .expires: NSDate(timeIntervalSinceNow: 30 * 24 * 60 * 60)
-              ]) else { return }
-
-        // Auth.js falls back to non-secure cookie name in dev/http, 
-        // but production is https, so we set both to be absolutely certain.
-        if let fallbackCookie = HTTPCookie(properties: [
-            .domain: "socratictrade.com",
-            .path: "/",
-            .name: "authjs.session-token",
-            .value: jwt,
-            .secure: "TRUE",
-            .expires: NSDate(timeIntervalSinceNow: 30 * 24 * 60 * 60)
-        ]) {
-            HTTPCookieStorage.shared.setCookie(fallbackCookie)
-        }
-
-        HTTPCookieStorage.shared.setCookie(cookie)
-        
-        // Immediately try loading since we injected the token
+    func completeWebAuth(code: String, state: String, codeVerifier: String) async {
         busy = true
         defer { busy = false }
-        await load()
-        if isAuthenticated {
+        do {
+            _ = try await client.completeWebAuth(code: code, state: state, codeVerifier: codeVerifier)
+            error = nil
+            isAuthenticated = true
+            await load()
             startEvents()
-        } else {
-            error = "Authentication failed after web redirect."
+        } catch {
+            self.error = "Web authentication failed: \(error.localizedDescription)"
         }
     }
 }

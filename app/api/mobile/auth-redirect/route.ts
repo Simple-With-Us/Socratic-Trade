@@ -1,24 +1,38 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
+import {
+  isValidMobileAuthState,
+  isValidPkceChallenge,
+  issueMobileAuthExchange
+} from "@/lib/mobile-auth-exchange";
+import { resolvePublicAppOrigin } from "@/lib/public-origin";
 
-// This route acts as the callback destination for Auth.js when initiated from the iOS app.
-// The iOS app launches ASWebAuthenticationSession pointing to:
-// /api/auth/signin/[provider]?callbackUrl=https://socratictrade.com/api/mobile/auth-redirect
-//
-// Once Auth.js finishes the OAuth flow, it sets the session cookie in the browser and redirects here.
-// We intercept that cookie and redirect to the custom URL scheme so the iOS app can capture the JWT.
-export async function GET() {
+// Auth.js redirects here after Google/GitHub login. The custom scheme receives only a short-lived,
+// PKCE-bound one-time code; the raw session JWT never leaves HTTPS or appears in a callback URL.
+export async function GET(request: Request) {
+  const requestUrl = new URL(request.url);
+  const state = requestUrl.searchParams.get("state");
+  const codeChallenge = requestUrl.searchParams.get("code_challenge");
+  const publicOrigin = resolvePublicAppOrigin(request);
+  if (!isValidMobileAuthState(state) || !isValidPkceChallenge(codeChallenge)) {
+    return NextResponse.redirect(new URL("/login?error=MobileAuthInvalidState", publicOrigin));
+  }
+
   const cookieStore = await cookies();
-  
-  // Auth.js uses a prefixed cookie name in production.
-  const token = 
-    cookieStore.get("__Secure-authjs.session-token")?.value || 
+  const token =
+    cookieStore.get("__Secure-authjs.session-token")?.value ||
     cookieStore.get("authjs.session-token")?.value;
 
   if (!token) {
-    return NextResponse.redirect(new URL("/login?error=MobileAuthFailed", "https://socratictrade.com"));
+    return NextResponse.redirect(new URL("/login?error=MobileAuthFailed", publicOrigin));
   }
 
-  // Redirect to the native app with the token
-  return NextResponse.redirect(`socratictrade://auth?token=${token}`);
+  const { code } = issueMobileAuthExchange({ sessionToken: token, state, codeChallenge });
+  const callbackUrl = new URL("socratictrade://auth");
+  callbackUrl.searchParams.set("code", code);
+  callbackUrl.searchParams.set("state", state);
+  const response = NextResponse.redirect(callbackUrl, 303);
+  response.headers.set("cache-control", "no-store");
+  response.headers.set("referrer-policy", "no-referrer");
+  return response;
 }

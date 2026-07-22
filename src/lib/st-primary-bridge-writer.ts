@@ -4,6 +4,7 @@ import {
   getUserApiKey,
   LOCAL_USER,
   setInternalSetting,
+  USER_API_KEY_DELETION_TOMBSTONE,
 } from "./db";
 
 const ENABLED_ENV = "INFISICAL_ST_PRIMARY_WRITER_ENABLED";
@@ -347,7 +348,7 @@ function desiredEntries(): DesiredEntry[] {
     // The source account is a compile-time constant. No caller, request, env,
     // or manifest can select another Socratic user.
     const stored = getUserApiKey(LOCAL_USER, contract.service, { includeDeleted: true });
-    if (!stored || stored.apiKey === "__DELETED__") {
+    if (!stored || stored.apiKey === USER_API_KEY_DELETION_TOMBSTONE) {
       return {
         id: contract.id,
         providerName: contract.providerName,

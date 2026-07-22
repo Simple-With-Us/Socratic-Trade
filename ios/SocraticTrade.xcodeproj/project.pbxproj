@@ -13,11 +13,13 @@
 		B809CECFEB4FD5728FDEB2DD /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF7C7148209F2ABD8380F78A /* LoginView.swift */; };
 		BBAE4029DDC9950AAA0BAF47 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 16DF0585D8D4EC838E76F4C1 /* README.md */; };
 		E0D6A43A40978E2B4C1A3E2C /* SocraticTradeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 844E45A6BE6E24077582838F /* SocraticTradeApp.swift */; };
+		E2C3FD4721555ED0745EB7B5 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 375FAA4824FDBD38260DB66F /* Assets.xcassets */; };
 		E92D9BA2C0C87CE7369BB7ED /* MobileModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69084DDD8FB2AC5F57166159 /* MobileModels.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		16DF0585D8D4EC838E76F4C1 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+		375FAA4824FDBD38260DB66F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		69084DDD8FB2AC5F57166159 /* MobileModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileModels.swift; sourceTree = "<group>"; };
 		844E45A6BE6E24077582838F /* SocraticTradeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocraticTradeApp.swift; sourceTree = "<group>"; };
 		8857F69986E12712DA6176D3 /* MobileAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAPIClient.swift; sourceTree = "<group>"; };
@@ -33,6 +35,7 @@
 		2E3A0B6B7E883C937D272DAC /* SocraticTrade */ = {
 			isa = PBXGroup;
 			children = (
+				375FAA4824FDBD38260DB66F /* Assets.xcassets */,
 				CFF68C0EC6F9B1BC0769DAC2 /* Info.plist */,
 				CF7C7148209F2ABD8380F78A /* LoginView.swift */,
 				8857F69986E12712DA6176D3 /* MobileAPIClient.swift */,
@@ -118,6 +121,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E2C3FD4721555ED0745EB7B5 /* Assets.xcassets in Resources */,
 				BBAE4029DDC9950AAA0BAF47 /* README.md in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
