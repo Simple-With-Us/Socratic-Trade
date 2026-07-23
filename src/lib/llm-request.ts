@@ -689,6 +689,10 @@ export function withLlmRequestBounds<T extends Record<string, unknown>>(
         const maxTokens = Math.max(maxCompletionTokens, bounds.maxOutputTokens + thinkingBudget);
         return { ...body, max_completion_tokens: maxTokens, reasoning: { max_tokens: thinkingBudget } };
       }
+      if (capability.provider === "gemini" && normalizedEffort !== "none") {
+        // Like other reasoning models, Gemini thinking models reject a custom temperature parameter.
+        return { ...body, max_completion_tokens: maxCompletionTokens, reasoning_effort: normalizedEffort };
+      }
       return { ...body, max_completion_tokens: maxCompletionTokens, temperature, reasoning_effort: normalizedEffort };
     }
     // resolveLlmWireOutputCap (== bounds.maxOutputTokens on this non-reasoning path) keeps every

@@ -16,6 +16,10 @@ from this audit. Rollout: `docs/rollouts/2026-07-22-grok-pr-audit.md`.
 
 # Current Status
 
+## 2026-07-23 — Gemini Reasoning Temperature Fix (ANTIGRAVITY)
+
+Fixed an issue where Gemini 3.1 Pro Preview (and other reasoning-enabled Gemini models) would fail when used for the Red Team due to passing `temperature` to the provider. The LLM request shaper (`withLlmRequestBounds` in `src/lib/llm-request.ts`) now correctly omits `temperature` for Gemini models when `reasoning_effort` is enabled, matching the existing behavior for Anthropic, OpenAI, Mistral, and DeepSeek. `npx tsc --noEmit` verified clean. Rollout: `docs/rollouts/2026-07-23-gemini-temperature-fix.md`.
+
 ## 2026-07-22 — Admin UI Polish (ANTIGRAVITY, branch `fix/admin-ui-polish`)
 
 Fixed Admin panel UI bugs:
