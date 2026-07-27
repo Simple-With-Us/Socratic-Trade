@@ -1,11 +1,17 @@
 # Socratic Trade Status
 
-## 2026-07-27 — Open-PR drain to production (CURSOR)
+## 2026-07-27 — All open PRs merged to main & production deployed (ANTIGRAVITY)
 
-Merged to `main` (auto-deploy): #2229 (eslint-config-next), #2231 (hoard), #2232 (dormant-features).
-Enrichment cascade is on **#2230** (supersedes closed #2224) with auto-merge armed; verify-hosted
-in progress on socratic-ci queue. #2234 (CONGRESS_TRADE_TOKEN SSE) also open + auto-merge.
-Duplicate closed PRs #2233/#2235 cancelled from CI queue.
+All open PRs have passed CI on Hetzner `socratic-ci` runner pool and auto-merged to `main` (auto-deployed to `socratictrade.com` via Coolify):
+- **#2234**: `fix(#165): wire CONGRESS_TRADE_TOKEN into SSE subscription creation` — **MERGED**
+- **#2232**: `feat: dormant-features readiness (landing, CSP report, embed_rev)` — **MERGED**
+- **#2231**: `feat(hoard): add 5-year multi-index universe data hoarding script across Massive and FMP` — **MERGED**
+- **#2230**: `feat(enrichment): free-first cascade planner + coverage report` — **MERGED**
+- **#2229**: `chore(deps-dev): bump eslint-config-next from 16.2.10 to 16.2.12` — **MERGED**
+
+Hetzner Actions Runner Infrastructure (`ci-cpx32-hel1-22` / `77.42.35.209`):
+- Root Cause Identified: runner host had 0B swap configured on 7.6GB total RAM. Parallel builds across `socratic-ci` and `socratic-ci-2` peaked above 100% RAM causing OOM failures.
+- Resolution: Provisioned & activated 8GB swapfile (`/swapfile`). All 5 GitHub Actions runner systemd services (`shared-ci`, `congress-ci`, `socratic-ci`, `socratic-ci-2`, `usage-ci`) are online, healthy, and processing jobs cleanly.
 
 
 ## 2026-07-26 — Free-first enrichment cascade + coverage report (CURSOR)
