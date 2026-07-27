@@ -36,7 +36,7 @@ import {
   ShortVolumeRowSchema,
   FundamentalRowSchema,
   AnalystRowSchema,
-  TradeEventRowSchema,
+  
 } from "@jaywedgeworth22/congress-trading-shared";
 import {
   assertOperationLeaseOwnership,
@@ -198,7 +198,7 @@ export interface CongressShareResult {
     shortVolume: number;
     fundamentals: number;
     analyst: number;
-    trades: number;
+    
   };
 }
 
@@ -451,7 +451,6 @@ export function dropInvalidShareRows(
       shortVolume: filterRows(payload.shortVolume, ShortVolumeRowSchema, "shortVolume"),
       fundamentals: filterRows(payload.fundamentals, FundamentalRowSchema, "fundamentals"),
       analyst: filterRows(payload.analyst, AnalystRowSchema, "analyst"),
-      trades: filterRows(payload.trades, TradeEventRowSchema, "trades"),
     },
     dropped,
   };
@@ -477,7 +476,7 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
     shortVolume: clean.shortVolume?.length ?? 0,
     fundamentals: clean.fundamentals?.length ?? 0,
     analyst: clean.analyst?.length ?? 0,
-    trades: clean.trades?.length ?? 0
+    
   };
   const token = congressTradeToken();
   if (!token) return { ok: false, skipped: true, reason: "no-token", sent };
@@ -488,8 +487,7 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
     sent.insider +
     sent.shortVolume +
     sent.fundamentals +
-    sent.analyst +
-    sent.trades;
+    sent.analyst;
   if (total === 0) {
     // Distinguish a genuinely-empty input (nothing to send → legitimate skip) from a payload whose
     // rows were ALL rejected by the shared schema. The latter is a real failure: counting it as a
@@ -528,7 +526,7 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
     console.error(
       `[congress-share] import error: ${error} ` +
         `(refs=${sent.refs} spx=${sent.spx} prices=${sent.prices} closes=${sent.closes} ` +
-        `insider=${sent.insider} shortVolume=${sent.shortVolume} fundamentals=${sent.fundamentals} analyst=${sent.analyst} trades=${sent.trades})`
+        `insider=${sent.insider} shortVolume=${sent.shortVolume} fundamentals=${sent.fundamentals} analyst=${sent.analyst})`
     );
     return { ok: false, error, sent };
   } finally {

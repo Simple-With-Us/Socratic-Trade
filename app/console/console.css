@@ -1015,9 +1015,6 @@
 .con-disclosure > summary {
   cursor: pointer;
   list-style: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
   user-select: none;
 }
 .con-disclosure > summary::-webkit-details-marker { display: none; }
@@ -1029,24 +1026,11 @@
   color: var(--con-faint);
 }
 .con-disclosure-label::after {
-  content: "EXPAND";
+  content: "EXPAND >";
 }
 .con-disclosure[open] .con-disclosure-label::after {
-  content: "COLLAPSE";
+  content: "COLLAPSE \02C5";
 }
-
-.con-disclosure > summary::after {
-  content: "";
-  width: 6px;
-  height: 6px;
-  margin-left: 2px;
-  border-right: 1.5px solid var(--con-faint);
-  border-bottom: 1.5px solid var(--con-faint);
-  transform: rotate(-45deg);
-  transition: transform 140ms ease;
-  flex: none;
-}
-.con-disclosure[open] > summary::after { transform: rotate(45deg); }
 
 .con-hr {
   border: none;

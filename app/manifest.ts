@@ -4,12 +4,12 @@ export default function manifest(): MetadataRoute.Manifest {
   return {
     name: "Socratic Trade",
     short_name: "Socratic.Trade",
-    description: "Phone control surface for Socratic Trade.",
-    start_url: "/mobile",
+    description: "Autonomy desk for Socratic Trade.",
+    start_url: "/console",
     scope: "/",
     display: "standalone",
-    background_color: "#080b12",
-    theme_color: "#080b12",
+    background_color: "#0a0a0a",
+    theme_color: "#0a0a0a",
     orientation: "portrait",
     icons: [
       {
