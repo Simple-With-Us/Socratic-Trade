@@ -7,14 +7,14 @@ import { fetchBlackRockHoldingSymbols } from "../src/lib/fund-holdings";
 import { normalizeSymbol } from "../src/lib/money";
 import { resolveApiKey } from "../src/lib/db-api-keys";
 
-const EXTENDED_ETFS_AND_REITS = [
+const MAJOR_ETFS_AND_REITS = [
   // Major Sector & Broad Market ETFs
-  "SPY", "IVV", "VOO", "QQQ", "IWM", "OEF", "VTI", "SCHD", "VEA", "VWO", "BND", "AGG", "VUG", "VTV", "IJH", "IJR", "IWD", "IWF", "VIG", "VYM",
-  "XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLC", "XLU", "XLB", "XLRE", "VNQ", "JEPI", "JEPQ", "TLT", "GLD", "SLV", "USO", "UNG", "SOXX", "SMH",
-  "ARKK", "ARKG", "ARKW", "ARKF", "XBI", "IBB", "KRE", "KBE", "XRT", "XHB", "ITB", "XME", "GDX", "GDXJ", "SIL", "XOP", "OIH", "SCHA", "SCHF", "SCHE",
+  "SPY", "IVV", "VOO", "QQQ", "IWM", "OEF", "VTI", "SCHD",
+  "XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLC", "XLU", "XLB", "XLRE",
+  "VNQ", "JEPI", "JEPQ", "TLT", "GLD", "SLV", "USO", "UNG", "SOXX", "SMH", "ARKK",
   // Real Estate Investment Trusts (REITs)
-  "O", "PLD", "AMT", "EQIX", "SPG", "PSA", "CCI", "DLR", "WELL", "VICI", "AVB", "EQR", "WY", "SBAC", "EXR", "MAA", "CPT", "INVH", "ARE", "IRM", "VTR",
-  "KIM", "REG", "BXP", "HST", "ESS", "UDR", "DOC", "NNN", "WPC", "GLPI", "EPR", "STAG", "FRT", "COLD", "RITM", "AGNC", "NLY", "TWO", "ARR", "ABR", "AIRC"
+  "O", "PLD", "AMT", "EQIX", "SPG", "PSA", "CCI", "DLR", "WELL", "VICI",
+  "AVB", "EQR", "WY", "SBAC", "EXR", "MAA", "CPT", "INVH", "ARE"
 ];
 
 async function hoard5YearMassiveBars(massiveKey: string, symbol: string): Promise<number> {
@@ -56,14 +56,14 @@ async function hoard() {
   if (!fmpKey) console.warn("[Hoard 5Y] FMP_API_KEY not found.");
   if (!massiveKey) console.warn("[Hoard 5Y] MASSIVE_API_KEY not found.");
 
-  // 1. Build Master Multi-Index Universe (3,300+ symbols)
-  console.log("=== BUILDING MASTER 3K+ UNIVERSE (S&P 500, Nasdaq 100, Dow 30, Russell 2000, S&P 100, ETFs, REITs, SEC EDGAR) ===");
+  // 1. Build Master Multi-Index Universe (~2,500+ symbols)
+  console.log("=== BUILDING MASTER MULTI-INDEX UNIVERSE (S&P 500, Nasdaq 100, Dow 30, Russell 2000, S&P 100, ETFs, REITs) ===");
   const symbolSet = new Set<string>();
 
   for (const sym of SP500_SYMBOLS) symbolSet.add(normalizeSymbol(sym));
   for (const sym of NASDAQ100_SYMBOLS) symbolSet.add(normalizeSymbol(sym));
   for (const sym of DOW30_SYMBOLS) symbolSet.add(normalizeSymbol(sym));
-  for (const sym of EXTENDED_ETFS_AND_REITS) symbolSet.add(normalizeSymbol(sym));
+  for (const sym of MAJOR_ETFS_AND_REITS) symbolSet.add(normalizeSymbol(sym));
 
   try {
     const r2k = await fetchBlackRockHoldingSymbols("russell2000", 3600000);
@@ -81,24 +81,8 @@ async function hoard() {
     console.warn("Failed to fetch S&P 100 holdings:", err);
   }
 
-  // Fetch SEC EDGAR official company tickers to expand universe to ~3,300+ tradeable symbols
-  try {
-    const secRes = await fetch("https://www.sec.gov/files/company_tickers.json", {
-      headers: { "User-Agent": "SocraticTrade admin@socratictrade.com" }
-    });
-    const secData = await secRes.json();
-    const secSymbols = Object.values(secData)
-      .map((item: any) => normalizeSymbol(item.ticker))
-      .filter((s) => /^[A-Z]{1,5}$/.test(s));
-    
-    for (const s of secSymbols.slice(0, 1500)) symbolSet.add(s);
-    console.log(`Expanded universe with SEC EDGAR tickers (total: ${symbolSet.size} symbols).`);
-  } catch (err) {
-    console.warn("Failed to fetch SEC EDGAR tickers:", err);
-  }
-
   const allSymbols = Array.from(symbolSet).filter(Boolean);
-  console.log(`Master 3K+ Multi-Index Universe contains ${allSymbols.length} unique tradeable symbols.\n`);
+  console.log(`Master Multi-Index Universe contains ${allSymbols.length} unique tradeable symbols.\n`);
 
   // 2. Fetch 5-Year OHLC Historical Bars via Massive API
   if (massiveKey) {
@@ -108,7 +92,7 @@ async function hoard() {
 
     for (let i = 0; i < allSymbols.length; i++) {
       const symbol = allSymbols[i];
-      if (i % 100 === 0 || i === allSymbols.length - 1) {
+      if (i % 50 === 0 || i === allSymbols.length - 1) {
         console.log(`[Massive 5Y OHLC Progress] ${i}/${allSymbols.length} symbols processed (Downloaded: ${downloadedCount}, Total Bars: ${totalBarsCount})`);
       }
       const count = await hoard5YearMassiveBars(massiveKey, symbol);
@@ -116,7 +100,7 @@ async function hoard() {
         downloadedCount++;
         totalBarsCount += count;
       }
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise(r => setTimeout(r, 120)); // ~8 req/sec pacing
     }
     console.log(`Massive 5-Year OHLC Bar Hoarding Complete! (${downloadedCount} downloaded, ${totalBarsCount} total daily candles stored in data/history-5y/)\n`);
   }
@@ -132,7 +116,7 @@ async function hoard() {
       const chunk = allSymbols.slice(i, i + chunkSize);
       console.log(`[FMP Fundamentals Progress] Chunk ${Math.floor(i / chunkSize) + 1}/${totalChunks} (${chunk.length} symbols)...`);
       await fmpProvider.enrich(chunk);
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise(r => setTimeout(r, 350));
     }
     console.log(`FMP Multi-Index Fundamentals Hoarding Complete!\n`);
   }
@@ -148,7 +132,7 @@ async function hoard() {
       const chunk = allSymbols.slice(i, i + chunkSize);
       console.log(`[Massive Short Interest Progress] Chunk ${Math.floor(i / chunkSize) + 1}/${totalChunks} (${chunk.length} symbols)...`);
       await massiveProvider.enrich(chunk);
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise(r => setTimeout(r, 250));
     }
     console.log(`Massive Short Interest & Float Hoarding Complete!\n`);
   }

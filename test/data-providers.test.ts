@@ -52,6 +52,17 @@ describe("market enrichment provider", () => {
   const originalFintechKey = process.env.FINTECH_STUDIOS_API_KEY;
   const originalFintechBase = process.env.FINTECH_STUDIOS_BASE_URL;
 
+  const originalRoicKey = process.env.ROIC_API_KEY;
+  const originalMassiveKey = process.env.MASSIVE_API_KEY;
+  const originalMassiveAltKey = process.env.MASSIVE_API_KEY_ALT;
+  const originalRapidApiKey = process.env.RAPIDAPI_KEY;
+  const originalTiingoKey = process.env.TIINGO_API_KEY;
+  const originalTwelveKey = process.env.TWELVEDATA_API_KEY;
+
+  const originalSecXbrl = process.env.SEC_XBRL_ENRICHMENT_ENABLED;
+  const originalFilingApi = process.env.FILINGAPI;
+  const originalFilingApiKey = process.env.FILINGAPI_KEY;
+
   beforeEach(() => {
     delete process.env.FINNHUB_API_KEY;
     delete process.env.FMP_API_KEY;
@@ -59,6 +70,16 @@ describe("market enrichment provider", () => {
     delete process.env.WEBULL_UNOFFICIAL_ENABLED;
     delete process.env.FINTECH_STUDIOS_API_KEY;
     delete process.env.FINTECH_STUDIOS_BASE_URL;
+    delete process.env.ROIC_API_KEY;
+    delete process.env.MASSIVE_API_KEY;
+    delete process.env.MASSIVE_API_KEY_ALT;
+    delete process.env.RAPIDAPI_KEY;
+    delete process.env.TIINGO_API_KEY;
+    delete process.env.TWELVEDATA_API_KEY;
+    delete process.env.FILINGAPI;
+    delete process.env.FILINGAPI_KEY;
+    // Isolate keyless-floor registration tests from default-ON SEC XBRL.
+    process.env.SEC_XBRL_ENRICHMENT_ENABLED = "0";
   });
 
   afterEach(() => {
@@ -74,13 +95,31 @@ describe("market enrichment provider", () => {
     else delete process.env.FINTECH_STUDIOS_API_KEY;
     if (originalFintechBase) process.env.FINTECH_STUDIOS_BASE_URL = originalFintechBase;
     else delete process.env.FINTECH_STUDIOS_BASE_URL;
+    if (originalRoicKey) process.env.ROIC_API_KEY = originalRoicKey;
+    else delete process.env.ROIC_API_KEY;
+    if (originalMassiveKey) process.env.MASSIVE_API_KEY = originalMassiveKey;
+    else delete process.env.MASSIVE_API_KEY;
+    if (originalMassiveAltKey) process.env.MASSIVE_API_KEY_ALT = originalMassiveAltKey;
+    else delete process.env.MASSIVE_API_KEY_ALT;
+    if (originalRapidApiKey) process.env.RAPIDAPI_KEY = originalRapidApiKey;
+    else delete process.env.RAPIDAPI_KEY;
+    if (originalTiingoKey) process.env.TIINGO_API_KEY = originalTiingoKey;
+    else delete process.env.TIINGO_API_KEY;
+    if (originalTwelveKey) process.env.TWELVEDATA_API_KEY = originalTwelveKey;
+    else delete process.env.TWELVEDATA_API_KEY;
+    if (originalSecXbrl === undefined) delete process.env.SEC_XBRL_ENRICHMENT_ENABLED;
+    else process.env.SEC_XBRL_ENRICHMENT_ENABLED = originalSecXbrl;
+    if (originalFilingApi === undefined) delete process.env.FILINGAPI;
+    else process.env.FILINGAPI = originalFilingApi;
+    if (originalFilingApiKey === undefined) delete process.env.FILINGAPI_KEY;
+    else process.env.FILINGAPI_KEY = originalFilingApiKey;
   });
 
   it("uses Yahoo Finance provider when no API key is configured", async () => {
     const provider = getEnrichmentProvider();
-    // Yahoo Finance is always the final real tier — no API key required.
+    // Keyless free-wave floor: nasdaq-quote + Yahoo Finance (no paid keys; SEC XBRL off in this suite).
     expect(provider.configured).toBe(true);
-    expect(provider.name).toBe("yahoo-finance");
+    expect(provider.name).toBe("nasdaq-quote+yahoo-finance");
   });
 
   it("keeps the unofficial Webull quote bridge disabled by default", async () => {
@@ -1283,12 +1322,22 @@ describe("Yahoo Finance provider — cookie/crumb handshake retry", () => {
     "POLYGON_API_KEY",
     "ALPACA_API_KEY",
     "ALPACA_API_SECRET",
+    "ROIC_API_KEY",
+    "MASSIVE_API_KEY",
+    "MASSIVE_API_KEY_ALT",
+    "TIINGO_API_KEY",
+    "TWELVEDATA_API_KEY",
+    "FILINGAPI",
+    "FILINGAPI_KEY",
+    "SEC_XBRL_ENRICHMENT_ENABLED",
   ] as const;
   const originals: Partial<Record<(typeof KEYS)[number], string | undefined>> = {};
   for (const k of KEYS) originals[k] = process.env[k];
 
   beforeEach(() => {
     for (const k of KEYS) delete process.env[k];
+    // Keep Yahoo crumb tests free of SEC/FilingAPI network side-channels.
+    process.env.SEC_XBRL_ENRICHMENT_ENABLED = "0";
   });
 
   afterEach(() => {
@@ -1307,15 +1356,20 @@ describe("Yahoo Finance provider — cookie/crumb handshake retry", () => {
 
     let cookieAttempts = 0;
     vi.stubGlobal("fetch", async (url: string) => {
-      if (url === "https://fc.yahoo.com") {
+      const u = String(url);
+      // Free-wave nasdaq-quote may run alongside Yahoo — return empty so it doesn't win fields.
+      if (u.includes("api.nasdaq.com")) {
+        return new Response(JSON.stringify({ data: null }), { status: 200 });
+      }
+      if (u === "https://fc.yahoo.com") {
         cookieAttempts++;
         if (cookieAttempts === 1) throw new Error("network blip");
         return new Response(null, { status: 200, headers: { "set-cookie": "A=1; Path=/" } });
       }
-      if (url.startsWith("https://query1.finance.yahoo.com/v1/test/getcrumb")) {
+      if (u.startsWith("https://query1.finance.yahoo.com/v1/test/getcrumb")) {
         return new Response("test-crumb", { status: 200 });
       }
-      if (url.startsWith("https://query1.finance.yahoo.com/v10/finance/quoteSummary/")) {
+      if (u.startsWith("https://query1.finance.yahoo.com/v10/finance/quoteSummary/")) {
         return new Response(
           JSON.stringify({
             quoteSummary: {
@@ -1331,17 +1385,11 @@ describe("Yahoo Finance provider — cookie/crumb handshake retry", () => {
     const provider = getEnrichmentProvider();
     expect(provider.name).toContain("yahoo-finance");
 
-    vi.useFakeTimers();
-    try {
-      const resultPromise = provider.enrich(["AAPL"]);
-      // Let the failed first attempt run, then cross the retry backoff.
-      await vi.advanceTimersByTimeAsync(1000);
-      const result = await resultPromise;
-      expect(result.AAPL?.peRatio).toBe(31.4);
-      expect(result.AAPL?.sector).toBe("Technology");
-    } finally {
-      vi.useRealTimers();
-    }
+    // Real timers: free-wave nasdaq-quote runs alongside Yahoo; fake timers previously
+    // deadlocked the cascade Promise.race with Yahoo's 500ms crumb retry.
+    const result = await provider.enrich(["AAPL"]);
+    expect(result.AAPL?.peRatio).toBe(31.4);
+    expect(result.AAPL?.sector).toBe("Technology");
     expect(cookieAttempts).toBe(2); // failed once, retried once, succeeded
   });
 
@@ -1350,21 +1398,18 @@ describe("Yahoo Finance provider — cookie/crumb handshake retry", () => {
     clearEnrichmentCache();
 
     vi.stubGlobal("fetch", async (url: string) => {
-      if (url === "https://fc.yahoo.com") throw new Error("network down");
+      const u = String(url);
+      if (u.includes("api.nasdaq.com")) {
+        return new Response(JSON.stringify({ data: null }), { status: 200 });
+      }
+      if (u === "https://fc.yahoo.com") throw new Error("network down");
       throw new Error(`unexpected fetch to ${url}`);
     });
 
     const provider = getEnrichmentProvider();
-    vi.useFakeTimers();
-    try {
-      const resultPromise = provider.enrich(["AAPL"]);
-      await vi.advanceTimersByTimeAsync(1000);
-      const result = await resultPromise;
-      expect(result.AAPL?.peRatio).toBeUndefined();
-      expect(result.AAPL?.sector).toBeUndefined();
-    } finally {
-      vi.useRealTimers();
-    }
+    const result = await provider.enrich(["AAPL"]);
+    expect(result.AAPL?.peRatio).toBeUndefined();
+    expect(result.AAPL?.sector).toBeUndefined();
   });
 });
 
@@ -2226,9 +2271,11 @@ describe("enrichment short-circuit (App A coverage hint → paid providers skip 
   const FLAG = "ENRICHMENT_SHORT_CIRCUIT_ENABLED";
   // The short-circuit now gates on the fundamentals tier flag, not the price-read flag.
   const READS = "CONGRESS_TRADE_FUNDAMENTALS_ENABLED";
+  const FREE_FIRST = "ENRICHMENT_FREE_FIRST_ENABLED";
   afterEach(() => {
     delete process.env[FLAG];
     delete process.env[READS];
+    delete process.env[FREE_FIRST];
   });
 
   function appA(fundamentals: Record<string, SymbolEnrichment>): MarketEnrichmentProvider {
@@ -2285,7 +2332,9 @@ describe("enrichment short-circuit (App A coverage hint → paid providers skip 
     expect(contexts[0]?.coveredFields?.AAA?.has("peRatio")).toBe(true);
     expect(contexts[0]?.coveredFields?.AAA?.has("analystRating")).toBe(true);
     expect(contexts[0]?.analystSource?.AAA).toBe("fmp");
-    expect(contexts[0]?.coveredFields?.BBB).toBeUndefined();
+    // Free-first (default ON) records an empty covered set for symbols the free wave
+    // returned nothing for — distinct from "key absent" under the legacy short-circuit path.
+    expect(contexts[0]?.coveredFields?.BBB?.size ?? 0).toBe(0);
   });
 
   it("preserves the paid provider's unique fields for covered symbols (nothing lost)", async () => {
@@ -2325,6 +2374,9 @@ describe("enrichment short-circuit (App A coverage hint → paid providers skip 
 
   it("passes NO coverage hint when the flag is OFF (default)", async () => {
     process.env[READS] = "on"; // reads on, short-circuit off
+    // Free-first also injects coveredFields for paid waves — disable it here so this test
+    // asserts the legacy short-circuit-OFF contract in isolation.
+    process.env[FREE_FIRST] = "0";
     const calls: string[][] = [];
     const contexts: Array<EnrichmentContext | undefined> = [];
     const cascade = new CascadingEnrichmentProvider([

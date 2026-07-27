@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { getChunkCoverage, getChunkSourceBreakdown, getInternalSetting, getDb } from "@/lib/db";
 import { getRagUsageSummary } from "@/lib/rag-metering";
-import { getAllVectorStoreStats, getVectorStoreStats, activeEmbeddingModel, type VectorIndexStats, type VectorStoreStats } from "@/lib/vector-db";
+import { getAllVectorStoreStats, getVectorStoreStats, activeEmbeddingModel, currentEmbedRev, type VectorIndexStats, type VectorStoreStats } from "@/lib/vector-db";
 import { requireAdmin } from "@/lib/auth/admin";
 import { getFmpTranscriptStatus } from "@/lib/web-sources/fmp-transcripts";
+import { listDormantFeatureStatus } from "@/lib/dormant-features";
 
 export const dynamic = "force-dynamic";
 
@@ -59,6 +60,8 @@ export async function GET(request: Request) {
   ]);
 
   const activeModel = activeEmbeddingModel("local");
+  const dormantFeatures = listDormantFeatureStatus();
+  const readyCount = dormantFeatures.filter((f) => f.readyToEnable && !f.enabled).length;
 
   const filingsStats = db.prepare(`
     SELECT 
@@ -165,6 +168,11 @@ export async function GET(request: Request) {
       sinceDays,
       totalCostUsd: ragUsage.reduce((s, r) => s + r.costEstUsd, 0),
       rows: ragUsage
+    },
+    dormantFeatures: {
+      currentEmbedRev: currentEmbedRev(),
+      readyToEnableCount: readyCount,
+      items: dormantFeatures
     }
   });
 }

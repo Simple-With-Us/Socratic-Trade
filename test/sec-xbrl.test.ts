@@ -371,11 +371,14 @@ describe("secXbrlEnrichmentEnabled", () => {
   });
 
   it("defaults to false and rejects off/empty", () => {
+    // Default ON when unset (owner 2026-07-26).
     delete process.env.SEC_XBRL_ENRICHMENT_ENABLED;
-    expect(secXbrlEnrichmentEnabled()).toBe(false);
+    expect(secXbrlEnrichmentEnabled()).toBe(true);
+    process.env.SEC_XBRL_ENRICHMENT_ENABLED = "";
+    expect(secXbrlEnrichmentEnabled()).toBe(true);
     process.env.SEC_XBRL_ENRICHMENT_ENABLED = "off";
     expect(secXbrlEnrichmentEnabled()).toBe(false);
-    process.env.SEC_XBRL_ENRICHMENT_ENABLED = "";
+    process.env.SEC_XBRL_ENRICHMENT_ENABLED = "0";
     expect(secXbrlEnrichmentEnabled()).toBe(false);
   });
 

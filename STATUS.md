@@ -1,5 +1,43 @@
 # Socratic Trade Status
 
+## 2026-07-27 — Open-PR drain to production (CURSOR)
+
+Merged to `main` (auto-deploy): #2229 (eslint-config-next), #2231 (hoard), #2232 (dormant-features).
+Enrichment cascade is on **#2230** (supersedes closed #2224) with auto-merge armed; verify-hosted
+in progress on socratic-ci queue. #2234 (CONGRESS_TRADE_TOKEN SSE) also open + auto-merge.
+Duplicate closed PRs #2233/#2235 cancelled from CI queue.
+
+
+## 2026-07-26 — Free-first enrichment cascade + coverage report (CURSOR)
+
+Optimized the market-data cascade for free/keyless + RapidAPI sources and added
+owner-visible coverage reporting:
+- Free-first planner (default ON): free wave → paid gap-fill → scarce RapidAPI failover;
+  one retry on free-provider throw.
+- Fixed Insiders/TwelveData RapidAPI `suppliesFields` so scarce gating actually applies.
+- Admin `/admin/enrichment-coverage` + `/api/admin/enrichment-coverage` + ops snapshot
+  `enrichmentCoverage` show per-field fill, winning/most-frequent source, and missing fields.
+- `applyEnrichment` preserves `fieldObservations` / `providerFailures` on quotes.
+- Follow-up: AV RapidAPI NEWS, ROIC wire, keyless nasdaq-quote, FilingAPI.dev (`FILINGAPI`),
+  SEC XBRL **default ON**, RapidAPI lanes for yh-finance / real-time-finance-data /
+  seeking-alpha (9 RapidAPI enrichment keys in quota module). RT finance confirmed 200.
+- RapidAPI link fix: only verified Pricing page is `letscrape-6bRBa3QguO5` Real-Time Finance
+  Data (already 200). Api Dojo yh-finance / seeking-alpha hub pages are **API not found**
+  (delisted) — stop asking owner to open them. yahoo-finance15 + mboum already work.
+Branch `cursor/free-cascade-coverage-0aef`. Rollout:
+`docs/rollouts/2026-07-26-free-cascade-coverage.md`.
+## 2026-07-27 — Dormant features readiness (CURSOR)
+
+Prepare remaining default-off capabilities for safe enablement (not blind flag flips):
+- `src/lib/dormant-features.ts` + admin RAG coverage `dormantFeatures` ready/blocked checklist.
+- Restore accurate `LANDING_PAGE_ENABLED` contract (unset/empty = ON; explicit off → 404 marketing pages).
+- CSP report-only path: default policy includes `report-uri /api/csp-report`; public collector route.
+- `VECTOR_EMBED_CLEAN_TEXT` stamps `embed_rev=2` when on (vs 1) so mixed embedding populations stay detectable.
+- Rewrote `docs/FEATURE-ENABLEMENT-BACKLOG.md` into Ready / Keep-off / Live tables.
+
+Branch: `cursor/dormant-features-impl-1c6c`.
+Rollout: `docs/rollouts/2026-07-27-dormant-features-readiness.md`.
+
 ## 2026-07-26 — PR merge drain + Actions runner fixes (GROK)
 
 Open-PR board drain and self-hosted CI hygiene:

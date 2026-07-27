@@ -55,6 +55,7 @@ const PUBLIC_PREFIXES = [
   "/api/health",
   "/api/ops",
   "/api/webhooks",
+  "/api/csp-report",
   "/api/framework",
   "/access-denied",
   "/login",
@@ -111,7 +112,8 @@ function isFlagExplicitlyOff(value: string | undefined): boolean {
 
 /** The CSP directive string. Kept intentionally permissive (unsafe-inline/eval, https:) because Next.js
  *  ships inline bootstrap scripts and styled-jsx; this is a starting point for report-only telemetry,
- *  NOT a hardened enforcing policy. Override via CSP_POLICY when you have a tightened one. */
+ *  NOT a hardened enforcing policy. Override via CSP_POLICY when you have a tightened one.
+ *  Default policy always includes report-uri /api/csp-report so CSP_ENABLED=on starts collecting. */
 function cspPolicy(): string {
   const custom = process.env.CSP_POLICY?.trim();
   if (custom) return custom;
@@ -124,7 +126,8 @@ function cspPolicy(): string {
     "connect-src 'self' https:",
     "frame-ancestors 'none'",
     "base-uri 'self'",
-    "form-action 'self'"
+    "form-action 'self'",
+    "report-uri /api/csp-report"
   ].join("; ");
 }
 

@@ -168,8 +168,9 @@ export function activeEmbeddingModel(userId: string = "local"): string {
 }
 
 export function embeddingSpaceRevisionForModel(model: string): string {
-  if (model === "voyage-finance-2") return `v${EMBED_REV}`;
-  return `v${EMBED_REV}-${model.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+  const rev = currentEmbedRev();
+  if (model === "voyage-finance-2") return `v${rev}`;
+  return `v${rev}-${model.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
 }
 
 export function embedSpaceFilterForModel(model: string): Record<string, unknown> {
@@ -251,11 +252,19 @@ function activeRerankRoute(userId: string, allowMockClient = false) {
  * `VOYAGE_MODEL` swap, or flipping `VECTOR_EMBED_CLEAN_TEXT` (R17). Vectors written before this
  * item shipped carry no `embed_rev` at all; callers should treat a missing value as rev 0, NOT as
  * this rev, so a mixed population stays distinguishable.
+ *
+ * `currentEmbedRev()` returns BASE (1) normally, and CLEAN_TEXT (2) when
+ * `VECTOR_EMBED_CLEAN_TEXT` is on — so enabling clean-text is migration-safe to *detect* (new
+ * vectors are tagged differently) even before a full reindex. Do not purge rev-1 until an
+ * inventory/backfill/completeness/switchover receipt says so.
  */
-// Keep the live corpus on representation revision 1 until a bounded inventory/backfill,
-// completeness check, switchover, rollback window, and v1 deletion can be executed. The prior
-// dirty branch changed this globally to 2 without that migration, which mixed incomparable spaces.
-const EMBED_REV = 1;
+const BASE_EMBED_REV = 1;
+const CLEAN_TEXT_EMBED_REV = 2;
+
+/** Live representation revision stamped on every newly-written vector (`embed_rev` metadata). */
+export function currentEmbedRev(): number {
+  return embedCleanTextEnabled() ? CLEAN_TEXT_EMBED_REV : BASE_EMBED_REV;
+}
 const EMBEDDING_DIMENSION = 1024; // voyage-finance-2 dimension
 const DEFAULT_INDEX_NAME = "socratic-trade";
 const DEFAULT_EMBED_BATCH_SIZE = 8;
@@ -379,7 +388,7 @@ function documentEmbeddingCacheKey(input: string, userId: string = "local"): str
   // `input` is already the exact post-cleaning text, so model + representation revision + bytes is
   // sufficient and remains stable even if an operator changes an env flag while a call is in flight.
   const modelName = activeEmbeddingModel(userId);
-  return `${modelName}\u0000${EMBED_REV}\u0000${input}`;
+  return `${modelName}\u0000${currentEmbedRev()}\u0000${input}`;
 }
 
 function getCachedDocumentEmbedding(input: string, userId: string = "local"): number[] | undefined {
@@ -1816,7 +1825,7 @@ function cleanMetadata(
   // with the model that produced it + a representation revision, so a mixed population (e.g. after
   // a VOYAGE_MODEL swap or a VECTOR_EMBED_CLEAN_TEXT flip) can be detected/filtered/migrated later
   // instead of silently comparing across incompatible embedding spaces. Legacy vectors written
-  // before this field existed simply lack it — treat missing as rev 0 (see EMBED_REV above).
+  // before this field existed simply lack it — treat missing as rev 0 (see currentEmbedRev above).
   const out: Record<string, string | number | boolean | string[]> = {
     text,
     userId,
@@ -1824,7 +1833,7 @@ function cleanMetadata(
     tenant_scope: tenantScope,
     provider_authority: providerAuthority,
     embed_model: activeEmbeddingModel(userId),
-    embed_rev: EMBED_REV,
+    embed_rev: currentEmbedRev(),
     // Direct/legacy-style writes have no relational receipt protocol and are committed by their
     // single successful upsert. `storeDocument` explicitly overrides these to pending/required,
     // then promotes them only after its exact receipt transaction.

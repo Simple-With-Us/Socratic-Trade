@@ -3,6 +3,7 @@ import { getDb, getLastStrategyRunStartedAt, listConnectedAccounts, listUsers, p
 import { userHasAnyLlmCredential } from "./db-api-keys";
 import { resolveLlmEndpoint } from "./llm-provider";
 import { computeAccountTradingLiveness } from "./trading-liveness";
+import { getLastEnrichmentCoverageReport } from "./enrichment-coverage";
 import { statSync, statfsSync, readdirSync } from "fs";
 import { dirname, join } from "path";
 
@@ -108,6 +109,16 @@ export interface OpsSnapshot {
   schedulerAgeSeconds: number | null;
   dependencies?: Record<string, { ok: boolean; reason?: string | null; lastFailure?: string | null }>;
   storage?: Record<string, any> | null;
+  /** Last CascadingEnrichmentProvider coverage summary (filled / source / missing), if any scan has run. */
+  enrichmentCoverage?: {
+    asOf: string;
+    symbolCount: number;
+    missingFields: string[];
+    partialFieldCount: number;
+    contributingSources: string[];
+    topSources: Array<{ source: string; wins: number }>;
+    providerFailureCount: number;
+  } | null;
   users: OpsUserSnapshot[];
 }
 
@@ -371,12 +382,34 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
     };
   } catch {}
 
+  let enrichmentCoverage: OpsSnapshot["enrichmentCoverage"] = null;
+  try {
+    const report = getLastEnrichmentCoverageReport();
+    if (report) {
+      enrichmentCoverage = {
+        asOf: report.asOf,
+        symbolCount: report.symbolCount,
+        missingFields: report.missingFields,
+        partialFieldCount: report.partialFields.length,
+        contributingSources: report.contributingSources,
+        topSources: Object.entries(report.sourceWinTotals)
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+          .slice(0, 12)
+          .map(([source, wins]) => ({ source, wins })),
+        providerFailureCount: report.providerFailures.reduce((sum, row) => sum + row.failureCount, 0)
+      };
+    }
+  } catch {
+    enrichmentCoverage = null;
+  }
+
   return {
     asOf: new Date().toISOString(),
     schedulerLastTick: lastTick ?? null,
     schedulerAgeSeconds: Number.isFinite(tickMs) ? Math.round((Date.now() - tickMs) / 1000) : null,
     dependencies,
     storage,
+    enrichmentCoverage,
     users
   };
 }

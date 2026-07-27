@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 import { Card } from "../ui/primitives";
 import { DecisionTraceIllustration } from "./decision-trace-illustration";
+import { landingPageEnabled } from "@/lib/landing-page";
 
 export const metadata: Metadata = {
   title: { absolute: "Socratic Trade" },
@@ -86,6 +88,7 @@ const STEPS: Array<{ n: number; title: string; detail: string }> = [
 ];
 
 export default function WelcomePage() {
+  if (!landingPageEnabled()) notFound();
   return (
     <>
       {/* JSON-LD structured data */}

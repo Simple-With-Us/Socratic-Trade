@@ -36,7 +36,7 @@ import {
   ShortVolumeRowSchema,
   FundamentalRowSchema,
   AnalystRowSchema,
-  
+  TradeEventRowSchema,
 } from "@jaywedgeworth22/congress-trading-shared";
 import {
   assertOperationLeaseOwnership,
@@ -198,7 +198,6 @@ export interface CongressShareResult {
     shortVolume: number;
     fundamentals: number;
     analyst: number;
-    
   };
 }
 
@@ -451,6 +450,7 @@ export function dropInvalidShareRows(
       shortVolume: filterRows(payload.shortVolume, ShortVolumeRowSchema, "shortVolume"),
       fundamentals: filterRows(payload.fundamentals, FundamentalRowSchema, "fundamentals"),
       analyst: filterRows(payload.analyst, AnalystRowSchema, "analyst"),
+      trades: filterRows(payload.trades, TradeEventRowSchema, "trades"),
     },
     dropped,
   };
@@ -476,18 +476,11 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
     shortVolume: clean.shortVolume?.length ?? 0,
     fundamentals: clean.fundamentals?.length ?? 0,
     analyst: clean.analyst?.length ?? 0,
-    
+    trades: clean.trades?.length ?? 0
   };
   const token = congressTradeToken();
   if (!token) return { ok: false, skipped: true, reason: "no-token", sent };
-  const total =
-    sent.refs +
-    sent.spx +
-    sent.prices +
-    sent.insider +
-    sent.shortVolume +
-    sent.fundamentals +
-    sent.analyst;
+  const total = sent.refs + sent.spx + sent.prices + sent.insider + sent.shortVolume + sent.fundamentals + sent.analyst;
   if (total === 0) {
     // Distinguish a genuinely-empty input (nothing to send → legitimate skip) from a payload whose
     // rows were ALL rejected by the shared schema. The latter is a real failure: counting it as a

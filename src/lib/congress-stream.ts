@@ -78,7 +78,7 @@ async function createSubscription(): Promise<Subscription | null> {
   const clientId = (process.env.CONGRESS_STREAM_CLIENT_ID ?? "app-b").trim() || "app-b";
   const desiredSecret = (process.env.CONGRESS_STREAM_SUBSCRIPTION_TOKEN ?? "").trim();
   try {
-    const client = new CongressTradeClient({ baseUrl: baseUrl() });
+    const client = new CongressTradeClient({ baseUrl: baseUrl(), token: process.env.CONGRESS_TRADE_TOKEN || undefined });
     return await client.createSubscription(clientId, desiredSecret);
   } catch (err) {
     console.warn("[congress-stream] subscription create error:", err instanceof Error ? err.message : err);

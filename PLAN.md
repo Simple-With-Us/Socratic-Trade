@@ -1,5 +1,17 @@
 # Active Implementation Plan
 
+> **2026-07-26 — Free-first enrichment cascade + coverage report (CURSOR).** Prefer
+> free/keyless + RapidAPI failover before paid native keys; coverage Admin/ops. Follow-up:
+> FilingAPI.dev, SEC XBRL default ON, RapidAPI yh-finance / real-time-finance-data /
+> seeking-alpha (pricing-page Subscribe links in rollout). Branch
+> `cursor/free-cascade-coverage-0aef`. Rollout:
+> `docs/rollouts/2026-07-26-free-cascade-coverage.md`.
+> **2026-07-27 — Dormant features readiness (CURSOR).** Substrate so remaining default-off
+> capabilities can be enabled safely: `dormantFeatures` checklist on `/api/admin/rag-coverage`,
+> `LANDING_PAGE_ENABLED` unset=ON with explicit off-switch, CSP report-uri collector, and
+> `VECTOR_EMBED_CLEAN_TEXT` bumping `embed_rev` 1→2. Do **not** flip MULTIQUERY/HyDE, ASOF_STRICT,
+> FMP dual-gate, SEC8K full body, or legacy purge without owner preconditions. Branch
+> `cursor/dormant-features-impl-1c6c`. Checklist: `docs/FEATURE-ENABLEMENT-BACKLOG.md`.
 > **2026-07-25 — Fix vs-SPY benchmark (CURSOR).** Correct cash-flow-aware TWR vs SPY so all-cash
 > deposits/resets are not alpha and Home shows You / SPY decomposition. Branch
 > `cursor/fix-vs-spy-benchmark-9833`. Rollout: `docs/rollouts/2026-07-25-fix-vs-spy-benchmark.md`.

@@ -315,15 +315,35 @@ function enrichmentShortCircuitEnabled(): boolean {
 /**
  * Per-symbol coverage gate for `quotaScarce` providers — DEFAULT ON, and scoped strictly to
  * providers that opt in via `quotaScarce` + `suppliesFields`. Today that is only the RapidAPI
- * failover tier (Mboum / YH Finance 15 / Alpha Vantage-RapidAPI), which is new and currently
- * spends a MONTHLY-backed quota on whichever symbols happen to be cache-misses first with no
- * regard for whether the free keyless Yahoo scrape already supplied that exact data. Every
- * pre-existing provider is unaffected (they never set the flag), so defaulting this ON has no
- * regression surface for them. Set `ENRICHMENT_SCARCE_TIER_GATE_ENABLED=0` to restore the old
- * all-providers-in-one-concurrent-wave behavior for the scarce tier too.
+ * failover tier (Mboum / YH Finance 15 / Alpha Vantage-RapidAPI / Insiders / TwelveData-RapidAPI),
+ * which is new and currently spends a MONTHLY-backed quota on whichever symbols happen to be
+ * cache-misses first with no regard for whether the free keyless Yahoo scrape already supplied
+ * that exact data. Every pre-existing provider is unaffected (they never set the flag), so
+ * defaulting this ON has no regression surface for them. Set
+ * `ENRICHMENT_SCARCE_TIER_GATE_ENABLED=0` to restore the old all-providers-in-one-concurrent-wave
+ * behavior for the scarce tier too.
  */
 export function scarceEnrichmentGateEnabled(): boolean {
   const raw = process.env.ENRICHMENT_SCARCE_TIER_GATE_ENABLED;
+  if (raw === undefined || raw.trim() === "") return true;
+  return flagEnabled(raw);
+}
+
+/**
+ * Free-first field-demand planner — DEFAULT ON.
+ *
+ * Wave A: free/keyless/broker-bundled providers (`costTier !== "paid"`) over the full batch.
+ * Wave B: paid non-scarce providers only for symbols that still have a coverage gap, with a
+ *         `coveredFields` hint so they can skip redundant sub-calls.
+ * Wave C: scarce RapidAPI failover (existing `quotaScarce` gate) for remaining field gaps.
+ *
+ * When a free-wave provider throws, it is retried once before the paid wave so a transient
+ * timeout/429 does not permanently suppress the keyless floor for that scan.
+ *
+ * Set `ENRICHMENT_FREE_FIRST_ENABLED=0` to restore the prior single concurrent non-scarce wave.
+ */
+export function freeFirstEnrichmentEnabled(): boolean {
+  const raw = process.env.ENRICHMENT_FREE_FIRST_ENABLED;
   if (raw === undefined || raw.trim() === "") return true;
   return flagEnabled(raw);
 }
@@ -995,10 +1015,16 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   // (no price/fundamentals), so ordering doesn't affect first-wins fields. Registered only when a
   // MASSIVE_API_KEY is present AND massiveShortInterestEnabled() (default ON) — inert otherwise.
   if (massive.key && massiveShortInterestEnabled()) providers.push(withHealthLane(new MassiveEnrichmentProvider(massive.key, massive.source, userId), massive.source));
-  // SEC EDGAR XBRL: keyless, default-OFF. Fills debtToEquity from authoritative SEC filings.
+  // SEC EDGAR XBRL: keyless, default-ON. Fills debtToEquity from authoritative SEC filings.
   // Positioned after FMP (paid key wins) but before Yahoo (keyless fallback) so SEC authoritative
-  // data supersedes Yahoo's scraped values when enabled.
+  // data supersedes Yahoo's scraped values. Set SEC_XBRL_ENRICHMENT_ENABLED=0 to disable.
   if (secXbrlEnrichmentEnabled()) providers.push(new SecXbrlEnrichmentProvider());
+  // FilingAPI.dev (FILINGAPI / FILINGAPI_KEY): company sector/industry, earnings calendar,
+  // insider summary — scarce free-tier (50/day) so wave-C only.
+  const filingApi = resolveApiKeyWithSource("filingapi", userId);
+  if (filingApi.key) {
+    providers.push(withHealthLane(new FilingApiEnrichmentProvider(filingApi.key, filingApi.source, userId), filingApi.source));
+  }
   // Opt-in Robinhood option-chain tier (near-the-money IV + put/call ratio). Default OFF and inert
   // unless Robinhood MCP is connected — a long-TTL, low-frequency source with its own cache. Seated
   // late so it only fills the options-specific fields nothing else supplies.
@@ -1011,15 +1037,17 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   // it's never registered, i.e. fully dormant. See src/lib/quiver-provider.ts.
   const quiverKey = resolveQuiverApiKey();
   if (quiverKey) providers.push(withHealthLane(new QuiverEnrichmentProvider(quiverKey), "env"));
+  // Keyless Nasdaq quote/summary/holdings — free-wave redundancy beside Yahoo (no crumb handshake).
+  // Seated just before Yahoo so both participate in wave A; first-wins still prefers earlier paid
+  // tiers when they filled a field.
+  providers.push(new NasdaqQuoteEnrichmentProvider());
   providers.push(new YahooFinanceEnrichmentProvider());
   // Tier LAST — RapidAPI-hosted FAILOVER redundancy for the free scrape above (see the big doc
-  // comment on the provider classes for why this ordering, and rapidapi-quota.ts for the quota
-  // math). All three are dormant unless RAPIDAPI_KEY is set; each self-limits to a tiny persisted
-  // daily budget far below its real plan cap, so registering them here is safe even though the
-  // cascade calls every provider's enrich() with the FULL per-run symbol batch regardless of
-  // whether an earlier tier already filled a symbol's fields (no such per-provider narrowing
-  // mechanism exists in CascadingEnrichmentProvider outside the opt-in congress.trade coverage
-  // hint above) — the budget gate, not field-coverage narrowing, is what keeps this safe.
+  // comment on the provider classes + rapidapi-quota.ts). Dormant unless RAPIDAPI_KEY is set.
+  // Scarce providers (Mboum / YH15 / AV-RapidAPI / Insiders / TwelveData-RapidAPI) declare
+  // `quotaScarce` + `suppliesFields` so the free-first planner's wave C only spends them on
+  // symbols still missing those fields. FMP-RapidAPI is costTier "free" / not scarce so it
+  // participates in the free wave (extra fundamentals without a native FMP key).
   if (rapidApiKey) {
     // Mboum first (owner: prioritize by lowest disclosed RapidAPI-listing latency, 1663ms vs YH
     // Finance 15's 1757ms) — near-identical, so this is a tie-break, not a meaningful difference.
@@ -1035,6 +1063,13 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
     providers.push(withHealthLane(new FmpRapidApiEnrichmentProvider(rapidApiKey, "env", userId), "env"));
     providers.push(withHealthLane(new InsidersRapidApiEnrichmentProvider(rapidApiKey, "env", userId), "env"));
     providers.push(withHealthLane(new TwelveDataRapidApiEnrichmentProvider(rapidApiKey, "env", userId), "env"));
+    // Additional RapidAPI free-tier failover lanes. Working Pricing page (verified):
+    //   real-time-finance-data: https://rapidapi.com/letscrape-6bRBa3QguO5/api/real-time-finance-data/pricing
+    // yh-finance / seeking-alpha hub listings currently return API not found (delisted);
+    // providers stay as scarce failover if a key gains access.
+    providers.push(withHealthLane(new YhFinanceApiDojoEnrichmentProvider(rapidApiKey, "env", userId), "env"));
+    providers.push(withHealthLane(new RealTimeFinanceDataEnrichmentProvider(rapidApiKey, "env", userId), "env"));
+    providers.push(withHealthLane(new SeekingAlphaRapidApiEnrichmentProvider(rapidApiKey, "env", userId), "env"));
   }
   // Opt-in active circuit breaker: skip a lane whose db-health lane is currently `stoppedWorking`,
   // re-probing only after the backoff window. Default OFF so it can't silently black out a
@@ -1144,6 +1179,8 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
   // a keyless/default-OFF provider that returns nothing for a scan (budget timeout, no CIK, no aligned
   // fact) must not appear in the source string just because it was registered.
   private contributingNames = new Set<string>();
+  /** Most recent coverage report from enrich(); also mirrored via enrichment-coverage module. */
+  private lastCoverageReport: import("./enrichment-coverage").EnrichmentCoverageReport | null = null;
 
   constructor(private readonly providers: MarketEnrichmentProvider[]) {
     this.name = providers.map((p) => p.name).join("+");
@@ -1154,8 +1191,14 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
     return this.providers.map((p) => p.name).filter((n) => this.contributingNames.has(n));
   }
 
+  /** Coverage summary from the most recent enrich() call on this instance. */
+  get coverageReport(): import("./enrichment-coverage").EnrichmentCoverageReport | null {
+    return this.lastCoverageReport;
+  }
+
   async enrich(symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
     this.contributingNames = new Set();
+    this.lastCoverageReport = null;
     const normalized = Array.from(new Set(symbols.map(normalizeSymbol))).filter(Boolean);
     // Each provider's result set, paired with its name, kept in REGISTRATION order
     // so the first-wins merge below is unchanged regardless of how we fetched.
@@ -1177,37 +1220,138 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
         }));
 
     // ── Wave split ────────────────────────────────────────────────────────────
-    // WAVE ONE = every provider that has NOT declared itself quota-scarce. It is dispatched
-    // exactly as before (one concurrent Promise.all over the full symbol batch, or the App A
-    // short-circuit variant below) — no latency regression for the many providers where
-    // concurrency is correct and free.
-    // WAVE TWO = providers that declared `quotaScarce` + a non-empty `suppliesFields`. They run
-    // only AFTER wave one settles, and only over the symbols where wave one left at least one of
-    // their declared fields empty. A scarce provider with nothing to add is not called at all, so
-    // it reserves no quota (its reservation happens inside its own enrich()).
+    // FREE-FIRST (default ON):
+    //   Wave A = free/keyless (`costTier !== "paid"`) over the full batch (+ one retry on throw).
+    //   Wave B = paid non-scarce providers only for symbols still missing coverage-gap fields.
+    //   Wave C = scarce RapidAPI failover for remaining suppliesFields gaps.
+    // LEGACY (ENRICHMENT_FREE_FIRST_ENABLED=0):
+    //   Wave one = every non-scarce provider concurrently; wave two = scarce gate only.
     const gateOn = scarceEnrichmentGateEnabled();
+    const freeFirstOn = freeFirstEnrichmentEnabled();
     const isGatedScarce = (p: MarketEnrichmentProvider): boolean =>
       gateOn && p.quotaScarce === true && (p.suppliesFields?.length ?? 0) > 0;
-    const waveOneIndexes: number[] = [];
+    const isFreeTier = (p: MarketEnrichmentProvider): boolean => p.costTier !== "paid";
+
+    const freeIndexes: number[] = [];
+    const paidIndexes: number[] = [];
     const scarceIndexes: number[] = [];
+    const legacyWaveOneIndexes: number[] = [];
     this.providers.forEach((p, i) => {
-      (isGatedScarce(p) ? scarceIndexes : waveOneIndexes).push(i);
+      if (isGatedScarce(p)) {
+        scarceIndexes.push(i);
+        return;
+      }
+      legacyWaveOneIndexes.push(i);
+      if (isFreeTier(p)) freeIndexes.push(i);
+      else paidIndexes.push(i);
     });
-    const waveOneProviders = waveOneIndexes.map((i) => this.providers[i]);
+
     // Positional, so the first-wins merge precedence below is registration order regardless of
     // which wave a provider ran in (and regardless of duplicate provider names).
     const results: ProviderRun[] = this.providers.map((p) => ({ name: p.name, data: {} }));
 
-    let waveOneRuns: ProviderRun[];
-    if (enrichmentShortCircuitEnabled()) {
-      // Short-circuit: ONLY the Congress.Trade tier feeds the coverage hint, so await
-      // just it first, then run EVERY other provider (free AND paid) in parallel. Paid
-      // providers use the per-symbol hint to skip only the redundant SUB-calls (e.g.
-      // FMP's ratios-ttm + grades-consensus when App A already has P/E + analyst) while
-      // STILL fetching the fields they uniquely supply — insider/senate, news/sentiment,
-      // quotes. No whole provider is skipped, so no field is lost; only duplicate upstream
-      // calls are eliminated. Crucially, paid providers are NOT serialized behind
-      // unrelated free tiers (Yahoo/Alpaca/SEC) — only behind the single App A read.
+    const {
+      collectFilledFields,
+      symbolHasCoverageGap,
+      buildEnrichmentCoverageReport
+    } = await import("./enrichment-coverage");
+
+    const buildFilledBySymbol = (providerIndexes: number[]): Map<string, Set<string>> => {
+      const filledBySymbol = new Map<string, Set<string>>();
+      for (const symbol of normalized) {
+        filledBySymbol.set(symbol, collectFilledFields(results, symbol, providerIndexes));
+      }
+      return filledBySymbol;
+    };
+
+    const coveredFieldsFrom = (filledBySymbol: Map<string, Set<string>>): Record<string, ReadonlySet<string>> => {
+      const coveredFields: Record<string, ReadonlySet<string>> = {};
+      for (const [symbol, filled] of filledBySymbol) coveredFields[symbol] = filled;
+      return coveredFields;
+    };
+
+    if (freeFirstOn) {
+      // ── Wave A: free / keyless / RapidAPI-free-tier ─────────────────────────
+      const freeProviders = freeIndexes.map((i) => this.providers[i]);
+      let freeRuns: ProviderRun[];
+      if (enrichmentShortCircuitEnabled()) {
+        // App A still leads the free wave when short-circuit is on (coverage hint for paid).
+        const congressProvider = freeProviders.find((p) => p.name === "congress.trade");
+        const appAResult = congressProvider
+          ? await run(congressProvider, normalized)
+          : { name: "congress.trade", data: {} as Record<string, SymbolEnrichment> } satisfies ProviderRun;
+        const otherFree = freeProviders.filter((p) => p.name !== "congress.trade");
+        const otherResults = await Promise.all(otherFree.map((p) => run(p, normalized)));
+        const byName = new Map<string, ProviderRun>();
+        for (const r of [appAResult, ...otherResults]) byName.set(r.name, r);
+        freeRuns = freeProviders.map((p) => byName.get(p.name) ?? { name: p.name, data: {} });
+      } else {
+        freeRuns = await Promise.all(freeProviders.map((p) => run(p, normalized)));
+      }
+      freeIndexes.forEach((providerIndex, k) => {
+        results[providerIndex] = freeRuns[k];
+      });
+
+      // One retry for free providers that threw — transient 429/timeout must not permanently
+      // suppress the keyless floor before paid/scarce failover runs.
+      const retryIndexes = freeIndexes.filter((providerIndex) => results[providerIndex].failure);
+      if (retryIndexes.length > 0) {
+        const retries = await Promise.all(
+          retryIndexes.map(async (providerIndex) => ({
+            providerIndex,
+            run: await run(this.providers[providerIndex], normalized)
+          }))
+        );
+        for (const { providerIndex, run: providerRun } of retries) {
+          // Keep the retry only when it recovered; otherwise preserve the original failure receipt.
+          if (!providerRun.failure) results[providerIndex] = providerRun;
+        }
+      }
+
+      // ── Wave B: paid non-scarce, gap-only ───────────────────────────────────
+      if (paidIndexes.length > 0) {
+        const filledAfterFree = buildFilledBySymbol(freeIndexes);
+        const gapSymbols = normalized.filter((symbol) =>
+          symbolHasCoverageGap(filledAfterFree.get(symbol) ?? new Set())
+        );
+        if (gapSymbols.length > 0) {
+          const coveredFields = coveredFieldsFrom(filledAfterFree);
+          // Analyst-source hint from App A when present (same semantics as short-circuit).
+          const analystSource: Record<string, string> = {};
+          const congressIdx = freeIndexes.find((i) => this.providers[i].name === "congress.trade");
+          if (congressIdx !== undefined) {
+            for (const s of gapSymbols) {
+              const e = results[congressIdx].data[s];
+              const srcKey = e?.analystBySource ? Object.keys(e.analystBySource)[0] : undefined;
+              if (srcKey) analystSource[s] = srcKey;
+            }
+          }
+          const paidContext: EnrichmentContext = { coveredFields, analystSource };
+          const paidRuns = await Promise.all(
+            paidIndexes.map((providerIndex) => {
+              const provider = this.providers[providerIndex];
+              const fields = provider.suppliesFields;
+              const targets =
+                fields && fields.length > 0
+                  ? gapSymbols.filter((symbol) => {
+                      const filled = filledAfterFree.get(symbol);
+                      return fields.some((field) => !filled?.has(field as string));
+                    })
+                  : gapSymbols;
+              if (targets.length === 0) {
+                return Promise.resolve({ name: provider.name, data: {} } as ProviderRun);
+              }
+              return run(provider, targets, paidContext);
+            })
+          );
+          paidIndexes.forEach((providerIndex, k) => {
+            results[providerIndex] = paidRuns[k];
+          });
+        }
+      }
+    } else if (enrichmentShortCircuitEnabled()) {
+      // Legacy short-circuit: App A first, then every other non-scarce provider in parallel.
+      const waveOneProviders = legacyWaveOneIndexes.map((i) => this.providers[i]);
       const congressProvider = waveOneProviders.find((p) => p.name === "congress.trade");
       const appAResult = congressProvider
         ? await run(congressProvider, normalized)
@@ -1219,9 +1363,6 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
         const e = appA[s];
         if (e) {
           coveredFields[s] = new Set(Object.keys(e));
-          // App A keys its analyst entry under the upstream provider it came from, so the
-          // single key here IS that source. A paid provider uses it to skip its own
-          // consensus sub-call only when App A's analyst is genuinely its data.
           const srcKey = e.analystBySource ? Object.keys(e.analystBySource)[0] : undefined;
           if (srcKey) analystSource[s] = srcKey;
         }
@@ -1231,40 +1372,30 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
       const otherResults = await Promise.all(
         otherProviders.map((p) => run(p, normalized, p.costTier === "paid" ? context : undefined))
       );
-      // Reassemble in wave-one registration order so the merge precedence is identical.
       const byName = new Map<string, ProviderRun>();
       for (const r of [appAResult, ...otherResults]) byName.set(r.name, r);
-      waveOneRuns = waveOneProviders.map((p) => byName.get(p.name) ?? { name: p.name, data: {} });
+      const waveOneRuns = waveOneProviders.map((p) => byName.get(p.name) ?? { name: p.name, data: {} });
+      legacyWaveOneIndexes.forEach((providerIndex, k) => {
+        results[providerIndex] = waveOneRuns[k];
+      });
     } else {
-      // Default: run every wave-one provider over every symbol in parallel.
-      waveOneRuns = await Promise.all(waveOneProviders.map((p) => run(p, normalized)));
+      // Legacy default: every non-scarce provider over every symbol in parallel.
+      const waveOneRuns = await Promise.all(
+        legacyWaveOneIndexes.map((i) => run(this.providers[i], normalized))
+      );
+      legacyWaveOneIndexes.forEach((providerIndex, k) => {
+        results[providerIndex] = waveOneRuns[k];
+      });
     }
-    waveOneIndexes.forEach((providerIndex, k) => {
-      results[providerIndex] = waveOneRuns[k];
-    });
 
     if (scarceIndexes.length > 0) {
-      // What wave one ACTUALLY filled, per symbol. A wave-one provider that threw or timed out
-      // contributed `{}` (see `run`'s catch), so its fields correctly read as NOT covered and the
-      // scarce tier can still step in — a failure upstream must never suppress the failover tier.
-      const filledBySymbol = new Map<string, Set<string>>();
-      for (const symbol of normalized) {
-        const filled = new Set<string>();
-        for (const providerIndex of waveOneIndexes) {
-          const record = results[providerIndex].data[symbol];
-          if (!record) continue;
-          for (const [key, value] of Object.entries(record)) {
-            // `undefined` and an EMPTY array (e.g. `headlines: []`) are not coverage — a provider
-            // that returned the key with no usable value left the gap open.
-            if (value === undefined) continue;
-            if (Array.isArray(value) && value.length === 0) continue;
-            filled.add(key);
-          }
-        }
-        filledBySymbol.set(symbol, filled);
-      }
-      const coveredFields: Record<string, ReadonlySet<string>> = {};
-      for (const [symbol, filled] of filledBySymbol) coveredFields[symbol] = filled;
+      // Prior waves' actual fills. A provider that threw contributed `{}`, so its fields read as
+      // NOT covered and the scarce tier can still step in — failure must never suppress failover.
+      const priorIndexes = freeFirstOn
+        ? [...freeIndexes, ...paidIndexes]
+        : legacyWaveOneIndexes;
+      const filledBySymbol = buildFilledBySymbol(priorIndexes);
+      const coveredFields = coveredFieldsFrom(filledBySymbol);
       const scarceContext: EnrichmentContext = { coveredFields };
       const scarceRuns = await Promise.all(
         scarceIndexes.map(async (providerIndex) => {
@@ -1274,8 +1405,6 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
             const filled = filledBySymbol.get(symbol);
             return fields.some((field) => !filled?.has(field as string));
           });
-          // Nothing this provider supplies is missing anywhere → do not call it at all. No
-          // request, and therefore no quota reservation (reservations live inside enrich()).
           if (gaps.length === 0) return { providerIndex, run: { name: provider.name, data: {} } as ProviderRun };
           return { providerIndex, run: await run(provider, gaps, scarceContext) };
         })
@@ -1566,6 +1695,14 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
         // Silently ignored when db modules are partially mocked in unit tests
       });
 
+    // Persist a field-by-field coverage report for admin/ops (filled / winning source /
+    // missing). buildEnrichmentCoverageReport also mirrors into the module-level last-report slot.
+    try {
+      this.lastCoverageReport = buildEnrichmentCoverageReport(merged, this.activeSources);
+    } catch {
+      this.lastCoverageReport = null;
+    }
+
     return merged;
   }
 }
@@ -1629,8 +1766,12 @@ export function webullUnofficialEnabled(): boolean {
   return ["1", "true", "on", "yes"].includes(String(process.env.WEBULL_UNOFFICIAL_ENABLED ?? "").trim().toLowerCase());
 }
 
+/** SEC EDGAR XBRL debt/equity enrichment — DEFAULT ON (keyless). Set
+ *  `SEC_XBRL_ENRICHMENT_ENABLED=0` to disable. */
 export function secXbrlEnrichmentEnabled(): boolean {
-  return ["1", "true", "on", "yes"].includes(String(process.env.SEC_XBRL_ENRICHMENT_ENABLED ?? "").trim().toLowerCase());
+  const raw = process.env.SEC_XBRL_ENRICHMENT_ENABLED;
+  if (raw === undefined || raw.trim() === "") return true;
+  return flagEnabled(raw);
 }
 
 /**
@@ -2196,6 +2337,159 @@ export function parseAlpacaSnapshot(snap: AlpacaSnapshot | undefined | null): Sy
   };
 }
 
+// ── Nasdaq.com public quote/summary (no API key) ─────────────────────────────
+// Keyless JSON endpoints used by nasdaq.com (same family as the delayed screener in
+// market.ts). Complements Yahoo when the crumb handshake fails or Yahoo rate-limits.
+const NASDAQ_QUOTE_UA =
+  "Mozilla/5.0 (compatible; SocraticTrade/1.0; +https://socratictrade.com; research@socratictrade.com)";
+
+/** Parse `/api/quote/{sym}/info` + `/api/quote/{sym}/summary` (+ optional holdings). */
+export function parseNasdaqQuoteInfo(payload: unknown): SymbolEnrichment {
+  const data = (payload as { data?: Record<string, unknown> } | undefined)?.data;
+  if (!data) return {};
+  const companyName = typeof data.companyName === "string" && data.companyName.trim()
+    ? data.companyName.replace(/\s+Common Stock\s*$/i, "").trim()
+    : undefined;
+  const pd = (data.primaryData ?? {}) as Record<string, unknown>;
+  const price = parseRapidApiNumberString(pd.lastSalePrice);
+  const intradayChangePct = parseRapidApiNumberString(pd.percentageChange);
+  const volume = parseRapidApiNumberString(pd.volume);
+  let fiftyTwoWeekHigh: number | undefined;
+  let fiftyTwoWeekLow: number | undefined;
+  const range = ((data.keyStats as Record<string, unknown> | undefined)?.fiftyTwoWeekHighLow as
+    | { value?: string }
+    | undefined)?.value;
+  if (typeof range === "string" && range.includes("-")) {
+    const parts = range.split(/\s*-\s*/).map((part) => parseRapidApiNumberString(part.trim()));
+    if (typeof parts[0] === "number") fiftyTwoWeekLow = parts[0];
+    if (typeof parts[1] === "number") fiftyTwoWeekHigh = parts[1];
+  }
+  return {
+    ...(companyName !== undefined && companyName && { companyName }),
+    ...(price !== undefined && price > 0 && { price }),
+    ...(intradayChangePct !== undefined && { intradayChangePct }),
+    ...(volume !== undefined && volume >= 0 && { volume }),
+    ...(fiftyTwoWeekHigh !== undefined && { fiftyTwoWeekHigh }),
+    ...(fiftyTwoWeekLow !== undefined && { fiftyTwoWeekLow })
+  };
+}
+
+export function parseNasdaqQuoteSummary(payload: unknown): SymbolEnrichment {
+  const summaryData = (payload as { data?: { summaryData?: Record<string, { value?: string }> } } | undefined)
+    ?.data?.summaryData;
+  if (!summaryData) return {};
+  const sector = summaryData.Sector?.value?.trim() || undefined;
+  const industry = summaryData.Industry?.value?.trim() || undefined;
+  const yieldRaw = parseRapidApiNumberString(summaryData.Yield?.value);
+  const targetMean = parseRapidApiNumberString(summaryData.OneYrTarget?.value);
+  let fiftyTwoWeekHigh: number | undefined;
+  let fiftyTwoWeekLow: number | undefined;
+  const range = summaryData.FiftTwoWeekHighLow?.value; // Nasdaq's typo in the wire key
+  if (typeof range === "string" && range.includes("/")) {
+    const parts = range.split("/").map((part) => parseRapidApiNumberString(part.replace(/[$,]/g, "").trim()));
+    // Wire format is High/Low
+    if (typeof parts[0] === "number") fiftyTwoWeekHigh = parts[0];
+    if (typeof parts[1] === "number") fiftyTwoWeekLow = parts[1];
+  }
+  return {
+    ...(sector !== undefined && { sector }),
+    ...(industry !== undefined && { industry }),
+    ...(yieldRaw !== undefined && yieldRaw >= 0 && { dividendYield: yieldRaw }),
+    ...(targetMean !== undefined && targetMean > 0 && { targetMean }),
+    ...(fiftyTwoWeekHigh !== undefined && { fiftyTwoWeekHigh }),
+    ...(fiftyTwoWeekLow !== undefined && { fiftyTwoWeekLow })
+  };
+}
+
+export function parseNasdaqInstitutionalHoldings(payload: unknown): SymbolEnrichment {
+  const ownership = (payload as {
+    data?: { ownershipSummary?: { SharesOutstandingPCT?: { value?: string } } };
+  } | undefined)?.data?.ownershipSummary;
+  const pct = parseRapidApiNumberString(ownership?.SharesOutstandingPCT?.value);
+  return pct !== undefined && pct >= 0 ? { institutionOwnershipPct: pct } : {};
+}
+
+export class NasdaqQuoteEnrichmentProvider implements MarketEnrichmentProvider {
+  readonly name = "nasdaq-quote";
+  readonly costTier = "free" as const;
+  readonly configured = true;
+
+  async enrich(symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
+    const normalized = Array.from(new Set(symbols.map(normalizeSymbol))).filter(Boolean).slice(0, maxSymbols());
+    if (normalized.length === 0) return {};
+
+    const now = Date.now();
+    const result: Record<string, SymbolEnrichment> = {};
+    const misses: string[] = [];
+    for (const symbol of normalized) {
+      const cached = cache.get(`nasdaq-quote:${symbol}`);
+      if (cached && cached.expiresAt > now) result[symbol] = cached.data;
+      else misses.push(symbol);
+    }
+    if (misses.length === 0) return result;
+
+    for (let i = 0; i < misses.length; i += CONCURRENCY) {
+      const chunk = misses.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        chunk.map(async (symbol) => {
+          try {
+            const data = await this.fetchSymbol(symbol);
+            if (Object.keys(data).length > 0) {
+              cache.set(`nasdaq-quote:${symbol}`, { expiresAt: now + ttlMs(), data });
+            }
+            result[symbol] = data;
+          } catch {
+            result[symbol] = {};
+          }
+        })
+      );
+    }
+    return result;
+  }
+
+  private async getJson(path: string): Promise<unknown> {
+    return withProviderLimit(this.name, async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      try {
+        const res = await fetchWithRetry(
+          `https://api.nasdaq.com${path}`,
+          {
+            cache: "no-store",
+            signal: controller.signal,
+            headers: {
+              Accept: "application/json,text/plain,*/*",
+              "User-Agent": NASDAQ_QUOTE_UA,
+              Origin: "https://www.nasdaq.com",
+              Referer: "https://www.nasdaq.com/"
+            }
+          },
+          { service: this.name, retries: 1 }
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.json();
+      } finally {
+        clearTimeout(timeout);
+      }
+    });
+  }
+
+  private async fetchSymbol(symbol: string): Promise<SymbolEnrichment> {
+    // BRK.B works on Nasdaq's API; BRK-B does not — keep dots.
+    const enc = encodeURIComponent(symbol);
+    const [infoRes, summaryRes, holdingsRes] = await Promise.allSettled([
+      this.getJson(`/api/quote/${enc}/info?assetclass=stocks`),
+      this.getJson(`/api/quote/${enc}/summary?assetclass=stocks`),
+      this.getJson(`/api/company/${enc}/institutional-holdings`)
+    ]);
+    const merged: SymbolEnrichment = {};
+    if (infoRes.status === "fulfilled") Object.assign(merged, parseNasdaqQuoteInfo(infoRes.value));
+    if (summaryRes.status === "fulfilled") Object.assign(merged, parseNasdaqQuoteSummary(summaryRes.value));
+    if (holdingsRes.status === "fulfilled") Object.assign(merged, parseNasdaqInstitutionalHoldings(holdingsRes.value));
+    return merged;
+  }
+}
+
 // ── Yahoo Finance provider (no API key required) ─────────────────────────────
 // Uses Yahoo Finance session-crumb auth to call v10/finance/quoteSummary.
 // Provides: sector, industry, P/E, EPS, dividend yield, and analyst rating.
@@ -2210,6 +2504,8 @@ const YF_CREDS_RETRY_BACKOFF_MS = 500;
 
 class YahooFinanceEnrichmentProvider implements MarketEnrichmentProvider {
   readonly name = "yahoo-finance";
+  /** Keyless floor — always free-wave under the free-first planner. */
+  readonly costTier = "free" as const;
   readonly configured = true;
 
   async enrich(symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
@@ -3206,6 +3502,68 @@ export class MassiveEnrichmentProvider implements MarketEnrichmentProvider {
 
 // ── ROIC.ai provider ──────────────────────────────────────────────────────────
 
+/** Maps a ROIC.ai `/v2/company/profile/{sym}` row (snake_case) into SymbolEnrichment.
+ *  Ratios endpoint paths historically 404'd on free keys — profile alone still fills
+ *  company/sector/industry/dividend/short-interest/price when present. */
+export function parseRoicProfile(profile: unknown, now: number = Date.now()): SymbolEnrichment {
+  const p = (Array.isArray(profile) ? profile[0] : profile) as Record<string, unknown> | undefined;
+  if (!p || typeof p !== "object") return {};
+
+  const companyName = firstString(p, ["company_name", "companyName", "name"]);
+  const sector = firstString(p, ["sector"]);
+  const industry = firstString(p, ["industry"]);
+  const price = firstNumber(p, ["price"]);
+  const dividendYield = firstNumber(p, ["dividend_yield", "dividendYield"]);
+  const shortPercentOfFloat = firstNumber(p, [
+    "short_shares_outstanding_percentage",
+    "shortPercentOfFloat",
+    "short_percent_of_float"
+  ]);
+  const institutionOwnershipPct = firstNumber(p, [
+    "percentage_held_by_institutions",
+    "institutionOwnershipPct"
+  ]);
+
+  let daysToEarnings: number | undefined;
+  const earningsRaw = firstString(p, ["earnings_date", "earningsDate"]);
+  if (earningsRaw) {
+    const ts = Date.parse(earningsRaw);
+    if (Number.isFinite(ts) && ts > now) {
+      daysToEarnings = Math.max(0, Math.ceil((ts - now) / 86_400_000));
+    }
+  }
+
+  return {
+    ...(companyName !== undefined && { companyName }),
+    ...(sector !== undefined && { sector }),
+    ...(industry !== undefined && { industry }),
+    ...(price !== undefined && price > 0 && { price }),
+    ...(dividendYield !== undefined && dividendYield >= 0 && { dividendYield: normalizePercent(dividendYield) }),
+    ...(shortPercentOfFloat !== undefined && shortPercentOfFloat >= 0 && { shortPercentOfFloat: normalizePercent(shortPercentOfFloat) }),
+    ...(institutionOwnershipPct !== undefined && institutionOwnershipPct >= 0 && {
+      institutionOwnershipPct: normalizePercent(institutionOwnershipPct)
+    }),
+    ...(daysToEarnings !== undefined && { daysToEarnings })
+  };
+}
+
+export function parseRoicRatios(ratios: unknown): SymbolEnrichment {
+  const r = (Array.isArray(ratios) ? ratios[0] : ratios) as Record<string, unknown> | undefined;
+  if (!r || typeof r !== "object") return {};
+  const peRatio = firstNumber(r, ["peRatio", "pe", "pe_ratio"]);
+  const pbRatio = firstNumber(r, ["pbRatio", "pb", "pb_ratio", "priceToBook"]);
+  const eps = firstNumber(r, ["eps"]);
+  const returnOnEquity = firstNumber(r, ["roe", "returnOnEquity", "return_on_equity"]);
+  const debtToEquity = firstNumber(r, ["debtToEquity", "debt_to_equity"]);
+  return {
+    ...(peRatio !== undefined && peRatio > 0 && { peRatio }),
+    ...(pbRatio !== undefined && pbRatio > 0 && { pbRatio }),
+    ...(eps !== undefined && { eps }),
+    ...(returnOnEquity !== undefined && { returnOnEquity: normalizePercent(returnOnEquity) }),
+    ...(debtToEquity !== undefined && debtToEquity >= 0 && { debtToEquity })
+  };
+}
+
 export class RoicAiEnrichmentProvider implements MarketEnrichmentProvider {
   readonly name = "roic";
   readonly costTier = "paid" as const;
@@ -3244,7 +3602,9 @@ export class RoicAiEnrichmentProvider implements MarketEnrichmentProvider {
     if (misses.length === 0) return result;
 
     const credKey = `${this.keySource}:${this.userId ?? ""}`;
-    const allowed = admitProviderRequests("roic", credKey, misses.length * 2);
+    // Profile is the reliable free-tier endpoint; ratios paths currently 404 — reserve 1/symbol
+    // for the profile call (ratios are best-effort and do not block admission).
+    const allowed = admitProviderRequests("roic", credKey, misses.length);
     if (!allowed) return result;
 
     for (let i = 0; i < misses.length; i += CONCURRENCY) {
@@ -3252,39 +3612,53 @@ export class RoicAiEnrichmentProvider implements MarketEnrichmentProvider {
       await Promise.all(
         chunk.map(async (symbol) => {
           try {
+            const covered = context?.coveredFields?.[symbol];
+            const needProfile =
+              !covered ||
+              !covered.has("companyName") ||
+              !covered.has("sector") ||
+              !covered.has("industry") ||
+              !covered.has("dividendYield") ||
+              !covered.has("shortPercentOfFloat") ||
+              !covered.has("price");
+            const needRatios =
+              !covered ||
+              !covered.has("peRatio") ||
+              !covered.has("pbRatio") ||
+              !covered.has("eps") ||
+              !covered.has("returnOnEquity") ||
+              !covered.has("debtToEquity");
+
             const [profileRes, ratiosRes] = await Promise.allSettled([
-              fetchWithRetry(
-                `${this.base}/company/profile/${encodeURIComponent(symbol)}?apikey=${encodeURIComponent(this.apiKey)}`,
-                {},
-                { service: "roic", keySource: this.keySource, userId: this.userId }
-              ),
-              fetchWithRetry(
-                `${this.base}/financial-ratios/${encodeURIComponent(symbol)}?apikey=${encodeURIComponent(this.apiKey)}`,
-                {},
-                { service: "roic", keySource: this.keySource, userId: this.userId }
-              ),
+              needProfile
+                ? fetchWithRetry(
+                    `${this.base}/company/profile/${encodeURIComponent(symbol)}?apikey=${encodeURIComponent(this.apiKey)}`,
+                    {},
+                    { service: "roic", keySource: this.keySource, userId: this.userId }
+                  )
+                : Promise.resolve(undefined),
+              needRatios
+                ? fetchWithRetry(
+                    `${this.base}/financial-ratios/${encodeURIComponent(symbol)}?apikey=${encodeURIComponent(this.apiKey)}`,
+                    {},
+                    { service: "roic", keySource: this.keySource, userId: this.userId, retries: 0 }
+                  )
+                : Promise.resolve(undefined),
             ]);
 
-            const profile = profileRes.status === "fulfilled" && profileRes.value?.ok ? await profileRes.value.json() : undefined;
-            const ratios = ratiosRes.status === "fulfilled" && ratiosRes.value?.ok ? await ratiosRes.value.json() : undefined;
+            const profile =
+              profileRes.status === "fulfilled" && profileRes.value?.ok
+                ? await profileRes.value.json()
+                : undefined;
+            const ratios =
+              ratiosRes.status === "fulfilled" && ratiosRes.value?.ok
+                ? await ratiosRes.value.json()
+                : undefined;
 
-            const item: SymbolEnrichment = {};
-            if (profile) {
-              const p = Array.isArray(profile) ? profile[0] : profile;
-              if (p?.name || p?.companyName) item.companyName = String(p.name || p.companyName);
-              if (p?.sector) item.sector = String(p.sector);
-              if (p?.industry) item.industry = String(p.industry);
-            }
-            if (ratios) {
-              const r = Array.isArray(ratios) ? ratios[0] : ratios;
-              if (r) {
-                if (typeof r.peRatio === "number" || typeof r.pe === "number") item.peRatio = r.peRatio ?? r.pe;
-                if (typeof r.pbRatio === "number" || typeof r.pb === "number") item.pbRatio = r.pbRatio ?? r.pb;
-                if (typeof r.eps === "number") item.eps = r.eps;
-                if (typeof r.roe === "number" || typeof r.returnOnEquity === "number") item.returnOnEquity = r.roe ?? r.returnOnEquity;
-                if (typeof r.debtToEquity === "number") item.debtToEquity = r.debtToEquity;
-              }
-            }
+            const item: SymbolEnrichment = {
+              ...parseRoicProfile(profile, now),
+              ...parseRoicRatios(ratios)
+            };
 
             if (Object.keys(item).length > 0) {
               result[symbol] = item;
@@ -4021,15 +4395,59 @@ export function parseAlphaVantageOverview(payload: Record<string, unknown>): Sym
 }
 
 /**
+ * Parse Alpha Vantage NEWS_SENTIMENT feed (native or RapidAPI — byte-identical shape) into
+ * sentiment 0–100 + up to 5 headlines. Shared by the RapidAPI failover lane.
+ */
+export function parseAlphaVantageNewsSentiment(
+  payload: Record<string, unknown>,
+  symbol: string
+): Pick<SymbolEnrichment, "sentiment" | "headlines"> {
+  if (!payload || !Array.isArray(payload.feed)) return {};
+  const feed = payload.feed as Array<Record<string, unknown>>;
+  const headlines = feed
+    .slice(0, 5)
+    .map((item) => (typeof item.title === "string" ? item.title.trim() : ""))
+    .filter(Boolean);
+
+  let scoreSum = 0;
+  let scoreCount = 0;
+  for (const item of feed.slice(0, 20)) {
+    const tickerArr = Array.isArray(item.ticker_sentiment) ? item.ticker_sentiment : [];
+    const targetTicker = tickerArr.find((t: { ticker?: string }) => t.ticker === symbol);
+    if (targetTicker && typeof targetTicker.ticker_sentiment_score === "string") {
+      const score = Number(targetTicker.ticker_sentiment_score);
+      if (Number.isFinite(score)) {
+        scoreSum += score;
+        scoreCount++;
+      }
+    } else if (typeof item.overall_sentiment_score === "number" && Number.isFinite(item.overall_sentiment_score)) {
+      // Fallback when ticker_sentiment is absent (some RapidAPI responses only carry overall).
+      scoreSum += item.overall_sentiment_score;
+      scoreCount++;
+    }
+  }
+
+  const sentiment =
+    scoreCount > 0
+      ? Math.max(0, Math.min(100, Math.round(50 + (scoreSum / scoreCount) * 100)))
+      : undefined;
+
+  return {
+    ...(sentiment !== undefined && { sentiment }),
+    ...(headlines.length > 0 && { headlines })
+  };
+}
+
+/**
  * Alpha Vantage via RapidAPI (host alpha-vantage.p.rapidapi.com) — a DIFFERENT credential/transport
  * from the native AlphaVantageEnrichmentProvider above (query-param `apikey=`, own key pool, 25/day
  * native per-source-IP cap). This lane authenticates via the x-rapidapi-host/x-rapidapi-key headers
  * instead, and its real quota shape is a flat 500/day (RapidAPI dashboard, owner-confirmed) + 5
  * req/min — nothing like the native key-pool's daily cap, so it gets its OWN persisted budget
  * (rapidapi-quota.ts) rather than sharing tryReserveAlphaVantageCalls. Confirmed byte-identical JSON
- * shape to native (2026-07-19 ground truth), but this provider only wires up OVERVIEW
- * (fundamentals) — NOT NEWS_SENTIMENT, which the native lane above already covers when configured,
- * and which isn't worth spending this separate quota on redundantly.
+ * shape to native (2026-07-19 ground truth). Wires OVERVIEW (fundamentals) plus NEWS_SENTIMENT
+ * (headlines/sentiment) when the coveredFields hint still shows those gaps — so Alpaca/Yahoo news
+ * winners do not burn this quota.
  */
 export class AlphaVantageRapidApiEnrichmentProvider implements MarketEnrichmentProvider {
   readonly name = "alpha-vantage-rapidapi";
@@ -4038,7 +4456,7 @@ export class AlphaVantageRapidApiEnrichmentProvider implements MarketEnrichmentP
   // Quota-scarce (500/day shared against the 900/day combined ceiling) — gated into the cascade's
   // second wave so it is never spent on a symbol every field it supplies is already filled for.
   readonly quotaScarce = true;
-  // Exactly the keys parseAlphaVantageOverview can produce — keep in sync with that parser.
+  // Keep in sync with parseAlphaVantageOverview + parseAlphaVantageNewsSentiment.
   readonly suppliesFields = [
     "peRatio",
     "dividendYield",
@@ -4050,7 +4468,9 @@ export class AlphaVantageRapidApiEnrichmentProvider implements MarketEnrichmentP
     "fiftyTwoWeekHigh",
     "fiftyTwoWeekLow",
     "epsGrowth",
-    "analystBySource"
+    "analystBySource",
+    "sentiment",
+    "headlines"
   ] as const;
   private readonly host = "alpha-vantage.p.rapidapi.com";
   private readonly scope: CacheScope;
@@ -4061,7 +4481,7 @@ export class AlphaVantageRapidApiEnrichmentProvider implements MarketEnrichmentP
     this.keySource = keySource;
   }
 
-  async enrich(symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
+  async enrich(symbols: string[], context?: EnrichmentContext): Promise<Record<string, SymbolEnrichment>> {
     const normalized = Array.from(new Set(symbols.map(normalizeSymbol))).filter(Boolean).slice(0, maxSymbols());
     if (normalized.length === 0) return {};
 
@@ -4076,39 +4496,82 @@ export class AlphaVantageRapidApiEnrichmentProvider implements MarketEnrichmentP
     }
     if (misses.length === 0) return result;
 
+    const overviewFields = [
+      "peRatio", "dividendYield", "eps", "sector", "industry", "pbRatio", "beta",
+      "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "epsGrowth", "analystBySource"
+    ] as const;
+
     for (let i = 0; i < misses.length; i += CONCURRENCY) {
       const chunk = misses.slice(i, i + CONCURRENCY);
       await Promise.all(
         chunk.map(async (symbol) => {
-          const admitted = tryReserveRapidApiCalls("alpha-vantage-rapidapi", 1, now) > 0;
-          if (!admitted) { result[symbol] = {}; return; }
-          const tracker = { dispatched: false };
-          try {
-            const payload = await rapidApiGetJson(
-              this.host,
-              `/query?function=OVERVIEW&symbol=${encodeURIComponent(symbol)}`,
-              this.apiKey,
-              { service: this.name, keySource: this.keySource, userId: this.userId },
-              tracker
-            );
-            const errorMessage = alphaVantageOverviewErrorMessage(payload);
-            if (errorMessage) {
-              logApiHealth({
-                service: this.name,
-                ok: false,
-                errorText: scrubProviderErrorText(`Alpha Vantage (RapidAPI) API warning/error: ${errorMessage}`, this.apiKey),
-                keySource: this.keySource,
-                userId: this.userId
-              });
-              throw new Error("Alpha Vantage (RapidAPI) API warning/error");
-            }
-            const data = parseAlphaVantageOverview(payload as Record<string, unknown>);
-            writeEnrichmentCache(this.name, symbol, this.scope, this.userId, data, now + ttlMs());
-            result[symbol] = data;
-          } catch {
-            if (!tracker.dispatched) refundRapidApiCalls("alpha-vantage-rapidapi", 1, now);
+          const covered = context?.coveredFields?.[symbol];
+          const needOverview = !covered || overviewFields.some((f) => !covered.has(f));
+          const needNews = !covered || !covered.has("sentiment") || !covered.has("headlines");
+          if (!needOverview && !needNews) {
             result[symbol] = {};
+            return;
           }
+
+          const merged: SymbolEnrichment = {};
+
+          if (needOverview) {
+            const admitted = tryReserveRapidApiCalls("alpha-vantage-rapidapi", 1, now) > 0;
+            if (admitted) {
+              const tracker = { dispatched: false };
+              try {
+                const payload = await rapidApiGetJson(
+                  this.host,
+                  `/query?function=OVERVIEW&symbol=${encodeURIComponent(symbol)}`,
+                  this.apiKey,
+                  { service: this.name, keySource: this.keySource, userId: this.userId },
+                  tracker
+                );
+                const errorMessage = alphaVantageOverviewErrorMessage(payload);
+                if (errorMessage) {
+                  logApiHealth({
+                    service: this.name,
+                    ok: false,
+                    errorText: scrubProviderErrorText(`Alpha Vantage (RapidAPI) API warning/error: ${errorMessage}`, this.apiKey),
+                    keySource: this.keySource,
+                    userId: this.userId
+                  });
+                  throw new Error("Alpha Vantage (RapidAPI) API warning/error");
+                }
+                Object.assign(merged, parseAlphaVantageOverview(payload as Record<string, unknown>));
+              } catch {
+                if (!tracker.dispatched) refundRapidApiCalls("alpha-vantage-rapidapi", 1, now);
+              }
+            }
+          }
+
+          if (needNews) {
+            const admitted = tryReserveRapidApiCalls("alpha-vantage-rapidapi", 1, now) > 0;
+            if (admitted) {
+              const tracker = { dispatched: false };
+              try {
+                const payload = await rapidApiGetJson(
+                  this.host,
+                  `/query?function=NEWS_SENTIMENT&tickers=${encodeURIComponent(symbol)}&limit=50`,
+                  this.apiKey,
+                  { service: this.name, keySource: this.keySource, userId: this.userId },
+                  tracker
+                );
+                if (payload && typeof payload === "object") {
+                  const errMsg = alphaVantageOverviewErrorMessage(payload);
+                  if (errMsg) throw new Error(errMsg);
+                  Object.assign(merged, parseAlphaVantageNewsSentiment(payload as Record<string, unknown>, symbol));
+                }
+              } catch {
+                if (!tracker.dispatched) refundRapidApiCalls("alpha-vantage-rapidapi", 1, now);
+              }
+            }
+          }
+
+          if (Object.keys(merged).length > 0) {
+            writeEnrichmentCache(this.name, symbol, this.scope, this.userId, merged, now + ttlMs());
+          }
+          result[symbol] = merged;
         })
       );
     }
@@ -4690,11 +5153,11 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
   }
 }
 
-// ── SEC EDGAR XBRL company-facts provider (keyless, default-OFF) ─────────────
+// ── SEC EDGAR XBRL company-facts provider (keyless, DEFAULT ON) ──────────────
 // Fills debtToEquity from authoritative SEC 10-K filings via the public
 // companyfacts API (https://data.sec.gov/api/xbrl/companyfacts/CIK##########.json).
 // Polite 300 ms inter-symbol delay per SEC fair-access guidance.
-// Enable with: SEC_XBRL_ENRICHMENT_ENABLED=on
+// Disable with: SEC_XBRL_ENRICHMENT_ENABLED=0
 
 const SEC_XBRL_TTL_MS = 24 * 60 * 60_000; // 24h — filings move slowly
 const SEC_XBRL_DELAY_MS = 300; // polite inter-request delay
@@ -4869,6 +5332,7 @@ export function parseCompanyFacts(json: unknown): { debtToEquity?: number } {
 
 export class SecXbrlEnrichmentProvider implements MarketEnrichmentProvider {
   readonly name = "sec-xbrl";
+  readonly costTier = "free" as const;
   readonly configured = true;
 
   async enrich(symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
@@ -5137,7 +5601,8 @@ export class InsidersRapidApiEnrichmentProvider implements MarketEnrichmentProvi
   readonly name = "insiders-rapidapi";
   readonly costTier = "free" as const;
   readonly configured = true;
-  readonly quotaScarce = true; // Use sparingly
+  readonly quotaScarce = true; // Use sparingly — wave-two only when insiderSentiment is still empty.
+  readonly suppliesFields = ["insiderSentiment"] as const;
   private readonly base = "https://insiders.p.rapidapi.com";
   private readonly scope: CacheScope;
   private readonly keySource: ApiKeySource;
@@ -5244,7 +5709,8 @@ export class TwelveDataRapidApiEnrichmentProvider implements MarketEnrichmentPro
   readonly name = "twelvedata-rapidapi";
   readonly costTier = "free" as const;
   readonly configured = true;
-  readonly quotaScarce = true; // Use sparingly
+  readonly quotaScarce = true; // Use sparingly — wave-two only when 52w range is still empty.
+  readonly suppliesFields = ["fiftyTwoWeekHigh", "fiftyTwoWeekLow"] as const;
   private readonly base = "https://twelve-data1.p.rapidapi.com";
   private readonly scope: CacheScope;
   private readonly keySource: ApiKeySource;
@@ -5334,5 +5800,579 @@ export class TwelveDataRapidApiEnrichmentProvider implements MarketEnrichmentPro
     } finally {
       clearTimeout(timeout);
     }
+  }
+}
+
+// ── FilingAPI.dev (FILINGAPI) ────────────────────────────────────────────────
+// https://filingapi.dev — X-API-Key header (company/calendar); some routes also
+// accept ?api_key=. Free tier ~50 req/day → scarce wave-C only.
+
+export function parseFilingApiCompany(payload: unknown): SymbolEnrichment {
+  const row = payload as Record<string, unknown> | undefined;
+  if (!row || typeof row !== "object") return {};
+  const ticker = firstString(row, ["ticker", "symbol"]);
+  const sector = firstString(row, ["sector"]);
+  const industry = firstString(row, ["industry"]);
+  const companyName = firstString(row, ["company_name", "companyName", "name"]) ?? ticker;
+  return {
+    ...(companyName !== undefined && { companyName }),
+    ...(sector !== undefined && { sector }),
+    ...(industry !== undefined && { industry })
+  };
+}
+
+export function parseFilingApiEarningsCalendar(
+  payload: unknown,
+  symbol: string,
+  now: number = Date.now()
+): Pick<SymbolEnrichment, "daysToEarnings"> {
+  const earnings = (payload as { earnings?: Array<Record<string, unknown>> } | undefined)?.earnings;
+  if (!Array.isArray(earnings) || earnings.length === 0) return {};
+  const upper = symbol.toUpperCase();
+  const future = earnings
+    .filter((e) => String(e.symbol ?? "").toUpperCase() === upper && typeof e.date === "string")
+    .map((e) => Date.parse(String(e.date)))
+    .filter((ts) => Number.isFinite(ts) && ts >= now - 12 * 3_600_000)
+    .sort((a, b) => a - b);
+  if (future.length === 0) return {};
+  const days = Math.max(0, Math.ceil((future[0] - now) / 86_400_000));
+  return { daysToEarnings: days };
+}
+
+/** Map FilingAPI insider summary → 0–100 insiderSentiment (50 = neutral). */
+export function parseFilingApiInsiderSummary(payload: unknown): Pick<SymbolEnrichment, "insiderSentiment"> {
+  const row = payload as Record<string, unknown> | undefined;
+  if (!row || typeof row !== "object") return {};
+  const sellRatio = firstNumber(row, ["sell_ratio", "sellRatio"]);
+  const signal = firstString(row, ["signal"]);
+  let score: number | undefined;
+  if (sellRatio !== undefined) {
+    score = Math.max(5, Math.min(95, Math.round(50 - (sellRatio - 0.5) * 80)));
+  } else if (signal === "net_selling") {
+    score = 30;
+  } else if (signal === "net_buying") {
+    score = 70;
+  }
+  return score !== undefined ? { insiderSentiment: score } : {};
+}
+
+export class FilingApiEnrichmentProvider implements MarketEnrichmentProvider {
+  readonly name = "filingapi";
+  readonly costTier = "paid" as const;
+  readonly configured = true;
+  readonly quotaScarce = true;
+  readonly suppliesFields = ["companyName", "sector", "industry", "daysToEarnings", "insiderSentiment"] as const;
+  private readonly base = "https://filingapi.dev";
+  private readonly scope: CacheScope;
+  private readonly keySource: ApiKeySource;
+
+  constructor(
+    private readonly apiKey: string,
+    keySource: ApiKeySource = "env",
+    private readonly userId?: string
+  ) {
+    this.scope = cacheScopeForKeySource(keySource, userId);
+    this.keySource = keySource;
+  }
+
+  async enrich(symbols: string[], context?: EnrichmentContext): Promise<Record<string, SymbolEnrichment>> {
+    const normalized = Array.from(new Set(symbols.map(normalizeSymbol))).filter(Boolean).slice(0, maxSymbols());
+    if (normalized.length === 0) return {};
+    const now = Date.now();
+    const consented = hasDataPoolConsent(this.userId ?? "local");
+    const result: Record<string, SymbolEnrichment> = {};
+    const misses: string[] = [];
+    for (const symbol of normalized) {
+      const cached = readEnrichmentCache(this.name, symbol, this.userId, consented, now);
+      if (cached) result[symbol] = cached.data;
+      else misses.push(symbol);
+    }
+    if (misses.length === 0) return result;
+
+    const credKey = `${this.keySource}:${this.userId ?? ""}`;
+    // ~50/day free tier — admit at most one symbol-bundle per reservation unit.
+    const allowed = admitProviderRequests(this.name, credKey, misses.length);
+    if (!allowed) return result;
+    const work = misses.slice(0, allowed);
+
+    for (let i = 0; i < work.length; i += CONCURRENCY) {
+      const chunk = work.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        chunk.map(async (symbol) => {
+          try {
+            const covered = context?.coveredFields?.[symbol];
+            const needCompany =
+              !covered || !covered.has("companyName") || !covered.has("sector") || !covered.has("industry");
+            const needEarnings = !covered || !covered.has("daysToEarnings");
+            const needInsiders = !covered || !covered.has("insiderSentiment");
+            const [companyRes, earningsRes, insiderRes] = await Promise.allSettled([
+              needCompany ? this.getJson(`/v1/company/${encodeURIComponent(symbol)}`) : Promise.resolve(undefined),
+              needEarnings
+                ? this.getJson(`/v1/calendar/earnings?ticker=${encodeURIComponent(symbol)}`)
+                : Promise.resolve(undefined),
+              needInsiders
+                ? this.getJson(`/v1/insiders/${encodeURIComponent(symbol)}/summary?api_key=${encodeURIComponent(this.apiKey)}`)
+                : Promise.resolve(undefined)
+            ]);
+            const merged: SymbolEnrichment = {
+              ...(companyRes.status === "fulfilled" ? parseFilingApiCompany(companyRes.value) : {}),
+              ...(earningsRes.status === "fulfilled"
+                ? parseFilingApiEarningsCalendar(earningsRes.value, symbol, now)
+                : {}),
+              ...(insiderRes.status === "fulfilled" ? parseFilingApiInsiderSummary(insiderRes.value) : {})
+            };
+            if (Object.keys(merged).length > 0) {
+              writeEnrichmentCache(this.name, symbol, this.scope, this.userId, merged, now + 6 * 60 * 60_000);
+            }
+            result[symbol] = merged;
+          } catch {
+            result[symbol] = {};
+          }
+        })
+      );
+    }
+    return result;
+  }
+
+  private async getJson(path: string): Promise<unknown> {
+    return withProviderLimit(this.name, async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      try {
+        const res = await fetchWithRetry(
+          `${this.base}${path}`,
+          {
+            cache: "no-store",
+            signal: controller.signal,
+            headers: {
+              Accept: "application/json",
+              "X-API-Key": this.apiKey
+            }
+          },
+          { service: this.name, keySource: this.keySource, userId: this.userId, apiKey: this.apiKey, retries: 0 }
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.json();
+      } finally {
+        clearTimeout(timeout);
+      }
+    });
+  }
+}
+
+// ── RapidAPI: Yahoo Finance (API Dojo) ───────────────────────────────────────
+// Hub listing currently API-not-found (delisted); host still answers 403 if unsubscribed.
+// Host: yh-finance.p.rapidapi.com
+
+function yahooChartRaw(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (value && typeof value === "object" && "raw" in (value as object)) {
+    const raw = (value as { raw?: unknown }).raw;
+    if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  }
+  return undefined;
+}
+
+export function parseYhFinanceApiDojoSummary(payload: unknown): SymbolEnrichment {
+  const root = payload as Record<string, unknown> | undefined;
+  if (!root) return {};
+  const quoteType = (root.quoteType ?? {}) as Record<string, unknown>;
+  const summaryProfile = (root.summaryProfile ?? {}) as Record<string, unknown>;
+  const summaryDetail = (root.summaryDetail ?? {}) as Record<string, unknown>;
+  const defaultKeyStatistics = (root.defaultKeyStatistics ?? {}) as Record<string, unknown>;
+  const financialData = (root.financialData ?? {}) as Record<string, unknown>;
+  const priceNode = (root.price ?? {}) as Record<string, unknown>;
+
+  const companyName =
+    firstString(quoteType, ["longName", "shortName"]) ??
+    firstString(priceNode, ["longName", "shortName"]);
+  const sector = firstString(summaryProfile, ["sector"]);
+  const industry = firstString(summaryProfile, ["industry"]);
+  const price = yahooChartRaw(priceNode.regularMarketPrice) ?? yahooChartRaw(financialData.currentPrice);
+  const changePct = yahooChartRaw(priceNode.regularMarketChangePercent);
+  const volume = yahooChartRaw(priceNode.regularMarketVolume);
+  const peRatio = yahooChartRaw(summaryDetail.trailingPE) ?? yahooChartRaw(defaultKeyStatistics.trailingPE);
+  const dividendYieldRaw = yahooChartRaw(summaryDetail.dividendYield);
+  const beta = yahooChartRaw(summaryDetail.beta) ?? yahooChartRaw(defaultKeyStatistics.beta);
+  const fiftyTwoWeekHigh = yahooChartRaw(summaryDetail.fiftyTwoWeekHigh);
+  const fiftyTwoWeekLow = yahooChartRaw(summaryDetail.fiftyTwoWeekLow);
+  const shortPct = yahooChartRaw(defaultKeyStatistics.shortPercentOfFloat);
+  const targetMean = yahooChartRaw(financialData.targetMeanPrice);
+  const eps = yahooChartRaw(defaultKeyStatistics.trailingEps);
+  const pbRatio = yahooChartRaw(defaultKeyStatistics.priceToBook);
+  const roe = yahooChartRaw(financialData.returnOnEquity);
+
+  let analystBySource: Record<string, AnalystRatingDetail> | undefined;
+  const recMean = yahooChartRaw(financialData.recommendationMean);
+  if (recMean !== undefined && recMean > 0) {
+    const score = analystScoreFromMean(recMean);
+    analystBySource = {
+      "yh-finance-apidojo": {
+        score: Math.round(score),
+        label: labelFromAnalystScore(score),
+        mean: Math.round(recMean * 100) / 100
+      }
+    };
+  }
+
+  return {
+    ...(companyName !== undefined && { companyName }),
+    ...(sector !== undefined && { sector }),
+    ...(industry !== undefined && { industry }),
+    ...(price !== undefined && price > 0 && { price }),
+    ...(changePct !== undefined && { intradayChangePct: Math.abs(changePct) <= 1 ? changePct * 100 : changePct }),
+    ...(volume !== undefined && volume >= 0 && { volume }),
+    ...(peRatio !== undefined && peRatio > 0 && { peRatio }),
+    ...(dividendYieldRaw !== undefined && dividendYieldRaw >= 0 && { dividendYield: normalizePercent(dividendYieldRaw) }),
+    ...(beta !== undefined && { beta }),
+    ...(fiftyTwoWeekHigh !== undefined && { fiftyTwoWeekHigh }),
+    ...(fiftyTwoWeekLow !== undefined && { fiftyTwoWeekLow }),
+    ...(shortPct !== undefined && shortPct >= 0 && { shortPercentOfFloat: normalizePercent(shortPct) }),
+    ...(targetMean !== undefined && targetMean > 0 && { targetMean }),
+    ...(eps !== undefined && { eps }),
+    ...(pbRatio !== undefined && pbRatio > 0 && { pbRatio }),
+    ...(roe !== undefined && { returnOnEquity: normalizePercent(roe) }),
+    ...(analystBySource !== undefined && { analystBySource })
+  };
+}
+
+export class YhFinanceApiDojoEnrichmentProvider implements MarketEnrichmentProvider {
+  readonly name = "yh-finance-apidojo";
+  readonly costTier = "paid" as const;
+  readonly configured = true;
+  readonly quotaScarce = true;
+  readonly suppliesFields = [
+    "companyName", "sector", "industry", "price", "intradayChangePct", "volume",
+    "peRatio", "dividendYield", "beta", "fiftyTwoWeekHigh", "fiftyTwoWeekLow",
+    "shortPercentOfFloat", "targetMean", "eps", "pbRatio", "returnOnEquity", "analystBySource"
+  ] as const;
+  private readonly host = "yh-finance.p.rapidapi.com";
+  private readonly scope: CacheScope;
+  private readonly keySource: ApiKeySource;
+
+  constructor(private readonly apiKey: string, keySource: ApiKeySource = "env", private readonly userId?: string) {
+    this.scope = cacheScopeForKeySource(keySource, userId);
+    this.keySource = keySource;
+  }
+
+  async enrich(symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
+    const normalized = Array.from(new Set(symbols.map(normalizeSymbol))).filter(Boolean).slice(0, maxSymbols());
+    if (normalized.length === 0) return {};
+    const now = Date.now();
+    const consented = hasDataPoolConsent(this.userId ?? "local");
+    const result: Record<string, SymbolEnrichment> = {};
+    const misses: string[] = [];
+    for (const symbol of normalized) {
+      const cached = readEnrichmentCache(this.name, symbol, this.userId, consented, now);
+      if (cached) result[symbol] = cached.data;
+      else misses.push(symbol);
+    }
+    for (let i = 0; i < misses.length; i += CONCURRENCY) {
+      const chunk = misses.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        chunk.map(async (symbol) => {
+          const admitted = tryReserveRapidApiCalls("yh-finance-apidojo", 1, now) > 0;
+          if (!admitted) { result[symbol] = {}; return; }
+          const tracker = { dispatched: false };
+          try {
+            const payload = await rapidApiGetJson(
+              this.host,
+              `/stock/v2/get-summary?symbol=${encodeURIComponent(symbol)}&region=US`,
+              this.apiKey,
+              { service: this.name, keySource: this.keySource, userId: this.userId },
+              tracker
+            );
+            const data = parseYhFinanceApiDojoSummary(payload);
+            if (Object.keys(data).length > 0) {
+              writeEnrichmentCache(this.name, symbol, this.scope, this.userId, data, now + ttlMs());
+            }
+            result[symbol] = data;
+          } catch {
+            if (!tracker.dispatched) refundRapidApiCalls("yh-finance-apidojo", 1, now);
+            result[symbol] = {};
+          }
+        })
+      );
+    }
+    return result;
+  }
+}
+
+// ── RapidAPI: Real-Time Finance Data ─────────────────────────────────────────
+// Pricing: https://rapidapi.com/letscrape-6bRBa3QguO5/api/real-time-finance-data/pricing
+// Host: real-time-finance-data.p.rapidapi.com (confirmed 200 with stock-quote + stock-news)
+
+export function parseRealTimeFinanceQuote(payload: unknown): SymbolEnrichment {
+  const data = (payload as { data?: Record<string, unknown> } | undefined)?.data;
+  if (!data) return {};
+  const companyName = firstString(data, ["name"]);
+  const price = firstNumber(data, ["price"]);
+  const changePct = firstNumber(data, ["change_percent", "changePercent"]);
+  const volume = firstNumber(data, ["volume"]);
+  return {
+    ...(companyName !== undefined && { companyName }),
+    ...(price !== undefined && price > 0 && { price }),
+    ...(changePct !== undefined && { intradayChangePct: changePct }),
+    ...(volume !== undefined && volume >= 0 && { volume })
+  };
+}
+
+export function parseRealTimeFinanceNews(payload: unknown): Pick<SymbolEnrichment, "headlines" | "sentiment"> {
+  const news = (payload as { data?: { news?: Array<Record<string, unknown>> } } | undefined)?.data?.news;
+  if (!Array.isArray(news) || news.length === 0) return {};
+  const headlines = news
+    .slice(0, 5)
+    .map((n) => firstString(n, ["article_title", "title"]) ?? "")
+    .filter(Boolean);
+  if (headlines.length === 0) return {};
+  return { headlines, sentiment: scoreHeadlines(headlines) };
+}
+
+export class RealTimeFinanceDataEnrichmentProvider implements MarketEnrichmentProvider {
+  readonly name = "real-time-finance-data";
+  readonly costTier = "paid" as const;
+  readonly configured = true;
+  readonly quotaScarce = true;
+  readonly suppliesFields = ["companyName", "price", "intradayChangePct", "volume", "headlines", "sentiment"] as const;
+  private readonly host = "real-time-finance-data.p.rapidapi.com";
+  private readonly scope: CacheScope;
+  private readonly keySource: ApiKeySource;
+
+  constructor(private readonly apiKey: string, keySource: ApiKeySource = "env", private readonly userId?: string) {
+    this.scope = cacheScopeForKeySource(keySource, userId);
+    this.keySource = keySource;
+  }
+
+  async enrich(symbols: string[], context?: EnrichmentContext): Promise<Record<string, SymbolEnrichment>> {
+    const normalized = Array.from(new Set(symbols.map(normalizeSymbol))).filter(Boolean).slice(0, maxSymbols());
+    if (normalized.length === 0) return {};
+    const now = Date.now();
+    const consented = hasDataPoolConsent(this.userId ?? "local");
+    const result: Record<string, SymbolEnrichment> = {};
+    const misses: string[] = [];
+    for (const symbol of normalized) {
+      const cached = readEnrichmentCache(this.name, symbol, this.userId, consented, now);
+      if (cached) result[symbol] = cached.data;
+      else misses.push(symbol);
+    }
+    for (let i = 0; i < misses.length; i += CONCURRENCY) {
+      const chunk = misses.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        chunk.map(async (symbol) => {
+          const covered = context?.coveredFields?.[symbol];
+          const needQuote =
+            !covered ||
+            !covered.has("price") ||
+            !covered.has("companyName") ||
+            !covered.has("intradayChangePct") ||
+            !covered.has("volume");
+          const needNews = !covered || !covered.has("headlines") || !covered.has("sentiment");
+          const merged: SymbolEnrichment = {};
+
+          if (needQuote) {
+            const admitted = tryReserveRapidApiCalls("real-time-finance-data", 1, now) > 0;
+            if (admitted) {
+              const tracker = { dispatched: false };
+              try {
+                const payload = await rapidApiGetJson(
+                  this.host,
+                  `/stock-quote?symbol=${encodeURIComponent(symbol)}`,
+                  this.apiKey,
+                  { service: this.name, keySource: this.keySource, userId: this.userId },
+                  tracker
+                );
+                Object.assign(merged, parseRealTimeFinanceQuote(payload));
+              } catch {
+                if (!tracker.dispatched) refundRapidApiCalls("real-time-finance-data", 1, now);
+              }
+            }
+          }
+
+          if (needNews) {
+            const admitted = tryReserveRapidApiCalls("real-time-finance-data", 1, now) > 0;
+            if (admitted) {
+              const tracker = { dispatched: false };
+              try {
+                const payload = await rapidApiGetJson(
+                  this.host,
+                  `/stock-news?symbol=${encodeURIComponent(symbol)}`,
+                  this.apiKey,
+                  { service: this.name, keySource: this.keySource, userId: this.userId },
+                  tracker
+                );
+                Object.assign(merged, parseRealTimeFinanceNews(payload));
+              } catch {
+                if (!tracker.dispatched) refundRapidApiCalls("real-time-finance-data", 1, now);
+              }
+            }
+          }
+
+          if (Object.keys(merged).length > 0) {
+            writeEnrichmentCache(this.name, symbol, this.scope, this.userId, merged, now + ttlMs());
+          }
+          result[symbol] = merged;
+        })
+      );
+    }
+    return result;
+  }
+}
+
+// ── RapidAPI: Seeking Alpha (API Dojo) ───────────────────────────────────────
+// Hub listing currently API-not-found (delisted); host still answers 403 if unsubscribed.
+// Host: seeking-alpha.p.rapidapi.com
+
+export function parseSeekingAlphaKeyStats(payload: unknown): SymbolEnrichment {
+  const root = payload as Record<string, unknown> | undefined;
+  if (!root) return {};
+  // Tolerate several nesting shapes RapidAPI SA products have used over time.
+  const candidates: Array<Record<string, unknown> | undefined> = [
+    root,
+    root.data as Record<string, unknown> | undefined,
+    (root.data as { attributes?: Record<string, unknown> } | undefined)?.attributes,
+    Array.isArray(root.data) ? (root.data[0] as Record<string, unknown>) : undefined
+  ];
+  for (const row of candidates) {
+    if (!row) continue;
+    const peRatio = firstNumber(row, ["peRatio", "pe_ratio", "priceEarningsRatio", "pe"]);
+    const eps = firstNumber(row, ["eps", "earningsPerShare", "diluted_eps"]);
+    const dividendYield = firstNumber(row, ["dividendYield", "div_yield", "yield"]);
+    const beta = firstNumber(row, ["beta"]);
+    const companyName = firstString(row, ["companyName", "name", "company"]);
+    const sector = firstString(row, ["sector"]);
+    const industry = firstString(row, ["industry"]);
+    if (
+      peRatio !== undefined ||
+      eps !== undefined ||
+      dividendYield !== undefined ||
+      beta !== undefined ||
+      companyName ||
+      sector ||
+      industry
+    ) {
+      return {
+        ...(companyName !== undefined && { companyName }),
+        ...(sector !== undefined && { sector }),
+        ...(industry !== undefined && { industry }),
+        ...(peRatio !== undefined && peRatio > 0 && { peRatio }),
+        ...(eps !== undefined && { eps }),
+        ...(dividendYield !== undefined && dividendYield >= 0 && { dividendYield: normalizePercent(dividendYield) }),
+        ...(beta !== undefined && { beta })
+      };
+    }
+  }
+  return {};
+}
+
+export function parseSeekingAlphaArticles(payload: unknown): Pick<SymbolEnrichment, "headlines" | "sentiment"> {
+  const root = payload as Record<string, unknown> | undefined;
+  if (!root) return {};
+  const list =
+    (Array.isArray(root.data) ? root.data : undefined) ??
+    (Array.isArray(root.articles) ? root.articles : undefined) ??
+    ((root.data as { articles?: unknown } | undefined)?.articles as unknown[] | undefined) ??
+    [];
+  if (!Array.isArray(list) || list.length === 0) return {};
+  const headlines = list
+    .slice(0, 5)
+    .map((item) => {
+      const row = item as Record<string, unknown>;
+      const attrs = (row.attributes ?? row) as Record<string, unknown>;
+      return firstString(attrs, ["title", "article_title"]) ?? "";
+    })
+    .filter(Boolean);
+  if (headlines.length === 0) return {};
+  return { headlines, sentiment: scoreHeadlines(headlines) };
+}
+
+export class SeekingAlphaRapidApiEnrichmentProvider implements MarketEnrichmentProvider {
+  readonly name = "seeking-alpha-rapidapi";
+  readonly costTier = "paid" as const;
+  readonly configured = true;
+  readonly quotaScarce = true;
+  readonly suppliesFields = [
+    "companyName", "sector", "industry", "peRatio", "eps", "dividendYield", "beta", "headlines", "sentiment"
+  ] as const;
+  private readonly host = "seeking-alpha.p.rapidapi.com";
+  private readonly scope: CacheScope;
+  private readonly keySource: ApiKeySource;
+
+  constructor(private readonly apiKey: string, keySource: ApiKeySource = "env", private readonly userId?: string) {
+    this.scope = cacheScopeForKeySource(keySource, userId);
+    this.keySource = keySource;
+  }
+
+  async enrich(symbols: string[], context?: EnrichmentContext): Promise<Record<string, SymbolEnrichment>> {
+    const normalized = Array.from(new Set(symbols.map(normalizeSymbol))).filter(Boolean).slice(0, maxSymbols());
+    if (normalized.length === 0) return {};
+    const now = Date.now();
+    const consented = hasDataPoolConsent(this.userId ?? "local");
+    const result: Record<string, SymbolEnrichment> = {};
+    const misses: string[] = [];
+    for (const symbol of normalized) {
+      const cached = readEnrichmentCache(this.name, symbol, this.userId, consented, now);
+      if (cached) result[symbol] = cached.data;
+      else misses.push(symbol);
+    }
+    for (let i = 0; i < misses.length; i += CONCURRENCY) {
+      const chunk = misses.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        chunk.map(async (symbol) => {
+          const covered = context?.coveredFields?.[symbol];
+          const needStats =
+            !covered ||
+            !covered.has("peRatio") ||
+            !covered.has("eps") ||
+            !covered.has("sector") ||
+            !covered.has("companyName");
+          const needNews = !covered || !covered.has("headlines") || !covered.has("sentiment");
+          const merged: SymbolEnrichment = {};
+
+          if (needStats) {
+            const admitted = tryReserveRapidApiCalls("seeking-alpha-rapidapi", 1, now) > 0;
+            if (admitted) {
+              const tracker = { dispatched: false };
+              try {
+                const payload = await rapidApiGetJson(
+                  this.host,
+                  `/symbols/get-key-stats?symbol=${encodeURIComponent(symbol)}`,
+                  this.apiKey,
+                  { service: this.name, keySource: this.keySource, userId: this.userId },
+                  tracker
+                );
+                Object.assign(merged, parseSeekingAlphaKeyStats(payload));
+              } catch {
+                if (!tracker.dispatched) refundRapidApiCalls("seeking-alpha-rapidapi", 1, now);
+              }
+            }
+          }
+
+          if (needNews) {
+            const admitted = tryReserveRapidApiCalls("seeking-alpha-rapidapi", 1, now) > 0;
+            if (admitted) {
+              const tracker = { dispatched: false };
+              try {
+                const payload = await rapidApiGetJson(
+                  this.host,
+                  `/articles/list?symbol=${encodeURIComponent(symbol)}&size=5`,
+                  this.apiKey,
+                  { service: this.name, keySource: this.keySource, userId: this.userId },
+                  tracker
+                );
+                Object.assign(merged, parseSeekingAlphaArticles(payload));
+              } catch {
+                if (!tracker.dispatched) refundRapidApiCalls("seeking-alpha-rapidapi", 1, now);
+              }
+            }
+          }
+
+          if (Object.keys(merged).length > 0) {
+            writeEnrichmentCache(this.name, symbol, this.scope, this.userId, merged, now + ttlMs());
+          }
+          result[symbol] = merged;
+        })
+      );
+    }
+    return result;
   }
 }

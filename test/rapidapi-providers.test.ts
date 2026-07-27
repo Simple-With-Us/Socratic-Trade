@@ -10,6 +10,7 @@ import {
   parseSteadyApiQuote,
   parseSteadyApiAssetProfile,
   parseAlphaVantageOverview,
+  parseAlphaVantageNewsSentiment,
   resolveRapidApiKey,
   AlphaVantageRapidApiEnrichmentProvider, FmpRapidApiEnrichmentProvider, InsidersRapidApiEnrichmentProvider, TwelveDataRapidApiEnrichmentProvider,
   type MarketEnrichmentProvider,
@@ -322,21 +323,64 @@ describe("RapidAPI providers as a failover tier — first-wins keeps the free sc
 
 // ── Quota enforcement — AlphaVantageRapidApiEnrichmentProvider never exceeds its cap ────
 
+describe("parseAlphaVantageNewsSentiment", () => {
+  it("maps ticker_sentiment scores to 0-100 and keeps headlines", () => {
+    const result = parseAlphaVantageNewsSentiment(
+      {
+        feed: [
+          {
+            title: "Apple beats estimates",
+            ticker_sentiment: [{ ticker: "AAPL", ticker_sentiment_score: "0.25" }]
+          },
+          {
+            title: "iPhone demand steady",
+            ticker_sentiment: [{ ticker: "AAPL", ticker_sentiment_score: "0.15" }]
+          }
+        ]
+      },
+      "AAPL"
+    );
+    expect(result.headlines).toEqual(["Apple beats estimates", "iPhone demand steady"]);
+    expect(result.sentiment).toBe(70); // 50 + round(0.20 * 100)
+  });
+});
+
 describe("AlphaVantageRapidApiEnrichmentProvider — respects the persisted daily budget", () => {
   it("never dispatches more network calls than the configured per-provider cap", async () => {
     process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_RAPIDAPI_PER_DAY = "2";
     let callCount = 0;
-    vi.stubGlobal("fetch", async () => {
+    vi.stubGlobal("fetch", async (url: string) => {
       callCount++;
+      const u = String(url);
+      if (u.includes("NEWS_SENTIMENT")) {
+        return new Response(JSON.stringify({ feed: [{ title: "Hello", overall_sentiment_score: 0.1 }] }), { status: 200 });
+      }
       return new Response(JSON.stringify({ Symbol: "X", PERatio: "10" }), { status: 200 });
     });
     const provider = new AlphaVantageRapidApiEnrichmentProvider("test-key", "env");
+    // Without coveredFields, each symbol may spend up to 2 calls (OVERVIEW + NEWS). Cap=2
+    // therefore admits one symbol's full pair (or two overview-only — either way ≤2).
     const symbols = ["AAA", "BBB", "CCC", "DDD", "EEE"];
     const result = await provider.enrich(symbols);
-    expect(callCount).toBe(2);
-    // Symbols beyond the budget are left unenriched by this provider this run, not fabricated.
-    const filled = symbols.filter((s) => result[s]?.peRatio !== undefined);
-    expect(filled.length).toBe(2);
+    expect(callCount).toBeLessThanOrEqual(2);
+    const filled = symbols.filter((s) => result[s]?.peRatio !== undefined || (result[s]?.headlines?.length ?? 0) > 0);
+    expect(filled.length).toBeGreaterThanOrEqual(1);
+    expect(filled.length).toBeLessThanOrEqual(2);
+  });
+
+  it("skips NEWS_SENTIMENT when coveredFields already has sentiment+headlines", async () => {
+    process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_RAPIDAPI_PER_DAY = "10";
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      urls.push(String(url));
+      return new Response(JSON.stringify({ Symbol: "AAPL", PERatio: "20", Sector: "Technology" }), { status: 200 });
+    });
+    const provider = new AlphaVantageRapidApiEnrichmentProvider("test-key", "env");
+    await provider.enrich(["AAPL"], {
+      coveredFields: { AAPL: new Set(["sentiment", "headlines"]) }
+    });
+    expect(urls.some((u) => u.includes("OVERVIEW"))).toBe(true);
+    expect(urls.some((u) => u.includes("NEWS_SENTIMENT"))).toBe(false);
   });
 
   it("refunds a reservation whose call never reached the network so a later symbol can use it", async () => {

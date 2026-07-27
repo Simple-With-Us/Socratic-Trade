@@ -13,6 +13,7 @@ import {
   Activity,
   Brain,
   Database,
+  Layers,
   Server,
   FileText,
   ArrowLeft,
@@ -62,6 +63,12 @@ const NAV_ITEMS: NavItem[] = [
     label: "RAG Coverage",
     desc: "Vector index contents per ticker: chunk counts, freshness, and coverage gaps.",
     icon: Database
+  },
+  {
+    href: "/admin/enrichment-coverage",
+    label: "Enrichment Coverage",
+    desc: "Last market-data cascade: field fill rates, winning sources, and missing data points.",
+    icon: Layers
   },
   {
     href: "/admin/server",

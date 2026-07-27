@@ -42,6 +42,8 @@ const HARD_DEFAULTS: Record<string, { perMin?: number; minIntervalMs?: number; c
   // No published limit, but the prod egress IP gets HTTP 429 on a cold burst while paced,
   // low-concurrency requests succeed — gentle pacing, not parallel bursts.
   "yahoo-finance": { minIntervalMs: 400, concurrency: 2 },
+  // Public Nasdaq.com JSON endpoints (no key) — gentle pacing to avoid 429 bursts.
+  "nasdaq-quote": { minIntervalMs: 250, concurrency: 2 },
   // Free "Basic" tier is 8 API credits/min and each symbol in a batch /quote costs ONE credit
   // (see docs/data-provider-mcp-evaluation.md). The REAL budget control now lives in the provider
   // (data-providers.ts): it caps a call to `twelveDataCreditsPerMin()` symbols AND gates to one
@@ -62,7 +64,11 @@ const HARD_DEFAULTS: Record<string, { perMin?: number; minIntervalMs?: number; c
   // key pool above (500/day, 5/min — NOT the native 25/day) — see alpha-vantage-key-pool.ts's
   // own doc comment for why native pacing stays keyed by provider name only; this is a distinct
   // provider name so the two transports never share one pacer/quota by accident.
-  "alpha-vantage-rapidapi": { perMin: 5, concurrency: 1 }
+  "alpha-vantage-rapidapi": { perMin: 5, concurrency: 1 },
+  "yh-finance-apidojo": { minIntervalMs: 1100, concurrency: 1 },
+  "real-time-finance-data": { minIntervalMs: 500, concurrency: 1 },
+  "seeking-alpha-rapidapi": { minIntervalMs: 1100, concurrency: 1 },
+  filingapi: { minIntervalMs: 400, concurrency: 1 }
 };
 
 function envKeyFor(provider: string): string {

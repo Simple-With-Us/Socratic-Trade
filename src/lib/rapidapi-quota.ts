@@ -25,7 +25,16 @@ import { getInternalSetting, setInternalSetting } from "./db";
 /** The three RapidAPI-backed provider lanes this budget covers. Using a closed union (rather than
  *  an arbitrary string) means a typo in a call site fails to compile instead of silently opening
  *  an unbudgeted new bucket. */
-export type RapidApiProviderKey = "mboum-finance" | "yahoo-finance15" | "alpha-vantage-rapidapi" | "fmp-rapidapi" | "insiders-rapidapi" | "twelvedata-rapidapi";
+export type RapidApiProviderKey =
+  | "mboum-finance"
+  | "yahoo-finance15"
+  | "alpha-vantage-rapidapi"
+  | "fmp-rapidapi"
+  | "insiders-rapidapi"
+  | "twelvedata-rapidapi"
+  | "yh-finance-apidojo"
+  | "real-time-finance-data"
+  | "seeking-alpha-rapidapi";
 
 const DEFAULT_PER_PROVIDER_DAILY_CAP: Record<RapidApiProviderKey, number> = {
   "mboum-finance": 16,
@@ -34,6 +43,10 @@ const DEFAULT_PER_PROVIDER_DAILY_CAP: Record<RapidApiProviderKey, number> = {
   "fmp-rapidapi": 50000,
   "insiders-rapidapi": 100,
   "twelvedata-rapidapi": 100,
+  // Free Basic tiers — keep small until owner confirms higher plan caps.
+  "yh-finance-apidojo": 16,
+  "real-time-finance-data": 50,
+  "seeking-alpha-rapidapi": 20,
 };
 
 const ENV_KEY_FOR_PROVIDER: Record<RapidApiProviderKey, string> = {
@@ -43,6 +56,9 @@ const ENV_KEY_FOR_PROVIDER: Record<RapidApiProviderKey, string> = {
   "fmp-rapidapi": "PROVIDER_QUOTA_FMP_RAPIDAPI_PER_DAY",
   "insiders-rapidapi": "PROVIDER_QUOTA_INSIDERS_RAPIDAPI_PER_DAY",
   "twelvedata-rapidapi": "PROVIDER_QUOTA_TWELVEDATA_RAPIDAPI_PER_DAY",
+  "yh-finance-apidojo": "PROVIDER_QUOTA_YH_FINANCE_APIDOJO_PER_DAY",
+  "real-time-finance-data": "PROVIDER_QUOTA_REAL_TIME_FINANCE_DATA_PER_DAY",
+  "seeking-alpha-rapidapi": "PROVIDER_QUOTA_SEEKING_ALPHA_RAPIDAPI_PER_DAY",
 };
 
 const DEFAULT_COMBINED_DAILY_CAP = 900;

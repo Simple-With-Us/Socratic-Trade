@@ -270,6 +270,8 @@ const API_KEY_ENV_MAP: Record<string, string> = {
   finnhub: "FINNHUB_API_KEY",
   fmp: "FMP_API_KEY",
   alphavantage: "ALPHAVANTAGE_API_KEY",
+  roic: "ROIC_API_KEY",
+  filingapi: "FILINGAPI",
   marketstack: "MARKETSTACK_API_KEY",
   fred: "FRED_API_KEY",
   sec_edgar_user_agent: "SEC_EDGAR_USER_AGENT",
@@ -297,6 +299,9 @@ const API_KEY_SERVICE_ALIASES: Record<string, string> = {
   alphavantage_api_key: "alphavantage",
   finnhub_api_key: "finnhub",
   fmp_api_key: "fmp",
+  filing_api: "filingapi",
+  filingapi_key: "filingapi",
+  filingapi_dev: "filingapi",
   openai_api_key: "openai",
   anthropic_api_key: "anthropic",
   xai_api_key: "xai",
@@ -376,6 +381,12 @@ export function apiKeyEnvVarForService(service: string): string | undefined {
   const canonical = normalizeApiKeyService(service);
   if (canonical === "massive" && !process.env.MASSIVE_API_KEY && process.env.MASSIVE_API_KEY_ALT) {
     return "MASSIVE_API_KEY_ALT";
+  }
+  if (canonical === "filingapi") {
+    for (const envVar of ["FILINGAPI", "FILINGAPI_KEY", "FILING_API_KEY"] as const) {
+      if ((process.env[envVar] ?? "").trim()) return envVar;
+    }
+    return "FILINGAPI";
   }
   return API_KEY_ENV_MAP[canonical];
 }
@@ -501,6 +512,8 @@ const API_KEY_TIER: Record<string, CredTier> = {
   finnhub: "shared-operator-infra",
   fmp: "shared-operator-infra",
   alphavantage: "shared-operator-infra",
+  roic: "shared-operator-infra",
+  filingapi: "shared-operator-infra",
   marketstack: "shared-operator-infra",
   fred: "shared-operator-infra",
   massive: "shared-operator-infra",
@@ -870,6 +883,7 @@ const ALL_SERVICE_ENV_VARS: Record<string, string[]> = {
   powerintell: ["FINTECH_STUDIOS_API_KEY", "POWERINTELL_API_KEY", "POWER_INTELL_API_KEY"],
   tiingo: ["TIINGO_API_KEY"],
   twelvedata: ["TWELVEDATA_API_KEY", "TWELVE_DATA_API_KEY"],
+  filingapi: ["FILINGAPI", "FILINGAPI_KEY", "FILING_API_KEY"],
   logodev: ["LOGO_DEV_TOKEN", "LOGO_DEV_API_KEY"],
   logodev_secret: ["LOGO_DEV_SECRET_KEY", "LOGO_DEV_SECRET"]
 };

@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 import { Card } from "../ui/primitives";
 import { DecisionLoopDiagram } from "./decision-loop-diagram";
+import { landingPageEnabled } from "@/lib/landing-page";
 
 export const metadata: Metadata = {
   title: "Decision framework",
@@ -117,6 +119,7 @@ const PRIMARY_LINK_SM =
   "inline-flex h-8 items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-accent px-3 text-[13px] font-medium text-accent-fg shadow-sm transition-colors hover:brightness-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 max-sm:min-h-11";
 
 export default function HowItWorksPage() {
+  if (!landingPageEnabled()) notFound();
   return (
     <div className="min-h-screen bg-bg text-fg">
       <header className="border-b border-line bg-surface/80 backdrop-blur-sm">

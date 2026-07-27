@@ -162,6 +162,34 @@ describe("applyEnrichment", () => {
     expect(enriched.sources?.daysToEarnings).toBe("yahoo-finance");
     expect(enriched.sources?.nearTheMoneyIv).toBe("robinhood-options");
   });
+
+  it("preserves cascade fieldObservations and providerFailures on the quote", () => {
+    const extra: SymbolEnrichment = {
+      peRatio: 22,
+      sources: { peRatio: "yahoo-finance" },
+      fieldObservations: {
+        peRatio: {
+          value: 22,
+          source: "yahoo-finance",
+          upstreamFamily: "yahoo-finance",
+          fetchedAt: "2026-07-26T00:00:00.000Z",
+          status: "ok"
+        }
+      },
+      providerFailures: {
+        finnhub: {
+          source: "finnhub",
+          upstreamFamily: "finnhub",
+          fetchedAt: "2026-07-26T00:00:00.000Z",
+          status: "failed",
+          errorKind: "TimeoutError"
+        }
+      }
+    };
+    const enriched = applyEnrichment(quote({ symbol: "NVDA" }), extra);
+    expect(enriched.fieldObservations?.peRatio?.source).toBe("yahoo-finance");
+    expect(enriched.providerFailures?.finnhub?.errorKind).toBe("TimeoutError");
+  });
 });
 
 describe("mergeQuoteData", () => {

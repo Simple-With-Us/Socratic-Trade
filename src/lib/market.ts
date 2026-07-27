@@ -1129,7 +1129,13 @@ export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): Ma
     evidenceBulletins: extra.shortInterestDisagreement
       ? Array.from(new Set([...(quote.evidenceBulletins ?? []), extra.shortInterestDisagreement]))
       : quote.evidenceBulletins,
-    sources: mergeSources(quote, extra)
+    sources: mergeSources(quote, extra),
+    // Keep cascade receipts on the quote so admin/ops/coverage reporting (and drilldowns) can see
+    // which providers failed and the per-field observation status — not only the winning scalar.
+    fieldObservations: extra.fieldObservations ?? quote.fieldObservations,
+    providerFailures: extra.providerFailures
+      ? { ...(quote.providerFailures ?? {}), ...extra.providerFailures }
+      : quote.providerFailures
   };
 }
 

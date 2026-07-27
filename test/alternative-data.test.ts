@@ -126,7 +126,7 @@ describe("Finnhub News Enrichment", () => {
     const provider = getEnrichmentProvider();
     // Yahoo Finance is the final real tier — always configured, no API key required.
     expect(provider.configured).toBe(true);
-    expect(provider.name).toBe("yahoo-finance");
+    expect(provider.name).toContain("yahoo-finance");
   });
 
   it("fetches and scores company news from Finnhub when key is configured", async () => {

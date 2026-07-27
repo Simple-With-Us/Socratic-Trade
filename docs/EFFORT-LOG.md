@@ -61,8 +61,12 @@ rules text. No effort rows were changed.)_
 As of 2026-07-08 (assignment-rule update).
 
 ## Planned / Reserved Before Implementation
+- **[Socratic.Trade][CURSOR] Free-first enrichment cascade + coverage report — In Progress 2026-07-26.** Optimize keyless/RapidAPI cascade; coverage admin/ops; AV RapidAPI NEWS; ROIC; nasdaq-quote; FilingAPI.dev; SEC XBRL default ON; RapidAPI yh-finance + real-time-finance-data + seeking-alpha wired (confirm SA/yh Subscribe Active). Branch `cursor/free-cascade-coverage-0aef`.
+
 - **[Socratic.Trade][OWNER REMINDER][GROK 2026-07-22] Enable default-off RAG / retrieval features after #1892 lands — PLANNED / UNASSIGNED.** **#1892 MERGED 2026-07-23** — enablement still gated on re-embed proof. Order: telemetry → eval → `RAG_CORPUS_WIDE_LEXICAL` → adaptive rerank → parent expansion → multi-query/HyDE. Checklist: `docs/FEATURE-ENABLEMENT-BACKLOG.md`.
 - **[Fleet][OWNER REMINDER][GROK 2026-07-22] Inventory + enable forgotten dormant features — PLANNED / UNASSIGNED.** Default-off flags, key-gated providers, rights dual-gates, policy toggles, cross-app holds. Living list: `docs/FEATURE-ENABLEMENT-BACKLOG.md`. Agents must append when landing new dormant switches.
+- **[Socratic.Trade][OWNER REMINDER][GROK 2026-07-22] Enable default-off RAG / retrieval features after #1892 lands — PLANNED / UNASSIGNED.** **#1892 MERGED 2026-07-23**; Priority A safe flags code-default ON 2026-07-24. Residual: MULTIQUERY/HyDE cost canaries, `VECTOR_ASOF_STRICT` coverage proof, clean-text reindex, legacy purge hold. Checklist: `docs/FEATURE-ENABLEMENT-BACKLOG.md`.
+- **[Fleet][OWNER REMINDER][GROK 2026-07-22] Inventory + enable forgotten dormant features — residual PLANNED / UNASSIGNED.** Living list + ready-vs-blocked: `docs/FEATURE-ENABLEMENT-BACKLOG.md`. Runtime checklist: `GET /api/admin/rag-coverage` → `dormantFeatures`. Rights/cost gates stay owner-gated; ready items (CSP report-only, USAGE_BUDGET_ENFORCE, clean-text rev-safe, disclosure embed, candidate-pool canary) await Infisical flip.
 
 - **Exit-strategy intelligence program, Phase B — Exit Contract + lanes (UNASSIGNED; blocked on nothing, but
   money-path: frontier-tier adversarial review required).** Persist parameterized exit contract columns on
@@ -446,6 +450,7 @@ Jul 8 18:10 CT)._
 - **Prune stale abandoned local-only branches from origin (June 21–29 experiments) (OWNER, M)** — ~40 origin branches are ahead of main with NO PR and last activity June 21–29 (agent/claude-*, safety/*, feat/*, reliability/*, sim/funded-test-account, etc.). They are stale experiments from the pre-worktree era, add noise to every branch scan, and confuse abandoned-work triage. Audit which are fully superseded by merged work and delete them from origin (with owner confirmation before any deletion per the no-destructive-git rule).
 
 ## In Progress
+- **[Socratic.Trade][CURSOR] Dormant features readiness (`cursor/dormant-features-impl-1c6c`) — IN PROGRESS 2026-07-27.** Landing-page gate contract (unset=ON), CSP report collector + report-uri, `currentEmbedRev` for clean-text, `dormantFeatures` on admin RAG coverage, FEATURE-ENABLEMENT Ready/Keep-off rewrite. Not flipping rights/cost gates.
 
 - **[Socratic.Trade][GROK] PR merge drain + Actions runner unblock (land #2218/#2220, close #2217, arm #2219, fix #2215 via shared v2.3.0 + trades filter, e2e smoke package.json race re-checkout) — In Progress 2026-07-26.** Self-hosted runners online; residual open: #2219 (CI), this fix PR, #2215 to close when superseded.
 - **[Socratic.Trade][CURSOR] Fix vs-SPY benchmark accuracy (cash-flow-aware TWR) — In Progress 2026-07-25.** Branch `cursor/fix-vs-spy-benchmark-9833`. All-cash deposits/resets no longer read as alpha; missing-fill buy guard; newest snapshot slice; live portfolio tip; Home You/SPY breakdown. Rollout: `docs/rollouts/2026-07-25-fix-vs-spy-benchmark.md`.
@@ -847,7 +852,7 @@ _(None actively in flight as of CURSOR accuracy audit 2026-07-24. Stale Usage-co
 infra-panel reliability rows moved to Completed — see corrections below. Claim here before starting
 new substantial work.)_
 - **[Socratic.Trade][CURSOR] Coolify/Hetzner runners only + monitor (branch `cursor/coolify-runners-only-14e5`) — IN PROGRESS 2026-07-24.** Owner: no GitHub-hosted Actions; use ci-cpx32 systemd runners + Coolify prod host. Fix `sentry-ci-report` off missing `socratic-deploy`; sudo-free `gh`; Playwright without `--with-deps`; add `scripts/monitor-coolify-runners.sh`. Supersedes conflicting #2158 billing framing. Rollout: `docs/rollouts/2026-07-24-coolify-runners-only.md`.
-- **[Socratic.Trade][CURSOR] RAG enablement + Exit Contract B1 + branch prune (`cursor/rag-enable-exit-prune-1c6c`) — IN PROGRESS 2026-07-24.** Code-default ON for safe RAG flags; Exit Contract columns + fill writes + proactive/synthetic read-with-fallback; w2 DISCARD + 19 origin branches pruned; board/FEATURE-ENABLEMENT sync for `effort-issues-sync`.
+- **[Socratic.Trade][CURSOR] RAG enablement + Exit Contract B1 + branch prune (`cursor/rag-enable-exit-prune-1c6c`) — COMPLETED 2026-07-24 via #2193 (`42114e8f`).** Code-default ON for safe RAG flags; Exit Contract B1 substrate; w2 DISCARD + branch prune; board/FEATURE-ENABLEMENT sync. Residual dormant readiness continues on `cursor/dormant-features-impl-1c6c`.
 _(None actively in flight as of CURSOR accuracy audit 2026-07-24. Stale Usage-compliance Wave 2 and
 infra-panel reliability rows moved to Completed — see corrections below. Claim here before starting
 new substantial work.)_
