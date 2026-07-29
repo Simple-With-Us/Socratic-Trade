@@ -39,11 +39,15 @@ and a dated rollout note before commit/push. Do not recreate a single
 - Equity execution only.
 - Allowlist required before autonomy can be enabled.
 - Allowlist can be either a custom ticker list or the built-in S&P 500 universe.
-- Max `$10` per order.
-- Max `$500` daily notional.
+- Max `5%` of NAV per order (account-relative default, tunable to a fixed dollar cap).
+- Max `20%` of NAV daily notional (account-relative default, tunable to a fixed dollar cap).
 - Max `25%` portfolio exposure per symbol.
-- Max `10` live orders per day.
-- Kill switch blocks new orders immediately.
+- Max `80%` gross exposure (maintains minimum 20% cash buffer by default).
+- Max `10` opening orders per day.
+- Max `120s` quote staleness limit on opening orders.
+- Max `10%` entry price drift limit.
+- Max `5%` Average Daily Volume (ADV) market impact cap.
+- Kill switch (`halted` system state) blocks new orders immediately.
 
 ## Allowed Universe
 
