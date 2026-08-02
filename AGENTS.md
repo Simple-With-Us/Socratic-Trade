@@ -166,13 +166,23 @@ cleanup thresholds matter — a build burst filled the old box's disk on 2026-07
 rollout note).
 
 **PRODUCTION IS ON COOLIFY (cut over 2026-07-07, owner-directed, MONET; verified).**
-`socratictrade.com` = Coolify app `socratic-trade-prod` (uuid `m1os7ijf31bg3fanil152e4b`,
-branch `main`, nixpacks). **AUTO-DEPLOY IS ON (owner-directed 2026-07-10): every push to `main`
-auto-deploys `socratic-trade-prod`** via Coolify's GitHub-App webhook — `is_auto_deploy_enabled=true`
-plus GitHub's webhook IP ranges whitelisted on the `jays.services` Cloudflare zone (they were 403'd by
-the zone's IP-allowlist, which is why webhooks never fired before; bot protection stays on for all
-other traffic). Merge == live; the **ANNOUNCE-THEN-DEPLOY protocol is RETIRED** — do NOT post deploy
-claims or manually trigger deploys. Rollback to manual: set `is_auto_deploy_enabled=false` on the app.
+`socratictrade.com` = Coolify app **uuid `socratic-app`** (name "Socratic.Trade", branch `main`,
+dockerfile build pack, SSH deploy-key git source). The old uuid `m1os7ijf31bg3fanil152e4b` and the
+nixpacks note are STALE — the app was recreated during the Oracle migration; API calls against the
+old uuid return a bare `{"message":...}` that is easy to misread as a permissions problem.
+**AUTO-DEPLOY IS ON (owner-directed 2026-07-10): every push to `main` auto-deploys** via the
+repo's GitHub webhook to Coolify's **manual webhook endpoint**
+(`https://host.jays.services/webhooks/source/github/events/manual`) — NOT the GitHub-App
+integration; the deploy-key source uses the manual endpoint, which validates an HMAC secret that
+must equal the app's `manual_webhook_secret_github`. **Known failure mode (bit us 2026-08-01/02):
+if those secrets drift, every main push is answered `Invalid signature`, no deployment is ever
+created, and prod silently freezes while merges pile up** — GitHub's hook page still shows green
+200s, so check the DELIVERY RESPONSE BODY (`gh api .../hooks/<id>/deliveries/<id>` →
+`.response.payload`), not the status code. Repair recipe + receipts:
+`docs/rollouts/2026-08-02-deploy-webhook-secret-repair.md`. Verify any deploy landed with
+`bash scripts/verify-deploy-sha.sh` (asserts the live sha CONTAINS your commit). Merge == live;
+the **ANNOUNCE-THEN-DEPLOY protocol is RETIRED** — do NOT post deploy claims or manually trigger
+deploys. Rollback to manual: disable auto deploy on the app.
 Details/verification: `docs/rollouts/2026-07-10-auto-deploy-on.md`.
 `~/apps/trading-publish.sh` is DEPRECATED (it targets the stopped Mac pm2 lane); canonical
 protocol detail lives in `/Users/jay/apps/AGENT-SYNC.md`. Boot path:

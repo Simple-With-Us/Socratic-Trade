@@ -5,36 +5,36 @@ Snapshot only: what is true right now, what is blocked, what to do next. This fi
 of work), effort state lives in `docs/EFFORT-LOG.md`, and entries written here before
 2026-08-01 were moved to `docs/status-archive.md`.
 
-Last updated: 2026-08-01.
+Last updated: 2026-08-02.
 
 ## Where things stand
 
 | | |
 |---|---|
-| `main` / PR #2341 | `ag/codex-review-remediation` — PR #2341 open, auto-merge armed, CI gates clean |
-| Production (`socratictrade.com`) | Coolify `socratic-trade-prod` (auto-deploys on `main` push) |
-| Core trading health | DB ok, scheduler ticking, 3 active accounts / 0 degraded, litestream replicating |
-| Data providers | `dataProvidersDegraded=true` — FMP plan probe 403, Massive capped to ~2y history |
-| Deploy mechanism | auto-deploy on push to `main` (Coolify `socratic-trade-prod`) |
+| `main` | `19dfd51b` — includes the full 30-finding Codex remediation (PR #2341, AG-reviewed) |
+| Production (`socratictrade.com`) | live `23d7b9cd`; a webhook-triggered build of `19dfd51b` is in progress after the 2026-08-02 webhook-secret repair |
+| Deploy mechanism | auto-deploy on push to `main` — **repaired 2026-08-02** (see blocker history below) |
 | Core trading health | DB ok, scheduler ticking, 3 active accounts / 0 degraded, litestream replicating |
 | Data providers | `dataProvidersDegraded=true` — FMP plan probe 403, Massive capped to ~2y history |
 
 ## Blockers
 
-1. **Production is behind `main` and auto-deploy is not closing the gap — OWNER ACTION.**
-   Live health reported `d456ca58` at 21:33Z and *still* reported `d456ca58` more than an
-   hour later, while `main` advanced from `88e614d7` to `ad1c1d5c`. That is 5 commits
-   merged and not running, and the gap is growing, so this is not a slow build. Merging is
-   currently **not** evidence that anything shipped.
-
-   Verify before believing a change is live:
+1. **RESOLVED 2026-08-02 — auto-deploy was broken by a webhook HMAC mismatch.** Every
+   push to `refs/heads/main` was answered by Coolify with
+   `[{"status":"failed","message":"Invalid signature."}]` (visible in the GitHub hook
+   delivery log), so no deployment was ever created; the single deploy on 2026-08-01
+   (`23d7b9cd`, process start 23:29Z) was the owner's manual click, not the pipeline.
+   Repair: synced the GitHub hook secret to the Coolify app's
+   `manual_webhook_secret_github`, deleted the duplicate hook (same URL/events, wrong
+   secret — its "Validation Failed" on re-config proved it identical), and redelivered the
+   newest main push, which immediately produced a real `in_progress` deployment of
+   `19dfd51b`. Also fixed en route: the AGENTS.md Coolify uuid was stale — the app is
+   `socratic-app` now, not `m1os7ijf31bg3fanil152e4b`. Detail:
+   `docs/rollouts/2026-08-02-deploy-webhook-secret-repair.md`. Until the `19dfd51b` build
+   is verified live, keep using:
    ```bash
    bash scripts/verify-deploy-sha.sh            # defaults to origin/main
    ```
-   Agents must NOT hand-trigger a Coolify deploy (manual deploy claims/triggers are
-   retired). The likely causes are on the Coolify side — a wedged/zombie `in_progress`
-   deployment blocking the queue, or the GitHub webhook not being delivered — and both need
-   the owner at the dashboard.
 
 2. **Local verification is broken on npm 11.16 (all agent lanes).** `npm install` and
    `npm ci` both fail preparing the `congress-trading-shared` git dependency:
@@ -54,8 +54,8 @@ Last updated: 2026-08-01.
 
 ## Next action
 
-- Confirm production actually advances to `main` on the next merge, using the SHA
-  verifier rather than assuming.
+- Confirm the in-flight `19dfd51b` build lands (`bash scripts/verify-deploy-sha.sh`) —
+  after that, merge==live is trustworthy again.
 - Land the durable fix for the npm 11.16 install failure — every agent lane currently
   needs the `npm@10` workaround to run the gates locally.
 - Owner decisions pending: FMP subscription, Massive plan tier.
