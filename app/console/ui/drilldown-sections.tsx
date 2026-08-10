@@ -33,23 +33,20 @@ import {
 
 // ── Shared shells ────────────────────────────────────────────────────────────
 
-/** Bordered section block with an uppercase title (tooltip on the title). */
-function Section({ title, titleHint, children }: { title: string; titleHint: string; children: ReactNode }) {
-  return (
-    <section className="rounded-control border border-[color:var(--con-line)] p-3">
-      <h3 className="con-card-title mb-2 cursor-default">
-        <Tooltip content={titleHint}>{title}</Tooltip>
-      </h3>
-      {children}
-    </section>
-  );
-}
-
-/** Collapsible section for the deep-dive tail of the drawer. */
-function Disclosure({ title, titleHint, children, defaultOpen }: { title: string; titleHint: string; children: ReactNode; defaultOpen?: boolean }) {
+/**
+ * Collapsible section shell shared by every drilldown section — native <details>/<summary> with
+ * a top-right "EXPAND >" / "COLLAPSE ⌄" show/hide cue (`.con-disclosure-label`, the same idiom
+ * `Card`'s collapsible mode uses in primitives.tsx). Every section is collapsible now: default
+ * open for all except Sources, which starts collapsed (least useful on first glance — raw
+ * per-field provenance, not something you check every time).
+ */
+function Disclosure({ title, titleHint, children, defaultOpen = true }: { title: string; titleHint: string; children: ReactNode; defaultOpen?: boolean }) {
   return (
     <details className="con-disclosure rounded-control border border-[color:var(--con-line)] px-3" open={defaultOpen}>
-      <summary><Tooltip content={titleHint}>{title}</Tooltip></summary>
+      <summary className="flex items-center gap-3 focus:outline-none">
+        <span className="con-card-title"><Tooltip content={titleHint}>{title}</Tooltip></span>
+        <span className="con-disclosure-label ml-auto" />
+      </summary>
       <div className="pb-3">{children}</div>
     </details>
   );
@@ -82,7 +79,7 @@ export function ExposureSection({
   const empty = !position && pending.length === 0 && orders.length === 0;
 
   return (
-    <Section
+    <Disclosure
       title="Your exposure"
       titleHint={`Everything this account has going on in ${symbol}: the current position, trade ideas waiting for approval, and recent orders.`}
     >
@@ -207,7 +204,7 @@ export function ExposureSection({
           </ul>
         </div>
       )}
-    </Section>
+    </Disclosure>
   );
 }
 
@@ -218,7 +215,7 @@ export function SignalSummarySection({ view, derived }: { view: QuoteView; deriv
   const chips = buildSignalChips(view);
 
   return (
-    <Section
+    <Disclosure
       title="Signal summary"
       titleHint="A plain-language readout of the strongest bullish and bearish signals in the last scan's data for this symbol — the same thresholds the legacy dashboard used."
     >
@@ -259,7 +256,7 @@ export function SignalSummarySection({ view, derived }: { view: QuoteView; deriv
           )}
         </div>
       )}
-    </Section>
+    </Disclosure>
   );
 }
 
@@ -268,7 +265,7 @@ export function SignalSummarySection({ view, derived }: { view: QuoteView; deriv
 export function DerivedTilesSection({ view, derived }: { view: QuoteView; derived: DerivedResult }) {
   const tiles = buildDerivedTiles(view, derived);
   return (
-    <Section
+    <Disclosure
       title="Derived metrics"
       titleHint="Ratios this app computes from the raw quote data it already pulls — the same values handed to the trading agent. Hover any tile for what it means and how to read it."
     >
@@ -285,7 +282,7 @@ export function DerivedTilesSection({ view, derived }: { view: QuoteView; derive
           </Tooltip>
         ))}
       </div>
-    </Section>
+    </Disclosure>
   );
 }
 
@@ -297,7 +294,7 @@ export function FactorSection({ view }: { view: QuoteView }) {
   const rows = factorRows(fb);
   if (rows.length === 0) return null;
   return (
-    <Section
+    <Disclosure
       title="Factor breakdown"
       titleHint="Every weighted sub-score (0–100 each) behind this symbol's composite scan score. The composite is the policy-weighted total the screener ranked by."
     >
@@ -321,7 +318,7 @@ export function FactorSection({ view }: { view: QuoteView }) {
           <span className="con-num">{typeof view.score === "number" ? view.score.toFixed(1) : EM_DASH}</span>
         </Tooltip>
       </div>
-    </Section>
+    </Disclosure>
   );
 }
 
@@ -352,7 +349,7 @@ export function AnalystSection({ view }: { view: QuoteView }) {
     : [];
 
   return (
-    <Section
+    <Disclosure
       title="Analysts"
       titleHint="Wall Street analyst ratings and price targets for this symbol, as reported by the scan's data providers."
     >
@@ -420,7 +417,7 @@ export function AnalystSection({ view }: { view: QuoteView }) {
           </p>
         )}
       </div>
-    </Section>
+    </Disclosure>
   );
 }
 
@@ -630,6 +627,7 @@ export function SourcesSection({ view }: { view: QuoteView }) {
     <Disclosure
       title="Data sources"
       titleHint="Which provider actually supplied each field in the last scan — real per-field provenance, recorded when the data was fetched."
+      defaultOpen={false}
     >
       <div className="flex flex-col">
         {view.provider && (

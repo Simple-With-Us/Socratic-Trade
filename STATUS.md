@@ -1,4 +1,23 @@
-## Current (2026-08-10 ~2:00am CT GROK — unstick open PR #2597)
+## Current (2026-08-10 ~1:00pm CT MONET — drilldown sections unified + SPY-freshness fix)
+
+**Branch `monet/sources-collapse-and-fundamentals-sourcing`:** owner asked why non-Congress
+fundamentals show a "Congress.Trade" source (investigated — not circular sourcing; a blended
+`MarketScan.source` string conflates overlay-ranking-contribution with field-provenance
+attribution, see rollout note; no code fix shipped, owner didn't ask for one) plus two UI asks on
+the symbol drilldown: Sources collapsed by default, everything else open, each section with a
+top-right show/hide button like Congress.Trade's Trends page. Unified `drilldown-sections.tsx`'s
+two shells (`Section`/`Disclosure`) into one collapsible `Disclosure` for all 8 sections, using
+the codebase's own existing `.con-disclosure-label` show/hide cue (EXPAND>/COLLAPSE⌄, the same
+idiom `Card` already uses) rather than copying CT's raw CSS. Along the way, answering a related
+"why is SPY stale" question surfaced a real bug: `history.ts`'s imported-EOD tier (Congress.Trade
+gap-fill batch) had no freshness check and sat FIRST in the fetch cascade, so a 16+-day-stale
+batch permanently won over every live provider below it. Fixed: same `isBarSeriesFresh` guard the
+sibling local-cache tier already uses. tsc clean, lint 0 errors, 73+ tests green (new staleness
+regression test verified). No dev server used (real-website-only); NOT yet visually verified in a
+browser — code/gate-verified only. Rollout:
+`docs/rollouts/2026-08-10-drilldown-sections-and-spy-freshness.md`.
+
+## Prior (2026-08-10 ~2:00am CT GROK — unstick open PR #2597)
 
 **Only open PR after #2603 merged:** #2597 `grok/always-auto-merge-prs` — fleet policy always-auto-merge for non-draft same-repo PRs + `do-not-automerge` hold. Blockers fixed this pass: real `AGENTS.md` conflict (kept main's Apple Notes close-out), `sentry-ci-report.yml` missing the new workflow name (failed `test/sentry-ci-report-workflows.test.ts`), Codex P1s (disable auto on hold label; `GH_PAT`/`SHEPHERD_TOKEN` preferred so post-merge workflows fire; squash-only; fail when arming fails). Next: green `verify` → auto-merge → Coolify auto-deploy. Rollout: `docs/rollouts/2026-08-10-always-auto-merge-prs.md`.
 

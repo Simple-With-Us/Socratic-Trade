@@ -194,14 +194,29 @@ describe("fetchDailyOHLC imported-EOD tier", () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("no network in test"); }));
   });
 
-  it("serves imported closes (close-only bars) when enabled and dense enough", async () => {
+  it("serves imported closes (close-only bars) when enabled, dense enough, and fresh", async () => {
     process.env.SECURITIES_IMPORT_HISTORY_TIER_ENABLED = "1";
-    upsertImportedPrices([{ ticker: "DENSE", closes: seqCloses(250) }]);
-    const bars = await fetchDailyOHLC("DENSE", Date.UTC(2025, 0, 1));
+    const closes = seqCloses(250);
+    upsertImportedPrices([{ ticker: "DENSE", closes }]);
+    // "now" just after the last imported date — within the tier's freshness tolerance.
+    const now = Date.parse(closes[closes.length - 1]!.date) + 6 * 60 * 60_000;
+    const bars = await fetchDailyOHLC("DENSE", now);
     expect(bars).not.toBeNull();
     expect(bars).toHaveLength(250);
     expect(bars![0]).toMatchObject({ close: 100 });
     expect(bars![0].open).toBeUndefined(); // close-only
+  });
+
+  it("freshness guard (2026-08-10): a dense but stale import does NOT short-circuit past a live fetch", async () => {
+    // This is the exact SPY incident: a dense, one-time imported batch that's months old must not
+    // win the cascade over live providers below it — with the network stubbed to fail (beforeEach),
+    // a stale-but-dense series must fall through to null, not silently serve dead data.
+    process.env.SECURITIES_IMPORT_HISTORY_TIER_ENABLED = "1";
+    const closes = seqCloses(250);
+    upsertImportedPrices([{ ticker: "STALE", closes }]);
+    const now = Date.parse(closes[closes.length - 1]!.date) + 30 * 24 * 60 * 60_000; // 30 days later
+    const bars = await fetchDailyOHLC("STALE", now);
+    expect(bars).toBeNull();
   });
 
   it("does NOT serve when the tier is disabled (default)", async () => {
@@ -219,8 +234,10 @@ describe("fetchDailyOHLC imported-EOD tier", () => {
 
   it("serves the imported ^GSPC series from the spx table", async () => {
     process.env.SECURITIES_IMPORT_HISTORY_TIER_ENABLED = "1";
-    upsertImportedSpx(seqCloses(250, 5000));
-    const bars = await fetchDailyOHLC("^GSPC", Date.UTC(2025, 0, 1));
+    const closes = seqCloses(250, 5000);
+    upsertImportedSpx(closes);
+    const now = Date.parse(closes[closes.length - 1]!.date) + 6 * 60 * 60_000;
+    const bars = await fetchDailyOHLC("^GSPC", now);
     expect(bars).toHaveLength(250);
     expect(bars![0]).toMatchObject({ close: 5000 });
   });

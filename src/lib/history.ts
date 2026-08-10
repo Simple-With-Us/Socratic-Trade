@@ -255,7 +255,7 @@ export async function fetchDailyOHLC(
     // table first (ahead of the App A HTTP read and our keyed providers) lets an imported series displace
     // a re-fetch entirely. DEFAULT OFF + density-guarded inside fetchImportedHistory so a sparse gap-fill
     // never short-circuits with an incomplete series. Close-only bars.
-    { scope: "shared", sourceId: "imported-eod", fetch: async () => fetchImportedHistory(symbol) },
+    { scope: "shared", sourceId: "imported-eod", fetch: async () => fetchImportedHistory(symbol, now) },
     ...(opts?.skipAppATier
       ? []
       : [{ scope: "shared" as const, sourceId: "congress.trade", fetch: () => fetchAppAHistory(symbol) }]),
@@ -801,13 +801,21 @@ function importedHistoryMinBars(): number {
  * OFF (SECURITIES_IMPORT_HISTORY_TIER_ENABLED) and density-guarded (SECURITIES_IMPORT_MIN_BARS, default
  * 200 ≈ ~10 months) so a sparse gap-fill never displaces a full fetch with an incomplete series.
  * Close-only bars (no OHLC), like the App A HTTP tier — an enabled price chart renders a line on hits.
+ *
+ * ALSO freshness-guarded (2026-08-10): this tier sits FIRST in fetchDailyOHLC's provider cascade,
+ * ahead of every live fetch (massive/roic/tradier/tiingo/marketstack/yahoo). A one-time import batch
+ * has no reason to ever be re-POSTed, so without a recency check a dense-but-stale batch would win
+ * the density guard and permanently short-circuit past every live provider below it — exactly what
+ * happened to SPY (imported-eod stuck 16+ days behind, printing a dead benchmark comparison instead
+ * of falling through to a live source). Same 3-day tolerance as the local SQLite cache tier above.
  */
-function fetchImportedHistory(symbol: string): OHLCBar[] | null {
+function fetchImportedHistory(symbol: string, now: number): OHLCBar[] | null {
   if (!importedHistoryTierEnabled()) return null;
   const closes = symbol === "^GSPC" ? getImportedSpxCloses() : getImportedPriceCloses(symbol);
   if (closes.length < importedHistoryMinBars()) return null;
   const bars = appAClosesToBars(closes);
-  return bars.length >= 2 ? bars : null;
+  if (bars.length < 2) return null;
+  return isBarSeriesFresh(bars, 3, now) ? bars : null;
 }
 
 
