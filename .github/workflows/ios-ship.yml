@@ -1,0 +1,56 @@
+name: iOS TestFlight ship (Mac runner)
+
+# Archive + upload on the owned Mac runner so TestFlight (the phone) actually
+# updates when iOS code lands on main. Unsigned compile stays in ios-build.yml.
+#
+# XCODE BUILDS ONLY (owner 2026-08-12): this workflow may target mac-runner
+# labels. Backend jobs stay off this host. Fork PRs never run here.
+#
+# Secrets stay on the Mac (~/.secrets/appstore-connect.env). Nothing is
+# checked into GitHub. The fleet ship script also declares export compliance
+# so a missing ITSAppUsesNonExemptEncryption cannot leave a VALID-but-unusable
+# build (ST 1.0.1/2, 2026-08-12).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios-ship.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-ship-socratic
+  cancel-in-progress: false
+
+jobs:
+  ship:
+    name: TestFlight archive + upload
+    if: github.event.repository.fork == false
+    runs-on: [self-hosted, macOS, ARM64, xcode26]
+    timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Assert stable Xcode 26 (never beta)
+        run: |
+          echo "DEVELOPER_DIR=${DEVELOPER_DIR}"
+          xcodebuild -version
+          ver=$(xcodebuild -version | awk 'NR==1{print $2}')
+          case "$ver" in
+            26.*) echo "stable Xcode $ver — OK" ;;
+            *)
+              echo "::error::Expected stable Xcode 26.x, got '$ver'."
+              exit 1
+              ;;
+          esac
+
+      - name: Ship SocraticTrade to TestFlight
+        run: |
+          bash /Users/jay/apps/ios-fleet/ship-testflight.sh socratic \
+            --repo-root "$GITHUB_WORKSPACE"

@@ -8,7 +8,7 @@ name: Socratic Trade
 options:
   bundleIdPrefix: trade.socratic
   deploymentTarget:
-    iOS: "26.0"
+    iOS: "17.0"
   groupSortPosition: top
   xcodeVersion: "26.3"
 
@@ -57,6 +57,7 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDisplayName: Socratic Trade
         LSApplicationCategoryType: public.app-category.finance
+        ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
