@@ -142,9 +142,7 @@ struct MobileControlView: View {
         TabView(selection: selection) {
             ForEach(tabPreferences.barTabs) { tab in
                 Tab(tab.title, systemImage: tab.systemImage, value: tab) {
-                    NavigationStack {
-                        destination(for: tab)
-                    }
+                    barTabStack(for: tab)
                 }
                 .badge(tab == .proposals ? pendingProposalCount : 0)
             }
@@ -162,6 +160,13 @@ struct MobileControlView: View {
             }
         }
         .tint(AppPalette.accent)
+    }
+
+    @ViewBuilder
+    private func barTabStack(for tab: AppTab) -> some View {
+        NavigationStack {
+            destination(for: tab)
+        }
     }
 
     @ViewBuilder
