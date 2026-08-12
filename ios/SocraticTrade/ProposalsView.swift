@@ -6,9 +6,15 @@ struct ProposalsView: View {
     @State private var confirmingProposal: PendingProposal?
     @State private var confirmationText = ""
     @State private var presentedSymbol: PresentedSymbol?
+    /// Set when a deep link named one proposal: that card is scrolled to and ringed.
+    @Binding private var focusedProposalId: String?
+
+    init(focusedProposalId: Binding<String?> = .constant(nil)) {
+        self._focusedProposalId = focusedProposalId
+    }
 
     var body: some View {
-        SnapshotScaffold { snapshot in
+        SnapshotScaffold(scrollTarget: focusedProposalId) { snapshot in
             ProposalQueueSummary(snapshot: snapshot)
             if snapshot.pendingProposals.isEmpty {
                 EmptyStateCard(
@@ -44,6 +50,14 @@ struct ProposalsView: View {
                             && feedback?.isSettledSuccess != true
                     ) {
                         reject(proposal)
+                    }
+                    .id(proposal.id)
+                    .overlay {
+                        if focusedProposalId == proposal.id {
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .stroke(AppPalette.accent, lineWidth: 2)
+                                .allowsHitTesting(false)
+                        }
                     }
                 }
             }

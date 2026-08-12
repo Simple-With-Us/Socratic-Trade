@@ -1,3 +1,33 @@
+## Current (2026-08-12 MONET — iOS parity wave 2: guardrail tightening, control catalog, universal links)
+
+Branch `monet/ios-parity-wave2` (worktree `~/apps/trading-monet-wave2`).  Three items, all on
+server capabilities that already exist:
+
+1. **Tighten Guardrails** in the account/settings sheet — submits the existing `policy.patch`
+   mobile command.  Autopilot -> Ask-First, and 75/50/25% reductions of `maxOrderNotional` /
+   `maxDailyNotional`.  Tighten-only is a pure predicate (`PolicyTightening`), and it refuses
+   entirely when a competing percent-of-NAV cap is stored, because the server's
+   `normalizeExclusivePolicyCaps` would delete that cap and change which rule binds.  No new
+   confirmation ceremony: same weight as Close Only / Wind Down.
+2. **`snapshot.catalog` decoded** (`mobileControlCatalog()`), gating non-protective commands
+   through `MobileStore.serverAdvertises`.  Missing catalog or empty `commands` falls back to
+   the app's built-in controls; protective halts are never catalog-gated.
+3. **Universal links + deep-link routing** — the app's first `onOpenURL`.
+   `https://socratictrade.com/console/{approvals,approvals/<id>,orders,watchlist,activity}`
+   routes to the matching tab (reusing the existing More-stack rerouting for unpinned tabs);
+   `socratictrade://` stays auth-callback-only.  Entitlement + `project.yml` claim
+   `applinks:socratictrade.com`; the domain half is `app/.well-known/apple-app-site-association/
+   route.ts`, added to middleware `PUBLIC_PREFIXES` so Apple's anonymous fetch is not redirected
+   to /login.
+
+Verified: iOS 56/56 XCTests (was 37), `npx tsc --noEmit` clean, new vitest file green,
+`npm run build` clean (AASA prerendered static).
+
+Next: owner action — no App Store Connect / Apple credential work was performed; the associated
+domain only takes effect once a build carrying the entitlement ships.
+
+Rollout: `docs/rollouts/2026-08-12-ios-parity-wave2.md`.
+
 ## Current (2026-08-12 GROK — iOS watchlist wrap + account switch + admin + P&L)
 
 Owner Assets screenshot + follow-up.  Four bugs on one branch

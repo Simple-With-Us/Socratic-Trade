@@ -20,6 +20,11 @@ struct SocraticTradeApp: App {
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var store: MobileStore
+    /// Set by `onOpenURL`, consumed (and cleared) by the tab shell.  Held here rather than
+    /// inside the shell so a link that arrives before sign-in still routes: the shell exists in
+    /// this ZStack the whole time and applies the destination as soon as it is set, so the
+    /// right screen is already showing when authentication completes.
+    @State private var pendingDeepLink: DeepLinkDestination?
 
     var body: some View {
         ZStack {
@@ -28,7 +33,7 @@ struct ContentView: View {
                 .allowsHitTesting(store.hasInitialized && !store.isAuthenticated)
                 .accessibilityHidden(!store.hasInitialized || store.isAuthenticated)
 
-            MobileControlView()
+            MobileControlView(pendingDeepLink: $pendingDeepLink)
                 .opacity(store.isAuthenticated ? 1 : 0)
                 .allowsHitTesting(store.isAuthenticated)
                 .accessibilityHidden(!store.isAuthenticated)
@@ -45,6 +50,12 @@ struct ContentView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             handleScenePhase(phase)
+        }
+        // Universal links only reach here for paths the AASA file claims; anything else
+        // (including the auth-callback scheme) maps to nil and is ignored.
+        .onOpenURL { url in
+            guard let destination = DeepLink.destination(for: url) else { return }
+            pendingDeepLink = destination
         }
     }
 

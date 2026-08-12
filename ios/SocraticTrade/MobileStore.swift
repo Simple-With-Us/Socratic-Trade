@@ -222,9 +222,27 @@ final class MobileStore: ObservableObject {
         return snapshotLoadFailed || now.timeIntervalSince(lastUpdatedAt) > 180
     }
 
+    /// Capability discovery from the server-advertised control catalog
+    /// (`snapshot.catalog.commands[].type`).  Two deliberate fallbacks:
+    /// - No snapshot yet, no catalog field, or an empty `commands` array means the server did
+    ///   not answer the question — assume supported, so an older server (or a payload that
+    ///   drops the field) never silently disables working controls.
+    /// - Protective commands are never gated on this (see `canSubmit`): a halt must not depend
+    ///   on the catalog decoding correctly.
+    func serverAdvertises(_ commandType: String) -> Bool {
+        guard let catalog = snapshot?.catalog, catalog.describesCommands else { return true }
+        return catalog.advertisedCommandTypes.contains(commandType)
+    }
+
     func canSubmit(_ commandType: String, at now: Date = Date()) -> Bool {
         if Self.protectiveCommands.contains(commandType) {
             return true
+        }
+        // A command this deployment does not advertise would be rejected by the server's
+        // `isMobileCommandType` check anyway — refuse it here instead of spending a round
+        // trip to collect a 400.
+        if !serverAdvertises(commandType) {
+            return false
         }
         // Account switch is a pure active-pointer flip on the server (now also executes
         // immediately, outside the strategy.run_once queue). It must remain available when
@@ -580,6 +598,9 @@ final class MobileStore: ObservableObject {
     }
 
     private func unavailableMessage(for commandType: String) -> String {
+        if !serverAdvertises(commandType) {
+            return "This server build does not offer \(AppFormat.commandLabel(commandType)).  Use the web console for it."
+        }
         if Self.readinessDependentCommands.contains(commandType),
            let snapshot,
            !snapshot.readiness.hasAccount || !snapshot.readiness.hasUniverse {

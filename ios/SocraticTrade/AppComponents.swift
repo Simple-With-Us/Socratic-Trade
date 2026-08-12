@@ -29,7 +29,10 @@ enum AppFormat {
         "watchlist.add": "Add to Watchlist",
         "watchlist.remove": "Remove from Watchlist",
         "alert.create": "Create Alert",
-        "alert.delete": "Delete Alert"
+        "alert.delete": "Delete Alert",
+        // Neutral wording on purpose: the phone only tightens, but the same command type
+        // arrives from the web console in either direction, and Activity shows both.
+        "policy.patch": "Policy Change"
     ]
 
     /// Full money by default (`$99,812.34`). Compact uses lowercase suffixes (`$99.8k`, `$1.2m`)
@@ -519,8 +522,12 @@ struct SnapshotScaffold<Content: View>: View {
     @EnvironmentObject private var store: MobileStore
 
     let content: (MobileSnapshot) -> Content
+    /// Optional `.id(_:)` value inside `content` to scroll into view — used by deep links that
+    /// point at one row (a specific proposal).  Screens that never take a link pass nothing.
+    private let scrollTarget: String?
 
-    init(@ViewBuilder content: @escaping (MobileSnapshot) -> Content) {
+    init(scrollTarget: String? = nil, @ViewBuilder content: @escaping (MobileSnapshot) -> Content) {
+        self.scrollTarget = scrollTarget
         self.content = content
     }
 
@@ -528,27 +535,33 @@ struct SnapshotScaffold<Content: View>: View {
         ZStack {
             AppPalette.background.ignoresSafeArea()
 
-            ScrollView {
-                TimelineView(.periodic(from: .now, by: 30)) { context in
-                    LazyVStack(spacing: 14) {
-                        if let snapshot = store.snapshot {
-                            SnapshotStatusBanner(snapshot: snapshot, now: context.date)
-                            if let error = store.error {
-                                InlineErrorBanner(
-                                    message: error,
-                                    retry: refresh,
-                                    dismiss: store.dismissError
-                                )
+            ScrollViewReader { proxy in
+                ScrollView {
+                    TimelineView(.periodic(from: .now, by: 30)) { context in
+                        LazyVStack(spacing: 14) {
+                            if let snapshot = store.snapshot {
+                                SnapshotStatusBanner(snapshot: snapshot, now: context.date)
+                                if let error = store.error {
+                                    InlineErrorBanner(
+                                        message: error,
+                                        retry: refresh,
+                                        dismiss: store.dismissError
+                                    )
+                                }
+                                content(snapshot)
                             }
-                            content(snapshot)
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
                 }
-            }
-            .refreshable {
-                await store.load()
+                .refreshable {
+                    await store.load()
+                }
+                .onAppear { scroll(with: proxy) }
+                .onChange(of: scrollTarget) { _, _ in scroll(with: proxy) }
+                // The target row may only exist after the next snapshot lands.
+                .onChange(of: store.lastUpdatedAt) { _, _ in scroll(with: proxy) }
             }
 
             if store.snapshot == nil {
@@ -559,6 +572,13 @@ struct SnapshotScaffold<Content: View>: View {
 
     private func refresh() {
         Task { await store.load() }
+    }
+
+    private func scroll(with proxy: ScrollViewProxy) {
+        guard let scrollTarget else { return }
+        withAnimation(.easeInOut(duration: 0.25)) {
+            proxy.scrollTo(scrollTarget, anchor: .top)
+        }
     }
 }
 

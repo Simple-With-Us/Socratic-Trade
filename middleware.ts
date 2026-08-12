@@ -66,6 +66,10 @@ const PUBLIC_PREFIXES = [
   "/robots.txt",
   "/sitemap.xml",
   "/manifest.webmanifest",
+  // Apple's CDN fetches this anonymously to verify the universal-link claim; behind auth it
+  // 307s to /login and the domain never claims the iOS app (app/.well-known/...
+  // apple-app-site-association/route.ts).
+  "/.well-known/apple-app-site-association",
   "/welcome",
   "/strategy",
   "/framework",

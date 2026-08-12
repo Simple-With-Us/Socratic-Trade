@@ -76,6 +76,12 @@ targets:
       properties:
         com.apple.developer.applesignin:
           - Default
+        # Universal links.  The domain side is app/.well-known/apple-app-site-association/
+        # route.ts (served without a .json extension, appID CC8UTF7ATG.trade.socratic.app).
+        # Keep this list and SocraticTrade.entitlements in sync — xcodegen REWRITES that file
+        # from these properties, so an entry only added there is lost on the next regen.
+        com.apple.developer.associated-domains:
+          - applinks:socratictrade.com
 
   SocraticTradeTests:
     type: bundle.unit-test

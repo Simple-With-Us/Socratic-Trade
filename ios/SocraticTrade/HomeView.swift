@@ -708,6 +708,7 @@ private struct AccountSettingsView: View {
                 identitySection
                 accountsSection
                 policySection
+                GuardrailTighteningSection()
                 adminSection
                 sessionSection
                 deletionSection

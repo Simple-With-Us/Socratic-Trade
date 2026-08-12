@@ -2,6 +2,10 @@ import Foundation
 
 struct MobileSnapshot: Decodable {
     let currentUser: CurrentUser?
+    /// Server-advertised control catalog.  Optional: a server that predates it (or any
+    /// payload where it is absent) leaves this nil and the app falls back to its built-in
+    /// controls — see `MobileStore.serverAdvertises`.
+    let catalog: ControlCatalog?
     let readiness: Readiness
     let policy: PolicySummary
     let marketSession: String
@@ -19,6 +23,7 @@ struct MobileSnapshot: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case currentUser
+        case catalog
         case readiness
         case policy
         case marketSession
@@ -38,6 +43,7 @@ struct MobileSnapshot: Decodable {
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         currentUser = try values.decodeIfPresent(CurrentUser.self, forKey: .currentUser)
+        catalog = try values.decodeIfPresent(ControlCatalog.self, forKey: .catalog)
         readiness = try values.decode(Readiness.self, forKey: .readiness)
         policy = try values.decode(PolicySummary.self, forKey: .policy)
         marketSession = try values.decodeIfPresent(String.self, forKey: .marketSession) ?? "unknown"
@@ -52,6 +58,36 @@ struct MobileSnapshot: Decodable {
         watchlist = try values.decodeIfPresent([WatchlistItem].self, forKey: .watchlist) ?? []
         alerts = try values.decodeIfPresent([PriceAlert].self, forKey: .alerts) ?? []
         recentCommands = try values.decodeIfPresent([MobileCommand].self, forKey: .recentCommands) ?? []
+    }
+}
+
+/// The server's own description of what this deployment's mobile control plane offers —
+/// `catalog: mobileControlCatalog()` in app/api/mobile/snapshot/route.ts.  The catalog is
+/// built in src/lib/mobile-api.ts:
+///
+///     commands: MOBILE_COMMAND_TYPES.map((type) => ({ type }))
+///
+/// so `commands[].type` is exactly the set of `commandType` values `/api/mobile/commands`
+/// will accept (`isMobileCommandType`).  Only the fields the app actually acts on are
+/// decoded; `auth`, `realtime`, and `accountDeletion` are deliberately left out rather than
+/// mirrored into dead model surface.
+struct ControlCatalog: Decodable, Equatable {
+    struct Command: Decodable, Equatable {
+        let type: String
+    }
+
+    let version: Int?
+    let commands: [Command]?
+
+    var advertisedCommandTypes: Set<String> {
+        Set((commands ?? []).map(\.type))
+    }
+
+    /// Whether this catalog can answer "does the server support command X?".  A missing or
+    /// empty `commands` array cannot, and must never be read as "the server supports
+    /// nothing" — callers fall back to their built-in controls instead.
+    var describesCommands: Bool {
+        (commands?.isEmpty == false)
     }
 }
 

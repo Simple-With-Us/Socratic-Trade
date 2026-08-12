@@ -114,6 +114,14 @@ struct MobileControlView: View {
     @StateObject private var tabPreferences = TabPreferences()
     @State private var selectedTab: AppTab = .home
     @State private var morePath: [AppTab] = []
+    /// Proposal id a deep link asked for, handed to whichever ProposalsView is on screen.
+    @State private var focusedProposalId: String?
+
+    @Binding private var pendingDeepLink: DeepLinkDestination?
+
+    init(pendingDeepLink: Binding<DeepLinkDestination?> = .constant(nil)) {
+        self._pendingDeepLink = pendingDeepLink
+    }
 
     private var pendingProposalCount: Int {
         store.snapshot?.pendingProposals.count ?? 0
@@ -162,13 +170,30 @@ struct MobileControlView: View {
             }
         }
         .tint(AppPalette.accent)
+        .onChange(of: pendingDeepLink) { _, destination in
+            apply(destination)
+        }
+        .onAppear {
+            // A link that launched the app can arrive before this view exists.
+            apply(pendingDeepLink)
+        }
+    }
+
+    /// Deep links reuse the SAME rerouting `selection` binding as in-app jumps, so a link to an
+    /// UNPINNED screen lands in the More stack instead of selecting a tab that is not on the
+    /// bar.  Clearing `pendingDeepLink` afterwards keeps a repeat of the same link routable.
+    private func apply(_ destination: DeepLinkDestination?) {
+        guard let destination else { return }
+        focusedProposalId = destination.proposalId
+        selection.wrappedValue = destination.tab
+        pendingDeepLink = nil
     }
 
     @ViewBuilder
     private func destination(for tab: AppTab) -> some View {
         switch tab {
         case .home: HomeView(selectedTab: selection)
-        case .proposals: ProposalsView()
+        case .proposals: ProposalsView(focusedProposalId: $focusedProposalId)
         case .markets: MarketsView()
         case .activity: ActivityView()
         case .insights: InsightsView()
