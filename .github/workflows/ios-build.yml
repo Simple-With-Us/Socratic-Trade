@@ -1,0 +1,78 @@
+name: iOS build (Mac runner)
+
+# Compile-check the iOS app on the self-hosted Mac runner (mac-xcode26-socratic).
+#
+# XCODE BUILDS ONLY (owner directive, 2026-08-12): this is the sole workflow
+# that may target the mac-runner labels; everything else stays on hosted/Linux
+# runners. Label routing enforces that — nothing lands on the Mac unless a
+# workflow asks for these labels.
+#
+# The Mac carries stable Xcode 26.x and Xcode-beta 27 side by side. A binary
+# built against the beta SDK passes TestFlight upload but is rejected at App
+# Store submission as INVALID_BINARY (Congress.Trade 1.0 hit this twice). CI
+# pins DEVELOPER_DIR to stable and asserts the version so a stray xcode-select
+# can never silently move builds onto the beta.
+#
+# Deliberately unsigned (CODE_SIGNING_ALLOWED=NO) and no archive/upload —
+# TestFlight shipping stays in the fleet ship script, which has its own guard.
+
+on:
+  pull_request:
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios-build.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: xcodebuild (unsigned)
+    # Self-hosted Mac: never run fork PRs on it.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macOS, ARM64, xcode26]
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Assert stable Xcode 26 (never beta)
+        run: |
+          echo "DEVELOPER_DIR=${DEVELOPER_DIR}"
+          xcodebuild -version
+          ver=$(xcodebuild -version | awk 'NR==1{print $2}')
+          case "$ver" in
+            26.*) echo "stable Xcode $ver — OK" ;;
+            *)
+              echo "::error::Expected stable Xcode 26.x, got '$ver'. A beta-SDK build passes TestFlight but is rejected at App Store submission as INVALID_BINARY."
+              exit 1
+              ;;
+          esac
+          case "$DEVELOPER_DIR" in
+            *[Bb]eta*)
+              echo "::error::DEVELOPER_DIR resolves to a beta Xcode: $DEVELOPER_DIR"
+              exit 1
+              ;;
+          esac
+
+      - name: Build SocraticTrade (generic iOS device, unsigned)
+        run: |
+          xcodebuild build \
+            -project 'ios/Socratic Trade.xcodeproj' \
+            -scheme SocraticTrade \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
