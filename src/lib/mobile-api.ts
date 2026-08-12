@@ -16,6 +16,7 @@ import { isIndexUniverse, isValidAppSymbol } from "./index-universes";
 import { normalizeSymbol } from "./money";
 import { notify } from "./notify";
 import { DEFAULT_TAX_SETTINGS } from "./defaults";
+import { cancelWorkingOrder } from "./order-cancel";
 import { normalizeExclusivePolicyCaps } from "./policy-normalization";
 import {
   rejectProposal,
@@ -43,6 +44,7 @@ export const MOBILE_COMMAND_TYPES = [
   "proposal.approve",
   "proposal.reject",
   "account.activate",
+  "order.cancel",
   "watchlist.add",
   "watchlist.remove",
   "alert.create",
@@ -68,10 +70,20 @@ const IMMEDIATE_PROTECTIVE_COMMAND_TYPES = new Set<MobileCommandType>([
  * pure active-pointer flip with no broker I/O, but was queued behind run_once — so the iOS/PWA
  * "Use" / account selector spinner hung for the entire in-flight strategy run (owner report:
  * Roth IRA spinner while Sandbox stayed Active, backlog 2 queued · 1 running).
+ *
+ * order.cancel is here for the timing reason and NOT in IMMEDIATE_PROTECTIVE_COMMAND_TYPES. The
+ * whole point of cancelling a rotting limit order from a phone is that it happens now, not after
+ * a 30-minute strategy.run_once drains — so it bypasses the worker. But protective membership
+ * additionally means "on success, cancel this user's queued run_once / start / approve"
+ * (cancelQueuedRiskIncreasingCommands), which is the right blast radius for a system-wide
+ * containment state and the wrong one for killing ONE order: an operator cancelling a stale AAPL
+ * limit did not ask to also drop a queued approval on an unrelated symbol. Same seat as
+ * account.activate — immediate, not preemptive.
  */
 const IMMEDIATE_MOBILE_COMMAND_TYPES = new Set<MobileCommandType>([
   ...IMMEDIATE_PROTECTIVE_COMMAND_TYPES,
-  "account.activate"
+  "account.activate",
+  "order.cancel"
 ]);
 
 const RISK_INCREASING_QUEUED_COMMAND_TYPES = [
@@ -263,8 +275,8 @@ export function toPublicMobileCommand(command: MobileCommandRecord): PublicMobil
   };
 }
 
-function requireString(payload: Record<string, unknown>, key: string): string {
-  const value = asOptionalString(payload[key]);
+function requireString(payload: Record<string, unknown>, key: string, max = 256): string {
+  const value = asOptionalString(payload[key], max);
   if (!value) throw new MobileCommandValidationError(`${key} is required.`);
   return value;
 }
@@ -437,6 +449,14 @@ function normalizeCommandPayload(commandType: MobileCommandType, rawPayload: unk
       return { proposalId: requireString(payload, "proposalId") };
     case "account.activate":
       return { accountId: requireString(payload, "accountId") };
+    case "order.cancel": {
+      const orderId = requireString(payload, "orderId", 128);
+      // Optional, and verified server-side when present: the account the phone BELIEVED it was
+      // looking at. A client that sends it gets a refusal instead of a cancel landing on whatever
+      // account happens to be selected by the time the command runs.
+      const accountNumber = asOptionalString(payload.accountNumber, 64);
+      return accountNumber ? { orderId, accountNumber } : { orderId };
+    }
     case "watchlist.add":
     case "watchlist.remove": {
       const symbol = normalizeSymbol(requireString(payload, "symbol"));
@@ -796,6 +816,30 @@ async function runCommand(command: MobileCommandRecord): Promise<unknown> {
       audit("mobile_account_activate", { accountId }, command.userId);
       return { ok: true, activeAccount: listConnectedAccounts(command.userId).find((account) => account.id === accountId) };
     }
+    case "order.cancel": {
+      // Same implementation the console's POST /api/orders/cancel runs — lease-interleave receipt,
+      // time-bounded dust advisory, audit trail, dashboard event and all. `requireWorkingOrder`
+      // asks it to resolve the order inside THIS user's selected account first, because a mobile
+      // failure is read as text on a phone minutes later and has to say something true; account
+      // isolation itself does not rest on that read (the cancel is always scoped to the requesting
+      // user's own selected account and their own broker credentials).
+      const orderId = String(payload.orderId);
+      const expectedAccountNumber = typeof payload.accountNumber === "string" ? payload.accountNumber : undefined;
+      const result = await cancelWorkingOrder({
+        userId: command.userId,
+        orderId,
+        expectedAccountNumber,
+        requireWorkingOrder: true,
+        source: "mobile"
+      });
+      return {
+        ok: true,
+        status: result.state,
+        orderId: result.orderId ?? orderId,
+        ...(result.symbol ? { symbol: result.symbol } : {}),
+        ...(result.dustWarning ? { dustWarning: result.dustWarning } : {})
+      };
+    }
     case "watchlist.add": {
       const item = addToWatchlist(command.userId, String(payload.symbol));
       return { ok: true, ...item };
@@ -862,6 +906,9 @@ export async function executeMobileCommand(command: MobileCommandRecord): Promis
  *   submission boundary; placement re-reads durable state at its final pre-submit boundary.
  * - account.activate: pure active-pointer flip; must complete in the same request so mobile
  *   clients do not leave the Use / selector control spinning for the entire run_once duration.
+ * - order.cancel: killing a rotting limit order is worth nothing if it lands after the run that
+ *   was already ahead of it in the queue. Immediate, but NOT protective — it does not cancel the
+ *   user's other queued work (see IMMEDIATE_MOBILE_COMMAND_TYPES).
  */
 export async function executeMobileCommandImmediately(
   commandId: string,

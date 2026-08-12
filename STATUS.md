@@ -1,3 +1,26 @@
+## Current (2026-08-12 MONET — mobile `order.cancel` command, server side)
+
+Roadmap item #3, server half.  The phone could see working orders (`/api/mobile/snapshot` already
+filters by `isWorkingOrderState`) but could not kill one.  Now it can.
+
+- The console's cancel logic was extracted out of `app/api/orders/cancel/route.ts` into
+  `src/lib/order-cancel.ts` (`cancelWorkingOrder`), so mobile runs the SAME path — lease-interleave
+  receipt, time-bounded cancel-dust advisory, `order_cancel` audit, dashboard event, dust
+  notification — instead of a second implementation drifting against the gateway.  The route is now
+  the HTTP shell; console behaviour is unchanged and its three existing route tests pass untouched.
+- New mobile command `order.cancel`, payload `{ orderId, accountNumber? }`.  Immediate (bypasses the
+  sequential worker, so it cannot land behind a 30-minute `strategy.run_once`) but deliberately NOT
+  protective — it must not cancel the operator's other queued work the way stop/close_only do.
+- No typed confirmation: cancelling closes risk, it does not open it.
+- Account isolation: every cancel is scoped to the requesting user's own selected account through
+  their own credentials; a caller-named account that is not the selected one is refused before any
+  broker I/O (`order_cancel_account_mismatch`), and the mobile lane additionally resolves the order
+  in that account first (fail-open on an unavailable read, receipted).
+- Replace-at-market is NOT included; requirements for it are listed in the rollout note.
+
+Branch `monet/order-cancel-server`, worktree `~/apps/trading-monet-cancel`.  No iOS files touched.
+Rollout: `docs/rollouts/2026-08-12-order-cancel-command.md`.
+
 ## Current (2026-08-12 GROK — iOS watchlist wrap + account switch + admin + P&L)
 
 Owner Assets screenshot + follow-up.  Four bugs on one branch
