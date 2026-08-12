@@ -139,12 +139,34 @@ struct MobileControlView: View {
     var body: some View {
         // iOS 26 `Tab` builder (not legacy `.tabItem`) — this is what keeps the bar on
         // the system Liquid Glass appearance and its iPad/Mac sidebar adaptations.
+        // Unrolled (no ForEach) so Release/archive can type-check; ForEach+Tab
+        // times out the Swift 6 compiler ("unable to type-check this expression").
         TabView(selection: selection) {
-            ForEach(tabPreferences.barTabs) { tab in
-                Tab(tab.title, systemImage: tab.systemImage, value: tab) {
-                    barTabStack(for: tab)
+            if tabPreferences.isPinned(.home) {
+                Tab(AppTab.home.title, systemImage: AppTab.home.systemImage, value: AppTab.home) {
+                    NavigationStack { HomeView(selectedTab: selection) }
                 }
-                .badge(tab == .proposals ? pendingProposalCount : 0)
+            }
+            if tabPreferences.isPinned(.proposals) {
+                Tab(AppTab.proposals.title, systemImage: AppTab.proposals.systemImage, value: AppTab.proposals) {
+                    NavigationStack { ProposalsView() }
+                }
+                .badge(pendingProposalCount)
+            }
+            if tabPreferences.isPinned(.markets) {
+                Tab(AppTab.markets.title, systemImage: AppTab.markets.systemImage, value: AppTab.markets) {
+                    NavigationStack { MarketsView() }
+                }
+            }
+            if tabPreferences.isPinned(.activity) {
+                Tab(AppTab.activity.title, systemImage: AppTab.activity.systemImage, value: AppTab.activity) {
+                    NavigationStack { ActivityView() }
+                }
+            }
+            if tabPreferences.isPinned(.insights) {
+                Tab(AppTab.insights.title, systemImage: AppTab.insights.systemImage, value: AppTab.insights) {
+                    NavigationStack { InsightsView() }
+                }
             }
 
             Tab(AppTab.more.title, systemImage: AppTab.more.systemImage, value: AppTab.more) {
@@ -160,13 +182,6 @@ struct MobileControlView: View {
             }
         }
         .tint(AppPalette.accent)
-    }
-
-    @ViewBuilder
-    private func barTabStack(for tab: AppTab) -> some View {
-        NavigationStack {
-            destination(for: tab)
-        }
     }
 
     @ViewBuilder
