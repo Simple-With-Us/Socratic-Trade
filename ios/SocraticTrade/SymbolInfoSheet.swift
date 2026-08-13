@@ -45,7 +45,7 @@ struct SymbolInfoSheet: View {
                         SymbolInfoAnalystCard(info: info)
                         if let asOfLine {
                             Text(asOfLine)
-                                .font(.caption2)
+                                .font(.appCaption2)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -71,7 +71,7 @@ struct SymbolInfoSheet: View {
             ProgressView()
                 .controlSize(.large)
             Text("Loading \(normalized)…")
-                .font(.subheadline)
+                .font(.appSubheadline)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
@@ -124,10 +124,10 @@ private struct SymbolInfoHeaderCard: View {
                     TickerLogo(symbol: symbol, size: 40)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(symbol)
-                            .font(.title3.weight(.bold))
+                            .font(.appTitle3.weight(.bold))
                         if let companyName = info.companyName, !companyName.isEmpty {
                             Text(companyName)
-                                .font(.subheadline)
+                                .font(.appSubheadline)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -135,17 +135,17 @@ private struct SymbolInfoHeaderCard: View {
 
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text(AppFormat.money(info.price))
-                        .font(.largeTitle.weight(.semibold))
+                        .font(.appLargeTitle.weight(.semibold))
                     if let changePct = info.intradayChangePct {
                         Text("\(AppFormat.percent(changePct, signed: true)) today")
-                            .font(.subheadline.weight(.semibold))
+                            .font(.appSubheadline.weight(.semibold))
                             .foregroundStyle(changePct >= 0 ? AppPalette.positive : AppPalette.negative)
                     }
                 }
 
                 if let sector = info.sector, !sector.isEmpty {
                     Text(industryLine(sector: sector, industry: info.industry))
-                        .font(.caption)
+                        .font(.appCaption)
                         .foregroundStyle(.secondary)
                 }
             }

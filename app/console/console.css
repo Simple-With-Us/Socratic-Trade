@@ -97,7 +97,12 @@
   --con-fs-xxl: 30px;
 
   /* Font stacks */
-  --con-font-ui: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* --con-font-ui is the console's default face and now resolves to Lato (app/fonts/lato.ts
+     injects --font-lato on <html>), matching the rest of the site and the native iOS app.
+     --con-font-lato is the same stack under an explicit name so the font picker can offer
+     "Lato" as a named choice rather than only as the unnamed default. */
+  --con-font-lato: var(--font-lato), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --con-font-ui: var(--con-font-lato);
   --con-font-system: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --con-font-serif: Georgia, "Times New Roman", serif;
   --con-font-mono: ui-monospace, "SF Mono", Menlo, monospace;
@@ -113,6 +118,9 @@
   min-height: 100dvh;
 }
 
+.console-root[data-textbox-font="lato"] {
+  --con-control-font: var(--con-font-lato);
+}
 .console-root[data-textbox-font="system"] {
   --con-control-font: var(--con-font-system);
 }
@@ -126,6 +134,9 @@
 /* Console font: the whole console UI's font (nav, chrome, cards, copy) — kept
    independent from --con-control-font/[data-textbox-font] above, which only
    governs editable inputs/textareas. */
+.console-root[data-console-font="lato"] {
+  --con-body-font: var(--con-font-lato);
+}
 .console-root[data-console-font="system"] {
   --con-body-font: var(--con-font-system);
 }

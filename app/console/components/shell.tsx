@@ -74,12 +74,12 @@ const SNAPSHOT_INDEPENDENT_ROUTES = new Set(["/console/usage"]);
  *  broker chain (~24s worst case).
  *
  *  Before adding a route here: its page must render something meaningful for BOTH
- *  `snapshot === null` states — still loading AND first-load watchdog error — because this
- *  branch also bypasses the shell's error card below. */
+ *  `snapshot === null` states — still loading AND load failed — because this branch also
+ *  bypasses the shell's error card below. */
 const SELF_SKELETON_ROUTES = new Set(["/console/connections"]);
 
 function ShellFrame({ children }: { children: ReactNode }) {
-  const { snapshot, fetchedAt, loading, error, stream, refresh } = useConsoleData();
+  const { snapshot, fetchedAt, loading, slowFirstLoad, error, stream, refresh } = useConsoleData();
   const { theme, dataTheme, set: setTheme } = useConsoleTheme();
   const { dataTextBoxFont } = useConsoleTextBoxFont();
   const { dataConsoleFont } = useConsoleFont();
@@ -121,6 +121,20 @@ function ShellFrame({ children }: { children: ReactNode }) {
         <p role="status" aria-live="polite" className="sr-only">
           Loading your Socratic Trade console…
         </p>
+        {/* A long first load is normal, not a failure: the snapshot's broker chain is sequential
+            and can legitimately take ~24s. This used to render as a full-screen "Couldn't load the
+            autonomy desk" card at 15s while the request was still in flight and about to succeed.
+            Now the load screen simply stays up and says so, so the wordless backdrop is unchanged
+            for every load that lands normally. */}
+        {slowFirstLoad ? (
+          <p
+            role="status"
+            aria-live="polite"
+            className="pointer-events-none fixed inset-x-0 bottom-10 px-6 text-center text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]"
+          >
+            Still loading — your broker is answering slowly.  Hang tight.
+          </p>
+        ) : null}
       </div>
     );
   }

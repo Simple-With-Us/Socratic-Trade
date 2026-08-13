@@ -106,7 +106,13 @@
   --color-warn: var(--warn);
   --color-info: var(--info);
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "Menlo", monospace;
-  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Lato is the product typeface, shared with the native iOS app. --font-lato is injected on
+     <html> by next/font/local (app/fonts/lato.ts) and already carries its own metric-matched
+     fallback stack, so the tail here is only for the case where that class is missing entirely.
+     This slot previously named "Inter", which was never actually loaded anywhere in the app —
+     no @font-face, no next/font, no file in public/ — so the site silently rendered in whatever
+     system UI font the device had. Lato is the first real webfont this stack has ever resolved. */
+  --font-sans: var(--font-lato), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --radius-xl: 16px;
   --radius-2xl: 20px;
   /* Shared card/control radius canon (console values are canonical — console.css

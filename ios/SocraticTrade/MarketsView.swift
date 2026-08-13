@@ -85,20 +85,20 @@ private struct PositionRow: View {
                         }
                     }
                     Text("\(AppFormat.number(abs(position.quantity))) shares")
-                        .font(.subheadline)
+                        .font(.appSubheadline)
                         .foregroundStyle(.secondary)
                     if let sector = position.sector, !sector.isEmpty {
                         Text(sector)
-                            .font(.caption)
+                            .font(.appCaption)
                             .foregroundStyle(.secondary)
                     }
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 5) {
                     Text(AppFormat.money(position.marketValue))
-                        .font(.headline)
+                        .font(.appHeadline)
                     Text("Avg \(AppFormat.money(position.averageCost))")
-                        .font(.caption)
+                        .font(.appCaption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -153,10 +153,10 @@ private struct OrderRow: View {
                 }
                 HStack {
                     Text(orderDescription)
-                        .font(.subheadline)
+                        .font(.appSubheadline)
                     Spacer()
                     Text(AppFormat.dateTime(order.updatedAt ?? order.createdAt))
-                        .font(.caption)
+                        .font(.appCaption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -206,7 +206,7 @@ private struct WatchlistSection: View {
 
                     if items.isEmpty {
                         Text("No symbols watched yet.")
-                            .font(.subheadline)
+                            .font(.appSubheadline)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
@@ -273,7 +273,7 @@ private struct WatchlistChip: View {
                 HStack(spacing: 6) {
                     TickerLogo(symbol: item.symbol, size: 18)
                     Text(item.symbol)
-                        .font(.subheadline.weight(.semibold))
+                        .font(.appSubheadline.weight(.semibold))
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                 }
@@ -366,19 +366,19 @@ private struct AlertRow: View {
                             presentedSymbol = PresentedSymbol(symbol: alert.symbol)
                         }
                         Image(systemName: alert.status == "armed" ? "bell.fill" : "bell.badge.fill")
-                            .font(.caption)
+                            .font(.appCaption)
                             .foregroundStyle(alert.status == "armed" ? AppPalette.accent : AppPalette.positive)
                     }
                     Text("\(alert.op) \(AppFormat.money(alert.price))")
-                        .font(.subheadline)
+                        .font(.appSubheadline)
                         .foregroundStyle(.secondary)
                     if let triggeredDetail {
                         Text(triggeredDetail)
-                            .font(.caption)
+                            .font(.appCaption)
                             .foregroundStyle(AppPalette.positive)
                     }
                     Text(alert.note?.isEmpty == false ? alert.note! : alert.status.capitalized)
-                        .font(.caption)
+                        .font(.appCaption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()

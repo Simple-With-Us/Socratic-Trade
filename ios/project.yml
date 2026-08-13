@@ -57,7 +57,24 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDisplayName: Socratic Trade
         LSApplicationCategoryType: public.app-category.finance
-        UILaunchScreen: {}
+        # Lato (SIL OFL 1.1) — the shared web/native typeface, sources in SocraticTrade/Fonts/.
+        # BARE FILENAMES, no "Fonts/" prefix: XcodeGen emits Fonts/ as a PBXGroup (not a folder
+        # reference), so the Resources build phase copies each .ttf to the TOP level of the
+        # bundle. A path that doesn't resolve here fails SILENTLY — the faces never register
+        # and every .app* style falls back to SF Pro with no error anywhere. `testAppFontsAreRegistered`
+        # in SocraticTradeTests is the guard; keep it passing rather than eyeballing a screenshot.
+        UIAppFonts:
+          - Lato-Regular.ttf
+          - Lato-Italic.ttf
+          - Lato-Bold.ttf
+          - Lato-Black.ttf
+        # An empty UILaunchScreen paints WHITE, and the app's own background is
+        # systemGroupedBackground (#F2F2F7) — so every cold launch flashed white before the
+        # candlestick splash appeared. LaunchBackground pins that same grey (deliberately the
+        # SAME value in both appearances: the launch screen renders before SwiftUI can apply
+        # the app's forced .light scheme, so a dark variant here would flash dark instead).
+        UILaunchScreen:
+          UIColorName: LaunchBackground
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:

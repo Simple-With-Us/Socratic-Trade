@@ -204,17 +204,17 @@ private struct MoreView: View {
             NavigationLink(value: tab) {
                 HStack(spacing: 12) {
                     Image(systemName: tab.systemImage)
-                        .font(.body)
+                        .font(.appBody)
                         .foregroundStyle(AppPalette.accent)
                         .frame(width: 30, height: 30)
                         .background(AppPalette.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     VStack(alignment: .leading, spacing: 1) {
                         HStack(spacing: 6) {
                             Text(tab.title)
-                                .font(.body.weight(.medium))
+                                .font(.appBody.weight(.medium))
                             if tab == .proposals && pendingProposalCount > 0 {
                                 Text("\(pendingProposalCount)")
-                                    .font(.caption2.weight(.bold))
+                                    .font(.appCaption2.weight(.bold))
                                     .foregroundStyle(.white)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
@@ -222,7 +222,7 @@ private struct MoreView: View {
                             }
                         }
                         Text(tab.detail)
-                            .font(.caption)
+                            .font(.appCaption)
                             .foregroundStyle(.secondary)
                     }
                 }

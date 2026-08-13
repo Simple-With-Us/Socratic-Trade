@@ -20,12 +20,12 @@ struct AdminPortalView: View {
                 if sessionExpired {
                     VStack(spacing: 14) {
                         Image(systemName: "person.crop.circle.badge.exclamationmark")
-                            .font(.largeTitle)
+                            .font(.appLargeTitle)
                             .foregroundStyle(AppPalette.warning)
                         Text("Session Expired")
-                            .font(.headline)
+                            .font(.appHeadline)
                         Text("The web session for the admin portal has expired.  Sign in again from the app's login screen, then reopen the portal.")
-                            .font(.subheadline)
+                            .font(.appSubheadline)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                         Button("Close") { dismiss() }
@@ -55,12 +55,12 @@ struct AdminPortalView: View {
                     if let loadError {
                         VStack(spacing: 14) {
                             Image(systemName: "exclamationmark.triangle")
-                                .font(.largeTitle)
+                                .font(.appLargeTitle)
                                 .foregroundStyle(AppPalette.warning)
                             Text("Admin Portal Unavailable")
-                                .font(.headline)
+                                .font(.appHeadline)
                             Text(loadError)
-                                .font(.subheadline)
+                                .font(.appSubheadline)
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
                             Button("Retry") { reloadPortal() }
@@ -72,7 +72,7 @@ struct AdminPortalView: View {
                         VStack(spacing: 12) {
                             ProgressView()
                             Text("Loading Admin Portal")
-                                .font(.subheadline)
+                                .font(.appSubheadline)
                                 .foregroundStyle(.secondary)
                         }
                     }

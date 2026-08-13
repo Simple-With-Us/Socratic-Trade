@@ -264,10 +264,10 @@ struct SectionHeading: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
-                .font(.title3.weight(.semibold))
+                .font(.appTitle3.weight(.semibold))
             if let subtitle {
                 Text(subtitle)
-                    .font(.caption)
+                    .font(.appCaption)
                     .foregroundStyle(.secondary)
             }
         }
@@ -308,28 +308,28 @@ struct MetricTile: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(.caption)
+                .font(.appCaption)
                 .foregroundStyle(.secondary)
             if let detail, detailPlacement == .trailing {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(value)
-                        .font(.title3.weight(.semibold))
+                        .font(.appTitle3.weight(.semibold))
                         .foregroundStyle(tint)
                         .fixedSize(horizontal: true, vertical: true)
                     Text(detail)
-                        .font(.caption2)
+                        .font(.appCaption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                     Spacer(minLength: 0)
                 }
             } else {
                 Text(value)
-                    .font(.title3.weight(.semibold))
+                    .font(.appTitle3.weight(.semibold))
                     .foregroundStyle(tint)
                     .fixedSize(horizontal: false, vertical: true)
                 if let detail {
                     Text(detail)
-                        .font(.caption2)
+                        .font(.appCaption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
@@ -399,7 +399,7 @@ struct TickerLogo: View {
 
     private var monogramView: some View {
         Text(monogram)
-            .font(.system(size: max(9, size * 0.38), weight: .semibold, design: .rounded))
+            .font(.custom(AppFont.bold, size: max(9, size * 0.38)))
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -455,7 +455,7 @@ struct StatusPill: View {
             }
             Text(text)
         }
-        .font(.caption.weight(.semibold))
+        .font(.appCaption.weight(.semibold))
         .foregroundStyle(color)
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
@@ -472,12 +472,12 @@ struct EmptyStateCard: View {
         AppCard {
             VStack(spacing: 10) {
                 Image(systemName: systemImage)
-                    .font(.title2)
+                    .font(.appTitle2)
                     .foregroundStyle(.secondary)
                 Text(title)
-                    .font(.headline)
+                    .font(.appHeadline)
                 Text(message)
-                    .font(.subheadline)
+                    .font(.appSubheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
@@ -499,7 +499,7 @@ struct InlineErrorBanner: View {
                     .foregroundStyle(AppPalette.warning)
                 VStack(alignment: .leading, spacing: 8) {
                     Text(message)
-                        .font(.subheadline)
+                        .font(.appSubheadline)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack {
                         Button("Retry", action: retry)
@@ -571,16 +571,16 @@ private struct InitialSnapshotState: View {
                 ProgressView()
                     .controlSize(.large)
                 Text("Loading your trading workspace…")
-                    .font(.subheadline)
+                    .font(.appSubheadline)
                     .foregroundStyle(.secondary)
             } else {
                 Image(systemName: "wifi.exclamationmark")
-                    .font(.largeTitle)
+                    .font(.appLargeTitle)
                     .foregroundStyle(AppPalette.warning)
                 Text("Couldn’t load your workspace")
-                    .font(.headline)
+                    .font(.appHeadline)
                 Text(store.error ?? "Check your connection and try again.")
-                    .font(.subheadline)
+                    .font(.appSubheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                 Button("Try Again") {
@@ -608,7 +608,7 @@ private struct SnapshotStatusBanner: View {
                 systemImage: stale ? "clock.badge.exclamationmark" : "checkmark.circle.fill"
             )
             Text("\(AppFormat.relative(store.lastUpdatedAt))")
-                .font(.caption)
+                .font(.appCaption)
                 .foregroundStyle(.secondary)
             Spacer()
             if store.isRefreshing {
@@ -622,7 +622,7 @@ private struct SnapshotStatusBanner: View {
             }
             // Keep the circlepath / radio glyph; label is "Market Closed" etc. on every tab.
             Text(AppFormat.marketSessionBannerLabel(snapshot.marketSession))
-                .font(.caption.weight(.medium))
+                .font(.appCaption.weight(.medium))
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 4)
@@ -676,9 +676,9 @@ struct SwipeRevealAction: ViewModifier {
                     Button(action: fire) {
                         VStack(spacing: 5) {
                             Image(systemName: systemImage)
-                                .font(.body.weight(.semibold))
+                                .font(.appBody.weight(.semibold))
                             Text(title)
-                                .font(.caption.weight(.semibold))
+                                .font(.appCaption.weight(.semibold))
                         }
                         .foregroundStyle(.white)
                         .frame(width: actionWidth)

@@ -62,7 +62,7 @@ struct LoginView: View {
                         .frame(width: 6, height: 6)
                         .padding(.top, 6)
                     Text(text)
-                        .font(.subheadline)
+                        .font(.appSubheadline)
                         .foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
@@ -96,7 +96,7 @@ struct LoginView: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(AppPalette.warning)
                     Text(error)
-                        .font(.subheadline)
+                        .font(.appSubheadline)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                 }
@@ -164,7 +164,7 @@ struct LoginView: View {
                 icon()
                     .frame(width: 18, height: 18)
                 Text(title)
-                    .font(.subheadline.weight(.medium))
+                    .font(.appSubheadline.weight(.medium))
             }
             .frame(maxWidth: .infinity)
             .frame(minHeight: 48)
@@ -198,7 +198,7 @@ struct LoginView: View {
             "The app stores only your Socratic Trade session.  Broker and provider secrets stay on the backend.",
             systemImage: "lock.fill"
         )
-        .font(.caption)
+        .font(.appCaption)
         .foregroundStyle(.secondary)
         .multilineTextAlignment(.center)
         .padding(.top, 4)

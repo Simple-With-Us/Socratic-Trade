@@ -118,11 +118,19 @@ private enum CandleWordmarkModel {
         UIGraphicsPopContext()
 
         func alphaAt(xx: Int, yy: Int) -> UInt8 {
-            // After flip, pixel buffer is still physical bottom-up. Convert top-origin yy
-            // to buffer row: physical row = H - 1 - yy.
-            let row = H - 1 - yy
-            guard xx >= 0, xx < W, row >= 0, row < H else { return 0 }
-            return pixelData[(row * W + xx) * 4 + 3]
+            // Row 0 of a CGBitmapContext's buffer is the TOP of the image, and the
+            // translate/scale above already put user space in top-origin coordinates — so a
+            // top-origin yy maps straight to buffer row yy, with no conversion.
+            //
+            // This used to apply a second flip (`H - 1 - yy`) on the theory that the buffer was
+            // "still physical bottom-up". It isn't, and the extra flip sampled the wordmark
+            // upside down: every candle column got its letter's rows in reverse, so the mark
+            // rendered vertically mirrored — S read as 2, R as K, A as Y, T as ⊥. It was subtle
+            // enough to survive review because the mirrored form is still roughly wordmark-shaped
+            // at a glance, and the web original (app/console/ui/candle-ticker.ts, which samples a
+            // top-origin canvas with no flip at all) was correct the whole time.
+            guard xx >= 0, xx < W, yy >= 0, yy < H else { return 0 }
+            return pixelData[(yy * W + xx) * 4 + 3]
         }
 
         var x0 = W, x1 = 0, y0 = H, y1 = 0

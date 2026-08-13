@@ -63,16 +63,16 @@ private struct ReadinessChecklistHero: View {
                         Circle()
                             .fill(AppPalette.accent.opacity(0.14))
                         Image(systemName: "checklist")
-                            .font(.title3.weight(.semibold))
+                            .font(.appTitle3.weight(.semibold))
                             .foregroundStyle(AppPalette.accent)
                     }
                     .frame(width: 44, height: 44)
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Finish setup to trade")
-                            .font(.title3.weight(.bold))
+                            .font(.appTitle3.weight(.bold))
                         Text("Phone is a control remote — connect an account and symbol universe, then Run Once.")
-                            .font(.subheadline)
+                            .font(.appSubheadline)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -98,7 +98,7 @@ private struct ReadinessChecklistHero: View {
                 if needsAccount {
                     Button(action: openSettings) {
                         Label("Account & Settings", systemImage: "person.crop.circle")
-                            .font(.body.weight(.semibold))
+                            .font(.appBody.weight(.semibold))
                             .frame(maxWidth: .infinity)
                             .frame(minHeight: 44)
                     }
@@ -106,7 +106,7 @@ private struct ReadinessChecklistHero: View {
                     .tint(AppPalette.accent)
                 } else if needsUniverse {
                     Text("Open the desktop console to edit Strategy universe (indices + extra symbols), then pull to refresh here.")
-                        .font(.caption)
+                        .font(.appCaption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -124,12 +124,12 @@ private struct ChecklistRow: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: done ? "checkmark.circle.fill" : "circle")
                 .foregroundStyle(done ? AppPalette.positive : AppPalette.warning)
-                .font(.body.weight(.semibold))
+                .font(.appBody.weight(.semibold))
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.appSubheadline.weight(.semibold))
                 Text(detail)
-                    .font(.caption)
+                    .font(.appCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -177,17 +177,17 @@ private struct ReadyHomeHero: View {
                                 )
                             }
                             Text(store.displayedActiveAccount(in: snapshot)?.label ?? "Ready")
-                                .font(.caption.weight(.semibold))
+                                .font(.appCaption.weight(.semibold))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
                         Text(AppFormat.money(snapshot.portfolio?.totalMarketValue))
-                            .font(.largeTitle.weight(.bold))
+                            .font(.appLargeTitle.weight(.bold))
                             .foregroundStyle(AppPalette.accent)
                             .minimumScaleFactor(0.7)
                             .lineLimit(1)
                         Text("Equity")
-                            .font(.caption)
+                            .font(.appCaption)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -198,7 +198,7 @@ private struct ReadyHomeHero: View {
                             systemImage: runState.pillSystemImage
                         )
                         Text(AppFormat.strategyAuthorityLabel(snapshot.readiness.strategyAuthority))
-                            .font(.caption.weight(.medium))
+                            .font(.appCaption.weight(.medium))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -230,7 +230,7 @@ private struct ReadyHomeHero: View {
                     pendingCount == 1 ? "Review 1 Proposal" : "Review \(pendingCount) Proposals",
                     systemImage: "checklist"
                 )
-                .font(.body.weight(.semibold))
+                .font(.appBody.weight(.semibold))
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: 44)
             }
@@ -274,9 +274,9 @@ private struct AgentOverviewCard: View {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Socratic agent")
-                            .font(.title2.weight(.bold))
+                            .font(.appTitle2.weight(.bold))
                         Text(snapshot.readiness.activeConnectedAccount?.label ?? "No active account")
-                            .font(.subheadline)
+                            .font(.appSubheadline)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -297,7 +297,7 @@ private struct AgentOverviewCard: View {
                         statusLabels
                     }
                 }
-                .font(.caption.weight(.medium))
+                .font(.appCaption.weight(.medium))
                 .foregroundStyle(.secondary)
 
                 if showInlineReadiness, !snapshot.readiness.hasAccount || !snapshot.readiness.hasUniverse {
@@ -305,7 +305,7 @@ private struct AgentOverviewCard: View {
                         Image(systemName: "exclamationmark.circle.fill")
                             .foregroundStyle(AppPalette.warning)
                         Text(readinessMessage)
-                            .font(.subheadline)
+                            .font(.appSubheadline)
                     }
                 }
             }
@@ -387,13 +387,13 @@ private struct StrategyControlsCard: View {
                 .tint(AppPalette.negative)
 
                 Text("Close Only stops new buys while protective exits keep working.  Wind Down submits only sell orders until the account is in cash.  Stop immediately halts future broker submissions.  A broker request already submitted before the halt may still complete; review existing orders under Assets.")
-                    .font(.caption)
+                    .font(.appCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 if snapshot.readiness.commandBacklog.queued + snapshot.readiness.commandBacklog.running > 0 {
                     Text("\(snapshot.readiness.commandBacklog.queued) queued · \(snapshot.readiness.commandBacklog.running) running")
-                        .font(.caption)
+                        .font(.appCaption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -556,24 +556,24 @@ private struct PerformanceOverviewCard: View {
                             HStack {
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text("vs \(benchmark.benchmarkSymbol)")
-                                        .font(.caption)
+                                        .font(.appCaption)
                                         .foregroundStyle(.secondary)
                                     Text(AppFormat.percent(benchmark.excessReturnPct, signed: true))
-                                        .font(.headline)
+                                        .font(.appHeadline)
                                         .foregroundStyle(pnlColor(benchmark.excessReturnPct))
                                 }
                                 Spacer()
                                 Text("\(benchmark.points) observations")
-                                    .font(.caption)
+                                    .font(.appCaption)
                                     .foregroundStyle(.secondary)
                             }
                             Text(
                                 "You \(AppFormat.percent(benchmark.accountReturnPct, signed: true)) · \(benchmark.benchmarkSymbol) \(AppFormat.percent(benchmark.benchmarkReturnPct, signed: true))"
                             )
-                            .font(.caption)
+                            .font(.appCaption)
                             .foregroundStyle(.secondary)
                             Text("account return minus \(benchmark.benchmarkSymbol) over the same window (cash flows neutralized).")
-                                .font(.caption2)
+                                .font(.appCaption2)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -682,7 +682,7 @@ private struct AttentionRow: View {
                     .fontWeight(emphasize ? .semibold : .regular)
                     .foregroundStyle(emphasize ? AppPalette.accent : .secondary)
                 Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
+                    .font(.appCaption.weight(.semibold))
                     .foregroundStyle(.tertiary)
             }
             .frame(minHeight: 44)
@@ -761,7 +761,7 @@ private struct AccountSettingsView: View {
                             ProgressView()
                         }
                         Text("Switching accounts — portfolio reload can take a few seconds.")
-                            .font(.footnote)
+                            .font(.appFootnote)
                             .foregroundStyle(.secondary)
                     }
                     if !store.isRefreshing && !store.hasActiveCommandWork {
@@ -811,7 +811,7 @@ private struct AccountSettingsView: View {
             if let deletion = store.deletionRequest {
                 ForEach(Array(deletion.steps.enumerated()), id: \.offset) { index, step in
                     Label(step, systemImage: "\(index + 1).circle")
-                        .font(.subheadline)
+                        .font(.appSubheadline)
                 }
 
                 TextField(deletion.email ?? deletion.userId, text: $deleteIdentity)
@@ -896,18 +896,18 @@ private struct ConnectedAccountSettingsRow: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(account.label)
-                    .font(.body.weight(.medium))
+                    .font(.appBody.weight(.medium))
                 Text(AppFormat.accountBrokerEnvironmentLine(broker: account.broker, environment: account.environment))
-                    .font(.caption)
+                    .font(.appCaption)
                     .foregroundStyle(.secondary)
                 if let capabilitiesLine {
                     Text(capabilitiesLine)
-                        .font(.caption2)
+                        .font(.appCaption2)
                         .foregroundStyle(.secondary)
                 }
                 if account.isDraining == true {
                     Text("draining — existing orders wind down before removal")
-                        .font(.caption2)
+                        .font(.appCaption2)
                         .foregroundStyle(AppPalette.warning)
                 }
             }

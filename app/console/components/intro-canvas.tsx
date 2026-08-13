@@ -50,6 +50,24 @@ let MODEL: Model | null = null;
 // into the cached MODEL) so candleAt reads the freshly-resolved values.
 let CHART_POS = "#059669";
 let CHART_NEG = "#dc2626";
+
+// Top safe-area inset in CSS px. The page is viewport-fit=cover (app/layout.tsx), so in a
+// home-screen/standalone install the top bar — and therefore the wordmark's landing box — sits
+// BELOW the notch, not at y=0. The layout() fallback below has no way to know that on a
+// first-ever visit (nothing cached, top bar not mounted yet), so it assembled the wordmark up
+// under the notch and then visibly dropped it into place once the real logo mounted. Measured
+// once via a throwaway probe, since env() is only reachable from CSS.
+let SAFE_TOP = 0;
+function readSafeAreaTop() {
+  try {
+    const probe = document.createElement("div");
+    probe.style.cssText = "position:fixed;top:0;left:0;visibility:hidden;pointer-events:none;padding-top:env(safe-area-inset-top,0px)";
+    document.body.appendChild(probe);
+    const v = parseFloat(getComputedStyle(probe).paddingTop);
+    probe.remove();
+    if (Number.isFinite(v) && v >= 0 && v <= 200) SAFE_TOP = v;
+  } catch { /* keep 0 */ }
+}
 function readIntroColors(el: HTMLElement) {
   const styles = getComputedStyle(el);
   const pos = styles.getPropertyValue("--con-pos").trim();
@@ -193,7 +211,7 @@ function buildModel(): Model {
     let header: Layout["header"];
     if (vw < 1024) {
       const lh = Math.max(16, Math.min(34, Math.round((vw * 0.88) / WORDMARK_AR)));
-      header = { x: (vw - lh * HEADER_AR) / 2, y: readCachedHeaderTop("m") ?? 10, w: lh * HEADER_AR, h: lh };
+      header = { x: (vw - lh * HEADER_AR) / 2, y: readCachedHeaderTop("m") ?? (SAFE_TOP + 10), w: lh * HEADER_AR, h: lh };
     } else {
       header = { x: Math.max(16, (vw - 1400) / 2 + 16), y: readCachedHeaderTop("d") ?? 20, w: 18 * HEADER_AR, h: 18 };
     }
@@ -297,8 +315,17 @@ export function ConsoleIntro() {
     // Resolve the theme's pos/neg tokens for the chart-phase candles at animation
     // start (wrap sits inside .console-root, so the --con-* scope is inherited).
     readIntroColors(wrap);
+    // Must run BEFORE buildModel()'s layout() is first called below, so the very first frame
+    // already places the landing box under the notch instead of correcting for it later.
+    readSafeAreaTop();
 
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // Phones are DPR 3 (every iPhone since the X). Capping at 2 there rendered the candles —
+    // thin round-capped strokes, the one shape that shows it — visibly soft on exactly the
+    // screens this splash is most often seen on. The cap exists to stop a huge desktop canvas
+    // from costing 3x the fill rate, and a phone canvas is small enough in CSS px that the
+    // full ratio is cheap, so allow 3 only there.
+    const phoneSized = Math.min(window.innerWidth, window.innerHeight) <= 500;
+    const dpr = Math.min(window.devicePixelRatio || 1, phoneSized ? 3 : 2);
     let VW = 0, VH = 0, L = model.layout(1, 1), raf = 0, fading = false, done = false, fadeTimer = 0;
     // The intro's final candles land on the REAL top-bar brand logo so the splash
     // hands off seamlessly into it. We measure [data-brand-logo] (in the DOM behind
@@ -314,9 +341,40 @@ export function ConsoleIntro() {
         if (r.width > 2 && r.height > 2) { headerBox = { x: r.left, y: r.top, w: r.width, h: r.height }; return; }
       }
     };
-    const resize = () => { VW = window.innerWidth; VH = window.innerHeight; canvas.width = VW * dpr; canvas.height = VH * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); L = model.layout(VW, VH); measureHeader(); };
+    // Measure the OVERLAY, not window.innerWidth/innerHeight. `wrap` is position:fixed inset:0,
+    // so its rect is by definition the box the canvas actually fills; window.innerHeight is the
+    // VISUAL viewport, which on iOS Safari excludes the collapsed URL bar and so disagreed with
+    // it by 60-90px. The chart's midY/amp were built from that taller number while the canvas
+    // was the shorter one, which pushed the whole candle chart down and clipped its low wicks
+    // off the bottom of every iPhone. Desktop never showed it because there the two agree.
+    const readSize = () => {
+      const r = wrap.getBoundingClientRect();
+      return { w: Math.max(1, Math.round(r.width)), h: Math.max(1, Math.round(r.height)) };
+    };
+    const applySize = (w: number, h: number) => {
+      VW = w; VH = h;
+      canvas.width = VW * dpr; canvas.height = VH * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      L = model.layout(VW, VH);
+      measureHeader();
+    };
+    const resize = () => { const s = readSize(); applySize(s.w, s.h); };
     resize();
-    window.addEventListener("resize", resize);
+    // iOS Safari fires resize when the URL bar collapses/expands on the tiniest scroll, which is
+    // a chrome change, not a layout change — recomputing the model mid-flight made the candles
+    // visibly jump. Absorb height-only deltas in that range while the animation is running (a
+    // real rotation or split-view change moves the WIDTH too, and still goes through).
+    const URL_BAR_SLOP = 120;
+    const onResize = () => {
+      const s = readSize();
+      const chromeOnly = !done && s.w === VW && Math.abs(s.h - VH) <= URL_BAR_SLOP;
+      if (chromeOnly) return;
+      applySize(s.w, s.h);
+    };
+    window.addEventListener("resize", onResize);
+    // The visual viewport is what actually changes on iOS (pinch-zoom, keyboard, URL bar); its
+    // own resize event fires in cases the window one misses.
+    window.visualViewport?.addEventListener("resize", onResize);
 
     const finish = () => {
       if (done) return; done = true;
@@ -427,7 +485,14 @@ export function ConsoleIntro() {
     };
     raf = requestAnimationFrame(loop);
 
-    return () => { cancelAnimationFrame(raf); if (fadeTimer) window.clearTimeout(fadeTimer); window.removeEventListener("resize", resize); window.removeEventListener("keydown", onKey); wrap.removeEventListener("click", skip); };
+    return () => {
+      cancelAnimationFrame(raf);
+      if (fadeTimer) window.clearTimeout(fadeTimer);
+      window.removeEventListener("resize", onResize);
+      window.visualViewport?.removeEventListener("resize", onResize);
+      window.removeEventListener("keydown", onKey);
+      wrap.removeEventListener("click", skip);
+    };
   }, []);
 
   if (hidden) return null;

@@ -114,19 +114,19 @@ private struct FillActivityRow: View {
                             presentedSymbol = PresentedSymbol(symbol: fill.symbol)
                         }
                         Text(fill.side.uppercased())
-                            .font(.caption.weight(.semibold))
+                            .font(.appCaption.weight(.semibold))
                             .foregroundStyle(sideColor)
                     }
                     Text("\(AppFormat.number(fill.quantity)) @ \(AppFormat.money(fill.price))")
-                        .font(.subheadline)
+                        .font(.appSubheadline)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 4) {
                     Text(AppFormat.money(fill.notional))
-                        .font(.title3.weight(.semibold))
+                        .font(.appTitle3.weight(.semibold))
                     Text(AppFormat.dateTime(fill.filledAt))
-                        .font(.footnote)
+                        .font(.appFootnote)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -176,22 +176,26 @@ private struct CommandActivityRow: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text(displayName)
-                        .font(.headline)
+                        .font(.appHeadline)
                     Spacer()
                     StatusPill(command.status.capitalized, color: statusColor, systemImage: statusIcon)
                 }
                 HStack {
                     Text(AppFormat.dateTime(command.updatedAt))
-                        .font(.footnote)
+                        .font(.appFootnote)
                         .foregroundStyle(.secondary)
                     Spacer()
                     Text(String(command.id.prefix(8)))
+                        // Deliberately NOT Lato: this row is column-aligned figures, and Lato
+                        // ships no monospaced face, so `.monospaced()` on it would silently
+                        // drop back to proportional and break the alignment this line exists
+                        // for.  The system mono face stays.
                         .font(.caption2.monospaced())
                         .foregroundStyle(.tertiary)
                 }
                 if let error = command.error, !error.isEmpty {
                     Label(error, systemImage: "exclamationmark.triangle")
-                        .font(.caption)
+                        .font(.appCaption)
                         .foregroundStyle(AppPalette.negative)
                         .fixedSize(horizontal: false, vertical: true)
                 }

@@ -18,14 +18,26 @@ import {
 } from "react";
 import type { DashboardSnapshot } from "../../dashboard-types";
 import { ConsoleApiError, fetchDashboard } from "./api";
+import { deriveConsoleLoadState } from "./console-load-state";
 
 const POLL_MS = 15_000;
 const EVENT_REFRESH_DEBOUNCE_MS = 200;
-// If the very first snapshot hasn't arrived by the time this fires, the shell would otherwise sit
-// on the logo forever (a hung upstream fetch with no client-side deadline). Flip to the existing
-// error card instead — it already auto-retries via the poll interval above.
-const FIRST_LOAD_WATCHDOG_MS = 15_000;
-const FIRST_LOAD_WATCHDOG_MESSAGE = "The dashboard is taking too long to respond. Retrying…";
+// Reassurance timer, NOT a failure. When it fires the first snapshot still hasn't arrived, so the
+// shell adds a "this is taking longer than usual" line UNDER the load animation — it does not set
+// `error`, and it must never flip the shell to the error card.
+//
+// It used to do exactly that (set `error` at 15s), and that was a real bug the owner hit on every
+// single production load: getDashboardSnapshot is self-bounded but its broker chain is SEQUENTIAL
+// (~24s worst case — see FETCH_DEADLINE_MS below), so any first load in the 15-24s band showed
+// "Couldn't load the autonomy desk" while the request was still in flight and about to succeed.
+// The native iOS client, which polls the SAME getDashboardSnapshot via /api/mobile/snapshot but
+// just waits out its 30s URLSession timeout, loaded fine at the same moment — that split is what
+// the owner reported ("iOS said stale for a few minutes, then Updated; the website errors").
+//
+// The watchdog's original job — "don't sit on the logo forever if the fetch hangs" — is now owned
+// by FETCH_DEADLINE_MS, which aborts and retries a genuinely hung attempt. So this timer no longer
+// needs to (and must not) manufacture an error to stay safe.
+const FIRST_LOAD_SLOW_NOTICE_MS = 15_000;
 // Hard per-attempt ceiling, independent of anything the server does. fetchDashboard has no
 // built-in timeout, so a request that hangs at the network layer (an open connection that never
 // receives data — exactly the kernel TCP-memory-exhaustion failure mode that caused the prod
@@ -70,6 +82,12 @@ export interface ConsoleData {
   fetchedAt: Date | null;
   /** True only before the very first snapshot arrives. */
   loading: boolean;
+  /** An attempt is in flight right now. Lets the shell tell "still working on it" apart from
+   *  "gave up" while there is no snapshot to fall back on. */
+  retrying: boolean;
+  /** The first snapshot is late (past FIRST_LOAD_SLOW_NOTICE_MS) but still coming. Advisory only —
+   *  the shell keeps the load screen up and adds a note; this is never a failure. */
+  slowFirstLoad: boolean;
   /** Last fetch error (the previous snapshot stays rendered). */
   error: string | null;
   /** Health of the SSE stream used for push refreshes. */
@@ -92,6 +110,10 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
   const [fetchedAt, setFetchedAt] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [slowFirstLoad, setSlowFirstLoad] = useState(false);
+  // True while runLoop is actively attempting (including its own immediate deadline retries). Only
+  // consumed for the no-snapshot case, where it separates "still fetching" from "stopped trying".
+  const [fetching, setFetching] = useState(false);
   const [stream, setStream] = useState<ConsoleStreamHealth>(UNSUPPORTED_STREAM);
   const inFlight = useRef<AbortController | null>(null);
   const mounted = useRef(true);
@@ -112,6 +134,7 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
       setSnapshot(data);
       setFetchedAt(new Date());
       setError(null);
+      setSlowFirstLoad(false);
       return "ok";
     } catch (err) {
       if (controller.signal.aborted) {
@@ -142,6 +165,11 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
   //    lands mid-refresh() is drained before refresh()'s own promise resolves, instead of waiting
   //    for the next independent trigger.
   const runLoop = useCallback(async (foreground = false) => {
+    if (mounted.current) setFetching(true);
+    // Every exit path below must clear `fetching`, EXCEPT the "superseded" one — there the newer
+    // loop that replaced us is still running and owns the flag, so clearing it here would falsely
+    // report "stopped trying" and drop the shell onto the error card mid-fetch.
+    const stop = () => { if (mounted.current) setFetching(false); };
     for (;;) {
       if (!mounted.current) return;
       const controller = new AbortController();
@@ -157,12 +185,13 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
         // background loop and let this foreground promise resolve. (A background trigger arriving
         // meanwhile still coalesces via pendingBackgroundRefresh — the detached loop drains it.)
         if (foreground) {
+          // The detached loop takes over and sets `fetching` itself, so do NOT stop here.
           void runLoop(false);
           return;
         }
         continue;
       }
-      if (!pendingBackgroundRefresh.current) return;
+      if (!pendingBackgroundRefresh.current) { stop(); return; }
       pendingBackgroundRefresh.current = false;
     }
   }, [runFetch]);
@@ -223,18 +252,16 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
     };
   }, [refresh, backgroundRefresh]);
 
-  // First-load watchdog: self-contained, independent of refresh()/the effect above. While no
-  // snapshot has arrived and no error has been reported yet, arm a timer; if it fires first, flip to
-  // the existing error card (which already auto-retries via the poll interval) instead of sitting on
-  // the shell's logo forever. Re-armed automatically by its own [snapshot, error] deps — a snapshot
-  // or error arriving before the deadline clears the pending timer via the effect cleanup.
+  // First-load slow notice: while no snapshot has arrived, arm a timer; if it fires the load is
+  // running long, so let the shell say so UNDER the animation. This deliberately does not touch
+  // `error` — see FIRST_LOAD_SLOW_NOTICE_MS above for why setting it here was the false-failure bug.
+  // Cleared on the first successful fetch (runFetch), not here, so the note doesn't blink off and
+  // on across the deadline retries of one long load.
   useEffect(() => {
-    if (snapshot !== null || error !== null) return;
-    const timer = window.setTimeout(() => {
-      setError((prev) => prev ?? FIRST_LOAD_WATCHDOG_MESSAGE);
-    }, FIRST_LOAD_WATCHDOG_MS);
+    if (snapshot !== null) return;
+    const timer = window.setTimeout(() => setSlowFirstLoad(true), FIRST_LOAD_SLOW_NOTICE_MS);
     return () => window.clearTimeout(timer);
-  }, [snapshot, error]);
+  }, [snapshot]);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof EventSource === "undefined") {
@@ -292,10 +319,26 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
     };
   }, [queueRefresh]);
 
-  const value = useMemo<ConsoleData>(
-    () => ({ snapshot, fetchedAt, loading: snapshot === null && error === null, error, stream, refresh }),
-    [snapshot, fetchedAt, error, stream, refresh]
-  );
+  const value = useMemo<ConsoleData>(() => {
+    // The loading/slow/failed decision lives in a pure module so it is actually covered by tests
+    // — see console-load-state.ts for why that mattered here.
+    const state = deriveConsoleLoadState({
+      hasSnapshot: snapshot !== null,
+      error,
+      fetching,
+      slowElapsed: slowFirstLoad
+    });
+    return {
+      snapshot,
+      fetchedAt,
+      loading: state === "loading" || state === "slow",
+      retrying: fetching,
+      slowFirstLoad: state === "slow",
+      error,
+      stream,
+      refresh
+    };
+  }, [snapshot, fetchedAt, error, fetching, slowFirstLoad, stream, refresh]);
 
   return <ConsoleDataContext.Provider value={value}>{children}</ConsoleDataContext.Provider>;
 }

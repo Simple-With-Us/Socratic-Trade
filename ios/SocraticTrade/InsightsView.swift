@@ -105,19 +105,19 @@ private struct InsightsBriefCard: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Image(systemName: "lightbulb.fill")
-                        .font(.title2)
+                        .font(.appTitle2)
                         .foregroundStyle(AppPalette.accent)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Portfolio Brief")
-                            .font(.title3.weight(.semibold))
+                            .font(.appTitle3.weight(.semibold))
                         Text("A concise read from the latest backend snapshot")
-                            .font(.caption)
+                            .font(.appCaption)
                             .foregroundStyle(.secondary)
                     }
                 }
 
                 Text(brief)
-                    .font(.body)
+                    .font(.appBody)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -164,15 +164,15 @@ private struct InsightCard: View {
         AppCard {
             HStack(alignment: .top, spacing: 13) {
                 Image(systemName: insight.systemImage)
-                    .font(.headline)
+                    .font(.appHeadline)
                     .foregroundStyle(insight.color)
                     .frame(width: 38, height: 38)
                     .background(insight.color.opacity(0.11), in: Circle())
                 VStack(alignment: .leading, spacing: 5) {
                     Text(insight.title)
-                        .font(.headline)
+                        .font(.appHeadline)
                     Text(insight.detail)
-                        .font(.subheadline)
+                        .font(.appSubheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -198,7 +198,7 @@ private struct InsightsActionCard: View {
                         ? "Open the Home tab and tap Run Once (or Review Proposals when the queue is waiting)."
                         : "Finish account + universe setup on Home first; then use Run Once there."
                 )
-                .font(.subheadline)
+                .font(.appSubheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -211,10 +211,10 @@ private struct InsightsAuthorityCard: View {
         AppCard {
             VStack(alignment: .leading, spacing: 8) {
                 Label("Backend Remains Authoritative", systemImage: "lock.shield.fill")
-                    .font(.headline)
+                    .font(.appHeadline)
                     .foregroundStyle(AppPalette.accent)
                 Text("This tab summarizes server-returned facts.  Broker credentials, provider keys, policy checks, proposal validation, and order placement never move onto the phone.")
-                    .font(.subheadline)
+                    .font(.appSubheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

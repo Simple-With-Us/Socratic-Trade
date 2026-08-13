@@ -2,7 +2,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-export type ConsoleFont = "site" | "system" | "serif" | "mono";
+/** "site" is the stored value for "follow the site default", which IS Lato — it keeps that key
+ *  (rather than being renamed) so preferences saved before Lato landed still resolve. "lato" is the
+ *  same face pinned explicitly, so a later change to the site default leaves this choice alone. */
+export type ConsoleFont = "site" | "lato" | "system" | "serif" | "mono";
 
 export interface ConsoleFontOption {
   value: ConsoleFont;
@@ -15,8 +18,14 @@ export const CONSOLE_FONT_OPTIONS: ConsoleFontOption[] = [
   {
     value: "site",
     label: "Site",
-    description: "Use the same Inter-based font as the rest of Socratic Trade.",
-    fontFamily: "\"Inter\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    description: "Follow the Socratic Trade default, which is Lato today.",
+    fontFamily: "var(--font-lato), ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+  },
+  {
+    value: "lato",
+    label: "Lato",
+    description: "Pin the humanist sans the iOS app and site share, whatever the default becomes.",
+    fontFamily: "var(--font-lato), ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
   },
   {
     value: "system",
@@ -42,7 +51,7 @@ const STORAGE_KEY = "console:consoleFont";
 const CHANGE_EVENT = "console:consoleFontChange";
 
 function isConsoleFont(value: unknown): value is ConsoleFont {
-  return value === "site" || value === "system" || value === "serif" || value === "mono";
+  return CONSOLE_FONT_OPTIONS.some((o) => o.value === value);
 }
 
 function readStored(): ConsoleFont {

@@ -3,31 +3,38 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 100;
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0AECCBC50D5461DB100A6502 /* WrappingHStackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D127513EA965CC0E9E36D114 /* WrappingHStackTests.swift */; };
 		0D33482A75E80E8B8393568C /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1414766425B708D8C45691ED /* HomeView.swift */; };
 		16C32102BDAA57BDDC9BC51E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 64D21DA3DA51118F65691FBE /* Assets.xcassets */; };
-		1A9E4C2B7D6F11E0B3C8A501 /* WrappingHStackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A9E4C2B7D6F11E0B3C8A502 /* WrappingHStackTests.swift */; };
-		1A9E4C2B7D6F11E0B3C8A503 /* AccountMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A9E4C2B7D6F11E0B3C8A504 /* AccountMetricsTests.swift */; };
 		1F37FE2BA14490285C0A0156 /* RunStateDerivationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF789FDEB98C62C5D8A12A7F /* RunStateDerivationTests.swift */; };
 		20459811A20F559A78FC18B3 /* SocraticTradeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F94CABB7BE5CB871622BADD /* SocraticTradeApp.swift */; };
 		27D79C4CCEC77B61D399EE85 /* SymbolInfoSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3125CC92E339D3923013056 /* SymbolInfoSheet.swift */; };
+		33303D981912E771B2711FDE /* Lato-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 042C3DAFDC413C79CE5526F9 /* Lato-Bold.ttf */; };
+		3D5C036934C466C235DAB70A /* Lato-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 552372DC3315B434227861EE /* Lato-Regular.ttf */; };
 		4298F7ACB07D50EE61F0ECB9 /* MobileControlView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FD3EFCF82E664100A11FC33 /* MobileControlView.swift */; };
 		51FE4A579117BE3605C107D9 /* PreviewSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37C2568FFF3FB30F96619E8E /* PreviewSupport.swift */; };
 		5601AC0021A8D0D6F3C5E27F /* MobileAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89D3AB0C26BB7394334E998E /* MobileAPIClient.swift */; };
+		59A784D6939E343235F74CF3 /* LATO-OFL.txt in Resources */ = {isa = PBXBuildFile; fileRef = 64FD6B1AE752DEF0DB8C719D /* LATO-OFL.txt */; };
 		84A3825A59F57AD4C4DEE18D /* InsightsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD460CC2D17E0F0B061B372A /* InsightsView.swift */; };
+		85DC43A7311763C033D46DC8 /* AccountMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1104431D2656738961FF9E2E /* AccountMetricsTests.swift */; };
 		8C402A017E39D5CF92861A85 /* MobileModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23A34A6694A3A24320E058E4 /* MobileModelsTests.swift */; };
+		8FC9AE92C498E935EB550AAF /* AppTypographyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40B15024373F200D860968ED /* AppTypographyTests.swift */; };
 		96788F467DDE0AEBD26DBE2E /* AppComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38386F538E5ECC5191294B9A /* AppComponents.swift */; };
 		97E7970C650099475A424225 /* MobileModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46F9B58AE392D9B952212857 /* MobileModels.swift */; };
+		9A2713B013C93FDA2F9ECCE9 /* Lato-Black.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6B078CF6C158BBF3E54734FC /* Lato-Black.ttf */; };
 		A0B35AC0FE7982512B0E4796 /* ProposalsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC1C49575DCB6DA8E8D65CD7 /* ProposalsView.swift */; };
+		AADECAD991DC4AEB91852D42 /* Lato-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = C5DB2224CAACE329BCE50890 /* Lato-Italic.ttf */; };
 		ACF83840AA1DAFC72B2A59AE /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761C0F1E45ABE2373664A335 /* ActivityView.swift */; };
 		AD51C8FEF98EF6F4E763A044 /* MarketsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D351D03CEAFD6CD1EB4536FD /* MarketsView.swift */; };
 		C3BB26F6D86DD0C45B1EBEFC /* TabPreferencesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 728EAC5AE3C4358672EBAEED /* TabPreferencesTests.swift */; };
 		C4C5A007566AD8E6187289D7 /* AdminPortalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C59D290B3E70A1F9606F659 /* AdminPortalView.swift */; };
 		C67CC3242AE041DFAE3A419E /* CandleWordmarkView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D112E8C717D899B0AFF0B6E5 /* CandleWordmarkView.swift */; };
 		CF7E04F6E303A90DA3947D4A /* MobileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B407C6306CC293CF54036A1 /* MobileStore.swift */; };
+		E775D82245F3524DC339DCC4 /* AppTypography.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC9F509664B51F30B581932B /* AppTypography.swift */; };
 		EEFE88508B9B9CC94639E02C /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65E9A5E5A0273AC7B97E89D3 /* LoginView.swift */; };
 /* End PBXBuildFile section */
 
@@ -42,18 +49,22 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		042C3DAFDC413C79CE5526F9 /* Lato-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Lato-Bold.ttf"; sourceTree = "<group>"; };
 		04FCAD7405F1B4180574C644 /* SocraticTrade.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SocraticTrade.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		1104431D2656738961FF9E2E /* AccountMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountMetricsTests.swift; sourceTree = "<group>"; };
 		1414766425B708D8C45691ED /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
-		1A9E4C2B7D6F11E0B3C8A502 /* WrappingHStackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WrappingHStackTests.swift; sourceTree = "<group>"; };
-		1A9E4C2B7D6F11E0B3C8A504 /* AccountMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountMetricsTests.swift; sourceTree = "<group>"; };
 		23A34A6694A3A24320E058E4 /* MobileModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileModelsTests.swift; sourceTree = "<group>"; };
 		37C2568FFF3FB30F96619E8E /* PreviewSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewSupport.swift; sourceTree = "<group>"; };
 		38386F538E5ECC5191294B9A /* AppComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppComponents.swift; sourceTree = "<group>"; };
+		40B15024373F200D860968ED /* AppTypographyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppTypographyTests.swift; sourceTree = "<group>"; };
 		46F9B58AE392D9B952212857 /* MobileModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileModels.swift; sourceTree = "<group>"; };
 		50946B1368FEFB6B6B20116D /* SocraticTradeTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SocraticTradeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		552372DC3315B434227861EE /* Lato-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Lato-Regular.ttf"; sourceTree = "<group>"; };
 		5F94CABB7BE5CB871622BADD /* SocraticTradeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocraticTradeApp.swift; sourceTree = "<group>"; };
 		64D21DA3DA51118F65691FBE /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		64FD6B1AE752DEF0DB8C719D /* LATO-OFL.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "LATO-OFL.txt"; sourceTree = "<group>"; };
 		65E9A5E5A0273AC7B97E89D3 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
+		6B078CF6C158BBF3E54734FC /* Lato-Black.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Lato-Black.ttf"; sourceTree = "<group>"; };
 		6C59D290B3E70A1F9606F659 /* AdminPortalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminPortalView.swift; sourceTree = "<group>"; };
 		728EAC5AE3C4358672EBAEED /* TabPreferencesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabPreferencesTests.swift; sourceTree = "<group>"; };
 		761C0F1E45ABE2373664A335 /* ActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityView.swift; sourceTree = "<group>"; };
@@ -61,11 +72,14 @@
 		8B407C6306CC293CF54036A1 /* MobileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileStore.swift; sourceTree = "<group>"; };
 		8FD3EFCF82E664100A11FC33 /* MobileControlView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileControlView.swift; sourceTree = "<group>"; };
 		A3125CC92E339D3923013056 /* SymbolInfoSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SymbolInfoSheet.swift; sourceTree = "<group>"; };
+		C5DB2224CAACE329BCE50890 /* Lato-Italic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Lato-Italic.ttf"; sourceTree = "<group>"; };
 		D112E8C717D899B0AFF0B6E5 /* CandleWordmarkView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandleWordmarkView.swift; sourceTree = "<group>"; };
+		D127513EA965CC0E9E36D114 /* WrappingHStackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WrappingHStackTests.swift; sourceTree = "<group>"; };
 		D351D03CEAFD6CD1EB4536FD /* MarketsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarketsView.swift; sourceTree = "<group>"; };
 		DD460CC2D17E0F0B061B372A /* InsightsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InsightsView.swift; sourceTree = "<group>"; };
 		EC1C49575DCB6DA8E8D65CD7 /* ProposalsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProposalsView.swift; sourceTree = "<group>"; };
 		EF789FDEB98C62C5D8A12A7F /* RunStateDerivationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunStateDerivationTests.swift; sourceTree = "<group>"; };
+		FC9F509664B51F30B581932B /* AppTypography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppTypography.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -81,9 +95,11 @@
 		062CEF8FEA3EFD091CDD619D /* SocraticTrade */ = {
 			isa = PBXGroup;
 			children = (
+				E1435EB17748A8296DAE65FD /* Fonts */,
 				761C0F1E45ABE2373664A335 /* ActivityView.swift */,
 				6C59D290B3E70A1F9606F659 /* AdminPortalView.swift */,
 				38386F538E5ECC5191294B9A /* AppComponents.swift */,
+				FC9F509664B51F30B581932B /* AppTypography.swift */,
 				64D21DA3DA51118F65691FBE /* Assets.xcassets */,
 				D112E8C717D899B0AFF0B6E5 /* CandleWordmarkView.swift */,
 				1414766425B708D8C45691ED /* HomeView.swift */,
@@ -114,13 +130,26 @@
 		6C5E76B26EEA71F469806853 /* SocraticTradeTests */ = {
 			isa = PBXGroup;
 			children = (
-				1A9E4C2B7D6F11E0B3C8A504 /* AccountMetricsTests.swift */,
+				1104431D2656738961FF9E2E /* AccountMetricsTests.swift */,
+				40B15024373F200D860968ED /* AppTypographyTests.swift */,
 				23A34A6694A3A24320E058E4 /* MobileModelsTests.swift */,
 				EF789FDEB98C62C5D8A12A7F /* RunStateDerivationTests.swift */,
 				728EAC5AE3C4358672EBAEED /* TabPreferencesTests.swift */,
-				1A9E4C2B7D6F11E0B3C8A502 /* WrappingHStackTests.swift */,
+				D127513EA965CC0E9E36D114 /* WrappingHStackTests.swift */,
 			);
 			path = SocraticTradeTests;
+			sourceTree = "<group>";
+		};
+		E1435EB17748A8296DAE65FD /* Fonts */ = {
+			isa = PBXGroup;
+			children = (
+				6B078CF6C158BBF3E54734FC /* Lato-Black.ttf */,
+				042C3DAFDC413C79CE5526F9 /* Lato-Bold.ttf */,
+				C5DB2224CAACE329BCE50890 /* Lato-Italic.ttf */,
+				64FD6B1AE752DEF0DB8C719D /* LATO-OFL.txt */,
+				552372DC3315B434227861EE /* Lato-Regular.ttf */,
+			);
+			path = Fonts;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -190,7 +219,7 @@
 			);
 			mainGroup = 008B71438D3CFDB4D27347DF;
 			minimizedProjectReferenceProxies = 1;
-			preferredProjectObjectVersion = 77;
+			preferredProjectObjectVersion = 100;
 			productRefGroup = 20E63D98EDABA6D29C136796 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -207,6 +236,11 @@
 			buildActionMask = 2147483647;
 			files = (
 				16C32102BDAA57BDDC9BC51E /* Assets.xcassets in Resources */,
+				59A784D6939E343235F74CF3 /* LATO-OFL.txt in Resources */,
+				9A2713B013C93FDA2F9ECCE9 /* Lato-Black.ttf in Resources */,
+				33303D981912E771B2711FDE /* Lato-Bold.ttf in Resources */,
+				AADECAD991DC4AEB91852D42 /* Lato-Italic.ttf in Resources */,
+				3D5C036934C466C235DAB70A /* Lato-Regular.ttf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -217,11 +251,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1A9E4C2B7D6F11E0B3C8A503 /* AccountMetricsTests.swift in Sources */,
+				85DC43A7311763C033D46DC8 /* AccountMetricsTests.swift in Sources */,
+				8FC9AE92C498E935EB550AAF /* AppTypographyTests.swift in Sources */,
 				8C402A017E39D5CF92861A85 /* MobileModelsTests.swift in Sources */,
 				1F37FE2BA14490285C0A0156 /* RunStateDerivationTests.swift in Sources */,
 				C3BB26F6D86DD0C45B1EBEFC /* TabPreferencesTests.swift in Sources */,
-				1A9E4C2B7D6F11E0B3C8A501 /* WrappingHStackTests.swift in Sources */,
+				0AECCBC50D5461DB100A6502 /* WrappingHStackTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -232,6 +267,7 @@
 				ACF83840AA1DAFC72B2A59AE /* ActivityView.swift in Sources */,
 				C4C5A007566AD8E6187289D7 /* AdminPortalView.swift in Sources */,
 				96788F467DDE0AEBD26DBE2E /* AppComponents.swift in Sources */,
+				E775D82245F3524DC339DCC4 /* AppTypography.swift in Sources */,
 				C67CC3242AE041DFAE3A419E /* CandleWordmarkView.swift in Sources */,
 				0D33482A75E80E8B8393568C /* HomeView.swift in Sources */,
 				84A3825A59F57AD4C4DEE18D /* InsightsView.swift in Sources */,

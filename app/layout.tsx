@@ -1,5 +1,6 @@
 import "./globals.css";
 import type { Metadata, Viewport } from "next";
+import { lato } from "./fonts/lato";
 import { ThemeProvider, themeInitScript } from "./ui/theme";
 import { Toaster } from "sonner";
 import { GlobalErrorToasts } from "./ui/global-error-toasts";
@@ -65,8 +66,10 @@ export const viewport: Viewport = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  // lato.variable puts --font-lato on <html>, so both globals.css (--font-sans) and console.css
+  // (--con-font-lato) can resolve it — the console mounts deep inside <body>, not here.
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" className={lato.variable} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
       </head>

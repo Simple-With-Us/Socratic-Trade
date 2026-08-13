@@ -1,3 +1,38 @@
+## Current (2026-08-12 ~9:20pm CT MONET - console false load-failure, phone-correct load graphic, iOS candlestick splash, Lato everywhere)
+
+Owner-reported four-parter, all landed on `monet/loading-fonts`.  The headline is a real bug: the
+console showed "Couldn't load the autonomy desk" on essentially every load while the iOS app on the
+same account loaded fine.  Both clients call the SAME `getDashboardSnapshot`, so this was never a
+server split - the console's 15s first-load watchdog SET `error`, and the shell rendered its
+full-screen failure card on `error` alone, so any first load in the routine 15-24s band (the
+server's own sequential broker-chain worst case) showed a failure screen while the request was
+still in flight and about to succeed.  iOS has no such timer and simply waited.  Fixed via a new
+pure `console-load-state.ts` ("an error while a fetch is still in flight is not a failure") with the
+15s timer demoted to a reassurance line under the load screen; 7 regression tests - the rule was
+untestable inside the React hook (node-only vitest, no jsdom), which is why it shipped.  Server-side
+slowness itself is UNTOUCHED and remains the real follow-up: parallelising the sequential
+accounts -> portfolio/positions/orders -> quotes chain.
+
+Also: the intro canvas now measures the fixed overlay instead of `window.innerHeight` (they
+disagree by 60-90px on iOS Safari, which pushed the chart down and clipped its low wicks on every
+iPhone), DPR 3 on phones, iOS URL-bar resize absorption, safe-area-aware landing box.  iOS
+`LaunchStateView` (icon + spinner + "Socratic.Trade") is now the candlestick SOCRATIC TRADE wordmark
+at the top that slides away, sized by the web `MobileBrandRow` formula, plus a `LaunchBackground`
+colorset that kills the white cold-launch flash.  Found and fixed a shipped bug along the way:
+`CandleWordmarkView` rendered the wordmark VERTICALLY MIRRORED (S as 2, R as K, A as Y) from a
+double row-flip in `alphaAt` - visible on the login screen in the current build.  Lato is now
+self-hosted (deliberately NOT `next/font/google`: a build-time fetch would freeze auto-deploy) as
+the site-wide default plus a named picker option, and bundled on iOS with Dynamic-Type-preserving
+`.app*` twins across all 120 call sites.  Worth knowing: `--font-sans` named "Inter" but never
+loaded it anywhere - no @font-face, no next/font, nothing in public/ - so the site had been
+rendering in the device system font all along; Lato is the first real webfont it has ever resolved.
+
+Gates: tsc clean, lint 0 errors, 6449 tests green, build clean, xcodebuild 40 iOS tests green.
+Verified live, not just green: iOS simulator screenshots of the real launch sequence (that is how
+the mirrored wordmark was caught), the built .app bundle inspected for font placement, and the
+console load screen at 375x812 with Lato confirmed resolving at runtime.
+Rollout: `docs/rollouts/2026-08-12-load-screens-and-lato.md`.  Blockers: none.
+
 ## Current (2026-08-12 ~7:45pm CT CLAUDE — round 3 landed: scorecard, lookahead audit, PIT chain, Polymarket)
 
 Four backlog features land in this PR (details in the four r3 rollout notes): the unified
