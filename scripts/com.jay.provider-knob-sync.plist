@@ -7,6 +7,7 @@
 
   INSTALL (owner action; see docs/rollouts/2026-07-10-provider-knob-sync.md):
     1. Edit the paths below if this repo does not live at /Users/jay/Code/Socratic.Trade.
+       SSH target is launchd-inherited from the script: Host coolify (Hetzner).
     2. To enable the #agent-sync post-on-change, add your SLACK_BOT_TOKEN to
        EnvironmentVariables (otherwise slack-sync.sh is a safe no-op).
     3. cp scripts/com.jay.provider-knob-sync.plist ~/Library/LaunchAgents/

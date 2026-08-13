@@ -8,8 +8,9 @@
 # smart quotes / em dashes / arrows. Check: grep -nP '[^\x00-\x7F]' scripts/*.sh
 #
 # WHAT IT DOES
-#   1. GET https://usage.jays.services/api/subscriptions  (Bearer USAGE_INGEST_TOKEN
-#      from ~/.secrets/usage-monitor.env). Bare JSON array; each element has
+#   1. GET https://usage.jays.services/api/subscriptions  (Bearer USAGE_READ_TOKEN
+#      from ~/.secrets/usage-monitor.env, falling back to USAGE_INGEST_TOKEN).
+#      Prod UM denies ingest-token reads (Wave C). Bare JSON array; each element has
 #      provider{id,name,displayName}, name, status, knobEnv (obj|null),
 #      freeTierKnobEnv (obj|null).
 #   2. Desired knobs per plan (scripts/provider-knob-diff.mjs, unit-tested):
@@ -38,22 +39,20 @@
 #
 # ENV OVERRIDES (defaults in [brackets])
 #   USAGE_API            [https://usage.jays.services/api/subscriptions]
-#   USAGE_MONITOR_ENV    [~/.secrets/usage-monitor.env]   file holding USAGE_INGEST_TOKEN
-#   KNOB_SYNC_SSH_KEY    [~/.ssh/id_ed25519]
-#   KNOB_SYNC_SSH_HOST   [ubuntu@141.148.182.224]   (Oracle Coolify prod host; the Hetzner
-#                                                    box root@135.181.192.190 was deleted 2026-07-31)
-#   KNOB_SYNC_BOX_ENV    [/data/coolify/applications/m1os7ijf31bg3fanil152e4b/.env]
-#     NOTE 2026-07-31: on the Oracle host the app env lives in Coolify's Postgres
-#     (environment_variables, encrypted) — there is NO /data/coolify tree. The remote
-#     read/apply path below needs rework against the DB (see the artisan-tinker pattern in
-#     docs/rollouts/2026-07-30-oracle-deploy-path-repair.md) before --apply is usable again.
+#   USAGE_MONITOR_ENV    [~/.secrets/usage-monitor.env]   USAGE_READ_TOKEN (preferred)
+#                                                     or USAGE_INGEST_TOKEN (legacy)
+#   KNOB_SYNC_SSH_KEY    [~/.ssh/hetzner]
+#   KNOB_SYNC_SSH_HOST   [coolify]   (Hetzner fleet-hetzner-nbg1 / 167.233.254.55)
+#   KNOB_SYNC_BOX_ENV    [/data/coolify/applications/d83b1aykr03uwr32yhgzaiay/.env]
+#     Socratic.Trade Coolify UUID. Infisical ST machine identity lives in that
+#     host .env (verified 2026-08-12). Oracle 141.148.182.224 is decommissioned.
 set -u
 
 USAGE_API="${USAGE_API:-https://usage.jays.services/api/subscriptions}"
 USAGE_MONITOR_ENV="${USAGE_MONITOR_ENV:-$HOME/.secrets/usage-monitor.env}"
-SSH_KEY="${KNOB_SYNC_SSH_KEY:-$HOME/.ssh/id_ed25519}"
-SSH_HOST="${KNOB_SYNC_SSH_HOST:-ubuntu@141.148.182.224}"
-BOX_ENV="${KNOB_SYNC_BOX_ENV:-/data/coolify/applications/m1os7ijf31bg3fanil152e4b/.env}"
+SSH_KEY="${KNOB_SYNC_SSH_KEY:-$HOME/.ssh/hetzner}"
+SSH_HOST="${KNOB_SYNC_SSH_HOST:-coolify}"
+BOX_ENV="${KNOB_SYNC_BOX_ENV:-/data/coolify/applications/d83b1aykr03uwr32yhgzaiay/.env}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HELPER="$SCRIPT_DIR/provider-knob-diff.mjs"
@@ -78,18 +77,27 @@ cleanup() { [ -n "${WORK:-}" ] && rm -rf "$WORK"; }
 trap cleanup EXIT INT TERM
 
 # -- 1) read the usage-monitor token (never echoed) ----------------------------
+# Prod GET /api/subscriptions wants USAGE_READ_TOKEN. Ingest is write-only
+# there (Wave C) and 401s if used as a read bearer.
 USAGE_TOKEN=""
-if [ -f "$USAGE_MONITOR_ENV" ]; then
-  _line="$(grep -E '^(export )?USAGE_INGEST_TOKEN=' "$USAGE_MONITOR_ENV" 2>/dev/null | tail -1 || true)"
-  USAGE_TOKEN="${_line#*USAGE_INGEST_TOKEN=}"
-  # strip surrounding quotes if present
-  case "$USAGE_TOKEN" in
-    \"*\") USAGE_TOKEN="${USAGE_TOKEN#\"}"; USAGE_TOKEN="${USAGE_TOKEN%\"}" ;;
-    \'*\') USAGE_TOKEN="${USAGE_TOKEN#\'}"; USAGE_TOKEN="${USAGE_TOKEN%\'}" ;;
+_load_tok() {
+  _name="$1"
+  _line="$(grep -E "^(export )?${_name}=" "$USAGE_MONITOR_ENV" 2>/dev/null | tail -1 || true)"
+  _val="${_line#*${_name}=}"
+  case "$_val" in
+    \"*\") _val="${_val#\"}"; _val="${_val%\"}" ;;
+    \'*\') _val="${_val#\'}"; _val="${_val%\'}" ;;
   esac
+  printf '%s' "$_val"
+}
+if [ -f "$USAGE_MONITOR_ENV" ]; then
+  USAGE_TOKEN="$(_load_tok USAGE_READ_TOKEN)"
+  if [ -z "$USAGE_TOKEN" ]; then
+    USAGE_TOKEN="$(_load_tok USAGE_INGEST_TOKEN)"
+  fi
 fi
 if [ -z "$USAGE_TOKEN" ]; then
-  log "no USAGE_INGEST_TOKEN in $USAGE_MONITOR_ENV - cannot reach the monitor; nothing to do."
+  log "no USAGE_READ_TOKEN or USAGE_INGEST_TOKEN in $USAGE_MONITOR_ENV - cannot reach the monitor; nothing to do."
   exit 0
 fi
 
