@@ -293,6 +293,76 @@ function migrateLegacyDailyOpeningCapRows(database: Database.Database): number {
   return changed;
 }
 
+/**
+ * Event types added to NOTIFICATION_EVENT_TYPES after enabledEvents was already a populated,
+ * per-user array — DEFAULT_POLICY includes them for brand-new policies, but an existing stored
+ * array predates them and mergePolicy lets an explicit array win wholesale (no per-type
+ * unioning), so they'd silently read as "off" for every account that already had a policy row.
+ * The various send sites used to paper over this by force-injecting the type into that one
+ * send's effective enabledEvents — which also permanently overrode an owner's real, rendered
+ * Settings checkbox for these events (owner ruling 2026-08-12: no toggle may be silently
+ * overridden). This ONE-TIME backfill is the honest fix: it unions each type into a stored
+ * array exactly once (matching the delivery behavior every account already had via the old
+ * force-inject), after which the checkbox is authoritative — an explicit uncheck sticks.
+ */
+const DEFAULT_ON_EVENT_TYPES_BACKFILL = [
+  "provider_degraded",
+  "storage_warning",
+  "autonomy_halted_on_boot",
+  "signal_health",
+  "lookahead_leak",
+  "risk_advisory",
+  "budget_alert",
+  "earningscalls_entitlement_blocked"
+] as const;
+
+/** Shared four-table policy-blob walk (same targets as migrateLegacyDailyOpeningCapRows) that
+ *  unions DEFAULT_ON_EVENT_TYPES_BACKFILL into every stored notificationSettings.enabledEvents
+ *  array missing one or more of them. Only ADDS — never removes an event a user explicitly
+ *  disabled among the types that already existed when they saved. A row with no
+ *  notificationSettings at all (or no enabledEvents array) is left alone: mergePolicy already
+ *  gives it the full DEFAULT_POLICY list on read. Exported for unit testing; the versioned-
+ *  migration guard runs it exactly once at runtime. */
+export function backfillDefaultOnNotificationEvents(database: Database.Database): number {
+  const targets = [
+    { table: "account_strategy_state", column: "policy", where: "1=1" },
+    { table: "strategy_profiles", column: "policy", where: "1=1" },
+    { table: "user_settings", column: "value", where: "key = 'policy'" },
+    { table: "settings", column: "value", where: "key = 'policy'" }
+  ] as const;
+  let changed = 0;
+  for (const target of targets) {
+    // A legacy DB rolled back to a pre-baseline user_version for a migration-replay test may not
+    // have created this table yet at all (unlike migrateLegacyDailyOpeningCapRows at v26, this
+    // migration is always the newest and so always runs against those minimal fixtures) — skip
+    // rather than throw.
+    const exists = database
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(target.table);
+    if (!exists) continue;
+    const rows = database
+      .prepare(`SELECT rowid, ${target.column} AS json FROM ${target.table} WHERE ${target.where}`)
+      .all() as Array<{ rowid: number; json: string }>;
+    const update = database.prepare(`UPDATE ${target.table} SET ${target.column} = ? WHERE rowid = ?`);
+    for (const row of rows) {
+      try {
+        const policy = JSON.parse(row.json) as { notificationSettings?: { enabledEvents?: unknown } };
+        const enabledEvents = policy.notificationSettings?.enabledEvents;
+        if (!Array.isArray(enabledEvents)) continue;
+        const missing = DEFAULT_ON_EVENT_TYPES_BACKFILL.filter((type) => !enabledEvents.includes(type));
+        if (missing.length === 0) continue;
+        policy.notificationSettings!.enabledEvents = [...enabledEvents, ...missing];
+        update.run(JSON.stringify(policy), row.rowid);
+        changed += 1;
+      } catch {
+        // Corrupt JSON is already handled by the owning policy reader; a settings backfill must
+        // not make the database unbootable while trying to repair an unrelated row.
+      }
+    }
+  }
+  return changed;
+}
+
 const MIGRATIONS: Migration[] = [
   {
     // Per-attached-key LLM usage attribution: usage/cost measured per distinct key (user or
@@ -2847,6 +2917,18 @@ const MIGRATIONS: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_fundamental_revisions_symbol_field_filed
           ON fundamental_revisions (symbol, field, filed_at);
       `);
+    }
+  },
+  {
+    // Owner ruling 2026-08-12: every notification-event toggle must be authoritative — no
+    // silent force-include. Runs the one-time backfill once so the Settings checkbox for these
+    // 8 events (previously permanently overridden at every send site) becomes real going
+    // forward without flipping any account's actual delivery behavior on this deploy.
+    version: 77,
+    name: "notification_default_on_events_backfill",
+    up: (database) => {
+      const changed = backfillDefaultOnNotificationEvents(database);
+      if (changed > 0) console.log(`[db] migration 77: backfilled default-on notification events into ${changed} policy row(s)`);
     }
   }
 ];

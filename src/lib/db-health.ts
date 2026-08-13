@@ -713,36 +713,26 @@ export async function alertConnectionFailure(
               )
           : undefined;
 
-      // Also send standard notification
+      // Also send standard notification. enabledEvents gating is real (owner ruling
+      // 2026-08-12: no toggle is silently overridden) — a persisted policy that predates
+      // provider_degraded got it backfilled once by the db migration (see
+      // backfillDefaultOnNotificationEvents in db.ts); an owner who has since unchecked it stays
+      // unchecked.
       const { sendNotification } = await import("./notifications");
       const { getPolicy } = await import("./db");
       const policy = getPolicy("local");
-      const forcedPolicy = {
-        ...policy,
-        notificationSettings: {
-          ...policy.notificationSettings,
-          enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "provider_degraded" as const])) as any
-        }
-      };
       await sendNotification(
         { type: "provider_degraded", title, payload },
-        { userId: "local", policy: forcedPolicy as any, directBody: body, notifyDeps: { config }, additionalDelivery }
+        { userId: "local", policy, directBody: body, notifyDeps: { config }, additionalDelivery }
       ).catch(() => {});
     } else {
       // User-key failures: Route to user notifications only
       const { sendNotification } = await import("./notifications");
       const { getPolicy } = await import("./db");
       const policy = getPolicy(targetUserId);
-      const forcedPolicy = {
-        ...policy,
-        notificationSettings: {
-          ...policy.notificationSettings,
-          enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "provider_degraded" as const])) as any
-        }
-      };
       await sendNotification(
         { type: "provider_degraded", title, payload },
-        { userId: targetUserId, policy: forcedPolicy as any, directBody: body }
+        { userId: targetUserId, policy, directBody: body }
       ).catch(() => {});
     }
   } catch (err) {
@@ -791,20 +781,14 @@ export async function alertStorageWarning(warningType: string, message: string):
             )
         : undefined;
 
-    // Also send standard notification
+    // Also send standard notification. enabledEvents gating is real (see the provider_degraded
+    // comment above) — storage_warning was likewise backfilled once, not force-included per send.
     const { sendNotification } = await import("./notifications");
     const { getPolicy } = await import("./db");
     const policy = getPolicy("local");
-    const forcedPolicy = {
-      ...policy,
-      notificationSettings: {
-        ...policy.notificationSettings,
-        enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "storage_warning" as const])) as any
-      }
-    };
     await sendNotification(
       { type: "storage_warning", title, payload },
-      { userId: "local", policy: forcedPolicy as any, directBody: body, notifyDeps: { config }, additionalDelivery }
+      { userId: "local", policy, directBody: body, notifyDeps: { config }, additionalDelivery }
     ).catch(() => {});
   } catch {
     // never throw on warnings

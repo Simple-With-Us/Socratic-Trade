@@ -362,21 +362,15 @@ export async function runSignalHealthRefresh(
   return result;
 }
 
-/** One batched advisory notification for the pass's NEW alarms. Force-includes the signal_health
- * event type in enabledEvents (db-health's provider_degraded precedent: stored arrays predating
- * the type would otherwise silently skip a brand-new alarm class). ntfy titles are raw HTTP
- * header values — ASCII only. */
+/** One batched advisory notification for the pass's NEW alarms. enabledEvents gating is real
+ * (owner ruling 2026-08-12: no toggle is silently overridden) — a persisted policy that predated
+ * the signal_health event type got it backfilled once by the db migration
+ * (backfillDefaultOnNotificationEvents in db.ts), not force-included per send. ntfy titles are
+ * raw HTTP header values — ASCII only. */
 async function notifyDriftAlarms(userId: string, alarms: DriftState[]): Promise<void> {
   const { sendNotification } = await import("./notifications");
   const { getPolicy } = await import("./db");
   const policy = getPolicy(userId);
-  const forcedPolicy = {
-    ...policy,
-    notificationSettings: {
-      ...policy.notificationSettings,
-      enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "signal_health" as const]))
-    }
-  };
   const horizons = alarms.map((alarm) => alarm.horizon).join(", ");
   const throttleOn = policy.tuning?.signalHealthAutoThrottle === true;
   const detail = alarms
@@ -392,7 +386,7 @@ async function notifyDriftAlarms(userId: string, alarms: DriftState[]): Promise<
       : "Advisory only: sizing is unchanged unless you enable the signal-health auto-throttle in tuning.");
   await sendNotification(
     { type: "signal_health", title: `Signal health drift (${horizons})`, payload: { alarms, autoThrottle: throttleOn } },
-    { userId, policy: forcedPolicy, directBody: body }
+    { userId, policy, directBody: body }
   );
 }
 

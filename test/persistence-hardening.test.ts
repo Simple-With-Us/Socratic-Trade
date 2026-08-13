@@ -68,7 +68,7 @@ describe("runMigrations — versioned schema migrations", () => {
       upsertConnectedAccount
     } = await import("../src/lib/db");
     const db = getDb();
-    expect(getSchemaVersion(db)).toBe(76);
+    expect(getSchemaVersion(db)).toBe(77);
 
     upsertConnectedAccount({
       id: "legacy-product-test",
@@ -83,7 +83,7 @@ describe("runMigrations — versioned schema migrations", () => {
     // DELETE catches missing account/user columns as well as proving the account itself is removed.
     db.pragma("user_version = 24");
     expect(() => applyVersionedMigrations(db)).not.toThrow();
-    expect(getSchemaVersion(db)).toBe(76);
+    expect(getSchemaVersion(db)).toBe(77);
 
     expect(listConnectedAccounts("local").some((account) => account.broker === "test")).toBe(false);
   });
@@ -101,7 +101,7 @@ describe("runMigrations — versioned schema migrations", () => {
 
     db.pragma("user_version = 25");
     applyVersionedMigrations(db);
-    expect(getSchemaVersion(db)).toBe(76);
+    expect(getSchemaVersion(db)).toBe(77);
 
 
     const migrated = JSON.parse((db.prepare("SELECT value FROM user_settings WHERE id = ?").get("cap-default") as { value: string }).value);
@@ -148,7 +148,7 @@ describe("runMigrations — versioned schema migrations", () => {
     db.pragma("user_version = 29");
     applyVersionedMigrations(db);
 
-    expect(getSchemaVersion(db)).toBe(76);
+    expect(getSchemaVersion(db)).toBe(77);
 
     expect(db.prepare(`
       SELECT state, attempt_token, ledger_authority FROM vector_ingest_commits WHERE id = ?
@@ -195,7 +195,7 @@ describe("runMigrations — versioned schema migrations", () => {
     db.pragma("user_version = 31");
     applyVersionedMigrations(db);
 
-    expect(getSchemaVersion(db)).toBe(76);
+    expect(getSchemaVersion(db)).toBe(77);
 
     expect(db.prepare(`
       SELECT id, state, attempt_token, lease_expires_at
@@ -273,7 +273,7 @@ describe("runMigrations — versioned schema migrations", () => {
     db.pragma("user_version = 32");
     applyVersionedMigrations(db);
 
-    expect(getSchemaVersion(db)).toBe(76);
+    expect(getSchemaVersion(db)).toBe(77);
 
     expect(db.prepare(`
       SELECT commit_id FROM vector_document_heads
@@ -315,7 +315,7 @@ describe("runMigrations — versioned schema migrations", () => {
     db.prepare("INSERT INTO strategy_profiles (policy) VALUES (?)").run(JSON.stringify({ maxDailyNotional: 500 }));
     db.pragma("user_version = 25");
 
-    expect(applyVersionedMigrations(db)).toBe(76);
+    expect(applyVersionedMigrations(db)).toBe(77);
 
 
     for (const json of [
@@ -359,7 +359,7 @@ describe("runMigrations — versioned schema migrations", () => {
     db.prepare("INSERT INTO strategy_profiles (policy) VALUES (?)").run(JSON.stringify({ maxDailyNotional: 500 }));
     db.pragma("user_version = 26");
 
-    expect(applyVersionedMigrations(db)).toBe(76);
+    expect(applyVersionedMigrations(db)).toBe(77);
 
 
     for (const json of [
@@ -409,7 +409,7 @@ describe("runMigrations — versioned schema migrations", () => {
     `);
     db.pragma("user_version = 27");
 
-    expect(applyVersionedMigrations(db)).toBe(76);
+    expect(applyVersionedMigrations(db)).toBe(77);
 
     expect(db.prepare(`
       SELECT status, COUNT(*) AS count
@@ -446,7 +446,7 @@ describe("runMigrations — versioned schema migrations", () => {
       .run("unrelated:setting", JSON.stringify(now), now);
     db.pragma("user_version = 39");
 
-    expect(applyVersionedMigrations(db)).toBe(76);
+    expect(applyVersionedMigrations(db)).toBe(77);
 
     // v40 purges legacy broker-minimum cooldown keys; later migrations (v58) may seed
     // unrelated settings such as earningscalls_burst_pending — assert the purge, not a frozen key set.
@@ -492,7 +492,7 @@ describe("runMigrations — versioned schema migrations", () => {
     ).run(now);
     db.pragma("user_version = 45");
 
-    expect(applyVersionedMigrations(db)).toBe(76);
+    expect(applyVersionedMigrations(db)).toBe(77);
 
     expect(
       db.prepare(
@@ -518,7 +518,7 @@ describe("runMigrations — versioned schema migrations", () => {
     // Legacy v52 on-disk DB gains the table when versioned migrations re-run.
     const legacy = new RawDatabase(":memory:");
     legacy.pragma("user_version = 52");
-    expect(applyVersionedMigrations(legacy)).toBe(76);
+    expect(applyVersionedMigrations(legacy)).toBe(77);
     expect(
       legacy.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'socratic_coach_note_archive'").get()
     ).toBeTruthy();

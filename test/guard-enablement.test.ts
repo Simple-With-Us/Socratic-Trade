@@ -156,7 +156,7 @@ describe("advisory drawdown-breaker notification (dedup per user/account/source/
     expect(drawdownAudits.length).toBeGreaterThanOrEqual(2); // one receipt per breaching run
   }, 150_000);
 
-  it("delivers even when the stored enabledEvents list predates risk_advisory (force-inject regression)", async () => {
+  it("respects an explicit enabledEvents list that excludes risk_advisory — no force-inject (owner ruling 2026-08-12)", async () => {
     process.env.OPENROUTER_API_KEY = "test-openai-key";
     vi.stubGlobal("fetch", zeroProposalFetchStub());
 
@@ -185,10 +185,11 @@ describe("advisory drawdown-breaker notification (dedup per user/account/source/
       additionalSymbols: ["AAPL"],
       strategyAuthority: "decide",
       riskRules: { ...DEFAULT_POLICY.riskRules, maxDrawdownPct: 20 },
-      // Simulate an account whose stored notification preferences were saved BEFORE the
-      // risk_advisory event type existed: mergePolicy lets this explicit list win wholesale, so
-      // without the send-site force-inject the advisory is recorded as skipped ("Notification
-      // type is disabled.") and never reaches a push channel.
+      // An explicit list that excludes risk_advisory — whether because it predates the event type
+      // (backfilled once by the db migration for an EXISTING row, not force-included per send —
+      // see backfillDefaultOnNotificationEvents in db.ts) or because the owner unchecked it in
+      // Settings. Either way, setPolicy here writes it fresh (post-migration), so it must be
+      // honored: the drawdown advisory is genuinely skipped, not force-delivered.
       notificationSettings: { webhookUrl: "", enabledEvents: ["fill", "block"] }
     });
 
@@ -198,9 +199,8 @@ describe("advisory drawdown-breaker notification (dedup per user/account/source/
 
     const advisories = listNotificationEvents("local", 100).filter((e) => e.type === "risk_advisory");
     expect(advisories).toHaveLength(1);
-    // The send was ATTEMPTED, not dropped by the enabledEvents filter. (Status may still be
-    // "skipped" in this channel-less test env with the no-channels-configured reason — that is a
-    // delivery outcome, not a filter drop.)
-    expect(advisories[0].error).not.toBe("Notification type is disabled.");
+    // The send was attempted and genuinely gated off — recorded skipped for the real reason
+    // (disabled), not silently force-delivered around the owner's own Settings choice.
+    expect(advisories[0].error).toBe("Notification type is disabled.");
   }, 150_000);
 });

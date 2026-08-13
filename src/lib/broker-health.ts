@@ -177,15 +177,9 @@ export async function applyBrokerOrderPlacementPause(input: {
         userId,
         connectedAccountId
       );
-      const forcedPolicy: TradingPolicy = {
-        ...policy,
-        notificationSettings: {
-          ...policy.notificationSettings,
-          enabledEvents: Array.from(
-            new Set([...policy.notificationSettings.enabledEvents, "risk_advisory" as const])
-          )
-        }
-      };
+      // enabledEvents gating is real (owner ruling 2026-08-12: no toggle is silently overridden)
+      // — a persisted policy that predated risk_advisory got it backfilled once by the db
+      // migration (backfillDefaultOnNotificationEvents in db.ts), not force-included per send.
       await sendNotification(
         {
           type: "risk_advisory",
@@ -196,7 +190,7 @@ export async function applyBrokerOrderPlacementPause(input: {
             action: "auto_resume"
           }
         },
-        { policy: forcedPolicy, userId, connectedAccountId }
+        { policy, userId, connectedAccountId }
       );
       clearBrokerPlacementPauseMarker(userId, accountScope);
       return { action: "resumed", priorReason: marker.reason };

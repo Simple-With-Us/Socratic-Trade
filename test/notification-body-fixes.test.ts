@@ -235,3 +235,31 @@ describe("fill notification body — pending_reconciliation placeholder guard", 
     expect(embed.fields).toContainEqual({ name: "Notional", value: "$400.00", inline: true });
   });
 });
+
+// risk_advisory is emitted by both agent-originated advisories (e.g. the drawdown breaker in
+// advisory mode) AND owner-initiated actions (e.g. a manual order cancel that would leave dust
+// below the broker minimum — app/api/orders/cancel). The shared tail must read honestly for
+// both instead of claiming "the agent is still in control" when the owner acted directly.
+describe("risk_advisory notification body — neutral advisory tail", () => {
+  it("ends with the neutral tail, not the old agent-framed one", async () => {
+    const body = await directBody("risk_advisory", "Drawdown advisory: threshold breached (agent still in control)", {
+      reason: "drawdown/daily-loss threshold breached",
+      drawdownPct: 12.5,
+      equity: 100_000,
+      highWaterMark: 120_000
+    });
+    expect(body).toContain("Advisory only — nothing was blocked or changed.");
+    expect(body).not.toContain("no state change; the agent is still in control");
+  });
+
+  it("reads correctly for an owner-initiated advisory with no drawdown/equity payload fields", async () => {
+    // Mirrors app/api/orders/cancel/route.ts's cancel-dust-risk advisory: the OWNER initiated the
+    // cancel, not the agent, and the payload carries only `reason`.
+    const body = await directBody("risk_advisory", "AAPL cancel may leave dust below the broker minimum", {
+      reason: "Cancelling this order would leave 0.4 shares below the broker's $1 minimum."
+    });
+    expect(body).toBe(
+      "Cancelling this order would leave 0.4 shares below the broker's $1 minimum.\nAdvisory only — nothing was blocked or changed."
+    );
+  });
+});

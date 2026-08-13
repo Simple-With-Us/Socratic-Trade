@@ -1,7 +1,7 @@
 import { audit, getInternalSetting, getNotifyPrefs, getPolicy, setInternalSetting } from "./db";
 import { sendNotification } from "./notifications";
 import { loadNotifyConfig, notify } from "./notify";
-import type { NotifyPrefs, TradingPolicy } from "./types";
+import type { NotifyPrefs } from "./types";
 
 export interface UsageLimitAlertInput {
   userId?: string;
@@ -55,16 +55,6 @@ function shouldSend(input: Required<Pick<UsageLimitAlertInput, "userId" | "provi
   if (last && Date.now() - Date.parse(last) < cooldownMs()) return false;
   setInternalSetting(key, new Date().toISOString());
   return true;
-}
-
-function forcedBudgetAlertPolicy(policy: TradingPolicy): TradingPolicy {
-  return {
-    ...policy,
-    notificationSettings: {
-      ...policy.notificationSettings,
-      enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "budget_alert"]))
-    }
-  };
 }
 
 function operatorAlertEmail(): string | undefined {
@@ -173,11 +163,14 @@ export async function alertUsageLimitHit(
     assertUsageAlertActive(options);
     audit("usage_limit_alert", payload, userId);
     assertUsageAlertActive(options);
+    // enabledEvents gating is real (owner ruling 2026-08-12: no toggle is silently overridden)
+    // — a persisted policy that predated budget_alert got it backfilled once by the db migration
+    // (backfillDefaultOnNotificationEvents in db.ts), not force-included per send.
     await sendNotification(
       { type: "budget_alert", title, payload },
       {
         userId,
-        policy: forcedBudgetAlertPolicy(getPolicy(userId)),
+        policy: getPolicy(userId),
         assertActive: options.assertActive,
         signal: options.signal
       }

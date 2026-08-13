@@ -380,3 +380,49 @@ describe("truthful notification delivery aggregation", () => {
     expect(additionalDelivery).not.toHaveBeenCalled();
   });
 });
+
+// Owner ruling 2026-08-12: every notification-event toggle must be authoritative. These 8 event
+// types (provider_degraded, storage_warning, autonomy_halted_on_boot, signal_health,
+// lookahead_leak, risk_advisory, budget_alert, earningscalls_entitlement_blocked) used to be
+// force-injected into enabledEvents at every send site regardless of what the owner had
+// unchecked in Settings. That force-inject is gone; sendNotification's enabledEvents gate is now
+// the single source of truth for all of them, same as every other event type.
+describe("default-on notification events are toggleable — no remaining force-include", () => {
+  const FORMERLY_FORCE_INCLUDED: NotificationEventType[] = [
+    "provider_degraded",
+    "storage_warning",
+    "autonomy_halted_on_boot",
+    "signal_health",
+    "lookahead_leak",
+    "risk_advisory",
+    "budget_alert",
+    "earningscalls_entitlement_blocked"
+  ];
+
+  it("a brand-new policy (owner never touched the toggle) has all 8 enabled by default", () => {
+    for (const type of FORMERLY_FORCE_INCLUDED) {
+      expect(DEFAULT_POLICY.notificationSettings.enabledEvents).toContain(type);
+    }
+  });
+
+  it.each(FORMERLY_FORCE_INCLUDED)(
+    "an explicitly-disabled %s does not notify on any channel — no force-inject",
+    async (type) => {
+      const notifyImpl = notifierReturning([{ channel: "email", ok: true }]);
+      const fetcher = vi.fn(async () => new Response(null, { status: 204 }));
+      const additionalDelivery = vi.fn(async () => [{ channel: "email", ok: true }] satisfies NotifyChannelResult[]);
+      const policy = policyFor(type, "https://legacy.example/hook");
+      policy.notificationSettings.enabledEvents = []; // explicit opt-out of every event
+
+      const event = await sendNotification(
+        { type, title: `Test ${type}`, payload: {} },
+        { policy, userId: `disabled-${type}`, notifyImpl, fetcher, additionalDelivery }
+      );
+
+      expect(event).toMatchObject({ status: "skipped", error: "Notification type is disabled." });
+      expect(notifyImpl).not.toHaveBeenCalled();
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(additionalDelivery).not.toHaveBeenCalled();
+    }
+  );
+});

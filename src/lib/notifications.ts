@@ -517,13 +517,16 @@ function directNotificationBody(input: { type: NotificationEventType; title: str
       return `${provider} hit ${limitName} during ${operation}.${usage}${recommendation}`;
     }
     case "risk_advisory": {
-      // Advisory guardrail breach (e.g. drawdown breaker in advisory mode): render the breach
-      // detail, not just the title. Nothing halted — the copy must keep that unambiguous.
+      // Advisory guardrail breach: render the breach detail, not just the title. risk_advisory
+      // covers both agent-originated advisories (e.g. the drawdown breaker in advisory mode) and
+      // owner-initiated actions (e.g. a manual order cancel that would leave dust below the
+      // broker minimum, app/api/orders/cancel) — the tail must read honestly for both, not just
+      // claim "the agent is still in control" when it was the owner acting.
       const reason = payload.reason ? String(payload.reason) : input.title;
       const dd = Number.isFinite(Number(payload.drawdownPct)) ? `\nDrawdown: ${Number(payload.drawdownPct).toFixed(2)}% from the equity high-water mark` : "";
       const eq = Number.isFinite(Number(payload.equity)) ? `\nEquity: $${Number(payload.equity).toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "";
       const hwm = Number.isFinite(Number(payload.highWaterMark)) ? `\nHigh-water mark: $${Number(payload.highWaterMark).toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "";
-      return `${reason}${dd}${eq}${hwm}\nAdvisory only — no state change; the agent is still in control.`;
+      return `${reason}${dd}${eq}${hwm}\nAdvisory only — nothing was blocked or changed.`;
     }
     default:
       return input.title;
