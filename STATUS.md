@@ -1,3 +1,9 @@
+## Current (2026-08-15 GROK — cropped transparent ST favicon)
+
+Website tab icon is the offset 3D candlestick ST (S higher than T), tight-cropped so the letters barely fit, on a transparent background.  Apple home-screen icons stay opaque white.  iOS App Icon (dollar-sign) untouched.
+
+Branch `grok/favicon-crop-st`, issue #2731.  Rollout: `docs/rollouts/2026-08-15-favicon-crop-st.md`.
+
 ## Current (2026-08-15 GROK — account-config Title Case)
 
 Capabilities sheet on Connections was mixing Title Case chips (`Connected`, `Disabled`) with sentence-case values (`Whole shares`, `regular + extended`).  Labels and chips now match: `Fractional Shares`, `Whole Shares`, `Regular + Extended`, `Orders · Level N`.

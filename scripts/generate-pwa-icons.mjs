@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
-/** Renders public/icon.svg (the app's icon source) to the raster PNG sizes
- *  the PWA manifest and Apple's home-screen icon need — Safari and some
- *  Android/PWA installers don't reliably rasterize the SVG themselves.
- *  Re-run whenever public/icon.svg changes:
+/** Resizes public/icon.png (transparent cropped candlestick ST) to the
+ *  raster sizes the PWA manifest needs.  Does NOT write the iOS App Icon
+ *  (that is the separate dollar-sign mark).  Re-run after
+ *  scripts/generate-favicon-st.py:
  *
  *    node scripts/generate-pwa-icons.mjs
  */
@@ -14,21 +14,23 @@ import path from "node:path";
 import sharp from "sharp";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const SOURCE_SVG = path.join(ROOT, "public", "icon.svg");
-const OUT_DIR = path.join(ROOT, "public", "icons");
+const SOURCE_PNG = path.join(ROOT, "public", "icon.png");
 
 const TARGETS = [
-  { outDir: path.join(ROOT, "public", "icons"), file: "apple-touch-icon-180.png", size: 180 },
-  { outDir: path.join(ROOT, "public", "icons"), file: "icon-192.png", size: 192 },
-  { outDir: path.join(ROOT, "public", "icons"), file: "icon-512.png", size: 512 },
-  { outDir: path.join(ROOT, "ios", "SocraticTrade", "Assets.xcassets", "AppIcon.appiconset"), file: "AppIcon-1024.png", size: 1024 }
+  { file: "icon-32.png", size: 32, flatten: false },
+  { file: "icon-192.png", size: 192, flatten: false },
+  { file: "icon-512.png", size: 512, flatten: false },
+  { file: "apple-touch-icon-180.png", size: 180, flatten: true }
 ];
 
 async function main() {
-  for (const { outDir, file, size } of TARGETS) {
-    await mkdir(outDir, { recursive: true });
+  const outDir = path.join(ROOT, "public", "icons");
+  await mkdir(outDir, { recursive: true });
+  for (const { file, size, flatten } of TARGETS) {
     const outPath = path.join(outDir, file);
-    await sharp(SOURCE_SVG, { density: 384 }).resize(size, size).png().toFile(outPath);
+    let pipeline = sharp(SOURCE_PNG).resize(size, size);
+    if (flatten) pipeline = pipeline.flatten({ background: "#ffffff" });
+    await pipeline.png().toFile(outPath);
     console.log(`wrote ${path.relative(ROOT, outPath)} (${size}x${size})`);
   }
 }
