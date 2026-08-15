@@ -2,6 +2,11 @@ import SwiftUI
 
 struct MarketsView: View {
     @EnvironmentObject private var store: MobileStore
+    @Binding var selectedTab: AppTab
+
+    init(selectedTab: Binding<AppTab> = .constant(.markets)) {
+        self._selectedTab = selectedTab
+    }
     @State private var ticker = ""
     @State private var presentedSheet: MarketsSheet?
     @State private var presentedSymbol: PresentedSymbol?
@@ -9,6 +14,7 @@ struct MarketsView: View {
 
     var body: some View {
         SnapshotScaffold { snapshot in
+            ScanShortcutCard { selectedTab = .scan }
             PositionsSection(positions: snapshot.positions, presentedItem: $presentedItem)
             OrdersSection(
                 orders: snapshot.orders,
@@ -54,6 +60,30 @@ private enum MarketsSheet: String, Identifiable {
     case newAlert
 
     var id: String { rawValue }
+}
+
+private struct ScanShortcutCard: View {
+    let openScan: () -> Void
+
+    var body: some View {
+        AppCard {
+            VStack(alignment: .leading, spacing: 10) {
+                SectionHeading("Scan Table", subtitle: "ranked names for the current universe")
+                Text("Holdings stay here.  The interactive scan — score, price, and watchlist actions — is its own desk.")
+                    .font(.appSubheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(action: openScan) {
+                    Label("Open Scan", systemImage: "tablecells")
+                        .font(.appBody.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(AppPalette.accent)
+            }
+        }
+    }
 }
 
 private struct PositionsSection: View {

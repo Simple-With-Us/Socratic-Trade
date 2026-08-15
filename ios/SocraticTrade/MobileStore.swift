@@ -458,6 +458,38 @@ final class MobileStore: ObservableObject {
         try await client.symbolQuote(symbol)
     }
 
+    func fetchChatHistory() async throws -> [ChatTurn] {
+        try await client.chatHistory()
+    }
+
+    func sendChat(message: String, model: String?, clientTurnId: String) async throws -> ChatReply {
+        try await client.sendChat(message: message, model: model, clientTurnId: clientTurnId)
+    }
+
+    func clearChatHistory() async throws {
+        try await client.clearChatHistory()
+    }
+
+    func fetchChatProviders() async throws -> [String: Bool] {
+        try await client.chatProviders()
+    }
+
+    func fetchMarketScan() async throws -> MarketScanResponse {
+        try await client.marketScan()
+    }
+
+    func fetchFullPolicy() async throws -> FullPolicy {
+        try await client.fullPolicy()
+    }
+
+    func fetchSourceFeatures() async throws -> SourceFeaturesResponse {
+        try await client.sourceFeatures()
+    }
+
+    func patchSourceFeatures(_ settings: [String: Any]) async throws -> SourceFeaturesResponse {
+        try await client.patchSourceFeatures(settings)
+    }
+
     func loadAccountDeletionPreview() async {
         guard !isDeletingAccount else { return }
         isDeletingAccount = true

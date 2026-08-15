@@ -4,9 +4,26 @@ import SwiftUI
 struct SocraticTradeApp: App {
     /// UIKit hands back the APNs device token nowhere else — see `PushAppDelegate`.
     @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
-    @StateObject private var store = MobileStore(
-        client: MobileAPIClient(baseURL: MobileAPIClient.productionBaseURL)
-    )
+    @StateObject private var store = SocraticTradeApp.makeStore()
+
+    /// DEBUG App Store shots: `-ASCScreenshots` / `ASC_SCREENSHOTS=1` / UserDefaults `ascScreenshots`.
+    static var isScreenshotMode: Bool {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-ASCScreenshots") { return true }
+        if ProcessInfo.processInfo.environment["ASC_SCREENSHOTS"] == "1" { return true }
+        if UserDefaults.standard.bool(forKey: "ascScreenshots") { return true }
+        return false
+        #else
+        return false
+        #endif
+    }
+
+    private static func makeStore() -> MobileStore {
+        #if DEBUG
+        if isScreenshotMode { return MobileStore.preview }
+        #endif
+        return MobileStore(client: MobileAPIClient(baseURL: MobileAPIClient.productionBaseURL))
+    }
 
     init() {
         // Nav bars and tab items are drawn by UIKit and never see SwiftUI's .font, so the
@@ -105,6 +122,7 @@ struct ContentView: View {
             route: { destination in pendingDeepLink = destination },
             isLiveStreamConnected: { store.isStreamConnected }
         )
+        if SocraticTradeApp.isScreenshotMode { return }
         guard !store.hasInitialized else { return }
         await store.load()
         if store.isAuthenticated {
@@ -117,6 +135,7 @@ struct ContentView: View {
     }
 
     private func handleScenePhase(_ phase: ScenePhase) {
+        if SocraticTradeApp.isScreenshotMode { return }
         switch phase {
         case .active where store.isAuthenticated:
             store.startEvents()

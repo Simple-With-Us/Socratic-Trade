@@ -1,8 +1,9 @@
 # Socratic.Trade iOS
 
-Native, phone-first control surface for Socratic.Trade. The app presents five
-stable areas: Home, Proposals, Markets, Activity, and Insights
-(snapshot brief + attention items — not the web console Coach chat).
+Native, phone-first desk for Socratic.Trade. Pin Home, Proposals, Assets,
+Activity, Insights, Coach, Scan, Guardrails, or Results — More keeps every
+screen reachable. Insights stays a snapshot brief; Coach is the live
+`/api/chat` conversation.
 
 The backend remains authoritative. The app reads `/api/mobile/snapshot`, submits
 audited work through `/api/mobile/commands`, and listens to

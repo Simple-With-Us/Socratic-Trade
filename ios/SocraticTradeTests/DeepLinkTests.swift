@@ -18,6 +18,10 @@ final class DeepLinkTests: XCTestCase {
         XCTAssertEqual(destination("https://socratictrade.com/console/orders"), .tab(.markets))
         XCTAssertEqual(destination("https://socratictrade.com/console/watchlist"), .tab(.markets))
         XCTAssertEqual(destination("https://socratictrade.com/console/activity"), .tab(.activity))
+        XCTAssertEqual(destination("https://socratictrade.com/console/assistant"), .tab(.coach))
+        XCTAssertEqual(destination("https://socratictrade.com/console/scan"), .tab(.scan))
+        XCTAssertEqual(destination("https://socratictrade.com/console/guardrails"), .tab(.guardrails))
+        XCTAssertEqual(destination("https://socratictrade.com/console/results"), .tab(.results))
     }
 
     func testExtractsAProposalIdFromPathAndQuery() {
@@ -91,6 +95,10 @@ final class DeepLinkTests: XCTestCase {
             DeepLinkDestination.tab(.proposals),
             .tab(.markets),
             .tab(.activity),
+            .tab(.coach),
+            .tab(.scan),
+            .tab(.guardrails),
+            .tab(.results),
             .proposal(id: "proposal-1")
         ] {
             XCTAssertTrue(AppTab.customizable.contains(destination.tab), "\(destination)")

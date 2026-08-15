@@ -33,7 +33,11 @@ describe("GET /.well-known/apple-app-site-association", () => {
       "/console/approvals/*",
       "/console/orders",
       "/console/watchlist",
-      "/console/activity"
+      "/console/activity",
+      "/console/assistant",
+      "/console/scan",
+      "/console/guardrails",
+      "/console/results"
     ]);
     // A bare "/*" would hijack every link to the site into the app.
     expect(paths).not.toContain("/*");

@@ -4,6 +4,11 @@ import SwiftUI
 /// Not the web console Coach chat — rename keeps that product distinction clear.
 struct InsightsView: View {
     @EnvironmentObject private var store: MobileStore
+    @Binding var selectedTab: AppTab
+
+    init(selectedTab: Binding<AppTab> = .constant(.insights)) {
+        self._selectedTab = selectedTab
+    }
 
     var body: some View {
         SnapshotScaffold { snapshot in
@@ -11,7 +16,8 @@ struct InsightsView: View {
             ForEach(insights(for: snapshot)) { insight in
                 InsightCard(insight: insight)
             }
-            InsightsActionCard(snapshot: snapshot)
+            InsightsCoachCard { selectedTab = .coach }
+            InsightsActionCard(snapshot: snapshot, selectedTab: $selectedTab)
             InsightsAuthorityCard()
         }
         .navigationTitle("Insights")
@@ -182,9 +188,34 @@ private struct InsightCard: View {
     }
 }
 
+private struct InsightsCoachCard: View {
+    let openCoach: () -> Void
+
+    var body: some View {
+        AppCard {
+            VStack(alignment: .leading, spacing: 10) {
+                SectionHeading("Ask Coach", subtitle: "a real conversation, not this brief")
+                Text("Coach uses the same backend chat as the web desk.  Ask about a name, a pending proposal, or what the last scan ranked.")
+                    .font(.appSubheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(action: openCoach) {
+                    Label("Open Coach", systemImage: "bubble.left.and.bubble.right.fill")
+                        .font(.appBody.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(AppPalette.accent)
+            }
+        }
+    }
+}
+
 /// Insights is a brief — not a third home for Run once (Home owns that primary CTA).
 private struct InsightsActionCard: View {
     let snapshot: MobileSnapshot
+    @Binding var selectedTab: AppTab
 
     var body: some View {
         AppCard {
@@ -201,6 +232,15 @@ private struct InsightsActionCard: View {
                 .font(.appSubheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    selectedTab = .home
+                } label: {
+                    Label("Open Home", systemImage: "house.fill")
+                        .font(.appBody.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(minHeight: 44)
+                }
+                .buttonStyle(.bordered)
             }
         }
     }

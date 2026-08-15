@@ -22,7 +22,8 @@ struct HomeView: View {
             }
             StrategyControlsCard(snapshot: snapshot)
             PortfolioOverviewCard(snapshot: snapshot)
-            PerformanceOverviewCard(snapshot: snapshot)
+            PerformanceOverviewCard(snapshot: snapshot, selectedTab: $selectedTab)
+            DeskShortcutsCard(selectedTab: $selectedTab)
             ScheduleOverviewCard(snapshot: snapshot)
             HomeAttentionCard(snapshot: snapshot, selectedTab: $selectedTab)
         }
@@ -322,7 +323,7 @@ private struct AgentOverviewCard: View {
     @ViewBuilder
     private var statusLabels: some View {
         Label(AppFormat.strategyAuthorityLabel(snapshot.readiness.strategyAuthority), systemImage: "person.badge.shield.checkmark")
-        Label(snapshot.marketSession.capitalized, systemImage: "chart.line.uptrend.xyaxis")
+        Label(AppFormat.marketSessionBannerLabel(snapshot.marketSession), systemImage: "chart.line.uptrend.xyaxis")
     }
 }
 
@@ -485,9 +486,41 @@ private struct PortfolioOverviewCard: View {
     }
 }
 
+private struct DeskShortcutsCard: View {
+    @Binding var selectedTab: AppTab
+
+    var body: some View {
+        AppCard {
+            VStack(alignment: .leading, spacing: 10) {
+                SectionHeading("Desk", subtitle: "full surfaces, not just the remote")
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                    shortcut("Coach", systemImage: "bubble.left.and.bubble.right.fill", tab: .coach)
+                    shortcut("Scan", systemImage: "tablecells", tab: .scan)
+                    shortcut("Guardrails", systemImage: "shield.checkered", tab: .guardrails)
+                    shortcut("Results", systemImage: "chart.xyaxis.line", tab: .results)
+                }
+            }
+        }
+    }
+
+    private func shortcut(_ title: String, systemImage: String, tab: AppTab) -> some View {
+        Button {
+            selectedTab = tab
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.appSubheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: 44)
+        }
+        .buttonStyle(.bordered)
+        .tint(AppPalette.accent)
+    }
+}
+
 private struct PerformanceOverviewCard: View {
     @EnvironmentObject private var store: MobileStore
     let snapshot: MobileSnapshot
+    @Binding var selectedTab: AppTab
 
     private var usesLiveMetrics: Bool {
         AccountMetrics.usesLiveMetrics(environment: store.displayedActiveAccount(in: snapshot)?.environment)
@@ -524,7 +557,12 @@ private struct PerformanceOverviewCard: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            SectionHeading("Performance", subtitle: accountSubtitle)
+            HStack(alignment: .firstTextBaseline) {
+                SectionHeading("Performance", subtitle: accountSubtitle)
+                Spacer()
+                Button("See Results") { selectedTab = .results }
+                    .font(.appCaption.weight(.semibold))
+            }
             if let performance = snapshot.performance {
                 LazyVGrid(columns: columns, spacing: 10) {
                     MetricTile(
@@ -711,6 +749,7 @@ private struct AccountSettingsView: View {
                 alertsSection
                 policySection
                 GuardrailTighteningSection()
+                DataSourcesSection()
                 adminSection
                 sessionSection
                 deletionSection
@@ -794,6 +833,11 @@ private struct AccountSettingsView: View {
             LabeledContent("Max Order", value: AppFormat.money(store.snapshot?.policy.maxOrderNotional))
             LabeledContent("Daily Cap", value: AppFormat.money(store.snapshot?.policy.maxDailyNotional))
             LabeledContent("Daily Orders", value: store.snapshot?.policy.maxDailyOrders.map(String.init) ?? "—")
+            NavigationLink {
+                GuardrailsView()
+            } label: {
+                Label("View Full Policy", systemImage: "shield.checkered")
+            }
         }
     }
 

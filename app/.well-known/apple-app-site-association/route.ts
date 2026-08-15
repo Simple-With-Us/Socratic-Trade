@@ -22,7 +22,11 @@ export const APPLE_APP_SITE_ASSOCIATION = {
           { "/": "/console/approvals/*", comment: "One specific proposal" },
           { "/": "/console/orders", comment: "Assets tab (orders)" },
           { "/": "/console/watchlist", comment: "Assets tab (watchlist)" },
-          { "/": "/console/activity", comment: "Activity tab" }
+          { "/": "/console/activity", comment: "Activity tab" },
+          { "/": "/console/assistant", comment: "Coach chat" },
+          { "/": "/console/scan", comment: "Scan table" },
+          { "/": "/console/guardrails", comment: "Guardrails" },
+          { "/": "/console/results", comment: "Results" }
         ]
       }
     ]

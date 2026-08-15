@@ -3,6 +3,16 @@
 Website tab icon is the offset 3D candlestick ST (S higher than T), tight-cropped so the letters barely fit, on a transparent background.  Apple home-screen icons stay opaque white.  iOS App Icon (dollar-sign) untouched.
 
 Branch `grok/favicon-crop-st`, issue #2731.  Rollout: `docs/rollouts/2026-08-15-favicon-crop-st.md`.
+## Current (2026-08-14 GROK — ban grepping secrets files for KEY=value lines)
+
+Owner: change agent rules so nobody dumps `~/.secrets/global-api-keys` into a
+transcript.  Rotation is already done; do not re-litigate it.
+
+Added the handoff-file grep trap to AGENT-SYNC, TEMPLATE-AGENTS, this
+`AGENTS.md`, and the secret-safety skill.  Names only: `grep -oE`.
+Branch `grok/secret-file-grep-ban`.
+
+Rollout: `docs/rollouts/2026-08-14-secret-file-grep-ban.md`.
 
 ## Current (2026-08-15 GROK — account-config Title Case)
 
@@ -412,6 +422,17 @@ Owner screenshot 8:06–8:44am CT plus 7d Uptime/Sentry.  Four distinct app bugs
 ST 503s pair with the keyword "OpenRouter credits low" monitor because that monitor hit the same `/api/health` URL and treated 5xx as down.  Allowed 4xx/5xx on that keyword monitor so only the credits substring pages.
 
 Branch `grok/fleet-alerts-aug13`.  Rollout: `docs/rollouts/2026-08-13-fleet-alert-triage.md`.
+
+## Current (2026-08-14 GROK — ban grepping secrets files for KEY=value lines)
+
+Owner: change agent rules so nobody dumps `~/.secrets/global-api-keys` into a
+transcript.  Rotation is already done; do not re-litigate it.
+
+Added the handoff-file grep trap to AGENT-SYNC, TEMPLATE-AGENTS, this
+`AGENTS.md`, and the secret-safety skill.  Names only: `grep -oE`.
+Branch `grok/secret-file-grep-ban`.
+
+Rollout: `docs/rollouts/2026-08-14-secret-file-grep-ban.md`.
 
 ## Current (2026-08-13 GROK — Settings Saving… + ROIC Individual actually binds)
 

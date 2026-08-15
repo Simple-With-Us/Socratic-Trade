@@ -92,6 +92,56 @@ struct MobileAPIClient {
         return envelope.command
     }
 
+    func chatHistory() async throws -> [ChatTurn] {
+        let envelope: ChatHistoryResponse = try await get("/api/chat-history")
+        return envelope.turns
+    }
+
+    func sendChat(message: String, model: String?, clientTurnId: String) async throws -> ChatReply {
+        var body: [String: Any] = [
+            "message": message,
+            "clientTurnId": clientTurnId
+        ]
+        if let model, !model.isEmpty {
+            body["model"] = model
+        }
+        return try await sendJSON("/api/chat", method: "POST", body: body, timeout: 90)
+    }
+
+    func clearChatHistory() async throws {
+        var request = request(path: "/api/chat-history", method: "DELETE")
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [:])
+        _ = try await successfulResponseData(for: request)
+    }
+
+    func chatProviders() async throws -> [String: Bool] {
+        let envelope: ChatProvidersResponse = try await get("/api/chat/providers")
+        return envelope.providers
+    }
+
+    /// Interactive market scan — GET `/api/scan`.  The server budget is 20s.
+    func marketScan() async throws -> MarketScanResponse {
+        try await get("/api/scan", retries: 0, timeout: 25)
+    }
+
+    func fullPolicy() async throws -> FullPolicy {
+        try await get("/api/policy")
+    }
+
+    func sourceFeatures() async throws -> SourceFeaturesResponse {
+        try await get("/api/settings/source-features")
+    }
+
+    func patchSourceFeatures(_ settings: [String: Any]) async throws -> SourceFeaturesResponse {
+        let _: SourceFeaturesPatchAck = try await sendJSON(
+            "/api/settings/source-features",
+            method: "PATCH",
+            body: ["settings": settings]
+        )
+        return try await sourceFeatures()
+    }
+
     /// On-demand single-symbol quote + fundamentals for `SymbolInfoSheet` — GET
     /// `/api/quote?symbol=...`, the same on-demand provider cascade the web console drilldown
     /// falls back to for a symbol outside the last market scan.
@@ -250,11 +300,13 @@ struct MobileAPIClient {
         return request
     }
 
-    private func get<T: Decodable>(_ path: String, retries: Int = 2) async throws -> T {
+    private func get<T: Decodable>(_ path: String, retries: Int = 2, timeout: TimeInterval = 30) async throws -> T {
         var attempt = 0
         while true {
             do {
-                return try await send(request(path: path))
+                var req = request(path: path)
+                req.timeoutInterval = timeout
+                return try await send(req)
             } catch let error as MobileAPIError {
                 if case .network = error, attempt < retries {
                     attempt += 1
@@ -267,6 +319,19 @@ struct MobileAPIClient {
                 throw error
             }
         }
+    }
+
+    private func sendJSON<T: Decodable>(
+        _ path: String,
+        method: String,
+        body: [String: Any],
+        timeout: TimeInterval = 30
+    ) async throws -> T {
+        var request = request(path: path, method: method)
+        request.timeoutInterval = timeout
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return try await send(request)
     }
 
     private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
@@ -310,7 +375,7 @@ struct MobileAPIClient {
     private static func serverMessage(from data: Data?) -> String? {
         guard let data, !data.isEmpty else { return nil }
         if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            return object["error"] as? String ?? object["message"] as? String
+            return object["message"] as? String ?? object["error"] as? String
         }
         // Cloudflare often returns plain text like "error code: 522" when origin is down.
         if let text = String(data: data, encoding: .utf8)?

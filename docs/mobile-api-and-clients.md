@@ -93,12 +93,14 @@ standalone display and app icons.
 
 ## SwiftUI iPhone App
 
-The starter files in `ios/SocraticTrade/` model the same backend contract:
+The files in `ios/SocraticTrade/` model the same backend contract:
 
-- `MobileAPIClient` reads snapshots, queues commands, listens to SSE events, and
-  calls account deletion endpoints.
+- `MobileAPIClient` reads snapshots, queues commands, listens to SSE events,
+  calls account deletion endpoints, and (session-cookie) reads Coach, Scan,
+  full policy, and Settings data-source knobs.
 - `MobileStore` keeps app state and refreshes from the backend.
-- `MobileControlView` renders the native control surface and deletion flow.
+- `MobileControlView` renders the native desk: Home, Proposals, Assets,
+  Activity, Insights, Coach, Scan, Guardrails, Results, plus More.
 
 The iOS app should use `ASWebAuthenticationSession` or system browser login for
 the backend session and store only the resulting session token/cookie in Keychain

@@ -77,6 +77,14 @@ enum DeepLink {
             return segments.count == 2 ? .tab(.markets) : nil
         case "activity":
             return segments.count == 2 ? .tab(.activity) : nil
+        case "assistant", "coach":
+            return segments.count == 2 ? .tab(.coach) : nil
+        case "scan":
+            return segments.count == 2 ? .tab(.scan) : nil
+        case "guardrails":
+            return segments.count == 2 ? .tab(.guardrails) : nil
+        case "results":
+            return segments.count == 2 ? .tab(.results) : nil
         default:
             return nil
         }

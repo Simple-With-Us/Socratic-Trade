@@ -218,6 +218,8 @@ current Hetzner host (app env lives in Coolify's DB, not a `/data/coolify` tree)
 `docs/rollouts/2026-07-31-hetzner-servers-deleted.md`.
 
 **Coolify tokens (do not mix — 2026-07-30):** `COOLIFY_SERVER_STATS` is **read-only** (website server-stats only). `COOLIFY_AGENTS` is **full** deploy/admin (agent ops / GH deploy only). Never store `COOLIFY_AGENTS` as the app's `COOLIFY_API_TOKEN`. Infisical must keep both keys; if `COOLIFY_API_TOKEN` exists for metrics it must equal the read-only stats token. **Never run bare `infisical secrets`** (it prints every value into the transcript) — use `scripts/infisical-secrets-safe.sh`. Canonical: `/Users/jay/apps/AGENT-SYNC.md` § Secret handoff.
+
+**Handoff-file grep trap (2026-08-14, binding):** `~/.secrets/global-api-keys` is a multi-secret file.  `grep '^[A-Z0-9_]+='` / `grep '^ADMIN'` / `rg TOKEN file` print **values** (the whole matching line).  Names only: `grep -oE '^[A-Z][A-Z0-9_]*' ~/.secrets/global-api-keys`.  Never `cat` or open that file with a Read tool.  One Grok session leaked the whole store this way.
 **Build caveats:** the box's `concurrent_builds` is
 pinned to **1** (two parallel `next build`s OOM-wedged the old 4 GB box on 2026-07-07,
 console reboot required; unproven on the 8 GB box — loosen only deliberately), and Docker
@@ -598,6 +600,8 @@ paternalism that keeps creeping back in from every agent (Claude, Codex, others)
 - Don't run destructive git operations (`reset --hard`, force-push, branch
  deletion) without explicit user confirmation in the current conversation,
  even if a previous session was authorized to push.
+
+- **Don't grep a secrets handoff file for `KEY=` lines.** `grep '^[A-Z0-9_]+=' ~/.secrets/global-api-keys` prints every value into the transcript. Names only: `grep -oE '^[A-Z][A-Z0-9_]*'`. See AGENT-SYNC.md § Handoff-file grep trap.
 
 - **NEVER create a new provider API key. No agent, on any platform, ever.**
  (Owner ruling, 2026-07-20 — binding for Claude, Codex, Antigravity/Gemini,

@@ -8,6 +8,14 @@ enum AppTab: String, CaseIterable, Identifiable {
     case activity
     /// Snapshot brief + rule-based attention items — not the web console Coach chat.
     case insights
+    /// Live Coach conversation (POST /api/chat).
+    case coach
+    /// Interactive market scan table.
+    case scan
+    /// Full policy + tighten-only edits.
+    case guardrails
+    /// Read-only P&L and tax-relevant fill receipts.
+    case results
     /// Every screen + tab customization. Always present, always last — the iOS
     /// counterpart of the web mobile bar's "More" sheet (app/console/components/nav.tsx).
     case more
@@ -24,6 +32,10 @@ enum AppTab: String, CaseIterable, Identifiable {
         case .markets: return "Assets"
         case .activity: return "Activity"
         case .insights: return "Insights"
+        case .coach: return "Coach"
+        case .scan: return "Scan"
+        case .guardrails: return "Guardrails"
+        case .results: return "Results"
         case .more: return "More"
         }
     }
@@ -35,6 +47,10 @@ enum AppTab: String, CaseIterable, Identifiable {
         case .markets: return "chart.line.uptrend.xyaxis"
         case .activity: return "clock.arrow.circlepath"
         case .insights: return "lightbulb.fill"
+        case .coach: return "bubble.left.and.bubble.right.fill"
+        case .scan: return "tablecells"
+        case .guardrails: return "shield.checkered"
+        case .results: return "chart.xyaxis.line"
         case .more: return "square.grid.2x2"
         }
     }
@@ -47,6 +63,10 @@ enum AppTab: String, CaseIterable, Identifiable {
         case .markets: return "Holdings, orders, watchlist, and price alerts."
         case .activity: return "Everything the agent did, newest first."
         case .insights: return "Status brief and attention items."
+        case .coach: return "Ask the desk — a real Coach conversation."
+        case .scan: return "Ranked names with watchlist actions."
+        case .guardrails: return "Read the full policy and tighten it."
+        case .results: return "P&L, benchmark, and fill receipts."
         case .more: return "All screens and tab customization."
         }
     }
@@ -112,7 +132,7 @@ final class TabPreferences: ObservableObject {
 struct MobileControlView: View {
     @EnvironmentObject private var store: MobileStore
     @StateObject private var tabPreferences = TabPreferences()
-    @State private var selectedTab: AppTab = .home
+    @State private var selectedTab: AppTab = MobileControlView.initialTab()
     @State private var morePath: [AppTab] = []
     /// Proposal id a deep link asked for, handed to whichever ProposalsView is on screen.
     @State private var focusedProposalId: String?
@@ -182,6 +202,26 @@ struct MobileControlView: View {
                     NavigationStack { destination(for: .insights) }
                 }
             }
+            if tabPreferences.isPinned(.coach) {
+                Tab(AppTab.coach.title, systemImage: AppTab.coach.systemImage, value: AppTab.coach) {
+                    NavigationStack { destination(for: .coach) }
+                }
+            }
+            if tabPreferences.isPinned(.scan) {
+                Tab(AppTab.scan.title, systemImage: AppTab.scan.systemImage, value: AppTab.scan) {
+                    NavigationStack { destination(for: .scan) }
+                }
+            }
+            if tabPreferences.isPinned(.guardrails) {
+                Tab(AppTab.guardrails.title, systemImage: AppTab.guardrails.systemImage, value: AppTab.guardrails) {
+                    NavigationStack { destination(for: .guardrails) }
+                }
+            }
+            if tabPreferences.isPinned(.results) {
+                Tab(AppTab.results.title, systemImage: AppTab.results.systemImage, value: AppTab.results) {
+                    NavigationStack { destination(for: .results) }
+                }
+            }
 
             Tab(AppTab.more.title, systemImage: AppTab.more.systemImage, value: AppTab.more) {
                 NavigationStack(path: $morePath) {
@@ -204,6 +244,27 @@ struct MobileControlView: View {
             // exists, and one that arrives while signed out waits here until it does.
             apply(pendingDeepLink)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .ascSelectTab)) { note in
+            if let raw = note.object as? String, let tab = AppTab(rawValue: raw) {
+                selection.wrappedValue = tab
+            }
+        }
+    }
+
+    /// `-ASCScreenshotTab home|proposals|markets|activity|insights` or UserDefaults `ascScreenshotTab`.
+    private static func initialTab() -> AppTab {
+        #if DEBUG
+        if let idx = ProcessInfo.processInfo.arguments.firstIndex(of: "-ASCScreenshotTab"),
+           ProcessInfo.processInfo.arguments.indices.contains(idx + 1),
+           let tab = AppTab(rawValue: ProcessInfo.processInfo.arguments[idx + 1]) {
+            return tab
+        }
+        if let raw = UserDefaults.standard.string(forKey: "ascScreenshotTab"),
+           let tab = AppTab(rawValue: raw) {
+            return tab
+        }
+        #endif
+        return .home
     }
 
     /// Deep links reuse the SAME rerouting `selection` binding as in-app jumps, so a link to an
@@ -241,12 +302,20 @@ struct MobileControlView: View {
         switch tab {
         case .home: HomeView(selectedTab: selection)
         case .proposals: ProposalsView(focusedProposalId: $focusedProposalId)
-        case .markets: MarketsView()
+        case .markets: MarketsView(selectedTab: selection)
         case .activity: ActivityView()
-        case .insights: InsightsView()
+        case .insights: InsightsView(selectedTab: selection)
+        case .coach: CoachView()
+        case .scan: ScanView()
+        case .guardrails: GuardrailsView()
+        case .results: ResultsView()
         case .more: EmptyView()
         }
     }
+}
+
+extension Notification.Name {
+    static let ascSelectTab = Notification.Name("ascSelectTab")
 }
 
 /// The overflow + customization screen: every destination stays reachable here, and
