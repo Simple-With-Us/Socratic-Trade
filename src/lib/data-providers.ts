@@ -1278,12 +1278,8 @@ export function getEnrichmentProvider(
   // Positioned after FMP (paid key wins) but before Yahoo (keyless fallback) so SEC authoritative
   // data supersedes Yahoo's scraped values. Set SEC_XBRL_ENRICHMENT_ENABLED=0 to disable.
   if (secXbrlEnrichmentEnabled()) providers.push(new SecXbrlEnrichmentProvider());
-  // FilingAPI.dev (FILINGAPI / FILINGAPI_KEY): optional. Missing / known-401 keys skip
-  // the lane; ROIC + SEC EDGAR cover the same fields. A later valid key registers again.
-  const filingApi = resolveApiKeyWithSource("filingapi", userId);
-  if (shouldUseFilingApiKey(filingApi.key)) {
-    providers.push(withHealthLane(new FilingApiEnrichmentProvider(filingApi.key, filingApi.source, userId), filingApi.source));
-  }
+  // FilingAPI.dev is retired (owner 2026-08-17). Earnings/transcripts are ROIC.ai only.
+  // Do not register even if a dead FILINGAPI key is still in Infisical.
   // Wisesheets + SimFin: two new (2026-08-02) free/keyed fundamentals "second opinions" layered
   // on top of FMP/roic/SEC-XBRL above, both key-gated on their own env var (process.env only,
   // mirror QuiverEnrichmentProvider) and both self-contained (no shared provider-rate-limit.ts
