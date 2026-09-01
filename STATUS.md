@@ -1,5 +1,27 @@
 # Current Status
 
+## 2026-09-01 CLAUDE — "Never idle-watch a PR" codified as a binding fleet rule
+
+Owner ruling, 2026-09-01: agents "should never just wait and watch for things to merge
+since that wastes tokens/time and they inevitably almost invariably end up slowly wasting
+money/quota while the PR sits there with conflicts or comments/issues unresolved."
+
+The rule now lives in every place an agent actually reads it: a canonical
+`## Never idle-watch a PR` section in `/Users/jay/apps/AGENT-SYNC.md` (directly after
+Merge requirements, mirrored into the tracked `ai-fleet-coordinator` copy so the GitHub
+file does not drift), a stanza in `/Users/jay/.claude/CLAUDE.md` next to "Always commit +
+land finished work", and a bullet block in the `## Pull requests` section of this repo's
+`AGENTS.md` plus the Congress.Trade and Usage-Monitor equivalents.
+
+Substance: a PR that is not merging is not waiting on time, it is waiting on an **action**
+— unresolved review threads, a merge conflict, a failing or never-dispatched required
+check, auto-merge never armed, or a branch behind `main`.  Arm auto-merge the moment the
+PR exists, then either do the next useful thing or take exactly ONE bounded
+`gh pr checks <n> --watch`; if that ends unmerged, diagnose the cause instead of waiting
+again.  Same for background jobs: a turn whose only output is "still running" is quota
+burn.  Docs/rules only — image-noop, outside the Coolify `watch_paths` list.  Rollout:
+`docs/rollouts/2026-09-01-never-idle-watch-rule.md`.
+
 ## 2026-09-01 CLAUDE — PR #3139 plist comment: actually fix the XML `--` bug
 
 PR #3139 claimed moving the template comment above `<!DOCTYPE>` down into `<dict>` fixed
