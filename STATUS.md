@@ -1,5 +1,10 @@
 # Current Status
 
+## 2026-09-18 GROK — MM AG takeover #3378 admin CI (board 6aa1e66e)
+
+Hosted verify failed on operator wiring + copy-rules, not lucide-react.  Point the backtest-ic marker at `admin-shell.tsx`, gap the CPU caveat title, show the active admin nav label.  Continue `mm/ag-takeover-eb883289`.  Extra-ship no.  No Coolify Deploy.
+Rollout: `docs/rollouts/2026-09-18-ag-takeover-admin-ci.md`.
+
 ## 2026-09-18 CURSOR — Cleanup Actions Caches Crons margin (FLEET-INFRA-BY)
 
 Sentry `ci-cleanup-actions-caches` false-pages every day at 03:20Z.  The prune job itself succeeds on `ubuntu-latest` in ~12s; GitHub just starts the `5 3 * * *` schedule 4.5-7h late (typical 07:35-08:48Z, worst retained 2026-08-29 09:57Z).  Same class as #3194 / FLEET-INFRA-C1 and #3387 / FLEET-INFRA-C3.  Raise `CHECKIN_MARGIN_OVERRIDES["Cleanup Actions Caches"]` to 600.  Cron and prune script unchanged.  Extra-ship no.  No Coolify Deploy.  Do not `workflow_dispatch` the cleanup.  #3302 already moved the live slug to `ci-socratic-trade-cleanup-actions-caches`; do not close BY on merge.
