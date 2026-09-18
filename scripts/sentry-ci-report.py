@@ -102,8 +102,19 @@ CRON_SCHEDULES = {
 _CRON_SCHEDULES_FOLDED = {name.casefold(): expr for name, expr in CRON_SCHEDULES.items()}
 
 DEFAULT_CHECKIN_MARGIN = 15
+# GitHub `schedule` delivery is best-effort.  These daily/weekday/hourly
+# monitors always eventually run, but the start is hours late, so a 15-minute
+# margin false-pages a healthy job.  600 min matches #3194 (FLEET-INFRA-C1)
+# and #3387 (FLEET-INFRA-C3).  Cleanup Actions Caches typically starts
+# 4.5-7h after 03:05Z (worst retained 2026-08-29 09:57Z, ~6h 52m).  Do not
+# copy this onto 30-min macos ship crons (FLEET-INFRA-CC / DA / CX): those
+# drop ticks entirely, so a wider margin still misses.  Pre-#3302 slugs
+# (`ci-cleanup-actions-caches`, `ci-rth-deploy-latch`) stay orphaned; HEAD
+# upserts `ci-socratic-trade-*`.
 CHECKIN_MARGIN_OVERRIDES = {
     "Deploy freshness": 600,
+    "RTH Deploy Latch": 600,
+    "Cleanup Actions Caches": 600,
 }
 _CHECKIN_MARGINS_FOLDED = {name.casefold(): margin for name, margin in CHECKIN_MARGIN_OVERRIDES.items()}
 
