@@ -1,5 +1,9 @@
 # Current Status
 
+## 2026-09-21 Antigravity — Quote cascade freshness & event-loop stall performance repair
+
+Diagnosed and resolved ST quote staleness root cause where live broker two-sided NBBO quotes lacked `fetchedAt` timestamps across cascade levels and `quoteAgeSecForStalenessGate` penalized non-delayed quotes with older last-trade `asOf` prints.  Wired `fetchFreshQuotesCascade` into `/api/quote`, `src/lib/dashboard.ts`, and `app/api/watchlist/route.ts` as resilient fallback.  Isolated SEC RAG ingestion and managed vector reconciliation during RTH trading hours and added cooperative event loop yields around heavy Cheerio HTML parses to prevent main-thread stalls (26s–362s).  Tests passing across quote cascade and RTH worker suites.  Running verification gate.  Rollout: `docs/rollouts/2026-09-21-quote-cascade-freshness-and-performance.md`.
+
 ## 2026-09-21 codex-autofix — PR #3444 round 3: correct the head attribution for the green CI run
 
 Codex reviewed head `e892f938` and raised one new P1 against the round-2 rollout note: it said the
