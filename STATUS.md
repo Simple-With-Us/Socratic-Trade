@@ -40,6 +40,10 @@ run against real B2 credentials — the first real drill should be watched.  Rep
 check re-runs on push.  Ops script + docs only.  Extra-ship no.
 Rollout: `docs/rollouts/2026-09-23-b2-ltx-restore-drill-hardening.md`.
 
+## 2026-09-21 Antigravity — LLM stats lineage, token usage, and lifetime retention
+
+Delivered model lineage predecessor roll-forward and token aggregation for LLM usage and picker statistics.  Exempted `llm_call_latency` from audit pruning (`AUDIT_PRUNE_NEVER_PRUNED_KINDS`) to permanently retain latency records in SQLite.  Lifted the default 90-day window to lifetime (`sinceDays=0`), while adding an interactive time-range selector (`All Time`, `90 Days`, `30 Days`) to the Model Stats drawer.  Surfaced average token usage per call with prompt/completion breakdown and explicit predecessor lineage badging when models shift versions.  Added `scripts/ops/backfill-pruned-latency-audits.ts` for safe idempotent restoration of historical latency records from backups.  Local gate passed (`npm run lint`, `npx tsc --noEmit`, vitest target tests, `npm run build`).
+Rollout: `docs/rollouts/2026-09-21-llm-stats-lineage-and-tokens.md`.
 
 ## 2026-09-21 MUSE — claude-code-action 1.0.230 bump, round-3 sweep (restore pin, record verification)
 
