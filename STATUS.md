@@ -1,5 +1,13 @@
 # Current Status
 
+## 2026-09-25 CLAUDE — PR #3756 re-synced with main
+
+Merged `origin/main` into `claude/st-stall-profiler` to pick up #3761, #3774, #3778 (no file
+overlap with this lane besides `STATUS.md`/`docs/EFFORT-LOG.md`, both sides kept).  Re-verified
+on the merged tree: `npx tsc --noEmit` clean, `npm run lint` 0 errors, targeted
+`stall-profiler`/`cpuprofile-summary`/`lane-deadline-stall-attribution` vitest files (55 tests)
+pass.  Hold label kept; auto-merge not armed.  Detail: `docs/rollouts/2026-09-24-st-stall-profiler.md`.
+
 ## 2026-09-24 CLAUDE — Stall-triggered CPU profiler (Lane A, board 687a5fb4)
 
 **What.**  Production's recurring RTH event-loop stall (40-140s chunks, ~97% blocked, board
