@@ -1,12 +1,22 @@
 name: Playwright Smoke
 
-# Playwright Smoke — NOT a required merge check (ruleset: verify only). PR trigger removed
-# 2026-07-21 to unclog the self-hosted runner queue; still runs on main / nightly / manual.
+# Playwright Smoke — NOT a required merge check (ruleset: verify only).
+# PR trigger was removed 2026-07-21 to unclog the self-hosted runner queue, then
+# restored 2026-09-27 as a NARROW path-filtered trigger: only PRs that touch
+# Playwright-owned files run it (test/e2e/**, playwright.config.ts, lockfiles,
+# this workflow). UI PRs that don't touch those paths still skip it, preserving
+# the 2026-07-21 queue-protection rationale. Still runs on main / nightly / manual.
 
 on:
-  # smoke is NOT a required status check (ruleset requires only `verify`). Running it on
-  # every PR clogged the single socratic-ci pool (~35% of backlog was smoke). PR coverage
-  # removed 2026-07-21; smoke remains on main push, nightly schedule, and workflow_dispatch.
+  # Narrow PR trigger: Playwright-related changes only. The docs-only fast path
+  # in `classify` still applies on top (docs-only PRs short-circuit).
+  pull_request:
+    paths:
+      - "test/e2e/**"
+      - "playwright.config.ts"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/e2e.yml"
   push:
     branches:
       - main
@@ -196,3 +206,15 @@ jobs:
       - name: Run smoke tests
         if: needs.classify.outputs.docs-only != 'true'
         run: npm run test:e2e
+      # Visual regression failures are pixel diffs — the report and traces are
+      # the only way to see what changed. Upload on failure for PR review.
+      - name: Upload Playwright results on failure
+        if: failure() && needs.classify.outputs.docs-only != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results-${{ github.run_attempt }}
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
+          retention-days: 14

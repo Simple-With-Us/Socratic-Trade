@@ -1,45 +1,10 @@
 # Current Status
 
-## 2026-09-25 CLAUDE — Tradier fill reconciliation: placed orders now become filled
+## 2026-09-27 MUSE — Playwright visual regression (fleet rollout, IN PR)
 
-**What.**  `reconcilePendingFills` can now ask the broker about ONE order id
-(`BrokerGateway.getEquityOrder`, Tradier `GET /accounts/{id}/orders/{orderId}`) when a pending
-receipt's order is absent from the order listing or still reads as working after 5 minutes.  A
-bracket container id resolves to its entry leg's execution, and the bracket's executed exit legs
-are booked as broker-originated fills.  New sweeps (`src/lib/fill-reconciliation.ts`) book executed
-owner orders and bracket exit legs from the Tradier listing, flip "placed" proposals whose receipt
-is already final, link the app's own cancel-and-replace fills to their proposal, and backfill a
-receipt for a "placed" proposal that never got one.  Everything is budgeted (12 lookups per tick),
-throttled, and deduped by broker order id.  New ops route `/api/ops/fill-reconcile` (GET preview,
-POST one pass with a larger budget).  **Why.**  Tradier's order listing is current-session only and
-bracket entries are stored under the container id, so the Tradier Sandbox had 40 proposals stuck at
-"placed", 17 stalled receipts, and $0 realized P&L while about $64K of buys and $20.8K of exits
-traded.  Alpaca and Robinhood keep their listing-only behavior.  Board `687a5fb4`, lane G1, branch
-`claude/st-tradier-fill-reconciliation`.  Rollout: `docs/rollouts/2026-09-25-st-tradier-fill-reconciliation.md`.
+**What.**  Owner-directed fleet rollout: automated-only visual verification for the web UI.  New `test/e2e/visual.spec.ts` adds full-page `toHaveScreenshot` assertions (chromium-desktop, committed baselines under `test/e2e/visual.spec.ts-snapshots/`) for `/console` (Autonomy Desk) and `/login`.  Deterministic controls: reduced-motion, animation-killing style tag, hermetic network (browser requests not to `127.0.0.1` aborted), masks for chart figures/countdown clocks/day-PnL date label/freshness strip/Market Analysis card; consent gate accepted with a 30s budget + pre-screenshot sweep.  `e2e.yml` gains a narrow path-filtered `pull_request` trigger (test/e2e, config, lockfiles, itself) so the PR runs Playwright CI, plus failure-only result upload.  AGENTS.md "Verify before claiming done" now carries the automated-only policy: Jay never takes manual screenshots; native Mac UI is code-review/CI verified.  Branch `muse/playwright-visual-socratic-trade`, auto-merge armed on green.
+**Verified.**  Baselines generated + second pass matched (2 passed / 2 mobile-skipped each, stock Chrome-for-Testing 153, `next dev` — local production build OOM-killed on this VM, CI `verify` is the gate).  Targeted eslint clean, `tsc --noEmit` ran, `git diff --check` clean.  Rollout: `docs/rollouts/2026-09-27-playwright-visual-regression.md`.
 
-## 2026-09-25 CLAUDE — Stall profiler: review-round fix (follow-up to merged PR #3756, board 687a5fb4)
-
-Independent review of PR #3756 raised three findings against code already merged to `main`
-(commit `16698bef0` — the PR merged and its branch was deleted before this review reached it, so
-this lands as a NEW PR off fresh `origin/main`, branch `claude/st-stall-profiler-review`).  All
-three verified real.  Two are docs-factuality fixes: the rollout note wrongly claimed "nothing in
-this repo" restarts a V8 CPU profiler on an interval besides this module, and that Sentry's own
-profiler is "eager and long-lived" — reading the installed `@sentry/profiling-node` 10.75.0 source
-shows the opposite: with `profileSessionSampleRate` + `profileLifecycle: "trace"` (this app's
-actual `sentry.server.config.ts`), Sentry's own continuous profiler restarts its chunk on a fixed
-60s timer for as long as a span stays active, through its own native addon — a genuinely different
-code path than the `node:inspector` restart this lane bridges, so the doc's coexistence and
-overhead claims are corrected in place, and whether that restart pays a comparable heap-walk cost
-is left as an explicit next step (production access this session does not have).  The third is a
-real test-coverage gap: `createInspectorBindings` (the real `node:inspector` wiring) was never
-exercised by any vitest test (they all drive a fake session by design), so a regression in the
-real `Session.post()` callback wrapping would have passed the whole suite and only failed silently
-in production — confirmed by reproducing exactly that regression locally.  Fixed by exporting
-`createInspectorBindings` and adding `scripts/ops/verify-stall-profiler-bindings.ts`, a `tsx`-run
-integration check (not vitest, so the "never start a real profiler under vitest" design holds)
-wired into `.github/workflows/ci.yml`'s required `verify` job.  Rollout:
-`docs/rollouts/2026-09-24-st-stall-profiler.md` ("Review Round" section 7).  Hold label
-`do-not-automerge` kept; auto-merge not armed.
 ## 2026-09-25 CLAUDE — Approved exits release the app's own resting protective stop (lane G2, board 687a5fb4)
 
 **What.**  An approved exit (autopilot or human-approved sell of a long / cover of a short) that is
@@ -5095,72 +5060,3 @@ Fixed `test/chat-draft-policy.test.ts` test regression. A previous commit accide
 Production served a public 503 while healthy: `/api/live` intermittently took 8.60s against a 5s container healthcheck timeout, so Docker marked the container unhealthy and Traefik stopped routing.  Widened to timeout=15s / retries=5 (detection bound ~225s).
 
 This is MITIGATION.  The root cause is the non-convergent FTS mirror loop fixed in PR #3202; stalls up to 36,511ms were measured, which a 15s timeout still cannot absorb.  Next action: land PR #3202.
-
-## 2026-09-27 — [MM] Ops performance: round-trip grading + unattributed model bucket + per-model funnel + broker-rejection reasons
-
-Owner asked to confirm Claude's post-review work was deployed and to implement the rest of the
-2026-09-25 trading-performance report's Improvement Plan.  Deploy verified live at `7492aa1f3`
-(includes #3793, review rank 2).  This commit is rank 3 of ten — the measurement layer the plan
-gates ranks 4, 5, 6 and 7 on.
-
-`/api/ops/performance` graded every trade as one entry per FIFO lot, so a scaled-out position was
-graded once per trim; it also silently dropped unstamped model lots, reported only a global
-proposal funnel, and never itemised broker rejections.  Each of those four is now fixed:
-
-- `roundTripStats` grades on completed round trips via the existing `aggregateRoundTrip`, and
-  counts still-open positions in `incompleteRoundTrips` rather than grading them early.  Per-exit
-  `tradeStats` is kept alongside it — both numbers are useful and the gap between them is the point.
-- Unstamped lots now surface as an explicit `unattributed` model row instead of vanishing.  The
-  review found that bucket was collectively the profitable one.
-- The funnel is broken out per proposing model.  Both views come from ONE grouped scan, so the
-  global counts are a sum of the per-model rows and cannot disagree — this module's design
-  constraint is not adding a query that scales with the window.
-- `brokerRejectionReasons` itemises broker declines from `audit_events`, merging the same refusal
-  across differing HTTP status codes.  Scoped by `audit_events`' own indexed
-  `(user_id, connected_account_id, kind)` columns rather than a payload join, which would have
-  made SQLite parse every rejection payload in the table.
-
-No trading behaviour changed; this is a read-only diagnostics endpoint.  Verified `tsc --noEmit`
-clean (0 errors in src/ + app/) and 17/17 across `test/ops-performance-measurement.test.ts` +
-`test/ops-performance.test.ts`.  Full-suite `npm test` / `npm run lint` did not finish — the host
-sat at load 114-228 all session — so CI's `verify` is the full gate of record for this PR.
-
-Rollout: `docs/rollouts/2026-09-27-st-perf-measurement-ranks.md`.  Board: `66ca3e67`.
-
-## 2026-09-27 — [MM] Per-thesis sizing multiplier + Seer fixes to the rank-3 rollup
-
-Follow-up to the rank-3 commit above, on PR #3895.
-
-**Seer caught two real bugs in the rank-3 code, both now fixed.**  `brokerRejectionRowsCapped` was
-comparing a count of *proposals* with a count of *audit rows* — different populations, so the
-capped flag was wrong in both directions; it now reports only "did the scan hit its row cap", like
-the block-reason and hold-reason scans.  And `lotsGraded` was accumulating every lot ever rather
-than only windowed ones, so an old round trip inflated a denominator that contributed nothing to
-`tradeCount` — two figures describing the same window and disagreeing.  Regression test added for
-the second.
-
-**Rank 5 — `policy.tuning.thesisSizeMultipliers`.**  The review's own motivating case: "Value-Quality
-— the most consistent negative thesis in the data (25 lots, -$79.18)".  The learned `edgeFactor`
-already shrinks a weak thesis from realized stats; this dial is for parking one whose sample is too
-thin or too regime-specific for that to be trustworthy.
-
-Two decisions the tests forced.  The value is clamped to **[0, 1]** — a knob that could *inflate*
-sizing on a typo does not belong in a policy file, and a non-finite value is ignored outright.  And
-an explicit **0 bypasses `sizingFloorPct`**: the floor stops the sizer emitting dust, but an operator
-parking a thesis means "stop trading this", and sizing it at the floor anyway would make the dial
-lie.  The existing `avgReturn < 0` branch already takes that same hard-zero path.  A 0-notional order
-cannot reach a broker (the small-account/broker-minimum guards reject it), so honouring the zero
-degrades to "proposal never places" with no chance of an accidental fill.
-
-Every application is announced in the order rationale and a `sizing_thesis_multiplier_applied` audit
-event, matching the `volTargetNote` convention.
-
-Verified: `tsc --noEmit` clean, eslint clean on touched files, 29/29 across the new
-`test/thesis-size-multiplier.test.ts` plus the four pre-existing sizing suites.  Those four passing
-unchanged is the load-bearing result — the multiplier composes with the floor/ceiling clamp, vol
-targeting, fractional-Kelly and the broker-minimum guard without perturbing any of them.
-
-Not done: rank 5's "watch Momentum-Breakout" half needs rank 3 live and a fresh sample; it is a
-decision, not a code change.
-
-Rollout: `docs/rollouts/2026-09-27-st-perf-measurement-ranks.md`.  Board: `66ca3e67`.
