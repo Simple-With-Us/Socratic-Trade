@@ -17,6 +17,19 @@ already-reported historical number changes meaning.  **Owner ruling requested** 
 cannot be derived without inventing semantics (`Mean-Reversion`, `Defensive-Rotation`,
 `Analyst-Revision`) — the scorer never emits them and a test enforces that.  Rollout §3.
 
+## 2026-09-27 MINIMAX — P1-3: the filings path finally re-ranks on learned usefulness (branch `minimax/outcome-closure`)
+
+**What.**  `applyRetrievalUsefulnessWeighting` had exactly one caller, so the per-doc-type statistics
+the join exists to produce were computed and persisted and then never consulted on the path that
+retrieves the majority of the evidence the proposer reads.  The filings dossier now applies the
+weighting after both retrieval shapes, failing open to the retriever's order on any error.  **The
+clamp was the real bug:** `usefulnessMultiplier`'s reachable range is 0.8–1.2 (±20%), and the old
+0.9–1.1 clamp was *binding*, clipping a third off both ends — so widening it alone would have doubled
+the effective nudge as a side effect of a constant tweak.  The coefficient now defines the operating
+range and 0.75/1.25 remains a real backstop.  **No feedback loop:** the multiplier is keyed on
+aggregate `doc_type|memoryKind` stats, never per-document, so a document can never be re-ranked on
+its own influence; a test enforces that.  Rollout §2.
+
 ## 2026-09-27 MINIMAX — P0-1: the app's own post-mortem lessons can now reach the brain (branch `minimax/outcome-closure`)
 
 **What.**  A post-mortem lesson about a trade the app already closed and measured was being graded by

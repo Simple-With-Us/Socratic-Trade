@@ -137,6 +137,40 @@ Until that ruling, those three are assigned by the model and are the tags whose 
 model-graded.  A test asserts the scorer never returns them, so a future "completion" of the mapping
 has to be a deliberate, reviewable change.
 
+### P1-3 — the filings RAG path finally re-ranks on learned usefulness
+
+- `src/lib/strategy.ts` — calls `applyRetrievalUsefulnessWeighting(chunks, userId)` on the filings
+  chunks, placed after BOTH retrieval shapes (proposer dossier and plain `retrieveContextDetailed`)
+  so neither can bypass it. Wrapped in its own try/catch that fails open to the retriever's order and
+  warns, because an advisory nudge must never cost a dossier.
+- `src/lib/retrieval-usefulness.ts` — the multiplier bound widened, and the header updated to name
+  both callers.
+
+**The bound was the actual bug, and this is worth stating plainly.**  `usefulnessMultiplier` computes
+`1 + (hitRate − 0.5) * 0.4`, so its reachable range is **0.8–1.2** (±20%).  The old clamp of
+0.9–1.1 was therefore **BINDING** — it was silently clipping a third off both ends of a signal that
+was already computed.  Simply widening the clamp to 0.75–1.25 without noticing this would have
+doubled the effective nudge as a side effect of a "constant tweak", which is exactly the kind of
+unreviewed change that should not ship.  The fix keeps the coefficient as the operating range
+(0.8–1.2, now reachable) and leaves 0.75/1.25 as a genuine backstop that binds only if the
+coefficient is ever raised.  Net effect on the ranking: 2× the intended nudge, deliberately.
+
+**No feedback loop — and the reason is structural, not care.**  The multiplier is keyed on the
+AGGREGATE `doc_type|memoryKind` statistics, never on a per-document attribution.  A chunk can never
+be credited for influencing a decision and then re-ranked on its own influence; a document's rank
+moves because its whole TYPE has a track record.  There is no path by which a document's usefulness is
+derived from the documents it itself influenced.  A test asserts the lookup key contains `doc_type`
+and `memoryKindForDocType` and does NOT contain `vector_id` / `chunkId` / `chunk.id`, so a future
+per-document re-rank fails loudly.
+
+**An honest correction about "nudge, never takeover".**  Over a SHORT list the positional RRF base
+gives a chunk at position 7 a threshold of only 0.896 to overtake position 0, so a ±20% nudge *can*
+invert a wide gap.  The property the bound actually buys is: the multiplier is clamped regardless of
+what the coefficient becomes, nothing is ever excluded, equal multipliers are rank-stable, and the
+whole mechanism is toggleable and fail-open.  It is **not** "the retriever's order is preserved end to
+end".  The test pins the real ratio (1.5) so a future coefficient change that turned the re-rank into
+a takeover fails the assertion instead of passing silently.
+
 ## 4. Decisions & Trade-offs
 
 - **Provenance marker, not a behaviour heuristic.**  The alternative — loosening the gate prompt, or
@@ -183,6 +217,6 @@ has to be a deliberate, reviewable change.
 | --- | --- |
 | P0-1 autonomous-provenance gate bypass | **landed** (this commit) |
 | P0-2 deterministic thesis tag | **landed** (abstaining scorer + recorded proposal; 3 tags need an owner ruling) |
-| P1-3 retrieval usefulness in the filings path | not started |
+| P1-3 retrieval usefulness in the filings path | **landed** (with a corrected, honest statement of what the bound buys) |
 | P1-4 retrieval stage telemetry read path | not started |
 | P1-5 non-deep evidence depth | not started |

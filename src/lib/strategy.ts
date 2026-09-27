@@ -1579,6 +1579,36 @@ export async function runStrategyOnce(
                 chunks = await retrieveContextDetailed(query, sym, limit, userId, retrieveOptions);
               }
 
+              // P1-3 (2026-09-27): apply the learned usefulness weighting to the FILINGS path too.
+              // Until now the only caller was experience-memory.ts, so the per-doc-type statistics —
+              // "documents of this kind preceded decisions that did well" — were computed and
+              // persisted by the join and then never consulted here.  The evidence the Bull proposer
+              // reads was therefore ordered purely by similarity, and the one signal that says
+              // "filings of this kind have a realized track record" could not move anything.
+              //
+              // NO FEEDBACK LOOP, and the reason is structural rather than a matter of care: the
+              // multiplier is keyed on the AGGREGATE `doc_type|memoryKind` statistics, not on any
+              // per-document attribution. A chunk can never be credited for influencing a decision
+              // and then be re-ranked on its own influence; a document's rank moves because its whole
+              // TYPE has a track record. There is no path by which a document's usefulness can be
+              // derived from the documents it itself influenced. The bounded clamp
+              // (USEFULNESS_MULTIPLIER_MIN/MAX) and the RETRIEVAL_USEFULNESS_WEIGHTING off-switch
+              // are the second guard, and the function fails open to the similarity order on any
+              // error or when stats are unavailable.
+              if (Array.isArray(chunks) && chunks.length > 1) {
+                try {
+                  const { applyRetrievalUsefulnessWeighting } = await import("./retrieval-usefulness");
+                  chunks = applyRetrievalUsefulnessWeighting(chunks, userId);
+                } catch (err) {
+                  // Fail open to the retriever's own order — an advisory nudge must never cost a
+                  // dossier. The warning is what makes "the weighting did not run" diagnosable.
+                  console.warn(
+                    "[Strategy] filings usefulness re-rank unavailable, keeping similarity order:",
+                    err instanceof Error ? err.message : String(err)
+                  );
+                }
+              }
+
               // Structured facts and Form 4 transactions use SQLite, not semantic retrieval.
               // Their inclusion is declared by the routing plan above, so a future caller cannot
               // accidentally turn a current financial fact into an embedding query.
