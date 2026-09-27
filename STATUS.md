@@ -17,6 +17,27 @@ bracket entries are stored under the container id, so the Tradier Sandbox had 40
 traded.  Alpaca and Robinhood keep their listing-only behavior.  Board `687a5fb4`, lane G1, branch
 `claude/st-tradier-fill-reconciliation`.  Rollout: `docs/rollouts/2026-09-25-st-tradier-fill-reconciliation.md`.
 
+## 2026-09-25 CLAUDE — Robinhood $1 minimum correctness fix + account-questionnaire hold + holdReason (lane G3, board 687a5fb4)
+
+**What.**  Production evidence on the live Robinhood "Agentic" account (22 `placing_failed`
+rejections: 11x "Fractional orders must be at least $1", 8x "Dollar-based orders must be at least
+$1", 3x an account-questionnaire message) showed the existing broker-minimum guard's
+full-position-exit exemption was unsafe — it assumed Robinhood permits liquidating a whole
+fractional position below the floor, which the evidence contradicts.  Removed the exemption from
+`describeBrokerMinimumOrderBlock` (`src/lib/broker-minimum-guard.ts`); a full-position exit under
+the floor now blocks pre-flight exactly like a partial trim, and `planBrokerMinimumBump` declines
+immediately (no wasted round trip) when there's nothing left to bump to.  New
+`src/lib/broker-account-questionnaire.ts` detects the account-questionnaire rejection, marks a
+durable account-level hold that pauses NEW entries (buy/short) for that account until an opening
+order is accepted again, and alerts the owner once per 24h (never on every run) — exits and
+existing management are untouched.  New `src/lib/hold-reason.ts` gives every "Awaiting approval"
+proposal a structured `holdReason` (`red_team_unavailable | funding_sell | policy_revert | other`),
+set at all four `strategy.ts` insertion sites and surfaced in the run summary, the console approval
+card (a header chip), and `GET /api/ops/performance`'s funnel (`holdReasons`/
+`holdReasonRowsCapped`).  **Why.**  Owner-directed trading-performance program; see the full
+analysis referenced from board `687a5fb4`.  Branch `claude/st-rh-min-and-hold-reasons`, worktree
+`~/apps/claude-st-rh-min-and-hold-reasons`.
+Rollout: `docs/rollouts/2026-09-25-st-rh-min-and-hold-reasons.md`.
 ## 2026-09-25 CLAUDE — Trading performance report docs: review-round fix-up (follow-up to merged PR #3786, board 687a5fb4)
 
 Independent review of merged PR #3786 raised one finding (P2): the report published dollar-level
