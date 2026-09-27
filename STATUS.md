@@ -5235,3 +5235,46 @@ Not done: rank 5's "watch Momentum-Breakout" half needs rank 3 live and a fresh 
 decision, not a code change.
 
 Rollout: `docs/rollouts/2026-09-27-st-perf-measurement-ranks.md`.  Board: `66ca3e67`.
+
+## 2026-09-27 — [MM] Branch protection on `main`, plus the two guards that keep it meaningful
+
+Owner-directed, directly after this session's own merge driver nearly merged a PR whose CI had never
+run.  `main` was unprotected (404 on `/branches/main/protection`); a driver reading the PR-level
+`statusCheckRollup` reads an empty rollup on a not-yet-dispatched head as "nothing pending, nothing
+failed".  Caught before it merged anything, but the platform fix is the durable one.
+
+`main` now requires, `strict: true`: **`verify`** (the aggregate gate in `ci.yml`) and **`gitleaks`**
+(the credential guard in `security.yml`).  Both were already designed for the role — neither has a
+path filter, and both workflows carry a `merge_group` trigger whose comment explains that queued PRs
+hang without it.  The repo was built for `verify` to be required; nothing was setting it.
+
+Also: no force pushes, no deletions, conversation resolution on, **0 approvals required** (a personal
+repo has no second approver — a non-zero count would block every agent merge fleet-wide), and
+`enforce_admins: false` to keep a documented owner hotfix escape hatch.  The threat protection
+addresses is an *accidental* ungated merge, and agents are not admins, so the guard holds where it
+matters.
+
+Observed immediately: #3795 and #3792 both flipped to `MERGEABLE/BLOCKED` while `verify-hosted` was
+still running.  `verify` has no check-run until its dependencies conclude, and GitHub treats a
+required-but-absent check as *pending* — fail-closed, correct, not a wedge.
+
+Protection is a remote setting, so it is invisible in a diff and needs **two** guards:
+
+- `test/branch-protection-gate.test.ts` (new, 9 cases, static, no network) — pins the workflow side:
+  no path filter on `pull_request`, `merge_group` on both workflows, `verify` aggregates the lanes,
+  uses `!cancelled()` and never `always()`, passes only on enumerated states and requires *both*
+  lanes, keeps `set -euo pipefail`, and the two required-context job names still exist.
+- `scripts/verify-branch-protection.sh` (new, live) — checks the other half of the pairing: that
+  protection exists and that every required context is a job CI actually defines.  A required context
+  nothing can report is worse than no protection: every PR hangs against a check that appears
+  nowhere in the logs.  Ships the re-apply payload as a commented block, because re-applying
+  protection is a fleet-wide act that should be deliberate.
+
+**Failing-first proven:** three mutations of `ci.yml` (add a `paths` filter; accept any non-failure
+lane; switch `verify` to `always()`) each fail the corresponding case, and the file reverts clean.
+
+`scripts/land.sh`'s trailing `gh pr merge --auto --squash` was *unsafe* before this — auto-merge had
+nothing to wait for and merged immediately.  It is now the correct mechanism.  Seats that assumed
+"auto-merge lands it right away" will see PRs wait for CI; that is the intended change.
+
+Rollout: `docs/rollouts/2026-09-27-branch-protection.md`.
