@@ -39,6 +39,10 @@ The first worker left everything uncommitted when its session died.  This attemp
 - Re-ran `npx tsc --noEmit` (exit 0), `eslint test/e2e/visual.spec.ts` (clean), `git diff --check` (clean), YAML-parsed the edited `e2e.yml`.
 - `next build` NOT attempted locally this round (first attempt: repeated OOM kills under VM memory pressure) — CI `verify` is the gate; do not merge until it is green.
 
+### CI failure diagnosed: local baselines vs CI environment (2026-09-27 ~22:05 UTC)
+
+The PR's first `e2e` CI run FAILED both visual tests: 34,119 px (console) and 12,564 px (login) differed — ratio 0.02 vs the 0.01 budget.  The diff artifacts (uploaded by the new failure-only step, which proved its worth immediately) showed the drift is sub-pixel font antialiasing across ALL text — same font, same layout, same wrapping — not a UI regression.  Root cause: baselines were generated on the dev VM with a different Chromium build, different system fonts, and `next dev`, while CI uses Playwright 1.63's bundled Chromium, ubuntu-latest system fonts, and the production build.  Fix (committed as `ci(e2e)`): `e2e.yml` gained an `update-visual-baselines` workflow_dispatch input; dispatched runs execute `visual.spec.ts --update-snapshots` in the CI environment and upload `test/e2e/visual.spec.ts-snapshots/` as the `visual-baselines` artifact, whose PNGs are then committed normally.  Run 36355028610 (dispatch on the PR branch) succeeded; its artifact PNGs replaced the local baselines.  Standing rule recorded in the workflow: baselines must be regenerated IN CI — local regeneration is not supported for this reason.  The PR then re-ran `e2e` on the committed CI-generated baselines.
+
 ## Next Steps & Blockers
 
 - Watch the `e2e` job on the PR (now runs on this PR via the narrow path trigger): if CI's bundled Chromium renders differently from Chrome-for-Testing 153 beyond the 1% pixel budget, regenerate baselines with CI's browser or widen masking.
