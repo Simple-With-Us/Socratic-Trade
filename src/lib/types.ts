@@ -312,6 +312,19 @@ export interface TuningSettings {
   sizingFloorPct?: number;
   /** Maximum % of max order notional the deterministic sizer will ever allocate. Default 100. */
   sizingCeilingPct?: number;
+  /**
+   * Per-thesis multiplier applied to the deterministic sizer's composed multiplier, keyed by
+   * `tradeThesisTag`. `0.5` halves every position opened under that thesis; `0` disables it.
+   *
+   * Distinct from the learned `edgeFactor`/`selectThesisStat` path, which is DERIVED from realized
+   * stats and shrinks on its own. This is an operator dial for a decision the data cannot make on
+   * its own — e.g. parking a thesis that is consistently negative while its sample is too thin or
+   * too regime-specific to trust as an edge signal. Absent key → thesis sizes exactly as before.
+   *
+   * Reversible by design: delete the key. Values are clamped to [0, 1] at the call site, so a typo
+   * can never inflate a position past its existing ceiling.
+   */
+  thesisSizeMultipliers?: Record<string, number>;
   // `redTeamConvictionThreshold` and `redTeamNotionalPctOfNavThreshold` were REMOVED 2026-07-07
   // (single-adversary consolidation, decision O2): the Red Team review now runs on EVERY risk-adding
   // opening — coverage is structural, not conviction/stakes-gated — so both trigger thresholds (and
