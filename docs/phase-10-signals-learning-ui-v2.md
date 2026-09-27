@@ -241,3 +241,7 @@ Codex: "symbol drilldown drawer … learning matrix."
 `npm run build` ok · no synthetic/"mock" data shown user-facing or to the LLM ·
 missing provider keys → neutral/stale signals, never fake confidence · a
 `docs/rollouts/*` note + `STATUS.md`/`PLAN.md` update per commit (AGENTS.md).
+
+## Public description scope — 2026-09-27
+
+The welcome and framework pages describe evidence and outcomes as available records whose coverage depends on configured sources and completed workflows.  They do not promise complete traces for every proposal or improved future trading results.  Coaching and proposed changes remain reviewable features; this copy update does not alter learning-review modes or automatic application settings.  See `rollouts/2026-09-27-public-copy-scope.md`.
