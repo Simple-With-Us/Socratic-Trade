@@ -8,6 +8,7 @@ import {
   normalizeExitSidesForHeldPositions
 } from "./order-position-invariant";
 import { evaluateBrokerHeldExitAvailability, brokerHeldExitBlockReason } from "./broker-held-orders";
+import { placeExitReleasingOwnStops, planExitStopRelease } from "./exit-stop-release";
 import { describeBrokerMinimumOrderBlock, planBrokerMinimumBump, shouldAlertBrokerMinimumOrderBlock } from "./broker-minimum-guard";
 import { hasBrokerReportedFill, hasBrokerReportedPricedFill, isLiveOrderState, isRejectedOrCanceledState } from "./broker-side";
 import { audit, clearStopPlans, deriveExitContractFromOpening, getDb, recordStopPlan } from "./db";
@@ -1117,14 +1118,27 @@ export async function executeProposal(
       throw new Error([`Proposal was ${current} before it could be executed.`].join(" "));
     }
 
-    const heldExit = evaluateBrokerHeldExitAvailability(proposal, account.positions, orders);
-    if (heldExit) {
-      const heldReason = brokerHeldExitBlockReason(heldExit);
+    // Held exit: blocked unless the ONLY holder is the app's own resting protective stop and the
+    // owner toggle "Exits release the app's own stop" is on (default) — then the stop is released
+    // inside the placement lease below, the approved exit placed, and protection re-placed for any
+    // remainder (src/lib/exit-stop-release.ts).
+    const heldExitDecision = planExitStopRelease({
+      proposal,
+      positions: account.positions,
+      orders,
+      policy,
+      userId,
+      accountNumber: policy.accountNumber
+    });
+    const exitStopRelease = heldExitDecision.kind === "release" ? heldExitDecision.plan : undefined;
+    if (heldExitDecision.kind === "blocked") {
+      const heldExit = heldExitDecision.heldExit;
+      const heldReason = heldExitDecision.reason;
       const heldDecision: PolicyDecision = { approved: false, reasons: [heldReason] };
       updateProposalStatus(proposalId, "blocked", undefined, review, review.estimatedNotional, userId, undefined, undefined, heldDecision);
       audit(
         "proposal_approved",
-        { proposalId, symbol: proposal.symbol, side: proposal.side, action: "approval", result: "blocked", reasons: heldDecision.reasons, heldExit },
+        { proposalId, symbol: proposal.symbol, side: proposal.side, action: "approval", result: "blocked", reasons: heldDecision.reasons, heldExit, appStopOrderIds: heldExitDecision.appStopOrderIds },
         userId,
         policy.connectedAccountId
       );
@@ -1286,11 +1300,34 @@ export async function executeProposal(
           // strategy lock) as the caller-verified hint: the placement choke point still reads the
           // position FRESH and uses the hint only if that read fails, so one read timeout cannot
           // kill an owner-approved exit (PR #3759 review round).
+          //
+          // Only the fallback leg needs it. When a stop-release plan exists, `placeExitReleasingOwnStops`
+          // runs inside the same placement lease, re-reads the position itself, and hands its own
+          // verified quantity to the `place` callback — feeding the start-of-call hint there would
+          // substitute a staler number for a fresher one (#3793 review round).
           const verifiedPositionHint =
             proposal.side === "sell" || proposal.side === "cover"
               ? { verifiedPositionQuantity: heldPositionFor(positions, proposal.symbol).signedQuantity }
               : {};
-          execution = await gateway.placeEquityOrder({ accountNumber, ...proposal, refId, ...verifiedPositionHint });
+          execution = exitStopRelease
+            ? await placeExitReleasingOwnStops(
+                {
+                  userId,
+                  policy,
+                  accountNumber,
+                  connectedAccountId: policy.connectedAccountId,
+                  gateway,
+                  executionMode,
+                  proposal,
+                  plan: exitStopRelease,
+                  lane: "approval",
+                  proposalId,
+                  runId: row.runId,
+                  assertOwned: () => mutationCtx.assertOwned()
+                },
+                (verifiedPositionQuantity) => gateway.placeEquityOrder({ accountNumber, ...proposal, refId, verifiedPositionQuantity })
+              )
+            : await gateway.placeEquityOrder({ accountNumber, ...proposal, refId, ...verifiedPositionHint });
         } catch (placeError) {
           const message = placeError instanceof Error ? placeError.message : String(placeError);
           const sym = proposal.symbol;
