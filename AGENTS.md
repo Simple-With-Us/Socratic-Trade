@@ -143,6 +143,8 @@ that file directly.
 
 ## Hosting & dev servers (multi-agent coordination)
 
+Hosting and routing (apexes, hostnames, hosts, deploy paths): consult the private operations inventory maintained outside this public repository.
+
 This repo is touched by several AI tools (Claude Code, Codex, Antigravity/Gemini, Cursor).
 **Each agent works in its OWN git worktree, on its OWN branch** (Claude →
 `~/apps/trading-claude`, Codex → `~/apps/trading-codex`, Antigravity →
