@@ -1423,8 +1423,7 @@ export async function runStrategyOnce(
     }
 
     let ragContext = "";
-    let socraticRagAttributions: SocraticRagAttribution[] = [];
-    // Retrieval is deliberately distinct from prompt consumption. Candidates stay local until
+    let socraticRagAttributions: SocraticRagAttribution[] = [];    // Retrieval is deliberately distinct from prompt consumption. Candidates stay local until
     // proposeTrades has applied containment + the final evidence budget and can prove what the
     // model actually received.
     let retrievedRagAttributions: SocraticRagAttribution[] = [];
@@ -1500,7 +1499,22 @@ export async function runStrategyOnce(
           const chunkResults = await Promise.all(
             chunk.map(async (sym) => {
               const isDeep = deepSymbols.includes(sym);
-              const limit = isDeep ? 8 : 1;
+              // P1-5 (2026-09-27): evidence depth used to be 8 chunks for the deep symbols (scan
+              // top-3 plus held names) and exactly ONE for every other scored candidate. With a scan
+              // surfacing 8+ candidates that is an 8:1 tilt toward the existing ranking, so the extra
+              // evidence re-read the ranking instead of being able to contradict it — the very names
+              // the ranking had demoted got the thinnest dossier.
+              //
+              // The default is 3 (the low end of the intended 3–4) and it is BOUNDED + CONFIGURABLE
+              // rather than a flat raise, because the cost is displacement, not budget blowout:
+              // `applyEvidenceBudget` truncates and hard-caps, so the prompt can never exceed
+              // maxTokenEstimate, but the whole RAG block is a single budget item — so extra chunks
+              // for scout symbols consume the filings quota that previously went to the TAIL of the
+              // concatenation, and the last symbols' dossiers are what get cut mid-string. Filings
+              // ARE the highest-priority item (priority 100), so nothing else is crowded out; the
+              // loss is entirely among filings. Clamped to the deep limit so a bad env value cannot
+              // explode the quota, and parsing fails safe to the default.
+              const limit = isDeep ? DEEP_FILINGS_CHUNK_LIMIT : scoutFilingsChunkLimit();
               const query = deterministicFilingsRetrievalQuery(sym);
               let variants: string[] = [];
 
@@ -6829,6 +6843,24 @@ export function protectiveExitQuoteFromScan(quote: MarketQuoteSummary | undefine
     bid: !quote.syntheticBid && quote.bid && quote.bid > 0 ? quote.bid : undefined,
     ask: !quote.syntheticAsk && quote.ask && quote.ask > 0 ? quote.ask : undefined
   };
+}
+
+/** Full evidence dossier for the symbols the scan ranked highest plus every held name. */
+const DEEP_FILINGS_CHUNK_LIMIT = 8;
+/** Default dossier depth for every OTHER scored candidate — see P1-5 at the `limit` assignment. */
+const DEFAULT_SCOUT_FILINGS_CHUNK_LIMIT = 3;
+
+/**
+ * P1-5: chunks per non-deep symbol, owner-tunable via FILINGS_SCOUT_CHUNK_LIMIT. Clamped to
+ * [1, DEEP_FILINGS_CHUNK_LIMIT] and fail-safe to the default on a malformed value, so this can
+ * never be the thing that blows the filings quota.
+ */
+export function scoutFilingsChunkLimit(): number {
+  const raw = process.env.FILINGS_SCOUT_CHUNK_LIMIT;
+  if (raw === undefined) return DEFAULT_SCOUT_FILINGS_CHUNK_LIMIT;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_SCOUT_FILINGS_CHUNK_LIMIT;
+  return Math.max(1, Math.min(DEEP_FILINGS_CHUNK_LIMIT, Math.round(parsed)));
 }
 
 export function uniqueSymbols(symbols: string[]): string[] {

@@ -17,6 +17,19 @@ already-reported historical number changes meaning.  **Owner ruling requested** 
 cannot be derived without inventing semantics (`Mean-Reversion`, `Defensive-Rotation`,
 `Analyst-Revision`) — the scorer never emits them and a test enforces that.  Rollout §3.
 
+## 2026-09-27 MINIMAX — P1-5: evidence depth can now contradict the ranking (branch `minimax/outcome-closure`)
+
+**What.**  Only the scan's top 3 plus held names got an 8-chunk dossier; every other scored candidate
+got exactly ONE.  With a scan surfacing 8+ candidates that is an 8:1 tilt toward the existing
+ordering, so the extra evidence re-read the ranking instead of being able to contradict it — the names
+the ranking demoted received the thinnest dossier.  Non-deep candidates now get 3, bounded and
+env-tunable via `FILINGS_SCOUT_CHUNK_LIMIT` (clamped to 1–8, fail-safe default) rather than a flat
+raise.  **Budget interaction:** `applyEvidenceBudget` truncates and hard-caps, so this can never
+exceed the prompt token budget (tested with a 200k-character RAG block against a 24k filings quota).
+The real cost is *within-RAG displacement* — the whole RAG block is one budget item, so scout chunks
+consume quota the tail previously had and the last symbols' dossiers are what get cut.  Filings are the
+highest-priority item so nothing else is crowded out, and the cut is recorded as a receipt.  Rollout §2.
+
 ## 2026-09-27 MINIMAX — P1-3: the filings path finally re-ranks on learned usefulness (branch `minimax/outcome-closure`)
 
 **What.**  `applyRetrievalUsefulnessWeighting` had exactly one caller, so the per-doc-type statistics

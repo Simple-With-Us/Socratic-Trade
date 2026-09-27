@@ -171,6 +171,27 @@ whole mechanism is toggleable and fail-open.  It is **not** "the retriever's ord
 end".  The test pins the real ratio (1.5) so a future coefficient change that turned the re-rank into
 a takeover fails the assertion instead of passing silently.
 
+### P1-5 — non-deep candidates get a real evidence dossier
+
+- `src/lib/strategy.ts` — `DEEP_FILINGS_CHUNK_LIMIT` (8, unchanged) and
+  `DEFAULT_SCOUT_FILINGS_CHUNK_LIMIT` (3), with `scoutFilingsChunkLimit()` reading
+  `FILINGS_SCOUT_CHUNK_LIMIT`, clamped to `[1, 8]` and fail-safe to the default on a malformed value.
+  The old flat `isDeep ? 8 : 1` is gone.
+
+**Default is 3, not 4** — the low end of the intended range, because the cost is displacement.
+
+**The budget interaction, stated precisely, because "it can't blow the budget" is only half true.**
+`applyEvidenceBudget` truncates and hard-caps (`units.slice(0, allowedCharacters)`, plus global and
+per-family quotas), so a deeper dossier can **never** push the prompt past `maxTokenEstimate` or the
+filings quota — a test feeds it a 200,000-character RAG block against a 24,000-character filings quota
+and asserts the result is truncated, within quota, and carries an explicit receipt.  The real cost is
+**within-RAG displacement**: the entire RAG block is a *single* budget item, so extra chunks for scout
+symbols consume the quota that previously went to the TAIL of the per-symbol concatenation, and it is
+the last symbols' dossiers that get cut mid-string.  Two mitigating facts: filings are the
+highest-priority item in the whole budget (priority 100), so nothing else — learned context,
+reflection, analogs, coaching — is crowded out; and the truncation is recorded as a receipt rather than
+being silent.  The tunable exists so the owner can dial it back to 1 or up to 4 without a deploy.
+
 ## 4. Decisions & Trade-offs
 
 - **Provenance marker, not a behaviour heuristic.**  The alternative — loosening the gate prompt, or
@@ -219,4 +240,4 @@ a takeover fails the assertion instead of passing silently.
 | P0-2 deterministic thesis tag | **landed** (abstaining scorer + recorded proposal; 3 tags need an owner ruling) |
 | P1-3 retrieval usefulness in the filings path | **landed** (with a corrected, honest statement of what the bound buys) |
 | P1-4 retrieval stage telemetry read path | not started |
-| P1-5 non-deep evidence depth | not started |
+| P1-5 non-deep evidence depth | **landed** (default 3, bounded + env-tunable; displacement documented) |
