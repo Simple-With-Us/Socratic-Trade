@@ -20,6 +20,7 @@ on:
       - '.github/workflows/ios-ship.yml'
       - 'scripts/ios-ship-testflight.sh'
       - 'scripts/ios-appstore-gm-prepare.sh'
+      - 'scripts/ios-stage-asc-key.sh'
       - 'scripts/ios-fleet/**'
       - 'scripts/ios-fleet-pin.sh'
       - 'scripts/ios-fleet.sha256'
@@ -177,7 +178,7 @@ jobs:
           fi
           echo "::add-mask::$TOKEN"
 
-          for name in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8 \
+          for name in ASC_KEY_ID ASC_ISSUER_ID \
                       IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD; do
             val="$(
               INFISICAL_TOKEN="$TOKEN" infisical secrets get "$name" \
@@ -195,7 +196,20 @@ jobs:
               echo "INFISICAL_EOF"
             } >> "$GITHUB_ENV"
           done
-          unset TOKEN CLIENT_ID CLIENT_SECRET val
+          # Keep multiline PEM out of GITHUB_ENV and every later step environment.
+          # Only its mode-600 file path crosses the step boundary.
+          key_material="$(
+            INFISICAL_TOKEN="$TOKEN" infisical secrets get ASC_KEY_P8 \
+              --plain --silent --telemetry=false --expand=false \
+              --projectId="$INFISICAL_PROJECT_ID" --env=prod --path=/ \
+              2>/dev/null || true
+          )"
+          if [ -z "$key_material" ]; then
+            echo "::error::Missing ASC key material in Infisical prod."
+            exit 1
+          fi
+          printf '%s\n' "$key_material" | bash "$GITHUB_WORKSPACE/scripts/ios-stage-asc-key.sh"
+          unset key_material TOKEN CLIENT_ID CLIENT_SECRET val
 
       - name: Import signing + ASC key
         if: steps.gate.outputs.should_ship == '1'
