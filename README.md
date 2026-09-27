@@ -4,6 +4,8 @@ Next.js agentic trading console for real broker accounts — **production at
 [socratictrade.com](https://socratictrade.com)** (Coolify). Local `npm run dev` is
 for development only; previews are retired.
 
+**Public overview:** [Socratic Trade](https://socratictrade.com/welcome) · **From:** [Simple With Us](https://simplewithus.com/)
+
 ## Supported brokers
 
 | Broker | Connection | Environments |
