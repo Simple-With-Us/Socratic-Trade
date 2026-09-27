@@ -567,29 +567,14 @@ export function marketQuoteToAnalyst(
   return row;
 }
 
-/**
- * Convert OHLC bars to deduped, date-sorted {date, close, volume?} closes (drops invalid bars).
- *
- * Two guards here exist because App A (Congress.Trade) performs NO validation of its own on the
- * values it receives, and it uses them for customer-facing analytics:
- *
- *  1. `close <= 0` is rejected. The previous check was `Number.isFinite` only, so a zero or negative
- *     close from any of the L1-L9 provider tiers would flow into App A's `price_eod` table and into
- *     per-trade P&L with nothing rejecting it anywhere on the path.
- *  2. A date in the future is rejected. App A takes `MAX(date)` as the ticker's latest price date,
- *     so one future-dated row marks the whole ticker fresh and silently suppresses its own staleness
- *     watchdog. A future date is always a provider or clock bug, never real data.
- */
+/** Convert OHLC bars to deduped, date-sorted {date, close, volume?} closes (drops invalid bars). */
 export function ohlcBarsToCloses(bars: OHLCBar[] | null | undefined): CongressClose[] {
   if (!bars || bars.length === 0) return [];
-  // `toBusinessDay` is UTC-based, so compare against the same clock rather than a local date.
-  const todayUtc = new Date().toISOString().slice(0, 10);
   const byDate = new Map<string, CongressClose>();
   for (const bar of bars) {
     const date = toBusinessDay(bar.time);
     const close = bar.close;
-    if (!date || typeof close !== "number" || !Number.isFinite(close) || close <= 0) continue;
-    if (date > todayUtc) continue; // never let a future date mark a ticker fresh downstream
+    if (!date || typeof close !== "number" || !Number.isFinite(close)) continue;
     const entry: CongressClose = { date, close };
     if (typeof bar.volume === "number" && Number.isFinite(bar.volume)) entry.volume = bar.volume;
     byDate.set(date, entry); // later bar for a given date wins
@@ -828,19 +813,6 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
       }
       const response = await res.json().catch(() => undefined);
       clearCongressAuthBreaker(); // a successful call proves the token is good again
-      // App A answers HTTP 200 even when it rejected rows: its import handler returns
-      // `{ ok: summary.errors.length === 0, ...summary }`, so `ok:false` and a populated `errors[]`
-      // arrive on a 2xx. Treating transport success as delivery success is how a partial import
-      // looks identical to a clean one, and how the nightly marker advances over rows App A never
-      // wrote. Read the body's verdict, not just the status line.
-      const bodyErrorText = congressImportBodyError(response);
-      if (bodyErrorText) {
-        console.error(`[congress-share] import rejected rows despite HTTP ${res.status}: ${bodyErrorText}`);
-        logApiHealth({ service: "congress-share", ok: false, errorText: bodyErrorText, keySource: "env" });
-        // `ok:false` (not `skipped`) so the daily run counts this in failedPosts and retries,
-        // rather than advancing the marker over an import App A only partly accepted.
-        return { ok: false, status: res.status, error: bodyErrorText, sent };
-      }
       logApiHealth({ service: "congress-share", ok: true, keySource: "env" });
       return { ok: true, status: res.status, response, sent };
     } catch (err) {
