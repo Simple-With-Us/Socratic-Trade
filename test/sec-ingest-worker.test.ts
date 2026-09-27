@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { getDb, applyVersionedMigrations } from "../src/lib/db";
 import { createSecIngestJob, enqueueSecIngestTask, getSecIngestTask, claimSecIngestTasks, transitionSecIngestJob } from "../src/lib/db-rag-ingest";
 import { SecIngestWorker } from "../src/lib/rag/sec-ingest-worker";
@@ -684,6 +684,10 @@ describe("embed_queued FTS slice + durable resume", () => {
     const accession = "0000320193-26-000099";
     const { jobId, task } = await seedEmbedQueued({ accession, chunks: 45 });
     const vectorDocId = `${accession}:1:document.html`;
+    // Count only the FILING commit — the extractive abstract (B-2) is a separate storeDocument
+    // call with its own doc_id, and this assertion is about the body.
+    const filingStoreCalls = () =>
+      vi.mocked(storeDocument).mock.calls.filter((call) => (call[0] as any)?.doc_id === vectorDocId);
     const worker = new SecIngestWorker();
 
     await worker.processTask(task);
@@ -700,7 +704,7 @@ describe("embed_queued FTS slice + durable resume", () => {
     expect(firstRows.at(-1)!.content_hash).toBe(
       `hash-${accession}-${String(FTS_MIRROR_MAX_CHUNKS_PER_TICK - 1).padStart(4, "0")}`
     );
-    expect(vi.mocked(storeDocument)).toHaveBeenCalledTimes(1);
+    expect(filingStoreCalls()).toHaveLength(1);
 
     const reclaimed = claimSecIngestTasks(jobId, {
       owner: "test-worker",
@@ -723,10 +727,10 @@ describe("embed_queued FTS slice + durable resume", () => {
       `hash-${accession}-${String(FTS_MIRROR_MAX_CHUNKS_PER_TICK).padStart(4, "0")}`
     );
     // storeDocument must not run again on the FTS-only resume.
-    expect(vi.mocked(storeDocument)).toHaveBeenCalledTimes(1);
+    expect(filingStoreCalls()).toHaveLength(1);
   });
 
-  it("finishes a small filing in one tick and advances to embedded", async () => {
+  it("finishes a small filing in ONE drain call, all the way to complete", async () => {
     const { getSecIngestTask } = await import("../src/lib/db-rag-ingest");
     const { storeDocument } = await import("../src/lib/vector-db");
     vi.mocked(storeDocument).mockClear();
@@ -740,16 +744,23 @@ describe("embed_queued FTS slice + durable resume", () => {
     const accession = "0000320193-26-000098";
     const { task } = await seedEmbedQueued({ accession, chunks: 3, storeAlreadyDone: true });
     const worker = new SecIngestWorker();
+    // 2026-09-27 P0-2: the drain carries the task through embed_queued -> ... -> complete in one
+    // call. Before the fix every advance returned, so this needed 6 more claim/process cycles.
     await worker.processTask(task);
 
     const after = getSecIngestTask(task.id)!;
-    expect(after.checkpoint).toBe("embedded");
-    expect(after.status).toBe("pending");
+    expect(after.checkpoint).toBe("complete");
+    expect(after.status).toBe("complete");
+    expect(after.observedChunks).toBe(3);
     const rows = getDb()
       .prepare("SELECT COUNT(*) AS n FROM document_chunks_fts WHERE accession = ?")
       .get(`${accession}:1:document.html`) as { n: number };
     expect(rows.n).toBe(3);
-    expect(vi.mocked(storeDocument)).not.toHaveBeenCalled();
+    // storeDocument already ran for this task, so the drain must not embed the body twice.
+    const filingStores = vi
+      .mocked(storeDocument)
+      .mock.calls.filter((call) => (call[0] as any)?.doc_id === `${accession}:1:document.html`);
+    expect(filingStores).toHaveLength(0);
   });
 
   // 2026-08-23 P0 fix: an incomplete storeDocument result used to ALWAYS throw the generic
@@ -1049,4 +1060,309 @@ describe("embed_queued FTS slice + durable resume", () => {
     expect(after.lastError).toMatch(/text embed budget/i);
   });
 
+});
+
+// 2026-09-27 P0-1: the tick used to walk `SELECT id FROM sec_ingest_jobs WHERE status='running'`
+// (no ORDER BY) and hand the ENTIRE per-tick budget to the first job with candidates. With ~500
+// running jobs, issuer #1 consumed all 5 slots every tick and every other issuer sat at
+// `discovered` forever. The claim is now global + round-robin with a per-job ceiling.
+describe("cross-job claim fairness (2026-09-27 P0-1)", () => {
+  beforeEach(() => {
+    // The claim is deliberately GLOBAL, so tasks left claimable by earlier tests in this shared
+    // test DB are fair game for these ticks too. Park them so each fairness assertion sees only
+    // the jobs it seeded. (Their tests have already run and asserted.)
+    getDb()
+      .prepare(
+        `UPDATE sec_ingest_tasks
+         SET status = 'quarantined', lease_owner = NULL, lease_token = NULL,
+             lease_expires_at = NULL, heartbeat_at = NULL, next_retry_at = NULL
+         WHERE status IN ('pending', 'leased', 'retry_wait')`
+      )
+      .run();
+  });
+
+  function seedJob(idempotencyKey: string, tasks: number, priority: number, tag: string) {
+    const job = createSecIngestJob({
+      idempotencyKey: `${idempotencyKey}-${randomUUID()}`,
+      corpusRevision: "corp-v1"
+    });
+    transitionSecIngestJob(job.id, "running");
+    for (let t = 0; t < tasks; t++) {
+      enqueueSecIngestTask({
+        jobId: job.id,
+        accession: `0000320193-26-${tag}${t.toString().padStart(4, "0")}`,
+        cik: "0000320193",
+        symbol: "AAPL",
+        priority,
+        payload: { url: "https://www.sec.gov/x", docType: "10-K", filedAt: "2026-07-15" }
+      });
+    }
+    return job.id;
+  }
+
+  it("splits one tick's budget between two equally-ranked jobs instead of draining the first", async () => {
+    const { SEC_INGEST_TASKS_PER_TICK } = await import("../src/lib/rag/sec-ingest-worker");
+    const perJobCeiling = Math.ceil(SEC_INGEST_TASKS_PER_TICK / 2);
+    const processed: Array<{ id: string; jobId: string }> = [];
+    const worker = new SecIngestWorker();
+    worker.processTask = async (task) => {
+      processed.push({ id: task.id, jobId: task.jobId });
+    };
+
+    const first = seedJob("fair-a", 10, 0, "7000");
+    const second = seedJob("fair-b", 10, 0, "8000");
+
+    await worker.runTick();
+
+    expect(processed).toHaveLength(SEC_INGEST_TASKS_PER_TICK);
+    // Neither job may take more than its share even though both have far more work than the tick.
+    const fromFirst = processed.filter((p) => p.jobId === first).length;
+    const fromSecond = processed.filter((p) => p.jobId === second).length;
+    expect(fromFirst).toBeGreaterThan(0);
+    expect(fromSecond).toBeGreaterThan(0);
+    expect(fromFirst).toBeLessThanOrEqual(perJobCeiling);
+    expect(fromSecond).toBeLessThanOrEqual(perJobCeiling);
+  });
+
+  it("spends the budget on the higher-priority jobs, not on the deepest backlog", async () => {
+    const { SEC_INGEST_TASKS_PER_TICK } = await import("../src/lib/rag/sec-ingest-worker");
+    const processed: Array<{ id: string; jobId: string }> = [];
+    const worker = new SecIngestWorker();
+    worker.processTask = async (task) => {
+      processed.push({ id: task.id, jobId: task.jobId });
+    };
+
+    // One issuer with a 10-task backlog at UNIVERSE priority, four single-task jobs at the
+    // money-path priority. The backlog must not be able to crowd them out.
+    const backlog = seedJob("fair-backlog", 10, 0, "7100");
+    const desk = ["7200", "7300", "7400", "7500"].map((tag) => seedJob(`fair-desk-${tag}`, 1, 10, tag));
+
+    await worker.runTick();
+
+    expect(processed).toHaveLength(SEC_INGEST_TASKS_PER_TICK);
+    for (const jobId of desk) {
+      expect(processed.filter((p) => p.jobId === jobId)).toHaveLength(1);
+    }
+    expect(processed.filter((p) => p.jobId === backlog)).toHaveLength(1);
+  });
+
+  it("keeps the per-job ceiling while still filling the tick from one job when nothing else is claimable", async () => {
+    const { SEC_INGEST_TASKS_PER_TICK } = await import("../src/lib/rag/sec-ingest-worker");
+    const processed: string[] = [];
+    const worker = new SecIngestWorker();
+    worker.processTask = async (task) => {
+      processed.push(task.id);
+    };
+
+    const only = seedJob("fair-solo", 10, 0, "7600");
+    await worker.runTick();
+
+    expect(processed).toHaveLength(SEC_INGEST_TASKS_PER_TICK);
+    const { getSecIngestTask } = await import("../src/lib/db-rag-ingest");
+    for (const id of processed) expect(getSecIngestTask(id)!.jobId).toBe(only);
+  });
+});
+
+// 2026-09-27 P0-2: every advanceSecIngestTask used to be followed by an immediate return, so one
+// document cost 11 claim->process->advance cycles. processTask now drains the state machine in
+// process, bounded by wall clock and re-checking the strategy/RTH gates at every stage boundary.
+describe("in-process checkpoint drain (2026-09-27 P0-2)", () => {
+  it("drives a filing from discovered to complete in ONE processTask call", async () => {
+    const { getSecIngestTask } = await import("../src/lib/db-rag-ingest");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+    vi.mocked(storeDocument).mockResolvedValue({
+      skipped: false,
+      attempted: 2,
+      indexed: 2,
+      documentComplete: true
+    } as any);
+    vi.mocked(politeFetchText).mockResolvedValue(
+      "<html><body>Item 1. Business<p>AAPL makes iPhones and lots of other consumer electronics that people buy all over the world.</p></body></html>"
+    );
+    // ingestCompanyFacts (facts_extracted stage) goes through politeFetch; a 404 is its
+    // "issuer has no companyfacts" no-op, so the drain is not at the mercy of test ordering.
+    vi.mocked(politeFetch).mockResolvedValue({
+      ok: false,
+      status: 404,
+      statusText: "Not Found"
+    } as any);
+
+    const accession = "0000320193-26-000500";
+    const job = createSecIngestJob({
+      idempotencyKey: `drain-${randomUUID()}`,
+      corpusRevision: "corp-v1"
+    });
+    transitionSecIngestJob(job.id, "running");
+    enqueueSecIngestTask({
+      jobId: job.id,
+      accession,
+      cik: "0000320193",
+      symbol: "AAPL",
+      payload: {
+        url: "https://www.sec.gov/Archives/edgar/data/320193/a.htm",
+        docType: "10-K",
+        filedAt: "2026-07-15",
+        acceptanceDateTime: "2026-07-15T21:37:12.000Z"
+      }
+    });
+    const [claimed] = claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 });
+    expect(claimed!.checkpoint).toBe("discovered");
+
+    await new SecIngestWorker().processTask(claimed!);
+
+    const after = getSecIngestTask(claimed!.id)!;
+    expect(after.checkpoint).toBe("complete");
+    expect(after.status).toBe("complete");
+    // The audit trail is unchanged in shape: one claim + one 'advanced' receipt per stage, and
+    // no stage burned a second attempt because the re-lease went through the claim accounting.
+    const attempts = getDb()
+      .prepare(
+        `SELECT checkpoint, outcome FROM sec_ingest_task_attempts
+         WHERE task_id = ? ORDER BY attempt_no`
+      )
+      .all(claimed!.id) as Array<{ checkpoint: string; outcome: string }>;
+    // One durable attempt receipt per stage (the claim writes it 'claimed', the advance flips it
+    // to 'advanced') — the same shape the 11-tick version produced, now inside one processTask.
+    expect(attempts).toHaveLength(11);
+    expect(attempts.every((a) => a.outcome === "advanced")).toBe(true);
+    expect(attempts[0]!.checkpoint).toBe("discovered");
+    expect(attempts.at(-1)!.checkpoint).toBe("verified");
+    expect(after.stageAttempts).toBe(0);
+    expect(after.totalAttempts).toBe(11);
+  });
+
+  it("hands the task back (no stage attempt burned) when the drain budget is already spent", async () => {
+    const { getSecIngestTask, claimSecIngestTasks } = await import("../src/lib/db-rag-ingest");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+
+    const accession = "0000320193-26-000501";
+    const job = createSecIngestJob({
+      idempotencyKey: `drain-budget-${randomUUID()}`,
+      corpusRevision: "corp-v1"
+    });
+    transitionSecIngestJob(job.id, "running");
+    enqueueSecIngestTask({
+      jobId: job.id,
+      accession,
+      cik: "0000320193",
+      symbol: "AAPL",
+      payload: { url: "https://www.sec.gov/x", docType: "10-K", filedAt: "2026-07-15" }
+    });
+    const [claimed] = claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 });
+
+    await new SecIngestWorker().processTask(claimed!, { drainBudgetMs: 0 });
+
+    const after = getSecIngestTask(claimed!.id)!;
+    expect(after.checkpoint).toBe("discovered");
+    expect(after.status).toBe("retry_wait");
+    expect(after.stageAttempts).toBe(0);
+    expect(after.lastErrorType).toBe("task_drain_budget_exhausted");
+    expect(vi.mocked(storeDocument)).not.toHaveBeenCalled();
+    // Released, not parked: the very next tick can pick it straight back up.
+    expect(claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 })).toHaveLength(1);
+  });
+
+  it("stops the drain at a stage boundary when a strategy run is in flight, and resumes after it", async () => {
+    const { writeLocalArtifact } = await import("../src/lib/web-sources/sec-filings");
+    const {
+      getSecIngestTask,
+      claimSecIngestTasks,
+      createSecIngestJob,
+      enqueueSecIngestTask,
+      advanceSecIngestTask,
+      transitionSecIngestJob
+    } = await import("../src/lib/db-rag-ingest");
+    const { insertStrategyRun, finishStrategyRun } = await import("../src/lib/db-execution");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+    vi.mocked(storeDocument).mockResolvedValue({
+      skipped: false,
+      attempted: 1,
+      indexed: 1,
+      documentComplete: true
+    } as any);
+
+    const accession = "0000320193-26-000502";
+    const vectorDocId = `${accession}:1:document.html`;
+    const job = createSecIngestJob({
+      idempotencyKey: `drain-strategy-${randomUUID()}`,
+      corpusRevision: "corp-v1"
+    });
+    transitionSecIngestJob(job.id, "running");
+    enqueueSecIngestTask({
+      jobId: job.id,
+      accession,
+      cik: "0000320193",
+      symbol: "AAPL",
+      payload: { url: "https://www.sec.gov/x", docType: "10-K", filedAt: "2026-07-15" }
+    });
+    const raw = "<html><body>Item 1. Business<p>AAPL makes iPhones.</p></body></html>";
+    const chunks = [{ content_hash: `hash-${accession}-0`, text: "chunk 0" }];
+    await writeLocalArtifact("0000320193", accession, 1, "raw-document.html", raw);
+    await writeLocalArtifact("0000320193", accession, 1, "sections.json", JSON.stringify([{ itemCode: "1", text: raw }]));
+    await writeLocalArtifact("0000320193", accession, 1, "chunks.json", JSON.stringify(chunks));
+    await writeLocalArtifact(
+      "0000320193",
+      accession,
+      1,
+      "storeResult.json",
+      JSON.stringify({ skipped: false, attempted: 1, indexed: 1, documentComplete: true })
+    );
+
+    let claimed = claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 });
+    const steps = [
+      ["discovered", "fetched"],
+      ["fetched", "validated"],
+      ["validated", "parsed"],
+      ["parsed", "facts_extracted"],
+      ["facts_extracted", "chunked"],
+      ["chunked", "embed_queued"]
+    ] as const;
+    for (const [from, to] of steps) {
+      expect(
+        advanceSecIngestTask({
+          taskId: claimed![0]!.id,
+          owner: "test-worker",
+          leaseToken: claimed![0]!.leaseToken || "",
+          expectedCheckpoint: from,
+          nextCheckpoint: to,
+          receipt: claimed![0]!.payload
+        })
+      ).toBe(true);
+      claimed = claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 });
+    }
+    const taskId = claimed![0]!.id;
+
+    // A strategy run owns the event loop. The drain must hand the task straight back rather than
+    // keep driving stages through it (runTick's pre-tick gate alone is not enough once a drain
+    // can run many stages back to back).
+    const runId = randomUUID();
+    const userId = `drain-strategy-${randomUUID()}`;
+    const worker = new SecIngestWorker();
+    insertStrategyRun(runId, userId);
+    try {
+      await worker.processTask(claimed![0]!);
+    } finally {
+      finishStrategyRun(runId, "finished", "drain test release", userId);
+    }
+
+    const released = getSecIngestTask(taskId)!;
+    expect(released.status).toBe("retry_wait");
+    expect(released.checkpoint).toBe("embed_queued");
+    expect(released.lastErrorType).toBe("strategy_work_in_flight");
+    // Released, not failed: the stage attempt is refunded and no FTS row was written.
+    expect(released.stageAttempts).toBe(0);
+    const mirrored = getDb()
+      .prepare("SELECT COUNT(*) AS n FROM document_chunks_fts WHERE accession = ?")
+      .get(vectorDocId) as { n: number };
+    expect(mirrored.n).toBe(0);
+
+    // With the strategy run done, the released task resumes and finishes in one more drain.
+    const [resumed] = claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 });
+    expect(resumed!.checkpoint).toBe("embed_queued");
+    await worker.processTask(resumed!);
+    expect(getSecIngestTask(taskId)!.status).toBe("complete");
+  });
 });

@@ -10,7 +10,7 @@ import {
 import { seedSecIngestJobsFromManifest, SEC_INGEST_BASELINE_CORPUS_REVISION } from "../src/lib/rag/sec-ingest-seeder";
 import { SecIngestWorker, secIngestWorkerEnabled } from "../src/lib/rag/sec-ingest-worker";
 import { fetchRecentFilings, type FilingRef } from "../src/lib/web-sources/sec-filings";
-import { politeFetchText } from "../src/lib/web-sources/http";
+import { politeFetch, politeFetchText } from "../src/lib/web-sources/http";
 import { hashSecUniverseIssuers, type FrozenSecUniverseManifest, type SecUniverseIssuer } from "../src/lib/rag/universe-manifest";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -179,18 +179,34 @@ describe("seedSecIngestJobsFromManifest", () => {
     });
 
     // Drive the task through the worker's first checkpoint with a mocked fetch: discovered ->
-    // fetched must fetch payload.url, persist the raw artifact, and advance.
-    vi.mocked(politeFetchText).mockResolvedValueOnce(
+    // fetched must fetch payload.url, persist the raw artifact, and advance. 2026-09-27 P0-2: the
+    // worker now DRAINS the state machine in one call, so this single processTask carries the task
+    // all the way to complete; companyfacts 404 is the facts_extracted stage's documented no-op.
+    vi.mocked(politeFetchText).mockResolvedValue(
       "<html><body>Item 1. Business<p>CCC Corp makes widgets and files its reports on time.</p></body></html>"
     );
+    vi.mocked(politeFetch).mockResolvedValue({
+      ok: false,
+      status: 404,
+      statusText: "Not Found"
+    } as any);
     const worker = new SecIngestWorker();
     await worker.processTask(task);
 
     expect(vi.mocked(politeFetchText)).toHaveBeenCalledWith(ref.url);
+    // The drain then carries it through fetched -> validated -> parsed -> facts_extracted ->
+    // chunked -> embed_queued, where it parks: this test file has no embed provider, so the real
+    // storeDocument returns an incomplete result and the worker defers with a retry instead of
+    // dead-lettering. That is the budget-gate contract, and it is the furthest durable state the
+    // seeder's payload can drive in a unit-test environment.
+    const { getSecIngestTask } = await import("../src/lib/db-rag-ingest");
+    const after = getSecIngestTask(task.id)!;
+    expect(after.checkpoint).toBe("embed_queued");
+    expect(after.status).toBe("retry_wait");
+    expect(after.lastErrorType).toBe("embed-transient-error");
     const receipt = getSecIngestJobReceipt(jobId)!;
-    expect(receipt.byStatus.pending).toBe(1); // released back to pending at the next checkpoint
-    const reclaimed = claimSecIngestTasks(jobId, { owner: "contract-worker", leaseMs: 60_000, limit: 1 });
-    expect(reclaimed[0]!.checkpoint).toBe("fetched");
+    expect(receipt.byStatus.retry_wait).toBe(1);
+    expect(receipt.byStatus.pending).toBe(0);
   });
 
   it("never re-seeds or revives a dead-lettered document (dead-letter discipline)", async () => {
