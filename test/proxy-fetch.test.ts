@@ -63,10 +63,17 @@ describe("resolveResidentialProxyUrl", () => {
 
 describe("resolveProxyFailureMode", () => {
   it("defaults to fail_soft and honors fail_closed", () => {
-    expect(resolveProxyFailureMode({} as NodeJS.ProcessEnv)).toBe("fail_soft");
-    expect(resolveProxyFailureMode({ RESIDENTIAL_PROXY_FAILURE_MODE: "fail_closed" } as NodeJS.ProcessEnv)).toBe(
-      "fail_closed"
-    );
+    // Plain env literals, not casts to NodeJS.ProcessEnv: these fixtures describe
+    // a ResidentialProxyEnv override, and ProcessEnv carries a required NODE_ENV
+    // that a fixture has no business asserting.
+    expect(resolveProxyFailureMode({})).toBe("fail_soft");
+    expect(resolveProxyFailureMode({ RESIDENTIAL_PROXY_FAILURE_MODE: "fail_closed" })).toBe("fail_closed");
+  });
+  it("accepts a real process.env source without a cast", () => {
+    // Pins the weak-type regression: process.env is an index-signature type and
+    // must stay assignable to the resolver parameter (src/lib/proxy-fetch.ts).
+    expect(["fail_soft", "fail_closed"]).toContain(resolveProxyFailureMode(process.env));
+    expect(["fail_soft", "fail_closed"]).toContain(resolveProxyFailureMode());
   });
 });
 

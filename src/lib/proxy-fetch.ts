@@ -79,7 +79,24 @@ export interface ResidentialProxyEnv {
   HTTPS_PROXY?: string;
 }
 
-function readEnv(env?: ResidentialProxyEnv): ResidentialProxyEnv {
+/**
+ * The env source these resolvers accept: an explicit literal (tests, DI) or
+ * process.env itself. process.env is NodeJS.ProcessEnv, an index-signature
+ * type, and TypeScript's weak-type check rejects it against ResidentialProxyEnv
+ * (every property optional) because the two share no declared properties — even
+ * though every key ResidentialProxyEnv declares is satisfied by ProcessEnv's
+ * `string | undefined` values, and RESIDENTIAL_PROXY_PORT stays `string | number`
+ * because formatProxyUrl accepts both.
+ *
+ * Naming both sides in a union states the real contract instead of casting
+ * through `unknown`, and keeps the declared keys strictly typed: adding an index
+ * signature to ResidentialProxyEnv would have compiled too, but it would also
+ * admit a typo'd key (RESIDENTIAL_PROXY_UR:), and a silently missed env var is
+ * the exact failure this module's default-fallback design exists to prevent.
+ */
+export type ProxyEnvSource = ResidentialProxyEnv | NodeJS.ProcessEnv;
+
+function readEnv(env?: ProxyEnvSource): ProxyEnvSource {
   return env ?? process.env;
 }
 
@@ -96,7 +113,7 @@ function readEnv(env?: ResidentialProxyEnv): ResidentialProxyEnv {
  * nothing is configured and allowDefault === false (the diagnostics shape).
  */
 export function resolveResidentialProxyUrl(
-  env?: ResidentialProxyEnv,
+  env?: ProxyEnvSource,
   opts?: { allowDefault?: boolean }
 ): string | undefined {
   const source = readEnv(env);
@@ -129,7 +146,7 @@ export function resolveResidentialProxyUrl(
 }
 
 /** Resolve the proxy failure mode from env; default fail_soft (CT parity). */
-export function resolveProxyFailureMode(env?: ResidentialProxyEnv): ProxyFailureMode {
+export function resolveProxyFailureMode(env?: ProxyEnvSource): ProxyFailureMode {
   const raw = (env ?? process.env).RESIDENTIAL_PROXY_FAILURE_MODE?.trim().toLowerCase();
   return raw === "fail_closed" ? "fail_closed" : "fail_soft";
 }
