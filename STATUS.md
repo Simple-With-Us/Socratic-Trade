@@ -27,6 +27,20 @@ enrichment coverage report; and a CT push with no receipt).  8 P0 + 6 P1 board r
 **Next:** in flight — equal-risk sizing (above), outcome closure, and SEC volume/breadth.
 Rollout + full findings: Apple Note `[Socratic.Trade, MiniMax] performance + data ingestion audit`.
 
+## 2026-09-25 CLAUDE — Order correctness review round (PR #3759 follow-up)
+
+**What/why.**  PR #3759 merged while an independent review was in flight; this follow-up fixes
+what the review confirmed.  (1) P1: a DOLLAR-sized buy against a held short (the autopilot's
+default sizing) now resolves against the short's per-share value and is placed as a whole-share
+cover without bracket legs, at the choke point and upstream.  (2) The autopilot flips an LLM
+`sell` of a held short into a `cover` only on a long-only venue, only for a market sell, and a
+dollar sell covers only its own dollars.  (3) A long-only schema now offers `cover` while a short
+is held, matching the prompt (prompt `agentic-strategy@2.19.1`).  (4) A failed placement-time
+position read is booked retryable `not_placed`, not `blocked`, and the approval lane passes its
+own just-read position as the caller-verified hint.  Declined: the "oversized sell should flip
+long to short" finding (Alpaca, Tradier, and Robinhood never flip in one order).  Board
+`687a5fb4`, branch `claude/st-order-correctness`.  Rollout:
+`docs/rollouts/2026-09-24-st-order-correctness.md` section 7.
 ## 2026-09-25 CLAUDE — Cash-flow HWM review round (follow-up to merged PR #3753, board 687a5fb4, lane F2)
 
 **What.**  Four independent-review findings on the merged cash-flow HWM work, all verified and
