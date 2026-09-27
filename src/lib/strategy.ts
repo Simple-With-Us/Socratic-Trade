@@ -63,7 +63,13 @@ import { summarizeSourceCoverage } from "./source-value";
 import { deriveExecutionState, fillSourceForExecutionMode, llmExecutionMode, llmModeClarification, type ExecutionAccount } from "./execution-mode";
 import { applyBrokerOrderPlacementPause, brokerHealthRunSkip, checkBrokerHealth, isOrderPlacementInfrastructureFailure } from "./broker-health";
 import { greenFailoverExhaustedSuffix, interactiveStrategyReasoningEffort, isFailoverLlmStatus, isRetryableLlmError, LLM_OUTPUT_TOKEN_CAPS, LLM_REQUEST_DEFAULTS, LLM_TIMEOUT_MS, llmFetch, llmFetchCapturing, resolveLlmWireOutputCap, strategyLlmTimeoutMs, type LlmCallOutcome } from "./llm-request";
-import { buildBullSystem, STRATEGY_PROMPT_VERSION, THESIS_PLAYBOOK } from "./strategy-prompts";
+import {
+  assignDeterministicThesisTag,
+  buildBullSystem,
+  shouldScoreThesisTagForSide,
+  STRATEGY_PROMPT_VERSION,
+  THESIS_PLAYBOOK
+} from "./strategy-prompts";
 import { resolveLlmEndpoint } from "./llm-provider";
 import { isModelRotationSentinel, planRotationImplicitFallbacks, recordOpenRouterModelNotFound, resolveModelRotationForRun } from "./model-rotation";
 import { maybeOpenRouterCreditsExhaustedHint } from "./openrouter-credits";
@@ -6575,11 +6581,72 @@ async function proposeTrades(input: {
   // batch, then a deterministic check per proposal. A mismatch is RECORDED as a kind-prefixed
   // dataAdjustments receipt — the rationale is never rewritten and nothing is blocked.
   const sessionAtProposal = currentMarketSession();
-  const rawBullProposals = candidateBoundBullProposals.map(p => ({
+  // P0-2 (2026-09-27) — deterministic thesis-tag assignment, applied at the ONE seam where the raw
+  // model answer, the scan evidence, and the run identity are all in scope. `tradeThesisTag` used to
+  // be the model's own pick while the sizing multiplier, the negative-expectancy skip, and the thesis
+  // scorecards all keyed on it — so a model could relabel its way out of a penalty, and no "P&L by
+  // thesis" number was falsifiable. The scorer assigns the final tag from evidence the scan already
+  // computed, the model's choice is kept as `tradeThesisProposedTag`, and every divergence is audited.
+  //
+  // Properties that keep this additive rather than a reinterpretation of history: nothing is
+  // backfilled (old rows keep the tag they were stored with), the scorer ABSTAINS to the model's tag
+  // when no rule fires or the margin is too small, and only openings are scored — sells keep today's
+  // behaviour exactly, which leaves the existing Risk-Exit de-risking path untouched.
+  const candidateBySymbolForThesisTag = new Map<string, MarketQuote>();
+  for (const candidate of input.marketScan?.topCandidates ?? []) {
+    const sym = normalizeSymbol(candidate.symbol);
+    if (sym && !candidateBySymbolForThesisTag.has(sym)) candidateBySymbolForThesisTag.set(sym, candidate);
+  }
+  const rawBullProposals = candidateBoundBullProposals.map(p => {
+    const proposedTag = p.tradeThesisTag;
+    let assignedTag: string | undefined;
+    let thesisTagAudit: { result: ReturnType<typeof assignDeterministicThesisTag>; candidateFound: boolean } | null = null;
+    if (shouldScoreThesisTagForSide(p.side)) {
+      const candidate = candidateBySymbolForThesisTag.get(normalizeSymbol(p.symbol));
+      const decision = assignDeterministicThesisTag({
+        factorBreakdown: candidate?.factorBreakdown,
+        sectorRelStrength: candidate?.sectorRelStrength,
+        daysToEarnings: candidate?.daysToEarnings,
+        insiderSentiment: candidate?.insiderSentiment,
+        senateTrades: candidate?.senateTrades,
+        congressCompositeSignedScore: candidate?.congressCompositeSignedScore,
+        shortPercentOfFloat: candidate?.shortPercentOfFloat,
+        analystScore: candidate?.analystScore
+      });
+      thesisTagAudit = { result: decision, candidateFound: Boolean(candidate) };
+      if (decision.tag && decision.tag !== proposedTag) assignedTag = decision.tag;
+    }
+    if (thesisTagAudit) {
+      const { result: decision, candidateFound } = thesisTagAudit;
+      // The receipt fires on EVERY scored proposal, not only on override: "the scorer ran and
+      // agreed" is as useful to measure as "the scorer overruled the model", and without the
+      // former you cannot tell a genuine agreement from a scorer that silently never ran.
+      audit(
+        "thesis_tag_assigned",
+        {
+          runId: input.runId,
+          symbol: normalizeSymbol(p.symbol),
+          side: p.side,
+          proposedTag,
+          assignedTag: assignedTag ?? proposedTag,
+          overrode: Boolean(assignedTag),
+          rule: decision.rule,
+          reason: decision.reason,
+          runnerUp: decision.runnerUp,
+          margin: Number(decision.margin.toFixed(2)),
+          scores: decision.scores,
+          candidateFound
+        },
+        input.userId,
+        input.policy.connectedAccountId
+      );
+    }
+    return {
     ...p,
     // Preserve the proposing model's own thesis before deterministic sizing/risk receipts and the
     // Red Team review are appended to the legacy all-in-one rationale string.
     greenTeamRationale: p.rationale,
+    ...(assignedTag ? { tradeThesisTag: assignedTag, tradeThesisProposedTag: proposedTag } : {}),
     entryMarketRegime: currentMarketRegime,
     ...(regimeSeverity ? { entryRegimeSeverity: Number(regimeSeverity.severity.toFixed(2)) } : {}),
     ...(activeOverlays.length > 0 ? { appliedOverlayIds: activeOverlays.map((overlay) => overlay.id) } : {}),
@@ -6596,7 +6663,8 @@ async function proposeTrades(input: {
       const receipt = sessionPhrasingReceipt(p.rationale, sessionAtProposal);
       return receipt ? [receipt] : undefined;
     })()
-  }));
+    };
+  });
   // TRUNCATION-AWARE: if the Bull answer hit the output-token cap, a zero/partial parse is NOT a
   // genuine "do nothing" — record a DISTINCT reason + audit so it's diagnosable and never a silent
   // no-op. (See Chat A item 5; raise LLM_OUTPUT_TOKEN_CAPS.strategyProposal if this recurs.) The

@@ -1,5 +1,22 @@
 # Current Status
 
+## 2026-09-27 MINIMAX — Outcome closure: the system can learn from its own outcomes (branch `minimax/outcome-closure`)
+
+**P0-2.**  `tradeThesisTag` was chosen by the same model that then got graded on it, while the
+deterministic sizing multiplier, the negative-expectancy skip, and the thesis scorecards all keyed on
+it — so a model could relabel its way out of a penalty, and no "P&L by thesis" number was falsifiable.
+`assignDeterministicThesisTag` now assigns the tag from evidence the scan already computes
+(`factorBreakdown`, `daysToEarnings`, `shortPercentOfFloat`, `sectorRelStrength`, and the
+insider-vs-congress split that the blended `positioning` factor cannot express), the model's choice is
+kept as `tradeThesisProposedTag`, and a `thesis_tag_assigned` audit event fires on **every** scored
+proposal — including agreements, so "the scorer agreed" is distinguishable from "the scorer never ran".
+The scorer **abstains** (model's tag stands) when no rule fires, when the best rule is under the
+neutral floor, or when the leader's margin is under 8.  Openings only — sells keep today's behaviour
+exactly, which leaves the existing Risk-Exit de-risking path untouched.  Nothing is backfilled, so no
+already-reported historical number changes meaning.  **Owner ruling requested** on the three tags that
+cannot be derived without inventing semantics (`Mean-Reversion`, `Defensive-Rotation`,
+`Analyst-Revision`) — the scorer never emits them and a test enforces that.  Rollout §3.
+
 ## 2026-09-27 MINIMAX — P0-1: the app's own post-mortem lessons can now reach the brain (branch `minimax/outcome-closure`)
 
 **What.**  A post-mortem lesson about a trade the app already closed and measured was being graded by

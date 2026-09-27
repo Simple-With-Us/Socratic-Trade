@@ -1635,6 +1635,15 @@ export interface TradeProposal {
    * at persistence time by the strategy loop; legacy proposals and test fixtures don't carry it. */
   scorecard?: ProposalScorecard;
   tradeThesisTag: string;
+  /**
+   * The tag the PROPOSING MODEL chose, retained when `tradeThesisTag` was overridden by the
+   * deterministic thesis scorer (src/lib/strategy-prompts.ts, P0-2). Absent when the scorer
+   * abstained or on proposals persisted before 2026-09-27, in which case `tradeThesisTag` IS the
+   * model's own pick. This is what makes the two comparable: the report can be recomputed on
+   * assigned tags and on proposed tags side by side, and the divergence is measured from the
+   * `thesis_tag_assigned` audit events rather than inferred.
+   */
+  tradeThesisProposedTag?: string;
   entryMarketRegime: string;
   /**
    * Multi-signal regime severity ([0,1], rounded 2dp) from `computeMultiSignalSeverity`

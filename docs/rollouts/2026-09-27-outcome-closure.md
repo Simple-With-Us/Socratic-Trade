@@ -58,9 +58,16 @@ What the bypass deliberately does **not** do, each pinned by a test:
 
 Side effect, positive: this is the only ingest path that no longer spends an LLM call per lesson.
 
-### P0-2 — deterministic thesis-tag assignment — NOT YET IMPLEMENTED IN THIS COMMIT
+### P0-2 — deterministic thesis-tag assignment, with the model's choice kept as a proposal
 
-Design work is done and recorded in §3; the code lands in the next commit on this branch.
+- `src/lib/strategy-prompts.ts` — `assignDeterministicThesisTag(evidence)` plus
+  `shouldScoreThesisTagForSide(side)`, next to `THESIS_PLAYBOOK` (where the taxonomy already lives).
+  Every tunable is env-overridable with a fail-safe fallback to the default.
+- `src/lib/types.ts` — `TradeProposal.tradeThesisProposedTag?: string`, optional and additive.
+- `src/lib/strategy.ts` — applied at the one seam (`rawBullProposals`) where the raw model answer, the
+  scan evidence, and the run identity are all in scope. Fills `tradeThesisProposedTag` and overwrites
+  `tradeThesisTag` only when the scorer actually assigns something different.
+- Audit event `thesis_tag_assigned`, fired on **every scored proposal**, not only on override.
 
 ## 3. Deterministic tag-assignment rule (P0-2)
 
@@ -75,8 +82,60 @@ scorer ABSTAINS and the LLM's tag stands.**  Abstention is the important design 
 change is strictly additive at the tail, no tag is ever lost, and the residual set of un-derivable tags
 is explicit rather than papered over with a plausible-looking guess.
 
-> **Status: not implemented in this commit.**  The rule table, margins, tunables, and the list of tags
-that need an owner ruling are filled in as the code lands.
+**The rule table.**  All six rules read only fields the market scan already computes.  The factor scale
+is 0–100 with 50 = neutral (`scoreFactors`, `src/lib/market.ts`).
+
+| tag | score | source field |
+| --- | --- | --- |
+| `Momentum-Breakout` | `momentum` | `factorBreakdown.momentum` — intraday move + 52-week position + technicals |
+| `Value-Quality` | `max(value, quality)` | the two factors the playbook's own guide names for this tag |
+| `Earnings-Catalyst` | `100 − days×(45/window)` | `daysToEarnings`, a source-provided countdown (window default 3) |
+| `Insider-Accumulation` | `positioning` | `factorBreakdown.positioning` **and** insider evidence leading over congress |
+| `Short-Squeeze-Risk` | `60 + min(20, short% − 20)` | `shortPercentOfFloat` (threshold 20 mirrors `positioningScore`) |
+| `Sector-Relative-Strength` | `50 + min(30, rel×4)` | `sectorRelStrength`, a purpose-built cross-sectional field |
+
+`Insider-Accumulation` needs the raw-field split because the `positioning` factor deliberately BLENDS
+congress, insider and short interest into one number, so the factor alone cannot say which of the two
+playbook tags it represents.
+
+**Thresholds are not invented.**  `shortPercentOfFloat >= 20` and `insiderSentiment >= 60` are the
+thresholds `positioningScore` already uses in `src/lib/market.ts`.  All six are env-overridable
+(`THESIS_TAG_MARGIN`, `THESIS_TAG_NEUTRALFLOOR`, `THESIS_TAG_SECTORRELSTRENGTHPCT`,
+`THESIS_TAG_SHORTFLOATPCT`, `THESIS_TAG_INSIDERSENTIMENT`, `THESIS_TAG_EARNINGSWINDOWDAYS`) so the
+owner can calibrate against realized performance without shipping new constants; a malformed value
+falls back to the default rather than poisoning the scorer.
+
+**Abstention is the load-bearing part.**  The scorer returns `null` — and the MODEL'S TAG STANDS —
+when no rule matches, when the best rule is below the neutral floor (55), or when the leader's margin
+over the runner-up is under 8.  So the tail of the distribution is byte-identical to today, and the
+residual set of underivable tags is explicit rather than papered over.
+
+**How the divergence is made observable.**  Every scored proposal writes an audit event
+`thesis_tag_assigned` carrying `proposedTag`, `assignedTag`, `overrode`, `rule`, `reason`, `runnerUp`,
+`margin`, the full `scores` map, and `candidateFound`.  It fires on agreement too — "the scorer ran and
+agreed" is what distinguishes a genuine agreement from a scorer that silently never ran.  With
+`tradeThesisProposedTag` persisted alongside `tradeThesisTag`, the owner's existing performance report
+can be recomputed on assigned tags and on proposed tags side by side.
+
+**Why `candidateFound` is in the receipt.**  A proposal whose symbol is not in the scan's candidate set
+scores on an empty evidence set and abstains.  Without that flag, "abstained because no candidate" and
+"abstained because the evidence was genuinely ambiguous" would be indistinguishable in the data, and
+the second is a signal worth chasing.
+
+**Owner ruling requested** on three playbook tags that cannot be derived from existing evidence without
+inventing semantics, and which the scorer therefore never emits:
+
+- **`Mean-Reversion`** — needs "price is extended from its reference", which no computed field states.
+  `technicalSignals` is a free-form `string[]` with an open-ended vocabulary, so substring-matching it
+  would encode a guess as a rule.
+- **`Defensive-Rotation`** — needs a definition of "defensive" (a sector list? a beta ceiling? a
+  volatility regime?).  Nothing in the scan computes that classification.
+- **`Analyst-Revision`** — we have `analystScore`, a consensus LEVEL.  A revision is a DELTA, and no
+  field carries one.  Mapping a level onto "revision" redefines the tag.
+
+Until that ruling, those three are assigned by the model and are the tags whose scorecards remain
+model-graded.  A test asserts the scorer never returns them, so a future "completion" of the mapping
+has to be a deliberate, reviewable change.
 
 ## 4. Decisions & Trade-offs
 
@@ -123,7 +182,7 @@ that need an owner ruling are filled in as the code lands.
 | Item | Status |
 | --- | --- |
 | P0-1 autonomous-provenance gate bypass | **landed** (this commit) |
-| P0-2 deterministic thesis tag | design done in §3; code pending |
+| P0-2 deterministic thesis tag | **landed** (abstaining scorer + recorded proposal; 3 tags need an owner ruling) |
 | P1-3 retrieval usefulness in the filings path | not started |
 | P1-4 retrieval stage telemetry read path | not started |
 | P1-5 non-deep evidence depth | not started |
