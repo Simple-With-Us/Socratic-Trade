@@ -561,6 +561,47 @@ export function applyDeterministicSizing(
   const edgeFactor = avgReturn > 1 ? 1 : avgReturn >= 0 ? 0.7 : avgReturn > -1 ? 0.5 : 0.3;
   const rawMultiplier = (winRate / 100) * throttledConviction * edgeFactor;
 
+  // Operator per-thesis dial (policy.tuning.thesisSizeMultipliers), applied on top of the learned
+  // edge factor rather than replacing it. The learned path above is DERIVED from realized stats and
+  // already shrinks a weak thesis on its own; this exists for the case it cannot cover — parking a
+  // thesis whose sample is too thin or too regime-specific for its edgeFactor to be trustworthy
+  // (the 2026-09-25 performance review's "Value-Quality, 25 lots, -$79.18, the most consistent
+  // negative thesis in the data" is the motivating case).
+  //
+  // Clamped to [0, 1] so a misconfigured value can only ever SHRINK a position. A knob that could
+  // inflate sizing on a typo is not a knob anyone should leave in a policy file. Unset, a
+  // non-finite, or out-of-range value is ignored and sizes exactly as before.
+  const thesisKey = proposal.tradeThesisTag?.trim();
+  const configuredThesisMultiplier = thesisKey ? policy.tuning?.thesisSizeMultipliers?.[thesisKey] : undefined;
+  const thesisScale =
+    typeof configuredThesisMultiplier === "number" && Number.isFinite(configuredThesisMultiplier)
+      ? Math.min(1, Math.max(0, configuredThesisMultiplier))
+      : 1;
+  // An operator writing an explicit 0 for this thesis means "stop trading this". It is honoured as
+  // written and is NOT raised to `sizingFloorPct` below: the floor exists to stop the sizer emitting
+  // dust, but silently sizing a parked thesis at the floor would make the dial lie. The
+  // `avgReturn < 0` branch already takes exactly this hard-zero path, so this is the same rule
+  // reached by configuration instead of by learned stats.
+  //
+  // Safe in practice: a 0-notional order cannot reach a broker — the small-account/broker-minimum
+  // guards reject it — so honouring the zero degrades to "proposal never places", which is the
+  // intent, with no possibility of an accidental fill.
+  const thesisParked = thesisScale === 0;
+  if (thesisScale < 1) {
+    audit(
+      "sizing_thesis_multiplier_applied",
+      {
+        symbol: normalizeSymbol(proposal.symbol),
+        thesisTag: thesisKey,
+        configured: configuredThesisMultiplier,
+        applied: thesisScale,
+        rawMultiplier
+      },
+      userId,
+      policy.connectedAccountId
+    );
+  }
+
   // Volatility-targeting sizing (opt-in, default off): taper the Kelly-lite multiplier by
   // targetVol/realizedVol (never up, floored at 0.25) BEFORE the floor/ceiling clamp below, so it
   // composes with (and stays bounded by) the existing sizingFloorPct/sizingCeilingPct clamps exactly
@@ -574,7 +615,14 @@ export function applyDeterministicSizing(
     volScaleApplies && typeof realizedVol === "number"
       ? volTargetScale(realizedVol, targetVol as number)
       : 1;
-  const multiplier = rawMultiplier * volScale;
+  const multiplier = rawMultiplier * volScale * thesisScale;
+  // Honest receipt, same convention as volTargetNote: say what was applied and why, not just that
+  // a number came out smaller. Silent shrinkage is indistinguishable from a bug in the log.
+  const thesisNote =
+    thesisScale < 1
+      ? `\n\n[Sizing] Thesis ${thesisKey} held to ${(thesisScale * 100).toFixed(0)}% size by policy.tuning.thesisSizeMultipliers (configured ${configuredThesisMultiplier}).` +
+        (thesisParked ? " An explicit 0 parks this thesis: the sizing floor does not override it." : "")
+      : "";
   const volTargetNote =
     typeof realizedVol === "number"
       ? `\n\n[Sizing] Realized vol ${realizedVol.toFixed(1)}%${typeof targetVol === "number" && targetVol > 0
@@ -596,11 +644,15 @@ export function applyDeterministicSizing(
 
   const minLotsForSizing = policy.tuning?.minClosedLotsForWeightShift ?? 20;
   const unproven = sampleTrades < minLotsForSizing;
-  const boundedMultiplier = unproven
-    ? floor
-    : avgReturn < 0
-      ? 0
-      : Math.max(floor, Math.min(ceiling, multiplier));
+  // `thesisParked` is declared alongside `thesisScale` above; see its comment for why an explicit 0
+  // bypasses the floor.
+  const boundedMultiplier = thesisParked
+    ? 0
+    : unproven
+      ? floor
+      : avgReturn < 0
+        ? 0
+        : Math.max(floor, Math.min(ceiling, multiplier));
 
   // Fractional-Kelly sizing on realized payoff (downside-dispersion-aware, advisory). Runs BESIDE
   // the Kelly-lite heuristic above (never replaces it): computes a suggested multiplier from the
@@ -845,6 +897,6 @@ export function applyDeterministicSizing(
     quantity: undefined, // Override any LLM-guessed quantity to force notional routing
     rationale: proposal.rationale + advisedSizeNote + fallbackSizeNote + bracketMinNote + brokerMinNote + (unproven
       ? ` — EXPLORATORY floor: thesis has ${sampleTrades} closed lot${sampleTrades === 1 ? "" : "s"} (< ${minLotsForSizing}); held to minimum size until validated.`
-      : ` from ${winRate}% win rate, ${avgReturn}% avg edge, and ${Math.round(throttledConviction * 100)}% AI conviction.`) + capNote + advCapNote + volTargetNote + heatNote + kellyNote
+      : ` from ${winRate}% win rate, ${avgReturn}% avg edge, and ${Math.round(throttledConviction * 100)}% AI conviction.`) + capNote + advCapNote + volTargetNote + heatNote + kellyNote + thesisNote
   };
 }

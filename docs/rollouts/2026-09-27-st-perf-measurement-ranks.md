@@ -135,3 +135,68 @@ Owner also asked for confirmation that Claude's post-review work was deployed.  
 - Review rank 10 ("why did Autopilot runs leave 4 proposals Awaiting approval") is already
   answered by shipped code: `hold-reason.ts` classifies the cause, and it is
   `red_team_unavailable` — the Red Team could not run, so the proposal was held for a human.
+
+---
+
+## Addendum — Seer review round on rank 3, and rank 5 (per-thesis sizing dial)
+
+### 7. Seer findings on rank 3 — both correct, both fixed
+
+`sentry[bot]` (Seer) posted two MEDIUM findings on PR #3895.  Both were real:
+
+1. **`brokerRejectionRowsCapped` compared two different populations.**  It read
+   `rejectedCount > sum(brokerRejectionReasons)`, where `rejectedCount` is a count of *proposals*
+   carrying the `rejected_by_broker` status and the right-hand side counts *audit rows*.  Those are
+   different populations — one proposal can log several rejection events, and a reconcile-path audit
+   row can exist without a status write — so the flag was wrong in both directions.  It also lost
+   rows past the `.slice(0, 20)`.  Now simply `brokerRejectionRows.length >= MAX_BROKER_REJECTION_ROWS`,
+   matching the block-reason and hold-reason scans.  The now-unused `brokerRejectionRowsUnreadable`
+   counter was dropped in favour of the sibling scans' catch-and-skip convention.
+2. **`lotsGraded` counted every lot ever, not just the windowed ones.**  `computeTradeStats` windows
+   on `exitAt >= sinceIso`, but `lotsGraded` accumulated unconditionally, so a 200-day-old round trip
+   inflated a denominator that contributed nothing to `tradeCount` — two figures describing the same
+   window and disagreeing.  Now applies the identical predicate.  Regression test added
+   ("windows lotsGraded the same way it windows tradeCount").
+
+### 8. Rank 5 — per-thesis sizing multiplier
+
+`policy.tuning.thesisSizeMultipliers: Record<string, number>`, keyed by `tradeThesisTag`, applied in
+`applyDeterministicSizing` (`strategy-risk.ts`) on top of the learned `edgeFactor`.
+
+The motivating case is the review's own: "Value-Quality — the most consistent negative thesis in the
+data (25 lots, -$79.18)".  The learned path already shrinks a weak thesis from realized stats, so
+this dial exists for what that cannot do: park a thesis whose sample is too thin or too
+regime-specific for its learned factor to be trustworthy.
+
+Two deliberate design decisions, both discovered by the tests failing first:
+
+- **Clamped to [0, 1].**  A knob that could *inflate* sizing on a typo is not a knob anyone should
+  leave in a policy file.  A non-finite or out-of-range value is ignored entirely.
+- **An explicit 0 BYPASSES `sizingFloorPct`.**  The floor exists to stop the sizer emitting dust, but
+  an operator parking a thesis means "stop trading this", and silently sizing it at the floor would
+  make the dial lie.  The existing `avgReturn < 0` branch already takes exactly this hard-zero path,
+  so this is the same rule reached by configuration rather than by learned stats.  Safe in practice: a
+  0-notional order cannot reach a broker (the small-account/broker-minimum guards reject it), so
+  honouring the zero degrades to "proposal never places" with no possibility of an accidental fill.
+
+Every application is announced in the order rationale and in a `sizing_thesis_multiplier_applied`
+audit event, matching the `volTargetNote` convention — silent shrinkage is indistinguishable from a
+bug in the log.
+
+Not done in this addendum: rank 5's second half ("watch Momentum-Breakout") needs rank 3's
+`roundTripStats` to be live and a fresh sample; it is a decision, not a code change.
+
+### 9. Verification (addendum)
+
+```
+npx tsc --noEmit                                                        # 0 errors in src/ + app/
+npx eslint <5 touched files>                                            # clean
+npx vitest run test/thesis-size-multiplier.test.ts \
+                test/kelly-sizing.test.ts test/vol-targeting-sizing.test.ts \
+                test/finalized-sizing-review.test.ts test/broker-minimum-sizing.test.ts
+                                                                       # 29 passed (29), 5 files
+```
+
+The 4 pre-existing sizing suites passing unchanged is the load-bearing check: the new multiplier
+composes with the floor/ceiling clamp, vol targeting, fractional-Kelly and the broker-minimum guard
+without perturbing any of them.

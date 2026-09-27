@@ -57,6 +57,39 @@ describe("ops performance — round-trip grading (review rank 3, part 1)", () =>
     expect(account.roundTripStats.expectancyUsd).toBeCloseTo((68 - 50) / 2, 2);
   });
 
+  it("windows lotsGraded the same way it windows tradeCount", async () => {
+    const db = await import("../src/lib/db");
+    const userId = `rt-win-user-${randomUUID()}`;
+    const accountId = `rt-win-acct-${randomUUID()}`;
+    const accountNumber = `RTW-${randomUUID()}`;
+    db.upsertConnectedAccount({ id: accountId, userId, broker: "alpaca", environment: "paper", accountNumber, label: "RT Window", isActive: true });
+    db.setPolicy({ ...db.getPolicy(userId, accountId), systemState: "active", strategyAuthority: "decide" }, userId, accountId);
+
+    const now = Date.now();
+    const fill = (symbol: string, side: "buy" | "sell", quantity: number, price: number, at: string) =>
+      db.insertFillEvent({ accountNumber, source: "paper", symbol, side, quantity, price, notional: quantity * price, status: "filled", userId, filledAt: at });
+
+    // A 3-exit round trip that closed 200 days ago — entirely OUTSIDE the 30-day window.
+    fill("IIII", "buy", 10, 100, daysAgo(now, 210));
+    fill("IIII", "sell", 3, 120, daysAgo(now, 205));
+    fill("IIII", "sell", 3, 120, daysAgo(now, 204));
+    fill("IIII", "sell", 4, 118, daysAgo(now, 200));
+    // And one 2-exit round trip inside the window.
+    fill("JJJJ", "buy", 10, 100, daysAgo(now, 10));
+    fill("JJJJ", "sell", 4, 120, daysAgo(now, 6));
+    fill("JJJJ", "sell", 6, 118, daysAgo(now, 5));
+
+    const { buildOpsPerformanceSnapshot } = await import("../src/lib/ops-performance");
+    const account = (await buildOpsPerformanceSnapshot({ connectedAccountId: accountId, days: 30 })).accounts[0];
+
+    // Only the in-window trip is graded...
+    expect(account.roundTripStats.tradeCount).toBe(1);
+    // ...and lotsGraded must count only THAT trip's two exits. Counting all five would report a
+    // denominator that contributes nothing to tradeCount — the two figures would describe the same
+    // window and disagree.
+    expect(account.roundTripStats.lotsGraded).toBe(2);
+  });
+
   it("excludes a still-partly-open position and counts it, rather than grading it early", async () => {
     const db = await import("../src/lib/db");
     const userId = `rt-open-user-${randomUUID()}`;

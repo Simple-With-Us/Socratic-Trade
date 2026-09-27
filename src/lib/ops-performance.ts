@@ -327,7 +327,11 @@ function buildRoundTripStats(
       continue;
     }
     trips.push(trip);
-    lotsGraded += lots.length;
+    // Count the lots only when the trip they belong to is actually IN the window. `computeTradeStats`
+    // windows on `exitAt >= sinceIso`, so counting unconditionally here would let a 200-day-old
+    // round trip inflate `lotsGraded` while contributing nothing to `tradeCount` — two figures
+    // describing the same denominator but disagreeing. Apply the identical predicate.
+    if (typeof trip.exitAt === "string" && trip.exitAt >= sinceIso) lotsGraded += lots.length;
   }
 
   return { ...computeTradeStats(trips, sinceIso, windowDays), incompleteRoundTrips, lotsGraded };
@@ -502,7 +506,6 @@ function queryProposalFunnel(
       : [];
 
   const brokerReasonCounts = new Map<string, number>();
-  let brokerRejectionRowsUnreadable = 0;
   for (const row of brokerRejectionRows) {
     let reason: string | undefined;
     try {
@@ -512,7 +515,7 @@ function queryProposalFunnel(
       // broker's own terminal state instead, which is the closest thing to a reason available.
       else if (typeof parsed.brokerState === "string" && parsed.brokerState.trim()) reason = `broker state: ${parsed.brokerState}`;
     } catch {
-      brokerRejectionRowsUnreadable += 1;
+      // malformed payload — skip this row's reason, same as the block-reason scan above
       continue;
     }
     if (!reason) continue;
@@ -534,7 +537,13 @@ function queryProposalFunnel(
     holdReasons,
     holdReasonRowsCapped: heldRows.length >= MAX_HOLD_REASON_ROWS && proposedCount > MAX_HOLD_REASON_ROWS,
     brokerRejectionReasons,
-    brokerRejectionRowsCapped: rejectedCount > brokerRejectionReasons.reduce((s, r) => s + r.count, 0) + brokerRejectionRowsUnreadable
+    // "Did the scan hit its row cap?" — and nothing else. Deliberately NOT a comparison against
+    // `rejectedCount`: that is a count of PROPOSALS carrying the `rejected_by_broker` status, while
+    // this list is built from AUDIT ROWS, which are a different population (one proposal can log
+    // several rejection events, and a reconcile-path row can exist without a status write).
+    // Comparing the two silently produced a wrong answer in both directions. Same "hit the cap"
+    // semantics as the block-reason and hold-reason scans.
+    brokerRejectionRowsCapped: brokerRejectionRows.length >= MAX_BROKER_REJECTION_ROWS
   };
 }
 
