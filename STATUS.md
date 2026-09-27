@@ -1,5 +1,19 @@
 # Current Status
 
+## 2026-09-27 MINIMAX — P0-1: the app's own post-mortem lessons can now reach the brain (branch `minimax/outcome-closure`)
+
+**What.**  A post-mortem lesson about a trade the app already closed and measured was being graded by
+the LLM semantic gate — which asks whether the text "would influence … trading behavior", a question a
+sizing lesson answers yes to by construction — upgraded to `risk`, and parked in
+`learned_context_pending`, a queue read only by a human approval click or the nightly Learning Review.
+So the highest-quality learning artifact the system produces never reached the brain it is read from.
+The lesson producer now stamps `provenance: "system-postmortem"` and `source: "postmortem-outcome"`,
+and `semantic-gate.ts` step 1b skips the LLM **layer** for those rows.  Unchanged: the keyword risk
+layer (a lesson naming a real risk knob is still queued for human approval), the PII gate, and the full
+gate for every unmarked candidate.  Side effect: this is the only ingest path that no longer spends an
+LLM call per lesson.  **Next:** P0-2 deterministic thesis tag.  Rollout:
+`docs/rollouts/2026-09-27-outcome-closure.md`.
+
 ## 2026-09-25 CLAUDE — Cash-flow HWM review round (follow-up to merged PR #3753, board 687a5fb4, lane F2)
 
 **What.**  Four independent-review findings on the merged cash-flow HWM work, all verified and

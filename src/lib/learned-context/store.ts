@@ -84,6 +84,13 @@ export interface IngestLearnedOptions extends SemanticGateOptions {
  * + LLM semantic gate; see semantic-gate.ts). The gate is STRICTLY ADDITIVE — it can only UPGRADE a
  * keyword 'fact' → 'risk' and falls back to the keyword result on any LLM failure — so every routing
  * branch below (incl. the chat hard-cap) keeps its exact semantics. `opts.llm` is injectable for tests.
+ *
+ * PROVENANCE (2026-09-27): a candidate carrying `provenance: "system-postmortem"` skips the gate's LLM
+ * layer inside semantic-gate.ts, so a lesson the app derived from its OWN closed trades is written to
+ * the brain instead of queued for a human nobody is going to click. The keyword layer is untouched and
+ * still routes risk-knob lessons to the confirmation queue below, and the PII gate above still runs
+ * first. Because the write branch is where such a row lands, the bypass is recorded in the
+ * `learned_context.write` audit payload (see below) so it is verifiable after the fact.
  */
 export async function ingestLearned(
   userId: string,
@@ -232,6 +239,11 @@ export async function ingestLearned(
       connectedAccountId: row.connectedAccountId,
       learningScope: row.learningScope,
       transferState: row.transferState,
+      // Explicit producer provenance, when the producer set one. This is the audit trail for the
+      // semantic gate's provenance bypass (semantic-gate.ts step 1b): a row that reached the brain
+      // BECAUSE its LLM upgrade was skipped is distinguishable from one that passed the gate as a
+      // fact, without needing a schema change on learned_context.
+      ...(candidate.provenance ? { provenance: candidate.provenance } : {}),
       op: existing ? "supersede" : "append"
     },
     userId
