@@ -186,6 +186,26 @@ bug in the log.
 Not done in this addendum: rank 5's second half ("watch Momentum-Breakout") needs rank 3's
 `roundTripStats` to be live and a fresh sample; it is a decision, not a code change.
 
+### 8a. Query-plan verification for the broker-rejection scan
+
+The claim "index-driven, not a table scan" was checked rather than assumed, by running
+`EXPLAIN QUERY PLAN` for the exact statement against a schema carrying the production index:
+
+```
+SEARCH audit_events USING INDEX idx_audit_events_user_account_kind
+       (user_id=? AND connected_account_id=? AND kind=?)
+USE TEMP B-TREE FOR ORDER BY
+```
+
+An index SEARCH on all three equality columns, no `SCAN audit_events`.  The temp B-tree is the
+`ORDER BY created_at DESC` over the already-narrowed set (created_at is not in that index) and is
+bounded by `MAX_BROKER_REJECTION_ROWS`; the newest rejections are the ones worth reporting, so the
+sort is the right trade against dropping the ORDER BY and taking an arbitrary slice.
+
+This is the concrete payoff of scoping on `audit_events`' own columns instead of joining the
+payload's `proposalId` to `trade_proposals` — that join would have forced a scan plus a JSON parse
+per rejection payload in the entire table.
+
 ### 9. Verification (addendum)
 
 ```
