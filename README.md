@@ -18,7 +18,9 @@ An account is an account: paper vs live is only the broker account's
 `environment`. There is **no** local simulator, **no** "Test mode", and **no**
 fake fills. With no connected account, the app cannot place orders.
 
-Native iOS companion (TestFlight): control remote for the same production backend.
+Native iOS companion: an invite-only remote for the same backend.  The current
+`com.socratictrade.ios` TestFlight release is being prepared; access is not publicly
+available.
 
 ## For AI Tools And Contributors
 
