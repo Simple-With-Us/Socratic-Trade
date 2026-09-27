@@ -4,6 +4,8 @@ Next.js agentic trading console for real broker accounts — **production at
 [socratictrade.com](https://socratictrade.com)** (Coolify). Local `npm run dev` is
 for development only; previews are retired.
 
+**Public overview:** [Socratic Trade](https://socratictrade.com/welcome) · **From:** [Simple With Us](https://simplewithus.com/)
+
 ## Supported brokers
 
 | Broker | Connection | Environments |
@@ -16,7 +18,9 @@ An account is an account: paper vs live is only the broker account's
 `environment`. There is **no** local simulator, **no** "Test mode", and **no**
 fake fills. With no connected account, the app cannot place orders.
 
-Native iOS companion (TestFlight): control remote for the same production backend.
+Native iOS companion: an invite-only remote for the same backend.  The current
+`com.socratictrade.ios` TestFlight release is being prepared; access is not publicly
+available.
 
 ## For AI Tools And Contributors
 
