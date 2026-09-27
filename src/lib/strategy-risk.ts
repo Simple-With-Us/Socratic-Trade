@@ -800,7 +800,11 @@ export function applyDeterministicSizing(
     const before = targetNotional;
     applyEqualRiskCap();
     if (targetNotional < before) {
-      effectiveOpeningCap = Math.min(effectiveOpeningCap, targetNotional);
+      // Deliberately NOT clamping `effectiveOpeningCap` here. The risk cap is a DOLLAR budget, not a
+      // capacity constraint: it says how much this order may be, not how much the account may
+      // deploy. Clamping capacity here would also suppress the bracket-minimum raise below, which
+      // would leave the re-assertion after it untested and the interaction untested. Letting the
+      // raise happen and then losing to the re-assertion is the behaviour actually worth pinning.
       audit(
         "sizing_equal_risk_capped",
         {
