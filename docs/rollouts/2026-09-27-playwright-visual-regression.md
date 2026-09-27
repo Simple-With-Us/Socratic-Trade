@@ -54,3 +54,7 @@ The PR's first `e2e` CI run FAILED both visual tests: 34,119 px (console) and 12
 
 - `/tmp` on this VM is a 512M tmpfs shared with other agents' work (one agent's `npm ci` in `/tmp/um-clean` grew to 453M); it hit 100% during this task.  Cleaned only regenerable caches (`node-compile-cache`, prisma engines); left other agents' files alone.  Playwright/Chrome and `next dev` both need /tmp headroom — worth watching on shared-VM Playwright runs.
 - `page.route()` aborts browser-initiated requests only; the dev/prod server's own upstream fetches (macro feed) still vary run to run — mask, don't assume hermeticity.
+
+### PR trigger removed to respect queue-safety guardrail (2026-09-27 ~22:55 UTC)
+
+The merge commit's `verify` run failed on `test/ci-workflow-queue-safety.test.ts > CI queue safety > does not schedule Playwright smoke for every pull request`: the narrowed `pull_request:` trigger added to `e2e.yml` violates a deliberate repo decision — documented in the workflow itself and asserted by the test — that smoke was removed from PRs on 2026-07-21 because it clogged the single CI pool.  Reverted to the original triggers (push to main, nightly schedule, workflow_dispatch) and kept only the new `update-visual-baselines` dispatch input.  The one PR-triggered smoke run before the revert had already proven the CI-generated baselines green, and `verify` (the only required check) is the gate.

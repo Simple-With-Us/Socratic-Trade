@@ -8,15 +8,9 @@ name: Playwright Smoke
 # the 2026-07-21 queue-protection rationale. Still runs on main / nightly / manual.
 
 on:
-  # Narrow PR trigger: Playwright-related changes only. The docs-only fast path
-  # in `classify` still applies on top (docs-only PRs short-circuit).
-  pull_request:
-    paths:
-      - "test/e2e/**"
-      - "playwright.config.ts"
-      - "package.json"
-      - "package-lock.json"
-      - ".github/workflows/e2e.yml"
+  # smoke is NOT a required status check (ruleset requires only `verify`). Running it on
+  # every PR clogged the single socratic-ci pool (~35% of backlog was smoke). PR coverage
+  # removed 2026-07-21; smoke remains on main push, nightly schedule, and workflow_dispatch.
   push:
     branches:
       - main
