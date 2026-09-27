@@ -312,6 +312,19 @@ export interface TuningSettings {
   sizingFloorPct?: number;
   /** Maximum % of max order notional the deterministic sizer will ever allocate. Default 100. */
   sizingCeilingPct?: number;
+  /**
+   * Per-thesis multiplier applied to the deterministic sizer's composed multiplier, keyed by
+   * `tradeThesisTag`. `0.5` halves every position opened under that thesis; `0` disables it.
+   *
+   * Distinct from the learned `edgeFactor`/`selectThesisStat` path, which is DERIVED from realized
+   * stats and shrinks on its own. This is an operator dial for a decision the data cannot make on
+   * its own — e.g. parking a thesis that is consistently negative while its sample is too thin or
+   * too regime-specific to trust as an edge signal. Absent key → thesis sizes exactly as before.
+   *
+   * Reversible by design: delete the key. Values are clamped to [0, 1] at the call site, so a typo
+   * can never inflate a position past its existing ceiling.
+   */
+  thesisSizeMultipliers?: Record<string, number>;
   // `redTeamConvictionThreshold` and `redTeamNotionalPctOfNavThreshold` were REMOVED 2026-07-07
   // (single-adversary consolidation, decision O2): the Red Team review now runs on EVERY risk-adding
   // opening — coverage is structural, not conviction/stakes-gated — so both trigger thresholds (and
@@ -767,6 +780,16 @@ export interface RiskRules {
    * The breaker itself is still opt-in via the thresholds above (unset ⇒ no breaker at all).
    */
   drawdownBreakerAction?: "advisory" | "close_only" | "halt";
+  /**
+   * Owner preference, default OFF.  When on, a drawdown / daily-loss breach that coincides with a
+   * run-over-run equity fall of 20% or more with NO deposit or withdrawal on the broker ledger
+   * (possibly a withdrawal whose ledger row has not posted yet) holds an opted-in
+   * `drawdownBreakerAction` (close_only / halt) as advisory for ONE run.  A real loss is enforced on
+   * the next run.  Off: the configured action applies on the run the breach happens.  Either way
+   * the breach reason and receipt say the fall was unexplained, and the HWM is re-based on the
+   * follow-up run if the withdrawal posts.
+   */
+  drawdownUnexplainedDropGrace?: boolean;
   /**
    * Accuracy breaker (nofx-style consecutive-miss safety mode, docs/oss-lessons.md §8): fires after
    * this many CONSECUTIVE matured losses on real (placed/filled) decisions. The drawdown breaker
@@ -1294,6 +1317,14 @@ export interface TradingPolicy {
    * Robinhood/Webull never get this lane.
    */
   brokerStopsForShorts?: boolean;
+  /**
+   * "Exits release the app's own stop" (src/lib/exit-stop-release.ts). Default ON (`false` opts
+   * out). When an approved exit (autopilot or human-approved sell/cover) needs shares that only the
+   * app's OWN resting protective stop is holding at the broker, cancel that stop, place the exit,
+   * then re-place a stop for any remaining shares. Owner and external orders are never touched.
+   * Off keeps the old behavior: the exit is blocked and the position can only leave via its stop.
+   */
+  exitsReleaseAppStops?: boolean;
   /**
    * Options place/cancel. Default ON.
    */
@@ -2742,6 +2773,47 @@ export interface BrokerGateway {
    * and may throttle internally. Optional — gateways without a probe skip this check.
    */
   probeOrderCapability?(accountNumber: string): Promise<{ ok: boolean; reason?: string }>;
+  /**
+   * Broker truth for ONE order id, independent of the order listing's window.  Tradier's order
+   * listing only covers the current market session, so a receipt that did not reconcile the same
+   * day (halted account, missed tick, bracket container the listing flattens away) could never
+   * match again.  Resolves `undefined` only when the broker definitively reports the id as not
+   * found; any transport or server failure throws so callers never read absence into an error.
+   * Optional — gateways without it keep the listing-only reconciliation.
+   */
+  getEquityOrder?(accountNumber: string, orderId: string): Promise<BrokerOrderLookup | undefined>;
+  /**
+   * Executed orders (and bracket legs) visible in the broker's recent order listing, with the
+   * structure the flattened `getEquityOrders` view loses: which rows are a bracket's entry leg vs
+   * its contingent exit legs.  Feeds broker-originated fill ingestion (owner orders and bracket
+   * exits that no app lane books).  Optional.
+   */
+  listRecentExecutions?(accountNumber: string): Promise<BrokerExecution[]>;
+}
+
+/** Result of `BrokerGateway.getEquityOrder`. */
+export interface BrokerOrderLookup {
+  /**
+   * Reconciliation view of the id that was asked for.  For a multi-leg bracket container (Tradier
+   * OTO/OTOCO) the state and execution fields are the ENTRY leg's, while `id` and `clientOrderId`
+   * stay the container's — the id the app stored at placement.
+   */
+  order: EquityOrder;
+  /** The entry leg's own broker id when the order is a container whose entry is a separate leg. */
+  entryLegId?: string;
+  /** Contingent exit legs of a bracket container, each with its own id and execution truth. */
+  exitLegs?: EquityOrder[];
+}
+
+/** One order or bracket leg from the broker's recent order listing, with its bracket role. */
+export interface BrokerExecution {
+  order: EquityOrder;
+  /** `single` = a plain order; `entry`/`exit` = a leg of a bracket container. */
+  role: "single" | "entry" | "exit";
+  /** Container id for a bracket leg. */
+  parentOrderId?: string;
+  /** The container's idempotency tag, when the container carried one (app-placed brackets). */
+  parentClientOrderId?: string;
 }
 
 /** Strategy run status — see `src/lib/strategy-run-status.ts` for skip taxonomy (UX PR-A1). */

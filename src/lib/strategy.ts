@@ -125,6 +125,7 @@ import { getTaxSummary, getUserWashSaleLockProvenance, overlayAccountTaxationTyp
 import { getBrokerGateway } from "./broker";
 import { normalizeExitSidesForHeldPositions, withPositionSides } from "./order-position-invariant";
 import { describeBrokerMinimumOrderBlock, planBrokerMinimumBump, shouldAlertBrokerMinimumOrderBlock } from "./broker-minimum-guard";
+import { placeExitReleasingOwnStops, planExitStopRelease } from "./exit-stop-release";
 import { classifyHoldReasonFromCodes } from "./hold-reason";
 import {
   clearAccountActionRequired,
@@ -140,6 +141,7 @@ import { avgReturnCorrelation, correlationProfile } from "./correlation";
 import { stressScenario, type StressPositionInput } from "./stress-scenario";
 import { assertLivePreflight } from "./preflight-live-guard";
 import { startStrategyLockGuard, StrategyLockOwnershipLostError } from "./strategy-lock-guard";
+import { resolveStrategyRunOrigin } from "./strategy-run-origin";
 import type { StrategyRunFinishStatus } from "./strategy-run-status";
 import { checkLlmDailyBudget, checkMonthlyLlmSpendCeiling, releaseLlmReservation, reserveLlmRunBudget } from "./llm-budget";
 import {
@@ -502,7 +504,10 @@ export async function runStrategyOnce(
     const activeProfile = getActiveStrategyProfile(userId);
     const policyRevision = activeProfile ? `${activeProfile.id}@${activeProfile.updatedAt}` : undefined;
     const savedPolicy = getPolicy(userId, connectedAccountId);
-    insertStrategyRun(runId, userId, connectedAccountId, savedPolicy.accountNumber, policyRevision);
+    // The run's origin is written with the run row, from the same options that decide its authority
+    // (a manual run is propose-only), so the restart retry never re-runs a manual run as an
+    // autonomous one (board 687a5fb4 review round, strategy-run-origin.ts).
+    insertStrategyRun(runId, userId, connectedAccountId, savedPolicy.accountNumber, policyRevision, resolveStrategyRunOrigin(options));
     const accountNumber = savedPolicy.accountNumber;
     if (!accountNumber) throw new Error("No account selected.");
     if (savedPolicy.systemState === "halted" && !manualRun) throw new Error("System is halted.");
@@ -519,6 +524,13 @@ export async function runStrategyOnce(
       audit("run_state_override", { runId, userId, override: options.runStateOverride, storedSystemState: savedPolicy.systemState }, userId, connectedAccountId);
     }
     const activeAccount = connectedAccountId ? getConnectedAccount(connectedAccountId, userId) : undefined;
+    // A disconnected account keeps its strategy state `active` while the scheduler's drain lane
+    // cancels its open orders and then purges it; only the scheduler loop skipped draining accounts.
+    // No autonomous run may place new orders there (the purge would delete their stops and plans,
+    // leaving any fill unmanaged).  Board 687a5fb4 review round.
+    if (!manualRun && activeAccount?.isDraining) {
+      throw new Error("This account is being disconnected — autonomous strategy runs are stopped while its open orders are wound down.");
+    }
     // Owner ruling 2026-08-05: TestBroker is vitest infrastructure, never a production autonomy
     // target. Scheduler already skips broker==="test"; this refuse is belt-and-suspenders for
     // prod/manual runs. Vitest still uses TestBroker (VITEST / NODE_ENV=test).
@@ -894,9 +906,9 @@ export async function runStrategyOnce(
       if (breaker.breached) {
         const configuredBreakerAction = policy.riskRules.drawdownBreakerAction ?? "advisory";
         // Equity fell hard since the last run with no deposit/withdrawal on the broker ledger (or the
-        // ledger was unreadable): most likely a cash-out whose ledger row has not posted.  Hold an
-        // opted-in hard action as advisory for this ONE run; risk-breaker never defers the same
-        // baseline twice, so a real loss is enforced next run.
+        // ledger was unreadable).  Only when the owner turned on riskRules.drawdownUnexplainedDropGrace
+        // does risk-breaker set deferHardAction, holding an opted-in hard action as advisory for this
+        // ONE run (never the same baseline twice).  By default the configured action applies now.
         const breakerAction = breaker.deferHardAction ? "advisory" : configuredBreakerAction;
         const breakerLedgerContext = {
           ...(breaker.deferHardAction && configuredBreakerAction !== "advisory" ? { deferredHardAction: configuredBreakerAction } : {}),
@@ -3836,9 +3848,22 @@ export async function runStrategyOnce(
         continue;
       }
 
-      const heldExit = evaluateBrokerHeldExitAvailability(normalizedProposal, workingPositions, orders);
-      if (heldExit) {
-        const heldReason = brokerHeldExitBlockReason(heldExit);
+      // An exit whose shares are held at the broker is blocked — UNLESS the only thing holding them
+      // is the app's OWN resting protective stop and the owner toggle "Exits release the app's own
+      // stop" is on (default): then the stop is released inside the placement lease below, the
+      // exit placed, and protection re-placed for any remainder (src/lib/exit-stop-release.ts).
+      const heldExitDecision = planExitStopRelease({
+        proposal: normalizedProposal,
+        positions: workingPositions,
+        orders,
+        policy,
+        userId,
+        accountNumber: policy.accountNumber
+      });
+      const exitStopRelease = heldExitDecision.kind === "release" ? heldExitDecision.plan : undefined;
+      if (heldExitDecision.kind === "blocked") {
+        const heldExit = heldExitDecision.heldExit;
+        const heldReason = heldExitDecision.reason;
         const heldDecision: PolicyDecision = { approved: false, reasons: [heldReason] };
         insertRunProposal({
           userId,
@@ -3856,7 +3881,7 @@ export async function runStrategyOnce(
         recordSocraticDecision({ proposalId, proposal: normalizedProposal, decision: heldDecision, status: "blocked", review, overrideResolution });
         audit(
           "proposal_blocked_broker_held_exit",
-          { runId, proposalId, symbol: heldExit.symbol, side: heldExit.side, heldExit },
+          { runId, proposalId, symbol: heldExit.symbol, side: heldExit.side, heldExit, appStopOrderIds: heldExitDecision.appStopOrderIds },
           userId,
           connectedAccountId
         );
@@ -4146,7 +4171,26 @@ export async function runStrategyOnce(
           try {
             // Mutation-lease fence: fail closed if the window lost its lease before the risk-creating call.
             mutationCtx.assertOwned();
-            execution = await gateway.placeEquityOrder({ accountNumber: policy.accountNumber, ...normalizedProposal, refId });
+            execution = exitStopRelease
+              ? await placeExitReleasingOwnStops(
+                  {
+                    userId,
+                    policy,
+                    accountNumber: policy.accountNumber,
+                    connectedAccountId,
+                    gateway,
+                    executionMode,
+                    proposal: normalizedProposal,
+                    plan: exitStopRelease,
+                    lane: "autopilot",
+                    proposalId,
+                    runId,
+                    assertOwned: () => mutationCtx.assertOwned()
+                  },
+                  (verifiedPositionQuantity) =>
+                    gateway.placeEquityOrder({ accountNumber: policy.accountNumber, ...normalizedProposal, refId, verifiedPositionQuantity })
+                )
+              : await gateway.placeEquityOrder({ accountNumber: policy.accountNumber, ...normalizedProposal, refId });
           } catch (placeError) {
             const message = placeError instanceof Error ? placeError.message : String(placeError);
             const sym = normalizedProposal.symbol;
