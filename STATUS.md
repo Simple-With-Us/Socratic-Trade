@@ -5292,3 +5292,61 @@ nothing to wait for and merged immediately.  It is now the correct mechanism.  S
 "auto-merge lands it right away" will see PRs wait for CI; that is the intended change.
 
 Rollout: `docs/rollouts/2026-09-27-branch-protection.md`.
+
+## 2026-09-27 — [MM] Review ranks 4, 6, 7, 9: equal-risk sizing, rotation pin, honest Red Team scoring, visible SPY feed
+
+Closes four more items from the 2026-09-25 performance report's Improvement Plan.  Ranks 3 and 5
+already landed as `991c02a4e`; branch protection is in the previous entry.
+
+**Rank 4 — equal-risk sizing.**  `policy.tuning.maxPositionRiskPctOfEquity` caps the DOLLAR risk one
+position may carry, so `size = risk budget ÷ stop distance`.  The review's shape: 4 lots were 70% of
+Alpaca Paper's loss, and Insider-Accumulation was positive in *percent* while negative in *dollars*
+purely because its losers were bigger.  Everything upstream sizes to a notional, so a wider stop
+silently risks more — a notional cap structurally cannot see that.  Stop distance prefers the stop
+the order will actually carry, then `riskRules.stopLossPct`, then the same shared
+`STOP_PLAN_FALLBACK_STOP_PCT` the codebase already uses.  It **wins against the bracket-minimum
+raise** (a convenience must not breach a risk budget; the cost is the order loses its native bracket)
+and **loses loudly to a hard broker minimum** with a dedicated audit event.  Announced in the order
+rationale and `sizing_equal_risk_capped` — silent shrinkage is indistinguishable from a bug.
+
+**Rank 6 — controlled rotation pin.**  New `model-rotation-pin.ts` plus wiring.  Force half and weight
+half validate independently, so a bad force does not discard valid overrides.  Unknown models and
+out-of-range weights are refused **with a receipt**, never silently producing an empty rotation.  The
+pick floor resolves to the last positive-weight candidate so a 0-pinned model cannot be resurrected by
+a float edge.  Pinned picks are excluded from the representation ledger — "removes exactly" beats
+"every pick counted", because an experiment that corrupts its own weights is not reversible.  Loud by
+construction: a `model_rotation_pin` audit row per run, `pinned` stamps on picks, and a `rotationPin`
+result field that is absent entirely when unpinned.  `TradingPolicy.rotationPin` added here because
+the worker did not own `types.ts`.
+
+**Rank 7 — honest Red Team scoring.**  Repeat vetoes of the same `symbol+side` within 7 days (the
+calendar length of the pipeline's own 5-day horizon) collapse to the earliest, and the deduped set now
+drives rates, mean, **median**, `byModel` and `records`.  That is the review's "+1.16% headline comes
+from one vetoed PYPL buy at +27.4%" problem: the median now travels with the mean.  Plus
+`uniqueScenarios`, `duplicateVetoes`, `sampleSufficient`, `verdict`, and a horizon-disclosure block
+that makes the 5-day-counterfactual-vs-3-12-day-holds mismatch visible instead of silent.  The
+`RED_TEAM_EFFICACY_UNAVAILABLE` fallback was updated in the same pass so a failed read reports
+`verdict: "insufficient-sample"` rather than reading as a scored zero.
+
+**Rank 9 — SPY feed visibility, root cause diagnosed.**  `fetchDailyOHLC` is a 10-source cascade
+whose per-source fetchers reduce errors to `ok:false` and discard the message; when the cascade
+returns null it does **not** return null, it returns the frozen EOD cache re-stamped
+`fetchedAt = now`, so the bar dates never advance — and the old gate compared the newest close to the
+*account window's end*, so a feed frozen alongside a dormant account passed and rendered a flat
+0.00% "vs SPY".  Staleness is now judged against the **wall clock** first, and `status`/`stale`/`feed`
+(`lastCloseDate`, `staleDays`, `source`, `fetchedAt`, `fellBackToStaleCache`) ride on every return path.
+
+Verified `tsc --noEmit` clean and **185/185** across 13 affected files.  Failing-first: the Red Team +
+benchmark tests were 15/15 red on unmodified main; the rotation pin 10/11; equal-risk 4/6.
+
+**Two of this session's own test mistakes, recorded because both would have produced green tests
+proving nothing:** the *unproven-thesis floor* pins size below any cap, so the first rank-4 and rank-5
+tests were vacuous until they seeded 24 closed round trips; and a policy override at the top level
+instead of inside `tuning` is silently ignored, which made the rank-4 bracket test assert against the
+wrong budget.
+
+**Not done, and why:** rank 8 (parked account state) needs a schema migration.  The workers also
+reported UI carriers, `history.ts` provider-error text, and `/api/policy` persistence for
+`rotationPin` as follow-ups outside their file ownership.
+
+Rollout: `docs/rollouts/2026-09-27-review-ranks-4-6-7-9.md`.
