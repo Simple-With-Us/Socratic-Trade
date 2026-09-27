@@ -1,5 +1,43 @@
 # Current Status
 
+## 2026-09-25 CLAUDE — Robinhood $1 minimum correctness fix + account-questionnaire hold + holdReason (lane G3, board 687a5fb4)
+
+**What.**  Production evidence on the live Robinhood "Agentic" account (22 `placing_failed`
+rejections: 11x "Fractional orders must be at least $1", 8x "Dollar-based orders must be at least
+$1", 3x an account-questionnaire message) showed the existing broker-minimum guard's
+full-position-exit exemption was unsafe — it assumed Robinhood permits liquidating a whole
+fractional position below the floor, which the evidence contradicts.  Removed the exemption from
+`describeBrokerMinimumOrderBlock` (`src/lib/broker-minimum-guard.ts`); a full-position exit under
+the floor now blocks pre-flight exactly like a partial trim, and `planBrokerMinimumBump` declines
+immediately (no wasted round trip) when there's nothing left to bump to.  New
+`src/lib/broker-account-questionnaire.ts` detects the account-questionnaire rejection, marks a
+durable account-level hold that pauses NEW entries (buy/short) for that account until an opening
+order is accepted again, and alerts the owner once per 24h (never on every run) — exits and
+existing management are untouched.  New `src/lib/hold-reason.ts` gives every "Awaiting approval"
+proposal a structured `holdReason` (`red_team_unavailable | funding_sell | policy_revert | other`),
+set at all four `strategy.ts` insertion sites and surfaced in the run summary, the console approval
+card (a header chip), and `GET /api/ops/performance`'s funnel (`holdReasons`/
+`holdReasonRowsCapped`).  **Why.**  Owner-directed trading-performance program; see the full
+analysis referenced from board `687a5fb4`.  Branch `claude/st-rh-min-and-hold-reasons`, worktree
+`~/apps/claude-st-rh-min-and-hold-reasons`.
+Rollout: `docs/rollouts/2026-09-25-st-rh-min-and-hold-reasons.md`.
+## 2026-09-25 CLAUDE — Trading performance report docs: review-round fix-up (follow-up to merged PR #3786, board 687a5fb4)
+
+Independent review of merged PR #3786 raised one finding (P2): the report published dollar-level
+realized P&L and balance/drawdown history for the owner's real live accounts (Roth IRA, Agentic,
+Sandbox/Tradier) into `docs/reviews/2026-09-25-trading-performance-report.md`, and this repo
+(`jaywedgeworth22/Socratic-Trade`) is public.  Verified real: `gh repo view` confirms
+`isPrivate: false`, and every dollar figure the finding cited is present verbatim in the merged
+doc.  Declined as a code/content defect — this exact unchanged copy was the lane's own explicit
+instruction, it matches existing published precedent (Roth IRA dollar caps already public in
+merged docs), `AGENTS.md` explicitly warns against re-imposing paternalism the owner has not
+asked for, and the finding's own suggested resolution says "No code/merge blocker."  No
+redaction made; flagged as a standing-policy question for the owner to decide, not something this
+lane should decide unilaterally.  Lands as a NEW PR off fresh `origin/main`
+(`claude/st-perf-report-review-round`) since #3786's branch was deleted on merge.  Gate: `npx tsc
+--noEmit` clean, `npm run lint` 0 errors (docs-only, no tests applicable).  Rollout:
+`docs/rollouts/2026-09-25-st-perf-report-docs.md` ("Review round 1" section).  Auto-merge NOT
+armed; `do-not-automerge` label carried.
 ## 2026-09-27 CODEX — ASC signing file handoff
 
 Review follow-up in progress: scalar signing values reject CR/LF before masks, certificate credentials are scoped to the load/import step, and the decoded P12 is deleted after import.  Synthetic multiline-certificate tests pass.
