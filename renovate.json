@@ -15,6 +15,32 @@
       "matchUpdateTypes": ["major"],
       "automerge": false,
       "labels": ["dependencies", "major"]
+    },
+    {
+      "description": "Ported from the removed .github/dependabot.yml: keep the compiler and runtime declarations inside their reviewed support windows. Remove or narrow this rule only in the same PR as the migration.",
+      "matchPackageNames": ["typescript"],
+      "matchUpdateTypes": ["minor", "major"],
+      "automerge": false,
+      "labels": ["dependencies"]
+    },
+    {
+      "description": "Ported from the removed .github/dependabot.yml: @types/node stays on its reviewed major support window.",
+      "matchPackageNames": ["@types/node"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["dependencies"]
+    },
+    {
+      "matchPackagePatterns": ["^next$", "^react$", "^react-dom$"],
+      "groupName": "next-react"
+    },
+    {
+      "matchPackagePatterns": ["^@sentry/.*$", "^@langfuse/.*$", "^@opentelemetry/.*$"],
+      "groupName": "observability"
+    },
+    {
+      "matchPackagePatterns": ["^vitest$", "^@playwright/.*$"],
+      "groupName": "testing"
     }
   ],
   "vulnerabilityAlerts": { "labels": ["security"] }
