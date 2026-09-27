@@ -5055,3 +5055,34 @@ Fixed `test/chat-draft-policy.test.ts` test regression. A previous commit accide
 Production served a public 503 while healthy: `/api/live` intermittently took 8.60s against a 5s container healthcheck timeout, so Docker marked the container unhealthy and Traefik stopped routing.  Widened to timeout=15s / retries=5 (detection bound ~225s).
 
 This is MITIGATION.  The root cause is the non-convergent FTS mirror loop fixed in PR #3202; stalls up to 36,511ms were measured, which a 15s timeout still cannot absorb.  Next action: land PR #3202.
+
+## 2026-09-27 — [MM] Ops performance: round-trip grading + unattributed model bucket + per-model funnel + broker-rejection reasons
+
+Owner asked to confirm Claude's post-review work was deployed and to implement the rest of the
+2026-09-25 trading-performance report's Improvement Plan.  Deploy verified live at `7492aa1f3`
+(includes #3793, review rank 2).  This commit is rank 3 of ten — the measurement layer the plan
+gates ranks 4, 5, 6 and 7 on.
+
+`/api/ops/performance` graded every trade as one entry per FIFO lot, so a scaled-out position was
+graded once per trim; it also silently dropped unstamped model lots, reported only a global
+proposal funnel, and never itemised broker rejections.  Each of those four is now fixed:
+
+- `roundTripStats` grades on completed round trips via the existing `aggregateRoundTrip`, and
+  counts still-open positions in `incompleteRoundTrips` rather than grading them early.  Per-exit
+  `tradeStats` is kept alongside it — both numbers are useful and the gap between them is the point.
+- Unstamped lots now surface as an explicit `unattributed` model row instead of vanishing.  The
+  review found that bucket was collectively the profitable one.
+- The funnel is broken out per proposing model.  Both views come from ONE grouped scan, so the
+  global counts are a sum of the per-model rows and cannot disagree — this module's design
+  constraint is not adding a query that scales with the window.
+- `brokerRejectionReasons` itemises broker declines from `audit_events`, merging the same refusal
+  across differing HTTP status codes.  Scoped by `audit_events`' own indexed
+  `(user_id, connected_account_id, kind)` columns rather than a payload join, which would have
+  made SQLite parse every rejection payload in the table.
+
+No trading behaviour changed; this is a read-only diagnostics endpoint.  Verified `tsc --noEmit`
+clean (0 errors in src/ + app/) and 17/17 across `test/ops-performance-measurement.test.ts` +
+`test/ops-performance.test.ts`.  Full-suite `npm test` / `npm run lint` did not finish — the host
+sat at load 114-228 all session — so CI's `verify` is the full gate of record for this PR.
+
+Rollout: `docs/rollouts/2026-09-27-st-perf-measurement-ranks.md`.  Board: `66ca3e67`.
