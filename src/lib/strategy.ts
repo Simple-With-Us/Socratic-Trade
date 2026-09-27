@@ -125,6 +125,15 @@ import { getTaxSummary, getUserWashSaleLockProvenance, overlayAccountTaxationTyp
 import { getBrokerGateway } from "./broker";
 import { normalizeExitSidesForHeldPositions, withPositionSides } from "./order-position-invariant";
 import { describeBrokerMinimumOrderBlock, planBrokerMinimumBump, shouldAlertBrokerMinimumOrderBlock } from "./broker-minimum-guard";
+import { placeExitReleasingOwnStops, planExitStopRelease } from "./exit-stop-release";
+import { classifyHoldReasonFromCodes } from "./hold-reason";
+import {
+  clearAccountActionRequired,
+  detectRobinhoodAccountQuestionnaireError,
+  getAccountActionRequired,
+  markAccountActionRequired,
+  shouldAlertAccountActionRequired
+} from "./broker-account-questionnaire";
 import { brokerHeldExitBlockReason, evaluateBrokerHeldExitAvailability } from "./broker-held-orders";
 import { notifyStaleLimitOrders } from "./stale-limit-orders";
 import { checkBudgetAndAlert, evaluateBudgetForRun, formatBudgetAdvisory, getBudgetStatusCached, notifyBudgetSkip, previewBudgetDecision, usageBudgetEnforceEnabled } from "./usage-budget";
@@ -132,6 +141,7 @@ import { avgReturnCorrelation, correlationProfile } from "./correlation";
 import { stressScenario, type StressPositionInput } from "./stress-scenario";
 import { assertLivePreflight } from "./preflight-live-guard";
 import { startStrategyLockGuard, StrategyLockOwnershipLostError } from "./strategy-lock-guard";
+import { resolveStrategyRunOrigin } from "./strategy-run-origin";
 import type { StrategyRunFinishStatus } from "./strategy-run-status";
 import { checkLlmDailyBudget, checkMonthlyLlmSpendCeiling, releaseLlmReservation, reserveLlmRunBudget } from "./llm-budget";
 import {
@@ -494,7 +504,10 @@ export async function runStrategyOnce(
     const activeProfile = getActiveStrategyProfile(userId);
     const policyRevision = activeProfile ? `${activeProfile.id}@${activeProfile.updatedAt}` : undefined;
     const savedPolicy = getPolicy(userId, connectedAccountId);
-    insertStrategyRun(runId, userId, connectedAccountId, savedPolicy.accountNumber, policyRevision);
+    // The run's origin is written with the run row, from the same options that decide its authority
+    // (a manual run is propose-only), so the restart retry never re-runs a manual run as an
+    // autonomous one (board 687a5fb4 review round, strategy-run-origin.ts).
+    insertStrategyRun(runId, userId, connectedAccountId, savedPolicy.accountNumber, policyRevision, resolveStrategyRunOrigin(options));
     const accountNumber = savedPolicy.accountNumber;
     if (!accountNumber) throw new Error("No account selected.");
     if (savedPolicy.systemState === "halted" && !manualRun) throw new Error("System is halted.");
@@ -511,6 +524,13 @@ export async function runStrategyOnce(
       audit("run_state_override", { runId, userId, override: options.runStateOverride, storedSystemState: savedPolicy.systemState }, userId, connectedAccountId);
     }
     const activeAccount = connectedAccountId ? getConnectedAccount(connectedAccountId, userId) : undefined;
+    // A disconnected account keeps its strategy state `active` while the scheduler's drain lane
+    // cancels its open orders and then purges it; only the scheduler loop skipped draining accounts.
+    // No autonomous run may place new orders there (the purge would delete their stops and plans,
+    // leaving any fill unmanaged).  Board 687a5fb4 review round.
+    if (!manualRun && activeAccount?.isDraining) {
+      throw new Error("This account is being disconnected — autonomous strategy runs are stopped while its open orders are wound down.");
+    }
     // Owner ruling 2026-08-05: TestBroker is vitest infrastructure, never a production autonomy
     // target. Scheduler already skips broker==="test"; this refuse is belt-and-suspenders for
     // prod/manual runs. Vitest still uses TestBroker (VITEST / NODE_ENV=test).
@@ -886,9 +906,9 @@ export async function runStrategyOnce(
       if (breaker.breached) {
         const configuredBreakerAction = policy.riskRules.drawdownBreakerAction ?? "advisory";
         // Equity fell hard since the last run with no deposit/withdrawal on the broker ledger (or the
-        // ledger was unreadable): most likely a cash-out whose ledger row has not posted.  Hold an
-        // opted-in hard action as advisory for this ONE run; risk-breaker never defers the same
-        // baseline twice, so a real loss is enforced next run.
+        // ledger was unreadable).  Only when the owner turned on riskRules.drawdownUnexplainedDropGrace
+        // does risk-breaker set deferHardAction, holding an opted-in hard action as advisory for this
+        // ONE run (never the same baseline twice).  By default the configured action applies now.
         const breakerAction = breaker.deferHardAction ? "advisory" : configuredBreakerAction;
         const breakerLedgerContext = {
           ...(breaker.deferHardAction && configuredBreakerAction !== "advisory" ? { deferredHardAction: configuredBreakerAction } : {}),
@@ -3750,6 +3770,9 @@ export async function runStrategyOnce(
             // DB (approvedEscalationsFromDecision). No client payload can create or alter it.
             escalations: (decision.escalations ?? []).map((entry) => ({ ...entry, token: crypto.randomUUID() }))
           };
+          // A policy gate (wash-sale ask or a time-context cap/staleness check) reverted what would
+          // otherwise have been an outright block into a human decision — see classifyHoldReasonFromCodes.
+          normalizedProposal.holdReason = "policy_revert";
           insertProposalWithSocraticDecision(
             { userId, executionMode, promptVersion: STRATEGY_PROMPT_VERSION, id: proposalId, runId, accountNumber: policy.accountNumber, proposal: normalizedProposal, decision: escalatedDecision, review, estimatedNotional: review.estimatedNotional, status: "proposed" },
             { proposalId, proposal: normalizedProposal, decision: escalatedDecision, status: "proposed", review, overrideResolution }
@@ -3825,9 +3848,22 @@ export async function runStrategyOnce(
         continue;
       }
 
-      const heldExit = evaluateBrokerHeldExitAvailability(normalizedProposal, workingPositions, orders);
-      if (heldExit) {
-        const heldReason = brokerHeldExitBlockReason(heldExit);
+      // An exit whose shares are held at the broker is blocked — UNLESS the only thing holding them
+      // is the app's OWN resting protective stop and the owner toggle "Exits release the app's own
+      // stop" is on (default): then the stop is released inside the placement lease below, the
+      // exit placed, and protection re-placed for any remainder (src/lib/exit-stop-release.ts).
+      const heldExitDecision = planExitStopRelease({
+        proposal: normalizedProposal,
+        positions: workingPositions,
+        orders,
+        policy,
+        userId,
+        accountNumber: policy.accountNumber
+      });
+      const exitStopRelease = heldExitDecision.kind === "release" ? heldExitDecision.plan : undefined;
+      if (heldExitDecision.kind === "blocked") {
+        const heldExit = heldExitDecision.heldExit;
+        const heldReason = heldExitDecision.reason;
         const heldDecision: PolicyDecision = { approved: false, reasons: [heldReason] };
         insertRunProposal({
           userId,
@@ -3845,7 +3881,7 @@ export async function runStrategyOnce(
         recordSocraticDecision({ proposalId, proposal: normalizedProposal, decision: heldDecision, status: "blocked", review, overrideResolution });
         audit(
           "proposal_blocked_broker_held_exit",
-          { runId, proposalId, symbol: heldExit.symbol, side: heldExit.side, heldExit },
+          { runId, proposalId, symbol: heldExit.symbol, side: heldExit.side, heldExit, appStopOrderIds: heldExitDecision.appStopOrderIds },
           userId,
           connectedAccountId
         );
@@ -3862,10 +3898,58 @@ export async function runStrategyOnce(
         continue;
       }
 
+      // Account-level hold: Robinhood has told this account it must answer a questionnaire before
+      // accepting NEW positions (see broker-account-questionnaire.ts). Only entries (buy/short) are
+      // paused — exits and existing management are untouched, and this clears automatically the
+      // next time an opening order for this account is actually accepted.
+      if (
+        (normalizedProposal.side === "buy" || normalizedProposal.side === "short") &&
+        policy.accountNumber
+      ) {
+        const actionRequired = getAccountActionRequired(userId, policy.accountNumber);
+        if (actionRequired) {
+          const heldDecision: PolicyDecision = { approved: false, reasons: [actionRequired.reason] };
+          insertRunProposal({
+            userId,
+            executionMode,
+            id: proposalId,
+            runId,
+            accountNumber: policy.accountNumber,
+            proposal: normalizedProposal,
+            decision: heldDecision,
+            review,
+            estimatedNotional: review.estimatedNotional,
+            status: "blocked",
+            promptVersion: STRATEGY_PROMPT_VERSION
+          });
+          recordSocraticDecision({ proposalId, proposal: normalizedProposal, decision: heldDecision, status: "blocked", review, overrideResolution });
+          audit(
+            "proposal_blocked_account_action_required",
+            { runId, proposalId, symbol: normalizedProposal.symbol, side: normalizedProposal.side, since: actionRequired.since },
+            userId,
+            connectedAccountId
+          );
+          results.push({ id: proposalId, proposal: normalizedProposal, status: "blocked", reasons: heldDecision.reasons });
+          if (shouldAlertAccountActionRequired(userId, policy.accountNumber)) {
+            await sendNotification(
+              {
+                type: "block",
+                title: `${policy.accountNumber} needs your action on Robinhood`,
+                payload: { runId, proposalId, decision: heldDecision, review, proposal: normalizedProposal }
+              },
+              { policy, userId }
+            );
+          }
+          lockGuard.assertOwned();
+          continue;
+        }
+      }
+
       // Sell-to-fund "propose" mode: funding sells queue for human approval even under "decide"
       // authority — raising cash by selling is the user's call. (Identified by tradeThesisTag so it's
       // robust to any reordering by the cluster gate.)
       if (sellToFundMode === "propose" && normalizedProposal.tradeThesisTag === "Sell-to-Fund") {
+        normalizedProposal.holdReason = "funding_sell";
         insertProposalWithSocraticDecision(
           { userId, executionMode, promptVersion: STRATEGY_PROMPT_VERSION, id: proposalId, runId, accountNumber: policy.accountNumber, proposal: normalizedProposal, decision, review, estimatedNotional: review.estimatedNotional, status: "proposed" },
           { proposalId, proposal: normalizedProposal, decision, status: "proposed", review, overrideResolution }
@@ -3887,6 +3971,7 @@ export async function runStrategyOnce(
         // de-risk exit reads "surfaced for your approval" under propose authority (never falsely
         // "proceeding") — so no separate corrective note is needed here.
         const primaryHumanReviewReason = activeHumanReviewReasons[0];
+        normalizedProposal.holdReason = classifyHoldReasonFromCodes(activeHumanReviewReasons.map((reason) => reason.code));
         insertProposalWithSocraticDecision(
           { userId, executionMode, promptVersion: STRATEGY_PROMPT_VERSION, id: proposalId, runId, accountNumber: policy.accountNumber, proposal: normalizedProposal, decision, review, estimatedNotional: review.estimatedNotional, status: "proposed" },
           { proposalId, proposal: normalizedProposal, decision, status: "proposed", review, overrideResolution }
@@ -3921,6 +4006,7 @@ export async function runStrategyOnce(
       if (requiresHumanReview.has(proposal)) {
         const primaryHumanReviewReason = activeHumanReviewReasons[0];
         const pendingReason = activeHumanReviewReasons.map((reason) => `${reason.title}: ${reason.summary}`).join(" ");
+        normalizedProposal.holdReason = classifyHoldReasonFromCodes(activeHumanReviewReasons.map((reason) => reason.code));
         insertProposalWithSocraticDecision(
           { userId, executionMode, promptVersion: STRATEGY_PROMPT_VERSION, id: proposalId, runId, accountNumber: policy.accountNumber, proposal: normalizedProposal, decision, review, estimatedNotional: review.estimatedNotional, status: "proposed" },
           { proposalId, proposal: normalizedProposal, decision, status: "proposed", review, overrideResolution }
@@ -4085,10 +4171,57 @@ export async function runStrategyOnce(
           try {
             // Mutation-lease fence: fail closed if the window lost its lease before the risk-creating call.
             mutationCtx.assertOwned();
-            execution = await gateway.placeEquityOrder({ accountNumber: policy.accountNumber, ...normalizedProposal, refId });
+            execution = exitStopRelease
+              ? await placeExitReleasingOwnStops(
+                  {
+                    userId,
+                    policy,
+                    accountNumber: policy.accountNumber,
+                    connectedAccountId,
+                    gateway,
+                    executionMode,
+                    proposal: normalizedProposal,
+                    plan: exitStopRelease,
+                    lane: "autopilot",
+                    proposalId,
+                    runId,
+                    assertOwned: () => mutationCtx.assertOwned()
+                  },
+                  (verifiedPositionQuantity) =>
+                    gateway.placeEquityOrder({ accountNumber: policy.accountNumber, ...normalizedProposal, refId, verifiedPositionQuantity })
+                )
+              : await gateway.placeEquityOrder({ accountNumber: policy.accountNumber, ...normalizedProposal, refId });
           } catch (placeError) {
             const message = placeError instanceof Error ? placeError.message : String(placeError);
             const sym = normalizedProposal.symbol;
+
+            // Account-level hold (2026-09-25, board 687a5fb4, lane G3): Robinhood refused this order
+            // because the ACCOUNT needs owner action (a suitability/compliance questionnaire), not
+            // because of this order's own size/shape. No resize or retry fixes this — mark the
+            // account so every later run pauses NEW entries here instead of repeating the same
+            // guaranteed rejection, and stop before the infrastructure/4xx classification below
+            // (which would otherwise treat this as an ordinary per-order failure).
+            const accountQuestionnaireReason = detectRobinhoodAccountQuestionnaireError(message);
+            if (accountQuestionnaireReason && policy.accountNumber) {
+              markAccountActionRequired(userId, policy.accountNumber, accountQuestionnaireReason);
+              const heldDecision: PolicyDecision = { ...decision, approved: false, reasons: [...decision.reasons, accountQuestionnaireReason] };
+              updateProposalStatus(proposalId, "blocked", undefined, review, review.estimatedNotional, userId, undefined, message, heldDecision);
+              audit(
+                "proposal_blocked_account_action_required",
+                { runId, proposalId, symbol: sym, side: normalizedProposal.side, accountNumber: policy.accountNumber, error: message.slice(0, 400) },
+                userId,
+                connectedAccountId
+              );
+              results.push({ id: proposalId, proposal: normalizedProposal, status: "error", reasons: [accountQuestionnaireReason] });
+              if (shouldAlertAccountActionRequired(userId, policy.accountNumber)) {
+                await sendNotification(
+                  { type: "run_failed", title: `${policy.accountNumber} needs your action on Robinhood`, payload: { runId, proposalId, refId, reason: accountQuestionnaireReason, error: message, reconcile: "account_action_required" } },
+                  { policy, userId }
+                );
+              }
+              lockGuard.assertOwned();
+              return { done: "continue" } as const;
+            }
 
             // Infrastructure/OMS failures (5xx, backend unreachable) feed the broker-health
             // auto-pause gate so the next run halts instead of burning another LLM cycle.
@@ -4316,6 +4449,11 @@ export async function runStrategyOnce(
             return { done: "continue" } as const;
           }
           auditWashSaleProceed(decision, { runId, proposalId, symbol: normalizedProposal.symbol, side: normalizedProposal.side, estimatedNotional: review.estimatedNotional, userId, connectedAccountId });
+          // An OPENING order just cleared the broker — the only reliable signal (from inside this
+          // app) that an earlier account-questionnaire hold was resolved on Robinhood's side.
+          if ((normalizedProposal.side === "buy" || normalizedProposal.side === "short") && policy.accountNumber) {
+            clearAccountActionRequired(userId, policy.accountNumber);
+          }
           results.push({ id: proposalId, proposal: normalizedProposal, status: proposalStatus, reasons: [], orderId: execution.orderId });
           await sendNotification(
             {
