@@ -136,14 +136,16 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   // --- Curated catalog rows (LLM_MODEL_CATALOG, 21 rows as of 2026-09-18) ---
   "gpt-6-astra-pro": [10, 50],
   "gpt-6-astra": [10, 50],
+  "gpt-6-sol": [2, 10], // new 2026-09-22 — real price is $2/$10 (verified 2026-09-27)
+  "gpt-6-luna": [0.1, 0.5], // new 2026-09-22 — real price is $0.10/$0.50 (verified 2026-09-27)
   "gpt-5.6-sol": [2, 10], // was [5, 30] — real price is $2/$10 (verified 2026-09-18)
   "gpt-5.6-luna": [0.2, 1.2], // was [1, 6] — real price is $0.20/$1.20 (verified 2026-09-18)
   "grok-4.6": [2, 6],
   "grok-latest": [2, 6],
   "claude-fable-latest": [10, 50],
-  "claude-opus-latest": [4.5, 22.5],
-  "claude-opus-5-5": [4.5, 22.5],
-  "claude-opus-5.5": [4.5, 22.5],
+  "claude-opus-latest": [4, 20], // was [4.5, 22.5] — real Opus 5.5 price is $4/$20 (verified 2026-09-27)
+  "claude-opus-5-5": [4, 20], // was [4.5, 22.5] — real price is $4/$20 (verified 2026-09-27)
+  "claude-opus-5.5": [4, 20], // was [4.5, 22.5] — real price is $4/$20 (verified 2026-09-27)
   "claude-opus-5": [5, 25],
   "claude-sonnet-5": [2, 10], // was [3, 15] — real price is $2/$10 (verified 2026-09-18)
   "claude-sonnet-4-6": [2, 10], // was [3, 15] — kept in sync with claude-sonnet-5 above

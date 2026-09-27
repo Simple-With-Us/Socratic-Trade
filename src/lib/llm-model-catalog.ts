@@ -69,31 +69,31 @@ export const LLM_MODEL_CATALOG: readonly LlmCatalogEntry[] = [
     predecessors: ["gpt-5.6-sol", "gpt-5.6-terra"]
   },
   {
-    displaySlug: "gpt-5.6-luna",
-    openRouterSlug: "openai/gpt-5.6-luna",
-    nativeSlug: "gpt-5.6-luna",
+    displaySlug: "gpt-6-luna",
+    openRouterSlug: "openai/gpt-6-luna",
+    nativeSlug: "gpt-6-luna",
     provider: "openai",
-    label: "gpt-5.6-luna — current cost-sensitive tier",
+    label: "gpt-6-luna — current cost-sensitive tier",
     tier: "$$",
-    aliases: ["gpt-luna-latest", "openai/gpt-5.6-luna"],
+    aliases: ["gpt-luna-latest", "openai/gpt-6-luna", "gpt-5.6-luna", "openai/gpt-5.6-luna"],
     lineage: "openai-luna",
-    predecessors: ["gpt-luna-latest", "gpt-5.4", "gpt-4o-mini"]
+    predecessors: ["gpt-5.6-luna", "gpt-luna-latest", "gpt-5.4", "gpt-4o-mini"]
   },
   {
-    displaySlug: "gpt-5.6-sol",
-    openRouterSlug: "openai/gpt-5.6-sol",
-    nativeSlug: "gpt-5.6-sol",
+    displaySlug: "gpt-6-sol",
+    openRouterSlug: "openai/gpt-6-sol",
+    nativeSlug: "gpt-6-sol",
     provider: "openai",
-    label: "gpt-5.6-sol — frontier professional reasoning",
+    label: "gpt-6-sol — frontier professional reasoning",
     tier: "$$$",
     // Green recommendation moved here from the removed gpt-5.6-terra (2026-09-18): same
     // input price as terra, cheaper output, and the stronger model — see
     // docs/rollouts/2026-09-18-model-catalog-cleanup.md.
     recommendedGreen: true,
     recommendedRed: true,
-    aliases: ["gpt-sol-latest", "openai/gpt-5.6-sol", "gpt-5.6"],
+    aliases: ["gpt-sol-latest", "openai/gpt-6-sol", "gpt-6", "gpt-5.6-sol", "openai/gpt-5.6-sol", "gpt-5.6"],
     lineage: "openai-sol",
-    predecessors: ["gpt-5.6-terra", "gpt-5.5", "gpt-5.6"]
+    predecessors: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.6"]
   },
   {
     displaySlug: "claude-haiku-latest",
