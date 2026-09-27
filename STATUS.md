@@ -1,5 +1,9 @@
 # Current Status
 
+## 2026-09-27 CODEX — Public description scope
+
+The public welcome and framework pages describe available research, decision records, and outcome review without promising complete trace coverage or improved future results.  Invite-only iOS release preparation is stated explicitly, and the unsupported zero-price structured offer was removed.  Trading controls and learning behavior are unchanged.  Hosted verification and automatic deployment are pending for PR #3866; issue #3865 tracks this copy unit.  Earlier SWU footer source `12543ec4` is already live.  Rollout: `docs/rollouts/2026-09-27-public-copy-scope.md`.
+
 ## 2026-09-25 CLAUDE — Order role classification: review-round fixes (PR #3755, board 687a5fb4)
 
 Independent review of PR #3755 raised 7 findings; verified each against the actual branch HEAD
