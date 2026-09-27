@@ -11,7 +11,7 @@ export const revalidate = 3600;
 export const metadata: Metadata = {
   title: { absolute: "Socratic Trade" },
   description:
-    "Socratic Trade is an autonomous market-reasoning desk for inspecting live theses, delegated actions, RAG evidence, dissent, and outcome learning.  Not investment advice.",
+    "Socratic Trade brings market research, connected-account controls, and decision records into one workspace.  Not investment advice.",
   alternates: { canonical: "/welcome" },
   openGraph: {
     type: "website",
@@ -19,12 +19,12 @@ export const metadata: Metadata = {
     url: "/welcome",
     title: "Socratic Trade",
     description:
-      "Autonomous market reasoning with visible theses, evidence, dissent, actions, coaching, and outcome learning.  Not investment advice."
+      "Market research, configured trading workflows, and decision records for review.  Not investment advice."
   },
   twitter: {
     card: "summary_large_image",
     title: "Socratic Trade",
-    description: "Autonomous market reasoning with visible decisions and outcome learning.  Not investment advice."
+    description: "Market research and connected-account workflows with decision records for review.  Not investment advice."
   },
   robots:
     process.env.NEXT_PUBLIC_ALLOW_INDEXING === "true"
@@ -45,28 +45,28 @@ const GHOST_LINK_SM =
 
 const FEATURES: Array<{ title: string; body: string }> = [
   {
-    title: "Autonomous thesis formation",
-    body: "Builds a market thesis from current regime, portfolio state, scan results, and remembered outcomes before it chooses action or restraint."
+    title: "Market research",
+    body: "Uses available market data, portfolio context, scan results, and prior records to propose a market thesis."
   },
   {
     title: "Decision trace",
-    body: "Every action is framed as a trace: belief, catalyst, size, status, supporting evidence, dissent, and what would make the agent change its mind."
+    body: "Review recorded proposals and actions, including their rationale, status, supporting evidence, and objections when available."
   },
   {
     title: "Evidence attribution",
-    body: "Surfaces which data providers, retrieval memories, prior lessons, and market facts influenced the decision instead of hiding behind a single score."
+    body: "Decision records can include source references, retrieved context, and market data so you can inspect the inputs."
   },
   {
-    title: "Dissent by design",
-    body: "Bull case, bear case, gate output, and objections stay visible.  Disagreement is a first-class part of the interface, not a buried log line."
+    title: "Alternative views",
+    body: "Compare recorded bull and bear cases, policy checks, and objections when those reviews are enabled."
   },
   {
-    title: "Outcome learning",
-    body: "Scores thesis types, regimes, and model choices against actual outcomes so future runs can learn from both successes and failures."
+    title: "Outcome review",
+    body: "Review available outcomes by thesis, market conditions, and model choice to help assess the workflow."
   },
   {
-    title: "Coaching and self-improvement",
-    body: "You can suggest refocuses or critiques, and Socratic Trade can propose framework improvements for you to accept, reject, or rewrite."
+    title: "Coaching and framework review",
+    body: "Add feedback and inspect proposed framework changes, review decisions, and their recorded status."
   }
 ];
 
@@ -75,19 +75,19 @@ const STEPS: Array<{ n: number; title: string; detail: string }> = [
     n: 1,
     title: "Observe the market",
     detail:
-      "Socratic Trade watches the market, active account, regime signals, candidates, and prior lessons to decide what kind of opportunity or danger it is seeing."
+      "Review available market signals, account state, candidates, and prior records from configured sources."
   },
   {
     n: 2,
-    title: "Form a thesis and act under mandate",
+    title: "Review proposals and authority",
     detail:
-      "It turns evidence into a thesis, chooses whether to buy, sell, hold, exit, or stand aside within the authority you have delegated, then records why."
+      "Use Ask-First for proposals that require approval, or configure Autopilot and its controls for a connected account."
   },
   {
     n: 3,
-    title: "Explain, learn, and improve",
+    title: "Review results",
     detail:
-      "It shows the evidence path, dissent, outcome, coaching notes, and proposed framework changes so the next run has a better memory."
+      "Inspect recorded evidence, objections, outcomes, and coaching notes when assessing a proposed framework change."
   }
 ];
 
@@ -106,8 +106,7 @@ export default function WelcomePage() {
             applicationCategory: "FinanceApplication",
             operatingSystem: "Web",
             description:
-              "Autonomous market-reasoning desk with visible theses, delegated actions, evidence attribution, dissent, and outcome learning.",
-            offers: { "@type": "Offer", price: "0", priceCurrency: "USD" }
+              "Market research and connected-account workflows with decision records for review."
           })
         }}
       />
@@ -127,12 +126,12 @@ export default function WelcomePage() {
           {/* ── Hero ───────────────────────────────────────────────────────── */}
           <section className="text-center space-y-6">
             <h1 className="text-4xl font-bold tracking-tight text-fg sm:text-5xl">
-              Socratic Trade is an autonomy desk for market decisions
+              A workspace for market research and trading workflows
             </h1>
             <p className="mx-auto max-w-2xl text-lg text-muted leading-relaxed">
-              It watches markets, forms a thesis, can act under delegated authority, and leaves a
-              decision trail you can inspect: evidence, memory, dissent, action, outcome, and what it
-              thinks should change next.
+              Socratic Trade brings research, proposals, and connected-account controls together.
+              {"  "}Review the available evidence and decision records, and choose the authority
+              you give the system.
             </p>
             <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
               <a href={ACCESS_HREF} className={PRIMARY_LINK}>
@@ -142,7 +141,7 @@ export default function WelcomePage() {
                 Decision framework
               </a>
             </div>
-            <p className="text-sm text-faint">Private operator build at socratictrade.com.</p>
+            <p className="text-sm text-faint">Private beta · Access by invitation.</p>
           </section>
 
           {/* ── Features grid ──────────────────────────────────────────────── */}
@@ -157,8 +156,8 @@ export default function WelcomePage() {
               ))}
             </div>
             <p className="text-xs text-faint leading-relaxed">
-              The core question is visible by design: what did Socratic Trade believe, what changed
-              its mind, what did it do, and what should it learn from the result?
+              Data coverage and recorded detail depend on your sources, settings, and completed
+              runs. {"  "}Review the underlying records when evaluating a result.
             </p>
           </section>
 
@@ -185,8 +184,8 @@ export default function WelcomePage() {
             <div className="space-y-2 text-center">
               <h2 className="text-xl font-semibold text-fg">What a decision trace looks like</h2>
               <p className="mx-auto max-w-2xl text-sm text-muted leading-relaxed">
-                A stylized example of the receipt Socratic Trade leaves behind for every proposal:
-                who argued for it, who argued against it, and what the policy gate did.
+                An illustrative decision record showing supporting arguments, objections, and a
+                policy check. {"  "}Available detail varies by proposal and configuration.
               </p>
             </div>
             <DecisionTraceIllustration />
@@ -196,9 +195,8 @@ export default function WelcomePage() {
           <section className="space-y-3 text-center">
             <h2 className="text-xl font-semibold text-fg">How the decision framework works</h2>
             <p className="mx-auto max-w-2xl text-sm text-muted leading-relaxed">
-              The interface is organized around a Socratic loop: observe, argue, decide, explain,
-              measure, and improve. The agent&apos;s notes should make its judgment inspectable rather
-              than asking you to trust a black box.
+              The workflow connects research, alternative views, account controls, and outcome
+              review. {"  "}The framework overview explains how these parts fit together.
             </p>
             <a href="/how-it-works" className={GHOST_LINK_SM}>
               Read the full framework overview
@@ -231,7 +229,7 @@ export default function WelcomePage() {
         <footer className="border-t border-line mt-8">
           <div className="mx-auto max-w-5xl px-6 py-8 flex flex-col items-center gap-2 text-center sm:flex-row sm:justify-between">
             <p className="text-xs text-faint">
-              Not investment advice.  You set authority.{" "}
+              Not investment advice.  You set authority.{" "}
               <a href="/terms-and-conditions" className="underline underline-offset-2 hover:text-muted">
                 Terms
               </a>
