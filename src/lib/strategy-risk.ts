@@ -12,7 +12,7 @@ import { accountEquity } from "./risk-breaker";
 import { signalHealthDriftActive } from "./signal-health";
 import { bracketWholeShareMinimum, brokerLabel, brokerMinimumDollarNotional, estimateOpeningProposalNotional, formatWholeDollars, openingPolicyNotionalCap, openingRiskCapacity } from "./strategy";
 import { StressPositionInput, stressScenario } from "./stress-scenario";
-import { PolicyDecision, TradingPolicy, ApprovedEscalation, TradeProposal, EquityPosition, OrderSide, MarketQuote, MarketFactorBreakdown, FillSource, MarketScan, Portfolio, StopPlanStyle } from "./types";
+import { PolicyDecision, TradingPolicy, ApprovedEscalation, TradeProposal, EquityPosition, OrderSide, MarketQuote, MarketFactorBreakdown, FillSource, MarketScan, Portfolio, StopPlanStyle, STOP_PLAN_FALLBACK_STOP_PCT } from "./types";
 import { PortfolioHeatResult, volTargetScale, positionRiskUsd } from "./vol-targeting";
 
 export function shouldEscalateDecision(decision: PolicyDecision, policy: TradingPolicy): boolean {
@@ -425,6 +425,31 @@ export async function applyRiskReceipts(
 
   return out;
 }
+/**
+ * Stop distance as a PERCENT of entry, for the equal-risk cap. Prefers the stop the order will
+ * actually carry, so the cap reflects real risk rather than a policy average:
+ *
+ *  1. `proposal.stopPrice` against `proposal.referencePrice` — the concrete order.
+ *  2. `policy.riskRules.stopLossPct` — the configured distance the app places.
+ *  3. `STOP_PLAN_FALLBACK_STOP_PCT` — the SAME shared fallback the rest of the codebase uses when an
+ *     account runs with no configured stop (`synthetic-stops.ts`, `broker-protective-stops.ts`).
+ *
+ * Falls back rather than returning 0 because a 0 distance would make `budget ÷ fraction` infinite
+ * and silently disable the cap, which is the exact failure a risk cap must not have. Returns 0 only
+ * when a stop was configured at a non-positive distance, which the caller treats as "skip the cap".
+ */
+function resolveStopDistancePct(proposal: TradeProposal, policy: TradingPolicy): number {
+  const ref = proposal.referencePrice;
+  const stop = proposal.stopPrice;
+  if (typeof ref === "number" && Number.isFinite(ref) && ref > 0 && typeof stop === "number" && Number.isFinite(stop) && stop > 0) {
+    const distancePct = (Math.abs(ref - stop) / ref) * 100;
+    if (distancePct > 0) return distancePct;
+  }
+  const configured = policy.riskRules?.stopLossPct;
+  if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) return configured;
+  return STOP_PLAN_FALLBACK_STOP_PCT;
+}
+
 export function applyDeterministicSizing(
   proposal: TradeProposal,
   policy: TradingPolicy,
@@ -739,6 +764,59 @@ export function applyDeterministicSizing(
     ? Math.min(Math.floor(advisedNotional), openingSizingCap)
     : Math.min(fallbackNotional, openingSizingCap);
 
+  // Equal-risk sizing (opt-in, default off): cap the DOLLAR risk one position may carry, as a % of
+  // account equity, so size = risk budget ÷ stop distance. Everything upstream sizes to a NOTIONAL,
+  // which means a name whose stop sits further from entry silently risks proportionally more — and
+  // the 2026-09-25 performance review found exactly that shape: 4 lots accounted for 70% of the
+  // account's total loss, and Insider-Accumulation was positive in PERCENT while negative in DOLLARS
+  // purely because its losing positions were the bigger ones. A notional cap cannot see that; a
+  // dollar-risk cap can.
+  //
+  // Applied BEFORE the ADV cap and the minimum raises below, and re-asserted after the bracket-minimum
+  // raise (a preference-based raise that must not silently undo a risk cap). The broker-dollar
+  // minimum is a HARD constraint and is left to win, with an audit if it breaches the cap — refusing
+  // to trade is the owner's call, not this function's.
+  const stopDistancePct = resolveStopDistancePct(proposal, policy);
+  const maxRiskPct = policy.tuning?.maxPositionRiskPctOfEquity;
+  const equityForRisk = accountEquity(portfolio);
+  const riskBudgetUsd =
+    typeof maxRiskPct === "number" && Number.isFinite(maxRiskPct) && maxRiskPct > 0 && equityForRisk > 0
+      ? (equityForRisk * maxRiskPct) / 100
+      : 0;
+  // risk = notional × stopFraction, so the notional that exactly spends the budget is budget ÷ fraction.
+  // Guard the division: a zero/unknown stop distance must skip the cap entirely rather than collapse
+  // every order to zero (the same reason `positionRiskUsd` returns 0 for a non-positive stop).
+  const equalRiskCap = riskBudgetUsd > 0 && stopDistancePct > 0 ? riskBudgetUsd / (stopDistancePct / 100) : 0;
+  let equalRiskNote = "";
+  const applyEqualRiskCap = () => {
+    if (equalRiskCap > 0 && targetNotional > 0 && targetNotional > equalRiskCap) {
+      equalRiskNote =
+        (equalRiskNote ? equalRiskNote : "") +
+        `\n\n[Sizing] Equal-risk cap: trimmed ${formatWholeDollars(targetNotional)} → ${formatWholeDollars(equalRiskCap)} so a ${stopDistancePct.toFixed(1)}% stop risks at most ${formatWholeDollars(riskBudgetUsd)} (${maxRiskPct}% of equity).`;
+      targetNotional = Math.floor(equalRiskCap);
+    }
+  };
+  if (riskBudgetUsd > 0 && stopDistancePct > 0) {
+    const before = targetNotional;
+    applyEqualRiskCap();
+    if (targetNotional < before) {
+      effectiveOpeningCap = Math.min(effectiveOpeningCap, targetNotional);
+      audit(
+        "sizing_equal_risk_capped",
+        {
+          symbol: normalizeSymbol(proposal.symbol),
+          from: before,
+          to: targetNotional,
+          stopDistancePct,
+          riskBudgetUsd: Number(riskBudgetUsd.toFixed(2)),
+          maxPositionRiskPctOfEquity: maxRiskPct
+        },
+        userId,
+        policy.connectedAccountId
+      );
+    }
+  }
+
   // Market-impact (ADV) cap: keep the order from sizing into a name far past what the tape can
   // absorb. ADV is approximated by the latest scan daily $-volume (price × volume) since the app
   // ingests no historical bars. Skipped when the gauge is unavailable so it never false-shrinks.
@@ -834,6 +912,13 @@ export function applyDeterministicSizing(
     }
   }
 
+  // Re-assert the equal-risk cap AFTER the bracket raise above. That raise exists only so Alpaca can
+  // place a NATIVE whole-share bracket — a convenience, not a risk requirement — so it must not be
+  // allowed to quietly push an order back above the configured dollar-risk budget. The cost is that
+  // such an order loses its broker bracket and places unbracketed, which is the right way round: the
+  // risk budget wins, the bracket does not.
+  if (riskBudgetUsd > 0 && stopDistancePct > 0) applyEqualRiskCap();
+
   // Broker-dollar-minimum floor: Robinhood (and potentially other brokers) reject
   // dollar-based/fractional orders below a hard minimum notional (Robinhood: $1).
   // Raise the sized notional to at least that floor when capacity allows, so
@@ -863,6 +948,25 @@ export function applyDeterministicSizing(
   ) {
     brokerMinNote = `\n\n[Sizing] Raised ${formatWholeDollars(targetNotional)} to ${formatWholeDollars(brokerMinDollar)} to meet ${brokerLabel(policy)}'s minimum dollar-based order size.`;
     targetNotional = brokerMinDollar;
+    // The broker minimum is a HARD constraint, so unlike the bracket raise it is allowed to win over
+    // the equal-risk cap. But "allowed to win" is not "fine to do silently": record the breach so an
+    // owner can see that a real risk budget was exceeded, and why. Only reachable when the budget
+    // itself is smaller than a broker minimum, which is a misconfiguration worth surfacing, not a
+    // routine trim.
+    if (equalRiskCap > 0 && brokerMinDollar > equalRiskCap) {
+      audit(
+        "sizing_equal_risk_breached_by_broker_minimum",
+        {
+          symbol: normalizeSymbol(proposal.symbol),
+          budgetNotional: Math.floor(equalRiskCap),
+          brokerMinDollar,
+          riskBudgetUsd: Number(riskBudgetUsd.toFixed(2)),
+          maxPositionRiskPctOfEquity: maxRiskPct
+        },
+        userId,
+        policy.connectedAccountId
+      );
+    }
   }
 
   // Visibility: when the conviction cap actually BINDS (uncorroborated thesis whose raw AI
@@ -897,6 +1001,6 @@ export function applyDeterministicSizing(
     quantity: undefined, // Override any LLM-guessed quantity to force notional routing
     rationale: proposal.rationale + advisedSizeNote + fallbackSizeNote + bracketMinNote + brokerMinNote + (unproven
       ? ` — EXPLORATORY floor: thesis has ${sampleTrades} closed lot${sampleTrades === 1 ? "" : "s"} (< ${minLotsForSizing}); held to minimum size until validated.`
-      : ` from ${winRate}% win rate, ${avgReturn}% avg edge, and ${Math.round(throttledConviction * 100)}% AI conviction.`) + capNote + advCapNote + volTargetNote + heatNote + kellyNote + thesisNote
+      : ` from ${winRate}% win rate, ${avgReturn}% avg edge, and ${Math.round(throttledConviction * 100)}% AI conviction.`) + capNote + advCapNote + equalRiskNote + volTargetNote + heatNote + kellyNote + thesisNote
   };
 }

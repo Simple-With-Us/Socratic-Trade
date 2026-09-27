@@ -325,6 +325,17 @@ export interface TuningSettings {
    * can never inflate a position past its existing ceiling.
    */
   thesisSizeMultipliers?: Record<string, number>;
+  /**
+   * Equal-risk sizing: cap the DOLLAR risk any single new position may carry, as a % of account
+   * equity. A position sized to a fixed notional risks proportionally more when its stop sits
+   * further from entry, so a name with a wide stop silently gets a wider loss than the account
+   * intended. This inverts that: size = risk budget ÷ stop distance, so every position risks the
+   * same dollars by construction.
+   *
+   * Off when unset or non-positive. It is a CAP, never a sizing target: it can only shrink an
+   * order, and the existing floor/ceiling, ADV, and broker-minimum rules still apply around it.
+   */
+  maxPositionRiskPctOfEquity?: number;
   // `redTeamConvictionThreshold` and `redTeamNotionalPctOfNavThreshold` were REMOVED 2026-07-07
   // (single-adversary consolidation, decision O2): the Red Team review now runs on EVERY risk-adding
   // opening — coverage is structural, not conviction/stakes-gated — so both trigger thresholds (and

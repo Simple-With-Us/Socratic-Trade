@@ -1,5 +1,32 @@
 # Current Status
 
+## 2026-09-27 MINIMAX — Equal-risk sizing cap (opt-in, default off)
+
+**What.**  `applyDeterministicSizing` gains an opt-in dollar-risk cap: size = risk budget ÷ stop
+distance, so every new position risks the same dollars by construction.  Motivated by the
+2026-09-25 performance review, which found 4 lots accounted for 70% of total loss and one thesis
+positive in percent while negative in dollars purely because its losers were bigger — the signature
+of a notional cap rather than a risk cap.  The cap is applied before the ADV cap and re-asserted
+after the bracket-minimum raise (so a native-bracket convenience cannot undo a risk cap), while the
+broker-dollar minimum stays a hard constraint.  Stop distance resolves from the concrete order
+first, then policy, then the shared `STOP_PLAN_FALLBACK_STOP_PCT` — never `0`, because a zero
+distance makes the division infinite and would silently disable the cap.  **Next:** owner sets
+`TuningSettings.maxPositionRiskPctOfEquity`; until then the code is inert and no behaviour changes.
+Branch `minimax/equal-risk-sizing`, recovered from uncommitted work in the drifted
+`minimax/perf-rollout-doc` lane.
+Rollout: `docs/rollouts/2026-09-27-equal-risk-sizing.md`.
+
+## 2026-09-27 MINIMAX — Performance / ingestion audit filed (board parent dc501c68)
+
+**What.**  Four-worker read-only audit across outcomes, data collection, SEC/RAG ingestion, and the
+Congress.Trade contract.  Headline: the app has a **closure** problem, not a capability problem — six
+feedback loops are instrumented on write and left open on read (retrieval stage telemetry with zero
+read paths; filings usefulness credit never applied to ranking; post-mortem lessons routed into a
+human queue; an LLM-chosen thesis tag that every performance metric keys on; a memory-only
+enrichment coverage report; and a CT push with no receipt).  8 P0 + 6 P1 board rows filed.
+**Next:** in flight — equal-risk sizing (above), outcome closure, and SEC volume/breadth.
+Rollout + full findings: Apple Note `[Socratic.Trade, MiniMax] performance + data ingestion audit`.
+
 ## 2026-09-25 CLAUDE — Cash-flow HWM review round (follow-up to merged PR #3753, board 687a5fb4, lane F2)
 
 **What.**  Four independent-review findings on the merged cash-flow HWM work, all verified and
