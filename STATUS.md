@@ -5,6 +5,9 @@
 Review follow-up in progress: scalar signing values reject CR/LF before masks, certificate credentials are scoped to the load/import step, and the decoded P12 is deleted after import.  Synthetic multiline-certificate tests pass.
 
 PR #3863, issue #3861, board `2a08205f`: source changes stage the multiline signing key in a private file and pass only its path between Actions steps.  Synthetic workflow-block and shell syntax checks pass.  The `ios-ship` workflow remains manually disabled pending credential recovery; no release or signing validation is claimed.  Next: finish PR checks, complete credential replacement separately, and validate the repaired release path before re-enabling the workflow.  See `docs/rollouts/2026-09-27-ios-signing-file-handoff.md`.
+## 2026-09-27 CODEX — Public description scope
+
+The public welcome and framework pages describe available research, decision records, and outcome review without promising complete trace coverage or improved future results.  Invite-only iOS release preparation is stated explicitly, and the unsupported zero-price structured offer was removed.  Trading controls and learning behavior are unchanged.  Hosted verification and automatic deployment are pending for PR #3866; issue #3865 tracks this copy unit.  Earlier SWU footer source `12543ec4` is already live.  Rollout: `docs/rollouts/2026-09-27-public-copy-scope.md`.
 
 ## 2026-09-25 CLAUDE — Order role classification: review-round fixes (PR #3755, board 687a5fb4)
 
