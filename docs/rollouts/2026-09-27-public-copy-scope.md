@@ -21,7 +21,7 @@ Source review included `framework-review.ts`, `learning-loop.ts`, `learning-revi
 
 ## Next Steps & Blockers
 
-Merge PR #3864 after required hosted checks pass, then verify the automatic Coolify deployment and both public pages.  No manual deployment or native release dispatch belongs to this unit.
+Merge PR #3866 after required hosted checks pass, then verify the automatic Coolify deployment and both public pages.  No manual deployment or native release dispatch belongs to this unit.
 
 ## Zero-Code Findings
 
