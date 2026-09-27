@@ -2,7 +2,9 @@
 # Prepare a GitHub-hosted macos-26 runner to archive for App Store review.
 # Writes ASC credentials and imports the iOS Distribution identity.
 # Never prints secret values.  Fail closed on a beta macOS host.
+set +o xtrace
 set -euo pipefail
+umask 077
 
 die() { echo "error: $*" >&2; exit 1; }
 log() { echo "[ios-gm] $*"; }
@@ -18,7 +20,10 @@ fi
 
 : "${ASC_KEY_ID:?ASC_KEY_ID required}"
 : "${ASC_ISSUER_ID:?ASC_ISSUER_ID required}"
-: "${ASC_KEY_P8:?ASC_KEY_P8 required}"
+# Current CI passes ASC_KEY_PATH; retain ASC_KEY_P8 for local legacy callers.
+if [[ -z "${ASC_KEY_PATH:-}" ]]; then
+  : "${ASC_KEY_P8:?ASC_KEY_P8 or ASC_KEY_PATH required}"
+fi
 : "${IOS_DIST_P12_BASE64:?IOS_DIST_P12_BASE64 required}"
 : "${IOS_DIST_P12_PASSWORD:?IOS_DIST_P12_PASSWORD required}"
 
@@ -26,9 +31,13 @@ SECRETS_DIR="${HOME}/.secrets"
 mkdir -p "$SECRETS_DIR"
 chmod 700 "$SECRETS_DIR"
 
-KEY_PATH="${SECRETS_DIR}/AuthKey.p8"
-# The p8 body is a GitHub secret.  Write it without echoing.
-printf '%s\n' "$ASC_KEY_P8" > "$KEY_PATH"
+KEY_PATH="${ASC_KEY_PATH:-${SECRETS_DIR}/AuthKey.p8}"
+if [[ -n "${ASC_KEY_PATH:-}" ]]; then
+  [[ -s "$KEY_PATH" ]] || die "ASC_KEY_PATH has no key file"
+else
+  # Legacy local path: CI stages the key file before this helper runs.
+  printf '%s\n' "$ASC_KEY_P8" > "$KEY_PATH"
+fi
 chmod 600 "$KEY_PATH"
 
 ENV_PATH="${SECRETS_DIR}/appstore-connect.env"
@@ -40,6 +49,7 @@ ENV_PATH="${SECRETS_DIR}/appstore-connect.env"
 chmod 600 "$ENV_PATH"
 
 P12_PATH="${SECRETS_DIR}/ios-distribution.p12"
+trap 'rm -f "$P12_PATH"' EXIT
 printf '%s' "$IOS_DIST_P12_BASE64" | base64 --decode > "$P12_PATH"
 chmod 600 "$P12_PATH"
 
@@ -56,6 +66,7 @@ security set-keychain-settings -lut 21600 "$KC_PATH"
 security unlock-keychain -p "$KC_PASS" "$KC_PATH"
 security import "$P12_PATH" -k "$KC_PATH" -P "$IOS_DIST_P12_PASSWORD" \
   -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/xcodebuild >/dev/null
+rm -f "$P12_PATH"
 security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASS" "$KC_PATH" >/dev/null
 security list-keychain -d user -s "$KC_PATH" login.keychain-db
 
