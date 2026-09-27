@@ -1,5 +1,10 @@
 # Current Status
 
+## 2026-09-27 MUSE — Playwright visual regression (fleet rollout, IN PR)
+
+**What.**  Owner-directed fleet rollout: automated-only visual verification for the web UI.  New `test/e2e/visual.spec.ts` adds full-page `toHaveScreenshot` assertions (chromium-desktop, committed baselines under `test/e2e/visual.spec.ts-snapshots/`) for `/console` (Autonomy Desk) and `/login`.  Deterministic controls: reduced-motion, animation-killing style tag, hermetic network (browser requests not to `127.0.0.1` aborted), masks for chart figures/countdown clocks/day-PnL date label/freshness strip/Market Analysis card; consent gate accepted with a 30s budget + pre-screenshot sweep.  `e2e.yml` gains a narrow path-filtered `pull_request` trigger (test/e2e, config, lockfiles, itself) so the PR runs Playwright CI, plus failure-only result upload.  AGENTS.md "Verify before claiming done" now carries the automated-only policy: Jay never takes manual screenshots; native Mac UI is code-review/CI verified.  Branch `muse/playwright-visual-socratic-trade`, auto-merge armed on green.
+**Verified.**  Fresh attempt picked up the uncommitted work and re-based onto latest main (`d0440ed2`, +3 commits): STATUS.md/EFFORT-LOG.md entries re-anchored onto main's new rows; baselines re-generated against latest main and a second pass matched (2 passed / 2 mobile-skipped each, fleet stock Chrome-for-Testing, `next dev` — local production build OOM-killed on this VM, CI `verify` is the gate).  `tsc --noEmit` clean, targeted eslint clean, `git diff --check` clean.  Rollout: `docs/rollouts/2026-09-27-playwright-visual-regression.md`.
+
 ## 2026-09-25 CLAUDE — Cash-flow HWM review round (follow-up to merged PR #3753, board 687a5fb4, lane F2)
 
 **What.**  Four independent-review findings on the merged cash-flow HWM work, all verified and
