@@ -248,6 +248,15 @@ export default function WelcomePage() {
               >
                 mail@jays.services
               </a>
+              {" · "}
+              <a
+                href="https://simplewithus.com/"
+                aria-label="From Simple With Us"
+                className="inline-flex items-center gap-1.5 align-middle hover:text-muted focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2"
+              >
+                <span>From</span>
+                <img src="/swu-logo-wide.webp" alt="Simple With Us by Jay Wedgeworth" width={288} height={30} className="h-auto max-w-[calc(100vw-92px)] rounded-sm bg-white" />
+              </a>
             </p>
           </div>
         </footer>
