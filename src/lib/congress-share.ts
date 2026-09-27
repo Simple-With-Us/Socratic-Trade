@@ -567,14 +567,29 @@ export function marketQuoteToAnalyst(
   return row;
 }
 
-/** Convert OHLC bars to deduped, date-sorted {date, close, volume?} closes (drops invalid bars). */
+/**
+ * Convert OHLC bars to deduped, date-sorted {date, close, volume?} closes (drops invalid bars).
+ *
+ * Two guards here exist because App A (Congress.Trade) performs NO validation of its own on the
+ * values it receives, and it uses them for customer-facing analytics:
+ *
+ *  1. `close <= 0` is rejected. The previous check was `Number.isFinite` only, so a zero or negative
+ *     close from any of the L1-L9 provider tiers would flow into App A's `price_eod` table and into
+ *     per-trade P&L with nothing rejecting it anywhere on the path.
+ *  2. A date in the future is rejected. App A derives a ticker's latest price date from `MAX(date)`,
+ *     so one future-dated row marks the whole ticker fresh and silently suppresses its own staleness
+ *     watchdog. A future date is always a provider or clock bug, never real data.
+ */
 export function ohlcBarsToCloses(bars: OHLCBar[] | null | undefined): CongressClose[] {
   if (!bars || bars.length === 0) return [];
+  // `toBusinessDay` is UTC-based, so compare against the same clock rather than a local date.
+  const todayUtc = new Date().toISOString().slice(0, 10);
   const byDate = new Map<string, CongressClose>();
   for (const bar of bars) {
     const date = toBusinessDay(bar.time);
     const close = bar.close;
-    if (!date || typeof close !== "number" || !Number.isFinite(close)) continue;
+    if (!date || typeof close !== "number" || !Number.isFinite(close) || close <= 0) continue;
+    if (date > todayUtc) continue; // never let a future date mark a ticker fresh downstream
     const entry: CongressClose = { date, close };
     if (typeof bar.volume === "number" && Number.isFinite(bar.volume)) entry.volume = bar.volume;
     byDate.set(date, entry); // later bar for a given date wins
@@ -701,6 +716,32 @@ export function dropInvalidShareRows(
 }
 
 /**
+ * Read App A's verdict out of a 2xx import response.
+ *
+ * App A returns `{ ok, errors[], <dataset>Rows, ... }` with HTTP 200, so `ok:false` and a populated
+ * `errors[]` are the ONLY signals that rows were rejected. Returns "" when the body reports a clean
+ * import, and a short diagnostic otherwise. A body we cannot parse is treated as a FAILURE, not a
+ * pass: an unreadable 200 is exactly the case where the daily marker must not advance on faith.
+ */
+function congressImportBodyError(response: unknown): string {
+  if (response === undefined || response === null) {
+    return "import response body was empty or unparseable";
+  }
+  if (typeof response !== "object") return `unexpected import response body of type ${typeof response}`;
+  const body = response as { ok?: unknown; errors?: unknown; summary?: { errors?: unknown } };
+  const errors = Array.isArray(body.errors)
+    ? body.errors
+    : Array.isArray(body.summary?.errors)
+      ? body.summary.errors
+      : [];
+  if (body.ok === false || errors.length > 0) {
+    const first = errors.length > 0 ? JSON.stringify(errors[0]).slice(0, 200) : "no detail";
+    return `App A reported ok=${String(body.ok)} with ${errors.length} error(s); first: ${first}`;
+  }
+  return "";
+}
+
+/**
  * POST one payload to App A's import endpoint. Idempotent + safe to resend. Self-guarded: never
  * throws — returns a structured result (skipped when no token; ok:false on transport/HTTP error).
  */
@@ -709,7 +750,20 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
   // `sent` (and the empty check) then reflect only what is actually transmitted.
   const { payload: clean, dropped } = dropInvalidShareRows(payload);
   if (Object.keys(dropped).length > 0) {
-    console.warn("[congress-share] dropped schema-invalid rows before send:", dropped);
+    // Schema drift between the two apps is silent by construction here: a row that stops matching
+    // the shared schema is filtered out and the POST still succeeds, so coverage shrinks with no
+    // error anywhere. App A also runs a STRICT schema (non-null `sentiment`/`buyFilings`/`owners`/
+    // `ratio` on insider + short-volume rows), so a null we emit fails safeParse on OUR side first
+    // and never reaches them at all. Log loudly and surface it in the health store so a silent
+    // coverage regression becomes visible instead of permanent.
+    const droppedText = JSON.stringify(dropped);
+    console.warn(`[congress-share] dropped schema-invalid rows before send: ${droppedText}`);
+    logApiHealth({
+      service: "congress-share",
+      ok: true, // the transport is fine; this is a payload-quality signal, not an outage
+      keySource: "env",
+      errorText: `dropped ${droppedText}`
+    });
   }
   const sent = {
     refs: clean.refs?.length ?? 0,
@@ -813,6 +867,19 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
       }
       const response = await res.json().catch(() => undefined);
       clearCongressAuthBreaker(); // a successful call proves the token is good again
+      // App A answers HTTP 200 even when it rejected rows: its import handler returns
+      // `{ ok: summary.errors.length === 0, ...summary }`, so `ok:false` and a populated `errors[]`
+      // arrive on a 2xx. Treating transport success as delivery success is how a partial import
+      // becomes indistinguishable from a clean one, and how the nightly marker advances over rows
+      // App A never wrote. Read the body's verdict, not just the status line.
+      const bodyErrorText = congressImportBodyError(response);
+      if (bodyErrorText) {
+        console.error(`[congress-share] import rejected rows despite HTTP ${res.status}: ${bodyErrorText}`);
+        logApiHealth({ service: "congress-share", ok: false, errorText: bodyErrorText, keySource: "env" });
+        // `ok:false` (NOT `skipped`) so the daily run counts this in failedPosts and retries rather
+        // than advancing the marker over an import App A only partly accepted.
+        return { ok: false, status: res.status, error: bodyErrorText, sent };
+      }
       logApiHealth({ service: "congress-share", ok: true, keySource: "env" });
       return { ok: true, status: res.status, response, sent };
     } catch (err) {

@@ -1,5 +1,23 @@
 # Current Status
 
+## 2026-09-27 MINIMAX — Congress.Trade share guards: stop treating an HTTP 200 as delivery
+
+**What.**  CT is now exclusively dependent on ST for EOD prices and enrichment, and the ST→CT push is
+fire-and-forget — a CT-side audit found CT validates **nothing** it receives.  Three guards close the
+ways a wrong number reaches customer-facing analytics in CT unnoticed.  (1) `ohlcBarsToCloses`
+rejects `close <= 0` (it previously checked only `Number.isFinite`, so a zero/negative close from any
+provider tier reached CT's `price_eod` and its per-trade P&L).  (2) It rejects a future date: CT
+derives a ticker's latest price from `MAX(date)`, so one future-dated row marks the ticker fresh and
+**suppresses CT's own staleness watchdog**.  (3) CT's import handler returns
+`{ ok: errors.length === 0 }` with **HTTP 200 even when it rejected rows**; ST read only `res.ok`, so
+a partial import looked identical to a clean one and the nightly marker advanced over rows CT never
+wrote.  ST now reads the body verdict, returns `ok:false` (not `skipped`, so the run retries), and
+treats an unparseable 200 as failure.  Schema-dropped rows now also reach the health store instead of
+only a `console.warn`.  **Closed question:** the CT audit found **zero consumers** for all 21
+tracked-but-unpushed enrichment fields — no column, type, or UI slot in the CT repo — so pushing them
+is premature and deliberately not done here.  Branch `minimax/ct-share-guards`.
+Rollout: `docs/rollouts/2026-09-27-congress-share-guards.md`.
+
 ## 2026-09-25 CLAUDE — Order correctness review round (PR #3759 follow-up)
 
 **What/why.**  PR #3759 merged while an independent review was in flight; this follow-up fixes
