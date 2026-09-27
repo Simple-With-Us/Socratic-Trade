@@ -24,6 +24,11 @@ on:
     # Nightly full-browser baseline now that smoke no longer runs on every PR.
     - cron: "17 9 * * *"
   workflow_dispatch:
+    inputs:
+      update-visual-baselines:
+        description: "Regenerate the Playwright visual baselines IN CI (visual.spec.ts --update-snapshots, CI browser + production build) and upload them as the visual-baselines artifact — download and commit the PNGs to refresh committed baselines."
+        type: boolean
+        default: false
 
 concurrency:
   group: e2e-${{ github.workflow }}-${{ github.ref }}
@@ -204,8 +209,24 @@ jobs:
             ${{ runner.os }}-nextjs-${{ hashFiles('package.json') }}-
             ${{ runner.os }}-nextjs-
       - name: Run smoke tests
-        if: needs.classify.outputs.docs-only != 'true'
+        if: needs.classify.outputs.docs-only != 'true' && inputs.update-visual-baselines != true
         run: npm run test:e2e
+      # Baseline regeneration lives in CI (not on a dev laptop/VM) because the
+      # committed PNGs must match the CI browser + production build byte for byte:
+      # local runs use a different Chromium build, different system fonts, and
+      # `next dev`, and that drift alone fails the 1% pixel budget. Dispatch the
+      # workflow with update-visual-baselines=true, download the visual-baselines
+      # artifact, and commit the PNGs.
+      - name: Regenerate visual baselines (CI browser, production build)
+        if: needs.classify.outputs.docs-only != 'true' && inputs.update-visual-baselines == true
+        run: npx playwright test test/e2e/visual.spec.ts --update-snapshots
+      - name: Upload regenerated visual baselines
+        if: needs.classify.outputs.docs-only != 'true' && inputs.update-visual-baselines == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-baselines-${{ github.run_attempt }}
+          path: test/e2e/visual.spec.ts-snapshots/
+          retention-days: 14
       # Visual regression failures are pixel diffs — the report and traces are
       # the only way to see what changed. Upload on failure for PR review.
       - name: Upload Playwright results on failure
