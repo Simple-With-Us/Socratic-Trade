@@ -1,5 +1,9 @@
 # Current Status
 
+## 2026-09-27 CODEX — ASC signing file handoff
+
+PR #3863, issue #3861, board `2a08205f`: source changes stage the multiline signing key in a private file and pass only its path between Actions steps.  Synthetic workflow-block and shell syntax checks pass.  The `ios-ship` workflow remains manually disabled pending credential recovery; no release or signing validation is claimed.  Next: finish PR checks, complete credential replacement separately, and validate the repaired release path before re-enabling the workflow.  See `docs/rollouts/2026-09-27-ios-signing-file-handoff.md`.
+
 ## 2026-09-25 CLAUDE — Order role classification: review-round fixes (PR #3755, board 687a5fb4)
 
 Independent review of PR #3755 raised 7 findings; verified each against the actual branch HEAD
