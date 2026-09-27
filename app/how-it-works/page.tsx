@@ -7,7 +7,7 @@ import { landingPageEnabled } from "@/lib/landing-page";
 export const metadata: Metadata = {
   title: "Decision framework",
   description:
-    "How Socratic Trade forms a thesis, weighs evidence and memory, handles dissent, acts under delegated authority, and learns from outcomes.  Not investment advice.",
+    "How Socratic Trade forms a thesis, weighs evidence and memory, handles dissent, uses configured authority, and records outcomes for review.  Not investment advice.",
   alternates: { canonical: "/how-it-works" },
   openGraph: {
     type: "website",
@@ -15,13 +15,13 @@ export const metadata: Metadata = {
     url: "/how-it-works",
     title: "Socratic Trade decision framework",
     description:
-      "How Socratic Trade forms a thesis, weighs evidence and memory, handles dissent, acts under delegated authority, and learns from outcomes.  Not investment advice."
+      "How Socratic Trade forms a thesis, weighs evidence and memory, handles dissent, uses configured authority, and records outcomes for review.  Not investment advice."
   },
   twitter: {
     card: "summary_large_image",
     title: "Socratic Trade decision framework",
     description:
-      "Autonomous market reasoning with visible thesis, evidence, dissent, authority, action, outcome, and framework learning."
+      "Autonomous market reasoning with visible thesis, evidence, dissent, authority, action, outcome, and proposed framework changes."
   },
   robots:
     process.env.NEXT_PUBLIC_ALLOW_INDEXING === "true"
@@ -36,7 +36,7 @@ const CORE_LOOP: Array<{ title: string; body: string }> = [
   },
   {
     title: "Argue",
-    body: "Build a thesis, retrieve relevant prior cases, identify what evidence supports or weakens the idea, and force a counterargument before acting."
+    body: "Build a thesis, retrieve relevant prior cases, identify what evidence supports or weakens the idea, and include a counterargument when review is configured."
   },
   {
     title: "Decide",
@@ -52,7 +52,7 @@ const CORE_LOOP: Array<{ title: string; body: string }> = [
   },
   {
     title: "Learn",
-    body: "Closed and counterfactual outcomes feed scorecards by thesis, regime, model, and evidence quality, then become framework-improvement proposals."
+    body: "Available closed and counterfactual outcomes can inform scorecards and proposed framework changes for review."
   }
 ];
 
@@ -100,7 +100,7 @@ const LEARNING_ITEMS: Array<{ title: string; body: string }> = [
   },
   {
     title: "Evidence quality",
-    body: "Which sources, retrieval memories, and contradictions actually improved decisions after outcomes are known."
+    body: "Compare recorded sources, retrieved context, and contradictions alongside the available outcomes."
   },
   {
     title: "Mistake review",
@@ -128,10 +128,10 @@ export default function HowItWorksPage() {
         <section className="space-y-5">
           <p className="text-sm font-semibold uppercase tracking-wide text-accent">Decision framework</p>
           <h1 className="text-3xl font-bold tracking-tight text-fg sm:text-4xl">
-            A reasoning console for autonomous market decisions
+            How research, proposals, and review fit together
           </h1>
           <p className="max-w-3xl text-lg leading-relaxed text-muted">
-            Socratic Trade is organized around a simple product contract: what did the system
+            Socratic Trade is organized around questions you can use to review a decision: what did the system
             believe, why did it believe it, what did it remember, what could prove it wrong, what
             did it do, what happened, and how should the framework improve?
           </p>
@@ -155,9 +155,9 @@ export default function HowItWorksPage() {
         <section className="space-y-5">
           <h2 className="text-xl font-semibold text-fg">Decision case file</h2>
           <p className="text-sm leading-relaxed text-muted">
-            Each action or non-action should read like an audit case, not a mystery score.  The
-            case-file frame keeps the agent accountable when it buys, sells, waits, rejects, sizes
-            down, or chooses to press a rebound thesis during stress.
+            A decision record can bring together the thesis, available evidence, account authority,
+            action status, and outcome. {"  "}The fields below describe the information the interface
+            is designed to show; coverage depends on the source data and completed workflow.
           </p>
           <div className="grid gap-4 sm:grid-cols-2">
             {DECISION_FILE.map((item) => (
@@ -192,9 +192,9 @@ export default function HowItWorksPage() {
         <section className="space-y-5">
           <h2 className="text-xl font-semibold text-fg">Learning loop</h2>
           <p className="text-sm leading-relaxed text-muted">
-            Learning is not a vague claim that the bot gets smarter.  It is a visible trail from
-            thesis to action to outcome to proposed framework change.  Wins, losses, missed trades,
-            blocked trades, and false positives all become reviewable evidence.
+            Outcome review connects recorded theses and actions with available results and
+            proposed framework changes. {"  "}These records can help you assess a workflow;
+            they do not establish that a change will improve future trading results.
           </p>
           <div className="grid gap-4 sm:grid-cols-2">
             {LEARNING_ITEMS.map((item) => (
