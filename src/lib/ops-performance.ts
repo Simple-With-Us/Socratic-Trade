@@ -1,5 +1,6 @@
 import { getDb, listConnectedAccounts, listUsers, peekPolicy, listFillEvents } from "./db";
 import {
+  aggregateRoundTrip,
   calculatePnl,
   getPerformanceSummary,
   getThesisScorecard,
@@ -9,8 +10,9 @@ import {
   type ThesisStat,
   type RedTeamEfficacy
 } from "./performance";
+import { normalizeSymbol } from "./money";
 import { yieldEventLoop } from "./slow-sync-guard";
-import type { FillSource, HoldReasonCode } from "./types";
+import type { FillEvent, FillSource, HoldReasonCode } from "./types";
 
 /**
  * Token-gated, read-only realized-performance rollup for remote diagnostics
@@ -69,6 +71,12 @@ const MAX_HOLD_REASON_ROWS = 1000;
 /** Bound on Red Team veto audit rows scanned per account — the app's own default (5000) is sized
  *  for a single-account request; this endpoint can iterate every account for every user. */
 const OPS_RED_TEAM_AUDIT_LIMIT = 500;
+/** Bucket label for closed lots whose opening proposal carries no `proposedByModel` stamp —
+ *  matches the Red Team rollup's own label (performance.ts:1391). */
+const OPS_MODEL_UNATTRIBUTED = "unattributed";
+/** Bound on `order_rejected_by_broker` audit rows scanned per account for the broker-rejection
+ *  reason itemisation — same rationale as MAX_BLOCK_REASON_ROWS. */
+const MAX_BROKER_REJECTION_ROWS = 1000;
 
 export interface OpsTradeStats {
   windowDays: number;
@@ -84,6 +92,17 @@ export interface OpsTradeStats {
   profitFactor?: number;
   /** Mean pnl (USD) per closed lot across the WHOLE window (winners and losers). */
   expectancyUsd: number;
+}
+
+export interface OpsRoundTripStats extends OpsTradeStats {
+  /** Opening lots whose exits do not yet cover the full entry size — the position is still
+   *  partly open, so there is no result to grade. Excluded from every inherited figure; reported
+   *  so a consumer can say "40 graded of 51 opened" rather than implying full coverage. */
+  incompleteRoundTrips: number;
+  /** Raw `ClosedLot`s folded into the graded round trips above. Equals `tradeCount` when nothing
+   *  was scaled out of, and exceeds it precisely when partial exits are what created the need for
+   *  round-trip grading in the first place. */
+  lotsGraded: number;
 }
 
 export interface OpsModelAttributionRow {
@@ -111,6 +130,22 @@ export interface OpsProposalFunnel {
   /** True when `holdReasons` was truncated by MAX_HOLD_REASON_ROWS (more held proposals exist in
    *  the window than were scanned — counts for the "proposed" status is still exact). */
   holdReasonRowsCapped: boolean;
+  /** The same status counts, broken out by the model that PROPOSED the idea. Without this the
+   *  funnel is a single global tally, so "which model actually reaches the broker" is unanswerable
+   *  and a model's win rate can be compared while its share of placed orders is invisible. The
+   *  2026-09-25 review named this gap explicitly. `model` is the `proposedByModel` stamp read out
+   *  of the proposal JSON; proposals with no stamp (or a malformed blob) fall into the shared
+   *  `unattributed` bucket so they are visible rather than dropped. */
+  byModel: Array<{ model: string; counts: Array<{ status: string; count: number }> }>;
+  /** Broker-declined orders itemised by the reason the broker gave, e.g. "bracket orders must be
+   *  entry orders" or "market orders require no stop or limit price". `topBlockReasons` above only
+   *  covers the app's OWN pre-placement block decision, so before this the ~84 broker rejections
+   *  outside the PG failure path were a single unexplained bucket. Sourced from
+   *  `audit_events` where kind = `order_rejected_by_broker` (`payload.reason`, falling back to
+   *  `payload.brokerState` for the reconcile-path rows that carry no reason string). */
+  brokerRejectionReasons: Array<{ reason: string; count: number }>;
+  /** True when `brokerRejectionReasons` was truncated by MAX_BROKER_REJECTION_ROWS. */
+  brokerRejectionRowsCapped: boolean;
 }
 
 export interface OpsEquityCurvePoint {
@@ -133,6 +168,10 @@ export interface OpsPerformanceAccount {
   liveUnrealizedPnl: number;
   paperUnrealizedPnl: number;
   tradeStats: OpsTradeStats;
+  /** Same window, graded on completed ROUND TRIPS rather than individual FIFO lots. This is the
+   *  figure to decide on: `tradeStats` counts one entry per exit, so a scaled-out position is
+   *  graded several times and reads better than it traded. See `buildRoundTripStats`. */
+  roundTripStats: OpsRoundTripStats;
   thesisScorecard: ThesisStat[];
   redTeamEfficacy: RedTeamEfficacy;
   modelAttribution: OpsModelAttributionRow[];
@@ -228,14 +267,88 @@ function computeTradeStats(closedLots: ClosedLot[], sinceIso: string, windowDays
   };
 }
 
+/** Round-trip identity of one OPENING fill: symbol + the timestamp `calculatePnl` stamps onto
+ *  every exit it books against that lot. Deliberately the same pair, so grouping exits here lines
+ *  up with the FIFO match `calculatePnl` already performed — this never re-derives lot matching. */
+function roundTripKey(symbol: string | undefined, entryAt: string | undefined): string {
+  // A legacy lot with no symbol and no entryAt cannot be attributed to an opening fill at all;
+  // give it a stable singleton key so it forms its own group and is reported as incomplete
+  // rather than silently merged into some other position's round trip.
+  return `${symbol ? normalizeSymbol(symbol) : "?"}|${entryAt ?? ""}`;
+}
+
+/** Grade the window on ROUND TRIPS rather than on individual FIFO lots.
+ *
+ * `computeTradeStats` above counts one entry per `ClosedLot`, and a scaled-out position produces
+ * one `ClosedLot` per trim — so a position that took two profitable trims and then a stopped-out
+ * remainder reads as 2 wins + 1 loss instead of one losing trade. Every per-model/thesis
+ * comparison the 2026-09-25 review drew is distorted by that, which is why it asked for
+ * `aggregateRoundTrip` grading (its "perf-11" note). This is the honest denominator.
+ *
+ * A round trip is only graded once it is COMPLETE: `aggregateRoundTrip` returns `undefined` while
+ * the position is still partly open, because grading a half-closed trade is grading it before it
+ * is over. Those openings are counted in `incompleteRoundTrips` rather than dropped silently, so
+ * a report can say "these figures cover 40 of 51 round trips" instead of quietly implying 51.
+ *
+ * `fills` supplies the opening size per lot — `ClosedLot` carries the size each EXIT closed, not
+ * the size the position was opened with, and the two differ on exactly the scaled-out positions
+ * this exists to measure. */
+function buildRoundTripStats(
+  closedLots: ClosedLot[],
+  fills: FillEvent[],
+  sinceIso: string,
+  windowDays: number
+): OpsRoundTripStats {
+  const entrySize = new Map<string, number>();
+  for (const fill of fills) {
+    if (fill.side !== "buy" && fill.side !== "short") continue; // closing side
+    const key = roundTripKey(fill.symbol, fill.filledAt);
+    entrySize.set(key, (entrySize.get(key) ?? 0) + Number(fill.quantity));
+  }
+
+  const groups = new Map<string, ClosedLot[]>();
+  for (const lot of closedLots) {
+    const key = roundTripKey(lot.symbol, lot.entryAt);
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(lot);
+    else groups.set(key, [lot]);
+  }
+
+  const trips: ClosedLot[] = [];
+  let lotsGraded = 0;
+  let incompleteRoundTrips = 0;
+  for (const [key, lots] of groups) {
+    // Terminal ordering matters: `aggregateRoundTrip` takes exitAt/mae/mfe from the LAST exit,
+    // so a group read out of order would stamp the wrong holding period.
+    lots.sort((a, b) => String(a.exitAt ?? "").localeCompare(String(b.exitAt ?? "")));
+    const trip = aggregateRoundTrip(lots, entrySize.get(key) ?? 0);
+    if (!trip) {
+      incompleteRoundTrips += 1;
+      continue;
+    }
+    trips.push(trip);
+    // Count the lots only when the trip they belong to is actually IN the window. `computeTradeStats`
+    // windows on `exitAt >= sinceIso`, so counting unconditionally here would let a 200-day-old
+    // round trip inflate `lotsGraded` while contributing nothing to `tradeCount` — two figures
+    // describing the same denominator but disagreeing. Apply the identical predicate.
+    if (typeof trip.exitAt === "string" && trip.exitAt >= sinceIso) lotsGraded += lots.length;
+  }
+
+  return { ...computeTradeStats(trips, sinceIso, windowDays), incompleteRoundTrips, lotsGraded };
+}
+
 /** Group ALL (not window-filtered — an account's model attribution is inherently
  *  lifetime) closed lots by `entryModel` (proposal.proposedByModel).  Pure arithmetic over
  *  already-computed pnl/returnPct, same category as `computeTradeStats` above — not P&L math. */
 function computeModelAttribution(closedLots: ClosedLot[]): OpsModelAttributionRow[] {
   const byModel = new Map<string, { trades: number; wins: number; pnl: number }>();
   for (const lot of closedLots) {
-    const model = lot.entryModel?.trim();
-    if (!model) continue;
+    // An unstamped lot is a REPORTABLE bucket, not a silent drop. The 2026-09-25 performance
+    // review found the unstamped fifth of Alpaca Paper's closed lots was collectively the
+    // PROFITABLE bucket (+$184.54) — dropping them is what let "gpt-5.5 vs grok-build-0.1"
+    // read as ~3-in-1,000 by chance. Same label the Red Team rollup already uses
+    // (performance.ts:1391), so both surfaces agree on what one word means.
+    const model = lot.entryModel?.trim() || OPS_MODEL_UNATTRIBUTED;
     const cur = byModel.get(model) ?? { trades: 0, wins: 0, pnl: 0 };
     cur.trades += 1;
     if (lot.pnl > 0) cur.wins += 1;
@@ -255,19 +368,57 @@ function computeModelAttribution(closedLots: ClosedLot[]): OpsModelAttributionRo
 /** Status funnel + top block reasons for one account's proposals in the window.  Both queries are
  *  scoped by (user_id, account_number, created_at) — covered by the existing
  *  idx_trade_proposals_user_account_created index — and the reasons scan is row-capped. */
-function queryProposalFunnel(userId: string, accountNumber: string, sinceIso: string, windowDays: number): OpsProposalFunnel {
+function queryProposalFunnel(
+  userId: string,
+  accountNumber: string,
+  connectedAccountId: string,
+  sinceIso: string,
+  windowDays: number
+): OpsProposalFunnel {
   const countRows = getDb()
     .prepare(
-      `SELECT status, COUNT(*) AS n FROM trade_proposals
+      `SELECT COALESCE(NULLIF(TRIM(json_extract(proposal, '$.proposedByModel')), ''), ?) AS model,
+              status, COUNT(*) AS n
+       FROM trade_proposals
        WHERE user_id = ? AND account_number = ? AND created_at >= ?
-       GROUP BY status`
+       GROUP BY model, status`
     )
-    .all(userId, accountNumber, sinceIso) as Array<{ status: string; n: number }>;
-  const counts = countRows
-    .map((row) => ({ status: row.status, count: row.n }))
-    .sort((a, b) => b.count - a.count || a.status.localeCompare(b.status));
+    .all(OPS_MODEL_UNATTRIBUTED, userId, accountNumber, sinceIso) as Array<{
+    model: string;
+    status: string;
+    n: number;
+  }>;
 
-  const blockedCount = countRows.find((row) => row.status === "blocked")?.n ?? 0;
+  // Global per-status counts are the SUM over the per-model rows, not a second query: the window
+  // scan is the expensive part of this function and this module's whole design constraint is not
+  // adding one (see the module doc comment on the stalling event loop). Both views come from the
+  // same grouped rows, so they can never disagree with each other.
+  const globalCounts = new Map<string, number>();
+  const byModel = new Map<string, Map<string, number>>();
+  for (const row of countRows) {
+    globalCounts.set(row.status, (globalCounts.get(row.status) ?? 0) + row.n);
+    const perModel = byModel.get(row.model) ?? new Map<string, number>();
+    perModel.set(row.status, (perModel.get(row.status) ?? 0) + row.n);
+    byModel.set(row.model, perModel);
+  }
+  const counts = Array.from(globalCounts.entries())
+    .map(([status, count]) => ({ status, count }))
+    .sort((a, b) => b.count - a.count || a.status.localeCompare(b.status));
+  const byModelRows = Array.from(byModel.entries())
+    .map(([model, perStatus]) => ({
+      model,
+      counts: Array.from(perStatus.entries())
+        .map(([status, count]) => ({ status, count }))
+        .sort((a, b) => b.count - a.count || a.status.localeCompare(b.status))
+    }))
+    .sort(
+      (a, b) =>
+        (b.counts[0]?.count ?? 0) - (a.counts[0]?.count ?? 0) ||
+        b.counts.reduce((s, c) => s + c.count, 0) - a.counts.reduce((s, c) => s + c.count, 0) ||
+        a.model.localeCompare(b.model)
+    );
+
+  const blockedCount = globalCounts.get("blocked") ?? 0;
   const blockedRows =
     blockedCount > 0
       ? (getDb()
@@ -300,7 +451,7 @@ function queryProposalFunnel(userId: string, accountNumber: string, sinceIso: st
 
   // holdReasons: same shape of query as the block-reasons rollup above, but over "proposed"
   // (Awaiting approval) rows' `proposal.holdReason` (see hold-reason.ts) instead of `decision`.
-  const proposedCount = countRows.find((row) => row.status === "proposed")?.n ?? 0;
+  const proposedCount = globalCounts.get("proposed") ?? 0;
   const heldRows =
     proposedCount > 0
       ? (getDb()
@@ -334,14 +485,86 @@ function queryProposalFunnel(userId: string, accountNumber: string, sinceIso: st
     .map(([reason, count]) => ({ reason, count }))
     .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
 
+  // Broker-declined orders, itemised. Scoped on `audit_events`' own (user_id,
+  // connected_account_id, kind) columns — every `order_rejected_by_broker` row is written with
+  // both by `audit()` (db.ts:3627), and `idx_audit_events_user_account_kind` covers the lookup.
+  // Deliberately NOT joined through to `trade_proposals` on the payload's proposalId: that would
+  // make SQLite parse every rejection payload in the table to find the ones in this account, and
+  // this module's whole design constraint (see its doc comment) is not adding a query whose cost
+  // scales with the whole audit table. Row-capped for the same reason the block-reason scan is.
+  const rejectedCount = globalCounts.get("rejected_by_broker") ?? 0;
+  const brokerRejectionRows =
+    rejectedCount > 0
+      ? (getDb()
+          .prepare(
+            `SELECT payload FROM audit_events
+             WHERE user_id = ? AND connected_account_id = ? AND kind = 'order_rejected_by_broker'
+               AND created_at >= ?
+             ORDER BY created_at DESC LIMIT ?`
+          )
+          .all(userId, connectedAccountId, sinceIso, MAX_BROKER_REJECTION_ROWS) as Array<{ payload: string }>)
+      : [];
+
+  const brokerReasonCounts = new Map<string, number>();
+  for (const row of brokerRejectionRows) {
+    let reason: string | undefined;
+    try {
+      const parsed = JSON.parse(row.payload) as { reason?: unknown; brokerState?: unknown };
+      if (typeof parsed.reason === "string" && parsed.reason.trim()) reason = parsed.reason;
+      // The reconcile-path rows (strategy-execution.ts) never carry `reason`; they record the
+      // broker's own terminal state instead, which is the closest thing to a reason available.
+      else if (typeof parsed.brokerState === "string" && parsed.brokerState.trim()) reason = `broker state: ${parsed.brokerState}`;
+    } catch {
+      // malformed payload — skip this row's reason, same as the block-reason scan above
+      continue;
+    }
+    if (!reason) continue;
+    const key = canonicalizeBrokerRejectionReason(reason);
+    if (!key) continue;
+    brokerReasonCounts.set(key, (brokerReasonCounts.get(key) ?? 0) + 1);
+  }
+  const brokerRejectionReasons = Array.from(brokerReasonCounts.entries())
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason))
+    .slice(0, 20);
+
   return {
     windowDays,
     counts,
+    byModel: byModelRows,
     topBlockReasons,
     blockReasonRowsCapped: blockedRows.length >= MAX_BLOCK_REASON_ROWS && blockedCount > MAX_BLOCK_REASON_ROWS,
     holdReasons,
-    holdReasonRowsCapped: heldRows.length >= MAX_HOLD_REASON_ROWS && proposedCount > MAX_HOLD_REASON_ROWS
+    holdReasonRowsCapped: heldRows.length >= MAX_HOLD_REASON_ROWS && proposedCount > MAX_HOLD_REASON_ROWS,
+    brokerRejectionReasons,
+    // "Did the scan hit its row cap?" — and nothing else. Deliberately NOT a comparison against
+    // `rejectedCount`: that is a count of PROPOSALS carrying the `rejected_by_broker` status, while
+    // this list is built from AUDIT ROWS, which are a different population (one proposal can log
+    // several rejection events, and a reconcile-path row can exist without a status write).
+    // Comparing the two silently produced a wrong answer in both directions. Same "hit the cap"
+    // semantics as the block-reason and hold-reason scans.
+    brokerRejectionRowsCapped: brokerRejectionRows.length >= MAX_BROKER_REJECTION_ROWS
   };
+}
+
+/** Reduce a broker/validation error string to a bucket key.
+ *
+ * The raw text is a broker adapter message, so the same underlying refusal arrives with
+ * different HTTP statuses attached ("HTTP 422: bracket orders must be entry orders" vs "HTTP 400:
+ * …"). Stripping the transport prefix is what lets the repeat offenders in the 2026-09-25 review
+ * — 11 rejections of that one bracket rule — actually count as one cause instead of eleven.
+ *
+ * Deliberately NOT a full canonicalizer: anything beyond collapsing whitespace and stripping the
+ * leading status code risks merging genuinely different refusals, and a diagnostic rollup that
+ * over-merges is worse than one that under-merges. Same caveat as `topBlockReasons`. */
+function canonicalizeBrokerRejectionReason(raw: string): string | undefined {
+  const stripped = raw
+    .trim()
+    .replace(/^HTTP\s+\d{3}\s*[:\-]?\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!stripped) return undefined;
+  return stripped.slice(0, 200);
 }
 
 /** Merge live+paper equity curves (already downsampled to <= 1 point/day inside
@@ -397,10 +620,11 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
           liveUnrealizedPnl: 0,
           paperUnrealizedPnl: 0,
           tradeStats: { windowDays, tradeCount: 0, winRate: 0, expectancyUsd: 0 },
+          roundTripStats: { windowDays, tradeCount: 0, winRate: 0, expectancyUsd: 0, incompleteRoundTrips: 0, lotsGraded: 0 },
           thesisScorecard: [],
           redTeamEfficacy: safeRedTeamEfficacy(userId, { connectedAccountId: account.id, auditLimit: OPS_RED_TEAM_AUDIT_LIMIT }),
           modelAttribution: [],
-          proposalFunnel: { windowDays, counts: [], topBlockReasons: [], blockReasonRowsCapped: false, holdReasons: [], holdReasonRowsCapped: false },
+          proposalFunnel: { windowDays, counts: [], byModel: [], topBlockReasons: [], blockReasonRowsCapped: false, holdReasons: [], holdReasonRowsCapped: false, brokerRejectionReasons: [], brokerRejectionRowsCapped: false },
           equityCurve: []
         });
         // Give the process a scheduling point between accounts even on this cheap branch, so an
@@ -441,7 +665,11 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
         });
         const modelAttribution = computeModelAttribution(sourcePnl.closedLots);
         const tradeStats = computeTradeStats(sourcePnl.closedLots, sinceIso, windowDays);
-        const proposalFunnel = queryProposalFunnel(userId, accountNumber, sinceIso, windowDays);
+        // Grade the same book on completed round trips, using the account's OWN source fills for
+        // opening sizes — the same live/paper split `source`/`sourcePnl` already apply above.
+        const sourceFills: FillEvent[] = source === "live" ? liveFills : paperFills;
+        const roundTripStats = buildRoundTripStats(sourcePnl.closedLots, sourceFills, sinceIso, windowDays);
+        const proposalFunnel = queryProposalFunnel(userId, accountNumber, account.id, sinceIso, windowDays);
         const equityCurve = buildEquityCurve(performance.liveEquityCurve, performance.paperEquityCurve, sinceIso);
 
         accounts.push({
@@ -453,6 +681,7 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
           liveUnrealizedPnl: performance.liveUnrealizedPnl,
           paperUnrealizedPnl: performance.paperUnrealizedPnl,
           tradeStats,
+          roundTripStats,
           thesisScorecard,
           redTeamEfficacy,
           modelAttribution,
@@ -470,10 +699,11 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
           liveUnrealizedPnl: 0,
           paperUnrealizedPnl: 0,
           tradeStats: { windowDays, tradeCount: 0, winRate: 0, expectancyUsd: 0 },
+          roundTripStats: { windowDays, tradeCount: 0, winRate: 0, expectancyUsd: 0, incompleteRoundTrips: 0, lotsGraded: 0 },
           thesisScorecard: [],
           redTeamEfficacy: safeRedTeamEfficacy(userId, { connectedAccountId: account.id, auditLimit: OPS_RED_TEAM_AUDIT_LIMIT }),
           modelAttribution: [],
-          proposalFunnel: { windowDays, counts: [], topBlockReasons: [], blockReasonRowsCapped: false, holdReasons: [], holdReasonRowsCapped: false },
+          proposalFunnel: { windowDays, counts: [], byModel: [], topBlockReasons: [], blockReasonRowsCapped: false, holdReasons: [], holdReasonRowsCapped: false, brokerRejectionReasons: [], brokerRejectionRowsCapped: false },
           equityCurve: [],
           error: message
         });
