@@ -49,6 +49,7 @@ ENV_PATH="${SECRETS_DIR}/appstore-connect.env"
 chmod 600 "$ENV_PATH"
 
 P12_PATH="${SECRETS_DIR}/ios-distribution.p12"
+trap 'rm -f "$P12_PATH"' EXIT
 printf '%s' "$IOS_DIST_P12_BASE64" | base64 --decode > "$P12_PATH"
 chmod 600 "$P12_PATH"
 
@@ -65,6 +66,7 @@ security set-keychain-settings -lut 21600 "$KC_PATH"
 security unlock-keychain -p "$KC_PASS" "$KC_PATH"
 security import "$P12_PATH" -k "$KC_PATH" -P "$IOS_DIST_P12_PASSWORD" \
   -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/xcodebuild >/dev/null
+rm -f "$P12_PATH"
 security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASS" "$KC_PATH" >/dev/null
 security list-keychain -d user -s "$KC_PATH" login.keychain-db
 

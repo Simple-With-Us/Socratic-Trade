@@ -33,3 +33,7 @@ The `ios-ship` workflow remains manually disabled pending credential recovery.  
 ## Zero-code findings
 
 This unit includes code changes.  Private credential bindings and recovery decisions are maintained outside public source.
+
+## Review follow-up
+
+The loader rejects multiline scalar signing fields before mask output and keeps P12/password inside the load/import step.  Only ASC identifiers and the private-key path cross into subsequent steps.  The decoded P12 file is deleted after import; synthetic multiline-P12 and no-certificate-in-GITHUB_ENV checks pass.
