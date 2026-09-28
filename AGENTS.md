@@ -91,6 +91,8 @@ npm test           # vitest, ~723 tests across 81 files as of 2026-06-21
 npm run build      # full Next.js build; also re-checks types
 ```
 
+Web UI is verified via Playwright screenshot assertions with committed baselines (`test/e2e/visual.spec.ts`, baselines under `test/e2e/visual.spec.ts-snapshots/`).  Jay never takes manual screenshots or runs local UI preview sessions.  Native Mac UI is verified through code review and CI.
+
 `npm run lint` runs `eslint .` against `eslint.config.mjs` (flat config). It is
 pinned to **ESLint 9**, not 10: `eslint-config-next@16` bundles
 `eslint-plugin-react@7.x`, which calls `context.getFilename()` — an API ESLint 10
