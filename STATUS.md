@@ -1,5 +1,23 @@
 # Current Status
 
+## 2026-09-27 MINIMAX — Congress.Trade share guards: stop treating an HTTP 200 as delivery
+
+**What.**  CT is now exclusively dependent on ST for EOD prices and enrichment, and the ST→CT push is
+fire-and-forget — a CT-side audit found CT validates **nothing** it receives.  Three guards close the
+ways a wrong number reaches customer-facing analytics in CT unnoticed.  (1) `ohlcBarsToCloses`
+rejects `close <= 0` (it previously checked only `Number.isFinite`, so a zero/negative close from any
+provider tier reached CT's `price_eod` and its per-trade P&L).  (2) It rejects a future date: CT
+derives a ticker's latest price from `MAX(date)`, so one future-dated row marks the ticker fresh and
+**suppresses CT's own staleness watchdog**.  (3) CT's import handler returns
+`{ ok: errors.length === 0 }` with **HTTP 200 even when it rejected rows**; ST read only `res.ok`, so
+a partial import looked identical to a clean one and the nightly marker advanced over rows CT never
+wrote.  ST now reads the body verdict, returns `ok:false` (not `skipped`, so the run retries), and
+treats an unparseable 200 as failure.  Schema-dropped rows now also reach the health store instead of
+only a `console.warn`.  **Closed question:** the CT audit found **zero consumers** for all 21
+tracked-but-unpushed enrichment fields — no column, type, or UI slot in the CT repo — so pushing them
+is premature and deliberately not done here.  Branch `minimax/ct-share-guards`.
+Rollout: `docs/rollouts/2026-09-27-congress-share-guards.md`.
+
 ## 2026-09-27 MINIMAX — SEC ingest: fair tick + one-tick documents + corpus breadth (branch `minimax/sec-volume-breadth`)
 
 **What.**  Two P0 starvation bugs in the SEC/EDGAR ingest tick plus four breadth items.  (1) P0: `runTick` read the running-jobs list with no `ORDER BY` and handed the whole 5-slot per-tick budget to the first job, so with ~500 running jobs issuer #1 consumed every tick and everyone else sat at `discovered` forever (2,156 tasks pending since 2026-08-10); the claim is now one cross-job round-robin (`claimSecIngestTasksAcrossJobs`) with a per-job ceiling enforced in SQL, topped up only when nothing else is claimable.  (2) P0: every `advanceSecIngestTask` returned immediately, so one document cost 11 claim→process→advance cycles; `processTask` now drains the checkpoint machine in process via `reclaimSecIngestTaskForStage`, wall-clock bounded (120s) with the strategy-work and RTH gates re-checked at every stage boundary and the stage attempt refunded on release.  (3) Breadth: real `FormType` union; the extractive highlighter now runs in the worker's `embed_queued` branch (backfilled filings had NO abstract while `information-routing` depends on them); 13F holdings are embedded through the same `storeDocument`→`chunkDocument` path (the file had no `storeDocument` call at all), stamped with the filing date not the period end; ownership forms are discovered and enqueued as raw XML; the seeder asks for 8-K x2, DEF 14A x1, S-1 x1, Form 4 x2 plus up to 2 material exhibits per 8-K/10-K, with `SEC_INGEST_BASELINE_CORPUS_REVISION` bumped (required — v1 jobs are sealed).  RTH/strategy gates, dead-letter discipline, FTS-after-vector ordering, 403 refund, the parser/chunker and `SEC_INGEST_TASKS_PER_TICK` are all unchanged.  **Review round (Sentry, 2026-09-27):** two real findings, both introduced here and both fixed before merge — a mid-drain stage failure was recorded against the tick's STALE lease token (the drain re-leases between stages, so the failure was dropped and the task walked into a dead-letter via lease expiry; now recorded against the live lease), and the ownership-XML directory read was gated on `formLimits["4"]` for all of 3/4/5 (now gated on each form's own limit).  **Next:** run a seed with the v2 revision on the first non-RTH window and watch the 4 req/s EDGAR limiter and the Pinecone write-unit breaker; the universe manifest stays frozen (separate effort).  Rollout: `docs/rollouts/2026-09-27-sec-ingest-volume.md`.
