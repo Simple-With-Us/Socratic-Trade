@@ -48,8 +48,18 @@ unreadable body is exactly the case where the marker must not advance on faith.
 `dropInvalidShareRows` filters schema-invalid rows and previously only `console.warn`ed.  Because CT
 runs a **strict** schema (non-null `sentiment`/`buyFilings`/`owners`/`ratio` on insider and
 short-volume rows), a null ST emits fails `safeParse` **on ST's side first** and never reaches CT at
-all — so a schema drift shrinks delivered coverage with no error on either side.  Dropped counts now
-also go to the service health store.
+all — so a schema drift shrinks delivered coverage with no error on either side.  Dropped counts are
+now written as a `congress_share_rows_dropped` `audit()` row.
+
+**Review fix (Sentry, caught on PR #3909).**  The first version of this logged through
+`logApiHealth({ service: "congress-share", ok: true, errorText: ... })` on the reasoning that the
+transport was fine and this was a payload-quality signal.  That was wrong in a way that mattered:
+`logApiHealth` counts **consecutive** failures per service to drive a "5 consecutive failures" alert,
+so an `ok: true` record interleaved between two genuine `ok: false` request failures resets that
+counter and **masks a real outage**.  The signal now goes to the `audit()` trail instead, which is the
+codebase's own convention for this class of event and cannot touch alert state.  Worth recording
+generally: a health-channel call is a statement about *transport outcomes*, so using it for a
+non-transport signal is a category error even when the `ok` value looks honest.
 
 ## 3. Decisions & Trade-offs
 

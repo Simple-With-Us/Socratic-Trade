@@ -754,16 +754,16 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
     // the shared schema is filtered out and the POST still succeeds, so coverage shrinks with no
     // error anywhere. App A also runs a STRICT schema (non-null `sentiment`/`buyFilings`/`owners`/
     // `ratio` on insider + short-volume rows), so a null we emit fails safeParse on OUR side first
-    // and never reaches them at all. Log loudly and surface it in the health store so a silent
-    // coverage regression becomes visible instead of permanent.
+    // and never reaches them at all. Surface it so a silent coverage regression becomes visible.
+    //
+    // Deliberately an `audit()` row and NOT `logApiHealth`. The health store counts CONSECUTIVE
+    // failures per service to drive a "5 consecutive failures" alert, so writing an `ok: true`
+    // record here would interleave between two genuine `ok: false` request failures and reset that
+    // counter — masking a real outage. This is a payload-quality signal, not a transport outcome,
+    // so it belongs in the audit trail where it cannot touch alert state.
     const droppedText = JSON.stringify(dropped);
     console.warn(`[congress-share] dropped schema-invalid rows before send: ${droppedText}`);
-    logApiHealth({
-      service: "congress-share",
-      ok: true, // the transport is fine; this is a payload-quality signal, not an outage
-      keySource: "env",
-      errorText: `dropped ${droppedText}`
-    });
+    audit("congress_share_rows_dropped", { dropped, droppedTotal: Object.values(dropped).reduce((a, b) => a + b, 0) });
   }
   const sent = {
     refs: clean.refs?.length ?? 0,
