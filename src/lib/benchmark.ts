@@ -299,13 +299,108 @@ export function coalesceSubPeriods(periods: BenchmarkSubPeriod[]): BenchmarkSubP
 /** Result of the SPY comparison with an honest "why not" when it cannot be computed. */
 export interface SpyBenchmarkResult {
   comparison: BenchmarkComparison | null;
-  /** Present whenever `comparison` is null, naming the reason (feed failure vs young account). */
-  unavailable?: BenchmarkUnavailability;
+  /** Present whenever `comparison` is null, naming the reason (feed failure vs young account).
+   *  Carries the machine-readable feed facts (`lastCloseDate`, `staleDays`, `stale`,
+   *  `fellBackToStaleCache`) alongside the human `detail`, so a consumer never has to parse prose
+   *  to tell "the feed is dead" from "the account is young". */
+  unavailable?: BenchmarkUnavailability & BenchmarkFeedFacts;
+  /** `ok` only when a real comparison was computed. Optional because the two deadline/catch
+   *  fallbacks in src/lib/dashboard.ts hand-build this shape; absent means "unknown", and the safe
+   *  read for a consumer is "no comparison" — never a 0.00%. */
+  status?: "ok" | "unavailable";
+  /** True when the SPY series itself is frozen/short — the feed died, as opposed to the account
+   *  being too young to compare. Present on both outcomes so a consumer can flag the feed. */
+  stale?: boolean;
+  /** What the history cascade actually returned, on BOTH outcomes. Diagnostic only — the comparison
+   *  numbers are never derived from it. */
+  feed?: BenchmarkFeedDiagnostic;
+}
+
+/** Machine-readable facts about the benchmark series, never prose-only. */
+export interface BenchmarkFeedFacts {
+  /** Newest usable close date in the series (undefined when the cascade returned nothing usable). */
+  lastCloseDate?: string;
+  /** Calendar days between the newest close and the reference clock. 0 on a fresh series. */
+  staleDays?: number;
+  /** True when the series is older than BENCHMARK_STALE_GRACE_DAYS. */
+  stale?: boolean;
+  /** Provenance stamped on the newest bar by the history cascade (e.g. "yahoo-finance"). */
+  source?: string;
+  /** When that bar was FETCHED. A recent `fetchedAt` on an old close date is the exact signature of
+   *  the history module's stale-local-cache fallback: the fetch "succeeded", the data did not. */
+  fetchedAt?: string;
+  /** True when the newest bar came from that stale-cache fallback — i.e. every live provider in the
+   *  cascade returned null. See the staleness note on computeSpyBenchmarkDetailed for why the error
+   *  itself is unrecoverable here. */
+  fellBackToStaleCache?: boolean;
+}
+
+/** Full per-call feed diagnostic — the same facts `unavailable` carries, plus the bar count and a
+ *  `detail` sentence. Always populated by computeSpyBenchmarkDetailed, on success and failure alike. */
+export interface BenchmarkFeedDiagnostic extends BenchmarkFeedFacts {
+  symbol: string;
+  /** Bars the history cascade returned, before the finite-close filter. */
+  bars: number;
+  /** Human sentence naming the failure; safe to render verbatim. */
+  detail?: string;
 }
 
 /** Calendar-day lag allowed between the last benchmark close and the account window's end before
- *  the series counts as stale (covers weekends/holidays + a same-day snapshot vs yesterday's close). */
+ *  the series counts as stale (covers weekends/holidays + a same-day snapshot vs yesterday's close).
+ *  ALSO the lag allowed between the last close and the wall clock before the series counts as stale
+ *  on its own (see `assessBenchmarkSeriesAge`) — a frozen feed is stale whether or not the account's
+ *  own snapshots happened to move. */
 export const BENCHMARK_STALE_GRACE_DAYS = 5;
+
+/** Provenance stamp the history cascade puts on bars it fell back to when EVERY live provider failed
+ *  (src/lib/history.ts, the `history-cache-eod-stale` branch). It re-stamps `fetchedAt` with "now"
+ *  while the bar DATES stay frozen, so the stamp is the only in-band signal that the series is
+ *  cached history rather than a live quote. */
+const STALE_CACHE_BAR_SOURCE = "history-cache-eod-stale";
+
+/** Newest usable close in a series (undefined when nothing usable), by date order. */
+function newestClose(closes: Array<{ date: string; close: number }>): { date: string; close: number } | undefined {
+  let newest: { date: string; close: number } | undefined;
+  for (const c of closes) {
+    if (!Number.isFinite(c.close) || c.close <= 0) continue;
+    if (!newest || c.date > newest.date) newest = { date: c.date, close: c.close };
+  }
+  return newest;
+}
+
+/**
+ * Pure staleness gate on the wall clock, independent of the account's equity window (#2557 follow-up,
+ * 2026-09-25 review: the SPY series was stale since Jul 24 and the card just went blank).
+ *
+ * The original gate compared the newest close against the account window's END. That works while the
+ * account keeps taking snapshots and misses the case that actually bit: a dormant account whose
+ * snapshots froze the same week the feed died, where lastEquityDate and lastCloseDate are both months
+ * old and the gate passes — leaving a comparison whose every sub-period is 0.00% and whose "vs SPY"
+ * line silently re-prints the account number. A dead feed is not a flat market, so it is judged
+ * against `now` as well. Returns the unavailability, or null when the series is fresh. Exported for
+ * direct unit testing.
+ */
+export function assessBenchmarkSeriesAge(
+  closes: Array<{ date: string; close: number }>,
+  now: number = Date.now(),
+  benchmarkSymbol = "SPY"
+): (BenchmarkUnavailability & BenchmarkFeedFacts) | null {
+  const usable = closes.filter((c) => Number.isFinite(c.close) && c.close > 0);
+  if (usable.length < 2) return null; // short/empty series is `no-bars` — a different verdict.
+  const last = newestClose(usable);
+  if (!last) return null;
+  const lagMs = now - Date.parse(`${last.date}T00:00:00Z`);
+  if (!Number.isFinite(lagMs)) return null;
+  const staleDays = Math.max(0, Math.floor(lagMs / 86_400_000));
+  if (staleDays <= BENCHMARK_STALE_GRACE_DAYS) return null;
+  return {
+    reason: "stale-series",
+    detail: `${benchmarkSymbol} newest close is ${last.date}, ${staleDays} calendar days behind the reference clock (grace ${BENCHMARK_STALE_GRACE_DAYS}d)`,
+    lastCloseDate: last.date,
+    staleDays,
+    stale: true
+  };
+}
 
 /**
  * Pure staleness gate (#2557): a benchmark series whose last close predates the account window's
@@ -349,6 +444,25 @@ export function assessBenchmarkSeries(
  *
  * Synthetic fill-only curves (no real portfolio snapshots) are refused — those start at a fake
  * $100 equity base and are not comparable to SPY for an account holding real capital.
+ *
+ * WHY THE FEED GOES STALE (2026-09-25 review: "SPY stale since Jul 24", diagnosed here, not guessed).
+ * `fetchDailyOHLC` (src/lib/history.ts) is a cascade: local SQLite EOD cache → imported EOD →
+ * congress.trade → Tradier → Alpaca → Robinhood → Massive → ROIC → Tiingo → Yahoo → Marketstack.
+ * Every one of those per-source fetchers wraps its HTTP call in `try { … } catch { recordProviderCall(
+ * source, { ok: false }); return null; }` — the error is reduced to a boolean metric and DISCARDED.
+ * When the whole cascade returns null, the cascade does not return null to its caller: it returns
+ * the last local EOD cache, re-stamped with `fetchedAt = now` and `source = "history-cache-eod-stale"`,
+ * and writes one `eod_cache_stale` audit row whose payload is a fixed sentence with no provider
+ * names. So the caller cannot tell WHICH provider died, and the bar DATES never advance. That frozen
+ * series is what makes the benchmark blank and (before the wall-clock gate below) what made
+ * `alphaPct` disappear from every thesis row in src/lib/performance.ts.
+ *
+ * The two knobs this function can honestly turn without touching history.ts: (1) judge the series
+ * against the WALL CLOCK as well as the account window, so a feed frozen alongside a dormant account
+ * is caught instead of rendering a flat 0.00% "vs SPY"; (2) hand the caller the machine-readable
+ * feed facts (newest close, its age, its provenance, whether it came off the stale-cache fallback) so
+ * the blank says WHY. The provider error itself is NOT recoverable here — it was discarded upstream.
+ * Making it actionable means recording per-source failures in the history.ts cascade.
  */
 export async function computeSpyBenchmarkDetailed(
   equityCurve: EquityCurvePoint[],
@@ -358,7 +472,7 @@ export async function computeSpyBenchmarkDetailed(
   brokerActivities?: AlpacaAccountActivity[]
 ): Promise<SpyBenchmarkResult> {
   if (!equityCurve || equityCurve.length < 2) {
-    return { comparison: null, unavailable: { reason: "insufficient-history" } };
+    return { comparison: null, unavailable: { reason: "insufficient-history" }, status: "unavailable", stale: false };
   }
   // Defense in depth against fabricated-equity curves (getPerformanceSummary no longer builds one
   // when there are no persisted portfolio snapshots, but this filter stays as a second guard for
@@ -370,7 +484,7 @@ export async function computeSpyBenchmarkDetailed(
     (p) => typeof p.cash === "number" || typeof p.positionsValue === "number"
   );
   if (realCurve.length < 2) {
-    return { comparison: null, unavailable: { reason: "insufficient-history" } };
+    return { comparison: null, unavailable: { reason: "insufficient-history" }, status: "unavailable", stale: false };
   }
   // Prefer the real-snapshot sub-curve (includes a live tip when present).
   equityCurve = realCurve;
@@ -379,17 +493,60 @@ export async function computeSpyBenchmarkDetailed(
     bars = await fetchDailyOHLC("SPY", now, userId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { comparison: null, unavailable: { reason: "fetch-failed", detail: message.slice(0, 200) } };
+    return {
+      comparison: null,
+      unavailable: { reason: "fetch-failed", detail: message.slice(0, 200) },
+      status: "unavailable",
+      stale: false
+    };
   }
   if (!bars || bars.length < 2) {
     return {
       comparison: null,
-      unavailable: { reason: "no-bars", detail: `SPY history cascade returned ${bars?.length ?? 0} bar(s)` }
+      unavailable: { reason: "no-bars", detail: `SPY history cascade returned ${bars?.length ?? 0} bar(s)` },
+      status: "unavailable",
+      stale: false,
+      feed: { symbol: "SPY", bars: bars?.length ?? 0, staleDays: 0, stale: false, detail: `SPY history cascade returned ${bars?.length ?? 0} bar(s)` }
     };
   }
   const closes = bars
     .map((b) => ({ date: isoDate(b.time), close: b.close }))
     .filter((b): b is { date: string; close: number } => b.date != null && Number.isFinite(b.close));
+
+  // Feed facts first, so EVERY return below can carry them. `newestClose` reads the same finite-close
+  // filter as the gates, and `source`/`fetchedAt` come off the newest BAR (not the newest close) so
+  // the stale-cache fallback signature survives a merged series.
+  const lastBar = bars[bars.length - 1];
+  const newest = newestClose(closes);
+  const barSource = typeof lastBar?.source === "string" ? lastBar.source : undefined;
+  const barFetchedAt = typeof lastBar?.fetchedAt === "string" ? lastBar.fetchedAt : undefined;
+  const staleDays = newest
+    ? Math.max(0, Math.floor((now - Date.parse(`${newest.date}T00:00:00Z`)) / 86_400_000))
+    : 0;
+  const feed: BenchmarkFeedDiagnostic = {
+    symbol: "SPY",
+    bars: bars.length,
+    ...(newest ? { lastCloseDate: newest.date } : {}),
+    staleDays,
+    ...(barSource ? { source: barSource } : {}),
+    ...(barFetchedAt ? { fetchedAt: barFetchedAt } : {}),
+    fellBackToStaleCache: barSource === STALE_CACHE_BAR_SOURCE,
+    stale: staleDays > BENCHMARK_STALE_GRACE_DAYS
+  };
+
+  // Wall-clock gate FIRST: a series that is months old is a dead feed no matter what the account
+  // window says. The account-window gate below can only catch it when the account kept moving.
+  const ageVerdict = assessBenchmarkSeriesAge(closes, now, "SPY");
+  if (ageVerdict) {
+    const detail = `${ageVerdict.detail}${barSource ? ` (source: ${barSource})` : ""}`;
+    return {
+      comparison: null,
+      unavailable: { ...ageVerdict, detail, ...feedFacts(feed) },
+      status: "unavailable",
+      stale: true,
+      feed: { ...feed, detail }
+    };
+  }
 
   // Staleness gate BEFORE computing: a series frozen before the account window would print
   // 0.00% for every sub-period (the live 2026-08-06 failure — stale local bars fallback).
@@ -398,17 +555,36 @@ export async function computeSpyBenchmarkDetailed(
     .filter((d): d is string => d != null)
     .sort();
   if (equityDates.length >= 2) {
-    const lastBar = bars[bars.length - 1];
-    const seriesSource = typeof lastBar?.source === "string" ? lastBar.source : undefined;
-    const stale = assessBenchmarkSeries(closes, equityDates[0], equityDates[equityDates.length - 1], "SPY", seriesSource);
-    if (stale) return { comparison: null, unavailable: stale };
+    const stale = assessBenchmarkSeries(closes, equityDates[0], equityDates[equityDates.length - 1], "SPY", barSource);
+    if (stale) {
+      return {
+        comparison: null,
+        unavailable: { ...stale, lastCloseDate: feed.lastCloseDate, staleDays: feed.staleDays, stale: false, ...feedFacts(feed) },
+        status: "unavailable",
+        stale: false,
+        feed: { ...feed, detail: stale.detail }
+      };
+    }
   }
 
   const { flows, source } = resolveExternalCashFlows({ equityCurve, fills, brokerActivities });
   const comparison = normalizeAgainstBenchmark(equityCurve, closes, "SPY", flows.size > 0 ? flows : undefined);
-  if (!comparison) return { comparison: null, unavailable: { reason: "insufficient-overlap" } };
+  if (!comparison) {
+    return { comparison: null, unavailable: { reason: "insufficient-overlap" }, status: "unavailable", stale: false, feed };
+  }
   if (source === "broker" && flows.size > 0) comparison.cashFlowAdjusted = true;
-  return { comparison };
+  return { comparison, status: "ok", stale: false, feed };
+}
+
+/** The subset of a feed diagnostic that can be spread onto an `unavailable` object. */
+function feedFacts(feed: BenchmarkFeedDiagnostic): BenchmarkFeedFacts {
+  return {
+    ...(feed.lastCloseDate ? { lastCloseDate: feed.lastCloseDate } : {}),
+    staleDays: feed.staleDays,
+    ...(feed.source ? { source: feed.source } : {}),
+    ...(feed.fetchedAt ? { fetchedAt: feed.fetchedAt } : {}),
+    ...(feed.fellBackToStaleCache ? { fellBackToStaleCache: true } : {})
+  };
 }
 
 /** Back-compat wrapper: the comparison alone (null on any failure). Prefer the detailed variant. */
