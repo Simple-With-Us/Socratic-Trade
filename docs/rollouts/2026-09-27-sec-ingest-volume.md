@@ -188,6 +188,30 @@ Run in this order in `~/apps/st-mm-sec-volume`:
   `idx_sec_ingest_tasks_claim` leads with `job_id`, so a status-only filter is a scan; a migration
   is the right fix if the queue ever outgrows that.
 
+## Review round (Sentry code review, 2026-09-27) — two real findings, both fixed
+
+Both were verified against the code rather than waved through, and both were introduced by this
+branch:
+
+1. **HIGH — a mid-drain stage failure was recorded against a stale lease token.**  The drain
+   re-leases between stages (`reclaimSecIngestTaskForStage` issues a NEW token), so the
+   `failSecIngestTask` in `runTick`'s catch — which carries the token from the original claim —
+   matched nothing once a LATER stage threw.  The failure was dropped, the task sat `leased` until
+   the lease expired, and the lease-expiry path then re-claimed it and marched it into a
+   dead-letter: a transient error reported as a permanently dead document.  Fixed by
+   `runStageRecordingFailure`, which records the failure against the CURRENT lease (and warns if
+   even that does not apply); `runTick`'s catch stays as the fallback for non-stage errors.
+   Regression: a task driven to throw at `facts_extracted` (fifth stage, four re-leases in) lands in
+   `retry_wait` with `worker-error`, lease columns cleared, not dead-lettered.
+2. **MEDIUM — the ownership-XML directory read was gated on the wrong form's limit.**
+   `formLimits["4"]` was gating Form 3/4/5 together, so a caller asking only for "3" (or only "5")
+   queued the unparseable browse-edgar URL and silently dropped the raw XML, and an unrequested
+   ownership form still spent a directory read.  Fixed by gating on `formLimits[ref.docType]`.
+   Regressions: form 3/5 without form 4 enqueues both raw XMLs; an unrequested ownership form makes
+   zero directory calls.
+
+Docs updated: STATUS.md, docs/EFFORT-LOG.md, docs/rollouts/2026-09-27-sec-ingest-volume.md
+
 ## Follow-ups
 
 - After this merges, the 2,156-task backlog starts draining across issuers instead of one at a

@@ -236,9 +236,6 @@ export async function seedSecIngestJobsFromManifest(
     ? { ...opts.formLimits }
     : { ...SEC_INGEST_BASELINE_FORM_LIMITS, "10-K": tenKLimit, "10-Q": tenQLimit };
   const exhibitLimit = opts.exhibitLimitPerAccession ?? SEC_INGEST_BASELINE_EXHIBIT_LIMIT;
-  // Ownership documents are discovered from the "4" (and 3/5) refs; bound the extra directory
-  // lookups independently of the form limit so a caller can widen Form 4 without extra lookups.
-  const ownershipLimit = formLimits["4"] ?? 0;
 
   let selected = manifest.issuers;
   if (opts.issuerCiks && opts.issuerCiks.length > 0) {
@@ -326,7 +323,12 @@ export async function seedSecIngestJobsFromManifest(
           });
         }
       }
-      if (ownershipLimit > 0 && OWNERSHIP_FORMS.has(ref.docType)) {
+      // Gate on THIS form's own limit, not on the "4" entry: a caller asking only for "3" (or only
+      // for "5") must still get their raw XML, and a form that is not requested at all must not
+      // spend a directory read.  The EDGAR raw XML is the only document form the worker can parse
+      // — the primaryDocument the submissions API reports is the XSL-rendered page — so skipping
+      // this would silently queue an unparseable browse-edgar URL for that form.
+      if (OWNERSHIP_FORMS.has(ref.docType) && (formLimits[ref.docType] ?? 0) > 0) {
         // The submissions API reports the XSL-rendered ownership document; the worker needs the raw
         // XML (that is what parseAndSaveForm4 and the chunker are built for), so read the filing
         // directory and reuse the same picker the incremental insider lane uses.

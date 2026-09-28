@@ -235,7 +235,7 @@ export class SecIngestWorker {
         this.releaseForLaterTick(current, "rth_deferred", "RTH began mid-drain; task released for a non-RTH tick");
         return;
       }
-      const advanced = await this.runTaskStage(current);
+      const advanced = await this.runStageRecordingFailure(current);
       if (!advanced) return;
       const next = reclaimSecIngestTaskForStage({
         taskId: current.id,
@@ -246,6 +246,37 @@ export class SecIngestWorker {
       // worker took it). The durable state is authoritative; nothing left to drive.
       if (!next) return;
       current = next;
+    }
+  }
+
+  /** Run one stage, and record a stage failure against the lease that is actually live.
+   *
+   *  The drain re-leases the task between stages (`reclaimSecIngestTaskForStage` issues a NEW
+   *  lease token), so by the time a later stage throws, the token the tick claimed with is stale
+   *  and a `failSecIngestTask` carrying it matches nothing — the failure would be silently dropped
+   *  and the task would sit leased until the lease expired, then be re-claimed and marched into a
+   *  dead-letter by the lease-expiry path.  Recording the failure here, against `current`, keeps
+   *  the permanent-vs-transient classification and the attempt receipt intact.
+   */
+  private async runStageRecordingFailure(task: SecIngestTask): Promise<boolean> {
+    try {
+      return await this.runTaskStage(task);
+    } catch (err: any) {
+      console.error(`[SecIngestWorker] Task ${task.id} stage failed:`, err.message);
+      const failed = failSecIngestTask({
+        taskId: task.id,
+        owner: task.leaseOwner || this.workerId,
+        leaseToken: task.leaseToken || "",
+        retryable: true,
+        errorType: "worker-error",
+        error: err.message
+      });
+      if (!failed.applied) {
+        console.warn(
+          `[SecIngestWorker] stage failure for task ${task.id} was not recorded against its lease; the lease will expire back to the queue`
+        );
+      }
+      return false;
     }
   }
 

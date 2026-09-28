@@ -451,6 +451,54 @@ describe("seedSecIngestJobsFromManifest breadth (2026-09-27 v2)", () => {
     ]);
   });
 
+  it("reads a raw ownership XML for form 3/5 even when form 4 was not requested", async () => {
+    const cik = "0000900103";
+    const m = manifest([issuer(1, cik, "HHH")], "snap-ownership-gate");
+    vi.mocked(fetchRecentFilings).mockImplementation(async (_cikArg, docTypes) => {
+      const wanted = new Set(docTypes ?? []);
+      const refs: FilingRef[] = [];
+      if (wanted.has("3")) refs.push(ref(cik, "3", 1));
+      if (wanted.has("5")) refs.push(ref(cik, "5", 2));
+      return refs;
+    });
+    vi.mocked(fetchFilingDirectory).mockImplementation(async (_cikArg, accession) => [
+      { name: `${accession}-index.html`, type: "INDEX" },
+      { name: accession.endsWith("1") ? "form3.xml" : "form5.xml", type: "XML", size: 5_000 }
+    ]);
+
+    const seeded = await seedSecIngestJobsFromManifest({
+      manifest: m,
+      corpusRevision: `${SEC_INGEST_BASELINE_CORPUS_REVISION}-forms35`,
+      formLimits: { "3": 1, "5": 1 }
+    });
+    // 2 primary documents + 2 raw ownership XML. Gating the directory read on formLimits["4"]
+    // instead of the form's own limit would have queued the unparseable browse-edgar URLs only.
+    expect(seeded.totalTasksEnqueued).toBe(4);
+    const names = (
+      getDb()
+        .prepare("SELECT document_name FROM sec_ingest_tasks WHERE job_id = ? ORDER BY ordinal")
+        .all(seeded.issuers[0]!.jobId) as Array<{ document_name: string }>
+    ).map((r) => r.document_name);
+    expect(names).toEqual(expect.arrayContaining(["form3.xml", "form5.xml"]));
+  });
+
+  it("does not spend a directory read on an ownership form that was not requested", async () => {
+    const cik = "0000900104";
+    const m = manifest([issuer(1, cik, "III")], "snap-ownership-unrequested");
+    vi.mocked(fetchRecentFilings).mockImplementation(async (_cikArg, docTypes) =>
+      (docTypes ?? []).includes("4") ? [ref(cik, "4", 1)] : []
+    );
+    vi.mocked(fetchFilingDirectory).mockImplementation(async () => directoryFor("0000900104-26-000010"));
+    vi.mocked(fetchFilingDirectory).mockClear();
+
+    await seedSecIngestJobsFromManifest({
+      manifest: m,
+      corpusRevision: `${SEC_INGEST_BASELINE_CORPUS_REVISION}-noforms`,
+      formLimits: { "10-K": 1 }
+    });
+    expect(vi.mocked(fetchFilingDirectory)).not.toHaveBeenCalled();
+  });
+
   it("selectMaterialExhibits ranks EX-99 first and drops everything non-material", () => {
     const items = directoryFor("0000900101-26-000001");
     const picked = selectMaterialExhibits(items, SEC_INGEST_BASELINE_EXHIBIT_LIMIT);

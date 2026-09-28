@@ -1243,6 +1243,55 @@ describe("in-process checkpoint drain (2026-09-27 P0-2)", () => {
     expect(abstract.summaryText.length).toBeGreaterThan(0);
   });
 
+  it("records a mid-drain stage failure against the LIVE lease, not the tick's stale token", async () => {
+    // The drain re-leases between stages, so the token the tick claimed with is stale by the time a
+    // later stage throws. If the failure were recorded with the tick's token it would match
+    // nothing: the task would sit leased until the lease expired, be re-claimed, and walk into a
+    // dead-letter by the lease-expiry path instead of being classified as a normal worker error.
+    const { getSecIngestTask, claimSecIngestTasks, createSecIngestJob, enqueueSecIngestTask, transitionSecIngestJob } =
+      await import("../src/lib/db-rag-ingest");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+    vi.mocked(politeFetch).mockResolvedValue({ ok: false, status: 404, statusText: "Not Found" } as any);
+
+    const accession = "0000320193-26-000503";
+    const job = createSecIngestJob({
+      idempotencyKey: `drain-failure-${randomUUID()}`,
+      corpusRevision: "corp-v1"
+    });
+    transitionSecIngestJob(job.id, "running");
+    enqueueSecIngestTask({
+      jobId: job.id,
+      accession,
+      cik: "0000320193",
+      symbol: "AAPL",
+      payload: { url: "https://www.sec.gov/x", docType: "10-K", filedAt: "2026-07-15" }
+    });
+    // The body fetch (discovered) succeeds; the companyfacts call at facts_extracted — the fifth
+    // stage, i.e. after four re-leases — throws.
+    vi.mocked(politeFetchText).mockResolvedValue(
+      "<html><body><p>Item 1. Business</p><p>AAPL designs, manufactures and markets smartphones, personal computers, tablets and a variety of related services, and sells a broad line of consumer electronics worldwide through its retail and online channels.</p></body></html>"
+    );
+    vi.mocked(politeFetch).mockRejectedValue(new Error("EDGAR exploded on the companyfacts fetch"));
+    const [claimed] = claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 });
+
+    await new SecIngestWorker().processTask(claimed!);
+
+    const after = getSecIngestTask(claimed!.id)!;
+    expect(after.checkpoint).toBe("parsed");
+    expect(after.status).toBe("retry_wait");
+    expect(after.lastErrorType).toBe("worker-error");
+    expect(after.lastError).toContain("EDGAR exploded");
+    expect(after.stageAttempts).toBe(1);
+    // The live lease was released by the recorded failure — the task is NOT left sitting in
+    // 'leased' with no record, which is what a silently dropped failure looks like — and it is not
+    // dead-lettered either (retryable:true, so the retry backoff decides when it returns).
+    expect(after.leaseToken ?? null).toBeNull();
+    expect(after.leaseExpiresAt ?? null).toBeNull();
+    expect(after.status).not.toBe("dead_letter");
+    expect(claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 })).toHaveLength(0);
+  });
+
   it("hands the task back (no stage attempt burned) when the drain budget is already spent", async () => {
     const { getSecIngestTask, claimSecIngestTasks } = await import("../src/lib/db-rag-ingest");
     const { storeDocument } = await import("../src/lib/vector-db");
