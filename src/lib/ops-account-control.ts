@@ -288,8 +288,10 @@ function centralTime(iso: string | null): string | null {
 /**
  * What the scheduler (src/lib/scheduler.ts `tickInner`, per-account loop) will do with this account
  * on its next ticks, evaluated in the same gate order: test broker → account number → draining →
- * broker health gate → systemState → cadence lane → market session → cadence clock → monthly LLM
- * ceiling.  Read-only; uses the scheduler's own presentation helper for the next-run time.
+ * parked → broker health gate → systemState → cadence lane → market session → cadence clock →
+ * monthly LLM ceiling.  Read-only; uses the scheduler's own presentation helper for the next-run
+ * time.  Every blocker here MUST have a counterpart in `scheduler.ts`'s per-account loop, or this
+ * description will contradict what the scheduler actually does.
  */
 export function describeNextEligibleRun(input: {
   userId: string;
@@ -313,6 +315,15 @@ export function describeNextEligibleRun(input: {
   // account without one is never wound down either: report the account number first.
   if (!policy.accountNumber) blockers.push("This connected account has no broker account number.");
   if (account.isDraining) blockers.push("This account is draining (being disconnected); the scheduler only winds it down.");
+  // The scheduler skips a PARKED account before it derives an execution state, so this description
+  // has to say so too. Without it the two disagree in the worst direction: the scheduler is quiet
+  // while this says `willRun: true`, which is precisely the "operator believes a parked account is
+  // live" confusion the flag exists to prevent. (Seer, MEDIUM, 2026-09-27.)
+  if (account.parked) {
+    blockers.push(
+      `This account is parked${account.parkedReason ? `: ${account.parkedReason}` : ""}. The scheduler skips it every tick until it is un-parked.`
+    );
+  }
   if (brokerHealth && !brokerHealth.isHealthy) {
     blockers.push(
       `The broker health gate is failing right now (${brokerHealth.reason ?? "unhealthy"}).  The scheduler skips this account every tick until it passes, and re-halts an active account if the failure persists.`
@@ -735,6 +746,7 @@ function setParked(
 
   const now = new Date().toISOString();
   let applied = false;
+  let after: ConnectedAccount = account;
   if (!request.dryRun) {
     getDb()
       .prepare(
@@ -751,6 +763,11 @@ function setParked(
         userId
       );
     applied = true;
+    // Re-read so the response describes the row as it NOW is. `account` is the pre-update snapshot,
+    // so reusing it made `body.account.parked` contradict the correct top-level `body.parked` in the
+    // very response that reports the change. A caller trusting the nested summary would read the
+    // old state back. (Seer, MEDIUM, 2026-09-27.)
+    after = getConnectedAccount(account.id, userId) ?? account;
   }
 
   const outcome = {
@@ -758,7 +775,7 @@ function setParked(
     body: {
       ok: true,
       dryRun: request.dryRun,
-      account: accountSummary(account),
+      account: accountSummary(after),
       parked: parking,
       parkedReason: parking ? request.reason : null,
       parkedAt: parking ? now : null,

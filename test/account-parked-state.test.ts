@@ -139,6 +139,53 @@ describe("ops account control — park (review rank 8)", () => {
     expect(JSON.stringify(list.body)).toContain("owner decision");
   });
 
+  it("does not self-contradict: the nested account summary matches the top-level flag", async () => {
+    // Seer, MEDIUM: the response reused the PRE-update account, so `body.account.parked` said false
+    // while the correct top-level `body.parked` said true - a response that disagreed with itself
+    // about the change it was reporting.
+    const { accountId } = await seedAccount();
+    const { runOpsAccountControl } = await import("../src/lib/ops-account-control");
+    const parked = await runOpsAccountControl({ action: "park_account", connectedAccountId: accountId, reason: "self-consistency", dryRun: false });
+    const p = parked.body as Record<string, any>;
+    expect(p.parked).toBe(true);
+    expect(p.account?.parked).toBe(true);
+    expect(p.account?.parkedReason).toBe("self-consistency");
+
+    const unparked = await runOpsAccountControl({ action: "unpark_account", connectedAccountId: accountId, dryRun: false });
+    const u = unparked.body as Record<string, any>;
+    expect(u.parked).toBe(false);
+    expect(u.account?.parked).toBe(false);
+  });
+
+  it("next-eligible-run says a parked account will NOT run", async () => {
+    // Seer, MEDIUM: the scheduler skips a parked account before deriving an execution state, but
+    // describeNextEligibleRun did not know about `parked` and reported willRun: true - the two
+    // disagreed in the worst direction, which is exactly the "operator thinks a parked account is
+    // live" confusion the flag exists to prevent.
+    //
+    // Called directly rather than through set_system_state: arming a synthetic account fails the
+    // broker preconditions and returns a refusal, so the response would never carry the field.
+    const { db, userId, accountId } = await seedAccount();
+    const { runOpsAccountControl, describeNextEligibleRun } = await import("../src/lib/ops-account-control");
+    const { getConnectedAccount, getPolicy } = await import("../src/lib/db");
+
+    const read = () => describeNextEligibleRun({ userId, account: getConnectedAccount(accountId, userId)!, policy: getPolicy(userId, accountId) });
+
+    // Before parking: the account is halted, so it is not running anyway - assert the parked
+    // blocker is absent so this cannot pass vacuously.
+    expect(JSON.stringify(read().blockers ?? [])).not.toContain("parked");
+
+    await runOpsAccountControl({ action: "park_account", connectedAccountId: accountId, reason: "quiet on purpose", dryRun: false });
+
+    const after = read();
+    expect(after.willRun).toBe(false);
+    expect(JSON.stringify(after.blockers ?? [])).toContain("parked");
+    // The reason travels with the blocker, so the operator can see WHY it is quiet without a
+    // second lookup.
+    expect(JSON.stringify(after.blockers ?? [])).toContain("quiet on purpose");
+    expect(db.listConnectedAccounts(userId).find((a) => a.id === accountId)?.parked).toBe(true);
+  });
+
   it("audits both directions", async () => {
     const { db, userId, accountId } = await seedAccount();
     const { runOpsAccountControl } = await import("../src/lib/ops-account-control");
