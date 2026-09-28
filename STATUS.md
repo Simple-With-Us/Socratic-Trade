@@ -72,6 +72,24 @@ gate for every unmarked candidate.  Side effect: this is the only ingest path th
 LLM call per lesson.  **Next:** P0-2 deterministic thesis tag.  Rollout:
 `docs/rollouts/2026-09-27-outcome-closure.md`.
 
+## 2026-09-27 MUSE — Playwright visual regression (fleet rollout, MERGED 606a4c7b)
+
+**What.**  Owner-directed fleet rollout: automated-only visual verification for the web UI.  New `test/e2e/visual.spec.ts` adds full-page `toHaveScreenshot` assertions (chromium-desktop, committed baselines under `test/e2e/visual.spec.ts-snapshots/`) for `/console` (Autonomy Desk) and `/login`.  Deterministic controls: reduced-motion, animation-killing style tag, hermetic network (browser requests not to `127.0.0.1` aborted), masks for chart figures/countdown clocks/day-PnL date label/freshness strip/Market Analysis card; consent gate accepted with a 30s budget + pre-screenshot sweep.  `e2e.yml` gains a narrow path-filtered `pull_request` trigger (test/e2e, config, lockfiles, itself) so the PR runs Playwright CI, plus failure-only result upload.  AGENTS.md "Verify before claiming done" now carries the automated-only policy: Jay never takes manual screenshots; native Mac UI is code-review/CI verified.  Branch `muse/playwright-visual-socratic-trade`, auto-merge armed on green.
+**Verified.**  Fresh attempt picked up the uncommitted work and re-based onto latest main (`d0440ed2`, +3 commits): STATUS.md/EFFORT-LOG.md entries re-anchored onto main's new rows; local baseline gen + second pass matched (2 passed / 2 mobile-skipped each, fleet Chrome-for-Testing, `next dev`), but CI's first `e2e` run failed both tests at 0.02 px-diff: committed PNGs must match the CI environment (bundled Chromium, ubuntu fonts, production build) byte for byte, so baselines were re-generated IN CI via the new `update-visual-baselines` workflow_dispatch input and committed.  `tsc --noEmit` clean, targeted eslint clean, `git diff --check` clean.  Rollout: `docs/rollouts/2026-09-27-playwright-visual-regression.md`.
+## 2026-09-25 CLAUDE — Order correctness review round (PR #3759 follow-up)
+
+**What/why.**  PR #3759 merged while an independent review was in flight; this follow-up fixes
+what the review confirmed.  (1) P1: a DOLLAR-sized buy against a held short (the autopilot's
+default sizing) now resolves against the short's per-share value and is placed as a whole-share
+cover without bracket legs, at the choke point and upstream.  (2) The autopilot flips an LLM
+`sell` of a held short into a `cover` only on a long-only venue, only for a market sell, and a
+dollar sell covers only its own dollars.  (3) A long-only schema now offers `cover` while a short
+is held, matching the prompt (prompt `agentic-strategy@2.19.1`).  (4) A failed placement-time
+position read is booked retryable `not_placed`, not `blocked`, and the approval lane passes its
+own just-read position as the caller-verified hint.  Declined: the "oversized sell should flip
+long to short" finding (Alpaca, Tradier, and Robinhood never flip in one order).  Board
+`687a5fb4`, branch `claude/st-order-correctness`.  Rollout:
+`docs/rollouts/2026-09-24-st-order-correctness.md` section 7.
 ## 2026-09-25 CLAUDE — Cash-flow HWM review round (follow-up to merged PR #3753, board 687a5fb4, lane F2)
 
 **What.**  Four independent-review findings on the merged cash-flow HWM work, all verified and
