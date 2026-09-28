@@ -212,6 +212,21 @@ branch:
 
 Docs updated: STATUS.md, docs/EFFORT-LOG.md, docs/rollouts/2026-09-27-sec-ingest-volume.md
 
+## Incidents during this change
+
+- **Another lane's edit leaked into this branch.**  A `git add -A` on the coverage-test commit swept
+  up `ios/SocraticTradeTests/Fixtures/policy-contract.json`, which had been written into this
+  worktree by a different MINIMAX session (its commit `307ec6f9c` on `minimax/outcome-closure`).
+  It is restored to `origin/main`'s content here so this PR carries only SEC-ingest work; the
+  change is preserved on that session's own branch.  Worth knowing that two sessions were writing
+  into one worktree tree at the same time.
+- **`node_modules` was deleted out from under this worktree** mid-verification (20:00), which made
+  `land.sh`'s `tsc` step report thousands of `TS2307 Cannot find module 'vitest'` errors against
+  files that had type-checked minutes earlier.  A second worktree (`st-mm-renovate-dedupe`) lost
+  its `node_modules` at the same moment and the disk was at 94% (28 GiB free), so this reads as
+  disk-pressure cleanup rather than anything this branch did.  `npm ci` restored it and every
+  gate re-ran clean from scratch.
+
 ## Follow-ups
 
 - After this merges, the 2,156-task backlog starts draining across issuers instead of one at a
