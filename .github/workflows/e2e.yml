@@ -216,7 +216,7 @@ jobs:
         run: npx playwright test test/e2e/visual.spec.ts --update-snapshots
       - name: Upload regenerated visual baselines
         if: needs.classify.outputs.docs-only != 'true' && inputs.update-visual-baselines == true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: visual-baselines-${{ github.run_attempt }}
           path: test/e2e/visual.spec.ts-snapshots/
@@ -225,7 +225,7 @@ jobs:
       # the only way to see what changed. Upload on failure for PR review.
       - name: Upload Playwright results on failure
         if: failure() && needs.classify.outputs.docs-only != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-results-${{ github.run_attempt }}
           path: |
