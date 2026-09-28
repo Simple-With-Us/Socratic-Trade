@@ -20,7 +20,12 @@ import { shouldDeferRagIngestDuringRth } from "../sqlite-event-loop";
 import { parseFilingHtml } from "../web-sources/sec-parser";
 import { ingestCompanyFacts, parseAndSaveForm4 } from "../web-sources/sec-facts";
 import { storeDocument, classifyEmbedFailure, hasIngestTextBudget } from "../vector-db";
-import { readLocalArtifact, writeLocalArtifact } from "../web-sources/sec-filings";
+import {
+  readLocalArtifact,
+  secAbstractFormHint,
+  secAbstractSourceType,
+  writeLocalArtifact
+} from "../web-sources/sec-filings";
 import { insertDocumentChunkFtsBatch, countDocumentChunkFts, ftsMirrorResumeOffset } from "../db";
 import { hasInFlightStrategyWork } from "../db-execution";
 import { serverKnobBool } from "../server-knobs";
@@ -638,6 +643,42 @@ export class SecIngestWorker {
           await writeLocalArtifact(task.cik, task.accession, sequence, "storeResult.json", JSON.stringify(res));
         }
 
+        // 2026-09-27 B-2: extractive abstract, right next to storeDocument.  The backfill lane is
+        // the ONLY way these documents enter the corpus, and it used to leave every backfilled
+        // filing with no abstract at all — while `information-routing.ts` reads abstracts to
+        // decide that a document answers a question.  Deliberately the same deterministic
+        // extractive highlighter the direct filing/8-K paths already use
+        // (DOCUMENT_HIGHLIGHT_MODEL = "extractive-highlights-v2", no LLM on the ingest path);
+        // mirrors sec-filings.ts / sec8k.ts.  Best-effort: an abstract failure must never fail the
+        // embedding, so it is caught and logged, and abstractNeedsUpgrade makes it idempotent
+        // (a task that resumes here does not re-generate).
+        if (doc) {
+          const docTypeText = typeof task.payload.docType === "string" ? task.payload.docType : "10-K";
+          const sourceType = secAbstractSourceType(docTypeText);
+          try {
+            const { abstractNeedsUpgrade, generateAndStoreDocumentAbstract, tradeHighlightChunksFromText } =
+              await import("./document-summarizer");
+            if (abstractNeedsUpgrade(task.accession, sourceType)) {
+              await generateAndStoreDocumentAbstract({
+                ticker: task.symbol,
+                accessionOrEventId: task.accession,
+                sourceType,
+                headline: `${task.symbol} ${docTypeText} highlights (${task.payload.filedAt ?? ""})`.trim(),
+                chunks: tradeHighlightChunksFromText(doc.text, {
+                  maxChunks: 8,
+                  formHint: secAbstractFormHint(docTypeText)
+                }),
+                publishedAt: task.payload.filedAt as string | undefined,
+                acceptanceDatetime: (task.payload.acceptanceDateTime as string | undefined) ?? undefined
+              });
+            }
+          } catch (err) {
+            console.warn(
+              `[SecIngestWorker] extractive abstract failed for ${vectorDocId}: ${(err as Error)?.message ?? err}`
+            );
+          }
+        }
+
         // Lexical (FTS) indexing happens HERE — only after storeDocument reported a complete
         // committed document — so hybrid retrieval can never surface chunks whose vector commit
         // failed or is still retrying. insertDocumentChunkFts is idempotent per occurrence
@@ -763,7 +804,6 @@ export class SecIngestWorker {
         clearInterval(leaseHeartbeat);
       }
     }
-
     if (checkpoint === "embedded") {
       heartbeat();
       const ok = advanceSecIngestTask({

@@ -1230,6 +1230,17 @@ describe("in-process checkpoint drain (2026-09-27 P0-2)", () => {
     expect(attempts.at(-1)!.checkpoint).toBe("verified");
     expect(after.stageAttempts).toBe(0);
     expect(after.totalAttempts).toBe(11);
+
+    // 2026-09-27 B-2: the backfill lane now produces the extractive abstract too. Before this the
+    // only way a document got an abstract was the direct filing/8-K path, so EVERY backfilled
+    // filing landed without one even though information-routing reads abstracts to decide that a
+    // document answers a question.
+    const { getDocumentAbstractByAccession } = await import("../src/lib/db-document-abstracts");
+    const abstract = getDocumentAbstractByAccession(accession)!;
+    expect(abstract).toBeDefined();
+    expect(abstract.sourceType).toBe("10k-delta");
+    expect(abstract.modelUsed).toBe("extractive-highlights-v2");
+    expect(abstract.summaryText.length).toBeGreaterThan(0);
   });
 
   it("hands the task back (no stage attempt burned) when the drain budget is already spent", async () => {
@@ -1345,7 +1356,7 @@ describe("in-process checkpoint drain (2026-09-27 P0-2)", () => {
     try {
       await worker.processTask(claimed![0]!);
     } finally {
-      finishStrategyRun(runId, "finished", "drain test release", userId);
+      finishStrategyRun(runId, "completed", "drain test release", userId);
     }
 
     const released = getSecIngestTask(taskId)!;
