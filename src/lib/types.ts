@@ -1683,6 +1683,15 @@ export interface TradeProposal {
    * at persistence time by the strategy loop; legacy proposals and test fixtures don't carry it. */
   scorecard?: ProposalScorecard;
   tradeThesisTag: string;
+  /**
+   * The tag the PROPOSING MODEL chose, retained when `tradeThesisTag` was overridden by the
+   * deterministic thesis scorer (src/lib/strategy-prompts.ts, P0-2). Absent when the scorer
+   * abstained or on proposals persisted before 2026-09-27, in which case `tradeThesisTag` IS the
+   * model's own pick. This is what makes the two comparable: the report can be recomputed on
+   * assigned tags and on proposed tags side by side, and the divergence is measured from the
+   * `thesis_tag_assigned` audit events rather than inferred.
+   */
+  tradeThesisProposedTag?: string;
   entryMarketRegime: string;
   /**
    * Multi-signal regime severity ([0,1], rounded 2dp) from `computeMultiSignalSeverity`
@@ -3448,6 +3457,24 @@ export interface LearnedContextRow {
   dominantFactor?: string | null;
 }
 
+/**
+ * EXPLICIT producer provenance for a candidate whose epistemic status is settled at the source.
+ *
+ * "system-postmortem" is the single narrow value today, and it means exactly one thing: the statement
+ * was derived BY THIS APP from its OWN already-realized, already-measured trade outcomes (the
+ * post-mortem lesson writer in outcome-engine.ts). It is a fact about a closed trade, not a claim
+ * about how the agent *should* trade going forward. The semantic gate asks a model "is this behavioral
+ * advice?" — for a closed-outcome post-mortem that is a category error, so the LLM layer is skipped
+ * for these rows (see semantic-gate.ts). The keyword layer stays AUTHORITATIVE and still routes a
+ * lesson that reads like a risk knob to the human queue.
+ *
+ * The marker is OPT-IN PER CANDIDATE and deliberately NOT inferred from `origin`: a generic
+ * "autonomous" producer (chat-driven ingest, a future agent) keeps the full gate. Widening this union
+ * is a safety-relevant change — each new value is a class of statement that stops being second-guessed
+ * by a model, so it needs the same review the first one got.
+ */
+export type LearnedContextCandidateProvenance = "system-postmortem";
+
 /** A pre-persistence learned-context candidate (origin/scope are assigned at ingest time). */
 export interface LearnedContextCandidate {
   kind: LearnedContextKind;
@@ -3458,6 +3485,8 @@ export interface LearnedContextCandidate {
   confidence?: number;
   /** Optional intent hint from the producer; the classifier may use it to force 'risk'. */
   intent?: string;
+  /** Set only when the producer can vouch for the statement's provenance. See the type doc. */
+  provenance?: LearnedContextCandidateProvenance;
 }
 
 /** Status of a queued risk-tier candidate awaiting explicit human confirmation. */

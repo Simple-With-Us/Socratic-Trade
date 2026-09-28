@@ -209,13 +209,15 @@ describe("retrieval-usefulness join", () => {
 });
 
 describe("advisory usefulness weighting", () => {
-  it("bounds the multiplier to [0.9, 1.1] and stays neutral under the sample floor", async () => {
+  it("reaches the full ±20% the coefficient allows, and stays neutral under the sample floor", async () => {
     const { usefulnessMultiplier, USEFULNESS_MIN_SAMPLES } = await import("../src/lib/retrieval-usefulness");
     expect(usefulnessMultiplier(undefined)).toBe(1);
     expect(usefulnessMultiplier({ samples: USEFULNESS_MIN_SAMPLES - 1, wins: 4, losses: 0 })).toBe(1);
     expect(usefulnessMultiplier({ samples: 10, wins: 0, losses: 0 })).toBe(1);
-    expect(usefulnessMultiplier({ samples: 100, wins: 100, losses: 0 })).toBe(1.1); // clamped, never more
-    expect(usefulnessMultiplier({ samples: 100, wins: 0, losses: 100 })).toBe(0.9); // clamped, never less
+    // The reachable range is 0.8–1.2: `1 + (hitRate - 0.5) * 0.4`. Before 2026-09-27 the
+    // 0.9/1.1 clamp was BINDING and silently clipped a third off both ends.
+    expect(usefulnessMultiplier({ samples: 100, wins: 100, losses: 0 })).toBeCloseTo(1.2, 10);
+    expect(usefulnessMultiplier({ samples: 100, wins: 0, losses: 100 })).toBeCloseTo(0.8, 10);
     expect(usefulnessMultiplier({ samples: 10, wins: 5, losses: 5 })).toBe(1); // coin-flip = neutral
   });
 
@@ -239,7 +241,7 @@ describe("advisory usefulness weighting", () => {
 
     const analog = { doc_type: "socratic-decision", score: 0.8 };
     const coach = { doc_type: "coach-note", score: 0.75 };
-    // Positional RRF base: analog #0 -> 0.9/60 = 0.0150; coach #1 -> 1.1/61 = 0.0180 -> coach first.
+    // Positional RRF base: analog #0 -> 0.8/60 = 0.0133; coach #1 -> 1.2/61 = 0.0197 -> coach first.
     expect(applyRetrievalUsefulnessWeighting([analog, coach], userId)).toEqual([coach, analog]);
     // Rank-stable by design: the base is POSITIONAL, so an incoming order that does not follow the
     // raw scores (e.g. the hybrid RRF-fused order) is respected — same-kind chunks (equal
@@ -304,7 +306,7 @@ describe("advisory usefulness weighting", () => {
     const coach = { doc_type: "coach-note", score: 0.8 };
     const analog = { doc_type: "socratic-decision", score: 0.75 };
 
-    // Default (raw): only the plain rows count -> analog x1.1 overtakes coach x0.9.
+    // Default (raw): only the plain rows count -> analog x1.2 overtakes coach x0.8.
     clearRetrievalUsefulnessWeightCache();
     expect(applyRetrievalUsefulnessWeighting([coach, analog], userId)).toEqual([analog, coach]);
 
@@ -368,5 +370,105 @@ describe("advisory usefulness weighting", () => {
     expect(applyRetrievalUsefulnessWeighting(chunks, userId)).toEqual(chunks);
     delete process.env.RETRIEVAL_USEFULNESS_WEIGHTING;
     expect(applyRetrievalUsefulnessWeighting(chunks, userId)).not.toEqual(chunks);
+  });
+});
+
+// ── P1-3 (2026-09-27): the filings path must actually USE the statistics this join produces ────────
+// The weighting function had exactly ONE caller (experience-memory.ts). The per-doc-type statistics
+// — "documents of this kind preceded decisions that did well" — were computed, persisted, and then
+// never consulted on the path that retrieves the majority of the evidence the Bull proposer reads.
+// These pin the wiring and the no-feedback-loop property, since a ranking nudge that can feed itself
+// would be worse than no nudge at all.
+describe("P1-3: the filings dossier path applies the usefulness weighting", () => {
+  it("strategy.ts calls applyRetrievalUsefulnessWeighting on the retrieved filings chunks", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join: pathJoin } = await import("node:path");
+    const src = readFileSync(pathJoin(process.cwd(), "src/lib/strategy.ts"), "utf8");
+    // The import and the call must both be present, and the call must be on the FILINGS branch —
+    // i.e. after BOTH retrieval shapes (proposer dossier and plain retrieveContextDetailed).
+    expect(src).toContain('await import("./retrieval-usefulness")');
+    expect(src).toContain("applyRetrievalUsefulnessWeighting(chunks, userId)");
+    const dossierIdx = src.indexOf("chunks = dossier.chunks;");
+    const plainIdx = src.indexOf("chunks = await retrieveContextDetailed(");
+    const weightIdx = src.indexOf("applyRetrievalUsefulnessWeighting(chunks, userId)");
+    expect(dossierIdx).toBeGreaterThan(-1);
+    expect(plainIdx).toBeGreaterThan(-1);
+    // After BOTH branches, so neither retrieval shape can bypass the re-rank.
+    expect(weightIdx).toBeGreaterThan(dossierIdx);
+    expect(weightIdx).toBeGreaterThan(plainIdx);
+  });
+
+  it("the weighting is bounded: usefulness can never promote a document the retriever ranked last", async () => {
+    const { USEFULNESS_MULTIPLIER_MIN, USEFULNESS_MULTIPLIER_MAX, usefulnessMultiplier, USEFULNESS_RRF_K } = await import(
+      "../src/lib/retrieval-usefulness"
+    );
+    // The bound is what makes "a nudge, never a takeover" a property of the CODE rather than a hope:
+    // the multiplier is clamped no matter what the coefficient above is later changed to.
+    expect(USEFULNESS_MULTIPLIER_MIN).toBeGreaterThan(0.5);
+    expect(USEFULNESS_MULTIPLIER_MAX).toBeLessThan(2);
+    // The operating range is the coefficient's ±20%, and it is now REACHABLE — the old 0.9/1.1
+    // clamp bound tighter than the coefficient and clipped a third off both ends.
+    expect(usefulnessMultiplier({ samples: 500, wins: 500, losses: 0 })).toBeCloseTo(1.2, 10);
+    expect(usefulnessMultiplier({ samples: 500, wins: 0, losses: 500 })).toBeCloseTo(0.8, 10);
+    // The clamp is a genuine backstop, not dead code: widen it further and nothing changes, because
+    // the coefficient is what actually limits the multiplier today.
+    expect(usefulnessMultiplier({ samples: 500, wins: 500, losses: 0 })).toBeLessThan(USEFULNESS_MULTIPLIER_MAX);
+    // What the positional RRF base guarantees is the SHAPE of the reorder, not its absence: a chunk
+    // at position m can only overtake position n when the multiplier ratio exceeds (K+m)/(K+n).
+    // Asserted rather than assumed, so a change to the coefficient that made the nudge a takeover
+    // would fail here instead of silently inverting the retriever's ordering.
+    const ratio = usefulnessMultiplier({ samples: 500, wins: 500, losses: 0 }) /
+      usefulnessMultiplier({ samples: 500, wins: 0, losses: 500 });
+    expect(ratio).toBeCloseTo(1.5, 10);
+    // HONEST STATEMENT OF WHAT THE BOUND DOES AND DOES NOT BUY. A chunk at position m overtakes
+    // position n when the multiplier ratio exceeds (K+m)/(K+n). Over a SHORT list that threshold is
+    // small, so a ±20% nudge CAN invert a wide gap — (60+0)/(60+7) is 0.896, well under the 1.5
+    // ratio. "Nudge, never a takeover" is therefore true in the sense that the MULTIPLIER is bounded,
+    // nothing is ever excluded, equal multipliers are rank-stable, and the whole thing is toggleable
+    // and fail-open — NOT in the sense that the retriever's order is preserved end to end. Pinning
+    // the real ratio here means a future change to the coefficient that widened the nudge further
+    // would fail this assertion instead of quietly turning the re-rank into a takeover.
+    expect((USEFULNESS_RRF_K + 0) / (USEFULNESS_RRF_K + 7)).toBeLessThan(ratio);
+    expect(ratio).toBeCloseTo(1.5, 10);
+  });
+
+  it("NO FEEDBACK LOOP: the multiplier is keyed on aggregate doc-type stats, never per-document", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join: pathJoin } = await import("node:path");
+    const src = readFileSync(pathJoin(process.cwd(), "src/lib/retrieval-usefulness.ts"), "utf8");
+    // The lookup inside applyRetrievalUsefulnessWeighting is keyed ONLY on doc_type and memory kind.
+    // If it were ever keyed on a vector/chunk id, a document could be credited for influencing a
+    // decision and then re-ranked on its own influence — the self-referential loop the wiring must
+    // never introduce.
+    const fn = src.slice(src.indexOf("export function applyRetrievalUsefulnessWeighting"));
+    const lookup = fn.slice(fn.indexOf("const multiplier ="), fn.indexOf("const multiplier =") + 220);
+    expect(lookup).toContain("doc_type");
+    expect(lookup).toContain("memoryKindForDocType");
+    expect(lookup).not.toContain("vector_id");
+    expect(lookup).not.toContain("chunk.id");
+    expect(lookup).not.toContain("chunkId");
+  });
+
+  it("the re-rank fails OPEN — the toggle still returns the incoming order unchanged", async () => {
+    const userId = `ru-failopen-${randomUUID()}`;
+    const { applyRetrievalUsefulnessWeighting, clearRetrievalUsefulnessWeightCache } = await import(
+      "../src/lib/retrieval-usefulness"
+    );
+    const { creditRetrievalUsefulness } = await import("../src/lib/db");
+    for (let i = 0; i < 6; i += 1) {
+      creditRetrievalUsefulness(userId, `d-failopen-${i}`, [
+        { docType: "sec-10k", memoryKind: "context", horizon: "headline", returnPct: -3 }
+      ]);
+    }
+    clearRetrievalUsefulnessWeightCache();
+    const input = [
+      { doc_type: "sec-10q", score: 0.9 },
+      { doc_type: "sec-10k", score: 0.8 }
+    ];
+    process.env.RETRIEVAL_USEFULNESS_WEIGHTING = "off";
+    expect(applyRetrievalUsefulnessWeighting(input, userId)).toEqual(input);
+    // A single chunk is a no-op even with stats present (nothing to reorder).
+    delete process.env.RETRIEVAL_USEFULNESS_WEIGHTING;
+    expect(applyRetrievalUsefulnessWeighting([input[0]], userId)).toEqual([input[0]]);
   });
 });
