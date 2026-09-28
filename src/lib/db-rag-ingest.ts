@@ -6,6 +6,7 @@
 // quarantine, and auditable cost/verification receipts.
 import "server-only";
 import crypto from "crypto";
+import type Database from "better-sqlite3";
 import { getDb } from "./db";
 
 export const SEC_INGEST_CHECKPOINTS = [
@@ -542,6 +543,112 @@ function boundedLeaseMs(value: number | undefined): number {
   return Math.max(1_000, Math.min(60 * 60_000, parsed));
 }
 
+/** Shared per-candidate claim body: retire an expired lease (dead-lettering a task whose stage
+ *  attempt budget is spent), then lease the row to `owner` and open a fresh attempt receipt. Shared
+ *  by the per-job claim and the cross-job round-robin claim so both keep IDENTICAL lease-expiry
+ *  and attempt-accounting discipline. Returns the claimed task, or null when the row was retired
+ *  or lost the race. Runs inside the caller's claim transaction. */
+function claimSecIngestCandidate(
+  database: Database.Database,
+  candidate: RawTaskRow,
+  ctx: { owner: string; nowIso: string; leaseExpiresAt: string }
+): SecIngestTask | null {
+  if (candidate.status === "leased" && candidate.lease_token) {
+    const attemptsExhausted = candidate.stage_attempts >= candidate.max_stage_attempts;
+    const expiredAttempt = database
+      .prepare(
+        `UPDATE sec_ingest_task_attempts
+         SET outcome = ?, finished_at = ?,
+             error_type = CASE WHEN ? THEN 'lease_attempts_exhausted' ELSE error_type END,
+             error = CASE WHEN ? THEN 'worker lease expired after the stage attempt budget was exhausted' ELSE error END
+         WHERE task_id = ? AND lease_token = ? AND outcome = 'claimed'`
+      )
+      .run(
+        attemptsExhausted ? "dead_letter" : "lease_expired",
+        ctx.nowIso,
+        attemptsExhausted ? 1 : 0,
+        attemptsExhausted ? 1 : 0,
+        candidate.id,
+        candidate.lease_token
+      );
+    if (expiredAttempt.changes !== 1) {
+      throw new Error("Expired SEC ingest claim has no matching attempt receipt");
+    }
+    if (attemptsExhausted) {
+      const terminal = database
+        .prepare(
+          `UPDATE sec_ingest_tasks
+           SET status = 'dead_letter', next_retry_at = NULL,
+               lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+               last_error_type = 'lease_attempts_exhausted',
+               last_error = 'worker lease expired after the stage attempt budget was exhausted',
+               last_error_json = ?, updated_at = ?
+           WHERE id = ? AND status = 'leased' AND lease_token = ? AND lease_expires_at <= ?`
+        )
+        .run(
+          stableSecIngestJson({
+            checkpoint: candidate.checkpoint,
+            stageAttempts: candidate.stage_attempts,
+            maxStageAttempts: candidate.max_stage_attempts
+          }),
+          ctx.nowIso,
+          candidate.id,
+          candidate.lease_token,
+          ctx.nowIso
+        );
+      if (terminal.changes !== 1) throw new Error("Expired SEC ingest claim could not be dead-lettered");
+      database.prepare("UPDATE sec_ingest_jobs SET updated_at = ? WHERE id = ?").run(ctx.nowIso, candidate.job_id);
+      return null;
+    }
+  }
+  const leaseToken = crypto.randomUUID();
+  const info = database
+    .prepare(
+      `UPDATE sec_ingest_tasks
+       SET status = 'leased', lease_owner = ?, lease_token = ?, lease_expires_at = ?,
+           heartbeat_at = ?, next_retry_at = NULL, total_attempts = total_attempts + 1,
+           stage_attempts = stage_attempts + 1, updated_at = ?
+       WHERE id = ?
+         AND EXISTS (SELECT 1 FROM sec_ingest_jobs WHERE id = sec_ingest_tasks.job_id AND status = 'running')
+         AND (
+           status = 'pending'
+           OR (status = 'retry_wait' AND next_retry_at <= ?)
+           OR (status = 'leased' AND lease_expires_at <= ?)
+         )`
+    )
+    .run(
+      ctx.owner,
+      leaseToken,
+      ctx.leaseExpiresAt,
+      ctx.nowIso,
+      ctx.nowIso,
+      candidate.id,
+      ctx.nowIso,
+      ctx.nowIso
+    );
+  if (info.changes !== 1) return null;
+  const row = database.prepare("SELECT * FROM sec_ingest_tasks WHERE id = ?").get(candidate.id) as RawTaskRow;
+  database
+    .prepare(
+      `INSERT INTO sec_ingest_task_attempts (
+        task_id, attempt_no, checkpoint, lease_owner, lease_token,
+        started_at, heartbeat_at, outcome
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'claimed')`
+    )
+    .run(row.id, row.total_attempts, row.checkpoint, ctx.owner, leaseToken, ctx.nowIso, ctx.nowIso);
+  return rowToTask(row);
+}
+
+function claimLimit(options: { limit?: number }): number {
+  if (
+    options.limit !== undefined &&
+    (!Number.isFinite(options.limit) || !Number.isInteger(options.limit) || options.limit < 1)
+  ) {
+    throw new Error("SEC ingest task claim limit must be a positive finite integer");
+  }
+  return Math.min(200, options.limit ?? 20);
+}
+
 export function claimSecIngestTasks(
   jobId: string,
   options: { owner: string; limit?: number; leaseMs?: number; now?: Date }
@@ -551,13 +658,7 @@ export function claimSecIngestTasks(
   const now = options.now ?? new Date();
   const nowIso = now.toISOString();
   const leaseExpiresAt = new Date(now.getTime() + boundedLeaseMs(options.leaseMs)).toISOString();
-  if (
-    options.limit !== undefined &&
-    (!Number.isFinite(options.limit) || !Number.isInteger(options.limit) || options.limit < 1)
-  ) {
-    throw new Error("SEC ingest task claim limit must be a positive finite integer");
-  }
-  const limit = Math.min(200, options.limit ?? 20);
+  const limit = claimLimit(options);
   const claim = database.transaction((): SecIngestTask[] => {
     const candidates = database
       .prepare(
@@ -573,93 +674,13 @@ export function claimSecIngestTasks(
       )
       .all(jobId, nowIso, nowIso, limit) as RawTaskRow[];
     const claimed: SecIngestTask[] = [];
-    const read = database.prepare("SELECT * FROM sec_ingest_tasks WHERE id = ?");
     for (const candidate of candidates) {
-      if (candidate.status === "leased" && candidate.lease_token) {
-        const attemptsExhausted = candidate.stage_attempts >= candidate.max_stage_attempts;
-        const expiredAttempt = database
-          .prepare(
-            `UPDATE sec_ingest_task_attempts
-             SET outcome = ?, finished_at = ?,
-                 error_type = CASE WHEN ? THEN 'lease_attempts_exhausted' ELSE error_type END,
-                 error = CASE WHEN ? THEN 'worker lease expired after the stage attempt budget was exhausted' ELSE error END
-             WHERE task_id = ? AND lease_token = ? AND outcome = 'claimed'`
-          )
-          .run(
-            attemptsExhausted ? "dead_letter" : "lease_expired",
-            nowIso,
-            attemptsExhausted ? 1 : 0,
-            attemptsExhausted ? 1 : 0,
-            candidate.id,
-            candidate.lease_token
-          );
-        if (expiredAttempt.changes !== 1) {
-          throw new Error("Expired SEC ingest claim has no matching attempt receipt");
-        }
-        if (attemptsExhausted) {
-          const terminal = database
-            .prepare(
-              `UPDATE sec_ingest_tasks
-               SET status = 'dead_letter', next_retry_at = NULL,
-                   lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
-                   last_error_type = 'lease_attempts_exhausted',
-                   last_error = 'worker lease expired after the stage attempt budget was exhausted',
-                   last_error_json = ?, updated_at = ?
-               WHERE id = ? AND status = 'leased' AND lease_token = ? AND lease_expires_at <= ?`
-            )
-            .run(
-              stableSecIngestJson({
-                checkpoint: candidate.checkpoint,
-                stageAttempts: candidate.stage_attempts,
-                maxStageAttempts: candidate.max_stage_attempts
-              }),
-              nowIso,
-              candidate.id,
-              candidate.lease_token,
-              nowIso
-            );
-          if (terminal.changes !== 1) throw new Error("Expired SEC ingest claim could not be dead-lettered");
-          database.prepare("UPDATE sec_ingest_jobs SET updated_at = ? WHERE id = ?").run(nowIso, candidate.job_id);
-          continue;
-        }
-      }
-      const leaseToken = crypto.randomUUID();
-      const info = database
-        .prepare(
-          `UPDATE sec_ingest_tasks
-           SET status = 'leased', lease_owner = ?, lease_token = ?, lease_expires_at = ?,
-               heartbeat_at = ?, next_retry_at = NULL, total_attempts = total_attempts + 1,
-               stage_attempts = stage_attempts + 1, updated_at = ?
-           WHERE id = ?
-             AND EXISTS (SELECT 1 FROM sec_ingest_jobs WHERE id = ? AND status = 'running')
-             AND (
-               status = 'pending'
-               OR (status = 'retry_wait' AND next_retry_at <= ?)
-               OR (status = 'leased' AND lease_expires_at <= ?)
-             )`
-        )
-        .run(
-          options.owner,
-          leaseToken,
-          leaseExpiresAt,
-          nowIso,
-          nowIso,
-          candidate.id,
-          jobId,
-          nowIso,
-          nowIso
-        );
-      if (info.changes !== 1) continue;
-      const row = read.get(candidate.id) as RawTaskRow;
-      database
-        .prepare(
-          `INSERT INTO sec_ingest_task_attempts (
-            task_id, attempt_no, checkpoint, lease_owner, lease_token,
-            started_at, heartbeat_at, outcome
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'claimed')`
-        )
-        .run(row.id, row.total_attempts, row.checkpoint, options.owner, leaseToken, nowIso, nowIso);
-      claimed.push(rowToTask(row));
+      const task = claimSecIngestCandidate(database, candidate, {
+        owner: options.owner,
+        nowIso,
+        leaseExpiresAt
+      });
+      if (task) claimed.push(task);
     }
     return claimed;
   });
@@ -667,6 +688,146 @@ export function claimSecIngestTasks(
   // it rolls every partial claim back, while the thrown error stops a worker that cannot prove its
   // durable state instead of disguising infrastructure failure as an empty queue.
   return claim.immediate() as SecIngestTask[];
+}
+
+/**
+ * Cross-job round-robin claim — the worker's production claim path.
+ *
+ * The per-job claim (`claimSecIngestTasks`) cannot express fairness: the worker used to loop
+ * `SELECT id FROM sec_ingest_jobs WHERE status='running'` (no ORDER BY, so DB order) and hand the
+ * whole per-tick budget to the FIRST job that had candidates. With ~500 running jobs, issuer #1
+ * consumed all 5 slots every tick and every other issuer sat at `discovered` forever (2,156
+ * tasks pending since 2026-08-10).
+ *
+ * This claim takes `perJobLimit` candidates from EVERY running job (ranked by the same
+ * priority/ordinal/age order the per-job claim uses), then orders that union globally by
+ * priority DESC then age and takes `limit`. The per-job ceiling is a fairness bound: no job
+ * can take more than its share of a tick no matter how much pending work it has, and a job with
+ * a huge backlog cannot starve the rest of the queue. If the fair window comes back SHORT — a
+ * lone job is the only thing with work left, so there is nobody to starve — the claim tops the
+ * tick up from the same global order without the ceiling, because throughput should not be
+ * sacrificed when fairness has nothing to protect.
+ *
+ * Ordering is priority first (money-path overlay from sec-ingest-priority), then age, so the
+ * oldest work still wins within a priority band. Default `perJobLimit` is half the tick budget
+ * (rounded up), which keeps the claim global while still letting one job use spare slots when
+ * nothing else is claimable.
+ */
+export function claimSecIngestTasksAcrossJobs(
+  options: { owner: string; limit?: number; perJobLimit?: number; leaseMs?: number; now?: Date }
+): SecIngestTask[] {
+  if (!options.owner.trim()) throw new Error("SEC ingest task claim owner is required");
+  const database = getDb();
+  const now = options.now ?? new Date();
+  const nowIso = now.toISOString();
+  const leaseExpiresAt = new Date(now.getTime() + boundedLeaseMs(options.leaseMs)).toISOString();
+  const limit = claimLimit(options);
+  const perJobLimit =
+    options.perJobLimit !== undefined
+      ? Math.max(1, Math.min(limit, Math.floor(options.perJobLimit)))
+      : Math.max(1, Math.ceil(limit / 2));
+  const claim = database.transaction((): SecIngestTask[] => {
+    // One row per (job, rank) window: rn <= perJobLimit is each job's own top slice, so the
+    // per-job ceiling is applied by the database, not by a JavaScript loop over 500 jobs.
+    const fairWindow = database.prepare(
+      `SELECT t.* FROM (
+         SELECT t.*, ROW_NUMBER() OVER (
+           PARTITION BY t.job_id
+           ORDER BY t.priority DESC, t.ordinal ASC, t.created_at ASC, t.id ASC
+         ) AS job_rank
+         FROM sec_ingest_tasks t
+         JOIN sec_ingest_jobs j ON j.id = t.job_id
+         WHERE j.status = 'running' AND (
+           t.status = 'pending'
+           OR (t.status = 'retry_wait' AND t.next_retry_at <= ?)
+           OR (t.status = 'leased' AND t.lease_expires_at <= ?)
+         )
+       ) t
+       WHERE t.job_rank <= ?
+       ORDER BY t.priority DESC, t.created_at ASC, t.id ASC
+       LIMIT ?`
+    );
+    // Same order, no ceiling — only read when the fair window could not fill the tick.
+    const fairFill = database.prepare(
+      `SELECT t.* FROM sec_ingest_tasks t
+       JOIN sec_ingest_jobs j ON j.id = t.job_id
+       WHERE j.status = 'running' AND (
+         t.status = 'pending'
+         OR (t.status = 'retry_wait' AND t.next_retry_at <= ?)
+         OR (t.status = 'leased' AND t.lease_expires_at <= ?)
+       )
+       ORDER BY t.priority DESC, t.created_at ASC, t.id ASC
+       LIMIT ?`
+    );
+    const claimed: SecIngestTask[] = [];
+    const consume = (candidates: RawTaskRow[]) => {
+      for (const candidate of candidates) {
+        if (claimed.length >= limit) break;
+        const task = claimSecIngestCandidate(database, candidate, {
+          owner: options.owner,
+          nowIso,
+          leaseExpiresAt
+        });
+        if (task) claimed.push(task);
+      }
+    };
+    consume(fairWindow.all(nowIso, nowIso, perJobLimit, limit) as RawTaskRow[]);
+    if (claimed.length < limit) {
+      consume(fairFill.all(nowIso, nowIso, limit - claimed.length) as RawTaskRow[]);
+    }
+    return claimed;
+  });
+  // Same fail-closed boundary as the per-job claim: a partial claim must roll back, and a
+  // database/schema failure must surface instead of looking like an empty queue.
+  return claim.immediate() as SecIngestTask[];
+}
+
+/**
+ * Re-lease ONE already-advanced task for its next checkpoint stage, in the same process.
+ *
+ * `advanceSecIngestTask` deliberately RELEASES the lease (it sets status back to `pending` and
+ * clears the lease columns) because a checkpoint is a durable handoff point: a crash between
+ * stages is recoverable by any worker. That handoff is what made one document cost 11 separate
+ * claim→process→advance cycles (5 tasks/tick, 5s tick, serialized tickInFlight ⇒ 11x less
+ * throughput than the cap implied). When the worker stays inside one process it must re-acquire
+ * the lease between stages, and it must do so through the SAME accounting as a tick claim:
+ * a new attempt receipt, `total_attempts` bumped, `stage_attempts` re-armed at 1 (advance
+ * already reset it to 0), and the job must still be `running`.
+ *
+ * Returns the freshly leased task, or null when the task is no longer claimable — a completed
+ * task, a job that left `running`, or a concurrent claim. Callers treat null as "stop; the
+ * durable state is authoritative".
+ */
+export function reclaimSecIngestTaskForStage(input: {
+  taskId: string;
+  owner: string;
+  leaseMs?: number;
+  now?: Date;
+}): SecIngestTask | null {
+  if (!input.owner.trim()) throw new Error("SEC ingest task claim owner is required");
+  const database = getDb();
+  const now = input.now ?? new Date();
+  const nowIso = now.toISOString();
+  const leaseExpiresAt = new Date(now.getTime() + boundedLeaseMs(input.leaseMs)).toISOString();
+  const reclaim = database.transaction((): SecIngestTask | null => {
+    const candidate = database
+      .prepare(
+        `SELECT t.* FROM sec_ingest_tasks t
+         JOIN sec_ingest_jobs j ON j.id = t.job_id
+         WHERE t.id = ? AND j.status = 'running' AND (
+           t.status = 'pending'
+           OR (t.status = 'retry_wait' AND t.next_retry_at <= ?)
+         )`
+      )
+      .get(input.taskId, nowIso) as RawTaskRow | undefined;
+    if (!candidate) return null;
+    return claimSecIngestCandidate(database, candidate, {
+      owner: input.owner,
+      nowIso,
+      leaseExpiresAt
+    });
+  });
+  return reclaim.immediate() as SecIngestTask | null;
 }
 
 export function heartbeatSecIngestTask(input: {
