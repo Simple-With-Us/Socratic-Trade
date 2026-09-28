@@ -77,12 +77,22 @@ $(printf '%s' "$raw" | python3 -c 'import json,sys; print(json.load(sys.stdin).g
 # A required context that no workflow can ever report is worse than no protection: every PR sits
 # BLOCKED forever with a check name that appears nowhere in the logs. This is the failure mode that
 # makes a context rename a fleet-wide outage.
-for ctx in $actual_contexts; do
+# Split on the PIPE explicitly. `for ctx in $actual_contexts` word-splits on IFS (space/tab/newline),
+# NOT on `|`, so the loop body ran exactly once with ctx="verify|gitleaks" - and because `|` is
+# alternation in an ERE, `grep -E "^  verify|gitleaks:$"` matches almost anything. The guard then
+# passed for the wrong reason and would have approved a protection naming a context no workflow
+# produces, which is precisely the failure it exists to catch. (Found by Seer, HIGH, 2026-09-27.)
+IFS='|' read -r -a required_contexts <<< "$actual_contexts"
+[ "${#required_contexts[@]}" -gt 0 ] || die_fail "could not parse required contexts from: $actual_contexts"
+for ctx in "${required_contexts[@]}"; do
+  [ -n "$ctx" ] || continue
   found=0
   for wf in "$REPO_ROOT"/.github/workflows/*.yml "$REPO_ROOT"/.github/workflows/*.yaml; do
     [ -f "$wf" ] || continue
-    # A job definition, not a reference to the context somewhere in a run block.
-    if grep -Eq "^  ${ctx}:[[:space:]]*$" "$wf"; then found=1; break; fi
+    # A job definition, not a reference to the context somewhere in a run block. The name is
+    # interpolated into an ERE, so escape it: a context containing regex metacharacters would
+    # otherwise match something other than itself.
+    if grep -Eq "^  $(printf '%s' "$ctx" | sed 's/[][\.^$*+?(){}|\\]/\\&/g'):[[:space:]]*$" "$wf"; then found=1; break; fi
   done
   [ "$found" -eq 1 ] || die_fail "required context \"$ctx\" is not defined as a job in any workflow under .github/workflows/ -- every PR would hang at BLOCKED."
 done
