@@ -1,11 +1,12 @@
 import {
-  claimSecIngestTasks,
+  claimSecIngestTasksAcrossJobs,
   advanceSecIngestTask,
   deferSecIngestTask,
   failSecIngestTask,
   heartbeatSecIngestTask,
   reconcileSecIngestJob,
   releaseSecIngestTaskForResume,
+  reclaimSecIngestTaskForStage,
   requeueSecIngestDeadLetters,
   SecIngestTask
 } from "../db-rag-ingest";
@@ -19,8 +20,13 @@ import { shouldDeferRagIngestDuringRth } from "../sqlite-event-loop";
 import { parseFilingHtml } from "../web-sources/sec-parser";
 import { ingestCompanyFacts, parseAndSaveForm4 } from "../web-sources/sec-facts";
 import { storeDocument, classifyEmbedFailure, hasIngestTextBudget } from "../vector-db";
-import { readLocalArtifact, writeLocalArtifact } from "../web-sources/sec-filings";
-import { insertDocumentChunkFtsBatch, countDocumentChunkFts, ftsMirrorResumeOffset, getDb } from "../db";
+import {
+  readLocalArtifact,
+  secAbstractFormHint,
+  secAbstractSourceType,
+  writeLocalArtifact
+} from "../web-sources/sec-filings";
+import { insertDocumentChunkFtsBatch, countDocumentChunkFts, ftsMirrorResumeOffset } from "../db";
 import { hasInFlightStrategyWork } from "../db-execution";
 import { serverKnobBool } from "../server-knobs";
 import { chunkDocument } from "./chunk";
@@ -57,6 +63,14 @@ export function clearFtsRowsCacheForTests(): void {
  *  5 per job let a single tick lease thousands of facts_extracted rows and hang for
  *  hours on chunkDocument, so later jobs never ran (2156 pending since 2026-08-10). */
 export const SEC_INGEST_TASKS_PER_TICK = 5;
+
+/** Wall-clock ceiling on draining ONE task through its checkpoint stages inside a single
+ *  processTask call (2026-09-27 P0). The drain is what makes a document cost one tick instead of
+ *  eleven; this bound is what keeps it from becoming the 279s-tick incident class all over again —
+ *  the loop hands the task back (stage attempt refunded) and the next tick resumes from whatever
+ *  checkpoint it reached. Generous enough to cover fetch+parse+chunk+embed of a large 10-K, tight
+ *  enough that 5 of them still fit in a 5s-interval tick. */
+export const SEC_INGEST_TASK_DRAIN_BUDGET_MS = 120_000;
 
 export class SecIngestWorker {
   private active = false;
@@ -143,56 +157,149 @@ export class SecIngestWorker {
       return;
     }
 
-    const db = getDb();
-    const activeJobs = db.prepare("SELECT id FROM sec_ingest_jobs WHERE status = 'running'").all() as any[];
+    // Fairness across the whole queue, not the first job in DB order. The old loop read
+    // `SELECT id FROM sec_ingest_jobs WHERE status='running'` (no ORDER BY) and handed the ENTIRE
+    // per-tick budget to the first job that had candidates, so with ~500 running jobs issuer #1
+    // consumed all 5 slots every tick and everyone else sat at `discovered` forever. One
+    // cross-job claim, ordered by priority then age, with a per-job ceiling inside the query.
+    const claimed = claimSecIngestTasksAcrossJobs({
+      owner: this.workerId,
+      leaseMs: 60000,
+      limit: SEC_INGEST_TASKS_PER_TICK
+    });
 
-    let remaining = SEC_INGEST_TASKS_PER_TICK;
-    for (const job of activeJobs) {
-      if (remaining <= 0) break;
-      const tasks = claimSecIngestTasks(job.id, {
-        owner: this.workerId,
-        leaseMs: 60000,
-        limit: remaining
-      });
-
-      for (const task of tasks) {
-        // Each task chains synchronous extract/chunk/persist segments; yield between tasks so
-        // queued HTTP requests get served (2026-08-10 event-loop stall incident).
-        await yieldEventLoop();
-        // RTH re-admission check (Codex P1 review): a tick admitted just before 09:30 ET
-        // must not keep claiming/processing long tasks into regular hours.  Stop at the
-        // task boundary — unprocessed tasks keep their durable state and are picked up by
-        // a later non-RTH tick; claimed-but-unprocessed tasks expire via their lease.
-        if (process.env.NODE_ENV !== "test" && shouldDeferRagIngestDuringRth()) {
-          console.log("[SecIngestWorker] RTH began mid-tick — deferring remaining tasks to a non-RTH tick.");
-          return;
-        }
-        try {
-          await this.processTask(task);
-        } catch (err: any) {
-          console.error(`[SecIngestWorker] Task ${task.id} failed:`, err.message);
-          failSecIngestTask({
-            taskId: task.id,
-            owner: this.workerId,
-            leaseToken: task.leaseToken || "",
-            retryable: true,
-            errorType: "worker-error",
-            error: err.message
-          });
-        }
+    for (const task of claimed) {
+      // Each task chains synchronous extract/chunk/persist segments; yield between tasks so
+      // queued HTTP requests get served (2026-08-10 event-loop stall incident).
+      await yieldEventLoop();
+      // RTH re-admission check (Codex P1 review): a tick admitted just before 09:30 ET
+      // must not keep claiming/processing long tasks into regular hours.  Stop at the
+      // task boundary — unprocessed tasks keep their durable state and are picked up by
+      // a later non-RTH tick; claimed-but-unprocessed tasks expire via their lease.
+      if (process.env.NODE_ENV !== "test" && shouldDeferRagIngestDuringRth()) {
+        console.log("[SecIngestWorker] RTH began mid-tick — deferring remaining tasks to a non-RTH tick.");
+        return;
       }
+      try {
+        await this.processTask(task);
+      } catch (err: any) {
+        console.error(`[SecIngestWorker] Task ${task.id} failed:`, err.message);
+        failSecIngestTask({
+          taskId: task.id,
+          owner: this.workerId,
+          leaseToken: task.leaseToken || "",
+          retryable: true,
+          errorType: "worker-error",
+          error: err.message
+        });
+      }
+    }
 
-      remaining -= tasks.length;
-
-      // Nothing else flips a job from 'running' to a terminal status once its tasks finish — the
-      // seeder seals intake up front but does not itself watch for completion. Reconcile here (cheap,
-      // idempotent no-op unless intake is sealed and every task has reached a terminal status) so a
-      // job whose tasks all completed/dead-lettered doesn't sit at 'running' forever.
-      reconcileSecIngestJob(job.id);
+    // Nothing else flips a job from 'running' to a terminal status once its tasks finish — the
+    // seeder seals intake up front but does not itself watch for completion. Reconcile here (cheap,
+    // idempotent no-op unless intake is sealed and every task has reached a terminal status) so a
+    // job whose tasks all completed/dead-lettered doesn't sit at 'running' forever. Only the jobs
+    // this tick actually touched are reconciled: a sweep over all ~500 running jobs every 5s is
+    // wasted work on a box that also serves quotes and order execution.
+    for (const jobId of new Set(claimed.map((task) => task.jobId))) {
+      reconcileSecIngestJob(jobId);
     }
   }
 
-  async processTask(task: SecIngestTask) {
+  /** Drain one task through its checkpoint stages until it terminates, defers, or runs out of
+   *  wall-clock budget. 2026-09-27 P0: every `advanceSecIngestTask` was followed by an immediate
+   *  `return`, so a single document needed 11 separate claim→process→advance cycles — 5 tasks/tick
+   *  at a 5s tick with a serialized tickInFlight delivered ~11x less than the cap implied. The
+   *  gates are re-checked at every stage boundary (not just once before the drain), and the drain
+   *  is wall-clock bounded, so it can never hold the tick open indefinitely or run past the moment
+   *  strategy work / RTH needs the event loop. */
+  async processTask(task: SecIngestTask, options?: { drainBudgetMs?: number }) {
+    const deadline = Date.now() + (options?.drainBudgetMs ?? SEC_INGEST_TASK_DRAIN_BUDGET_MS);
+    let current = task;
+    for (;;) {
+      // RTH + strategy-work are re-admission gates for the WHOLE tick, so a drain that starts
+      // outside RTH (or before a Manual Run once lands) must stop at the stage boundary too.
+      if (hasInFlightStrategyWork()) {
+        this.releaseForLaterTick(current, "strategy_work_in_flight", "strategy run in flight; task released for a later tick");
+        return;
+      }
+      if (Date.now() >= deadline) {
+        this.releaseForLaterTick(
+          current,
+          "task_drain_budget_exhausted",
+          `task drain budget ${options?.drainBudgetMs ?? SEC_INGEST_TASK_DRAIN_BUDGET_MS}ms reached; released for a later tick`
+        );
+        return;
+      }
+      if (process.env.NODE_ENV !== "test" && shouldDeferRagIngestDuringRth()) {
+        this.releaseForLaterTick(current, "rth_deferred", "RTH began mid-drain; task released for a non-RTH tick");
+        return;
+      }
+      const advanced = await this.runStageRecordingFailure(current);
+      if (!advanced) return;
+      const next = reclaimSecIngestTaskForStage({
+        taskId: current.id,
+        owner: current.leaseOwner || this.workerId,
+        leaseMs: 60000
+      });
+      // null = the task is no longer claimable (it completed, its job left `running`, or another
+      // worker took it). The durable state is authoritative; nothing left to drive.
+      if (!next) return;
+      current = next;
+    }
+  }
+
+  /** Run one stage, and record a stage failure against the lease that is actually live.
+   *
+   *  The drain re-leases the task between stages (`reclaimSecIngestTaskForStage` issues a NEW
+   *  lease token), so by the time a later stage throws, the token the tick claimed with is stale
+   *  and a `failSecIngestTask` carrying it matches nothing — the failure would be silently dropped
+   *  and the task would sit leased until the lease expired, then be re-claimed and marched into a
+   *  dead-letter by the lease-expiry path.  Recording the failure here, against `current`, keeps
+   *  the permanent-vs-transient classification and the attempt receipt intact.
+   */
+  private async runStageRecordingFailure(task: SecIngestTask): Promise<boolean> {
+    try {
+      return await this.runTaskStage(task);
+    } catch (err: any) {
+      console.error(`[SecIngestWorker] Task ${task.id} stage failed:`, err.message);
+      const failed = failSecIngestTask({
+        taskId: task.id,
+        owner: task.leaseOwner || this.workerId,
+        leaseToken: task.leaseToken || "",
+        retryable: true,
+        errorType: "worker-error",
+        error: err.message
+      });
+      if (!failed.applied) {
+        console.warn(
+          `[SecIngestWorker] stage failure for task ${task.id} was not recorded against its lease; the lease will expire back to the queue`
+        );
+      }
+      return false;
+    }
+  }
+
+  /** Hand a leased task back for a later tick WITHOUT consuming a stage attempt. */
+  private releaseForLaterTick(task: SecIngestTask, reasonType: string, reason: string): void {
+    const released = releaseSecIngestTaskForResume({
+      taskId: task.id,
+      owner: task.leaseOwner || this.workerId,
+      leaseToken: task.leaseToken || "",
+      reasonType,
+      reason
+    });
+    if (!released.applied) {
+      console.warn(
+        `[SecIngestWorker] could not release task ${task.id} (${reasonType}); its lease expiry will return it to the queue`
+      );
+    }
+  }
+
+  /** Run exactly ONE checkpoint stage of a task. Returns true when the checkpoint advanced and
+   *  the caller should re-lease and continue the drain, false when the task is finished, deferred,
+   *  failed, or parked by a budget gate. */
+  private async runTaskStage(task: SecIngestTask): Promise<boolean> {
     const leaseToken = task.leaseToken || "";
     const owner = task.leaseOwner || this.workerId;
     const documentName = task.documentName || "document.html";
@@ -240,7 +347,7 @@ export class SecIngestWorker {
               reasonType: "edgar_403_deferred",
               reason: `EDGAR 403 (automated-access block); deferred until ${until}`
             });
-            return;
+            return false;
           }
           throw err;
         }
@@ -263,7 +370,7 @@ export class SecIngestWorker {
         receipt: task.payload
       });
       if (!ok) throw new Error("Failed to advance checkpoint from discovered to fetched");
-      return;
+      return true;
     }
 
     if (checkpoint === "fetched") {
@@ -281,7 +388,7 @@ export class SecIngestWorker {
         receipt: task.payload
       });
       if (!ok) throw new Error("Failed to advance checkpoint from fetched to validated");
-      return;
+      return true;
     }
 
     if (checkpoint === "validated") {
@@ -300,7 +407,7 @@ export class SecIngestWorker {
         // non-RTH tick (Codex P1 review).
         if (process.env.NODE_ENV !== "test" && shouldDeferRagIngestDuringRth()) {
           console.log(`[SecIngestWorker] RTH began before parse of task ${task.id} — deferring to a non-RTH tick.`);
-          return;
+          return false;
         }
         // Form-aware title canonicalization: only a proven 10-K gets the 10-K
         // Item-code -> title map; other forms keep raw parsed titles.
@@ -321,7 +428,7 @@ export class SecIngestWorker {
         receipt: task.payload
       });
       if (!ok) throw new Error("Failed to advance checkpoint from validated to parsed");
-      return;
+      return true;
     }
 
     if (checkpoint === "parsed") {
@@ -343,7 +450,7 @@ export class SecIngestWorker {
         receipt: task.payload
       });
       if (!ok) throw new Error("Failed to advance checkpoint from parsed to facts_extracted");
-      return;
+      return true;
     }
 
     if (checkpoint === "facts_extracted") {
@@ -383,7 +490,7 @@ export class SecIngestWorker {
         receipt: task.payload
       });
       if (!ok) throw new Error("Failed to advance checkpoint from facts_extracted to chunked");
-      return;
+      return true;
     }
 
     if (checkpoint === "chunked") {
@@ -397,7 +504,7 @@ export class SecIngestWorker {
         receipt: task.payload
       });
       if (!ok) throw new Error("Failed to advance checkpoint from chunked to embed_queued");
-      return;
+      return true;
     }
 
     if (checkpoint === "embed_queued") {
@@ -421,7 +528,7 @@ export class SecIngestWorker {
             reasonType: "wu_exhausted_deferred",
             reason: `Pinecone monthly write units exhausted; deferred until ${wuUntil}`
           });
-          return;
+          return false;
         }
       }
       // Qdrant daily point fuse: same clean deferral as the Pinecone WU park — do not
@@ -437,7 +544,7 @@ export class SecIngestWorker {
             reasonType: "wu_exhausted_deferred",
             reason: `Qdrant daily point ingest fuse spent; deferred until ${until}`
           });
-          return;
+          return false;
         }
       }
       // Rolling 24h text embed budget (RAG_INGEST_MAX_TEXTS_PER_DAY): park BEFORE spending any
@@ -455,7 +562,7 @@ export class SecIngestWorker {
           reasonType: "wu_exhausted_deferred",
           reason: `Daily text embed budget (RAG_INGEST_MAX_TEXTS_PER_DAY) spent; deferred until ${until}`
         });
-        return;
+        return false;
       }
       let doc: ReturnType<typeof buildSecDocument> | undefined;
       if (!storeAlreadyDone) {
@@ -502,7 +609,7 @@ export class SecIngestWorker {
                 reasonType: "wu_exhausted_deferred",
                 reason: `Pinecone monthly write units exhausted mid-store; deferred until ${res.wuExhaustedUntil ?? "next check"}`
               });
-              return;
+              return false;
             }
             if (res.ingestPointsBudgetExhausted) {
               deferSecIngestTask({
@@ -513,7 +620,7 @@ export class SecIngestWorker {
                 reasonType: "wu_exhausted_deferred",
                 reason: `Qdrant daily point ingest fuse spent mid-store; deferred until ${res.ingestPointsBudgetExhaustedUntil ?? "next check"}`
               });
-              return;
+              return false;
             }
             if (res.ingestTextBudgetExhausted) {
               deferSecIngestTask({
@@ -524,7 +631,7 @@ export class SecIngestWorker {
                 reasonType: "wu_exhausted_deferred",
                 reason: `Daily text embed budget spent mid-store; deferred until ${res.ingestTextBudgetExhaustedUntil ?? "next check"}`
               });
-              return;
+              return false;
             }
             if ((res.writeUnitBudgetSkipped ?? 0) > 0 || (res.budgetSkipped ?? 0) > 0) {
               deferSecIngestTask({
@@ -535,7 +642,7 @@ export class SecIngestWorker {
                 reasonType: "wu_exhausted_deferred",
                 reason: "Daily write fuse or ingest text budget spent; deferred 1h"
               });
-              return;
+              return false;
             }
             // A real embed/store failure, not a budget/quota condition — classify it by what it
             // actually is instead of collapsing it into the generic "budget or capacity exceeded"
@@ -561,10 +668,46 @@ export class SecIngestWorker {
               errorType: failureClass === "permanent" ? "embed-permanent-error" : "embed-transient-error",
               error: failureReason
             });
-            return;
+            return false;
           }
 
           await writeLocalArtifact(task.cik, task.accession, sequence, "storeResult.json", JSON.stringify(res));
+        }
+
+        // 2026-09-27 B-2: extractive abstract, right next to storeDocument.  The backfill lane is
+        // the ONLY way these documents enter the corpus, and it used to leave every backfilled
+        // filing with no abstract at all — while `information-routing.ts` reads abstracts to
+        // decide that a document answers a question.  Deliberately the same deterministic
+        // extractive highlighter the direct filing/8-K paths already use
+        // (DOCUMENT_HIGHLIGHT_MODEL = "extractive-highlights-v2", no LLM on the ingest path);
+        // mirrors sec-filings.ts / sec8k.ts.  Best-effort: an abstract failure must never fail the
+        // embedding, so it is caught and logged, and abstractNeedsUpgrade makes it idempotent
+        // (a task that resumes here does not re-generate).
+        if (doc) {
+          const docTypeText = typeof task.payload.docType === "string" ? task.payload.docType : "10-K";
+          const sourceType = secAbstractSourceType(docTypeText);
+          try {
+            const { abstractNeedsUpgrade, generateAndStoreDocumentAbstract, tradeHighlightChunksFromText } =
+              await import("./document-summarizer");
+            if (abstractNeedsUpgrade(task.accession, sourceType)) {
+              await generateAndStoreDocumentAbstract({
+                ticker: task.symbol,
+                accessionOrEventId: task.accession,
+                sourceType,
+                headline: `${task.symbol} ${docTypeText} highlights (${task.payload.filedAt ?? ""})`.trim(),
+                chunks: tradeHighlightChunksFromText(doc.text, {
+                  maxChunks: 8,
+                  formHint: secAbstractFormHint(docTypeText)
+                }),
+                publishedAt: task.payload.filedAt as string | undefined,
+                acceptanceDatetime: (task.payload.acceptanceDateTime as string | undefined) ?? undefined
+              });
+            }
+          } catch (err) {
+            console.warn(
+              `[SecIngestWorker] extractive abstract failed for ${vectorDocId}: ${(err as Error)?.message ?? err}`
+            );
+          }
         }
 
         // Lexical (FTS) indexing happens HERE — only after storeDocument reported a complete
@@ -674,7 +817,7 @@ export class SecIngestWorker {
           if (!released.applied) {
             throw new Error("Failed to release embed_queued task after partial FTS mirror");
           }
-          return;
+          return false;
         }
 
         const ok = advanceSecIngestTask({
@@ -687,12 +830,11 @@ export class SecIngestWorker {
         });
         ftsRowsCache.delete(cacheKey);
         if (!ok) throw new Error("Failed to advance checkpoint from embed_queued to embedded");
-        return;
+        return true;
       } finally {
         clearInterval(leaseHeartbeat);
       }
     }
-
     if (checkpoint === "embedded") {
       heartbeat();
       const ok = advanceSecIngestTask({
@@ -704,7 +846,7 @@ export class SecIngestWorker {
         receipt: task.payload
       });
       if (!ok) throw new Error("Failed to advance checkpoint from embedded to index_queued");
-      return;
+      return true;
     }
 
     if (checkpoint === "index_queued") {
@@ -718,7 +860,7 @@ export class SecIngestWorker {
         receipt: task.payload
       });
       if (!ok) throw new Error("Failed to advance checkpoint from index_queued to indexed");
-      return;
+      return true;
     }
 
     if (checkpoint === "indexed") {
@@ -732,7 +874,7 @@ export class SecIngestWorker {
         receipt: task.payload
       });
       if (!ok) throw new Error("Failed to advance checkpoint from indexed to verified");
-      return;
+      return true;
     }
 
     if (checkpoint === "verified") {
@@ -755,8 +897,11 @@ export class SecIngestWorker {
         receipt: task.payload
       });
       if (!ok) throw new Error("Failed to advance checkpoint from verified to complete");
-      return;
+      return true;
     }
+
+    // "complete" (or any checkpoint with no stage body) is terminal: nothing to drive.
+    return false;
   }
 }
 
