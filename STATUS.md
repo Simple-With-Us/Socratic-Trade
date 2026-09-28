@@ -5259,6 +5259,41 @@ decision, not a code change.
 
 Rollout: `docs/rollouts/2026-09-27-st-perf-measurement-ranks.md`.  Board: `66ca3e67`.
 
+## 2026-09-27 — [MM] Parked account state, so a quiet account can say why (review rank 8)
+
+The 2026-09-25 review asked for a decision on four dormant accounts — "park it, re-arm it, or
+investigate" — and could not make one, because nothing in the state vocabulary could express it.
+`systemState: "halted"` says trading stopped; `isDraining` says the account is being disconnected.
+Neither says a person looked at the account and decided it should stay quiet, so a deliberately
+quiet account and a broken one were the same row in every report.
+
+Adds `connected_accounts.parked / parked_reason / parked_at` (guarded `ALTER`, same pattern as the
+existing `is_draining` migration), `park_account` / `unpark_account` on the ops account-control
+surface the review named as its dependency, a scheduler skip that happens *before* the execution
+state is derived so no broker gateway is constructed, and the parked facts on every ops response.
+
+Deliberate separations, each stated in the response so an operator cannot be misled: parking does
+NOT halt (halting stays `set_system_state`), un-parking does NOT arm, and a park **requires** a
+reason — a blank-reason park is indistinguishable from the broken accounts this exists to tell
+apart, so it is rejected rather than accepted-and-useless.  Re-parking with a *different* reason is
+refused 409 and surfaces the existing one; re-parking with the *same* reason is idempotent.  A
+draining account cannot be parked, and un-park clears the reason and timestamp together so no stale
+"why" outlives its decision.
+
+Did **not** invent a `lastSkipReason` on the per-account schedule — no such field exists and nothing
+would read it; the audit row is the record.
+
+Verified `tsc --noEmit` clean, 46/46 across the parked suite plus account-deletion,
+connected-accounts-route and connected-account-tenant-guard.  Failing-first proven: 8 of 10 fail with
+the implementation stashed.  Also worth knowing: `listConnectedAccounts` is not the only reader of
+`connected_accounts` — there are **four** row mappers, and an early two-of-four patch typechecked
+while leaving two paths reading a parked account as not parked.
+
+**The decision is still the owner's.**  This adds the vocabulary; the four accounts in the review
+still need an explicit park / re-arm / investigate.  Parking is reachable only from the ops endpoint
+(no console control yet), and `ops-performance` does not yet surface `parked` on its account rows.
+
+Rollout: `docs/rollouts/2026-09-27-st-account-parked.md`.
 ## 2026-09-27 — [MM] Branch protection on `main`, plus the two guards that keep it meaningful
 
 Owner-directed, directly after this session's own merge driver nearly merged a PR whose CI had never
