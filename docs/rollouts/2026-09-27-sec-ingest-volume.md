@@ -227,6 +227,31 @@ Docs updated: STATUS.md, docs/EFFORT-LOG.md, docs/rollouts/2026-09-27-sec-ingest
   disk-pressure cleanup rather than anything this branch did.  `npm ci` restored it and every
   gate re-ran clean from scratch.
 
+## BLOCKER at handoff: `node_modules` keeps being deleted mid-verification
+
+Four separate verify attempts were destroyed by the same external cause.  At ~20:00, ~21:16,
+~22:08 and ~23:35 local, this worktree's `node_modules` (and `.next`) were deleted while a gate was
+running — 541 packages down to 0, 348, 130, 320.  The symptoms are unmistakable and always of the
+form `Cannot find module 'vitest'` / `Cannot find module 'lodash'` / `Cannot find module
+'is-plain-obj'` (a `react-markdown` transitive) / `Property 'not' does not exist on type
+'Assertion<...>'` (`@types/chai` gone), across files this branch does not touch.  A sibling worktree
+(`st-mm-renovate-dedupe`) lost its `node_modules` in the same window, the disk was at 90-94% full,
+and CleanMyMac plus the fleet `housekeeper`/`mac-cleanup` job were running.  Nothing in this branch
+writes outside its worktree, and the failures reappear identically after a clean `npm ci`.
+
+Consequence: `scripts/land.sh` cannot complete its gate, so the two review-round fixes
+(`0d6bd69ae`) are committed and verified locally but NOT yet pushed, and PR #3915 still points at
+`60dcc4197`.  What IS proven green, on the exact tree that carries the fixes:
+`npx tsc --noEmit` 0 errors; `npm test` 8,801 passed / 51 skipped / 0 failed (run standalone at
+22:51 and again inside `land.sh` at 23:32 — "789 test files passed | 1 skipped", "tests pass");
+`npm run build` exit 0 at 22:57; `npm run lint` 0 errors (844 pre-existing warnings).  The one
+`land.sh` run that failed at `[3/3] npm run build` failed on a missing `is-plain-obj` with
+`node_modules` at 320 packages — not on anything in this change.
+
+To finish: stop the disk-cleanup job (or free space), then
+`LAND_ALLOW_STALE_OVERLAP=1 bash scripts/land.sh` in `~/apps/st-mm-sec-volume`.  Nothing else is
+pending.
+
 ## Follow-ups
 
 - After this merges, the 2,156-task backlog starts draining across issuers instead of one at a
