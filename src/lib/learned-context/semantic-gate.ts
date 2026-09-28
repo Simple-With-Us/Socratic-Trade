@@ -27,6 +27,16 @@
 //
 // The chat-origin HARD-CAP is enforced in store.ts, not here: a chat candidate the gate upgrades to
 // 'risk' is still DROPPED (never queued). This module only decides the tier; routing stays in the store.
+//
+// ── PROVENANCE BYPASS (step 1b, 2026-09-27) ─────────────────────────────────────────────────────
+// One narrow case sits between the keyword layer and the LLM call: a candidate the producer has
+// stamped `provenance: "system-postmortem"`. That text is a statement the app derived from its OWN
+// already-closed, already-measured trade outcomes, so the gate's question ("would this influence
+// position sizing … or trading behavior?") is not a meaningful test of it — a post-mortem lesson
+// about sizing will answer "yes" by construction and be parked in the human queue forever. Those
+// rows skip the LLM LAYER only. The keyword layer above still runs and is still authoritative, so a
+// lesson naming a risk knob is still routed to the confirmation queue. See step 1b for the full
+// list of things this does not do.
 
 import type { ChatLLM } from "../chat/types";
 import { getLLM, MockLLM } from "../chat/llm";
@@ -107,8 +117,9 @@ function parseGateTier(text: string): "fact" | "risk" | null {
  * The async second-layer classifier used by the ingest path. Returns 'fact' | 'risk' |
  * 'strategy-directive'. STRICTLY ADDITIVE — see the file header for the full contract.
  *
- * Order: keyword (authoritative for risk) → allowlist (definitive fact, no LLM) → LLM gate (may
- * upgrade fact→risk) → fail-safe to the keyword result on any LLM failure or when the flag is off.
+ * Order: keyword (authoritative for risk) → provenance bypass (system-postmortem: skip the LLM)
+ * → allowlist (definitive fact, no LLM) → LLM gate (may upgrade fact→risk) → fail-safe to the
+ * keyword result on any LLM failure or when the flag is off.
  */
 export async function classifyWithSemanticGate(
   candidate: LearnedContextCandidate,
@@ -117,6 +128,29 @@ export async function classifyWithSemanticGate(
   // 1. Keyword layer is authoritative for catching risk. Never override a risk verdict down to fact.
   const keywordTier = classifyRiskTier(candidate);
   if (keywordTier !== "fact") return keywordTier;
+
+  // 1b. EXPLICIT AUTONOMOUS PROVENANCE (2026-09-27). A candidate stamped `provenance:
+  // "system-postmortem"` was derived by this app from its OWN already-measured, already-closed trade
+  // outcomes. GATE_SYSTEM_PROMPT then asks a model whether the text "would influence … trading
+  // behavior" — and the answer for "size down after failed breakouts" is yes, every time, which is
+  // why the app's own post-mortem lessons were being upgraded fact→risk and parked in
+  // learned_context_pending instead of the brain they are read from. The system observing its own
+  // losses is not a claim about how it *should* trade; asking a model to grade it is a category
+  // error, and the queue it lands in is read by nobody until a human clicks or a nightly LLM pass
+  // runs. So the LLM LAYER is skipped here.
+  //
+  // WHAT THIS DOES NOT DO — read before widening it:
+  //   - It does NOT bypass the keyword layer. Step 1 already ran, so a lesson that names a risk knob
+  //     ("raise max position", "double down", "30% of the book") is still 'risk' and still routes to
+  //     the human confirmation queue. Only gate-upgrades are skipped, never gate-substitutions.
+  //   - It does NOT touch the PII gate (store.ts, earlier) or the chat hard-cap.
+  //   - It does NOT change the ingested row's ability to influence anything numeric: a learned
+  //     learned_context row is advisory prompt DATA. See the SEMANTIC-channel note in classify.ts.
+  //   - It is NOT keyed off `origin`. `origin: "autonomous"` is used by several unrelated producers
+  //     (chat-coach ingest, research transfer); keying off it would silently disable the gate for
+  //     text this app did not derive from its own outcomes. The marker is per-candidate and opt-in.
+  //   It is also strictly cheaper: this is the only path that no longer spends an LLM call per lesson.
+  if (candidate.provenance === "system-postmortem") return keywordTier;
 
   // 2. Templated-fact allowlist: definitively a fact → never call the LLM.
   if (matchesTemplatedFact(candidate)) return "fact";

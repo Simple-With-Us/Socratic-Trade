@@ -3,6 +3,77 @@
 ## 2026-09-27 MINIMAX — SEC ingest: fair tick + one-tick documents + corpus breadth (branch `minimax/sec-volume-breadth`)
 
 **What.**  Two P0 starvation bugs in the SEC/EDGAR ingest tick plus four breadth items.  (1) P0: `runTick` read the running-jobs list with no `ORDER BY` and handed the whole 5-slot per-tick budget to the first job, so with ~500 running jobs issuer #1 consumed every tick and everyone else sat at `discovered` forever (2,156 tasks pending since 2026-08-10); the claim is now one cross-job round-robin (`claimSecIngestTasksAcrossJobs`) with a per-job ceiling enforced in SQL, topped up only when nothing else is claimable.  (2) P0: every `advanceSecIngestTask` returned immediately, so one document cost 11 claim→process→advance cycles; `processTask` now drains the checkpoint machine in process via `reclaimSecIngestTaskForStage`, wall-clock bounded (120s) with the strategy-work and RTH gates re-checked at every stage boundary and the stage attempt refunded on release.  (3) Breadth: real `FormType` union; the extractive highlighter now runs in the worker's `embed_queued` branch (backfilled filings had NO abstract while `information-routing` depends on them); 13F holdings are embedded through the same `storeDocument`→`chunkDocument` path (the file had no `storeDocument` call at all), stamped with the filing date not the period end; ownership forms are discovered and enqueued as raw XML; the seeder asks for 8-K x2, DEF 14A x1, S-1 x1, Form 4 x2 plus up to 2 material exhibits per 8-K/10-K, with `SEC_INGEST_BASELINE_CORPUS_REVISION` bumped (required — v1 jobs are sealed).  RTH/strategy gates, dead-letter discipline, FTS-after-vector ordering, 403 refund, the parser/chunker and `SEC_INGEST_TASKS_PER_TICK` are all unchanged.  **Review round (Sentry, 2026-09-27):** two real findings, both introduced here and both fixed before merge — a mid-drain stage failure was recorded against the tick's STALE lease token (the drain re-leases between stages, so the failure was dropped and the task walked into a dead-letter via lease expiry; now recorded against the live lease), and the ownership-XML directory read was gated on `formLimits["4"]` for all of 3/4/5 (now gated on each form's own limit).  **Next:** run a seed with the v2 revision on the first non-RTH window and watch the 4 req/s EDGAR limiter and the Pinecone write-unit breaker; the universe manifest stays frozen (separate effort).  Rollout: `docs/rollouts/2026-09-27-sec-ingest-volume.md`.
+## 2026-09-27 MINIMAX — Outcome closure: the system can learn from its own outcomes (branch `minimax/outcome-closure`)
+
+**P0-2.**  `tradeThesisTag` was chosen by the same model that then got graded on it, while the
+deterministic sizing multiplier, the negative-expectancy skip, and the thesis scorecards all keyed on
+it — so a model could relabel its way out of a penalty, and no "P&L by thesis" number was falsifiable.
+`assignDeterministicThesisTag` now assigns the tag from evidence the scan already computes
+(`factorBreakdown`, `daysToEarnings`, `shortPercentOfFloat`, `sectorRelStrength`, and the
+insider-vs-congress split that the blended `positioning` factor cannot express), the model's choice is
+kept as `tradeThesisProposedTag`, and a `thesis_tag_assigned` audit event fires on **every** scored
+proposal — including agreements, so "the scorer agreed" is distinguishable from "the scorer never ran".
+The scorer **abstains** (model's tag stands) when no rule fires, when the best rule is under the
+neutral floor, or when the leader's margin is under 8.  Openings only — sells keep today's behaviour
+exactly, which leaves the existing Risk-Exit de-risking path untouched.  Nothing is backfilled, so no
+already-reported historical number changes meaning.  **Owner ruling requested** on the three tags that
+cannot be derived without inventing semantics (`Mean-Reversion`, `Defensive-Rotation`,
+`Analyst-Revision`) — the scorer never emits them and a test enforces that.  Rollout §3.
+
+## 2026-09-27 MINIMAX — P1-4: the retrieval stage telemetry can finally be read (branch `minimax/outcome-closure`)
+
+**What.**  `rag_retrieval_stage_trace` and `rag_retrieval_quality` are written default-on and record
+exactly what you need to diagnose a bad decision — which recall stage threw the candidates away and
+how long each stage took.  The only reference to either event anywhere in the repo was
+`audit-prune.ts`, which decides how long to *keep* them, so a recall stage that silently returned
+nothing was invisible in-product.  New `GET /api/admin/retrieval-telemetry` (admin-gated,
+`force-dynamic`, one bounded read, no writes) over new pure aggregation functions in
+`src/lib/rag/retrieval-telemetry-read.ts`, plus an admin page ("Retrieval Stages") and nav entry.
+The headline is the **empty-recall rate** — traces whose `finalCandidates` was zero.  The payloads
+carry no query text and no document text (only a short deterministic query digest), so the page
+shows per-stage and per-symbol aggregates only.  The response makes `truncated` and `noData`
+explicit, so a capped or empty window is never read as a healthy one — no data can itself mean the
+telemetry was off.  Rollout §2.
+
+## 2026-09-27 MINIMAX — P1-5: evidence depth can now contradict the ranking (branch `minimax/outcome-closure`)
+
+**What.**  Only the scan's top 3 plus held names got an 8-chunk dossier; every other scored candidate
+got exactly ONE.  With a scan surfacing 8+ candidates that is an 8:1 tilt toward the existing
+ordering, so the extra evidence re-read the ranking instead of being able to contradict it — the names
+the ranking demoted received the thinnest dossier.  Non-deep candidates now get 3, bounded and
+env-tunable via `FILINGS_SCOUT_CHUNK_LIMIT` (clamped to 1–8, fail-safe default) rather than a flat
+raise.  **Budget interaction:** `applyEvidenceBudget` truncates and hard-caps, so this can never
+exceed the prompt token budget (tested with a 200k-character RAG block against a 24k filings quota).
+The real cost is *within-RAG displacement* — the whole RAG block is one budget item, so scout chunks
+consume quota the tail previously had and the last symbols' dossiers are what get cut.  Filings are the
+highest-priority item so nothing else is crowded out, and the cut is recorded as a receipt.  Rollout §2.
+
+## 2026-09-27 MINIMAX — P1-3: the filings path finally re-ranks on learned usefulness (branch `minimax/outcome-closure`)
+
+**What.**  `applyRetrievalUsefulnessWeighting` had exactly one caller, so the per-doc-type statistics
+the join exists to produce were computed and persisted and then never consulted on the path that
+retrieves the majority of the evidence the proposer reads.  The filings dossier now applies the
+weighting after both retrieval shapes, failing open to the retriever's order on any error.  **The
+clamp was the real bug:** `usefulnessMultiplier`'s reachable range is 0.8–1.2 (±20%), and the old
+0.9–1.1 clamp was *binding*, clipping a third off both ends — so widening it alone would have doubled
+the effective nudge as a side effect of a constant tweak.  The coefficient now defines the operating
+range and 0.75/1.25 remains a real backstop.  **No feedback loop:** the multiplier is keyed on
+aggregate `doc_type|memoryKind` stats, never per-document, so a document can never be re-ranked on
+its own influence; a test enforces that.  Rollout §2.
+
+## 2026-09-27 MINIMAX — P0-1: the app's own post-mortem lessons can now reach the brain (branch `minimax/outcome-closure`)
+
+**What.**  A post-mortem lesson about a trade the app already closed and measured was being graded by
+the LLM semantic gate — which asks whether the text "would influence … trading behavior", a question a
+sizing lesson answers yes to by construction — upgraded to `risk`, and parked in
+`learned_context_pending`, a queue read only by a human approval click or the nightly Learning Review.
+So the highest-quality learning artifact the system produces never reached the brain it is read from.
+The lesson producer now stamps `provenance: "system-postmortem"` and `source: "postmortem-outcome"`,
+and `semantic-gate.ts` step 1b skips the LLM **layer** for those rows.  Unchanged: the keyword risk
+layer (a lesson naming a real risk knob is still queued for human approval), the PII gate, and the full
+gate for every unmarked candidate.  Side effect: this is the only ingest path that no longer spends an
+LLM call per lesson.  **Next:** P0-2 deterministic thesis tag.  Rollout:
+`docs/rollouts/2026-09-27-outcome-closure.md`.
 
 ## 2026-09-27 MINIMAX — Equal-risk sizing cap (opt-in, default off)
 

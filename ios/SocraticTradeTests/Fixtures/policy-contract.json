@@ -39,6 +39,7 @@
   "robinhoodBrokerStops": false,
   "brokerTrailingStops": true,
   "brokerStopsForShorts": true,
+  "exitsReleaseAppStops": true,
   "optionsTradingEnabled": true,
   "eventContractsEnabled": true,
   "atrStops": true,
