@@ -45,11 +45,20 @@ import { CATALOG_ROTATION_POOL } from "./llm-model-catalog";
 import { modelCredentialService, normalizeOpenRouterModelId, stripOpenRouterTilde } from "./llm-provider";
 import { isModelRotationSentinel, LLM_MODEL_ROTATION_SENTINEL } from "./llm-request";
 import { isSameModelLine } from "./model-identity";
+import {
+  resolveRotationSeatPin,
+  type ModelRotationPin,
+  type RotationPinReport,
+  type RotationSeatPinResolution
+} from "./model-rotation-pin";
 import { recommendedReasoningEffortForModel } from "./model-reasoning-recommendations";
 import { getOpenRouterUserModelAvailability, isOpenRouterModelAvailable } from "./openrouter-model-availability";
 import type { LlmReasoningEffort } from "./types";
 
 export { isModelRotationSentinel, LLM_MODEL_ROTATION_SENTINEL };
+// Re-exported so the owner of `types.ts` can type `TradingPolicy.rotationPin` by importing from
+// here (the module that USES the field) instead of reaching into the pin module directly.
+export { resolveRotationSeatPin, type ModelRotationPin, type RotationPinReport, type RotationSeatPinResolution };
 
 /**
  * The rotation pool: the curated model catalog (keep in sync with
@@ -401,35 +410,77 @@ export interface WeightedRotationPick {
   weight: number;
   /** The model's representation count in the window (committed picks for this user/account/seat). */
   representation: number;
+  /** True when the weight came from a controlled-experiment pin rather than the learned rule
+   *  (review "rank 6"). Absent/false on an ordinary learned pick, so a per-model report can keep
+   *  experiment runs out of the comparison without reading the pin audit table. */
+  pinned?: boolean;
 }
 
 /**
  * Proportional (weighted) sampling over the pool. `random()` must return a value in [0, 1) —
  * injectable so tests are deterministic; callers default it to Math.random. Out-of-range or
  * non-finite RNG output is clamped defensively rather than thrown.
+ *
+ * `weightOverrides` (review "rank 6", 2026-09-25 — the controlled-model-test lever) layers a pin's
+ * per-model weights OVER the learned representation weights: a listed model carries the pinned
+ * weight, every other model keeps its learned one.  Weight 0 is an EXCLUSION for the experiment
+ * window, which is why the last-member floor below resolves to the last POSITIVE-weight candidate
+ * rather than the last array element — a floating-point edge must never serve a model the operator
+ * pinned out.  A weight set that leaves nothing positive degrades to the learned weights instead of
+ * returning no pick (a starved rotation is the one outcome a pin must never cause; the pin resolver
+ * refuses such a set up front and this is the belt-and-braces floor behind it).
  */
 export function weightedRotationPick(input: {
   pool: readonly string[];
   counts: ReadonlyMap<string, number>;
   random: () => number;
+  weightOverrides?: ReadonlyMap<string, number>;
 }): WeightedRotationPick | undefined {
   const { pool, counts } = input;
   if (pool.length === 0) return undefined;
-  const weights = rotationRepresentationWeights(pool, counts);
-  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  const learned = rotationRepresentationWeights(pool, counts);
+  const overrides = input.weightOverrides;
+  const pinned = overrides
+    ? learned.map((weight, i) => {
+        const override = overrides.get(pool[i]!);
+        return override === undefined ? weight : override;
+      })
+    : learned;
+  const total = pinned.reduce((sum, weight) => sum + weight, 0);
+  const weights = total > 0 ? pinned : learned;
+  const effectiveTotal = total > 0 ? total : learned.reduce((sum, weight) => sum + weight, 0);
   const raw = input.random();
   const r = Number.isFinite(raw) ? Math.min(Math.max(raw, 0), 1 - Number.EPSILON) : 0;
   let cumulative = 0;
   for (let i = 0; i < pool.length; i++) {
     cumulative += weights[i]!;
-    if (r * total < cumulative) {
-      return { model: pool[i]!, weight: weights[i]!, representation: counts.get(pool[i]!) ?? 0 };
+    if (r * effectiveTotal < cumulative) {
+      return {
+        model: pool[i]!,
+        weight: weights[i]!,
+        representation: counts.get(pool[i]!) ?? 0,
+        ...(overrides?.has(pool[i]!) ? { pinned: true } : {})
+      };
     }
   }
   // Unreachable with a clamped r (< 1 guarantees r * total < total = final cumulative), kept as a
   // belt-and-braces floor so a floating-point edge can never yield "no pick" on a non-empty pool.
+  // Last POSITIVE-weight candidate, not the last element: with a pin in force the tail member can
+  // carry weight 0, and the floor must not resurrect a model the experiment excluded.
+  for (let i = pool.length - 1; i >= 0; i--) {
+    if ((weights[i] ?? 0) > 0) {
+      return {
+        model: pool[i]!,
+        weight: weights[i]!,
+        representation: counts.get(pool[i]!) ?? 0,
+        ...(overrides?.has(pool[i]!) ? { pinned: true } : {})
+      };
+    }
+  }
+  // Every weight is 0 or negative: no distribution exists, so fall back to the learned weights
+  // rather than serving the sentinel or nothing.
   const last = pool.length - 1;
-  return { model: pool[last]!, weight: weights[last]!, representation: counts.get(pool[last]!) ?? 0 };
+  return { model: pool[last]!, weight: learned[last]!, representation: counts.get(pool[last]!) ?? 0 };
 }
 
 /**
@@ -497,6 +548,14 @@ export async function eligibleRotationPool(userId: string): Promise<EligibleRota
  * the pool must not shift the median for the models still in it. Stats are ADVISORY: on any read
  * error the seat degrades to uniform sampling (all-zero counts) rather than failing the rotation —
  * a pick must not die because its history could not be read.
+ *
+ * Picks made UNDER A PIN are excluded (review "rank 6", 2026-09-25).  This is what makes an
+ * experiment reversible-obviously rather than merely reversible: a controlled window deliberately
+ * serves models the learned rule would not have chosen, and counting those picks would leave a
+ * permanent scar in the weights that outlives the experiment.  With them excluded, removing the pin
+ * restores the learned behavior computed from the clean history alone — the property the review
+ * asked for when it called the down-weight "reversible".  Legacy rows carry no `pinned` field and
+ * are therefore counted, so an account with pre-pin history is unaffected.
  */
 function rotationSeatRepresentation(
   userId: string,
@@ -516,7 +575,8 @@ function rotationSeatRepresentation(
       .all(userId, accountId ?? null, since) as Array<{ payload: string }>;
     for (const row of rows) {
       try {
-        const pick = JSON.parse(row.payload) as { seat?: unknown; model?: unknown };
+        const pick = JSON.parse(row.payload) as { seat?: unknown; model?: unknown; pinned?: unknown };
+        if (pick.pinned === true) continue;
         if (pick.seat !== seat || typeof pick.model !== "string" || !counts.has(pick.model)) continue;
         counts.set(pick.model, (counts.get(pick.model) ?? 0) + 1);
       } catch {
@@ -552,7 +612,10 @@ export async function resolveModelRotationForRun(input: {
   userId: string;
   accountId?: string;
   runId: string;
-  policy: { llmModel?: string | null; redTeamLlmModel?: string | null };
+  // The pin rides on the policy beside the sentinel (review "rank 6" controlled model test). The
+  // narrow structural type here is what lets the full TradingPolicy flow through without a cast:
+  // the owner of types.ts adds the same optional field to TradingPolicy and no call site changes.
+  policy: { llmModel?: string | null; redTeamLlmModel?: string | null; rotationPin?: ModelRotationPin | null };
   random?: () => number;
 }): Promise<{
   llmModel?: string;
@@ -576,6 +639,11 @@ export async function resolveModelRotationForRun(input: {
    *  not hold every opening for human approval under Autopilot (2026-09-24 fix), and never offers
    *  Green's own model as Red's fallback (review round 2026-09-25). */
   redRotationPool?: string[];
+  /** The controlled-experiment pin in force for this run (review "rank 6", 2026-09-25): what was
+   *  forced, which weights were overridden, and every receipt. Present ONLY when a pin is
+   *  configured on the policy — an unpinned run is byte-identical to the pre-pin behavior, which
+   *  is what keeps the experiment separable from ordinary rotation in any per-model report. */
+  rotationPin?: RotationPinReport;
   commit: () => void;
 }> {
   const rotateGreen = isModelRotationSentinel(input.policy.llmModel);
@@ -611,13 +679,35 @@ export async function resolveModelRotationForRun(input: {
       };
     }
     const random = input.random ?? Math.random;
-    const greenPickCandidates = greenFirstPickPool(pool);
-    const greenPick = rotateGreen
-      ? weightedRotationPick({
-          pool: greenPickCandidates,
-          counts: rotationSeatRepresentation(input.userId, input.accountId, "green", greenPickCandidates),
-          random
+    // ── Controlled-experiment pin (review "rank 6", 2026-09-25) ─────────────────────────────────
+    // Resolved AFTER the empty-pool guard and BEFORE any pick, per seat, against that seat's own
+    // candidate pool.  Nothing here is remembered between runs: the pin is read from THIS call's
+    // policy and disappears with it, which is the whole reason removing it restores the learned
+    // rotation exactly.  A pin that is present but wholly invalid is NOT a reason to serve nothing
+    // — it degrades to learned rotation and leaves a receipt (see model-rotation-pin.ts).
+    const pinConfigured = input.policy.rotationPin !== null && input.policy.rotationPin !== undefined;
+    const greenCandidates = greenFirstPickPool(pool);
+    const greenPin = rotateGreen
+      ? resolveRotationSeatPin({
+          pin: input.policy.rotationPin,
+          seat: "green",
+          pool: greenCandidates,
+          knownModels: MODEL_ROTATION_POOL
         })
+      : undefined;
+    // A pinned model is dropped from its seat's candidates so it is not also handed to the run as
+    // an IMPLICIT FAILOVER (planRotationImplicitFallbacks reads the returned pool): weight 0 in a
+    // controlled window means "this model does not serve this seat", not "not first".
+    const greenPool = excludeZeroWeighted(greenCandidates, greenPin?.weightOverrides);
+    const greenPick = rotateGreen
+      ? greenPin?.forcedModel !== undefined
+        ? forcedRotationPick(greenPin.forcedModel)
+        : weightedRotationPick({
+            pool: greenPool,
+            counts: rotationSeatRepresentation(input.userId, input.accountId, "green", greenPool),
+            random,
+            ...(greenPin?.weightOverrides ? { weightOverrides: greenPin.weightOverrides } : {})
+          })
       : undefined;
     // Same-model guarantee: when BOTH seats rotate, a run never serves green's pick to red too —
     // red samples from the pool MINUS green's model (possible only with >= 2 models; a 1-model
@@ -629,14 +719,39 @@ export async function resolveModelRotationForRun(input: {
     // Red's implicit failover chain is built from it too.
     const greenSeatModel = greenPick?.model ?? (rotateGreen ? undefined : input.policy.llmModel?.trim() || undefined);
     const poolWithoutGreen = greenSeatModel ? pool.filter((model) => !isSameModelLine(model, greenSeatModel)) : pool;
-    const redPool = poolWithoutGreen.length > 0 ? poolWithoutGreen : pool;
-    const redPick = rotateRed
-      ? weightedRotationPick({
-          pool: redPool,
-          counts: rotationSeatRepresentation(input.userId, input.accountId, "red", redPool),
-          random
+    const redPoolCandidates = poolWithoutGreen.length > 0 ? poolWithoutGreen : pool;
+    // Red's pin is validated against the RED seat's pool (already minus Green's model) and is told
+    // which model Green serves, so a pin can never route around the same-model guarantee.
+    const redPin = rotateRed
+      ? resolveRotationSeatPin({
+          pin: input.policy.rotationPin,
+          seat: "red",
+          pool: redPoolCandidates,
+          knownModels: MODEL_ROTATION_POOL,
+          excludeModel: greenSeatModel
         })
       : undefined;
+    const redPool = excludeZeroWeighted(redPoolCandidates, redPin?.weightOverrides);
+    const redPick = rotateRed
+      ? redPin?.forcedModel !== undefined
+        ? forcedRotationPick(redPin.forcedModel)
+        : weightedRotationPick({
+            pool: redPool,
+            counts: rotationSeatRepresentation(input.userId, input.accountId, "red", redPool),
+            random,
+            ...(redPin?.weightOverrides ? { weightOverrides: redPin.weightOverrides } : {})
+          })
+      : undefined;
+    // A pin that is in force is announced on the log surface the operator already watches, with its
+    // label and every receipt — the loud half of "a silent pin would distort every report".
+    const pinReport = buildRotationPinReport({
+      pinConfigured,
+      greenPin,
+      redPin,
+      pool,
+      accountId: input.accountId
+    });
+    if (pinReport) console.warn(`[model-rotation] rotation pin active: ${JSON.stringify(pinReport)}`);
     const out: {
       llmModel?: string;
       redTeamLlmModel?: string;
@@ -648,6 +763,13 @@ export async function resolveModelRotationForRun(input: {
     // once the run is committed to serving the LLM. If the caller returns/throws/skips before calling
     // commit(), nothing is audited — an aborted run never skews the weights (Finding 3).
     const commits: Array<() => void> = [];
+    // The pin audit is deferred the same way, and written even when the pin was REFUSED: a
+    // half-typed experiment is exactly the case an operator needs to see. Same commit-late rule —
+    // a run that never served the LLM never touched the experiment, so it leaves no trace.
+    if (pinReport) {
+      const row = { runId: input.runId, ...pinReport };
+      commits.push(() => audit("model_rotation_pin", row, input.userId, input.accountId));
+    }
     for (const [seat, pick] of [
       ["green", greenPick],
       ["red", redPick]
@@ -669,6 +791,16 @@ export async function resolveModelRotationForRun(input: {
             weight: pick.weight,
             representation: pick.representation,
             poolSize: pool.length,
+            // Controlled-experiment receipts (review "rank 6").  `pinned: true` is what lets a
+            // later per-model report separate experiment runs from learned rotation — and what
+            // keeps them out of the representation ledger (rotationSeatRepresentation).
+            ...(pick.pinned
+              ? {
+                  pinned: true,
+                  forced: "forced" in pick ? true : false,
+                  ...(pinReport?.label ? { pinLabel: pinReport.label } : {})
+                }
+              : {}),
             skipped,
             skippedNoCredential: skipped,
             availability,
@@ -688,8 +820,9 @@ export async function resolveModelRotationForRun(input: {
     }
     return {
       ...out,
-      ...(rotateGreen && pool.length > 0 ? { greenRotationPool: pool } : {}),
+      ...(rotateGreen && pool.length > 0 ? { greenRotationPool: greenPool } : {}),
       ...(rotateRed && redPool.length > 0 ? { redRotationPool: redPool } : {}),
+      ...(pinReport ? { rotationPin: pinReport } : {}),
       commit: () => {
         for (const runCommit of commits) runCommit();
       }
@@ -706,4 +839,69 @@ export async function resolveModelRotationForRun(input: {
       commit: () => {}
     };
   }
+}
+
+/** Drop the models a pin weighted to 0 from a seat's candidates (and from the pool handed to the
+ *  implicit-failover planner).  A no-op without a weight map, so an unpinned run is unchanged. */
+function excludeZeroWeighted(
+  pool: readonly string[],
+  overrides: ReadonlyMap<string, number> | undefined
+): string[] {
+  if (!overrides || overrides.size === 0) return [...pool];
+  const kept = pool.filter((model) => overrides.get(model) !== 0);
+  // A pin can never empty the pool: if it somehow got here, the untouched pool serves instead.
+  return kept.length > 0 ? kept : [...pool];
+}
+
+/**
+ * A pin FORCED this model onto the seat, so there is no sampled distribution to report: `weight: 0`
+ * means "not a weighted pick" (the audit's `forced: true` is the field a reader keys on) and
+ * `representation` is deliberately left 0 rather than guessed, because the pick did not come from
+ * the seat's representation ledger.  Marked `pinned` so it stays out of the next run's learned
+ * weights (rotationSeatRepresentation).
+ */
+function forcedRotationPick(model: string): WeightedRotationPick & { forced: true } {
+  return { model, weight: 0, representation: 0, pinned: true, forced: true };
+}
+
+/**
+ * Merge the two per-seat pin resolutions into the run-level report the caller returns and the
+ * `model_rotation_pin` audit carries.  Returns undefined when NO pin is configured at all — that
+ * absence is itself a contract (an unpinned run resolves exactly as it did before this feature).
+ * `connectedAccountId` rides in the PAYLOAD as well as the column because the payload is what every
+ * per-model report parses, and a scoped experiment has to be separable without a second query.
+ */
+function buildRotationPinReport(input: {
+  pinConfigured: boolean;
+  greenPin?: RotationSeatPinResolution;
+  redPin?: RotationSeatPinResolution;
+  pool: readonly string[];
+  accountId?: string;
+}): RotationPinReport | undefined {
+  if (!input.pinConfigured) return undefined;
+  const seats = [input.greenPin, input.redPin].filter((pin): pin is RotationSeatPinResolution => !!pin);
+  const first = <T,>(read: (pin: RotationSeatPinResolution) => T | undefined): T | undefined =>
+    seats.map(read).find((value) => value !== undefined);
+  const rejected = seats.flatMap((pin) => pin.rejected);
+  const weights: Record<string, number> = {};
+  for (const pin of seats) {
+    for (const [model, weight] of pin.weightOverrides ?? []) weights[model] = weight;
+  }
+  const label = first((pin) => pin.label);
+  const ignored = first((pin) => pin.ignored);
+  const expiresAt = first((pin) => pin.expiresAt);
+  return {
+    applied: seats.some((pin) => pin.applied),
+    rejected,
+    ...(label ? { label } : {}),
+    ...(input.greenPin?.forcedModel ? { green: input.greenPin.forcedModel } : {}),
+    ...(input.redPin?.forcedModel ? { red: input.redPin.forcedModel } : {}),
+    ...(Object.keys(weights).length > 0 ? { weights } : {}),
+    ...(ignored ? { ignored } : {}),
+    ...(expiresAt ? { expiresAt } : {}),
+    // The pool the pin was validated against, so a receipt like "not in this seat's eligible pool"
+    // can be read months later without re-deriving which catalog was live that day.
+    poolSize: input.pool.length,
+    connectedAccountId: input.accountId ?? null
+  };
 }

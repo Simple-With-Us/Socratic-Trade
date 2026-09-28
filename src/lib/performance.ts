@@ -1258,6 +1258,41 @@ export interface RedTeamVetoRecord {
   /** Realized % move since the veto, side-adjusted so positive = the veto avoided a loss / missed a gain
    *  is negative (mirrors returnSinceProposalPct's sign convention). */
   returnPct: number;
+  /** Configured counterfactual horizon in TRADING days — the pipeline's fixed 5-day window, which is
+   *  NOT the hold the book takes on the approved version of this trade. Read with `measuredHoldDays`. */
+  horizonDays?: number;
+  /** Realized length of THIS counterfactual's measurement window in calendar days (snapshotAt →
+   *  exitDate). The two horizon fields deliberately disagree; that disagreement is the disclosure. */
+  measuredHoldDays?: number;
+  /** Later repeat vetoes of this same scenario collapsed into this record (dedup rule in
+   *  `RED_TEAM_DEDUP_WINDOW_DAYS`). 0 for a scenario the Bear blocked once. */
+  duplicatesCollapsed?: number;
+}
+
+/**
+ * Horizon disclosure for the veto scorecard. The counterfactual pipeline measures a fixed
+ * 5-trading-day forward return while the trades the Bear vetoes are held far longer in the book, so
+ * "veto value-add" is NOT horizon-matched to realized hold performance. Both horizons are reported
+ * side by side (rather than the mismatch being inherited silently) — the 2026-09-25 review flagged
+ * exactly this: counterfactuals at 5 trading days against actual holds of roughly 3–12 days.
+ */
+export interface RedTeamHorizonDisclosure {
+  /** Median configured counterfactual horizon across scored scenarios, in TRADING days. */
+  counterfactualHorizonDays: number;
+  /** Median REALIZED length of the counterfactual measurement windows themselves, in calendar days. */
+  medianMeasuredHoldDays: number;
+  /** Median realized holding period of the APPROVED book, when the caller supplies it. Absent when
+   *  `getRedTeamEfficacy` is called without account context (the common case) — the honest reason
+   *  being that a user-wide veto rollup has no account to read closed lots for, and a NEW
+   *  user-scoped closed-lot read (src/lib/db-fills.ts) is required to fill it in. */
+  medianApprovedHoldDays?: number;
+  /** How many closed lots backed `medianApprovedHoldDays` (0 when it was not supplied). */
+  approvedHoldSampleSize?: number;
+  /** True only when the approved book's median hold is known AND within one counterfactual
+   *  calendar week of the measured window. Nothing here is "matched" by default. */
+  horizonMatched: boolean;
+  /** Owner-facing one-liner stating the mismatch, safe to render verbatim. */
+  disclosure: string;
 }
 
 /**
@@ -1271,6 +1306,12 @@ export interface RedTeamVetoRecord {
  * trade would have made money — the Bear's rejection MISSED a winner. Never gates anything; this is a
  * read-only scorecard for the approval-time debate prompt and the Results page (console wiring left for
  * the console lane — see docs/rollouts/2026-07-04-w1-learning-loops.md).
+ *
+ * The rates, mean and median below are computed over UNIQUE SCENARIOS (repeat vetoes of the same
+ * setup collapsed — see `RED_TEAM_DEDUP_WINDOW_DAYS`), not over raw audit rows. The raw counts
+ * (`totalVetoes` / `maturedVetoes` / `unresolvableVetoes`) are unchanged pipeline stats and keep their
+ * original meaning; the scenario denominators are the new `uniqueScenarios` /
+ * `maturedUniqueScenarios` / `medianReturnPct` / `verdict` fields.
  */
 export interface RedTeamEfficacy {
   /** Total Bear-veto audit events observed in the scanned window (matured or not). */
@@ -1284,23 +1325,150 @@ export interface RedTeamEfficacy {
   maturedCoveragePct: number;
   /** Human coverage disclosure, e.g. "4/6 vetoes resolved (66.7%) — 1 unresolvable; may be survivor-biased". */
   coverage: string;
+  // ── 2026-09-25 review ("re-score the Red Team honestly") ──────────────────────
+  // Every field below is optional in the TYPE but always present in the VALUE returned by
+  // getRedTeamEfficacy. They are optional only so the hand-built static fallbacks elsewhere keep
+  // compiling: src/lib/ops-performance.ts RED_TEAM_EFFICACY_UNAVAILABLE and the
+  // test/red-team-efficacy-ui.test.ts fixture are both full `RedTeamEfficacy` literals in files this
+  // change does not own. Promoting them to required means updating those two literals too — and the
+  // ops fallback SHOULD set `sampleSufficient: false` / `verdict: "insufficient-sample"` when it does,
+  // so a failed read can never be mistaken for a scored zero.
+  /** UNIQUE scenarios behind the scored numbers (totalVetoes minus repeat vetoes of the same setup).
+   *  This — not `totalVetoes` — is the sample size the rates, mean and median are computed over. The
+   *  2026-09-25 review counted 79 vetoes and 24 unique scenarios on the same account. */
+  uniqueScenarios?: number;
+  /** Raw vetoes that collapsed into an existing scenario cluster (totalVetoes − uniqueScenarios). */
+  duplicateVetoes?: number;
+  /** Matured vetoes that SURVIVED dedup — the denominator of vetoValueAddRate, survivorRiskHitRate,
+   *  avgReturnPct, medianReturnPct and every `byModel` row. */
+  maturedUniqueScenarios?: number;
+  /** Median counterfactual return (%) over matured unique scenarios. Reported next to the mean on
+   *  purpose: one +27.4% PYPL veto moved the mean from +0.19% to +1.16% and the median stayed at
+   *  +0.23% (2026-09-25 review). A mean alone is not a verdict on this scorecard. */
+  medianReturnPct?: number;
+  /** True once `maturedUniqueScenarios` reaches `minUniqueMaturedForVerdict`. Until then the numbers
+   *  are a running tally, not a judgement of the Red Team. */
+  sampleSufficient?: boolean;
+  /** The bar `sampleSufficient` is measured against (50 unique matured scenarios). */
+  minUniqueMaturedForVerdict?: number;
+  verdict?: "insufficient-sample" | "sufficient-sample";
+  /** Actual measurement horizon next to the approved book's holding period (see the interface). */
+  horizon?: RedTeamHorizonDisclosure;
   /** Share of MATURED vetoes where the counterfactual return was negative (the veto avoided a loser). */
   vetoValueAddRate: number;
   /** Share of MATURED vetoes where the counterfactual return was positive (the veto missed a winner —
    *  the survivor-risk the Bear itself introduced by rejecting a trade that would have worked). */
   survivorRiskHitRate: number;
-  /** Mean counterfactual return (%) across matured vetoes; negative is good (vetoes avoided losses). */
+  /** Mean counterfactual return (%) across matured UNIQUE scenarios; negative is good (vetoes avoided
+   *  losses). Kept for existing consumers, but never read alone — see `medianReturnPct`. */
   avgReturnPct: number;
-  /** Per red-team model breakdown (full scanned history; missing model is bucketed as "unattributed"). */
+  /** Per red-team model breakdown (full scanned history; missing model is bucketed as "unattributed").
+   *  Deduped like the top-level scores: `maturedVetoes` is this model's matured UNIQUE scenarios. */
   byModel: Array<{
     model: string;
     maturedVetoes: number;
     vetoValueAddRate: number;
     survivorRiskHitRate: number;
     avgReturnPct: number;
+    /** Median of the same set `avgReturnPct` averages — outlier-resistant companion. */
+    medianReturnPct?: number;
+    /** Repeat vetoes of the same scenario this model re-issued and that were collapsed away. */
+    duplicateVetoes?: number;
   }>;
-  /** The individual matured veto records, most recent counterfactual maturation first — bounded by `limit`. */
+  /** The individual matured veto records — DEDUPED, most recent counterfactual maturation first,
+   *  bounded by `limit`. Each record carries the number of repeat vetoes collapsed into it. */
   records: RedTeamVetoRecord[];
+}
+
+/**
+ * Deduplication window for repeat Red Team vetoes of one scenario, in CALENDAR days.
+ *
+ * WHY dedup at all: a `proposal_rejected_by_red_team` row is written per Bear veto, and the Bear
+ * re-lists the same name on every subsequent scan until the setup dies or the thesis expires. A
+ * setup it blocked six times is ONE decision point, not six independent pieces of evidence, and
+ * scoring it six times inflates the sample while letting a single outlier (one PYPL buy at +27.4%)
+ * carry the headline average — the exact 79-vetoes / 24-scenarios finding from the 2026-09-25 review.
+ *
+ * RULE: two vetoes are the same scenario when they share the same normalized SYMBOL and the same SIDE
+ * (a buy block and a short block on one name are different calls) and the later veto lands within
+ * this window of the previous veto of that pair. Seven calendar days is the calendar length of the
+ * counterfactual pipeline's own 5-trading-day horizon: a re-veto inside the same measurement window
+ * is the Bear re-litigating one decision, not a second one. Legacy audits with no `side` cluster by
+ * symbol alone (the writer has always been opening-scoped downstream).
+ *
+ * SURVIVOR: the EARLIEST veto in a cluster, keeping its own `(runId, symbol)` counterfactual — it is
+ * the decision that actually changed the outcome, and its row is the only one measured from the
+ * moment the Bear said no. Later re-vetoes are counted in `duplicateVetoes` and on the survivor
+ * record, never silently dropped.
+ */
+export const RED_TEAM_DEDUP_WINDOW_DAYS = 7;
+
+/**
+ * Unique matured scenarios required before the Red Team verdict is answerable, per the 2026-09-25
+ * review ("decide once each account has at least 50 unique matured vetoes"). Matches the console's
+ * existing SOLID gate (RED_TEAM_EFFICACY_SOLID_RESOLVED, app/console/lib/red-team-efficacy.ts) —
+ * but the console gate is fed RAW matured vetoes, repeats included, which is how a 24-scenario
+ * account could read as a 28-veto sample and look ready to judge.
+ */
+export const RED_TEAM_EFFICACY_MIN_UNIQUE_MATURED = 50;
+
+/** Median of a numeric sample (mean of the two middles on an even count). Empty sample → 0, matching
+ *  every other aggregate in this file — callers gate on their own denominators, never on the number. */
+function medianOf(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
+ * Collapse repeat vetoes into unique scenarios (rule + survivor choice in RED_TEAM_DEDUP_WINDOW_DAYS).
+ * Every veto key gets an entry so the caller can tell a survivor from a collapsed repeat in one pass;
+ * `duplicates` is the cluster size seen from every member.
+ */
+function clusterVetoScenarios(
+  vetoes: Array<{ key: string; symbol: string; side?: string; createdAt: string }>
+): Map<string, { survivorKey: string; isSurvivor: boolean; duplicates: number }> {
+  const assignment = new Map<string, { survivorKey: string; isSurvivor: boolean; duplicates: number }>();
+  // Chronological, with a deterministic key tiebreak so an unparseable created_at cannot make the
+  // surviving scenario depend on Map insertion order.
+  const chronological = [...vetoes].sort((a, b) => {
+    const at = Date.parse(a.createdAt);
+    const bt = Date.parse(b.createdAt);
+    if (Number.isFinite(at) && Number.isFinite(bt) && at !== bt) return at - bt;
+    return a.key.localeCompare(b.key);
+  });
+  const lastSeenAt = new Map<string, number>();
+  const survivorOf = new Map<string, string>();
+  const duplicatesOf = new Map<string, number>();
+  const windowMs = RED_TEAM_DEDUP_WINDOW_DAYS * 86_400_000;
+
+  for (const veto of chronological) {
+    const clusterKey = `${veto.symbol}:${veto.side ?? "unspecified"}`;
+    const at = Date.parse(veto.createdAt);
+    const previousAt = lastSeenAt.get(clusterKey);
+    // An unparseable veto timestamp never collapses into a cluster — we cannot prove it is a repeat,
+    // and inventing the grouping would understate the sample.
+    const isRepeat = Number.isFinite(at) && previousAt !== undefined && at - previousAt <= windowMs;
+    const survivorKey = isRepeat ? (survivorOf.get(clusterKey) as string) : veto.key;
+    if (isRepeat) {
+      duplicatesOf.set(survivorKey, (duplicatesOf.get(survivorKey) ?? 0) + 1);
+    } else {
+      survivorOf.set(clusterKey, veto.key);
+    }
+    if (Number.isFinite(at)) lastSeenAt.set(clusterKey, at);
+    assignment.set(veto.key, {
+      survivorKey,
+      isSurvivor: survivorKey === veto.key,
+      duplicates: 0
+    });
+  }
+
+  // Second pass so every member (including repeats) reports the cluster's duplicate count.
+  for (const entry of assignment.values()) {
+    entry.duplicates = duplicatesOf.get(entry.survivorKey) ?? 0;
+  }
+  return assignment;
 }
 
 /**
@@ -1316,12 +1484,24 @@ export const RED_TEAM_EFFICACY_DEFAULT_AUDIT_LIMIT = 5000;
 
 export function getRedTeamEfficacy(
   userId: string = "local",
-  options: { auditLimit?: number; limit?: number; connectedAccountId?: string } = {}
+  options: {
+    auditLimit?: number;
+    limit?: number;
+    connectedAccountId?: string;
+    /**
+     * Median realized holding period (days) of the APPROVED book, plus how many closed lots backed
+     * it. Callers that already hold a `calculatePnl` result (dashboard, ops-performance) should pass
+     * it so the horizon disclosure can quantify the mismatch instead of merely naming it. A user-wide
+     * veto rollup has no account to read closed lots for, so this cannot be derived here.
+     */
+    approvedHoldMedianDays?: number;
+    approvedHoldSampleSize?: number;
+  } = {}
 ): RedTeamEfficacy {
   const auditLimit = options.auditLimit ?? RED_TEAM_EFFICACY_DEFAULT_AUDIT_LIMIT;
   const limit = options.limit ?? 50;
 
-  const vetoesByKey = new Map<string, { runId: string; symbol: string; side?: string; thesisTag?: string; reason?: string; model?: string }>();
+  const vetoesByKey = new Map<string, { runId: string; symbol: string; side?: string; thesisTag?: string; reason?: string; model?: string; createdAt: string }>();
   // Kind-scoped audit query (Codex review on PR #365): the LIMIT applies AFTER the kind
   // filter, so newer audit rows of other kinds can never push older Bear vetoes out of the
   // scanned window and zero the scorecard's history.
@@ -1335,25 +1515,46 @@ export function getRedTeamEfficacy(
     // (the writer has always been opening-scoped downstream).
     if (payload.side !== undefined && payload.side !== "buy" && payload.side !== "short") continue;
     const symbol = normalizeSymbol(payload.symbol);
-    vetoesByKey.set(`${payload.runId}:${symbol}`, {
+    const key = `${payload.runId}:${symbol}`;
+    // Newest payload fields still win (a re-audit of the same run/symbol carries the later reason),
+    // but the scenario's decision moment stays the EARLIEST row: that is when the Bear said no, and
+    // the dedup window counts from there.
+    const prior = vetoesByKey.get(key);
+    vetoesByKey.set(key, {
       runId: payload.runId,
       symbol,
       side: payload.side,
       thesisTag: payload.thesisTag,
       reason: payload.reason,
-      model: payload.model
+      model: payload.model,
+      createdAt: prior && prior.createdAt < event.createdAt ? prior.createdAt : event.createdAt
     });
   }
 
   const totalVetoes = vetoesByKey.size;
+  // One pass over the vetoes builds the scenario clusters (rule in RED_TEAM_DEDUP_WINDOW_DAYS). The
+  // assignment map tells a surviving scenario from a collapsed repeat without a second scan.
+  const scenarioOf = clusterVetoScenarios(
+    [...vetoesByKey.entries()].map(([key, veto]) => ({ key, symbol: veto.symbol, side: veto.side, createdAt: veto.createdAt }))
+  );
+  const uniqueScenarios = new Set([...scenarioOf.values()].map((entry) => entry.survivorKey)).size;
+
   // Keyed (runId, symbol) lookups rather than a return_pct-DESC top slice of all matured
   // rows: the top-return slice could drop exactly the low/negative-return vetoes (the
   // avoided losers) that vetoValueAddRate exists to count (Codex review on PR #365).
-  const maturedPairs: Array<{ record: RedTeamVetoRecord; maturedAt: string }> = [];
-  for (const veto of vetoesByKey.values()) {
+  const maturedPairs: Array<{ record: RedTeamVetoRecord; maturedAt: string; isSurvivor: boolean }> = [];
+  for (const [key, veto] of vetoesByKey.entries()) {
     const row = getMaturedSkippedCounterfactualByRunSymbol(userId, veto.runId, veto.symbol);
     if (!row || row.returnPct === undefined) continue;
     const returnPct = veto.side === "short" ? -row.returnPct : row.returnPct;
+    // Realized length of the counterfactual window this return was actually measured over. The
+    // configured horizon is in TRADING days and the measured window in CALENDAR days — they are kept
+    // apart so the horizon disclosure can show the pipeline is not measuring the book's real hold.
+    const windowStart = Date.parse(row.snapshotAt);
+    const windowEnd = Date.parse(row.exitDate ?? row.targetDate);
+    const measuredHoldDays = Number.isFinite(windowStart) && Number.isFinite(windowEnd) && windowEnd >= windowStart
+      ? Number(((windowEnd - windowStart) / 86_400_000).toFixed(1))
+      : undefined;
     maturedPairs.push({
       record: {
         runId: veto.runId,
@@ -1362,14 +1563,22 @@ export function getRedTeamEfficacy(
         thesisTag: veto.thesisTag,
         reason: veto.reason,
         model: veto.model,
-        returnPct
+        returnPct,
+        horizonDays: row.horizonDays,
+        ...(measuredHoldDays !== undefined ? { measuredHoldDays } : {}),
+        duplicatesCollapsed: scenarioOf.get(key)?.duplicates ?? 0
       },
-      maturedAt: row.updatedAt
+      maturedAt: row.updatedAt,
+      isSurvivor: scenarioOf.get(key)?.isSurvivor ?? true
     });
   }
   // Most recent counterfactual maturation first (the documented `records` ordering contract).
   maturedPairs.sort((a, b) => b.maturedAt.localeCompare(a.maturedAt));
-  const records: RedTeamVetoRecord[] = maturedPairs.map((pair) => pair.record);
+  const maturedVetoes = maturedPairs.length;
+  // Scoring set: matured vetoes that survived dedup. A collapsed repeat keeps its raw count in
+  // `maturedVetoes` (pipeline coverage) but never enters a rate, a mean or a median.
+  const scored = maturedPairs.filter((pair) => pair.isSurvivor).map((pair) => pair.record);
+  const records: RedTeamVetoRecord[] = scored;
 
   // Kill-survivorship (Wave-2 outcome engine): terminally-unresolvable counterfactuals
   // (delisted/renamed vetoed names) stay in the denominator and in the disclosure instead
@@ -1381,10 +1590,12 @@ export function getRedTeamEfficacy(
     }
   }
 
-  const maturedVetoes = records.length;
-  const valueAdds = records.filter((r) => r.returnPct < 0).length;
-  const survivorHits = records.filter((r) => r.returnPct > 0).length;
-  const avgReturnPct = maturedVetoes > 0 ? records.reduce((sum, r) => sum + r.returnPct, 0) / maturedVetoes : 0;
+  const maturedUniqueScenarios = scored.length;
+  const valueAdds = scored.filter((r) => r.returnPct < 0).length;
+  const survivorHits = scored.filter((r) => r.returnPct > 0).length;
+  const avgReturnPct = maturedUniqueScenarios > 0 ? scored.reduce((sum, r) => sum + r.returnPct, 0) / maturedUniqueScenarios : 0;
+  const medianReturnPct = medianOf(scored.map((r) => r.returnPct));
+  const sampleSufficient = maturedUniqueScenarios >= RED_TEAM_EFFICACY_MIN_UNIQUE_MATURED;
 
   const byModelMap = new Map<string, RedTeamVetoRecord[]>();
   for (const record of records) {
@@ -1394,12 +1605,39 @@ export function getRedTeamEfficacy(
     else byModelMap.set(model, [{ ...record, model }]);
   }
 
+  // Horizon disclosure (2026-09-25 review: counterfactuals run a 5-trading-day window while the
+  // book holds these names for days-to-weeks, so veto value-add is not horizon-matched). Reported
+  // rather than assumed, and never silently "matched" — the approved-book leg is only filled in
+  // when a caller that holds closed lots supplies it.
+  const counterfactualHorizonDays = medianOf(
+    scored.map((r) => r.horizonDays).filter((days): days is number => typeof days === "number" && Number.isFinite(days))
+  );
+  const medianMeasuredHoldDays = medianOf(
+    scored.map((r) => r.measuredHoldDays).filter((days): days is number => typeof days === "number" && Number.isFinite(days))
+  );
+  const approvedHoldMedianDays = typeof options.approvedHoldMedianDays === "number" ? options.approvedHoldMedianDays : undefined;
+  const approvedHoldSampleSize = typeof options.approvedHoldSampleSize === "number" ? options.approvedHoldSampleSize : 0;
+  const horizonMatched =
+    approvedHoldMedianDays !== undefined && Math.abs(approvedHoldMedianDays - medianMeasuredHoldDays) <= RED_TEAM_DEDUP_WINDOW_DAYS;
+  const horizon: RedTeamHorizonDisclosure = {
+    counterfactualHorizonDays: Number(counterfactualHorizonDays.toFixed(1)),
+    medianMeasuredHoldDays: Number(medianMeasuredHoldDays.toFixed(1)),
+    ...(approvedHoldMedianDays !== undefined ? { medianApprovedHoldDays: Number(approvedHoldMedianDays.toFixed(1)) } : {}),
+    approvedHoldSampleSize,
+    horizonMatched,
+    disclosure: horizonDisclosureText(counterfactualHorizonDays, medianMeasuredHoldDays, approvedHoldMedianDays, approvedHoldSampleSize, horizonMatched)
+  };
+
   const resolvedDenominator = maturedVetoes + unresolvableVetoes;
   const coverage =
     totalVetoes > 0
       ? `${maturedVetoes}/${totalVetoes} vetoes resolved (${Number(((maturedVetoes / totalVetoes) * 100).toFixed(1))}%)${
           unresolvableVetoes > 0 ? ` — ${unresolvableVetoes} unresolvable; may be survivor-biased` : ""
-        }${totalVetoes - resolvedDenominator > 0 ? `; ${totalVetoes - resolvedDenominator} still maturing` : ""}`
+        }${totalVetoes - resolvedDenominator > 0 ? `; ${totalVetoes - resolvedDenominator} still maturing` : ""}${
+          totalVetoes - uniqueScenarios > 0
+            ? `; scored on ${maturedUniqueScenarios} unique scenario${maturedUniqueScenarios === 1 ? "" : "s"} (${totalVetoes - uniqueScenarios} repeat veto${totalVetoes - uniqueScenarios === 1 ? "" : "es"} collapsed)`
+            : ""
+        }`
       : "no vetoes observed";
 
   return {
@@ -1408,8 +1646,16 @@ export function getRedTeamEfficacy(
     unresolvableVetoes,
     maturedCoveragePct: totalVetoes > 0 ? Number(((maturedVetoes / totalVetoes) * 100).toFixed(1)) : 0,
     coverage,
-    vetoValueAddRate: maturedVetoes > 0 ? Number(((valueAdds / maturedVetoes) * 100).toFixed(1)) : 0,
-    survivorRiskHitRate: maturedVetoes > 0 ? Number(((survivorHits / maturedVetoes) * 100).toFixed(1)) : 0,
+    uniqueScenarios,
+    duplicateVetoes: totalVetoes - uniqueScenarios,
+    maturedUniqueScenarios,
+    medianReturnPct: Number(medianReturnPct.toFixed(2)),
+    sampleSufficient,
+    minUniqueMaturedForVerdict: RED_TEAM_EFFICACY_MIN_UNIQUE_MATURED,
+    verdict: sampleSufficient ? "sufficient-sample" : "insufficient-sample",
+    horizon,
+    vetoValueAddRate: maturedUniqueScenarios > 0 ? Number(((valueAdds / maturedUniqueScenarios) * 100).toFixed(1)) : 0,
+    survivorRiskHitRate: maturedUniqueScenarios > 0 ? Number(((survivorHits / maturedUniqueScenarios) * 100).toFixed(1)) : 0,
     avgReturnPct: Number(avgReturnPct.toFixed(2)),
     byModel: Array.from(byModelMap.entries()).map(([model, modelRecords]) => {
       const modelValueAdds = modelRecords.filter((r) => r.returnPct < 0).length;
@@ -1420,11 +1666,32 @@ export function getRedTeamEfficacy(
         maturedVetoes: modelRecords.length,
         vetoValueAddRate: Number(((modelValueAdds / modelRecords.length) * 100).toFixed(1)),
         survivorRiskHitRate: Number(((modelSurvivorHits / modelRecords.length) * 100).toFixed(1)),
-        avgReturnPct: Number(modelAvg.toFixed(2))
+        avgReturnPct: Number(modelAvg.toFixed(2)),
+        medianReturnPct: Number(medianOf(modelRecords.map((r) => r.returnPct)).toFixed(2)),
+        duplicateVetoes: modelRecords.reduce((sum, r) => sum + (r.duplicatesCollapsed ?? 0), 0)
       };
     }),
     records: records.slice(0, limit)
   };
+}
+
+/** Owner-facing horizon sentence. Two legibilities, never one number: the window the counterfactual
+ *  pipeline actually measured, and the hold the approved book actually takes. */
+function horizonDisclosureText(
+  counterfactualHorizonDays: number,
+  medianMeasuredHoldDays: number,
+  approvedHoldMedianDays: number | undefined,
+  approvedHoldSampleSize: number,
+  horizonMatched: boolean
+): string {
+  const window = `Counterfactual returns measure a ${Number(counterfactualHorizonDays.toFixed(1))}-trading-day forward window, realized over a median of ${Number(medianMeasuredHoldDays.toFixed(1))} calendar days.`;
+  if (approvedHoldMedianDays === undefined) {
+    return `${window} The holding period of the approved trades this Red Team vetoes was not supplied at this call site, so the horizon mismatch cannot be quantified here — treat every return below as NOT horizon-matched.`;
+  }
+  const book = `The approved book holds those trades a median of ${Number(approvedHoldMedianDays.toFixed(1))} days over ${approvedHoldSampleSize} closed lot${approvedHoldSampleSize === 1 ? "" : "s"}.`;
+  return horizonMatched
+    ? `${window} ${book} The two windows are within a week, so veto value-add is approximately horizon-matched.`
+    : `${window} ${book} The two windows differ by more than a week, so veto value-add is NOT horizon-matched to realized hold performance.`;
 }
 
 /**
@@ -1438,7 +1705,10 @@ export function getMissedOpportunityCoverage(userId: string = "local", connected
   return getSkippedCounterfactualCoverage(userId, connectedAccountId);
 }
 
-/** One matured Red Team veto joined to its post-veto counterfactual return. */
+/** One matured Red Team veto joined to its post-veto counterfactual return.
+ *  DUPLICATE of the block above `RedTeamEfficacy` (TypeScript declaration-merges the two, so the
+ *  type is the union either way). Left in place rather than deleted in the 2026-09-25 scoring work to
+ *  keep that change to the scorecard only — add any new field to the CANONICAL block above. */
 export interface RedTeamVetoRecord {
   runId: string;
   symbol: string;
