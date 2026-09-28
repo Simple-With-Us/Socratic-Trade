@@ -63,7 +63,13 @@ import { summarizeSourceCoverage } from "./source-value";
 import { deriveExecutionState, fillSourceForExecutionMode, llmExecutionMode, llmModeClarification, type ExecutionAccount } from "./execution-mode";
 import { applyBrokerOrderPlacementPause, brokerHealthRunSkip, checkBrokerHealth, isOrderPlacementInfrastructureFailure } from "./broker-health";
 import { greenFailoverExhaustedSuffix, interactiveStrategyReasoningEffort, isFailoverLlmStatus, isRetryableLlmError, LLM_OUTPUT_TOKEN_CAPS, LLM_REQUEST_DEFAULTS, LLM_TIMEOUT_MS, llmFetch, llmFetchCapturing, resolveLlmWireOutputCap, strategyLlmTimeoutMs, type LlmCallOutcome } from "./llm-request";
-import { buildBullSystem, STRATEGY_PROMPT_VERSION, THESIS_PLAYBOOK } from "./strategy-prompts";
+import {
+  assignDeterministicThesisTag,
+  buildBullSystem,
+  shouldScoreThesisTagForSide,
+  STRATEGY_PROMPT_VERSION,
+  THESIS_PLAYBOOK
+} from "./strategy-prompts";
 import { resolveLlmEndpoint } from "./llm-provider";
 import { isModelRotationSentinel, planRotationImplicitFallbacks, recordOpenRouterModelNotFound, resolveModelRotationForRun } from "./model-rotation";
 import { maybeOpenRouterCreditsExhaustedHint } from "./openrouter-credits";
@@ -1422,8 +1428,7 @@ export async function runStrategyOnce(
     }
 
     let ragContext = "";
-    let socraticRagAttributions: SocraticRagAttribution[] = [];
-    // Retrieval is deliberately distinct from prompt consumption. Candidates stay local until
+    let socraticRagAttributions: SocraticRagAttribution[] = [];    // Retrieval is deliberately distinct from prompt consumption. Candidates stay local until
     // proposeTrades has applied containment + the final evidence budget and can prove what the
     // model actually received.
     let retrievedRagAttributions: SocraticRagAttribution[] = [];
@@ -1499,7 +1504,22 @@ export async function runStrategyOnce(
           const chunkResults = await Promise.all(
             chunk.map(async (sym) => {
               const isDeep = deepSymbols.includes(sym);
-              const limit = isDeep ? 8 : 1;
+              // P1-5 (2026-09-27): evidence depth used to be 8 chunks for the deep symbols (scan
+              // top-3 plus held names) and exactly ONE for every other scored candidate. With a scan
+              // surfacing 8+ candidates that is an 8:1 tilt toward the existing ranking, so the extra
+              // evidence re-read the ranking instead of being able to contradict it — the very names
+              // the ranking had demoted got the thinnest dossier.
+              //
+              // The default is 3 (the low end of the intended 3–4) and it is BOUNDED + CONFIGURABLE
+              // rather than a flat raise, because the cost is displacement, not budget blowout:
+              // `applyEvidenceBudget` truncates and hard-caps, so the prompt can never exceed
+              // maxTokenEstimate, but the whole RAG block is a single budget item — so extra chunks
+              // for scout symbols consume the filings quota that previously went to the TAIL of the
+              // concatenation, and the last symbols' dossiers are what get cut mid-string. Filings
+              // ARE the highest-priority item (priority 100), so nothing else is crowded out; the
+              // loss is entirely among filings. Clamped to the deep limit so a bad env value cannot
+              // explode the quota, and parsing fails safe to the default.
+              const limit = isDeep ? DEEP_FILINGS_CHUNK_LIMIT : scoutFilingsChunkLimit();
               const query = deterministicFilingsRetrievalQuery(sym);
               let variants: string[] = [];
 
@@ -1576,6 +1596,36 @@ export async function runStrategyOnce(
                 }
               } else {
                 chunks = await retrieveContextDetailed(query, sym, limit, userId, retrieveOptions);
+              }
+
+              // P1-3 (2026-09-27): apply the learned usefulness weighting to the FILINGS path too.
+              // Until now the only caller was experience-memory.ts, so the per-doc-type statistics —
+              // "documents of this kind preceded decisions that did well" — were computed and
+              // persisted by the join and then never consulted here.  The evidence the Bull proposer
+              // reads was therefore ordered purely by similarity, and the one signal that says
+              // "filings of this kind have a realized track record" could not move anything.
+              //
+              // NO FEEDBACK LOOP, and the reason is structural rather than a matter of care: the
+              // multiplier is keyed on the AGGREGATE `doc_type|memoryKind` statistics, not on any
+              // per-document attribution. A chunk can never be credited for influencing a decision
+              // and then be re-ranked on its own influence; a document's rank moves because its whole
+              // TYPE has a track record. There is no path by which a document's usefulness can be
+              // derived from the documents it itself influenced. The bounded clamp
+              // (USEFULNESS_MULTIPLIER_MIN/MAX) and the RETRIEVAL_USEFULNESS_WEIGHTING off-switch
+              // are the second guard, and the function fails open to the similarity order on any
+              // error or when stats are unavailable.
+              if (Array.isArray(chunks) && chunks.length > 1) {
+                try {
+                  const { applyRetrievalUsefulnessWeighting } = await import("./retrieval-usefulness");
+                  chunks = applyRetrievalUsefulnessWeighting(chunks, userId);
+                } catch (err) {
+                  // Fail open to the retriever's own order — an advisory nudge must never cost a
+                  // dossier. The warning is what makes "the weighting did not run" diagnosable.
+                  console.warn(
+                    "[Strategy] filings usefulness re-rank unavailable, keeping similarity order:",
+                    err instanceof Error ? err.message : String(err)
+                  );
+                }
               }
 
               // Structured facts and Form 4 transactions use SQLite, not semantic retrieval.
@@ -6603,11 +6653,72 @@ async function proposeTrades(input: {
   // batch, then a deterministic check per proposal. A mismatch is RECORDED as a kind-prefixed
   // dataAdjustments receipt — the rationale is never rewritten and nothing is blocked.
   const sessionAtProposal = currentMarketSession();
-  const rawBullProposals = candidateBoundBullProposals.map(p => ({
+  // P0-2 (2026-09-27) — deterministic thesis-tag assignment, applied at the ONE seam where the raw
+  // model answer, the scan evidence, and the run identity are all in scope. `tradeThesisTag` used to
+  // be the model's own pick while the sizing multiplier, the negative-expectancy skip, and the thesis
+  // scorecards all keyed on it — so a model could relabel its way out of a penalty, and no "P&L by
+  // thesis" number was falsifiable. The scorer assigns the final tag from evidence the scan already
+  // computed, the model's choice is kept as `tradeThesisProposedTag`, and every divergence is audited.
+  //
+  // Properties that keep this additive rather than a reinterpretation of history: nothing is
+  // backfilled (old rows keep the tag they were stored with), the scorer ABSTAINS to the model's tag
+  // when no rule fires or the margin is too small, and only openings are scored — sells keep today's
+  // behaviour exactly, which leaves the existing Risk-Exit de-risking path untouched.
+  const candidateBySymbolForThesisTag = new Map<string, MarketQuote>();
+  for (const candidate of input.marketScan?.topCandidates ?? []) {
+    const sym = normalizeSymbol(candidate.symbol);
+    if (sym && !candidateBySymbolForThesisTag.has(sym)) candidateBySymbolForThesisTag.set(sym, candidate);
+  }
+  const rawBullProposals = candidateBoundBullProposals.map(p => {
+    const proposedTag = p.tradeThesisTag;
+    let assignedTag: string | undefined;
+    let thesisTagAudit: { result: ReturnType<typeof assignDeterministicThesisTag>; candidateFound: boolean } | null = null;
+    if (shouldScoreThesisTagForSide(p.side)) {
+      const candidate = candidateBySymbolForThesisTag.get(normalizeSymbol(p.symbol));
+      const decision = assignDeterministicThesisTag({
+        factorBreakdown: candidate?.factorBreakdown,
+        sectorRelStrength: candidate?.sectorRelStrength,
+        daysToEarnings: candidate?.daysToEarnings,
+        insiderSentiment: candidate?.insiderSentiment,
+        senateTrades: candidate?.senateTrades,
+        congressCompositeSignedScore: candidate?.congressCompositeSignedScore,
+        shortPercentOfFloat: candidate?.shortPercentOfFloat,
+        analystScore: candidate?.analystScore
+      });
+      thesisTagAudit = { result: decision, candidateFound: Boolean(candidate) };
+      if (decision.tag && decision.tag !== proposedTag) assignedTag = decision.tag;
+    }
+    if (thesisTagAudit) {
+      const { result: decision, candidateFound } = thesisTagAudit;
+      // The receipt fires on EVERY scored proposal, not only on override: "the scorer ran and
+      // agreed" is as useful to measure as "the scorer overruled the model", and without the
+      // former you cannot tell a genuine agreement from a scorer that silently never ran.
+      audit(
+        "thesis_tag_assigned",
+        {
+          runId: input.runId,
+          symbol: normalizeSymbol(p.symbol),
+          side: p.side,
+          proposedTag,
+          assignedTag: assignedTag ?? proposedTag,
+          overrode: Boolean(assignedTag),
+          rule: decision.rule,
+          reason: decision.reason,
+          runnerUp: decision.runnerUp,
+          margin: Number(decision.margin.toFixed(2)),
+          scores: decision.scores,
+          candidateFound
+        },
+        input.userId,
+        input.policy.connectedAccountId
+      );
+    }
+    return {
     ...p,
     // Preserve the proposing model's own thesis before deterministic sizing/risk receipts and the
     // Red Team review are appended to the legacy all-in-one rationale string.
     greenTeamRationale: p.rationale,
+    ...(assignedTag ? { tradeThesisTag: assignedTag, tradeThesisProposedTag: proposedTag } : {}),
     entryMarketRegime: currentMarketRegime,
     ...(regimeSeverity ? { entryRegimeSeverity: Number(regimeSeverity.severity.toFixed(2)) } : {}),
     ...(activeOverlays.length > 0 ? { appliedOverlayIds: activeOverlays.map((overlay) => overlay.id) } : {}),
@@ -6624,7 +6735,8 @@ async function proposeTrades(input: {
       const receipt = sessionPhrasingReceipt(p.rationale, sessionAtProposal);
       return receipt ? [receipt] : undefined;
     })()
-  }));
+    };
+  });
   // TRUNCATION-AWARE: if the Bull answer hit the output-token cap, a zero/partial parse is NOT a
   // genuine "do nothing" — record a DISTINCT reason + audit so it's diagnosable and never a silent
   // no-op. (See Chat A item 5; raise LLM_OUTPUT_TOKEN_CAPS.strategyProposal if this recurs.) The
@@ -6759,6 +6871,24 @@ export function protectiveExitQuoteFromScan(quote: MarketQuoteSummary | undefine
     bid: !quote.syntheticBid && quote.bid && quote.bid > 0 ? quote.bid : undefined,
     ask: !quote.syntheticAsk && quote.ask && quote.ask > 0 ? quote.ask : undefined
   };
+}
+
+/** Full evidence dossier for the symbols the scan ranked highest plus every held name. */
+const DEEP_FILINGS_CHUNK_LIMIT = 8;
+/** Default dossier depth for every OTHER scored candidate — see P1-5 at the `limit` assignment. */
+const DEFAULT_SCOUT_FILINGS_CHUNK_LIMIT = 3;
+
+/**
+ * P1-5: chunks per non-deep symbol, owner-tunable via FILINGS_SCOUT_CHUNK_LIMIT. Clamped to
+ * [1, DEEP_FILINGS_CHUNK_LIMIT] and fail-safe to the default on a malformed value, so this can
+ * never be the thing that blows the filings quota.
+ */
+export function scoutFilingsChunkLimit(): number {
+  const raw = process.env.FILINGS_SCOUT_CHUNK_LIMIT;
+  if (raw === undefined) return DEFAULT_SCOUT_FILINGS_CHUNK_LIMIT;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_SCOUT_FILINGS_CHUNK_LIMIT;
+  return Math.max(1, Math.min(DEEP_FILINGS_CHUNK_LIMIT, Math.round(parsed)));
 }
 
 export function uniqueSymbols(symbols: string[]): string[] {

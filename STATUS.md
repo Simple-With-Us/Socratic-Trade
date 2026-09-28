@@ -1,5 +1,77 @@
 # Current Status
 
+## 2026-09-27 MINIMAX — Outcome closure: the system can learn from its own outcomes (branch `minimax/outcome-closure`)
+
+**P0-2.**  `tradeThesisTag` was chosen by the same model that then got graded on it, while the
+deterministic sizing multiplier, the negative-expectancy skip, and the thesis scorecards all keyed on
+it — so a model could relabel its way out of a penalty, and no "P&L by thesis" number was falsifiable.
+`assignDeterministicThesisTag` now assigns the tag from evidence the scan already computes
+(`factorBreakdown`, `daysToEarnings`, `shortPercentOfFloat`, `sectorRelStrength`, and the
+insider-vs-congress split that the blended `positioning` factor cannot express), the model's choice is
+kept as `tradeThesisProposedTag`, and a `thesis_tag_assigned` audit event fires on **every** scored
+proposal — including agreements, so "the scorer agreed" is distinguishable from "the scorer never ran".
+The scorer **abstains** (model's tag stands) when no rule fires, when the best rule is under the
+neutral floor, or when the leader's margin is under 8.  Openings only — sells keep today's behaviour
+exactly, which leaves the existing Risk-Exit de-risking path untouched.  Nothing is backfilled, so no
+already-reported historical number changes meaning.  **Owner ruling requested** on the three tags that
+cannot be derived without inventing semantics (`Mean-Reversion`, `Defensive-Rotation`,
+`Analyst-Revision`) — the scorer never emits them and a test enforces that.  Rollout §3.
+
+## 2026-09-27 MINIMAX — P1-4: the retrieval stage telemetry can finally be read (branch `minimax/outcome-closure`)
+
+**What.**  `rag_retrieval_stage_trace` and `rag_retrieval_quality` are written default-on and record
+exactly what you need to diagnose a bad decision — which recall stage threw the candidates away and
+how long each stage took.  The only reference to either event anywhere in the repo was
+`audit-prune.ts`, which decides how long to *keep* them, so a recall stage that silently returned
+nothing was invisible in-product.  New `GET /api/admin/retrieval-telemetry` (admin-gated,
+`force-dynamic`, one bounded read, no writes) over new pure aggregation functions in
+`src/lib/rag/retrieval-telemetry-read.ts`, plus an admin page ("Retrieval Stages") and nav entry.
+The headline is the **empty-recall rate** — traces whose `finalCandidates` was zero.  The payloads
+carry no query text and no document text (only a short deterministic query digest), so the page
+shows per-stage and per-symbol aggregates only.  The response makes `truncated` and `noData`
+explicit, so a capped or empty window is never read as a healthy one — no data can itself mean the
+telemetry was off.  Rollout §2.
+
+## 2026-09-27 MINIMAX — P1-5: evidence depth can now contradict the ranking (branch `minimax/outcome-closure`)
+
+**What.**  Only the scan's top 3 plus held names got an 8-chunk dossier; every other scored candidate
+got exactly ONE.  With a scan surfacing 8+ candidates that is an 8:1 tilt toward the existing
+ordering, so the extra evidence re-read the ranking instead of being able to contradict it — the names
+the ranking demoted received the thinnest dossier.  Non-deep candidates now get 3, bounded and
+env-tunable via `FILINGS_SCOUT_CHUNK_LIMIT` (clamped to 1–8, fail-safe default) rather than a flat
+raise.  **Budget interaction:** `applyEvidenceBudget` truncates and hard-caps, so this can never
+exceed the prompt token budget (tested with a 200k-character RAG block against a 24k filings quota).
+The real cost is *within-RAG displacement* — the whole RAG block is one budget item, so scout chunks
+consume quota the tail previously had and the last symbols' dossiers are what get cut.  Filings are the
+highest-priority item so nothing else is crowded out, and the cut is recorded as a receipt.  Rollout §2.
+
+## 2026-09-27 MINIMAX — P1-3: the filings path finally re-ranks on learned usefulness (branch `minimax/outcome-closure`)
+
+**What.**  `applyRetrievalUsefulnessWeighting` had exactly one caller, so the per-doc-type statistics
+the join exists to produce were computed and persisted and then never consulted on the path that
+retrieves the majority of the evidence the proposer reads.  The filings dossier now applies the
+weighting after both retrieval shapes, failing open to the retriever's order on any error.  **The
+clamp was the real bug:** `usefulnessMultiplier`'s reachable range is 0.8–1.2 (±20%), and the old
+0.9–1.1 clamp was *binding*, clipping a third off both ends — so widening it alone would have doubled
+the effective nudge as a side effect of a constant tweak.  The coefficient now defines the operating
+range and 0.75/1.25 remains a real backstop.  **No feedback loop:** the multiplier is keyed on
+aggregate `doc_type|memoryKind` stats, never per-document, so a document can never be re-ranked on
+its own influence; a test enforces that.  Rollout §2.
+
+## 2026-09-27 MINIMAX — P0-1: the app's own post-mortem lessons can now reach the brain (branch `minimax/outcome-closure`)
+
+**What.**  A post-mortem lesson about a trade the app already closed and measured was being graded by
+the LLM semantic gate — which asks whether the text "would influence … trading behavior", a question a
+sizing lesson answers yes to by construction — upgraded to `risk`, and parked in
+`learned_context_pending`, a queue read only by a human approval click or the nightly Learning Review.
+So the highest-quality learning artifact the system produces never reached the brain it is read from.
+The lesson producer now stamps `provenance: "system-postmortem"` and `source: "postmortem-outcome"`,
+and `semantic-gate.ts` step 1b skips the LLM **layer** for those rows.  Unchanged: the keyword risk
+layer (a lesson naming a real risk knob is still queued for human approval), the PII gate, and the full
+gate for every unmarked candidate.  Side effect: this is the only ingest path that no longer spends an
+LLM call per lesson.  **Next:** P0-2 deterministic thesis tag.  Rollout:
+`docs/rollouts/2026-09-27-outcome-closure.md`.
+
 ## 2026-09-27 MINIMAX — Equal-risk sizing cap (opt-in, default off)
 
 **What.**  `applyDeterministicSizing` gains an opt-in dollar-risk cap: size = risk budget ÷ stop
@@ -5255,6 +5327,41 @@ decision, not a code change.
 
 Rollout: `docs/rollouts/2026-09-27-st-perf-measurement-ranks.md`.  Board: `66ca3e67`.
 
+## 2026-09-27 — [MM] Parked account state, so a quiet account can say why (review rank 8)
+
+The 2026-09-25 review asked for a decision on four dormant accounts — "park it, re-arm it, or
+investigate" — and could not make one, because nothing in the state vocabulary could express it.
+`systemState: "halted"` says trading stopped; `isDraining` says the account is being disconnected.
+Neither says a person looked at the account and decided it should stay quiet, so a deliberately
+quiet account and a broken one were the same row in every report.
+
+Adds `connected_accounts.parked / parked_reason / parked_at` (guarded `ALTER`, same pattern as the
+existing `is_draining` migration), `park_account` / `unpark_account` on the ops account-control
+surface the review named as its dependency, a scheduler skip that happens *before* the execution
+state is derived so no broker gateway is constructed, and the parked facts on every ops response.
+
+Deliberate separations, each stated in the response so an operator cannot be misled: parking does
+NOT halt (halting stays `set_system_state`), un-parking does NOT arm, and a park **requires** a
+reason — a blank-reason park is indistinguishable from the broken accounts this exists to tell
+apart, so it is rejected rather than accepted-and-useless.  Re-parking with a *different* reason is
+refused 409 and surfaces the existing one; re-parking with the *same* reason is idempotent.  A
+draining account cannot be parked, and un-park clears the reason and timestamp together so no stale
+"why" outlives its decision.
+
+Did **not** invent a `lastSkipReason` on the per-account schedule — no such field exists and nothing
+would read it; the audit row is the record.
+
+Verified `tsc --noEmit` clean, 46/46 across the parked suite plus account-deletion,
+connected-accounts-route and connected-account-tenant-guard.  Failing-first proven: 8 of 10 fail with
+the implementation stashed.  Also worth knowing: `listConnectedAccounts` is not the only reader of
+`connected_accounts` — there are **four** row mappers, and an early two-of-four patch typechecked
+while leaving two paths reading a parked account as not parked.
+
+**The decision is still the owner's.**  This adds the vocabulary; the four accounts in the review
+still need an explicit park / re-arm / investigate.  Parking is reachable only from the ops endpoint
+(no console control yet), and `ops-performance` does not yet surface `parked` on its account rows.
+
+Rollout: `docs/rollouts/2026-09-27-st-account-parked.md`.
 ## 2026-09-27 — [MM] Branch protection on `main`, plus the two guards that keep it meaningful
 
 Owner-directed, directly after this session's own merge driver nearly merged a PR whose CI had never
