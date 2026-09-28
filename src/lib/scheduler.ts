@@ -1297,6 +1297,22 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
           schedule.nextRunAt = null;
           continue;
         }
+        // Review rank 8: a parked account is skipped BEFORE anything reaches the broker, and the
+        // reason travels with the skip. Without this the flag would record a decision that nothing
+        // acted on, and a parked account would keep proposing trades. Checked before the execution
+        // state so no gateway is even constructed for an account the owner has parked.
+        if (account.parked) {
+          schedule.nextRunAt = null;
+          // The audit row IS the record — there is no `lastSkipReason` field on the per-account
+          // schedule, and inventing one here would add a shape nothing else reads.
+          audit(
+            "scheduler_account_parked_skip",
+            { connectedAccountId: account.id, parkedReason: account.parkedReason ?? null, parkedAt: account.parkedAt ?? null },
+            userId,
+            account.id
+          );
+          continue;
+        }
         const executionState = deriveExecutionState(policy, account);
         const brokerGateway = executionState.submitsBrokerOrders ? getBrokerGateway(policy, userId) : undefined;
         
