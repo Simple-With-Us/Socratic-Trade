@@ -1,7 +1,11 @@
 name: Playwright Smoke
 
-# Playwright Smoke — NOT a required merge check (ruleset: verify only). PR trigger removed
-# 2026-07-21 to unclog the self-hosted runner queue; still runs on main / nightly / manual.
+# Playwright Smoke — NOT a required merge check (ruleset: verify only).
+# PR trigger was removed 2026-07-21 to unclog the self-hosted runner queue, then
+# restored 2026-09-27 as a NARROW path-filtered trigger: only PRs that touch
+# Playwright-owned files run it (test/e2e/**, playwright.config.ts, lockfiles,
+# this workflow). UI PRs that don't touch those paths still skip it, preserving
+# the 2026-07-21 queue-protection rationale. Still runs on main / nightly / manual.
 
 on:
   # smoke is NOT a required status check (ruleset requires only `verify`). Running it on
@@ -14,6 +18,11 @@ on:
     # Nightly full-browser baseline now that smoke no longer runs on every PR.
     - cron: "17 9 * * *"
   workflow_dispatch:
+    inputs:
+      update-visual-baselines:
+        description: "Regenerate the Playwright visual baselines IN CI (visual.spec.ts --update-snapshots, CI browser + production build) and upload them as the visual-baselines artifact — download and commit the PNGs to refresh committed baselines."
+        type: boolean
+        default: false
 
 concurrency:
   group: e2e-${{ github.workflow }}-${{ github.ref }}
@@ -194,5 +203,33 @@ jobs:
             ${{ runner.os }}-nextjs-${{ hashFiles('package.json') }}-
             ${{ runner.os }}-nextjs-
       - name: Run smoke tests
-        if: needs.classify.outputs.docs-only != 'true'
+        if: needs.classify.outputs.docs-only != 'true' && inputs.update-visual-baselines != true
         run: npm run test:e2e
+      # Baseline regeneration lives in CI (not on a dev laptop/VM) because the
+      # committed PNGs must match the CI browser + production build byte for byte:
+      # local runs use a different Chromium build, different system fonts, and
+      # `next dev`, and that drift alone fails the 1% pixel budget. Dispatch the
+      # workflow with update-visual-baselines=true, download the visual-baselines
+      # artifact, and commit the PNGs.
+      - name: Regenerate visual baselines (CI browser, production build)
+        if: needs.classify.outputs.docs-only != 'true' && inputs.update-visual-baselines == true
+        run: npx playwright test test/e2e/visual.spec.ts --update-snapshots
+      - name: Upload regenerated visual baselines
+        if: needs.classify.outputs.docs-only != 'true' && inputs.update-visual-baselines == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-baselines-${{ github.run_attempt }}
+          path: test/e2e/visual.spec.ts-snapshots/
+          retention-days: 14
+      # Visual regression failures are pixel diffs — the report and traces are
+      # the only way to see what changed. Upload on failure for PR review.
+      - name: Upload Playwright results on failure
+        if: failure() && needs.classify.outputs.docs-only != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results-${{ github.run_attempt }}
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
+          retention-days: 14
