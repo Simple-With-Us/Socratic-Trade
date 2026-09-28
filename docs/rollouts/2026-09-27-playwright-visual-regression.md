@@ -58,3 +58,7 @@ The PR's first `e2e` CI run FAILED both visual tests: 34,119 px (console) and 12
 ### PR trigger removed to respect queue-safety guardrail (2026-09-27 ~22:55 UTC)
 
 The merge commit's `verify` run failed on `test/ci-workflow-queue-safety.test.ts > CI queue safety > does not schedule Playwright smoke for every pull request`: the narrowed `pull_request:` trigger added to `e2e.yml` violates a deliberate repo decision — documented in the workflow itself and asserted by the test — that smoke was removed from PRs on 2026-07-21 because it clogged the single CI pool.  Reverted to the original triggers (push to main, nightly schedule, workflow_dispatch) and kept only the new `update-visual-baselines` dispatch input.  The one PR-triggered smoke run before the revert had already proven the CI-generated baselines green, and `verify` (the only required check) is the gate.
+
+### MERGED (2026-09-27 ~23:12 UTC)
+
+PR #3903 merged to main as `606a4c7b` via auto-merge (verify + iOS verification + Seer + gitleaks + check-pin all green; Playwright Smoke had proven the CI-generated baselines green on the branch before the PR trigger was reverted).  Post-merge push runs on main: Playwright Smoke SUCCESS (visual assertions pass against the committed baselines) and CI verify SUCCESS.  Feature branch auto-deleted.  No remaining blocker.
