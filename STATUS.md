@@ -17,6 +17,21 @@ already-reported historical number changes meaning.  **Owner ruling requested** 
 cannot be derived without inventing semantics (`Mean-Reversion`, `Defensive-Rotation`,
 `Analyst-Revision`) — the scorer never emits them and a test enforces that.  Rollout §3.
 
+## 2026-09-27 MINIMAX — P1-4: the retrieval stage telemetry can finally be read (branch `minimax/outcome-closure`)
+
+**What.**  `rag_retrieval_stage_trace` and `rag_retrieval_quality` are written default-on and record
+exactly what you need to diagnose a bad decision — which recall stage threw the candidates away and
+how long each stage took.  The only reference to either event anywhere in the repo was
+`audit-prune.ts`, which decides how long to *keep* them, so a recall stage that silently returned
+nothing was invisible in-product.  New `GET /api/admin/retrieval-telemetry` (admin-gated,
+`force-dynamic`, one bounded read, no writes) over new pure aggregation functions in
+`src/lib/rag/retrieval-telemetry-read.ts`, plus an admin page ("Retrieval Stages") and nav entry.
+The headline is the **empty-recall rate** — traces whose `finalCandidates` was zero.  The payloads
+carry no query text and no document text (only a short deterministic query digest), so the page
+shows per-stage and per-symbol aggregates only.  The response makes `truncated` and `noData`
+explicit, so a capped or empty window is never read as a healthy one — no data can itself mean the
+telemetry was off.  Rollout §2.
+
 ## 2026-09-27 MINIMAX — P1-5: evidence depth can now contradict the ranking (branch `minimax/outcome-closure`)
 
 **What.**  Only the scan's top 3 plus held names got an 8-chunk dossier; every other scored candidate

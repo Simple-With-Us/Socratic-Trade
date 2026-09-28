@@ -192,6 +192,36 @@ highest-priority item in the whole budget (priority 100), so nothing else — le
 reflection, analogs, coaching — is crowded out; and the truncation is recorded as a receipt rather than
 being silent.  The tunable exists so the owner can dial it back to 1 or up to 4 without a deploy.
 
+### P1-4 — a read path for the retrieval stage telemetry
+
+- `src/lib/rag/retrieval-telemetry-read.ts` (new) — `aggregateRetrievalStageTraces` and
+  `aggregateRetrievalQuality`. Deliberately **pure functions over already-parsed payloads**, so the
+  SQL stays in the route where the other admin routes keep theirs and the aggregation is testable
+  without a database.
+- `app/api/admin/retrieval-telemetry/route.ts` (new) — `requireAdmin`-gated, `force-dynamic`, one
+  bounded `listAuditByKindsSince` SELECT, no writes.
+- `app/admin/retrieval-telemetry/{page,retrieval-telemetry-client}.tsx` (new) plus a nav entry in
+  `app/admin/admin-shell.tsx` ("Retrieval Stages", reusing the existing `Activity` icon).
+
+**Read-only and disclosure.**  The payloads carry no query text and no document text — the query is
+represented only by a short deterministic digest, which `retrieval-stage-telemetry.ts` itself
+describes as "a correlation key, not a security or authentication primitive".  The page therefore
+shows per-STAGE and per-SYMBOL aggregates only: counts, durations, and drop arithmetic.  It never
+reconstructs a query.
+
+**Two things the response makes explicit rather than leaving to inference:**
+
+- `truncated` — the route reports when the read hit its row cap, so a capped window is never read as
+  a complete one.  (Same discipline as the CI rule this task was briefed with: an absent signal is
+  "not gathered yet", never "fine".)
+- `noData`, plus `firstTraceAt`/`lastTraceAt` — no rows can mean the telemetry was OFF for the whole
+  window, which is itself the finding an owner needs when a decision looks inexplicable.  Without the
+  timestamps, "no data" and "telemetry disabled" are indistinguishable.
+
+**The headline the page exists to answer** is the empty-recall rate: `finalCandidates === 0` traces
+per symbol, and the quality-side `emptyRate`.  That is the "a recall stage silently returned nothing"
+case, and it was previously invisible.
+
 ## 4. Decisions & Trade-offs
 
 - **Provenance marker, not a behaviour heuristic.**  The alternative — loosening the gate prompt, or
@@ -223,6 +253,18 @@ being silent.  The tunable exists so the owner can dial it back to 1 or up to 4 
   5 files, **103 passed**.
 - Full gate (`npm run lint`, `npm test`, `npm run build`) and the remaining P0-2 / P1 items are
   recorded as they land; see §7.
+- Per-item, as each landed:
+  - P0-1: tsc clean; `test/semantic-gate.test.ts` + `test/outcome-engine.test.ts` 44/44; the five
+    learned-context / learning-review / post-mortem suites 103/103.
+  - P0-2: tsc clean; `test/thesis-tag-deterministic.test.ts` 23/23; thesis size-multiplier,
+    thesis-tag-persistence and strategy-prompt-version 15/15.
+  - P1-3: tsc clean; `test/retrieval-usefulness.test.ts` 15/15.
+  - P1-4: tsc clean, `npm run lint` 0 errors; `test/retrieval-telemetry-read.test.ts` 15/15.
+  - P1-5: tsc clean; `test/filings-chunk-depth.test.ts` 3/3; evidence, evidence-pack and
+    rag-evidence-consumption 26/26.
+  - `npm run lint` reported 0 errors throughout (839 pre-existing warnings, 840 after the new files —
+    all `@typescript-eslint/no-explicit-any`-class debt already pinned to "warn" in
+    `eslint.config.mjs`).
 
 ## 6. Next Steps & Blockers
 
@@ -239,5 +281,5 @@ being silent.  The tunable exists so the owner can dial it back to 1 or up to 4 
 | P0-1 autonomous-provenance gate bypass | **landed** (this commit) |
 | P0-2 deterministic thesis tag | **landed** (abstaining scorer + recorded proposal; 3 tags need an owner ruling) |
 | P1-3 retrieval usefulness in the filings path | **landed** (with a corrected, honest statement of what the bound buys) |
-| P1-4 retrieval stage telemetry read path | not started |
+| P1-4 retrieval stage telemetry read path | **landed** (read-only admin route + page; `truncated`/`noData` explicit) |
 | P1-5 non-deep evidence depth | **landed** (default 3, bounded + env-tunable; displacement documented) |
