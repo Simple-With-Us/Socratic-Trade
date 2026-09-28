@@ -48,12 +48,23 @@ import type { ConnectedAccount, EquityOrder, SystemState, TradingPolicy } from "
  * active).  Responses carry no credentials, no raw broker bodies, and only masked account numbers.
  */
 
-export const OPS_ACCOUNT_CONTROL_ACTIONS = ["list_working_orders", "cancel_working_orders", "set_system_state"] as const;
+export const OPS_ACCOUNT_CONTROL_ACTIONS = [
+  "list_working_orders",
+  "cancel_working_orders",
+  "set_system_state",
+  // Review rank 8: record that an account is deliberately parked, and reverse it. A bare halt says
+  // trading stopped; it does not say a person decided it should, which is the distinction the review
+  // needed to make a call on four dormant accounts it otherwise could not interpret.
+  "park_account",
+  "unpark_account"
+] as const;
 export type OpsAccountControlAction = (typeof OPS_ACCOUNT_CONTROL_ACTIONS)[number];
 
 export const OPS_SETTABLE_SYSTEM_STATES = ["active", "close_only", "halted"] as const;
 export type OpsSettableSystemState = (typeof OPS_SETTABLE_SYSTEM_STATES)[number];
 
+/** Upper bound on a park reason, so the flag cannot be used as free-text storage. */
+export const OPS_MAX_PARK_REASON = 500;
 /** Upper bound on explicitly named order ids per call. */
 export const OPS_MAX_ORDER_IDS = 100;
 const MAX_ID_LENGTH = 200;
@@ -75,7 +86,9 @@ const OPS_ACTOR = "ops-token";
 export type OpsAccountControlRequest =
   | { action: "list_working_orders"; connectedAccountId: string; dryRun: boolean }
   | { action: "cancel_working_orders"; connectedAccountId: string; orderIds?: string[]; dryRun: boolean }
-  | { action: "set_system_state"; connectedAccountId: string; systemState: OpsSettableSystemState; dryRun: boolean };
+  | { action: "set_system_state"; connectedAccountId: string; systemState: OpsSettableSystemState; dryRun: boolean }
+  | { action: "park_account"; connectedAccountId: string; reason: string; dryRun: boolean }
+  | { action: "unpark_account"; connectedAccountId: string; dryRun: boolean };
 
 export type ParsedOpsAccountControlRequest = { ok: true; request: OpsAccountControlRequest } | { ok: false; error: string };
 
@@ -117,6 +130,20 @@ export function parseOpsAccountControlRequest(raw: unknown): ParsedOpsAccountCon
     return { ok: true, request: { action, connectedAccountId, orderIds, dryRun } };
   }
 
+  if (action === "unpark_account") return { ok: true, request: { action, connectedAccountId, dryRun } };
+
+  if (action === "park_account") {
+    // A reason is REQUIRED, not optional. The whole point of the flag is that a dormant account can
+    // be read months later and understood; a park with a blank reason is indistinguishable from the
+    // broken accounts this exists to tell apart, so it is rejected instead of accepted-and-useless.
+    const reason = typeof raw.reason === "string" ? raw.reason.trim() : "";
+    if (!reason) return { ok: false, error: "reason is required when parking an account." };
+    if (reason.length > OPS_MAX_PARK_REASON) {
+      return { ok: false, error: `reason may be at most ${OPS_MAX_PARK_REASON} characters.` };
+    }
+    return { ok: true, request: { action, connectedAccountId, reason, dryRun } };
+  }
+
   const systemState = raw.systemState;
   if (typeof systemState !== "string" || !(OPS_SETTABLE_SYSTEM_STATES as readonly string[]).includes(systemState)) {
     return { ok: false, error: `systemState must be one of: ${OPS_SETTABLE_SYSTEM_STATES.join(", ")}.` };
@@ -149,7 +176,12 @@ function accountSummary(account: ConnectedAccount) {
     accountNumberMasked: maskAccountNumber(account.accountNumber),
     /** The console's selected-account pointer (connected_accounts.is_active).  Not a scheduling input. */
     isSelectedInConsole: account.isActive,
-    isDraining: account.isDraining === true
+    isDraining: account.isDraining === true,
+    // Review rank 8: the reason this account is quiet, when the quiet was a decision. Without it a
+    // parked account and a broken one are the same row in every ops response.
+    parked: account.parked === true,
+    parkedReason: account.parkedReason ?? null,
+    parkedAt: account.parkedAt ?? null
   };
 }
 
@@ -659,6 +691,88 @@ async function setSystemState(
   return outcome;
 }
 
+/**
+ * Park / un-park an account (review rank 8).
+ *
+ * Parking is a DELIBERATE halt with a recorded reason, and it is the missing half of the state
+ * vocabulary. `systemState: "halted"` says trading stopped; `isDraining` says the account is being
+ * disconnected. Neither says a person looked at a dormant account and decided it should stay
+ * quiet — which is why the 2026-09-25 review could not tell four dormant accounts apart from four
+ * broken ones, and why every one of them kept reporting an unexplained zero or an unknown balance.
+ *
+ * Parking does NOT itself halt: it records the decision, and the account is skipped by the scheduler
+ * for that reason. Halting stays the separate, explicit `set_system_state` action so the two remain
+ * independently auditable — otherwise "parked" and "halted" would be one flag and the distinction
+ * this exists to create would evaporate on first use.
+ *
+ * Refuses to park a draining account (that is a disconnect, not a park) and refuses to park one that
+ * is already parked with a DIFFERENT reason without naming it, so a blind re-park cannot silently
+ * overwrite the decision someone else made. Un-park clears the reason and timestamp together, so no
+ * stale "why" can outlive the decision it belonged to.
+ */
+function setParked(
+  account: ConnectedAccount,
+  request: Extract<OpsAccountControlRequest, { action: "park_account" | "unpark_account" }>
+): OpsAccountControlOutcome {
+  const parking = request.action === "park_account";
+  const userId = account.userId;
+  const before = { parked: account.parked === true, parkedReason: account.parkedReason ?? null, parkedAt: account.parkedAt ?? null };
+
+  const refuse = (status: number, error: string, extra: Record<string, unknown> = {}): OpsAccountControlOutcome => {
+    const outcome = { status, body: { ok: false, error, account: accountSummary(account), ...extra } };
+    auditOpsCall(account, request, outcome, { parked: before.parked, error });
+    return outcome;
+  };
+
+  if (parking && account.isDraining) {
+    return refuse(409, "This account is disconnected and being wound down; parking it would record a decision that is not true.");
+  }
+  if (parking && before.parked && before.parkedReason !== request.reason) {
+    return refuse(409, `This account is already parked with a different reason: ${before.parkedReason ?? "(none recorded)"}.`, {
+      parkedReason: before.parkedReason
+    });
+  }
+
+  const now = new Date().toISOString();
+  let applied = false;
+  if (!request.dryRun) {
+    getDb()
+      .prepare(
+        `UPDATE connected_accounts
+            SET parked = ?, parked_reason = ?, parked_at = ?, updated_at = ?
+          WHERE id = ? AND user_id = ?`
+      )
+      .run(
+        parking ? 1 : 0,
+        parking ? request.reason : null,
+        parking ? now : null,
+        now,
+        account.id,
+        userId
+      );
+    applied = true;
+  }
+
+  const outcome = {
+    status: 200,
+    body: {
+      ok: true,
+      dryRun: request.dryRun,
+      account: accountSummary(account),
+      parked: parking,
+      parkedReason: parking ? request.reason : null,
+      parkedAt: parking ? now : null,
+      // Say plainly that the flag is a decision and not a halt, so an operator does not read a
+      // successful park as "this account is now safe to leave running".
+      note: parking
+        ? "Account recorded as parked. Trading state is unchanged; use set_system_state to halt it if that is also wanted."
+        : "Park cleared. The account is not automatically armed; use set_system_state to arm it."
+    }
+  } as OpsAccountControlOutcome;
+  auditOpsCall(account, request, outcome, { from: before, to: { parked: parking, parkedReason: parking ? request.reason : null }, applied });
+  return outcome;
+}
+
 export async function runOpsAccountControl(request: OpsAccountControlRequest): Promise<OpsAccountControlOutcome> {
   const account = findConnectedAccountById(request.connectedAccountId);
   if (!account) return { status: 404, body: { ok: false, error: "Connected account not found." } };
@@ -671,5 +785,8 @@ export async function runOpsAccountControl(request: OpsAccountControlRequest): P
       return cancelWorkingOrders(safeAccount, request);
     case "set_system_state":
       return setSystemState(safeAccount, request);
+    case "park_account":
+    case "unpark_account":
+      return setParked(safeAccount, request);
   }
 }
