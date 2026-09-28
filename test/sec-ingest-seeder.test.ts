@@ -7,9 +7,14 @@ import {
   getSecIngestJobReceipt,
   reconcileSecIngestJob
 } from "../src/lib/db-rag-ingest";
-import { seedSecIngestJobsFromManifest, SEC_INGEST_BASELINE_CORPUS_REVISION } from "../src/lib/rag/sec-ingest-seeder";
+import {
+  seedSecIngestJobsFromManifest,
+  selectMaterialExhibits,
+  SEC_INGEST_BASELINE_CORPUS_REVISION,
+  SEC_INGEST_BASELINE_EXHIBIT_LIMIT
+} from "../src/lib/rag/sec-ingest-seeder";
 import { SecIngestWorker, secIngestWorkerEnabled } from "../src/lib/rag/sec-ingest-worker";
-import { fetchRecentFilings, type FilingRef } from "../src/lib/web-sources/sec-filings";
+import { fetchRecentFilings, fetchFilingDirectory, type FilingDirectoryItem, type FilingRef } from "../src/lib/web-sources/sec-filings";
 import { politeFetch, politeFetchText } from "../src/lib/web-sources/http";
 import { hashSecUniverseIssuers, type FrozenSecUniverseManifest, type SecUniverseIssuer } from "../src/lib/rag/universe-manifest";
 import { tmpdir } from "node:os";
@@ -34,7 +39,7 @@ afterEach(() => {
 // matching test/sec-ingest-worker.test.ts.
 vi.mock("../src/lib/web-sources/sec-filings", async (importOriginal) => {
   const original = await importOriginal<typeof import("../src/lib/web-sources/sec-filings")>();
-  return { ...original, fetchRecentFilings: vi.fn() };
+  return { ...original, fetchRecentFilings: vi.fn(), fetchFilingDirectory: vi.fn(async () => []) };
 });
 vi.mock("../src/lib/web-sources/http", () => ({
   politeFetchText: vi.fn(),
@@ -312,5 +317,149 @@ describe("SEC ingest worker startup gate", () => {
       if (prior === undefined) delete process.env.SEC_INGEST_WORKER_ENABLED;
       else process.env.SEC_INGEST_WORKER_ENABLED = prior;
     }
+  });
+});
+
+// 2026-09-27 breadth: the v1 baseline was 1x10-K + 4x10-Q primary documents only, so DEF 14A,
+// S-1, 8-K, ownership forms and material exhibits were structurally unreachable — the exhibits
+// path in particular had ZERO callers anywhere in the repo (fetchFilingDirectory).
+describe("seedSecIngestJobsFromManifest breadth (2026-09-27 v2)", () => {
+  function ref(cik: string, docType: string, serial: number): FilingRef {
+    return filingRef(cik, docType as "10-K" | "10-Q", serial);
+  }
+
+  function mockBroadFilings(cik: string) {
+    // Honours the per-docType limit map exactly like the real parser, so a test can assert the
+    // narrow v1 scope without the mock handing back more filings than were asked for.
+    vi.mocked(fetchRecentFilings).mockImplementation(async (requestedCik, docTypes, limitPerType) => {
+      expect(requestedCik).toBe(cik);
+      const wanted = new Set(docTypes ?? []);
+      const cap = (form: string, fallback: number): number => {
+        if (typeof limitPerType === "number") return limitPerType;
+        return limitPerType?.[form] ?? fallback;
+      };
+      const refs: FilingRef[] = [];
+      const push = (form: string, serials: number[]) => {
+        if (!wanted.has(form)) return;
+        refs.push(...serials.slice(0, cap(form, serials.length)).map((n) => ref(cik, form, n)));
+      };
+      push("10-K", [1]);
+      push("10-Q", [2, 3, 4, 5]);
+      push("8-K", [6, 7]);
+      push("DEF 14A", [8]);
+      push("S-1", [9]);
+      push("4", [10]);
+      return refs;
+    });
+  }
+
+  function directoryFor(accession: string): FilingDirectoryItem[] {
+    if (accession.endsWith("000010")) {
+      // Ownership filing: raw XML plus the XSL-rendered variant the submissions API points at.
+      return [
+        { name: "0000000000-26-000010-index.html", type: "INDEX" },
+        { name: "doc4.xml", type: "XML", size: 18_000 },
+        { name: "xslF345X05/doc4.xml", type: "XML", size: 20_000 }
+      ];
+    }
+    return [
+      { name: `${accession}-index.htm`, type: "INDEX", size: 9_000 },
+      { name: "ex99-1.htm", type: "EX-99.1", size: 120_000 },
+      { name: "ex10-1.htm", type: "EX-10.1", size: 300_000 },
+      { name: "ex21-1.htm", type: "EX-21.1", size: 80_000 },
+      { name: "ex31-1.htm", type: "EX-31.1", size: 60_000 },
+      { name: "R2.htm", type: "EX-99.1", size: 900_000 },
+      { name: "graphic.jpg", type: "JPG", size: 400_000 },
+      { name: "tiny.htm", type: "EX-99.1", size: 400 }
+    ];
+  }
+
+  it("enqueues the wider form set plus material exhibits and the raw ownership XML", async () => {
+    const cik = "0000900100";
+    const m = manifest([issuer(1, cik, "EEE")], "snap-breadth");
+    mockBroadFilings(cik);
+    vi.mocked(fetchFilingDirectory).mockImplementation(async (requestedCik, accession) => {
+      expect(requestedCik).toBe(cik);
+      return directoryFor(accession);
+    });
+
+    const seeded = await seedSecIngestJobsFromManifest({ manifest: m });
+    // 1 10-K + 4 10-Q + 2 8-K + 1 DEF 14A + 1 S-1 + 1 Form 4 = 10 primary documents,
+    // + 2 material exhibits on the 10-K and on each of the 2 8-Ks, + 1 raw ownership XML.
+    expect(seeded.totalTasksEnqueued).toBe(10 + 2 + 2 + 2 + 1);
+    expect(seeded.issuersWithNoFilings).toEqual([]);
+
+    const rows = getDb()
+      .prepare("SELECT accession, document_name, ordinal, payload_json FROM sec_ingest_tasks WHERE job_id = ? ORDER BY ordinal")
+      .all(seeded.issuers[0]!.jobId) as Array<{ accession: string; document_name: string; ordinal: number; payload_json: string }>;
+    const byName = new Map(rows.map((r) => [r.document_name, r]));
+
+    // Material exhibits are queued, non-material ones are not.
+    expect(byName.get("ex99-1.htm")).toBeDefined();
+    expect(byName.get("ex10-1.htm")).toBeDefined();
+    expect(byName.has("ex21-1.htm")).toBe(false);
+    expect(byName.has("ex31-1.htm")).toBe(false);
+    expect(byName.has("R2.htm")).toBe(false);
+    expect(byName.has("tiny.htm")).toBe(false);
+    const exhibitPayload = JSON.parse(byName.get("ex99-1.htm")!.payload_json);
+    expect(exhibitPayload.exhibitType).toBe("EX-99.1");
+    expect(exhibitPayload.url).toBe(`https://www.sec.gov/Archives/edgar/data/${cik}/${byName.get("ex99-1.htm")!.accession.replace(/-/g, "")}/ex99-1.htm`);
+
+    // The ownership document is the RAW xml, not the XSL-rendered path the submissions API reports.
+    const ownership = byName.get("doc4.xml");
+    expect(ownership).toBeDefined();
+    expect(JSON.parse(ownership!.payload_json).ownershipXml).toBe(true);
+
+    // Every task is still one document for the SAME checkpoint machine: unique (accession,
+    // documentName) key, unique ordinal, all owned by the issuer's job.
+    const keys = new Set(rows.map((r) => `${r.accession}|${r.document_name}`));
+    expect(keys.size).toBe(rows.length);
+    expect(new Set(rows.map((r) => r.ordinal)).size).toBe(rows.length);
+  });
+
+  it("can run the historical v1 scope, and exhibitLimitPerAccession 0 skips the directory call", async () => {
+    const cik = "0000900101";
+    const m = manifest([issuer(1, cik, "FFF")], "snap-narrow");
+    mockBroadFilings(cik);
+    // Only the 10-K accession has exhibits, so this also proves 10-Q accessions are not probed.
+    vi.mocked(fetchFilingDirectory).mockImplementation(async (_cikArg, accession) =>
+      accession.endsWith("000001") ? directoryFor("0000900101-26-000001") : []
+    );
+
+    const narrow = await seedSecIngestJobsFromManifest({
+      manifest: m,
+      corpusRevision: `${SEC_INGEST_BASELINE_CORPUS_REVISION}-narrow`,
+      formLimits: { "10-K": 1, "10-Q": 2 }
+    });
+    // 1x10-K + 2x10-Q + 2 exhibits on the 10-K; the 8-K/DEF 14A/S-1/4 were never even requested.
+    expect(narrow.totalTasksEnqueued).toBe(3 + 2);
+    expect(vi.mocked(fetchRecentFilings).mock.calls[0]![1]).toEqual(["10-K", "10-Q"]);
+    expect(vi.mocked(fetchFilingDirectory)).toHaveBeenCalledTimes(1);
+
+    const otherCik = "0000900102";
+    const m2 = manifest([issuer(1, otherCik, "GGG")], "snap-no-exhibits");
+    mockBroadFilings(otherCik);
+    vi.mocked(fetchFilingDirectory).mockClear();
+    vi.mocked(fetchFilingDirectory).mockImplementation(async (_cikArg, accession) =>
+      directoryFor(accession)
+    );
+    const noExhibits = await seedSecIngestJobsFromManifest({ manifest: m2, exhibitLimitPerAccession: 0 });
+    expect(noExhibits.totalTasksEnqueued).toBe(10 + 1); // +1 raw ownership XML, no exhibits
+    // Exhibit discovery is off, so only the ownership accession is still probed.
+    expect(vi.mocked(fetchFilingDirectory).mock.calls.map((call) => call[1])).toEqual([
+      `${otherCik}-26-000010`
+    ]);
+  });
+
+  it("selectMaterialExhibits ranks EX-99 first and drops everything non-material", () => {
+    const items = directoryFor("0000900101-26-000001");
+    const picked = selectMaterialExhibits(items, SEC_INGEST_BASELINE_EXHIBIT_LIMIT);
+    expect(picked.map((p) => p.documentName)).toEqual(["ex99-1.htm", "ex10-1.htm"]);
+    expect(selectMaterialExhibits(items, 0)).toEqual([]);
+    expect(selectMaterialExhibits([], 2)).toEqual([]);
+    // 6MB of EX-99 is still refused: one exhibit must not be able to eat a whole tick.
+    expect(
+      selectMaterialExhibits([{ name: "huge.htm", type: "EX-99.1", size: 6_000_000 }], 2)
+    ).toEqual([]);
   });
 });
