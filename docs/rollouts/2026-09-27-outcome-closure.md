@@ -266,6 +266,23 @@ case, and it was previously invisible.
     all `@typescript-eslint/no-explicit-any`-class debt already pinned to "warn" in
     `eslint.config.mjs`).
 
+**The first full `scripts/land.sh` gate failed with 3 tests, all genuinely caused by this branch, all
+now fixed.**  Recording them because two of them are the kind of failure that is easy to "fix" by
+loosening an assertion, and it is worth being explicit that that is not what happened:
+
+1. `test/copy-rules-lint.test.ts` — the house sentence-gap rule caught **three** single-space sentence
+   boundaries in the new admin page's user-facing copy. Fixed with the two-space convention (JSX
+   collapses whitespace, so `{"  "}`) rather than by widening the locked-file list.
+2. `test/strategy-money-path-f-g.test.ts` — the Red Team rejection test asserted
+   `thesisTag === "Quality-Compounder"`, which is (a) **not a member of `THESIS_PLAYBOOK`** and (b) the
+   model's own pick, i.e. the test was pinning the exact contract P0-2 removes. Updated to assert the
+   NEW contract rather than to accept whatever came out: the rejection receipt now carries the
+   assigned tag, `not.toBe` the model's pick, AND a `thesis_tag_assigned` receipt is asserted to carry
+   `proposedTag: "Quality-Compounder"`, `assignedTag: "Value-Quality"`, `overrode: true`, the firing
+   rule, and a margin clearing the required 8.  That is a strictly stronger test than the one it
+   replaces: it now proves the divergence is observable, which is the property the fix exists to
+   create.
+
 ## 6. Next Steps & Blockers
 
 - Land P0-2 (deterministic thesis tag) as the next commit on this branch.

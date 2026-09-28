@@ -146,15 +146,15 @@ export function RetrievalTelemetryClient() {
         }
       >
         <p className="text-xs opacity-70">
-          Which stage of recall is eating the candidates, and how long each stage takes. Aggregates only —
-          no query text and no document text is stored in these events, only a short query digest. This page
+          Which stage of recall is eating the candidates, and how long each stage takes.{"  "}Aggregates only —
+          no query text and no document text is stored in these events, only a short query digest.{"  "}This page
           exists because these events were written on every retrieval and could not be read anywhere: a
           recall stage that silently returned nothing was invisible in-product.
         </p>
         {error ? <p className="mt-2 text-xs text-[var(--neg)]">{error}</p> : null}
         {data && data.noData ? (
           <p className="mt-3 text-xs">
-            No retrieval telemetry in this window. That is itself a finding: check that{" "}
+            No retrieval telemetry in this window.{"  "}That is itself a finding: check that{" "}
             <code className="opacity-80">RAG_RETRIEVAL_STAGE_TELEMETRY</code> is not set to{" "}
             <code className="opacity-80">off</code> and that{" "}
             <code className="opacity-80">RAG_RETRIEVAL_TELEMETRY</code> is enabled.
@@ -163,7 +163,7 @@ export function RetrievalTelemetryClient() {
         {data && data.truncated ? (
           <p className="mt-3 text-xs">
             <Chip tone="warn">capped</Chip> Read hit the row cap, so this window is a SAMPLE, not the whole
-            window. Narrow the date range to see a complete picture.
+            window.{"  "}Narrow the date range to see a complete picture.
           </p>
         ) : null}
       </Card>
