@@ -32,7 +32,7 @@ jobs:
       - name: Attach Sentry production deploy
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: jays-services
+          SENTRY_ORG: simple-with-us
           SENTRY_PROJECT: socratic-trade
           VERSION: ${{ github.event.workflow_run.head_sha }}
         run: |

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 sentry-ci-report.py — reports CI workflow outcomes to the shared fleet-infra
-Sentry project (org jays-services), via raw envelope HTTP (no sentry-sdk
+Sentry project (org simple-with-us), via raw envelope HTTP (no sentry-sdk
 dependency, no GitHub Actions marketplace action).
 
 Invoked by .github/workflows/sentry-ci-report.yml, which listens for
