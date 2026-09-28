@@ -1,5 +1,6 @@
 import type { DerivedMetrics } from "./derived-metrics";
 import type { FieldObservation, ProviderFailureReceipt } from "./evidence-facts";
+import type { ModelRotationPin } from "./model-rotation";
 
 export class OrderValidationError extends Error {
   constructor(message: string) {
@@ -325,6 +326,17 @@ export interface TuningSettings {
    * can never inflate a position past its existing ceiling.
    */
   thesisSizeMultipliers?: Record<string, number>;
+  /**
+   * Equal-risk sizing: cap the DOLLAR risk any single new position may carry, as a % of account
+   * equity. A position sized to a fixed notional risks proportionally more when its stop sits
+   * further from entry, so a name with a wide stop silently gets a wider loss than the account
+   * intended. This inverts that: size = risk budget ÷ stop distance, so every position risks the
+   * same dollars by construction.
+   *
+   * Off when unset or non-positive. It is a CAP, never a sizing target: it can only shrink an
+   * order, and the existing floor/ceiling, ADV, and broker-minimum rules still apply around it.
+   */
+  maxPositionRiskPctOfEquity?: number;
   // `redTeamConvictionThreshold` and `redTeamNotionalPctOfNavThreshold` were REMOVED 2026-07-07
   // (single-adversary consolidation, decision O2): the Red Team review now runs on EVERY risk-adding
   // opening — coverage is structural, not conviction/stakes-gated — so both trigger thresholds (and
@@ -1165,6 +1177,22 @@ export interface TradingPolicy {
    * never a gate. May also hold the "__rotate__" rotation sentinel (see `llmModel`).
    */
   redTeamLlmModel?: string;
+  /**
+   * Controlled-experiment pin on the `"__rotate__"` rotation sentinel (review rank 6, 2026-09-25).
+   *
+   * The review's finding was that per-model results are not a clean comparison — the rotation
+   * strategy changed three times, so each model's numbers are tied to a calendar period. This makes
+   * that testable: force a model and/or override the LEARNED rotation weights for a bounded window.
+   *
+   * Per-policy, not global, which is what keeps the review's other suggestion ("split models by
+   * account") viable — a policy is already per-account. Removing the field restores learned
+   * rotation exactly, and `expiresAt` is an independent backstop.
+   *
+   * Never silent: every run the pin touches is audited as `model_rotation_pin` and its picks are
+   * stamped `pinned`. A pin that quietly changed which model proposed a trade would silently
+   * distort every performance report built on top of it.
+   */
+  rotationPin?: ModelRotationPin | null;
   /**
    * Daily LLM learning review (default OFF): once per UTC day a frontier-class model audits the
    * system's LEARNING DECISIONS — recent learned_context rows + the pending risk-tier queue —

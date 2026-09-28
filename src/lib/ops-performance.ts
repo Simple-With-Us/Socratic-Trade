@@ -7,6 +7,7 @@ import {
   getRedTeamEfficacy,
   type ClosedLot,
   type PnlResult,
+  RED_TEAM_EFFICACY_MIN_UNIQUE_MATURED,
   type ThesisStat,
   type RedTeamEfficacy
 } from "./performance";
@@ -209,6 +210,16 @@ const RED_TEAM_EFFICACY_UNAVAILABLE: RedTeamEfficacy = {
   vetoValueAddRate: 0,
   survivorRiskHitRate: 0,
   avgReturnPct: 0,
+  // A failed read must NOT read as a scored zero. `getRedTeamEfficacy` now reports whether its
+  // sample is even large enough to conclude on (review rank 7), and "we could not measure it" is a
+  // different fact from "we measured zero vetoes and zero value". Say so explicitly, or a consumer
+  // reading the default shape would conclude the Red Team vetoes nothing.
+  sampleSufficient: false,
+  minUniqueMaturedForVerdict: RED_TEAM_EFFICACY_MIN_UNIQUE_MATURED,
+  verdict: "insufficient-sample",
+  uniqueScenarios: 0,
+  maturedUniqueScenarios: 0,
+  duplicateVetoes: 0,
   byModel: [],
   records: []
 };
