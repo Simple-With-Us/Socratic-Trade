@@ -1164,6 +1164,12 @@ export function listConnectedAccounts(userId: string = "local"): ConnectedAccoun
     capabilities: parseCapabilities(r.capabilities),
     isActive: r.is_active === 1,
     isDraining: r.is_draining === 1,
+    // Review rank 8: a deliberate park, with the decision that caused it. Read the columns
+    // defensively (a row written before the migration has neither) so an un-migrated database
+    // degrades to "not parked" rather than throwing inside an account mapper.
+    parked: r.parked === 1,
+    parkedReason: r.parked_reason != null ? String(r.parked_reason) : undefined,
+    parkedAt: r.parked_at != null ? String(r.parked_at) : undefined,
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at)
   }));
@@ -1188,6 +1194,12 @@ export function getActiveConnectedAccount(userId: string = "local"): ConnectedAc
     capabilities: parseCapabilities(row.capabilities),
     isActive: row.is_active === 1,
     isDraining: row.is_draining === 1,
+    // Review rank 8: a deliberate park, with the decision that caused it. Read the columns
+    // defensively (a row written before the migration has neither) so an un-migrated database
+    // degrades to "not parked" rather than throwing inside an account mapper.
+    parked: row.parked === 1,
+    parkedReason: row.parked_reason != null ? String(row.parked_reason) : undefined,
+    parkedAt: row.parked_at != null ? String(row.parked_at) : undefined,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };
@@ -1228,6 +1240,12 @@ export function getConnectedAccountByBroker(broker: ConnectedAccount["broker"], 
     capabilities: parseCapabilities(row.capabilities),
     isActive: row.is_active === 1,
     isDraining: row.is_draining === 1,
+    // Review rank 8: a deliberate park, with the decision that caused it. Read the columns
+    // defensively (a row written before the migration has neither) so an un-migrated database
+    // degrades to "not parked" rather than throwing inside an account mapper.
+    parked: row.parked === 1,
+    parkedReason: row.parked_reason != null ? String(row.parked_reason) : undefined,
+    parkedAt: row.parked_at != null ? String(row.parked_at) : undefined,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };
@@ -1263,6 +1281,12 @@ export function getConnectedAccount(id: string, userId: string = "local"): Conne
     capabilities: parseCapabilities(row.capabilities),
     isActive: row.is_active === 1,
     isDraining: row.is_draining === 1,
+    // Review rank 8: a deliberate park, with the decision that caused it. Read the columns
+    // defensively (a row written before the migration has neither) so an un-migrated database
+    // degrades to "not parked" rather than throwing inside an account mapper.
+    parked: row.parked === 1,
+    parkedReason: row.parked_reason != null ? String(row.parked_reason) : undefined,
+    parkedAt: row.parked_at != null ? String(row.parked_at) : undefined,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };

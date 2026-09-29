@@ -1,5 +1,144 @@
 # Current Status
 
+## 2026-09-27 MINIMAX — Congress.Trade share guards: stop treating an HTTP 200 as delivery
+
+**What.**  CT is now exclusively dependent on ST for EOD prices and enrichment, and the ST→CT push is
+fire-and-forget — a CT-side audit found CT validates **nothing** it receives.  Three guards close the
+ways a wrong number reaches customer-facing analytics in CT unnoticed.  (1) `ohlcBarsToCloses`
+rejects `close <= 0` (it previously checked only `Number.isFinite`, so a zero/negative close from any
+provider tier reached CT's `price_eod` and its per-trade P&L).  (2) It rejects a future date: CT
+derives a ticker's latest price from `MAX(date)`, so one future-dated row marks the ticker fresh and
+**suppresses CT's own staleness watchdog**.  (3) CT's import handler returns
+`{ ok: errors.length === 0 }` with **HTTP 200 even when it rejected rows**; ST read only `res.ok`, so
+a partial import looked identical to a clean one and the nightly marker advanced over rows CT never
+wrote.  ST now reads the body verdict, returns `ok:false` (not `skipped`, so the run retries), and
+treats an unparseable 200 as failure.  Schema-dropped rows now also reach the health store instead of
+only a `console.warn`.  **Closed question:** the CT audit found **zero consumers** for all 21
+tracked-but-unpushed enrichment fields — no column, type, or UI slot in the CT repo — so pushing them
+is premature and deliberately not done here.  Branch `minimax/ct-share-guards`.
+Rollout: `docs/rollouts/2026-09-27-congress-share-guards.md`.
+
+## 2026-09-27 MINIMAX — SEC ingest: fair tick + one-tick documents + corpus breadth (branch `minimax/sec-volume-breadth`)
+
+**What.**  Two P0 starvation bugs in the SEC/EDGAR ingest tick plus four breadth items.  (1) P0: `runTick` read the running-jobs list with no `ORDER BY` and handed the whole 5-slot per-tick budget to the first job, so with ~500 running jobs issuer #1 consumed every tick and everyone else sat at `discovered` forever (2,156 tasks pending since 2026-08-10); the claim is now one cross-job round-robin (`claimSecIngestTasksAcrossJobs`) with a per-job ceiling enforced in SQL, topped up only when nothing else is claimable.  (2) P0: every `advanceSecIngestTask` returned immediately, so one document cost 11 claim→process→advance cycles; `processTask` now drains the checkpoint machine in process via `reclaimSecIngestTaskForStage`, wall-clock bounded (120s) with the strategy-work and RTH gates re-checked at every stage boundary and the stage attempt refunded on release.  (3) Breadth: real `FormType` union; the extractive highlighter now runs in the worker's `embed_queued` branch (backfilled filings had NO abstract while `information-routing` depends on them); 13F holdings are embedded through the same `storeDocument`→`chunkDocument` path (the file had no `storeDocument` call at all), stamped with the filing date not the period end; ownership forms are discovered and enqueued as raw XML; the seeder asks for 8-K x2, DEF 14A x1, S-1 x1, Form 4 x2 plus up to 2 material exhibits per 8-K/10-K, with `SEC_INGEST_BASELINE_CORPUS_REVISION` bumped (required — v1 jobs are sealed).  RTH/strategy gates, dead-letter discipline, FTS-after-vector ordering, 403 refund, the parser/chunker and `SEC_INGEST_TASKS_PER_TICK` are all unchanged.  **Review round (Sentry, 2026-09-27):** two real findings, both introduced here and both fixed before merge — a mid-drain stage failure was recorded against the tick's STALE lease token (the drain re-leases between stages, so the failure was dropped and the task walked into a dead-letter via lease expiry; now recorded against the live lease), and the ownership-XML directory read was gated on `formLimits["4"]` for all of 3/4/5 (now gated on each form's own limit).  **Next:** run a seed with the v2 revision on the first non-RTH window and watch the 4 req/s EDGAR limiter and the Pinecone write-unit breaker; the universe manifest stays frozen (separate effort).  Rollout: `docs/rollouts/2026-09-27-sec-ingest-volume.md`.
+## 2026-09-27 MINIMAX — Outcome closure: the system can learn from its own outcomes (branch `minimax/outcome-closure`)
+
+**P0-2.**  `tradeThesisTag` was chosen by the same model that then got graded on it, while the
+deterministic sizing multiplier, the negative-expectancy skip, and the thesis scorecards all keyed on
+it — so a model could relabel its way out of a penalty, and no "P&L by thesis" number was falsifiable.
+`assignDeterministicThesisTag` now assigns the tag from evidence the scan already computes
+(`factorBreakdown`, `daysToEarnings`, `shortPercentOfFloat`, `sectorRelStrength`, and the
+insider-vs-congress split that the blended `positioning` factor cannot express), the model's choice is
+kept as `tradeThesisProposedTag`, and a `thesis_tag_assigned` audit event fires on **every** scored
+proposal — including agreements, so "the scorer agreed" is distinguishable from "the scorer never ran".
+The scorer **abstains** (model's tag stands) when no rule fires, when the best rule is under the
+neutral floor, or when the leader's margin is under 8.  Openings only — sells keep today's behaviour
+exactly, which leaves the existing Risk-Exit de-risking path untouched.  Nothing is backfilled, so no
+already-reported historical number changes meaning.  **Owner ruling requested** on the three tags that
+cannot be derived without inventing semantics (`Mean-Reversion`, `Defensive-Rotation`,
+`Analyst-Revision`) — the scorer never emits them and a test enforces that.  Rollout §3.
+
+## 2026-09-27 MINIMAX — P1-4: the retrieval stage telemetry can finally be read (branch `minimax/outcome-closure`)
+
+**What.**  `rag_retrieval_stage_trace` and `rag_retrieval_quality` are written default-on and record
+exactly what you need to diagnose a bad decision — which recall stage threw the candidates away and
+how long each stage took.  The only reference to either event anywhere in the repo was
+`audit-prune.ts`, which decides how long to *keep* them, so a recall stage that silently returned
+nothing was invisible in-product.  New `GET /api/admin/retrieval-telemetry` (admin-gated,
+`force-dynamic`, one bounded read, no writes) over new pure aggregation functions in
+`src/lib/rag/retrieval-telemetry-read.ts`, plus an admin page ("Retrieval Stages") and nav entry.
+The headline is the **empty-recall rate** — traces whose `finalCandidates` was zero.  The payloads
+carry no query text and no document text (only a short deterministic query digest), so the page
+shows per-stage and per-symbol aggregates only.  The response makes `truncated` and `noData`
+explicit, so a capped or empty window is never read as a healthy one — no data can itself mean the
+telemetry was off.  Rollout §2.
+
+## 2026-09-27 MINIMAX — P1-5: evidence depth can now contradict the ranking (branch `minimax/outcome-closure`)
+
+**What.**  Only the scan's top 3 plus held names got an 8-chunk dossier; every other scored candidate
+got exactly ONE.  With a scan surfacing 8+ candidates that is an 8:1 tilt toward the existing
+ordering, so the extra evidence re-read the ranking instead of being able to contradict it — the names
+the ranking demoted received the thinnest dossier.  Non-deep candidates now get 3, bounded and
+env-tunable via `FILINGS_SCOUT_CHUNK_LIMIT` (clamped to 1–8, fail-safe default) rather than a flat
+raise.  **Budget interaction:** `applyEvidenceBudget` truncates and hard-caps, so this can never
+exceed the prompt token budget (tested with a 200k-character RAG block against a 24k filings quota).
+The real cost is *within-RAG displacement* — the whole RAG block is one budget item, so scout chunks
+consume quota the tail previously had and the last symbols' dossiers are what get cut.  Filings are the
+highest-priority item so nothing else is crowded out, and the cut is recorded as a receipt.  Rollout §2.
+
+## 2026-09-27 MINIMAX — P1-3: the filings path finally re-ranks on learned usefulness (branch `minimax/outcome-closure`)
+
+**What.**  `applyRetrievalUsefulnessWeighting` had exactly one caller, so the per-doc-type statistics
+the join exists to produce were computed and persisted and then never consulted on the path that
+retrieves the majority of the evidence the proposer reads.  The filings dossier now applies the
+weighting after both retrieval shapes, failing open to the retriever's order on any error.  **The
+clamp was the real bug:** `usefulnessMultiplier`'s reachable range is 0.8–1.2 (±20%), and the old
+0.9–1.1 clamp was *binding*, clipping a third off both ends — so widening it alone would have doubled
+the effective nudge as a side effect of a constant tweak.  The coefficient now defines the operating
+range and 0.75/1.25 remains a real backstop.  **No feedback loop:** the multiplier is keyed on
+aggregate `doc_type|memoryKind` stats, never per-document, so a document can never be re-ranked on
+its own influence; a test enforces that.  Rollout §2.
+
+## 2026-09-27 MINIMAX — P0-1: the app's own post-mortem lessons can now reach the brain (branch `minimax/outcome-closure`)
+
+**What.**  A post-mortem lesson about a trade the app already closed and measured was being graded by
+the LLM semantic gate — which asks whether the text "would influence … trading behavior", a question a
+sizing lesson answers yes to by construction — upgraded to `risk`, and parked in
+`learned_context_pending`, a queue read only by a human approval click or the nightly Learning Review.
+So the highest-quality learning artifact the system produces never reached the brain it is read from.
+The lesson producer now stamps `provenance: "system-postmortem"` and `source: "postmortem-outcome"`,
+and `semantic-gate.ts` step 1b skips the LLM **layer** for those rows.  Unchanged: the keyword risk
+layer (a lesson naming a real risk knob is still queued for human approval), the PII gate, and the full
+gate for every unmarked candidate.  Side effect: this is the only ingest path that no longer spends an
+LLM call per lesson.  **Next:** P0-2 deterministic thesis tag.  Rollout:
+`docs/rollouts/2026-09-27-outcome-closure.md`.
+
+## 2026-09-27 MINIMAX — Equal-risk sizing cap (opt-in, default off)
+
+**What.**  `applyDeterministicSizing` gains an opt-in dollar-risk cap: size = risk budget ÷ stop
+distance, so every new position risks the same dollars by construction.  Motivated by the
+2026-09-25 performance review, which found 4 lots accounted for 70% of total loss and one thesis
+positive in percent while negative in dollars purely because its losers were bigger — the signature
+of a notional cap rather than a risk cap.  The cap is applied before the ADV cap and re-asserted
+after the bracket-minimum raise (so a native-bracket convenience cannot undo a risk cap), while the
+broker-dollar minimum stays a hard constraint.  Stop distance resolves from the concrete order
+first, then policy, then the shared `STOP_PLAN_FALLBACK_STOP_PCT` — never `0`, because a zero
+distance makes the division infinite and would silently disable the cap.  **Next:** owner sets
+`TuningSettings.maxPositionRiskPctOfEquity`; until then the code is inert and no behaviour changes.
+Branch `minimax/equal-risk-sizing`, recovered from uncommitted work in the drifted
+`minimax/perf-rollout-doc` lane.
+Rollout: `docs/rollouts/2026-09-27-equal-risk-sizing.md`.
+
+## 2026-09-27 MINIMAX — Performance / ingestion audit filed (board parent dc501c68)
+
+**What.**  Four-worker read-only audit across outcomes, data collection, SEC/RAG ingestion, and the
+Congress.Trade contract.  Headline: the app has a **closure** problem, not a capability problem — six
+feedback loops are instrumented on write and left open on read (retrieval stage telemetry with zero
+read paths; filings usefulness credit never applied to ranking; post-mortem lessons routed into a
+human queue; an LLM-chosen thesis tag that every performance metric keys on; a memory-only
+enrichment coverage report; and a CT push with no receipt).  8 P0 + 6 P1 board rows filed.
+**Next:** in flight — equal-risk sizing (above), outcome closure, and SEC volume/breadth.
+Rollout + full findings: Apple Note `[Socratic.Trade, MiniMax] performance + data ingestion audit`.
+
+## 2026-09-27 MUSE — Playwright visual regression (fleet rollout, IN PR)
+## 2026-09-27 MUSE — Playwright visual regression (fleet rollout, MERGED 606a4c7b)
+
+**What.**  Owner-directed fleet rollout: automated-only visual verification for the web UI.  New `test/e2e/visual.spec.ts` adds full-page `toHaveScreenshot` assertions (chromium-desktop, committed baselines under `test/e2e/visual.spec.ts-snapshots/`) for `/console` (Autonomy Desk) and `/login`.  Deterministic controls: reduced-motion, animation-killing style tag, hermetic network (browser requests not to `127.0.0.1` aborted), masks for chart figures/countdown clocks/day-PnL date label/freshness strip/Market Analysis card; consent gate accepted with a 30s budget + pre-screenshot sweep.  `e2e.yml` gains a narrow path-filtered `pull_request` trigger (test/e2e, config, lockfiles, itself) so the PR runs Playwright CI, plus failure-only result upload.  AGENTS.md "Verify before claiming done" now carries the automated-only policy: Jay never takes manual screenshots; native Mac UI is code-review/CI verified.  Branch `muse/playwright-visual-socratic-trade`, auto-merge armed on green.
+**Verified.**  Fresh attempt picked up the uncommitted work and re-based onto latest main (`d0440ed2`, +3 commits): STATUS.md/EFFORT-LOG.md entries re-anchored onto main's new rows; local baseline gen + second pass matched (2 passed / 2 mobile-skipped each, fleet Chrome-for-Testing, `next dev`), but CI's first `e2e` run failed both tests at 0.02 px-diff: committed PNGs must match the CI environment (bundled Chromium, ubuntu fonts, production build) byte for byte, so baselines were re-generated IN CI via the new `update-visual-baselines` workflow_dispatch input and committed.  `tsc --noEmit` clean, targeted eslint clean, `git diff --check` clean.  Rollout: `docs/rollouts/2026-09-27-playwright-visual-regression.md`.
+## 2026-09-25 CLAUDE — Order correctness review round (PR #3759 follow-up)
+
+**What/why.**  PR #3759 merged while an independent review was in flight; this follow-up fixes
+what the review confirmed.  (1) P1: a DOLLAR-sized buy against a held short (the autopilot's
+default sizing) now resolves against the short's per-share value and is placed as a whole-share
+cover without bracket legs, at the choke point and upstream.  (2) The autopilot flips an LLM
+`sell` of a held short into a `cover` only on a long-only venue, only for a market sell, and a
+dollar sell covers only its own dollars.  (3) A long-only schema now offers `cover` while a short
+is held, matching the prompt (prompt `agentic-strategy@2.19.1`).  (4) A failed placement-time
+position read is booked retryable `not_placed`, not `blocked`, and the approval lane passes its
+own just-read position as the caller-verified hint.  Declined: the "oversized sell should flip
+long to short" finding (Alpaca, Tradier, and Robinhood never flip in one order).  Board
+`687a5fb4`, branch `claude/st-order-correctness`.  Rollout:
+`docs/rollouts/2026-09-24-st-order-correctness.md` section 7.
 ## 2026-09-25 CLAUDE — Cash-flow HWM review round (follow-up to merged PR #3753, board 687a5fb4, lane F2)
 
 **What.**  Four independent-review findings on the merged cash-flow HWM work, all verified and
@@ -5208,3 +5347,139 @@ Not done: rank 5's "watch Momentum-Breakout" half needs rank 3 live and a fresh 
 decision, not a code change.
 
 Rollout: `docs/rollouts/2026-09-27-st-perf-measurement-ranks.md`.  Board: `66ca3e67`.
+
+## 2026-09-27 — [MM] Parked account state, so a quiet account can say why (review rank 8)
+
+The 2026-09-25 review asked for a decision on four dormant accounts — "park it, re-arm it, or
+investigate" — and could not make one, because nothing in the state vocabulary could express it.
+`systemState: "halted"` says trading stopped; `isDraining` says the account is being disconnected.
+Neither says a person looked at the account and decided it should stay quiet, so a deliberately
+quiet account and a broken one were the same row in every report.
+
+Adds `connected_accounts.parked / parked_reason / parked_at` (guarded `ALTER`, same pattern as the
+existing `is_draining` migration), `park_account` / `unpark_account` on the ops account-control
+surface the review named as its dependency, a scheduler skip that happens *before* the execution
+state is derived so no broker gateway is constructed, and the parked facts on every ops response.
+
+Deliberate separations, each stated in the response so an operator cannot be misled: parking does
+NOT halt (halting stays `set_system_state`), un-parking does NOT arm, and a park **requires** a
+reason — a blank-reason park is indistinguishable from the broken accounts this exists to tell
+apart, so it is rejected rather than accepted-and-useless.  Re-parking with a *different* reason is
+refused 409 and surfaces the existing one; re-parking with the *same* reason is idempotent.  A
+draining account cannot be parked, and un-park clears the reason and timestamp together so no stale
+"why" outlives its decision.
+
+Did **not** invent a `lastSkipReason` on the per-account schedule — no such field exists and nothing
+would read it; the audit row is the record.
+
+Verified `tsc --noEmit` clean, 46/46 across the parked suite plus account-deletion,
+connected-accounts-route and connected-account-tenant-guard.  Failing-first proven: 8 of 10 fail with
+the implementation stashed.  Also worth knowing: `listConnectedAccounts` is not the only reader of
+`connected_accounts` — there are **four** row mappers, and an early two-of-four patch typechecked
+while leaving two paths reading a parked account as not parked.
+
+**The decision is still the owner's.**  This adds the vocabulary; the four accounts in the review
+still need an explicit park / re-arm / investigate.  Parking is reachable only from the ops endpoint
+(no console control yet), and `ops-performance` does not yet surface `parked` on its account rows.
+
+Rollout: `docs/rollouts/2026-09-27-st-account-parked.md`.
+## 2026-09-27 — [MM] Branch protection on `main`, plus the two guards that keep it meaningful
+
+Owner-directed, directly after this session's own merge driver nearly merged a PR whose CI had never
+run.  `main` was unprotected (404 on `/branches/main/protection`); a driver reading the PR-level
+`statusCheckRollup` reads an empty rollup on a not-yet-dispatched head as "nothing pending, nothing
+failed".  Caught before it merged anything, but the platform fix is the durable one.
+
+`main` now requires, `strict: true`: **`verify`** (the aggregate gate in `ci.yml`) and **`gitleaks`**
+(the credential guard in `security.yml`).  Both were already designed for the role — neither has a
+path filter, and both workflows carry a `merge_group` trigger whose comment explains that queued PRs
+hang without it.  The repo was built for `verify` to be required; nothing was setting it.
+
+Also: no force pushes, no deletions, conversation resolution on, **0 approvals required** (a personal
+repo has no second approver — a non-zero count would block every agent merge fleet-wide), and
+`enforce_admins: false` to keep a documented owner hotfix escape hatch.  The threat protection
+addresses is an *accidental* ungated merge, and agents are not admins, so the guard holds where it
+matters.
+
+Observed immediately: #3795 and #3792 both flipped to `MERGEABLE/BLOCKED` while `verify-hosted` was
+still running.  `verify` has no check-run until its dependencies conclude, and GitHub treats a
+required-but-absent check as *pending* — fail-closed, correct, not a wedge.
+
+Protection is a remote setting, so it is invisible in a diff and needs **two** guards:
+
+- `test/branch-protection-gate.test.ts` (new, 9 cases, static, no network) — pins the workflow side:
+  no path filter on `pull_request`, `merge_group` on both workflows, `verify` aggregates the lanes,
+  uses `!cancelled()` and never `always()`, passes only on enumerated states and requires *both*
+  lanes, keeps `set -euo pipefail`, and the two required-context job names still exist.
+- `scripts/verify-branch-protection.sh` (new, live) — checks the other half of the pairing: that
+  protection exists and that every required context is a job CI actually defines.  A required context
+  nothing can report is worse than no protection: every PR hangs against a check that appears
+  nowhere in the logs.  Ships the re-apply payload as a commented block, because re-applying
+  protection is a fleet-wide act that should be deliberate.
+
+**Failing-first proven:** three mutations of `ci.yml` (add a `paths` filter; accept any non-failure
+lane; switch `verify` to `always()`) each fail the corresponding case, and the file reverts clean.
+
+`scripts/land.sh`'s trailing `gh pr merge --auto --squash` was *unsafe* before this — auto-merge had
+nothing to wait for and merged immediately.  It is now the correct mechanism.  Seats that assumed
+"auto-merge lands it right away" will see PRs wait for CI; that is the intended change.
+
+Rollout: `docs/rollouts/2026-09-27-branch-protection.md`.
+
+## 2026-09-27 — [MM] Review ranks 4, 6, 7, 9: equal-risk sizing, rotation pin, honest Red Team scoring, visible SPY feed
+
+Closes four more items from the 2026-09-25 performance report's Improvement Plan.  Ranks 3 and 5
+already landed as `991c02a4e`; branch protection is in the previous entry.
+
+**Rank 4 — equal-risk sizing.**  `policy.tuning.maxPositionRiskPctOfEquity` caps the DOLLAR risk one
+position may carry, so `size = risk budget ÷ stop distance`.  The review's shape: 4 lots were 70% of
+Alpaca Paper's loss, and Insider-Accumulation was positive in *percent* while negative in *dollars*
+purely because its losers were bigger.  Everything upstream sizes to a notional, so a wider stop
+silently risks more — a notional cap structurally cannot see that.  Stop distance prefers the stop
+the order will actually carry, then `riskRules.stopLossPct`, then the same shared
+`STOP_PLAN_FALLBACK_STOP_PCT` the codebase already uses.  It **wins against the bracket-minimum
+raise** (a convenience must not breach a risk budget; the cost is the order loses its native bracket)
+and **loses loudly to a hard broker minimum** with a dedicated audit event.  Announced in the order
+rationale and `sizing_equal_risk_capped` — silent shrinkage is indistinguishable from a bug.
+
+**Rank 6 — controlled rotation pin.**  New `model-rotation-pin.ts` plus wiring.  Force half and weight
+half validate independently, so a bad force does not discard valid overrides.  Unknown models and
+out-of-range weights are refused **with a receipt**, never silently producing an empty rotation.  The
+pick floor resolves to the last positive-weight candidate so a 0-pinned model cannot be resurrected by
+a float edge.  Pinned picks are excluded from the representation ledger — "removes exactly" beats
+"every pick counted", because an experiment that corrupts its own weights is not reversible.  Loud by
+construction: a `model_rotation_pin` audit row per run, `pinned` stamps on picks, and a `rotationPin`
+result field that is absent entirely when unpinned.  `TradingPolicy.rotationPin` added here because
+the worker did not own `types.ts`.
+
+**Rank 7 — honest Red Team scoring.**  Repeat vetoes of the same `symbol+side` within 7 days (the
+calendar length of the pipeline's own 5-day horizon) collapse to the earliest, and the deduped set now
+drives rates, mean, **median**, `byModel` and `records`.  That is the review's "+1.16% headline comes
+from one vetoed PYPL buy at +27.4%" problem: the median now travels with the mean.  Plus
+`uniqueScenarios`, `duplicateVetoes`, `sampleSufficient`, `verdict`, and a horizon-disclosure block
+that makes the 5-day-counterfactual-vs-3-12-day-holds mismatch visible instead of silent.  The
+`RED_TEAM_EFFICACY_UNAVAILABLE` fallback was updated in the same pass so a failed read reports
+`verdict: "insufficient-sample"` rather than reading as a scored zero.
+
+**Rank 9 — SPY feed visibility, root cause diagnosed.**  `fetchDailyOHLC` is a 10-source cascade
+whose per-source fetchers reduce errors to `ok:false` and discard the message; when the cascade
+returns null it does **not** return null, it returns the frozen EOD cache re-stamped
+`fetchedAt = now`, so the bar dates never advance — and the old gate compared the newest close to the
+*account window's end*, so a feed frozen alongside a dormant account passed and rendered a flat
+0.00% "vs SPY".  Staleness is now judged against the **wall clock** first, and `status`/`stale`/`feed`
+(`lastCloseDate`, `staleDays`, `source`, `fetchedAt`, `fellBackToStaleCache`) ride on every return path.
+
+Verified `tsc --noEmit` clean and **185/185** across 13 affected files.  Failing-first: the Red Team +
+benchmark tests were 15/15 red on unmodified main; the rotation pin 10/11; equal-risk 4/6.
+
+**Two of this session's own test mistakes, recorded because both would have produced green tests
+proving nothing:** the *unproven-thesis floor* pins size below any cap, so the first rank-4 and rank-5
+tests were vacuous until they seeded 24 closed round trips; and a policy override at the top level
+instead of inside `tuning` is silently ignored, which made the rank-4 bracket test assert against the
+wrong budget.
+
+**Not done, and why:** rank 8 (parked account state) needs a schema migration.  The workers also
+reported UI carriers, `history.ts` provider-error text, and `/api/policy` persistence for
+`rotationPin` as follow-ups outside their file ownership.
+
+Rollout: `docs/rollouts/2026-09-27-review-ranks-4-6-7-9.md`.

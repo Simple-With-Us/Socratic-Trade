@@ -129,7 +129,7 @@ export default withSentryConfig(nextConfig, {
   // For all available options, see:
   // https://www.npmjs.com/package/@sentry/webpack-plugin#options
 
-  org: process.env.SENTRY_ORG || "jays-services",
+  org: process.env.SENTRY_ORG || "simple-with-us",
 
   project: process.env.SENTRY_PROJECT || "socratic-trade",
 

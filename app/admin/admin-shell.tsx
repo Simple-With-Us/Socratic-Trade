@@ -75,6 +75,12 @@ const NAV_ITEMS: NavItem[] = [
     icon: Database
   },
   {
+    href: "/admin/retrieval-telemetry",
+    label: "Retrieval Stages",
+    desc: "Which recall stage dropped the candidates, and how long each stage took.",
+    icon: Activity
+  },
+  {
     href: "/admin/enrichment-coverage",
     label: "Enrichment Coverage",
     desc: "Last market-data cascade: field fill rates, winning sources, and missing data points.",

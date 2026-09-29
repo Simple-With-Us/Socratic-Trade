@@ -4774,6 +4774,23 @@ function migrate(database: Database.Database): void {
     database.exec("ALTER TABLE connected_accounts ADD COLUMN is_draining INTEGER DEFAULT 0");
   }
 
+  // Review rank 8 (2026-09-25): a DELIBERATE park, so a dormant account can be distinguished from a
+  // broken one. `systemState: "halted"` records that trading stopped but not that a person decided
+  // it should, which is why four dormant accounts kept reporting unexplained zeros and unknown
+  // balances. The reason and timestamp travel with the flag so the decision is auditable months
+  // later; both are cleared on un-park. Separate from `is_draining`, which means the account is
+  // being DISCONNECTED — parking keeps the account connected and re-armable in one call.
+  const connectedAccountParkedColumns = database.prepare("PRAGMA table_info(connected_accounts)").all() as Array<{ name: string }>;
+  if (!connectedAccountParkedColumns.some((c) => c.name === "parked")) {
+    database.exec("ALTER TABLE connected_accounts ADD COLUMN parked INTEGER DEFAULT 0");
+  }
+  if (!connectedAccountParkedColumns.some((c) => c.name === "parked_reason")) {
+    database.exec("ALTER TABLE connected_accounts ADD COLUMN parked_reason TEXT");
+  }
+  if (!connectedAccountParkedColumns.some((c) => c.name === "parked_at")) {
+    database.exec("ALTER TABLE connected_accounts ADD COLUMN parked_at TEXT");
+  }
+
   // Exit-strategy Phase A: confirmation-based bad-tick acceptance (suspect_price, suspect_count)
   const syntheticStopCols = database.prepare("PRAGMA table_info(synthetic_trailing_stops)").all() as Array<{ name: string }>;
   if (!syntheticStopCols.some((c) => c.name === "suspect_price")) {
