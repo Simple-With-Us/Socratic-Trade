@@ -1425,4 +1425,81 @@ describe("in-process checkpoint drain (2026-09-27 P0-2)", () => {
     await worker.processTask(resumed!);
     expect(getSecIngestTask(taskId)!.status).toBe("complete");
   });
+
+  describe("dual-speed SEC ingest & transcript pacing (daytime + night-accelerated)", () => {
+    it("paces tasks-per-tick dynamically between RTH daytime (1) and off-hours night (5)", async () => {
+      const {
+        getSecIngestTasksPerTick,
+        secIngestTasksPerTickRth,
+        secIngestTasksPerTickOffHours,
+        secIngestDaytimeEnabled,
+        secIngestWorkerEnabled
+      } = await import("../src/lib/rag/sec-ingest-worker");
+
+      expect(secIngestWorkerEnabled()).toBe(true);
+      expect(secIngestDaytimeEnabled()).toBe(true);
+      expect(secIngestTasksPerTickRth()).toBe(1);
+      expect(secIngestTasksPerTickOffHours()).toBe(5);
+
+      // Tuesday 14:00 ET = 18:00 UTC (RTH)
+      const rthTuesday = new Date("2026-09-15T18:00:00.000Z");
+      expect(getSecIngestTasksPerTick(rthTuesday)).toBe(1);
+
+      // Tuesday 21:00 ET = Wednesday 01:00 UTC (Night / off-hours)
+      const nightTuesday = new Date("2026-09-16T01:00:00.000Z");
+      expect(getSecIngestTasksPerTick(nightTuesday)).toBe(5);
+
+      // Saturday 14:00 ET (Weekend / off-hours)
+      const saturday = new Date("2026-09-19T18:00:00.000Z");
+      expect(getSecIngestTasksPerTick(saturday)).toBe(5);
+    });
+
+    it("runTick claims 1 task during daytime RTH and 5 tasks off-hours", async () => {
+      const worker = new SecIngestWorker();
+      const processed: string[] = [];
+      worker.processTask = async (task) => {
+        processed.push(task.id);
+      };
+
+      const job = createSecIngestJob({
+        idempotencyKey: `pacing-job-${randomUUID()}`,
+        corpusRevision: "corp-v1"
+      });
+      transitionSecIngestJob(job.id, "running");
+
+      for (let i = 0; i < 10; i++) {
+        enqueueSecIngestTask({
+          jobId: job.id,
+          accession: `0000320193-26-00099${i}`,
+          cik: "0000320193",
+          symbol: "AAPL",
+          payload: { url: "https://www.sec.gov/x", docType: "10-K", filedAt: "2026-07-15" }
+        });
+      }
+
+      // During RTH: claims 1
+      const rthTuesday = new Date("2026-09-15T18:00:00.000Z");
+      await worker.runTick({ now: rthTuesday, allowRth: true });
+      expect(processed).toHaveLength(1);
+
+      // Off-hours: claims 5
+      const nightTuesday = new Date("2026-09-16T01:00:00.000Z");
+      await worker.runTick({ now: nightTuesday, allowRth: true });
+      expect(processed).toHaveLength(6); // 1 + 5 = 6 total processed
+    });
+
+    it("paces ROIC transcripts during regular trading hours", async () => {
+      const { maxTranscriptsPerRun } = await import("../src/lib/web-sources/roic-transcripts");
+      const rthTuesday = new Date("2026-09-15T18:00:00.000Z");
+      const nightTuesday = new Date("2026-09-16T01:00:00.000Z");
+
+      expect(maxTranscriptsPerRun("test-user", rthTuesday)).toBe(6);
+      expect(maxTranscriptsPerRun("test-user", nightTuesday)).toBeGreaterThan(6);
+    });
+
+    it("defaults congressFundamentalsShareEnabled to true via server knob", async () => {
+      const { congressFundamentalsShareEnabled } = await import("../src/lib/congress-share");
+      expect(congressFundamentalsShareEnabled()).toBe(true);
+    });
+  });
 });
