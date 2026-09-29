@@ -45,11 +45,13 @@ import {
   resetCongressRefThrottle,
   runCongressDailyShare,
   runCongressDailyShareIfDue,
+  probeCongressShareTokenIfDue,
+  probeCongressShareTokenOnStartup,
   shareScanRefs,
   shareWithCongressTrade,
   type CongressPrice
 } from "../src/lib/congress-share";
-import { setInternalSetting } from "../src/lib/db";
+import { deleteInternalSetting, getInternalSetting, setInternalSetting } from "../src/lib/db";
 import { getServiceHealthLog } from "../src/lib/db-health";
 import { flushDurableStateNow, resetDurableStateCacheForTests } from "../src/lib/durable-state";
 
@@ -1026,5 +1028,52 @@ describe("runCongressDailyShare — fromAppANeeds + deep history for needs", () 
     expect(pricePost?.prices[0].ticker).toBe("NEED");
     // full history despite MAX_CLOSES=2
     expect(pricePost?.prices[0].closes.length).toBe(5);
+  });
+});
+
+describe("congress-share startup and scheduler token probe cadence", () => {
+  const marker = "congress-share:lastTokenProbeTs";
+
+  it("marks the boot probe before awaiting fetch, so an immediate scheduler tick skips", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "test-token";
+    deleteInternalSetting(marker);
+    let release: (() => void) | undefined;
+    const fetchSpy = vi.fn(() => new Promise<Response>((resolve) => {
+      release = () => resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const now = Date.now();
+    const startup = probeCongressShareTokenOnStartup(now);
+    expect(getInternalSetting<number>(marker)).toBe(now);
+    expect(await probeCongressShareTokenIfDue(now + 1)).toEqual({ status: "skipped" });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    release?.();
+    await expect(startup).resolves.toBeUndefined();
+  });
+
+  it("probes on every boot despite a fresh marker, then suppresses the first scheduler tick", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "test-token";
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const now = Date.now();
+    deleteInternalSetting(marker);
+    await probeCongressShareTokenOnStartup(now);
+    await probeCongressShareTokenOnStartup(now + 1000); // a new process booted inside six hours
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(getInternalSetting<number>(marker)).toBe(now + 1000);
+    expect(await probeCongressShareTokenIfDue(now + 1001)).toEqual({ status: "skipped" });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("probes again only at the six-hour boundary", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "test-token";
+    deleteInternalSetting(marker);
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const now = Date.now();
+    expect(await probeCongressShareTokenIfDue(now)).toEqual({ status: "ok" });
+    expect(await probeCongressShareTokenIfDue(now + 6 * 60 * 60_000 - 1)).toEqual({ status: "skipped" });
+    expect(await probeCongressShareTokenIfDue(now + 6 * 60 * 60_000)).toEqual({ status: "ok" });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 });
