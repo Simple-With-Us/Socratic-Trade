@@ -3516,6 +3516,14 @@ export interface LearnedContextPendingRow {
   learningScope: LearnedContextLearningScope;
   transferState: LearnedContextTransferState;
   classifierReason: string | null;
+  /**
+   * EXPLICIT producer provenance, carried onto the queued row so the confirmation queue can be
+   * audited by producer. Absent/NULL for every candidate whose producer did not stamp one, and for
+   * every row written before this column existed — the migration is a guarded nullable ADD, so a
+   * pre-existing row is never backfilled. That is deliberate: it keeps "we did not record this" a
+   * distinguishable state from "this really was chat-origin".
+   */
+  provenance?: LearnedContextCandidateProvenance | null;
   createdAt: string;
   status: LearnedContextPendingStatus;
   resolvedAt: string | null;

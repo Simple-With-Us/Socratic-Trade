@@ -1282,6 +1282,10 @@ interface RawLearnedContextPendingRow {
   learning_scope: string;
   transfer_state: string;
   classifier_reason: string | null;
+  // Added by migration 94 (learned_context_pending_provenance). Rows written before it have no such
+  // column value, and `SELECT *` then simply omits the key — read it defensively rather than
+  // assuming the key exists.
+  provenance?: string | null;
   created_at: string;
   status: string;
   resolved_at: string | null;
@@ -1305,6 +1309,10 @@ function mapLearnedContextPending(row: RawLearnedContextPendingRow): LearnedCont
     learningScope: row.learning_scope as LearnedContextPendingRow["learningScope"],
     transferState: row.transfer_state as LearnedContextPendingRow["transferState"],
     classifierReason: row.classifier_reason,
+    // SQLite hands back TEXT, so the narrow union has to be re-asserted here. A value the union does
+    // not contain is read as "no provenance recorded" rather than passed through as a bogus marker —
+    // this column is a forensic label, and a label the type system rejects is not evidence of anything.
+    provenance: row.provenance === "system-postmortem" ? "system-postmortem" : null,
     createdAt: row.created_at,
     status: row.status as LearnedContextPendingRow["status"],
     resolvedAt: row.resolved_at,
@@ -1318,8 +1326,8 @@ export function insertPendingLearnedContext(row: LearnedContextPendingRow): Lear
       `INSERT INTO learned_context_pending
         (id, user_id, scope, kind, subject, symbol, value, source, origin, risk_tier,
          connected_account_id, account_environment, learning_scope, transfer_state,
-         classifier_reason, created_at, status, resolved_at, review_note)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         classifier_reason, provenance, created_at, status, resolved_at, review_note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       row.id,
@@ -1337,6 +1345,7 @@ export function insertPendingLearnedContext(row: LearnedContextPendingRow): Lear
       row.learningScope,
       row.transferState,
       row.classifierReason,
+      row.provenance ?? null,
       row.createdAt,
       row.status,
       row.resolvedAt,
@@ -1393,6 +1402,68 @@ export function setPendingLearnedContextReviewNote(id: string, userId: string, n
     .prepare("UPDATE learned_context_pending SET review_note = ? WHERE id = ? AND user_id = ?")
     .run(note, id, userId);
   return result.changes > 0;
+}
+
+// ── Confirmation-queue audit (provenance split) ──
+
+/** One row of `pendingLearnedContextProvenanceBreakdown`. */
+export interface PendingProvenanceBucket {
+  /**
+   * The producer marker, or the literal `"(unstamped)"` for rows with no recorded provenance —
+   * which covers BOTH a producer that never stamped one and every row written before migration 94.
+   * Those two are deliberately not separated: the schema cannot tell them apart, and guessing would
+   * be a reinterpretation of stored data.
+   */
+  provenance: string;
+  riskTier: string;
+  count: number;
+}
+
+export interface PendingProvenanceBreakdown {
+  /** Counted over `status = 'pending'` only — the queue a human is actually looking at. */
+  byProvenance: PendingProvenanceBucket[];
+  /**
+   * How many pending rows carry a `track_record:` subject. This is a *read-only inference* over the
+   * stored subject, not a stored fact: it is the only handle on the pre-migration backlog, whose
+   * `provenance` is NULL because the column did not exist when those rows were written. Treat it as
+   * "rows shaped like the post-mortem track-record producer", not as a proven provenance claim.
+   */
+  trackRecordSubjectCount: number;
+  totalPending: number;
+}
+
+/**
+ * READ-ONLY audit of the risk-tier confirmation queue, grouped by the producer that created each
+ * row. Purely additive: nothing here writes, mutates or re-classifies a stored row.
+ *
+ * It exists because the queue was found holding 421 production rows, all of them at 'risk' tier, and
+ * the central question — how much of that was a human's risk guidance versus track-record text this
+ * app misclassified — had no answer. Rows queued after the fix carry a real `provenance`; the backlog
+ * before it is covered by `trackRecordSubjectCount`.
+ */
+export function pendingLearnedContextProvenanceBreakdown(): PendingProvenanceBreakdown {
+  const rows = getDb()
+    .prepare(
+      `SELECT COALESCE(provenance, '(unstamped)') AS provenance, risk_tier AS riskTier, COUNT(*) AS count
+         FROM learned_context_pending
+        WHERE status = 'pending'
+        GROUP BY 1, 2
+        ORDER BY count DESC`
+    )
+    .all() as PendingProvenanceBucket[];
+
+  const trackRecord = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS count FROM learned_context_pending
+        WHERE status = 'pending' AND subject LIKE 'track_record:%'`
+    )
+    .get() as { count: number };
+
+  return {
+    byProvenance: rows,
+    trackRecordSubjectCount: trackRecord?.count ?? 0,
+    totalPending: rows.reduce((sum, r) => sum + r.count, 0)
+  };
 }
 
 // ── RAG Backfill P1 (Identity and Manifest) Types & CRUD ──

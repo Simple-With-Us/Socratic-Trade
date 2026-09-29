@@ -3362,6 +3362,23 @@ const MIGRATIONS: Migration[] = [
         database.exec("ALTER TABLE strategy_runs ADD COLUMN origin TEXT");
       }
     }
+  },
+  {
+    // Producer provenance on the risk-tier confirmation queue. The queue was found holding 421
+    // production rows, 100% of them at 'risk' tier, with no way to tell a legitimate human risk
+    // lesson from text this app wrote about its own closed trades and misclassified. `subject` and
+    // `classifier_reason` were the only forensic handles and neither names the producer. This adds a
+    // NULLABLE column: rows written before this migration simply have NULL and are NOT backfilled
+    // (backfilling would assert a provenance nobody recorded), so NULL honestly means "producer not
+    // recorded — pre-migration or unstamped". See docs/rollouts/2026-09-28-postmortem-and-coverage.md.
+    version: 94,
+    name: "learned_context_pending_provenance",
+    up: (database) => {
+      if (!tableExists(database, "learned_context_pending")) return;
+      if (!columnExists(database, "learned_context_pending", "provenance")) {
+        database.exec("ALTER TABLE learned_context_pending ADD COLUMN provenance TEXT");
+      }
+    }
   }
 ];
 

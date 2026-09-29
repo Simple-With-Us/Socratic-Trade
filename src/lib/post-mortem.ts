@@ -497,7 +497,11 @@ function poolClosedLotReturnsByThesis(
  * (origin='autonomous'). Now per-user: pools ALL accounts' trades so lessons benefit every account.
  * The phrasing is deliberately directional and carries NO numeric percent/size token, so the
  * fail-closed classifier admits it as a fact rather than dropping it as a risk-adjacent (numeric)
- * candidate. Untagged buckets are skipped. Best-effort: a failure here never affects the reflection
+ * candidate. The one count it does carry — how many closed lots the bucket pooled — is written as a
+ * LABELLED `sample_size=N closed lots` and the candidate is stamped `provenance: "system-postmortem"`,
+ * because a bare "(23 lots)" matches the classifier's bare-count numeric clause and force-queued
+ * every track-record fact. See MEASURED_SAMPLE_SIZE_PATTERN in learned-context/classify.ts.
+ * Untagged buckets are skipped. Best-effort: a failure here never affects the reflection
  * write or any trading path.
  *
  * Significance annotation (Jesse lesson, docs/oss-lessons.md §6): each directional fact also carries
@@ -532,9 +536,15 @@ async function writeThesisTrackRecordFacts(
         {
           kind: "pattern",
           subject: `track_record:${stat.thesisTag}`,
-          value: `The "${stat.thesisTag}" thesis ${verdict} across pooled closed trades from all accounts (${stat.trades} lots).${sigSentence ? ` ${sigSentence}` : ""} source_accounts: ${sourceAccts} environment_breakdown: ${envBreakdown}`,
+          // The lot count is written as a LABELLED sample size, not a bare "(23 lots)": a bare
+          // count matches the bare-count clause of the classifier's NUMERIC_RISK_PATTERN and reads
+          // as an order size. `provenance: "system-postmortem"` is what makes the exemption apply at
+          // all — see MEASURED_SAMPLE_SIZE_PATTERN in learned-context/classify.ts, and the same
+          // marker already skipping the LLM layer in semantic-gate.ts step 1b.
+          value: `The "${stat.thesisTag}" thesis ${verdict} across pooled closed trades from all accounts (sample_size=${stat.trades} closed lots).${sigSentence ? ` ${sigSentence}` : ""} source_accounts: ${sourceAccts} environment_breakdown: ${envBreakdown}`,
           source: "inferred",
-          confidence
+          confidence,
+          provenance: "system-postmortem"
         },
         "autonomous",
         { connectedAccountId: undefined, accountEnvironment: dominantEnv }

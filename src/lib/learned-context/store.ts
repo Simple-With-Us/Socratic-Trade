@@ -162,7 +162,13 @@ export async function ingestLearned(
       accountEnvironment: accountEnvironment ?? null,
       learningScope,
       transferState,
-      classifierReason: `classified '${tier}' (fail-closed); queued for human confirmation`,
+      classifierReason: `classified '${tier}' (fail-closed); queued for human confirmation${
+        candidate.provenance ? ` [producer=${candidate.provenance}]` : ""
+      }`,
+      // Producer marker, when the candidate carried one. Lets the owner split the queue by producer
+      // (see pendingLearnedContextProvenanceBreakdown in db-learning.ts) instead of seeing a single
+      // undifferentiated wall of 'risk' rows.
+      provenance: candidate.provenance ?? null,
       createdAt: new Date().toISOString(),
       status: "pending",
       resolvedAt: null

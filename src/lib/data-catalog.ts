@@ -138,6 +138,21 @@ export const CATALOG_FIELDS: CatalogField[] = [
     ]
   },
   {
+    id: "marketCap",
+    label: "Market cap",
+    category: "quote",
+    valueKind: "number",
+    description:
+      "Equity market capitalisation in USD. Not cosmetic: liquidityScore, valueScore and qualityScore " +
+      "all branch on it, and an absent value is not neutral — valueScore/qualityScore fall back to a flat " +
+      "50/45 for the whole universe, so a screener regression that stops returning market cap silently " +
+      "re-scores everything. Supplied by the Nasdaq delayed screener (toMarketQuote, market.ts) and " +
+      "back-filled for company profiles from the imported securities ref cache; it is NOT an " +
+      "enrichment-cascade field, which is why it is absent from COVERAGE_TRACKED_FIELDS.",
+    provenanceRequired: true,
+    sources: [src("nasdaq-delayed-screener", "Scan universe first pass", true)]
+  },
+  {
     id: "bid",
     label: "Bid",
     category: "quote",
