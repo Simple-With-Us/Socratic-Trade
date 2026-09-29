@@ -2,7 +2,8 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import dns from "node:dns";
-import { withSentryConfig } from "@sentry/nextjs";
+// v11: withSentryConfig moved to the dedicated build-config entry point.
+import { withSentryConfig } from "@sentry/nextjs/config";
 
 const require = createRequire(import.meta.url);
 const webpack = require("webpack");
