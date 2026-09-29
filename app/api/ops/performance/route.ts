@@ -26,8 +26,13 @@ export const dynamic = "force-dynamic";
  * 1-3650 — the lookback window for trade-level stats, the proposal funnel, and the equity curve;
  * thesis/Red-Team/model attribution are lifetime, matching how the app's own scorecards work).
  *
- * Response cached in-process for 60s (single-flight per `account`+`days` key) — this runs inside
- * a production web process whose event loop is already known to stall under load.
+ * `marks=0` (or `false`/`off`) skips quoting the open positions for unrealized P&L, so the request
+ * makes no market-data call at all and open positions are reported unpriced instead.  The default
+ * quotes them through the dashboard's own quote cascade under a hard time budget — see the doc
+ * comment in `src/lib/ops-performance.ts`.
+ *
+ * Response cached in-process for 60s (single-flight per `account`+`days`+`marks` key) — this runs
+ * inside a production web process whose event loop is already known to stall under load.
  */
 export async function GET(request: Request) {
   if (!authorizeOpsRequest(request)) {
@@ -42,9 +47,13 @@ export async function GET(request: Request) {
   const daysParam = url.searchParams.get("days");
   const days = daysParam != null && daysParam.trim() !== "" ? Number(daysParam) : OPS_PERFORMANCE_DEFAULT_DAYS;
 
+  const marksParam = url.searchParams.get("marks")?.trim().toLowerCase();
+  const includeMarks = !(marksParam === "0" || marksParam === "false" || marksParam === "off");
+
   const snapshot = await getOrBuildOpsPerformanceSnapshot({
     connectedAccountId: account,
-    days: Number.isFinite(days) ? days : OPS_PERFORMANCE_DEFAULT_DAYS
+    days: Number.isFinite(days) ? days : OPS_PERFORMANCE_DEFAULT_DAYS,
+    includeMarks
   });
 
   return NextResponse.json({

@@ -5,13 +5,17 @@ import {
   getPerformanceSummary,
   getThesisScorecard,
   getRedTeamEfficacy,
+  openLotSymbols,
+  unrealizedFromOpenLots,
   type ClosedLot,
   type PnlResult,
   RED_TEAM_EFFICACY_MIN_UNIQUE_MATURED,
   type ThesisStat,
   type RedTeamEfficacy
 } from "./performance";
+import { withDeadline } from "./inflight-deadline";
 import { normalizeSymbol } from "./money";
+import { fetchFreshQuotesCascade } from "./quotes-cascade";
 import { yieldEventLoop } from "./slow-sync-guard";
 import type { FillEvent, FillSource, HoldReasonCode } from "./types";
 
@@ -53,11 +57,21 @@ import type { FillEvent, FillSource, HoldReasonCode } from "./types";
  * work — however large — is never one unbroken synchronous stretch; it cannot reduce the total
  * work, only keep this process able to serve `/api/health` and other requests while it runs.
  *
- * No live quotes are fetched (mirrors `/api/connected-accounts/[id]/performance`):
- * `unrealized` P&L is real only when a broker sync recently wrote a portfolio
- * snapshot's mark; this endpoint never calls a broker, so every account's
- * `pricesUnavailable` is always `true` and unrealized figures read 0 from an
- * empty `currentPrices` map — same disclosed limitation as that route.
+ * Unrealized P&L (was hardcoded 0 with `pricesUnavailable: true` for every account): an account
+ * whose book has at least one OPEN lot has those symbols quoted through
+ * `fetchFreshQuotesCascade` — the SAME cascade the dashboard falls back to; it never calls FMP
+ * (owner rule 2026-08-20).  `skipActiveBroker: true` means the account's OWN broker gateway is
+ * never hit a second time by this diagnostic, though the cascade can still reach the user's OTHER
+ * connected brokers' market-data-only endpoints, Alpaca snapshots and Yahoo, exactly like the
+ * dashboard fallback.  Everything about that fetch is bounded so a slow feed cannot stall the
+ * request: at most `OPS_QUOTE_MAX_SYMBOLS` symbols per account, `OPS_QUOTE_FETCH_TIMEOUT_MS` per
+ * account with a real `AbortController` (not just a race), one `OPS_QUOTE_TOTAL_BUDGET_MS` budget
+ * across the whole request, a per-request symbol memo so the same ticker held in several accounts
+ * is quoted once, and the whole snapshot stays behind the 60s cache below.  Best effort by design:
+ * a failed or timed-out fetch leaves those symbols UNPRICED (listed in `unrealizedUnpricedSymbols`,
+ * never fabricated as a $0 mark) instead of failing the request, and `marks=0` on the route skips
+ * quoting entirely.  The unrealized figure is `unrealizedFromOpenLots` over the `openLots`
+ * `calculatePnl` already produced — it does NOT re-run the FIFO walk with prices.
  */
 
 export const OPS_PERFORMANCE_DEFAULT_DAYS = 90;
@@ -66,6 +80,21 @@ export const OPS_PERFORMANCE_MAX_DAYS = 3650;
 
 /** Bound on blocked-proposal rows scanned for the top-block-reasons rollup, per account. */
 const MAX_BLOCK_REASON_ROWS = 1000;
+/** Output cap on distinct itemised reason buckets (block, broker-rejection, placing-failure).  It
+ *  was 10 / 20, which is sized for a human dashboard, not for an ops read that wants every cause.
+ *  Only the OUTPUT grew: the row scans feeding it keep their own `MAX_*_ROWS` bounds, so this
+ *  changes payload size, not query cost. */
+const MAX_REASON_BUCKETS = 50;
+/** Bound on `placing_failed` proposal rows scanned per account for the placing-failure reasons. */
+const MAX_PLACING_FAILURE_ROWS = 1000;
+/** Most open symbols quoted for one account's unrealized P&L — a runaway book must not turn one
+ *  diagnostic read into a hundreds-of-symbols quote fan-out.  The excess is reported as unpriced. */
+const OPS_QUOTE_MAX_SYMBOLS = 100;
+/** Ceiling on the quote fetch for ONE account.  A slow feed degrades to "unpriced", never a hang. */
+const OPS_QUOTE_FETCH_TIMEOUT_MS = 8_000;
+/** Ceiling on ALL quote fetching in one snapshot build.  An unfiltered request walks every
+ *  account; without this a slow feed could cost `accounts x OPS_QUOTE_FETCH_TIMEOUT_MS`. */
+const OPS_QUOTE_TOTAL_BUDGET_MS = 20_000;
 /** Bound on held ("proposed" / Awaiting approval) proposal rows scanned for the holdReasons
  *  rollup, per account — same rationale as MAX_BLOCK_REASON_ROWS. */
 const MAX_HOLD_REASON_ROWS = 1000;
@@ -113,6 +142,17 @@ export interface OpsModelAttributionRow {
   totalPnlUsd: number;
 }
 
+/** One itemised reason with how many times it was seen and WHEN.  `firstSeenAt`/`lastSeenAt` are the
+ *  earliest and latest `created_at` among the rows that were scanned for this bucket, so a cause
+ *  that stopped weeks ago reads differently from one still firing today.  When the scan hit its row
+ *  cap (see the matching `*RowsCapped` flag) they describe the scanned newest rows only. */
+export interface OpsReasonBucket {
+  reason: string;
+  count: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
 export interface OpsProposalFunnel {
   windowDays: number;
   /** Every status observed in the window, most-common first. */
@@ -120,7 +160,7 @@ export interface OpsProposalFunnel {
   /** Primary (first) block reason per blocked proposal, tallied and truncated to 160 chars —
    *  reasons that embed a dynamic amount/symbol will not merge into one bucket; this is a
    *  diagnostic rollup, not a canonicalized taxonomy. */
-  topBlockReasons: Array<{ reason: string; count: number }>;
+  topBlockReasons: OpsReasonBucket[];
   /** True when `topBlockReasons` was truncated by MAX_BLOCK_REASON_ROWS (more blocked proposals
    *  exist in the window than were scanned for reasons — counts.blocked is still exact). */
   blockReasonRowsCapped: boolean;
@@ -144,9 +184,16 @@ export interface OpsProposalFunnel {
    *  outside the PG failure path were a single unexplained bucket. Sourced from
    *  `audit_events` where kind = `order_rejected_by_broker` (`payload.reason`, falling back to
    *  `payload.brokerState` for the reconcile-path rows that carry no reason string). */
-  brokerRejectionReasons: Array<{ reason: string; count: number }>;
+  brokerRejectionReasons: OpsReasonBucket[];
   /** True when `brokerRejectionReasons` was truncated by MAX_BROKER_REJECTION_ROWS. */
   brokerRejectionRowsCapped: boolean;
+  /** `placing_failed` proposals itemised by their recorded `error_message` — the other way a
+   *  broker refusal reaches a proposal row (the audit-event source above never sees these).  The
+   *  Robinhood account's "Fractional orders must be at least $1" and account-questionnaire errors
+   *  live here.  A row with no message is bucketed as "(no error message recorded)". */
+  placingFailureReasons: OpsReasonBucket[];
+  /** True when `placingFailureReasons` was truncated by MAX_PLACING_FAILURE_ROWS. */
+  placingFailureRowsCapped: boolean;
 }
 
 export interface OpsEquityCurvePoint {
@@ -163,7 +210,14 @@ export interface OpsPerformanceAccount {
   environment: FillSource;
   systemState: string;
   accountNumber: string | null;
-  pricesUnavailable: true;
+  /** True only when the book HAS open positions and NONE of them could be marked (or marking was
+   *  turned off with `marks=0`).  False when there is nothing to price, or at least one open symbol
+   *  got a mark — in which case `unrealizedUnpricedSymbols` says which ones are still missing and
+   *  the unrealized figures understate by exactly those positions. */
+  pricesUnavailable: boolean;
+  /** Open symbols that got no mark (quote fetch failed, timed out, was over budget, or skipped).
+   *  Empty when every open position was priced or there are none. */
+  unrealizedUnpricedSymbols: string[];
   liveRealizedPnl: number;
   paperRealizedPnl: number;
   liveUnrealizedPnl: number;
@@ -434,31 +488,25 @@ function queryProposalFunnel(
     blockedCount > 0
       ? (getDb()
           .prepare(
-            `SELECT decision FROM trade_proposals
+            `SELECT decision, created_at FROM trade_proposals
              WHERE user_id = ? AND account_number = ? AND status = 'blocked' AND created_at >= ?
              ORDER BY created_at DESC LIMIT ?`
           )
-          .all(userId, accountNumber, sinceIso, MAX_BLOCK_REASON_ROWS) as Array<{ decision: string }>)
+          .all(userId, accountNumber, sinceIso, MAX_BLOCK_REASON_ROWS) as Array<{ decision: string; created_at: string }>)
       : [];
 
-  const reasonCounts = new Map<string, number>();
+  const blockReasonRows: TimedReason[] = [];
   for (const row of blockedRows) {
-    let reason: string | undefined;
     try {
       const parsed = JSON.parse(row.decision) as { reasons?: unknown };
       if (Array.isArray(parsed.reasons) && typeof parsed.reasons[0] === "string" && parsed.reasons[0].trim()) {
-        reason = parsed.reasons[0].trim().slice(0, 160);
+        blockReasonRows.push({ reason: parsed.reasons[0].trim().slice(0, 160), createdAt: row.created_at });
       }
     } catch {
       // malformed decision JSON — skip this row's reason, the count is still in `counts`
     }
-    if (!reason) continue;
-    reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
   }
-  const topBlockReasons = Array.from(reasonCounts.entries())
-    .map(([reason, count]) => ({ reason, count }))
-    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason))
-    .slice(0, 10);
+  const topBlockReasons = tallyReasonBuckets(blockReasonRows);
 
   // holdReasons: same shape of query as the block-reasons rollup above, but over "proposed"
   // (Awaiting approval) rows' `proposal.holdReason` (see hold-reason.ts) instead of `decision`.
@@ -508,15 +556,15 @@ function queryProposalFunnel(
     rejectedCount > 0
       ? (getDb()
           .prepare(
-            `SELECT payload FROM audit_events
+            `SELECT payload, created_at FROM audit_events
              WHERE user_id = ? AND connected_account_id = ? AND kind = 'order_rejected_by_broker'
                AND created_at >= ?
              ORDER BY created_at DESC LIMIT ?`
           )
-          .all(userId, connectedAccountId, sinceIso, MAX_BROKER_REJECTION_ROWS) as Array<{ payload: string }>)
+          .all(userId, connectedAccountId, sinceIso, MAX_BROKER_REJECTION_ROWS) as Array<{ payload: string; created_at: string }>)
       : [];
 
-  const brokerReasonCounts = new Map<string, number>();
+  const brokerReasonRows: TimedReason[] = [];
   for (const row of brokerRejectionRows) {
     let reason: string | undefined;
     try {
@@ -530,14 +578,34 @@ function queryProposalFunnel(
       continue;
     }
     if (!reason) continue;
-    const key = canonicalizeBrokerRejectionReason(reason);
+    const key = normalizeBrokerRejectionReason(reason);
     if (!key) continue;
-    brokerReasonCounts.set(key, (brokerReasonCounts.get(key) ?? 0) + 1);
+    brokerReasonRows.push({ reason: key, createdAt: row.created_at });
   }
-  const brokerRejectionReasons = Array.from(brokerReasonCounts.entries())
-    .map(([reason, count]) => ({ reason, count }))
-    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason))
-    .slice(0, 20);
+  const brokerRejectionReasons = tallyReasonBuckets(brokerReasonRows);
+
+  // `placing_failed` proposals carry the broker's refusal in `error_message` and never wrote an
+  // `order_rejected_by_broker` audit row, so the audit scan above cannot see them: on the live
+  // Robinhood account that was 22 failures (11x "Fractional orders must be at least $1", 8x the
+  // dollar-based equivalent, 3x the account questionnaire) with no breakdown at all.  Same
+  // indexed (user_id, account_number, created_at) scope and row cap as the block-reason scan.
+  const placingFailedCount = globalCounts.get("placing_failed") ?? 0;
+  const placingFailureRows =
+    placingFailedCount > 0
+      ? (getDb()
+          .prepare(
+            `SELECT error_message, created_at FROM trade_proposals
+             WHERE user_id = ? AND account_number = ? AND status = 'placing_failed' AND created_at >= ?
+             ORDER BY created_at DESC LIMIT ?`
+          )
+          .all(userId, accountNumber, sinceIso, MAX_PLACING_FAILURE_ROWS) as Array<{ error_message: string | null; created_at: string }>)
+      : [];
+  const placingFailureReasons = tallyReasonBuckets(
+    placingFailureRows.map((row) => ({
+      reason: normalizeBrokerRejectionReason(row.error_message) ?? PLACING_FAILURE_NO_MESSAGE,
+      createdAt: row.created_at
+    }))
+  );
 
   return {
     windowDays,
@@ -554,28 +622,98 @@ function queryProposalFunnel(
     // several rejection events, and a reconcile-path row can exist without a status write).
     // Comparing the two silently produced a wrong answer in both directions. Same "hit the cap"
     // semantics as the block-reason and hold-reason scans.
-    brokerRejectionRowsCapped: brokerRejectionRows.length >= MAX_BROKER_REJECTION_ROWS
+    brokerRejectionRowsCapped: brokerRejectionRows.length >= MAX_BROKER_REJECTION_ROWS,
+    placingFailureReasons,
+    placingFailureRowsCapped: placingFailureRows.length >= MAX_PLACING_FAILURE_ROWS && placingFailedCount > MAX_PLACING_FAILURE_ROWS
   };
 }
 
-/** Reduce a broker/validation error string to a bucket key.
+/** Bucket label for a `placing_failed` proposal that recorded no `error_message`. */
+const PLACING_FAILURE_NO_MESSAGE = "(no error message recorded)";
+
+/** One scanned reason string plus the row timestamp it came from. */
+interface TimedReason {
+  reason: string;
+  createdAt: string;
+}
+
+/** Tally `(reason, createdAt)` rows into count + first/last-seen buckets, sorted by count then
+ *  name and capped at `MAX_REASON_BUCKETS`.  Shared by the block-reason, broker-rejection and
+ *  placing-failure rollups: all three are "normalise, then tally over a row-capped scan". */
+function tallyReasonBuckets(rows: TimedReason[]): OpsReasonBucket[] {
+  const buckets = new Map<string, { count: number; firstSeenAt: string; lastSeenAt: string }>();
+  for (const { reason, createdAt } of rows) {
+    const existing = buckets.get(reason);
+    if (!existing) {
+      buckets.set(reason, { count: 1, firstSeenAt: createdAt, lastSeenAt: createdAt });
+      continue;
+    }
+    existing.count += 1;
+    if (createdAt < existing.firstSeenAt) existing.firstSeenAt = createdAt;
+    if (createdAt > existing.lastSeenAt) existing.lastSeenAt = createdAt;
+  }
+  return Array.from(buckets.entries())
+    .map(([reason, bucket]) => ({ reason, ...bucket }))
+    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason))
+    .slice(0, MAX_REASON_BUCKETS);
+}
+
+/** Reduce a broker/validation error string to a short reason key.
  *
- * The raw text is a broker adapter message, so the same underlying refusal arrives with
- * different HTTP statuses attached ("HTTP 422: bracket orders must be entry orders" vs "HTTP 400:
- * …"). Stripping the transport prefix is what lets the repeat offenders in the 2026-09-25 review
- * — 11 rejections of that one bracket rule — actually count as one cause instead of eleven.
+ * Broker adapter errors arrive wrapped, and the same underlying refusal differs on every
+ * occurrence:
+ *  - a transport prefix ("HTTP 422: bracket orders must be entry orders" vs "HTTP 400: ...");
+ *  - JSON nested one to three levels deep — Robinhood's "Fractional orders must be at least $1"
+ *    arrives as `place_equity_order response had no order id: {"text":"API error 400:
+ *    {\"non_field_errors\":[\"Fractional orders must be at least $1...\"]}"}`;
+ *  - a dynamic amount inside the sentence ("at least $1" vs "at least $5").
+ * Without collapsing those, 11 rejections of one rule read as 11 causes.
  *
- * Deliberately NOT a full canonicalizer: anything beyond collapsing whitespace and stripping the
- * leading status code risks merging genuinely different refusals, and a diagnostic rollup that
- * over-merges is worse than one that under-merges. Same caveat as `topBlockReasons`. */
-function canonicalizeBrokerRejectionReason(raw: string): string | undefined {
-  const stripped = raw
-    .trim()
-    .replace(/^HTTP\s+\d{3}\s*[:\-]?\s*/i, "")
+ * Unwraps up to three levels of JSON looking for the innermost sentence (`non_field_errors[0]`,
+ * `detail`, `text`, `message`, `error`), strips a leading `HTTP <code>:` / `API error <code>:`,
+ * then collapses dollar amounts to `$N` and other bare numbers to `#`.  Best effort and never
+ * throws: a message that will not unwrap (truncated mid-JSON, say) is still normalised and
+ * returned, and an empty one returns `undefined` so the caller can decide what an unexplained row
+ * is called.  Deliberately NOT a full canonicaliser — merging genuinely different refusals is
+ * worse than under-merging.  Same caveat as `topBlockReasons`.  Capped at 160 characters. */
+export function normalizeBrokerRejectionReason(raw: string | null | undefined): string | undefined {
+  if (typeof raw !== "string" || !raw.trim()) return undefined;
+  let text = raw.trim();
+  for (let depth = 0; depth < 3; depth += 1) {
+    const jsonStart = text.indexOf("{");
+    if (jsonStart === -1) break;
+    let inner: string | undefined;
+    try {
+      const parsed = JSON.parse(text.slice(jsonStart)) as Record<string, unknown> | null;
+      const nonField = parsed?.non_field_errors;
+      const candidates: unknown[] = [
+        Array.isArray(nonField) ? nonField[0] : undefined,
+        parsed?.detail,
+        parsed?.text,
+        parsed?.message,
+        parsed?.error
+      ];
+      inner = candidates.find((c): c is string => typeof c === "string" && c.trim().length > 0);
+    } catch {
+      // Not valid JSON at this level — the stored message is often cut off mid-string, which is
+      // exactly what happened to the Robinhood account-questionnaire error.  Take the sentence
+      // that follows the first recognisable error key instead of leaving the whole wrapper as the
+      // reason, so a truncated row still lands in the same bucket as its untruncated siblings.
+      const salvaged = /\b(?:non_field_errors|detail|message)\b\W{1,8}([^"\\]{8,})/i.exec(text.slice(jsonStart));
+      if (salvaged) text = salvaged[1].trim();
+      break;
+    }
+    if (!inner) break;
+    text = inner.trim();
+  }
+  const normalized = text
+    .replace(/^(?:HTTP|API error)\s+\d{3}\s*[:\-]?\s*/i, "")
+    .replace(/\$\d+(?:\.\d+)?/g, "$N")
+    .replace(/\b\d+(?:\.\d+)?\b/g, "#")
     .replace(/\s+/g, " ")
-    .trim();
-  if (!stripped) return undefined;
-  return stripped.slice(0, 200);
+    .trim()
+    .slice(0, 160);
+  return normalized || undefined;
 }
 
 /** Merge live+paper equity curves (already downsampled to <= 1 point/day inside
@@ -595,16 +733,104 @@ function buildEquityCurve(
     }));
 }
 
+function round2(value: number): number {
+  return Number(value.toFixed(2));
+}
+
+function emptyProposalFunnel(windowDays: number): OpsProposalFunnel {
+  return {
+    windowDays,
+    counts: [],
+    byModel: [],
+    topBlockReasons: [],
+    blockReasonRowsCapped: false,
+    holdReasons: [],
+    holdReasonRowsCapped: false,
+    brokerRejectionReasons: [],
+    brokerRejectionRowsCapped: false,
+    placingFailureReasons: [],
+    placingFailureRowsCapped: false
+  };
+}
+
+/** Per-build quote state: marks already obtained (a ticker held in several accounts is quoted
+ *  once) and the wall-clock instant after which no further quote fetch is attempted. */
+interface OpsQuoteContext {
+  marks: Map<string, number>;
+  deadlineAt: number;
+  enabled: boolean;
+}
+
+/**
+ * Best-effort marks for one account's open symbols.  Never throws and never blocks past its
+ * budget: the cascade gets a real `AbortController` (aborted on timeout, so the in-flight fetch
+ * stops instead of leaking past the race) and `withDeadline` guarantees this await returns even
+ * if some tier ignores the signal.  Only strictly positive prices are kept — a zero or missing
+ * quote is "unpriced", never a $0 mark.  Returns the marks for every requested symbol that has
+ * one, including ones memoised earlier in the same build.
+ */
+async function fetchOpsMarks(
+  symbols: string[],
+  userId: string,
+  accountNumber: string,
+  connectedAccountId: string,
+  ctx: OpsQuoteContext
+): Promise<Record<string, number>> {
+  const out: Record<string, number> = {};
+  const missing: string[] = [];
+  for (const symbol of symbols) {
+    const known = ctx.marks.get(symbol);
+    if (known !== undefined) out[symbol] = known;
+    else missing.push(symbol);
+  }
+  if (!ctx.enabled || missing.length === 0) return out;
+
+  const timeoutMs = Math.min(OPS_QUOTE_FETCH_TIMEOUT_MS, ctx.deadlineAt - Date.now());
+  if (timeoutMs <= 0) return out; // request-level quote budget already spent
+
+  const controller = new AbortController();
+  try {
+    const quotes = await withDeadline(
+      fetchFreshQuotesCascade(missing.slice(0, OPS_QUOTE_MAX_SYMBOLS), userId, accountNumber, connectedAccountId, {
+        skipActiveBroker: true,
+        signal: controller.signal
+      }),
+      timeoutMs,
+      `ops-performance quote cascade timed out after ${timeoutMs}ms`,
+      { controller }
+    );
+    for (const quote of Object.values(quotes)) {
+      const symbol = normalizeSymbol(quote.symbol);
+      if (typeof quote.price === "number" && Number.isFinite(quote.price) && quote.price > 0) {
+        ctx.marks.set(symbol, quote.price);
+        out[symbol] = quote.price;
+      }
+    }
+  } catch {
+    // Timed out, aborted, or the cascade threw: leave whatever it could not price unpriced.
+  }
+  return out;
+}
+
 export interface BuildOpsPerformanceInput {
   /** Narrow to one connectedAccountId (across every user) — omit for every account the ops
    *  snapshot covers, mirroring `/api/ops/snapshot`'s all-users iteration. */
   connectedAccountId?: string;
   days?: number;
+  /** Quote open positions for real unrealized P&L (default true).  `false` skips every quote
+   *  fetch — the cheap mode for a probe that only wants realized figures; open positions are then
+   *  reported unpriced rather than as a $0 mark. */
+  includeMarks?: boolean;
 }
 
 export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInput = {}): Promise<OpsPerformanceSnapshot> {
   const windowDays = clampDays(input.days);
   const sinceIso = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+  const quoteCtx: OpsQuoteContext = {
+    marks: new Map(),
+    deadlineAt: Date.now() + OPS_QUOTE_TOTAL_BUDGET_MS,
+    enabled: input.includeMarks !== false
+  };
 
   const accounts: OpsPerformanceAccount[] = [];
   for (const userId of listUsers()) {
@@ -625,7 +851,9 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
         accounts.push({
           ...base,
           systemState: "unknown",
-          pricesUnavailable: true,
+          // Nothing was computed, so there is nothing that needed a price.
+          pricesUnavailable: false,
+          unrealizedUnpricedSymbols: [],
           liveRealizedPnl: 0,
           paperRealizedPnl: 0,
           liveUnrealizedPnl: 0,
@@ -635,7 +863,7 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
           thesisScorecard: [],
           redTeamEfficacy: safeRedTeamEfficacy(userId, { connectedAccountId: account.id, auditLimit: OPS_RED_TEAM_AUDIT_LIMIT }),
           modelAttribution: [],
-          proposalFunnel: { windowDays, counts: [], byModel: [], topBlockReasons: [], blockReasonRowsCapped: false, holdReasons: [], holdReasonRowsCapped: false, brokerRejectionReasons: [], brokerRejectionRowsCapped: false },
+          proposalFunnel: emptyProposalFunnel(windowDays),
           equityCurve: []
         });
         // Give the process a scheduling point between accounts even on this cheap branch, so an
@@ -654,13 +882,22 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
         // getThesisScorecard never recompute calculatePnl for the same book.
         const liveFills = listFillEvents(accountNumber, "live", undefined, userId);
         const paperFills = listFillEvents(accountNumber, "paper", undefined, userId);
+        // FIFO runs with NO prices: its `openLots` tell us which symbols need a mark, and the
+        // unrealized figure is then applied to those lots below without a second ledger walk.
         const livePnl: PnlResult = calculatePnl(liveFills, {});
         const paperPnl: PnlResult = calculatePnl(paperFills, {});
         const prefetched = { liveFills, paperFills };
         const prefetchedPnl = { live: livePnl, paper: paperPnl };
 
-        // No currentPrices fetched (matches /api/connected-accounts/[id]/performance) — this is a
-        // read-only ops diagnostic and never calls a broker for a live quote.
+        const openSymbols = openLotSymbols(livePnl.openLots, paperPnl.openLots);
+        const marks = openSymbols.length > 0 ? await fetchOpsMarks(openSymbols, userId, accountNumber, account.id, quoteCtx) : {};
+        const unpricedSymbols = openSymbols.filter((symbol) => marks[symbol] === undefined).sort();
+        const liveUnrealizedPnl = unrealizedFromOpenLots(livePnl.openLots, marks);
+        const paperUnrealizedPnl = unrealizedFromOpenLots(paperPnl.openLots, marks);
+        const pricesUnavailable = openSymbols.length > 0 && unpricedSymbols.length === openSymbols.length;
+
+        // Realized P&L and the equity curve never depend on a live quote; only unrealized does,
+        // and that is overridden below from `marks`.
         const performance = getPerformanceSummary(accountNumber, {}, userId, prefetched, prefetchedPnl);
 
         // Scorecards/trade-stats key off the account's OWN book (environment), not a merged
@@ -686,11 +923,12 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
         accounts.push({
           ...base,
           systemState,
-          pricesUnavailable: true,
+          pricesUnavailable,
+          unrealizedUnpricedSymbols: unpricedSymbols,
           liveRealizedPnl: performance.liveRealizedPnl,
           paperRealizedPnl: performance.paperRealizedPnl,
-          liveUnrealizedPnl: performance.liveUnrealizedPnl,
-          paperUnrealizedPnl: performance.paperUnrealizedPnl,
+          liveUnrealizedPnl: round2(liveUnrealizedPnl),
+          paperUnrealizedPnl: round2(paperUnrealizedPnl),
           tradeStats,
           roundTripStats,
           thesisScorecard,
@@ -704,7 +942,9 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
         accounts.push({
           ...base,
           systemState: "unknown",
+          // The account errored before it could be priced: unknown, not "nothing to price".
           pricesUnavailable: true,
+          unrealizedUnpricedSymbols: [],
           liveRealizedPnl: 0,
           paperRealizedPnl: 0,
           liveUnrealizedPnl: 0,
@@ -714,7 +954,7 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
           thesisScorecard: [],
           redTeamEfficacy: safeRedTeamEfficacy(userId, { connectedAccountId: account.id, auditLimit: OPS_RED_TEAM_AUDIT_LIMIT }),
           modelAttribution: [],
-          proposalFunnel: { windowDays, counts: [], byModel: [], topBlockReasons: [], blockReasonRowsCapped: false, holdReasons: [], holdReasonRowsCapped: false, brokerRejectionReasons: [], brokerRejectionRowsCapped: false },
+          proposalFunnel: emptyProposalFunnel(windowDays),
           equityCurve: [],
           error: message
         });
@@ -745,7 +985,7 @@ const snapshotCache = new Map<string, CacheEntry>();
 const inFlight = new Map<string, Promise<OpsPerformanceSnapshot>>();
 
 function cacheKey(input: BuildOpsPerformanceInput): string {
-  return `${input.connectedAccountId ?? "*"}\0${clampDays(input.days)}`;
+  return `${input.connectedAccountId ?? "*"}\0${clampDays(input.days)}\0${input.includeMarks === false ? "nomarks" : "marks"}`;
 }
 
 /** Cached wrapper around buildOpsPerformanceSnapshot — 60s TTL, single-flight per key so two

@@ -177,6 +177,34 @@ export interface OpenLot {
   entryAt?: string;
 }
 
+/**
+ * Mark-to-market unrealized P&L over already-computed `OpenLot`s (`calculatePnl`'s own
+ * `openLots`) and a freshly fetched price map, WITHOUT re-running `calculatePnl` — that would
+ * repeat the whole FIFO ledger walk for the same book just to apply prices the first pass did not
+ * have.  Mirrors `calculatePnl`'s own unrealized arithmetic exactly (long: qty * (mark - entry);
+ * short: qty * (entry - mark), with the short lot's signed quantity taken as a magnitude).  A
+ * symbol with no usable price is SKIPPED, never fabricated as a $0 mark, same as `calculatePnl`'s
+ * `if (!current) continue`.  A caller that must say which symbols were left unmarked diffs
+ * `openLotSymbols` against its price map.
+ */
+export function unrealizedFromOpenLots(openLots: OpenLot[], currentPrices: Record<string, number>): number {
+  let unrealized = 0;
+  for (const lot of openLots) {
+    const mark = currentPrices[normalizeSymbol(lot.symbol)];
+    if (typeof mark !== "number" || !(mark > 0)) continue;
+    const quantity = Math.abs(lot.quantity);
+    unrealized += lot.side === "short" ? quantity * (lot.entryPrice - mark) : quantity * (mark - lot.entryPrice);
+  }
+  return unrealized;
+}
+
+/** Distinct normalized symbols across `OpenLot`s — the set a quote fetch has to cover. */
+export function openLotSymbols(...books: OpenLot[][]): string[] {
+  const symbols = new Set<string>();
+  for (const book of books) for (const lot of book) symbols.add(normalizeSymbol(lot.symbol));
+  return Array.from(symbols);
+}
+
 /** Close on or immediately before `iso`. Bars must be chronological. */
 function closeOnOrBefore(bars: Array<{ date: string; close: number }>, iso?: string): number | undefined {
   if (!iso || bars.length === 0) return undefined;

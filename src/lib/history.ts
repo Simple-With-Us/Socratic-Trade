@@ -133,6 +133,13 @@ export function isBarSeriesFresh(bars: OHLCBar[] | null, now: number = Date.now(
   return lastBarDay >= latestExpected;
 }
 
+/** Last bar's business-day string ("" when there is no last bar) — for comparing which of two
+ *  STALE fallback candidates (SQLite eod-cache vs imported-EOD, perf-17) has newer history. */
+function latestStaleBarDate(bars: OHLCBar[] | null): string {
+  if (!bars || bars.length === 0) return "";
+  return toBusinessDay(bars[bars.length - 1]?.time) ?? "";
+}
+
 /**
  * Merges historical bars with incoming fresh bars by date YYYY-MM-DD, sorting ascending.
  */
@@ -255,6 +262,31 @@ export async function fetchDailyOHLC(
   // If localBars exists but is STALE, retain for topping up with active provider data
   const staleLocalBars = localBars && localBars.length >= 2 ? localBars : null;
 
+  // perf-17: the imported-EOD tier below used to short-circuit the WHOLE cascade the instant it
+  // had >=2 bars, with no freshness check at all — unlike the SQLite eod-cache tier just above,
+  // which only short-circuits when fresh and otherwise falls through to a live fetch. Production
+  // observed exactly the failure that gap predicts: the SPY benchmark (src/lib/benchmark.ts) read
+  // "source imported-eod" pinned to 2026-07-24 for two months, because App A's imported series
+  // simply stopped being refreshed and every live tier below it (Tradier/Alpaca/Massive/ROIC/
+  // Tiingo/Yahoo/Marketstack) never even ran. Evaluate its freshness up FRONT: a fresh imported
+  // series still short-circuits immediately below (unchanged, cheap-path behavior — no extra
+  // fetchImportedHistory call, since importedBarsRaw is reused); a STALE one is demoted to the
+  // same "retain to merge with, or fall back to, a live fetch" treatment `staleLocalBars` already
+  // gets, so the cascade actually reaches a live source instead of pinning forever.
+  const importedBarsRaw = fetchImportedHistory(symbol);
+  const importedIsFresh = importedBarsRaw != null && isBarSeriesFresh(importedBarsRaw, now);
+  // Stamped now (not left to the immediate-accept branch's stamp below) so that if this stale
+  // series later gets MERGED with a live fetch, every bar it contributes still reads "imported-eod"
+  // instead of inheriting whichever live source's tag stamped the merged result.
+  const staleImportedBars =
+    importedBarsRaw != null && !importedIsFresh
+      ? stampOhlcBarProvenance(importedBarsRaw, "imported-eod", new Date(now).toISOString())
+      : null;
+  // Prefer whichever stale candidate actually has newer history — a live top-up should merge with
+  // the freshest available stale series, not always the SQLite eod-cache tier by default.
+  const staleFallbackBars =
+    latestStaleBarDate(staleImportedBars) > latestStaleBarDate(staleLocalBars) ? staleImportedBars : staleLocalBars;
+
   const startDate = new Date(now - 1825 * 24 * 60 * 60_000).toISOString().slice(0, 10);
   const sources: Array<{
     scope: CacheScope;
@@ -266,7 +298,9 @@ export async function fetchDailyOHLC(
     // table first (ahead of the App A HTTP read and our keyed providers) lets an imported series displace
     // a re-fetch entirely. DEFAULT OFF + density-guarded inside fetchImportedHistory so a sparse gap-fill
     // never short-circuits with an incomplete series. Close-only bars.
-    { scope: "shared", sourceId: "imported-eod", fetch: async () => fetchImportedHistory(symbol) },
+    // Only serves here when FRESH (perf-17) — a stale hit was already diverted to
+    // `staleImportedBars` above instead of short-circuiting the cascade.
+    { scope: "shared", sourceId: "imported-eod", fetch: async () => (importedIsFresh ? importedBarsRaw : null) },
     ...(opts?.skipAppATier
       ? []
       : [{ scope: "shared" as const, sourceId: "congress.trade", fetch: () => fetchAppAHistory(symbol) }]),
@@ -328,8 +362,8 @@ export async function fetchDailyOHLC(
     if (liveBars && liveBars.length >= 2) {
       const fetchedAt = new Date(now).toISOString();
       const stampedLive = stampOhlcBarProvenance(liveBars, source.sourceId, fetchedAt);
-      const finalBars = staleLocalBars
-        ? stampOhlcBarProvenance(mergeOHLCBars(staleLocalBars, stampedLive), source.sourceId, fetchedAt)
+      const finalBars = staleFallbackBars
+        ? stampOhlcBarProvenance(mergeOHLCBars(staleFallbackBars, stampedLive), source.sourceId, fetchedAt)
         : stampedLive;
       persistEodBarsToCache(symbol, finalBars);
 
@@ -347,15 +381,28 @@ export async function fetchDailyOHLC(
     }
   }
 
-  // Fallback if active providers hit errors or expired keys: audit warning and return stale local bars
-  if (staleLocalBars) {
-    const lastBar = staleLocalBars[staleLocalBars.length - 1];
+  // Fallback if active providers hit errors or expired keys: audit warning and return whichever
+  // stale candidate (SQLite eod-cache or imported-EOD) has the newer history.
+  if (staleFallbackBars) {
+    const lastBar = staleFallbackBars[staleFallbackBars.length - 1];
+    const fallbackSourceId = staleFallbackBars === staleImportedBars ? "imported-eod-stale" : "history-cache-eod-stale";
     audit(
       "eod_cache_stale",
-      { symbol, lastBarTime: lastBar?.time, note: "All active EOD price history providers failed or expired; falling back to stale local bars." },
+      {
+        symbol,
+        lastBarTime: lastBar?.time,
+        note: `All active EOD price history providers failed or expired; falling back to stale ${fallbackSourceId === "imported-eod-stale" ? "imported-EOD" : "local"} bars.`
+      },
       userId ?? "local"
     );
-    const stampedStale = stampOhlcBarProvenance(staleLocalBars, "history-cache-eod-stale", new Date(now).toISOString());
+    // The imported series was pre-stamped "imported-eod" (so a live merge keeps per-bar
+    // provenance), and `stampOhlcBarProvenance` never overwrites an existing tag.  As the FINAL
+    // fallback the whole series is stale, so re-tag it: otherwise a consumer that keys on the stale
+    // source (benchmark.ts `fellBackToStaleCache`) cannot tell a frozen feed from a live one.
+    const stampedStale =
+      staleFallbackBars === staleImportedBars
+        ? staleFallbackBars.map((bar) => ({ ...bar, source: fallbackSourceId }))
+        : stampOhlcBarProvenance(staleFallbackBars, fallbackSourceId, new Date(now).toISOString());
     cache.set(sharedCacheKey, { expiresAt: now + 5 * 60_000, bars: stampedStale });
     return stampedStale;
   }
