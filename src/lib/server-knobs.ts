@@ -109,8 +109,48 @@ export const SERVER_KNOBS_CATALOG: readonly ServerKnobSpec[] = [
     label: "SEC backfill worker",
     description: "Background job queue for large 10-K/10-Q backfills.  Jobs are seeded separately via the sec-ingest admin route.",
     type: "boolean",
-    defaultValue: false,
+    defaultValue: true,
     effect: "Takes effect within about 20 seconds.  The worker loop parks itself while off and resumes when turned back on."
+  },
+  {
+    id: "SEC_INGEST_DAYTIME_ENABLED",
+    group: "workers",
+    label: "SEC ingest during market hours",
+    description: "Allow polite 1-task-per-tick SEC filing ingestion during regular trading hours (09:30-16:00 ET).  When off, ingest defers to non-RTH ticks.",
+    type: "boolean",
+    defaultValue: true,
+    effect: "Takes effect on the next worker tick.  When on, the worker paces at 1 task per tick and yields to in-flight strategy work."
+  },
+  {
+    id: "SEC_INGEST_TASKS_PER_TICK_RTH",
+    group: "workers",
+    label: "SEC ingest daytime tasks / tick",
+    description: "Number of filing tasks claimed per tick during regular trading hours.",
+    type: "number",
+    defaultValue: 1,
+    min: 1,
+    max: 5,
+    effect: "Applies on the next worker tick during market hours."
+  },
+  {
+    id: "SEC_INGEST_TASKS_PER_TICK_OFF_HOURS",
+    group: "workers",
+    label: "SEC ingest night/off-hours tasks / tick",
+    description: "Number of filing tasks claimed per tick outside trading hours and at night (accelerated throughput).",
+    type: "number",
+    defaultValue: 5,
+    min: 1,
+    max: 20,
+    effect: "Applies on the next worker tick outside market hours."
+  },
+  {
+    id: "TRANSCRIPTS_DAYTIME_ENABLED",
+    group: "workers",
+    label: "Earnings transcripts daytime ingestion",
+    description: "Allow earnings call transcripts (ROIC, EarningsCalls, FMP) to ingest at a measured pace during market hours rather than deferring entirely to off-hours.",
+    type: "boolean",
+    defaultValue: true,
+    effect: "Applies at the next scheduler pass.  Ingest yields immediately to in-flight strategy runs."
   },
   {
     id: "STREAMS_ALPACA_NEWS_ENABLED",
@@ -203,6 +243,15 @@ export const SERVER_KNOBS_CATALOG: readonly ServerKnobSpec[] = [
     min: 0,
     max: 5000,
     effect: "Applies at the next scheduler tick.  A signed-in user's own Settings > Sources override still wins over this server value."
+  },
+  {
+    id: "CONGRESS_SHARE_FUNDAMENTALS_ENABLED",
+    group: "retrieval",
+    label: "Share fundamentals with Congress Trade",
+    description: "Includes fundamentals and analyst consensus in data shared with Congress Trade.",
+    type: "boolean",
+    defaultValue: true,
+    effect: "Applies at the next market scan or daily share. When true, forwards PE, EPS, beta, dividend yield, and analyst consensus to Congress Trade."
   }
 ] as const;
 

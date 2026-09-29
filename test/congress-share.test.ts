@@ -906,10 +906,26 @@ describe("shareScanRefs — fundamentals + analyst", () => {
     expect(body.analyst[0]).toMatchObject({ ticker: "AAPL", rating: "Buy", strongBuy: 2 });
   });
 
-  it("HOLDS fundamentals + analyst by default (refs still flow) until App A's #46 migration", async () => {
+  it("shares fundamentals + analyst by default (now that App A migration is live)", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_ENABLED = "on";
-    // CONGRESS_SHARE_FUNDAMENTALS_ENABLED unset (default) → held
+    const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const scan = {
+      topCandidates: [{ symbol: "AAPL", peRatio: 25, analystRating: "Buy", analystBySource: { fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } } } }]
+    } as unknown as Parameters<typeof shareScanRefs>[0];
+    const res = await shareScanRefs(scan);
+    expect(res?.ok).toBe(true);
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.refs[0].ticker).toBe("AAPL");
+    expect(body.fundamentals[0]).toMatchObject({ ticker: "AAPL", peRatio: 25 });
+    expect(body.analyst[0]).toMatchObject({ ticker: "AAPL", rating: "Buy" });
+  });
+
+  it("holds fundamentals + analyst when CONGRESS_SHARE_FUNDAMENTALS_ENABLED is explicitly off", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_SHARE_ENABLED = "on";
+    process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "off";
     const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
     const scan = {
