@@ -58,6 +58,9 @@ const DELETE_TABLES_BY_USER_ID = [
   "socratic_decisions",
   "socratic_framework_proposals",
   "synthetic_trailing_stops",
+  // Added 2026-09-29: per-user data-source residential proxy settings (including the
+  // encrypted proxy password). A deleted account must not leave proxy credentials behind.
+  "user_proxy_settings",
   "broker_protective_stops",
   "audit_events",
   // Added by the G9(b) coverage cross-check (2026-07-01) — previously missing:
