@@ -103,9 +103,11 @@ export async function startServerBackgroundWorkers(
   // Startup token probe: validate CONGRESS_TRADE_TOKEN against App A on every boot so a
   // drifted/rotated token is surfaced immediately (Sentry + health log) rather than waiting
   // for the next nightly batch run. Fire-and-forget; never blocks startup.
-  void import("./congress-share").then(({ probeCongressShareToken, congressTradeToken }) => {
+  void import("./congress-share").then(({ probeCongressShareTokenIfDue, congressTradeToken }) => {
     if (congressTradeToken()) {
-      probeCongressShareToken().catch((err) => {
+      // Claims the six-hour marker before the first await. The scheduler's
+      // immediate tick then sees this boot probe as already in progress.
+      probeCongressShareTokenIfDue().catch((err) => {
         console.warn("[background-workers] congress-share startup probe error:", err instanceof Error ? err.message : err);
       });
     }
