@@ -18,6 +18,13 @@ import {
   type ProxyTestResult
 } from "./lib";
 
+const SOURCE_LABELS: Record<NonNullable<ProxyTestResult["source"]>, string> = {
+  user: "Your Proxy",
+  env: "Operator Proxy",
+  default: "Default Residential Proxy",
+  none: "Direct"
+};
+
 export function ProxyCard() {
   const toast = useToast();
   const [data, setData] = useState<ProxySettingsPayload | null>(null);
@@ -112,17 +119,13 @@ export function ProxyCard() {
   const effective = data?.effective;
   return (
     <Card
-      title="Data-source proxy"
+      title="Data Source Proxy"
       action={
         effective ? (
           <Chip tone={effective.source === "none" ? "muted" : effective.source === "user" ? "pos" : "accent"}>
-            {effective.source === "user"
-              ? `your proxy (${effective.proxyHost})`
-              : effective.source === "env"
-                ? `operator proxy (${effective.proxyHost})`
-                : effective.source === "default"
-                  ? `default residential proxy (${effective.proxyHost})`
-                  : "direct egress"}
+            {effective.source === "none"
+              ? "Direct Egress"
+              : `${SOURCE_LABELS[effective.source]} (${effective.proxyHost})`}
           </Chip>
         ) : undefined
       }
@@ -136,7 +139,7 @@ export function ProxyCard() {
         </p>
         {loadError && <p className="text-[color:var(--con-neg)]">{loadError}</p>}
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Host" hint="Bare host or IP — no scheme, no path.">
+          <Field label="Host" hint="Bare host or IP · no scheme, no path.">
             <TextInput
               value={draft.host}
               onChange={(e) => setDraft((d) => ({ ...d, host: e.target.value }))}
@@ -180,7 +183,7 @@ export function ProxyCard() {
           </Field>
           <Field
             label="Password (optional)"
-            hint={data?.settings?.hasPassword ? "A password is stored — leave blank to keep it." : undefined}
+            hint={data?.settings?.hasPassword ? "A password is stored · leave blank to keep it." : undefined}
           >
             <TextInput
               type="password"
@@ -200,23 +203,23 @@ export function ProxyCard() {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <Btn variant="primary" onClick={save} disabled={busy || !draft.host.trim()}>
-            Save proxy settings
+            Save Proxy Settings
           </Btn>
           <Btn onClick={test} disabled={testing}>
-            {testing ? "Testing…" : "Test egress"}
+            {testing ? "Testing…" : "Test Egress"}
           </Btn>
           {data?.settings && (
             <Btn onClick={clear} disabled={busy}>
-              Remove my proxy
+              Remove My Proxy
             </Btn>
           )}
         </div>
         {testResult && (
           <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-faint)]">
             {testResult.ok
-              ? `Egress OK — data sources see ${testResult.egressIp ?? "an IP"} (${testResult.source}${
-                  testResult.proxyHost ? ` via ${testResult.proxyHost}` : ""
-                }, ${testResult.latencyMs}ms).`
+              ? `Egress OK · data sources see ${testResult.egressIp ?? "an IP"} (${
+                  SOURCE_LABELS[testResult.source ?? "none"]
+                }${testResult.proxyHost ? ` via ${testResult.proxyHost}` : ""}, ${testResult.latencyMs}ms).`
               : `Egress test failed: ${testResult.error ?? "unknown error"}`}
           </p>
         )}
