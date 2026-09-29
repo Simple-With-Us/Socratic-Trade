@@ -14,8 +14,9 @@ import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 import { reconcileBrokerProtectiveStops } from "../src/lib/broker-protective-stops";
-import { getDb, listBrokerProtectiveStops, listFillEvents, upsertBrokerProtectiveStop } from "../src/lib/db";
+import { getDb, listBrokerProtectiveStops, listFillEvents, setPolicy, upsertBrokerProtectiveStop, upsertConnectedAccount } from "../src/lib/db";
 import { setInternalSetting } from "../src/lib/db-settings";
+import { OperationLeaseOwnershipError } from "../src/lib/operation-lease";
 import {
   ExitStopReleaseError,
   placeExitReleasingOwnStops,
@@ -59,6 +60,13 @@ const ACTIVE = new Set(["new", "accepted", "pending_new", "held", "partially_fil
 function heldSellQty(broker: FakeBroker, symbol: string): number {
   return broker.orders
     .filter((o) => o.symbol === symbol && o.side === "sell" && ACTIVE.has(o.state))
+    .reduce((sum, o) => sum + Math.max((o.quantity ?? 0) - (o.filledQuantity ?? 0), 0), 0);
+}
+
+/** Buy-side twin for shorts: an open buy/cover (e.g. the app's own buy stop) holds short shares. */
+function heldBuyQty(broker: FakeBroker, symbol: string): number {
+  return broker.orders
+    .filter((o) => o.symbol === symbol && (o.side === "buy" || o.side === "cover") && ACTIVE.has(o.state))
     .reduce((sum, o) => sum + Math.max((o.quantity ?? 0) - (o.filledQuantity ?? 0), 0), 0);
 }
 
@@ -109,6 +117,14 @@ function fakeBroker(init: { positions: EquityPosition[]; orders: EquityOrder[] }
       const qty = order.quantity ?? 0;
       if (order.side === "sell") {
         const available = Math.max((pos?.quantity ?? 0) - heldSellQty(b, order.symbol), 0);
+        if (qty > available + 1e-9) {
+          throw new Error(`HTTP 403 insufficient qty available for order (requested: ${qty}, available: ${available})`);
+        }
+      }
+      // A cover against a short is held the same way: open buy orders (the app's own buy stop)
+      // hold the short shares, so a cover larger than what is left would flip the account long.
+      if ((order.side === "buy" || order.side === "cover") && (pos?.quantity ?? 0) < 0) {
+        const available = Math.max(-(pos?.quantity ?? 0) - heldBuyQty(b, order.symbol), 0);
         if (qty > available + 1e-9) {
           throw new Error(`HTTP 403 insufficient qty available for order (requested: ${qty}, available: ${available})`);
         }
@@ -567,5 +583,276 @@ describe("restart mid-sequence", () => {
     });
     expect(broker.placed[0]).toMatchObject({ symbol: "CI", type: "stop_market", quantity: 27, stopPrice: 276 });
     expect(getExitStopReleaseIntent(USER, account, "CI")).toBeUndefined();
+  });
+});
+
+// ── #3793 review round (2026-09-29, board 687a5fb4, lane h1) ─────────────────────────────────────
+
+/** The app's OWN tracked protective BUY stop on a short (the reconciler's row + the broker order). */
+function seedAppShortStop(accountNumber: string, symbol: string, quantity: number, stopPrice: number, brokerOrderId = `stop-${symbol}`): EquityOrder {
+  return { ...seedAppStop(accountNumber, symbol, quantity, stopPrice, brokerOrderId), side: "buy" };
+}
+
+function coverProposal(symbol: string, quantity: number): TradeProposal {
+  return { ...sellProposal(symbol, quantity), side: "cover", rationale: "Discretionary cover of a short (h1 test)." };
+}
+
+describe("cover of a short: the app's own buy stop is released the same way", () => {
+  it("partial cover: cancels the app's buy stop, covers 4 of 10, and re-places a buy stop for the 6 left", async () => {
+    const account = "CV-1";
+    // Short 10 @ 200; the app's own protective buy stop 8% above entry holds all 10.
+    const stop = seedAppShortStop(account, "TSLA", 10, 216);
+    const broker = fakeBroker({ positions: [pos("TSLA", -10, 200)], orders: [stop] });
+    broker.marketFillPrice = 205;
+
+    const exec = await runExit(account, broker, coverProposal("TSLA", 4));
+
+    expect(exec.state).toBe("filled");
+    expect(broker.cancelled).toEqual(["stop-TSLA"]);
+    const [exit, restored] = broker.placed;
+    expect([exit.side, exit.type, exit.quantity]).toEqual(["cover", "market", 4]);
+    // The exit was sized against the SHORT (signed negative), not a long.
+    expect(exit.verifiedPositionQuantity).toBe(-10);
+    expect(restored).toMatchObject({ symbol: "TSLA", side: "cover", type: "stop_market", quantity: 6, stopPrice: 216, timeInForce: "gtc" });
+    expect(broker.positions.find((p) => p.symbol === "TSLA")?.quantity).toBe(-6);
+    const rows = listBrokerProtectiveStops(account, USER);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ symbol: "TSLA", quantity: 6, status: "resting" });
+    expect(getExitStopReleaseIntent(USER, account, "TSLA")).toBeUndefined();
+    expect(auditKinds("TSLA")).toEqual(expect.arrayContaining(["exit_stop_release_started", "exit_stop_released", "exit_stop_release_restored"]));
+  });
+
+  it("full cover: releases the buy stop, covers all 10, and re-places nothing for a closed short", async () => {
+    const account = "CV-2";
+    const stop = seedAppShortStop(account, "RIVN", 10, 16.2);
+    const broker = fakeBroker({ positions: [pos("RIVN", -10, 15)], orders: [stop] });
+    broker.marketFillPrice = 14.5;
+
+    await runExit(account, broker, coverProposal("RIVN", 10));
+
+    expect(broker.cancelled).toEqual(["stop-RIVN"]);
+    expect(broker.placed.map((o) => [o.side, o.type, o.quantity])).toEqual([["cover", "market", 10]]);
+    expect(broker.positions.find((p) => p.symbol === "RIVN")).toBeUndefined();
+    expect(listBrokerProtectiveStops(account, USER)).toHaveLength(0);
+    expect(getExitStopReleaseIntent(USER, account, "RIVN")).toBeUndefined();
+  });
+
+  it("the buy stop fills during the cancel: the cover is moot and never sent (no accidental long)", async () => {
+    const account = "CV-3";
+    const stop = seedAppShortStop(account, "GME", 5, 27);
+    const broker = fakeBroker({ positions: [pos("GME", -5, 25)], orders: [stop] });
+    broker.cancelBehavior = "fill";
+
+    const err = await runExit(account, broker, coverProposal("GME", 5)).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ExitStopReleaseError);
+    expect((err as ExitStopReleaseError).code).toBe("exit_moot_stop_filled");
+    expect(broker.placed).toHaveLength(0);
+    expect(listBrokerProtectiveStops(account, USER)).toHaveLength(0);
+    const fills = listFillEvents(account, undefined, undefined, USER).filter((f) => f.symbol === "GME");
+    expect(fills).toHaveLength(1);
+    expect(fills[0]).toMatchObject({ side: "cover", quantity: 5, price: 27, brokerOrderId: "stop-GME" });
+  });
+});
+
+describe("final placement fence: re-checked after the release, immediately before the exit leaves", () => {
+  function leaseLost(): OperationLeaseOwnershipError {
+    return new OperationLeaseOwnershipError("Account mutation lease lost (test).");
+  }
+
+  it("lease lost while the stop cancel settles: the exit is never sent and the restore is owed to the next lease holder", async () => {
+    const account = "LF-1";
+    const stop = seedAppStop(account, "AAPL", 50, 165.6);
+    const broker = fakeBroker({ positions: [pos("AAPL", 50, 180)], orders: [stop] });
+    broker.marketFillPrice = 181;
+    const proposal = sellProposal("AAPL", 50);
+    const plan = releasePlan(account, broker, proposal);
+
+    const err = await placeExitReleasingOwnStops(
+      {
+        userId: USER,
+        policy: alpacaPolicy(account),
+        accountNumber: account,
+        gateway: broker as never,
+        executionMode: "broker/paper",
+        proposal,
+        plan,
+        lane: "autopilot",
+        cancelSettleMs: 0,
+        // Owned when the stop is cancelled; lost by the time the exit would leave.
+        assertOwned: () => {
+          if (broker.cancelled.length > 0) throw leaseLost();
+        }
+      },
+      (verifiedPositionQuantity) => broker.placeEquityOrder({ accountNumber: account, ...proposal, refId: "ref-AAPL", verifiedPositionQuantity })
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(OperationLeaseOwnershipError);
+    expect(broker.cancelled).toEqual(["stop-AAPL"]);
+    // Nothing reached the broker from outside the lease: no exit, and no restore either.
+    expect(broker.placed).toHaveLength(0);
+    expect(getExitStopReleaseIntent(USER, account, "AAPL")).toMatchObject({ phase: "restore_pending" });
+    expect(auditKinds("AAPL")).toContain("exit_stop_release_restore_deferred");
+
+    // The next lease holder's protective pass puts the stop back.
+    await reconcileBrokerProtectiveStops({
+      userId: USER,
+      policy: alpacaPolicy(account),
+      accountNumber: account,
+      gateway: broker as never,
+      positions: await broker.getEquityPositions(account),
+      executionMode: "broker/paper",
+      running: true,
+      orders: await broker.getEquityOrders(account),
+      ordersListed: true
+    });
+    expect(broker.placed).toHaveLength(1);
+    expect(broker.placed[0]).toMatchObject({ symbol: "AAPL", type: "stop_market", quantity: 50, stopPrice: 165.6 });
+    expect(getExitStopReleaseIntent(USER, account, "AAPL")).toBeUndefined();
+  });
+
+  it("fresh re-plan finds nothing to release: the exit is still fenced by the lease", async () => {
+    const account = "LF-2";
+    const stop = seedAppStop(account, "MSFT", 20, 368);
+    const broker = fakeBroker({ positions: [pos("MSFT", 20, 400)], orders: [stop] });
+    const proposal = sellProposal("MSFT", 20);
+    const plan = releasePlan(account, broker, proposal);
+    // The stop left the book on its own after the plan; the fresh re-plan needs no release.
+    broker.orders[0].state = "canceled";
+
+    const err = await placeExitReleasingOwnStops(
+      {
+        userId: USER,
+        policy: alpacaPolicy(account),
+        accountNumber: account,
+        gateway: broker as never,
+        executionMode: "broker/paper",
+        proposal,
+        plan,
+        lane: "approval",
+        cancelSettleMs: 0,
+        assertOwned: () => {
+          throw leaseLost();
+        }
+      },
+      (verifiedPositionQuantity) => broker.placeEquityOrder({ accountNumber: account, ...proposal, refId: "ref-MSFT", verifiedPositionQuantity })
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(OperationLeaseOwnershipError);
+    expect(broker.placed).toHaveLength(0);
+    expect(broker.cancelled).toEqual([]);
+    expect(getExitStopReleaseIntent(USER, account, "MSFT")).toBeUndefined();
+  });
+
+  it("fresh re-plan finds nothing to release and the exit placement fails: the error propagates once, nothing is cancelled or re-sent", async () => {
+    const account = "LF-3";
+    const stop = seedAppStop(account, "NVDA", 12, 110.4);
+    const broker = fakeBroker({ positions: [pos("NVDA", 12, 120)], orders: [stop] });
+    const proposal = sellProposal("NVDA", 12);
+    const plan = releasePlan(account, broker, proposal);
+    broker.orders[0].state = "canceled";
+    let attempts = 0;
+
+    const err = await placeExitReleasingOwnStops(
+      { userId: USER, policy: alpacaPolicy(account), accountNumber: account, gateway: broker as never, executionMode: "broker/paper", proposal, plan, lane: "autopilot", cancelSettleMs: 0 },
+      async () => {
+        attempts += 1;
+        throw new Error("HTTP 503 upstream timeout");
+      }
+    ).catch((e: unknown) => e);
+
+    // A broker error on the exit is the caller's to reconcile (by refId); this sequence must not
+    // swallow it as a failed re-plan and walk into the release path to submit the exit again.
+    expect((err as Error).message).toBe("HTTP 503 upstream timeout");
+    expect(attempts).toBe(1);
+    expect(broker.cancelled).toEqual([]);
+    expect(auditKinds("NVDA")).not.toContain("exit_stop_release_replan_unavailable");
+  });
+
+  it("owner Stop while the stop cancel settles: the exit is not sent and the released stop is put back", async () => {
+    const account = "LF-4";
+    const stop = seedAppStop(account, "AMZN", 30, 165.6);
+    const broker = fakeBroker({ positions: [pos("AMZN", 30, 180)], orders: [stop] });
+    broker.marketFillPrice = 181;
+    const proposal = sellProposal("AMZN", 30);
+    const plan = releasePlan(account, broker, proposal);
+
+    const err = await placeExitReleasingOwnStops(
+      {
+        userId: USER,
+        policy: alpacaPolicy(account),
+        accountNumber: account,
+        gateway: broker as never,
+        executionMode: "broker/paper",
+        proposal,
+        plan,
+        lane: "approval",
+        cancelSettleMs: 0,
+        assertOwned: () => {},
+        // The durable Stop lands after the caller's fence, while the release is in flight.
+        placementBlockReason: () => (broker.cancelled.length > 0 ? "System was halted before broker submission. No new order was sent." : undefined)
+      },
+      (verifiedPositionQuantity) => broker.placeEquityOrder({ accountNumber: account, ...proposal, refId: "ref-AMZN", verifiedPositionQuantity })
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ExitStopReleaseError);
+    expect((err as ExitStopReleaseError).code).toBe("placement_blocked");
+    expect((err as Error).message).toContain("halted");
+    // The only order sent is the restored protective stop; the exit never left.
+    expect(broker.placed.map((o) => [o.side, o.type, o.quantity])).toEqual([["sell", "stop_market", 30]]);
+    expect(broker.placed[0].stopPrice).toBe(165.6);
+    expect(getExitStopReleaseIntent(USER, account, "AMZN")).toBeUndefined();
+  });
+});
+
+describe("restore reconcile reads the account's CURRENT state, not the run's snapshot", () => {
+  it("owner halts mid-release: the released stop comes back, and nothing new is initiated for another position", async () => {
+    const account = "FS-1";
+    const connectedAccountId = "acct-h1-FS-1";
+    upsertConnectedAccount({ id: connectedAccountId, userId: USER, broker: "alpaca", environment: "paper", accountNumber: account, label: "h1 fresh state", isActive: false });
+    const staleActive = alpacaPolicy(account, { connectedAccountId });
+    setPolicy(staleActive, USER, connectedAccountId);
+
+    const stop = seedAppStop(account, "PYPL", 30, 55.2);
+    // XOM is naked: a running account would get a new stop for it; a halted one must not.
+    const broker = fakeBroker({ positions: [pos("PYPL", 30, 60), pos("XOM", 40, 100)], orders: [stop] });
+    broker.marketFillPrice = 61;
+    const cancel = broker.cancelEquityOrder.bind(broker);
+    broker.cancelEquityOrder = async (accountNumber, orderId) => {
+      // The owner presses Stop while the release is in flight.
+      setPolicy({ ...staleActive, systemState: "halted" }, USER, connectedAccountId);
+      return cancel(accountNumber, orderId);
+    };
+    const proposal = sellProposal("PYPL", 10);
+    const plan = releasePlan(account, broker, proposal, staleActive);
+
+    await placeExitReleasingOwnStops(
+      { userId: USER, policy: staleActive, accountNumber: account, connectedAccountId, gateway: broker as never, executionMode: "broker/paper", proposal, plan, lane: "autopilot", cancelSettleMs: 0 },
+      (verifiedPositionQuantity) => broker.placeEquityOrder({ accountNumber: account, ...proposal, refId: "ref-PYPL-FS", verifiedPositionQuantity })
+    );
+
+    expect(broker.placed.map((o) => [o.symbol, o.type, o.quantity])).toEqual([
+      ["PYPL", "market", 10],
+      ["PYPL", "stop_market", 20]
+    ]);
+    expect(broker.placed.some((o) => o.symbol === "XOM")).toBe(false);
+    expect(listBrokerProtectiveStops(account, USER).map((r) => r.symbol)).toEqual(["PYPL"]);
+    expect(getExitStopReleaseIntent(USER, account, "PYPL")).toBeUndefined();
+  });
+
+  it("the account's current state cannot be read: the restore takes the halt treatment (put back only what was released)", async () => {
+    const account = "FS-2";
+    const stop = seedAppStop(account, "KO", 14, 59.8);
+    const broker = fakeBroker({ positions: [pos("KO", 14, 65), pos("PEP", 12, 150)], orders: [stop] });
+    broker.marketFillPrice = 66;
+    // No connected account row for this account number: there is no durable state to re-read.
+    await runExit(account, broker, sellProposal("KO", 4));
+
+    expect(broker.placed.map((o) => [o.symbol, o.type, o.quantity])).toEqual([
+      ["KO", "market", 4],
+      ["KO", "stop_market", 10]
+    ]);
+    expect(broker.placed.some((o) => o.symbol === "PEP")).toBe(false);
+    expect(auditKinds("KO")).toContain("exit_stop_release_restore_state_fallback");
   });
 });
