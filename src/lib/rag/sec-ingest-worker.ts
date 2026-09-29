@@ -16,7 +16,7 @@ import { hasRagIngestPointsBudget, ragIngestPointsBudgetDeferUntil, ragIngestTex
 import { vectorWriteBackend } from "../vector-store/qdrant-write";
 import { politeFetchText } from "../web-sources/http";
 import { timeSync, yieldEventLoop } from "../slow-sync-guard";
-import { shouldDeferRagIngestDuringRth } from "../sqlite-event-loop";
+import { isRegularTradingHours, shouldDeferRagIngestDuringRth } from "../sqlite-event-loop";
 import { parseFilingHtml } from "../web-sources/sec-parser";
 import { ingestCompanyFacts, parseAndSaveForm4 } from "../web-sources/sec-facts";
 import { storeDocument, classifyEmbedFailure, hasIngestTextBudget } from "../vector-db";
@@ -28,7 +28,7 @@ import {
 } from "../web-sources/sec-filings";
 import { insertDocumentChunkFtsBatch, countDocumentChunkFts, ftsMirrorResumeOffset } from "../db";
 import { hasInFlightStrategyWork } from "../db-execution";
-import { serverKnobBool } from "../server-knobs";
+import { serverKnobBool, serverKnobNumber } from "../server-knobs";
 import { chunkDocument } from "./chunk";
 import { buildSecDocument } from "./sec-document";
 import {
@@ -110,7 +110,7 @@ export class SecIngestWorker {
       // skips ticks, so an Admin > Operations flip resumes ingest within one interval + knob-cache
       // TTL — no redeploy.  Cheap: the knob read is cached (~15s) between ticks.
       if (!secIngestWorkerEnabled()) return;
-      if (process.env.NODE_ENV !== "test" && shouldDeferRagIngestDuringRth()) return;
+      if (process.env.NODE_ENV !== "test" && isRegularTradingHours() && !secIngestDaytimeEnabled()) return;
       if (this.tickInFlight) return;
       this.tickInFlight = true;
       void this.runTick()
@@ -131,14 +131,15 @@ export class SecIngestWorker {
 
   /** One polling pass. Public (like `processTask`) so tests can drive a single tick
    *  deterministically instead of racing the 5s interval. */
-  async runTick(options?: { allowRth?: boolean }) {
+  async runTick(options?: { allowRth?: boolean; limit?: number; now?: Date }) {
     // Live b3b83913: 78 ftsMirrorSlice ticks (6–13s) starved gather/Green.  Do not claim
     // more ingest / FTS work while a Manual Run once or strategy run is on this loop.
     if (hasInFlightStrategyWork()) return;
 
     // Defend event loop during active market hours (RTH). Multi-megabyte SEC HTML parsing
     // and vector embedding pin the Node thread, delaying quote cascades and trade execution.
-    if (!options?.allowRth && process.env.NODE_ENV !== "test" && shouldDeferRagIngestDuringRth()) return;
+    // Daytime ingestion runs in gentle 1-task ticks unless explicitly disabled by knob.
+    if (!options?.allowRth && process.env.NODE_ENV !== "test" && isRegularTradingHours(options?.now) && !secIngestDaytimeEnabled()) return;
 
     // Monthly write-unit PACE guard. This queue IS the bulk/backfill lane, so it is the one
     // producer the pace guard throttles: when the month-end projection exceeds
@@ -162,26 +163,31 @@ export class SecIngestWorker {
     // per-tick budget to the first job that had candidates, so with ~500 running jobs issuer #1
     // consumed all 5 slots every tick and everyone else sat at `discovered` forever. One
     // cross-job claim, ordered by priority then age, with a per-job ceiling inside the query.
+    const defaultLimit = process.env.NODE_ENV === "test" && !options?.now
+      ? SEC_INGEST_TASKS_PER_TICK
+      : getSecIngestTasksPerTick(options?.now);
+    const taskLimit = options?.limit ?? defaultLimit;
+
     const claimed = claimSecIngestTasksAcrossJobs({
       owner: this.workerId,
       leaseMs: 60000,
-      limit: SEC_INGEST_TASKS_PER_TICK
+      limit: taskLimit
     });
 
     for (const task of claimed) {
       // Each task chains synchronous extract/chunk/persist segments; yield between tasks so
       // queued HTTP requests get served (2026-08-10 event-loop stall incident).
       await yieldEventLoop();
-      // RTH re-admission check (Codex P1 review): a tick admitted just before 09:30 ET
-      // must not keep claiming/processing long tasks into regular hours.  Stop at the
-      // task boundary — unprocessed tasks keep their durable state and are picked up by
-      // a later non-RTH tick; claimed-but-unprocessed tasks expire via their lease.
-      if (process.env.NODE_ENV !== "test" && shouldDeferRagIngestDuringRth()) {
-        console.log("[SecIngestWorker] RTH began mid-tick — deferring remaining tasks to a non-RTH tick.");
+      // Yield immediately to strategy runs that began mid-tick
+      if (hasInFlightStrategyWork()) return;
+      // Daytime ingest disabled check: if daytime ingest was toggled off mid-tick during RTH,
+      // stop at the task boundary — unprocessed tasks keep their durable state.
+      if (process.env.NODE_ENV !== "test" && isRegularTradingHours(options?.now) && !secIngestDaytimeEnabled()) {
+        console.log("[SecIngestWorker] Daytime ingest disabled mid-tick — deferring remaining tasks.");
         return;
       }
       try {
-        await this.processTask(task);
+        await this.processTask(task, { now: options?.now });
       } catch (err: any) {
         console.error(`[SecIngestWorker] Task ${task.id} failed:`, err.message);
         failSecIngestTask({
@@ -213,7 +219,7 @@ export class SecIngestWorker {
    *  gates are re-checked at every stage boundary (not just once before the drain), and the drain
    *  is wall-clock bounded, so it can never hold the tick open indefinitely or run past the moment
    *  strategy work / RTH needs the event loop. */
-  async processTask(task: SecIngestTask, options?: { drainBudgetMs?: number }) {
+  async processTask(task: SecIngestTask, options?: { drainBudgetMs?: number; now?: Date }) {
     const deadline = Date.now() + (options?.drainBudgetMs ?? SEC_INGEST_TASK_DRAIN_BUDGET_MS);
     let current = task;
     for (;;) {
@@ -231,8 +237,8 @@ export class SecIngestWorker {
         );
         return;
       }
-      if (process.env.NODE_ENV !== "test" && shouldDeferRagIngestDuringRth()) {
-        this.releaseForLaterTick(current, "rth_deferred", "RTH began mid-drain; task released for a non-RTH tick");
+      if (process.env.NODE_ENV !== "test" && isRegularTradingHours(options?.now) && !secIngestDaytimeEnabled()) {
+        this.releaseForLaterTick(current, "rth_deferred", "Daytime ingest disabled; task released for an off-hours tick");
         return;
       }
       const advanced = await this.runStageRecordingFailure(current);
@@ -402,11 +408,11 @@ export class SecIngestWorker {
       } else {
         // Yield before and after heavy Cheerio parsing so I/O, health checks, and timers can breathe
         await yieldEventLoop();
-        // Do not ENTER the synchronous multi-second parse once RTH has begun — the
-        // task stays at its checkpoint and its lease expiry re-queues it for a later
-        // non-RTH tick (Codex P1 review).
-        if (process.env.NODE_ENV !== "test" && shouldDeferRagIngestDuringRth()) {
-          console.log(`[SecIngestWorker] RTH began before parse of task ${task.id} — deferring to a non-RTH tick.`);
+        if (hasInFlightStrategyWork()) {
+          return false;
+        }
+        if (process.env.NODE_ENV !== "test" && isRegularTradingHours() && !secIngestDaytimeEnabled()) {
+          console.log(`[SecIngestWorker] Daytime ingest disabled before parse of task ${task.id} — deferring.`);
           return false;
         }
         // Form-aware title canonicalization: only a proven 10-K gets the 10-K
@@ -918,6 +924,24 @@ export class SecIngestWorker {
  *  override > SEC_INGEST_WORKER_ENABLED env > off) so the loop can be parked/resumed at runtime. */
 export function secIngestWorkerEnabled(): boolean {
   return serverKnobBool("SEC_INGEST_WORKER_ENABLED");
+}
+
+export function secIngestDaytimeEnabled(): boolean {
+  return serverKnobBool("SEC_INGEST_DAYTIME_ENABLED");
+}
+
+export function secIngestTasksPerTickRth(): number {
+  return Math.max(1, Math.min(5, serverKnobNumber("SEC_INGEST_TASKS_PER_TICK_RTH")));
+}
+
+export function secIngestTasksPerTickOffHours(): number {
+  return Math.max(1, Math.min(20, serverKnobNumber("SEC_INGEST_TASKS_PER_TICK_OFF_HOURS")));
+}
+
+export function getSecIngestTasksPerTick(now = new Date()): number {
+  return isRegularTradingHours(now)
+    ? secIngestTasksPerTickRth()
+    : secIngestTasksPerTickOffHours();
 }
 
 type SecIngestWorkerHost = typeof globalThis & {

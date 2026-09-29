@@ -64,6 +64,7 @@ import { INDEX_UNIVERSES, symbolsForPolicyUniverse } from "./index-universes";
 import type { OHLCBar } from "./indicators";
 import { fetchGroupedDailyBarsRange } from "./market-signals/massive-s3";
 import { normalizeSymbol } from "./money";
+import { serverKnobBool } from "./server-knobs";
 import type { MarketQuote, MarketScan } from "./types";
 import { getFinraDataset, getInsiderDataset, getInsiderSignals, getShortVolumeSignals } from "./web-sources";
 import { fetchNasdaqScreenerResponse } from "./nasdaq-screener-fetch";
@@ -254,12 +255,12 @@ export function isCongressShareAutoEnabled(): boolean {
 }
 
 /**
- * Whether to include fundamentals[]/analyst[] in the scan-hook push. Held OFF by default: App A's #46
- * tables don't exist until its migration runs, and pushing those rows earlier just errors them on App A
- * (the rest of the import is unaffected). Flip this on only after App A confirms #46 is applied.
+ * Whether to include fundamentals[]/analyst[] in the data pushed to App A (Congress.Trade).
+ * Defaults to ON via the CONGRESS_SHARE_FUNDAMENTALS_ENABLED server knob now that App A's
+ * fundamentals_eod and analyst_consensus tables are live.
  */
 export function congressFundamentalsShareEnabled(): boolean {
-  return flagOn(process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED);
+  return serverKnobBool("CONGRESS_SHARE_FUNDAMENTALS_ENABLED");
 }
 
 function maxDailyTickers(): number {

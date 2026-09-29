@@ -53,6 +53,7 @@ import { rankDemandFirstSymbols, rankHighInterestSymbols } from "../rag/demand-f
 import { chunkDocument } from "../rag/chunk";
 import { storeSignalSectionDocuments } from "../rag/processed-corpus-write";
 import { yieldEventLoop } from "../slow-sync-guard";
+import { isRegularTradingHours } from "../sqlite-event-loop";
 import { hasVectorIngestWriteBudget, storeDocument } from "../vector-db";
 
 export { ROIC_TRANSCRIPT_DOC_TYPE, ROIC_TRANSCRIPT_SOURCE, roicTranscriptsKillSwitchOn };
@@ -97,12 +98,15 @@ function completeTtlMs(): number {
   return Math.max(1, Number.isFinite(h) ? h : DEFAULT_COMPLETE_TTL_HOURS) * 3_600_000;
 }
 
-function maxTranscriptsPerRun(userId?: string): number {
+export function maxTranscriptsPerRun(userId?: string, now = new Date()): number {
   const paid = paidRoicPlan(userId);
   const fallback = paid ? DEFAULT_MAX_TRANSCRIPTS_PER_RUN_PAID : DEFAULT_MAX_TRANSCRIPTS_PER_RUN_FREE;
   const cap = paid ? 300 : 20;
   const n = resolveSourceNumber("ROIC_TRANSCRIPTS_MAX_PER_RUN");
-  const raw = Number.isFinite(n) ? n : fallback;
+  let raw = Number.isFinite(n) ? n : fallback;
+  if (isRegularTradingHours(now)) {
+    raw = Math.min(raw, 6);
+  }
   return Math.max(1, Math.min(cap, Math.floor(raw)));
 }
 
@@ -955,7 +959,7 @@ async function runRoicTranscriptRefresh(
   };
 
   base.symbolsConsidered = queue.length;
-  const budget = maxTranscriptsPerRun(options?.userId);
+  const budget = maxTranscriptsPerRun(options?.userId, new Date(now));
   let remainingBudget = budget;
 
   const recordIngest = (status: "ingested" | "cached" | "failed"): void => {
