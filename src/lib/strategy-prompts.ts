@@ -17,7 +17,7 @@ import type { IraWashSaleHandling, WashSaleHandling } from "./types";
  * constants "strategy@1.0.0" / "agentic-strategy@0.1.0"; unified 2026-07-01 to the repo's
  * `agentic-*@` naming convention.)
  */
-export const STRATEGY_PROMPT_VERSION = "agentic-strategy@2.19.0";
+export const STRATEGY_PROMPT_VERSION = "agentic-strategy@2.19.1";
 
 /**
  * Fixed thesis "playbook" the agent must choose from. A bounded vocabulary keeps
@@ -41,6 +41,239 @@ export const THESIS_PLAYBOOK_GUIDE =
   "You MUST set `tradeThesisTag` to exactly one of the playbook tags: " +
   THESIS_PLAYBOOK.join(", ") +
   ". Pick the one that best fits the dominant evidence (e.g. Value-Quality for cheap, low-leverage, FCF-positive names; Momentum-Breakout for strong intraday/volume; Insider-Accumulation when insider/senate signals lead; Risk-Exit for stop-loss/take-profit/de-risking sells).";
+
+// ── P0-2: deterministic thesis-tag assignment (2026-09-27) ─────────────────────────────────────────
+// THE PROBLEM. `tradeThesisTag` used to be whatever the model chose, while every realized-performance
+// mechanism keyed on it: the deterministic sizing multiplier, the negative-expectancy skip, and the
+// thesis scorecards. Two consequences. (a) A model could escape a size penalty or an expectancy skip
+// simply by relabeling — the gate and the thing being gated were the same actor. (b) Every "P&L by
+// thesis" number was unfalsifiable, because the label and the outcome were not independent.
+//
+// THE SHAPE OF THE FIX. The model's choice is KEPT as a proposal; a deterministic scorer in this file
+// assigns the final tag from evidence the scan already computes, and the assigned/proposed pair is
+// recorded on every proposal so the owner's existing report can be recomputed two ways and the
+// divergence measured. An `audit()` event fires whenever the two disagree.
+//
+// THREE PROPERTIES THAT MAKE THIS SAFE TO SHIP RATHER THAN A REINTERPRETATION OF HISTORY:
+//   1. ADDITIVE. Nothing is backfilled. A historical row keeps the tag it was stored with, so no
+//      already-reported performance number silently changes meaning. Divergence is only visible for
+//      proposals created after this landed.
+//   2. IT ABSTAINS. When no rule fires, or the leader's margin over the runner-up is too small, the
+//      scorer's answer is `null` and the MODEL'S TAG STANDS. So the residual set of tags that cannot
+//      be derived is explicit rather than papered over with a plausible guess, and the tail of the
+//      distribution is byte-identical to today.
+//   3. OPENINGS ONLY. See `shouldScoreThesisTagForSide`. Sells and covers keep today's behaviour
+//      exactly, which is what keeps the existing Risk-Exit de-risking path untouched.
+//
+// WHAT IS DELIBERATELY NOT DERIVED (needs an owner ruling on the tag taxonomy — see the rollout):
+//   Mean-Reversion       — needs "price is extended from its reference", which no computed field states.
+//                          `technicalSignals` is a free-form string[] whose vocabulary is open-ended,
+//                          so substring-matching it would encode my guess as a rule.
+//   Defensive-Rotation   — needs a definition of "defensive" (a sector list? a beta ceiling? a
+//                          volatility regime?). Nothing in the scan computes that classification.
+//   Analyst-Revision     — we have `analystScore`, which is a LEVEL of consensus. A revision is a
+//                          DELTA, and no field carries one. Mapping a level onto "revision" would
+//                          redefine the tag's meaning.
+// Those three are left to the model by design. A rule that confidently assigned them would look more
+// complete and would be wrong in a way nobody could see.
+
+/** Evidence the scorer reads. Every field is one the market scan already computes. */
+export interface DeterministicThesisTagEvidence {
+  factorBreakdown?: Record<string, number | undefined>;
+  /** Cross-sectional: this name's move minus its sector's average move (percentage points). */
+  sectorRelStrength?: number;
+  /** Trading days to the next scheduled earnings date; undefined when unknown, never fabricated. */
+  daysToEarnings?: number;
+  /** 0–100 open-market Form 4 buy share (50 = balanced). */
+  insiderSentiment?: number;
+  /** Net congressional trade signal (buy members minus sell members). */
+  senateTrades?: number;
+  congressCompositeSignedScore?: number;
+  shortPercentOfFloat?: number;
+  analystScore?: number;
+}
+
+export interface DeterministicThesisTagResult {
+  /** The assigned tag, or `null` when the scorer abstains and the model's proposal stands. */
+  tag: string | null;
+  /** Stable id of the rule that produced `tag` (or the top rule, when abstaining). */
+  rule: string | null;
+  /** Human-readable justification, surfaced verbatim in the audit event. */
+  reason: string;
+  /** Every rule's score, so the audit shows the full field rather than just the winner. */
+  scores: Record<string, number>;
+  runnerUp: string | null;
+  /** `top - runnerUp`. Below the margin the scorer abstains. */
+  margin: number;
+}
+
+/**
+ * Tunables. Every DEFAULT here is anchored on a threshold the codebase ALREADY uses, rather than a
+ * number invented for this feature:
+ *   - SQUARE_SHORT_FLOAT_PCT 20 mirrors `positioningScore` (src/lib/market.ts), which has already
+ *     treated `shortPercentOfFloat >= 20` as squeeze potential.
+ *   - INSIDER_SENTIMENT 60 mirrors the same function's `insiderSentiment >= 60` buy-share step.
+ *   Each is env-overridable so the owner can calibrate against realized performance without a deploy
+ *   of new constants; parsing is fail-safe (a malformed value falls back to the default).
+ */
+const THESIS_TAG_TUNABLES = {
+  /** Lead required over the runner-up before the scorer will override the model. */
+  margin: 8,
+  /** A rule scoring below this is treated as "no signal" (the factor scale is 0–100, 50 = neutral). */
+  neutralFloor: 55,
+  sectorRelStrengthPct: 1.5,
+  shortFloatPct: 20,
+  insiderSentiment: 60,
+  earningsWindowDays: 3
+} as const;
+
+function thesisTagTunable(key: keyof typeof THESIS_TAG_TUNABLES): number {
+  const fallback = THESIS_TAG_TUNABLES[key];
+  const raw = process.env[`THESIS_TAG_${key.toUpperCase()}`];
+  if (raw === undefined) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function num(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * The deterministic assignment. See the block comment above for the full rationale.
+ *
+ * Rules, and why each is derivable from what the scan ALREADY computes:
+ *
+ * | tag                    | score                                                        |
+ * | ---------------------- | ------------------------------------------------------------ |
+ * | Momentum-Breakout      | the `momentum` factor itself (intraday move + 52w position + technicals) |
+ * | Value-Quality          | `max(value, quality)` — the two factors the playbook's own guide names |
+ * | Earnings-Catalyst      | `daysToEarnings` inside a short window; a source-provided countdown |
+ * | Insider-Accumulation    | `positioning` dominant AND insider evidence leading over congress |
+ * | Short-Squeeze-Risk     | `shortPercentOfFloat` at/over the codebase's existing squeeze threshold |
+ * | Sector-Relative-Strength | `sectorRelStrength`, a purpose-built cross-sectional field      |
+ *
+ * `Insider-Accumulation` needs the insider-vs-congress split because the `positioning` factor
+ * deliberately BLENDS congress, insider and short interest into one number (see `positioningScore`),
+ * so the factor alone cannot say which of the two playbook tags it represents.
+ */
+export function assignDeterministicThesisTag(
+  evidence: DeterministicThesisTagEvidence
+): DeterministicThesisTagResult {
+  const scores: Record<string, number> = {};
+  const reasons: Record<string, string> = {};
+  const breakdown = evidence.factorBreakdown ?? {};
+  const factor = (key: string): number | undefined => num(breakdown[key]);
+
+  // ── Factor-mapped tags. The factors are 0–100 sub-scores with 50 = neutral.
+  const momentum = factor("momentum");
+  if (momentum !== undefined) {
+    scores["Momentum-Breakout"] = momentum;
+    reasons["Momentum-Breakout"] = `momentum factor ${momentum.toFixed(1)}/100 (intraday move, 52-week position, technicals)`;
+  }
+
+  const value = factor("value");
+  const quality = factor("quality");
+  if (value !== undefined || quality !== undefined) {
+    const best = Math.max(value ?? 0, quality ?? 0);
+    const which = (value ?? 0) >= (quality ?? 0) ? "value" : "quality";
+    scores["Value-Quality"] = best;
+    reasons["Value-Quality"] = `${which} factor ${best.toFixed(1)}/100 (the two factors the playbook guide names for this tag)`;
+  }
+
+  // ── Purpose-built non-factor signals.
+  const daysToEarnings = num(evidence.daysToEarnings);
+  const earningsWindow = thesisTagTunable("earningsWindowDays");
+  if (daysToEarnings !== undefined && daysToEarnings >= 0 && daysToEarnings <= earningsWindow) {
+    // Closer to the report = higher score, but capped so it cannot swamp a strong fundamental read.
+    const score = 100 - daysToEarnings * (45 / Math.max(1, earningsWindow));
+    scores["Earnings-Catalyst"] = score;
+    reasons["Earnings-Catalyst"] = `next scheduled earnings in ${daysToEarnings} trading day(s) (source-provided countdown)`;
+  }
+
+  const insiderSentiment = num(evidence.insiderSentiment);
+  const senateTrades = num(evidence.senateTrades);
+  const positioning = factor("positioning");
+  const insiderThreshold = thesisTagTunable("insiderSentiment");
+  const insiderLeads =
+    (insiderSentiment !== undefined && insiderSentiment >= insiderThreshold && (senateTrades === undefined || senateTrades <= 0)) ||
+    (insiderSentiment !== undefined && insiderSentiment >= insiderThreshold + 20);
+  if (positioning !== undefined && insiderLeads) {
+    scores["Insider-Accumulation"] = positioning;
+    reasons["Insider-Accumulation"] =
+      `positioning factor ${positioning.toFixed(1)}/100 with insider buy share ${insiderSentiment?.toFixed(0)}/100 leading congress (${senateTrades ?? "n/a"})`;
+  }
+
+  const shortPct = num(evidence.shortPercentOfFloat);
+  const squeezeFloor = thesisTagTunable("shortFloatPct");
+  if (shortPct !== undefined && shortPct >= squeezeFloor) {
+    const score = 60 + Math.min(20, shortPct - squeezeFloor);
+    scores["Short-Squeeze-Risk"] = score;
+    reasons["Short-Squeeze-Risk"] = `short interest ${shortPct.toFixed(1)}% of float (the codebase's existing squeeze threshold is ${squeezeFloor}%)`;
+  }
+
+  const sectorRel = num(evidence.sectorRelStrength);
+  const sectorFloor = thesisTagTunable("sectorRelStrengthPct");
+  if (sectorRel !== undefined && sectorRel >= sectorFloor) {
+    const score = 50 + Math.min(30, sectorRel * 4);
+    scores["Sector-Relative-Strength"] = score;
+    reasons["Sector-Relative-Strength"] = `outperforming its sector by ${sectorRel.toFixed(2)} points today (cross-sectional field)`;
+  }
+
+  const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+  const [topTag, topScore] = ranked[0] ?? [null, 0];
+  const [runnerTag, runnerScore] = ranked[1] ?? [null, 0];
+  const margin = topScore - runnerScore;
+  const floor = thesisTagTunable("neutralFloor");
+  const requiredMargin = thesisTagTunable("margin");
+
+  if (topTag === null) {
+    return {
+      tag: null,
+      rule: null,
+      reason: "no deterministic rule matched (factor breakdown absent, or no purpose-built signal fired)",
+      scores,
+      runnerUp: null,
+      margin: 0
+    };
+  }
+
+  // ABSTAIN rather than guess. Both conditions are the difference between a calibration and a
+  // fabrication: a weak signal, or two signals too close to call, are not a decision.
+  if (topScore < floor) {
+    return {
+      tag: null,
+      rule: null,
+      reason: `best rule "${topTag}" scored ${topScore.toFixed(1)}, below the ${floor} neutral floor`,
+      scores,
+      runnerUp: runnerTag,
+      margin
+    };
+  }
+  if (margin < requiredMargin) {
+    return {
+      tag: null,
+      rule: null,
+      reason: `abstained: "${topTag}" (${topScore.toFixed(1)}) led "${runnerTag ?? "none"}" (${runnerScore.toFixed(1)}) by only ${margin.toFixed(1)}, under the ${requiredMargin} margin`,
+      scores,
+      runnerUp: runnerTag,
+      margin
+    };
+  }
+
+  return { tag: topTag, rule: topTag, reason: reasons[topTag] ?? "dominant deterministic evidence", scores, runnerUp: runnerTag, margin };
+}
+
+/**
+ * Openings only. A sell/cover keeps today's tagging exactly: the de-risking path already assigns
+ * `Risk-Exit` deterministically at its own call sites, and a sell is not a new thesis — it is the
+ * close of the one already on the scorecard. Scoring sells here would relabel exits and move the
+ * scorecard buckets that the existing Risk-Exit logic is built around.
+ */
+export function shouldScoreThesisTagForSide(side: string | undefined | null): boolean {
+  return side === "buy" || side === "short";
+}
+
 
 const HOLDING_HORIZON_GUIDE: Record<string, string> = {
   intraday:
@@ -162,7 +395,7 @@ export function buildBullSystem(p: BullSystemParams): string {
           "You are an autonomous equity trading agent for a connected brokerage account.",
           p.shortAllowed
             ? `SHORT SELLING IS ENABLED on this account. In addition to buy/sell you MAY open SHORT positions (side='short') on names with a clearly bearish thesis, and close them with side='cover' (never 'sell' — a sell adds to a short). Every short MUST carry a mandatory stop-loss (via bracketStopLoss or stopPlan, defaulting to shortStopLossPct of ${p.shortStopLossPct ?? 8}%) and respect the short-exposure caps; only short with genuine conviction, not to fill a quota.`
-            : "SHORT SELLING IS DISABLED on this account. Propose long-only: side is buy or sell. Do not propose short. The one use of cover: a position listed with side 'short' (negative quantity) is an unintended short — close it with side='cover' for its held quantity, never 'sell' (a sell adds to a short) and never a bracketed 'buy'."
+            : "SHORT SELLING IS DISABLED on this account. Propose long-only: side is buy or sell. Do not propose short. The one use of cover: a position listed with side 'short' (negative quantity) is an unintended short — close it with side='cover' for its held quantity, never 'sell' (a sell adds to a short) and never a bracketed 'buy'. Side 'cover' is offered in the schema only while such a short is held."
         ]),
     p.shortAllowed && p.venueLines?.length
       ? `Every short MUST carry a mandatory stop-loss (via bracketStopLoss or stopPlan, defaulting to shortStopLossPct of ${p.shortStopLossPct ?? 8}%) and respect the short-exposure caps; only short with genuine conviction, not to fill a quota.`

@@ -184,7 +184,7 @@ load_secrets() {
   return 0
 }
 
-# Map ship APP_KEY to Sentry project slug in org jays-services.
+# Map ship APP_KEY to Sentry project slug in org simple-with-us.
 sentry_project_for_app() {
   case "${APP_KEY}" in
     socratic) echo "socratic-trade" ;;
@@ -244,7 +244,7 @@ upload_sentry_artifacts() {
   fi
   log "sentry: uploading debug files for project=${project} (token length ${#SENTRY_AUTH_TOKEN})"
   set +e
-  SENTRY_ORG=jays-services SENTRY_PROJECT="$project" \
+  SENTRY_ORG=simple-with-us SENTRY_PROJECT="$project" \
     sentry-cli debug-files upload --include-sources "$archive" \
     >"${LOG_DIR}/sentry-debug-files.log" 2>&1
   local dif_rc=$?
@@ -256,7 +256,7 @@ upload_sentry_artifacts() {
   fi
   log "sentry: Size Analysis build upload for project=${project}"
   set +e
-  SENTRY_ORG=jays-services SENTRY_PROJECT="$project" \
+  SENTRY_ORG=simple-with-us SENTRY_PROJECT="$project" \
     sentry-cli build upload "$archive" \
     >"${LOG_DIR}/sentry-build-upload.log" 2>&1
   local build_rc=$?

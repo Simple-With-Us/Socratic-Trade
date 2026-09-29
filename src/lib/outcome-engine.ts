@@ -1139,8 +1139,19 @@ async function generatePostMortemLessons(
           subject: `decision_lesson:${decisionCase.symbol ?? "portfolio"}:${decisionCase.thesisTag ?? "untagged"}`,
           value: `${lesson} (direction: ${direction}; from the ${decisionCase.symbol ?? "portfolio"} ${decisionCase.status} decision${envNote}, outcome ${outcome.status})`,
           symbol: decisionCase.symbol,
-          source: "inferred",
-          confidence: 0.55
+          // Distinct from the generic "inferred" source so a lesson written HERE is identifiable in
+          // the brain's provenance line (`source=postmortem-outcome`) without a schema change.
+          source: "postmortem-outcome",
+          confidence: 0.55,
+          // PROVENANCE (2026-09-27). This text is derived by this app from its OWN closed, measured
+          // trade outcome — it is a statement about what already happened, not a claim about how to
+          // trade next. The semantic gate's LLM layer used to read it, answer "yes, this would
+          // influence trading behavior" (which is what a sizing lesson literally is), upgrade it to
+          // 'risk', and park it in learned_context_pending — a queue read only by a human click or the
+          // nightly Learning Review. That made the single highest-quality artifact the system produces
+          // effectively unreadable to the system. The marker skips the LLM layer only; the keyword
+          // layer still runs, so a lesson naming an actual risk knob is still queued for approval.
+          provenance: "system-postmortem"
         },
         "autonomous",
         {

@@ -2,7 +2,7 @@ name: Sentry CI Report
 
 # Fleet-wide CI observability: fires after every other workflow in this repo
 # completes and reports failures to the shared `fleet-infra` Sentry project
-# (org jays-services). ADDITIVE ONLY — this file must never modify the
+# (org simple-with-us). ADDITIVE ONLY — this file must never modify the
 # behavior of the workflows it observes.
 #
 # Two independent signals per completed run:

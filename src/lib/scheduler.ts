@@ -15,7 +15,8 @@ import { isEarningsCallsRefreshDue, refreshEarningsCallsTranscriptsIfDue } from 
 import { isRoicTranscriptRefreshDue, refreshRoicTranscriptsIfDue } from "./web-sources/roic-transcripts";
 import { runDailyLearningReviewIfDue } from "./learning-review";
 import { isRunAllowedNow } from "./market-hours";
-import { shouldDeferRagIngestDuringRth, sqliteYieldRetry } from "./sqlite-event-loop";
+import { isRegularTradingHours, shouldDeferRagIngestDuringRth, sqliteYieldRetry } from "./sqlite-event-loop";
+import { serverKnobBool } from "./server-knobs";
 import { runProviderTierCheckIfDue } from "./provider-tier";
 import { refreshLitestreamRemoteInventoryIfDue } from "./litestream-remote-inventory";
 import { runR2UsageCheckIfDue, runR2UsageDailyDigestIfDue } from "./r2-usage";
@@ -1013,8 +1014,11 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // this guard a breached ceiling would still let the weekly filing-body ingest spend.
   const filingIngestDue = isFilingIngestDue();
   const transcriptIngestDue = isFmpTranscriptRefreshDue();
-  const deferRagIngest = shouldDeferRagIngestDuringRth();
-  if ((filingIngestDue || transcriptIngestDue) && checkMonthlyLlmSpendCeiling().ok && !deferRagIngest) {
+  const isRth = isRegularTradingHours();
+  const deferFilingIngest = isRth && !serverKnobBool("SEC_INGEST_DAYTIME_ENABLED");
+  const deferTranscriptIngest = isRth && !serverKnobBool("TRANSCRIPTS_DAYTIME_ENABLED");
+
+  if (((filingIngestDue && !deferFilingIngest) || (transcriptIngestDue && !deferTranscriptIngest)) && !hasInFlightStrategyWork() && checkMonthlyLlmSpendCeiling().ok) {
     // DEMAND-FIRST: held-by-value, watchlist, technical, policy universe, then the
     // 1k-issuer manifest.  Insertion order is the ingest order; a Set union used to
     // drop value ranking so the desk's names waited behind the alphabet.
@@ -1023,14 +1027,15 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     // lease. Keep their scheduler admission ordered too, so a same-tick refresh does not make one
     // producer race into a benign busy result while the other starts embedding.
     void (async () => {
-      if (filingIngestDue) {
+      if (filingIngestDue && !deferFilingIngest) {
         try {
-          await journalLane("filing-body-ingest", { metadata: { symbols: symbols.length } }, () => refreshFilingBodies(symbols));
+          const maxFilings = isRth ? 3 : undefined;
+          await journalLane("filing-body-ingest", { metadata: { symbols: symbols.length } }, () => refreshFilingBodies(symbols, Date.now(), maxFilings));
         } catch (err) {
           console.error("[scheduler] filing-body refresh error:", err);
         }
       }
-      if (transcriptIngestDue) {
+      if (transcriptIngestDue && !deferTranscriptIngest) {
         try {
           await journalLane("fmp-transcript-ingest", { metadata: { symbols: symbols.length } }, () => refreshFmpTranscripts(symbols));
         } catch {
@@ -1050,7 +1055,7 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // with them via the shared durable RAG_REINDEX operation lease (acquired inside the producer,
   // like refreshFilingBodies/refreshFmpTranscripts; a busy lease is a benign deferred pass —
   // the daily watermark is untouched, so a later tick retries). Self-guarded.
-  if (isEarningsCallsRefreshDue() && checkMonthlyLlmSpendCeiling().ok && !deferRagIngest) {
+  if (isEarningsCallsRefreshDue() && !hasInFlightStrategyWork() && checkMonthlyLlmSpendCeiling().ok && !deferTranscriptIngest) {
     void journalLane("earningscalls-refresh", {}, () => refreshEarningsCallsTranscriptsIfDue()).catch((err) =>
       console.error("[scheduler] earningscalls transcript refresh error:", err instanceof Error ? err.message : err)
     );
@@ -1061,7 +1066,7 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // Cached earningscalls_transcripts + data/roic-artifacts never re-list or re-fetch.
   // Holdings → watchlist, last N fiscal quarters, cap ROIC_TRANSCRIPTS_MAX_PER_RUN.
   // Library helpers existed earlier without a scheduler caller — that left zero ROIC saves.
-  if (isRoicTranscriptRefreshDue() && !hasInFlightStrategyWork() && checkMonthlyLlmSpendCeiling().ok && !deferRagIngest) {
+  if (isRoicTranscriptRefreshDue() && !hasInFlightStrategyWork() && checkMonthlyLlmSpendCeiling().ok && !deferTranscriptIngest) {
     void journalLane("roic-transcript-refresh", {}, () => refreshRoicTranscriptsIfDue()).catch((err) =>
       console.error("[scheduler] roic transcript refresh error:", err instanceof Error ? err.message : err)
     );
@@ -1295,6 +1300,22 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
 
         if (!policy.accountNumber) {
           schedule.nextRunAt = null;
+          continue;
+        }
+        // Review rank 8: a parked account is skipped BEFORE anything reaches the broker, and the
+        // reason travels with the skip. Without this the flag would record a decision that nothing
+        // acted on, and a parked account would keep proposing trades. Checked before the execution
+        // state so no gateway is even constructed for an account the owner has parked.
+        if (account.parked) {
+          schedule.nextRunAt = null;
+          // The audit row IS the record — there is no `lastSkipReason` field on the per-account
+          // schedule, and inventing one here would add a shape nothing else reads.
+          audit(
+            "scheduler_account_parked_skip",
+            { connectedAccountId: account.id, parkedReason: account.parkedReason ?? null, parkedAt: account.parkedAt ?? null },
+            userId,
+            account.id
+          );
           continue;
         }
         const executionState = deriveExecutionState(policy, account);

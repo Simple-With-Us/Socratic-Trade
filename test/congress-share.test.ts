@@ -159,6 +159,46 @@ describe("dropInvalidShareRows — drop malformed rows instead of sending them",
     expect(res.sent.refs).toBe(1);
     expect(posted?.refs).toEqual([{ ticker: "AAPL" }]);
   });
+
+  // App A returns `{ ok: errors.length === 0, ...summary }` with HTTP 200, so a partial import is a
+  // 2xx. Reading only `res.ok` made a rejected row indistinguishable from a delivered one and let
+  // the nightly marker advance over data App A never wrote.
+  it("shareWithCongressTrade treats an HTTP 200 carrying ok:false as a FAILURE, not a success", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "t";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ ok: false, errors: [{ row: 3, reason: "schema" }] }),
+      { status: 200 }
+    )));
+    const res = await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] });
+    expect(res.ok).toBe(false);
+    expect(res.skipped).toBeUndefined(); // must NOT be a skip, or the daily marker advances
+    expect(String(res.error)).toContain("ok=false");
+  });
+
+  it("shareWithCongressTrade fails on a populated errors[] even when ok is absent", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "t";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ errors: ["ticker required"] }),
+      { status: 200 }
+    )));
+    const res = await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] });
+    expect(res.ok).toBe(false);
+  });
+
+  it("shareWithCongressTrade fails on an unparseable 200 body rather than assuming delivery", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "t";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("not json", { status: 200 })));
+    const res = await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] });
+    expect(res.ok).toBe(false);
+    expect(String(res.error)).toContain("unparseable");
+  });
+
+  it("shareWithCongressTrade still reports ok on a clean 200 body", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "t";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true, refsRows: 1 }), { status: 200 })));
+    const res = await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] });
+    expect(res.ok).toBe(true);
+  });
 });
 
 // ── Mappers ─────────────────────────────────────────────────────────────────────
@@ -181,6 +221,25 @@ describe("marketQuoteToRef", () => {
 });
 
 describe("ohlcBarsToCloses", () => {
+  it("rejects a zero or negative close — App A has no guard and uses it for per-trade P&L", () => {
+    const bars: OHLCBar[] = [
+      { time: "2026-06-15", close: 0 }, // dropped: zero close
+      { time: "2026-06-16", close: -5 }, // dropped: negative close
+      { time: "2026-06-17", close: 100 } // kept
+    ];
+    expect(ohlcBarsToCloses(bars)).toEqual([{ date: "2026-06-17", close: 100 }]);
+  });
+
+  it("rejects a future date so one bad row cannot mark a ticker fresh downstream", () => {
+    const future = new Date(Date.now() + 5 * 86_400_000).toISOString().slice(0, 10);
+    const past = new Date(Date.now() - 5 * 86_400_000).toISOString().slice(0, 10);
+    const bars: OHLCBar[] = [
+      { time: past, close: 100 }, // kept
+      { time: future, close: 999 } // dropped: future-dated
+    ];
+    expect(ohlcBarsToCloses(bars)).toEqual([{ date: past, close: 100 }]);
+  });
+
   it("maps to {date, close}, sorts ascending, and drops invalid bars", () => {
     const bars: OHLCBar[] = [
       { time: "2026-06-16", close: 101 },
@@ -847,10 +906,26 @@ describe("shareScanRefs — fundamentals + analyst", () => {
     expect(body.analyst[0]).toMatchObject({ ticker: "AAPL", rating: "Buy", strongBuy: 2 });
   });
 
-  it("HOLDS fundamentals + analyst by default (refs still flow) until App A's #46 migration", async () => {
+  it("shares fundamentals + analyst by default (now that App A migration is live)", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_ENABLED = "on";
-    // CONGRESS_SHARE_FUNDAMENTALS_ENABLED unset (default) → held
+    const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const scan = {
+      topCandidates: [{ symbol: "AAPL", peRatio: 25, analystRating: "Buy", analystBySource: { fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } } } }]
+    } as unknown as Parameters<typeof shareScanRefs>[0];
+    const res = await shareScanRefs(scan);
+    expect(res?.ok).toBe(true);
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.refs[0].ticker).toBe("AAPL");
+    expect(body.fundamentals[0]).toMatchObject({ ticker: "AAPL", peRatio: 25 });
+    expect(body.analyst[0]).toMatchObject({ ticker: "AAPL", rating: "Buy" });
+  });
+
+  it("holds fundamentals + analyst when CONGRESS_SHARE_FUNDAMENTALS_ENABLED is explicitly off", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_SHARE_ENABLED = "on";
+    process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "off";
     const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
     const scan = {
