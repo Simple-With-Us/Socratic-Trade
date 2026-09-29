@@ -38,6 +38,44 @@ already-reported historical number changes meaning.  **Owner ruling requested** 
 cannot be derived without inventing semantics (`Mean-Reversion`, `Defensive-Rotation`,
 `Analyst-Revision`) — the scorer never emits them and a test enforces that.  Rollout §3.
 
+## 2026-09-28 MINIMAX — the thesis-tag taxonomy is closed (branch `minimax/thesis-tag-coverage`)
+
+**What.**  The owner ruled on the three tags the deterministic scorer abstained on: derive them or
+rule them out, never leave one model-assigned.  Two were derivable, one was not.
+
+- **`Mean-Reversion` — derived.**  `computeTechnicals` already emits a named `rsi_reclaim_oversold`
+  event (RSI-14 crossing back up out of oversold, `src/lib/indicators.ts:269`), and
+  `pricePosition52w` states the "extended from a reference" half.  The rule needs both the event and
+  a **non-bearish** read, because the reclaim is pushed on the RSI cross alone — without the
+  `!downTrend` guard its level nudge uses — so it also fires inside a persistent downtrend, which is
+  a falling knife.  Measured against real bar series, that knife scores 36 (bearish) while a turn
+  that also flips the MACD scores 56 (neutral) and a stronger bounce 67 (bullish), so "no longer
+  bearish" is the app's own neutral boundary and sits in the real gap.  Requiring `bullish` was
+  considered and rejected: a bottoming name is not yet in an uptrend, which is the point of the tag.
+- **`Defensive-Rotation` — derived.**  `volatilityScore` was *already* a defensiveness score (it
+  dings beta > 1.1 and lifts beta < 0.8), so no new definition was needed — just the app's own beta
+  ladder as a gate and its own steadiness factor as the score.  The beta gate is load-bearing: the
+  factor is `100 − |intraday move|`, so an unmeasured name scores the maximum and would otherwise be
+  labelled defensive.
+- **`Analyst-Revision` — retired.**  A revision is a delta; `analystScore` is a level and
+  `analystBySource` is a cross-provider snapshot with no timestamp and no prior value.  There is no
+  upgrade/downgrade field in the schema at all.  Removed from `THESIS_PLAYBOOK`, with
+  `RETIRED_THESIS_TAGS` recording why, and `STRATEGY_PROMPT_VERSION` bumped to
+  `agentic-strategy@2.20.0` because the guide is interpolated into the prompt.
+
+**Additive to history, and that is tested rather than asserted.**  Every consumer of a thesis tag is
+a string lookup over what was actually stored — `getThesisScorecard` buckets closed lots by
+`lot.thesisTag`, and both `shouldSkipNegativeExpectancy` and `applyDeterministicSizing` join through
+the exported `selectThesisStat`.  So a lot filed under the retired tag keeps its scorecard bucket,
+its size multiplier and its expectancy skip.  What retirement removes is the ability to *select* the
+tag on anything new: the schema no longer offers it and `filterRepairedProposals` drops a reply
+carrying it.  Nothing is backfilled.
+
+**No tag in the playbook is now left to the model's own choice on an opening.**  `Risk-Exit` is the
+only other tag with no scorer rule, and it is assigned on the de-risking path, which the
+openings-only rule never scores.  Rollout: `docs/rollouts/2026-09-28-thesis-tag-coverage.md`.
+
+
 ## 2026-09-27 MINIMAX — P1-4: the retrieval stage telemetry can finally be read (branch `minimax/outcome-closure`)
 
 **What.**  `rag_retrieval_stage_trace` and `rag_retrieval_quality` are written default-on and record

@@ -137,6 +137,15 @@ Until that ruling, those three are assigned by the model and are the tags whose 
 model-graded.  A test asserts the scorer never returns them, so a future "completion" of the mapping
 has to be a deliberate, reviewable change.
 
+> **RESOLVED 2026-09-28 — see `docs/rollouts/2026-09-28-thesis-tag-coverage.md`.**  The owner
+> delegated the call (derive each or rule it out; do not leave any model-assigned).  Outcome:
+> `Mean-Reversion` and `Defensive-Rotation` turned out to BE derivable from evidence the scan already
+> computes and now have rules; `Analyst-Revision` is not derivable and was retired from the
+> playbook.  The "A test asserts the scorer never returns them" sentence above is superseded — the
+> test now asserts that of the three, only the retired one is never returned, and the other two are
+> never returned *weakly* (the floor/margin abstention is what replaced the prohibition).
+
+
 ### P1-3 — the filings RAG path finally re-ranks on learned usefulness
 
 - `src/lib/strategy.ts` — calls `applyRetrievalUsefulnessWeighting(chunks, userId)` on the filings

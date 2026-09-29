@@ -211,7 +211,9 @@ describe("prompt-safety fencing + receipts (advisory only)", () => {
     // 2.17.0: Red Job 1 also fact-checks reviewerFilingsPack
     // 2.19.0: a held short (side 'short') is closed with cover, never sell / bracketed buy
     // 2.19.1: long-only schema offers side 'cover' while a short is held (and the prompt says so)
-    expect(STRATEGY_PROMPT_VERSION).toBe("agentic-strategy@2.19.1");
+    // 2.20.0: `Analyst-Revision` retired from the playbook — the guide no longer offers a tag the
+    //          app cannot derive from its own evidence (see RETIRED_THESIS_TAGS in strategy-prompts)
+    expect(STRATEGY_PROMPT_VERSION).toBe("agentic-strategy@2.20.0");
   });
 
   it("(a) buildBullSystem/buildRedTeamReviewSystem carry the data-not-command clause; reflection only by reference", async () => {

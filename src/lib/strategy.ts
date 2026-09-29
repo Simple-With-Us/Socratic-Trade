@@ -66,6 +66,7 @@ import { greenFailoverExhaustedSuffix, interactiveStrategyReasoningEffort, isFai
 import {
   assignDeterministicThesisTag,
   buildBullSystem,
+  isSelectableThesisTag,
   shouldScoreThesisTagForSide,
   STRATEGY_PROMPT_VERSION,
   THESIS_PLAYBOOK
@@ -6683,7 +6684,16 @@ async function proposeTrades(input: {
         senateTrades: candidate?.senateTrades,
         congressCompositeSignedScore: candidate?.congressCompositeSignedScore,
         shortPercentOfFloat: candidate?.shortPercentOfFloat,
-        analystScore: candidate?.analystScore
+        analystScore: candidate?.analystScore,
+        // Added 2026-09-28 for the two rules that closed the taxonomy: `volatility` (inside
+        // factorBreakdown) is the Defensive-Rotation score, and the Mean-Reversion rule reads the
+        // same named technical event the momentum factor was already blending in. `pricePosition52w`
+        // is re-derived here rather than stored, so nothing new is persisted and the value is the
+        // one `momentumScore` itself used to compute.
+        beta: candidate?.beta,
+        technicalSignals: candidate?.technicalSignals,
+        technicalDirection: candidate?.technicalDirection,
+        pricePosition52w: candidate ? pricePosition52w(candidate) : undefined
       });
       thesisTagAudit = { result: decision, candidateFound: Boolean(candidate) };
       if (decision.tag && decision.tag !== proposedTag) assignedTag = decision.tag;
@@ -7282,9 +7292,12 @@ export function filterRepairedProposals(
       typeof record.rationale === "string" && record.rationale.trim() !== "" &&
       // Playbook membership, not just non-emptiness (Codex P1, round 6): a fabricated tag has
       // no scorecard history, so shouldSkipNegativeExpectancy treats it as unproven and a
-      // repaired reply could bypass a proven negative thesis's skip gate.
+      // repaired reply could bypass a proven negative thesis's skip gate. Asked through
+      // `isSelectableThesisTag` rather than a raw `THESIS_PLAYBOOK.includes` so this boundary
+      // keeps meaning "may the model choose this tag" after a retirement, without a second
+      // call site having to remember that retired names are no longer in the list.
       typeof record.tradeThesisTag === "string" &&
-      (THESIS_PLAYBOOK as readonly string[]).includes(record.tradeThesisTag) &&
+      isSelectableThesisTag(record.tradeThesisTag) &&
       typeof record.confidenceScore === "number" && Number.isFinite(record.confidenceScore) &&
       // Numeric/null sizing fields (Codex P2, round 3): repair can deliver `dollarAmount: "100"`,
       // which sanitize preserves via ?? and Robinhood later dereferences with .toFixed —

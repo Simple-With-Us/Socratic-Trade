@@ -14,6 +14,16 @@
 import type { TechnicalDirection } from "./types";
 export type { TechnicalDirection };
 
+/**
+ * The closed set of condition names `computeTechnicals` can emit. Exported so a CONSUMER that
+ * matches on one of them (the deterministic thesis-tag scorer matches `rsi_reclaim_oversold`)
+ * references the same definition the producer pushes, and a rename cannot silently orphan the
+ * match. Not every downstream source uses this vocabulary — the TradingView push path stores an
+ * arbitrary `payload.signal` string — so a consumer must treat a name it does not recognise as
+ * absent rather than as evidence.
+ */
+export const TECHNICAL_SIGNAL_RSI_RECLAIM_OVERSOLD = "rsi_reclaim_oversold";
+
 export interface OHLCBar {
   /** Bar timestamp (ms epoch or ISO) — optional; only the close series is required. */
   time?: number | string;
@@ -268,7 +278,7 @@ export function computeTechnicals(bars: OHLCBar[]): TechnicalRead | undefined {
     if (typeof rsi14Prev === "number") {
       if (rsi14Prev <= 30 && rsi14 > 30) {
         base += 10;
-        signals.push("rsi_reclaim_oversold");
+        signals.push(TECHNICAL_SIGNAL_RSI_RECLAIM_OVERSOLD);
       } else if (rsi14Prev >= 70 && rsi14 < 70) {
         base -= 10;
         signals.push("rsi_fade_overbought");

@@ -1,3 +1,4 @@
+import { TECHNICAL_SIGNAL_RSI_RECLAIM_OVERSOLD } from "./indicators";
 import { OPENING_ORDER_HEADROOM_PCT } from "./policy";
 import { STRATEGY_LEGAL_SENTENCE } from "./legal-notice";
 import type { IraWashSaleHandling, WashSaleHandling } from "./types";
@@ -6,8 +7,8 @@ import type { IraWashSaleHandling, WashSaleHandling } from "./types";
  * Versioned strategy Bull/Bear system prompts (Chat A item 2). Extracted from strategy.ts so the
  * money-path prompts are (a) in one place, (b) versioned for provenance, and (c) offline-eval-able
  * (see scripts/eval/run-strategy-offline.ts). This is a LEAF module — it imports only a constant
- * from ./policy; all dynamic run context is passed in as plain params so it never depends on
- * strategy.ts / execution-mode / db.
+ * from ./policy and a NAME from ./indicators (both runtime-leaf, side-effect-free); all dynamic run
+ * context is passed in as plain params so it never depends on strategy.ts / execution-mode / db.
  *
  * BUMP STRATEGY_PROMPT_VERSION whenever either prompt's wording changes — it is stamped onto every
  * persisted trade proposal (trade_proposals.prompt_version) AND onto traced generations' metadata
@@ -17,25 +18,60 @@ import type { IraWashSaleHandling, WashSaleHandling } from "./types";
  * constants "strategy@1.0.0" / "agentic-strategy@0.1.0"; unified 2026-07-01 to the repo's
  * `agentic-*@` naming convention.)
  */
-export const STRATEGY_PROMPT_VERSION = "agentic-strategy@2.19.1";
+export const STRATEGY_PROMPT_VERSION = "agentic-strategy@2.20.0";
 
 /**
  * Fixed thesis "playbook" the agent must choose from. A bounded vocabulary keeps
  * the thesis × outcome learning loop consistent (free-form tags fragment the
  * scorecards and never accumulate enough samples to learn from).
+ *
+ * `Analyst-Revision` was REMOVED on 2026-09-28 — see `RETIRED_THESIS_TAGS` below. Every other tag is
+ * now either deterministically assignable or (for `Risk-Exit`) assigned on the exit path, so no tag
+ * in this list is left to the model's own choice on an opening.
  */
 export const THESIS_PLAYBOOK = [
   "Momentum-Breakout",
   "Mean-Reversion",
   "Value-Quality",
   "Earnings-Catalyst",
-  "Analyst-Revision",
   "Insider-Accumulation",
   "Short-Squeeze-Risk",
   "Defensive-Rotation",
   "Sector-Relative-Strength",
   "Risk-Exit"
 ] as const;
+
+/**
+ * Tags that were in the playbook and are no longer, with the reason each was retired. The owner
+ * delegated the call on 2026-09-28: make every tag derivable from evidence the app already computes,
+ * or rule it out — do not leave it model-assigned. Retirement is ADDITIVE to history: a stored
+ * `tradeThesisTag` keeps whatever it had, and every consumer of a thesis tag is a STRING lookup
+ * (`getThesisScorecard` aggregates closed lots by the tag actually stored), so historical rows with
+ * a retired tag keep their scorecard bucket, their sizing multiplier and their negative-expectancy
+ * skip. What retirement removes is the ability to SELECT the tag on anything new.
+ */
+export const RETIRED_THESIS_TAGS: Readonly<Record<string, string>> = {
+  "Analyst-Revision":
+    "A revision is a DELTA in an analyst's rating; the scan only computes a consensus LEVEL " +
+    "(`analystScore` / `analystRating`) and a cross-provider snapshot (`analystBySource`, which " +
+    "carries no timestamp or prior value). No field states that any rating changed, so a rule " +
+    "naming this tag would be re-defining it as 'high consensus', silently changing what every " +
+    "historical performance number in this bucket means."
+};
+
+/**
+ * May the model SELECT this tag? True for every live playbook tag and false for every retired one —
+ * which is the single question `filterRepairedProposals` asks at the repaired-reply boundary.
+ *
+ * Note this is NOT the same question as "can `assignDeterministicThesisTag` produce it": `Risk-Exit`
+ * is selectable but has no scorer rule, because it is assigned on the de-risking path and openings
+ * are the only side that is scored.
+ */
+export function isSelectableThesisTag(tag: string | null | undefined): boolean {
+  return typeof tag === "string" && (THESIS_PLAYBOOK as readonly string[]).includes(tag);
+}
+
+
 
 export const THESIS_PLAYBOOK_GUIDE =
   "You MUST set `tradeThesisTag` to exactly one of the playbook tags: " +
@@ -65,17 +101,23 @@ export const THESIS_PLAYBOOK_GUIDE =
 //   3. OPENINGS ONLY. See `shouldScoreThesisTagForSide`. Sells and covers keep today's behaviour
 //      exactly, which is what keeps the existing Risk-Exit de-risking path untouched.
 //
-// WHAT IS DELIBERATELY NOT DERIVED (needs an owner ruling on the tag taxonomy — see the rollout):
-//   Mean-Reversion       — needs "price is extended from its reference", which no computed field states.
-//                          `technicalSignals` is a free-form string[] whose vocabulary is open-ended,
-//                          so substring-matching it would encode my guess as a rule.
-//   Defensive-Rotation   — needs a definition of "defensive" (a sector list? a beta ceiling? a
-//                          volatility regime?). Nothing in the scan computes that classification.
-//   Analyst-Revision     — we have `analystScore`, which is a LEVEL of consensus. A revision is a
-//                          DELTA, and no field carries one. Mapping a level onto "revision" would
-//                          redefine the tag's meaning.
-// Those three are left to the model by design. A rule that confidently assigned them would look more
-// complete and would be wrong in a way nobody could see.
+// WHAT WAS NOT DERIVABLE, AND WHAT HAPPENED TO IT (owner ruling 2026-09-28: derive it or rule it
+// out — do not leave a tag model-assigned). All three of the original hold-outs have been resolved:
+//   Mean-Reversion      — DERIVED. See the `Mean-Reversion` rule below. The evidence exists after
+//                         all: `computeTechnicals` (src/lib/indicators.ts) already emits a named
+//                         `rsi_reclaim_oversold` event — RSI-14 crossing back up out of oversold —
+//                         which is the reversion itself, and `pricePosition52w` states the
+//                         "extended from a reference" half the first implementer said was missing.
+//   Defensive-Rotation  — DERIVED. See the `Defensive-Rotation` rule below: `volatilityScore` is
+//                         already a defensiveness score (it dings beta > 1.1 and LIFTS beta < 0.8),
+//                         so "defensive" needed no new definition, only the app's own beta ladder.
+//   Analyst-Revision    — RETIRED, not derived. It needs a DELTA; every analyst field the scan
+//                         computes is a LEVEL or a cross-provider snapshot with no timestamp. See
+//                         `RETIRED_THESIS_TAGS` for the full argument.
+//
+// The property the first version established is the one that survives: when a rule is weak or two
+// rules are close, the scorer returns `null` and the MODEL'S TAG STANDS. Retirement means the
+// model cannot pick a tag the app cannot justify at all, not that the scorer is forced to pick one.
 
 /** Evidence the scorer reads. Every field is one the market scan already computes. */
 export interface DeterministicThesisTagEvidence {
@@ -91,7 +133,16 @@ export interface DeterministicThesisTagEvidence {
   congressCompositeSignedScore?: number;
   shortPercentOfFloat?: number;
   analystScore?: number;
+  /** Market beta vs the benchmark. `volatilityScore` (src/lib/market.ts) reads it directly. */
+  beta?: number;
+  /** Named technical conditions that fired this bar, verbatim from `TechnicalRead.signals`. */
+  technicalSignals?: string[];
+  /** `technicalDirection` from the same read. Bounded: "bullish" | "bearish" | "neutral". */
+  technicalDirection?: string;
+  /** `pricePosition52w` — 0 at the 52-week low, 100 at the high; undefined when the band is unusable. */
+  pricePosition52w?: number;
 }
+
 
 export interface DeterministicThesisTagResult {
   /** The assigned tag, or `null` when the scorer abstains and the model's proposal stands. */
@@ -113,6 +164,11 @@ export interface DeterministicThesisTagResult {
  *   - SQUARE_SHORT_FLOAT_PCT 20 mirrors `positioningScore` (src/lib/market.ts), which has already
  *     treated `shortPercentOfFloat >= 20` as squeeze potential.
  *   - INSIDER_SENTIMENT 60 mirrors the same function's `insiderSentiment >= 60` buy-share step.
+ *   - DEFENSIVE_BETA 0.8 mirrors the same function's `beta < 0.8` steady-lift step, the app's only
+ *     existing notion of a defensive name.
+ *   - MEAN_REVERSION_52W_PCT 30 is the only one that is a stated choice rather than a mirror: it is
+ *     the bottom third of the trailing 52-week band, below which a reclaim is an extended move that
+ *     reverted rather than a pullback inside an uptrend (which is Momentum-Breakout's evidence).
  *   Each is env-overridable so the owner can calibrate against realized performance without a deploy
  *   of new constants; parsing is fail-safe (a malformed value falls back to the default).
  */
@@ -124,8 +180,11 @@ const THESIS_TAG_TUNABLES = {
   sectorRelStrengthPct: 1.5,
   shortFloatPct: 20,
   insiderSentiment: 60,
-  earningsWindowDays: 3
+  earningsWindowDays: 3,
+  defensiveBeta: 0.8,
+  meanReversion52wPct: 30
 } as const;
+
 
 function thesisTagTunable(key: keyof typeof THESIS_TAG_TUNABLES): number {
   const fallback = THESIS_TAG_TUNABLES[key];
@@ -152,11 +211,19 @@ function num(value: unknown): number | undefined {
  * | Insider-Accumulation    | `positioning` dominant AND insider evidence leading over congress |
  * | Short-Squeeze-Risk     | `shortPercentOfFloat` at/over the codebase's existing squeeze threshold |
  * | Sector-Relative-Strength | `sectorRelStrength`, a purpose-built cross-sectional field      |
+ * | Defensive-Rotation     | the `volatility` factor, gated on `beta` at/below the app's own defensive step |
+ * | Mean-Reversion         | `60 + min(20, floor − pos52w)`, gated on the `rsi_reclaim_oversold` event |
  *
  * `Insider-Accumulation` needs the insider-vs-congress split because the `positioning` factor
  * deliberately BLENDS congress, insider and short interest into one number (see `positioningScore`),
  * so the factor alone cannot say which of the two playbook tags it represents.
+ *
+ * `Risk-Exit` is the one playbook tag with no rule here, and it is not a gap: openings are the only
+ * side this function scores (`shouldScoreThesisTagForSide`), and an exit is not a new thesis — it is
+ * the close of one already on the scorecard. The de-risking path assigns `Risk-Exit` at its own
+ * call sites, and scoring exits here would relabel them and move buckets that logic is built around.
  */
+
 export function assignDeterministicThesisTag(
   evidence: DeterministicThesisTagEvidence
 ): DeterministicThesisTagResult {
@@ -219,6 +286,64 @@ export function assignDeterministicThesisTag(
     scores["Sector-Relative-Strength"] = score;
     reasons["Sector-Relative-Strength"] = `outperforming its sector by ${sectorRel.toFixed(2)} points today (cross-sectional field)`;
   }
+
+  // ── Defensive-Rotation. `volatilityScore` (src/lib/market.ts) is ALREADY a defensiveness score:
+  // it starts from 100 minus the absolute intraday move and then dings beta > 1.1 (−6) and > 1.5
+  // (−15) while LIFTING beta < 0.8 (+6), with the comment "Higher = steadier (less realized +
+  // systematic volatility)". So this rule needs no new definition of "defensive" — it uses the
+  // app's own beta ladder as the gate and its own steadiness factor as the score, which also keeps
+  // it on the same 0–100 scale (and therefore the same floor and margin) as every other rule.
+  //
+  // THE BETA GATE IS LOAD-BEARING, not decoration. `volatilityScore` is 100 minus |intraday move|,
+  // so a name with no fresh quote — a pre-market scan, a stalled feed, a symbol the provider did
+  // not return — scores the MAXIMUM on a quiet tape. Scoring the factor alone would hand the tag to
+  // every unmeasured name. `beta` is a real fundamentals field that is usually absent rather than
+  // zero, so requiring it to be present AND at/below the app's own defensive step keeps absence
+  // reading as absence.
+  const beta = num(evidence.beta);
+  const defensiveBeta = thesisTagTunable("defensiveBeta");
+  const volatility = factor("volatility");
+  if (beta !== undefined && beta > 0 && beta <= defensiveBeta && volatility !== undefined) {
+    scores["Defensive-Rotation"] = volatility;
+    reasons["Defensive-Rotation"] =
+      `beta ${beta.toFixed(2)} (at/below the ${defensiveBeta} defensive step volatilityScore already applies) with a volatility factor of ${volatility.toFixed(1)}/100`;
+  }
+
+  // ── Mean-Reversion. Two independent facts have to hold, and the second is what stops this from
+  // being a falling-knife label:
+  //   1. `rsi_reclaim_oversold` fired — RSI-14 crossed back UP out of oversold (≤ 30). That is the
+  //      app's own named reversion event (src/lib/indicators.ts), and it is matched EXACTLY against
+  //      the constant the producer pushes, not by searching free text for the concept.
+  //   2. the read is no longer BEARISH (`technicalDirection` is "neutral" or "bullish"; indicators.ts
+  //      derives "bearish" at score ≤ 40). The reclaim event is pushed on the RSI cross ALONE,
+  //      WITHOUT the `!downTrend` guard the level nudge uses, so by itself it also fires deep inside
+  //      a persistent downtrend — which is a falling knife, not a reversion.
+  //
+  // Why "no longer bearish" and not "bullish": measured against `computeTechnicals`' own output, a
+  // reclaim inside a downtrend MA stack scores 36 (bearish) while a reclaim that also turns the MACD
+  // scores 56 (neutral) and a stronger bounce 67 (bullish). Requiring "bullish" would demand a +20
+  // swing the tag does not need — a bottoming name is not yet in an uptrend, which is the whole
+  // point of the thesis — and would leave the rule near-unreachable. "No longer bearish" is the
+  // app's own neutral boundary and it sits in the real gap between those two populations.
+  //
+  // The gate also requires the price to sit in the bottom third of its 52-week band, so an oversold
+  // reclaim high in the range (a pullback inside an uptrend — Momentum-Breakout's evidence, not this
+  // tag's) does not qualify. The same band then GRADES the score, so a deeper extension reads
+  // stronger exactly the way `shortPercentOfFloat` grades Short-Squeeze-Risk.
+  const pos52w = num(evidence.pricePosition52w);
+  const meanReversionFloor = thesisTagTunable("meanReversion52wPct");
+  const reclaimsOversold =
+    Array.isArray(evidence.technicalSignals) &&
+    evidence.technicalSignals.includes(TECHNICAL_SIGNAL_RSI_RECLAIM_OVERSOLD);
+  const notBearish =
+    evidence.technicalDirection === "neutral" || evidence.technicalDirection === "bullish";
+  if (reclaimsOversold && notBearish && pos52w !== undefined && pos52w <= meanReversionFloor) {
+    const score = 60 + Math.min(20, meanReversionFloor - pos52w);
+    scores["Mean-Reversion"] = score;
+    reasons["Mean-Reversion"] =
+      `RSI-14 reclaimed oversold on a ${evidence.technicalDirection} technical read while price sits ${pos52w.toFixed(0)}% of the way up its 52-week band`;
+  }
+
 
   const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]);
   const [topTag, topScore] = ranked[0] ?? [null, 0];
