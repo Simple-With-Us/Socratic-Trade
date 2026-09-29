@@ -71,15 +71,95 @@ describe("account-level action-required state", () => {
     expect(() => clearAccountActionRequired(userId, "RH-ACCOUNT")).not.toThrow();
   });
 
-  it("re-marking refreshes the reason and since timestamp (idempotent, not duplicated)", async () => {
+  it("re-marking refreshes the reason and last attempt but keeps the ORIGINAL since (idempotent, not duplicated)", async () => {
     const { getAccountActionRequired, markAccountActionRequired } = await import("../src/lib/broker-account-questionnaire");
     const userId = `questionnaire-user-${randomUUID()}`;
-    markAccountActionRequired(userId, "RH-ACCOUNT", "first");
+    const t0 = Date.parse("2026-09-28T12:00:00.000Z");
+    markAccountActionRequired(userId, "RH-ACCOUNT", "first", t0);
     const first = getAccountActionRequired(userId, "RH-ACCOUNT");
-    markAccountActionRequired(userId, "RH-ACCOUNT", "second");
+    markAccountActionRequired(userId, "RH-ACCOUNT", "second", t0 + 6 * 60 * 60_000);
     const second = getAccountActionRequired(userId, "RH-ACCOUNT");
-    expect(second?.reason).toBe("second");
     expect(first?.reason).toBe("first");
+    expect(second?.reason).toBe("second");
+    expect(second?.since).toBe(first?.since);
+    expect(second?.lastAttemptAt).toBe(new Date(t0 + 6 * 60 * 60_000).toISOString());
+  });
+});
+
+// Audit of the merged G3 change (2026-09-29): the hold used to clear ONLY when an opening order was
+// accepted, but the run loop refused to place ANY opening order while the hold was set — so the
+// hold could never clear by itself, and the "clears automatically" promise in the owner alert was
+// false.  The gate is now half-open: after each retry interval ONE entry is let through as a probe.
+describe("evaluateAccountActionRequiredGate (self-clearing hold)", () => {
+  const T0 = Date.parse("2026-09-28T12:00:00.000Z");
+
+  it("is clear when nothing is held", async () => {
+    const { evaluateAccountActionRequiredGate } = await import("../src/lib/broker-account-questionnaire");
+    expect(evaluateAccountActionRequiredGate(`gate-${randomUUID()}`, "RH-ACCOUNT", T0)).toEqual({ kind: "clear" });
+  });
+
+  it("holds entries right after a rejection and for the whole retry interval", async () => {
+    const { ACCOUNT_ACTION_REQUIRED_PROBE_INTERVAL_MS, evaluateAccountActionRequiredGate, markAccountActionRequired } = await import(
+      "../src/lib/broker-account-questionnaire"
+    );
+    const userId = `gate-${randomUUID()}`;
+    markAccountActionRequired(userId, "RH-ACCOUNT", "held", T0);
+    expect(evaluateAccountActionRequiredGate(userId, "RH-ACCOUNT", T0).kind).toBe("hold");
+    expect(evaluateAccountActionRequiredGate(userId, "RH-ACCOUNT", T0 + ACCOUNT_ACTION_REQUIRED_PROBE_INTERVAL_MS - 1).kind).toBe("hold");
+  });
+
+  it("lets a probe entry through once the retry interval has elapsed (the hold must be escapable)", async () => {
+    const { ACCOUNT_ACTION_REQUIRED_PROBE_INTERVAL_MS, evaluateAccountActionRequiredGate, markAccountActionRequired } = await import(
+      "../src/lib/broker-account-questionnaire"
+    );
+    const userId = `gate-${randomUUID()}`;
+    markAccountActionRequired(userId, "RH-ACCOUNT", "held", T0);
+    const gate = evaluateAccountActionRequiredGate(userId, "RH-ACCOUNT", T0 + ACCOUNT_ACTION_REQUIRED_PROBE_INTERVAL_MS);
+    expect(gate.kind).toBe("probe");
+  });
+
+  it("a probe that is rejected again re-arms the hold for a full interval", async () => {
+    const { ACCOUNT_ACTION_REQUIRED_PROBE_INTERVAL_MS, evaluateAccountActionRequiredGate, markAccountActionRequired } = await import(
+      "../src/lib/broker-account-questionnaire"
+    );
+    const userId = `gate-${randomUUID()}`;
+    markAccountActionRequired(userId, "RH-ACCOUNT", "held", T0);
+    const probeAt = T0 + ACCOUNT_ACTION_REQUIRED_PROBE_INTERVAL_MS;
+    expect(evaluateAccountActionRequiredGate(userId, "RH-ACCOUNT", probeAt).kind).toBe("probe");
+    // The probe reached the broker and was refused again -> the strategy loop re-marks.
+    markAccountActionRequired(userId, "RH-ACCOUNT", "held", probeAt);
+    expect(evaluateAccountActionRequiredGate(userId, "RH-ACCOUNT", probeAt + 1).kind).toBe("hold");
+    expect(evaluateAccountActionRequiredGate(userId, "RH-ACCOUNT", probeAt + ACCOUNT_ACTION_REQUIRED_PROBE_INTERVAL_MS).kind).toBe("probe");
+  });
+
+  it("a probe that is accepted clears the hold entirely", async () => {
+    const { ACCOUNT_ACTION_REQUIRED_PROBE_INTERVAL_MS, clearAccountActionRequired, evaluateAccountActionRequiredGate, markAccountActionRequired } =
+      await import("../src/lib/broker-account-questionnaire");
+    const userId = `gate-${randomUUID()}`;
+    markAccountActionRequired(userId, "RH-ACCOUNT", "held", T0);
+    const probeAt = T0 + ACCOUNT_ACTION_REQUIRED_PROBE_INTERVAL_MS;
+    expect(evaluateAccountActionRequiredGate(userId, "RH-ACCOUNT", probeAt).kind).toBe("probe");
+    clearAccountActionRequired(userId, "RH-ACCOUNT");
+    expect(evaluateAccountActionRequiredGate(userId, "RH-ACCOUNT", probeAt + 1)).toEqual({ kind: "clear" });
+  });
+
+  it("a state persisted by the merged version (no lastAttemptAt) falls back to since so it can still probe", async () => {
+    const { ACCOUNT_ACTION_REQUIRED_PROBE_INTERVAL_MS, evaluateAccountActionRequiredGate } = await import(
+      "../src/lib/broker-account-questionnaire"
+    );
+    const { setInternalSetting } = await import("../src/lib/db");
+    const userId = `gate-${randomUUID()}`;
+    setInternalSetting(`robinhoodAccountActionRequired:${userId}:RH-ACCOUNT`, { reason: "legacy", since: new Date(T0).toISOString() });
+    expect(evaluateAccountActionRequiredGate(userId, "RH-ACCOUNT", T0 + 1).kind).toBe("hold");
+    expect(evaluateAccountActionRequiredGate(userId, "RH-ACCOUNT", T0 + ACCOUNT_ACTION_REQUIRED_PROBE_INTERVAL_MS).kind).toBe("probe");
+  });
+
+  it("an unparseable timestamp probes instead of holding forever", async () => {
+    const { evaluateAccountActionRequiredGate } = await import("../src/lib/broker-account-questionnaire");
+    const { setInternalSetting } = await import("../src/lib/db");
+    const userId = `gate-${randomUUID()}`;
+    setInternalSetting(`robinhoodAccountActionRequired:${userId}:RH-ACCOUNT`, { reason: "corrupt", since: "not-a-date" });
+    expect(evaluateAccountActionRequiredGate(userId, "RH-ACCOUNT", T0).kind).toBe("probe");
   });
 });
 
