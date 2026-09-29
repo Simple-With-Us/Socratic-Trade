@@ -412,6 +412,19 @@ export async function probeCongressShareToken(
   }
 }
 
+/** Always probe at boot, even when the previous process probed moments ago.
+ * Claim the same six-hour marker the scheduler reads before awaiting network,
+ * so its first tick cannot duplicate this request. */
+export async function probeCongressShareTokenOnStartup(now: number = Date.now()): Promise<void> {
+  if (!congressTradeToken()) return;
+  try {
+    setInternalSetting(LAST_TOKEN_PROBE_KEY, now);
+  } catch {
+    // A broken marker must not suppress the boot-time auth check.
+  }
+  await probeCongressShareToken();
+}
+
 /**
  * Run the congress-share token probe if the probe interval has elapsed since the last run.
  * Intended for the scheduler tick — returns {status:"skipped"} when the window hasn't elapsed

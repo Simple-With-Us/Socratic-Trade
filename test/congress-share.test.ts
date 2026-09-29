@@ -46,6 +46,7 @@ import {
   runCongressDailyShare,
   runCongressDailyShareIfDue,
   probeCongressShareTokenIfDue,
+  probeCongressShareTokenOnStartup,
   shareScanRefs,
   shareWithCongressTrade,
   type CongressPrice
@@ -1042,12 +1043,26 @@ describe("congress-share startup and scheduler token probe cadence", () => {
     }));
     vi.stubGlobal("fetch", fetchSpy);
     const now = Date.now();
-    const startup = probeCongressShareTokenIfDue(now);
+    const startup = probeCongressShareTokenOnStartup(now);
     expect(getInternalSetting<number>(marker)).toBe(now);
     expect(await probeCongressShareTokenIfDue(now + 1)).toEqual({ status: "skipped" });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     release?.();
-    await expect(startup).resolves.toEqual({ status: "ok" });
+    await expect(startup).resolves.toBeUndefined();
+  });
+
+  it("probes on every boot despite a fresh marker, then suppresses the first scheduler tick", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "test-token";
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const now = Date.now();
+    deleteInternalSetting(marker);
+    await probeCongressShareTokenOnStartup(now);
+    await probeCongressShareTokenOnStartup(now + 1000); // a new process booted inside six hours
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(getInternalSetting<number>(marker)).toBe(now + 1000);
+    expect(await probeCongressShareTokenIfDue(now + 1001)).toEqual({ status: "skipped" });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
   it("probes again only at the six-hour boundary", async () => {
