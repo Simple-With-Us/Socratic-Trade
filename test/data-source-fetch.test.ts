@@ -131,7 +131,9 @@ describe("isInternalFetchTarget", () => {
       "http://192.168.1.1/x",
       "http://172.16.0.1/x",
       "http://169.254.169.254/latest/meta-data",
-      "http://qdrant-st.internal/x"
+      "http://qdrant-st.internal/x",
+      "http://qdrant-st:6333/x",
+      "http://postgres/x"
     ]) {
       expect(isInternalFetchTarget(u), u).toBe(true);
     }

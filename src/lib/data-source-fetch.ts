@@ -102,6 +102,10 @@ export function isInternalFetchTarget(url: string | URL): boolean {
   host = host.replace(/^\[|\]$/g, "");
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".internal")) return true;
   if (host === "::1" || host === "::") return true;
+  // Bare single-label hostnames (Docker/compose service names like
+  // "qdrant-st", intranet short names) are internal by definition - no
+  // public DNS name is dotless.
+  if (!host.includes(".")) return true;
   const parts = host.split(".");
   if (parts.length === 4 && parts.every((p) => /^\d{1,3}$/.test(p))) {
     const [a, b] = parts.map(Number);
