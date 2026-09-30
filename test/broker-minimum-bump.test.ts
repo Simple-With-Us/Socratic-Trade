@@ -92,13 +92,25 @@ describe("planBrokerMinimumBump", () => {
     expect(plan!.patch.quantity!).toBeLessThan(0.02);
   });
 
-  it("degrades a SELL bump that needs more than the held position to a FULL-position exit", async () => {
+  it("degrades a SELL bump that needs more than the held position to a FULL-position exit when that exit clears the floor", async () => {
     const { planBrokerMinimumBump } = await import("../src/lib/broker-minimum-guard");
-    // Holding only 0.002 sh (~$0.46): reaching $1 would need ~0.0044 sh > held -> sell it all
-    // (brokers permit liquidating a whole fractional position at any notional).
-    const plan = planBrokerMinimumBump(baseReview(), "robinhood", { quantity: 0.001, side: "sell", positionQuantity: 0.002 });
+    // ~$230/sh implied.  Holding 0.004365 sh (~$1.004): reaching the cushioned $1.005 would need
+    // ~0.00437 sh > held -> sell it all, and the whole position is itself over the $1 floor.
+    const plan = planBrokerMinimumBump(baseReview(), "robinhood", { quantity: 0.001, side: "sell", positionQuantity: 0.004365 });
     expect(plan).toBeDefined();
-    expect(plan!.patch.quantity).toBe(0.002);
+    expect(plan!.patch.quantity).toBe(0.004365);
+    expect(plan!.toNotional).toBeGreaterThanOrEqual(1);
+  });
+
+  // Audit of the merged G3 change (2026-09-29): the floor has no full-exit exemption, so degrading a
+  // trim to a whole-position exit only helps when the WHOLE position is over the floor.  Otherwise the
+  // planned patch is guaranteed to be blocked by the post-bump re-review, costing a broker round trip
+  // (and a bump attempt) on every run for what is already a known skip.
+  it("declines a SELL bump when even the whole position is under the floor", async () => {
+    const { planBrokerMinimumBump } = await import("../src/lib/broker-minimum-guard");
+    // Holding only 0.002 sh (~$0.46): no resize can reach $1.
+    const plan = planBrokerMinimumBump(baseReview(), "robinhood", { quantity: 0.001, side: "sell", positionQuantity: 0.002 });
+    expect(plan).toBeUndefined();
   });
 
   it("converts a dollar-based SELL to a position-bounded quantity order (the production AAPL case)", async () => {
@@ -119,7 +131,19 @@ describe("planBrokerMinimumBump", () => {
     expect(plan!.patch.quantity!).toBeLessThan(0.005);
   });
 
-  it("degrades a dollar-based SELL of a sub-floor position to a full-position exit", async () => {
+  it("degrades a dollar-based SELL to a full-position exit when the whole position just clears the floor", async () => {
+    const { planBrokerMinimumBump } = await import("../src/lib/broker-minimum-guard");
+    const plan = planBrokerMinimumBump(baseReview({ estimatedNotional: 0.22 }), "robinhood", {
+      dollarAmount: 0.22,
+      side: "sell",
+      positionQuantity: 0.0043,
+      positionMarketValue: 1.003
+    });
+    expect(plan).toBeDefined();
+    expect(plan!.patch.quantity).toBe(0.0043);
+  });
+
+  it("declines a dollar-based SELL when the whole position (0.9) is under the floor", async () => {
     const { planBrokerMinimumBump } = await import("../src/lib/broker-minimum-guard");
     const plan = planBrokerMinimumBump(baseReview({ estimatedNotional: 0.22 }), "robinhood", {
       dollarAmount: 0.22,
@@ -127,8 +151,7 @@ describe("planBrokerMinimumBump", () => {
       positionQuantity: 0.004,
       positionMarketValue: 0.9
     });
-    expect(plan).toBeDefined();
-    expect(plan!.patch.quantity).toBe(0.004);
+    expect(plan).toBeUndefined();
   });
 
   it("declines a dollar-based SELL when the position's market value is unknown", async () => {

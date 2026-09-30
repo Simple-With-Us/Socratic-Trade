@@ -135,13 +135,13 @@ import {
   proposalSidesForHeldPositions,
   withPositionSides
 } from "./order-position-invariant";
-import { describeBrokerMinimumOrderBlock, planBrokerMinimumBump, shouldAlertBrokerMinimumOrderBlock } from "./broker-minimum-guard";
+import { describeBrokerMinimumOrderBlock, detectBrokerMinimumPlacementError, planBrokerMinimumBump, shouldAlertBrokerMinimumOrderBlock } from "./broker-minimum-guard";
 import { isRetryableExitStopReleaseError, placeExitReleasingOwnStops, planExitStopRelease, retryableExitStopReleaseTitle } from "./exit-stop-release";
-import { classifyHoldReasonFromCodes } from "./hold-reason";
+import { classifyHoldReasonFromCodes, formatAwaitingApprovalSummary } from "./hold-reason";
 import {
   clearAccountActionRequired,
   detectRobinhoodAccountQuestionnaireError,
-  getAccountActionRequired,
+  evaluateAccountActionRequiredGate,
   markAccountActionRequired,
   shouldAlertAccountActionRequired
 } from "./broker-account-questionnaire";
@@ -3330,6 +3330,35 @@ export async function runStrategyOnce(
         }
       }
     }
+    // Account-questionnaire hold (broker-account-questionnaire.ts): the execution loop below blocks every
+    // buy/short while the hold stands, so a funding sale planned for such a buy would liquidate a
+    // holding for cash that then sits idle (the buy is refused, the sale is not undone).  Same class
+    // as the review-routed openings excluded above: an opening that will not reach the broker must
+    // contribute $0 to the shortfall.  In the half-open PROBE state exactly one entry is let through,
+    // so only the first opening the loop will process is funded.  A manual run is propose-only (no
+    // order reaches the broker), so the hold does not apply to it and neither does this exclusion.
+    if (sellToFundMode !== "off" && !manualRun && policy.accountNumber) {
+      const holdGate = evaluateAccountActionRequiredGate(userId, policy.accountNumber);
+      if (holdGate.kind !== "clear") {
+        let probeFunded = false;
+        for (const proposal of correlationGatedBaseProposals) {
+          if (proposal.side !== "buy" && proposal.side !== "short") continue;
+          // Already contributes $0 to the shortfall: nothing to exclude, and it must not spend the probe.
+          if (
+            requiresHumanReview.has(proposal) ||
+            sellToFundExcludedOpenings.has(proposal) ||
+            !preVetoTaggedOpeningWillPlace(proposal, policy.socraticOverrideMode)
+          ) {
+            continue;
+          }
+          if (holdGate.kind === "probe" && !probeFunded) {
+            probeFunded = true;
+            continue;
+          }
+          sellToFundExcludedOpenings.add(proposal);
+        }
+      }
+    }
     let fundingSells: TradeProposal[] = [];
 
     if (sellToFundMode !== "off") {
@@ -3959,49 +3988,67 @@ export async function runStrategyOnce(
 
       // Account-level hold: Robinhood has told this account it must answer a questionnaire before
       // accepting NEW positions (see broker-account-questionnaire.ts). Only entries (buy/short) are
-      // paused — exits and existing management are untouched, and this clears automatically the
-      // next time an opening order for this account is actually accepted.
+      // paused — exits and existing management are untouched.  The hold is HALF-OPEN: after each
+      // broker refusal it pauses entries for one probe interval, then lets an entry through as a
+      // probe; an accepted opening order clears the hold, a refused one re-arms it.  (Before the
+      // 2026-09-29 audit the gate refused EVERY entry, so no order could ever be accepted and the
+      // hold could never clear on its own.)
+      //
+      // A manual "Run once" skips the gate: it is propose-only (no order reaches the broker), so the
+      // gate would protect nothing and would only hide the card the owner needs.  The card the owner
+      // approves IS the probe -- executeProposal records a refusal and clears the hold on acceptance.
+      let accountActionGate: ReturnType<typeof evaluateAccountActionRequiredGate> = { kind: "clear" };
       if (
+        !manualRun &&
         (normalizedProposal.side === "buy" || normalizedProposal.side === "short") &&
         policy.accountNumber
       ) {
-        const actionRequired = getAccountActionRequired(userId, policy.accountNumber);
-        if (actionRequired) {
-          const heldDecision: PolicyDecision = { approved: false, reasons: [actionRequired.reason] };
-          insertRunProposal({
-            userId,
-            executionMode,
-            id: proposalId,
-            runId,
-            accountNumber: policy.accountNumber,
-            proposal: normalizedProposal,
-            decision: heldDecision,
-            review,
-            estimatedNotional: review.estimatedNotional,
-            status: "blocked",
-            promptVersion: STRATEGY_PROMPT_VERSION
-          });
-          recordSocraticDecision({ proposalId, proposal: normalizedProposal, decision: heldDecision, status: "blocked", review, overrideResolution });
+        accountActionGate = evaluateAccountActionRequiredGate(userId, policy.accountNumber);
+        if (accountActionGate.kind === "probe") {
           audit(
-            "proposal_blocked_account_action_required",
-            { runId, proposalId, symbol: normalizedProposal.symbol, side: normalizedProposal.side, since: actionRequired.since },
+            "account_action_required_probe",
+            { runId, proposalId, symbol: normalizedProposal.symbol, side: normalizedProposal.side, since: accountActionGate.state.since, lastAttemptAt: accountActionGate.state.lastAttemptAt },
             userId,
             connectedAccountId
           );
-          results.push({ id: proposalId, proposal: normalizedProposal, status: "blocked", reasons: heldDecision.reasons });
-          if (shouldAlertAccountActionRequired(userId, policy.accountNumber)) {
-            await sendNotification(
-              {
-                type: "block",
-                title: `${policy.accountNumber} needs your action on Robinhood`,
-                payload: { runId, proposalId, decision: heldDecision, review, proposal: normalizedProposal }
-              },
-              { policy, userId }
-            );
-          }
-          lockGuard.assertOwned();
-          continue;
         }
+      }
+      if (accountActionGate.kind === "hold" && policy.accountNumber) {
+        const actionRequired = accountActionGate.state;
+        const heldDecision: PolicyDecision = { approved: false, reasons: [actionRequired.reason] };
+        insertRunProposal({
+          userId,
+          executionMode,
+          id: proposalId,
+          runId,
+          accountNumber: policy.accountNumber,
+          proposal: normalizedProposal,
+          decision: heldDecision,
+          review,
+          estimatedNotional: review.estimatedNotional,
+          status: "blocked",
+          promptVersion: STRATEGY_PROMPT_VERSION
+        });
+        recordSocraticDecision({ proposalId, proposal: normalizedProposal, decision: heldDecision, status: "blocked", review, overrideResolution });
+        audit(
+          "proposal_blocked_account_action_required",
+          { runId, proposalId, symbol: normalizedProposal.symbol, side: normalizedProposal.side, since: actionRequired.since },
+          userId,
+          connectedAccountId
+        );
+        results.push({ id: proposalId, proposal: normalizedProposal, status: "blocked", reasons: heldDecision.reasons });
+        if (shouldAlertAccountActionRequired(userId, policy.accountNumber)) {
+          await sendNotification(
+            {
+              type: "block",
+              title: `${policy.accountNumber} needs your action on Robinhood`,
+              payload: { runId, proposalId, decision: heldDecision, review, proposal: normalizedProposal }
+            },
+            { policy, userId }
+          );
+        }
+        lockGuard.assertOwned();
+        continue;
       }
 
       // Sell-to-fund "propose" mode: funding sells queue for human approval even under "decide"
@@ -4030,7 +4077,11 @@ export async function runStrategyOnce(
         // de-risk exit reads "surfaced for your approval" under propose authority (never falsely
         // "proceeding") — so no separate corrective note is needed here.
         const primaryHumanReviewReason = activeHumanReviewReasons[0];
-        normalizedProposal.holdReason = classifyHoldReasonFromCodes(activeHumanReviewReasons.map((reason) => reason.code));
+        // An account that was on Autopilot when this run started but is Ask-first NOW was demoted
+        // mid-run by autoRevertOnCapBreach (a manual run is Ask-first by construction, never a revert).
+        normalizedProposal.holdReason = classifyHoldReasonFromCodes(activeHumanReviewReasons.map((reason) => reason.code), {
+          authorityRevertedInRun: !manualRun && savedPolicy.strategyAuthority === "decide"
+        });
         insertProposalWithSocraticDecision(
           { userId, executionMode, promptVersion: STRATEGY_PROMPT_VERSION, id: proposalId, runId, accountNumber: policy.accountNumber, proposal: normalizedProposal, decision, review, estimatedNotional: review.estimatedNotional, status: "proposed" },
           { proposalId, proposal: normalizedProposal, decision, status: "proposed", review, overrideResolution }
@@ -4278,6 +4329,37 @@ export async function runStrategyOnce(
               if (shouldAlertAccountActionRequired(userId, policy.accountNumber)) {
                 await sendNotification(
                   { type: "run_failed", title: `${policy.accountNumber} needs your action on Robinhood`, payload: { runId, proposalId, refId, reason: accountQuestionnaireReason, error: message, reconcile: "account_action_required" } },
+                  { policy, userId }
+                );
+              }
+              lockGuard.assertOwned();
+              return { done: "continue" } as const;
+            }
+
+            // Placement-time backstop for the broker's minimum order size (broker-minimum-guard.ts):
+            // the pre-flight review missed it (price moved, or the review carried no alert), so the
+            // broker refused at placement with a non-HTTP error the generic classifiers below would
+            // book as an uncertain placement -- a protected "verify with broker" alert, then a sweep
+            // to placing_failed on every run.  A refusal that names the minimum is deterministic:
+            // book it exactly like the pre-flight skip and stop.
+            const belowMinimumReason = detectBrokerMinimumPlacementError(message);
+            if (belowMinimumReason) {
+              const blockedDecision: PolicyDecision = { ...decision, approved: false, reasons: [...decision.reasons, belowMinimumReason] };
+              updateProposalStatus(proposalId, "blocked", undefined, review, review.estimatedNotional, userId, undefined, message, blockedDecision);
+              audit(
+                "order_skipped_broker_minimum",
+                { runId, proposalId, symbol: sym, side: normalizedProposal.side, estimatedNotional: review.estimatedNotional, reason: belowMinimumReason, phase: "placement", error: message.slice(0, 400) },
+                userId,
+                connectedAccountId
+              );
+              results.push({ id: proposalId, proposal: normalizedProposal, status: "blocked", reasons: [belowMinimumReason] });
+              if (shouldAlertBrokerMinimumOrderBlock(userId, policy.accountNumber, sym)) {
+                await sendNotification(
+                  {
+                    type: "block",
+                    title: `${normalizedProposal.side.charAt(0).toUpperCase() + normalizedProposal.side.slice(1)} ${sym} skipped (below broker minimum)`,
+                    payload: { runId, proposalId, decision: blockedDecision, review, proposal: normalizedProposal }
+                  },
                   { policy, userId }
                 );
               }
@@ -4688,7 +4770,7 @@ export async function runStrategyOnce(
             : `${manualRun ? "Manual run" : "Scheduled run"} proposed ${tradeCount} Trade${tradeCount === 1 ? "" : "s"}.`,
           placed > 0 ? `Placed: ${placed}.` : "",
           filled > 0 ? `Filled: ${filled}.` : "",
-          proposed > 0 ? `Awaiting approval: ${proposed}.` : "",
+          formatAwaitingApprovalSummary(results),
           expiry.expired > 0 ? `Expired ${expiry.expired} stale proposal${expiry.expired === 1 ? "" : "s"}.` : "",
           revalidation && (revalidation.withdrawn > 0 || revalidation.reaffirmed > 0)
             ? `Re-checked ${revalidation.checked} pending: kept ${revalidation.reaffirmed}, withdrew ${revalidation.withdrawn}.`
