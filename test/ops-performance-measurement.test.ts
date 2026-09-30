@@ -12,9 +12,11 @@ import { beforeAll, describe, expect, it } from "vitest";
  * the old behaviour fails here rather than silently flattering a scorecard again.
  */
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `ops-perf-measurement-${randomUUID()}.db`)}`;
-});
+  // Load the heavy modules once up front so the first test does not pay the cold-import cost.
+  await import("../src/lib/ops-performance");
+}, 300_000);
 
 const daysAgo = (now: number, n: number) => new Date(now - n * 24 * 60 * 60 * 1000).toISOString();
 
@@ -240,7 +242,7 @@ describe("ops performance — broker rejection reasons (review rank 3, part 4)",
     const { buildOpsPerformanceSnapshot } = await import("../src/lib/ops-performance");
     const funnel = (await buildOpsPerformanceSnapshot({ connectedAccountId: accountId, days: 30 })).accounts[0].proposalFunnel;
 
-    expect(funnel.brokerRejectionReasons[0]).toEqual({ reason: "bracket orders must be entry orders", count: 2 });
+    expect(funnel.brokerRejectionReasons[0]).toMatchObject({ reason: "bracket orders must be entry orders", count: 2 });
     expect(funnel.brokerRejectionReasons.map((r) => r.reason)).toContain("market orders require no stop or limit price");
   });
 
@@ -267,6 +269,129 @@ describe("ops performance — broker rejection reasons (review rank 3, part 4)",
 
     const { buildOpsPerformanceSnapshot } = await import("../src/lib/ops-performance");
     const funnel = (await buildOpsPerformanceSnapshot({ connectedAccountId: accountId, days: 30 })).accounts[0].proposalFunnel;
-    expect(funnel.brokerRejectionReasons).toEqual([{ reason: "broker state: canceled", count: 1 }]);
+    expect(funnel.brokerRejectionReasons).toHaveLength(1);
+    expect(funnel.brokerRejectionReasons[0]).toMatchObject({ reason: "broker state: canceled", count: 1 });
+  });
+});
+
+describe("ops performance — broker rejection reason normalisation and timestamps (lane h4)", () => {
+  it("collapses the real Robinhood nested-JSON refusals into one key per cause", async () => {
+    const { normalizeBrokerRejectionReason } = await import("../src/lib/ops-performance");
+
+    // Production shape from the 2026-09-25 evidence: JSON wrapped twice, with a dynamic dollar amount.
+    const wrapped = (inner: string) =>
+      `Robinhood place_equity_order response had no order id: ${JSON.stringify({
+        text: `API error 400: ${JSON.stringify({ non_field_errors: [inner] })}`
+      })}`;
+    const one = normalizeBrokerRejectionReason(wrapped("Fractional orders must be at least $1."));
+    const five = normalizeBrokerRejectionReason(wrapped("Fractional orders must be at least $5."));
+    expect(one).toBe("Fractional orders must be at least $N.");
+    expect(five).toBe(one);
+    // A different cause stays a different key.
+    expect(normalizeBrokerRejectionReason(wrapped("Dollar-based orders must be at least $1."))).toBe(
+      "Dollar-based orders must be at least $N."
+    );
+  });
+
+  it("strips transport prefixes and never throws on junk", async () => {
+    const { normalizeBrokerRejectionReason } = await import("../src/lib/ops-performance");
+    expect(normalizeBrokerRejectionReason("HTTP 422: bracket orders must be entry orders")).toBe("bracket orders must be entry orders");
+    expect(normalizeBrokerRejectionReason("  HTTP 400 - bracket orders must be entry orders ")).toBe("bracket orders must be entry orders");
+    expect(normalizeBrokerRejectionReason("")).toBeUndefined();
+    expect(normalizeBrokerRejectionReason(undefined)).toBeUndefined();
+    expect(normalizeBrokerRejectionReason(null)).toBeUndefined();
+    expect(normalizeBrokerRejectionReason("{ not json")).toBe("{ not json");
+    expect(normalizeBrokerRejectionReason("x".repeat(500))?.length).toBe(160);
+  });
+
+  it("salvages the sentence from a message truncated mid-JSON", async () => {
+    const { normalizeBrokerRejectionReason } = await import("../src/lib/ops-performance");
+    // Cut off before the closing braces, as the questionnaire error was in the stored row.
+    const truncated =
+      'Robinhood place_equity_order response had no order id: {"text":"API error 400: {\\"non_field_errors\\":[\\"We\'re required to have you answer some questions about y';
+    expect(normalizeBrokerRejectionReason(truncated)).toBe("We're required to have you answer some questions about y");
+  });
+
+  it("reports first and last seen on broker-rejection and block reasons, and lifts the old top-10 cap", async () => {
+    const db = await import("../src/lib/db");
+    const userId = `ts-user-${randomUUID()}`;
+    const accountId = `ts-acct-${randomUUID()}`;
+    const accountNumber = `TS-${randomUUID()}`;
+    db.upsertConnectedAccount({ id: accountId, userId, broker: "alpaca", environment: "paper", accountNumber, label: "Timestamps", isActive: true });
+    db.setPolicy({ ...db.getPolicy(userId, accountId), systemState: "active", strategyAuthority: "decide" }, userId, accountId);
+
+    const now = Date.now();
+    const proposal = { symbol: "TTTT", side: "buy", type: "market", dollarAmount: 100, timeInForce: "gfd", marketHours: "regular_hours", rationale: "test" };
+    const proposalId = randomUUID();
+    db.insertProposal({ id: proposalId, userId, runId: randomUUID(), accountNumber, proposal, decision: { approved: true, reasons: [] }, status: "rejected_by_broker" });
+
+    // Same refusal at three different times.
+    for (const day of [9, 4, 1]) {
+      db.audit("order_rejected_by_broker", { proposalId, symbol: "TTTT", side: "buy", reason: "HTTP 422: bracket orders must be entry orders" }, userId, accountId);
+      db.getDb()
+        .prepare("UPDATE audit_events SET created_at = ? WHERE id = (SELECT id FROM audit_events WHERE user_id = ? AND kind = 'order_rejected_by_broker' AND created_at > ? ORDER BY rowid DESC LIMIT 1)")
+        .run(daysAgo(now, day), userId, daysAgo(now, 0.5));
+    }
+
+    // 15 distinct block reasons: the old cap of 10 would have hidden five of them.
+    for (let i = 0; i < 15; i += 1) {
+      db.insertProposal({
+        id: randomUUID(),
+        userId,
+        runId: randomUUID(),
+        accountNumber,
+        proposal,
+        decision: { approved: false, reasons: [`Distinct block reason number ${String.fromCharCode(97 + i)}`] },
+        status: "blocked"
+      });
+    }
+    // Pin one block reason's time so first/last seen are checkable.
+    db.getDb()
+      .prepare("UPDATE trade_proposals SET created_at = ? WHERE user_id = ? AND decision LIKE '%number a%'")
+      .run(daysAgo(now, 6), userId);
+
+    const { buildOpsPerformanceSnapshot } = await import("../src/lib/ops-performance");
+    const funnel = (await buildOpsPerformanceSnapshot({ connectedAccountId: accountId, days: 30 })).accounts[0].proposalFunnel;
+
+    const bracket = funnel.brokerRejectionReasons.find((r) => r.reason === "bracket orders must be entry orders");
+    expect(bracket).toMatchObject({ count: 3, firstSeenAt: daysAgo(now, 9), lastSeenAt: daysAgo(now, 1) });
+
+    expect(funnel.topBlockReasons).toHaveLength(15);
+    const pinned = funnel.topBlockReasons.find((r) => r.reason.endsWith("number a"));
+    expect(pinned?.firstSeenAt).toBe(daysAgo(now, 6));
+    expect(pinned?.lastSeenAt).toBe(daysAgo(now, 6));
+  });
+
+  it("itemises placing_failed proposals from their error message, including a row with none", async () => {
+    const db = await import("../src/lib/db");
+    const userId = `pf-user-${randomUUID()}`;
+    const accountId = `pf-acct-${randomUUID()}`;
+    const accountNumber = `PF-${randomUUID()}`;
+    db.upsertConnectedAccount({ id: accountId, userId, broker: "robinhood", environment: "live", accountNumber, label: "Placing Failed", isActive: true });
+    db.setPolicy({ ...db.getPolicy(userId, accountId), systemState: "active", strategyAuthority: "decide" }, userId, accountId);
+
+    const now = Date.now();
+    const proposal = { symbol: "RRRR", side: "buy", type: "market", dollarAmount: 0.5, timeInForce: "gfd", marketHours: "regular_hours", rationale: "test" };
+    const fail = (message: string | null, day: number) => {
+      const id = randomUUID();
+      db.insertProposal({ id, userId, runId: randomUUID(), accountNumber, proposal, decision: { approved: true, reasons: [] }, status: "placing_failed" });
+      db.getDb().prepare("UPDATE trade_proposals SET error_message = ?, created_at = ? WHERE id = ?").run(message, daysAgo(now, day), id);
+    };
+    const wrapped = (inner: string) =>
+      `Robinhood place_equity_order response had no order id: ${JSON.stringify({ text: `API error 400: ${JSON.stringify({ non_field_errors: [inner] })}` })}`;
+    fail(wrapped("Fractional orders must be at least $1."), 8);
+    fail(wrapped("Fractional orders must be at least $2."), 3);
+    fail(wrapped("We're required to have you answer some questions about your account."), 2);
+    fail(null, 1);
+
+    const { buildOpsPerformanceSnapshot } = await import("../src/lib/ops-performance");
+    const funnel = (await buildOpsPerformanceSnapshot({ connectedAccountId: accountId, days: 30 })).accounts[0].proposalFunnel;
+
+    expect(funnel.counts.find((c) => c.status === "placing_failed")?.count).toBe(4);
+    const byReason = new Map(funnel.placingFailureReasons.map((r) => [r.reason, r]));
+    expect(byReason.get("Fractional orders must be at least $N.")).toMatchObject({ count: 2, firstSeenAt: daysAgo(now, 8), lastSeenAt: daysAgo(now, 3) });
+    expect(byReason.get("We're required to have you answer some questions about your account.")?.count).toBe(1);
+    expect(byReason.get("(no error message recorded)")?.count).toBe(1);
+    expect(funnel.placingFailureRowsCapped).toBe(false);
   });
 });

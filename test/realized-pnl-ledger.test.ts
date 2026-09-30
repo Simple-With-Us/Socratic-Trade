@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
-import { aggregateRoundTrip, calculatePnl, type ClosedLot } from "../src/lib/performance";
+import { aggregateRoundTrip, calculatePnl, openLotSymbols, unrealizedFromOpenLots, type ClosedLot } from "../src/lib/performance";
 import { getTaxSummary } from "../src/lib/tax";
 import type { FillEvent, OrderSide } from "../src/lib/types";
 
@@ -192,6 +192,48 @@ describe("aggregateRoundTrip — scaled-out positions", () => {
 
   it("returns undefined when there are no exits", () => {
     expect(aggregateRoundTrip([], 10)).toBeUndefined();
+  });
+});
+
+describe("unrealizedFromOpenLots — mark-to-market over already-computed open lots", () => {
+  it("matches calculatePnl's own unrealized figure for the same prices, without re-running FIFO", () => {
+    const fills = [
+      fill({ id: "open-long", side: "buy", quantity: 10, price: 100, filledAt: daysAgo(5) }),
+      fill({ id: "open-short", symbol: "MSFT", side: "short", quantity: 4, price: 50, filledAt: daysAgo(3) })
+    ];
+    const prices = { AAPL: 120, MSFT: 45 };
+    const withPrices = calculatePnl(fills, prices);
+    const withoutPrices = calculatePnl(fills, {});
+    // long AAPL: 10*(120-100)=200; short MSFT: 4*(50-45)=20 -> 220
+    expect(withPrices.unrealized).toBeCloseTo(220);
+    expect(unrealizedFromOpenLots(withoutPrices.openLots, prices)).toBeCloseTo(withPrices.unrealized);
+  });
+
+  it("skips a symbol with no price rather than fabricating a $0 mark", () => {
+    const fills = [fill({ id: "open", side: "buy", quantity: 10, price: 100, filledAt: daysAgo(5) })];
+    const { openLots } = calculatePnl(fills, {});
+    expect(unrealizedFromOpenLots(openLots, {})).toBe(0);
+    expect(unrealizedFromOpenLots(openLots, { AAPL: 0 })).toBe(0);
+    expect(unrealizedFromOpenLots(openLots, { AAPL: 150 })).toBeCloseTo(500);
+  });
+
+  it("marks a short as a profit when the price falls and a loss when it rises", () => {
+    const fills = [fill({ id: "open-short", symbol: "MSFT", side: "short", quantity: 4, price: 50, filledAt: daysAgo(3) })];
+    const { openLots } = calculatePnl(fills, {});
+    expect(unrealizedFromOpenLots(openLots, { MSFT: 45 })).toBeCloseTo(20);
+    expect(unrealizedFromOpenLots(openLots, { MSFT: 60 })).toBeCloseTo(-40);
+  });
+
+  it("openLotSymbols returns each open symbol once across books", () => {
+    const live = calculatePnl(
+      [
+        fill({ id: "a", side: "buy", quantity: 1, price: 10, filledAt: daysAgo(5) }),
+        fill({ id: "b", side: "buy", quantity: 1, price: 11, filledAt: daysAgo(4) })
+      ],
+      {}
+    ).openLots;
+    const paper = calculatePnl([fill({ id: "c", symbol: "MSFT", side: "buy", quantity: 1, price: 10, filledAt: daysAgo(4) })], {}).openLots;
+    expect(openLotSymbols(live, paper).sort()).toEqual(["AAPL", "MSFT"]);
   });
 });
 
