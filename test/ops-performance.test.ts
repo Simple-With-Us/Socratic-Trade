@@ -262,7 +262,11 @@ describe("ops performance snapshot — shape and math", () => {
     expect(account.label).toBe("Ops Perf Test Account");
     expect(account.environment).toBe("paper");
     expect(account.systemState).toBe("active");
-    expect(account.pricesUnavailable).toBe(true);
+    // Every round trip in this fixture is closed, so there is nothing to mark: "prices unavailable"
+    // would be a false statement about a book that needs no prices.
+    expect(account.pricesUnavailable).toBe(false);
+    expect(account.unrealizedUnpricedSymbols).toEqual([]);
+    expect(account.paperUnrealizedPnl).toBe(0);
 
     // Realized P&L: +200 (AAPL) - 150 (MSFT) + 20 (TSLA, outside window but still realized-to-date) = 70.
     expect(account.paperRealizedPnl).toBeCloseTo(70, 2);
@@ -293,7 +297,11 @@ describe("ops performance snapshot — shape and math", () => {
     expect(placedCount).toBe(2);
     const blockedCount = account.proposalFunnel.counts.find((c) => c.status === "blocked")?.count;
     expect(blockedCount).toBe(1);
-    expect(account.proposalFunnel.topBlockReasons[0]).toEqual({ reason: "Daily notional cap exceeded.", count: 1 });
+    expect(account.proposalFunnel.topBlockReasons[0]).toMatchObject({ reason: "Daily notional cap exceeded.", count: 1 });
+    // Each bucket says when it was first and last seen (the row's own created_at, i.e. "now").
+    const blockBucket = account.proposalFunnel.topBlockReasons[0];
+    expect(Date.parse(blockBucket.firstSeenAt)).not.toBeNaN();
+    expect(blockBucket.lastSeenAt >= blockBucket.firstSeenAt).toBe(true);
 
     // Held ("proposed") proposals' structured holdReason rolls up too, sorted by count then name.
     const proposedCount = account.proposalFunnel.counts.find((c) => c.status === "proposed")?.count;
