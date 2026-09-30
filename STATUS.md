@@ -1,5 +1,27 @@
 # Current Status
 
+## 2026-09-30 CLAUDE — Exit stop release review round (#3793 follow-up, lane H1, branch `claude/st-w3-h1`)
+
+**What.**  PR #3793 merged before its review findings were addressed; all three are confirmed and
+closed here (board `687a5fb4`).  (1) P1: the release sequence awaited re-plan reads, stop cancels,
+settle polling and a position re-read AFTER the callers' fence, then placed the exit with no final
+lease or system-state check.  `placeExitReleasingOwnStops` now re-reads the durable system state
+(the caller's `freshPlacementBlockReason`) and the mutation lease synchronously, immediately before
+`place`, like `order-replacement.ts` and both strategy lanes; a failed fence after a release puts
+the stop back (or marks it owed when the lease is lost).  Also fixed: on the no-release branch a
+broker error on the exit was swallowed as "re-plan unavailable" and the exit was submitted a second
+time.  (2) P2: the restore reconcile now decides halt treatment from the account's current policy,
+not the run's snapshot; if that cannot be tied to this account it takes the halt treatment (put
+back only the released stop).  (3) P2: three cover-of-a-short tests added (green on `main`; coverage
+gap only).  10 new tests, 7 red on `main`.  `do-not-automerge`.
+**PR #4005 review round.**  (R1) a transient release refusal (post-cancel position read failed, or
+the stop cancel did not settle) was booked terminal `blocked` in both lanes; it is now retryable
+`not_placed` (`order_not_placed_exit_stop_release`).  (R2) both fences are now required on
+`ExitStopReleaseRun` (dropping one is a compile error), and a new autopilot end-to-end test through
+`runStrategyOnce` proves an owner Stop mid-release keeps the exit from leaving.  The retryable
+notification title now names the actual cause per code (`retryableExitStopReleaseTitle`).  6 new
+tests.  Branch merged with `main` (GitHub had reported it conflicting; the local merge was clean).
+Rollout: `docs/rollouts/2026-09-30-st-exit-stop-release-review-round.md`.
 ## 2026-09-30 CLAUDE - Performance Measurement Upgrades: Real Unrealized P&L, Reason Timestamps, Frozen SPY Benchmark (branch `claude/st-w3-h4`, board `687a5fb4`)
 
 **What.**  Lane G4 of the 2026-09-25 wave, finished on top of MM's #3895 (which already landed round-trip grading, the `unattributed` model row, the per-model funnel, and a first cut of broker-rejection reasons).  `GET /api/ops/performance` now reports real unrealized P&L: an account's open symbols are marked from the stored latest-price rows by default (`marks=stored`, one indexed read of `symbol_field_latest`, no network, never FMP), `marks=live` opts in to one bounded Alpaca snapshot batch that keeps the stored marks on a timeout, and `marks=off` skips marking.  `pricesUnavailable` means "open positions and none could be priced", the missing symbols are listed in `unrealizedUnpricedSymbols`, and `unrealizedMarkBasis` plus `unrealizedMarksOldestAsOf` show how old the figure is.  The trading quote cascade is deliberately not used.  Reason buckets (block, broker rejection, and the new `placing_failed` itemisation) carry `firstSeenAt`/`lastSeenAt`, and the output cap moved from 10 to 50; a new normaliser merges the real Robinhood nested-JSON refusals (`$1` and `$5` read `$N`).  `resolveShrinkPrior` now reads `peekPolicy`, so the read-only route no longer seeds policy rows.  perf-17: the SPY benchmark was pinned to `imported-eod` at 2026-07-24 because `fetchDailyOHLC`'s imported tier short-circuited the whole cascade with no freshness check; that was fixed on `main` by #4009 (which does change trading-input history fan-out for every symbol when the imported tier is on), and this branch was merged with it and keeps only two extras: a stale import is also a merge base for a live fetch, and an import-only fallback is stamped `imported-eod-stale`, which `benchmark.ts` recognises.  No broker order path was touched.  Rollout: `docs/rollouts/2026-09-30-st-perf-measurement-h4.md`.  Runbook: `docs/runbooks/ops-performance-endpoint.md`.

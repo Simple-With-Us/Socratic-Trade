@@ -136,7 +136,7 @@ import {
   withPositionSides
 } from "./order-position-invariant";
 import { describeBrokerMinimumOrderBlock, planBrokerMinimumBump, shouldAlertBrokerMinimumOrderBlock } from "./broker-minimum-guard";
-import { placeExitReleasingOwnStops, planExitStopRelease } from "./exit-stop-release";
+import { isRetryableExitStopReleaseError, placeExitReleasingOwnStops, planExitStopRelease, retryableExitStopReleaseTitle } from "./exit-stop-release";
 import { classifyHoldReasonFromCodes } from "./hold-reason";
 import {
   clearAccountActionRequired,
@@ -4244,7 +4244,10 @@ export async function runStrategyOnce(
                     lane: "autopilot",
                     proposalId,
                     runId,
-                    assertOwned: () => mutationCtx.assertOwned()
+                    assertOwned: () => mutationCtx.assertOwned(),
+                    // Same durable-state fence as above, re-read after the release and immediately
+                    // before the exit leaves (#3793 review round).
+                    placementBlockReason: () => freshPlacementBlockReason({ userId, connectedAccountId, side: normalizedProposal.side })
                   },
                   (verifiedPositionQuantity) =>
                     gateway.placeEquityOrder({ accountNumber: policy.accountNumber, ...normalizedProposal, refId, verifiedPositionQuantity })
@@ -4309,6 +4312,29 @@ export async function runStrategyOnce(
               results.push({ id: proposalId, proposal: normalizedProposal, status: "error", reasons: [message] });
               await sendNotification(
                 { type: "run_failed", title: `${sym} order not placed — position unverified (safe to retry)`, payload: { runId, proposalId, refId, error: message, reconcile: "not_placed" } },
+                { policy, userId }
+              );
+              lockGuard.assertOwned();
+              return { done: "continue" } as const;
+            }
+            // Same for the exit-stop release (#4005 review round): a post-cancel position read that
+            // failed, or a stop cancel that never settled, sent nothing and rolled the stop back.
+            // The cause is transient, so the exit is retryable not_placed, never terminal "blocked".
+            if (isRetryableExitStopReleaseError(placeError)) {
+              updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, message);
+              audit(
+                "order_not_placed_exit_stop_release",
+                { runId, proposalId, refId, symbol: sym, side: normalizedProposal.side, code: placeError.code, error: message },
+                userId,
+                connectedAccountId
+              );
+              results.push({ id: proposalId, proposal: normalizedProposal, status: "error", reasons: [message] });
+              await sendNotification(
+                {
+                  type: "run_failed",
+                  title: retryableExitStopReleaseTitle(sym, placeError.code),
+                  payload: { runId, proposalId, refId, error: message, code: placeError.code, reconcile: "not_placed" }
+                },
                 { policy, userId }
               );
               lockGuard.assertOwned();

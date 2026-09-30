@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
-import { getProposal, insertProposal, listBrokerProtectiveStops, setPolicy, upsertBrokerProtectiveStop, upsertConnectedAccount } from "../src/lib/db";
+import { getProposal, insertProposal, listAudit, listBrokerProtectiveStops, setPolicy, upsertBrokerProtectiveStop, upsertConnectedAccount } from "../src/lib/db";
 import type { MarketQuote, MarketScan, TradeProposal } from "../src/lib/types";
 import { executeProposal } from "../src/lib/strategy-execution";
 
@@ -46,7 +46,11 @@ const broker = vi.hoisted(() => ({
   orders: [] as MockOrder[],
   placed: [] as Array<{ symbol: string; side: string; type: string; quantity?: number; stopPrice?: number; refId?: string }>,
   cancelled: [] as string[],
-  seq: 0
+  seq: 0,
+  /** Position reads that fail next (e.g. the release's post-cancel re-read timing out). */
+  failPositionReads: 0,
+  /** Test hook: runs as the broker receives a cancel (e.g. the owner pressing Stop mid-release). */
+  onCancel: undefined as (() => void) | undefined
 }));
 
 vi.mock("../src/lib/broker", () => {
@@ -63,7 +67,13 @@ vi.mock("../src/lib/broker", () => {
         optionMarketValue: 0,
         cash: 5000
       }),
-      getEquityPositions: async () => clone(broker.positions),
+      getEquityPositions: async () => {
+        if (broker.failPositionReads > 0) {
+          broker.failPositionReads -= 1;
+          throw new Error("alpaca getPositions timed out");
+        }
+        return clone(broker.positions);
+      },
       getEquityOrders: async () => clone(broker.orders),
       getEquityQuotes: async () => ({}),
       getEquityTradability: async (_accountNumber: string, symbols: string[]) =>
@@ -71,6 +81,7 @@ vi.mock("../src/lib/broker", () => {
       reviewEquityOrder: async (input: { quantity?: number }) => ({ estimatedNotional: (input.quantity ?? 0) * 50, alerts: [] }),
       cancelEquityOrder: async (_accountNumber: string, orderId: string) => {
         broker.cancelled.push(orderId);
+        broker.onCancel?.();
         const order = broker.orders.find((o) => o.id === orderId);
         if (order) order.state = "canceled";
         return { orderId, refId: "x", state: "cancel_requested", raw: {} };
@@ -178,18 +189,11 @@ beforeEach(() => {
   ];
   broker.placed = [];
   broker.cancelled = [];
+  broker.failPositionReads = 0;
+  broker.onCancel = undefined;
 });
 
-function seed(userId: string, sellQuantity: number, over: Record<string, unknown> = {}): string {
-  upsertConnectedAccount({
-    id: `acct-${userId}`,
-    userId,
-    broker: "alpaca",
-    environment: "paper",
-    accountNumber: ACCOUNT,
-    label: "G2 Integration",
-    isActive: true
-  });
+function seedPolicy(userId: string, over: Record<string, unknown> = {}): void {
   setPolicy(
     {
       ...DEFAULT_POLICY,
@@ -205,6 +209,19 @@ function seed(userId: string, sellQuantity: number, over: Record<string, unknown
     },
     userId
   );
+}
+
+function seed(userId: string, sellQuantity: number, over: Record<string, unknown> = {}): string {
+  upsertConnectedAccount({
+    id: `acct-${userId}`,
+    userId,
+    broker: "alpaca",
+    environment: "paper",
+    accountNumber: ACCOUNT,
+    label: "G2 Integration",
+    isActive: true
+  });
+  seedPolicy(userId, over);
   // The app's OWN protective stop, exactly as the reconciler tracks it.
   upsertBrokerProtectiveStop({
     id: `protstop-${userId}-${ACCOUNT}-BAC`,
@@ -265,6 +282,39 @@ describe("executeProposal — approved exit vs the app's own resting stop", () =
     const rows = listBrokerProtectiveStops(ACCOUNT, userId);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ quantity: 14, status: "resting" });
+  }, 60_000);
+
+  it("owner presses Stop while the stop is being released: the exit is blocked, not sent, and the stop is put back", async () => {
+    const userId = `g2-halt-${randomUUID()}`;
+    const proposalId = seed(userId, 24);
+    // The durable Stop lands after the placement fence passed, while the release is in flight.
+    broker.onCancel = () => seedPolicy(userId, { systemState: "halted" });
+    await expect(executeProposal(proposalId, userId)).rejects.toThrow(/halted/);
+    expect(broker.cancelled).toEqual(["stop-BAC"]);
+    // The only order sent is the restored protective stop for all 24 shares; the exit never left.
+    expect(broker.placed).toHaveLength(1);
+    expect(broker.placed[0]).toMatchObject({ symbol: "BAC", side: "sell", type: "stop_market", quantity: 24, stopPrice: 46 });
+    expect(getProposal(proposalId, userId)?.status).toBe("blocked");
+    const rows = listBrokerProtectiveStops(ACCOUNT, userId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ quantity: 24, status: "resting" });
+  }, 60_000);
+
+  it("the position re-read fails after the stop cancel: retryable not_placed, never terminal blocked, and the stop is put back", async () => {
+    const userId = `g2-unverified-${randomUUID()}`;
+    const proposalId = seed(userId, 24);
+    // Exactly the release's post-cancel position read fails (a transient broker timeout); nothing
+    // reached the broker, so one read timeout must not kill an approved exit (#4005 review round).
+    broker.onCancel = () => {
+      broker.failPositionReads = 1;
+    };
+    await expect(executeProposal(proposalId, userId)).rejects.toThrow(/position could not be re-read/);
+    expect(broker.cancelled).toEqual(["stop-BAC"]);
+    expect(broker.placed.map((o) => [o.side, o.type, o.quantity, o.stopPrice])).toEqual([["sell", "stop_market", 24, 46]]);
+    expect(getProposal(proposalId, userId)?.status).toBe("not_placed");
+    const kinds = listAudit(500, userId).map((entry) => entry.kind);
+    expect(kinds).toContain("order_not_placed_exit_stop_release");
+    expect(kinds).not.toContain("order_blocked_validation");
   }, 60_000);
 
   it("toggle off: the exit stays blocked and the stop is never touched", async () => {
