@@ -1,0 +1,45 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "dependencyDashboard": true,
+  "minimumReleaseAge": "5 days",
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "non-major dependencies",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true
+    },
+    {
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["dependencies", "major"]
+    },
+    {
+      "description": "Ported from the removed .github/dependabot.yml ignore: Renovate must not open typescript minor/major upgrade PRs at all - the compiler stays inside its reviewed support window (Dependabot ignored these upgrades outright; automerge:false alone would still open mergeable PRs). Remove or narrow this rule only in the same PR as the migration.",
+      "matchPackageNames": ["typescript"],
+      "matchUpdateTypes": ["minor", "major"],
+      "enabled": false
+    },
+    {
+      "description": "Ported from the removed .github/dependabot.yml ignore: Renovate must not open @types/node major upgrade PRs at all - the Node type declarations stay on their reviewed major support window. Remove or narrow this rule only in the same PR as the migration.",
+      "matchPackageNames": ["@types/node"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    },
+    {
+      "matchPackagePatterns": ["^next$", "^react$", "^react-dom$"],
+      "groupName": "next-react"
+    },
+    {
+      "matchPackagePatterns": ["^@sentry/.*$", "^@langfuse/.*$", "^@opentelemetry/.*$"],
+      "groupName": "observability"
+    },
+    {
+      "matchPackagePatterns": ["^vitest$", "^@playwright/.*$"],
+      "groupName": "testing"
+    }
+  ],
+  "vulnerabilityAlerts": { "labels": ["security"] }
+}
