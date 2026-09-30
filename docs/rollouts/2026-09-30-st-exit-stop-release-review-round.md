@@ -116,7 +116,10 @@ npx tsc --noEmit
 npx eslint src/lib/exit-stop-release.ts src/lib/strategy.ts src/lib/strategy-execution.ts test/exit-stop-release.test.ts test/exit-stop-release-approval.test.ts
 ```
 
-Gate results for the final commit are in the PR body.  `npm run build` was not run locally (no
+Results: the two test files pass (29 tests); eslint on the five changed files reports 0 errors.
+The full `npx tsc --noEmit` did not finish locally: it was killed by its timeout twice (20 and about
+40 minutes) with the Mac at load average 250 to 360, so the required `verify` CI job is the type
+gate for this PR.  `npm run build` was not run locally (no
 route or client/server boundary change; the required `verify` CI job runs the full suite and the
 build).
 
