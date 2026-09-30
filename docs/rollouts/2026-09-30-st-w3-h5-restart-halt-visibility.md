@@ -102,17 +102,28 @@ Files touched:
 
 ## 4. Verification State
 
-Commands (Node 24, `export PATH=/opt/homebrew/opt/node@24/bin:$PATH`, host load 80 to 300):
+Node 24 (`export PATH=/opt/homebrew/opt/node@24/bin:$PATH`); host load average 300 to 400 throughout.
 
 ```bash
-npx tsc --noEmit
-npx eslint <touched files>
-npx vitest run test/autonomy-halt-cause.test.ts test/scheduler-boot-halt-notify.test.ts \
-  test/broker-health-probe-resilience.test.ts test/ops-account-control.test.ts test/ops-snapshot.test.ts
+npx tsc --noEmit -p .                     # exit 0, 0 errors (55 min wall clock under load)
+npx eslint src/lib/autonomy-halt-cause.ts src/lib/scheduler.ts src/lib/ops-snapshot.ts \
+  src/lib/ops-account-control.ts src/lib/dashboard.ts app/dashboard-types.ts \
+  app/console/lib/derive.ts app/console/components/chrome.tsx \
+  test/autonomy-halt-cause.test.ts test/scheduler-boot-halt-notify.test.ts
+                                          # 0 errors, 4 pre-existing warnings
+npx vitest run test/autonomy-halt-cause.test.ts --testTimeout=900000 --hookTimeout=900000
+                                          # 10/10 passed
+npx vitest run <temp copies of broker-health-probe-resilience, ops-account-control, ops-snapshot> \
+  test/scheduler-boot-halt-notify.test.ts --testTimeout=1800000 --hookTimeout=1800000
+                                          # 4 files, 67/67 passed
 ```
 
-Results: see the PR body (filled in after the runs).  Full `npm test` and `npm run build` were not
-run locally under this load; the required CI `verify` check is the binding gate.
+The three adjacent suites hard-code 120s to 300s `beforeAll` timeouts that a cold import misses at
+this load (the first resilience run timed out in its hook, not an assertion), so they were run from
+temporary copies with only that number raised, then deleted.  The first full `tsc` started before
+the last small scheduler edit and the new test file, so a second `tsc` over the touched files and
+their import graph ran on the final tree (see the PR body).  Full `npm test` and `npm run build`
+were not run locally under this load; the required CI `verify` check is the binding gate.
 
 ## 5. Next Steps & Blockers
 
