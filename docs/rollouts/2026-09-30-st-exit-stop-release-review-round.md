@@ -190,9 +190,12 @@ also fails it.
   mid-release; post-cancel position read timeout books `not_placed`).
 - `test/exit-stop-release-approval.test.ts`: 1 new test (post-cancel position read timeout books
   `not_placed`, stop put back); `failPositionReads` hook on the mocked broker.
-- `test/exit-stop-release.test.ts`: 2 new tests (retryable classification; both fences required by
-  the type); every direct call now passes both fences explicitly (`OPEN_FENCES` where a test is not
-  about them).
+- `test/exit-stop-release.test.ts`: 3 new tests (retryable classification; both fences required by
+  the type; the notification title names the cause per code); every direct call now passes both
+  fences explicitly (`OPEN_FENCES` where a test is not about them).
+- `src/lib/exit-stop-release.ts`: `retryableExitStopReleaseTitle` (used by both lanes): a failed
+  post-cancel position re-read and an unconfirmed stop cancel no longer share one title that said
+  the release "did not settle".
 - Docs: this section, `STATUS.md`, `docs/EFFORT-LOG.md`.
 
 ### Review Round Decisions
@@ -206,6 +209,14 @@ also fails it.
   `test/exit-stop-release.test.ts` isolates the restore reconcile, so it passes an explicit
   `placementBlockReason: () => undefined`; the placement fence under a halt is covered by the
   unit fence test and both lanes' end-to-end tests.
+
+- **Notification title per code.**  The first cut of R1 gave both codes one title ("protective
+  stop release did not settle"), which mislabels `position_unverified`, the same mislabeling the
+  separate branch exists to avoid.  `retryableExitStopReleaseTitle` picks the title by code.
+- **Merged `main` into the branch.**  GitHub reported the PR as conflicting with no checks
+  dispatched; `git merge` of `origin/main` (#4007, #4009 and the Renovate / dependency bumps) was
+  clean, and the PR is mergeable again.  A test-only typing fix in the autopilot test's fake broker
+  (`type` cast to `OrderType`, like `side`) was committed before the merge.
 
 ### Review Round Verification
 

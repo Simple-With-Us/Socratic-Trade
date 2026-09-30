@@ -18,7 +18,9 @@ gap only).  10 new tests, 7 red on `main`.  `do-not-automerge`.
 the stop cancel did not settle) was booked terminal `blocked` in both lanes; it is now retryable
 `not_placed` (`order_not_placed_exit_stop_release`).  (R2) both fences are now required on
 `ExitStopReleaseRun` (dropping one is a compile error), and a new autopilot end-to-end test through
-`runStrategyOnce` proves an owner Stop mid-release keeps the exit from leaving.  5 new tests.
+`runStrategyOnce` proves an owner Stop mid-release keeps the exit from leaving.  The retryable
+notification title now names the actual cause per code (`retryableExitStopReleaseTitle`).  6 new
+tests.  Branch merged with `main` (GitHub had reported it conflicting; the local merge was clean).
 Rollout: `docs/rollouts/2026-09-30-st-exit-stop-release-review-round.md`.
 ## 2026-09-30 CLAUDE — Post-merge audit of #3798 Tradier fill reconciliation (lane h2, board `687a5fb4`)
 
