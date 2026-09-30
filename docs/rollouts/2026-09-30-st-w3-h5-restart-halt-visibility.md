@@ -148,6 +148,30 @@ the last small scheduler edit and the new test file, so a second `tsc` over the 
 their import graph ran on the final tree (see the PR body).  Full `npm test` and `npm run build`
 were not run locally under this load; the required CI `verify` check is the binding gate.
 
+**Review round (2026-09-30), host load average 600 to 950:**
+
+```bash
+npx eslint <every touched src, app and test file>   # 0 errors (pre-existing warnings only)
+npx vitest run <lane test copy, beforeAll raised to 3_600_000> test/console-brokers-account-visibility.test.tsx \
+  --no-file-parallelism --testTimeout=1800000 --hookTimeout=3600000
+                                                     # 2 files, 19/19 passed
+npx vitest run test/scheduler-halt-cause-tick.test.ts test/dashboard-halt-cause.test.ts \
+  test/ops-account-control.test.ts test/broker-health-auto-pause.test.ts test/scheduler-boot-halt-notify.test.ts \
+  --no-file-parallelism --testTimeout=1800000 --hookTimeout=3600000
+                                                     # 5 files, 56/56 passed
+npx vitest run <lane test copy> test/broker-health-probe-resilience.test.ts test/ops-snapshot.test.ts \
+  --no-file-parallelism --testTimeout=1800000 --hookTimeout=3600000
+                                                     # lane copy 16/16 passed (after the try/catch);
+                                                     # the other two timed out in their hard-coded
+                                                     # 240s / 120s beforeAll import hooks, not in
+                                                     # an assertion; both pass in CI verify
+```
+
+Local `npx tsc --noEmit -p .` did not finish inside 25 minutes at this load (killed by `timeout`,
+exit 124, no errors printed).  The required CI `verify` (lint, tsc, full suite, build) passed on
+the merged review-round tree (`ec4061052`) and again on `aedf3d4d9` (the try/catch around the
+last-probe write), together with `verify-ios`.
+
 ## 5. Next Steps & Blockers
 
 - **Owner decision:** if Autopilot should keep running through deploys, turn on Settings, After a
