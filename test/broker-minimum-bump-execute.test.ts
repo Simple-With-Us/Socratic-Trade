@@ -519,3 +519,93 @@ describe("executeProposal — broker-minimum bump-to-floor wiring", () => {
     expect(placeEquityOrder).not.toHaveBeenCalled();
   });
 });
+
+// Audit of the merged G3 change (2026-09-29, board 687a5fb4, lane h3): the human-approval path used
+// to know nothing about the account-questionnaire hold, so a card Robinhood refused for the
+// questionnaire reason left autonomous runs to rediscover it, and an accepted opening order placed
+// by hand never cleared a hold that had already been set.
+describe("executeProposal — account-questionnaire hold on the human-approval path", () => {
+  const QUESTIONNAIRE_REJECTION =
+    'Robinhood place_equity_order response had no order id: {"text":"API error 400: {\\"non_field_errors\\":[\\"We\'re required to have you answer some questions about your account.\\"]}"}';
+
+  it("records the account-level hold when the broker refuses a human-approved order for the questionnaire reason", async () => {
+    reviewEquityOrder.mockImplementation(async (i) => echoReview(i));
+    placeEquityOrder.mockRejectedValue(new Error(QUESTIONNAIRE_REJECTION));
+
+    const userId = `questionnaire-approval-refused-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getAccountActionRequired } = await import("../src/lib/broker-account-questionnaire");
+    expect(getAccountActionRequired(userId, ACCOUNT)).toBeUndefined();
+
+    await executeProposal(proposalId, userId).then(
+      () => undefined,
+      () => undefined
+    );
+
+    expect(placeEquityOrder).toHaveBeenCalledTimes(1);
+    const held = getAccountActionRequired(userId, ACCOUNT);
+    expect(held).toBeDefined();
+    expect(held?.reason).toContain("answer account questions");
+    expect(held?.lastAttemptAt).toBeDefined();
+  });
+
+  it("books the refused approval as blocked and alerts the owner, instead of leaving an uncertain placing row", async () => {
+    reviewEquityOrder.mockImplementation(async (i) => echoReview(i));
+    placeEquityOrder.mockRejectedValue(new Error(QUESTIONNAIRE_REJECTION));
+
+    const userId = `questionnaire-approval-booked-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal, listAudit, listNotificationEvents } = await import("../src/lib/db");
+
+    await expect(executeProposal(proposalId, userId)).rejects.toThrow(/answer account questions/);
+
+    // The refusal is not an HTTP status, so it used to fall through to reconcilePlacementError,
+    // resolve "uncertain" (Robinhood's order list omits terminal orders) and stay in `placing`.
+    expect(getProposal(proposalId, userId)?.status).toBe("blocked");
+    expect(listAudit(100, userId).some((event) => event.kind === "proposal_blocked_account_action_required")).toBe(true);
+    expect(listAudit(100, userId).some((event) => event.kind === "order_placement_uncertain")).toBe(false);
+    const alerts = listNotificationEvents(userId, 50).filter((event) => event.title.includes("needs your action on Robinhood"));
+    expect(alerts).toHaveLength(1);
+  });
+
+  it("books a placement-time sub-minimum refusal on the approval path as blocked, not uncertain, and sets no account hold", async () => {
+    reviewEquityOrder.mockImplementation(async (i) => echoReview(i));
+    placeEquityOrder.mockRejectedValue(
+      new Error('Robinhood place_equity_order response had no order id: {"text":"API error 400: {\\"non_field_errors\\":[\\"Fractional orders must be at least $1.\\"]}"}')
+    );
+
+    const userId = `min-approval-refused-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal, listAudit } = await import("../src/lib/db");
+    const { getAccountActionRequired } = await import("../src/lib/broker-account-questionnaire");
+
+    await expect(executeProposal(proposalId, userId)).rejects.toThrow(/below its minimum order size/);
+
+    expect(placeEquityOrder).toHaveBeenCalledTimes(1);
+    expect(getProposal(proposalId, userId)?.status).toBe("blocked");
+    const skipped = listAudit(100, userId).find((event) => event.kind === "order_skipped_broker_minimum");
+    expect(skipped?.payload).toMatchObject({ phase: "placement", action: "approval" });
+    expect(listAudit(100, userId).some((event) => event.kind === "order_placement_uncertain")).toBe(false);
+    expect(getAccountActionRequired(userId, ACCOUNT)).toBeUndefined();
+  });
+
+  it("clears the hold when a human-approved OPENING order is accepted by the broker", async () => {
+    reviewEquityOrder.mockImplementation(async (i) => echoReview(i));
+    placeEquityOrder.mockImplementation(async (i) => ({ orderId: `ord-${randomUUID()}`, state: "confirmed", raw: {}, ...i }));
+
+    const userId = `questionnaire-approval-accepted-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getAccountActionRequired, markAccountActionRequired } = await import("../src/lib/broker-account-questionnaire");
+    markAccountActionRequired(userId, ACCOUNT, "Robinhood requires you to answer account questions.", Date.now() - 60 * 60_000);
+    expect(getAccountActionRequired(userId, ACCOUNT)).toBeDefined();
+
+    const result = await executeProposal(proposalId, userId);
+
+    expect(result.status).toBe("placed");
+    expect(getAccountActionRequired(userId, ACCOUNT)).toBeUndefined();
+  });
+});

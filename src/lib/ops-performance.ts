@@ -1,16 +1,20 @@
-import { getDb, listConnectedAccounts, listUsers, peekPolicy, listFillEvents } from "./db";
+import { getDb, getSymbolLatestPrices, listConnectedAccounts, listUsers, peekPolicy, listFillEvents, resolveAlpacaMarketData } from "./db";
+import { AlpacaSnapshotEnrichmentProvider } from "./data-providers";
 import {
   aggregateRoundTrip,
   calculatePnl,
   getPerformanceSummary,
   getThesisScorecard,
   getRedTeamEfficacy,
+  openLotSymbols,
+  unrealizedFromOpenLots,
   type ClosedLot,
   type PnlResult,
   RED_TEAM_EFFICACY_MIN_UNIQUE_MATURED,
   type ThesisStat,
   type RedTeamEfficacy
 } from "./performance";
+import { withDeadline } from "./inflight-deadline";
 import { normalizeSymbol } from "./money";
 import { yieldEventLoop } from "./slow-sync-guard";
 import type { FillEvent, FillSource, HoldReasonCode } from "./types";
@@ -53,11 +57,26 @@ import type { FillEvent, FillSource, HoldReasonCode } from "./types";
  * work — however large — is never one unbroken synchronous stretch; it cannot reduce the total
  * work, only keep this process able to serve `/api/health` and other requests while it runs.
  *
- * No live quotes are fetched (mirrors `/api/connected-accounts/[id]/performance`):
- * `unrealized` P&L is real only when a broker sync recently wrote a portfolio
- * snapshot's mark; this endpoint never calls a broker, so every account's
- * `pricesUnavailable` is always `true` and unrealized figures read 0 from an
- * empty `currentPrices` map — same disclosed limitation as that route.
+ * Unrealized P&L (was hardcoded 0 with `pricesUnavailable: true` for every account): the open
+ * symbols of each account are marked from the STORED latest-price rows (`symbol_field_latest`, via
+ * `getSymbolLatestPrices` — one indexed read, no network, kept warm by the dashboard and every quote
+ * refresh; never FMP, owner rule 2026-08-20).  That is the DEFAULT (`marks=stored`) on purpose: the
+ * first cut ran the trading-grade quote cascade here, which after hours walks Finnhub (shared 1.2s
+ * pacer), Tiingo (shared hourly budget), unpaced Yahoo singles and ROIC for every symbol that is not
+ * field-complete, THREW AWAY every price gathered when the 8s deadline hit (so the account read
+ * unpriced again), seeded policy rows through `getPolicy`, and let other-broker gateways fan out
+ * per-symbol close-history fetches that ignore the abort.  A diagnostic GET must do none of that.
+ * Each stored mark carries its own `as_of`; one older than `OPS_STORED_MARK_MAX_AGE_MS` is treated
+ * as unpriced rather than mis-marking the book, and the oldest `as_of` used is reported per account
+ * (`unrealizedMarksOldestAsOf`) so the reader can judge the figure.  `marks=live` opts in to ONE
+ * bounded Alpaca market-data snapshot batch on top of the stored marks (no policy read, no broker
+ * gateway, no history fan-out): at most `OPS_QUOTE_MAX_SYMBOLS` symbols per account, one
+ * `OPS_QUOTE_FETCH_TIMEOUT_MS` deadline per account, one `OPS_QUOTE_TOTAL_BUDGET_MS` budget across
+ * the request, and a timeout keeps the stored marks it already has.  `marks=off` skips marking
+ * entirely.  A symbol is never re-quoted within one build (per-request memo), a missing mark is
+ * skipped and listed in `unrealizedUnpricedSymbols` (never a $0 mark), and the whole snapshot stays
+ * behind the 60s cache below.  The unrealized figure is `unrealizedFromOpenLots` over the
+ * `openLots` `calculatePnl` already produced — it does NOT re-run the FIFO walk with prices.
  */
 
 export const OPS_PERFORMANCE_DEFAULT_DAYS = 90;
@@ -66,6 +85,31 @@ export const OPS_PERFORMANCE_MAX_DAYS = 3650;
 
 /** Bound on blocked-proposal rows scanned for the top-block-reasons rollup, per account. */
 const MAX_BLOCK_REASON_ROWS = 1000;
+/** Output cap on distinct itemised reason buckets (block, broker-rejection, placing-failure).  It
+ *  was 10 / 20, which is sized for a human dashboard, not for an ops read that wants every cause.
+ *  Only the OUTPUT grew: the row scans feeding it keep their own `MAX_*_ROWS` bounds, so this
+ *  changes payload size, not query cost. */
+const MAX_REASON_BUCKETS = 50;
+/** Bound on `placing_failed` proposal rows scanned per account for the placing-failure reasons. */
+const MAX_PLACING_FAILURE_ROWS = 1000;
+/** Most open symbols marked for one account's unrealized P&L — a runaway book must not turn one
+ *  diagnostic read into an unbounded lookup.  The excess is reported as unpriced. */
+const OPS_MARK_MAX_SYMBOLS = 200;
+/** Most symbols sent to the live Alpaca snapshot batch for one account (Alpaca's own batch size). */
+const OPS_QUOTE_MAX_SYMBOLS = 100;
+/** A stored latest-price row older than this is treated as unpriced: it is real data, but marking a
+ *  position off a weeks-old print would report a confident, wrong unrealized figure.  Ten days
+ *  covers a long holiday weekend and a missed refresh without accepting a stale-for-weeks price. */
+const OPS_STORED_MARK_MAX_AGE_MS = 10 * 24 * 60 * 60 * 1000;
+/** Ceiling on the live snapshot fetch for ONE account.  A slow feed keeps the stored marks and
+ *  degrades the rest to "unpriced", never a hang. */
+const OPS_QUOTE_FETCH_TIMEOUT_MS = 8_000;
+/** Ceiling on the time ALL live fetching may spend in one snapshot build.  An unfiltered request
+ *  walks every account; without this a slow feed could cost `accounts x OPS_QUOTE_FETCH_TIMEOUT_MS`.
+ *  It counts time spent WAITING ON QUOTES, not wall clock since the build started, so a large
+ *  ledger's FIFO walk or a loaded event loop on an earlier account cannot starve the marks of the
+ *  accounts after it. */
+const OPS_QUOTE_TOTAL_BUDGET_MS = 20_000;
 /** Bound on held ("proposed" / Awaiting approval) proposal rows scanned for the holdReasons
  *  rollup, per account — same rationale as MAX_BLOCK_REASON_ROWS. */
 const MAX_HOLD_REASON_ROWS = 1000;
@@ -113,6 +157,17 @@ export interface OpsModelAttributionRow {
   totalPnlUsd: number;
 }
 
+/** One itemised reason with how many times it was seen and WHEN.  `firstSeenAt`/`lastSeenAt` are the
+ *  earliest and latest `created_at` among the rows that were scanned for this bucket, so a cause
+ *  that stopped weeks ago reads differently from one still firing today.  When the scan hit its row
+ *  cap (see the matching `*RowsCapped` flag) they describe the scanned newest rows only. */
+export interface OpsReasonBucket {
+  reason: string;
+  count: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
 export interface OpsProposalFunnel {
   windowDays: number;
   /** Every status observed in the window, most-common first. */
@@ -120,16 +175,20 @@ export interface OpsProposalFunnel {
   /** Primary (first) block reason per blocked proposal, tallied and truncated to 160 chars —
    *  reasons that embed a dynamic amount/symbol will not merge into one bucket; this is a
    *  diagnostic rollup, not a canonicalized taxonomy. */
-  topBlockReasons: Array<{ reason: string; count: number }>;
+  topBlockReasons: OpsReasonBucket[];
   /** True when `topBlockReasons` was truncated by MAX_BLOCK_REASON_ROWS (more blocked proposals
    *  exist in the window than were scanned for reasons — counts.blocked is still exact). */
   blockReasonRowsCapped: boolean;
-  /** Coarse cause bucket per held ("proposed" / Awaiting approval) proposal — see `HoldReasonCode`
-   *  in types.ts. A held proposal persisted before this field existed carries no `holdReason` and
-   *  is simply not counted here (counts.proposed is still exact). */
+  /** Coarse cause bucket for every proposal that was ever routed to "Awaiting approval" in the
+   *  window — see `HoldReasonCode` in types.ts — counted WHATEVER its status is now.  A held card
+   *  the owner never answered expires (policy.proposalExpiryMinutes) and one they answered is
+   *  placed, rejected or withdrawn; counting only rows still "proposed" (the first version)
+   *  reported just the cards open at that instant, so the very holds the owner asked about
+   *  vanished once resolved.  A held proposal persisted before `holdReason` existed carries none
+   *  and is simply not counted here (counts.proposed is still exact). */
   holdReasons: Array<{ reason: HoldReasonCode; count: number }>;
-  /** True when `holdReasons` was truncated by MAX_HOLD_REASON_ROWS (more held proposals exist in
-   *  the window than were scanned — counts for the "proposed" status is still exact). */
+  /** Always false: the roll-up is folded into the funnel's single grouped count query (exact, no
+   *  row cap).  Kept so the response shape does not change for existing consumers. */
   holdReasonRowsCapped: boolean;
   /** The same status counts, broken out by the model that PROPOSED the idea. Without this the
    *  funnel is a single global tally, so "which model actually reaches the broker" is unanswerable
@@ -144,9 +203,16 @@ export interface OpsProposalFunnel {
    *  outside the PG failure path were a single unexplained bucket. Sourced from
    *  `audit_events` where kind = `order_rejected_by_broker` (`payload.reason`, falling back to
    *  `payload.brokerState` for the reconcile-path rows that carry no reason string). */
-  brokerRejectionReasons: Array<{ reason: string; count: number }>;
+  brokerRejectionReasons: OpsReasonBucket[];
   /** True when `brokerRejectionReasons` was truncated by MAX_BROKER_REJECTION_ROWS. */
   brokerRejectionRowsCapped: boolean;
+  /** `placing_failed` proposals itemised by their recorded `error_message` — the other way a
+   *  broker refusal reaches a proposal row (the audit-event source above never sees these).  The
+   *  Robinhood account's "Fractional orders must be at least $1" and account-questionnaire errors
+   *  live here.  A row with no message is bucketed as "(no error message recorded)". */
+  placingFailureReasons: OpsReasonBucket[];
+  /** True when `placingFailureReasons` was truncated by MAX_PLACING_FAILURE_ROWS. */
+  placingFailureRowsCapped: boolean;
 }
 
 export interface OpsEquityCurvePoint {
@@ -154,6 +220,10 @@ export interface OpsEquityCurvePoint {
   equity: number;
   cash: number | null;
 }
+
+/** Where unrealized-P&L marks come from.  `stored` reads the latest-price rows (no network, the
+ *  default); `live` adds one bounded Alpaca snapshot batch; `off` skips marking. */
+export type OpsMarksMode = "stored" | "live" | "off";
 
 export interface OpsPerformanceAccount {
   connectedAccountId: string;
@@ -163,7 +233,20 @@ export interface OpsPerformanceAccount {
   environment: FillSource;
   systemState: string;
   accountNumber: string | null;
-  pricesUnavailable: true;
+  /** True only when the book HAS open positions and NONE of them could be marked (or marking was
+   *  turned off with `marks=off`).  False when there is nothing to price, or at least one open symbol
+   *  got a mark - in which case `unrealizedUnpricedSymbols` says which ones are still missing and
+   *  the unrealized figures understate by exactly those positions. */
+  pricesUnavailable: boolean;
+  /** Open symbols that got no mark (no stored price, one too old, live fetch failed or over budget,
+   *  or marking off).  Empty when every open position was priced or there are none. */
+  unrealizedUnpricedSymbols: string[];
+  /** How the marks were sourced: `stored` (latest-price rows, the default), `live` (stored plus one
+   *  Alpaca snapshot batch), or `off`. */
+  unrealizedMarkBasis: OpsMarksMode;
+  /** ISO time of the OLDEST mark that fed the unrealized figures, or null when nothing was priced.
+   *  The age of the figure: a stored mark can be a day or a long weekend old. */
+  unrealizedMarksOldestAsOf: string | null;
   liveRealizedPnl: number;
   paperRealizedPnl: number;
   liveUnrealizedPnl: number;
@@ -389,14 +472,15 @@ function queryProposalFunnel(
   const countRows = getDb()
     .prepare(
       `SELECT COALESCE(NULLIF(TRIM(json_extract(proposal, '$.proposedByModel')), ''), ?) AS model,
-              status, COUNT(*) AS n
+              status, json_extract(proposal, '$.holdReason') AS hold_reason, COUNT(*) AS n
        FROM trade_proposals
        WHERE user_id = ? AND account_number = ? AND created_at >= ?
-       GROUP BY model, status`
+       GROUP BY model, status, hold_reason`
     )
     .all(OPS_MODEL_UNATTRIBUTED, userId, accountNumber, sinceIso) as Array<{
     model: string;
     status: string;
+    hold_reason: string | null;
     n: number;
   }>;
 
@@ -434,63 +518,39 @@ function queryProposalFunnel(
     blockedCount > 0
       ? (getDb()
           .prepare(
-            `SELECT decision FROM trade_proposals
+            `SELECT decision, created_at FROM trade_proposals
              WHERE user_id = ? AND account_number = ? AND status = 'blocked' AND created_at >= ?
              ORDER BY created_at DESC LIMIT ?`
           )
-          .all(userId, accountNumber, sinceIso, MAX_BLOCK_REASON_ROWS) as Array<{ decision: string }>)
+          .all(userId, accountNumber, sinceIso, MAX_BLOCK_REASON_ROWS) as Array<{ decision: string; created_at: string }>)
       : [];
 
-  const reasonCounts = new Map<string, number>();
+  const blockReasonRows: TimedReason[] = [];
   for (const row of blockedRows) {
-    let reason: string | undefined;
     try {
       const parsed = JSON.parse(row.decision) as { reasons?: unknown };
       if (Array.isArray(parsed.reasons) && typeof parsed.reasons[0] === "string" && parsed.reasons[0].trim()) {
-        reason = parsed.reasons[0].trim().slice(0, 160);
+        blockReasonRows.push({ reason: parsed.reasons[0].trim().slice(0, 160), createdAt: row.created_at });
       }
     } catch {
       // malformed decision JSON — skip this row's reason, the count is still in `counts`
     }
-    if (!reason) continue;
-    reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
   }
-  const topBlockReasons = Array.from(reasonCounts.entries())
-    .map(([reason, count]) => ({ reason, count }))
-    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason))
-    .slice(0, 10);
+  const topBlockReasons = tallyReasonBuckets(blockReasonRows);
 
-  // holdReasons: same shape of query as the block-reasons rollup above, but over "proposed"
-  // (Awaiting approval) rows' `proposal.holdReason` (see hold-reason.ts) instead of `decision`.
-  const proposedCount = globalCounts.get("proposed") ?? 0;
-  const heldRows =
-    proposedCount > 0
-      ? (getDb()
-          .prepare(
-            `SELECT proposal FROM trade_proposals
-             WHERE user_id = ? AND account_number = ? AND status = 'proposed' AND created_at >= ?
-             ORDER BY created_at DESC LIMIT ?`
-          )
-          .all(userId, accountNumber, sinceIso, MAX_HOLD_REASON_ROWS) as Array<{ proposal: string }>)
-      : [];
+  // holdReasons: read off the same grouped rows as the status counts (no extra window scan), over
+  // EVERY status — see the `holdReasons` field doc for why "still proposed" is the wrong filter.
   const holdReasonCounts = new Map<HoldReasonCode, number>();
-  for (const row of heldRows) {
-    let holdReason: HoldReasonCode | undefined;
-    try {
-      const parsed = JSON.parse(row.proposal) as { holdReason?: unknown };
-      if (
-        parsed.holdReason === "red_team_unavailable" ||
-        parsed.holdReason === "funding_sell" ||
-        parsed.holdReason === "policy_revert" ||
-        parsed.holdReason === "other"
-      ) {
-        holdReason = parsed.holdReason;
-      }
-    } catch {
-      // malformed proposal JSON — skip this row, counts.proposed above is still exact
+  for (const row of countRows) {
+    const holdReason = row.hold_reason;
+    if (
+      holdReason === "red_team_unavailable" ||
+      holdReason === "funding_sell" ||
+      holdReason === "policy_revert" ||
+      holdReason === "other"
+    ) {
+      holdReasonCounts.set(holdReason, (holdReasonCounts.get(holdReason) ?? 0) + row.n);
     }
-    if (!holdReason) continue;
-    holdReasonCounts.set(holdReason, (holdReasonCounts.get(holdReason) ?? 0) + 1);
   }
   const holdReasons = Array.from(holdReasonCounts.entries())
     .map(([reason, count]) => ({ reason, count }))
@@ -508,15 +568,15 @@ function queryProposalFunnel(
     rejectedCount > 0
       ? (getDb()
           .prepare(
-            `SELECT payload FROM audit_events
+            `SELECT payload, created_at FROM audit_events
              WHERE user_id = ? AND connected_account_id = ? AND kind = 'order_rejected_by_broker'
                AND created_at >= ?
              ORDER BY created_at DESC LIMIT ?`
           )
-          .all(userId, connectedAccountId, sinceIso, MAX_BROKER_REJECTION_ROWS) as Array<{ payload: string }>)
+          .all(userId, connectedAccountId, sinceIso, MAX_BROKER_REJECTION_ROWS) as Array<{ payload: string; created_at: string }>)
       : [];
 
-  const brokerReasonCounts = new Map<string, number>();
+  const brokerReasonRows: TimedReason[] = [];
   for (const row of brokerRejectionRows) {
     let reason: string | undefined;
     try {
@@ -530,14 +590,34 @@ function queryProposalFunnel(
       continue;
     }
     if (!reason) continue;
-    const key = canonicalizeBrokerRejectionReason(reason);
+    const key = normalizeBrokerRejectionReason(reason);
     if (!key) continue;
-    brokerReasonCounts.set(key, (brokerReasonCounts.get(key) ?? 0) + 1);
+    brokerReasonRows.push({ reason: key, createdAt: row.created_at });
   }
-  const brokerRejectionReasons = Array.from(brokerReasonCounts.entries())
-    .map(([reason, count]) => ({ reason, count }))
-    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason))
-    .slice(0, 20);
+  const brokerRejectionReasons = tallyReasonBuckets(brokerReasonRows);
+
+  // `placing_failed` proposals carry the broker's refusal in `error_message` and never wrote an
+  // `order_rejected_by_broker` audit row, so the audit scan above cannot see them: on the live
+  // Robinhood account that was 22 failures (11x "Fractional orders must be at least $1", 8x the
+  // dollar-based equivalent, 3x the account questionnaire) with no breakdown at all.  Same
+  // indexed (user_id, account_number, created_at) scope and row cap as the block-reason scan.
+  const placingFailedCount = globalCounts.get("placing_failed") ?? 0;
+  const placingFailureRows =
+    placingFailedCount > 0
+      ? (getDb()
+          .prepare(
+            `SELECT error_message, created_at FROM trade_proposals
+             WHERE user_id = ? AND account_number = ? AND status = 'placing_failed' AND created_at >= ?
+             ORDER BY created_at DESC LIMIT ?`
+          )
+          .all(userId, accountNumber, sinceIso, MAX_PLACING_FAILURE_ROWS) as Array<{ error_message: string | null; created_at: string }>)
+      : [];
+  const placingFailureReasons = tallyReasonBuckets(
+    placingFailureRows.map((row) => ({
+      reason: normalizeBrokerRejectionReason(row.error_message) ?? PLACING_FAILURE_NO_MESSAGE,
+      createdAt: row.created_at
+    }))
+  );
 
   return {
     windowDays,
@@ -546,7 +626,9 @@ function queryProposalFunnel(
     topBlockReasons,
     blockReasonRowsCapped: blockedRows.length >= MAX_BLOCK_REASON_ROWS && blockedCount > MAX_BLOCK_REASON_ROWS,
     holdReasons,
-    holdReasonRowsCapped: heldRows.length >= MAX_HOLD_REASON_ROWS && proposedCount > MAX_HOLD_REASON_ROWS,
+    // The existing grouped count query is not row-capped, so this stays false; keep the field for
+    // the API shape without running a duplicate proposal scan.
+    holdReasonRowsCapped: false,
     brokerRejectionReasons,
     // "Did the scan hit its row cap?" — and nothing else. Deliberately NOT a comparison against
     // `rejectedCount`: that is a count of PROPOSALS carrying the `rejected_by_broker` status, while
@@ -554,28 +636,98 @@ function queryProposalFunnel(
     // several rejection events, and a reconcile-path row can exist without a status write).
     // Comparing the two silently produced a wrong answer in both directions. Same "hit the cap"
     // semantics as the block-reason and hold-reason scans.
-    brokerRejectionRowsCapped: brokerRejectionRows.length >= MAX_BROKER_REJECTION_ROWS
+    brokerRejectionRowsCapped: brokerRejectionRows.length >= MAX_BROKER_REJECTION_ROWS,
+    placingFailureReasons,
+    placingFailureRowsCapped: placingFailureRows.length >= MAX_PLACING_FAILURE_ROWS && placingFailedCount > MAX_PLACING_FAILURE_ROWS
   };
 }
 
-/** Reduce a broker/validation error string to a bucket key.
+/** Bucket label for a `placing_failed` proposal that recorded no `error_message`. */
+const PLACING_FAILURE_NO_MESSAGE = "(no error message recorded)";
+
+/** One scanned reason string plus the row timestamp it came from. */
+interface TimedReason {
+  reason: string;
+  createdAt: string;
+}
+
+/** Tally `(reason, createdAt)` rows into count + first/last-seen buckets, sorted by count then
+ *  name and capped at `MAX_REASON_BUCKETS`.  Shared by the block-reason, broker-rejection and
+ *  placing-failure rollups: all three are "normalise, then tally over a row-capped scan". */
+function tallyReasonBuckets(rows: TimedReason[]): OpsReasonBucket[] {
+  const buckets = new Map<string, { count: number; firstSeenAt: string; lastSeenAt: string }>();
+  for (const { reason, createdAt } of rows) {
+    const existing = buckets.get(reason);
+    if (!existing) {
+      buckets.set(reason, { count: 1, firstSeenAt: createdAt, lastSeenAt: createdAt });
+      continue;
+    }
+    existing.count += 1;
+    if (createdAt < existing.firstSeenAt) existing.firstSeenAt = createdAt;
+    if (createdAt > existing.lastSeenAt) existing.lastSeenAt = createdAt;
+  }
+  return Array.from(buckets.entries())
+    .map(([reason, bucket]) => ({ reason, ...bucket }))
+    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason))
+    .slice(0, MAX_REASON_BUCKETS);
+}
+
+/** Reduce a broker/validation error string to a short reason key.
  *
- * The raw text is a broker adapter message, so the same underlying refusal arrives with
- * different HTTP statuses attached ("HTTP 422: bracket orders must be entry orders" vs "HTTP 400:
- * …"). Stripping the transport prefix is what lets the repeat offenders in the 2026-09-25 review
- * — 11 rejections of that one bracket rule — actually count as one cause instead of eleven.
+ * Broker adapter errors arrive wrapped, and the same underlying refusal differs on every
+ * occurrence:
+ *  - a transport prefix ("HTTP 422: bracket orders must be entry orders" vs "HTTP 400: ...");
+ *  - JSON nested one to three levels deep — Robinhood's "Fractional orders must be at least $1"
+ *    arrives as `place_equity_order response had no order id: {"text":"API error 400:
+ *    {\"non_field_errors\":[\"Fractional orders must be at least $1...\"]}"}`;
+ *  - a dynamic amount inside the sentence ("at least $1" vs "at least $5").
+ * Without collapsing those, 11 rejections of one rule read as 11 causes.
  *
- * Deliberately NOT a full canonicalizer: anything beyond collapsing whitespace and stripping the
- * leading status code risks merging genuinely different refusals, and a diagnostic rollup that
- * over-merges is worse than one that under-merges. Same caveat as `topBlockReasons`. */
-function canonicalizeBrokerRejectionReason(raw: string): string | undefined {
-  const stripped = raw
-    .trim()
-    .replace(/^HTTP\s+\d{3}\s*[:\-]?\s*/i, "")
+ * Unwraps up to three levels of JSON looking for the innermost sentence (`non_field_errors[0]`,
+ * `detail`, `text`, `message`, `error`), strips a leading `HTTP <code>:` / `API error <code>:`,
+ * then collapses dollar amounts to `$N` and other bare numbers to `#`.  Best effort and never
+ * throws: a message that will not unwrap (truncated mid-JSON, say) is still normalised and
+ * returned, and an empty one returns `undefined` so the caller can decide what an unexplained row
+ * is called.  Deliberately NOT a full canonicaliser — merging genuinely different refusals is
+ * worse than under-merging.  Same caveat as `topBlockReasons`.  Capped at 160 characters. */
+export function normalizeBrokerRejectionReason(raw: string | null | undefined): string | undefined {
+  if (typeof raw !== "string" || !raw.trim()) return undefined;
+  let text = raw.trim();
+  for (let depth = 0; depth < 3; depth += 1) {
+    const jsonStart = text.indexOf("{");
+    if (jsonStart === -1) break;
+    let inner: string | undefined;
+    try {
+      const parsed = JSON.parse(text.slice(jsonStart)) as Record<string, unknown> | null;
+      const nonField = parsed?.non_field_errors;
+      const candidates: unknown[] = [
+        Array.isArray(nonField) ? nonField[0] : undefined,
+        parsed?.detail,
+        parsed?.text,
+        parsed?.message,
+        parsed?.error
+      ];
+      inner = candidates.find((c): c is string => typeof c === "string" && c.trim().length > 0);
+    } catch {
+      // Not valid JSON at this level — the stored message is often cut off mid-string, which is
+      // exactly what happened to the Robinhood account-questionnaire error.  Take the sentence
+      // that follows the first recognisable error key instead of leaving the whole wrapper as the
+      // reason, so a truncated row still lands in the same bucket as its untruncated siblings.
+      const salvaged = /\b(?:non_field_errors|detail|message)\b\W{1,8}([^"\\]{8,})/i.exec(text.slice(jsonStart));
+      if (salvaged) text = salvaged[1].trim();
+      break;
+    }
+    if (!inner) break;
+    text = inner.trim();
+  }
+  const normalized = text
+    .replace(/^(?:HTTP|API error)\s+\d{3}\s*[:\-]?\s*/i, "")
+    .replace(/\$\d+(?:\.\d+)?/g, "$N")
+    .replace(/\b\d+(?:\.\d+)?\b/g, "#")
     .replace(/\s+/g, " ")
-    .trim();
-  if (!stripped) return undefined;
-  return stripped.slice(0, 200);
+    .trim()
+    .slice(0, 160);
+  return normalized || undefined;
 }
 
 /** Merge live+paper equity curves (already downsampled to <= 1 point/day inside
@@ -595,16 +747,174 @@ function buildEquityCurve(
     }));
 }
 
+function round2(value: number): number {
+  return Number(value.toFixed(2));
+}
+
+function emptyProposalFunnel(windowDays: number): OpsProposalFunnel {
+  return {
+    windowDays,
+    counts: [],
+    byModel: [],
+    topBlockReasons: [],
+    blockReasonRowsCapped: false,
+    holdReasons: [],
+    holdReasonRowsCapped: false,
+    brokerRejectionReasons: [],
+    brokerRejectionRowsCapped: false,
+    placingFailureReasons: [],
+    placingFailureRowsCapped: false
+  };
+}
+
+interface OpsMark {
+  price: number;
+  /** ISO time the price was observed (stored rows) or fetched (live snapshot). */
+  asOf: string;
+}
+
+/** Per-build mark state: marks already obtained (a ticker held in several accounts is marked once),
+ *  symbols already attempted (a failed one is not retried by the next account), and how much of the
+ *  live-fetch budget is already spent. */
+interface OpsQuoteContext {
+  mode: OpsMarksMode;
+  marks: Map<string, OpsMark>;
+  attempted: Set<string>;
+  /** Milliseconds spent waiting on live fetches so far in this build. */
+  spentMs: number;
+}
+
+/** The oldest observation time among the marks in use, as ISO, or null when there are none. */
+function oldestMarkAsOf(marks: OpsMark[]): string | null {
+  let oldest: number | null = null;
+  for (const mark of marks) {
+    const at = Date.parse(mark.asOf);
+    if (Number.isFinite(at) && (oldest === null || at < oldest)) oldest = at;
+  }
+  return oldest === null ? null : new Date(oldest).toISOString();
+}
+
+/** Stored latest-price rows for `symbols`, minus any whose observation time is unparseable or older
+ *  than the cutoff.  One indexed read; never throws (a read failure leaves them unpriced). */
+function readStoredMarks(symbols: string[], nowMs: number): Record<string, OpsMark> {
+  const out: Record<string, OpsMark> = {};
+  let stored: ReturnType<typeof getSymbolLatestPrices>;
+  try {
+    stored = getSymbolLatestPrices(symbols);
+  } catch {
+    return out;
+  }
+  for (const [rawSymbol, row] of Object.entries(stored)) {
+    const symbol = normalizeSymbol(rawSymbol);
+    const at = Date.parse(row.asOf);
+    if (!symbol || !Number.isFinite(at) || nowMs - at > OPS_STORED_MARK_MAX_AGE_MS) continue;
+    if (typeof row.price === "number" && Number.isFinite(row.price) && row.price > 0) {
+      out[symbol] = { price: row.price, asOf: new Date(at).toISOString() };
+    }
+  }
+  return out;
+}
+
+/**
+ * One bounded Alpaca market-data snapshot batch (`marks=live` only).  Deliberately NOT the trading
+ * quote cascade: no policy read (so it can never seed a policy row), no broker gateway (whose
+ * per-symbol close-history fan-out ignores an abort), no Finnhub/Tiingo/Yahoo/ROIC tiers.  Returns
+ * whatever it could price; a timeout or provider error returns {} and the caller keeps its stored
+ * marks.  Only strictly positive prices count - a zero or missing quote is unpriced, never a $0 mark.
+ */
+async function fetchLiveSnapshotMarks(symbols: string[], userId: string, timeoutMs: number): Promise<Record<string, OpsMark>> {
+  const out: Record<string, OpsMark> = {};
+  try {
+    const creds = resolveAlpacaMarketData(userId);
+    if (!creds.apiKey || !creds.secretKey) return out;
+    const provider = new AlpacaSnapshotEnrichmentProvider(creds.apiKey, creds.secretKey, creds.source, userId);
+    const enrichment = await withDeadline(
+      provider.enrich(symbols),
+      timeoutMs,
+      `ops-performance live snapshot timed out after ${timeoutMs}ms`
+    );
+    const fetchedAt = new Date().toISOString();
+    for (const symbol of symbols) {
+      const data = enrichment[symbol];
+      if (!data) continue;
+      const price = data.price ?? (data.bid && data.ask ? (data.bid + data.ask) / 2 : undefined);
+      if (typeof price === "number" && Number.isFinite(price) && price > 0) {
+        const at = data.asOf ? Date.parse(data.asOf) : NaN;
+        out[symbol] = { price, asOf: Number.isFinite(at) ? new Date(at).toISOString() : fetchedAt };
+      }
+    }
+  } catch {
+    // Timed out or the provider threw: the stored marks the caller already holds stand.
+  }
+  return out;
+}
+
+/**
+ * Marks for one account's open symbols.  Never throws and never blocks past its budget.  Stored
+ * latest-price rows are read first (memoised per build); `live` mode then upgrades up to
+ * `OPS_QUOTE_MAX_SYMBOLS` of them from one snapshot batch under the per-account and per-request
+ * time budgets.  Returns the mark for every requested symbol that has one, including ones
+ * memoised earlier in the same build.
+ */
+async function resolveOpsMarks(symbols: string[], userId: string, ctx: OpsQuoteContext): Promise<Record<string, OpsMark>> {
+  const out: Record<string, OpsMark> = {};
+  if (ctx.mode === "off") return out;
+
+  const fresh: string[] = [];
+  for (const symbol of symbols) {
+    const known = ctx.marks.get(symbol);
+    if (known) out[symbol] = known;
+    else if (!ctx.attempted.has(symbol)) fresh.push(symbol);
+  }
+  if (fresh.length === 0) return out;
+
+  const slice = fresh.slice(0, OPS_MARK_MAX_SYMBOLS);
+  const marks = readStoredMarks(slice, Date.now());
+
+  if (ctx.mode === "live") {
+    const timeoutMs = Math.min(OPS_QUOTE_FETCH_TIMEOUT_MS, OPS_QUOTE_TOTAL_BUDGET_MS - ctx.spentMs);
+    if (timeoutMs > 0) {
+      const startedAt = Date.now();
+      try {
+        Object.assign(marks, await fetchLiveSnapshotMarks(slice.slice(0, OPS_QUOTE_MAX_SYMBOLS), userId, timeoutMs));
+      } finally {
+        ctx.spentMs += Math.max(0, Date.now() - startedAt);
+      }
+    }
+  }
+
+  for (const symbol of slice) {
+    ctx.attempted.add(symbol);
+    const mark = marks[symbol];
+    if (mark) {
+      ctx.marks.set(symbol, mark);
+      out[symbol] = mark;
+    }
+  }
+  return out;
+}
+
 export interface BuildOpsPerformanceInput {
   /** Narrow to one connectedAccountId (across every user) — omit for every account the ops
    *  snapshot covers, mirroring `/api/ops/snapshot`'s all-users iteration. */
   connectedAccountId?: string;
   days?: number;
+  /** How to mark open positions for unrealized P&L (default `stored`: one indexed read of the
+   *  latest-price rows, no network).  `live` adds one bounded Alpaca snapshot batch; `off` skips
+   *  marking, and open positions are then reported unpriced rather than as a $0 mark. */
+  marks?: OpsMarksMode;
 }
 
 export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInput = {}): Promise<OpsPerformanceSnapshot> {
   const windowDays = clampDays(input.days);
   const sinceIso = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+  const marksMode: OpsMarksMode = input.marks ?? "stored";
+  const quoteCtx: OpsQuoteContext = {
+    mode: marksMode,
+    marks: new Map(),
+    attempted: new Set(),
+    spentMs: 0
+  };
 
   const accounts: OpsPerformanceAccount[] = [];
   for (const userId of listUsers()) {
@@ -625,7 +935,11 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
         accounts.push({
           ...base,
           systemState: "unknown",
-          pricesUnavailable: true,
+          // Nothing was computed, so there is nothing that needed a price.
+          pricesUnavailable: false,
+          unrealizedUnpricedSymbols: [],
+          unrealizedMarkBasis: marksMode,
+          unrealizedMarksOldestAsOf: null,
           liveRealizedPnl: 0,
           paperRealizedPnl: 0,
           liveUnrealizedPnl: 0,
@@ -635,7 +949,7 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
           thesisScorecard: [],
           redTeamEfficacy: safeRedTeamEfficacy(userId, { connectedAccountId: account.id, auditLimit: OPS_RED_TEAM_AUDIT_LIMIT }),
           modelAttribution: [],
-          proposalFunnel: { windowDays, counts: [], byModel: [], topBlockReasons: [], blockReasonRowsCapped: false, holdReasons: [], holdReasonRowsCapped: false, brokerRejectionReasons: [], brokerRejectionRowsCapped: false },
+          proposalFunnel: emptyProposalFunnel(windowDays),
           equityCurve: []
         });
         // Give the process a scheduling point between accounts even on this cheap branch, so an
@@ -654,13 +968,24 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
         // getThesisScorecard never recompute calculatePnl for the same book.
         const liveFills = listFillEvents(accountNumber, "live", undefined, userId);
         const paperFills = listFillEvents(accountNumber, "paper", undefined, userId);
+        // FIFO runs with NO prices: its `openLots` tell us which symbols need a mark, and the
+        // unrealized figure is then applied to those lots below without a second ledger walk.
         const livePnl: PnlResult = calculatePnl(liveFills, {});
         const paperPnl: PnlResult = calculatePnl(paperFills, {});
         const prefetched = { liveFills, paperFills };
         const prefetchedPnl = { live: livePnl, paper: paperPnl };
 
-        // No currentPrices fetched (matches /api/connected-accounts/[id]/performance) — this is a
-        // read-only ops diagnostic and never calls a broker for a live quote.
+        const openSymbols = openLotSymbols(livePnl.openLots, paperPnl.openLots);
+        const opsMarks = openSymbols.length > 0 ? await resolveOpsMarks(openSymbols, userId, quoteCtx) : {};
+        const marks: Record<string, number> = {};
+        for (const [symbol, mark] of Object.entries(opsMarks)) marks[symbol] = mark.price;
+        const unpricedSymbols = openSymbols.filter((symbol) => marks[symbol] === undefined).sort();
+        const liveUnrealizedPnl = unrealizedFromOpenLots(livePnl.openLots, marks);
+        const paperUnrealizedPnl = unrealizedFromOpenLots(paperPnl.openLots, marks);
+        const pricesUnavailable = openSymbols.length > 0 && unpricedSymbols.length === openSymbols.length;
+
+        // Realized P&L and the equity curve never depend on a live quote; only unrealized does,
+        // and that is overridden below from `marks`.
         const performance = getPerformanceSummary(accountNumber, {}, userId, prefetched, prefetchedPnl);
 
         // Scorecards/trade-stats key off the account's OWN book (environment), not a merged
@@ -686,11 +1011,14 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
         accounts.push({
           ...base,
           systemState,
-          pricesUnavailable: true,
+          pricesUnavailable,
+          unrealizedUnpricedSymbols: unpricedSymbols,
+          unrealizedMarkBasis: marksMode,
+          unrealizedMarksOldestAsOf: oldestMarkAsOf(Object.values(opsMarks)),
           liveRealizedPnl: performance.liveRealizedPnl,
           paperRealizedPnl: performance.paperRealizedPnl,
-          liveUnrealizedPnl: performance.liveUnrealizedPnl,
-          paperUnrealizedPnl: performance.paperUnrealizedPnl,
+          liveUnrealizedPnl: round2(liveUnrealizedPnl),
+          paperUnrealizedPnl: round2(paperUnrealizedPnl),
           tradeStats,
           roundTripStats,
           thesisScorecard,
@@ -704,7 +1032,11 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
         accounts.push({
           ...base,
           systemState: "unknown",
+          // The account errored before it could be priced: unknown, not "nothing to price".
           pricesUnavailable: true,
+          unrealizedUnpricedSymbols: [],
+          unrealizedMarkBasis: marksMode,
+          unrealizedMarksOldestAsOf: null,
           liveRealizedPnl: 0,
           paperRealizedPnl: 0,
           liveUnrealizedPnl: 0,
@@ -714,7 +1046,7 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
           thesisScorecard: [],
           redTeamEfficacy: safeRedTeamEfficacy(userId, { connectedAccountId: account.id, auditLimit: OPS_RED_TEAM_AUDIT_LIMIT }),
           modelAttribution: [],
-          proposalFunnel: { windowDays, counts: [], byModel: [], topBlockReasons: [], blockReasonRowsCapped: false, holdReasons: [], holdReasonRowsCapped: false, brokerRejectionReasons: [], brokerRejectionRowsCapped: false },
+          proposalFunnel: emptyProposalFunnel(windowDays),
           equityCurve: [],
           error: message
         });
@@ -745,7 +1077,7 @@ const snapshotCache = new Map<string, CacheEntry>();
 const inFlight = new Map<string, Promise<OpsPerformanceSnapshot>>();
 
 function cacheKey(input: BuildOpsPerformanceInput): string {
-  return `${input.connectedAccountId ?? "*"}\0${clampDays(input.days)}`;
+  return `${input.connectedAccountId ?? "*"}\0${clampDays(input.days)}\0${input.marks ?? "stored"}`;
 }
 
 /** Cached wrapper around buildOpsPerformanceSnapshot — 60s TTL, single-flight per key so two

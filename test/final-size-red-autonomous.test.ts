@@ -400,6 +400,8 @@ describe("autonomous broker-minimum final-size Red review", () => {
 
     const row = listRecentProposals(ACCOUNT, 20, userId).find((candidate) => candidate.proposal.symbol === "AAPL");
     expect(row?.status).toBe("proposed");
+    // Audit of G3 (2026-09-29): the persisted run summary says WHY the card is held, not just how many.
+    expect(result.summary).toContain("Awaiting approval: 1 (Red Team review needed: 1).");
     // lane G3: a final_size_red_team hold classifies as the "red_team_unavailable" holdReason
     // bucket (see hold-reason.ts — it covers both "could not run" and "ran but needs a decision").
     expect(row?.proposal.holdReason).toBe("red_team_unavailable");

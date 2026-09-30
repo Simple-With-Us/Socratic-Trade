@@ -1,5 +1,97 @@
 # Current Status
 
+## 2026-09-29 CLAUDE — Post-merge audit of #3799: the account-questionnaire hold now clears itself (branch `claude/st-w3-h3`)
+
+**What.**  Board `687a5fb4`, wave 3 lane h3.  #3799 (Robinhood $1 minimum, account-questionnaire hold,
+`holdReason`) merged without its adversarial review; this audits it against the lane spec and fixes
+what is real.  **P1:** the hold cleared only when an opening order was accepted, but the run loop
+refused every opening order while it was set, so it could never clear on its own (and the owner alert
+promised it would).  It is now half-open: entries pause for 6 hours after each broker refusal, then
+one probe entry goes through; an accepted probe clears the hold and a refused one re-arms it.  The
+human-approval path now records and clears the hold too.  **P2:** the `holdReasons` funnel counted only
+proposals still "proposed" (held cards expire or are resolved, so the funnel was empty for the very
+holds asked about) and now counts every held proposal in the window; the run summary now says why
+("Awaiting approval: 4 (Red Team review needed: 3, Policy hold: 1)."); holds caused by a mid-run cap
+breach demotion are labelled `policy_revert` instead of `other`.  **P3:** the bump planner no longer
+returns a whole-position exit plan for a position worth less than the $1 floor (guaranteed re-block);
+clearing the hold resets the owner-alert cooldown.  Not changed: the removal of the full-exit
+exemption (Robinhood behaviour unverifiable here; consistent with the existing unconditional-floor
+comments and the broker's own pre-flight).
+**Review round (2026-09-30).**  The adversarial review of this PR found five more real defects, all
+fixed test-first.  **P1:** automated sell-to-fund planned funding sales for buys that the account hold
+then blocked, liquidating holdings for cash that sat idle; the planner now excludes every opening the
+hold will block (in the probe state it funds only the first opening).  **P2:** a manual "Run once" was
+blocked by the hold although it is propose-only, hiding the card the owner needs; the gate now skips
+manual runs, so the approved card is the probe.  **P2:** a placement-time "orders must be at least $1"
+refusal (a non-HTTP error) resolved "uncertain" and looped through `placing` to `placing_failed`; it is
+now booked as a deterministic blocked below-minimum row on both the run loop and the approval path.
+**P2:** the approval path recorded the questionnaire hold but left the card in `placing` behind a
+"verify with broker" alert with no owner alert; it now books the card blocked and sends the rate-limited
+"needs your action on Robinhood" alert.
+Rollout: `docs/rollouts/2026-09-29-st-g3-post-merge-audit.md`.
+## 2026-09-30 CLAUDE — Exit stop release review round (#3793 follow-up, lane H1, branch `claude/st-w3-h1`)
+
+**What.**  PR #3793 merged before its review findings were addressed; all three are confirmed and
+closed here (board `687a5fb4`).  (1) P1: the release sequence awaited re-plan reads, stop cancels,
+settle polling and a position re-read AFTER the callers' fence, then placed the exit with no final
+lease or system-state check.  `placeExitReleasingOwnStops` now re-reads the durable system state
+(the caller's `freshPlacementBlockReason`) and the mutation lease synchronously, immediately before
+`place`, like `order-replacement.ts` and both strategy lanes; a failed fence after a release puts
+the stop back (or marks it owed when the lease is lost).  Also fixed: on the no-release branch a
+broker error on the exit was swallowed as "re-plan unavailable" and the exit was submitted a second
+time.  (2) P2: the restore reconcile now decides halt treatment from the account's current policy,
+not the run's snapshot; if that cannot be tied to this account it takes the halt treatment (put
+back only the released stop).  (3) P2: three cover-of-a-short tests added (green on `main`; coverage
+gap only).  10 new tests, 7 red on `main`.  `do-not-automerge`.
+**PR #4005 review round.**  (R1) a transient release refusal (post-cancel position read failed, or
+the stop cancel did not settle) was booked terminal `blocked` in both lanes; it is now retryable
+`not_placed` (`order_not_placed_exit_stop_release`).  (R2) both fences are now required on
+`ExitStopReleaseRun` (dropping one is a compile error), and a new autopilot end-to-end test through
+`runStrategyOnce` proves an owner Stop mid-release keeps the exit from leaving.  The retryable
+notification title now names the actual cause per code (`retryableExitStopReleaseTitle`).  6 new
+tests.  Branch merged with `main` (GitHub had reported it conflicting; the local merge was clean).
+Rollout: `docs/rollouts/2026-09-30-st-exit-stop-release-review-round.md`.
+## 2026-09-30 CLAUDE - Performance Measurement Upgrades: Real Unrealized P&L, Reason Timestamps, Frozen SPY Benchmark (branch `claude/st-w3-h4`, board `687a5fb4`)
+
+**What.**  Lane G4 of the 2026-09-25 wave, finished on top of MM's #3895 (which already landed round-trip grading, the `unattributed` model row, the per-model funnel, and a first cut of broker-rejection reasons).  `GET /api/ops/performance` now reports real unrealized P&L: an account's open symbols are marked from the stored latest-price rows by default (`marks=stored`, one indexed read of `symbol_field_latest`, no network, never FMP), `marks=live` opts in to one bounded Alpaca snapshot batch that keeps the stored marks on a timeout, and `marks=off` skips marking.  `pricesUnavailable` means "open positions and none could be priced", the missing symbols are listed in `unrealizedUnpricedSymbols`, and `unrealizedMarkBasis` plus `unrealizedMarksOldestAsOf` show how old the figure is.  The trading quote cascade is deliberately not used.  Reason buckets (block, broker rejection, and the new `placing_failed` itemisation) carry `firstSeenAt`/`lastSeenAt`, and the output cap moved from 10 to 50; a new normaliser merges the real Robinhood nested-JSON refusals (`$1` and `$5` read `$N`).  `resolveShrinkPrior` now reads `peekPolicy`, so the read-only route no longer seeds policy rows.  perf-17: the SPY benchmark was pinned to `imported-eod` at 2026-07-24 because `fetchDailyOHLC`'s imported tier short-circuited the whole cascade with no freshness check; that was fixed on `main` by #4009 (which does change trading-input history fan-out for every symbol when the imported tier is on), and this branch was merged with it and keeps only two extras: a stale import is also a merge base for a live fetch, and an import-only fallback is stamped `imported-eod-stale`, which `benchmark.ts` recognises.  No broker order path was touched.  Rollout: `docs/rollouts/2026-09-30-st-perf-measurement-h4.md`.  Runbook: `docs/runbooks/ops-performance-endpoint.md`.
+## 2026-09-30 CLAUDE — Accounts stranded halted after a broker-health auto-halt: honest restart halts (board 687a5fb4, lane h5)
+
+**What.**  Alpaca Paper (the owner's Autopilot account) was auto-halted by a probe timeout at
+2026-09-25 18:20Z and sat halted, with no runs, for four days until an operator re-armed it.  Root
+cause is a hypothesis, not established (the review round softened it): the leading candidate is the
+pre-#3752 stale-snapshot drop, where a caller that read "active" before the halt got a healthy
+probe and removed the auto-resume marker without resuming (#3752's durable re-read closed it; now
+pinned by a test).  The alternative is the #3752 boot interlock ending the auto-pause with "Auto-resume
+on boot" off, but 2026-09-24's restarts did not halt the account, which argues the setting was on.
+The rollout note lists the read-only prod query that decides it.  Either way nothing said what held
+the account.  Now `describeAutonomyHaltCause` names every halt: broker auto-pause (with the last
+failed probe and whether a restart would end it), restart (receipt), drawdown breaker or an
+auto-pause whose record vanished (audit trail), or "no record" (never "a person").  It shows on the
+console run-state chip and control sheet, every account-switcher and Brokers row, the ops snapshot
+(`autoResumeOnBoot`, `haltCause`, auto-pause audit kinds) and ops `nextEligibleRun`.  The boot and
+auto-halt notifications and the Settings card say a restart ends an auto-pause when the setting is
+off.  With the setting on (or `AUTONOMY_RESUME_ON_BOOT=1`) an auto-owned halt survives restarts and
+lifts on the first healthy probe; an owner halt never auto-lifts; both pinned, including through the
+real scheduler tick.  **Owner decision, not changed here:** turn on Settings, After a restart,
+Auto-resume on boot if Autopilot should run through deploys.  Branch `claude/st-w3-h5` (PR #4008).
+Rollout: `docs/rollouts/2026-09-30-st-w3-h5-restart-halt-visibility.md`.
+## 2026-09-30 CLAUDE — Post-merge audit of #3798 Tradier fill reconciliation (lane h2, board `687a5fb4`)
+
+**What.**  #3798 merged without its adversarial review.  The audit found four real defects, all
+fixed test-first on branch `claude/st-w3-h2`.  (1) P2: a definitive Tradier not-found in
+`getEquityOrder` was logged as a `tradier-broker` hard failure, so five old-id lookups in a row (one
+backfill pass) raised a false "tradier-broker connection failed" push, a Sentry capture, and a red
+Connections row.  It is now recorded as a healthy answer.  (2) P2: the OTO/OTOCO split chose its
+shape by leg SIDES, so an owner's sell-first OTOCO or a stock-plus-option OTO booked the container
+AND leg 0: the same shares twice.  It now keys on the total leg count.  (3) P3: side-less exit legs
+from a by-id lookup would book as a fabricated BUY.  They are dropped now.  (4) P3:
+`fill_reconciliation_pending_price` fired for live orders with nothing executed (the 2026-09-29
+22:41Z Sandbox observation).  **Ruled out:** `pending_cancel` is not mis-mapped.  Tradier itself
+reports `pending` until a cancel is confirmed, and keeping those orders live is correct.  **Open:**
+confirm on production that the Sandbox backlog drained (`GET /api/ops/fill-reconcile`), and an
+owner call on booking untagged owner orders into the app's learning ledger.
+Rollout: `docs/rollouts/2026-09-30-st-tradier-fill-recon-audit.md`.
+
 ## 2026-09-27 MINIMAX — Congress.Trade share guards: stop treating an HTTP 200 as delivery
 
 **What.**  CT is now exclusively dependent on ST for EOD prices and enrichment, and the ST→CT push is

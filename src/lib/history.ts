@@ -255,22 +255,38 @@ export async function fetchDailyOHLC(
   // If localBars exists but is STALE, retain for topping up with active provider data
   const staleLocalBars = localBars && localBars.length >= 2 ? localBars : null;
 
+  // Imported-EOD series (congress.trade return-path), read ONCE.  A FRESH dense series may displace
+  // a re-fetch (the tier below).  A STALE one must not (#4009): production had this tier ON with a
+  // 1,000-bar SPY series ending 2026-07-24 that won ahead of Tradier, Massive, ROIC, Tiingo, and
+  // Yahoo, so the SPY benchmark read "imported-eod" pinned to that date for two months.  Here a
+  // stale series is instead a merge base for a live fetch and the all-sources-failed fallback.
+  // Tagged "imported-eod" now so bars it contributes keep that provenance after a live merge
+  // instead of inheriting whichever live source's tag stamps the merged result.
+  const importedBars = fetchImportedHistory(symbol);
+  const importedIsFresh = importedBars != null && isBarSeriesFresh(importedBars, now);
+  const staleImportedBars =
+    importedBars != null && !importedIsFresh
+      ? stampOhlcBarProvenance(importedBars, "imported-eod", new Date(now).toISOString())
+      : null;
+  // One stale base for both the live top-up and the final fallback: the local cache and a stale
+  // import unioned by date (import wins a shared date, as #4009's fallback did).
+  const staleFallbackBars =
+    staleLocalBars && staleImportedBars
+      ? mergeOHLCBars(staleLocalBars, staleImportedBars)
+      : staleLocalBars ?? staleImportedBars;
+
   const startDate = new Date(now - 1825 * 24 * 60 * 60_000).toISOString().slice(0, 10);
   const sources: Array<{
     scope: CacheScope;
     sourceId: string;
     fetch: () => Promise<OHLCBar[] | null>;
   }> = [
-    // Local imported-EOD cache tier (congress.trade return-path). A fresh, dense series
-    // may displace a re-fetch. A stale one must not: production had this tier ON with
-    // a 1,000-bar SPY series ending 2026-07-24, and that series won ahead of Tradier,
-    // Massive, ROIC, Tiingo, and Yahoo, so Congress.Trade never saw later sessions.
-    // Stale imports stay available as the all-sources-failed fallback below.
-    { scope: "shared", sourceId: "imported-eod", fetch: async () => {
-      const imported = fetchImportedHistory(symbol);
-      if (!imported || !isBarSeriesFresh(imported, now)) return null;
-      return imported;
-    } },
+    // Local imported-EOD cache tier (congress.trade return-path). A fresh, dense series may displace
+    // a re-fetch; a stale one was diverted to `staleImportedBars` above (#4009) and only serves as a
+    // merge base or the all-sources-failed fallback.  DEFAULT OFF + density-guarded inside
+    // fetchImportedHistory so a sparse gap-fill never short-circuits with an incomplete series.
+    // Close-only bars.
+    { scope: "shared", sourceId: "imported-eod", fetch: async () => (importedIsFresh ? importedBars : null) },
     ...(opts?.skipAppATier
       ? []
       : [{ scope: "shared" as const, sourceId: "congress.trade", fetch: () => fetchAppAHistory(symbol) }]),
@@ -332,8 +348,8 @@ export async function fetchDailyOHLC(
     if (liveBars && liveBars.length >= 2) {
       const fetchedAt = new Date(now).toISOString();
       const stampedLive = stampOhlcBarProvenance(liveBars, source.sourceId, fetchedAt);
-      const finalBars = staleLocalBars
-        ? stampOhlcBarProvenance(mergeOHLCBars(staleLocalBars, stampedLive), source.sourceId, fetchedAt)
+      const finalBars = staleFallbackBars
+        ? stampOhlcBarProvenance(mergeOHLCBars(staleFallbackBars, stampedLive), source.sourceId, fetchedAt)
         : stampedLive;
       persistEodBarsToCache(symbol, finalBars);
 
@@ -351,21 +367,30 @@ export async function fetchDailyOHLC(
     }
   }
 
-  // Fallback if active providers hit errors or expired keys. Prefer the newer tip
-  // when both the sqlite cache and a stale import exist. This is not a success:
-  // the peer reader must be able to tell the series is behind the session.
-  const importedFallback = fetchImportedHistory(symbol);
-  const fallbackBars = staleLocalBars && importedFallback
-    ? mergeOHLCBars(staleLocalBars, importedFallback)
-    : staleLocalBars ?? importedFallback;
-  if (fallbackBars && fallbackBars.length >= 2) {
-    const lastBar = fallbackBars[fallbackBars.length - 1];
+  // Fallback if active providers hit errors or expired keys: audit warning and return the stale base
+  // (local cache and/or stale import).  This is not a success: the peer reader must be able to tell
+  // the series is behind the session.
+  if (staleFallbackBars && staleFallbackBars.length >= 2) {
+    const lastBar = staleFallbackBars[staleFallbackBars.length - 1];
+    const staleSourceId = staleLocalBars ? "history-cache-eod-stale" : "imported-eod-stale";
     audit(
       "eod_cache_stale",
-      { symbol, lastBarTime: lastBar?.time, note: "All active EOD price history providers failed or expired; falling back to stale local bars." },
+      {
+        symbol,
+        lastBarTime: lastBar?.time,
+        note: `All active EOD price history providers failed or expired; falling back to stale ${staleLocalBars ? "local" : "imported-EOD"} bars.`
+      },
       userId ?? "local"
     );
-    const stampedStale = stampOhlcBarProvenance(fallbackBars, "history-cache-eod-stale", new Date(now).toISOString());
+    // Import bars were pre-tagged "imported-eod" (so a live merge keeps per-bar provenance) and
+    // stampOhlcBarProvenance never overwrites an existing tag.  As the FINAL fallback the whole
+    // series is stale, so re-tag those bars: otherwise a consumer that keys on the stale source
+    // (benchmark.ts fellBackToStaleCache) cannot tell a frozen feed from a live one.
+    const stampedStale = stampOhlcBarProvenance(
+      staleFallbackBars.map((bar) => (bar.source === "imported-eod" ? { ...bar, source: staleSourceId } : bar)),
+      staleSourceId,
+      new Date(now).toISOString()
+    );
     cache.set(sharedCacheKey, { expiresAt: now + 5 * 60_000, bars: stampedStale });
     return stampedStale;
   }
