@@ -110,7 +110,7 @@ vi.mock("../src/lib/broker", async (importOriginal) => {
             id,
             symbol: order.symbol,
             side: order.side as EquityOrder["side"],
-            type: order.type,
+            type: order.type as EquityOrder["type"],
             state: fills ? "filled" : "new",
             quantity: qty,
             filledQuantity: fills ? qty : 0,
