@@ -26,6 +26,7 @@ import {
   deriveSpend,
   deriveStateInfo,
   realityForAccount,
+  stateChipTitle,
   withHaltCause
 } from "../lib/derive";
 import {
@@ -145,7 +146,8 @@ export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compa
   const renderRow = (account: ConnectedAccount) => {
     const r = realityForAccount(account);
     const policy = snapshot.connectedAccountPolicies?.[account.id];
-    const st = policy ? deriveStateInfo(policy) : null;
+    // Lane h5 review round: a stopped account that is not loaded says why, too.
+    const st = policy ? withHaltCause(deriveStateInfo(policy), policy.haltCause) : null;
     const isActive = account.isActive;
     const last4 = account.accountNumber ? account.accountNumber.slice(-4) : null;
     return (
@@ -168,7 +170,7 @@ export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compa
             </span>
             {r.tone !== "live" && <Chip tone={r.tone}>{r.tone === "paper" ? "PAPER" : r.word}</Chip>}
             {st && (
-              <Chip tone={st.tone}>
+              <Chip tone={st.tone} title={stateChipTitle(st)}>
                 {st.label.replace(" · market closed", "")}
               </Chip>
             )}

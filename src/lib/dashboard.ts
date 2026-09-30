@@ -340,9 +340,15 @@ export interface CurrentUserDisplay {
   loginProvider?: string;
 }
 
-/** Why the viewed account is halted (lane h5), or null.  Display-only: a lookup failure must never
- *  break the snapshot, so it degrades to null (the console then shows the plain "Stopped" copy). */
-function dashboardHaltCause(userId: string, policy: TradingPolicy): AutonomyHaltCause | null {
+/** Why an account is halted (lane h5), or null.  Display-only: a lookup failure must never break
+ *  the snapshot, so it degrades to null (the console then shows the plain "Stopped" copy).  Used for
+ *  the viewed account AND each row of connectedAccountPolicies, so the account switcher and the
+ *  Brokers list say why a non-loaded account is stopped too (review round). */
+function dashboardHaltCause(
+  userId: string,
+  policy: Pick<TradingPolicy, "connectedAccountId" | "accountNumber" | "systemState">
+): AutonomyHaltCause | null {
+  if (policy.systemState !== "halted") return null;
   try {
     return describeAutonomyHaltCause({
       userId,
@@ -392,12 +398,23 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       // runDuringExtendedHours rides along so the account-switcher's market-aware run-state chip
       // can honor each account's extended-hours setting — without it, an extended-hours account
       // would read "Paused · market closed" during pre/post sessions while genuinely running.
+      // haltCause (lane h5 review round): only for halted accounts, so a stopped account that is
+      // not loaded still says whether it will start again by itself.  Read-only lookups.
+      const haltCause =
+        pol.systemState === "halted"
+          ? dashboardHaltCause(userId, {
+              connectedAccountId: account.id,
+              accountNumber: account.accountNumber ?? pol.accountNumber,
+              systemState: pol.systemState
+            })
+          : null;
       return [
         account.id,
         {
           systemState: pol.systemState,
           strategyAuthority: pol.strategyAuthority,
-          runDuringExtendedHours: pol.runDuringExtendedHours
+          runDuringExtendedHours: pol.runDuringExtendedHours,
+          ...(haltCause ? { haltCause } : {})
         }
       ];
     })

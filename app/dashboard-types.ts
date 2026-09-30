@@ -75,7 +75,12 @@ export interface DashboardSnapshot {
    *  skips the market-open/paused split rather than mislabeling an extended-hours account. */
   connectedAccountPolicies?: Record<
     string,
-    Pick<TradingPolicy, "systemState" | "strategyAuthority"> & Partial<Pick<TradingPolicy, "runDuringExtendedHours">>
+    Pick<TradingPolicy, "systemState" | "strategyAuthority"> &
+      Partial<Pick<TradingPolicy, "runDuringExtendedHours">> & {
+        /** Why this account is halted and whether it starts again by itself (lane h5 review round).
+         *  Present only for halted accounts with a known cause lookup. */
+        haltCause?: AutonomyHaltCause | null;
+      }
   >;
   /** Real pending-proposal count per connected account (not just the active one) — the
    *  scheduler runs every connected account independently of which is loaded, so a

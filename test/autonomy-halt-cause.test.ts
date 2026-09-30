@@ -6,17 +6,22 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 // Board 687a5fb4, lane h5.  Production 2026-09-25..29: Alpaca Paper (the owner's Autopilot account)
 // was auto-halted at 18:20Z by "Broker health check timed out" and then sat halted, with no runs,
-// for four days until an operator re-armed it.  The deploy of #3752 and the weekend restarts ran
-// the boot autonomy interlock; with "Auto-resume on boot" off it hands a broker auto-pause to the
-// owner exactly as it halts a Running account, and nothing on the console, in the ops snapshot, or
-// in the notification title said so.
+// for four days until an operator re-armed it.  Why the auto-pause never lifted is a hypothesis, not
+// established (rollout note, Review round).  Leading candidate: pre-#3752 apply decided on the
+// caller's snapshot, so a tick or run that read "active" before the halt and then got a healthy
+// probe dropped the auto-resume marker without resuming.  #3752's durable re-read closed that; the
+// first test below pins it.  Alternative: the boot interlock ended the auto-pause at the #3752
+// deploy because "Auto-resume on boot" was off.
 //
 // Pinned here:
+//   * stale "active" caller snapshot + durable auto-halt + healthy probe -> resumes (the pre-#3752 hole);
 //   * auto-halt -> restart -> healthy probe -> resumes, whenever the owner's boot setting (or the
 //     AUTONOMY_RESUME_ON_BOOT=1 override) lets autonomy survive a restart;
 //   * manual halt -> restart -> healthy probe -> stays halted, with the setting on or off;
 //   * autoResumeOnBoot off: a restart halts Running accounts and ends a broker auto-pause, by the
-//     owner's setting, and every surface now says so (halt cause, notification title, ops snapshot).
+//     owner's setting, and every surface says so (halt cause, notifications, ops snapshot);
+//   * every halted account names its cause: auto-pause (with the last failed probe), restart,
+//     drawdown breaker, auto-pause whose resume record is gone, or "no record" (never "a person").
 
 const dir = mkdtempSync(join(tmpdir(), "agentic-halt-cause-"));
 process.env.DATABASE_URL = `file:${join(dir, "test.db")}`;
@@ -250,6 +255,134 @@ describe("broker auto-pause across restarts (lane h5)", () => {
     const run = describeNextEligibleRun({ userId, account: account!, policy: getPolicy(userId, accountId) });
     expect(run.notes.join(" ")).toMatch(/Why halted: Stopped by the restart/);
   });
+  it("pre-#3752 hole: durable auto-halt + a caller snapshot still 'active' + healthy probe resumes and clears the marker", async () => {
+    const { applyBrokerOrderPlacementPause, getBrokerPlacementPauseMarker } = await import("../src/lib/broker-health");
+    const { getPolicy, listAudit } = await import("../src/lib/db");
+    const { userId, accountId } = await seedAccount({ autoResumeOnBoot: true, systemState: "active" });
+    // A scheduled run (or an overlapping tick) read its policy while the account was Running...
+    const staleSnapshot = getPolicy(userId, accountId);
+    // ...then the scheduler gate auto-halted the account (the 18:20Z shape)...
+    await autoHaltOnProbeTimeouts(userId, accountId);
+    expect(getBrokerPlacementPauseMarker(userId, accountId)).toBeDefined();
+    expect(staleSnapshot.systemState).toBe("active");
+
+    // ...and that caller's own probe came back healthy.  Pre-#3752 code read `policy.systemState`
+    // ("active"), took the "owner already re-armed" branch, dropped the marker and left the account
+    // halted with nothing to resume it.  It must resume from the DURABLE halted state instead.
+    const healthy = await applyBrokerOrderPlacementPause({
+      userId,
+      connectedAccountId: accountId,
+      accountScope: accountId,
+      health: { isHealthy: true },
+      policy: staleSnapshot
+    });
+    expect(healthy.action).toBe("resumed");
+    expect(getPolicy(userId, accountId).systemState).toBe("active");
+    expect(getBrokerPlacementPauseMarker(userId, accountId)).toBeUndefined();
+    expect(listAudit(100, userId).map((a) => a.kind)).toContain("broker_placement_auto_resumed");
+  });
+
+  it("a still-failing probe is recorded on the auto-pause, so a stuck pause shows its last check", async () => {
+    const { getBrokerPlacementPauseMarker } = await import("../src/lib/broker-health");
+    const { userId, accountId } = await seedAccount({ autoResumeOnBoot: true, systemState: "active" });
+    await autoHaltOnProbeTimeouts(userId, accountId);
+
+    const before = await haltCause(userId, accountId);
+    expect(before).toMatchObject({ kind: "broker_auto_pause" });
+    expect(before?.kind === "broker_auto_pause" ? before.lastProbeAt : "x").toBeUndefined();
+    expect(before?.summary).toMatch(/No failed broker check recorded since the pause\./);
+
+    const still = await probe(userId, accountId, { isHealthy: false, reason: "Broker connectivity failure: socket hang up", category: "connectivity" });
+    expect(still).toMatchObject({ action: "still_paused", autoOwned: true });
+    const marker = getBrokerPlacementPauseMarker(userId, accountId);
+    expect(marker?.lastProbeReason).toBe("Broker connectivity failure: socket hang up");
+    expect(Number.isFinite(Date.parse(marker?.lastProbeAt ?? ""))).toBe(true);
+    // The original halt reason and time are kept.
+    expect(marker?.reason).toMatch(/^Broker health check timed out/);
+
+    const after = await haltCause(userId, accountId);
+    expect(after).toMatchObject({ kind: "broker_auto_pause", lastProbeReason: "Broker connectivity failure: socket hang up", lastProbeAt: marker?.lastProbeAt });
+    expect(after?.summary).toMatch(/Last broker check .+ CT still failed: Broker connectivity failure: socket hang up\./);
+
+    // A manual halt (no marker) is never given a probe record, so it can never look auto-owned.
+    const manual = await seedAccount({ autoResumeOnBoot: true, systemState: "halted" });
+    await probe(manual.userId, manual.accountId, { isHealthy: false, reason: "down", category: "connectivity" });
+    expect(getBrokerPlacementPauseMarker(manual.userId, manual.accountId)).toBeUndefined();
+  });
+
+  it("an auto-pause says a restart will end it when Auto-resume on boot is off, and not when it is on", async () => {
+    const { listNotificationEvents } = await import("../src/lib/db");
+    const off = await seedAccount({ autoResumeOnBoot: false, systemState: "active" });
+    await autoHaltOnProbeTimeouts(off.userId, off.accountId);
+    const offCause = await haltCause(off.userId, off.accountId);
+    expect(offCause).toMatchObject({ kind: "broker_auto_pause", resumesOnItsOwn: true, autoResumeOnBootNow: false });
+    expect(offCause?.summary).toMatch(/Auto-resume on boot is off, so a restart or deploy before the broker recovers ends this auto-pause and leaves the account stopped\./);
+    const offHalt = listNotificationEvents(off.userId, 50).find((e) => e.type === "kill_switch");
+    expect(JSON.stringify(offHalt?.payload)).toMatch(/restart or deploy before the broker recovers ends this auto-pause/);
+
+    const on = await seedAccount({ autoResumeOnBoot: true, systemState: "active" });
+    await autoHaltOnProbeTimeouts(on.userId, on.accountId);
+    const onCause = await haltCause(on.userId, on.accountId);
+    expect(onCause).toMatchObject({ kind: "broker_auto_pause", autoResumeOnBootNow: true });
+    expect(onCause?.summary).not.toMatch(/restart or deploy/);
+    const onHalt = listNotificationEvents(on.userId, 50).find((e) => e.type === "kill_switch");
+    expect(JSON.stringify(onHalt?.payload)).toMatch(/Will auto-resume when the broker order path recovers/);
+    expect(JSON.stringify(onHalt?.payload)).not.toMatch(/restart or deploy/);
+
+    // The env override counts as on, exactly as the boot interlock reads it.
+    process.env.AUTONOMY_RESUME_ON_BOOT = "1";
+    expect(await haltCause(off.userId, off.accountId)).toMatchObject({ autoResumeOnBootNow: true });
+  });
+
+  it("a drawdown-breaker halt is named as the breaker, not a person, until the account is re-armed", async () => {
+    const { audit, getPolicy, setPolicy } = await import("../src/lib/db");
+    const { userId, accountId } = await seedAccount({ autoResumeOnBoot: true, systemState: "active" });
+    // strategy.ts, riskRules.drawdownBreakerAction "halted": setPolicy(halted), then the audit row.
+    setPolicy({ ...getPolicy(userId, accountId), systemState: "halted" }, userId, accountId);
+    audit(
+      "policy_violation_drawdown",
+      { runId: "r-1", reason: "Trailing drawdown 72.10% breached the 15% limit.", from: "active", revertedTo: "halted", action: "halted" },
+      userId,
+      accountId
+    );
+    // An owner settings edit while halted does not change who holds the halt.
+    setPolicy({ ...getPolicy(userId, accountId), runCadenceMinutes: 45 }, userId, accountId);
+    const cause = await haltCause(userId, accountId);
+    expect(cause).toMatchObject({ kind: "breaker", resumesOnItsOwn: false, reason: "Trailing drawdown 72.10% breached the 15% limit." });
+    expect(cause?.summary).toMatch(/^The drawdown circuit breaker stopped this account at .+ CT: Trailing drawdown 72\.10% breached the 15% limit\.  It will not start by itself\./);
+    expect(cause?.summary).not.toMatch(/person/);
+
+    // Re-armed, then stopped again: the breaker is history; the app has no record of the new stop.
+    setPolicy({ ...getPolicy(userId, accountId), systemState: "active" }, userId, accountId);
+    setPolicy({ ...getPolicy(userId, accountId), systemState: "halted" }, userId, accountId);
+    const later = await haltCause(userId, accountId);
+    expect(later).toMatchObject({ kind: "stopped" });
+    expect(later?.summary).toMatch(/did not record who or what stopped it/);
+    expect(later?.summary).not.toMatch(/by a person/);
+
+    // An ADVISORY breach (no state change) never names the breaker.
+    const advisory = await seedAccount({ autoResumeOnBoot: true, systemState: "halted" });
+    audit("policy_violation_drawdown", { runId: "r-2", reason: "advisory breach", from: "active", action: "advisory" }, advisory.userId, advisory.accountId);
+    expect(await haltCause(advisory.userId, advisory.accountId)).toMatchObject({ kind: "stopped" });
+  });
+
+  it("an auto-pause whose resume marker vanished without a record is named, not blamed on a person", async () => {
+    const { clearBrokerPlacementPauseMarker } = await import("../src/lib/broker-health");
+    const { getPolicy } = await import("../src/lib/db");
+    const { userId, accountId } = await seedAccount({ autoResumeOnBoot: true, systemState: "active" });
+    await autoHaltOnProbeTimeouts(userId, accountId);
+    // The 2026-09-25 shape: the marker is gone, nothing audited a resume, an owner takeover, or a boot.
+    clearBrokerPlacementPauseMarker(userId, accountId);
+
+    expect(getPolicy(userId, accountId).systemState).toBe("halted");
+    const cause = await haltCause(userId, accountId);
+    expect(cause).toMatchObject({ kind: "auto_pause_lost", resumesOnItsOwn: false });
+    expect(cause?.kind === "auto_pause_lost" ? cause.reason : "").toMatch(/^Broker health check timed out/);
+    expect(cause?.summary).toMatch(/the record that lets it start again by itself is gone\.  It will not start by itself\./);
+    // It never resumes by itself: ownership cannot be inferred from the audit trail.
+    expect((await probe(userId, accountId, { isHealthy: true })).action).toBe("none");
+    expect(getPolicy(userId, accountId).systemState).toBe("halted");
+  });
 });
 
 describe("console run-state display of the halt cause (lane h5)", () => {
@@ -257,7 +390,14 @@ describe("console run-state display of the halt cause (lane h5)", () => {
     const { deriveStateInfo, withHaltCause } = await import("../app/console/lib/derive");
     const halted = deriveStateInfo({ systemState: "halted", strategyAuthority: "decide" });
 
-    const auto = withHaltCause(halted, { kind: "broker_auto_pause", resumesOnItsOwn: true, since: "2026-09-25T18:20:24Z", reason: "x", summary: "Paused by the app." });
+    const auto = withHaltCause(halted, {
+      kind: "broker_auto_pause",
+      resumesOnItsOwn: true,
+      since: "2026-09-25T18:20:24Z",
+      reason: "x",
+      autoResumeOnBootNow: true,
+      summary: "Paused by the app."
+    });
     expect(auto).toMatchObject({ word: "Stopped", label: "Stopped · auto-paused", tone: "warn", cause: "Paused by the app." });
 
     const boot = withHaltCause(halted, {
@@ -270,8 +410,28 @@ describe("console run-state display of the halt cause (lane h5)", () => {
     });
     expect(boot).toMatchObject({ word: "Stopped", label: "Stopped · by restart", tone: "neg", cause: "Stopped by the restart." });
 
+    expect(
+      withHaltCause(halted, { kind: "breaker", resumesOnItsOwn: false, at: "2026-09-18T15:00:00Z", reason: "dd", summary: "The drawdown circuit breaker stopped this account." })
+    ).toMatchObject({ word: "Stopped", label: "Stopped · breaker", tone: "neg" });
+    expect(
+      withHaltCause(halted, { kind: "auto_pause_lost", resumesOnItsOwn: false, at: "2026-09-25T18:20:24Z", reason: "t", summary: "The app paused this account." })
+    ).toMatchObject({ word: "Stopped", label: "Stopped · by app", tone: "neg" });
+
     expect(withHaltCause(halted, null)).toEqual(halted);
     const running = deriveStateInfo({ systemState: "active", strategyAuthority: "decide" });
     expect(withHaltCause(running, { kind: "stopped", resumesOnItsOwn: false, summary: "stale" })).toEqual(running);
+  });
+
+  it("chip tooltips keep the two-space sentence gap visible in HTML", async () => {
+    const { deriveStateInfo, stateChipTitle, withHaltCause } = await import("../app/console/lib/derive");
+    const { SENTENCE_GAP } = await import("../app/console/lib/format");
+    const info = withHaltCause(deriveStateInfo({ systemState: "halted", strategyAuthority: "decide" }), {
+      kind: "stopped",
+      resumesOnItsOwn: false,
+      summary: "No automatic pause is holding this account.  It stays stopped."
+    });
+    const title = stateChipTitle(info);
+    expect(title.startsWith(`No automatic pause is holding this account.${SENTENCE_GAP}It stays stopped.${SENTENCE_GAP}`)).toBe(true);
+    expect(title).not.toMatch(/ {2}/);
   });
 });

@@ -1,6 +1,6 @@
 import { autonomyAuthorityWord, autonomyStatusLabel } from "./autonomy-labels";
-import { getAutoResumeOnBoot, getInternalSetting } from "./db-settings";
-import { describeAutonomyHaltCause, type AutonomyHaltCause } from "./autonomy-halt-cause";
+import { getInternalSetting } from "./db-settings";
+import { describeAutonomyHaltCause, effectiveAutoResumeOnBoot, type AutonomyHaltCause } from "./autonomy-halt-cause";
 import { getDb, getLastStrategyRunStartedAt, listConnectedAccounts, listUsers, peekPolicy, getServiceHealthSummaries, databasePath } from "./db";
 import { isHardStoppedHealthSummary } from "./db-health";
 import { isIntentionalOffHealthService } from "./retired-direct-vendors";
@@ -55,6 +55,12 @@ const OPS_AUDIT_KINDS = new Set([
   "policy_violation_vol_panic",
   "policy_violation_cap_exceeded",
   "autonomy_halted_on_boot",
+  // Lane h5 review round: the broker auto-pause lifecycle and the owner's boot setting, so the
+  // snapshot alone can tell a pause whose probes kept failing from one a restart or a person ended.
+  "broker_placement_auto_halted",
+  "broker_placement_auto_resumed",
+  "broker_placement_pause_owner_override",
+  "auto_resume_on_boot",
   "order_placement_uncertain",
   "proposal_skipped_negative_ev",
   "order_rejected_by_broker"
@@ -87,8 +93,9 @@ export interface OpsAccountSnapshot {
   consecutiveFailedRuns: number | null;
   tradingLivenessDegraded: boolean | null;
   /** Lane h5 (board 687a5fb4): why a `halted` account is halted and whether it lifts by itself —
-   *  a broker auto-pause (resumes on the next healthy probe), a restart with autoResumeOnBoot off
-   *  (stays halted until someone re-arms it), or a manual stop.  null for every other state. */
+   *  a broker auto-pause (resumes on the next healthy probe; carries the last failed probe), a
+   *  restart with autoResumeOnBoot off, the drawdown breaker, an auto-pause whose resume marker is
+   *  gone, or no record.  Only the first lifts by itself.  null for every other state. */
   haltCause: AutonomyHaltCause | null;
   /** Present when `?orders=1` — broker order-list breakdown for open-vs-history diagnosis. */
   orders?: OpsOrderListSummary | null;
@@ -363,11 +370,10 @@ function safeHaltCause(userId: string, connectedAccountId: string, accountNumber
 }
 
 function safeAutoResumeOnBoot(userId: string): boolean {
-  if (process.env.AUTONOMY_RESUME_ON_BOOT === "1") return true;
   try {
-    return getAutoResumeOnBoot(userId);
+    return effectiveAutoResumeOnBoot(userId);
   } catch {
-    return false;
+    return process.env.AUTONOMY_RESUME_ON_BOOT === "1";
   }
 }
 

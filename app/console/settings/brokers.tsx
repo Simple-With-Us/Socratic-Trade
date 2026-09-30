@@ -11,7 +11,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ConnectedAccount, TaxationType } from "@/lib/types";
 import { mergeAccountCapabilities } from "@/lib/venue-contract-pure";
 import { activateAccount, ConsoleApiError } from "../lib/api";
-import { deriveStateInfo, realityForAccount } from "../lib/derive";
+import { deriveStateInfo, realityForAccount, stateChipTitle, withHaltCause } from "../lib/derive";
 import {
   accountFractionalSharesLabel,
   accountOptionsTradingLabel,
@@ -204,7 +204,8 @@ export function BrokerAccountsCard() {
     // a non-active account (e.g. a live Roth IRA) can genuinely be running Autopilot right now —
     // this used to unconditionally chip every "Other Accounts" row "Inactive" regardless.
     const policyForAccount = snapshot.connectedAccountPolicies?.[account.id];
-    const stateInfo = policyForAccount ? deriveStateInfo(policyForAccount) : null;
+    // Lane h5 review round: fold in why a halted account is halted (and whether it lifts by itself).
+    const stateInfo = policyForAccount ? withHaltCause(deriveStateInfo(policyForAccount), policyForAccount.haltCause) : null;
 
     // A real per-account pending-proposal count. snapshot.pendingProposals is scoped
     // server-side to the ACTIVE account only (dashboard.ts), so filtering it for another
@@ -288,7 +289,7 @@ export function BrokerAccountsCard() {
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex items-center gap-1.5 text-[length:var(--con-fs-xs)]">
               {stateInfo ? (
-                <Chip tone={stateInfo.tone} title={stateInfo.detail}>
+                <Chip tone={stateInfo.tone} title={stateChipTitle(stateInfo)}>
                   {stateInfo.label}
                 </Chip>
               ) : (

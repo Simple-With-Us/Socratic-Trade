@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { audit, finishStrategyRun, getDb, getInternalSetting, getPolicy, insertStrategyRun, setInternalSetting, setPolicy, deleteInternalSetting } from "./db";
+import { audit, finishStrategyRun, getAutoResumeOnBoot, getDb, getInternalSetting, getPolicy, insertStrategyRun, setInternalSetting, setPolicy, deleteInternalSetting } from "./db";
 import { countRecentAuditEvents } from "./db-learning";
 import { ExecutionAccount, HealthSignals } from "./execution-mode";
 import { accountEquity } from "./risk-breaker";
@@ -234,6 +234,11 @@ export type BrokerPlacementPauseMarker = {
   autoResume: true;
   /** systemState before we flipped it (should be "active"). */
   priorState: SystemState;
+  /** Lane h5 review round: the latest broker check that found the account still unhealthy while
+   *  this pause held it.  Lets the console and the ops snapshot tell a pause whose probes keep
+   *  failing apart from one whose probes stopped running.  Absent on markers written before. */
+  lastProbeAt?: string;
+  lastProbeReason?: string;
 };
 
 const pauseMarkerKey = (userId: string, accountScope: string) =>
@@ -396,6 +401,14 @@ export async function applyBrokerOrderPlacementPause(input: {
       // manual owner pause (Codex PR #3189 P2).
       return { action: "still_paused", reason, autoOwned: false };
     }
+    // Record this failed check on our own marker (lane h5 review round).  Synchronous with the
+    // marker read above (no await in between), so it can never resurrect a marker an owner or
+    // operator cleared.  One small upsert per tick, only while an auto-pause holds the account.
+    setInternalSetting(pauseMarkerKey(userId, accountScope), {
+      ...marker,
+      lastProbeAt: new Date().toISOString(),
+      lastProbeReason: reason
+    } satisfies BrokerPlacementPauseMarker);
     return { action: "still_paused", reason: marker.reason, autoOwned: true };
   }
 
@@ -460,12 +473,30 @@ export async function applyBrokerOrderPlacementPause(input: {
         reason,
         category: health.category,
         action: "auto_halt",
-        note: "Will auto-resume when the broker order path recovers. You can also re-arm Start manually after fixing the connection."
+        note: autoHaltNotificationNote(userId)
       }
     },
     { policy: current, userId, connectedAccountId }
   );
   return { action: "halted", reason };
+}
+
+/** The auto-halt notification's promise, made honest (lane h5 review round): with "Auto-resume on
+ *  boot" off (and no AUTONOMY_RESUME_ON_BOOT=1), a restart or deploy before the broker recovers
+ *  ends the auto-pause, so "will auto-resume" alone would be false.  Exported for tests. */
+export function autoHaltNotificationNote(userId: string): string {
+  const base = "Will auto-resume when the broker order path recovers.  You can also re-arm Start manually after fixing the connection.";
+  let survivesRestart = process.env.AUTONOMY_RESUME_ON_BOOT === "1";
+  if (!survivesRestart) {
+    try {
+      survivesRestart = getAutoResumeOnBoot(userId);
+    } catch {
+      survivesRestart = false;
+    }
+  }
+  return survivesRestart
+    ? base
+    : `${base}  Auto-resume on boot is off, so a restart or deploy before the broker recovers ends this auto-pause and leaves the account stopped.`;
 }
 
 /** Pause-marker scope for an account: the connected account id, else the legacy
