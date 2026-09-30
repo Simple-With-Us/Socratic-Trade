@@ -127,6 +127,14 @@ export function isRetryableExitStopReleaseError(error: unknown): error is ExitSt
   return error instanceof ExitStopReleaseError && (error.code === "position_unverified" || error.code === "stop_cancel_unconfirmed");
 }
 
+/** Owner-facing notification title for a retryable release refusal, shared by both lanes so the
+ *  title names the actual cause (a failed position re-read is not an unconfirmed stop cancel). */
+export function retryableExitStopReleaseTitle(symbol: string, code: ExitStopReleaseErrorCode): string {
+  return code === "position_unverified"
+    ? `${symbol} exit not placed — position could not be re-read after releasing the protective stop (safe to retry)`
+    : `${symbol} exit not placed — protective stop cancel did not confirm (safe to retry)`;
+}
+
 function round6(value: number): number {
   return Math.round(value * 1e6) / 1e6;
 }

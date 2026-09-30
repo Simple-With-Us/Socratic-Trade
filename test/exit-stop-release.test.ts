@@ -21,6 +21,7 @@ import {
   ExitStopReleaseError,
   isRetryableExitStopReleaseError,
   placeExitReleasingOwnStops,
+  retryableExitStopReleaseTitle,
   planExitStopRelease,
   type ExitStopReleasePlan,
   type ExitStopReleaseRun
@@ -881,6 +882,12 @@ describe("#4005 review round: lane contract", () => {
     expect(isRetryableExitStopReleaseError(new ExitStopReleaseError("halted", "placement_blocked"))).toBe(false);
     expect(isRetryableExitStopReleaseError(new OrderValidationError("adapter refused"))).toBe(false);
     expect(isRetryableExitStopReleaseError(new Error("HTTP 503"))).toBe(false);
+  });
+
+  it("the retryable notification names the actual cause: a failed position re-read is not a cancel that did not settle", () => {
+    expect(retryableExitStopReleaseTitle("KO", "position_unverified")).toMatch(/^KO exit not placed .*position could not be re-read.*safe to retry/);
+    expect(retryableExitStopReleaseTitle("KO", "position_unverified")).not.toMatch(/cancel/);
+    expect(retryableExitStopReleaseTitle("KO", "stop_cancel_unconfirmed")).toMatch(/^KO exit not placed .*stop cancel did not confirm.*safe to retry/);
   });
 
   it("both placement fences are required by the type: a lane cannot drop one silently", () => {

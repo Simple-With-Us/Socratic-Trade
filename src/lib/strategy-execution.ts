@@ -8,7 +8,7 @@ import {
   normalizeExitSidesForHeldPositions
 } from "./order-position-invariant";
 import { evaluateBrokerHeldExitAvailability, brokerHeldExitBlockReason } from "./broker-held-orders";
-import { isRetryableExitStopReleaseError, placeExitReleasingOwnStops, planExitStopRelease } from "./exit-stop-release";
+import { isRetryableExitStopReleaseError, placeExitReleasingOwnStops, planExitStopRelease, retryableExitStopReleaseTitle } from "./exit-stop-release";
 import { describeBrokerMinimumOrderBlock, planBrokerMinimumBump, shouldAlertBrokerMinimumOrderBlock } from "./broker-minimum-guard";
 import { hasBrokerReportedFill, hasBrokerReportedPricedFill, isLiveOrderState, isRejectedOrCanceledState } from "./broker-side";
 import { audit, clearStopPlans, deriveExitContractFromOpening, getDb, recordStopPlan } from "./db";
@@ -1399,7 +1399,7 @@ export async function executeProposal(
             await sendNotification(
               {
                 type: "run_failed",
-                title: `${sym} exit not placed — protective stop release did not settle (safe to retry)`,
+                title: retryableExitStopReleaseTitle(sym, placeError.code),
                 payload: { proposalId, refId, error: message, code: placeError.code, reconcile: "not_placed" }
               },
               { policy, userId }

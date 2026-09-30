@@ -136,7 +136,7 @@ import {
   withPositionSides
 } from "./order-position-invariant";
 import { describeBrokerMinimumOrderBlock, planBrokerMinimumBump, shouldAlertBrokerMinimumOrderBlock } from "./broker-minimum-guard";
-import { isRetryableExitStopReleaseError, placeExitReleasingOwnStops, planExitStopRelease } from "./exit-stop-release";
+import { isRetryableExitStopReleaseError, placeExitReleasingOwnStops, planExitStopRelease, retryableExitStopReleaseTitle } from "./exit-stop-release";
 import { classifyHoldReasonFromCodes } from "./hold-reason";
 import {
   clearAccountActionRequired,
@@ -4332,7 +4332,7 @@ export async function runStrategyOnce(
               await sendNotification(
                 {
                   type: "run_failed",
-                  title: `${sym} exit not placed — protective stop release did not settle (safe to retry)`,
+                  title: retryableExitStopReleaseTitle(sym, placeError.code),
                   payload: { runId, proposalId, refId, error: message, code: placeError.code, reconcile: "not_placed" }
                 },
                 { policy, userId }
