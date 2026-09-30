@@ -173,12 +173,19 @@ Results on the review-round commit: the six targeted test files passed (6 files,
 the merge with `origin/main`; `test/ops-performance-unrealized.test.ts` was also run against the
 pre-fix `ops-performance.ts`, `performance.ts`, and route with the new tests in place and failed
 16 of 19 cases (the other 3 assert an unpriced outcome the old code also produced), which is the
-fail-first evidence.  The
-`tsc --noEmit` and `eslint` results are recorded in the PR body.  The host sat at load average
-about 150 for the whole session, so `npm run build` and the full suite were not run locally; the
-required CI check `verify` is the full-suite and build gate of record.  The measurement and
+fail-first evidence.  The host sat at load average about 150 for the whole first session, so
+`npm run build` and the full suite were not run locally; the required CI check `verify` is the
+full-suite and build gate of record.  The measurement and
 unrealized test files now import `ops-performance` once in `beforeAll` (300 second hook timeout),
 because the cold import alone exceeded the 60 second per-test timeout under that load.
+
+Fix-up pass on merge commit `63db802b9` (2026-09-30, load average 500 to 900): `npx eslint` on the
+touched source and test files exited 0 (0 errors; 6 warnings, all pre-existing unused-import or `any`
+warnings in lines this lane did not add).  A local `npx tsc --noEmit` and the six-file vitest run
+were started and stopped after tsc had run for 39 minutes without finishing on the overloaded host,
+so neither result is claimed here.  The gate of record for that head is the CI run on PR #4006:
+`verify` (tsc, full vitest suite, `next build`), `verify-hosted`, and `verify-ios / xcodebuild
+(unsigned)` all completed SUCCESS on `63db802b9`, with merge state CLEAN.
 
 ## 5. Next Steps & Blockers
 
