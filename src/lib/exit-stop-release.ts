@@ -114,6 +114,19 @@ export class ExitStopReleaseError extends OrderValidationError {
   }
 }
 
+/**
+ * True for a release refusal whose cause is transient: the position re-read after the cancel
+ * failed (`position_unverified`), or the stop's cancel did not settle in time
+ * (`stop_cancel_unconfirmed`).  Nothing reached the broker and the released stop was rolled back,
+ * so both lanes book it retryable "not_placed", never terminal "blocked" — one read timeout must
+ * not kill an approved exit (#4005 review round; mirrors isRetryablePositionInvariantError).
+ * `still_held`, `exit_moot_stop_filled` and `placement_blocked` stay terminal: retrying cannot
+ * change an owner order holding the shares, a closed position, or the owner's Stop.
+ */
+export function isRetryableExitStopReleaseError(error: unknown): error is ExitStopReleaseError {
+  return error instanceof ExitStopReleaseError && (error.code === "position_unverified" || error.code === "stop_cancel_unconfirmed");
+}
+
 function round6(value: number): number {
   return Math.round(value * 1e6) / 1e6;
 }
@@ -242,12 +255,14 @@ export interface ExitStopReleaseRun {
   proposalId?: string;
   runId?: string;
   /** Mutation-lease fence, re-asserted before cancelling protection AND immediately before the
-   *  exit leaves (the release sequence runs after the caller's own fence). */
-  assertOwned?: () => void;
-  /** Durable system-state fence (the caller's freshPlacementBlockReason for this lane), re-read
-   *  immediately before the exit leaves: an owner Stop issued while the release was in flight
-   *  keeps the exit from being sent, exactly like every other placement path. */
-  placementBlockReason?: () => string | undefined;
+   *  exit leaves (the release sequence runs after the caller's own fence).  REQUIRED: an omitted
+   *  fence would silently fail open, so dropping it from a lane is a compile error (#4005). */
+  assertOwned: () => void;
+  /** Durable system-state fence (the caller's freshPlacementBlockReason for this lane, for THIS
+   *  account), re-read immediately before the exit leaves: an owner Stop issued while the release
+   *  was in flight keeps the exit from being sent, exactly like every other placement path.
+   *  REQUIRED for the same reason as assertOwned (#4005 review round). */
+  placementBlockReason: () => string | undefined;
   /** Test seam: settle poll interval in ms (0 = one immediate order read). */
   cancelSettleMs?: number;
   cancelSettleMaxMs?: number;
@@ -372,7 +387,7 @@ export async function placeExitReleasingOwnStops<T>(input: ExitStopReleaseRun, p
 
   for (const stop of run.plan.stops) {
     try {
-      run.assertOwned?.();
+      run.assertOwned();
     } catch (fenceError) {
       // Lost the lease before touching this stop.  Nothing is cancelled yet on the first stop, so
       // there is nothing to restore; otherwise the next lease holder's reconcile owes the restore
@@ -519,9 +534,9 @@ type FinalPlacementFenceFailure = { kind: "blocked"; reason: string } | { kind: 
  */
 function finalPlacementFence(run: ExitStopReleaseRun): FinalPlacementFenceFailure | undefined {
   try {
-    const reason = run.placementBlockReason?.();
+    const reason = run.placementBlockReason();
     if (reason) return { kind: "blocked", reason };
-    run.assertOwned?.();
+    run.assertOwned();
   } catch (error) {
     return { kind: "error", error };
   }
@@ -627,7 +642,7 @@ async function restoreProtectionAfterRelease(run: ExitStopReleaseRun, symbol: st
   // Re-placing protection is a broker mutation: only while this sequence still owns the account
   // lease.  A lost lease hands the restore to the next lease holder's protective-stop pass.
   try {
-    run.assertOwned?.();
+    run.assertOwned();
   } catch {
     markRestoreOwed(run, symbol, "lease_lost_before_restore");
     return;

@@ -8,7 +8,7 @@ import {
   normalizeExitSidesForHeldPositions
 } from "./order-position-invariant";
 import { evaluateBrokerHeldExitAvailability, brokerHeldExitBlockReason } from "./broker-held-orders";
-import { placeExitReleasingOwnStops, planExitStopRelease } from "./exit-stop-release";
+import { isRetryableExitStopReleaseError, placeExitReleasingOwnStops, planExitStopRelease } from "./exit-stop-release";
 import { describeBrokerMinimumOrderBlock, planBrokerMinimumBump, shouldAlertBrokerMinimumOrderBlock } from "./broker-minimum-guard";
 import { hasBrokerReportedFill, hasBrokerReportedPricedFill, isLiveOrderState, isRejectedOrCanceledState } from "./broker-side";
 import { audit, clearStopPlans, deriveExitContractFromOpening, getDb, recordStopPlan } from "./db";
@@ -1380,6 +1380,27 @@ export async function executeProposal(
                 type: "run_failed",
                 title: `${sym} order not placed — position unverified (safe to retry)`,
                 payload: { proposalId, refId, error: message, reconcile: "not_placed" }
+              },
+              { policy, userId }
+            );
+            throw new Error([message].join(" "));
+          }
+          // Same for the exit-stop release (#4005 review round): a post-cancel position read that
+          // failed, or a stop cancel that never settled, sent nothing and rolled the stop back.
+          // The cause is transient, so the approved exit is retryable not_placed, never "blocked".
+          if (isRetryableExitStopReleaseError(placeError)) {
+            updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, message);
+            audit(
+              "order_not_placed_exit_stop_release",
+              { proposalId, refId, symbol: sym, side: proposal.side, code: placeError.code, error: message, path: "approval" },
+              userId,
+              policy.connectedAccountId
+            );
+            await sendNotification(
+              {
+                type: "run_failed",
+                title: `${sym} exit not placed — protective stop release did not settle (safe to retry)`,
+                payload: { proposalId, refId, error: message, code: placeError.code, reconcile: "not_placed" }
               },
               { policy, userId }
             );
