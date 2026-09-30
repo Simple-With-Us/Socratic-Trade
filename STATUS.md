@@ -1,5 +1,21 @@
 # Current Status
 
+## 2026-09-30 CLAUDE — Exit stop release review round (#3793 follow-up, lane H1, branch `claude/st-w3-h1`)
+
+**What.**  PR #3793 merged before its review findings were addressed; all three are confirmed and
+closed here (board `687a5fb4`).  (1) P1: the release sequence awaited re-plan reads, stop cancels,
+settle polling and a position re-read AFTER the callers' fence, then placed the exit with no final
+lease or system-state check.  `placeExitReleasingOwnStops` now re-reads the durable system state
+(the caller's `freshPlacementBlockReason`) and the mutation lease synchronously, immediately before
+`place`, like `order-replacement.ts` and both strategy lanes; a failed fence after a release puts
+the stop back (or marks it owed when the lease is lost).  Also fixed: on the no-release branch a
+broker error on the exit was swallowed as "re-plan unavailable" and the exit was submitted a second
+time.  (2) P2: the restore reconcile now decides halt treatment from the account's current policy,
+not the run's snapshot; if that cannot be tied to this account it takes the halt treatment (put
+back only the released stop).  (3) P2: three cover-of-a-short tests added (green on `main`; coverage
+gap only).  10 new tests, 7 red on `main`.  `do-not-automerge`.
+Rollout: `docs/rollouts/2026-09-30-st-exit-stop-release-review-round.md`.
+
 ## 2026-09-27 MINIMAX — Congress.Trade share guards: stop treating an HTTP 200 as delivery
 
 **What.**  CT is now exclusively dependent on ST for EOD prices and enrichment, and the ST→CT push is
