@@ -648,14 +648,16 @@ function BootBehaviorCard() {
     <Card title="After a restart">
       <div
         className="flex items-center justify-between gap-4 rounded-control px-1.5 py-1 transition-colors hover:bg-[color:var(--con-surface-2)]"
-        title="Controls what happens to Running accounts when the server process restarts.  Off keeps the safety net: a human must start trading again."
+        title="Controls what happens to Running and auto-paused accounts when the server restarts or deploys.  Off keeps the safety net: a human must start trading again."
       >
         <div>
           <div className="text-[length:var(--con-fs-sm)] font-semibold">Auto-resume on boot</div>
           <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
-            Off (recommended): whenever the server restarts, any Running account is stopped until a person starts it
-            again — a restored backup or crash-loop can never silently resume trading.  Turning this ON removes that
-            safety net.
+            Off (recommended): whenever the server restarts or deploys, any Running account is stopped until a person
+            starts it again — a restored backup or crash-loop can never silently resume trading.  An account the app
+            auto-paused for a broker problem loses its auto-resume too, and stays stopped after the broker
+            recovers.  Turning this on removes that safety net: Running accounts keep running, and auto-paused
+            accounts start again by themselves once the broker recovers.
           </p>
         </div>
         <Toggle

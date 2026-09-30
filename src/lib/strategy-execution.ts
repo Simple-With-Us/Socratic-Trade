@@ -8,8 +8,9 @@ import {
   normalizeExitSidesForHeldPositions
 } from "./order-position-invariant";
 import { evaluateBrokerHeldExitAvailability, brokerHeldExitBlockReason } from "./broker-held-orders";
-import { placeExitReleasingOwnStops, planExitStopRelease } from "./exit-stop-release";
-import { describeBrokerMinimumOrderBlock, planBrokerMinimumBump, shouldAlertBrokerMinimumOrderBlock } from "./broker-minimum-guard";
+import { isRetryableExitStopReleaseError, placeExitReleasingOwnStops, planExitStopRelease, retryableExitStopReleaseTitle } from "./exit-stop-release";
+import { describeBrokerMinimumOrderBlock, detectBrokerMinimumPlacementError, planBrokerMinimumBump, shouldAlertBrokerMinimumOrderBlock } from "./broker-minimum-guard";
+import { clearAccountActionRequired, detectRobinhoodAccountQuestionnaireError, markAccountActionRequired, shouldAlertAccountActionRequired } from "./broker-account-questionnaire";
 import { hasBrokerReportedFill, hasBrokerReportedPricedFill, isLiveOrderState, isRejectedOrCanceledState } from "./broker-side";
 import { audit, clearStopPlans, deriveExitContractFromOpening, getDb, recordStopPlan } from "./db";
 import { auditDeduped } from "./audit-dedupe";
@@ -1335,7 +1336,11 @@ export async function executeProposal(
                   lane: "approval",
                   proposalId,
                   runId: row.runId,
-                  assertOwned: () => mutationCtx.assertOwned()
+                  assertOwned: () => mutationCtx.assertOwned(),
+                  // Same durable-state fence as above, re-read after the release and immediately
+                  // before the exit leaves (#3793 review round).
+                  placementBlockReason: () =>
+                    freshPlacementBlockReason({ userId, connectedAccountId: policy.connectedAccountId, side: proposal.side, source: "owner_approval" })
                 },
                 (verifiedPositionQuantity) => gateway.placeEquityOrder({ accountNumber, ...proposal, refId, verifiedPositionQuantity })
               )
@@ -1343,6 +1348,61 @@ export async function executeProposal(
         } catch (placeError) {
           const message = placeError instanceof Error ? placeError.message : String(placeError);
           const sym = proposal.symbol;
+          // Robinhood refusing this order because the ACCOUNT needs the owner's questionnaire answers
+          // (broker-account-questionnaire.ts): record it so autonomous runs pause new entries too and
+          // re-probe on the retry interval, and book THIS approval like the autonomous loop does.
+          // The refusal is not an HTTP status, so without the early exit below it would fall through to
+          // reconcilePlacementError, resolve "uncertain" (Robinhood's order list omits terminal orders),
+          // and leave the card in `placing` behind a "verify with broker" alert -- while the owner
+          // never hears that the account itself needs their action.
+          const accountQuestionnaireReason = detectRobinhoodAccountQuestionnaireError(message);
+          if (accountQuestionnaireReason && accountNumber) {
+            markAccountActionRequired(userId, accountNumber, accountQuestionnaireReason);
+            const heldDecision: PolicyDecision = { ...decision, approved: false, reasons: [...decision.reasons, accountQuestionnaireReason] };
+            updateProposalStatus(proposalId, "blocked", undefined, review, review.estimatedNotional, userId, undefined, message, heldDecision);
+            audit(
+              "proposal_blocked_account_action_required",
+              { proposalId, refId, symbol: sym, side: proposal.side, accountNumber, error: message.slice(0, 400), path: "approval" },
+              userId,
+              policy.connectedAccountId
+            );
+            if (shouldAlertAccountActionRequired(userId, accountNumber)) {
+              await sendNotification(
+                {
+                  type: "run_failed",
+                  title: `${accountNumber} needs your action on Robinhood`,
+                  payload: { proposalId, refId, reason: accountQuestionnaireReason, error: message, reconcile: "account_action_required" }
+                },
+                { policy, userId }
+              );
+            }
+            throw new Error([accountQuestionnaireReason].join(" "));
+          }
+          // Placement-time backstop for the broker's minimum order size (broker-minimum-guard.ts): the
+          // refusal names the minimum, so it is deterministic.  Book it like the pre-flight skip
+          // instead of letting it resolve "uncertain" (the same non-HTTP refusal shape as above).
+          const belowMinimumReason = detectBrokerMinimumPlacementError(message);
+          if (belowMinimumReason) {
+            const blockedDecision: PolicyDecision = { ...decision, approved: false, reasons: [...decision.reasons, belowMinimumReason] };
+            updateProposalStatus(proposalId, "blocked", undefined, review, review.estimatedNotional, userId, undefined, message, blockedDecision);
+            audit(
+              "order_skipped_broker_minimum",
+              { proposalId, symbol: sym, side: proposal.side, estimatedNotional: review.estimatedNotional, reason: belowMinimumReason, action: "approval", phase: "placement", error: message.slice(0, 400) },
+              userId,
+              policy.connectedAccountId
+            );
+            if (shouldAlertBrokerMinimumOrderBlock(userId, accountNumber, proposal.symbol)) {
+              await sendNotification(
+                {
+                  type: "block",
+                  title: `${proposal.side.charAt(0).toUpperCase() + proposal.side.slice(1)} ${proposal.symbol} skipped (below broker minimum)`,
+                  payload: { proposalId, decision: blockedDecision, review, proposal }
+                },
+                { policy, userId }
+              );
+            }
+            throw new Error([belowMinimumReason].join(" "));
+          }
           if (isOrderPlacementInfrastructureFailure(message) && policy.connectedAccountId) {
             audit(
               "order_place_infrastructure_failed",
@@ -1376,6 +1436,27 @@ export async function executeProposal(
                 type: "run_failed",
                 title: `${sym} order not placed — position unverified (safe to retry)`,
                 payload: { proposalId, refId, error: message, reconcile: "not_placed" }
+              },
+              { policy, userId }
+            );
+            throw new Error([message].join(" "));
+          }
+          // Same for the exit-stop release (#4005 review round): a post-cancel position read that
+          // failed, or a stop cancel that never settled, sent nothing and rolled the stop back.
+          // The cause is transient, so the approved exit is retryable not_placed, never "blocked".
+          if (isRetryableExitStopReleaseError(placeError)) {
+            updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, message);
+            audit(
+              "order_not_placed_exit_stop_release",
+              { proposalId, refId, symbol: sym, side: proposal.side, code: placeError.code, error: message, path: "approval" },
+              userId,
+              policy.connectedAccountId
+            );
+            await sendNotification(
+              {
+                type: "run_failed",
+                title: retryableExitStopReleaseTitle(sym, placeError.code),
+                payload: { proposalId, refId, error: message, code: placeError.code, reconcile: "not_placed" }
               },
               { policy, userId }
             );
@@ -1594,6 +1675,13 @@ export async function executeProposal(
             { policy, userId }
           );
           throw new Error([message].join(" "));
+        }
+        // An OPENING order just cleared the broker on the human-approval path: the only reliable
+        // in-app signal that an earlier account-questionnaire hold was resolved on Robinhood's side.
+        // (The autonomous loop clears it the same way; without this an owner who fixed the account
+        // and approved a card by hand would still find autonomous entries paused.)
+        if ((proposal.side === "buy" || proposal.side === "short") && accountNumber) {
+          clearAccountActionRequired(userId, accountNumber);
         }
         audit("proposal_approved", {
           proposalId,
@@ -1929,17 +2017,25 @@ async function reconcilePendingReceipts(ctx: BrokerTruthContext): Promise<void> 
         // state with an unpriced cumulative quantity larger than the already-booked partial). Keep
         // the prior accounting truth and leave this receipt eligible for another reconciliation.
         updateFillEvent(fill.id, { raw }, userId);
-        // Steady-state per-tick spam guard (~4.5k identical rows/day in prod):
-        // first occurrence per (fillId, brokerState) logs immediately, then ≤1/6h.
-        auditDeduped("fill_reconciliation_pending_price", {
-          fillId: fill.id,
-          symbol: fill.symbol,
-          brokerState: matched.state,
-          brokerQuantity: matched.filledQuantity,
-          knownBrokerQuantity: merged.knownQuantity,
-          priorBookedQuantity: bookedExecutionTruth(fill)?.quantity,
-          unresolvedGrowth: merged.unresolvedGrowth
-        }, [fill.id, matched.state], { userId, connectedAccountId });
+        // "Pending price" means executed-but-unpriced.  A LIVE order with nothing executed has no
+        // price to wait for: it is simply still working (a resting GTC limit, or one whose cancel
+        // Tradier has not confirmed yet and so reports as "pending").  Auditing those every pass
+        // mislabeled healthy working orders as unpriced executions (Tradier Sandbox, 2026-09-29
+        // 22:41Z: four cancel-requested GTC buy limits, brokerQuantity 0).
+        const brokerReportsExecution = hasBrokerReportedFill(matched) || merged.knownQuantity > 0;
+        if (brokerReportsExecution || !isLiveOrderState(matched.state)) {
+          // Steady-state per-tick spam guard (~4.5k identical rows/day in prod):
+          // first occurrence per (fillId, brokerState) logs immediately, then ≤1/6h.
+          auditDeduped("fill_reconciliation_pending_price", {
+            fillId: fill.id,
+            symbol: fill.symbol,
+            brokerState: matched.state,
+            brokerQuantity: matched.filledQuantity,
+            knownBrokerQuantity: merged.knownQuantity,
+            priorBookedQuantity: bookedExecutionTruth(fill)?.quantity,
+            unresolvedGrowth: merged.unresolvedGrowth
+          }, [fill.id, matched.state], { userId, connectedAccountId });
+        }
         // A matched order still LIVE at the broker (working day limit, queued stop, ...) is
         // healthy — it simply hasn't executed yet, and stale-limit-orders.ts owns the alerting
         // for a far-from-market resting order. Only a matched order in a TERMINAL state that

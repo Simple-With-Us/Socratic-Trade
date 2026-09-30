@@ -376,3 +376,75 @@ describe("broker-originated executions from the listing", () => {
     expect(pnl.closedLots.some((lot) => lot.symbol === "C")).toBe(true);
   });
 });
+
+// Post-merge audit of #3798 (lane h2), from the 2026-09-29 22:41Z Tradier Sandbox observation: after an
+// ops cancel the four Aug 5 GTC buy limits read "pending" at Tradier (cancel requested, not yet
+// confirmed), and every pass wrote fill_reconciliation_pending_price for them with brokerQuantity 0.
+// Keeping them live is right (they can still fill until Tradier confirms them dead), but nothing has
+// executed, so there is no price to wait for: that audit must be reserved for executed-but-unpriced.
+describe("a live order with nothing executed is not an unpriced execution", () => {
+  const liveOrder = (id: string, overrides: Partial<EquityOrder> = {}): EquityOrder => ({
+    id, symbol: "WBD", side: "buy", type: "limit", state: "pending", quantity: 97, filledQuantity: 0, averagePrice: 0,
+    limitPrice: 25.61, timeInForce: "gtc", createdAt: "2026-08-05T16:15:27.104Z", clientOrderId: `st-ref-${id}`, placedAgent: "tradier",
+    ...overrides
+  });
+  const pendingPriceAudits = (fillId: string) =>
+    listAuditByKind("fill_reconciliation_pending_price", 1000).filter((row) => (row.payload as { fillId?: string }).fillId === fillId);
+
+  it("keeps a cancel-pending order live without auditing a pending price", async () => {
+    const accountNumber = `VA-${randomUUID()}`;
+    const { proposalId, fillId } = seedPlacedBuy({ accountNumber, orderId: "36514419", symbol: "WBD", quantity: 97, limitPrice: 25.61, placedAgoMs: 55 * 24 * HOUR });
+    const { gateway } = tradierLikeGateway(new Map(), { listing: [liveOrder("36514419")] });
+
+    await reconcilePendingFills(gateway, accountNumber, "local", undefined, { ignoreThrottle: true });
+
+    expect(fillById(accountNumber, fillId!)).toMatchObject({ status: "pending_reconciliation" });
+    expect(getProposal(proposalId)?.status).toBe("placed");
+    expect(pendingPriceAudits(fillId!)).toHaveLength(0);
+  });
+
+  it("still audits an execution the broker reports without a usable price", async () => {
+    const accountNumber = `VA-${randomUUID()}`;
+    const { fillId } = seedPlacedBuy({ accountNumber, orderId: "36514422", symbol: "WBD", quantity: 97, limitPrice: 25.61, placedAgoMs: 55 * 24 * HOUR });
+    const { gateway } = tradierLikeGateway(new Map(), {
+      listing: [liveOrder("36514422", { state: "partially_filled", filledQuantity: 40, averagePrice: undefined })]
+    });
+
+    await reconcilePendingFills(gateway, accountNumber, "local", undefined, { ignoreThrottle: true });
+
+    expect(fillById(accountNumber, fillId!)).toMatchObject({ status: "pending_reconciliation" });
+    expect(pendingPriceAudits(fillId!)).toHaveLength(1);
+  });
+});
+
+// Post-merge audit of #3798 (lane h2): an owner's sell-first OTOCO in the listing books each leg that
+// traded exactly once; the container's mirrored execution is never booked beside leg 0.
+describe("listing ingestion never books a bracket container beside its own legs", () => {
+  it("books a sell-first owner OTOCO leg by leg", async () => {
+    const accountNumber = `VA-${randomUUID()}`;
+    const row: Record<string, unknown> = {
+      id: 36300000, class: "otoco", symbol: "SHEL", side: "sell", type: "limit", status: "filled", quantity: 50,
+      exec_quantity: 50, avg_fill_price: 70.1, create_date: "2026-09-24T14:00:00.000Z", transaction_date: "2026-09-24T15:00:00.000Z",
+      leg: [
+        { id: 36300001, class: "equity", symbol: "SHEL", side: "sell", type: "limit", quantity: 50, status: "filled", exec_quantity: 50, avg_fill_price: 70.1, transaction_date: "2026-09-24T14:10:00.000Z" },
+        { id: 36300002, class: "equity", symbol: "SHEL", side: "buy", type: "limit", quantity: 50, status: "canceled", exec_quantity: 0, avg_fill_price: 0 },
+        { id: 36300003, class: "equity", symbol: "SHEL", side: "buy", type: "stop", quantity: 50, status: "filled", exec_quantity: 50, avg_fill_price: 72, transaction_date: "2026-09-24T15:00:00.000Z" }
+      ]
+    };
+    // The account already holds the app's SHEL lot (this is also how the ingest classifies the mode).
+    insertFillEvent({
+      accountNumber, source: "paper", executionMode: "broker/paper", symbol: "SHEL", side: "buy", quantity: 50, price: 66,
+      notional: 3300, status: "filled", brokerOrderId: "36299999", filledAt: "2026-09-20T14:00:00.000Z", raw: {}
+    });
+    const { gateway } = tradierLikeGateway(new Map(), { executions: executionsFromTradierRow(row) });
+
+    await reconcilePendingFills(gateway, accountNumber, "local", undefined, { ignoreThrottle: true });
+    await reconcilePendingFills(gateway, accountNumber, "local", undefined, { ignoreThrottle: true });
+
+    const booked = listFillEvents(accountNumber, "paper").filter((fill) => (fill.raw as { brokerOriginated?: boolean } | undefined)?.brokerOriginated);
+    expect(booked.map((fill) => [fill.brokerOrderId, fill.side, fill.quantity]).sort()).toEqual([
+      ["36300001", "sell", 50],
+      ["36300003", "buy", 50]
+    ]);
+  });
+});

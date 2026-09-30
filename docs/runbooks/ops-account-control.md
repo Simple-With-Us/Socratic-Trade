@@ -124,6 +124,44 @@ Facts it encodes:
   `AUTONOMY_RESUME_ON_BOOT=1`) is on (`reconcileAutonomyOnBoot`).  Re-arm after a deploy.
 - A failing broker health gate skips the account every tick, and re-halts an active one if the
   failure persists (`applyBrokerOrderPlacementPause`).
+- For a halted account, a `Why halted:` note gives the cause (see below).
+
+#### Why an account is halted (lane h5, board `687a5fb4`)
+
+The owner setting is **Settings, After a restart, Auto-resume on boot** (`autoResumeOnBoot` in
+`user_settings`, default off; `AUTONOMY_RESUME_ON_BOOT=1` overrides it for every user).  Agents do
+not change it; it is the owner's call.
+
+| Setting | Account Running at restart | Account auto-paused by the broker gate at restart | Account stopped by a person |
+|---|---|---|---|
+| On (or env override) | Keeps running | Stays auto-paused; resumes by itself on the first healthy broker probe | Stays stopped |
+| Off | Stopped by the restart; stays stopped until re-armed | The restart ends the auto-pause; stays stopped until re-armed | Stays stopped |
+
+`describeAutonomyHaltCause` (`src/lib/autonomy-halt-cause.ts`) reports one cause per halted
+account, in this order:
+
+| `kind` | Meaning | Lifts by itself |
+|---|---|---|
+| `broker_auto_pause` | The broker gate paused it (marker present).  Carries `lastProbeAt` / `lastProbeReason` (the latest check that still failed) and `autoResumeOnBootNow`; with the setting off, a restart before recovery ends it. | Yes, on the first healthy probe |
+| `restart` | The boot interlock stopped it (from `active`) or ended its auto-pause (from `broker_auto_pause`).  Receipt-based. | No |
+| `breaker` | The drawdown circuit breaker (hard action `halted`) stopped it and nothing re-armed it since.  Audit-based. | No |
+| `auto_pause_lost` | The broker gate halted it, nothing resumed, re-armed or took it over since, but the marker is gone (the 2026-09-25 shape; should not happen on current code). | No |
+| `stopped` | No automatic pause holds it and the app has no record of who or what stopped it. | No |
+
+It is in the ops snapshot (`users[].autoResumeOnBoot`, `users[].accounts[].haltCause`), in the
+console's run-state chip and control sheet, on every account-switcher and Settings Brokers row,
+and in `nextEligibleRun.notes`.  The ops snapshot's `recentAudit` also lists
+`broker_placement_auto_halted`, `broker_placement_auto_resumed`,
+`broker_placement_pause_owner_override` (its `source` says whether the boot interlock or a person
+took the halt over) and `auto_resume_on_boot`.
+
+**Stuck auto-pause triage.**  `broker_auto_pause` with a recent `lastProbeAt`: the probe keeps
+failing, so read `lastProbeReason`.  `broker_auto_pause` with an old or missing `lastProbeAt`: the
+scheduler is not probing it, so check `schedulerAgeSeconds` and the tick.  `auto_pause_lost`: the
+marker was dropped without a record; re-arm it and report it as a bug.  The boot interlock's receipt lives at
+internal setting `autonomy:boot-halted:<userId>:<connectedAccountId>`; the scheduler drops it on
+the first tick after the account leaves `halted`, and `set_system_state` drops it (with the
+broker auto-pause marker) in its own transaction, reporting `restartHalt` and `clearedRestartHalt`.
 
 ## Verifying
 

@@ -16,7 +16,8 @@ import {
   type ImportedCloseInput
 } from "../src/lib/db-securities-import";
 import { verifySecuritiesImportToken, securitiesImportToken } from "../src/lib/securities-import-auth";
-import { clearHistoryCache, fetchDailyOHLC } from "../src/lib/history";
+import { clearHistoryCache, fetchDailyOHLC, toBusinessDay } from "../src/lib/history";
+import { latestCompletedTradingSessionEtKey } from "../src/lib/market-hours";
 import { POST as importRoute } from "../app/api/admin/securities/import/route";
 
 beforeAll(() => {
@@ -223,5 +224,106 @@ describe("fetchDailyOHLC imported-EOD tier", () => {
     const bars = await fetchDailyOHLC("^GSPC", Date.UTC(2025, 0, 1));
     expect(bars).toHaveLength(250);
     expect(bars![0]).toMatchObject({ close: 5000 });
+  });
+
+  it("does not let a stale dense import beat a live source", async () => {
+    process.env.SECURITIES_IMPORT_HISTORY_TIER_ENABLED = "1";
+    upsertImportedPrices([{ ticker: "SPY", closes: seqCloses(250) }]);
+    // Wednesday 2026-09-30 21:00 UTC is after the 16:00 ET cash close.
+    const now = Date.UTC(2026, 8, 30, 21, 0, 0);
+    const session = latestCompletedTradingSessionEtKey(now);
+    const endSec = Math.floor(Date.parse(`${session}T20:00:00Z`) / 1000);
+    const yahoo = JSON.stringify({
+      chart: {
+        result: [{
+          timestamp: [endSec - 86_400, endSec],
+          indicators: { quote: [{ open: [1, 2], high: [1, 2], low: [1, 2], close: [10, 11], volume: [1, 1] }] }
+        }]
+      }
+    });
+    const fetchMock = vi.fn(async (url: string) =>
+      String(url).includes("query1.finance.yahoo.com")
+        ? new Response(yahoo, { status: 200 })
+        : new Response("no other source", { status: 500 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bars = await fetchDailyOHLC("SPY", now);
+    expect(fetchMock).toHaveBeenCalled();
+    expect(toBusinessDay(bars![bars!.length - 1].time)).toBe(session);
+  });
+
+  it("still serves a fresh dense import without calling the network", async () => {
+    process.env.SECURITIES_IMPORT_HISTORY_TIER_ENABLED = "1";
+    const now = Date.UTC(2026, 8, 30, 21, 0, 0);
+    const session = latestCompletedTradingSessionEtKey(now);
+    const end = Date.parse(`${session}T00:00:00Z`);
+    const closes: ImportedCloseInput[] = [];
+    for (let i = 0; i < 250; i++) {
+      closes.push({
+        date: new Date(end - (249 - i) * 86_400_000).toISOString().slice(0, 10),
+        close: 100 + i,
+        volume: 1
+      });
+    }
+    upsertImportedPrices([{ ticker: "FRESH", closes }]);
+    const fetchMock = vi.fn(async () => new Response("should not be called", { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bars = await fetchDailyOHLC("FRESH", now);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(bars).toHaveLength(250);
+    expect(toBusinessDay(bars![bars!.length - 1].time)).toBe(session);
+  });
+
+  // ── perf-17 extras kept on top of #4009's freshness gate ────────────────────────────────────
+  //
+  // #4009 (above) stops a stale import from short-circuiting the cascade.  What it did not cover:
+  // when a live provider then answers, the stale import's older history should still be merged in
+  // (a live source may return a shorter window), and when EVERY provider fails the fallback should
+  // say which tier the frozen bars came from so the benchmark can flag the feed as stale.
+
+  it("perf-17: merges the stale imported history with a live provider's bars, keeping import provenance", async () => {
+    process.env.SECURITIES_IMPORT_HISTORY_TIER_ENABLED = "1";
+    // seqCloses(250) from 2024-01-01 ends ~2024-09-06, stale relative to "now" below.
+    upsertImportedPrices([{ ticker: "STALEIMP", closes: seqCloses(250) }]);
+    const now = Date.UTC(2025, 0, 1);
+    const yahooTimestampSec = Math.floor(now / 1000) - 5 * 86_400;
+    const yahooBody = JSON.stringify({
+      chart: {
+        result: [
+          {
+            timestamp: [yahooTimestampSec, yahooTimestampSec + 86_400],
+            indicators: { quote: [{ close: [500, 505] }] }
+          }
+        ]
+      }
+    });
+    const fetchMock = vi.fn(async (url: string) =>
+      String(url).includes("query1.finance.yahoo.com")
+        ? new Response(yahooBody, { status: 200 })
+        : new Response("unexpected source", { status: 500 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bars = await fetchDailyOHLC("STALEIMP", now);
+    expect(bars).not.toBeNull();
+    expect(bars!.some((b) => b.close === 500 && b.source === "yahoo-finance")).toBe(true);
+    // The stale imported history is preserved (merged), still tagged with its own source rather
+    // than inheriting "yahoo-finance" from the bars it was merged with.
+    expect(bars!.some((b) => b.close === 100 && b.source === "imported-eod")).toBe(true);
+  });
+
+  it("perf-17: an import-only fallback is stamped imported-eod-stale when every live tier fails", async () => {
+    process.env.SECURITIES_IMPORT_HISTORY_TIER_ENABLED = "1";
+    upsertImportedPrices([{ ticker: "STALENOLIVE", closes: seqCloses(250) }]);
+    // beforeEach already stubs fetch to throw for every URL, so every live tier fails.
+    const bars = await fetchDailyOHLC("STALENOLIVE", Date.UTC(2025, 0, 1));
+    expect(bars).not.toBeNull();
+    expect(bars).toHaveLength(250);
+    expect(bars![0]).toMatchObject({ close: 100 });
+    // The WHOLE series is a stale fallback, so it is tagged as one: a consumer that keys on the
+    // stale source (benchmark.ts fellBackToStaleCache) can then tell it from a live feed.
+    expect(bars!.every((b) => b.source === "imported-eod-stale")).toBe(true);
   });
 });
