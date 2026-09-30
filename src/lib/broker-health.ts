@@ -404,11 +404,17 @@ export async function applyBrokerOrderPlacementPause(input: {
     // Record this failed check on our own marker (lane h5 review round).  Synchronous with the
     // marker read above (no await in between), so it can never resurrect a marker an owner or
     // operator cleared.  One small upsert per tick, only while an auto-pause holds the account.
-    setInternalSetting(pauseMarkerKey(userId, accountScope), {
-      ...marker,
-      lastProbeAt: new Date().toISOString(),
-      lastProbeReason: reason
-    } satisfies BrokerPlacementPauseMarker);
+    // Diagnostics only: a failed write (SQLITE_BUSY under load) must never break the health gate,
+    // which used to do no write at all on this path.
+    try {
+      setInternalSetting(pauseMarkerKey(userId, accountScope), {
+        ...marker,
+        lastProbeAt: new Date().toISOString(),
+        lastProbeReason: reason
+      } satisfies BrokerPlacementPauseMarker);
+    } catch (err) {
+      console.error(`[broker-health] could not record the last failed probe for ${userId}/${accountScope}:`, safeErrorMessage(err));
+    }
     return { action: "still_paused", reason: marker.reason, autoOwned: true };
   }
 
