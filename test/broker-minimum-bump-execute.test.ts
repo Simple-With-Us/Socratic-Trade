@@ -519,3 +519,51 @@ describe("executeProposal — broker-minimum bump-to-floor wiring", () => {
     expect(placeEquityOrder).not.toHaveBeenCalled();
   });
 });
+
+// Audit of the merged G3 change (2026-09-29, board 687a5fb4, lane h3): the human-approval path used
+// to know nothing about the account-questionnaire hold, so a card Robinhood refused for the
+// questionnaire reason left autonomous runs to rediscover it, and an accepted opening order placed
+// by hand never cleared a hold that had already been set.
+describe("executeProposal — account-questionnaire hold on the human-approval path", () => {
+  const QUESTIONNAIRE_REJECTION =
+    'Robinhood place_equity_order response had no order id: {"text":"API error 400: {\\"non_field_errors\\":[\\"We\'re required to have you answer some questions about your account.\\"]}"}';
+
+  it("records the account-level hold when the broker refuses a human-approved order for the questionnaire reason", async () => {
+    reviewEquityOrder.mockImplementation(async (i) => echoReview(i));
+    placeEquityOrder.mockRejectedValue(new Error(QUESTIONNAIRE_REJECTION));
+
+    const userId = `questionnaire-approval-refused-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getAccountActionRequired } = await import("../src/lib/broker-account-questionnaire");
+    expect(getAccountActionRequired(userId, ACCOUNT)).toBeUndefined();
+
+    await executeProposal(proposalId, userId).then(
+      () => undefined,
+      () => undefined
+    );
+
+    expect(placeEquityOrder).toHaveBeenCalledTimes(1);
+    const held = getAccountActionRequired(userId, ACCOUNT);
+    expect(held).toBeDefined();
+    expect(held?.reason).toContain("answer account questions");
+    expect(held?.lastAttemptAt).toBeDefined();
+  });
+
+  it("clears the hold when a human-approved OPENING order is accepted by the broker", async () => {
+    reviewEquityOrder.mockImplementation(async (i) => echoReview(i));
+    placeEquityOrder.mockImplementation(async (i) => ({ orderId: `ord-${randomUUID()}`, state: "confirmed", raw: {}, ...i }));
+
+    const userId = `questionnaire-approval-accepted-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getAccountActionRequired, markAccountActionRequired } = await import("../src/lib/broker-account-questionnaire");
+    markAccountActionRequired(userId, ACCOUNT, "Robinhood requires you to answer account questions.", Date.now() - 60 * 60_000);
+    expect(getAccountActionRequired(userId, ACCOUNT)).toBeDefined();
+
+    const result = await executeProposal(proposalId, userId);
+
+    expect(result.status).toBe("placed");
+    expect(getAccountActionRequired(userId, ACCOUNT)).toBeUndefined();
+  });
+});

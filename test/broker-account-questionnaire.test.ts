@@ -171,6 +171,20 @@ describe("shouldAlertAccountActionRequired cooldown", () => {
     expect(shouldAlertAccountActionRequired(userId, "RH-ACCOUNT")).toBe(false);
   });
 
+  it("clearing the hold resets the alert cooldown so a later recurrence alerts the owner again", async () => {
+    const { clearAccountActionRequired, markAccountActionRequired, shouldAlertAccountActionRequired } = await import(
+      "../src/lib/broker-account-questionnaire"
+    );
+    const userId = `questionnaire-alert-${randomUUID()}`;
+    markAccountActionRequired(userId, "RH-ACCOUNT", "held");
+    expect(shouldAlertAccountActionRequired(userId, "RH-ACCOUNT")).toBe(true);
+    expect(shouldAlertAccountActionRequired(userId, "RH-ACCOUNT")).toBe(false);
+    // The owner resolved it and an opening order was accepted; if Robinhood asks again within the
+    // 24h window that is a NEW action-required event and must not be swallowed by the old cooldown.
+    clearAccountActionRequired(userId, "RH-ACCOUNT");
+    expect(shouldAlertAccountActionRequired(userId, "RH-ACCOUNT")).toBe(true);
+  });
+
   it("cooldown is scoped per (user, accountNumber), not global", async () => {
     const { shouldAlertAccountActionRequired } = await import("../src/lib/broker-account-questionnaire");
     const userId = `questionnaire-alert-${randomUUID()}`;

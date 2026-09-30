@@ -1,5 +1,24 @@
 # Current Status
 
+## 2026-09-29 CLAUDE — Post-merge audit of #3799: the account-questionnaire hold now clears itself (branch `claude/st-w3-h3`)
+
+**What.**  Board `687a5fb4`, wave 3 lane h3.  #3799 (Robinhood $1 minimum, account-questionnaire hold,
+`holdReason`) merged without its adversarial review; this audits it against the lane spec and fixes
+what is real.  **P1:** the hold cleared only when an opening order was accepted, but the run loop
+refused every opening order while it was set, so it could never clear on its own (and the owner alert
+promised it would).  It is now half-open: entries pause for 6 hours after each broker refusal, then
+one probe entry goes through; an accepted probe clears the hold and a refused one re-arms it.  The
+human-approval path now records and clears the hold too.  **P2:** the `holdReasons` funnel counted only
+proposals still "proposed" (held cards expire or are resolved, so the funnel was empty for the very
+holds asked about) and now counts every held proposal in the window; the run summary now says why
+("Awaiting approval: 4 (Red Team review needed: 3, Policy hold: 1)."); holds caused by a mid-run cap
+breach demotion are labelled `policy_revert` instead of `other`.  **P3:** the bump planner no longer
+returns a whole-position exit plan for a position worth less than the $1 floor (guaranteed re-block);
+clearing the hold resets the owner-alert cooldown.  Not changed: the removal of the full-exit
+exemption (Robinhood behaviour unverifiable here; consistent with the existing unconditional-floor
+comments and the broker's own pre-flight).
+Rollout: `docs/rollouts/2026-09-29-st-g3-post-merge-audit.md`.
+
 ## 2026-09-27 MINIMAX — Congress.Trade share guards: stop treating an HTTP 200 as delivery
 
 **What.**  CT is now exclusively dependent on ST for EOD prices and enrichment, and the ST→CT push is

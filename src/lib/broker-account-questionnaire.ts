@@ -58,6 +58,12 @@ function accountActionRequiredKey(userId: string, accountNumber: string): string
   return `${ACCOUNT_ACTION_REQUIRED_PREFIX}:${userId}:${accountNumber}`;
 }
 
+const ACCOUNT_ACTION_REQUIRED_ALERT_COOLDOWN_PREFIX = "accountActionRequiredAlertSent";
+
+function accountActionRequiredAlertKey(userId: string, accountNumber: string): string {
+  return `${ACCOUNT_ACTION_REQUIRED_ALERT_COOLDOWN_PREFIX}:${userId}:${accountNumber}`;
+}
+
 /** Persists the account-level hold.  Idempotent — a repeat detection while already marked keeps the
  *  ORIGINAL `since` and refreshes `reason` and `lastAttemptAt` (which re-arms the retry interval). */
 export function markAccountActionRequired(userId: string, accountNumber: string, reason: string, nowMs: number = Date.now()): void {
@@ -81,6 +87,9 @@ export function getAccountActionRequired(userId: string, accountNumber: string):
  *  unconditionally when there is nothing to clear. */
 export function clearAccountActionRequired(userId: string, accountNumber: string): void {
   deleteInternalSetting(accountActionRequiredKey(userId, accountNumber));
+  // Also reset the owner-alert cooldown: if Robinhood asks again later that is a NEW event and must
+  // alert, not be swallowed by the previous episode's 24h window.
+  deleteInternalSetting(accountActionRequiredAlertKey(userId, accountNumber));
 }
 
 export type AccountActionRequiredGate =
@@ -112,7 +121,6 @@ export function evaluateAccountActionRequiredGate(
   return { kind: "probe", state };
 }
 
-const ACCOUNT_ACTION_REQUIRED_ALERT_COOLDOWN_PREFIX = "accountActionRequiredAlertSent";
 // This condition does not clear itself run to run (it is a standing broker-side account gate, not
 // a transient outage), so re-notifying every run would just be noise until the owner acts — same
 // rationale as SUB_MINIMUM_ALERT_COOLDOWN_MS in broker-minimum-guard.ts.
@@ -123,7 +131,7 @@ const ACCOUNT_ACTION_REQUIRED_ALERT_COOLDOWN_MS = 24 * 60 * 60_000; // 24 hours
  *  entries for this account regardless of this return value; it only gates whether an outward
  *  alert/notification fires this run. */
 export function shouldAlertAccountActionRequired(userId: string, accountNumber: string): boolean {
-  const key = `${ACCOUNT_ACTION_REQUIRED_ALERT_COOLDOWN_PREFIX}:${userId}:${accountNumber}`;
+  const key = accountActionRequiredAlertKey(userId, accountNumber);
   const last = getInternalSetting<string>(key);
   if (last && Date.now() - Date.parse(last) < ACCOUNT_ACTION_REQUIRED_ALERT_COOLDOWN_MS) return false;
   setInternalSetting(key, new Date().toISOString());

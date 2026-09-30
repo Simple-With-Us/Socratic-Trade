@@ -224,11 +224,13 @@ const MIN_TRUSTED_REVIEW_NOTIONAL = 0.05;
  *  - quantity scaling whose price oracle (the reviewed notional) is too small to trust;
  *  - SELL/COVER orders whose held position is unknown (no safe way to bound the bump).
  * A sell/cover bump is capped at the FULL held position, so "needs more than held" degrades to a
- * whole-position exit rather than an unfillable order.  That exit is NOT exempt from the floor:
- * if the whole position is itself under the minimum the post-bump re-review blocks it
+ * whole-position exit rather than an unfillable order.  That exit is NOT exempt from the floor
  * (describeBrokerMinimumOrderBlock has no full-exit exemption — see isFullPositionExit, corrected
- * 2026-09-25).  Dollar-based exits are CONVERTED to a quantity order priced off the position's market value (the production
- * AAPL trim case is a dollar-based sell — declining those would leave the motivating loop alive).
+ * 2026-09-25), so the degrade happens only when the whole position itself clears the minimum; a
+ * position worth less than the floor declines here (audit 2026-09-29) instead of returning a plan
+ * the post-bump re-review is guaranteed to block.  Dollar-based exits are CONVERTED to a quantity
+ * order priced off the position's market value (the production AAPL trim case is a dollar-based
+ * sell — declining those would leave the motivating loop alive).
  * positionQuantity may be negative for short positions (cover): magnitudes are used throughout.
  */
 export function planBrokerMinimumBump(
@@ -287,6 +289,10 @@ export function planBrokerMinimumBump(
       const impliedPrice = from / order.quantity;
       const needed = (order.quantity * minNotional * BUMP_QTY_CUSHION) / from;
       if (needed >= heldQty - FULL_POSITION_QTY_EPSILON) {
+        // Degrade to a whole-position exit ONLY when the whole position itself clears the floor.
+        // There is no full-exit exemption (see describeBrokerMinimumOrderBlock), so a whole position
+        // under the floor is a guaranteed post-bump block: decline now and take the skip path.
+        if (heldQty * impliedPrice < minNotional) return undefined;
         return { patch: { quantity: heldQty, dollarAmount: undefined }, fromNotional: from, toNotional: round2(heldQty * impliedPrice) };
       }
       return { patch: { quantity: round6(needed), dollarAmount: undefined }, fromNotional: from, toNotional: round2(needed * impliedPrice) };
@@ -301,6 +307,8 @@ export function planBrokerMinimumBump(
       if (!(impliedPrice > 0) || heldValue < MIN_TRUSTED_REVIEW_NOTIONAL) return undefined;
       const needed = (minNotional * BUMP_QTY_CUSHION) / impliedPrice;
       if (needed >= heldQty - FULL_POSITION_QTY_EPSILON) {
+        // Same rule as the quantity branch: a whole position under the floor cannot be bumped over it.
+        if (heldValue < minNotional) return undefined;
         return { patch: { quantity: heldQty, dollarAmount: undefined }, fromNotional: from, toNotional: round2(heldValue) };
       }
       return { patch: { quantity: round6(needed), dollarAmount: undefined }, fromNotional: from, toNotional: round2(needed * impliedPrice) };
