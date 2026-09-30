@@ -10,6 +10,7 @@ import {
 import { evaluateBrokerHeldExitAvailability, brokerHeldExitBlockReason } from "./broker-held-orders";
 import { placeExitReleasingOwnStops, planExitStopRelease } from "./exit-stop-release";
 import { describeBrokerMinimumOrderBlock, planBrokerMinimumBump, shouldAlertBrokerMinimumOrderBlock } from "./broker-minimum-guard";
+import { clearAccountActionRequired, detectRobinhoodAccountQuestionnaireError, markAccountActionRequired } from "./broker-account-questionnaire";
 import { hasBrokerReportedFill, hasBrokerReportedPricedFill, isLiveOrderState, isRejectedOrCanceledState } from "./broker-side";
 import { audit, clearStopPlans, deriveExitContractFromOpening, getDb, recordStopPlan } from "./db";
 import { auditDeduped } from "./audit-dedupe";
@@ -1343,6 +1344,14 @@ export async function executeProposal(
         } catch (placeError) {
           const message = placeError instanceof Error ? placeError.message : String(placeError);
           const sym = proposal.symbol;
+          // Robinhood refusing this order because the ACCOUNT needs the owner's questionnaire answers
+          // (broker-account-questionnaire.ts): record it so autonomous runs pause new entries too and
+          // re-probe on the retry interval, instead of learning it only from their own rejected order.
+          // Recording only — this path's status handling below is unchanged.
+          const accountQuestionnaireReason = detectRobinhoodAccountQuestionnaireError(message);
+          if (accountQuestionnaireReason && accountNumber) {
+            markAccountActionRequired(userId, accountNumber, accountQuestionnaireReason);
+          }
           if (isOrderPlacementInfrastructureFailure(message) && policy.connectedAccountId) {
             audit(
               "order_place_infrastructure_failed",
@@ -1594,6 +1603,13 @@ export async function executeProposal(
             { policy, userId }
           );
           throw new Error([message].join(" "));
+        }
+        // An OPENING order just cleared the broker on the human-approval path: the only reliable
+        // in-app signal that an earlier account-questionnaire hold was resolved on Robinhood's side.
+        // (The autonomous loop clears it the same way; without this an owner who fixed the account
+        // and approved a card by hand would still find autonomous entries paused.)
+        if ((proposal.side === "buy" || proposal.side === "short") && accountNumber) {
+          clearAccountActionRequired(userId, accountNumber);
         }
         audit("proposal_approved", {
           proposalId,

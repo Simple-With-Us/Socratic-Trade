@@ -223,10 +223,11 @@ const MIN_TRUSTED_REVIEW_NOTIONAL = 0.05;
  *    the account's authority (autoRevertOnCapBreach), which the app must never self-inflict;
  *  - quantity scaling whose price oracle (the reviewed notional) is too small to trust;
  *  - SELL/COVER orders whose held position is unknown (no safe way to bound the bump).
- * A sell/cover bump is capped at the FULL held position: brokers permit liquidating an entire
- * fractional position regardless of its dollar value (see isFullPositionExit), so "needs more
- * than held" degrades to a whole-position exit rather than an unfillable order. Dollar-based
- * exits are CONVERTED to a quantity order priced off the position's market value (the production
+ * A sell/cover bump is capped at the FULL held position, so "needs more than held" degrades to a
+ * whole-position exit rather than an unfillable order.  That exit is NOT exempt from the floor:
+ * if the whole position is itself under the minimum the post-bump re-review blocks it
+ * (describeBrokerMinimumOrderBlock has no full-exit exemption — see isFullPositionExit, corrected
+ * 2026-09-25).  Dollar-based exits are CONVERTED to a quantity order priced off the position's market value (the production
  * AAPL trim case is a dollar-based sell — declining those would leave the motivating loop alive).
  * positionQuantity may be negative for short positions (cover): magnitudes are used throughout.
  */
