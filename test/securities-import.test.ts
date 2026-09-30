@@ -16,7 +16,8 @@ import {
   type ImportedCloseInput
 } from "../src/lib/db-securities-import";
 import { verifySecuritiesImportToken, securitiesImportToken } from "../src/lib/securities-import-auth";
-import { clearHistoryCache, fetchDailyOHLC } from "../src/lib/history";
+import { clearHistoryCache, fetchDailyOHLC, toBusinessDay } from "../src/lib/history";
+import { latestCompletedTradingSessionEtKey } from "../src/lib/market-hours";
 import { POST as importRoute } from "../app/api/admin/securities/import/route";
 
 beforeAll(() => {
@@ -223,5 +224,55 @@ describe("fetchDailyOHLC imported-EOD tier", () => {
     const bars = await fetchDailyOHLC("^GSPC", Date.UTC(2025, 0, 1));
     expect(bars).toHaveLength(250);
     expect(bars![0]).toMatchObject({ close: 5000 });
+  });
+
+  it("does not let a stale dense import beat a live source", async () => {
+    process.env.SECURITIES_IMPORT_HISTORY_TIER_ENABLED = "1";
+    upsertImportedPrices([{ ticker: "SPY", closes: seqCloses(250) }]);
+    // Wednesday 2026-09-30 21:00 UTC is after the 16:00 ET cash close.
+    const now = Date.UTC(2026, 8, 30, 21, 0, 0);
+    const session = latestCompletedTradingSessionEtKey(now);
+    const endSec = Math.floor(Date.parse(`${session}T20:00:00Z`) / 1000);
+    const yahoo = JSON.stringify({
+      chart: {
+        result: [{
+          timestamp: [endSec - 86_400, endSec],
+          indicators: { quote: [{ open: [1, 2], high: [1, 2], low: [1, 2], close: [10, 11], volume: [1, 1] }] }
+        }]
+      }
+    });
+    const fetchMock = vi.fn(async (url: string) =>
+      String(url).includes("query1.finance.yahoo.com")
+        ? new Response(yahoo, { status: 200 })
+        : new Response("no other source", { status: 500 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bars = await fetchDailyOHLC("SPY", now);
+    expect(fetchMock).toHaveBeenCalled();
+    expect(toBusinessDay(bars![bars!.length - 1].time)).toBe(session);
+  });
+
+  it("still serves a fresh dense import without calling the network", async () => {
+    process.env.SECURITIES_IMPORT_HISTORY_TIER_ENABLED = "1";
+    const now = Date.UTC(2026, 8, 30, 21, 0, 0);
+    const session = latestCompletedTradingSessionEtKey(now);
+    const end = Date.parse(`${session}T00:00:00Z`);
+    const closes: ImportedCloseInput[] = [];
+    for (let i = 0; i < 250; i++) {
+      closes.push({
+        date: new Date(end - (249 - i) * 86_400_000).toISOString().slice(0, 10),
+        close: 100 + i,
+        volume: 1
+      });
+    }
+    upsertImportedPrices([{ ticker: "FRESH", closes }]);
+    const fetchMock = vi.fn(async () => new Response("should not be called", { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bars = await fetchDailyOHLC("FRESH", now);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(bars).toHaveLength(250);
+    expect(toBusinessDay(bars![bars!.length - 1].time)).toBe(session);
   });
 });
