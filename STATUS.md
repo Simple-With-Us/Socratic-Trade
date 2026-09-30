@@ -14,6 +14,11 @@ time.  (2) P2: the restore reconcile now decides halt treatment from the account
 not the run's snapshot; if that cannot be tied to this account it takes the halt treatment (put
 back only the released stop).  (3) P2: three cover-of-a-short tests added (green on `main`; coverage
 gap only).  10 new tests, 7 red on `main`.  `do-not-automerge`.
+**PR #4005 review round.**  (R1) a transient release refusal (post-cancel position read failed, or
+the stop cancel did not settle) was booked terminal `blocked` in both lanes; it is now retryable
+`not_placed` (`order_not_placed_exit_stop_release`).  (R2) both fences are now required on
+`ExitStopReleaseRun` (dropping one is a compile error), and a new autopilot end-to-end test through
+`runStrategyOnce` proves an owner Stop mid-release keeps the exit from leaving.  5 new tests.
 Rollout: `docs/rollouts/2026-09-30-st-exit-stop-release-review-round.md`.
 
 ## 2026-09-27 MINIMAX — Congress.Trade share guards: stop treating an HTTP 200 as delivery

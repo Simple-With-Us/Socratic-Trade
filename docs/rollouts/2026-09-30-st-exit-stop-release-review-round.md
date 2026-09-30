@@ -136,3 +136,88 @@ build).
 - The cover path was already correct; the gap was test coverage only.
 - `freshPlacementBlockReason` blocks every side when halted (both sources), so the new fence stops
   an exit under a halt the same way the callers' existing fence does.
+
+## Review Round (PR #4005, 2026-09-30)
+
+The review of this PR returned two P2 findings.  Both were verified against the branch and both
+are real; none were declined.
+
+| # | Severity | Finding | Verdict |
+|---|---|---|---|
+| R1 | P2 | Transient release failures land as terminal `blocked` (pre-existing from #3793) | **Confirmed, fixed** |
+| R2 | P2 | The autopilot lane's `placementBlockReason` wiring has no test and fails open if dropped | **Confirmed, fixed** |
+
+### R1 — Transient release refusals booked terminal (confirmed)
+
+`ExitStopReleaseError` extends `OrderValidationError`, and both lanes only special-case
+`isRetryablePositionInvariantError`, which matches `OrderPositionInvariantError` alone.  So the two
+transient release codes fell through to the generic `OrderValidationError` branch and were booked
+terminal `blocked`: `position_unverified` (the position re-read after the cancel failed) and
+`stop_cancel_unconfirmed` (the cancel did not settle in time).  In both cases nothing reached the
+broker and the released stop was rolled back.  Reproduced before the fix: a single post-cancel
+position read timeout booked the approved exit `blocked` in both lanes.
+
+Fix: new `isRetryableExitStopReleaseError` in `src/lib/exit-stop-release.ts` (true for exactly
+those two codes).  Each lane gets a branch right after its position-invariant branch that books
+`not_placed`, audits `order_not_placed_exit_stop_release` with the code, and notifies "exit not
+placed ... (safe to retry)".  `still_held`, `exit_moot_stop_filled` and `placement_blocked` stay
+terminal on purpose: a retry cannot change an owner order holding the shares, a closed position,
+or the owner's Stop.
+
+### R2 — Autopilot fence wiring untested and optional (confirmed)
+
+Only the approval lane had an end-to-end test of the final placement fence, and both fences were
+optional on `ExitStopReleaseRun`, so deleting the `placementBlockReason` line in `strategy.ts`
+kept every test green.  Mutation check before the fix: with that line removed, the new autopilot
+test fails because the exit is sent (`["BAC", "sell", "market", 24]` reaches the broker).
+
+Fix: `assertOwned` and `placementBlockReason` are now REQUIRED on `ExitStopReleaseRun`, so a lane
+that drops either one fails to compile (a `@ts-expect-error` unit test pins that down, since `tsc`
+covers `test/`).  New `test/exit-stop-release-autopilot.test.ts` drives the real
+`runStrategyOnce` through the release path: the owner's Stop lands on THIS account while the stop
+cancel is in flight, and the test asserts the exit never leaves, the released stop is put back for
+all 24 shares, and the proposal is `blocked` with an `exit_stop_release_placement_blocked` audit.
+It seeds the halt on the run's own connected account, so wiring the fence to the wrong account id
+also fails it.
+
+### Review Round Files
+
+- `src/lib/exit-stop-release.ts`: `isRetryableExitStopReleaseError`; `assertOwned` and
+  `placementBlockReason` required (optional-call sites now plain calls).
+- `src/lib/strategy.ts`: autopilot retryable `not_placed` branch for the two transient codes.
+- `src/lib/strategy-execution.ts`: approval retryable `not_placed` branch for the same codes.
+- `test/exit-stop-release-autopilot.test.ts` (new): 2 end-to-end autopilot tests (owner Stop
+  mid-release; post-cancel position read timeout books `not_placed`).
+- `test/exit-stop-release-approval.test.ts`: 1 new test (post-cancel position read timeout books
+  `not_placed`, stop put back); `failPositionReads` hook on the mocked broker.
+- `test/exit-stop-release.test.ts`: 2 new tests (retryable classification; both fences required by
+  the type); every direct call now passes both fences explicitly (`OPEN_FENCES` where a test is not
+  about them).
+- Docs: this section, `STATUS.md`, `docs/EFFORT-LOG.md`.
+
+### Review Round Decisions
+
+- **A separate branch, not a wider `isRetryablePositionInvariantError`.**  That helper's audit kind
+  and notification say "position unverified", which would mislabel a stop cancel that did not
+  settle.  The new branch keeps its own audit kind and carries the code.
+- **Both fences required, not just `placementBlockReason`.**  The same fail-open argument applies
+  to the lease fence; both production callers already pass both.
+- **The restore-state test keeps an open placement fence.**  "Owner halts mid-release" in
+  `test/exit-stop-release.test.ts` isolates the restore reconcile, so it passes an explicit
+  `placementBlockReason: () => undefined`; the placement fence under a halt is covered by the
+  unit fence test and both lanes' end-to-end tests.
+
+### Review Round Verification
+
+```bash
+export PATH=/opt/homebrew/opt/node@24/bin:$PATH
+npx vitest run test/exit-stop-release.test.ts test/exit-stop-release-approval.test.ts test/exit-stop-release-autopilot.test.ts test/order-position-invariant-lanes.test.ts
+#   before the fix: 3 failed (R1 in both lanes, R1 classification); with the strategy.ts
+#   placementBlockReason line deleted, the autopilot Stop test fails (the exit is sent)
+#   after the fix: 4 files, 37 passed
+npx eslint src/lib/exit-stop-release.ts src/lib/strategy.ts src/lib/strategy-execution.ts test/exit-stop-release.test.ts test/exit-stop-release-approval.test.ts test/exit-stop-release-autopilot.test.ts
+#   0 errors (49 pre-existing warnings in strategy.ts / strategy-execution.ts, none on changed lines)
+npx tsc --noEmit
+#   pending at commit time (load average 250-350); the required `verify` CI job is the type gate
+```
+
