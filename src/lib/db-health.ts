@@ -1203,6 +1203,17 @@ export async function alertStorageWarning(warningType: string, message: string):
 
 const LIVENESS_ALERT_COOLDOWN_PREFIX = "livenessAlertSent";
 const LIVENESS_ALERT_COOLDOWN_MS = 15 * 60_000; // 15 mins for liveness since it's more critical, or maybe 12 hours? Let's use 1 hour.
+// Episode tracking for escalation: a degradation nobody acts on must get LOUDER,
+// not just repeat.  `livenessDegradedSince:<type>` marks when the current episode
+// began; `livenessEscalatedAt:<type>` marks the last escalation ping.
+const LIVENESS_DEGRADED_SINCE_PREFIX = "livenessDegradedSince";
+const LIVENESS_ESCALATED_AT_PREFIX = "livenessEscalatedAt";
+
+function livenessEscalationHours(): number {
+  const raw = Number(process.env.ST_LIVENESS_ESCALATION_HOURS ?? 4);
+  return Number.isFinite(raw) && raw > 0 ? raw : 4;
+}
+
 export async function alertLivenessWarning(warningType: string, message: string): Promise<void> {
   try {
     const key = `${LIVENESS_ALERT_COOLDOWN_PREFIX}:${warningType}`;
@@ -1211,11 +1222,56 @@ export async function alertLivenessWarning(warningType: string, message: string)
     if (last && Date.now() - Date.parse(last) < LIVENESS_ALERT_COOLDOWN_MS) return;
     setInternalSetting(key, new Date().toISOString());
 
-    const title = `Liveness Warning: ${warningType.replace(/_/g, " ")}`;
-    const body = message;
-    const payload = { warningType, message };
+    // Track the episode start so a persistent degradation escalates.  First
+    // alert of an episode stamps it; recovery clears it via clearLivenessWarning.
+    const sinceKey = `${LIVENESS_DEGRADED_SINCE_PREFIX}:${warningType}`;
+    let sinceIso = getInternalSetting<string>(sinceKey);
+    if (!sinceIso || Number.isNaN(Date.parse(sinceIso))) {
+      sinceIso = new Date().toISOString();
+      setInternalSetting(sinceKey, sinceIso);
+    }
+    const degradedHours = (Date.now() - Date.parse(sinceIso)) / 3_600_000;
+    const escalationHours = livenessEscalationHours();
+    // Escalate at most once per escalation window: loud on crossing, then the
+    // regular 15-min cadence resumes until the next window boundary.
+    const escalatedAtKey = `${LIVENESS_ESCALATED_AT_PREFIX}:${warningType}`;
+    const escalatedAt = getInternalSetting<string>(escalatedAtKey);
+    const escalatedAtMs = escalatedAt ? Date.parse(escalatedAt) : NaN;
+    const dueForEscalation =
+      degradedHours >= escalationHours &&
+      (Number.isNaN(escalatedAtMs) || Date.now() - escalatedAtMs >= escalationHours * 3_600_000);
+
+    const title = dueForEscalation
+      ? `ESCALATED Liveness: ${warningType.replace(/_/g, " ")} still degraded after ${Math.floor(degradedHours)}h`
+      : `Liveness Warning: ${warningType.replace(/_/g, " ")}`;
+    const body = dueForEscalation
+      ? `${message}\n\nThis condition has persisted for ${degradedHours.toFixed(1)} hours without recovery. Trading may be silently stalled; human intervention is needed.`
+      : message;
+    const payload = {
+      warningType,
+      message,
+      degradedHours: Math.round(degradedHours * 10) / 10,
+      escalated: dueForEscalation
+    };
 
     audit("liveness_warning_alert", payload, "local");
+
+    // Page via Sentry at error level (the level PagerDuty routes on) with a
+    // stable fingerprint per warning type, so a degradation that nobody acts on
+    // keeps paging instead of sitting in a notification nobody reads.  The
+    // 2026-09-30 incident had tradingLivenessDegraded=true for ~5 days with no
+    // escalation; this path is the in-app backstop for exactly that.
+    await captureHealthSentryMessage("error", `${title}: ${message}`, {
+      service: "trading-liveness",
+      failureClass: dueForEscalation ? "escalated-persistent" : "persistent-degradation",
+      warningType,
+      degradedHours: Math.round(degradedHours * 10) / 10,
+      escalated: dueForEscalation
+    });
+
+    if (dueForEscalation) {
+      setInternalSetting(escalatedAtKey, new Date().toISOString());
+    }
 
     await deliverSystemAlertToAdmins({
       type: "liveness_warning",
@@ -1224,6 +1280,21 @@ export async function alertLivenessWarning(warningType: string, message: string)
       payload,
       kind: "liveness_warning"
     });
+  } catch {
+    // never throw on warnings
+  }
+}
+
+/**
+ * Clear a liveness episode's escalation state once the condition recovers, so
+ * the next episode starts its clock fresh instead of escalating immediately.
+ * Call from the healthy branch wherever alertLivenessWarning is raised.
+ */
+export async function clearLivenessWarning(warningType: string): Promise<void> {
+  try {
+    const { deleteInternalSetting } = await import("./db");
+    deleteInternalSetting(`${LIVENESS_DEGRADED_SINCE_PREFIX}:${warningType}`);
+    deleteInternalSetting(`${LIVENESS_ESCALATED_AT_PREFIX}:${warningType}`);
   } catch {
     // never throw on warnings
   }

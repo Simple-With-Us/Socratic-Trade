@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-09-30 FINCH — Self-healing watchdogs (branch `finch/self-healing-watchdogs`, lane `~/workspace/lanes/st-selfheal`)
+
+**What.**  Owner directive after the 2026-09-30 10:33-10:44 CT 11-minute public 503 (Traefik "no available server" while the app process was alive, Docker healthcheck green, Coolify "running:healthy"; manual Coolify restart recovered).  Root causes: (1) nothing acts on the Docker health signal (Coolify `health_check_enabled=false`); (2) the tick watchdog's abort never reaches run/scroll work — orphaned Qdrant scrolls OOM the process (2026-09-25 mechanism); (3) `tradingLivenessDegraded` had no consumer (UptimeRobot retired), so a 4-failure streak with no completed run in ~4.9 days sat silent; (4) no in-process memory watchdog existed.
+
+**Changes.**  (1) Entrypoint liveness watchdog: a background subshell in `scripts/coolify-prod-start.sh` (outside Node, so a pinned event loop cannot wedge it) probes `GET /api/live`; after 5 consecutive failures it SIGTERMs the app so Docker restarts the container (boot grace 600s, one success resets, kill switch `LIVENESS_WATCHDOG=0`).  (2) Boot-ledger attribution: `readRecentWatchdogKill()` logs the watchdog receipt on the next boot; `rssBytes` captured at exit receipts.  (3) Staleness paging: `alertLivenessWarning` now captures Sentry **error**-level (PagerDuty route) with stable fingerprint, 4h escalation, and `clearLivenessWarning` on recovery; wired into `/api/health`.  (4) New `src/lib/rss-watchdog.ts`: exits 44 on sustained RSS breach (default 8GB, 3 samples).  (5) New `src/lib/run-failure-watchdog.ts` as a scheduler lane: alert at 3 consecutive failures, exponential backoff at 5, auto-halt at 10 with a durable `autoResume:false` marker; owner re-arm honored (fresh episode, re-halt needs NEW failures); **never restarts the process** (boot interlock would halt the fleet).  (6) `run_failure_halt` cause surfaced in `describeAutonomyHaltCause`.  (7) Tick AbortSignal threaded through `managed-vector-reconcile` into the Qdrant scroll `throwIfAborted()` seams — the watchdog unwedge now kills the orphaned scroll instead of OOMing.
+
+**Verification.**  `npx tsc --noEmit` clean; `npx eslint` 0 errors on changed files; 31 new tests (rss-watchdog 9, run-failure-watchdog 10, liveness-warning-escalation 8, boot-ledger +4); liveness shell function tested with stubbed curl.  Full `npm test` + `npm run build` running.
+
+**Not done / blocked.**  External public-URL watchdog is BLOCKED: from this VM every socratictrade.com path returns Cloudflare 403 (egress IP blocked at the edge), so a VM-side monitor cannot distinguish healthy from down and would false-positive restart production.  Script kept DISABLED at `~/workspace/socratic-trade-watchdog/` with a README; needs a Cloudflare IP allowlist, an unblocked vantage point, or a third-party uptime service.  Coolify-side health-check-with-restart is a manual owner step.  Weekday RTH latch queues the deploy until after close; PR can auto-merge.
+
+**Next.**  Finish full verify, `bash scripts/land.sh`, open PR READY, `gh pr merge --squash --auto`.
+
 ## 2026-09-30 CLAUDE — Exit stop release review round (#3793 follow-up, lane H1, branch `claude/st-w3-h1`)
 
 **What.**  PR #3793 merged before its review findings were addressed; all three are confirmed and

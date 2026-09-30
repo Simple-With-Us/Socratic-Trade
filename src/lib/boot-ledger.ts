@@ -61,6 +61,8 @@ export interface ExitEntry {
   signal?: string;
   /** process.exit() call-site stack captured by exit-guard, when the exit went through it. */
   callSite?: string;
+  /** RSS in bytes at exit time, when captured (self-healing 2026-09-30). */
+  rssBytes?: number;
 }
 
 export type BootLedgerEntry = BootEntry | ExitEntry;
@@ -69,6 +71,10 @@ export interface ExitReceiptDetail {
   code: number;
   signal?: string;
   callSite?: string;
+  /** RSS in bytes at exit time, captured by noteExitReceipt (self-healing 2026-09-30:
+   *  gives the boot ledger "RSS-at-death" for receipted exits, so a watchdog/OOM-adjacent
+   *  exit can be distinguished from a lean one; SIGKILLs still leave no receipt at all). */
+  rssBytes?: number;
 }
 
 export interface RestartLoopAssessment {
@@ -205,7 +211,19 @@ let state: LedgerState | null = null;
 
 /** Called by exit-guard right before it performs the real exit, so the ledger keeps the call site. */
 export function noteExitReceipt(detail: ExitReceiptDetail): void {
-  if (state) state.pendingReceipt = detail;
+  if (state) {
+    // Capture RSS-at-death here (not at the call site): the receipt lands a
+    // moment before the real exit, so this is the freshest possible reading.
+    // Best-effort — a broken memoryUsage() must never block an exit.
+    if (detail.rssBytes === undefined) {
+      try {
+        detail = { ...detail, rssBytes: process.memoryUsage().rss };
+      } catch {
+        /* keep the receipt without RSS */
+      }
+    }
+    state.pendingReceipt = detail;
+  }
 }
 
 /** Test helper. */
@@ -268,7 +286,8 @@ export function recordBoot(options: BootLedgerOptions = {}): RestartLoopAssessme
           code: typeof code === "number" ? code : (receipt?.code ?? null),
           uptimeSec: Math.max(0, Math.round((now() - startedAtMs) / 1000)),
           ...(receipt?.signal ? { signal: receipt.signal } : {}),
-          ...(receipt?.callSite ? { callSite: receipt.callSite } : {})
+          ...(receipt?.callSite ? { callSite: receipt.callSite } : {}),
+          ...(typeof receipt?.rssBytes === "number" ? { rssBytes: receipt.rssBytes } : {})
         };
         appendLine(path, exitEntry);
       } catch {
@@ -347,5 +366,37 @@ export async function reportRestartLoop(
     await alertStorageWarning(RESTART_LOOP_ALERT_TYPE, message);
   } catch {
     // alerting must not affect boot
+  }
+}
+
+export const LIVENESS_WATCHDOG_LOG_FILENAME = "liveness-watchdog.log";
+const WATCHDOG_KILL_RECENCY_MS = 60 * 60 * 1000;
+
+/**
+ * Best-effort attribution for container restarts triggered by the liveness
+ * watchdog in scripts/coolify-prod-start.sh (2026-09-30 self-healing).  The
+ * watchdog appends one line per kill to liveness-watchdog.log on the data
+ * volume; the exit-guard receipt for the same restart just shows SIGTERM, so
+ * without this the next boot cannot tell a watchdog kill from a deploy stop.
+ * Returns the last log line when the file was written recently, else null.
+ * Never throws.
+ */
+export function readRecentWatchdogKill(
+  env: Record<string, string | undefined> = process.env,
+  nowMs: number = Date.now()
+): string | null {
+  try {
+    const logPath = join(dirname(bootLedgerPath(env)), LIVENESS_WATCHDOG_LOG_FILENAME);
+    let stat;
+    try {
+      stat = statSync(logPath);
+    } catch {
+      return null;
+    }
+    if (nowMs - stat.mtimeMs > WATCHDOG_KILL_RECENCY_MS) return null;
+    const lines = readFileSync(logPath, "utf8").trim().split("\n").filter((l) => l.trim());
+    return lines.length > 0 ? lines[lines.length - 1] : null;
+  } catch {
+    return null;
   }
 }

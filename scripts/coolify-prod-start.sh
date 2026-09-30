@@ -177,6 +177,33 @@ fi
 
 MODE="${DB_BOOTSTRAP:-fresh}"
 
+# --- container liveness watchdog config (2026-09-30, self-healing) ---
+# The Dockerfile HEALTHCHECK probes /api/live every 30s and marks the container
+# unhealthy when the Node HTTP server stops answering -- but nothing ACTS on an
+# unhealthy container: Docker never restarts on health status alone, and Coolify
+# defers to the Dockerfile HEALTHCHECK (health_check_enabled=false).  On
+# 2026-09-30 socratictrade.com returned Traefik "no available server" for ~11
+# minutes while the process lived and Coolify reported "running:healthy"; only a
+# manual restart recovered it.  (The 2026-09-24 stall-profiler doc shows the
+# mechanism: the event loop pins for 40-140s chunks during RTH, wedging the
+# server while the process stays alive.)
+# The watchdog below is the missing actor: same /api/live probe, same curl
+# flags as the HEALTHCHECK; after LIVENESS_WATCHDOG_FAILURES consecutive
+# failures it kills the app process so Docker's restart=unless-stopped
+# restarts the container.  The boot autonomy interlock then halts trading (the
+# SAFE direction when the server cannot serve), the boot ledger records the
+# exit, and reportRestartLoop pages if it recurs.
+# Kill switch: LIVENESS_WATCHDOG=0.
+LIVENESS_WATCHDOG="${LIVENESS_WATCHDOG:-1}"
+LIVENESS_WATCHDOG_INTERVAL="${LIVENESS_WATCHDOG_INTERVAL:-30}"
+LIVENESS_WATCHDOG_FAILURES="${LIVENESS_WATCHDOG_FAILURES:-5}"
+LIVENESS_WATCHDOG_BOOT_GRACE_S="${LIVENESS_WATCHDOG_BOOT_GRACE_S:-600}"
+case "$LIVENESS_WATCHDOG_INTERVAL" in ''|*[!0-9]*) LIVENESS_WATCHDOG_INTERVAL=30 ;; esac
+case "$LIVENESS_WATCHDOG_FAILURES" in ''|*[!0-9]*) LIVENESS_WATCHDOG_FAILURES=5 ;; esac
+case "$LIVENESS_WATCHDOG_BOOT_GRACE_S" in ''|*[!0-9]*) LIVENESS_WATCHDOG_BOOT_GRACE_S=600 ;; esac
+LIVENESS_WATCHDOG_PID=""
+LIVENESS_WATCHDOG_LOG="$DATA_DIR/liveness-watchdog.log"
+
 # Production exit-code contract (docs/rollouts/2026-08-02-exit0-outage-audit.md):
 # NO production code path may exit 0 spontaneously. The Coolify app runs under
 # restart=unless-stopped, which restarts ANY spontaneous exit regardless of
@@ -189,17 +216,87 @@ MODE="${DB_BOOTSTRAP:-fresh}"
 #             re-boots WITHOUT litestream via the marker branch below
 #   42      = R2 replication resume; the restart re-enables litestream
 #   43      = in-app exit-guard re-tagged a spontaneous process.exit(0)
+#   44      = in-app RSS watchdog pre-OOM exit (src/lib/rss-watchdog.ts);
+#             RSS stayed over ST_RSS_LIMIT_MB; the restart is the recovery
 #   130/143 = graceful shutdown after a forwarded SIGINT/SIGTERM (docker stop)
 # The app is invoked as node_modules/.bin/next directly, NEVER via `npm run`:
 # in-container npm dies on SIGTERM without forwarding it to the server (proven
 # in the 2026-08-02 sandbox repro), so deploys hard-killed next-server and the
 # recorded exit codes were garbage.
+# Probes /api/live (same endpoint and curl flags as the Dockerfile
+# HEALTHCHECK) in a sequential loop -- one probe at a time, so a wedged server
+# can never pile up probes the way the 2026-09-09 zombie-curl incident did.
+# Runs as a background subshell of this script, OUTSIDE the Node process, so it
+# keeps working when the event loop is fully pinned.
+#
+# Arming discipline: failures are not counted until the server has answered at
+# least once (boot grace) OR the boot grace period expires -- a server that
+# cannot serve /api/live LIVENESS_WATCHDOG_BOOT_GRACE_S after process start is
+# broken, and one success resets the consecutive-failure count so transient
+# stalls (the 40-140s RTH chunks) ride out without a kill.
+liveness_watchdog_loop() {
+  local app_pid="$1"
+  local failures=0
+  local armed=0
+  local elapsed=0
+  while true; do
+    sleep "$LIVENESS_WATCHDOG_INTERVAL"
+    elapsed=$((elapsed + LIVENESS_WATCHDOG_INTERVAL))
+    if curl -fsS --max-time 14 --connect-timeout 2 http://127.0.0.1:4000/api/live >/dev/null 2>&1; then
+      failures=0
+      armed=1
+    else
+      if [ "$armed" -eq 0 ] && [ "$elapsed" -lt "$LIVENESS_WATCHDOG_BOOT_GRACE_S" ]; then
+        continue
+      fi
+      armed=1
+      failures=$((failures + 1))
+      log "liveness watchdog: /api/live probe failed ${failures}/${LIVENESS_WATCHDOG_FAILURES} consecutive"
+      if [ "$failures" -ge "$LIVENESS_WATCHDOG_FAILURES" ]; then
+        log "LIVENESS-WATCHDOG: /api/live failed ${failures} consecutive probes - killing app pid ${app_pid} for container restart"
+        printf '%s liveness-watchdog kill pid=%s after %s failed /api/live probes\n' \
+          "$(date -u +%FT%TZ)" "$app_pid" "$failures" >> "$LIVENESS_WATCHDOG_LOG" 2>/dev/null || true
+        kill -TERM "$app_pid" 2>/dev/null || true
+        sleep 20
+        if kill -0 "$app_pid" 2>/dev/null; then
+          log "LIVENESS-WATCHDOG: app pid ${app_pid} survived SIGTERM - SIGKILL"
+          kill -KILL "$app_pid" 2>/dev/null || true
+        fi
+        return 0
+      fi
+    fi
+  done
+}
+
+start_liveness_watchdog() {
+  if [ "${LIVENESS_WATCHDOG:-1}" = "0" ]; then
+    log "liveness watchdog disabled (LIVENESS_WATCHDOG=0)"
+    return 0
+  fi
+  liveness_watchdog_loop "$1" &
+  LIVENESS_WATCHDOG_PID=$!
+  log "liveness watchdog armed (pid $LIVENESS_WATCHDOG_PID, interval ${LIVENESS_WATCHDOG_INTERVAL}s, failures ${LIVENESS_WATCHDOG_FAILURES}, boot grace ${LIVENESS_WATCHDOG_BOOT_GRACE_S}s)"
+}
+
+# Safe without a pidfile: an exited-but-unreaped watchdog subshell is our child
+# zombie and still holds its pid, so pid reuse cannot hit an unrelated process;
+# kill on a zombie is a harmless no-op.
+stop_liveness_watchdog() {
+  if [ -n "${LIVENESS_WATCHDOG_PID:-}" ]; then
+    kill "$LIVENESS_WATCHDOG_PID" 2>/dev/null || true
+    LIVENESS_WATCHDOG_PID=""
+  fi
+}
+
 GOT_STOP_SIGNAL=""
 run_app() {
   "$@" &
   APP_PID=$!
   trap 'GOT_STOP_SIGNAL=SIGTERM; log "forwarding SIGTERM to app (pid $APP_PID)"; kill -TERM "$APP_PID" 2>/dev/null || true' TERM
   trap 'GOT_STOP_SIGNAL=SIGINT; log "forwarding SIGINT to app (pid $APP_PID)"; kill -INT "$APP_PID" 2>/dev/null || true' INT
+  # Arm the liveness watchdog now that APP_PID is known.  It lives outside the
+  # Node process so a pinned event loop cannot wedge it too.
+  start_liveness_watchdog "$APP_PID"
   set +e
   wait "$APP_PID"
   code=$?
@@ -210,6 +307,9 @@ run_app() {
     code=$?
   done
   set -e
+  # The app is down; the watchdog has nothing left to guard.  Stop it before
+  # the exit-code branches below so a stale prober can never outlive the app.
+  stop_liveness_watchdog
   if [ "$code" -eq 0 ] && [ -z "$GOT_STOP_SIGNAL" ]; then
     log "FATAL: app exited 0 spontaneously (no stop signal was forwarded)."
     log "A clean exit is never valid in production - translating to exit 40 so every restart policy restarts us."
