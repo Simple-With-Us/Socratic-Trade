@@ -147,9 +147,12 @@ npx eslint src/lib/ops-performance.ts src/lib/performance.ts src/lib/history.ts 
   src/lib/benchmark.ts app/api/ops/performance/route.ts
 ```
 
-Results are recorded in the PR description.  The host sat at load average 300 for the whole
-session, so `npm run build` and the full suite were not run locally; the required CI check
-`verify` is the full-suite and build gate of record.
+Results on the final commit: `tsc --noEmit` exited 0 with no output; the six targeted test files
+passed (6 files, 80 tests); eslint reported 0 errors and 8 warnings, all pre-existing
+(`no-unused-vars` and `no-explicit-any` backlog, plus two unused `eslint-disable` directives in
+`test/ops-performance.test.ts`).  The host sat at load average 300 for the whole session, so
+`npm run build` and the full suite were not run locally; the required CI check `verify` is the
+full-suite and build gate of record.
 
 ## 5. Next Steps & Blockers
 
