@@ -2,7 +2,8 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import dns from "node:dns";
-import { withSentryConfig } from "@sentry/nextjs";
+// v11: withSentryConfig moved to the dedicated build-config entry point.
+import { withSentryConfig } from "@sentry/nextjs/config";
 
 const require = createRequire(import.meta.url);
 const webpack = require("webpack");
@@ -38,7 +39,7 @@ const nextConfig = {
       }
     ];
   },
-  serverExternalPackages: ["better-sqlite3", "@pinecone-database/pinecone", "voyageai", "dd-trace", "@sentry/profiling-node"],
+  serverExternalPackages: ["better-sqlite3", "@pinecone-database/pinecone", "voyageai", "dd-trace", "@sentry/profiling-node", "undici"],
   webpack: (config, { isServer, nextRuntime }) => {
     config.resolve.alias = {
       ...(config.resolve.alias ?? {}),
@@ -51,6 +52,7 @@ const nextConfig = {
         "@pinecone-database/pinecone": false,
         "voyageai": false,
         "dd-trace": false,
+        "undici": false,
         "node:fs": false,
         "node:path": false,
         "node:http": false,

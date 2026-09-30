@@ -44,8 +44,8 @@
     "@opentelemetry/instrumentation": "^0.222.0",
     "@opentelemetry/sdk-trace-node": "^2.11.0",
     "@pinecone-database/pinecone": "^8.2.0",
-    "@sentry/nextjs": "^10.75.0",
-    "@sentry/profiling-node": "10.75.0",
+    "@sentry/nextjs": "^11.0.0",
+    "@sentry/profiling-node": "11.0.0",
     "better-sqlite3": "^13.0.3",
     "cheerio": "^1.2.0",
     "clsx": "^2.1.1",
@@ -66,6 +66,7 @@
     "server-only": "^0.0.1",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.6.0",
+    "undici": "^7.16.0",
     "zod": "^4.6.2"
   },
   "devDependencies": {

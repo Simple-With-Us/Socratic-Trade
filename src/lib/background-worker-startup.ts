@@ -88,10 +88,22 @@ export async function startServerBackgroundWorkers(
   }
 
   log(`[background-workers] enabled (${decision.environment}; ${decision.reason})`);
+  // Import before the scheduler starts: its immediate tick can otherwise win
+  // the race against a later fire-and-forget import and start a duplicate probe.
+  const congressShare = await import("./congress-share");
   const starters = options.starters ?? await loadDefaultStarters();
   // startUsageMonitorReplay synchronously establishes the atomic all-ledger v2 boundary before
   // launching its first async send. It must precede every producer family, especially scheduler.
   starters.startUsageMonitorReplay();
+  // Startup token probe: validate on every boot so a drifted/rotated token
+  // surfaces immediately (Sentry + health log), even inside a previous
+  // process's six-hour window. Claim the marker synchronously before the
+  // scheduler's first tick; the network check does not block startup.
+  if (congressShare.congressTradeToken()) {
+    void congressShare.probeCongressShareTokenOnStartup().catch((err) => {
+      console.warn("[background-workers] congress-share startup probe error:", err instanceof Error ? err.message : err);
+    });
+  }
   starters.startScheduler();
   // Server-knob supervisor MUST precede startStreams: it registers the congress-stream enabled
   // resolver so even the boot gate sees a DB override, and it later restarts streams flipped on
@@ -99,5 +111,6 @@ export async function startServerBackgroundWorkers(
   starters.startServerKnobSupervisor();
   starters.startStreams();
   starters.startSecIngestWorker(); // loop parks/resumes itself per the SEC_INGEST_WORKER_ENABLED server knob
+
   return decision;
 }

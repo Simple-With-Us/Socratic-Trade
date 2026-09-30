@@ -116,6 +116,27 @@ describe("account deletion", () => {
     expect(db.getDb().prepare("SELECT COUNT(*) AS count FROM account_deletion_requests WHERE user_id = ?").get(userA)).toMatchObject({ count: 0 });
   });
 
+  it("purges the per-user data-source proxy settings row (deletion sweep coverage)", async () => {
+    const db = await import("../src/lib/db");
+    const deletion = await import("../src/lib/account-deletion");
+    const email = "proxy-delete@example.com";
+    const userId = userIdForEmail(email);
+    const now = new Date().toISOString();
+    db.getDb()
+      .prepare(
+        `INSERT INTO user_proxy_settings (user_id, enabled, protocol, host, port, username, password, failure_mode, created_at, updated_at)
+         VALUES (?, 1, 'http', 'proxy.example.com', 8888, 'proxy-user', 'encrypted-secret', 'fail_soft', ?, ?)`
+      )
+      .run(userId, now, now);
+    const count = () => (db.getDb().prepare("SELECT COUNT(*) AS c FROM user_proxy_settings WHERE user_id = ?").get(userId) as { c: number }).c;
+    expect(count()).toBe(1);
+
+    deletion.prepareAccountDeletion({ userId, email });
+    const result = await deletion.confirmAndDeleteAccount({ userId, email, body: confirmation(email) });
+    expect(result.ok).toBe(true);
+    expect(count()).toBe(0); // the sweep deleted the proxy row, credentials included
+  });
+
   it("purges the per-user LLM budget reservation settings row (deletion sweep coverage)", async () => {
     const db = await import("../src/lib/db");
     const deletion = await import("../src/lib/account-deletion");
