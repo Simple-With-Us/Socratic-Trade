@@ -113,9 +113,18 @@ npx eslint src/lib/broker-account-questionnaire.ts src/lib/broker-minimum-guard.
   src/lib/hold-reason.ts src/lib/ops-performance.ts src/lib/strategy.ts src/lib/strategy-execution.ts
 ```
 
-Failing tests were written first for every finding (committed as `f60da9350` and in this PR's
-history).  The required `verify` CI check on this PR is the binding full-suite and build gate; the
-Mac was under load average 250 to 300 so the full suite and `npm run build` were not run locally.
+Failing tests were written first for the hold gate, funnel, summary, and revert-label findings
+(commit `f60da9350`) and for the planner and cooldown findings (they failed before the fix, 4 of 4).
+The two integration files (`test/account-questionnaire-run-loop.test.ts`, the approval-path cases
+in `test/broker-minimum-bump-execute.test.ts`) were added alongside the fixes and pass.
+
+Results on the merged tree (`origin/main` merged in): `tsc --noEmit` clean (exit 0), eslint 0 errors
+(two pre-existing unused-import warnings in `strategy-execution.ts`), every targeted file above
+passes.  Caveat: the Mac was at load average 250 to 800, and the repo's own fixed 30 second per-test
+timeouts in `test/final-size-red-autonomous.test.ts` fail all six of its tests under that load
+(including ones this PR does not touch).  The test carrying this PR's new run-summary assertion
+passes when its per-test timeout is raised.  The required `verify` CI check is the binding
+full-suite and build gate; `npm run build` was not run locally.
 
 ## Next Steps & Blockers
 
