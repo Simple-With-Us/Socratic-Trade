@@ -92,8 +92,11 @@ const MAX_PLACING_FAILURE_ROWS = 1000;
 const OPS_QUOTE_MAX_SYMBOLS = 100;
 /** Ceiling on the quote fetch for ONE account.  A slow feed degrades to "unpriced", never a hang. */
 const OPS_QUOTE_FETCH_TIMEOUT_MS = 8_000;
-/** Ceiling on ALL quote fetching in one snapshot build.  An unfiltered request walks every
- *  account; without this a slow feed could cost `accounts x OPS_QUOTE_FETCH_TIMEOUT_MS`. */
+/** Ceiling on the time ALL quote fetching may spend in one snapshot build.  An unfiltered request
+ *  walks every account; without this a slow feed could cost `accounts x OPS_QUOTE_FETCH_TIMEOUT_MS`.
+ *  It counts time spent WAITING ON QUOTES, not wall clock since the build started, so a large
+ *  ledger's FIFO walk or a loaded event loop on an earlier account cannot starve the marks of the
+ *  accounts after it. */
 const OPS_QUOTE_TOTAL_BUDGET_MS = 20_000;
 /** Bound on held ("proposed" / Awaiting approval) proposal rows scanned for the holdReasons
  *  rollup, per account — same rationale as MAX_BLOCK_REASON_ROWS. */
@@ -754,10 +757,11 @@ function emptyProposalFunnel(windowDays: number): OpsProposalFunnel {
 }
 
 /** Per-build quote state: marks already obtained (a ticker held in several accounts is quoted
- *  once) and the wall-clock instant after which no further quote fetch is attempted. */
+ *  once) and how much of the quote-time budget is already spent. */
 interface OpsQuoteContext {
   marks: Map<string, number>;
-  deadlineAt: number;
+  /** Milliseconds spent waiting on quote fetches so far in this build. */
+  spentMs: number;
   enabled: boolean;
 }
 
@@ -785,10 +789,11 @@ async function fetchOpsMarks(
   }
   if (!ctx.enabled || missing.length === 0) return out;
 
-  const timeoutMs = Math.min(OPS_QUOTE_FETCH_TIMEOUT_MS, ctx.deadlineAt - Date.now());
+  const timeoutMs = Math.min(OPS_QUOTE_FETCH_TIMEOUT_MS, OPS_QUOTE_TOTAL_BUDGET_MS - ctx.spentMs);
   if (timeoutMs <= 0) return out; // request-level quote budget already spent
 
   const controller = new AbortController();
+  const startedAt = Date.now();
   try {
     const quotes = await withDeadline(
       fetchFreshQuotesCascade(missing.slice(0, OPS_QUOTE_MAX_SYMBOLS), userId, accountNumber, connectedAccountId, {
@@ -808,6 +813,8 @@ async function fetchOpsMarks(
     }
   } catch {
     // Timed out, aborted, or the cascade threw: leave whatever it could not price unpriced.
+  } finally {
+    ctx.spentMs += Math.max(0, Date.now() - startedAt);
   }
   return out;
 }
@@ -828,7 +835,7 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
   const sinceIso = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
   const quoteCtx: OpsQuoteContext = {
     marks: new Map(),
-    deadlineAt: Date.now() + OPS_QUOTE_TOTAL_BUDGET_MS,
+    spentMs: 0,
     enabled: input.includeMarks !== false
   };
 

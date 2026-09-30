@@ -47,8 +47,10 @@ in open positions read as flat.
 - At most 100 symbols per account (`OPS_QUOTE_MAX_SYMBOLS`), the excess reported unpriced.
 - 8 seconds per account (`OPS_QUOTE_FETCH_TIMEOUT_MS`) with a real `AbortController` plus a
   `withDeadline` guard, so a tier that ignores the signal still cannot hold the request.
-- One 20 second budget for the whole request (`OPS_QUOTE_TOTAL_BUDGET_MS`), so an unfiltered
-  request cannot cost accounts times the per-account ceiling.
+- One 20 second budget of quote-waiting time for the whole request (`OPS_QUOTE_TOTAL_BUDGET_MS`),
+  so an unfiltered request cannot cost accounts times the per-account ceiling.  It counts time spent
+  waiting on quotes, not wall clock since the build began, so a large ledger on an early account
+  cannot starve the marks of later ones.
 - A per-request memo, so a ticker held in several accounts is quoted once.
 - No quote call at all for an account with no open lots.  The existing 60 second single-flight
   cache and the per-account `yieldEventLoop()` are unchanged.

@@ -93,9 +93,9 @@ under load.  Every query this endpoint adds is bounded:
 - The unrealized-P&L quote fetch runs only for an account with at least one open lot, and every
   part of it is bounded: at most 100 symbols per account (`OPS_QUOTE_MAX_SYMBOLS`, the excess is
   reported unpriced), 8 seconds per account (`OPS_QUOTE_FETCH_TIMEOUT_MS`) enforced with a real
-  `AbortController` plus a `withDeadline` guard, one 20 second budget across the whole request
-  (`OPS_QUOTE_TOTAL_BUDGET_MS`, so an unfiltered request cannot cost accounts times the per-account
-  ceiling), and a per-request memo so a ticker held in several accounts is quoted once.  It never
+  `AbortController` plus a `withDeadline` guard, one 20 second budget of quote-waiting time across
+  the whole request (`OPS_QUOTE_TOTAL_BUDGET_MS`; time spent on ledgers does not consume it, and it
+  stops an unfiltered request costing accounts times the per-account ceiling), and a per-request memo so a ticker held in several accounts is quoted once.  It never
   throws into the request.
 - Red Team veto-audit scan is capped at 500 rows per account (`OPS_RED_TEAM_AUDIT_LIMIT`).
 - `liveFills`/`paperFills` are fetched ONCE per account and `calculatePnl` (the FIFO lot match)
