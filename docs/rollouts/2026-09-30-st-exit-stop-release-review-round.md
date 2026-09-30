@@ -232,3 +232,18 @@ npx tsc --noEmit
 #   pending at commit time (load average 250-350); the required `verify` CI job is the type gate
 ```
 
+Fix-up pass (after the `main` merge and the per-code title, head `2b204ed6d`):
+
+```bash
+export PATH=/opt/homebrew/opt/node@24/bin:$PATH
+npx vitest run test/exit-stop-release.test.ts test/exit-stop-release-approval.test.ts test/exit-stop-release-autopilot.test.ts test/order-position-invariant-lanes.test.ts
+#   4 files, 38 passed (833 s at load average 500-950)
+npx eslint src/lib/exit-stop-release.ts src/lib/strategy.ts src/lib/strategy-execution.ts test/exit-stop-release.test.ts test/exit-stop-release-approval.test.ts test/exit-stop-release-autopilot.test.ts
+#   0 errors, 49 warnings (pre-existing, none on changed lines)
+timeout 3500 npx tsc --noEmit
+#   killed by the timeout again (exit 124, load average 300-950)
+```
+
+CI on `2b204ed6d`: `verify`, `verify-hosted` (tsc, full vitest suite, build, 15m34s) and
+`verify-ios` all passed, so `verify-hosted` is the type gate of record for this PR.
+
