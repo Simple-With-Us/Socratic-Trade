@@ -115,6 +115,31 @@ export function describeBrokerMinimumOrderBlock(
   return undefined;
 }
 
+/**
+ * The broker's own refusal wording for an order below its minimum size, matched tolerantly:
+ * "Fractional orders must be at least $1", "Dollar-based orders must be at least $1", and any
+ * sibling with the same shape.  The text arrives inside a placement error whose envelope varies
+ * ("... response had no order id: {"text":"API error 400: {...}"}", or an MCP isError string), so
+ * only the sentence itself is matched.
+ */
+const BROKER_MINIMUM_PLACEMENT_PATTERN = /\b((?:[a-z-]+\s+)?orders?\s+must\s+be\s+at\s+least\s+\$\s*\d+(?:\.\d+)?)/i;
+
+/**
+ * Placement-time BACKSTOP for the pre-flight guard above.  The pre-flight reads Robinhood's own
+ * `review_equity_order` verdict, but a price move between review and placement (or a review that
+ * carries no alert) can still let a sub-minimum order reach `place_equity_order`.  Robinhood's
+ * refusal then surfaces as a "response had no order id" error that is not an HTTP status, so the
+ * generic classifiers call it uncertain: the row sits in `placing` behind a protected
+ * "verify with broker" alert and is later swept to `placing_failed` (how the 22 production rows
+ * arose).  A refusal that NAMES the minimum is deterministic, so callers book it as a blocked
+ * below-minimum row, exactly like the pre-flight skip.  Returns undefined for any other error.
+ */
+export function detectBrokerMinimumPlacementError(message: string): string | undefined {
+  const match = BROKER_MINIMUM_PLACEMENT_PATTERN.exec(message);
+  if (!match) return undefined;
+  return `The broker rejected this order at placement for being below its minimum order size (${match[1].replace(/\s+/g, " ")}).  Nothing was placed.`;
+}
+
 const round6 = (n: number) => Math.round(n * 1e6) / 1e6;
 const round2 = (n: number) => Math.round(n * 100) / 100;
 

@@ -137,3 +137,83 @@ full-suite and build gate; `npm run build` was not run locally.
 
 - Robinhood sub-$1 whole-position exit behaviour is unverified (see Decisions).  No production
   access was used for this audit.
+
+## Review Round (2026-09-30)
+
+The adversarial review of this PR returned five findings (two of them the same defect, reported as P1 and
+P2).  Each was verified against the code on this branch, and the four real defects were fixed test-first:
+the new tests were run in a temporary worktree at the previous commit (`ea6e7e075`) and failed there, then
+pass on the fix.
+
+**Fixed.**
+
+1. **P1 and P2 (one defect) — sell-to-fund funded buys the account hold then blocked.**  Confirmed.  The
+   planner (`strategy.ts`, the sell-to-fund block) excluded openings that need human review, are pre-vetoed,
+   fail the broker minimum or are policy-blocked, but never consulted the hold.  Funding sales are placed
+   first and only buy/short are gated, so an automated run sold holdings for buys that were then blocked
+   and left the cash idle.  Fix: before planning, evaluate the hold once.  While held, every opening that
+   would otherwise be funded is excluded (contributes $0 to the shortfall).  In the half-open probe state
+   only the first opening in execution order is funded, because exactly one entry is let through; funding
+   none in the probe state would make the hold impossible to clear whenever a buy needs funding, the same
+   deadlock this PR removed.  Tests (`test/account-questionnaire-run-loop.test.ts`): control (no hold, the
+   MSFT funding sale is placed), fresh hold (no funding sale, no `sell_to_fund_plan` audit, buys blocked),
+   probe (no funding sale for the second opening).
+2. **P2 — a manual Run once was blocked by the hold.**  Confirmed.  A manual run forces authority to
+   "propose", so no order reaches the broker and the gate protected nothing while hiding the card the owner
+   needs to approve.  Fix: the per-proposal gate and the planning exclusion both skip manual runs.  The
+   approved card is the probe: `executeProposal` records a refusal and clears the hold on acceptance.  Test:
+   a manual run under a fresh hold yields a `proposed` card, places nothing, and leaves the hold set.
+3. **P2 — no placement-time backstop for the sub-$1 refusal.**  Confirmed, and reproduced: with a review
+   that carries no alert and a `place_equity_order` error whose text is "Fractional orders must be at least
+   $1", the proposal row was left in `placing` (the observed production path: the refusal is
+   "response had no order id: {API error 400 ...}", not an HTTP status, and Robinhood's order list omits
+   terminal orders, so `reconcilePlacementError` resolves uncertain).  Fix:
+   `detectBrokerMinimumPlacementError` in `broker-minimum-guard.ts`; both placement catches (run loop and
+   approval path) book a blocked row with the reason, audit `order_skipped_broker_minimum` with
+   `phase: "placement"`, and send the existing cooldown-gated below-minimum alert.  No account hold is set
+   for it.  Tests: run loop, approval path, and unit tests for the detector.  This does not prove the root
+   cause of the original 22 rows (see Decisions).
+4. **P2 — the approval path recorded the hold but still resolved the refusal as uncertain.**  Confirmed
+   (the message says "API error 400", which `isTerminalBrokerHttpError` does not match).  Fix: after
+   `markAccountActionRequired` the approval path now mirrors the run loop: proposal `blocked`,
+   `proposal_blocked_account_action_required` audit, the rate-limited "needs your action on Robinhood"
+   alert, and an early exit before reconcile.  Test extended to assert the status, the audit, the absence of
+   `order_placement_uncertain`, and exactly one alert.
+
+**Files touched in the review round.**
+
+- `src/lib/strategy.ts` — hold-aware sell-to-fund exclusion, manual-run skip of the gate, placement-time
+  minimum backstop.
+- `src/lib/strategy-execution.ts` — approval path books the questionnaire refusal and the minimum refusal.
+- `src/lib/broker-minimum-guard.ts` — `detectBrokerMinimumPlacementError`.
+- Tests: `test/account-questionnaire-run-loop.test.ts` (funding, probe, manual, backstop cases; the gateway
+  now takes mutable account state and several symbols), `test/broker-minimum-bump-execute.test.ts`,
+  `test/broker-minimum-guard.test.ts`.
+- Docs: this note, `STATUS.md`, `docs/EFFORT-LOG.md`.
+
+**Declined or narrowed, with reasons.**
+
+- **"Add an owner or ops clear for the hold" (the optional part of the manual-run finding).**  Not added.
+  The owner already has an override without new API surface: approving a card by hand is a probe, and an
+  accepted order clears the hold immediately; the half-open gate also retries by itself every 6 hours.  A
+  new clear endpoint would be one more thing to secure and keep consistent for a state that self-heals.
+- **Generalizing the backstop to every Robinhood "API error 4xx".**  Not done.  Treating all of them as
+  terminal changes reconcile behaviour for errors nobody has evidence for; the backstop matches only the
+  documented minimum wording, like the questionnaire detector.
+- **Scheduled Ask-first (propose authority) runs still hit the hold gate.**  The finding asked only for
+  the manual run to be exempt.  A scheduled propose run would otherwise emit a card per run for buys that
+  Robinhood will refuse; the owner sees the once-a-day alert and can use a manual run to get cards.
+
+**Verification (review round).**
+
+```
+export PATH=/opt/homebrew/opt/node@24/bin:$PATH
+npx vitest run test/account-questionnaire-run-loop.test.ts test/broker-minimum-bump-execute.test.ts \
+  test/broker-account-questionnaire.test.ts test/broker-minimum-guard.test.ts test/hold-reason.test.ts \
+  test/broker-minimum-bump.test.ts
+npx tsc --noEmit
+npx eslint src/lib/broker-minimum-guard.ts src/lib/strategy.ts src/lib/strategy-execution.ts \
+  test/account-questionnaire-run-loop.test.ts test/broker-minimum-bump-execute.test.ts test/broker-minimum-guard.test.ts
+```
+
+RESULTS_PLACEHOLDER

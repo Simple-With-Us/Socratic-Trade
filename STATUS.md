@@ -17,6 +17,17 @@ returns a whole-position exit plan for a position worth less than the $1 floor (
 clearing the hold resets the owner-alert cooldown.  Not changed: the removal of the full-exit
 exemption (Robinhood behaviour unverifiable here; consistent with the existing unconditional-floor
 comments and the broker's own pre-flight).
+**Review round (2026-09-30).**  The adversarial review of this PR found five more real defects, all
+fixed test-first.  **P1:** automated sell-to-fund planned funding sales for buys that the account hold
+then blocked, liquidating holdings for cash that sat idle; the planner now excludes every opening the
+hold will block (in the probe state it funds only the first opening).  **P2:** a manual "Run once" was
+blocked by the hold although it is propose-only, hiding the card the owner needs; the gate now skips
+manual runs, so the approved card is the probe.  **P2:** a placement-time "orders must be at least $1"
+refusal (a non-HTTP error) resolved "uncertain" and looped through `placing` to `placing_failed`; it is
+now booked as a deterministic blocked below-minimum row on both the run loop and the approval path.
+**P2:** the approval path recorded the questionnaire hold but left the card in `placing` behind a
+"verify with broker" alert with no owner alert; it now books the card blocked and sends the rate-limited
+"needs your action on Robinhood" alert.
 Rollout: `docs/rollouts/2026-09-29-st-g3-post-merge-audit.md`.
 
 ## 2026-09-27 MINIMAX — Congress.Trade share guards: stop treating an HTTP 200 as delivery
