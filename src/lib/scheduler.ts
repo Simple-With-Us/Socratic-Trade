@@ -35,7 +35,7 @@ import {
   shouldPersistBrokerHealthSkip,
   type ApplyBrokerPauseResult
 } from "./broker-health";
-import { clearBootHaltReceiptIfNotHalted, recordBootHaltReceipt } from "./autonomy-halt-cause";
+import { clearBootHaltReceiptIfNotHalted, recordBootHaltReceipt, type BootHaltReceipt } from "./autonomy-halt-cause";
 import { sendNotification } from "./notifications";
 import { expireStalePendingProposals } from "./proposal-revalidation";
 import { hasInFlightStrategyWork } from "./db-execution";
@@ -674,13 +674,12 @@ export async function reconcileAutonomyOnBoot(): Promise<void> {
             audit("autonomy_halted_on_boot", { from: "active", to: "halted", reason: "autoResumeOnBoot not enabled" }, userId, accountId)
           );
           // Board 687a5fb4 lane h5: remember WHY this account is halted, so the console and the ops
-          // snapshot say "stopped by the restart" instead of an unexplained "Stopped".
-          await sqliteYieldRetry(() =>
-            recordBootHaltReceipt(userId, brokerPauseAccountScope(accountId, policy.accountNumber), {
-              at: new Date().toISOString(),
-              from: "active"
-            })
-          );
+          // snapshot say "stopped by the restart" instead of an unexplained "Stopped".  Display
+          // only, so a failure here must not skip this account's boot notification below.
+          await recordBootHaltReceiptSafely(userId, brokerPauseAccountScope(accountId, policy.accountNumber), {
+            at: new Date().toISOString(),
+            from: "active"
+          });
           console.warn(`[scheduler] autonomy was 'active' for ${userId}/${accountId ?? "(base)"} at boot; reverted to 'halted' (enable autoResumeOnBoot in Settings to auto-resume).`);
           const label = accountId ? (accounts.find((a) => a.id === accountId)?.label ?? accountId) : "(base account)";
           affected(userId).reverted.push(label);
@@ -705,13 +704,11 @@ export async function reconcileAutonomyOnBoot(): Promise<void> {
           if (released) {
             // Lane h5: without this receipt the account read as a plain "Stopped" for four days
             // (2026-09-25..29) — nothing said the restart, not the owner, had ended the auto-pause.
-            await sqliteYieldRetry(() =>
-              recordBootHaltReceipt(userId, pauseScope, {
-                at: new Date().toISOString(),
-                from: "broker_auto_pause",
-                ...(pausedBy ? { autoPauseReason: pausedBy.reason, autoPausedSince: pausedBy.since } : {})
-              })
-            );
+            await recordBootHaltReceiptSafely(userId, pauseScope, {
+              at: new Date().toISOString(),
+              from: "broker_auto_pause",
+              ...(pausedBy ? { autoPauseReason: pausedBy.reason, autoPausedSince: pausedBy.since } : {})
+            });
             const label = accountId ? (accounts.find((a) => a.id === accountId)?.label ?? accountId) : "(base account)";
             affected(userId).autoPauseReleased.push(label);
           }
@@ -728,6 +725,16 @@ export async function reconcileAutonomyOnBoot(): Promise<void> {
     notifyAutonomyHaltedOnBoot(userId, accounts).catch((err) => {
       console.error(`[scheduler] boot-halt notification failed for ${userId}:`, err);
     });
+  }
+}
+
+/** Lane h5: the boot-halt receipt is display-only.  Retried like the other boot writes, but a
+ *  failure is logged, never thrown into the reconcile loop. */
+async function recordBootHaltReceiptSafely(userId: string, accountScope: string, receipt: BootHaltReceipt): Promise<void> {
+  try {
+    await sqliteYieldRetry(() => recordBootHaltReceipt(userId, accountScope, receipt));
+  } catch (err) {
+    console.error(`[scheduler] boot-halt receipt write failed for ${userId}/${accountScope}:`, err);
   }
 }
 
