@@ -1,5 +1,24 @@
 # Current Status
 
+## 2026-09-30 CLAUDE — Accounts stranded halted after a broker-health auto-halt: honest restart halts (board 687a5fb4, lane h5)
+
+**What.**  Alpaca Paper (the owner's Autopilot account) was auto-halted by a probe timeout at
+2026-09-25 18:20Z and sat halted, with no runs, for four days until an operator re-armed it.  Root
+cause: with the user's "Auto-resume on boot" off, the boot autonomy interlock (since #3752) hands a
+broker auto-pause to the owner exactly as it halts a Running account, and every later restart then
+found a plain halted account.  That is the owner's setting working as designed; what was wrong is
+that nothing said so.  The console showed a bare "Stopped", the ops snapshot had neither the setting
+nor a reason, and the boot notification said the auto-pause was "kept".  Now the boot interlock
+records a per-account receipt, `describeAutonomyHaltCause` reports broker auto-pause (resumes by
+itself), restart (stays halted until re-armed), or a person's stop, and that cause shows in the
+console run-state chip and control sheet, the ops snapshot (`autoResumeOnBoot` per user,
+`haltCause` per account), and ops `nextEligibleRun` notes.  The notification title now reads
+"Restart ended the broker auto-pause: <label> stays stopped".  With the setting on (or
+`AUTONOMY_RESUME_ON_BOOT=1`) an auto-owned halt survives restarts and lifts on the first healthy
+probe; an owner halt never auto-lifts; both pinned by tests.  **Owner decision, not changed here:**
+turn on Settings, After a restart, Auto-resume on boot if Autopilot should run through deploys.
+Branch `claude/st-w3-h5`.  Rollout: `docs/rollouts/2026-09-30-st-w3-h5-restart-halt-visibility.md`.
+
 ## 2026-09-27 MINIMAX — Congress.Trade share guards: stop treating an HTTP 200 as delivery
 
 **What.**  CT is now exclusively dependent on ST for EOD prices and enrichment, and the ST→CT push is
