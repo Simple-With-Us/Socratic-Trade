@@ -4,20 +4,23 @@
 
 **What.**  Alpaca Paper (the owner's Autopilot account) was auto-halted by a probe timeout at
 2026-09-25 18:20Z and sat halted, with no runs, for four days until an operator re-armed it.  Root
-cause: with the user's "Auto-resume on boot" off, the boot autonomy interlock (since #3752) hands a
-broker auto-pause to the owner exactly as it halts a Running account, and every later restart then
-found a plain halted account.  That is the owner's setting working as designed; what was wrong is
-that nothing said so.  The console showed a bare "Stopped", the ops snapshot had neither the setting
-nor a reason, and the boot notification said the auto-pause was "kept".  Now the boot interlock
-records a per-account receipt, `describeAutonomyHaltCause` reports broker auto-pause (resumes by
-itself), restart (stays halted until re-armed), or a person's stop, and that cause shows in the
-console run-state chip and control sheet, the ops snapshot (`autoResumeOnBoot` per user,
-`haltCause` per account), and ops `nextEligibleRun` notes.  The notification title now reads
-"Restart ended the broker auto-pause: <label> stays stopped".  With the setting on (or
-`AUTONOMY_RESUME_ON_BOOT=1`) an auto-owned halt survives restarts and lifts on the first healthy
-probe; an owner halt never auto-lifts; both pinned by tests.  **Owner decision, not changed here:**
-turn on Settings, After a restart, Auto-resume on boot if Autopilot should run through deploys.
-Branch `claude/st-w3-h5`.  Rollout: `docs/rollouts/2026-09-30-st-w3-h5-restart-halt-visibility.md`.
+cause is a hypothesis, not established (the review round softened it): the leading candidate is the
+pre-#3752 stale-snapshot drop, where a caller that read "active" before the halt got a healthy
+probe and removed the auto-resume marker without resuming (#3752's durable re-read closed it; now
+pinned by a test).  The alternative is the #3752 boot interlock ending the auto-pause with "Auto-resume
+on boot" off, but 2026-09-24's restarts did not halt the account, which argues the setting was on.
+The rollout note lists the read-only prod query that decides it.  Either way nothing said what held
+the account.  Now `describeAutonomyHaltCause` names every halt: broker auto-pause (with the last
+failed probe and whether a restart would end it), restart (receipt), drawdown breaker or an
+auto-pause whose record vanished (audit trail), or "no record" (never "a person").  It shows on the
+console run-state chip and control sheet, every account-switcher and Brokers row, the ops snapshot
+(`autoResumeOnBoot`, `haltCause`, auto-pause audit kinds) and ops `nextEligibleRun`.  The boot and
+auto-halt notifications and the Settings card say a restart ends an auto-pause when the setting is
+off.  With the setting on (or `AUTONOMY_RESUME_ON_BOOT=1`) an auto-owned halt survives restarts and
+lifts on the first healthy probe; an owner halt never auto-lifts; both pinned, including through the
+real scheduler tick.  **Owner decision, not changed here:** turn on Settings, After a restart,
+Auto-resume on boot if Autopilot should run through deploys.  Branch `claude/st-w3-h5` (PR #4008).
+Rollout: `docs/rollouts/2026-09-30-st-w3-h5-restart-halt-visibility.md`.
 
 ## 2026-09-27 MINIMAX — Congress.Trade share guards: stop treating an HTTP 200 as delivery
 
