@@ -72,7 +72,10 @@ describe("reconcileAutonomyOnBoot — boot-halt notification", () => {
   // before the restart must not be described as "reverted from 'active'" by the restart.
   it("describes reverted and already-auto-paused accounts separately and truthfully", () => {
     const released = autonomyBootInterlockNotificationCopy({ reverted: [], autoPauseReleased: ["Roth IRA"] });
-    expect(released.title).toBe("Broker auto-pause kept after restart: Roth IRA");
+    // Lane h5: never "kept" — the restart took the auto-resume away, so the account stays stopped.
+    expect(released.title).toBe("Restart ended the broker auto-pause: Roth IRA stays stopped");
+    expect(released.body).toMatch(/will not re-arm on its own when the broker recovers/);
+    expect(released.body).toMatch(/turn on Auto-resume on boot in Settings/);
     expect(released.body).not.toMatch(/reverted from 'active'/);
     expect(released.body).toMatch(/Already halted before the restart by a broker auto-pause/);
     expect(released.body).toMatch(/Roth IRA/);
