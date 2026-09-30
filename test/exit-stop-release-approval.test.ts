@@ -46,7 +46,9 @@ const broker = vi.hoisted(() => ({
   orders: [] as MockOrder[],
   placed: [] as Array<{ symbol: string; side: string; type: string; quantity?: number; stopPrice?: number; refId?: string }>,
   cancelled: [] as string[],
-  seq: 0
+  seq: 0,
+  /** Test hook: runs as the broker receives a cancel (e.g. the owner pressing Stop mid-release). */
+  onCancel: undefined as (() => void) | undefined
 }));
 
 vi.mock("../src/lib/broker", () => {
@@ -71,6 +73,7 @@ vi.mock("../src/lib/broker", () => {
       reviewEquityOrder: async (input: { quantity?: number }) => ({ estimatedNotional: (input.quantity ?? 0) * 50, alerts: [] }),
       cancelEquityOrder: async (_accountNumber: string, orderId: string) => {
         broker.cancelled.push(orderId);
+        broker.onCancel?.();
         const order = broker.orders.find((o) => o.id === orderId);
         if (order) order.state = "canceled";
         return { orderId, refId: "x", state: "cancel_requested", raw: {} };
@@ -178,18 +181,10 @@ beforeEach(() => {
   ];
   broker.placed = [];
   broker.cancelled = [];
+  broker.onCancel = undefined;
 });
 
-function seed(userId: string, sellQuantity: number, over: Record<string, unknown> = {}): string {
-  upsertConnectedAccount({
-    id: `acct-${userId}`,
-    userId,
-    broker: "alpaca",
-    environment: "paper",
-    accountNumber: ACCOUNT,
-    label: "G2 Integration",
-    isActive: true
-  });
+function seedPolicy(userId: string, over: Record<string, unknown> = {}): void {
   setPolicy(
     {
       ...DEFAULT_POLICY,
@@ -205,6 +200,19 @@ function seed(userId: string, sellQuantity: number, over: Record<string, unknown
     },
     userId
   );
+}
+
+function seed(userId: string, sellQuantity: number, over: Record<string, unknown> = {}): string {
+  upsertConnectedAccount({
+    id: `acct-${userId}`,
+    userId,
+    broker: "alpaca",
+    environment: "paper",
+    accountNumber: ACCOUNT,
+    label: "G2 Integration",
+    isActive: true
+  });
+  seedPolicy(userId, over);
   // The app's OWN protective stop, exactly as the reconciler tracks it.
   upsertBrokerProtectiveStop({
     id: `protstop-${userId}-${ACCOUNT}-BAC`,
@@ -265,6 +273,22 @@ describe("executeProposal — approved exit vs the app's own resting stop", () =
     const rows = listBrokerProtectiveStops(ACCOUNT, userId);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ quantity: 14, status: "resting" });
+  }, 60_000);
+
+  it("owner presses Stop while the stop is being released: the exit is blocked, not sent, and the stop is put back", async () => {
+    const userId = `g2-halt-${randomUUID()}`;
+    const proposalId = seed(userId, 24);
+    // The durable Stop lands after the placement fence passed, while the release is in flight.
+    broker.onCancel = () => seedPolicy(userId, { systemState: "halted" });
+    await expect(executeProposal(proposalId, userId)).rejects.toThrow(/halted/);
+    expect(broker.cancelled).toEqual(["stop-BAC"]);
+    // The only order sent is the restored protective stop for all 24 shares; the exit never left.
+    expect(broker.placed).toHaveLength(1);
+    expect(broker.placed[0]).toMatchObject({ symbol: "BAC", side: "sell", type: "stop_market", quantity: 24, stopPrice: 46 });
+    expect(getProposal(proposalId, userId)?.status).toBe("blocked");
+    const rows = listBrokerProtectiveStops(ACCOUNT, userId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ quantity: 24, status: "resting" });
   }, 60_000);
 
   it("toggle off: the exit stays blocked and the stop is never touched", async () => {

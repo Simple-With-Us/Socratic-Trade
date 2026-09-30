@@ -1335,7 +1335,11 @@ export async function executeProposal(
                   lane: "approval",
                   proposalId,
                   runId: row.runId,
-                  assertOwned: () => mutationCtx.assertOwned()
+                  assertOwned: () => mutationCtx.assertOwned(),
+                  // Same durable-state fence as above, re-read after the release and immediately
+                  // before the exit leaves (#3793 review round).
+                  placementBlockReason: () =>
+                    freshPlacementBlockReason({ userId, connectedAccountId: policy.connectedAccountId, side: proposal.side, source: "owner_approval" })
                 },
                 (verifiedPositionQuantity) => gateway.placeEquityOrder({ accountNumber, ...proposal, refId, verifiedPositionQuantity })
               )

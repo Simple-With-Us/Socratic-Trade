@@ -4244,7 +4244,10 @@ export async function runStrategyOnce(
                     lane: "autopilot",
                     proposalId,
                     runId,
-                    assertOwned: () => mutationCtx.assertOwned()
+                    assertOwned: () => mutationCtx.assertOwned(),
+                    // Same durable-state fence as above, re-read after the release and immediately
+                    // before the exit leaves (#3793 review round).
+                    placementBlockReason: () => freshPlacementBlockReason({ userId, connectedAccountId, side: normalizedProposal.side })
                   },
                   (verifiedPositionQuantity) =>
                     gateway.placeEquityOrder({ accountNumber: policy.accountNumber, ...normalizedProposal, refId, verifiedPositionQuantity })
