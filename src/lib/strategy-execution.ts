@@ -1929,17 +1929,25 @@ async function reconcilePendingReceipts(ctx: BrokerTruthContext): Promise<void> 
         // state with an unpriced cumulative quantity larger than the already-booked partial). Keep
         // the prior accounting truth and leave this receipt eligible for another reconciliation.
         updateFillEvent(fill.id, { raw }, userId);
-        // Steady-state per-tick spam guard (~4.5k identical rows/day in prod):
-        // first occurrence per (fillId, brokerState) logs immediately, then ≤1/6h.
-        auditDeduped("fill_reconciliation_pending_price", {
-          fillId: fill.id,
-          symbol: fill.symbol,
-          brokerState: matched.state,
-          brokerQuantity: matched.filledQuantity,
-          knownBrokerQuantity: merged.knownQuantity,
-          priorBookedQuantity: bookedExecutionTruth(fill)?.quantity,
-          unresolvedGrowth: merged.unresolvedGrowth
-        }, [fill.id, matched.state], { userId, connectedAccountId });
+        // "Pending price" means executed-but-unpriced.  A LIVE order with nothing executed has no
+        // price to wait for: it is simply still working (a resting GTC limit, or one whose cancel
+        // Tradier has not confirmed yet and so reports as "pending").  Auditing those every pass
+        // mislabeled healthy working orders as unpriced executions (Tradier Sandbox, 2026-09-29
+        // 22:41Z: four cancel-requested GTC buy limits, brokerQuantity 0).
+        const brokerReportsExecution = hasBrokerReportedFill(matched) || merged.knownQuantity > 0;
+        if (brokerReportsExecution || !isLiveOrderState(matched.state)) {
+          // Steady-state per-tick spam guard (~4.5k identical rows/day in prod):
+          // first occurrence per (fillId, brokerState) logs immediately, then ≤1/6h.
+          auditDeduped("fill_reconciliation_pending_price", {
+            fillId: fill.id,
+            symbol: fill.symbol,
+            brokerState: matched.state,
+            brokerQuantity: matched.filledQuantity,
+            knownBrokerQuantity: merged.knownQuantity,
+            priorBookedQuantity: bookedExecutionTruth(fill)?.quantity,
+            unresolvedGrowth: merged.unresolvedGrowth
+          }, [fill.id, matched.state], { userId, connectedAccountId });
+        }
         // A matched order still LIVE at the broker (working day limit, queued stop, ...) is
         // healthy — it simply hasn't executed yet, and stale-limit-orders.ts owns the alerting
         // for a far-from-market resting order. Only a matched order in a TERMINAL state that

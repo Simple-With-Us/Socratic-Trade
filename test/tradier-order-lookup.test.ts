@@ -74,6 +74,35 @@ describe("Tradier getEquityOrder", () => {
     await expect(gateway.getEquityOrder!(ACCT, "500500")).rejects.toThrow(/502/);
   });
 
+  // Post-merge audit of #3798 (lane h2): a definitive not-found is the broker ANSWERING, not a broker
+  // failure.  Logged as a tradier-broker hard failure, five in a row (one budgeted backfill pass over
+  // old sandbox receipts Tradier no longer serves) trip getLaneHealth's consecutive-failure streak and
+  // mint a "tradier-broker connection failed" operator push + Sentry error while Tradier is healthy.
+  it("records a definitive not-found as a healthy broker answer, never as a tradier-broker connection failure", async () => {
+    await seedTradierSandbox();
+    stubFetch((u) => u.includes("/orders/5005")
+      ? { status: 502, body: "Bad Gateway" }
+      : u.includes("/orders/")
+        ? { status: 404, body: "The requested resource was not found" }
+        : undefined);
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const { getDb } = await import("../src/lib/db");
+    const { getLaneHealth } = await import("../src/lib/db-health");
+    const gateway = getTradierGateway("local");
+    for (const id of ["4001", "4002", "4003", "4004", "4005", "4006"]) {
+      await expect(gateway.getEquityOrder!(ACCT, id)).resolves.toBeUndefined();
+    }
+    const health = () => getDb()
+      .prepare("SELECT ok FROM api_health_log WHERE service = 'tradier-broker' ORDER BY rowid")
+      .all() as Array<{ ok: number }>;
+    expect(health()).toHaveLength(6);
+    expect(health().every((row) => row.ok === 1)).toBe(true);
+    expect(getLaneHealth("tradier-broker", "user", "local").stoppedWorking).toBe(false);
+    // A real server failure still counts against the lane.
+    await expect(gateway.getEquityOrder!(ACCT, "5005")).rejects.toThrow(/502/);
+    expect(health().at(-1)?.ok).toBe(0);
+  });
+
   it("never interpolates an unusable id into the request path", async () => {
     await seedTradierSandbox();
     const urls = stubFetch(() => undefined);
@@ -116,6 +145,52 @@ describe("tradierOrderLookupFromRow / executionsFromTradierRow", () => {
     // A leg that omits its symbol inherits the container's; it carries no execution of its own.
     expect(lookup.exitLegs?.[1]).toMatchObject({ symbol: "AAPL", stopPrice: 180 });
     expect(lookup.exitLegs?.[1]?.filledQuantity).toBeUndefined();
+  });
+
+  // Post-merge audit of #3798 (lane h2): a leg array that carries the class's full leg count already
+  // holds the entry, so the container is never itself an execution.  The side heuristic sent an
+  // owner's sell-first OTOCO (and an equity-plus-option OTO) to the container-entry shape, which booked
+  // the container's mirrored execution AND leg 0's own execution — the same shares twice.
+  it("full-count leg arrays are leg-entry whatever the sides: the container is never booked beside its legs", async () => {
+    const { executionsFromTradierRow, tradierOrderLookupFromRow } = await import("../src/lib/tradier");
+    const { isFinalPricedExecution } = await import("../src/lib/fill-reconciliation");
+    const sellFirst: Record<string, unknown> = {
+      id: 700, class: "otoco", symbol: "SHEL", side: "sell", type: "limit", status: "filled", quantity: 50,
+      exec_quantity: 50, avg_fill_price: 70.1, create_date: "2026-09-29T14:00:00.000Z", transaction_date: "2026-09-29T15:00:00.000Z",
+      leg: [
+        { id: 701, class: "equity", symbol: "SHEL", side: "sell", type: "limit", quantity: 50, status: "filled", exec_quantity: 50, avg_fill_price: 70.1 },
+        { id: 702, class: "equity", symbol: "SHEL", side: "buy", type: "limit", quantity: 50, status: "canceled", exec_quantity: 0, avg_fill_price: 0 },
+        { id: 703, class: "equity", symbol: "SHEL", side: "buy", type: "stop", quantity: 50, status: "filled", exec_quantity: 50, avg_fill_price: 72 }
+      ]
+    };
+    const executions = executionsFromTradierRow(sellFirst);
+    expect(executions.map((e) => [e.order.id, e.role])).toEqual([["701", "entry"], ["702", "exit"], ["703", "exit"]]);
+    expect(executions.filter((e) => isFinalPricedExecution(e.order)).map((e) => e.order.id)).toEqual(["701", "703"]);
+    const lookup = tradierOrderLookupFromRow(sellFirst);
+    expect(lookup.order).toMatchObject({ id: "700", side: "sell", state: "filled", filledQuantity: 50, averagePrice: 70.1 });
+    expect(lookup.entryLegId).toBe("701");
+    expect(lookup.exitLegs?.map((leg) => leg.id)).toEqual(["702", "703"]);
+
+    // Buy stock, which triggers a covered-call sale: two legs, one of them an option.
+    const buyWrite: Record<string, unknown> = {
+      id: 800, class: "oto", symbol: "C", side: "buy", type: "limit", status: "filled", quantity: 100,
+      exec_quantity: 100, avg_fill_price: 72.4, transaction_date: "2026-09-29T15:00:00.000Z",
+      leg: [
+        { id: 801, class: "equity", symbol: "C", side: "buy", type: "limit", quantity: 100, status: "filled", exec_quantity: 100, avg_fill_price: 72.4 },
+        { id: 802, class: "option", symbol: "C", option_symbol: "C261016C00075000", side: "sell_to_open", type: "limit", quantity: 1, status: "open" }
+      ]
+    };
+    expect(executionsFromTradierRow(buyWrite).map((e) => [e.order.id, e.role])).toEqual([["801", "entry"]]);
+  });
+
+  it("drops a bracket exit leg without a recognized side instead of booking it as a default buy", async () => {
+    const { tradierOrderLookupFromRow } = await import("../src/lib/tradier");
+    const lookup = tradierOrderLookupFromRow({
+      id: 600, symbol: "VZ", side: "buy", type: "limit", class: "oto", status: "filled", exec_quantity: 98, avg_fill_price: 40, tag: "st-ref-vz",
+      leg: [{ id: 601, class: "equity", type: "stop", status: "filled", quantity: 98, exec_quantity: 98, avg_fill_price: 38.2 }]
+    });
+    expect(lookup.order).toMatchObject({ id: "600", state: "filled", filledQuantity: 98 });
+    expect(lookup.exitLegs ?? []).toEqual([]);
   });
 
   it("listRecentExecutions keeps bracket roles and drops rows with an unrecognized side", async () => {

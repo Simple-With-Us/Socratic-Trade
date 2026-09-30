@@ -3,6 +3,22 @@
 ## 2026-09-30 CLAUDE - Performance Measurement Upgrades: Real Unrealized P&L, Reason Timestamps, Frozen SPY Benchmark (branch `claude/st-w3-h4`, board `687a5fb4`)
 
 **What.**  Lane G4 of the 2026-09-25 wave, finished on top of MM's #3895 (which already landed round-trip grading, the `unattributed` model row, the per-model funnel, and a first cut of broker-rejection reasons).  `GET /api/ops/performance` now reports real unrealized P&L: an account's open symbols are marked from the stored latest-price rows by default (`marks=stored`, one indexed read of `symbol_field_latest`, no network, never FMP), `marks=live` opts in to one bounded Alpaca snapshot batch that keeps the stored marks on a timeout, and `marks=off` skips marking.  `pricesUnavailable` means "open positions and none could be priced", the missing symbols are listed in `unrealizedUnpricedSymbols`, and `unrealizedMarkBasis` plus `unrealizedMarksOldestAsOf` show how old the figure is.  The trading quote cascade is deliberately not used.  Reason buckets (block, broker rejection, and the new `placing_failed` itemisation) carry `firstSeenAt`/`lastSeenAt`, and the output cap moved from 10 to 50; a new normaliser merges the real Robinhood nested-JSON refusals (`$1` and `$5` read `$N`).  `resolveShrinkPrior` now reads `peekPolicy`, so the read-only route no longer seeds policy rows.  perf-17: the SPY benchmark was pinned to `imported-eod` at 2026-07-24 because `fetchDailyOHLC`'s imported tier short-circuited the whole cascade with no freshness check; that was fixed on `main` by #4009 (which does change trading-input history fan-out for every symbol when the imported tier is on), and this branch was merged with it and keeps only two extras: a stale import is also a merge base for a live fetch, and an import-only fallback is stamped `imported-eod-stale`, which `benchmark.ts` recognises.  No broker order path was touched.  Rollout: `docs/rollouts/2026-09-30-st-perf-measurement-h4.md`.  Runbook: `docs/runbooks/ops-performance-endpoint.md`.
+## 2026-09-30 CLAUDE — Post-merge audit of #3798 Tradier fill reconciliation (lane h2, board `687a5fb4`)
+
+**What.**  #3798 merged without its adversarial review.  The audit found four real defects, all
+fixed test-first on branch `claude/st-w3-h2`.  (1) P2: a definitive Tradier not-found in
+`getEquityOrder` was logged as a `tradier-broker` hard failure, so five old-id lookups in a row (one
+backfill pass) raised a false "tradier-broker connection failed" push, a Sentry capture, and a red
+Connections row.  It is now recorded as a healthy answer.  (2) P2: the OTO/OTOCO split chose its
+shape by leg SIDES, so an owner's sell-first OTOCO or a stock-plus-option OTO booked the container
+AND leg 0: the same shares twice.  It now keys on the total leg count.  (3) P3: side-less exit legs
+from a by-id lookup would book as a fabricated BUY.  They are dropped now.  (4) P3:
+`fill_reconciliation_pending_price` fired for live orders with nothing executed (the 2026-09-29
+22:41Z Sandbox observation).  **Ruled out:** `pending_cancel` is not mis-mapped.  Tradier itself
+reports `pending` until a cancel is confirmed, and keeping those orders live is correct.  **Open:**
+confirm on production that the Sandbox backlog drained (`GET /api/ops/fill-reconcile`), and an
+owner call on booking untagged owner orders into the app's learning ledger.
+Rollout: `docs/rollouts/2026-09-30-st-tradier-fill-recon-audit.md`.
 
 ## 2026-09-27 MINIMAX — Congress.Trade share guards: stop treating an HTTP 200 as delivery
 
