@@ -20,6 +20,22 @@ the stop cancel did not settle) was booked terminal `blocked` in both lanes; it 
 `ExitStopReleaseRun` (dropping one is a compile error), and a new autopilot end-to-end test through
 `runStrategyOnce` proves an owner Stop mid-release keeps the exit from leaving.  5 new tests.
 Rollout: `docs/rollouts/2026-09-30-st-exit-stop-release-review-round.md`.
+## 2026-09-30 CLAUDE — Post-merge audit of #3798 Tradier fill reconciliation (lane h2, board `687a5fb4`)
+
+**What.**  #3798 merged without its adversarial review.  The audit found four real defects, all
+fixed test-first on branch `claude/st-w3-h2`.  (1) P2: a definitive Tradier not-found in
+`getEquityOrder` was logged as a `tradier-broker` hard failure, so five old-id lookups in a row (one
+backfill pass) raised a false "tradier-broker connection failed" push, a Sentry capture, and a red
+Connections row.  It is now recorded as a healthy answer.  (2) P2: the OTO/OTOCO split chose its
+shape by leg SIDES, so an owner's sell-first OTOCO or a stock-plus-option OTO booked the container
+AND leg 0: the same shares twice.  It now keys on the total leg count.  (3) P3: side-less exit legs
+from a by-id lookup would book as a fabricated BUY.  They are dropped now.  (4) P3:
+`fill_reconciliation_pending_price` fired for live orders with nothing executed (the 2026-09-29
+22:41Z Sandbox observation).  **Ruled out:** `pending_cancel` is not mis-mapped.  Tradier itself
+reports `pending` until a cancel is confirmed, and keeping those orders live is correct.  **Open:**
+confirm on production that the Sandbox backlog drained (`GET /api/ops/fill-reconcile`), and an
+owner call on booking untagged owner orders into the app's learning ledger.
+Rollout: `docs/rollouts/2026-09-30-st-tradier-fill-recon-audit.md`.
 
 ## 2026-09-27 MINIMAX — Congress.Trade share guards: stop treating an HTTP 200 as delivery
 

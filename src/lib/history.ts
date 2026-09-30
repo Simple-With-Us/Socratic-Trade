@@ -261,12 +261,16 @@ export async function fetchDailyOHLC(
     sourceId: string;
     fetch: () => Promise<OHLCBar[] | null>;
   }> = [
-    // Local imported-EOD cache tier (congress.trade return-path): App A POSTs gap-fill closes to
-    // /api/admin/securities/import; they land in imported_price_eod/imported_spx_eod. Reading the local
-    // table first (ahead of the App A HTTP read and our keyed providers) lets an imported series displace
-    // a re-fetch entirely. DEFAULT OFF + density-guarded inside fetchImportedHistory so a sparse gap-fill
-    // never short-circuits with an incomplete series. Close-only bars.
-    { scope: "shared", sourceId: "imported-eod", fetch: async () => fetchImportedHistory(symbol) },
+    // Local imported-EOD cache tier (congress.trade return-path). A fresh, dense series
+    // may displace a re-fetch. A stale one must not: production had this tier ON with
+    // a 1,000-bar SPY series ending 2026-07-24, and that series won ahead of Tradier,
+    // Massive, ROIC, Tiingo, and Yahoo, so Congress.Trade never saw later sessions.
+    // Stale imports stay available as the all-sources-failed fallback below.
+    { scope: "shared", sourceId: "imported-eod", fetch: async () => {
+      const imported = fetchImportedHistory(symbol);
+      if (!imported || !isBarSeriesFresh(imported, now)) return null;
+      return imported;
+    } },
     ...(opts?.skipAppATier
       ? []
       : [{ scope: "shared" as const, sourceId: "congress.trade", fetch: () => fetchAppAHistory(symbol) }]),
@@ -347,15 +351,21 @@ export async function fetchDailyOHLC(
     }
   }
 
-  // Fallback if active providers hit errors or expired keys: audit warning and return stale local bars
-  if (staleLocalBars) {
-    const lastBar = staleLocalBars[staleLocalBars.length - 1];
+  // Fallback if active providers hit errors or expired keys. Prefer the newer tip
+  // when both the sqlite cache and a stale import exist. This is not a success:
+  // the peer reader must be able to tell the series is behind the session.
+  const importedFallback = fetchImportedHistory(symbol);
+  const fallbackBars = staleLocalBars && importedFallback
+    ? mergeOHLCBars(staleLocalBars, importedFallback)
+    : staleLocalBars ?? importedFallback;
+  if (fallbackBars && fallbackBars.length >= 2) {
+    const lastBar = fallbackBars[fallbackBars.length - 1];
     audit(
       "eod_cache_stale",
       { symbol, lastBarTime: lastBar?.time, note: "All active EOD price history providers failed or expired; falling back to stale local bars." },
       userId ?? "local"
     );
-    const stampedStale = stampOhlcBarProvenance(staleLocalBars, "history-cache-eod-stale", new Date(now).toISOString());
+    const stampedStale = stampOhlcBarProvenance(fallbackBars, "history-cache-eod-stale", new Date(now).toISOString());
     cache.set(sharedCacheKey, { expiresAt: now + 5 * 60_000, bars: stampedStale });
     return stampedStale;
   }
@@ -915,6 +925,8 @@ function importedHistoryMinBars(): number {
  * POSTed to /api/admin/securities/import (persisted in imported_price_eod / imported_spx_eod). DEFAULT
  * OFF (SECURITIES_IMPORT_HISTORY_TIER_ENABLED) and density-guarded (SECURITIES_IMPORT_MIN_BARS, default
  * 200 ≈ ~10 months) so a sparse gap-fill never displaces a full fetch with an incomplete series.
+ * A dense series still has to be fresh (latest bar covers the latest completed session) before it
+ * may win. Otherwise the cascade continues, and these bars are only the all-sources-failed fallback.
  * Close-only bars (no OHLC), like the App A HTTP tier — an enabled price chart renders a line on hits.
  */
 function fetchImportedHistory(symbol: string): OHLCBar[] | null {
