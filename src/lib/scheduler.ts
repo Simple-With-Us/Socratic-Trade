@@ -26,13 +26,16 @@ import { runWatchlistDigestIfDue } from "./watchlist-digest";
 import { runAuditPruneIfDue } from "./audit-prune";
 import {
   applyBrokerOrderPlacementPause,
+  brokerPauseAccountScope,
   checkBrokerHealth,
+  getBrokerPlacementPauseMarker,
   healthSignalsFromProbeFailure,
   persistBrokerHealthSkipRun,
   releaseBrokerPlacementPauseToOwner,
   shouldPersistBrokerHealthSkip,
   type ApplyBrokerPauseResult
 } from "./broker-health";
+import { clearBootHaltReceiptIfNotHalted, recordBootHaltReceipt } from "./autonomy-halt-cause";
 import { sendNotification } from "./notifications";
 import { expireStalePendingProposals } from "./proposal-revalidation";
 import { hasInFlightStrategyWork } from "./db-execution";
@@ -670,6 +673,14 @@ export async function reconcileAutonomyOnBoot(): Promise<void> {
           await sqliteYieldRetry(() =>
             audit("autonomy_halted_on_boot", { from: "active", to: "halted", reason: "autoResumeOnBoot not enabled" }, userId, accountId)
           );
+          // Board 687a5fb4 lane h5: remember WHY this account is halted, so the console and the ops
+          // snapshot say "stopped by the restart" instead of an unexplained "Stopped".
+          await sqliteYieldRetry(() =>
+            recordBootHaltReceipt(userId, brokerPauseAccountScope(accountId, policy.accountNumber), {
+              at: new Date().toISOString(),
+              from: "active"
+            })
+          );
           console.warn(`[scheduler] autonomy was 'active' for ${userId}/${accountId ?? "(base)"} at boot; reverted to 'halted' (enable autoResumeOnBoot in Settings to auto-resume).`);
           const label = accountId ? (accounts.find((a) => a.id === accountId)?.label ?? accountId) : "(base account)";
           affected(userId).reverted.push(label);
@@ -681,6 +692,8 @@ export async function reconcileAutonomyOnBoot(): Promise<void> {
           // above, so the same SQLITE_BUSY hardening: the release is one transaction (rolls back
           // as a unit), retried with yields instead of throwing into the per-account catch and
           // leaving the stale auto-resume marker behind.
+          const pauseScope = brokerPauseAccountScope(accountId, policy.accountNumber);
+          const pausedBy = getBrokerPlacementPauseMarker(userId, pauseScope);
           const released = await sqliteYieldRetry(() =>
             releaseBrokerPlacementPauseToOwner({
               userId,
@@ -690,6 +703,15 @@ export async function reconcileAutonomyOnBoot(): Promise<void> {
             })
           );
           if (released) {
+            // Lane h5: without this receipt the account read as a plain "Stopped" for four days
+            // (2026-09-25..29) — nothing said the restart, not the owner, had ended the auto-pause.
+            await sqliteYieldRetry(() =>
+              recordBootHaltReceipt(userId, pauseScope, {
+                at: new Date().toISOString(),
+                from: "broker_auto_pause",
+                ...(pausedBy ? { autoPauseReason: pausedBy.reason, autoPausedSince: pausedBy.since } : {})
+              })
+            );
             const label = accountId ? (accounts.find((a) => a.id === accountId)?.label ?? accountId) : "(base account)";
             affected(userId).autoPauseReleased.push(label);
           }
@@ -719,7 +741,10 @@ type BootInterlockAccounts = {
 /**
  * Title and body of the boot-interlock summary.  Pure; exported for tests.  Each account is
  * described by what actually happened to it: a restart never "reverted from active" an account that
- * a broker auto-pause had already halted (board 687a5fb4 review round).
+ * a broker auto-pause had already halted (board 687a5fb4 review round).  Lane h5: the title for an
+ * auto-paused account used to say the auto-pause was "kept after restart", which read as "still
+ * resuming by itself" when the restart had just taken the auto-resume away.  It now says the
+ * account stays stopped, and the body says how to start it and how to keep it running next time.
  */
 export function autonomyBootInterlockNotificationCopy(accounts: BootInterlockAccounts): { title: string; body: string } {
   const { reverted, autoPauseReleased } = accounts;
@@ -731,8 +756,8 @@ export function autonomyBootInterlockNotificationCopy(accounts: BootInterlockAcc
         : `Autonomy halted on boot for ${reverted.length} accounts`
       : reverted.length === 0
         ? autoPauseReleased.length === 1
-          ? `Broker auto-pause kept after restart: ${autoPauseReleased[0]}`
-          : `Broker auto-pause kept after restart for ${autoPauseReleased.length} accounts`
+          ? `Restart ended the broker auto-pause: ${autoPauseReleased[0]} stays stopped`
+          : `Restart ended the broker auto-pause: ${autoPauseReleased.length} accounts stay stopped`
         : `Autonomy halted on boot for ${total} accounts`;
   const lines: string[] = [];
   if (reverted.length > 0) {
@@ -745,12 +770,12 @@ export function autonomyBootInterlockNotificationCopy(accounts: BootInterlockAcc
     lines.push(
       `Already halted before the restart by a broker auto-pause (the broker order path or connection was failing): ` +
         `${autoPauseReleased.join(", ")}.  ` +
-        `Auto-resume on boot is off, so autonomy will no longer re-arm on its own when the broker recovers.`
+        `Auto-resume on boot is off, so the restart ended that auto-pause: autonomy will not re-arm on its own when the broker recovers.`
     );
   }
   lines.push(
-    `Re-arm autonomy in Settings when ready.  To skip this halt on future restarts, enable ` +
-      `"auto-resume on boot" for this user in Settings, or set AUTONOMY_RESUME_ON_BOOT=1.`
+    `Nothing starts again by itself.  Start it with Start Agent when ready.  To keep accounts running through ` +
+      `restarts and deploys, turn on Auto-resume on boot in Settings (After a restart), or set AUTONOMY_RESUME_ON_BOOT=1.`
   );
   return { title, body: lines.join("\n") };
 }
@@ -1294,6 +1319,15 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
         const schedule = accountSchedules[key];
 
         const policy = getPolicy(userId, accountId);
+
+        // Lane h5: a "stopped by the restart" receipt is only true while the account stays halted.
+        // Once anyone re-arms it (console, mobile, ops token), drop it so a later manual stop is not
+        // mislabelled.  A read on every tick; a delete only on the tick after a re-arm.
+        try {
+          clearBootHaltReceiptIfNotHalted(userId, accountId, policy.systemState);
+        } catch (err) {
+          console.error("[scheduler] boot-halt receipt cleanup failed:", err);
+        }
 
         // Deterministic proposal expiry runs independently of the trading cadence so a stale
         // approval queue self-clears even while the system is halted or the market is closed.

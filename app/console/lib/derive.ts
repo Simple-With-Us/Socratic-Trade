@@ -116,6 +116,9 @@ export interface StateInfo {
   label: string;
   /** One-line honest explanation. */
   detail: string;
+  /** Why a halted account is halted and whether it starts again by itself (server-computed, lane h5).
+   *  Absent when the snapshot does not say. */
+  cause?: string;
   tone: "pos" | "warn" | "neg" | "muted";
   /** Only meaningful when state === "active" — whether the market (per current session + the
    *  account's extended-hours policy) is open right now. undefined for every other state (those
@@ -193,6 +196,22 @@ export function deriveStateInfo(
         tone: "neg"
       };
   }
+}
+
+/**
+ * Fold the server's halt cause (DashboardSnapshot.haltCause, lane h5) into the run-state display.
+ * The run-state WORD stays "Stopped" (shared vocabulary); only the chip label, tone, and the `cause`
+ * sentence change.  A broker auto-pause is amber, not red: the app will lift it by itself.
+ */
+export function withHaltCause(info: StateInfo, cause: DashboardSnapshot["haltCause"]): StateInfo {
+  if (info.state !== "halted" || !cause) return info;
+  if (cause.kind === "broker_auto_pause") {
+    return { ...info, label: "Stopped · auto-paused", tone: "warn", cause: cause.summary };
+  }
+  if (cause.kind === "restart") {
+    return { ...info, label: "Stopped · by restart", cause: cause.summary };
+  }
+  return { ...info, cause: cause.summary };
 }
 
 export function authorityWord(policy: TradingPolicy): "Ask-first" | "Autopilot" {

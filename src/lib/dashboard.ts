@@ -69,6 +69,7 @@ import { getRobinhoodMcpHealth, type RobinhoodMcpHealth } from "./robinhood";
 import { getStoredMcpOAuthTokens } from "./mcp-oauth";
 import { deriveExecutionState, fillSourceForExecutionMode } from "./execution-mode";
 import { getSchedulerState } from "./scheduler";
+import { describeAutonomyHaltCause, type AutonomyHaltCause } from "./autonomy-halt-cause";
 import { getCongressDataset, getInsiderDataset, getWebSourcesStatus, type CongressTrade } from "./web-sources";
 import { listRecentArkHoldings, listRecentThirteenFChanges } from "./db";
 import { readCongressScoreVerdict } from "./congress-score-gate";
@@ -337,6 +338,21 @@ export interface CurrentUserDisplay {
   name?: string;
   imageUrl?: string;
   loginProvider?: string;
+}
+
+/** Why the viewed account is halted (lane h5), or null.  Display-only: a lookup failure must never
+ *  break the snapshot, so it degrades to null (the console then shows the plain "Stopped" copy). */
+function dashboardHaltCause(userId: string, policy: TradingPolicy): AutonomyHaltCause | null {
+  try {
+    return describeAutonomyHaltCause({
+      userId,
+      connectedAccountId: policy.connectedAccountId,
+      accountNumber: policy.accountNumber,
+      systemState: policy.systemState
+    });
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1288,6 +1304,7 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     webSources: getWebSourcesStatus(),
     robinhoodMcpConnected: policy.activeBroker === "robinhood" ? Boolean(getStoredMcpOAuthTokens(userId)) : true,
     autoResumeOnBoot: getAutoResumeOnBoot(userId),
+    haltCause: dashboardHaltCause(userId, policy),
     socratic: {
       decisions: socraticDecisions,
       frameworkProposals: socraticFrameworkProposals

@@ -1,5 +1,6 @@
 import type { AuditFeedItem as DashboardAuditFeedItem, SymbolMeta as DashboardSymbolMeta, UnifiedActivityGroup } from "@/lib/dashboard-feed";
 import type { AccountReadiness } from "@/lib/dashboard";
+import type { AutonomyHaltCause } from "@/lib/autonomy-halt-cause";
 import type { PositionStopPlan } from "@/lib/db";
 import type { MacroData } from "@/lib/macro";
 import type { MacroDerivedMetrics } from "@/lib/macro-metrics";
@@ -182,6 +183,9 @@ export interface DashboardSnapshot {
   robinhoodMcpConnected: boolean;
   /** Per-user setting: when true, accounts left in "active" state auto-resume on server boot. */
   autoResumeOnBoot: boolean;
+  /** Why the viewed account is halted and whether it starts again by itself (lane h5).  null when
+   *  it is not halted; optional so older payloads and test fixtures stay valid. */
+  haltCause?: AutonomyHaltCause | null;
   socratic?: {
     decisions: SocraticDecisionCase[];
     frameworkProposals: SocraticFrameworkProposal[];
