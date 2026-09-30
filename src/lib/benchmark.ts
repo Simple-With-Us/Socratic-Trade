@@ -352,11 +352,12 @@ export interface BenchmarkFeedDiagnostic extends BenchmarkFeedFacts {
  *  own snapshots happened to move. */
 export const BENCHMARK_STALE_GRACE_DAYS = 5;
 
-/** Provenance stamp the history cascade puts on bars it fell back to when EVERY live provider failed
- *  (src/lib/history.ts, the `history-cache-eod-stale` branch). It re-stamps `fetchedAt` with "now"
- *  while the bar DATES stay frozen, so the stamp is the only in-band signal that the series is
- *  cached history rather than a live quote. */
-const STALE_CACHE_BAR_SOURCE = "history-cache-eod-stale";
+/** Provenance stamps the history cascade puts on bars it fell back to when EVERY live provider
+ *  failed (src/lib/history.ts, the stale-fallback branch): `history-cache-eod-stale` for the local
+ *  SQLite EOD cache, `imported-eod-stale` for the imported-EOD series (perf-17).  It re-stamps
+ *  `fetchedAt` with "now" while the bar DATES stay frozen, so the stamp is the only in-band signal
+ *  that the series is cached history rather than a live quote. */
+const STALE_CACHE_BAR_SOURCES: ReadonlySet<string> = new Set(["history-cache-eod-stale", "imported-eod-stale"]);
 
 /** Newest usable close in a series (undefined when nothing usable), by date order. */
 function newestClose(closes: Array<{ date: string; close: number }>): { date: string; close: number } | undefined {
@@ -530,7 +531,7 @@ export async function computeSpyBenchmarkDetailed(
     staleDays,
     ...(barSource ? { source: barSource } : {}),
     ...(barFetchedAt ? { fetchedAt: barFetchedAt } : {}),
-    fellBackToStaleCache: barSource === STALE_CACHE_BAR_SOURCE,
+    fellBackToStaleCache: barSource !== undefined && STALE_CACHE_BAR_SOURCES.has(barSource),
     stale: staleDays > BENCHMARK_STALE_GRACE_DAYS
   };
 
