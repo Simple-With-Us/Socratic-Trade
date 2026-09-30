@@ -216,4 +216,14 @@ npx eslint src/lib/broker-minimum-guard.ts src/lib/strategy.ts src/lib/strategy-
   test/account-questionnaire-run-loop.test.ts test/broker-minimum-bump-execute.test.ts test/broker-minimum-guard.test.ts
 ```
 
-RESULTS_PLACEHOLDER
+Results: `test/account-questionnaire-run-loop.test.ts` (8 tests), `test/broker-minimum-bump-execute.test.ts`
+(14), `test/broker-account-questionnaire.test.ts`, `test/broker-minimum-guard.test.ts`,
+`test/hold-reason.test.ts` and `test/broker-minimum-bump.test.ts` all pass (100 tests in the second batch,
+plus the 8 run-loop tests in the first).  Failing-first evidence: in a temporary worktree at `ea6e7e075`
+the fresh-hold funding, probe funding and manual-run tests failed and the control test passed; the
+sub-minimum backstop test failed with the row left in `placing`.  `npx tsc --noEmit` exited 0 on the tree
+with the source changes; eslint reports 0 errors (49 pre-existing warnings, none new).  Caveat: the Mac ran
+at load average 300 to 1000, so the repo's fixed 60 second per-test timeout tripped on the first test of
+three files on the first attempt (cold module import) and those files were re-run with
+`--testTimeout=900000`, all green.  The required `verify` CI check is the binding full-suite and build
+gate; `npm run build` was not run locally.
