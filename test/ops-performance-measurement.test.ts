@@ -12,9 +12,11 @@ import { beforeAll, describe, expect, it } from "vitest";
  * the old behaviour fails here rather than silently flattering a scorecard again.
  */
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `ops-perf-measurement-${randomUUID()}.db`)}`;
-});
+  // Load the heavy modules once up front so the first test does not pay the cold-import cost.
+  await import("../src/lib/ops-performance");
+}, 300_000);
 
 const daysAgo = (now: number, n: number) => new Date(now - n * 24 * 60 * 60 * 1000).toISOString();
 

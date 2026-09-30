@@ -1,4 +1,4 @@
-import { clearStopPlans, deriveExitContractFromOpening, getMaturedSkippedCounterfactualByRunSymbol, getPolicy, getSkippedCounterfactualCoverage, insertFillEvent, insertPortfolioSnapshot, listAudit, listAuditByKind, listFillEvents, listMaturedSkippedCounterfactuals, listPortfolioSnapshots, listDailyPortfolioSnapshots, listRecentMaturedSkippedCounterfactuals, listSkippedCounterfactualsByStatus, recordStopPlan, recordTakeProfitTrimBand, type SkippedCounterfactualCoverage } from "./db";
+import { clearStopPlans, deriveExitContractFromOpening, getMaturedSkippedCounterfactualByRunSymbol, getSkippedCounterfactualCoverage, insertFillEvent, insertPortfolioSnapshot, listAudit, listAuditByKind, listFillEvents, listMaturedSkippedCounterfactuals, listPortfolioSnapshots, listDailyPortfolioSnapshots, listRecentMaturedSkippedCounterfactuals, listSkippedCounterfactualsByStatus, peekPolicy, recordStopPlan, recordTakeProfitTrimBand, type SkippedCounterfactualCoverage } from "./db";
 import { applyExecutionCost, estimateExecutionCostBps, executionCostConfig } from "./execution-cost";
 import { canonicalModelId } from "./model-identity";
 import { normalizeSymbol } from "./money";
@@ -1886,10 +1886,14 @@ export function getOpenLots(
  */
 const SHRINK_PRIOR = 5;
 
-/** Shrinkage prior, overridable via policy.tuning.shrinkPrior (0 = no shrinkage); else the default. */
+/** Shrinkage prior, overridable via policy.tuning.shrinkPrior (0 = no shrinkage); else the default.
+ *  Reads through `peekPolicy`, not `getPolicy`: this runs inside read-only scorecards (including the
+ *  token-gated ops performance GET), and `getPolicy` seeds an account_strategy_state row the first
+ *  time it touches an account that has none.  `peekPolicy` returns the same effective policy without
+ *  persisting it. */
 function resolveShrinkPrior(userId: string = "local"): number {
   try {
-    const v = getPolicy(userId).tuning?.shrinkPrior;
+    const v = peekPolicy(userId).tuning?.shrinkPrior;
     return typeof v === "number" && v >= 0 ? v : SHRINK_PRIOR;
   } catch {
     return SHRINK_PRIOR;

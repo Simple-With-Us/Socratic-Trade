@@ -18,16 +18,21 @@ the ops snapshot covers (or one, via `?account=`):
   quote.
 - `liveUnrealizedPnl` / `paperUnrealizedPnl` — mark-to-market over the `openLots` the account's one
   `calculatePnl` call already produced (`unrealizedFromOpenLots`, pure arithmetic, no second FIFO
-  walk).  An account with at least one open lot has those symbols quoted through
-  `fetchFreshQuotesCascade` with `skipActiveBroker: true` (the same fallback the dashboard uses, so
-  the account's own broker is not called a second time; the cascade may still reach the user's
-  other connected brokers' market-data endpoints, Alpaca snapshots, and Yahoo; never FMP, per the
-  owner rule).  Best effort: a failed, timed-out, or over-budget fetch leaves the symbol unpriced
-  instead of failing the request or being marked at `$0`.
+  walk).  The open symbols are marked from the STORED latest-price rows (`symbol_field_latest`, via
+  `getSymbolLatestPrices`: one indexed read, no network, no policy read; the dashboard and every
+  quote refresh keep it warm; never FMP, per the owner rule).  A stored price older than 10 days is
+  treated as unpriced rather than marking a position off a stale print.  `marks=live` adds ONE
+  bounded Alpaca market-data snapshot batch on top (see Query cost).  The trading quote cascade is
+  deliberately NOT used here: it walks Finnhub, Tiingo, Yahoo, and ROIC after hours, reads policy
+  through `getPolicy`, and reaches broker gateways whose history fan-out ignores an abort.  A
+  missing mark leaves the symbol unpriced instead of failing the request or marking it at `$0`.
 - `pricesUnavailable` — `true` only when the book HAS open positions and NONE could be priced (or
-  `marks=0` was passed).  An account with nothing open reports `false`: nothing to price is not a
-  quoting failure.  `unrealizedUnpricedSymbols` lists the open symbols that got no mark, so a
+  `marks=off` was passed).  An account with nothing open reports `false`: nothing to price is not a
+  pricing failure.  `unrealizedUnpricedSymbols` lists the open symbols that got no mark, so a
   partly priced account says exactly which positions the unrealized figure leaves out.
+  `unrealizedMarkBasis` says how marks were sourced (`stored`, `live`, or `off`) and
+  `unrealizedMarksOldestAsOf` is the ISO time of the oldest mark used, so the age of the figure is
+  visible (a stored mark can be a day or a long weekend old).
 - `tradeStats` — win rate, avg win/loss (USD), profit factor, expectancy (USD/trade), trade
   count, graded per FIFO exit lot.  Computed over the account's own book (`environment`'s closed
   lots from `calculatePnl`), windowed to `days` by `exitAt`.  A scaled-out position's several trims
@@ -76,7 +81,7 @@ the ops snapshot covers (or one, via `?account=`):
 | --- | --- | --- |
 | `account` | (all) | One `connectedAccountId`, across every user — mirrors `/api/ops/snapshot`'s all-users iteration. |
 | `days` | 90 | Clamped 1-3650.  Windows `tradeStats`, `roundTripStats`, `proposalFunnel`, and `equityCurve`.  `thesisScorecard`/`redTeamEfficacy`/`modelAttribution` are always lifetime. |
-| `marks` | on | `marks=0` (or `false`/`off`) skips quoting open positions entirely, so the request makes no market-data call and reports open positions unpriced.  Use it for a probe that only wants realized figures. |
+| `marks` | `stored` | `stored` marks open positions from the stored latest-price rows (no network).  `live` adds one bounded Alpaca snapshot batch on top and keeps the stored marks if it times out.  `0` / `false` / `off` skips marking and reports open positions unpriced.  Cached per mode. |
 
 ## Query cost / caching
 
@@ -90,13 +95,14 @@ under load.  Every query this endpoint adds is bounded:
   (`MAX_BLOCK_REASON_ROWS`, `MAX_BROKER_REJECTION_ROWS`, `MAX_PLACING_FAILURE_ROWS` in
   `src/lib/ops-performance.ts`); the matching `*RowsCapped` flag says so when a bound was hit.
   Raising the output cap on distinct reasons to 50 changes payload size only, not query cost.
-- The unrealized-P&L quote fetch runs only for an account with at least one open lot, and every
-  part of it is bounded: at most 100 symbols per account (`OPS_QUOTE_MAX_SYMBOLS`, the excess is
-  reported unpriced), 8 seconds per account (`OPS_QUOTE_FETCH_TIMEOUT_MS`) enforced with a real
-  `AbortController` plus a `withDeadline` guard, one 20 second budget of quote-waiting time across
-  the whole request (`OPS_QUOTE_TOTAL_BUDGET_MS`; time spent on ledgers does not consume it, and it
-  stops an unfiltered request costing accounts times the per-account ceiling), and a per-request memo so a ticker held in several accounts is quoted once.  It never
-  throws into the request.
+- Unrealized-P&L marking is one indexed read of `symbol_field_latest` per account with open lots
+  (at most 200 symbols, `OPS_MARK_MAX_SYMBOLS`; the excess is reported unpriced), memoised so a
+  ticker held in several accounts is read once.  `marks=live` adds at most one Alpaca snapshot
+  batch per account (100 symbols, `OPS_QUOTE_MAX_SYMBOLS`) with an 8 second deadline
+  (`OPS_QUOTE_FETCH_TIMEOUT_MS`) and one 20 second budget across the request
+  (`OPS_QUOTE_TOTAL_BUDGET_MS`; ledger time does not consume it).  A timeout keeps the stored marks
+  already gathered; it does not discard them.  Neither mode reads policy, calls a broker gateway, or
+  fans out history fetches, and neither can throw into the request.
 - Red Team veto-audit scan is capped at 500 rows per account (`OPS_RED_TEAM_AUDIT_LIMIT`).
 - `liveFills`/`paperFills` are fetched ONCE per account and `calculatePnl` (the FIFO lot match)
   runs ONCE per source — the results are threaded through as `PrefetchedFills`/`PrefetchedPnl` so
@@ -153,10 +159,12 @@ curl -sS -H "x-ops-token: $OPS_DIAGNOSTIC_TOKEN" \
 - `perf-17` (SPY benchmark frozen at 2026-07-24 with `source: imported-eod`): the cause was in the
   shared `fetchDailyOHLC` cascade (`src/lib/history.ts`), not in this endpoint.  The imported-EOD tier
   accepted any series with at least two bars and short-circuited the whole cascade with no
-  freshness check, so once the imported feed stopped refreshing no live provider was ever tried.  A
-  stale imported series is now demoted to a fallback that a live fetch is merged into, and when
-  every live provider also fails the frozen series is stamped `imported-eod-stale`, which
-  `src/lib/benchmark.ts` recognises as a stale-cache fallback.  AG's `ag/perf-twr-basis` branch no
-  longer exists and the only related merged PR (#3345, TWR cap by daily snapshots) is a different
-  fix, so nothing here duplicates it.
-- Unrealized P&L (`pricesUnavailable` was hardcoded `true`) now uses real marks, described above.
+  freshness check.  The fix on `main` is #4009 (a dense import must reach the latest completed
+  session before it may win; a stale one is the all-sources-failed fallback).  It applies to every
+  symbol, so a stale imported series now walks the live providers, and when every one fails the
+  fallback is cached for 5 minutes.  This lane keeps two small extras on top of #4009: a stale
+  import is also a merge base for a live fetch, and an import-only fallback is stamped
+  `imported-eod-stale`, which `src/lib/benchmark.ts` recognises as a stale-cache fallback.  AG's
+  `ag/perf-twr-basis` branch no longer exists and #3345 (TWR cap by daily snapshots) is a
+  different fix.
+- Unrealized P&L (`pricesUnavailable` was hardcoded `true`) now uses real stored marks, described above.

@@ -1,4 +1,5 @@
-import { getDb, listConnectedAccounts, listUsers, peekPolicy, listFillEvents } from "./db";
+import { getDb, getSymbolLatestPrices, listConnectedAccounts, listUsers, peekPolicy, listFillEvents, resolveAlpacaMarketData } from "./db";
+import { AlpacaSnapshotEnrichmentProvider } from "./data-providers";
 import {
   aggregateRoundTrip,
   calculatePnl,
@@ -15,7 +16,6 @@ import {
 } from "./performance";
 import { withDeadline } from "./inflight-deadline";
 import { normalizeSymbol } from "./money";
-import { fetchFreshQuotesCascade } from "./quotes-cascade";
 import { yieldEventLoop } from "./slow-sync-guard";
 import type { FillEvent, FillSource, HoldReasonCode } from "./types";
 
@@ -57,21 +57,26 @@ import type { FillEvent, FillSource, HoldReasonCode } from "./types";
  * work — however large — is never one unbroken synchronous stretch; it cannot reduce the total
  * work, only keep this process able to serve `/api/health` and other requests while it runs.
  *
- * Unrealized P&L (was hardcoded 0 with `pricesUnavailable: true` for every account): an account
- * whose book has at least one OPEN lot has those symbols quoted through
- * `fetchFreshQuotesCascade` — the SAME cascade the dashboard falls back to; it never calls FMP
- * (owner rule 2026-08-20).  `skipActiveBroker: true` means the account's OWN broker gateway is
- * never hit a second time by this diagnostic, though the cascade can still reach the user's OTHER
- * connected brokers' market-data-only endpoints, Alpaca snapshots and Yahoo, exactly like the
- * dashboard fallback.  Everything about that fetch is bounded so a slow feed cannot stall the
- * request: at most `OPS_QUOTE_MAX_SYMBOLS` symbols per account, `OPS_QUOTE_FETCH_TIMEOUT_MS` per
- * account with a real `AbortController` (not just a race), one `OPS_QUOTE_TOTAL_BUDGET_MS` budget
- * across the whole request, a per-request symbol memo so the same ticker held in several accounts
- * is quoted once, and the whole snapshot stays behind the 60s cache below.  Best effort by design:
- * a failed or timed-out fetch leaves those symbols UNPRICED (listed in `unrealizedUnpricedSymbols`,
- * never fabricated as a $0 mark) instead of failing the request, and `marks=0` on the route skips
- * quoting entirely.  The unrealized figure is `unrealizedFromOpenLots` over the `openLots`
- * `calculatePnl` already produced — it does NOT re-run the FIFO walk with prices.
+ * Unrealized P&L (was hardcoded 0 with `pricesUnavailable: true` for every account): the open
+ * symbols of each account are marked from the STORED latest-price rows (`symbol_field_latest`, via
+ * `getSymbolLatestPrices` — one indexed read, no network, kept warm by the dashboard and every quote
+ * refresh; never FMP, owner rule 2026-08-20).  That is the DEFAULT (`marks=stored`) on purpose: the
+ * first cut ran the trading-grade quote cascade here, which after hours walks Finnhub (shared 1.2s
+ * pacer), Tiingo (shared hourly budget), unpaced Yahoo singles and ROIC for every symbol that is not
+ * field-complete, THREW AWAY every price gathered when the 8s deadline hit (so the account read
+ * unpriced again), seeded policy rows through `getPolicy`, and let other-broker gateways fan out
+ * per-symbol close-history fetches that ignore the abort.  A diagnostic GET must do none of that.
+ * Each stored mark carries its own `as_of`; one older than `OPS_STORED_MARK_MAX_AGE_MS` is treated
+ * as unpriced rather than mis-marking the book, and the oldest `as_of` used is reported per account
+ * (`unrealizedMarksOldestAsOf`) so the reader can judge the figure.  `marks=live` opts in to ONE
+ * bounded Alpaca market-data snapshot batch on top of the stored marks (no policy read, no broker
+ * gateway, no history fan-out): at most `OPS_QUOTE_MAX_SYMBOLS` symbols per account, one
+ * `OPS_QUOTE_FETCH_TIMEOUT_MS` deadline per account, one `OPS_QUOTE_TOTAL_BUDGET_MS` budget across
+ * the request, and a timeout keeps the stored marks it already has.  `marks=off` skips marking
+ * entirely.  A symbol is never re-quoted within one build (per-request memo), a missing mark is
+ * skipped and listed in `unrealizedUnpricedSymbols` (never a $0 mark), and the whole snapshot stays
+ * behind the 60s cache below.  The unrealized figure is `unrealizedFromOpenLots` over the
+ * `openLots` `calculatePnl` already produced — it does NOT re-run the FIFO walk with prices.
  */
 
 export const OPS_PERFORMANCE_DEFAULT_DAYS = 90;
@@ -87,12 +92,19 @@ const MAX_BLOCK_REASON_ROWS = 1000;
 const MAX_REASON_BUCKETS = 50;
 /** Bound on `placing_failed` proposal rows scanned per account for the placing-failure reasons. */
 const MAX_PLACING_FAILURE_ROWS = 1000;
-/** Most open symbols quoted for one account's unrealized P&L — a runaway book must not turn one
- *  diagnostic read into a hundreds-of-symbols quote fan-out.  The excess is reported as unpriced. */
+/** Most open symbols marked for one account's unrealized P&L — a runaway book must not turn one
+ *  diagnostic read into an unbounded lookup.  The excess is reported as unpriced. */
+const OPS_MARK_MAX_SYMBOLS = 200;
+/** Most symbols sent to the live Alpaca snapshot batch for one account (Alpaca's own batch size). */
 const OPS_QUOTE_MAX_SYMBOLS = 100;
-/** Ceiling on the quote fetch for ONE account.  A slow feed degrades to "unpriced", never a hang. */
+/** A stored latest-price row older than this is treated as unpriced: it is real data, but marking a
+ *  position off a weeks-old print would report a confident, wrong unrealized figure.  Ten days
+ *  covers a long holiday weekend and a missed refresh without accepting a stale-for-weeks price. */
+const OPS_STORED_MARK_MAX_AGE_MS = 10 * 24 * 60 * 60 * 1000;
+/** Ceiling on the live snapshot fetch for ONE account.  A slow feed keeps the stored marks and
+ *  degrades the rest to "unpriced", never a hang. */
 const OPS_QUOTE_FETCH_TIMEOUT_MS = 8_000;
-/** Ceiling on the time ALL quote fetching may spend in one snapshot build.  An unfiltered request
+/** Ceiling on the time ALL live fetching may spend in one snapshot build.  An unfiltered request
  *  walks every account; without this a slow feed could cost `accounts x OPS_QUOTE_FETCH_TIMEOUT_MS`.
  *  It counts time spent WAITING ON QUOTES, not wall clock since the build started, so a large
  *  ledger's FIFO walk or a loaded event loop on an earlier account cannot starve the marks of the
@@ -205,6 +217,10 @@ export interface OpsEquityCurvePoint {
   cash: number | null;
 }
 
+/** Where unrealized-P&L marks come from.  `stored` reads the latest-price rows (no network, the
+ *  default); `live` adds one bounded Alpaca snapshot batch; `off` skips marking. */
+export type OpsMarksMode = "stored" | "live" | "off";
+
 export interface OpsPerformanceAccount {
   connectedAccountId: string;
   userId: string;
@@ -214,13 +230,19 @@ export interface OpsPerformanceAccount {
   systemState: string;
   accountNumber: string | null;
   /** True only when the book HAS open positions and NONE of them could be marked (or marking was
-   *  turned off with `marks=0`).  False when there is nothing to price, or at least one open symbol
-   *  got a mark — in which case `unrealizedUnpricedSymbols` says which ones are still missing and
+   *  turned off with `marks=off`).  False when there is nothing to price, or at least one open symbol
+   *  got a mark - in which case `unrealizedUnpricedSymbols` says which ones are still missing and
    *  the unrealized figures understate by exactly those positions. */
   pricesUnavailable: boolean;
-  /** Open symbols that got no mark (quote fetch failed, timed out, was over budget, or skipped).
-   *  Empty when every open position was priced or there are none. */
+  /** Open symbols that got no mark (no stored price, one too old, live fetch failed or over budget,
+   *  or marking off).  Empty when every open position was priced or there are none. */
   unrealizedUnpricedSymbols: string[];
+  /** How the marks were sourced: `stored` (latest-price rows, the default), `live` (stored plus one
+   *  Alpaca snapshot batch), or `off`. */
+  unrealizedMarkBasis: OpsMarksMode;
+  /** ISO time of the OLDEST mark that fed the unrealized figures, or null when nothing was priced.
+   *  The age of the figure: a stored mark can be a day or a long weekend old. */
+  unrealizedMarksOldestAsOf: string | null;
   liveRealizedPnl: number;
   paperRealizedPnl: number;
   liveUnrealizedPnl: number;
@@ -756,65 +778,129 @@ function emptyProposalFunnel(windowDays: number): OpsProposalFunnel {
   };
 }
 
-/** Per-build quote state: marks already obtained (a ticker held in several accounts is quoted
- *  once) and how much of the quote-time budget is already spent. */
+interface OpsMark {
+  price: number;
+  /** ISO time the price was observed (stored rows) or fetched (live snapshot). */
+  asOf: string;
+}
+
+/** Per-build mark state: marks already obtained (a ticker held in several accounts is marked once),
+ *  symbols already attempted (a failed one is not retried by the next account), and how much of the
+ *  live-fetch budget is already spent. */
 interface OpsQuoteContext {
-  marks: Map<string, number>;
-  /** Milliseconds spent waiting on quote fetches so far in this build. */
+  mode: OpsMarksMode;
+  marks: Map<string, OpsMark>;
+  attempted: Set<string>;
+  /** Milliseconds spent waiting on live fetches so far in this build. */
   spentMs: number;
-  enabled: boolean;
+}
+
+/** The oldest observation time among the marks in use, as ISO, or null when there are none. */
+function oldestMarkAsOf(marks: OpsMark[]): string | null {
+  let oldest: number | null = null;
+  for (const mark of marks) {
+    const at = Date.parse(mark.asOf);
+    if (Number.isFinite(at) && (oldest === null || at < oldest)) oldest = at;
+  }
+  return oldest === null ? null : new Date(oldest).toISOString();
+}
+
+/** Stored latest-price rows for `symbols`, minus any whose observation time is unparseable or older
+ *  than the cutoff.  One indexed read; never throws (a read failure leaves them unpriced). */
+function readStoredMarks(symbols: string[], nowMs: number): Record<string, OpsMark> {
+  const out: Record<string, OpsMark> = {};
+  let stored: ReturnType<typeof getSymbolLatestPrices>;
+  try {
+    stored = getSymbolLatestPrices(symbols);
+  } catch {
+    return out;
+  }
+  for (const [rawSymbol, row] of Object.entries(stored)) {
+    const symbol = normalizeSymbol(rawSymbol);
+    const at = Date.parse(row.asOf);
+    if (!symbol || !Number.isFinite(at) || nowMs - at > OPS_STORED_MARK_MAX_AGE_MS) continue;
+    if (typeof row.price === "number" && Number.isFinite(row.price) && row.price > 0) {
+      out[symbol] = { price: row.price, asOf: new Date(at).toISOString() };
+    }
+  }
+  return out;
 }
 
 /**
- * Best-effort marks for one account's open symbols.  Never throws and never blocks past its
- * budget: the cascade gets a real `AbortController` (aborted on timeout, so the in-flight fetch
- * stops instead of leaking past the race) and `withDeadline` guarantees this await returns even
- * if some tier ignores the signal.  Only strictly positive prices are kept — a zero or missing
- * quote is "unpriced", never a $0 mark.  Returns the marks for every requested symbol that has
- * one, including ones memoised earlier in the same build.
+ * One bounded Alpaca market-data snapshot batch (`marks=live` only).  Deliberately NOT the trading
+ * quote cascade: no policy read (so it can never seed a policy row), no broker gateway (whose
+ * per-symbol close-history fan-out ignores an abort), no Finnhub/Tiingo/Yahoo/ROIC tiers.  Returns
+ * whatever it could price; a timeout or provider error returns {} and the caller keeps its stored
+ * marks.  Only strictly positive prices count - a zero or missing quote is unpriced, never a $0 mark.
  */
-async function fetchOpsMarks(
-  symbols: string[],
-  userId: string,
-  accountNumber: string,
-  connectedAccountId: string,
-  ctx: OpsQuoteContext
-): Promise<Record<string, number>> {
-  const out: Record<string, number> = {};
-  const missing: string[] = [];
-  for (const symbol of symbols) {
-    const known = ctx.marks.get(symbol);
-    if (known !== undefined) out[symbol] = known;
-    else missing.push(symbol);
-  }
-  if (!ctx.enabled || missing.length === 0) return out;
-
-  const timeoutMs = Math.min(OPS_QUOTE_FETCH_TIMEOUT_MS, OPS_QUOTE_TOTAL_BUDGET_MS - ctx.spentMs);
-  if (timeoutMs <= 0) return out; // request-level quote budget already spent
-
-  const controller = new AbortController();
-  const startedAt = Date.now();
+async function fetchLiveSnapshotMarks(symbols: string[], userId: string, timeoutMs: number): Promise<Record<string, OpsMark>> {
+  const out: Record<string, OpsMark> = {};
   try {
-    const quotes = await withDeadline(
-      fetchFreshQuotesCascade(missing.slice(0, OPS_QUOTE_MAX_SYMBOLS), userId, accountNumber, connectedAccountId, {
-        skipActiveBroker: true,
-        signal: controller.signal
-      }),
+    const creds = resolveAlpacaMarketData(userId);
+    if (!creds.apiKey || !creds.secretKey) return out;
+    const provider = new AlpacaSnapshotEnrichmentProvider(creds.apiKey, creds.secretKey, creds.source, userId);
+    const enrichment = await withDeadline(
+      provider.enrich(symbols),
       timeoutMs,
-      `ops-performance quote cascade timed out after ${timeoutMs}ms`,
-      { controller }
+      `ops-performance live snapshot timed out after ${timeoutMs}ms`
     );
-    for (const quote of Object.values(quotes)) {
-      const symbol = normalizeSymbol(quote.symbol);
-      if (typeof quote.price === "number" && Number.isFinite(quote.price) && quote.price > 0) {
-        ctx.marks.set(symbol, quote.price);
-        out[symbol] = quote.price;
+    const fetchedAt = new Date().toISOString();
+    for (const symbol of symbols) {
+      const data = enrichment[symbol];
+      if (!data) continue;
+      const price = data.price ?? (data.bid && data.ask ? (data.bid + data.ask) / 2 : undefined);
+      if (typeof price === "number" && Number.isFinite(price) && price > 0) {
+        const at = data.asOf ? Date.parse(data.asOf) : NaN;
+        out[symbol] = { price, asOf: Number.isFinite(at) ? new Date(at).toISOString() : fetchedAt };
       }
     }
   } catch {
-    // Timed out, aborted, or the cascade threw: leave whatever it could not price unpriced.
-  } finally {
-    ctx.spentMs += Math.max(0, Date.now() - startedAt);
+    // Timed out or the provider threw: the stored marks the caller already holds stand.
+  }
+  return out;
+}
+
+/**
+ * Marks for one account's open symbols.  Never throws and never blocks past its budget.  Stored
+ * latest-price rows are read first (memoised per build); `live` mode then upgrades up to
+ * `OPS_QUOTE_MAX_SYMBOLS` of them from one snapshot batch under the per-account and per-request
+ * time budgets.  Returns the mark for every requested symbol that has one, including ones
+ * memoised earlier in the same build.
+ */
+async function resolveOpsMarks(symbols: string[], userId: string, ctx: OpsQuoteContext): Promise<Record<string, OpsMark>> {
+  const out: Record<string, OpsMark> = {};
+  if (ctx.mode === "off") return out;
+
+  const fresh: string[] = [];
+  for (const symbol of symbols) {
+    const known = ctx.marks.get(symbol);
+    if (known) out[symbol] = known;
+    else if (!ctx.attempted.has(symbol)) fresh.push(symbol);
+  }
+  if (fresh.length === 0) return out;
+
+  const slice = fresh.slice(0, OPS_MARK_MAX_SYMBOLS);
+  const marks = readStoredMarks(slice, Date.now());
+
+  if (ctx.mode === "live") {
+    const timeoutMs = Math.min(OPS_QUOTE_FETCH_TIMEOUT_MS, OPS_QUOTE_TOTAL_BUDGET_MS - ctx.spentMs);
+    if (timeoutMs > 0) {
+      const startedAt = Date.now();
+      try {
+        Object.assign(marks, await fetchLiveSnapshotMarks(slice.slice(0, OPS_QUOTE_MAX_SYMBOLS), userId, timeoutMs));
+      } finally {
+        ctx.spentMs += Math.max(0, Date.now() - startedAt);
+      }
+    }
+  }
+
+  for (const symbol of slice) {
+    ctx.attempted.add(symbol);
+    const mark = marks[symbol];
+    if (mark) {
+      ctx.marks.set(symbol, mark);
+      out[symbol] = mark;
+    }
   }
   return out;
 }
@@ -824,19 +910,21 @@ export interface BuildOpsPerformanceInput {
    *  snapshot covers, mirroring `/api/ops/snapshot`'s all-users iteration. */
   connectedAccountId?: string;
   days?: number;
-  /** Quote open positions for real unrealized P&L (default true).  `false` skips every quote
-   *  fetch — the cheap mode for a probe that only wants realized figures; open positions are then
-   *  reported unpriced rather than as a $0 mark. */
-  includeMarks?: boolean;
+  /** How to mark open positions for unrealized P&L (default `stored`: one indexed read of the
+   *  latest-price rows, no network).  `live` adds one bounded Alpaca snapshot batch; `off` skips
+   *  marking, and open positions are then reported unpriced rather than as a $0 mark. */
+  marks?: OpsMarksMode;
 }
 
 export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInput = {}): Promise<OpsPerformanceSnapshot> {
   const windowDays = clampDays(input.days);
   const sinceIso = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+  const marksMode: OpsMarksMode = input.marks ?? "stored";
   const quoteCtx: OpsQuoteContext = {
+    mode: marksMode,
     marks: new Map(),
-    spentMs: 0,
-    enabled: input.includeMarks !== false
+    attempted: new Set(),
+    spentMs: 0
   };
 
   const accounts: OpsPerformanceAccount[] = [];
@@ -861,6 +949,8 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
           // Nothing was computed, so there is nothing that needed a price.
           pricesUnavailable: false,
           unrealizedUnpricedSymbols: [],
+          unrealizedMarkBasis: marksMode,
+          unrealizedMarksOldestAsOf: null,
           liveRealizedPnl: 0,
           paperRealizedPnl: 0,
           liveUnrealizedPnl: 0,
@@ -897,7 +987,9 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
         const prefetchedPnl = { live: livePnl, paper: paperPnl };
 
         const openSymbols = openLotSymbols(livePnl.openLots, paperPnl.openLots);
-        const marks = openSymbols.length > 0 ? await fetchOpsMarks(openSymbols, userId, accountNumber, account.id, quoteCtx) : {};
+        const opsMarks = openSymbols.length > 0 ? await resolveOpsMarks(openSymbols, userId, quoteCtx) : {};
+        const marks: Record<string, number> = {};
+        for (const [symbol, mark] of Object.entries(opsMarks)) marks[symbol] = mark.price;
         const unpricedSymbols = openSymbols.filter((symbol) => marks[symbol] === undefined).sort();
         const liveUnrealizedPnl = unrealizedFromOpenLots(livePnl.openLots, marks);
         const paperUnrealizedPnl = unrealizedFromOpenLots(paperPnl.openLots, marks);
@@ -932,6 +1024,8 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
           systemState,
           pricesUnavailable,
           unrealizedUnpricedSymbols: unpricedSymbols,
+          unrealizedMarkBasis: marksMode,
+          unrealizedMarksOldestAsOf: oldestMarkAsOf(Object.values(opsMarks)),
           liveRealizedPnl: performance.liveRealizedPnl,
           paperRealizedPnl: performance.paperRealizedPnl,
           liveUnrealizedPnl: round2(liveUnrealizedPnl),
@@ -952,6 +1046,8 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
           // The account errored before it could be priced: unknown, not "nothing to price".
           pricesUnavailable: true,
           unrealizedUnpricedSymbols: [],
+          unrealizedMarkBasis: marksMode,
+          unrealizedMarksOldestAsOf: null,
           liveRealizedPnl: 0,
           paperRealizedPnl: 0,
           liveUnrealizedPnl: 0,
@@ -992,7 +1088,7 @@ const snapshotCache = new Map<string, CacheEntry>();
 const inFlight = new Map<string, Promise<OpsPerformanceSnapshot>>();
 
 function cacheKey(input: BuildOpsPerformanceInput): string {
-  return `${input.connectedAccountId ?? "*"}\0${clampDays(input.days)}\0${input.includeMarks === false ? "nomarks" : "marks"}`;
+  return `${input.connectedAccountId ?? "*"}\0${clampDays(input.days)}\0${input.marks ?? "stored"}`;
 }
 
 /** Cached wrapper around buildOpsPerformanceSnapshot — 60s TTL, single-flight per key so two
