@@ -825,6 +825,9 @@ describe("restore reconcile reads the account's CURRENT state, not the run's sna
     };
     const proposal = sellProposal("PYPL", 10);
     const plan = releasePlan(account, broker, proposal, staleActive);
+    // PYPL is shared with an earlier test in this file, so count this run's fallback rows only.
+    const fallbackAudits = () => auditKinds("PYPL").filter((kind) => kind === "exit_stop_release_restore_state_fallback").length;
+    const fallbacksBefore = fallbackAudits();
 
     await placeExitReleasingOwnStops(
       { userId: USER, policy: staleActive, accountNumber: account, connectedAccountId, gateway: broker as never, executionMode: "broker/paper", proposal, plan, lane: "autopilot", cancelSettleMs: 0 },
@@ -838,6 +841,8 @@ describe("restore reconcile reads the account's CURRENT state, not the run's sna
     expect(broker.placed.some((o) => o.symbol === "XOM")).toBe(false);
     expect(listBrokerProtectiveStops(account, USER).map((r) => r.symbol)).toEqual(["PYPL"]);
     expect(getExitStopReleaseIntent(USER, account, "PYPL")).toBeUndefined();
+    // The halt came from the account's CURRENT durable state, not the unreadable-state fallback.
+    expect(fallbackAudits()).toBe(fallbacksBefore);
   });
 
   it("the account's current state cannot be read: the restore takes the halt treatment (put back only what was released)", async () => {
