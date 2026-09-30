@@ -22,6 +22,27 @@ the stop cancel did not settle) was booked terminal `blocked` in both lanes; it 
 notification title now names the actual cause per code (`retryableExitStopReleaseTitle`).  6 new
 tests.  Branch merged with `main` (GitHub had reported it conflicting; the local merge was clean).
 Rollout: `docs/rollouts/2026-09-30-st-exit-stop-release-review-round.md`.
+## 2026-09-30 CLAUDE — Accounts stranded halted after a broker-health auto-halt: honest restart halts (board 687a5fb4, lane h5)
+
+**What.**  Alpaca Paper (the owner's Autopilot account) was auto-halted by a probe timeout at
+2026-09-25 18:20Z and sat halted, with no runs, for four days until an operator re-armed it.  Root
+cause is a hypothesis, not established (the review round softened it): the leading candidate is the
+pre-#3752 stale-snapshot drop, where a caller that read "active" before the halt got a healthy
+probe and removed the auto-resume marker without resuming (#3752's durable re-read closed it; now
+pinned by a test).  The alternative is the #3752 boot interlock ending the auto-pause with "Auto-resume
+on boot" off, but 2026-09-24's restarts did not halt the account, which argues the setting was on.
+The rollout note lists the read-only prod query that decides it.  Either way nothing said what held
+the account.  Now `describeAutonomyHaltCause` names every halt: broker auto-pause (with the last
+failed probe and whether a restart would end it), restart (receipt), drawdown breaker or an
+auto-pause whose record vanished (audit trail), or "no record" (never "a person").  It shows on the
+console run-state chip and control sheet, every account-switcher and Brokers row, the ops snapshot
+(`autoResumeOnBoot`, `haltCause`, auto-pause audit kinds) and ops `nextEligibleRun`.  The boot and
+auto-halt notifications and the Settings card say a restart ends an auto-pause when the setting is
+off.  With the setting on (or `AUTONOMY_RESUME_ON_BOOT=1`) an auto-owned halt survives restarts and
+lifts on the first healthy probe; an owner halt never auto-lifts; both pinned, including through the
+real scheduler tick.  **Owner decision, not changed here:** turn on Settings, After a restart,
+Auto-resume on boot if Autopilot should run through deploys.  Branch `claude/st-w3-h5` (PR #4008).
+Rollout: `docs/rollouts/2026-09-30-st-w3-h5-restart-halt-visibility.md`.
 ## 2026-09-30 CLAUDE — Post-merge audit of #3798 Tradier fill reconciliation (lane h2, board `687a5fb4`)
 
 **What.**  #3798 merged without its adversarial review.  The audit found four real defects, all

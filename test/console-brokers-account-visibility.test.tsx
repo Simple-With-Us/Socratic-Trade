@@ -32,20 +32,35 @@ function account(partial: Partial<ConnectedAccount> & Pick<ConnectedAccount, "id
 
 const loadedAccount = account({ id: "acct-paper", label: "Loaded Paper Account", isActive: true, environment: "paper" });
 const otherAccount = account({ id: "acct-roth-live", label: "Roth IRA Live Account", isActive: false, environment: "live" });
+// Lane h5 review round: a stopped, non-loaded account the app auto-paused (the 2026-09-25 Alpaca
+// Paper shape) must say so on its row, not a bare "Stopped".
+const pausedAccount = account({ id: "acct-alpaca-paper", label: "Alpaca Paper Account", isActive: false, environment: "paper" });
 
 // The genuinely-running-but-not-loaded account: Autopilot (strategyAuthority "decide") with the
 // market open, plus 2 real pending proposals waiting — exactly the case lifecycle-02/lifecycle-12
 // describe (a second connected account trading independently of what's loaded in this tab).
 const fixtureSnapshot = {
   policy: { systemState: "active", strategyAuthority: "propose", includedIndices: [], additionalSymbols: [], maxDailyOrders: 6 } as unknown as TradingPolicy,
-  connectedAccounts: [loadedAccount, otherAccount],
+  connectedAccounts: [loadedAccount, otherAccount, pausedAccount],
   // runDuringExtendedHours deliberately omitted (stays undefined): deriveStateInfo treats that as
   // "can't know if the market-hours window matters" and skips the open/closed split entirely, so
   // the label is a plain, time-of-day-independent "Running"/"Autopilot" — not flaky depending on
   // when this test happens to run relative to market hours.
   connectedAccountPolicies: {
     [loadedAccount.id]: { systemState: "active", strategyAuthority: "propose" },
-    [otherAccount.id]: { systemState: "active", strategyAuthority: "decide" }
+    [otherAccount.id]: { systemState: "active", strategyAuthority: "decide" },
+    [pausedAccount.id]: {
+      systemState: "halted",
+      strategyAuthority: "decide",
+      haltCause: {
+        kind: "broker_auto_pause",
+        resumesOnItsOwn: true,
+        since: "2026-09-25T18:20:24.034Z",
+        reason: "Broker health check timed out: checkBrokerHealth timeout",
+        autoResumeOnBootNow: false,
+        summary: "Paused by the app since Thu, Sep 25, 1:20 PM CT: Broker health check timed out."
+      }
+    }
   },
   connectedAccountPendingCounts: {
     [loadedAccount.id]: 0,
@@ -89,6 +104,14 @@ describe("Settings > Broker connections (per-account-visibility)", () => {
     // The real per-account pending count (connectedAccountPendingCounts) — 2 proposals waiting on
     // an account that was never "loaded" in this browser tab.
     expect(otherSection).toContain("2 pending proposals");
+  });
+
+  it("says why a stopped, non-loaded account is stopped (lane h5)", async () => {
+    const { BrokerAccountsCard } = await import("../app/console/settings/brokers");
+    const html = renderToStaticMarkup(<BrokerAccountsCard />);
+    const pausedRow = html.split(pausedAccount.label)[1];
+    expect(pausedRow).toBeTruthy();
+    expect(pausedRow).toContain("Stopped · auto-paused");
   });
 
   it("still shows the loaded account's own real state (unchanged, sanity check)", async () => {

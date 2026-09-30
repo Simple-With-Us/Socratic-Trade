@@ -25,7 +25,9 @@ import {
   deriveReality,
   deriveSpend,
   deriveStateInfo,
-  realityForAccount
+  realityForAccount,
+  stateChipTitle,
+  withHaltCause
 } from "../lib/derive";
 import {
   activateAccount,
@@ -144,7 +146,8 @@ export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compa
   const renderRow = (account: ConnectedAccount) => {
     const r = realityForAccount(account);
     const policy = snapshot.connectedAccountPolicies?.[account.id];
-    const st = policy ? deriveStateInfo(policy) : null;
+    // Lane h5 review round: a stopped account that is not loaded says why, too.
+    const st = policy ? withHaltCause(deriveStateInfo(policy), policy.haltCause) : null;
     const isActive = account.isActive;
     const last4 = account.accountNumber ? account.accountNumber.slice(-4) : null;
     return (
@@ -167,7 +170,7 @@ export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compa
             </span>
             {r.tone !== "live" && <Chip tone={r.tone}>{r.tone === "paper" ? "PAPER" : r.word}</Chip>}
             {st && (
-              <Chip tone={st.tone}>
+              <Chip tone={st.tone} title={stateChipTitle(st)}>
                 {st.label.replace(" · market closed", "")}
               </Chip>
             )}
@@ -290,7 +293,7 @@ const STATE_TONE: Record<string, "pos" | "warn" | "neg" | "muted"> = {
 
 export function StateChip({ snapshot }: { snapshot: DashboardSnapshot }) {
   const [open, setOpen] = useState(false);
-  const info = deriveStateInfo(snapshot.policy);
+  const info = withHaltCause(deriveStateInfo(snapshot.policy), snapshot.haltCause);
   // On phones the boxed single-line chip read as a second dropdown next to the
   // account selector and crowded the bar (owner report) — below sm it renders
   // unboxed with the state stacked over the authority in smaller type. Desktop
@@ -302,7 +305,7 @@ export function StateChip({ snapshot }: { snapshot: DashboardSnapshot }) {
         type="button"
         onClick={() => setOpen(true)}
         className="con-bar-ctl flex shrink-0 items-center gap-2 rounded-control border border-transparent px-1.5 py-1 text-left transition-colors sm:border-[color:var(--con-line-strong)] sm:bg-[color:var(--con-surface-2)] sm:px-3 sm:py-1.5 sm:hover:border-[color:var(--con-accent)]"
-        title={info.detail}
+        title={info.cause ? `${info.cause}  ${info.detail}` : info.detail}
       >
         <Dot tone={STATE_TONE[info.tone]} pulse={info.state === "active" && info.marketOpen !== false && snapshot.policy.strategyAuthority === "decide"} />
         <span className="flex flex-col leading-tight sm:flex-row sm:items-center sm:gap-1">
@@ -323,13 +326,13 @@ export function RunStateButton({ snapshot }: { snapshot: DashboardSnapshot }) {
   const [open, setOpen] = useState(false);
   const state = snapshot.policy.systemState;
   const isStartDirection = state === "halted" || state === "close_only";
-  const info = deriveStateInfo(snapshot.policy);
+  const info = withHaltCause(deriveStateInfo(snapshot.policy), snapshot.haltCause);
   const label = state === "halted" ? "Start Agent" : state === "close_only" ? "Resume Agent" : "Stop Agent";
   const title =
     info.word === "Paused · market closed"
       ? "The agent is on.  Scheduled runs wait for the next open.  Open this to stop it or change run state."
       : state === "halted"
-        ? "Open start options.  Scheduled runs stay off until you confirm Start Agent."
+        ? `${info.cause ? `${info.cause}  ` : ""}Open start options.  Scheduled runs stay off until you confirm Start Agent.`
         : state === "close_only"
           ? "Open resume options.  You can resume full operation or change run state."
           : "Stop the agent.  Stopping never sells anything.";
@@ -371,7 +374,7 @@ function ControlSheet({
   const [armText, setArmText] = useState("");
   const [confirmVerb, setConfirmVerb] = useState<"start" | "liquidate" | null>(null);
   const reality = deriveReality(snapshot);
-  const info = deriveStateInfo(snapshot.policy);
+  const info = withHaltCause(deriveStateInfo(snapshot.policy), snapshot.haltCause);
   const state = snapshot.policy.systemState;
 
   const startLabel = state === "close_only" ? "Resume Agent" : "Start Agent";
@@ -466,6 +469,14 @@ function ControlSheet({
           Now: <strong className="text-[color:var(--con-fg)]">{info.label}</strong>
         </span>
       </div>
+      {info.cause && (
+        <p
+          className="mb-2 text-[length:var(--con-fs-sm)] text-[color:var(--con-fg)]"
+          data-testid="halt-cause"
+        >
+          {info.cause.replace(/ {2}/g, SENTENCE_GAP)}
+        </p>
+      )}
       <p className="mb-4 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
         {info.detail}
         {info.word === "Paused · market closed"

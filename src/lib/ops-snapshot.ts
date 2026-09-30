@@ -1,5 +1,6 @@
 import { autonomyAuthorityWord, autonomyStatusLabel } from "./autonomy-labels";
 import { getInternalSetting } from "./db-settings";
+import { describeAutonomyHaltCause, effectiveAutoResumeOnBoot, type AutonomyHaltCause } from "./autonomy-halt-cause";
 import { getDb, getLastStrategyRunStartedAt, listConnectedAccounts, listUsers, peekPolicy, getServiceHealthSummaries, databasePath } from "./db";
 import { isHardStoppedHealthSummary } from "./db-health";
 import { isIntentionalOffHealthService } from "./retired-direct-vendors";
@@ -14,7 +15,7 @@ import { pineconeWuExhaustedUntil } from "./pinecone-wu-breaker";
 import { isWorkingOrderState } from "./broker-held-orders";
 import { isLiveOrderState } from "./broker-side";
 import { buildOpsWorkingOrderDetails, type OpsWorkingOrderDetail } from "./order-role-context";
-import type { EquityOrder } from "./types";
+import type { EquityOrder, TradingPolicy } from "./types";
 import { statSync, statfsSync, readdirSync } from "fs";
 import { dirname, join } from "path";
 import { summarizeRoicArchiveCoverage } from "./web-sources/roic-transcripts";
@@ -54,6 +55,12 @@ const OPS_AUDIT_KINDS = new Set([
   "policy_violation_vol_panic",
   "policy_violation_cap_exceeded",
   "autonomy_halted_on_boot",
+  // Lane h5 review round: the broker auto-pause lifecycle and the owner's boot setting, so the
+  // snapshot alone can tell a pause whose probes kept failing from one a restart or a person ended.
+  "broker_placement_auto_halted",
+  "broker_placement_auto_resumed",
+  "broker_placement_pause_owner_override",
+  "auto_resume_on_boot",
   "order_placement_uncertain",
   "proposal_skipped_negative_ev",
   "order_rejected_by_broker"
@@ -85,6 +92,11 @@ export interface OpsAccountSnapshot {
   lastCompletedRunAgeSeconds: number | null;
   consecutiveFailedRuns: number | null;
   tradingLivenessDegraded: boolean | null;
+  /** Lane h5 (board 687a5fb4): why a `halted` account is halted and whether it lifts by itself —
+   *  a broker auto-pause (resumes on the next healthy probe; carries the last failed probe), a
+   *  restart with autoResumeOnBoot off, the drawdown breaker, an auto-pause whose resume marker is
+   *  gone, or no record.  Only the first lifts by itself.  null for every other state. */
+  haltCause: AutonomyHaltCause | null;
   /** Present when `?orders=1` — broker order-list breakdown for open-vs-history diagnosis. */
   orders?: OpsOrderListSummary | null;
   /** Present when `?ordersDetail=1` — per-working-order role classification (see
@@ -129,6 +141,10 @@ export interface OpsAuditRow {
 export interface OpsUserSnapshot {
   userId: string;
   llmAnyProviderConfigured: boolean;
+  /** The user's "Auto-resume on boot" setting (or the AUTONOMY_RESUME_ON_BOOT=1 override).  When
+   *  false, every restart or deploy halts this user's running accounts and ends any broker
+   *  auto-pause, and nothing re-arms them by itself (lane h5). */
+  autoResumeOnBoot: boolean;
   accounts: OpsAccountSnapshot[];
   recentRuns: OpsStrategyRunRow[];
   recentAudit: OpsAuditRow[];
@@ -344,6 +360,23 @@ function listOpsAudit(userId: string, limit: number, labels: Map<string, string>
   });
 }
 
+/** Diagnostics must never fail the snapshot: a cause lookup that throws reads as "unknown" (null). */
+function safeHaltCause(userId: string, connectedAccountId: string, accountNumber: string | undefined, systemState: TradingPolicy["systemState"]): AutonomyHaltCause | null {
+  try {
+    return describeAutonomyHaltCause({ userId, connectedAccountId, accountNumber, systemState });
+  } catch {
+    return null;
+  }
+}
+
+function safeAutoResumeOnBoot(userId: string): boolean {
+  try {
+    return effectiveAutoResumeOnBoot(userId);
+  } catch {
+    return process.env.AUTONOMY_RESUME_ON_BOOT === "1";
+  }
+}
+
 export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: number } = {}): OpsSnapshot {
   const runsPerUser = input.runsPerUser ?? 20;
   const auditPerUser = input.auditPerUser ?? 40;
@@ -394,7 +427,8 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
           lastCompletedRunAt: liveness?.lastCompletedRunAt ?? null,
           lastCompletedRunAgeSeconds: liveness?.lastCompletedRunAgeSeconds ?? null,
           consecutiveFailedRuns: liveness?.consecutiveFailedRuns ?? null,
-          tradingLivenessDegraded: liveness?.degraded ?? null
+          tradingLivenessDegraded: liveness?.degraded ?? null,
+          haltCause: safeHaltCause(userId, account.id, policy.accountNumber, policy.systemState)
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -419,7 +453,8 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
           lastCompletedRunAt: null,
           lastCompletedRunAgeSeconds: null,
           consecutiveFailedRuns: null,
-          tradingLivenessDegraded: null
+          tradingLivenessDegraded: null,
+          haltCause: null
         };
       }
     });
@@ -427,6 +462,7 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
     users.push({
       userId,
       llmAnyProviderConfigured: userHasAnyLlmCredential(userId),
+      autoResumeOnBoot: safeAutoResumeOnBoot(userId),
       accounts,
       recentRuns: listOpsStrategyRuns(userId, runsPerUser, labels),
       recentAudit: listOpsAudit(userId, auditPerUser, labels)
