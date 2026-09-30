@@ -201,6 +201,34 @@ describe("ops performance snapshot — shape and math", () => {
       status: "proposed"
     });
 
+    // Holds that are no longer pending still count: an Awaiting-approval card the owner never
+    // answered EXPIRES (policy.proposalExpiryMinutes), and one they answered is placed or
+    // rejected — the funnel must keep saying why each was held, or the diagnostic only ever
+    // describes the cards that happen to be open right now (audit 2026-09-29).
+    for (const [status, holdReason] of [
+      ["expired", "red_team_unavailable"],
+      ["withdrawn", "policy_revert"]
+    ] as const) {
+      db.insertProposal({
+        id: randomUUID(),
+        userId,
+        runId: randomUUID(),
+        accountNumber,
+        proposal: {
+          symbol: "AAPL",
+          side: "buy",
+          type: "market",
+          dollarAmount: 100,
+          timeInForce: "gfd",
+          marketHours: "regular_hours",
+          rationale: "test",
+          holdReason
+        },
+        decision: { approved: false, reasons: ["held then resolved"] },
+        status
+      });
+    }
+
     // Portfolio snapshots -> equity curve.
     db.insertPortfolioSnapshot({
       accountNumber,
@@ -280,8 +308,9 @@ describe("ops performance snapshot — shape and math", () => {
     expect(proposedCount).toBe(2);
     expect(account.proposalFunnel.holdReasons).toEqual([
       { reason: "funding_sell", count: 1 },
-      { reason: "red_team_unavailable", count: 1 }
-    ]);
+      { reason: "policy_revert", count: 1 },
+      { reason: "red_team_unavailable", count: 2 }
+    ].sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason)));
     expect(account.proposalFunnel.holdReasonRowsCapped).toBe(false);
 
     // Equity curve: both snapshots are inside the 30-day window, downsampled to one point/day.

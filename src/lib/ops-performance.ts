@@ -179,12 +179,16 @@ export interface OpsProposalFunnel {
   /** True when `topBlockReasons` was truncated by MAX_BLOCK_REASON_ROWS (more blocked proposals
    *  exist in the window than were scanned for reasons — counts.blocked is still exact). */
   blockReasonRowsCapped: boolean;
-  /** Coarse cause bucket per held ("proposed" / Awaiting approval) proposal — see `HoldReasonCode`
-   *  in types.ts. A held proposal persisted before this field existed carries no `holdReason` and
-   *  is simply not counted here (counts.proposed is still exact). */
+  /** Coarse cause bucket for every proposal that was ever routed to "Awaiting approval" in the
+   *  window — see `HoldReasonCode` in types.ts — counted WHATEVER its status is now.  A held card
+   *  the owner never answered expires (policy.proposalExpiryMinutes) and one they answered is
+   *  placed, rejected or withdrawn; counting only rows still "proposed" (the first version)
+   *  reported just the cards open at that instant, so the very holds the owner asked about
+   *  vanished once resolved.  A held proposal persisted before `holdReason` existed carries none
+   *  and is simply not counted here (counts.proposed is still exact). */
   holdReasons: Array<{ reason: HoldReasonCode; count: number }>;
-  /** True when `holdReasons` was truncated by MAX_HOLD_REASON_ROWS (more held proposals exist in
-   *  the window than were scanned — counts for the "proposed" status is still exact). */
+  /** Always false: the roll-up is folded into the funnel's single grouped count query (exact, no
+   *  row cap).  Kept so the response shape does not change for existing consumers. */
   holdReasonRowsCapped: boolean;
   /** The same status counts, broken out by the model that PROPOSED the idea. Without this the
    *  funnel is a single global tally, so "which model actually reaches the broker" is unanswerable
@@ -468,14 +472,15 @@ function queryProposalFunnel(
   const countRows = getDb()
     .prepare(
       `SELECT COALESCE(NULLIF(TRIM(json_extract(proposal, '$.proposedByModel')), ''), ?) AS model,
-              status, COUNT(*) AS n
+              status, json_extract(proposal, '$.holdReason') AS hold_reason, COUNT(*) AS n
        FROM trade_proposals
        WHERE user_id = ? AND account_number = ? AND created_at >= ?
-       GROUP BY model, status`
+       GROUP BY model, status, hold_reason`
     )
     .all(OPS_MODEL_UNATTRIBUTED, userId, accountNumber, sinceIso) as Array<{
     model: string;
     status: string;
+    hold_reason: string | null;
     n: number;
   }>;
 
@@ -533,37 +538,19 @@ function queryProposalFunnel(
   }
   const topBlockReasons = tallyReasonBuckets(blockReasonRows);
 
-  // holdReasons: same shape of query as the block-reasons rollup above, but over "proposed"
-  // (Awaiting approval) rows' `proposal.holdReason` (see hold-reason.ts) instead of `decision`.
-  const proposedCount = globalCounts.get("proposed") ?? 0;
-  const heldRows =
-    proposedCount > 0
-      ? (getDb()
-          .prepare(
-            `SELECT proposal FROM trade_proposals
-             WHERE user_id = ? AND account_number = ? AND status = 'proposed' AND created_at >= ?
-             ORDER BY created_at DESC LIMIT ?`
-          )
-          .all(userId, accountNumber, sinceIso, MAX_HOLD_REASON_ROWS) as Array<{ proposal: string }>)
-      : [];
+  // holdReasons: read off the same grouped rows as the status counts (no extra window scan), over
+  // EVERY status — see the `holdReasons` field doc for why "still proposed" is the wrong filter.
   const holdReasonCounts = new Map<HoldReasonCode, number>();
-  for (const row of heldRows) {
-    let holdReason: HoldReasonCode | undefined;
-    try {
-      const parsed = JSON.parse(row.proposal) as { holdReason?: unknown };
-      if (
-        parsed.holdReason === "red_team_unavailable" ||
-        parsed.holdReason === "funding_sell" ||
-        parsed.holdReason === "policy_revert" ||
-        parsed.holdReason === "other"
-      ) {
-        holdReason = parsed.holdReason;
-      }
-    } catch {
-      // malformed proposal JSON — skip this row, counts.proposed above is still exact
+  for (const row of countRows) {
+    const holdReason = row.hold_reason;
+    if (
+      holdReason === "red_team_unavailable" ||
+      holdReason === "funding_sell" ||
+      holdReason === "policy_revert" ||
+      holdReason === "other"
+    ) {
+      holdReasonCounts.set(holdReason, (holdReasonCounts.get(holdReason) ?? 0) + row.n);
     }
-    if (!holdReason) continue;
-    holdReasonCounts.set(holdReason, (holdReasonCounts.get(holdReason) ?? 0) + 1);
   }
   const holdReasons = Array.from(holdReasonCounts.entries())
     .map(([reason, count]) => ({ reason, count }))
@@ -639,7 +626,9 @@ function queryProposalFunnel(
     topBlockReasons,
     blockReasonRowsCapped: blockedRows.length >= MAX_BLOCK_REASON_ROWS && blockedCount > MAX_BLOCK_REASON_ROWS,
     holdReasons,
-    holdReasonRowsCapped: heldRows.length >= MAX_HOLD_REASON_ROWS && proposedCount > MAX_HOLD_REASON_ROWS,
+    // The existing grouped count query is not row-capped, so this stays false; keep the field for
+    // the API shape without running a duplicate proposal scan.
+    holdReasonRowsCapped: false,
     brokerRejectionReasons,
     // "Did the scan hit its row cap?" — and nothing else. Deliberately NOT a comparison against
     // `rejectedCount`: that is a count of PROPOSALS carrying the `rejected_by_broker` status, while
