@@ -19,10 +19,13 @@ import { setInternalSetting } from "../src/lib/db-settings";
 import { OperationLeaseOwnershipError } from "../src/lib/operation-lease";
 import {
   ExitStopReleaseError,
+  isRetryableExitStopReleaseError,
   placeExitReleasingOwnStops,
   planExitStopRelease,
-  type ExitStopReleasePlan
+  type ExitStopReleasePlan,
+  type ExitStopReleaseRun
 } from "../src/lib/exit-stop-release";
+import { OrderValidationError } from "../src/lib/types";
 import {
   EXIT_STOP_RELEASE_STALE_MS,
   exitStopReleaseKey,
@@ -155,6 +158,10 @@ function fakeBroker(init: { positions: EquityPosition[]; orders: EquityOrder[] }
 
 const USER = "local";
 
+/** Both placement fences open (lease owned, account running).  The fences are REQUIRED on every
+ *  run (#4005 review round), so a test that is not about them passes this explicitly. */
+const OPEN_FENCES = { assertOwned: () => {}, placementBlockReason: () => undefined } as const;
+
 function alpacaPolicy(accountNumber: string, over: Partial<TradingPolicy> = {}): TradingPolicy {
   return {
     ...DEFAULT_POLICY,
@@ -245,7 +252,8 @@ async function runExit(accountNumber: string, broker: FakeBroker, proposal: Trad
       plan,
       lane: "approval",
       proposalId: `prop-${proposal.symbol}`,
-      cancelSettleMs: 0
+      cancelSettleMs: 0,
+      ...OPEN_FENCES
     },
     (verifiedPositionQuantity) => broker.placeEquityOrder({ accountNumber, ...proposal, refId: `ref-${proposal.symbol}`, verifiedPositionQuantity })
   );
@@ -390,7 +398,7 @@ describe("re-plan inside the lease", () => {
     broker.marketFillPrice = 30;
 
     await placeExitReleasingOwnStops(
-      { userId: USER, policy: alpacaPolicy(account), accountNumber: account, gateway: broker as never, executionMode: "broker/paper", proposal, plan: stalePlan, lane: "autopilot", cancelSettleMs: 0 },
+      { userId: USER, policy: alpacaPolicy(account), accountNumber: account, gateway: broker as never, executionMode: "broker/paper", proposal, plan: stalePlan, lane: "autopilot", cancelSettleMs: 0, ...OPEN_FENCES },
       (verifiedPositionQuantity) => broker.placeEquityOrder({ accountNumber: account, ...proposal, refId: "ref-MFC", verifiedPositionQuantity })
     );
 
@@ -409,7 +417,7 @@ describe("re-plan inside the lease", () => {
     broker.orders.push(stopOrder("owner-BSX", "BSX", 60, 79, "owner-typed-in-alpaca-ui"));
 
     const err = await placeExitReleasingOwnStops(
-      { userId: USER, policy: alpacaPolicy(account), accountNumber: account, gateway: broker as never, executionMode: "broker/paper", proposal, plan, lane: "approval", cancelSettleMs: 0 },
+      { userId: USER, policy: alpacaPolicy(account), accountNumber: account, gateway: broker as never, executionMode: "broker/paper", proposal, plan, lane: "approval", cancelSettleMs: 0, ...OPEN_FENCES },
       (verifiedPositionQuantity) => broker.placeEquityOrder({ accountNumber: account, ...proposal, refId: "ref-BSX", verifiedPositionQuantity })
     ).catch((e: unknown) => e);
 
@@ -682,7 +690,8 @@ describe("final placement fence: re-checked after the release, immediately befor
         // Owned when the stop is cancelled; lost by the time the exit would leave.
         assertOwned: () => {
           if (broker.cancelled.length > 0) throw leaseLost();
-        }
+        },
+        placementBlockReason: () => undefined
       },
       (verifiedPositionQuantity) => broker.placeEquityOrder({ accountNumber: account, ...proposal, refId: "ref-AAPL", verifiedPositionQuantity })
     ).catch((e: unknown) => e);
@@ -733,7 +742,8 @@ describe("final placement fence: re-checked after the release, immediately befor
         cancelSettleMs: 0,
         assertOwned: () => {
           throw leaseLost();
-        }
+        },
+        placementBlockReason: () => undefined
       },
       (verifiedPositionQuantity) => broker.placeEquityOrder({ accountNumber: account, ...proposal, refId: "ref-MSFT", verifiedPositionQuantity })
     ).catch((e: unknown) => e);
@@ -754,7 +764,7 @@ describe("final placement fence: re-checked after the release, immediately befor
     let attempts = 0;
 
     const err = await placeExitReleasingOwnStops(
-      { userId: USER, policy: alpacaPolicy(account), accountNumber: account, gateway: broker as never, executionMode: "broker/paper", proposal, plan, lane: "autopilot", cancelSettleMs: 0 },
+      { userId: USER, policy: alpacaPolicy(account), accountNumber: account, gateway: broker as never, executionMode: "broker/paper", proposal, plan, lane: "autopilot", cancelSettleMs: 0, ...OPEN_FENCES },
       async () => {
         attempts += 1;
         throw new Error("HTTP 503 upstream timeout");
@@ -830,7 +840,7 @@ describe("restore reconcile reads the account's CURRENT state, not the run's sna
     const fallbacksBefore = fallbackAudits();
 
     await placeExitReleasingOwnStops(
-      { userId: USER, policy: staleActive, accountNumber: account, connectedAccountId, gateway: broker as never, executionMode: "broker/paper", proposal, plan, lane: "autopilot", cancelSettleMs: 0 },
+      { userId: USER, policy: staleActive, accountNumber: account, connectedAccountId, gateway: broker as never, executionMode: "broker/paper", proposal, plan, lane: "autopilot", cancelSettleMs: 0, ...OPEN_FENCES },
       (verifiedPositionQuantity) => broker.placeEquityOrder({ accountNumber: account, ...proposal, refId: "ref-PYPL-FS", verifiedPositionQuantity })
     );
 
@@ -859,5 +869,40 @@ describe("restore reconcile reads the account's CURRENT state, not the run's sna
     ]);
     expect(broker.placed.some((o) => o.symbol === "PEP")).toBe(false);
     expect(auditKinds("KO")).toContain("exit_stop_release_restore_state_fallback");
+  });
+});
+
+describe("#4005 review round: lane contract", () => {
+  it("a transient release refusal (position re-read failed, stop cancel unconfirmed) is retryable; deterministic ones are not", () => {
+    expect(isRetryableExitStopReleaseError(new ExitStopReleaseError("re-read failed", "position_unverified"))).toBe(true);
+    expect(isRetryableExitStopReleaseError(new ExitStopReleaseError("cancel unconfirmed", "stop_cancel_unconfirmed"))).toBe(true);
+    expect(isRetryableExitStopReleaseError(new ExitStopReleaseError("owner order holds it", "still_held"))).toBe(false);
+    expect(isRetryableExitStopReleaseError(new ExitStopReleaseError("stop filled", "exit_moot_stop_filled"))).toBe(false);
+    expect(isRetryableExitStopReleaseError(new ExitStopReleaseError("halted", "placement_blocked"))).toBe(false);
+    expect(isRetryableExitStopReleaseError(new OrderValidationError("adapter refused"))).toBe(false);
+    expect(isRetryableExitStopReleaseError(new Error("HTTP 503"))).toBe(false);
+  });
+
+  it("both placement fences are required by the type: a lane cannot drop one silently", () => {
+    const account = "RC-1";
+    const broker = fakeBroker({ positions: [pos("AAPL", 5, 180)], orders: [] });
+    const full: ExitStopReleaseRun = {
+      userId: USER,
+      policy: alpacaPolicy(account),
+      accountNumber: account,
+      gateway: broker as never,
+      executionMode: "broker/paper",
+      proposal: sellProposal("AAPL", 5),
+      plan: {} as ExitStopReleasePlan,
+      lane: "autopilot",
+      ...OPEN_FENCES
+    };
+    const { placementBlockReason: droppedBlock, ...withoutBlock } = full;
+    const { assertOwned: droppedLease, ...withoutLease } = full;
+    // @ts-expect-error placementBlockReason (the owner's durable Stop) is required
+    const missingBlock: ExitStopReleaseRun = withoutBlock;
+    // @ts-expect-error assertOwned (the mutation lease) is required
+    const missingLease: ExitStopReleaseRun = withoutLease;
+    expect([droppedBlock, droppedLease, missingBlock, missingLease].every((v) => v !== null)).toBe(true);
   });
 });
