@@ -47,7 +47,7 @@ import {
   audit,
 } from "./db";
 import { getTradingLivenessSummary } from "./trading-liveness";
-import { alertLivenessWarning } from "./db-health";
+import { alertLivenessWarning, clearLivenessWarning } from "./db-health";
 
 const STATE_PREFIX = "runFailureWatch";
 const HALT_MARKER_PREFIX = "runFailureHaltMarker";
@@ -222,6 +222,37 @@ async function haltAccountForRunFailures(
   );
 }
 
+/** True when any durable row under `prefix` still satisfies `live`. */
+function anyDurableRow(prefix: string, live: (value: unknown) => boolean): boolean {
+  try {
+    const rows = getDb().prepare(`SELECT value FROM settings WHERE key LIKE ?`).all(`${prefix}:%`) as Array<{ value: string }>;
+    return rows.some((row) => {
+      try {
+        return live(JSON.parse(row.value));
+      } catch {
+        return true; // unreadable but present: do not end the episode on a guess
+      }
+    });
+  } catch {
+    return true; // cannot tell: leave the episode alone
+  }
+}
+
+/**
+ * The two liveness warnings are fleet-wide (one episode clock each), so their
+ * episodes end only when NO account still holds the condition: a recovered
+ * streak or an owner re-arm clears them, but one account recovering does not
+ * reset the clock for another that is still failing or halted.
+ */
+async function clearEndedLivenessEpisodes(): Promise<void> {
+  if (!anyDurableRow(STATE_PREFIX, (v) => ((v as { lastAlertedStreak?: number })?.lastAlertedStreak ?? 0) > 0)) {
+    await clearLivenessWarning("run_failure_streak");
+  }
+  if (!anyDurableRow(HALT_MARKER_PREFIX, () => true)) {
+    await clearLivenessWarning("run_failure_streak_halted");
+  }
+}
+
 /**
  * One watchdog pass over every account.  Intended as a cadence-gated lane
  * inside the scheduler tick (leader only).  Never throws.
@@ -367,6 +398,7 @@ export async function runFailureWatchdogTick(now: number = Date.now()): Promise<
         saveState(userId, accountId, state);
       }
     }
+    await clearEndedLivenessEpisodes();
   } catch (err) {
     console.error("[run-failure-watchdog] tick error:", err);
   }
