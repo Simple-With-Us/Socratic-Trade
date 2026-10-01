@@ -173,8 +173,10 @@ export async function GET(request: Request) {
         "trading_liveness_degraded",
         `Trading liveness is degraded: ${publicLiveness.degraded} active account(s) have stalled or failed repeatedly.`
       );
-    } else {
-      // Recovery: reset the escalation episode clock.
+    } else if (liveness) {
+      // Recovery: reset the escalation episode clock.  Only a real healthy
+      // result counts: null means no active accounts or an unreadable
+      // summary, which says nothing about whether the episode ended.
       void clearLivenessWarning("trading_liveness_degraded");
     }
   } catch {

@@ -132,6 +132,17 @@ describe("alertLivenessWarning escalation", () => {
     expect(title).not.toMatch(/ESCALATED/);
   });
 
+  it("clearLivenessWarning is a no-op with no episode, and clears once when there is one", async () => {
+    const { clearLivenessWarning } = await lib();
+    const { setInternalSetting, getInternalSetting } = await db();
+    // A healthy /api/health hit with nothing to clear must not write.
+    expect(await clearLivenessWarning(TYPE)).toBe(false);
+    setInternalSetting(`livenessDegradedSince:${TYPE}`, hoursAgoIso(9));
+    expect(await clearLivenessWarning(TYPE)).toBe(true);
+    expect(getInternalSetting<string>(`livenessDegradedSince:${TYPE}`)).toBeUndefined();
+    expect(await clearLivenessWarning(TYPE)).toBe(false);
+  });
+
   it("respects the 15-minute cooldown between alerts", async () => {
     const { alertLivenessWarning } = await lib();
     await alertLivenessWarning(TYPE, "first");

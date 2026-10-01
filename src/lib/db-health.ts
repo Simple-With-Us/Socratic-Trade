@@ -1290,12 +1290,22 @@ export async function alertLivenessWarning(warningType: string, message: string)
  * the next episode starts its clock fresh instead of escalating immediately.
  * Call from the healthy branch wherever alertLivenessWarning is raised.
  */
-export async function clearLivenessWarning(warningType: string): Promise<void> {
+export async function clearLivenessWarning(warningType: string): Promise<boolean> {
   try {
-    const { deleteInternalSetting } = await import("./db");
-    deleteInternalSetting(`${LIVENESS_DEGRADED_SINCE_PREFIX}:${warningType}`);
-    deleteInternalSetting(`${LIVENESS_ESCALATED_AT_PREFIX}:${warningType}`);
+    const { getInternalSetting, deleteInternalSetting } = await import("./db");
+    // The public health endpoint calls this on every healthy hit: only touch
+    // the settings table when an episode actually left state behind.
+    let cleared = false;
+    for (const prefix of [LIVENESS_DEGRADED_SINCE_PREFIX, LIVENESS_ESCALATED_AT_PREFIX]) {
+      const key = `${prefix}:${warningType}`;
+      if (getInternalSetting<string>(key) !== undefined) {
+        deleteInternalSetting(key);
+        cleared = true;
+      }
+    }
+    return cleared;
   } catch {
     // never throw on warnings
+    return false;
   }
 }
