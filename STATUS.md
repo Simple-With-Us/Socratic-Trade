@@ -13,7 +13,7 @@ provisioning service and uploads the IPA with `altool`.  The unused App Group en
 (the App Store profile's group list is empty and the API cannot assign one).  `ios-ship.yml` gains an
 `export_only` dispatch input and a redacted failure-log artifact.  Rollout:
 `docs/rollouts/2026-09-30-st-ios-first-ship.md`.
-**Next.**  Merge, dispatch the ship from `main`, confirm the build on `6815511597`.
+**Shipped.**  PR #4019 merged (`16b87bb5`); ios-ship run `36800120244` uploaded **1.0.102 (202610010114)**, `VALID` and `IN_BETA_TESTING` on `6815511597`.  `ios-ship.yml` is enabled; the cron skips until `ios/` changes.
 
 ## 2026-09-29 CLAUDE — Post-merge audit of #3799: the account-questionnaire hold now clears itself (branch `claude/st-w3-h3`)
 
