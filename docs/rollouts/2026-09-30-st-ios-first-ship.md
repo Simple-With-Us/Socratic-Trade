@@ -95,8 +95,14 @@ npm run lint && npx tsc --noEmit && npm test && npm run build
 ```
 
 `scripts/ios-fleet/test-ship-seq.sh` has one pre-existing failure (case 11 die-text) on
-`origin/main` too; unchanged by this work.  CI ship receipts (run ids, build number) are recorded
-in section 5 once they exist.
+`origin/main` too; unchanged by this work.
+
+**Branch signing check, hosted `macos-26-arm64`, Xcode 26.6 (17F113):** run `36796164530`
+(`workflow_dispatch`, `export_only=true`, branch `claude/st-ios-first-ship`) succeeded.  The installer
+matched identity `7995E5D2...9140` (Apple Distribution: Jay Wedgeworth, LLC) and installed profile
+UUID `1bf60929-6116-4a2a-9a9b-5ad1c007c687`; both the Sentry framework and the app signed with
+"Apple Distribution" + "Socratic Trade App Store (API)"; `ARCHIVE SUCCEEDED`, `EXPORT SUCCEEDED`,
+IPA produced.  No upload (by design).
 
 ## 5. Next Steps & Blockers
 
