@@ -159,6 +159,7 @@ function ship(sb: ReturnType<typeof sandbox>, extraEnv: Record<string, string>) 
     {
       encoding: "utf8",
       env: {
+        NODE_ENV: "test",
         HOME: sb.home,
         PATH: `${sb.bin}:/usr/bin:/bin:/usr/sbin:/sbin`,
         TMPDIR: join(sb.root, "tmp"),
