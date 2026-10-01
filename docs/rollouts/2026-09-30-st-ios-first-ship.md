@@ -104,6 +104,15 @@ UUID `1bf60929-6116-4a2a-9a9b-5ad1c007c687`; both the Sentry framework and the a
 "Apple Distribution" + "Socratic Trade App Store (API)"; `ARCHIVE SUCCEEDED`, `EXPORT SUCCEEDED`,
 IPA produced.  No upload (by design).
 
+**First real ship, from `main` after PR #4019 merged (`16b87bb5`):** run `36800120244`
+(`workflow_dispatch`, `main`) succeeded in about 6 minutes.  Same identity and profile, `ARCHIVE
+SUCCEEDED`, `EXPORT SUCCEEDED`, `altool` "UPLOAD SUCCEEDED with no errors", What to Test created
+(954 chars), export compliance declared (`enc=false`), internal state `IN_BETA_TESTING`.  App Store
+Connect app `6815511597` now lists build **1.0.102 (202610010114)**, `VALID`, id
+`b8f5b6c2-c305-4d10-897e-19edd76c77e7`.  The ship-state cache was saved
+(`ios-fleet-socratic-36800120244`), so scheduled ticks skip until `ios/` changes again;
+`ios-ship.yml` is left **enabled**.
+
 ## 5. Next Steps & Blockers
 
 - Owner, optional: assign `group.com.socratictrade` to the `com.socratictrade.ios` App ID in the
