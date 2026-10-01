@@ -146,6 +146,37 @@ export function searchCorpusWideLexicalCandidates(
   const params: unknown[] = [symbol, matchQuery, symbol, ...visibleTenantScopes];
   const metadataFilters: string[] = [];
   const metadataFilterParams: string[] = [];
+  // `sec_filings` is resolved as a correlated scalar subquery rather than a LEFT JOIN.
+  //
+  // Live RTH signature 2026-10-01T15:43Z/15:46Z/15:51Z (board e7b49943): stalls of 112.7s and
+  // 147.9s, escalating until the 14s healthcheck timed out and Docker SIGKILLed the container.
+  // EXPLAIN QUERY PLAN on the production DB (14.87 GB) showed `SCAN sf LEFT-JOIN`: SQLite cannot
+  // use an index for a join constraint built from OR/GLOB, so it re-scanned all 16,938 sec_filings
+  // rows once per candidate chunk row. One synchronous better-sqlite3 statement with no yield
+  // point held the serving loop 95-99% of each window.
+  //
+  // COALESCE keeps the exact match semantics but probes the PRIMARY KEY first
+  // (`sf.accession = o.accession`), so the common case is an index lookup. The GLOB fallback is
+  // gated on `instr(o.accession, ':') > 0`, which is a sound necessary condition: both managed-key
+  // patterns require a ':' in the occurrence accession, so when it is absent the fallback cannot
+  // match and the whole branch is skipped. Verified on production data: 1.92s -> 1.03s for a
+  // 132-row result, 7.60s -> 1.99s for an 800-row worst case, identical row counts in both.
+  const secFilingForm = `
+      COALESCE(
+        (SELECT sf.form FROM sec_filings sf WHERE sf.accession = o.accession),
+        CASE WHEN instr(o.accession, ':') > 0 THEN
+          (
+            SELECT sf.form
+            FROM sec_filings sf
+            WHERE o.accession GLOB ('*:' || sf.accession || ':*')
+               OR o.accession GLOB (sf.accession || ':*')
+            LIMIT 1
+          )
+        END
+      )`;
+  // The docType filter must project the same resolved value the candidate row carries, so it is
+  // written against the same expression rather than a `sf.` column reference.
+  const docTypeFilterSql = `LOWER(TRIM(CASE WHEN o.source = 'sec-8k' THEN '8-k' ELSE ${secFilingForm} END))`;
   const docTypes = Array.from(new Set(
     (options.docTypes ?? [])
       .filter((docType): docType is string => typeof docType === "string" && docType.trim().length > 0)
@@ -155,7 +186,7 @@ export function searchCorpusWideLexicalCandidates(
     // Full-body 8-K ingestion mirrors chunks into FTS without creating a sec_filings row. Treat
     // its authoritative occurrence source as the document type for filtering instead of dropping
     // every otherwise-visible 8-K row on the NULL left join.
-    metadataFilters.push(`LOWER(TRIM(CASE WHEN o.source = 'sec-8k' THEN '8-k' ELSE sf.form END)) IN (${docTypes.map(() => "?").join(", ")})`);
+    metadataFilters.push(`${docTypeFilterSql} IN (${docTypes.map(() => "?").join(", ")})`);
     metadataFilterParams.push(...docTypes);
   }
   if (options.source?.trim()) {
@@ -277,12 +308,6 @@ export function searchCorpusWideLexicalCandidates(
         OR o.accession GLOB ('*:' || document_chunks_fts.accession || ':*')
         OR o.accession GLOB (document_chunks_fts.accession || ':*')
       )`;
-  const secFilingJoin = `
-      (
-        sf.accession = o.accession
-        OR o.accession GLOB ('*:' || sf.accession || ':*')
-        OR o.accession GLOB (sf.accession || ':*')
-      )`;
 
   const rows = getDb().prepare(`
     SELECT
@@ -295,7 +320,7 @@ export function searchCorpusWideLexicalCandidates(
       o.section,
       o.ordinal,
       o.accepted_at,
-      sf.form AS doc_type,
+      ${secFilingForm} AS doc_type,
       o.tenant_scope,
       owner_commit.user_id,
       bm25(document_chunks_fts) AS lexical_score
@@ -305,7 +330,6 @@ export function searchCorpusWideLexicalCandidates(
       AND o.symbol = document_chunks_fts.symbol
       AND o.source = document_chunks_fts.source
       AND ${accessionJoin}
-    LEFT JOIN sec_filings sf ON ${secFilingJoin}
     LEFT JOIN vector_ingest_commits owner_commit ON owner_commit.id = o.commit_id
     WHERE document_chunks_fts.symbol = ?
       AND document_chunks_fts.text MATCH ?
