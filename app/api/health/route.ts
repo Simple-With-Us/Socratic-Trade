@@ -1,4 +1,4 @@
-import { getInternalSetting, getServiceHealthSummaries, databasePath, resolveApiKeyWithSource, alertStorageWarning, alertLivenessWarning } from "@/lib/db";
+import { getInternalSetting, getServiceHealthSummaries, databasePath, resolveApiKeyWithSource, alertStorageWarning, alertLivenessWarning, clearLivenessWarning } from "@/lib/db";
 import { isHardStoppedHealthSummary } from "@/lib/db-health";
 import { isIntentionalOffHealthService } from "@/lib/retired-direct-vendors";
 import { activeEmbeddingProvider } from "@/lib/vector-db";
@@ -120,6 +120,10 @@ export async function GET(request: Request) {
         ? `The autonomous scheduler has not ticked in ${checks.schedulerAgeSeconds} seconds (threshold ${Math.round(schedulerStaleMs / 1000)}s).`
         : `The autonomous scheduler has never ticked, and the process has been up for ${Math.round(release.processUptimeSeconds)} seconds.`
     );
+  } else {
+    // Recovery: reset the escalation episode clock so the next stale episode
+    // starts fresh instead of escalating immediately on old state.
+    void clearLivenessWarning("scheduler_stale");
   }
 
   // Scheduler lease state (additive; only meaningful when SCHEDULER_SINGLE_LEADER is on).
@@ -169,6 +173,11 @@ export async function GET(request: Request) {
         "trading_liveness_degraded",
         `Trading liveness is degraded: ${publicLiveness.degraded} active account(s) have stalled or failed repeatedly.`
       );
+    } else if (liveness) {
+      // Recovery: reset the escalation episode clock.  Only a real healthy
+      // result counts: null means no active accounts or an unreadable
+      // summary, which says nothing about whether the episode ended.
+      void clearLivenessWarning("trading_liveness_degraded");
     }
   } catch {
     checks.tradingLiveness = toPublicTradingLiveness(null);
