@@ -11,6 +11,20 @@
 **Not done / blocked.**  External public-URL watchdog is BLOCKED: from this VM every socratictrade.com path returns Cloudflare 403 (egress IP blocked at the edge), so a VM-side monitor cannot distinguish healthy from down and would false-positive restart production.  Script kept DISABLED at `~/workspace/socratic-trade-watchdog/` with a README; needs a Cloudflare IP allowlist, an unblocked vantage point, or a third-party uptime service.  Coolify-side health-check-with-restart is a manual owner step.  Weekday RTH latch queues the deploy until after close; PR can auto-merge.
 
 **Next.**  Finish full verify, `bash scripts/land.sh`, open PR READY, `gh pr merge --squash --auto`.
+## 2026-09-30 CLAUDE — First TestFlight build on com.socratictrade.ios: Release signs manually (branch `claude/st-ios-first-ship`)
+
+**What.**  Board `687a5fb4`.  App Store Connect app `6815511597` had zero builds because every
+`ios-ship.yml` archive failed at `GatherProvisioningInputs`.  **Root cause:** Xcode 26 automatic
+signing calls `developerservices2.apple.com`, and the fleet ASC API key gets HTTP 401 NOT_AUTHORIZED
+there while `api.appstoreconnect.apple.com` accepts it (reproduced with a hand-signed JWT: 200 vs
+401 on both audiences).  **Fix:** the `SocraticTrade` Release config signs manually (Apple
+Distribution + "Socratic Trade App Store (API)"), `scripts/ios-install-appstore-profiles.sh`
+installs that profile over the REST API, and the fleet ship script's manual mode skips Xcode's
+provisioning service and uploads the IPA with `altool`.  The unused App Group entitlement is removed
+(the App Store profile's group list is empty and the API cannot assign one).  `ios-ship.yml` gains an
+`export_only` dispatch input and a redacted failure-log artifact.  Rollout:
+`docs/rollouts/2026-09-30-st-ios-first-ship.md`.
+**Shipped.**  PR #4019 merged (`16b87bb5`); ios-ship run `36800120244` uploaded **1.0.102 (202610010114)**, `VALID` and `IN_BETA_TESTING` on `6815511597`.  `ios-ship.yml` is enabled; the cron skips until `ios/` changes.
 
 ## 2026-09-29 CLAUDE — Post-merge audit of #3799: the account-questionnaire hold now clears itself (branch `claude/st-w3-h3`)
 

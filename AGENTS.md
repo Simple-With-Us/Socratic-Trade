@@ -814,6 +814,17 @@ Bundle ID `com.socratictrade.ios` (renamed 2026-09-22 from `trade.socratic.app`;
 Connect key. Do not exec `/Users/jay/apps/ios-fleet/ship-testflight.sh` from a
 cloud seat -- that path does not exist on hosted runners.
 
+**Release signs MANUALLY (2026-09-30).**  Xcode 26 automatic signing calls
+`developerservices2.apple.com`, and the fleet ASC API key gets HTTP 401 there
+("Authentication failed: Make sure a bearer token was provided...", then "No
+profiles for 'com.socratictrade.ios' were found").  Do not "fix" that by putting
+`-allowProvisioningUpdates` or `CODE_SIGN_STYLE=Automatic` back.  The Release
+config uses the App Store profile named in `ios/appstore-profiles.json`, which
+`scripts/ios-install-appstore-profiles.sh` installs over the REST API, and
+upload is IPA export + `altool`.  Signing check without an upload:
+`gh workflow run ios-ship.yml --ref <branch> -f export_only=true`.  Rollout:
+`docs/rollouts/2026-09-30-st-ios-first-ship.md`.
+
 ## Bundle identifiers (canonical table — 2026-09-22)
 
 | Surface | Identifier | Notes |
@@ -822,7 +833,7 @@ cloud seat -- that path does not exist on hosted runners.
 | iOS test target (`PRODUCT_BUNDLE_IDENTIFIER`) | `com.socratictrade.ios.tests` | `ios/SocraticTradeTests/`. Was `trade.socratic.app.tests`. |
 | Sign in with Apple native audience (`NATIVE_APPLE_CLIENT_ID`) | `com.socratictrade.ios` (+ legacy `trade.socratic.app` during coexistence) | `src/lib/auth/apple-client-id.ts` hardcodes BOTH native IDs in `resolveAppleClientIds` until old TF is retired. `APPLE_CLIENT_ID` is the web Service ID — do NOT rely on it for the legacy native audience. |
 | APNs topic | `com.socratictrade.ios` (+ legacy `trade.socratic.app` during coexistence) | `resolveAcceptedApnsBundleIds` always accepts both; register rejects unknowns; `sendApnsPush` uses per-device `topic` (stored bundleId). Optional `APNS_BUNDLE_IDS` CSV extends the set. Flip Infisical `APNS_BUNDLE_ID` only after new TF is live. |
-| App Group (new) | `group.com.socratictrade` | `com.apple.security.application-groups` in `ios/SocraticTrade/SocraticTrade.entitlements` + `ios/project.yml` entitlements block. Must be registered per App ID in the Apple Developer Portal before any shared-container `UserDefaults` writes work. |
+| App Group (not requested) | `group.com.socratictrade` | REMOVED from the entitlements 2026-09-30: the group was never assigned to the App ID, so the App Store profile's application-groups list is empty and a Release signature requesting it cannot match.  No Swift code reads a shared container.  To restore: assign it in the Developer Portal, regenerate "Socratic Trade App Store (API)", re-add it in `ios/project.yml`, run `xcodegen generate`.  Rollout `docs/rollouts/2026-09-30-st-ios-first-ship.md`. |
 | Associated Domain — applinks | `socratic.trade` (new), `socratictrade.com` (existing) | `com.apple.developer.associated-domains` in `ios/SocraticTrade/SocraticTrade.entitlements` + `ios/project.yml`. The existing `socratictrade.com` universal-link surface is preserved. |
 | Associated Domain — webcredentials | `socratic.trade` (new) | Same key; webcredentials is required for Shared Safari Credentials on the new domain. |
 | Server-side AASA `appIDs` + `webcredentials.apps` | both `CC8UTF7ATG.com.socratictrade.ios` and `CC8UTF7ATG.trade.socratic.app` | `app/.well-known/apple-app-site-association/route.ts`. Keep BOTH appIDs until old TF retired; top-level `webcredentials` required for `webcredentials:socratic.trade`. |
