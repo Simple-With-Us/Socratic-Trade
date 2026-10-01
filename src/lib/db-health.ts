@@ -1029,7 +1029,14 @@ async function captureHealthSentryMessage(
       // name that drifts ("Voyage" vs "voyage", "OpenRouter" vs "OpenRouter embed") — one lane
       // fragmented into six issues that way. `service` is the health-log service id and never
       // drifts, so grouping survives any future title rewording.
-      if (context.service) scope.setFingerprint(["api-health", String(context.service)]);
+      if (context.service) {
+        // Include the warning type so distinct liveness incidents (scheduler-stale vs
+        // trading-liveness-degraded vs run-failure) group into separate Sentry issues
+        // instead of collapsing into one.
+        const fingerprint = ["api-health", String(context.service)];
+        if (context.warningType) fingerprint.push(String(context.warningType));
+        scope.setFingerprint(fingerprint);
+      }
       scope.setContext("api-health", context);
       captureMessage(message);
     });
