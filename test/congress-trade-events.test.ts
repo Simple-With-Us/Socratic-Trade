@@ -180,6 +180,27 @@ describe("coerceCongressTrade — App A /api/transactions confirmed shape", () =
     expect(sig?.bulletin).toContain("1 exchange disclosure");
   });
 
+  it("does not call an exchange-only window 'mixed activity' or emit dangling 'by '", () => {
+    // Regression: buyCount===0 && sellCount===0 used to fall through to the mixed-activity
+    // branch, which rendered `0 buy(s) by  vs 0 sell(s) by .` because names([]) is the empty
+    // string. The existing test above only pinned the trailing exchange clause, so it passed
+    // while the leading sentence stayed misleading.
+    const exchange = coerceCongressTrade({ id: "ex-only-1", ticker: "EXONLY", memberName: "Jane Doe", txType: "E", txDate: recent(1) });
+    upsertCongressTrades([exchange!]);
+    const bulletin = getCongressSignals(["EXONLY"]).EXONLY?.bulletin ?? "";
+
+    // Honest leading sentence, and no invented buy/sell direction.
+    expect(bulletin).toContain("no member buy or sell disclosures for EXONLY");
+    expect(bulletin).not.toContain("mixed activity");
+    expect(bulletin).not.toMatch(/0 buy\(s\)/);
+    expect(bulletin).not.toMatch(/0 sell\(s\)/);
+    // The malformed "by  vs" / trailing "by ." shape must not come back.
+    expect(bulletin).not.toMatch(/by\s+vs/);
+    expect(bulletin).not.toMatch(/by\s*\./);
+    // The real signal after the leading sentence must survive the fix.
+    expect(bulletin).toContain("1 exchange disclosure");
+  });
+
   it("rejects future-dated and impossible (rolled-over) trade dates", () => {
     // A future trade date is a data error even when a valid disclosure date is present — the row must
     // NOT slip in under the disclosure date.

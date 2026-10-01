@@ -421,6 +421,13 @@ function buildBulletin(
     base = `Congress: ${buyMembers.length} member(s) disclosed BUYS of ${symbol} in the last ${window}d (${names(buyMembers)}); no sells.`;
   } else if (sellCount > 0 && buyCount === 0) {
     base = `Congress: ${sellMembers.length} member(s) disclosed SELLS of ${symbol} in the last ${window}d (${names(sellMembers)}); no buys.`;
+  } else if (buyCount === 0 && sellCount === 0) {
+    // Exchange-only window: no member buy or sell exists, so the mixed-activity branch below
+    // would render "mixed activity ... 0 buy(s) by  vs 0 sell(s) by ." — both wrong (it is not
+    // mixed) and malformed (names([]) is the empty string, leaving a dangling "by "). The
+    // exchange-count and latency/competitor clauses appended after this block still carry the
+    // real signal, so we only need the leading sentence to stop asserting a direction.
+    base = `Congress: no member buy or sell disclosures for ${symbol} in the last ${window}d.`;
   } else {
     base = `Congress: mixed activity on ${symbol} in last ${window}d — ${buyCount} buy(s) by ${names(buyMembers)} vs ${sellCount} sell(s) by ${names(sellMembers)}.`;
   }
