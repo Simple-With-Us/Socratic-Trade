@@ -44,12 +44,20 @@ export async function register() {
   // no-op in dev/tests). Installed before anything below can exit or receive a stop
   // signal. See src/lib/exit-guard.ts and docs/rollouts/2026-08-02-exit0-outage-audit.md.
   const { installProcessExitGuard } = await import("./src/lib/exit-guard");
-  const { recordBoot, noteExitReceipt, reportRestartLoop } = await import("./src/lib/boot-ledger");
+  const { recordBoot, noteExitReceipt, reportRestartLoop, readRecentWatchdogKill } = await import("./src/lib/boot-ledger");
   installProcessExitGuard(process, { receipt: noteExitReceipt });
   // Durable boot/exit ledger on the persistent data volume + restart-loop detection (board a9676caf).
   // Container logs (and the exit-guard receipts above) die with the container when Coolify replaces it
   // on restart; this keeps one JSON line per boot/exit beside the DB.  Synchronous, never throws.
   const restartAssessment = recordBoot();
+
+  // Attribute a previous-container liveness-watchdog kill (scripts/coolify-prod-start.sh,
+  // 2026-09-30 self-healing): without this, the exit-guard receipt for a watchdog
+  // restart just shows SIGTERM and the next boot cannot tell it from a deploy stop.
+  const watchdogKill = readRecentWatchdogKill();
+  if (watchdogKill) {
+    console.error(`[boot-ledger] previous container killed by liveness watchdog: ${watchdogKill}`);
+  }
 
   // Fail fast if this deployment requires a secrets manager but wasn't launched through one
   // (REQUIRE_SECRETS_MANAGER set, but not started via start:secrets). Default off →
@@ -96,6 +104,18 @@ export async function register() {
     void startStallProfiler().catch(() => {});
   } catch {
     // Optional diagnostics must never take down boot.
+  }
+
+  // In-app RSS watchdog (self-healing 2026-09-30): samples process RSS and
+  // exits 44 before the kernel OOM-killer fires, so a runaway allocation
+  // (e.g. an orphaned vector scroll) becomes a receipted, attributable restart
+  // instead of a SIGKILL.  ST_RSS_WATCHDOG=0 disables; ST_RSS_LIMIT_MB tunes.
+  // Never throws and never blocks boot.  See src/lib/rss-watchdog.ts.
+  try {
+    const { startRssWatchdog } = await import("./src/lib/rss-watchdog");
+    startRssWatchdog();
+  } catch {
+    // Optional protection must never take down boot.
   }
 
   const { datadogApmEnabled, datadogLogsEnabled } = await import("./src/lib/datadog-env");

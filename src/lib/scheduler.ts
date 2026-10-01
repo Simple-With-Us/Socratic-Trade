@@ -18,6 +18,7 @@ import { isRunAllowedNow } from "./market-hours";
 import { isRegularTradingHours, shouldDeferRagIngestDuringRth, sqliteYieldRetry } from "./sqlite-event-loop";
 import { serverKnobBool } from "./server-knobs";
 import { runProviderTierCheckIfDue } from "./provider-tier";
+import { isRunBackedOff } from "./run-failure-watchdog";
 import { refreshLitestreamRemoteInventoryIfDue } from "./litestream-remote-inventory";
 import { runR2UsageCheckIfDue, runR2UsageDailyDigestIfDue } from "./r2-usage";
 import { maybeAdvisePineconeTrialRollback } from "./pinecone-trial-window";
@@ -123,7 +124,10 @@ const managedVectorReconcileGuardHost = globalThis as unknown as {
  * global `local` tenant. The promise guard is pinned to globalThis so HMR/module duplication cannot
  * start a second provider/SQLite repair in the same process.
  */
-export async function reconcileManagedVectorRecordsIfDue(now = Date.now()): Promise<ManagedVectorReconcileRun | null> {
+export async function reconcileManagedVectorRecordsIfDue(
+  now = Date.now(),
+  signal?: AbortSignal
+): Promise<ManagedVectorReconcileRun | null> {
   const existing = managedVectorReconcileGuardHost.__schedulerManagedVectorReconcileInFlight;
   if (existing) return existing;
 
@@ -156,7 +160,10 @@ export async function reconcileManagedVectorRecordsIfDue(now = Date.now()): Prom
       const { reconcileManagedVectorRecords } = await import("./vector-db");
       // Scheduled maintenance is observation-only. Provider list inventory is eventually
       // consistent, so destructive repair requires an explicit operator invocation after review.
-      const result = await reconcileManagedVectorRecords({ dryRun: true });
+      // Self-healing 2026-09-30: thread the tick watchdog's abort signal through, so a
+      // watchdog unwedge actually kills an in-flight whole-index scroll instead of
+      // orphaning it to OOM the process (the 2026-09-25 restart-loop fatal).
+      const result = await reconcileManagedVectorRecords({ dryRun: true, signal });
       if (result.skipped) {
         console.warn("[scheduler] managed-vector reconciliation busy; retry deferred");
         return { status: "busy", result };
@@ -967,7 +974,10 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // Global managed-vector crash repair is cadence-gated and single-flight. It must never block or
   // throw into trading work; failed or lease-busy attempts persist their hourly retry marker.
   void journalLane("managed-vector-reconcile", {}, async () => {
-    const run = await reconcileManagedVectorRecordsIfDue();
+    // Pass the tick's abort signal: a watchdog unwedge must kill this lane's
+    // whole-index scroll, not orphan it (2026-09-25 OOM).  The lane is
+    // fire-and-forget, so without the signal the abort could never reach it.
+    const run = await reconcileManagedVectorRecordsIfDue(Date.now(), signal);
     if (run === null) return { status: "skipped" as const, summary: "not due" };
     return { status: "ok" as const, summary: `status=${run.status}` };
   }).catch((err) => console.error("[scheduler] managed-vector reconcile journal error:", err));
@@ -996,6 +1006,18 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // free-safe 5/min so the raised paid default can't 429-storm. No-op until due; fully self-guarded.
   void journalLane("provider-tier-check", {}, () => runProviderTierCheckIfDue())
     .catch((err) => console.error("[scheduler] provider-tier check error:", err));
+
+  // Consecutive-run-failure watchdog (self-healing 2026-09-30): the
+  // trading-liveness signal is read-only, so a streak of failing strategy runs
+  // had no in-process consumer (the 2026-09-30 incident: ~5 days unhandled).
+  // This lane alerts loudly, backs off the account's runs exponentially, and
+  // auto-halts after a long streak — never restarts the process.  Fully
+  // self-guarded so it can't break a tick.  See src/lib/run-failure-watchdog.ts.
+  void journalLane("run-failure-watchdog", {}, async () => {
+    const { runFailureWatchdogTick } = await import("./run-failure-watchdog");
+    await runFailureWatchdogTick();
+    return { status: "ok" as const, summary: "checked" };
+  }).catch((err) => console.error("[scheduler] run-failure watchdog error:", err));
 
   // Re-open hard-STOPPED Connections health lanes on a 3–6h cadence (or at known
   // quota reset). Prevents "red forever until an agent SSHs" — owner 2026-08-06.
@@ -1655,6 +1677,26 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
         }
       }
     } else {
+      // Consecutive-run-failure backoff (self-healing 2026-09-30): suppress due
+      // runs for accounts the run-failure watchdog is backing off, so a broken
+      // broker/LLM path is not hammered every cadence.  Same cadence-state
+      // rollback as the monthly-ceiling suppression above: a run that never
+      // executed must NOT look completed.  Probe runs are allowed once the
+      // backoff expires (isRunBackedOff goes false), so recovery is automatic.
+      for (let i = dueRuns.length - 1; i >= 0; i--) {
+        const run = dueRuns[i];
+        if (isRunBackedOff(run.userId, run.accountId)) {
+          const s = accountSchedules[run.key];
+          if (s) {
+            s.lastRunAt = run.prevLastRunAt;
+            s.nextRunAt = run.prevNextRunAt;
+          }
+          console.log(
+            `[scheduler] run-failure backoff: suppressing due run for ${run.userId}/${run.accountId}`
+          );
+          dueRuns.splice(i, 1);
+        }
+      }
       // Do NOT await the strategy promises: a hung LLM/gather used to pin `__tickInFlight` until
       // process restart, which skipped every later 60s interval (no lease renew, no lastTick, no
       // Sentry close). Per-account strategy locks still prevent duplicate money-path work.
