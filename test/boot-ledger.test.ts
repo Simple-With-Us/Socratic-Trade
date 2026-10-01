@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -13,6 +13,7 @@ import {
   describeRestartLoop,
   noteExitReceipt,
   parseBootLedger,
+  readRecentWatchdogKill,
   recordBoot,
   reportRestartLoop,
   resetBootLedgerForTests,
@@ -278,5 +279,49 @@ describe("reportRestartLoop", () => {
     } finally {
       if (prev !== undefined) process.env["SENTRY_" + "DSN"] = prev;
     }
+  });
+});
+
+describe("readRecentWatchdogKill (liveness watchdog attribution)", () => {
+  function ledgerEnv(): Record<string, string | undefined> {
+    const dir = mkdtempSync(join(tmpdir(), "watchdog-kill-"));
+    return { DATABASE_URL: `file:${join(dir, "app.db")}` };
+  }
+  function logPathFor(env: Record<string, string | undefined>): string {
+    return join(dirname(bootLedgerPath(env)), "liveness-watchdog.log");
+  }
+
+  it("returns null when there is no watchdog log", () => {
+    expect(readRecentWatchdogKill(ledgerEnv(), T0)).toBeNull();
+  });
+
+  it("returns the last line of a recent watchdog log", () => {
+    const env = ledgerEnv();
+    const p = logPathFor(env);
+    writeFileSync(
+      p,
+      "2026-09-30T15:58:29Z liveness-watchdog kill pid=32077 after 5 failed /api/live probes\n" +
+        "2026-09-30T16:20:00Z liveness-watchdog kill pid=32100 after 5 failed /api/live probes\n"
+    );
+    // File was just written: "now" is real wall-clock time, inside the recency window.
+    expect(readRecentWatchdogKill(env, Date.now())).toContain("pid=32100");
+  });
+
+  it("returns null when the watchdog log is older than the recency window", () => {
+    const env = ledgerEnv();
+    const p = logPathFor(env);
+    writeFileSync(p, "2026-09-20T00:00:00Z liveness-watchdog kill pid=1 after 5 failed /api/live probes\n");
+    const tenDaysAgoSec = new Date("2026-09-20T00:00:00Z").getTime() / 1000;
+    utimesSync(p, tenDaysAgoSec, tenDaysAgoSec);
+    // "now" is ten days after the kill: well outside the 1h recency window.
+    expect(readRecentWatchdogKill(env, Date.parse("2026-09-30T00:00:00Z"))).toBeNull();
+  });
+
+  it("returns null for a whitespace-only log and never throws on garbage", () => {
+    const env = ledgerEnv();
+    const p = logPathFor(env);
+    writeFileSync(p, "\n   \n");
+    expect(readRecentWatchdogKill(env, T0)).toBeNull();
+    expect(readRecentWatchdogKill({}, T0)).toBeNull();
   });
 });

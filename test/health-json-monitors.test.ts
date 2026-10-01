@@ -56,6 +56,20 @@ describe("/api/health JSON monitor fields", () => {
     expect(raw).toContain('"litestreamTiersDegraded":');
   });
 
+  it("keeps a trading-liveness episode when the liveness result is unknown (no summary)", async () => {
+    const { db, healthRoute } = await load();
+    const since = new Date(Date.now() - 9 * 3_600_000).toISOString();
+    db.setInternalSetting("livenessDegradedSince:trading_liveness_degraded", since);
+    db.setInternalSetting("livenessEscalatedAt:trading_liveness_degraded", since);
+    // No active-autonomy accounts in this DB: the summary is null, which is
+    // "unknown", not "recovered".
+    const response = await healthRoute.GET(new Request(HEALTH_URL));
+    expect(response.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(db.getInternalSetting<string>("livenessDegradedSince:trading_liveness_degraded")).toBe(since);
+    expect(db.getInternalSetting<string>("livenessEscalatedAt:trading_liveness_degraded")).toBe(since);
+  });
+
   it("stays HTTP 200 when schedulerStale is true", async () => {
     const { db, healthRoute } = await load();
     db.setInternalSetting("scheduler:lastTick", new Date(Date.now() - 10 * 60_000).toISOString());

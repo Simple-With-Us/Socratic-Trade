@@ -65,6 +65,17 @@ export type AutonomyHaltCause =
       summary: string;
     }
   | {
+      /** The run-failure watchdog (run-failure-watchdog.ts) auto-halted the account after a long
+       *  streak of consecutive strategy-run failures, and it has stayed halted since.  The owner
+       *  re-arms from the console; the watchdog never lifts it by itself. */
+      kind: "run_failure_halt";
+      resumesOnItsOwn: false;
+      since: string;
+      reason: string;
+      consecutiveFailures: number;
+      summary: string;
+    }
+  | {
       /** The audit trail says a broker auto-pause halted the account and nothing re-armed or took it
        *  over since, but the auto-resume marker is gone.  The 2026-09-25 incident shape; current code
        *  should never produce it, so seeing it means a marker was dropped without a record. */
@@ -188,6 +199,34 @@ function lastAppHaltFromAudit(userId: string, connectedAccountId: string | undef
 }
 
 /**
+ * The run-failure watchdog's halt marker, read without importing
+ * run-failure-watchdog.ts (which pulls in db-health's `server-only`; the key
+ * is duplicated as a literal for the same reason broker-health.ts documents).
+ * Key format mirrors runFailureHaltMarkerKey() there.
+ */
+interface RunFailureHaltMarkerRead {
+  since: string;
+  reason?: string;
+  consecutiveFailures?: number;
+}
+
+function getRunFailureHaltMarkerRead(
+  userId: string,
+  connectedAccountId: string | undefined
+): RunFailureHaltMarkerRead | null {
+  if (!connectedAccountId) return null;
+  try {
+    const raw = getInternalSetting<RunFailureHaltMarkerRead>(
+      `runFailureHaltMarker:${userId}:${connectedAccountId}`
+    );
+    if (!raw || typeof raw !== "object" || typeof raw.since !== "string") return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Owner-readable cause of a `halted` account, or null for any other state.  Precedence: a live
  * broker auto-pause marker (the app owns the halt and will lift it), then a boot receipt (a restart
  * stopped it and nothing will start it by itself), then an app halt read from the audit trail (the
@@ -227,6 +266,27 @@ export function describeAutonomyHaltCause(input: {
         lastCheck +
         restartCaveat +
         "Start Agent resumes it now."
+    };
+  }
+
+  // Self-healing 2026-09-30: the run-failure watchdog auto-halted this account
+  // after a long streak of consecutive strategy-run failures.  Unlike a broker
+  // auto-pause it never lifts by itself — the owner re-arms from the console.
+  const runFailureMarker = getRunFailureHaltMarkerRead(input.userId, input.connectedAccountId);
+  if (runFailureMarker) {
+    const reason =
+      trimReason(runFailureMarker.reason) ||
+      "its strategy runs kept failing";
+    const failures = runFailureMarker.consecutiveFailures;
+    return {
+      kind: "run_failure_halt",
+      resumesOnItsOwn: false,
+      since: runFailureMarker.since,
+      reason: runFailureMarker.reason ?? reason,
+      consecutiveFailures: typeof failures === "number" ? failures : 0,
+      summary:
+        `Auto-halted by the app since ${centralTime(runFailureMarker.since)}: ${reason}.  ` +
+        "It will not start by itself.  Start Agent resumes it when the underlying failure is fixed."
     };
   }
 
