@@ -13,6 +13,7 @@ for development only; previews are retired.
 | **Alpaca** | API key + secret (REST) | Paper (`PA…` / `PK…`) and live brokerage |
 | **Tradier** | Access token | Sandbox (paper) and production (live) |
 | **Robinhood** | Official Trading MCP (OAuth) | Live brokerage |
+| **Kalshi** | Event contracts | Experimental — the live kill switch defaults off |
 
 An account is an account: paper vs live is only the broker account's
 `environment`. There is **no** local simulator, **no** "Test mode", and **no**
