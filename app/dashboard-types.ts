@@ -132,7 +132,7 @@ export interface DashboardSnapshot {
     ark?: { enabled: boolean; fetchedAt?: string; recordCount: number; sources: string[]; due: boolean; ttlMs: number; asOf?: string };
   };
   smartMoney?: {
-    congress: Array<{ symbol: string; member: string; chamber: string; side: "buy" | "sell"; amountLow?: number; amountHigh?: number; tradedAt: string; disclosedAt?: string }>;
+    congress: Array<{ symbol: string; member: string; chamber: string; side: "buy" | "sell" | "exchange"; amountLow?: number; amountHigh?: number; tradedAt: string; disclosedAt?: string }>;
     insider: Array<{ symbol: string; owner: string; buyTx: number; sellTx: number; filedAt: string }>;
     thirteenF?: Array<{ ticker: string; filerName: string; periodEnd: string; shares: number; valueUsd: number }>;
     ark?: Array<{ ticker: string; fund: string; asOf: string; weightPct: number; shares: number }>;
