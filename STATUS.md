@@ -1,5 +1,20 @@
 # Current Status
 
+## 2026-09-30 CLAUDE — First TestFlight build on com.socratictrade.ios: Release signs manually (branch `claude/st-ios-first-ship`)
+
+**What.**  Board `687a5fb4`.  App Store Connect app `6815511597` had zero builds because every
+`ios-ship.yml` archive failed at `GatherProvisioningInputs`.  **Root cause:** Xcode 26 automatic
+signing calls `developerservices2.apple.com`, and the fleet ASC API key gets HTTP 401 NOT_AUTHORIZED
+there while `api.appstoreconnect.apple.com` accepts it (reproduced with a hand-signed JWT: 200 vs
+401 on both audiences).  **Fix:** the `SocraticTrade` Release config signs manually (Apple
+Distribution + "Socratic Trade App Store (API)"), `scripts/ios-install-appstore-profiles.sh`
+installs that profile over the REST API, and the fleet ship script's manual mode skips Xcode's
+provisioning service and uploads the IPA with `altool`.  The unused App Group entitlement is removed
+(the App Store profile's group list is empty and the API cannot assign one).  `ios-ship.yml` gains an
+`export_only` dispatch input and a redacted failure-log artifact.  Rollout:
+`docs/rollouts/2026-09-30-st-ios-first-ship.md`.
+**Next.**  Merge, dispatch the ship from `main`, confirm the build on `6815511597`.
+
 ## 2026-09-29 CLAUDE — Post-merge audit of #3799: the account-questionnaire hold now clears itself (branch `claude/st-w3-h3`)
 
 **What.**  Board `687a5fb4`, wave 3 lane h3.  #3799 (Robinhood $1 minimum, account-questionnaire hold,

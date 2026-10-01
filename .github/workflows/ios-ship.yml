@@ -11,6 +11,14 @@ name: iOS TestFlight ship
 # App Store Connect key. The fleet script also declares export compliance
 # so a missing ITSAppUsesNonExemptEncryption cannot leave a VALID-but-unusable
 # build (ST 1.0.1/2, 2026-08-12).
+#
+# IOS_MANUAL_SIGN=1 (2026-09-30): Release signs MANUALLY with the App Store
+# profile in ios/appstore-profiles.json, which scripts/ios-install-appstore-profiles.sh
+# downloads over the App Store Connect API.  Xcode 26 automatic signing calls
+# developerservices2.apple.com and the fleet API key gets HTTP 401 there, so this
+# job must not ask Xcode's provisioning service for anything.  Upload is
+# local IPA export + altool with the API key.
+# See docs/rollouts/2026-09-30-st-ios-first-ship.md.
 
 on:
   push:
@@ -21,10 +29,17 @@ on:
       - 'scripts/ios-ship-testflight.sh'
       - 'scripts/ios-appstore-gm-prepare.sh'
       - 'scripts/ios-stage-asc-key.sh'
+      - 'scripts/ios-install-appstore-profiles.sh'
+      - 'scripts/ios-collect-ship-logs.sh'
       - 'scripts/ios-fleet/**'
       - 'scripts/ios-fleet-pin.sh'
       - 'scripts/ios-fleet.sha256'
   workflow_dispatch:
+    inputs:
+      export_only:
+        description: 'Archive + export the IPA only; do not upload (signing check)'
+        type: boolean
+        default: false
   schedule:
     - cron: '*/30 * * * *'
 
@@ -239,4 +254,29 @@ jobs:
         if: steps.gate.outputs.should_ship == '1'
         env:
           IOS_TF_RELEASE_NOTES: "1"  # Jay 2026-09-08: publish ASC What to Test
-        run: bash scripts/ios-ship-testflight.sh
+          IOS_MANUAL_SIGN: "1"  # 2026-09-30: App Store profile, no Xcode provisioning service
+          EXPORT_ONLY_INPUT: ${{ inputs.export_only }}
+        run: |
+          args=()
+          if [ "${EXPORT_ONLY_INPUT:-false}" = "true" ]; then
+            echo "[ios-ship] export_only=true: archive + export the IPA, no upload"
+            args+=(--export-only)
+          fi
+          bash scripts/ios-ship-testflight.sh ${args[@]+"${args[@]}"}
+
+      # Archive/export/upload logs are tee'd into the job log, but Xcode's
+      # .xcdistributionlogs are not.  Collect both on failure, redact the ASC and
+      # Sentry identifiers, and refuse to upload anything holding key material.
+      - name: Collect ship logs (failure only)
+        id: shiplogs
+        if: failure() && steps.gate.outputs.should_ship == '1'
+        run: bash scripts/ios-collect-ship-logs.sh "$RUNNER_TEMP/ios-ship-logs"
+
+      - name: Upload ship logs (failure only)
+        if: failure() && steps.shiplogs.outputs.safe == '1'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ios-ship-logs-${{ github.run_id }}
+          path: ${{ runner.temp }}/ios-ship-logs
+          retention-days: 7
+          if-no-files-found: ignore

@@ -80,12 +80,25 @@ targets:
         # runnable).  Pin the module name so imports and the display name are
         # decoupled.
         PRODUCT_MODULE_NAME: SocraticTrade
-        # Release archive: Automatic + ASC API key + -allowProvisioningUpdates
-        # (ship-testflight.sh). Do not set CODE_SIGN_IDENTITY to Apple Distribution
-        # here — that conflicts with CODE_SIGN_STYLE Automatic on Xcode 26 CI
-        # ("automatically signed for development, but Apple Distribution specified").
-        # Congress.Trade / fleet ship use Automatic only; ios-appstore-gm-prepare.sh
-        # imports the distribution cert for Automatic to select at archive time.
+        # Debug stays Automatic for a logged-in Xcode session.  Do not set
+        # CODE_SIGN_IDENTITY to Apple Distribution in `base` -- that conflicts with
+        # CODE_SIGN_STYLE Automatic on Xcode 26 ("automatically signed for
+        # development, but Apple Distribution specified").
+      # Release (the TestFlight archive) signs MANUALLY with the App Store profile
+      # named in ios/appstore-profiles.json.  Xcode 26 automatic signing calls
+      # developerservices2.apple.com, and the fleet App Store Connect API key gets
+      # HTTP 401 NOT_AUTHORIZED there while api.appstoreconnect.apple.com accepts
+      # it (2026-09-30, docs/rollouts/2026-09-30-st-ios-first-ship.md).
+      # scripts/ios-install-appstore-profiles.sh downloads and installs the
+      # profile over the App Store Connect API before the archive; the Apple
+      # Distribution identity comes from ios-appstore-gm-prepare.sh.  Keep the
+      # specifier and ios/appstore-profiles.json identical
+      # (test/ios-manual-signing.test.ts).
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: "Apple Distribution"
+          PROVISIONING_PROFILE_SPECIFIER: "Socratic Trade App Store (API)"
     info:
       path: SocraticTrade/Info.plist
       properties:
@@ -156,18 +169,21 @@ targets:
         #
         # 2026-09-22 bundle-ID migration (see docs/rollouts/2026-09-22-bundle-id-migration.md):
         # added applinks:socratic.trade + webcredentials:socratic.trade for the new
-        # socratic.trade zone (Jay owns the domain; app group group.com.socratictrade also added
-        # in the application-groups block below), and kept applinks:socratictrade.com so
+        # socratic.trade zone (Jay owns the domain), and kept applinks:socratictrade.com so
         # the existing universal-link surfaces do not break.
         com.apple.developer.associated-domains:
           - applinks:socratictrade.com
           - applinks:socratic.trade
           - webcredentials:socratic.trade
-        # App Group for the new com.socratictrade.ios bundle (must be registered per App ID in
-        # the Apple Developer Portal before any shared-container UserDefaults writes work).
-        # 2026-09-22 bundle-ID migration (see docs/rollouts/2026-09-22-bundle-id-migration.md).
-        com.apple.security.application-groups:
-          - group.com.socratictrade
+        # NO App Group entitlement (removed 2026-09-30).  The 2026-09-22 migration added
+        # `com.apple.security.application-groups: [group.com.socratictrade]`, but the group
+        # was never assigned to the com.socratictrade.ios App ID, so every App Store profile
+        # for this bundle carries an EMPTY application-groups list and a Release signature
+        # that requests the group cannot match it.  The public App Store Connect API cannot
+        # assign an App Group, and no Swift code reads a shared container (no suiteName:,
+        # no containerURL(forSecurityApplicationGroupIdentifier:)).  To bring it back: assign
+        # group.com.socratictrade to the App ID in the Developer Portal, regenerate the
+        # "Socratic Trade App Store (API)" profile, then re-add the key here and regenerate.
 
   SocraticTradeTests:
     type: bundle.unit-test
