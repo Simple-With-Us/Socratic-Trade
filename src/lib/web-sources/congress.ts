@@ -21,7 +21,7 @@
 // is App A's wire format; `coerceCongressTrade()` converts between them.
 
 import { audit, getInternalSetting, resolveApiKey, setInternalSetting } from "../db";
-import { congressAsCongressSourceEnabled, getCongressTradeClient } from "../api-clients/congress";
+import { congressAsCongressSourceEnabled, readCongressTransactionsPage } from "../api-clients/congress";
 import { normalizeSymbol } from "../money";
 import {
   assertOperationLeaseOwnership,
@@ -42,6 +42,8 @@ import {
 } from "./http";
 
 const DATASET_KEY = "webSource:congress:dataset";
+/** Separate from the dataset so a rewrite of the trade list cannot drop the poll cursor. */
+export const CONGRESS_CURSOR_SETTING_KEY = "webSource:congress:cursor";
 const ATTEMPT_KEY = "webSource:congress:lastAttempt";
 const DEFAULT_TTL_MS = 24 * 60 * 60_000; // daily; congressional disclosures trickle in every day
 const DEFAULT_RETRY_BACKOFF_MS = 60 * 60_000; // wait 1h before retrying after a failed/empty scrape
@@ -419,6 +421,13 @@ function buildBulletin(
     base = `Congress: ${buyMembers.length} member(s) disclosed BUYS of ${symbol} in the last ${window}d (${names(buyMembers)}); no sells.`;
   } else if (sellCount > 0 && buyCount === 0) {
     base = `Congress: ${sellMembers.length} member(s) disclosed SELLS of ${symbol} in the last ${window}d (${names(sellMembers)}); no buys.`;
+  } else if (buyCount === 0 && sellCount === 0) {
+    // Exchange-only window: no member buy or sell exists, so the mixed-activity branch below
+    // would render "mixed activity ... 0 buy(s) by  vs 0 sell(s) by ." — both wrong (it is not
+    // mixed) and malformed (names([]) is the empty string, leaving a dangling "by "). The
+    // exchange-count and latency/competitor clauses appended after this block still carry the
+    // real signal, so we only need the leading sentence to stop asserting a direction.
+    base = `Congress: no member buy or sell disclosures for ${symbol} in the last ${window}d.`;
   } else {
     base = `Congress: mixed activity on ${symbol} in last ${window}d — ${buyCount} buy(s) by ${names(buyMembers)} vs ${sellCount} sell(s) by ${names(sellMembers)}.`;
   }
@@ -433,6 +442,11 @@ function buildBulletin(
       .map((t) => `latency: ${t.latencyProbeDelayMs}ms, health: ${t.latencyProbeHealth ?? "unknown"}, provider_pub: ${t.providerPublishedAt ?? "N/A"}`)
       .join("; ");
     base += ` (Competitor tracking stats for latest trades: ${details})`;
+  }
+
+  const exchangeCount = trades.filter((t) => t.side === "exchange").length;
+  if (exchangeCount > 0) {
+    base += `  Also ${exchangeCount} exchange disclosure(s) (not counted as buy or sell).`;
   }
 
   return base;
@@ -544,6 +558,8 @@ export async function fetchCapitolTrades(): Promise<CongressTrade[]> {
 // ── Refresh orchestration ────────────────────────────────────────────────────
 
 function tradeKey(t: CongressTrade): string {
+  if (t.id) return `id:${t.id}`;
+  if (t.docId && t.rowKey) return `doc:${t.docId}|row:${t.rowKey}`;
   return `${t.symbol}|${t.member}|${t.side}|${t.tradedAt}|${t.amountLow ?? ""}`;
 }
 
@@ -627,6 +643,7 @@ async function refreshCongressUnlocked(
     return { id: "congress", ok: true, recordCount: ds?.recordCount ?? 0, sources: ds?.sources ?? [], fetchedAt: ds?.fetchedAt ?? "", skipped: true };
   }
   assertOperationLeaseOwnership(operationLeaseClaim);
+  resetAppAPollState();
 
   // Record the attempt up front so a failure backs off (retryBackoffMs) instead of
   // re-firing every tick; the dataset's fetchedAt still only advances on success.
@@ -665,8 +682,20 @@ async function refreshCongressUnlocked(
   assertOperationLeaseOwnership(operationLeaseClaim);
   const fetchedAt = new Date(now).toISOString();
   if (collected.length === 0) {
-    // Don't overwrite a good prior dataset with nothing on a transient outage.
     const prior = getCongressDataset();
+    // A successful empty incremental poll is not an outage.  Keep the prior
+    // rows and refresh fetchedAt so the TTL still applies.  The cursor moves
+    // only after that write.
+    if (appAPollReachedServer && appAPollCursor > 0 && prior && prior.trades.length > 0) {
+      const dataset: CongressDataset = { ...prior, fetchedAt };
+      assertOperationLeaseOwnership(operationLeaseClaim);
+      setInternalSetting(DATASET_KEY, dataset);
+      persistAppACursor();
+      audit("web_source_refresh", { id: "congress", ok: true, recordCount: prior.recordCount, sources: prior.sources, warnings });
+      return { id: "congress", ok: true, recordCount: prior.recordCount, sources: prior.sources, fetchedAt, warning: warnings.join("; ") || undefined };
+    }
+    if (appAPollReachedServer && appAPollCursor > 0) persistAppACursor();
+    // Don't overwrite a good prior dataset with nothing on a transient outage.
     audit("web_source_refresh", { id: "congress", ok: false, recordCount: 0, warnings });
     return { id: "congress", ok: false, recordCount: prior?.recordCount ?? 0, sources: prior?.sources ?? [], fetchedAt: prior?.fetchedAt ?? "", warning: warnings.join("; ") || "no records" };
   }
@@ -675,6 +704,7 @@ async function refreshCongressUnlocked(
   const dataset: CongressDataset = { trades, fetchedAt, sources, recordCount: trades.length };
   assertOperationLeaseOwnership(operationLeaseClaim);
   setInternalSetting(DATASET_KEY, dataset);
+  persistAppACursor();
   audit("web_source_refresh", { id: "congress", ok: true, recordCount: trades.length, sources, warnings });
   return { id: "congress", ok: true, recordCount: trades.length, sources, fetchedAt, warning: warnings.join("; ") || undefined };
 }
@@ -729,13 +759,14 @@ export function coerceCongressTrade(raw: unknown): CongressTrade | null {
   const symbol = normalizeSymbol(pickStr(o, ["symbol", "ticker", "asset", "assetTicker", "issuerTicker"]) ?? "");
   if (!symbol) return null;
 
-  // App A's /api/transactions uses single-letter SEC codes: P=purchase(buy), S / S_partial=sale(sell);
-  // other codes (E exchange, G gift, …) are intentionally ignored. Also accept word forms from
-  // other sources.
+  // App A's /api/transactions uses single-letter codes: P/B buy, S / S_partial sell, E exchange.
+  // Gifts and other codes stay dropped.  Key order stays side, type, transactionType,
+  // txType, action so a bare SSE frame is read from `type` before `txType`.
   const sideRaw = (pickStr(o, ["side", "type", "transactionType", "txType", "action"]) ?? "").toLowerCase();
-  let side: "buy" | "sell" | undefined;
+  let side: CongressTrade["side"] | undefined;
   if (sideRaw === "p" || sideRaw === "b" || /(buy|purchase|acqui)/.test(sideRaw)) side = "buy";
   else if (sideRaw === "s" || sideRaw.startsWith("s_") || /(sell|sale|dispos)/.test(sideRaw)) side = "sell";
+  else if (sideRaw === "e" || sideRaw === "exchange" || /\bexchange\b/.test(sideRaw)) side = "exchange";
   if (!side) return null;
 
   const now = Date.now();
@@ -755,9 +786,13 @@ export function coerceCongressTrade(raw: unknown): CongressTrade | null {
   if (!anchor) return null;
 
   // Match the senate prefix (senate/senator) at the START — substring .includes("sen") would
-  // misclassify "representative". Anything else (house/rep/unknown) → house.
+  // misclassify "representative".  "exec..." stays executive.  Anything else → house.
   const chamberRaw = (pickStr(o, ["chamber", "house", "body"]) ?? "").toLowerCase();
-  const chamber: "senate" | "house" = chamberRaw.startsWith("sen") ? "senate" : "house";
+  const chamber: CongressTrade["chamber"] = chamberRaw.startsWith("exec")
+    ? "executive"
+    : chamberRaw.startsWith("sen")
+      ? "senate"
+      : "house";
 
   const trade: CongressTrade = {
     symbol,
@@ -765,16 +800,41 @@ export function coerceCongressTrade(raw: unknown): CongressTrade | null {
     chamber,
     side,
     tradedAt: anchor,
-    disclosedAt: disclosedAt ?? tradedAt,
     source: APP_A_SOURCE
   };
+  if (disclosedAt) trade.disclosedAt = disclosedAt;
   const amountLow = pickNum(o, ["amountLow", "amount_min", "minAmount", "sizeRangeLow", "valueLow", "amountMin"]);
   const amountHigh = pickNum(o, ["amountHigh", "amount_max", "maxAmount", "sizeRangeHigh", "valueHigh", "amountMax"]);
   if (amountLow !== undefined) trade.amountLow = amountLow;
   if (amountHigh !== undefined) trade.amountHigh = amountHigh;
   const owner = pickStr(o, ["owner", "ownerType", "holder"]);
   if (owner) trade.owner = owner;
+  const id = pickStr(o, ["id"]);
+  if (id) trade.id = id;
+  const docId = pickStr(o, ["docId", "doc_id"]);
+  if (docId) trade.docId = docId;
+  const rowKey = pickStr(o, ["rowKey", "row_key"]);
+  if (rowKey) trade.rowKey = rowKey;
+  const party = pickStr(o, ["party"]);
+  if (party) trade.party = party;
+  const bioguideId = pickStr(o, ["bioguideId", "bioguide_id"]);
+  if (bioguideId) trade.bioguideId = bioguideId;
+  const pdfUrl = pickStr(o, ["pdfUrl", "pdf_url"]);
+  if (pdfUrl) trade.pdfUrl = pdfUrl;
+  const disclosureLagDays = pickNum(o, ["disclosureLagDays", "disclosure_lag_days"]);
+  if (disclosureLagDays !== undefined) trade.disclosureLagDays = disclosureLagDays;
+  const stockActStatus = pickStr(o, ["stockActStatus", "stock_act_status"]);
+  if (stockActStatus) trade.stockActStatus = stockActStatus;
+  const priceAtTrade = pickNum(o, ["priceAtTrade", "price_at_trade"]);
+  if (priceAtTrade !== undefined) trade.priceAtTrade = priceAtTrade;
+  const spxAtTrade = pickNum(o, ["spxAtTrade", "spx_at_trade"]);
+  if (spxAtTrade !== undefined) trade.spxAtTrade = spxAtTrade;
+  const priceAtFiling = pickNum(o, ["priceAtFiling", "price_at_filing"]);
+  if (priceAtFiling !== undefined) trade.priceAtFiling = priceAtFiling;
+  const spxAtFiling = pickNum(o, ["spxAtFiling", "spx_at_filing"]);
+  if (spxAtFiling !== undefined) trade.spxAtFiling = spxAtFiling;
 
+  applyPayloadLatency(trade, o);
   const latencyProbeHealth = pickStr(o, ["latencyProbeHealth"]);
   if (latencyProbeHealth) trade.latencyProbeHealth = latencyProbeHealth;
   const latencyProbeDelayMs = pickNum(o, ["latencyProbeDelayMs"]);
@@ -785,27 +845,92 @@ export function coerceCongressTrade(raw: unknown): CongressTrade | null {
   return trade;
 }
 
+function applyPayloadLatency(trade: CongressTrade, o: Record<string, unknown>): void {
+  const latency = o.latency;
+  if (!latency || typeof latency !== "object" || Array.isArray(latency)) return;
+  const lat = latency as Record<string, unknown>;
+  const status = pickStr(lat, ["status"]);
+  const provider = pickStr(lat, ["provider"]);
+  if (status) trade.latencyProbeHealth = status;
+  else if (provider) trade.latencyProbeHealth = provider;
+  const deltaSec = pickNum(lat, ["providerDeltaSec"]);
+  if (deltaSec !== undefined) trade.latencyProbeDelayMs = deltaSec * 1000;
+  const published = pickStr(lat, ["providerPublishedAt"]);
+  if (published) trade.providerPublishedAt = published;
+}
+
+let appAPollReachedServer = false;
+let appAPollCursor = 0;
+
+function resetAppAPollState(): void {
+  appAPollReachedServer = false;
+  appAPollCursor = 0;
+}
+
+function readStoredCursor(): number {
+  const raw = getInternalSetting<number | string>(CONGRESS_CURSOR_SETTING_KEY);
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function persistAppACursor(): void {
+  if (!appAPollReachedServer || !(appAPollCursor > 0)) return;
+  if (appAPollCursor > readStoredCursor()) setInternalSetting(CONGRESS_CURSOR_SETTING_KEY, appAPollCursor);
+}
+
+function rowCursorSeq(raw: unknown): number | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const n = Number((raw as { cursorSeq?: unknown }).cursorSeq);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 /**
- * Pull the rolling congressional window from App A's public /api/transactions feed. App A's feed is
- * oldest-first by `cursor_seq`, so we bound it server-side with `from=<window start>` (the documented
- * rolling-window param) and page forward via `cursor` until the window is exhausted. Without `from`
- * a recent-window pull would have to walk all historical rows to reach today's disclosures.
+ * Pull congressional disclosures from App A's public /api/transactions feed.
+ * The first backfill sends `from` alone (then `from` plus `since` to page that
+ * window; offset is capped, so since is the pager).  Once a cursor is stored,
+ * later polls send `since` alone.
  */
 export async function fetchAppACongressTrades(now: number = Date.now()): Promise<CongressTrade[]> {
+  resetAppAPollState();
   const out: CongressTrade[] = [];
-  const from = new Date(now - (windowDays() + 7) * 24 * 60 * 60_000).toISOString().slice(0, 10);
-  let since: string | undefined;
+  const stored = readStoredCursor();
+  const backfill = stored <= 0;
+  const from = backfill
+    ? new Date(now - (windowDays() + 7) * 24 * 60 * 60_000).toISOString().slice(0, 10)
+    : undefined;
+  let since: string | undefined = backfill ? undefined : String(stored);
   for (let page = 0; page < APP_A_MAX_PAGES; page++) {
-    const client = getCongressTradeClient();
-    const res = await client.getTransactions({ from, limit: APP_A_PAGE_SIZE, ...(since ? { since } : {}) }).catch(e => { console.error("getTransactions error:", e); return null; });
-    if (!res || res.transactions.length === 0) break;
+    const res = await readCongressTransactionsPage({
+      limit: APP_A_PAGE_SIZE,
+      ...(from ? { from } : {}),
+      ...(since ? { since } : {})
+    }).catch(e => { console.error("getTransactions error:", e); return null; });
+    if (!res) break;
+    appAPollReachedServer = true;
+    if (res.transactions.length === 0) {
+      if (res.cursor > appAPollCursor) appAPollCursor = res.cursor;
+      break;
+    }
+    let consumed = appAPollCursor;
+    let stoppedEarly = false;
     for (const raw of res.transactions) {
+      const rowCursor = rowCursorSeq(raw);
+      if (rowCursor !== undefined && rowCursor > consumed) consumed = rowCursor;
       const t = coerceCongressTrade(raw);
       if (t) out.push(t);
-      if (out.length >= APP_A_MAX_TRADES) return out;
+      if (out.length >= APP_A_MAX_TRADES) {
+        stoppedEarly = true;
+        break;
+      }
     }
-    const next = res.cursor === undefined || res.cursor === null ? undefined : String(res.cursor);
-    if (!next || next === since) break; // no more pages / no forward progress
+    if (stoppedEarly) {
+      if (consumed > appAPollCursor) appAPollCursor = consumed;
+      return out;
+    }
+    const pageCursor = Math.max(res.cursor, consumed);
+    if (pageCursor > appAPollCursor) appAPollCursor = pageCursor;
+    const next = pageCursor > 0 ? String(pageCursor) : undefined;
+    if (!next || next === since) break;
     since = next;
   }
   return out;

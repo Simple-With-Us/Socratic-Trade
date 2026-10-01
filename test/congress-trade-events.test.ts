@@ -8,7 +8,8 @@ import {
   resetCongressEventDedupe
 } from "../src/lib/congress-trade-events";
 import { getServiceHealthSummaries } from "../src/lib/db-health";
-import { coerceCongressTrade, fetchAppACongressTrades } from "../src/lib/web-sources/congress";
+import { coerceCongressTrade, CONGRESS_CURSOR_SETTING_KEY, fetchAppACongressTrades, getCongressSignals, refreshCongress, upsertCongressTrades } from "../src/lib/web-sources/congress";
+import { deleteInternalSetting, getInternalSetting, setInternalSetting } from "../src/lib/db";
 import { getCongressDataset, getInsiderSignals, getSymbolWebSignals } from "../src/lib/web-sources";
 import { POST as postCongressWebhook } from "../app/api/webhooks/congress/route";
 
@@ -91,10 +92,113 @@ describe("coerceCongressTrade — App A /api/transactions confirmed shape", () =
     expect(coerceCongressTrade({ ticker: "T", txType: "P", txDate: "2026-06-01", chamber: "representative" })?.chamber).toBe("house");
   });
 
-  it("rejects non-P/S txTypes and unparseable dates at ingestion", () => {
-    expect(coerceCongressTrade({ ticker: "T", txType: "E", txDate: "2026-06-01" })).toBeNull(); // exchange code ignored
+  it("rejects gifts and unparseable dates at ingestion", () => {
+    expect(coerceCongressTrade({ ticker: "T", txType: "G", txDate: "2026-06-01" })).toBeNull();
     expect(coerceCongressTrade({ ticker: "T", txType: "P", txDate: "not-a-date" })).toBeNull();
     expect(coerceCongressTrade({ ticker: "T", txType: "P", txDate: "2026-13-45" })).toBeNull();
+  });
+
+  it("keeps exchange and executive, and does not copy tradedAt into disclosedAt", () => {
+    const exchange = coerceCongressTrade({ ticker: "T", txType: "E", txDate: "2026-06-01" });
+    expect(exchange).toMatchObject({ side: "exchange", tradedAt: "2026-06-01" });
+    expect(exchange?.disclosedAt).toBeUndefined();
+    expect(coerceCongressTrade({ ticker: "T", txType: "P", txDate: "2026-06-01", chamber: "executive" })?.chamber).toBe("executive");
+    expect(coerceCongressTrade({ ticker: "T", txType: "exchange", txDate: "2026-06-01" })?.side).toBe("exchange");
+  });
+
+  it("keeps identity, prices, and latency from the feed payload", () => {
+    expect(coerceCongressTrade({
+      id: "tx-9",
+      docId: "doc-9",
+      rowKey: "row-9",
+      ticker: "T",
+      txType: "P",
+      txDate: "2026-06-01",
+      filedDate: "2026-06-03",
+      party: "Democratic",
+      bioguideId: "P000197",
+      pdfUrl: "/api/documents/doc-9/pdf",
+      disclosureLagDays: 3,
+      stockActStatus: "on_time",
+      priceAtTrade: 10,
+      spxAtTrade: 5000,
+      priceAtFiling: 11,
+      spxAtFiling: 5010,
+      latency: {
+        provider: "fmp",
+        providerDeltaSec: 12,
+        status: "matched",
+        providerPublishedAt: "2026-06-02T00:00:00.000Z"
+      }
+    })).toMatchObject({
+      id: "tx-9",
+      docId: "doc-9",
+      rowKey: "row-9",
+      party: "Democratic",
+      bioguideId: "P000197",
+      pdfUrl: "/api/documents/doc-9/pdf",
+      disclosureLagDays: 3,
+      stockActStatus: "on_time",
+      priceAtTrade: 10,
+      spxAtTrade: 5000,
+      priceAtFiling: 11,
+      spxAtFiling: 5010,
+      disclosedAt: "2026-06-03",
+      latencyProbeDelayMs: 12000,
+      latencyProbeHealth: "matched",
+      providerPublishedAt: "2026-06-02T00:00:00.000Z"
+    });
+  });
+
+  it("dedupes on id, otherwise docId+rowKey, and still collapses rows with neither", () => {
+    const day = recent(2);
+    const self = coerceCongressTrade({ id: "zzz-self", ticker: "ZZZ", memberName: "Jane Doe", txType: "P", txDate: day, amountMin: 1000, owner: "self" });
+    const spouse = coerceCongressTrade({ id: "zzz-spouse", ticker: "ZZZ", memberName: "Jane Doe", txType: "P", txDate: day, amountMin: 1000, owner: "spouse" });
+    expect(self && spouse).toBeTruthy();
+    expect(upsertCongressTrades([self!, spouse!]).added).toBe(2);
+    expect((getCongressDataset()?.trades ?? []).filter((t) => t.symbol === "ZZZ")).toHaveLength(2);
+
+    const rowA = coerceCongressTrade({ docId: "doc-q", rowKey: "1", ticker: "QQQ", memberName: "Jane Doe", txType: "P", txDate: day, amountMin: 1000, owner: "self" });
+    const rowB = coerceCongressTrade({ docId: "doc-q", rowKey: "2", ticker: "QQQ", memberName: "Jane Doe", txType: "P", txDate: day, amountMin: 1000, owner: "spouse" });
+    expect(upsertCongressTrades([rowA!, rowB!]).added).toBe(2);
+    expect((getCongressDataset()?.trades ?? []).filter((t) => t.symbol === "QQQ")).toHaveLength(2);
+
+    const first = coerceCongressTrade({ ticker: "YYY", memberName: "Same Person", txType: "P", txDate: day, amountMin: 5, owner: "self" });
+    const second = coerceCongressTrade({ ticker: "YYY", memberName: "Same Person", txType: "P", txDate: day, amountMin: 5, owner: "spouse" });
+    expect(upsertCongressTrades([first!, second!]).added).toBe(1);
+    expect((getCongressDataset()?.trades ?? []).filter((t) => t.symbol === "YYY")).toHaveLength(1);
+  });
+
+  it("mentions exchanges in the bulletin without counting them as buys or sells", () => {
+    const exchange = coerceCongressTrade({ id: "ex-1", ticker: "EXCH", memberName: "Jane Doe", txType: "E", txDate: recent(1) });
+    expect(exchange?.side).toBe("exchange");
+    upsertCongressTrades([exchange!]);
+    const sig = getCongressSignals(["EXCH"]).EXCH;
+    expect(sig?.buyCount).toBe(0);
+    expect(sig?.sellCount).toBe(0);
+    expect(sig?.netSignal).toBe(0);
+    expect(sig?.bulletin).toContain("1 exchange disclosure");
+  });
+
+  it("does not call an exchange-only window 'mixed activity' or emit dangling 'by '", () => {
+    // Regression: buyCount===0 && sellCount===0 used to fall through to the mixed-activity
+    // branch, which rendered `0 buy(s) by  vs 0 sell(s) by .` because names([]) is the empty
+    // string. The existing test above only pinned the trailing exchange clause, so it passed
+    // while the leading sentence stayed misleading.
+    const exchange = coerceCongressTrade({ id: "ex-only-1", ticker: "EXONLY", memberName: "Jane Doe", txType: "E", txDate: recent(1) });
+    upsertCongressTrades([exchange!]);
+    const bulletin = getCongressSignals(["EXONLY"]).EXONLY?.bulletin ?? "";
+
+    // Honest leading sentence, and no invented buy/sell direction.
+    expect(bulletin).toContain("no member buy or sell disclosures for EXONLY");
+    expect(bulletin).not.toContain("mixed activity");
+    expect(bulletin).not.toMatch(/0 buy\(s\)/);
+    expect(bulletin).not.toMatch(/0 sell\(s\)/);
+    // The malformed "by  vs" / trailing "by ." shape must not come back.
+    expect(bulletin).not.toMatch(/by\s+vs/);
+    expect(bulletin).not.toMatch(/by\s*\./);
+    // The real signal after the leading sentence must survive the fix.
+    expect(bulletin).toContain("1 exchange disclosure");
   });
 
   it("rejects future-dated and impossible (rolled-over) trade dates", () => {
@@ -189,6 +293,11 @@ describe("applyCongressEvent — dedupe + other types", () => {
 });
 
 describe("fetchAppACongressTrades — public feed with rolling from= window", () => {
+  beforeEach(() => {
+    deleteInternalSetting(CONGRESS_CURSOR_SETTING_KEY);
+    deleteInternalSetting("webSource:congress:lastAttempt");
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
     delete process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE;
@@ -220,6 +329,85 @@ describe("fetchAppACongressTrades — public feed with rolling from= window", ()
     expect(trades.length).toBeGreaterThanOrEqual(1);
     expect(trades[0]).toMatchObject({ symbol: "AAPL", side: "buy", member: "Jane Doe", chamber: "house" });
     expect(String(fetchSpy.mock.calls[0][0])).toContain("from="); // rolling-window bound is sent
+    expect(String(fetchSpy.mock.calls[0][0])).not.toContain("since=");
+    expect(trades[0]?.id).toBe("test-1");
+  });
+
+  it("pages the first backfill with from, then from plus since", async () => {
+    let calls = 0;
+    const fetchSpy = vi.fn(async (_url: string) => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(JSON.stringify({
+          transactions: [{ id: "p1", ticker: "AAPL", txType: "P", txDate: recent(3), memberName: "Jane", cursorSeq: 9, confidence: 1, isOption: false }],
+          cursor: 9
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ transactions: [], cursor: 9 }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const trades = await fetchAppACongressTrades(Date.now());
+    expect(trades).toHaveLength(1);
+    const first = String(fetchSpy.mock.calls[0][0]);
+    const second = String(fetchSpy.mock.calls[1][0]);
+    expect(first).toContain("from=");
+    expect(first).not.toContain("since=");
+    expect(second).toContain("from=");
+    expect(second).toContain("since=9");
+  });
+
+  it("uses since alone once a cursor is stored", async () => {
+    setInternalSetting(CONGRESS_CURSOR_SETTING_KEY, 42);
+    const fetchSpy = vi.fn(async (_url: string) => new Response(JSON.stringify({ transactions: [], cursor: 42 }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const trades = await fetchAppACongressTrades(Date.now());
+    expect(trades).toEqual([]);
+    const url = String(fetchSpy.mock.calls[0][0]);
+    expect(url).toContain("since=42");
+    expect(url).not.toContain("from=");
+  });
+
+  it("stores the cursor after a successful refresh and keeps rows on an empty incremental poll", async () => {
+    deleteInternalSetting("webSource:congress:dataset");
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    const row = {
+      id: "keep-1", ticker: "AAPL", memberName: "Jane Doe", chamber: "house", txType: "P",
+      txDate: recent(3), cursorSeq: 77, confidence: 1, isOption: false, owner: "self"
+    };
+    let phase: "backfill" | "incremental" = "backfill";
+    const fetchSpy = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (phase === "backfill") {
+        if (u.includes("since=")) {
+          return new Response(JSON.stringify({ transactions: [], cursor: 77 }), { status: 200 });
+        }
+        expect(u).toContain("from=");
+        return new Response(JSON.stringify({ transactions: [row], cursor: 77 }), { status: 200 });
+      }
+      expect(u).toContain("since=77");
+      expect(u).not.toContain("from=");
+      return new Response(JSON.stringify({ transactions: [], cursor: 77 }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const first = await refreshCongress(Date.now(), true);
+    expect(first.ok).toBe(true);
+    expect(getInternalSetting<number>(CONGRESS_CURSOR_SETTING_KEY)).toBe(77);
+    expect(getCongressDataset()?.trades.some((t) => t.id === "keep-1")).toBe(true);
+    const fetchedAt = getCongressDataset()?.fetchedAt;
+    phase = "incremental";
+    const second = await refreshCongress(Date.now() + 1000, true);
+    expect(second.ok).toBe(true);
+    expect(getCongressDataset()?.trades.some((t) => t.id === "keep-1")).toBe(true);
+    expect(getCongressDataset()?.fetchedAt).not.toBe(fetchedAt);
+  });
+
+  it("does not store a cursor when the feed errors", async () => {
+    deleteInternalSetting("webSource:congress:dataset");
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 500 })));
+    const result = await refreshCongress(Date.now(), true);
+    expect(result.ok).toBe(false);
+    expect(getInternalSetting(CONGRESS_CURSOR_SETTING_KEY)).toBeUndefined();
   });
 });
 
