@@ -14,6 +14,10 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  * - Live regions are masked: equity/benchmark chart figures (SVG paths drawn
  *   from live data), countdown clocks ("Next …"), and the day-PnL baseline
  *   date label. Everything else asserts pixel-stable across runs.
+ * - A mask hides pixels but NOT layout, and `fullPage: true` compares image
+ *   dimensions before pixels — so the one region whose height tracks live
+ *   server-side data (the Market Analysis card) also has its box pinned. See
+ *   PINNED_LIVE_HEIGHT_PX.
  * - ConsentGate is accepted before screenshotting, exactly like the smoke spec.
  */
 
@@ -95,12 +99,92 @@ test.describe("visual regression", () => {
     ];
   }
 
+  /**
+   * Constant height for the masked live regions whose box also moves.
+   *
+   * A mask hides PIXELS; the element still lays out at its natural size. Under
+   * `fullPage: true` Playwright compares the full-page image dimensions BEFORE
+   * any pixel comparison, so a region whose height depends on data fails the
+   * whole assertion no matter how high `maxDiffPixelRatio` is set. Pinning the
+   * box removes that dependency; the element is masked, so its pixels are
+   * painted solid magenta at any height and nothing observable changes.
+   *
+   * Must be >= the tallest natural height so real content is never clipped.
+   */
+  const PINNED_LIVE_HEIGHT_PX = 176;
+
+  /**
+   * Freeze the layout of masked regions whose HEIGHT varies run to run.
+   *
+   * The Market Analysis card is the known one: `app/console/page.tsx` returns
+   * null when `!macroBoard`, renders "Regime" unconditionally, "Market Breadth"
+   * only when `latestScan?.breadthPct != null`, and "VIX" only when
+   * `macroBoard.macro?.vix`. That feed is fetched SERVER-side, so `page.route()`
+   * cannot pin it — the rollout doc says so explicitly ("mask, don't assume
+   * hermeticity"). Measured on the 2026-10-03 run: 171px populated vs 110px
+   * empty, a 61px swing that was exactly the fullPage height delta and failed
+   * 7 of 8 runs with no real pixel regression anywhere on the page.
+   *
+   * All three states must land on the same height: populated, partially
+   * populated, and absent. When the card is present we pin it; when it is
+   * absent there is nothing to pin, so we reserve the slot with a spacer in
+   * the same rail. The card is a direct child of the `<aside>` immediately
+   * after RiskUtilization (unconditional), so the reservation is stable — and
+   * since only the rail's total height is asserted, the exact insertion index
+   * does not matter.
+   *
+   * Only block-level regions belong here — pinning an inline element (the
+   * countdown spans, the date label) to a card-sized height would wreck the
+   * layout instead of stabilising it.
+   */
+  async function pinVariableHeightRegions(page: Page): Promise<void> {
+    const rail = page
+      .locator("aside")
+      .filter({ has: page.locator("section.con-card") })
+      .first();
+    if ((await rail.count()) === 0) return;
+
+    const card = rail.locator("section.con-card", {
+      has: page.locator("h2.con-card-title", { hasText: "Market Analysis" }),
+    });
+    const cardCount = await card.count();
+    if (cardCount > 0) {
+      for (let i = 0; i < cardCount; i++) {
+        await card
+          .nth(i)
+          .evaluate((el) => el.setAttribute("data-visual-height-pinned", "1"))
+          .catch(() => {});
+      }
+    } else {
+      await rail
+        .evaluate((el, h) => {
+          const spacer = document.createElement("div");
+          spacer.setAttribute("data-visual-height-pinned", "1");
+          spacer.style.height = `${h}px`;
+          el.insertBefore(spacer, el.children[1] ?? null);
+        }, PINNED_LIVE_HEIGHT_PX)
+        .catch(() => {});
+    }
+
+    await page.addStyleTag({
+      content: [
+        `[data-visual-height-pinned] {`,
+        `  height: ${PINNED_LIVE_HEIGHT_PX}px !important;`,
+        `  min-height: ${PINNED_LIVE_HEIGHT_PX}px !important;`,
+        `  max-height: ${PINNED_LIVE_HEIGHT_PX}px !important;`,
+        `  overflow: hidden !important;`,
+        `}`,
+      ].join("\n"),
+    });
+  }
+
   async function assertStableScreenshot(
     page: Page,
     name: string,
     masks: Locator[] = [],
   ): Promise<void> {
     await freezeMotion(page);
+    await pinVariableHeightRegions(page);
     // In dev the Next compile-status pill ("Compiling …") is a fixed overlay;
     // it never exists in the production build CI screenshots, so settle it
     // out before asserting. Resolves immediately when absent.
