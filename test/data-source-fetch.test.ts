@@ -82,6 +82,53 @@ describe("dataSourceFetch", () => {
     expect(calls.direct).toBe(1);
   });
 
+  it("fail_soft falls back to direct when the proxied fetch aborts mid-flight", async () => {
+    // Regression: previously an AbortError from the proxied fetch had no
+    // `.code`, so isProxyLegError classified it as a non-proxy error and
+    // rethrew — fail_soft never engaged. The fix both classifies AbortError
+    // as proxy-leg AND (via the proxy-leg timeout) aborts the proxy before
+    // the caller's signal so the caller's signal is still live for direct.
+    const { deps, calls } = makeDeps({
+      env: { RESIDENTIAL_PROXY_URL: "http://10.99.0.2:8888" },
+      proxiedFetchFactory: () => (async () => {
+        throw new DOMException("aborted", "AbortError");
+      }) as typeof fetch
+    });
+    const res = await dataSourceFetch("https://api.stlouisfed.org/fred/x", undefined, {}, deps);
+    expect(await res.text()).toBe("direct");
+    expect(calls.direct).toBe(1);
+  });
+
+  it("does not fall back to direct when the caller's own signal aborted (caller cancellation)", async () => {
+    // An AbortError thrown by the proxied fetch because the caller's signal
+    // fired reflects caller intent, not a proxy-leg failure. Honour the
+    // cancellation — do NOT silently kick off a direct fallback the caller
+    // no longer wants.
+    const { deps, calls } = makeDeps({
+      env: { RESIDENTIAL_PROXY_URL: "http://10.99.0.2:8888" },
+      proxiedFetchFactory: () => (async (_input, init) => {
+        const signal = (init as RequestInit | undefined)?.signal;
+        return await new Promise<Response>((resolve, reject) => {
+          if (signal?.aborted) {
+            reject(new DOMException("aborted", "AbortError"));
+            return;
+          }
+          signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("aborted", "AbortError")),
+            { once: true }
+          );
+        });
+      }) as typeof fetch
+    });
+    const controller = new AbortController();
+    controller.abort(); // already aborted at call time
+    await expect(
+      dataSourceFetch("https://api.stlouisfed.org/fred/x", { signal: controller.signal }, {}, deps)
+    ).rejects.toThrow(/aborted/i);
+    expect(calls.direct).toBe(0);
+  });
+
   it("fail_closed propagates instead of falling back", async () => {
     const { deps } = makeDeps({
       env: { RESIDENTIAL_PROXY_URL: "http://10.99.0.2:8888", RESIDENTIAL_PROXY_FAILURE_MODE: "fail_closed" },

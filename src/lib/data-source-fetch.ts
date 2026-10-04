@@ -38,6 +38,7 @@ import "server-only";
 import {
   createProxiedFetch,
   isProxyLegError,
+  PROXY_LEG_TIMEOUT_MS,
   resolveProxyFailureMode,
   resolveResidentialProxyUrl,
   safeProxyHostForLog,
@@ -47,10 +48,16 @@ import {
 } from "./proxy-fetch";
 import { resolveUserProxy } from "./user-proxy-settings";
 
-/** Services that call fetchWithRetry but are NOT third-party market data —
- *  they keep direct egress even when a proxy is configured. */
+/** Services that always use direct egress (no proxy, no fallback). Two reasons qualify:
+ *   - "usage-monitor" → our own infra, not a third-party data source
+ *   - "fred"          → api.stlouisfed.org does NOT block datacenter IPs (direct
+ *                       egress succeeds in ~0.24s vs ~10s through the residential
+ *                       proxy); the residential proxy exists for Senate/House
+ *                       scraping (Imperva anti-bot), not for FRED. See
+ *                       `fetchFredSeries` for the full reasoning. */
 export const PROXY_EXCLUDED_SERVICES: ReadonlySet<string> = new Set([
-  "usage-monitor" // pushes to usage.jays.services — our own infra, not a data source
+  "usage-monitor",
+  "fred"
 ]);
 
 export type DataSourceProxySource = "user" | "env" | "default" | "none";
@@ -142,13 +149,19 @@ export async function dataSourceFetch(
     return directFetch(url, init);
   }
 
-  const proxiedFetch = (deps.proxiedFetchFactory ?? ((proxyUrl: string) => createProxiedFetch(proxyUrl)))(
+  const proxiedFetch = (deps.proxiedFetchFactory ?? ((proxyUrl: string) =>
+    createProxiedFetch(proxyUrl, undefined, { proxyTimeoutMs: PROXY_LEG_TIMEOUT_MS })))(
     resolution.proxyUrl
   );
   try {
     return await proxiedFetch(url, init);
   } catch (error) {
     if (!isProxyLegError(error)) throw error;
+    // If the caller's own signal aborted, the proxied fetch's AbortError
+    // reflects caller intent (cancellation / higher-level timeout), NOT a
+    // proxy-leg failure. Honour the cancellation — do not silently mask it by
+    // kicking off a direct fetch the caller no longer wants.
+    if (init?.signal?.aborted) throw error;
     if (resolution.failureMode === "fail_closed") {
       throw new Error(
         `data-source proxy ${safeProxyHostForLog(resolution.proxyUrl)} unreachable and failure mode is fail_closed: ` +

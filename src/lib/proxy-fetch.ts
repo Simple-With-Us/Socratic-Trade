@@ -165,18 +165,62 @@ export function getProxyAgent(proxyUrl: string): ProxyAgent {
 }
 
 /**
+ * Per-proxy-leg timeout (ms). Shorter than typical call-site budgets (the
+ * FRED fetch is 5s, the VIX lanes are 6s) so a slow residential proxy fails
+ * fast into the `fail_soft` direct fallback BEFORE the caller's own signal
+ * fires — otherwise the caller's signal aborts the proxied fetch first, the
+ * caller's now-aborted signal would also abort the direct fallback, and the
+ * fail-soft would silently never get to run.  The remaining caller budget
+ * (e.g. 2s for FRED, 3s for VIX) is comfortably above direct egress latency
+ * for the providers that have a fast direct path.
+ *
+ * 0 / undefined disables the per-leg timeout (caller signal only). Used by
+ * the dataSourceFetch call site; tests that want to drive the abort path
+ * directly leave it off.
+ */
+export const PROXY_LEG_TIMEOUT_MS = 3000;
+
+/**
  * Wrap a fetch function so requests egress through the given HTTP(S) proxy.
  * Returns baseFetch unchanged when no proxy URL is given (CT parity).
+ *
+ * When `options.proxyTimeoutMs` is a positive number, the returned fetch
+ * chains a fresh AbortController (the "proxy leg" timeout) with the caller's
+ * own signal. Either side aborting cancels the in-flight proxied request, so
+ * a slow proxy yields an AbortError (now classified as a proxy-leg failure
+ * by `isProxyLegError`) instead of consuming the caller's full budget.
  */
 export function createProxiedFetch(
   proxyUrl: string | undefined,
-  baseFetch: typeof fetch = undiciFetch as unknown as typeof fetch
+  baseFetch: typeof fetch = undiciFetch as unknown as typeof fetch,
+  options?: { proxyTimeoutMs?: number }
 ): typeof fetch {
   if (!proxyUrl || !proxyUrl.trim()) return baseFetch;
   const agent = getProxyAgent(proxyUrl);
+  const proxyTimeoutMs = options?.proxyTimeoutMs;
   return (async function proxiedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const withDispatcher = { ...(init ?? {}), dispatcher: agent } as RequestInit;
-    return baseFetch(input, withDispatcher);
+    if (!proxyTimeoutMs || proxyTimeoutMs <= 0) {
+      return baseFetch(input, withDispatcher);
+    }
+    const proxyController = new AbortController();
+    const timeoutHandle = setTimeout(() => proxyController.abort(), proxyTimeoutMs);
+    const callerSignal = init?.signal;
+    let onCallerAbort: (() => void) | undefined;
+    if (callerSignal) {
+      if (callerSignal.aborted) {
+        proxyController.abort();
+      } else {
+        onCallerAbort = () => proxyController.abort();
+        callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+      }
+    }
+    try {
+      return await baseFetch(input, { ...withDispatcher, signal: proxyController.signal });
+    } finally {
+      clearTimeout(timeoutHandle);
+      if (onCallerAbort && callerSignal) callerSignal.removeEventListener("abort", onCallerAbort);
+    }
   }) as typeof fetch;
 }
 
@@ -199,19 +243,54 @@ export const PROXY_LEG_ERROR_CODES: ReadonlySet<string> = new Set([
   "UND_ERR_SOCKET"
 ]);
 
-function errorCodeChain(err: unknown, depth = 0): string[] {
+/**
+ * Error names that mean the PROXY LEG was aborted mid-flight — the proxy (or
+ * an upstream hop through it) was slow enough that our own per-proxy-leg
+ * timeout fired, OR the proxy connection was reset without a typed Node
+ * `code` on the resulting DOMException. Without classifying these, the
+ * `fail_soft` fallback in `dataSourceFetch` never engages and the caller
+ * silently sees undefined for every series fetch (the regression that hit FRED
+ * in production when the residential proxy stalled at ~10s while the FRED
+ * call-site budget is 5s — see `fetchFredSeries`).
+ *
+ * A bare `Error("aborted")` has `name === "Error"` (NOT `"AbortError"`) and
+ * is intentionally NOT matched here; only DOMException/TimeoutError-style
+ * aborts (which carry the abort name as `.name`) qualify.
+ */
+const PROXY_LEG_ABORT_NAMES: ReadonlySet<string> = new Set([
+  "AbortError"
+]);
+
+function errorChainValues<T>(
+  err: unknown,
+  pick: (e: unknown) => T | undefined,
+  depth = 0
+): T[] {
   if (depth > 4 || !(err instanceof Error)) return [];
-  const codes: string[] = [];
-  const code = (err as { code?: unknown }).code;
-  if (typeof code === "string") codes.push(code);
+  const values: T[] = [];
+  const v = pick(err);
+  if (v !== undefined) values.push(v);
   const cause = (err as { cause?: unknown }).cause;
-  if (cause) codes.push(...errorCodeChain(cause, depth + 1));
-  return codes;
+  if (cause) values.push(...errorChainValues(cause, pick, depth + 1));
+  return values;
+}
+
+function pickErrorCode(err: unknown): string | undefined {
+  const code = (err as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function pickErrorName(err: unknown): string | undefined {
+  const name = (err as { name?: unknown }).name;
+  return typeof name === "string" ? name : undefined;
 }
 
 /** True when the thrown error indicates the proxy leg itself failed. */
 export function isProxyLegError(err: unknown): boolean {
-  return errorCodeChain(err).some((code) => PROXY_LEG_ERROR_CODES.has(code));
+  const codes = errorChainValues(err, pickErrorCode);
+  if (codes.some((code) => PROXY_LEG_ERROR_CODES.has(code))) return true;
+  const names = errorChainValues(err, pickErrorName);
+  return names.some((name) => PROXY_LEG_ABORT_NAMES.has(name));
 }
 
 // Rate-limited warn logging so a dead proxy does not spam one line per request.

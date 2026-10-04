@@ -82,7 +82,22 @@ describe("isProxyLegError", () => {
     const err = new TypeError("fetch failed", { cause: Object.assign(new Error("connect refused"), { code: "ECONNREFUSED" }) });
     expect(isProxyLegError(err)).toBe(true);
   });
-  it("does not classify aborts or unrelated errors as proxy-down", () => {
+  it("classifies a bare DOMException AbortError as proxy-down (the FRED regression fix)", () => {
+    // Regression: a proxied fetch that aborted mid-flight (e.g. residential
+    // proxy stalled past the proxy-leg timeout, or the call-site signal
+    // fired while still on the proxy leg) was silently never classified as
+    // a proxy-leg failure. Without classification, fail_soft never engaged
+    // and every FRED series fetch returned undefined with no log line.
+    expect(isProxyLegError(new DOMException("aborted", "AbortError"))).toBe(true);
+  });
+  it("classifies an AbortError nested in a cause chain as proxy-down", () => {
+    const err = new TypeError("fetch failed", { cause: new DOMException("aborted", "AbortError") });
+    expect(isProxyLegError(err)).toBe(true);
+  });
+  it("does not classify non-AbortError errors or unrelated errors as proxy-down", () => {
+    // A bare Error("aborted") has name "Error", not "AbortError" — it must
+    // not be classified. Only DOMException/TimeoutError-style aborts
+    // (which carry the abort name as `.name`) qualify.
     expect(isProxyLegError(new Error("aborted"))).toBe(false);
     expect(isProxyLegError(new TypeError("fetch failed", { cause: new Error("boom") }))).toBe(false);
   });
