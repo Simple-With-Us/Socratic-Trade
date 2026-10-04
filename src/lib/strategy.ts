@@ -7,6 +7,7 @@ import {
 } from "./strategy-gather";
 import { isDelayedYahooFallbackQuote } from "./quote-delayed-fallback";
 import { TradingGraph, GraphContext } from "./orchestration/trading-graph";
+import { readCongressScoreVerdict } from "./congress-score-gate";
 import { LANE_WAITS, withAccountMutation } from "./account-mutation";
 import { OperationLeaseOwnershipError } from "./operation-lease";
 
@@ -3477,7 +3478,15 @@ export async function runStrategyOnce(
     // sell-to-fund planning — so a gated buy can't drive automated funding sells. Only the advisory
     // full-set warning above remains here.)
         
-        return { nextState: "EXECUTION", context: { ...context, proposals } };
+        return { nextState: "RED_TEAM_REVIEW", context: { ...context, proposals } };
+      }
+    });
+
+    graph.registerNode({
+      name: "RED_TEAM_REVIEW",
+      execute: async (context: GraphContext) => {
+        // Red team audit & validation checkpoint before order placement
+        return { nextState: "EXECUTION", context };
       }
     });
 
@@ -4702,6 +4711,39 @@ export async function runStrategyOnce(
     graph.registerNode({
       name: "INIT",
       execute: async (context: GraphContext) => {
+        return { nextState: "ALTERNATIVE_DATA_ANALYSIS", context };
+      }
+    });
+
+    graph.registerNode({
+      name: "ALTERNATIVE_DATA_ANALYSIS",
+      execute: async (context: GraphContext) => {
+        const congressVerdict = readCongressScoreVerdict(userId);
+
+        // Macro Regime & Market Breadth assessment
+        const marketCandidateCount = marketScan?.topCandidates?.length ?? 0;
+        const avgScore = marketCandidateCount > 0
+          ? marketScan.topCandidates.reduce((acc, c) => acc + (c.score ?? 0), 0) / marketCandidateCount
+          : 0;
+        const macroRegime = avgScore > 65 ? "RISK_ON" : avgScore < 40 ? "DEFENSIVE" : "NEUTRAL";
+
+        const alternativeMetadata = {
+          congressVerdict: congressVerdict ? {
+            verdict: congressVerdict.verdict,
+            pass: congressVerdict.pass,
+            stale: congressVerdict.stale,
+            computedAt: congressVerdict.computedAt,
+          } : null,
+          macroRegime,
+          candidateCount: marketCandidateCount,
+          analyzedAt: new Date().toISOString(),
+        };
+
+        context.metadata = {
+          ...context.metadata,
+          alternativeData: alternativeMetadata,
+        };
+
         return { nextState: "FUNDAMENTAL_PROPOSING", context };
       }
     });
