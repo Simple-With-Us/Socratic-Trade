@@ -65,6 +65,14 @@ export async function register() {
   const { assertSecretsManagerIfRequired } = await import("./src/lib/secrets-source");
   assertSecretsManagerIfRequired();
 
+  // Infisical sole-source-of-truth settings cache (fleet directive 2026-10-03): load the
+  // app-level settings set into memory at startup; background refresh + SIGHUP reload;
+  // write-through on admin saves.  Fail-soft by design — the runner already injected the
+  // Infisical-sourced values into process.env, so a failed settings init must never take
+  // the trading box down.  See INFISICAL.md and src/lib/infisical-settings.ts.
+  const { initInfisicalSettings } = await import("./src/lib/infisical-settings");
+  await initInfisicalSettings();
+
   // Fail fast in PRODUCTION if ENCRYPTION_KEY is missing/malformed — a trading app must never
   // silently mint a per-process ephemeral encryption key (stored credentials would become
   // unreadable after every restart). No effect in dev/test (a deterministic warning fires there
