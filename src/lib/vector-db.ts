@@ -30,7 +30,7 @@ import { resolveSourceBool } from "./source-settings";
 import { serverKnobBool } from "./server-knobs";
 import { expandPostRerankParentContext } from "./rag/parent-context";
 import { fuseHybrid, rrfFuse } from "./rag/hybrid";
-import { searchCorpusWideLexicalCandidates, type CorpusWideLexicalCandidate } from "./rag/corpus-wide-lexical";
+import { searchCorpusWideLexicalCandidatesOffLoop, type CorpusWideLexicalCandidate } from "./rag/corpus-wide-lexical";
 import { fuseDenseAndLexicalRecall, hasLexicalRecall } from "./rag/recall-fusion";
 import { adaptiveRerankEnabled, planRerank, resolveRerankRoute, type RagRerankProvider } from "./rag/rerank-policy";
 import { RetrievalStageTrace, type RetrievalTraceSnapshot } from "./rag/retrieval-stage-telemetry";
@@ -8179,7 +8179,7 @@ export async function retrieveContextDetailed(
       });
       let lexicalCandidates: CorpusWideLexicalCandidate[] = [];
       try {
-        lexicalCandidates = searchCorpusWideLexicalCandidates({
+        lexicalCandidates = (await searchCorpusWideLexicalCandidatesOffLoop({
           symbol,
           query,
           limit: Math.min(baseFetchK, 100),
@@ -8192,7 +8192,7 @@ export async function retrieveContextDetailed(
           ...(options?.section ? { section: options.section } : {}),
           strictUndated: strictAsOf,
           ...(options?.asOf ? { asOf: options.asOf } : {})
-        }).filter((candidate) => lexicalCandidateMatchesOptions(candidate, options));
+        })).filter((candidate) => lexicalCandidateMatchesOptions(candidate, options));
         endLexical?.({ candidatesOut: lexicalCandidates.length });
       } catch (error) {
         corpusWideLexicalFailed = true;
