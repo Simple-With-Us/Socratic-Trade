@@ -115,7 +115,7 @@ import { fractionalKellySuggestion } from "./kelly";
 import { resolveCongressGateMultiplier } from "./congress-score-gate";
 import type { ThesisStat, ThesisRegimeStat, SkippedCandidateReturn } from "./performance";
 import { buildSpyReturnToNowMap } from "./backtest";
-import type { SituationCandidate } from "./experience-memory";
+import type { ExperienceRetrievalResult, SituationCandidate } from "./experience-memory";
 import { allowedSymbolsForPolicy, applyOpeningOrderHeadroom, betaScaledStopPct, estimateNotional, evaluateTradeProposal, hasFractionalQuantity, iraWashSaleMinLossUsd, isIraTaxRegime } from "./policy";
 import { currentMarketSession } from "./market-hours";
 import { sessionPhrasingReceipt } from "./proposal-phase-guard";
@@ -240,6 +240,7 @@ import { isTradingDay } from "./market-calendar";
 import { isIdempotencyConflictHttpError } from "./placement-outcome";
 import { reconcilePendingFills, flagStalePlacingIntents, reconcilePlacementError, LiveApprovalConfirmation, LiveApprovalConfirmationError, coerceProtectiveExitToMarket } from "./strategy-execution";
 import { runSafetyMaintenance, withDeadline } from "./safety-maintenance";
+import { STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE, withStrategyRagRetrievalDeadline } from "./rag-retrieval-deadline";
 import { shouldSkipNegativeExpectancy, applyDeterministicSizing, isRiskAddingOpening, applyRedTeamHalfSize, applyEarningsBlackoutTag, applyCorrelationClusterGate, applyRiskReceipts, shouldEscalateDecision, allowedProposalSides, deterministicBearFilter, mapWithConcurrency } from "./strategy-risk";
 import { deriveVenueContract } from "./venue-contract";
 
@@ -1562,41 +1563,55 @@ export async function runStrategyOnce(
                   ragRetrievalStatusRows.push({ symbol: normalizeSymbol(sym), status });
                 }
               };
-              let chunks;
               const { proposerDossierEnabled, assembleProposerDossier } = await import("./rag/proposer-dossier");
-              if (proposerDossierEnabled()) {
-                const dossier = await assembleProposerDossier({
-                  symbol: sym,
-                  depth: isDeep ? "deep" : "scout",
-                  query,
-                  userId,
-                  limit,
-                  retrieveOptions,
-                  retrieve: retrieveContextDetailed
-                });
-                chunks = dossier.chunks;
-                if (dossier.coverage.missing.length > 0 || dossier.coverage.hydrateMisses.length > 0) {
-                  const reason = [
-                    dossier.coverage.missing.length > 0
-                      ? `coverage_missing:${dossier.coverage.missing.join(",")}`
-                      : "",
-                    dossier.coverage.hydrateMisses.length > 0
-                      ? `hydrate_miss:${dossier.coverage.hydrateMisses.slice(0, 4).join(",")}`
-                      : ""
-                  ]
-                    .filter(Boolean)
-                    .join(";");
-                  if (!ragRetrievalStatusRows.some((row) => row.symbol === normalizeSymbol(sym))) {
-                    ragRetrievalStatusRows.push({
-                      symbol: normalizeSymbol(sym),
-                      status: chunks.length > 0 ? "ok" : "no_memory",
-                      reason
-                    });
+              // Issue #2961: a hung embed or vector query must not stall the trading loop.
+              // Deadline aborts the signal and this symbol contributes no chunks. The run
+              // continues; the account is not halted.
+              let chunks = await withStrategyRagRetrievalDeadline(async (signal) => {
+                const optionsWithSignal = { ...retrieveOptions, signal };
+                if (proposerDossierEnabled()) {
+                  const dossier = await assembleProposerDossier({
+                    symbol: sym,
+                    depth: isDeep ? "deep" : "scout",
+                    query,
+                    userId,
+                    limit,
+                    retrieveOptions: optionsWithSignal,
+                    retrieve: retrieveContextDetailed
+                  });
+                  if (dossier.coverage.missing.length > 0 || dossier.coverage.hydrateMisses.length > 0) {
+                    const reason = [
+                      dossier.coverage.missing.length > 0
+                        ? `coverage_missing:${dossier.coverage.missing.join(",")}`
+                        : "",
+                      dossier.coverage.hydrateMisses.length > 0
+                        ? `hydrate_miss:${dossier.coverage.hydrateMisses.slice(0, 4).join(",")}`
+                        : ""
+                    ]
+                      .filter(Boolean)
+                      .join(";");
+                    if (!ragRetrievalStatusRows.some((row) => row.symbol === normalizeSymbol(sym))) {
+                      ragRetrievalStatusRows.push({
+                        symbol: normalizeSymbol(sym),
+                        status: dossier.chunks.length > 0 ? "ok" : "no_memory",
+                        reason
+                      });
+                    }
                   }
+                  return dossier.chunks;
                 }
-              } else {
-                chunks = await retrieveContextDetailed(query, sym, limit, userId, retrieveOptions);
-              }
+                return retrieveContextDetailed(query, sym, limit, userId, optionsWithSignal);
+              }, () => {
+                console.warn(`[Strategy] ${STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE} for ${sym}; continuing without those chunks.`);
+                if (!ragRetrievalStatusRows.some((row) => row.symbol === normalizeSymbol(sym))) {
+                  ragRetrievalStatusRows.push({
+                    symbol: normalizeSymbol(sym),
+                    status: "lookup_failed",
+                    reason: STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE
+                  });
+                }
+                return [];
+              });
 
               // P1-3 (2026-09-27): apply the learned usefulness weighting to the FILINGS path too.
               // Until now the only caller was experience-memory.ts, so the per-doc-type statistics —
@@ -1961,14 +1976,31 @@ export async function runStrategyOnce(
               : { symbol: heldSym, sector: marketScan.sectorBySymbol[heldSym], dominantFactor: undefined, evidence: undefined, held: true }
           );
         }
-        const episodic = await retrieveDecisionExperiences({
-          userId,
-          runId,
-          regime: regimeForSketch,
-          candidates: situationCandidates,
-          connectedAccountId: policy.connectedAccountId,
-          asOf: runAsOf
-        });
+        const episodic = await withStrategyRagRetrievalDeadline<ExperienceRetrievalResult>(
+          (signal) => retrieveDecisionExperiences({
+            userId,
+            runId,
+            regime: regimeForSketch,
+            candidates: situationCandidates,
+            connectedAccountId: policy.connectedAccountId,
+            asOf: runAsOf,
+            signal
+          }),
+          () => {
+            console.warn(
+              "[Strategy] Skipping episodic decision memory, retrieval unavailable:",
+              STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE
+            );
+            return {
+              analogChunks: [],
+              coachingChunks: [],
+              injected: [],
+              asOf: runAsOf,
+              query: "",
+              status: "lookup_failed"
+            } satisfies ExperienceRetrievalResult;
+          }
+        );
         lockGuard.assertOwned();
         experienceAnalogs = episodic.analogsBlock ?? "";
         ownerCoaching = episodic.coachingBlock ?? "";
