@@ -238,4 +238,12 @@ describe("required contexts are not renamed out from under the ruleset", () => {
     expect(auto).toMatch(/^  disable-on-hold:\s*$/m);
     expect(auto).toContain("do-not-automerge");
   });
+
+  it("auto-merge skips CODEOWNERS trading paths so money-path PRs need a human merge", () => {
+    const auto = workflow("auto-merge-prs.yml");
+    expect(auto).toMatch(/^  classify-protected:\s*$/m);
+    expect(auto).toMatch(/^  disable-on-protected:\s*$/m);
+    expect(auto).toContain("pr-touches-codeowners-paths.sh");
+    expect(auto).toMatch(/touches_protected != 'true'/);
+  });
 });

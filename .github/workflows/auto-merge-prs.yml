@@ -1,8 +1,10 @@
 name: Auto-merge PRs
 
-# Enable GitHub auto-merge on every non-draft, same-repo PR so green CI
-# lands without a human click (owner fleet policy: always auto-merge).
-# Hold label: `do-not-automerge` skips arming and disables any already-armed merge.
+# Arm GitHub auto-merge on non-draft, same-repo PRs that do NOT touch
+# CODEOWNERS trading-execution paths (.github/CODEOWNERS).  Live-money diffs
+# require a human merge (owner review gate; board bdc2b662 / 318bfe710b794c28).
+# Hold labels: `do-not-automerge` or `needs-human-merge` skip arming and disable
+# any already-armed merge.
 #
 # ---------------------------------------------------------------------------
 # WHY THIS WORKFLOW REFUSES TO ARM WITHOUT AN ELEVATED TOKEN (2026-08-13)
@@ -43,16 +45,42 @@ on:
     types: [opened, synchronize, reopened, labeled, ready_for_review, unlabeled]
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 
 jobs:
+  classify-protected:
+    runs-on: ubuntu-latest
+    if: >
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    outputs:
+      touches_protected: ${{ steps.check.outputs.touches_protected }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect CODEOWNERS trading paths in PR diff
+        id: check
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if bash scripts/pr-touches-codeowners-paths.sh "$BASE" "$HEAD"; then
+            echo "touches_protected=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::PR touches CODEOWNERS trading-execution paths - auto-merge will not be armed (human merge required)"
+          else
+            echo "touches_protected=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # When the hold label is present (including mid-flight labeled events),
   # cancel any already-armed auto-merge so production cannot land against intent.
   disable-on-hold:
     runs-on: ubuntu-latest
     if: >
-      contains(github.event.pull_request.labels.*.name, 'do-not-automerge')
+      contains(github.event.pull_request.labels.*.name, 'do-not-automerge') ||
+      contains(github.event.pull_request.labels.*.name, 'needs-human-merge')
     steps:
       - name: Disable auto-merge (hold label)
         env:
@@ -66,12 +94,33 @@ jobs:
             exit 0
           }
 
+  disable-on-protected:
+    runs-on: ubuntu-latest
+    needs: classify-protected
+    if: >
+      needs.classify-protected.outputs.touches_protected == 'true'
+    steps:
+      - name: Disable auto-merge (CODEOWNERS paths)
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN || secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          echo "PR touches CODEOWNERS trading paths; disabling auto-merge for $PR_URL"
+          gh pr merge --disable-auto "$PR_URL" || {
+            echo "disable-auto returned nonzero (already off or not armed); continuing"
+            exit 0
+          }
+
   auto-merge:
     runs-on: ubuntu-latest
+    needs: classify-protected
     if: >
       github.event.pull_request.draft == false &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      !contains(github.event.pull_request.labels.*.name, 'do-not-automerge')
+      !contains(github.event.pull_request.labels.*.name, 'do-not-automerge') &&
+      !contains(github.event.pull_request.labels.*.name, 'needs-human-merge') &&
+      needs.classify-protected.outputs.touches_protected != 'true'
     steps:
       # Fail-safe, not fail-open: without an elevated token this workflow would
       # arm a merge that GitHub attributes to github-actions[bot], and that

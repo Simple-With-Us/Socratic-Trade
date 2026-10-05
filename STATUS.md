@@ -89,6 +89,13 @@
 **Verification.**  `bash -n` on three scripts.
 
 **Next.**  Push; reply on Kody threads; do not merge.
+## 2026-10-05 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, branch `cursor/automerge-money-path-gate-2ac4`)
+
+**What.**  `auto-merge-prs.yml` no longer arms merge when the PR diff touches any `.github/CODEOWNERS` trading-execution path; adds `disable-on-protected` and treats `needs-human-merge` like `do-not-automerge`.  Safe non-money PRs still auto-arm when `GH_PAT` / `SHEPHERD_TOKEN` is set.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-gate.test.ts` 13/13; `npm run build` clean.  Full `npm test` on this VM reported 11 pre-existing failures in unrelated files (not touched by this PR).
+
+**Next.**  Push, open PR READY, wait for `verify`.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
