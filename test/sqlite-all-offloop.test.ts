@@ -418,6 +418,45 @@ describe("sqlite off-loop timeout and abort", () => {
       setSqliteOffLoopStartedHookForTesting(null);
     }
   });
+
+  it("skips an aborted queued statement and lets the one ahead finish", async () => {
+    await resetSqliteAllOffLoopForTesting();
+    const iterations = iterationsTakingAtLeast(250);
+    let startedCount = 0;
+    const bothStarted = new Promise<void>((resolve) => {
+      setSqliteOffLoopStartedHookForTesting(() => {
+        startedCount += 1;
+        if (startedCount >= SQLITE_OFF_LOOP_POOL_SIZE) resolve();
+      });
+    });
+    const blockers = Array.from({ length: SQLITE_OFF_LOOP_POOL_SIZE }, () =>
+      sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema, { timeoutMs: 5_000 })
+    );
+    try {
+      await bothStarted;
+      const controller = new AbortController();
+      // Posted synchronously onto a busy slot (both workers are inside .all()),
+      // then aborted before that message is dequeued. `started` is posted only
+      // after the cancel check and immediately before .all(), so a missing
+      // notice means the statement never ran.
+      const victim = sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema, {
+        signal: controller.signal,
+        timeoutMs: 5_000
+      });
+      const victimSettled = expect(victim).rejects.toThrow("queued scan aborted");
+      controller.abort(new Error("queued scan aborted"));
+      await victimSettled;
+
+      const rows = await Promise.all(blockers);
+      for (const row of rows) expect(row).toEqual([{ c: iterations }]);
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(startedCount).toBe(SQLITE_OFF_LOOP_POOL_SIZE);
+      expect(activeSqliteOffLoopSlotCountForTesting()).toBe(SQLITE_OFF_LOOP_POOL_SIZE);
+    } finally {
+      setSqliteOffLoopStartedHookForTesting(null);
+    }
+  });
 });
 
 describe("serving retrieval path", () => {

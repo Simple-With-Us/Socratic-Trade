@@ -61,12 +61,24 @@ const WORKER_MMAP_SIZE = 268_435_456;
  * `timeoutMs`.
  *
  * A wedged `.all()` cannot be interrupted in place. When a request that has
- * started is abandoned — this deadline or the caller's AbortSignal — that slot
- * is terminated. Only the started request fails. Requests still queued on it
- * are re-dispatched onto another live instance, or a fresh one when the rest
- * of the pool is busy. The decision uses the slot and `started` flag stored on
- * the waiter, not a `pending` lookup after the waiter has been settled, so
- * abort and this timer can fire in either order.
+ * started is abandoned — this deadline, the caller's AbortSignal, or a queue
+ * ceiling that loses the race with the start notice — that slot is terminated.
+ * Only the started request fails. Requests still queued on it are re-dispatched
+ * onto another live instance, or a fresh one when the rest of the pool is busy.
+ * The decision uses the slot and `started` flag stored on the waiter, not a
+ * `pending` lookup after the waiter has been settled, so abort and this timer
+ * can fire in either order.
+ *
+ * A request that was posted but has not started is cancelled in place. Each
+ * worker is given a SharedArrayBuffer of 1024 int32 slots; the parent stores
+ * the abandoned id at `id % length`, and the worker checks that flag after
+ * validating the message and before posting `started` or calling `.all()`. A
+ * match skips the statement. An index collision stores a different id, the
+ * comparison fails, and the statement runs — safe, because a false cancel is
+ * the outcome we refuse. The worker already inside `.all()` for a different
+ * request is left alone. If SharedArrayBuffer cannot be allocated, the slot is
+ * retired only when it has no started request; otherwise the abandoned message
+ * is left to drain behind that healthy statement.
  *
  * Queued requests are also bounded by the caller's AbortSignal. A caller that
  * omits a signal gets a queue ceiling of `timeoutMs + SQLITE_OFF_LOOP_TIMEOUT_MS`
@@ -77,6 +89,13 @@ const WORKER_MMAP_SIZE = 268_435_456;
  * execution starts.
  */
 export const SQLITE_OFF_LOOP_TIMEOUT_MS = Math.floor(RAG_QUERY_IO_DEADLINE_MS / 2);
+
+/**
+ * Shared cancellation table, one per worker. Indexed by `requestId % length`.
+ * 1024 entries keeps the buffer small (4KB) while making id collisions rare;
+ * a collision only fails to cancel, it never cancels a different live request.
+ */
+const CANCEL_FLAG_COUNT = 1024;
 
 /**
  * Readonly worker threads. Created lazily, up to this many. Each request is
@@ -96,8 +115,9 @@ export type SqliteAllOffLoopOptions = {
    * Reject this waiter on abort, including while it is still queued.
    * Abort of a request that has started executing retires that slot: the
    * statement is still on the worker thread, so only that request fails and
-   * not-yet-started requests queued on the slot are re-dispatched. Abort
-   * before the request has started does not terminate the worker.
+   * not-yet-started requests queued on the slot are re-dispatched. Abort of a
+   * request that was posted but has not started cancels it in place (the worker
+   * skips the statement) and does not disturb a query already running there.
    */
   signal?: AbortSignal;
   /** Execution budget armed at worker start. Overrides SQLITE_OFF_LOOP_TIMEOUT_MS. Production callers omit this. */
@@ -230,6 +250,21 @@ function invalidRequest(msg) {
   });
 }
 
+// Parent stores an abandoned request id at id % length before this message is
+// dequeued. Equal ids mean skip .all(). A colliding later id fails the compare
+// and the statement runs, which must stay the safe direction.
+function requestCancelled(id) {
+  const flags = workerData.cancelFlags;
+  if (!flags || typeof id !== "number" || !Number.isSafeInteger(id)) return false;
+  try {
+    const index = id % flags.length;
+    if (index < 0 || index >= flags.length) return false;
+    return Atomics.load(flags, index) === id;
+  } catch {
+    return false;
+  }
+}
+
 parentPort.on("message", (msg) => {
   let request = null;
   try {
@@ -242,11 +277,21 @@ parentPort.on("message", (msg) => {
     invalidRequest(msg);
     return;
   }
+  if (requestCancelled(request.id)) {
+    parentPort.postMessage({
+      id: request.id,
+      ok: false,
+      error: { message: "sqlite off-loop query cancelled", code: "CANCELLED" }
+    });
+    return;
+  }
   try {
     const database = openDb(request.dbPath);
     const statement = database.prepare(request.sql);
     // After this message the statement is on the worker thread. The parent arms the
     // execution timeout here so earlier queue time is not charged against it.
+    // Cancellation is checked above, before this post, so a skipped statement never
+    // reports started and never enters .all().
     parentPort.postMessage({ id: request.id, started: true });
     const rows = statement.all(...request.params);
     parentPort.postMessage({ id: request.id, ok: true, rows });
@@ -268,6 +313,14 @@ type PoolSlot = {
   worker: Worker | null;
   starting: Promise<Worker> | null;
   disposed: boolean;
+  /** Shared with this slot's worker. Null when SharedArrayBuffer could not be allocated. */
+  cancelFlags: Int32Array | null;
+  /**
+   * Posted ids abandoned before the parent observed `started`. A later start
+   * notice means the cancel flag lost the race and the statement is running,
+   * so the slot is retired. Terminal replies drop the id without retiring.
+   */
+  abandonedBeforeStart: Set<number>;
 };
 
 type Pending = {
@@ -277,6 +330,8 @@ type Pending = {
   slot: PoolSlot;
   /** True once this instance has posted `{ id, started: true }` for the request. */
   started: boolean;
+  /** True once postMessage has queued this attempt on `slot`'s worker. */
+  posted: boolean;
   /**
    * True once the waiter left `pending`. Execution-timer callbacks read this
    * instead of looking the id up again: settle clears the timer, but a callback
@@ -391,18 +446,75 @@ function abandonedWorkerError(): Error {
   return new Error("sqlite off-loop worker terminated after an abandoned query");
 }
 
+function createCancelFlags(): Int32Array | null {
+  try {
+    if (typeof SharedArrayBuffer !== "function" || typeof Atomics === "undefined") return null;
+    const buffer = new SharedArrayBuffer(CANCEL_FLAG_COUNT * Int32Array.BYTES_PER_ELEMENT);
+    const flags = new Int32Array(buffer);
+    // Atomics rejects a non-shared buffer. Prove the allocation before handing it to a worker.
+    Atomics.store(flags, 0, 0);
+    return flags;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Record `id` so the worker skips that queued message. Returns false when there
+ * is no shared table (or the id cannot be stored exactly in an int32); the
+ * caller then falls back to retiring an idle slot or letting the message drain.
+ * A wrapped or colliding store would not compare equal, so the statement would
+ * run — do not report success in that case.
+ */
+function markCancelled(slot: PoolSlot, id: number): boolean {
+  const flags = slot.cancelFlags;
+  if (!flags) return false;
+  if (!Number.isSafeInteger(id) || id <= 0 || id > 0x7fffffff) return false;
+  Atomics.store(flags, id % flags.length, id);
+  return true;
+}
+
+/**
+ * The message is already on the worker port and `.all()` has not been observed.
+ * Cancel it in place when a shared flag exists. A later `started` for this id
+ * means the flag lost the race: the statement is running, and the slot is
+ * retired from the message handler. Without a shared flag, retire the slot
+ * only when nothing on it has started; a healthy in-flight statement is left
+ * alone and this message drains behind it.
+ */
+function abandonPostedRequest(waiter: Pending, slot: PoolSlot): void {
+  if (markCancelled(slot, waiter.id)) {
+    slot.abandonedBeforeStart.add(waiter.id);
+    return;
+  }
+  let slotHasStarted = false;
+  for (const other of pending.values()) {
+    if (other.slot === slot && other.started) {
+      slotHasStarted = true;
+      break;
+    }
+  }
+  if (!slotHasStarted) {
+    killSlot(slot, () => abandonedWorkerError(), true);
+  }
+}
+
 function settleReject(waiter: Pending, err: Error): void {
   if (pending.get(waiter.id) !== waiter) return;
   const started = waiter.started;
+  const posted = waiter.posted;
   const slot = waiter.slot;
   dropPending(waiter.id);
-  // Retire before reject so a synchronous rejection handler observes the pool
-  // after the wedged slot is gone. `slot.disposed` is already set when killSlot
-  // itself is settling the rest of the slot, so this does not terminate twice.
-  // Slot and `started` live on the waiter: do not look the id up in `pending`
-  // after this point. Abort and the execution timer can fire in either order.
-  if (started && !slot.disposed) {
-    killSlot(slot, () => abandonedWorkerError(), true);
+  // Retire or cancel before reject so a synchronous rejection handler observes
+  // the pool after the abandoned statement's slot has been dealt with.
+  // `slot.disposed` is already set when killSlot itself is settling the rest
+  // of the slot, so this does not terminate twice.
+  if (!slot.disposed) {
+    if (started) {
+      killSlot(slot, () => abandonedWorkerError(), true);
+    } else if (posted) {
+      abandonPostedRequest(waiter, slot);
+    }
   }
   waiter.reject(err);
 }
@@ -430,7 +542,13 @@ function selectSlot(): PoolSlot {
 }
 
 function createSlot(): PoolSlot {
-  const slot: PoolSlot = { worker: null, starting: null, disposed: false };
+  const slot: PoolSlot = {
+    worker: null,
+    starting: null,
+    disposed: false,
+    cancelFlags: null,
+    abandonedBeforeStart: new Set()
+  };
   slots.push(slot);
   slot.starting = startSlot(slot);
   return slot;
@@ -444,9 +562,11 @@ async function startSlot(slot: PoolSlot): Promise<Worker> {
       resolvePackageEntry("zod")
     ]);
     if (slot.disposed) throw new Error("sqlite off-loop worker replaced");
+    const cancelFlags = createCancelFlags();
+    slot.cancelFlags = cancelFlags;
     const instance = new WorkerCtor(WORKER_SOURCE, {
       eval: true,
-      workerData: { betterSqlitePath, zodPath }
+      workerData: { betterSqlitePath, zodPath, cancelFlags }
     });
     if (slot.disposed) {
       instance.removeAllListeners();
@@ -494,6 +614,7 @@ function postToSlot(waiter: Pending): void {
         sql: waiter.sql,
         params: [...waiter.params]
       });
+      waiter.posted = true;
     } catch (err) {
       settleReject(waiter, err instanceof Error ? err : new Error(String(err)));
     }
@@ -533,6 +654,9 @@ function killSlot(
   const movable: Pending[] = [];
   for (const waiter of pending.values()) {
     if (waiter.slot !== slot) continue;
+    // The port message cannot be pulled. Ask the dying worker to skip anything
+    // it has not started so a slow terminate does not run SQL we are moving.
+    if (!waiter.started && waiter.posted) markCancelled(slot, waiter.id);
     if (redispatchQueued && !waiter.started && waiter.allowRedispatch && waiter.placements < SQLITE_OFF_LOOP_POOL_SIZE) {
       movable.push(waiter);
     } else {
@@ -541,6 +665,9 @@ function killSlot(
   }
   for (const waiter of doomed) settleReject(waiter, errorFor(waiter));
   for (const waiter of movable) {
+    // The new attempt posts to a different flag table. The old id was marked
+    // cancelled only on the worker we are retiring.
+    waiter.posted = false;
     waiter.slot = selectSlot();
     postToSlot(waiter);
   }
@@ -608,9 +735,23 @@ function handleWorkerMessage(slot: PoolSlot, instance: Worker, msg: unknown): vo
     return;
   }
   if ("started" in parsed.data) {
+    // The cancel flag is checked before the worker posts this. Seeing it for an
+    // id we already abandoned means `.all()` is now running; retire the slot.
+    // The request ahead of it has already finished — the worker is serial.
+    // Notify the test hook before retiring so a start that escaped cancellation
+    // is observable as a statement that began.
+    if (slot.abandonedBeforeStart.delete(parsed.data.id)) {
+      onQueryStartedForTesting?.(parsed.data.id);
+      killSlot(slot, () => abandonedWorkerError(), true);
+      return;
+    }
     noteStarted(slot, instance, parsed.data.id);
     return;
   }
+  // Replies for unknown ids (including a cancelled message whose waiter already
+  // settled) are ignored. Drop the abandon mark so a stale entry cannot retire
+  // the slot if a later start notice is ever delivered for the same id.
+  slot.abandonedBeforeStart.delete(parsed.data.id);
   if (parsed.data.id === -1) return;
   const waiter = takeWaiter(slot, instance, parsed.data.id);
   if (!waiter) return;
@@ -665,6 +806,7 @@ export async function sqliteAllOffLoop<T>(
       reject,
       slot,
       started: false,
+      posted: false,
       settled: false,
       placements: 0,
       allowRedispatch: true,
@@ -763,6 +905,7 @@ export async function primeSqliteOffLoopWaiterForTesting(): Promise<{ id: number
       reject,
       slot,
       started: false,
+      posted: false,
       settled: false,
       placements: 1,
       allowRedispatch: false,
