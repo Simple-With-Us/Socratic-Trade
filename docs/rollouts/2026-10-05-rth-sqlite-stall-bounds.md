@@ -30,13 +30,13 @@ Source maps from a webpack production build of the same SHA the profiles were ta
 
 - One PR covers both mapped hot paths.  They are the same class (a serving-thread full read) and the 82s snapshot is the longest stall.  The diff is query and walk bounds, not a worker-thread framework.
 - A filing-CPU worker draft (`parseFilingHtml` / `chunkDocument` off loop) was dropped.  `runTaskStage` is about 8% of profile 3, not the 58-66% function.  Child total time cannot exceed the parent frame.
-- #4164 owns `searchCorpusWideLexicalCandidates`.  Those frames were not the mapped leaders.
+- Corpus-wide lexical FTS off the serving loop stays a separate effort.  Those frames were not the mapped leaders.
 - `listProviderUsageOutboxRows` and `usage-monitor-replay.ts` (chunk 8358, about 8-22%) stay.  They are the next profile if stalls remain after this lands.
 - `rankDemandFirstSymbols` still reads `data/rag-universe-manifest.json` synchronously when the snapshot does not pass a universe.  That was not the regex frame or the 58% function.
 - Local benches did not reproduce a 45s prune.  `INDEXED BY` makes a planner SCAN of `task_journal` impossible for this statement.  If the index is missing the existing catch returns 0 and retention stops for that call, which is the same swallow-errors behavior as before.  The index is created in the same migration as the table (v62).
 - No schema migration and no boot backfill of a stored `content_len`.  Either would scan blobs at migrate time.
 - Ops snapshot `artifactFiles` is 0 until the first yielding walk finishes, then the cached count for 10 minutes.  Diagnostic GETs no longer `readdirSync` the tree.
-- Effort tracking requires the same row and lifecycle state in both the branch-neutral live board and the tracked repo mirror (`docs/EFFORT-LOG.md`).  Phase docs are unchanged because this is not a phase-design change.  Cloud agent seats update the mirror only; the owner copies the row to the live board and assigns the board reservation id (see issue #4239).
+- Effort tracking requires the same row and lifecycle state in both the live board and the tracked mirror.  Phase docs are unchanged because this is not a phase-design change.
 
 ## Verification State
 
@@ -60,19 +60,9 @@ Targeted proof in `test/event-loop-stall-hot-path.test.ts`: scale a fixture unti
 
 ## Next Steps & Blockers
 
-- Kody review (2026-10-05): public docs sanitized; tracking issue #4239 opened; live effort board reservation **deferred** to Jay (cloud seat cannot write the branch-neutral live board or mint board ids).  Stall-path CI flake on fast runners fixed by growing regression fixtures until the unindexed baseline crosses 100ms.
-- Owner: paste the `docs/EFFORT-LOG.md` row into the live board and add `board \`<id>\`` when reserved.
+- Kody review (2026-10-05): public effort mirror sanitized; live board sync and board reservation id pending owner.  Stall-path CI flake on fast runners fixed by growing regression fixtures until the unindexed baseline crosses 100ms.
 - If production still stalls inside journal prune after deploy, re-map the new profile.  Do not assume the old OR scan came back.
 - Do not hammer production ops snapshot during regular hours to "check" this; that route was on the hot path.
-
-## Kody thread dispositions (2026-10-05)
-
-| Thread | Fix / defer |
-|--------|-------------|
-| Both effort ledgers | **defer (owner):** mirror updated; identical row text in `docs/EFFORT-LOG.md`; Jay must write the live board — cloud seat has no access. |
-| Board + issue before work record | **fix:** issue #4239; single canonical row references it.  **defer (owner):** board id not minted on cloud. |
-| Remove ops paths from public docs | **fix:** effort row, STATUS, PLAN sanitized. |
-| No absolute paths / host inventory in rollout | **fix:** generic effort-tracking statement; removed host-specific inventory from Context. |
 
 ## Zero-Code Findings
 

@@ -11,7 +11,7 @@
 
 **What.**  Production profiling during regular hours named two synchronous paths on the serving thread: scheduler journal pruning and ops snapshot assembly (transcript coverage, artifact directory walk, optional order reads).  Prune uses index-forced range deletes with the existing per-tick row cap.  Snapshot coverage avoids reading every transcript body, caches artifact counts with yielding walks, and yields once before optional order reads.  Filing-CPU worker, usage-monitor replay, and lexical corpus search stay out of scope.
 
-**Docs.**  Handoff rollout note on file.  `PLAN.md` notes no roadmap scope change.  Phase docs unchanged (not a phase-design change).  `docs/EFFORT-LOG.md` carries the canonical in-repo row (issue #4239).  **defer:** branch-neutral live effort board — cloud seat cannot write it; Jay must paste the same row and assign a board id before merge rules treat reservation as complete.
+**Docs.**  Handoff rollout note on file.  `PLAN.md` notes no roadmap scope change.  Phase docs unchanged (not a phase-design change).  This push updates the repo effort mirror only; live effort board sync is pending owner (not available from this cloud seat).
 
 **Left alone.**  Provider usage outbox replay, SEC task-stage parse/chunk, lexical FTS off-loop work, synchronous universe manifest read when the snapshot omits a universe.
 
