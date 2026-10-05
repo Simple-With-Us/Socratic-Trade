@@ -34,12 +34,13 @@ scripts only; **no live deletes**.
 ## Verification State
 
 ```bash
-npm run lint
-npx tsc --noEmit
+npm run lint          # 0 errors, 863 warnings (grandfathered)
+npx tsc --noEmit      # clean
 npm test -- test/r2-trading-live-dead-history-inventory.test.ts test/r2-cold-snapshot-inventory.test.ts
+                      # 9 passed
 ```
 
-Record results below after commands complete.
+Full `npm run build` not run (docs + ops script only; CI verify on PR).
 
 ## Next Steps & Blockers
 
