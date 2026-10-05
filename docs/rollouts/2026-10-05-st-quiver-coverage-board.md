@@ -38,6 +38,10 @@ npm run build
 
 - None for merge; Kody review on PR.
 
+## Rebase (2026-10-05)
+
+Rebased onto `origin/main` (`4a0f1ca0` area); resolved `test/enrichment-coverage.test.ts` conflict by keeping main's `marketCap` coverage test plus this branch's retired Quiver lane test.  Re-ran lint/tsc/targeted tests/build green after rebase.
+
 ## Zero-Code Findings
 
 N/A — code change.
