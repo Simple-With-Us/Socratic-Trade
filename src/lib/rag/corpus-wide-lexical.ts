@@ -6,6 +6,7 @@
  * recall and fuse the two independently-ranked candidate lists. Keeping this read-only adapter
  * separate makes its point-in-time and query-safety contract directly testable.
  */
+import { z } from "zod";
 import { databasePath, getDb } from "../db";
 import { canonicalTicker } from "./chunk";
 import { sqliteAllOffLoop } from "./sqlite-all-offloop";
@@ -65,21 +66,26 @@ export interface CorpusWideLexicalCandidate {
   metadata: Record<string, unknown>;
 }
 
-type LexicalRow = {
-  vector_id: string;
-  content_hash: string;
-  symbol: string;
-  source: string;
-  accession: string;
-  text: string;
-  section: string;
-  ordinal: number | null;
-  accepted_at: string | null;
-  doc_type: string | null;
-  tenant_scope: string;
-  user_id: string | null;
-  lexical_score: number;
-};
+// SELECT list of planCorpusWideLexicalQuery. ordinal / accepted_at are nullable in the row
+// contract; doc_type (sec_filings.form) and user_id (owner commit) come from LEFT JOINs and
+// are null when the join misses. lexical_score is FTS5 bm25 — a float, often negative.
+const LexicalRowSchema = z.object({
+  vector_id: z.string(),
+  content_hash: z.string(),
+  symbol: z.string(),
+  source: z.string(),
+  accession: z.string(),
+  text: z.string(),
+  section: z.string(),
+  ordinal: z.number().nullable(),
+  accepted_at: z.string().nullable(),
+  doc_type: z.string().nullable(),
+  tenant_scope: z.string(),
+  user_id: z.string().nullable(),
+  lexical_score: z.number()
+});
+
+type LexicalRow = z.infer<typeof LexicalRowSchema>;
 
 function normalizedLimit(value: number | undefined): number {
   if (!Number.isFinite(value)) return 20;
@@ -416,6 +422,6 @@ export async function searchCorpusWideLexicalCandidatesOffLoop(
 ): Promise<CorpusWideLexicalCandidate[]> {
   const plan = planCorpusWideLexicalQuery(options);
   if (!plan) return [];
-  const rows = await sqliteAllOffLoop<LexicalRow>(plan.sql, plan.params, databasePath());
+  const rows = await sqliteAllOffLoop(plan.sql, plan.params, databasePath(), LexicalRowSchema);
   return mapLexicalRows(rows, plan.limit);
 }
