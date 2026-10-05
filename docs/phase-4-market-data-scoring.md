@@ -296,3 +296,13 @@ not a broken cascade:
 - Approval cards (website + iOS) stamp user-facing **Delayed Quote**.
 
 See `docs/rollouts/2026-08-18-delayed-yahoo-fallback-stamp.md`.
+
+## Quote observation time (2026-10-05, board `009b99f0de754dff`)
+
+Three stamps that were still fabricating "now" or using the ask as the price:
+
+- Yahoo quote-only rows (`toQuoteOnlyMarketQuote`) keep `quote.asOf` (`regularMarketTime`).  A missing observation time stays undefined.
+- ROIC company-profile prices have no observation timestamp (`parseRoicProfile`).  The cascade leaves `asOf` unset so `isQuoteFresh` returns false.  The end-of-cascade fallback may still return the price.
+- Alpaca `getEquityQuotes` sets `price` to `(bid + ask) / 2` when both sides are numbers, otherwise `ask ?? bid`.
+
+`takeScalar`'s wall-clock `cascadeFetchedAt` and the field-store `nowIso` fallback are deferred.  See `docs/rollouts/2026-10-05-quote-asof-anchors.md`.

@@ -18,6 +18,15 @@
 **Verification.**  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  `npm run build` exit 0.  `npm test` mostly green on this seat; stall-path regression tests pass.  Authoritative gate is CI `verify` on push.
 
 **Next.**  Land post-merge doc sync if needed.  Extra-ship no.
+## 2026-10-05 GROK — Quote asOf anchors (board `009b99f0de754dff`, branch `cursor/quote-asof-anchors-7726`)
+
+**What.**  Three remaining quote-provenance anchors that partial PR #3309 (`ag/quote-asof`) left on `main`.  `toQuoteOnlyMarketQuote` keeps Yahoo `quote.asOf` instead of stamping `new Date()`.  The ROIC profile block leaves `asOf` undefined when the profile has no price timestamp, so `isQuoteFresh` treats it as stale.  Alpaca `getEquityQuotes` uses the mid `(bid+ask)/2` when both sides are numbers, otherwise `ask ?? bid`.
+
+**Deferred.**  `data-providers.ts` `takeScalar` (`cascadeFetchedAt = new Date()` for fields that lack their own asOf) and `syncQuotesToFieldStore`'s `nowIso` fallback.  Both are the same class of stamp and are not trivial.  UI age chips on watchlist / symbol drilldown stay as they are.
+
+**Verification.**  Targeted vitest: `test/quote-only-asof.test.ts`, `test/alpaca-nbbo-mid.test.ts`, `test/quotes-cascade.test.ts`, `test/order-confirmation-status.test.ts` — 4 files, 61 passed.  Full lint / tsc / npm test / build recorded in the rollout after this commit.
+
+**Next.**  Push and open a ready PR.  Extra-ship no.  Do not merge.  Do not Coolify deploy.  Kody threads: fix or leave open with rationale.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
