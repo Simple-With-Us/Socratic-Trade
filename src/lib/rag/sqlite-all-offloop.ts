@@ -8,10 +8,9 @@
  * connection.  WAL readers can proceed without sharing the serving `getDb()` handle.
  */
 import "server-only";
-import { createRequire } from "node:module";
 import type { Worker } from "node:worker_threads";
 
-const nodeRequire = createRequire(import.meta.url);
+// WEBPACK TRAP: reachable from instrumentation.ts via vector-db.ts — no static "node:" imports.
 
 /** Off-loop readers may wait the historical 60s lock budget; the serving thread stays free. */
 const WORKER_BUSY_TIMEOUT_MS = 60_000;
@@ -71,8 +70,10 @@ let workerReady: Promise<Worker> | null = null;
 let nextId = 1;
 const pending = new Map<number, Pending>();
 
-function betterSqlitePath(): string {
+async function betterSqlitePath(): Promise<string> {
   try {
+    const { createRequire } = await import(/* webpackIgnore: true */ "node:module");
+    const nodeRequire = createRequire(import.meta.url);
     return nodeRequire.resolve("better-sqlite3");
   } catch {
     return "better-sqlite3";
@@ -139,10 +140,10 @@ async function getWorker(): Promise<Worker> {
   if (worker) return worker;
   if (workerReady) return workerReady;
   workerReady = (async () => {
-    const { Worker: WorkerCtor } = await import("node:worker_threads");
+    const { Worker: WorkerCtor } = await import(/* webpackIgnore: true */ "node:worker_threads");
     const instance = new WorkerCtor(WORKER_SOURCE, {
       eval: true,
-      workerData: { betterSqlitePath: betterSqlitePath() }
+      workerData: { betterSqlitePath: await betterSqlitePath() }
     });
     attachWorker(instance);
     worker = instance;
