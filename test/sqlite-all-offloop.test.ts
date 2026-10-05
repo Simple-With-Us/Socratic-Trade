@@ -11,9 +11,11 @@ import {
   postSqliteOffLoopRawForTesting,
   primeSqliteOffLoopWaiterForTesting,
   resetSqliteAllOffLoopForTesting,
+  SQLITE_OFF_LOOP_POOL_SIZE,
   SqliteRowSchema,
   SqliteValueSchema,
   SqliteWorkerResponseSchema,
+  SqliteWorkerStartedSchema,
   sqliteAllOffLoop
 } from "../src/lib/rag/sqlite-all-offloop";
 
@@ -23,6 +25,34 @@ const COUNT_SQL =
   "WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM r WHERE i < ?) SELECT COUNT(*) AS c FROM r";
 
 let dbPath = "";
+
+/** Sync recursive-count size that runs at least `targetMs`, cached per target. */
+const durationCache = new Map<number, number>();
+
+function iterationsTakingAtLeast(targetMs: number): number {
+  const cached = durationCache.get(targetMs);
+  if (cached != null) return cached;
+  const syncDb = new Database(dbPath, { readonly: true, fileMustExist: true });
+  try {
+    const count = syncDb.prepare(COUNT_SQL);
+    let iterations = 100_000;
+    let syncMs = 0;
+    for (;;) {
+      const started = Date.now();
+      count.get(iterations);
+      syncMs = Date.now() - started;
+      if (syncMs >= targetMs || iterations >= 8_000_000) break;
+      iterations *= 2;
+    }
+    if (syncMs < targetMs) {
+      throw new Error(`sqlite statement did not reach ${targetMs}ms (last ${syncMs}ms at ${iterations})`);
+    }
+    durationCache.set(targetMs, iterations);
+    return iterations;
+  } finally {
+    syncDb.close();
+  }
+}
 
 beforeAll(() => {
   dbPath = join(tmpdir(), `agentic-sqlite-all-offloop-${randomUUID()}.db`);
@@ -114,6 +144,10 @@ describe("sqlite off-loop validation", () => {
       error: { message: "x", code: "E", extra: 1 }
     }).success).toBe(false);
     expect(SqliteWorkerResponseSchema.safeParse({ id: 1.5, ok: true, rows: [] }).success).toBe(false);
+    expect(SqliteWorkerStartedSchema.safeParse({ id: 1, started: true }).success).toBe(true);
+    expect(SqliteWorkerResponseSchema.safeParse({ id: 1, started: true }).success).toBe(true);
+    expect(SqliteWorkerStartedSchema.safeParse({ id: 1, started: true, ok: true }).success).toBe(false);
+    expect(SqliteWorkerResponseSchema.safeParse({ id: 1, started: true, extra: true }).success).toBe(false);
     expect(SqliteValueSchema.safeParse(new Uint8Array([1, 2])).success).toBe(true);
     expect(SqliteValueSchema.safeParse(Buffer.from([1, 2])).success).toBe(true);
     expect(SqliteValueSchema.safeParse(1n).success).toBe(true);
@@ -212,31 +246,117 @@ describe("sqlite off-loop validation", () => {
     await badSettled;
     await otherSettled;
   });
+
+  it("does not settle a waiter on the start notification alone", async () => {
+    const waiter = await primeSqliteOffLoopWaiterForTesting();
+    let settled = false;
+    void waiter.done.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      }
+    );
+    await deliverSqliteOffLoopMessageForTesting({ id: waiter.id, started: true });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await deliverSqliteOffLoopMessageForTesting({ id: waiter.id, ok: true, rows: [{ c: 7 }] });
+    await expect(waiter.done).resolves.toEqual([{ c: 7 }]);
+  });
 });
 
 describe("sqlite off-loop timeout and abort", () => {
-  it("terminates a wedged query so a later query can run on a fresh worker", async () => {
-    const first = sqliteAllOffLoop(COUNT_SQL, [8_000_000], dbPath, CountRowSchema, { timeoutMs: 200 });
-    const second = sqliteAllOffLoop(COUNT_SQL, [8_000_000], dbPath, CountRowSchema, { timeoutMs: 10_000 });
+  it("terminates a wedged query without failing a query on another instance", async () => {
+    expect(SQLITE_OFF_LOOP_POOL_SIZE).toBe(2);
+    const iterations = iterationsTakingAtLeast(300);
+    const first = sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema, { timeoutMs: 80 });
+    const second = sqliteAllOffLoop("SELECT 9 AS c", [], dbPath, CountRowSchema, { timeoutMs: 5_000 });
     const firstSettled = expect(first).rejects.toThrow("sqlite off-loop query timed out");
-    const secondSettled = expect(second).rejects.toThrow("sqlite off-loop worker terminated after query timeout");
+    const secondSettled = expect(second).resolves.toEqual([{ c: 9 }]);
     await firstSettled;
     await secondSettled;
 
-    // Overlaps the dying worker's exit when terminate waits out the native call.
-    const rows = await sqliteAllOffLoop(COUNT_SQL, [8_000_000], dbPath, CountRowSchema, { timeoutMs: 10_000 });
-    expect(rows).toEqual([{ c: 8_000_000 }]);
+    const rows = await sqliteAllOffLoop("SELECT 8 AS c", [], dbPath, CountRowSchema);
+    expect(rows).toEqual([{ c: 8 }]);
+  });
+
+  it("does not time out a queued request for time spent waiting on a slow statement", async () => {
+    const iterations = iterationsTakingAtLeast(300);
+    const blockers = Array.from({ length: SQLITE_OFF_LOOP_POOL_SIZE }, () =>
+      sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema, { timeoutMs: 5_000 })
+    );
+    const blockerDone = Promise.all(blockers);
+    try {
+      const timeoutMs = 40;
+      const startedAt = Date.now();
+      const rows = await sqliteAllOffLoop("SELECT 1 AS c", [], dbPath, CountRowSchema, { timeoutMs });
+      const elapsed = Date.now() - startedAt;
+      expect(rows).toEqual([{ c: 1 }]);
+      // Wall time past the execution budget means the request was queued. The old
+      // postMessage timer would have rejected it; the start-armed timer must not.
+      expect(elapsed).toBeGreaterThan(timeoutMs);
+    } finally {
+      await blockerDone;
+    }
+  });
+
+  it("re-dispatches a queued request when the statement ahead of it times out", async () => {
+    const iterations = iterationsTakingAtLeast(300);
+    const wedgeTimeoutMs = 80;
+    const wedges = Array.from({ length: SQLITE_OFF_LOOP_POOL_SIZE }, () =>
+      sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema, { timeoutMs: wedgeTimeoutMs })
+    );
+    const wedgeDone = Promise.allSettled(wedges);
+    try {
+      const startedAt = Date.now();
+      const rows = await sqliteAllOffLoop("SELECT 6 AS c", [], dbPath, CountRowSchema, { timeoutMs: 5_000 });
+      const elapsed = Date.now() - startedAt;
+      expect(rows).toEqual([{ c: 6 }]);
+      expect(elapsed).toBeGreaterThan(wedgeTimeoutMs / 2);
+    } finally {
+      const results = await wedgeDone;
+      for (const result of results) {
+        expect(result.status).toBe("rejected");
+        if (result.status === "rejected") {
+          expect(String(result.reason instanceof Error ? result.reason.message : result.reason)).toMatch(
+            /sqlite off-loop query timed out/
+          );
+        }
+      }
+    }
+  });
+
+  it("rejects a queued request when its signal aborts", async () => {
+    const iterations = iterationsTakingAtLeast(300);
+    const blockers = Array.from({ length: SQLITE_OFF_LOOP_POOL_SIZE }, () =>
+      sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema, { timeoutMs: 5_000 })
+    );
+    const blockerDone = Promise.all(blockers);
+    const controller = new AbortController();
+    const queued = sqliteAllOffLoop("SELECT 1 AS c", [], dbPath, CountRowSchema, {
+      signal: controller.signal,
+      timeoutMs: 5_000
+    });
+    const queuedSettled = expect(queued).rejects.toThrow("queued lexical aborted");
+    controller.abort(new Error("queued lexical aborted"));
+    try {
+      await queuedSettled;
+    } finally {
+      await blockerDone;
+    }
   });
 
   it("rejects when the caller aborts and a later query still succeeds", async () => {
+    const iterations = iterationsTakingAtLeast(300);
     const controller = new AbortController();
-    const pending = sqliteAllOffLoop(COUNT_SQL, [8_000_000], dbPath, CountRowSchema, {
+    const pendingQuery = sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema, {
       signal: controller.signal,
-      timeoutMs: 10_000
+      timeoutMs: 5_000
     });
     await new Promise((resolve) => setTimeout(resolve, 30));
     controller.abort(new Error("lexical aborted"));
-    await expect(pending).rejects.toThrow("lexical aborted");
+    await expect(pendingQuery).rejects.toThrow("lexical aborted");
     await resetSqliteAllOffLoopForTesting();
     const rows = await sqliteAllOffLoop("SELECT 1 AS c", [], dbPath, CountRowSchema);
     expect(rows).toEqual([{ c: 1 }]);
