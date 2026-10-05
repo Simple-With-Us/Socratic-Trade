@@ -30,6 +30,7 @@ import {
   qdrantProviderAuthority,
   qdrantSetPayload,
   qdrantUpsertPoints,
+  VectorInventoryOverCeilingError,
   vectorWriteBackend
 } from "../src/lib/vector-store/qdrant-write";
 import { qdrantConfigured } from "../src/lib/vector-store/qdrant-read";
@@ -143,14 +144,18 @@ describe("payload pc_id/ns", () => {
   });
 });
 
-function stubFetch(response: { ok?: boolean; status?: number; json?: unknown; text?: string }) {
+function stubFetch(response: { ok?: boolean; status?: number; json?: unknown; text?: string; inventoryCount?: number }) {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit) => {
     calls.push({ url: String(url), init: init ?? {} });
+    const urlStr = String(url);
+    const json = urlStr.includes("/points/count")
+      ? { result: { count: response.inventoryCount ?? 0 } }
+      : (response.json ?? { result: {} });
     return {
       ok: response.ok ?? true,
       status: response.status ?? 200,
-      json: async () => response.json ?? { result: {} },
+      json: async () => json,
       text: async () => response.text ?? ""
     } as unknown as Response;
   });
@@ -247,20 +252,25 @@ describe("qdrant inventory / payload / collection info", () => {
       }
     });
     const rows = await qdrantInventoryByMetadata({ namespace: "socratic-abc", prefix: "occ:v3:" });
-    expect(calls[0].url).toContain("/points/scroll");
+    expect(calls.some((call) => call.url.includes("/points/count"))).toBe(true);
+    expect(calls.some((call) => call.url.includes("/points/scroll"))).toBe(true);
     expect(rows).toEqual([{ id: "occ:v3:abc", metadata: { symbol: "AAPL" } }]);
   });
 
   it("aborts a paged inventory before fetching the next page", async () => {
     const controller = new AbortController();
-    const calls = vi.fn(async () => {
+    const calls = vi.fn(async (url: string | URL) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: 2 } }), { status: 200 });
+      }
       controller.abort(new Error("inventory cancelled"));
       return new Response(JSON.stringify({ result: { points: [{ payload: { pc_id: "one" } }], next_page_offset: 1 } }), { status: 200 });
     });
     vi.stubGlobal("fetch", calls);
     await expect(qdrantInventoryByMetadata({ namespace: "socratic-abc", signal: controller.signal }))
       .rejects.toThrow("inventory cancelled");
-    expect(calls).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveBeenCalledTimes(2);
   });
 
   it("does not let a caller signal disable the per-request timeout", async () => {
@@ -278,16 +288,43 @@ describe("qdrant inventory / payload / collection info", () => {
     }
   });
 
-  it("keeps the Qdrant inventory at a 50k hard ceiling even if env or caller requests more", async () => {
+  it("skips scroll when Qdrant count exceeds the 50k hard ceiling", async () => {
     process.env.VECTOR_INVENTORY_MAX_SCANNED = "250000";
-    const calls = vi.fn(async () => new Response(JSON.stringify({
-      result: { points: Array.from({ length: 1000 }, (_, i) => ({ payload: { pc_id: `id-${i}` } })), next_page_offset: 1 }
-    }), { status: 200 }));
+    const calls = vi.fn(async (url: string | URL) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: 80_000 } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        result: { points: Array.from({ length: 1000 }, (_, i) => ({ payload: { pc_id: `id-${i}` } })), next_page_offset: 1 }
+      }), { status: 200 });
+    });
     vi.stubGlobal("fetch", calls);
     await expect(qdrantInventoryByMetadata({ namespace: "socratic-abc", batchSize: 1000, maxScanned: 250000 }))
-      .rejects.toThrow("Vector inventory scan limit exceeded (50000 records)");
-    expect(calls).toHaveBeenCalledTimes(51);
+      .rejects.toBeInstanceOf(VectorInventoryOverCeilingError);
+    expect(calls.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(false);
     delete process.env.VECTOR_INVENTORY_MAX_SCANNED;
+  });
+
+  it("still throws mid-scroll if count was under ceiling but pagination exceeds it", async () => {
+    let scrollCalls = 0;
+    const calls = vi.fn(async (url: string | URL) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: 1000 } }), { status: 200 });
+      }
+      scrollCalls += 1;
+      return new Response(JSON.stringify({
+        result: {
+          points: Array.from({ length: 1000 }, (_, i) => ({ payload: { pc_id: `id-${scrollCalls}-${i}` } })),
+          next_page_offset: scrollCalls < 51 ? scrollCalls : null
+        }
+      }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", calls);
+    await expect(qdrantInventoryByMetadata({ namespace: "socratic-abc", batchSize: 1000, maxScanned: 50_000 }))
+      .rejects.toThrow("Vector inventory scan limit exceeded (50000 records)");
+    expect(scrollCalls).toBe(51);
   });
 
   it("sets payload on uuid5 point ids", async () => {

@@ -98,6 +98,13 @@
 **Blockers.**  Rebase onto origin/main complete; required CI `verify` checks pending before squash auto-merge.
 
 **Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
+## 2026-10-05 CURSOR — Qdrant inventory count pre-check (branch `cursor/qdrant-count-precheck-reconcile-7677`)
+
+**What.**  Managed-vector dry-run reconcile no longer scrolls 50k Qdrant payloads before failing: `qdrantInventoryByMetadata` calls `POST /points/count` first and throws `VectorInventoryOverCeilingError` when the tenant/metadata filter exceeds the 50k scan ceiling; reconcile returns `skipped: true` with `inventoryOverCeiling` so the scheduler treats it as busy, not failed.
+
+**Verification.**  `npm test` on `test/qdrant-write.test.ts` + `test/vector-db-qdrant-retrieval.test.ts` (38 tests); `npm run lint` 0 errors; `npx tsc --noEmit` clean.
+
+**Next.**  Push; open PR READY; do not merge.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
