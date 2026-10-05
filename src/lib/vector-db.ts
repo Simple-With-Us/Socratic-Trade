@@ -1,6 +1,7 @@
 import { Pinecone, type PineconeRecord, type RecordMetadata } from "@pinecone-database/pinecone";
 import crypto from "crypto";
 import { siliconflowBaseUrl } from "./siliconflow-base";
+import { combineAbortSignals, createRagQueryAbort, raceWithAbort } from "./rag-retrieval-deadline";
 import * as dbModule from "./db";
 import { audit, getInternalSetting, resolveApiKey, setInternalSetting, type ApiKeySource } from "./db";
 import { filterNewDocumentChunks, insertDocumentChunks } from "./db";
@@ -2709,6 +2710,7 @@ async function embedWithRetry(
   userId: string,
   leaseGuard?: VectorStoreLeaseGuard
 ): Promise<any> {
+  const boundSignal = combineAbortSignals(signal, leaseGuard?.signal);
   const attempts = embedRetryAttempts();
   const provider = activeEmbeddingProvider(userId);
   const modelName = activeEmbeddingModel(userId);
@@ -2737,23 +2739,21 @@ async function embedWithRetry(
 
   const embedOnce = async (texts: string[]): Promise<any> => {
     for (let attempt = 0; ; attempt++) {
+      if (boundSignal?.aborted) {
+        throw boundSignal.reason instanceof Error ? boundSignal.reason : new Error("RAG embed aborted");
+      }
       try {
         const runCall = async () => {
           if (useMockClient) {
-            if (leaseGuard?.signal) {
-              return await voyage.embed({
-                input: texts,
-                model: modelName,
-                inputType: inputType === "document" ? "document" : "query"
-              }, {
-                abortSignal: leaseGuard.signal
-              });
-            }
-            return await voyage.embed({
+            const embedArgs = {
               input: texts,
               model: modelName,
               inputType: inputType === "document" ? "document" : "query"
-            });
+            };
+            if (boundSignal) {
+              return await voyage.embed(embedArgs, { abortSignal: boundSignal });
+            }
+            return await voyage.embed(embedArgs);
           }
 
           const url = isOpenRouter ? "https://openrouter.ai/api/v1/embeddings" : `${siliconflowBaseUrl()}/v1/embeddings`;
@@ -2778,7 +2778,7 @@ async function embedWithRetry(
                 method: "POST",
                 headers,
                 body: JSON.stringify(body),
-                signal
+                signal: boundSignal
               }),
             { operation: "embeddings", model: modelName, system: isOpenRouter ? "openrouter" : "siliconflow" }
           );
@@ -2803,8 +2803,8 @@ async function embedWithRetry(
           { estimatedCostUsd: estimateRagDispatchCost(texts, "embed", modelName, provider) }
         );
       } catch (error) {
-        if (signal?.aborted) {
-          throw signal.reason instanceof Error ? signal.reason : error;
+        if (boundSignal?.aborted) {
+          throw boundSignal.reason instanceof Error ? boundSignal.reason : error;
         }
         const isRate = isRateLimitError(error);
         const isTransient = isTransientNetworkError(error);
@@ -2813,7 +2813,7 @@ async function embedWithRetry(
         console.warn(
           `[vector-db] Embedding ${isRate ? "rate limited" : "transient network failure"} for inputType=${inputType}; retrying in ${Math.round(delay / 1000)}s.`
         );
-        await sleep(delay, signal);
+        await sleep(delay, boundSignal);
       }
     }
   };
@@ -2837,7 +2837,7 @@ async function embedWithRetry(
     if (texts.length > 1 && !embedRequestFits(texts)) {
       throw new Error(`embed packer produced an over-budget request (${texts.length} texts, budget ${EMBED_REQUEST_TOKEN_BUDGET})`);
     }
-    if (sent) await sleep(embedBatchDelayMs(), signal);
+    if (sent) await sleep(embedBatchDelayMs(), boundSignal);
     sent = true;
     const response = await embedOnce(texts);
     const validated = validateDocumentEmbeddingBatch(response?.data, texts.length);
@@ -7054,6 +7054,13 @@ export interface RetrieveOptions {
    * audit row only when RAG_RETRIEVAL_STAGE_TELEMETRY is enabled; a callback alone stays in-memory.
    */
   onTrace?: (trace: RetrievalTraceSnapshot) => void;
+  /**
+   * Aborts the query embed and the dense read when the caller stops waiting
+   * (strategy-run `withDeadline`). Combined inside retrieval with
+   * `RAG_QUERY_IO_DEADLINE_MS`, so a missing signal still cannot hang the embed
+   * fetch. Omitted does not change ranking; it only adds that default budget.
+   */
+  signal?: AbortSignal;
 }
 
 /** Invoke `options?.onStatus` best-effort; a throwing callback must never affect retrieval. */
@@ -7727,6 +7734,9 @@ export async function retrieveContextDetailed(
     // Factored out of the single-query path unchanged so `queries?.length` absent/empty is
     // byte-for-byte identical to pre-multi-query behavior (one embed, one match round-trip).
     const embedAndMatchOneQuery = async (q: string): Promise<any[] | null> => {
+      const ragAbort = createRagQueryAbort(options?.signal);
+      const querySignal = ragAbort.signal;
+      try {
       const activeModel = activeEmbeddingModel(userId);
       const endCacheLookup = stageTrace?.start("query_embed_cache", {
         provider: activeEmbeddingProvider(userId),
@@ -7749,7 +7759,7 @@ export async function retrieveContextDetailed(
             voyageSource,
             userId,
             "embed query",
-            () => embedWithRetry(voyage, [q], "query", undefined, voyageSource, userId),
+            () => embedWithRetry(voyage, [q], "query", querySignal, voyageSource, userId),
             undefined,
             { durablyTrackedInside: true },
             { lane: "rag-embed", provider: embedProvider }
@@ -7853,7 +7863,7 @@ export async function retrieveContextDetailed(
       ): Promise<{ matches: any[] }> => {
         if (readBackend === "qdrant") {
           qdrantTierAttempts += 1;
-          return qdrantQueryTier(namespaceName, { vector: embedding as number[], topK: fetchK, filter }).catch(
+          return raceWithAbort(qdrantQueryTier(namespaceName, { vector: embedding as number[], topK: fetchK, filter }).catch(
             (error) => {
               qdrantTierErrors.push(error);
               console.warn(
@@ -7862,10 +7872,10 @@ export async function retrieveContextDetailed(
               );
               return { matches: [] };
             }
-          );
+          ), querySignal);
         }
         if (!index) return Promise.resolve({ matches: [] });
-        return withRagApiHealth("pinecone", pineconeSource, userId, operation, () =>
+        return raceWithAbort(withRagApiHealth("pinecone", pineconeSource, userId, operation, () =>
           withSentrySpan("pinecone.query", "db", () =>
             index.query({
               vector: embedding,
@@ -7875,7 +7885,7 @@ export async function retrieveContextDetailed(
             }),
             { "db.system": "pinecone", "db.operation": "query" }
           )
-        ) as Promise<{ matches: any[] }>;
+        ) as Promise<{ matches: any[] }>, querySignal);
       };
       let denseResults: any[];
       try {
@@ -7990,6 +8000,9 @@ export async function retrieveContextDetailed(
         tierByCandidateIdentity
       });
       return eligiblePool;
+      } finally {
+        ragAbort.cancel();
+      }
     };
 
     // Additive multi-query fan-out (hyde-multiquery-retrieval, 2026-07-05): when the caller passes

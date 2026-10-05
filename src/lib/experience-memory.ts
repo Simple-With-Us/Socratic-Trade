@@ -813,6 +813,8 @@ export interface RetrieveDecisionExperiencesInput {
   asOf?: string;
   /** How many neighbors to keep across analogs+coaching (review suggests 5-10; default 8). */
   k?: number;
+  /** Strategy-run deadline. Aborts the underlying query embed / dense read. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -860,6 +862,7 @@ export async function retrieveDecisionExperiences(
         connectedAccountId: input.connectedAccountId,
         accountScope: "exact",
         runId: input.runId,
+        ...(input.signal ? { signal: input.signal } : {}),
         onStatus: (s) => {
           vectorStatusRef.value = s;
         }
