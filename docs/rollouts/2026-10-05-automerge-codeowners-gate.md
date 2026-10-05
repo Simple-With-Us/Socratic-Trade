@@ -24,6 +24,8 @@ Touched paths:
 - **Single source of truth:** CODEOWNERS patterns only (no duplicate path list).  Expanding CODEOWNERS expands the auto-merge skip set automatically.
 - **Fail-closed:** missing diff or missing CODEOWNERS file => do not arm auto-merge.
 - **Labels:** `needs-human-merge` (merge-shepherd) now also blocks arming, matching manual hold semantics.
+- **Self-edit:** PRs that change `.github/workflows/auto-merge-prs.yml` set `skip_automerge` and run `disable-on-skip-automerge` (bootstrap PR #4221 cannot arm itself).
+- **Non-fatal arm step:** `gh pr merge --auto` failures from conflicts, pending checks, or org fine-grained PAT lifetime policy emit `::notice` and exit 0 so the workflow job does not go red while arming is best-effort.
 - **Out of scope:** GitHub required-review ruleset / CODEOWNERS review enforcement (board `bdc2b662`); this workflow gate only prevents auto-arming, not manual `gh pr merge --auto` from an agent with credentials.
 
 ## Verification State
