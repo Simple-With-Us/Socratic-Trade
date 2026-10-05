@@ -6,8 +6,8 @@ The Mac launchd merge shepherd defaulted `REPO` to `jaywedgeworth22/Socratic-Tra
 
 ## Changes Made
 
-- Resolve `REPO` from `GITHUB_REPOSITORY`, else `gh repo view`, else `Simple-With-Us/Socratic-Trade` in `scripts/merge-shepherd.sh`, `scripts/runner-availability.sh`, and `scripts/rth-deploy-drain.sh`.
-- Classify `mergeStateStatus=BLOCKED` into a `[blocked]` digest bucket; do not `update-branch` for blocked PRs.
+- Pin `REPO` to `Simple-With-Us/Socratic-Trade` via `GITHUB_REPOSITORY` / `SHEPHERD_REPO` overrides (`merge-shepherd.sh`, `runner-availability.sh`, `rth-deploy-drain.sh`).
+- Poll `mergeStateStatus` before acting on green armed PRs; `BLOCKED` / `UNKNOWN` / `BEHIND` never fall through to a blind `gh pr merge`.
 - Point `merge-shepherd.yml` reusable workflow `uses:` at `Simple-With-Us/Socratic-Trade`.
 
 **Files:** `scripts/merge-shepherd.sh`, `scripts/runner-availability.sh`, `scripts/rth-deploy-drain.sh`, `.github/workflows/merge-shepherd.yml`, `docs/rollouts/2026-10-05-merge-shepherd-repo-slug.md`, `STATUS.md`.
