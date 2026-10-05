@@ -272,6 +272,14 @@ export function getLastEnrichmentCoverageReport(): EnrichmentCoverageReport | nu
 
 export function setLastEnrichmentCoverageReport(report: EnrichmentCoverageReport | null): void {
   lastCoverageReport = report;
+  if (!report) return;
+  void import("./db-enrichment-coverage")
+    .then((mod) => {
+      mod.persistEnrichmentCoverageReport(report);
+    })
+    .catch(() => {
+      // Best-effort durability — never break a cascade run (tests may omit DB).
+    });
 }
 
 /** Test helper — clears the in-memory last-report slot. */
@@ -408,7 +416,7 @@ export function buildEnrichmentCoverageReport(
     contributingSources: [...contributingSources],
     headlines
   };
-  lastCoverageReport = report;
+  setLastEnrichmentCoverageReport(report);
   return report;
 }
 

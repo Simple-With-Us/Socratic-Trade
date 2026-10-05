@@ -3362,6 +3362,38 @@ const MIGRATIONS: Migration[] = [
         database.exec("ALTER TABLE strategy_runs ADD COLUMN origin TEXT");
       }
     }
+  },
+  {
+    // Enrichment cascade coverage: durable admin/ops field-fill reports survive redeploys.
+    // One run row per cascade as_of (full report JSON) plus normalized per-(as_of, field) rows
+    // for history. Written by buildEnrichmentCoverageReport via db-enrichment-coverage.ts.
+    version: 94,
+    name: "enrichment_coverage_reports",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS enrichment_coverage_runs (
+          as_of TEXT PRIMARY KEY,
+          symbol_count INTEGER NOT NULL,
+          report_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_enrichment_coverage_runs_created
+          ON enrichment_coverage_runs (created_at DESC);
+        CREATE TABLE IF NOT EXISTS enrichment_coverage_fields (
+          as_of TEXT NOT NULL,
+          field TEXT NOT NULL,
+          filled_count INTEGER NOT NULL,
+          total_symbols INTEGER NOT NULL,
+          fill_rate REAL NOT NULL,
+          winning_sources_json TEXT NOT NULL,
+          most_frequent_source TEXT,
+          missing_symbols_json TEXT NOT NULL,
+          PRIMARY KEY (as_of, field)
+        );
+        CREATE INDEX IF NOT EXISTS idx_enrichment_coverage_fields_field_as_of
+          ON enrichment_coverage_fields (field, as_of DESC);
+      `);
+    }
   }
 ];
 
@@ -5021,6 +5053,7 @@ export * from "./db-task-journal";
 export * from "./db-embed-stage";
 export * from "./db-signal-health";
 export * from "./db-lookahead-audit";
+export * from "./db-enrichment-coverage";
 export * from "./db-device-tokens";
 export * from "./db-trade-locks";
 export * from "./db-memory-lifecycle";
