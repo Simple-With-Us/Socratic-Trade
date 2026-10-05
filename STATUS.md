@@ -8,6 +8,7 @@
 
 **Next.**  Push; open PR; optional follow-up to wire `marketCap` through enrichment provenance.
 ## 2026-10-05 CURSOR — RTH sqlite stall bounds (branch `cursor/rth-sqlite-stall-bounds-cf92`)
+## 2026-10-05 CURSOR — RTH sqlite stall bounds (PR #4218, branch `cursor/rth-sqlite-stall-bounds-cf92`)
 
 **What.**  Three production CPU profiles from 2026-10-05 RTH (82s, 66s, 45s busy runs) map to two first-party sync paths, not the filing CPU worker and not #4164 lexical FTS.  Profiles 2 and 3 (`ha@5313` + `r@6744`, ~58-66% total) are scheduler `tickInner` -> `pruneTaskJournal`.  Profile 1 (longest, 82s) is `GET /api/ops/snapshot`: `length(content)` over transcript blobs, the `YYYYQn.json` directory walk, and `getEquityOrders` continuing the same busy run.  Prune now forces `INDEXED BY idx_task_journal_started` and splits skipped vs ok/error into two range deletes that still share the 500-row batch cap.  Coverage counts `content IS NOT NULL` without reading bodies.  The snapshot reports a cached artifact count and recounts with a yield per symbol directory.  The route yields once before optional order reads.
 

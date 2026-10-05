@@ -60,7 +60,7 @@ Targeted proof in `test/event-loop-stall-hot-path.test.ts`: scale a fixture unti
 
 ## Next Steps & Blockers
 
-- Open a ready PR against `main`.  Do not merge.  Do not Coolify Deploy.  Extra-ship no.  No Slack.
+- Ready PR #4218 is open against `main`.  Do not merge.  Do not Coolify Deploy.  Extra-ship no.  No Slack.
 - No Kodus threads exist on this branch yet.  If review opens threads, fix them or reply `defer` with a rationale.  Do not resolve a thread only to merge.
 - If production still stalls inside `pruneTaskJournal` after this image is live, re-map the new profile.  Do not assume the old OR scan came back.
 - Do not call production `GET /api/ops/snapshot` during RTH to "check" this.  That GET is the 82s path.
