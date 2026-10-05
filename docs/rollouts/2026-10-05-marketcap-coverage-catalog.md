@@ -31,7 +31,10 @@ Board item `2c62f3fde01447a7` (GROK): `marketCap` drives three of eight score fa
 npm run lint
 npx tsc --noEmit
 npm test test/enrichment-coverage.test.ts test/data-catalog-completeness.test.ts
+npm run build
 ```
+
+Build passes (Next.js 16.3.6).
 
 ## Next Steps & Blockers
 
