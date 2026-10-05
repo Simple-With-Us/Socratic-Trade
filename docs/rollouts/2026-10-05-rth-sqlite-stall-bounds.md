@@ -2,7 +2,7 @@
 
 ## Context & Objective
 
-Production `event_loop_stall` profiles captured on the Coolify ST container during RTH on 2026-10-05 name two first-party synchronous paths that pin the Node serving loop.  The goal is one small change that stops those paths from scanning the whole table or walking the whole archive on the request or tick that is already running.  Extra-ship no.  No Coolify Deploy.  Do not duplicate in-flight PR #4164 (lexical FTS off the loop).
+Production `event_loop_stall` profiles captured during regular trading hours on 2026-10-05 name two first-party synchronous paths that pin the Node serving loop.  The goal is one small change that stops those paths from scanning the whole table or walking the whole archive on the request or tick that is already running.  No extra release or deployment is authorized from this lane.  Lexical corpus-wide FTS off the serving loop remains a separate tracked effort.
 
 ## Changes Made
 
@@ -36,7 +36,7 @@ Source maps from a webpack production build of the same SHA the profiles were ta
 - Local benches did not reproduce a 45s prune.  `INDEXED BY` makes a planner SCAN of `task_journal` impossible for this statement.  If the index is missing the existing catch returns 0 and retention stops for that call, which is the same swallow-errors behavior as before.  The index is created in the same migration as the table (v62).
 - No schema migration and no boot backfill of a stored `content_len`.  Either would scan blobs at migrate time.
 - Ops snapshot `artifactFiles` is 0 until the first yielding walk finishes, then the cached count for 10 minutes.  Diagnostic GETs no longer `readdirSync` the tree.
-- Live effort board `/Users/jay/apps/TRADING-EFFORT-LOG.md` does not exist on this cloud VM.  `docs/EFFORT-LOG.md` is the tracked mirror.  Phase docs are unchanged.  This is not a phase-design change.
+- Effort tracking requires the same row and lifecycle state in both the branch-neutral live board and the tracked repo mirror (`docs/EFFORT-LOG.md`).  Phase docs are unchanged because this is not a phase-design change.  Cloud agent seats update the mirror only; the owner copies the row to the live board and assigns the board reservation id (see issue #4239).
 
 ## Verification State
 
@@ -60,10 +60,19 @@ Targeted proof in `test/event-loop-stall-hot-path.test.ts`: scale a fixture unti
 
 ## Next Steps & Blockers
 
-- Ready PR #4218 is open against `main`.  Rebased onto `4a0f1ca0` (2026-10-05).  `verify-hosted` failed once on `test/event-loop-stall-hot-path.test.ts` when the unindexed scan baseline reported 99ms on a fast runner; commit `a6c0d99a` grows the fixture until the baseline crosses 100ms.  Do not merge.  Do not Coolify Deploy.  Extra-ship no.  No Slack.
-- No Kodus threads exist on this branch yet.  If review opens threads, fix them or reply `defer` with a rationale.  Do not resolve a thread only to merge.
-- If production still stalls inside `pruneTaskJournal` after this image is live, re-map the new profile.  Do not assume the old OR scan came back.
-- Do not call production `GET /api/ops/snapshot` during RTH to "check" this.  That GET is the 82s path.
+- Kody review (2026-10-05): public docs sanitized; tracking issue #4239 opened; live effort board reservation **deferred** to Jay (cloud seat cannot write the branch-neutral live board or mint board ids).  Stall-path CI flake on fast runners fixed by growing regression fixtures until the unindexed baseline crosses 100ms.
+- Owner: paste the `docs/EFFORT-LOG.md` row into the live board and add `board \`<id>\`` when reserved.
+- If production still stalls inside journal prune after deploy, re-map the new profile.  Do not assume the old OR scan came back.
+- Do not hammer production ops snapshot during regular hours to "check" this; that route was on the hot path.
+
+## Kody thread dispositions (2026-10-05)
+
+| Thread | Fix / defer |
+|--------|-------------|
+| Both effort ledgers | **defer (owner):** mirror updated; identical row text in `docs/EFFORT-LOG.md`; Jay must write the live board — cloud seat has no access. |
+| Board + issue before work record | **fix:** issue #4239; single canonical row references it.  **defer (owner):** board id not minted on cloud. |
+| Remove ops paths from public docs | **fix:** effort row, STATUS, PLAN sanitized. |
+| No absolute paths / host inventory in rollout | **fix:** generic effort-tracking statement; removed host-specific inventory from Context. |
 
 ## Zero-Code Findings
 
