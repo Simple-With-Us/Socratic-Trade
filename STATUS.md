@@ -72,11 +72,11 @@
 **Next.**  Push; open PR READY; merge after `verify` + `ios-build` green.
 ## 2026-10-05 CURSOR — Merge shepherd repo slug + BLOCKED bucket (branch `cursor/merge-shepherd-repo-slug-dfc4`)
 
-**What.**  Canonical `REPO` via `gh repo view` (default `Simple-With-Us/Socratic-Trade`); `[blocked]` bucket from `mergeStateStatus`; same slug fix in `runner-availability.sh`, `rth-deploy-drain.sh`, `merge-shepherd.yml`.
+**What.**  Pin `REPO` to `Simple-With-Us/Socratic-Trade` (`GITHUB_REPOSITORY` / `SHEPHERD_REPO`); poll `mergeStateStatus` before merge/sync (`UNKNOWN` waits); `[blocked]` bucket; same slug in `runner-availability.sh`, `rth-deploy-drain.sh`, `merge-shepherd.yml`.  PR #4207 Kody round 2.
 
-**Verification.**  `bash -n` on three scripts; live dry scan resolved `Simple-With-Us/Socratic-Trade` and updated existing tracking issue `#4206` (no new issue).
+**Verification.**  `bash -n` on three scripts.
 
-**Next.**  Open PR; do not merge; owner bulk-closes ~430 duplicate tracking issues separately.
+**Next.**  Push; reply on Kody threads; do not merge.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
