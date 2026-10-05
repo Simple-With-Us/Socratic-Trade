@@ -375,14 +375,13 @@ describe("sqlite off-loop timeout and abort", () => {
     ).rejects.toThrow("already aborted");
   });
 
-  it("keeps the execution budget strictly inside the caller abort deadline", () => {
+  it("sets the execution budget equal to the caller abort deadline", () => {
     // Production callers omit timeoutMs, so SQLITE_OFF_LOOP_TIMEOUT_MS is the budget
-    // armed when the worker reports started. createRagQueryAbort uses the full deadline.
-    expect(SQLITE_OFF_LOOP_TIMEOUT_MS).toBeLessThan(RAG_QUERY_IO_DEADLINE_MS);
-    expect(SQLITE_OFF_LOOP_TIMEOUT_MS).toBe(Math.floor(RAG_QUERY_IO_DEADLINE_MS / 2));
+    // armed when the worker reports started. createRagQueryAbort uses the same deadline.
+    expect(SQLITE_OFF_LOOP_TIMEOUT_MS).toBe(RAG_QUERY_IO_DEADLINE_MS);
   });
 
-  it("retires a started slot when the caller aborts before the execution timer", async () => {
+  it("keeps the warm pool when the caller aborts a started request", async () => {
     await resetSqliteAllOffLoopForTesting();
     const minMs = 600;
     const iterations = iterationsTakingAtLeast(minMs);
@@ -397,7 +396,7 @@ describe("sqlite off-loop timeout and abort", () => {
     const wedges = controllers.map((controller) =>
       sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema, {
         signal: controller.signal,
-        // Far past the abort, so reclaim cannot be the execution timer.
+        // Far past the abort, so the surviving slots are not the execution timer's doing.
         timeoutMs: 30_000
       })
     );
@@ -405,14 +404,43 @@ describe("sqlite off-loop timeout and abort", () => {
     try {
       await bothStarted;
       for (const controller of controllers) controller.abort(new Error("lexical aborted"));
-      // killSlot removes the slot before abort() returns. A later query cannot
-      // sit on either wedged worker.
-      expect(activeSqliteOffLoopSlotCountForTesting()).toBe(0);
+      // Caller abort drops the waiters and leaves both workers running.
+      expect(activeSqliteOffLoopSlotCountForTesting()).toBeGreaterThan(0);
+      expect(activeSqliteOffLoopSlotCountForTesting()).toBe(SQLITE_OFF_LOOP_POOL_SIZE);
       await Promise.all(wedgeSettled);
 
-      const startedAt = Date.now();
-      const rows = await sqliteAllOffLoop("SELECT 4 AS c", [], dbPath, CountRowSchema, { timeoutMs: 5_000 });
+      // Reuse a worker that was already live. The follow-up may sit behind the
+      // in-flight statement; it must not wait on a kill and a cold respawn.
+      const slotsBefore = activeSqliteOffLoopSlotCountForTesting();
+      const rows = await sqliteAllOffLoop("SELECT 4 AS c", [], dbPath, CountRowSchema, { timeoutMs: 10_000 });
       expect(rows).toEqual([{ c: 4 }]);
+      expect(slotsBefore).toBe(SQLITE_OFF_LOOP_POOL_SIZE);
+      expect(activeSqliteOffLoopSlotCountForTesting()).toBe(SQLITE_OFF_LOOP_POOL_SIZE);
+    } finally {
+      setSqliteOffLoopStartedHookForTesting(null);
+      await resetSqliteAllOffLoopForTesting();
+    }
+  });
+
+  it("retires a wedged slot when the execution budget fires", async () => {
+    await resetSqliteAllOffLoopForTesting();
+    const minMs = 600;
+    const iterations = iterationsTakingAtLeast(minMs);
+    const started = new Promise<void>((resolve) => {
+      setSqliteOffLoopStartedHookForTesting(() => resolve());
+    });
+    const wedge = sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema, { timeoutMs: 80 });
+    const wedgeSettled = expect(wedge).rejects.toThrow("sqlite off-loop query timed out");
+    try {
+      await started;
+      expect(activeSqliteOffLoopSlotCountForTesting()).toBeGreaterThan(0);
+      await wedgeSettled;
+      expect(activeSqliteOffLoopSlotCountForTesting()).toBe(0);
+
+      const startedAt = Date.now();
+      const rows = await sqliteAllOffLoop("SELECT 5 AS c", [], dbPath, CountRowSchema, { timeoutMs: 5_000 });
+      expect(rows).toEqual([{ c: 5 }]);
+      // The wedged worker is gone, so this does not wait out the statement.
       expect(Date.now() - startedAt).toBeLessThan(minMs / 2);
     } finally {
       setSqliteOffLoopStartedHookForTesting(null);

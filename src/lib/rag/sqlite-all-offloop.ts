@@ -36,38 +36,28 @@ const WORKER_MMAP_SIZE = 268_435_456;
  * Execution budget for one off-loop read, armed when that worker reports it is
  * about to call `.all()` — not when the parent posts. The worker runs statements
  * serially, so a timer started at postMessage would bill queue wait to the
- * statement. `RAG_QUERY_IO_DEADLINE_MS` lives in rag-retrieval-deadline.ts, which
- * does not statically import node: builtins (only inflight-deadline.ts), so it
- * is safe on the instrumentation webpack graph.
+ * statement. The budget equals `RAG_QUERY_IO_DEADLINE_MS`
+ * (rag-retrieval-deadline.ts). That module does not statically import node:
+ * builtins (only inflight-deadline.ts), so it is safe on the instrumentation
+ * webpack graph.
  *
- * Strictly shorter than that caller deadline. Production retrieval
- * (`createRagQueryAbort` in vector-db.ts) arms the full
- * `RAG_QUERY_IO_DEADLINE_MS` before the request is posted, so the caller timer
- * includes queue wait and scheduling delay. An execution budget equal to the
- * caller deadline never fires first: the abort settles the waiter, and a
- * reclaim path that then looked the id up in `pending` did not retire the slot.
- * Half the caller deadline leaves headroom so this timer lands first when the
- * statement starts promptly (the usual case: little or no queue). A request
- * that sits queued for nearly this whole budget can still meet the caller abort
- * around the same instant; abandoning a started request retires the slot on
- * that path too, without depending on this timer winning the race.
+ * Production retrieval (`createRagQueryAbort` in vector-db.ts) arms that same
+ * deadline before the request is posted, so the caller timer includes queue
+ * wait and either timer can fire first. The settle path is safe whichever
+ * wins. The execution timer keeps the waiter and retires the slot itself,
+ * without looking the id up in `pending` after the waiter has been dropped.
+ * A caller abort that settles first sets `settled` and clears that timer, so
+ * the later callback does not terminate again and does not retire the slot.
+ * The worker is left to finish: a client disconnect or the retrieval deadline
+ * is not evidence the statement is wedged, and killing the thread would
+ * cold-start the pool.
  *
- * Trade-off: a lexical scan that needs longer than this budget, but would have
- * finished inside the 15s caller deadline, now fails and the slot is recycled.
- * Corpus-wide lexical recall degrades to dense search for that one request
- * (`corpusWideLexicalFailed`) instead of holding a pool worker for the rest of
- * the statement. Two such pins (pool size 2) would disable lexical recall until
- * both statements returned. Callers with a genuinely longer statement pass
- * `timeoutMs`.
- *
- * A wedged `.all()` cannot be interrupted in place. When a request that has
- * started is abandoned — this deadline, the caller's AbortSignal, or a queue
- * ceiling that loses the race with the start notice — that slot is terminated.
- * Only the started request fails. Requests still queued on it are re-dispatched
- * onto another live instance, or a fresh one when the rest of the pool is busy.
- * The decision uses the slot and `started` flag stored on the waiter, not a
- * `pending` lookup after the waiter has been settled, so abort and this timer
- * can fire in either order.
+ * A wedged `.all()` cannot be interrupted in place. This module retires a
+ * started slot only for its own abandonments: the execution timer, or a
+ * signal-less queue ceiling that loses the race with the start notice. Only
+ * the started request fails. Requests still queued on that slot are
+ * re-dispatched onto another live instance, or a fresh one when the rest of
+ * the pool is busy.
  *
  * A request that was posted but has not started is cancelled in place. Each
  * worker is given a SharedArrayBuffer of 1024 int32 slots; the parent stores
@@ -88,7 +78,7 @@ const WORKER_MMAP_SIZE = 268_435_456;
  * start notification still cannot wait forever. The ceiling is cleared once
  * execution starts.
  */
-export const SQLITE_OFF_LOOP_TIMEOUT_MS = Math.floor(RAG_QUERY_IO_DEADLINE_MS / 2);
+export const SQLITE_OFF_LOOP_TIMEOUT_MS = RAG_QUERY_IO_DEADLINE_MS;
 
 /**
  * Shared cancellation table, one per worker. Indexed by `requestId % length`.
@@ -113,11 +103,11 @@ const SIGNAL_LESS_QUEUE_SLACK_MS = SQLITE_OFF_LOOP_TIMEOUT_MS;
 export type SqliteAllOffLoopOptions = {
   /**
    * Reject this waiter on abort, including while it is still queued.
-   * Abort of a request that has started executing retires that slot: the
-   * statement is still on the worker thread, so only that request fails and
-   * not-yet-started requests queued on the slot are re-dispatched. Abort of a
-   * request that was posted but has not started cancels it in place (the worker
-   * skips the statement) and does not disturb a query already running there.
+   * Abort of a request that has started drops only that waiter. The worker
+   * finishes the statement and the slot stays in the pool, including requests
+   * still queued behind it. Abort of a request that was posted but has not
+   * started cancels it in place (the worker skips the statement) and does not
+   * disturb a query already running there.
    */
   signal?: AbortSignal;
   /** Execution budget armed at worker start. Overrides SQLITE_OFF_LOOP_TIMEOUT_MS. Production callers omit this. */
@@ -339,6 +329,12 @@ type Pending = {
    * depend on `pending.get`.
    */
   settled: boolean;
+  /**
+   * True when this module initiated the abandon (execution timer or the
+   * signal-less queue ceiling). Caller AbortSignal leaves this false, so a
+   * started request does not retire the worker.
+   */
+  abandonedByBudget: boolean;
   /** How many times the request has been posted. Caps re-dispatch at the pool size. */
   placements: number;
   /**
@@ -481,8 +477,12 @@ function markCancelled(slot: PoolSlot, id: number): boolean {
  * retired from the message handler. Without a shared flag, retire the slot
  * only when nothing on it has started; a healthy in-flight statement is left
  * alone and this message drains behind it.
+ *
+ * A waiter that has already started is a caller abort. Budget abandonment of
+ * a started request retires the slot before this runs. Leave the worker up.
  */
 function abandonPostedRequest(waiter: Pending, slot: PoolSlot): void {
+  if (waiter.started) return;
   if (markCancelled(slot, waiter.id)) {
     slot.abandonedBeforeStart.add(waiter.id);
     return;
@@ -503,14 +503,17 @@ function settleReject(waiter: Pending, err: Error): void {
   if (pending.get(waiter.id) !== waiter) return;
   const started = waiter.started;
   const posted = waiter.posted;
+  const abandonedByBudget = waiter.abandonedByBudget;
   const slot = waiter.slot;
   dropPending(waiter.id);
   // Retire or cancel before reject so a synchronous rejection handler observes
-  // the pool after the abandoned statement's slot has been dealt with.
+  // the pool after the abandoned statement has been dealt with.
   // `slot.disposed` is already set when killSlot itself is settling the rest
-  // of the slot, so this does not terminate twice.
+  // of the slot (the execution timer calls killSlot directly), so this does
+  // not terminate twice. Caller abort of a started request leaves
+  // `abandonedByBudget` false and does not retire the worker.
   if (!slot.disposed) {
-    if (started) {
+    if (started && abandonedByBudget) {
       killSlot(slot, () => abandonedWorkerError(), true);
     } else if (posted) {
       abandonPostedRequest(waiter, slot);
@@ -591,6 +594,9 @@ function armCeiling(waiter: Pending): void {
   if (waiter.signal || waiter.started || waiter.ceilingTimer !== undefined) return;
   const timer = setTimeout(() => {
     if (pending.get(waiter.id) !== waiter || waiter.started) return;
+    // This module's queue ceiling, not the caller's AbortSignal. A start that
+    // wins the race is handled from the worker message (see abandonedBeforeStart).
+    waiter.abandonedByBudget = true;
     settleReject(waiter, new Error("sqlite off-loop query timed out before it started"));
   }, queueCeilingMs(waiter.timeoutMs));
   timer.unref?.();
@@ -686,10 +692,13 @@ function killSlot(
 function onExecutionTimeout(waiter: Pending): void {
   // The waiter object still carries slot and started after settle drops it from
   // `pending` and clears this timer. If the callback lost that race, `settled`
-  // is set and the settle path already retired a started request.
+  // is set. Caller abort leaves the worker running; do not retire it here.
   if (waiter.settled || !waiter.started || waiter.slot.disposed) return;
+  waiter.abandonedByBudget = true;
   const timeoutError = new Error("sqlite off-loop query timed out");
   const exhausted = new Error("sqlite off-loop worker terminated after query timeout");
+  // Dispose the slot before settleReject runs for the waiters still on it, so
+  // the budget branch there does not call killSlot a second time.
   killSlot(
     waiter.slot,
     (pendingWaiter) => (pendingWaiter.id === waiter.id ? timeoutError : exhausted),
@@ -808,6 +817,7 @@ export async function sqliteAllOffLoop<T>(
       started: false,
       posted: false,
       settled: false,
+      abandonedByBudget: false,
       placements: 0,
       allowRedispatch: true,
       signal,
@@ -907,6 +917,7 @@ export async function primeSqliteOffLoopWaiterForTesting(): Promise<{ id: number
       started: false,
       posted: false,
       settled: false,
+      abandonedByBudget: false,
       placements: 1,
       allowRedispatch: false,
       sql: "SELECT 1",
