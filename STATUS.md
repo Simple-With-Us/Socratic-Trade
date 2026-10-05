@@ -1,5 +1,13 @@
 # Current Status
 
+## 2026-10-05 CURSOR — marketCap coverage + catalog (branch `cursor/marketcap-coverage-catalog-62d9`)
+
+**What.**  Board `2c62f3fde01447a7`: add `marketCap` to `COVERAGE_TRACKED_FIELDS` and `CATALOG_FIELDS` for score-factor observability.
+
+**Verification.**  `npm run lint`, `npx tsc --noEmit`, targeted vitest on enrichment-coverage + data-catalog-completeness.
+
+**Next.**  Push; open PR; optional follow-up to wire `marketCap` through enrichment provenance.
+
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
 **What.**  Five open Kody threads: relay vs Slack (honest gap + optional hook), rollout build-status N/A, `nvm install` fail-soft, `load_nvm` `--no-use` + relaxed strict mode around source, remove `.cursor/infisical.env` parsing from `cursor-cloud-start.sh`.
