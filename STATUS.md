@@ -15,7 +15,7 @@
 
 **Docs.**  Rollout `docs/rollouts/2026-10-04-axios-1.20.0.md`.  `PLAN.md` and phase docs are unchanged because this is not a product-scope or phase-design change.
 
-**Verification.**  Required `verify` and `gitleaks` were already green on this head.  `check-pin` is green after Usage-Monitor main moved to congress-trading-shared v2.7.1.
+**Verification.**  `verify-hosted` on the lockfile commit already ran lint, `tsc --noEmit`, `npm test`, and `npm run build`.  `gitleaks` passed.  This docs commit must pass that same gate again.
 
 ## 2026-09-30 FINCH — Self-healing watchdogs (branch `finch/self-healing-watchdogs`, lane `~/workspace/lanes/st-selfheal`)
 
