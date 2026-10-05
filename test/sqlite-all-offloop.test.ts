@@ -11,6 +11,8 @@ import {
   postSqliteOffLoopRawForTesting,
   primeSqliteOffLoopWaiterForTesting,
   resetSqliteAllOffLoopForTesting,
+  SqliteRowSchema,
+  SqliteValueSchema,
   SqliteWorkerResponseSchema,
   sqliteAllOffLoop
 } from "../src/lib/rag/sqlite-all-offloop";
@@ -112,6 +114,60 @@ describe("sqlite off-loop validation", () => {
       error: { message: "x", code: "E", extra: 1 }
     }).success).toBe(false);
     expect(SqliteWorkerResponseSchema.safeParse({ id: 1.5, ok: true, rows: [] }).success).toBe(false);
+    expect(SqliteValueSchema.safeParse(new Uint8Array([1, 2])).success).toBe(true);
+    expect(SqliteValueSchema.safeParse(Buffer.from([1, 2])).success).toBe(true);
+    expect(SqliteValueSchema.safeParse(1n).success).toBe(true);
+    expect(SqliteValueSchema.safeParse(true).success).toBe(true);
+    expect(SqliteValueSchema.safeParse(null).success).toBe(true);
+    expect(SqliteRowSchema.safeParse({ c: { nested: true } }).success).toBe(false);
+    expect(SqliteWorkerResponseSchema.safeParse({
+      id: 1,
+      ok: true,
+      rows: [{ c: { nested: true } }]
+    }).success).toBe(false);
+  });
+
+  it("rejects a forged row that contains a non-SQLite value", async () => {
+    const waiter = await primeSqliteOffLoopWaiterForTesting();
+    const settled = expect(waiter.done).rejects.toThrow("invalid sqlite worker response");
+    await deliverSqliteOffLoopMessageForTesting({
+      id: waiter.id,
+      ok: true,
+      rows: [{ c: { nested: true } }]
+    });
+    await settled;
+
+    const rows = await sqliteAllOffLoop("SELECT 5 AS c", [], dbPath, CountRowSchema);
+    expect(rows).toEqual([{ c: 5 }]);
+  });
+
+  it("round-trips a BLOB column as Uint8Array after worker structured clone", async () => {
+    const blobPath = join(tmpdir(), `agentic-sqlite-all-offloop-blob-${randomUUID()}.db`);
+    const payload = Uint8Array.from([0, 1, 2, 127, 128, 255, 10, 13]);
+    const writer = new Database(blobPath);
+    writer.exec("CREATE TABLE docs (id INTEGER PRIMARY KEY, payload BLOB)");
+    writer.prepare("INSERT INTO docs (id, payload) VALUES (1, ?)").run(Buffer.from(payload));
+    writer.prepare("INSERT INTO docs (id, payload) VALUES (2, ?)").run(Buffer.alloc(0));
+    writer.prepare("INSERT INTO docs (id, payload) VALUES (3, NULL)").run();
+    writer.close();
+
+    const schema = z.object({
+      id: z.number(),
+      payload: z.instanceof(Uint8Array).nullable()
+    });
+    const rows = await sqliteAllOffLoop(
+      "SELECT id, payload FROM docs ORDER BY id",
+      [],
+      blobPath,
+      schema
+    );
+    expect(rows.map((row) => row.id)).toEqual([1, 2, 3]);
+    expect(Buffer.isBuffer(rows[0]?.payload)).toBe(false);
+    expect(rows[0]?.payload).toBeInstanceOf(Uint8Array);
+    expect(Array.from(rows[0]?.payload ?? [])).toEqual(Array.from(payload));
+    expect(rows[1]?.payload).toBeInstanceOf(Uint8Array);
+    expect(Array.from(rows[1]?.payload ?? [1])).toEqual([]);
+    expect(rows[2]?.payload).toBeNull();
   });
 
   it("rejects an invalid worker request and uses -1 when the id is not a safe integer", async () => {

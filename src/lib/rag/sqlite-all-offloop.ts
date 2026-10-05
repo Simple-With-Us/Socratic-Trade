@@ -53,15 +53,52 @@ const SqliteWorkerErrorSchema = z.strictObject({
 });
 
 /**
+ * One column value as the parent observes it.
+ *
+ * better-sqlite3 materializes NULL, TEXT, INTEGER/REAL, and BLOB. INTEGER is a JS number,
+ * or a bigint when safeIntegers is enabled (this worker does not enable it). REAL is a JS
+ * number and can be ±Infinity; Zod 4's `z.number()` is finite-only, so non-finite numbers
+ * are listed beside it. NaN does not survive better-sqlite3's bind path (it comes back
+ * NULL) but is accepted so a non-finite REAL is not mistaken for a corrupt envelope.
+ * Column reads never produce booleans — SQLite has no boolean storage class and the
+ * binding layer rejects them — but a boolean is still a scalar SQLite-shaped value, not
+ * an object/array, so it stays in the transport union. The caller's row schema is the
+ * domain check.
+ *
+ * BLOB is a Node Buffer inside the worker (`Napi::Buffer` in better-sqlite3). Buffer is a
+ * Uint8Array subclass. `postMessage` structured-clone does not preserve the Buffer
+ * subclass: the parent receives a plain Uint8Array. `z.instanceof(Uint8Array)` accepts
+ * both, including a same-realm Buffer delivered in tests.
+ */
+const SqliteNumberSchema = z.union([z.number(), z.literal(Infinity), z.literal(-Infinity), z.nan()]);
+
+export const SqliteValueSchema = z.union([
+  z.string(),
+  SqliteNumberSchema,
+  z.bigint(),
+  z.boolean(),
+  z.null(),
+  z.instanceof(Uint8Array)
+]);
+
+export type SqliteValue = z.infer<typeof SqliteValueSchema>;
+
+/** One row object: column name to SQLite value. Not `z.array(z.unknown())`. */
+export const SqliteRowSchema = z.record(z.string(), SqliteValueSchema);
+
+export type SqliteRow = z.infer<typeof SqliteRowSchema>;
+
+/**
  * Parent-side view of one worker reply.  Strict so a widened payload cannot be treated as
  * rows or as a sqlite error.  `id: -1` is the worker's sentinel for a request that had no
  * safe integer id; it is not a waiter and must not settle anyone else.
+ * Row values are checked here; the caller's `rowSchema` remains the domain check.
  */
 export const SqliteWorkerResponseSchema = z.discriminatedUnion("ok", [
   z.strictObject({
     id: z.int(),
     ok: z.literal(true),
-    rows: z.array(z.unknown())
+    rows: z.array(SqliteRowSchema)
   }),
   z.strictObject({
     id: z.int(),
