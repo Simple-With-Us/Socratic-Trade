@@ -1,5 +1,13 @@
 # Current Status
 
+## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
+
+**What.**  Five open Kody threads: relay vs Slack (honest gap + optional hook), rollout build-status N/A, `nvm install` fail-soft, `load_nvm` `--no-use` + relaxed strict mode around source, remove `.cursor/infisical.env` parsing from `cursor-cloud-start.sh`.
+
+**Verification.**  `bash -n` on both cursor-cloud scripts; application `npm run build` not run (shell-only change).
+
+**Next.**  Push; reply on threads with fix SHA; do not merge.
+
 ## 2026-10-05 CURSOR — PR #4158 Kody review follow-up (branch `fix/fred-proxy-failsoft`)
 
 **What.**  Addressed two real Kody threads on the FRED/proxy fail-soft PR: skip the fixed 3s proxy-leg cap when the caller supplies `init.signal`, and keep proxy-leg timeout + caller abort wired through proxied response **body** reads (not only headers).

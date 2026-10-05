@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Cursor cloud agent start for Socratic-Trade.
-# 1. Attach Slack coordination (SessionStart hook via setup-slack-sync.sh) -- same path as
-#    scripts/cloud-setup.sh; there is no Mac-side agent-sync-push relay on Linux cloud VMs.
-# 2. Load non-secret Infisical defaults from .cursor/infisical.env (ENV / DOMAIN only).
+# 1. Attach fleet relay consumer/poller when an in-repo Linux bootstrap exists
+#    (soft-fail with a documented gap otherwise; Slack is optional coordination only).
+# 2. Infisical selectors come from process environment / Cursor dashboard Secrets only
+#    (strict Infisical: no parsing committed .env-shaped files in this hook).
 # 3. When dashboard credentials exist, smoke-test scripts/infisical-run.mjs without writing
 #    secrets to disk.  Agents load secrets through npm run dev:secrets / infisical-run.mjs.
 # 4. Missing credentials: log secret NAMES only and exit 0 so the VM boot succeeds.
@@ -14,35 +15,44 @@ cd "$REPO_ROOT"
 log()   { printf '[cursor-cloud-start] %s\n' "$*"; }
 warn()  { printf '[cursor-cloud-start] WARN: %s\n' "$*" >&2; }
 
-# 1. Fleet coordination relay (read/post path for #agent-sync at session start).
+# Known in-repo relay bootstrap scripts (first match wins).  There is no Linux consumer
+# in this repo today; Mac seats run pm2 agent-sync-push outside the tree.
+RELAY_BOOTSTRAP_CANDIDATES=(
+  scripts/agent-sync-relay-consumer.sh
+  scripts/agent-sync-relay-poller.sh
+  scripts/agent-sync-push-consumer.sh
+)
+
+attach_fleet_relay_consumer() {
+  local script rel
+  for rel in "${RELAY_BOOTSTRAP_CANDIDATES[@]}"; do
+    script="${REPO_ROOT}/${rel}"
+    if [[ -f "${script}" ]]; then
+      log "Attaching fleet relay via ${rel}"
+      if bash "${script}" >/dev/null 2>&1; then
+        log "Fleet relay consumer bootstrap completed."
+      else
+        warn "Fleet relay bootstrap ${rel} failed; continuing cloud start."
+      fi
+      return 0
+    fi
+  done
+  warn "No in-repo Linux fleet relay consumer/poller script found (known gap)."
+  warn "Mac agent-sync-push is not available on Cursor cloud VMs."
+  return 0
+}
+
+attach_fleet_relay_consumer
+
+# Optional #agent-sync coordination (SessionStart hook).  Not a substitute for relay.
 if [[ -f scripts/setup-slack-sync.sh ]]; then
   if bash scripts/setup-slack-sync.sh >/dev/null 2>&1; then
-    log "Slack coordination hook installed (no-op without SLACK_BOT_TOKEN)."
+    log "Optional Slack coordination hook installed (no-op without SLACK_BOT_TOKEN)."
   else
-    warn "setup-slack-sync.sh skipped; coordination hook not updated."
+    warn "setup-slack-sync.sh skipped; optional coordination hook not updated."
   fi
 else
-  warn "scripts/setup-slack-sync.sh missing; skipping coordination hook install."
-fi
-
-# 2. Committed defaults only -- never project UUIDs (dashboard supplies those).
-if [[ -f .cursor/infisical.env ]]; then
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line%%#*}"
-    line="${line#"${line%%[![:space:]]*}"}"
-    [[ -z "$line" ]] && continue
-    case "$line" in
-      INFISICAL_ENV=*|INFISICAL_DOMAIN=*|INFISICAL_PATH=*)
-        key="${line%%=*}"
-        if [[ -z "${!key:-}" ]]; then
-          export "$line"
-        fi
-        ;;
-    esac
-  done < .cursor/infisical.env
-  log "Loaded Infisical defaults from .cursor/infisical.env (no project ids)."
-else
-  warn ".cursor/infisical.env missing; relying on Cursor dashboard env only."
+  warn "scripts/setup-slack-sync.sh missing; skipping optional Slack coordination."
 fi
 
 # Do not enter the shared overlay branch unless shared machine identity is present.
@@ -51,7 +61,7 @@ if [[ -z "${INFISICAL_SHARED_CLIENT_ID:-}" || -z "${INFISICAL_SHARED_CLIENT_SECR
     INFISICAL_SHARED_CLIENT_ID INFISICAL_SHARED_CLIENT_SECRET 2>/dev/null || true
 fi
 
-# 3. Dashboard secrets -- NAMES only, never values.
+# Dashboard secrets -- NAMES only, never values.
 missing=()
 [[ -z "${INFISICAL_CLIENT_ID:-}" ]]     && missing+=("INFISICAL_CLIENT_ID")
 [[ -z "${INFISICAL_CLIENT_SECRET:-}" ]] && missing+=("INFISICAL_CLIENT_SECRET")
@@ -69,7 +79,7 @@ if [[ -z "${INFISICAL_PROJECT_ID:-}" ]]; then
   exit 0
 fi
 
-# 4. Smoke-test the in-repo runner (secrets stay in the child process; no .env files).
+# Smoke-test the in-repo runner (secrets stay in the child process; no .env files).
 if [[ ! -f scripts/infisical-run.mjs ]]; then
   warn "scripts/infisical-run.mjs missing; cannot validate Infisical wiring."
   exit 0
