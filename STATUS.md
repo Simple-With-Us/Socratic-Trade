@@ -9,6 +9,13 @@
 **Left open.**  Three Kody threads that ask to replace `10.99.0.2` in test fixtures — owner: not a disclosure to fix.  Rollout `docs/rollouts/2026-10-05-fred-proxy-kody-review.md`.
 
 **Next.**  Push commit; update PR #4158 body; human resolves fixed threads; do not merge from this agent.
+## 2026-10-04 — axios 1.18.0 to 1.20.0 (PR #4014)
+
+**What.**  Dependabot runtime bump.  The production image installs this via `npm ci`.  Axios 1.20.0 hardens config reads against prototype pollution and keeps `PayloadTooLarge` / `UnprocessableEntity` as aliases.  The XHR navigation-cancel change (reject `ECONNABORTED` instead of status 0) does not apply here.  The only axios consumer is the Alpaca SDK's Node HTTP adapter (`src/lib/alpaca.ts`).
+
+**Docs.**  Rollout `docs/rollouts/2026-10-04-axios-1.20.0.md`.  `PLAN.md` and phase docs are unchanged because this is not a product-scope or phase-design change.
+
+**Verification.**  Required `verify` and `gitleaks` were already green on this head.  `check-pin` is green after Usage-Monitor main moved to congress-trading-shared v2.7.1.
 
 ## 2026-09-30 FINCH — Self-healing watchdogs (branch `finch/self-healing-watchdogs`, lane `~/workspace/lanes/st-selfheal`)
 
