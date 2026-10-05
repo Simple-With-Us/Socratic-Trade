@@ -98,6 +98,14 @@
 **Blockers.**  Rebase onto origin/main complete; required CI `verify` checks pending before squash auto-merge.
 
 **Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
+**Next.**  Address Kody review threads (honest fix or `defer`).  Extra-ship no.  Do not deploy or merge from this lane.
+## 2026-10-05 CURSOR — Issue #3888 isTradierOrderNotFound hardening (branch `cursor/harden-is-tradier-order-not-found-b176`)
+
+**What.**  Require `Tradier HTTP 404` or `Tradier HTTP 422` plus order not-found phrase in `isTradierOrderNotFound`; add lookup tests for 422 envelope and 400/502 prose collision; fix stale `cancelBracketSiblingLegs` comment only.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/tradier-order-lookup.test.ts` 11/11; `npm run build` clean.
+
+**Next.**  Push; open PR (Closes #3888); do not merge.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
