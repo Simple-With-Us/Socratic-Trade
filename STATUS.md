@@ -29,7 +29,7 @@
 
 **What.**  Exclude five retired QuiverQuant carrier fields from enrichment coverage tracking; drop misleading `freeCashFlowYield` score ablation neutralizer.
 
-**Verification.**  Pending: full lint/tsc/test/build on branch.
+**Verification.**  `npm run lint`, `npx tsc --noEmit`, targeted vitest (`test/enrichment-coverage.test.ts`, `test/source-value.test.ts`), `npm run build` — all green.
 
 **Next.**  Push; open ready PR linking board `d550b5ee`; address Kody threads.
 
