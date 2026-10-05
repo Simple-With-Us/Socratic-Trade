@@ -10,7 +10,7 @@
 
 ## 2026-10-05 CURSOR — PR #4164 off-loop reclaim (branch `grok/lexical-fts-off-event-loop`)
 
-**Claim.**  `repo: Simple-With-Us/Socratic-Trade`  `pr: #4164`.  No linked track issue.  No Slack #agent-sync post and no board card id from this cloud VM.
+**Claim.**  `repo: Simple-With-Us/Socratic-Trade`  `issue: #4213`  `board: f50c66930a124233b28563e7967b9ac7`  `pr: #4164`.  Board card is app `socratic-trade`, claimed GROK.  No Slack #agent-sync post from this cloud VM.
 
 **What.**  Rebased onto latest `origin/main` (axios #4014, Cursor cloud env #4178).  Reclaim map no longer leaks after caller abort when the slot is already dead: `onExecutionTimeout` disarms before the `disposed` guard, `killSlot` sweeps `reclaimById`, and the test reset clears timers.  A remote merge of `main` plus a partial leak fix was not kept.  This branch stays a rebase.
 

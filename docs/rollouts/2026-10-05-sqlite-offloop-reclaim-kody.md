@@ -33,7 +33,7 @@ Files:
 
 Caller abort alone still does not `killSlot` synchronously (warm pool).  Wedged `.all()` is reclaimed when the start-armed budget fires, when the worker finishes and clears reclaim, or when the slot is retired.
 
-No Slack #agent-sync post was sent from this cloud VM, and no board card id was invented.  The STATUS claim line is `repo: Simple-With-Us/Socratic-Trade` and `pr: #4164`.  There is no linked track issue.
+No Slack #agent-sync post was sent from this cloud VM.  Rule 25 reservation (owner-supplied 2026-10-05): GitHub issue `#4213`, board card `f50c66930a124233b28563e7967b9ac7` (app `socratic-trade`, claimed GROK), PR `#4164`.  STATUS claim line matches.
 
 The live board path `/Users/jay/apps/TRADING-EFFORT-LOG.md` is not on this VM.  The repo mirror `docs/EFFORT-LOG.md` has the row.
 
