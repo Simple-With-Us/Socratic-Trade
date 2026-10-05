@@ -7,6 +7,13 @@
 **Verification.**  `bash -n` on both cursor-cloud scripts; application `npm run build` not run (shell-only change).
 
 **Next.**  Push; reply on threads with fix SHA; do not merge.
+## 2026-10-05 CURSOR — PR #4164 off-loop reclaim (branch `grok/lexical-fts-off-event-loop`)
+
+**What.**  Kody threads on wedged started-slot reclaim: keep execution timer after caller abort, `reclaimById` + `clearExecutionReclaim`, remove dead `settleReject` budget branch.
+
+**Verification.**  `npm test -- test/sqlite-all-offloop.test.ts` (22 passed).
+
+**Next.**  Push; reply on threads `PRRT_kwDOS7mOVM6o82Q_` and `PRRT_kwDOS7mOVM6o82UE_`.
 
 ## 2026-10-05 CURSOR — PR #4158 Kody review follow-up (branch `fix/fred-proxy-failsoft`)
 

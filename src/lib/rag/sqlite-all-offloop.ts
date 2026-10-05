@@ -46,11 +46,12 @@ const WORKER_MMAP_SIZE = 268_435_456;
  * wait and either timer can fire first. The settle path is safe whichever
  * wins. The execution timer keeps the waiter and retires the slot itself,
  * without looking the id up in `pending` after the waiter has been dropped.
- * A caller abort that settles first sets `settled` and clears that timer, so
- * the later callback does not terminate again and does not retire the slot.
- * The worker is left to finish: a client disconnect or the retrieval deadline
- * is not evidence the statement is wedged, and killing the thread would
- * cold-start the pool.
+ * A caller abort that settles first drops the waiter from `pending` but leaves
+ * the execution timer armed until the worker replies or the budget fires.
+ * Finishing quickly after the client gave up clears that timer and keeps the
+ * slot warm. A wedged `.all()` that outlives the start-armed budget still
+ * retires the slot when the timer fires, even though the caller already
+ * rejected.
  *
  * A wedged `.all()` cannot be interrupted in place. This module retires a
  * started slot only for its own abandonments: the execution timer, or a
@@ -354,6 +355,8 @@ type Pending = {
 
 const slots: PoolSlot[] = [];
 const pending = new Map<number, Pending>();
+/** Started waiters settled by caller abort; execution timer may still reclaim the slot. */
+const reclaimById = new Map<number, Pending>();
 let nextId = 1;
 /** Test-only. Invoked when the parent observes `{ started: true }` and arms the execution timer. */
 let onQueryStartedForTesting: ((id: number) => void) | null = null;
@@ -426,12 +429,25 @@ function updateRef(slot: PoolSlot): void {
   }
 }
 
-function dropPending(id: number): Pending | undefined {
+function clearExecutionReclaim(id: number): void {
+  const waiter = reclaimById.get(id);
+  if (!waiter) return;
+  reclaimById.delete(id);
+  if (waiter.executionTimer !== undefined) {
+    clearTimeout(waiter.executionTimer);
+    waiter.executionTimer = undefined;
+  }
+}
+
+function dropPending(id: number, options?: { keepExecutionTimer?: boolean }): Pending | undefined {
   const waiter = pending.get(id);
   if (!waiter) return undefined;
   waiter.settled = true;
   pending.delete(id);
-  if (waiter.executionTimer !== undefined) clearTimeout(waiter.executionTimer);
+  if (!options?.keepExecutionTimer && waiter.executionTimer !== undefined) {
+    clearTimeout(waiter.executionTimer);
+    waiter.executionTimer = undefined;
+  }
   if (waiter.ceilingTimer !== undefined) clearTimeout(waiter.ceilingTimer);
   if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
   updateRef(waiter.slot);
@@ -478,8 +494,8 @@ function markCancelled(slot: PoolSlot, id: number): boolean {
  * only when nothing on it has started; a healthy in-flight statement is left
  * alone and this message drains behind it.
  *
- * A waiter that has already started is a caller abort. Budget abandonment of
- * a started request retires the slot before this runs. Leave the worker up.
+ * A waiter that has already started is a caller abort; reclaim is the execution
+ * timer, not this path. Leave the worker up until the budget fires or SQL ends.
  */
 function abandonPostedRequest(waiter: Pending, slot: PoolSlot): void {
   if (waiter.started) return;
@@ -505,19 +521,15 @@ function settleReject(waiter: Pending, err: Error): void {
   const posted = waiter.posted;
   const abandonedByBudget = waiter.abandonedByBudget;
   const slot = waiter.slot;
-  dropPending(waiter.id);
+  const keepExecutionTimer = started && !abandonedByBudget;
+  dropPending(waiter.id, { keepExecutionTimer });
+  if (keepExecutionTimer) reclaimById.set(waiter.id, waiter);
   // Retire or cancel before reject so a synchronous rejection handler observes
   // the pool after the abandoned statement has been dealt with.
-  // `slot.disposed` is already set when killSlot itself is settling the rest
-  // of the slot (the execution timer calls killSlot directly), so this does
-  // not terminate twice. Caller abort of a started request leaves
-  // `abandonedByBudget` false and does not retire the worker.
-  if (!slot.disposed) {
-    if (started && abandonedByBudget) {
-      killSlot(slot, () => abandonedWorkerError(), true);
-    } else if (posted) {
-      abandonPostedRequest(waiter, slot);
-    }
+  // Started budget abandonment retires the slot from onExecutionTimeout via
+  // killSlot before settleReject runs for that waiter (`slot.disposed` true).
+  if (!slot.disposed && posted) {
+    abandonPostedRequest(waiter, slot);
   }
   waiter.reject(err);
 }
@@ -690,10 +702,12 @@ function killSlot(
 }
 
 function onExecutionTimeout(waiter: Pending): void {
-  // The waiter object still carries slot and started after settle drops it from
-  // `pending` and clears this timer. If the callback lost that race, `settled`
-  // is set. Caller abort leaves the worker running; do not retire it here.
-  if (waiter.settled || !waiter.started || waiter.slot.disposed) return;
+  if (!waiter.started || waiter.slot.disposed) return;
+  reclaimById.delete(waiter.id);
+  if (waiter.executionTimer !== undefined) {
+    clearTimeout(waiter.executionTimer);
+    waiter.executionTimer = undefined;
+  }
   waiter.abandonedByBudget = true;
   const timeoutError = new Error("sqlite off-loop query timed out");
   const exhausted = new Error("sqlite off-loop worker terminated after query timeout");
@@ -762,6 +776,7 @@ function handleWorkerMessage(slot: PoolSlot, instance: Worker, msg: unknown): vo
   // the slot if a later start notice is ever delivered for the same id.
   slot.abandonedBeforeStart.delete(parsed.data.id);
   if (parsed.data.id === -1) return;
+  clearExecutionReclaim(parsed.data.id);
   const waiter = takeWaiter(slot, instance, parsed.data.id);
   if (!waiter) return;
   if (parsed.data.ok) {
@@ -859,6 +874,7 @@ export async function resetSqliteAllOffLoopForTesting(): Promise<void> {
     if (instance && !instances.includes(instance)) instances.push(instance);
   }
   for (const waiter of [...pending.values()]) settleReject(waiter, resetError);
+  reclaimById.clear();
   const startedLater = await Promise.all(
     starts.map(async (starting) => {
       if (!starting) return null;

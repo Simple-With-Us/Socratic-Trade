@@ -422,6 +422,36 @@ describe("sqlite off-loop timeout and abort", () => {
     }
   });
 
+  it("reclaims a wedged slot after caller abort when the execution budget fires", async () => {
+    await resetSqliteAllOffLoopForTesting();
+    const timeoutMs = 80;
+    const iterations = iterationsTakingAtLeast(400);
+    const started = new Promise<void>((resolve) => {
+      setSqliteOffLoopStartedHookForTesting(() => resolve());
+    });
+    const controller = new AbortController();
+    const wedge = sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema, {
+      signal: controller.signal,
+      timeoutMs
+    });
+    const wedgeSettled = expect(wedge).rejects.toThrow("lexical reclaim aborted");
+    try {
+      await started;
+      controller.abort(new Error("lexical reclaim aborted"));
+      await wedgeSettled;
+      expect(activeSqliteOffLoopSlotCountForTesting()).toBeGreaterThan(0);
+      await new Promise((resolve) => setTimeout(resolve, timeoutMs + 120));
+      expect(activeSqliteOffLoopSlotCountForTesting()).toBe(0);
+
+      const startedAt = Date.now();
+      const rows = await sqliteAllOffLoop("SELECT 7 AS c", [], dbPath, CountRowSchema, { timeoutMs: 5_000 });
+      expect(rows).toEqual([{ c: 7 }]);
+      expect(Date.now() - startedAt).toBeLessThan(200);
+    } finally {
+      setSqliteOffLoopStartedHookForTesting(null);
+    }
+  });
+
   it("retires a wedged slot when the execution budget fires", async () => {
     await resetSqliteAllOffLoopForTesting();
     const minMs = 600;
