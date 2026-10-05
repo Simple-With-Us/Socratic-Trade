@@ -149,8 +149,13 @@ export async function dataSourceFetch(
     return directFetch(url, init);
   }
 
+  // A caller signal is the deadline.  A fixed 3s cap truncates lanes that
+  // need 4-5s to headers through a slow but working residential proxy, then
+  // duplicates the request on direct egress, which anti-bot sources reject.
+  // The cap remains only when nothing else bounds the leg.
+  const perLegTimeoutMs = init?.signal ? undefined : PROXY_LEG_TIMEOUT_MS;
   const proxiedFetch = (deps.proxiedFetchFactory ?? ((proxyUrl: string) =>
-    createProxiedFetch(proxyUrl, undefined, { proxyTimeoutMs: PROXY_LEG_TIMEOUT_MS })))(
+    createProxiedFetch(proxyUrl, undefined, { proxyTimeoutMs: perLegTimeoutMs })))(
     resolution.proxyUrl
   );
   try {

@@ -165,18 +165,13 @@ export function getProxyAgent(proxyUrl: string): ProxyAgent {
 }
 
 /**
- * Per-proxy-leg timeout (ms). Shorter than typical call-site budgets (the
- * FRED fetch is 5s, the VIX lanes are 6s) so a slow residential proxy fails
- * fast into the `fail_soft` direct fallback BEFORE the caller's own signal
- * fires — otherwise the caller's signal aborts the proxied fetch first, the
- * caller's now-aborted signal would also abort the direct fallback, and the
- * fail-soft would silently never get to run.  The remaining caller budget
- * (e.g. 2s for FRED, 3s for VIX) is comfortably above direct egress latency
- * for the providers that have a fast direct path.
- *
- * 0 / undefined disables the per-leg timeout (caller signal only). Used by
- * the dataSourceFetch call site; tests that want to drive the abort path
- * directly leave it off.
+ * Safety cap (ms) for a proxied leg that has no caller AbortSignal.
+ * dataSourceFetch applies it only in that case.  A caller-supplied signal is
+ * the deadline.  A fixed 3s cap was aborting lanes that need 4-5s to headers
+ * through a slow but working residential proxy, then duplicating the request
+ * on direct egress, which anti-bot sources reject.  FRED does not use this
+ * cap.  It is excluded and goes direct.  0 or undefined disables the per-leg
+ * timeout (caller signal only).
  */
 export const PROXY_LEG_TIMEOUT_MS = 3000;
 
@@ -185,10 +180,11 @@ export const PROXY_LEG_TIMEOUT_MS = 3000;
  * Returns baseFetch unchanged when no proxy URL is given (CT parity).
  *
  * When `options.proxyTimeoutMs` is a positive number, the returned fetch
- * chains a fresh AbortController (the "proxy leg" timeout) with the caller's
- * own signal. Either side aborting cancels the in-flight proxied request, so
- * a slow proxy yields an AbortError (now classified as a proxy-leg failure
- * by `isProxyLegError`) instead of consuming the caller's full budget.
+ * chains a fresh AbortController (the proxy-leg timeout) with the caller's
+ * own signal.  Either side aborting cancels the in-flight proxied request.
+ * The timer and the caller listener stay armed until the body settles.
+ * fetch() resolves at headers, and releasing them there left res.json()
+ * without cancellation.
  */
 export function createProxiedFetch(
   proxyUrl: string | undefined,
@@ -215,11 +211,30 @@ export function createProxiedFetch(
         callerSignal.addEventListener("abort", onCallerAbort, { once: true });
       }
     }
-    try {
-      return await baseFetch(input, { ...withDispatcher, signal: proxyController.signal });
-    } finally {
+    let settled = false;
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeoutHandle);
       if (onCallerAbort && callerSignal) callerSignal.removeEventListener("abort", onCallerAbort);
+    };
+    // fetch() resolves at headers.  The body is still an open stream, so the
+    // caller's signal and the leg timer stay armed until the body settles.
+    // Releasing them here let a header-then-stall proxy hang past the caller
+    // budget, including long-lived cascade reads.
+    try {
+      const res = await baseFetch(input, { ...withDispatcher, signal: proxyController.signal });
+      if (!res.body) {
+        cleanup();
+        return res;
+      }
+      return new Response(
+        res.body.pipeThrough(new TransformStream({ flush: cleanup, cancel: cleanup })),
+        { status: res.status, statusText: res.statusText, headers: res.headers }
+      );
+    } catch (err) {
+      cleanup();
+      throw err;
     }
   }) as typeof fetch;
 }

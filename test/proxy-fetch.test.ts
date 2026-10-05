@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_RESIDENTIAL_PROXY_URL,
+  createProxiedFetch,
   formatProxyUrl,
   isProxyLegError,
   isProxyOffSentinel,
@@ -106,5 +107,56 @@ describe("isProxyLegError", () => {
 describe("safeProxyHostForLog", () => {
   it("never leaks embedded credentials", () => {
     expect(safeProxyHostForLog("http://user:secret@10.99.0.2:8888")).toBe("10.99.0.2:8888");
+  });
+});
+
+function stalledBody(onAbort: (signal: AbortSignal) => void): typeof fetch {
+  return (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const signal = init?.signal;
+    const stream = new ReadableStream({
+      start(controller) {
+        if (!signal) return;
+        const fail = () => {
+          onAbort(signal);
+          try {
+            controller.error(signal.reason ?? new DOMException("aborted", "AbortError"));
+          } catch {
+            // already errored
+          }
+        };
+        if (signal.aborted) fail();
+        else signal.addEventListener("abort", fail, { once: true });
+      }
+    });
+    return new Response(stream, { status: 200 });
+  }) as typeof fetch;
+}
+
+describe("createProxiedFetch body lifetime", () => {
+  it("keeps the caller abort linked until the body settles", async () => {
+    const caller = new AbortController();
+    let aborted = false;
+    const proxied = createProxiedFetch(
+      "http://proxy.test:8888",
+      stalledBody(() => {
+        aborted = true;
+      }),
+      { proxyTimeoutMs: 30000 }
+    );
+    const res = await proxied("https://example.test/x", { signal: caller.signal });
+    expect(aborted).toBe(false);
+    caller.abort();
+    await expect(res.text()).rejects.toThrow(/aborted/i);
+    expect(aborted).toBe(true);
+  });
+
+  it("keeps the proxy-leg timer armed after headers", async () => {
+    const proxied = createProxiedFetch(
+      "http://proxy.test:8888",
+      stalledBody(() => {}),
+      { proxyTimeoutMs: 40 }
+    );
+    const res = await proxied("https://example.test/x");
+    await expect(res.text()).rejects.toThrow(/aborted/i);
   });
 });

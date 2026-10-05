@@ -64,15 +64,15 @@ describe("dataSourceFetch", () => {
   });
 
   it("routes through the effective proxy", async () => {
-    const { deps, calls } = makeDeps({ env: { RESIDENTIAL_PROXY_URL: "http://10.99.0.2:8888" } });
+    const { deps, calls } = makeDeps({ env: { RESIDENTIAL_PROXY_URL: "http://proxy.test:8888" } });
     const res = await dataSourceFetch("https://api.polygon.io/x", undefined, {}, deps);
     expect(await res.text()).toBe("proxied");
-    expect(calls.proxiedUrls).toEqual(["http://10.99.0.2:8888"]);
+    expect(calls.proxiedUrls).toEqual(["http://proxy.test:8888"]);
   });
 
   it("fail_soft falls back to direct on a proxy-leg transport error", async () => {
     const { deps, calls } = makeDeps({
-      env: { RESIDENTIAL_PROXY_URL: "http://10.99.0.2:8888" },
+      env: { RESIDENTIAL_PROXY_URL: "http://proxy.test:8888" },
       proxiedFetchFactory: () => (async () => {
         throw PROXY_DOWN;
       }) as typeof fetch
@@ -85,11 +85,10 @@ describe("dataSourceFetch", () => {
   it("fail_soft falls back to direct when the proxied fetch aborts mid-flight", async () => {
     // Regression: previously an AbortError from the proxied fetch had no
     // `.code`, so isProxyLegError classified it as a non-proxy error and
-    // rethrew — fail_soft never engaged. The fix both classifies AbortError
-    // as proxy-leg AND (via the proxy-leg timeout) aborts the proxy before
-    // the caller's signal so the caller's signal is still live for direct.
+    // rethrew.  fail_soft never engaged.  AbortError is a proxy-leg failure
+    // unless the caller's own signal is already aborted.
     const { deps, calls } = makeDeps({
-      env: { RESIDENTIAL_PROXY_URL: "http://10.99.0.2:8888" },
+      env: { RESIDENTIAL_PROXY_URL: "http://proxy.test:8888" },
       proxiedFetchFactory: () => (async () => {
         throw new DOMException("aborted", "AbortError");
       }) as typeof fetch
@@ -105,7 +104,7 @@ describe("dataSourceFetch", () => {
     // cancellation — do NOT silently kick off a direct fallback the caller
     // no longer wants.
     const { deps, calls } = makeDeps({
-      env: { RESIDENTIAL_PROXY_URL: "http://10.99.0.2:8888" },
+      env: { RESIDENTIAL_PROXY_URL: "http://proxy.test:8888" },
       proxiedFetchFactory: () => (async (_input, init) => {
         const signal = (init as RequestInit | undefined)?.signal;
         return await new Promise<Response>((resolve, reject) => {
@@ -131,7 +130,7 @@ describe("dataSourceFetch", () => {
 
   it("fail_closed propagates instead of falling back", async () => {
     const { deps } = makeDeps({
-      env: { RESIDENTIAL_PROXY_URL: "http://10.99.0.2:8888", RESIDENTIAL_PROXY_FAILURE_MODE: "fail_closed" },
+      env: { RESIDENTIAL_PROXY_URL: "http://proxy.test:8888", RESIDENTIAL_PROXY_FAILURE_MODE: "fail_closed" },
       proxiedFetchFactory: () => (async () => {
         throw PROXY_DOWN;
       }) as typeof fetch
@@ -143,7 +142,7 @@ describe("dataSourceFetch", () => {
 
   it("returns a proxy HTTP 502 as-is (upstream-down is not proxy-down)", async () => {
     const { deps, calls } = makeDeps({
-      env: { RESIDENTIAL_PROXY_URL: "http://10.99.0.2:8888" },
+      env: { RESIDENTIAL_PROXY_URL: "http://proxy.test:8888" },
       proxiedFetchFactory: () => (async () => new Response("bad gateway", { status: 502 })) as typeof fetch
     });
     const res = await dataSourceFetch("https://blocked-upstream.example/x", undefined, {}, deps);
@@ -152,7 +151,7 @@ describe("dataSourceFetch", () => {
   });
 
   it("never proxies internal targets, even with a proxy configured", async () => {
-    const { deps, calls } = makeDeps({ env: { RESIDENTIAL_PROXY_URL: "http://10.99.0.2:8888" } });
+    const { deps, calls } = makeDeps({ env: { RESIDENTIAL_PROXY_URL: "http://proxy.test:8888" } });
     for (const url of ["http://localhost:3000/api/health", "http://qdrant-st:6333/collections", "http://10.0.0.5:6333/"]) {
       await dataSourceFetch(url, undefined, {}, deps);
     }
@@ -161,7 +160,7 @@ describe("dataSourceFetch", () => {
   });
 
   it("keeps excluded services direct", async () => {
-    const { deps, calls } = makeDeps({ env: { RESIDENTIAL_PROXY_URL: "http://10.99.0.2:8888" } });
+    const { deps, calls } = makeDeps({ env: { RESIDENTIAL_PROXY_URL: "http://proxy.test:8888" } });
     await dataSourceFetch("https://usage.jays.services/api/ingest", undefined, { service: "usage-monitor" }, deps);
     expect(calls.proxied).toBe(0);
     expect(calls.direct).toBe(1);
