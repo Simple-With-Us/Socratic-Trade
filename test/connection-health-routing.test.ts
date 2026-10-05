@@ -296,6 +296,7 @@ describe("Connection Health & Failure Routing", () => {
   it("/api/health stays 200 when Pinecone is hard-stopped but Qdrant is the read backend", async () => {
     process.env.QDRANT_URL = "http://127.0.0.1:6333";
     process.env.QDRANT_API_KEY = "test-qdrant-key";
+    process.env.RAG_VECTOR_WRITE_BACKEND = "qdrant";
     try {
       const { healthRoute, db } = await load();
       db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
@@ -310,6 +311,7 @@ describe("Connection Health & Failure Routing", () => {
       expect(body.checks.ragVectorReadBackend).toBe("qdrant");
       expect(body.checks.ragVectorWriteBackend).toBe("qdrant");
     } finally {
+      process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
       delete process.env.QDRANT_URL;
       delete process.env.QDRANT_API_KEY;
     }

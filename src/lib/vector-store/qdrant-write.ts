@@ -10,8 +10,9 @@
  *   2. env RAG_VECTOR_WRITE_QDRANT (truthy/falsy, same parsing as every server knob)
  *   3. env RAG_VECTOR_WRITE_BACKEND ("qdrant" | "pinecone")
  *   4. default: qdrant when QDRANT_URL is configured, else pinecone
- * Qdrant is additionally gated on qdrantConfigured() — a knob flipped on without the endpoint
- * stays on Pinecone (warned once) instead of turning every ingest into a hard failure.
+ * Qdrant is additionally gated on qdrantConfigured() — when the write backend resolves to Qdrant
+ * but QDRANT_URL is missing, vectorWriteBackend() throws (fail closed) instead of silently
+ * falling back to Pinecone.  Opt into Pinecone explicitly via the knob/env when Qdrant is absent.
  *
  * Point ids MUST match scripts/qdrant/pinecone-to-qdrant-copy.py: uuid5(NAMESPACE_URL,
  * "st:" + ns + ":" + pinecone_id).  Payload MUST keep pc_id (original Pinecone id) and ns
@@ -66,8 +67,6 @@ export interface QdrantCollectionInfo {
   distance?: string;
 }
 
-let warnedUnconfigured = false;
-
 export function qdrantCollectionName(): string {
   return process.env.QDRANT_COLLECTION?.trim() || DEFAULT_COLLECTION;
 }
@@ -93,18 +92,16 @@ function qdrantHeaders(): Record<string, string> {
 }
 
 /**
- * Effective write backend for this ingest/delete/inventory pass.  Never throws — any
- * resolution failure lands on "pinecone" (today's behavior) so a broken knob cannot
- * take the only remaining write path down.
+ * Effective write backend for this ingest/delete/inventory pass.  Knob/env resolution failures
+ * fail open to Pinecone when Qdrant was not selected.  When Qdrant is selected (default or
+ * explicit) but QDRANT_URL is unset, throws so ingest cannot silently resume on Pinecone.
  */
 export function vectorWriteBackend(): VectorWriteBackend {
   let enabled: boolean | undefined;
-  let explicit = false;
   try {
     const override = serverKnobOverride(QDRANT_WRITE_KNOB_ID);
     if (typeof override === "boolean") {
       enabled = override;
-      explicit = true;
     }
   } catch {
     // fail open to env — same posture as every server-knob read
@@ -114,29 +111,24 @@ export function vectorWriteBackend(): VectorWriteBackend {
     if (raw) {
       if (TRUTHY.has(raw)) enabled = true;
       else if (FALSY.has(raw)) enabled = false;
-      if (enabled !== undefined) explicit = true;
     }
   }
   if (enabled === undefined) {
     const backend = process.env.RAG_VECTOR_WRITE_BACKEND?.trim().toLowerCase();
     if (backend === "qdrant") enabled = true;
     else if (backend === "pinecone") enabled = false;
-    if (enabled !== undefined) explicit = true;
   }
   if (enabled === undefined) {
     enabled = true;
   }
   if (enabled !== true) return "pinecone";
   if (!qdrantConfigured()) {
-    // Default-on without QDRANT_URL is silent pinecone (local tests, boxes without Qdrant).
-    // Warn only when an operator explicitly flipped the knob/env on without the endpoint.
-    if (explicit && !warnedUnconfigured) {
-      warnedUnconfigured = true;
-      console.warn(
-        "[qdrant-write] Qdrant write backend requested but QDRANT_URL is not set; writes stay on Pinecone."
-      );
-    }
-    return "pinecone";
+    const message =
+      "QDRANT_URL is not configured but the vector write backend is Qdrant (default or explicit).  " +
+      "Writes must not silently fall back to Pinecone — set QDRANT_URL or opt into Pinecone via " +
+      "RAG_VECTOR_WRITE_BACKEND=pinecone or RAG_VECTOR_WRITE_QDRANT=off.";
+    console.error(`[qdrant-write] ${message}`);
+    throw new Error(message);
   }
   return "qdrant";
 }

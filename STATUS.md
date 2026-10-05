@@ -98,6 +98,13 @@
 **Blockers.**  Rebase onto origin/main complete; required CI `verify` checks pending before squash auto-merge.
 
 **Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
+## 2026-10-05 CURSOR — Qdrant write loud fallback (branch `cursor/loud-qdrant-write-fallback-7868`, board 8215e304, PR #4232)
+
+**What.**  `vectorWriteBackend()` no longer silently returns `"pinecone"` when Qdrant is selected but `QDRANT_URL` is unset; it logs `console.error` and throws.  Explicit Pinecone opt-in unchanged.  `RAG_MAX_DAILY_INGEST_POINTS` untouched.  Rebased onto `origin/main` (no conflicts).  Kody sentence-gap fix on operator error string (two ASCII spaces after `explicit).`).
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/qdrant-write.test.ts` green post-rebase.
+
+**Next.**  Force-with-lease push; CI `verify` on PR #4232.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
