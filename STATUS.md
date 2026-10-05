@@ -1,5 +1,13 @@
 # Current Status
 
+## 2026-10-05 CURSOR — R2 dead `trading-live/**` prune plan (board `242c350e`, branch `cursor/r2-trading-live-prune-plan-7d7e`)
+
+**What.**  Docs/runbook + read-only `scripts/ops/r2-trading-live-dead-history-inventory.mjs` for pre-B2-cutover Litestream objects on R2 `socratic-trade-bucket`.  **No deletes.**  B2 live replica untouched.
+
+**Verification.**  Targeted vitest on inventory scripts; full gate before merge.
+
+**Next.**  Draft PR for owner review; operator runs inventory with `AWS_R2_HISTORIC_*` when approved.
+
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
 **What.**  Five open Kody threads: relay vs Slack (honest gap + optional hook), rollout build-status N/A, `nvm install` fail-soft, `load_nvm` `--no-use` + relaxed strict mode around source, remove `.cursor/infisical.env` parsing from `cursor-cloud-start.sh`.
