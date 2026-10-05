@@ -36,25 +36,47 @@ const WORKER_MMAP_SIZE = 268_435_456;
  * Execution budget for one off-loop read, armed when that worker reports it is
  * about to call `.all()` — not when the parent posts. The worker runs statements
  * serially, so a timer started at postMessage would bill queue wait to the
- * statement. Same budget as RAG_QUERY_IO_DEADLINE_MS (rag-retrieval-deadline.ts).
- * That module does not statically import node: builtins (only inflight-deadline.ts),
- * so it is safe on the instrumentation webpack graph.
+ * statement. `RAG_QUERY_IO_DEADLINE_MS` lives in rag-retrieval-deadline.ts, which
+ * does not statically import node: builtins (only inflight-deadline.ts), so it
+ * is safe on the instrumentation webpack graph.
  *
- * A wedged statement cannot be interrupted. On this deadline only the instance
- * inside `.all()` is terminated, and only that request fails. Requests still
- * queued on it are re-dispatched onto another live instance, or a fresh one
- * when the rest of the pool is busy.
+ * Strictly shorter than that caller deadline. Production retrieval
+ * (`createRagQueryAbort` in vector-db.ts) arms the full
+ * `RAG_QUERY_IO_DEADLINE_MS` before the request is posted, so the caller timer
+ * includes queue wait and scheduling delay. An execution budget equal to the
+ * caller deadline never fires first: the abort settles the waiter, and a
+ * reclaim path that then looked the id up in `pending` did not retire the slot.
+ * Half the caller deadline leaves headroom so this timer lands first when the
+ * statement starts promptly (the usual case: little or no queue). A request
+ * that sits queued for nearly this whole budget can still meet the caller abort
+ * around the same instant; abandoning a started request retires the slot on
+ * that path too, without depending on this timer winning the race.
  *
- * Queued requests are bounded by the caller's AbortSignal. Retrieval passes
- * `createRagQueryAbort`'s signal, so abort rejects the waiter without retiring
- * the worker. A caller that omits a signal also gets a queue ceiling of
- * `timeoutMs + SQLITE_OFF_LOOP_TIMEOUT_MS` (the execution budget plus the
- * production timeout, not a small multiple of `timeoutMs`). A short test
- * override can sit behind a slow-but-under-timeout statement without the
- * ceiling firing, and a request that never receives a start notification still
- * cannot wait forever. The ceiling is cleared once execution starts.
+ * Trade-off: a lexical scan that needs longer than this budget, but would have
+ * finished inside the 15s caller deadline, now fails and the slot is recycled.
+ * Corpus-wide lexical recall degrades to dense search for that one request
+ * (`corpusWideLexicalFailed`) instead of holding a pool worker for the rest of
+ * the statement. Two such pins (pool size 2) would disable lexical recall until
+ * both statements returned. Callers with a genuinely longer statement pass
+ * `timeoutMs`.
+ *
+ * A wedged `.all()` cannot be interrupted in place. When a request that has
+ * started is abandoned — this deadline or the caller's AbortSignal — that slot
+ * is terminated. Only the started request fails. Requests still queued on it
+ * are re-dispatched onto another live instance, or a fresh one when the rest
+ * of the pool is busy. The decision uses the slot and `started` flag stored on
+ * the waiter, not a `pending` lookup after the waiter has been settled, so
+ * abort and this timer can fire in either order.
+ *
+ * Queued requests are also bounded by the caller's AbortSignal. A caller that
+ * omits a signal gets a queue ceiling of `timeoutMs + SQLITE_OFF_LOOP_TIMEOUT_MS`
+ * (this execution budget plus the same production timeout, not a small multiple
+ * of `timeoutMs`). A short test override can sit behind a slow-but-under-timeout
+ * statement without the ceiling firing, and a request that never receives a
+ * start notification still cannot wait forever. The ceiling is cleared once
+ * execution starts.
  */
-export const SQLITE_OFF_LOOP_TIMEOUT_MS = RAG_QUERY_IO_DEADLINE_MS;
+export const SQLITE_OFF_LOOP_TIMEOUT_MS = Math.floor(RAG_QUERY_IO_DEADLINE_MS / 2);
 
 /**
  * Readonly worker threads. Created lazily, up to this many. Each request is
@@ -70,7 +92,13 @@ export const SQLITE_OFF_LOOP_POOL_SIZE = 2;
 const SIGNAL_LESS_QUEUE_SLACK_MS = SQLITE_OFF_LOOP_TIMEOUT_MS;
 
 export type SqliteAllOffLoopOptions = {
-  /** Reject this waiter on abort, including while it is still queued. Does not terminate the worker. */
+  /**
+   * Reject this waiter on abort, including while it is still queued.
+   * Abort of a request that has started executing retires that slot: the
+   * statement is still on the worker thread, so only that request fails and
+   * not-yet-started requests queued on the slot are re-dispatched. Abort
+   * before the request has started does not terminate the worker.
+   */
   signal?: AbortSignal;
   /** Execution budget armed at worker start. Overrides SQLITE_OFF_LOOP_TIMEOUT_MS. Production callers omit this. */
   timeoutMs?: number;
@@ -249,6 +277,13 @@ type Pending = {
   slot: PoolSlot;
   /** True once this instance has posted `{ id, started: true }` for the request. */
   started: boolean;
+  /**
+   * True once the waiter left `pending`. Execution-timer callbacks read this
+   * instead of looking the id up again: settle clears the timer, but a callback
+   * already queued must still see that the waiter was abandoned and must not
+   * depend on `pending.get`.
+   */
+  settled: boolean;
   /** How many times the request has been posted. Caps re-dispatch at the pool size. */
   placements: number;
   /**
@@ -269,6 +304,8 @@ type Pending = {
 const slots: PoolSlot[] = [];
 const pending = new Map<number, Pending>();
 let nextId = 1;
+/** Test-only. Invoked when the parent observes `{ started: true }` and arms the execution timer. */
+let onQueryStartedForTesting: ((id: number) => void) | null = null;
 
 async function resolvePackageEntry(specifier: string): Promise<string> {
   try {
@@ -341,6 +378,7 @@ function updateRef(slot: PoolSlot): void {
 function dropPending(id: number): Pending | undefined {
   const waiter = pending.get(id);
   if (!waiter) return undefined;
+  waiter.settled = true;
   pending.delete(id);
   if (waiter.executionTimer !== undefined) clearTimeout(waiter.executionTimer);
   if (waiter.ceilingTimer !== undefined) clearTimeout(waiter.ceilingTimer);
@@ -349,9 +387,23 @@ function dropPending(id: number): Pending | undefined {
   return waiter;
 }
 
+function abandonedWorkerError(): Error {
+  return new Error("sqlite off-loop worker terminated after an abandoned query");
+}
+
 function settleReject(waiter: Pending, err: Error): void {
   if (pending.get(waiter.id) !== waiter) return;
+  const started = waiter.started;
+  const slot = waiter.slot;
   dropPending(waiter.id);
+  // Retire before reject so a synchronous rejection handler observes the pool
+  // after the wedged slot is gone. `slot.disposed` is already set when killSlot
+  // itself is settling the rest of the slot, so this does not terminate twice.
+  // Slot and `started` live on the waiter: do not look the id up in `pending`
+  // after this point. Abort and the execution timer can fire in either order.
+  if (started && !slot.disposed) {
+    killSlot(slot, () => abandonedWorkerError(), true);
+  }
   waiter.reject(err);
 }
 
@@ -504,12 +556,18 @@ function killSlot(
   if (stopThread) void instance.terminate().catch(() => undefined);
 }
 
-function onExecutionTimeout(slot: PoolSlot, id: number): void {
-  const waiter = pending.get(id);
-  if (!waiter || waiter.slot !== slot || !waiter.started) return;
+function onExecutionTimeout(waiter: Pending): void {
+  // The waiter object still carries slot and started after settle drops it from
+  // `pending` and clears this timer. If the callback lost that race, `settled`
+  // is set and the settle path already retired a started request.
+  if (waiter.settled || !waiter.started || waiter.slot.disposed) return;
   const timeoutError = new Error("sqlite off-loop query timed out");
   const exhausted = new Error("sqlite off-loop worker terminated after query timeout");
-  killSlot(slot, (pendingWaiter) => (pendingWaiter.id === id ? timeoutError : exhausted), true);
+  killSlot(
+    waiter.slot,
+    (pendingWaiter) => (pendingWaiter.id === waiter.id ? timeoutError : exhausted),
+    true
+  );
 }
 
 function takeWaiter(slot: PoolSlot, instance: Worker, id: number): Pending | undefined {
@@ -522,16 +580,17 @@ function takeWaiter(slot: PoolSlot, instance: Worker, id: number): Pending | und
 function noteStarted(slot: PoolSlot, instance: Worker, id: number): void {
   if (slot.disposed || slot.worker !== instance) return;
   const waiter = pending.get(id);
-  if (!waiter || waiter.slot !== slot || waiter.started) return;
+  if (!waiter || waiter.slot !== slot || waiter.started || waiter.settled) return;
   waiter.started = true;
   if (waiter.ceilingTimer !== undefined) {
     clearTimeout(waiter.ceilingTimer);
     waiter.ceilingTimer = undefined;
   }
   if (waiter.executionTimer !== undefined) clearTimeout(waiter.executionTimer);
-  const timer = setTimeout(() => onExecutionTimeout(slot, id), waiter.timeoutMs);
+  const timer = setTimeout(() => onExecutionTimeout(waiter), waiter.timeoutMs);
   timer.unref?.();
   waiter.executionTimer = timer;
+  onQueryStartedForTesting?.(id);
 }
 
 function handleWorkerMessage(slot: PoolSlot, instance: Worker, msg: unknown): void {
@@ -606,6 +665,7 @@ export async function sqliteAllOffLoop<T>(
       reject,
       slot,
       started: false,
+      settled: false,
       placements: 0,
       allowRedispatch: true,
       signal,
@@ -682,6 +742,16 @@ async function ensureWorkerForTesting(): Promise<PoolSlot> {
   return slot;
 }
 
+/** Test-only: observe the parent arming the execution timer after `{ started: true }`. */
+export function setSqliteOffLoopStartedHookForTesting(hook: ((id: number) => void) | null): void {
+  onQueryStartedForTesting = hook;
+}
+
+/** Test-only: live pool slots. A retired slot is removed synchronously in killSlot. */
+export function activeSqliteOffLoopSlotCountForTesting(): number {
+  return slots.filter((slot) => !slot.disposed).length;
+}
+
 /** Test-only: register a waiter without sending SQL, so a forged reply can be delivered. */
 export async function primeSqliteOffLoopWaiterForTesting(): Promise<{ id: number; done: Promise<SqliteRow[]> }> {
   const slot = await ensureWorkerForTesting();
@@ -693,6 +763,7 @@ export async function primeSqliteOffLoopWaiterForTesting(): Promise<{ id: number
       reject,
       slot,
       started: false,
+      settled: false,
       placements: 1,
       allowRedispatch: false,
       sql: "SELECT 1",

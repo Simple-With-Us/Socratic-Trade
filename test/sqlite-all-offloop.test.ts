@@ -5,13 +5,17 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { z, ZodError } from "zod";
+import { RAG_QUERY_IO_DEADLINE_MS } from "../src/lib/rag-retrieval-deadline";
 import { SQLITE_BUSY_PIN_MS } from "../src/lib/sqlite-event-loop";
 import {
+  activeSqliteOffLoopSlotCountForTesting,
   deliverSqliteOffLoopMessageForTesting,
   postSqliteOffLoopRawForTesting,
   primeSqliteOffLoopWaiterForTesting,
   resetSqliteAllOffLoopForTesting,
+  setSqliteOffLoopStartedHookForTesting,
   SQLITE_OFF_LOOP_POOL_SIZE,
+  SQLITE_OFF_LOOP_TIMEOUT_MS,
   SqliteRowSchema,
   SqliteValueSchema,
   SqliteWorkerResponseSchema,
@@ -61,6 +65,7 @@ beforeAll(() => {
 });
 
 afterAll(async () => {
+  setSqliteOffLoopStartedHookForTesting(null);
   await resetSqliteAllOffLoopForTesting();
 });
 
@@ -368,6 +373,50 @@ describe("sqlite off-loop timeout and abort", () => {
     await expect(
       sqliteAllOffLoop("SELECT 1 AS c", [], dbPath, CountRowSchema, { signal: controller.signal })
     ).rejects.toThrow("already aborted");
+  });
+
+  it("keeps the execution budget strictly inside the caller abort deadline", () => {
+    // Production callers omit timeoutMs, so SQLITE_OFF_LOOP_TIMEOUT_MS is the budget
+    // armed when the worker reports started. createRagQueryAbort uses the full deadline.
+    expect(SQLITE_OFF_LOOP_TIMEOUT_MS).toBeLessThan(RAG_QUERY_IO_DEADLINE_MS);
+    expect(SQLITE_OFF_LOOP_TIMEOUT_MS).toBe(Math.floor(RAG_QUERY_IO_DEADLINE_MS / 2));
+  });
+
+  it("retires a started slot when the caller aborts before the execution timer", async () => {
+    await resetSqliteAllOffLoopForTesting();
+    const minMs = 600;
+    const iterations = iterationsTakingAtLeast(minMs);
+    let startedCount = 0;
+    const bothStarted = new Promise<void>((resolve) => {
+      setSqliteOffLoopStartedHookForTesting(() => {
+        startedCount += 1;
+        if (startedCount >= SQLITE_OFF_LOOP_POOL_SIZE) resolve();
+      });
+    });
+    const controllers = Array.from({ length: SQLITE_OFF_LOOP_POOL_SIZE }, () => new AbortController());
+    const wedges = controllers.map((controller) =>
+      sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema, {
+        signal: controller.signal,
+        // Far past the abort, so reclaim cannot be the execution timer.
+        timeoutMs: 30_000
+      })
+    );
+    const wedgeSettled = wedges.map((wedge) => expect(wedge).rejects.toThrow("lexical aborted"));
+    try {
+      await bothStarted;
+      for (const controller of controllers) controller.abort(new Error("lexical aborted"));
+      // killSlot removes the slot before abort() returns. A later query cannot
+      // sit on either wedged worker.
+      expect(activeSqliteOffLoopSlotCountForTesting()).toBe(0);
+      await Promise.all(wedgeSettled);
+
+      const startedAt = Date.now();
+      const rows = await sqliteAllOffLoop("SELECT 4 AS c", [], dbPath, CountRowSchema, { timeoutMs: 5_000 });
+      expect(rows).toEqual([{ c: 4 }]);
+      expect(Date.now() - startedAt).toBeLessThan(minMs / 2);
+    } finally {
+      setSqliteOffLoopStartedHookForTesting(null);
+    }
   });
 });
 
