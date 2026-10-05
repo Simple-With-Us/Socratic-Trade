@@ -104,7 +104,7 @@
 
 **Verification.**  `bash scripts/ops/st-container-restart-monitor.selftest.sh` (3/3); `bash -n` on shell scripts; `python3 -m py_compile` on sentry helper.
 
-**Next.**  Push PR; owner installs on host per `docs/runbooks/st-container-restart-monitor.md`.
+**Next.**  PR #4224 — owner installs on host per `docs/runbooks/st-container-restart-monitor.md`.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
