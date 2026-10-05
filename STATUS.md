@@ -18,6 +18,14 @@
 
 **Next.**  Push commit; update PR #4158 body; human resolves fixed threads; do not merge from this agent.
 
+## 2026-10-04 — axios 1.18.0 to 1.20.0 (PR #4014)
+
+**What.**  Dependabot runtime bump.  The production image installs this via `npm ci`.  Axios 1.20.0 hardens prototype-pollution-safe reads of merged config and keeps `PayloadTooLarge` / `UnprocessableEntity` as aliases.  The XHR navigation-cancel change (reject `ECONNABORTED` instead of status 0) does not apply here.  Consumers: `@alpacahq/alpaca-trade-api` (via `overrides.axios`) and first-party `src/lib/alpaca.ts`, which `require`s axios and sets `defaults.timeout` from `ALPACA_BROKER_IO_DEADLINE_MS` on the broker path.
+
+**Docs.**  Rollout `docs/rollouts/2026-10-04-axios-1.20.0.md`.  `PLAN.md` and phase docs are unchanged because this is not a product-scope or phase-design change.
+
+**Verification.**  The lockfile commit passed the required `verify` gate: `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build`.  The full Next.js build passed on the lockfile commit.  `gitleaks` passed.  This docs commit remains incomplete until it passes the same exact gate.
+
 ## 2026-09-30 FINCH — Self-healing watchdogs (branch `finch/self-healing-watchdogs`, lane `~/workspace/lanes/st-selfheal`)
 
 **What.**  Owner directive after the 2026-09-30 10:33-10:44 CT 11-minute public 503 (Traefik "no available server" while the app process was alive, Docker healthcheck green, Coolify "running:healthy"; manual Coolify restart recovered).  Root causes: (1) nothing acts on the Docker health signal (Coolify `health_check_enabled=false`); (2) the tick watchdog's abort never reaches run/scroll work — orphaned Qdrant scrolls OOM the process (2026-09-25 mechanism); (3) `tradingLivenessDegraded` had no consumer (UptimeRobot retired), so a 4-failure streak with no completed run in ~4.9 days sat silent; (4) no in-process memory watchdog existed.
