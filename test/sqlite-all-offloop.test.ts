@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { z, ZodError } from "zod";
+import { SQLITE_BUSY_PIN_MS } from "../src/lib/sqlite-event-loop";
 import {
   deliverSqliteOffLoopMessageForTesting,
   postSqliteOffLoopRawForTesting,
@@ -70,6 +71,18 @@ describe("sqliteAllOffLoop", () => {
     } finally {
       clearInterval(offloopTimer);
     }
+  });
+});
+
+describe("sqlite off-loop connection", () => {
+  it("uses the serving busy pin and read pragmas", async () => {
+    const busy = await sqliteAllOffLoop("PRAGMA busy_timeout", [], dbPath, z.object({ timeout: z.number() }));
+    const cache = await sqliteAllOffLoop("PRAGMA cache_size", [], dbPath, z.object({ cache_size: z.number() }));
+    const mmap = await sqliteAllOffLoop("PRAGMA mmap_size", [], dbPath, z.object({ mmap_size: z.number() }));
+    expect(busy).toEqual([{ timeout: SQLITE_BUSY_PIN_MS }]);
+    expect(cache).toEqual([{ cache_size: -20_000 }]);
+    expect(mmap).toEqual([{ mmap_size: 268_435_456 }]);
+    expect(SQLITE_BUSY_PIN_MS).toBe(100);
   });
 });
 

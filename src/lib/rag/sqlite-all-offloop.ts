@@ -10,11 +10,25 @@
 import "server-only";
 import type { Worker } from "node:worker_threads";
 import { z } from "zod";
+import { SQLITE_BUSY_PIN_MS } from "../sqlite-event-loop";
 
 // WEBPACK TRAP: reachable from instrumentation.ts via vector-db.ts — no static "node:" imports.
+// SQLITE_BUSY_PIN_MS is safe to import: sqlite-event-loop.ts only reaches market-hours.ts and
+// slow-sync-guard.ts, neither of which has a static node: import. db.ts is not imported here.
 
-/** Off-loop readers may wait the historical 60s lock budget; the serving thread stays free. */
-const WORKER_BUSY_TIMEOUT_MS = 60_000;
+/**
+ * The worker handles one message at a time on its own thread. A 60s busy_timeout would park
+ * every queued lexical query behind one SQLITE_BUSY. The serving connection uses
+ * SQLITE_BUSY_PIN_MS so the busy error surfaces quickly; corpusWideLexicalFailed then degrades
+ * to dense recall. Same pin here.
+ */
+const WORKER_BUSY_TIMEOUT_MS = SQLITE_BUSY_PIN_MS;
+
+/** Serving handle in src/lib/db.ts: `cache_size = -20000` (~20MB page cache). */
+const WORKER_CACHE_SIZE = -20_000;
+
+/** Serving handle in src/lib/db.ts: `mmap_size = 268435456` (256MB). */
+const WORKER_MMAP_SIZE = 268_435_456;
 
 const SqliteWorkerErrorSchema = z.strictObject({
   message: z.string(),
@@ -69,6 +83,8 @@ function openDb(dbPath) {
   try {
     next.pragma("query_only = ON");
     next.pragma("busy_timeout = ${WORKER_BUSY_TIMEOUT_MS}");
+    next.pragma("cache_size = ${WORKER_CACHE_SIZE}");
+    next.pragma("mmap_size = ${WORKER_MMAP_SIZE}");
   } catch (err) {
     try { next.close(); } catch {}
     throw err;
