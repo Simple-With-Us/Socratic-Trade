@@ -223,15 +223,71 @@ export function createProxiedFetch(
     // Releasing them here let a header-then-stall proxy hang past the caller
     // budget, including long-lived cascade reads.
     try {
-      const res = await baseFetch(input, { ...withDispatcher, signal: proxyController.signal });
+      const effectiveSignal =
+        callerSignal && typeof AbortSignal !== "undefined" && "any" in AbortSignal
+          ? AbortSignal.any([proxyController.signal, callerSignal])
+          : proxyController.signal;
+      const res = await baseFetch(input, { ...withDispatcher, signal: effectiveSignal });
       if (!res.body) {
         cleanup();
         return res;
       }
-      return new Response(
-        res.body.pipeThrough(new TransformStream({ flush: cleanup, cancel: cleanup })),
-        { status: res.status, statusText: res.statusText, headers: res.headers }
-      );
+      let onBodyAbort: (() => void) | undefined;
+      const releaseBodyAbort = () => {
+        if (onBodyAbort && callerSignal) callerSignal.removeEventListener("abort", onBodyAbort);
+        onBodyAbort = undefined;
+      };
+      const finishBody = () => {
+        cleanup();
+        releaseBodyAbort();
+      };
+      const upstream = res.body.getReader();
+      const wrappedBody = new ReadableStream<Uint8Array>({
+        start(controller) {
+          if (callerSignal?.aborted) {
+            finishBody();
+            controller.error(new DOMException("aborted", "AbortError"));
+            void upstream.cancel();
+            return;
+          }
+          if (callerSignal) {
+            onBodyAbort = () => {
+              try {
+                controller.error(new DOMException("aborted", "AbortError"));
+              } catch {
+                // already errored
+              }
+              finishBody();
+              void upstream.cancel();
+            };
+            callerSignal.addEventListener("abort", onBodyAbort, { once: true });
+          }
+        },
+        async pull(controller) {
+          if (callerSignal?.aborted) {
+            finishBody();
+            controller.error(new DOMException("aborted", "AbortError"));
+            await upstream.cancel();
+            return;
+          }
+          const { done, value } = await upstream.read();
+          if (done) {
+            finishBody();
+            controller.close();
+            return;
+          }
+          controller.enqueue(value);
+        },
+        async cancel(reason) {
+          finishBody();
+          await upstream.cancel(reason);
+        }
+      });
+      return new Response(wrappedBody, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers
+      });
     } catch (err) {
       cleanup();
       throw err;

@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-05 CURSOR — PR #4158 Kody review follow-up (branch `fix/fred-proxy-failsoft`)
+
+**What.**  Addressed two real Kody threads on the FRED/proxy fail-soft PR: skip the fixed 3s proxy-leg cap when the caller supplies `init.signal`, and keep proxy-leg timeout + caller abort wired through proxied response **body** reads (not only headers).
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/proxy-fetch.test.ts` + `test/data-source-fetch.test.ts` (32 tests) green.
+
+**Left open.**  Three Kody threads that ask to replace `10.99.0.2` in test fixtures — owner: not a disclosure to fix.  Rollout `docs/rollouts/2026-10-05-fred-proxy-kody-review.md`.
+
+**Next.**  Push commit; update PR #4158 body; human resolves fixed threads; do not merge from this agent.
+
 ## 2026-09-30 FINCH — Self-healing watchdogs (branch `finch/self-healing-watchdogs`, lane `~/workspace/lanes/st-selfheal`)
 
 **What.**  Owner directive after the 2026-09-30 10:33-10:44 CT 11-minute public 503 (Traefik "no available server" while the app process was alive, Docker healthcheck green, Coolify "running:healthy"; manual Coolify restart recovered).  Root causes: (1) nothing acts on the Docker health signal (Coolify `health_check_enabled=false`); (2) the tick watchdog's abort never reaches run/scroll work — orphaned Qdrant scrolls OOM the process (2026-09-25 mechanism); (3) `tradingLivenessDegraded` had no consumer (UptimeRobot retired), so a 4-failure streak with no completed run in ~4.9 days sat silent; (4) no in-process memory watchdog existed.

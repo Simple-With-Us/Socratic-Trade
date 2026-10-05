@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_RESIDENTIAL_PROXY_URL,
   createProxiedFetch,
+  DEFAULT_RESIDENTIAL_PROXY_URL,
   formatProxyUrl,
   isProxyLegError,
   isProxyOffSentinel,
