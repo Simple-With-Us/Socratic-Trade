@@ -35,15 +35,17 @@ The live board path `/Users/jay/apps/TRADING-EFFORT-LOG.md` is not on this VM.  
 
 ## Verification State
 
-Mandated full check is CI `verify` (workflow `CI`), which runs `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build`, plus the related jobs on the PR (`verify-hosted`, `verify-ios`, `gitleaks`, `check-pin`, `classify`).  That `verify` job was green on the pre-rebase head `4ca11431` (run `37282382569`).  These rebase and leak-fix commits are not claimed against a finished local full suite.  No dev server was running, so none was restarted.
+Mandated full check is CI `verify` (workflow `CI`), which runs `npm run lint`, `npx tsc --noEmit`, full `npm test` (unfiltered Vitest), and `npm run build`.  Related PR jobs on the same workflow run: `verify-hosted`, `verify-ios`, `classify`; plus `gitleaks` and `check-pin` on sibling workflows.
 
-Additional local note, not a substitute for `verify`:
+**Head `910ecdfa` (current PR head):** workflow run [37294288409](https://github.com/Simple-With-Us/Socratic-Trade/actions/runs/37294288409) — `verify` job **SUCCESS** (2026-10-05T10:45:16Z–10:45:18Z).  That job is the authoritative full-suite proof for this branch tip; it is not replaced by a path-filtered local Vitest.
+
+Additional targeted local note only (not a substitute for `verify`):
 
 ```bash
 npx vitest run test/sqlite-all-offloop.test.ts --testTimeout=20000
 ```
 
-24 tests passed (2026-10-05, this cloud VM).
+24 tests passed (2026-10-05, cloud VM).  No dev server was running, so none was restarted.
 
 ## Next Steps & Blockers
 
