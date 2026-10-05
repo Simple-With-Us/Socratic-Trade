@@ -11,13 +11,13 @@
 
 **What.**  Production profiling during regular hours named two synchronous paths on the serving thread: scheduler journal pruning and ops snapshot assembly (transcript coverage, artifact directory walk, optional order reads).  Prune uses index-forced range deletes with the existing per-tick row cap.  Snapshot coverage avoids reading every transcript body, caches artifact counts with yielding walks, and yields once before optional order reads.  Filing-CPU worker, usage-monitor replay, and lexical corpus search stay out of scope.
 
-**Docs.**  Handoff rollout note on file.  `PLAN.md` notes no roadmap scope change.  Phase docs unchanged (not a phase-design change).  `docs/EFFORT-LOG.md` carries the canonical in-repo row (issue #4239).  **defer:** branch-neutral live effort board — cloud seat cannot write it; Jay must paste the same row and assign a board id before merge rules treat reservation as complete.
+**Docs.**  Handoff rollout note on file.  `PLAN.md` notes no roadmap scope change.  Phase docs unchanged (not a phase-design change).  The branch-neutral live effort board and `docs/EFFORT-LOG.md` carry the same lifecycle row (board `3554f500`, issue #4239, PR #4218).
 
 **Left alone.**  Provider usage outbox replay, SEC task-stage parse/chunk, lexical FTS off-loop work, synchronous universe manifest read when the snapshot omits a universe.
 
 **Verification.**  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  `npm run build` exit 0.  `npm test` mostly green on this seat; stall-path regression tests pass.  Authoritative gate is CI `verify` on push.
 
-**Next.**  Address Kody review threads (honest fix or `defer`).  Extra-ship no.  Do not deploy or merge from this lane.
+**Next.**  Land post-merge doc sync if needed.  Extra-ship no.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

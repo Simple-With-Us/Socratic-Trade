@@ -60,8 +60,7 @@ Targeted proof in `test/event-loop-stall-hot-path.test.ts`: scale a fixture unti
 
 ## Next Steps & Blockers
 
-- Kody review (2026-10-05): public docs sanitized; tracking issue #4239 opened; live effort board reservation **deferred** to Jay (cloud seat cannot write the branch-neutral live board or mint board ids).  Stall-path CI flake on fast runners fixed by growing regression fixtures until the unindexed baseline crosses 100ms.
-- Owner: paste the `docs/EFFORT-LOG.md` row into the live board and add `board \`<id>\`` when reserved.
+- Kody review (2026-10-05): public docs sanitized; live board and `docs/EFFORT-LOG.md` share board `3554f500` / issue #4239 (PR #4218).  Stall-path CI flake on fast runners fixed by growing regression fixtures until the unindexed baseline crosses 100ms.
 - If production still stalls inside journal prune after deploy, re-map the new profile.  Do not assume the old OR scan came back.
 - Do not hammer production ops snapshot during regular hours to "check" this; that route was on the hot path.
 
@@ -69,8 +68,8 @@ Targeted proof in `test/event-loop-stall-hot-path.test.ts`: scale a fixture unti
 
 | Thread | Fix / defer |
 |--------|-------------|
-| Both effort ledgers | **defer (owner):** mirror updated; identical row text in `docs/EFFORT-LOG.md`; Jay must write the live board — cloud seat has no access. |
-| Board + issue before work record | **fix:** issue #4239; single canonical row references it.  **defer (owner):** board id not minted on cloud. |
+| Both effort ledgers | **fix:** live board and `docs/EFFORT-LOG.md` carry the same lifecycle row (board `3554f500`, issue #4239). |
+| Board + issue before work record | **fix:** board `3554f500` and issue #4239 in the canonical effort row. |
 | Remove ops paths from public docs | **fix:** effort row, STATUS, PLAN sanitized. |
 | No absolute paths / host inventory in rollout | **fix:** generic effort-tracking statement; removed host-specific inventory from Context. |
 
