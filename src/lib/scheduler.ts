@@ -358,6 +358,14 @@ const staleExitGuardHost = globalThis as unknown as { __staleExitInFlight?: Set<
 const staleExitInFlight: Set<string> =
   staleExitGuardHost.__staleExitInFlight ?? (staleExitGuardHost.__staleExitInFlight = new Set<string>());
 
+// Per-account in-flight guard for pending-fill reconciliation. Without it, a slow broker pass can
+// stack a second concurrent reconcile on the next tick (void fire-and-forget), multiplying order
+// history walks and SQLite fill writes for the same account.
+const pendingFillGuardHost = globalThis as unknown as { __pendingFillReconcileInFlight?: Set<string> };
+const pendingFillReconcileInFlight: Set<string> =
+  pendingFillGuardHost.__pendingFillReconcileInFlight ??
+  (pendingFillGuardHost.__pendingFillReconcileInFlight = new Set<string>());
+
 // ── Observability: de-duplicated health-gate skip log + degraded-lane surfacing ──────────────
 //
 // Production evidence (litestream-runtime.log, 2026-08-29..2026-09-07): a single restricted/
@@ -1495,14 +1503,22 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
         // order that returned non-filled — common on Robinhood and limit orders — doesn't sit
         // pending_reconciliation until the next strategy run. Applies to broker/paper and broker/live;
         // Test/local has no broker order lifecycle.
-        if (brokerGateway) {
+        if (brokerGateway && !pendingFillReconcileInFlight.has(key)) {
+          pendingFillReconcileInFlight.add(key);
           // Captured outside the closure: the !accountNumber `continue` guard above narrows the
           // property here, but property narrowing does not propagate into arrow closures.
           const accountNumber = policy.accountNumber;
-          void journalLane(
+          const pendingFillWork = journalLane(
             "pending-fill-reconcile",
             { userId, connectedAccountId: accountId },
             () => reconcilePendingFills(brokerGateway, accountNumber, userId, policy.connectedAccountId)
+          );
+          void pendingFillWork.catch(() => undefined).finally(() => pendingFillReconcileInFlight.delete(key));
+          void withLaneDeadline(
+            pendingFillWork,
+            SCHEDULER_BROKER_TIMEOUT_MS,
+            "pending-fill-reconcile broker timeout",
+            "pending-fill-reconcile"
           ).catch((err) => console.error("[scheduler] pending-fill reconcile error:", err));
         }
 
