@@ -29,9 +29,9 @@
 
 **What.**  Exclude five retired QuiverQuant carrier fields from enrichment coverage tracking; drop misleading `freeCashFlowYield` score ablation neutralizer.
 
-**Verification.**  `npm run lint`, `npx tsc --noEmit`, targeted vitest (`test/enrichment-coverage.test.ts`, `test/source-value.test.ts`), `npm run build` — all green.
+**Verification.**  `npm run lint`, `npx tsc --noEmit`, `npm test`, `npm run build` — all green (post-rebase local gate + CI `verify-hosted` on `99ec5cf9`).
 
-**Next.**  Push; open ready PR linking board `d550b5ee`; address Kody threads.
+**Next.**  PR #4217 mergeable; wait `verify` green; Kody doc threads addressed.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

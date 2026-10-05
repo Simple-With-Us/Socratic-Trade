@@ -30,7 +30,7 @@ Files:
 ```bash
 npm run lint
 npx tsc --noEmit
-npm test -- test/enrichment-coverage.test.ts test/source-value.test.ts
+npm test
 npm run build
 ```
 
