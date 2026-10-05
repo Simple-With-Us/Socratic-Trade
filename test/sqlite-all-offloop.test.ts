@@ -10,10 +10,13 @@ import { SQLITE_BUSY_PIN_MS } from "../src/lib/sqlite-event-loop";
 import {
   activeSqliteOffLoopSlotCountForTesting,
   deliverSqliteOffLoopMessageForTesting,
+  markSqliteOffLoopSlotsDisposedForTesting,
   postSqliteOffLoopRawForTesting,
   primeSqliteOffLoopWaiterForTesting,
   resetSqliteAllOffLoopForTesting,
+  retireSqliteOffLoopSlotsForTesting,
   setSqliteOffLoopStartedHookForTesting,
+  sqliteOffLoopReclaimCountForTesting,
   SQLITE_OFF_LOOP_POOL_SIZE,
   SQLITE_OFF_LOOP_TIMEOUT_MS,
   SqliteRowSchema,
@@ -419,6 +422,65 @@ describe("sqlite off-loop timeout and abort", () => {
     } finally {
       setSqliteOffLoopStartedHookForTesting(null);
       await resetSqliteAllOffLoopForTesting();
+    }
+  });
+
+  it("does not leak the reclaim entry after caller abort and slot death", async () => {
+    await resetSqliteAllOffLoopForTesting();
+    const timeoutMs = 1_000;
+    const iterations = iterationsTakingAtLeast(800);
+    const started = new Promise<void>((resolve) => {
+      setSqliteOffLoopStartedHookForTesting(() => resolve());
+    });
+    const controller = new AbortController();
+    const wedge = sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema, {
+      signal: controller.signal,
+      timeoutMs
+    });
+    const wedgeSettled = expect(wedge).rejects.toThrow("lexical reclaim leaked");
+    try {
+      await started;
+      controller.abort(new Error("lexical reclaim leaked"));
+      await wedgeSettled;
+      expect(sqliteOffLoopReclaimCountForTesting()).toBe(1);
+      retireSqliteOffLoopSlotsForTesting();
+      expect(sqliteOffLoopReclaimCountForTesting()).toBe(0);
+      expect(activeSqliteOffLoopSlotCountForTesting()).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, timeoutMs + 80));
+      expect(sqliteOffLoopReclaimCountForTesting()).toBe(0);
+    } finally {
+      setSqliteOffLoopStartedHookForTesting(null);
+      await resetSqliteAllOffLoopForTesting();
+      expect(sqliteOffLoopReclaimCountForTesting()).toBe(0);
+    }
+  });
+
+  it("drops the reclaim entry when the execution timer fires after the slot is already dead", async () => {
+    await resetSqliteAllOffLoopForTesting();
+    const timeoutMs = 350;
+    const iterations = iterationsTakingAtLeast(800);
+    const started = new Promise<void>((resolve) => {
+      setSqliteOffLoopStartedHookForTesting(() => resolve());
+    });
+    const controller = new AbortController();
+    const wedge = sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema, {
+      signal: controller.signal,
+      timeoutMs
+    });
+    const wedgeSettled = expect(wedge).rejects.toThrow("lexical reclaim disposed");
+    try {
+      await started;
+      controller.abort(new Error("lexical reclaim disposed"));
+      await wedgeSettled;
+      expect(sqliteOffLoopReclaimCountForTesting()).toBe(1);
+      markSqliteOffLoopSlotsDisposedForTesting();
+      expect(sqliteOffLoopReclaimCountForTesting()).toBe(1);
+      await new Promise((resolve) => setTimeout(resolve, timeoutMs + 120));
+      expect(sqliteOffLoopReclaimCountForTesting()).toBe(0);
+    } finally {
+      setSqliteOffLoopStartedHookForTesting(null);
+      await resetSqliteAllOffLoopForTesting();
+      expect(sqliteOffLoopReclaimCountForTesting()).toBe(0);
     }
   });
 

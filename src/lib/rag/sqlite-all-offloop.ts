@@ -429,13 +429,23 @@ function updateRef(slot: PoolSlot): void {
   }
 }
 
-function clearExecutionReclaim(id: number): void {
-  const waiter = reclaimById.get(id);
-  if (!waiter) return;
-  reclaimById.delete(id);
+function disarmExecutionTimer(waiter: Pending): void {
+  reclaimById.delete(waiter.id);
   if (waiter.executionTimer !== undefined) {
     clearTimeout(waiter.executionTimer);
     waiter.executionTimer = undefined;
+  }
+}
+
+function clearExecutionReclaim(id: number): void {
+  const waiter = reclaimById.get(id);
+  if (!waiter) return;
+  disarmExecutionTimer(waiter);
+}
+
+function releaseReclaimForSlot(slot: PoolSlot): void {
+  for (const waiter of [...reclaimById.values()]) {
+    if (waiter.slot === slot) disarmExecutionTimer(waiter);
   }
 }
 
@@ -663,7 +673,12 @@ function killSlot(
   redispatchQueued: boolean,
   stopThread = true
 ): void {
-  if (slot.disposed) return;
+  if (slot.disposed) {
+    // A prior retire already dropped pending waiters. Reclaim entries are not in
+    // `pending`, so a second pass still has to drop them.
+    releaseReclaimForSlot(slot);
+    return;
+  }
   slot.disposed = true;
   const index = slots.indexOf(slot);
   if (index >= 0) slots.splice(index, 1);
@@ -689,6 +704,10 @@ function killSlot(
     waiter.slot = selectSlot();
     postToSlot(waiter);
   }
+  // settleReject re-adds a started waiter that was not abandoned by budget.
+  // The slot is dead, so that entry must not outlive this retire. Caller-abort
+  // entries were already only in reclaimById (not pending) and are swept here.
+  releaseReclaimForSlot(slot);
   updateRef(slot);
   const instance = slot.worker;
   slot.worker = null;
@@ -702,12 +721,11 @@ function killSlot(
 }
 
 function onExecutionTimeout(waiter: Pending): void {
+  // Drop the map entry and the timer before the disposed guard. killSlot strips
+  // the worker listeners, so a late timeout is the only remaining cleanup when
+  // the slot died first. Returning early used to pin the Pending closure forever.
+  disarmExecutionTimer(waiter);
   if (!waiter.started || waiter.slot.disposed) return;
-  reclaimById.delete(waiter.id);
-  if (waiter.executionTimer !== undefined) {
-    clearTimeout(waiter.executionTimer);
-    waiter.executionTimer = undefined;
-  }
   waiter.abandonedByBudget = true;
   const timeoutError = new Error("sqlite off-loop query timed out");
   const exhausted = new Error("sqlite off-loop worker terminated after query timeout");
@@ -874,7 +892,10 @@ export async function resetSqliteAllOffLoopForTesting(): Promise<void> {
     if (instance && !instances.includes(instance)) instances.push(instance);
   }
   for (const waiter of [...pending.values()]) settleReject(waiter, resetError);
-  reclaimById.clear();
+  for (let index = slots.length - 1; index >= 0; index -= 1) {
+    if (slots[index]?.disposed) slots.splice(index, 1);
+  }
+  for (const id of [...reclaimById.keys()]) clearExecutionReclaim(id);
   const startedLater = await Promise.all(
     starts.map(async (starting) => {
       if (!starting) return null;
@@ -918,6 +939,27 @@ export function setSqliteOffLoopStartedHookForTesting(hook: ((id: number) => voi
 /** Test-only: live pool slots. A retired slot is removed synchronously in killSlot. */
 export function activeSqliteOffLoopSlotCountForTesting(): number {
   return slots.filter((slot) => !slot.disposed).length;
+}
+
+/** Test-only: aborted started waiters still holding SQL and settle closures. */
+export function sqliteOffLoopReclaimCountForTesting(): number {
+  return reclaimById.size;
+}
+
+/** Test-only: retire live slots the way a worker exit does, including the reclaim sweep. */
+export function retireSqliteOffLoopSlotsForTesting(): void {
+  const error = new Error("sqlite off-loop worker exited (test)");
+  for (const slot of [...slots]) {
+    killSlot(slot, () => error, true);
+  }
+}
+
+/**
+ * Test-only: mark slots disposed without killSlot. The execution timer must still
+ * drop reclaim entries; this does not terminate the worker (reset does).
+ */
+export function markSqliteOffLoopSlotsDisposedForTesting(): void {
+  for (const slot of slots) slot.disposed = true;
 }
 
 /** Test-only: register a waiter without sending SQL, so a forged reply can be delivered. */
