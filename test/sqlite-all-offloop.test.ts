@@ -160,6 +160,46 @@ describe("sqlite off-loop validation", () => {
   });
 });
 
+const SLOW_COUNT_SQL =
+  "WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM r WHERE i < ?) SELECT COUNT(*) AS c FROM r";
+
+describe("sqlite off-loop timeout and abort", () => {
+  it("terminates a wedged query so a later query can run on a fresh worker", async () => {
+    const first = sqliteAllOffLoop(SLOW_COUNT_SQL, [8_000_000], dbPath, CountRowSchema, { timeoutMs: 200 });
+    const second = sqliteAllOffLoop(SLOW_COUNT_SQL, [8_000_000], dbPath, CountRowSchema, { timeoutMs: 10_000 });
+    const firstSettled = expect(first).rejects.toThrow("sqlite off-loop query timed out");
+    const secondSettled = expect(second).rejects.toThrow("sqlite off-loop worker terminated after query timeout");
+    await firstSettled;
+    await secondSettled;
+
+    // Overlaps the dying worker's exit when terminate waits out the native call.
+    const rows = await sqliteAllOffLoop(SLOW_COUNT_SQL, [8_000_000], dbPath, CountRowSchema, { timeoutMs: 10_000 });
+    expect(rows).toEqual([{ c: 8_000_000 }]);
+  });
+
+  it("rejects when the caller aborts and a later query still succeeds", async () => {
+    const controller = new AbortController();
+    const pending = sqliteAllOffLoop(SLOW_COUNT_SQL, [8_000_000], dbPath, CountRowSchema, {
+      signal: controller.signal,
+      timeoutMs: 10_000
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    controller.abort(new Error("lexical aborted"));
+    await expect(pending).rejects.toThrow("lexical aborted");
+    await resetSqliteAllOffLoopForTesting();
+    const rows = await sqliteAllOffLoop("SELECT 1 AS c", [], dbPath, CountRowSchema);
+    expect(rows).toEqual([{ c: 1 }]);
+  });
+
+  it("rejects immediately when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("already aborted"));
+    await expect(
+      sqliteAllOffLoop("SELECT 1 AS c", [], dbPath, CountRowSchema, { signal: controller.signal })
+    ).rejects.toThrow("already aborted");
+  });
+});
+
 describe("serving retrieval path", () => {
   it("awaits searchCorpusWideLexicalCandidatesOffLoop instead of the sync FTS .all()", () => {
     const src = readFileSync(join(process.cwd(), "src/lib/vector-db.ts"), "utf8");

@@ -10,6 +10,7 @@
 import "server-only";
 import type { Worker } from "node:worker_threads";
 import { z } from "zod";
+import { RAG_QUERY_IO_DEADLINE_MS } from "../rag-retrieval-deadline";
 import { SQLITE_BUSY_PIN_MS } from "../sqlite-event-loop";
 
 // WEBPACK TRAP: reachable from instrumentation.ts via vector-db.ts — no static "node:" imports.
@@ -29,6 +30,22 @@ const WORKER_CACHE_SIZE = -20_000;
 
 /** Serving handle in src/lib/db.ts: `mmap_size = 268435456` (256MB). */
 const WORKER_MMAP_SIZE = 268_435_456;
+
+/**
+ * Per-request ceiling for one off-loop read. Same budget as RAG_QUERY_IO_DEADLINE_MS
+ * (rag-retrieval-deadline.ts). That module does not statically import node: builtins
+ * (only inflight-deadline.ts), so it is safe on the instrumentation webpack graph.
+ * A wedged statement blocks the worker thread; on this deadline the instance is
+ * terminated and the next call opens a fresh one.
+ */
+export const SQLITE_OFF_LOOP_TIMEOUT_MS = RAG_QUERY_IO_DEADLINE_MS;
+
+export type SqliteAllOffLoopOptions = {
+  /** Drop this waiter when the signal aborts. Does not by itself terminate the worker. */
+  signal?: AbortSignal;
+  /** Override SQLITE_OFF_LOOP_TIMEOUT_MS. Production callers omit this. */
+  timeoutMs?: number;
+};
 
 const SqliteWorkerErrorSchema = z.strictObject({
   message: z.string(),
@@ -139,6 +156,10 @@ parentPort.on("message", (msg) => {
 type Pending = {
   resolve: (rows: unknown[]) => void;
   reject: (err: Error) => void;
+  instance: Worker;
+  timer?: ReturnType<typeof setTimeout>;
+  signal?: AbortSignal;
+  onAbort?: () => void;
 };
 
 let worker: Worker | null = null;
@@ -176,15 +197,94 @@ function numericMessageId(msg: unknown): number | undefined {
   return id;
 }
 
-function rejectAll(err: Error): void {
-  const waiters = [...pending.values()];
-  pending.clear();
-  for (const waiter of waiters) waiter.reject(err);
+function abortError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  if (typeof signal.reason === "string" && signal.reason.length > 0) return new Error(signal.reason);
+  return new Error("sqlite off-loop query aborted");
+}
+
+function resolveTimeoutMs(value: number | undefined): number {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+  return SQLITE_OFF_LOOP_TIMEOUT_MS;
+}
+
+function dropPending(id: number): Pending | undefined {
+  const waiter = pending.get(id);
+  if (!waiter) return undefined;
+  pending.delete(id);
+  if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+  if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+  return waiter;
+}
+
+/** Reject waiters for `instance`, or every waiter when `instance` is omitted (test reset). */
+function rejectAll(err: Error, instance?: Worker): void {
+  const ids: number[] = [];
+  for (const [id, waiter] of pending) {
+    if (instance && waiter.instance !== instance) continue;
+    ids.push(id);
+  }
+  const touched = new Set<Worker>();
+  for (const id of ids) {
+    const waiter = dropPending(id);
+    if (!waiter) continue;
+    touched.add(waiter.instance);
+    waiter.reject(err);
+  }
+  if (instance) updateRef(instance);
+  else for (const owned of touched) updateRef(owned);
 }
 
 function updateRef(instance: Worker): void {
-  if (pending.size > 0) instance.ref();
-  else instance.unref();
+  let count = 0;
+  for (const waiter of pending.values()) {
+    if (waiter.instance === instance) count += 1;
+  }
+  try {
+    if (count > 0) instance.ref();
+    else instance.unref();
+  } catch {
+    // terminate()/exit already stopped the thread.
+  }
+}
+
+function detachInstance(instance: Worker): void {
+  if (worker === instance) {
+    worker = null;
+    workerReady = null;
+  }
+}
+
+function retireInstance(instance: Worker, errorFor: (id: number) => Error): void {
+  detachInstance(instance);
+  const ids: number[] = [];
+  for (const [id, waiter] of pending) {
+    if (waiter.instance === instance) ids.push(id);
+  }
+  for (const id of ids) {
+    const waiter = dropPending(id);
+    waiter?.reject(errorFor(id));
+  }
+  updateRef(instance);
+  // The statement is synchronous on this thread, so a timeout means every request
+  // queued behind it is stuck too. Kill the instance; the next call spawns another.
+  void instance.terminate().catch(() => undefined);
+}
+
+function onRequestTimeout(instance: Worker, id: number): void {
+  const waiter = pending.get(id);
+  if (!waiter || waiter.instance !== instance) return;
+  const timeoutError = new Error("sqlite off-loop query timed out");
+  const collateral = new Error("sqlite off-loop worker terminated after query timeout");
+  retireInstance(instance, (pendingId) => (pendingId === id ? timeoutError : collateral));
+}
+
+function takeWaiter(instance: Worker, id: number): Pending | undefined {
+  const waiter = pending.get(id);
+  if (!waiter || waiter.instance !== instance) return undefined;
+  dropPending(id);
+  updateRef(instance);
+  return waiter;
 }
 
 function handleWorkerMessage(instance: Worker, msg: unknown): void {
@@ -196,18 +296,13 @@ function handleWorkerMessage(instance: Worker, msg: unknown): void {
       console.warn("[sqlite-all-offloop] ignoring invalid worker response");
       return;
     }
-    const waiter = pending.get(id);
-    if (!waiter) return;
-    pending.delete(id);
-    updateRef(instance);
-    waiter.reject(new Error("invalid sqlite worker response"));
+    const waiter = takeWaiter(instance, id);
+    waiter?.reject(new Error("invalid sqlite worker response"));
     return;
   }
   if (parsed.data.id === -1) return;
-  const waiter = pending.get(parsed.data.id);
+  const waiter = takeWaiter(instance, parsed.data.id);
   if (!waiter) return;
-  pending.delete(parsed.data.id);
-  updateRef(instance);
   if (parsed.data.ok) {
     waiter.resolve(parsed.data.rows);
     return;
@@ -221,20 +316,14 @@ function attachWorker(instance: Worker): void {
   });
   instance.on("error", (err) => {
     const wrapped = err instanceof Error ? err : new Error(String(err));
-    if (worker === instance) {
-      worker = null;
-      workerReady = null;
-    }
-    rejectAll(wrapped);
+    detachInstance(instance);
+    rejectAll(wrapped, instance);
   });
   instance.on("exit", (code) => {
-    if (worker === instance) {
-      worker = null;
-      workerReady = null;
-    }
-    if (pending.size > 0) {
-      rejectAll(new Error(`sqlite off-loop worker exited (${code ?? "unknown"})`));
-    }
+    // Only this instance's waiters. A trailing exit after a replacement worker
+    // has taken over must not reject the new instance's queries.
+    detachInstance(instance);
+    rejectAll(new Error(`sqlite off-loop worker exited (${code ?? "unknown"})`), instance);
   });
 }
 
@@ -269,7 +358,8 @@ export async function sqliteAllOffLoop<T>(
   sql: string,
   params: readonly unknown[],
   dbPath: string,
-  rowSchema: z.ZodType<T>
+  rowSchema: z.ZodType<T>,
+  options?: SqliteAllOffLoopOptions
 ): Promise<T[]> {
   if (typeof sql !== "string" || sql.length === 0) {
     throw new Error("sqlite off-loop query requires SQL");
@@ -277,15 +367,47 @@ export async function sqliteAllOffLoop<T>(
   if (typeof dbPath !== "string" || dbPath.length === 0) {
     throw new Error("sqlite off-loop query requires a database path");
   }
+  const signal = options?.signal;
+  if (signal?.aborted) throw abortError(signal);
+  const timeoutMs = resolveTimeoutMs(options?.timeoutMs);
   const instance = await getWorker();
+  if (signal?.aborted) throw abortError(signal);
   const id = nextId++;
   const rows = await new Promise<unknown[]>((resolve, reject) => {
-    pending.set(id, { resolve, reject });
+    if (worker !== instance) {
+      reject(new Error("sqlite off-loop worker replaced"));
+      return;
+    }
+    const timer = setTimeout(() => onRequestTimeout(instance, id), timeoutMs);
+    timer.unref?.();
+    const entry: Pending = { resolve, reject, instance, timer, signal };
+    if (signal) {
+      const callerSignal = signal;
+      const onAbort = () => {
+        const waiter = pending.get(id);
+        if (!waiter || waiter !== entry) return;
+        dropPending(id);
+        updateRef(instance);
+        waiter.reject(abortError(callerSignal));
+      };
+      entry.onAbort = onAbort;
+      if (callerSignal.aborted) {
+        clearTimeout(timer);
+        reject(abortError(callerSignal));
+        return;
+      }
+      callerSignal.addEventListener("abort", onAbort, { once: true });
+    }
+    pending.set(id, entry);
     updateRef(instance);
+    if (signal?.aborted) {
+      entry.onAbort?.();
+      return;
+    }
     try {
       instance.postMessage({ id, dbPath, sql, params: [...params] });
     } catch (err) {
-      pending.delete(id);
+      dropPending(id);
       updateRef(instance);
       reject(err instanceof Error ? err : new Error(String(err)));
     }
@@ -308,7 +430,7 @@ export async function primeSqliteOffLoopWaiterForTesting(): Promise<{ id: number
   const instance = await getWorker();
   const id = nextId++;
   const done = new Promise<unknown[]>((resolve, reject) => {
-    pending.set(id, { resolve, reject });
+    pending.set(id, { resolve, reject, instance });
     updateRef(instance);
   });
   return { id, done };

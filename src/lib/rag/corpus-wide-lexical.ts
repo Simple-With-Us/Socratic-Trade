@@ -416,12 +416,14 @@ export function searchCorpusWideLexicalCandidates(
 /**
  * Same FTS statement and row mapping as {@link searchCorpusWideLexicalCandidates}, with
  * `.all()` on a readonly worker thread so the serving event loop can run health/API.
+ * `signal` aborts the off-loop read (the retrieval deadline) without changing the SQL.
  */
 export async function searchCorpusWideLexicalCandidatesOffLoop(
-  options: CorpusWideLexicalSearchOptions
+  options: CorpusWideLexicalSearchOptions,
+  signal?: AbortSignal
 ): Promise<CorpusWideLexicalCandidate[]> {
   const plan = planCorpusWideLexicalQuery(options);
   if (!plan) return [];
-  const rows = await sqliteAllOffLoop(plan.sql, plan.params, databasePath(), LexicalRowSchema);
+  const rows = await sqliteAllOffLoop(plan.sql, plan.params, databasePath(), LexicalRowSchema, { signal });
   return mapLexicalRows(rows, plan.limit);
 }

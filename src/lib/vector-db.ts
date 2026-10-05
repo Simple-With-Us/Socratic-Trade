@@ -8178,26 +8178,32 @@ export async function retrieveContextDetailed(
         candidatesIn: Math.min(baseFetchK, 100)
       });
       let lexicalCandidates: CorpusWideLexicalCandidate[] = [];
+      const lexicalAbort = createRagQueryAbort(options?.signal);
       try {
-        lexicalCandidates = (await searchCorpusWideLexicalCandidatesOffLoop({
-          symbol,
-          query,
-          limit: Math.min(baseFetchK, 100),
-          visibleTenantScopes: [
-            vectorTenantScope(userId, SHARED_SCOPE),
-            vectorTenantScope(userId, PRIVATE_SCOPE)
-          ],
-          ...(options?.docType?.length ? { docTypes: options.docType } : {}),
-          ...(options?.source ? { source: options.source } : {}),
-          ...(options?.section ? { section: options.section } : {}),
-          strictUndated: strictAsOf,
-          ...(options?.asOf ? { asOf: options.asOf } : {})
-        })).filter((candidate) => lexicalCandidateMatchesOptions(candidate, options));
+        lexicalCandidates = (await raceWithAbort(
+          searchCorpusWideLexicalCandidatesOffLoop({
+            symbol,
+            query,
+            limit: Math.min(baseFetchK, 100),
+            visibleTenantScopes: [
+              vectorTenantScope(userId, SHARED_SCOPE),
+              vectorTenantScope(userId, PRIVATE_SCOPE)
+            ],
+            ...(options?.docType?.length ? { docTypes: options.docType } : {}),
+            ...(options?.source ? { source: options.source } : {}),
+            ...(options?.section ? { section: options.section } : {}),
+            strictUndated: strictAsOf,
+            ...(options?.asOf ? { asOf: options.asOf } : {})
+          }, lexicalAbort.signal),
+          lexicalAbort.signal
+        )).filter((candidate) => lexicalCandidateMatchesOptions(candidate, options));
         endLexical?.({ candidatesOut: lexicalCandidates.length });
       } catch (error) {
         corpusWideLexicalFailed = true;
         endLexical?.({ error, candidatesOut: 0 });
         console.warn("[vector-db] corpus-wide lexical recall failed; retaining dense recall:", error instanceof Error ? error.message : String(error));
+      } finally {
+        lexicalAbort.cancel();
       }
 
       if (lexicalCandidates.length > 0) {
