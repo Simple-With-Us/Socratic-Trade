@@ -17,9 +17,8 @@ import {
 
 const CountRowSchema = z.object({ c: z.number() });
 
-function countSql(iterations: number): string {
-  return `WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM r WHERE i < ${iterations}) SELECT COUNT(*) AS c FROM r`;
-}
+const COUNT_SQL =
+  "WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM r WHERE i < ?) SELECT COUNT(*) AS c FROM r";
 
 let dbPath = "";
 
@@ -36,24 +35,23 @@ afterAll(async () => {
 describe("sqliteAllOffLoop", () => {
   it("lets timers run while a long sqlite statement executes", async () => {
     const syncDb = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const count = syncDb.prepare(COUNT_SQL);
     let iterations = 200_000;
-    let sql = countSql(iterations);
     let syncMs = 0;
     let syncRow = { c: 0 };
     for (;;) {
       const started = Date.now();
-      syncRow = syncDb.prepare(sql).get() as { c: number };
+      syncRow = count.get(iterations) as { c: number };
       syncMs = Date.now() - started;
       if (syncMs >= 40 || iterations >= 8_000_000) break;
       iterations *= 2;
-      sql = countSql(iterations);
     }
 
     let syncTicks = 0;
     const syncTimer = setInterval(() => {
       syncTicks += 1;
     }, 5);
-    syncDb.prepare(sql).get();
+    count.get(iterations);
     clearInterval(syncTimer);
     syncDb.close();
     expect(syncRow.c).toBe(iterations);
@@ -65,7 +63,7 @@ describe("sqliteAllOffLoop", () => {
       offloopTicks += 1;
     }, 5);
     try {
-      const rows = await sqliteAllOffLoop(sql, [], dbPath, CountRowSchema);
+      const rows = await sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema);
       expect(rows[0]?.c).toBe(iterations);
       expect(offloopTicks).toBeGreaterThan(0);
     } finally {
@@ -160,26 +158,23 @@ describe("sqlite off-loop validation", () => {
   });
 });
 
-const SLOW_COUNT_SQL =
-  "WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM r WHERE i < ?) SELECT COUNT(*) AS c FROM r";
-
 describe("sqlite off-loop timeout and abort", () => {
   it("terminates a wedged query so a later query can run on a fresh worker", async () => {
-    const first = sqliteAllOffLoop(SLOW_COUNT_SQL, [8_000_000], dbPath, CountRowSchema, { timeoutMs: 200 });
-    const second = sqliteAllOffLoop(SLOW_COUNT_SQL, [8_000_000], dbPath, CountRowSchema, { timeoutMs: 10_000 });
+    const first = sqliteAllOffLoop(COUNT_SQL, [8_000_000], dbPath, CountRowSchema, { timeoutMs: 200 });
+    const second = sqliteAllOffLoop(COUNT_SQL, [8_000_000], dbPath, CountRowSchema, { timeoutMs: 10_000 });
     const firstSettled = expect(first).rejects.toThrow("sqlite off-loop query timed out");
     const secondSettled = expect(second).rejects.toThrow("sqlite off-loop worker terminated after query timeout");
     await firstSettled;
     await secondSettled;
 
     // Overlaps the dying worker's exit when terminate waits out the native call.
-    const rows = await sqliteAllOffLoop(SLOW_COUNT_SQL, [8_000_000], dbPath, CountRowSchema, { timeoutMs: 10_000 });
+    const rows = await sqliteAllOffLoop(COUNT_SQL, [8_000_000], dbPath, CountRowSchema, { timeoutMs: 10_000 });
     expect(rows).toEqual([{ c: 8_000_000 }]);
   });
 
   it("rejects when the caller aborts and a later query still succeeds", async () => {
     const controller = new AbortController();
-    const pending = sqliteAllOffLoop(SLOW_COUNT_SQL, [8_000_000], dbPath, CountRowSchema, {
+    const pending = sqliteAllOffLoop(COUNT_SQL, [8_000_000], dbPath, CountRowSchema, {
       signal: controller.signal,
       timeoutMs: 10_000
     });
