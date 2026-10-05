@@ -7,6 +7,17 @@
 **Verification.**  `npm run lint`, `npx tsc --noEmit`, targeted vitest on enrichment-coverage + data-catalog-completeness.
 
 **Next.**  Push; open PR; optional follow-up to wire `marketCap` through enrichment provenance.
+## 2026-10-05 CURSOR — RTH sqlite stall bounds (branch `cursor/rth-sqlite-stall-bounds-cf92`)
+
+**What.**  Three production CPU profiles from 2026-10-05 RTH (82s, 66s, 45s busy runs) map to two first-party sync paths, not the filing CPU worker and not #4164 lexical FTS.  Profiles 2 and 3 (`ha@5313` + `r@6744`, ~58-66% total) are scheduler `tickInner` -> `pruneTaskJournal`.  Profile 1 (longest, 82s) is `GET /api/ops/snapshot`: `length(content)` over transcript blobs, the `YYYYQn.json` directory walk, and `getEquityOrders` continuing the same busy run.  Prune now forces `INDEXED BY idx_task_journal_started` and splits skipped vs ok/error into two range deletes that still share the 500-row batch cap.  Coverage counts `content IS NOT NULL` without reading bodies.  The snapshot reports a cached artifact count and recounts with a yield per symbol directory.  The route yields once before optional order reads.
+
+**Docs.**  `docs/rollouts/2026-10-05-rth-sqlite-stall-bounds.md`.  `PLAN.md` notes no roadmap scope change.  Phase docs unchanged (this is not a phase-design change).  Live board `/Users/jay/apps/TRADING-EFFORT-LOG.md` is absent on this cloud VM; the repo mirror is updated.
+
+**Left alone.**  `listProviderUsageOutboxRows` / usage-monitor replay (~8-22%).  `runTaskStage` parse/chunk (~8%).  #4164 lexical FTS.  `rankDemandFirstSymbols` still reads the universe manifest synchronously when the snapshot does not pass a universe.
+
+**Verification.**  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  `npm run build` exit 0.  `npm test` 9048 passed, 51 skipped, 9 failed.  The failures are this seat's Node 22 (cpuprofile `.ts` import), injected `PUSHOVER_*` / `RESEND_API_KEY` / `COOLIFY_SERVER_STATS`, and two isolated fetch-count tests.  None are in the diff.  Stall-path files passed on a second run.  Detail in the rollout note.
+
+**Next.**  Ready PR against `main`.  Extra-ship no.  Do not Coolify Deploy.  Do not merge from this lane.  No Kodus threads exist on this branch yet.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

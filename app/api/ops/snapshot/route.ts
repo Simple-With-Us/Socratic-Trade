@@ -1,5 +1,6 @@
 import { authorizeOpsRequest } from "@/lib/ops-auth";
 import { attachOpsOrderSummaries, buildOpsSnapshot } from "@/lib/ops-snapshot";
+import { yieldEventLoop } from "@/lib/slow-sync-guard";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -34,6 +35,10 @@ export async function GET(request: Request) {
     includeOrdersDetail || url.searchParams.get("orders") === "1" || url.searchParams.get("orders") === "true";
 
   let snapshot = buildOpsSnapshot({ runsPerUser, auditPerUser });
+  // buildOpsSnapshot is synchronous.  Yield before broker order reads so a slow
+  // getEquityOrders JSON parse cannot extend that turn into one busy run.
+  // The 82s profile sampled this route together with getEquityOrders.
+  await yieldEventLoop();
   if (includeOrders) {
     snapshot = await attachOpsOrderSummaries(snapshot, { includeDetail: includeOrdersDetail });
   }

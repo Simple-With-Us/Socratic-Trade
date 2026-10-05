@@ -1180,11 +1180,16 @@ export interface RoicArchiveCoverage {
   thinSymbols: Array<{ symbol: string; count: number }>;
 }
 
-/** Local archive inventory for ops / remaining-gap lists.  No ROIC HTTP. */
+/** Local archive inventory for ops / remaining-gap lists.  No ROIC HTTP.
+ *  Pass `artifactFiles` to skip the synchronous directory walk.  The ops snapshot
+ *  does that and fills the count from `refreshRoicArtifactFileCount`, which yields
+ *  between symbol directories.  A sync walk of the production tree showed up on
+ *  the 2026-10-05 82s stall (`RegExp ^(\d{4})Q([1-4])\.json$`). */
 export function summarizeRoicArchiveCoverage(options?: {
   now?: number;
   universe?: string[];
   depth?: number;
+  artifactFiles?: number;
 }): RoicArchiveCoverage {
   const depth = options?.depth ?? quartersPerSymbol();
   const table = summarizeEarningsCallsTranscriptCoverage(depth);
@@ -1204,7 +1209,9 @@ export function summarizeRoicArchiveCoverage(options?: {
     symbolsWithContent: table.symbolsWithContent,
     symbolsAtDepth: table.symbolsAtDepth,
     symbolsPartial: table.symbolsPartial,
-    artifactFiles: countRoicTranscriptArtifactFiles(),
+    artifactFiles: options && "artifactFiles" in options
+      ? options.artifactFiles ?? 0
+      : countRoicTranscriptArtifactFiles(),
     archiveDepth: depth,
     cursorPhase: cursor?.phase ?? null,
     cursorRemaining: cursor?.queue.length ?? 0,

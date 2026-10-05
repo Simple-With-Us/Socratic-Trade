@@ -313,7 +313,16 @@ export interface EarningsCallsTranscriptCoverage {
   perSymbol: EarningsCallsCoverageBucket[];
 }
 
-/** Local Individual-archive inventory: rows with real transcript text (>= 200 chars). */
+/**
+ * Local Individual-archive inventory: rows with non-null transcript text.
+ *
+ * Do not filter with `length(content)`.  SQLite reads every transcript body to
+ * compute it, and GET /api/ops/snapshot runs this synchronously on the serving
+ * thread.  The 2026-10-05 82s stall profile has that route, better-sqlite3
+ * `prepare`, and the ROIC `YYYYQn.json` walk from the same snapshot on one busy
+ * run.  Empty bodies are stored as NULL, so `content IS NOT NULL` is the
+ * inventory without touching the blobs.
+ */
 export function summarizeEarningsCallsTranscriptCoverage(
   depth: number = 20
 ): EarningsCallsTranscriptCoverage {
@@ -322,7 +331,7 @@ export function summarizeEarningsCallsTranscriptCoverage(
     .prepare(
       `SELECT symbol, COUNT(*) AS count
        FROM earningscalls_transcripts
-       WHERE content IS NOT NULL AND length(content) >= 200
+       WHERE content IS NOT NULL
        GROUP BY symbol
        ORDER BY count ASC, symbol ASC`
     )
