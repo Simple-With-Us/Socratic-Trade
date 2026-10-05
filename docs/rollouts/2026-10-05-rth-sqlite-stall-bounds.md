@@ -60,7 +60,7 @@ Targeted proof in `test/event-loop-stall-hot-path.test.ts`: scale a fixture unti
 
 ## Next Steps & Blockers
 
-- Ready PR #4218 is open against `main`.  Do not merge.  Do not Coolify Deploy.  Extra-ship no.  No Slack.
+- Ready PR #4218 is open against `main`.  Rebased onto `4a0f1ca0` (2026-10-05).  `verify-hosted` failed once on `test/event-loop-stall-hot-path.test.ts` when the unindexed scan baseline reported 99ms on a fast runner; commit `a6c0d99a` grows the fixture until the baseline crosses 100ms.  Do not merge.  Do not Coolify Deploy.  Extra-ship no.  No Slack.
 - No Kodus threads exist on this branch yet.  If review opens threads, fix them or reply `defer` with a rationale.  Do not resolve a thread only to merge.
 - If production still stalls inside `pruneTaskJournal` after this image is live, re-map the new profile.  Do not assume the old OR scan came back.
 - Do not call production `GET /api/ops/snapshot` during RTH to "check" this.  That GET is the 82s path.
