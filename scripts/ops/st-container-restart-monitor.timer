@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic ST Docker restart monitor on fleet-hetzner-nbg1
+Documentation=https://github.com/jaywedgeworth22/Socratic-Trade/blob/main/docs/runbooks/st-container-restart-monitor.md
+
+[Timer]
+# Off the :00/:13/:33/:53 deploy-freshness cluster.
+OnCalendar=*:02,17,32,47
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
