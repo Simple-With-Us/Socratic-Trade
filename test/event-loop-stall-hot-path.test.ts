@@ -86,12 +86,20 @@ describe("serving-thread sqlite stalls mapped from 2026-10-05 profiles", () => {
     );
     let scanMs = 0;
     let batch = 50_000;
-    while (scanMs < 100 && n < 2_000_000) {
+    // Hosted CI can report 99ms on the last growth step; keep adding until the
+    // unindexed scan clearly crosses the 100ms stall threshold or we hit a row cap.
+    while (scanMs < 100 && n < 4_000_000) {
       add(batch, recent);
       scanMs = elapsed(() => {
         scan.get(cutoff);
       });
       batch = Math.min(batch * 2, 400_000);
+    }
+    if (scanMs < 100 && n < 4_000_000) {
+      add(200_000, recent);
+      scanMs = elapsed(() => {
+        scan.get(cutoff);
+      });
     }
     expect(scanMs).toBeGreaterThanOrEqual(100);
     const pruned = { n: 0 };
@@ -128,12 +136,18 @@ describe("serving-thread sqlite stalls mapped from 2026-10-05 profiles", () => {
     );
     let slowMs = 0;
     let batch = 8;
-    while (slowMs < 100 && rows < 400) {
+    while (slowMs < 100 && rows < 512) {
       add(batch);
       slowMs = elapsed(() => {
         lengthQuery.all();
       });
       batch = Math.min(batch * 2, 64);
+    }
+    if (slowMs < 100 && rows < 512) {
+      add(32);
+      slowMs = elapsed(() => {
+        lengthQuery.all();
+      });
     }
     expect(slowMs).toBeGreaterThanOrEqual(100);
     const fastMs = elapsed(() => {
