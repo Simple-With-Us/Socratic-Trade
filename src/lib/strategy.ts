@@ -6,7 +6,8 @@ import {
   gatherStrategyMarket
 } from "./strategy-gather";
 import { isDelayedYahooFallbackQuote } from "./quote-delayed-fallback";
-import { TradingGraph, GraphContext } from "./orchestration/trading-graph";
+import { TradingGraph, GraphContext, readGraphTrajectory } from "./orchestration/trading-graph";
+import { readCongressScoreVerdict } from "./congress-score-gate";
 import { LANE_WAITS, withAccountMutation } from "./account-mutation";
 import { OperationLeaseOwnershipError } from "./operation-lease";
 
@@ -53,7 +54,7 @@ import { deriveMacroMetrics } from "./macro-metrics";
 import { computeMarketInternals } from "./market-internals";
 import { getMarketSignals } from "./market-signals";
 import { compactWeeklyScreensForPrompt, weeklyMarketDigestForScan } from "./weekly-market-digest";
-import { fetchMacroData, fetchMacroDataWithLiveVix, pruneMacro, determineMarketRegime, evaluateVolatilityBrake, type MacroData } from "./macro";
+import { fetchMacroData, fetchMacroDataWithLiveVix, pruneMacro, determineMarketRegime, evaluateVolatilityBrake, MARKET_REGIME_LABELS, type MacroData } from "./macro";
 import { compactMacroTrendsForPrompt, fetchMacroHistory } from "./macro-history";
 import { buildCandidateEvidence } from "./evidence";
 import { applyEvidenceBudget } from "./evidence-budget";
@@ -4702,11 +4703,74 @@ export async function runStrategyOnce(
     graph.registerNode({
       name: "INIT",
       execute: async (context: GraphContext) => {
+        return { nextState: "ALTERNATIVE_DATA_ANALYSIS", context };
+      }
+    });
+
+    graph.registerNode({
+      name: "ALTERNATIVE_DATA_ANALYSIS",
+      execute: async (context: GraphContext) => {
+        const congressVerdict = readCongressScoreVerdict(userId);
+
+        // Receipt only.  Regime is determineMarketRegime, the same classifier the
+        // rest of the run uses.  A macro fetch failure is an explicit unknown and
+        // does not fail the run.  This node does not gate proposals or trades.
+        // The post-placement fetchMacroData below stays: that await is where a
+        // lost account lease is observed before evidence writes.
+        let macroRegime = MARKET_REGIME_LABELS.unknown;
+        try {
+          macroRegime = determineMarketRegime(await fetchMacroData(userId));
+        } catch (error) {
+          console.warn(
+            "[strategy] alternative-data macro fetch failed:",
+            error instanceof Error ? error.message : String(error)
+          );
+          macroRegime = MARKET_REGIME_LABELS.unknown;
+        }
+
+        const candidateCount = marketScan?.topCandidates?.length ?? 0;
+        const alternativeMetadata = {
+          congressVerdict: congressVerdict ? {
+            verdict: congressVerdict.verdict,
+            pass: congressVerdict.pass,
+            stale: congressVerdict.stale,
+            computedAt: congressVerdict.computedAt,
+          } : null,
+          macroRegime,
+          breadthPct: marketScan?.breadthPct ?? null,
+          candidateCount,
+          analyzedAt: new Date().toISOString(),
+        };
+
+        audit("alternative_data_analysis", { runId, ...alternativeMetadata }, userId, connectedAccountId);
+
+        context.metadata = {
+          ...context.metadata,
+          alternativeData: alternativeMetadata,
+        };
+
         return { nextState: "FUNDAMENTAL_PROPOSING", context };
       }
     });
 
     const finalContext = await graph.run();
+    // Before the error check, so a failed graph is recorded too. Telemetry must not
+    // change the run outcome or replace finalContext.errors[0].
+    try {
+      const trajectory = readGraphTrajectory(finalContext.metadata);
+      await recordDecisionObservation({
+        name: "trading.strategy.graph-trajectory",
+        userId,
+        metadata: {
+          runId,
+          graphTransitions: trajectory.transitions,
+          graphFinalState: trajectory.finalState
+        },
+        tags: ["strategy", "graph-trajectory"]
+      });
+    } catch (error) {
+      console.warn("[strategy] graph trajectory observation failed:", error instanceof Error ? error.message : String(error));
+    }
     if (finalContext.errors.length > 0) {
       throw finalContext.errors[0];
     }
