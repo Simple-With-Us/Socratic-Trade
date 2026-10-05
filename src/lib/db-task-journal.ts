@@ -254,22 +254,42 @@ export const TASK_JOURNAL_SKIPPED_RETENTION_MS = 24 * 60 * 60 * 1_000;
 export const TASK_JOURNAL_PRUNE_BATCH_LIMIT = 500;
 
 /** Delete aged rows. Returns rows deleted. Never throws. Bounded per call — the scheduler
- *  drains a backlog across ticks rather than pinning the event loop on one unbounded DELETE. */
+ *  drains a backlog across ticks rather than pinning the event loop on one unbounded DELETE.
+ *
+ *  Each delete is forced onto `idx_task_journal_started`.  The previous OR predicate planned
+ *  as MULTI-INDEX OR and, without that index, as a full SCAN of every heartbeat row.  RTH
+ *  stall profiles on 2026-10-05 (45s and 66s busy runs) map the dominant stack to
+ *  `tickInner` -> this function, with better-sqlite3 `prepare` under it, while `/api/health`
+ *  sat on the same loop.  Skipped rows (24h) are drained first, then ok/error rows (30d),
+ *  sharing one batch cap so a tick still deletes at most TASK_JOURNAL_PRUNE_BATCH_LIMIT rows. */
 export function pruneTaskJournal(now: Date = new Date()): number {
   try {
     const okCutoff = new Date(now.getTime() - TASK_JOURNAL_RETENTION_MS).toISOString();
     const skippedCutoff = new Date(now.getTime() - TASK_JOURNAL_SKIPPED_RETENTION_MS).toISOString();
-    const info = getDb()
+    const db = getDb();
+    const skipped = db
       .prepare(
-        `DELETE FROM task_journal WHERE id IN (
-           SELECT id FROM task_journal
-           WHERE (status = 'skipped' AND started_at < ?)
-              OR (status != 'skipped' AND started_at < ?)
+        `DELETE FROM task_journal WHERE rowid IN (
+           SELECT rowid FROM task_journal INDEXED BY idx_task_journal_started
+           WHERE started_at < ? AND status = 'skipped'
+           ORDER BY started_at ASC
            LIMIT ${TASK_JOURNAL_PRUNE_BATCH_LIMIT}
          )`
       )
-      .run(skippedCutoff, okCutoff);
-    return info.changes;
+      .run(skippedCutoff);
+    const remaining = TASK_JOURNAL_PRUNE_BATCH_LIMIT - skipped.changes;
+    if (remaining <= 0) return skipped.changes;
+    const older = db
+      .prepare(
+        `DELETE FROM task_journal WHERE rowid IN (
+           SELECT rowid FROM task_journal INDEXED BY idx_task_journal_started
+           WHERE started_at < ? AND status != 'skipped'
+           ORDER BY started_at ASC
+           LIMIT ?
+         )`
+      )
+      .run(okCutoff, remaining);
+    return skipped.changes + older.changes;
   } catch {
     return 0;
   }

@@ -19,6 +19,7 @@ import type { EquityOrder, TradingPolicy } from "./types";
 import { statSync, statfsSync, readdirSync } from "fs";
 import { dirname, join } from "path";
 import { summarizeRoicArchiveCoverage } from "./web-sources/roic-transcripts";
+import { peekRoicArtifactFileCount, refreshRoicArtifactFileCount } from "./roic-archive-artifacts";
 
 function getLitestreamLastSyncAge(dbPath: string): number | null {
   const litestreamDir = `${dbPath}-litestream`;
@@ -566,7 +567,12 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
 
   let roicArchive: OpsRoicArchiveCoverage | null = null;
   try {
-    roicArchive = summarizeRoicArchiveCoverage();
+    // The directory walk yields off this request.  The snapshot reports the last
+    // finished count (0 until the first walk completes) instead of readdirSync.
+    void refreshRoicArtifactFileCount();
+    roicArchive = summarizeRoicArchiveCoverage({
+      artifactFiles: peekRoicArtifactFileCount() ?? 0
+    });
   } catch {
     roicArchive = null;
   }
