@@ -137,7 +137,7 @@ describe("canonicalMarketDataSymbol (shared rename-vs-acquisition)", () => {
 
 describe("dropInvalidShareRows — drop malformed rows instead of sending them", () => {
   it("drops schema-invalid rows per dataset and keeps the valid ones", () => {
-    const { payload, dropped } = dropInvalidShareRows({
+    const { payload, dropped, droppedReasons } = dropInvalidShareRows({
       refs: [{ ticker: "AAPL" }, { ticker: "" }], // "" fails ticker.min(1)
       spx: [{ date: "2026-06-15", close: 100 }, { date: "not-a-date", close: 1 }], // bad date dropped
       insider: [{ ticker: "AAPL", date: "2026-06-15", sentiment: 60, buyFilings: 1, sellFilings: 0, buyShares: 1, sellShares: 0, owners: [] }],
@@ -147,6 +147,8 @@ describe("dropInvalidShareRows — drop malformed rows instead of sending them",
     expect(payload.insider).toHaveLength(1); // all valid -> untouched
     expect(dropped).toMatchObject({ refs: 1, spx: 1 });
     expect(dropped.insider).toBeUndefined();
+    expect(droppedReasons.refs).toBeDefined();
+    expect(Object.keys(droppedReasons.refs ?? {}).length).toBeGreaterThan(0);
   });
 
   it("shareWithCongressTrade excludes invalid rows from the POST body and counts only what's sent", async () => {
@@ -159,7 +161,20 @@ describe("dropInvalidShareRows — drop malformed rows instead of sending them",
     const res = await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }, { ticker: "" }] });
     expect(res.ok).toBe(true);
     expect(res.sent.refs).toBe(1);
+    expect(res.dropped).toMatchObject({ refs: 1 });
+    expect(res.droppedTotal).toBe(1);
     expect(posted?.refs).toEqual([{ ticker: "AAPL" }]);
+  });
+
+  it("shareWithCongressTrade logs optional schemaVersion when present (tolerant reader)", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "t";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })));
+    const res = await shareWithCongressTrade({
+      schemaVersion: 3,
+      refs: [{ ticker: "AAPL" }]
+    } as Parameters<typeof shareWithCongressTrade>[0]);
+    expect(res.ok).toBe(true);
+    expect(res.schemaVersion).toBe(3);
   });
 
   // App A returns `{ ok: errors.length === 0, ...summary }` with HTTP 200, so a partial import is a

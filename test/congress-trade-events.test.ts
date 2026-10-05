@@ -12,12 +12,14 @@ import { coerceCongressTrade, CONGRESS_CURSOR_SETTING_KEY, fetchAppACongressTrad
 import { deleteInternalSetting, getInternalSetting, setInternalSetting } from "../src/lib/db";
 import { getCongressDataset, getInsiderSignals, getSymbolWebSignals } from "../src/lib/web-sources";
 import { POST as postCongressWebhook } from "../app/api/webhooks/congress/route";
+import { RATE_LIMITS, resetRateLimiter } from "../src/lib/rate-limit";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-congress-events-${randomUUID()}.db`)}`;
 });
 
 beforeEach(() => {
+  resetRateLimiter();
   resetCongressEventDedupe();
   delete process.env.CONGRESS_WEBHOOK_SECRET;
 });
@@ -422,6 +424,26 @@ describe("webhook endpoint (POST)", () => {
     expect(applyCongressEvent(ev).duplicate).toBeFalsy();
     resetCongressEventDedupe();
     expect(applyCongressEvent(ev)).toMatchObject({ duplicate: true, applied: 0 });
+  });
+
+  it("returns 429 after the per-IP rate limit is exceeded", async () => {
+    process.env.CONGRESS_WEBHOOK_SECRET = "s3cr3t";
+    const body = "{}";
+    const headers = {
+      "x-signature": sign("s3cr3t", body),
+      "cf-connecting-ip": "203.0.113.99"
+    };
+    const { limit } = RATE_LIMITS.congressWebhook;
+    for (let i = 0; i < limit; i++) {
+      const res = await postCongressWebhook(
+        new Request("https://b.example/api/webhooks/congress", { method: "POST", headers, body })
+      );
+      expect(res.status).not.toBe(429);
+    }
+    const blocked = await postCongressWebhook(
+      new Request("https://b.example/api/webhooks/congress", { method: "POST", headers, body })
+    );
+    expect(blocked.status).toBe(429);
   });
 
   it("rejects unauthorized and oversized requests early", async () => {

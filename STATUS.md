@@ -34,6 +34,11 @@
 **Verification.**  `npm run lint`, `npx tsc --noEmit`, `npm test`, `npm run build` — green locally; CI `verify` + `verify-hosted` SUCCESS on head `5b23cd2f` (run `37399054045`).
 
 **Next.**  PR #4217 MERGEABLE; wait `verify` green; Kody doc threads addressed.
+## 2026-10-05 CURSOR — Congress share schema drift (board bf84ffba, branch `gb-compiler/st-share-schemaversion`)
+
+**What.**  Outbound share row drops now emit audit + Sentry + per-stream reasons on `shareWithCongressTrade` receipts and daily share summaries.  Inbound `/api/admin/securities/import` uses `readJsonWithLimit` (5 MB) and per-IP rate limiting; congress webhook rate-limited.  Optional `schemaVersion` logged when present.
+
+**Next.**  Run full verify, push, open ready PR linking board item.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

@@ -19,12 +19,15 @@ import { verifySecuritiesImportToken, securitiesImportToken } from "../src/lib/s
 import { clearHistoryCache, fetchDailyOHLC, toBusinessDay } from "../src/lib/history";
 import { latestCompletedTradingSessionEtKey } from "../src/lib/market-hours";
 import { POST as importRoute } from "../app/api/admin/securities/import/route";
+import { SECURITIES_IMPORT_MAX_BYTES } from "../src/lib/bounded-body";
+import { RATE_LIMITS, resetRateLimiter } from "../src/lib/rate-limit";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-securities-import-${randomUUID()}.db`)}`;
 });
 
 beforeEach(() => {
+  resetRateLimiter();
   clearImportedSecuritiesForTests();
   clearHistoryCache();
   delete process.env.APP_B_INGEST_TOKEN;
@@ -184,6 +187,65 @@ describe("POST /api/admin/securities/import", () => {
     );
     expect(res.status).toBe(200);
     expect(getImportedPriceCloses("F")).toHaveLength(2);
+  });
+
+  it("413s when the body exceeds SECURITIES_IMPORT_MAX_BYTES", async () => {
+    process.env.APP_B_INGEST_TOKEN = "tok";
+    const bigBody = JSON.stringify({ padding: "a".repeat(SECURITIES_IMPORT_MAX_BYTES) });
+    const req = new Request("http://localhost/api/admin/securities/import", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer tok" },
+      body: bigBody
+    });
+    const res = await importRoute(req);
+    expect(res.status).toBe(413);
+  });
+
+  it("returns 429 after the per-IP rate limit is exceeded", async () => {
+    process.env.APP_B_INGEST_TOKEN = "tok";
+    const { limit } = RATE_LIMITS.securitiesImport;
+    const headers = {
+      "content-type": "application/json",
+      authorization: "Bearer tok",
+      "cf-connecting-ip": "203.0.113.50"
+    };
+    for (let i = 0; i < limit; i++) {
+      const ok = await importRoute(
+        new Request("http://localhost/api/admin/securities/import", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ prices: [] })
+        })
+      );
+      expect(ok.status).toBe(200);
+    }
+    const blocked = await importRoute(
+      new Request("http://localhost/api/admin/securities/import", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ prices: [] })
+      })
+    );
+    expect(blocked.status).toBe(429);
+  });
+
+  it("surfaces rowsDropped when malformed refs are coerced away", async () => {
+    process.env.APP_B_INGEST_TOKEN = "tok";
+    const res = await importRoute(
+      postJson({ refs: [{ ticker: "AAPL" }, { ticker: "" }, "not-an-object"] }, "Bearer tok")
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { rowsDropped?: Record<string, number>; rowsDroppedTotal?: number };
+    expect(json.rowsDropped).toMatchObject({ refs: 2 });
+    expect(json.rowsDroppedTotal).toBe(2);
+  });
+
+  it("accepts optional schemaVersion on the inbound payload", async () => {
+    process.env.APP_B_INGEST_TOKEN = "tok";
+    const res = await importRoute(postJson({ schemaVersion: "2.7.0", prices: [] }, "Bearer tok"));
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { schemaVersion?: string };
+    expect(json.schemaVersion).toBe("2.7.0");
   });
 });
 

@@ -10,6 +10,10 @@
  *  already used (batches of many trade events can be a few MB). */
 export const CONGRESS_WEBHOOK_MAX_BYTES = 5 * 1024 * 1024;
 
+/** Inbound App A -> App B securities import: same wire shape as outbound share payloads (refs,
+ *  prices, spx batches); 5 MB matches the congress webhook cap. */
+export const SECURITIES_IMPORT_MAX_BYTES = CONGRESS_WEBHOOK_MAX_BYTES;
+
 /** TradingView Pine `alert()` webhook: a single alert payload is a few hundred bytes; no
  *  batching. 1 MB leaves generous headroom with no prior cap to preserve. */
 export const TRADINGVIEW_WEBHOOK_MAX_BYTES = 1 * 1024 * 1024;

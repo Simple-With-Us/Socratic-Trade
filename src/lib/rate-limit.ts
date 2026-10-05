@@ -136,7 +136,11 @@ export const RATE_LIMITS = {
   /** Paid strategy tuning performs a full LLM review; contain retries and compromised-session spend. */
   strategyTuning: { limit: 10, windowMs: 60_000 },
   /** Peer reads from App A (congress.trade) */
-  peerRead: { limit: 120, windowMs: 60_000 }
+  peerRead: { limit: 120, windowMs: 60_000 },
+  /** Inbound congress.trade webhook pushes (App A -> App B). */
+  congressWebhook: { limit: 120, windowMs: 60_000 },
+  /** Inbound congress.trade securities gap-fill import (App A -> App B). */
+  securitiesImport: { limit: 60, windowMs: 60_000 }
 } as const satisfies Record<string, RateLimitOptions>;
 
 /**
