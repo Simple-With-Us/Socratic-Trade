@@ -25,6 +25,13 @@
 **Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/enrichment-coverage*.test.ts` 17/17; full `npm test` + `npm run build` at PR verify.
 
 **Next.**  Push; open PR READY; do not merge from agent unless owner asks.
+## 2026-10-05 CURSOR — Quiver coverage board d550b5ee (branch `gb-compiler/st-quiver-coverage`)
+
+**What.**  Exclude five retired QuiverQuant carrier fields from enrichment coverage tracking; drop misleading `freeCashFlowYield` score ablation neutralizer.
+
+**Verification.**  Pending: full lint/tsc/test/build on branch.
+
+**Next.**  Push; open ready PR linking board `d550b5ee`; address Kody threads.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
