@@ -14,8 +14,8 @@ import {
   postSqliteOffLoopRawForTesting,
   primeSqliteOffLoopWaiterForTesting,
   resetSqliteAllOffLoopForTesting,
-  retireSqliteOffLoopSlotsForTesting,
   setSqliteOffLoopStartedHookForTesting,
+  emitSqliteOffLoopWorkerExitForTesting,
   sqliteOffLoopReclaimCountForTesting,
   SQLITE_OFF_LOOP_POOL_SIZE,
   SQLITE_OFF_LOOP_TIMEOUT_MS,
@@ -443,11 +443,13 @@ describe("sqlite off-loop timeout and abort", () => {
       controller.abort(new Error("lexical reclaim leaked"));
       await wedgeSettled;
       expect(sqliteOffLoopReclaimCountForTesting()).toBe(1);
-      retireSqliteOffLoopSlotsForTesting();
+      emitSqliteOffLoopWorkerExitForTesting();
       expect(sqliteOffLoopReclaimCountForTesting()).toBe(0);
       expect(activeSqliteOffLoopSlotCountForTesting()).toBe(0);
       await new Promise((resolve) => setTimeout(resolve, timeoutMs + 80));
       expect(sqliteOffLoopReclaimCountForTesting()).toBe(0);
+      const rows = await sqliteAllOffLoop("SELECT 8 AS c", [], dbPath, CountRowSchema, { timeoutMs: 5_000 });
+      expect(rows).toEqual([{ c: 8 }]);
     } finally {
       setSqliteOffLoopStartedHookForTesting(null);
       await resetSqliteAllOffLoopForTesting();

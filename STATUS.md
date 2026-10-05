@@ -12,7 +12,7 @@
 
 **Claim.**  `repo: Simple-With-Us/Socratic-Trade`  `pr: #4164`.  No linked track issue.  No Slack #agent-sync post and no board card id from this cloud VM.
 
-**What.**  Rebased onto latest `origin/main` (axios #4014, Cursor cloud env #4178).  Reclaim map no longer leaks after caller abort when the slot is already dead: `onExecutionTimeout` disarms before the `disposed` guard, `killSlot` sweeps `reclaimById`, and the test reset clears timers.  Fix commit `fa5ddffb`.
+**What.**  Rebased onto latest `origin/main` (axios #4014, Cursor cloud env #4178).  Reclaim map no longer leaks after caller abort when the slot is already dead: `onExecutionTimeout` disarms before the `disposed` guard, `killSlot` sweeps `reclaimById`, and the test reset clears timers.  A remote merge of `main` plus a partial leak fix was not kept.  This branch stays a rebase.
 
 **Verification.**  Mandated full check is CI `verify` (lint, `tsc --noEmit`, full Vitest, Next.js build) and the related CI jobs on this PR.  That gate was green on the pre-rebase head `4ca11431`.  Additional local note only: `npx vitest run test/sqlite-all-offloop.test.ts` (24 passed).  Full local lint, tsc, test, and build were not run in this cloud session.
 

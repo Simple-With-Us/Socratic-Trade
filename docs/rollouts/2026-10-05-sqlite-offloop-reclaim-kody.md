@@ -13,7 +13,7 @@ Rebased onto latest `origin/main` (no merge commit).  Main's axios 1.20.0 bump (
 - Disarm (`reclaimById.delete` and `clearTimeout`) runs before the `waiter.slot.disposed` return in `onExecutionTimeout`.  A disposed slot used to skip that cleanup and pin the `Pending` closure for the process lifetime.
 - `killSlot` sweeps reclaim entries for that slot, including the early return when the slot is already disposed.  `settleReject` can re-add a started waiter, so the sweep is after that loop.
 - `resetSqliteAllOffLoopForTesting` disarms timers via `clearExecutionReclaim` instead of dropping map entries and leaving timers armed.  Slots marked disposed without `killSlot` are removed from the pool array.  Reset still terminates the captured workers.
-- Tests: reclaim after caller abort when the execution budget fires.  Reclaim count is 0 after abort plus slot retirement, and after the execution timer fires on an already-dead slot.
+- Tests: reclaim after caller abort when the execution budget fires.  Reclaim count is 0 after caller abort and a worker `exit` (that handler runs `killSlot`, then a replacement query succeeds).  Awaiting `worker.terminate()` from the test deadlocks because `killSlot` removes the `exit` listener that promise is waiting on.  Reclaim count is also 0 after the execution timer fires on a slot marked disposed without `killSlot`.
 
 Files:
 

@@ -946,12 +946,17 @@ export function sqliteOffLoopReclaimCountForTesting(): number {
   return reclaimById.size;
 }
 
-/** Test-only: retire live slots the way a worker exit does, including the reclaim sweep. */
-export function retireSqliteOffLoopSlotsForTesting(): void {
-  const error = new Error("sqlite off-loop worker exited (test)");
-  for (const slot of [...slots]) {
-    killSlot(slot, () => error, true);
-  }
+/**
+ * Test-only: run the worker `exit` handler. Awaiting `worker.terminate()` from a
+ * test deadlocks: that promise waits on `exit`, and `killSlot` removes the
+ * listener before the promise settles. `killSlot` then terminates in the safe
+ * order (strip listeners, then `terminate()`).
+ */
+export function emitSqliteOffLoopWorkerExitForTesting(): void {
+  const slot = slots.find((candidate) => !candidate.disposed && candidate.worker);
+  const instance = slot?.worker;
+  if (!instance) throw new Error("sqlite off-loop worker unavailable");
+  instance.emit("exit", 1);
 }
 
 /**
