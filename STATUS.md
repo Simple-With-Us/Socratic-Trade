@@ -98,6 +98,13 @@
 **Blockers.**  Rebase onto origin/main complete; required CI `verify` checks pending before squash auto-merge.
 
 **Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
+## 2026-10-05 CURSOR — ST host container restart monitor (board `2ad7f8b92e864958887e72fc25572c34`)
+
+**What.**  Host-side Docker `RestartCount` / missing-container monitor for Coolify ST (`d83b1aykr03uwr32yhgzaiay`): script + systemd timer + install helper + runbook.  Alerts via existing `PUSHOVER_*` and optional `SENTRY_FLEET_DSN`.  **Not installed on prod from this agent** — owner runs `install-st-container-restart-monitor.sh` on fleet-hetzner-nbg1.
+
+**Verification.**  `bash scripts/ops/st-container-restart-monitor.selftest.sh` (3/3); `bash -n` on shell scripts; `python3 -m py_compile` on sentry helper.
+
+**Next.**  Push PR; owner installs on host per `docs/runbooks/st-container-restart-monitor.md`.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
