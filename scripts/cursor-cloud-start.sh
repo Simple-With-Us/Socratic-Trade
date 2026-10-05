@@ -1,111 +1,85 @@
 #!/usr/bin/env bash
 # Cursor cloud agent start for Socratic-Trade.
-# 1. Load non-secret Infisical selectors from .cursor/infisical.env.
-# 2. If INFISICAL_CLIENT_ID + INFISICAL_CLIENT_SECRET are present in the env
-#    injected by the Cursor dashboard, log in via the existing in-repo helper
-#    scripts/infisical-run.mjs (or the infisical CLI fallback) and write the
-#    resolved secrets to $HOME/.cursor-cloud-env/Socratic-Trade.env (mode 0600).
-# 3. Optionally write a tiny .source.sh that re-exports those vars for agents
-#    that do not invoke infisical-run.
-# 4. If credentials are missing, print the missing dashboard secret NAMES and
-#    exit 0 so the agent boot still succeeds.
+# 1. Attach Slack coordination (SessionStart hook via setup-slack-sync.sh) -- same path as
+#    scripts/cloud-setup.sh; there is no Mac-side agent-sync-push relay on Linux cloud VMs.
+# 2. Load non-secret Infisical defaults from .cursor/infisical.env (ENV / DOMAIN only).
+# 3. When dashboard credentials exist, smoke-test scripts/infisical-run.mjs without writing
+#    secrets to disk.  Agents load secrets through npm run dev:secrets / infisical-run.mjs.
+# 4. Missing credentials: log secret NAMES only and exit 0 so the VM boot succeeds.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-REPO_NAME="Socratic-Trade"
-ENV_DIR="$HOME/.cursor-cloud-env"
-ENV_FILE="$ENV_DIR/${REPO_NAME}.env"
-SOURCE_FILE="$ENV_DIR/${REPO_NAME}.source.sh"
-
 log()   { printf '[cursor-cloud-start] %s\n' "$*"; }
 warn()  { printf '[cursor-cloud-start] WARN: %s\n' "$*" >&2; }
-names_only() { printf '%s\n' "$1"; }
 
-mkdir -p "$ENV_DIR"
-chmod 700 "$ENV_DIR"
+# 1. Fleet coordination relay (read/post path for #agent-sync at session start).
+if [[ -f scripts/setup-slack-sync.sh ]]; then
+  if bash scripts/setup-slack-sync.sh >/dev/null 2>&1; then
+    log "Slack coordination hook installed (no-op without SLACK_BOT_TOKEN)."
+  else
+    warn "setup-slack-sync.sh skipped; coordination hook not updated."
+  fi
+else
+  warn "scripts/setup-slack-sync.sh missing; skipping coordination hook install."
+fi
 
-# 1. Load committed selectors (non-secret PROJECT_ID / ENV / DOMAIN).
+# 2. Committed defaults only -- never project UUIDs (dashboard supplies those).
 if [[ -f .cursor/infisical.env ]]; then
-  # shellcheck disable=SC1091
-  set -a; source .cursor/infisical.env; set +a
-  log "Loaded non-secret Infisical selectors from .cursor/infisical.env"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$line" ]] && continue
+    case "$line" in
+      INFISICAL_ENV=*|INFISICAL_DOMAIN=*|INFISICAL_PATH=*)
+        key="${line%%=*}"
+        if [[ -z "${!key:-}" ]]; then
+          export "$line"
+        fi
+        ;;
+    esac
+  done < .cursor/infisical.env
+  log "Loaded Infisical defaults from .cursor/infisical.env (no project ids)."
 else
   warn ".cursor/infisical.env missing; relying on Cursor dashboard env only."
 fi
 
-# 2. Dashboard secrets -- NAMES only, never values.
+# Do not enter the shared overlay branch unless shared machine identity is present.
+if [[ -z "${INFISICAL_SHARED_CLIENT_ID:-}" || -z "${INFISICAL_SHARED_CLIENT_SECRET:-}" ]]; then
+  unset INFISICAL_SHARED_PROJECT_ID INFISICAL_SHARED_TOKEN \
+    INFISICAL_SHARED_CLIENT_ID INFISICAL_SHARED_CLIENT_SECRET 2>/dev/null || true
+fi
+
+# 3. Dashboard secrets -- NAMES only, never values.
 missing=()
 [[ -z "${INFISICAL_CLIENT_ID:-}" ]]     && missing+=("INFISICAL_CLIENT_ID")
 [[ -z "${INFISICAL_CLIENT_SECRET:-}" ]] && missing+=("INFISICAL_CLIENT_SECRET")
 
 if (( ${#missing[@]} > 0 )); then
   warn "Missing Cursor dashboard secrets: ${missing[*]}"
-  warn "Add these names to the Cursor dashboard (values are never logged)."
-  warn "Skipping secret export; agents using infisical-run will see the same miss."
+  warn "Add these names in the Cursor environment Secrets UI (values are never logged)."
+  warn "Skipping Infisical smoke test; use npm run dev:secrets when credentials are set."
   exit 0
 fi
 
-# 3. Fetch secrets.  Prefer the in-repo helper (no value echo, scrubs
-#    bootstrap credentials, supports shared project + watch).  Fall back to
-#    the infisical CLI if the helper is absent.
-fetch_via_helper() {
-    node ./scripts/infisical-run.mjs -- \
-      node -e "const e=process.env;const out=Object.entries(e).filter(([k])=>!['INFISICAL_CLIENT_ID','INFISICAL_CLIENT_SECRET','INFISICAL_TOKEN','INFISICAL_SHARED_CLIENT_ID','INFISICAL_SHARED_CLIENT_SECRET','INFISICAL_SHARED_TOKEN','PATH','HOME','USER','LOGNAME','SHELL','TMPDIR','TMP','TEMP','LANG','LC_ALL'].includes(k));for(const [k,v] of out)process.stdout.write(k+'='+v+'\n');" \
-      > "$ENV_FILE.tmp"
-}
+if [[ -z "${INFISICAL_PROJECT_ID:-}" ]]; then
+  warn "INFISICAL_PROJECT_ID is not set (Cursor dashboard or operator config)."
+  warn "Skipping Infisical smoke test; npm run dev:secrets needs a project id."
+  exit 0
+fi
 
-fetch_via_cli() {
-    local token
-    token="$(infisical login --method universal-auth \
-      --client-id "$INFISICAL_CLIENT_ID" \
-      --client-secret "$INFISICAL_CLIENT_SECRET" \
-      --silent --output=plain 2>/dev/null || true)"
-    if [[ -z "${token:-}" ]]; then
-      warn "infisical CLI login failed; aborting secret export."
-      exit 0
-    fi
-    INFISICAL_TOKEN="$token" \
-      infisical export \
-        --env="${INFISICAL_ENV:-dev}" \
-        --projectId="${INFISICAL_PROJECT_ID}" \
-        --plain --output=dotenv \
-        > "$ENV_FILE.tmp" 2>/dev/null || true
-}
+# 4. Smoke-test the in-repo runner (secrets stay in the child process; no .env files).
+if [[ ! -f scripts/infisical-run.mjs ]]; then
+  warn "scripts/infisical-run.mjs missing; cannot validate Infisical wiring."
+  exit 0
+fi
 
-if [[ -f scripts/infisical-run.mjs ]]; then
-  if fetch_via_helper; then
-    :
-  else
-    warn "infisical-run.mjs failed; trying infisical CLI fallback."
-    fetch_via_cli
-  fi
-elif command -v infisical >/dev/null 2>&1; then
-  fetch_via_cli
+if node ./scripts/infisical-run.mjs -- node -e "process.exit(0)" >/dev/null 2>&1; then
+  log "Infisical runner smoke test passed (secrets not written to disk)."
 else
-  warn "Neither scripts/infisical-run.mjs nor infisical CLI found."
-  warn "Install Infisical CLI or commit scripts/infisical-run.mjs, then retry."
-  exit 0
+  warn "Infisical runner smoke test failed; check dashboard secrets and project id."
+  warn "Boot continues; fix credentials before npm run dev:secrets."
 fi
 
-if [[ ! -s "$ENV_FILE.tmp" ]]; then
-  warn "Secret export produced no output; leaving $ENV_FILE untouched."
-  rm -f "$ENV_FILE.tmp"
-  exit 0
-fi
-
-mv "$ENV_FILE.tmp" "$ENV_FILE"
-chmod 0600 "$ENV_FILE"
-
-# 4. Companion sourcer (no echo) for agents that bypass infisical-run.
-{
-  printf '# Auto-generated by scripts/cursor-cloud-start.sh; do not edit.\n'
-  printf 'set -a\n'
-  printf 'source %q\n' "${ENV_FILE}"
-  printf 'set +a\n'
-} > "$SOURCE_FILE"
-chmod 0600 "$SOURCE_FILE"
-
-log "Wrote $(names_only "$ENV_FILE") and $(names_only "$SOURCE_FILE") (mode 0600)."
 log "start complete."

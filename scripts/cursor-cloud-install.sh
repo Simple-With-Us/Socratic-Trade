@@ -10,6 +10,18 @@ cd "$REPO_ROOT"
 log()  { printf '[cursor-cloud-install] %s\n' "$*"; }
 warn() { printf '[cursor-cloud-install] WARN: %s\n' "$*" >&2; }
 
+load_nvm() {
+  local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
+  if [[ -s "${nvm_dir}/nvm.sh" ]]; then
+    # shellcheck disable=SC1091
+    # nvm is a shell function; non-interactive bash never has `command -v nvm` true
+    # until nvm.sh is sourced.
+    . "${nvm_dir}/nvm.sh"
+    return 0
+  fi
+  return 1
+}
+
 # macOS / iOS / Xcode are not supported on Cursor cloud (Linux).  Fail soft if
 # anyone is on Darwin so this script still exits 0 on a Mac dev seat.
 if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -17,16 +29,11 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   exit 0
 fi
 
-# 1. Node toolchain -- match .nvmrc (24).
-if command -v nvm >/dev/null 2>&1; then
-  # shellcheck disable=SC1091
-  source "$HOME/.nvm/nvm.sh" || true
-fi
-
+# 1. Node toolchain -- match .nvmrc (24) when nvm is installed on the image.
 NODE_REQUIRED="24"
 NODE_CURRENT="$(node -v 2>/dev/null || echo "none")"
 if [[ "$NODE_CURRENT" == "none" || "$NODE_CURRENT" != v${NODE_REQUIRED}.* ]]; then
-  if command -v nvm >/dev/null 2>&1; then
+  if load_nvm && type nvm >/dev/null 2>&1; then
     log "Installing Node ${NODE_REQUIRED}.x via nvm"
     nvm install "${NODE_REQUIRED}" >/dev/null
     nvm use "${NODE_REQUIRED}" >/dev/null
@@ -47,11 +54,23 @@ else
   warn "package-lock.json missing; skipping npm ci."
 fi
 
-# 3. Sanity-check the existing in-repo Infisical helper without invoking it.
+# 3. Infisical bootstrap check (values stay private; ok when keyless).
+if [[ -f scripts/infisical-bootstrap-env.mjs ]]; then
+  log "Checking Infisical bootstrap identity (values stay private)"
+  node scripts/infisical-bootstrap-env.mjs >/dev/null 2>&1 || warn "Infisical bootstrap skipped (ok in keyless cloud)"
+fi
+
+# 4. Slack coordination hook (same as scripts/cloud-setup.sh).
+if [[ -f scripts/setup-slack-sync.sh ]]; then
+  log "Installing Slack coordination sync (global SessionStart hook)"
+  bash scripts/setup-slack-sync.sh >/dev/null 2>&1 || warn "slack-sync install skipped; see docs/slack-coordination.md"
+fi
+
+# 5. Sanity-check the existing in-repo Infisical helper without invoking it.
 if [[ -f scripts/infisical-run.mjs ]]; then
-  log "Found scripts/infisical-run.mjs -- start script will reuse it."
+  log "Found scripts/infisical-run.mjs -- start script will smoke-test it when creds exist."
 else
-  warn "scripts/infisical-run.mjs missing; start script will fall back to infisical CLI."
+  warn "scripts/infisical-run.mjs missing; Infisical injection unavailable."
 fi
 
 log "install complete."
