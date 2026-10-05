@@ -19,6 +19,7 @@ import {
   sqliteOffLoopReclaimCountForTesting,
   SQLITE_OFF_LOOP_POOL_SIZE,
   SQLITE_OFF_LOOP_TIMEOUT_MS,
+  SqliteBindSchema,
   SqliteRowSchema,
   SqliteValueSchema,
   SqliteWorkerResponseSchema,
@@ -160,6 +161,11 @@ describe("sqlite off-loop validation", () => {
     expect(SqliteValueSchema.safeParse(Buffer.from([1, 2])).success).toBe(true);
     expect(SqliteValueSchema.safeParse(1n).success).toBe(true);
     expect(SqliteValueSchema.safeParse(true).success).toBe(true);
+    expect(SqliteBindSchema.safeParse(true).success).toBe(false);
+    expect(SqliteBindSchema.safeParse(1).success).toBe(true);
+    expect(SqliteBindSchema.safeParse(null).success).toBe(true);
+    expect(SqliteBindSchema.safeParse(Buffer.from([1])).success).toBe(true);
+    expect(SqliteBindSchema.safeParse({ nested: true }).success).toBe(false);
     expect(SqliteValueSchema.safeParse(null).success).toBe(true);
     expect(SqliteRowSchema.safeParse({ c: { nested: true } }).success).toBe(false);
     expect(SqliteWorkerResponseSchema.safeParse({
@@ -181,6 +187,39 @@ describe("sqlite off-loop validation", () => {
 
     const rows = await sqliteAllOffLoop("SELECT 5 AS c", [], dbPath, CountRowSchema);
     expect(rows).toEqual([{ c: 5 }]);
+  });
+
+  it("keeps reclaim armed when a started waiter's response fails validation", async () => {
+    const waiter = await primeSqliteOffLoopWaiterForTesting();
+    await deliverSqliteOffLoopMessageForTesting({ id: waiter.id, started: true });
+    const settled = expect(waiter.done).rejects.toThrow("invalid sqlite worker response");
+    await deliverSqliteOffLoopMessageForTesting({
+      id: waiter.id,
+      ok: true,
+      rows: [{ c: { nested: true } }]
+    });
+    await settled;
+    expect(sqliteOffLoopReclaimCountForTesting()).toBe(1);
+    await resetSqliteAllOffLoopForTesting();
+    expect(sqliteOffLoopReclaimCountForTesting()).toBe(0);
+  });
+
+  it("rejects an unsupported bind before the worker runs the statement", async () => {
+    await expect(
+      sqliteAllOffLoop("SELECT 1 AS c", [{ nested: true }], dbPath, CountRowSchema)
+    ).rejects.toThrow("supported SQLite type");
+
+    const rejected = await postSqliteOffLoopRawForTesting({
+      id: 77,
+      dbPath,
+      sql: "SELECT 1 AS c",
+      params: [{ nested: true }]
+    });
+    expect(rejected).toEqual({
+      id: 77,
+      ok: false,
+      error: { message: "invalid sqlite worker request", code: "INVALID_REQUEST" }
+    });
   });
 
   it("round-trips a BLOB column as Uint8Array after worker structured clone", async () => {

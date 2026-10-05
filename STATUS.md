@@ -14,7 +14,7 @@
 
 **What.**  Rebased onto latest `origin/main` (axios #4014, Cursor cloud env #4178).  Reclaim map no longer leaks after caller abort when the slot is already dead: `onExecutionTimeout` disarms before the `disposed` guard, `killSlot` sweeps `reclaimById`, and the test reset clears timers.  A remote merge of `main` plus a partial leak fix was not kept.  This branch stays a rebase.
 
-**Verification.**  Mandated full check is CI `verify` on head `910ecdfa`: run [37294288409](https://github.com/Simple-With-Us/Socratic-Trade/actions/runs/37294288409), `verify` job SUCCESS (full `npm run lint`, `npx tsc --noEmit`, unfiltered `npm test`, `npm run build`).  Targeted local note only: `npx vitest run test/sqlite-all-offloop.test.ts` (24 passed).
+**Verification.**  Mandated full check is CI `verify` (`npm run lint`, `npx tsc --noEmit`, unfiltered `npm test`, `npm run build`).  The required `verify` job completed SUCCESS on the prior head.  This Kody-fix commit waits on that same job for the new head.
 
 **Next.**  Push; comment on the open Kody threads with the fix SHAs.  Do not treat a docs claim as a Slack post.
 

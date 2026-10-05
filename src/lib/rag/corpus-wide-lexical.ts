@@ -76,7 +76,12 @@ const LexicalRowSchema = z.object({
   source: z.string(),
   accession: z.string(),
   text: z.string(),
-  section: z.string(),
+  // chunk_occurrences.section is NOT NULL on databases created by the current
+  // migration, but CREATE TABLE IF NOT EXISTS does not add that constraint to
+  // an older table, and the sync path already treats a missing section as
+  // omitted (`row.section?.trim()`).  A NULL here must not fail the whole
+  // off-loop batch.
+  section: z.string().nullable(),
   ordinal: z.number().nullable(),
   accepted_at: z.string().nullable(),
   doc_type: z.string().nullable(),

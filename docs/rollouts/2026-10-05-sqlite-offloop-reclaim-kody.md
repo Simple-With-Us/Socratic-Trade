@@ -14,6 +14,10 @@ Rebased onto latest `origin/main` (no merge commit).  Main's axios 1.20.0 bump (
 - `killSlot` sweeps reclaim entries for that slot, including the early return when the slot is already disposed.  `settleReject` can re-add a started waiter, so the sweep is after that loop.
 - `resetSqliteAllOffLoopForTesting` disarms timers via `clearExecutionReclaim` instead of dropping map entries and leaving timers armed.  Slots marked disposed without `killSlot` are removed from the pool array.  Reset still terminates the captured workers.
 - Tests: reclaim after caller abort when the execution budget fires.  Reclaim count is 0 after caller abort and a worker `exit` (that handler runs `killSlot`, then a replacement query succeeds).  Awaiting `worker.terminate()` from the test deadlocks because `killSlot` removes the `exit` listener that promise is waiting on.  Reclaim count is also 0 after the execution timer fires on a slot marked disposed without `killSlot`.
+- `LexicalRowSchema.section` accepts null so one NULL section does not fail the off-loop batch.  `mapLexicalRows` still omits a blank section.
+- Worker `RequestSchema` bind params are an explicit better-sqlite3 union.  `sqliteAllOffLoop` rejects the same union before post.  `statement.all` runs only after `safeParse` succeeds.
+- Worker pragmas are fixed literals (`busy_timeout = 100`, `cache_size = -20000`, `mmap_size = 268435456`).  The parent throws if those constants drift.
+- A malformed worker response for a known id settles through `settleReject`, so a started waiter keeps its execution timer and `reclaimById` entry.
 
 Files:
 
@@ -35,9 +39,9 @@ The live board path `/Users/jay/apps/TRADING-EFFORT-LOG.md` is not on this VM.  
 
 ## Verification State
 
-Mandated full check is CI `verify` (workflow `CI`), which runs `npm run lint`, `npx tsc --noEmit`, full `npm test` (unfiltered Vitest), and `npm run build`.  Related PR jobs on the same workflow run: `verify-hosted`, `verify-ios`, `classify`; plus `gitleaks` and `check-pin` on sibling workflows.
+Mandated full check is CI `verify`, which runs `npm run lint`, `npx tsc --noEmit`, full `npm test` (unfiltered Vitest), and `npm run build`.
 
-**Head `910ecdfa` (current PR head):** workflow run [37294288409](https://github.com/Simple-With-Us/Socratic-Trade/actions/runs/37294288409) — `verify` job **SUCCESS** (2026-10-05T10:45:16Z–10:45:18Z).  That job is the authoritative full-suite proof for this branch tip; it is not replaced by a path-filtered local Vitest.
+**Verification:** the required `verify` job completed **SUCCESS** on the prior head.  It is the authoritative full-suite proof and is not replaced by a path-filtered local Vitest.  This Kody-fix commit is not claimed against a finished local full suite until that job is green on the new head.
 
 Additional targeted local note only (not a substitute for `verify`):
 
@@ -45,18 +49,22 @@ Additional targeted local note only (not a substitute for `verify`):
 npx vitest run test/sqlite-all-offloop.test.ts --testTimeout=20000
 ```
 
-24 tests passed (2026-10-05, cloud VM).  No dev server was running, so none was restarted.
+No dev server was running, so none was restarted.
 
 ## Next Steps & Blockers
 
-Push to `grok/lexical-fts-off-event-loop` with `--force-with-lease` because the branch was rebased.  Re-arm squash auto-merge if the rebase cleared it.  Comment on PR #4164 with the commit SHAs for each open Kody thread.  Resolve a thread only when that SHA clearly fixes it.
+Push new commits to `grok/lexical-fts-off-event-loop` with a fast-forward push.  Do not force-push.  Re-arm squash auto-merge if a push cleared it.  Comment on PR #4164 with the commit SHA for each open Kody thread.  Resolve a thread only when that SHA clearly fixes it.
+
+The earlier rebase onto `origin/main` already landed.  This follow-up does not rebase again unless `origin/main` moves ahead.
 
 ## Zero-Code Findings
 
-Fleet recall accepted one lesson: `contrib/GROK/2026-10-05/59e3d453` (category `lesson`, app `socratic-trade`, seat `GROK`).  Command that succeeded:
+Fleet recall already holds the worker-lifecycle invariant.  Search on 2026-10-05 (`recall_search`, app `socratic-trade`, category `lesson`, source `agent-contribution`, limit 5) returned these records before any further contribute:
 
-```bash
-recall contribute "A start-armed bounded worker must keep an independent execution deadline after the caller cancels, until the worker responds or that deadline fires, or an abandoned job pins a pool slot.  When the slot dies first, drop the reclaim entry and disarm that timer immediately, including when the timeout handler observes the slot is already disposed and when the module is reset.  Clearing a map without clearTimeout, or returning before the delete because the slot is disposed, retains the job payload and the settle closures for the process lifetime.  Listener removal on the dying worker is not cleanup: the reply path never runs." --category lesson --app socratic-trade
-```
+- `contrib/GROK/2026-10-05/59e3d453` — disarm reclaim when the slot dies first.
+- `contrib/GB-COMPILER/2026-10-05/0952b86c` — every slot teardown clears per-request bookkeeping.
+- `contrib/GROK/2026-10-05/dc248598` — clear reclaim maps before a disposed guard.
+- `contrib/BF-FIXER/2026-10-02/a8cf4751` — stall-lane watchdog SIGKILL (different invariant).
+- `contrib/BF-FIXER/2026-10-01/00cd51c7` — corpus-wide lexical query as the stall cause (different invariant).
 
-The cloud call also passed `seat: GROK`.  Recall was available.  This was not a skipped contribute.
+No second contribution.  The start-armed reclaim lesson is already in the corpus.

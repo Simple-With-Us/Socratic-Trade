@@ -32,6 +32,15 @@ const WORKER_CACHE_SIZE = -20_000;
 /** Serving handle in src/lib/db.ts: `mmap_size = 268435456` (256MB). */
 const WORKER_MMAP_SIZE = 268_435_456;
 
+// Worker source uses these as fixed PRAGMA literals (no interpolation).
+if (
+  WORKER_BUSY_TIMEOUT_MS !== 100
+  || WORKER_CACHE_SIZE !== -20_000
+  || WORKER_MMAP_SIZE !== 268_435_456
+) {
+  throw new Error("sqlite off-loop PRAGMA literals drifted from the approved constants");
+}
+
 /**
  * Execution budget for one off-loop read, armed when that worker reports it is
  * about to call `.all()` — not when the parent posts. The worker runs statements
@@ -151,6 +160,21 @@ export const SqliteValueSchema = z.union([
 
 export type SqliteValue = z.infer<typeof SqliteValueSchema>;
 
+/**
+ * better-sqlite3 bind values.  Booleans, objects, and arrays are rejected by
+ * the binding layer, so they are not in this union.  The worker parses the
+ * IPC request with this same union before `statement.all`.
+ */
+export const SqliteBindSchema = z.union([
+  z.string(),
+  SqliteNumberSchema,
+  z.bigint(),
+  z.instanceof(Uint8Array),
+  z.null()
+]);
+
+export type SqliteBindValue = z.infer<typeof SqliteBindSchema>;
+
 /** One row object: column name to SQLite value. Not `z.array(z.unknown())`. */
 export const SqliteRowSchema = z.record(z.string(), SqliteValueSchema);
 
@@ -200,11 +224,29 @@ const RequestSchema = z.strictObject({
   id: z.int(),
   dbPath: z.string().min(1),
   sql: z.string().min(1),
-  params: z.array(z.unknown())
+  params: z.array(z.union([
+    z.string(),
+    z.number(),
+    z.literal(Infinity),
+    z.literal(-Infinity),
+    z.nan(),
+    z.bigint(),
+    z.instanceof(Uint8Array),
+    z.null()
+  ]))
 });
 
 let db = null;
 let openPath = null;
+
+function applyApprovedPragmas(next) {
+  // Fixed literals.  Parent asserts these match SQLITE_BUSY_PIN_MS (100),
+  // WORKER_CACHE_SIZE (-20000), and WORKER_MMAP_SIZE (268435456).
+  next.pragma("query_only = ON");
+  next.pragma("busy_timeout = 100");
+  next.pragma("cache_size = -20000");
+  next.pragma("mmap_size = 268435456");
+}
 
 function openDb(dbPath) {
   if (db && openPath === dbPath) return db;
@@ -215,10 +257,7 @@ function openDb(dbPath) {
   }
   const next = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
-    next.pragma("query_only = ON");
-    next.pragma("busy_timeout = ${WORKER_BUSY_TIMEOUT_MS}");
-    next.pragma("cache_size = ${WORKER_CACHE_SIZE}");
-    next.pragma("mmap_size = ${WORKER_MMAP_SIZE}");
+    applyApprovedPragmas(next);
   } catch (err) {
     try { next.close(); } catch {}
     throw err;
@@ -771,8 +810,12 @@ function handleWorkerMessage(slot: PoolSlot, instance: Worker, msg: unknown): vo
       console.warn("[sqlite-all-offloop] ignoring invalid worker response");
       return;
     }
-    const waiter = takeWaiter(slot, instance, id);
-    waiter?.reject(new Error("invalid sqlite worker response"));
+    const waiter = pending.get(id);
+    if (waiter && waiter.slot === slot && slot.worker === instance) {
+      // Started waiters keep the execution timer and a reclaim entry.
+      // Not-yet-started waiters still cancel in place inside settleReject.
+      settleReject(waiter, new Error("invalid sqlite worker response"));
+    }
     return;
   }
   if ("started" in parsed.data) {
@@ -832,6 +875,10 @@ export async function sqliteAllOffLoop<T>(
   if (typeof dbPath !== "string" || dbPath.length === 0) {
     throw new Error("sqlite off-loop query requires a database path");
   }
+  const parsedParams = z.array(SqliteBindSchema).safeParse([...params]);
+  if (!parsedParams.success) {
+    throw new Error("sqlite off-loop query bind parameter is not a supported SQLite type");
+  }
   const signal = options?.signal;
   if (signal?.aborted) throw abortError(signal);
   const timeoutMs = resolveTimeoutMs(options?.timeoutMs);
@@ -855,7 +902,7 @@ export async function sqliteAllOffLoop<T>(
       allowRedispatch: true,
       signal,
       sql,
-      params,
+      params: parsedParams.data,
       dbPath,
       timeoutMs
     };
