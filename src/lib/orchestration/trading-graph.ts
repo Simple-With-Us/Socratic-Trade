@@ -68,6 +68,16 @@ export class TradingGraph {
     return [...this.transitions];
   }
 
+  /** Callback failures must not change the node outcome or skip error recording. */
+  private emitTransition(record: GraphTransitionRecord): void {
+    try {
+      this.onTransition?.(record);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.warn(`[TradingGraph] onTransition callback threw: ${detail}`);
+    }
+  }
+
   public async run(): Promise<GraphContext> {
     while (this.currentState !== "COMPLETED" && this.currentState !== "FAILED") {
       const node = this.nodes.get(this.currentState);
@@ -76,25 +86,23 @@ export class TradingGraph {
         this.currentState = "FAILED";
         break;
       }
-      
+
       const fromState = this.currentState;
       const startTime = Date.now();
+      let result: { nextState: GraphState; context: GraphContext } | undefined;
+      let thrown: { error: unknown } | undefined;
       try {
-        const result = await node.execute(this.context);
-        const durationMs = Date.now() - startTime;
-        const transition: GraphTransitionRecord = {
-          from: fromState,
-          to: result.nextState,
-          timestamp: startTime,
-          durationMs,
-        };
-        this.transitions.push(transition);
-        this.onTransition?.(transition);
-
-        this.currentState = result.nextState;
-        this.context = result.context;
+        result = await node.execute(this.context);
       } catch (error) {
-        const durationMs = Date.now() - startTime;
+        thrown = { error };
+      }
+
+      const durationMs = Date.now() - startTime;
+      if (thrown || result === undefined) {
+        const error = thrown
+          ? thrown.error
+          : new Error(`Node ${fromState} returned no result`);
+        this.context.errors.push(error instanceof Error ? error : new Error(String(error)));
         const transition: GraphTransitionRecord = {
           from: fromState,
           to: "FAILED",
@@ -102,11 +110,21 @@ export class TradingGraph {
           durationMs,
         };
         this.transitions.push(transition);
-        this.onTransition?.(transition);
-
-        this.context.errors.push(error instanceof Error ? error : new Error(String(error)));
         this.currentState = "FAILED";
+        this.emitTransition(transition);
+        continue;
       }
+
+      const transition: GraphTransitionRecord = {
+        from: fromState,
+        to: result.nextState,
+        timestamp: startTime,
+        durationMs,
+      };
+      this.transitions.push(transition);
+      this.currentState = result.nextState;
+      this.context = result.context;
+      this.emitTransition(transition);
     }
     
     // Attach transition history to metadata for full observability and trajectory tracking

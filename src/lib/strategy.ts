@@ -6,7 +6,7 @@ import {
   gatherStrategyMarket
 } from "./strategy-gather";
 import { isDelayedYahooFallbackQuote } from "./quote-delayed-fallback";
-import { TradingGraph, GraphContext, GraphState } from "./orchestration/trading-graph";
+import { TradingGraph, GraphContext } from "./orchestration/trading-graph";
 import { readCongressScoreVerdict } from "./congress-score-gate";
 import { LANE_WAITS, withAccountMutation } from "./account-mutation";
 import { OperationLeaseOwnershipError } from "./operation-lease";
@@ -54,7 +54,7 @@ import { deriveMacroMetrics } from "./macro-metrics";
 import { computeMarketInternals } from "./market-internals";
 import { getMarketSignals } from "./market-signals";
 import { compactWeeklyScreensForPrompt, weeklyMarketDigestForScan } from "./weekly-market-digest";
-import { fetchMacroData, fetchMacroDataWithLiveVix, pruneMacro, determineMarketRegime, evaluateVolatilityBrake, type MacroData } from "./macro";
+import { fetchMacroData, fetchMacroDataWithLiveVix, pruneMacro, determineMarketRegime, evaluateVolatilityBrake, MARKET_REGIME_LABELS, type MacroData } from "./macro";
 import { compactMacroTrendsForPrompt, fetchMacroHistory } from "./macro-history";
 import { buildCandidateEvidence } from "./evidence";
 import { applyEvidenceBudget } from "./evidence-budget";
@@ -476,41 +476,6 @@ export function rememberEvidenceAgeAnomalyDedupKey(
   }
   cache.set(key, true);
   return true;
-}
-
-export interface AlternativeDataAnalysisParams {
-  congressVerdict: { verdict: string; pass: boolean; stale: boolean; computedAt: number } | null;
-  topCandidates?: Array<{ score?: number }>;
-}
-
-export function evaluateAlternativeDataAnalysis(
-  context: GraphContext,
-  params: AlternativeDataAnalysisParams
-): { nextState: GraphState; context: GraphContext } {
-  const marketCandidateCount = params.topCandidates?.length ?? 0;
-  const avgScore = marketCandidateCount > 0
-    ? params.topCandidates!.reduce((acc, c) => acc + (c.score ?? 0), 0) / marketCandidateCount
-    : 0;
-  const macroRegime = avgScore > 65 ? "RISK_ON" : avgScore < 40 ? "DEFENSIVE" : "NEUTRAL";
-
-  const alternativeMetadata = {
-    congressVerdict: params.congressVerdict ? {
-      verdict: params.congressVerdict.verdict,
-      pass: params.congressVerdict.pass,
-      stale: params.congressVerdict.stale,
-      computedAt: params.congressVerdict.computedAt,
-    } : null,
-    macroRegime,
-    candidateCount: marketCandidateCount,
-    analyzedAt: new Date().toISOString(),
-  };
-
-  context.metadata = {
-    ...context.metadata,
-    alternativeData: alternativeMetadata,
-  };
-
-  return { nextState: "FUNDAMENTAL_PROPOSING", context };
 }
 
 export async function runStrategyOnce(
@@ -3513,15 +3478,7 @@ export async function runStrategyOnce(
     // sell-to-fund planning — so a gated buy can't drive automated funding sells. Only the advisory
     // full-set warning above remains here.)
         
-        return { nextState: "RED_TEAM_REVIEW", context: { ...context, proposals } };
-      }
-    });
-
-    graph.registerNode({
-      name: "RED_TEAM_REVIEW",
-      execute: async (context: GraphContext) => {
-        // Red team audit & validation checkpoint before order placement
-        return { nextState: "EXECUTION", context };
+        return { nextState: "EXECUTION", context: { ...context, proposals } };
       }
     });
 
@@ -4754,15 +4711,45 @@ export async function runStrategyOnce(
       name: "ALTERNATIVE_DATA_ANALYSIS",
       execute: async (context: GraphContext) => {
         const congressVerdict = readCongressScoreVerdict(userId);
-        return evaluateAlternativeDataAnalysis(context, {
+
+        // Receipt only.  Regime is determineMarketRegime, the same classifier the
+        // rest of the run uses.  A macro fetch failure is an explicit unknown and
+        // does not fail the run.  This node does not gate proposals or trades.
+        // The post-placement fetchMacroData below stays: that await is where a
+        // lost account lease is observed before evidence writes.
+        let macroRegime = MARKET_REGIME_LABELS.unknown;
+        try {
+          macroRegime = determineMarketRegime(await fetchMacroData(userId));
+        } catch (error) {
+          console.warn(
+            "[strategy] alternative-data macro fetch failed:",
+            error instanceof Error ? error.message : String(error)
+          );
+          macroRegime = MARKET_REGIME_LABELS.unknown;
+        }
+
+        const candidateCount = marketScan?.topCandidates?.length ?? 0;
+        const alternativeMetadata = {
           congressVerdict: congressVerdict ? {
             verdict: congressVerdict.verdict,
             pass: congressVerdict.pass,
             stale: congressVerdict.stale,
             computedAt: congressVerdict.computedAt,
           } : null,
-          topCandidates: marketScan?.topCandidates,
-        });
+          macroRegime,
+          breadthPct: marketScan?.breadthPct ?? null,
+          candidateCount,
+          analyzedAt: new Date().toISOString(),
+        };
+
+        audit("alternative_data_analysis", { runId, ...alternativeMetadata }, userId, connectedAccountId);
+
+        context.metadata = {
+          ...context.metadata,
+          alternativeData: alternativeMetadata,
+        };
+
+        return { nextState: "FUNDAMENTAL_PROPOSING", context };
       }
     });
 

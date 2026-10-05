@@ -1,34 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { DEFAULT_POLICY } from "../src/lib/defaults";
 import {
   TradingGraph,
   type GraphContext,
   type GraphState,
   type GraphNode,
-  type GraphTransitionRecord,
 } from "../src/lib/orchestration/trading-graph";
-import { DEFAULT_POLICY, type TradingPolicy, type TradeProposal } from "../src/lib/types";
-import { evaluateAlternativeDataAnalysis } from "../src/lib/strategy";
-
-function isGraphTransitionRecordArray(value: unknown): value is GraphTransitionRecord[] {
-  return (
-    Array.isArray(value) &&
-    value.every(
-      (item) =>
-        item !== null &&
-        typeof item === "object" &&
-        "from" in item &&
-        "to" in item &&
-        "timestamp" in item &&
-        "durationMs" in item
-    )
-  );
-}
+import type { TradeProposal } from "../src/lib/types";
 
 function createMockContext(overrides?: Partial<GraphContext>): GraphContext {
   return {
     runId: "test-run-1",
     policy: { ...DEFAULT_POLICY },
-    mode: "dry-run",
+    mode: "broker/paper",
     userId: "test-user",
     connectedAccountId: "test-account",
     proposals: [],
@@ -36,6 +20,36 @@ function createMockContext(overrides?: Partial<GraphContext>): GraphContext {
     metadata: {},
     ...overrides,
   };
+}
+
+function tradeProposal(overrides?: Partial<TradeProposal>): TradeProposal {
+  return {
+    symbol: "AAPL",
+    side: "buy",
+    type: "market",
+    timeInForce: "gfd",
+    marketHours: "regular_hours",
+    rationale: "Strong alternative & fundamental alignment",
+    tradeThesisTag: "momentum_breakout",
+    entryMarketRegime: "Neutral (Normal Volatility)",
+    ...overrides,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isGraphTransition(value: unknown): value is { from: string; to: string; durationMs: number } {
+  if (!isRecord(value)) return false;
+  return typeof value.from === "string" && typeof value.to === "string" && typeof value.durationMs === "number";
+}
+
+function readGraphTransitions(value: unknown): Array<{ from: string; to: string; durationMs: number }> {
+  if (!Array.isArray(value) || !value.every(isGraphTransition)) {
+    throw new Error("graphTransitions has an unexpected shape");
+  }
+  return value.filter(isGraphTransition);
 }
 
 describe("TradingGraph Orchestration Engine", () => {
@@ -81,14 +95,11 @@ describe("TradingGraph Orchestration Engine", () => {
         context: {
           ...ctx,
           proposals: [
-            {
+            tradeProposal({
               symbol: "AAPL",
               side: "buy",
-              type: "market",
-              timeInForce: "day",
-              marketHours: "regular_only",
               rationale: "Strong alternative & fundamental alignment",
-            },
+            }),
           ],
         },
       }),
@@ -127,14 +138,11 @@ describe("TradingGraph Orchestration Engine", () => {
     ]);
 
     expect(result.metadata.graphFinalState).toBe("COMPLETED");
-    const metaTransitions: unknown = result.metadata.graphTransitions;
-    expect(isGraphTransitionRecordArray(metaTransitions)).toBe(true);
-    if (isGraphTransitionRecordArray(metaTransitions)) {
-      expect(metaTransitions).toHaveLength(5);
-      expect(metaTransitions[0].from).toBe("INIT");
-      expect(metaTransitions[1].to).toBe("FUNDAMENTAL_PROPOSING");
-      expect(metaTransitions[0].durationMs).toBeGreaterThanOrEqual(0);
-    }
+    const metaTransitions = readGraphTransitions(result.metadata.graphTransitions);
+    expect(metaTransitions).toHaveLength(5);
+    expect(metaTransitions[0].from).toBe("INIT");
+    expect(metaTransitions[1].to).toBe("FUNDAMENTAL_PROPOSING");
+    expect(metaTransitions[0].durationMs).toBeGreaterThanOrEqual(0);
   });
 
   it("handles node execution errors cleanly and transitions to FAILED", async () => {
@@ -222,62 +230,58 @@ describe("TradingGraph Orchestration Engine", () => {
     expect(transitions[1].to).toBe("RED_TEAM_REVIEW");
     expect(transitions[2].to).toBe("COMPLETED");
   });
-});
 
-describe("Production ALTERNATIVE_DATA_ANALYSIS Node Execution", () => {
-  it("computes RISK_ON macro regime with valid congress verdict", () => {
-    const ctx = createMockContext();
-    const result = evaluateAlternativeDataAnalysis(ctx, {
-      congressVerdict: { verdict: "PASS", pass: true, stale: false, computedAt: Date.now() },
-      topCandidates: [{ score: 70 }, { score: 80 }],
+  it("keeps the success path when onTransition throws on every call", async () => {
+    const context = createMockContext();
+    const graph = new TradingGraph(context, {
+      onTransition: () => {
+        throw new Error("telemetry sink down");
+      },
     });
 
-    expect(result.nextState).toBe("FUNDAMENTAL_PROPOSING");
-    const altData = result.context.metadata.alternativeData as {
-      macroRegime: string;
-      candidateCount: number;
-      congressVerdict: { verdict: string; pass: boolean } | null;
-    };
-    expect(altData.macroRegime).toBe("RISK_ON");
-    expect(altData.candidateCount).toBe(2);
-    expect(altData.congressVerdict?.verdict).toBe("PASS");
-    expect(altData.congressVerdict?.pass).toBe(true);
+    graph.registerNode({
+      name: "INIT",
+      execute: async (ctx) => ({ nextState: "EXECUTION", context: ctx }),
+    });
+    graph.registerNode({
+      name: "EXECUTION",
+      execute: async (ctx) => ({ nextState: "COMPLETED", context: ctx }),
+    });
+
+    const result = await graph.run();
+
+    expect(graph.getCurrentState()).toBe("COMPLETED");
+    expect(result.errors).toHaveLength(0);
+    expect(result.metadata.graphFinalState).toBe("COMPLETED");
+    const transitions = graph.getTransitions();
+    expect(transitions.map((record) => ({ from: record.from, to: record.to }))).toEqual([
+      { from: "INIT", to: "EXECUTION" },
+      { from: "EXECUTION", to: "COMPLETED" },
+    ]);
+    expect(transitions.every((record) => record.durationMs >= 0)).toBe(true);
   });
 
-  it("computes DEFENSIVE macro regime when market candidate breadth is low", () => {
-    const ctx = createMockContext();
-    const result = evaluateAlternativeDataAnalysis(ctx, {
-      congressVerdict: null,
-      topCandidates: [{ score: 25 }, { score: 35 }],
+  it("records the node error when onTransition throws during a failure", async () => {
+    const context = createMockContext();
+    const graph = new TradingGraph(context, {
+      onTransition: () => {
+        throw new Error("telemetry sink down");
+      },
     });
 
-    expect(result.nextState).toBe("FUNDAMENTAL_PROPOSING");
-    const altData = result.context.metadata.alternativeData as {
-      macroRegime: string;
-      candidateCount: number;
-      congressVerdict: null;
-    };
-    expect(altData.macroRegime).toBe("DEFENSIVE");
-    expect(altData.candidateCount).toBe(2);
-    expect(altData.congressVerdict).toBeNull();
-  });
-
-  it("computes NEUTRAL macro regime for moderate scores", () => {
-    const ctx = createMockContext();
-    const result = evaluateAlternativeDataAnalysis(ctx, {
-      congressVerdict: { verdict: "INSUFFICIENT", pass: true, stale: false, computedAt: Date.now() },
-      topCandidates: [{ score: 50 }, { score: 55 }],
+    graph.registerNode({
+      name: "INIT",
+      execute: async () => {
+        throw new Error("Data provider connection timeout");
+      },
     });
 
-    expect(result.nextState).toBe("FUNDAMENTAL_PROPOSING");
-    const altData = result.context.metadata.alternativeData as {
-      macroRegime: string;
-      candidateCount: number;
-      congressVerdict: { verdict: string };
-    };
-    expect(altData.macroRegime).toBe("NEUTRAL");
-    expect(altData.candidateCount).toBe(2);
-    expect(altData.congressVerdict?.verdict).toBe("INSUFFICIENT");
+    const result = await graph.run();
+
+    expect(graph.getCurrentState()).toBe("FAILED");
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].message).toContain("Data provider connection timeout");
+    expect(result.metadata.graphFinalState).toBe("FAILED");
+    expect(graph.getTransitions().map((record) => record.to)).toEqual(["FAILED"]);
   });
 });
-
