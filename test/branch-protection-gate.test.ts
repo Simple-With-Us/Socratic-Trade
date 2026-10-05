@@ -88,6 +88,33 @@ function withoutComments(source: string): string {
     .join("\n");
 }
 
+/**
+ * Body of the shell `if <cond>; then` block whose condition line is exactly `cond` (after
+ * indentation), up to the `fi` at the SAME indentation — nested blocks stay inside. Undefined if
+ * the condition is absent.
+ */
+function ifBody(script: string, cond: string): string | undefined {
+  const lines = script.split("\n");
+  const start = lines.findIndex((l) => l.trim() === cond);
+  if (start < 0) return undefined;
+  const indent = lines[start].match(/^\s*/)?.[0] ?? "";
+  const body: string[] = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    if (lines[i] === `${indent}fi`) return body.join("\n");
+    body.push(lines[i]);
+  }
+  return undefined;
+}
+
+/** Last non-blank, non-`fi` statement of a shell snippet, trimmed. */
+function lastStatement(script: string): string {
+  const lines = script
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && l !== "fi");
+  return lines[lines.length - 1] ?? "";
+}
+
 describe("branch protection is backed by a gate that always reports", () => {
   it("CI has no paths filter on pull_request, so `verify` is created for EVERY diff", () => {
     // THE critical invariant. A `paths:`/`paths-ignore:` filter would mean some diffs never create
@@ -131,22 +158,55 @@ describe("the `verify` gate cannot fail open", () => {
   });
 
   it("passes only on enumerated success states and fails otherwise", () => {
-    const verify = jobBlock(ci, "verify");
+    const verify = withoutComments(jobBlock(ci, "verify"));
 
-    // Enumerated PASS states: docs-only, the hourly backstop (cron-only),
-    // hosted green with iOS required only when the diff changed iOS, and
-    // hosted green with a skipped or successful iOS lane otherwise.
-    expect(verify).toMatch(/if \[ "\$DOCS_ONLY" = "true" \]; then[\s\S]*?exit 0/);
-    expect(verify).toMatch(/if \[ "\$REDUNDANT" = "true" \]; then[\s\S]*?exit 0/);
-    // HOSTED is always required once the fast paths are exhausted. iOS is
-    // required only when IOS_CHANGED=true; a skipped or successful iOS lane
-    // is PASS when the diff is not iOS. Any other iOS result still exits 1.
-    expect(verify).toMatch(
-      /if \[ "\$HOSTED_RESULT" != "success" \]; then[\s\S]*?exit 1[\s\S]*?if \[ "\$\{IOS_CHANGED:-\}" = "true" \]; then[\s\S]*?if \[ "\$IOS_RESULT" = "success" \]; then[\s\S]*?exit 0[\s\S]*?exit 1[\s\S]*?if \[ "\$IOS_RESULT" = "skipped" \] \|\| \[ "\$IOS_RESULT" = "success" \]; then[\s\S]*?exit 0[\s\S]*?exit 1/,
-    );
-    expect(verify).toMatch(/exit 1\s*$/m);
-    // And `classify` failing is never a pass.
-    expect(verify).toMatch(/if \[ "\$CLASSIFY_RESULT" != "success" \]; then[\s\S]*?exit 1/);
+    // Each assertion is scoped to ONE `if ...; then` body (up to its own `fi`), so an `exit 0` /
+    // `exit 1` from a later branch can never satisfy an earlier one (Kody review, PR #4231).
+    const classify = ifBody(verify, 'if [ "$CLASSIFY_RESULT" != "success" ]; then');
+    const docsOnly = ifBody(verify, 'if [ "$DOCS_ONLY" = "true" ]; then');
+    const redundant = ifBody(verify, 'if [ "$REDUNDANT" = "true" ]; then');
+    const hosted = ifBody(verify, 'if [ "$HOSTED_RESULT" != "success" ]; then');
+    const iosRequired = ifBody(verify, 'if [ "${IOS_CHANGED:-}" = "true" ]; then');
+    const iosRequiredOk = ifBody(iosRequired ?? "", 'if [ "$IOS_RESULT" = "success" ]; then');
+    const iosOptional = ifBody(verify, 'if [ "$IOS_RESULT" = "skipped" ] || [ "$IOS_RESULT" = "success" ]; then');
+
+    // FAIL branches: classify failure and a non-green hosted lane exit 1 and never exit 0.
+    for (const body of [classify, hosted]) {
+      expect(body).toBeDefined();
+      expect(lastStatement(body!)).toBe("exit 1");
+      expect(body).not.toMatch(/exit 0/);
+    }
+    // PASS fast paths: docs-only and the hourly backstop exit 0 and never exit 1.
+    for (const body of [docsOnly, redundant]) {
+      expect(body).toBeDefined();
+      expect(lastStatement(body!)).toBe("exit 0");
+      expect(body).not.toMatch(/exit 1/);
+    }
+    // iOS required (IOS_CHANGED=true): PASS only inside the IOS_RESULT=success sub-branch;
+    // anything else falls through to the branch's own trailing `exit 1`.
+    expect(iosRequired).toBeDefined();
+    expect(iosRequiredOk).toBeDefined();
+    expect(lastStatement(iosRequiredOk!)).toBe("exit 0");
+    expect(iosRequiredOk).not.toMatch(/exit 1/);
+    expect(lastStatement(iosRequired!)).toBe("exit 1");
+    // iOS not required: a skipped or successful lane passes; nothing else in that branch fails.
+    expect(iosOptional).toBeDefined();
+    expect(lastStatement(iosOptional!)).toBe("exit 0");
+    expect(iosOptional).not.toMatch(/exit 1/);
+
+    // Order matters: classify -> docs-only -> backstop -> hosted -> iOS required -> iOS optional,
+    // and anything that falls past the last enumerated PASS state is a FAIL.
+    const order = [
+      'if [ "$CLASSIFY_RESULT" != "success" ]; then',
+      'if [ "$DOCS_ONLY" = "true" ]; then',
+      'if [ "$REDUNDANT" = "true" ]; then',
+      'if [ "$HOSTED_RESULT" != "success" ]; then',
+      'if [ "${IOS_CHANGED:-}" = "true" ]; then',
+      'if [ "$IOS_RESULT" = "skipped" ] || [ "$IOS_RESULT" = "success" ]; then',
+    ].map((cond) => verify.indexOf(cond));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(lastStatement(verify)).toBe("exit 1");
   });
 
   it("keeps `set -euo pipefail` so an unset variable cannot quietly pass the gate", () => {
