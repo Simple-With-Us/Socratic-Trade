@@ -79,7 +79,6 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
     steps:
       # fetch-depth: 0 is load-bearing, not hygiene. The default depth-1 checkout
       # leaves the runner workspace with exactly ONE commit (verified 2026-08-13:
