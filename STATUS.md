@@ -7,13 +7,18 @@
 **Verification.**  `bash -n` on both cursor-cloud scripts; application `npm run build` not run (shell-only change).
 
 **Next.**  Push; reply on threads with fix SHA; do not merge.
+
 ## 2026-10-05 CURSOR — PR #4164 off-loop reclaim (branch `grok/lexical-fts-off-event-loop`)
 
-**What.**  Kody threads on wedged started-slot reclaim: keep execution timer after caller abort, `reclaimById` + `clearExecutionReclaim`, remove dead `settleReject` budget branch.
+**Claim.**  `repo: Simple-With-Us/Socratic-Trade`  `pr: #4164`.  No linked track issue.  No Slack #agent-sync post and no board card id from this cloud VM.
 
-**Verification.**  `npm test -- test/sqlite-all-offloop.test.ts` (22 passed).
+**What.**  Rebased onto latest `origin/main` (axios #4014, Cursor cloud env #4178).  Reclaim map no longer leaks after caller abort when the slot is already dead: `onExecutionTimeout` disarms before the `disposed` guard, `killSlot` sweeps `reclaimById`, and the test reset clears timers.  Fix commit `fa5ddffb`.
 
-**Next.**  Push; reply on threads `PRRT_kwDOS7mOVM6o82Q_` and `PRRT_kwDOS7mOVM6o82UE_`.
+**Verification.**  Mandated full check is CI `verify` (lint, `tsc --noEmit`, full Vitest, Next.js build) and the related CI jobs on this PR.  That gate was green on the pre-rebase head `4ca11431`.  Additional local note only: `npx vitest run test/sqlite-all-offloop.test.ts` (24 passed).  Full local lint, tsc, test, and build were not run in this cloud session.
+
+**Next.**  Push; comment on the open Kody threads with the fix SHAs.  Do not treat a docs claim as a Slack post.
+
+
 
 ## 2026-10-05 CURSOR — PR #4158 Kody review follow-up (branch `fix/fred-proxy-failsoft`)
 
