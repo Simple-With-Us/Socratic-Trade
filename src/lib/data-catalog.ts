@@ -138,6 +138,20 @@ export const CATALOG_FIELDS: CatalogField[] = [
     ]
   },
   {
+    id: "marketCap",
+    label: "Market cap",
+    category: "quote",
+    valueKind: "number",
+    description: "Total market capitalization in USD.",
+    provenanceRequired: true,
+    llmKey: "mktCap",
+    sources: [
+      src("nasdaq-delayed-screener", "Scan universe first pass", true),
+      src("yahoo-finance"),
+      src("symbol_field_latest")
+    ]
+  },
+  {
     id: "bid",
     label: "Bid",
     category: "quote",

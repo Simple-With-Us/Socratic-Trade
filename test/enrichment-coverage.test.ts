@@ -4,6 +4,7 @@ import {
   buildEnrichmentCoverageReport,
   collectFilledFields,
   COVERAGE_GAP_FIELDS,
+  COVERAGE_TRACKED_FIELDS,
   getLastEnrichmentCoverageReport,
   paidProviderHasUsefulWaveBGap,
   scarceProviderHasUsefulGap,
@@ -54,6 +55,20 @@ function coreComplete(overrides: SymbolEnrichment = {}): SymbolEnrichment {
 }
 
 describe("buildEnrichmentCoverageReport", () => {
+  it("tracks marketCap in coverage field inventory", () => {
+    expect(COVERAGE_TRACKED_FIELDS).toContain("marketCap");
+    const report = buildEnrichmentCoverageReport(
+      { AAPL: { marketCap: 3e12, sources: { marketCap: "nasdaq-delayed-screener" } } } as Record<
+        string,
+        EnrichmentCoverageRecord
+      >,
+      ["nasdaq-delayed-screener"]
+    );
+    const mcap = report.fields.find((f) => f.field === "marketCap");
+    expect(mcap?.filledCount).toBe(1);
+    expect(mcap?.mostFrequentSource).toBe("nasdaq-delayed-screener");
+  });
+
   it("reports fill rates, most-frequent source, missing fields, and failures", () => {
     const merged: Record<string, SymbolEnrichment> = {
       AAPL: {

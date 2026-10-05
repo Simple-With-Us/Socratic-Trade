@@ -22,6 +22,7 @@ describe("data-catalog", () => {
     const byCat = catalogFieldsByCategory();
     expect(byCat.rag_corpus?.some((f) => f.id === "rag:10-k")).toBe(true);
     expect(byCat.fundamental?.some((f) => f.id === "peRatio")).toBe(true);
+    expect(byCat.quote?.some((f) => f.id === "marketCap")).toBe(true);
   });
 
   it("buildCatalogPayload is static and includes provenance policy", () => {
