@@ -12,7 +12,7 @@
 
 ## 2026-10-04 — axios 1.18.0 to 1.20.0 (PR #4014)
 
-**What.**  Dependabot runtime bump.  The production image installs this via `npm ci`.  Axios 1.20.0 hardens config reads against prototype pollution and keeps `PayloadTooLarge` / `UnprocessableEntity` as aliases.  The XHR navigation-cancel change (reject `ECONNABORTED` instead of status 0) does not apply here.  The only axios consumer is the Alpaca SDK's Node HTTP adapter (`src/lib/alpaca.ts`).
+**What.**  Dependabot runtime bump.  The production image installs this via `npm ci`.  Axios 1.20.0 hardens prototype-pollution-safe reads of merged config and keeps `PayloadTooLarge` / `UnprocessableEntity` as aliases.  The XHR navigation-cancel change (reject `ECONNABORTED` instead of status 0) does not apply here.  Consumers: `@alpacahq/alpaca-trade-api` (via `overrides.axios`) and first-party `src/lib/alpaca.ts`, which `require`s axios and sets `defaults.timeout` from `ALPACA_BROKER_IO_DEADLINE_MS` on the broker path.
 
 **Docs.**  Rollout `docs/rollouts/2026-10-04-axios-1.20.0.md`.  `PLAN.md` and phase docs are unchanged because this is not a product-scope or phase-design change.
 
