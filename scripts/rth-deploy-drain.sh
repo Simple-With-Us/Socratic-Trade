@@ -105,7 +105,12 @@ log "live $LIVE_SHA is behind $EXPECTED_SHA; nudging Coolify"
 nudge_ok=0
 
 if command -v gh >/dev/null 2>&1; then
-  REPO="${GITHUB_REPOSITORY:-jaywedgeworth22/Socratic-Trade}"
+  if [ -n "${GITHUB_REPOSITORY:-}" ]; then
+    REPO="$GITHUB_REPOSITORY"
+  else
+    REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)" || true
+    REPO="${REPO:-Simple-With-Us/Socratic-Trade}"
+  fi
   HOOK_ID="$(gh api "repos/${REPO}/hooks" --jq '.[] | select(.config.url != null and (.config.url | test("host.jays.services/webhooks"))) | .id' 2>/dev/null | head -n 1 || true)"
   if [ -n "${HOOK_ID:-}" ]; then
     DELIVERY_ID="$(gh api "repos/${REPO}/hooks/${HOOK_ID}/deliveries?per_page=30" --jq '[.[] | select(.event == "push" and .redelivery == false)] | .[0].id // empty' 2>/dev/null || true)"

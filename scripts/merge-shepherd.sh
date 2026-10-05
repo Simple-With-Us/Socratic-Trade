@@ -23,7 +23,7 @@
 #   strict, no thread-resolution), so `verify == SUCCESS` is our green signal.
 #
 # Env:
-#   GITHUB_REPOSITORY   owner/repo (default: jaywedgeworth22/Socratic-Trade)
+#   GITHUB_REPOSITORY   owner/repo (default: gh repo view, else Simple-With-Us/Socratic-Trade)
 #   SHEPHERD_DRY_RUN=1  report only; attempt nothing
 #   GH_TOKEN/GITHUB_TOKEN  auth. A PAT (repo+workflow scope) is preferred so that
 #                          update-branch re-triggers verify; the default Actions
@@ -35,7 +35,12 @@
 #                          which uses a real user PAT) defaults to "1".
 set -uo pipefail
 
-REPO="${GITHUB_REPOSITORY:-jaywedgeworth22/Socratic-Trade}"
+if [ -n "${GITHUB_REPOSITORY:-}" ]; then
+  REPO="$GITHUB_REPOSITORY"
+else
+  REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)" || true
+  REPO="${REPO:-Simple-With-Us/Socratic-Trade}"
+fi
 DRY="${SHEPHERD_DRY_RUN:-0}"
 HAS_PAT="${SHEPHERD_HAS_PAT:-1}"
 ISSUE_TITLE="Merge shepherd status"
@@ -72,7 +77,7 @@ nums=$(gh pr list -R "$REPO" --state open --limit 80 --json number --jq '.[].num
 
 for num in $nums; do
   d=$(gh pr view "$num" -R "$REPO" \
-        --json title,isDraft,autoMergeRequest,statusCheckRollup,labels,headRefOid,comments 2>/dev/null) || continue
+        --json title,isDraft,autoMergeRequest,statusCheckRollup,labels,headRefOid,comments,mergeStateStatus 2>/dev/null) || continue
   title=$(jq -r '.title' <<<"$d")
   draft=$(jq -r '.isDraft' <<<"$d")
   armed=$(jq -r '.autoMergeRequest != null' <<<"$d")
@@ -93,6 +98,7 @@ for num in $nums; do
   # copy the visible head sha into a comment and trick the shepherd into skipping its
   # one-time flake-recovery rerun (Codex review, round 3).
   reran=$(jq -r --arg sha "$sha" --arg me "$ME" '[.comments[]? | select((.author.login // "")==$me) | (.body // "") | select(contains("shepherd-reran:" + $sha))] | length > 0' <<<"$d")
+  merge_state=$(jq -r '.mergeStateStatus // "UNKNOWN"' <<<"$d")
 
   if [ "$draft" = "true" ]; then row DRAFT "$num" "$title"; continue; fi
   if [ "$armed" != "true" ]; then row NOT-ARMED "$num" "$title  (verify=$verify -- parked / not landed via land.sh)"; continue; fi
@@ -101,7 +107,12 @@ for num in $nums; do
 
   if [ "$DRY" = "1" ]; then
     case "$verify" in
-      SUCCESS) row WOULD-MERGE "$num" "$title" ;;
+      SUCCESS)
+        if [ "$merge_state" = "BLOCKED" ]; then
+          row BLOCKED "$num" "$title  (mergeStateStatus=BLOCKED -- unresolved review / rules)"
+        else
+          row WOULD-MERGE "$num" "$title"
+        fi ;;
       FAILURE|CANCELLED|TIMED_OUT|ACTION_REQUIRED|STARTUP_FAILURE|STALE|ERROR)
                row FAILING "$num" "$title  (verify=$verify; reran=$reran)" ;;
       NONE)    if [ "$running" -gt 0 ]; then row WAITING "$num" "$title  (CI running; verify not posted yet)";
@@ -121,12 +132,16 @@ for num in $nums; do
     row WAITING "$num" "$title  (green + armed; merge skipped -- no PAT, a bot merge would dispatch no post-merge CI)"
 
   elif [ "$verify" = "SUCCESS" ]; then
+    if [ "$merge_state" = "BLOCKED" ]; then
+      row BLOCKED "$num" "$title  (mergeStateStatus=BLOCKED -- unresolved review / rules)"
     # Attempt the merge; the attempt itself resolves mergeability.
-    if out=$(gh pr merge "$num" -R "$REPO" --squash 2>&1); then
+    elif out=$(gh pr merge "$num" -R "$REPO" --squash 2>&1); then
       row MERGED "$num" "$title"
     else
       lc=$(printf '%s' "$out" | tr '[:upper:]' '[:lower:]')
-      if printf '%s' "$lc" | grep -Eq 'conflict|not mergeable|not up to date|behind|base branch was modified'; then
+      if [ "$merge_state" = "BLOCKED" ]; then
+        row BLOCKED "$num" "$title  (merge blocked -- gh: $(printf '%s' "$out" | head -1 | cut -c1-80))"
+      elif printf '%s' "$lc" | grep -Eq 'conflict|not mergeable|not up to date|behind|base branch was modified'; then
         # Behind/conflicting -- re-sync. union-merge (.gitattributes) auto-resolves board files.
         if [ "$HAS_PAT" != "1" ]; then
           row WAITING "$num" "$title  (behind main; re-sync skipped -- no PAT to re-trigger verify)"
@@ -226,6 +241,7 @@ now="$(date -u '+%Y-%m-%d %H:%MZ' 2>/dev/null || echo now)"
   echo "| [unstuck] synced to main | $(cnt UNSTUCK) |"
   echo "| [re-ran] verify (flake) | $(cnt RE-RAN) |"
   echo "| [merge-retry] transient merge error | $(cnt MERGE-RETRY) |"
+  echo "| [blocked] merge blocked (reviews/rules) | $(cnt BLOCKED) |"
   echo "| [conflict] real conflict -- needs human | $(cnt CONFLICT) |"
   echo "| [failing] verify failing -- needs human | $(cnt FAILING) |"
   echo "| [waiting] on CI | $(cnt WAITING) |"
@@ -234,6 +250,7 @@ now="$(date -u '+%Y-%m-%d %H:%MZ' 2>/dev/null || echo now)"
   [ "$DRY" = "1" ] && echo "| _(dry) would merge_ | $(cnt WOULD-MERGE) |"
   [ "$DRY" = "1" ] && echo "| _(dry) would re-sync_ | $(cnt WOULD-SYNC) |"
   for pair in \
+    "BLOCKED:[blocked] Merge blocked (unresolved reviews / rules)" \
     "CONFLICT:[conflict] Real conflict -- needs a human" \
     "FAILING:[failing] Verify failing after a re-run -- needs a human" \
     "MERGE-RETRY:[merge-retry] Merge attempt failed (non-conflict) -- will retry next run" \

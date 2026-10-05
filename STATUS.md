@@ -70,6 +70,13 @@
 **Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean.  Swift XCTest not run on Linux — wait for `ios-build` on PR.
 
 **Next.**  Push; open PR READY; merge after `verify` + `ios-build` green.
+## 2026-10-05 CURSOR — Merge shepherd repo slug + BLOCKED bucket (branch `cursor/merge-shepherd-repo-slug-dfc4`)
+
+**What.**  Canonical `REPO` via `gh repo view` (default `Simple-With-Us/Socratic-Trade`); `[blocked]` bucket from `mergeStateStatus`; same slug fix in `runner-availability.sh`, `rth-deploy-drain.sh`, `merge-shepherd.yml`.
+
+**Verification.**  `bash -n` on three scripts; live dry scan resolved `Simple-With-Us/Socratic-Trade` and updated existing tracking issue `#4206` (no new issue).
+
+**Next.**  Open PR; do not merge; owner bulk-closes ~430 duplicate tracking issues separately.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
