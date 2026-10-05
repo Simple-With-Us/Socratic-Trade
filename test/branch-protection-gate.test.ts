@@ -243,7 +243,9 @@ describe("required contexts are not renamed out from under the ruleset", () => {
     const auto = workflow("auto-merge-prs.yml");
     expect(auto).toMatch(/^  classify-protected:\s*$/m);
     expect(auto).toMatch(/^  disable-on-protected:\s*$/m);
+    expect(auto).toMatch(/^  disable-on-skip-automerge:\s*$/m);
     expect(auto).toContain("pr-touches-codeowners-paths.sh");
-    expect(auto).toMatch(/touches_protected != 'true'/);
+    expect(auto).toMatch(/skip_automerge != 'true'/);
+    expect(auto).toContain(".github/workflows/auto-merge-prs.yml");
   });
 });

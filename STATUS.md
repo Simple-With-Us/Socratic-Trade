@@ -93,7 +93,7 @@
 
 **What.**  `auto-merge-prs.yml` no longer arms merge when the PR diff touches any `.github/CODEOWNERS` trading-execution path; adds `disable-on-protected` and treats `needs-human-merge` like `do-not-automerge`.  Safe non-money PRs still auto-arm when `GH_PAT` / `SHEPHERD_TOKEN` is set.
 
-**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-gate.test.ts` 13/13; `npm run build` clean.  Full `npm test` on this VM reported 11 pre-existing failures in unrelated files (not touched by this PR).
+**Verification.**  Rebased onto `origin/main` (2026-10-05).  Round 2: self-edit gate for `auto-merge-prs.yml`, non-fatal arm step.  `npm run lint` 0 errors; `npx tsc --noEmit` clean; targeted vitest 13/13; awaiting CI `verify` after push.
 
 **Next.**  Push, open PR READY, wait for `verify`.
 
