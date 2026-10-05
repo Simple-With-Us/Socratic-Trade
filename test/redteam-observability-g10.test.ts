@@ -167,5 +167,24 @@ describe("observability stamping (G10)", () => {
     expect(collapse).toBeDefined();
     expect(collapse?.metadata?.promptVersion).toBe(STRATEGY_PROMPT_VERSION);
     expect(collapse?.tags).toContain("diversity-collapse");
+
+    // (4) The completed run records its graph trajectory (run id, transitions, final state).
+    const trajectory = decisionObservations.find((o) => o.name === "trading.strategy.graph-trajectory");
+    expect(trajectory).toBeDefined();
+    expect(trajectory?.tags).toContain("graph-trajectory");
+    expect(trajectory?.metadata?.runId).toBe(result.runId);
+    expect(trajectory?.metadata?.graphFinalState).toBe("COMPLETED");
+    const recordedTransitions = trajectory?.metadata?.graphTransitions;
+    expect(Array.isArray(recordedTransitions)).toBe(true);
+    if (!Array.isArray(recordedTransitions)) {
+      throw new Error("graphTransitions has an unexpected shape");
+    }
+    expect(recordedTransitions.length).toBeGreaterThan(0);
+    expect(recordedTransitions[0]).toEqual(expect.objectContaining({
+      from: "INIT",
+      durationMs: expect.any(Number),
+      timestamp: expect.any(Number)
+    }));
+    expect(recordedTransitions.at(-1)).toEqual(expect.objectContaining({ to: "COMPLETED" }));
   }, 30_000);
 });

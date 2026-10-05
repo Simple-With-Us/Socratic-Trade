@@ -10,6 +10,13 @@ export type GraphState =
   | "COMPLETED"
   | "FAILED";
 
+export interface GraphTransitionRecord {
+  from: GraphState;
+  to: GraphState;
+  timestamp: number;
+  durationMs: number;
+}
+
 export interface GraphContext {
   runId: string;
   policy: TradingPolicy;
@@ -18,7 +25,7 @@ export interface GraphContext {
   connectedAccountId: string;
   proposals: TradeProposal[];
   errors: Error[];
-  // Extensible for future nodes
+  // Extensible for future nodes & alternative data
   metadata: Record<string, unknown>;
 }
 
@@ -27,14 +34,48 @@ export interface GraphNode {
   execute: (context: GraphContext) => Promise<{ nextState: GraphState; context: GraphContext }>;
 }
 
+export interface TradingGraphOptions {
+  onTransition?: (record: GraphTransitionRecord) => void;
+  initialState?: GraphState;
+}
+
 export class TradingGraph {
   private nodes = new Map<GraphState, GraphNode>();
   private currentState: GraphState = "INIT";
+  private transitions: GraphTransitionRecord[] = [];
+  private onTransition?: (record: GraphTransitionRecord) => void;
   
-  constructor(private context: GraphContext) {}
+  constructor(private context: GraphContext, options?: TradingGraphOptions) {
+    if (options?.initialState) {
+      this.currentState = options.initialState;
+    }
+    this.onTransition = options?.onTransition;
+  }
 
-  public registerNode(node: GraphNode) {
+  public registerNode(node: GraphNode): void {
     this.nodes.set(node.name, node);
+  }
+
+  public hasNode(state: GraphState): boolean {
+    return this.nodes.has(state);
+  }
+
+  public getCurrentState(): GraphState {
+    return this.currentState;
+  }
+
+  public getTransitions(): GraphTransitionRecord[] {
+    return [...this.transitions];
+  }
+
+  /** Callback failures must not change the node outcome or skip error recording. */
+  private emitTransition(record: GraphTransitionRecord): void {
+    try {
+      this.onTransition?.(record);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.warn(`[TradingGraph] onTransition callback threw: ${detail}`);
+    }
   }
 
   public async run(): Promise<GraphContext> {
@@ -45,19 +86,83 @@ export class TradingGraph {
         this.currentState = "FAILED";
         break;
       }
-      
+
+      const fromState = this.currentState;
+      const startTime = Date.now();
+      let result: { nextState: GraphState; context: GraphContext } | undefined;
+      let thrown: { error: unknown } | undefined;
       try {
-        console.log(`[TradingGraph] Entering state: ${this.currentState}`);
-        const result = await node.execute(this.context);
-        this.currentState = result.nextState;
-        this.context = result.context;
+        result = await node.execute(this.context);
       } catch (error) {
-        console.error(`[TradingGraph] Error in state ${this.currentState}:`, error);
-        this.context.errors.push(error instanceof Error ? error : new Error(String(error)));
-        this.currentState = "FAILED";
+        thrown = { error };
       }
+
+      const durationMs = Date.now() - startTime;
+      if (thrown || result === undefined) {
+        const error = thrown
+          ? thrown.error
+          : new Error(`Node ${fromState} returned no result`);
+        this.context.errors.push(error instanceof Error ? error : new Error(String(error)));
+        const transition: GraphTransitionRecord = {
+          from: fromState,
+          to: "FAILED",
+          timestamp: startTime,
+          durationMs,
+        };
+        this.transitions.push(transition);
+        this.currentState = "FAILED";
+        this.emitTransition(transition);
+        continue;
+      }
+
+      const transition: GraphTransitionRecord = {
+        from: fromState,
+        to: result.nextState,
+        timestamp: startTime,
+        durationMs,
+      };
+      this.transitions.push(transition);
+      this.currentState = result.nextState;
+      this.context = result.context;
+      this.emitTransition(transition);
     }
     
+    // Copy the list. Metadata readers must not alias the graph's mutable transitions
+    // (getTransitions() already returns a copy).
+    this.context.metadata = {
+      ...this.context.metadata,
+      graphTransitions: [...this.transitions],
+      graphFinalState: this.currentState,
+    };
+
     return this.context;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Plain trajectory fields stored on context metadata by `run()`. */
+export function readGraphTrajectory(metadata: Record<string, unknown>): {
+  transitions: Array<{ from: string; to: string; durationMs: number; timestamp: number }>;
+  finalState: string | null;
+} {
+  const transitions: Array<{ from: string; to: string; durationMs: number; timestamp: number }> = [];
+  const raw = metadata.graphTransitions;
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      if (!isRecord(entry)) continue;
+      const { from, to, durationMs, timestamp } = entry;
+      if (typeof from !== "string" || typeof to !== "string") continue;
+      if (typeof durationMs !== "number" || !Number.isFinite(durationMs)) continue;
+      if (typeof timestamp !== "number" || !Number.isFinite(timestamp)) continue;
+      transitions.push({ from, to, durationMs, timestamp });
+    }
+  }
+  const finalState = metadata.graphFinalState;
+  return {
+    transitions,
+    finalState: typeof finalState === "string" ? finalState : null,
+  };
 }
