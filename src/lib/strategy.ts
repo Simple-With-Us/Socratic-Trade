@@ -6,7 +6,7 @@ import {
   gatherStrategyMarket
 } from "./strategy-gather";
 import { isDelayedYahooFallbackQuote } from "./quote-delayed-fallback";
-import { TradingGraph, GraphContext } from "./orchestration/trading-graph";
+import { TradingGraph, GraphContext, GraphState } from "./orchestration/trading-graph";
 import { readCongressScoreVerdict } from "./congress-score-gate";
 import { LANE_WAITS, withAccountMutation } from "./account-mutation";
 import { OperationLeaseOwnershipError } from "./operation-lease";
@@ -476,6 +476,41 @@ export function rememberEvidenceAgeAnomalyDedupKey(
   }
   cache.set(key, true);
   return true;
+}
+
+export interface AlternativeDataAnalysisParams {
+  congressVerdict: { verdict: string; pass: boolean; stale: boolean; computedAt: number } | null;
+  topCandidates?: Array<{ score?: number }>;
+}
+
+export function evaluateAlternativeDataAnalysis(
+  context: GraphContext,
+  params: AlternativeDataAnalysisParams
+): { nextState: GraphState; context: GraphContext } {
+  const marketCandidateCount = params.topCandidates?.length ?? 0;
+  const avgScore = marketCandidateCount > 0
+    ? params.topCandidates!.reduce((acc, c) => acc + (c.score ?? 0), 0) / marketCandidateCount
+    : 0;
+  const macroRegime = avgScore > 65 ? "RISK_ON" : avgScore < 40 ? "DEFENSIVE" : "NEUTRAL";
+
+  const alternativeMetadata = {
+    congressVerdict: params.congressVerdict ? {
+      verdict: params.congressVerdict.verdict,
+      pass: params.congressVerdict.pass,
+      stale: params.congressVerdict.stale,
+      computedAt: params.congressVerdict.computedAt,
+    } : null,
+    macroRegime,
+    candidateCount: marketCandidateCount,
+    analyzedAt: new Date().toISOString(),
+  };
+
+  context.metadata = {
+    ...context.metadata,
+    alternativeData: alternativeMetadata,
+  };
+
+  return { nextState: "FUNDAMENTAL_PROPOSING", context };
 }
 
 export async function runStrategyOnce(
@@ -4719,32 +4754,15 @@ export async function runStrategyOnce(
       name: "ALTERNATIVE_DATA_ANALYSIS",
       execute: async (context: GraphContext) => {
         const congressVerdict = readCongressScoreVerdict(userId);
-
-        // Macro Regime & Market Breadth assessment
-        const marketCandidateCount = marketScan?.topCandidates?.length ?? 0;
-        const avgScore = marketCandidateCount > 0
-          ? marketScan.topCandidates.reduce((acc, c) => acc + (c.score ?? 0), 0) / marketCandidateCount
-          : 0;
-        const macroRegime = avgScore > 65 ? "RISK_ON" : avgScore < 40 ? "DEFENSIVE" : "NEUTRAL";
-
-        const alternativeMetadata = {
+        return evaluateAlternativeDataAnalysis(context, {
           congressVerdict: congressVerdict ? {
             verdict: congressVerdict.verdict,
             pass: congressVerdict.pass,
             stale: congressVerdict.stale,
             computedAt: congressVerdict.computedAt,
           } : null,
-          macroRegime,
-          candidateCount: marketCandidateCount,
-          analyzedAt: new Date().toISOString(),
-        };
-
-        context.metadata = {
-          ...context.metadata,
-          alternativeData: alternativeMetadata,
-        };
-
-        return { nextState: "FUNDAMENTAL_PROPOSING", context };
+          topCandidates: marketScan?.topCandidates,
+        });
       }
     });
 

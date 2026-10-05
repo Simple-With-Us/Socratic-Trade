@@ -1,15 +1,33 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   TradingGraph,
   type GraphContext,
   type GraphState,
   type GraphNode,
+  type GraphTransitionRecord,
 } from "../src/lib/orchestration/trading-graph";
+import { DEFAULT_POLICY, type TradingPolicy, type TradeProposal } from "../src/lib/types";
+import { evaluateAlternativeDataAnalysis } from "../src/lib/strategy";
+
+function isGraphTransitionRecordArray(value: unknown): value is GraphTransitionRecord[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        item !== null &&
+        typeof item === "object" &&
+        "from" in item &&
+        "to" in item &&
+        "timestamp" in item &&
+        "durationMs" in item
+    )
+  );
+}
 
 function createMockContext(overrides?: Partial<GraphContext>): GraphContext {
   return {
     runId: "test-run-1",
-    policy: {} as any,
+    policy: { ...DEFAULT_POLICY },
     mode: "dry-run",
     userId: "test-user",
     connectedAccountId: "test-account",
@@ -66,8 +84,11 @@ describe("TradingGraph Orchestration Engine", () => {
             {
               symbol: "AAPL",
               side: "buy",
+              type: "market",
+              timeInForce: "day",
+              marketHours: "regular_only",
               rationale: "Strong alternative & fundamental alignment",
-            } as any,
+            },
           ],
         },
       }),
@@ -106,11 +127,14 @@ describe("TradingGraph Orchestration Engine", () => {
     ]);
 
     expect(result.metadata.graphFinalState).toBe("COMPLETED");
-    const metaTransitions = result.metadata.graphTransitions as any[];
-    expect(metaTransitions).toHaveLength(5);
-    expect(metaTransitions[0].from).toBe("INIT");
-    expect(metaTransitions[1].to).toBe("FUNDAMENTAL_PROPOSING");
-    expect(metaTransitions[0].durationMs).toBeGreaterThanOrEqual(0);
+    const metaTransitions: unknown = result.metadata.graphTransitions;
+    expect(isGraphTransitionRecordArray(metaTransitions)).toBe(true);
+    if (isGraphTransitionRecordArray(metaTransitions)) {
+      expect(metaTransitions).toHaveLength(5);
+      expect(metaTransitions[0].from).toBe("INIT");
+      expect(metaTransitions[1].to).toBe("FUNDAMENTAL_PROPOSING");
+      expect(metaTransitions[0].durationMs).toBeGreaterThanOrEqual(0);
+    }
   });
 
   it("handles node execution errors cleanly and transitions to FAILED", async () => {
@@ -199,3 +223,61 @@ describe("TradingGraph Orchestration Engine", () => {
     expect(transitions[2].to).toBe("COMPLETED");
   });
 });
+
+describe("Production ALTERNATIVE_DATA_ANALYSIS Node Execution", () => {
+  it("computes RISK_ON macro regime with valid congress verdict", () => {
+    const ctx = createMockContext();
+    const result = evaluateAlternativeDataAnalysis(ctx, {
+      congressVerdict: { verdict: "PASS", pass: true, stale: false, computedAt: Date.now() },
+      topCandidates: [{ score: 70 }, { score: 80 }],
+    });
+
+    expect(result.nextState).toBe("FUNDAMENTAL_PROPOSING");
+    const altData = result.context.metadata.alternativeData as {
+      macroRegime: string;
+      candidateCount: number;
+      congressVerdict: { verdict: string; pass: boolean } | null;
+    };
+    expect(altData.macroRegime).toBe("RISK_ON");
+    expect(altData.candidateCount).toBe(2);
+    expect(altData.congressVerdict?.verdict).toBe("PASS");
+    expect(altData.congressVerdict?.pass).toBe(true);
+  });
+
+  it("computes DEFENSIVE macro regime when market candidate breadth is low", () => {
+    const ctx = createMockContext();
+    const result = evaluateAlternativeDataAnalysis(ctx, {
+      congressVerdict: null,
+      topCandidates: [{ score: 25 }, { score: 35 }],
+    });
+
+    expect(result.nextState).toBe("FUNDAMENTAL_PROPOSING");
+    const altData = result.context.metadata.alternativeData as {
+      macroRegime: string;
+      candidateCount: number;
+      congressVerdict: null;
+    };
+    expect(altData.macroRegime).toBe("DEFENSIVE");
+    expect(altData.candidateCount).toBe(2);
+    expect(altData.congressVerdict).toBeNull();
+  });
+
+  it("computes NEUTRAL macro regime for moderate scores", () => {
+    const ctx = createMockContext();
+    const result = evaluateAlternativeDataAnalysis(ctx, {
+      congressVerdict: { verdict: "INSUFFICIENT", pass: true, stale: false, computedAt: Date.now() },
+      topCandidates: [{ score: 50 }, { score: 55 }],
+    });
+
+    expect(result.nextState).toBe("FUNDAMENTAL_PROPOSING");
+    const altData = result.context.metadata.alternativeData as {
+      macroRegime: string;
+      candidateCount: number;
+      congressVerdict: { verdict: string };
+    };
+    expect(altData.macroRegime).toBe("NEUTRAL");
+    expect(altData.candidateCount).toBe(2);
+    expect(altData.congressVerdict?.verdict).toBe("INSUFFICIENT");
+  });
+});
+
