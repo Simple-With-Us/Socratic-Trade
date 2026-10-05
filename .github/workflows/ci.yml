@@ -68,12 +68,15 @@ on:
 # without cancelling the expensive in-flight suite. This prevents high-churn branches from
 # repeatedly losing all progress before `verify` can turn green.
 concurrency:
-  # Per-ref group. Cancel superseded PR / merge_group runs so the queue does not
-  # serialize behind cancel-in-progress: false (2026-10-05 Actions backlog).
-  # Keep main / schedule / workflow_dispatch runs alive so an in-flight suite on
-  # main is not dropped by a rapid follow-up push.
+  # Keep one active run and one newest pending run per ref. Including a commit SHA here
+  # creates a distinct group for every push, so duplicate pending verifies accumulate
+  # indefinitely even though cancellation is disabled (2026-07-22 queue-drain fix).
+  # Do NOT flip this to cancel PR runs: cancel-in-progress was the primary cause of the
+  # 2026-07-21 "days of red checks" queue wedge (docs/rollouts/2026-07-21-ci-queue-stuck-
+  # root-cause-fixes.md). macOS slot pressure is handled by the iOS path gate in
+  # `classify`, not by cancelling in-flight suites (Kody review, PR #4231).
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+  cancel-in-progress: false
 
 jobs:
   classify:
@@ -94,7 +97,7 @@ jobs:
       - name: Disable lingering sparse-checkout
         run: rm -rf ./* ./.git || true
       - uses: actions/checkout@v7
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
           # Classify only needs the two endpoint trees. Full-history fetches can
           # monopolize the single self-hosted runner before this cheap gate runs.
@@ -106,10 +109,58 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          # iOS path gate: only spend a macos-latest slot when iOS sources or the
+          # ios-build workflow changed. Free org plan = 5 concurrent macOS jobs;
+          # requiring verify-ios on every PR was the main Socratic queue amplifier
+          # (2026-10-05 Actions backlog).
+          # Paths come from `git -c core.quotePath=false diff --name-only`, so non-ASCII
+          # names are emitted raw. git still C-quotes names containing `"`, `\` or control
+          # bytes (leading `"`), so the pattern tolerates one leading quote: a quoted iOS
+          # path must still require verify-ios, never fail open (Kody review, PR #4231).
+          ios_gate() {
+            local hits
+            hits="$(printf '%s\n' "$1" | grep -aE '^"?(ios/|\.github/workflows/ios-build\.yml$)' || true)"
+            if [ -n "$hits" ]; then
+              echo "iOS paths changed — verify-ios (macos-latest) required:"
+              printf '%s\n' "$hits"
+              echo "ios_changed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "No iOS paths changed — verify-ios skipped (no macOS slot)."
+              echo "ios_changed=false" >> "$GITHUB_OUTPUT"
+            fi
+          }
+
+          if [ "${{ github.event_name }}" = "merge_group" ]; then
+            # The merge queue creates one merge_group run per queued PR on a unique
+            # gh-readonly-queue/... ref, so concurrency can never collapse them; without
+            # this gate every web-only PR transiting the queue would still take a macOS
+            # slot. No docs-only fast path here (unchanged). base_sha..head_sha covers
+            # this PR plus every PR ahead of it in the group — a superset, so fail-closed.
+            echo "merge_group event — running full gate; computing iOS path gate."
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            mg_base="${{ github.event.merge_group.base_sha }}"
+            mg_head="${{ github.event.merge_group.head_sha }}"
+            if [ -z "$mg_base" ] || [ -z "$mg_head" ] || ! git fetch --no-tags --depth=1 origin "$mg_base" "$mg_head"; then
+              echo "Could not resolve/fetch merge_group base/head — running verify-ios (fail-closed)."
+              echo "ios_changed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            mg_files="$(git -c core.quotePath=false diff --name-only --no-renames "$mg_base" "$mg_head" 2>/dev/null || true)"
+            if [ -z "$mg_files" ]; then
+              echo "Could not compute merge_group changed files — running verify-ios (fail-closed)."
+              echo "ios_changed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            ios_gate "$mg_files"
+            exit 0
+          fi
+
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "Not a pull_request event (${{ github.event_name }}) — running full gate."
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
-            # Push/schedule/dispatch on main always run iOS (fail-closed for main).
+            # push/schedule (main) and workflow_dispatch (the manual re-kick lever, which
+            # has no base to diff against) always run verify-ios — fail-closed.
             echo "ios_changed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -135,7 +186,7 @@ jobs:
           # so `git mv src/foo.ts docs/foo.md` would list just docs/foo.md and classify as
           # docs-only while code was removed. --no-renames splits every rename into
           # delete(old)+add(new) so BOTH paths get classified.
-          changed_files="$(git diff --name-only --no-renames "$base" "$head" 2>/dev/null || true)"
+          changed_files="$(git -c core.quotePath=false diff --name-only --no-renames "$base" "$head" 2>/dev/null || true)"
           if [ -z "$changed_files" ]; then
             echo "Could not compute a changed-files list — running full gate to be safe."
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
@@ -162,19 +213,7 @@ jobs:
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
           fi
 
-          # iOS path gate: only spend a macos-latest slot when iOS sources or the
-          # ios-build workflow changed. Free org plan = 5 concurrent macOS jobs;
-          # requiring verify-ios on every PR was the main Socratic queue amplifier
-          # (2026-10-05 Actions backlog).
-          ios_changed="$(printf '%s\n' "$changed_files" | grep -E '^(ios/|\.github/workflows/ios-build\.yml$)' || true)"
-          if [ -n "$ios_changed" ]; then
-            echo "iOS paths changed — verify-ios (macos-latest) required:"
-            echo "$ios_changed"
-            echo "ios_changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No iOS paths changed — verify-ios skipped (no macOS slot)."
-            echo "ios_changed=false" >> "$GITHUB_OUTPUT"
-          fi
+          ios_gate "$changed_files"
 
       # Hourly-backstop redundancy gate. The `17 * * * *` cron exists only to verify main
       # HEADs that arrived without a push event; when main HEAD already has a successful

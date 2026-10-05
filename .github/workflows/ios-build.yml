@@ -22,9 +22,11 @@ permissions:
 
 concurrency:
   group: ios-build-${{ github.ref }}
-  # Cancel superseded PR runs. workflow_call inherits the caller's event_name
-  # (usually pull_request), so this also cancels superseded verify-ios lanes.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # Must match the caller (ci.yml `concurrency`): never cancel an in-flight lane.
+  # A ref-keyed predicate here diverged from ci.yml and could tear down the iOS
+  # lane of a workflow_dispatch re-kick while the rest of the suite kept running
+  # (Kody review, PR #4231). Pending duplicates still collapse per ref.
+  cancel-in-progress: false
 
 jobs:
   build:
