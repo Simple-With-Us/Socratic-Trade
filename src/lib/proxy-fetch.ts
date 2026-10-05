@@ -165,18 +165,133 @@ export function getProxyAgent(proxyUrl: string): ProxyAgent {
 }
 
 /**
+ * Safety cap (ms) for a proxied leg that has no caller AbortSignal.
+ * dataSourceFetch applies it only in that case.  A caller-supplied signal is
+ * the deadline.  A fixed 3s cap was aborting lanes that need 4-5s to headers
+ * through a slow but working residential proxy, then duplicating the request
+ * on direct egress, which anti-bot sources reject.  FRED does not use this
+ * cap.  It is excluded and goes direct.  0 or undefined disables the per-leg
+ * timeout (caller signal only).
+ */
+export const PROXY_LEG_TIMEOUT_MS = 3000;
+
+/**
  * Wrap a fetch function so requests egress through the given HTTP(S) proxy.
  * Returns baseFetch unchanged when no proxy URL is given (CT parity).
+ *
+ * When `options.proxyTimeoutMs` is a positive number, the returned fetch
+ * chains a fresh AbortController (the proxy-leg timeout) with the caller's
+ * own signal.  Either side aborting cancels the in-flight proxied request.
+ * The timer and the caller listener stay armed until the body settles.
+ * fetch() resolves at headers, and releasing them there left res.json()
+ * without cancellation.
  */
 export function createProxiedFetch(
   proxyUrl: string | undefined,
-  baseFetch: typeof fetch = undiciFetch as unknown as typeof fetch
+  baseFetch: typeof fetch = undiciFetch as unknown as typeof fetch,
+  options?: { proxyTimeoutMs?: number }
 ): typeof fetch {
   if (!proxyUrl || !proxyUrl.trim()) return baseFetch;
   const agent = getProxyAgent(proxyUrl);
+  const proxyTimeoutMs = options?.proxyTimeoutMs;
   return (async function proxiedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const withDispatcher = { ...(init ?? {}), dispatcher: agent } as RequestInit;
-    return baseFetch(input, withDispatcher);
+    if (!proxyTimeoutMs || proxyTimeoutMs <= 0) {
+      return baseFetch(input, withDispatcher);
+    }
+    const proxyController = new AbortController();
+    const timeoutHandle = setTimeout(() => proxyController.abort(), proxyTimeoutMs);
+    const callerSignal = init?.signal;
+    let onCallerAbort: (() => void) | undefined;
+    if (callerSignal) {
+      if (callerSignal.aborted) {
+        proxyController.abort();
+      } else {
+        onCallerAbort = () => proxyController.abort();
+        callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+      }
+    }
+    let settled = false;
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutHandle);
+      if (onCallerAbort && callerSignal) callerSignal.removeEventListener("abort", onCallerAbort);
+    };
+    // fetch() resolves at headers.  The body is still an open stream, so the
+    // caller's signal and the leg timer stay armed until the body settles.
+    // Releasing them here let a header-then-stall proxy hang past the caller
+    // budget, including long-lived cascade reads.
+    try {
+      const effectiveSignal =
+        callerSignal && typeof AbortSignal !== "undefined" && "any" in AbortSignal
+          ? AbortSignal.any([proxyController.signal, callerSignal])
+          : proxyController.signal;
+      const res = await baseFetch(input, { ...withDispatcher, signal: effectiveSignal });
+      if (!res.body) {
+        cleanup();
+        return res;
+      }
+      let onBodyAbort: (() => void) | undefined;
+      const releaseBodyAbort = () => {
+        if (onBodyAbort && callerSignal) callerSignal.removeEventListener("abort", onBodyAbort);
+        onBodyAbort = undefined;
+      };
+      const finishBody = () => {
+        cleanup();
+        releaseBodyAbort();
+      };
+      const upstream = res.body.getReader();
+      const wrappedBody = new ReadableStream<Uint8Array>({
+        start(controller) {
+          if (callerSignal?.aborted) {
+            finishBody();
+            controller.error(new DOMException("aborted", "AbortError"));
+            void upstream.cancel();
+            return;
+          }
+          if (callerSignal) {
+            onBodyAbort = () => {
+              try {
+                controller.error(new DOMException("aborted", "AbortError"));
+              } catch {
+                // already errored
+              }
+              finishBody();
+              void upstream.cancel();
+            };
+            callerSignal.addEventListener("abort", onBodyAbort, { once: true });
+          }
+        },
+        async pull(controller) {
+          if (callerSignal?.aborted) {
+            finishBody();
+            controller.error(new DOMException("aborted", "AbortError"));
+            await upstream.cancel();
+            return;
+          }
+          const { done, value } = await upstream.read();
+          if (done) {
+            finishBody();
+            controller.close();
+            return;
+          }
+          controller.enqueue(value);
+        },
+        async cancel(reason) {
+          finishBody();
+          await upstream.cancel(reason);
+        }
+      });
+      return new Response(wrappedBody, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers
+      });
+    } catch (err) {
+      cleanup();
+      throw err;
+    }
   }) as typeof fetch;
 }
 
@@ -199,19 +314,54 @@ export const PROXY_LEG_ERROR_CODES: ReadonlySet<string> = new Set([
   "UND_ERR_SOCKET"
 ]);
 
-function errorCodeChain(err: unknown, depth = 0): string[] {
+/**
+ * Error names that mean the PROXY LEG was aborted mid-flight — the proxy (or
+ * an upstream hop through it) was slow enough that our own per-proxy-leg
+ * timeout fired, OR the proxy connection was reset without a typed Node
+ * `code` on the resulting DOMException. Without classifying these, the
+ * `fail_soft` fallback in `dataSourceFetch` never engages and the caller
+ * silently sees undefined for every series fetch (the regression that hit FRED
+ * in production when the residential proxy stalled at ~10s while the FRED
+ * call-site budget is 5s — see `fetchFredSeries`).
+ *
+ * A bare `Error("aborted")` has `name === "Error"` (NOT `"AbortError"`) and
+ * is intentionally NOT matched here; only DOMException/TimeoutError-style
+ * aborts (which carry the abort name as `.name`) qualify.
+ */
+const PROXY_LEG_ABORT_NAMES: ReadonlySet<string> = new Set([
+  "AbortError"
+]);
+
+function errorChainValues<T>(
+  err: unknown,
+  pick: (e: unknown) => T | undefined,
+  depth = 0
+): T[] {
   if (depth > 4 || !(err instanceof Error)) return [];
-  const codes: string[] = [];
-  const code = (err as { code?: unknown }).code;
-  if (typeof code === "string") codes.push(code);
+  const values: T[] = [];
+  const v = pick(err);
+  if (v !== undefined) values.push(v);
   const cause = (err as { cause?: unknown }).cause;
-  if (cause) codes.push(...errorCodeChain(cause, depth + 1));
-  return codes;
+  if (cause) values.push(...errorChainValues(cause, pick, depth + 1));
+  return values;
+}
+
+function pickErrorCode(err: unknown): string | undefined {
+  const code = (err as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function pickErrorName(err: unknown): string | undefined {
+  const name = (err as { name?: unknown }).name;
+  return typeof name === "string" ? name : undefined;
 }
 
 /** True when the thrown error indicates the proxy leg itself failed. */
 export function isProxyLegError(err: unknown): boolean {
-  return errorCodeChain(err).some((code) => PROXY_LEG_ERROR_CODES.has(code));
+  const codes = errorChainValues(err, pickErrorCode);
+  if (codes.some((code) => PROXY_LEG_ERROR_CODES.has(code))) return true;
+  const names = errorChainValues(err, pickErrorName);
+  return names.some((name) => PROXY_LEG_ABORT_NAMES.has(name));
 }
 
 // Rate-limited warn logging so a dead proxy does not spam one line per request.

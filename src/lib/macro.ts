@@ -726,7 +726,10 @@ async function fetchFredSeries(seriesId: string, apiKey: string, units?: string)
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);
   try {
-    const response = await dataSourceFetch(url, { cache: "no-store", signal: controller.signal });
+    // service: "fred" → direct egress via PROXY_EXCLUDED_SERVICES. FRED does
+    // NOT block datacenter IPs, and proxying adds latency when the residential
+    // proxy stalls (~10s observed in prod). See data-source-fetch.ts.
+    const response = await dataSourceFetch(url, { cache: "no-store", signal: controller.signal }, { service: "fred" });
     clearTimeout(timeout);
     if (!response.ok) return undefined;
     const payload = await response.json() as any;

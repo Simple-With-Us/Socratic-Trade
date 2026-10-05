@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  createProxiedFetch,
   DEFAULT_RESIDENTIAL_PROXY_URL,
   formatProxyUrl,
   isProxyLegError,
@@ -82,7 +83,22 @@ describe("isProxyLegError", () => {
     const err = new TypeError("fetch failed", { cause: Object.assign(new Error("connect refused"), { code: "ECONNREFUSED" }) });
     expect(isProxyLegError(err)).toBe(true);
   });
-  it("does not classify aborts or unrelated errors as proxy-down", () => {
+  it("classifies a bare DOMException AbortError as proxy-down (the FRED regression fix)", () => {
+    // Regression: a proxied fetch that aborted mid-flight (e.g. residential
+    // proxy stalled past the proxy-leg timeout, or the call-site signal
+    // fired while still on the proxy leg) was silently never classified as
+    // a proxy-leg failure. Without classification, fail_soft never engaged
+    // and every FRED series fetch returned undefined with no log line.
+    expect(isProxyLegError(new DOMException("aborted", "AbortError"))).toBe(true);
+  });
+  it("classifies an AbortError nested in a cause chain as proxy-down", () => {
+    const err = new TypeError("fetch failed", { cause: new DOMException("aborted", "AbortError") });
+    expect(isProxyLegError(err)).toBe(true);
+  });
+  it("does not classify non-AbortError errors or unrelated errors as proxy-down", () => {
+    // A bare Error("aborted") has name "Error", not "AbortError" — it must
+    // not be classified. Only DOMException/TimeoutError-style aborts
+    // (which carry the abort name as `.name`) qualify.
     expect(isProxyLegError(new Error("aborted"))).toBe(false);
     expect(isProxyLegError(new TypeError("fetch failed", { cause: new Error("boom") }))).toBe(false);
   });
@@ -91,5 +107,56 @@ describe("isProxyLegError", () => {
 describe("safeProxyHostForLog", () => {
   it("never leaks embedded credentials", () => {
     expect(safeProxyHostForLog("http://user:secret@10.99.0.2:8888")).toBe("10.99.0.2:8888");
+  });
+});
+
+function stalledBody(onAbort: (signal: AbortSignal) => void): typeof fetch {
+  return (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const signal = init?.signal;
+    const stream = new ReadableStream({
+      start(controller) {
+        if (!signal) return;
+        const fail = () => {
+          onAbort(signal);
+          try {
+            controller.error(signal.reason ?? new DOMException("aborted", "AbortError"));
+          } catch {
+            // already errored
+          }
+        };
+        if (signal.aborted) fail();
+        else signal.addEventListener("abort", fail, { once: true });
+      }
+    });
+    return new Response(stream, { status: 200 });
+  }) as typeof fetch;
+}
+
+describe("createProxiedFetch body lifetime", () => {
+  it("keeps the caller abort linked until the body settles", async () => {
+    const caller = new AbortController();
+    let aborted = false;
+    const proxied = createProxiedFetch(
+      "http://proxy.test:8888",
+      stalledBody(() => {
+        aborted = true;
+      }),
+      { proxyTimeoutMs: 30000 }
+    );
+    const res = await proxied("https://example.test/x", { signal: caller.signal });
+    expect(aborted).toBe(false);
+    caller.abort();
+    await expect(res.text()).rejects.toThrow(/aborted/i);
+    expect(aborted).toBe(true);
+  });
+
+  it("keeps the proxy-leg timer armed after headers", async () => {
+    const proxied = createProxiedFetch(
+      "http://proxy.test:8888",
+      stalledBody(() => {}),
+      { proxyTimeoutMs: 40 }
+    );
+    const res = await proxied("https://example.test/x");
+    await expect(res.text()).rejects.toThrow(/aborted/i);
   });
 });
