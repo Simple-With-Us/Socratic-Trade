@@ -6,7 +6,7 @@ import {
   gatherStrategyMarket
 } from "./strategy-gather";
 import { isDelayedYahooFallbackQuote } from "./quote-delayed-fallback";
-import { TradingGraph, GraphContext } from "./orchestration/trading-graph";
+import { TradingGraph, GraphContext, readGraphTrajectory } from "./orchestration/trading-graph";
 import { readCongressScoreVerdict } from "./congress-score-gate";
 import { LANE_WAITS, withAccountMutation } from "./account-mutation";
 import { OperationLeaseOwnershipError } from "./operation-lease";
@@ -4754,6 +4754,23 @@ export async function runStrategyOnce(
     });
 
     const finalContext = await graph.run();
+    // Before the error check, so a failed graph is recorded too. Telemetry must not
+    // change the run outcome or replace finalContext.errors[0].
+    try {
+      const trajectory = readGraphTrajectory(finalContext.metadata);
+      await recordDecisionObservation({
+        name: "trading.strategy.graph-trajectory",
+        userId,
+        metadata: {
+          runId,
+          graphTransitions: trajectory.transitions,
+          graphFinalState: trajectory.finalState
+        },
+        tags: ["strategy", "graph-trajectory"]
+      });
+    } catch (error) {
+      console.warn("[strategy] graph trajectory observation failed:", error instanceof Error ? error.message : String(error));
+    }
     if (finalContext.errors.length > 0) {
       throw finalContext.errors[0];
     }

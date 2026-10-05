@@ -127,13 +127,42 @@ export class TradingGraph {
       this.emitTransition(transition);
     }
     
-    // Attach transition history to metadata for full observability and trajectory tracking
+    // Copy the list. Metadata readers must not alias the graph's mutable transitions
+    // (getTransitions() already returns a copy).
     this.context.metadata = {
       ...this.context.metadata,
-      graphTransitions: this.transitions,
+      graphTransitions: [...this.transitions],
       graphFinalState: this.currentState,
     };
 
     return this.context;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Plain trajectory fields stored on context metadata by `run()`. */
+export function readGraphTrajectory(metadata: Record<string, unknown>): {
+  transitions: Array<{ from: string; to: string; durationMs: number; timestamp: number }>;
+  finalState: string | null;
+} {
+  const transitions: Array<{ from: string; to: string; durationMs: number; timestamp: number }> = [];
+  const raw = metadata.graphTransitions;
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      if (!isRecord(entry)) continue;
+      const { from, to, durationMs, timestamp } = entry;
+      if (typeof from !== "string" || typeof to !== "string") continue;
+      if (typeof durationMs !== "number" || !Number.isFinite(durationMs)) continue;
+      if (typeof timestamp !== "number" || !Number.isFinite(timestamp)) continue;
+      transitions.push({ from, to, durationMs, timestamp });
+    }
+  }
+  const finalState = metadata.graphFinalState;
+  return {
+    transitions,
+    finalState: typeof finalState === "string" ? finalState : null,
+  };
 }

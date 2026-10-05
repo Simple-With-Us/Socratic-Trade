@@ -261,6 +261,34 @@ describe("TradingGraph Orchestration Engine", () => {
     expect(transitions.every((record) => record.durationMs >= 0)).toBe(true);
   });
 
+  it("publishes graphTransitions metadata as a copy of the internal list", async () => {
+    const context = createMockContext();
+    const graph = new TradingGraph(context);
+
+    graph.registerNode({
+      name: "INIT",
+      execute: async (ctx) => ({ nextState: "EXECUTION", context: ctx }),
+    });
+    graph.registerNode({
+      name: "EXECUTION",
+      execute: async (ctx) => ({ nextState: "COMPLETED", context: ctx }),
+    });
+
+    const result = await graph.run();
+    const published = result.metadata.graphTransitions;
+    expect(Array.isArray(published)).toBe(true);
+    if (!Array.isArray(published)) {
+      throw new Error("graphTransitions has an unexpected shape");
+    }
+
+    const before = graph.getTransitions().map((record) => ({ ...record }));
+    expect(published).toEqual(before);
+
+    published.push({ from: "COMPLETED", to: "FAILED", timestamp: 0, durationMs: 0 });
+
+    expect(graph.getTransitions()).toEqual(before);
+  });
+
   it("records the node error when onTransition throws during a failure", async () => {
     const context = createMockContext();
     const graph = new TradingGraph(context, {
