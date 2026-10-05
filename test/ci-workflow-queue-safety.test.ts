@@ -14,10 +14,16 @@ function topLevelBlock(source: string, key: string): string {
 }
 
 describe("CI queue safety", () => {
-  it("preserves the active required verification run when a newer head arrives", () => {
+  it("cancels superseded pull_request and merge_group runs and keeps main, schedule, and workflow_dispatch alive", () => {
     const concurrency = topLevelBlock(workflow("ci.yml"), "concurrency");
 
-    expect(concurrency).toMatch(/^  cancel-in-progress:\s*false\s*$/m);
+    // Cancel only the events that stack behind a newer head. A literal `true`
+    // would also drop in-flight main / schedule / workflow_dispatch suites; a
+    // literal `false` serializes the PR queue behind the previous head.
+    expect(concurrency).toMatch(
+      /^  cancel-in-progress:\s*\$\{\{\s*github\.event_name == 'pull_request' \|\| github\.event_name == 'merge_group'\s*\}\}\s*$/m,
+    );
+    expect(concurrency).not.toMatch(/^  cancel-in-progress:\s*(?:true|false)\s*$/m);
     expect(concurrency).toMatch(/^  group: ci-\$\{\{ github\.workflow \}\}-\$\{\{ github\.ref \}\}\s*$/m);
     expect(concurrency).not.toContain("github.sha");
   });

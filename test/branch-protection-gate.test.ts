@@ -133,16 +133,20 @@ describe("the `verify` gate cannot fail open", () => {
   it("passes only on enumerated success states and fails otherwise", () => {
     const verify = jobBlock(ci, "verify");
 
-    // Enumerated PASS states: docs-only, the hourly backstop (cron-only), and both lanes green.
+    // Enumerated PASS states: docs-only, the hourly backstop (cron-only),
+    // hosted green with iOS required only when the diff changed iOS, and
+    // hosted green with a skipped or successful iOS lane otherwise.
     expect(verify).toMatch(/if \[ "\$DOCS_ONLY" = "true" \]; then[\s\S]*?exit 0/);
-    expect(verify).toMatch(/if \[ "\$HOSTED_RESULT" = "success" \] && \[ "\$IOS_RESULT" = "success" \]; then[\s\S]*?exit 0/);
-    // A non-success lane is a FAIL, including a skipped one.
+    expect(verify).toMatch(/if \[ "\$REDUNDANT" = "true" \]; then[\s\S]*?exit 0/);
+    // HOSTED is always required once the fast paths are exhausted. iOS is
+    // required only when IOS_CHANGED=true; a skipped or successful iOS lane
+    // is PASS when the diff is not iOS. Any other iOS result still exits 1.
+    expect(verify).toMatch(
+      /if \[ "\$HOSTED_RESULT" != "success" \]; then[\s\S]*?exit 1[\s\S]*?if \[ "\$\{IOS_CHANGED:-\}" = "true" \]; then[\s\S]*?if \[ "\$IOS_RESULT" = "success" \]; then[\s\S]*?exit 0[\s\S]*?exit 1[\s\S]*?if \[ "\$IOS_RESULT" = "skipped" \] \|\| \[ "\$IOS_RESULT" = "success" \]; then[\s\S]*?exit 0[\s\S]*?exit 1/,
+    );
     expect(verify).toMatch(/exit 1\s*$/m);
     // And `classify` failing is never a pass.
     expect(verify).toMatch(/if \[ "\$CLASSIFY_RESULT" != "success" \]; then[\s\S]*?exit 1/);
-    // The success path must actually require BOTH lanes — a one-sided success must not pass.
-    expect(verify).not.toMatch(/if \[ "\$HOSTED_RESULT" = "success" \]; then/);
-    expect(verify).not.toMatch(/if \[ "\$IOS_RESULT" = "success" \]; then/);
   });
 
   it("keeps `set -euo pipefail` so an unset variable cannot quietly pass the gate", () => {
