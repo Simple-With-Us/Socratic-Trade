@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-05 BF-FIXER — Effort-issues sync HTTP 500 retry
+
+**What.**  `Effort Issues Sync` run 37388978298 aborted on `update issue #3797 failed: 500 {}`.  Idempotent 5xx and a bare 429 now use the existing rate-limit retry budget.  POST 500 is not replayed.  Budget exhaustion stays a partial sync (exit 0).
+
+**Docs.**  `docs/rollouts/2026-10-05-effort-sync-http-500-retry.md`.  `PLAN.md` unchanged.
+
+**Verification.**  `python3 -m py_compile scripts/sync-effort-issues.py`.  `python3 -m unittest scripts/sync_effort_issues_retry_test.py`.  Repo gate is `scripts/land.sh`.
+
+**Next.**  Land the PR.  Do not dispatch the sync by hand.
+
 ## 2026-10-05 CURSOR — marketCap coverage + catalog (branch `cursor/marketcap-coverage-catalog-62d9`)
 
 **What.**  Board `2c62f3fde01447a7`: add `marketCap` to `COVERAGE_TRACKED_FIELDS` and `CATALOG_FIELDS` for score-factor observability.
