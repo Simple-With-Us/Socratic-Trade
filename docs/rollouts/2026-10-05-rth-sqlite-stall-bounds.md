@@ -60,7 +60,7 @@ Targeted proof in `test/event-loop-stall-hot-path.test.ts`: scale a fixture unti
 
 ## Next Steps & Blockers
 
-- Kody review (2026-10-05): public effort mirror sanitized; live board sync and board reservation id pending owner.  Stall-path CI flake on fast runners fixed by growing regression fixtures until the unindexed baseline crosses 100ms.
+- Kody review (2026-10-05): public effort mirror sanitized; live board and `docs/EFFORT-LOG.md` now share board `3554f500` / issue #4239 (PR #4218).  Stall-path CI flake on fast runners fixed by growing regression fixtures until the unindexed baseline crosses 100ms.
 - If production still stalls inside journal prune after deploy, re-map the new profile.  Do not assume the old OR scan came back.
 - Do not hammer production ops snapshot during regular hours to "check" this; that route was on the hot path.
 
