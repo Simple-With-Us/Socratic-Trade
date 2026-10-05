@@ -24,9 +24,9 @@
 
 **Deferred.**  `data-providers.ts` `takeScalar` (`cascadeFetchedAt = new Date()` for fields that lack their own asOf) and `syncQuotesToFieldStore`'s `nowIso` fallback.  Both are the same class of stamp and are not trivial.  UI age chips on watchlist / symbol drilldown stay as they are.
 
-**Verification.**  Targeted vitest: `test/quote-only-asof.test.ts`, `test/alpaca-nbbo-mid.test.ts`, `test/quotes-cascade.test.ts`, `test/order-confirmation-status.test.ts` — 4 files, 61 passed.  Full lint / tsc / npm test / build recorded in the rollout after this commit.
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` clean.  `npm run build` passed.  `npm test`: 9047 passed, 51 skipped, 11 failed outside this diff (notify creds injected as `[REDACTED]`, Alpha Vantage / Congress extra fetches, TwelveData quota, Node 22 `.ts` import from `summarize-cpuprofile.mjs`, `server-metrics` `usesLocalHost` on this VM).  Targeted quote tests passed inside that run.
 
-**Next.**  Push and open a ready PR.  Extra-ship no.  Do not merge.  Do not Coolify deploy.  Kody threads: fix or leave open with rationale.
+**Next.**  PR #4215 is ready.  Extra-ship no.  Do not merge.  Do not Coolify deploy.  Kody threads: fix or leave open with rationale.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

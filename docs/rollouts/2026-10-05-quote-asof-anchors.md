@@ -46,7 +46,16 @@ npx vitest run test/quote-only-asof.test.ts test/alpaca-nbbo-mid.test.ts test/qu
 # 4 files, 61 tests passed
 ```
 
-Full `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build` are recorded in a follow-up commit on this branch once they finish.
+Full gate on this branch (2026-10-05, Node 22 cloud VM):
+
+```bash
+npm run lint       # exit 0; 0 errors, 863 warnings (grandfathered)
+npx tsc --noEmit   # exit 0
+npm test           # 11 failed | 9047 passed | 51 skipped (9109).  See below.
+npm run build      # exit 0 (Next.js 16.3.6 webpack)
+```
+
+The 11 failures are outside this diff.  None import the three anchors.  They are cloud-env: injected notify credentials (`[REDACTED]` pushover token), Alpha Vantage / Congress extra fetches, TwelveData quota, Node 22 refusing `.ts` from `summarize-cpuprofile.mjs`, and `server-metrics` `usesLocalHost` false on this VM.  Quote tests in the same run passed (`quote-only-asof`, `alpaca-nbbo-mid`, the ROIC cascade case, `order-confirmation-status`).
 
 ## Next Steps & Blockers
 
