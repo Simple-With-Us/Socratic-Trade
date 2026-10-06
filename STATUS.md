@@ -36,9 +36,9 @@
 **Next.**  PR #4217 MERGEABLE; wait `verify` green; Kody doc threads addressed.
 ## 2026-10-05 CURSOR — Congress share schema drift (board bf84ffba, branch `gb-compiler/st-share-schemaversion`)
 
-**What.**  Outbound share row drops now emit audit + Sentry + per-stream reasons on `shareWithCongressTrade` receipts and daily share summaries.  Inbound `/api/admin/securities/import` uses `readJsonWithLimit` (5 MB) and Cloudflare-trusted per-IP rate limiting (600/min for chunked nightly fan-out); congress webhook rate-limited the same way.  Optional `schemaVersion` on share payload type; log-safe schemaVersion strings.
+**What.**  Outbound share row drops now emit audit + per-stream reasons on `shareWithCongressTrade` receipts and daily share summaries.  Inbound `/api/admin/securities/import` uses `readJsonWithLimit` (5 MB) and Cloudflare-trusted per-IP rate limiting (600/min for chunked nightly fan-out); congress webhook rate-limited the same way.  Optional `schemaVersion` on share payload type; log-safe schemaVersion strings.  Kody PR #4220 follow-up: test tokens from `SECURITIES_IMPORT_TEST_TOKEN` / `CONGRESS_WEBHOOK_TEST_SECRET` (vitest env); removed redundant Sentry `captureMessage` on row drops.
 
-**Next.**  PR #4220: wait for `verify` on head after Kody follow-up commit; Jay resolves review threads (fixes landed for rate-limit/IP/docs; `/defer` on strict-400 vs tolerant-row-drops and test-token env pattern).
+**Next.**  PR #4220: push Kody follow-up; reply/resolve threads; `/defer` on strict Zod 400 vs intentional tolerant row-drops.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

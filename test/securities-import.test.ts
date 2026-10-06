@@ -22,6 +22,24 @@ import { POST as importRoute } from "../app/api/admin/securities/import/route";
 import { SECURITIES_IMPORT_MAX_BYTES } from "../src/lib/bounded-body";
 import { RATE_LIMITS, resetRateLimiter } from "../src/lib/rate-limit";
 
+function securitiesImportTestToken(): string {
+  const token = process.env.SECURITIES_IMPORT_TEST_TOKEN;
+  if (!token) {
+    throw new Error("SECURITIES_IMPORT_TEST_TOKEN is required for securities-import tests");
+  }
+  return token;
+}
+
+function bearerAuth(token: string): string {
+  return `Bearer ${token}`;
+}
+
+function withSecuritiesImportToken(): string {
+  const token = securitiesImportTestToken();
+  process.env.APP_B_INGEST_TOKEN = token;
+  return token;
+}
+
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-securities-import-${randomUUID()}.db`)}`;
 });
@@ -128,10 +146,10 @@ describe("securities-import auth", () => {
   });
 
   it("rejects a wrong / length-mismatched token and accepts the exact token", () => {
-    process.env.APP_B_INGEST_TOKEN = "s3cret-token";
+    const token = withSecuritiesImportToken();
     expect(verifySecuritiesImportToken(reqWith("Bearer wrong"))).toBe(false);
     expect(verifySecuritiesImportToken(reqWith(""))).toBe(false);
-    expect(verifySecuritiesImportToken(reqWith("Bearer s3cret-token"))).toBe(true);
+    expect(verifySecuritiesImportToken(reqWith(bearerAuth(token)))).toBe(true);
   });
 });
 
@@ -152,17 +170,17 @@ describe("POST /api/admin/securities/import", () => {
   });
 
   it("401s on a wrong token", async () => {
-    process.env.APP_B_INGEST_TOKEN = "tok";
+    withSecuritiesImportToken();
     const res = await importRoute(postJson({ prices: [] }, "Bearer nope"));
     expect(res.status).toBe(401);
   });
 
   it("persists refs/prices/spx and returns counts on a valid token", async () => {
-    process.env.APP_B_INGEST_TOKEN = "tok";
+    const token = withSecuritiesImportToken();
     const res = await importRoute(
       postJson(
         { refs: [{ ticker: "AAPL", companyName: "Apple" }], prices: [{ ticker: "AAPL", closes: seqCloses(3) }], spx: seqCloses(2, 5000), origin: "app-a" },
-        "Bearer tok"
+        bearerAuth(token)
       )
     );
     expect(res.status).toBe(200);
@@ -172,8 +190,8 @@ describe("POST /api/admin/securities/import", () => {
   });
 
   it("no-echo guard: a payload tagged with App B's own origin is acked but NOT stored", async () => {
-    process.env.APP_B_INGEST_TOKEN = "tok";
-    const res = await importRoute(postJson({ prices: [{ ticker: "AAPL", closes: seqCloses(3) }], origin: "app-b" }, "Bearer tok"));
+    const token = withSecuritiesImportToken();
+    const res = await importRoute(postJson({ prices: [{ ticker: "AAPL", closes: seqCloses(3) }], origin: "app-b" }, bearerAuth(token)));
     expect(res.status).toBe(200);
     const json = (await res.json()) as { ok: boolean; skipped?: boolean };
     expect(json).toMatchObject({ ok: true, skipped: true });
@@ -181,20 +199,20 @@ describe("POST /api/admin/securities/import", () => {
   });
 
   it("ignores insider/shortVolume on the inbound path", async () => {
-    process.env.APP_B_INGEST_TOKEN = "tok";
+    const token = withSecuritiesImportToken();
     const res = await importRoute(
-      postJson({ prices: [{ ticker: "F", closes: seqCloses(2) }], insider: [{ ticker: "F" }], shortVolume: [{ ticker: "F" }] }, "Bearer tok")
+      postJson({ prices: [{ ticker: "F", closes: seqCloses(2) }], insider: [{ ticker: "F" }], shortVolume: [{ ticker: "F" }] }, bearerAuth(token))
     );
     expect(res.status).toBe(200);
     expect(getImportedPriceCloses("F")).toHaveLength(2);
   });
 
   it("413s when the body exceeds SECURITIES_IMPORT_MAX_BYTES", async () => {
-    process.env.APP_B_INGEST_TOKEN = "tok";
+    const token = withSecuritiesImportToken();
     const bigBody = JSON.stringify({ padding: "a".repeat(SECURITIES_IMPORT_MAX_BYTES) });
     const req = new Request("http://localhost/api/admin/securities/import", {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: "Bearer tok" },
+      headers: { "content-type": "application/json", authorization: bearerAuth(token) },
       body: bigBody
     });
     const res = await importRoute(req);
@@ -202,11 +220,11 @@ describe("POST /api/admin/securities/import", () => {
   });
 
   it("returns 429 after the per-IP rate limit is exceeded", async () => {
-    process.env.APP_B_INGEST_TOKEN = "tok";
+    const token = withSecuritiesImportToken();
     const { limit } = RATE_LIMITS.securitiesImport;
     const headers = {
       "content-type": "application/json",
-      authorization: "Bearer tok",
+      authorization: bearerAuth(token),
       "cf-connecting-ip": "203.0.113.50"
     };
     for (let i = 0; i < limit; i++) {
@@ -230,9 +248,9 @@ describe("POST /api/admin/securities/import", () => {
   });
 
   it("surfaces rowsDropped when malformed refs are coerced away", async () => {
-    process.env.APP_B_INGEST_TOKEN = "tok";
+    const token = withSecuritiesImportToken();
     const res = await importRoute(
-      postJson({ refs: [{ ticker: "AAPL" }, { ticker: "" }, "not-an-object"] }, "Bearer tok")
+      postJson({ refs: [{ ticker: "AAPL" }, { ticker: "" }, "not-an-object"] }, bearerAuth(token))
     );
     expect(res.status).toBe(200);
     const json = (await res.json()) as { rowsDropped?: Record<string, number>; rowsDroppedTotal?: number };
@@ -241,8 +259,8 @@ describe("POST /api/admin/securities/import", () => {
   });
 
   it("accepts optional schemaVersion on the inbound payload", async () => {
-    process.env.APP_B_INGEST_TOKEN = "tok";
-    const res = await importRoute(postJson({ schemaVersion: "2.7.0", prices: [] }, "Bearer tok"));
+    const token = withSecuritiesImportToken();
+    const res = await importRoute(postJson({ schemaVersion: "2.7.0", prices: [] }, bearerAuth(token)));
     expect(res.status).toBe(200);
     const json = (await res.json()) as { schemaVersion?: string };
     expect(json.schemaVersion).toBe("2.7.0");

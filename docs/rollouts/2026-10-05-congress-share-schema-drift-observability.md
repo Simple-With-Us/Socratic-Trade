@@ -12,7 +12,7 @@ without editing the shared package (`schemaVersion` on `SharePayload` remains a 
 - `dropInvalidShareRows` now returns per-stream drop counts plus aggregated Zod issue reasons; outbound
   `shareWithCongressTrade` receipts and `runCongressDailyShare` summaries surface `dropped` /
   `rowsDropped` fields.
-- Row drops are reported via `audit()`, `logWarn`, and fingerprinted Sentry `captureMessage` (not
+- Row drops are reported via `audit()`, `console.warn`, and sparse `logWarn` structured logs (not
   `logApiHealth`, which would reset consecutive transport-failure counters).
 - Optional `schemaVersion` on inbound/outbound share-shaped JSON is accepted and logged (tolerant reader).
 - `SECURITIES_IMPORT_MAX_BYTES` (5 MB, same as congress webhook) + `readJsonWithLimit` on
@@ -34,7 +34,7 @@ Files:
 ## 3. Decisions & Trade-offs
 
 - Still per-row drop, not whole-payload reject — matches existing share contract.
-- Sentry at `warning` level: payload-quality signal, not a transport outage.
+- Row-drop warnings are payload-quality signals, not transport outages (deliberately not `logApiHealth`).
 - `schemaVersion` not added to shared `SharePayloadSchema` in this repo; CT/ST must add it in
   `congress-trading-shared` as a follow-up.
 

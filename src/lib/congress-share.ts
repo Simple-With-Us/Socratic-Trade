@@ -821,26 +821,6 @@ async function reportCongressShareRowsDropped(details: {
     droppedTotal,
     ...(schemaVersion !== undefined ? { schemaVersion: String(schemaVersion) } : {})
   });
-  if (!process.env.SENTRY_DSN) return;
-  try {
-    const Sentry = await import("@sentry/nextjs");
-    Sentry.withScope((scope) => {
-      scope.setLevel("warning");
-      scope.setTag("component", "congress-share");
-      scope.setFingerprint(["congress-share", "rows-dropped"]);
-      scope.setContext("congress-share-rows-dropped", {
-        dropped,
-        droppedReasons,
-        droppedTotal,
-        schemaVersion: schemaVersion ?? null
-      });
-      Sentry.captureMessage(
-        `Congress share dropped ${droppedTotal} schema-invalid row(s) before send (${Object.keys(dropped).join(", ")})`
-      );
-    });
-  } catch {
-    // observability must not affect the share path
-  }
 }
 
 function shareDropReceipt(report: ShareRowsDropReport, schemaVersion?: string | number) {
