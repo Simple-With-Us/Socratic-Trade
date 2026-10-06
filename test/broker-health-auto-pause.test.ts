@@ -256,6 +256,39 @@ describe("broker-health auto-pause when orders cannot be placed", () => {
     clearBrokerPlacementPauseMarker(userId, accountScope);
   });
 
+  it("low equity on an active account skips without auto-halt, marker, or kill_switch", async () => {
+    const { getPolicy, setPolicy, listAudit } = await import("../src/lib/db");
+    const { applyBrokerOrderPlacementPause, getBrokerPlacementPauseMarker } = await import("../src/lib/broker-health");
+    const notificationsMod = await import("../src/lib/notifications");
+    const sendNotificationSpy = vi.spyOn(notificationsMod, "sendNotification").mockResolvedValue({} as never);
+
+    const userId = "local";
+    const accountScope = "acct-equity-low";
+    const policy = getPolicy(userId);
+    policy.systemState = "active";
+    setPolicy(policy, userId);
+
+    const health = {
+      isHealthy: false,
+      reason: "Account equity (2.5) is too low to trade",
+      category: "equity" as const
+    };
+    const first = await applyBrokerOrderPlacementPause({ userId, accountScope, health, policy });
+    expect(first.action).toBe("none");
+    const second = await applyBrokerOrderPlacementPause({ userId, accountScope, health, policy });
+    expect(second.action).toBe("none");
+    expect(getPolicy(userId).systemState).toBe("active");
+    expect(getBrokerPlacementPauseMarker(userId, accountScope)).toBeUndefined();
+
+    const kinds = listAudit(50, userId).map((a) => a.kind);
+    expect(kinds).not.toContain("broker_placement_auto_halted");
+    expect(sendNotificationSpy).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "kill_switch" }),
+      expect.anything()
+    );
+    sendNotificationSpy.mockRestore();
+  });
+
   it("checkBrokerHealth fails closed when probeOrderCapability returns not ok", async () => {
     const { checkBrokerHealth } = await import("../src/lib/broker-health");
     const gateway = {

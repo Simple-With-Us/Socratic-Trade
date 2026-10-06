@@ -156,8 +156,9 @@ export async function checkBrokerHealth(
       };
     }
 
-    // Minimum notional check to prevent burning tokens when there's no money.
-    // E.g., Robinhood requires $1 minimum for fractional shares.
+    // Placeability floor (~$5): broker cannot meaningfully place fractional equity below this.
+    // Strategy proposal generation uses a separate floor (MIN_STRATEGY_ACCOUNT_EQUITY = $10 in
+    // strategy.ts).  Low equity skips this tick via isHealthy=false; it does not auto-halt.
     const equity = accountEquity(portfolio);
     if (equity < 5.0) {
       return {
@@ -426,6 +427,12 @@ export async function applyBrokerOrderPlacementPause(input: {
   // The app was frozen, not the broker: skip this tick (isHealthy=false upstream) but leave the
   // streak exactly where it was — neither evidence of a broker outage nor of broker recovery.
   if (health.processStall) {
+    return { action: "none" };
+  }
+
+  // Underfunded account: same as process stall — skip via the health gate, never flip halted or
+  // fire kill_switch (strategy already skips proposals below MIN_STRATEGY_ACCOUNT_EQUITY).
+  if (health.category === "equity") {
     return { action: "none" };
   }
 
