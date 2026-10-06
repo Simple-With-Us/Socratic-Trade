@@ -22,6 +22,10 @@ permissions:
 
 concurrency:
   group: ios-build-${{ github.ref }}
+  # Must match the caller (ci.yml `concurrency`): never cancel an in-flight lane.
+  # A ref-keyed predicate here diverged from ci.yml and could tear down the iOS
+  # lane of a workflow_dispatch re-kick while the rest of the suite kept running
+  # (Kody review, PR #4231). Pending duplicates still collapse per ref.
   cancel-in-progress: false
 
 jobs:
