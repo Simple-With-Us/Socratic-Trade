@@ -69,17 +69,25 @@ jobs:
         run: |
           set -euo pipefail
           skip_automerge=false
-          if bash scripts/pr-touches-codeowners-paths.sh "$BASE" "$HEAD"; then
+          # Read CODEOWNERS from the base revision so this PR cannot relax its own gate.
+          BASE_CODEOWNERS="$RUNNER_TEMP/codeowners-base"
+          git show "$BASE:.github/CODEOWNERS" > "$BASE_CODEOWNERS" 2>/dev/null || : > "$BASE_CODEOWNERS"
+          if CODEOWNERS_FILE="$BASE_CODEOWNERS" bash scripts/pr-touches-codeowners-paths.sh "$BASE" "$HEAD"; then
             echo "touches_protected=true" >> "$GITHUB_OUTPUT"
             skip_automerge=true
             echo "::notice::PR touches CODEOWNERS trading-execution paths - auto-merge will not be armed (human merge required)"
           else
             echo "touches_protected=false" >> "$GITHUB_OUTPUT"
           fi
-          changed_files="$(git diff --name-only --no-renames "$BASE" "$HEAD" 2>/dev/null || true)"
-          if printf '%s\n' "$changed_files" | grep -qx '.github/workflows/auto-merge-prs.yml'; then
+          merge_base="$(git merge-base "$BASE" "$HEAD" 2>/dev/null || true)"
+          if [ -n "$merge_base" ]; then
+            changed_files="$(git diff --name-only --no-renames "$merge_base" "$HEAD" 2>/dev/null || true)"
+          else
+            changed_files=""
+          fi
+          if printf '%s\n' "$changed_files" | grep -qxE '(\.github/CODEOWNERS|\.github/workflows/auto-merge-prs\.yml|scripts/pr-touches-codeowners-paths\.sh)'; then
             skip_automerge=true
-            echo "::notice::PR edits auto-merge-prs.yml - auto-merge will not be armed on this PR"
+            echo "::notice::PR edits the auto-merge gate - auto-merge will not be armed on this PR"
           fi
           if [ "$skip_automerge" = true ]; then
             echo "skip_automerge=true" >> "$GITHUB_OUTPUT"
@@ -195,8 +203,8 @@ jobs:
             echo "Auto-merge already armed."
             exit 0
           fi
-          # Pending checks, merge conflicts, org PAT policy, or other non-actionable refusals.
-          if echo "$out" | grep -qiE 'is not mergeable|not mergeable|merge conflict|required status check|Review required|forbids access via a fine-grained|personal access token|GraphQL:'; then
+          # Pending checks, merge conflicts, or review-required refusals (non-fatal).
+          if echo "$out" | grep -qiE 'is not mergeable|not mergeable|merge conflict|required status check|Review required'; then
             if gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest' | grep -vq null; then
               echo "Auto-merge armed despite pending checks."
               exit 0
@@ -204,6 +212,6 @@ jobs:
             echo "::notice::Auto-merge not armed ($(echo "$out" | head -1))"
             exit 0
           fi
-          echo "::warning::Unexpected auto-merge arm failure for $PR_URL"
+          echo "::error::Failed to enable squash auto-merge for $PR_URL"
           echo "$out"
-          exit 0
+          exit 1

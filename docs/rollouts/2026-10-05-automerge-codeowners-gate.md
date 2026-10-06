@@ -24,8 +24,9 @@ Touched paths:
 - **Single source of truth:** CODEOWNERS patterns only (no duplicate path list).  Expanding CODEOWNERS expands the auto-merge skip set automatically.
 - **Fail-closed:** missing diff or missing CODEOWNERS file => do not arm auto-merge.
 - **Labels:** `needs-human-merge` (merge-shepherd) now also blocks arming, matching manual hold semantics.
-- **Self-edit:** PRs that change `.github/workflows/auto-merge-prs.yml` set `skip_automerge` and run `disable-on-skip-automerge` (bootstrap PR #4221 cannot arm itself).
-- **Non-fatal arm step:** `gh pr merge --auto` failures from conflicts, pending checks, or org fine-grained PAT lifetime policy emit `::notice` and exit 0 so the workflow job does not go red while arming is best-effort.
+- **Self-edit:** PRs that change `.github/CODEOWNERS`, `.github/workflows/auto-merge-prs.yml`, or `scripts/pr-touches-codeowners-paths.sh` set `skip_automerge` and run `disable-on-skip-automerge`.  CODEOWNERS patterns for the gate are read from the **base** revision so the PR cannot relax its own rules.
+- **Diff scope:** `pr-touches-codeowners-paths.sh` uses `merge-base(base,head)..head`, not `base..head`, so main-line drift does not false-trigger protected classification.
+- **Arm step:** unexpected `gh pr merge --auto` failures emit `::error::` and fail the job (no blanket `GraphQL:` swallow).  Enumerated pending-check / conflict refusals stay non-fatal.
 - **Out of scope:** GitHub required-review ruleset / CODEOWNERS review enforcement (board `bdc2b662`); this workflow gate only prevents auto-arming, not manual `gh pr merge --auto` from an agent with credentials.
 
 ## Verification State
@@ -47,3 +48,5 @@ Full-repo `npm test` on the cloud VM reported 11 failures in unrelated suites (p
 ## Zero-Code Findings
 
 - Prior rollout `docs/rollouts/2026-08-10-always-auto-merge-prs.md` described arming every non-draft PR; header comment in the workflow now matches the CODEOWNERS exception.
+- **Kody defer (performance):** pattern matching could cache CODEOWNERS lines once per job; typical PR diffs are small and classify-protected finishes in seconds — optimize only if telemetry shows pain.
+- **Kody defer (fleet recall Rule 40):** reusable lesson is captured in this rollout + `scripts/pr-touches-codeowners-paths.sh` header; separate `recall contribute` is optional owner follow-up, not a merge blocker for this CI gate PR.

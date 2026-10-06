@@ -14,7 +14,10 @@ function protectedExit(...files: string[]): number {
     });
     return 0;
   } catch (err: unknown) {
-    const e = err as { status?: number };
+    const e: { status?: unknown } =
+      typeof err === "object" && err !== null && "status" in err
+        ? { status: (err as { status?: unknown }).status }
+        : {};
     return typeof e.status === "number" ? e.status : 2;
   }
 }
