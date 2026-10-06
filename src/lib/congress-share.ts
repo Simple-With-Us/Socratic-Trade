@@ -38,7 +38,6 @@ import {
   AnalystRowSchema,
   TradeEventRowSchema,
 } from "@jaywedgeworth22/congress-trading-shared";
-import { z } from "zod";
 import {
   assertOperationLeaseOwnership,
   OPERATION_LEASE_GROUPS,

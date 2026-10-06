@@ -32,7 +32,15 @@ npm test -- test/congress-share.test.ts -t "drops spx and price-series"
 npm test -- test/congress-share.test.ts -t "ohlcBarsToCloses"
 ```
 
-Full `npm test` / `npm run build` run at PR handoff.
+```bash
+npm run lint          # 0 errors
+npx tsc --noEmit      # clean
+npm test -- test/congress-share.test.ts -t "drops spx and price-series"  # pass
+npm test -- test/congress-share.test.ts -t "ohlcBarsToCloses"           # pass
+npm run build         # pass
+```
+
+Full `npm test` on cloud VM: 798 files passed; 11 failures in unrelated env-sensitive suites (not congress-share plausibility).
 
 ## 5. Next Steps & Blockers
 
