@@ -90,12 +90,16 @@
 
 **Next.**  Push; reply on Kody threads; do not merge.
 ## 2026-10-05 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, branch `cursor/automerge-money-path-gate-2ac4`)
+## 2026-10-05 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, branch `cursor/automerge-money-path-gate-2ac4`, PR #4221)
 
-**What.**  `auto-merge-prs.yml` no longer arms merge when the PR diff touches any `.github/CODEOWNERS` trading-execution path; adds `disable-on-protected` and treats `needs-human-merge` like `do-not-automerge`.  Safe non-money PRs still auto-arm when `GH_PAT` / `SHEPHERD_TOKEN` is set.
+**What.**  `auto-merge-prs.yml` no longer arms merge when the PR diff touches any `.github/CODEOWNERS` trading-execution path; adds `disable-on-protected` and treats `needs-human-merge` like `do-not-automerge`.  Safe non-money PRs still auto-arm when `GH_PAT` / `SHEPHERD_TOKEN` is set.  Kody follow-up: basename-anywhere CODEOWNERS matching, single-pass pattern load, tests pass `CODEOWNERS_FILE`.
 
 **Verification.**  Rebased onto `origin/main` @ `494576fc` (2026-10-06).  PR head `dd6398d6` (tip; matcher fix `4834b6bc`).  Local @ `dd6398d6`: `npm run lint` exit 0; `npx vitest run test/pr-touches-codeowners-paths.test.ts` 4/4; `npx vitest run test/branch-protection-gate.test.ts` 10/10.  CI: await `verify` on `dd6398d6`.
 
 **Next.**  Owner squash merge when `verify` + Kody green and `mergeable` not CONFLICTING/BEHIND.  No `--admin` merge.  Do not arm auto-merge on this PR (self-edit bootstrap).
+**Verification.**  PR base `main` @ `494576fc` (2026-10-06).  Head OID `HEAD_OID_PLACEHOLDER`.  Local gate (this commit): `npm run lint` exit 0; `npx tsc --noEmit` exit 0; `npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-gate.test.ts` 14/14; `npm run build` exit 0.  Authoritative merge gate: CI `verify` + `gitleaks` on the same head OID.
+
+**Next.**  Owner squash merge when `verify` green, Kody threads resolved, and `mergeable` not CONFLICTING/BEHIND.  No auto-merge arm on this PR (money-path / self-edit).  No `--admin` merge.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
