@@ -92,11 +92,11 @@
 ## 2026-10-05 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, branch `cursor/automerge-money-path-gate-2ac4`)
 ## 2026-10-05 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, branch `cursor/automerge-money-path-gate-2ac4`, PR #4221)
 
-**What.**  `auto-merge-prs.yml` no longer arms merge when the PR diff touches any `.github/CODEOWNERS` trading-execution path; adds `disable-on-protected` and treats `needs-human-merge` like `do-not-automerge`.  Safe non-money PRs still auto-arm when `GH_PAT` / `SHEPHERD_TOKEN` is set.  Kody follow-up: basename-anywhere CODEOWNERS matching, single-pass pattern load, tests pass `CODEOWNERS_FILE`.
+**What.**  `auto-merge-prs.yml` no longer arms merge when the PR diff touches any `.github/CODEOWNERS` trading-execution path; adds `disable-on-protected` and treats `needs-human-merge` like `do-not-automerge`.  Classifier uses shallow checkout + GitHub Compare/Contents APIs (no full clone).  Kody follow-up: basename-anywhere matching, `CODEOWNERS_FILE` tests, Fleet recall evidence in rollout.
 
-**Verification.**  PR base `main` @ `494576fc` (2026-10-06).  Head OID `4eb84136`.  Local gate @ `67c2e1e9` (code+docs before final STATUS tip): `npm run lint` exit 0; `npx tsc --noEmit` exit 0; `npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-gate.test.ts` 14/14; `npm run build` exit 0.  Authoritative merge gate: CI `verify` + `gitleaks` on head `4eb84136`.
+**Verification.**  PR base `main` @ `494576fc` (2026-10-06).  Head OID updated on push.  Local: `npm run lint` exit 0; `npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-gate.test.ts` 14/14.  CI `verify` + `gitleaks` authoritative on PR head.
 
-**Next.**  Owner squash merge when `verify` green, Kody threads resolved, and `mergeable` not CONFLICTING/BEHIND.  No auto-merge arm on this PR (money-path / self-edit).  No `--admin` merge.
+**Next.**  Owner squash when green; Rule 24 defer may block ruleset until Jay accepts.  No auto-merge on this PR.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
