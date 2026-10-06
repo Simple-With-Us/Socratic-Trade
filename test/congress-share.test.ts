@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OHLCBar } from "../src/lib/indicators";
+import type { MarketQuote, MarketScan } from "../src/lib/types";
 
 // Mock the history cascade without importOriginal(). history.ts imports the db barrel, whose
 // outcome-horizon re-export imports history.ts again; importing the original inside this factory can
@@ -49,13 +50,38 @@ import {
   probeCongressShareTokenOnStartup,
   shareScanRefs,
   shareWithCongressTrade,
-  type CongressPrice
+  type CongressPrice,
+  type CongressRef,
 } from "../src/lib/congress-share";
 import { deleteInternalSetting, getInternalSetting, setInternalSetting } from "../src/lib/db";
 import { getServiceHealthLog } from "../src/lib/db-health";
 import { flushDurableStateNow, resetDurableStateCacheForTests } from "../src/lib/durable-state";
 
 const recentDate = (daysAgo: number) => new Date(Date.now() - daysAgo * 86_400_000).toISOString().slice(0, 10);
+
+function congressTradeTestToken(): string {
+  const token = process.env.CONGRESS_TRADE_TEST_TOKEN;
+  if (!token) {
+    throw new Error("CONGRESS_TRADE_TEST_TOKEN is required for Congress share tests");
+  }
+  return token;
+}
+
+function scanWithCandidates(
+  candidates: Array<Pick<MarketQuote, "symbol"> & Partial<MarketQuote>>
+): Pick<MarketScan, "topCandidates"> {
+  return {
+    topCandidates: candidates.map((c) => ({
+      price: c.price ?? 100,
+      volume: c.volume ?? 1_000_000,
+      intradayChangePct: c.intradayChangePct ?? 0,
+      positionMarketValue: c.positionMarketValue ?? 0,
+      score: c.score ?? 50,
+      ...c,
+      symbol: c.symbol,
+    })),
+  };
+}
 
 const mockedFetchDailyOHLC = vi.mocked(fetchDailyOHLC);
 
@@ -91,12 +117,9 @@ describe("canonicalOutboundSymbol + alias-resolved outbound tickers", () => {
   });
 
   it("stamps the canonical ticker on outbound ref / fundamentals / analyst rows", () => {
-    type RefArg = Parameters<typeof marketQuoteToRef>[0];
-    type FundArg = Parameters<typeof marketQuoteToFundamentals>[0];
-    type AnalystArg = Parameters<typeof marketQuoteToAnalyst>[0];
-    expect(marketQuoteToRef({ symbol: "FB" } as unknown as RefArg)?.ticker).toBe("META");
-    expect(marketQuoteToFundamentals({ symbol: "FB", peRatio: 20 } as unknown as FundArg, recentDate(0))?.ticker).toBe("META");
-    expect(marketQuoteToAnalyst({ symbol: "FB", analystRating: "Buy" } as unknown as AnalystArg, recentDate(0))?.ticker).toBe("META");
+    expect(marketQuoteToRef({ symbol: "FB" })?.ticker).toBe("META");
+    expect(marketQuoteToFundamentals({ symbol: "FB", peRatio: 20 }, recentDate(0))?.ticker).toBe("META");
+    expect(marketQuoteToAnalyst({ symbol: "FB", analystRating: "Buy" }, recentDate(0))?.ticker).toBe("META");
   });
 });
 
@@ -116,15 +139,11 @@ describe("canonicalMarketDataSymbol (shared rename-vs-acquisition)", () => {
   });
 
   it("keeps identity refs folding acquisitions while market-data mappers drop them", () => {
-    type RefArg = Parameters<typeof marketQuoteToRef>[0];
-    type FundArg = Parameters<typeof marketQuoteToFundamentals>[0];
     // Company identity still points at the acquirer (canonicalOutboundSymbol).
     expect(canonicalOutboundSymbol("ATVI")).toBe("MSFT");
-    expect(marketQuoteToRef({ symbol: "ATVI", companyName: "Activision" } as unknown as RefArg)?.ticker).toBe("MSFT");
+    expect(marketQuoteToRef({ symbol: "ATVI", companyName: "Activision" })?.ticker).toBe("MSFT");
     // Market-data rows must not pollute MSFT's series with ATVI numbers.
-    expect(
-      marketQuoteToFundamentals({ symbol: "ATVI", peRatio: 12, eps: 1 } as unknown as FundArg, "2026-07-01")
-    ).toBeNull();
+    expect(marketQuoteToFundamentals({ symbol: "ATVI", peRatio: 12, eps: 1 }, "2026-07-01")).toBeNull();
     expect(
       ohlcBarsToPriceEntry("ATVI", [
         { time: "2026-07-01", open: 1, high: 1, low: 1, close: 90, volume: 1 }
@@ -137,7 +156,7 @@ describe("canonicalMarketDataSymbol (shared rename-vs-acquisition)", () => {
 
 describe("dropInvalidShareRows — drop malformed rows instead of sending them", () => {
   it("drops schema-invalid rows per dataset and keeps the valid ones", () => {
-    const { payload, dropped } = dropInvalidShareRows({
+    const { payload, dropped, droppedReasons } = dropInvalidShareRows({
       refs: [{ ticker: "AAPL" }, { ticker: "" }], // "" fails ticker.min(1)
       spx: [{ date: "2026-06-15", close: 100 }, { date: "not-a-date", close: 1 }], // bad date dropped
       insider: [{ ticker: "AAPL", date: "2026-06-15", sentiment: 60, buyFilings: 1, sellFilings: 0, buyShares: 1, sellShares: 0, owners: [] }],
@@ -147,6 +166,38 @@ describe("dropInvalidShareRows — drop malformed rows instead of sending them",
     expect(payload.insider).toHaveLength(1); // all valid -> untouched
     expect(dropped).toMatchObject({ refs: 1, spx: 1 });
     expect(dropped.insider).toBeUndefined();
+    expect(droppedReasons.refs).toBeDefined();
+    expect(Object.keys(droppedReasons.refs ?? {}).length).toBeGreaterThan(0);
+  });
+
+  it("forwards validated refs via parsed.data and keeps passthrough fields", () => {
+    // Zod passthrough keeps unknown keys at runtime; cast past the closed CongressRef shape.
+    const row = {
+      ticker: "AAPL",
+      isEtf: true,
+      country: "US",
+      futureField: "keep-me",
+    } as CongressRef & { futureField: string };
+    const { payload } = dropInvalidShareRows({
+      refs: [row],
+    });
+    expect(payload.refs).toEqual([
+      { ticker: "AAPL", isEtf: true, country: "US", futureField: "keep-me" },
+    ]);
+  });
+
+  it("aggregates Zod issue reasons with collapsed array indices (not per-element paths)", () => {
+    const badClose = { date: "not-a-date", close: 1 };
+    const { droppedReasons } = dropInvalidShareRows({
+      prices: [
+        { ticker: "AAA", closes: [badClose, { date: "2026-01-02", close: 2 }] },
+        { ticker: "BBB", closes: [{ date: "2026-01-01", close: 1 }, badClose] },
+      ],
+    });
+    const priceReasons = droppedReasons.prices ?? {};
+    const dateKeys = Object.keys(priceReasons).filter((k) => k.includes("date"));
+    expect(dateKeys).toHaveLength(1);
+    expect(dateKeys[0]).toMatch(/^closes\[\]\.date:/);
   });
 
   it("shareWithCongressTrade excludes invalid rows from the POST body and counts only what's sent", async () => {
@@ -159,7 +210,20 @@ describe("dropInvalidShareRows — drop malformed rows instead of sending them",
     const res = await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }, { ticker: "" }] });
     expect(res.ok).toBe(true);
     expect(res.sent.refs).toBe(1);
+    expect(res.dropped).toMatchObject({ refs: 1 });
+    expect(res.droppedTotal).toBe(1);
     expect(posted?.refs).toEqual([{ ticker: "AAPL" }]);
+  });
+
+  it("shareWithCongressTrade logs optional schemaVersion when present (tolerant reader)", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = congressTradeTestToken();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })));
+    const res = await shareWithCongressTrade({
+      schemaVersion: 3,
+      refs: [{ ticker: "AAPL" }]
+    });
+    expect(res.ok).toBe(true);
+    expect(res.schemaVersion).toBe(3);
   });
 
   // App A returns `{ ok: errors.length === 0, ...summary }` with HTTP 200, so a partial import is a
@@ -553,7 +617,7 @@ describe("shareWithCongressTrade", () => {
 // ── shareScanRefs (after-scan hook) ────────────────────────────────────────────────
 
 describe("shareScanRefs", () => {
-  const scan = { topCandidates: [{ symbol: "AAPL" }, { symbol: "MSFT" }] } as Parameters<typeof shareScanRefs>[0];
+  const scan = scanWithCandidates([{ symbol: "AAPL" }, { symbol: "MSFT" }]);
 
   it("is a no-op when automatic sharing is disabled", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok"; // token alone is not enough
@@ -890,16 +954,14 @@ describe("shareScanRefs — fundamentals + analyst", () => {
     process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "on"; // App A's #46 migration is live
     const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
-    const scan = {
-      topCandidates: [
-        {
-          symbol: "AAPL",
-          peRatio: 25,
-          analystRating: "Buy",
-          analystBySource: { fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } } }
-        }
-      ]
-    } as unknown as Parameters<typeof shareScanRefs>[0];
+    const scan = scanWithCandidates([
+      {
+        symbol: "AAPL",
+        peRatio: 25,
+        analystRating: "Buy",
+        analystBySource: { fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } } },
+      },
+    ]);
     const res = await shareScanRefs(scan);
     expect(res?.ok).toBe(true);
     const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
@@ -913,9 +975,14 @@ describe("shareScanRefs — fundamentals + analyst", () => {
     process.env.CONGRESS_SHARE_ENABLED = "on";
     const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
-    const scan = {
-      topCandidates: [{ symbol: "AAPL", peRatio: 25, analystRating: "Buy", analystBySource: { fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } } } }]
-    } as unknown as Parameters<typeof shareScanRefs>[0];
+    const scan = scanWithCandidates([
+      {
+        symbol: "AAPL",
+        peRatio: 25,
+        analystRating: "Buy",
+        analystBySource: { fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } } },
+      },
+    ]);
     const res = await shareScanRefs(scan);
     expect(res?.ok).toBe(true);
     const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
@@ -930,9 +997,14 @@ describe("shareScanRefs — fundamentals + analyst", () => {
     process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "off";
     const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
-    const scan = {
-      topCandidates: [{ symbol: "AAPL", peRatio: 25, analystRating: "Buy", analystBySource: { fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } } } }]
-    } as unknown as Parameters<typeof shareScanRefs>[0];
+    const scan = scanWithCandidates([
+      {
+        symbol: "AAPL",
+        peRatio: 25,
+        analystRating: "Buy",
+        analystBySource: { fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } } },
+      },
+    ]);
     const res = await shareScanRefs(scan);
     expect(res?.ok).toBe(true);
     const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);

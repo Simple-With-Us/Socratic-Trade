@@ -34,6 +34,23 @@
 **Verification.**  `npm run lint`, `npx tsc --noEmit`, `npm test`, `npm run build` — green locally; CI `verify` + `verify-hosted` SUCCESS on head `5b23cd2f` (run `37399054045`).
 
 **Next.**  PR #4217 MERGEABLE; wait `verify` green; Kody doc threads addressed.
+## 2026-10-05 CURSOR — Congress share schema drift (board bf84ffba, branch `gb-compiler/st-share-schemaversion`)
+## 2026-10-06 CURSOR — Congress share schema drift Kody round 2 (board bf84ffba, branch `gb-compiler/st-share-schemaversion`, PR https://github.com/Simple-With-Us/Socratic-Trade/pull/4220)
+## 2026-10-06 CURSOR — Congress share schema drift Kody round 4 (board bf84ffba, branch `gb-compiler/st-share-schemaversion`, PR #4220)
+
+**What.**  Rebased onto `origin/main`.  Kody round 4: unauth IP rate limits before audit on securities import + congress webhook; `dropInvalidShareRows` uses passthrough schemas + `parsed.data`; rollout verification records real `npm run build` PASS.
+
+**Verification.**  `npm run lint`; `npx tsc --noEmit`; targeted vitest (congress-share, securities-import, congress-trade-events) 136/136; `npm run build` exit 0.
+
+**Next.**  Push; FIXED + resolve three open Kody threads; CI `verify`.
+
+## 2026-10-06 CURSOR — Congress share schema drift Kody round 2 (board bf84ffba, branch `gb-compiler/st-share-schemaversion`, PR #4220)
+
+**What.**  Kody round 3: rate limits after auth on congress webhook + securities import; effort-log/STATUS use `#4220` refs only; rollout handoff headings normalized; `dropInvalidShareRows` forwards original rows; `OptionalSchemaVersionSchema` (Zod) for inbound/outbound `schemaVersion`; response schema accepts numeric echo; `CONGRESS_TRADE_TEST_TOKEN` in vitest for share tests.
+
+**Verification.**  `npm run lint`; `npx tsc --noEmit`; `npx vitest run test/securities-import.test.ts test/congress-trade-events.test.ts test/congress-share.test.ts`.
+
+**Next.**  Push; FIXED replies + resolve all open Kody threads; CI `verify`.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import type { PriceClose, PriceSeries, SecurityRefInput } from "@jaywedgeworth22/congress-trading-shared";
 import { audit } from "@/lib/db";
 import {
   getImportedCacheCounts,
@@ -9,6 +10,13 @@ import {
 } from "@/lib/db-securities-import";
 import { verifySecuritiesImportToken } from "@/lib/securities-import-auth";
 import { APP_B_ORIGIN } from "@/lib/congress-share";
+import {
+  PayloadTooLargeError,
+  readJsonWithLimit,
+  SECURITIES_IMPORT_MAX_BYTES
+} from "@/lib/bounded-body";
+import { enforceRateLimit, RATE_LIMITS, trustedCloudflareClientIp } from "@/lib/rate-limit";
+import { SecuritiesImportPayloadSchema } from "@/lib/securities-import-schema";
 
 export const dynamic = "force-dynamic";
 
@@ -37,36 +45,75 @@ export const dynamic = "force-dynamic";
 // Body (all optional): { refs?, prices?, spx?, insider?, shortVolume?, fundamentals?, analyst?, origin? }
 // — the same shape as App B's outbound push (only refs/prices/spx are stored inbound).
 export async function POST(req: Request) {
+  const clientIp = trustedCloudflareClientIp(req);
+  if (!clientIp) {
+    return NextResponse.json({ ok: false, error: "missing or invalid client ip" }, { status: 400 });
+  }
+
   if (!verifySecuritiesImportToken(req)) {
+    const unauthLimited = enforceRateLimit(
+      clientIp,
+      "admin/securities/import:unauth",
+      RATE_LIMITS.securitiesImportUnauth
+    );
+    if (unauthLimited) return unauthLimited;
     audit("securities_import_rejected", { reason: "token" });
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
-  let body: unknown;
+  const limited = enforceRateLimit(
+    clientIp,
+    "admin/securities/import",
+    RATE_LIMITS.securitiesImport
+  );
+  if (limited) return limited;
+
+  let rawBody: unknown;
   try {
-    body = await req.json();
-  } catch {
+    rawBody = await readJsonWithLimit(req, SECURITIES_IMPORT_MAX_BYTES);
+  } catch (err) {
+    if (err instanceof PayloadTooLargeError) {
+      return NextResponse.json({ ok: false, error: "payload too large" }, { status: 413 });
+    }
     return NextResponse.json({ ok: false, error: "invalid JSON body" }, { status: 400 });
   }
-  const rec = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+
+  const parsed = SecuritiesImportPayloadSchema.safeParse(rawBody);
+  if (!parsed.success) {
+    audit("securities_import_rejected", { reason: "invalid_payload" });
+    return NextResponse.json({ ok: false, error: "invalid payload" }, { status: 400 });
+  }
+  const body = parsed.data;
+
+  const schemaVersion = body.schemaVersion;
+  if (schemaVersion !== undefined) {
+    console.info(`[securities-import] inbound payload schemaVersion=${String(schemaVersion)}`);
+  }
 
   // No-echo guard: never re-store rows we originated.
-  const origin = typeof rec.origin === "string" && rec.origin.trim() ? rec.origin.trim() : "app-a";
+  const origin = body.origin?.trim() ? body.origin.trim() : "app-a";
   if (origin === APP_B_ORIGIN) {
-    return NextResponse.json({ ok: true, skipped: true, reason: "own-origin", refs: 0, pricedTickers: 0, priceRows: 0, spxRows: 0 });
+    return NextResponse.json({
+      ok: true,
+      skipped: true,
+      reason: "own-origin",
+      refs: 0,
+      pricedTickers: 0,
+      priceRows: 0,
+      spxRows: 0,
+      ...(schemaVersion !== undefined ? { schemaVersion } : {})
+    });
   }
 
   try {
-    const refs = coerceRefs(rec.refs);
-    const prices = coercePrices(rec.prices);
-    const spx = coerceCloses(rec.spx);
+    const refs = mapRefs(body.refs);
+    const prices = mapPrices(body.prices);
+    const spx = mapCloses(body.spx);
 
-    // Explicitly acknowledge any non-persisted datasets that arrived, so nothing is silently
-    // discarded (see the directional-asymmetry note in the file header).
     const acceptedNotPersisted: Record<string, number> = {};
     for (const key of ["insider", "shortVolume", "fundamentals", "analyst"] as const) {
-      const arr = rec[key];
-      if (Array.isArray(arr) && arr.length > 0) acceptedNotPersisted[key] = arr.length;
+      const arr = body[key];
+      if (arr && arr.length > 0) acceptedNotPersisted[key] = arr.length;
     }
 
     const result = persistSecuritiesImport({ refs, prices, spx }, origin);
@@ -76,6 +123,7 @@ export async function POST(req: Request) {
       origin,
       ...result,
       totals: getImportedCacheCounts(),
+      ...(schemaVersion !== undefined ? { schemaVersion } : {}),
       ...(Object.keys(acceptedNotPersisted).length > 0
         ? {
             acceptedNotPersisted,
@@ -89,61 +137,39 @@ export async function POST(req: Request) {
   }
 }
 
-// ── Tolerant coercion (extra keys ignored; bad rows dropped; never throws on shape) ──
-
-function str(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-function num(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+function nullableStr(value: string | null | undefined): string | undefined {
+  const trimmed = (value ?? "").trim();
+  return trimmed ? trimmed : undefined;
 }
 
-function coerceRefs(value: unknown): ImportedRefInput[] {
-  if (!Array.isArray(value)) return [];
-  const out: ImportedRefInput[] = [];
-  for (const raw of value) {
-    if (!raw || typeof raw !== "object") continue;
-    const r = raw as Record<string, unknown>;
-    const ticker = str(r.ticker);
-    if (!ticker) continue;
-    out.push({
-      ticker,
-      companyName: str(r.companyName),
-      sector: str(r.sector),
-      industry: str(r.industry),
-      assetClass: str(r.assetClass),
-      exchange: str(r.exchange) ?? str(r.exchangeShort),
-      currency: str(r.currency),
-      marketCap: num(r.marketCap),
-      cik: str(r.cik)
-    });
-  }
-  return out;
+function mapRefs(rows: SecurityRefInput[] | undefined): ImportedRefInput[] | undefined {
+  if (!rows?.length) return undefined;
+  return rows.map((r) => ({
+    ticker: r.ticker,
+    companyName: nullableStr(r.companyName),
+    sector: nullableStr(r.sector),
+    industry: nullableStr(r.industry),
+    assetClass: nullableStr(r.assetClass),
+    exchange: nullableStr(r.exchange) ?? nullableStr(r.exchangeShort),
+    currency: nullableStr(r.currency),
+    marketCap: r.marketCap ?? undefined,
+    cik: nullableStr(r.cik),
+  }));
 }
 
-function coerceCloses(value: unknown): ImportedCloseInput[] {
-  if (!Array.isArray(value)) return [];
-  const out: ImportedCloseInput[] = [];
-  for (const raw of value) {
-    if (!raw || typeof raw !== "object") continue;
-    const c = raw as Record<string, unknown>;
-    const date = str(c.date);
-    const close = num(c.close);
-    if (!date || close === undefined) continue;
-    out.push({ date, close, volume: num(c.volume) });
-  }
-  return out;
+function mapCloses(rows: PriceClose[] | undefined): ImportedCloseInput[] | undefined {
+  if (!rows?.length) return undefined;
+  return rows.map((c) => ({
+    date: c.date,
+    close: c.close,
+    volume: c.volume ?? undefined,
+  }));
 }
 
-function coercePrices(value: unknown): ImportedPriceInput[] {
-  if (!Array.isArray(value)) return [];
-  const out: ImportedPriceInput[] = [];
-  for (const raw of value) {
-    if (!raw || typeof raw !== "object") continue;
-    const p = raw as Record<string, unknown>;
-    const ticker = str(p.ticker);
-    if (!ticker) continue;
-    out.push({ ticker, closes: coerceCloses(p.closes) });
-  }
-  return out;
+function mapPrices(rows: PriceSeries[] | undefined): ImportedPriceInput[] | undefined {
+  if (!rows?.length) return undefined;
+  return rows.map((p) => ({
+    ticker: p.ticker,
+    closes: mapCloses(p.closes) ?? [],
+  }));
 }
