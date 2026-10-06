@@ -89,6 +89,13 @@
 **Verification.**  `bash -n` on three scripts.
 
 **Next.**  Push; reply on Kody threads; do not merge.
+## 2026-10-05 CURSOR — App-stall failures must not auto-halt Autopilot (branch `cursor/stall-halt-streak-exempt-d19f`)
+
+**What.**  The run-failure watchdog counted event-loop stalls and mid-run restarts toward `ST_RUN_FAILURE_HALT_AFTER`.  On 2026-10-01 RTH that auto-halted Alpaca Paper and Tradier Sandbox after 10–12 stall failures.  Those runs still alert and back off.  They no longer advance the auto-halt streak.  Broker HTTP failures and LLM/provider failures still do.  Trading liveness reports both counts.  The stale-run sweep stamps `haltExempt: true` on both `process_restarted_mid_run` and `stalled_no_progress`.
+
+**Verification.**  Targeted vitest green (`test/run-failure-watchdog.test.ts`, `test/trading-liveness.test.ts`, `test/stale-running-runs.test.ts`).  Full gate recorded in the rollout note.
+
+**Next.**  PR only.  Do not merge.  Do not Coolify Deploy.  Extra-ship no.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
