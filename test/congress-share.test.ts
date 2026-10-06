@@ -172,7 +172,7 @@ describe("dropInvalidShareRows — drop malformed rows instead of sending them",
     const res = await shareWithCongressTrade({
       schemaVersion: 3,
       refs: [{ ticker: "AAPL" }]
-    } as Parameters<typeof shareWithCongressTrade>[0]);
+    });
     expect(res.ok).toBe(true);
     expect(res.schemaVersion).toBe(3);
   });

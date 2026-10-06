@@ -14,19 +14,15 @@ import {
   readJsonWithLimit,
   SECURITIES_IMPORT_MAX_BYTES
 } from "@/lib/bounded-body";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
+import { enforceRateLimit, RATE_LIMITS, trustedCloudflareClientIp } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
-function inboundClientIp(req: Request): string {
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) return xff.split(",")[0]?.trim() || "unknown-ip";
-  return req.headers.get("cf-connecting-ip")?.trim() || req.headers.get("x-real-ip")?.trim() || "unknown-ip";
-}
-
 function readOptionalSchemaVersion(rec: Record<string, unknown>): string | number | undefined {
   const raw = rec.schemaVersion;
-  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  if (typeof raw === "string" && raw.trim()) {
+    return raw.trim().replace(/[\r\n\t]/g, " ").slice(0, 64);
+  }
   if (typeof raw === "number" && Number.isFinite(raw)) return raw;
   return undefined;
 }
@@ -57,7 +53,7 @@ function readOptionalSchemaVersion(rec: Record<string, unknown>): string | numbe
 // — the same shape as App B's outbound push (only refs/prices/spx are stored inbound).
 export async function POST(req: Request) {
   const limited = enforceRateLimit(
-    inboundClientIp(req),
+    trustedCloudflareClientIp(req),
     "admin/securities/import",
     RATE_LIMITS.securitiesImport
   );

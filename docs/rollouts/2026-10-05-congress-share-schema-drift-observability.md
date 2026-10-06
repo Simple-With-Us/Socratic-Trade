@@ -43,8 +43,8 @@ Files:
 ```bash
 npm run lint
 npx tsc --noEmit
-npm test -- test/congress-share.test.ts test/securities-import.test.ts test/congress-trade-events.test.ts test/bounded-body.test.ts
-npm run build
+npm test
+npm run build  # PASS
 ```
 
 ## 5. Next Steps & Blockers
@@ -54,4 +54,6 @@ npm run build
 
 ## 6. Zero-Code Findings
 
-N/A — code changed.
+Shared-schema drift should be surfaced with per-stream drop counts and aggregate validation reasons so outbound coverage loss is diagnosable instead of silent.
+
+`recall contribute "Shared-schema drift should be surfaced with per-stream drop counts and aggregate validation reasons so outbound coverage loss is diagnosable instead of silent." --category lesson --app socratic-trade`

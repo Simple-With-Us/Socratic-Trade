@@ -519,6 +519,8 @@ export type CongressAnalyst = AnalystRow;
  */
 export type CongressSharePayload = Omit<SharePayload, "refs"> & {
   refs?: CongressRef[];
+  /** Optional envelope field from a future shared-package schemaVersion (tolerant reader). */
+  schemaVersion?: string | number;
 };
 
 export interface CongressShareResult {
@@ -790,8 +792,10 @@ function zodIssueLabel(issue: { path: PropertyKey[]; code: string }): string {
 }
 
 function readOptionalSchemaVersion(payload: CongressSharePayload): string | number | undefined {
-  const raw = (payload as Record<string, unknown>).schemaVersion;
-  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  const raw = payload.schemaVersion;
+  if (typeof raw === "string" && raw.trim()) {
+    return raw.trim().replace(/[\r\n\t]/g, " ").slice(0, 64);
+  }
   if (typeof raw === "number" && Number.isFinite(raw)) return raw;
   return undefined;
 }

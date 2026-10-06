@@ -117,6 +117,11 @@ export function rateLimit(key: string, options: RateLimitOptions, now: number = 
   }
 }
 
+/** Production is Cloudflare-fronted; only the overwritten connecting-IP header is a trusted client address. */
+export function trustedCloudflareClientIp(req: Request): string {
+  return req.headers.get("cf-connecting-ip")?.trim() || "unknown-ip";
+}
+
 /** Sensible defaults for the route classes we guard. Override per-route as needed. */
 export const RATE_LIMITS = {
   /** OAuth start/callback: a handful per minute is plenty for an interactive login dance. */
@@ -139,8 +144,8 @@ export const RATE_LIMITS = {
   peerRead: { limit: 120, windowMs: 60_000 },
   /** Inbound congress.trade webhook pushes (App A -> App B). */
   congressWebhook: { limit: 120, windowMs: 60_000 },
-  /** Inbound congress.trade securities gap-fill import (App A -> App B). */
-  securitiesImport: { limit: 60, windowMs: 60_000 }
+  /** Inbound congress.trade securities gap-fill import (App A -> App B; ~130+ chunked POSTs/nightly). */
+  securitiesImport: { limit: 600, windowMs: 60_000 }
 } as const satisfies Record<string, RateLimitOptions>;
 
 /**

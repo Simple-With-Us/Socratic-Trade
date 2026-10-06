@@ -5,15 +5,9 @@ import { applyCongressEvent, applyCongressEvents, type CongressEvent } from "@/l
 import { verifyCongressWebhookSignature } from "@jaywedgeworth22/congress-trading-shared";
 import { logApiHealth } from "@/lib/db-health";
 import { CONGRESS_WEBHOOK_MAX_BYTES, PayloadTooLargeError, readBodyWithLimit } from "@/lib/bounded-body";
-import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
+import { enforceRateLimit, RATE_LIMITS, trustedCloudflareClientIp } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
-
-function webhookClientIp(req: Request): string {
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) return xff.split(",")[0]?.trim() || "unknown-ip";
-  return req.headers.get("cf-connecting-ip")?.trim() || req.headers.get("x-real-ip")?.trim() || "unknown-ip";
-}
 
 // Inbound receiver for congress.trade (App A) push events (see docs/push-to-app-b.md).
 // Auth: a shared secret (CONGRESS_WEBHOOK_SECRET) verified via HMAC SHA256 (X-Signature),
@@ -35,7 +29,11 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
-  const limited = enforceRateLimit(webhookClientIp(req), "webhooks/congress", RATE_LIMITS.congressWebhook);
+  const limited = enforceRateLimit(
+    trustedCloudflareClientIp(req),
+    "webhooks/congress",
+    RATE_LIMITS.congressWebhook
+  );
   if (limited) return limited;
 
   const hasSignature = req.headers.has("x-signature");
