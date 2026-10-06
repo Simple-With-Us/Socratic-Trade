@@ -98,6 +98,7 @@
 
 **Next.**  Owner squash merge when `verify` + Kody green and `mergeable` not CONFLICTING/BEHIND.  No `--admin` merge.  Do not arm auto-merge on this PR (self-edit bootstrap).
 **Verification.**  PR base `main` @ `494576fc` (2026-10-06).  Head OID `HEAD_OID_PLACEHOLDER`.  Local gate (this commit): `npm run lint` exit 0; `npx tsc --noEmit` exit 0; `npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-gate.test.ts` 14/14; `npm run build` exit 0.  Authoritative merge gate: CI `verify` + `gitleaks` on the same head OID.
+**Verification.**  PR base `main` @ `494576fc` (2026-10-06).  Head OID `ad288f03`.  Local gate (on `0c2a861d` code commit): `npm run lint` exit 0; `npx tsc --noEmit` exit 0; `npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-gate.test.ts` 14/14; `npm run build` exit 0.  Authoritative merge gate: CI `verify` + `gitleaks` on PR head.
 
 **Next.**  Owner squash merge when `verify` green, Kody threads resolved, and `mergeable` not CONFLICTING/BEHIND.  No auto-merge arm on this PR (money-path / self-edit).  No `--admin` merge.
 
