@@ -91,12 +91,13 @@
 **Next.**  Push; reply on Kody threads; do not merge.
 ## 2026-10-05 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, branch `cursor/automerge-money-path-gate-2ac4`)
 ## 2026-10-05 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, branch `cursor/automerge-money-path-gate-2ac4`, PR #4221)
+## 2026-10-06 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, PR #4221, branch `cursor/automerge-money-path-gate-2ac4`)
 
-**What.**  `auto-merge-prs.yml` no longer arms merge when the PR diff touches any `.github/CODEOWNERS` trading-execution path; adds `disable-on-protected` and treats `needs-human-merge` like `do-not-automerge`.  Classifier uses shallow checkout + GitHub Compare/Contents APIs (no full clone).  Kody follow-up: basename-anywhere matching, `CODEOWNERS_FILE` tests, Fleet recall evidence in rollout.
+**What.**  `auto-merge-prs.yml` money-path classifier: paginated compare file list and fail-closed on empty compare results or Contents API errors (404-only => empty CODEOWNERS).  Docs: single `318bfe710b794c28` effort row; rollout Fleet contrib narrowed to slash-less basename nugget.  Kody threads UtHk/UtJr/UtMN/UtOl addressed; Sc5X left open per Jay defer.
 
-**Verification.**  PR base `main` @ `494576fc` (2026-10-06).  Head OID updated on push.  Local: `npm run lint` exit 0; `npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-gate.test.ts` 14/14.  CI `verify` + `gitleaks` authoritative on PR head.
+**Verification.**  `npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-gate.test.ts` on push.  CI `verify` authoritative.
 
-**Next.**  Owner squash when green; Rule 24 defer may block ruleset until Jay accepts.  No auto-merge on this PR.
+**Next.**  Jay squash when green; no workflow auto-merge on this PR; Sc5X unresolved.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

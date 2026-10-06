@@ -38,6 +38,12 @@ npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-g
 
 PR tip `4834b6bc` (2026-10-06): Kody follow-up — anchored vs unanchored CODEOWNERS matching, pattern normalization in `load_patterns`, `CODEOWNERS_FILE` exercised in vitest.
 
+```bash
+npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-gate.test.ts
+```
+
+2026-10-06 Kody UtHk/UtJr: compare `--paginate` without swallowed `gh` failures; empty file list fail-closed; CODEOWNERS Contents API fail-closed except 404.
+
 Full-repo `npm test` on the cloud VM may report unrelated failures; CI `verify` is authoritative for merge.
 
 ## Next Steps & Blockers
@@ -61,6 +67,6 @@ Full-repo `npm test` on the cloud VM may report unrelated failures; CI `verify` 
 | Rollout **`docs/rollouts/2026-08-10-always-auto-merge-prs.md`** | Owner policy: arm every non-draft PR when token present |
 | Board **`bdc2b662`** / **KIMI** | Ruleset lacked required reviews on money paths — still optional follow-up |
 
-**Contributed** (category `lesson`, app `socratic-trade`, seat CURSOR): auto-merge gate uses merge-base diff scope (GitHub `base...head` compare API in CI), base-pinned CODEOWNERS via Contents API, slash-less basename matching, and self-edit skip for gate files.
+**Contributed** (category `lesson`, app `socratic-trade`, seat CURSOR): CODEOWNERS path patterns without a leading slash match that basename anywhere in the changed path (not only repo-root segments).
 
 **Rule 81 (manual bypass):** this PR does **not** claim to block every merge path — only the workflow's auto-arm step.  Until ruleset required CODEOWNERS reviews land (board `318bfe71` option 2), money-path PRs rely on human squash + `do-not-automerge` / `needs-human-merge`; out of scope for this diff.
