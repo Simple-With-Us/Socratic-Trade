@@ -24,13 +24,15 @@ Raising the floor to `max(halt streak, current raw streak)` does not fix a run t
 
 ## Verification State
 
-Targeted vitest on the working tree (prior to this note's commit):
+On `0fa100ea` (PR #4259):
 
 ```bash
+npm run lint
+npx tsc --noEmit
 npx vitest run test/run-failure-watchdog.test.ts test/trading-liveness.test.ts --testTimeout=20000
 ```
 
-2 files, 26 passed.  Lint, `npx tsc --noEmit`, the full suite, and `npm run build` are recorded in the follow-up commit if they differ from this line.
+`npm run lint` exited 0 (0 errors, 863 grandfathered warnings).  `npx tsc --noEmit` exited 0.  Targeted vitest: 2 files, 26 passed.  Full `npm test` and `npm run build` follow on this head; CI `verify` is the merge gate.
 
 ## Next Steps & Blockers
 
