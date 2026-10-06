@@ -95,7 +95,7 @@
 
 **Verification.**  Touched files: `npm run lint` 0 errors; `npx tsc --noEmit` clean.  CI `verify` then runs full `npm test` and `npm run build` (no "Attempted import error", no Edge `Module not found` for `@sentry/node`).
 
-**Next.**  Rebased onto `origin/main`.  Wait for `verify` CI on this tip.
+**Next.**  Tip `608ae672` rebased onto `origin/main` with `--force-with-lease`.  Wait for `verify` CI; unresolved Kody defer threads (Mac live ledger, agent-sync claim) block auto-merge until Jay or a Mac seat clears them.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

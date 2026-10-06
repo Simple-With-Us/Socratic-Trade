@@ -27,6 +27,8 @@ Files touched:
 
 ## Verification State
 
+2026-10-06 rebase onto `origin/main` (`608ae672`, `--force-with-lease`; prior tip `785c1e70`).  GitHub `verify` + `verify-hosted` green on `608ae672`.  Fleet recall query `Sentry Next.js webpackIgnore @sentry/node Edge bundle` (app `socratic-trade`) cited on `docs/EFFORT-LOG.md` row.
+
 ```bash
 npm run lint          # touched files, 0 errors
 npx tsc --noEmit      # clean
