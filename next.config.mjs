@@ -7,6 +7,7 @@ import { withSentryConfig } from "@sentry/nextjs/config";
 
 const require = createRequire(import.meta.url);
 const webpack = require("webpack");
+const { sentryBuildRelease } = require("./scripts/sentry-build-release.cjs");
 
 dns.setDefaultResultOrder("ipv4first");
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -139,6 +140,7 @@ export default withSentryConfig(nextConfig, {
   project: process.env.SENTRY_PROJECT || "socratic-trade",
 
   authToken: process.env.SENTRY_AUTH_TOKEN,
+  release: { name: sentryBuildRelease() },
 
   // Only print logs for uploading source maps in CI
   silent: !process.env.CI,
