@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-06 CURSOR — Autopilot re-arm streak (branch `cursor/autopilot-rearm-streak-38d0`)
+
+**What.**  Re-arming an account was undone within seconds because the run-failure watchdog's `lastHaltStreak` floor was the streak at halt time.  A strategy run already in flight could fail after the re-arm, push the raw streak one past that floor, and auto-halt again.  The watchdog now counts only runs whose `started_at` is strictly after the re-arm receipt.  The same window feeds `/api/health` `tradingLiveness.maxConsecutiveFailedRuns`.  Genuine new failures still halt at the existing threshold.  Sentry SOCRATIC-TRADE-2R and 2T and PagerDuty #322 stay open until a clean completed run.
+
+**Left alone.**  No account was re-armed.  No trading cap or limit changed.  No production host or Mac access.
+
+**Docs.**  `docs/rollouts/2026-10-06-rearm-failure-streak.md`, `PLAN.md`, `docs/EFFORT-LOG.md`, `docs/runbooks/uptime-health-json-monitors.md`, pointer on `docs/rollouts/2026-09-30-self-healing-watchdogs.md`.
+
+**Verification.**  `npm run lint` exit 0 (0 errors).  `npx tsc --noEmit` exit 0.  Watchdog + liveness vitest 26 passed.  Health monitor tests 12 passed.  `npm run build` exit 0.  Full `npm test`: 9097 passed, 11 failed in unrelated files on this seat (notify env, Node 22 `.ts` ops script).  CI `verify` is the merge gate.
+
+**Next.**  PR https://github.com/Simple-With-Us/Socratic-Trade/pull/4259.  Merge only when `verify` is green and review is clear.  Do not force-merge.
+
 ## 2026-10-05 CURSOR — marketCap coverage + catalog (branch `cursor/marketcap-coverage-catalog-62d9`)
 
 **What.**  Board `2c62f3fde01447a7`: add `marketCap` to `COVERAGE_TRACKED_FIELDS` and `CATALOG_FIELDS` for score-factor observability.

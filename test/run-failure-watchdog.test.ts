@@ -206,22 +206,115 @@ describe("runFailureWatchdogTick", () => {
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
   });
 
-  it("re-halts after re-arm only when NEW failures grow the streak", async () => {
+  it("does not halt when a run in flight at re-arm later fails", async () => {
     await addFailedRuns(5);
     const w = await watchdog();
-    await w.runFailureWatchdogTick();
     const d = await db();
+    await w.runFailureWatchdogTick();
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("halted");
-    // Owner re-arms; the old 5-failure streak is still in the DB.
+
+    const inflightId = randomUUID();
+    d.getDb()
+      .prepare(
+        `INSERT INTO strategy_runs (id, user_id, connected_account_id, account_number, started_at, status, summary)
+         VALUES (?, ?, ?, ?, ?, 'running', ?)`
+      )
+      .run(inflightId, USER, ACCT, "WD1", new Date(Date.now() - 120_000).toISOString(), "still running");
+
+    d.setPolicy({ ...d.getPolicy(USER, ACCT), systemState: "active" }, USER, ACCT);
+    notifyMock.sendNotification.mockClear();
+    await w.runFailureWatchdogTick();
+    const rearmAudit = d
+      .getDb()
+      .prepare(
+        `SELECT created_at FROM audit_events
+         WHERE user_id = ? AND connected_account_id = ? AND kind = 'policy_change'
+         ORDER BY created_at DESC LIMIT 1`
+      )
+      .get(USER, ACCT) as { created_at: string };
+    const saved = d.getInternalSetting<{ rearmedAt?: string }>(`runFailureWatch:${USER}:${ACCT}`);
+    expect(saved?.rearmedAt).toBe(rearmAudit.created_at);
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
+    expect(w.getRunFailureHaltMarker(USER, ACCT)).toBeNull();
+    expect(w.isRunBackedOff(USER, ACCT)).toBe(false);
+    expect(notifyMock.sendNotification).not.toHaveBeenCalled();
+
+    d.finishStrategyRun(inflightId, "failed", "in flight at re-arm", USER);
+    await w.runFailureWatchdogTick();
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
+    expect(w.getRunFailureHaltMarker(USER, ACCT)).toBeNull();
+
+    const liveness = await import("../src/lib/trading-liveness");
+    const summary = liveness.getTradingLivenessSummary();
+    const row = summary?.accounts.find((a) => a.connectedAccountId === ACCT);
+    expect(row?.consecutiveFailedRuns).toBe(0);
+    expect(liveness.toPublicTradingLiveness(summary).maxConsecutiveFailedRuns).toBe(0);
+  });
+
+  it("does not halt on re-arm when an in-flight run already failed and raised the raw streak", async () => {
+    await addFailedRuns(5);
+    const w = await watchdog();
+    const d = await db();
+    await w.runFailureWatchdogTick();
+    const inflightId = randomUUID();
+    d.getDb()
+      .prepare(
+        `INSERT INTO strategy_runs (id, user_id, connected_account_id, account_number, started_at, status, summary)
+         VALUES (?, ?, ?, ?, ?, 'running', ?)`
+      )
+      .run(inflightId, USER, ACCT, "WD1", new Date(Date.now() - 120_000).toISOString(), "started before halt");
+    d.finishStrategyRun(inflightId, "failed", "failed before re-arm", USER);
     d.setPolicy({ ...d.getPolicy(USER, ACCT), systemState: "active" }, USER, ACCT);
     await w.runFailureWatchdogTick();
-    expect(d.peekPolicy(USER, ACCT).systemState).toBe("active"); // not instantly undone
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
     expect(w.getRunFailureHaltMarker(USER, ACCT)).toBeNull();
-    // One more failure grows the streak to 6 > halt-time floor 5 -> re-halt.
+    const liveness = await import("../src/lib/trading-liveness");
+    const row = liveness.getTradingLivenessSummary()?.accounts.find((a) => a.connectedAccountId === ACCT);
+    expect(row?.consecutiveFailedRuns).toBe(0);
+  });
+
+  it("halts after N new failures that started after re-arm", async () => {
+    await addFailedRuns(5);
+    const w = await watchdog();
+    const d = await db();
+    await w.runFailureWatchdogTick();
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("halted");
+    d.setPolicy({ ...d.getPolicy(USER, ACCT), systemState: "active" }, USER, ACCT);
+    await w.runFailureWatchdogTick();
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
+
+    // Halt threshold in this file is 5.  Four post-re-arm failures stay armed.
+    await addFailedRuns(4);
+    await w.runFailureWatchdogTick();
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
+    const liveness = await import("../src/lib/trading-liveness");
+    const mid = liveness.getTradingLivenessSummary()?.accounts.find((a) => a.connectedAccountId === ACCT);
+    expect(mid?.consecutiveFailedRuns).toBe(4);
+
     await addFailedRuns(1);
     await w.runFailureWatchdogTick();
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("halted");
-    expect(w.getRunFailureHaltMarker(USER, ACCT)).not.toBeNull();
+    expect(w.getRunFailureHaltMarker(USER, ACCT)?.consecutiveFailures).toBe(5);
+  });
+
+  it("resets the streak when a run that started after re-arm succeeds", async () => {
+    await addFailedRuns(5);
+    const w = await watchdog();
+    const d = await db();
+    await w.runFailureWatchdogTick();
+    d.setPolicy({ ...d.getPolicy(USER, ACCT), systemState: "active" }, USER, ACCT);
+    await w.runFailureWatchdogTick();
+    await addCompletedRun();
+    await w.runFailureWatchdogTick();
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
+    expect(w.isRunBackedOff(USER, ACCT)).toBe(false);
+
+    await addFailedRuns(1);
+    await w.runFailureWatchdogTick();
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
+    const liveness = await import("../src/lib/trading-liveness");
+    const row = liveness.getTradingLivenessSummary()?.accounts.find((a) => a.connectedAccountId === ACCT);
+    expect(row?.consecutiveFailedRuns).toBe(1);
   });
 
   it("never touches an account that is not active", async () => {
