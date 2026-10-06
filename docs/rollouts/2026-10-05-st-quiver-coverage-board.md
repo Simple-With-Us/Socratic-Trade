@@ -2,7 +2,7 @@
 
 ## Context & Objective
 
-QuiverQuant direct access is retired and the provider is never registered, but five `*Quiver` carrier fields stayed in `COVERAGE_TRACKED_FIELDS`, pinning ~12% of the enrichment coverage board at zero and training operators to ignore the page.  Board item `d550b5ee` (P1).
+QuiverQuant direct access is retired and the provider is never registered, but five `*Quiver` carrier fields stayed in `COVERAGE_TRACKED_FIELDS`, pinning ~12% of the enrichment coverage board at zero and training operators to ignore the page.  Board item `d550b5ee` (P1); tracked as GitHub #4217 (PR).
 
 ## Changes Made
 
@@ -44,4 +44,4 @@ Rebased onto `origin/main` (`4a0f1ca0` area); resolved `test/enrichment-coverage
 
 ## Zero-Code Findings
 
-N/A — code change.
+Fleet recall search (`coverage dashboards retired providers`, app `socratic-trade`) had no exact lesson on coverage-board retirement; closest hits were retired-provider telemetry cleanup rollouts.  Contributed lesson (category `lesson`, app `socratic-trade`, seat `CURSOR`): coverage dashboards should track only fields backed by active providers and keep retired-provider carriers in metadata (e.g. `COVERAGE_RETIRED_LANE_FIELDS`) instead of zero-valued active tracked fields, so inactive integrations do not distort completeness metrics.
