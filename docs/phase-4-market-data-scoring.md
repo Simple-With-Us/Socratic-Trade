@@ -277,7 +277,9 @@ enrichment checklist (`SymbolEnrichment` → `EnrichmentSourcedField` → `takeS
 - **Enrichment coverage report** — after each cascade run, Admin → Enrichment Coverage
   (`/admin/enrichment-coverage`), `/api/admin/enrichment-coverage`, and ops snapshot
   `enrichmentCoverage` show per-field fill rate, winning/most-frequent source, missing
-  fields, and provider failures. `applyEnrichment` preserves `fieldObservations` /
+  fields, and provider failures.  Reports persist in SQLite (`enrichment_coverage_runs` /
+  `enrichment_coverage_fields`, migration 94) so redeploys still serve the last run until
+  the next enrich. `applyEnrichment` preserves `fieldObservations` /
   `providerFailures` on `MarketQuote`.
 
 See `docs/rollouts/2026-07-01-data-sources-breadth.md`,
