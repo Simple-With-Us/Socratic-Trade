@@ -169,6 +169,15 @@ describe("dropInvalidShareRows — drop malformed rows instead of sending them",
     expect(Object.keys(droppedReasons.refs ?? {}).length).toBeGreaterThan(0);
   });
 
+  it("forwards validated refs via parsed.data and keeps passthrough fields", () => {
+    const { payload } = dropInvalidShareRows({
+      refs: [{ ticker: "AAPL", isEtf: true, country: "US", futureField: "keep-me" }],
+    });
+    expect(payload.refs).toEqual([
+      { ticker: "AAPL", isEtf: true, country: "US", futureField: "keep-me" },
+    ]);
+  });
+
   it("aggregates Zod issue reasons with collapsed array indices (not per-element paths)", () => {
     const badClose = { date: "not-a-date", close: 1 };
     const { droppedReasons } = dropInvalidShareRows({

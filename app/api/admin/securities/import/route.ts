@@ -46,6 +46,12 @@ export const dynamic = "force-dynamic";
 // — the same shape as App B's outbound push (only refs/prices/spx are stored inbound).
 export async function POST(req: Request) {
   if (!verifySecuritiesImportToken(req)) {
+    const unauthLimited = enforceRateLimit(
+      trustedCloudflareClientIp(req),
+      "admin/securities/import:unauth",
+      RATE_LIMITS.securitiesImportUnauth
+    );
+    if (unauthLimited) return unauthLimited;
     audit("securities_import_rejected", { reason: "token" });
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }

@@ -55,6 +55,12 @@ export async function POST(req: Request) {
     (hasSignature && await verifyCongressWebhookSignature(text, signatureHeader, expectedSecret));
 
   if (!isValid) {
+    const unauthLimited = enforceRateLimit(
+      trustedCloudflareClientIp(req),
+      "webhooks/congress:unauth",
+      RATE_LIMITS.congressWebhookUnauth
+    );
+    if (unauthLimited) return unauthLimited;
     audit("congress_webhook_rejected", { reason: "signature" });
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }

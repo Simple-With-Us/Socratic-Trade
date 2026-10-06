@@ -72,6 +72,17 @@ import { logWarn } from "./sentry-metrics";
 import { readOptionalSchemaVersionField } from "./schema-version";
 import { z, type ZodType } from "zod";
 
+/** Passthrough row schemas so validated outbound rows keep forward-compat / App-B-only fields. */
+const ShareSecurityRefRowSchema: ZodType<CongressRef> =
+  SecurityRefInputSchema.passthrough() as ZodType<CongressRef>;
+const SharePriceSeriesRowSchema: ZodType<PriceSeries> = PriceSeriesSchema.passthrough();
+const SharePriceCloseRowSchema: ZodType<PriceClose> = PriceCloseSchema.passthrough();
+const ShareInsiderRowSchema: ZodType<InsiderRow> = InsiderRowSchema.passthrough();
+const ShareShortVolumeRowSchema: ZodType<ShortVolumeRow> = ShortVolumeRowSchema.passthrough();
+const ShareFundamentalRowSchema: ZodType<FundamentalRow> = FundamentalRowSchema.passthrough();
+const ShareAnalystRowSchema: ZodType<AnalystRow> = AnalystRowSchema.passthrough();
+const ShareTradeEventRowSchema = TradeEventRowSchema.passthrough();
+
 /** Strict upstream import response from App A (HTTP 2xx body). */
 const CongressImportResponseSchema = z
   .object({
@@ -869,21 +880,21 @@ function shareDropReceipt(report: ShareRowsDropReport, schemaVersion?: string | 
  * Validate each dataset's rows against the shared row schemas and DROP any that fail, so malformed
  * data never reaches App A's import endpoint. Validation is PER-ROW (not whole-payload) so one bad
  * row never suppresses the valid rows in the same dataset — and it filters, rather than logs-and-sends
- * as the old code did. Rows that pass are returned as Zod-parsed data so only validated fields
- * cross the trust boundary.
+ * as the old code did. Rows that pass are returned as Zod-validated `parsed.data` (passthrough schemas
+ * keep forward-compat fields) so only validated shapes cross the trust boundary.
  * Returns the filtered payload plus per-dataset dropped counts and aggregated Zod issue reasons.
  */
 export function dropInvalidShareRows(payload: CongressSharePayload): ShareRowsDropReport {
   const dropped: Record<string, number> = {};
   const droppedReasons: Record<string, Record<string, number>> = {};
-  const filterRows = <T>(rows: T[] | undefined, schema: ZodType, key: string): T[] | undefined => {
+  const filterRows = <T>(rows: T[] | undefined, schema: ZodType<T>, key: string): T[] | undefined => {
     if (!rows || rows.length === 0) return rows;
     const valid: T[] = [];
     let bad = 0;
     for (const row of rows) {
       const parsed = schema.safeParse(row);
       if (parsed.success) {
-        valid.push(row);
+        valid.push(parsed.data);
         continue;
       }
       bad++;
@@ -899,14 +910,14 @@ export function dropInvalidShareRows(payload: CongressSharePayload): ShareRowsDr
   };
   const clean: CongressSharePayload = {
     ...payload,
-    refs: filterRows(payload.refs, SecurityRefInputSchema, "refs"),
-    prices: filterRows(payload.prices, PriceSeriesSchema, "prices"),
-    spx: filterRows(payload.spx, PriceCloseSchema, "spx"),
-    insider: filterRows(payload.insider, InsiderRowSchema, "insider"),
-    shortVolume: filterRows(payload.shortVolume, ShortVolumeRowSchema, "shortVolume"),
-    fundamentals: filterRows(payload.fundamentals, FundamentalRowSchema, "fundamentals"),
-    analyst: filterRows(payload.analyst, AnalystRowSchema, "analyst"),
-    trades: filterRows(payload.trades, TradeEventRowSchema, "trades"),
+    refs: filterRows(payload.refs, ShareSecurityRefRowSchema, "refs"),
+    prices: filterRows(payload.prices, SharePriceSeriesRowSchema, "prices"),
+    spx: filterRows(payload.spx, SharePriceCloseRowSchema, "spx"),
+    insider: filterRows(payload.insider, ShareInsiderRowSchema, "insider"),
+    shortVolume: filterRows(payload.shortVolume, ShareShortVolumeRowSchema, "shortVolume"),
+    fundamentals: filterRows(payload.fundamentals, ShareFundamentalRowSchema, "fundamentals"),
+    analyst: filterRows(payload.analyst, ShareAnalystRowSchema, "analyst"),
+    trades: filterRows(payload.trades, ShareTradeEventRowSchema, "trades"),
   };
   const droppedTotal = Object.values(dropped).reduce((a, b) => a + b, 0);
   return { payload: clean, dropped, droppedReasons, droppedTotal };

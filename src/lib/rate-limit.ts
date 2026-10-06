@@ -145,7 +145,11 @@ export const RATE_LIMITS = {
   /** Inbound congress.trade webhook pushes (App A -> App B). */
   congressWebhook: { limit: 120, windowMs: 60_000 },
   /** Inbound congress.trade securities gap-fill import (App A -> App B; ~130+ chunked POSTs/nightly). */
-  securitiesImport: { limit: 600, windowMs: 60_000 }
+  securitiesImport: { limit: 600, windowMs: 60_000 },
+  /** Failed bearer on securities import — cap audit rows from internet credential stuffing. */
+  securitiesImportUnauth: { limit: 30, windowMs: 60_000 },
+  /** Failed HMAC/bearer on congress webhook — cap audit rows after junk signatures force body+HMAC. */
+  congressWebhookUnauth: { limit: 60, windowMs: 60_000 }
 } as const satisfies Record<string, RateLimitOptions>;
 
 /**
