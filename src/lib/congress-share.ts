@@ -38,6 +38,7 @@ import {
   AnalystRowSchema,
   TradeEventRowSchema,
 } from "@jaywedgeworth22/congress-trading-shared";
+import { z } from "zod";
 import {
   assertOperationLeaseOwnership,
   OPERATION_LEASE_GROUPS,
@@ -539,6 +540,15 @@ export type CongressShortVol = ShortVolumeRow;
 export type CongressFundamental = FundamentalRow;
 export type CongressAnalyst = AnalystRow;
 
+/** Outbound EOD close guard — shared `PriceCloseSchema` accepts any finite number; CT has no inbound plausibility check. */
+const CongressSharePriceCloseSchema = PriceCloseSchema.extend({
+  close: z.number().finite().positive(),
+});
+
+const CongressSharePriceSeriesSchema = PriceSeriesSchema.extend({
+  closes: z.array(CongressSharePriceCloseSchema),
+});
+
 /**
  * Outbound share payload. Same wire shape as shared `SharePayload`; `refs` may
  * use the local optional-field builder (`CongressRef`) before schema validation
@@ -911,8 +921,8 @@ export function dropInvalidShareRows(payload: CongressSharePayload): ShareRowsDr
   const clean: CongressSharePayload = {
     ...payload,
     refs: filterRows(payload.refs, ShareSecurityRefRowSchema, "refs"),
-    prices: filterRows(payload.prices, SharePriceSeriesRowSchema, "prices"),
-    spx: filterRows(payload.spx, SharePriceCloseRowSchema, "spx"),
+    prices: filterRows(payload.prices, CongressSharePriceSeriesSchema, "prices"),
+    spx: filterRows(payload.spx, CongressSharePriceCloseSchema, "spx"),
     insider: filterRows(payload.insider, ShareInsiderRowSchema, "insider"),
     shortVolume: filterRows(payload.shortVolume, ShareShortVolumeRowSchema, "shortVolume"),
     fundamentals: filterRows(payload.fundamentals, ShareFundamentalRowSchema, "fundamentals"),

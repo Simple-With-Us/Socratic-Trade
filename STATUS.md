@@ -89,6 +89,15 @@
 **Verification.**  `bash -n` on three scripts.
 
 **Next.**  Push; reply on Kody threads; do not merge.
+## 2026-10-05 CURSOR — EOD close plausibility (board feab5c88, branch `cursor/eod-close-plausibility-4676`)
+
+**What.**  Congress-share export schemas now reject `close <= 0` on `spx` and nested `prices[].closes` before CT import (`CongressSharePriceCloseSchema` / `CongressSharePriceSeriesSchema`).  `ohlcBarsToCloses` already filtered non-positive closes on `main`.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; targeted congress-share tests green.  Full `npm test` + `npm run build` at PR handoff.
+
+**Blocker.**  Matching `congress-trading-shared` v2.7.2 patch is prepared locally (`d82daf4`) but not pushed (403 from cloud bot).  Owner should publish tag and bump ST pin when ready.
+
+**Next.**  Open PR READY; do not merge from agent.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
