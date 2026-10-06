@@ -41,7 +41,7 @@ function service({ existing = true, deploys = [], repoId = CONFIG.repositoryId, 
   };
   return {calls,fetchImpl};
 }
-const report = (fetchImpl,extra={})=>reportDeploy(receipt,{token:'test-only',repositoryId:CONFIG.repositoryId,runId:'123',fetchImpl,...extra});
+const report = (fetchImpl,extra={})=>reportDeploy(receipt,{token:'test-only',repositoryId:CONFIG.repositoryId,runId:'123',fetchImpl,sleep:async()=>{},...extra});
 test('missing token or wrong stable GitHub ID refuses all API writes', async () => {
   const s=service(); await assert.rejects(report(s.fetchImpl,{token:''}), /required/); await assert.rejects(report(s.fetchImpl,{repositoryId:'999'}), /repository ID/); assert.equal(s.calls.length,0);
 });
@@ -103,4 +103,41 @@ test('ST build identity skips placeholders but preserves health precedence',asyn
  assert.equal(sentryBuildRelease({APP_RELEASE_SHA:'unknown',SOURCE_COMMIT:newer}),newer);
  assert.equal(sentryBuildRelease({APP_RELEASE_SHA:expected,SOURCE_COMMIT:newer}),expected);
  assert.equal(sentryBuildRelease({APP_RELEASE_SHA:expected.slice(0,12),SOURCE_COMMIT:newer}),undefined);
+});
+
+test('release lookup retries a confirmed 404 visibility race, then writes once',async()=>{
+ const s=service();let reads=0;const pauses=[];
+ const fetchImpl=async(url,init)=>{
+  if(init.method==='GET' && url.endsWith(`/releases/${newer}/`) && ++reads===1)return json({},404);
+  return s.fetchImpl(url,init);
+ };
+ await report(fetchImpl,{sleep:async(ms)=>pauses.push(ms)});
+ assert.equal(reads,2);assert.deepEqual(pauses,[10000]);
+ assert.equal(s.calls.filter(c=>c.method==='PUT').length,1);
+ assert.equal(s.calls.filter(c=>c.method==='POST').length,1);
+});
+test('persistent missing release lookup is bounded and makes no writes',async()=>{
+ const s=service({existing:false});const pauses=[];
+ await assert.rejects(report(s.fetchImpl,{sleep:async(ms)=>pauses.push(ms)}),/after bounded lookup/);
+ assert.equal(s.calls.filter(c=>c.url.endsWith(`/releases/${newer}/`)).length,6);
+ assert.deepEqual(pauses,[10000,10000,10000,10000,10000]);
+ assert.ok(s.calls.every(c=>c.method==='GET'));
+});
+test('release authentication errors are not retried',async()=>{
+ const s=service();let reads=0;let pauses=0;
+ const fetchImpl=async(url,init)=>{
+  if(init.method==='GET' && url.endsWith(`/releases/${newer}/`)){reads++;return json({},401);}
+  return s.fetchImpl(url,init);
+ };
+ await assert.rejects(report(fetchImpl,{sleep:async()=>pauses++}),/HTTP 401/);
+ assert.equal(reads,1);assert.equal(pauses,0);assert.ok(s.calls.every(c=>c.method==='GET'));
+});
+test('a null JSON release is invalid data, not a retryable 404',async()=>{
+ const s=service();let reads=0;let pauses=0;
+ const fetchImpl=async(url,init)=>{
+  if(init.method==='GET' && url.endsWith(`/releases/${newer}/`)){reads++;return json(null);}
+  return s.fetchImpl(url,init);
+ };
+ await assert.rejects(report(fetchImpl,{sleep:async()=>pauses++}),/identity\/project conflicts/);
+ assert.equal(reads,1);assert.equal(pauses,0);assert.ok(s.calls.every(c=>c.method==='GET'));
 });

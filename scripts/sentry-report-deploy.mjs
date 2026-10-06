@@ -72,10 +72,11 @@ export async function observeProduction({ expected, fetchImpl = fetch, sleep = p
   throw new Error(`Deployment not confirmed within the bounded observation window: ${reason}`);
 }
 
-export async function reportDeploy(receipt, { token, repositoryId, runId, attribution, fetchImpl = fetch } = {}) {
+export async function reportDeploy(receipt, { token, repositoryId, runId, attribution, fetchImpl = fetch, sleep = pause } = {}) {
   if (!token?.trim()) throw new Error('SENTRY_AUTH_TOKEN is required');
   if (String(repositoryId) !== CONFIG.repositoryId) throw new Error('GitHub stable repository ID does not match the configured app');
   if (!SHA.test(receipt?.revision || '') || !Number.isFinite(Date.parse(receipt?.confirmedAt)) || !/^\d+$/.test(runId || '')) throw new Error('Invalid verified deployment receipt');
+  const missingRelease = Symbol('release-not-found');
   async function request(method, path, body, allowMissing = false, page = false) {
     let response;
     try {
@@ -83,7 +84,7 @@ export async function reportDeploy(receipt, { token, repositoryId, runId, attrib
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         ...(body ? { body: JSON.stringify(body) } : {}) });
     } catch { throw new Error(`Sentry ${method} request failed; inspect outcome before rerunning`); }
-    if (allowMissing && response.status === 404) return null;
+    if (allowMissing && response.status === 404) return missingRelease;
     if (!response.ok) throw new Error(`Sentry ${method} failed (HTTP ${response.status})`);
     try {
       const data = await response.json();
@@ -111,12 +112,19 @@ export async function reportDeploy(receipt, { token, repositoryId, runId, attrib
   if (matches.length !== 1 || !matches[0].name) throw new Error('Sentry repository must uniquely match the stable GitHub repository ID');
   const version = receipt.revision;
   const releasePath = `releases/${version}/`;
-  const existing = await request('GET', releasePath, undefined, true);
-  if (!existing) throw new Error('The verified SHA has no existing Sentry bundler release; refusing to invent a parallel release');
-  if (existing && (existing.version !== version || (existing.ref && existing.ref !== version) || !Array.isArray(existing.projects) || existing.projects.length !== 1 || existing.projects[0].slug !== CONFIG.project)) throw new Error('Existing Sentry release identity/project conflicts with the verified runtime');
+  let existing = missingRelease;
+  // Bundler release visibility can trail healthy traffic by a few seconds.
+  // Retry only confirmed 404 reads, never auth/network/validation failures or writes.
+  for (let attempt = 0; attempt < 6; attempt++) {
+    existing = await request('GET', releasePath, undefined, true);
+    if (existing !== missingRelease) break;
+    if (attempt < 5) await sleep(10000);
+  }
+  if (existing === missingRelease) throw new Error('The verified SHA has no existing Sentry bundler release after bounded lookup; refusing to invent a parallel release');
+  if (!existing || existing.version !== version || (existing.ref && existing.ref !== version) || !Array.isArray(existing.projects) || existing.projects.length !== 1 || existing.projects[0].slug !== CONFIG.project) throw new Error('Existing Sentry release identity/project conflicts with the verified runtime');
   const metadata = { ref: version, refs: [{ repository: matches[0].name, commit: version }], url: `https://github.com/${CONFIG.repository}/commit/${version}` };
   // Existing bundler releases (including their sourcemaps) are updated, never replaced.
-  await request(existing ? 'PUT' : 'POST', existing ? releasePath : 'releases/', existing ? metadata : { ...metadata, version, projects: [CONFIG.project], dateReleased: receipt.confirmedAt });
+  await request('PUT', releasePath, metadata);
   const deploys = await list(`${releasePath}deploys/`);
   if (!Array.isArray(deploys)) throw new Error('Sentry returned an invalid deployment list');
   // DeploySerializer caps names at 64 characters; the release already carries the full SHA.
