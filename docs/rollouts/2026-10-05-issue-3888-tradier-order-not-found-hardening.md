@@ -6,9 +6,9 @@ Follow-up from PR #3798 review: keep real Tradier 404 and 422-envelope missing-o
 
 ## Changes Made
 
-- Gate the order not-found regex on `Tradier HTTP 422` (errors envelope path) in `isTradierOrderNotFound` (`src/lib/tradier.ts`).
+- Gate the order not-found check on `Tradier HTTP 422` (errors envelope path) in `isTradierOrderNotFound` (`src/lib/tradier.ts`), including bare `Tradier HTTP 422: not found` from `{errors:{error:"not found"}}`.
 - Correct stale comment at `cancelBracketSiblingLegs` (422 prefix is present on the envelope throw path).
-- Extend `test/tradier-order-lookup.test.ts` with 422 not-found → `undefined`, and 400/502 prose collision → throw.
+- Extend `test/tradier-order-lookup.test.ts` with 422 not-found (order-scoped and bare envelope) → `undefined`, and 400/502 prose collision → throw.
 
 Files:
 
@@ -21,18 +21,18 @@ Files:
 ## Decisions & Trade-offs
 
 - `cancelBracketSiblingLegs` still uses its own inline not-found check (out of scope per issue); only the shared helper and comment were touched there.
-- 422 envelope messages that omit an order-scoped not-found phrase remain throws (same as before the unanchored regex could match only when `order…not found` appeared).
+- Unrelated 422 validation messages (not bare `not found` and not order-scoped) still throw.
 
 ## Verification State
 
 ```bash
 npm run lint          # 0 errors
 npx tsc --noEmit      # clean
-npm test -- test/tradier-order-lookup.test.ts   # 11 passed
+npm test -- test/tradier-order-lookup.test.ts   # 11 passed (includes bare 422 envelope case)
 npm run build         # clean
 ```
 
-Full-suite `npm test` on this cloud seat reported 9 unrelated failures in other files (pre-existing / environment); CI `verify` is the merge gate.
+CI `verify` on PR #4212 is the merge gate.
 
 ## Next Steps & Blockers
 

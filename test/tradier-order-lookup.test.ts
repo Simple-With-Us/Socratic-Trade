@@ -80,6 +80,9 @@ describe("Tradier getEquityOrder", () => {
       if (u.includes("/orders/422422")) {
         return { status: 200, body: { errors: { error: "order 422422 not found" } } };
       }
+      if (u.includes("/orders/bare422")) {
+        return { status: 200, body: { errors: { error: "not found" } } };
+      }
       if (u.includes("/orders/502prose")) {
         return { status: 502, body: "upstream said order 502prose not found in cache" };
       }
@@ -91,6 +94,7 @@ describe("Tradier getEquityOrder", () => {
     const { getTradierGateway } = await import("../src/lib/tradier");
     const gateway = getTradierGateway("local");
     await expect(gateway.getEquityOrder!(ACCT, "422422")).resolves.toBeUndefined();
+    await expect(gateway.getEquityOrder!(ACCT, "bare422")).resolves.toBeUndefined();
     await expect(gateway.getEquityOrder!(ACCT, "502prose")).rejects.toThrow(/502/);
     await expect(gateway.getEquityOrder!(ACCT, "400prose")).rejects.toThrow(/400/);
   });

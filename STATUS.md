@@ -99,13 +99,13 @@
 
 **Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
 **Next.**  Address Kody review threads (honest fix or `defer`).  Extra-ship no.  Do not deploy or merge from this lane.
-## 2026-10-05 CURSOR — Issue #3888 isTradierOrderNotFound hardening (branch `cursor/harden-is-tradier-order-not-found-b176`)
+## 2026-10-05 CURSOR — Issue #3888 isTradierOrderNotFound hardening (PR #4212)
 
-**What.**  Require `Tradier HTTP 404` or `Tradier HTTP 422` plus order not-found phrase in `isTradierOrderNotFound`; add lookup tests for 422 envelope and 400/502 prose collision; fix stale `cancelBracketSiblingLegs` comment only.
+**What.**  Board `77590d59` (claimed GROK, in_progress): harden `isTradierOrderNotFound` for issue #3888 — Tradier HTTP 404, or HTTP 422 with order-scoped not-found or bare `{errors:{error:"not found"}}` envelope; reject incidental prose on other statuses; lookup tests + stale `cancelBracketSiblingLegs` comment only.
 
-**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/tradier-order-lookup.test.ts` 11/11; `npm run build` clean.
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/tradier-order-lookup.test.ts` green; `npm run build` clean; CI `verify` on PR #4212.
 
-**Next.**  Push; open PR (Closes #3888); do not merge.
+**Next.**  Owner merge when ready; `do-not-automerge` stays until cleared.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
