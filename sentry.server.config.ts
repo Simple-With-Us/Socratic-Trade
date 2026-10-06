@@ -1,4 +1,12 @@
 import * as Sentry from "@sentry/nextjs";
+import {
+  anthropicAIIntegration,
+  googleGenAIIntegration,
+  langChainIntegration,
+  nodeRuntimeMetricsIntegration,
+  openAIIntegration,
+  vercelAIIntegration,
+} from "@sentry/node";
 import { redactForTelemetry } from "./src/lib/telemetry-sanitize";
 
 if (process.env.SENTRY_DSN) {
@@ -32,12 +40,12 @@ if (process.env.SENTRY_DSN) {
       /^https:\/\/usage\.jays\.services/,
     ],
     integrations: [
-      Sentry.nodeRuntimeMetricsIntegration(),
-      Sentry.openAIIntegration(),
-      Sentry.anthropicAIIntegration(),
-      Sentry.googleGenAIIntegration(),
-      Sentry.vercelAIIntegration(),
-      Sentry.langChainIntegration(),
+      nodeRuntimeMetricsIntegration(),
+      openAIIntegration(),
+      anthropicAIIntegration(),
+      googleGenAIIntegration(),
+      vercelAIIntegration(),
+      langChainIntegration(),
     ],
     beforeSend(event) {
       return redactForTelemetry(event) as typeof event;

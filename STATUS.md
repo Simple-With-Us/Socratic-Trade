@@ -89,6 +89,13 @@
 **Verification.**  `bash -n` on three scripts.
 
 **Next.**  Push; reply on Kody threads; do not merge.
+## 2026-10-05 CURSOR — Sentry server AI integrations (board `f411f8a7`, branch `cursor/fix-sentry-node-integrations-373d`)
+
+**What.**  `sentry.server.config.ts` imported six integrations from `@sentry/nextjs` that webpack does not re-export (Sentry 7753792417).  Integrations now come from `@sentry/node@11.0.0`; `Sentry.init` stays on `@sentry/nextjs`.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `npm run build` with no "Attempted import error" for those symbols; full `npm test` on branch.
+
+**Next.**  Open PR READY; wait for `verify` CI; do not merge from cloud agent unless owner asks.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
