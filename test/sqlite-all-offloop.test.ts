@@ -189,7 +189,7 @@ describe("sqlite off-loop validation", () => {
     expect(rows).toEqual([{ c: 5 }]);
   });
 
-  it("keeps reclaim armed when a started waiter's response fails validation", async () => {
+  it("drops reclaim when a started waiter's terminal response fails validation", async () => {
     const waiter = await primeSqliteOffLoopWaiterForTesting();
     await deliverSqliteOffLoopMessageForTesting({ id: waiter.id, started: true });
     const settled = expect(waiter.done).rejects.toThrow("invalid sqlite worker response");
@@ -199,7 +199,9 @@ describe("sqlite off-loop validation", () => {
       rows: [{ c: { nested: true } }]
     });
     await settled;
-    expect(sqliteOffLoopReclaimCountForTesting()).toBe(1);
+    expect(sqliteOffLoopReclaimCountForTesting()).toBe(0);
+    const rows = await sqliteAllOffLoop("SELECT 6 AS c", [], dbPath, CountRowSchema);
+    expect(rows).toEqual([{ c: 6 }]);
     await resetSqliteAllOffLoopForTesting();
     expect(sqliteOffLoopReclaimCountForTesting()).toBe(0);
   });

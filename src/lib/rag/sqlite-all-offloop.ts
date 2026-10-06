@@ -213,6 +213,11 @@ export const SqliteWorkerResponseSchema = z.union([SqliteWorkerResultSchema, Sql
 
 export type SqliteWorkerResponse = z.infer<typeof SqliteWorkerResponseSchema>;
 
+/** Zod source interpolated into WORKER_SOURCE so the worker validator cannot drift from SqliteBindSchema. */
+const WORKER_NUMBER_UNION_SOURCE =
+  "z.union([z.number(), z.literal(Infinity), z.literal(-Infinity), z.nan()])";
+const WORKER_BIND_UNION_SOURCE = `z.union([z.string(), ${WORKER_NUMBER_UNION_SOURCE}, z.bigint(), z.instanceof(Uint8Array), z.null()])`;
+
 const WORKER_SOURCE = `
 const { parentPort, workerData } = require("node:worker_threads");
 const Database = require(workerData.betterSqlitePath);
@@ -224,16 +229,7 @@ const RequestSchema = z.strictObject({
   id: z.int(),
   dbPath: z.string().min(1),
   sql: z.string().min(1),
-  params: z.array(z.union([
-    z.string(),
-    z.number(),
-    z.literal(Infinity),
-    z.literal(-Infinity),
-    z.nan(),
-    z.bigint(),
-    z.instanceof(Uint8Array),
-    z.null()
-  ]))
+  params: z.array(${WORKER_BIND_UNION_SOURCE})
 });
 
 let db = null;
@@ -564,13 +560,17 @@ function abandonPostedRequest(waiter: Pending, slot: PoolSlot): void {
   }
 }
 
-function settleReject(waiter: Pending, err: Error): void {
+function settleReject(
+  waiter: Pending,
+  err: Error,
+  options?: { terminalWorkerReply?: boolean }
+): void {
   if (pending.get(waiter.id) !== waiter) return;
   const started = waiter.started;
   const posted = waiter.posted;
   const abandonedByBudget = waiter.abandonedByBudget;
   const slot = waiter.slot;
-  const keepExecutionTimer = started && !abandonedByBudget;
+  const keepExecutionTimer = started && !abandonedByBudget && !options?.terminalWorkerReply;
   dropPending(waiter.id, { keepExecutionTimer });
   if (keepExecutionTimer) reclaimById.set(waiter.id, waiter);
   // Retire or cancel before reject so a synchronous rejection handler observes
@@ -812,9 +812,10 @@ function handleWorkerMessage(slot: PoolSlot, instance: Worker, msg: unknown): vo
     }
     const waiter = pending.get(id);
     if (waiter && waiter.slot === slot && slot.worker === instance) {
-      // Started waiters keep the execution timer and a reclaim entry.
+      // A malformed envelope is the worker's terminal reply for this id.  Do not
+      // keep the execution timer; that would kill an idle worker after the budget.
       // Not-yet-started waiters still cancel in place inside settleReject.
-      settleReject(waiter, new Error("invalid sqlite worker response"));
+      settleReject(waiter, new Error("invalid sqlite worker response"), { terminalWorkerReply: true });
     }
     return;
   }

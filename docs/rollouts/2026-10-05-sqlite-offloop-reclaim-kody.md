@@ -17,7 +17,8 @@ Rebased onto latest `origin/main` (no merge commit).  Main's axios 1.20.0 bump (
 - `LexicalRowSchema.section` accepts null so one NULL section does not fail the off-loop batch.  `mapLexicalRows` still omits a blank section.
 - Worker `RequestSchema` bind params are an explicit better-sqlite3 union.  `sqliteAllOffLoop` rejects the same union before post.  `statement.all` runs only after `safeParse` succeeds.
 - Worker pragmas are fixed literals (`busy_timeout = 100`, `cache_size = -20000`, `mmap_size = 268435456`).  The parent throws if those constants drift.
-- A malformed worker response for a known id settles through `settleReject`, so a started waiter keeps its execution timer and `reclaimById` entry.
+- A malformed worker response for a known id settles through `settleReject` with `terminalWorkerReply`, so execution reclaim is cleared instead of killing an idle worker after the budget.
+- `WORKER_BIND_UNION_SOURCE` is interpolated into `WORKER_SOURCE` so the worker request validator cannot drift from `SqliteBindSchema`.
 
 Files:
 
@@ -55,7 +56,7 @@ No dev server was running, so none was restarted.
 
 Push new commits to `grok/lexical-fts-off-event-loop` with a fast-forward push.  Do not force-push.  Re-arm squash auto-merge if a push cleared it.  Comment on PR #4164 with the commit SHA for each open Kody thread.  Resolve a thread only when that SHA clearly fixes it.
 
-The earlier rebase onto `origin/main` already landed.  This follow-up does not rebase again unless `origin/main` moves ahead.
+2026-10-06: merged `origin/main` (#4218, #4241) and addressed the two open Kody threads on `sqlite-all-offloop.ts` (bind union drift, terminal malformed reclaim).
 
 ## Zero-Code Findings
 

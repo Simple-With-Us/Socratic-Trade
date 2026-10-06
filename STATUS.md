@@ -27,15 +27,15 @@
 
 **Next.**  Push; reply on threads with fix SHA; do not merge.
 
-## 2026-10-05 CURSOR — PR #4164 off-loop reclaim (branch `grok/lexical-fts-off-event-loop`)
+## 2026-10-06 CURSOR — PR #4164 Kody tip-fix (branch `grok/lexical-fts-off-event-loop`)
 
-**Claim.**  `repo: Simple-With-Us/Socratic-Trade`  `issue: #4213`  `board: f50c66930a124233b28563e7967b9ac7`  `pr: #4164`.  Board card is app `socratic-trade`, claimed GROK.  No Slack #agent-sync post from this cloud VM.
+**Claim.**  `repo: Simple-With-Us/Socratic-Trade`  `issue: #4213`  `board: f50c66930a124233b28563e7967b9ac7`  `pr: #4164`.  No Slack #agent-sync post from this cloud VM.
 
-**What.**  Rebased onto latest `origin/main` (axios #4014, Cursor cloud env #4178).  Reclaim map no longer leaks after caller abort when the slot is already dead: `onExecutionTimeout` disarms before the `disposed` guard, `killSlot` sweeps `reclaimById`, and the test reset clears timers.  A remote merge of `main` plus a partial leak fix was not kept.  This branch stays a rebase.
+**What.**  Merged `origin/main` (#4218 RTH stall bounds, #4241 effort sync).  Kody: interpolate `WORKER_BIND_UNION_SOURCE` into `WORKER_SOURCE` so worker bind validation cannot drift from `SqliteBindSchema`.  Kody: malformed terminal worker replies call `settleReject` with `terminalWorkerReply` so execution reclaim does not kill an idle worker after 15s.
 
-**Verification.**  Mandated full check is CI `verify` (`npm run lint`, `npx tsc --noEmit`, unfiltered `npm test`, `npm run build`).  The required `verify` job completed SUCCESS on the prior head.  This Kody-fix commit waits on that same job for the new head.
+**Verification.**  `npm run lint`, `npx tsc --noEmit`, `npx vitest run test/sqlite-all-offloop.test.ts`.  CI `verify` pending on new head.
 
-**Next.**  Push; comment on the open Kody threads with the fix SHAs.  Do not treat a docs claim as a Slack post.
+**Next.**  Push; reply on Kody threads with tip SHA; resolve threads when fixed.
 
 
 
