@@ -39,6 +39,11 @@
 **What.**  Outbound share row drops now emit audit + per-stream reasons on `shareWithCongressTrade` receipts and daily share summaries.  Inbound `/api/admin/securities/import` uses `readJsonWithLimit` (5 MB) and Cloudflare-trusted per-IP rate limiting (600/min for chunked nightly fan-out); congress webhook rate-limited the same way.  Optional `schemaVersion` on share payload type; log-safe schemaVersion strings.  Kody PR #4220 follow-up: test tokens from `SECURITIES_IMPORT_TEST_TOKEN` / `CONGRESS_WEBHOOK_TEST_SECRET` (vitest env); removed redundant Sentry `captureMessage` on row drops.
 
 **Next.**  PR #4220: push Kody follow-up; reply/resolve threads; `/defer` on strict Zod 400 vs intentional tolerant row-drops.
+**What.**  Outbound share row drops emit audit + Sentry + per-stream reasons.  Inbound `/api/admin/securities/import` now `safeParse`s `SecuritiesImportPayloadSchema` (shared `SharePayloadSchema` + log-safe `schemaVersion`) and returns HTTP 400 on shape failure; `trustedCloudflareClientIp` + 600/min rate limit on import and congress webhook.  Tests use runtime token constants (no literal `s3cr3t` / `Bearer tok`).
+
+**Verification.**  `npx tsc --noEmit`; `npx vitest run test/securities-import.test.ts test/congress-trade-events.test.ts` (green); `test/congress-share.test.ts` (one pre-existing timing flake on breaker probe when run in full file).
+
+**Next.**  PR #4220: push head; Kody thread replies (FIXED vs defer); wait for CI `verify`.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

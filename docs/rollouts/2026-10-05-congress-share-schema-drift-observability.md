@@ -18,11 +18,13 @@ without editing the shared package (`schemaVersion` on `SharePayload` remains a 
 - `SECURITIES_IMPORT_MAX_BYTES` (5 MB, same as congress webhook) + `readJsonWithLimit` on
   `/api/admin/securities/import`.
 - Per-IP rate limits on `/api/admin/securities/import` and `/api/webhooks/congress`.
-- Inbound coerce paths report `rowsDropped` in the import response when malformed rows are skipped.
+- **2026-10-06 follow-up (PR #4220 Kody):** inbound import uses strict `SecuritiesImportPayloadSchema.safeParse` (HTTP 400 on failure) instead of per-row coerce/drop; `src/lib/schema-version.ts` strips control chars and bounds `schemaVersion` length; tests use `TEST_INGEST_TOKEN` / `TEST_WEBHOOK_SECRET`.
 
 Files:
 
 - `src/lib/congress-share.ts`
+- `src/lib/securities-import-schema.ts`
+- `src/lib/schema-version.ts`
 - `src/lib/bounded-body.ts`
 - `src/lib/rate-limit.ts`
 - `app/api/admin/securities/import/route.ts`
@@ -41,10 +43,9 @@ Files:
 ## 4. Verification State
 
 ```bash
-npm run lint
 npx tsc --noEmit
-npm test
-npm run build  # PASS
+npx vitest run test/securities-import.test.ts test/congress-trade-events.test.ts
+npx vitest run test/congress-share.test.ts  # intermittent flake: shareWithCongressTrade breaker probe fetch count when full file runs
 ```
 
 ## 5. Next Steps & Blockers
