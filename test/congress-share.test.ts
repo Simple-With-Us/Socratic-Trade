@@ -50,7 +50,8 @@ import {
   probeCongressShareTokenOnStartup,
   shareScanRefs,
   shareWithCongressTrade,
-  type CongressPrice
+  type CongressPrice,
+  type CongressRef,
 } from "../src/lib/congress-share";
 import { deleteInternalSetting, getInternalSetting, setInternalSetting } from "../src/lib/db";
 import { getServiceHealthLog } from "../src/lib/db-health";
@@ -170,8 +171,15 @@ describe("dropInvalidShareRows — drop malformed rows instead of sending them",
   });
 
   it("forwards validated refs via parsed.data and keeps passthrough fields", () => {
+    // Zod passthrough keeps unknown keys at runtime; cast past the closed CongressRef shape.
+    const row = {
+      ticker: "AAPL",
+      isEtf: true,
+      country: "US",
+      futureField: "keep-me",
+    } as CongressRef & { futureField: string };
     const { payload } = dropInvalidShareRows({
-      refs: [{ ticker: "AAPL", isEtf: true, country: "US", futureField: "keep-me" }],
+      refs: [row],
     });
     expect(payload.refs).toEqual([
       { ticker: "AAPL", isEtf: true, country: "US", futureField: "keep-me" },
