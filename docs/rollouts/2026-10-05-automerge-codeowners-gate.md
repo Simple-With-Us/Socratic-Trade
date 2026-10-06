@@ -33,12 +33,12 @@ Touched paths:
 
 ```bash
 npm run lint
-npx tsc --noEmit
 npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-gate.test.ts
-npm run build
 ```
 
-Full-repo `npm test` on the cloud VM reported 11 failures in unrelated suites (pre-existing on this seat); CI `verify` is authoritative for merge.
+PR tip (2026-10-06): Kody follow-up — anchored vs unanchored CODEOWNERS matching, pattern normalization in `load_patterns`, `CODEOWNERS_FILE` exercised in vitest.  Record exact tip SHA in `STATUS.md` after push.
+
+Full-repo `npm test` on the cloud VM may report unrelated failures; CI `verify` is authoritative for merge.
 
 ## Next Steps & Blockers
 

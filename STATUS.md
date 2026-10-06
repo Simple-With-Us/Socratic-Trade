@@ -93,9 +93,9 @@
 
 **What.**  `auto-merge-prs.yml` no longer arms merge when the PR diff touches any `.github/CODEOWNERS` trading-execution path; adds `disable-on-protected` and treats `needs-human-merge` like `do-not-automerge`.  Safe non-money PRs still auto-arm when `GH_PAT` / `SHEPHERD_TOKEN` is set.
 
-**Verification.**  Rebased onto `origin/main` @ `494576fc` (2026-10-06).  Head after push: see PR.  Kody hardening in 437d0f1b lineage.  Local gate vitest 13/13.  CI: await `verify` (hosted + iOS); cancel stale queued runs if concurrency stalls.
+**Verification.**  Rebased onto `origin/main` @ `494576fc` (2026-10-06).  PR head after this tip: record on push.  Local: `npm run lint` exit 0; `npx vitest run test/pr-touches-codeowners-paths.test.ts` 4/4; `npx vitest run test/branch-protection-gate.test.ts` green.  CI: await `verify` on tip SHA.
 
-**Next.**  Owner squash merge when `verify` + Kody green and `mergeable` not CONFLICTING/BEHIND.  No `--admin` merge.
+**Next.**  Owner squash merge when `verify` + Kody green and `mergeable` not CONFLICTING/BEHIND.  No `--admin` merge.  Do not arm auto-merge on this PR (self-edit bootstrap).
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

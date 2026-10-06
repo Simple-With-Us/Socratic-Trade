@@ -34,57 +34,102 @@ pr_changed_files() {
   return 0
 }
 
-# Match one changed file against one CODEOWNERS pattern (GitHub-style, repo-root relative).
+# Match one changed file against one normalized CODEOWNERS pattern.
+# $2 = anchored flag (1 = leading / in CODEOWNERS, 0 = match anywhere per GitHub rules)
+# $3 = pattern without leading / and without @owners (normalized in load_patterns).
 file_matches_pattern() {
   local file="$1"
-  local raw_pat="$2"
-  local pat="${raw_pat#/}"
-  pat="${pat%%@*}"
-  pat="${pat%"${pat##*[![:space:]]}"}"
+  local anchored="$2"
+  local pat="$3"
   [ -z "$pat" ] && return 1
 
   if [[ "$pat" == */ ]]; then
     local dir="${pat%/}"
+    if [ "$anchored" = 1 ]; then
+      if [[ "$file" == "$dir" ]] || [[ "$file" == "$dir/"* ]]; then
+        return 0
+      fi
+      return 1
+    fi
     if [[ "$file" == "$dir" ]] || [[ "$file" == "$dir/"* ]]; then
+      return 0
+    fi
+    if [[ "$file" == */"$dir" ]] || [[ "$file" == */"$dir/"* ]]; then
       return 0
     fi
     return 1
   fi
 
-  case "$file" in
-    $pat) return 0 ;;
-  esac
+  if [ "$anchored" = 1 ]; then
+    case "$file" in
+      $pat) return 0 ;;
+    esac
+    return 1
+  fi
 
-  # Slash-less patterns match the basename at any directory depth (GitHub CODEOWNERS).
+  # Slash-less unanchored patterns: basename at any directory depth (GitHub CODEOWNERS).
   if [[ "$pat" != */* ]]; then
     local base="${file##*/}"
     case "$base" in
       $pat) return 0 ;;
     esac
+    return 1
   fi
+
+  # Unanchored path pattern (contains / but no leading /): match anywhere in the tree.
+  case "$file" in
+    $pat | */$pat) return 0 ;;
+  esac
   return 1
 }
 
+# Prints one normalized pattern per line: "<anchored>\t<pattern>" (no subprocesses per line).
 load_patterns() {
   [ -f "$CODEOWNERS_FILE" ] || {
     echo "Missing $CODEOWNERS_FILE -- treating diff as protected (fail closed)" >&2
     return 1
   }
+  local line pat anchored
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
     [ -z "$line" ] && continue
-    printf '%s\n' "$line"
+
+    anchored=0
+    pat="$line"
+    if [[ "$pat" == /* ]]; then
+      anchored=1
+      pat="${pat#/}"
+    fi
+    pat="${pat%%@*}"
+    pat="${pat#"${pat%%[![:space:]]*}"}"
+    pat="${pat%"${pat##*[![:space:]]}"}"
+    [ -z "$pat" ] && continue
+    printf '%s\t%s\n' "$anchored" "$pat"
   done < "$CODEOWNERS_FILE"
+}
+
+load_patterns_into_array() {
+  local -n _out=$1
+  _out=()
+  local row anchored pat
+  while IFS=$'\t' read -r anchored pat || [ -n "$anchored" ]; do
+    [ -z "$anchored" ] && continue
+    _out+=("$anchored" "$pat")
+  done < <(load_patterns) || return 1
+  return 0
 }
 
 file_touches_patterns() {
   local file="$1"
   shift
-  local pat
-  for pat in "$@"; do
-    if file_matches_pattern "$file" "$pat"; then
+  local -a pairs=("$@")
+  local i anchored pat
+  for ((i = 0; i < ${#pairs[@]}; i += 2)); do
+    anchored="${pairs[i]}"
+    pat="${pairs[i + 1]}"
+    if file_matches_pattern "$file" "$anchored" "$pat"; then
       return 0
     fi
   done
@@ -92,15 +137,13 @@ file_touches_patterns() {
 }
 
 check_files_against_patterns() {
-  local patterns=()
-  while IFS= read -r line; do
-    patterns+=("$line")
-  done < <(load_patterns) || return 0
+  local pattern_pairs=()
+  load_patterns_into_array pattern_pairs || return 0
 
   local file
   for file in "$@"; do
     [ -z "$file" ] && continue
-    if file_touches_patterns "$file" "${patterns[@]}"; then
+    if file_touches_patterns "$file" "${pattern_pairs[@]}"; then
       echo "Protected path touched: $file" >&2
       return 0
     fi
@@ -127,14 +170,12 @@ if [ -z "$changed_files" ]; then
   exit 0
 fi
 
-patterns=()
-while IFS= read -r line; do
-  patterns+=("$line")
-done < <(load_patterns) || exit 0
+pattern_pairs=()
+load_patterns_into_array pattern_pairs || exit 0
 
 while IFS= read -r file; do
   [ -z "$file" ] && continue
-  if file_touches_patterns "$file" "${patterns[@]}"; then
+  if file_touches_patterns "$file" "${pattern_pairs[@]}"; then
     echo "Protected path touched: $file" >&2
     exit 0
   fi
