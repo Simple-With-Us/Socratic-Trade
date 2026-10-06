@@ -923,13 +923,120 @@ export function dropInvalidShareRows(payload: CongressSharePayload): ShareRowsDr
   return { payload: clean, dropped, droppedReasons, droppedTotal };
 }
 
+/** Optional wire envelope version on outbound import POST bodies (App A ignores unknown keys). */
+export const CONGRESS_SHARE_PAYLOAD_SCHEMA_VERSION = 1;
+
+/** Per-dataset accepted tallies from App A's `POST /api/admin/securities/import` 2xx body. */
+export interface CongressImportAcceptedCounts {
+  refs: number;
+  spxRows: number;
+  pricedTickers: number;
+  priceRows: number;
+  insiderRows: number;
+  shortVolumeRows: number;
+  fundamentalsRows: number;
+  analystRows: number;
+}
+
+export type CongressShareSentCounts = CongressShareResult["sent"] & { trades?: number };
+
+function nonNegativeIntField(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && Number.isInteger(value)
+    ? value
+    : undefined;
+}
+
+/** Parse App A's per-dataset accepted counts out of a 2xx import JSON body. */
+export function parseCongressImportAcceptedCounts(
+  response: unknown,
+): { ok: true; counts: CongressImportAcceptedCounts } | { ok: false; reason: string } {
+  if (response === undefined || response === null || typeof response !== "object") {
+    return { ok: false, reason: "import response body was empty or unparseable" };
+  }
+  const body = response as Record<string, unknown>;
+  const refs = nonNegativeIntField(body.refs);
+  const spxRows = nonNegativeIntField(body.spxRows);
+  const pricedTickers = nonNegativeIntField(body.pricedTickers);
+  const priceRows = nonNegativeIntField(body.priceRows);
+  const insiderRows = nonNegativeIntField(body.insiderRows);
+  const shortVolumeRows = nonNegativeIntField(body.shortVolumeRows);
+  const fundamentalsRows = nonNegativeIntField(body.fundamentalsRows);
+  const analystRows = nonNegativeIntField(body.analystRows);
+  if (
+    refs === undefined ||
+    spxRows === undefined ||
+    pricedTickers === undefined ||
+    priceRows === undefined ||
+    insiderRows === undefined ||
+    shortVolumeRows === undefined ||
+    fundamentalsRows === undefined ||
+    analystRows === undefined
+  ) {
+    return {
+      ok: false,
+      reason:
+        "import response missing per-dataset accepted counts (expected refs, spxRows, pricedTickers, priceRows, insiderRows, shortVolumeRows, fundamentalsRows, analystRows)",
+    };
+  }
+  return {
+    ok: true,
+    counts: {
+      refs,
+      spxRows,
+      pricedTickers,
+      priceRows,
+      insiderRows,
+      shortVolumeRows,
+      fundamentalsRows,
+      analystRows,
+    },
+  };
+}
+
+/**
+ * Compare what we sent on this POST to what App A reports it accepted. Returns "" when every
+ * non-zero sent dataset has a matching accepted tally with accepted >= sent.
+ */
+export function congressImportAcceptedReceiptError(
+  sent: CongressShareSentCounts,
+  response: unknown,
+): string {
+  const parsed = parseCongressImportAcceptedCounts(response);
+  if (!parsed.ok) return parsed.reason;
+  const { counts } = parsed;
+  const gaps: string[] = [];
+
+  const check = (label: string, sentN: number, acceptedN: number) => {
+    if (sentN <= 0) return;
+    if (acceptedN < sentN) gaps.push(`${label}: sent=${sentN} accepted=${acceptedN}`);
+  };
+
+  check("refs", sent.refs, counts.refs);
+  check("spx", sent.spx, counts.spxRows);
+  check("prices", sent.prices, counts.pricedTickers);
+  check("closes", sent.closes, counts.priceRows);
+  check("insider", sent.insider, counts.insiderRows);
+  check("shortVolume", sent.shortVolume, counts.shortVolumeRows);
+  check("fundamentals", sent.fundamentals, counts.fundamentalsRows);
+  check("analyst", sent.analyst, counts.analystRows);
+
+  const tradesSent = sent.trades ?? 0;
+  if (tradesSent > 0) {
+    gaps.push(`trades: sent=${tradesSent} but App A import response has no trades receipt (not implemented on App A)`);
+  }
+
+  if (gaps.length === 0) return "";
+  return `App A accepted fewer rows than sent — ${gaps.join("; ")}`;
+}
+
 /**
  * Read App A's verdict out of a 2xx import response.
  *
  * App A returns `{ ok, errors[], <dataset>Rows, ... }` with HTTP 200, so `ok:false` and a populated
- * `errors[]` are the ONLY signals that rows were rejected. Returns "" when the body reports a clean
- * import, and a short diagnostic otherwise. A body we cannot parse is treated as a FAILURE, not a
- * pass: an unreadable 200 is exactly the case where the daily marker must not advance on faith.
+ * `errors[]` mean rows were rejected. Per-dataset accepted tallies are checked separately via
+ * `congressImportAcceptedReceiptError`. Returns "" when the body reports a clean import, and a short
+ * diagnostic otherwise. A body we cannot parse is treated as a FAILURE, not a pass: an unreadable 200
+ * is exactly the case where the daily marker must not advance on faith.
  */
 function congressImportBodyError(response: unknown): string {
   if (response === undefined || response === null) {
@@ -1046,7 +1153,11 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       // Stamp our origin so the counterpart never echoes our own rows back to us (no-echo-loop guard).
-      const body = { ...clean, origin: clean.origin ?? APP_B_ORIGIN_TAG };
+      const body = {
+        ...clean,
+        origin: clean.origin ?? APP_B_ORIGIN_TAG,
+        schemaVersion: CONGRESS_SHARE_PAYLOAD_SCHEMA_VERSION,
+      };
       const res = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
@@ -1112,6 +1223,13 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
         // `ok:false` (NOT `skipped`) so the daily run counts this in failedPosts and retries rather
         // than advancing the marker over an import App A only partly accepted.
         return { ...dropMeta, ok: false, status: res.status, error: bodyErrorText, sent };
+      }
+      const receiptErrorText = congressImportAcceptedReceiptError(sent, response);
+      if (receiptErrorText) {
+        console.error(`[congress-share] import consumption shortfall despite HTTP ${res.status}: ${receiptErrorText}`);
+        audit("congress_share_import_receipt_shortfall", { sent, receiptErrorText, response });
+        logApiHealth({ service: "congress-share", ok: false, errorText: receiptErrorText, keySource: "env" });
+        return { ok: false, status: res.status, error: receiptErrorText, sent };
       }
       logApiHealth({ service: "congress-share", ok: true, keySource: "env" });
       return { ...dropMeta, ok: true, status: res.status, response, sent };

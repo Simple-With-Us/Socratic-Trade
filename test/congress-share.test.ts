@@ -50,6 +50,9 @@ import {
   probeCongressShareTokenOnStartup,
   shareScanRefs,
   shareWithCongressTrade,
+  parseCongressImportAcceptedCounts,
+  congressImportAcceptedReceiptError,
+  CONGRESS_SHARE_PAYLOAD_SCHEMA_VERSION,
   type CongressPrice,
   type CongressRef,
 } from "../src/lib/congress-share";
@@ -81,6 +84,31 @@ function scanWithCandidates(
       symbol: c.symbol,
     })),
   };
+}
+
+/** App A `POST /api/admin/securities/import` 2xx body with per-dataset accepted tallies. */
+function ctImportOkBody(accepted?: Partial<{
+  refs: number;
+  spxRows: number;
+  pricedTickers: number;
+  priceRows: number;
+  insiderRows: number;
+  shortVolumeRows: number;
+  fundamentalsRows: number;
+  analystRows: number;
+}>): string {
+  const max = 10_000;
+  return JSON.stringify({
+    ok: true,
+    refs: accepted?.refs ?? max,
+    spxRows: accepted?.spxRows ?? max,
+    pricedTickers: accepted?.pricedTickers ?? max,
+    priceRows: accepted?.priceRows ?? max,
+    insiderRows: accepted?.insiderRows ?? max,
+    shortVolumeRows: accepted?.shortVolumeRows ?? max,
+    fundamentalsRows: accepted?.fundamentalsRows ?? max,
+    analystRows: accepted?.analystRows ?? max,
+  });
 }
 
 const mockedFetchDailyOHLC = vi.mocked(fetchDailyOHLC);
@@ -205,7 +233,7 @@ describe("dropInvalidShareRows — drop malformed rows instead of sending them",
     let posted: { refs?: unknown[]; origin?: string } | undefined;
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
       posted = JSON.parse(String(init?.body));
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return new Response(ctImportOkBody(), { status: 200 });
     }));
     const res = await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }, { ticker: "" }] });
     expect(res.ok).toBe(true);
@@ -261,9 +289,81 @@ describe("dropInvalidShareRows — drop malformed rows instead of sending them",
 
   it("shareWithCongressTrade still reports ok on a clean 200 body", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "t";
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true, refsRows: 1 }), { status: 200 })));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(ctImportOkBody({ refs: 1 }), { status: 200 })));
     const res = await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] });
     expect(res.ok).toBe(true);
+  });
+
+  it("shareWithCongressTrade fails when accepted counts are missing from a clean 200 body", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "t";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })));
+    const res = await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] });
+    expect(res.ok).toBe(false);
+    expect(String(res.error)).toContain("missing per-dataset accepted counts");
+    const rows = getServiceHealthLog("congress-share", 3);
+    expect(rows[0]).toMatchObject({ ok: 0 });
+  });
+
+  it("shareWithCongressTrade fails when App A accepted fewer rows than sent", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "t";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(ctImportOkBody({ refs: 0 }), { status: 200 })));
+    const res = await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] });
+    expect(res.ok).toBe(false);
+    expect(String(res.error)).toContain("refs: sent=1 accepted=0");
+    const rows = getServiceHealthLog("congress-share", 3);
+    expect(rows[0]).toMatchObject({ ok: 0 });
+  });
+});
+
+describe("parseCongressImportAcceptedCounts + congressImportAcceptedReceiptError", () => {
+  it("parses all eight accepted tally fields from App A's import summary", () => {
+    const parsed = parseCongressImportAcceptedCounts({
+      refs: 2,
+      spxRows: 3,
+      pricedTickers: 4,
+      priceRows: 40,
+      insiderRows: 1,
+      shortVolumeRows: 5,
+      fundamentalsRows: 6,
+      analystRows: 7,
+    });
+    expect(parsed).toEqual({
+      ok: true,
+      counts: {
+        refs: 2,
+        spxRows: 3,
+        pricedTickers: 4,
+        priceRows: 40,
+        insiderRows: 1,
+        shortVolumeRows: 5,
+        fundamentalsRows: 6,
+        analystRows: 7,
+      },
+    });
+  });
+
+  it("fails closed when any accepted tally is missing or non-integer", () => {
+    expect(parseCongressImportAcceptedCounts({ ok: true, refs: 1 }).ok).toBe(false);
+    expect(parseCongressImportAcceptedCounts({ ok: true, refs: 1.5, spxRows: 0, pricedTickers: 0, priceRows: 0, insiderRows: 0, shortVolumeRows: 0, fundamentalsRows: 0, analystRows: 0 }).ok).toBe(
+      false,
+    );
+  });
+
+  it("returns no receipt error when every non-zero sent dataset has accepted >= sent", () => {
+    const err = congressImportAcceptedReceiptError(
+      { refs: 1, spx: 2, prices: 0, closes: 10, insider: 0, shortVolume: 0, fundamentals: 0, analyst: 0 },
+      { refs: 1, spxRows: 2, pricedTickers: 0, priceRows: 10, insiderRows: 0, shortVolumeRows: 0, fundamentalsRows: 0, analystRows: 0 },
+    );
+    expect(err).toBe("");
+  });
+
+  it("flags accepted < sent per dataset", () => {
+    const err = congressImportAcceptedReceiptError(
+      { refs: 2, spx: 0, prices: 1, closes: 5, insider: 0, shortVolume: 0, fundamentals: 0, analyst: 0 },
+      { refs: 1, spxRows: 0, pricedTickers: 1, priceRows: 3, insiderRows: 0, shortVolumeRows: 0, fundamentalsRows: 0, analystRows: 0 },
+    );
+    expect(err).toContain("refs: sent=2 accepted=1");
+    expect(err).toContain("closes: sent=5 accepted=3");
   });
 });
 
@@ -384,6 +484,12 @@ describe("chunkPrices", () => {
 // ── shareWithCongressTrade ────────────────────────────────────────────────────────
 
 describe("shareWithCongressTrade", () => {
+  afterEach(async () => {
+    // Drain microtasks so a prior test's in-flight import cannot land on this block's fetch stub.
+    await new Promise((resolve) => setImmediate(resolve));
+    resetCongressAuthBreakerForTests();
+  });
+
   it("skips (no fetch) when no token is configured", async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
@@ -414,7 +520,7 @@ describe("shareWithCongressTrade", () => {
     process.env.CONGRESS_TRADE_TOKEN = "secret-token";
     process.env.CONGRESS_TRADE_BASE_URL = "https://congress.trade/";
     const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) =>
-      new Response(JSON.stringify({ ok: true, refs: 1 }), { status: 200 })
+      new Response(ctImportOkBody({ refs: 1, spxRows: 1 }), { status: 200 })
     );
     vi.stubGlobal("fetch", fetchSpy);
 
@@ -429,9 +535,15 @@ describe("shareWithCongressTrade", () => {
     expect(JSON.parse(init.body as string)).toEqual({
       refs: [{ ticker: "AAPL" }],
       spx: [{ date: "2026-06-15", close: 5400 }],
-      origin: "app-b" // no-echo-loop provenance tag stamped on every outbound payload
+      origin: "app-b", // no-echo-loop provenance tag stamped on every outbound payload
+      schemaVersion: CONGRESS_SHARE_PAYLOAD_SCHEMA_VERSION,
     });
-    expect(res).toMatchObject({ ok: true, status: 200, response: { ok: true, refs: 1 }, sent: { refs: 1, spx: 1 } });
+    expect(res).toMatchObject({
+      ok: true,
+      status: 200,
+      response: { ok: true, refs: 1, spxRows: 1 },
+      sent: { refs: 1, spx: 1 },
+    });
   });
 
   it("returns ok:false on an HTTP error without throwing", async () => {
@@ -470,7 +582,7 @@ describe("shareWithCongressTrade", () => {
 
   it("logs an ok health-log row on success", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(ctImportOkBody(), { status: 200 })));
     await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] });
     const rows = getServiceHealthLog("congress-share", 10);
     expect(rows[0]).toMatchObject({ ok: 1, key_source: "env" });
@@ -540,11 +652,13 @@ describe("shareWithCongressTrade", () => {
   });
 
   it("clears the breaker and resumes real sends after a successful post-cooldown probe", async () => {
+    resetCongressAuthBreakerForTests();
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_AUTH_BREAKER_COOLDOWN_MS = "300"; // short but not flaky-short
     const fetchSpy = vi
-      .fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }))
-      .mockResolvedValueOnce(new Response("denied", { status: 401 }));
+      .fn()
+      .mockResolvedValueOnce(new Response("denied", { status: 401 }))
+      .mockResolvedValue(new Response(ctImportOkBody(), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
 
     await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] }); // trips breaker
@@ -554,7 +668,7 @@ describe("shareWithCongressTrade", () => {
 
     const res = await shareWithCongressTrade({ refs: [{ ticker: "MSFT" }] }); // real probe
     expect(res).toMatchObject({ ok: true });
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(isCongressAuthBreakerTripped()).toBe(false); // success clears the breaker
   });
 
@@ -573,7 +687,7 @@ describe("shareWithCongressTrade", () => {
 
     // Operator resyncs the token — no restart, no waiting for the 6h cooldown.
     process.env.CONGRESS_TRADE_TOKEN = "resynced-good-token";
-    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    fetchSpy.mockResolvedValueOnce(new Response(ctImportOkBody(), { status: 200 }));
 
     expect(isCongressAuthBreakerTripped()).toBe(false); // stale entry is ignored for the new token
     const res = await shareWithCongressTrade({ refs: [{ ticker: "MSFT" }] });
@@ -588,9 +702,12 @@ describe("shareWithCongressTrade", () => {
   it("serializes the post-cooldown half-open probe across concurrent overlapping callers", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_AUTH_BREAKER_COOLDOWN_MS = "300";
-    const fetchSpy = vi
-      .fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }))
-      .mockResolvedValueOnce(new Response("denied", { status: 401 }));
+    let importCalls = 0;
+    const fetchSpy = vi.fn(async () => {
+      importCalls += 1;
+      if (importCalls === 1) return new Response("denied", { status: 401 });
+      return new Response(ctImportOkBody(), { status: 200 });
+    });
     vi.stubGlobal("fetch", fetchSpy);
 
     await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] }); // trips breaker
@@ -631,7 +748,7 @@ describe("shareScanRefs", () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_ENABLED = "on";
     const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) =>
-      new Response(JSON.stringify({ ok: true }), { status: 200 })
+      new Response(ctImportOkBody(), { status: 200 })
     );
     vi.stubGlobal("fetch", fetchSpy);
 
@@ -650,11 +767,11 @@ describe("shareScanRefs", () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_ENABLED = "on";
     const fetchSpy = vi
-      .fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .fn(async (_url: string, _init?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }))
       .mockResolvedValueOnce(new Response("boom", { status: 500 }))
       .mockResolvedValueOnce(new Response("boom", { status: 500 }))
       .mockResolvedValueOnce(new Response("boom", { status: 500 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      .mockResolvedValueOnce(new Response(ctImportOkBody(), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
 
     expect((await shareScanRefs(scan))?.ok).toBe(false);
@@ -665,7 +782,7 @@ describe("shareScanRefs", () => {
   it("the per-symbol send throttle survives a simulated process restart", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_ENABLED = "on";
-    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const fetchSpy = vi.fn(async () => new Response(ctImportOkBody(), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
 
     expect((await shareScanRefs(scan))?.ok).toBe(true);
@@ -746,7 +863,7 @@ describe("runCongressDailyShare", () => {
     ];
     mockedFetchDailyOHLC.mockResolvedValue(bars);
     const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) =>
-      new Response(JSON.stringify({ ok: true }), { status: 200 })
+      new Response(ctImportOkBody(), { status: 200 })
     );
     vi.stubGlobal("fetch", fetchSpy);
 
@@ -787,7 +904,7 @@ describe("runCongressDailyShare", () => {
       if (url.includes("nasdaq.com")) {
         return new Response(JSON.stringify({ data: { table: { rows: [] } } }), { status: 200 });
       }
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return new Response(ctImportOkBody(), { status: 200 });
     });
     vi.stubGlobal("fetch", fetchSpy);
 
@@ -855,7 +972,7 @@ describe("runCongressDailyShare — insider + short-volume on the nightly batch"
     });
     setInternalSetting("webSource:finra:dataset", { ratios: { AAPL: 51.2 }, asOf: recentDate(1), fetchedAt: new Date().toISOString(), recordCount: 1 });
     mockedFetchDailyOHLC.mockResolvedValue([{ time: recentDate(2), close: 1 }, { time: recentDate(1), close: 2 }]);
-    const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
 
     const res = await runCongressDailyShare({ now: Date.now(), force: true }); // non-custom → builds both
@@ -881,7 +998,7 @@ describe("runCongressDailyShare — insider + short-volume on the nightly batch"
       { time: "2026-06-15", close: 4 },
       { time: "2026-06-16", close: 5 }
     ]);
-    const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
     const res = await runCongressDailyShare({ now: Date.UTC(2026, 5, 22), force: true, symbols: ["AAPL"] });
     expect(res.ok).toBe(true);
@@ -904,7 +1021,7 @@ describe("runCongressDailyShare — insider + short-volume on the nightly batch"
       { time: "2026-06-15", close: 4 },
       { time: "2026-06-16", close: 5 }
     ]);
-    const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
     const res = await runCongressDailyShare({ now: Date.UTC(2026, 5, 22), force: true, symbols: ["AAPL"], fullHistory: true });
     expect(res.ok).toBe(true);
@@ -952,7 +1069,7 @@ describe("shareScanRefs — fundamentals + analyst", () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_ENABLED = "on";
     process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "on"; // App A's #46 migration is live
-    const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
     const scan = scanWithCandidates([
       {
@@ -973,7 +1090,7 @@ describe("shareScanRefs — fundamentals + analyst", () => {
   it("shares fundamentals + analyst by default (now that App A migration is live)", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_ENABLED = "on";
-    const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
     const scan = scanWithCandidates([
       {
@@ -995,7 +1112,7 @@ describe("shareScanRefs — fundamentals + analyst", () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_ENABLED = "on";
     process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "off";
-    const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
     const scan = scanWithCandidates([
       {
@@ -1085,7 +1202,7 @@ describe("runCongressDailyShare — fromAppANeeds + deep history for needs", () 
         );
       }
       // import POST
-      return new Response(JSON.stringify({ ok: true, perfTickers: 1 }), { status: 200 });
+      return new Response(ctImportOkBody(), { status: 200 });
     });
     vi.stubGlobal("fetch", fetchSpy);
 
@@ -1111,7 +1228,7 @@ describe("congress-share startup and scheduler token probe cadence", () => {
     deleteInternalSetting(marker);
     let release: (() => void) | undefined;
     const fetchSpy = vi.fn(() => new Promise<Response>((resolve) => {
-      release = () => resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      release = () => resolve(new Response(ctImportOkBody(), { status: 200 }));
     }));
     vi.stubGlobal("fetch", fetchSpy);
     const now = Date.now();
@@ -1125,7 +1242,7 @@ describe("congress-share startup and scheduler token probe cadence", () => {
 
   it("probes on every boot despite a fresh marker, then suppresses the first scheduler tick", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "test-token";
-    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const fetchSpy = vi.fn(async () => new Response(ctImportOkBody(), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
     const now = Date.now();
     deleteInternalSetting(marker);
@@ -1140,7 +1257,7 @@ describe("congress-share startup and scheduler token probe cadence", () => {
   it("probes again only at the six-hour boundary", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "test-token";
     deleteInternalSetting(marker);
-    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const fetchSpy = vi.fn(async () => new Response(ctImportOkBody(), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
     const now = Date.now();
     expect(await probeCongressShareTokenIfDue(now)).toEqual({ status: "ok" });

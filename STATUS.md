@@ -89,6 +89,13 @@
 **Verification.**  `bash -n` on three scripts.
 
 **Next.**  Push; reply on Kody threads; do not merge.
+## 2026-10-05 CURSOR — Congress-share import consumption receipt (board `52f0143da16d44b8`, branch `cursor/congress-share-import-receipt-715f`)
+
+**What.**  Parse App A per-dataset accepted counts from `POST /api/admin/securities/import`; fail closed when counts are missing or `accepted < sent`; optional `schemaVersion: 1` on outbound POST body.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/congress-share.test.ts` 77/77; `npm run build` clean.
+
+**Next.**  Push; open PR READY; no extra-ship.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
