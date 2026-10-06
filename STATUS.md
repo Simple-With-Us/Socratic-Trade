@@ -8,7 +8,7 @@
 
 **Docs.**  `docs/rollouts/2026-10-06-rearm-failure-streak.md`, `PLAN.md`, `docs/EFFORT-LOG.md`, `docs/runbooks/uptime-health-json-monitors.md`, pointer on `docs/rollouts/2026-09-30-self-healing-watchdogs.md`.
 
-**Verification.**  `npm run lint` exit 0 (0 errors).  `npx tsc --noEmit` exit 0.  `npx vitest run test/run-failure-watchdog.test.ts test/trading-liveness.test.ts --testTimeout=20000` — 26 passed.
+**Verification.**  `npm run lint` exit 0 (0 errors).  `npx tsc --noEmit` exit 0.  Watchdog + liveness vitest 26 passed.  Health monitor tests 12 passed.  `npm run build` exit 0.  Full `npm test`: 9097 passed, 11 failed in unrelated files on this seat (notify env, Node 22 `.ts` ops script).  CI `verify` is the merge gate.
 
 **Next.**  PR https://github.com/Simple-With-Us/Socratic-Trade/pull/4259.  Merge only when `verify` is green and review is clear.  Do not force-merge.
 

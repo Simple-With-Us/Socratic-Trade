@@ -32,7 +32,7 @@ npx tsc --noEmit
 npx vitest run test/run-failure-watchdog.test.ts test/trading-liveness.test.ts --testTimeout=20000
 ```
 
-`npm run lint` exited 0 (0 errors, 863 grandfathered warnings).  `npx tsc --noEmit` exited 0.  Targeted vitest: 2 files, 26 passed.  Full `npm test` and `npm run build` follow on this head; CI `verify` is the merge gate.
+`npm run lint` exited 0 (0 errors, 863 grandfathered warnings).  `npx tsc --noEmit` exited 0.  Targeted vitest: 2 files, 26 passed.  Health monitor tests: 2 files, 12 passed.  `npm run build` exited 0.  Full `npm test` was 9097 passed, 51 skipped, 11 failed in files this change does not touch (`alpha-vantage-key-pool`, `congress-share`, `cpuprofile-summary`, `data-providers` TwelveData, `notify-body-tiers`, `notify-user-creds`, `persistence-notification`, `server-metrics`).  Those look like this seat's env (a pushover token is present, Node 22 refuses the `.ts` ops script).  CI `verify` is the merge gate.
 
 ## Next Steps & Blockers
 
