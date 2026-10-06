@@ -103,7 +103,7 @@
 
 **What.**  Board `77590d59` (claimed GROK, in_progress): harden `isTradierOrderNotFound` for issue #3888 — Tradier HTTP 404, or HTTP 422 with order-scoped not-found or bare `{errors:{error:"not found"}}` envelope; reject incidental prose on other statuses; lookup tests + stale `cancelBracketSiblingLegs` comment only.
 
-**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/tradier-order-lookup.test.ts` green; `npm run build` clean; CI `verify` on PR #4212.
+**Verification.**  Head `b8a35131`; Kody threads on #4212 addressed (board row, EFFORT-LOG scrub, bare 422 fix).  CI `verify` re-running after push.
 
 **Next.**  Owner merge when ready; `do-not-automerge` stays until cleared.
 
