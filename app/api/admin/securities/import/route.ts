@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import type { PriceClose, PriceSeries, SecurityRefInput } from "@jaywedgeworth22/congress-trading-shared";
 import { audit } from "@/lib/db";
 import {
   getImportedCacheCounts,
@@ -15,17 +16,9 @@ import {
   SECURITIES_IMPORT_MAX_BYTES
 } from "@/lib/bounded-body";
 import { enforceRateLimit, RATE_LIMITS, trustedCloudflareClientIp } from "@/lib/rate-limit";
+import { SecuritiesImportPayloadSchema } from "@/lib/securities-import-schema";
 
 export const dynamic = "force-dynamic";
-
-function readOptionalSchemaVersion(rec: Record<string, unknown>): string | number | undefined {
-  const raw = rec.schemaVersion;
-  if (typeof raw === "string" && raw.trim()) {
-    return raw.trim().replace(/[\r\n\t]/g, " ").slice(0, 64);
-  }
-  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
-  return undefined;
-}
 
 // Inbound securities-import receiver for the congress.trade (App A) return-path (App B side).
 //
@@ -64,24 +57,30 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
-  let body: unknown;
+  let rawBody: unknown;
   try {
-    body = await readJsonWithLimit(req, SECURITIES_IMPORT_MAX_BYTES);
+    rawBody = await readJsonWithLimit(req, SECURITIES_IMPORT_MAX_BYTES);
   } catch (err) {
     if (err instanceof PayloadTooLargeError) {
       return NextResponse.json({ ok: false, error: "payload too large" }, { status: 413 });
     }
     return NextResponse.json({ ok: false, error: "invalid JSON body" }, { status: 400 });
   }
-  const rec = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
 
-  const schemaVersion = readOptionalSchemaVersion(rec);
+  const parsed = SecuritiesImportPayloadSchema.safeParse(rawBody);
+  if (!parsed.success) {
+    audit("securities_import_rejected", { reason: "invalid_payload" });
+    return NextResponse.json({ ok: false, error: "invalid payload" }, { status: 400 });
+  }
+  const body = parsed.data;
+
+  const schemaVersion = body.schemaVersion;
   if (schemaVersion !== undefined) {
     console.info(`[securities-import] inbound payload schemaVersion=${String(schemaVersion)}`);
   }
 
   // No-echo guard: never re-store rows we originated.
-  const origin = typeof rec.origin === "string" && rec.origin.trim() ? rec.origin.trim() : "app-a";
+  const origin = body.origin?.trim() ? body.origin.trim() : "app-a";
   if (origin === APP_B_ORIGIN) {
     return NextResponse.json({
       ok: true,
@@ -96,39 +95,23 @@ export async function POST(req: Request) {
   }
 
   try {
-    const refsResult = coerceRefs(rec.refs);
-    const pricesResult = coercePrices(rec.prices);
-    const spxResult = coerceCloses(rec.spx);
+    const refs = mapRefs(body.refs);
+    const prices = mapPrices(body.prices);
+    const spx = mapCloses(body.spx);
 
-    // Explicitly acknowledge any non-persisted datasets that arrived, so nothing is silently
-    // discarded (see the directional-asymmetry note in the file header).
     const acceptedNotPersisted: Record<string, number> = {};
     for (const key of ["insider", "shortVolume", "fundamentals", "analyst"] as const) {
-      const arr = rec[key];
-      if (Array.isArray(arr) && arr.length > 0) acceptedNotPersisted[key] = arr.length;
+      const arr = body[key];
+      if (arr && arr.length > 0) acceptedNotPersisted[key] = arr.length;
     }
 
-    const rowsDropped: Record<string, number> = {};
-    if (refsResult.dropped > 0) rowsDropped.refs = refsResult.dropped;
-    if (pricesResult.dropped > 0) rowsDropped.prices = pricesResult.dropped;
-    if (spxResult.dropped > 0) rowsDropped.spx = spxResult.dropped;
-    const rowsDroppedTotal = Object.values(rowsDropped).reduce((a, b) => a + b, 0);
-    if (rowsDroppedTotal > 0) {
-      audit("securities_import_rows_dropped", { rowsDropped, rowsDroppedTotal, origin });
-      console.warn(`[securities-import] dropped malformed inbound rows: ${JSON.stringify(rowsDropped)}`);
-    }
-
-    const result = persistSecuritiesImport(
-      { refs: refsResult.rows, prices: pricesResult.rows, spx: spxResult.rows },
-      origin
-    );
-    audit("securities_import", { origin, ...result, acceptedNotPersisted, ...(rowsDroppedTotal > 0 ? { rowsDropped, rowsDroppedTotal } : {}) });
+    const result = persistSecuritiesImport({ refs, prices, spx }, origin);
+    audit("securities_import", { origin, ...result, acceptedNotPersisted });
     return NextResponse.json({
       ok: true,
       origin,
       ...result,
       totals: getImportedCacheCounts(),
-      ...(rowsDroppedTotal > 0 ? { rowsDropped, rowsDroppedTotal } : {}),
       ...(schemaVersion !== undefined ? { schemaVersion } : {}),
       ...(Object.keys(acceptedNotPersisted).length > 0
         ? {
@@ -143,84 +126,39 @@ export async function POST(req: Request) {
   }
 }
 
-// ── Tolerant coercion (extra keys ignored; bad rows dropped; never throws on shape) ──
-
-function str(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-function num(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+function nullableStr(value: string | null | undefined): string | undefined {
+  const trimmed = (value ?? "").trim();
+  return trimmed ? trimmed : undefined;
 }
 
-function coerceRefs(value: unknown): { rows: ImportedRefInput[]; dropped: number } {
-  if (!Array.isArray(value)) return { rows: [], dropped: 0 };
-  const out: ImportedRefInput[] = [];
-  let dropped = 0;
-  for (const raw of value) {
-    if (!raw || typeof raw !== "object") {
-      dropped++;
-      continue;
-    }
-    const r = raw as Record<string, unknown>;
-    const ticker = str(r.ticker);
-    if (!ticker) {
-      dropped++;
-      continue;
-    }
-    out.push({
-      ticker,
-      companyName: str(r.companyName),
-      sector: str(r.sector),
-      industry: str(r.industry),
-      assetClass: str(r.assetClass),
-      exchange: str(r.exchange) ?? str(r.exchangeShort),
-      currency: str(r.currency),
-      marketCap: num(r.marketCap),
-      cik: str(r.cik)
-    });
-  }
-  return { rows: out, dropped };
+function mapRefs(rows: SecurityRefInput[] | undefined): ImportedRefInput[] | undefined {
+  if (!rows?.length) return undefined;
+  return rows.map((r) => ({
+    ticker: r.ticker,
+    companyName: nullableStr(r.companyName),
+    sector: nullableStr(r.sector),
+    industry: nullableStr(r.industry),
+    assetClass: nullableStr(r.assetClass),
+    exchange: nullableStr(r.exchange) ?? nullableStr(r.exchangeShort),
+    currency: nullableStr(r.currency),
+    marketCap: r.marketCap ?? undefined,
+    cik: nullableStr(r.cik),
+  }));
 }
 
-function coerceCloses(value: unknown): { rows: ImportedCloseInput[]; dropped: number } {
-  if (!Array.isArray(value)) return { rows: [], dropped: 0 };
-  const out: ImportedCloseInput[] = [];
-  let dropped = 0;
-  for (const raw of value) {
-    if (!raw || typeof raw !== "object") {
-      dropped++;
-      continue;
-    }
-    const c = raw as Record<string, unknown>;
-    const date = str(c.date);
-    const close = num(c.close);
-    if (!date || close === undefined) {
-      dropped++;
-      continue;
-    }
-    out.push({ date, close, volume: num(c.volume) });
-  }
-  return { rows: out, dropped };
+function mapCloses(rows: PriceClose[] | undefined): ImportedCloseInput[] | undefined {
+  if (!rows?.length) return undefined;
+  return rows.map((c) => ({
+    date: c.date,
+    close: c.close,
+    volume: c.volume ?? undefined,
+  }));
 }
 
-function coercePrices(value: unknown): { rows: ImportedPriceInput[]; dropped: number } {
-  if (!Array.isArray(value)) return { rows: [], dropped: 0 };
-  const out: ImportedPriceInput[] = [];
-  let dropped = 0;
-  for (const raw of value) {
-    if (!raw || typeof raw !== "object") {
-      dropped++;
-      continue;
-    }
-    const p = raw as Record<string, unknown>;
-    const ticker = str(p.ticker);
-    if (!ticker) {
-      dropped++;
-      continue;
-    }
-    const closes = coerceCloses(p.closes);
-    dropped += closes.dropped;
-    out.push({ ticker, closes: closes.rows });
-  }
-  return { rows: out, dropped };
+function mapPrices(rows: PriceSeries[] | undefined): ImportedPriceInput[] | undefined {
+  if (!rows?.length) return undefined;
+  return rows.map((p) => ({
+    ticker: p.ticker,
+    closes: mapCloses(p.closes) ?? [],
+  }));
 }

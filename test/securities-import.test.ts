@@ -34,10 +34,14 @@ function bearerAuth(token: string): string {
   return `Bearer ${token}`;
 }
 
-function withSecuritiesImportToken(): string {
+function configureIngestToken(): string {
   const token = securitiesImportTestToken();
   process.env.APP_B_INGEST_TOKEN = token;
   return token;
+}
+
+function ingestAuthHeader(): string {
+  return bearerAuth(configureIngestToken());
 }
 
 beforeAll(() => {
@@ -146,10 +150,10 @@ describe("securities-import auth", () => {
   });
 
   it("rejects a wrong / length-mismatched token and accepts the exact token", () => {
-    const token = withSecuritiesImportToken();
+    configureIngestToken();
     expect(verifySecuritiesImportToken(reqWith("Bearer wrong"))).toBe(false);
     expect(verifySecuritiesImportToken(reqWith(""))).toBe(false);
-    expect(verifySecuritiesImportToken(reqWith(bearerAuth(token)))).toBe(true);
+    expect(verifySecuritiesImportToken(reqWith(ingestAuthHeader()))).toBe(true);
   });
 });
 
@@ -170,17 +174,17 @@ describe("POST /api/admin/securities/import", () => {
   });
 
   it("401s on a wrong token", async () => {
-    withSecuritiesImportToken();
+    configureIngestToken();
     const res = await importRoute(postJson({ prices: [] }, "Bearer nope"));
     expect(res.status).toBe(401);
   });
 
   it("persists refs/prices/spx and returns counts on a valid token", async () => {
-    const token = withSecuritiesImportToken();
+    configureIngestToken();
     const res = await importRoute(
       postJson(
         { refs: [{ ticker: "AAPL", companyName: "Apple" }], prices: [{ ticker: "AAPL", closes: seqCloses(3) }], spx: seqCloses(2, 5000), origin: "app-a" },
-        bearerAuth(token)
+        ingestAuthHeader()
       )
     );
     expect(res.status).toBe(200);
@@ -190,8 +194,8 @@ describe("POST /api/admin/securities/import", () => {
   });
 
   it("no-echo guard: a payload tagged with App B's own origin is acked but NOT stored", async () => {
-    const token = withSecuritiesImportToken();
-    const res = await importRoute(postJson({ prices: [{ ticker: "AAPL", closes: seqCloses(3) }], origin: "app-b" }, bearerAuth(token)));
+    configureIngestToken();
+    const res = await importRoute(postJson({ prices: [{ ticker: "AAPL", closes: seqCloses(3) }], origin: "app-b" }, ingestAuthHeader()));
     expect(res.status).toBe(200);
     const json = (await res.json()) as { ok: boolean; skipped?: boolean };
     expect(json).toMatchObject({ ok: true, skipped: true });
@@ -199,20 +203,38 @@ describe("POST /api/admin/securities/import", () => {
   });
 
   it("ignores insider/shortVolume on the inbound path", async () => {
-    const token = withSecuritiesImportToken();
+    configureIngestToken();
     const res = await importRoute(
-      postJson({ prices: [{ ticker: "F", closes: seqCloses(2) }], insider: [{ ticker: "F" }], shortVolume: [{ ticker: "F" }] }, bearerAuth(token))
+      postJson(
+        {
+          prices: [{ ticker: "F", closes: seqCloses(2) }],
+          insider: [
+            {
+              ticker: "F",
+              date: "2024-01-01",
+              sentiment: 0,
+              buyFilings: 0,
+              sellFilings: 0,
+              buyShares: 0,
+              sellShares: 0,
+              owners: [],
+            },
+          ],
+          shortVolume: [{ ticker: "F", date: "2024-01-01", ratio: 0.5, elevated: false }],
+        },
+        ingestAuthHeader()
+      )
     );
     expect(res.status).toBe(200);
     expect(getImportedPriceCloses("F")).toHaveLength(2);
   });
 
   it("413s when the body exceeds SECURITIES_IMPORT_MAX_BYTES", async () => {
-    const token = withSecuritiesImportToken();
+    configureIngestToken();
     const bigBody = JSON.stringify({ padding: "a".repeat(SECURITIES_IMPORT_MAX_BYTES) });
     const req = new Request("http://localhost/api/admin/securities/import", {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: bearerAuth(token) },
+      headers: { "content-type": "application/json", authorization: ingestAuthHeader() },
       body: bigBody
     });
     const res = await importRoute(req);
@@ -220,11 +242,11 @@ describe("POST /api/admin/securities/import", () => {
   });
 
   it("returns 429 after the per-IP rate limit is exceeded", async () => {
-    const token = withSecuritiesImportToken();
+    configureIngestToken();
     const { limit } = RATE_LIMITS.securitiesImport;
     const headers = {
       "content-type": "application/json",
-      authorization: bearerAuth(token),
+      authorization: ingestAuthHeader(),
       "cf-connecting-ip": "203.0.113.50"
     };
     for (let i = 0; i < limit; i++) {
@@ -247,23 +269,30 @@ describe("POST /api/admin/securities/import", () => {
     expect(blocked.status).toBe(429);
   });
 
-  it("surfaces rowsDropped when malformed refs are coerced away", async () => {
-    const token = withSecuritiesImportToken();
+  it("400s when refs contain invalid row shapes (strict Zod at trust boundary)", async () => {
+    configureIngestToken();
     const res = await importRoute(
-      postJson({ refs: [{ ticker: "AAPL" }, { ticker: "" }, "not-an-object"] }, bearerAuth(token))
+      postJson({ refs: [{ ticker: "AAPL" }, { ticker: "" }, "not-an-object"] }, ingestAuthHeader())
     );
-    expect(res.status).toBe(200);
-    const json = (await res.json()) as { rowsDropped?: Record<string, number>; rowsDroppedTotal?: number };
-    expect(json.rowsDropped).toMatchObject({ refs: 2 });
-    expect(json.rowsDroppedTotal).toBe(2);
+    expect(res.status).toBe(400);
   });
 
   it("accepts optional schemaVersion on the inbound payload", async () => {
-    const token = withSecuritiesImportToken();
-    const res = await importRoute(postJson({ schemaVersion: "2.7.0", prices: [] }, bearerAuth(token)));
+    configureIngestToken();
+    const res = await importRoute(postJson({ schemaVersion: "2.7.0", prices: [] }, ingestAuthHeader()));
     expect(res.status).toBe(200);
     const json = (await res.json()) as { schemaVersion?: string };
     expect(json.schemaVersion).toBe("2.7.0");
+  });
+
+  it("strips control characters from schemaVersion before logging and echoing", async () => {
+    configureIngestToken();
+    const res = await importRoute(
+      postJson({ schemaVersion: "2.7.0\n[securities-import] forged", prices: [] }, ingestAuthHeader())
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { schemaVersion?: string };
+    expect(json.schemaVersion).toBe("2.7.0[securities-import] forged");
   });
 });
 

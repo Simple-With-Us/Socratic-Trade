@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OHLCBar } from "../src/lib/indicators";
+import type { MarketQuote, MarketScan } from "../src/lib/types";
 
 // Mock the history cascade without importOriginal(). history.ts imports the db barrel, whose
 // outcome-horizon re-export imports history.ts again; importing the original inside this factory can
@@ -57,6 +58,22 @@ import { flushDurableStateNow, resetDurableStateCacheForTests } from "../src/lib
 
 const recentDate = (daysAgo: number) => new Date(Date.now() - daysAgo * 86_400_000).toISOString().slice(0, 10);
 
+function scanWithCandidates(
+  candidates: Array<Pick<MarketQuote, "symbol"> & Partial<MarketQuote>>
+): Pick<MarketScan, "topCandidates"> {
+  return {
+    topCandidates: candidates.map((c) => ({
+      price: c.price ?? 100,
+      volume: c.volume ?? 1_000_000,
+      intradayChangePct: c.intradayChangePct ?? 0,
+      positionMarketValue: c.positionMarketValue ?? 0,
+      score: c.score ?? 50,
+      ...c,
+      symbol: c.symbol,
+    })),
+  };
+}
+
 const mockedFetchDailyOHLC = vi.mocked(fetchDailyOHLC);
 
 beforeAll(() => {
@@ -91,12 +108,9 @@ describe("canonicalOutboundSymbol + alias-resolved outbound tickers", () => {
   });
 
   it("stamps the canonical ticker on outbound ref / fundamentals / analyst rows", () => {
-    type RefArg = Parameters<typeof marketQuoteToRef>[0];
-    type FundArg = Parameters<typeof marketQuoteToFundamentals>[0];
-    type AnalystArg = Parameters<typeof marketQuoteToAnalyst>[0];
-    expect(marketQuoteToRef({ symbol: "FB" } as unknown as RefArg)?.ticker).toBe("META");
-    expect(marketQuoteToFundamentals({ symbol: "FB", peRatio: 20 } as unknown as FundArg, recentDate(0))?.ticker).toBe("META");
-    expect(marketQuoteToAnalyst({ symbol: "FB", analystRating: "Buy" } as unknown as AnalystArg, recentDate(0))?.ticker).toBe("META");
+    expect(marketQuoteToRef({ symbol: "FB" })?.ticker).toBe("META");
+    expect(marketQuoteToFundamentals({ symbol: "FB", peRatio: 20 }, recentDate(0))?.ticker).toBe("META");
+    expect(marketQuoteToAnalyst({ symbol: "FB", analystRating: "Buy" }, recentDate(0))?.ticker).toBe("META");
   });
 });
 
@@ -116,15 +130,11 @@ describe("canonicalMarketDataSymbol (shared rename-vs-acquisition)", () => {
   });
 
   it("keeps identity refs folding acquisitions while market-data mappers drop them", () => {
-    type RefArg = Parameters<typeof marketQuoteToRef>[0];
-    type FundArg = Parameters<typeof marketQuoteToFundamentals>[0];
     // Company identity still points at the acquirer (canonicalOutboundSymbol).
     expect(canonicalOutboundSymbol("ATVI")).toBe("MSFT");
-    expect(marketQuoteToRef({ symbol: "ATVI", companyName: "Activision" } as unknown as RefArg)?.ticker).toBe("MSFT");
+    expect(marketQuoteToRef({ symbol: "ATVI", companyName: "Activision" })?.ticker).toBe("MSFT");
     // Market-data rows must not pollute MSFT's series with ATVI numbers.
-    expect(
-      marketQuoteToFundamentals({ symbol: "ATVI", peRatio: 12, eps: 1 } as unknown as FundArg, "2026-07-01")
-    ).toBeNull();
+    expect(marketQuoteToFundamentals({ symbol: "ATVI", peRatio: 12, eps: 1 }, "2026-07-01")).toBeNull();
     expect(
       ohlcBarsToPriceEntry("ATVI", [
         { time: "2026-07-01", open: 1, high: 1, low: 1, close: 90, volume: 1 }
@@ -568,7 +578,7 @@ describe("shareWithCongressTrade", () => {
 // ── shareScanRefs (after-scan hook) ────────────────────────────────────────────────
 
 describe("shareScanRefs", () => {
-  const scan = { topCandidates: [{ symbol: "AAPL" }, { symbol: "MSFT" }] } as Parameters<typeof shareScanRefs>[0];
+  const scan = scanWithCandidates([{ symbol: "AAPL" }, { symbol: "MSFT" }]);
 
   it("is a no-op when automatic sharing is disabled", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok"; // token alone is not enough
@@ -905,16 +915,14 @@ describe("shareScanRefs — fundamentals + analyst", () => {
     process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "on"; // App A's #46 migration is live
     const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
-    const scan = {
-      topCandidates: [
-        {
-          symbol: "AAPL",
-          peRatio: 25,
-          analystRating: "Buy",
-          analystBySource: { fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } } }
-        }
-      ]
-    } as unknown as Parameters<typeof shareScanRefs>[0];
+    const scan = scanWithCandidates([
+      {
+        symbol: "AAPL",
+        peRatio: 25,
+        analystRating: "Buy",
+        analystBySource: { fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } } },
+      },
+    ]);
     const res = await shareScanRefs(scan);
     expect(res?.ok).toBe(true);
     const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
@@ -928,9 +936,14 @@ describe("shareScanRefs — fundamentals + analyst", () => {
     process.env.CONGRESS_SHARE_ENABLED = "on";
     const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
-    const scan = {
-      topCandidates: [{ symbol: "AAPL", peRatio: 25, analystRating: "Buy", analystBySource: { fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } } } }]
-    } as unknown as Parameters<typeof shareScanRefs>[0];
+    const scan = scanWithCandidates([
+      {
+        symbol: "AAPL",
+        peRatio: 25,
+        analystRating: "Buy",
+        analystBySource: { fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } } },
+      },
+    ]);
     const res = await shareScanRefs(scan);
     expect(res?.ok).toBe(true);
     const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
@@ -945,9 +958,14 @@ describe("shareScanRefs — fundamentals + analyst", () => {
     process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "off";
     const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
-    const scan = {
-      topCandidates: [{ symbol: "AAPL", peRatio: 25, analystRating: "Buy", analystBySource: { fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } } } }]
-    } as unknown as Parameters<typeof shareScanRefs>[0];
+    const scan = scanWithCandidates([
+      {
+        symbol: "AAPL",
+        peRatio: 25,
+        analystRating: "Buy",
+        analystBySource: { fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } } },
+      },
+    ]);
     const res = await shareScanRefs(scan);
     expect(res?.ok).toBe(true);
     const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);

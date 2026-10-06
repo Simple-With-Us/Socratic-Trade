@@ -69,6 +69,7 @@ import type { MarketQuote, MarketScan } from "./types";
 import { getFinraDataset, getInsiderDataset, getInsiderSignals, getShortVolumeSignals } from "./web-sources";
 import { fetchNasdaqScreenerResponse } from "./nasdaq-screener-fetch";
 import { logWarn } from "./sentry-metrics";
+import { readOptionalSchemaVersionField } from "./schema-version";
 import type { ZodType } from "zod";
 const DEFAULT_BASE_URL = "https://congress.trade";
 const DEFAULT_TIMEOUT_MS = 30_000; // App A upserts + recomputes per-trade perf anchors per call — give it room
@@ -792,12 +793,7 @@ function zodIssueLabel(issue: { path: PropertyKey[]; code: string }): string {
 }
 
 function readOptionalSchemaVersion(payload: CongressSharePayload): string | number | undefined {
-  const raw = payload.schemaVersion;
-  if (typeof raw === "string" && raw.trim()) {
-    return raw.trim().replace(/[\r\n\t]/g, " ").slice(0, 64);
-  }
-  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
-  return undefined;
+  return readOptionalSchemaVersionField(payload.schemaVersion);
 }
 
 async function reportCongressShareRowsDropped(details: {
