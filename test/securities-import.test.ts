@@ -295,6 +295,20 @@ describe("POST /api/admin/securities/import", () => {
     const json = SecuritiesImportResponseSchema.parse(await res.json());
     expect(json.schemaVersion).toBe("2.7.0[securities-import] forged");
   });
+
+  it("treats whitespace-only schemaVersion as absent", async () => {
+    configureIngestToken();
+    const res = await importRoute(postJson({ schemaVersion: "   \t", prices: [] }, ingestAuthHeader()));
+    expect(res.status).toBe(200);
+    const json = SecuritiesImportResponseSchema.parse(await res.json());
+    expect(json.schemaVersion).toBeUndefined();
+  });
+
+  it("400s when schemaVersion has an invalid type", async () => {
+    configureIngestToken();
+    const res = await importRoute(postJson({ schemaVersion: { bad: true }, prices: [] }, ingestAuthHeader()));
+    expect(res.status).toBe(400);
+  });
 });
 
 // ── fetchDailyOHLC cache-aside tier ─────────────────────────────────────────────

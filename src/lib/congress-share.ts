@@ -883,7 +883,7 @@ export function dropInvalidShareRows(payload: CongressSharePayload): ShareRowsDr
     for (const row of rows) {
       const parsed = schema.safeParse(row);
       if (parsed.success) {
-        valid.push(parsed.data as T);
+        valid.push(row);
         continue;
       }
       bad++;

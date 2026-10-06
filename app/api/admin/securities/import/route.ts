@@ -45,17 +45,17 @@ export const dynamic = "force-dynamic";
 // Body (all optional): { refs?, prices?, spx?, insider?, shortVolume?, fundamentals?, analyst?, origin? }
 // — the same shape as App B's outbound push (only refs/prices/spx are stored inbound).
 export async function POST(req: Request) {
+  if (!verifySecuritiesImportToken(req)) {
+    audit("securities_import_rejected", { reason: "token" });
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
+
   const limited = enforceRateLimit(
     trustedCloudflareClientIp(req),
     "admin/securities/import",
     RATE_LIMITS.securitiesImport
   );
   if (limited) return limited;
-
-  if (!verifySecuritiesImportToken(req)) {
-    audit("securities_import_rejected", { reason: "token" });
-    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  }
 
   let rawBody: unknown;
   try {

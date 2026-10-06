@@ -36,12 +36,13 @@
 **Next.**  PR #4217 MERGEABLE; wait `verify` green; Kody doc threads addressed.
 ## 2026-10-05 CURSOR — Congress share schema drift (board bf84ffba, branch `gb-compiler/st-share-schemaversion`)
 ## 2026-10-06 CURSOR — Congress share schema drift Kody round 2 (board bf84ffba, branch `gb-compiler/st-share-schemaversion`, PR https://github.com/Simple-With-Us/Socratic-Trade/pull/4220)
+## 2026-10-06 CURSOR — Congress share schema drift Kody round 2 (board bf84ffba, branch `gb-compiler/st-share-schemaversion`, PR #4220)
 
-**What.**  Rebased onto `origin/main`.  Kody round 2: effort-log PR tracking URL; rollout scrubbed internal route paths + new fleet-recall lesson; `dropInvalidShareRows` pushes Zod-parsed rows; collapsed Zod path indices in `droppedReasons`; `CongressImportResponseSchema` on upstream 2xx bodies; exported `SecuritiesImportResponseSchema` in route tests.
+**What.**  Kody round 3: rate limits after auth on congress webhook + securities import; effort-log/STATUS use `#4220` refs only; rollout handoff headings normalized; `dropInvalidShareRows` forwards original rows; `OptionalSchemaVersionSchema` (Zod) for inbound/outbound `schemaVersion`; response schema accepts numeric echo; `CONGRESS_TRADE_TEST_TOKEN` in vitest for share tests.
 
-**Verification.**  `npm run lint` (0 errors); `npx tsc --noEmit`; `npx vitest run test/securities-import.test.ts test/congress-share.test.ts` (green; breaker probe test can flake when full file runs).
+**Verification.**  `npm run lint`; `npx tsc --noEmit`; `npx vitest run test/securities-import.test.ts test/congress-trade-events.test.ts test/congress-share.test.ts`.
 
-**Next.**  Push; reply + resolve all seven Kody threads; CI `verify` for squash auto-merge.
+**Next.**  Push; FIXED replies + resolve all open Kody threads; CI `verify`.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

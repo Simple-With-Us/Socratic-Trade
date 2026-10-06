@@ -71,7 +71,8 @@ export default defineConfig({
       FILING_API_KEY: "",
       // Non-production test credentials for route tests (never embed bearer/HMAC secrets in test source).
       SECURITIES_IMPORT_TEST_TOKEN: "vitest-securities-import-token",
-      CONGRESS_WEBHOOK_TEST_SECRET: "vitest-congress-webhook-secret"
+      CONGRESS_WEBHOOK_TEST_SECRET: "vitest-congress-webhook-secret",
+      CONGRESS_TRADE_TEST_TOKEN: "vitest-congress-trade-token"
     },
     exclude: [
       "node_modules/**",

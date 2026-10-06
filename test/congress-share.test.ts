@@ -58,6 +58,14 @@ import { flushDurableStateNow, resetDurableStateCacheForTests } from "../src/lib
 
 const recentDate = (daysAgo: number) => new Date(Date.now() - daysAgo * 86_400_000).toISOString().slice(0, 10);
 
+function congressTradeTestToken(): string {
+  const token = process.env.CONGRESS_TRADE_TEST_TOKEN;
+  if (!token) {
+    throw new Error("CONGRESS_TRADE_TEST_TOKEN is required for Congress share tests");
+  }
+  return token;
+}
+
 function scanWithCandidates(
   candidates: Array<Pick<MarketQuote, "symbol"> & Partial<MarketQuote>>
 ): Pick<MarketScan, "topCandidates"> {
@@ -191,7 +199,7 @@ describe("dropInvalidShareRows — drop malformed rows instead of sending them",
   });
 
   it("shareWithCongressTrade logs optional schemaVersion when present (tolerant reader)", async () => {
-    process.env.CONGRESS_TRADE_TOKEN = "t";
+    process.env.CONGRESS_TRADE_TOKEN = congressTradeTestToken();
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })));
     const res = await shareWithCongressTrade({
       schemaVersion: 3,

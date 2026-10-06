@@ -1,6 +1,6 @@
 # Congress share schema drift observability + inbound guards (2026-10-05)
 
-## 1. Context & Objective
+## Context & Objective
 
 Board item `bf84ffba` (P1): outbound `dropInvalidShareRows` silently shrank Congress.Trade coverage when
 `congress-trading-shared` row schemas drifted; the inbound securities-import flow had no body cap;
@@ -8,7 +8,7 @@ neither inbound App A → App B receiver had request-rate limits.  Harden observ
 in Socratic.Trade without editing the shared package (`schemaVersion` on `SharePayload` remains a
 follow-up there).
 
-## 2. Changes Made
+## Changes Made
 
 - `dropInvalidShareRows` now returns per-stream drop counts plus aggregated Zod issue reasons; outbound
   `shareWithCongressTrade` receipts and `runCongressDailyShare` summaries surface `dropped` /
@@ -34,14 +34,14 @@ Files:
 - `test/securities-import.test.ts`
 - `test/congress-trade-events.test.ts`
 
-## 3. Decisions & Trade-offs
+## Decisions & Trade-offs
 
 - Still per-row drop, not whole-payload reject — matches existing share contract.
 - Row-drop warnings are payload-quality signals, not transport outages (deliberately not `logApiHealth`).
 - `schemaVersion` not added to shared `SharePayloadSchema` in this repo; CT/ST must add it in
   `congress-trading-shared` as a follow-up.
 
-## 4. Verification State
+## Verification State
 
 ```bash
 npx tsc --noEmit
@@ -49,12 +49,12 @@ npx vitest run test/securities-import.test.ts test/congress-trade-events.test.ts
 npx vitest run test/congress-share.test.ts  # intermittent flake: shareWithCongressTrade breaker probe fetch count when full file runs
 ```
 
-## 5. Next Steps & Blockers
+## Next Steps & Blockers
 
 - Add `schemaVersion` to `SharePayloadSchema` in `congress-trading-shared` and pin the version in both apps.
 - None for this ST change set.
 
-## 6. Zero-Code Findings
+## Zero-Code Findings
 
 Shared-schema drift should be surfaced with per-stream drop counts and aggregate validation reasons so outbound coverage loss is diagnosable instead of silent.
 
