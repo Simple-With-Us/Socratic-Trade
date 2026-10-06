@@ -7,7 +7,7 @@ Production builds logged webpack "Attempted import error" for six integrations r
 ## Changes Made
 
 - Leave `Sentry.init` on `@sentry/nextjs` in `sentry.server.config.ts`.  Do not name the six factories there.
-- From the Node branch of `instrumentation.ts`, load `nodeRuntimeMetricsIntegration`, `openAIIntegration`, `anthropicAIIntegration`, `googleGenAIIntegration`, `vercelAIIntegration`, and `langChainIntegration` with `webpackIgnore` (same shape as `@sentry/profiling-node`) and `Sentry.addIntegration`.  `addIntegration` skips a name that default integrations already installed.
+- From the Node branch of `instrumentation.ts`, load `nodeRuntimeMetricsIntegration`, `openAIIntegration`, `anthropicAIIntegration`, `googleGenAIIntegration`, `vercelAIIntegration`, and `langChainIntegration` with `webpackIgnore` (same shape as `@sentry/profiling-node`) and `Sentry.addIntegration`.  `addIntegration` skips a name that default integrations already installed.  Each factory is registered in its own try/catch and a failure is logged, so one throw does not drop the other five.  `addIntegration` is taken from `@sentry/nextjs` or its default export.
 - Direct dependency `@sentry/node` at `^11.0.0`, the same range as `@sentry/nextjs`, so npm dedupes to one copy.  Lockfile still resolves 11.0.0.  Unrelated lockfile `libc` churn from the first commit is reverted.
 
 Files touched:

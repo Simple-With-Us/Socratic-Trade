@@ -91,11 +91,11 @@
 **Next.**  Push; reply on Kody threads; do not merge.
 ## 2026-10-05 CURSOR — Sentry server AI integrations (board `f411f8a7`, branch `cursor/fix-sentry-node-integrations-373d`)
 
-**What.**  `sentry.server.config.ts` named six integrations on `@sentry/nextjs` that the Edge compile does not re-export (Sentry 7753792417).  A static `@sentry/node` import then failed that same Edge bundle (`diagnostics_channel`, `worker_threads`).  `Sentry.init` stays on `@sentry/nextjs`.  The six factories are attached from `instrumentation.ts` on the Node runtime only, with `webpackIgnore` (same path as `@sentry/profiling-node`).  Direct `@sentry/node` is `^11.0.0`, the same range as `@sentry/nextjs`, so npm keeps one copy.
+**What.**  `sentry.server.config.ts` named six integrations on `@sentry/nextjs` that the Edge compile does not re-export (Sentry 7753792417).  A static `@sentry/node` import then failed that same Edge bundle (`diagnostics_channel`, `worker_threads`).  `Sentry.init` stays on `@sentry/nextjs`.  The six factories are attached from `instrumentation.ts` on the Node runtime only, with `webpackIgnore` (same path as `@sentry/profiling-node`).  Each factory has its own try/catch and logs on failure.  Direct `@sentry/node` is `^11.0.0`, the same range as `@sentry/nextjs`, so npm keeps one copy.
 
 **Verification.**  Touched files: `npm run lint` 0 errors; `npx tsc --noEmit` clean.  CI `verify` then runs full `npm test` and `npm run build` (no "Attempted import error", no Edge `Module not found` for `@sentry/node`).
 
-**Next.**  Open PR READY; wait for `verify` CI; do not merge from cloud agent unless owner asks.
+**Next.**  Rebased onto `origin/main`.  Wait for `verify` CI on this tip.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

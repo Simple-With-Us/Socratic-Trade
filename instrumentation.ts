@@ -89,23 +89,53 @@ export async function register() {
       // Same webpackIgnore shape as profiling below.  A static @sentry/node
       // import is traced into the Edge compile of this file and fails the build.
       const sentryNodePkg = "@sentry/node";
-      const {
-        anthropicAIIntegration,
-        googleGenAIIntegration,
-        langChainIntegration,
-        nodeRuntimeMetricsIntegration,
-        openAIIntegration,
-        vercelAIIntegration,
-      } = (await import(/* webpackIgnore: true */ sentryNodePkg)) as typeof import("@sentry/node");
-      const Sentry = await import("@sentry/nextjs");
-      Sentry.addIntegration(nodeRuntimeMetricsIntegration());
-      Sentry.addIntegration(openAIIntegration());
-      Sentry.addIntegration(anthropicAIIntegration());
-      Sentry.addIntegration(googleGenAIIntegration());
-      Sentry.addIntegration(vercelAIIntegration());
-      Sentry.addIntegration(langChainIntegration());
-    } catch {
+      const loaded = (await import(/* webpackIgnore: true */ sentryNodePkg)) as typeof import("@sentry/node") & {
+        default?: typeof import("@sentry/node");
+      };
+      const sentryNode =
+        typeof loaded.nodeRuntimeMetricsIntegration === "function" ? loaded : loaded.default;
+      const sentryNext = (await import("@sentry/nextjs")) as typeof import("@sentry/nextjs") & {
+        default?: typeof import("@sentry/nextjs");
+      };
+      // Raw Node ESM can put CJS exports on `.default` (same interop as scheduler.ts).
+      const addIntegration = sentryNext.addIntegration ?? sentryNext.default?.addIntegration;
+      if (!sentryNode || typeof addIntegration !== "function") {
+        console.warn("[sentry] node AI integrations not attached", {
+          module: Boolean(sentryNode),
+          addIntegration: typeof addIntegration
+        });
+      } else {
+        const attach = (name: string, register: () => void) => {
+          try {
+            register();
+          } catch (err) {
+            // One failing factory must not drop the other five, and a silent
+            // catch would look the same as "instrumentation is on".
+            console.warn(`[sentry] failed to attach integration ${name}`, err);
+          }
+        };
+        attach("nodeRuntimeMetricsIntegration", () => {
+          addIntegration(sentryNode.nodeRuntimeMetricsIntegration());
+        });
+        attach("openAIIntegration", () => {
+          addIntegration(sentryNode.openAIIntegration());
+        });
+        attach("anthropicAIIntegration", () => {
+          addIntegration(sentryNode.anthropicAIIntegration());
+        });
+        attach("googleGenAIIntegration", () => {
+          addIntegration(sentryNode.googleGenAIIntegration());
+        });
+        attach("vercelAIIntegration", () => {
+          addIntegration(sentryNode.vercelAIIntegration());
+        });
+        attach("langChainIntegration", () => {
+          addIntegration(sentryNode.langChainIntegration());
+        });
+      }
+    } catch (err) {
       // Node-only SDK.  A missing module must not take down Sentry.init.
+      console.warn("[sentry] @sentry/node not loadable on this runtime", err);
     }
     try {
       const profilingPkg = "@sentry/profiling-node";
