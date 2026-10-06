@@ -58,34 +58,45 @@ jobs:
       touches_protected: ${{ steps.check.outputs.touches_protected }}
       skip_automerge: ${{ steps.check.outputs.skip_automerge }}
     steps:
+      # Shallow checkout: only need the classifier script at HEAD.  Base CODEOWNERS and the
+      # merge-base..head file list come from the GitHub API (no full git history clone).
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
       - name: Detect CODEOWNERS trading paths in PR diff
         id: check
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           skip_automerge=false
-          # Read CODEOWNERS from the base revision so this PR cannot relax its own gate.
           BASE_CODEOWNERS="$RUNNER_TEMP/codeowners-base"
-          git show "$BASE:.github/CODEOWNERS" > "$BASE_CODEOWNERS" 2>/dev/null || : > "$BASE_CODEOWNERS"
-          if CODEOWNERS_FILE="$BASE_CODEOWNERS" bash scripts/pr-touches-codeowners-paths.sh "$BASE" "$HEAD"; then
+          if content="$(gh api "repos/$REPO/contents/.github/CODEOWNERS?ref=$BASE" --jq -r '.content // empty' 2>/dev/null)" && [ -n "$content" ]; then
+            printf '%s' "$content" | base64 -d > "$BASE_CODEOWNERS"
+          else
+            : > "$BASE_CODEOWNERS"
+          fi
+          # GitHub three-dot compare = merge-base(base, head)..head (same scope as the script's git diff).
+          if ! gh api "repos/$REPO/compare/${BASE}...${HEAD}" --jq -r '.status' >/dev/null 2>&1; then
+            echo "Could not list PR changed files via compare API -- fail closed" >&2
+            echo "touches_protected=true" >> "$GITHUB_OUTPUT"
+            echo "skip_automerge=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mapfile -t changed_files < <(
+            gh api "repos/$REPO/compare/${BASE}...${HEAD}" --paginate -q '.files[].filename' 2>/dev/null || true
+          )
+          if [ ${#changed_files[@]} -gt 0 ] && CODEOWNERS_FILE="$BASE_CODEOWNERS" bash scripts/pr-touches-codeowners-paths.sh --files "${changed_files[@]}"; then
             echo "touches_protected=true" >> "$GITHUB_OUTPUT"
             skip_automerge=true
             echo "::notice::PR touches CODEOWNERS trading-execution paths - auto-merge will not be armed (human merge required)"
           else
             echo "touches_protected=false" >> "$GITHUB_OUTPUT"
           fi
-          merge_base="$(git merge-base "$BASE" "$HEAD" 2>/dev/null || true)"
-          if [ -n "$merge_base" ]; then
-            changed_files="$(git diff --name-only --no-renames "$merge_base" "$HEAD" 2>/dev/null || true)"
-          else
-            changed_files=""
-          fi
-          if printf '%s\n' "$changed_files" | grep -qxE '(\.github/CODEOWNERS|\.github/workflows/auto-merge-prs\.yml|scripts/pr-touches-codeowners-paths\.sh)'; then
+          if printf '%s\n' "${changed_files[@]}" | grep -qxE '(\.github/CODEOWNERS|\.github/workflows/auto-merge-prs\.yml|scripts/pr-touches-codeowners-paths\.sh)'; then
             skip_automerge=true
             echo "::notice::PR edits the auto-merge gate - auto-merge will not be armed on this PR"
           fi

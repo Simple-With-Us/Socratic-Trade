@@ -27,7 +27,7 @@ Touched paths:
 - **Self-edit:** PRs that change `.github/CODEOWNERS`, `.github/workflows/auto-merge-prs.yml`, or `scripts/pr-touches-codeowners-paths.sh` set `skip_automerge` and run `disable-on-skip-automerge`.  CODEOWNERS patterns for the gate are read from the **base** revision so the PR cannot relax its own rules.
 - **Diff scope:** `pr-touches-codeowners-paths.sh` uses `merge-base(base,head)..head`, not `base..head`, so main-line drift does not false-trigger protected classification.
 - **Arm step:** unexpected `gh pr merge --auto` failures emit `::error::` and fail the job (no blanket `GraphQL:` swallow).  Enumerated pending-check / conflict refusals stay non-fatal.
-- **Out of scope:** GitHub required-review ruleset / CODEOWNERS review enforcement (board `bdc2b662`); this workflow gate only prevents auto-arming, not manual `gh pr merge --auto` from an agent with credentials.
+- **Out of scope:** GitHub required-review ruleset / CODEOWNERS review enforcement (board `bdc2b662`); this workflow gate only prevents auto-arming, not manual squash merge or `gh pr merge --auto` by an actor with credentials (Rule 81 — see Fleet recall below).
 
 ## Verification State
 
@@ -49,6 +49,18 @@ Full-repo `npm test` on the cloud VM may report unrelated failures; CI `verify` 
 
 - Prior rollout `docs/rollouts/2026-08-10-always-auto-merge-prs.md` described arming every non-draft PR; header comment in the workflow now matches the CODEOWNERS exception.
 
-## Fleet recall (Rule 40)
+## Fleet recall (Rule 40 / Rule 35)
 
-Contributed lesson (category `lesson`, app `socratic-trade`, seat CURSOR): auto-merge gate uses merge-base diff scope, base-pinned CODEOWNERS read, slash-less basename matching, and self-edit skip for gate files.  Search: `recall_search` query `CODEOWNERS auto-merge merge-base`.
+**Search performed** (fleet `recall_search`, 2026-10-06; ≥5 hits reviewed; no secrets in corpus).  **Conclusion corroborated:** always-on workflow arming was unsafe for money-path PRs; fix is classifier + skip arm + labels, with ruleset CODEOWNERS reviews as the platform-layer follow-up (board `bdc2b662`).
+
+| Hit | What it added |
+|-----|----------------|
+| Contrib lesson **CURSOR** — `CODEOWNERS auto-merge gate: merge-base diff + base-pinned policy` | This PR's merge-base scope, base-revision CODEOWNERS read, self-edit skip |
+| Board **`318bfe710b794c28`** — money-path PRs still auto-armed | Options 1–3; this PR implements workflow classifier (option 1) |
+| Contrib lesson **CLAUDE** — workflow arms auto-merge; `disable-auto` alone races | Need `do-not-automerge` / hold labels, not disable-only |
+| Rollout **`docs/rollouts/2026-08-10-always-auto-merge-prs.md`** | Owner policy: arm every non-draft PR when token present |
+| Board **`bdc2b662`** / **KIMI** | Ruleset lacked required reviews on money paths — still optional follow-up |
+
+**Contributed** (category `lesson`, app `socratic-trade`, seat CURSOR): auto-merge gate uses merge-base diff scope (GitHub `base...head` compare API in CI), base-pinned CODEOWNERS via Contents API, slash-less basename matching, and self-edit skip for gate files.
+
+**Rule 81 (manual bypass):** this PR does **not** claim to block every merge path — only the workflow's auto-arm step.  Until ruleset required CODEOWNERS reviews land (board `318bfe71` option 2), money-path PRs rely on human squash + `do-not-automerge` / `needs-human-merge`; out of scope for this diff.

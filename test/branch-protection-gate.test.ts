@@ -246,7 +246,9 @@ describe("required contexts are not renamed out from under the ruleset", () => {
     expect(auto).toMatch(/^  disable-on-skip-automerge:\s*$/m);
     expect(auto).toContain("pr-touches-codeowners-paths.sh");
     expect(auto).toMatch(/skip_automerge != 'true'/);
-    expect(auto).toContain("git show \"$BASE:.github/CODEOWNERS\"");
+    expect(auto).toMatch(/contents\/\.github\/CODEOWNERS\?ref=\$BASE/);
+    expect(auto).toMatch(/compare\/\$\{BASE\}\.\.\.\$\{HEAD\}/);
+    expect(auto).not.toMatch(/fetch-depth:\s*0/);
     expect(auto).toContain(".github/CODEOWNERS|");
   });
 });
