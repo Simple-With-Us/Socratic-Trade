@@ -56,7 +56,10 @@ describe("CI queue safety", () => {
     // leading quote so such an iOS path still requires verify-ios (never fails open).
     const pattern = source.match(/grep -aE '(\^"\?\(ios\/[^']*)'/)?.[1];
     expect(pattern).toBeDefined();
-    const re = new RegExp(pattern!);
+    if (pattern === undefined) {
+      throw new Error("expected ios path grep pattern in ci.yml");
+    }
+    const re = new RegExp(pattern);
     for (const hit of [
       "ios/App/A.swift",
       "ios/App/Café.swift",
