@@ -47,15 +47,22 @@ No phase-doc change.  This does not change strategy, orders, or risk limits.
 
 ## Verification State
 
-Targeted, before the full gate:
+```bash
+npm run lint          # exit 0.  0 errors, 863 warnings (grandfathered).
+npx tsc --noEmit      # exit 0.
+npm test              # 11 failed, 9051 passed, 51 skipped (9113).
+npm run build         # exit 0.
+```
+
+The 11 failures are outside this diff.  None are in `test/run-failure-watchdog.test.ts`, `test/trading-liveness.test.ts`, or `test/stale-running-runs.test.ts`.  They are `test/alpha-vantage-key-pool.test.ts`, `test/congress-share.test.ts`, `test/cpuprofile-summary.test.ts` (Node 22 cannot import the `.ts` helper), `test/data-providers.test.ts` (Twelve Data), `test/notify-body-tiers.test.ts`, `test/notify-user-creds.test.ts` (cloud env returns a redacted token), `test/persistence-notification.test.ts`, and `test/server-metrics.test.ts`.
+
+Targeted, before the full suite:
 
 ```bash
 npx vitest run test/run-failure-watchdog.test.ts test/trading-liveness.test.ts test/stale-running-runs.test.ts
 ```
 
-44 passed.
-
-Full gate (lint, tsc, vitest, build) is recorded in the commit that follows this note once those commands finish.
+44 passed.  Those files are among the 9051 that passed in the full suite.
 
 ## Next Steps & Blockers
 
