@@ -161,6 +161,20 @@ describe("dropInvalidShareRows — drop malformed rows instead of sending them",
     expect(Object.keys(droppedReasons.refs ?? {}).length).toBeGreaterThan(0);
   });
 
+  it("aggregates Zod issue reasons with collapsed array indices (not per-element paths)", () => {
+    const badClose = { date: "not-a-date", close: 1 };
+    const { droppedReasons } = dropInvalidShareRows({
+      prices: [
+        { ticker: "AAA", closes: [badClose, { date: "2026-01-02", close: 2 }] },
+        { ticker: "BBB", closes: [{ date: "2026-01-01", close: 1 }, badClose] },
+      ],
+    });
+    const priceReasons = droppedReasons.prices ?? {};
+    const dateKeys = Object.keys(priceReasons).filter((k) => k.includes("date"));
+    expect(dateKeys).toHaveLength(1);
+    expect(dateKeys[0]).toMatch(/^closes\[\]\.date:/);
+  });
+
   it("shareWithCongressTrade excludes invalid rows from the POST body and counts only what's sent", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "t";
     let posted: { refs?: unknown[]; origin?: string } | undefined;

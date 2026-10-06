@@ -70,7 +70,22 @@ import { getFinraDataset, getInsiderDataset, getInsiderSignals, getShortVolumeSi
 import { fetchNasdaqScreenerResponse } from "./nasdaq-screener-fetch";
 import { logWarn } from "./sentry-metrics";
 import { readOptionalSchemaVersionField } from "./schema-version";
-import type { ZodType } from "zod";
+import { z, type ZodType } from "zod";
+
+/** Strict upstream import response from App A (HTTP 2xx body). */
+const CongressImportResponseSchema = z
+  .object({
+    ok: z.boolean().optional(),
+    errors: z.array(z.unknown()).optional(),
+    summary: z
+      .object({
+        errors: z.array(z.unknown()).optional(),
+      })
+      .optional(),
+  })
+  .catchall(z.unknown());
+
+export type CongressImportResponse = z.infer<typeof CongressImportResponseSchema>;
 const DEFAULT_BASE_URL = "https://congress.trade";
 const DEFAULT_TIMEOUT_MS = 30_000; // App A upserts + recomputes per-trade perf anchors per call — give it room
 const LAST_DAILY_RUN_KEY = "congress-share:lastDailyRunDate";
@@ -787,9 +802,28 @@ export type ShareRowsDropReport = {
   droppedTotal: number;
 };
 
+function formatZodIssuePath(path: PropertyKey[]): string {
+  if (path.length === 0) return "(root)";
+  const out: string[] = [];
+  for (const segment of path) {
+    if (typeof segment === "number") {
+      if (out.length === 0) {
+        out.push("[]");
+        continue;
+      }
+      const last = out[out.length - 1];
+      if (!last.endsWith("[]")) {
+        out[out.length - 1] = `${last}[]`;
+      }
+      continue;
+    }
+    out.push(String(segment));
+  }
+  return out.join(".");
+}
+
 function zodIssueLabel(issue: { path: PropertyKey[]; code: string }): string {
-  const path = issue.path.length > 0 ? issue.path.map(String).join(".") : "(root)";
-  return `${path}:${issue.code}`;
+  return `${formatZodIssuePath(issue.path)}:${issue.code}`;
 }
 
 function readOptionalSchemaVersion(payload: CongressSharePayload): string | number | undefined {
@@ -835,8 +869,8 @@ function shareDropReceipt(report: ShareRowsDropReport, schemaVersion?: string | 
  * Validate each dataset's rows against the shared row schemas and DROP any that fail, so malformed
  * data never reaches App A's import endpoint. Validation is PER-ROW (not whole-payload) so one bad
  * row never suppresses the valid rows in the same dataset — and it filters, rather than logs-and-sends
- * as the old code did. Rows that pass are returned verbatim (App A's importer accepts the extra
- * CongressRef fields the strict schema strips, so we never narrow a valid row's payload).
+ * as the old code did. Rows that pass are returned as Zod-parsed data so only validated fields
+ * cross the trust boundary.
  * Returns the filtered payload plus per-dataset dropped counts and aggregated Zod issue reasons.
  */
 export function dropInvalidShareRows(payload: CongressSharePayload): ShareRowsDropReport {
@@ -849,7 +883,7 @@ export function dropInvalidShareRows(payload: CongressSharePayload): ShareRowsDr
     for (const row of rows) {
       const parsed = schema.safeParse(row);
       if (parsed.success) {
-        valid.push(row);
+        valid.push(parsed.data as T);
         continue;
       }
       bad++;
@@ -1036,8 +1070,22 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
         logApiHealth({ service: "congress-share", ok: false, errorText: formattedError, keySource: "env" });
         return { ...dropMeta, ok: false, status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}`, sent };
       }
-      const response = await res.json().catch(() => undefined);
+      const responseRaw = await res.json().catch(() => undefined);
       clearCongressAuthBreaker(); // a successful call proves the token is good again
+      if (responseRaw === undefined) {
+        const bodyErrorText = "import response body was empty or unparseable";
+        console.error(`[congress-share] import rejected rows despite HTTP ${res.status}: ${bodyErrorText}`);
+        logApiHealth({ service: "congress-share", ok: false, errorText: bodyErrorText, keySource: "env" });
+        return { ...dropMeta, ok: false, status: res.status, error: bodyErrorText, sent };
+      }
+      const parsedResponse = CongressImportResponseSchema.safeParse(responseRaw);
+      if (!parsedResponse.success) {
+        const bodyErrorText = "import response body failed schema validation";
+        console.error(`[congress-share] import rejected rows despite HTTP ${res.status}: ${bodyErrorText}`);
+        logApiHealth({ service: "congress-share", ok: false, errorText: bodyErrorText, keySource: "env" });
+        return { ...dropMeta, ok: false, status: res.status, error: bodyErrorText, sent };
+      }
+      const response = parsedResponse.data;
       // App A answers HTTP 200 even when it rejected rows: its import handler returns
       // `{ ok: summary.errors.length === 0, ...summary }`, so `ok:false` and a populated `errors[]`
       // arrive on a 2xx. Treating transport success as delivery success is how a partial import

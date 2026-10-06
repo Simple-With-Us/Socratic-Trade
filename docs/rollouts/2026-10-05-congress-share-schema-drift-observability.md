@@ -3,9 +3,10 @@
 ## 1. Context & Objective
 
 Board item `bf84ffba` (P1): outbound `dropInvalidShareRows` silently shrank Congress.Trade coverage when
-`congress-trading-shared` row schemas drifted; inbound `/api/admin/securities/import` had no body cap;
-neither inbound route had request-rate limits.  Harden observability and inbound guards in Socratic.Trade
-without editing the shared package (`schemaVersion` on `SharePayload` remains a follow-up there).
+`congress-trading-shared` row schemas drifted; the inbound securities-import flow had no body cap;
+neither inbound App A → App B receiver had request-rate limits.  Harden observability and inbound guards
+in Socratic.Trade without editing the shared package (`schemaVersion` on `SharePayload` remains a
+follow-up there).
 
 ## 2. Changes Made
 
@@ -15,9 +16,9 @@ without editing the shared package (`schemaVersion` on `SharePayload` remains a 
 - Row drops are reported via `audit()`, `console.warn`, and sparse `logWarn` structured logs (not
   `logApiHealth`, which would reset consecutive transport-failure counters).
 - Optional `schemaVersion` on inbound/outbound share-shaped JSON is accepted and logged (tolerant reader).
-- `SECURITIES_IMPORT_MAX_BYTES` (5 MB, same as congress webhook) + `readJsonWithLimit` on
-  `/api/admin/securities/import`.
-- Per-IP rate limits on `/api/admin/securities/import` and `/api/webhooks/congress`.
+- `SECURITIES_IMPORT_MAX_BYTES` (5 MB, same as congress webhook) + `readJsonWithLimit` on the guarded
+  securities-import receiver.
+- Per-IP rate limits on the securities-import receiver and the congress webhook ingest route.
 - **2026-10-06 follow-up (PR #4220 Kody):** inbound import uses strict `SecuritiesImportPayloadSchema.safeParse` (HTTP 400 on failure) instead of per-row coerce/drop; `src/lib/schema-version.ts` strips control chars and bounds `schemaVersion` length; tests use `TEST_INGEST_TOKEN` / `TEST_WEBHOOK_SECRET`.
 
 Files:
@@ -57,4 +58,6 @@ npx vitest run test/congress-share.test.ts  # intermittent flake: shareWithCongr
 
 Shared-schema drift should be surfaced with per-stream drop counts and aggregate validation reasons so outbound coverage loss is diagnosable instead of silent.
 
-`recall contribute "Shared-schema drift should be surfaced with per-stream drop counts and aggregate validation reasons so outbound coverage loss is diagnosable instead of silent." --category lesson --app socratic-trade`
+When aggregating Zod drop reasons for array fields, collapse numeric path indices to `[]` so one bucket covers every bad element instead of minting a key per row index.
+
+`recall contribute "When aggregating Zod drop reasons for array fields, collapse numeric path indices to [] so observability buckets stay bounded under large nightly fan-outs." --category lesson --app socratic-trade`

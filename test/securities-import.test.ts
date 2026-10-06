@@ -21,6 +21,7 @@ import { latestCompletedTradingSessionEtKey } from "../src/lib/market-hours";
 import { POST as importRoute } from "../app/api/admin/securities/import/route";
 import { SECURITIES_IMPORT_MAX_BYTES } from "../src/lib/bounded-body";
 import { RATE_LIMITS, resetRateLimiter } from "../src/lib/rate-limit";
+import { SecuritiesImportResponseSchema } from "../src/lib/securities-import-schema";
 
 function securitiesImportTestToken(): string {
   const token = process.env.SECURITIES_IMPORT_TEST_TOKEN;
@@ -188,7 +189,7 @@ describe("POST /api/admin/securities/import", () => {
       )
     );
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { ok: boolean; refs: number; pricedTickers: number; priceRows: number; spxRows: number };
+    const json = SecuritiesImportResponseSchema.parse(await res.json());
     expect(json).toMatchObject({ ok: true, refs: 1, pricedTickers: 1, priceRows: 3, spxRows: 2 });
     expect(getImportedPriceCloses("AAPL")).toHaveLength(3);
   });
@@ -197,7 +198,7 @@ describe("POST /api/admin/securities/import", () => {
     configureIngestToken();
     const res = await importRoute(postJson({ prices: [{ ticker: "AAPL", closes: seqCloses(3) }], origin: "app-b" }, ingestAuthHeader()));
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { ok: boolean; skipped?: boolean };
+    const json = SecuritiesImportResponseSchema.parse(await res.json());
     expect(json).toMatchObject({ ok: true, skipped: true });
     expect(getImportedPriceCloses("AAPL")).toHaveLength(0);
   });
@@ -281,7 +282,7 @@ describe("POST /api/admin/securities/import", () => {
     configureIngestToken();
     const res = await importRoute(postJson({ schemaVersion: "2.7.0", prices: [] }, ingestAuthHeader()));
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { schemaVersion?: string };
+    const json = SecuritiesImportResponseSchema.parse(await res.json());
     expect(json.schemaVersion).toBe("2.7.0");
   });
 
@@ -291,7 +292,7 @@ describe("POST /api/admin/securities/import", () => {
       postJson({ schemaVersion: "2.7.0\n[securities-import] forged", prices: [] }, ingestAuthHeader())
     );
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { schemaVersion?: string };
+    const json = SecuritiesImportResponseSchema.parse(await res.json());
     expect(json.schemaVersion).toBe("2.7.0[securities-import] forged");
   });
 });
