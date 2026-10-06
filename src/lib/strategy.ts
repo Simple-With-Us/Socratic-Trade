@@ -238,7 +238,7 @@ import { STOP_PLAN_FALLBACK_STOP_PCT, STOP_PLAN_STYLES } from "./types";
 import { computeRationaleDiversity } from "./rationale-diversity";
 import { isMarketOpen } from "./market-calendar";
 import { isTradingDay } from "./market-calendar";
-import { isIdempotencyConflictHttpError } from "./placement-outcome";
+import { classifyPlaceOrderError } from "./placement-outcome";
 import { reconcilePendingFills, flagStalePlacingIntents, reconcilePlacementError, LiveApprovalConfirmation, LiveApprovalConfirmationError, coerceProtectiveExitToMarket } from "./strategy-execution";
 import { runSafetyMaintenance, withDeadline } from "./safety-maintenance";
 import { STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE, withStrategyRagRetrievalDeadline } from "./rag-retrieval-deadline";
@@ -4413,10 +4413,12 @@ export async function runStrategyOnce(
 
             // P2.6: Explicitly intercept pre-flight validation throws and broker 4xx rejections.
             // A 4xx (e.g. 403 Forbidden, 400 Bad Request) means the broker definitively received and rejected it.
-            // HTTP 409 is the exception: Alpaca uses it for a reused client_order_id, which means
-            // the order already exists and must be reconciled rather than marked rejected.
-            // OrderValidationError means the adapter blocked it before sending.
-            // Neither terminal case is "uncertain", so we abort the placement loop immediately.
+            // HTTP 429/408 are transient — book not_placed, never rejected_by_broker.
+            // HTTP 409, and a duplicate client_order_id on another status (Alpaca 422
+            // "must be unique"), mean the key already exists and must be reconciled
+            // rather than marked rejected. OrderValidationError means the adapter
+            // blocked it before sending. Neither terminal case is "uncertain", so we
+            // abort the placement loop immediately.
             // A failed placement-time position read (fail-closed sell/cover on Alpaca) is the ONE
             // OrderValidationError that is transient: nothing reached the broker, and the next run
             // re-proposes against a fresh read.  Book it retryable not_placed, never terminal
@@ -4455,10 +4457,27 @@ export async function runStrategyOnce(
               lockGuard.assertOwned();
               return { done: "continue" } as const;
             }
-            if (
-              placeError instanceof OrderValidationError ||
-              (/\bHTTP 4\d\d\b/i.test(message) && !isIdempotencyConflictHttpError(message))
-            ) {
+            // OrderValidationError is checked first so a validation message that happens
+            // to mention HTTP 429 stays blocked, not retryable.
+            const placeClass = placeError instanceof OrderValidationError ? null : classifyPlaceOrderError(message);
+            if (placeClass === "retryable") {
+              const note = `Broker rate-limited or timed out (${message}). Safe to retry.`;
+              updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, note);
+              audit(
+                "order_not_placed_retryable_http",
+                { runId, proposalId, refId, symbol: sym, side: normalizedProposal.side, error: message.slice(0, 400) },
+                userId,
+                connectedAccountId
+              );
+              results.push({ id: proposalId, proposal: normalizedProposal, status: "error", reasons: [note] });
+              await sendNotification(
+                { type: "run_failed", title: `${sym} order not placed — safe to retry`, payload: { runId, proposalId, refId, error: message, reconcile: "not_placed" } },
+                { policy, userId }
+              );
+              lockGuard.assertOwned();
+              return { done: "continue" } as const;
+            }
+            if (placeError instanceof OrderValidationError || placeClass === "rejected_terminal") {
               const status = placeError instanceof OrderValidationError ? "blocked" : "rejected_by_broker";
               const transitionDecision =
                 status === "blocked" ? { ...decision, approved: false, reasons: [...decision.reasons, message] } : decision;

@@ -72,8 +72,7 @@ import {
   StrategyLockOwnershipLostError
 } from "./strategy-lock-guard";
 import {
-  isRetryableBrokerHttpError,
-  isTerminalBrokerHttpError,
+  classifyPlaceOrderError,
   type ExecuteProposalResult
 } from "./placement-outcome";
 import { appendDecisionStep, assertLiveApprovalConfirmation, protectiveExitQuoteFromScan, openingPolicyNotionalCap, autoRevertOnCapBreach, auditWashSaleProceed } from "./strategy";
@@ -1485,7 +1484,8 @@ export async function executeProposal(
             );
             throw new Error([message].join(" "));
           }
-          if (isRetryableBrokerHttpError(message)) {
+          const placeClass = classifyPlaceOrderError(message);
+          if (placeClass === "retryable") {
             const note = `Broker rate-limited or timed out (${message}). Safe to retry.`;
             updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, note);
             audit(
@@ -1504,7 +1504,7 @@ export async function executeProposal(
             );
             throw new Error([note].join(" "));
           }
-          if (isTerminalBrokerHttpError(message)) {
+          if (placeClass === "rejected_terminal") {
             updateProposalStatus(proposalId, "rejected_by_broker", undefined, review, review.estimatedNotional, userId, undefined, message);
             audit(
               "order_rejected_by_broker",

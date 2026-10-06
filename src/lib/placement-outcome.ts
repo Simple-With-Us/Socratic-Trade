@@ -24,13 +24,18 @@ export function isRetryableBrokerHttpError(message: string): boolean {
 }
 
 /**
- * Alpaca 409 on `client_order_id` means that idempotency key already exists at
- * the broker — usually because the first createOrder was accepted and the
- * response socket died. That is a live order, not a rejection. Callers must
- * reconcile by refId instead of marking rejected_by_broker.
+ * Alpaca reports a reused `client_order_id` as HTTP 409, and also as HTTP 422
+ * `"client_order_id must be unique"`. Either way the key already exists at the
+ * broker — usually because the first createOrder was accepted and the response
+ * socket died. That is a live order, not a rejection. Callers must reconcile
+ * by refId instead of marking rejected_by_broker.
  */
+export function isDuplicateClientOrderIdError(message: string): boolean {
+  return /client_order_id/i.test(message) && /must be unique|already exists|duplicate/i.test(message);
+}
+
 export function isIdempotencyConflictHttpError(message: string): boolean {
-  return /\bHTTP 409\b/i.test(message);
+  return /\bHTTP 409\b/i.test(message) || isDuplicateClientOrderIdError(message);
 }
 
 /** Definitive broker HTTP 4xx excluding retryable limits and idempotency conflicts. */
@@ -40,6 +45,21 @@ export function isTerminalBrokerHttpError(message: string): boolean {
     !isRetryableBrokerHttpError(message) &&
     !isIdempotencyConflictHttpError(message)
   );
+}
+
+export type PlaceOrderErrorClass = "retryable" | "idempotency_conflict" | "rejected_terminal" | "other";
+
+/**
+ * Shared place-order error class for the approval path and the autonomous run.
+ * `retryable` books not_placed (429/408).  `idempotency_conflict` must reconcile
+ * (409, or a duplicate client_order_id on another 4xx) — an order may already
+ * be live.  `rejected_terminal` is a definitive broker refusal.
+ */
+export function classifyPlaceOrderError(message: string): PlaceOrderErrorClass {
+  if (isRetryableBrokerHttpError(message)) return "retryable";
+  if (isIdempotencyConflictHttpError(message)) return "idempotency_conflict";
+  if (/\bHTTP 4\d\d\b/i.test(message)) return "rejected_terminal";
+  return "other";
 }
 
 export function classifyPlacementOutcomeKind(status: string, reasons?: string[]): PlacementOutcomeKind {
