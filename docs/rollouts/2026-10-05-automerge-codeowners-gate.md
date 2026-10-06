@@ -36,7 +36,7 @@ npm run lint
 npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-gate.test.ts
 ```
 
-PR tip (2026-10-06): Kody follow-up — anchored vs unanchored CODEOWNERS matching, pattern normalization in `load_patterns`, `CODEOWNERS_FILE` exercised in vitest.  Record exact tip SHA in `STATUS.md` after push.
+PR tip `4834b6bc` (2026-10-06): Kody follow-up — anchored vs unanchored CODEOWNERS matching, pattern normalization in `load_patterns`, `CODEOWNERS_FILE` exercised in vitest.
 
 Full-repo `npm test` on the cloud VM may report unrelated failures; CI `verify` is authoritative for merge.
 
