@@ -48,5 +48,7 @@ Full-repo `npm test` on the cloud VM may report unrelated failures; CI `verify` 
 ## Zero-Code Findings
 
 - Prior rollout `docs/rollouts/2026-08-10-always-auto-merge-prs.md` described arming every non-draft PR; header comment in the workflow now matches the CODEOWNERS exception.
-- **Kody defer (performance):** pattern matching could cache CODEOWNERS lines once per job; typical PR diffs are small and classify-protected finishes in seconds — optimize only if telemetry shows pain.
-- **Kody defer (fleet recall Rule 40):** reusable lesson is captured in this rollout + `scripts/pr-touches-codeowners-paths.sh` header; separate `recall contribute` is optional owner follow-up, not a merge blocker for this CI gate PR.
+
+## Fleet recall (Rule 40)
+
+Contributed lesson (category `lesson`, app `socratic-trade`, seat CURSOR): auto-merge gate uses merge-base diff scope, base-pinned CODEOWNERS read, slash-less basename matching, and self-edit skip for gate files.  Search: `recall_search` query `CODEOWNERS auto-merge merge-base`.
