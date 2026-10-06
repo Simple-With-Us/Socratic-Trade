@@ -10,6 +10,8 @@
 //   - INTERNAL ERROR inside the limiter → fail OPEN: never block a legitimate request because the limiter
 //     itself threw. `rateLimit()` swallows its own errors and allows the request.
 
+import { z } from "zod";
+
 export interface RateLimitOptions {
   /** Max number of allowed requests within the window. */
   limit: number;
@@ -117,9 +119,20 @@ export function rateLimit(key: string, options: RateLimitOptions, now: number = 
   }
 }
 
-/** Production is Cloudflare-fronted; only the overwritten connecting-IP header is a trusted client address. */
-export function trustedCloudflareClientIp(req: Request): string {
-  return req.headers.get("cf-connecting-ip")?.trim() || "unknown-ip";
+/** Zod schema for Cloudflare's overwritten connecting-IP header (IPv4 or IPv6). */
+export const TrustedCloudflareClientIpSchema = z.union([z.ipv4(), z.ipv6()]);
+export type TrustedCloudflareClientIp = z.infer<typeof TrustedCloudflareClientIpSchema>;
+
+/**
+ * Production is Cloudflare-fronted; only the overwritten connecting-IP header is a trusted
+ * client address. Returns null when the header is missing or fails Zod IP validation so
+ * callers can answer HTTP 400 rather than keying the limiter on a forged / fallback string.
+ */
+export function trustedCloudflareClientIp(req: Request): TrustedCloudflareClientIp | null {
+  const parsed = TrustedCloudflareClientIpSchema.safeParse(
+    req.headers.get("cf-connecting-ip")?.trim()
+  );
+  return parsed.success ? parsed.data : null;
 }
 
 /** Sensible defaults for the route classes we guard. Override per-route as needed. */

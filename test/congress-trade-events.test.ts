@@ -443,21 +443,26 @@ describe("webhook endpoint (POST)", () => {
   it("returns 429 after the per-IP rate limit is exceeded", async () => {
     const secret = useCongressWebhookSecret();
     const body = "{}";
-    const headers = {
-      "x-signature": sign(secret, body),
-      "cf-connecting-ip": "203.0.113.99"
-    };
-    const { limit } = RATE_LIMITS.congressWebhook;
-    for (let i = 0; i < limit; i++) {
-      const res = await postCongressWebhook(
+    const originalLimit = RATE_LIMITS.congressWebhook.limit;
+    (RATE_LIMITS.congressWebhook as { limit: number }).limit = 2;
+    try {
+      const headers = {
+        "x-signature": sign(secret, body),
+        "cf-connecting-ip": "203.0.113.99"
+      };
+      for (let i = 0; i < 2; i++) {
+        const res = await postCongressWebhook(
+          new Request("https://b.example/api/webhooks/congress", { method: "POST", headers, body })
+        );
+        expect(res.status).not.toBe(429);
+      }
+      const blocked = await postCongressWebhook(
         new Request("https://b.example/api/webhooks/congress", { method: "POST", headers, body })
       );
-      expect(res.status).not.toBe(429);
+      expect(blocked.status).toBe(429);
+    } finally {
+      (RATE_LIMITS.congressWebhook as { limit: number }).limit = originalLimit;
     }
-    const blocked = await postCongressWebhook(
-      new Request("https://b.example/api/webhooks/congress", { method: "POST", headers, body })
-    );
-    expect(blocked.status).toBe(429);
   });
 
   it("rejects unauthorized and oversized requests early", async () => {
@@ -470,6 +475,7 @@ describe("webhook endpoint (POST)", () => {
     const reqOversized = new Request("https://b.example/api/webhooks/congress", {
       method: "POST",
       headers: {
+        "cf-connecting-ip": "203.0.113.40",
         "x-signature": sign(secret, "{}"),
         "content-length": String(10 * 1024 * 1024)
       }
@@ -487,7 +493,7 @@ describe("webhook endpoint (POST)", () => {
     const bigBody = JSON.stringify({ padding: "a".repeat(6 * 1024 * 1024) });
     const req = new Request("https://b.example/api/webhooks/congress", {
       method: "POST",
-      headers: { "x-signature": sign(secret, bigBody) },
+      headers: { "cf-connecting-ip": "203.0.113.40", "x-signature": sign(secret, bigBody) },
       body: bigBody
     });
     expect(req.headers.get("content-length")).toBeNull(); // proves this exercises the stream path, not the header fast-path
@@ -506,7 +512,7 @@ describe("webhook endpoint (POST)", () => {
       const response = await postCongressWebhook(
         new Request("https://b.example/api/webhooks/congress", {
           method: "POST",
-          headers: { "x-signature": signatureHeader, "content-type": "application/json" },
+          headers: { "cf-connecting-ip": "203.0.113.40", "x-signature": signatureHeader, "content-type": "application/json" },
           body,
         })
       );
@@ -521,7 +527,7 @@ describe("webhook endpoint (POST)", () => {
     const accepted = await postCongressWebhook(
       new Request("https://b.example/api/webhooks/congress", {
         method: "POST",
-        headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
+        headers: { "cf-connecting-ip": "203.0.113.40", authorization: `Bearer ${secret}`, "content-type": "application/json" },
         body,
       })
     );
@@ -530,7 +536,7 @@ describe("webhook endpoint (POST)", () => {
     const rejected = await postCongressWebhook(
       new Request("https://b.example/api/webhooks/congress", {
         method: "POST",
-        headers: { authorization: "Bearer wrong", "content-type": "application/json" },
+        headers: { "cf-connecting-ip": "203.0.113.40", authorization: "Bearer wrong", "content-type": "application/json" },
         body,
       })
     );
@@ -544,7 +550,7 @@ describe("webhook endpoint (POST)", () => {
     const response = await postCongressWebhook(
       new Request("https://b.example/api/webhooks/congress", {
         method: "POST",
-        headers: { "x-signature": `sha256=${signature}`, "content-type": "application/json" },
+        headers: { "cf-connecting-ip": "203.0.113.40", "x-signature": `sha256=${signature}`, "content-type": "application/json" },
         body,
       })
     );
@@ -559,7 +565,7 @@ describe("webhook endpoint (POST)", () => {
     const res = await postCongressWebhook(
       new Request("https://b.example/api/webhooks/congress", {
         method: "POST",
-        headers: { "x-signature": sig, "content-type": "application/json" },
+        headers: { "cf-connecting-ip": "203.0.113.40", "x-signature": sig, "content-type": "application/json" },
         body: body,
       })
     );

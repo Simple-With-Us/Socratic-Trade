@@ -163,7 +163,11 @@ describe("securities-import auth", () => {
 function postJson(body: unknown, auth?: string): Request {
   return new Request("http://localhost/api/admin/securities/import", {
     method: "POST",
-    headers: { "content-type": "application/json", ...(auth ? { authorization: auth } : {}) },
+    headers: {
+      "content-type": "application/json",
+      "cf-connecting-ip": "203.0.113.10",
+      ...(auth ? { authorization: auth } : {}),
+    },
     body: JSON.stringify(body)
   });
 }
@@ -235,7 +239,11 @@ describe("POST /api/admin/securities/import", () => {
     const bigBody = JSON.stringify({ padding: "a".repeat(SECURITIES_IMPORT_MAX_BYTES) });
     const req = new Request("http://localhost/api/admin/securities/import", {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: ingestAuthHeader() },
+      headers: {
+        "content-type": "application/json",
+        authorization: ingestAuthHeader(),
+        "cf-connecting-ip": "203.0.113.10",
+      },
       body: bigBody
     });
     const res = await importRoute(req);
@@ -244,30 +252,37 @@ describe("POST /api/admin/securities/import", () => {
 
   it("returns 429 after the per-IP rate limit is exceeded", async () => {
     configureIngestToken();
-    const { limit } = RATE_LIMITS.securitiesImport;
-    const headers = {
-      "content-type": "application/json",
-      authorization: ingestAuthHeader(),
-      "cf-connecting-ip": "203.0.113.50"
-    };
-    for (let i = 0; i < limit; i++) {
-      const ok = await importRoute(
+    // Drive the limiter with a tiny injected ceiling rather than replaying the production
+    // 600/min limit through the full handler (each pass is SQLite + audit).
+    const originalLimit = RATE_LIMITS.securitiesImport.limit;
+    (RATE_LIMITS.securitiesImport as { limit: number }).limit = 2;
+    try {
+      const headers = {
+        "content-type": "application/json",
+        authorization: ingestAuthHeader(),
+        "cf-connecting-ip": "203.0.113.50"
+      };
+      for (let i = 0; i < 2; i++) {
+        const ok = await importRoute(
+          new Request("http://localhost/api/admin/securities/import", {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ prices: [] })
+          })
+        );
+        expect(ok.status).toBe(200);
+      }
+      const blocked = await importRoute(
         new Request("http://localhost/api/admin/securities/import", {
           method: "POST",
           headers,
           body: JSON.stringify({ prices: [] })
         })
       );
-      expect(ok.status).toBe(200);
+      expect(blocked.status).toBe(429);
+    } finally {
+      (RATE_LIMITS.securitiesImport as { limit: number }).limit = originalLimit;
     }
-    const blocked = await importRoute(
-      new Request("http://localhost/api/admin/securities/import", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ prices: [] })
-      })
-    );
-    expect(blocked.status).toBe(429);
   });
 
   it("400s when refs contain invalid row shapes (strict Zod at trust boundary)", async () => {

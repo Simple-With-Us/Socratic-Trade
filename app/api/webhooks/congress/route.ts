@@ -54,9 +54,14 @@ export async function POST(req: Request) {
     bearerSecretMatches(req, expectedSecret) ||
     (hasSignature && await verifyCongressWebhookSignature(text, signatureHeader, expectedSecret));
 
+  const clientIp = trustedCloudflareClientIp(req);
+  if (!clientIp) {
+    return NextResponse.json({ ok: false, error: "missing or invalid client ip" }, { status: 400 });
+  }
+
   if (!isValid) {
     const unauthLimited = enforceRateLimit(
-      trustedCloudflareClientIp(req),
+      clientIp,
       "webhooks/congress:unauth",
       RATE_LIMITS.congressWebhookUnauth
     );
@@ -66,7 +71,7 @@ export async function POST(req: Request) {
   }
 
   const limited = enforceRateLimit(
-    trustedCloudflareClientIp(req),
+    clientIp,
     "webhooks/congress",
     RATE_LIMITS.congressWebhook
   );

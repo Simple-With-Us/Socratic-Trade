@@ -45,9 +45,14 @@ export const dynamic = "force-dynamic";
 // Body (all optional): { refs?, prices?, spx?, insider?, shortVolume?, fundamentals?, analyst?, origin? }
 // — the same shape as App B's outbound push (only refs/prices/spx are stored inbound).
 export async function POST(req: Request) {
+  const clientIp = trustedCloudflareClientIp(req);
+  if (!clientIp) {
+    return NextResponse.json({ ok: false, error: "missing or invalid client ip" }, { status: 400 });
+  }
+
   if (!verifySecuritiesImportToken(req)) {
     const unauthLimited = enforceRateLimit(
-      trustedCloudflareClientIp(req),
+      clientIp,
       "admin/securities/import:unauth",
       RATE_LIMITS.securitiesImportUnauth
     );
@@ -57,7 +62,7 @@ export async function POST(req: Request) {
   }
 
   const limited = enforceRateLimit(
-    trustedCloudflareClientIp(req),
+    clientIp,
     "admin/securities/import",
     RATE_LIMITS.securitiesImport
   );

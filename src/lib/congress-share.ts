@@ -1086,14 +1086,17 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
       if (responseRaw === undefined) {
         const bodyErrorText = "import response body was empty or unparseable";
         console.error(`[congress-share] import rejected rows despite HTTP ${res.status}: ${bodyErrorText}`);
-        logApiHealth({ service: "congress-share", ok: false, errorText: bodyErrorText, keySource: "env" });
+        // Contract/payload-quality signal, NOT a transport outcome: writing this to the
+        // logApiHealth lane would interleave hard failure rows and mask (or fake) a real
+        // "5 consecutive failures" alert for a POST that actually succeeded. Audit only.
+        audit("congress_share_import_body_rejected", { reason: "empty_or_unparseable", status: res.status });
         return { ...dropMeta, ok: false, status: res.status, error: bodyErrorText, sent };
       }
       const parsedResponse = CongressImportResponseSchema.safeParse(responseRaw);
       if (!parsedResponse.success) {
         const bodyErrorText = "import response body failed schema validation";
         console.error(`[congress-share] import rejected rows despite HTTP ${res.status}: ${bodyErrorText}`);
-        logApiHealth({ service: "congress-share", ok: false, errorText: bodyErrorText, keySource: "env" });
+        audit("congress_share_import_body_rejected", { reason: "schema_validation", status: res.status });
         return { ...dropMeta, ok: false, status: res.status, error: bodyErrorText, sent };
       }
       const response = parsedResponse.data;
