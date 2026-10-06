@@ -66,7 +66,7 @@ npx vitest run test/run-failure-watchdog.test.ts test/trading-liveness.test.ts t
 
 ## Next Steps & Blockers
 
-Open the PR.  Do not merge.  Do not Coolify Deploy.  Extra-ship no.  Owner re-arm is still required for any account this watchdog already halted.
+PR #4210 is open.  Do not merge.  Do not Coolify Deploy.  Extra-ship no.  Owner re-arm is still required for any account this watchdog already halted.
 
 ## Zero-Code Findings
 
