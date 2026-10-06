@@ -51,6 +51,8 @@ npx vitest run test/placement-outcome.test.ts test/placement-reconcile.test.ts t
 
 Open the PR ready.  Do not merge.  Do not deploy.  If Kodus comments, fix or defer with a rationale.  Do not resolve a thread only to merge.  There is no isolated autonomous-loop fixture; the autonomous 429/422 path is the same `classifyPlaceOrderError` the approval tests pin.
 
+**2026-10-06 tip-fix (PR #4229).**  Rebased onto `origin/main` with no conflicts.  `isDuplicateClientOrderIdError` now requires uniqueness wording within 80 chars of `client_order_id` on the same clause (`.` boundary) so unrelated HTTP 422 bodies stay `rejected_terminal`.
+
 ## Zero-Code Findings
 
 The green "Approved" mobile bug for a returned `busy` status was already closed on main (`executeMobileCommand` mapped non-placed outcomes to `failed`).  This change moves that check into the `proposal.approve` case as `ProposalNotPlacedError` so the command still fails with the structured result.  Generic throws from `executeProposal` (including the existing 429 throw after booking `not_placed`) still fail the command without that structured payload.  That is the #3343 contract and was left alone.

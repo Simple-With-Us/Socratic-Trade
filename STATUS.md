@@ -90,14 +90,13 @@
 
 **Next.**  Push; reply on Kody threads; do not merge.
 ## 2026-10-05 GROK — Placement honesty remainder (board `d2094c78ff79447d`, branch `cursor/placement-outcome-honesty-4829`)
+## 2026-10-06 CURSOR — PR #4229 tip-fix (branch `cursor/placement-outcome-honesty-4829`)
 
-**What.**  Approve already refused a green success for busy/blocked on mobile, and the approval path already booked HTTP 429/408 as `not_placed`.  Two holes remained.  HTTP 422 `client_order_id must be unique` was filed as terminal `rejected_by_broker` and skipped reconcile (a live order can hide).  The autonomous run still filed HTTP 429/408 as `rejected_by_broker`.  `classifyPlaceOrderError` is the shared class: retryable books `not_placed`; 409 and duplicate `client_order_id` reconcile; other 4xx stay terminal.  `ProposalNotPlacedError` is thrown only inside mobile `proposal.approve` when the returned status is outside placed/filled/paper.  `executeProposal` still returns busy and still throws the #3343 non-placement errors.  Console home and the approval card share `toastForApproveResult`.
+**What.**  Rebased onto `origin/main` (no merge conflicts).  Tightened `isDuplicateClientOrderIdError` so `client_order_id` and uniqueness wording must sit in the same clause (Kody HIGH on false idempotency reclass).  Retryable 429/408 and true duplicate-key reconcile behavior unchanged.
 
-**Not done.**  No Coolify deploy.  Do not merge from this lane.  Live effort board `/Users/jay/apps/TRADING-EFFORT-LOG.md` is not on this VM; the repo mirror is updated.
+**Verification.**  `npx vitest run test/placement-outcome.test.ts test/placement-reconcile.test.ts` — 24 passed.
 
-**Docs.**  `docs/rollouts/2026-10-05-placement-outcome-honesty.md`, `docs/EFFORT-LOG.md`, `PLAN.md`.
-
-**Next.**  Open the PR ready.  Fix or defer Kodus with a rationale.  Do not resolve a thread just to merge.
+**Next.**  CI `verify` on push.  Extra-ship no.  Do not resolve review threads to unblock merge.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

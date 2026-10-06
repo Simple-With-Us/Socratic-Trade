@@ -59,6 +59,10 @@ describe("placement outcome resolver", () => {
     expect(classifyPlaceOrderError("HTTP 403 Forbidden")).toBe("rejected_terminal");
     expect(classifyPlaceOrderError("HTTP 400 Bad Request")).toBe("rejected_terminal");
     expect(classifyPlaceOrderError('HTTP 422 — {"message":"invalid client_order_id"}')).toBe("rejected_terminal");
+    // Unrelated sentences must not become idempotency_conflict (clause boundary is `.`).
+    expect(classifyPlaceOrderError('HTTP 422 — duplicate symbol in basket. client_order_id format invalid')).toBe(
+      "rejected_terminal"
+    );
     expect(classifyPlaceOrderError("network timeout during placement")).toBe("other");
   });
 

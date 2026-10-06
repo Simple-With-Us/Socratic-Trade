@@ -31,7 +31,9 @@ export function isRetryableBrokerHttpError(message: string): boolean {
  * by refId instead of marking rejected_by_broker.
  */
 export function isDuplicateClientOrderIdError(message: string): boolean {
-  return /client_order_id/i.test(message) && /must be unique|already exists|duplicate/i.test(message);
+  return /client_order_id[^.]{0,80}(must be unique|already exists|duplicate)|(must be unique|already exists|duplicate)[^.]{0,80}client_order_id/i.test(
+    message
+  );
 }
 
 export function isIdempotencyConflictHttpError(message: string): boolean {
