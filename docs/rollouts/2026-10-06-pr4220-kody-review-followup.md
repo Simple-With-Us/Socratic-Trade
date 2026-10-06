@@ -23,7 +23,7 @@ Files:
 
 ## 3. Decisions & Trade-offs
 
-- `/defer` on strict Zod envelope validation that rejects malformed rows with HTTP 400: product choice in rollout `2026-10-05-congress-share-schema-drift-observability.md` §3 is per-row drop with loud `rowsDropped` reporting for schema drift, symmetric with outbound share.
+- Merged remote `5626f59f` strict `SecuritiesImportPayloadSchema` at the import trust boundary (HTTP 400 on invalid payload); outbound share still uses per-row drop with loud reporting.
 - `/defer` on retroactive `#agent-sync` claim post from this cloud seat (cannot authenticate owner's Slack bot here); effort row updated with `repo:` prefix per fleet format.
 
 ## 4. Verification State
