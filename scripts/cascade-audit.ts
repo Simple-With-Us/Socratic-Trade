@@ -2,7 +2,7 @@
 // print which provider won each field + which fields nothing filled. Run:
 //   source ~/.secrets/global-api-keys.env && DATABASE_URL=file:/tmp/cascade-audit.db npx tsx scripts/cascade-audit.ts
 import { getEnrichmentProvider } from "../src/lib/data-providers";
-import { getLastEnrichmentCoverageReport } from "../src/lib/enrichment-coverage";
+import { resolveEnrichmentCoverageReport } from "../src/lib/db-enrichment-coverage";
 
 async function main() {
   const provider = getEnrichmentProvider("local");
@@ -19,7 +19,7 @@ async function main() {
       console.log(`  ${k} = ${JSON.stringify(v)}  [${src}]`);
     }
   }
-  const report = getLastEnrichmentCoverageReport();
+  const report = resolveEnrichmentCoverageReport();
   if (report) {
     console.log("\n=== coverage report ===");
     console.log(JSON.stringify(report, null, 1));

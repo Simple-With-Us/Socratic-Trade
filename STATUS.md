@@ -18,6 +18,13 @@
 **Verification.**  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  `npm run build` exit 0.  `npm test` mostly green on this seat; stall-path regression tests pass.  Authoritative gate is CI `verify` on push.
 
 **Next.**  Land post-merge doc sync if needed.  Extra-ship no.
+## 2026-10-05 CURSOR — Enrichment coverage persistence (branch `cursor/enrichment-coverage-persist-67f3`)
+
+**What.**  Board `8fd801251acf4061`: durable SQLite store for cascade coverage reports (migration 94), wired through `setLastEnrichmentCoverageReport`; admin API and ops snapshot fall back to DB after redeploy; `history` on GET `/api/admin/enrichment-coverage`.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/enrichment-coverage*.test.ts` 17/17; full `npm test` + `npm run build` at PR verify.
+
+**Next.**  Push; open PR READY; do not merge from agent unless owner asks.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
