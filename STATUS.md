@@ -34,6 +34,18 @@
 
 **Next.**  Push; reply on threads with fix SHA; do not merge.
 
+## 2026-10-06 CURSOR — PR #4164 Kody tip-fix (branch `grok/lexical-fts-off-event-loop`)
+
+**Claim.**  `repo: Simple-With-Us/Socratic-Trade`  `issue: #4213`  `board: f50c66930a124233b28563e7967b9ac7`  `pr: #4164`.  No Slack #agent-sync post from this cloud VM.
+
+**What.**  Merged `origin/main` (#4218 RTH stall bounds, #4241 effort sync).  Kody: interpolate `WORKER_BIND_UNION_SOURCE` into `WORKER_SOURCE` so worker bind validation cannot drift from `SqliteBindSchema`.  Kody: malformed terminal worker replies call `settleReject` with `terminalWorkerReply` so execution reclaim does not kill an idle worker after 15s.
+
+**Verification.**  `npm run lint`, `npx tsc --noEmit`, `npx vitest run test/sqlite-all-offloop.test.ts`.  CI `verify` pending on new head.
+
+**Next.**  Push; reply on Kody threads with tip SHA; resolve threads when fixed.
+
+
+
 ## 2026-10-05 CURSOR — PR #4158 Kody review follow-up (branch `fix/fred-proxy-failsoft`)
 
 **What.**  Addressed two real Kody threads on the FRED/proxy fail-soft PR: skip the fixed 3s proxy-leg cap when the caller supplies `init.signal`, and keep proxy-leg timeout + caller abort wired through proxied response **body** reads (not only headers).

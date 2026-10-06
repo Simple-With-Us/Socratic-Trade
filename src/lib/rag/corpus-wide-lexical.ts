@@ -6,8 +6,10 @@
  * recall and fuse the two independently-ranked candidate lists. Keeping this read-only adapter
  * separate makes its point-in-time and query-safety contract directly testable.
  */
-import { getDb } from "../db";
+import { z } from "zod";
+import { databasePath, getDb } from "../db";
 import { canonicalTicker } from "./chunk";
+import { sqliteAllOffLoop } from "./sqlite-all-offloop";
 
 const MAX_QUERY_CHARS = 8_192;
 const MAX_QUERY_TERMS = 32;
@@ -64,21 +66,31 @@ export interface CorpusWideLexicalCandidate {
   metadata: Record<string, unknown>;
 }
 
-type LexicalRow = {
-  vector_id: string;
-  content_hash: string;
-  symbol: string;
-  source: string;
-  accession: string;
-  text: string;
-  section: string;
-  ordinal: number | null;
-  accepted_at: string | null;
-  doc_type: string | null;
-  tenant_scope: string;
-  user_id: string | null;
-  lexical_score: number;
-};
+// SELECT list of planCorpusWideLexicalQuery. ordinal / accepted_at are nullable in the row
+// contract; doc_type (sec_filings.form) and user_id (owner commit) come from LEFT JOINs and
+// are null when the join misses. lexical_score is FTS5 bm25 — a float, often negative.
+const LexicalRowSchema = z.object({
+  vector_id: z.string(),
+  content_hash: z.string(),
+  symbol: z.string(),
+  source: z.string(),
+  accession: z.string(),
+  text: z.string(),
+  // chunk_occurrences.section is NOT NULL on databases created by the current
+  // migration, but CREATE TABLE IF NOT EXISTS does not add that constraint to
+  // an older table, and the sync path already treats a missing section as
+  // omitted (`row.section?.trim()`).  A NULL here must not fail the whole
+  // off-loop batch.
+  section: z.string().nullable(),
+  ordinal: z.number().nullable(),
+  accepted_at: z.string().nullable(),
+  doc_type: z.string().nullable(),
+  tenant_scope: z.string(),
+  user_id: z.string().nullable(),
+  lexical_score: z.number()
+});
+
+type LexicalRow = z.infer<typeof LexicalRowSchema>;
 
 function normalizedLimit(value: number | undefined): number {
   if (!Number.isFinite(value)) return 20;
@@ -119,20 +131,22 @@ export function compileCorpusWideLexicalQuery(query: string): string | null {
   return terms.map((term) => `"${term.replace(/"/g, '""')}"`).join(" OR ");
 }
 
+type LexicalPlan = {
+  sql: string;
+  params: unknown[];
+  limit: number;
+};
+
 /**
- * Search the local filing-text corpus for exact lexical candidates.
- *
- * `chunk_occurrences.accepted_at` is the availability authority. The FTS table intentionally
- * stores occurrence text only, so the join requires all occurrence coordinates rather than a
- * content-hash-only join; identical boilerplate in two filings must remain independently eligible.
+ * Compile the FTS statement.  SQL construction is cheap; the blocking work is `.all()`.
  */
-export function searchCorpusWideLexicalCandidates(
+function planCorpusWideLexicalQuery(
   options: CorpusWideLexicalSearchOptions
-): CorpusWideLexicalCandidate[] {
+): LexicalPlan | null {
   const symbol = canonicalTicker(options.symbol);
   const matchQuery = compileCorpusWideLexicalQuery(options.query);
   const asOf = canonicalAsOf(options.asOf);
-  if (!symbol || !matchQuery || asOf === null) return [];
+  if (!symbol || !matchQuery || asOf === null) return null;
 
   const limit = normalizedLimit(options.limit);
   const rawLimit = Math.min(MAX_RAW_RESULTS, limit * RAW_RESULT_MULTIPLIER);
@@ -142,7 +156,7 @@ export function searchCorpusWideLexicalCandidates(
       .filter((scope): scope is string => typeof scope === "string" && scope.trim().length > 0)
       .map((scope) => scope.trim())
   )).slice(0, 8);
-  if (visibleTenantScopes.length === 0) return [];
+  if (visibleTenantScopes.length === 0) return null;
   const params: unknown[] = [symbol, matchQuery, symbol, ...visibleTenantScopes];
   const metadataFilters: string[] = [];
   const metadataFilterParams: string[] = [];
@@ -284,7 +298,7 @@ export function searchCorpusWideLexicalCandidates(
         OR o.accession GLOB (sf.accession || ':*')
       )`;
 
-  const rows = getDb().prepare(`
+  const sql = `
     SELECT
       o.vector_id,
       document_chunks_fts.content_hash,
@@ -329,8 +343,11 @@ export function searchCorpusWideLexicalCandidates(
       julianday(o.accepted_at) DESC,
       o.vector_id ASC
     LIMIT ?
-  `).all(...params) as LexicalRow[];
+  `;
+  return { sql, params, limit };
+}
 
+function mapLexicalRows(rows: LexicalRow[], limit: number): CorpusWideLexicalCandidate[] {
   const candidates: CorpusWideLexicalCandidate[] = [];
   const seenOccurrenceIds = new Set<string>();
   for (const row of rows) {
@@ -380,4 +397,38 @@ export function searchCorpusWideLexicalCandidates(
     if (candidates.length >= limit) break;
   }
   return candidates;
+}
+
+/**
+ * Search the local filing-text corpus for exact lexical candidates.
+ *
+ * `chunk_occurrences.accepted_at` is the availability authority. The FTS table intentionally
+ * stores occurrence text only, so the join requires all occurrence coordinates rather than a
+ * content-hash-only join; identical boilerplate in two filings must remain independently eligible.
+ *
+ * Synchronous on the calling thread.  Tests and in-process fixtures use this.  The serving
+ * retrieval path must call {@link searchCorpusWideLexicalCandidatesOffLoop}.
+ */
+export function searchCorpusWideLexicalCandidates(
+  options: CorpusWideLexicalSearchOptions
+): CorpusWideLexicalCandidate[] {
+  const plan = planCorpusWideLexicalQuery(options);
+  if (!plan) return [];
+  const rows = getDb().prepare(plan.sql).all(...plan.params) as LexicalRow[];
+  return mapLexicalRows(rows, plan.limit);
+}
+
+/**
+ * Same FTS statement and row mapping as {@link searchCorpusWideLexicalCandidates}, with
+ * `.all()` on a readonly worker thread so the serving event loop can run health/API.
+ * `signal` aborts the off-loop read (the retrieval deadline) without changing the SQL.
+ */
+export async function searchCorpusWideLexicalCandidatesOffLoop(
+  options: CorpusWideLexicalSearchOptions,
+  signal?: AbortSignal
+): Promise<CorpusWideLexicalCandidate[]> {
+  const plan = planCorpusWideLexicalQuery(options);
+  if (!plan) return [];
+  const rows = await sqliteAllOffLoop(plan.sql, plan.params, databasePath(), LexicalRowSchema, { signal });
+  return mapLexicalRows(rows, plan.limit);
 }
