@@ -97,3 +97,10 @@ test('transient refresh failures retry without using stale ancestry',async()=>{
 test('persistent ancestry errors fail within bounded observation window',async()=>{
  await assert.rejects(observe([expected,expected],{isAncestor:()=>{throw Error('execution failure')}}),/Unable to refresh or evaluate main ancestry/);
 });
+
+test('ST build identity skips placeholders but preserves health precedence',async()=>{
+ const {sentryBuildRelease}=await import('./sentry-build-release.cjs');
+ assert.equal(sentryBuildRelease({APP_RELEASE_SHA:'unknown',SOURCE_COMMIT:newer}),newer);
+ assert.equal(sentryBuildRelease({APP_RELEASE_SHA:expected,SOURCE_COMMIT:newer}),expected);
+ assert.equal(sentryBuildRelease({APP_RELEASE_SHA:expected.slice(0,12),SOURCE_COMMIT:newer}),undefined);
+});
