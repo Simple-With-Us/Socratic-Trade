@@ -39,6 +39,7 @@ struct CommandAttemptTracker {
         let operationID: String
         let status: String
         let error: String?
+        let commandID: String?
     }
 
     private var attempts: [String: PendingAttempt] = [:]
@@ -109,7 +110,12 @@ struct CommandAttemptTracker {
             }
             attempts.removeValue(forKey: operationID)
             resolutions.append(
-                Resolution(operationID: operationID, status: command.status, error: command.error)
+                Resolution(
+                    operationID: operationID,
+                    status: command.status,
+                    error: command.error,
+                    commandID: commandID
+                )
             )
         }
         return resolutions
@@ -811,25 +817,32 @@ final class MobileStore: ObservableObject {
         await PushNotificationCoordinator.shared.registerIfAlreadyAuthorized()
     }
 
-    /// Explicit sign-out.  The push token is withdrawn FIRST and awaited: `clearLocalSession`
-    /// deletes the session cookies, and a delete sent after that would arrive unauthenticated
-    /// and leave this device registered to receive the signed-out user's alerts.
+    /// Explicit sign-out.  Account-scoped UI is cleared immediately so the previous portfolio
+    /// cannot flash while the authenticated push delete is in flight.  Session cookies stay
+    /// until that delete finishes — `clearPersistedSessionCredentials` runs last.
     func signOut() async {
+        clearAccountScopedUIState()
         await PushNotificationCoordinator.shared.signOutAndForgetToken()
-        clearLocalSession()
+        clearPersistedSessionCredentials()
     }
 
     func clearLocalSession() {
+        clearAccountScopedUIState()
+        clearPersistedSessionCredentials()
+    }
+
+    /// XCTest seam: bind a proposal card to a `recentCommands` row without a network submit.
+    func bindProposalCommand(proposalId: String, commandId: String) {
+        proposalCommandIds[proposalId] = commandId
+    }
+
+    /// In-memory account state only — leaves cookies and the disk snapshot row intact so an
+    /// authenticated push delete can still run after sign-out begins.
+    func clearAccountScopedUIState() {
         stopEvents()
         // Also reached when a session simply expires, where no authenticated delete is
         // possible — drop the local belief that this device is registered.
         PushNotificationCoordinator.shared.forgetTokenLocally()
-        for cookie in HTTPCookieStorage.shared.cookies ?? [] where client.ownsCookie(cookie) {
-            HTTPCookieStorage.shared.deleteCookie(cookie)
-        }
-        // Remove the UserDefaults blob so a cold launch after sign-out does not re-read it
-        UserDefaults.standard.removeObject(forKey: Self.cacheKey)
-        UserDefaults.standard.removeObject(forKey: Self.cacheTimestampKey)
         loadGeneration &+= 1
         snapshot = nil
         lastUpdatedAt = nil
@@ -846,6 +859,15 @@ final class MobileStore: ObservableObject {
         hasInitialized = true
         error = nil
         successMessage = nil
+    }
+
+    private func clearPersistedSessionCredentials() {
+        for cookie in HTTPCookieStorage.shared.cookies ?? [] where client.ownsCookie(cookie) {
+            HTTPCookieStorage.shared.deleteCookie(cookie)
+        }
+        // Remove the UserDefaults blob so a cold launch after sign-out does not re-read it
+        UserDefaults.standard.removeObject(forKey: Self.cacheKey)
+        UserDefaults.standard.removeObject(forKey: Self.cacheTimestampKey)
     }
 
     private func scheduleReload() {
@@ -868,6 +890,13 @@ final class MobileStore: ObservableObject {
         let resolutions = commandAttemptTracker.reconcile(commands)
         for resolution in resolutions {
             busyOperations.remove(resolution.operationID)
+            if let commandID = resolution.commandID,
+               let command = foldedCommand(id: commandID, in: commands),
+               command.commandType == "proposal.approve",
+               let result = command.result {
+                surfacePlacementOutcome(from: result)
+                continue
+            }
             if resolution.status == "succeeded",
                resolution.operationID.hasPrefix(PolicyTightening.commandType) {
                 successMessage = "Guardrails updated."
@@ -878,6 +907,29 @@ final class MobileStore: ObservableObject {
             error = detail?.isEmpty == false
                 ? detail
                 : "The queued action was \(resolution.status)."
+        }
+    }
+
+    private func foldedCommand(id commandID: String, in commands: [MobileCommand]) -> MobileCommand? {
+        var folded: MobileCommand?
+        for command in commands where command.id == commandID {
+            guard let current = folded else {
+                folded = command
+                continue
+            }
+            folded = MobileCommand.foldDuplicate(existing: current, incoming: command)
+        }
+        return folded
+    }
+
+    private func surfacePlacementOutcome(from result: MobileCommandResult) {
+        let status = result.status ?? "error"
+        let message = AppFormat.placementApproveMessage(status: status, reasons: result.reasons)
+        switch status {
+        case "filled", "placed", "paper":
+            successMessage = message
+        default:
+            error = message
         }
     }
 

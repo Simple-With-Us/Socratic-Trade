@@ -548,7 +548,8 @@ final class MobileModelsTests: XCTestCase {
             [CommandAttemptTracker.Resolution(
                 operationID: "proposal.approve:proposal-9",
                 status: "failed",
-                error: "Proposal expired"
+                error: "Proposal expired",
+                commandID: "command-9"
             )]
         )
         let resolvedThenRetried = tracker.idempotencyKey(
@@ -593,7 +594,8 @@ final class MobileModelsTests: XCTestCase {
             [CommandAttemptTracker.Resolution(
                 operationID: "proposal.approve:proposal-9",
                 status: "failed",
-                error: "Proposal expired"
+                error: "Proposal expired",
+                commandID: "command-9"
             )]
         )
     }
@@ -624,7 +626,8 @@ final class MobileModelsTests: XCTestCase {
                 [CommandAttemptTracker.Resolution(
                     operationID: "proposal.approve:proposal-9",
                     status: "failed",
-                    error: "Proposal expired"
+                    error: "Proposal expired",
+                    commandID: "command-9"
                 )],
                 "equal-updatedAt duplicates must resolve to the terminal entry in any array order"
             )
@@ -793,6 +796,50 @@ final class MobileModelsTests: XCTestCase {
 
         defaults.removeObject(forKey: cacheKey)
         defaults.removeObject(forKey: cacheTimestampKey)
+    }
+
+    @MainActor
+    func testClearAccountScopedUIStateDropsSnapshotBeforeDiskCache() throws {
+        let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(minimalSnapshotJSON.utf8))
+        let data = Data(minimalSnapshotJSON.utf8)
+        let cacheKey = "cached_mobile_snapshot_data"
+        let defaults = UserDefaults.standard
+        defaults.set(data, forKey: cacheKey)
+
+        let store = MobileStore(
+            client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!),
+            previewSnapshot: snapshot
+        )
+        store.clearAccountScopedUIState()
+
+        XCTAssertNil(store.snapshot)
+        XCTAssertFalse(store.isAuthenticated)
+        XCTAssertNotNil(defaults.data(forKey: cacheKey))
+
+        defaults.removeObject(forKey: cacheKey)
+    }
+
+    @MainActor
+    func testProposalActionFeedbackSurfacesBusyPlacementOnSucceededApprove() throws {
+        let busyCommandJSON =
+            #"{"id":"cmd-busy","commandType":"proposal.approve","status":"succeeded","result":{"status":"busy","outcome":"busy","reasons":["A strategy run is in progress."]},"createdAt":"2026-07-21T17:30:00.000Z","updatedAt":"2026-07-21T17:31:00.000Z"}"#
+        let snapshotJSON = fullSnapshotJSON.replacingOccurrences(
+            of: "\"recentCommands\":[{\"id\":\"command-1\"",
+            with: "\"recentCommands\":[\(busyCommandJSON),{\"id\":\"command-1\""
+        )
+        let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(snapshotJSON.utf8))
+        let store = MobileStore(
+            client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!),
+            previewSnapshot: snapshot
+        )
+        store.bindProposalCommand(proposalId: "proposal-1", commandId: "cmd-busy")
+
+        let feedback = store.proposalActionFeedback(proposalId: "proposal-1")
+        XCTAssertEqual(feedback, .placementSettled(
+            action: .approve,
+            status: "busy",
+            reasons: ["A strategy run is in progress."]
+        ))
     }
 
     private func decodeCommand(_ json: String) -> MobileCommand {

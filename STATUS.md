@@ -63,6 +63,13 @@
 **Verification.**  `npm run lint`; `npx tsc --noEmit`; `npx vitest run test/securities-import.test.ts test/congress-trade-events.test.ts test/congress-share.test.ts`.
 
 **Next.**  Push; FIXED replies + resolve all open Kody threads; CI `verify`.
+## 2026-10-05 CURSOR — iOS sign-out flash + placement outcomes (branch `cursor/ios-state-outcome-truth-189b`)
+
+**What.**  Board `ios-state-outcome-truth`: sign-out clears account-scoped UI before the push delete finishes; `reconcileTrackedCommands` surfaces honest approve placement toasts from `command.result`; XCTest notes for `ios-build`.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean.  Swift XCTest not run on Linux — wait for `ios-build` on PR.
+
+**Next.**  Push; open PR READY; merge after `verify` + `ios-build` green.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
