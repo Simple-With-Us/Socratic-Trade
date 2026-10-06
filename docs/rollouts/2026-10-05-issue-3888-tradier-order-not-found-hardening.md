@@ -6,9 +6,9 @@ Follow-up from PR #3798 review: keep real Tradier 404 and 422-envelope missing-o
 
 ## Changes Made
 
-- Gate the order not-found check on `Tradier HTTP 422` (errors envelope path) in `isTradierOrderNotFound` (`src/lib/tradier.ts`), including bare `Tradier HTTP 422: not found` from `{errors:{error:"not found"}}`.
+- Anchor `isTradierOrderNotFound` on `^Tradier HTTP 404` and on `^Tradier HTTP 422:` with body parsed only after that prefix (`src/lib/tradier.ts`): bare `not found`, order-scoped phrase at body start; never match echoed `Tradier HTTP 422: not found` inside a non-422 message (e.g. `Tradier HTTP 502: …`).
 - Correct stale comment at `cancelBracketSiblingLegs` (422 prefix is present on the envelope throw path).
-- Extend `test/tradier-order-lookup.test.ts` with 422 not-found (order-scoped and bare envelope) → `undefined`, and 400/502 prose collision → throw.
+- Extend `test/tradier-order-lookup.test.ts` with 422 not-found (order-scoped and bare envelope) → `undefined`, 400/502 incidental prose → throw, and `502echo422` (502 body echoing the 422 envelope string) → throw.
 
 Files:
 
@@ -28,7 +28,7 @@ Files:
 ```bash
 npm run lint          # 0 errors
 npx tsc --noEmit      # clean
-npm test -- test/tradier-order-lookup.test.ts   # 11 passed (includes bare 422 envelope case)
+npm test -- test/tradier-order-lookup.test.ts   # 11 passed (bare 422 envelope + 502echo422)
 npm run build         # clean
 ```
 
@@ -40,4 +40,4 @@ CI `verify` on PR #4212 is the merge gate.
 
 ## Zero-Code Findings
 
-None.
+- Reusable lesson (fleet-recall `contrib/CURSOR/2026-10-06/fdeee7c7`): Scope Tradier missing-order detection to validated HTTP 404 and HTTP 422 not-found envelopes (status prefix at message start, body parsed after `Tradier HTTP 422:`) rather than generic error prose, so unrelated broker failures still reach normal retry and error handling.

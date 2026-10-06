@@ -86,6 +86,9 @@ describe("Tradier getEquityOrder", () => {
       if (u.includes("/orders/502prose")) {
         return { status: 502, body: "upstream said order 502prose not found in cache" };
       }
+      if (u.includes("/orders/502echo422")) {
+        return { status: 502, body: { errors: { error: "upstream replay: Tradier HTTP 422: not found" } } };
+      }
       if (u.includes("/orders/400prose")) {
         return { status: 400, body: { errors: { error: "order 400prose not found in validation context" } } };
       }
@@ -96,6 +99,7 @@ describe("Tradier getEquityOrder", () => {
     await expect(gateway.getEquityOrder!(ACCT, "422422")).resolves.toBeUndefined();
     await expect(gateway.getEquityOrder!(ACCT, "bare422")).resolves.toBeUndefined();
     await expect(gateway.getEquityOrder!(ACCT, "502prose")).rejects.toThrow(/502/);
+    await expect(gateway.getEquityOrder!(ACCT, "502echo422")).rejects.toThrow(/502/);
     await expect(gateway.getEquityOrder!(ACCT, "400prose")).rejects.toThrow(/400/);
   });
 

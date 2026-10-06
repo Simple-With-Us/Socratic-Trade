@@ -1285,11 +1285,12 @@ export function equityRowsFromTradierOrder(row: Record<string, unknown>): Record
 // rate limit, 5xx, an unrelated validation error) is NOT absence and must propagate.
 function isTradierOrderNotFound(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  if (/Tradier HTTP 404\b/.test(message)) return true;
-  // Real missing-order on GET-by-id: HTTP 404, or HTTP 200 + errors envelope re-labelled 422 in request().
-  if (/Tradier HTTP 422\b/.test(message)) {
-    if (/Tradier HTTP 422:\s*not found\b/i.test(message)) return true;
-    if (/order[^.]{0,40}not found/i.test(message)) return true;
+  if (/^Tradier HTTP 404\b/.test(message)) return true;
+  // request() always prefixes `Tradier HTTP <status>:` at the start of error.message (see request()).
+  const body422 = message.match(/^Tradier HTTP 422:\s*(.*)$/s)?.[1];
+  if (body422 !== undefined) {
+    if (/^not found\b/i.test(body422)) return true;
+    if (/^order[^.]{0,40}not found/i.test(body422)) return true;
   }
   return false;
 }

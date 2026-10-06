@@ -101,9 +101,11 @@
 **Next.**  Address Kody review threads (honest fix or `defer`).  Extra-ship no.  Do not deploy or merge from this lane.
 ## 2026-10-05 CURSOR — Issue #3888 isTradierOrderNotFound hardening (PR #4212)
 
-**What.**  Board `77590d59` (claimed GROK, in_progress): harden `isTradierOrderNotFound` for issue #3888 — Tradier HTTP 404, or HTTP 422 with order-scoped not-found or bare `{errors:{error:"not found"}}` envelope; reject incidental prose on other statuses; lookup tests + stale `cancelBracketSiblingLegs` comment only.
+**What.**  Board `77590d59` (GROK in_progress), issue #3888 / PR #4212: harden `isTradierOrderNotFound` — `^Tradier HTTP 404`, or `^Tradier HTTP 422:` with body-prefix order not-found / bare `not found`; reject incidental or echoed 422 prose on other statuses (incl. 502 echo fixture); lookup tests + stale `cancelBracketSiblingLegs` comment only.
 
-**Verification.**  Head `b8a35131`; Kody threads on #4212 addressed (board row, EFFORT-LOG scrub, bare 422 fix).  CI `verify` re-running after push.
+**Coordination.**  AGENT-SYNC.md applies to new effort claims; this row tracks board/issue scope only (reservation already on live board).  No retroactive `#agent-sync` post is recorded from this cloud follow-up pass.
+
+**Verification.**  CI `verify` on PR #4212 is the merge gate.
 
 **Next.**  Owner merge when ready; `do-not-automerge` stays until cleared.
 
