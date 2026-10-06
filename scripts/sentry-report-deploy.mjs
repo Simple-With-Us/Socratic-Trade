@@ -17,9 +17,10 @@ export function readIdentity(body) {
   return revision;
 }
 
-export function gitAncestry(ancestor, descendant) {
+export function gitAncestry(ancestor, descendant, spawn = spawnSync) {
   if (!SHA.test(ancestor) || !(SHA.test(descendant) || descendant === 'refs/remotes/origin/main')) return false;
-  const result = spawnSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], { stdio: 'ignore', timeout: 30000 });
+  const result = spawn('git', ['merge-base', '--is-ancestor', ancestor, descendant], { stdio: 'ignore', timeout: 30000 });
+  if (result.error || ![0, 1].includes(result.status)) throw new Error('Git ancestry execution failed');
   return result.status === 0;
 }
 
@@ -33,8 +34,17 @@ export async function observeProduction({ expected, fetchImpl = fetch, sleep = p
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (now() >= deadline) break;
     // Refresh every observation: a newer deployed main revision can supersede this CI run.
-    refreshMain();
-    if (!isAncestor(expected, 'refs/remotes/origin/main')) throw new Error('Expected revision is no longer on main');
+    let expectedOnMain;
+    try {
+      refreshMain();
+      expectedOnMain = isAncestor(expected, 'refs/remotes/origin/main');
+    } catch {
+      prior = null;
+      reason = 'Unable to refresh or evaluate main ancestry';
+      if (attempt + 1 < attempts && now() < deadline) await sleep(Math.min(intervalMs, deadline - now()));
+      continue;
+    }
+    if (!expectedOnMain) throw new Error('Expected revision is no longer on main');
     try {
       const url = new URL(CONFIG.health);
       url.searchParams.set('sentry-deploy-probe', `${now()}-${attempt}`);
@@ -55,7 +65,7 @@ export async function observeProduction({ expected, fetchImpl = fetch, sleep = p
     } catch (error) {
       prior = null;
       // Network/parser errors may contain endpoint internals; only our own static reasons are logged.
-      reason = error.message?.startsWith('Production ') || error.message?.startsWith('Observed ') ? error.message : 'Production health request or JSON parsing failed';
+      reason = error.message?.startsWith('Production ') || error.message?.startsWith('Observed ') || error.message === 'Git ancestry execution failed' ? error.message : 'Production health request or JSON parsing failed';
     }
     if (attempt + 1 < attempts && now() < deadline) await sleep(Math.min(intervalMs, deadline - now()));
   }
@@ -128,7 +138,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     if (!process.env.SENTRY_AUTH_TOKEN?.trim()) throw new Error('SENTRY_AUTH_TOKEN is required');
     const receipt = await observeProduction({ expected: process.env.EXPECTED_SHA });
     const result = await reportDeploy(receipt, { token: process.env.SENTRY_AUTH_TOKEN, repositoryId: process.env.GITHUB_REPOSITORY_ID, runId: process.env.GITHUB_RUN_ID });
-    const summary = `Production confirmed at ${result.version}; Sentry deploy ${result.deployId}${result.alreadyRecorded ? ' already recorded' : ' recorded'}.${receipt.superseded ? '  The triggering CI revision was superseded; only the observed live revision was reported.' : ''}\n`;
+    const summary = `Production health and Sentry deployment reporting confirmed.${result.alreadyRecorded ? '  A matching deployment receipt already exists.' : '  A new deployment receipt was recorded.'}${receipt.superseded ? '  The triggering CI revision was superseded; only the observed live revision was reported.' : ''}\n`;
+    console.log(`Verified production source SHA: ${receipt.revision}`);
     console.log(summary.trim());
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
   } catch (error) {

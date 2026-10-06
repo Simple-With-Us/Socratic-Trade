@@ -70,8 +70,8 @@ test('build release matches a full source SHA, independent of git metadata',asyn
  const {sentryBuildRelease}=await import('./sentry-build-release.cjs');
  assert.equal(sentryBuildRelease({SOURCE_COMMIT:newer,GIT_COMMIT_SHA:expected,SENTRY_RELEASE:'unrelated'}),newer);
  assert.equal(sentryBuildRelease({}),undefined);
- assert.throws(()=>sentryBuildRelease({SOURCE_COMMIT:'unknown'}),/full source SHA/);
- assert.throws(()=>sentryBuildRelease({SOURCE_COMMIT:newer.slice(0,12)}),/full source SHA/);
+ assert.equal(sentryBuildRelease({SOURCE_COMMIT:'unknown'}),undefined);
+ assert.equal(sentryBuildRelease({SOURCE_COMMIT:newer.slice(0,12)}),undefined);
 });
 test('Next build config wires explicit Sentry release identity',async()=>{
  const {readFileSync}=await import('node:fs');
@@ -82,4 +82,18 @@ test('Next build config wires explicit Sentry release identity',async()=>{
  assert.match(builder,/ARG SOURCE_COMMIT=/);
  assert.match(builder,/SOURCE_COMMIT=\$\{SOURCE_COMMIT\}/);
  assert.ok(builder.indexOf('SOURCE_COMMIT=${SOURCE_COMMIT}')<builder.lastIndexOf('npm run build'));
+});
+
+test('git ancestry distinguishes divergence from execution failures',async()=>{
+ const {gitAncestry}=await import('./sentry-report-deploy.mjs');
+ assert.equal(gitAncestry(expected,newer,()=>({status:0})),true);
+ assert.equal(gitAncestry(expected,newer,()=>({status:1})),false);
+ for(const result of [{status:null},{status:128},{status:1,error:new Error('spawn failed')}]) assert.throws(()=>gitAncestry(expected,newer,()=>result),/execution failed/);
+});
+test('transient refresh failures retry without using stale ancestry',async()=>{
+ let calls=0;const r=await observe([expected,expected],{attempts:3,refreshMain:()=>{if(++calls===1)throw Error('temporary network failure');}});
+ assert.equal(r.revision,expected);assert.equal(calls,3);
+});
+test('persistent ancestry errors fail within bounded observation window',async()=>{
+ await assert.rejects(observe([expected,expected],{isAncestor:()=>{throw Error('execution failure')}}),/Unable to refresh or evaluate main ancestry/);
 });
