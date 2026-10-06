@@ -86,6 +86,28 @@ export async function register() {
   if (process.env.SENTRY_DSN) {
     await import("./sentry.server.config");
     try {
+      // Same webpackIgnore shape as profiling below.  A static @sentry/node
+      // import is traced into the Edge compile of this file and fails the build.
+      const sentryNodePkg = "@sentry/node";
+      const {
+        anthropicAIIntegration,
+        googleGenAIIntegration,
+        langChainIntegration,
+        nodeRuntimeMetricsIntegration,
+        openAIIntegration,
+        vercelAIIntegration,
+      } = (await import(/* webpackIgnore: true */ sentryNodePkg)) as typeof import("@sentry/node");
+      const Sentry = await import("@sentry/nextjs");
+      Sentry.addIntegration(nodeRuntimeMetricsIntegration());
+      Sentry.addIntegration(openAIIntegration());
+      Sentry.addIntegration(anthropicAIIntegration());
+      Sentry.addIntegration(googleGenAIIntegration());
+      Sentry.addIntegration(vercelAIIntegration());
+      Sentry.addIntegration(langChainIntegration());
+    } catch {
+      // Node-only SDK.  A missing module must not take down Sentry.init.
+    }
+    try {
       const profilingPkg = "@sentry/profiling-node";
       const { nodeProfilingIntegration } = (await import(
         /* webpackIgnore: true */ profilingPkg

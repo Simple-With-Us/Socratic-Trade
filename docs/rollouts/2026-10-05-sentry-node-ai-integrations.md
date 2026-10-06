@@ -2,16 +2,18 @@
 
 ## Context & Objective
 
-Production builds logged webpack "Attempted import error" for six integrations referenced via `@sentry/nextjs` in `sentry.server.config.ts` (Sentry issue 7753792417).  Those helpers are exported from `@sentry/node`, not the Next.js SDK re-export surface.  Goal: keep LLM AI auto-instrumentation working on the Node server without silent import failures at build time.
+Production builds logged webpack "Attempted import error" for six integrations referenced via `@sentry/nextjs` in `sentry.server.config.ts` (Sentry issue 7753792417).  Those helpers live on `@sentry/node`.  A top-level import from `@sentry/node` in `sentry.server.config.ts` is traced into the Edge bundle (`instrumentation.ts` → that file) and fails the build on `diagnostics_channel` and `worker_threads`.  Goal: keep the Node server registrations without an Edge webpack failure.
 
 ## Changes Made
 
-- Import `nodeRuntimeMetricsIntegration`, `openAIIntegration`, `anthropicAIIntegration`, `googleGenAIIntegration`, `vercelAIIntegration`, and `langChainIntegration` from `@sentry/node`; keep `Sentry.init` on `@sentry/nextjs`.
-- Add explicit runtime dependency `@sentry/node@11.0.0` (aligned with lockfile `@sentry/nextjs` / `@sentry/profiling-node` 11.0.0).
+- Leave `Sentry.init` on `@sentry/nextjs` in `sentry.server.config.ts`.  Do not name the six factories there.
+- From the Node branch of `instrumentation.ts`, load `nodeRuntimeMetricsIntegration`, `openAIIntegration`, `anthropicAIIntegration`, `googleGenAIIntegration`, `vercelAIIntegration`, and `langChainIntegration` with `webpackIgnore` (same shape as `@sentry/profiling-node`) and `Sentry.addIntegration`.  `addIntegration` skips a name that default integrations already installed.
+- Direct dependency `@sentry/node` at `^11.0.0`, the same range as `@sentry/nextjs`, so npm dedupes to one copy.  Lockfile still resolves 11.0.0.  Unrelated lockfile `libc` churn from the first commit is reverted.
 
 Files touched:
 
 - `sentry.server.config.ts`
+- `instrumentation.ts`
 - `package.json`
 - `package-lock.json`
 - `STATUS.md`
@@ -20,24 +22,22 @@ Files touched:
 
 ## Decisions & Trade-offs
 
-- Kept all six integrations (not dropped) so Node runtime metrics and official GenAI SDK hooks stay registered for this LLM-heavy app.
-- Did not move `Sentry.init` to `@sentry/node`; Next.js instrumentation path still uses `@sentry/nextjs` as before.
+- Kept all six integrations.  With `tracesSampleRate` set, `@sentry/nextjs` already installs the five GenAI hooks via `getTracingIntegrations`.  `nodeRuntimeMetricsIntegration` is not in that default list, so the Node-only `addIntegration` is what registers it.
+- Did not move `Sentry.init` to `@sentry/node`.  Datadog request logs in `instrumentation.ts` stay as they are; this change does not add or remove an observability backend.
 
 ## Verification State
 
 ```bash
-npm run lint          # 0 errors
+npm run lint          # touched files, 0 errors
 npx tsc --noEmit      # clean
-npm test              # (full vitest suite)
-npm run build         # no "Attempted import error" for sentry.server.config.ts
+npm test              # CI verify, full vitest suite
+npm run build         # CI verify; no Attempted import error; no Edge Module not found for @sentry/node
 ```
-
-Build before fix emitted six `not exported from '@sentry/nextjs'` lines; after fix `npm run build` reports none.
 
 ## Next Steps & Blockers
 
-- Merge PR after `verify` CI is green; production deploy follows normal `main` auto-deploy (RTH latch may queue image build on weekdays).
+- Merge PR #4227 after `verify` CI is green.  Production deploy follows normal `main` auto-deploy (RTH latch may queue the image build on weekdays).
 
 ## Zero-Code Findings
 
-- `@sentry/node` was already present transitively via `@sentry/nextjs@11.0.0`; pinning it as a direct dependency makes the integration import explicit and version-locked.
+- `@sentry/node` is already required by `@sentry/nextjs@11.0.0` at the same exact version.  The direct `^11.0.0` range tracks that copy instead of pinning `11.0.0` while `@sentry/nextjs` floats.
