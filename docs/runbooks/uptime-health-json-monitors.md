@@ -80,6 +80,10 @@ liveness check.  Do not convert it into a keyword monitor.
 - `tradingLiveness` is always present.  `degraded` is a **count** of
   active-autonomy accounts that are stale (market open) or over the consecutive
   failure cap.  Halted accounts do not count.  `degraded: 0` is healthy.
+  `maxConsecutiveFailedRuns` is the worst post-re-arm streak: after the owner
+  sets the account active again, only runs whose `started_at` is after that
+  re-arm count.  A run that was already in flight does not keep the public
+  streak at the old halt-time number.  `stale_last_completed_run` is unchanged.
 - `storage.litestreamTiersDegraded` is always a boolean.  `true` when a
   compaction level is wedged or empty-wedged (see `assessLitestreamTierFreshness`).
 

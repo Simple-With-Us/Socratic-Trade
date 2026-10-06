@@ -25,7 +25,9 @@
  *      marker (autoResume: false) + audit row, mirroring the broker-health
  *      auto-pause.  The halt cause is described honestly by
  *      describeAutonomyHaltCause ("run_failure_halt").  The owner re-arms from
- *      the console; a fresh streak is required before it can halt again.
+ *      the console.  Only runs that STARTED after that re-arm count toward the
+ *      next halt, so a run already in flight cannot re-trip it.  A fresh streak
+ *      of the same halt threshold is required before it can halt again.
  *
  * Deliberately NEVER restarts the process: the boot interlock
  * (reconcileAutonomyOnBoot) would revert every active account to halted,
@@ -46,10 +48,16 @@ import {
   setPolicy,
   audit,
 } from "./db";
-import { getTradingLivenessSummary } from "./trading-liveness";
+import {
+  RUN_FAILURE_WATCH_STATE_PREFIX,
+  countLeadingFailedRuns,
+  getTradingLivenessSummary,
+  hasFinishedRunStartedAfter,
+  runFailureWatchStateKey,
+} from "./trading-liveness";
 import { alertLivenessWarning, clearLivenessWarning } from "./db-health";
 
-const STATE_PREFIX = "runFailureWatch";
+const STATE_PREFIX = RUN_FAILURE_WATCH_STATE_PREFIX;
 const HALT_MARKER_PREFIX = "runFailureHaltMarker";
 
 export interface RunFailureWatchState {
@@ -65,9 +73,14 @@ export interface RunFailureWatchState {
   backoffUntil: string | null;
   /** Whether this account was auto-halted by the watchdog. */
   halted: boolean;
-  /** Streak at the last auto-halt (set on owner re-arm): a re-halt requires
-   *  NEW failures beyond this floor, so re-arming is not instantly undone. */
+  /** Legacy raw-streak floor.  Re-arm now sets this to 0 and records `rearmedAt`
+   *  instead.  A raw floor of "streak at halt time" is one behind a run that was
+   *  already in flight, so the next failure stepped over it and re-halted. */
   lastHaltStreak?: number;
+  /** ISO time the account was last re-armed to active.  Only runs with
+   *  `started_at` strictly after this instant count toward alert, backoff, and
+   *  halt.  Cleared when a run that started after it completes successfully. */
+  rearmedAt?: string;
 }
 
 export interface RunFailureHaltMarker {
@@ -80,7 +93,7 @@ export interface RunFailureHaltMarker {
 }
 
 function stateKey(userId: string, accountId: string): string {
-  return `${STATE_PREFIX}:${userId}:${accountId}`;
+  return runFailureWatchStateKey(userId, accountId);
 }
 
 export function runFailureHaltMarkerKey(userId: string, accountId: string): string {
@@ -163,6 +176,73 @@ function clearHaltMarker(userId: string, accountId: string): void {
   } catch {
     /* ignore */
   }
+}
+
+/** Finished runs, newest start first.  A still-running row is omitted. */
+function recentFinishedRuns(userId: string, accountId: string): Array<{ status: string; started_at: string }> {
+  return getDb()
+    .prepare(
+      `SELECT status, started_at FROM strategy_runs
+       WHERE user_id = ? AND connected_account_id = ? AND status IN ('completed', 'failed')
+       ORDER BY started_at DESC LIMIT 200`
+    )
+    .all(userId, accountId) as Array<{ status: string; started_at: string }>;
+}
+
+/** Null when the run log could not be read.  Callers must not treat that as a recovered streak. */
+function failuresStartedAfter(userId: string, accountId: string, startedAfter: string | null): number | null {
+  try {
+    return countLeadingFailedRuns(recentFinishedRuns(userId, accountId), startedAfter);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * When the owner set the account active again.  Prefer the audit receipt (console
+ * `policy_change` or ops `set_system_state`) so a run that started in the gap between
+ * re-arm and this tick still counts.  Falls back to null; the caller uses the tick time,
+ * which still excludes anything already in flight.
+ */
+function resolveRearmTimestamp(userId: string, accountId: string, haltedSince: string): string | null {
+  try {
+    const row = getDb()
+      .prepare(
+        `SELECT created_at FROM audit_events
+         WHERE user_id = ? AND connected_account_id = ? AND created_at >= ?
+           AND (
+             (kind = 'policy_change'
+               AND json_valid(payload)
+               AND json_extract(payload, '$.value.systemState') = 'active')
+             OR (kind = 'ops_account_control'
+               AND json_valid(payload)
+               AND json_extract(payload, '$.action') = 'set_system_state'
+               AND CAST(json_extract(payload, '$.dryRun') AS INTEGER) = 0
+               AND CAST(json_extract(payload, '$.ok') AS INTEGER) = 1
+               AND json_extract(payload, '$.to') = 'active')
+           )
+         ORDER BY created_at ASC
+         LIMIT 1`
+      )
+      .get(userId, accountId, haltedSince) as { created_at: string } | undefined;
+    if (!row?.created_at || !Number.isFinite(Date.parse(row.created_at))) return null;
+    return row.created_at;
+  } catch {
+    return null;
+  }
+}
+
+function freshEpisode(rearmedAt: string, effectiveStreak: number): RunFailureWatchState {
+  return {
+    consecutiveFailures: effectiveStreak,
+    firstSeenAt: rearmedAt,
+    lastFailureAt: rearmedAt,
+    lastAlertedStreak: 0,
+    backoffUntil: null,
+    halted: false,
+    lastHaltStreak: 0,
+    rearmedAt,
+  };
 }
 
 /**
@@ -299,11 +379,13 @@ export async function runFailureWatchdogTick(now: number = Date.now()): Promise<
               systemState = undefined;
             }
             if (systemState && systemState !== "halted") {
-              // The owner (or another mechanism) moved the account out of
-              // halted: hand it back.  A fresh streak is required before the
-              // watchdog can halt it again.
+              // Not in the active summary on this tick (the summary was taken
+              // before the re-arm, or the account is close_only).  Open the
+              // post-re-arm window anyway.  Clearing it here would let the next
+              // active tick see the historical streak and halt immediately.
+              const rearmedAt = resolveRearmTimestamp(userId, accountId, marker.since) ?? new Date(now).toISOString();
               clearHaltMarker(userId, accountId);
-              clearState(userId, accountId);
+              saveState(userId, accountId, freshEpisode(rearmedAt, 0));
               console.log(
                 `[run-failure-watchdog] ${userId}/${accountId} left halted; run-failure halt marker cleared`
               );
@@ -312,10 +394,66 @@ export async function runFailureWatchdogTick(now: number = Date.now()): Promise<
           continue;
         }
 
-        if (streak === 0) {
+        // Active account.  `streak` from the summary is the post-re-arm count once
+        // `rearmedAt` has been saved.  On the tick that first observes the re-arm,
+        // the summary was computed before that write, so it is still the raw
+        // historical streak.  Recompute from `started_at` before any decision.
+        const isoNow = new Date(now).toISOString();
+        let markerNow = marker;
+        let prev = loadState(userId, accountId);
+        let effective = streak;
+        if (markerNow) {
+          // The owner re-armed after the watchdog halted the account.  The halt-time
+          // raw streak is NOT a safe floor: a run that had already started can fail
+          // after the re-arm and make the raw count floor+1, which re-halts on this
+          // tick.  Only runs that started after the re-arm count, and the halt
+          // threshold applies to that new streak in full.
+          const rearmedAt = resolveRearmTimestamp(userId, accountId, markerNow.since) ?? isoNow;
+          clearHaltMarker(userId, accountId);
+          markerNow = null;
+          const counted = failuresStartedAfter(userId, accountId, rearmedAt);
+          // Unreadable log: open the window at 0 so this tick cannot re-halt.
+          effective = counted ?? 0;
+          prev = freshEpisode(rearmedAt, effective);
+          console.log(
+            `[run-failure-watchdog] ${userId}/${accountId} re-armed after auto-halt; post-rearm streak ${effective}`
+          );
+        } else if (prev && !prev.rearmedAt && (prev.lastHaltStreak ?? 0) > 0 && prev.firstSeenAt) {
+          // Episode opened by the old raw floor.  firstSeenAt is that re-arm tick.
+          // Adopt it so an in-flight failure cannot step over the floor.
+          const rearmedAt = prev.firstSeenAt;
+          const counted = failuresStartedAfter(userId, accountId, rearmedAt);
+          if (counted === null) {
+            saveState(userId, accountId, prev);
+            continue;
+          }
+          effective = counted;
+          prev = { ...prev, rearmedAt, lastHaltStreak: 0, consecutiveFailures: effective };
+        } else if (prev?.rearmedAt) {
+          const counted = failuresStartedAfter(userId, accountId, prev.rearmedAt);
+          if (counted === null) {
+            saveState(userId, accountId, prev);
+            continue;
+          }
+          effective = counted;
+        }
+
+        if (effective === 0) {
+          if (prev?.rearmedAt && !hasFinishedRunStartedAfter(userId, accountId, prev.rearmedAt)) {
+            // No finished run has started since the re-arm.  Keep the window.
+            // Dropping it would put the historical streak back in force.
+            saveState(userId, accountId, {
+              ...prev,
+              consecutiveFailures: 0,
+              halted: false,
+              backoffUntil: null,
+              lastHaltStreak: 0,
+            });
+            continue;
+          }
           // Recovered: a completed run broke the streak.  Clear everything so
-          // the next episode starts fresh; keep the marker only while halted.
-          const hadState = loadState(userId, accountId) !== null;
+          // the next episode starts fresh.
+          const hadState = prev !== null || loadState(userId, accountId) !== null;
           clearState(userId, accountId);
           if (hadState) {
             console.log(
@@ -325,23 +463,6 @@ export async function runFailureWatchdogTick(now: number = Date.now()): Promise<
           continue;
         }
 
-        // Active account with a live failure streak.
-        const isoNow = new Date(now).toISOString();
-        let markerNow = marker;
-        let prev = loadState(userId, accountId);
-        if (markerNow) {
-          // The owner (or another mechanism) re-armed the account after the
-          // watchdog halted it: hand it back and start a fresh episode.  The
-          // halt-time streak becomes the re-halt floor, so a re-halt requires
-          // NEW failures beyond it (mirrors the broker-health auto-pause
-          // re-arm rule) instead of instantly undoing the owner's re-arm.
-          clearHaltMarker(userId, accountId);
-          markerNow = null;
-          prev = null;
-          console.log(
-            `[run-failure-watchdog] ${userId}/${accountId} re-armed after auto-halt; fresh episode`
-          );
-        }
         const state: RunFailureWatchState = prev ?? {
           consecutiveFailures: 0,
           firstSeenAt: isoNow,
@@ -349,29 +470,28 @@ export async function runFailureWatchdogTick(now: number = Date.now()): Promise<
           lastAlertedStreak: 0,
           backoffUntil: null,
           halted: false,
-          ...(marker ? { lastHaltStreak: marker.consecutiveFailures } : {}),
         };
-        if (streak > state.consecutiveFailures) {
+        if (effective > state.consecutiveFailures) {
           state.lastFailureAt = isoNow;
         }
-        state.consecutiveFailures = streak;
+        state.consecutiveFailures = effective;
 
         // 1. Alert — on first crossing and on every growth, so a worsening
         //    failure is not a single ping.
-        if (streak >= alertAfter() && streak > state.lastAlertedStreak) {
-          state.lastAlertedStreak = streak;
+        if (effective >= alertAfter() && effective > state.lastAlertedStreak) {
+          state.lastAlertedStreak = effective;
           await alertLivenessWarning(
             "run_failure_streak",
-            `${label || accountId}: ${streak} consecutive strategy-run failures ` +
+            `${label || accountId}: ${effective} consecutive strategy-run failures ` +
               `(first seen ${state.firstSeenAt}). Trading on this account is failing every run; ` +
-              `backoff ${streak >= backoffAfter() ? "engaged" : `engages at ${backoffAfter()}`} ` +
+              `backoff ${effective >= backoffAfter() ? "engaged" : `engages at ${backoffAfter()}`} ` +
               `failures, auto-halt at ${haltAfter()}.`
           );
         }
 
         // 2. Backoff — exponential suppression window from the last failure.
-        if (streak >= backoffAfter()) {
-          const minutes = backoffMinutesForStreak(streak);
+        if (effective >= backoffAfter()) {
+          const minutes = backoffMinutesForStreak(effective);
           const untilMs = Date.parse(state.lastFailureAt) + minutes * 60_000;
           const untilIso = new Date(untilMs).toISOString();
           // Only ever extend, never shorten: a shrinking window would flap.
@@ -379,19 +499,21 @@ export async function runFailureWatchdogTick(now: number = Date.now()): Promise<
             state.backoffUntil = untilIso;
             console.warn(
               `[run-failure-watchdog] ${userId}/${accountId}: backing off runs for ${minutes}m ` +
-                `(streak=${streak}, until ${untilIso})`
+                `(streak=${effective}, until ${untilIso})`
             );
           }
         }
 
-        // 3. Auto-halt — the last resort.  Never restarts the process.  After an
-        //    owner re-arm, the streak must grow BEYOND the halt-time floor
-        //    before it can halt again.
+        // 3. Auto-halt — the last resort.  Never restarts the process.  `effective`
+        //    is already limited to runs that started after re-arm, so the same
+        //    halt threshold applies to a fresh streak.  `lastHaltStreak` stays 0
+        //    on that episode; a raw halt-time floor is what let one in-flight
+        //    failure re-halt.
         const rehaltFloor = state.lastHaltStreak ?? 0;
-        if (streak >= haltAfter() && streak > rehaltFloor && !state.halted && !markerNow) {
+        if (effective >= haltAfter() && effective > rehaltFloor && !state.halted && !markerNow) {
           state.halted = true;
           saveState(userId, accountId, state);
-          await haltAccountForRunFailures(userId, accountId, label, streak, now);
+          await haltAccountForRunFailures(userId, accountId, label, effective, now);
           continue;
         }
 

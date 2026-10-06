@@ -1,5 +1,7 @@
 # 2026-09-30 - Self-healing watchdogs (liveness, OOM, run-failure)
 
+> Re-arm correction (2026-10-06): the halt-time `lastHaltStreak` floor re-halted an account when a run that had already started failed after re-arm.  The window is now `rearmedAt`.  See `docs/rollouts/2026-10-06-rearm-failure-streak.md`.
+
 ## Context & Objective
 
 On 2026-09-30 ~10:33-10:44 AM CT, every route on socratictrade.com returned
