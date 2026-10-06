@@ -260,7 +260,9 @@ describe("broker-health auto-pause when orders cannot be placed", () => {
     const { getPolicy, setPolicy, listAudit } = await import("../src/lib/db");
     const { applyBrokerOrderPlacementPause, getBrokerPlacementPauseMarker } = await import("../src/lib/broker-health");
     const notificationsMod = await import("../src/lib/notifications");
-    const sendNotificationSpy = vi.spyOn(notificationsMod, "sendNotification").mockResolvedValue({} as never);
+    const sendNotificationSpy = vi.spyOn(notificationsMod, "sendNotification").mockImplementation(() => {
+      throw new Error("sendNotification should not be called for equity-low health skip");
+    });
 
     const userId = "local";
     const accountScope = "acct-equity-low";
@@ -361,6 +363,22 @@ describe("broker-health auto-pause when orders cannot be placed", () => {
 
     expect(shouldPersistBrokerHealthSkip({ wasActive: true, pauseAction: "halted" })).toBe(true);
     expect(shouldPersistBrokerHealthSkip({ wasActive: true, pauseAction: "none" })).toBe(false);
+    expect(
+      shouldPersistBrokerHealthSkip({
+        wasActive: true,
+        pauseAction: "none",
+        health: { isHealthy: false, category: "equity", reason: "Account equity (0) is too low to trade" },
+        skipEpisodeStarted: true
+      })
+    ).toBe(true);
+    expect(
+      shouldPersistBrokerHealthSkip({
+        wasActive: true,
+        pauseAction: "none",
+        health: { isHealthy: false, category: "equity", reason: "Account equity (0) is too low to trade" },
+        skipEpisodeStarted: false
+      })
+    ).toBe(false);
     expect(shouldPersistBrokerHealthSkip({ wasActive: false, pauseAction: "halted" })).toBe(false);
     expect(shouldPersistBrokerHealthSkip({ wasActive: true, pauseAction: "still_paused" })).toBe(false);
 
@@ -369,14 +387,14 @@ describe("broker-health auto-pause when orders cannot be placed", () => {
       connectedAccountId: "acct-equity-0",
       accountNumber: "PA1",
       reason: "Account equity (0) is too low to trade",
-      halted: true
+      halted: false
     });
     const row = getDb()
       .prepare("SELECT status, summary, connected_account_id FROM strategy_runs WHERE id = ?")
       .get(runId) as { status: string; summary: string; connected_account_id: string };
     expect(row.status).toBe("skipped_broker_unhealthy");
     expect(row.connected_account_id).toBe("acct-equity-0");
-    expect(row.summary).toMatch(/auto-paused/);
+    expect(row.summary).not.toMatch(/auto-paused/);
     expect(row.summary).toMatch(/equity \(0\)/);
     const kinds = listAudit(50, "local").map((a) => a.kind);
     expect(kinds).toContain("run_skipped_broker_unhealthy");

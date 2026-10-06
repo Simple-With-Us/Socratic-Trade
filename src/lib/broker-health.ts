@@ -273,16 +273,28 @@ export type ApplyBrokerPauseResult =
   | { action: "still_paused"; reason: string; autoOwned: boolean };
 
 /**
- * Persist a skipped strategy_runs row when the scheduler health gate auto-halts
- * an active account.  Journal-only skip left tradingLiveness with no row while
- * equity-0 accounts sat halted (board 06df80cf).  Do not call on already-halted
- * ticks — that would write a row every 15s.
+ * Persist a skipped strategy_runs row when the scheduler health gate suppresses an
+ * active account in a way liveness/ops should see in strategy_runs: auto-halt (once,
+ * while still active) or a new low-equity skip episode (once per cause, account stays
+ * active).  Do not call on already-halted ticks for halt — that would write every 15s.
  */
 export function shouldPersistBrokerHealthSkip(input: {
   wasActive: boolean;
   pauseAction: ApplyBrokerPauseResult["action"];
+  health?: HealthSignals;
+  /** True on first tick of a skip episode (new/changed cause); scheduler passes logHealthGateSkip's return. */
+  skipEpisodeStarted?: boolean;
 }): boolean {
-  return input.wasActive && input.pauseAction === "halted";
+  if (!input.wasActive) return false;
+  if (input.pauseAction === "halted") return true;
+  if (
+    input.skipEpisodeStarted &&
+    input.pauseAction === "none" &&
+    input.health?.category === "equity"
+  ) {
+    return true;
+  }
+  return false;
 }
 
 export function persistBrokerHealthSkipRun(input: {

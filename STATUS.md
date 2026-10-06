@@ -93,7 +93,7 @@
 
 **What.**  `applyBrokerOrderPlacementPause` treats `health.category === "equity"` like process stall: action `none`, no halt/marker/kill_switch.  Tests + rollout `docs/rollouts/2026-10-05-equity-low-skip-no-auto-halt.md`.
 
-**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; broker-health test files 33 passed; `npm run build` clean.
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; targeted broker-health + scheduler observability tests; PR `verify-hosted` runs full `npm test` + build.
 
 **Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
 
