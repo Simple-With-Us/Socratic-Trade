@@ -54,7 +54,7 @@ The snapshot cache lives in `src/lib/health-probe-cache.ts` because Next.js reje
 
 ## Next Steps & Blockers
 
-Open a normal PR.  Do not force-merge and do not bypass the `verify` ruleset.  After merge and a real production ship, resolve PagerDuty #383 with a note that names the deployed sha.  Do not Coolify-deploy or restart the container from an agent during this work.
+PR https://github.com/Simple-With-Us/Socratic-Trade/pull/4302.  Do not force-merge and do not bypass the `verify` ruleset.  After merge and a real production ship, resolve PagerDuty #383 with a note that names the deployed sha.  Do not Coolify-deploy or restart the container from an agent during this work.
 
 Residual: move any remaining multi-second main-thread `better-sqlite3` or HTML/JSON parse off the serving thread.  Lexical FTS off-loop work is a separate effort.  Do not prune `app.db` in a drive-by.
 
