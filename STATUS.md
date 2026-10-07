@@ -10,7 +10,7 @@
 
 **Verification.**  `npm run lint` exit 0 (0 errors).  `npx tsc --noEmit` exit 0.  Health and live vitest 47 passed, including a warm GET that does not enter a 400ms sync summary or a hung credit fetch.  `npm run build` exit 0.  Full `npm test`: 9101 passed, 11 failed in unrelated files on this seat (notify env, Node 22 `.ts` ops script).  CI `verify` is the merge gate.
 
-**Next.**  Open a normal PR.  Do not force-merge.  Resolve PagerDuty #383 only after merge and ship, with a non-silent note.
+**Next.**  PR https://github.com/Simple-With-Us/Socratic-Trade/pull/4302.  Do not force-merge.  Resolve PagerDuty #383 only after merge and ship, with a non-silent note.
 
 ## 2026-10-06 CURSOR — Autopilot re-arm streak (branch `cursor/autopilot-rearm-streak-38d0`)
 
