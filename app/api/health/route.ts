@@ -123,8 +123,7 @@ async function assembleHealth(): Promise<HealthPayload> {
   const checks: Record<string, unknown> = {};
   let ok = true;
   // Always collect the operator fields.  GET projects them away for anonymous
-  // callers so one snapshot serves both audiences.  `ok` does not depend on this.
-  const detailed = true;
+  // callers via projectHealthPayload so one snapshot serves both audiences.
 
   const release = runtimeReleaseIdentity();
   checks.release = release;
@@ -179,7 +178,7 @@ async function assembleHealth(): Promise<HealthPayload> {
     const lease = getLease();
     if (lease) {
       checks.schedulerLease = {
-        owner: detailed ? lease.owner : leaseOwnerWithoutPid(lease.owner),
+        owner: lease.owner,
         acquiredAt: lease.acquiredAt,
         expiresAt: lease.expiresAt,
         ageSeconds: Math.round(lease.ageMs / 1000),
@@ -413,9 +412,9 @@ async function assembleHealth(): Promise<HealthPayload> {
       checks.dependencies = deps;
       checks.openrouterCredits = {
         ok: credits.ok,
-        ...(detailed
-          ? { remainingUsd: credits.remainingUsd, totalUsd: credits.totalUsd, usedUsd: credits.usedUsd }
-          : {}),
+        remainingUsd: credits.remainingUsd,
+        totalUsd: credits.totalUsd,
+        usedUsd: credits.usedUsd,
         thresholdUsd: credits.thresholdUsd,
         checkedAt: credits.checkedAt,
         ...(credits.error ? { error: credits.error } : {})
@@ -507,7 +506,10 @@ async function assembleHealth(): Promise<HealthPayload> {
     // those, and `storageDegraded` (computed from the raw numbers, not from this object) keeps the
     // disk/WAL thresholds visible to an anonymous monitor without publishing the capacity itself.
     checks.storage = {
-      ...(detailed ? { dbSizeBytes, walSizeBytes, freeBytes, totalBytes } : {}),
+      dbSizeBytes,
+      walSizeBytes,
+      freeBytes,
+      totalBytes,
       litestreamAgeSeconds,
       litestreamState,
       litestreamStatus: freshness.state === "known" ? freshness.status : null,
