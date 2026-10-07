@@ -148,19 +148,18 @@ describe("weightedRotationPick (proportional sampling)", () => {
 });
 
 describe("MODEL_ROTATION_POOL (curated catalog minus exclusions)", () => {
-  it("excludes only the unsuitable models and nothing else from the curated catalog", async () => {
+  it("excludes only the expensive models from automatic rotation, keeping them in the curated picker", async () => {
     const { MODEL_ROTATION_POOL } = await import("../src/lib/model-rotation");
     const { CURATED_LLM_MODEL_IDS } = await import("../app/ui/llm-model-catalog");
-    // mistral-small-2603 / mistral-medium-3-5 were re-added 2026-07-10 (owner directive, after
-    // the keyed re-benchmark proved both complete real calls) — only grok-build-0.1 (coding
-    // specialist, soft-timeouts as a Green strategist) stays excluded.
-    const excluded = ["grok-build-0.1"];
-    for (const model of excluded) expect(MODEL_ROTATION_POOL).not.toContain(model);
-    // Keep-in-sync check: the pool is exactly the curated catalog minus the exclusions.
+    const excluded = ["gpt-6-astra-pro", "claude-opus-latest", "claude-fable-latest"];
+    for (const model of excluded) {
+      expect(MODEL_ROTATION_POOL).not.toContain(model);
+      expect(CURATED_LLM_MODEL_IDS).toContain(model);
+    }
+    // Keep-in-sync check: rotation is the curated catalog minus exactly these exclusions.
     expect(new Set(MODEL_ROTATION_POOL)).toEqual(new Set(CURATED_LLM_MODEL_IDS.filter((id) => !excluded.includes(id))));
     expect(MODEL_ROTATION_POOL).toContain("gpt-6-astra");
     expect(MODEL_ROTATION_POOL).toContain("gpt-5.6-sol");
-    expect(MODEL_ROTATION_POOL).toContain("claude-fable-latest");
     expect(MODEL_ROTATION_POOL).toContain("grok-latest");
     expect(MODEL_ROTATION_POOL).toContain("mistral-small-latest");
     expect(MODEL_ROTATION_POOL).toContain("mistral-medium-latest");
@@ -180,7 +179,9 @@ describe("MODEL_ROTATION_POOL (curated catalog minus exclusions)", () => {
     clearOpenRouterModelCooldowns();
     const safe = applyRotationAvailabilityFailOpen(MODEL_ROTATION_POOL);
     expect(safe).toContain("kimi-latest");
-    expect(safe).toContain("claude-fable-latest");
+    expect(safe).not.toContain("claude-fable-latest");
+    expect(safe).not.toContain("claude-opus-latest");
+    expect(safe).not.toContain("gpt-6-astra-pro");
     expect(safe).toContain("gpt-6-astra");
     expect(safe).toContain("gpt-5.6-sol");
     expect(safe).toContain("gemini-flash-latest");
@@ -233,7 +234,9 @@ describe("MODEL_ROTATION_POOL (curated catalog minus exclusions)", () => {
     expect(result.pool).toContain("gpt-6-astra");
     expect(result.pool).toContain("gpt-5.6-sol");
     expect(result.pool).toContain("kimi-latest");
-    expect(result.pool).toContain("claude-fable-latest");
+    expect(result.pool).not.toContain("claude-fable-latest");
+    expect(result.pool).not.toContain("claude-opus-latest");
+    expect(result.pool).not.toContain("gpt-6-astra-pro");
   });
 });
 
@@ -251,7 +254,7 @@ describe("eligibleRotationPool (credential-missing skip)", () => {
     // GPT and Claude models should be kept (in pool) since openai/anthropic keys are active
     expect(pool).toContain("gpt-6-astra");
     expect(pool).toContain("gpt-5.6-sol");
-    expect(pool).toContain("claude-opus-latest");
+    expect(pool).not.toContain("claude-opus-latest");
     
     // Gemini and DeepSeek models should be skipped since gemini/deepseek keys are missing
     expect(skipped).toContain("gemini-flash-latest");
