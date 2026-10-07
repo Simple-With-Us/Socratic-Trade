@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.27
 # Production image for Coolify (socratic-app).
 #
 # Design constraints (learned the hard way 2026-08-04):
@@ -22,7 +22,7 @@
 #   keep python3/make/g++ for that step, and fail the image build if the
 #   .node binary is missing or unloadable.
 
-FROM node:24.14.1-bookworm-slim AS build
+FROM node:24.20.0-bookworm-slim AS build
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends bash ca-certificates curl python3 make g++ \
@@ -73,7 +73,7 @@ RUN rm -rf scripts/eval test \
   && find docs -mindepth 1 -maxdepth 1 ! -name benchmarks -exec rm -rf {} + 2>/dev/null || true \
   && rm -rf node_modules/.cache
 
-FROM node:24.14.1-bookworm-slim AS runtime
+FROM node:24.20.0-bookworm-slim AS runtime
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends bash ca-certificates curl tar gzip tini \
