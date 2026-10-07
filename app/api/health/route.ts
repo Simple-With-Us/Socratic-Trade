@@ -1,4 +1,4 @@
-import { getInternalSetting, getServiceHealthSummaries, databasePath, resolveApiKeyWithSource, alertStorageWarning, alertLivenessWarning, clearLivenessWarning } from "@/lib/db";
+import { databasePath, resolveApiKeyWithSource, alertStorageWarning, alertLivenessWarning, clearLivenessWarning } from "@/lib/db";
 import { isHardStoppedHealthSummary } from "@/lib/db-health";
 import { isIntentionalOffHealthService } from "@/lib/retired-direct-vendors";
 import { activeEmbeddingProvider } from "@/lib/vector-db";
@@ -20,9 +20,15 @@ import {
   scanLitestreamRuntimeLogFile
 } from "@/lib/runtime-health";
 import { getLease } from "@/lib/scheduler-lease";
-import { getTradingLivenessSummary, toPublicTradingLiveness } from "@/lib/trading-liveness";
-import { getOpenRouterCreditStatus } from "@/lib/openrouter-credits";
+import { toPublicTradingLiveness } from "@/lib/trading-liveness";
 import { authorizeOpsRequest } from "@/lib/ops-auth";
+import { yieldEventLoop } from "@/lib/slow-sync-guard";
+import {
+  healthProbeDeps,
+  readWarmHealthSnapshot,
+  storeHealthSnapshot,
+  type HealthPayload
+} from "@/lib/health-probe-cache";
 import { statSync, statfsSync } from "fs";
 import { dirname } from "path";
 
@@ -38,7 +44,45 @@ function leaseOwnerWithoutPid(owner: string): string {
   return owner.replace(/^\d+:/, "");
 }
 
-// Rich public/ops probe — NOT the Coolify/Traefik backend probe.  Docker HEALTHCHECK
+function projectHealthPayload(payload: HealthPayload, detailed: boolean): HealthPayload {
+  if (detailed) return payload;
+  const checks: Record<string, unknown> = { ...payload.checks };
+  const credits = checks.openrouterCredits;
+  if (credits && typeof credits === "object") {
+    const copy = { ...(credits as Record<string, unknown>) };
+    delete copy.remainingUsd;
+    delete copy.totalUsd;
+    delete copy.usedUsd;
+    checks.openrouterCredits = copy;
+  }
+  const storage = checks.storage;
+  if (storage && typeof storage === "object") {
+    const copy = { ...(storage as Record<string, unknown>) };
+    delete copy.dbSizeBytes;
+    delete copy.walSizeBytes;
+    delete copy.freeBytes;
+    delete copy.totalBytes;
+    checks.storage = copy;
+  }
+  const lease = checks.schedulerLease;
+  if (lease && typeof lease === "object" && typeof (lease as { owner?: unknown }).owner === "string") {
+    checks.schedulerLease = {
+      ...(lease as Record<string, unknown>),
+      owner: leaseOwnerWithoutPid((lease as { owner: string }).owner)
+    };
+  }
+  return { ok: payload.ok, checks };
+}
+
+function jsonHealth(payload: HealthPayload, detailed: boolean): Response {
+  const projected = projectHealthPayload(payload, detailed);
+  return Response.json(projected, { status: projected.ok ? 200 : 503 });
+}
+
+// Rich public/ops probe — NOT the Coolify/Traefik backend probe.  A warm process
+// serves a memory snapshot (HEALTH_SNAPSHOT_TTL_MS, default 2s) and refreshes
+// it after the response, so this GET does not wait on SQLite or the OpenRouter
+// credit fetch.  The first request after boot still assembles inline.  Docker HEALTHCHECK
 // and any Coolify HTTP health path must use GET /api/live.  A 503 here (critical
 // Pinecone/RAG/Alpaca hard-stop) or a >5s response used to mark the named container
 // running:unhealthy while Next was up; Traefik then had no healthy backend
@@ -75,17 +119,19 @@ function leaseOwnerWithoutPid(owner: string): string {
 // schedulerStale, tradingLiveness.degraded, and storage.litestreamTiersDegraded are JSON flags
 // that MUST stay 200 so a Coolify restart cannot "heal" them.  Page those with keyword/JSON
 // monitors — see docs/runbooks/uptime-health-json-monitors.md.
-export async function GET(request: Request) {
+async function assembleHealth(): Promise<HealthPayload> {
   const checks: Record<string, unknown> = {};
   let ok = true;
-  const detailed = authorizeOpsRequest(request);
+  // Always collect the operator fields.  GET projects them away for anonymous
+  // callers so one snapshot serves both audiences.  `ok` does not depend on this.
+  const detailed = true;
 
   const release = runtimeReleaseIdentity();
   checks.release = release;
 
   let lastTick: string | undefined;
   try {
-    lastTick = getInternalSetting<string>("scheduler:lastTick"); // also proves the DB is reachable
+    lastTick = healthProbeDeps.getInternalSetting<string>("scheduler:lastTick"); // also proves the DB is reachable
     checks.db = "ok";
   } catch (error) {
     ok = false;
@@ -146,6 +192,8 @@ export async function GET(request: Request) {
     // never let lease reporting break the liveness probe
   }
 
+  await yieldEventLoop();
+
   // Trading-liveness (handoff 6b.7): the heartbeat above proves the tick FUNCTION runs, not that
   // trading works — a scheduler that ticks while every run fails keeps this route green for hours.
   // Per active-autonomy account (policy.systemState === "active"), report the age of the most
@@ -161,7 +209,7 @@ export async function GET(request: Request) {
   // ops-snapshot.ts). Here we fold it down to counts + the oldest age, which is enough for an
   // external uptime probe without leaking account identity.
   try {
-    const liveness = getTradingLivenessSummary();
+    const liveness = healthProbeDeps.getTradingLivenessSummary();
     const publicLiveness = toPublicTradingLiveness(liveness);
     // Always emit so `tradingLiveness.degraded` exists for JSON-path monitors even when
     // every account is halted.  The boolean sibling is the unique keyword substring.
@@ -239,6 +287,8 @@ export async function GET(request: Request) {
     // do not break health check on key resolution
   }
 
+  await yieldEventLoop();
+
   // Surface every backend dependency from health summaries.
   //
   // PUBLIC route (no requireAdmin): expose ONLY boolean/degraded status — never the raw
@@ -246,7 +296,7 @@ export async function GET(request: Request) {
   // connections-health route). A `degraded` flag captures the soft/cold-start case without
   // failing liveness; the detailed reason text is deliberately omitted here.
   try {
-    const summaries = getServiceHealthSummaries();
+    const summaries = healthProbeDeps.getServiceHealthSummaries();
     const dependencies: Record<string, { ok: boolean; degraded?: boolean }> = {};
     // Critical liveness is Alpaca plus the ACTIVE vector store. After the Qdrant
     // cutover Pinecone is leftover telemetry, not a 503 (PD #116). A hard-stopped
@@ -352,7 +402,7 @@ export async function GET(request: Request) {
     // full 8s timeout and, stacked behind a busy scheduler tick, pushed
     // `/api/health` past UptimeRobot's 30s — pairing socratictrade.com
     // downtime with a false "OpenRouter credits low" on the same URL.
-    const credits = await getOpenRouterCreditStatus(Date.now(), fetch, { maxWaitMs: 1_500 });
+    const credits = await healthProbeDeps.getOpenRouterCreditStatus(Date.now(), fetch, { maxWaitMs: 1_500 });
     if (credits) {
       const deps = (checks.dependencies ?? {}) as Record<string, { ok: boolean; degraded?: boolean }>;
       const existing = deps.openrouter;
@@ -374,6 +424,8 @@ export async function GET(request: Request) {
   } catch {
     // never let the credit check break the health probe
   }
+
+  await yieldEventLoop();
 
   // Disk and database headroom check (purely advisory, never fails the health probe)
   try {
@@ -563,5 +615,14 @@ export async function GET(request: Request) {
     }
   }
 
-  return Response.json({ ok, checks }, { status: ok ? 200 : 503 });
+  return { ok, checks };
+}
+
+export async function GET(request: Request) {
+  const detailed = authorizeOpsRequest(request);
+  const warm = readWarmHealthSnapshot(assembleHealth);
+  if (warm) return jsonHealth(warm, detailed);
+  const payload = await assembleHealth();
+  storeHealthSnapshot(payload);
+  return jsonHealth(payload, detailed);
 }
