@@ -435,11 +435,13 @@ export function nativeSlugFor(model: string | null | undefined): string {
   return bare.includes("/") ? bare.split("/").pop() || bare : bare;
 }
 
-// grok-build-0.1 (the previous sole exclusion — a coding-specialist checkpoint unsuited to
-// either team role) was removed from the catalog entirely on 2026-09-18, not just excluded
-// from rotation; see docs/rollouts/2026-09-18-model-catalog-cleanup.md. Empty for now — kept
-// as a mechanism for a future model that should stay curated/selectable but not rotate.
-export const ROTATION_EXCLUDED_DISPLAY_SLUGS: readonly string[] = [];
+// Keep expensive models available for explicit owner selection, but out of automatic rotation
+// so a daily run batch stays within the owner's $4/day OpenRouter key cap.
+export const ROTATION_EXCLUDED_DISPLAY_SLUGS: readonly string[] = [
+  "gpt-6-astra-pro",
+  "claude-opus-latest",
+  "claude-fable-latest"
+];
 
 export const CATALOG_ROTATION_POOL: readonly string[] = CATALOG_DISPLAY_SLUGS.filter(
   (id) => !ROTATION_EXCLUDED_DISPLAY_SLUGS.includes(id)
