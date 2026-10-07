@@ -96,11 +96,12 @@ EXPOSE 4000
 # Traefik follows Docker health.  /api/health is the rich ops probe and
 # can 503 (Pinecone/RAG hard-stop) or exceed this 15s timeout after boot.
 # That marks running:unhealthy while the process is up -- public 503 for
-# ~20 min after #2810 finished on 2026-08-17.  /api/live is process+SQLite
-# only.  Do not point Coolify HTTP health back at /api/health.
-# 2026-09-09: /api/live itself intermittently takes ~8s.  better-sqlite3 is
-# SYNCHRONOUS, so a heavy query against the now-11GB app.db blocks the event
-# loop and every request behind it, including this probe.  Measured on prod:
+# ~20 min after #2810 finished on 2026-08-17.  /api/live is process-only:
+# it does not open app.db.  Do not point Coolify HTTP health back at /api/health.
+# 2026-09-09: /api/live itself intermittently took ~8s because it read SQLite.
+# better-sqlite3 is SYNCHRONOUS, so a heavy query against the ~11GB app.db
+# blocked the event loop and every request behind it, including this probe.
+# Measured on prod:
 # 8.60s then 0.09s then 0.03s back-to-back, CPU 107%, disk %util 0.10 -- CPU
 # bound in-process, not IO.  At timeout=5s/retries=3 that flapped the container
 # to unhealthy and Traefik served a public 503 while the app was fine (DB ok,

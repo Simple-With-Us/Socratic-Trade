@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-07 CURSOR — Health probe off the SQLite critical path (branch `cursor/health-probe-event-loop-b9ee`)
+
+**What.**  Sentry uptime SOCRATIC-TRADE-S times out `GET /api/health` at ~8s (681 events).  A warm probe now returns a memory snapshot and refreshes SQLite, Litestream, and OpenRouter credits after the response.  `/api/live` no longer opens `app.db`.  Service-health summary statements are prepared once per read.  PagerDuty #383 stays open until this ships.  Extra-ship no.
+
+**Left alone.**  No production restart.  No FTS rewrite.  No database prune.  The ~11GB `app.db` is mostly corpus, not a health-log leak.  A single main-thread native call longer than 8s can still delay every in-process HTTP handler, including these probes.
+
+**Docs.**  `docs/rollouts/2026-10-07-health-probe-snapshot.md`, `PLAN.md`, `docs/EFFORT-LOG.md`, `docs/runbooks/uptime-health-json-monitors.md`.
+
+**Verification.**  `npm run lint` exit 0 (0 errors).  `npx tsc --noEmit` exit 0.  Health and live vitest 47 passed, including a warm GET that does not enter a 400ms sync summary or a hung credit fetch.  `npm run build` exit 0.  Full `npm test`: 9101 passed, 11 failed in unrelated files on this seat (notify env, Node 22 `.ts` ops script).  CI `verify` is the merge gate.
+
+**Next.**  PR https://github.com/Simple-With-Us/Socratic-Trade/pull/4302.  Do not force-merge.  Resolve PagerDuty #383 only after merge and ship, with a non-silent note.
+
 ## 2026-10-06 CURSOR — Autopilot re-arm streak (branch `cursor/autopilot-rearm-streak-38d0`)
 
 **What.**  Re-arming an account was undone within seconds because the run-failure watchdog's `lastHaltStreak` floor was the streak at halt time.  A strategy run already in flight could fail after the re-arm, push the raw streak one past that floor, and auto-halt again.  The watchdog now counts only runs whose `started_at` is strictly after the re-arm receipt.  The same window feeds `/api/health` `tradingLiveness.maxConsecutiveFailedRuns`.  Genuine new failures still halt at the existing threshold.  Sentry SOCRATIC-TRADE-2R and 2T and PagerDuty #322 stay open until a clean completed run.
