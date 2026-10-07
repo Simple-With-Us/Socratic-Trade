@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-07 CURSOR — `__rotate__` OpenRouter access-denied failover (branch `cursor/preopen-autopilot-rotate-failover-b257`)
+
+**What.**  Prod Autopilot `__rotate__` runs failed with OpenRouter 403 access-denied slugs and "Failover chain exhausted (3 Green Team endpoints)" while the scheduler stayed healthy.  Implicit rotation failover now walks up to twelve alternates (hard cap eighteen), and rotation picks skip per-user 403 cooldown slugs with fail-open when every pool member is cooling.
+
+**Left alone.**  No Coolify restart or deploy.  No OpenRouter key minting.  No trading risk policy changes.
+
+**Docs.**  `docs/rollouts/2026-10-07-rotate-openrouter-access-failover.md`, `PLAN.md`, `docs/EFFORT-LOG.md`.
+
+**Verification.**  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  Rotation + access-denied failover vitest 37 passed.  CI `verify` is the merge gate.
+
+**Next.**  Open PR; do not force-merge or resolve review threads just to merge.
+
 ## 2026-10-07 CURSOR — Health probe off the SQLite critical path (branch `cursor/health-probe-event-loop-b9ee`)
 
 **What.**  Sentry uptime SOCRATIC-TRADE-S times out `GET /api/health` at ~8s (681 events).  A warm probe now returns a memory snapshot and refreshes SQLite, Litestream, and OpenRouter credits after the response.  `/api/live` no longer opens `app.db`.  Service-health summary statements are prepared once per read.  PagerDuty #383 stays open until this ships.  Extra-ship no.
