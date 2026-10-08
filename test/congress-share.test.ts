@@ -230,6 +230,40 @@ describe("dropInvalidShareRows — drop malformed rows instead of sending them",
     expect(dropped).toMatchObject({ spx: 1, prices: 1 });
   });
 
+  it("drops price-series rows with non-positive currentPrice even when closes are valid", () => {
+    const { payload, dropped } = dropInvalidShareRows({
+      prices: [
+        {
+          ticker: "ZERO",
+          closes: [{ date: "2026-06-15", close: 50 }],
+          currentPrice: 0,
+          currentPriceDate: "2026-06-15",
+        },
+        {
+          ticker: "NEG",
+          closes: [{ date: "2026-06-15", close: 50 }],
+          currentPrice: -1,
+          currentPriceDate: "2026-06-15",
+        },
+        {
+          ticker: "GOOD",
+          closes: [{ date: "2026-06-15", close: 50 }],
+          currentPrice: 50,
+          currentPriceDate: "2026-06-15",
+        },
+      ],
+    });
+    expect(payload.prices).toEqual([
+      {
+        ticker: "GOOD",
+        closes: [{ date: "2026-06-15", close: 50 }],
+        currentPrice: 50,
+        currentPriceDate: "2026-06-15",
+      },
+    ]);
+    expect(dropped).toMatchObject({ prices: 2 });
+  });
+
   it("shareWithCongressTrade excludes invalid rows from the POST body and counts only what's sent", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "t";
     let posted: { refs?: unknown[]; origin?: string } | undefined;

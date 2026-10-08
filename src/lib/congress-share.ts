@@ -546,6 +546,11 @@ const CongressSharePriceCloseSchema = PriceCloseSchema.extend({
 
 const CongressSharePriceSeriesSchema = PriceSeriesSchema.extend({
   closes: z.array(CongressSharePriceCloseSchema),
+  // Shared schema is `nullAsUndefined(z.number())` — allow null/omit, reject 0/-1/NaN.
+  currentPrice: z.preprocess(
+    (value) => (value === null ? undefined : value),
+    z.number().finite().positive().optional(),
+  ),
 });
 
 /**
