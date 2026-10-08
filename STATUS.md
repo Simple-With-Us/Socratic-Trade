@@ -89,6 +89,15 @@
 **Verification.**  `bash -n` on three scripts.
 
 **Next.**  Push; reply on Kody threads; do not merge.
+## 2026-10-05 CURSOR — Equity-low skip without auto-halt (branch `cursor/equity-low-skip-no-halt-5d8f`)
+
+**What.**  `applyBrokerOrderPlacementPause` treats `health.category === "equity"` like process stall: action `none`, no halt/marker/kill_switch.  Tests + rollout `docs/rollouts/2026-10-05-equity-low-skip-no-auto-halt.md`.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; targeted broker-health + scheduler observability tests; PR `verify-hosted` runs full `npm test` + build.
+
+**Blockers.**  Rebase onto origin/main complete; required CI `verify` checks pending before squash auto-merge.
+
+**Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
