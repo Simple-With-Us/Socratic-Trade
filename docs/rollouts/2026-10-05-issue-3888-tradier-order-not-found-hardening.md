@@ -40,4 +40,4 @@ CI `verify` on PR #4212 is the merge gate.
 
 ## Zero-Code Findings
 
-- Reusable lesson (fleet-recall, seat CURSOR, category lesson, app socratic-trade): Scope Tradier missing-order detection to validated HTTP 404 and HTTP 422 not-found envelopes (status prefix at message start, body parsed after `Tradier HTTP 422:`) rather than generic error prose, so unrelated broker failures still reach normal retry and error handling.
+- Reusable lesson: Scope Tradier missing-order detection to validated HTTP 404 and HTTP 422 not-found envelopes (status prefix at message start, body parsed after `Tradier HTTP 422:`) rather than generic error prose, so unrelated broker failures still reach normal retry and error handling.
