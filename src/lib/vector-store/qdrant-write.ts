@@ -11,8 +11,9 @@
  *   3. env RAG_VECTOR_WRITE_BACKEND ("qdrant" | "pinecone")
  *   4. default: qdrant when QDRANT_URL is configured, else pinecone
  * Qdrant is additionally gated on qdrantConfigured() — when the write backend resolves to Qdrant
- * but QDRANT_URL is missing, vectorWriteBackend() throws (fail closed) instead of silently
- * falling back to Pinecone.  Opt into Pinecone explicitly via the knob/env when Qdrant is absent.
+ * but the endpoint is not usable, vectorWriteBackend() throws (fail closed) instead of silently
+ * falling back to Pinecone.  vectorWriteBackendOrNull() is the non-throwing probe for reads,
+ * health, and other diagnostics.  Opt into Pinecone explicitly via the knob/env when Qdrant is absent.
  *
  * Point ids MUST match scripts/qdrant/pinecone-to-qdrant-copy.py: uuid5(NAMESPACE_URL,
  * "st:" + ns + ":" + pinecone_id).  Payload MUST keep pc_id (original Pinecone id) and ns
@@ -91,12 +92,22 @@ function qdrantHeaders(): Record<string, string> {
   return headers;
 }
 
+const QDRANT_WRITE_MISCONFIGURED_MESSAGE =
+  "Qdrant is the selected vector write backend but it is not usable: QDRANT_URL is unset, or a " +
+  "remote QDRANT_URL has no QDRANT_API_KEY (or QDRANT_ALLOW_ANONYMOUS is not \"true\").  " +
+  "Writes must not silently fall back to Pinecone — set QDRANT_URL (and QDRANT_API_KEY), or opt " +
+  "into Pinecone via RAG_VECTOR_WRITE_BACKEND=pinecone or RAG_VECTOR_WRITE_QDRANT=off.";
+
+/** Operator-facing reason when Qdrant writes are selected but the endpoint is not usable. */
+export function qdrantWriteMisconfiguredMessage(): string {
+  return QDRANT_WRITE_MISCONFIGURED_MESSAGE;
+}
+
 /**
- * Effective write backend for this ingest/delete/inventory pass.  Knob/env resolution failures
- * fail open to Pinecone when Qdrant was not selected.  When Qdrant is selected (default or
- * explicit) but QDRANT_URL is unset, throws so ingest cannot silently resume on Pinecone.
+ * Knob/env selection only.  Does not check that the Qdrant endpoint is usable and does not throw.
+ * Default is Qdrant unless an explicit knob or env opts into Pinecone.
  */
-export function vectorWriteBackend(): VectorWriteBackend {
+function selectedWriteBackend(): VectorWriteBackend {
   let enabled: boolean | undefined;
   try {
     const override = serverKnobOverride(QDRANT_WRITE_KNOB_ID);
@@ -121,16 +132,34 @@ export function vectorWriteBackend(): VectorWriteBackend {
   if (enabled === undefined) {
     enabled = true;
   }
-  if (enabled !== true) return "pinecone";
-  if (!qdrantConfigured()) {
-    const message =
-      "QDRANT_URL is not configured but the vector write backend is Qdrant (default or explicit).  " +
-      "Writes must not silently fall back to Pinecone — set QDRANT_URL or opt into Pinecone via " +
-      "RAG_VECTOR_WRITE_BACKEND=pinecone or RAG_VECTOR_WRITE_QDRANT=off.";
-    console.error(`[qdrant-write] ${message}`);
-    throw new Error(message);
-  }
+  return enabled === true ? "qdrant" : "pinecone";
+}
+
+/**
+ * Non-throwing write-backend probe.  `null` means Qdrant was selected but the endpoint is not
+ * usable — callers that only diagnose or that must not fail a read should treat that as
+ * "not on Qdrant" and surface qdrantWriteMisconfiguredMessage() when they report status.
+ * Write entry points use vectorWriteBackend(), which throws instead.
+ */
+export function vectorWriteBackendOrNull(): VectorWriteBackend | null {
+  const selected = selectedWriteBackend();
+  if (selected !== "qdrant") return "pinecone";
+  if (!qdrantConfigured()) return null;
   return "qdrant";
+}
+
+/**
+ * Effective write backend for this ingest/delete/inventory pass.  Knob/env resolution failures
+ * fail open to Pinecone when Qdrant was not selected.  When Qdrant is selected (default or
+ * explicit) but the endpoint is not usable, throws so ingest cannot silently resume on Pinecone.
+ */
+export function vectorWriteBackend(): VectorWriteBackend {
+  const backend = vectorWriteBackendOrNull();
+  if (backend == null) {
+    console.error(`[qdrant-write] ${QDRANT_WRITE_MISCONFIGURED_MESSAGE}`);
+    throw new Error(QDRANT_WRITE_MISCONFIGURED_MESSAGE);
+  }
+  return backend;
 }
 
 /**

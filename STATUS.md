@@ -100,11 +100,13 @@
 **Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
 ## 2026-10-05 CURSOR — Qdrant write loud fallback (branch `cursor/loud-qdrant-write-fallback-7868`, board 8215e304, PR #4232)
 
-**What.**  `vectorWriteBackend()` no longer silently returns `"pinecone"` when Qdrant is selected but `QDRANT_URL` is unset; it logs `console.error` and throws.  Explicit Pinecone opt-in unchanged.  `RAG_MAX_DAILY_INGEST_POINTS` untouched.  Rebased onto `origin/main` (no conflicts).  Kody sentence-gap fix on operator error string (two ASCII spaces after `explicit).`).
+**What.**  `vectorWriteBackend()` no longer silently returns `"pinecone"` when Qdrant is selected but the endpoint is not usable; it logs `console.error` and throws.  Read, health, and stats probes use `vectorWriteBackendOrNull()` so they do not throw.  Explicit Pinecone opt-in unchanged.  `RAG_MAX_DAILY_INGEST_POINTS` untouched.
 
-**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/qdrant-write.test.ts` green post-rebase.
+**Blockers.**  None identified.
 
-**Next.**  Force-with-lease push; CI `verify` on PR #4232.
+**Verification.**  `npx vitest run` on qdrant-write, sec-ingest-worker, vector-db-qdrant-retrieval, vector-db-qdrant-index-metric, and connection-health-routing: 114 passed.  `npx eslint` on the touched TypeScript files: 0 errors.  `npx tsc --noEmit` exit 0.  `npm run build` was not run on this seat.
+
+**Next.**  CI `verify` on PR #4232 is the merge gate.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

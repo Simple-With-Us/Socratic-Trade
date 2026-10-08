@@ -261,7 +261,12 @@ async function assembleHealth(): Promise<HealthPayload> {
     checks.pineconeConfigured = pineconeKey.source !== "none";
     checks.qdrantConfigured = qdrantConfigured();
     checks.ragVectorReadBackend = vectorReadBackend();
-    checks.ragVectorWriteBackend = vectorWriteBackend();
+    try {
+      checks.ragVectorWriteBackend = vectorWriteBackend();
+    } catch (error) {
+      checks.ragVectorWriteBackend = "misconfigured";
+      checks.ragVectorWriteBackendError = error instanceof Error ? error.message : String(error);
+    }
 
     try {
       ragEmbedProvider = activeEmbeddingProvider();

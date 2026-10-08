@@ -30,7 +30,8 @@ import {
   qdrantProviderAuthority,
   qdrantSetPayload,
   qdrantUpsertPoints,
-  vectorWriteBackend
+  vectorWriteBackend,
+  vectorWriteBackendOrNull
 } from "../src/lib/vector-store/qdrant-write";
 import { qdrantConfigured } from "../src/lib/vector-store/qdrant-read";
 import { invalidateServerKnobCache, serverKnobById, setServerKnobOverride } from "../src/lib/server-knobs";
@@ -68,12 +69,15 @@ describe("backend knob resolution", () => {
   });
 
   it("defaults to qdrant when QDRANT_URL is set; missing QDRANT_URL fails closed (no silent Pinecone)", () => {
-    expect(() => vectorWriteBackend()).toThrow(/QDRANT_URL is not configured/);
+    expect(() => vectorWriteBackend()).toThrow(/QDRANT_URL is unset/);
+    expect(vectorWriteBackendOrNull()).toBeNull();
     process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
     expect(vectorWriteBackend()).toBe("pinecone");
+    expect(vectorWriteBackendOrNull()).toBe("pinecone");
     delete process.env.RAG_VECTOR_WRITE_BACKEND;
     process.env.QDRANT_URL = "http://qdrant.example:6333";
     expect(vectorWriteBackend()).toBe("qdrant");
+    expect(vectorWriteBackendOrNull()).toBe("qdrant");
   });
 
   it("boolean env turns qdrant on (with QDRANT_URL) and explicit falsy keeps pinecone", () => {
@@ -110,6 +114,24 @@ describe("backend knob resolution", () => {
     process.env[QDRANT_WRITE_KNOB_ID] = "true";
     expect(qdrantConfigured()).toBe(false);
     expect(() => vectorWriteBackend()).toThrow(/must not silently fall back to Pinecone/);
+    expect(vectorWriteBackendOrNull()).toBeNull();
+  });
+
+  it("names a remote URL with no API key, which qdrantConfigured rejects outside test mode", () => {
+    const env = process.env as Record<string, string | undefined>;
+    const previousNodeEnv = env.NODE_ENV;
+    env.NODE_ENV = "production";
+    process.env.QDRANT_URL = "https://qdrant.example:6333";
+    delete process.env.QDRANT_API_KEY;
+    delete process.env.QDRANT_ALLOW_ANONYMOUS;
+    try {
+      expect(qdrantConfigured()).toBe(false);
+      expect(() => vectorWriteBackend()).toThrow(/QDRANT_API_KEY/);
+      expect(() => vectorWriteBackend()).toThrow(/QDRANT_ALLOW_ANONYMOUS/);
+      expect(vectorWriteBackendOrNull()).toBeNull();
+    } finally {
+      env.NODE_ENV = previousNodeEnv;
+    }
   });
 });
 

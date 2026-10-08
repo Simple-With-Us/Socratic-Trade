@@ -317,6 +317,27 @@ describe("Connection Health & Failure Routing", () => {
     }
   });
 
+  it("/api/health reports a misconfigured Qdrant write backend without dropping the rest of the RAG block", async () => {
+    delete process.env.QDRANT_URL;
+    delete process.env.QDRANT_API_KEY;
+    delete process.env.RAG_VECTOR_WRITE_BACKEND;
+    try {
+      const { healthRoute, db } = await load();
+      db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+      const response = await healthRoute.GET(anonymousHealthRequest());
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.ok).toBe(true);
+      expect(body.checks.ragVectorWriteBackend).toBe("misconfigured");
+      expect(body.checks.ragVectorWriteBackendError).toMatch(/QDRANT_URL/);
+      expect(body.checks.qdrantConfigured).toBe(false);
+      expect(body.checks.ragVectorReadBackend).toBeDefined();
+      expect(body.checks.ragEmbedProvider ?? body.checks.ragEmbedProviderError).toBeDefined();
+    } finally {
+      process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
+    }
+  });
+
   it("/api/health stays 200 when env lane hard-stops but a user-keyed lane for the same critical service is healthy", async () => {
     // Prod failure mode 2026-08-05: Infisical env Alpaca keys 401 (env lane hard-stopped) while
     // Connections user keys succeed — Coolify healthcheck required HTTP 200 and rolled every deploy.
