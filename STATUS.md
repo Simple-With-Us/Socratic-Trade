@@ -8,7 +8,7 @@
 
 **Docs.**  `docs/rollouts/2026-10-07-rotate-openrouter-access-failover.md`, `PLAN.md`, `docs/EFFORT-LOG.md`.
 
-**Verification.**  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  Rotation + access-denied failover vitest 37 passed.  CI `verify` is the merge gate.
+**Verification.**  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  Rotation + access-denied failover vitest 37 passed.  `npm run build` exit 0 (this seat, after `npm ci`).  CI `verify` is the merge gate.
 
 **Next.**  Open PR; do not force-merge or resolve review threads just to merge.
 
