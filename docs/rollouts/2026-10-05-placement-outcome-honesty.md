@@ -6,7 +6,7 @@ Board `d2094c78ff79447d` (`placement-outcome-truth`): Approve must not report su
 
 ## Changes Made
 
-`classifyPlaceOrderError` is the shared class for both lanes.  HTTP 429/408 are `retryable` and book `not_placed`.  HTTP 409 and a duplicate `client_order_id` (`must be unique` / `already exists` / `duplicate`, including Alpaca HTTP 422) are `idempotency_conflict` and fall through to the existing refId reconcile.  Other HTTP 4xx stay `rejected_terminal`.  The autonomous run previously treated every HTTP 4xx except 409 as `rejected_by_broker`; it now uses the same class.  Mobile `proposal.approve` throws `ProposalNotPlacedError` only when the returned status is outside `placed` / `filled` / `paper`, and the command is failed with that structured result.  Busy still returns from `executeProposal`.  The #3343 throws (decline, missing order id, absent order, uncertain) stay throws.  Console home and the approval card share `toastForApproveResult`.  Home still titles a placement "Approved".  The card still titles "BUY AAPL placed".
+`classifyPlaceOrderError` is the shared class for both lanes.  HTTP 429/408 are `retryable`.  HTTP 429 books `not_placed` immediately.  HTTP 408 falls through to the existing refId reconcile on both lanes before any `not_placed` booking, because a timeout does not prove rejection and the next attempt mints a new refId.  HTTP 409 and a duplicate `client_order_id` (`must be unique` / `already exists` / `duplicate`, including Alpaca HTTP 422) are `idempotency_conflict` and use that same reconcile.  Other HTTP 4xx stay `rejected_terminal`.  The autonomous run previously treated every HTTP 4xx except 409 as `rejected_by_broker`; it now uses the same class.  Mobile `proposal.approve` throws `ProposalNotPlacedError` only when the returned status is outside `placed` / `filled` / `paper`, and the command is failed with that structured result.  Busy still returns from `executeProposal`.  The #3343 throws (decline, missing order id, absent order, uncertain) stay throws.  Console home and the approval card share `toastForApproveResult`.  Home still titles a placement "Approved".  The card still titles "BUY AAPL placed".
 
 Touched files:
 
@@ -27,7 +27,7 @@ Touched files:
 
 ## Decisions & Trade-offs
 
-Did not throw new errors from `executeProposal`.  Reprice re-approval, broker-minimum blocks, and owner-consent drift keep their current return-or-throw contract.  A duplicate `client_order_id` is not immediately `not_placed`.  Reconcile first: order present → placed; authoritative list and order absent → `not_placed`.  An invalid `client_order_id` that is not a duplicate stays terminal.  `OrderValidationError` is classified before the HTTP class so a validation message that mentions HTTP 429 stays blocked.  No iOS change.  The command is already failed when the result is not placed, and Linux cannot compile Swift.  No Coolify deploy.  The live board `/Users/jay/apps/TRADING-EFFORT-LOG.md` is not on this VM; the repo mirror was updated.
+Did not throw new errors from `executeProposal`.  Reprice re-approval, broker-minimum blocks, and owner-consent drift keep their current return-or-throw contract.  A duplicate `client_order_id` is not immediately `not_placed`.  Reconcile first: order present → placed; authoritative list and order absent → `not_placed`.  An invalid `client_order_id` that is not a duplicate stays terminal.  `OrderValidationError` is classified before the HTTP class so a validation message that mentions HTTP 429 stays blocked.  No iOS change.  The command is already failed when the result is not placed, and Linux cannot compile Swift.  No deployment was initiated.  HTTP 408 now reconciles by refId before a retryable `not_placed` on both the approval path and the autonomous run; HTTP 429 is unchanged.
 
 ## Verification State
 
@@ -46,6 +46,15 @@ npx vitest run test/placement-outcome.test.ts test/placement-reconcile.test.ts t
 `npm test` (vitest): 9 failed, 9050 passed, 51 skipped.  None of the 9 are in the placement files.  They are environment noise on this VM: Alpha Vantage pool dispatch count, Congress share breaker call count, `summarize-cpuprofile.mjs` failing to load a `.ts` file under plain Node, notify tests seeing a redacted env credential instead of empty, and server-metrics `usesLocalHost`.  Placement files in that run passed.
 
 `npm run lint` (`eslint .`) exited 0: 0 errors, 863 existing warnings.  `npm run build` passed (exit 0).  Static pages generated.
+
+**2026-10-07 rebase.**  Rebased onto `origin/main` with no conflict hunks.  HTTP 408 on the approval path and the autonomous run now uses the existing refId reconcile before any `not_placed` booking.  HTTP 429 still books `not_placed` immediately.
+
+```bash
+npx vitest run test/placement-outcome.test.ts test/placement-reconcile.test.ts test/console-approval-honesty.test.ts
+# 31 passed
+npx tsc --noEmit
+# exit 0
+```
 
 ## Next Steps & Blockers
 

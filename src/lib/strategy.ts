@@ -4413,7 +4413,9 @@ export async function runStrategyOnce(
 
             // P2.6: Explicitly intercept pre-flight validation throws and broker 4xx rejections.
             // A 4xx (e.g. 403 Forbidden, 400 Bad Request) means the broker definitively received and rejected it.
-            // HTTP 429/408 are transient — book not_placed, never rejected_by_broker.
+            // HTTP 429 is a rate limit — book not_placed, never rejected_by_broker.
+            // HTTP 408 is a timeout: the order may already be live, and the next attempt
+            // mints a new refId, so it falls through to refId reconcile instead.
             // HTTP 409, and a duplicate client_order_id on another status (Alpaca 422
             // "must be unique"), mean the key already exists and must be reconciled
             // rather than marked rejected. OrderValidationError means the adapter
@@ -4460,7 +4462,8 @@ export async function runStrategyOnce(
             // OrderValidationError is checked first so a validation message that happens
             // to mention HTTP 429 stays blocked, not retryable.
             const placeClass = placeError instanceof OrderValidationError ? null : classifyPlaceOrderError(message);
-            if (placeClass === "retryable") {
+            // 408 stays classified retryable but must not book not_placed before reconcile.
+            if (placeClass === "retryable" && !/\bHTTP 408\b/i.test(message)) {
               const note = `Broker rate-limited or timed out (${message}). Safe to retry.`;
               updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, note);
               audit(
