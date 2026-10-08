@@ -43,7 +43,7 @@ A stall between broker failures does not reset the halt streak.  It is skipped, 
 
 `stalled_no_progress` is exempt along with `process_restarted_mid_run`.  Both are the stale-run sweep closing a run the app did not finish.  A broker or LLM error that returns and fails the run is a different summary and still counts.  A parenthetical stall measurement on a broker timeout still counts, so a real broker deadline is not relabeled as an app stall.
 
-No phase-doc change.  This does not change strategy, orders, or risk limits.
+No `docs/phase-*.md` change.  None of those files define this watchdog.  The counter split is on `docs/rollouts/2026-09-30-self-healing-watchdogs.md` (alert and backoff still use `consecutiveFailedRuns`; auto-halt uses `consecutiveHaltEligibleFailures`).  This does not change strategy, orders, or risk limits.
 
 ## Verification State
 

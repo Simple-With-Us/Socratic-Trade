@@ -89,11 +89,12 @@
 **Verification.**  `bash -n` on three scripts.
 
 **Next.**  Push; reply on Kody threads; do not merge.
+
 ## 2026-10-05 CURSOR — App-stall failures must not auto-halt Autopilot (branch `cursor/stall-halt-streak-exempt-d19f`)
 
 **What.**  The run-failure watchdog counted event-loop stalls and mid-run restarts toward `ST_RUN_FAILURE_HALT_AFTER`.  On 2026-10-01 RTH that auto-halted Alpaca Paper and Tradier Sandbox after 10–12 stall failures.  Those runs still alert and back off.  They no longer advance the auto-halt streak.  Broker HTTP failures and LLM/provider failures still do.  Trading liveness reports both counts.  The stale-run sweep stamps `haltExempt: true` on both `process_restarted_mid_run` and `stalled_no_progress`.
 
-**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` clean.  `npm run build` exit 0.  Full vitest: 9051 passed, 11 failed outside this diff (notify redaction, Node 22 `.ts` loader, Twelve Data / Alpha Vantage / congress-share / server-metrics).  Targeted watchdog, liveness, and stale-run files passed (44, and again inside the full suite).  PR #4210.
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` clean.  Full vitest: 9051 passed, 11 failed outside this diff (notify redaction, Node 22 `.ts` loader, Twelve Data / Alpha Vantage / congress-share / server-metrics).  Targeted watchdog, liveness, and stale-run files passed (44, and again inside the full suite).  `npm run build` exit 0.  PR #4210.
 
 **Next.**  PR only.  Do not merge.  Do not Coolify Deploy.  Extra-ship no.
 
