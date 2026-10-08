@@ -41,7 +41,7 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # project.yml is the source of truth.  Linux seats cannot run xcodegen, and
       # the Cursor hook blocks hand-edits of project.pbxproj, so this Mac job
