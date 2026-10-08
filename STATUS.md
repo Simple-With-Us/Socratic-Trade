@@ -95,6 +95,8 @@
 
 **Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; targeted broker-health + scheduler observability tests; PR `verify-hosted` runs full `npm test` + build.
 
+**Blockers.**  Rebase onto origin/main complete; required CI `verify` checks pending before squash auto-merge.
+
 **Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
