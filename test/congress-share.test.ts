@@ -245,7 +245,7 @@ describe("dropInvalidShareRows — drop malformed rows instead of sending them",
 
   it("shareWithCongressTrade logs optional schemaVersion when present (tolerant reader)", async () => {
     process.env.CONGRESS_TRADE_TOKEN = congressTradeTestToken();
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(ctImportOkBody({ refs: 1 }), { status: 200 })));
     const res = await shareWithCongressTrade({
       schemaVersion: 3,
       refs: [{ ticker: "AAPL" }]
@@ -364,6 +364,32 @@ describe("parseCongressImportAcceptedCounts + congressImportAcceptedReceiptError
     );
     expect(err).toContain("refs: sent=2 accepted=1");
     expect(err).toContain("closes: sent=5 accepted=3");
+  });
+
+  it("does not count SPX rows inside sent.closes against priceRows", () => {
+    const zeros = { refs: 0, spxRows: 4, pricedTickers: 0, priceRows: 0, insiderRows: 0, shortVolumeRows: 0, fundamentalsRows: 0, analystRows: 0 };
+    const err = congressImportAcceptedReceiptError(
+      { refs: 0, spx: 4, prices: 0, closes: 4, insider: 0, shortVolume: 0, fundamentals: 0, analyst: 0 },
+      zeros,
+    );
+    expect(err).toBe("");
+  });
+
+  it("compares priceRows to per-ticker closes only when the POST also sent SPX", () => {
+    const err = congressImportAcceptedReceiptError(
+      { refs: 0, spx: 2, prices: 1, closes: 7, insider: 0, shortVolume: 0, fundamentals: 0, analyst: 0 },
+      { refs: 0, spxRows: 2, pricedTickers: 1, priceRows: 4, insiderRows: 0, shortVolumeRows: 0, fundamentalsRows: 0, analystRows: 0 },
+    );
+    expect(err).toContain("closes: sent=5 accepted=4");
+    expect(err).not.toContain("spx:");
+  });
+
+  it("uses tradesRows when App A sends it and otherwise fails a trades send", () => {
+    const sent = { refs: 0, spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0, fundamentals: 0, analyst: 0, trades: 2 };
+    const base = { refs: 0, spxRows: 0, pricedTickers: 0, priceRows: 0, insiderRows: 0, shortVolumeRows: 0, fundamentalsRows: 0, analystRows: 0 };
+    expect(congressImportAcceptedReceiptError(sent, { ...base, tradesRows: 2 })).toBe("");
+    expect(congressImportAcceptedReceiptError(sent, base)).toContain("no tradesRows receipt");
+    expect(congressImportAcceptedReceiptError(sent, { ...base, tradesRows: 1 })).toContain("trades: sent=2 accepted=1");
   });
 });
 
@@ -505,6 +531,28 @@ describe("shareWithCongressTrade", () => {
     const res = await shareWithCongressTrade({});
     expect(res).toMatchObject({ ok: false, skipped: true, reason: "empty" });
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("POSTs a trades-only payload and fails the receipt instead of skipping it", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    const fetchSpy = vi.fn(async () => new Response(ctImportOkBody(), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const res = await shareWithCongressTrade({
+      trades: [{
+        docId: "doc-1",
+        chamber: "senate",
+        source: "senate-efd",
+        filerName: "Jane Doe",
+        ticker: "AAPL",
+        txType: "purchase",
+        transactionDate: "2026-06-15",
+      }],
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(res.skipped).toBeUndefined();
+    expect(res.ok).toBe(false);
+    expect(String(res.error)).toContain("no tradesRows receipt");
+    expect(res.sent.trades).toBe(1);
   });
 
   it("fails (not skip) when every row is schema-dropped — do not advance daily marker", async () => {

@@ -1014,7 +1014,10 @@ export function congressImportAcceptedReceiptError(
   check("refs", sent.refs, counts.refs);
   check("spx", sent.spx, counts.spxRows);
   check("prices", sent.prices, counts.pricedTickers);
-  check("closes", sent.closes, counts.priceRows);
+  // `countCloses` (sent.closes) includes SPX rows. App A reports those under `spxRows`;
+  // `priceRows` is only per-ticker price_eod closes. Comparing the sum to `priceRows`
+  // fails every SPX-only nightly POST (priceRows stays 0).
+  check("closes", Math.max(0, sent.closes - sent.spx), counts.priceRows);
   check("insider", sent.insider, counts.insiderRows);
   check("shortVolume", sent.shortVolume, counts.shortVolumeRows);
   check("fundamentals", sent.fundamentals, counts.fundamentalsRows);
@@ -1022,7 +1025,18 @@ export function congressImportAcceptedReceiptError(
 
   const tradesSent = sent.trades ?? 0;
   if (tradesSent > 0) {
-    gaps.push(`trades: sent=${tradesSent} but App A import response has no trades receipt (not implemented on App A)`);
+    const tradesAccepted = nonNegativeIntField(
+      typeof response === "object" && response !== null
+        ? (response as Record<string, unknown>).tradesRows
+        : undefined,
+    );
+    if (tradesAccepted === undefined) {
+      gaps.push(
+        `trades: sent=${tradesSent} but App A import response has no tradesRows receipt (not implemented on App A)`,
+      );
+    } else if (tradesAccepted < tradesSent) {
+      gaps.push(`trades: sent=${tradesSent} accepted=${tradesAccepted}`);
+    }
   }
 
   if (gaps.length === 0) return "";
@@ -1097,7 +1111,18 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
   };
   const token = congressTradeToken();
   if (!token) return { ...dropMeta, ok: false, skipped: true, reason: "no-token", sent };
-  const total = sent.refs + sent.spx + sent.prices + sent.insider + sent.shortVolume + sent.fundamentals + sent.analyst;
+  // Trades are a real dataset on the shared payload. Leaving them out of this sum made a
+  // trades-only body `skipped: true` ("empty") so the daily marker could advance without a POST.
+  // Include them so the body is sent and the receipt check below can fail it honestly.
+  const total =
+    sent.refs +
+    sent.spx +
+    sent.prices +
+    sent.insider +
+    sent.shortVolume +
+    sent.fundamentals +
+    sent.analyst +
+    (sent.trades ?? 0);
   if (total === 0) {
     // Distinguish a genuinely-empty input (nothing to send → legitimate skip) from a payload whose
     // rows were ALL rejected by the shared schema. The latter is a real failure: counting it as a
