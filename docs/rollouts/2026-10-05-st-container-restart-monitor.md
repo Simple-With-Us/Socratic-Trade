@@ -36,18 +36,29 @@ runbook only — **no host deploy from this agent**.
 - **Reuses documented secret names only** — no new Infisical keys invented in code.
 - **15-minute sample interval** balances detection vs. noise; tunable via timer unit if owner wants
   faster sampling.
+- **Terminal states** `exited` and `dead` page when no live container matches the Coolify name.
+  A container-id change clears the previous status so a deploy does not inherit `restarting`.
+- **Cooldown** is stored only after Pushover or Sentry actually accepts the page. The form body
+  is posted on stdin so the Pushover token is not in `curl` argv.
 
 ## Verification State
 
 ```bash
 bash -n scripts/ops/st-container-restart-monitor.sh
 bash -n scripts/ops/install-st-container-restart-monitor.sh
+bash -n scripts/ops/st-container-restart-monitor.selftest.sh
 bash scripts/ops/st-container-restart-monitor.selftest.sh
 python3 -m py_compile scripts/ops/st-container-restart-monitor-sentry.py
 ```
 
-Docs-only / host-script change: full `npm run lint` / `npm test` / `npm run build` not required for
-merge gate relevance; no app runtime code touched.
+Ran on Linux after the review fixes (2026-10-07): `bash -n` on the three shell scripts exited 0,
+`python3 -m py_compile` exited 0, and a direct `parse_dsn` check mapped
+`https://abc@sentry.example.com/prefix/123` to `https://sentry.example.com/api/prefix/123/envelope/`
+and `http://abc@127.0.0.1:9000/1` to `http://127.0.0.1:9000/api/1/envelope/`.
+`bash scripts/ops/st-container-restart-monitor.selftest.sh` printed `selftest: 9 passed, 0 failed.`
+
+Host-script change: full `npm run lint` / `npm test` / `npm run build` not required for merge-gate
+relevance; no app runtime code touched.
 
 ## Next Steps & Blockers
 

@@ -102,7 +102,7 @@
 
 **What.**  Host-side Docker `RestartCount` / missing-container monitor for Coolify ST (`d83b1aykr03uwr32yhgzaiay`): script + systemd timer + install helper + runbook.  Alerts via existing `PUSHOVER_*` and optional `SENTRY_FLEET_DSN`.  **Not installed on prod from this agent** — owner runs `install-st-container-restart-monitor.sh` on fleet-hetzner-nbg1.
 
-**Verification.**  `bash scripts/ops/st-container-restart-monitor.selftest.sh` (3/3); `bash -n` on shell scripts; `python3 -m py_compile` on sentry helper.
+**Verification.**  2026-10-07 Linux: `bash -n` on the monitor, install, and selftest scripts exited 0; `python3 -m py_compile` on the sentry helper exited 0; `bash scripts/ops/st-container-restart-monitor.selftest.sh` printed `selftest: 9 passed, 0 failed.`
 
 **Next.**  PR #4224 — owner installs on host per `docs/runbooks/st-container-restart-monitor.md`.
 

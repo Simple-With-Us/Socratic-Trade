@@ -15,7 +15,8 @@ Board: `2ad7f8b92e864958887e72fc25572c34` (GB-HOUSEKEEPER).  Complements board `
 | Signal | Threshold (default) | Meaning |
 | --- | --- | --- |
 | Restart delta | 3 increases within 15 minutes | Crash / restart loop on the same container id |
-| Status `restarting` | 2 consecutive samples | Docker has not stabilized |
+| Status `exited` or `dead` | any sample, when no live container matches | Docker will not bring Node back |
+| Status `restarting` | 2 consecutive samples of the same container id | Docker has not stabilized |
 | Container missing | Was running, now no match for Coolify id | Deploy stuck or container removed while unhealthy |
 
 Coolify application UUID (name filter): `d83b1aykr03uwr32yhgzaiay` (`ST_RESTART_MONITOR_COOLIFY_ID`).
@@ -32,7 +33,9 @@ Configure on the host in `/etc/default/st-container-restart-monitor`:
 | Sentry fleet-infra (PagerDuty route) | `SENTRY_FLEET_DSN` | Same secret as `.github/workflows/sentry-ci-report.yml` |
 
 Set `ST_RESTART_MONITOR_NOTIFY=1` to send alerts.  Default cooldown between pages: 3600s
-(`ST_RESTART_MONITOR_ALERT_COOLDOWN_SECONDS`).
+(`ST_RESTART_MONITOR_ALERT_COOLDOWN_SECONDS`).  The cooldown is stored only after at least one
+channel accepts the page.  A skipped or failed post does not suppress the next sample.
+Sentry is optional: a delivered Pushover page is enough to arm the cooldown.
 
 ## Install (owner on host — agents do not deploy)
 

@@ -18,14 +18,14 @@
 #   ST_RESTART_MONITOR_NOTIFY=0 bash ...   # sample only
 #
 # Env (also loaded from /etc/default/st-container-restart-monitor when installed):
-#   ST_RESTART_MONITOR_COOLIFY_ID   default d83b1aykr03uwr32yhgzaiay
+#   ST_RESTART_MONITOR_COOLIFY_ID   required (no shared default; set on the host)
 #   ST_RESTART_MONITOR_WINDOW_SECONDS default 900 (15m)
 #   ST_RESTART_MONITOR_DELTA_THRESHOLD default 3 (RestartCount increases in window)
 #   ST_RESTART_MONITOR_STATE_PATH     default /var/lib/st-container-restart-monitor/state.json
 #   ST_RESTART_MONITOR_NOTIFY         default 0 (install sets 1)
 #   ST_RESTART_MONITOR_ALERT_COOLDOWN_SECONDS default 3600
-#   PUSHOVER_ST_API_TOKEN / PUSHOVER_APP_TOKEN + PUSHOVER_USER_KEY (INFISICAL.md)
-#   SENTRY_FLEET_DSN (optional fleet-infra -> PagerDuty route)
+#   PUSHOVER_ST_API_TOKEN / PUSHOVER_APP_TOKEN (INFISICAL.md) + PUSHOVER_USER_KEY (Pushover dashboard)
+#   SENTRY_FLEET_DSN optional GitHub Actions secret (not Infisical). Unset channel stays silent.
 #
 # Keep this file pure ASCII (AGENTS.md: operator shell scripts, Apple bash 3.2).
 set -euo pipefail
@@ -33,7 +33,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SENTRY_HELPER="${SCRIPT_DIR}/st-container-restart-monitor-sentry.py"
 
-COOLIFY_ID="${ST_RESTART_MONITOR_COOLIFY_ID:-d83b1aykr03uwr32yhgzaiay}"
+COOLIFY_ID="${ST_RESTART_MONITOR_COOLIFY_ID:-}"
 WINDOW_SECONDS="${ST_RESTART_MONITOR_WINDOW_SECONDS:-900}"
 DELTA_THRESHOLD="${ST_RESTART_MONITOR_DELTA_THRESHOLD:-3}"
 STATE_PATH="${ST_RESTART_MONITOR_STATE_PATH:-/var/lib/st-container-restart-monitor/state.json}"
@@ -52,6 +52,7 @@ command -v jq >/dev/null 2>&1 || fail_op "jq is required."
 printf '%s' "$WINDOW_SECONDS" | grep -Eq '^[0-9]+$' || fail_op "WINDOW_SECONDS must be an integer."
 printf '%s' "$DELTA_THRESHOLD" | grep -Eq '^[0-9]+$' || fail_op "DELTA_THRESHOLD must be an integer."
 printf '%s' "$ALERT_COOLDOWN" | grep -Eq '^[0-9]+$' || fail_op "ALERT_COOLDOWN must be an integer."
+[ -n "$COOLIFY_ID" ] || fail_op "ST_RESTART_MONITOR_COOLIFY_ID is required."
 
 NOW_EPOCH="$(date +%s)"
 
@@ -73,12 +74,23 @@ save_state() {
 
 find_container_id() {
   # Coolify names containers with the application UUID substring.
-  docker ps -aq --filter "name=${COOLIFY_ID}" 2>/dev/null | head -n 1
+  # Prefer a live container so a stopped predecessor does not hide a running replacement.
+  local live
+  live="$(docker ps -q --filter "name=${COOLIFY_ID}" 2>/dev/null | head -n 1 || true)"
+  if [ -n "$live" ]; then
+    printf '%s' "$live"
+    return 0
+  fi
+  docker ps -aq --filter "name=${COOLIFY_ID}" 2>/dev/null | head -n 1 || true
 }
 
 inspect_field() {
   local cid="$1" format="$2"
   docker inspect -f "$format" "$cid" 2>/dev/null || true
+}
+
+uri_encode() {
+  printf '%s' "$1" | jq -sRr @uri
 }
 
 notify_pushover() {
@@ -90,33 +102,39 @@ notify_pushover() {
   local user="${PUSHOVER_USER_KEY:-}"
   if [ -z "$token" ] || [ -z "$user" ]; then
     log "pushover skipped (need PUSHOVER_ST_API_TOKEN or PUSHOVER_APP_TOKEN plus PUSHOVER_USER_KEY)."
-    return 0
+    return 3
   fi
-  curl -fsS --max-time 20 -X POST https://api.pushover.net/1/messages.json \
-    --data-urlencode "token=${token}" \
-    --data-urlencode "user=${user}" \
-    --data-urlencode "title=${title}" \
-    --data-urlencode "message=${message}" \
-    --data-urlencode "priority=1" >/dev/null \
-    || log "warn: pushover post failed."
+  local body
+  body="token=$(uri_encode "$token")&user=$(uri_encode "$user")&title=$(uri_encode "$title")&message=$(uri_encode "$message")&priority=1"
+  # Form body on stdin so the token and user key are not in curl argv (/proc/pid/cmdline).
+  if ! printf '%s' "$body" | curl -fsS --max-time 20 -X POST https://api.pushover.net/1/messages.json \
+      -H 'Content-Type: application/x-www-form-urlencoded' \
+      --data-binary @- >/dev/null; then
+    log "warn: pushover post failed."
+    return 1
+  fi
+  return 0
 }
 
 notify_sentry() {
   local message="$1" reason="$2"
   if [ -z "${SENTRY_FLEET_DSN:-}" ]; then
     log "sentry skipped (SENTRY_FLEET_DSN unset)."
-    return 0
+    return 3
   fi
   if [ ! -f "$SENTRY_HELPER" ]; then
     log "sentry skipped (missing ${SENTRY_HELPER})."
-    return 0
+    return 3
   fi
-  command -v python3 >/dev/null 2>&1 || {
+  if ! command -v python3 >/dev/null 2>&1; then
     log "sentry skipped (python3 required)."
-    return 0
-  }
-  SENTRY_FLEET_DSN="$SENTRY_FLEET_DSN" python3 "$SENTRY_HELPER" "$reason" "$message" \
-    || log "warn: sentry post failed."
+    return 3
+  fi
+  if ! SENTRY_FLEET_DSN="$SENTRY_FLEET_DSN" python3 "$SENTRY_HELPER" "$reason" "$message"; then
+    log "warn: sentry post failed."
+    return 1
+  fi
+  return 0
 }
 
 maybe_alert() {
@@ -132,11 +150,19 @@ maybe_alert() {
     fi
   fi
   if [ "$NOTIFY" = "1" ]; then
-    notify_pushover "ST container restart (${reason})" "$message"
-    notify_sentry "$message" "$reason"
-    state="$(printf '%s' "$state" | jq -c --argjson t "$NOW_EPOCH" --arg r "$reason" \
-      '.lastAlertAt = $t | .lastAlertReason = $r')"
-    save_state "$state"
+    # 0 = delivered, 1 = failed, 3 = skipped (unset). Cooldown arms only on a real delivery.
+    # Sentry is optional, so one delivered channel is enough; requiring both would re-page
+    # every tick when only Pushover is configured.
+    local prc=0 src=0
+    notify_pushover "ST container restart (${reason})" "$message" || prc=$?
+    notify_sentry "$message" "$reason" || src=$?
+    if [ "$prc" -eq 0 ] || [ "$src" -eq 0 ]; then
+      state="$(printf '%s' "$state" | jq -c --argjson t "$NOW_EPOCH" --arg r "$reason" \
+        '.lastAlertAt = $t | .lastAlertReason = $r')"
+      save_state "$state"
+    else
+      log "alert not delivered (pushover=${prc} sentry=${src}); cooldown not armed."
+    fi
   else
     log "notify skipped (ST_RESTART_MONITOR_NOTIFY=${NOTIFY}); alert reason: ${reason}"
   fi
@@ -150,13 +176,18 @@ PREV_STATUS="$(printf '%s' "$STATE" | jq -r '.lastStatus // empty')"
 INCREASES_JSON="$(printf '%s' "$STATE" | jq -c '.increases // []')"
 
 if [ -z "$CID" ]; then
+  # containerId is cleared while the container stays missing; lastSeenId keeps the incident open
+  # so missingSince is the first sample, not "now" on every later tick.
+  if [ -z "$PREV_CID" ]; then
+    PREV_CID="$(printf '%s' "$STATE" | jq -r '.lastSeenId // empty')"
+  fi
   if [ -n "$PREV_CID" ]; then
     msg="Socratic-Trade Coolify container (${COOLIFY_ID}) is not running on the host.  Last id ${PREV_CID}.  App-side boot-ledger cannot run if the container never starts.  Check Coolify deploy logs and docker events on fleet-hetzner-nbg1."
-    NEW_STATE="$(jq -nc \
+    NEW_STATE="$(printf '%s' "$STATE" | jq -c \
       --argjson t "$NOW_EPOCH" \
       --arg prev "$PREV_CID" \
       --argjson inc "$INCREASES_JSON" \
-      '{sampledAt: $t, containerId: "", lastStatus: "missing", increases: $inc, missingSince: $t, lastSeenId: $prev}')"
+      '{sampledAt: $t, containerId: "", lastStatus: "missing", increases: $inc, missingSince: (.missingSince // $t), lastSeenId: $prev, lastAlertAt: (.lastAlertAt // 0), lastAlertReason: (.lastAlertReason // "")}')"
     save_state "$NEW_STATE"
     set +e
     maybe_alert "missing" "$msg"
@@ -188,6 +219,7 @@ INCREASES_JSON="$(printf '%s' "$INCREASES_JSON" | jq -c --argjson now "$NOW_EPOC
 if [ "$CID" != "$PREV_CID" ] && [ -n "$PREV_CID" ]; then
   log "container id changed (${PREV_CID} -> ${CID}); reset restart baseline (deploy/replace)."
   INCREASES_JSON='[]'
+  PREV_STATUS=''
 fi
 
 PREV_COUNT="$(printf '%s' "$STATE" | jq -r '.lastRestartCount // empty')"
@@ -195,11 +227,8 @@ if [ -n "$PREV_COUNT" ] && [ "$CID" = "$PREV_CID" ]; then
   if [ "$RESTART_COUNT" -gt "$PREV_COUNT" ]; then
     delta=$((RESTART_COUNT - PREV_COUNT))
     log "RestartCount ${PREV_COUNT} -> ${RESTART_COUNT} (delta ${delta}) on ${NAME} status=${STATUS}."
-    i=0
-    while [ "$i" -lt "$delta" ]; do
-      INCREASES_JSON="$(printf '%s' "$INCREASES_JSON" | jq -c --argjson t "$NOW_EPOCH" '. + [{at: $t, count: 1}]')"
-      i=$((i + 1))
-    done
+    INCREASES_JSON="$(printf '%s' "$INCREASES_JSON" | jq -c --argjson t "$NOW_EPOCH" --argjson n "$delta" \
+      '. + [range($n) | {at: $t, count: 1}]')"
   fi
 fi
 
@@ -221,6 +250,12 @@ save_state "$NEW_STATE"
 if [ "$IN_WINDOW" -ge "$DELTA_THRESHOLD" ]; then
   msg="Socratic-Trade container ${NAME} (${CID:0:12}) hit ${IN_WINDOW} Docker restarts within ${WINDOW_SECONDS}s (RestartCount=${RESTART_COUNT}, status=${STATUS}, exit=${EXIT_CODE}, started=${STARTED_AT}).  Crash loop class - app boot-ledger may not run.  Investigate docker logs and Coolify; board 2ad7f8b92e864958887e72fc25572c34."
   maybe_alert "restart_loop" "$msg"
+  exit $?
+fi
+
+if [ "$STATUS" = "exited" ] || [ "$STATUS" = "dead" ]; then
+  msg="Socratic-Trade container ${NAME} (${CID:0:12}) is in terminal Docker state '${STATUS}' (exit=${EXIT_CODE}, RestartCount=${RESTART_COUNT}).  Container is down and Node is not running.  board 2ad7f8b92e864958887e72fc25572c34."
+  maybe_alert "down" "$msg"
   exit $?
 fi
 

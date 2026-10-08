@@ -14,21 +14,28 @@ import uuid
 from urllib.parse import urlparse
 
 
-def parse_dsn(dsn: str) -> tuple[str, str, str]:
-    parsed = urlparse(dsn)
+def parse_dsn(dsn: str) -> tuple[str, str, str, str]:
+    """Return (public_key, host, project_path, scheme).
+
+    project_path keeps any URL prefix so a self-hosted DSN
+    (https://sentry.example/prefix/123) posts to /api/prefix/123/envelope/.
+    """
+    parsed = urlparse(dsn.strip())
     if parsed.scheme not in ("http", "https"):
         raise ValueError("SENTRY_FLEET_DSN must be an http(s) URL")
     public_key = parsed.username or ""
-    project_id = parsed.path.strip("/").split("/")[-1]
     host = parsed.hostname or ""
-    if not public_key or not project_id or not host:
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    project_path = parsed.path.strip("/")
+    if not public_key or not project_path or not host:
         raise ValueError("SENTRY_FLEET_DSN is malformed")
-    return public_key, host, project_id
+    return public_key, host, project_path, parsed.scheme
 
 
 def send_event(dsn: str, reason: str, message: str) -> None:
-    public_key, host, project_id = parse_dsn(dsn)
-    envelope_url = f"https://{host}/api/{project_id}/envelope/"
+    public_key, host, project_path, scheme = parse_dsn(dsn)
+    envelope_url = f"{scheme}://{host}/api/{project_path}/envelope/"
     auth_header = (
         "Sentry sentry_version=7, sentry_client=st-container-restart-monitor/1.0, "
         f"sentry_key={public_key}"

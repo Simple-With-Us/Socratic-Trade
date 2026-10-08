@@ -45,7 +45,7 @@ chmod 0750 "$STATE_DIR"
 
 if [ ! -f "$DST_ENV" ]; then
   install -m 0640 "$ENV_EXAMPLE" "$DST_ENV"
-  echo "install-st-container-restart-monitor: created ${DST_ENV} from example - fill secrets before enabling notify."
+  echo "install-st-container-restart-monitor: created ${DST_ENV} from example - set ST_RESTART_MONITOR_COOLIFY_ID and fill secrets before the timer can page."
 else
   echo "install-st-container-restart-monitor: kept existing ${DST_ENV}."
 fi
