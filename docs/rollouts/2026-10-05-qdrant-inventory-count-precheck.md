@@ -13,17 +13,17 @@ Hourly dry-run `reconcileManagedVectorRecords` scrolled up to 50k Qdrant payload
 ## Decisions & Trade-offs
 
 - Count uses the same tenant/metadata Qdrant filter as scroll (not the optional `prefix`, which is applied client-side after scroll).  That is intentionally conservative: if the filter matches more than 50k points, scroll would hit the ceiling anyway.
-- Mid-scroll ceiling throw remains as a safety net if count races downward.
+- Mid-scroll ceiling throws the same `VectorInventoryOverCeilingError` if the count races downward, so reconcile soft-skips either detection point.
 
 ## Verification State
 
 ```bash
-npm test -- test/qdrant-write.test.ts test/vector-db-qdrant-retrieval.test.ts
-npm run lint
+npx vitest run test/qdrant-write.test.ts test/vector-db-qdrant-retrieval.test.ts
+npx eslint src/lib/vector-db.ts src/lib/vector-store/qdrant-write.ts test/qdrant-write.test.ts test/vector-db-qdrant-retrieval.test.ts
 npx tsc --noEmit
 ```
 
-38 tests in the two files pass; lint 0 errors; tsc clean.
+39 tests passed.  eslint on those TypeScript files: 0 errors (pre-existing warnings only).  `npx tsc --noEmit` exit 0.  `npm run build` was not run on this seat.
 
 ## Next Steps & Blockers
 

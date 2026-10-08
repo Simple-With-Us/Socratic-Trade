@@ -22,6 +22,7 @@
  */
 
 import crypto from "crypto";
+import { z } from "zod";
 import { isAbortOrTimeoutError, isTransientNetworkError } from "../network-errors";
 import { hasRagIngestPointsBudget, recordRagUsage } from "../rag-metering";
 import { yieldEventLoop } from "../slow-sync-guard";
@@ -513,6 +514,14 @@ function qdrantInventoryMetadataFilter(options: {
   );
 }
 
+const QdrantCountResponseSchema = z.object({
+  result: z.object({
+    count: z.number().int().nonnegative()
+  }),
+  status: z.string().optional(),
+  time: z.number().finite().nonnegative().optional()
+});
+
 async function qdrantCountPointsByFilter(filter: QdrantFilter, signal?: AbortSignal): Promise<number> {
   const collection = encodeURIComponent(qdrantCollectionName());
   const response = await qdrantRequest(`/collections/${collection}/points/count`, {
@@ -521,9 +530,11 @@ async function qdrantCountPointsByFilter(filter: QdrantFilter, signal?: AbortSig
     signal
   });
   signal?.throwIfAborted();
-  const parsed = (await response.json()) as { result?: { count?: unknown } };
-  const count = Number(parsed.result?.count ?? 0);
-  return Number.isFinite(count) ? count : 0;
+  const parsed = QdrantCountResponseSchema.safeParse(await response.json());
+  if (!parsed.success) {
+    throw new Error("Invalid Qdrant count response");
+  }
+  return parsed.data.result.count;
 }
 
 export async function qdrantInventoryByMetadata(options: {
@@ -578,7 +589,7 @@ export async function qdrantInventoryByMetadata(options: {
     options.signal?.throwIfAborted();
     const points = Array.isArray(parsed.result?.points) ? parsed.result.points : [];
     if (scanned + points.length > maxScanned) {
-      throw new Error(`Vector inventory scan limit exceeded (${maxScanned} records).`);
+      throw new VectorInventoryOverCeilingError(scanned + points.length, maxScanned);
     }
     scanned += points.length;
     for (const point of points) {

@@ -77,7 +77,6 @@ import {
   qdrantSetPayload,
   qdrantUpsertPoints,
   isVectorInventoryOverCeilingError,
-  VectorInventoryOverCeilingError,
   vectorWriteBackend
 } from "./vector-store/qdrant-write";
 
@@ -6299,14 +6298,20 @@ async function reconcileManagedVectorRecordsUnlocked(
     ));
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    if (error instanceof VectorInventoryOverCeilingError) {
-      const ceiling = error;
+    if (isVectorInventoryOverCeilingError(error)) {
+      // Name check covers a duplicate module instance (Next server bundles) where instanceof misses.
+      const ceiling = error as { count?: unknown; maxScanned?: unknown };
+      const overCount = Number(ceiling.count ?? 0);
+      const overMax = Number(ceiling.maxScanned ?? 0);
       console.warn(
-        `[vector-db] managed-vector reconcile skipped: inventory over scan ceiling (${ceiling.count} > ${ceiling.maxScanned})`
+        `[vector-db] managed-vector reconcile skipped: inventory over scan ceiling (${overCount} > ${overMax})`
       );
       return {
         ...emptyReconcileResult(dryRun, true),
-        inventoryOverCeiling: { count: ceiling.count, maxScanned: ceiling.maxScanned }
+        inventoryOverCeiling: {
+          count: Number.isFinite(overCount) ? overCount : 0,
+          maxScanned: Number.isFinite(overMax) ? overMax : 0
+        }
       };
     }
     if (isWholeIndexInventoryDeferredError(error) || isPineconeWuExhaustedError(msg)) return emptyReconcileResult(dryRun, true);

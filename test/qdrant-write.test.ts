@@ -323,8 +323,26 @@ describe("qdrant inventory / payload / collection info", () => {
     });
     vi.stubGlobal("fetch", calls);
     await expect(qdrantInventoryByMetadata({ namespace: "socratic-abc", batchSize: 1000, maxScanned: 50_000 }))
-      .rejects.toThrow("Vector inventory scan limit exceeded (50000 records)");
+      .rejects.toMatchObject({
+        name: "VectorInventoryOverCeilingError",
+        count: 51_000,
+        maxScanned: 50_000
+      });
     expect(scrollCalls).toBe(51);
+  });
+
+  it("rejects a malformed Qdrant count instead of treating it as zero and scrolling", async () => {
+    const calls = vi.fn(async (url: string | URL) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: "80000" } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ result: { points: [], next_page_offset: null } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", calls);
+    await expect(qdrantInventoryByMetadata({ namespace: "socratic-abc" }))
+      .rejects.toThrow("Invalid Qdrant count response");
+    expect(calls.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(false);
   });
 
   it("sets payload on uuid5 point ids", async () => {
