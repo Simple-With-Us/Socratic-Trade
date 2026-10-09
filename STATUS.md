@@ -130,6 +130,13 @@
 **Verification.**  Re-run 2026-10-09: `npm run lint` exit 0 (0 errors, 863 warnings).  `npx tsc --noEmit` exit 0.  `npm test` exit 1 (9119 passed, 51 skipped, 1 failed in `test/egress-guard.test.ts`: this host resolves discord.com to 198.18.0.1 and the SSRF guard rejects it).  `npm run build` exit 0.  No dev server running; none to restart.
 
 **Next.**  Push; open PR READY; do not merge.
+## 2026-10-05 CURSOR — ST host container restart monitor (board `2ad7f8b92e864958887e72fc25572c34`)
+
+**What.**  Host-side Docker `RestartCount` / missing-container monitor for Coolify ST (`<st-container-id>`, resolved at install time): script + systemd timer + install helper + runbook.  Alerts use the ST Pushover token and Sentry DSN from Infisical.  **Not installed on prod from this agent** — owner runs `install-st-container-restart-monitor.sh` on the fleet Hetzner host.
+
+**Verification.**  2026-10-09 Linux: `shellcheck` on the monitor and install scripts exited 0; `bash -n` on the monitor, install, and selftest scripts exited 0; `python3 -m py_compile` on the sentry helper exited 0; `bash scripts/ops/st-container-restart-monitor.selftest.sh` printed `selftest: 9 passed, 0 failed.`
+
+**Next.**  PR #4224 — owner installs on host per `docs/runbooks/st-container-restart-monitor.md`.
 **Next.**  Address Kody review threads (honest fix or `defer`).  Extra-ship no.  Do not deploy or merge from this lane.
 ## 2026-10-05 CURSOR — Issue #3888 isTradierOrderNotFound hardening (PR #4212)
 
