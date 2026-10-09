@@ -719,6 +719,35 @@ describe("fetchFreshQuotesCascade", () => {
     expect(callArgs.some((r) => r.symbol === "AAPL" && r.field === "prevClose")).toBe(true);
     expect(callArgs.some((r) => r.symbol === "AAPL" && r.field === "vwap")).toBe(true);
   });
+
+  it("does not treat a ROIC profile price with no upstream timestamp as fresh", async () => {
+    mockGetEquityQuotes.mockResolvedValue({});
+    mockEnrich.mockResolvedValue({});
+    mockFetchYahooFinanceQuotesBatch.mockResolvedValue(new Map());
+    mockFetchYahooFinanceQuote.mockResolvedValue(undefined);
+    mockResolveApiKeyWithSource.mockImplementation((service: string) =>
+      service === "roic" ? { key: "roic-test", source: "user" } : { key: undefined, source: "none" }
+    );
+    mockFetchWithRetry.mockImplementation(async (url: unknown) => {
+      if (!String(url).includes("api.roic.ai/v2/company/profile/")) {
+        return { ok: false, json: async () => ({}) };
+      }
+      return {
+        ok: true,
+        json: async () => ({ price: 18.5, companyName: "No Stamp Co" })
+      };
+    });
+
+    const result = await fetchFreshQuotesCascade(["NOSTAMP"], "local", "ACC123");
+    const quote = result.NOSTAMP;
+    // The close/weekend fallback may still return the price.  It must not
+    // pass the freshness gate: a fabricated wall-clock asOf always does.
+    expect(quote?.provider).toBe("roic");
+    expect(quote?.price).toBe(18.5);
+    expect(quote?.asOf).toBeUndefined();
+    expect(isQuoteFresh(quote!, Date.now(), cascadeFreshMaxAgeMs(120))).toBe(false);
+    expect(quoteAgeSecForStalenessGate(quote, Date.now()).missing).toBe(true);
+  });
 });
 
 describe("isCascadeFieldComplete", () => {
