@@ -156,6 +156,15 @@
 **Blockers.**  Rebase onto origin/main complete; required CI `verify` checks pending before squash auto-merge.
 
 **Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
+## 2026-10-09 CURSOR — Qdrant write loud fallback (branch `cursor/loud-qdrant-write-fallback-7868`, board 8215e304, PR #4232)
+
+**What.**  `vectorWriteBackend()` no longer silently returns `"pinecone"` when Qdrant is selected but the endpoint is not usable; it logs `console.error` and throws.  Read, health, and stats probes use `vectorWriteBackendOrNull()` so they do not throw.  Explicit Pinecone opt-in unchanged.  `RAG_MAX_DAILY_INGEST_POINTS` untouched.  Kody follow-up: the public health catch that records `ragVectorWriteBackend=misconfigured` now also sets `ragConfigured` to false, matching the embed-provider and vector-store failure paths.  The probe stays HTTP 200.
+
+**Blockers.**  None identified.  Merged `origin/main` (already current at `43f7896f`).
+
+**Verification.**  `npx vitest run test/connection-health-routing.test.ts`: 29 passed.  Full `npm test`, `npm run lint`, `npx tsc --noEmit`, and `npm run build` were not re-run on this seat.  CI `verify` is the merge gate.
+
+**Next.**  CI `verify` on PR #4232 is the merge gate.  Do not merge from this lane.
 ## 2026-10-05 CURSOR — ST host container restart monitor (board `2ad7f8b92e864958887e72fc25572c34`)
 
 **What.**  Host-side Docker `RestartCount` / missing-container monitor for Coolify ST (`<st-container-id>`, resolved at install time): script + systemd timer + install helper + runbook.  Alerts use the ST Pushover token and Sentry DSN from Infisical.  **Not installed on prod from this agent** — owner runs `install-st-container-restart-monitor.sh` on the fleet Hetzner host.
