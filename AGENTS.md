@@ -891,22 +891,17 @@ owner**, PR titles/bodies, commit messages, Slack posts to #agent-sync, Apple No
 effort-board rows, rollout notes, review reports, and design docs.  If it's prose a
 human reads, it gets two spaces.
 
-**HOW to emit it so the owner can actually SEE it (verified 2026-08-19).**  The gap is not
-a matter of intent — it has to survive the renderer:
+**HOW to emit it so it's actually visible (owner ruling 2026-10-08, every agent on every platform):**  intent is not enough, the gap has to survive the renderer.  Pick by destination.
 
-- **Agent chat replies** (Claude Code terminal / desktop transcript): use the HTML entity
-  `&nbsp;` right after the period, then a normal space — `Sentence one.&nbsp; Sentence two.`
-  The markdown renderer expands the entity, so the double gap is visible.
-- **Files** — repo docs, commit messages, PR titles/bodies, Slack posts, Apple Notes,
-  effort-board rows, code comments: two **literal** spaces.  These are read as source or by
-  renderers that preserve them; an entity would show up as literal text.
+- **Chat reply in a Markdown-rendering pane** (the Claude Code desktop app Code tab, owner-verified 2026-10-08; other agent chat panes by the same ruling, not individually verified): type the literal HTML entity text `&nbsp;` right after the period, then a normal space, outside code spans, as in `Sentence one.&nbsp; Sentence two.`  The renderer decodes it into a visibly wider gap.  Two literal spaces collapse, and a raw U+00A0 typed by the model arrives as a plain space.
+- **GitHub PR and issue titles, bodies and comments, review comments, and Zulip posts** (anything a tool writes that a Markdown or HTML renderer then shows): a real U+00A0 plus a space after each sentence.  Never the `&nbsp;` entity there, because GitHub can copy a PR body into a plain-text squash commit, where the entity would show literally.
+- **Plain-text surfaces** (git commit messages, source files and repo docs read as source, terminal output, terminal TUI chat, Slack): two literal ASCII spaces.  Do not write `&nbsp;` or U+00A0 into files.  A terminal TUI chat is unverified, and a terminal would print the entity literally.
+- **HTML, JSX and SwiftUI product copy:** a real U+00A0 plus a space, or a shared `SENTENCE_GAP` constant.
+- The owner must never see the six characters `&nbsp;`.  If a chat surface shows them, stop using the entity there and report the surface in #agent-sync, because that surface then needs a different mechanism, which is unknown until tested.  When a surface is known to collapse two typed spaces, use its working mechanism without asking.
 
-What does NOT work, all tested live: two literal spaces in chat (GitHub-flavored markdown
-collapses the run when rendering); a raw U+00A0 character in chat (normalized away in the view
-even though copy-paste shows two spaces — do not be fooled by copy-paste); app settings (none
-exist: `outputStyle` changes tone only, `--output-format` is headless `claude -p` only,
-`axScreenReader` only drops borders); patching the client (compiled binary + signed app; breaks
-code signing, wiped by auto-update — do not attempt).
+Also tested live and ruled out: app settings (none exist: `outputStyle` changes tone only, `--output-format`
+is headless `claude -p` only, `axScreenReader` only drops borders); patching the client (compiled binary +
+signed app; breaks code signing, wiped by auto-update — do not attempt).
 
 Process lesson: when an instruction appears not to take effect, diagnose the **rendering**
 layer between you and the reader — and ask what they see on screen — before restating a promise
