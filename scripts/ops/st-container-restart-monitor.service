@@ -1,0 +1,12 @@
+[Unit]
+Description=Socratic-Trade Docker container restart monitor (oneshot sample)
+Documentation=https://github.com/jaywedgeworth22/Socratic-Trade/blob/main/docs/runbooks/st-container-restart-monitor.md
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Nice=10
+EnvironmentFile=-/etc/default/st-container-restart-monitor
+ExecStart=/usr/local/sbin/st-container-restart-monitor.sh
+SyslogIdentifier=st-restart-monitor
