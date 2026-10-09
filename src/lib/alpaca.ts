@@ -901,7 +901,9 @@ class AlpacaBrokerGateway implements BrokerGateway {
     const results: Record<string, { tradable: boolean; fractional: boolean }> = {};
     for (const symbol of symbols) {
       try {
-        const asset = await this.trackHealth(() => this.alpaca.getAsset(toAlpacaSymbol(symbol)));
+        const asset = await this.trackHealth(() => this.alpaca.getAsset(toAlpacaSymbol(symbol)), {
+          deadlineMs: ALPACA_BROKER_IO_DEADLINE_MS
+        });
         results[normalizeSymbol(symbol)] = {
           tradable: asset.tradable === true,
           fractional: asset.fractionable === true

@@ -358,6 +358,14 @@ const staleExitGuardHost = globalThis as unknown as { __staleExitInFlight?: Set<
 const staleExitInFlight: Set<string> =
   staleExitGuardHost.__staleExitInFlight ?? (staleExitGuardHost.__staleExitInFlight = new Set<string>());
 
+// Per-account in-flight guard for pending-fill reconciliation. Without it, a slow broker pass can
+// stack a second concurrent reconcile on the next tick (void fire-and-forget), multiplying order
+// history walks and SQLite fill writes for the same account.
+const pendingFillGuardHost = globalThis as unknown as { __pendingFillReconcileInFlight?: Set<string> };
+const pendingFillReconcileInFlight: Set<string> =
+  pendingFillGuardHost.__pendingFillReconcileInFlight ??
+  (pendingFillGuardHost.__pendingFillReconcileInFlight = new Set<string>());
+
 // ── Observability: de-duplicated health-gate skip log + degraded-lane surfacing ──────────────
 //
 // Production evidence (litestream-runtime.log, 2026-08-29..2026-09-07): a single restricted/
@@ -391,8 +399,9 @@ export function isHaltedPauseAction(result: ApplyBrokerPauseResult): boolean {
   return result.action === "halted" || (result.action === "still_paused" && result.autoOwned);
 }
 
-/** Log an unhealthy-account skip once per NEW cause, then only on a low-rate heartbeat. */
-export function logHealthGateSkip(key: string, reason: string, halted: boolean): void {
+/** Log an unhealthy-account skip once per NEW cause, then only on a low-rate heartbeat.
+ *  @returns true when this tick starts a new skip episode (first occurrence or cause/halt change). */
+export function logHealthGateSkip(key: string, reason: string, halted: boolean): boolean {
   const prev = healthSkipLog.get(key);
   const changed = !prev || prev.reason !== reason || prev.halted !== halted;
   const occurrences = changed ? 1 : prev.occurrences + 1;
@@ -404,6 +413,7 @@ export function logHealthGateSkip(key: string, reason: string, halted: boolean):
   } else if (occurrences % HEALTH_SKIP_HEARTBEAT_EVERY === 0) {
     console.warn(`[scheduler] Skipping account ${key}: still unhealthy after ${occurrences} ticks (cause unchanged): ${reason}${suffix}`);
   }
+  return changed;
 }
 
 /** Clear a prior skip state and announce recovery — a no-op if the account was already healthy. */
@@ -1493,14 +1503,22 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
         // order that returned non-filled — common on Robinhood and limit orders — doesn't sit
         // pending_reconciliation until the next strategy run. Applies to broker/paper and broker/live;
         // Test/local has no broker order lifecycle.
-        if (brokerGateway) {
+        if (brokerGateway && !pendingFillReconcileInFlight.has(key)) {
+          pendingFillReconcileInFlight.add(key);
           // Captured outside the closure: the !accountNumber `continue` guard above narrows the
           // property here, but property narrowing does not propagate into arrow closures.
           const accountNumber = policy.accountNumber;
-          void journalLane(
+          const pendingFillWork = journalLane(
             "pending-fill-reconcile",
             { userId, connectedAccountId: accountId },
             () => reconcilePendingFills(brokerGateway, accountNumber, userId, policy.connectedAccountId)
+          );
+          void pendingFillWork.catch(() => undefined).finally(() => pendingFillReconcileInFlight.delete(key));
+          void withLaneDeadline(
+            pendingFillWork,
+            SCHEDULER_BROKER_TIMEOUT_MS,
+            "pending-fill-reconcile broker timeout",
+            "pending-fill-reconcile"
           ).catch((err) => console.error("[scheduler] pending-fill reconcile error:", err));
         }
 
@@ -1570,19 +1588,25 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
           // isHaltedPauseAction (not a raw `=== "halted"` check) tracks the DURABLE auto-halt
           // we own, not the one-tick transition marker and not a manual owner pause — see its
           // own doc comment.
-          logHealthGateSkip(key, healthSignals.reason ?? "unhealthy", isHaltedPauseAction(pauseResult));
+          const skipEpisodeStarted = logHealthGateSkip(
+            key,
+            healthSignals.reason ?? "unhealthy",
+            isHaltedPauseAction(pauseResult)
+          );
           // Journal the suppression itself: an unhealthy gate is exactly the event an operator
           // later asks "why didn't this account trade?" about.
           void journalLane("broker-health-gate", { userId, connectedAccountId: accountId }, () => ({
             status: "ok" as const,
             summary: `suppressed: ${healthSignals.reason ?? "unhealthy"}${pauseResult.action === "halted" ? "; auto-halted" : pauseResult.action === "still_paused" ? "; still paused" : ""}`
           })).catch(() => undefined);
-          // Equity-0 / OMS-down used to write NO strategy_runs row, so the completed-run
-          // counter never moved.  Persist once when we auto-halt an active account.
+          // Auto-halt and new low-equity skip episodes write one strategy_runs row so liveness/ops
+          // see why ticks stopped (deduped via skipEpisodeStarted for equity — account stays active).
           if (
             shouldPersistBrokerHealthSkip({
               wasActive: wasActiveForHealthGate,
-              pauseAction: pauseResult.action
+              pauseAction: pauseResult.action,
+              health: healthSignals,
+              skipEpisodeStarted
             })
           ) {
             try {
@@ -1591,7 +1615,7 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
                 connectedAccountId: accountId,
                 accountNumber: policy.accountNumber,
                 reason: healthSignals.reason ?? "unhealthy",
-                halted: true
+                halted: pauseResult.action === "halted"
               });
             } catch (err) {
               console.error("[scheduler] broker-health-gate skip row failed:", err);
