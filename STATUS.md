@@ -11,6 +11,13 @@
 **Verification.**  `npm ci` exit 0.  `npm run lint` exit 0 (0 errors, 866 warnings).  `npx tsc --noEmit` exit 0.  `npm test` exit 1: 9120 passed, 51 skipped, 1 failed (`test/egress-guard.test.ts` real-DNS webhook check; sandbox resolves `discord.com` to `198.18.0.1`).  `NODE_OPTIONS=--max-old-space-size=4096 npm run build` exit 0.  CI `verify` is the merge gate.
 
 **Next.**  Open PR; do not force-merge or resolve review threads just to merge.
+## 2026-10-09 GROK — Congress-share import receipt schema (PR #4228, branch `cursor/congress-share-import-receipt-715f`)
+
+**What.**  App A's import 2xx body is parsed with exported `ImportedReceiptSchema` (strict nonnegative ints for the eight accepted-count fields).  The parser strips envelope keys so `ok`, `errors`, `perfTickers`, and `tradesRows` do not fail a valid tally.  The receipt-shortfall return now spreads `dropMeta`.
+
+**Blockers.**  None in this diff.  Do not merge from this lane.  Do not resolve Kody threads from this lane.
+
+**Next.**  Push the branch.  CI `verify` is the merge gate.  Extra-ship no.
 
 ## 2026-10-07 CURSOR — Health probe off the SQLite critical path (branch `cursor/health-probe-event-loop-b9ee`)
 
@@ -110,6 +117,13 @@
 **Verification.**  `bash -n` on three scripts.
 
 **Next.**  Push; reply on Kody threads; do not merge.
+## 2026-10-05 CURSOR — Congress-share import consumption receipt (board `52f0143da16d44b8`, branch `cursor/congress-share-import-receipt-715f`)
+
+**What.**  Parse App A per-dataset accepted counts from `POST /api/admin/securities/import`; fail closed when counts are missing or `accepted < sent`; optional `schemaVersion: 1` on outbound POST body.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/congress-share.test.ts` 77/77; `npm run build` clean.
+
+**Next.**  Push; open PR READY; no extra-ship.
 ## 2026-10-05 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, branch `cursor/automerge-money-path-gate-2ac4`)
 ## 2026-10-05 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, branch `cursor/automerge-money-path-gate-2ac4`, PR #4221)
 ## 2026-10-06 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, PR #4221, branch `cursor/automerge-money-path-gate-2ac4`)
