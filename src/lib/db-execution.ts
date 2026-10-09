@@ -477,6 +477,24 @@ export function staleRunningRunSweepSummary(
 }
 
 /**
+ * Both sweep causes are the app, not the broker or the LLM.  The auto-halt streak
+ * (`strategyRunCountsTowardAutoHalt`) ignores them.  One flag for both so a reader
+ * does not special-case only `process_restarted_mid_run` and keep counting a
+ * same-process stall.
+ */
+export function staleSweepFailureExemptsAutoHalt(cause: StaleRunningSweepCause): true {
+  switch (cause) {
+    case "process_restarted_mid_run":
+    case "stalled_no_progress":
+      return true;
+    default: {
+      const _exhaustive: never = cause;
+      throw new Error(`unhandled stale running sweep cause: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+/**
  * Manual Run once persists `strategy_run_requests.id` and then passes that same UUID to
  * `runStrategyOnce` as `runId`, so the request row and the `strategy_runs` row share an id.
  * `queueStrategyRunRequest` refuses a second click while any request for that user is still
@@ -707,6 +725,10 @@ export function sweepStaleRunningRuns(now: number = Date.now()): StaleRunningSwe
         runId: row.id,
         startedAt: row.started_at,
         reason: cause,
+        // Same exemption for restart and same-process stall.  The summary phrases
+        // above are the streak classifier's copy of this flag (no audit join on
+        // the health path).
+        haltExempt: staleSweepFailureExemptsAutoHalt(cause),
         processStartedAt: new Date(processStartedAtMs()).toISOString()
       },
       row.user_id,
