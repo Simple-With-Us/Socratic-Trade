@@ -35,6 +35,36 @@ import { isMarketOpen } from "./market-calendar";
 
 const MAX_RUN_LOOKBACK = 200;
 
+export type FinishedStrategyRunRow = {
+  status: string;
+  started_at: string;
+  summary: string | null;
+};
+
+/**
+ * Set by `computeAccountTradingLiveness` for the caller that immediately takes it.
+ *  `getTradingLivenessSummary` copies the array into an optional sink so the
+ *  run-failure watchdog can walk the same rows again without a second SELECT.
+ */
+let lastFinishedRunsForCaller: FinishedStrategyRunRow[] | null = null;
+
+/** Newest finished runs for one account.  Liveness and the watchdog share this SELECT. */
+export function loadRecentFinishedRuns(userId: string, connectedAccountId: string): FinishedStrategyRunRow[] {
+  return getDb()
+    .prepare(
+      `SELECT status, started_at, summary FROM strategy_runs
+       WHERE user_id = ? AND connected_account_id = ? AND status IN ('completed', 'failed')
+       ORDER BY started_at DESC LIMIT ?`
+    )
+    .all(userId, connectedAccountId, MAX_RUN_LOOKBACK) as FinishedStrategyRunRow[];
+}
+
+function takeFinishedRunsLoadedForLastAccount(): FinishedStrategyRunRow[] | null {
+  const rows = lastFinishedRunsForCaller;
+  lastFinishedRunsForCaller = null;
+  return rows;
+}
+
 /** Durable settings prefix for the run-failure watchdog episode (`run-failure-watchdog.ts` writes it). */
 export const RUN_FAILURE_WATCH_STATE_PREFIX = "runFailureWatch";
 
@@ -285,6 +315,7 @@ export function computeAccountTradingLiveness(
   label: string,
   now: number = Date.now()
 ): AccountTradingLiveness {
+  lastFinishedRunsForCaller = null;
   const staleMinutes = tradingLivenessStaleMinutes();
   const maxConsecutiveFailures = tradingLivenessMaxConsecutiveFailures();
   const db = getDb();
@@ -314,17 +345,8 @@ export function computeAccountTradingLiveness(
   // App-stall / mid-run-restart failures stay in the full streak (alert and backoff) and are
   // skipped only for the auto-halt subset (`consecutiveHaltEligibleFailures`).
   const rearmCutoff = runFailureRearmCutoff(userId, connectedAccountId);
-  const recentFinished = db
-    .prepare(
-      `SELECT status, started_at, summary FROM strategy_runs
-       WHERE user_id = ? AND connected_account_id = ? AND status IN ('completed', 'failed')
-       ORDER BY started_at DESC LIMIT ?`
-    )
-    .all(userId, connectedAccountId, MAX_RUN_LOOKBACK) as Array<{
-      status: string;
-      started_at: string;
-      summary: string | null;
-    }>;
+  const recentFinished = loadRecentFinishedRuns(userId, connectedAccountId);
+  lastFinishedRunsForCaller = recentFinished;
   const consecutiveFailedRuns = countLeadingFailedRuns(recentFinished, rearmCutoff);
   const consecutiveHaltEligibleFailures = countLeadingHaltEligibleFailedRuns(recentFinished, rearmCutoff);
 
@@ -367,7 +389,10 @@ export function computeAccountTradingLiveness(
  * top-level error (e.g. DB unreachable) returns null the same as "no active accounts" — callers
  * that need to distinguish should check DB health separately (this module is not the DB probe).
  */
-export function getTradingLivenessSummary(now: number = Date.now()): TradingLivenessSummary | null {
+export function getTradingLivenessSummary(
+  now: number = Date.now(),
+  finishedRunsOut?: Map<string, FinishedStrategyRunRow[]>
+): TradingLivenessSummary | null {
   try {
     const accounts: AccountTradingLiveness[] = [];
     for (const userId of listUsers()) {
@@ -375,11 +400,15 @@ export function getTradingLivenessSummary(now: number = Date.now()): TradingLive
         try {
           const policy = peekPolicy(userId, account.id);
           if (policy.systemState !== "active") continue;
+          const computed = computeAccountTradingLiveness(userId, account.id, account.label || account.broker, now);
+          const rows = takeFinishedRunsLoadedForLastAccount();
+          if (finishedRunsOut && rows) finishedRunsOut.set(`${userId}:${account.id}`, rows);
           accounts.push({
-            ...computeAccountTradingLiveness(userId, account.id, account.label || account.broker, now),
+            ...computed,
             strategyAuthority: policy.strategyAuthority
           });
         } catch {
+          takeFinishedRunsLoadedForLastAccount();
           // Skip an unreadable account's policy/runs rather than failing the whole summary.
         }
       }
@@ -393,6 +422,7 @@ export function getTradingLivenessSummary(now: number = Date.now()): TradingLive
       degraded: accounts.some((a) => a.degraded)
     };
   } catch {
+    lastFinishedRunsForCaller = null;
     return null;
   }
 }

@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-09 CURSOR — One finished-run lookback on the watchdog tick (branch `cursor/stall-halt-streak-exempt-d19f`, PR #4210)
+
+**What.**  The re-arm path selected the same newest finished runs three times per active account per tick.  `getTradingLivenessSummary` keeps that row array, and both streak walks use it.  Stall exemption and re-arm cutoff semantics are unchanged.  Extra-ship no.  Do not merge.
+
+**Docs.**  `docs/rollouts/2026-10-09-watchdog-one-finished-run-read.md`, `PLAN.md`, `docs/EFFORT-LOG.md`.
+
+**Verification.**  eslint on the three touched files exit 0.  `npx tsc --noEmit` exit 0.  `npx vitest run test/run-failure-watchdog.test.ts test/trading-liveness.test.ts` 35 passed.  Full `npm test` and `npm run build` not run on this pass.
+
+**Next.**  Push the branch.  Do not merge PR #4210.
+
 ## 2026-10-07 CURSOR — Health probe off the SQLite critical path (branch `cursor/health-probe-event-loop-b9ee`)
 
 **What.**  Sentry uptime SOCRATIC-TRADE-S times out `GET /api/health` at ~8s (681 events).  A warm probe now returns a memory snapshot and refreshes SQLite, Litestream, and OpenRouter credits after the response.  `/api/live` no longer opens `app.db`.  Service-health summary statements are prepared once per read.  PagerDuty #383 stays open until this ships.  Extra-ship no.

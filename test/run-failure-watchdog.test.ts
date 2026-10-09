@@ -234,6 +234,40 @@ describe("runFailureWatchdogTick", () => {
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
   });
 
+  it("reads finished runs once per active account on the re-arm tick", async () => {
+    await addFailedRuns(5);
+    const w = await watchdog();
+    const d = await db();
+    await w.runFailureWatchdogTick();
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("halted");
+    d.setPolicy({ ...d.getPolicy(USER, ACCT), systemState: "active" }, USER, ACCT);
+
+    const database = d.getDb();
+    const originalPrepare = database.prepare;
+    let lookbacks = 0;
+    database.prepare = ((sql: string) => {
+      if (
+        sql.includes("FROM strategy_runs") &&
+        sql.includes("status IN ('completed', 'failed')") &&
+        sql.includes("ORDER BY started_at DESC")
+      ) {
+        lookbacks += 1;
+      }
+      return originalPrepare.call(database, sql);
+    }) as typeof database.prepare;
+    try {
+      await w.runFailureWatchdogTick();
+    } finally {
+      database.prepare = originalPrepare;
+    }
+
+    // The liveness summary and both streak walks share one lookback.
+    // Historical failures stay behind the new re-arm cutoff, so this tick does not halt again.
+    expect(lookbacks).toBe(1);
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
+    expect(w.getRunFailureHaltMarker(USER, ACCT)).toBeNull();
+  });
+
   it("does not halt when a run in flight at re-arm later fails", async () => {
     await addFailedRuns(5);
     const w = await watchdog();
