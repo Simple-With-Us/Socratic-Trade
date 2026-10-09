@@ -52,6 +52,15 @@
 **Verification.**  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  `npm run build` exit 0.  `npm test` mostly green on this seat; stall-path regression tests pass.  Authoritative gate is CI `verify` on push.
 
 **Next.**  Land post-merge doc sync if needed.  Extra-ship no.
+## 2026-10-05 GROK — Quote asOf anchors (board `009b99f0de754dff`, branch `cursor/quote-asof-anchors-7726`)
+
+**What.**  Three remaining quote-provenance anchors that partial PR #3309 (`ag/quote-asof`) left on `main`.  `toQuoteOnlyMarketQuote` keeps Yahoo `quote.asOf` instead of stamping `new Date()`.  The ROIC profile block leaves `asOf` undefined when the profile has no price timestamp, so `isQuoteFresh` treats it as stale.  Alpaca `getEquityQuotes` uses the mid `(bid+ask)/2` when both sides are numbers, otherwise `ask ?? bid`.
+
+**Deferred.**  `data-providers.ts` `takeScalar` (`cascadeFetchedAt = new Date()` for fields that lack their own asOf) and `syncQuotesToFieldStore`'s `nowIso` fallback.  Both are the same class of stamp and are not trivial.  UI age chips on watchlist / symbol drilldown stay as they are.
+
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` clean.  `npm run build` passed.  `npm test`: 9047 passed, 51 skipped, 11 failed outside this diff (notify creds injected as `[REDACTED]`, Alpha Vantage / Congress extra fetches, TwelveData quota, Node 22 `.ts` import from `summarize-cpuprofile.mjs`, `server-metrics` `usesLocalHost` on this VM).  Targeted quote tests passed inside that run.
+
+**Next.**  PR #4215 is ready.  Extra-ship no.  Do not merge.  Do not Coolify deploy.  Kody threads: fix or leave open with rationale.
 ## 2026-10-05 CURSOR — Enrichment coverage persistence (branch `cursor/enrichment-coverage-persist-67f3`)
 
 **What.**  Board `8fd801251acf4061`: durable SQLite store for cascade coverage reports (migration 94), wired through `setLastEnrichmentCoverageReport`; admin API and ops snapshot fall back to DB after redeploy; `history` on GET `/api/admin/enrichment-coverage`.

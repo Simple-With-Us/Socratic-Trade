@@ -1669,7 +1669,7 @@ async function fetchQuoteOnlyMarketQuotes(symbols: string[], positions: EquityPo
   return { quotes, warnings };
 }
 
-function toQuoteOnlyMarketQuote(symbol: string, quote: YahooFinanceQuote, positions: EquityPosition[]): MarketQuote {
+export function toQuoteOnlyMarketQuote(symbol: string, quote: YahooFinanceQuote, positions: EquityPosition[]): MarketQuote {
   const yahooPrevClose = quote.prevClose;
   const prevClose = typeof yahooPrevClose === "number" && yahooPrevClose > 0 ? yahooPrevClose : quote.price;
   const netChange = quote.price - prevClose;
@@ -1695,7 +1695,10 @@ function toQuoteOnlyMarketQuote(symbol: string, quote: YahooFinanceQuote, positi
     positionMarketValue: position?.marketValue ?? 0,
     score: 0,
     provider: "yahoo-finance",
-    asOf: new Date().toISOString(),
+    // Yahoo's observation time (regularMarketTime).  A wall-clock stamp makes
+    // the staleness gate read ~0s old.  Missing regularMarketTime stays
+    // undefined, which isQuoteFresh already treats as stale.
+    asOf: quote.asOf,
     syntheticBid,
     syntheticAsk,
     sources: {
