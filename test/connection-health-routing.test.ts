@@ -296,6 +296,7 @@ describe("Connection Health & Failure Routing", () => {
   it("/api/health stays 200 when Pinecone is hard-stopped but Qdrant is the read backend", async () => {
     process.env.QDRANT_URL = "http://127.0.0.1:6333";
     process.env.QDRANT_API_KEY = "test-qdrant-key";
+    process.env.RAG_VECTOR_WRITE_BACKEND = "qdrant";
     try {
       const { healthRoute, db } = await load();
       db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
@@ -310,8 +311,31 @@ describe("Connection Health & Failure Routing", () => {
       expect(body.checks.ragVectorReadBackend).toBe("qdrant");
       expect(body.checks.ragVectorWriteBackend).toBe("qdrant");
     } finally {
+      process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
       delete process.env.QDRANT_URL;
       delete process.env.QDRANT_API_KEY;
+    }
+  });
+
+  it("/api/health reports a misconfigured Qdrant write backend without dropping the rest of the RAG block", async () => {
+    delete process.env.QDRANT_URL;
+    delete process.env.QDRANT_API_KEY;
+    delete process.env.RAG_VECTOR_WRITE_BACKEND;
+    try {
+      const { healthRoute, db } = await load();
+      db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+      const response = await healthRoute.GET(anonymousHealthRequest());
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.ok).toBe(true);
+      expect(body.checks.ragVectorWriteBackend).toBe("misconfigured");
+      expect(body.checks.ragVectorWriteBackendError).toMatch(/QDRANT_URL/);
+      expect(body.checks.ragConfigured).toBe(false);
+      expect(body.checks.qdrantConfigured).toBe(false);
+      expect(body.checks.ragVectorReadBackend).toBeDefined();
+      expect(body.checks.ragEmbedProvider ?? body.checks.ragEmbedProviderError).toBeDefined();
+    } finally {
+      process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
     }
   });
 

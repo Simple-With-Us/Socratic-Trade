@@ -1,7 +1,7 @@
 /**
  * STAGE-2 Qdrant write backend (src/lib/vector-store/qdrant-write.ts):
- *   - backend knob resolution: default qdrant when QDRANT_URL is set; DB override > env boolean >
- *     env string; unconfigured stays on pinecone
+ *   - backend knob resolution: default qdrant when QDRANT_URL is set; missing QDRANT_URL with
+ *     Qdrant selected fails closed (no silent Pinecone); DB override > env boolean > env string
  *   - uuid5 point-id scheme matching scripts/qdrant/pinecone-to-qdrant-copy.py
  *   - upsert payload keeps pc_id + ns
  *   - delete-by-ids uses ns + pc_id filter (never Pinecone health wrap)
@@ -30,7 +30,8 @@ import {
   qdrantProviderAuthority,
   qdrantSetPayload,
   qdrantUpsertPoints,
-  vectorWriteBackend
+  vectorWriteBackend,
+  vectorWriteBackendOrNull
 } from "../src/lib/vector-store/qdrant-write";
 import { qdrantConfigured } from "../src/lib/vector-store/qdrant-read";
 import { invalidateServerKnobCache, serverKnobById, setServerKnobOverride } from "../src/lib/server-knobs";
@@ -67,10 +68,16 @@ describe("backend knob resolution", () => {
     expect(spec?.defaultValue).toBe(true);
   });
 
-  it("defaults to qdrant when QDRANT_URL is set, falls back to pinecone when unconfigured", () => {
+  it("defaults to qdrant when QDRANT_URL is set; missing QDRANT_URL fails closed (no silent Pinecone)", () => {
+    expect(() => vectorWriteBackend()).toThrow(/QDRANT_URL is unset/);
+    expect(vectorWriteBackendOrNull()).toBeNull();
+    process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
     expect(vectorWriteBackend()).toBe("pinecone");
+    expect(vectorWriteBackendOrNull()).toBe("pinecone");
+    delete process.env.RAG_VECTOR_WRITE_BACKEND;
     process.env.QDRANT_URL = "http://qdrant.example:6333";
     expect(vectorWriteBackend()).toBe("qdrant");
+    expect(vectorWriteBackendOrNull()).toBe("qdrant");
   });
 
   it("boolean env turns qdrant on (with QDRANT_URL) and explicit falsy keeps pinecone", () => {
@@ -103,10 +110,28 @@ describe("backend knob resolution", () => {
     expect(vectorWriteBackend()).toBe("qdrant");
   });
 
-  it("qdrant selection requires QDRANT_URL — knob on without it stays on pinecone", () => {
+  it("qdrant selection requires QDRANT_URL — missing URL throws instead of silent Pinecone", () => {
     process.env[QDRANT_WRITE_KNOB_ID] = "true";
     expect(qdrantConfigured()).toBe(false);
-    expect(vectorWriteBackend()).toBe("pinecone");
+    expect(() => vectorWriteBackend()).toThrow(/must not silently fall back to Pinecone/);
+    expect(vectorWriteBackendOrNull()).toBeNull();
+  });
+
+  it("names a remote URL with no API key, which qdrantConfigured rejects outside test mode", () => {
+    const env = process.env as Record<string, string | undefined>;
+    const previousNodeEnv = env.NODE_ENV;
+    env.NODE_ENV = "production";
+    process.env.QDRANT_URL = "https://qdrant.example:6333";
+    delete process.env.QDRANT_API_KEY;
+    delete process.env.QDRANT_ALLOW_ANONYMOUS;
+    try {
+      expect(qdrantConfigured()).toBe(false);
+      expect(() => vectorWriteBackend()).toThrow(/QDRANT_API_KEY/);
+      expect(() => vectorWriteBackend()).toThrow(/QDRANT_ALLOW_ANONYMOUS/);
+      expect(vectorWriteBackendOrNull()).toBeNull();
+    } finally {
+      env.NODE_ENV = previousNodeEnv;
+    }
   });
 });
 
