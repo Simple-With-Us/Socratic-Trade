@@ -33,7 +33,11 @@ enum SentryTelemetry {
                 options.dist = dist
             }
             options.tracesSampleRate = 0.2
-            options.profilesSampleRate = 0.1
+            // sentry-cocoa 9 removed transaction-based profilesSampleRate.
+            options.configureProfiling = {
+                $0.sessionSampleRate = 0.1
+                $0.lifecycle = .trace
+            }
             options.enableAppHangTracking = true
             options.appHangTimeoutInterval = 2.0
             options.enableCaptureFailedRequests = true

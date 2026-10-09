@@ -107,6 +107,15 @@
 **Verification.**  `npx vitest run` on qdrant-write, sec-ingest-worker, vector-db-qdrant-retrieval, vector-db-qdrant-index-metric, and connection-health-routing: 114 passed.  `npx eslint` on the touched TypeScript files: 0 errors.  `npx tsc --noEmit` exit 0.  `npm run build` was not run on this seat.
 
 **Next.**  CI `verify` on PR #4232 is the merge gate.
+## 2026-10-05 CURSOR — Broker I/O bounded lanes (board `28996d82`, branch `cursor/broker-io-bounded-lanes-e6af`)
+
+**What.**  Verified `main` already has adapter deadlines (`ALPACA_BROKER_IO_DEADLINE_MS`, Tradier `AbortSignal.timeout`), axios default timeout (`#3313`), and protective scheduler lanes (`withLaneDeadline` + in-flight guards released by real work).  Closed the remaining expert-review gap: `pending-fill-reconcile` now has a per-account in-flight guard and lane deadline wrapper; Alpaca `getAsset` reads use the shared broker I/O deadline.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/scheduler-pending-fill-inflight-guard.test.ts` + `test/broker-io-deadlines.test.ts` green; `npm run build` pass.
+
+**Docs.**  Rollout `docs/rollouts/2026-10-05-broker-io-pending-fill-guard.md`.
+
+**Next.**  Push; open PR READY; CI `verify`.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
