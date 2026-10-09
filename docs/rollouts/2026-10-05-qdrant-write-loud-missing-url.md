@@ -7,7 +7,7 @@ Board item `8215e304aca64e8f` (Pinecone park P0, claimed GROK): production uses 
 ## Changes Made
 
 - `vectorWriteBackend()` in `src/lib/vector-store/qdrant-write.ts` throws with a `console.error` when Qdrant is selected (default or explicit) and `qdrantConfigured()` is false, instead of silently falling back to Pinecone.  The message names an unset `QDRANT_URL` and a remote URL missing `QDRANT_API_KEY` / `QDRANT_ALLOW_ANONYMOUS`.  `vectorWriteBackendOrNull()` is the non-throwing probe.
-- `src/lib/vector-db.ts` uses that probe on the read path, vector-store stats, and the reconcile rate-limit catch.  `app/api/health/route.ts` records `ragVectorWriteBackend=misconfigured` without skipping the rest of the RAG block.
+- `src/lib/vector-db.ts` uses that probe on the read path, vector-store stats, and the reconcile rate-limit catch.  `app/api/health/route.ts` records `ragVectorWriteBackend=misconfigured` without skipping the rest of the RAG block, and sets `ragConfigured` false in that same catch (Kody, 2026-10-09).
 - Updated knob catalog copy in `src/lib/server-knobs.ts` for `RAG_VECTOR_WRITE_QDRANT`.
 - Tests: `test/qdrant-write.test.ts` asserts fail-closed behavior; `test/sec-ingest-worker.test.ts` restores suite default after the Qdrant fuse case; `vitest.config.ts` sets `RAG_VECTOR_WRITE_BACKEND=pinecone` for the suite (same posture as `vector-db.test.ts`).
 
@@ -19,7 +19,10 @@ Board item `8215e304aca64e8f` (Pinecone park P0, claimed GROK): production uses 
 - `test/sec-ingest-worker.test.ts`
 - `vitest.config.ts`
 - `docs/rollouts/2026-10-05-qdrant-write-loud-missing-url.md`
+- `app/api/health/route.ts`
+- `test/connection-health-routing.test.ts`
 - `docs/EFFORT-LOG.md`
+- `PLAN.md`
 - `STATUS.md`
 
 ## Decisions & Trade-offs
@@ -36,7 +39,17 @@ npx eslint src/lib/vector-store/qdrant-write.ts src/lib/vector-db.ts app/api/hea
 npx tsc --noEmit
 ```
 
-114 tests passed.  eslint on those TypeScript files: 0 errors.  `npx tsc --noEmit` exit 0.  `npm run build` and full `npm test` were not run on this seat; CI `verify` is the merge gate.
+114 tests passed on the original change.  eslint on those TypeScript files: 0 errors.  `npx tsc --noEmit` exit 0.  `npm run build` and full `npm test` were not run on this seat; CI `verify` is the merge gate.
+
+### Kody follow-up (2026-10-09)
+
+The write-backend misconfig catch set `ragVectorWriteBackend` and `ragVectorWriteBackendError` but left `ragConfigured` undefined.  The embed-provider catch and the vector-store/key check both set that aggregate to false.  The catch now does the same.  HTTP status stays 200.  `test/connection-health-routing.test.ts` asserts `ragConfigured === false` on the misconfigured-write case.
+
+```bash
+npx vitest run test/connection-health-routing.test.ts
+```
+
+29 passed.  Full lint, `tsc`, `npm test`, and `npm run build` were not re-run for this one-line aggregate.  Merged `origin/main` (already current at `43f7896f`).
 
 ## Next Steps & Blockers
 

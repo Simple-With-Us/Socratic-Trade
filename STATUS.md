@@ -98,15 +98,15 @@
 **Blockers.**  Rebase onto origin/main complete; required CI `verify` checks pending before squash auto-merge.
 
 **Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
-## 2026-10-05 CURSOR — Qdrant write loud fallback (branch `cursor/loud-qdrant-write-fallback-7868`, board 8215e304, PR #4232)
+## 2026-10-09 CURSOR — Qdrant write loud fallback (branch `cursor/loud-qdrant-write-fallback-7868`, board 8215e304, PR #4232)
 
-**What.**  `vectorWriteBackend()` no longer silently returns `"pinecone"` when Qdrant is selected but the endpoint is not usable; it logs `console.error` and throws.  Read, health, and stats probes use `vectorWriteBackendOrNull()` so they do not throw.  Explicit Pinecone opt-in unchanged.  `RAG_MAX_DAILY_INGEST_POINTS` untouched.
+**What.**  `vectorWriteBackend()` no longer silently returns `"pinecone"` when Qdrant is selected but the endpoint is not usable; it logs `console.error` and throws.  Read, health, and stats probes use `vectorWriteBackendOrNull()` so they do not throw.  Explicit Pinecone opt-in unchanged.  `RAG_MAX_DAILY_INGEST_POINTS` untouched.  Kody follow-up: the public health catch that records `ragVectorWriteBackend=misconfigured` now also sets `ragConfigured` to false, matching the embed-provider and vector-store failure paths.  The probe stays HTTP 200.
 
-**Blockers.**  None identified.
+**Blockers.**  None identified.  Merged `origin/main` (already current at `43f7896f`).
 
-**Verification.**  `npx vitest run` on qdrant-write, sec-ingest-worker, vector-db-qdrant-retrieval, vector-db-qdrant-index-metric, and connection-health-routing: 114 passed.  `npx eslint` on the touched TypeScript files: 0 errors.  `npx tsc --noEmit` exit 0.  `npm run build` was not run on this seat.
+**Verification.**  `npx vitest run test/connection-health-routing.test.ts`: 29 passed.  Full `npm test`, `npm run lint`, `npx tsc --noEmit`, and `npm run build` were not re-run on this seat.  CI `verify` is the merge gate.
 
-**Next.**  CI `verify` on PR #4232 is the merge gate.
+**Next.**  CI `verify` on PR #4232 is the merge gate.  Do not merge from this lane.
 ## 2026-10-05 CURSOR — Broker I/O bounded lanes (board `28996d82`, branch `cursor/broker-io-bounded-lanes-e6af`)
 
 **What.**  Verified `main` already has adapter deadlines (`ALPACA_BROKER_IO_DEADLINE_MS`, Tradier `AbortSignal.timeout`), axios default timeout (`#3313`), and protective scheduler lanes (`withLaneDeadline` + in-flight guards released by real work).  Closed the remaining expert-review gap: `pending-fill-reconcile` now has a per-account in-flight guard and lane deadline wrapper; Alpaca `getAsset` reads use the shared broker I/O deadline.

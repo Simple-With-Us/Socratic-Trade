@@ -254,7 +254,8 @@ async function assembleHealth(): Promise<HealthPayload> {
   // cutover, "RAG configured" means the ACTIVE read backend is reachable plus the
   // active embed provider's key — a leftover Pinecone key is not required when
   // Qdrant is serving (PD #116 leftover: public health still advertised pineconeConfigured
-  // and treated a missing Pinecone key as RAG-down).
+  // and treated a missing Pinecone key as RAG-down). A selected write backend that
+  // throws (Qdrant chosen but not usable) clears the same aggregate.
   let ragEmbedProvider: RagEmbedRerankProvider | null = null;
   try {
     const pineconeKey = resolveApiKeyWithSource("pinecone");
@@ -266,6 +267,7 @@ async function assembleHealth(): Promise<HealthPayload> {
     } catch (error) {
       checks.ragVectorWriteBackend = "misconfigured";
       checks.ragVectorWriteBackendError = error instanceof Error ? error.message : String(error);
+      checks.ragConfigured = false;
     }
 
     try {

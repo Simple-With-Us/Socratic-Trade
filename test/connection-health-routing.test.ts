@@ -330,6 +330,7 @@ describe("Connection Health & Failure Routing", () => {
       expect(body.ok).toBe(true);
       expect(body.checks.ragVectorWriteBackend).toBe("misconfigured");
       expect(body.checks.ragVectorWriteBackendError).toMatch(/QDRANT_URL/);
+      expect(body.checks.ragConfigured).toBe(false);
       expect(body.checks.qdrantConfigured).toBe(false);
       expect(body.checks.ragVectorReadBackend).toBeDefined();
       expect(body.checks.ragEmbedProvider ?? body.checks.ragEmbedProviderError).toBeDefined();
