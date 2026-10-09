@@ -115,6 +115,14 @@
 **Verification.**  `bash -n` on three scripts.
 
 **Next.**  Push; reply on Kody threads; do not merge.
+## 2026-10-05 GROK — Placement honesty remainder (board `d2094c78ff79447d`, branch `cursor/placement-outcome-honesty-4829`)
+## 2026-10-06 CURSOR — PR #4229 tip-fix (branch `cursor/placement-outcome-honesty-4829`)
+
+**What.**  Rebased onto `origin/main` (no merge conflicts).  Tightened `isDuplicateClientOrderIdError` so `client_order_id` and uniqueness wording must sit in the same clause (Kody HIGH on false idempotency reclass).  Retryable 429/408 and true duplicate-key reconcile behavior unchanged.
+
+**Verification.**  `npx vitest run test/placement-outcome.test.ts test/placement-reconcile.test.ts` — 24 passed.
+
+**Next.**  CI `verify` on push.  Extra-ship no.  Do not resolve review threads to unblock merge.
 ## 2026-10-05 CURSOR — Congress-share import consumption receipt (board `52f0143da16d44b8`, branch `cursor/congress-share-import-receipt-715f`)
 
 **What.**  Parse App A per-dataset accepted counts from `POST /api/admin/securities/import`; fail closed when counts are missing or `accepted < sent`; optional `schemaVersion: 1` on outbound POST body.

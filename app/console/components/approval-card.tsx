@@ -33,10 +33,10 @@ import {
   resolveProposalStop,
   resolveProposalTarget
 } from "@/lib/proposal-price-review";
-import { resolveApprovalExecutionMode, willPromptTypedApproval } from "../lib/approval-honesty";
+import { resolveApprovalExecutionMode, toastForApproveResult, willPromptTypedApproval } from "../lib/approval-honesty";
 import { deriveReality, estimatedClosingPnl, isClosingOrder, positionMarkPrice, realityForMode } from "../lib/derive";
 import { cx, fmtMoney, fmtNum, fmtPct, fmtQty, fmtSignedMoney, timeUntil, EM_DASH } from "../lib/format";
-import { feedStatusLabel, plainLabel, thesisTagLabel } from "../lib/labels";
+import { plainLabel, thesisTagLabel } from "../lib/labels";
 import { modelDisplayName } from "../lib/models";
 import { redTeamCardState, redTeamFailureMeta, redTeamFailureModel, redTeamVerdictLabel } from "../lib/red-team";
 import { EXIT_ONLY_OWNER_APPROVE_NOTE } from "@/lib/proposal-actions";
@@ -386,24 +386,13 @@ export const ApprovalCard = memo(function ApprovalCard({
         : EM_DASH;
 
   const finish = (result: ApproveResult) => {
-    if (result.status === "filled") {
-      toast.push("pos", `${SIDE_LABEL[p.side] ?? p.side} ${p.symbol} filled`, "The broker reports that the order completed.");
-    } else if (result.status === "placed") {
-      toast.push("pos", `${SIDE_LABEL[p.side] ?? p.side} ${p.symbol} placed`, "The order went to the broker with a durable, idempotent intent record.");
-    } else if (result.status === "paper") {
-      toast.push("pos", `${SIDE_LABEL[p.side] ?? p.side} ${p.symbol} filled (paper)`, "Recorded on the broker paper account.");
-    } else if (result.status === "blocked") {
-      toast.push("warn", "Blocked at approval time", (result.reasons ?? []).join(" ") || "The policy gate re-ran and refused it.");
-    } else if (result.status === "busy") {
-      toast.push(
-        "warn",
-        "Approval is still busy",
-        (result.reasons ?? []).join(" ") ||
-          "A strategy run is still in progress after waiting.  Wait for the run to finish (or for its lock to expire, up to ~5 minutes), then Approve again."
-      );
-    } else {
-      toast.push("info", `Result: ${feedStatusLabel(result.status)}`, (result.reasons ?? []).join(" ") || undefined);
-    }
+    const outcome = toastForApproveResult({
+      status: result.status,
+      reasons: result.reasons,
+      symbol: p.symbol,
+      side: p.side
+    });
+    toast.push(outcome.tone, outcome.title, outcome.detail);
   };
 
   const approve = async () => {

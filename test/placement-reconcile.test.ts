@@ -391,6 +391,124 @@ describe("inline placement-error reconciliation via executeProposal", () => {
     expect(listFillEventsByProposalId(proposalId, userId)).toHaveLength(0);
   });
 
+  it("HTTP 408 + order PRESENT → placed via reconcile, not an immediate retry", async () => {
+    const userId = `reco-408-present-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("Broker HTTP 408 while placing");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      return [brokerOrder({ clientOrderId: capturedRefId, state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result = await executeProposal(proposalId, userId);
+    expect(result.status).toBe("placed");
+    expect(result.orderId).toBeTruthy();
+    expect(getProposal(proposalId, userId)?.status).toBe("placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("not_placed");
+  });
+
+  it("HTTP 408 + order ABSENT on an authoritative list → not_placed", async () => {
+    const userId = `reco-408-absent-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("Broker HTTP 408 while placing");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      return [brokerOrder({ clientOrderId: "some-other-key", state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(result.message).toMatch(/safe to retry/i);
+    expect(getProposal(proposalId, userId)?.status).toBe("not_placed");
+  });
+
+  it("HTTP 429 → not_placed (safe to retry), not rejected_by_broker", async () => {
+    const userId = `reco-429-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("Alpaca order failed: HTTP 429 Too Many Requests");
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(result.message).toMatch(/safe to retry/i);
+    expect(getProposal(proposalId, userId)?.status).toBe("not_placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("rejected_by_broker");
+  });
+
+  it("HTTP 422 duplicate client_order_id + order PRESENT → placed via reconcile, not rejected_by_broker", async () => {
+    const userId = `reco-422-dup-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error('HTTP 422 — {"message":"client_order_id must be unique"}');
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      return [brokerOrder({ clientOrderId: capturedRefId, state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal, listFillEventsByProposalId } = await import("../src/lib/db");
+
+    const result = await executeProposal(proposalId, userId);
+    expect(result.status).toBe("placed");
+    expect(result.orderId).toBeTruthy();
+    expect(getProposal(proposalId, userId)?.status).toBe("placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("rejected_by_broker");
+    expect(listFillEventsByProposalId(proposalId, userId).length).toBe(1);
+  });
+
+  it("HTTP 422 duplicate client_order_id + order ABSENT → not_placed, not rejected_by_broker", async () => {
+    const userId = `reco-422-absent-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error('HTTP 422 — {"message":"client_order_id must be unique"}');
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      return [brokerOrder({ clientOrderId: "some-other-key", state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal, listFillEventsByProposalId } = await import("../src/lib/db");
+
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(result.message).toMatch(/safe to retry/i);
+    expect(getProposal(proposalId, userId)?.status).toBe("not_placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("rejected_by_broker");
+    expect(listFillEventsByProposalId(proposalId, userId).length).toBe(0);
+  });
+
   it("HTTP 409 + order PRESENT (live) → placed via reconcile, not rejected_by_broker", async () => {
     const userId = `reco-409-${randomUUID()}`;
     const proposalId = await seedApprovedProposal(userId);
