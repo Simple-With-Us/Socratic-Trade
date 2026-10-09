@@ -1214,7 +1214,7 @@ class TradierBrokerGateway implements BrokerGateway {
       // "Order gone" means nothing to tear down, safe to resolve as done — Tradier surfaces this
       // TWO ways: a genuine HTTP 404 (this.request's `!response.ok` branch), or a 200 response with
       // its own `{errors: {error: "not found"}}` validation envelope (this.request's second throw
-      // path, which carries no HTTP-status prefix at all — see formatTradierError). Any OTHER
+      // path, prefixed as `Tradier HTTP 422:` — see formatTradierError). Any OTHER
       // failure (network, rate-limit, 5xx, an unrelated validation error) is transient/real and must
       // propagate so reconcilePendingBracketTeardowns' bounded-retry sweep actually retries it,
       // instead of the row being silently and permanently dropped on the first hiccup.
@@ -1285,7 +1285,14 @@ export function equityRowsFromTradierOrder(row: Record<string, unknown>): Record
 // rate limit, 5xx, an unrelated validation error) is NOT absence and must propagate.
 function isTradierOrderNotFound(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /Tradier HTTP 404\b/.test(message) || /order[^.]{0,40}not found/i.test(message);
+  if (/^Tradier HTTP 404\b/.test(message)) return true;
+  // request() always prefixes `Tradier HTTP <status>:` at the start of error.message (see request()).
+  const body422 = message.match(/^Tradier HTTP 422:\s*(.*)$/s)?.[1];
+  if (body422 !== undefined) {
+    if (/^not found\b/i.test(body422)) return true;
+    if (/^order[^.]{0,40}not found/i.test(body422)) return true;
+  }
+  return false;
 }
 
 /** getEquityOrder's in-band "Tradier answered: no such order" marker (see getEquityOrder). */
