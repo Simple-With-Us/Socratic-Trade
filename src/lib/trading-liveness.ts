@@ -23,11 +23,47 @@ import { isMarketOpen } from "./market-calendar";
 // real age (never fabricated/hidden) plus `marketOpen: false`, just without flipping `degraded`.
 // This is the simplest honest rule — it does not try to reconstruct "was the market open at any
 // point since the last completed run"; it only asks "is staleness actionable right now." The
-// `consecutive_failures` reason is unaffected: a run only reaches 'failed' status by actually
-// executing, which itself only happens while the market is open (or extended hours, per
-// policy.runDuringExtendedHours), so that signal is already implicitly market-gated.
+// `consecutive_failures` reason is unaffected by the market clock: a run only reaches 'failed'
+// status by actually executing, which itself only happens while the market is open (or extended
+// hours, per policy.runDuringExtendedHours), so that signal is already implicitly market-gated.
+//
+// Auto-halt is a narrower streak.  `consecutiveFailedRuns` counts every failed run (alert,
+// backoff, and this degraded reason).  `consecutiveHaltEligibleFailures` is that same walk with
+// app-stall and mid-run-restart failures removed.  Those still alert and back off.  They must
+// not auto-halt Autopilot after an event-loop stall (2026-10-01 RTH).  Broker HTTP failures
+// and LLM/provider failures stay on the halt streak.
 
 const MAX_RUN_LOOKBACK = 200;
+
+export type FinishedStrategyRunRow = {
+  status: string;
+  started_at: string;
+  summary: string | null;
+};
+
+/**
+ * Set by `computeAccountTradingLiveness` for the caller that immediately takes it.
+ *  `getTradingLivenessSummary` copies the array into an optional sink so the
+ *  run-failure watchdog can walk the same rows again without a second SELECT.
+ */
+let lastFinishedRunsForCaller: FinishedStrategyRunRow[] | null = null;
+
+/** Newest finished runs for one account.  Liveness and the watchdog share this SELECT. */
+export function loadRecentFinishedRuns(userId: string, connectedAccountId: string): FinishedStrategyRunRow[] {
+  return getDb()
+    .prepare(
+      `SELECT status, started_at, summary FROM strategy_runs
+       WHERE user_id = ? AND connected_account_id = ? AND status IN ('completed', 'failed')
+       ORDER BY started_at DESC LIMIT ?`
+    )
+    .all(userId, connectedAccountId, MAX_RUN_LOOKBACK) as FinishedStrategyRunRow[];
+}
+
+function takeFinishedRunsLoadedForLastAccount(): FinishedStrategyRunRow[] | null {
+  const rows = lastFinishedRunsForCaller;
+  lastFinishedRunsForCaller = null;
+  return rows;
+}
 
 /** Durable settings prefix for the run-failure watchdog episode (`run-failure-watchdog.ts` writes it). */
 export const RUN_FAILURE_WATCH_STATE_PREFIX = "runFailureWatch";
@@ -78,6 +114,26 @@ export function countLeadingFailedRuns(
   return consecutiveFailedRuns;
 }
 
+/** Like `countLeadingFailedRuns`, but only rows that count toward auto-halt. */
+export function countLeadingHaltEligibleFailedRuns(
+  rows: Array<{ status: string; started_at?: string | null; summary?: string | null }>,
+  startedAfter: string | null
+): number {
+  const cutoffMs = startedAfter ? Date.parse(startedAfter) : Number.NaN;
+  const gated = Number.isFinite(cutoffMs);
+  let consecutiveHaltEligibleFailures = 0;
+  for (const row of rows) {
+    if (gated) {
+      const startedMs = Date.parse(row.started_at ?? "");
+      if (!Number.isFinite(startedMs) || startedMs <= cutoffMs) break;
+    }
+    if (row.status === "completed") break;
+    if (row.status !== "failed") break;
+    if (strategyRunCountsTowardAutoHalt({ summary: row.summary })) consecutiveHaltEligibleFailures++;
+  }
+  return consecutiveHaltEligibleFailures;
+}
+
 /** True when any finished success or failure started strictly after `startedAfter`. */
 export function hasFinishedRunStartedAfter(
   userId: string,
@@ -120,8 +176,14 @@ export interface AccountTradingLiveness {
   lastCompletedRunAt: string | null;
   /** Age of lastCompletedRunAt in seconds, or null when there is no completed run yet. */
   lastCompletedRunAgeSeconds: number | null;
-  /** Failed runs, most-recent-first, before hitting a completed run (capped at MAX_RUN_LOOKBACK). */
+  /** Failed runs, most-recent-first, before hitting a completed run (capped at MAX_RUN_LOOKBACK).
+   *  Includes app-stall and mid-run-restart failures.  Alert, backoff, and `consecutive_failures`
+   *  use this count. */
   consecutiveFailedRuns: number;
+  /** Subset of `consecutiveFailedRuns` that may auto-halt.  App stalls and process restarts
+   *  mid-run are omitted.  Broker and LLM failures are kept.  See
+   *  `strategyRunCountsTowardAutoHalt`. */
+  consecutiveHaltEligibleFailures: number;
   /** decide = Autopilot (app places trades).  propose = Running / ask-first. */
   strategyAuthority?: string;
   /** Whether the US equity market was open (regular session) at evaluation time — see the
@@ -209,6 +271,40 @@ export function toPublicTradingLiveness(
 }
 
 /**
+ * True when a failed strategy run may advance the auto-halt streak.
+ *
+ * Exempt (return false) — still a failure for alert, backoff, and the degraded streak:
+ *   - stale-run sweep `strategy_run_crashed` causes `process_restarted_mid_run` and
+ *     `stalled_no_progress` (summaries written by `staleRunningRunSweepSummary`, plus the
+ *     audit `haltExempt` flag those receipts share)
+ *   - summaries the scheduler already attributes to the app: "App process was stalled",
+ *     "broker not at fault", or an event-loop stall that "dominated the window"
+ *
+ * Still counted: broker HTTP failures, LLM/provider failures, and a lane deadline that only
+ * reports a measured stall (`event-loop stall=120ms`) without claiming the stall dominated.
+ * That parenthetical is a broker timeout with a stall measurement, not an app-fault label.
+ */
+export function strategyRunCountsTowardAutoHalt(input: {
+  summary?: string | null;
+  crashReason?: string | null;
+  haltExempt?: boolean | null;
+}): boolean {
+  if (input.haltExempt === true) return false;
+  const reason = (input.crashReason ?? "").trim();
+  if (reason === "process_restarted_mid_run" || reason === "stalled_no_progress") return false;
+  const text = (input.summary ?? "").toLowerCase();
+  if (text.includes("process restarted mid-run")) return false;
+  if (text.includes("stalled with no progress")) return false;
+  if (text.includes("app process was stalled")) return false;
+  if (text.includes("broker not at fault")) return false;
+  const stallDominated =
+    (text.includes("event-loop stall") || text.includes("event loop stall")) &&
+    text.includes("dominated the window");
+  if (stallDominated) return false;
+  return true;
+}
+
+/**
  * Compute the liveness dimension for one (userId, connectedAccountId). Read-only against
  * strategy_runs; the caller decides what "active autonomy" means (this function doesn't check
  * systemState itself, so it can also be reused for diagnostics on a halted account).
@@ -219,6 +315,7 @@ export function computeAccountTradingLiveness(
   label: string,
   now: number = Date.now()
 ): AccountTradingLiveness {
+  lastFinishedRunsForCaller = null;
   const staleMinutes = tradingLivenessStaleMinutes();
   const maxConsecutiveFailures = tradingLivenessMaxConsecutiveFailures();
   const db = getDb();
@@ -244,15 +341,14 @@ export function computeAccountTradingLiveness(
   // streak (and a run that was already in flight at re-arm time) stays in the table but must
   // not keep `/api/health` at the halt-time count.  `stale_last_completed_run` is unchanged:
   // it still reports the real age of the last completed run.
+  //
+  // App-stall / mid-run-restart failures stay in the full streak (alert and backoff) and are
+  // skipped only for the auto-halt subset (`consecutiveHaltEligibleFailures`).
   const rearmCutoff = runFailureRearmCutoff(userId, connectedAccountId);
-  const recentFinished = db
-    .prepare(
-      `SELECT status, started_at FROM strategy_runs
-       WHERE user_id = ? AND connected_account_id = ? AND status IN ('completed', 'failed')
-       ORDER BY started_at DESC LIMIT ?`
-    )
-    .all(userId, connectedAccountId, MAX_RUN_LOOKBACK) as Array<{ status: string; started_at: string }>;
+  const recentFinished = loadRecentFinishedRuns(userId, connectedAccountId);
+  lastFinishedRunsForCaller = recentFinished;
   const consecutiveFailedRuns = countLeadingFailedRuns(recentFinished, rearmCutoff);
+  const consecutiveHaltEligibleFailures = countLeadingHaltEligibleFailedRuns(recentFinished, rearmCutoff);
 
   const marketOpen = isMarketOpen(new Date(now));
 
@@ -278,6 +374,7 @@ export function computeAccountTradingLiveness(
     lastCompletedRunAt,
     lastCompletedRunAgeSeconds,
     consecutiveFailedRuns,
+    consecutiveHaltEligibleFailures,
     marketOpen,
     degraded: degradedReasons.length > 0,
     degradedReasons
@@ -292,7 +389,10 @@ export function computeAccountTradingLiveness(
  * top-level error (e.g. DB unreachable) returns null the same as "no active accounts" — callers
  * that need to distinguish should check DB health separately (this module is not the DB probe).
  */
-export function getTradingLivenessSummary(now: number = Date.now()): TradingLivenessSummary | null {
+export function getTradingLivenessSummary(
+  now: number = Date.now(),
+  finishedRunsOut?: Map<string, FinishedStrategyRunRow[]>
+): TradingLivenessSummary | null {
   try {
     const accounts: AccountTradingLiveness[] = [];
     for (const userId of listUsers()) {
@@ -300,11 +400,15 @@ export function getTradingLivenessSummary(now: number = Date.now()): TradingLive
         try {
           const policy = peekPolicy(userId, account.id);
           if (policy.systemState !== "active") continue;
+          const computed = computeAccountTradingLiveness(userId, account.id, account.label || account.broker, now);
+          const rows = takeFinishedRunsLoadedForLastAccount();
+          if (finishedRunsOut && rows) finishedRunsOut.set(`${userId}:${account.id}`, rows);
           accounts.push({
-            ...computeAccountTradingLiveness(userId, account.id, account.label || account.broker, now),
+            ...computed,
             strategyAuthority: policy.strategyAuthority
           });
         } catch {
+          takeFinishedRunsLoadedForLastAccount();
           // Skip an unreadable account's policy/runs rather than failing the whole summary.
         }
       }
@@ -318,6 +422,7 @@ export function getTradingLivenessSummary(now: number = Date.now()): TradingLive
       degraded: accounts.some((a) => a.degraded)
     };
   } catch {
+    lastFinishedRunsForCaller = null;
     return null;
   }
 }

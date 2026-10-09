@@ -53,6 +53,8 @@ describe("markStaleRunningRuns", () => {
     expect(receipts).toHaveLength(1);
     expect(receipts[0].connected_account_id).toBe(accountId);
     expect(JSON.parse(receipts[0].payload).runId).toBe(runId);
+    expect(JSON.parse(receipts[0].payload).haltExempt).toBe(true);
+    expect(JSON.parse(receipts[0].payload).reason).toBe("stalled_no_progress");
 
     // Idempotent: the row is already failed, so a second sweep neither re-counts nor re-receipts.
     expect(db.markStaleRunningRuns(future)).toBe(0);
@@ -335,6 +337,7 @@ describe("markStaleRunningRuns", () => {
     expect(row.summary).not.toContain("Process restarted mid-run");
     expect(crashedReceipts(db, userId)).toHaveLength(1);
     expect(JSON.parse(crashedReceipts(db, userId)[0].payload).reason).toBe("stalled_no_progress");
+    expect(JSON.parse(crashedReceipts(db, userId)[0].payload).haltExempt).toBe(true);
   });
 
   it("does not call a same-process stall a restart (Roth b3b83913 shape)", async () => {
@@ -363,6 +366,7 @@ describe("markStaleRunningRuns", () => {
     expect(row.status).toBe("failed");
     expect(row.summary).toContain("Process restarted mid-run");
     expect(JSON.parse(crashedReceipts(db, userId)[0].payload).reason).toBe("process_restarted_mid_run");
+    expect(JSON.parse(crashedReceipts(db, userId)[0].payload).haltExempt).toBe(true);
   });
 
   it("immediately sweeps a prior-process run that started only 1 minute before boot without waiting 30 minutes", async () => {
