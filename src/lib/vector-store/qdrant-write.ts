@@ -24,6 +24,7 @@
  */
 
 import crypto from "crypto";
+import { z } from "zod";
 import { isAbortOrTimeoutError, isTransientNetworkError } from "../network-errors";
 import { hasRagIngestPointsBudget, recordRagUsage } from "../rag-metering";
 import { yieldEventLoop } from "../slow-sync-guard";
@@ -66,6 +67,26 @@ export interface QdrantCollectionInfo {
   dimension?: number;
   status?: string;
   distance?: string;
+}
+
+/** Raised when a metadata inventory would require scrolling more than the hard scan ceiling. */
+export class VectorInventoryOverCeilingError extends Error {
+  readonly code = "vector-inventory-over-ceiling" as const;
+
+  constructor(
+    readonly count: number,
+    readonly maxScanned: number
+  ) {
+    super(`Vector inventory over scan ceiling (${count} > ${maxScanned})`);
+    this.name = "VectorInventoryOverCeilingError";
+  }
+}
+
+export function isVectorInventoryOverCeilingError(error: unknown): boolean {
+  return (
+    error instanceof VectorInventoryOverCeilingError
+    || (error instanceof Error && error.name === "VectorInventoryOverCeilingError")
+  );
 }
 
 export function qdrantCollectionName(): string {
@@ -497,6 +518,46 @@ export async function qdrantVisitInventoryPages(options: {
   } while (offset != null && offset !== "");
 }
 
+function qdrantInventoryMetadataFilter(options: {
+  namespace?: string | undefined | null;
+  source?: string;
+  docType?: string;
+  receiptRequired?: boolean;
+}): QdrantFilter {
+  const ns = pineconeNamespaceToQdrantTenant(options.namespace);
+  const extraFilter: Record<string, unknown> = {};
+  if (options.source !== undefined) extraFilter.source = { $eq: options.source };
+  if (options.docType !== undefined) extraFilter.doc_type = { $eq: options.docType.toLowerCase() };
+  if (options.receiptRequired !== undefined) extraFilter.receipt_required = { $eq: options.receiptRequired };
+  return qdrantTenantFilter(
+    ns,
+    Object.keys(extraFilter).length > 0 ? extraFilter : undefined
+  );
+}
+
+const QdrantCountResponseSchema = z.object({
+  result: z.object({
+    count: z.number().int().nonnegative()
+  }),
+  status: z.string().optional(),
+  time: z.number().finite().nonnegative().optional()
+});
+
+async function qdrantCountPointsByFilter(filter: QdrantFilter, signal?: AbortSignal): Promise<number> {
+  const collection = encodeURIComponent(qdrantCollectionName());
+  const response = await qdrantRequest(`/collections/${collection}/points/count`, {
+    method: "POST",
+    body: JSON.stringify({ filter, exact: true }),
+    signal
+  });
+  signal?.throwIfAborted();
+  const parsed = QdrantCountResponseSchema.safeParse(await response.json());
+  if (!parsed.success) {
+    throw new Error("Invalid Qdrant count response");
+  }
+  return parsed.data.result.count;
+}
+
 export async function qdrantInventoryByMetadata(options: {
   namespace?: string | undefined | null;
   prefix?: string;
@@ -512,15 +573,15 @@ export async function qdrantInventoryByMetadata(options: {
   // A caller or environment may lower this guard, never raise the 50k hard ceiling.
   const defaultMaxScanned = Number.isFinite(configuredMaxScanned) && configuredMaxScanned > 0 ? configuredMaxScanned : 50_000;
   const maxScanned = Math.max(1, Math.min(50_000, Math.floor(options.maxScanned ?? defaultMaxScanned)));
-  const ns = pineconeNamespaceToQdrantTenant(options.namespace);
-  const extraFilter: Record<string, unknown> = {};
-  if (options.source !== undefined) extraFilter.source = { $eq: options.source };
-  if (options.docType !== undefined) extraFilter.doc_type = { $eq: options.docType.toLowerCase() };
-  if (options.receiptRequired !== undefined) extraFilter.receipt_required = { $eq: options.receiptRequired };
-  const filter: QdrantFilter = qdrantTenantFilter(
-    ns,
-    Object.keys(extraFilter).length > 0 ? extraFilter : undefined
-  );
+  const filter = qdrantInventoryMetadataFilter(options);
+  const matchingCount = await qdrantCountPointsByFilter(filter, options.signal);
+  options.signal?.throwIfAborted();
+  if (matchingCount > maxScanned) {
+    console.warn(
+      `[qdrant-write] Vector inventory scan ceiling exceeded (${matchingCount} records > ${maxScanned}); skipping scroll.`
+    );
+    throw new VectorInventoryOverCeilingError(matchingCount, maxScanned);
+  }
   const collection = encodeURIComponent(qdrantCollectionName());
   const found: QdrantInventoryRow[] = [];
   let scanned = 0;
@@ -549,7 +610,7 @@ export async function qdrantInventoryByMetadata(options: {
     options.signal?.throwIfAborted();
     const points = Array.isArray(parsed.result?.points) ? parsed.result.points : [];
     if (scanned + points.length > maxScanned) {
-      throw new Error(`Vector inventory scan limit exceeded (${maxScanned} records).`);
+      throw new VectorInventoryOverCeilingError(scanned + points.length, maxScanned);
     }
     scanned += points.length;
     for (const point of points) {

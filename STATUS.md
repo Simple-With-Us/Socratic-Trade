@@ -175,6 +175,13 @@
 **Blockers.**  Rebase onto origin/main complete; required CI `verify` checks pending before squash auto-merge.
 
 **Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
+## 2026-10-05 CURSOR — Qdrant inventory count pre-check (branch `cursor/qdrant-count-precheck-reconcile-7677`)
+
+**What.**  Managed-vector dry-run reconcile no longer scrolls 50k Qdrant payloads before failing: `qdrantInventoryByMetadata` calls `POST /points/count` first and throws `VectorInventoryOverCeilingError` when the tenant/metadata filter exceeds the 50k scan ceiling; reconcile returns `skipped: true` with `inventoryOverCeiling` so the scheduler treats it as busy, not failed.
+
+**Verification.**  Re-run 2026-10-09: `npm run lint` exit 0 (0 errors, 863 warnings).  `npx tsc --noEmit` exit 0.  `npm test` exit 1 (9119 passed, 51 skipped, 1 failed in `test/egress-guard.test.ts`: this host resolves discord.com to 198.18.0.1 and the SSRF guard rejects it).  `npm run build` exit 0.  No dev server running; none to restart.
+
+**Next.**  Push; open PR READY; do not merge.
 ## 2026-10-09 CURSOR — Qdrant write loud fallback (branch `cursor/loud-qdrant-write-fallback-7868`, board 8215e304, PR #4232)
 
 **What.**  `vectorWriteBackend()` no longer silently returns `"pinecone"` when Qdrant is selected but the endpoint is not usable; it logs `console.error` and throws.  Read, health, and stats probes use `vectorWriteBackendOrNull()` so they do not throw.  Explicit Pinecone opt-in unchanged.  `RAG_MAX_DAILY_INGEST_POINTS` untouched.  Kody follow-up: the public health catch that records `ragVectorWriteBackend=misconfigured` now also sets `ragConfigured` to false, matching the embed-provider and vector-store failure paths.  The probe stays HTTP 200.
