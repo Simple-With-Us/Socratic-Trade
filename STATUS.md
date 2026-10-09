@@ -110,6 +110,15 @@
 **Verification.**  `bash -n` on three scripts.
 
 **Next.**  Push; reply on Kody threads; do not merge.
+## 2026-10-05 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, branch `cursor/automerge-money-path-gate-2ac4`)
+## 2026-10-05 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, branch `cursor/automerge-money-path-gate-2ac4`, PR #4221)
+## 2026-10-06 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, PR #4221, branch `cursor/automerge-money-path-gate-2ac4`)
+
+**What.**  `auto-merge-prs.yml` money-path classifier: paginated compare file list and fail-closed on empty compare results or Contents API errors (404-only => empty CODEOWNERS).  Docs: single `318bfe710b794c28` effort row; rollout Fleet contrib narrowed to slash-less basename nugget.  Kody threads UtHk/UtJr/UtMN/UtOl addressed; Sc5X left open per Jay defer.
+
+**Verification.**  `npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-gate.test.ts` on push.  CI `verify` authoritative.
+
+**Next.**  Jay squash when green; no workflow auto-merge on this PR; Sc5X unresolved.
 ## 2026-10-05 CURSOR — Sentry server AI integrations (board `f411f8a7`, branch `cursor/fix-sentry-node-integrations-373d`)
 
 **What.**  `sentry.server.config.ts` named six integrations on `@sentry/nextjs` that the Edge compile does not re-export (Sentry 7753792417).  A static `@sentry/node` import then failed that same Edge bundle (`diagnostics_channel`, `worker_threads`).  `Sentry.init` stays on `@sentry/nextjs`.  The six factories are attached from `instrumentation.ts` on the Node runtime only, with `webpackIgnore` (same path as `@sentry/profiling-node`).  Each factory has its own try/catch and logs on failure.  Direct `@sentry/node` is `^11.0.0`, the same range as `@sentry/nextjs`, so npm keeps one copy.
