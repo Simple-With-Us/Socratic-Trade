@@ -327,8 +327,9 @@ describe("executeProposal — broker-agnostic order-placement confirmation", () 
     const { getAlpacaGateway } = await import("../src/lib/alpaca");
     const quotes = await getAlpacaGateway(userId, connectedAccountId).getEquityQuotes(ACCOUNT, ["BRK.B"]);
 
-    expect(quotes["BRK-B"]?.price).toBe(410);
-    expect(quotes["BRK.B"]?.price).toBe(410);
+    // bp 409 / ap 410: displayed price is the mid, not the ask.
+    expect(quotes["BRK-B"]?.price).toBe(409.5);
+    expect(quotes["BRK.B"]?.price).toBe(409.5);
     expect(quotes["BRK.B"]?.symbol).toBe("BRK.B");
   });
 });
