@@ -215,7 +215,44 @@ describe("trading-liveness", () => {
 
     const result = liveness.computeAccountTradingLiveness(userId, accountId, "Recovered Account", now);
     expect(result.consecutiveFailedRuns).toBe(1);
+    expect(result.consecutiveHaltEligibleFailures).toBe(1);
     expect(result.degraded).toBe(false); // 1 < default threshold (3) and last completed run is recent
+  });
+
+  it("keeps app stalls in the failure streak and drops them from the auto-halt streak", async () => {
+    process.env.TRADING_LIVENESS_MAX_CONSECUTIVE_FAILURES = "3";
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Stall Streak Account");
+    const now = Date.parse("2026-10-01T18:00:00.000Z");
+    const rows: Array<{ summary: string; offsetMin: number }> = [
+      { summary: "fetch failed", offsetMin: 8 },
+      { summary: "Process restarted mid-run — marked failed by stale-run sweep (started at 2026-10-01T17:00:00.000Z)", offsetMin: 6 },
+      { summary: "Strategy run stalled with no progress — marked failed by stale-run sweep (started at 2026-10-01T17:10:00.000Z)", offsetMin: 4 },
+      { summary: "App process was stalled (event loop blocked 27s of 30s); broker not at fault", offsetMin: 2 },
+      { summary: "Empty response returned from LLM API.", offsetMin: 1 }
+    ];
+    for (const row of rows) {
+      db.getDb()
+        .prepare(
+          `INSERT INTO strategy_runs (id, user_id, connected_account_id, started_at, finished_at, status, summary)
+           VALUES (?, ?, ?, ?, ?, 'failed', ?)`
+        )
+        .run(
+          randomUUID(),
+          userId,
+          accountId,
+          new Date(now - row.offsetMin * 60_000).toISOString(),
+          new Date(now - row.offsetMin * 60_000).toISOString(),
+          row.summary
+        );
+    }
+
+    const result = liveness.computeAccountTradingLiveness(userId, accountId, "Stall Streak Account", now);
+    expect(result.consecutiveFailedRuns).toBe(5);
+    // fetch failed + LLM failure.  The three app-fault rows do not count.
+    expect(result.consecutiveHaltEligibleFailures).toBe(2);
+    expect(result.degraded).toBe(true);
+    expect(result.degradedReasons).toContain("consecutive_failures");
   });
 
   it("reports a stale last-completed-run without degrading while the market is closed", async () => {

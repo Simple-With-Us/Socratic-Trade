@@ -43,12 +43,12 @@ async function setupActiveAccount() {
   d.setPolicy({ ...d.getPolicy(USER, ACCT), systemState: "active" }, USER, ACCT);
 }
 
-async function addFailedRuns(n: number) {
+async function addFailedRuns(n: number, summary?: string) {
   const d = await db();
   for (let i = 0; i < n; i++) {
     const id = randomUUID();
     d.insertStrategyRun(id, USER, ACCT, "WD1");
-    d.finishStrategyRun(id, "failed", `failure ${i}`, USER);
+    d.finishStrategyRun(id, "failed", summary ?? `failure ${i}`, USER);
   }
 }
 
@@ -72,6 +72,34 @@ function setThresholds(alert: number, backoff: number, halt: number) {
   process.env.ST_RUN_FAILURE_BACKOFF_AFTER = String(backoff);
   process.env.ST_RUN_FAILURE_HALT_AFTER = String(halt);
 }
+
+describe("strategyRunCountsTowardAutoHalt", () => {
+  it("exempts stall and restart markers and keeps broker and LLM failures", async () => {
+    const { strategyRunCountsTowardAutoHalt } = await import("../src/lib/trading-liveness");
+    const { staleRunningRunSweepSummary, staleSweepFailureExemptsAutoHalt } = await import("../src/lib/db-execution");
+    const counts = (summary: string) => strategyRunCountsTowardAutoHalt({ summary });
+
+    expect(counts(staleRunningRunSweepSummary("2026-10-01T14:00:00.000Z", Date.parse("2026-10-01T15:00:00.000Z")))).toBe(false);
+    expect(counts(staleRunningRunSweepSummary("2026-10-01T14:00:00.000Z", Date.parse("2026-10-01T13:00:00.000Z")))).toBe(false);
+    expect(staleSweepFailureExemptsAutoHalt("process_restarted_mid_run")).toBe(true);
+    expect(staleSweepFailureExemptsAutoHalt("stalled_no_progress")).toBe(true);
+    expect(strategyRunCountsTowardAutoHalt({ crashReason: "process_restarted_mid_run", summary: "failure" })).toBe(false);
+    expect(strategyRunCountsTowardAutoHalt({ crashReason: "stalled_no_progress", summary: "failure" })).toBe(false);
+    expect(strategyRunCountsTowardAutoHalt({ haltExempt: true, summary: "Alpaca API HTTP 500" })).toBe(false);
+
+    expect(counts("App process was stalled (event loop blocked 27s of 30s); broker not at fault")).toBe(false);
+    expect(
+      counts(
+        "runSyntheticStopMonitor timeout — event-loop stall 12000ms of 15000ms (80%) dominated the window; the process could not run callbacks for most of it"
+      )
+    ).toBe(false);
+    expect(counts("stale-limit-scan broker timeout (elapsed=15000ms, event-loop stall=120ms, 1%)")).toBe(true);
+    expect(counts("Alpaca API HTTP 500: internal server error")).toBe(true);
+    expect(counts("fetch failed")).toBe(true);
+    expect(counts("Empty response returned from LLM API.")).toBe(true);
+    expect(counts("OpenRouter 429 rate limit")).toBe(true);
+  });
+});
 
 describe("backoffMinutesForStreak", () => {
   it("is zero below the backoff threshold and base at it, doubling to the cap", async () => {
@@ -206,6 +234,40 @@ describe("runFailureWatchdogTick", () => {
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
   });
 
+  it("reads finished runs once per active account on the re-arm tick", async () => {
+    await addFailedRuns(5);
+    const w = await watchdog();
+    const d = await db();
+    await w.runFailureWatchdogTick();
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("halted");
+    d.setPolicy({ ...d.getPolicy(USER, ACCT), systemState: "active" }, USER, ACCT);
+
+    const database = d.getDb();
+    const originalPrepare = database.prepare;
+    let lookbacks = 0;
+    database.prepare = ((sql: string) => {
+      if (
+        sql.includes("FROM strategy_runs") &&
+        sql.includes("status IN ('completed', 'failed')") &&
+        sql.includes("ORDER BY started_at DESC")
+      ) {
+        lookbacks += 1;
+      }
+      return originalPrepare.call(database, sql);
+    }) as typeof database.prepare;
+    try {
+      await w.runFailureWatchdogTick();
+    } finally {
+      database.prepare = originalPrepare;
+    }
+
+    // The liveness summary and both streak walks share one lookback.
+    // Historical failures stay behind the new re-arm cutoff, so this tick does not halt again.
+    expect(lookbacks).toBe(1);
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
+    expect(w.getRunFailureHaltMarker(USER, ACCT)).toBeNull();
+  });
+
   it("does not halt when a run in flight at re-arm later fails", async () => {
     await addFailedRuns(5);
     const w = await watchdog();
@@ -315,6 +377,89 @@ describe("runFailureWatchdogTick", () => {
     const liveness = await import("../src/lib/trading-liveness");
     const row = liveness.getTradingLivenessSummary()?.accounts.find((a) => a.connectedAccountId === ACCT);
     expect(row?.consecutiveFailedRuns).toBe(1);
+  });
+
+  it("alerts and backs off on an app-stall streak but does not auto-halt", async () => {
+    const stall =
+      "runSyntheticStopMonitor timeout — event-loop stall 12000ms of 15000ms (80%) dominated the window; the process could not run callbacks for most of it";
+    await addFailedRuns(5, stall);
+    const w = await watchdog();
+    await w.runFailureWatchdogTick();
+    expect(notifyMock.sendNotification).toHaveBeenCalled();
+    expect(w.isRunBackedOff(USER, ACCT)).toBe(true);
+    const d = await db();
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
+    expect(w.getRunFailureHaltMarker(USER, ACCT)).toBeNull();
+  });
+
+  it("does not auto-halt a process-restart streak", async () => {
+    await addFailedRuns(
+      5,
+      "Process restarted mid-run — marked failed by stale-run sweep (started at 2026-10-01T14:00:00.000Z)"
+    );
+    const w = await watchdog();
+    await w.runFailureWatchdogTick();
+    expect(w.isRunBackedOff(USER, ACCT)).toBe(true);
+    const d = await db();
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
+    expect(w.getRunFailureHaltMarker(USER, ACCT)).toBeNull();
+  });
+
+  it("still auto-halts a broker HTTP failure streak", async () => {
+    await addFailedRuns(5, "Alpaca API HTTP 500: internal server error");
+    const w = await watchdog();
+    await w.runFailureWatchdogTick();
+    const d = await db();
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("halted");
+    expect(w.getRunFailureHaltMarker(USER, ACCT)?.consecutiveFailures).toBe(5);
+  });
+
+  it("still auto-halts an LLM failure streak", async () => {
+    await addFailedRuns(5, "Empty response returned from LLM API.");
+    const w = await watchdog();
+    await w.runFailureWatchdogTick();
+    const d = await db();
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("halted");
+  });
+
+  it("still auto-halts a broker timeout that only measured a small event-loop stall", async () => {
+    await addFailedRuns(
+      5,
+      "stale-limit-scan broker timeout (elapsed=15000ms, event-loop stall=120ms, 1%)"
+    );
+    const w = await watchdog();
+    await w.runFailureWatchdogTick();
+    const d = await db();
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("halted");
+  });
+
+  it("counts broker failures toward auto-halt when app stalls sit in the same streak", async () => {
+    // Older broker failures, then newer stalls.  Stalls must not erase the broker count
+    // and must not themselves complete the halt threshold (halt is 5; 4 broker + 4 stalls).
+    const d = await db();
+    const base = Date.parse("2026-10-01T14:00:00.000Z");
+    const insert = (summary: string, offsetSec: number) => {
+      const id = randomUUID();
+      const iso = new Date(base + offsetSec * 1000).toISOString();
+      d.getDb()
+        .prepare(
+          `INSERT INTO strategy_runs (id, user_id, connected_account_id, started_at, finished_at, status, summary)
+           VALUES (?, ?, ?, ?, ?, 'failed', ?)`
+        )
+        .run(id, USER, ACCT, iso, iso, summary);
+    };
+    for (let i = 0; i < 4; i++) insert("fetch failed", i);
+    for (let i = 0; i < 4; i++) {
+      insert("App process was stalled (event loop blocked 27s of 30s); broker not at fault", 10 + i);
+    }
+    const w = await watchdog();
+    await w.runFailureWatchdogTick();
+    expect(w.isRunBackedOff(USER, ACCT)).toBe(true);
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
+    insert("fetch failed", 20);
+    await w.runFailureWatchdogTick();
+    expect(d.peekPolicy(USER, ACCT).systemState).toBe("halted");
+    expect(w.getRunFailureHaltMarker(USER, ACCT)?.consecutiveFailures).toBe(5);
   });
 
   it("never touches an account that is not active", async () => {

@@ -1,5 +1,14 @@
 # Current Status
 
+## 2026-10-09 CURSOR — One finished-run lookback on the watchdog tick (branch `cursor/stall-halt-streak-exempt-d19f`, PR #4210)
+
+**What.**  The re-arm path selected the same newest finished runs three times per active account per tick.  `getTradingLivenessSummary` keeps that row array, and both streak walks use it.  Stall exemption and re-arm cutoff semantics are unchanged.  Extra-ship no.  Do not merge.
+
+**Docs.**  `docs/rollouts/2026-10-09-watchdog-one-finished-run-read.md`, `PLAN.md`, `docs/EFFORT-LOG.md`.
+
+**Verification.**  eslint on the three touched files exit 0.  `npx tsc --noEmit` exit 0.  `npx vitest run test/run-failure-watchdog.test.ts test/trading-liveness.test.ts` 35 passed.  Full `npm test` and `npm run build` not run on this pass.
+
+**Next.**  Push the branch.  Do not merge PR #4210.
 ## 2026-10-09 GROK — Congress-share import receipt schema (PR #4228, branch `cursor/congress-share-import-receipt-715f`)
 
 **What.**  App A's import 2xx body is parsed with exported `ImportedReceiptSchema` (strict nonnegative ints for the eight accepted-count fields).  The parser strips envelope keys so `ok`, `errors`, `perfTickers`, and `tradesRows` do not fail a valid tally.  The receipt-shortfall return now spreads `dropMeta`.
@@ -189,6 +198,14 @@
 **Docs.**  Rollout `docs/rollouts/2026-10-05-broker-io-pending-fill-guard.md`.
 
 **Next.**  Push; open PR READY; CI `verify`.
+
+## 2026-10-05 CURSOR — App-stall failures must not auto-halt Autopilot (branch `cursor/stall-halt-streak-exempt-d19f`)
+
+**What.**  The run-failure watchdog counted event-loop stalls and mid-run restarts toward `ST_RUN_FAILURE_HALT_AFTER`.  On 2026-10-01 RTH that auto-halted Alpaca Paper and Tradier Sandbox after 10–12 stall failures.  Those runs still alert and back off.  They no longer advance the auto-halt streak.  Broker HTTP failures and LLM/provider failures still do.  Trading liveness reports both counts.  The stale-run sweep stamps `haltExempt: true` on both `process_restarted_mid_run` and `stalled_no_progress`.
+
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` clean.  Full vitest: 9051 passed, 11 failed outside this diff (notify redaction, Node 22 `.ts` loader, Twelve Data / Alpha Vantage / congress-share / server-metrics).  Targeted watchdog, liveness, and stale-run files passed (44, and again inside the full suite).  `npm run build` exit 0.  PR #4210.
+
+**Next.**  PR only.  Do not merge.  Do not Coolify Deploy.  Extra-ship no.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
