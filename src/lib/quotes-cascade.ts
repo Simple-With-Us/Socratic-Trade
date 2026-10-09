@@ -1040,7 +1040,10 @@ export async function fetchFreshQuotesCascade(
                       symbol,
                       price,
                       companyName,
-                      asOf: new Date().toISOString(),
+                      // Profile rows have no price timestamp (see parseRoicProfile).
+                      // Leave asOf unset so isQuoteFresh treats the print as stale
+                      // instead of a just-observed quote.
+                      asOf: undefined,
                       provider: "roic",
                       fetchedAt: stampIngest()
                     };
