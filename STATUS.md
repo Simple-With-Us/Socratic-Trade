@@ -8,7 +8,7 @@
 
 **Docs.**  `docs/rollouts/2026-10-07-rotate-openrouter-access-failover.md`, `PLAN.md`, `docs/EFFORT-LOG.md`.
 
-**Verification.**  `npm ci` exit 0.  `npm run lint` exit 0 (0 errors, 866 warnings).  `npx tsc --noEmit` exit 0.  `npm test` exit 1: 9120 passed, 51 skipped, 1 failed (`test/egress-guard.test.ts` real-DNS webhook check; sandbox resolves `discord.com` to `198.18.0.1`).  `NODE_OPTIONS=--max-old-space-size=4096 npm run build` exit 0.  CI `verify` is the merge gate.
+**Verification.**  `npm ci` exit 0.  `npm run lint` exit 0 (0 errors, 866 warnings).  `npx tsc --noEmit` exit 0.  `npm test` exit 0 on CI `verify-hosted` (9120+ passed, 51 skipped, 0 failed; local Mac DNS may still fail `test/egress-guard.test.ts` when `discord.com` resolves to `198.18.0.1`).  `NODE_OPTIONS=--max-old-space-size=4096 npm run build` exit 0.  CI `verify` is the merge gate.
 
 **Next.**  Open PR; do not force-merge or resolve review threads just to merge.
 ## 2026-10-09 CURSOR — One finished-run lookback on the watchdog tick (branch `cursor/stall-halt-streak-exempt-d19f`, PR #4210)
