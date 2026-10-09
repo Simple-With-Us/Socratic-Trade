@@ -43,6 +43,46 @@ npx vitest run test/congress-share.test.ts   # 84 passed
 npx tsc --noEmit                             # exit 0
 ```
 
+## 2026-10-09 — Kody receipt schema + shortfall dropMeta
+
+### Context & Objective
+
+Kody rules 8 and 11 flagged `parseCongressImportAcceptedCounts` for reading App A's 2xx JSON through an `as Record<string, unknown>` cast and `nonNegativeIntField`.  A third finding noted the receipt-shortfall return omitted `dropMeta`, so a POST that both drops schema-invalid rows and fails the receipt check under-reported dropped rows in the nightly summary.
+
+### Changes Made
+
+- Exported `ImportedReceiptSchema`: a strict `z.object` whose eight tally fields are `z.number().int().nonnegative()`.
+- `parseCongressImportAcceptedCounts` calls `ImportedReceiptSchema.strip().safeParse(response)` first.  On failure it returns the existing `{ ok: false, reason }` strings (empty/unparseable vs missing counts).
+- `tradesRows` is read with `TradesRowsReceiptSchema` instead of a cast.  `nonNegativeIntField` is gone.
+- The shortfall return in `shareWithCongressTrade` spreads `...dropMeta`.
+
+**Files touched**
+
+- `src/lib/congress-share.ts`
+- `test/congress-share.test.ts`
+- `docs/rollouts/2026-10-05-congress-share-import-receipt.md`
+- `docs/EFFORT-LOG.md`
+- `STATUS.md`
+- `PLAN.md`
+
+### Decisions & Trade-offs
+
+- **Strip, do not reject, envelope keys.**  `.strict()` on the eight fields rejects `ok`, `errors`, and `perfTickers`, which App A's documented 2xx body includes.  Rejecting them would fail every valid receipt and stop the daily marker.  `strip()` keeps the tally types strict and leaves valid-receipt counts unchanged.  A direct `ImportedReceiptSchema.safeParse` (no strip) still rejects unknown keys.
+- **`tradesRows` stays off the eight-field schema.**  A non-integer `tradesRows` still means "no receipt" and does not fail the other tallies.
+
+### Verification State
+
+```bash
+npx vitest run test/congress-share.test.ts test/congress-share-price-targets.test.ts   # 91 passed
+npx tsc --noEmit                                                                       # exit 0
+```
+
+Branch was already even with `origin/main` (`git rev-list --left-right --count origin/main...HEAD` = 0 ahead on main).  No merge commit.
+
+### Next Steps & Blockers
+
+- Push.  Do not merge.  Do not resolve Kody threads from this lane.  CI `verify` is the merge gate.
+
 ## Next Steps & Blockers
 
 - None for merge.  Owner: no extra-ship.  If CT later adds a `trades` accepted count, map it in `congressImportAcceptedReceiptError` and extend tests.

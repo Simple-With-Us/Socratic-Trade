@@ -940,57 +940,45 @@ export interface CongressImportAcceptedCounts {
 
 export type CongressShareSentCounts = CongressShareResult["sent"] & { trades?: number };
 
-function nonNegativeIntField(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 && Number.isInteger(value)
-    ? value
-    : undefined;
-}
+const MISSING_ACCEPTED_COUNTS_REASON =
+  "import response missing per-dataset accepted counts (expected refs, spxRows, pricedTickers, priceRows, insiderRows, shortVolumeRows, fundamentalsRows, analystRows)";
+
+/**
+ * Strict accepted-count receipt from App A's import 2xx JSON.
+ * Unknown keys fail this schema.  The parser strips them first: a real body also
+ * carries envelope fields (`ok`, `errors`, `perfTickers`, `tradesRows`), and those
+ * must not turn a valid tally into a shortfall.
+ */
+export const ImportedReceiptSchema = z
+  .object({
+    refs: z.number().int().nonnegative(),
+    spxRows: z.number().int().nonnegative(),
+    pricedTickers: z.number().int().nonnegative(),
+    priceRows: z.number().int().nonnegative(),
+    insiderRows: z.number().int().nonnegative(),
+    shortVolumeRows: z.number().int().nonnegative(),
+    fundamentalsRows: z.number().int().nonnegative(),
+    analystRows: z.number().int().nonnegative(),
+  })
+  .strict();
+
+/** Optional `tradesRows` on the same body.  Not one of the eight required tallies. */
+const TradesRowsReceiptSchema = z.object({
+  tradesRows: z.number().int().nonnegative(),
+});
 
 /** Parse App A's per-dataset accepted counts out of a 2xx import JSON body. */
 export function parseCongressImportAcceptedCounts(
   response: unknown,
 ): { ok: true; counts: CongressImportAcceptedCounts } | { ok: false; reason: string } {
-  if (response === undefined || response === null || typeof response !== "object") {
-    return { ok: false, reason: "import response body was empty or unparseable" };
+  const parsed = ImportedReceiptSchema.strip().safeParse(response);
+  if (!parsed.success) {
+    if (response === undefined || response === null || typeof response !== "object") {
+      return { ok: false, reason: "import response body was empty or unparseable" };
+    }
+    return { ok: false, reason: MISSING_ACCEPTED_COUNTS_REASON };
   }
-  const body = response as Record<string, unknown>;
-  const refs = nonNegativeIntField(body.refs);
-  const spxRows = nonNegativeIntField(body.spxRows);
-  const pricedTickers = nonNegativeIntField(body.pricedTickers);
-  const priceRows = nonNegativeIntField(body.priceRows);
-  const insiderRows = nonNegativeIntField(body.insiderRows);
-  const shortVolumeRows = nonNegativeIntField(body.shortVolumeRows);
-  const fundamentalsRows = nonNegativeIntField(body.fundamentalsRows);
-  const analystRows = nonNegativeIntField(body.analystRows);
-  if (
-    refs === undefined ||
-    spxRows === undefined ||
-    pricedTickers === undefined ||
-    priceRows === undefined ||
-    insiderRows === undefined ||
-    shortVolumeRows === undefined ||
-    fundamentalsRows === undefined ||
-    analystRows === undefined
-  ) {
-    return {
-      ok: false,
-      reason:
-        "import response missing per-dataset accepted counts (expected refs, spxRows, pricedTickers, priceRows, insiderRows, shortVolumeRows, fundamentalsRows, analystRows)",
-    };
-  }
-  return {
-    ok: true,
-    counts: {
-      refs,
-      spxRows,
-      pricedTickers,
-      priceRows,
-      insiderRows,
-      shortVolumeRows,
-      fundamentalsRows,
-      analystRows,
-    },
-  };
+  return { ok: true, counts: parsed.data };
 }
 
 /**
@@ -1025,11 +1013,8 @@ export function congressImportAcceptedReceiptError(
 
   const tradesSent = sent.trades ?? 0;
   if (tradesSent > 0) {
-    const tradesAccepted = nonNegativeIntField(
-      typeof response === "object" && response !== null
-        ? (response as Record<string, unknown>).tradesRows
-        : undefined,
-    );
+    const tradesParsed = TradesRowsReceiptSchema.safeParse(response);
+    const tradesAccepted = tradesParsed.success ? tradesParsed.data.tradesRows : undefined;
     if (tradesAccepted === undefined) {
       gaps.push(
         `trades: sent=${tradesSent} but App A import response has no tradesRows receipt (not implemented on App A)`,
@@ -1254,7 +1239,7 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
         console.error(`[congress-share] import consumption shortfall despite HTTP ${res.status}: ${receiptErrorText}`);
         audit("congress_share_import_receipt_shortfall", { sent, receiptErrorText, response });
         logApiHealth({ service: "congress-share", ok: false, errorText: receiptErrorText, keySource: "env" });
-        return { ok: false, status: res.status, error: receiptErrorText, sent };
+        return { ...dropMeta, ok: false, status: res.status, error: receiptErrorText, sent };
       }
       logApiHealth({ service: "congress-share", ok: true, keySource: "env" });
       return { ...dropMeta, ok: true, status: res.status, response, sent };

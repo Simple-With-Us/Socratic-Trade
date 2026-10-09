@@ -1,5 +1,13 @@
 # Current Status
 
+## 2026-10-09 GROK — Congress-share import receipt schema (PR #4228, branch `cursor/congress-share-import-receipt-715f`)
+
+**What.**  App A's import 2xx body is parsed with exported `ImportedReceiptSchema` (strict nonnegative ints for the eight accepted-count fields).  The parser strips envelope keys so `ok`, `errors`, `perfTickers`, and `tradesRows` do not fail a valid tally.  The receipt-shortfall return now spreads `dropMeta`.
+
+**Blockers.**  None in this diff.  Do not merge from this lane.  Do not resolve Kody threads from this lane.
+
+**Next.**  Push the branch.  CI `verify` is the merge gate.  Extra-ship no.
+
 ## 2026-10-07 CURSOR — Health probe off the SQLite critical path (branch `cursor/health-probe-event-loop-b9ee`)
 
 **What.**  Sentry uptime SOCRATIC-TRADE-S times out `GET /api/health` at ~8s (681 events).  A warm probe now returns a memory snapshot and refreshes SQLite, Litestream, and OpenRouter credits after the response.  `/api/live` no longer opens `app.db`.  Service-health summary statements are prepared once per read.  PagerDuty #383 stays open until this ships.  Extra-ship no.

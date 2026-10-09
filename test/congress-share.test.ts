@@ -52,6 +52,7 @@ import {
   shareWithCongressTrade,
   parseCongressImportAcceptedCounts,
   congressImportAcceptedReceiptError,
+  ImportedReceiptSchema,
   CONGRESS_SHARE_PAYLOAD_SCHEMA_VERSION,
   type CongressPrice,
   type CongressRef,
@@ -313,6 +314,17 @@ describe("dropInvalidShareRows — drop malformed rows instead of sending them",
     const rows = getServiceHealthLog("congress-share", 3);
     expect(rows[0]).toMatchObject({ ok: 0 });
   });
+
+  it("shareWithCongressTrade shortfall return carries dropped-row meta", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "t";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(ctImportOkBody({ refs: 0 }), { status: 200 })));
+    const res = await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }, { ticker: "" }] });
+    expect(res.ok).toBe(false);
+    expect(String(res.error)).toContain("refs: sent=1 accepted=0");
+    expect(res.dropped).toMatchObject({ refs: 1 });
+    expect(res.droppedTotal).toBe(1);
+    expect(res.droppedReasons?.refs).toBeDefined();
+  });
 });
 
 describe("parseCongressImportAcceptedCounts + congressImportAcceptedReceiptError", () => {
@@ -347,6 +359,26 @@ describe("parseCongressImportAcceptedCounts + congressImportAcceptedReceiptError
     expect(parseCongressImportAcceptedCounts({ ok: true, refs: 1.5, spxRows: 0, pricedTickers: 0, priceRows: 0, insiderRows: 0, shortVolumeRows: 0, fundamentalsRows: 0, analystRows: 0 }).ok).toBe(
       false,
     );
+  });
+
+  it("rejects a malformed receipt via ImportedReceiptSchema", () => {
+    const malformed = {
+      ok: true,
+      refs: "2",
+      spxRows: 0,
+      pricedTickers: 0,
+      priceRows: 0,
+      insiderRows: 0,
+      shortVolumeRows: 0,
+      fundamentalsRows: 0,
+      analystRows: -1,
+    };
+    expect(ImportedReceiptSchema.safeParse(malformed).success).toBe(false);
+    const parsed = parseCongressImportAcceptedCounts(malformed);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.reason).toContain("missing per-dataset accepted counts");
+    }
   });
 
   it("returns no receipt error when every non-zero sent dataset has accepted >= sent", () => {
