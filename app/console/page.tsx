@@ -46,7 +46,7 @@ import { Ago, Card, Chip, Dash, Meter, SignedText, Stat } from "./ui/primitives"
 import { SymbolButton } from "./ui/symbol-drilldown";
 import { isExecutedStatus, isNotPlacedStatus, isProposalRowApprovable, proposalChipTone, sideVerb } from "./lib/action-verbs";
 import { approveProposal, LiveConfirmationRequiredError } from "./lib/api";
-import { approvalHomeToast } from "./lib/approval-honesty";
+import { toastForApproveResult } from "./lib/approval-honesty";
 import { applyCoachChipPrefill, COACH_NOTE_CHIPS } from "./lib/coach-chips";
 import { Sheet } from "./ui/sheet";
 import { useToast } from "./ui/toast";
@@ -1069,7 +1069,7 @@ function ProposalRow({
         typedText: liveConfirm
       } : undefined;
       const res = await approveProposal(row.id, confirmBody);
-      const outcome = approvalHomeToast(res.status, res.reasons);
+      const outcome = toastForApproveResult({ status: res.status, reasons: res.reasons });
       toast.push(outcome.tone, outcome.title, outcome.detail);
       if (isSuccessfulApprovalResult(res.status)) {
         setOpen(false);
