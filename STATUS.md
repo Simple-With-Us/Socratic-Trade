@@ -113,6 +113,13 @@
 **Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/congress-share.test.ts` 77/77; `npm run build` clean.
 
 **Next.**  Push; open PR READY; no extra-ship.
+## 2026-10-05 CURSOR — Sentry server AI integrations (board `f411f8a7`, branch `cursor/fix-sentry-node-integrations-373d`)
+
+**What.**  `sentry.server.config.ts` named six integrations on `@sentry/nextjs` that the Edge compile does not re-export (Sentry 7753792417).  A static `@sentry/node` import then failed that same Edge bundle (`diagnostics_channel`, `worker_threads`).  `Sentry.init` stays on `@sentry/nextjs`.  The six factories are attached from `instrumentation.ts` on the Node runtime only, with `webpackIgnore` (same path as `@sentry/profiling-node`).  Each factory has its own try/catch and logs on failure.  Direct `@sentry/node` is `^11.0.0`, the same range as `@sentry/nextjs`, so npm keeps one copy.
+
+**Verification.**  Touched files: `npm run lint` 0 errors; `npx tsc --noEmit` clean.  CI `verify` then runs full `npm test` and `npm run build` (no "Attempted import error", no Edge `Module not found` for `@sentry/node`).
+
+**Next.**  Tip `8425497f` (`608ae672` rebase onto `origin/main` with `--force-with-lease`, plus fleet-recall citations).  `verify` + `verify-hosted` green on `608ae672`; CI re-running on `8425497f` (docs-only).  Remaining merge blockers: unresolved Kody defer threads (Mac live ledger mirror, GitHub issue reservation, agent-sync claim) until Jay or a Mac seat clears them.
 ## 2026-10-05 CURSOR — EOD close plausibility (board feab5c88, branch `cursor/eod-close-plausibility-4676`)
 
 **What.**  Congress-share export schemas now reject `close <= 0` on `spx` and nested `prices[].closes` before CT import (`CongressSharePriceCloseSchema` / `CongressSharePriceSeriesSchema`).  `ohlcBarsToCloses` already filtered non-positive closes on `main`.
