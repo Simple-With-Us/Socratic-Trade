@@ -19,12 +19,38 @@ import { verifySecuritiesImportToken, securitiesImportToken } from "../src/lib/s
 import { clearHistoryCache, fetchDailyOHLC, toBusinessDay } from "../src/lib/history";
 import { latestCompletedTradingSessionEtKey } from "../src/lib/market-hours";
 import { POST as importRoute } from "../app/api/admin/securities/import/route";
+import { SECURITIES_IMPORT_MAX_BYTES } from "../src/lib/bounded-body";
+import { RATE_LIMITS, resetRateLimiter } from "../src/lib/rate-limit";
+import { SecuritiesImportResponseSchema } from "../src/lib/securities-import-schema";
+
+function securitiesImportTestToken(): string {
+  const token = process.env.SECURITIES_IMPORT_TEST_TOKEN;
+  if (!token) {
+    throw new Error("SECURITIES_IMPORT_TEST_TOKEN is required for securities-import tests");
+  }
+  return token;
+}
+
+function bearerAuth(token: string): string {
+  return `Bearer ${token}`;
+}
+
+function configureIngestToken(): string {
+  const token = securitiesImportTestToken();
+  process.env.APP_B_INGEST_TOKEN = token;
+  return token;
+}
+
+function ingestAuthHeader(): string {
+  return bearerAuth(configureIngestToken());
+}
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-securities-import-${randomUUID()}.db`)}`;
 });
 
 beforeEach(() => {
+  resetRateLimiter();
   clearImportedSecuritiesForTests();
   clearHistoryCache();
   delete process.env.APP_B_INGEST_TOKEN;
@@ -125,10 +151,10 @@ describe("securities-import auth", () => {
   });
 
   it("rejects a wrong / length-mismatched token and accepts the exact token", () => {
-    process.env.APP_B_INGEST_TOKEN = "s3cret-token";
+    configureIngestToken();
     expect(verifySecuritiesImportToken(reqWith("Bearer wrong"))).toBe(false);
     expect(verifySecuritiesImportToken(reqWith(""))).toBe(false);
-    expect(verifySecuritiesImportToken(reqWith("Bearer s3cret-token"))).toBe(true);
+    expect(verifySecuritiesImportToken(reqWith(ingestAuthHeader()))).toBe(true);
   });
 });
 
@@ -137,7 +163,11 @@ describe("securities-import auth", () => {
 function postJson(body: unknown, auth?: string): Request {
   return new Request("http://localhost/api/admin/securities/import", {
     method: "POST",
-    headers: { "content-type": "application/json", ...(auth ? { authorization: auth } : {}) },
+    headers: {
+      "content-type": "application/json",
+      "cf-connecting-ip": "203.0.113.10",
+      ...(auth ? { authorization: auth } : {}),
+    },
     body: JSON.stringify(body)
   });
 }
@@ -149,41 +179,150 @@ describe("POST /api/admin/securities/import", () => {
   });
 
   it("401s on a wrong token", async () => {
-    process.env.APP_B_INGEST_TOKEN = "tok";
+    configureIngestToken();
     const res = await importRoute(postJson({ prices: [] }, "Bearer nope"));
     expect(res.status).toBe(401);
   });
 
   it("persists refs/prices/spx and returns counts on a valid token", async () => {
-    process.env.APP_B_INGEST_TOKEN = "tok";
+    configureIngestToken();
     const res = await importRoute(
       postJson(
         { refs: [{ ticker: "AAPL", companyName: "Apple" }], prices: [{ ticker: "AAPL", closes: seqCloses(3) }], spx: seqCloses(2, 5000), origin: "app-a" },
-        "Bearer tok"
+        ingestAuthHeader()
       )
     );
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { ok: boolean; refs: number; pricedTickers: number; priceRows: number; spxRows: number };
+    const json = SecuritiesImportResponseSchema.parse(await res.json());
     expect(json).toMatchObject({ ok: true, refs: 1, pricedTickers: 1, priceRows: 3, spxRows: 2 });
     expect(getImportedPriceCloses("AAPL")).toHaveLength(3);
   });
 
   it("no-echo guard: a payload tagged with App B's own origin is acked but NOT stored", async () => {
-    process.env.APP_B_INGEST_TOKEN = "tok";
-    const res = await importRoute(postJson({ prices: [{ ticker: "AAPL", closes: seqCloses(3) }], origin: "app-b" }, "Bearer tok"));
+    configureIngestToken();
+    const res = await importRoute(postJson({ prices: [{ ticker: "AAPL", closes: seqCloses(3) }], origin: "app-b" }, ingestAuthHeader()));
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { ok: boolean; skipped?: boolean };
+    const json = SecuritiesImportResponseSchema.parse(await res.json());
     expect(json).toMatchObject({ ok: true, skipped: true });
     expect(getImportedPriceCloses("AAPL")).toHaveLength(0);
   });
 
   it("ignores insider/shortVolume on the inbound path", async () => {
-    process.env.APP_B_INGEST_TOKEN = "tok";
+    configureIngestToken();
     const res = await importRoute(
-      postJson({ prices: [{ ticker: "F", closes: seqCloses(2) }], insider: [{ ticker: "F" }], shortVolume: [{ ticker: "F" }] }, "Bearer tok")
+      postJson(
+        {
+          prices: [{ ticker: "F", closes: seqCloses(2) }],
+          insider: [
+            {
+              ticker: "F",
+              date: "2024-01-01",
+              sentiment: 0,
+              buyFilings: 0,
+              sellFilings: 0,
+              buyShares: 0,
+              sellShares: 0,
+              owners: [],
+            },
+          ],
+          shortVolume: [{ ticker: "F", date: "2024-01-01", ratio: 0.5, elevated: false }],
+        },
+        ingestAuthHeader()
+      )
     );
     expect(res.status).toBe(200);
     expect(getImportedPriceCloses("F")).toHaveLength(2);
+  });
+
+  it("413s when the body exceeds SECURITIES_IMPORT_MAX_BYTES", async () => {
+    configureIngestToken();
+    const bigBody = JSON.stringify({ padding: "a".repeat(SECURITIES_IMPORT_MAX_BYTES) });
+    const req = new Request("http://localhost/api/admin/securities/import", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: ingestAuthHeader(),
+        "cf-connecting-ip": "203.0.113.10",
+      },
+      body: bigBody
+    });
+    const res = await importRoute(req);
+    expect(res.status).toBe(413);
+  });
+
+  it("returns 429 after the per-IP rate limit is exceeded", async () => {
+    configureIngestToken();
+    // Drive the limiter with a tiny injected ceiling rather than replaying the production
+    // 600/min limit through the full handler (each pass is SQLite + audit).
+    const originalLimit = RATE_LIMITS.securitiesImport.limit;
+    (RATE_LIMITS.securitiesImport as { limit: number }).limit = 2;
+    try {
+      const headers = {
+        "content-type": "application/json",
+        authorization: ingestAuthHeader(),
+        "cf-connecting-ip": "203.0.113.50"
+      };
+      for (let i = 0; i < 2; i++) {
+        const ok = await importRoute(
+          new Request("http://localhost/api/admin/securities/import", {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ prices: [] })
+          })
+        );
+        expect(ok.status).toBe(200);
+      }
+      const blocked = await importRoute(
+        new Request("http://localhost/api/admin/securities/import", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ prices: [] })
+        })
+      );
+      expect(blocked.status).toBe(429);
+    } finally {
+      (RATE_LIMITS.securitiesImport as { limit: number }).limit = originalLimit;
+    }
+  });
+
+  it("400s when refs contain invalid row shapes (strict Zod at trust boundary)", async () => {
+    configureIngestToken();
+    const res = await importRoute(
+      postJson({ refs: [{ ticker: "AAPL" }, { ticker: "" }, "not-an-object"] }, ingestAuthHeader())
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("accepts optional schemaVersion on the inbound payload", async () => {
+    configureIngestToken();
+    const res = await importRoute(postJson({ schemaVersion: "2.7.0", prices: [] }, ingestAuthHeader()));
+    expect(res.status).toBe(200);
+    const json = SecuritiesImportResponseSchema.parse(await res.json());
+    expect(json.schemaVersion).toBe("2.7.0");
+  });
+
+  it("strips control characters from schemaVersion before logging and echoing", async () => {
+    configureIngestToken();
+    const res = await importRoute(
+      postJson({ schemaVersion: "2.7.0\n[securities-import] forged", prices: [] }, ingestAuthHeader())
+    );
+    expect(res.status).toBe(200);
+    const json = SecuritiesImportResponseSchema.parse(await res.json());
+    expect(json.schemaVersion).toBe("2.7.0[securities-import] forged");
+  });
+
+  it("treats whitespace-only schemaVersion as absent", async () => {
+    configureIngestToken();
+    const res = await importRoute(postJson({ schemaVersion: "   \t", prices: [] }, ingestAuthHeader()));
+    expect(res.status).toBe(200);
+    const json = SecuritiesImportResponseSchema.parse(await res.json());
+    expect(json.schemaVersion).toBeUndefined();
+  });
+
+  it("400s when schemaVersion has an invalid type", async () => {
+    configureIngestToken();
+    const res = await importRoute(postJson({ schemaVersion: { bad: true }, prices: [] }, ingestAuthHeader()));
+    expect(res.status).toBe(400);
   });
 });
 

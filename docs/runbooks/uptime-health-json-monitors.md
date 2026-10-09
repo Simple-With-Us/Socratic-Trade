@@ -8,6 +8,14 @@ liveness probe.  A 503 here restarts the container, which re-halts autonomy and
 cannot heal a stale scheduler, a silent trading loop, or a wedged Litestream
 tier.
 
+A warm process answers this URL from a memory snapshot (default 2 seconds,
+`HEALTH_SNAPSHOT_TTL_MS`) and refreshes SQLite, Litestream, and OpenRouter
+credits after the response.  Critical hard-stops still update `ok` on that
+refresh, so a 503 can lag by about one refresh.  `/api/live` does not open
+`app.db`.  Docker and the entrypoint watchdog stay on `/api/live`.  A single
+main-thread native call longer than the probe timeout can still delay the
+handler from starting; the snapshot stops the probe from adding its own wait.
+
 UptimeRobot (or equivalent) plus Pushover must therefore treat HTTP 200 as
 **up**, and page on these JSON fields instead:
 
@@ -80,6 +88,10 @@ liveness check.  Do not convert it into a keyword monitor.
 - `tradingLiveness` is always present.  `degraded` is a **count** of
   active-autonomy accounts that are stale (market open) or over the consecutive
   failure cap.  Halted accounts do not count.  `degraded: 0` is healthy.
+  `maxConsecutiveFailedRuns` is the worst post-re-arm streak: after the owner
+  sets the account active again, only runs whose `started_at` is after that
+  re-arm count.  A run that was already in flight does not keep the public
+  streak at the old halt-time number.  `stale_last_completed_run` is unchanged.
 - `storage.litestreamTiersDegraded` is always a boolean.  `true` when a
   compaction level is wedged or empty-wedged (see `assessLitestreamTierFreshness`).
 

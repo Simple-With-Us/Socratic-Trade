@@ -8,7 +8,7 @@ import { getTaskJournalSummary } from "./db-task-journal";
 import { userHasAnyLlmCredential } from "./db-api-keys";
 import { resolveLlmEndpoint } from "./llm-provider";
 import { computeAccountTradingLiveness } from "./trading-liveness";
-import { getLastEnrichmentCoverageReport } from "./enrichment-coverage";
+import { resolveEnrichmentCoverageReport } from "./db-enrichment-coverage";
 import { pineconeMonthToDateWriteUnits } from "./pinecone-monthly-pace";
 import { pineconeTrialState } from "./pinecone-trial-window";
 import { pineconeWuExhaustedUntil } from "./pinecone-wu-breaker";
@@ -546,7 +546,7 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
 
   let enrichmentCoverage: OpsSnapshot["enrichmentCoverage"] = null;
   try {
-    const report = getLastEnrichmentCoverageReport();
+    const report = resolveEnrichmentCoverageReport();
     if (report) {
       enrichmentCoverage = {
         asOf: report.asOf,

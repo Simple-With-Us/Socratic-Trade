@@ -11,6 +11,20 @@
  * (the cascade imports this module after merge).
  */
 
+/**
+ * QuiverQuant direct-access carrier fields (lane retired 2026-08-04; provider never registered).
+ * Excluded from coverage percentages so the admin board is not pinned at zero on dormant fields.
+ */
+export const COVERAGE_RETIRED_LANE_FIELDS = [
+  "congressTradesQuiver",
+  "insiderTradesQuiver",
+  "govContractsQuiver",
+  "lobbyingQuiver",
+  "patentsQuiver"
+] as const;
+
+export type CoverageRetiredLaneField = (typeof COVERAGE_RETIRED_LANE_FIELDS)[number];
+
 /** Scalar fields we track for "did the cascade fill this?" reporting. */
 export const COVERAGE_TRACKED_FIELDS = [
   "price",
@@ -51,12 +65,7 @@ export const COVERAGE_TRACKED_FIELDS = [
   "returnOnAssets",
   "revenueGrowth",
   "freeCashFlowYield",
-  "grossProfitMargin",
-  "congressTradesQuiver",
-  "insiderTradesQuiver",
-  "govContractsQuiver",
-  "lobbyingQuiver",
-  "patentsQuiver"
+  "grossProfitMargin"
 ] as const;
 
 export type CoverageTrackedField = (typeof COVERAGE_TRACKED_FIELDS)[number];
@@ -272,6 +281,14 @@ export function getLastEnrichmentCoverageReport(): EnrichmentCoverageReport | nu
 
 export function setLastEnrichmentCoverageReport(report: EnrichmentCoverageReport | null): void {
   lastCoverageReport = report;
+  if (!report) return;
+  void import("./db-enrichment-coverage")
+    .then((mod) => {
+      mod.persistEnrichmentCoverageReport(report);
+    })
+    .catch(() => {
+      // Best-effort durability — never break a cascade run (tests may omit DB).
+    });
 }
 
 /** Test helper — clears the in-memory last-report slot. */
@@ -408,7 +425,7 @@ export function buildEnrichmentCoverageReport(
     contributingSources: [...contributingSources],
     headlines
   };
-  lastCoverageReport = report;
+  setLastEnrichmentCoverageReport(report);
   return report;
 }
 

@@ -49,6 +49,24 @@ describe("source shadow ablation", () => {
     expect(fundamentals?.scoreDelta).not.toBe(0);
   });
 
+  it("treats freeCashFlowYield as prompt-only (score uses fcfYield alias only)", () => {
+    const rows = buildSourceAblations(
+      quote({
+        sources: {
+          price: "live-market",
+          volume: "live-market",
+          intradayChangePct: "live-market",
+          freeCashFlowYield: "fundamentals-a",
+          fcfYield: "fundamentals-a"
+        }
+      })
+    );
+    const fundamentals = rows.find((row) => row.provider === "fundamentals-a");
+    expect(fundamentals?.scoringFields).toEqual(["fcfYield"]);
+    expect(fundamentals?.promptOnlyFields).toEqual(["freeCashFlowYield"]);
+    expect(fundamentals?.scoreDelta).not.toBe(0);
+  });
+
   it("summarizes successful fields and provider failures without hiding partial coverage", () => {
     const rows = summarizeSourceCoverage([
       quote({

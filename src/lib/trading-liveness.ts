@@ -1,4 +1,4 @@
-import { getDb, listConnectedAccounts, listUsers, peekPolicy } from "./db";
+import { getDb, getInternalSetting, listConnectedAccounts, listUsers, peekPolicy } from "./db";
 import { isMarketOpen } from "./market-calendar";
 
 // Handoff 6b.7: the scheduler heartbeat (/api/health's schedulerAgeSeconds) only proves the tick
@@ -28,6 +28,77 @@ import { isMarketOpen } from "./market-calendar";
 // policy.runDuringExtendedHours), so that signal is already implicitly market-gated.
 
 const MAX_RUN_LOOKBACK = 200;
+
+/** Durable settings prefix for the run-failure watchdog episode (`run-failure-watchdog.ts` writes it). */
+export const RUN_FAILURE_WATCH_STATE_PREFIX = "runFailureWatch";
+
+/** Settings key whose JSON may carry `rearmedAt` after the owner sets the account active again. */
+export function runFailureWatchStateKey(userId: string, connectedAccountId: string): string {
+  return `${RUN_FAILURE_WATCH_STATE_PREFIX}:${userId}:${connectedAccountId}`;
+}
+
+/**
+ * ISO instant the owner re-armed this account, or null when no fresh episode is open.
+ *  `/api/health` uses it so `maxConsecutiveFailedRuns` is the post-re-arm streak: failures
+ *  that started before the re-arm stay in the run log but do not keep the public streak at
+ *  the halt-time count.  A missing or unreadable row means "no window" (the raw streak).
+ */
+export function runFailureRearmCutoff(userId: string, connectedAccountId: string): string | null {
+  try {
+    const raw = getInternalSetting<{ rearmedAt?: unknown }>(runFailureWatchStateKey(userId, connectedAccountId));
+    if (!raw || typeof raw.rearmedAt !== "string" || raw.rearmedAt.length === 0) return null;
+    return Number.isFinite(Date.parse(raw.rearmedAt)) ? raw.rearmedAt : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Leading failed-run count, newest first.  When `startedAfter` is set, a run counts only
+ *  when its `started_at` is strictly later.  An equal timestamp is not after the re-arm, and
+ *  a missing timestamp cannot be shown to be after it, so both stop the walk.  A completed
+ *  run still breaks the streak.
+ */
+export function countLeadingFailedRuns(
+  rows: Array<{ status: string; started_at?: string | null }>,
+  startedAfter: string | null
+): number {
+  const cutoffMs = startedAfter ? Date.parse(startedAfter) : Number.NaN;
+  const gated = Number.isFinite(cutoffMs);
+  let consecutiveFailedRuns = 0;
+  for (const row of rows) {
+    if (gated) {
+      const startedMs = Date.parse(row.started_at ?? "");
+      if (!Number.isFinite(startedMs) || startedMs <= cutoffMs) break;
+    }
+    if (row.status === "completed") break;
+    if (row.status !== "failed") break;
+    consecutiveFailedRuns++;
+  }
+  return consecutiveFailedRuns;
+}
+
+/** True when any finished success or failure started strictly after `startedAfter`. */
+export function hasFinishedRunStartedAfter(
+  userId: string,
+  connectedAccountId: string,
+  startedAfter: string
+): boolean {
+  if (!Number.isFinite(Date.parse(startedAfter))) return false;
+  try {
+    const row = getDb()
+      .prepare(
+        `SELECT 1 AS ok FROM strategy_runs
+         WHERE user_id = ? AND connected_account_id = ? AND status IN ('completed', 'failed')
+           AND started_at > ?
+         LIMIT 1`
+      )
+      .get(userId, connectedAccountId, startedAfter) as { ok: number } | undefined;
+    return Boolean(row);
+  } catch {
+    return false;
+  }
+}
 
 /** Minutes without a COMPLETED run (for an active-autonomy account) before it's reported stale. */
 export function tradingLivenessStaleMinutes(): number {
@@ -86,7 +157,8 @@ export interface PublicTradingLiveness {
   /** Worst consecutive-failure streak across active-autonomy accounts.  Without this a JSON-path
    *  monitor sees only `degraded > 0` and cannot tell an account failing every run from ordinary
    *  out-of-session silence — the two want very different responses.  Identity-free: a max across
-   *  accounts, never per-account. */
+   *  accounts, never per-account.  After an owner re-arm this is the post-re-arm streak (runs
+   *  whose `started_at` is after `rearmedAt`), not the historical halt-time count. */
   maxConsecutiveFailedRuns: number;
   /** Distinct reasons currently degrading at least one account, so ops can route on the CAUSE
    *  rather than inferring it from `oldestCompletedRunAgeSeconds` and the clock. */
@@ -164,21 +236,23 @@ export function computeAccountTradingLiveness(
     : null;
 
   // Walk the most recent finished (non-'running') runs newest-first, counting a leading streak of
-  // 'failed' rows until the first 'completed' row (or the lookback cap) breaks it. A run still
+  // 'failed' rows until the first 'completed' row (or the lookback cap) breaks it.  A run still
   // 'running' is neither a success nor a failure yet, so it's excluded rather than resetting or
   // extending the streak.
+  //
+  // After an owner re-arm, only runs that STARTED after `rearmedAt` count.  The historical
+  // streak (and a run that was already in flight at re-arm time) stays in the table but must
+  // not keep `/api/health` at the halt-time count.  `stale_last_completed_run` is unchanged:
+  // it still reports the real age of the last completed run.
+  const rearmCutoff = runFailureRearmCutoff(userId, connectedAccountId);
   const recentFinished = db
     .prepare(
-      `SELECT status FROM strategy_runs
+      `SELECT status, started_at FROM strategy_runs
        WHERE user_id = ? AND connected_account_id = ? AND status IN ('completed', 'failed')
        ORDER BY started_at DESC LIMIT ?`
     )
-    .all(userId, connectedAccountId, MAX_RUN_LOOKBACK) as Array<{ status: string }>;
-  let consecutiveFailedRuns = 0;
-  for (const row of recentFinished) {
-    if (row.status === "completed") break;
-    consecutiveFailedRuns++;
-  }
+    .all(userId, connectedAccountId, MAX_RUN_LOOKBACK) as Array<{ status: string; started_at: string }>;
+  const consecutiveFailedRuns = countLeadingFailedRuns(recentFinished, rearmCutoff);
 
   const marketOpen = isMarketOpen(new Date(now));
 

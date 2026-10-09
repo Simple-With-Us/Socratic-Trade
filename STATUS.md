@@ -1,5 +1,29 @@
 # Current Status
 
+## 2026-10-07 CURSOR — Health probe off the SQLite critical path (branch `cursor/health-probe-event-loop-b9ee`)
+
+**What.**  Sentry uptime SOCRATIC-TRADE-S times out `GET /api/health` at ~8s (681 events).  A warm probe now returns a memory snapshot and refreshes SQLite, Litestream, and OpenRouter credits after the response.  `/api/live` no longer opens `app.db`.  Service-health summary statements are prepared once per read.  PagerDuty #383 stays open until this ships.  Extra-ship no.
+
+**Left alone.**  No production restart.  No FTS rewrite.  No database prune.  The ~11GB `app.db` is mostly corpus, not a health-log leak.  A single main-thread native call longer than 8s can still delay every in-process HTTP handler, including these probes.
+
+**Docs.**  `docs/rollouts/2026-10-07-health-probe-snapshot.md`, `PLAN.md`, `docs/EFFORT-LOG.md`, `docs/runbooks/uptime-health-json-monitors.md`.
+
+**Verification.**  `npm run lint` exit 0 (0 errors).  `npx tsc --noEmit` exit 0.  Health and live vitest 47 passed, including a warm GET that does not enter a 400ms sync summary or a hung credit fetch.  `npm run build` exit 0.  Full `npm test`: 9101 passed, 11 failed in unrelated files on this seat (notify env, Node 22 `.ts` ops script).  CI `verify` is the merge gate.
+
+**Next.**  PR https://github.com/Simple-With-Us/Socratic-Trade/pull/4302.  Do not force-merge.  Resolve PagerDuty #383 only after merge and ship, with a non-silent note.
+
+## 2026-10-06 CURSOR — Autopilot re-arm streak (branch `cursor/autopilot-rearm-streak-38d0`)
+
+**What.**  Re-arming an account was undone within seconds because the run-failure watchdog's `lastHaltStreak` floor was the streak at halt time.  A strategy run already in flight could fail after the re-arm, push the raw streak one past that floor, and auto-halt again.  The watchdog now counts only runs whose `started_at` is strictly after the re-arm receipt.  The same window feeds `/api/health` `tradingLiveness.maxConsecutiveFailedRuns`.  Genuine new failures still halt at the existing threshold.  Sentry SOCRATIC-TRADE-2R and 2T and PagerDuty #322 stay open until a clean completed run.
+
+**Left alone.**  No account was re-armed.  No trading cap or limit changed.  No production host or Mac access.
+
+**Docs.**  `docs/rollouts/2026-10-06-rearm-failure-streak.md`, `PLAN.md`, `docs/EFFORT-LOG.md`, `docs/runbooks/uptime-health-json-monitors.md`, pointer on `docs/rollouts/2026-09-30-self-healing-watchdogs.md`.
+
+**Verification.**  `npm run lint` exit 0 (0 errors).  `npx tsc --noEmit` exit 0.  Watchdog + liveness vitest 26 passed.  Health monitor tests 12 passed.  `npm run build` exit 0.  Full `npm test`: 9097 passed, 11 failed in unrelated files on this seat (notify env, Node 22 `.ts` ops script).  CI `verify` is the merge gate.
+
+**Next.**  PR https://github.com/Simple-With-Us/Socratic-Trade/pull/4259.  Merge only when `verify` is green and review is clear.  Do not force-merge.
+
 ## 2026-10-05 CURSOR — marketCap coverage + catalog (branch `cursor/marketcap-coverage-catalog-62d9`)
 
 **What.**  Board `2c62f3fde01447a7`: add `marketCap` to `COVERAGE_TRACKED_FIELDS` and `CATALOG_FIELDS` for score-factor observability.
@@ -27,6 +51,80 @@
 **Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` clean.  `npm run build` passed.  `npm test`: 9047 passed, 51 skipped, 11 failed outside this diff (notify creds injected as `[REDACTED]`, Alpha Vantage / Congress extra fetches, TwelveData quota, Node 22 `.ts` import from `summarize-cpuprofile.mjs`, `server-metrics` `usesLocalHost` on this VM).  Targeted quote tests passed inside that run.
 
 **Next.**  PR #4215 is ready.  Extra-ship no.  Do not merge.  Do not Coolify deploy.  Kody threads: fix or leave open with rationale.
+## 2026-10-05 CURSOR — Enrichment coverage persistence (branch `cursor/enrichment-coverage-persist-67f3`)
+
+**What.**  Board `8fd801251acf4061`: durable SQLite store for cascade coverage reports (migration 94), wired through `setLastEnrichmentCoverageReport`; admin API and ops snapshot fall back to DB after redeploy; `history` on GET `/api/admin/enrichment-coverage`.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/enrichment-coverage*.test.ts` 17/17; full `npm test` + `npm run build` at PR verify.
+
+**Next.**  Push; open PR READY; do not merge from agent unless owner asks.
+## 2026-10-05 CURSOR — Quiver coverage board d550b5ee (branch `gb-compiler/st-quiver-coverage`)
+
+**What.**  Exclude five retired QuiverQuant carrier fields from enrichment coverage tracking; drop misleading `freeCashFlowYield` score ablation neutralizer.
+
+**Tracking.**  Board `d550b5ee`, GitHub #4217 (PR).
+
+**Verification.**  `npm run lint`, `npx tsc --noEmit`, `npm test`, `npm run build` — green locally; CI `verify` + `verify-hosted` SUCCESS on head `5b23cd2f` (run `37399054045`).
+
+**Next.**  PR #4217 MERGEABLE; wait `verify` green; Kody doc threads addressed.
+## 2026-10-05 CURSOR — Congress share schema drift (board bf84ffba, branch `gb-compiler/st-share-schemaversion`)
+## 2026-10-06 CURSOR — Congress share schema drift Kody round 2 (board bf84ffba, branch `gb-compiler/st-share-schemaversion`, PR https://github.com/Simple-With-Us/Socratic-Trade/pull/4220)
+## 2026-10-06 CURSOR — Congress share schema drift Kody round 4 (board bf84ffba, branch `gb-compiler/st-share-schemaversion`, PR #4220)
+
+**What.**  Rebased onto `origin/main`.  Kody round 4: unauth IP rate limits before audit on securities import + congress webhook; `dropInvalidShareRows` uses passthrough schemas + `parsed.data`; rollout verification records real `npm run build` PASS.
+
+**Verification.**  `npm run lint`; `npx tsc --noEmit`; targeted vitest (congress-share, securities-import, congress-trade-events) 136/136; `npm run build` exit 0.
+
+**Next.**  Push; FIXED + resolve three open Kody threads; CI `verify`.
+
+## 2026-10-06 CURSOR — Congress share schema drift Kody round 2 (board bf84ffba, branch `gb-compiler/st-share-schemaversion`, PR #4220)
+
+**What.**  Kody round 3: rate limits after auth on congress webhook + securities import; effort-log/STATUS use `#4220` refs only; rollout handoff headings normalized; `dropInvalidShareRows` forwards original rows; `OptionalSchemaVersionSchema` (Zod) for inbound/outbound `schemaVersion`; response schema accepts numeric echo; `CONGRESS_TRADE_TEST_TOKEN` in vitest for share tests.
+
+**Verification.**  `npm run lint`; `npx tsc --noEmit`; `npx vitest run test/securities-import.test.ts test/congress-trade-events.test.ts test/congress-share.test.ts`.
+
+**Next.**  Push; FIXED replies + resolve all open Kody threads; CI `verify`.
+## 2026-10-05 CURSOR — iOS sign-out flash + placement outcomes (branch `cursor/ios-state-outcome-truth-189b`)
+
+**What.**  Board `ios-state-outcome-truth`: sign-out clears account-scoped UI before the push delete finishes; `reconcileTrackedCommands` surfaces honest approve placement toasts from `command.result`; XCTest notes for `ios-build`.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean.  Swift XCTest not run on Linux — wait for `ios-build` on PR.
+
+**Next.**  Push; open PR READY; merge after `verify` + `ios-build` green.
+## 2026-10-05 CURSOR — Merge shepherd repo slug + BLOCKED bucket (branch `cursor/merge-shepherd-repo-slug-dfc4`)
+
+**What.**  Pin `REPO` to `Simple-With-Us/Socratic-Trade` (`GITHUB_REPOSITORY` / `SHEPHERD_REPO`); poll `mergeStateStatus` before merge/sync (`UNKNOWN` waits); `[blocked]` bucket; same slug in `runner-availability.sh`, `rth-deploy-drain.sh`, `merge-shepherd.yml`.  PR #4207 Kody round 2.
+
+**Verification.**  `bash -n` on three scripts.
+
+**Next.**  Push; reply on Kody threads; do not merge.
+## 2026-10-05 CURSOR — EOD close plausibility (board feab5c88, branch `cursor/eod-close-plausibility-4676`)
+
+**What.**  Congress-share export schemas now reject `close <= 0` on `spx` and nested `prices[].closes` before CT import (`CongressSharePriceCloseSchema` / `CongressSharePriceSeriesSchema`).  `ohlcBarsToCloses` already filtered non-positive closes on `main`.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; targeted congress-share tests green.  Full `npm test` + `npm run build` at PR handoff.
+
+**Blocker.**  Matching `congress-trading-shared` v2.7.2 patch is prepared locally (`d82daf4`) but not pushed (403 from cloud bot).  Owner should publish tag and bump ST pin when ready.
+
+**Next.**  Open PR READY; do not merge from agent.
+## 2026-10-05 CURSOR — Equity-low skip without auto-halt (branch `cursor/equity-low-skip-no-halt-5d8f`)
+
+**What.**  `applyBrokerOrderPlacementPause` treats `health.category === "equity"` like process stall: action `none`, no halt/marker/kill_switch.  Tests + rollout `docs/rollouts/2026-10-05-equity-low-skip-no-auto-halt.md`.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; targeted broker-health + scheduler observability tests; PR `verify-hosted` runs full `npm test` + build.
+
+**Blockers.**  Rebase onto origin/main complete; required CI `verify` checks pending before squash auto-merge.
+
+**Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
+## 2026-10-05 CURSOR — Broker I/O bounded lanes (board `28996d82`, branch `cursor/broker-io-bounded-lanes-e6af`)
+
+**What.**  Verified `main` already has adapter deadlines (`ALPACA_BROKER_IO_DEADLINE_MS`, Tradier `AbortSignal.timeout`), axios default timeout (`#3313`), and protective scheduler lanes (`withLaneDeadline` + in-flight guards released by real work).  Closed the remaining expert-review gap: `pending-fill-reconcile` now has a per-account in-flight guard and lane deadline wrapper; Alpaca `getAsset` reads use the shared broker I/O deadline.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/scheduler-pending-fill-inflight-guard.test.ts` + `test/broker-io-deadlines.test.ts` green; `npm run build` pass.
+
+**Docs.**  Rollout `docs/rollouts/2026-10-05-broker-io-pending-fill-guard.md`.
+
+**Next.**  Push; open PR READY; CI `verify`.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
@@ -35,6 +133,18 @@
 **Verification.**  `bash -n` on both cursor-cloud scripts; application `npm run build` not run (shell-only change).
 
 **Next.**  Push; reply on threads with fix SHA; do not merge.
+
+## 2026-10-06 CURSOR — PR #4164 Kody tip-fix (branch `grok/lexical-fts-off-event-loop`)
+
+**Claim.**  `repo: Simple-With-Us/Socratic-Trade`  `issue: #4213`  `board: f50c66930a124233b28563e7967b9ac7`  `pr: #4164`.  No Slack #agent-sync post from this cloud VM.
+
+**What.**  Merged `origin/main` (#4218 RTH stall bounds, #4241 effort sync).  Kody: interpolate `WORKER_BIND_UNION_SOURCE` into `WORKER_SOURCE` so worker bind validation cannot drift from `SqliteBindSchema`.  Kody: malformed terminal worker replies call `settleReject` with `terminalWorkerReply` so execution reclaim does not kill an idle worker after 15s.
+
+**Verification.**  `npm run lint`, `npx tsc --noEmit`, `npx vitest run test/sqlite-all-offloop.test.ts`.  CI `verify` pending on new head.
+
+**Next.**  Push; reply on Kody threads with tip SHA; resolve threads when fixed.
+
+
 
 ## 2026-10-05 CURSOR — PR #4158 Kody review follow-up (branch `fix/fred-proxy-failsoft`)
 
