@@ -130,6 +130,16 @@
 **Verification.**  Re-run 2026-10-09: `npm run lint` exit 0 (0 errors, 863 warnings).  `npx tsc --noEmit` exit 0.  `npm test` exit 1 (9119 passed, 51 skipped, 1 failed in `test/egress-guard.test.ts`: this host resolves discord.com to 198.18.0.1 and the SSRF guard rejects it).  `npm run build` exit 0.  No dev server running; none to restart.
 
 **Next.**  Push; open PR READY; do not merge.
+**Next.**  Address Kody review threads (honest fix or `defer`).  Extra-ship no.  Do not deploy or merge from this lane.
+## 2026-10-05 CURSOR — Issue #3888 isTradierOrderNotFound hardening (PR #4212)
+
+**What.**  Board `77590d59` (GROK in_progress), issue #3888 / PR #4212: harden `isTradierOrderNotFound` — `^Tradier HTTP 404`, or `^Tradier HTTP 422:` with body-prefix order not-found / bare `not found`; reject incidental or echoed 422 prose on other statuses (incl. 502 echo fixture); lookup tests + stale `cancelBracketSiblingLegs` comment only.
+
+**Coordination.**  AGENT-SYNC.md applies to new effort claims; this row tracks board/issue scope only (reservation already on live board).  No retroactive `#agent-sync` post is recorded from this cloud follow-up pass.
+
+**Verification.**  CI `verify` on PR #4212 is the merge gate.
+
+**Next.**  Owner merge when ready; `do-not-automerge` stays until cleared.
 ## 2026-10-05 CURSOR — Broker I/O bounded lanes (board `28996d82`, branch `cursor/broker-io-bounded-lanes-e6af`)
 
 **What.**  Verified `main` already has adapter deadlines (`ALPACA_BROKER_IO_DEADLINE_MS`, Tradier `AbortSignal.timeout`), axios default timeout (`#3313`), and protective scheduler lanes (`withLaneDeadline` + in-flight guards released by real work).  Closed the remaining expert-review gap: `pending-fill-reconcile` now has a per-account in-flight guard and lane deadline wrapper; Alpaca `getAsset` reads use the shared broker I/O deadline.
