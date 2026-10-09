@@ -315,6 +315,27 @@ describe("broker-health probe timeouts and process stalls", () => {
     );
   });
 
+  it("equity-unhealthy active account returns pause action none and never auto-halts", async () => {
+    const { applyBrokerOrderPlacementPause, getBrokerPlacementPauseMarker } = await import("../src/lib/broker-health");
+    const { getPolicy, listAudit } = await import("../src/lib/db");
+    const userId = "local";
+    const accountScope = `acct-equity-skip-${randomUUID()}`;
+    const policy = await freshActivePolicy(userId);
+    const equityHealth = {
+      isHealthy: false,
+      reason: "Account equity (0) is too low to trade",
+      category: "equity" as const
+    };
+    for (let i = 0; i < 5; i++) {
+      expect((await applyBrokerOrderPlacementPause({ userId, accountScope, health: equityHealth, policy })).action).toBe(
+        "none"
+      );
+    }
+    expect(getPolicy(userId).systemState).toBe("active");
+    expect(getBrokerPlacementPauseMarker(userId, accountScope)).toBeUndefined();
+    expect(listAudit(100, userId).map((a) => a.kind).filter((k) => k === "broker_placement_auto_halted")).toHaveLength(0);
+  });
+
   it("an auto-owned pause lifts automatically on the next healthy probe", async () => {
     const { applyBrokerOrderPlacementPause, getBrokerPlacementPauseMarker, healthSignalsFromProbeFailure } = await import(
       "../src/lib/broker-health"
