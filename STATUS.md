@@ -105,6 +105,15 @@
 **Verification.**  2026-10-07 Linux: `bash -n` on the monitor, install, and selftest scripts exited 0; `python3 -m py_compile` on the sentry helper exited 0; `bash scripts/ops/st-container-restart-monitor.selftest.sh` printed `selftest: 9 passed, 0 failed.`
 
 **Next.**  PR #4224 — owner installs on host per `docs/runbooks/st-container-restart-monitor.md`.
+## 2026-10-05 CURSOR — Broker I/O bounded lanes (board `28996d82`, branch `cursor/broker-io-bounded-lanes-e6af`)
+
+**What.**  Verified `main` already has adapter deadlines (`ALPACA_BROKER_IO_DEADLINE_MS`, Tradier `AbortSignal.timeout`), axios default timeout (`#3313`), and protective scheduler lanes (`withLaneDeadline` + in-flight guards released by real work).  Closed the remaining expert-review gap: `pending-fill-reconcile` now has a per-account in-flight guard and lane deadline wrapper; Alpaca `getAsset` reads use the shared broker I/O deadline.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/scheduler-pending-fill-inflight-guard.test.ts` + `test/broker-io-deadlines.test.ts` green; `npm run build` pass.
+
+**Docs.**  Rollout `docs/rollouts/2026-10-05-broker-io-pending-fill-guard.md`.
+
+**Next.**  Push; open PR READY; CI `verify`.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 
