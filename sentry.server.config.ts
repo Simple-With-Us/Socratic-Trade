@@ -19,9 +19,10 @@ if (process.env.SENTRY_DSN) {
       databaseQueryData: false,
       graphQL: { document: false, variables: false },
     },
-    // Continuous profiling on the Node server only (not browser UI profiling).
-    // Native @sentry/profiling-node is attached from instrumentation.ts with
-    // webpackIgnore so `node:module` never enters the webpack graph.
+    // Continuous profiling, node runtime metrics, and the GenAI SDK hooks are
+    // attached from instrumentation.ts on the Node runtime only.  webpackIgnore
+    // keeps @sentry/profiling-node and @sentry/node out of the Edge bundle
+    // (a static import fails that compile on diagnostics_channel / worker_threads).
     profileSessionSampleRate: Number(process.env.SENTRY_PROFILE_SESSION_SAMPLE_RATE ?? "1"),
     profileLifecycle: "trace",
     tracePropagationTargets: [
@@ -30,14 +31,6 @@ if (process.env.SENTRY_DSN) {
       /^https:\/\/([\w-]+\.)?congress\.trade/,
       /^https:\/\/([\w-]+\.)?jays\.services/,
       /^https:\/\/usage\.jays\.services/,
-    ],
-    integrations: [
-      Sentry.nodeRuntimeMetricsIntegration(),
-      Sentry.openAIIntegration(),
-      Sentry.anthropicAIIntegration(),
-      Sentry.googleGenAIIntegration(),
-      Sentry.vercelAIIntegration(),
-      Sentry.langChainIntegration(),
     ],
     beforeSend(event) {
       return redactForTelemetry(event) as typeof event;
