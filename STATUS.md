@@ -98,6 +98,33 @@
 **Verification.**  `npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-gate.test.ts` on push.  CI `verify` authoritative.
 
 **Next.**  Jay squash when green; no workflow auto-merge on this PR; Sc5X unresolved.
+## 2026-10-05 CURSOR — EOD close plausibility (board feab5c88, branch `cursor/eod-close-plausibility-4676`)
+
+**What.**  Congress-share export schemas now reject `close <= 0` on `spx` and nested `prices[].closes` before CT import (`CongressSharePriceCloseSchema` / `CongressSharePriceSeriesSchema`).  `ohlcBarsToCloses` already filtered non-positive closes on `main`.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; targeted congress-share tests green.  Full `npm test` + `npm run build` at PR handoff.
+
+**Blocker.**  Matching `congress-trading-shared` v2.7.2 patch is prepared locally (`d82daf4`) but not pushed (403 from cloud bot).  Owner should publish tag and bump ST pin when ready.
+
+**Next.**  Open PR READY; do not merge from agent.
+## 2026-10-05 CURSOR — Equity-low skip without auto-halt (branch `cursor/equity-low-skip-no-halt-5d8f`)
+
+**What.**  `applyBrokerOrderPlacementPause` treats `health.category === "equity"` like process stall: action `none`, no halt/marker/kill_switch.  Tests + rollout `docs/rollouts/2026-10-05-equity-low-skip-no-auto-halt.md`.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; targeted broker-health + scheduler observability tests; PR `verify-hosted` runs full `npm test` + build.
+
+**Blockers.**  Rebase onto origin/main complete; required CI `verify` checks pending before squash auto-merge.
+
+**Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
+## 2026-10-05 CURSOR — Broker I/O bounded lanes (board `28996d82`, branch `cursor/broker-io-bounded-lanes-e6af`)
+
+**What.**  Verified `main` already has adapter deadlines (`ALPACA_BROKER_IO_DEADLINE_MS`, Tradier `AbortSignal.timeout`), axios default timeout (`#3313`), and protective scheduler lanes (`withLaneDeadline` + in-flight guards released by real work).  Closed the remaining expert-review gap: `pending-fill-reconcile` now has a per-account in-flight guard and lane deadline wrapper; Alpaca `getAsset` reads use the shared broker I/O deadline.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/scheduler-pending-fill-inflight-guard.test.ts` + `test/broker-io-deadlines.test.ts` green; `npm run build` pass.
+
+**Docs.**  Rollout `docs/rollouts/2026-10-05-broker-io-pending-fill-guard.md`.
+
+**Next.**  Push; open PR READY; CI `verify`.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

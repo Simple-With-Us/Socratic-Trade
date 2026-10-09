@@ -156,8 +156,9 @@ export async function checkBrokerHealth(
       };
     }
 
-    // Minimum notional check to prevent burning tokens when there's no money.
-    // E.g., Robinhood requires $1 minimum for fractional shares.
+    // Placeability floor (~$5): broker cannot meaningfully place fractional equity below this.
+    // Strategy proposal generation uses a separate floor (MIN_STRATEGY_ACCOUNT_EQUITY = $10 in
+    // strategy.ts).  Low equity skips this tick via isHealthy=false; it does not auto-halt.
     const equity = accountEquity(portfolio);
     if (equity < 5.0) {
       return {
@@ -272,16 +273,28 @@ export type ApplyBrokerPauseResult =
   | { action: "still_paused"; reason: string; autoOwned: boolean };
 
 /**
- * Persist a skipped strategy_runs row when the scheduler health gate auto-halts
- * an active account.  Journal-only skip left tradingLiveness with no row while
- * equity-0 accounts sat halted (board 06df80cf).  Do not call on already-halted
- * ticks — that would write a row every 15s.
+ * Persist a skipped strategy_runs row when the scheduler health gate suppresses an
+ * active account in a way liveness/ops should see in strategy_runs: auto-halt (once,
+ * while still active) or a new low-equity skip episode (once per cause, account stays
+ * active).  Do not call on already-halted ticks for halt — that would write every 15s.
  */
 export function shouldPersistBrokerHealthSkip(input: {
   wasActive: boolean;
   pauseAction: ApplyBrokerPauseResult["action"];
+  health?: HealthSignals;
+  /** True on first tick of a skip episode (new/changed cause); scheduler passes logHealthGateSkip's return. */
+  skipEpisodeStarted?: boolean;
 }): boolean {
-  return input.wasActive && input.pauseAction === "halted";
+  if (!input.wasActive) return false;
+  if (input.pauseAction === "halted") return true;
+  if (
+    input.skipEpisodeStarted &&
+    input.pauseAction === "none" &&
+    input.health?.category === "equity"
+  ) {
+    return true;
+  }
+  return false;
 }
 
 export function persistBrokerHealthSkipRun(input: {
@@ -426,6 +439,12 @@ export async function applyBrokerOrderPlacementPause(input: {
   // The app was frozen, not the broker: skip this tick (isHealthy=false upstream) but leave the
   // streak exactly where it was — neither evidence of a broker outage nor of broker recovery.
   if (health.processStall) {
+    return { action: "none" };
+  }
+
+  // Underfunded account: same as process stall — skip via the health gate, never flip halted or
+  // fire kill_switch (strategy already skips proposals below MIN_STRATEGY_ACCOUNT_EQUITY).
+  if (health.category === "equity") {
     return { action: "none" };
   }
 
