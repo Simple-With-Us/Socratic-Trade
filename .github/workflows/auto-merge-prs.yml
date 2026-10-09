@@ -60,7 +60,7 @@ jobs:
     steps:
       # Shallow checkout: only need the classifier script at HEAD.  Base CODEOWNERS and the
       # merge-base..head file list come from the GitHub API (no full git history clone).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - name: Detect CODEOWNERS trading paths in PR diff
