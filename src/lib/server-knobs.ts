@@ -245,7 +245,7 @@ export const SERVER_KNOBS_CATALOG: readonly ServerKnobSpec[] = [
     description: "Send RAG upserts, deletes, and inventory to the self-hosted Qdrant collection instead of Pinecone.  Default on when QDRANT_URL is configured so ingest is not parked on exhausted Pinecone write units.",
     type: "boolean",
     defaultValue: true,
-    effect: "Applies to the next store, delete, or inventory call.  Requires QDRANT_URL (and QDRANT_API_KEY) in the environment; without them writes stay on Pinecone.  The string env RAG_VECTOR_WRITE_BACKEND=qdrant|pinecone is honored when neither this override nor this env var is set.  The Pinecone monthly WU breaker and daily write fuse apply only to the Pinecone write backend."
+    effect: "Applies to the next store, delete, or inventory call.  Requires QDRANT_URL (and QDRANT_API_KEY) in the environment when Qdrant is selected (default on); without them vectorWriteBackend() fails closed instead of silently using Pinecone.  The string env RAG_VECTOR_WRITE_BACKEND=qdrant|pinecone is honored when neither this override nor this env var is set.  The Pinecone monthly WU breaker and daily write fuse apply only to the Pinecone write backend."
   },
   {
     id: "SEC_FILING_RAG_MAX_PER_RUN",

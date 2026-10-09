@@ -35,6 +35,7 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
   beforeEach(() => {
     process.env.QDRANT_URL = "http://127.0.0.1:6333";
     process.env.QDRANT_API_KEY = "live-qdrant-key";
+    process.env.RAG_VECTOR_WRITE_BACKEND = "qdrant";
     process.env.SILICONFLOW_API_KEY = "live-sf-key";
     process.env.RAG_EMBED_PROVIDER = "siliconflow";
     process.env.VECTOR_EMBED_BATCH_DELAY_MS = "0";
@@ -46,6 +47,7 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
   afterEach(() => {
     delete process.env.QDRANT_URL;
     delete process.env.QDRANT_API_KEY;
+    process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
     delete process.env.SILICONFLOW_API_KEY;
     delete process.env.RAG_EMBED_PROVIDER;
     delete process.env.PINECONE_API_KEY;

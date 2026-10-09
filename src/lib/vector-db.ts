@@ -77,7 +77,9 @@ import {
   qdrantSetPayload,
   qdrantUpsertPoints,
   isVectorInventoryOverCeilingError,
-  vectorWriteBackend
+  qdrantWriteMisconfiguredMessage,
+  vectorWriteBackend,
+  vectorWriteBackendOrNull
 } from "./vector-store/qdrant-write";
 
 export class WholeIndexInventoryDeferredError extends Error {
@@ -97,6 +99,11 @@ export function isWholeIndexInventoryDeferredError(error: unknown): boolean {
 
 function usesQdrantWrites(): boolean {
   return vectorWriteBackend() === "qdrant";
+}
+
+/** Read, health, and catch probes.  False when Qdrant is selected but not usable; never throws. */
+function qdrantWritesConfigured(): boolean {
+  return vectorWriteBackendOrNull() === "qdrant";
 }
 
 /** Durable SQLite authority first so Qdrant writes keep matching copied occ:v3 ids. */
@@ -4951,7 +4958,15 @@ export function isStale(asOfIso: string | undefined, docType: string | undefined
  * confirm `totalVectorCount > 0` after a backfill instead of guessing.
  */
 export async function getVectorStoreStats(userId: string = "local"): Promise<VectorStoreStats> {
-  if (usesQdrantWrites()) {
+  const writeBackend = vectorWriteBackendOrNull();
+  if (writeBackend == null) {
+    return {
+      configured: false,
+      indexName: process.env.QDRANT_COLLECTION?.trim() || "socratic-trade",
+      error: qdrantWriteMisconfiguredMessage()
+    };
+  }
+  if (writeBackend === "qdrant") {
     try {
       const info = await qdrantCollectionInfo();
       return {
@@ -5003,7 +5018,14 @@ export async function getAllVectorStoreStats(userId: string = "local"): Promise<
   if (cachedAllStats && Date.now() - cachedAllStats.ts < ALL_STATS_TTL_MS) {
     return cachedAllStats.data;
   }
-  if (usesQdrantWrites()) {
+  const allStatsBackend = vectorWriteBackendOrNull();
+  if (allStatsBackend == null) {
+    return [{
+      indexName: process.env.QDRANT_COLLECTION?.trim() || "socratic-trade",
+      error: qdrantWriteMisconfiguredMessage()
+    }];
+  }
+  if (allStatsBackend === "qdrant") {
     try {
       const info = await qdrantCollectionInfo();
       const results: VectorIndexStats[] = [{
@@ -6316,7 +6338,7 @@ async function reconcileManagedVectorRecordsUnlocked(
     }
     if (isWholeIndexInventoryDeferredError(error) || isPineconeWuExhaustedError(msg)) return emptyReconcileResult(dryRun, true);
     if (
-      !usesQdrantWrites() &&
+      !qdrantWritesConfigured() &&
       /rate limit|429|too many requests|Pinecone connection failed|fetch failed/i.test(msg)
     ) {
       return emptyReconcileResult(dryRun, true);
@@ -7635,7 +7657,7 @@ export async function retrieveContextDetailed(
     // With Qdrant-only writes (Pinecone retired), `assertIndexMetric` short-circuits and we
     // never call describeIndex — Cosine is asserted via `assertQdrantCollectionMetric` below.
     // Authority for managed receipts comes from the durable ledger / qdrantProviderAuthority.
-    if (pc && initCacheKey && !usesQdrantWrites()) {
+    if (pc && initCacheKey && !qdrantWritesConfigured()) {
       try {
         await assertIndexMetric(pc, initCacheKey, pineconeSource, userId);
       } catch {
@@ -7670,7 +7692,7 @@ export async function retrieveContextDetailed(
       } catch {
         stableProviderAuthority = undefined;
       }
-      if (!stableProviderAuthority && (readBackend === "qdrant" || usesQdrantWrites())) {
+      if (!stableProviderAuthority && (readBackend === "qdrant" || qdrantWritesConfigured())) {
         stableProviderAuthority = qdrantProviderAuthority();
       }
     }
