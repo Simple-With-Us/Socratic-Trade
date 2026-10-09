@@ -1,5 +1,16 @@
 # Current Status
 
+## 2026-10-07 CURSOR — `__rotate__` OpenRouter access-denied failover (branch `cursor/preopen-autopilot-rotate-failover-b257`)
+
+**What.**  Prod Autopilot `__rotate__` runs failed with OpenRouter 403 access-denied slugs and "Failover chain exhausted (3 Green Team endpoints)" while the scheduler stayed healthy.  Implicit rotation failover now walks up to twelve alternates (hard cap eighteen), and rotation picks skip per-user 403 cooldown slugs with fail-open when every pool member is cooling.
+
+**Left alone.**  No Coolify restart or deploy.  No OpenRouter key minting.  No trading risk policy changes.
+
+**Docs.**  `docs/rollouts/2026-10-07-rotate-openrouter-access-failover.md`, `PLAN.md`, `docs/EFFORT-LOG.md`.
+
+**Verification.**  `npm ci` exit 0.  `npm run lint` exit 0 (0 errors, 866 warnings).  `npx tsc --noEmit` exit 0.  `npm test` exit 0 on CI `verify-hosted` (9120+ passed, 51 skipped, 0 failed; local Mac DNS may still fail `test/egress-guard.test.ts` when `discord.com` resolves to `198.18.0.1`).  `NODE_OPTIONS=--max-old-space-size=4096 npm run build` exit 0.  CI `verify` is the merge gate.
+
+**Next.**  Open PR; do not force-merge or resolve review threads just to merge.
 ## 2026-10-09 CURSOR — One finished-run lookback on the watchdog tick (branch `cursor/stall-halt-streak-exempt-d19f`, PR #4210)
 
 **What.**  The re-arm path selected the same newest finished runs three times per active account per tick.  `getTradingLivenessSummary` keeps that row array, and both streak walks use it.  Stall exemption and re-arm cutoff semantics are unchanged.  Extra-ship no.  Do not merge.

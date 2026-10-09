@@ -587,10 +587,10 @@ describe("recommendedReasoningEffortForModel (curated rotation efforts)", () => 
 });
 
 describe("implicitGreenRotationFallbacks", () => {
-  it("takes the next two unused pool models after the primary", async () => {
+  it("takes every other unused pool model after the primary up to the rotation failover cap", async () => {
     const { implicitGreenRotationFallbacks, ROTATION_IMPLICIT_GREEN_FAILOVERS } = await import("../src/lib/model-rotation");
-    expect(ROTATION_IMPLICIT_GREEN_FAILOVERS).toBe(2);
-    expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b")).toEqual(["a", "c"]);
+    expect(ROTATION_IMPLICIT_GREEN_FAILOVERS).toBeGreaterThanOrEqual(10);
+    expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b")).toEqual(["a", "c", "d"]);
     expect(implicitGreenRotationFallbacks(["a", "b", "c"], "a", ["c"])).toEqual(["b"]);
     expect(implicitGreenRotationFallbacks(["a"], "a")).toEqual([]);
   });
@@ -612,8 +612,29 @@ describe("implicitGreenRotationFallbacks", () => {
     expect(firstPick).toContain("gemini-flash-latest");
     expect(firstPick).toContain("mistral-medium-latest");
     const fallbacks = implicitGreenRotationFallbacks(MODEL_ROTATION_POOL, "claude-haiku-latest");
-    expect(fallbacks).toEqual(["gemini-flash-latest", "mistral-medium-latest"]);
-    expect(fallbacks).not.toContain("gpt-5.6-sol");
+    expect(fallbacks[0]).toBe("gemini-flash-latest");
+    expect(fallbacks[1]).toBe("mistral-medium-latest");
+    expect(fallbacks.length).toBeGreaterThan(2);
+    expect(fallbacks).not.toContain("claude-haiku-latest");
+  });
+
+  it("rotationPoolExcludingCooldown drops 403-cooled slugs for this user but fail-opens when all are cooling", async () => {
+    const {
+      clearOpenRouterModelCooldowns,
+      recordOpenRouterModelNotFound,
+      rotationPoolExcludingCooldown
+    } = await import("../src/lib/model-rotation");
+    clearOpenRouterModelCooldowns();
+    try {
+      recordOpenRouterModelNotFound("mistral-medium-3-5", { status: 403, userId: "u1", detail: "no access" });
+      expect(rotationPoolExcludingCooldown(["a", "mistral-medium-3-5", "c"], "u1")).toEqual(["a", "c"]);
+      expect(rotationPoolExcludingCooldown(["a", "mistral-medium-3-5", "c"], "u2")).toEqual(["a", "mistral-medium-3-5", "c"]);
+      recordOpenRouterModelNotFound("a", { status: 403, userId: "u1" });
+      recordOpenRouterModelNotFound("c", { status: 403, userId: "u1" });
+      expect(rotationPoolExcludingCooldown(["a", "mistral-medium-3-5", "c"], "u1")).toEqual(["a", "mistral-medium-3-5", "c"]);
+    } finally {
+      clearOpenRouterModelCooldowns();
+    }
   });
 
   // 2026-09-24 fix (board 687a5fb4): a model that just told us it 403'd/404'd must never be
@@ -626,8 +647,8 @@ describe("implicitGreenRotationFallbacks", () => {
     } = await import("../src/lib/model-rotation");
     clearOpenRouterModelCooldowns();
     try {
-      // Without any cooldown, "a" and "c" would normally be the two alternates after primary "b".
-      expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b")).toEqual(["a", "c"]);
+      // Without any cooldown, every other pool member is an alternate after primary "b".
+      expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b")).toEqual(["a", "c", "d"]);
       recordOpenRouterModelNotFound("a"); // simulates a 403/404 just observed on "a"
       expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b")).toEqual(["c", "d"]);
     } finally {
@@ -649,7 +670,7 @@ describe("implicitGreenRotationFallbacks", () => {
       recordOpenRouterModelNotFound("a");
       expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b", [], now)).toEqual(["c", "d"]);
       const afterCooldown = now + OPENROUTER_MODEL_NOT_FOUND_COOLDOWN_MS + 1;
-      expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b", [], afterCooldown)).toEqual(["a", "c"]);
+      expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b", [], afterCooldown)).toEqual(["a", "c", "d"]);
     } finally {
       vi.useRealTimers();
       clearOpenRouterModelCooldowns();
@@ -752,10 +773,10 @@ describe("rotation review round: cross-seat exclusion, per-user 403 cooldown, re
     });
     expect(planned.red).not.toContain("gemini-flash-latest");
     expect(planned.red).not.toContain("claude-haiku-latest");
-    expect(planned.red.length).toBe(2);
+    expect(planned.red.length).toBeGreaterThan(2);
     expect(planned.green).not.toContain("claude-haiku-latest");
     expect(planned.green).not.toContain("gemini-flash-latest");
-    expect(planned.green.length).toBe(2);
+    expect(planned.green.length).toBeGreaterThan(2);
 
     // Reverse direction: Red picked a preferred Green failover seat, so Green must not fail over to it.
     const reverse = planRotationImplicitFallbacks({
@@ -781,7 +802,7 @@ describe("rotation review round: cross-seat exclusion, per-user 403 cooldown, re
     });
     expect(fixedGreen.green).toEqual([]);
     expect(fixedGreen.red).not.toContain("gemini-flash-latest");
-    expect(fixedGreen.red.length).toBe(2);
+    expect(fixedGreen.red.length).toBeGreaterThan(2);
 
     // Owner-configured fallbacks win unchanged: no implicit chain is planned for that seat.
     const explicit = planRotationImplicitFallbacks({
