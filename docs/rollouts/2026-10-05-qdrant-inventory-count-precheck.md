@@ -24,7 +24,7 @@ npm test
 npm run build
 ```
 
-Re-run 2026-10-09: `npm run lint` exit 0 (0 errors, 863 warnings).  `npx tsc --noEmit` exit 0.  `npm test` exit 1 (9119 passed, 51 skipped, 1 failed in `test/egress-guard.test.ts`: this host resolves discord.com to 198.18.0.1 and the SSRF guard rejects it).  `npm run build` exit 0.  No dev server running; none to restart.
+CI `verify-hosted` on PR head: `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build` all exit 0.  Local Mac runs may still fail `test/egress-guard.test.ts` when DNS maps `discord.com` to `198.18.0.1`; CI is the merge gate.
 
 ## Next Steps & Blockers
 
