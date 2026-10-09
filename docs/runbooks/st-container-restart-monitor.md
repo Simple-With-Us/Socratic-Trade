@@ -5,7 +5,7 @@
 Coolify replaces the ST container on crash or deploy.  When the container **never reaches Node**
 (boot failure, OOM, healthcheck kill loop), the in-app boot ledger (`src/lib/boot-ledger.ts`)
 cannot run.  This host-side monitor samples Docker `RestartCount` and container state on
-**fleet-hetzner-nbg1** and pages when restarts cluster or the container vanishes.
+**the fleet Hetzner host** and pages when restarts cluster or the container vanishes.
 
 Board: `2ad7f8b92e864958887e72fc25572c34` (GB-HOUSEKEEPER).  Complements board `a9676caf`
 (boot-ledger, in-container).
@@ -19,18 +19,16 @@ Board: `2ad7f8b92e864958887e72fc25572c34` (GB-HOUSEKEEPER).  Complements board `
 | Status `restarting` | 2 consecutive samples of the same container id | Docker has not stabilized |
 | Container missing | Was running, now no match for Coolify id | Deploy stuck or container removed while unhealthy |
 
-Coolify application UUID (name filter): `d83b1aykr03uwr32yhgzaiay` (`ST_RESTART_MONITOR_COOLIFY_ID`).
+Coolify application id (name filter): `<st-container-id>`, resolved at install time
+(`ST_RESTART_MONITOR_COOLIFY_ID`).
 
 State file: `/var/lib/st-container-restart-monitor/state.json` (restart timestamps + dedupe).
 
-## Alert channels (existing env names only)
+## Alert channels
 
-Configure on the host in `/etc/default/st-container-restart-monitor`:
-
-| Channel | Variables | Notes |
-| --- | --- | --- |
-| Pushover | `PUSHOVER_ST_API_TOKEN` or `PUSHOVER_APP_TOKEN`, plus `PUSHOVER_USER_KEY` | Same names as `INFISICAL.md` / `src/lib/notify.ts` |
-| Sentry fleet-infra (PagerDuty route) | `SENTRY_FLEET_DSN` | Same secret as `.github/workflows/sentry-ci-report.yml` |
+The monitor pages with the ST Pushover token and Sentry DSN from Infisical.  Put those values
+in `/etc/default/st-container-restart-monitor` (created from
+`scripts/ops/st-container-restart-monitor.env.example`).  An unset channel stays silent.
 
 Set `ST_RESTART_MONITOR_NOTIFY=1` to send alerts.  Default cooldown between pages: 3600s
 (`ST_RESTART_MONITOR_ALERT_COOLDOWN_SECONDS`).  The cooldown is stored only after at least one
@@ -39,7 +37,7 @@ Sentry is optional: a delivered Pushover page is enough to arm the cooldown.
 
 ## Install (owner on host — agents do not deploy)
 
-From a checkout of this repo on **fleet-hetzner-nbg1**, as root:
+From a checkout of this repo on **the fleet Hetzner host**, as root:
 
 ```bash
 cd /path/to/Socratic-Trade
@@ -71,7 +69,8 @@ cat /var/lib/st-container-restart-monitor/state.json | jq .
 Manual inspect (production):
 
 ```bash
-CID=$(docker ps -q -f name=d83b1aykr03uwr32yhgzaiay | head -1)
+# <st-container-id> is the Coolify application id resolved at install time.
+CID=$(docker ps -q -f name=<st-container-id> | head -1)
 docker inspect -f 'name={{.Name}} restartCount={{.RestartCount}} status={{.State.Status}}' "$CID"
 ```
 

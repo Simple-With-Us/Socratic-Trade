@@ -1,5 +1,5 @@
 [Unit]
-Description=Periodic ST Docker restart monitor on fleet-hetzner-nbg1
+Description=Periodic ST Docker restart monitor on the fleet Hetzner host
 Documentation=https://github.com/jaywedgeworth22/Socratic-Trade/blob/main/docs/runbooks/st-container-restart-monitor.md
 
 [Timer]

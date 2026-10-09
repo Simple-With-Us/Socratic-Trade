@@ -2,7 +2,7 @@
 # st-container-restart-monitor.sh - host-side Docker restart loop detector for ST prod.
 #
 # App-side boot-ledger (src/lib/boot-ledger.ts) cannot see a container that never
-# reaches Node.  This script runs on fleet-hetzner-nbg1, samples the Coolify ST
+# reaches Node.  This script runs on the fleet Hetzner host, samples the Coolify ST
 # container RestartCount / state, and pages when restarts cluster in a window or
 # the container disappears.
 #
@@ -182,7 +182,7 @@ if [ -z "$CID" ]; then
     PREV_CID="$(printf '%s' "$STATE" | jq -r '.lastSeenId // empty')"
   fi
   if [ -n "$PREV_CID" ]; then
-    msg="Socratic-Trade Coolify container (${COOLIFY_ID}) is not running on the host.  Last id ${PREV_CID}.  App-side boot-ledger cannot run if the container never starts.  Check Coolify deploy logs and docker events on fleet-hetzner-nbg1."
+    msg="Socratic-Trade Coolify container (${COOLIFY_ID}) is not running on the host.  Last id ${PREV_CID}.  App-side boot-ledger cannot run if the container never starts.  Check Coolify deploy logs and docker events on the fleet Hetzner host."
     NEW_STATE="$(printf '%s' "$STATE" | jq -c \
       --argjson t "$NOW_EPOCH" \
       --arg prev "$PREV_CID" \

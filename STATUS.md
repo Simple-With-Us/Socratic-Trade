@@ -100,9 +100,9 @@
 **Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
 ## 2026-10-05 CURSOR — ST host container restart monitor (board `2ad7f8b92e864958887e72fc25572c34`)
 
-**What.**  Host-side Docker `RestartCount` / missing-container monitor for Coolify ST (`d83b1aykr03uwr32yhgzaiay`): script + systemd timer + install helper + runbook.  Alerts via existing `PUSHOVER_*` and optional `SENTRY_FLEET_DSN`.  **Not installed on prod from this agent** — owner runs `install-st-container-restart-monitor.sh` on fleet-hetzner-nbg1.
+**What.**  Host-side Docker `RestartCount` / missing-container monitor for Coolify ST (`<st-container-id>`, resolved at install time): script + systemd timer + install helper + runbook.  Alerts use the ST Pushover token and Sentry DSN from Infisical.  **Not installed on prod from this agent** — owner runs `install-st-container-restart-monitor.sh` on the fleet Hetzner host.
 
-**Verification.**  2026-10-07 Linux: `bash -n` on the monitor, install, and selftest scripts exited 0; `python3 -m py_compile` on the sentry helper exited 0; `bash scripts/ops/st-container-restart-monitor.selftest.sh` printed `selftest: 9 passed, 0 failed.`
+**Verification.**  2026-10-09 Linux: `shellcheck` on the monitor and install scripts exited 0; `bash -n` on the monitor, install, and selftest scripts exited 0; `python3 -m py_compile` on the sentry helper exited 0; `bash scripts/ops/st-container-restart-monitor.selftest.sh` printed `selftest: 9 passed, 0 failed.`
 
 **Next.**  PR #4224 — owner installs on host per `docs/runbooks/st-container-restart-monitor.md`.
 ## 2026-10-05 CURSOR — Broker I/O bounded lanes (board `28996d82`, branch `cursor/broker-io-bounded-lanes-e6af`)

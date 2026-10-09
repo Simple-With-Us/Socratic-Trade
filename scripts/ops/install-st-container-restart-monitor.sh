@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the ST container restart monitor on fleet-hetzner-nbg1.
+# Install the ST container restart monitor on the fleet Hetzner host.
 # Source of truth is this repo.  Idempotent.  Does not bounce Coolify or ST.
 #
 # Prerequisites on the host (owner):
@@ -25,7 +25,7 @@ DST_ENV="/etc/default/st-container-restart-monitor"
 STATE_DIR="/var/lib/st-container-restart-monitor"
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "install-st-container-restart-monitor: must run as root on fleet-hetzner-nbg1" >&2
+  echo "install-st-container-restart-monitor: must run as root on the fleet Hetzner host" >&2
   exit 1
 fi
 
