@@ -24,17 +24,25 @@ Prod Autopilot (`__rotate__` Green + Red) saw three consecutive failed runs with
 
 ## Verification State
 
+Re-run on this seat 2026-10-09.  `node_modules` was missing, so install was `npm ci` (exit 0, 733 packages).  The build used the same heap cap as `verify-hosted`.
+
 ```bash
-npm run lint          # 0 errors
-npx tsc --noEmit      # exit 0
-npx vitest run test/model-rotation.test.ts test/strategy-rotation-openrouter-403-failover.test.ts  # 37 passed
+npm ci                                                  # exit 0
+npm run lint                                            # exit 0 (0 errors, 866 warnings)
+npx tsc --noEmit                                        # exit 0
+npm test                                                # exit 1
+NODE_OPTIONS=--max-old-space-size=4096 npm run build    # exit 0
 ```
 
-Full `npm test` / `npm run build` not re-run on this seat before handoff (CI `verify` is the merge gate).
+`npm test` (`vitest run`): Test Files 1 failed | 811 passed | 1 skipped (813).  Tests 1 failed | 9120 passed | 51 skipped (9172).  Duration 1233.03s.
+
+Environment failure, not a product regression.  Test name: `test/egress-guard.test.ts` > `validateWebhookUrl — user-configured notification webhook (SSRF guard)` > `uses real DNS by default when no resolver is injected (production path)`.  `discord.com` resolved to `198.18.0.1` (same answer for `example.com` and `openrouter.ai`).  `198.18.0.0/15` is a blocked benchmark range in `isPrivateOrReservedIpv4`, so `validateWebhookUrl("https://discord.com/api/webhooks/x")` returned `ok: false` (expected `true` on real public DNS).
+
+`npm run build` exit 0.  The production build lists `ƒ Proxy (Middleware)`.
 
 ## Next Steps & Blockers
 
-- Merge PR after green `verify`.  No Coolify restart or deploy from this agent session (owner directive).
+- Local `npm test` is exit 1 because of the sandbox DNS failure named above.  Merge only after CI `verify` is green.  No Coolify restart or deploy from this agent session (owner directive).
 - After ship, confirm Autopilot Paper/Sandbox runs complete with `__rotate__` when some catalog slugs are region-restricted on the keyed OpenRouter account.
 
 ## Zero-Code Findings

@@ -8,7 +8,7 @@
 
 **Docs.**  `docs/rollouts/2026-10-07-rotate-openrouter-access-failover.md`, `PLAN.md`, `docs/EFFORT-LOG.md`.
 
-**Verification.**  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  Rotation + access-denied failover vitest 37 passed.  `npm run build` exit 0 (this seat, after `npm ci`).  CI `verify` is the merge gate.
+**Verification.**  `npm ci` exit 0.  `npm run lint` exit 0 (0 errors, 866 warnings).  `npx tsc --noEmit` exit 0.  `npm test` exit 1: 9120 passed, 51 skipped, 1 failed (`test/egress-guard.test.ts` real-DNS webhook check; sandbox resolves `discord.com` to `198.18.0.1`).  `NODE_OPTIONS=--max-old-space-size=4096 npm run build` exit 0.  CI `verify` is the merge gate.
 
 **Next.**  Open PR; do not force-merge or resolve review threads just to merge.
 
