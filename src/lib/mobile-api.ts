@@ -39,10 +39,9 @@ import type {
 } from "./types";
 import { retryProposalRedTeam } from "./retry-red-team";
 import {
-  mobileCommandStatusForPlacement,
   placementCommandErrorMessage,
   resolvePlacementOutcome,
-  type ExecuteProposalResult
+  type PlacementOutcome
 } from "./placement-outcome";
 import { executeProposal, LiveApprovalConfirmationError, LiveApprovalConfirmation } from "./strategy-execution";
 import { releaseBrokerPlacementPauseToOwner } from "./broker-health";
@@ -173,6 +172,25 @@ const mobileListeners =
 
 export class MobileCommandValidationError extends Error {
   status = 400;
+}
+
+/** Statuses that mean the broker accepted the order. Anything else is not a success. */
+const PLACED_APPROVAL_STATUSES = new Set(["placed", "filled", "paper"]);
+
+/**
+ * Thrown only from mobile `proposal.approve` when `executeProposal` returns a
+ * status outside placed/filled/paper.  The command is failed with the structured
+ * placement result.  `executeProposal` itself still returns busy/blocked and
+ * throws its existing non-placement errors — this class does not change that.
+ */
+export class ProposalNotPlacedError extends Error {
+  readonly result: PlacementOutcome;
+
+  constructor(result: PlacementOutcome) {
+    super(placementCommandErrorMessage(result) ?? "Order was not placed.");
+    this.name = "ProposalNotPlacedError";
+    this.result = result;
+  }
 }
 
 /**
@@ -982,10 +1000,16 @@ async function runCommand(command: MobileCommandRecord): Promise<unknown> {
       return setStrategyState(command.userId, "close_only");
     case "strategy.liquidating":
       return setStrategyState(command.userId, "liquidating");
-    case "proposal.approve":
-      return executeProposal(String(payload.proposalId), command.userId, {
+    case "proposal.approve": {
+      const result = await executeProposal(String(payload.proposalId), command.userId, {
         liveConfirmation: payload.liveConfirmation as LiveApprovalConfirmation | undefined
       });
+      const placement = resolvePlacementOutcome(result);
+      if (!PLACED_APPROVAL_STATUSES.has(result.status)) {
+        throw new ProposalNotPlacedError(placement);
+      }
+      return placement;
+    }
     case "proposal.reject": {
       const proposalId = String(payload.proposalId);
       if (!getProposal(proposalId, command.userId)) throw new Error("Proposal not found.");
@@ -1074,6 +1098,9 @@ async function runCommand(command: MobileCommandRecord): Promise<unknown> {
 }
 
 function errorPayload(error: unknown): { message: string; result?: unknown } {
+  if (error instanceof ProposalNotPlacedError) {
+    return { message: error.message, result: error.result };
+  }
   if (error instanceof PolicyPatchPreconditionError) {
     return {
       message: error.message,
@@ -1097,12 +1124,6 @@ function errorPayload(error: unknown): { message: string; result?: unknown } {
 export async function executeMobileCommand(command: MobileCommandRecord): Promise<PublicMobileCommand> {
   try {
     const result = await runCommand(command);
-    if (command.commandType === "proposal.approve") {
-      const placement = resolvePlacementOutcome(result as ExecuteProposalResult);
-      const commandStatus = mobileCommandStatusForPlacement(placement.outcome);
-      const error = placementCommandErrorMessage(placement);
-      return toPublicMobileCommand(finishCommand(command, commandStatus, placement, error));
-    }
     return toPublicMobileCommand(finishCommand(command, "succeeded", result));
   } catch (error) {
     const payload = errorPayload(error);

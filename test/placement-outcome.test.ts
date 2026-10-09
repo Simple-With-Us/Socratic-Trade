@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  classifyPlaceOrderError,
   classifyPlacementOutcomeKind,
   isIdempotencyConflictHttpError,
   isRetryableBrokerHttpError,
@@ -43,6 +44,26 @@ describe("placement outcome resolver", () => {
     expect(isRetryableBrokerHttpError(message)).toBe(false);
     expect(isTerminalBrokerHttpError(message)).toBe(false);
     expect(isTerminalBrokerHttpError("Alpaca order failed: HTTP 403 Forbidden")).toBe(true);
+  });
+
+  it("classifies retryable 429/408, idempotency 409, and duplicate client_order_id apart from terminal 4xx", () => {
+    expect(classifyPlaceOrderError("Alpaca order failed: HTTP 429 Too Many Requests")).toBe("retryable");
+    expect(classifyPlaceOrderError("Broker HTTP 408 while placing")).toBe("retryable");
+    expect(classifyPlaceOrderError("Alpaca order failed: HTTP 409 — client_order_id already exists")).toBe(
+      "idempotency_conflict"
+    );
+    // Alpaca also returns HTTP 422 when the idempotency key is already taken.
+    const duplicate422 = 'HTTP 422 — {"message":"client_order_id must be unique"}';
+    expect(classifyPlaceOrderError(duplicate422)).toBe("idempotency_conflict");
+    expect(isTerminalBrokerHttpError(duplicate422)).toBe(false);
+    expect(classifyPlaceOrderError("HTTP 403 Forbidden")).toBe("rejected_terminal");
+    expect(classifyPlaceOrderError("HTTP 400 Bad Request")).toBe("rejected_terminal");
+    expect(classifyPlaceOrderError('HTTP 422 — {"message":"invalid client_order_id"}')).toBe("rejected_terminal");
+    // Unrelated sentences must not become idempotency_conflict (clause boundary is `.`).
+    expect(classifyPlaceOrderError('HTTP 422 — duplicate symbol in basket. client_order_id format invalid')).toBe(
+      "rejected_terminal"
+    );
+    expect(classifyPlaceOrderError("network timeout during placement")).toBe("other");
   });
 
   it("resolvePlacementOutcome preserves the executeProposal payload and adds outcome", () => {
