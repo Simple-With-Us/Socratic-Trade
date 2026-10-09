@@ -102,7 +102,7 @@
 
 **What.**  Managed-vector dry-run reconcile no longer scrolls 50k Qdrant payloads before failing: `qdrantInventoryByMetadata` calls `POST /points/count` first and throws `VectorInventoryOverCeilingError` when the tenant/metadata filter exceeds the 50k scan ceiling; reconcile returns `skipped: true` with `inventoryOverCeiling` so the scheduler treats it as busy, not failed.
 
-**Verification.**  `npx vitest run test/qdrant-write.test.ts test/vector-db-qdrant-retrieval.test.ts`: 39 passed.  `npx eslint` on the touched TypeScript files: 0 errors.  `npx tsc --noEmit` exit 0.  `npm run build` was not run on this seat.
+**Verification.**  Re-run 2026-10-09: `npm run lint` exit 0 (0 errors, 863 warnings).  `npx tsc --noEmit` exit 0.  `npm test` exit 1 (9119 passed, 51 skipped, 1 failed in `test/egress-guard.test.ts`: this host resolves discord.com to 198.18.0.1 and the SSRF guard rejects it).  `npm run build` exit 0.  No dev server running; none to restart.
 
 **Next.**  Push; open PR READY; do not merge.
 ## 2026-10-05 CURSOR — Broker I/O bounded lanes (board `28996d82`, branch `cursor/broker-io-bounded-lanes-e6af`)

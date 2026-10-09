@@ -18,12 +18,13 @@ Hourly dry-run `reconcileManagedVectorRecords` scrolled up to 50k Qdrant payload
 ## Verification State
 
 ```bash
-npx vitest run test/qdrant-write.test.ts test/vector-db-qdrant-retrieval.test.ts
-npx eslint src/lib/vector-db.ts src/lib/vector-store/qdrant-write.ts test/qdrant-write.test.ts test/vector-db-qdrant-retrieval.test.ts
+npm run lint
 npx tsc --noEmit
+npm test
+npm run build
 ```
 
-39 tests passed.  eslint on those TypeScript files: 0 errors (pre-existing warnings only).  `npx tsc --noEmit` exit 0.  `npm run build` was not run on this seat.
+Re-run 2026-10-09: `npm run lint` exit 0 (0 errors, 863 warnings).  `npx tsc --noEmit` exit 0.  `npm test` exit 1 (9119 passed, 51 skipped, 1 failed in `test/egress-guard.test.ts`: this host resolves discord.com to 198.18.0.1 and the SSRF guard rejects it).  `npm run build` exit 0.  No dev server running; none to restart.
 
 ## Next Steps & Blockers
 
