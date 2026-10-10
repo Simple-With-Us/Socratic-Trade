@@ -567,6 +567,44 @@ describe("infisical-run bootstrap integration", () => {
     });
   });
 
+  it.each([
+    ["INFISICAL_ENV", "dev"],
+    ["INFISICAL_ENV", "staging"],
+    ["INFISICAL_SHARED_ENV", "dev"],
+    ["INFISICAL_SHARED_ENV", "staging"],
+  ])("refuses a non-prod %s=%s before invoking the Infisical executable", (key, value) => {
+    // prod is the only Infisical environment (owner 2026-10-10: dev and staging retired).
+    const root = tempRoot();
+    const bin = join(root, "bin");
+    const marker = join(root, "infisical-was-called");
+    const fakeInfisical = join(bin, "infisical");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(fakeInfisical, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(marker)}, "called");
+process.exit(0);
+`);
+    chmodSync(fakeInfisical, 0o755);
+
+    const result = spawnSync(
+      process.execPath,
+      [resolve(repoRoot, "scripts/infisical-run.mjs"), "--", process.execPath, "-e", "process.exit(0)"],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: isolatedProcessEnv({
+          PATH: `${bin}:${process.env.PATH || ""}`,
+          HOME: root,
+          [key]: value,
+        }),
+      }
+    );
+
+    expect(result.status).toBe(2);
+    expect(existsSync(marker)).toBe(false);
+    expect(result.stderr).toContain(`${key} must be "prod"`);
+  });
+
   it("fails a shared-only overlay before invoking the Infisical executable", () => {
     const root = tempRoot();
     const bin = join(root, "bin");
