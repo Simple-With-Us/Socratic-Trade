@@ -1,5 +1,13 @@
 # Current Status
 
+## 2026-10-10 CLAUDE - Infisical prod-only (board `11df8f1b`, branch `claude/infisical-prod-only`)
+
+**What.**  The Infisical `dev` and `staging` environments are retiring, so every script and code default now selects `prod` and refuses anything else:  `scripts/infisical-secrets-safe.sh` adds `--env prod` (the CLI defaults to dev) and `delete` needs an explicit one, `.cursor/infisical.env` is `prod`, and `infisical-run.mjs`, `src/lib/infisical-settings.ts`, `infisical-prod-cutover.sh` and `sync-provider-knobs.sh` refuse non-prod.  Production already ran `INFISICAL_ENV=prod`, so live behavior is unchanged.
+
+**Verification.**  New and updated vitest files for the wrapper, runner and settings service;  full gate before merge.
+
+**Next.**  Parent session deletes the dev and staging environments.  Six dev-only knobs stay out of prod and run on their code defaults.
+
 ## 2026-10-05 CURSOR — R2 dead `trading-live/**` prune plan (board `242c350e`, branch `cursor/r2-trading-live-prune-plan-7d7e`)
 
 **What.**  Docs/runbook + read-only `scripts/ops/r2-trading-live-dead-history-inventory.mjs` for pre-B2-cutover Litestream objects on R2 `socratic-trade-bucket`.  **No deletes.**  B2 live replica untouched.

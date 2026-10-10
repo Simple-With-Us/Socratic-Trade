@@ -61,8 +61,10 @@ Budgets: `R2_USAGE_DAILY_DIGEST`, `RAG_INGEST_BUDGET_ENABLED`,
 Retrieval: `RAG_VECTOR_READ_QDRANT`, `RAG_VECTOR_WRITE_QDRANT`,
 `CONGRESS_SHARE_FUNDAMENTALS_ENABLED`.
 
-Non-sensitive defaults for these keys are seeded in the project's `dev` environment so the
-inventory is real; `staging`/`prod` values are operator-managed.  Clearing a knob in the UI
+Non-sensitive defaults for these keys live in the project's `prod` environment, which is the only
+Infisical environment since 2026-10-10 (`dev` and `staging` are retired;  `scripts/infisical-run.mjs`,
+`src/lib/infisical-settings.ts` and `scripts/infisical-secrets-safe.sh` refuse any other value).
+Operators manage the values.  Clearing a knob in the UI
 (`value: null`) clears only the DB override and leaves the Infisical value alone.
 
 ### Secrets (in Infisical; never in code, logs, or chat)
