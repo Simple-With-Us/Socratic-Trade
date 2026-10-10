@@ -38,6 +38,20 @@ describe("/api/live", () => {
     await expect(response.json()).resolves.toEqual({ ok: true, probe: "live" });
   });
 
+  it("returns 200 when the serving SQLite handle is closed", async () => {
+    const { db, liveRoute } = await load();
+    db.getDb().close();
+    try {
+      const started = Date.now();
+      const response = await liveRoute.GET();
+      expect(Date.now() - started).toBeLessThan(200);
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ ok: true, probe: "live" });
+    } finally {
+      db.resetDbForTesting();
+    }
+  });
+
   it("stays 200 when /api/health would 503 on a hard-stopped critical dependency", async () => {
     const { db, liveRoute, healthRoute } = await load();
     for (let i = 0; i < 5; i++) {

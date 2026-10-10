@@ -10,8 +10,10 @@
  *   2. env RAG_VECTOR_WRITE_QDRANT (truthy/falsy, same parsing as every server knob)
  *   3. env RAG_VECTOR_WRITE_BACKEND ("qdrant" | "pinecone")
  *   4. default: qdrant when QDRANT_URL is configured, else pinecone
- * Qdrant is additionally gated on qdrantConfigured() — a knob flipped on without the endpoint
- * stays on Pinecone (warned once) instead of turning every ingest into a hard failure.
+ * Qdrant is additionally gated on qdrantConfigured() — when the write backend resolves to Qdrant
+ * but the endpoint is not usable, vectorWriteBackend() throws (fail closed) instead of silently
+ * falling back to Pinecone.  vectorWriteBackendOrNull() is the non-throwing probe for reads,
+ * health, and other diagnostics.  Opt into Pinecone explicitly via the knob/env when Qdrant is absent.
  *
  * Point ids MUST match scripts/qdrant/pinecone-to-qdrant-copy.py: uuid5(NAMESPACE_URL,
  * "st:" + ns + ":" + pinecone_id).  Payload MUST keep pc_id (original Pinecone id) and ns
@@ -22,6 +24,7 @@
  */
 
 import crypto from "crypto";
+import { z } from "zod";
 import { isAbortOrTimeoutError, isTransientNetworkError } from "../network-errors";
 import { hasRagIngestPointsBudget, recordRagUsage } from "../rag-metering";
 import { yieldEventLoop } from "../slow-sync-guard";
@@ -66,7 +69,25 @@ export interface QdrantCollectionInfo {
   distance?: string;
 }
 
-let warnedUnconfigured = false;
+/** Raised when a metadata inventory would require scrolling more than the hard scan ceiling. */
+export class VectorInventoryOverCeilingError extends Error {
+  readonly code = "vector-inventory-over-ceiling" as const;
+
+  constructor(
+    readonly count: number,
+    readonly maxScanned: number
+  ) {
+    super(`Vector inventory over scan ceiling (${count} > ${maxScanned})`);
+    this.name = "VectorInventoryOverCeilingError";
+  }
+}
+
+export function isVectorInventoryOverCeilingError(error: unknown): boolean {
+  return (
+    error instanceof VectorInventoryOverCeilingError
+    || (error instanceof Error && error.name === "VectorInventoryOverCeilingError")
+  );
+}
 
 export function qdrantCollectionName(): string {
   return process.env.QDRANT_COLLECTION?.trim() || DEFAULT_COLLECTION;
@@ -92,19 +113,27 @@ function qdrantHeaders(): Record<string, string> {
   return headers;
 }
 
+const QDRANT_WRITE_MISCONFIGURED_MESSAGE =
+  "Qdrant is the selected vector write backend but it is not usable: QDRANT_URL is unset, or a " +
+  "remote QDRANT_URL has no QDRANT_API_KEY (or QDRANT_ALLOW_ANONYMOUS is not \"true\").  " +
+  "Writes must not silently fall back to Pinecone — set QDRANT_URL (and QDRANT_API_KEY), or opt " +
+  "into Pinecone via RAG_VECTOR_WRITE_BACKEND=pinecone or RAG_VECTOR_WRITE_QDRANT=off.";
+
+/** Operator-facing reason when Qdrant writes are selected but the endpoint is not usable. */
+export function qdrantWriteMisconfiguredMessage(): string {
+  return QDRANT_WRITE_MISCONFIGURED_MESSAGE;
+}
+
 /**
- * Effective write backend for this ingest/delete/inventory pass.  Never throws — any
- * resolution failure lands on "pinecone" (today's behavior) so a broken knob cannot
- * take the only remaining write path down.
+ * Knob/env selection only.  Does not check that the Qdrant endpoint is usable and does not throw.
+ * Default is Qdrant unless an explicit knob or env opts into Pinecone.
  */
-export function vectorWriteBackend(): VectorWriteBackend {
+function selectedWriteBackend(): VectorWriteBackend {
   let enabled: boolean | undefined;
-  let explicit = false;
   try {
     const override = serverKnobOverride(QDRANT_WRITE_KNOB_ID);
     if (typeof override === "boolean") {
       enabled = override;
-      explicit = true;
     }
   } catch {
     // fail open to env — same posture as every server-knob read
@@ -114,31 +143,44 @@ export function vectorWriteBackend(): VectorWriteBackend {
     if (raw) {
       if (TRUTHY.has(raw)) enabled = true;
       else if (FALSY.has(raw)) enabled = false;
-      if (enabled !== undefined) explicit = true;
     }
   }
   if (enabled === undefined) {
     const backend = process.env.RAG_VECTOR_WRITE_BACKEND?.trim().toLowerCase();
     if (backend === "qdrant") enabled = true;
     else if (backend === "pinecone") enabled = false;
-    if (enabled !== undefined) explicit = true;
   }
   if (enabled === undefined) {
     enabled = true;
   }
-  if (enabled !== true) return "pinecone";
-  if (!qdrantConfigured()) {
-    // Default-on without QDRANT_URL is silent pinecone (local tests, boxes without Qdrant).
-    // Warn only when an operator explicitly flipped the knob/env on without the endpoint.
-    if (explicit && !warnedUnconfigured) {
-      warnedUnconfigured = true;
-      console.warn(
-        "[qdrant-write] Qdrant write backend requested but QDRANT_URL is not set; writes stay on Pinecone."
-      );
-    }
-    return "pinecone";
-  }
+  return enabled === true ? "qdrant" : "pinecone";
+}
+
+/**
+ * Non-throwing write-backend probe.  `null` means Qdrant was selected but the endpoint is not
+ * usable — callers that only diagnose or that must not fail a read should treat that as
+ * "not on Qdrant" and surface qdrantWriteMisconfiguredMessage() when they report status.
+ * Write entry points use vectorWriteBackend(), which throws instead.
+ */
+export function vectorWriteBackendOrNull(): VectorWriteBackend | null {
+  const selected = selectedWriteBackend();
+  if (selected !== "qdrant") return "pinecone";
+  if (!qdrantConfigured()) return null;
   return "qdrant";
+}
+
+/**
+ * Effective write backend for this ingest/delete/inventory pass.  Knob/env resolution failures
+ * fail open to Pinecone when Qdrant was not selected.  When Qdrant is selected (default or
+ * explicit) but the endpoint is not usable, throws so ingest cannot silently resume on Pinecone.
+ */
+export function vectorWriteBackend(): VectorWriteBackend {
+  const backend = vectorWriteBackendOrNull();
+  if (backend == null) {
+    console.error(`[qdrant-write] ${QDRANT_WRITE_MISCONFIGURED_MESSAGE}`);
+    throw new Error(QDRANT_WRITE_MISCONFIGURED_MESSAGE);
+  }
+  return backend;
 }
 
 /**
@@ -476,6 +518,46 @@ export async function qdrantVisitInventoryPages(options: {
   } while (offset != null && offset !== "");
 }
 
+function qdrantInventoryMetadataFilter(options: {
+  namespace?: string | undefined | null;
+  source?: string;
+  docType?: string;
+  receiptRequired?: boolean;
+}): QdrantFilter {
+  const ns = pineconeNamespaceToQdrantTenant(options.namespace);
+  const extraFilter: Record<string, unknown> = {};
+  if (options.source !== undefined) extraFilter.source = { $eq: options.source };
+  if (options.docType !== undefined) extraFilter.doc_type = { $eq: options.docType.toLowerCase() };
+  if (options.receiptRequired !== undefined) extraFilter.receipt_required = { $eq: options.receiptRequired };
+  return qdrantTenantFilter(
+    ns,
+    Object.keys(extraFilter).length > 0 ? extraFilter : undefined
+  );
+}
+
+const QdrantCountResponseSchema = z.object({
+  result: z.object({
+    count: z.number().int().nonnegative()
+  }),
+  status: z.string().optional(),
+  time: z.number().finite().nonnegative().optional()
+});
+
+async function qdrantCountPointsByFilter(filter: QdrantFilter, signal?: AbortSignal): Promise<number> {
+  const collection = encodeURIComponent(qdrantCollectionName());
+  const response = await qdrantRequest(`/collections/${collection}/points/count`, {
+    method: "POST",
+    body: JSON.stringify({ filter, exact: true }),
+    signal
+  });
+  signal?.throwIfAborted();
+  const parsed = QdrantCountResponseSchema.safeParse(await response.json());
+  if (!parsed.success) {
+    throw new Error("Invalid Qdrant count response");
+  }
+  return parsed.data.result.count;
+}
+
 export async function qdrantInventoryByMetadata(options: {
   namespace?: string | undefined | null;
   prefix?: string;
@@ -491,15 +573,15 @@ export async function qdrantInventoryByMetadata(options: {
   // A caller or environment may lower this guard, never raise the 50k hard ceiling.
   const defaultMaxScanned = Number.isFinite(configuredMaxScanned) && configuredMaxScanned > 0 ? configuredMaxScanned : 50_000;
   const maxScanned = Math.max(1, Math.min(50_000, Math.floor(options.maxScanned ?? defaultMaxScanned)));
-  const ns = pineconeNamespaceToQdrantTenant(options.namespace);
-  const extraFilter: Record<string, unknown> = {};
-  if (options.source !== undefined) extraFilter.source = { $eq: options.source };
-  if (options.docType !== undefined) extraFilter.doc_type = { $eq: options.docType.toLowerCase() };
-  if (options.receiptRequired !== undefined) extraFilter.receipt_required = { $eq: options.receiptRequired };
-  const filter: QdrantFilter = qdrantTenantFilter(
-    ns,
-    Object.keys(extraFilter).length > 0 ? extraFilter : undefined
-  );
+  const filter = qdrantInventoryMetadataFilter(options);
+  const matchingCount = await qdrantCountPointsByFilter(filter, options.signal);
+  options.signal?.throwIfAborted();
+  if (matchingCount > maxScanned) {
+    console.warn(
+      `[qdrant-write] Vector inventory scan ceiling exceeded (${matchingCount} records > ${maxScanned}); skipping scroll.`
+    );
+    throw new VectorInventoryOverCeilingError(matchingCount, maxScanned);
+  }
   const collection = encodeURIComponent(qdrantCollectionName());
   const found: QdrantInventoryRow[] = [];
   let scanned = 0;
@@ -528,7 +610,7 @@ export async function qdrantInventoryByMetadata(options: {
     options.signal?.throwIfAborted();
     const points = Array.isArray(parsed.result?.points) ? parsed.result.points : [];
     if (scanned + points.length > maxScanned) {
-      throw new Error(`Vector inventory scan limit exceeded (${maxScanned} records).`);
+      throw new VectorInventoryOverCeilingError(scanned + points.length, maxScanned);
     }
     scanned += points.length;
     for (const point of points) {

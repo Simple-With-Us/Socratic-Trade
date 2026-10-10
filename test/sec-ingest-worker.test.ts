@@ -951,42 +951,44 @@ describe("embed_queued FTS slice + durable resume", () => {
     process.env.QDRANT_URL = "http://127.0.0.1:6333";
     process.env.RAG_VECTOR_WRITE_BACKEND = "qdrant";
     process.env.RAG_MAX_DAILY_INGEST_POINTS = "1";
-    const { recordRagUsage } = await import("../src/lib/rag-metering");
-    // Spend the entire daily point fuse so hasRagIngestPointsBudget("local", 1, "qdrant") is false.
-    recordRagUsage({
-      userId: "local",
-      operation: "upsert",
-      provider: "qdrant",
-      batchCount: 5,
-      tokensIn: 0,
-      tokensOut: 5
-    });
+    try {
+      const { recordRagUsage } = await import("../src/lib/rag-metering");
+      // Spend the entire daily point fuse so hasRagIngestPointsBudget("local", 1, "qdrant") is false.
+      recordRagUsage({
+        userId: "local",
+        operation: "upsert",
+        provider: "qdrant",
+        batchCount: 5,
+        tokensIn: 0,
+        tokensOut: 5
+      });
 
-    const processed: string[] = [];
-    const worker = new SecIngestWorker();
-    worker.processTask = async (task) => {
-      processed.push(task.id);
-    };
+      const processed: string[] = [];
+      const worker = new SecIngestWorker();
+      worker.processTask = async (task) => {
+        processed.push(task.id);
+      };
 
-    const job = createSecIngestJob({
-      idempotencyKey: `tick-qdrant-fuse-${randomUUID()}`,
-      corpusRevision: "corp-v1"
-    });
-    transitionSecIngestJob(job.id, "running");
-    enqueueSecIngestTask({
-      jobId: job.id,
-      accession: "0000320193-26-000401",
-      cik: "0000320193",
-      symbol: "AAPL",
-      payload: { url: "https://www.sec.gov/x", docType: "10-K", filedAt: "2026-07-15" }
-    });
+      const job = createSecIngestJob({
+        idempotencyKey: `tick-qdrant-fuse-${randomUUID()}`,
+        corpusRevision: "corp-v1"
+      });
+      transitionSecIngestJob(job.id, "running");
+      enqueueSecIngestTask({
+        jobId: job.id,
+        accession: "0000320193-26-000401",
+        cik: "0000320193",
+        symbol: "AAPL",
+        payload: { url: "https://www.sec.gov/x", docType: "10-K", filedAt: "2026-07-15" }
+      });
 
-    await worker.runTick();
-    expect(processed).toHaveLength(0);
-
-    delete process.env.RAG_VECTOR_WRITE_BACKEND;
-    delete process.env.QDRANT_URL;
-    delete process.env.RAG_MAX_DAILY_INGEST_POINTS;
+      await worker.runTick();
+      expect(processed).toHaveLength(0);
+    } finally {
+      process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
+      delete process.env.QDRANT_URL;
+      delete process.env.RAG_MAX_DAILY_INGEST_POINTS;
+    }
   });
 
   it("defers embed_queued when storeDocument reports ingestPointsBudgetExhausted", async () => {

@@ -864,9 +864,14 @@ class AlpacaBrokerGateway implements BrokerGateway {
         const anyQ = q as Record<string, number | string>;
         const bid = optionalNumber(anyQ.bp);
         const ask = optionalNumber(anyQ.ap);
+        // Mid when both sides are numbers.  Ask alone biased the displayed
+        // price, alerts, and stops.  One side falls through; neither stays 0
+        // so the session-close fill can still price the symbol.
+        const price =
+          typeof bid === "number" && typeof ask === "number" ? (bid + ask) / 2 : ask ?? bid ?? 0;
         quotes[symbol] = {
           symbol,
-          price: ask ?? bid ?? 0,
+          price,
           bid,
           ask,
           asOf: optionalIso(anyQ.t),
@@ -901,7 +906,9 @@ class AlpacaBrokerGateway implements BrokerGateway {
     const results: Record<string, { tradable: boolean; fractional: boolean }> = {};
     for (const symbol of symbols) {
       try {
-        const asset = await this.trackHealth(() => this.alpaca.getAsset(toAlpacaSymbol(symbol)));
+        const asset = await this.trackHealth(() => this.alpaca.getAsset(toAlpacaSymbol(symbol)), {
+          deadlineMs: ALPACA_BROKER_IO_DEADLINE_MS
+        });
         results[normalizeSymbol(symbol)] = {
           tradable: asset.tradable === true,
           fractional: asset.fractionable === true

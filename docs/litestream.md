@@ -10,7 +10,8 @@ WAL as LTX files to an S3-compatible object store.
 cold-snapshot DR only (`cold-snapshots/app-YYYY-MM-DD.db.gz` since PR #3135), not a
 second Litestream writer.  Read-only inventory 2026-09-04: object_count=1,
 bucket_size ~9.68 GB; sole key `cold-snapshots/app-2026-08-30.db` (9679310848
-bytes, ~9.02 GiB); `trading-live/` empty (historic litestream prune moot);
+bytes, ~9.02 GiB); `trading-live/` empty in that snapshot (bucket may still hold pre-cutover LTX — re-inventory before
+assuming); dead `trading-live/**` prune plan: `docs/runbooks/r2-trading-live-dead-history-prune.md`.
 `weekly/` empty (leftover `R2_ARCHIVE_KEEP_GENERATIONS` unused).  Details:
 `docs/rollouts/2026-08-07-litestream-b2-backup.md`,
 `docs/rollouts/2026-08-17-litestream-restore-drill.md`, and
