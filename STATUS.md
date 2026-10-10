@@ -1,5 +1,12 @@
 # Current Status
 
+## 2026-10-05 CURSOR — R2 dead `trading-live/**` prune plan (board `242c350e`, branch `cursor/r2-trading-live-prune-plan-7d7e`)
+
+**What.**  Docs/runbook + read-only `scripts/ops/r2-trading-live-dead-history-inventory.mjs` for pre-B2-cutover Litestream objects on R2 `socratic-trade-bucket`.  **No deletes.**  B2 live replica untouched.
+
+**Verification.**  Targeted vitest on inventory scripts; full gate before merge.
+
+**Next.**  Draft PR for owner review; operator runs inventory with `AWS_R2_HISTORIC_*` when approved.
 ## 2026-10-07 CURSOR — `__rotate__` OpenRouter access-denied failover (branch `cursor/preopen-autopilot-rotate-failover-b257`)
 
 **What.**  Prod Autopilot `__rotate__` runs failed with OpenRouter 403 access-denied slugs and "Failover chain exhausted (3 Green Team endpoints)" while the scheduler stayed healthy.  Implicit rotation failover now walks up to twelve alternates (hard cap eighteen), and rotation picks skip per-user 403 cooldown slugs with fail-open when every pool member is cooling.
