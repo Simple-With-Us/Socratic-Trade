@@ -105,6 +105,13 @@ failures beyond the halt-time streak (mirrors the broker-health auto-pause
 re-arm rule). The scheduler's due-run loop now consults
 `isRunBackedOff(userId, accountId)` and skips backed-off accounts (rolling
 back cadence state, same pattern as monthly-ceiling suppression).
+App-stall and mid-run-restart failures stay on the alert and backoff streak
+and are omitted from auto-halt (`consecutiveHaltEligibleFailures`).  Broker
+HTTP and LLM failures still count toward `ST_RUN_FAILURE_HALT_AFTER`.
+`isRunBackedOff` is false once `backoffUntil` passes (cap
+`ST_RUN_FAILURE_BACKOFF_CAP_MIN`, default 240m), so a pure-stall episode
+retries instead of writing a halt marker.  Rollout:
+`docs/rollouts/2026-10-05-stall-failures-exempt-halt-streak.md` (PR #4210).
 
 **7. Halt-cause honesty — `src/lib/autonomy-halt-cause.ts`**
 New `run_failure_halt` kind; `describeAutonomyHaltCause` surfaces the watchdog

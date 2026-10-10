@@ -35,6 +35,7 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
   beforeEach(() => {
     process.env.QDRANT_URL = "http://127.0.0.1:6333";
     process.env.QDRANT_API_KEY = "live-qdrant-key";
+    process.env.RAG_VECTOR_WRITE_BACKEND = "qdrant";
     process.env.SILICONFLOW_API_KEY = "live-sf-key";
     process.env.RAG_EMBED_PROVIDER = "siliconflow";
     process.env.VECTOR_EMBED_BATCH_DELAY_MS = "0";
@@ -46,6 +47,7 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
   afterEach(() => {
     delete process.env.QDRANT_URL;
     delete process.env.QDRANT_API_KEY;
+    process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
     delete process.env.SILICONFLOW_API_KEY;
     delete process.env.RAG_EMBED_PROVIDER;
     delete process.env.PINECONE_API_KEY;
@@ -110,6 +112,12 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
     delete process.env.PINECONE_API_KEY;
     const mockFetch = vi.fn(async (url: string | URL | Request) => {
       const urlStr = String(url);
+      if (urlStr.includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: 0 } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
       if (urlStr.includes("/points/scroll")) {
         return new Response(
           JSON.stringify({ result: { points: [], next_page_offset: null } }),
@@ -124,6 +132,33 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
     expect(res.promoted).toBe(0);
     expect(res.deleted).toBe(0);
     expect(mockFetch.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(true);
+  });
+
+  it("reconcileManagedVectorRecords skips dry-run when Qdrant count exceeds inventory ceiling", async () => {
+    delete process.env.PINECONE_API_KEY;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mockFetch = vi.fn(async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: 90_000 } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (urlStr.includes("/points/scroll")) {
+        return new Response(
+          JSON.stringify({ result: { points: [], next_page_offset: null } }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response("Not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+    const res = await reconcileManagedVectorRecords({ userId: "local", dryRun: true });
+    expect(res.skipped).toBe(true);
+    expect(res.inventoryOverCeiling).toEqual({ count: 90_000, maxScanned: 50_000 });
+    expect(mockFetch.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(false);
+    warnSpy.mockRestore();
   });
 
   it("storeContexts upserts to Qdrant without a Pinecone client or pinecone health wrap", async () => {
@@ -185,6 +220,12 @@ describe("retrieveContextDetailed with Qdrant read backend", () => {
   it("inventoryVectorRecordsByMetadata scrolls Qdrant and does not require a Pinecone key", async () => {
     delete process.env.PINECONE_API_KEY;
     const mockFetch = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: 1 } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
       if (String(url).includes("/points/scroll")) {
         return new Response(
           JSON.stringify({

@@ -1,5 +1,40 @@
 # Current Status
 
+## 2026-10-05 CURSOR — R2 dead `trading-live/**` prune plan (board `242c350e`, branch `cursor/r2-trading-live-prune-plan-7d7e`)
+
+**What.**  Docs/runbook + read-only `scripts/ops/r2-trading-live-dead-history-inventory.mjs` for pre-B2-cutover Litestream objects on R2 `socratic-trade-bucket`.  **No deletes.**  B2 live replica untouched.
+
+**Verification.**  Targeted vitest on inventory scripts; full gate before merge.
+
+**Next.**  Draft PR for owner review; operator runs inventory with `AWS_R2_HISTORIC_*` when approved.
+## 2026-10-07 CURSOR — `__rotate__` OpenRouter access-denied failover (branch `cursor/preopen-autopilot-rotate-failover-b257`)
+
+**What.**  Prod Autopilot `__rotate__` runs failed with OpenRouter 403 access-denied slugs and "Failover chain exhausted (3 Green Team endpoints)" while the scheduler stayed healthy.  Implicit rotation failover now walks up to twelve alternates (hard cap eighteen), and rotation picks skip per-user 403 cooldown slugs with fail-open when every pool member is cooling.
+
+**Left alone.**  No Coolify restart or deploy.  No OpenRouter key minting.  No trading risk policy changes.
+
+**Docs.**  `docs/rollouts/2026-10-07-rotate-openrouter-access-failover.md`, `PLAN.md`, `docs/EFFORT-LOG.md`.
+
+**Verification.**  `npm ci` exit 0.  `npm run lint` exit 0 (0 errors, 866 warnings).  `npx tsc --noEmit` exit 0.  `npm test` exit 0 on CI `verify-hosted` (9120+ passed, 51 skipped, 0 failed; local Mac DNS may still fail `test/egress-guard.test.ts` when `discord.com` resolves to `198.18.0.1`).  `NODE_OPTIONS=--max-old-space-size=4096 npm run build` exit 0.  CI `verify` is the merge gate.
+
+**Next.**  Open PR; do not force-merge or resolve review threads just to merge.
+## 2026-10-09 CURSOR — One finished-run lookback on the watchdog tick (branch `cursor/stall-halt-streak-exempt-d19f`, PR #4210)
+
+**What.**  The re-arm path selected the same newest finished runs three times per active account per tick.  `getTradingLivenessSummary` keeps that row array, and both streak walks use it.  Stall exemption and re-arm cutoff semantics are unchanged.  Extra-ship no.  Do not merge.
+
+**Docs.**  `docs/rollouts/2026-10-09-watchdog-one-finished-run-read.md`, `PLAN.md`, `docs/EFFORT-LOG.md`.
+
+**Verification.**  eslint on the three touched files exit 0.  `npx tsc --noEmit` exit 0.  `npx vitest run test/run-failure-watchdog.test.ts test/trading-liveness.test.ts` 35 passed.  Full `npm test` and `npm run build` not run on this pass.
+
+**Next.**  Push the branch.  Do not merge PR #4210.
+## 2026-10-09 GROK — Congress-share import receipt schema (PR #4228, branch `cursor/congress-share-import-receipt-715f`)
+
+**What.**  App A's import 2xx body is parsed with exported `ImportedReceiptSchema` (strict nonnegative ints for the eight accepted-count fields).  The parser strips envelope keys so `ok`, `errors`, `perfTickers`, and `tradesRows` do not fail a valid tally.  The receipt-shortfall return now spreads `dropMeta`.
+
+**Blockers.**  None in this diff.  Do not merge from this lane.  Do not resolve Kody threads from this lane.
+
+**Next.**  Push the branch.  CI `verify` is the merge gate.  Extra-ship no.
+
 ## 2026-10-07 CURSOR — Health probe off the SQLite critical path (branch `cursor/health-probe-event-loop-b9ee`)
 
 **What.**  Sentry uptime SOCRATIC-TRADE-S times out `GET /api/health` at ~8s (681 events).  A warm probe now returns a memory snapshot and refreshes SQLite, Litestream, and OpenRouter credits after the response.  `/api/live` no longer opens `app.db`.  Service-health summary statements are prepared once per read.  PagerDuty #383 stays open until this ships.  Extra-ship no.
@@ -98,6 +133,30 @@
 **Verification.**  `bash -n` on three scripts.
 
 **Next.**  Push; reply on Kody threads; do not merge.
+## 2026-10-05 GROK — Placement honesty remainder (board `d2094c78ff79447d`, branch `cursor/placement-outcome-honesty-4829`)
+## 2026-10-06 CURSOR — PR #4229 tip-fix (branch `cursor/placement-outcome-honesty-4829`)
+
+**What.**  Rebased onto `origin/main` (no merge conflicts).  Tightened `isDuplicateClientOrderIdError` so `client_order_id` and uniqueness wording must sit in the same clause (Kody HIGH on false idempotency reclass).  Retryable 429/408 and true duplicate-key reconcile behavior unchanged.
+
+**Verification.**  `npx vitest run test/placement-outcome.test.ts test/placement-reconcile.test.ts` — 24 passed.
+
+**Next.**  CI `verify` on push.  Extra-ship no.  Do not resolve review threads to unblock merge.
+## 2026-10-05 CURSOR — Congress-share import consumption receipt (board `52f0143da16d44b8`, branch `cursor/congress-share-import-receipt-715f`)
+
+**What.**  Parse App A per-dataset accepted counts from `POST /api/admin/securities/import`; fail closed when counts are missing or `accepted < sent`; optional `schemaVersion: 1` on outbound POST body.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `test/congress-share.test.ts` 77/77; `npm run build` clean.
+
+**Next.**  Push; open PR READY; no extra-ship.
+## 2026-10-05 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, branch `cursor/automerge-money-path-gate-2ac4`)
+## 2026-10-05 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, branch `cursor/automerge-money-path-gate-2ac4`, PR #4221)
+## 2026-10-06 CURSOR — Auto-merge CODEOWNERS gate (board 318bfe710b794c28, PR #4221, branch `cursor/automerge-money-path-gate-2ac4`)
+
+**What.**  `auto-merge-prs.yml` money-path classifier: paginated compare file list and fail-closed on empty compare results or Contents API errors (404-only => empty CODEOWNERS).  Docs: single `318bfe710b794c28` effort row; rollout Fleet contrib narrowed to slash-less basename nugget.  Kody threads UtHk/UtJr/UtMN/UtOl addressed; Sc5X left open per Jay defer.
+
+**Verification.**  `npx vitest run test/pr-touches-codeowners-paths.test.ts test/branch-protection-gate.test.ts` on push.  CI `verify` authoritative.
+
+**Next.**  Jay squash when green; no workflow auto-merge on this PR; Sc5X unresolved.
 ## 2026-10-05 CURSOR — Sentry server AI integrations (board `f411f8a7`, branch `cursor/fix-sentry-node-integrations-373d`)
 
 **What.**  `sentry.server.config.ts` named six integrations on `@sentry/nextjs` that the Edge compile does not re-export (Sentry 7753792417).  A static `@sentry/node` import then failed that same Edge bundle (`diagnostics_channel`, `worker_threads`).  `Sentry.init` stays on `@sentry/nextjs`.  The six factories are attached from `instrumentation.ts` on the Node runtime only, with `webpackIgnore` (same path as `@sentry/profiling-node`).  Each factory has its own try/catch and logs on failure.  Direct `@sentry/node` is `^11.0.0`, the same range as `@sentry/nextjs`, so npm keeps one copy.
@@ -123,6 +182,29 @@
 **Blockers.**  Rebase onto origin/main complete; required CI `verify` checks pending before squash auto-merge.
 
 **Next.**  Open PR READY; do not merge; no Coolify deploy from this agent.
+## 2026-10-05 CURSOR — Qdrant inventory count pre-check (branch `cursor/qdrant-count-precheck-reconcile-7677`)
+
+**What.**  Managed-vector dry-run reconcile no longer scrolls 50k Qdrant payloads before failing: `qdrantInventoryByMetadata` calls `POST /points/count` first and throws `VectorInventoryOverCeilingError` when the tenant/metadata filter exceeds the 50k scan ceiling; reconcile returns `skipped: true` with `inventoryOverCeiling` so the scheduler treats it as busy, not failed.
+
+**Verification.**  Re-run 2026-10-09: `npm run lint` exit 0 (0 errors, 863 warnings).  `npx tsc --noEmit` exit 0.  `npm test` exit 1 (9119 passed, 51 skipped, 1 failed in `test/egress-guard.test.ts`: this host resolves discord.com to 198.18.0.1 and the SSRF guard rejects it).  `npm run build` exit 0.  No dev server running; none to restart.
+
+**Next.**  Push; open PR READY; do not merge.
+## 2026-10-09 CURSOR — Qdrant write loud fallback (branch `cursor/loud-qdrant-write-fallback-7868`, board 8215e304, PR #4232)
+
+**What.**  `vectorWriteBackend()` no longer silently returns `"pinecone"` when Qdrant is selected but the endpoint is not usable; it logs `console.error` and throws.  Read, health, and stats probes use `vectorWriteBackendOrNull()` so they do not throw.  Explicit Pinecone opt-in unchanged.  `RAG_MAX_DAILY_INGEST_POINTS` untouched.  Kody follow-up: the public health catch that records `ragVectorWriteBackend=misconfigured` now also sets `ragConfigured` to false, matching the embed-provider and vector-store failure paths.  The probe stays HTTP 200.
+
+**Blockers.**  None identified.  Merged `origin/main` (already current at `43f7896f`).
+
+**Verification.**  `npx vitest run test/connection-health-routing.test.ts`: 29 passed.  Full `npm test`, `npm run lint`, `npx tsc --noEmit`, and `npm run build` were not re-run on this seat.  CI `verify` is the merge gate.
+
+**Next.**  CI `verify` on PR #4232 is the merge gate.  Do not merge from this lane.
+## 2026-10-05 CURSOR — ST host container restart monitor (board `2ad7f8b92e864958887e72fc25572c34`)
+
+**What.**  Host-side Docker `RestartCount` / missing-container monitor for Coolify ST (`<st-container-id>`, resolved at install time): script + systemd timer + install helper + runbook.  Alerts use the ST Pushover token and Sentry DSN from Infisical.  **Not installed on prod from this agent** — owner runs `install-st-container-restart-monitor.sh` on the fleet Hetzner host.
+
+**Verification.**  2026-10-09 Linux: `shellcheck` on the monitor and install scripts exited 0; `bash -n` on the monitor, install, and selftest scripts exited 0; `python3 -m py_compile` on the sentry helper exited 0; `bash scripts/ops/st-container-restart-monitor.selftest.sh` printed `selftest: 9 passed, 0 failed.`
+
+**Next.**  PR #4224 — owner installs on host per `docs/runbooks/st-container-restart-monitor.md`.
 **Next.**  Address Kody review threads (honest fix or `defer`).  Extra-ship no.  Do not deploy or merge from this lane.
 ## 2026-10-05 CURSOR — Issue #3888 isTradierOrderNotFound hardening (PR #4212)
 
@@ -142,6 +224,14 @@
 **Docs.**  Rollout `docs/rollouts/2026-10-05-broker-io-pending-fill-guard.md`.
 
 **Next.**  Push; open PR READY; CI `verify`.
+
+## 2026-10-05 CURSOR — App-stall failures must not auto-halt Autopilot (branch `cursor/stall-halt-streak-exempt-d19f`)
+
+**What.**  The run-failure watchdog counted event-loop stalls and mid-run restarts toward `ST_RUN_FAILURE_HALT_AFTER`.  On 2026-10-01 RTH that auto-halted Alpaca Paper and Tradier Sandbox after 10–12 stall failures.  Those runs still alert and back off.  They no longer advance the auto-halt streak.  Broker HTTP failures and LLM/provider failures still do.  Trading liveness reports both counts.  The stale-run sweep stamps `haltExempt: true` on both `process_restarted_mid_run` and `stalled_no_progress`.
+
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` clean.  Full vitest: 9051 passed, 11 failed outside this diff (notify redaction, Node 22 `.ts` loader, Twelve Data / Alpha Vantage / congress-share / server-metrics).  Targeted watchdog, liveness, and stale-run files passed (44, and again inside the full suite).  `npm run build` exit 0.  PR #4210.
+
+**Next.**  PR only.  Do not merge.  Do not Coolify Deploy.  Extra-ship no.
 
 ## 2026-10-05 CURSOR — PR #4178 Kody review round 2 (branch `plumber/cursor-cloud-env`)
 

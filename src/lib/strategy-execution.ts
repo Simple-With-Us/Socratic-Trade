@@ -72,8 +72,7 @@ import {
   StrategyLockOwnershipLostError
 } from "./strategy-lock-guard";
 import {
-  isRetryableBrokerHttpError,
-  isTerminalBrokerHttpError,
+  classifyPlaceOrderError,
   type ExecuteProposalResult
 } from "./placement-outcome";
 import { appendDecisionStep, assertLiveApprovalConfirmation, protectiveExitQuoteFromScan, openingPolicyNotionalCap, autoRevertOnCapBreach, auditWashSaleProceed } from "./strategy";
@@ -1418,9 +1417,10 @@ export async function executeProposal(
           // (strategy.ts) and the protective-state block above: honest terminal "blocked".
           // P2.6 / #1319: pre-flight validation and definitive broker HTTP 4xx are never
           // "uncertain". OrderValidationError → blocked; terminal 4xx → rejected_by_broker;
-          // HTTP 429/408 → not_placed (retryable). HTTP 409 (duplicate client_order_id) is
-          // not a rejection — fall through to reconcilePlacementError. Reserve uncertain
-          // for timeouts / 5xx.
+          // HTTP 429 → not_placed (retryable). HTTP 408 is a timeout and falls through to
+          // reconcilePlacementError with HTTP 409 (duplicate client_order_id): executeProposal
+          // mints a new refId per call, so booking 408 as not_placed can duplicate a live order.
+          // Reserve uncertain for an unreachable broker list / 5xx.
           // The one transient OrderValidationError: the placement-time position read failed and
           // the sell/cover failed closed.  Nothing reached the broker — retryable not_placed.
           if (isRetryablePositionInvariantError(placeError)) {
@@ -1485,7 +1485,9 @@ export async function executeProposal(
             );
             throw new Error([message].join(" "));
           }
-          if (isRetryableBrokerHttpError(message)) {
+          const placeClass = classifyPlaceOrderError(message);
+          // 408 stays classified retryable but must not book not_placed before reconcile.
+          if (placeClass === "retryable" && !/\bHTTP 408\b/i.test(message)) {
             const note = `Broker rate-limited or timed out (${message}). Safe to retry.`;
             updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, note);
             audit(
@@ -1504,7 +1506,7 @@ export async function executeProposal(
             );
             throw new Error([note].join(" "));
           }
-          if (isTerminalBrokerHttpError(message)) {
+          if (placeClass === "rejected_terminal") {
             updateProposalStatus(proposalId, "rejected_by_broker", undefined, review, review.estimatedNotional, userId, undefined, message);
             audit(
               "order_rejected_by_broker",
