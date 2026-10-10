@@ -4,6 +4,8 @@ import {
   buildEnrichmentCoverageReport,
   collectFilledFields,
   COVERAGE_GAP_FIELDS,
+  COVERAGE_RETIRED_LANE_FIELDS,
+  COVERAGE_TRACKED_FIELDS,
   getLastEnrichmentCoverageReport,
   paidProviderHasUsefulWaveBGap,
   scarceProviderHasUsefulGap,
@@ -54,6 +56,34 @@ function coreComplete(overrides: SymbolEnrichment = {}): SymbolEnrichment {
 }
 
 describe("buildEnrichmentCoverageReport", () => {
+  it("tracks marketCap in coverage field inventory", () => {
+    expect(COVERAGE_TRACKED_FIELDS).toContain("marketCap");
+    const report = buildEnrichmentCoverageReport(
+      { AAPL: { marketCap: 3e12, sources: { marketCap: "nasdaq-delayed-screener" } } } as Record<
+        string,
+        EnrichmentCoverageRecord
+      >,
+      ["nasdaq-delayed-screener"]
+    );
+    const mcap = report.fields.find((f) => f.field === "marketCap");
+    expect(mcap?.filledCount).toBe(1);
+    expect(mcap?.mostFrequentSource).toBe("nasdaq-delayed-screener");
+  });
+
+  it("does not track retired Quiver lanes in coverage fields or missingFields", () => {
+    for (const field of COVERAGE_RETIRED_LANE_FIELDS) {
+      expect(COVERAGE_TRACKED_FIELDS).not.toContain(field);
+    }
+    const merged: Record<string, SymbolEnrichment> = {
+      AAPL: { peRatio: 1, sources: { peRatio: "yahoo-finance" } }
+    };
+    const report = buildEnrichmentCoverageReport(merged, ["yahoo-finance"]);
+    for (const field of COVERAGE_RETIRED_LANE_FIELDS) {
+      expect(report.fields.some((f) => f.field === field)).toBe(false);
+      expect(report.missingFields).not.toContain(field);
+    }
+  });
+
   it("reports fill rates, most-frequent source, missing fields, and failures", () => {
     const merged: Record<string, SymbolEnrichment> = {
       AAPL: {

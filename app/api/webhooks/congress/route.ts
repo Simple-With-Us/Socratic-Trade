@@ -5,6 +5,7 @@ import { applyCongressEvent, applyCongressEvents, type CongressEvent } from "@/l
 import { verifyCongressWebhookSignature } from "@jaywedgeworth22/congress-trading-shared";
 import { logApiHealth } from "@/lib/db-health";
 import { CONGRESS_WEBHOOK_MAX_BYTES, PayloadTooLargeError, readBodyWithLimit } from "@/lib/bounded-body";
+import { enforceRateLimit, RATE_LIMITS, trustedCloudflareClientIp } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -53,10 +54,28 @@ export async function POST(req: Request) {
     bearerSecretMatches(req, expectedSecret) ||
     (hasSignature && await verifyCongressWebhookSignature(text, signatureHeader, expectedSecret));
 
+  const clientIp = trustedCloudflareClientIp(req);
+  if (!clientIp) {
+    return NextResponse.json({ ok: false, error: "missing or invalid client ip" }, { status: 400 });
+  }
+
   if (!isValid) {
+    const unauthLimited = enforceRateLimit(
+      clientIp,
+      "webhooks/congress:unauth",
+      RATE_LIMITS.congressWebhookUnauth
+    );
+    if (unauthLimited) return unauthLimited;
     audit("congress_webhook_rejected", { reason: "signature" });
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
+
+  const limited = enforceRateLimit(
+    clientIp,
+    "webhooks/congress",
+    RATE_LIMITS.congressWebhook
+  );
+  if (limited) return limited;
 
   let body: unknown;
   try {

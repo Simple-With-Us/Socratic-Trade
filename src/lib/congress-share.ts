@@ -68,6 +68,35 @@ import { serverKnobBool } from "./server-knobs";
 import type { MarketQuote, MarketScan } from "./types";
 import { getFinraDataset, getInsiderDataset, getInsiderSignals, getShortVolumeSignals } from "./web-sources";
 import { fetchNasdaqScreenerResponse } from "./nasdaq-screener-fetch";
+import { logWarn } from "./sentry-metrics";
+import { readOptionalSchemaVersionField } from "./schema-version";
+import { z, type ZodType } from "zod";
+
+/** Passthrough row schemas so validated outbound rows keep forward-compat / App-B-only fields. */
+const ShareSecurityRefRowSchema: ZodType<CongressRef> =
+  SecurityRefInputSchema.passthrough() as ZodType<CongressRef>;
+const SharePriceSeriesRowSchema: ZodType<PriceSeries> = PriceSeriesSchema.passthrough();
+const SharePriceCloseRowSchema: ZodType<PriceClose> = PriceCloseSchema.passthrough();
+const ShareInsiderRowSchema: ZodType<InsiderRow> = InsiderRowSchema.passthrough();
+const ShareShortVolumeRowSchema: ZodType<ShortVolumeRow> = ShortVolumeRowSchema.passthrough();
+const ShareFundamentalRowSchema: ZodType<FundamentalRow> = FundamentalRowSchema.passthrough();
+const ShareAnalystRowSchema: ZodType<AnalystRow> = AnalystRowSchema.passthrough();
+const ShareTradeEventRowSchema = TradeEventRowSchema.passthrough();
+
+/** Strict upstream import response from App A (HTTP 2xx body). */
+const CongressImportResponseSchema = z
+  .object({
+    ok: z.boolean().optional(),
+    errors: z.array(z.unknown()).optional(),
+    summary: z
+      .object({
+        errors: z.array(z.unknown()).optional(),
+      })
+      .optional(),
+  })
+  .catchall(z.unknown());
+
+export type CongressImportResponse = z.infer<typeof CongressImportResponseSchema>;
 const DEFAULT_BASE_URL = "https://congress.trade";
 const DEFAULT_TIMEOUT_MS = 30_000; // App A upserts + recomputes per-trade perf anchors per call — give it room
 const LAST_DAILY_RUN_KEY = "congress-share:lastDailyRunDate";
@@ -510,6 +539,20 @@ export type CongressShortVol = ShortVolumeRow;
 export type CongressFundamental = FundamentalRow;
 export type CongressAnalyst = AnalystRow;
 
+/** Outbound EOD close guard — shared `PriceCloseSchema` accepts any finite number; CT has no inbound plausibility check. */
+const CongressSharePriceCloseSchema = PriceCloseSchema.extend({
+  close: z.number().finite().positive(),
+});
+
+const CongressSharePriceSeriesSchema = PriceSeriesSchema.extend({
+  closes: z.array(CongressSharePriceCloseSchema),
+  // Shared schema is `nullAsUndefined(z.number())` — allow null/omit, reject 0/-1/NaN.
+  currentPrice: z.preprocess(
+    (value) => (value === null ? undefined : value),
+    z.number().finite().positive().optional(),
+  ),
+});
+
 /**
  * Outbound share payload. Same wire shape as shared `SharePayload`; `refs` may
  * use the local optional-field builder (`CongressRef`) before schema validation
@@ -517,6 +560,8 @@ export type CongressAnalyst = AnalystRow;
  */
 export type CongressSharePayload = Omit<SharePayload, "refs"> & {
   refs?: CongressRef[];
+  /** Optional envelope field from a future shared-package schemaVersion (tolerant reader). */
+  schemaVersion?: string | number;
 };
 
 export interface CongressShareResult {
@@ -526,6 +571,13 @@ export interface CongressShareResult {
   status?: number;
   response?: unknown;
   error?: string;
+  /** Per-dataset schema-invalid row counts dropped before POST (outbound share only). */
+  dropped?: Record<string, number>;
+  /** Per-dataset aggregated Zod issue keys for dropped rows. */
+  droppedReasons?: Record<string, Record<string, number>>;
+  droppedTotal?: number;
+  /** Optional envelope field from a future shared-package schemaVersion (tolerant reader). */
+  schemaVersion?: string | number;
   /** Counts actually transmitted across all POSTs in this call. */
   sent: {
     refs: number;
@@ -536,6 +588,7 @@ export interface CongressShareResult {
     shortVolume: number;
     fundamentals: number;
     analyst: number;
+    trades?: number;
   };
 }
 
@@ -767,55 +820,236 @@ function countCloses(payload: CongressSharePayload): number {
   return n;
 }
 
-/** Minimal shape of a shared Zod row schema (avoids importing `z` just for the parameter type). */
-type RowSchema = { safeParse: (value: unknown) => { success: boolean } };
+export type ShareRowsDropReport = {
+  payload: CongressSharePayload;
+  dropped: Record<string, number>;
+  droppedReasons: Record<string, Record<string, number>>;
+  droppedTotal: number;
+};
+
+function formatZodIssuePath(path: PropertyKey[]): string {
+  if (path.length === 0) return "(root)";
+  const out: string[] = [];
+  for (const segment of path) {
+    if (typeof segment === "number") {
+      if (out.length === 0) {
+        out.push("[]");
+        continue;
+      }
+      const last = out[out.length - 1];
+      if (!last.endsWith("[]")) {
+        out[out.length - 1] = `${last}[]`;
+      }
+      continue;
+    }
+    out.push(String(segment));
+  }
+  return out.join(".");
+}
+
+function zodIssueLabel(issue: { path: PropertyKey[]; code: string }): string {
+  return `${formatZodIssuePath(issue.path)}:${issue.code}`;
+}
+
+function readOptionalSchemaVersion(payload: CongressSharePayload): string | number | undefined {
+  return readOptionalSchemaVersionField(payload.schemaVersion);
+}
+
+async function reportCongressShareRowsDropped(details: {
+  dropped: Record<string, number>;
+  droppedReasons: Record<string, Record<string, number>>;
+  droppedTotal: number;
+  schemaVersion?: string | number;
+}): Promise<void> {
+  const { dropped, droppedReasons, droppedTotal, schemaVersion } = details;
+  const droppedText = JSON.stringify({ dropped, droppedReasons, schemaVersion });
+  console.warn(`[congress-share] dropped schema-invalid rows before send: ${droppedText}`);
+  audit("congress_share_rows_dropped", {
+    dropped,
+    droppedReasons,
+    droppedTotal,
+    ...(schemaVersion !== undefined ? { schemaVersion } : {})
+  });
+  logWarn("[congress-share] schema-invalid rows dropped before send", {
+    dropped: JSON.stringify(dropped),
+    droppedReasons: JSON.stringify(droppedReasons),
+    droppedTotal,
+    ...(schemaVersion !== undefined ? { schemaVersion: String(schemaVersion) } : {})
+  });
+}
+
+function shareDropReceipt(report: ShareRowsDropReport, schemaVersion?: string | number) {
+  if (report.droppedTotal <= 0) {
+    return schemaVersion !== undefined ? { schemaVersion } : {};
+  }
+  return {
+    dropped: report.dropped,
+    droppedReasons: report.droppedReasons,
+    droppedTotal: report.droppedTotal,
+    ...(schemaVersion !== undefined ? { schemaVersion } : {})
+  };
+}
 
 /**
  * Validate each dataset's rows against the shared row schemas and DROP any that fail, so malformed
  * data never reaches App A's import endpoint. Validation is PER-ROW (not whole-payload) so one bad
  * row never suppresses the valid rows in the same dataset — and it filters, rather than logs-and-sends
- * as the old code did. Rows that pass are returned verbatim (App A's importer accepts the extra
- * CongressRef fields the strict schema strips, so we never narrow a valid row's payload).
- * Returns the filtered payload plus a per-dataset dropped-row count for observability.
+ * as the old code did. Rows that pass are returned as Zod-validated `parsed.data` (passthrough schemas
+ * keep forward-compat fields) so only validated shapes cross the trust boundary.
+ * Returns the filtered payload plus per-dataset dropped counts and aggregated Zod issue reasons.
  */
-export function dropInvalidShareRows(
-  payload: CongressSharePayload,
-): { payload: CongressSharePayload; dropped: Record<string, number> } {
+export function dropInvalidShareRows(payload: CongressSharePayload): ShareRowsDropReport {
   const dropped: Record<string, number> = {};
-  const filterRows = <T>(rows: T[] | undefined, schema: RowSchema, key: string): T[] | undefined => {
+  const droppedReasons: Record<string, Record<string, number>> = {};
+  const filterRows = <T>(rows: T[] | undefined, schema: ZodType<T>, key: string): T[] | undefined => {
     if (!rows || rows.length === 0) return rows;
     const valid: T[] = [];
     let bad = 0;
     for (const row of rows) {
-      if (schema.safeParse(row).success) valid.push(row);
-      else bad++;
+      const parsed = schema.safeParse(row);
+      if (parsed.success) {
+        valid.push(parsed.data);
+        continue;
+      }
+      bad++;
+      const bucket = droppedReasons[key] ?? {};
+      for (const issue of parsed.error.issues) {
+        const label = zodIssueLabel(issue);
+        bucket[label] = (bucket[label] ?? 0) + 1;
+      }
+      droppedReasons[key] = bucket;
     }
     if (bad > 0) dropped[key] = bad;
     return valid;
   };
-  return {
-    payload: {
-      ...payload,
-      refs: filterRows(payload.refs, SecurityRefInputSchema, "refs"),
-      prices: filterRows(payload.prices, PriceSeriesSchema, "prices"),
-      spx: filterRows(payload.spx, PriceCloseSchema, "spx"),
-      insider: filterRows(payload.insider, InsiderRowSchema, "insider"),
-      shortVolume: filterRows(payload.shortVolume, ShortVolumeRowSchema, "shortVolume"),
-      fundamentals: filterRows(payload.fundamentals, FundamentalRowSchema, "fundamentals"),
-      analyst: filterRows(payload.analyst, AnalystRowSchema, "analyst"),
-      trades: filterRows(payload.trades, TradeEventRowSchema, "trades"),
-    },
-    dropped,
+  const clean: CongressSharePayload = {
+    ...payload,
+    refs: filterRows(payload.refs, ShareSecurityRefRowSchema, "refs"),
+    prices: filterRows(payload.prices, CongressSharePriceSeriesSchema, "prices"),
+    spx: filterRows(payload.spx, CongressSharePriceCloseSchema, "spx"),
+    insider: filterRows(payload.insider, ShareInsiderRowSchema, "insider"),
+    shortVolume: filterRows(payload.shortVolume, ShareShortVolumeRowSchema, "shortVolume"),
+    fundamentals: filterRows(payload.fundamentals, ShareFundamentalRowSchema, "fundamentals"),
+    analyst: filterRows(payload.analyst, ShareAnalystRowSchema, "analyst"),
+    trades: filterRows(payload.trades, ShareTradeEventRowSchema, "trades"),
   };
+  const droppedTotal = Object.values(dropped).reduce((a, b) => a + b, 0);
+  return { payload: clean, dropped, droppedReasons, droppedTotal };
+}
+
+/** Optional wire envelope version on outbound import POST bodies (App A ignores unknown keys). */
+export const CONGRESS_SHARE_PAYLOAD_SCHEMA_VERSION = 1;
+
+/** Per-dataset accepted tallies from App A's `POST /api/admin/securities/import` 2xx body. */
+export interface CongressImportAcceptedCounts {
+  refs: number;
+  spxRows: number;
+  pricedTickers: number;
+  priceRows: number;
+  insiderRows: number;
+  shortVolumeRows: number;
+  fundamentalsRows: number;
+  analystRows: number;
+}
+
+export type CongressShareSentCounts = CongressShareResult["sent"] & { trades?: number };
+
+const MISSING_ACCEPTED_COUNTS_REASON =
+  "import response missing per-dataset accepted counts (expected refs, spxRows, pricedTickers, priceRows, insiderRows, shortVolumeRows, fundamentalsRows, analystRows)";
+
+/**
+ * Strict accepted-count receipt from App A's import 2xx JSON.
+ * Unknown keys fail this schema.  The parser strips them first: a real body also
+ * carries envelope fields (`ok`, `errors`, `perfTickers`, `tradesRows`), and those
+ * must not turn a valid tally into a shortfall.
+ */
+export const ImportedReceiptSchema = z
+  .object({
+    refs: z.number().int().nonnegative(),
+    spxRows: z.number().int().nonnegative(),
+    pricedTickers: z.number().int().nonnegative(),
+    priceRows: z.number().int().nonnegative(),
+    insiderRows: z.number().int().nonnegative(),
+    shortVolumeRows: z.number().int().nonnegative(),
+    fundamentalsRows: z.number().int().nonnegative(),
+    analystRows: z.number().int().nonnegative(),
+  })
+  .strict();
+
+/** Optional `tradesRows` on the same body.  Not one of the eight required tallies. */
+const TradesRowsReceiptSchema = z.object({
+  tradesRows: z.number().int().nonnegative(),
+});
+
+/** Parse App A's per-dataset accepted counts out of a 2xx import JSON body. */
+export function parseCongressImportAcceptedCounts(
+  response: unknown,
+): { ok: true; counts: CongressImportAcceptedCounts } | { ok: false; reason: string } {
+  const parsed = ImportedReceiptSchema.strip().safeParse(response);
+  if (!parsed.success) {
+    if (response === undefined || response === null || typeof response !== "object") {
+      return { ok: false, reason: "import response body was empty or unparseable" };
+    }
+    return { ok: false, reason: MISSING_ACCEPTED_COUNTS_REASON };
+  }
+  return { ok: true, counts: parsed.data };
+}
+
+/**
+ * Compare what we sent on this POST to what App A reports it accepted. Returns "" when every
+ * non-zero sent dataset has a matching accepted tally with accepted >= sent.
+ */
+export function congressImportAcceptedReceiptError(
+  sent: CongressShareSentCounts,
+  response: unknown,
+): string {
+  const parsed = parseCongressImportAcceptedCounts(response);
+  if (!parsed.ok) return parsed.reason;
+  const { counts } = parsed;
+  const gaps: string[] = [];
+
+  const check = (label: string, sentN: number, acceptedN: number) => {
+    if (sentN <= 0) return;
+    if (acceptedN < sentN) gaps.push(`${label}: sent=${sentN} accepted=${acceptedN}`);
+  };
+
+  check("refs", sent.refs, counts.refs);
+  check("spx", sent.spx, counts.spxRows);
+  check("prices", sent.prices, counts.pricedTickers);
+  // `countCloses` (sent.closes) includes SPX rows. App A reports those under `spxRows`;
+  // `priceRows` is only per-ticker price_eod closes. Comparing the sum to `priceRows`
+  // fails every SPX-only nightly POST (priceRows stays 0).
+  check("closes", Math.max(0, sent.closes - sent.spx), counts.priceRows);
+  check("insider", sent.insider, counts.insiderRows);
+  check("shortVolume", sent.shortVolume, counts.shortVolumeRows);
+  check("fundamentals", sent.fundamentals, counts.fundamentalsRows);
+  check("analyst", sent.analyst, counts.analystRows);
+
+  const tradesSent = sent.trades ?? 0;
+  if (tradesSent > 0) {
+    const tradesParsed = TradesRowsReceiptSchema.safeParse(response);
+    const tradesAccepted = tradesParsed.success ? tradesParsed.data.tradesRows : undefined;
+    if (tradesAccepted === undefined) {
+      gaps.push(
+        `trades: sent=${tradesSent} but App A import response has no tradesRows receipt (not implemented on App A)`,
+      );
+    } else if (tradesAccepted < tradesSent) {
+      gaps.push(`trades: sent=${tradesSent} accepted=${tradesAccepted}`);
+    }
+  }
+
+  if (gaps.length === 0) return "";
+  return `App A accepted fewer rows than sent — ${gaps.join("; ")}`;
 }
 
 /**
  * Read App A's verdict out of a 2xx import response.
  *
  * App A returns `{ ok, errors[], <dataset>Rows, ... }` with HTTP 200, so `ok:false` and a populated
- * `errors[]` are the ONLY signals that rows were rejected. Returns "" when the body reports a clean
- * import, and a short diagnostic otherwise. A body we cannot parse is treated as a FAILURE, not a
- * pass: an unreadable 200 is exactly the case where the daily marker must not advance on faith.
+ * `errors[]` mean rows were rejected. Per-dataset accepted tallies are checked separately via
+ * `congressImportAcceptedReceiptError`. Returns "" when the body reports a clean import, and a short
+ * diagnostic otherwise. A body we cannot parse is treated as a FAILURE, not a pass: an unreadable 200
+ * is exactly the case where the daily marker must not advance on faith.
  */
 function congressImportBodyError(response: unknown): string {
   if (response === undefined || response === null) {
@@ -842,8 +1076,13 @@ function congressImportBodyError(response: unknown): string {
 export async function shareWithCongressTrade(payload: CongressSharePayload): Promise<CongressShareResult> {
   // Drop schema-invalid rows BEFORE building the payload so malformed data never reaches App A;
   // `sent` (and the empty check) then reflect only what is actually transmitted.
-  const { payload: clean, dropped } = dropInvalidShareRows(payload);
-  if (Object.keys(dropped).length > 0) {
+  const dropReport = dropInvalidShareRows(payload);
+  const { payload: clean } = dropReport;
+  const schemaVersion = readOptionalSchemaVersion(payload);
+  if (schemaVersion !== undefined) {
+    console.info(`[congress-share] outbound payload schemaVersion=${String(schemaVersion)}`);
+  }
+  if (dropReport.droppedTotal > 0) {
     // Schema drift between the two apps is silent by construction here: a row that stops matching
     // the shared schema is filtered out and the POST still succeeds, so coverage shrinks with no
     // error anywhere. App A also runs a STRICT schema (non-null `sentiment`/`buyFilings`/`owners`/
@@ -855,10 +1094,9 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
     // record here would interleave between two genuine `ok: false` request failures and reset that
     // counter — masking a real outage. This is a payload-quality signal, not a transport outcome,
     // so it belongs in the audit trail where it cannot touch alert state.
-    const droppedText = JSON.stringify(dropped);
-    console.warn(`[congress-share] dropped schema-invalid rows before send: ${droppedText}`);
-    audit("congress_share_rows_dropped", { dropped, droppedTotal: Object.values(dropped).reduce((a, b) => a + b, 0) });
+    await reportCongressShareRowsDropped({ ...dropReport, schemaVersion });
   }
+  const dropMeta = shareDropReceipt(dropReport, schemaVersion);
   const sent = {
     refs: clean.refs?.length ?? 0,
     spx: clean.spx?.length ?? 0,
@@ -871,17 +1109,28 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
     trades: clean.trades?.length ?? 0
   };
   const token = congressTradeToken();
-  if (!token) return { ok: false, skipped: true, reason: "no-token", sent };
-  const total = sent.refs + sent.spx + sent.prices + sent.insider + sent.shortVolume + sent.fundamentals + sent.analyst;
+  if (!token) return { ...dropMeta, ok: false, skipped: true, reason: "no-token", sent };
+  // Trades are a real dataset on the shared payload. Leaving them out of this sum made a
+  // trades-only body `skipped: true` ("empty") so the daily marker could advance without a POST.
+  // Include them so the body is sent and the receipt check below can fail it honestly.
+  const total =
+    sent.refs +
+    sent.spx +
+    sent.prices +
+    sent.insider +
+    sent.shortVolume +
+    sent.fundamentals +
+    sent.analyst +
+    (sent.trades ?? 0);
   if (total === 0) {
     // Distinguish a genuinely-empty input (nothing to send → legitimate skip) from a payload whose
     // rows were ALL rejected by the shared schema. The latter is a real failure: counting it as a
     // skip would let the daily-run marker advance and silently swallow schema/API drift until the
     // next day. Returning skipped:false makes runCongressDailyShare count it in failedPosts.
-    if (Object.keys(dropped).length > 0) {
-      return { ok: false, skipped: false, reason: "all-rows-dropped", sent };
+    if (dropReport.droppedTotal > 0) {
+      return { ...dropMeta, ok: false, skipped: false, reason: "all-rows-dropped", sent };
     }
-    return { ok: false, skipped: true, reason: "empty", sent };
+    return { ...dropMeta, ok: false, skipped: true, reason: "empty", sent };
   }
 
   const now = Date.now();
@@ -901,7 +1150,7 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
       errorText: `${breakerState.lastError} [auth breaker cooldown active; not re-sent]`,
       keySource: "env"
     });
-    return { ok: false, skipped: false, reason: "auth-breaker-tripped", sent };
+    return { ...dropMeta, ok: false, skipped: false, reason: "auth-breaker-tripped", sent };
   }
   if (breakerState) {
     // Cooldown elapsed: half-open. Exactly one caller may send the real probe; any other caller
@@ -915,7 +1164,7 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
         errorText: `${breakerState.lastError} [auth breaker half-open probe already in flight; not re-sent]`,
         keySource: "env"
       });
-      return { ok: false, skipped: false, reason: "auth-breaker-tripped", sent };
+      return { ...dropMeta, ok: false, skipped: false, reason: "auth-breaker-tripped", sent };
     }
   }
 
@@ -928,7 +1177,11 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       // Stamp our origin so the counterpart never echoes our own rows back to us (no-echo-loop guard).
-      const body = { ...clean, origin: clean.origin ?? APP_B_ORIGIN_TAG };
+      const body = {
+        ...clean,
+        origin: clean.origin ?? APP_B_ORIGIN_TAG,
+        schemaVersion: CONGRESS_SHARE_PAYLOAD_SCHEMA_VERSION,
+      };
       const res = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
@@ -948,7 +1201,7 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
           console.error(`[congress-share] import failed: ${errorText}`);
           tripCongressAuthBreaker(now, errorText, token);
           logApiHealth({ service: "congress-share", ok: false, errorText, keySource: "env" });
-          return { ok: false, status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}`, sent };
+          return { ...dropMeta, ok: false, status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}`, sent };
         }
         // Downstream 5xx errors (e.g. transient D1 overload): retry with backoff before hard failure.
         if (res.status >= 500 && attempt < maxAttempts) {
@@ -961,10 +1214,27 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
         // Surface failure to health store: prefix 5xx as transient to allow escalation window.
         const formattedError = res.status >= 500 ? `${HEALTH_TRANSIENT_FAILURE_PREFIX}${errorText}` : errorText;
         logApiHealth({ service: "congress-share", ok: false, errorText: formattedError, keySource: "env" });
-        return { ok: false, status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}`, sent };
+        return { ...dropMeta, ok: false, status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}`, sent };
       }
-      const response = await res.json().catch(() => undefined);
+      const responseRaw = await res.json().catch(() => undefined);
       clearCongressAuthBreaker(); // a successful call proves the token is good again
+      if (responseRaw === undefined) {
+        const bodyErrorText = "import response body was empty or unparseable";
+        console.error(`[congress-share] import rejected rows despite HTTP ${res.status}: ${bodyErrorText}`);
+        // Contract/payload-quality signal, NOT a transport outcome: writing this to the
+        // logApiHealth lane would interleave hard failure rows and mask (or fake) a real
+        // "5 consecutive failures" alert for a POST that actually succeeded. Audit only.
+        audit("congress_share_import_body_rejected", { reason: "empty_or_unparseable", status: res.status });
+        return { ...dropMeta, ok: false, status: res.status, error: bodyErrorText, sent };
+      }
+      const parsedResponse = CongressImportResponseSchema.safeParse(responseRaw);
+      if (!parsedResponse.success) {
+        const bodyErrorText = "import response body failed schema validation";
+        console.error(`[congress-share] import rejected rows despite HTTP ${res.status}: ${bodyErrorText}`);
+        audit("congress_share_import_body_rejected", { reason: "schema_validation", status: res.status });
+        return { ...dropMeta, ok: false, status: res.status, error: bodyErrorText, sent };
+      }
+      const response = parsedResponse.data;
       // App A answers HTTP 200 even when it rejected rows: its import handler returns
       // `{ ok: summary.errors.length === 0, ...summary }`, so `ok:false` and a populated `errors[]`
       // arrive on a 2xx. Treating transport success as delivery success is how a partial import
@@ -976,10 +1246,17 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
         logApiHealth({ service: "congress-share", ok: false, errorText: bodyErrorText, keySource: "env" });
         // `ok:false` (NOT `skipped`) so the daily run counts this in failedPosts and retries rather
         // than advancing the marker over an import App A only partly accepted.
-        return { ok: false, status: res.status, error: bodyErrorText, sent };
+        return { ...dropMeta, ok: false, status: res.status, error: bodyErrorText, sent };
+      }
+      const receiptErrorText = congressImportAcceptedReceiptError(sent, response);
+      if (receiptErrorText) {
+        console.error(`[congress-share] import consumption shortfall despite HTTP ${res.status}: ${receiptErrorText}`);
+        audit("congress_share_import_receipt_shortfall", { sent, receiptErrorText, response });
+        logApiHealth({ service: "congress-share", ok: false, errorText: receiptErrorText, keySource: "env" });
+        return { ...dropMeta, ok: false, status: res.status, error: receiptErrorText, sent };
       }
       logApiHealth({ service: "congress-share", ok: true, keySource: "env" });
-      return { ok: true, status: res.status, response, sent };
+      return { ...dropMeta, ok: true, status: res.status, response, sent };
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       if (attempt < maxAttempts && isTransientNetworkError(err)) {
@@ -997,12 +1274,12 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
       const isTransient = isTransientNetworkError(err);
       const formattedError = isTransient ? `${HEALTH_TRANSIENT_FAILURE_PREFIX}${error}` : error;
       logApiHealth({ service: "congress-share", ok: false, errorText: formattedError, keySource: "env" });
-      return { ok: false, error, sent };
+      return { ...dropMeta, ok: false, error, sent };
     } finally {
       clearTimeout(timer);
     }
   }
-  return { ok: false, error: "max-attempts-exceeded", sent };
+  return { ...dropMeta, ok: false, error: "max-attempts-exceeded", sent };
 }
 
 // ── Chunking ────────────────────────────────────────────────────────────────────
@@ -1223,6 +1500,10 @@ export interface CongressDailyShareSummary {
   posts: number;
   failedPosts: number;
   sent: { spx: number; prices: number; closes: number; insider: number; shortVolume: number };
+  /** Aggregated schema-invalid row drops across all POSTs in this run. */
+  rowsDropped?: Record<string, number>;
+  rowsDroppedReasons?: Record<string, Record<string, number>>;
+  rowsDroppedTotal?: number;
   responses?: unknown[];
 }
 
@@ -1484,11 +1765,27 @@ async function runCongressDailyShareUnlocked(
   let posts = 0;
   let failedPosts = 0;
   const sent = { refs: 0, spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0 };
+  const rowsDropped: Record<string, number> = {};
+  const rowsDroppedReasons: Record<string, Record<string, number>> = {};
+  let rowsDroppedTotal = 0;
   for (const payload of payloads) {
     assertOperationLeaseOwnership(operationLeaseClaim);
     const result = await shareWithCongressTrade(payload);
     throwIfOperationLeaseCancelled(operationLeaseSignal);
     posts++;
+    if (result.droppedTotal && result.droppedTotal > 0) {
+      rowsDroppedTotal += result.droppedTotal;
+      for (const [stream, count] of Object.entries(result.dropped ?? {})) {
+        rowsDropped[stream] = (rowsDropped[stream] ?? 0) + count;
+      }
+      for (const [stream, reasons] of Object.entries(result.droppedReasons ?? {})) {
+        const bucket = rowsDroppedReasons[stream] ?? {};
+        for (const [reason, count] of Object.entries(reasons)) {
+          bucket[reason] = (bucket[reason] ?? 0) + count;
+        }
+        rowsDroppedReasons[stream] = bucket;
+      }
+    }
     if (result.ok) {
       responses.push(result.response);
       sent.refs += result.sent.refs ?? 0;
@@ -1529,6 +1826,9 @@ async function runCongressDailyShareUnlocked(
     posts,
     failedPosts,
     sent,
+    ...(rowsDroppedTotal > 0
+      ? { rowsDropped, rowsDroppedReasons, rowsDroppedTotal }
+      : {}),
     responses
   };
   try {
@@ -1544,6 +1844,7 @@ async function runCongressDailyShareUnlocked(
       posts,
       failedPosts,
       sent,
+      ...(rowsDroppedTotal > 0 ? { rowsDropped, rowsDroppedReasons, rowsDroppedTotal } : {}),
       custom: customUniverse,
       fromAppANeeds: options.fromAppANeeds === true,
       needsCount: needTickers.length

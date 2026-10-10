@@ -30,7 +30,7 @@ import { resolveSourceBool } from "./source-settings";
 import { serverKnobBool } from "./server-knobs";
 import { expandPostRerankParentContext } from "./rag/parent-context";
 import { fuseHybrid, rrfFuse } from "./rag/hybrid";
-import { searchCorpusWideLexicalCandidates, type CorpusWideLexicalCandidate } from "./rag/corpus-wide-lexical";
+import { searchCorpusWideLexicalCandidatesOffLoop, type CorpusWideLexicalCandidate } from "./rag/corpus-wide-lexical";
 import { fuseDenseAndLexicalRecall, hasLexicalRecall } from "./rag/recall-fusion";
 import { adaptiveRerankEnabled, planRerank, resolveRerankRoute, type RagRerankProvider } from "./rag/rerank-policy";
 import { RetrievalStageTrace, type RetrievalTraceSnapshot } from "./rag/retrieval-stage-telemetry";
@@ -76,7 +76,10 @@ import {
   qdrantRetrieveByPcIds,
   qdrantSetPayload,
   qdrantUpsertPoints,
-  vectorWriteBackend
+  isVectorInventoryOverCeilingError,
+  qdrantWriteMisconfiguredMessage,
+  vectorWriteBackend,
+  vectorWriteBackendOrNull
 } from "./vector-store/qdrant-write";
 
 export class WholeIndexInventoryDeferredError extends Error {
@@ -96,6 +99,11 @@ export function isWholeIndexInventoryDeferredError(error: unknown): boolean {
 
 function usesQdrantWrites(): boolean {
   return vectorWriteBackend() === "qdrant";
+}
+
+/** Read, health, and catch probes.  False when Qdrant is selected but not usable; never throws. */
+function qdrantWritesConfigured(): boolean {
+  return vectorWriteBackendOrNull() === "qdrant";
 }
 
 /** Durable SQLite authority first so Qdrant writes keep matching copied occ:v3 ids. */
@@ -4950,7 +4958,15 @@ export function isStale(asOfIso: string | undefined, docType: string | undefined
  * confirm `totalVectorCount > 0` after a backfill instead of guessing.
  */
 export async function getVectorStoreStats(userId: string = "local"): Promise<VectorStoreStats> {
-  if (usesQdrantWrites()) {
+  const writeBackend = vectorWriteBackendOrNull();
+  if (writeBackend == null) {
+    return {
+      configured: false,
+      indexName: process.env.QDRANT_COLLECTION?.trim() || "socratic-trade",
+      error: qdrantWriteMisconfiguredMessage()
+    };
+  }
+  if (writeBackend === "qdrant") {
     try {
       const info = await qdrantCollectionInfo();
       return {
@@ -5002,7 +5018,14 @@ export async function getAllVectorStoreStats(userId: string = "local"): Promise<
   if (cachedAllStats && Date.now() - cachedAllStats.ts < ALL_STATS_TTL_MS) {
     return cachedAllStats.data;
   }
-  if (usesQdrantWrites()) {
+  const allStatsBackend = vectorWriteBackendOrNull();
+  if (allStatsBackend == null) {
+    return [{
+      indexName: process.env.QDRANT_COLLECTION?.trim() || "socratic-trade",
+      error: qdrantWriteMisconfiguredMessage()
+    }];
+  }
+  if (allStatsBackend === "qdrant") {
     try {
       const info = await qdrantCollectionInfo();
       const results: VectorIndexStats[] = [{
@@ -6193,6 +6216,8 @@ export interface ReconcileManagedVectorRecordsResult {
   promoted: number;
   deleted: number;
   skipped?: boolean;
+  /** Qdrant metadata inventory matched more points than the scroll ceiling allows. */
+  inventoryOverCeiling?: { count: number; maxScanned: number };
   operationLease?: OperationLeaseBusy;
 }
 
@@ -6295,9 +6320,25 @@ async function reconcileManagedVectorRecordsUnlocked(
     ));
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
+    if (isVectorInventoryOverCeilingError(error)) {
+      // Name check covers a duplicate module instance (Next server bundles) where instanceof misses.
+      const ceiling = error as { count?: unknown; maxScanned?: unknown };
+      const overCount = Number(ceiling.count ?? 0);
+      const overMax = Number(ceiling.maxScanned ?? 0);
+      console.warn(
+        `[vector-db] managed-vector reconcile skipped: inventory over scan ceiling (${overCount} > ${overMax})`
+      );
+      return {
+        ...emptyReconcileResult(dryRun, true),
+        inventoryOverCeiling: {
+          count: Number.isFinite(overCount) ? overCount : 0,
+          maxScanned: Number.isFinite(overMax) ? overMax : 0
+        }
+      };
+    }
     if (isWholeIndexInventoryDeferredError(error) || isPineconeWuExhaustedError(msg)) return emptyReconcileResult(dryRun, true);
     if (
-      !usesQdrantWrites() &&
+      !qdrantWritesConfigured() &&
       /rate limit|429|too many requests|Pinecone connection failed|fetch failed/i.test(msg)
     ) {
       return emptyReconcileResult(dryRun, true);
@@ -7616,7 +7657,7 @@ export async function retrieveContextDetailed(
     // With Qdrant-only writes (Pinecone retired), `assertIndexMetric` short-circuits and we
     // never call describeIndex — Cosine is asserted via `assertQdrantCollectionMetric` below.
     // Authority for managed receipts comes from the durable ledger / qdrantProviderAuthority.
-    if (pc && initCacheKey && !usesQdrantWrites()) {
+    if (pc && initCacheKey && !qdrantWritesConfigured()) {
       try {
         await assertIndexMetric(pc, initCacheKey, pineconeSource, userId);
       } catch {
@@ -7651,7 +7692,7 @@ export async function retrieveContextDetailed(
       } catch {
         stableProviderAuthority = undefined;
       }
-      if (!stableProviderAuthority && (readBackend === "qdrant" || usesQdrantWrites())) {
+      if (!stableProviderAuthority && (readBackend === "qdrant" || qdrantWritesConfigured())) {
         stableProviderAuthority = qdrantProviderAuthority();
       }
     }
@@ -8178,26 +8219,32 @@ export async function retrieveContextDetailed(
         candidatesIn: Math.min(baseFetchK, 100)
       });
       let lexicalCandidates: CorpusWideLexicalCandidate[] = [];
+      const lexicalAbort = createRagQueryAbort(options?.signal);
       try {
-        lexicalCandidates = searchCorpusWideLexicalCandidates({
-          symbol,
-          query,
-          limit: Math.min(baseFetchK, 100),
-          visibleTenantScopes: [
-            vectorTenantScope(userId, SHARED_SCOPE),
-            vectorTenantScope(userId, PRIVATE_SCOPE)
-          ],
-          ...(options?.docType?.length ? { docTypes: options.docType } : {}),
-          ...(options?.source ? { source: options.source } : {}),
-          ...(options?.section ? { section: options.section } : {}),
-          strictUndated: strictAsOf,
-          ...(options?.asOf ? { asOf: options.asOf } : {})
-        }).filter((candidate) => lexicalCandidateMatchesOptions(candidate, options));
+        lexicalCandidates = (await raceWithAbort(
+          searchCorpusWideLexicalCandidatesOffLoop({
+            symbol,
+            query,
+            limit: Math.min(baseFetchK, 100),
+            visibleTenantScopes: [
+              vectorTenantScope(userId, SHARED_SCOPE),
+              vectorTenantScope(userId, PRIVATE_SCOPE)
+            ],
+            ...(options?.docType?.length ? { docTypes: options.docType } : {}),
+            ...(options?.source ? { source: options.source } : {}),
+            ...(options?.section ? { section: options.section } : {}),
+            strictUndated: strictAsOf,
+            ...(options?.asOf ? { asOf: options.asOf } : {})
+          }, lexicalAbort.signal),
+          lexicalAbort.signal
+        )).filter((candidate) => lexicalCandidateMatchesOptions(candidate, options));
         endLexical?.({ candidatesOut: lexicalCandidates.length });
       } catch (error) {
         corpusWideLexicalFailed = true;
         endLexical?.({ error, candidatesOut: 0 });
         console.warn("[vector-db] corpus-wide lexical recall failed; retaining dense recall:", error instanceof Error ? error.message : String(error));
+      } finally {
+        lexicalAbort.cancel();
       }
 
       if (lexicalCandidates.length > 0) {

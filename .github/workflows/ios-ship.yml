@@ -79,7 +79,6 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
     steps:
       # fetch-depth: 0 is load-bearing, not hygiene. The default depth-1 checkout
       # leaves the runner workspace with exactly ONE commit (verified 2026-08-13:
@@ -87,7 +86,7 @@ jobs:
       # so `git log <last-shipped-sha>..HEAD` fails with "unknown revision" and the
       # TestFlight "What to Test" release notes the fleet ship script now generates
       # would silently come out empty on every CI ship.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 

@@ -85,6 +85,7 @@ describe("assertIndexMetric on the Qdrant read path", () => {
     process.env.PINECONE_API_KEY = "pinecone-test";
     process.env.QDRANT_URL = "http://127.0.0.1:6333";
     process.env.QDRANT_API_KEY = "live-qdrant-key";
+    process.env.RAG_VECTOR_WRITE_BACKEND = "qdrant";
     process.env.SILICONFLOW_API_KEY = "live-sf-key";
     process.env.RAG_EMBED_PROVIDER = "siliconflow";
     process.env.PINECONE_INDEX_READY_WAIT_MS = "0";
@@ -103,6 +104,7 @@ describe("assertIndexMetric on the Qdrant read path", () => {
   afterEach(async () => {
     const { setServerKnobOverride, invalidateServerKnobCache } = await import("../src/lib/server-knobs");
     setServerKnobOverride("RAG_VECTOR_READ_QDRANT", null);
+    process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
     invalidateServerKnobCache();
     vi.unstubAllGlobals();
   });

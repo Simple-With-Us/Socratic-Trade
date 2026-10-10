@@ -63,6 +63,7 @@ const nextConfig = {
         "node:net": false,
         "node:os": false,
         "node:child_process": false,
+        "node:worker_threads": false,
         "node:async_hooks": false,
       };
       // webpack 5 rejects the node: URI scheme before aliases apply
@@ -91,7 +92,10 @@ const nextConfig = {
         // child_process is used by r2-cold-snapshot.ts (VACUUM INTO in a child process),
         // reachable via instrumentation -> background-worker-startup -> scheduler. Server-only
         // — stubbed out for client/edge bundles (same trap as http2 / fs / path).
-        child_process: false
+        child_process: false,
+        // worker_threads runs the corpus-wide lexical FTS `.all()` off the serving event loop
+        // (`src/lib/rag/sqlite-all-offloop.ts`), reachable via vector-db -> strategy -> scheduler.
+        worker_threads: false
       };
     }
     if (isServer && nextRuntime === "nodejs") {

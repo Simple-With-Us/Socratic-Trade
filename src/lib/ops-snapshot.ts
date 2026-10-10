@@ -8,7 +8,7 @@ import { getTaskJournalSummary } from "./db-task-journal";
 import { userHasAnyLlmCredential } from "./db-api-keys";
 import { resolveLlmEndpoint } from "./llm-provider";
 import { computeAccountTradingLiveness } from "./trading-liveness";
-import { getLastEnrichmentCoverageReport } from "./enrichment-coverage";
+import { resolveEnrichmentCoverageReport } from "./db-enrichment-coverage";
 import { pineconeMonthToDateWriteUnits } from "./pinecone-monthly-pace";
 import { pineconeTrialState } from "./pinecone-trial-window";
 import { pineconeWuExhaustedUntil } from "./pinecone-wu-breaker";
@@ -19,6 +19,7 @@ import type { EquityOrder, TradingPolicy } from "./types";
 import { statSync, statfsSync, readdirSync } from "fs";
 import { dirname, join } from "path";
 import { summarizeRoicArchiveCoverage } from "./web-sources/roic-transcripts";
+import { peekRoicArtifactFileCount, refreshRoicArtifactFileCount } from "./roic-archive-artifacts";
 
 function getLitestreamLastSyncAge(dbPath: string): number | null {
   const litestreamDir = `${dbPath}-litestream`;
@@ -545,7 +546,7 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
 
   let enrichmentCoverage: OpsSnapshot["enrichmentCoverage"] = null;
   try {
-    const report = getLastEnrichmentCoverageReport();
+    const report = resolveEnrichmentCoverageReport();
     if (report) {
       enrichmentCoverage = {
         asOf: report.asOf,
@@ -566,7 +567,12 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
 
   let roicArchive: OpsRoicArchiveCoverage | null = null;
   try {
-    roicArchive = summarizeRoicArchiveCoverage();
+    // The directory walk yields off this request.  The snapshot reports the last
+    // finished count (0 until the first walk completes) instead of readdirSync.
+    void refreshRoicArtifactFileCount();
+    roicArchive = summarizeRoicArchiveCoverage({
+      artifactFiles: peekRoicArtifactFileCount() ?? 0
+    });
   } catch {
     roicArchive = null;
   }

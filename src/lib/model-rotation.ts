@@ -281,10 +281,28 @@ export const ROTATION_REPRESENTED_WEIGHT = 1;
  * When the Green seat is rotating and the owner has not configured `llmFallbackModels`,
  * append this many other eligible pool models as implicit failover for empty/malformed
  * HTTP-200s (issue #2577).  Rotation otherwise serves one model per run, so a glitching
- * pick used to kill the whole run.  Cap stays small — a credits-exhausted session must
- * not fan out across the full catalog.
+ * pick used to kill the whole run.  Cap stays bounded — a credits-exhausted session must not fan
+ * out across the full catalog — but must survive several OpenRouter 403/404 access-denied slugs in
+ * a row while other keyed seats remain (prod Autopilot 2026-10-06: pick + 2 implicit = 3 endpoints).
  */
-export const ROTATION_IMPLICIT_GREEN_FAILOVERS = 2;
+export const ROTATION_IMPLICIT_GREEN_FAILOVERS = 12;
+
+/** Hard ceiling on implicit rotation failover seats (belt-and-braces below pool size). */
+export const ROTATION_IMPLICIT_FAILOVER_HARD_CAP = 18;
+
+/**
+ * Rotation pick pool minus slugs currently in an OpenRouter 404 (catalog-wide) or 403 (this user)
+ * cooldown.  Fail OPEN to the full pool when every member is cooling — same rule as
+ * `applyRotationUserModelAllowlist`.
+ */
+export function rotationPoolExcludingCooldown(
+  pool: readonly string[],
+  userId?: string,
+  now: number = Date.now()
+): string[] {
+  const without = pool.filter((model) => !isOpenRouterModelCoolingDown(model, now, userId));
+  return without.length > 0 ? without : [...pool];
+}
 
 /** Other rotation-pool models to try after a rotating primary (Green proposer OR Red reviewer —
  *  the name predates the Red reuse below but the logic is seat-agnostic), excluding the pick,
@@ -309,7 +327,9 @@ export function implicitGreenRotationFallbacks(
     (model) => !PREFERRED_GREEN_FAILOVER_SEATS.includes(model) && !isUnservableOpenRouterFirstPick(model)
   );
   const demoted = remaining.filter((model) => isUnservableOpenRouterFirstPick(model));
-  return [...preferred, ...otherReady, ...demoted].slice(0, ROTATION_IMPLICIT_GREEN_FAILOVERS);
+  const ordered = [...preferred, ...otherReady, ...demoted];
+  const cap = Math.min(ordered.length, ROTATION_IMPLICIT_GREEN_FAILOVERS, ROTATION_IMPLICIT_FAILOVER_HARD_CAP);
+  return ordered.slice(0, cap);
 }
 
 /**
@@ -650,7 +670,8 @@ export async function resolveModelRotationForRun(input: {
   const rotateRed = isModelRotationSentinel(input.policy.redTeamLlmModel);
   if (!rotateGreen && !rotateRed) return { commit: () => {} };
   try {
-    const { pool, skipped, availability, availabilityError } = await eligibleRotationPool(input.userId);
+    const { pool: credentialPool, skipped, availability, availabilityError } = await eligibleRotationPool(input.userId);
+    const pool = rotationPoolExcludingCooldown(credentialPool, input.userId);
     if (pool.length === 0) {
       // No provider credential resolves at all — no eligible model to rotate to. Under no-defaults
       // (owner 2026-07-07: DEFAULT_OPENAI_MODEL removed) there is nothing to substitute, so resolve

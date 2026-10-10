@@ -277,7 +277,9 @@ enrichment checklist (`SymbolEnrichment` → `EnrichmentSourcedField` → `takeS
 - **Enrichment coverage report** — after each cascade run, Admin → Enrichment Coverage
   (`/admin/enrichment-coverage`), `/api/admin/enrichment-coverage`, and ops snapshot
   `enrichmentCoverage` show per-field fill rate, winning/most-frequent source, missing
-  fields, and provider failures. `applyEnrichment` preserves `fieldObservations` /
+  fields, and provider failures.  Reports persist in SQLite (`enrichment_coverage_runs` /
+  `enrichment_coverage_fields`, migration 94) so redeploys still serve the last run until
+  the next enrich. `applyEnrichment` preserves `fieldObservations` /
   `providerFailures` on `MarketQuote`.
 
 See `docs/rollouts/2026-07-01-data-sources-breadth.md`,
@@ -296,3 +298,13 @@ not a broken cascade:
 - Approval cards (website + iOS) stamp user-facing **Delayed Quote**.
 
 See `docs/rollouts/2026-08-18-delayed-yahoo-fallback-stamp.md`.
+
+## Quote observation time (2026-10-05, board `009b99f0de754dff`)
+
+Three stamps that were still fabricating "now" or using the ask as the price:
+
+- Yahoo quote-only rows (`toQuoteOnlyMarketQuote`) keep `quote.asOf` (`regularMarketTime`).  A missing observation time stays undefined.
+- ROIC company-profile prices have no observation timestamp (`parseRoicProfile`).  The cascade leaves `asOf` unset so `isQuoteFresh` returns false.  The end-of-cascade fallback may still return the price.
+- Alpaca `getEquityQuotes` sets `price` to `(bid + ask) / 2` when both sides are numbers, otherwise `ask ?? bid`.
+
+`takeScalar`'s wall-clock `cascadeFetchedAt` and the field-store `nowIso` fallback are deferred.  See `docs/rollouts/2026-10-05-quote-asof-anchors.md`.

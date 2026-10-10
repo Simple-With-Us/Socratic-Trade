@@ -12,15 +12,31 @@ import { coerceCongressTrade, CONGRESS_CURSOR_SETTING_KEY, fetchAppACongressTrad
 import { deleteInternalSetting, getInternalSetting, setInternalSetting } from "../src/lib/db";
 import { getCongressDataset, getInsiderSignals, getSymbolWebSignals } from "../src/lib/web-sources";
 import { POST as postCongressWebhook } from "../app/api/webhooks/congress/route";
+import { RATE_LIMITS, resetRateLimiter } from "../src/lib/rate-limit";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-congress-events-${randomUUID()}.db`)}`;
 });
 
 beforeEach(() => {
+  resetRateLimiter();
   resetCongressEventDedupe();
   delete process.env.CONGRESS_WEBHOOK_SECRET;
 });
+
+function congressWebhookTestSecret(): string {
+  const secret = process.env.CONGRESS_WEBHOOK_TEST_SECRET;
+  if (!secret) {
+    throw new Error("CONGRESS_WEBHOOK_TEST_SECRET is required");
+  }
+  return secret;
+}
+
+function useCongressWebhookSecret(): string {
+  const secret = congressWebhookTestSecret();
+  process.env.CONGRESS_WEBHOOK_SECRET = secret;
+  return secret;
+}
 
 const recent = (daysAgo: number) => new Date(Date.now() - daysAgo * 86_400_000).toISOString().slice(0, 10);
 
@@ -424,8 +440,33 @@ describe("webhook endpoint (POST)", () => {
     expect(applyCongressEvent(ev)).toMatchObject({ duplicate: true, applied: 0 });
   });
 
+  it("returns 429 after the per-IP rate limit is exceeded", async () => {
+    const secret = useCongressWebhookSecret();
+    const body = "{}";
+    const originalLimit = RATE_LIMITS.congressWebhook.limit;
+    (RATE_LIMITS.congressWebhook as { limit: number }).limit = 2;
+    try {
+      const headers = {
+        "x-signature": sign(secret, body),
+        "cf-connecting-ip": "203.0.113.99"
+      };
+      for (let i = 0; i < 2; i++) {
+        const res = await postCongressWebhook(
+          new Request("https://b.example/api/webhooks/congress", { method: "POST", headers, body })
+        );
+        expect(res.status).not.toBe(429);
+      }
+      const blocked = await postCongressWebhook(
+        new Request("https://b.example/api/webhooks/congress", { method: "POST", headers, body })
+      );
+      expect(blocked.status).toBe(429);
+    } finally {
+      (RATE_LIMITS.congressWebhook as { limit: number }).limit = originalLimit;
+    }
+  });
+
   it("rejects unauthorized and oversized requests early", async () => {
-    process.env.CONGRESS_WEBHOOK_SECRET = "s3cr3t";
+    const secret = useCongressWebhookSecret();
     const resNoAuth = await postCongressWebhook(
       new Request("https://b.example/api/webhooks/congress", { method: "POST" })
     );
@@ -434,7 +475,8 @@ describe("webhook endpoint (POST)", () => {
     const reqOversized = new Request("https://b.example/api/webhooks/congress", {
       method: "POST",
       headers: {
-        "x-signature": sign("s3cr3t", "{}"),
+        "cf-connecting-ip": "203.0.113.40",
+        "x-signature": sign(secret, "{}"),
         "content-length": String(10 * 1024 * 1024)
       }
     });
@@ -447,11 +489,11 @@ describe("webhook endpoint (POST)", () => {
   // an unbounded req.text() read. readBodyWithLimit aborts mid-stream on the ACTUAL byte count
   // regardless of any header, so this must still 413 even with no content-length header at all.
   it("rejects an actually-oversized body via the streaming cap even with NO content-length header", async () => {
-    process.env.CONGRESS_WEBHOOK_SECRET = "s3cr3t";
+    const secret = useCongressWebhookSecret();
     const bigBody = JSON.stringify({ padding: "a".repeat(6 * 1024 * 1024) });
     const req = new Request("https://b.example/api/webhooks/congress", {
       method: "POST",
-      headers: { "x-signature": sign("s3cr3t", bigBody) },
+      headers: { "cf-connecting-ip": "203.0.113.40", "x-signature": sign(secret, bigBody) },
       body: bigBody
     });
     expect(req.headers.get("content-length")).toBeNull(); // proves this exercises the stream path, not the header fast-path
@@ -460,17 +502,17 @@ describe("webhook endpoint (POST)", () => {
   });
 
   it("accepts shared-package HMAC signatures with supported prefix forms", async () => {
-    process.env.CONGRESS_WEBHOOK_SECRET = "s3cr3t";
+    const secret = useCongressWebhookSecret();
     // An authenticated but invalid event returns 400; an auth failure returns 401. Using an
     // invalid event keeps this auth-only regression from writing a successful provider-health row.
     const body = `{"foo":"bar"}`;
-    const signature = sign("s3cr3t", body);
+    const signature = sign(secret, body);
 
     for (const signatureHeader of [signature, `sha256=${signature}`, `SHA256=${signature}`]) {
       const response = await postCongressWebhook(
         new Request("https://b.example/api/webhooks/congress", {
           method: "POST",
-          headers: { "x-signature": signatureHeader, "content-type": "application/json" },
+          headers: { "cf-connecting-ip": "203.0.113.40", "x-signature": signatureHeader, "content-type": "application/json" },
           body,
         })
       );
@@ -479,13 +521,13 @@ describe("webhook endpoint (POST)", () => {
   });
 
   it("retains constant-time legacy bearer authentication and rejects a bad token", async () => {
-    process.env.CONGRESS_WEBHOOK_SECRET = "s3cr3t";
+    const secret = useCongressWebhookSecret();
     const body = `{"foo":"bar"}`;
 
     const accepted = await postCongressWebhook(
       new Request("https://b.example/api/webhooks/congress", {
         method: "POST",
-        headers: { authorization: "Bearer s3cr3t", "content-type": "application/json" },
+        headers: { "cf-connecting-ip": "203.0.113.40", authorization: `Bearer ${secret}`, "content-type": "application/json" },
         body,
       })
     );
@@ -494,7 +536,7 @@ describe("webhook endpoint (POST)", () => {
     const rejected = await postCongressWebhook(
       new Request("https://b.example/api/webhooks/congress", {
         method: "POST",
-        headers: { authorization: "Bearer wrong", "content-type": "application/json" },
+        headers: { "cf-connecting-ip": "203.0.113.40", authorization: "Bearer wrong", "content-type": "application/json" },
         body,
       })
     );
@@ -502,13 +544,13 @@ describe("webhook endpoint (POST)", () => {
   });
 
   it("rejects a mismatched shared-package HMAC signature", async () => {
-    process.env.CONGRESS_WEBHOOK_SECRET = "s3cr3t";
+    useCongressWebhookSecret();
     const body = JSON.stringify({ type: "ref.upsert", id: `evt-${randomUUID()}`, data: {} });
     const signature = sign("different-secret", body);
     const response = await postCongressWebhook(
       new Request("https://b.example/api/webhooks/congress", {
         method: "POST",
-        headers: { "x-signature": `sha256=${signature}`, "content-type": "application/json" },
+        headers: { "cf-connecting-ip": "203.0.113.40", "x-signature": `sha256=${signature}`, "content-type": "application/json" },
         body,
       })
     );
@@ -516,14 +558,14 @@ describe("webhook endpoint (POST)", () => {
   });
 
   it("records webhook health from the ingest result, not just successful authentication", async () => {
-    process.env.CONGRESS_WEBHOOK_SECRET = "s3cr3t";
+    const secret = useCongressWebhookSecret();
     const body = `{"foo":"bar"}`;
-    const sig = sign("s3cr3t", body);
+    const sig = sign(secret, body);
 
     const res = await postCongressWebhook(
       new Request("https://b.example/api/webhooks/congress", {
         method: "POST",
-        headers: { "x-signature": sig, "content-type": "application/json" },
+        headers: { "cf-connecting-ip": "203.0.113.40", "x-signature": sig, "content-type": "application/json" },
         body: body,
       })
     );

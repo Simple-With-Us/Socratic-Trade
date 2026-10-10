@@ -16,14 +16,15 @@
 # PRs, re-runs flaky verify once, merges the green ones, and publishes a digest.
 #
 # Design notes:
-# - GitHub reports PR mergeability lazily (often "UNKNOWN"), so we don't trust it;
-#   we *attempt* the merge and react to the outcome -- the attempt forces the
-#   computation and tells us whether it's really a conflict.
+# - GitHub reports PR mergeability lazily (often "UNKNOWN").  We poll REST + GraphQL
+#   before acting on a green armed PR; UNKNOWN after polling waits (no merge / no sync).
+# - When mergeStateStatus is CLEAN (etc.), we still *attempt* merge and react to errors.
 # - The only merge gate is the required `verify` check (ruleset: no approvals, not
 #   strict, no thread-resolution), so `verify == SUCCESS` is our green signal.
 #
 # Env:
-#   GITHUB_REPOSITORY   owner/repo (default: jaywedgeworth22/Socratic-Trade)
+#   GITHUB_REPOSITORY   owner/repo (default: SHEPHERD_REPO or Simple-With-Us/Socratic-Trade)
+#   SHEPHERD_REPO       override when GITHUB_REPOSITORY unset (launchd / Mac driver)
 #   SHEPHERD_DRY_RUN=1  report only; attempt nothing
 #   GH_TOKEN/GITHUB_TOKEN  auth. A PAT (repo+workflow scope) is preferred so that
 #                          update-branch re-triggers verify; the default Actions
@@ -35,7 +36,8 @@
 #                          which uses a real user PAT) defaults to "1".
 set -uo pipefail
 
-REPO="${GITHUB_REPOSITORY:-jaywedgeworth22/Socratic-Trade}"
+DEFAULT_REPO="Simple-With-Us/Socratic-Trade"
+REPO="${GITHUB_REPOSITORY:-${SHEPHERD_REPO:-$DEFAULT_REPO}}"
 DRY="${SHEPHERD_DRY_RUN:-0}"
 HAS_PAT="${SHEPHERD_HAS_PAT:-1}"
 ISSUE_TITLE="Merge shepherd status"
@@ -62,6 +64,31 @@ is_failure_conclusion() {
     FAILURE|CANCELLED|TIMED_OUT|ACTION_REQUIRED|STARTUP_FAILURE|STALE|ERROR) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Poll until GitHub settles mergeStateStatus (UNKNOWN while mergeability computes).
+refresh_merge_state() {
+  local num="$1" state tries=0
+  while [ "$tries" -lt 5 ]; do
+    state=$(gh pr view "$num" -R "$REPO" --json mergeStateStatus --jq -r '.mergeStateStatus // "UNKNOWN"' 2>/dev/null) || state="UNKNOWN"
+    [ "$state" != "UNKNOWN" ] && { printf '%s' "$state"; return 0; }
+    gh api -H "Accept: application/vnd.github+json" "repos/$REPO/pulls/$num" >/dev/null 2>&1 || true
+    tries=$((tries + 1))
+    [ "$tries" -lt 5 ] && sleep 2
+  done
+  printf '%s' "UNKNOWN"
+}
+
+shepherd_sync_behind() {
+  local num="$1" title="$2"
+  if [ "$HAS_PAT" != "1" ]; then
+    row WAITING "$num" "$title  (behind main; re-sync skipped -- no PAT to re-trigger verify)"
+  elif gh pr update-branch "$num" -R "$REPO" >/dev/null 2>&1; then
+    row UNSTUCK "$num" "$title  (synced to main; verify re-running)"
+  else
+    gh pr edit "$num" -R "$REPO" --add-label needs-human-merge >/dev/null 2>&1 || true
+    row CONFLICT "$num" "$title  (real conflict -- needs a human)"
+  fi
 }
 
 echo "[shepherd] scanning open PRs in $REPO (dry=$DRY)"
@@ -101,7 +128,16 @@ for num in $nums; do
 
   if [ "$DRY" = "1" ]; then
     case "$verify" in
-      SUCCESS) row WOULD-MERGE "$num" "$title" ;;
+      SUCCESS)
+        merge_state="$(refresh_merge_state "$num")"
+        case "$merge_state" in
+          BLOCKED) row BLOCKED "$num" "$title  (mergeStateStatus=BLOCKED -- unresolved review / rules)" ;;
+          UNKNOWN) row WAITING "$num" "$title  (mergeStateStatus=UNKNOWN -- mergeability not settled)" ;;
+          BEHIND)  row WOULD-SYNC "$num" "$title  (behind main -- would re-sync)" ;;
+          DIRTY)   row CONFLICT "$num" "$title  (mergeStateStatus=DIRTY -- needs a human)" ;;
+          CLEAN|UNSTABLE|HAS_HOOKS) row WOULD-MERGE "$num" "$title" ;;
+          *)       row WAITING "$num" "$title  (mergeStateStatus=$merge_state -- not mergeable yet)" ;;
+        esac ;;
       FAILURE|CANCELLED|TIMED_OUT|ACTION_REQUIRED|STARTUP_FAILURE|STALE|ERROR)
                row FAILING "$num" "$title  (verify=$verify; reran=$reran)" ;;
       NONE)    if [ "$running" -gt 0 ]; then row WAITING "$num" "$title  (CI running; verify not posted yet)";
@@ -121,25 +157,36 @@ for num in $nums; do
     row WAITING "$num" "$title  (green + armed; merge skipped -- no PAT, a bot merge would dispatch no post-merge CI)"
 
   elif [ "$verify" = "SUCCESS" ]; then
-    # Attempt the merge; the attempt itself resolves mergeability.
-    if out=$(gh pr merge "$num" -R "$REPO" --squash 2>&1); then
-      row MERGED "$num" "$title"
-    else
-      lc=$(printf '%s' "$out" | tr '[:upper:]' '[:lower:]')
-      if printf '%s' "$lc" | grep -Eq 'conflict|not mergeable|not up to date|behind|base branch was modified'; then
-        # Behind/conflicting -- re-sync. union-merge (.gitattributes) auto-resolves board files.
-        if [ "$HAS_PAT" != "1" ]; then
-          row WAITING "$num" "$title  (behind main; re-sync skipped -- no PAT to re-trigger verify)"
-        elif gh pr update-branch "$num" -R "$REPO" >/dev/null 2>&1; then
-          row UNSTUCK "$num" "$title  (synced to main; verify re-running)"
+    merge_state="$(refresh_merge_state "$num")"
+    case "$merge_state" in
+      BLOCKED)
+        row BLOCKED "$num" "$title  (mergeStateStatus=BLOCKED -- unresolved review / rules)" ;;
+      UNKNOWN)
+        row WAITING "$num" "$title  (mergeStateStatus=UNKNOWN -- mergeability not settled; retry next run)" ;;
+      BEHIND)
+        shepherd_sync_behind "$num" "$title" ;;
+      DIRTY)
+        gh pr edit "$num" -R "$REPO" --add-label needs-human-merge >/dev/null 2>&1 || true
+        row CONFLICT "$num" "$title  (mergeStateStatus=DIRTY -- needs a human)" ;;
+      CLEAN|UNSTABLE|HAS_HOOKS)
+        if out=$(gh pr merge "$num" -R "$REPO" --squash 2>&1); then
+          row MERGED "$num" "$title"
         else
-          gh pr edit "$num" -R "$REPO" --add-label needs-human-merge >/dev/null 2>&1 || true
-          row CONFLICT "$num" "$title  (real conflict -- needs a human)"
-        fi
-      else
-        row MERGE-RETRY "$num" "$title  (gh: $(printf '%s' "$out" | head -1 | cut -c1-80))"
-      fi
-    fi
+          lc=$(printf '%s' "$out" | tr '[:upper:]' '[:lower:]')
+          merge_state="$(refresh_merge_state "$num")"
+          if [ "$merge_state" = "BLOCKED" ]; then
+            row BLOCKED "$num" "$title  (merge blocked -- gh: $(printf '%s' "$out" | head -1 | cut -c1-80))"
+          elif [ "$merge_state" = "UNKNOWN" ]; then
+            row WAITING "$num" "$title  (mergeability UNKNOWN after merge attempt)"
+          elif [ "$merge_state" = "BEHIND" ] || printf '%s' "$lc" | grep -Eq 'conflict|not mergeable|not up to date|behind|base branch was modified'; then
+            shepherd_sync_behind "$num" "$title"
+          else
+            row MERGE-RETRY "$num" "$title  (gh: $(printf '%s' "$out" | head -1 | cut -c1-80))"
+          fi
+        fi ;;
+      *)
+        row WAITING "$num" "$title  (mergeStateStatus=$merge_state -- not mergeable yet)" ;;
+    esac
 
   elif is_failure_conclusion "$verify" && [ "$reran" != "true" ]; then
     # Flake recovery: re-run non-passing workflow runs for this head sha, exactly once.
@@ -226,6 +273,7 @@ now="$(date -u '+%Y-%m-%d %H:%MZ' 2>/dev/null || echo now)"
   echo "| [unstuck] synced to main | $(cnt UNSTUCK) |"
   echo "| [re-ran] verify (flake) | $(cnt RE-RAN) |"
   echo "| [merge-retry] transient merge error | $(cnt MERGE-RETRY) |"
+  echo "| [blocked] merge blocked (reviews/rules) | $(cnt BLOCKED) |"
   echo "| [conflict] real conflict -- needs human | $(cnt CONFLICT) |"
   echo "| [failing] verify failing -- needs human | $(cnt FAILING) |"
   echo "| [waiting] on CI | $(cnt WAITING) |"
@@ -234,6 +282,7 @@ now="$(date -u '+%Y-%m-%d %H:%MZ' 2>/dev/null || echo now)"
   [ "$DRY" = "1" ] && echo "| _(dry) would merge_ | $(cnt WOULD-MERGE) |"
   [ "$DRY" = "1" ] && echo "| _(dry) would re-sync_ | $(cnt WOULD-SYNC) |"
   for pair in \
+    "BLOCKED:[blocked] Merge blocked (unresolved reviews / rules)" \
     "CONFLICT:[conflict] Real conflict -- needs a human" \
     "FAILING:[failing] Verify failing after a re-run -- needs a human" \
     "MERGE-RETRY:[merge-retry] Merge attempt failed (non-conflict) -- will retry next run" \

@@ -68,7 +68,14 @@ export default defineConfig({
       // cascade (a dead 401 key would open real sockets and time out strategy tests).
       FILINGAPI: "",
       FILINGAPI_KEY: "",
-      FILING_API_KEY: ""
+      FILING_API_KEY: "",
+      // Non-production test credentials for route tests (never embed bearer/HMAC secrets in test source).
+      SECURITIES_IMPORT_TEST_TOKEN: "vitest-securities-import-token",
+      CONGRESS_WEBHOOK_TEST_SECRET: "vitest-congress-webhook-secret",
+      CONGRESS_TRADE_TEST_TOKEN: "vitest-congress-trade-token",
+      // Production defaults vector writes to Qdrant and fails closed when QDRANT_URL is unset.
+      // The suite mocks Pinecone paths and must opt into Pinecone explicitly (see vector-db.test.ts).
+      RAG_VECTOR_WRITE_BACKEND: "pinecone"
     },
     exclude: [
       "node_modules/**",

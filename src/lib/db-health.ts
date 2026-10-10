@@ -703,51 +703,40 @@ export function getServiceHealthSummaries(): ServiceHealthSummary[] {
     const now = Date.now();
     const hourAgo = new Date(now - 60 * 60 * 1000).toISOString();
     const dayAgo = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+    // Prepare once.  The public health refresh calls this on the serving thread;
+    // per-lane prepare() was N*5 statement compiles on every probe.
+    const lastSuccessStmt = db.prepare(
+      `SELECT ts, latency_ms FROM api_health_log
+       WHERE service = ? AND key_source IS ? AND ok = 1
+       ORDER BY ts DESC, rowid DESC LIMIT 1`
+    );
+    const lastFailureStmt = db.prepare(
+      `SELECT ts, error_text FROM api_health_log
+       WHERE service = ? AND key_source IS ? AND ok = 0
+       ORDER BY ts DESC, rowid DESC LIMIT 1`
+    );
+    const callsSinceStmt = db.prepare(
+      `SELECT COUNT(*) as cnt FROM api_health_log
+       WHERE service = ? AND key_source IS ? AND ts >= ?`
+    );
+    const last5Stmt = db.prepare(
+      `SELECT ok, error_text FROM api_health_log
+       WHERE service = ? AND key_source IS ?
+       ORDER BY ts DESC, rowid DESC LIMIT 5`
+    );
 
     return lanes.map(({ service, key_source: ks }) => {
-      const lastSuccess = db
-        .prepare(
-          `SELECT ts, latency_ms FROM api_health_log
-           WHERE service = ? AND key_source IS ? AND ok = 1
-           ORDER BY ts DESC, rowid DESC LIMIT 1`
-        )
-        .get(service, ks) as { ts: string; latency_ms: number | null } | undefined;
+      const lastSuccess = lastSuccessStmt.get(service, ks) as { ts: string; latency_ms: number | null } | undefined;
 
-      const lastFailure = db
-        .prepare(
-          `SELECT ts, error_text FROM api_health_log
-           WHERE service = ? AND key_source IS ? AND ok = 0
-           ORDER BY ts DESC, rowid DESC LIMIT 1`
-        )
-        .get(service, ks) as { ts: string; error_text: string | null } | undefined;
+      const lastFailure = lastFailureStmt.get(service, ks) as { ts: string; error_text: string | null } | undefined;
 
-      const callsLastHour = (
-        db
-          .prepare(
-            `SELECT COUNT(*) as cnt FROM api_health_log
-             WHERE service = ? AND key_source IS ? AND ts >= ?`
-          )
-          .get(service, ks, hourAgo) as { cnt: number }
-      ).cnt;
+      const callsLastHour = (callsSinceStmt.get(service, ks, hourAgo) as { cnt: number }).cnt;
 
-      const callsLast24h = (
-        db
-          .prepare(
-            `SELECT COUNT(*) as cnt FROM api_health_log
-             WHERE service = ? AND key_source IS ? AND ts >= ?`
-          )
-          .get(service, ks, dayAgo) as { cnt: number }
-      ).cnt;
+      const callsLast24h = (callsSinceStmt.get(service, ks, dayAgo) as { cnt: number }).cnt;
 
       // "Stopped working" detection — scoped per credential lane. Soft/expected-limit failures
       // (429, daily caps) do NOT count toward the hard consecutive-failures kind.
-      const last5 = db
-        .prepare(
-          `SELECT ok, error_text FROM api_health_log
-           WHERE service = ? AND key_source IS ?
-           ORDER BY ts DESC, rowid DESC LIMIT 5`
-        )
-        .all(service, ks) as Array<{ ok: number; error_text: string | null }>;
+      const last5 = last5Stmt.all(service, ks) as Array<{ ok: number; error_text: string | null }>;
 
       let stoppedWorking = false;
       let stoppedReason: string | null = null;

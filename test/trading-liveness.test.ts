@@ -62,6 +62,32 @@ async function makeAccount(db: Awaited<ReturnType<typeof load>>["db"], label: st
   return { userId, accountId };
 }
 
+describe("countLeadingFailedRuns", () => {
+  it("ignores runs that started at or before the re-arm cutoff", async () => {
+    const { liveness } = await load();
+    const cutoff = "2026-10-06T18:00:00.000Z";
+    expect(
+      liveness.countLeadingFailedRuns(
+        [
+          { status: "failed", started_at: "2026-10-06T18:00:05.000Z" },
+          { status: "failed", started_at: cutoff },
+          { status: "failed", started_at: "2026-10-06T17:59:00.000Z" },
+        ],
+        cutoff
+      )
+    ).toBe(1);
+    expect(
+      liveness.countLeadingFailedRuns(
+        [
+          { status: "completed", started_at: "2026-10-06T18:02:00.000Z" },
+          { status: "failed", started_at: "2026-10-06T18:01:00.000Z" },
+        ],
+        cutoff
+      )
+    ).toBe(0);
+  });
+});
+
 describe("trading-liveness", () => {
   it("omits the dimension entirely when there are zero active-autonomy accounts", async () => {
     const { db, liveness } = await load();
@@ -131,6 +157,49 @@ describe("trading-liveness", () => {
     expect(result.degradedReasons.slice().sort()).toEqual(["consecutive_failures", "stale_last_completed_run"].sort());
   });
 
+  it("reports the post-re-arm streak and ignores an in-flight failure that started earlier", async () => {
+    process.env.TRADING_LIVENESS_MAX_CONSECUTIVE_FAILURES = "3";
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Rearm Window Account");
+    const rearmedAt = "2026-10-06T19:00:00.000Z";
+    const now = Date.parse("2026-10-06T20:00:00.000Z");
+    for (let i = 0; i < 4; i++) {
+      insertRunAt(db, {
+        userId,
+        connectedAccountId: accountId,
+        status: "failed",
+        startedAt: new Date(Date.parse(rearmedAt) - (i + 1) * 60_000).toISOString(),
+        finishedAt: new Date(Date.parse(rearmedAt) - i * 60_000).toISOString(),
+      });
+    }
+    db.setInternalSetting(liveness.runFailureWatchStateKey(userId, accountId), { rearmedAt });
+
+    const before = liveness.computeAccountTradingLiveness(userId, accountId, "Rearm Window Account", now);
+    expect(before.consecutiveFailedRuns).toBe(0);
+    expect(before.degradedReasons).not.toContain("consecutive_failures");
+
+    // Started before the re-arm, finished after.  Must not extend the public streak.
+    insertRunAt(db, {
+      userId,
+      connectedAccountId: accountId,
+      status: "failed",
+      startedAt: "2026-10-06T18:59:00.000Z",
+      finishedAt: "2026-10-06T19:05:00.000Z",
+    });
+    const inflight = liveness.computeAccountTradingLiveness(userId, accountId, "Rearm Window Account", now);
+    expect(inflight.consecutiveFailedRuns).toBe(0);
+
+    insertRunAt(db, {
+      userId,
+      connectedAccountId: accountId,
+      status: "failed",
+      startedAt: "2026-10-06T19:10:00.000Z",
+      finishedAt: "2026-10-06T19:11:00.000Z",
+    });
+    const after = liveness.computeAccountTradingLiveness(userId, accountId, "Rearm Window Account", now);
+    expect(after.consecutiveFailedRuns).toBe(1);
+  });
+
   it("stops the consecutive-failure count at the most recent completed run", async () => {
     process.env.TRADING_LIVENESS_MAX_CONSECUTIVE_FAILURES = "5";
     const { db, liveness } = await load();
@@ -146,7 +215,44 @@ describe("trading-liveness", () => {
 
     const result = liveness.computeAccountTradingLiveness(userId, accountId, "Recovered Account", now);
     expect(result.consecutiveFailedRuns).toBe(1);
+    expect(result.consecutiveHaltEligibleFailures).toBe(1);
     expect(result.degraded).toBe(false); // 1 < default threshold (3) and last completed run is recent
+  });
+
+  it("keeps app stalls in the failure streak and drops them from the auto-halt streak", async () => {
+    process.env.TRADING_LIVENESS_MAX_CONSECUTIVE_FAILURES = "3";
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Stall Streak Account");
+    const now = Date.parse("2026-10-01T18:00:00.000Z");
+    const rows: Array<{ summary: string; offsetMin: number }> = [
+      { summary: "fetch failed", offsetMin: 8 },
+      { summary: "Process restarted mid-run — marked failed by stale-run sweep (started at 2026-10-01T17:00:00.000Z)", offsetMin: 6 },
+      { summary: "Strategy run stalled with no progress — marked failed by stale-run sweep (started at 2026-10-01T17:10:00.000Z)", offsetMin: 4 },
+      { summary: "App process was stalled (event loop blocked 27s of 30s); broker not at fault", offsetMin: 2 },
+      { summary: "Empty response returned from LLM API.", offsetMin: 1 }
+    ];
+    for (const row of rows) {
+      db.getDb()
+        .prepare(
+          `INSERT INTO strategy_runs (id, user_id, connected_account_id, started_at, finished_at, status, summary)
+           VALUES (?, ?, ?, ?, ?, 'failed', ?)`
+        )
+        .run(
+          randomUUID(),
+          userId,
+          accountId,
+          new Date(now - row.offsetMin * 60_000).toISOString(),
+          new Date(now - row.offsetMin * 60_000).toISOString(),
+          row.summary
+        );
+    }
+
+    const result = liveness.computeAccountTradingLiveness(userId, accountId, "Stall Streak Account", now);
+    expect(result.consecutiveFailedRuns).toBe(5);
+    // fetch failed + LLM failure.  The three app-fault rows do not count.
+    expect(result.consecutiveHaltEligibleFailures).toBe(2);
+    expect(result.degraded).toBe(true);
+    expect(result.degradedReasons).toContain("consecutive_failures");
   });
 
   it("reports a stale last-completed-run without degrading while the market is closed", async () => {

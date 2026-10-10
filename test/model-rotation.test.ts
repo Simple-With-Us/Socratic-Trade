@@ -148,19 +148,18 @@ describe("weightedRotationPick (proportional sampling)", () => {
 });
 
 describe("MODEL_ROTATION_POOL (curated catalog minus exclusions)", () => {
-  it("excludes only the unsuitable models and nothing else from the curated catalog", async () => {
+  it("excludes only the expensive models from automatic rotation, keeping them in the curated picker", async () => {
     const { MODEL_ROTATION_POOL } = await import("../src/lib/model-rotation");
     const { CURATED_LLM_MODEL_IDS } = await import("../app/ui/llm-model-catalog");
-    // mistral-small-2603 / mistral-medium-3-5 were re-added 2026-07-10 (owner directive, after
-    // the keyed re-benchmark proved both complete real calls) — only grok-build-0.1 (coding
-    // specialist, soft-timeouts as a Green strategist) stays excluded.
-    const excluded = ["grok-build-0.1"];
-    for (const model of excluded) expect(MODEL_ROTATION_POOL).not.toContain(model);
-    // Keep-in-sync check: the pool is exactly the curated catalog minus the exclusions.
+    const excluded = ["gpt-6-astra-pro", "claude-opus-latest", "claude-fable-latest"];
+    for (const model of excluded) {
+      expect(MODEL_ROTATION_POOL).not.toContain(model);
+      expect(CURATED_LLM_MODEL_IDS).toContain(model);
+    }
+    // Keep-in-sync check: rotation is the curated catalog minus exactly these exclusions.
     expect(new Set(MODEL_ROTATION_POOL)).toEqual(new Set(CURATED_LLM_MODEL_IDS.filter((id) => !excluded.includes(id))));
     expect(MODEL_ROTATION_POOL).toContain("gpt-6-astra");
     expect(MODEL_ROTATION_POOL).toContain("gpt-5.6-sol");
-    expect(MODEL_ROTATION_POOL).toContain("claude-fable-latest");
     expect(MODEL_ROTATION_POOL).toContain("grok-latest");
     expect(MODEL_ROTATION_POOL).toContain("mistral-small-latest");
     expect(MODEL_ROTATION_POOL).toContain("mistral-medium-latest");
@@ -180,7 +179,9 @@ describe("MODEL_ROTATION_POOL (curated catalog minus exclusions)", () => {
     clearOpenRouterModelCooldowns();
     const safe = applyRotationAvailabilityFailOpen(MODEL_ROTATION_POOL);
     expect(safe).toContain("kimi-latest");
-    expect(safe).toContain("claude-fable-latest");
+    expect(safe).not.toContain("claude-fable-latest");
+    expect(safe).not.toContain("claude-opus-latest");
+    expect(safe).not.toContain("gpt-6-astra-pro");
     expect(safe).toContain("gpt-6-astra");
     expect(safe).toContain("gpt-5.6-sol");
     expect(safe).toContain("gemini-flash-latest");
@@ -233,7 +234,9 @@ describe("MODEL_ROTATION_POOL (curated catalog minus exclusions)", () => {
     expect(result.pool).toContain("gpt-6-astra");
     expect(result.pool).toContain("gpt-5.6-sol");
     expect(result.pool).toContain("kimi-latest");
-    expect(result.pool).toContain("claude-fable-latest");
+    expect(result.pool).not.toContain("claude-fable-latest");
+    expect(result.pool).not.toContain("claude-opus-latest");
+    expect(result.pool).not.toContain("gpt-6-astra-pro");
   });
 });
 
@@ -251,7 +254,7 @@ describe("eligibleRotationPool (credential-missing skip)", () => {
     // GPT and Claude models should be kept (in pool) since openai/anthropic keys are active
     expect(pool).toContain("gpt-6-astra");
     expect(pool).toContain("gpt-5.6-sol");
-    expect(pool).toContain("claude-opus-latest");
+    expect(pool).not.toContain("claude-opus-latest");
     
     // Gemini and DeepSeek models should be skipped since gemini/deepseek keys are missing
     expect(skipped).toContain("gemini-flash-latest");
@@ -584,10 +587,10 @@ describe("recommendedReasoningEffortForModel (curated rotation efforts)", () => 
 });
 
 describe("implicitGreenRotationFallbacks", () => {
-  it("takes the next two unused pool models after the primary", async () => {
+  it("takes every other unused pool model after the primary up to the rotation failover cap", async () => {
     const { implicitGreenRotationFallbacks, ROTATION_IMPLICIT_GREEN_FAILOVERS } = await import("../src/lib/model-rotation");
-    expect(ROTATION_IMPLICIT_GREEN_FAILOVERS).toBe(2);
-    expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b")).toEqual(["a", "c"]);
+    expect(ROTATION_IMPLICIT_GREEN_FAILOVERS).toBeGreaterThanOrEqual(10);
+    expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b")).toEqual(["a", "c", "d"]);
     expect(implicitGreenRotationFallbacks(["a", "b", "c"], "a", ["c"])).toEqual(["b"]);
     expect(implicitGreenRotationFallbacks(["a"], "a")).toEqual([]);
   });
@@ -609,8 +612,29 @@ describe("implicitGreenRotationFallbacks", () => {
     expect(firstPick).toContain("gemini-flash-latest");
     expect(firstPick).toContain("mistral-medium-latest");
     const fallbacks = implicitGreenRotationFallbacks(MODEL_ROTATION_POOL, "claude-haiku-latest");
-    expect(fallbacks).toEqual(["gemini-flash-latest", "mistral-medium-latest"]);
-    expect(fallbacks).not.toContain("gpt-5.6-sol");
+    expect(fallbacks[0]).toBe("gemini-flash-latest");
+    expect(fallbacks[1]).toBe("mistral-medium-latest");
+    expect(fallbacks.length).toBeGreaterThan(2);
+    expect(fallbacks).not.toContain("claude-haiku-latest");
+  });
+
+  it("rotationPoolExcludingCooldown drops 403-cooled slugs for this user but fail-opens when all are cooling", async () => {
+    const {
+      clearOpenRouterModelCooldowns,
+      recordOpenRouterModelNotFound,
+      rotationPoolExcludingCooldown
+    } = await import("../src/lib/model-rotation");
+    clearOpenRouterModelCooldowns();
+    try {
+      recordOpenRouterModelNotFound("mistral-medium-3-5", { status: 403, userId: "u1", detail: "no access" });
+      expect(rotationPoolExcludingCooldown(["a", "mistral-medium-3-5", "c"], "u1")).toEqual(["a", "c"]);
+      expect(rotationPoolExcludingCooldown(["a", "mistral-medium-3-5", "c"], "u2")).toEqual(["a", "mistral-medium-3-5", "c"]);
+      recordOpenRouterModelNotFound("a", { status: 403, userId: "u1" });
+      recordOpenRouterModelNotFound("c", { status: 403, userId: "u1" });
+      expect(rotationPoolExcludingCooldown(["a", "mistral-medium-3-5", "c"], "u1")).toEqual(["a", "mistral-medium-3-5", "c"]);
+    } finally {
+      clearOpenRouterModelCooldowns();
+    }
   });
 
   // 2026-09-24 fix (board 687a5fb4): a model that just told us it 403'd/404'd must never be
@@ -623,8 +647,8 @@ describe("implicitGreenRotationFallbacks", () => {
     } = await import("../src/lib/model-rotation");
     clearOpenRouterModelCooldowns();
     try {
-      // Without any cooldown, "a" and "c" would normally be the two alternates after primary "b".
-      expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b")).toEqual(["a", "c"]);
+      // Without any cooldown, every other pool member is an alternate after primary "b".
+      expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b")).toEqual(["a", "c", "d"]);
       recordOpenRouterModelNotFound("a"); // simulates a 403/404 just observed on "a"
       expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b")).toEqual(["c", "d"]);
     } finally {
@@ -646,7 +670,7 @@ describe("implicitGreenRotationFallbacks", () => {
       recordOpenRouterModelNotFound("a");
       expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b", [], now)).toEqual(["c", "d"]);
       const afterCooldown = now + OPENROUTER_MODEL_NOT_FOUND_COOLDOWN_MS + 1;
-      expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b", [], afterCooldown)).toEqual(["a", "c"]);
+      expect(implicitGreenRotationFallbacks(["a", "b", "c", "d"], "b", [], afterCooldown)).toEqual(["a", "c", "d"]);
     } finally {
       vi.useRealTimers();
       clearOpenRouterModelCooldowns();
@@ -749,10 +773,10 @@ describe("rotation review round: cross-seat exclusion, per-user 403 cooldown, re
     });
     expect(planned.red).not.toContain("gemini-flash-latest");
     expect(planned.red).not.toContain("claude-haiku-latest");
-    expect(planned.red.length).toBe(2);
+    expect(planned.red.length).toBeGreaterThan(2);
     expect(planned.green).not.toContain("claude-haiku-latest");
     expect(planned.green).not.toContain("gemini-flash-latest");
-    expect(planned.green.length).toBe(2);
+    expect(planned.green.length).toBeGreaterThan(2);
 
     // Reverse direction: Red picked a preferred Green failover seat, so Green must not fail over to it.
     const reverse = planRotationImplicitFallbacks({
@@ -778,7 +802,7 @@ describe("rotation review round: cross-seat exclusion, per-user 403 cooldown, re
     });
     expect(fixedGreen.green).toEqual([]);
     expect(fixedGreen.red).not.toContain("gemini-flash-latest");
-    expect(fixedGreen.red.length).toBe(2);
+    expect(fixedGreen.red.length).toBeGreaterThan(2);
 
     // Owner-configured fallbacks win unchanged: no implicit chain is planned for that seat.
     const explicit = planRotationImplicitFallbacks({
