@@ -51,7 +51,8 @@ function run(args: string[]) {
     env: {
       PATH: `${stubDir}:/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin`,
       HOME: work,
-      STUB_LOG: log
+      STUB_LOG: log,
+      NODE_ENV: "test"
     }
   });
   const calls = existsSync(log)
