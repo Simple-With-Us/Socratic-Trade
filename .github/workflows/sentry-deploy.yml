@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '22'
+          node-version: '24'
       - run: node --test scripts/sentry-report-deploy.node-test.mjs
 
   record-production-deploy:
@@ -48,7 +48,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '22'
+          node-version: '24'
       - name: Test deployment evidence and reporting
         run: node --test scripts/sentry-report-deploy.node-test.mjs
       - name: Verify live revision and record Sentry deployment
