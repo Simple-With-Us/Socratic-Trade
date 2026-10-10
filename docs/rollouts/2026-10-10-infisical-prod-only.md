@@ -27,13 +27,13 @@ Owner 2026-10-10:  the Infisical `dev` and `staging` environments are being reti
 ## 4. Verification State
 
 ```bash
-npx vitest run test/infisical-secrets-safe.test.ts test/infisical-settings.test.ts test/infisical-bootstrap.test.ts   # 106 passed
-npm run lint
-npx tsc --noEmit
-npm test
-npm run build
-bash -n scripts/infisical-secrets-safe.sh scripts/infisical-prod-cutover.sh scripts/sync-provider-knobs.sh
-grep -nP '[^\x00-\x7F]' <added lines>      # none
+npx vitest run test/infisical-secrets-safe.test.ts test/infisical-settings.test.ts test/infisical-bootstrap.test.ts   # 106 passed (later 44 in the wrapper file)
+npm run lint                  # -> ok
+npx tsc --noEmit              # -> ok (after fixing a ProcessEnv NODE_ENV typing error in the new test that CI caught)
+npm test                      # -> ok in CI verify-hosted;  local run on a box at load ~200: 9220 passed, 3 unrelated timeouts, all 3 pass when rerun alone
+npm run build                 # -> ok
+bash -n scripts/infisical-secrets-safe.sh scripts/infisical-prod-cutover.sh scripts/sync-provider-knobs.sh   # -> ok
+grep -nP '[^\x00-\x7F]' <added lines>   # -> none
 ```
 
 ## 5. Next Steps & Blockers
