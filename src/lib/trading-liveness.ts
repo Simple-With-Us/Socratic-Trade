@@ -14,6 +14,24 @@ import { isMarketOpen } from "./market-calendar";
 // restart the very process needed to place the trade that clears the staleness, and instead HALT
 // autonomy. This is `degraded`-only signal for a human/alert to act on.
 //
+// THE `autonomy_fully_dark` REASON (added 2026-09-29).  The per-account reasons below are both
+// scoped to accounts that are ALREADY `systemState === "active"` — the loop `continue`s past
+// everything else, and the whole summary returns null when no active account remains.  That is
+// correct for its own purpose (a halted account is not a stale RUN, it is a deliberate stop) and it
+// is also the exact reason this module read "healthy" for four consecutive days while Alpaca Paper
+// sat halted from 2026-09-25 with no strategy run at all.  A system where NOTHING is trading is the
+// worst state available, and the dimension that exists to detect trading going wrong was
+// structurally incapable of noticing that trading had stopped entirely.  The fleet's own numbers:
+// last strategy run 2026-09-25T18:33, seven accounts all `halted`/`close_only`, and
+// `tradingLiveness: { degraded: 0, degradedReasons: [] }` on /api/health throughout.
+// So: count accounts ELIGIBLE to trade (autopilot authority, connected with an account number, not
+// parked, not draining) separately from accounts that are actually ACTIVE, and report
+// `autonomy_fully_dark` when the first set is non-empty and the second is empty.  It is NOT gated on
+// market hours: accounts stay `active` overnight and across weekends, and only a HALT removes one
+// from the active set, so a dark fleet is worth paging about at any hour.  It still never maps to a
+// 503 — the Coolify-restart trap above still applies — so this is a `degradedReasons` entry for a
+// human, not a container kill switch.
+//
 // Market-session-aware staleness (audit finding, 2026-07-15): the scheduler deliberately skips
 // runs while the market is closed (strategy.ts's "Market is closed" guard, sourced from
 // market-calendar.ts's isMarketOpen — the SAME source of truth reused here), so a naive
@@ -190,7 +208,22 @@ export interface AccountTradingLiveness {
    *  module docstring for why `stale_last_completed_run` is gated on this. */
   marketOpen: boolean;
   degraded: boolean;
-  degradedReasons: Array<"stale_last_completed_run" | "consecutive_failures">;
+  degradedReasons: Array<"stale_last_completed_run" | "consecutive_failures" | "autonomy_fully_dark">;
+}
+
+/** Why a fleet eligible to trade is not trading — see the module docstring's
+ *  `autonomy_fully_dark` section, which is the incident that motivated it. */
+export interface AutonomyDarkness {
+  /** Accounts that COULD trade: autopilot authority, connected with an account number, not parked,
+   *  not draining.  Deliberately narrower than "all accounts" — a parked account is quiet on
+   *  purpose and must never be counted as an outage. */
+  eligibleAccounts: number;
+  /** Of those, how many are actually `systemState === "active"`. */
+  activeAccounts: number;
+  /** Labels of the eligible-but-not-active accounts, capped, for a human to act on. */
+  darkAccountLabels: string[];
+  /** True when eligibleAccounts > 0 and activeAccounts === 0 — the whole fleet is dark. */
+  fullyDark: boolean;
 }
 
 export interface TradingLivenessSummary {
@@ -201,6 +234,9 @@ export interface TradingLivenessSummary {
   marketOpen: boolean;
   accounts: AccountTradingLiveness[];
   degraded: boolean;
+  /** Fleet-level "nothing is trading" signal.  Populated even when `accounts` is empty, because
+   *  zero ACTIVE accounts is precisely the case the per-account list cannot express. */
+  darkness?: AutonomyDarkness;
 }
 
 /**
@@ -223,9 +259,16 @@ export interface PublicTradingLiveness {
    *  whose `started_at` is after `rearmedAt`), not the historical halt-time count. */
   maxConsecutiveFailedRuns: number;
   /** Distinct reasons currently degrading at least one account, so ops can route on the CAUSE
-   *  rather than inferring it from `oldestCompletedRunAgeSeconds` and the clock. */
-  degradedReasons: Array<"stale_last_completed_run" | "consecutive_failures">;
+   *  rather than inferring it from `oldestCompletedRunAgeSeconds` and the clock.  Includes the
+   *  fleet-level `autonomy_fully_dark`, which is why it can be non-empty while `degraded` is 0. */
+  degradedReasons: Array<"stale_last_completed_run" | "consecutive_failures" | "autonomy_fully_dark">;
   marketOpen: boolean;
+  /** Identity-free counts for the "nothing is trading" signal — see AutonomyDarkness. Present on
+   *  every response (zeros when there is nothing eligible) so a JSON-path monitor can alert on
+   *  `.autonomyFullyDark == true` without a null-vs-object special case. */
+  autonomyEligibleAccounts: number;
+  autonomyActiveAccounts: number;
+  autonomyFullyDark: boolean;
 }
 
 export function toPublicTradingLiveness(
@@ -233,6 +276,8 @@ export function toPublicTradingLiveness(
   now: number = Date.now()
 ): PublicTradingLiveness {
   if (!summary) {
+    // A null summary now means "no eligible account exists at all", NOT "no active account" — the
+    // fully-dark case returns a real summary carrying `darkness` (see getTradingLivenessSummary).
     return {
       activeAccounts: 0,
       autopilotAccounts: 0,
@@ -241,7 +286,10 @@ export function toPublicTradingLiveness(
       oldestCompletedRunAgeSeconds: null,
       maxConsecutiveFailedRuns: 0,
       degradedReasons: [],
-      marketOpen: isMarketOpen(new Date(now))
+      marketOpen: isMarketOpen(new Date(now)),
+      autonomyEligibleAccounts: 0,
+      autonomyActiveAccounts: 0,
+      autonomyFullyDark: false
     };
   }
   const degradedCount = summary.accounts.filter((a) => a.degraded).length;
@@ -256,7 +304,12 @@ export function toPublicTradingLiveness(
   // Union the reasons from the DEGRADED accounts only — a healthy account contributes none, so an
   // empty array always means "nothing is degraded right now".
   const degradedReasons = [
-    ...new Set(summary.accounts.filter((a) => a.degraded).flatMap((a) => a.degradedReasons))
+    ...new Set([
+      ...summary.accounts.filter((a) => a.degraded).flatMap((a) => a.degradedReasons),
+      // The fleet-level reason is not attached to any account row (there are none active by
+      // definition), so it is unioned in here where the public shape is built.
+      ...(summary.darkness?.fullyDark ? (["autonomy_fully_dark"] as const) : [])
+    ])
   ];
   return {
     activeAccounts: summary.accounts.length,
@@ -266,7 +319,10 @@ export function toPublicTradingLiveness(
     oldestCompletedRunAgeSeconds,
     maxConsecutiveFailedRuns,
     degradedReasons,
-    marketOpen: summary.marketOpen
+    marketOpen: summary.marketOpen,
+    autonomyEligibleAccounts: summary.darkness?.eligibleAccounts ?? 0,
+    autonomyActiveAccounts: summary.darkness?.activeAccounts ?? 0,
+    autonomyFullyDark: summary.darkness?.fullyDark ?? false
   };
 }
 
@@ -389,6 +445,51 @@ export function computeAccountTradingLiveness(
  * top-level error (e.g. DB unreachable) returns null the same as "no active accounts" — callers
  * that need to distinguish should check DB health separately (this module is not the DB probe).
  */
+/** Cap on the dark-account labels reported, so one user with many halted accounts cannot turn
+ *  a health payload into a list. */
+const MAX_DARK_LABELS = 12;
+
+/**
+ * Accounts that COULD trade but are not.
+ *
+ * Eligibility is deliberately narrow. A PARKED account is quiet on purpose (review rank 8) and a
+ * DRAINING one is being disconnected; counting either as an outage would page the owner about a
+ * decision they made. An account with no broker account number has never synced and has nothing to
+ * trade. Only an account that is connected, on autopilot authority, not parked and not draining is
+ * genuinely expected to be trading — so only those count.
+ */
+function computeAutonomyDarkness(now: number = Date.now()): AutonomyDarkness {
+  const darkAccountLabels: string[] = [];
+  let eligibleAccounts = 0;
+  let activeAccounts = 0;
+  for (const userId of listUsers()) {
+    for (const account of listConnectedAccounts(userId)) {
+      try {
+        const policy = peekPolicy(userId, account.id);
+        if (policy.strategyAuthority !== "decide") continue; // ask-first/Running is not Autopilot
+        if (account.isDraining) continue; // being disconnected — quiet on purpose
+        if (account.parked) continue; // parked on purpose (review rank 8)
+        if (!account.accountNumber) continue; // never synced; nothing to trade
+        eligibleAccounts += 1;
+        if (policy.systemState === "active") {
+          activeAccounts += 1;
+        } else if (darkAccountLabels.length < MAX_DARK_LABELS) {
+          darkAccountLabels.push(account.label || account.broker);
+        }
+      } catch {
+        // An unreadable policy is not evidence of darkness — skip it rather than over-count.
+      }
+    }
+  }
+  return {
+    eligibleAccounts,
+    activeAccounts,
+    darkAccountLabels,
+    // The whole fleet is dark only when there was someone to trade and nobody is.
+    fullyDark: eligibleAccounts > 0 && activeAccounts === 0
+  };
+}
+
 export function getTradingLivenessSummary(
   now: number = Date.now(),
   finishedRunsOut?: Map<string, FinishedStrategyRunRow[]>
@@ -413,13 +514,32 @@ export function getTradingLivenessSummary(
         }
       }
     }
-    if (accounts.length === 0) return null;
+    // Computed even when `accounts` is empty — that is exactly the case it exists to catch.
+    const darkness = computeAutonomyDarkness(now);
+    if (accounts.length === 0) {
+      // Previously: `return null`, which /api/health renders as tradingLivenessDegraded: false.  A
+      // fully dark fleet is not "no data", it is the worst data there is, so return the summary and
+      // let `degraded` carry the signal.  A genuinely empty fleet (no eligible accounts at all)
+      // still returns null, because there is genuinely nothing to be live about.
+      if (!darkness.fullyDark) return null;
+      return {
+        staleMinutes: tradingLivenessStaleMinutes(),
+        maxConsecutiveFailures: tradingLivenessMaxConsecutiveFailures(),
+        marketOpen: isMarketOpen(new Date(now)),
+        accounts: [],
+        degraded: true,
+        darkness
+      };
+    }
     return {
       staleMinutes: tradingLivenessStaleMinutes(),
       maxConsecutiveFailures: tradingLivenessMaxConsecutiveFailures(),
       marketOpen: isMarketOpen(new Date(now)),
       accounts,
-      degraded: accounts.some((a) => a.degraded)
+      // `degraded` is now the OR of the two conditions, so a fleet that still has one active
+      // account but has lost the rest is not silently reported as fine either.
+      degraded: accounts.some((a) => a.degraded) || darkness.fullyDark,
+      darkness
     };
   } catch {
     lastFinishedRunsForCaller = null;
