@@ -38,10 +38,17 @@ grep -nP '[^\x00-\x7F]' <added lines>   # -> none
 
 ## 5. Next Steps & Blockers
 
-- Parent session deletes the `dev` and `staging` environments of the `socratic-trade` Infisical project after the data-side checks in its audit note.  Nothing in this repo reads them any more.
-- Six ST dev-only knobs were deliberately left out of prod.  All six are catalogued in `src/lib/server-knobs.ts` with a code default, so nothing reads a missing key:  `R2_USAGE_DAILY_DIGEST` (on), `RAG_VECTOR_WRITE_QDRANT` (on), `SEC_INGEST_DAYTIME_ENABLED` (on), `SEC_INGEST_TASKS_PER_TICK_RTH` (1), `SEC_INGEST_TASKS_PER_TICK_OFF_HOURS` (5), `TRANSCRIPTS_DAYTIME_ENABLED` (on).
+- Nothing is outstanding for this change.  The `dev` environment is deleted (`staging` was deleted earlier) and the six dev-only knobs are in prod;  see section 7, "Update Sat Oct 10 (owner decision)".
 - Seven money-path feature flags had a dev value that differs from prod, and prod's value was kept:  `CONGRESS_STREAM_ENABLED`, `RAG_INGEST_BUDGET_ENABLED`, `RAG_PINECONE_WRITE_BUDGET_ENABLED`, `SEC_INGEST_WORKER_ENABLED`, `STREAMS_ALPACA_NEWS_ENABLED`, `STREAMS_ALPACA_PRICE_EVENTS_ENABLED`, `STREAMS_ALPACA_TRADE_UPDATES_ENABLED`.  Local and Cursor runs that used dev now get prod's values for these.  The three `STREAMS_ALPACA_*` flags have a code default of off.
 
 ## 6. Zero-Code Findings
 
 None.  Code was changed.
+
+## 7. Update Sat Oct 10 (owner decision)
+
+Later on Sat Oct 10 the owner decided "ok to do all" and "if values differ defer to prod, all the rest move to prod".  That replaces the plan in the first version of this note, which was to leave the six dev-only knobs out of prod and let them run on their code defaults.
+
+- Copied to prod:  all 6 dev-only keys.  They are `R2_USAGE_DAILY_DIGEST`, `RAG_VECTOR_WRITE_QDRANT`, `SEC_INGEST_DAYTIME_ENABLED`, `SEC_INGEST_TASKS_PER_TICK_OFF_HOURS`, `SEC_INGEST_TASKS_PER_TICK_RTH` and `TRANSCRIPTS_DAYTIME_ENABLED`.  Prod now holds an explicit value for each one instead of relying on the code default.
+- Value conflicts, prod's value kept:  the seven feature flags `CONGRESS_STREAM_ENABLED`, `RAG_INGEST_BUDGET_ENABLED`, `RAG_PINECONE_WRITE_BUDGET_ENABLED`, `SEC_INGEST_WORKER_ENABLED`, `STREAMS_ALPACA_NEWS_ENABLED`, `STREAMS_ALPACA_PRICE_EVENTS_ENABLED` and `STREAMS_ALPACA_TRADE_UPDATES_ENABLED` differ between dev and prod, and prod's value stays.
+- Environments:  the `dev` environment of the `socratic-trade` Infisical project is deleted.  `staging` was deleted earlier.  Prod is the only environment.

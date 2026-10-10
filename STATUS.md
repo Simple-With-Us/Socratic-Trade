@@ -6,7 +6,7 @@
 
 **Verification.**  New and updated vitest files for the wrapper, runner and settings service;  full gate before merge.
 
-**Next.**  Parent session deletes the dev and staging environments.  Six dev-only knobs stay out of prod and run on their code defaults.
+**Next.**  Nothing for this change.  Update Sat Oct 10 (owner decision):  all six dev-only knobs were copied to prod, the seven feature-flag conflicts kept prod's values, and the `dev` environment is deleted (`staging` was deleted earlier).  Details are in `docs/rollouts/2026-10-10-infisical-prod-only.md`.
 
 ## 2026-10-05 CURSOR — R2 dead `trading-live/**` prune plan (board `242c350e`, branch `cursor/r2-trading-live-prune-plan-7d7e`)
 
