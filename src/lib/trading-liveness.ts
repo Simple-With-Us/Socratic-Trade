@@ -248,8 +248,10 @@ export interface PublicTradingLiveness {
   activeAccounts: number;
   autopilotAccounts: number;
   runningAskFirstAccounts: number;
-  /** Count of degraded active-autonomy accounts.  Keyword monitors use the sibling
-   *  `tradingLivenessDegraded` boolean; JSON-path monitors use this number `> 0`. */
+  /** Count of degraded active-autonomy accounts, plus one when the fleet is fully dark (no
+   *  account rows exist to count, but the fleet is degraded — see `autonomyFullyDark`).
+   *  Keyword monitors use the sibling `tradingLivenessDegraded` boolean; JSON-path monitors
+   *  use this number `> 0`. */
   degraded: number;
   oldestCompletedRunAgeSeconds: number | null;
   /** Worst consecutive-failure streak across active-autonomy accounts.  Without this a JSON-path
@@ -260,7 +262,7 @@ export interface PublicTradingLiveness {
   maxConsecutiveFailedRuns: number;
   /** Distinct reasons currently degrading at least one account, so ops can route on the CAUSE
    *  rather than inferring it from `oldestCompletedRunAgeSeconds` and the clock.  Includes the
-   *  fleet-level `autonomy_fully_dark`, which is why it can be non-empty while `degraded` is 0. */
+   *  fleet-level `autonomy_fully_dark` (which also flips `degraded` above `0`). */
   degradedReasons: Array<"stale_last_completed_run" | "consecutive_failures" | "autonomy_fully_dark">;
   marketOpen: boolean;
   /** Identity-free counts for the "nothing is trading" signal — see AutonomyDarkness. Present on
@@ -311,11 +313,17 @@ export function toPublicTradingLiveness(
       ...(summary.darkness?.fullyDark ? (["autonomy_fully_dark"] as const) : [])
     ])
   ];
+  // A fully-dark fleet has no account rows, so degradedCount is 0 by construction — but the
+  // fleet IS degraded (that is the signal this module exists to report). Count the dark fleet
+  // as one so `degraded > 0` gates (health route, JSON-path monitors) fire. `degraded` was
+  // already consumed as a flag (`> 0`), never as an exact account tally.
+  const publicDegraded =
+    degradedCount + (summary.darkness?.fullyDark ? 1 : 0);
   return {
     activeAccounts: summary.accounts.length,
     autopilotAccounts: summary.accounts.filter((a) => a.strategyAuthority === "decide").length,
     runningAskFirstAccounts: summary.accounts.filter((a) => a.strategyAuthority !== "decide").length,
-    degraded: degradedCount,
+    degraded: publicDegraded,
     oldestCompletedRunAgeSeconds,
     maxConsecutiveFailedRuns,
     degradedReasons,
