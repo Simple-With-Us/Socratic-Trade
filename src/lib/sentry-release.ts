@@ -28,10 +28,10 @@ export function resolveSentryRelease(
   return undefined;
 }
 
-/** Resource attributes for the Langfuse OTel provider so those spans carry a release. */
-export function otelResourceAttributes(
-  release: string | undefined = resolveSentryRelease()
-): Record<string, string> {
+/** Resource attributes for the Langfuse OTel provider so those spans carry a release.
+ *  Callers pass `resolveSentryRelease()`; a missing argument does not re-read env
+ *  (CI sets `GITHUB_SHA`, which would otherwise stamp every no-arg test). */
+export function otelResourceAttributes(release?: string): Record<string, string> {
   const attrs: Record<string, string> = { "service.name": SENTRY_SERVICE_NAME };
   if (release) {
     attrs["service.version"] = release;

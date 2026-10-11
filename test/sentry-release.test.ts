@@ -36,11 +36,17 @@ describe("otelResourceAttributes", () => {
       vi.stubEnv(key, "");
     }
     expect(otelResourceAttributes()).toEqual({ "service.name": SENTRY_SERVICE_NAME });
+    expect(otelResourceAttributes(undefined)).toEqual({ "service.name": SENTRY_SERVICE_NAME });
     expect(otelResourceAttributes(sha)).toEqual({
       "service.name": SENTRY_SERVICE_NAME,
       "service.version": sha,
       "sentry.release": sha
     });
+  });
+
+  it("does not re-read GITHUB_SHA when the caller omitted a release", () => {
+    expect(resolveSentryRelease({ GITHUB_SHA: sha })).toBe(sha);
+    expect(otelResourceAttributes()).not.toHaveProperty("sentry.release");
   });
 });
 
