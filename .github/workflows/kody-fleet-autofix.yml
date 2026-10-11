@@ -10,8 +10,9 @@ on:
     types: [completed]
 
 permissions: {}
+# Shared with the fleet's other PR autofix callers so only one autofix runs per PR.
 concurrency:
-  group: kody-caller-${{ github.repository_id }}-${{ github.event.check_run.pull_requests[0].number || github.event.check_run.id }}
+  group: pr-autofix-${{ github.repository }}-${{ github.event.check_run.pull_requests[0].number || github.event.check_run.id }}
   cancel-in-progress: false
 
 jobs:
