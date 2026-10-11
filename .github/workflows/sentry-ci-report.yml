@@ -41,6 +41,8 @@ name: Sentry CI Report
 #   Deploy freshness         -> "13,33,53 * * * *"  (deploy-freshness.yml)
 #   RTH Deploy Latch         -> "20 21 * * 1-5" (rth-deploy-latch.yml weekday after-close drain)
 #   iOS TestFlight ship      -> "*/30 * * * *" (ios-ship.yml hosted macos-latest)
+# refresh-rag-snapshot is not a Socratic-Trade workflow (FLEET-INFRA-DN lives
+# on Fleet-OPS / AI-Fleet-Coordinator).  Do not add it to CRON_SCHEDULES here.
 
 on:
   workflow_run:

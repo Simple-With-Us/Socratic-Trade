@@ -79,6 +79,9 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      # Fallback when Infisical prod has no SENTRY_DSN.  The load step overwrites
+      # this via GITHUB_ENV when Infisical returns a value.
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
     steps:
       # fetch-depth: 0 is load-bearing, not hygiene. The default depth-1 checkout
       # leaves the runner workspace with exactly ONE commit (verified 2026-08-13:
@@ -235,7 +238,28 @@ jobs:
           ASC_KEY_PATH="$(sed -n 's/^ASC_KEY_PATH=//p' "$GITHUB_ENV" | tail -n 1)"
           export ASC_KEY_PATH
           bash "$GITHUB_WORKSPACE/scripts/ios-appstore-gm-prepare.sh"
-          unset key_material TOKEN CLIENT_ID CLIENT_SECRET val IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD
+
+          # Cocoa reads Info.plist $(SENTRY_DSN).  Empty / unsubstituted is a
+          # deliberate no-op (no hardcoded ingest).  Same Infisical name Coolify
+          # already uses for the server SDK.
+          sentry_dsn="$(
+            INFISICAL_TOKEN="$TOKEN" infisical secrets get SENTRY_DSN \
+              --plain --silent --telemetry=false --expand=false \
+              --projectId="$INFISICAL_PROJECT_ID" --env=prod --path=/ \
+              2>/dev/null || true
+          )"
+          if [ -n "$sentry_dsn" ]; then
+            if [[ "$sentry_dsn" == *$'\n'* || "$sentry_dsn" == *$'\r'* ]]; then
+              echo "::error::SENTRY_DSN must be single-line; correct Infisical formatting." >&2
+              exit 1
+            fi
+            printf '::add-mask::%s\n' "${sentry_dsn//'%'/'%25'}"
+            printf 'SENTRY_DSN=%s\n' "$sentry_dsn" >> "$GITHUB_ENV"
+            echo "SENTRY_DSN loaded from Infisical prod (length ${#sentry_dsn})"
+          else
+            echo "SENTRY_DSN not in Infisical prod; Cocoa no-ops unless the GitHub Actions secret is set"
+          fi
+          unset sentry_dsn key_material TOKEN CLIENT_ID CLIENT_SECRET val IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD
 
       - name: Ensure Xcode 26 project format (objectVersion 100)
         if: steps.gate.outputs.should_ship == '1'

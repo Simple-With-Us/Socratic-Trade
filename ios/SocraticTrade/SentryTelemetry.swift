@@ -20,14 +20,18 @@ enum SentryTelemetry {
 
         guard let dsn = plistString("SENTRY_DSN"), !dsn.isEmpty else { return }
 
-        let releaseName = plistString("CFBundleShortVersionString")
+        let version = plistString("CFBundleShortVersionString")
         let dist = plistString("CFBundleVersion")
 
         SentrySDK.start { options in
             options.dsn = dsn
             options.environment = "production"
-            if let releaseName, !releaseName.isEmpty {
-                options.releaseName = releaseName
+            if let version, !version.isEmpty {
+                if let dist, !dist.isEmpty {
+                    options.releaseName = "com.socratictrade.ios@\(version)+\(dist)"
+                } else {
+                    options.releaseName = "com.socratictrade.ios@\(version)"
+                }
             }
             if let dist, !dist.isEmpty {
                 options.dist = dist

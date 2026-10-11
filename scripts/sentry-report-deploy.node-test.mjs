@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CONFIG, readIdentity, observeProduction, reportDeploy } from './sentry-report-deploy.mjs';
+import { CONFIG, readIdentity, observeProduction, reportDeploy, skipReason } from './sentry-report-deploy.mjs';
 const old = '1'.repeat(40), expected = '2'.repeat(40), newer = '3'.repeat(40), foreign = '4'.repeat(40);
 const healthy = (revision) => ({ ok: true, status: 'live', environment: 'production', revision, build: { sha: revision }, checks: { release: { sha: revision } } });
 const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers });
@@ -132,6 +132,20 @@ test('release authentication errors are not retried',async()=>{
  await assert.rejects(report(fetchImpl,{sleep:async()=>pauses++}),/HTTP 401/);
  assert.equal(reads,1);assert.equal(pauses,0);assert.ok(s.calls.every(c=>c.method==='GET'));
 });
+test('RTH latch skip reason is an explicit env string', () => {
+  assert.equal(skipReason({}), '');
+  assert.equal(skipReason({ SENTRY_DEPLOY_SKIP_REASON: ' rth-blocked ' }), 'rth-blocked');
+});
+
+test('Sentry Deploy defers during weekday RTH and re-runs after the evening drain', async () => {
+  const { readFileSync } = await import('node:fs');
+  const workflow = readFileSync(new URL('../.github/workflows/sentry-deploy.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /workflows: \[CI, RTH Deploy Latch\]/);
+  assert.match(workflow, /SENTRY_DEPLOY_SKIP_REASON/);
+  assert.match(workflow, /assert-rth-deploy-latch\.ts/);
+  assert.match(workflow, /github.event.workflow_run.name == 'RTH Deploy Latch'/);
+});
+
 test('a null JSON release is invalid data, not a retryable 404',async()=>{
  const s=service();let reads=0;let pauses=0;
  const fetchImpl=async(url,init)=>{

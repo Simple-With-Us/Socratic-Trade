@@ -9,6 +9,15 @@
 **Docs.**  `docs/rollouts/2026-10-11-alpaca-sdk-v5-migration.md`, `docs/EFFORT-LOG.md`.
 
 **Next.**  PR #4475; merge when `verify` CI is green.
+## 2026-10-11 CURSOR -- Sentry iOS DSN, OTel release, deploy latch (branch `cursor/sentry-ios-dsn-spans-5fec`)
+
+**What.**  Fleet telemetry audit C13.  TestFlight ship loads `SENTRY_DSN` from Infisical prod (GitHub secret fallback) so Cocoa stops no-op'ing.  Langfuse OTel `LLM Generation` spans (~32k, null SDK) get `service.version` / `sentry.release`.  Runtime Sentry inits set the same 40-char SHA.  Sentry Deploy skips the 25-minute RTH wait and re-runs after the evening drain.  `refresh-rag-snapshot` is not an ST workflow (FLEET-INFRA-DN is Fleet-OPS / AFC).
+
+**Docs.**  `docs/rollouts/2026-10-11-sentry-ios-dsn-otel-release.md`.  `PLAN.md` + `docs/ops-observability-security.md`.  `docs/EFFORT-LOG.md` is archived; not edited.
+
+**Left alone.**  Trading logic.  Datadog.  No hardcoded DSN.
+
+**Next.**  Ready PR.  CI `verify` is the merge gate.  Jay must keep Infisical prod `SENTRY_DSN` set (optional Actions secret fallback).  iOS events start on the next TestFlight ship.
 
 ## 2026-10-10 CLAUDE - Effort-issues sync HTTP 500 retry (board `7989bcda`, branch `claude/effort-sync-retry`)
 

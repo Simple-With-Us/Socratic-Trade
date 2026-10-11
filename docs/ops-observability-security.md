@@ -31,9 +31,15 @@ This app now has opt-in scaffolding for the seven selected tools:
   is Node-only — not browser UI profiling.  Sparse `Sentry.logger` + Application
   Metrics (`src/lib/sentry-metrics.ts`) cover `scheduler.tick`/`scheduler.overrun`,
   `rag.rejected`, `embed.failed`, and `broker.call`.  LLM/embed HTTP is wrapped in
-  `gen_ai.*` spans (`src/lib/sentry-gen-ai.ts`) without prompt contents.  iOS Cocoa
-  reads `SENTRY_DSN` from Info.plist only (no hardcoded fallback) and sets
-  `releaseName`/`dist` from `CFBundleShortVersionString`/`CFBundleVersion`.
+  `gen_ai.*` spans (`src/lib/sentry-gen-ai.ts`) without prompt contents.  Runtime
+  `Sentry.init` (server/edge/browser) and the Langfuse OTel resource set
+  `release` / `service.version` from `resolveSentryRelease()` (same 40-char SHA
+  as `scripts/sentry-build-release.cjs`) so the Langfuse "LLM Generation" OTel
+  spans that arrive without an SDK name still have a release.  iOS Cocoa reads
+  `SENTRY_DSN` from Info.plist only (no hardcoded fallback).  TestFlight ship
+  loads that DSN from Infisical prod (`SENTRY_DSN`) with a GitHub Actions
+  `secrets.SENTRY_DSN` fallback, and sets `releaseName` to
+  `com.socratictrade.ios@{CFBundleShortVersionString}+{CFBundleVersion}`.
   Datadog stays the log warehouse; do not dual-ship the access-log firehose.
   RAG provider failures, Pinecone index/metric checks, ingest budget trips, Pinecone Write
   Unit budget trips, malformed embedding rejections, and retrieval degradations are captured
