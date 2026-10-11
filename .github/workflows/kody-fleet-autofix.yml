@@ -1,0 +1,40 @@
+# Enabled fleet wide by the owner on 2026-10-11 (boards 04b963b7 and 99e559ea).
+# DeepSeek route, paid; at most 5 attempts per UTC day in this repository.
+name: Kody DeepSeek Fix Proposals
+
+# Generated offline.  Missing SWU_KODY_AUTOFIX_ENABLED means disabled.
+# Budget approval and protected-environment setup are separate owner actions.
+# Daily attempt slots bound this repository only; they are not a dollar cap.
+on:
+  check_run:
+    types: [completed]
+
+permissions: {}
+concurrency:
+  group: kody-caller-${{ github.repository_id }}-${{ github.event.check_run.pull_requests[0].number || github.event.check_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    if: >-
+      vars.SWU_KODY_AUTOFIX_ENABLED == 'true' &&
+      github.event_name == 'check_run' && github.event.action == 'completed' &&
+      github.run_attempt == 1 &&
+      github.event.check_run.app.id == 413034 &&
+      github.event.sender.type == 'Bot' && github.event.sender.id == 148880201 &&
+      github.event.sender.login == 'kody-ai[bot]' &&
+      github.event.check_run.conclusion == 'success' &&
+      github.event.check_run.pull_requests[0].number != null &&
+      github.event.check_run.pull_requests[1] == null
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      actions: read
+    uses: Simple-With-Us/congress-trading-shared/.github/workflows/kody-autofix-reusable.yml@2790e9d2558f5164832741a61c0eb5601a9404e9
+    with:
+      repository_id: '1270451796'
+      profile: 'web'
+      source_prefixes: '["src/","app/"]'
+      daily_attempt_limit: 5
+      budget_policy_id: 'approved-owner-2026-10-11'
