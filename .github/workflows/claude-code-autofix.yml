@@ -1,0 +1,82 @@
+name: Claude Code Autofix
+
+on:
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to run the autofix loop on"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: pr-autofix-${{ github.repository }}-${{ github.event.pull_request.number || github.event.inputs.pr }}
+  cancel-in-progress: false
+
+jobs:
+  autofix:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_review' &&
+       github.event.review.user.type == 'Bot' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    uses: Simple-With-Us/congress-trading-shared/.github/workflows/codex-autofix-reusable.yml@3af2bff8dc3c17d713d64316ad46f5841c92701d
+    secrets:
+      MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+    with:
+      prompt: |
+        You are the autonomous fixer that responds to the PR review bots (Codex
+        chatgpt-codex-connector[bot], Kody kody-ai[bot], and Cursor cursor[bot]) on THIS
+        pull request.  You do NOT review the PR yourself.  The bots are the reviewers;
+        you only address their feedback.
+
+        Repo: agentic-trading (Next.js).  Verify trio: `npx tsc --noEmit` →
+        `npm test` → `npm run build`.  Note: `npm run build` rewrites
+        next-env.d.ts and tsconfig.json.  Restore them from origin/main before
+        committing (`git checkout origin/main -- next-env.d.ts tsconfig.json`).
+        The git author email MUST be 12656028+jaywedgeworth22@users.noreply.github.com.
+        Never edit files under .github/workflows, never add or print secrets, and never
+        weaken a test to make it pass.
+
+        Do this:
+        1. ROUND CAP: count commits on the PR branch whose message contains
+           "[codex-autofix]".  If there are already 10 or more, STOP: post one PR
+           comment summarizing the remaining open review items and asking the
+           maintainer how to proceed, then end without further changes.
+        2. Read the PR's review threads.  Separate OUTDATED threads (anchored to
+           code already changed, usually already fixed) from genuinely NEW,
+           non-outdated items from the review bots.
+        3. For each NEW item: if it is a clear correctness bug OR a simple
+           cosmetic/doc fix, fix it.  If it is ambiguous or architecturally
+           significant, do NOT guess.  Post a PR comment asking the maintainer,
+           and skip it.
+        4. If `git merge origin/main` is needed (branch behind main), merge it,
+           resolve conflicts (keep BOTH STATUS.md entries), run `npm install`
+           if package.json changed.
+        5. Run the verify trio.  Only commit if it passes.  Commit message must
+           start with "[codex-autofix] ".  Push to the PR branch.
+        6. Update STATUS.md + the relevant docs/rollouts note like the repo's
+           handoff protocol requires.
+        7. RESOLVE THE THREADS YOU HANDLED.  This is required: a fixed bug
+           whose thread is still OPEN leaves the PR blocked on the repo's
+           "all conversations resolved" gate (a fix only makes the thread
+           OUTDATED, never RESOLVED).  For every review-bot thread you addressed in
+           code this run, OR that is outdated and already fixed, mark it
+           resolved.  Do NOT resolve a thread where you posted a question to
+           the maintainer or intentionally left a finding unfixed;  those stay
+           open.  Get the IDs, then resolve each:
+             gh api graphql -f query='query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:100){nodes{id isResolved isOutdated comments(first:1){nodes{author{login}}}}}}}}' -f o=OWNER -f n=REPO -F p=PR
+             gh api graphql -f query='mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}' -f t=THREAD_ID
+           (OWNER/REPO/PR come from `gh pr view --json headRepositoryOwner,headRepository,number` or the event context.  Only resolve threads whose first comment author is chatgpt-codex-connector[bot], kody-ai[bot], or cursor[bot].)
+        8. When the PR is functional (CI will run on your push) and you have
+           addressed the actionable items, ensure auto-merge is enabled:
+           `gh pr merge <PR> --squash --auto`.  Do NOT use --admin and do NOT
+           try to bypass the required `verify` check.
+        9. Be frugal with PR comments.  Only comment to ask the maintainer a
+           question, to report the round cap was hit, or to flag a finding you
+           are intentionally not fixing.  The diff is the record otherwise.
