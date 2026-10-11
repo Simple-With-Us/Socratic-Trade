@@ -51,8 +51,9 @@ Touched files:
 
 - `npm run lint` -- 0 errors (grandfathered warnings only).
 - `npx tsc --noEmit` -- clean after `resolveSentryRelease` accepts `Record<string, string | undefined>` (test fixtures no longer need a fake `NODE_ENV`).
-- Targeted earlier: 33 vitest (5 files) + 29 `node --test` on `scripts/sentry-report-deploy.node-test.mjs`.
-- Full `npm test` and `npm run build` run after this revision; results recorded in STATUS.md / the PR.
+- Targeted: 23 vitest (`test/sentry-release.test.ts`, `test/sentry-tunnel-middleware.test.ts`, `test/ios-manual-signing.test.ts`, `test/sentry-ci-report-workflows.test.ts`) + 29 `node --test` on `scripts/sentry-report-deploy.node-test.mjs`.
+- `npm run build` -- Next 16.4.0 webpack build succeeded (43/43 static pages).
+- Full local `npm test` -- 9218 passed, 10 failed, 51 skipped (819 files).  Failures are this Cloud VM (notify creds in env, Node 22 `.ts` loader on `summarize-cpuprofile.mjs`) plus unrelated provider-pool flakes, not this observability diff.  Hosted `verify` is authoritative.
 
 ## 5. Next Steps & Blockers
 

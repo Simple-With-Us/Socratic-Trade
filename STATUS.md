@@ -19,9 +19,9 @@
 
 **PR.**  https://github.com/Simple-With-Us/Socratic-Trade/pull/4513 (ready).
 
-**Verification.**  `npm run lint` (0 errors).  `npx tsc --noEmit` after widening `resolveSentryRelease` env to `Record<string, string | undefined>` so test fixtures do not invent `NODE_ENV`.  Full `npm test` + `npm run build` in progress.
+**Verification.**  `npm run lint` (0 errors).  `npx tsc --noEmit` clean.  Targeted: 23 vitest + 29 `node --test` on sentry-release / tunnel / ios-ship / CI-report / sentry-report-deploy.  `npm run build` (Next 16.4.0) succeeded.  Full local `npm test` was 9218 pass / 10 fail / 51 skip: the 10 fails are this Cloud VM (`PUSHOVER_*` / `RESEND_API_KEY` leaking into notify tests; Node 22 `/exec-daemon/node` cannot load `.ts` in `summarize-cpuprofile.mjs`) plus unrelated provider-pool flakes, not this diff.  Hosted `verify` is the merge gate.
 
-**Next.**  CI `verify` is the merge gate.  Jay must keep Infisical prod `SENTRY_DSN` set (optional Actions secret fallback).  iOS events start on the next TestFlight ship.
+**Next.**  Hosted `verify` + Kody (`@kody start-review` already posted).  Jay must keep Infisical prod `SENTRY_DSN` set (optional Actions secret fallback).  iOS events start on the next TestFlight ship.
 
 ## 2026-10-10 CLAUDE - Effort-issues sync HTTP 500 retry (board `7989bcda`, branch `claude/effort-sync-retry`)
 
