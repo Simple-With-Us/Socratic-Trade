@@ -1,5 +1,6 @@
 import { redactForTelemetry, safeErrorMessage } from "./telemetry-sanitize";
 import { assertWithinLlmBudget } from "./llm-budget";
+import { otelResourceAttributes, resolveSentryRelease } from "./sentry-release";
 
 type LlmGenerationOptions<T> = {
   name: string;
@@ -18,7 +19,7 @@ type TraceProvider = {
   register: () => void;
 };
 
-type TraceProviderConstructor = new (config: { spanProcessors: unknown[] }) => TraceProvider;
+type TraceProviderConstructor = new (config: { spanProcessors: unknown[]; resource?: unknown }) => TraceProvider;
 type SpanProcessorConstructor = new (config: Record<string, unknown>) => unknown;
 type LangfuseGeneration = {
   update: (fields: Record<string, unknown>) => void;
@@ -48,19 +49,22 @@ export async function startObservability(): Promise<void> {
   if (!langfuseConfigured() || globalThis.__tradingObservabilityStarted) return;
 
   try {
-    const [{ NodeTracerProvider }, { LangfuseSpanProcessor }] = await Promise.all([
+    const [{ NodeTracerProvider }, { LangfuseSpanProcessor }, { resourceFromAttributes }] = await Promise.all([
       runtimeImport<{ NodeTracerProvider: TraceProviderConstructor }>("@opentelemetry/sdk-trace-node"),
-      runtimeImport<{ LangfuseSpanProcessor: SpanProcessorConstructor }>("@langfuse/otel")
+      runtimeImport<{ LangfuseSpanProcessor: SpanProcessorConstructor }>("@langfuse/otel"),
+      runtimeImport<{ resourceFromAttributes: (attrs: Record<string, string>) => unknown }>("@opentelemetry/resources")
     ]);
 
+    const sentryRelease = resolveSentryRelease();
     const provider = new NodeTracerProvider({
+      resource: resourceFromAttributes(otelResourceAttributes(sentryRelease)),
       spanProcessors: [
         new LangfuseSpanProcessor({
           publicKey: process.env.LANGFUSE_PUBLIC_KEY,
           secretKey: process.env.LANGFUSE_SECRET_KEY,
           baseUrl: process.env.LANGFUSE_BASE_URL,
           environment: process.env.LANGFUSE_TRACING_ENVIRONMENT || process.env.NODE_ENV || "development",
-          release: process.env.LANGFUSE_RELEASE || process.env.VERCEL_GIT_COMMIT_SHA || process.env.npm_package_version,
+          release: process.env.LANGFUSE_RELEASE || sentryRelease || process.env.npm_package_version,
           mask: ({ data }: { data: unknown }) => redactForTelemetry(data)
         })
       ]

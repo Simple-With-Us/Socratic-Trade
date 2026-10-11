@@ -40,9 +40,11 @@ describe("iOS SentryTelemetry DSN source", () => {
     const swift = readFileSync(join(repoRoot, "ios/SocraticTrade/SentryTelemetry.swift"), "utf8");
     expect(swift).toMatch(/plistString\("SENTRY_DSN"\)/);
     expect(swift).not.toMatch(/ingest\.us\.sentry\.io/);
+    expect(swift).toMatch(/com\.socratictrade\.ios@\\?\(version\)/);
     expect(swift).toMatch(/sessionReplay\.maskAllText = true/);
     // sentry-cocoa 9 replaced profilesSampleRate with configureProfiling.
     expect(swift).toMatch(/configureProfiling = \{[^}]*sessionSampleRate = 0\.1/);
+    expect(swift).toMatch(/lifecycle = \.trace/);
     expect(swift).toMatch(/attachScreenshot = false/);
     const plist = readFileSync(join(repoRoot, "ios/SocraticTrade/Info.plist"), "utf8");
     expect(plist).toMatch(/<key>SENTRY_DSN<\/key>/);

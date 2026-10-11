@@ -89,6 +89,12 @@ describe("Socratic Trade manual Release signing: config agreement", () => {
     expect(workflow).toContain("'scripts/ios-install-appstore-profiles.sh'");
   });
 
+  it("ios-ship.yml loads SENTRY_DSN from Infisical prod (never hardcoded)", () => {
+    expect(workflow).toContain("infisical secrets get SENTRY_DSN");
+    expect(workflow).toContain("SENTRY_DSN: ${{ secrets.SENTRY_DSN }}");
+    expect(workflow).not.toMatch(/https:\/\/[a-z0-9]+@o\d+\.ingest/);
+  });
+
   it("the installer reads the same map and fails closed on the wrong profile", () => {
     expect(installer).toContain("ios/appstore-profiles.json");
     expect(installer).toContain("get-task-allow");

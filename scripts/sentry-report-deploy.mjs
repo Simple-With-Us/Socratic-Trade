@@ -141,8 +141,20 @@ export async function reportDeploy(receipt, { token, repositoryId, runId, attrib
   return { version, deployId: deploy.id, alreadyRecorded: false };
 }
 
+export function skipReason(env = process.env) {
+  const reason = env.SENTRY_DEPLOY_SKIP_REASON?.trim();
+  return reason || '';
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
+    const deferred = skipReason();
+    if (deferred) {
+      const summary = `Sentry deploy observation skipped (${deferred}).  Coolify will not have this SHA until after the weekday RTH latch or the evening drain.  RTH Deploy Latch completion re-runs this reporter.\n`;
+      console.log(summary.trim());
+      if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
+      process.exit(0);
+    }
     if (!process.env.SENTRY_AUTH_TOKEN?.trim()) throw new Error('SENTRY_AUTH_TOKEN is required');
     const receipt = await observeProduction({ expected: process.env.EXPECTED_SHA });
     const result = await reportDeploy(receipt, { token: process.env.SENTRY_AUTH_TOKEN, repositoryId: process.env.GITHUB_REPOSITORY_ID, runId: process.env.GITHUB_RUN_ID });

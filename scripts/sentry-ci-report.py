@@ -88,6 +88,9 @@ from pathlib import Path
 # one Sentry issue.
 APP = "socratic-trade"
 
+# Keys MUST match this repo's workflow `name:` values that define `schedule:`.
+# refresh-rag-snapshot is Fleet-OPS / AI-Fleet-Coordinator (FLEET-INFRA-DN),
+# not a Socratic-Trade workflow -- do not add it here.
 CRON_SCHEDULES = {
     "CI": "47 7 * * *",
     "Cleanup Actions Caches": "5 3 * * *",
