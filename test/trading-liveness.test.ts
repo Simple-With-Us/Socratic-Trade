@@ -89,7 +89,7 @@ describe("countLeadingFailedRuns", () => {
 });
 
 describe("trading-liveness", () => {
-  it("omits the dimension entirely when there are zero active-autonomy accounts", async () => {
+  it("omits the dimension entirely when there are zero active-autonomy accounts AND no autopilot-eligible-but-halted ones", async () => {
     const { db, liveness } = await load();
     // A connected account exists but is left at its default "halted" state — it must not make
     // the dimension appear (a halted account not completing runs is expected, not degraded).
@@ -101,6 +101,23 @@ describe("trading-liveness", () => {
     expect(publicAgg.degraded).toBe(0);
     expect(publicAgg.activeAccounts).toBe(0);
     expect(typeof publicAgg.marketOpen).toBe("boolean");
+  });
+
+  it("returns a non-null summary marking autonomy_fully_dark when an autopilot-eligible account is halted", async () => {
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Dark Account", "halted");
+    db.setPolicy(
+      { ...db.getPolicy(userId, accountId), strategyAuthority: "decide", systemState: "halted" },
+      userId,
+      accountId
+    );
+
+    const summary = liveness.getTradingLivenessSummary();
+    expect(summary).not.toBeNull();
+    expect(summary!.darkness?.fullyDark).toBe(true);
+    expect(summary!.darkness?.eligibleAccounts).toBeGreaterThan(0);
+    expect(summary!.accounts.length).toBe(0);
+    expect(summary!.degraded).toBe(true);
   });
 
   it("maps a fully-dark fleet to degraded > 0 with the fleet-level reason (no account rows to count)", async () => {
