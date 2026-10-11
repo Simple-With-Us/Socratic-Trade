@@ -17,7 +17,7 @@
 
 **Left alone.**  Trading logic.  Datadog.  No hardcoded DSN.
 
-**PR.**  https://github.com/Simple-With-Us/Socratic-Trade/pull/4513 (ready).
+**PR.**  https://github.com/Simple-With-Us/Socratic-Trade/pull/4513 (ready).  Hosted `verify` failed once on `otelResourceAttributes()` env bleed; test stubs release env keys — re-running CI.
 
 **Verification.**  `npm run lint` (0 errors).  `npx tsc --noEmit` clean.  Targeted: 23 vitest + 29 `node --test` on sentry-release / tunnel / ios-ship / CI-report / sentry-report-deploy.  `npm run build` (Next 16.4.0) succeeded.  Full local `npm test` was 9218 pass / 10 fail / 51 skip: the 10 fails are this Cloud VM (`PUSHOVER_*` / `RESEND_API_KEY` leaking into notify tests; Node 22 `/exec-daemon/node` cannot load `.ts` in `summarize-cpuprofile.mjs`) plus unrelated provider-pool flakes, not this diff.  Hosted `verify` is the merge gate.
 

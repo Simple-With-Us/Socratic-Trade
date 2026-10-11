@@ -52,6 +52,7 @@ Touched files:
 - `npm run lint` -- 0 errors (grandfathered warnings only).
 - `npx tsc --noEmit` -- clean after `resolveSentryRelease` accepts `Record<string, string | undefined>` (test fixtures no longer need a fake `NODE_ENV`).
 - Targeted: 23 vitest (`test/sentry-release.test.ts`, `test/sentry-tunnel-middleware.test.ts`, `test/ios-manual-signing.test.ts`, `test/sentry-ci-report-workflows.test.ts`) + 29 `node --test` on `scripts/sentry-report-deploy.node-test.mjs`.
+- CI fix (2026-10-11): `test/sentry-release.test.ts` stubs release env keys before asserting the no-release `otelResourceAttributes()` shape so hosted `verify` (GITHUB_SHA set) does not fail the test.
 - `npm run build` -- Next 16.4.0 webpack build succeeded (43/43 static pages).
 - Full local `npm test` -- 9218 passed, 10 failed, 51 skipped (819 files).  Failures are this Cloud VM (notify creds in env, Node 22 `.ts` loader on `summarize-cpuprofile.mjs`) plus unrelated provider-pool flakes, not this observability diff.  Hosted `verify` is authoritative.
 
