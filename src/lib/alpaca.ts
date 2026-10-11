@@ -28,6 +28,7 @@ import {
   type OptionOrderInput
 } from "./option-orders";
 import { OrderValidationError } from "./types";
+import { z } from "zod";
 import { fromAlpacaSymbol, normalizeSymbol, roundAlpacaPrice, toAlpacaSymbol } from "./money";
 import { mergeAccountCapabilities } from "./venue-contract";
 import { normalizeVenueOrder } from "./venue-normalization";
@@ -101,18 +102,6 @@ import {
   equityOrdersDefaultSinceIso,
   withDeadline
 } from "./inflight-deadline";
-
-// Alpaca SDK v3 used axios without a default timeout; v5 uses `fetch` with `timeoutMs` on the client
-// (set in alpaca-sdk-legacy-client).  Keep the axios pin only when axios is still on the module graph.
-try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const sdkAxios = require("axios") as { defaults?: { timeout?: number } };
-  if (sdkAxios?.defaults) {
-    sdkAxios.defaults.timeout = ALPACA_BROKER_IO_DEADLINE_MS;
-  }
-} catch {
-  // v5 path: no axios dependency.
-}
 
 /**
  * Fill in a usable price for any symbol the broker didn't quote (>0). Alpaca's latest-quote feed
@@ -1340,28 +1329,46 @@ function optionalIso(value: unknown): string | undefined {
   return Number.isFinite(time) ? new Date(time).toISOString() : undefined;
 }
 
+/** Broker-error shape shared by the v3 axios envelope (`response.status` / `response.data`)
+ *  and the v5 fetch `ApiError` (top-level `status`, broker text folded into `message`).
+ *  Parsed with safeParse — never asserted — so a timeout abort or foreign throw cannot
+ *  crash the order path; unparseable input behaves as "no status, no body". */
+const AlpacaErrorSchema = z
+  .object({
+    status: z.number().optional(),
+    message: z.string().optional(),
+    response: z
+      .object({
+        status: z.number().optional(),
+        data: z.unknown().optional()
+      })
+      .passthrough()
+      .optional()
+  })
+  .passthrough();
+
 function alpacaErrorHttpStatus(error: unknown): number | undefined {
-  const err = error as { status?: number; response?: { status?: number } };
-  if (typeof err.status === "number") return err.status;
-  return err.response?.status;
+  const parsed = AlpacaErrorSchema.safeParse(error);
+  if (!parsed.success) return undefined;
+  if (typeof parsed.data.status === "number") return parsed.data.status;
+  return parsed.data.response?.status;
 }
 
 function formatAlpacaOrderError(error: unknown): string {
-  const err = error as {
-    message?: string;
-    response?: { status?: number; data?: unknown };
-    status?: number;
-  };
+  const parsed = AlpacaErrorSchema.safeParse(error);
+  const err = parsed.success ? parsed.data : undefined;
   const status = alpacaErrorHttpStatus(error);
-  const data = err.response?.data;
+  const data = err?.response?.data;
   const body = typeof data === "string"
     ? data
     : data && typeof data === "object"
       ? JSON.stringify(data)
       : "";
-  const message = err.message ?? String(error);
+  const message = err?.message ?? String(error);
   const detail = [status ? `HTTP ${status}` : "", message, body].filter(Boolean).join(" — ");
-  if (status === 403 && !/position|short|permission|forbidden|insufficient/i.test(body)) {
+  // The v5 SDK folds the broker `{code, message}` envelope into `message` (there is no
+  // `response.data` to test), so match the permission keywords against both.
+  if (status === 403 && !/position|short|permission|forbidden|insufficient/i.test(`${message} ${body}`)) {
     return `${detail} — broker forbade the order; verify the account has permission and a matching open position if this was a sell/cover.`;
   }
   return detail;
