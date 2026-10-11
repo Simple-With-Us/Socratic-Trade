@@ -10,16 +10,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 let latestQuotes: Record<string, { bp?: number; ap?: number; t?: string }> = {};
 
 vi.mock("@alpacahq/alpaca-trade-api", () => {
-  return {
-    default: class MockAlpaca {
-      async getLatestQuotes() {
-        return latestQuotes;
-      }
-      async getAccount() {
-        return { account_number: "ACC-NBBO", portfolio_value: "10000", equity: "10000", cash: "10000" };
-      }
+  class MockAlpaca {
+    async getLatestQuotes() {
+      return latestQuotes;
     }
-  };
+    async getAccount() {
+      return { account_number: "ACC-NBBO", portfolio_value: "10000", equity: "10000", cash: "10000" };
+    }
+  }
+  return { Alpaca: MockAlpaca, default: MockAlpaca };
 });
 
 beforeEach(async () => {

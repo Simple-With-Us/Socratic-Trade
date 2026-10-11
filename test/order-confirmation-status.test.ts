@@ -85,8 +85,7 @@ let lastCreateOrderOpts: Record<string, unknown> | null = null;
 let mockOrderSeq = 0;
 
 vi.mock("@alpacahq/alpaca-trade-api", () => {
-  return {
-    default: class MockAlpaca {
+  class MockAlpaca {
       async getAccount() {
         return { account_number: "ACC-CONFIRM", portfolio_value: "50000", buying_power: "25000", equity: "40000", cash: "40000" };
       }
@@ -127,8 +126,8 @@ vi.mock("@alpacahq/alpaca-trade-api", () => {
         return { id: `order-confirm-${mockOrderSeq}`, status: mockOrderStatus, qty: opts.qty, filled_qty: "0", filled_avg_price: null };
       }
       async cancelOrder() {}
-    }
-  };
+  }
+  return { Alpaca: MockAlpaca, default: MockAlpaca };
 });
 
 const ACCOUNT = "ACC-CONFIRM";

@@ -1,4 +1,7 @@
-import Alpaca from "@alpacahq/alpaca-trade-api";
+import {
+  createAlpacaBrokerSdk,
+  type LegacyAlpacaRestClient
+} from "./alpaca-sdk-legacy-client";
 import crypto from "crypto";
 import type {
   AccountCapabilities,
@@ -25,6 +28,7 @@ import {
   type OptionOrderInput
 } from "./option-orders";
 import { OrderValidationError } from "./types";
+import { z } from "zod";
 import { fromAlpacaSymbol, normalizeSymbol, roundAlpacaPrice, toAlpacaSymbol } from "./money";
 import { mergeAccountCapabilities } from "./venue-contract";
 import { normalizeVenueOrder } from "./venue-normalization";
@@ -98,20 +102,6 @@ import {
   equityOrdersDefaultSinceIso,
   withDeadline
 } from "./inflight-deadline";
-
-// Alpaca SDK does not configure a timeout, so broker sockets can hang indefinitely (axios default 0).
-// The SDK does `require("axios")` (the CommonJS build), so we must mutate THAT instance: an ESM
-// `import axios from "axios"` resolves the separate ESM build and would mutate a different object.
-//
-// Use a plain `require("axios")`, NOT `createRequire(import.meta.url)`.  This module is reached from
-// instrumentation.ts, which Next also compiles for the edge runtime, and webpack cannot resolve the
-// "module" builtin there (build failed: "Module not found: Can't resolve 'module'", PR #3313 CI
-// 2026-09-18).  Next bundles the SDK, so a webpack-visible `require("axios")` resolves to the very
-// module instance the bundled SDK calls; a runtime require (`createRequire` / `eval("require")`)
-// would mutate Node's separate copy and leave the SDK unbounded while looking correct.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const sdkAxios = require("axios") as { defaults: { timeout?: number } };
-sdkAxios.defaults.timeout = ALPACA_BROKER_IO_DEADLINE_MS;
 
 /**
  * Fill in a usable price for any symbol the broker didn't quote (>0). Alpaca's latest-quote feed
@@ -292,7 +282,7 @@ export function mcpWriteFailureAllowsRestFallback(error: unknown): boolean {
 class AlpacaBrokerGateway implements BrokerGateway {
   // Default getEquityOrders returns open orders plus terminal orders inside a bounded window.
   readonly ordersListIncludesTerminal = true;
-  private alpaca: Alpaca;
+  private alpaca: LegacyAlpacaRestClient;
   private label: string;
   private isMcp: boolean;
   private mcpUrl?: string;
@@ -348,23 +338,15 @@ class AlpacaBrokerGateway implements BrokerGateway {
       }
     }
 
-    const options: any = {
+    const legacyOpts = {
       paper: accountKeys?.environment !== "live",
-      usePolygon: false
+      keyId: keyId && secretKey ? keyId : undefined,
+      secretKey: keyId && secretKey ? secretKey : undefined,
+      oauth: keyId && !secretKey ? keyId : undefined,
+      baseUrl: baseUrl && !this.isMcp ? baseUrl : undefined
     };
 
-    if (keyId && !secretKey) {
-      options.oauth = keyId;
-    } else {
-      options.keyId = keyId;
-      options.secretKey = secretKey;
-    }
-
-    if (baseUrl && !this.isMcp) {
-      options.baseUrl = baseUrl;
-    }
-
-    this.alpaca = new Alpaca(options);
+    this.alpaca = createAlpacaBrokerSdk(legacyOpts);
   }
 
   // Wrap a raw Alpaca SDK call so the admin connections-health page can show whether the
@@ -563,7 +545,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
       }
       return undefined;
     } catch (error) {
-      const status = (error as { response?: { status?: number } })?.response?.status;
+      const status = alpacaErrorHttpStatus(error);
       if (status === 404) return undefined;
       const msg = error instanceof Error ? error.message : String(error);
       if (/\b404\b|not found/i.test(msg)) return undefined;
@@ -589,7 +571,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
       }
       return undefined;
     } catch (error) {
-      const status = (error as { response?: { status?: number } })?.response?.status;
+      const status = alpacaErrorHttpStatus(error);
       if (status === 404) {
         return { orderId, refId: crypto.randomUUID(), state: "cancel_requested", raw: { reconciled: true, missing: true } };
       }
@@ -1243,7 +1225,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
       // propagate so reconcilePendingBracketTeardowns' bounded-retry sweep actually retries it,
       // instead of the row being silently and permanently dropped on the first hiccup (adversarial
       // review of PR #1661, 2026-07-16).
-      if ((error as { response?: { status?: number } })?.response?.status === 404) {
+      if (alpacaErrorHttpStatus(error) === 404) {
         return { cancelledOrderIds: [] };
       }
       throw error;
@@ -1347,21 +1329,46 @@ function optionalIso(value: unknown): string | undefined {
   return Number.isFinite(time) ? new Date(time).toISOString() : undefined;
 }
 
+/** Broker-error shape shared by the v3 axios envelope (`response.status` / `response.data`)
+ *  and the v5 fetch `ApiError` (top-level `status`, broker text folded into `message`).
+ *  Parsed with safeParse — never asserted — so a timeout abort or foreign throw cannot
+ *  crash the order path; unparseable input behaves as "no status, no body". */
+const AlpacaErrorSchema = z
+  .object({
+    status: z.number().optional(),
+    message: z.string().optional(),
+    response: z
+      .object({
+        status: z.number().optional(),
+        data: z.unknown().optional()
+      })
+      .passthrough()
+      .optional()
+  })
+  .passthrough();
+
+function alpacaErrorHttpStatus(error: unknown): number | undefined {
+  const parsed = AlpacaErrorSchema.safeParse(error);
+  if (!parsed.success) return undefined;
+  if (typeof parsed.data.status === "number") return parsed.data.status;
+  return parsed.data.response?.status;
+}
+
 function formatAlpacaOrderError(error: unknown): string {
-  const err = error as {
-    message?: string;
-    response?: { status?: number; data?: unknown };
-  };
-  const status = err.response?.status;
-  const data = err.response?.data;
+  const parsed = AlpacaErrorSchema.safeParse(error);
+  const err = parsed.success ? parsed.data : undefined;
+  const status = alpacaErrorHttpStatus(error);
+  const data = err?.response?.data;
   const body = typeof data === "string"
     ? data
     : data && typeof data === "object"
       ? JSON.stringify(data)
       : "";
-  const message = err.message ?? String(error);
+  const message = err?.message ?? String(error);
   const detail = [status ? `HTTP ${status}` : "", message, body].filter(Boolean).join(" — ");
-  if (status === 403 && !/position|short|permission|forbidden|insufficient/i.test(body)) {
+  // The v5 SDK folds the broker `{code, message}` envelope into `message` (there is no
+  // `response.data` to test), so match the permission keywords against both.
+  if (status === 403 && !/position|short|permission|forbidden|insufficient/i.test(`${message} ${body}`)) {
     return `${detail} — broker forbade the order; verify the account has permission and a matching open position if this was a sell/cover.`;
   }
   return detail;
