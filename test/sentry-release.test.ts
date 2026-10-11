@@ -1,7 +1,17 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { otelResourceAttributes, resolveSentryRelease, SENTRY_SERVICE_NAME } from "../src/lib/sentry-release";
+
+const RELEASE_ENV_KEYS = [
+  "SENTRY_RELEASE",
+  "APP_RELEASE_SHA",
+  "SOURCE_COMMIT",
+  "COOLIFY_COMMIT_SHA",
+  "GIT_COMMIT_SHA",
+  "GITHUB_SHA",
+  "VERCEL_GIT_COMMIT_SHA"
+] as const;
 
 const repoRoot = join(import.meta.dirname, "..");
 const sha = "a".repeat(40);
@@ -17,7 +27,14 @@ describe("resolveSentryRelease", () => {
 });
 
 describe("otelResourceAttributes", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("always names the service and stamps a full SHA as sentry.release", () => {
+    for (const key of RELEASE_ENV_KEYS) {
+      vi.stubEnv(key, "");
+    }
     expect(otelResourceAttributes()).toEqual({ "service.name": SENTRY_SERVICE_NAME });
     expect(otelResourceAttributes(sha)).toEqual({
       "service.name": SENTRY_SERVICE_NAME,
