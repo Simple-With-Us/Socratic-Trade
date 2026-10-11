@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-10 CLAUDE - Effort-issues sync HTTP 500 retry (board `7989bcda`, branch `claude/effort-sync-retry`)
+
+**What.**  `Effort Issues Sync` run 37388978298 aborted on `update issue #3797 failed: 500 {}`.  Salvaged from the never-pushed BF-FIXER lane (commit `e289548e6`):  an idempotent 5xx and a bare 429 now use the existing rate-limit retry budget in `scripts/sync-effort-issues.py`.  A POST 500 is never replayed.  Budget exhaustion stays a partial sync (exit 0).
+
+**Docs.**  `docs/rollouts/2026-10-10-effort-sync-http-500-retry.md`.  `PLAN.md` unchanged.
+
+**Verification.**  `python3 -m py_compile scripts/sync-effort-issues.py`.  `python3 -m unittest scripts/sync_effort_issues_retry_test.py` (10 tests, not wired into CI).  The required `verify` check runs on the PR.
+
+**Next.**  Nothing for this change.  Other repos' copies of the script keep the 502/503/504-only budget.
+
 ## 2026-10-10 CLAUDE - Infisical prod-only (board `11df8f1b`, branch `claude/infisical-prod-only`)
 
 **What.**  The Infisical `dev` and `staging` environments are retiring, so every script and code default now selects `prod` and refuses anything else:  `scripts/infisical-secrets-safe.sh` adds `--env prod` (the CLI defaults to dev) and `delete` needs an explicit one, `.cursor/infisical.env` is `prod`, and `infisical-run.mjs`, `src/lib/infisical-settings.ts`, `infisical-prod-cutover.sh` and `sync-provider-knobs.sh` refuse non-prod.  Production already ran `INFISICAL_ENV=prod`, so live behavior is unchanged.
