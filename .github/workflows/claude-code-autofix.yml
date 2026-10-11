@@ -24,10 +24,9 @@ jobs:
       (github.event_name == 'pull_request_review' &&
        github.event.review.user.type == 'Bot' &&
        github.event.pull_request.head.repo.full_name == github.repository)
-    uses: Simple-With-Us/congress-trading-shared/.github/workflows/codex-autofix-reusable.yml@3af2bff8dc3c17d713d64316ad46f5841c92701d
+    uses: Simple-With-Us/congress-trading-shared/.github/workflows/codex-autofix-reusable.yml@f0e19d75c0b0320e09800cb2092f8cd8dc074fd0
     secrets:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
-      GH_PAT: ${{ secrets.GH_PAT }}
     with:
       prompt: |
         You are the autonomous fixer that responds to the PR review bots (Codex
