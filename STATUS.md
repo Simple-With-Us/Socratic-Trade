@@ -8,7 +8,7 @@
 
 **Docs.**  `docs/rollouts/2026-10-11-alpaca-sdk-v5-migration.md`, `docs/EFFORT-LOG.md`.
 
-**Next.**  Open/update PR; merge when `verify` CI is green.
+**Next.**  PR #4475; merge when `verify` CI is green.
 
 ## 2026-10-10 CLAUDE - Effort-issues sync HTTP 500 retry (board `7989bcda`, branch `claude/effort-sync-retry`)
 
