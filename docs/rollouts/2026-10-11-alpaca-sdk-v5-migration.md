@@ -7,7 +7,7 @@ Renovate bumps of `@alpacahq/alpaca-trade-api` to v5 broke `tsc` because the v3 
 ## Changes Made
 
 - Bumped `@alpacahq/alpaca-trade-api` to `^5.0.0` (`package.json`, lockfile).
-- Added `src/lib/alpaca-sdk-legacy-client.ts` — maps v5 clients to the v3-shaped REST surface `AlpacaBrokerGateway` still calls, including camelCase → snake_case normalization for account/order payloads.
+- Added `src/lib/alpaca-sdk-legacy-client.ts` — maps v5 clients to the v3-shaped REST surface `AlpacaBrokerGateway` still calls, including camelCase → snake_case normalization for account/order payloads and a v3-compatible `.configuration` object for credential introspection tests.
 - Updated `src/lib/alpaca.ts` to construct the legacy adapter, handle v5 `ApiError.status`, and make the old axios timeout pin optional (v5 uses `fetch` + `timeoutMs`).
 - Updated Alpaca vitest mocks to export both `Alpaca` and `default` for the v5 named export.
 
