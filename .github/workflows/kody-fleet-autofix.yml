@@ -1,0 +1,46 @@
+# Enabled fleet wide by the owner on 2026-10-11 (boards 04b963b7 and 99e559ea).
+# Meta Muse Spark via Vercel AI Gateway, paid; at most 5 attempts per UTC day in this repository.
+name: Kody Muse Spark Fix Proposals
+
+# Generated offline.  Missing SWU_KODY_AUTOFIX_ENABLED means disabled.
+# MODEL_API_KEY is forwarded explicitly; secrets are never inherited.
+# Budget approval and protected-environment setup are separate owner actions.
+# Daily attempt slots bound this repository only; they are not a dollar cap.
+on:
+  check_run:
+    types: [completed]
+
+permissions: {}
+# Shared with the fleet's other PR autofix callers so only one autofix runs per PR.
+concurrency:
+  group: pr-autofix-${{ github.repository }}-${{ github.event.check_run.pull_requests[0].number || github.event.check_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    if: >-
+      vars.SWU_KODY_AUTOFIX_ENABLED == 'true' &&
+      github.event_name == 'check_run' && github.event.action == 'completed' &&
+      github.run_attempt == 1 &&
+      github.event.check_run.app.id == 413034 &&
+      github.event.sender.type == 'Bot' && github.event.sender.id == 148880201 &&
+      github.event.sender.login == 'kody-ai[bot]' &&
+      github.event.check_run.conclusion == 'success' &&
+      github.event.check_run.pull_requests[0].number != null &&
+      github.event.check_run.pull_requests[1] == null
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      actions: read
+    uses: Simple-With-Us/congress-trading-shared/.github/workflows/kody-autofix-reusable.yml@e28fefcd12d4747e3ed66cb5c5b3f3dd7ea2db88
+    with:
+      repository_id: '1270451796'
+      profile: 'web'
+      source_prefixes: '["src/","app/"]'
+      daily_attempt_limit: 5
+      budget_policy_id: 'approved-owner-2026-10-11'
+      model: 'meta/muse-spark-1.3-contributor'
+      model_base_url: 'https://ai-gateway.vercel.sh/v1'
+    secrets:
+      MODEL_API_KEY: ${{ secrets.VERCEL_AI_GATEWAY_API_KEY }}
