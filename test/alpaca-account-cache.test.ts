@@ -7,8 +7,7 @@ let getAccountCalls = 0;
 let getAccountDelayMs = 0;
 
 vi.mock("@alpacahq/alpaca-trade-api", () => {
-  return {
-    default: class MockAlpaca {
+  class MockAlpaca {
       async getAccount() {
         getAccountCalls += 1;
         if (getAccountDelayMs > 0) {
@@ -31,8 +30,8 @@ vi.mock("@alpacahq/alpaca-trade-api", () => {
       async getOrders() {
         return [];
       }
-    }
-  };
+  }
+  return { Alpaca: MockAlpaca, default: MockAlpaca };
 });
 
 beforeEach(async () => {

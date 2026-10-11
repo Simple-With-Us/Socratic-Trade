@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-11 CURSOR — Alpaca SDK v5 migration (branch `cursor/alpaca-sdk-v5-migration-b257`)
+
+**What.**  `@alpacahq/alpaca-trade-api` upgraded to v5 with `src/lib/alpaca-sdk-legacy-client.ts` adapting `trading` / `marketData` to the existing gateway surface.  Renovate-only bumps had been failing `tsc`.
+
+**Verification.**  `npm run lint`, `npx tsc --noEmit`, targeted Alpaca vitest (106 tests), `npm run build`.  ST prod: `bash scripts/verify-deploy-sha.sh` PASS on `01441e3d` (origin/main).
+
+**Docs.**  `docs/rollouts/2026-10-11-alpaca-sdk-v5-migration.md`, `docs/EFFORT-LOG.md`.
+
+**Next.**  Open/update PR; merge when `verify` CI is green.
+
 ## 2026-10-10 CLAUDE - Effort-issues sync HTTP 500 retry (board `7989bcda`, branch `claude/effort-sync-retry`)
 
 **What.**  `Effort Issues Sync` run 37388978298 aborted on `update issue #3797 failed: 500 {}`.  Salvaged from the never-pushed BF-FIXER lane (commit `e289548e6`):  an idempotent 5xx and a bare 429 now use the existing rate-limit retry budget in `scripts/sync-effort-issues.py`.  A POST 500 is never replayed.  Budget exhaustion stays a partial sync (exit 0).
