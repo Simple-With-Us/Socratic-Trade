@@ -136,6 +136,7 @@ CID="$(get_env INFISICAL_CLIENT_ID)"
 CSECRET="$(get_env INFISICAL_CLIENT_SECRET)"
 PID="$(get_env INFISICAL_PROJECT_ID)"
 ENVN="$(get_env INFISICAL_ENV)"; ENVN="${ENVN:-prod}"
+[ "$ENVN" = "prod" ] || { echo "INFISICAL_ENV in $ENVF is not prod (dev and staging are retired)" >&2; exit 15; }
 SPATH="$(get_env INFISICAL_PATH)"; SPATH="${SPATH:-/}"
 [ -n "$CID" ] && [ -n "$CSECRET" ] && [ -n "$PID" ] || { echo "missing Infisical creds in $ENVF" >&2; exit 12; }
 BIN="$(command -v infisical || true)"
@@ -221,6 +222,7 @@ CID="$(get_env INFISICAL_CLIENT_ID)"
 CSECRET="$(get_env INFISICAL_CLIENT_SECRET)"
 PID="$(get_env INFISICAL_PROJECT_ID)"
 ENVN="$(get_env INFISICAL_ENV)"; ENVN="${ENVN:-prod}"
+[ "$ENVN" = "prod" ] || { echo "INFISICAL_ENV in $ENVF is not prod (dev and staging are retired)" >&2; exit 15; }
 SPATH="$(get_env INFISICAL_PATH)"; SPATH="${SPATH:-/}"
 [ -n "$CID" ] && [ -n "$CSECRET" ] && [ -n "$PID" ] || { echo "missing Infisical creds in $ENVF" >&2; exit 12; }
 BIN="$(command -v infisical || true)"

@@ -44,6 +44,8 @@ interface MockLog {
   ops: string[];
   /** projectId -> key -> value */
   secrets: Map<string, Map<string, string>>;
+  /** environment query param of every secrets GET */
+  environments: string[];
   failLogin: boolean;
   failGet: boolean;
   failPatch: boolean;
@@ -55,6 +57,7 @@ function freshLog(): MockLog {
   return {
     ops: [],
     secrets: new Map(),
+    environments: [],
     failLogin: false,
     failGet: false,
     failPatch: false,
@@ -84,6 +87,7 @@ function makeFetch(log: MockLog): typeof fetch {
       const qs = new URL(u).searchParams;
       const ws = qs.get("workspaceId") ?? "";
       log.ops.push(`get:${ws === APP_PROJ ? "app" : ws === SHARED_PROJ ? "shared" : ws}`);
+      log.environments.push(qs.get("environment") ?? "");
       if (log.failGet) return new Response("boom", { status: 500 });
       const store = log.secrets.get(ws) ?? new Map<string, string>();
       return json({
@@ -125,9 +129,9 @@ function credentialedOptions(log: MockLog, refreshIntervalMs = 0) {
     clientId: "test-id",
     clientSecret: "test-secret",
     appProjectId: APP_PROJ,
-    appEnvironment: "dev",
+    appEnvironment: "prod",
     sharedProjectId: SHARED_PROJ,
-    sharedEnvironment: "dev",
+    sharedEnvironment: "prod",
     refreshIntervalMs,
     fetchImpl: makeFetch(log)
   };
@@ -195,6 +199,55 @@ describe("reads: zero network calls after init", () => {
     infisicalSettingsStatus();
     expect(log.ops.length).toBe(opsAfterInit);
   });
+});
+
+describe("environment selection is prod-only (dev and staging retired 2026-10-10)", () => {
+  afterEach(() => {
+    delete process.env.INFISICAL_ENV;
+    delete process.env.INFISICAL_SHARED_ENV;
+  });
+
+  it("defaults to prod for both projects when nothing selects an environment", async () => {
+    const log = freshLog();
+    log.secrets.set(APP_PROJ, new Map([["K", "v"]]));
+    await initInfisicalSettings({
+      clientId: "test-id",
+      clientSecret: "test-secret",
+      appProjectId: APP_PROJ,
+      sharedProjectId: SHARED_PROJ,
+      refreshIntervalMs: 0,
+      fetchImpl: makeFetch(log)
+    });
+    expect(log.environments.length).toBeGreaterThan(0);
+    expect(new Set(log.environments)).toEqual(new Set(["prod"]));
+  });
+
+  const refused: Array<[string, Record<string, string>, Record<string, string>]> = [
+    ["appEnvironment dev", { appEnvironment: "dev" }, {}],
+    ["appEnvironment staging", { appEnvironment: "staging" }, {}],
+    ["sharedEnvironment dev", { sharedEnvironment: "dev" }, {}],
+    ["INFISICAL_ENV=dev", {}, { INFISICAL_ENV: "dev" }],
+    ["INFISICAL_ENV=staging", {}, { INFISICAL_ENV: "staging" }],
+    ["INFISICAL_SHARED_ENV=staging", {}, { INFISICAL_SHARED_ENV: "staging" }]
+  ];
+  for (const [label, optionOverrides, processEnv] of refused) {
+    it(`refuses ${label}: no Infisical call, loud error, boot-env fallback`, async () => {
+      process.env.SOT_TEST_SEED = "fallback-value";
+      Object.assign(process.env, processEnv);
+      const log = freshLog();
+      const base = credentialedOptions(log);
+      // The process-env cases must fall through to INFISICAL_ENV / INFISICAL_SHARED_ENV.
+      const options =
+        Object.keys(processEnv).length > 0
+          ? { ...base, appEnvironment: undefined, sharedEnvironment: undefined }
+          : { ...base, ...optionOverrides };
+      const status = await initInfisicalSettings(options);
+      expect(status.credentialed).toBe(false);
+      expect(status.lastInitError).toMatch(/Infisical environment must be "prod"/);
+      expect(log.ops).toEqual([]);
+      expect(getSetting("SOT_TEST_SEED")).toBe("fallback-value");
+    });
+  }
 });
 
 describe("write-through: Infisical first, then cache", () => {

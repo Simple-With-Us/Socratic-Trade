@@ -40,6 +40,10 @@ ENV_DIR="$HOME/.config/agentic-trading"
 ENV_FILE="$ENV_DIR/deploy.env"
 PROJECT_ID="${INFISICAL_PROJECT_ID:-39d93bb7-76f9-498c-8b50-a7def52e072f}" # Socratic-Trade (slug: socratic-trade)
 ENV_NAME="${INFISICAL_ENV:-prod}"
+if [ "$ENV_NAME" != "prod" ]; then
+  printf '\n[cutover] ERROR: INFISICAL_ENV must be prod (dev and staging are retired)\n' >&2
+  exit 1
+fi
 SECRETS_PATH="${INFISICAL_PATH:-/}"
 SHARED_PROJECT_ID="${INFISICAL_SHARED_PROJECT_ID:-18f563a3-9c88-454c-96eb-28fc9678f3ba}" # shared-at-ct
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:4000/api/health}"

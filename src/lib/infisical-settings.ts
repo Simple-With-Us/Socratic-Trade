@@ -61,11 +61,11 @@ export interface InitInfisicalSettingsOptions {
   clientSecret?: string;
   /** App project override.  Defaults to INFISICAL_PROJECT_ID env, then APP_INFISICAL_PROJECT_ID. */
   appProjectId?: string;
-  /** App environment slug.  Defaults to INFISICAL_ENV env, then "prod". */
+  /** App environment slug.  Defaults to INFISICAL_ENV env, then "prod".  Only "prod" is accepted. */
   appEnvironment?: string;
   /** Shared project override.  Defaults to INFISICAL_SHARED_PROJECT_ID env, then SHARED_INFISICAL_PROJECT_ID. */
   sharedProjectId?: string | null;
-  /** Shared environment slug.  Defaults to INFISICAL_SHARED_ENV env, then the app environment. */
+  /** Shared environment slug.  Defaults to INFISICAL_SHARED_ENV env, then the app environment.  Only "prod" is accepted. */
   sharedEnvironment?: string;
   /** Infisical instance base URL.  Defaults to https://app.infisical.com. */
   infisicalUrl?: string;
@@ -136,8 +136,20 @@ function resolveAppProjectId(options: InitInfisicalSettingsOptions): string {
   );
 }
 
+/** prod is the only Infisical environment (owner 2026-10-10: dev and staging are retired). */
+const INFISICAL_ENVIRONMENT = "prod";
+
+function requireProdEnvironment(label: "app" | "shared", value: string): void {
+  if (value !== INFISICAL_ENVIRONMENT) {
+    throw new Error(
+      `${label} Infisical environment must be "${INFISICAL_ENVIRONMENT}" ` +
+        `(dev and staging are retired); got "${value.slice(0, 32)}"`
+    );
+  }
+}
+
 function resolveAppEnvironment(options: InitInfisicalSettingsOptions): string {
-  return options.appEnvironment ?? process.env.INFISICAL_ENV ?? "prod";
+  return options.appEnvironment ?? process.env.INFISICAL_ENV ?? INFISICAL_ENVIRONMENT;
 }
 
 function resolveSharedProjectId(options: InitInfisicalSettingsOptions): string | null {
@@ -261,6 +273,10 @@ export function initInfisicalSettings(
     const sharedProjectId = resolveSharedProjectId(options);
     const sharedEnv = options.sharedEnvironment ?? process.env.INFISICAL_SHARED_ENV ?? appEnv;
     try {
+      // Inside the try on purpose:  a stray non-prod value takes the same
+      // loud, fail-soft path as any other failed credentialed init.
+      requireProdEnvironment("app", appEnv);
+      if (sharedProjectId) requireProdEnvironment("shared", sharedEnv);
       s.app = createInfisicalSettings({
         projectId: appProjectId,
         environment: appEnv,

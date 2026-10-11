@@ -2,10 +2,17 @@
 # Safe Infisical helpers for agents — NEVER dumps secret values to stdout/stderr.
 #
 # Usage:
-#   bash scripts/infisical-secrets-safe.sh set KEY=VALUE --projectId ID --env prod
-#   bash scripts/infisical-secrets-safe.sh has KEY --projectId ID --env prod
-#   bash scripts/infisical-secrets-safe.sh names --projectId ID --env prod
+#   bash scripts/infisical-secrets-safe.sh set KEY=VALUE --projectId ID [--env prod]
+#   bash scripts/infisical-secrets-safe.sh has KEY --projectId ID [--env prod]
+#   bash scripts/infisical-secrets-safe.sh names --projectId ID [--env prod]
 #   bash scripts/infisical-secrets-safe.sh delete KEY --projectId ID --env prod
+#
+# Environment (owner 2026-10-10):  prod is the only Infisical environment;  dev
+# and staging are retired.  The infisical CLI defaults to --env dev, so a call
+# without --env would read the wrong environment and report a prod secret as
+# missing.  set, has and names add --env prod when none is given.  delete never
+# defaults:  it requires an explicit --env prod.  Every command refuses any
+# other value (--env X and --env=X).
 #
 # LLM provider API keys must NEVER be stored in Infisical for Socratic-Trade.
 # They belong on Connections (user_api_keys). `set` refuses those names.
@@ -35,6 +42,40 @@ is_llm_runtime_key() {
   return 1
 }
 
+# Sets ENV_ARGS to the caller's remaining flags with --env prod enforced.
+# REQUIRE_EXPLICIT_ENV=1 (delete) refuses a call that has no --env at all.
+REQUIRE_EXPLICIT_ENV=0
+ENV_ARGS=()
+normalize_env() {
+  local seen=0 want=0 a
+  ENV_ARGS=()
+  for a in "$@"; do
+    if [ "$want" = 1 ]; then
+      [ "$a" = "prod" ] || die "refusing --env '${a:0:20}':  prod is the only Infisical environment (dev and staging are retired)"
+      ENV_ARGS+=("$a"); want=0
+      continue
+    fi
+    case "$a" in
+      --env)
+        seen=1; want=1; ENV_ARGS+=("$a")
+        ;;
+      --env=*)
+        seen=1
+        [ "${a#--env=}" = "prod" ] || die "refusing '${a:0:26}':  prod is the only Infisical environment (dev and staging are retired)"
+        ENV_ARGS+=("$a")
+        ;;
+      *)
+        ENV_ARGS+=("$a")
+        ;;
+    esac
+  done
+  [ "$want" = 0 ] || die "--env needs a value;  only prod is allowed"
+  if [ "$seen" = 0 ]; then
+    [ "$REQUIRE_EXPLICIT_ENV" = 0 ] || die "this command needs an explicit --env prod (it never defaults)"
+    ENV_ARGS+=(--env prod)
+  fi
+}
+
 cmd="${1:-}"; shift || true
 [ -n "$cmd" ] || die "missing command (set|has|names|delete)"
 
@@ -57,7 +98,7 @@ done
 case "$cmd" in
   set)
     pair="${1:-}"; shift || true
-    [ -n "$pair" ] || die "usage: set KEY=VALUE --projectId ID --env ENV"
+    [ -n "$pair" ] || die "usage: set KEY=VALUE --projectId ID [--env prod]"
     case "$pair" in
       *=*) ;;
       *) die "set argument must be KEY=VALUE" ;;
@@ -66,15 +107,17 @@ case "$cmd" in
     if is_llm_runtime_key "$key"; then
       die "refusing to set $key — LLM runtime keys must not live in Infisical for Socratic-Trade; paste them on Connections"
     fi
+    normalize_env "$@"
     # never echo value
-    infisical secrets set "$pair" "$@" >/dev/null
+    infisical secrets set "$pair" "${ENV_ARGS[@]}" >/dev/null
     info "set ok key=$key"
     ;;
   has)
     key="${1:-}"; shift || true
-    [ -n "$key" ] || die "usage: has KEY --projectId ID --env ENV"
+    [ -n "$key" ] || die "usage: has KEY --projectId ID [--env prod]"
+    normalize_env "$@"
     # capture plain value and only print length
-    val="$(infisical secrets get "$key" --plain "$@" 2>/dev/null || true)"
+    val="$(infisical secrets get "$key" --plain "${ENV_ARGS[@]}" 2>/dev/null || true)"
     if [ -z "$val" ]; then
       info "missing key=$key"
       exit 1
@@ -82,8 +125,9 @@ case "$cmd" in
     info "present key=$key len=${#val}"
     ;;
   names)
+    normalize_env "$@"
     # List key NAMES only via JSON + jq, never print secretValue
-    raw="$(infisical secrets --output json "$@" 2>/dev/null || true)"
+    raw="$(infisical secrets --output json "${ENV_ARGS[@]}" 2>/dev/null || true)"
     [ -n "$raw" ] || die "names: empty response"
     if command -v jq >/dev/null 2>&1; then
       # Coolify/Infisical shapes vary; try common paths
@@ -99,9 +143,11 @@ case "$cmd" in
     ;;
   delete)
     key="${1:-}"; shift || true
-    [ -n "$key" ] || die "usage: delete KEY --projectId ID --env ENV"
+    [ -n "$key" ] || die "usage: delete KEY --projectId ID --env prod"
+    REQUIRE_EXPLICIT_ENV=1
+    normalize_env "$@"
     # Default CLI type is personal; project secrets are shared.
-    infisical secrets delete "$key" --type shared --silent "$@" >/dev/null
+    infisical secrets delete "$key" --type shared --silent "${ENV_ARGS[@]}" >/dev/null
     info "deleted key=$key"
     ;;
   *)
