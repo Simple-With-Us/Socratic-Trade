@@ -91,8 +91,9 @@ describe("countLeadingFailedRuns", () => {
 describe("trading-liveness", () => {
   it("omits the dimension entirely when there are zero active-autonomy accounts AND no autopilot-eligible-but-halted ones", async () => {
     const { db, liveness } = await load();
-    // A connected account exists but is left at its default "halted" state — it must not make
-    // the dimension appear (a halted account not completing runs is expected, not degraded).
+    // A connected account exists with its default (non-autopilot) policy at the default "halted"
+    // systemState — it must not make the dimension appear because it is NEITHER active-autonomy
+    // NOR autopilot-eligible-but-halted (a halted non-autopilot account is expected to be quiet).
     await makeAccount(db, "Halted Account", "halted");
 
     const summary = liveness.getTradingLivenessSummary();
