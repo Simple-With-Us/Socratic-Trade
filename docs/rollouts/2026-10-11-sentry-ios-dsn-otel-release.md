@@ -49,7 +49,10 @@ Touched files:
 
 ## 4. Verification State
 
-Commands actually run are recorded in the PR and in STATUS.md after the gate.
+- `npm run lint` -- 0 errors (grandfathered warnings only).
+- `npx tsc --noEmit` -- clean after `resolveSentryRelease` accepts `Record<string, string | undefined>` (test fixtures no longer need a fake `NODE_ENV`).
+- Targeted earlier: 33 vitest (5 files) + 29 `node --test` on `scripts/sentry-report-deploy.node-test.mjs`.
+- Full `npm test` and `npm run build` run after this revision; results recorded in STATUS.md / the PR.
 
 ## 5. Next Steps & Blockers
 

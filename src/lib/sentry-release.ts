@@ -17,7 +17,9 @@ const SHA_KEYS = [
 
 export const SENTRY_SERVICE_NAME = "socratic-trade";
 
-export function resolveSentryRelease(env: NodeJS.ProcessEnv = process.env): string | undefined {
+export function resolveSentryRelease(
+  env: Record<string, string | undefined> = process.env
+): string | undefined {
   for (const key of SHA_KEYS) {
     const value = env[key]?.trim();
     if (!value || !/^[0-9a-f]{7,64}$/i.test(value)) continue;

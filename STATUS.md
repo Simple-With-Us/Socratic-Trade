@@ -17,7 +17,11 @@
 
 **Left alone.**  Trading logic.  Datadog.  No hardcoded DSN.
 
-**Next.**  Ready PR.  CI `verify` is the merge gate.  Jay must keep Infisical prod `SENTRY_DSN` set (optional Actions secret fallback).  iOS events start on the next TestFlight ship.
+**PR.**  https://github.com/Simple-With-Us/Socratic-Trade/pull/4513 (ready).
+
+**Verification.**  `npm run lint` (0 errors).  `npx tsc --noEmit` after widening `resolveSentryRelease` env to `Record<string, string | undefined>` so test fixtures do not invent `NODE_ENV`.  Full `npm test` + `npm run build` in progress.
+
+**Next.**  CI `verify` is the merge gate.  Jay must keep Infisical prod `SENTRY_DSN` set (optional Actions secret fallback).  iOS events start on the next TestFlight ship.
 
 ## 2026-10-10 CLAUDE - Effort-issues sync HTTP 500 retry (board `7989bcda`, branch `claude/effort-sync-retry`)
 
