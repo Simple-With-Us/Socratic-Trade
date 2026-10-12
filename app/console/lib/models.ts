@@ -139,6 +139,7 @@ const MODEL_DISPLAY_NAME: Record<string, string> = {
   "MiniMax-M3": "MiniMax M3",
   // Meta
   "muse-spark-1.3": "Muse Spark 1.3",
+  "muse-spark-1.3-contributor": "Muse Spark 1.3 Contributor",
   "muse-glimmer-30b": "Muse Glimmer 30B"
 };
 
