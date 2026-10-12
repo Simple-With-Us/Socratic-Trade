@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-11 CODEX — Kody MiniMax (CTS-330)
+
+**What.**  Kody autofix selects `minimax/minimax-m3` through the existing Vercel AI Gateway.  Its Sentry observer follows the new workflow name.
+
+**Verification.**  Scoped `actionlint`, `git diff --check`, and all three Sentry workflow coverage tests passed.  The shared helper passed a synthetic live MiniMax edit canary; hosted checks and current-head Codex review remain the merge gates.
+
+**Docs.**  `docs/rollouts/2026-10-11-kody-minimax.md`.  Linear CTS-330 tracks the fleet rollout; effort logs are archived.
+
+**Next.**  Land #4523 after review and required checks clear.
+
 ## 2026-10-11 CURSOR — trading-liveness dark fleet (#4435, branch `minimax/ingest-liveness-scan`)
 
 **What.**  Integration test for `getTradingLivenessSummary()` when the fleet is fully dark (autopilot-eligible halted account).  Resolves Kody `PRRT_kwDOS7mOVM6rSBIg`; duplicate-walk defer thread untouched.
