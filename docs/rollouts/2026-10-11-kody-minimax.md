@@ -35,12 +35,12 @@ Renaming a workflow requires updating Sentry's `workflow_run.workflows` filter b
 
 ## Reproduce The Direct-Endpoint Canary
 
-The final native-response helper is `59ae449dc93f691877f0fe8b58b43f6ca48e751d` in `Simple-With-Us/congress-trading-shared`.  Export only that helper into a scratch directory (not a Git checkout), install its locked dependencies, then submit a synthetic addition-function finding.  This sends no repository source and publishes nothing.  The command reads the existing key without printing it; the script prints only a pass/fail record.
+Native M3 uses the documented non-thinking mode to avoid upstream MiniMax-M3 issue 28 answer truncation.  The final native-response helper is `b1503884e547a8fb5d1449a94e03cae8c496da4c` in `Simple-With-Us/congress-trading-shared`.  Export only that helper into a scratch directory (not a Git checkout), install its locked dependencies, then submit a synthetic addition-function finding.  This sends no repository source and publishes nothing.  The command reads the existing key without printing it; the script prints only a pass/fail record.
 
 ```bash
 CANARY_DIR="$(mktemp -d)"
 export CANARY_DIR
-git -C /Users/jay/apps/lanes/congress-trading-shared/codex-cts-330-kody-minimax archive 59ae449dc93f691877f0fe8b58b43f6ca48e751d .github/kody-autofix | tar -x -C "$CANARY_DIR"
+git -C /Users/jay/apps/lanes/congress-trading-shared/codex-cts-330-kody-minimax archive b1503884e547a8fb5d1449a94e03cae8c496da4c .github/kody-autofix | tar -x -C "$CANARY_DIR"
 npm ci --ignore-scripts --prefix "$CANARY_DIR/.github/kody-autofix"
 MODEL_API_KEY="$(grep -m1 '^MINIMAX_API_KEY=' /Users/jay/.secrets/global-api-keys | cut -d= -f2- | tr -d '"')" node --input-type=module <<'JS'
 import assert from 'node:assert/strict';
