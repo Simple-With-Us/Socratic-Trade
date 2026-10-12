@@ -100,6 +100,46 @@ class CloudCoordinationTests(unittest.TestCase):
         self.assertEqual(self.install().returncode, 0)
         self.assertFalse(self.legacy.exists())
 
+    def test_mac_retires_hooks_before_skipping_install(self):
+        mock_bin = self.prepare_archive()
+        (mock_bin / "uname").write_text("#!/bin/sh\necho Darwin\n")
+        self.legacy.write_text("retired script")
+        self.assertEqual(self.install().returncode, 0)
+        self.assertFalse(self.legacy.exists())
+        self.assertFalse(Path(self.env["FLEET_COORD_CACHE"]).exists())
+
+    def test_new_pin_drops_removed_files(self):
+        self.prepare_archive()
+        self.assertEqual(self.install().returncode, 0)
+        cache = Path(self.env["FLEET_COORD_CACHE"])
+        stale = cache / "obsolete.py"
+        stale.write_text("stale")
+        self.env["AFC_SHA"] = "new-pin"
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(stale.exists())
+        self.assertEqual((cache / ".pinned-sha").read_text().strip(), "new-pin")
+
+    def test_failed_cli_import_preserves_old_cache_and_pin(self):
+        self.prepare_archive()
+        self.assertEqual(self.install().returncode, 0)
+        cache = Path(self.env["FLEET_COORD_CACHE"])
+        old_pin = (cache / ".pinned-sha").read_bytes()
+        archive = Path(self.env["TEST_ARCHIVE"])
+        with tarfile.open(archive, "r:gz") as source:
+            entries = [(item, source.extractfile(item).read()) for item in source]
+        with tarfile.open(archive, "w:gz") as target:
+            for item, data in entries:
+                if item.name.endswith("scripts/agent-sync"):
+                    data = b"#!/bin/sh\nexit 1\n"
+                    item.size = len(data)
+                target.addfile(item, io.BytesIO(data))
+        self.env["AFC_SHA"] = "broken-pin"
+        self.assertNotEqual(self.install().returncode, 0)
+        self.assertEqual((cache / ".pinned-sha").read_bytes(), old_pin)
+        self.assertEqual(subprocess.run([str(cache / "scripts/agent-sync"), "--help"]).returncode, 0)
+        self.assertFalse(list(cache.parent.glob("cache.stage.*")))
+
     def test_failed_fetch_never_reports_success_or_stamps_cache(self):
         mock_bin = self.prepare_archive()
         (mock_bin / "curl").write_text("#!/bin/sh\nexit 22\n")

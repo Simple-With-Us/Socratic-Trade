@@ -109,3 +109,11 @@ git diff --check
 ```
 
 All five isolated tests and shell/diff checks passed.  A real pinned-source install used isolated `FLEET_COORD_CACHE`, `FLEET_COORD_BIN`, and `CLAUDE_CONFIG_DIR` directories plus a test `uname` reporting Linux.  Both installed `--help` commands and `agent_sync.identity.strict_seat("CODEX")` passed without credentials or service calls.  The archive download is the only network action in this smoke test.  Runtime authentication remains an operator prerequisite, not a claimed test result.
+
+## Cache Review Follow-up (2026-10-12)
+
+Preserved PR Autofix commits `a731afc26` and `26d57aef2` and merged current main.  `scripts/install-fleet-coordination.sh` retires obsolete hooks before its Mac return, extracts into a clean sibling directory, validates CLI imports before promotion, and retains the previous installation on validation failure.  Replacement uses two same-filesystem renames, not an atomic transaction.  The old directory remains recoverable until promotion succeeds.
+
+`scripts/test-cloud-coordination-bootstrap.py` adds Mac retirement, removed-file pruning on pin advance, and failed-import preservation coverage.  `STATUS.md` and `PLAN.md` reflect this follow-up.  The on-demand Mac helper inventory is corrected to describe Mac retirement; no live Mac setup was run.
+
+Verification: `python3 scripts/test-cloud-coordination-bootstrap.py` passes eight tests; `bash -n scripts/install-fleet-coordination.sh scripts/setup-slack-sync.sh` and `git diff --check` pass.  `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build` were not rerun locally for this shell-only follow-up; fresh hosted required checks remain mandatory.  Current-head Codex review is also pending, so this is not a completed rollout.

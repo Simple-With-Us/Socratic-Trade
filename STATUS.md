@@ -13,6 +13,8 @@
 **Review follow-up (CODEX).**  The archived effort-log push gate now remains as a no-op compatibility hook, cloud bootstrap scripts no longer install the retired Slack hook, and the rollout canary recipe uses an environment-provided shared lane plus Python-only secret handoff.  Current-head Codex review and hosted checks are still required; auto-merge remains off.
 
 **Cloud review follow-up (2026-10-12 CODEX).**  The pinned bootstrap now includes the fleet registry and protocol documents, checks Python 3.11 and both CLI imports, and reports failed installation as a fleet-work blocker.  Reused cloud settings lose only retired Slack SessionStart entries; mixed unrelated hooks and settings are preserved.  Five isolated bootstrap tests, shell syntax, and a real pinned-source offline CLI/registry smoke test passed.  No live credentials or Mac settings were changed.
+**Cache review follow-up (2026-10-12 CODEX).**  Preserve both bot fixes, merge current main, retire Slack hooks before the Mac skip, and stage/validate a clean same-filesystem cache before replacement.  Eight isolated bootstrap regressions and shell/diff checks pass.  Full product checks and fresh Codex review remain hosted merge gates; auto-merge stays off.
+
 ## 2026-10-12 CODEX — Claude Autofix Diagnostics (OPS-935, PR #4532)
 
 **What.**  Pin Claude Code Autofix to shared revision `3bff293b56adcc0367d3a91066938b2d4d5ebbc5` for seven-day sanitized tool metadata after success or failure.  The 60-turn cap and model route remain unchanged.

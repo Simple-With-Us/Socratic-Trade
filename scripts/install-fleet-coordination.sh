@@ -85,7 +85,8 @@ fi
 # leaves a mixed tree in $CACHE_DIR: files removed or relocated by the new
 # revision cannot survive alongside the old ones, and an interrupted run
 # cannot damage the live install.
-tmp_extract="$(mktemp -d "${TMPDIR:-/tmp}/fleet-coordination.extract.XXXXXX")"
+tmp_extract="$(mktemp -d "${CACHE_DIR}.stage.XXXXXX")"
+trap 'rm -rf "$tmp_extract"' EXIT
 if ! tar -xz -C "$tmp_extract" --strip-components=1 \
        -f "$tmp_tar" "$afc_prefix/scripts" "$afc_prefix/AGENT-SYNC.md" \
        "$afc_prefix/fleet-apps.json" "$afc_prefix/docs/protocols"; then
@@ -103,9 +104,18 @@ for required in scripts/linear-board/board scripts/agent-sync AGENT-SYNC.md flee
   fi
 done
 
-# Atomically replace any prior $CACHE_DIR.  Rename is atomic on the same
-# filesystem; the old tree stays available for restore if the swap fails, and
-# is removed once the new tree is in place.
+# Validate the new tree before replacing a working installation.  These offline
+# argument-parser checks exercise imports without reading runtime credentials.
+for cli in scripts/linear-board/board scripts/agent-sync; do
+  chmod +x "$tmp_extract/$cli"
+  if ! "$tmp_extract/$cli" --help >/dev/null; then
+    warn "AFC CLI validation failed; the previous cache remains unchanged."
+    exit 1
+  fi
+done
+
+# Replace the tree using same-filesystem renames.  The two renames are not an
+# atomic transaction; retain the old tree for recovery until promotion succeeds.
 stale_cache=""
 if [[ -d "$CACHE_DIR" ]]; then
   stale_cache="$CACHE_DIR.old.$$"
