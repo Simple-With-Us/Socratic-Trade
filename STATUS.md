@@ -6,7 +6,7 @@
 
 **Dependency.**  Shared PR [#365](https://github.com/Simple-With-Us/congress-trading-shared/pull/365) must merge with its immutable helper and caller pins preserved in main history before this PR lands.
 
-**Verification.**  Caller actionlint and diff checks passed.  Shared validation passed 12 Node tests, 463 package tests, typecheck, build, and a provider-free hosted artifact check.  Current-head CI and Codex review are required before merge.
+**Verification.**  Caller actionlint and diff checks passed.  Shared validation passed 14 Node tests, 463 package tests, typecheck, build, and a provider-free hosted artifact check.  Current-head CI and Codex review are required before merge.
 
 **Docs.**  `docs/rollouts/2026-10-12-claude-autofix-diagnostics.md` and `PLAN.md`.  Linear OPS-935 is the live tracker; effort logs are archived.
 

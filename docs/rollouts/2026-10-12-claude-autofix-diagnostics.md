@@ -19,9 +19,40 @@ Keep the 60-turn cap, MiniMax model route, permissions, concurrency, and trigger
 
 - `actionlint .github/workflows/claude-code-autofix.yml`: passed.
 - `git diff --check`: passed.
-- Shared tests: 12 Node tests and 463 package tests with coverage passed; typecheck and build passed.
-- [Hosted synthetic validation](https://github.com/Simple-With-Us/congress-trading-shared/actions/runs/38207020098): passed, including artifact upload after a simulated failure.  The downloaded 580-byte JSON passed independent count, result, size, and private-content sentinel assertions.
+- Shared tests: 14 Node tests and 463 package tests with coverage passed; typecheck and build passed.
+- [Hosted synthetic validation](https://github.com/Simple-With-Us/congress-trading-shared/actions/runs/38210165662): passed, including artifact upload after a simulated failure.  The downloaded 596-byte JSON passed independent count, result, size, and private-content sentinel assertions.
 - No paid provider call or old autofix run was dispatched for this change.  Application code is unchanged; current-head required CI remains the merge gate.
+
+### Exact Shared Validation Commands
+
+Run from the shared repository checkout at reusable revision `3bff293b56adcc0367d3a91066938b2d4d5ebbc5`:
+
+```sh
+npm ci  # Includes the prepare script: npm run build.
+npm test -- --coverage
+npm run typecheck
+node --test .github/actions/autofix-diagnostics/test/reduce.node-test.mjs .github/autofix-diagnostics-workflow.node-test.mjs
+actionlint -color .github/workflows/autofix-diagnostics-validation.yml .github/workflows/codex-autofix-reusable.yml
+git diff --check
+```
+
+The initial package checks passed before the diagnostics-only review fixes.  The final shared revision's hosted CI and diagnostic validation also passed.  Artifact inspection used the following download and assertions:
+
+```sh
+artifact_dir="$(mktemp -d)"
+gh run download 38210165662 -R Simple-With-Us/congress-trading-shared --name autofix-diagnostics-smoke-38210165662-1 --dir "$artifact_dir"
+python3 - "$artifact_dir/diagnostics.json" <<'PYTHON'
+import json, sys
+from pathlib import Path
+raw = Path(sys.argv[1]).read_text()
+data = json.loads(raw)
+assert len(raw.encode()) <= 262144
+assert not any(s in raw for s in ["SYNTHETIC_PRIVATE_VALUE_DO_NOT_RETAIN", "npm test", "local1"])
+assert data["result"] == {"subtype": "error_max_turns", "is_error": True, "duration_ms": 1234, "num_turns": 61}
+assert data["counts"]["tool_uses"] == data["counts"]["tool_results"] == 1
+assert len(data["events"]) == 2
+PYTHON
+```
 
 ## Next Steps And Blockers
 
