@@ -225,6 +225,11 @@ describe("provider error detail (#4535)", () => {
     expect(humanizeLlmTransportError(new Error(once), { provider: "openrouter", model: "m/x", stepLabel: "Bull" })).toContain(once);
   });
 
+  it("does not skip humanizing a raw body that only mentions the detail marker", () => {
+    const out = humanizeLlmError('forbidden [provider detail: fake] trailing words', { provider: "openrouter", status: 403 });
+    expect(out).toContain("doesn't have access to this model or region");
+  });
+
   it("returns nothing extra when there is no status, model or body", () => {
     expect(describeProviderErrorDetail("", {})).toBe("");
     expect(humanizeLlmError("", { provider: "xai", status: 503 })).toContain("[provider detail: HTTP 503]");
