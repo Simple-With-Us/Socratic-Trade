@@ -53,12 +53,6 @@ echo "==> Checking Infisical bootstrap identity (values stay private)"
 # expected; do not fail the whole session setup for a keyless checkout.
 node scripts/infisical-bootstrap-env.mjs || echo "==> Infisical bootstrap skipped (ok in keyless cloud)"
 
-# Install the Slack coordination sync globally (SessionStart hook). No-op at
-# runtime unless SLACK_BOT_TOKEN is set as an environment secret. Non-fatal:
-# a hiccup here must never fail the whole environment setup.
-echo "==> Installing Slack coordination sync (global SessionStart hook)"
-bash scripts/setup-slack-sync.sh || echo "    (slack-sync install skipped; see docs/slack-coordination.md)"
-
 echo "==> Setup complete. Start the app with: npm run dev:secrets   (Infisical runner on :3000)"
 echo "    'npm run dev' (plain) is for tests-only — it no longer reads .env.local."
 echo "    Verify a change with: npx tsc --noEmit && npm test && npm run build"

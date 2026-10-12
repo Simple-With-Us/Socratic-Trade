@@ -73,13 +73,7 @@ if [[ -f scripts/infisical-bootstrap-env.mjs ]]; then
   node scripts/infisical-bootstrap-env.mjs >/dev/null 2>&1 || warn "Infisical bootstrap skipped (ok in keyless cloud)"
 fi
 
-# 4. Optional Slack coordination hook (not the fleet relay consumer path).
-if [[ -f scripts/setup-slack-sync.sh ]]; then
-  log "Installing optional Slack coordination hook (SessionStart; no-op without SLACK_BOT_TOKEN)"
-  bash scripts/setup-slack-sync.sh >/dev/null 2>&1 || warn "slack-sync install skipped; see docs/slack-coordination.md"
-fi
-
-# 5. Sanity-check the existing in-repo Infisical helper without invoking it.
+# 4. Sanity-check the existing in-repo Infisical helper without invoking it.
 if [[ -f scripts/infisical-run.mjs ]]; then
   log "Found scripts/infisical-run.mjs -- start script will smoke-test it when creds exist."
 else

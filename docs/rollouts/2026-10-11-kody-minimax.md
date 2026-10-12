@@ -9,6 +9,8 @@ Jay requested that the Muse-backed autofix use MiniMax.  CTS-330 tracks the flee
 - `.github/workflows/kody-fleet-autofix.yml`: select `MiniMax-M3` and update the displayed workflow name.
 - `.github/workflows/sentry-ci-report.yml`: match the renamed workflow in the observer and its inventory comment.
 - `AGENTS.md`: align the coordination instructions with Linear and archive the retired effort-log and Slack mechanisms.
+- `scripts/claude-hooks/board-check.sh`: retain the installed hook path as a no-op so the retired effort-log gate cannot block pushes.
+- `scripts/cloud-setup.sh`, `scripts/cursor-cloud-start.sh`, and `scripts/cursor-cloud-install.sh`: stop installing the retired Slack coordination hook in cloud sessions.
 - `STATUS.md`: record verification and landing status.
 - `PLAN.md`: record the model-selection approach and unchanged product roadmap.
 - `docs/rollouts/2026-10-11-kody-minimax.md`: preserve this change and verification record.
@@ -19,7 +21,17 @@ Use `https://api.minimax.io/v1` with the organization `MINIMAX_API_KEY`, and adv
 
 ## Verification State
 
+- `npm run lint` -> n/a — shell/workflow/docs-only changes; no linted app source changed.
+- `npx tsc --noEmit` -> n/a — no TypeScript changed.
+- `npm test` -> n/a — app tests do not cover these shell and documentation paths; focused shell/contract checks are listed below.
+- `npm run build` -> n/a — no app source or build configuration changed.
+
+Focused verification:
+
 - `git diff --check`: passed.
+- `bash -n scripts/claude-hooks/board-check.sh scripts/cloud-setup.sh scripts/cursor-cloud-start.sh scripts/cursor-cloud-install.sh`: passed.
+- Retired-hook push probe with synthetic hook input: allowed with no denial output.
+- Cloud-bootstrap source scan: none of the three setup scripts installs `setup-slack-sync.sh`.
 - `actionlint -shellcheck= -pyflakes= .github/workflows/kody-fleet-autofix.yml .github/workflows/sentry-ci-report.yml`: passed.
 - `npx --yes --package vitest@5.0.1 -- vitest run test/sentry-ci-report-workflows.test.ts --config <temporary-node-only-config>`: 3 tests passed.  The temporary config contains `export default { test: { environment: 'node' } };` and avoids requiring the app dependency tree for this workflow-only test.
 - Shared helper synthetic canary: a live MiniMax M3 response from the direct OpenAI-compatible endpoint parsed into an edit and applied successfully.  This proves API compatibility, not a production Kody fix.
@@ -40,10 +52,29 @@ Native M3 uses the documented non-thinking mode to avoid upstream MiniMax-M3 iss
 ```bash
 CANARY_DIR="$(mktemp -d)"
 export CANARY_DIR
-git -C /Users/jay/apps/lanes/congress-trading-shared/codex-cts-330-kody-minimax archive b1503884e547a8fb5d1449a94e03cae8c496da4c .github/kody-autofix | tar -x -C "$CANARY_DIR"
+git -C "${CONGRESS_TRADING_SHARED_LANE:?set the shared-repo lane path in this shell}" archive b1503884e547a8fb5d1449a94e03cae8c496da4c .github/kody-autofix | tar -x -C "$CANARY_DIR"
 npm ci --ignore-scripts --prefix "$CANARY_DIR/.github/kody-autofix"
-MODEL_API_KEY="$(grep -m1 '^MINIMAX_API_KEY=' /Users/jay/.secrets/global-api-keys | cut -d= -f2- | tr -d '"')" node --input-type=module <<'JS'
-import assert from 'node:assert/strict';
+python3 - <<'PY'
+import os
+import shlex
+import subprocess
+from pathlib import Path
+
+secret_file = Path.home() / ".secrets" / "global-api-keys"
+model_api_key = None
+for line in secret_file.read_text().splitlines():
+    if line.startswith("MINIMAX_API_KEY="):
+        values = shlex.split(line.partition("=")[2], comments=False, posix=True)
+        if len(values) != 1 or not values[0]:
+            raise SystemExit("MINIMAX_API_KEY entry is malformed.")
+        model_api_key = values[0]
+        break
+if model_api_key is None:
+    raise SystemExit("MINIMAX_API_KEY is missing from the secret file.")
+
+env = os.environ.copy()
+env["MODEL_API_KEY"] = model_api_key
+node_script = r'''import assert from 'node:assert/strict';
 import {pathToFileURL} from 'node:url';
 const {providerFrom, chatRequest, requestEdits, applyEdits} = await import(pathToFileURL(`${process.env.CANARY_DIR}/.github/kody-autofix/fleet.mjs`));
 const snapshot = {profile:'web', prefixes:['src/'], findings:[{path:'src/add.ts',line:1,body:'Return a + b instead of a - b.'}], files:[{path:'src/add.ts',content:'export const add = (a, b) => a - b;\n'}]};
@@ -55,5 +86,7 @@ try {
   assert.match(changed[0].content,/a\s*\+\s*b/);
   console.log(JSON.stringify({ok:true,model:provider.model,endpoint:provider.url,synthetic:true,published:false}));
 } catch { console.error('Synthetic MiniMax canary failed.'); process.exitCode=1; }
-JS
+'''
+subprocess.run(["node", "--input-type=module", "-e", node_script], env=env, check=True)
+PY
 ```

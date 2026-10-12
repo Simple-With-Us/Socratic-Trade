@@ -10,6 +10,8 @@
 
 **Next.**  Land #4523 after review and required checks clear.
 
+**Review follow-up (CODEX).**  The archived effort-log push gate now remains as a no-op compatibility hook, cloud bootstrap scripts no longer install the retired Slack hook, and the rollout canary recipe uses an environment-provided shared lane plus Python-only secret handoff.  Current-head Codex review and hosted checks are still required; auto-merge remains off.
+
 ## 2026-10-11 CURSOR — trading-liveness dark fleet (#4435, branch `minimax/ingest-liveness-scan`)
 
 **What.**  Integration test for `getTradingLivenessSummary()` when the fleet is fully dark (autopilot-eligible halted account).  Resolves Kody `PRRT_kwDOS7mOVM6rSBIg`; duplicate-walk defer thread untouched.

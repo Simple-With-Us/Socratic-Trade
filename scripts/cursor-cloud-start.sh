@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Cursor cloud agent start for Socratic-Trade.
 # 1. Attach fleet relay consumer/poller when an in-repo Linux bootstrap exists
-#    (soft-fail with a documented gap otherwise; Slack is optional coordination only).
+#    (soft-fail with a documented gap otherwise).
 # 2. Infisical selectors come from process environment / Cursor dashboard Secrets only
 #    (strict Infisical: no parsing committed .env-shaped files in this hook).
 # 3. When dashboard credentials exist, smoke-test scripts/infisical-run.mjs without writing
@@ -43,17 +43,6 @@ attach_fleet_relay_consumer() {
 }
 
 attach_fleet_relay_consumer
-
-# Optional #agent-sync coordination (SessionStart hook).  Not a substitute for relay.
-if [[ -f scripts/setup-slack-sync.sh ]]; then
-  if bash scripts/setup-slack-sync.sh >/dev/null 2>&1; then
-    log "Optional Slack coordination hook installed (no-op without SLACK_BOT_TOKEN)."
-  else
-    warn "setup-slack-sync.sh skipped; optional coordination hook not updated."
-  fi
-else
-  warn "scripts/setup-slack-sync.sh missing; skipping optional Slack coordination."
-fi
 
 # Do not enter the shared overlay branch unless shared machine identity is present.
 if [[ -z "${INFISICAL_SHARED_CLIENT_ID:-}" || -z "${INFISICAL_SHARED_CLIENT_SECRET:-}" ]]; then
