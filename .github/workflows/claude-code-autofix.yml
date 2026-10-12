@@ -24,7 +24,7 @@ jobs:
       (github.event_name == 'pull_request_review' &&
        github.event.review.user.type == 'Bot' &&
        github.event.pull_request.head.repo.full_name == github.repository)
-    uses: Simple-With-Us/congress-trading-shared/.github/workflows/codex-autofix-reusable.yml@f0e19d75c0b0320e09800cb2092f8cd8dc074fd0
+    uses: Simple-With-Us/congress-trading-shared/.github/workflows/codex-autofix-reusable.yml@3bff293b56adcc0367d3a91066938b2d4d5ebbc5
     secrets:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
     with:
