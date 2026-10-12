@@ -141,6 +141,10 @@ export function describeProviderErrorDetail(
 /** Matches text that is ALREADY a humanizeLlmError output ("<Provider label> error ...: ...") so a
  *  second pass (e.g. humanizeLlmTransportError re-wrapping an Error whose message was humanized at
  *  the throw site) returns it unchanged instead of stuttering "Gemini error: Gemini error: ...". */
+/** A humanized message ends with the appended detail block; an unrelated raw body that merely mentions
+ *  the marker does not match. */
+const PROVIDER_DETAIL_SUFFIX = /\[provider detail: .*\]\s*$/s;
+
 const ALREADY_HUMANIZED =
   /^(?:OpenAI|Anthropic \(Claude\)|xAI \(Grok\)|Google \(Gemini\)|Mistral|DeepSeek|Moonshot AI \(Kimi\)|MiniMax|OpenRouter|the LLM) error\b|^(?:That model id isn't valid on |That model isn't available on your |Couldn't complete this model request\.|.+ had no compatible endpoint for this request\.)/;
 
@@ -153,7 +157,7 @@ export function humanizeLlmError(raw: string | undefined | null, opts: { provide
   const text = (raw ?? "").toString().trim();
   const provider = opts.provider ? providerLabel(opts.provider) : text ? providerFromText(text) : "the LLM";
   if (!text && opts.status === undefined) return `${provider} request failed for an unknown reason. Try again.`;
-  if (ALREADY_HUMANIZED.test(text) || text.includes("[provider detail:")) return text;
+  if (ALREADY_HUMANIZED.test(text) || PROVIDER_DETAIL_SUFFIX.test(text)) return text;
   // Appended to the status-driven sentences below; two spaces between sentences.
   const detailText = describeProviderErrorDetail(text, { status: opts.status, model: opts.model });
   const withDetail = (message: string): string => (detailText ? `${message}  ${detailText}` : message);
