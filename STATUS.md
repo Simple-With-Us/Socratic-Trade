@@ -2,7 +2,7 @@
 
 ## 2026-10-12 CODEX — Claude Autofix Diagnostics (OPS-935, PR #4532)
 
-**What.**  Pin Claude Code Autofix to shared revision `43752150800873da81f01f104df47c9b8aab19de` for seven-day sanitized tool metadata after success or failure.  The 60-turn cap and model route remain unchanged.
+**What.**  Pin Claude Code Autofix to shared revision `3bff293b56adcc0367d3a91066938b2d4d5ebbc5` for seven-day sanitized tool metadata after success or failure.  The 60-turn cap and model route remain unchanged.
 
 **Dependency.**  Shared PR [#365](https://github.com/Simple-With-Us/congress-trading-shared/pull/365) must merge with its immutable helper and caller pins preserved in main history before this PR lands.
 

@@ -6,7 +6,7 @@ OPS-935 found Claude Code Autofix runs exhausting the 60-turn cap without retain
 
 ## Changes Made
 
-- `.github/workflows/claude-code-autofix.yml`: pin the reusable workflow to `43752150800873da81f01f104df47c9b8aab19de`.
+- `.github/workflows/claude-code-autofix.yml`: pin the reusable workflow to `3bff293b56adcc0367d3a91066938b2d4d5ebbc5`.
 - `STATUS.md`, `PLAN.md`, and this rollout note: record scope, dependency, and verification.
 
 The shared helper retains fixed tool names/categories, assistant-message indexes, counts, repeat groups, categorized errors, byte lengths, and aggregate duration/turn counts.  It excludes raw prompts, commands, arguments, paths, tool IDs, results, and model text.  Retention is seven days, bounded to 500 event rows and 256 KiB.  Hard runner termination may prevent upload; per-tool elapsed timestamps are unavailable.
