@@ -14,11 +14,15 @@ Kody thread `PRRT_kwDOS7mOVM6rSBIg` on PR #4435: `getTradingLivenessSummary()` d
 
 ## 4. Verification State
 
-- `npx vitest run test/trading-liveness.test.ts` — 14 passed.
+- `npm run lint` -> ok (0 errors)
+- `npx tsc --noEmit` -> ok
+- `npm test` -> ok on hosted `verify` for head `5e66c3ff` (full vitest gate in CI)
+- `npm run build` -> ok (local, after tsc)
+- `npx vitest run test/trading-liveness.test.ts` -> 14 passed (targeted)
 
 ## 5. Next Steps & Blockers
 
-- Merge PR #4435 when hosted `verify` + `gitleaks` green.
+- Squash-merge #4435 when ruleset allows (all review threads resolved).
 
 ## 6. Zero-Code Findings
 
