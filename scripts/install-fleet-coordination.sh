@@ -80,14 +80,52 @@ if [[ -z "$afc_prefix" ]]; then
   warn "AFC archive appears empty; installation failed."
   exit 1
 fi
-if ! tar -xz -C "$CACHE_DIR" --strip-components=1 \
+
+# Extract into a fresh temporary directory so a partial or advancing pin never
+# leaves a mixed tree in $CACHE_DIR: files removed or relocated by the new
+# revision cannot survive alongside the old ones, and an interrupted run
+# cannot damage the live install.
+tmp_extract="$(mktemp -d "${TMPDIR:-/tmp}/fleet-coordination.extract.XXXXXX")"
+if ! tar -xz -C "$tmp_extract" --strip-components=1 \
        -f "$tmp_tar" "$afc_prefix/scripts" "$afc_prefix/AGENT-SYNC.md" \
        "$afc_prefix/fleet-apps.json" "$afc_prefix/docs/protocols"; then
-  rm -f "$tmp_tar"
+  rm -rf "$tmp_extract" "$tmp_tar"
   warn "AFC archive extract failed (path mismatch or corrupt tar)."
   exit 1
 fi
 rm -f "$tmp_tar"
+
+for required in scripts/linear-board/board scripts/agent-sync AGENT-SYNC.md fleet-apps.json docs/protocols/zulip-fleet-guide.md; do
+  if [[ ! -e "$tmp_extract/$required" ]]; then
+    rm -rf "$tmp_extract"
+    warn "AFC archive missing required path: $required"
+    exit 1
+  fi
+done
+
+# Atomically replace any prior $CACHE_DIR.  Rename is atomic on the same
+# filesystem; the old tree stays available for restore if the swap fails, and
+# is removed once the new tree is in place.
+stale_cache=""
+if [[ -d "$CACHE_DIR" ]]; then
+  stale_cache="$CACHE_DIR.old.$$"
+  if ! mv "$CACHE_DIR" "$stale_cache"; then
+    rm -rf "$tmp_extract"
+    warn "AFC cache swap failed (rename out); cache left unchanged."
+    exit 1
+  fi
+fi
+if ! mv "$tmp_extract" "$CACHE_DIR"; then
+  if [[ -n "$stale_cache" ]] && [[ -e "$stale_cache" ]]; then
+    mv "$stale_cache" "$CACHE_DIR" || warn "AFC cache restore failed; manual recovery from $stale_cache required."
+  fi
+  rm -rf "$tmp_extract"
+  warn "AFC cache swap failed (rename in); cache left unchanged."
+  exit 1
+fi
+if [[ -n "$stale_cache" ]]; then
+  rm -rf "$stale_cache"
+fi
 
 # Symlink the CLIs into ~/.local/bin.  Idempotent; never overwrite a foreign non-symlink.
 mkdir -p "$BIN_DIR"
