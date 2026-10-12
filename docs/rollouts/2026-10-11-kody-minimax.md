@@ -9,6 +9,8 @@ Jay requested that the Muse-backed autofix use MiniMax.  CTS-330 tracks the flee
 - `.github/workflows/kody-fleet-autofix.yml`: select `minimax/minimax-m3` and update the displayed workflow name.
 - `.github/workflows/sentry-ci-report.yml`: match the renamed workflow in the observer and its inventory comment.
 - `STATUS.md`: record verification and landing status.
+- `PLAN.md`: record the model-selection approach and unchanged product roadmap.
+- `docs/rollouts/2026-10-11-kody-minimax.md`: preserve this change and verification record.
 
 ## Decisions & Trade-offs
 
