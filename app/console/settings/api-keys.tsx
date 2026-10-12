@@ -231,7 +231,7 @@ export function ApiKeysCard() {
                               className="min-w-[8.5rem] py-0.5 text-[length:var(--con-fs-xs)]"
                               value={entry.route ?? "openrouter"}
                               disabled={busy !== null || retired || entry.source === "none"}
-                              title={entry.source === "none" ? "Add a key first.  Direct only works once this provider has a key." : undefined}
+                              title={entry.source === "none" ? "Add a key first.  Direct only works once this provider has a key." : undefined}
                               aria-busy={busy === entry.service}
                               onChange={(e) => void onRouteChange(entry, e.target.value === "native" ? "native" : "openrouter")}
                               aria-label={`${entry.label} route`}
