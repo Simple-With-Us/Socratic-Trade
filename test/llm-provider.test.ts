@@ -143,7 +143,9 @@ describe("resolveLlmEndpoint", () => {
     setApiKey("minimax-direct", "minimax", "minimax-placeholder");
     setApiKey("minimax-direct", "openrouter", "openrouter-placeholder");
     expect(resolveLlmEndpoint({ llmModel: "minimax-m3" }, "minimax-direct").provider).toBe("openrouter");
+    expect(modelCredentialService("minimax-m3", "minimax-direct")).toBe("openrouter");
     setUserSetting("minimax-direct", "llm_route_minimax", "native");
+    expect(modelCredentialService("minimax-m3", "minimax-direct")).toBe("minimax");
     const minimax = resolveLlmEndpoint({ llmModel: "minimax-m3" }, "minimax-direct");
     expect(minimax.provider).toBe("minimax");
     expect(minimax.key).toBe("minimax-placeholder");
