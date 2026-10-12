@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-11 CURSOR — trading-liveness dark fleet (#4435, branch `minimax/ingest-liveness-scan`)
+
+**What.**  Integration test for `getTradingLivenessSummary()` when the fleet is fully dark (autopilot-eligible halted account).  Resolves Kody `PRRT_kwDOS7mOVM6rSBIg`; duplicate-walk defer thread untouched.
+
+**Verification.**  `npx vitest run test/trading-liveness.test.ts` (14 passed).  Hosted `verify` pending after push.
+
+**Docs.**  `docs/rollouts/2026-10-11-trading-liveness-dark-fleet-integration-test.md`.
+
+**Next.**  Squash-merge #4435 when `verify` + `gitleaks` green and threads clean.
+
 ## 2026-10-11 CURSOR — Alpaca SDK v5 migration (branch `cursor/alpaca-sdk-v5-migration-b257`)
 
 **What.**  `@alpacahq/alpaca-trade-api` upgraded to v5 with `src/lib/alpaca-sdk-legacy-client.ts` adapting `trading` / `marketData` to the existing gateway surface.  Renovate-only bumps had been failing `tsc`.
