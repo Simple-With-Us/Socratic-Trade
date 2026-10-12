@@ -2,9 +2,9 @@
 
 ## 2026-10-11 CODEX — Kody MiniMax (CTS-330)
 
-**What.**  Kody autofix selects `minimax/minimax-m3` through the existing Vercel AI Gateway.  Its Sentry observer follows the new workflow name.
+**What.**  Kody autofix selects `MiniMax-M3` through MiniMax’s direct OpenAI-compatible endpoint.  Its Sentry observer follows the new workflow name.
 
-**Verification.**  Scoped `actionlint`, `git diff --check`, and all three Sentry workflow coverage tests passed.  The shared helper passed a synthetic live MiniMax edit canary; hosted checks and current-head Codex review remain the merge gates.
+**Verification.**  Scoped `actionlint`, `git diff --check`, and all three Sentry workflow coverage tests passed.  The shared helper passed a synthetic live edit canary against `https://api.minimax.io/v1/chat/completions`; hosted checks and current-head Codex review remain the merge gates.
 
 **Docs.**  `docs/rollouts/2026-10-11-kody-minimax.md`.  Linear CTS-330 tracks the fleet rollout; effort logs are archived.
 
