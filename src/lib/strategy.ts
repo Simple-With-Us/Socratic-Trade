@@ -75,7 +75,7 @@ import { resolveLlmEndpoint } from "./llm-provider";
 import { isModelRotationSentinel, planRotationImplicitFallbacks, recordOpenRouterModelNotFound, resolveModelRotationForRun } from "./model-rotation";
 import { maybeOpenRouterCreditsExhaustedHint } from "./openrouter-credits";
 import { buildLlmRequestBody, llmAuthHeaders, extractLlmText, extractJsonPayload, detectLlmTruncation, toGeminiJsonSchema } from "./llm-call";
-import { humanizeLlmError, humanizeLlmTransportError } from "./llm-errors";
+import { describeProviderErrorDetail, humanizeLlmError, humanizeLlmTransportError } from "./llm-errors";
 import { planLlmProviderAttempts, recordLlmProviderFailure } from "./llm-provider-cooldown";
 import {
   LlmCredentialRequiredError,
@@ -6689,13 +6689,15 @@ async function proposeTrades(input: {
                 recordOpenRouterModelNotFound(attempt.model, { status: response.status, userId: input.userId, detail });
               }
               if (!isLast && isFailoverLlmStatus(response.status)) {
-                lastError = new Error(humanizeLlmError(detail, { provider: attempt.provider, status: response.status }));
+                lastError = new Error(humanizeLlmError(detail, { provider: attempt.provider, status: response.status, model: attempt.model }));
                 bullLastFailoverReason = `HTTP ${response.status}`;
+                const bullFailoverDetail = describeProviderErrorDetail(detail, { status: response.status, model: attempt.model });
+                if (bullFailoverDetail) bullLastFailoverReason = `HTTP ${response.status}  ${bullFailoverDetail}`;
                 console.warn(`[Bull] ${attempt.model}/${attempt.provider} failed (HTTP ${response.status}); failing over to ${next.model}/${next.provider}.`);
-                audit("strategy_llm_failover", { runId: input.runId, step: "bull", fromModel: attempt.model, fromProvider: attempt.provider, httpStatus: response.status, toModel: next.model, toProvider: next.provider }, input.userId, input.policy.connectedAccountId);
+                audit("strategy_llm_failover", { runId: input.runId, step: "bull", fromModel: attempt.model, fromProvider: attempt.provider, httpStatus: response.status, ...(bullFailoverDetail ? { providerDetail: bullFailoverDetail } : {}), toModel: next.model, toProvider: next.provider }, input.userId, input.policy.connectedAccountId);
                 continue;
               }
-              throw new Error(humanizeLlmError(detail, { provider: attempt.provider, status: response.status }));
+              throw new Error(humanizeLlmError(detail, { provider: attempt.provider, status: response.status, model: attempt.model }));
             }
             let payload: unknown;
             try {
