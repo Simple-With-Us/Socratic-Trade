@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-12 CODEX — Claude Autofix Diagnostics (OPS-935, PR #4532)
+
+**What.**  Pin Claude Code Autofix to shared revision `3bff293b56adcc0367d3a91066938b2d4d5ebbc5` for seven-day sanitized tool metadata after success or failure.  The 60-turn cap and model route remain unchanged.
+
+**Dependency.**  Shared PR [#365](https://github.com/Simple-With-Us/congress-trading-shared/pull/365) must merge with its immutable helper and caller pins preserved in main history before this PR lands.
+
+**Verification.**  Caller actionlint and diff checks passed.  Shared validation passed 14 Node tests, 463 package tests, typecheck, build, and a provider-free hosted artifact check.  Current-head CI and Codex review are required before merge.
+
+**Docs.**  `docs/rollouts/2026-10-12-claude-autofix-diagnostics.md` and `PLAN.md`.  Linear OPS-935 is the live tracker; effort logs are archived.
+
 ## 2026-10-11 CURSOR — trading-liveness dark fleet (#4435, branch `minimax/ingest-liveness-scan`)
 
 **What.**  Integration test for `getTradingLivenessSummary()` when the fleet is fully dark (autopilot-eligible halted account).  Resolves Kody `PRRT_kwDOS7mOVM6rSBIg`; duplicate-walk defer thread untouched.
