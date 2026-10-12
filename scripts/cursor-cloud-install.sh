@@ -81,11 +81,11 @@ else
 fi
 
 # 5. Bootstrap the fleet coordination CLIs (board for Linear, agent-sync for Zulip)
-# into ~/.local/bin. Soft-fails on network errors; cloud seats use curl+GraphQL
-# per AGENT-SYNC.md Core Actions when the CLIs are absent.
+# into ~/.local/bin.  Product setup may continue offline; fleet work waits
+# until the installed protocol and both CLI identity checks are available.
 if [[ -f scripts/install-fleet-coordination.sh ]]; then
   log "Installing fleet coordination CLIs (board, agent-sync)"
-  bash scripts/install-fleet-coordination.sh || warn "Fleet coordination install skipped (ok offline)"
+  bash scripts/install-fleet-coordination.sh || warn "Fleet coordination unavailable; stop fleet work until setup and identity checks pass"
 else
   warn "scripts/install-fleet-coordination.sh missing; coordination CLIs not bootstrapped."
 fi

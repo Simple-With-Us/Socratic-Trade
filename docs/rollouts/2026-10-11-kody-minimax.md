@@ -90,3 +90,22 @@ try {
 subprocess.run(["node", "--input-type=module", "-e", node_script], env=env, check=True)
 PY
 ```
+
+## Cloud Setup Review Follow-up (2026-10-12)
+
+- `scripts/install-fleet-coordination.sh` includes `AGENT-SYNC.md`, `fleet-apps.json`, and protocol documents from the pinned AFC revision alongside both stdlib-only clients.  It checks Python 3.11 and CLI imports before marking the cache installed.
+- `scripts/setup-slack-sync.sh` is now an idempotent retirement helper.  It removes only Slack entries inside SessionStart groups and the copied Slack engine; unrelated hooks and settings remain intact.  Malformed settings or symlinks fail without replacement.
+- `scripts/cloud-setup.sh`, `scripts/cursor-cloud-install.sh`, and `scripts/cursor-cloud-start.sh` report coordination failure as a fleet-work blocker.  Cursor no longer probes retired relay entry points.
+- `AGENTS.md` documents the Linux protocol location, PATH, runtime credential names, identity checks, and authorized Linear write switch.  Credentials are provisioned separately; no personal-owner token is allowed.
+- `scripts/test-cloud-coordination-bootstrap.py` covers isolated first install, cached cleanup, mixed hooks, malformed settings, symlinks, and failed fetches.
+- `STATUS.md` and `PLAN.md` record this follow-up.  The Mac on-demand helper inventory and its living Apple Note also identify these cloud-only helpers; no Mac setup or daemon was run.
+
+Verification:
+
+```bash
+python3 scripts/test-cloud-coordination-bootstrap.py
+bash -n scripts/install-fleet-coordination.sh scripts/setup-slack-sync.sh scripts/cloud-setup.sh scripts/cursor-cloud-start.sh scripts/cursor-cloud-install.sh
+git diff --check
+```
+
+All five isolated tests and shell/diff checks passed.  A real pinned-source install used isolated `FLEET_COORD_CACHE`, `FLEET_COORD_BIN`, and `CLAUDE_CONFIG_DIR` directories plus a test `uname` reporting Linux.  Both installed `--help` commands and `agent_sync.identity.strict_seat("CODEX")` passed without credentials or service calls.  The archive download is the only network action in this smoke test.  Runtime authentication remains an operator prerequisite, not a claimed test result.

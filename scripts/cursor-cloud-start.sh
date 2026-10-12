@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Cursor cloud agent start for Socratic-Trade.
-# 1. Attach fleet relay consumer/poller when an in-repo Linux bootstrap exists
-#    (soft-fail with a documented gap otherwise).
+# 1. Install the current Linear/Zulip clients and retire old Slack hooks.
 # 2. Infisical selectors come from process environment / Cursor dashboard Secrets only
 #    (strict Infisical: no parsing committed .env-shaped files in this hook).
 # 3. When dashboard credentials exist, smoke-test scripts/infisical-run.mjs without writing
@@ -15,41 +14,12 @@ cd "$REPO_ROOT"
 log()   { printf '[cursor-cloud-start] %s\n' "$*"; }
 warn()  { printf '[cursor-cloud-start] WARN: %s\n' "$*" >&2; }
 
-# Known in-repo relay bootstrap scripts (first match wins).  There is no Linux consumer
-# in this repo today; Mac seats run pm2 agent-sync-push outside the tree.
-RELAY_BOOTSTRAP_CANDIDATES=(
-  scripts/agent-sync-relay-consumer.sh
-  scripts/agent-sync-relay-poller.sh
-  scripts/agent-sync-push-consumer.sh
-)
-
-attach_fleet_relay_consumer() {
-  local script rel
-  for rel in "${RELAY_BOOTSTRAP_CANDIDATES[@]}"; do
-    script="${REPO_ROOT}/${rel}"
-    if [[ -f "${script}" ]]; then
-      log "Attaching fleet relay via ${rel}"
-      if bash "${script}" >/dev/null 2>&1; then
-        log "Fleet relay consumer bootstrap completed."
-      else
-        warn "Fleet relay bootstrap ${rel} failed; continuing cloud start."
-      fi
-      return 0
-    fi
-  done
-  warn "No in-repo Linux fleet relay consumer/poller script found (known gap)."
-  warn "Mac agent-sync-push is not available on Cursor cloud VMs."
-  return 0
-}
-
-attach_fleet_relay_consumer
-
 # Bootstrap the fleet coordination CLIs (board for Linear, agent-sync for Zulip)
-# into ~/.local/bin. Soft-fails on network errors; cloud seats use curl+GraphQL
-# per AGENT-SYNC.md Core Actions when the CLIs are absent.
+# into ~/.local/bin.  Product setup may continue offline; fleet work waits
+# until the installed protocol and both CLI identity checks are available.
 if [[ -f scripts/install-fleet-coordination.sh ]]; then
   log "Installing fleet coordination CLIs (board, agent-sync)"
-  bash scripts/install-fleet-coordination.sh || warn "Fleet coordination install skipped (ok offline)"
+  bash scripts/install-fleet-coordination.sh || warn "Fleet coordination unavailable; stop fleet work until setup and identity checks pass"
 else
   warn "scripts/install-fleet-coordination.sh missing; coordination CLIs not bootstrapped."
 fi
