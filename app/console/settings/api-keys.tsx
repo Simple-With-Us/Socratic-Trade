@@ -224,7 +224,7 @@ export function ApiKeysCard() {
                         {entry.routeToggle && (
                           <label
                             className="flex items-center gap-1.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]"
-                            title="OpenRouter is the default.  Pick Direct to send this provider's models straight to its own API with your key above."
+                            title="OpenRouter is the default.  Pick Direct to send this provider's models straight to its own API with your key above."
                           >
                             <span className="whitespace-nowrap">Route</span>
                             <Select
