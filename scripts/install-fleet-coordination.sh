@@ -17,15 +17,18 @@ SHA_FILE="$CACHE_DIR/.pinned-sha"
 log()  { printf '[fleet-coordination] %s\n' "$*"; }
 warn() { printf '[fleet-coordination] WARN: %s\n' "$*" >&2; }
 
+# Remove retired Slack hook entries on every platform, including reused Macs that
+# already have managed fleet tooling but still carry persisted SessionStart entries
+# and the copied engine from a prior setup-slack-sync.sh run.
+# No credentials are read, and unrelated settings stay intact.
+bash "$(dirname "$0")/setup-slack-sync.sh"
+
 # The Mac already has managed fleet tooling.  Only cloud/Linux setup runs here.
 if [[ "$(uname -s)" == "Darwin" ]]; then
   log "macOS detected; the Mac lane has its own AFC checkout.  Skipping."
   exit 0
 fi
 
-# Remove only retired Slack hook entries before the cache short-circuit.
-# No credentials are read, and unrelated settings stay intact.
-bash "$(dirname "$0")/setup-slack-sync.sh"
 if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
   warn "Python 3.11 or newer is required; fleet coordination is unavailable."
   exit 1
