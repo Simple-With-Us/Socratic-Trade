@@ -44,6 +44,16 @@ attach_fleet_relay_consumer() {
 
 attach_fleet_relay_consumer
 
+# Bootstrap the fleet coordination CLIs (board for Linear, agent-sync for Zulip)
+# into ~/.local/bin. Soft-fails on network errors; cloud seats use curl+GraphQL
+# per AGENT-SYNC.md Core Actions when the CLIs are absent.
+if [[ -f scripts/install-fleet-coordination.sh ]]; then
+  log "Installing fleet coordination CLIs (board, agent-sync)"
+  bash scripts/install-fleet-coordination.sh || warn "Fleet coordination install skipped (ok offline)"
+else
+  warn "scripts/install-fleet-coordination.sh missing; coordination CLIs not bootstrapped."
+fi
+
 # Do not enter the shared overlay branch unless shared machine identity is present.
 if [[ -z "${INFISICAL_SHARED_CLIENT_ID:-}" || -z "${INFISICAL_SHARED_CLIENT_SECRET:-}" ]]; then
   unset INFISICAL_SHARED_PROJECT_ID INFISICAL_SHARED_TOKEN \

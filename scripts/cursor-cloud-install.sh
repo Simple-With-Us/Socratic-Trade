@@ -80,4 +80,14 @@ else
   warn "scripts/infisical-run.mjs missing; Infisical injection unavailable."
 fi
 
+# 5. Bootstrap the fleet coordination CLIs (board for Linear, agent-sync for Zulip)
+# into ~/.local/bin. Soft-fails on network errors; cloud seats use curl+GraphQL
+# per AGENT-SYNC.md Core Actions when the CLIs are absent.
+if [[ -f scripts/install-fleet-coordination.sh ]]; then
+  log "Installing fleet coordination CLIs (board, agent-sync)"
+  bash scripts/install-fleet-coordination.sh || warn "Fleet coordination install skipped (ok offline)"
+else
+  warn "scripts/install-fleet-coordination.sh missing; coordination CLIs not bootstrapped."
+fi
+
 log "install complete."
