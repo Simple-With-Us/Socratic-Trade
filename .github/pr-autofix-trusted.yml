@@ -1,0 +1,9 @@
+# Trusted autofix policy for this repository (read from the default branch only).
+# PR-branch .autofix.yml may still narrow allowed_bots; it must not change model,
+# turn budget, iteration cap, or verify commands.
+
+model: MiniMax-M3.1-Flash-Preview
+max_turns: 60
+max_iterations: 5
+verify_command: |
+  npx tsc --noEmit && npm test && npm run build
