@@ -45,9 +45,10 @@ jobs:
 
       # project.yml is the source of truth.  Linux seats cannot run xcodegen, and
       # the Cursor hook blocks hand-edits of project.pbxproj, so this Mac job
-      # generates before build/test.  The checked-in pbxproj still matters for
-      # TestFlight (the ship script does not generate); after this job, commit
-      # the generated file from the artifact so they stay in sync.
+      # generates before build/test.  ios-ship.yml installs the same XcodeGen
+      # pin so the ship script can generate before archive.  After this job,
+      # commit the generated file from the artifact so the checked-in pbxproj
+      # stays in sync.
       - name: Generate Xcode project from project.yml
         run: |
           set -euo pipefail

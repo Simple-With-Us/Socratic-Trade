@@ -312,6 +312,68 @@ async function setWhatToTest({ api, buildId, appId, marketing }) {
     : `release-notes: POST failed HTTP ${res.status}`);
 }
 
+function appleFailure(res) {
+  const first = Array.isArray(res.parsed?.errors) ? res.parsed.errors[0] : null;
+  const code = first?.code ? String(first.code) : "";
+  const title = first?.title ? String(first.title) : "";
+  const detail = first?.detail ? String(first.detail).replace(/\s+/g, " ").slice(0, 160) : "";
+  return [`HTTP ${res.status}`, code, title, detail].filter(Boolean).join(" ");
+}
+
+async function getRetrying(api, url) {
+  let res = await api("GET", url);
+  if (!res.ok && (res.status >= 500 || res.status === 429)) {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    res = await api("GET", url);
+  }
+  return res;
+}
+
+// Try each list URL.  A non-2xx on page 1 falls through to the next URL.
+// A non-2xx on a later page fails the scan: a partial floor can reuse a
+// version Apple already has.
+async function scanPages(api, urls, visit) {
+  let last = "no response";
+  for (const first of urls) {
+    let url = first;
+    let failed = null;
+    for (let page = 0; page < 10 && url; page++) {
+      const res = await getRetrying(api, url);
+      if (!res.ok) {
+        failed = appleFailure(res);
+        break;
+      }
+      for (const row of res.parsed.data || []) visit(row);
+      url = res.parsed.links?.next || "";
+    }
+    if (!failed) return { ok: true };
+    last = failed;
+    console.error(`latest-build-seq: list failed (${failed}); trying next URL`);
+  }
+  return { ok: false, error: last };
+}
+
+async function resolveAppId(api, bundleId) {
+  const filtered = await getRetrying(
+    api,
+    `/v1/apps?filter[bundleId]=${encodeURIComponent(bundleId)}&limit=5`
+  );
+  if (filtered.ok) {
+    const rows = filtered.parsed.data || [];
+    const match = rows.find((row) => row.attributes?.bundleId === bundleId) || rows[0];
+    if (match?.id) return match.id;
+  }
+  const listed = await getRetrying(api, "/v1/apps?limit=200");
+  if (listed.ok) {
+    const match = (listed.parsed.data || []).find((row) => row.attributes?.bundleId === bundleId);
+    if (match?.id) return match.id;
+  }
+  const why = filtered.ok ? "filter returned no rows" : appleFailure(filtered);
+  const listWhy = listed.ok ? "list returned no matching bundle" : appleFailure(listed);
+  console.error(`latest-build-seq: app not found for bundle (${why}; ${listWhy})`);
+  return null;
+}
+
 async function main() {
   const envPath = join(homedir(), ".secrets", "appstore-connect.env");
   const env = loadEnvFile(envPath);
@@ -382,12 +444,8 @@ async function main() {
       console.error("Usage: node asc-api.mjs latest-build-seq <bundleId> <prefix>");
       process.exit(2);
     }
-    const apps = await api("GET", `/v1/apps?filter[bundleId]=${encodeURIComponent(bundleId)}&limit=1`);
-    if (!apps.ok || !apps.parsed.data?.[0]) {
-      console.error(`latest-build-seq: app not found for bundle (HTTP ${apps.status})`);
-      process.exit(2);
-    }
-    const appId = apps.parsed.data[0].id;
+    const appId = await resolveAppId(api, bundleId);
+    if (!appId) process.exit(2);
 
     // Escape the prefix so "1.0" cannot match "120" via the regex dot.
     const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -402,38 +460,37 @@ async function main() {
     };
 
     // 1) Marketing version trains -- the authoritative record.
-    let url = `/v1/preReleaseVersions?filter[app]=${appId}&limit=200`;
+    // The filter[app] list is what succeeded on 2026-10-08 (asc=106).  The
+    // relationship URL is the fallback when Apple rejects that filter.
     let seenVersions = 0;
-    for (let page = 0; page < 10 && url; page++) {
-      const res = await api("GET", url);
-      if (!res.ok) {
-        console.error(`latest-build-seq: preReleaseVersions query failed (HTTP ${res.status})`);
-        process.exit(2);
-      }
-      for (const v of res.parsed.data || []) {
-        // A macOS/tvOS train must not bump the iOS sequence.
-        if ((v.attributes?.platform || "IOS") !== "IOS") continue;
-        seenVersions++;
-        consider(v.attributes?.version);
-      }
-      url = res.parsed.links?.next || "";
+    const versions = await scanPages(api, [
+      `/v1/preReleaseVersions?filter[app]=${appId}&limit=200`,
+      `/v1/apps/${appId}/preReleaseVersions?limit=200`,
+    ], (row) => {
+      // A macOS/tvOS train must not bump the iOS sequence.
+      if ((row.attributes?.platform || "IOS") !== "IOS") return;
+      seenVersions++;
+      consider(row.attributes?.version);
+    });
+    if (!versions.ok) {
+      console.error(`latest-build-seq: preReleaseVersions query failed (${versions.error})`);
+      process.exit(2);
     }
 
     // 2) Build numbers, so the floor can never regress below what the previous
-    //    implementation reported.
-    url = `/v1/builds?filter[app]=${appId}&sort=-uploadedDate&limit=200`;
+    //    implementation reported.  Same fallback if sort/filter is rejected.
     let seenBuilds = 0;
-    for (let page = 0; page < 10 && url; page++) {
-      const res = await api("GET", url);
-      if (!res.ok) {
-        console.error(`latest-build-seq: builds query failed (HTTP ${res.status})`);
-        process.exit(2);
-      }
-      for (const b of res.parsed.data || []) {
-        seenBuilds++;
-        consider(b.attributes?.version);
-      }
-      url = res.parsed.links?.next || "";
+    const builds = await scanPages(api, [
+      `/v1/builds?filter[app]=${appId}&sort=-uploadedDate&limit=200`,
+      `/v1/builds?filter[app]=${appId}&limit=200`,
+      `/v1/apps/${appId}/builds?limit=200`,
+    ], (row) => {
+      seenBuilds++;
+      consider(row.attributes?.version);
+    });
+    if (!builds.ok) {
+      console.error(`latest-build-seq: builds query failed (${builds.error})`);
+      process.exit(2);
     }
 
     console.error(
