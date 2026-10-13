@@ -1,3 +1,8 @@
+> **2026-10-12 CODEX — CTS-330 cache review follow-up.**  Validate a fresh cache before replacing the old pin and retire Mac Slack hooks before skipping installation.  Product roadmap remains unchanged; hosted checks and current-head review gate landing.
+
+> **2026-10-12 CODEX — CTS-330 cloud review follow-up.**  Complete the Linear/Zulip setup prerequisite with a pinned protocol/registry bundle and idempotent retirement of persisted Slack hooks.  Product roadmap and runtime behavior are unchanged.  Rollout: `docs/rollouts/2026-10-11-kody-minimax.md`.
+
+> **2026-10-11 CODEX — Kody MiniMax (CTS-330).**  Select `MiniMax-M3` through MiniMax’s direct OpenAI-compatible endpoint and keep Sentry observation aligned with the workflow name.  Product roadmap scope and timeline are unchanged.  Rollout: `docs/rollouts/2026-10-11-kody-minimax.md`.
 > **2026-10-12 CODEX — Claude Autofix Diagnostics (OPS-935).**  Add sanitized failure diagnostics before choosing any change to the 60-turn budget.  Land shared PR #365 with immutable pins preserved, then this caller update.  Inspect the next eligible real run before claiming the turn-exhaustion issue resolved.  Rollout: `docs/rollouts/2026-10-12-claude-autofix-diagnostics.md`.
 
 > **2026-10-11 CURSOR -- Sentry iOS DSN + OTel release (`cursor/sentry-ios-dsn-spans-5fec`).**  No roadmap scope change.  Observability only: inject Infisical `SENTRY_DSN` on TestFlight ship, stamp Langfuse OTel spans with the production SHA, and stop Sentry Deploy from burning 25 minutes during the weekday RTH latch.  `refresh-rag-snapshot` is out of this repo (FLEET-INFRA-DN).  Extra-ship no.  Rollout: `docs/rollouts/2026-10-11-sentry-ios-dsn-otel-release.md`.
