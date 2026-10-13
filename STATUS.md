@@ -1,5 +1,13 @@
 # Current Status
 
+## 2026-10-13 Muse-Assist — per-request proxy-use logging + public `GET /api/proxy-use` (branch `Muse-Assist/proxy-use-logging`)
+
+**What.**  Per-request logging of residential-proxy use decisions for market-data/provider traffic. `src/lib/proxy-use-log.ts` (new) holds a 100-entry in-memory ring fed by `dataSourceFetch` at every exit path (excluded service / internal target / no proxy / proxied attempt / fail_soft fallback recorded as a second `fallback:true` entry). New public no-auth `GET /api/proxy-use` returns the aggregate snapshot plus a Mango TCP reachability probe (3s timeout, 60s cache, never throws); added to middleware `PUBLIC_PREFIXES` so the anonymous 2-minute watchdog can poll it. No request behavior changed — additive telemetry only. 6 new unit tests; 82 tests pass across the touched areas; tsc shows only pre-existing unrelated errors (identical on pristine main).
+
+**Next.**  PR opened against main; left for the standing auto-merge rule (merge when CI is green). Point the watchdog VM at `https://<app-host>/api/proxy-use`. Live Mango reachability from the Coolify host is unverified until the first watchdog poll post-deploy.
+
+**Docs.**  `docs/rollouts/2026-10-13-proxy-use-logging.md`.
+
 ## 2026-10-13 CURSOR — iOS Sentry DSN + TestFlight cron (branch `cursor/ios-sentry-testflight-cron-5438`)
 
 **What.**  TestFlight has not archived since 2026-10-08.  `latest-build-seq` exits 2 and the ship script discards that stderr, then refuses to pick a build number (`local=107`, `asc=UNVERIFIED`).  The phone is still on the 2026-10-08 binary, which logged `SENTRY_DSN unset`.  Run 38181542543 already loaded a 95-character `SENTRY_DSN` from Infisical prod and then died in the same ASC check, so the DSN never reached an archive.  Sentry monitor `ci-socratic-trade-ios-testflight-ship` (FLEET-INFRA-DA) is the other failure: over the last 200 workflow runs GitHub delivered about 22% of the `*/30` ticks (p90 gap 368 min).  A 15-minute check-in margin marks those gaps missed.
