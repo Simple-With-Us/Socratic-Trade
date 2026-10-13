@@ -545,7 +545,7 @@ export async function debateProposal(
               if (attempt.provider === "openrouter" && (response.status === 404 || response.status === 403)) {
                 recordOpenRouterModelNotFound(attempt.model, { status: response.status, userId, detail: rawDetail });
               }
-              const why = humanizeLlmError(rawDetail, { provider: attempt.provider, status: response.status });
+              const why = humanizeLlmError(rawDetail, { provider: attempt.provider, status: response.status, model: attempt.model });
               if (!isLast && isFailoverLlmStatus(response.status)) {
                 lastError = new Error(why);
                 console.warn(`[RedTeam] ${attempt.model}/${attempt.provider} failed (HTTP ${response.status}); failing over to ${next.model}/${next.provider}.`);
