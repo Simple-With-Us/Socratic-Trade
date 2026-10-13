@@ -224,6 +224,15 @@ final class UserFacingCopyTests: XCTestCase {
             MobileAPIError.network(URLError(.badServerResponse)).errorDescription,
             "Couldn't reach Socratic Trade"
         )
+        XCTAssertNil(
+            MobileAPIError.userFacingNetworkMessage(
+                for: MobileAPIError.serverError(statusCode: 500, message: "DB down")
+            )
+        )
+        XCTAssertEqual(
+            MobileAPIError.serverError(statusCode: 500, message: "DB down").errorDescription,
+            "DB down"
+        )
         let scanJSON = Data(#"""
         {"scannedSymbols":505,"returnedQuotes":0,"warnings":["This operation was aborted"],"topCandidates":[]}
         """#.utf8)
