@@ -674,8 +674,6 @@ struct StoreTransientAlerts: ViewModifier {
                 isPresented: Binding(
                     get: {
                         guard let message = store.error, !message.isEmpty else { return false }
-                        // Cached workspace stays visible during a background refresh failure.
-                        if store.snapshot != nil, store.snapshotLoadFailed { return false }
                         return true
                     },
                     set: { if !$0 { store.dismissError() } }

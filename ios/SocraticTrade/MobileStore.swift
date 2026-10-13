@@ -358,7 +358,7 @@ final class MobileStore: ObservableObject {
     /// When the snapshot is stale, do not trust cached `marketSession` from the server payload.
     func displayMarketSession(for snapshot: MobileSnapshot, at now: Date = Date()) -> String {
         guard isSnapshotStale(at: now) else { return snapshot.marketSession }
-        return NYSEMarketSession.sessionKey(now: now) ?? "unknown"
+        return NYSEMarketSession.sessionKey(now: now) ?? snapshot.marketSession
     }
 
     func deriveRunState(for snapshot: MobileSnapshot, at now: Date = Date()) -> RunStateWord {
@@ -965,10 +965,10 @@ final class MobileStore: ObservableObject {
             return
         }
         if preserveTransientMessage {
-            if let message = MobileAPIError.userFacingNetworkMessage(for: caught) {
-                error = message
-            } else if let apiError = caught as? MobileAPIError {
+            if let apiError = caught as? MobileAPIError {
                 error = apiError.errorDescription
+            } else if let message = MobileAPIError.userFacingNetworkMessage(for: caught) {
+                error = message
             } else {
                 error = caught.localizedDescription
             }

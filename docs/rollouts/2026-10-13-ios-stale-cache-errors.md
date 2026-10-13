@@ -20,11 +20,11 @@ Stop the native app from trusting stale snapshot market session, surfacing gener
 ## Verification State
 
 ```bash
-npm run lint
-npx tsc --noEmit
+npm run lint          # -> ok (cloud VM, 2026-10-13)
+npx tsc --noEmit      # -> ok (cloud VM, 2026-10-13)
 ```
 
-iOS: `ios-build` CI (Swift compile + XCTest on macos-latest).
+iOS: `ios-build` CI (Swift compile + XCTest on macos-latest) -> pending (will run on PR).
 
 ## Next Steps & Blockers
 

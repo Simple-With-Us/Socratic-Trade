@@ -31,7 +31,7 @@ enum MobileAPIError: Error, LocalizedError {
             }
             return "Quotes were unavailable for this universe.  Refresh after the quote feed recovers."
         case .network(let underlying):
-            return Self.userFacingNetworkMessage(for: underlying)
+            return Self.userFacingNetworkMessage(for: underlying) ?? "Couldn't reach Socratic Trade"
         case .decoding:
             return "Couldn’t load your workspace.  Try again."
         }
@@ -49,13 +49,13 @@ enum MobileAPIError: Error, LocalizedError {
             case .notConnectedToInternet, .networkConnectionLost:
                 return "Check your connection"
             default:
-                break
+                return "Couldn't reach Socratic Trade"
             }
         }
         if case MobileAPIError.network(let underlying) = error {
             return userFacingNetworkMessage(for: underlying)
         }
-        return "Couldn't reach Socratic Trade"
+        return nil
     }
 }
 
