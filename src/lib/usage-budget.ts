@@ -402,6 +402,7 @@ const CHEAPER_MODEL: Record<string, string> = {
   "grok-4.3": "grok-build-0.1",
   // Meta / Muse (OpenRouter)
   "muse-spark-1.3": "muse-glimmer-30b",
+  "muse-spark-1.3-contributor": "muse-glimmer-30b",
   // Gemini
   "gemini-pro-latest": "gemini-flash-latest",
   "gemini-flash-latest": "gemini-flash-lite-latest",

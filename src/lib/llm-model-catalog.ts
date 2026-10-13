@@ -359,6 +359,19 @@ export const LLM_MODEL_CATALOG: readonly LlmCatalogEntry[] = [
     predecessors: ["llama-4-scout", "llama-3.3-70b-instruct"]
   },
   {
+    // Contributor tier: Meta discounts the price in exchange for permission to train on prompts
+    // and completions.  Do not use it for anything the user would not want Meta to keep.
+    displaySlug: "muse-spark-1.3-contributor",
+    openRouterSlug: "meta/muse-spark-1.3-contributor",
+    nativeSlug: "muse-spark-1.3-contributor",
+    provider: "meta",
+    label: "muse-spark-1.3-contributor — cheapest Muse tier, Meta trains on your prompts",
+    tier: "$",
+    aliases: ["meta/muse-spark-1.3-contributor"],
+    lineage: "meta-muse",
+    predecessors: []
+  },
+  {
     displaySlug: "muse-glimmer-30b",
     openRouterSlug: "meta/muse-glimmer-30b",
     nativeSlug: "muse-glimmer-30b",
