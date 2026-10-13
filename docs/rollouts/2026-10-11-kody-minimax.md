@@ -129,3 +129,9 @@ Verification: `python3 scripts/test-cloud-coordination-bootstrap.py` passes nine
 The separate self-contained `scripts/agent-sync-bootstrap.sh` remained able to recreate the retired Slack engine and global `SessionStart` hook.  It now fails without writing files or reading credentials.  `docs/slack-coordination.md` points to the current pinned fleet installer and protocol instead of giving Slack installation commands.  The exact-file inventory above now covers every file unique to this PR, including the cloud installer and its tests.
 
 Verification: `python3 scripts/test-cloud-coordination-bootstrap.py` passes nine tests, including the final retired-bootstrap regression.  The counts above were corrected to match this command's actual result; only the cloud setup follow-up still records the five-test count that was accurate when that section was written.
+
+## Current-Head Review Follow-up (2026-10-13)
+
+Merged the latest `origin/main` into PR #4523 after it fell behind.  The fresh Kody review found that the updated retired-Slack guide exposed repository-specific paths; it now uses a generic cache path and onboarding reference.  The PR hold stays active until current-head Codex review and hosted `verify` pass.
+
+Verification on this follow-up: `git diff --check` passed after the path corrections; hosted `verify` is pending after the updated push.  No provider call or paid model run was made.

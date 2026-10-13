@@ -1,9 +1,9 @@
 # Fleet Coordination After Slack Retirement
 
 Slack agent coordination was retired at the fleet cutover.  Zulip `#agent-sync`
-is the agent chat, and Linear is the work tracker.  The canonical rules are in
-`/Users/jay/apps/AGENT-SYNC.md`; cloud sessions use the pinned copy installed at
-`~/.cache/ai-fleet-coordinator/AGENT-SYNC.md`.
+is the agent chat, and Linear is the work tracker.  Follow the canonical fleet
+AGENT-SYNC protocol; cloud sessions use a pinned copy under
+`~/.cache/<seat>/AGENT-SYNC.md`.
 
 ## Current Setup
 
@@ -20,9 +20,8 @@ the current AGENT-SYNC protocol for claims and Zulip topics.  A failed install
 or identity check blocks fleet work.  Do not fall back to Slack or archived
 effort logs.
 
-For another repository, use the fleet onboarding instructions in
-`AI-Fleet-Coordinator/docs/ONBOARDING-NEW-APP.md`.  Do not copy this repository's
-retired single-file bootstrap.  `scripts/agent-sync-bootstrap.sh` is retained
+For another repository, follow the fleet's new-app onboarding instructions.  Do
+not copy this repository's retired single-file bootstrap.  `scripts/agent-sync-bootstrap.sh` is retained
 only as a failing compatibility path so old setup calls cannot reinstall the
 Slack engine or hook.
 

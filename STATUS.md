@@ -8,12 +8,13 @@
 
 **Docs.**  `docs/rollouts/2026-10-11-kody-minimax.md`.  Linear CTS-330 tracks the fleet rollout; effort logs are archived.
 
-**Next.**  Land #4523 after review and required checks clear.
+**Next.**  Land #4523 after the current-head review and hosted `verify` pass; the scoped do-not-automerge hold remains until then.
 
 **Review follow-up (CODEX).**  The archived effort-log push gate now remains as a no-op compatibility hook, cloud bootstrap scripts no longer install the retired Slack hook, and the rollout canary recipe uses an environment-provided shared lane plus Python-only secret handoff.  Current-head Codex review and hosted checks are still required; auto-merge remains off.
 
 **Cloud review follow-up (2026-10-12 CODEX).**  The pinned bootstrap now includes the fleet registry and protocol documents, checks Python 3.11 and both CLI imports, and reports failed installation as a fleet-work blocker.  Reused cloud settings lose only retired Slack SessionStart entries; mixed unrelated hooks and settings are preserved.  Five isolated bootstrap tests, shell syntax, and a real pinned-source offline CLI/registry smoke test passed.  No live credentials or Mac settings were changed.
 **Cache review follow-up (2026-10-12 CODEX).**  Preserve both bot fixes, merge current main, retire Slack hooks before the Mac skip, and stage/validate a clean same-filesystem cache before replacement.  Nine isolated bootstrap regressions and shell/diff checks pass.  Full product checks and fresh Codex review remain hosted merge gates; auto-merge stays off.
+**Current-head review follow-up (2026-10-13 CODEX).**  Merged current `origin/main` into #4523 and generalized operational paths in the retired-Slack guide after a Kody review flagged repository topology in public docs.  Hosted `verify` and a fresh Codex review are required on the new head; the do-not-automerge hold remains.
 
 ## 2026-10-12 CODEX — Claude Autofix Diagnostics (OPS-935, PR #4532)
 
