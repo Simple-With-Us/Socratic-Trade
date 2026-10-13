@@ -166,6 +166,7 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   "deepseek-pro-latest": [0.57816, 1.73448], // was [0.57948, 1.73844] — kept in sync with deepseek-v4-pro-0813 above
   "minimax-m3": [0.3, 1.2],
   "muse-spark-1.3": [1.25, 4.25],
+  "muse-spark-1.3-contributor": [0.1, 0.2], // verified 2026-10-12 on OpenRouter and dev.meta.ai pricing
   "muse-glimmer-30b": [0.35, 1.5], // was [0.3, 1.1] — real (live OpenRouter) price is $0.35/$1.50 (verified 2026-09-18)
   "kimi-latest": [1.95, 10.92], // was [0.3, 1.2] — the old figure was Kimi's cache-HIT input price, not the
   "kimi-k3": [1.95, 10.92], //     real cache-miss rate; real price is $1.95/$10.92 (verified 2026-09-18)

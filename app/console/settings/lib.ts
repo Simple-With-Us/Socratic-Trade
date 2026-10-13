@@ -266,6 +266,9 @@ export interface ApiKeyEntry {
   /** Declared vendor plan tier (free/power/starter/…). Present for optional market-data keys. */
   planTier?: string;
   planTierOptions?: ApiKeyPlanTierOption[];
+  /** Present for Meta and MiniMax: route through OpenRouter (default) or directly with your own key. */
+  routeToggle?: boolean;
+  route?: "openrouter" | "native";
   /** ST product retired (e.g. FMP) — show badge, disable add when CT-only. */
   retired?: boolean;
   retiredNote?: string;
@@ -299,6 +302,14 @@ export function saveApiKeyPlanTier(service: string, planTier: string): Promise<{
   return request<{ success: boolean }>("/api/keys", {
     method: "POST",
     body: JSON.stringify({ service, planTier })
+  });
+}
+
+/** POST /api/keys with route only — pick OpenRouter or the provider's own API for Meta / MiniMax. */
+export function saveApiKeyRoute(service: string, route: "openrouter" | "native"): Promise<{ success: boolean }> {
+  return request<{ success: boolean }>("/api/keys", {
+    method: "POST",
+    body: JSON.stringify({ service, route })
   });
 }
 

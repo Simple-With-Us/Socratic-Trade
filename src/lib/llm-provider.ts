@@ -1,6 +1,7 @@
 import { resolveLlmCredential } from "./db";
 import { catalogEntryFor, nativeSlugFor, openRouterSlugFor } from "./llm-model-catalog";
 import { resolveOpenAiModel, type LlmTransport } from "./llm-request";
+import { llmRouteFor } from "./llm-route";
 
 export type LlmTeamRole = "green" | "red" | "support";
 export type LlmModelFamily = "openai" | "anthropic" | "xai" | "gemini" | "mistral" | "deepseek" | "meta" | "moonshot" | "minimax" | "openrouter";
@@ -42,8 +43,52 @@ export function modelRequiresOpenRouter(model: string | undefined): boolean {
     || catalogEntryFor(model)?.openRouterOnly === true;
 }
 
+/** Meta Model API chat-completions URL (OpenAI-compatible, bearer key). */
+export const META_MODEL_API_URL = "https://api.meta.ai/v1/chat/completions";
+
+/**
+ * The Meta-hosted slug the native Model API (api.meta.ai) serves for this model, or undefined.
+ * Only the Muse Spark models are hosted there.  Glimmer is open-weight and Llama is not served,
+ * so both stay OpenRouter-only.
+ */
+export function metaNativeModelSlug(model: string | undefined): string | undefined {
+  const slug = catalogEntryFor(model)?.nativeSlug ?? "";
+  return /^muse-spark-/i.test(slug) ? slug : undefined;
+}
+
+/**
+ * Native Meta route: the user's own Meta key (or the operator failover) for a Muse Spark model,
+ * used only when the user chose "direct" for Meta in Settings (default is OpenRouter).
+ * Returns undefined when the model is not Meta-hosted or no Meta key resolves, so callers fall
+ * through to OpenRouter.  A resolved key equal to the OpenRouter key is never treated as a Meta
+ * key, so an OpenRouter credential can not leak to api.meta.ai through the test-mode fallback.
+ */
+export function resolveMetaNative(
+  model: string | undefined,
+  userId: string = "local"
+): { key: string; model: string; keySource: "operator" | "user"; keyRef?: string } | undefined {
+  const slug = metaNativeModelSlug(model);
+  if (!slug) return undefined;
+  // OpenRouter is the default route.  Native Meta only when the user picked it in Settings.
+  if (llmRouteFor("meta", userId) !== "native") return undefined;
+  const cred = resolveLlmCredential("meta", userId);
+  if (!cred.key) return undefined;
+  if (cred.key === resolveLlmCredential("openrouter", userId).key) return undefined;
+  return { key: cred.key, model: slug, keySource: cred.source === "operator" ? "operator" : "user", keyRef: cred.keyRef };
+}
+
+/** True when the user chose "direct" for MiniMax and a MiniMax key resolves.  OpenRouter is the default. */
+export function minimaxDirectRoute(model: string | undefined, userId: string = "local"): boolean {
+  return llmModelFamily(model) === "minimax"
+    && !/^openrouter\//i.test((model ?? "").trim())
+    && llmRouteFor("minimax", userId) === "native"
+    && Boolean(resolveLlmCredential("minimax", userId).key);
+}
+
 /** Credential gate follows the same OpenRouter-first, native-fallback routing as execution. */
 export function modelCredentialService(model: string | undefined, userId: string = "local"): LlmModelFamily {
+  if (resolveMetaNative(model, userId)) return "meta";
+  if (minimaxDirectRoute(model, userId)) return "minimax";
   return modelRequiresOpenRouter(model) || resolveLlmCredential("openrouter", userId).key
     ? "openrouter" : llmModelFamily(model);
 }
@@ -140,10 +185,25 @@ export function resolveLlmEndpoint(
   const rawModel = resolveRoleModel(policy, role);
   const family = llmModelFamily(rawModel);
 
+  // 0. Native Meta: when the user chose "direct" for Meta and has a Meta key, a Muse Spark model
+  //    goes straight to api.meta.ai.  Otherwise it falls through to OpenRouter below.
+  const metaNative = resolveMetaNative(rawModel, userId);
+  if (metaNative) {
+    return {
+      provider: "meta",
+      url: process.env.META_API_URL?.trim() || META_MODEL_API_URL,
+      key: metaNative.key,
+      model: metaNative.model,
+      keySource: metaNative.keySource,
+      keyRef: metaNative.keyRef,
+      transport: "chat-completions"
+    };
+  }
+
   // 1. Primary path: OpenRouter key (user or operator failover when enabled)
   const openRouterCred = resolveLlmCredential("openrouter", userId);
   // Meta models are served through OpenRouter; never send a Meta credential to OpenAI.
-  if (openRouterCred.key || modelRequiresOpenRouter(rawModel)) {
+  if (!minimaxDirectRoute(rawModel, userId) && (openRouterCred.key || modelRequiresOpenRouter(rawModel))) {
     const model = normalizeOpenRouterModelId(rawModel);
     const url = process.env.OPENROUTER_API_URL?.trim() || "https://openrouter.ai/api/v1/chat/completions";
 
