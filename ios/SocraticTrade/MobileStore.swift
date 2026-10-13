@@ -355,6 +355,20 @@ final class MobileStore: ObservableObject {
         return now.timeIntervalSince(lastUpdatedAt) > 180
     }
 
+    /// When the snapshot is stale, do not trust cached `marketSession` from the server payload.
+    func displayMarketSession(for snapshot: MobileSnapshot, at now: Date = Date()) -> String {
+        guard isSnapshotStale(at: now) else { return snapshot.marketSession }
+        return NYSEMarketSession.sessionKey(now: now) ?? "unknown"
+    }
+
+    func deriveRunState(for snapshot: MobileSnapshot, at now: Date = Date()) -> RunStateWord {
+        deriveRunStateWord(
+            snapshot: snapshot,
+            useDeviceMarketSession: isSnapshotStale(at: now),
+            now: now
+        )
+    }
+
     /// Capability discovery from the server-advertised control catalog
     /// (`snapshot.catalog.commands[].type`).  Two deliberate fallbacks:
     /// - No snapshot yet, no catalog field, or an empty `commands` array means the server did
@@ -433,26 +447,10 @@ final class MobileStore: ObservableObject {
         }
         let wasLoadFailed = snapshotLoadFailed
         do {
-            let timeout: TimeInterval = pendingAccountId == nil ? 30 : 45
-            var loadedSnapshot: MobileSnapshot
-            var rawData: Data
-            do {
-                (loadedSnapshot, rawData) = try await client.snapshotData(timeout: timeout)
-            } catch let firstError as MobileAPIError {
-                // The snapshot endpoint can legitimately run tens of seconds when broker
-                // dependencies are slow, and a fresh sign-in has no cached snapshot to
-                // soften a single timeout — the first miss used to surface straight as
-                // the full-screen "Couldn't load your workspace" state.  The web console
-                // retries this same class instead of failing
-                // (docs/rollouts/2026-08-12-load-screens-and-lato.md); mirror that for
-                // the no-snapshot case with one longer second attempt.
-                guard snapshot == nil, case .network = firstError, generation == loadGeneration else {
-                    throw firstError
-                }
-                try await Task.sleep(nanoseconds: 1_500_000_000)
-                guard generation == loadGeneration else { return }
-                (loadedSnapshot, rawData) = try await client.snapshotData(timeout: 45)
-            }
+            let (loadedSnapshot, rawData) = try await fetchSnapshotWithNetworkRetry(
+                timeout: 45,
+                generation: generation
+            )
             guard generation == loadGeneration else { return }
             snapshot = loadedSnapshot
             Self.saveCachedSnapshot(rawData)
@@ -474,7 +472,11 @@ final class MobileStore: ObservableObject {
         } catch let caught {
             guard generation == loadGeneration else { return }
             snapshotLoadFailed = true
-            applyAuthAwareError(caught, showUnauthorizedMessage: shouldReportSessionExpiry)
+            if snapshot == nil {
+                applyAuthAwareError(caught, showUnauthorizedMessage: shouldReportSessionExpiry)
+            } else if let apiError = caught as? MobileAPIError, case .unauthorized = apiError {
+                applyAuthAwareError(caught, showUnauthorizedMessage: shouldReportSessionExpiry)
+            }
         }
     }
 
@@ -933,6 +935,25 @@ final class MobileStore: ObservableObject {
         }
     }
 
+    private func fetchSnapshotWithNetworkRetry(
+        timeout: TimeInterval,
+        generation: Int
+    ) async throws -> (MobileSnapshot, Data) {
+        let maxAttempts = 2
+        for attempt in 0..<maxAttempts {
+            do {
+                return try await client.snapshotData(timeout: timeout)
+            } catch let error as MobileAPIError {
+                guard case .network = error else { throw error }
+                if attempt >= maxAttempts - 1 { throw error }
+                let backoffNs: UInt64 = attempt == 0 ? 1_500_000_000 : 3_000_000_000
+                try await Task.sleep(nanoseconds: backoffNs)
+                guard generation == loadGeneration else { throw CancellationError() }
+            }
+        }
+        throw CancellationError()
+    }
+
     private func applyAuthAwareError(
         _ caught: Error,
         preserveTransientMessage: Bool = true,
@@ -944,7 +965,13 @@ final class MobileStore: ObservableObject {
             return
         }
         if preserveTransientMessage {
-            error = caught.localizedDescription
+            if let message = MobileAPIError.userFacingNetworkMessage(for: caught) {
+                error = message
+            } else if let apiError = caught as? MobileAPIError {
+                error = apiError.errorDescription
+            } else {
+                error = caught.localizedDescription
+            }
         }
     }
 

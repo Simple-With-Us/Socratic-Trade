@@ -208,7 +208,22 @@ final class UserFacingCopyTests: XCTestCase {
         assertOrdinary(MobileAPIError.serverError(statusCode: 522, message: nil).errorDescription ?? "")
         assertOrdinary(MobileAPIError.serverError(statusCode: 500, message: nil).errorDescription ?? "")
         assertOrdinary(MobileAPIError.decoding(NSError(domain: "test", code: 1)).errorDescription ?? "")
-        assertOrdinary(MobileAPIError.network(NSError(domain: "test", code: 1)).errorDescription ?? "")
+        XCTAssertEqual(
+            MobileAPIError.network(URLError(.timedOut)).errorDescription,
+            "Server is slow, still trying"
+        )
+        XCTAssertEqual(
+            MobileAPIError.network(URLError(.notConnectedToInternet)).errorDescription,
+            "Check your connection"
+        )
+        XCTAssertEqual(
+            MobileAPIError.network(URLError(.cancelled)).errorDescription,
+            nil
+        )
+        XCTAssertEqual(
+            MobileAPIError.network(URLError(.badServerResponse)).errorDescription,
+            "Couldn't reach Socratic Trade"
+        )
         let scanJSON = Data(#"""
         {"scannedSymbols":505,"returnedQuotes":0,"warnings":["This operation was aborted"],"topCandidates":[]}
         """#.utf8)

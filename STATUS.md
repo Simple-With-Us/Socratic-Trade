@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-13 CURSOR — iOS stale cache + error copy (branch `cursor/ios-stale-cache-fix-78c7`)
+
+**What.**  iOS stops trusting stale `marketSession`, retries `/api/mobile/snapshot` with backoff while keeping cache visible, maps URLError copy, and treats `/api/scan` `stale: true` as last-good data (PR #4609).
+
+**Verification.**  `npm run lint`, `npx tsc --noEmit` clean.  Swift: hosted `ios-build` on PR.
+
+**Docs.**  `docs/rollouts/2026-10-13-ios-stale-cache-errors.md`.
+
+**Next.**  Land PR after `ios-build` + `verify` green.
+
 ## 2026-10-11 CODEX — Kody MiniMax (CTS-330)
 
 **What.**  Kody autofix selects `MiniMax-M3` through MiniMax’s direct OpenAI-compatible endpoint.  Its Sentry observer follows the new workflow name.

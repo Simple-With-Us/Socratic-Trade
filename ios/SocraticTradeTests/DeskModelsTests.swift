@@ -126,6 +126,29 @@ final class DeskModelsTests: XCTestCase {
         )
     }
 
+    func testStaleScanResponseDecodesAndFormatsNote() throws {
+        let json = Data(#"""
+        {
+          "stale": true,
+          "staleReason": "Live Nasdaq screener timed out.",
+          "generatedAt": "2026-08-18T19:25:13.000Z",
+          "topCandidates": [
+            {"symbol":"AAPL","price":210.5,"score":81.2}
+          ],
+          "scannedSymbols": 503,
+          "returnedQuotes": 498,
+          "warnings": []
+        }
+        """#.utf8)
+        let scan = try JSONDecoder().decode(MarketScanResponse.self, from: json)
+        XCTAssertEqual(scan.stale, true)
+        XCTAssertEqual(scan.generatedAt, "2026-08-18T19:25:13.000Z")
+        XCTAssertTrue(scan.hasUsableUniverse)
+        let note = DeskCopy.scanShowingStaleNote(generatedAt: scan.generatedAt, staleReason: scan.staleReason)
+        XCTAssertTrue(note?.contains("Showing scan from") == true)
+        XCTAssertTrue(note?.contains("Live Nasdaq screener timed out.") == true)
+    }
+
     func testFailedRefreshKeepsLastGoodUniverse() {
         let lastGood = MarketScanResponse(
             topCandidates: [

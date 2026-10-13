@@ -179,6 +179,7 @@ enum AppFormat {
         case "pre": return "Pre-Market"
         case "post": return "After Hours"
         case "closed": return "Market Closed"
+        case "unknown": return "Market status unknown"
         case "": return "Market Session"
         default:
             return (session ?? "")
@@ -671,7 +672,12 @@ struct StoreTransientAlerts: ViewModifier {
             .alert(
                 "Something Went Wrong",
                 isPresented: Binding(
-                    get: { store.error != nil },
+                    get: {
+                        guard let message = store.error, !message.isEmpty else { return false }
+                        // Cached workspace stays visible during a background refresh failure.
+                        if store.snapshot != nil, store.snapshotLoadFailed { return false }
+                        return true
+                    },
                     set: { if !$0 { store.dismissError() } }
                 )
             ) {
@@ -831,7 +837,7 @@ private struct InitialSnapshotState: View {
                     .foregroundStyle(AppPalette.warning)
                 Text("Couldn’t load your workspace")
                     .font(.appHeadline)
-                Text(store.error ?? "Check your connection and try again.")
+                Text(store.error ?? DeskCopy.genericConnectionMessage)
                     .font(.appSubheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -874,7 +880,7 @@ private struct SnapshotStatusBanner: View {
                         .accessibilityLabel(store.isStreamConnected ? "Live" : "Updating")
                 }
                 // Keep the circlepath / radio glyph; label is "Market Closed" etc. on every tab.
-                Text(AppFormat.marketSessionBannerLabel(snapshot.marketSession))
+                Text(AppFormat.marketSessionBannerLabel(store.displayMarketSession(for: snapshot, at: context.date)))
                     .font(.appCaption.weight(.medium))
                     .foregroundStyle(.secondary)
             }

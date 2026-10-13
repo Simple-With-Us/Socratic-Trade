@@ -420,7 +420,10 @@ private struct StrategyRunsSection: View {
 }
 
 private struct SchedulerActivityCard: View {
+    @EnvironmentObject private var store: MobileStore
     let snapshot: MobileSnapshot
+
+    private var runState: RunStateWord { store.deriveRunState(for: snapshot) }
 
     var body: some View {
         AppCard {
@@ -430,8 +433,8 @@ private struct SchedulerActivityCard: View {
                         .font(.appHeadline)
                     Spacer()
                     StatusPill(
-                        deriveRunStateWord(snapshot: snapshot).rawValue,
-                        color: deriveRunStateWord(snapshot: snapshot).pillColor,
+                        runState.rawValue,
+                        color: runState.pillColor,
                         systemImage: "timer"
                     )
                 }
