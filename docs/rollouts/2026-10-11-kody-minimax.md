@@ -132,6 +132,6 @@ Verification: `python3 scripts/test-cloud-coordination-bootstrap.py` passes nine
 
 ## Current-Head Review Follow-up (2026-10-13)
 
-Merged the latest `origin/main` into PR #4523 after it fell behind.  The fresh Kody review found that the updated retired-Slack guide exposed repository-specific paths; it now uses a generic cache path and onboarding reference.  The PR hold stays active until current-head Codex review and hosted `verify` pass.
+Merged the latest `origin/main` into PR #4523 after it fell behind.  The fresh Kody review found that the updated retired-Slack guide exposed repository-specific paths; it now points cloud users to the installer's documented default location and `FLEET_COORD_CACHE` override without duplicating the private operational path.  The PR hold stays active until current-head Codex review and hosted `verify` pass.
 
 Verification on this follow-up: `git diff --check` passed after the path corrections; hosted `verify` is pending after the updated push.  No provider call or paid model run was made.

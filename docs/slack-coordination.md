@@ -2,8 +2,9 @@
 
 Slack agent coordination was retired at the fleet cutover.  Zulip `#agent-sync`
 is the agent chat, and Linear is the work tracker.  Follow the canonical fleet
-AGENT-SYNC protocol; cloud sessions use a pinned copy under
-`~/.cache/<seat>/AGENT-SYNC.md`.
+AGENT-SYNC protocol; cloud sessions read the pinned copy installed by
+`scripts/install-fleet-coordination.sh`.  See `AGENTS.md` for the installer's
+default protocol location; set `FLEET_COORD_CACHE` to override its cache directory.
 
 ## Current Setup
 
