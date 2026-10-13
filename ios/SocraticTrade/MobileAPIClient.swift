@@ -145,6 +145,7 @@ struct MobileAPIClient {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            SentryTelemetry.captureAPIFailure(error: error, endpoint: req.url?.absoluteString ?? "/api/scan")
             throw MobileAPIError.network(error)
         }
         if let http = response as? HTTPURLResponse, http.statusCode == 503 {
@@ -315,6 +316,7 @@ struct MobileAPIClient {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            SentryTelemetry.captureAPIFailure(error: error, endpoint: "/api/mobile/events")
             throw MobileAPIError.network(error)
         }
         try Self.requireSuccess(response, body: nil)
@@ -329,9 +331,10 @@ struct MobileAPIClient {
                     onEvent()
                 }
             }
-        } catch is CancellationError {
+            } catch is CancellationError {
             throw CancellationError()
         } catch {
+            SentryTelemetry.captureAPIFailure(error: error, endpoint: "/api/mobile/events")
             throw MobileAPIError.network(error)
         }
     }
@@ -386,7 +389,7 @@ struct MobileAPIClient {
             do {
                 var req = request(path: path)
                 req.timeoutInterval = timeout
-                return try await send(req)
+                return try await send(req, captureFailures: false)
             } catch let error as MobileAPIError {
                 let shouldRetry = {
                     if case .network = error { return true }
@@ -398,6 +401,9 @@ struct MobileAPIClient {
                     let delayMs = UInt64(150_000_000 * (1 << attempt)) // 300ms, 600ms backoff
                     try await Task.sleep(nanoseconds: delayMs)
                     continue
+                }
+                if case .network(let underlying) = error {
+                    SentryTelemetry.captureAPIFailure(error: underlying, endpoint: path)
                 }
                 throw error
             } catch {
@@ -419,8 +425,8 @@ struct MobileAPIClient {
         return try await send(request)
     }
 
-    private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
-        let data = try await successfulResponseData(for: request)
+    private func send<T: Decodable>(_ request: URLRequest, captureFailures: Bool = true) async throws -> T {
+        let data = try await successfulResponseData(for: request, captureFailures: captureFailures)
         do {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
@@ -428,7 +434,7 @@ struct MobileAPIClient {
         }
     }
 
-    private func successfulResponseData(for request: URLRequest) async throws -> Data {
+    private func successfulResponseData(for request: URLRequest, captureFailures: Bool = true) async throws -> Data {
         let data: Data
         let response: URLResponse
         do {
@@ -436,6 +442,9 @@ struct MobileAPIClient {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            if captureFailures {
+                SentryTelemetry.captureAPIFailure(error: error, endpoint: request.url?.absoluteString ?? "")
+            }
             throw MobileAPIError.network(error)
         }
         try Self.requireSuccess(response, body: data)
