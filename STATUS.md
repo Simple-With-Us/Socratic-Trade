@@ -1,5 +1,27 @@
 # Current Status
 
+## 2026-10-13 CLAUDE — PR #4606 review-bot pass 3 (doc/format only)
+
+**What.**  Round 3 on `fix/embed-fail-fast-congress-share-backoff`.  All four still-open Kody threads
+(`settleEmbedProviderAttempt` wedge, `passthrough()` -> strict, vector-db `response.json()` Zod guard,
+rollout verification block) were already fixed in `4351c0c3`; the code needed no change.  This pass
+made the rollout verification block use the literal four-command fast-to-slow `-> ok` format Kody's
+rule asks for, removed an orphaned duplicate doc comment left above `settleEmbedProviderAttempt`, and
+recorded *why* the embed response schema uses `.strip()` rather than the `.strict()` Kody suggested.
+
+**Decisions.**  Kept `.strip()` on the provider embed schema.  `.strict()` would reject live traffic —
+OpenRouter returns a per-item `id` and SiliconFlow a per-item `object`, so failing closed on unknown
+per-item keys turns every real embed response into a `ZodError`.  `test/embedding-response-schema.test.ts`
+already pins that a per-item `object` is stripped, not rejected.  This divergence is documented in the
+rollout note and the schema file.
+
+**Verification.**  `npm run lint` -> ok (0 errors, warnings only); `npx tsc --noEmit` -> ok;
+`npm test` and `npm run build` run on the pushed head.
+
+**Docs.**  `docs/rollouts/2026-10-13-pr-4606-review-thread-fixes.md`.
+
+**Next.**  Merge #4606 after hosted `verify` green.
+
 ## 2026-10-13 CURSOR — PR #4606 embed/congress review fixes
 
 **What.**  Closed eight Sentry/Kody threads on `fix/embed-fail-fast-congress-share-backoff`: breaker counts only 5xx/network/timeout, embed abort covers body reads, content-cache hits skip metering, congress upstream half-open probe expiry/release, single breaker warnings, embed cache validity, search-fusion Zod embed parse.

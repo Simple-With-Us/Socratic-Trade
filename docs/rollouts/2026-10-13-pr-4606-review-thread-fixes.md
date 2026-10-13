@@ -15,19 +15,28 @@ Address eight open Sentry/Kody review threads on `fix/embed-fail-fast-congress-s
 
 ## Decisions & Trade-offs
 
-- Provider embed responses use `.strip()` (Kody rule 22), not `.passthrough()`; optional top-level `id` is declared so OpenRouter metadata validates without retaining unknown keys.
+- Provider embed responses use `.strip()`, not `.passthrough()` and not `.strict()`.  Kody asked for
+  `.strict()` on the per-item object; that would reject real traffic — OpenRouter returns a per-item
+  `id` and SiliconFlow returns a per-item `object`, so fail-closed on unknown keys would turn every
+  live embed response into a `ZodError` and black-hole retrieval.  `.strip()` keeps the rule-22
+  guarantee that matters (unknown keys are never *retained* or consumed downstream) while tolerating
+  provider metadata.  Optional top-level `id` is declared explicitly for the same reason.
 
 ## Verification State
 
 ```bash
-npm run lint          # PASS (0 errors; warnings only)
-npx tsc --noEmit      # PASS
-npm test -- test/embed-resilience.test.ts test/congress-share.test.ts test/embedding-response-schema.test.ts  # PASS (103 tests)
-npm test -- test/usage-compliance-classifier.test.ts -t "search-fusion"  # PASS (1 test)
-npm run build         # PASS
+npm run lint -> ok (0 errors; warnings only)
+npx tsc --noEmit -> ok
+npm test -> ok
+npm run build -> ok
 ```
 
-Full gate outputs captured on the Kody follow-up commit in the cloud worktree.
+Fast-to-slow order, one status per command.  Targeted runs during development:
+
+```bash
+npm test -- test/embed-resilience.test.ts test/congress-share.test.ts test/embedding-response-schema.test.ts -> ok (103 tests)
+npm test -- test/usage-compliance-classifier.test.ts -t "search-fusion" -> ok (1 test)
+```
 
 ## Next Steps & Blockers
 
