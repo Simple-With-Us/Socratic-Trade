@@ -6,13 +6,13 @@ OPS-935 addresses Claude Code Autofix runs reaching the 60-turn ceiling.  This c
 
 ## Changes Made
 
-- `.github/workflows/claude-code-autofix.yml`: pin shared reusable revision `f6babc3ea5cae265a35e7e33fcb11403f9a9ba53`.
+- `.github/workflows/claude-code-autofix.yml`: pin shared reusable revision `825f8ee008d6ce104107f2a7267c14d370e6013e`.
 - `PLAN.md` and `STATUS.md`: record scope, dependency, and current verification state.
 - Shared PR [#368](https://github.com/Simple-With-Us/congress-trading-shared/pull/368) adds operation-category counts and error counters.  Raw commands remain excluded, and artifacts retain the existing seven-day, 500-event, 256-KiB limits.
 
 ## Decisions And Trade-offs
 
-The reusable workflow raises its default from 60 to 120 turns.  The 30-minute timeout, MiniMax route, caller prompt, secret, triggers, permissions, and shared concurrency stay unchanged.  This caller PR depends on shared PR #368 landing first.
+The reusable workflow raises its default from 60 to 120 turns and uses conservative fallback handling for ambiguous operation forms.  The 30-minute timeout, MiniMax route, caller prompt, secret, triggers, permissions, and shared concurrency stay unchanged.  This caller PR depends on shared PR #368 landing first.
 
 ## Verification State
 

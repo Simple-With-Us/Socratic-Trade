@@ -2,7 +2,7 @@
 
 ## 2026-10-12 CODEX — Claude Autofix 120-Turn Cap (OPS-935)
 
-**What.**  Pin Claude Code Autofix to shared revision `f6babc3ea5cae265a35e7e33fcb11403f9a9ba53`, raising the default from 60 to 120 turns and adding schema-2 operation category counters.  Raw commands remain excluded; artifacts retain the existing seven-day, 500-event, 256-KiB bounds.  The 30-minute timeout and model route remain unchanged.
+**What.**  Pin Claude Code Autofix to shared revision `825f8ee008d6ce104107f2a7267c14d370e6013e`, raising the default from 60 to 120 turns and adding schema-2 operation category counters with conservative fallback for ambiguous forms.  Raw commands remain excluded; artifacts retain the existing seven-day, 500-event, 256-KiB bounds.  The 30-minute timeout and model route remain unchanged.
 
 **Dependency.**  Shared PR [#368](https://github.com/Simple-With-Us/congress-trading-shared/pull/368) must merge before this caller PR can land.
 
