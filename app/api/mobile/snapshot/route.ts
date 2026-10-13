@@ -17,6 +17,10 @@ export async function GET(request: Request) {
   const user = resolveRequestUser(request);
   const snapshot = await getDashboardSnapshot(user.userId, user.email);
   return NextResponse.json({
+    // Server-side partial flag.  iOS ORs this with per-item decode drops so a timed-out
+    // broker read pauses Owner Approve instead of looking like a complete book.
+    partialData: snapshot.partialData === true,
+    partialReason: snapshot.partialReason ?? null,
     currentUser: snapshot.currentUser,
     catalog: mobileControlCatalog(),
     readiness: mobileReadiness(user.userId),

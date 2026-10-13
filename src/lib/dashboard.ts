@@ -54,17 +54,7 @@ import { fetchAlpacaNonTradeActivities } from "./alpaca-account-insights";
 import { centralTradingDayKey } from "./trading-day";
 import { getTaxSummary, overlayAccountTaxationType } from "./tax";
 import { getBrokerGateway } from "./broker";
-import {
-  GET_ACCOUNTS_FIRST_MS,
-  GET_ACCOUNTS_RETRY_MS,
-  PORTFOLIO_BUNDLE_FIRST_MS,
-  PORTFOLIO_BUNDLE_RETRY_MS,
-  EQUITY_QUOTES_MS,
-  OPTION_POSITIONS_MS,
-  awaitWithFirstCallRetry,
-  getAccountsTimeoutMessage,
-  portfolioBundleTimeoutMessage
-} from "./inflight-deadline";
+import { outcomeOrTimeout } from "./inflight-deadline";
 import { getRobinhoodMcpHealth, type RobinhoodMcpHealth } from "./robinhood";
 import { getStoredMcpOAuthTokens } from "./mcp-oauth";
 import { deriveExecutionState, fillSourceForExecutionMode } from "./execution-mode";
@@ -88,7 +78,9 @@ import { checkAndDispatchOptionAlerts } from "./notifications";
 import {
   DASHBOARD_SNAPSHOT_TTL_MS,
   dashboardSnapshotCacheKey,
-  getOrComputeDashboardSnapshot
+  getCachedDashboardSnapshot,
+  getOrComputeDashboardSnapshot,
+  peekDashboardSnapshot
 } from "./dashboard-snapshot-cache";
 import {
   collectSnapshotQuoteSymbols,
@@ -163,6 +155,22 @@ function withDeadline<T>(
     }, ms);
   });
   return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+/** iOS gives `/api/mobile/snapshot` one 30s attempt.  Per-dependency waits stay near 12s and the
+ *  whole snapshot stops waiting at 20s so a slow broker cannot consume the phone's budget. */
+export const SNAPSHOT_OVERALL_BUDGET_MS = 20_000;
+export const SNAPSHOT_BROKER_TIMEOUT_MS = 12_000;
+
+/** Wait for one snapshot dependency: the per-call cap, or whatever overall budget is left. */
+export function snapshotSectionWaitMs(
+  startedAt: number,
+  capMs = SNAPSHOT_BROKER_TIMEOUT_MS,
+  now = Date.now()
+): number {
+  const remaining = SNAPSHOT_OVERALL_BUDGET_MS - (now - startedAt);
+  if (remaining <= 0) return 0;
+  return Math.min(capMs, remaining);
 }
 
 /** Advisory-audit rate limiter: the dashboard snapshot recomputes on every console load, so an
@@ -369,15 +377,149 @@ function dashboardHaltCause(
  * hard correctness rule — never key by userId alone. Writes that change
  * snapshot material call `invalidateDashboardSnapshotCache`.
  */
+function markSnapshotPartial<T>(value: T, reason: string): T & { partialData: true; partialReason: string } {
+  return { ...(value as object), partialData: true, partialReason: reason } as T & { partialData: true; partialReason: string };
+}
+
+/** DB-only snapshot used when a cold compute is still running past the phone budget.  No broker
+ *  or provider calls.  The in-flight compute keeps going and fills the cache for the next poll. */
+function degradedDashboardSnapshot(
+  userId: string,
+  currentUser: string | CurrentUserDisplay | undefined,
+  reason: string
+) {
+  const currentUserDisplay: CurrentUserDisplay =
+    typeof currentUser === "string" ? { email: currentUser } : currentUser ?? {};
+  const policy = getPolicy(userId);
+  const connectedAccounts = listConnectedAccounts(userId);
+  let derived: ReturnType<typeof deriveMacroMetrics>;
+  try {
+    derived = deriveMacroMetrics(BLANK_MACRO_FALLBACK, {});
+  } catch {
+    derived = {} as ReturnType<typeof deriveMacroMetrics>;
+  }
+  let regime = "unknown";
+  try {
+    regime = determineMarketRegime(BLANK_MACRO_FALLBACK);
+  } catch {
+    regime = "unknown";
+  }
+  return {
+    partialData: true as const,
+    partialReason: reason,
+    currentUser: {
+      userId,
+      ...(currentUserDisplay.email ? { email: currentUserDisplay.email } : {}),
+      ...(currentUserDisplay.name ? { name: currentUserDisplay.name } : {}),
+      ...(currentUserDisplay.imageUrl ? { imageUrl: currentUserDisplay.imageUrl } : {}),
+      ...(currentUserDisplay.loginProvider ? { loginProvider: currentUserDisplay.loginProvider } : {}),
+      isAdmin: isAdminEmail(currentUserDisplay.email)
+    },
+    llmConfigured: false,
+    policy,
+    strategyPrompt: (() => {
+      try {
+        return getStrategyPrompt(userId);
+      } catch {
+        return "";
+      }
+    })(),
+    accounts: [] as BrokerageAccount[],
+    accountReadiness: accountReadinessForSnapshot({
+      policy,
+      liveAccounts: [],
+      brokerAccountReadError: reason
+    }),
+    connectedAccounts,
+    connectedAccountPolicies: {},
+    connectedAccountPendingCounts: {},
+    portfolio: undefined,
+    positions: [] as EquityPosition[],
+    options: [] as OptionPosition[],
+    symbolMetaBySymbol: {},
+    orders: [] as EquityOrder[],
+    auditFeed: [],
+    unifiedFeed: [],
+    dailyStats: { orderCount: 0, openingOrderCount: 0, notional: 0 },
+    strategyRuns: (() => {
+      try {
+        return listStrategyRuns(40, userId, policy.connectedAccountId);
+      } catch {
+        return [];
+      }
+    })(),
+    pendingProposals: [],
+    recentProposals: [],
+    profiles: (() => {
+      try {
+        return listStrategyProfiles(userId);
+      } catch {
+        return [];
+      }
+    })(),
+    notifications: [],
+    notificationStatus: {
+      configured: Boolean(policy.notificationSettings?.webhookUrl?.trim()),
+      enabledEvents: policy.notificationSettings?.enabledEvents ?? []
+    },
+    scheduler: (() => {
+      try {
+        return getSchedulerState(userId, policy.connectedAccountId);
+      } catch {
+        return { lastRunAt: null, nextRunAt: null };
+      }
+    })(),
+    robinhoodMcpConnected: policy.activeBroker !== "robinhood",
+    autoResumeOnBoot: (() => {
+      try {
+        return getAutoResumeOnBoot(userId);
+      } catch {
+        return false;
+      }
+    })(),
+    haltCause: dashboardHaltCause(userId, policy),
+    socratic: { decisions: [], frameworkProposals: [] },
+    smartMoney: { congress: [], insider: [], thirteenF: [], ark: [], congressScoreVerdict: null },
+    marketSession: currentMarketSession(),
+    macroBoard: {
+      macro: BLANK_MACRO_FALLBACK,
+      derived,
+      signals: {} as MarketSignals,
+      regime,
+      history: {},
+      news: []
+    },
+    weeklyMarketDigest: weeklyMarketDigestForScan(userId, undefined)
+  };
+}
+
 export async function getDashboardSnapshot(userId: string = "local", currentUser?: string | CurrentUserDisplay) {
   // Resolve the cache key from policy/active account WITHOUT building the snapshot.
   // Account number is part of the key so two concurrent accounts never share state.
+  type Snapshot = Awaited<ReturnType<typeof computeDashboardSnapshot>>;
   const policyForKey = getPolicy(userId);
   const activeForKey = getActiveConnectedAccount(userId);
   const accountNumberForKey = policyForKey.accountNumber ?? activeForKey?.accountNumber ?? "";
   const cacheKey = dashboardSnapshotCacheKey(userId, accountNumberForKey);
 
-  return getOrComputeDashboardSnapshot(cacheKey, () => computeDashboardSnapshot(userId, currentUser), DASHBOARD_SNAPSHOT_TTL_MS);
+  const fresh = getCachedDashboardSnapshot<Snapshot>(cacheKey);
+  if (fresh !== undefined) return fresh;
+
+  const computePromise = getOrComputeDashboardSnapshot(
+    cacheKey,
+    () => computeDashboardSnapshot(userId, currentUser),
+    DASHBOARD_SNAPSHOT_TTL_MS
+  );
+  const reason = `Dashboard snapshot exceeded ${SNAPSHOT_OVERALL_BUDGET_MS}ms; serving cached or partial data so the phone stays inside its 30s limit.`;
+  const first = await outcomeOrTimeout(computePromise, SNAPSHOT_OVERALL_BUDGET_MS);
+  if (first.kind === "fulfilled") return first.value;
+  if (first.kind === "rejected") throw first.reason;
+
+  const cached = peekDashboardSnapshot<Snapshot>(cacheKey);
+  if (cached) return markSnapshotPartial(cached.value, reason);
+  // Cold start has nothing to serve.  Return the DB-only shell now.  The in-flight compute
+  // keeps running and fills the cache for the next poll, still inside the phone's 30s limit.
+  return degradedDashboardSnapshot(userId, currentUser, reason) as unknown as Snapshot;
 }
 
 async function computeDashboardSnapshot(userId: string = "local", currentUser?: string | CurrentUserDisplay) {
@@ -473,23 +615,24 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
 
     const accountsPromise = (async () => {
       if (!gateway) return [];
+      const accountsWait = snapshotSectionWaitMs(snapshotStartedAt);
+      if (accountsWait <= 0) {
+        timedOutSections.push("gateway.getAccounts");
+        handleAccountsReadFailure("Skipped gateway.getAccounts because the snapshot budget was already spent.");
+        return [];
+      }
       try {
-        // Live alpaca-broker p95 is above 6s (191/500 ≥6s, max 14s) on the same
-        // in-process event loop that ftsMirrorSlice can pin for 6–12s.  First wait
-        // is 16s; a pending call starts one retry.  A credential / 401 throw still
-        // fails immediately.
-        return await awaitWithFirstCallRetry(
-          () => gateway.getAccounts(),
-          {
-            firstMs: GET_ACCOUNTS_FIRST_MS,
-            retryMs: GET_ACCOUNTS_RETRY_MS,
-            onFinalTimeout: () => {
-              handleAccountsReadFailure(getAccountsTimeoutMessage());
-              return [];
-            },
-            label: "gateway.getAccounts",
-            timedOutSections
-          }
+        // One 12s wait, not the 16s+8s broker retry.  That retry is right for health probes.
+        // Here it stacked past the iOS 30s snapshot attempt.
+        return await withDeadline(
+          gateway.getAccounts(),
+          accountsWait,
+          () => {
+            handleAccountsReadFailure(`Timed out waiting for gateway.getAccounts after ${accountsWait}ms.`);
+            return [];
+          },
+          "gateway.getAccounts",
+          timedOutSections
         );
       } catch (error) {
         handleAccountsReadFailure(messageFromUnknownError(error));
@@ -545,43 +688,50 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
         // app's single 30s snapshot attempt (docs/rollouts/2026-08-12-load-screens-and-lato.md
         // filed this parallelisation as the follow-up).
         let optionsPromise: Promise<OptionPosition[]> = Promise.resolve([]);
+        const optionsWait = snapshotSectionWaitMs(snapshotStartedAt);
         if (gateway.getOptionPositions) {
-          try {
-            optionsPromise = withDeadline<OptionPosition[]>(
-              gateway.getOptionPositions(targetAccountNumber),
-              OPTION_POSITIONS_MS,
-              () => [],
-              "gateway.getOptionPositions",
-              timedOutSections
-            ).catch((err) => {
+          if (optionsWait <= 0) {
+            timedOutSections.push("gateway.getOptionPositions");
+          } else {
+            try {
+              optionsPromise = withDeadline<OptionPosition[]>(
+                gateway.getOptionPositions(targetAccountNumber),
+                optionsWait,
+                () => [],
+                "gateway.getOptionPositions",
+                timedOutSections
+              ).catch((err) => {
+                console.warn("[Dashboard] options positions unavailable (non-fatal):", err);
+                return [];
+              });
+            } catch (err) {
               console.warn("[Dashboard] options positions unavailable (non-fatal):", err);
-              return [];
-            });
-          } catch (err) {
-            console.warn("[Dashboard] options positions unavailable (non-fatal):", err);
+            }
           }
         }
-        try {
-          [portfolio, positions, orders] = await awaitWithFirstCallRetry<[Portfolio | undefined, EquityPosition[], EquityOrder[]]>(
-            () =>
+        const bundleWait = snapshotSectionWaitMs(snapshotStartedAt);
+        if (bundleWait <= 0) {
+          timedOutSections.push("portfolio/positions/orders");
+          handlePortfolioReadFailure(targetAccountNumber, "Skipped portfolio bundle because the snapshot budget was already spent.");
+        } else {
+          try {
+            [portfolio, positions, orders] = await withDeadline<[Portfolio | undefined, EquityPosition[], EquityOrder[]]>(
               Promise.all([
                 gateway.getPortfolio(targetAccountNumber),
                 gateway.getEquityPositions(targetAccountNumber),
                 gateway.getEquityOrders(targetAccountNumber)
               ]),
-            {
-              firstMs: PORTFOLIO_BUNDLE_FIRST_MS,
-              retryMs: PORTFOLIO_BUNDLE_RETRY_MS,
-              onFinalTimeout: () => {
-                handlePortfolioReadFailure(targetAccountNumber as string, portfolioBundleTimeoutMessage());
+              bundleWait,
+              () => {
+                handlePortfolioReadFailure(targetAccountNumber, `Timed out waiting for portfolio, positions, and orders after ${bundleWait}ms.`);
                 return [undefined, [], []];
               },
-              label: "portfolio/positions/orders",
+              "portfolio/positions/orders",
               timedOutSections
-            }
-          );
-        } catch (error) {
-          handlePortfolioReadFailure(targetAccountNumber, messageFromUnknownError(error));
+            );
+          } catch (error) {
+            handlePortfolioReadFailure(targetAccountNumber, messageFromUnknownError(error));
+          }
         }
 
         options = await optionsPromise;
@@ -593,15 +743,21 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
 
         if (portfolio) {
           const priceSymbols = Array.from(new Set(positions.map((p) => normalizeSymbol(p.symbol))));
-          const quotes: Record<string, BrokerQuote> = priceSymbols.length > 0
-            ? await withDeadline(
+          const quoteWait = snapshotSectionWaitMs(snapshotStartedAt);
+          let quotes: Record<string, BrokerQuote> = {};
+          if (priceSymbols.length > 0) {
+            if (quoteWait <= 0) {
+              timedOutSections.push("gateway.getEquityQuotes");
+            } else {
+              quotes = await withDeadline(
                 gateway.getEquityQuotes(targetAccountNumber, priceSymbols),
-                EQUITY_QUOTES_MS,
+                quoteWait,
                 () => ({}),
                 "gateway.getEquityQuotes",
                 timedOutSections
-              )
-            : {};
+              );
+            }
+          }
           // Tradier paper (~15m delayed) can return successful two-sided quotes that are
           // not yet stamped venuePriceAuthoritative. Preserve them as the execution-venue
           // tape BEFORE the freshness filter / skipActiveBroker cascade so Alpaca/Yahoo
@@ -633,15 +789,21 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
               // skipActiveBroker: direct gateway already attempted. Delayed-venue successes
               // were stamped above and are not in missingPriceSymbols, so this skip cannot
               // strip the paper OMS tape (Codex P1 + P2).
-              const fallbackQuotes: Record<string, BrokerQuote> = await withDeadline<Record<string, BrokerQuote>>(
-                fetchFreshQuotesCascade(missingPriceSymbols, userId, targetAccountNumber, undefined, {
-                  skipActiveBroker: true
-                }),
-                EQUITY_QUOTES_MS,
-                () => ({}),
-                "fetchFreshQuotesCascade",
-                timedOutSections
-              );
+              const cascadeWait = snapshotSectionWaitMs(snapshotStartedAt);
+              let fallbackQuotes: Record<string, BrokerQuote> = {};
+              if (cascadeWait <= 0) {
+                timedOutSections.push("fetchFreshQuotesCascade");
+              } else {
+                fallbackQuotes = await withDeadline<Record<string, BrokerQuote>>(
+                  fetchFreshQuotesCascade(missingPriceSymbols, userId, targetAccountNumber, undefined, {
+                    skipActiveBroker: true
+                  }),
+                  cascadeWait,
+                  () => ({}),
+                  "fetchFreshQuotesCascade",
+                  timedOutSections
+                );
+              }
               for (const s of missingPriceSymbols) {
                 if (fallbackQuotes[s] && typeof fallbackQuotes[s].price === "number" && fallbackQuotes[s].price > 0) {
                   quotes[s] = fallbackQuotes[s];
@@ -854,20 +1016,25 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     // Same-source fills let the benchmark infer deposits/withdrawals (cash delta minus trade
     // cash) so the account return line is time-weighted instead of counting transfers as P&L.
     const benchmarkFills = scorecardSource === "live" ? liveFills : paperFills;
-    const brokerActivities =
-      activeAccount?.broker === "alpaca"
-        ? await withDeadline(
-            // category=non_trade_activity, classified client-side in broker-cash-flows: a server-side
-            // activity_types filter once carried a non-Alpaca code ("DIVTX") and could not name every
-            // IRA cash type (2026-09-24).  Same fallback-aware reader as the drawdown HWM and the ops
-            // routes, so a rejected `category` degrades to the documented type list, not to [].
-            fetchAlpacaNonTradeActivities(userId, { connectedAccountId: activeAccount?.id }).then((ledger) => ledger.activities),
-            4000,
-            () => [],
-            "fetchAlpacaNonTradeActivities",
-            timedOutSections
-          )
-        : [];
+    const activityWait = snapshotSectionWaitMs(snapshotStartedAt, 4_000);
+    let brokerActivities: Awaited<ReturnType<typeof fetchAlpacaNonTradeActivities>>["activities"] = [];
+    if (activeAccount?.broker === "alpaca") {
+      if (activityWait <= 0) {
+        timedOutSections.push("fetchAlpacaNonTradeActivities");
+      } else {
+        brokerActivities = await withDeadline(
+          // category=non_trade_activity, classified client-side in broker-cash-flows: a server-side
+          // activity_types filter once carried a non-Alpaca code ("DIVTX") and could not name every
+          // IRA cash type (2026-09-24).  Same fallback-aware reader as the drawdown HWM and the ops
+          // routes, so a rejected `category` degrades to the documented type list, not to [].
+          fetchAlpacaNonTradeActivities(userId, { connectedAccountId: activeAccount?.id }).then((ledger) => ledger.activities),
+          activityWait,
+          () => [],
+          "fetchAlpacaNonTradeActivities",
+          timedOutSections
+        );
+      }
+    }
     const todayKey = centralTradingDayKey(new Date());
     // Only transfer-class rows make the broker ledger authoritative for today's flow (a category
     // read also returns splits / option events, which must not suppress the inference fallback).
@@ -877,16 +1044,25 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
         cashFlowSource: "broker"
       };
     }
-    const benchmarkResult = await withDeadline<SpyBenchmarkResult>(
-      computeSpyBenchmarkDetailed(tippedCurve, userId, Date.now(), benchmarkFills, brokerActivities).catch((error) => ({
-        comparison: null,
-        unavailable: { reason: "fetch-failed" as const, detail: messageFromUnknownError(error).slice(0, 200) }
-      })),
-      4000,
-      () => ({ comparison: null, unavailable: { reason: "fetch-failed" as const, detail: "timed out after 4000ms" } }),
-      "computeSpyBenchmark",
-      timedOutSections
-    );
+    const benchmarkWait = snapshotSectionWaitMs(snapshotStartedAt, 4_000);
+    let benchmarkResult: SpyBenchmarkResult = {
+      comparison: null,
+      unavailable: { reason: "fetch-failed", detail: "skipped; snapshot budget spent" }
+    };
+    if (benchmarkWait <= 0) {
+      timedOutSections.push("computeSpyBenchmark");
+    } else {
+      benchmarkResult = await withDeadline<SpyBenchmarkResult>(
+        computeSpyBenchmarkDetailed(tippedCurve, userId, Date.now(), benchmarkFills, brokerActivities).catch((error) => ({
+          comparison: null,
+          unavailable: { reason: "fetch-failed" as const, detail: messageFromUnknownError(error).slice(0, 200) }
+        })),
+        benchmarkWait,
+        () => ({ comparison: null, unavailable: { reason: "fetch-failed" as const, detail: `timed out after ${benchmarkWait}ms` } }),
+        "computeSpyBenchmark",
+        timedOutSections
+      );
+    }
     if (benchmarkResult.comparison) {
       performance.benchmark = benchmarkResult.comparison;
       // #2557: an inferred transfer failed the equity-delta sanity bound — it was shown but
@@ -1261,7 +1437,13 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     );
   }
 
+  const partialReason = timedOutSections.length > 0
+    ? `Snapshot section timed out (${timedOutSections.join(", ")}).  Partial data is shown so the request stays inside the phone's 30s limit.`
+    : undefined;
+
   return {
+    partialData: timedOutSections.length > 0,
+    partialReason,
     currentUser: {
       userId,
       ...(currentUserDisplay.email ? { email: currentUserDisplay.email } : {}),

@@ -1,3 +1,5 @@
+> **2026-10-13 GROK — Mobile snapshot partial timeout (`cursor/snapshot-partial-timeout`).**  No roadmap scope change.  The phone snapshot stops waiting at 20s, with about 12s per broker section, and returns cached or partial data with `partialData` so Owner Approve pauses.  Global broker probe timeouts stay put.  Extra-ship no.  Do not merge from this lane.  Rollout: `docs/rollouts/2026-10-13-snapshot-partial-timeout.md`.
+
 > **2026-10-12 CODEX — CTS-330 cache review follow-up.**  Validate a fresh cache before replacing the old pin and retire Mac Slack hooks before skipping installation.  Product roadmap remains unchanged; hosted checks and current-head review gate landing.
 
 > **2026-10-12 CODEX — CTS-330 cloud review follow-up.**  Complete the Linear/Zulip setup prerequisite with a pinned protocol/registry bundle and idempotent retirement of persisted Slack hooks.  Product roadmap and runtime behavior are unchanged.  Rollout: `docs/rollouts/2026-10-11-kody-minimax.md`.

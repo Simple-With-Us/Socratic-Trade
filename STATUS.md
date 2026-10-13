@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-13 GROK — Mobile snapshot partial timeout
+
+**What.**  `/api/mobile/snapshot` and `getDashboardSnapshot` stop waiting at 20s.  Each broker or dependency section waits at most 12s.  A timeout returns the last cached snapshot, or a DB-only shell when nothing is cached, with `partialData` and `partialReason`.  iOS pauses Owner Approve on that server flag.
+
+**Verification.**  `npx tsc --noEmit` clean.  Targeted vitest passed for the snapshot budget, the snapshot cache, halt-cause, order roles, and inflight-deadline.  Swift was not compiled in this checkout.
+
+**Docs.**  `docs/rollouts/2026-10-13-snapshot-partial-timeout.md`.
+
+**Next.**  Ready for review.  `do-not-automerge` because the snapshot reads broker accounts, positions, and orders.  Do not merge from this lane.
+
 ## 2026-10-11 CODEX — Kody MiniMax (CTS-330)
 
 **What.**  Kody autofix selects `MiniMax-M3` through MiniMax’s direct OpenAI-compatible endpoint.  Its Sentry observer follows the new workflow name.
