@@ -382,8 +382,8 @@ covers the LLM providers behind the agentic loop and model picker (OpenAI,
 Anthropic, DeepSeek, Gemini, Mistral, xAI — `API_KEY_ENV_MAP` in
 `src/lib/db-api-keys.ts`) and the RAG stack (Pinecone, Voyage — same file,
 `shared-operator-infra` tier). Live spend, per-model rates, and usage tracking
-for all of these already live in the **API-Usage-Monitor** app (see
-`docs/slack-coordination.md`'s topic-tag table) — that app, not this doc, is the
+for all of these already live in the **API-Usage-Monitor** app — that app,
+not this doc, is the
 source of truth for what we're actually spending on LLM/RAG usage. Don't
 duplicate per-token pricing tables here; if a rate looks stale in
 API-Usage-Monitor, fix it there.

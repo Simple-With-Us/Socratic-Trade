@@ -73,17 +73,21 @@ if [[ -f scripts/infisical-bootstrap-env.mjs ]]; then
   node scripts/infisical-bootstrap-env.mjs >/dev/null 2>&1 || warn "Infisical bootstrap skipped (ok in keyless cloud)"
 fi
 
-# 4. Optional Slack coordination hook (not the fleet relay consumer path).
-if [[ -f scripts/setup-slack-sync.sh ]]; then
-  log "Installing optional Slack coordination hook (SessionStart; no-op without SLACK_BOT_TOKEN)"
-  bash scripts/setup-slack-sync.sh >/dev/null 2>&1 || warn "slack-sync install skipped; see docs/slack-coordination.md"
-fi
-
-# 5. Sanity-check the existing in-repo Infisical helper without invoking it.
+# 4. Sanity-check the existing in-repo Infisical helper without invoking it.
 if [[ -f scripts/infisical-run.mjs ]]; then
   log "Found scripts/infisical-run.mjs -- start script will smoke-test it when creds exist."
 else
   warn "scripts/infisical-run.mjs missing; Infisical injection unavailable."
+fi
+
+# 5. Bootstrap the fleet coordination CLIs (board for Linear, agent-sync for Zulip)
+# into ~/.local/bin.  Product setup may continue offline; fleet work waits
+# until the installed protocol and both CLI identity checks are available.
+if [[ -f scripts/install-fleet-coordination.sh ]]; then
+  log "Installing fleet coordination CLIs (board, agent-sync)"
+  bash scripts/install-fleet-coordination.sh || warn "Fleet coordination unavailable; stop fleet work until setup and identity checks pass"
+else
+  warn "scripts/install-fleet-coordination.sh missing; coordination CLIs not bootstrapped."
 fi
 
 log "install complete."
