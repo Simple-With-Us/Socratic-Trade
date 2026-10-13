@@ -1,5 +1,13 @@
 # Current Status
 
+## 2026-10-13 CURSOR — iOS Sentry DSN + TestFlight cron (branch `cursor/ios-sentry-testflight-cron-5438`)
+
+**What.**  TestFlight has not archived since 2026-10-08.  `latest-build-seq` exits 2 and the ship script discards that stderr, then refuses to pick a build number (`local=107`, `asc=UNVERIFIED`).  The phone is still on the 2026-10-08 binary, which logged `SENTRY_DSN unset`.  Run 38181542543 already loaded a 95-character `SENTRY_DSN` from Infisical prod and then died in the same ASC check, so the DSN never reached an archive.  Sentry monitor `ci-socratic-trade-ios-testflight-ship` (FLEET-INFRA-DA) is the other failure: over the last 200 workflow runs GitHub delivered about 22% of the `*/30` ticks (p90 gap 368 min).  A 15-minute check-in margin marks those gaps missed.
+
+**Next.**  Land the PR.  The next real ship log will print the App Store Connect HTTP status.  A 401 or 403 there means the existing Infisical prod ASC key cannot read `com.socratictrade.ios`; do not mint a new key.  `xcodegen generate` on the macOS ship drops the checked-in `SENTRY_DSN = ""` project settings.
+
+**Docs.**  `docs/rollouts/2026-10-13-ios-sentry-dsn-testflight-cron.md`, `PLAN.md`.
+
 ## 2026-10-11 CODEX — Kody MiniMax (CTS-330)
 
 **What.**  Kody autofix selects `MiniMax-M3` through MiniMax’s direct OpenAI-compatible endpoint.  Its Sentry observer follows the new workflow name.
