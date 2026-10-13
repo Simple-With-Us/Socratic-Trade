@@ -28,6 +28,22 @@ final class NYSEMarketSessionTests: XCTestCase {
         XCTAssertEqual(NYSEMarketSession.sessionKey(now: date), "closed")
     }
 
+    func testEarlyCloseFridayAfterThanksgiving() throws {
+        var components = DateComponents()
+        components.timeZone = TimeZone(identifier: "America/New_York")
+        components.year = 2026
+        components.month = 11
+        components.day = 27
+        components.hour = 11
+        components.minute = 0
+        let calendar = Calendar(identifier: .gregorian)
+        let morning = try XCTUnwrap(calendar.date(from: components))
+        XCTAssertEqual(NYSEMarketSession.sessionKey(now: morning), "regular")
+        components.hour = 14
+        let afternoon = try XCTUnwrap(calendar.date(from: components))
+        XCTAssertEqual(NYSEMarketSession.sessionKey(now: afternoon), "post")
+    }
+
     func testStaleSnapshotUsesDeviceSessionForRunState() throws {
         var components = DateComponents()
         components.timeZone = TimeZone(identifier: "America/New_York")

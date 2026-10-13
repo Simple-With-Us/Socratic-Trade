@@ -445,7 +445,6 @@ final class MobileStore: ObservableObject {
                 hasInitialized = true
             }
         }
-        let wasLoadFailed = snapshotLoadFailed
         do {
             let (loadedSnapshot, rawData) = try await fetchSnapshotWithNetworkRetry(
                 timeout: 45,
@@ -458,9 +457,7 @@ final class MobileStore: ObservableObject {
             snapshotLoadFailed = false
             partialData = loadedSnapshot.partialData
             isAuthenticated = true
-            if wasLoadFailed {
-                error = nil
-            }
+            error = nil
             if let pendingAccountId,
                loadedSnapshot.connectedAccounts.contains(where: { $0.id == pendingAccountId && $0.isActive == true })
                 || loadedSnapshot.readiness.activeConnectedAccount?.id == pendingAccountId {
@@ -476,6 +473,9 @@ final class MobileStore: ObservableObject {
                 applyAuthAwareError(caught, showUnauthorizedMessage: shouldReportSessionExpiry)
             } else if let apiError = caught as? MobileAPIError, case .unauthorized = apiError {
                 applyAuthAwareError(caught, showUnauthorizedMessage: shouldReportSessionExpiry)
+            } else {
+                // Cached snapshot stays on screen; do not keep a prior transient error banner.
+                error = nil
             }
         }
     }
@@ -967,7 +967,10 @@ final class MobileStore: ObservableObject {
         if preserveTransientMessage {
             if MobileAPIError.isUserCancellation(caught) { return }
             if let apiError = caught as? MobileAPIError {
-                guard let description = apiError.errorDescription else { return }
+                guard let description = apiError.errorDescription else {
+                    error = nil
+                    return
+                }
                 error = description
             } else if let message = MobileAPIError.userFacingNetworkMessage(for: caught) {
                 error = message

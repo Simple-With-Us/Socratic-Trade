@@ -10,12 +10,13 @@ enum NYSEMarketSession {
         if parts.weekday == .saturday || parts.weekday == .sunday { return "closed" }
 
         let dateKey = etDateKey(parts)
-        if marketHolidays(year: parts.year).contains(dateKey) { return "closed" }
+        let holidays = marketHolidays(year: parts.year)
+        if holidays.contains(dateKey) { return "closed" }
 
         let totalMinutes = parts.hour * 60 + parts.minute
         let preOpen = 4 * 60
         let open = 9 * 60 + 30
-        let close = marketCloseMinutes(parts)
+        let close = marketCloseMinutes(parts, holidays: holidays)
         let postClose = 20 * 60
 
         if totalMinutes >= open && totalMinutes < close { return "regular" }
@@ -45,12 +46,25 @@ enum NYSEMarketSession {
         case saturday
     }
 
-    private static func etParts(_ date: Date) -> EtParts {
+    private static let etWallClockFormatter: DateFormatter = {
         let fmt = DateFormatter()
         fmt.locale = Locale(identifier: "en_US_POSIX")
         fmt.timeZone = TimeZone(identifier: "America/New_York")
         fmt.dateFormat = "yyyy-MM-dd HH:mm EEE"
-        let formatted = fmt.string(from: date)
+        return fmt
+    }()
+
+    private static let utcGregorianCalendar: Calendar = {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        return cal
+    }()
+
+    private static let holidayCacheLock = NSLock()
+    private static var holidayCache: [Int: Set<String>] = [:]
+
+    private static func etParts(_ date: Date) -> EtParts {
+        let formatted = etWallClockFormatter.string(from: date)
         let bits = formatted.split(separator: " ")
         let ymd = bits[0].split(separator: "-")
         let hm = bits[1].split(separator: ":")
@@ -79,8 +93,8 @@ enum NYSEMarketSession {
         String(format: "%04d-%02d-%02d", parts.year, parts.month, parts.day)
     }
 
-    private static func marketCloseMinutes(_ parts: EtParts) -> Int {
-        if let early = earlyCloses(year: parts.year)[etDateKey(parts)] {
+    private static func marketCloseMinutes(_ parts: EtParts, holidays: Set<String>) -> Int {
+        if let early = earlyCloses(year: parts.year, holidays: holidays)[etDateKey(parts)] {
             return early.hour * 60 + early.minute
         }
         return 16 * 60
@@ -94,10 +108,16 @@ enum NYSEMarketSession {
     }
 
     private static func marketHolidays(year: Int) -> Set<String> {
+        holidayCacheLock.lock()
+        if let cached = holidayCache[year] {
+            holidayCacheLock.unlock()
+            return cached
+        }
+        holidayCacheLock.unlock()
+
         var holidays = Set<String>()
         holidays.insert(etDateKey(utcYMD: observedHoliday(year: year, month: 1, day: 1)))
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        let cal = utcGregorianCalendar
         if cal.component(.weekday, from: cal.date(from: DateComponents(year: year + 1, month: 1, day: 1))!) == 7 {
             holidays.insert(String(format: "%04d-12-31", year))
         }
@@ -110,16 +130,18 @@ enum NYSEMarketSession {
         holidays.insert(etDateKey(utcYMD: nthWeekdayOfMonth(year: year, month: 9, weekday: 2, n: 1)))
         holidays.insert(etDateKey(utcYMD: nthWeekdayOfMonth(year: year, month: 11, weekday: 5, n: 4)))
         holidays.insert(etDateKey(utcYMD: observedHoliday(year: year, month: 12, day: 25)))
+
+        holidayCacheLock.lock()
+        holidayCache[year] = holidays
+        holidayCacheLock.unlock()
         return holidays
     }
 
-    private static func earlyCloses(year: Int) -> [String: Clock] {
+    private static func earlyCloses(year: Int, holidays: Set<String>) -> [String: Clock] {
         var closes: [String: Clock] = [:]
         let half = Clock(hour: 13, minute: 0)
-        let holidays = marketHolidays(year: year)
         let thanksgiving = nthWeekdayOfMonth(year: year, month: 11, weekday: 5, n: 4)
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        let cal = utcGregorianCalendar
         let dayAfter = cal.date(byAdding: .day, value: 1, to: thanksgiving)!
         let dayAfterKey = etDateKey(utcYMD: dayAfter)
         if !holidays.contains(dayAfterKey) { closes[dayAfterKey] = half }
@@ -137,8 +159,7 @@ enum NYSEMarketSession {
     }
 
     private static func etDateKey(utcYMD date: Date) -> String {
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        let cal = utcGregorianCalendar
         let y = cal.component(.year, from: date)
         let m = cal.component(.month, from: date)
         let d = cal.component(.day, from: date)
@@ -146,8 +167,7 @@ enum NYSEMarketSession {
     }
 
     private static func observedHoliday(year: Int, month: Int, day: Int) -> Date {
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        var cal = utcGregorianCalendar
         var date = cal.date(from: DateComponents(year: year, month: month, day: day))!
         let dow = cal.component(.weekday, from: date)
         if dow == 1 { date = cal.date(byAdding: .day, value: 1, to: date)! }
@@ -156,8 +176,7 @@ enum NYSEMarketSession {
     }
 
     private static func nthWeekdayOfMonth(year: Int, month: Int, weekday: Int, n: Int) -> Date {
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        var cal = utcGregorianCalendar
         var date = cal.date(from: DateComponents(year: year, month: month, day: 1))!
         var count = 0
         while cal.component(.month, from: date) == month {
@@ -171,8 +190,7 @@ enum NYSEMarketSession {
     }
 
     private static func lastWeekdayOfMonth(year: Int, month: Int, weekday: Int) -> Date {
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        var cal = utcGregorianCalendar
         var date = cal.date(from: DateComponents(year: year, month: month + 1, day: 0))!
         while cal.component(.month, from: date) == month {
             if cal.component(.weekday, from: date) == weekday { return date }
@@ -196,8 +214,7 @@ enum NYSEMarketSession {
         let m = (a + 11 * h + 22 * l) / 451
         let month = (h + l - 7 * m + 114) / 31
         let day = ((h + l - 7 * m + 114) % 31) + 1
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        var cal = utcGregorianCalendar
         var easter = cal.date(from: DateComponents(year: year, month: month, day: day))!
         easter = cal.date(byAdding: .day, value: -2, to: easter)!
         return easter
