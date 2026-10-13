@@ -17,6 +17,7 @@ import {
   pineconeWuExhaustedUntil,
   tripPineconeWuBreaker
 } from "./pinecone-wu-breaker";
+import { z } from "zod";
 import { applyOpenRouterClassifierEnrichment } from "./llm-call";
 import { logError, logWarn, recordEmbedFailure, recordRagRejection } from "./sentry-metrics";
 import { withGenAiSpan, withSentrySpan } from "./sentry-gen-ai";
@@ -2875,6 +2876,15 @@ async function embedWithRetry(
 }
 
 /**
+ * Zod schema for the SiliconFlow /v1/embeddings response. Strict on both the outer
+ * object and the per-item shape so a malformed or hostile payload never silently
+ * flows into Qdrant as a corrupt query vector.
+ */
+const SiliconFlowEmbedSchema = z.object({
+  data: z.array(z.object({ embedding: z.array(z.number()) }).strict()).optional()
+}).strict();
+
+/**
  * One-shot SiliconFlow embedding call — used only as a query-embed fallback when the
  * primary OpenRouter provider times out or errors. No retries, no health-lane tracking,
  * no dispatch ledger: this is a narrow rescue path so that a slow OpenRouter response
@@ -2901,10 +2911,12 @@ async function callSiliconFlowEmbedOnce(
       signal
     });
     if (!response.ok) return null;
-    const json = await response.json() as { data?: Array<{ embedding?: number[] }> };
+    const json = SiliconFlowEmbedSchema.parse(await response.json());
     const embedding = json?.data?.[0]?.embedding;
     return Array.isArray(embedding) ? embedding : null;
   } catch {
+    // ZodError, network error, or bad JSON — all return null so the caller
+    // can proceed to the embed.failed / lookup_failed degradation path.
     return null;
   }
 }
