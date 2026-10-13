@@ -11,6 +11,12 @@ Jay requested that the Muse-backed autofix use MiniMax.  CTS-330 tracks the flee
 - `AGENTS.md`: align the coordination instructions with Linear and archive the retired effort-log and Slack mechanisms.
 - `scripts/claude-hooks/board-check.sh`: retain the installed hook path as a no-op so the retired effort-log gate cannot block pushes.
 - `scripts/cloud-setup.sh`, `scripts/cursor-cloud-start.sh`, and `scripts/cursor-cloud-install.sh`: stop installing the retired Slack coordination hook in cloud sessions.
+- `scripts/install-fleet-coordination.sh`: install the pinned Agent-Sync and Linear clients and protocol for cloud sessions after retiring persisted Slack hooks.
+- `scripts/setup-slack-sync.sh`: retain the old entry point as a cleanup-only helper that removes copied Slack hooks and engine files.
+- `scripts/agent-sync-bootstrap.sh`: replace the self-contained Slack installer with a failing retirement marker so stale callers cannot recreate the hook.
+- `scripts/test-cloud-coordination-bootstrap.py`: cover isolated cloud installation, safe cleanup, cache replacement, and the retired bootstrap path.
+- `docs/slack-coordination.md`: replace active Slack setup steps with current Agent-Sync and Linear setup guidance.
+- `docs/market-data-provider-pricing.md`: remove its stale reference to the former Slack topic table.
 - `STATUS.md`: record verification and landing status.
 - `PLAN.md`: record the model-selection approach and unchanged product roadmap.
 - `docs/rollouts/2026-10-11-kody-minimax.md`: preserve this change and verification record.
@@ -117,3 +123,7 @@ Preserved PR Autofix commits `a731afc26` and `26d57aef2` and merged current main
 `scripts/test-cloud-coordination-bootstrap.py` adds Mac retirement, removed-file pruning on pin advance, and failed-import preservation coverage.  `STATUS.md` and `PLAN.md` reflect this follow-up.  The on-demand Mac helper inventory is corrected to describe Mac retirement; no live Mac setup was run.
 
 Verification: `python3 scripts/test-cloud-coordination-bootstrap.py` passes eight tests; `bash -n scripts/install-fleet-coordination.sh scripts/setup-slack-sync.sh` and `git diff --check` pass.  `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build` were not rerun locally for this shell-only follow-up; fresh hosted required checks remain mandatory.  Current-head Codex review is also pending, so this is not a completed rollout.
+
+## Final Slack Bootstrap Review Follow-up (2026-10-12)
+
+The separate self-contained `scripts/agent-sync-bootstrap.sh` remained able to recreate the retired Slack engine and global `SessionStart` hook.  It now fails without writing files or reading credentials.  `docs/slack-coordination.md` points to the current pinned fleet installer and protocol instead of giving Slack installation commands.  The exact-file inventory above now covers every file unique to this PR, including the cloud installer and its tests.

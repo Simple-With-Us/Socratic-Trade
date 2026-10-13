@@ -27,6 +27,15 @@ class CloudCoordinationTests(unittest.TestCase):
         return subprocess.run(["bash", str(ROOT / "scripts/setup-slack-sync.sh")],
                               env=self.env, capture_output=True, text=True)
 
+    def test_retired_single_file_bootstrap_cannot_reinstall_slack(self):
+        result = subprocess.run(["bash", str(ROOT / "scripts/agent-sync-bootstrap.sh")],
+                                env={**self.env, "HOME": str(self.root)},
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("retired", result.stderr)
+        self.assertFalse(self.settings.exists())
+        self.assertFalse(self.legacy.exists())
+
     def test_retirement_preserves_mixed_hook_groups_and_is_idempotent(self):
         old = {"type": "command", "command": 'bash "/some path/slack-sync.sh" hook 2>/dev/null || true'}
         other = {"type": "command", "command": "bash /hooks/session-start.sh"}
