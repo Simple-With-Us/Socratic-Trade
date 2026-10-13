@@ -1,5 +1,23 @@
 # Current Status
 
+## 2026-10-13 CODEX-AUTOFIX — PR #4606 embed breaker `consecutive` reset
+
+**What.**  One genuinely new Kody thread on `fix/embed-fail-fast-congress-share-backoff`: when a
+half-open probe settles on a non-counted 4xx, `settleEmbedProviderAttempt` cleared `probeInFlight`
+and `openUntil` but left `consecutive` at its trip value.  The next single counted failure therefore
+re-opened the breaker and re-logged `embed circuit open`.  Confirmed real with a standalone repro
+(warn fired twice where the test expected once) before changing anything, then fixed by also
+clearing `state.consecutive` in the `hadProbe` branch, mirroring `noteEmbedProviderSuccess`.
+
+**Tests.**  New `fully resets the breaker after a 4xx half-open probe settles` case in
+`test/embed-resilience.test.ts`: `EMBED_BREAKER_FAILURES - 1` further counted failures must not
+re-trip the breaker, the Nth does, and no second `console.warn` fires early.  No existing test was
+weakened; the file's other 9 cases are unchanged.
+
+**Docs.**  `docs/rollouts/2026-10-13-pr-4606-review-thread-fixes.md` (Round 2 section).
+
+**Next.**  Merge #4606 after hosted `verify` green.
+
 ## 2026-10-13 CLAUDE — PR #4606 review-bot pass 3 (doc/format only)
 
 **What.**  Round 3 on `fix/embed-fail-fast-congress-share-backoff`.  All four still-open Kody threads

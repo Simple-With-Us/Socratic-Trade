@@ -107,6 +107,29 @@ describe("embed circuit breaker", () => {
     expect(beginEmbedProviderAttempt("openrouter", 1_062)).toBe(true);
   });
 
+  it("fully resets the breaker after a 4xx half-open probe settles", () => {
+    // A 4xx probe settles the breaker back to closed.  It must also clear the failure count:
+    // otherwise the stale trip value lets the very next counted failure re-open the breaker and
+    // re-log "circuit open" after a single fresh failure.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.EMBED_BREAKER_COOLDOWN_MS = "50";
+    noteEmbedProviderFailure("openrouter", 1_000);
+    noteEmbedProviderFailure("openrouter", 1_000);
+    noteEmbedProviderFailure("openrouter", 1_000);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(beginEmbedProviderAttempt("openrouter", 1_060)).toBe(true);
+    settleEmbedProviderAttempt("openrouter", Object.assign(new Error("bad request"), { status: 400 }), 1_061);
+    // EMBED_BREAKER_FAILURES - 1 further counted failures must not re-trip the breaker.
+    noteEmbedProviderFailure("openrouter", 1_062);
+    noteEmbedProviderFailure("openrouter", 1_062);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(beginEmbedProviderAttempt("openrouter", 1_063)).toBe(true);
+    // The Nth fresh failure does trip it, exactly once.
+    noteEmbedProviderFailure("openrouter", 1_063);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(beginEmbedProviderAttempt("openrouter", 1_064)).toBe(false);
+  });
+
   it("does not re-warn when a half-open probe fails after the cooldown", () => {
     process.env.EMBED_BREAKER_FAILURES = "1";
     process.env.EMBED_BREAKER_COOLDOWN_MS = "50";

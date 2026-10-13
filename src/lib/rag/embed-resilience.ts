@@ -149,6 +149,11 @@ export function settleEmbedProviderAttempt(provider: string, error?: unknown, no
   const hadProbe = state.probeInFlight;
   state.probeInFlight = false;
   if (hadProbe) {
+    // The half-open probe is the breaker's one chance to prove the provider is healthy again,
+    // and a 4xx is a client-side rejection, not provider ill-health.  Reset the whole breaker
+    // (mirroring noteEmbedProviderSuccess) rather than only clearing openUntil: leaving
+    // `consecutive` at its trip value would let the very next counted failure re-trip the
+    // breaker and re-log "circuit open" after a single fresh failure.
     state.openUntil = 0;
     state.consecutive = 0;
   }
