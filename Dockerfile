@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.27
+# syntax=docker/dockerfile:1.28
 # Production image for Coolify (socratic-app).
 #
 # Design constraints (learned the hard way 2026-08-04):
