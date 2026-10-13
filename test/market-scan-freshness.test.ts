@@ -61,9 +61,9 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  // The lane always reads/writes user "local" (sole-user app; see market-scan-freshness.ts),
-  // so every test shares that scope — start each test from a clean audit table rather than
-  // relying on userId isolation.
+  // Most cases still use user "local".  The lane now walks listUsers(), so a test that
+  // inserts another user must delete that user's rows before the next case.  Start from a
+  // clean audit table rather than relying on userId isolation.
   getDb().prepare("DELETE FROM audit_events").run();
   scanMarketMock.mockReset();
   scanMarketMock.mockResolvedValue(makeScan(new Date(MONDAY).toISOString()));
@@ -192,6 +192,45 @@ describe("runMarketScanFreshnessIfDue", () => {
     auditAt("market_scan", { scan: makeScan(new Date(MONDAY - 21 * 60 * 60_000).toISOString()) }, "local", MONDAY - 21 * 60 * 60_000);
     scanMarketMock.mockRejectedValueOnce(new Error("provider down"));
     await expect(runMarketScanFreshnessIfDue(MONDAY)).resolves.toBeUndefined();
+    expect(latestAuditByKind("market_scan_failed", "local")).toBeDefined();
+  });
+
+  it("refreshes a signed-in user and does not treat local as the only user", async () => {
+    const { upsertConnectedAccount, getDb } = await import("../src/lib/db");
+    const userId = "owner-scan";
+    upsertConnectedAccount({
+      id: "owner-scan-acct",
+      userId,
+      broker: "test",
+      environment: "paper",
+      accountNumber: "OWNER",
+      label: "Owner",
+      isActive: true
+    });
+    try {
+      auditAt("market_scan", { scan: makeScan(new Date(MONDAY - 25 * 60 * 60_000).toISOString()) }, userId, MONDAY - 25 * 60 * 60_000);
+      vi.setSystemTime(MONDAY);
+      await runMarketScanFreshnessIfDue(MONDAY);
+      const userIds = scanMarketMock.mock.calls.map((call) => call[3]);
+      expect(userIds).toContain(userId);
+      expect(latestAuditByKind("market_scan", userId)?.createdAt).toBe(new Date(MONDAY).toISOString());
+    } finally {
+      const db = getDb();
+      db.prepare("DELETE FROM connected_accounts WHERE user_id = ?").run(userId);
+      db.prepare("DELETE FROM user_settings WHERE user_id = ?").run(userId);
+      db.prepare("DELETE FROM account_strategy_state WHERE user_id = ?").run(userId);
+    }
+  });
+
+  it("rejects a hung scan at the freshness deadline so the next tick can run", async () => {
+    scanMarketMock.mockImplementationOnce(() => new Promise(() => {}));
+    const pending = runMarketScanFreshnessIfDue(MONDAY);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    await pending;
+    expect(latestAuditByKind("market_scan_failed", "local")).toBeDefined();
+    scanMarketMock.mockResolvedValue(makeScan(new Date(MONDAY).toISOString()));
+    await runMarketScanFreshnessIfDue(MONDAY);
+    expect(scanMarketMock).toHaveBeenCalledTimes(2);
   });
 });
 

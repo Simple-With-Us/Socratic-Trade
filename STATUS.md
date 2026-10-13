@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-13 GROK — Market scan deadline and freshness
+
+**What.**  No interactive or scheduled `market_scan` had refreshed since 2026-10-12 06:29Z.  The freshness lane only audited user `local`, and a Nasdaq body that ignored the abort signal could pin the singleflight without writing `market_scan_failed`.  The lane now refreshes every `listUsers()` id under a 10 minute deadline and records failures.  `GET /api/scan` returns the last good scan with `stale: true` when a refresh fails and one exists.  The 503 shape stays only when no last-good exists.  A rolling daily-close store for the weekly digest was skipped.
+
+**Verification.**  `npx tsc --noEmit` clean.  `npx vitest run test/scan-empty-screener.test.ts test/market-scan-freshness.test.ts test/scan-singleflight.test.ts` passed.
+
+**Docs.**  `docs/rollouts/2026-10-13-market-scan-deadline-freshness.md`.
+
+**Next.**  Ready for review.  `do-not-automerge` because `/api/scan` reads broker positions and quotes.  Do not merge from this lane.
+
 ## 2026-10-11 CODEX — Kody MiniMax (CTS-330)
 
 **What.**  Kody autofix selects `MiniMax-M3` through MiniMax’s direct OpenAI-compatible endpoint.  Its Sentry observer follows the new workflow name.

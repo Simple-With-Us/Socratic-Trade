@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
-import { getPolicy, latestAuditByKind, resetDbForTesting, setPolicy, upsertConnectedAccount } from "../src/lib/db";
+import { audit, getPolicy, latestAuditByKind, resetDbForTesting, setPolicy, upsertConnectedAccount } from "../src/lib/db";
 import { isUnusableEmptyMarketScan } from "../src/lib/scan-singleflight";
 import {
   clearMarketCache,
@@ -402,9 +402,8 @@ describe("fetchNasdaqScreener transport", () => {
     const market = readFileSync(join(process.cwd(), "src/lib/market.ts"), "utf8");
     const congress = readFileSync(join(process.cwd(), "src/lib/congress-share.ts"), "utf8");
     const helper = readFileSync(join(process.cwd(), "src/lib/nasdaq-screener-fetch.ts"), "utf8");
-    expect(market).toMatch(/"User-Agent": BROWSER_UA/);
-    expect(market).toContain("fetchWithRetry");
-    expect(market).toContain('Origin: "https://www.nasdaq.com"');
+    expect(market).toContain("fetchNasdaqScreenerResponse");
+    expect(market).toContain("readNasdaqScreenerJson");
     expect(market).not.toMatch(/"user-agent": "Mozilla\/5\.0"/);
     expect(congress).toContain("fetchNasdaqScreenerResponse");
     expect(congress).not.toContain('"Mozilla/5.0"');
@@ -436,6 +435,23 @@ describe("fetchNasdaqScreener transport", () => {
     const response = await pending;
     expect(response.ok).toBe(true);
     expect(calls).toBe(2);
+  });
+
+  it("does not retry when the caller deadline aborts the screener", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    vi.stubGlobal("fetch", (_request: RequestInfo | URL, init?: RequestInit) => {
+      calls += 1;
+      return new Promise((_resolve, reject) => {
+        const fail = () => reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" }));
+        if (init?.signal?.aborted) fail();
+        else init?.signal?.addEventListener("abort", fail, { once: true });
+      });
+    });
+    const pending = fetchNasdaqScreenerResponse("nasdaq-delayed-screener", { signal: controller.signal });
+    controller.abort(new Error("Interactive market scan deadline exceeded."));
+    await expect(pending).rejects.toThrow(/deadline exceeded/);
+    expect(calls).toBe(1);
   });
 });
 
@@ -517,6 +533,55 @@ describe("GET /api/scan empty-screener contract", () => {
     expect(body.warnings?.join(" ") ?? "").not.toMatch(/universe has no symbols/i);
     expect(latestAuditByKind("market_scan_failed", userId)?.kind).toBe("market_scan_failed");
     expect(latestAuditByKind("market_scan", userId)).toBeUndefined();
+  });
+
+  it("returns the last good scan with stale:true when refresh fails and one exists", async () => {
+    stubFetches({ nasdaqRows: [], yahoo: "miss", nasdaqAbort: true });
+    const { userId } = resolveRequestUserFromEmail("scan-stale@example.com");
+    upsertConnectedAccount({
+      id: `scan-stale-${userId}`,
+      userId,
+      broker: "test",
+      environment: "paper",
+      accountNumber: "TEST",
+      label: "Scan stale test",
+      isActive: true
+    });
+    const policy = getPolicy(userId);
+    setPolicy({
+      ...policy,
+      includedIndices: [],
+      additionalSymbols: ["AAPL"],
+      blocklist: []
+    }, userId);
+    const generatedAt = "2026-10-12T06:29:00.000Z";
+    audit("market_scan", {
+      scan: {
+        source: "nasdaq-delayed-screener",
+        generatedAt,
+        scannedSymbols: 1,
+        returnedQuotes: 1,
+        topCandidates: [{ symbol: "AAPL", price: 10, score: 1 }],
+        sectorBySymbol: { AAPL: "Technology" },
+        // No numeric score: the interactive seed loader rejects the row, so refresh
+        // fails closed, while newestPersistedMarketScan still treats the scan as last-good.
+        quotesBySymbol: { AAPL: { symbol: "AAPL", price: 10 } },
+        warnings: []
+      }
+    }, userId, policy.connectedAccountId);
+
+    const res = await scanGet(
+      new Request("https://trading.example.com/api/scan", {
+        headers: { [AUTHENTICATED_EMAIL_HEADER]: "scan-stale@example.com" }
+      })
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as { stale?: boolean; staleReason?: string; generatedAt?: string; topCandidates?: Array<{ symbol?: string }> };
+    expect(body.stale).toBe(true);
+    expect(body.staleReason).toMatch(/aborted|unavailable|Quotes/i);
+    expect(body.generatedAt).toBe(generatedAt);
+    expect(body.topCandidates?.[0]?.symbol).toBe("AAPL");
+    expect(latestAuditByKind("market_scan_failed", userId)).toBeTruthy();
   });
 });
 

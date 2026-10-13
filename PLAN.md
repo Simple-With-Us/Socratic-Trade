@@ -1,3 +1,5 @@
+> **2026-10-13 GROK — Market scan deadline and freshness (`cursor/market-scan-freshness-deadline`).**  No roadmap scope change.  Scheduled scans now run for every signed-in user, the Nasdaq body honors the scan abort signal, and a failed refresh returns the last good scan as stale when one exists.  Not a market-hours gate.  Weekly grouped-bar storage was skipped.  Extra-ship no.  Do not merge from this lane.  Rollout: `docs/rollouts/2026-10-13-market-scan-deadline-freshness.md`.
+
 > **2026-10-12 CODEX — CTS-330 cache review follow-up.**  Validate a fresh cache before replacing the old pin and retire Mac Slack hooks before skipping installation.  Product roadmap remains unchanged; hosted checks and current-head review gate landing.
 
 > **2026-10-12 CODEX — CTS-330 cloud review follow-up.**  Complete the Linear/Zulip setup prerequisite with a pinned protocol/registry bundle and idempotent retirement of persisted Slack hooks.  Product roadmap and runtime behavior are unchanged.  Rollout: `docs/rollouts/2026-10-11-kody-minimax.md`.

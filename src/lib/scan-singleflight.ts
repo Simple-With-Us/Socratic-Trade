@@ -50,11 +50,12 @@ export function interactiveScanKey(input: {
 
 export async function withScanDeadline<T>(
   budgetMs: number,
-  factory: (signal: AbortSignal) => Promise<T>
+  factory: (signal: AbortSignal) => Promise<T>,
+  deadlineMessage = "Interactive market scan deadline exceeded."
 ): Promise<T> {
   const controller = new AbortController();
   return await new Promise<T>((resolve, reject) => {
-    const deadlineError = new Error("Interactive market scan deadline exceeded.");
+    const deadlineError = new Error(deadlineMessage);
     const timeout = setTimeout(() => {
       controller.abort(deadlineError);
       reject(deadlineError);
@@ -95,6 +96,23 @@ export function runScanSingleFlight(
 
 export function resetScanSingleFlightForTests(): void {
   activeScans.clear();
+}
+
+/** Last-good scan served after a failed or timed-out refresh.  `generatedAt` stays the
+ *  last successful scan's stamp so a stale response is not mistaken for a new one. */
+export function staleMarketScanResponse<T extends { generatedAt?: string; warnings?: string[] }>(
+  scan: T,
+  staleReason: string
+): T & { stale: true; staleReason: string; generatedAt: string; warnings: string[] } {
+  const warnings = Array.isArray(scan.warnings) ? scan.warnings : [];
+  const reason = staleReason.trim() || "Market scan refresh failed.";
+  return {
+    ...scan,
+    stale: true,
+    staleReason: reason,
+    generatedAt: scan.generatedAt ?? new Date(0).toISOString(),
+    warnings: warnings.includes(reason) ? warnings : [...warnings, reason]
+  };
 }
 
 /** Zero-quote abort/empty rows written as `market_scan` (prod d0359642) are

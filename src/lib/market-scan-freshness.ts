@@ -10,20 +10,22 @@
 // interactive refresh; dashboard.ts already reads the newer of `market_scan` and
 // `strategy_run` — see fullMarketScan/`latestScan` there).
 //
+// Runs for every listUsers() id.  Hardcoding "local" left signed-in market_scan rows
+// stuck while the scheduler tick itself stayed green.  Not gated on market hours.
+//
 // Cost posture: on a trading day, run the full enrichment scan (fundamentals are still worth
 // refreshing). On a non-trading day, run in `enrichmentMode: "skip"` seeded from the newest
 // persisted scan's quotesBySymbol — a keyless price/breadth refresh that burns no keyed
 // provider quota, mirroring the interactive /api/scan path.
-import { audit, getPolicy, latestAuditByKind, newerAuditEntry, type AuditEventRow, latestAuditStampByKind } from "./db";
+import { audit, getPolicy, latestAuditByKind, listUsers, newerAuditEntry, type AuditEventRow, latestAuditStampByKind } from "./db";
 import { dynamicIndexUniversesForPolicy } from "./index-universes";
 import { isTradingDay } from "./market-calendar";
 import { scanMarket } from "./market";
 import { allowedSymbolsForPolicy } from "./policy";
-import { interactiveScanKey, marketScanQuotesFromAudit, runScanSingleFlight } from "./scan-singleflight";
+import { interactiveScanKey, isUnusableEmptyMarketScan, marketScanQuotesFromAudit, runScanSingleFlight, withScanDeadline } from "./scan-singleflight";
 import type { MarketScan } from "./types";
 
 const DEFAULT_MAX_AGE_HOURS = 20;
-const FRESHNESS_USER_ID = "local"; // sole-user app today; see AGENTS.md "Sole user, no compat tax"
 
 /** `MARKET_SCAN_FRESHNESS_MAX_AGE_HOURS` env knob: how stale the newest persisted scan may get
  *  before this lane refreshes it. `0` disables the lane entirely. Unset/invalid falls back to
@@ -101,9 +103,9 @@ export function newestPersistedMarketScan(
 /** Deterministic single-flight key for this lane's own scan, stable across repeated calls with
  *  the same policy/universe so a lane invocation still in flight (audit not yet persisted) never
  *  causes a second tick to kick off a duplicate scanMarket call — see runScanSingleFlight. */
-function freshnessScanKey(policy: ReturnType<typeof getPolicy>, symbols: string[], dynamicUniverses: ReturnType<typeof dynamicIndexUniversesForPolicy>): string {
+function freshnessScanKey(userId: string, policy: ReturnType<typeof getPolicy>, symbols: string[], dynamicUniverses: ReturnType<typeof dynamicIndexUniversesForPolicy>): string {
   return interactiveScanKey({
-    userId: FRESHNESS_USER_ID,
+    userId,
     accountNumber: policy.accountNumber,
     symbols,
     candidateLimit: policy.marketScanCandidateLimit,
@@ -129,13 +131,98 @@ export const FRESHNESS_BOOT_GRACE_SECONDS = 300;
  *  wedge shape this lane must never re-create. */
 export const FRESHNESS_SCAN_DEADLINE_MS = 10 * 60_000;
 
-/** Last audit row id proven to carry a usable scan — skips re-parsing a multi-MB payload every
- *  tick while the newest row is unchanged (steady state = two index seeks, zero parses). */
-let lastUsableAuditRowId: string | undefined;
+/** Per-user last audit row id proven to carry a usable scan.  A single global id skipped every
+ *  other user once `local` was fresh, which is why signed-in scans stopped moving. */
+const lastUsableAuditRowId = new Map<string, string>();
 
 /** Test-only (per-file temp DBs make cached row ids stale across tests). */
 export function resetFreshnessGateForTests(): void {
-  lastUsableAuditRowId = undefined;
+  lastUsableAuditRowId.clear();
+}
+
+function recordScanFailure(userId: string, connectedAccountId: string | undefined, message: string): void {
+  try {
+    audit("market_scan_failed", { message, source: "market_scan_freshness" }, userId, connectedAccountId);
+  } catch {
+    /* audit is diagnostic only */
+  }
+}
+
+/** One user.  Not market-hours gated: weekends still refresh in skip-enrichment mode.
+ *  A usable strategy_run scan counts as fresh.  A bounded `omitted` run does not. */
+async function refreshUserMarketScanIfDue(userId: string, now: number, maxAgeMs: number): Promise<"refreshed" | "failed" | "fresh"> {
+  const policy = getPolicy(userId);
+  const stampOf = (kind: string) =>
+    latestAuditStampByKind(kind, userId, policy.connectedAccountId) ??
+    latestAuditStampByKind(kind, userId);
+  const scanStamp = stampOf("market_scan");
+  const runStamp = stampOf("strategy_run");
+  const newestStamp = !scanStamp
+    ? runStamp
+    : !runStamp || Date.parse(scanStamp.createdAt) >= Date.parse(runStamp.createdAt)
+      ? scanStamp
+      : runStamp;
+  if (newestStamp && now - Date.parse(newestStamp.createdAt) < maxAgeMs) {
+    if (newestStamp.id === lastUsableAuditRowId.get(userId)) return "fresh";
+    const freshCheck = newestPersistedMarketScan(userId, policy.connectedAccountId);
+    if (freshCheck && now - Date.parse(freshCheck.entry.createdAt) < maxAgeMs) {
+      lastUsableAuditRowId.set(userId, freshCheck.entry.id);
+      return "fresh";
+    }
+  }
+
+  const newest = newestPersistedMarketScan(userId, policy.connectedAccountId);
+  const ageMs = newest ? now - Date.parse(newest.entry.createdAt) : Number.POSITIVE_INFINITY;
+  if (Number.isFinite(ageMs) && ageMs < maxAgeMs) {
+    lastUsableAuditRowId.set(userId, newest!.entry.id);
+    return "fresh";
+  }
+
+  const symbols = allowedSymbolsForPolicy(policy);
+  const dynamicUniverses = dynamicIndexUniversesForPolicy(policy);
+  const tradingDay = isTradingDay(new Date(now));
+  const seedEnrichment = !tradingDay && newest
+    ? marketScanQuotesFromAudit(newest.entry.payload, newest.entry.createdAt, now)
+    : undefined;
+
+  const key = freshnessScanKey(userId, policy, symbols, dynamicUniverses);
+  let scan: MarketScan;
+  try {
+    // withScanDeadline rejects even if a body read ignores the signal, so one hung
+    // Nasdaq response cannot pin this user's singleflight for the life of the process.
+    scan = await runScanSingleFlight(key, () =>
+      withScanDeadline(FRESHNESS_SCAN_DEADLINE_MS, (signal) =>
+        scanMarket(symbols, [], policy.scoringWeights, userId, dynamicUniverses, {
+          candidateLimit: policy.marketScanCandidateLimit,
+          outlierReserve: policy.marketScanOutlierReserve,
+          universeFloor: policy.universeFloor,
+          enrichmentMode: tradingDay ? undefined : "skip",
+          seedEnrichment,
+          signal,
+          deadlineAt: now + FRESHNESS_SCAN_DEADLINE_MS
+        }),
+        "Market scan freshness deadline exceeded."
+      )
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[market-scan-freshness] ${userId}:`, message);
+    recordScanFailure(userId, policy.connectedAccountId, message);
+    return "failed";
+  }
+
+  if (isUnusableEmptyMarketScan(scan)) {
+    recordScanFailure(userId, policy.connectedAccountId, "Scan finished with zero quotes.");
+    return "failed";
+  }
+
+  try {
+    audit("market_scan", { scan }, userId, policy.connectedAccountId);
+  } catch (err) {
+    recordScanFailure(userId, policy.connectedAccountId, err instanceof Error ? err.message : String(err));
+    return "failed";
+  }
+  return "refreshed";
 }
 
 export async function runMarketScanFreshnessIfDue(now: number = Date.now(), uptimeSeconds?: number): Promise<void> {
@@ -144,63 +231,25 @@ export async function runMarketScanFreshnessIfDue(now: number = Date.now(), upti
     if (maxAgeHours <= 0) return; // 0 disables the lane
     if (uptimeSeconds !== undefined && uptimeSeconds < FRESHNESS_BOOT_GRACE_SECONDS) return; // boot grace
 
-    const policy = getPolicy(FRESHNESS_USER_ID);
     const maxAgeMs = maxAgeHours * 60 * 60_000;
-
-    // FAST GATE — stamps only, no payloads. The old gate resolved BOTH kinds' full payloads
-    // (multi-MB rows) on every tick just to compare timestamps. A fresh stamp alone cannot
-    // prove freshness (a skipped strategy_run row carries no scan and must not mask an older
-    // stale-but-usable one), so usability is verified once per newest-row CHANGE and cached.
-    const stampOf = (kind: string) =>
-      latestAuditStampByKind(kind, FRESHNESS_USER_ID, policy.connectedAccountId) ??
-      latestAuditStampByKind(kind, FRESHNESS_USER_ID);
-    const scanStamp = stampOf("market_scan");
-    const runStamp = stampOf("strategy_run");
-    const newestStamp = !scanStamp
-      ? runStamp
-      : !runStamp || Date.parse(scanStamp.createdAt) >= Date.parse(runStamp.createdAt)
-        ? scanStamp
-        : runStamp;
-    if (newestStamp && now - Date.parse(newestStamp.createdAt) < maxAgeMs) {
-      if (newestStamp.id === lastUsableAuditRowId) return; // fresh + already proven usable
-      const freshCheck = newestPersistedMarketScan(FRESHNESS_USER_ID, policy.connectedAccountId);
-      if (freshCheck && now - Date.parse(freshCheck.entry.createdAt) < maxAgeMs) {
-        lastUsableAuditRowId = freshCheck.entry.id;
-        return;
+    // Signed-in users are not "local".  Refreshing only local left their market_scan
+    // row stuck (prod: last interactive/scheduled scan 2026-10-12 06:29Z) while the
+    // scheduler tick itself stayed healthy.  The lane is not gated on market hours.
+    const users = listUsers();
+    let refreshed = 0;
+    let failed = 0;
+    for (const userId of users) {
+      try {
+        const outcome = await refreshUserMarketScanIfDue(userId, now, maxAgeMs);
+        if (outcome === "refreshed") refreshed += 1;
+        if (outcome === "failed") failed += 1;
+      } catch (err) {
+        failed += 1;
+        console.error("[market-scan-freshness] error:", err instanceof Error ? err.message : err);
       }
-      // Fresh stamp but no fresh USABLE scan — fall through and refresh.
     }
-
-    const newest = newestPersistedMarketScan(FRESHNESS_USER_ID, policy.connectedAccountId);
-    const ageMs = newest ? now - Date.parse(newest.entry.createdAt) : Number.POSITIVE_INFINITY;
-    if (Number.isFinite(ageMs) && ageMs < maxAgeHours * 60 * 60_000) {
-      lastUsableAuditRowId = newest!.entry.id;
-      return; // still fresh
-    }
-
-    const symbols = allowedSymbolsForPolicy(policy);
-    const dynamicUniverses = dynamicIndexUniversesForPolicy(policy);
-    const tradingDay = isTradingDay(new Date(now));
-    const seedEnrichment = !tradingDay && newest
-      ? marketScanQuotesFromAudit(newest.entry.payload, newest.entry.createdAt, now)
-      : undefined;
-
-    const key = freshnessScanKey(policy, symbols, dynamicUniverses);
-    const scan = await runScanSingleFlight(key, () =>
-      scanMarket(symbols, [], policy.scoringWeights, FRESHNESS_USER_ID, dynamicUniverses, {
-        candidateLimit: policy.marketScanCandidateLimit,
-        outlierReserve: policy.marketScanOutlierReserve,
-        universeFloor: policy.universeFloor,
-        enrichmentMode: tradingDay ? undefined : "skip",
-        seedEnrichment,
-        signal: AbortSignal.timeout(FRESHNESS_SCAN_DEADLINE_MS)
-      })
-    );
-
-    try {
-      audit("market_scan", { scan }, FRESHNESS_USER_ID, policy.connectedAccountId);
-    } catch {
-      /* audit is diagnostic only */
+    if (refreshed > 0 || failed > 0) {
+      console.info(`[market-scan-freshness] users=${users.length} refreshed=${refreshed} failed=${failed}`);
     }
   } catch (err) {
     console.error("[market-scan-freshness] error:", err instanceof Error ? err.message : err);
