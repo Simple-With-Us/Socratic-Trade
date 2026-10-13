@@ -7909,7 +7909,7 @@ export async function retrieveContextDetailed(
                 // Re-close the embed stage with a success outcome so tracing
                 // correctly reflects primary-fail-then-fallback-success rather
                 // than a permanent error, and fix provider attribution for metering.
-                endEmbed?.({ candidatesOut: 1, recovered: true });
+                endEmbed?.({ candidatesOut: 1 });
                 embedProvider = "siliconflow";
               } else {
                 // Fallback returned nothing usable — degrade.
