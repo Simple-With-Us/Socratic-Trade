@@ -220,6 +220,9 @@ final class UserFacingCopyTests: XCTestCase {
             MobileAPIError.network(URLError(.cancelled)).errorDescription,
             nil
         )
+        XCTAssertTrue(MobileAPIError.isUserCancellation(MobileAPIError.network(URLError(.cancelled))))
+        XCTAssertTrue(MobileAPIError.isUserCancellation(URLError(.cancelled)))
+        XCTAssertFalse(MobileAPIError.isUserCancellation(URLError(.timedOut)))
         XCTAssertEqual(
             MobileAPIError.network(URLError(.badServerResponse)).errorDescription,
             "Couldn't reach Socratic Trade"

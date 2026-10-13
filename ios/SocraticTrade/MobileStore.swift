@@ -965,8 +965,10 @@ final class MobileStore: ObservableObject {
             return
         }
         if preserveTransientMessage {
+            if MobileAPIError.isUserCancellation(caught) { return }
             if let apiError = caught as? MobileAPIError {
-                error = apiError.errorDescription
+                guard let description = apiError.errorDescription else { return }
+                error = description
             } else if let message = MobileAPIError.userFacingNetworkMessage(for: caught) {
                 error = message
             } else {
