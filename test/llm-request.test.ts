@@ -29,7 +29,7 @@ describe("llm-request — model resolution", () => {
   it("classifies reasoning vs classic models", () => {
     expect(isReasoningModel("gpt-5.4-mini")).toBe(true);
     expect(isReasoningModel("openai/gpt-5.5")).toBe(true);
-    expect(isReasoningModel("o4-mini")).toBe(true);
+    expect(isReasoningModel("gpt-5.6-terra")).toBe(true);
     expect(isReasoningModel("openai/gpt-4.1-mini")).toBe(false);
     expect(isReasoningModel("openai/gpt-4o-mini")).toBe(false);
     expect(isReasoningModel("openai/gpt-4o")).toBe(false);
