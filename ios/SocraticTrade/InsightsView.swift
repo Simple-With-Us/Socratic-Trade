@@ -94,6 +94,7 @@ struct InsightsView: View {
 }
 
 private struct InsightsBriefCard: View {
+    @EnvironmentObject private var store: MobileStore
     let snapshot: MobileSnapshot
 
     var body: some View {
@@ -125,7 +126,7 @@ private struct InsightsBriefCard: View {
         let equity = AppFormat.money(snapshot.portfolio?.totalMarketValue)
         let n = snapshot.pendingProposals.count
         let pending = "\(n) pending proposal\(n == 1 ? "" : "s")"
-        return "\(account) is \(state) with \(equity) in equity, \(snapshot.positions.count) open position\(snapshot.positions.count == 1 ? "" : "s"), and \(pending).  Session: \(AppFormat.marketSessionBannerLabel(snapshot.marketSession))."
+        return "\(account) is \(state) with \(equity) in equity, \(snapshot.positions.count) open position\(snapshot.positions.count == 1 ? "" : "s"), and \(pending).  Session: \(AppFormat.marketSessionBannerLabel(store.displayMarketSession(for: snapshot)))."
     }
 }
 

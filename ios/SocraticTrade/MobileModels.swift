@@ -509,11 +509,22 @@ func deriveRunStateWord(
 }
 
 /// Convenience over the snapshot's own policy + market session.
-func deriveRunStateWord(snapshot: MobileSnapshot) -> RunStateWord {
-    deriveRunStateWord(
+/// When `useDeviceMarketSession` is true (stale snapshot), ignores cached `marketSession`.
+func deriveRunStateWord(
+    snapshot: MobileSnapshot,
+    useDeviceMarketSession: Bool = false,
+    now: Date = Date()
+) -> RunStateWord {
+    let marketSession: String?
+    if useDeviceMarketSession {
+        marketSession = NYSEMarketSession.sessionKey(now: now)
+    } else {
+        marketSession = snapshot.marketSession
+    }
+    return deriveRunStateWord(
         systemState: snapshot.readiness.systemState,
         runDuringExtendedHours: snapshot.policy.runDuringExtendedHours,
-        marketSession: snapshot.marketSession
+        marketSession: marketSession
     )
 }
 

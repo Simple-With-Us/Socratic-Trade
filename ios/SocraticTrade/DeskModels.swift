@@ -213,6 +213,8 @@ struct MarketScanResponse: Decodable {
     let scannedSymbols: Int?
     let returnedQuotes: Int?
     let warnings: [String]
+    let stale: Bool?
+    let staleReason: String?
 
     var hasUsableUniverse: Bool { !topCandidates.isEmpty }
 
@@ -227,6 +229,8 @@ struct MarketScanResponse: Decodable {
         case scannedSymbols
         case returnedQuotes
         case warnings
+        case stale
+        case staleReason
     }
 
     init(
@@ -235,7 +239,9 @@ struct MarketScanResponse: Decodable {
         generatedAt: String? = nil,
         scannedSymbols: Int? = nil,
         returnedQuotes: Int? = nil,
-        warnings: [String] = []
+        warnings: [String] = [],
+        stale: Bool? = nil,
+        staleReason: String? = nil
     ) {
         self.topCandidates = topCandidates
         self.asOf = asOf ?? generatedAt
@@ -243,6 +249,8 @@ struct MarketScanResponse: Decodable {
         self.scannedSymbols = scannedSymbols
         self.returnedQuotes = returnedQuotes
         self.warnings = warnings
+        self.stale = stale
+        self.staleReason = staleReason
     }
 
     init(from decoder: Decoder) throws {
@@ -256,6 +264,8 @@ struct MarketScanResponse: Decodable {
         scannedSymbols = try values.decodeIfPresent(Int.self, forKey: .scannedSymbols)
         returnedQuotes = try values.decodeIfPresent(Int.self, forKey: .returnedQuotes)
         warnings = try values.decodeIfPresent([String].self, forKey: .warnings) ?? []
+        stale = try values.decodeIfPresent(Bool.self, forKey: .stale)
+        staleReason = try values.decodeIfPresent(String.self, forKey: .staleReason)
     }
 
     /// Same rule as `/console/scan`: a failed refresh never blanks a last-good table.
@@ -695,7 +705,7 @@ enum DeskCopy {
     /// Scan refresh failed.  Do not reuse the workspace "Check your connection" sentence —
     /// SnapshotScaffold already shows that for a stale snapshot, and Retry there reloads
     /// the snapshot, not `/api/scan`.
-    static let genericConnectionMessage = "Check your connection and try again."
+    static let genericConnectionMessage = "Check your connection"
     static let scanRefreshing = "Refreshing the scan — this can take up to 45 seconds."
     static let scanEmptyUniverse =
         "The scan returned no ranked names.  Confirm the universe on Guardrails, then refresh."
@@ -713,9 +723,23 @@ enum DeskCopy {
     static func scanRefreshFailed(from message: String) -> String {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty || trimmed == genericConnectionMessage {
-            return "Couldn’t refresh the market scan.  Check your connection and try again."
+            return "Couldn’t refresh the market scan.  Check your connection."
         }
         return trimmed
+    }
+
+    /// Last-good scan served with HTTP 200 `stale: true` (PR #4609) — informational, not a failure banner.
+    static func scanShowingStaleNote(generatedAt: String?, staleReason: String? = nil) -> String? {
+        let stampSource = generatedAt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let stamped = stampSource.isEmpty ? "—" : AppFormat.dateTime(stampSource)
+        let reason = staleReason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if stamped == "—" {
+            return reason.isEmpty ? nil : reason
+        }
+        if reason.isEmpty {
+            return "Showing scan from \(stamped)."
+        }
+        return "\(reason)  Showing scan from \(stamped)."
     }
 
     static func shouldShowScanEmptyState(hasFilter: Bool, loadFailed: Bool) -> Bool {

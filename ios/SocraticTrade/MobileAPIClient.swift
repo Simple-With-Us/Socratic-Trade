@@ -30,11 +30,43 @@ enum MobileAPIError: Error, LocalizedError {
                 return reasons.joined(separator: "  ")
             }
             return "Quotes were unavailable for this universe.  Refresh after the quote feed recovers."
-        case .network:
-            return "Check your connection and try again."
+        case .network(let underlying):
+            if Self.isUserCancellation(underlying) { return nil }
+            return Self.userFacingNetworkMessage(for: underlying) ?? "Couldn't reach Socratic Trade"
         case .decoding:
             return "Couldn’t load your workspace.  Try again."
         }
+    }
+
+    /// True when the failure is user- or task-initiated cancellation (no alert copy).
+    static func isUserCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        if case MobileAPIError.network(let underlying) = error {
+            return isUserCancellation(underlying)
+        }
+        return false
+    }
+
+    /// Maps URLSession failures to short, accurate copy.  Returns nil for user-cancelled work.
+    static func userFacingNetworkMessage(for error: Error) -> String? {
+        if isUserCancellation(error) { return nil }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .cancelled:
+                return nil
+            case .timedOut:
+                return "Server is slow, still trying"
+            case .notConnectedToInternet, .networkConnectionLost:
+                return "Check your connection"
+            default:
+                return "Couldn't reach Socratic Trade"
+            }
+        }
+        if case MobileAPIError.network(let underlying) = error {
+            return userFacingNetworkMessage(for: underlying)
+        }
+        return nil
     }
 }
 
