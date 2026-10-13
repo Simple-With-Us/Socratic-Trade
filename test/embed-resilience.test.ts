@@ -3,6 +3,7 @@ import {
   beginEmbedProviderAttempt,
   countsTowardEmbedProviderFailure,
   createEmbedAttemptAbort,
+  settleEmbedProviderAttempt,
   getCachedContentEmbedding,
   noteEmbedProviderFailure,
   noteEmbedProviderSuccess,
@@ -82,6 +83,17 @@ describe("embed circuit breaker", () => {
     expect(getCachedContentEmbedding("baai/bge-m3", 1, "query", "other text")).toBeUndefined();
     expect(getCachedContentEmbedding("other-model", 1, "query", "hello world")).toBeUndefined();
     expect(getCachedContentEmbedding("baai/bge-m3", 2, "query", "hello world")).toBeUndefined();
+  });
+
+  it("releases a half-open probe on non-counted 4xx without wedging the breaker", () => {
+    process.env.EMBED_BREAKER_FAILURES = "1";
+    process.env.EMBED_BREAKER_COOLDOWN_MS = "50";
+    noteEmbedProviderFailure("openrouter", 1_000);
+    expect(beginEmbedProviderAttempt("openrouter", 1_060)).toBe(true);
+    expect(beginEmbedProviderAttempt("openrouter", 1_061)).toBe(false);
+    const clientError = Object.assign(new Error("bad request"), { status: 400 });
+    settleEmbedProviderAttempt("openrouter", clientError, 1_061);
+    expect(beginEmbedProviderAttempt("openrouter", 1_062)).toBe(true);
   });
 
   it("does not re-warn when a half-open probe fails after the cooldown", () => {

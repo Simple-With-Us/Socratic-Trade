@@ -131,6 +131,28 @@ export function noteEmbedProviderSuccess(provider: string): void {
 }
 
 /** Count one exhausted embed attempt.  The transition into open logs a single warning. */
+/**
+ * End an embed provider attempt: always clears a half-open probe.  Counted failures trip or
+ * extend the breaker; non-counted failures (e.g. 4xx) release the probe without wedging.
+ */
+export function settleEmbedProviderAttempt(provider: string, error?: unknown, now = Date.now()): void {
+  if (!embedBreakerEnabled()) return;
+  if (!error) {
+    breakerState(provider).probeInFlight = false;
+    return;
+  }
+  if (countsTowardEmbedProviderFailure(error)) {
+    noteEmbedProviderFailure(provider, now);
+    return;
+  }
+  const state = breakerState(provider);
+  const hadProbe = state.probeInFlight;
+  state.probeInFlight = false;
+  if (hadProbe) {
+    state.openUntil = 0;
+  }
+}
+
 export function noteEmbedProviderFailure(provider: string, now = Date.now()): void {
   if (!embedBreakerEnabled()) return;
   const state = breakerState(provider);

@@ -39,15 +39,16 @@ import { getCachedQueryEmbedding, setCachedQueryEmbedding } from "./rag/query-em
 import {
   beginEmbedProviderAttempt,
   contentEmbeddingCacheKey,
-  countsTowardEmbedProviderFailure,
   createEmbedAttemptAbort,
   EmbedCircuitOpenError,
+  settleEmbedProviderAttempt,
   getCachedContentEmbedding,
   isEmbedCircuitOpenError,
   noteEmbedProviderFailure,
   noteEmbedProviderSuccess,
   setCachedContentEmbedding
 } from "./rag/embed-resilience";
+import { parseProviderEmbeddingResponse } from "./rag/embedding-response-schema";
 import { recordRagOperation, shouldDegradeForBudget } from "./rag/run-budget";
 import { auditRagIngestPointsGateSkip, estimateRagDispatchCost, getRagUsageSummary, hasRagIngestPointsBudget, hashQuery, meterEmbed, meterPineconeQuery, meterPineconeUpsert, meterRerank, ragIngestPointsBudgetDeferUntil, ragIngestTextBudgetDeferUntil, ragMaxDailyIngestPoints, recordRetrievalQuality, retrievalTelemetryEnabled, usedRagUpsertPointsLast24h, type RagEmbedRerankProvider } from "./rag-metering";
 import {
@@ -2834,7 +2835,8 @@ async function embedWithRetry(
                 response.headers
               );
             }
-            return await response.json();
+            const raw = await response.json();
+            return parseProviderEmbeddingResponse(raw);
           } finally {
             attemptAbort.cancel();
           }
@@ -2916,7 +2918,7 @@ async function embedWithRetry(
     if (!useMockClient) noteEmbedProviderSuccess(httpProvider);
     return response;
   } catch (error) {
-    if (!useMockClient && countsTowardEmbedProviderFailure(error)) noteEmbedProviderFailure(httpProvider);
+    if (!useMockClient) settleEmbedProviderAttempt(httpProvider, error);
     throw error;
   }
 }

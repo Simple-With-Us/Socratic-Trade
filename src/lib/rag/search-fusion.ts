@@ -6,14 +6,13 @@ import { providerRequestIdFromPayload } from "../llm-usage";
 import { meterEmbed } from "../rag-metering";
 import {
   beginEmbedProviderAttempt,
-  countsTowardEmbedProviderFailure,
   createEmbedAttemptAbort,
   getCachedContentEmbedding,
-  noteEmbedProviderFailure,
   noteEmbedProviderSuccess,
+  settleEmbedProviderAttempt,
   setCachedContentEmbedding
 } from "./embed-resilience";
-import { z } from "zod";
+import { parseProviderEmbeddingResponse } from "./embedding-response-schema";
 import { deconstructQuery } from "./query-deconstruct";
 import { routeRetrievalIntent } from "./intent-router";
 import { hashContent } from "./chunk";
@@ -32,12 +31,6 @@ export interface FusionResult {
 function getHash(text: string): string {
   return hashContent(text);
 }
-
-const EmbeddingResponseSchema = z.object({
-  data: z
-    .array(z.object({ embedding: z.array(z.number()) }).passthrough())
-    .optional()
-});
 
 function getJaccardSimilarity(a: string, b: string): number {
   const wordsA = new Set(a.toLowerCase().split(/\s+/));
@@ -101,7 +94,7 @@ export async function fetchAlternativeEmbedding(texts: string[], userId: string 
       throw new Error(`Alternative embedding failed in search fusion (${provider}): ${response.status}`);
     }
     const raw = await response.json();
-    const res = EmbeddingResponseSchema.parse(raw);
+    const res = parseProviderEmbeddingResponse(raw);
     // Meter this paid embed call (usage-compliance WS1 gap #3), mirroring vector-db.ts's
     // meterEmbed call sites; the OpenRouter generation id rides along for monitor-side verification.
     meterEmbed(
@@ -121,7 +114,7 @@ export async function fetchAlternativeEmbedding(texts: string[], userId: string 
     noteEmbedProviderSuccess(provider);
     return vectors;
   } catch (error) {
-    if (countsTowardEmbedProviderFailure(error)) noteEmbedProviderFailure(provider);
+    settleEmbedProviderAttempt(provider, error);
     throw error;
   } finally {
     attemptAbort.cancel();
