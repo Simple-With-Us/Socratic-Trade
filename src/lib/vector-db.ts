@@ -2881,8 +2881,8 @@ async function embedWithRetry(
  * flows into Qdrant as a corrupt query vector.
  */
 const SiliconFlowEmbedSchema = z.object({
-  data: z.array(z.object({ embedding: z.array(z.number()) }).strict()).optional()
-}).strict();
+  data: z.array(z.object({ embedding: z.array(z.number()) })).optional()
+});
 
 /**
  * One-shot SiliconFlow embedding call — used only as a query-embed fallback when the
