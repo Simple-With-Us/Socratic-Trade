@@ -2911,12 +2911,23 @@ async function callSiliconFlowEmbedOnce(
       signal
     });
     if (!response.ok) return null;
-    const json = SiliconFlowEmbedSchema.parse(await response.json());
-    const embedding = json.data?.[0]?.embedding;
+    const parsed = SiliconFlowEmbedSchema.safeParse(await response.json());
+    if (!parsed.success) {
+      logWarn("embed.fallback_schema_error", {
+        fallbackProvider: "siliconflow",
+        error: parsed.error.message
+      });
+      return null;
+    }
+    const embedding = parsed.data.data?.[0]?.embedding;
     return Array.isArray(embedding) ? embedding : null;
-  } catch {
-    // ZodError, network error, or bad JSON — all return null so the caller
-    // can proceed to the embed.failed / lookup_failed degradation path.
+  } catch (err) {
+    // Network error or bad JSON — log and return null so the caller proceeds
+    // to the embed.failed / lookup_failed degradation path.
+    logWarn("embed.fallback_error", {
+      fallbackProvider: "siliconflow",
+      error: err instanceof Error ? err.message : String(err)
+    });
     return null;
   }
 }
