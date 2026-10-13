@@ -150,6 +150,7 @@ export function settleEmbedProviderAttempt(provider: string, error?: unknown, no
   state.probeInFlight = false;
   if (hadProbe) {
     state.openUntil = 0;
+    state.consecutive = 0;
   }
 }
 

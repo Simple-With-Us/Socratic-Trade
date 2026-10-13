@@ -5,6 +5,7 @@ import {
   createEmbedAttemptAbort,
   settleEmbedProviderAttempt,
   getCachedContentEmbedding,
+  isEmbedBreakerOpen,
   noteEmbedProviderFailure,
   noteEmbedProviderSuccess,
   resetEmbedResilienceForTests,
@@ -93,6 +94,16 @@ describe("embed circuit breaker", () => {
     expect(beginEmbedProviderAttempt("openrouter", 1_061)).toBe(false);
     const clientError = Object.assign(new Error("bad request"), { status: 400 });
     settleEmbedProviderAttempt("openrouter", clientError, 1_061);
+    expect(beginEmbedProviderAttempt("openrouter", 1_062)).toBe(true);
+
+    resetEmbedResilienceForTests();
+    process.env.EMBED_BREAKER_FAILURES = "2";
+    noteEmbedProviderFailure("openrouter", 1_000);
+    noteEmbedProviderFailure("openrouter", 1_001);
+    expect(beginEmbedProviderAttempt("openrouter", 1_060)).toBe(true);
+    settleEmbedProviderAttempt("openrouter", clientError, 1_060);
+    noteEmbedProviderFailure("openrouter", 1_061);
+    expect(isEmbedBreakerOpen("openrouter", 1_061)).toBe(false);
     expect(beginEmbedProviderAttempt("openrouter", 1_062)).toBe(true);
   });
 
