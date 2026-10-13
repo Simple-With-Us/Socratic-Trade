@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-13 CURSOR — PR #4606 embed/congress review fixes
+
+**What.**  Closed eight Sentry/Kody threads on `fix/embed-fail-fast-congress-share-backoff`: breaker counts only 5xx/network/timeout, embed abort covers body reads, content-cache hits skip metering, congress upstream half-open probe expiry/release, single breaker warnings, embed cache validity, search-fusion Zod embed parse.
+
+**Verification.**  `test/embed-resilience.test.ts`, targeted congress-share + usage-compliance tests, `npm run lint`, `npx tsc --noEmit`.
+
+**Docs.**  `docs/rollouts/2026-10-13-pr-4606-review-thread-fixes.md`.
+
+**Next.**  Push branch; hosted `verify` on PR #4606.
+
 ## 2026-10-11 CODEX — Kody MiniMax (CTS-330)
 
 **What.**  Kody autofix selects `MiniMax-M3` through MiniMax’s direct OpenAI-compatible endpoint.  Its Sentry observer follows the new workflow name.

@@ -797,6 +797,25 @@ describe("shareWithCongressTrade", () => {
     errorSpy.mockRestore();
   });
 
+  it("logs upstream circuit open only once across repeated half-open failures", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES = "1";
+    process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_COOLDOWN_MS = "20";
+    const upstreamWarns = () =>
+      vi.mocked(console.warn).mock.calls.filter((call) => String(call[0]).includes("upstream circuit open")).length;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+
+    await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] });
+    expect(upstreamWarns()).toBe(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await shareWithCongressTrade({ refs: [{ ticker: "MSFT" }] });
+    expect(upstreamWarns()).toBe(1);
+
+    warnSpy.mockRestore();
+  });
+
   it("does NOT trip the breaker on a transport error", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("network down"); }));

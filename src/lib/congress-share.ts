@@ -249,6 +249,7 @@ interface CongressUpstreamBreakerState {
   open: boolean;
   openUntil: number;
   probeInFlight: boolean;
+  probeClaimedUntilMs?: number;
 }
 
 let congressUpstreamBreaker: CongressUpstreamBreakerState = {
@@ -257,6 +258,10 @@ let congressUpstreamBreaker: CongressUpstreamBreakerState = {
   openUntil: 0,
   probeInFlight: false
 };
+
+function upstreamProbeClaimWindowMs(): number {
+  return Number(process.env.CONGRESS_SHARE_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
+}
 
 function upstreamBreakerFailures(): number {
   const v = Number(process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES ?? DEFAULT_UPSTREAM_BREAKER_FAILURES);
@@ -274,7 +279,7 @@ export function isCongressUpstreamBreakerTripped(now: number = Date.now()): bool
 }
 
 export function resetCongressUpstreamBreakerForTests(): void {
-  congressUpstreamBreaker = { consecutive: 0, open: false, openUntil: 0, probeInFlight: false };
+  congressUpstreamBreaker = { consecutive: 0, open: false, openUntil: 0, probeInFlight: false, probeClaimedUntilMs: undefined };
 }
 
 /**
@@ -285,8 +290,16 @@ function congressUpstreamShouldSkip(now: number = Date.now()): boolean {
   const state = congressUpstreamBreaker;
   if (!state.open) return false;
   if (now < state.openUntil) return true;
-  if (state.probeInFlight) return true;
+  if (state.probeInFlight) {
+    if (state.probeClaimedUntilMs !== undefined && now >= state.probeClaimedUntilMs) {
+      state.probeInFlight = false;
+      state.probeClaimedUntilMs = undefined;
+    } else {
+      return true;
+    }
+  }
   state.probeInFlight = true;
+  state.probeClaimedUntilMs = now + upstreamProbeClaimWindowMs();
   return false;
 }
 
@@ -294,6 +307,7 @@ function congressUpstreamShouldSkip(now: number = Date.now()): boolean {
 function noteCongressUpstream(ok: boolean, now: number = Date.now()): void {
   const state = congressUpstreamBreaker;
   state.probeInFlight = false;
+  state.probeClaimedUntilMs = undefined;
   if (ok) {
     state.consecutive = 0;
     state.open = false;
@@ -302,10 +316,10 @@ function noteCongressUpstream(ok: boolean, now: number = Date.now()): void {
   }
   state.consecutive += 1;
   if (state.consecutive < upstreamBreakerFailures()) return;
-  const alreadyCooling = state.open && state.openUntil > now;
+  const wasAlreadyOpen = state.open && state.openUntil > 0;
   state.open = true;
   state.openUntil = now + upstreamBreakerCooldownMs();
-  if (!alreadyCooling) {
+  if (!wasAlreadyOpen) {
     console.warn(
       `[congress-share] upstream circuit open after ${state.consecutive} consecutive HTTP 500/network failures; cooling down ${upstreamBreakerCooldownMs()}ms.  Further calls are skipped until the cooldown elapses.`
     );
@@ -1395,7 +1409,12 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
   upstreamOutcome = false;
   return { ...dropMeta, ok: false, error: "max-attempts-exceeded", sent };
   } finally {
-    if (upstreamOutcome !== undefined) noteCongressUpstream(upstreamOutcome);
+    if (upstreamOutcome !== undefined) {
+      noteCongressUpstream(upstreamOutcome);
+    } else if (congressUpstreamBreaker.probeInFlight) {
+      congressUpstreamBreaker.probeInFlight = false;
+      congressUpstreamBreaker.probeClaimedUntilMs = undefined;
+    }
   }
 }
 

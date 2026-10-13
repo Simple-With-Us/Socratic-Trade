@@ -6,12 +6,14 @@ import { providerRequestIdFromPayload } from "../llm-usage";
 import { meterEmbed } from "../rag-metering";
 import {
   beginEmbedProviderAttempt,
+  countsTowardEmbedProviderFailure,
   createEmbedAttemptAbort,
   getCachedContentEmbedding,
   noteEmbedProviderFailure,
   noteEmbedProviderSuccess,
   setCachedContentEmbedding
 } from "./embed-resilience";
+import { z } from "zod";
 import { deconstructQuery } from "./query-deconstruct";
 import { routeRetrievalIntent } from "./intent-router";
 import { hashContent } from "./chunk";
@@ -30,6 +32,12 @@ export interface FusionResult {
 function getHash(text: string): string {
   return hashContent(text);
 }
+
+const EmbeddingResponseSchema = z.object({
+  data: z
+    .array(z.object({ embedding: z.array(z.number()) }).passthrough())
+    .optional()
+});
 
 function getJaccardSimilarity(a: string, b: string): number {
   const wordsA = new Set(a.toLowerCase().split(/\s+/));
@@ -92,7 +100,8 @@ export async function fetchAlternativeEmbedding(texts: string[], userId: string 
     if (!response.ok) {
       throw new Error(`Alternative embedding failed in search fusion (${provider}): ${response.status}`);
     }
-    const res = await response.json();
+    const raw = await response.json();
+    const res = EmbeddingResponseSchema.parse(raw);
     // Meter this paid embed call (usage-compliance WS1 gap #3), mirroring vector-db.ts's
     // meterEmbed call sites; the OpenRouter generation id rides along for monitor-side verification.
     meterEmbed(
@@ -100,21 +109,19 @@ export async function fetchAlternativeEmbedding(texts: string[], userId: string 
       model,
       userId,
       provider,
-      useSiliconFlow ? undefined : providerRequestIdFromPayload("openrouter", res)
+      useSiliconFlow ? undefined : providerRequestIdFromPayload("openrouter", raw)
     );
-    const vectors = (res.data ?? []).map((d: { embedding?: number[] }) => d.embedding) as number[][];
+    const vectors = (res.data ?? []).map((d) => d.embedding);
     if (vectors.length === texts.length) {
       for (let i = 0; i < texts.length; i++) {
         const vec = vectors[i];
-        if (Array.isArray(vec) && vec.length > 0) {
-          setCachedContentEmbedding(model, revision, inputType, texts[i]!, vec);
-        }
+        if (vec) setCachedContentEmbedding(model, revision, inputType, texts[i]!, vec);
       }
     }
     noteEmbedProviderSuccess(provider);
     return vectors;
   } catch (error) {
-    noteEmbedProviderFailure(provider);
+    if (countsTowardEmbedProviderFailure(error)) noteEmbedProviderFailure(provider);
     throw error;
   } finally {
     attemptAbort.cancel();

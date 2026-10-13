@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   beginEmbedProviderAttempt,
+  countsTowardEmbedProviderFailure,
   createEmbedAttemptAbort,
   getCachedContentEmbedding,
   noteEmbedProviderFailure,
@@ -8,6 +9,22 @@ import {
   resetEmbedResilienceForTests,
   setCachedContentEmbedding
 } from "../src/lib/rag/embed-resilience";
+
+describe("search-fusion embedding response schema", () => {
+  it("rejects malformed embedding vectors at the HTTP boundary", async () => {
+    const { upsertUserApiKey } = await import("../src/lib/db");
+    upsertUserApiKey("local", "openrouter", "sk-or-test-schema");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ data: [{ embedding: ["not-a-number"] }] }), { status: 200 })
+      )
+    );
+    const { fetchAlternativeEmbedding } = await import("../src/lib/rag/search-fusion");
+    await expect(fetchAlternativeEmbedding(["hello"], "local")).rejects.toThrow();
+    vi.unstubAllGlobals();
+  });
+});
 
 describe("embed circuit breaker", () => {
   beforeEach(() => {
@@ -65,6 +82,37 @@ describe("embed circuit breaker", () => {
     expect(getCachedContentEmbedding("baai/bge-m3", 1, "query", "other text")).toBeUndefined();
     expect(getCachedContentEmbedding("other-model", 1, "query", "hello world")).toBeUndefined();
     expect(getCachedContentEmbedding("baai/bge-m3", 2, "query", "hello world")).toBeUndefined();
+  });
+
+  it("does not re-warn when a half-open probe fails after the cooldown", () => {
+    process.env.EMBED_BREAKER_FAILURES = "1";
+    process.env.EMBED_BREAKER_COOLDOWN_MS = "50";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    noteEmbedProviderFailure("openrouter", 1_000);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(beginEmbedProviderAttempt("openrouter", 1_060)).toBe(true);
+    noteEmbedProviderFailure("openrouter", 1_060);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("classifies provider failures for the circuit breaker", () => {
+    const abort = new Error("aborted");
+    abort.name = "AbortError";
+    expect(countsTowardEmbedProviderFailure(abort)).toBe(false);
+    const client = Object.assign(new Error("bad request"), { status: 400 });
+    expect(countsTowardEmbedProviderFailure(client)).toBe(false);
+    const server = Object.assign(new Error("boom"), { status: 503 });
+    expect(countsTowardEmbedProviderFailure(server)).toBe(true);
+    const timeout = new Error("embed provider timed out");
+    timeout.name = "TimeoutError";
+    expect(countsTowardEmbedProviderFailure(timeout)).toBe(true);
+  });
+
+  it("drops poisoned cache entries instead of serving them", () => {
+    setCachedContentEmbedding("baai/bge-m3", 1, "query", "bad", [Number.NaN, 1]);
+    expect(getCachedContentEmbedding("baai/bge-m3", 1, "query", "bad")).toBeUndefined();
+    setCachedContentEmbedding("baai/bge-m3", 1, "query", "good", [0.1, 0.2]);
+    expect(getCachedContentEmbedding("baai/bge-m3", 1, "query", "good")).toEqual([0.1, 0.2]);
   });
 
   it("aborts an embed attempt with TimeoutError", async () => {

@@ -7,6 +7,7 @@
 //
 // The cache stores only the vector.  Pinecone/Qdrant filters still run on every retrieval.
 
+import { isTransientNetworkError } from "../network-errors";
 import { hashContent } from "./chunk";
 
 export const DEFAULT_EMBED_CALL_TIMEOUT_MS = 8_000;
@@ -27,6 +28,39 @@ export class EmbedCircuitOpenError extends Error {
 export function isEmbedCircuitOpenError(error: unknown): error is EmbedCircuitOpenError {
   return error instanceof EmbedCircuitOpenError
     || (error instanceof Error && error.name === "EmbedCircuitOpenError");
+}
+
+function isValidEmbedding(embedding: unknown): embedding is number[] {
+  return (
+    Array.isArray(embedding) &&
+    embedding.length > 0 &&
+    embedding.every((v) => typeof v === "number" && Number.isFinite(v))
+  );
+}
+
+/** True when a failed embed attempt should advance the shared provider circuit breaker. */
+export function countsTowardEmbedProviderFailure(error: unknown): boolean {
+  if (isEmbedCircuitOpenError(error)) return false;
+  if (error instanceof Error) {
+    if (error.name === "AbortError") return false;
+    if (/embed aborted/i.test(error.message)) return false;
+  }
+  const status = (error as { status?: number }).status;
+  if (typeof status === "number") {
+    if (status >= 500) return true;
+    if (status >= 400 && status < 500) return false;
+  }
+  if (error instanceof Error) {
+    const statusMatch = error.message.match(/\b([45]\d{2})\b/);
+    if (statusMatch) {
+      const code = Number(statusMatch[1]);
+      if (code >= 500) return true;
+      if (code >= 400 && code < 500) return false;
+    }
+    if (error.name === "TimeoutError") return true;
+  }
+  if (isTransientNetworkError(error)) return true;
+  return false;
 }
 
 export function embedBreakerEnabled(): boolean {
@@ -103,9 +137,9 @@ export function noteEmbedProviderFailure(provider: string, now = Date.now()): vo
   state.probeInFlight = false;
   state.consecutive += 1;
   if (state.consecutive < breakerFailures()) return;
-  const alreadyCooling = state.openUntil > now;
+  const wasAlreadyOpen = state.openUntil > 0;
   state.openUntil = now + breakerCooldownMs();
-  if (!alreadyCooling) {
+  if (!wasAlreadyOpen) {
     console.warn(
       `[vector-db] embed circuit open for ${provider} after ${state.consecutive} consecutive failures; cooling down ${breakerCooldownMs()}ms.  Later retrievals skip the provider until the cooldown elapses.`
     );
@@ -194,6 +228,10 @@ export function getCachedContentEmbedding(
     embeddingCache.delete(key);
     return undefined;
   }
+  if (!isValidEmbedding(entry.embedding)) {
+    embeddingCache.delete(key);
+    return undefined;
+  }
   embeddingCache.delete(key);
   embeddingCache.set(key, entry);
   return [...entry.embedding];
@@ -206,7 +244,7 @@ export function setCachedContentEmbedding(
   text: string,
   embedding: number[]
 ): void {
-  if (!Array.isArray(embedding) || embedding.length === 0) return;
+  if (!isValidEmbedding(embedding)) return;
   const key = contentEmbeddingCacheKey(model, revision, inputType, text);
   embeddingCache.delete(key);
   embeddingCache.set(key, { embedding: [...embedding], expiresAt: Date.now() + cacheTtlMs() });

@@ -39,6 +39,7 @@ import { getCachedQueryEmbedding, setCachedQueryEmbedding } from "./rag/query-em
 import {
   beginEmbedProviderAttempt,
   contentEmbeddingCacheKey,
+  countsTowardEmbedProviderFailure,
   createEmbedAttemptAbort,
   EmbedCircuitOpenError,
   getCachedContentEmbedding,
@@ -2769,7 +2770,8 @@ async function embedWithRetry(
     const cached = input.map((text) => getCachedContentEmbedding(modelName, embedRevision, inputType, text));
     if (cached.every((row): row is number[] => Array.isArray(row) && row.length > 0)) {
       return {
-        data: cached.map((embedding, index) => ({ embedding, index }))
+        data: cached.map((embedding, index) => ({ embedding, index })),
+        servedFromContentCache: true
       };
     }
     if (!beginEmbedProviderAttempt(httpProvider)) {
@@ -2811,9 +2813,8 @@ async function embedWithRetry(
             applyOpenRouterClassifierEnrichment(body, { userId, service: "rag", feature: "embed" });
           }
           const attemptAbort = createEmbedAttemptAbort(boundSignal);
-          let response: Awaited<ReturnType<typeof fetch>>;
           try {
-            response = await withGenAiSpan(
+            const response = await withGenAiSpan(
               url,
               { method: "POST", body: JSON.stringify(body) },
               () =>
@@ -2825,18 +2826,18 @@ async function embedWithRetry(
                 }),
               { operation: "embeddings", model: modelName, system: isOpenRouter ? "openrouter" : "siliconflow" }
             );
+            if (!response.ok) {
+              const body = await response.text();
+              throw new HttpProviderError(
+                `Embedding API failed (isOpenRouter=${isOpenRouter}): ${response.status} ${body}`,
+                response.status,
+                response.headers
+              );
+            }
+            return await response.json();
           } finally {
             attemptAbort.cancel();
           }
-          if (!response.ok) {
-            const body = await response.text();
-            throw new HttpProviderError(
-              `Embedding API failed (isOpenRouter=${isOpenRouter}): ${response.status} ${body}`,
-              response.status,
-              response.headers
-            );
-          }
-          return await response.json();
         };
 
         return await withDurableRagProviderDispatch(
@@ -2915,7 +2916,7 @@ async function embedWithRetry(
     if (!useMockClient) noteEmbedProviderSuccess(httpProvider);
     return response;
   } catch (error) {
-    if (!useMockClient && !isEmbedCircuitOpenError(error)) noteEmbedProviderFailure(httpProvider);
+    if (!useMockClient && countsTowardEmbedProviderFailure(error)) noteEmbedProviderFailure(httpProvider);
     throw error;
   }
 }
@@ -3239,7 +3240,9 @@ async function embedDocumentsLaneOrSkip(
       { lane: "rag-embed", provider: embedProvider }
     );
     assertVectorStoreLease(leaseGuard);
-    meterEmbed(inputs, activeEmbeddingModel(userId), userId, embedProvider);
+    if (!response?.servedFromContentCache) {
+      meterEmbed(inputs, activeEmbeddingModel(userId), userId, embedProvider);
+    }
     return { response, rejected: 0 };
   } catch (error) {
     if (error instanceof VectorStoreLeaseLostError) throw error;
@@ -7894,8 +7897,10 @@ export async function retrieveContextDetailed(
           });
           return null;
         }
-        meterEmbed([q], activeModel, userId, embedProvider); // count only on a cache MISS; book under the requesting userId
-        recordRagOperation(Date.now(), userId); // R16: count this embed call against the per-run budget (no-op unless enabled).
+        if (!response?.servedFromContentCache) {
+          meterEmbed([q], activeModel, userId, embedProvider); // count only on a cache MISS; book under the requesting userId
+          recordRagOperation(Date.now(), userId); // R16: count this embed call against the per-run budget (no-op unless enabled).
+        }
         embedding = response.data?.[0]?.embedding;
       }
       // R2 integrity guard applies to the query embedding too: a malformed vector (wrong dimension,
