@@ -36,6 +36,17 @@ import { adaptiveRerankEnabled, planRerank, resolveRerankRoute, type RagRerankPr
 import { RetrievalStageTrace, type RetrievalTraceSnapshot } from "./rag/retrieval-stage-telemetry";
 import { dedupeSimilar, type DedupeSimilarReport } from "./rag/dedupe-similar";
 import { getCachedQueryEmbedding, setCachedQueryEmbedding } from "./rag/query-embed-cache";
+import {
+  beginEmbedProviderAttempt,
+  contentEmbeddingCacheKey,
+  createEmbedAttemptAbort,
+  EmbedCircuitOpenError,
+  getCachedContentEmbedding,
+  isEmbedCircuitOpenError,
+  noteEmbedProviderFailure,
+  noteEmbedProviderSuccess,
+  setCachedContentEmbedding
+} from "./rag/embed-resilience";
 import { recordRagOperation, shouldDegradeForBudget } from "./rag/run-budget";
 import { auditRagIngestPointsGateSkip, estimateRagDispatchCost, getRagUsageSummary, hasRagIngestPointsBudget, hashQuery, meterEmbed, meterPineconeQuery, meterPineconeUpsert, meterRerank, ragIngestPointsBudgetDeferUntil, ragIngestTextBudgetDeferUntil, ragMaxDailyIngestPoints, recordRetrievalQuality, retrievalTelemetryEnabled, usedRagUpsertPointsLast24h, type RagEmbedRerankProvider } from "./rag-metering";
 import {
@@ -581,10 +592,11 @@ interface DocumentEmbeddingCacheEntry {
 const documentEmbeddingCache = new Map<string, DocumentEmbeddingCacheEntry>();
 
 function documentEmbeddingCacheKey(input: string, userId: string = "local"): string {
-  // `input` is already the exact post-cleaning text, so model + representation revision + bytes is
-  // sufficient and remains stable even if an operator changes an env flag while a call is in flight.
+  // `input` is already the exact post-cleaning text.  Key by its content hash so the map does
+  // not retain every embedded string.  Model + revision keep a flag flip from reusing a vector
+  // that was built under a different representation.
   const modelName = activeEmbeddingModel(userId);
-  return `${modelName}\u0000${currentEmbedRev()}\u0000${input}`;
+  return contentEmbeddingCacheKey(modelName, currentEmbedRev(), "document", input);
 }
 
 function getCachedDocumentEmbedding(input: string, userId: string = "local"): number[] | undefined {
@@ -2089,6 +2101,12 @@ async function withRagApiHealth<T>(
       markRagSentryCaptured(error);
       throw error;
     }
+    // An open embed circuit means this call never reached the provider.  Logging health or
+    // paging here would replay "OpenRouter embed connection failed" on every later retrieval.
+    // The trip itself already warned once inside noteEmbedProviderFailure.
+    if (isEmbedCircuitOpenError(error)) {
+      throw error;
+    }
     // Monthly Pinecone write-unit exhaustion is an EXPECTED limit (soft health row, so the lane
     // never paints hard red STOPPED) and trips the WU breaker instead of the generic hourly
     // "Pinecone connection failed" alert — one storage_warning notification per episode, and the
@@ -2745,6 +2763,20 @@ async function embedWithRetry(
     throw new Error(`${provider} embedding credential is missing or is a mock placeholder.`);
   }
 
+  const httpProvider = isOpenRouter ? "openrouter" : "siliconflow";
+  const embedRevision = currentEmbedRev();
+  if (!useMockClient) {
+    const cached = input.map((text) => getCachedContentEmbedding(modelName, embedRevision, inputType, text));
+    if (cached.every((row): row is number[] => Array.isArray(row) && row.length > 0)) {
+      return {
+        data: cached.map((embedding, index) => ({ embedding, index }))
+      };
+    }
+    if (!beginEmbedProviderAttempt(httpProvider)) {
+      throw new EmbedCircuitOpenError(httpProvider);
+    }
+  }
+
   const embedOnce = async (texts: string[]): Promise<any> => {
     for (let attempt = 0; ; attempt++) {
       if (boundSignal?.aborted) {
@@ -2778,18 +2810,24 @@ async function embedWithRetry(
             headers["X-Title"] = "Socratic-Trade";
             applyOpenRouterClassifierEnrichment(body, { userId, service: "rag", feature: "embed" });
           }
-          const response = await withGenAiSpan(
-            url,
-            { method: "POST", body: JSON.stringify(body) },
-            () =>
-              fetch(url, {
-                method: "POST",
-                headers,
-                body: JSON.stringify(body),
-                signal: boundSignal
-              }),
-            { operation: "embeddings", model: modelName, system: isOpenRouter ? "openrouter" : "siliconflow" }
-          );
+          const attemptAbort = createEmbedAttemptAbort(boundSignal);
+          let response: Awaited<ReturnType<typeof fetch>>;
+          try {
+            response = await withGenAiSpan(
+              url,
+              { method: "POST", body: JSON.stringify(body) },
+              () =>
+                fetch(url, {
+                  method: "POST",
+                  headers,
+                  body: JSON.stringify(body),
+                  signal: attemptAbort.signal
+                }),
+              { operation: "embeddings", model: modelName, system: isOpenRouter ? "openrouter" : "siliconflow" }
+            );
+          } finally {
+            attemptAbort.cancel();
+          }
           if (!response.ok) {
             const body = await response.text();
             throw new HttpProviderError(
@@ -2826,39 +2864,60 @@ async function embedWithRetry(
     }
   };
 
+  const rememberEmbeddings = (response: { data?: unknown }) => {
+    if (useMockClient) return;
+    const validated = validateDocumentEmbeddingBatch(response?.data, input.length);
+    if (!validated.embeddings) return;
+    for (let i = 0; i < input.length; i++) {
+      const embedding = validated.embeddings[i];
+      if (embedding) setCachedContentEmbedding(modelName, embedRevision, inputType, input[i]!, embedding);
+    }
+  };
+
   // DeepInfra sums the whole `input[]` against 8192.  Count-only batches (prod
   // VECTOR_EMBED_BATCH_SIZE=32) 400 at 8193.  Pack under ~7500.  A single
   // over-budget text is isolated as its own POST — never re-chunked into extra
   // Pinecone records or extra ContextDocuments.
-  const packed = packInWindowTexts(
-    input.map((text, sourceIndex) => ({ text, sourceIndex })),
-    { maxCount: embedBatchSize() }
-  );
-  if (packed.length <= 1) {
-    return embedOnce(input);
-  }
+  try {
+    const packed = packInWindowTexts(
+      input.map((text, sourceIndex) => ({ text, sourceIndex })),
+      { maxCount: embedBatchSize() }
+    );
+    if (packed.length <= 1) {
+      const response = await embedOnce(input);
+      rememberEmbeddings(response);
+      if (!useMockClient) noteEmbedProviderSuccess(httpProvider);
+      return response;
+    }
 
-  const embeddings = new Array<number[]>(input.length);
-  let sent = false;
-  for (const group of packed) {
-    const texts = group.map((item) => item.text);
-    if (texts.length > 1 && !embedRequestFits(texts)) {
-      throw new Error(`embed packer produced an over-budget request (${texts.length} texts, budget ${EMBED_REQUEST_TOKEN_BUDGET})`);
+    const embeddings = new Array<number[]>(input.length);
+    let sent = false;
+    for (const group of packed) {
+      const texts = group.map((item) => item.text);
+      if (texts.length > 1 && !embedRequestFits(texts)) {
+        throw new Error(`embed packer produced an over-budget request (${texts.length} texts, budget ${EMBED_REQUEST_TOKEN_BUDGET})`);
+      }
+      if (sent) await sleep(embedBatchDelayMs(), boundSignal);
+      sent = true;
+      const response = await embedOnce(texts);
+      const validated = validateDocumentEmbeddingBatch(response?.data, texts.length);
+      if (!validated.embeddings) {
+        throw new Error(`Embedding response rejected after window pack (${validated.reason ?? "unknown"})`);
+      }
+      for (let i = 0; i < group.length; i++) {
+        embeddings[group[i]!.sourceIndex] = validated.embeddings[i]!;
+      }
     }
-    if (sent) await sleep(embedBatchDelayMs(), boundSignal);
-    sent = true;
-    const response = await embedOnce(texts);
-    const validated = validateDocumentEmbeddingBatch(response?.data, texts.length);
-    if (!validated.embeddings) {
-      throw new Error(`Embedding response rejected after window pack (${validated.reason ?? "unknown"})`);
-    }
-    for (let i = 0; i < group.length; i++) {
-      embeddings[group[i]!.sourceIndex] = validated.embeddings[i]!;
-    }
+    const response = {
+      data: embeddings.map((embedding, index) => ({ embedding, index }))
+    };
+    rememberEmbeddings(response);
+    if (!useMockClient) noteEmbedProviderSuccess(httpProvider);
+    return response;
+  } catch (error) {
+    if (!useMockClient && !isEmbedCircuitOpenError(error)) noteEmbedProviderFailure(httpProvider);
+    throw error;
   }
-  return {
-    data: embeddings.map((embedding, index) => ({ embedding, index }))
-  };
 }
 
 export function embeddingCredentialIsUsable(
@@ -3185,6 +3244,14 @@ async function embedDocumentsLaneOrSkip(
   } catch (error) {
     if (error instanceof VectorStoreLeaseLostError) throw error;
     assertVectorStoreLease(leaseGuard);
+    // The call that opened the circuit already logged.  Later skips must not warn per batch.
+    if (isEmbedCircuitOpenError(error)) {
+      return {
+        rejected: Math.max(1, inputs.length),
+        reason: "embed-api-failed",
+        errorMessage: error.message
+      };
+    }
     recordEmbedFailure(activeEmbeddingProvider(userId), "embed-api-failed");
     logWarn("embed.failed", { provider: activeEmbeddingProvider(userId), error_type: "embed-api-failed" });
     return {
@@ -7646,6 +7713,10 @@ export async function retrieveContextDetailed(
   const strictAsOf = options?.strictAsOf ?? asOfStrictEnabled();
   const asOfEpochFilter = buildAsOfEpochFilter(options?.asOf, strictAsOf);
 
+  // Set when an embed was skipped because the provider circuit is open.  Those passes
+  // report "degraded" and do not page.  A real provider error still reports lookup_failed.
+  let quietEmbedDegrade = false;
+
   try {
     let stableProviderAuthority: string | undefined;
     let defaultIndex: any;
@@ -7808,6 +7879,12 @@ export async function retrieveContextDetailed(
           endEmbed?.({ candidatesOut: response.data?.[0]?.embedding ? 1 : 0 });
         } catch (error) {
           endEmbed?.({ error });
+          // Open circuit: the provider was already declared down.  One warning was logged
+          // on the trip.  Do not log or count this skip as a fresh embed failure.
+          if (isEmbedCircuitOpenError(error)) {
+            quietEmbedDegrade = true;
+            return null;
+          }
           // Soft-degrade this query only. Multi-query already isolates per variant; the
           // single-query caller treats null as lookup_failed and Green/Red skip RAG.
           recordEmbedFailure(activeEmbeddingProvider(userId), "query-embed-failed");
@@ -8067,6 +8144,10 @@ export async function retrieveContextDetailed(
           try {
             return await embedAndMatchOneQuery(q);
           } catch (err) {
+            if (isEmbedCircuitOpenError(err)) {
+              quietEmbedDegrade = true;
+              return null;
+            }
             console.warn(`[vector-db] multi-query variant failed, dropping it from the fan-out:`, err instanceof Error ? err.message : String(err));
             return null;
           }
@@ -8078,6 +8159,10 @@ export async function retrieveContextDetailed(
         // nothing — fall back to the plain single-query path rather than returning `[]`.
         const single = await embedAndMatchOneQuery(query);
         if (single == null) {
+          if (quietEmbedDegrade) {
+            reportRetrievalStatus(options, "degraded");
+            return finish([]);
+          }
           reportRetrievalStatus(options, "lookup_failed", { userId, symbol });
           return finish([]);
         }
@@ -8162,6 +8247,10 @@ export async function retrieveContextDetailed(
     } else {
       const single = await embedAndMatchOneQuery(query);
       if (single == null) {
+        if (quietEmbedDegrade) {
+          reportRetrievalStatus(options, "degraded");
+          return finish([]);
+        }
         reportRetrievalStatus(options, "lookup_failed", { userId, symbol });
         return finish([]);
       }
@@ -8537,6 +8626,7 @@ export async function retrieveContextDetailed(
     // Rerank unavailability must NOT mask a clean empty lookup: dense/lexical already succeeded with
     // zero matches, so there is nothing to rerank — report `no_memory` rather than `degraded`.
     const qualityDegraded =
+      quietEmbedDegrade ||
       managedVersionCrowdingDegraded ||
       managedAuthorityDegraded ||
       budgetDegraded ||
@@ -8552,6 +8642,10 @@ export async function retrieveContextDetailed(
     );
     return finish(finalChunks);
   } catch (err) {
+    if (isEmbedCircuitOpenError(err)) {
+      reportRetrievalStatus(options, "degraded");
+      return finish([]);
+    }
     console.error("[vector-db] Error retrieving context:", err);
     if (!wasRagSentryCaptured(err)) {
       // Same leftover as the storeContexts catch (fixed 2026-09-07): a hardcoded
