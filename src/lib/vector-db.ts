@@ -2912,7 +2912,7 @@ async function callSiliconFlowEmbedOnce(
     });
     if (!response.ok) return null;
     const json = SiliconFlowEmbedSchema.parse(await response.json());
-    const embedding = json?.data?.[0]?.embedding;
+    const embedding = json.data?.[0]?.embedding;
     return Array.isArray(embedding) ? embedding : null;
   } catch {
     // ZodError, network error, or bad JSON — all return null so the caller
@@ -7847,7 +7847,9 @@ export async function retrieveContextDetailed(
       endCacheLookup?.({ cacheHit: embedding != null });
       if (embedding == null) {
         // Provider-generic health/alert lane (2026-07-19) + stage telemetry from #1892.
-        const embedProvider = activeEmbeddingProvider(userId);
+        // `let` so the fallback path can reassign to the provider that actually served
+        // the embedding, keeping meterEmbed cost attribution accurate.
+        let embedProvider = activeEmbeddingProvider(userId);
         const endEmbed = stageTrace?.start("query_embed_api", {
           provider: embedProvider,
           model: activeModel,
@@ -7879,7 +7881,10 @@ export async function retrieveContextDetailed(
                 [q],
                 "BAAI/bge-m3",
                 fallbackKey,
-                AbortSignal.timeout(RAG_QUERY_IO_DEADLINE_MS)
+                // Combine the parent querySignal (already-elapsed budget) with a
+                // fresh per-call timeout so cancellation is always honoured and the
+                // fallback cannot stall for a full extra 15s if the caller aborted.
+                combineAbortSignals(querySignal, AbortSignal.timeout(RAG_QUERY_IO_DEADLINE_MS))
               );
               if (fallbackEmbedding != null && isValidEmbedding(fallbackEmbedding)) {
                 logWarn("embed.provider_fallback", {
@@ -7890,10 +7895,11 @@ export async function retrieveContextDetailed(
                 // Assign the fallback response so execution continues to the
                 // meterEmbed / embedding assignment below without returning null.
                 response = { data: [{ embedding: fallbackEmbedding }] };
-                // Skip the embed.failed path — fallback succeeded.
-                // The `response` assignment above means the try block's
-                // endEmbed callback already fired; just continue.
-                // (The remaining code after this catch reads `embedding` from `response`.)
+                // Re-close the embed stage with a success outcome so tracing
+                // correctly reflects primary-fail-then-fallback-success rather
+                // than a permanent error, and fix provider attribution for metering.
+                endEmbed?.({ candidatesOut: 1, recovered: true });
+                embedProvider = "siliconflow";
               } else {
                 // Fallback returned nothing usable — degrade.
                 recordEmbedFailure(primaryProvider, "query-embed-failed");
