@@ -269,6 +269,43 @@ jobs:
         if: steps.gate.outputs.should_ship == '1'
         run: bash "$GITHUB_WORKSPACE/scripts/ios-fleet/check-drift.sh"
 
+      # The ship script regenerates the Xcode project when `xcodegen` is on PATH.
+      # macos-latest does not ship it.  Without this step the archive uses the
+      # checked-in pbxproj, whose project-level SENTRY_DSN = "" overrides
+      # Config/Sentry.xcconfig.  The xcodebuild SENTRY_DSN= flag still wins;
+      # generate is what drops the empty setting.  Same 2.46.0 pin as ios-build.yml.
+      - name: Install XcodeGen
+        if: steps.gate.outputs.should_ship == '1'
+        run: |
+          set -euo pipefail
+          if command -v xcodegen >/dev/null 2>&1; then
+            echo "xcodegen already on PATH: $(command -v xcodegen)"
+            exit 0
+          fi
+          ver="2.46.0"
+          zip="$RUNNER_TEMP/xcodegen.zip"
+          dest="$RUNNER_TEMP/xcodegen-$ver"
+          curl -fsSL -o "$zip" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${ver}/xcodegen.zip"
+          rm -rf "$dest"
+          mkdir -p "$dest"
+          unzip -q "$zip" -d "$dest"
+          if [ -x "$dest/bin/xcodegen" ]; then
+            bin="$dest/bin"
+          elif [ -x "$dest/xcodegen/bin/xcodegen" ]; then
+            bin="$dest/xcodegen/bin"
+          else
+            xcg_all="$(find "$dest" -type f -name xcodegen -perm -111)"
+            xcg="${xcg_all%%$'\n'*}"
+            if [ -z "${xcg:-}" ] || [ ! -x "$xcg" ]; then
+              echo "::error::xcodegen binary not found in release zip ${ver}"
+              find "$dest" -maxdepth 4 -type f
+              exit 1
+            fi
+            bin="$(dirname "$xcg")"
+          fi
+          echo "$bin" >> "$GITHUB_PATH"
+
       # No IOS_TF_MIN_INTERVAL_SEC here. That variable is a PER-RUN override.
       # Standing gate is DEFAULT_MIN_INTERVAL_SEC=3600 (1 hour) in the fleet
       # script (owner 2026-08-14). The 30-minute cron picks up an unbuilt merge
