@@ -18,6 +18,11 @@ The reusable workflow raises its default from 60 to 120 turns and uses conservat
 
 - `actionlint .github/workflows/claude-code-autofix.yml`: passed.
 - `git diff --check`: passed.
+- `npm run lint`: passed in current-head hosted [verify run 38337104537](https://github.com/Simple-With-Us/Socratic-Trade/actions/runs/38337104537).
+- `npx tsc --noEmit`: passed in the same hosted run.
+- `npm test`: passed in the same hosted run.
+- `npm run build`: passed in the same hosted run.
+- Local lint could not start because this lane had no installed dependencies; the hosted job installed from the lockfile and completed all four verification steps in the required order.
 - Shared PR #368 recorded a successful run using 37 turns and 36 calls over 99 seconds with no errors; the resulting fix push was verified.  This run confirms a successful fix path but does not establish how all exhausted runs will behave.
 - Caller PR CI and current-head Codex review remain required before merge.
 

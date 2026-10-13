@@ -6,7 +6,7 @@
 
 **Dependency.**  Shared PR [#368](https://github.com/Simple-With-Us/congress-trading-shared/pull/368) must merge before this caller PR can land.
 
-**Verification.**  Caller `actionlint` and `git diff --check` passed.  Shared PR #368 recorded a successful 120-turn-cap run and verified its fix push; the observed run used 37 turns and 36 calls with no errors.  Current-head CI and Codex review are required before merge.
+**Verification.**  Caller `actionlint` and `git diff --check` passed.  Hosted run 38337104537 passed lint, typecheck, tests, and build in order on the caller head.  Shared PR #368 recorded a successful 120-turn-cap run and verified its fix push; the observed run used 37 turns and 36 calls with no errors.  Recheck CI and Codex review after any caller head change before merge.
 
 **Docs.**  `docs/rollouts/2026-10-12-claude-autofix-diagnostics.md` and `PLAN.md`.  Linear OPS-935 is the live tracker; effort logs are archived.
 
