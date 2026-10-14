@@ -1,4 +1,4 @@
-import { describeAutonomyHaltCause } from "./autonomy-halt-cause";
+import { batchedHaltCauseKinds } from "./autonomy-halt-cause";
 import { getDb, getInternalSetting, listConnectedAccounts, listUsers, peekPolicy } from "./db";
 import { isMarketOpen } from "./market-calendar";
 import type { SystemState } from "./types";
@@ -31,7 +31,9 @@ import type { SystemState } from "./types";
 // `autonomy_fully_dark` when the first set is non-empty and the second is empty.  An owner stop,
 // exit-only, or liquidating fleet stays quiet.  A halt the app wrote (boot interlock, run-failure
 // watchdog, drawdown breaker, broker auto-pause) is not an owner stop: when nothing else is
-// `active`, including ask-first, that fleet is fully dark and still pages.  It is NOT gated on
+// `active`, including ask-first, that fleet is fully dark and still pages.  The health poll
+// classifies those halts with `batchedHaltCauseKinds` (one settings read, one audit read)
+// instead of repeating that work per account.  It is NOT gated on
 // market hours: accounts stay `active` overnight and across weekends, and only a HALT removes one
 // from the active set, so a dark fleet is worth paging about at any hour.  It still never maps to a
 // 503 — the Coolify-restart trap above still applies — so this is a `degradedReasons` entry for a
@@ -238,33 +240,9 @@ export interface AutonomyDarkness {
 /** State-only idle check.  `close_only` and `liquidating` are always owner-controlled.
  *  `halted` is both the owner stop and what the boot interlock and the watchdogs write, so
  *  `computeAutonomyDarkness` does not trust this helper for `halted`.  It asks
- *  `describeAutonomyHaltCause` and treats only kind `stopped` (no app receipt) as deliberate. */
+ *  `batchedHaltCauseKinds` and treats only kind `stopped` (no app receipt) as deliberate. */
 export function isDeliberateAutonomyIdleState(state: SystemState): boolean {
   return state === "halted" || state === "close_only" || state === "liquidating";
-}
-
-/** True when this eligible account is quiet on purpose.  App-caused `halted` returns false. */
-function eligibleAccountIsDeliberatelyIdle(
-  userId: string,
-  account: { id: string; accountNumber?: string | null },
-  systemState: SystemState
-): boolean {
-  if (systemState === "close_only" || systemState === "liquidating") return true;
-  if (systemState !== "halted") return false;
-  try {
-    const cause = describeAutonomyHaltCause({
-      userId,
-      connectedAccountId: account.id,
-      accountNumber: account.accountNumber || undefined,
-      systemState
-    });
-    // Missing cause and kind `stopped` are the no-receipt bucket (owner stop, or no app record).
-    // Every other kind is an app halt and must still be able to page.
-    return !cause || cause.kind === "stopped";
-  } catch {
-    // A lookup failure must not turn a health poll into a fleet-dark page.
-    return true;
-  }
 }
 
 export interface TradingLivenessSummary {
@@ -513,6 +491,7 @@ function computeAutonomyDarkness(now: number = Date.now()): AutonomyDarkness {
   let activeAccounts = 0;
   let fleetActiveAccounts = 0;
   let eligibleDeliberatelyIdle = 0;
+  const haltedEligible: Array<{ userId: string; accountId: string; accountNumber?: string }> = [];
   for (const userId of listUsers()) {
     for (const account of listConnectedAccounts(userId)) {
       try {
@@ -525,18 +504,37 @@ function computeAutonomyDarkness(now: number = Date.now()): AutonomyDarkness {
         if (account.parked) continue; // parked on purpose (review rank 8)
         if (!account.accountNumber) continue; // never synced; nothing to trade
         eligibleAccounts += 1;
-        if (eligibleAccountIsDeliberatelyIdle(userId, account, policy.systemState)) {
-          eligibleDeliberatelyIdle += 1;
-        }
         if (policy.systemState === "active") {
           activeAccounts += 1;
         } else if (darkAccountLabels.length < MAX_DARK_LABELS) {
           darkAccountLabels.push(account.label || account.broker);
         }
+        if (policy.systemState === "close_only" || policy.systemState === "liquidating") {
+          eligibleDeliberatelyIdle += 1;
+        } else if (policy.systemState === "halted") {
+          haltedEligible.push({
+            userId,
+            accountId: account.id,
+            accountNumber: account.accountNumber
+          });
+        }
       } catch {
         // An unreadable policy is not evidence of darkness — skip it rather than over-count.
       }
     }
+  }
+  let haltKinds = new Map<string, string>();
+  try {
+    haltKinds = batchedHaltCauseKinds(haltedEligible);
+  } catch {
+    // A lookup failure must not turn a health poll into a fleet-dark page.
+    haltKinds = new Map();
+  }
+  for (const halted of haltedEligible) {
+    const kind = haltKinds.get(`${halted.userId}:${halted.accountId}`);
+    // Missing kind and `stopped` are the no-receipt bucket (owner stop, or no app record).
+    // Every other kind is an app halt and must still be able to page.
+    if (kind === undefined || kind === "stopped") eligibleDeliberatelyIdle += 1;
   }
   const allEligibleDeliberatelyIdle =
     eligibleAccounts > 0 && eligibleDeliberatelyIdle === eligibleAccounts;

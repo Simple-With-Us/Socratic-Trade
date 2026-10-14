@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 Cursor — health poll batches halt-cause reads (PR #4663)
+
+**What.**  Kody thread `PRRT_kwDOS7mOVM6shgi0` is real.  `/api/health` was classifying each halted autopilot account with up to five queries.  `batchedHaltCauseKinds` now does one `settings` read for the three markers and one indexed `audit_events` read for the breaker and a lost auto-pause.  Kinds still match `describeAutonomyHaltCause`.  The thread is not resolved.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `test/batched-halt-cause.test.ts`, `test/trading-liveness.test.ts`, `test/autonomy-halt-cause.test.ts`, and `test/scheduler-halt-cause-tick.test.ts` passed.
+
+**Docs.**  `docs/rollouts/2026-10-14-fleet-fully-dark-detector.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Reply on the Kody thread, push, and comment `@kody start-review`.  Do not resolve the thread.  Do not merge.
+
 ## 2026-10-14 Cursor — fleet fully dark detector (SOCRATIC-TRADE-2S)
 
 **What.**  `autonomy_fully_dark` no longer fires when any account is `systemState === "active"` (fixes ask-first + halted autopilot false pages).  Owner halt / close_only / liquidating stays quiet.  An app halt (boot, watchdog, breaker, broker auto-pause) with nothing else active still pages, so the signal is not dead.  Health route double-checks counts before emitting "fleet is fully dark" copy.  Claude autofix starts only for Codex, Kody, and Cursor reviews, so a Seer review does not fail that job.
