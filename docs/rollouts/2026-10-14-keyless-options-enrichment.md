@@ -36,3 +36,22 @@
 ## Zero-Code Findings
 
 - Live Cboe options JSON for `AAPL` includes `data.current_price` and per-contract `iv` / `open_interest` / OCC `option` symbols; many deep ITM rows carry `iv: 0`, so ATM filtering in `deriveOptionMetrics` remains important.
+
+## Autofix Round 1 (2026-10-14) — triage only, no code change
+
+**Context & Objective.**  Automated fixer pass over PR #4658 to address review-bot feedback.
+
+**Changes Made.**  None to source or tests.  Documentation only:
+
+- `STATUS.md` — round-1 triage note added to the existing CURSOR entry.
+
+**Decisions & Trade-offs.**  All six `kody-ai` threads were already resolved and their findings verified as genuinely fixed in `99da1478` (Zod schemas in place of the `as unknown` casts, `underlyingPrice` threaded into the Alpaca and Tradier parsers, keyed options providers at `costTier = "paid"` gap-filling on the options fields in Wave B, per-endpoint Tradier error labels, negative caching for empty chains).  Zero `[codex-autofix]` commits on the branch, so this is round 1 of 10.  The three still-open threads are from `sentry[bot]`, which is outside the set of reviewers the fixer resolves; their fixes are already in the branch, but `required_review_thread_resolution` on ruleset `17945518` blocks the merge until they are dismissed.  Escalated to the maintainer rather than resolving them unilaterally.
+
+**Verification State.**  No source change, so no local verify trio was run — CI is the gate for this PR.
+
+- gh pr checks 4658 -> `gitleaks` pass; `verify-hosted` pending at time of writing
+- gh pr view 4658 -> `mergeStateStatus: BEHIND` (one commit behind `main`), `mergeable: MERGEABLE`
+
+**Next Steps & Blockers.**  Maintainer to dismiss the three `sentry[bot]` threads (or authorize the fixer to).  Auto-merge is armed (`gh pr merge 4658 --squash --auto`) and will squash-merge once `verify` and `gitleaks` are green and the thread gate clears.
+
+**Zero-Code Findings.**  Every finding from `chatgpt-codex-connector`, `kody-ai`, and `cursor` on this PR is already addressed and resolved in the branch; no actionable in-scope item remained this round.

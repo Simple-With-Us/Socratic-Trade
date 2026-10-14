@@ -10,6 +10,8 @@
 
 **Next.**  Open PR for review; merge queues runtime deploy via `main`.
 
+**Autofix round 1 (2026-10-14, no code change).**  All six `kody-ai` threads are resolved and their underlying concerns verified fixed in `99da1478` (Zod schemas replace the `as unknown` casts, `underlyingPrice` threaded into both Alpaca and Tradier parsers, keyed options providers at `costTier = "paid"` gap-filling on the options fields in Wave B, per-endpoint Tradier error labels, negative caching for empty chains).  Zero `[codex-autofix]` commits on the branch.  The three still-open threads are from `sentry[bot]`, outside the bots the fixer resolves; the fixes for them are also already in the branch, but `required_review_thread_resolution` on ruleset `17945518` will block the merge until someone dismisses them.  Asked the maintainer whether to resolve them.  Auto-merge armed (`--squash --auto`).
+
 ## 2026-10-14 GROK — PR #4609 verification order
 
 **What.**  Merged origin/main (`b7775658`, mobile snapshot partial timeout).  The freshness handoff verification block now lists `npm run lint`, `npx tsc --noEmit`, `npm test`, then `npm run build`.  No product behavior change.
