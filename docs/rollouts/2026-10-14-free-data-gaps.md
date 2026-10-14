@@ -44,21 +44,32 @@ Senate HTML uses the browser User-Agent already on `scrapeSenateEfd`, not the SE
 
 ## Verification State
 
-Targeted, before the full gate:
-
 ```bash
-npx vitest run test/history.test.ts test/web-sources-sec.test.ts test/web-sources.test.ts
+npm run lint
+npx tsc --noEmit
+npm test
+npx vitest run test/congress-share.test.ts test/sec-facts.test.ts test/sec-ingest-worker.test.ts
+npm run build
 ```
 
-3 files, 63 tests, exit 0.  The Congress.Trade 503 log line in that run is the fallback test throwing so eFD runs.
+`npm run lint` ok (0 errors, 866 warnings on the first pass; a second pass after the mock fixes was 0 errors and 867 warnings, then the new unused fetch argument was referenced).  `npx tsc --noEmit` ok after the test-type fixes.  Targeted history and web-source tests: 63 passed.  After the full suite, the three files the new score and User-Agent import broke were fixed and re-run: 144 passed.
 
-Full gate (`npm run lint`, `npx tsc --noEmit`, `npm test`, `npm run build`) is recorded in a follow-up edit of this note after it runs.  `npm test` is the full suite.  No fast mode.
+`npm test` (full suite, no fast mode): 29 failed, 9278 passed, 51 skipped, 826 files, about 19 minutes.  The wrapper can exit 0 while vitest prints failures; this run's log ended `EXIT:1`, and the `Tests ... failed` line is authoritative.
+
+Six of those failures were this diff and are fixed:
+
+- `test/congress-share.test.ts` expected the old count score 75.  Unpriced rows with shares now score `12000/14000` = 86.
+- `test/sec-facts.test.ts` and `test/sec-ingest-worker.test.ts` mocked `web-sources/http` without `secUserAgent`, which `ingestCompanyFacts` now calls.
+
+The other 23 failures are this cloud shell, not this diff: OpenRouter and native LLM routing tests see a configured key (`chat-llm`, `llm-provider`, `framework-review`, `red-team`, `openrouter-credits`); Pushover and email tests see injected notify credentials; `cpuprofile-summary` cannot load a `.ts` module under Node 22; `server-metrics` does not treat this VM as the local host; Alpha Vantage mid-chunk fast-stop counted 3 fetches instead of 2.  None of those files are in this diff.
+
+`npm run build` ok.  It compiled with the existing warning backlog and collected page data.
 
 ## Next Steps & Blockers
 
-Open the PR ready for review.  Do not merge from this lane.  Do not deploy.
+The PR is ready for review.  Do not merge from this lane.  Do not deploy.
 
-Fleet Linear (team ST) and Zulip were not claimed from this cloud seat when `board` / `agent-sync` identity was unavailable.  That does not block the code.  The next seat with fleet credentials should open or move the ST issue and link it.
+Fleet Linear (team ST) was not claimed.  `board` is installed, and `board whoami` stops because `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` are unset (`AGENT_SEAT` is unset too).  `agent-sync whoami` has no seat.  Agent-Sync MCP needs authentication.  Seat-specific `LINEAR_CURSOR_*` values are present and were not aliased into the Fleet client id.  That does not block the code.  The next seat with fleet credentials should open or move the ST issue and link it.
 
 ## Zero-Code Findings
 

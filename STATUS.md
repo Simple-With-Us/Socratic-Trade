@@ -631,7 +631,7 @@ all pre-existing (reproduced identically with these changes stashed; this sandbo
 
 **What.**  Requests longer than 730 days skip Massive and try Yahoo chart `range=max` (paced), then Tradier, then Twelve Data.  `history_cache_eod` stays a permanent upsert; a fresh series is served offline only when it covers the requested start.  Nightly insider refresh loads the SEC quarterly Form 4 ZIP plus the atom delta, scores dollar-weighted open-market buys and sells over 90 days, and no longer caps the atom feed at 60 or the watchlist at 20.  When Congress.Trade fails or returns no trades, the congress source falls back to Senate eFD.  Quiver is not called.
 
-**Verification.**  Targeted `npx vitest run test/history.test.ts test/web-sources-sec.test.ts test/web-sources.test.ts` passed (63 tests).  Full `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build` are the landing gate and are recorded in the rollout after they run.
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings on the first pass).  `npx tsc --noEmit` ok.  Full `npm test`: 29 failed, 9278 passed, 51 skipped.  Six failures were this diff (share-weighted insider score, and `secUserAgent` missing from two HTTP mocks) and those three files re-ran at 144 passed.  The other 23 are this shell (OpenRouter key, notify credentials, Node 22 `.ts` load, local-host metrics, Alpha Vantage fetch count).  `npm run build` ok.
 
 **Docs.**  `docs/rollouts/2026-10-14-free-data-gaps.md`, `docs/phase-4-market-data-scoring.md`, `docs/phase-9-web-sources.md`, `STATUS.md`, `PLAN.md`.
 

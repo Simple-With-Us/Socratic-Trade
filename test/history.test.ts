@@ -657,8 +657,8 @@ describe("fetchDailyOHLC", () => {
       { time: "2019-01-02", open: 10, high: 11, low: 9, close: 10, volume: 100 },
       { time: latest, open: 20, high: 21, low: 19, close: 20, volume: 200 }
     ]);
-    const fetchMock = vi.fn(async () => {
-      throw new Error("network should not run");
+    const fetchMock = vi.fn(async (url: string): Promise<Response> => {
+      throw new Error(`network should not run for ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
     try {
