@@ -6,19 +6,19 @@ OPS-935 addresses Claude Code Autofix runs reaching the 60-turn ceiling.  This c
 
 ## Changes Made
 
-- `.github/workflows/claude-code-autofix.yml`: pin shared reusable revision `825f8ee008d6ce104107f2a7267c14d370e6013e`.
+- `.github/workflows/claude-code-autofix.yml`: pin shared reusable revision `99d372dcd7f600611c7b2b83a6f8eb2d31d6ecad`, the squash-merge commit of shared PR #368 on `main`.
 - `PLAN.md` and `STATUS.md`: record scope, dependency, and current verification state.
 - Shared PR [#368](https://github.com/Simple-With-Us/congress-trading-shared/pull/368) adds operation-category counts and error counters.  Raw commands remain excluded, and artifacts retain the existing seven-day, 500-event, 256-KiB limits.
 
 ## Decisions And Trade-offs
 
-The reusable workflow raises its default from 60 to 120 turns and uses conservative fallback handling for ambiguous operation forms.  The 30-minute timeout, MiniMax route, caller prompt, secret, triggers, permissions, and shared concurrency stay unchanged.  This caller PR depends on shared PR #368 landing first.
+The reusable workflow raises its default from 60 to 120 turns and uses conservative fallback handling for ambiguous operation forms.  The 30-minute timeout, MiniMax route, caller prompt, secret, triggers, permissions, and shared concurrency stay unchanged.  Shared PR #368 squash-merged, so this caller pins that `main` commit instead of pre-merge revision `825f8ee008d6ce104107f2a7267c14d370e6013e`, which is not an ancestor of shared `main`.
 
 ## Verification State
 
 - `actionlint .github/workflows/claude-code-autofix.yml`: passed.
 - `git diff --check`: passed.
-- `npm run lint`: passed in current-head hosted [verify run 38337104537](https://github.com/Simple-With-Us/Socratic-Trade/actions/runs/38337104537).
+- `npm run lint`: passed in hosted [verify run 38337104537](https://github.com/Simple-With-Us/Socratic-Trade/actions/runs/38337104537) on the previous caller head (`825f8ee008d6ce104107f2a7267c14d370e6013e`).
 - `npx tsc --noEmit`: passed in the same hosted run.
 - `npm test`: passed in the same hosted run.
 - `npm run build`: passed in the same hosted run.
@@ -28,7 +28,7 @@ The reusable workflow raises its default from 60 to 120 turns and uses conservat
 
 ## Next Steps And Blockers
 
-Merge shared PR #368 first.  Then merge this caller PR only after its current-head review and required checks pass.  Keep OPS-935 open until later eligible runs provide evidence about remaining exhaustion cases.
+Shared PR #368 is merged.  Merge this caller PR only after its current-head review and required checks pass.  Keep OPS-935 open until later eligible runs provide evidence about remaining exhaustion cases.
 
 ## Zero-Code Findings
 

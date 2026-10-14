@@ -1,6 +1,15 @@
 # Current Status
 
 ## 2026-10-12 CODEX — Claude Autofix 120-Turn Cap (OPS-935)
+
+**What.**  Pin Claude Code Autofix to shared `main` revision `99d372dcd7f600611c7b2b83a6f8eb2d31d6ecad` (squash merge of shared PR #368).  That revision raises the default from 60 to 120 turns and adds schema-2 operation category counters with conservative fallback for ambiguous forms.  Raw commands remain excluded; artifacts retain the existing seven-day, 500-event, 256-KiB bounds.  The 30-minute timeout and model route remain unchanged.
+
+**Dependency.**  Shared PR [#368](https://github.com/Simple-With-Us/congress-trading-shared/pull/368) merged as `99d372dcd7f600611c7b2b83a6f8eb2d31d6ecad`.  The earlier caller pin `825f8ee008d6ce104107f2a7267c14d370e6013e` is not an ancestor of shared `main`.
+
+**Verification.**  Hosted run 38337104537 passed lint, typecheck, tests, and build in order on the caller head that still pinned `825f8ee008d6ce104107f2a7267c14d370e6013e`.  Shared PR #368 recorded a successful 120-turn-cap run and verified its fix push; the observed run used 37 turns and 36 calls with no errors.  Recheck CI and Codex review on this head before merge.
+
+**Docs.**  `docs/rollouts/2026-10-12-claude-autofix-diagnostics.md` and `PLAN.md`.  Linear OPS-935 is the live tracker; effort logs are archived.
+
 ## 2026-10-13 CODEX-AUTOFIX — PR #4606 embed breaker `consecutive` reset
 
 **What.**  One genuinely new Kody thread on `fix/embed-fail-fast-congress-share-backoff`: when a
@@ -85,11 +94,11 @@ rollout note and the schema file.
 
 ## 2026-10-12 CODEX — Claude Autofix Diagnostics (OPS-935, PR #4532)
 
-**What.**  Pin Claude Code Autofix to shared revision `825f8ee008d6ce104107f2a7267c14d370e6013e`, raising the default from 60 to 120 turns and adding schema-2 operation category counters with conservative fallback for ambiguous forms.  Raw commands remain excluded; artifacts retain the existing seven-day, 500-event, 256-KiB bounds.  The 30-minute timeout and model route remain unchanged.
+**What.**  Pin Claude Code Autofix to shared revision `3bff293b56adcc0367d3a91066938b2d4d5ebbc5` for seven-day sanitized tool metadata after success or failure.  The 60-turn cap and model route remain unchanged.
 
-**Dependency.**  Shared PR [#368](https://github.com/Simple-With-Us/congress-trading-shared/pull/368) must merge before this caller PR can land.
+**Dependency.**  Shared PR [#365](https://github.com/Simple-With-Us/congress-trading-shared/pull/365) must merge with its immutable helper and caller pins preserved in main history before this PR lands.
 
-**Verification.**  Caller `actionlint` and `git diff --check` passed.  Hosted run 38337104537 passed lint, typecheck, tests, and build in order on the caller head.  Shared PR #368 recorded a successful 120-turn-cap run and verified its fix push; the observed run used 37 turns and 36 calls with no errors.  Recheck CI and Codex review after any caller head change before merge.
+**Verification.**  Caller actionlint and diff checks passed.  Shared validation passed 14 Node tests, 463 package tests, typecheck, build, and a provider-free hosted artifact check.  Current-head CI and Codex review are required before merge.
 
 **Docs.**  `docs/rollouts/2026-10-12-claude-autofix-diagnostics.md` and `PLAN.md`.  Linear OPS-935 is the live tracker; effort logs are archived.
 
