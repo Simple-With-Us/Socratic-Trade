@@ -49,6 +49,15 @@ rollout note and the schema file.
 **Docs.**  `docs/rollouts/2026-10-13-pr-4606-review-thread-fixes.md`.
 
 **Next.**  Push branch; hosted `verify` on PR #4606.
+## 2026-10-13 CURSOR — iOS stale cache + error copy (branch `cursor/ios-stale-cache-fix-78c7`)
+
+**What.**  iOS stops trusting stale `marketSession`, retries `/api/mobile/snapshot` with backoff while keeping cache visible, maps URLError copy, and treats `/api/scan` `stale: true` as last-good data (PR #4609).
+
+**Verification.**  `npm run lint`, `npx tsc --noEmit` clean.  Swift: hosted `ios-build` on PR.
+
+**Docs.**  `docs/rollouts/2026-10-13-ios-stale-cache-errors.md`.
+
+**Next.**  Land PR after `ios-build` + `verify` green.
 ## 2026-10-13 CURSOR — iOS Sentry DSN + TestFlight cron (branch `cursor/ios-sentry-testflight-cron-5438`)
 
 **What.**  TestFlight has not archived since 2026-10-08.  `latest-build-seq` exits 2 and the ship script discards that stderr, then refuses to pick a build number (`local=107`, `asc=UNVERIFIED`).  The phone is still on the 2026-10-08 binary, which logged `SENTRY_DSN unset`.  Run 38181542543 already loaded a 95-character `SENTRY_DSN` from Infisical prod and then died in the same ASC check, so the DSN never reached an archive.  Sentry monitor `ci-socratic-trade-ios-testflight-ship` (FLEET-INFRA-DA) is the other failure: over the last 200 workflow runs GitHub delivered about 22% of the `*/30` ticks (p90 gap 368 min).  A 15-minute check-in margin marks those gaps missed.
