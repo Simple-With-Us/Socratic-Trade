@@ -473,7 +473,7 @@ export const DATA_POINT_CATALOG: readonly DataPointSpec[] = [
     sources: [
       opt("yahoo-finance", 1, "primary", "none", []),
       opt("nasdaq-screener", 2, "good", "none", []),
-      opt("sec-xbrl", 3, "good", "none", ["Shares from SEC × live quote when cap missing."], { delay: "filing" }),
+      opt("sec-xbrl", 3, "good", "none", ["Shares from SEC × live quote only when the screener cap is missing."], { delay: "filing" }),
     ],
   },
   {

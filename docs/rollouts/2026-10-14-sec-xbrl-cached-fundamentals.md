@@ -18,18 +18,21 @@ Fill missing fundamentals (ROE, ROA, gross profit margin, shares outstanding, im
 
 - **marketCap** is computed in the cascade merge (not in `parseCompanyFacts`) because SEC enrichment runs parallel with quote providers; price may arrive from Yahoo in the same wave.
 - **Cache row** stores JSON in `sec_facts.segment` (large payloads); structured concept rows unchanged for RAG/evidence cards.
-- **Sweep** uses demand-first symbol ordering and 300ms inter-symbol delay; failure backoff 1h per batch error.
+- **Sweep** uses demand-first symbol ordering and 300ms inter-symbol delay; failure backoff 1h per batch error.  A throwing symbol advances the cursor past itself so one bad CIK cannot stall the rest of the universe.  That symbol is retried on the next full sweep after the cursor wraps.
+- **Screener market cap wins** over the SEC shares × price fallback.  The cascade cannot see the Nasdaq cap, so `applyEnrichment` refuses a `sec-xbrl` marketCap when the quote already has a positive cap.
+- **Evidence cards** exclude the `__companyfacts_json__` cache sentinel so it does not occupy a prompt slot.
+- **Companyfacts JSON** is parsed with `CompanyFactsSchema` (passthrough, not strict).  Live filings include `cik`, `entityName`, and taxonomies other than `us-gaap` / `ifrs-full`.  A strict object would reject them.
 
 ## Verification State
 
 ```
-npm run lint
-npx tsc --noEmit
-npm test
-npm run build
+npm run lint       # exit 0.  Warnings only; the grandfathered backlog is unchanged.
+npx tsc --noEmit   # exit 0
+npx vitest run test/market.test.ts test/data-providers.test.ts test/sec-companyfacts-sweep.test.ts test/sec-facts.test.ts test/sec-xbrl.test.ts
+# Those files passed.  The new cases cover screener-cap precedence, sweep cursor advance, the cache sentinel, and a dei taxonomy beside us-gaap.
 ```
 
-(Paste results at commit time.)
+Full `npm test` was started.  One failure seen while it was still running is `test/egress-guard.test.ts` resolving discord.com, which this sandbox cannot reach.  That test is outside this diff.  `npm run build` was not re-run here; `verify` runs it.
 
 ## Next Steps & Blockers
 

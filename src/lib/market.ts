@@ -1694,6 +1694,30 @@ export function toQuoteOnlyMarketQuote(symbol: string, quote: YahooFinanceQuote,
 export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): MarketQuote {
   const enrichmentBid = extra.bid && extra.bid > 0;
   const enrichmentAsk = extra.ask && extra.ask > 0;
+  // SEC-derived market cap is a gap fill.  The cascade builds its base only from
+  // enrichment providers, so it never sees the Nasdaq screener cap and emits
+  // shares × price whenever no provider already set marketCap.  A positive screener
+  // cap must win; a stale SEC share count (for example after a split) must not replace it.
+  const screenerMarketCap =
+    typeof quote.marketCap === "number" && quote.marketCap > 0 ? quote.marketCap : undefined;
+  const secDerivedMarketCap =
+    extra.sources?.marketCap === "sec-xbrl" &&
+    typeof extra.marketCap === "number" &&
+    extra.marketCap > 0;
+  const keepScreenerMarketCap = Boolean(secDerivedMarketCap && screenerMarketCap !== undefined);
+  const sources = mergeSources(quote, extra);
+  if (keepScreenerMarketCap) {
+    if (quote.sources?.marketCap) sources.marketCap = quote.sources.marketCap;
+    else delete sources.marketCap;
+  }
+  const fieldObservations: EnrichmentFieldObservations = {
+    ...(quote.fieldObservations ?? {}),
+    ...(extra.fieldObservations ?? {})
+  };
+  if (keepScreenerMarketCap) {
+    if (quote.fieldObservations?.marketCap) fieldObservations.marketCap = quote.fieldObservations.marketCap;
+    else delete fieldObservations.marketCap;
+  }
   return {
     ...quote,
     price: extra.price && extra.price > 0 ? extra.price : quote.price,
@@ -1723,7 +1747,11 @@ export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): Ma
     sector: extra.sector ?? quote.sector,
     industry: extra.industry ?? quote.industry,
     volume: extra.volume && extra.volume > 0 ? extra.volume : quote.volume,
-    marketCap: extra.marketCap && extra.marketCap > 0 ? extra.marketCap : quote.marketCap,
+    marketCap: keepScreenerMarketCap
+      ? screenerMarketCap
+      : extra.marketCap && extra.marketCap > 0
+        ? extra.marketCap
+        : quote.marketCap,
     dividendYield: extra.dividendYield ?? quote.dividendYield,
     eps: extra.eps ?? quote.eps,
     sharesOutstanding: extra.sharesOutstanding ?? quote.sharesOutstanding,
@@ -1760,15 +1788,13 @@ export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): Ma
     evidenceBulletins: extra.shortInterestDisagreement
       ? Array.from(new Set([...(quote.evidenceBulletins ?? []), extra.shortInterestDisagreement]))
       : quote.evidenceBulletins,
-    sources: mergeSources(quote, extra),
+    sources,
     // Keep cascade receipts on the quote so admin/ops/coverage reporting (and drilldowns) can see
     // which providers failed and the per-field observation status — not only the winning scalar.
     // MERGE observations field-by-field so a live enrich layer does not wipe per-field as_of/
     // fetched_at stamps from the durable seed baseline for fields the live pass left empty.
-    fieldObservations: {
-      ...(quote.fieldObservations ?? {}),
-      ...(extra.fieldObservations ?? {})
-    },
+    // A kept screener market cap drops the SEC observation so the receipt matches the scalar.
+    fieldObservations,
     providerFailures: extra.providerFailures
       ? { ...(quote.providerFailures ?? {}), ...extra.providerFailures }
       : quote.providerFailures

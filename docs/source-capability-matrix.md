@@ -134,7 +134,7 @@ Legend for notes: **Q** = quota conservation · **D** = delay/staleness · **L**
 | **fcfYield / freeCashFlowYield** | Yahoo (derived), ROIC, ~~FMP~~ | Naming: both fields exist historically — treat as same economic idea when merging. |
 | **grossProfitMargin** | ROIC, Twelve, SEC XBRL, ~~FMP~~ | SEC: `GrossProfit` / `Revenues` or `(Revenues - CostOfRevenue)` on annual spans. |
 | **sharesOutstanding** | Yahoo, SEC XBRL (`dei:EntityCommonStockSharesOutstanding`, fallback `CommonStockSharesOutstanding`), Finnhub | Float vs diluted confusion — document which. |
-| **marketCap** (implied) | Yahoo, Nasdaq screener, SEC XBRL (shares × live quote when cap missing) | SEC only fills when shares came from `sec-xbrl` and price is already on the quote. |
+| **marketCap** (implied) | Yahoo, Nasdaq screener, SEC XBRL (shares × live quote when cap missing) | SEC only fills when shares came from `sec-xbrl` and price is already on the enrichment.  `applyEnrichment` keeps a positive Nasdaq screener cap; the derived cap is used only when that screener cap is missing or not positive. |
 
 ### 3.4 Range & risk
 

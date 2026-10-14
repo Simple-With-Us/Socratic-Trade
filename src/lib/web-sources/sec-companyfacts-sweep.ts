@@ -84,7 +84,10 @@ export async function runSecCompanyFactsSweep(
     } catch (err) {
       console.error(`[sec-companyfacts-sweep] ${symbol} CIK ${cik}:`, err instanceof Error ? err.message : err);
       setInternalSetting(SWEEP_FAILURE_MS_KEY, now);
-      const nextCursor = cursor + batch.indexOf(symbol);
+      // Advance PAST the failing symbol.  Retrying the same cursor forever stalls every
+      // later symbol when one CIK keeps throwing.  The 1h backoff still applies; the
+      // skipped symbol is retried on the next full sweep after the cursor wraps.
+      const nextCursor = cursor + batch.indexOf(symbol) + 1;
       setInternalSetting(SWEEP_CURSOR_KEY, nextCursor);
       return {
         attempted: batch.indexOf(symbol) + 1,

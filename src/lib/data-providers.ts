@@ -1918,7 +1918,9 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
       // The carrier never leaves the cascade — it exists only to compute the flag above.
       delete base.shortPercentOfFloatSecondary;
 
-      // SEC XBRL shares × live quote when Yahoo (or others) did not supply marketCap.
+      // SEC XBRL shares × enrichment price when no enrichment provider supplied marketCap.
+      // This cannot see the Nasdaq screener cap.  applyEnrichment keeps a positive screener
+      // cap and only adopts this derived value when the quote's marketCap is missing or <= 0.
       if (
         (base.marketCap === undefined || base.marketCap <= 0) &&
         typeof base.price === "number" &&

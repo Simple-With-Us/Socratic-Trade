@@ -210,7 +210,13 @@ describe("SEC Facts and Insider Transactions Ingestion (P4)", () => {
     const db = getDb();
     const mockFacts = {
       cik: 320193,
+      entityName: "Apple Inc.",
       facts: {
+        dei: {
+          EntityRegistrantName: {
+            units: { pure: [] }
+          }
+        },
         "us-gaap": {
           Assets: {
             units: {
@@ -277,6 +283,7 @@ describe("SEC Facts and Insider Transactions Ingestion (P4)", () => {
     const card = formatCompanyFactsEvidenceCard("0000320193");
     expect(card).toContain("Assets: 350,000,000,000 USD");
     expect(card).toContain("NetIncomeLoss: 100,000,000,000 USD");
+    expect(card).not.toContain(SEC_COMPANYFACTS_CACHE_CONCEPT);
   });
 
   it("round-trips companyfacts JSON through the SQLite cache helpers", () => {
