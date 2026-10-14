@@ -4,7 +4,7 @@
 
 **What.**  Production SQLite is about 16.5 GB with a 415 MB WAL.  Background checks were stalling 76-79s and the scheduler lagged 120s.  This lane adds a storage-hygiene job: table-size report, retention deletes for caches/logs/finished runs, batched deletes that yield, a PASSIVE WAL checkpoint with TRUNCATE only when Litestream looks safe, and incremental free-page reclaim.  It never runs a full file rewrite and never deletes orders, fills, positions, approvals, transfers, or HWM inputs.
 
-**Verification.**  `npx vitest run test/sqlite-storage-hygiene.test.ts` — 12 passed.  Full lint, tsc, test, and build follow in this lane before the PR is treated as verified.
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9284 passed, 51 skipped, and 25 failed outside this diff: sandbox provider keys (OpenRouter and notify credentials) make "no key" cases fail, `summarize-cpuprofile.mjs` cannot load a `.ts` file under Node 22, and server-metrics host detection.  Targeted `test/sqlite-storage-hygiene.test.ts` was 12 passed and is not in the failure list.
 
 **Docs.**  `docs/rollouts/2026-10-14-sqlite-storage-hygiene.md`, `STATUS.md`, `PLAN.md`.
 

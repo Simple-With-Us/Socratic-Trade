@@ -40,12 +40,14 @@ WAL checkpoint is PASSIVE.  TRUNCATE runs only after that copy reports busy 0 an
 ## Verification State
 
 ```bash
+npm run lint
+npx tsc --noEmit
+npm test
+npm run build
 npx vitest run test/sqlite-storage-hygiene.test.ts
 ```
 
-12 passed (denylist, dry-run cache on the ops snapshot, live retention, yield between batches, WAL truncate matrix, cadence, audit yield, fresh vs existing `auto_vacuum`).
-
-Full `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build` are the next gate on this branch.  This note will be updated with those results before the PR is called verified.
+`npm run lint` ok (0 errors, 866 grandfathered warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  Targeted hygiene tests 12 passed.  Full `npm test` was 9284 passed, 51 skipped, and 25 failed.  Those 25 are outside this diff: provider-key tests expect no OpenRouter or notify credential in the environment, `scripts/ops/summarize-cpuprofile.mjs` fails to import a `.ts` file under this Node 22, Twelve Data and Alpha Vantage pool cases see a configured key, and server-metrics host detection does not report a local host.  `test/sqlite-storage-hygiene.test.ts` is not in the failure list.
 
 ## Next Steps & Blockers
 
