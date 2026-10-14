@@ -21,6 +21,47 @@
 **Docs.**  `docs/rollouts/2026-10-14-data-cascade-reliability.md`, `STATUS.md`, `PLAN.md`.
 
 **Next.**  Open PR ready for review; watch prod freshness scan duration after deploy.
+## 2026-10-14 GROK — PR #4658 verification order
+
+**What.**  `origin/main` (`82162336`) is already merged (`e74332cd`).  The one open Kody thread (`PRRT_kwDOS7mOVM6sjYXO`) is the round 2 handoff: it omitted `npm run lint` and listed build before `npm test`.  That block is now lint, tsc, test, build.  The thread is not resolved.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test` was 1 failed, 9327 passed, 51 skipped.  The failure is sandbox DNS for discord.com in `test/egress-guard.test.ts`, outside this diff.  Hosted `verify` on `94b28463` passed lint, tsc, `npm test`, and `npm run build`.
+
+**Docs.**  `docs/rollouts/2026-10-14-keyless-options-enrichment.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Reply on the open thread without resolving it.  Comment `@kody start-review`.  Do not merge from this lane.
+
+## 2026-10-14 AUTOFIX round 2 — PR #4658 (no code change)
+
+**What.**  Second fixer pass.  Re-triaged all 12 review threads on the branch.  Nothing new: the second `kody-ai` review (triggered by `@kody start-review` at 22:39Z) raised only three threads, all `isOutdated` and all already answered by `94b28463` — `.strict()` vs `.passthrough()` on vendor envelopes, the Alpaca IEX snapshot sub-objects, and the Cboe `option` field type.  The three `sentry[bot]` threads are unchanged from round 1 and still describe the pre-`99da1478` diff.  No source or test change was warranted.
+
+**Verification.**  `npx tsc --noEmit` ok.  `npx vitest run test/keyless-options-enrichment.test.ts test/keyless-options-vendor-fetch.test.ts` 19 passed.  Full `npm test` and `npm run build` run on this branch; results in the rollout note.
+
+**Docs.**  `docs/rollouts/2026-10-14-keyless-options-enrichment.md`, `STATUS.md`.
+
+**Next.**  None outstanding.  The three stale `kody-ai` threads were resolved by this lane; the maintainer separately dismissed the three `sentry[bot]` threads, so all 12 threads on the PR are resolved and `required_review_thread_resolution` is cleared.  Merged `origin/main` (`82162336`) to clear a `CONFLICTING` state.  Auto-merge stays armed and will land once `verify` is green.
+
+## 2026-10-14 GROK — PR #4658 review threads (vendor Zod passthrough)
+
+**What.**  Merged `origin/main` (already up to date).  Vendor option envelopes now use explicit Zod `.passthrough()` instead of implicit strip, so extra Cboe/Alpaca/Tradier keys cannot fail a later `.strict()` pass.  Alpaca IEX underlying price reads `latestTrade.p`, else `dailyBar.c`, else `prevDailyBar.c` from nested records, so a partial snapshot still yields ATM IV.  The three Sentry threads were already fixed in `99da1478`.  Cboe `option` stays a string: OCC symbols contain letters, so a JSON number cannot be a valid contract id.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 grandfathered warnings).  `npx tsc --noEmit` ok.  Targeted options tests 39 passed.  `npm test` was 9319 passed, 51 skipped, and 1 failed outside this diff: sandbox DNS for discord.com in `test/egress-guard.test.ts`.  `npm run build` ok.
+
+**Docs.**  `docs/rollouts/2026-10-14-keyless-options-enrichment.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Reply on unresolved threads without resolving them.  Comment `@kody start-review`.  Do not merge from this lane.
+
+## 2026-10-14 CURSOR — Keyless options enrichment (`cursor/keyless-options-enrichment-8872`)
+
+**What.**  Background and shared market scans now fill `nearTheMoneyIv` and `putCallRatio` from keyless Cboe delayed options JSON (primary).  Alpaca indicative snapshots and Tradier chains are keyed Wave B fallbacks when credentials exist.  Same `deriveOptionMetrics` path as Robinhood options.  Review follow-up: Alpaca reads `impliedVolatility` and `dailyBar.v`, underlying price is threaded into ATM metrics, vendor JSON is Zod-parsed, Tradier errors are labeled by endpoint, and empty chains are negative-cached for at most five minutes.
+
+**Verification.**  `npm run lint` ok (0 errors).  `npx tsc --noEmit` ok.  `npm test` was 9315 passed, 51 skipped, and 2 failed outside this diff: sandbox DNS for discord.com in `test/egress-guard.test.ts`, and `pruneTaskJournal` at 238ms against a 100ms budget in `test/event-loop-stall-hot-path.test.ts`.  Targeted options and coverage tests (43) passed.  `npm run build` ok.
+
+**Docs.**  `docs/rollouts/2026-10-14-keyless-options-enrichment.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Open PR for review; merge queues runtime deploy via `main`.
+
+**Autofix round 1 (2026-10-14, no code change).**  All six `kody-ai` threads are resolved and their underlying concerns verified fixed in `99da1478` (Zod schemas replace the `as unknown` casts, `underlyingPrice` threaded into both Alpaca and Tradier parsers, keyed options providers at `costTier = "paid"` gap-filling on the options fields in Wave B, per-endpoint Tradier error labels, negative caching for empty chains).  Zero `[codex-autofix]` commits on the branch.  The three still-open threads are from `sentry[bot]`, outside the bots the fixer resolves; the fixes for them are also already in the branch, but `required_review_thread_resolution` on ruleset `17945518` will block the merge until someone dismisses them.  Asked the maintainer whether to resolve them.  Auto-merge armed (`--squash --auto`).
 ## 2026-10-14 Codex Autofix — PR #4663 review sweep (docs only)
 
 **What.**  Swept the review threads after the maintainer re-ran Kody.  Nothing new to fix.
