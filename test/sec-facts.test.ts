@@ -334,11 +334,9 @@ describe("SEC Facts and Insider Transactions Ingestion (P4)", () => {
       }
     };
 
-    vi.mocked(politeFetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => mockFacts
-    } as any);
+    vi.mocked(politeFetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(mockFacts), { status: 200 })
+    );
 
     await ingestCompanyFacts("0000141414");
     const rows = db
@@ -350,11 +348,9 @@ describe("SEC Facts and Insider Transactions Ingestion (P4)", () => {
     ]);
 
     // A `facts` value that is not an object still propagates (worker retry).  It is not a silent skip.
-    vi.mocked(politeFetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => ({ facts: 1 })
-    } as any);
+    vi.mocked(politeFetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ facts: 1 }), { status: 200 })
+    );
     await expect(ingestCompanyFacts("0000141414")).rejects.toThrow();
   });
 

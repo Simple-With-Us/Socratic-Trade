@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-14 Grok — PR #4665 companyfacts Response mocks
+
+**What.**  `git merge origin/main` was already up to date (`82162336`).  One unresolved Kody thread (`PRRT_kwDOS7mOVM6sjbIh`) was real.  The malformed-unit companyfacts test now builds both `politeFetch` mocks with `new Response` instead of `as any`.  No migration renumber.  The thread stays unresolved.
+
+**Verification.**  `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9315 passed, 51 skipped, and 2 failed, both outside this diff.  `test/egress-guard.test.ts` fails because this sandbox rejects the discord.com lookup.  `test/data-catalog-completeness.test.ts` reads peRatio completeness 1 from the local `data/app.db` cascade report.  Hosted `verify` passed on `f921cc43` before this commit.  `test/sec-facts.test.ts` passed (7).
+
+**Docs.**  `docs/rollouts/2026-10-14-sec-xbrl-cached-fundamentals.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Push.  Reply on the open thread.  Do not resolve it.  Do not merge the PR.  Comment `@kody start-review`.
+
+**CI note.**  `.github/workflows/autofix.yml` still fails at startup on this branch and on main.  The pinned reusable workflow uses `secrets` inside a step `if`, and coordinator main (`7508b399`) still has that expression.  A pin bump does not remove it.  This PR does not change the caller.
+
 ## 2026-10-14 Grok — PR #4665 merge main after #4663
 
 **What.**  Merged `origin/main` (`82162336`, #4663 fleet-fully-dark detector) into `cursor/sec-xbrl-fundamentals-cache-6783`.  The merge was clean.  No migration renumber.  GraphQL review threads: 7 total, 0 unresolved.  Prior Sentry and Kody findings stay fixed on this branch (`b075ccf0`, `d73d35e0`).  No new product code in this pass.

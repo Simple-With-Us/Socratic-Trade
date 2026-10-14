@@ -12,7 +12,7 @@ Fill missing fundamentals (ROE, ROA, gross profit margin, shares outstanding, im
 - `src/lib/scheduler.ts` — `runSecCompanyFactsSweepIfDue` on scheduler tick.
 - `src/lib/market.ts`, `src/lib/enrichment-coverage.ts`, `src/lib/source-capability-matrix.ts`, `src/lib/source-settings-catalog.ts` — coverage + matrix + catalog copy.
 - `docs/market-data-provider-pricing.md`, `docs/source-capability-matrix.md` — operator docs.
-- Tests: `test/sec-xbrl.test.ts`, `test/sec-facts.test.ts`, `test/sec-companyfacts-sweep.test.ts`, `test/data-providers.test.ts`, `test/enrichment-coverage.test.ts`.
+- Tests: `test/sec-xbrl.test.ts`, `test/sec-facts.test.ts`, `test/sec-companyfacts-sweep.test.ts`, `test/data-providers.test.ts`, `test/enrichment-coverage.test.ts`.  The malformed-unit test mocks `politeFetch` with `new Response` at both call sites.
 
 ## Decisions & Trade-offs
 
@@ -25,25 +25,25 @@ Fill missing fundamentals (ROE, ROA, gross profit margin, shares outstanding, im
 
 ## Main merge
 
-`git merge origin/main` brought in `82162336` (#4663, fleet-fully-dark detector) with no conflicts.  No migration files were renumbered.  All seven review threads on PR #4665 were already resolved.  Nothing new to reply to or to change in the SEC path.
+`git merge origin/main` brought in `82162336` (#4663, fleet-fully-dark detector) with no conflicts.  No migration files were renumbered.  A later fetch was already up to date with that same `origin/main`.  Kody then opened thread `PRRT_kwDOS7mOVM6sjbIh` on the new `as any` fetch mocks.  Those two call sites now use `new Response`.  The thread is left unresolved.
 
 ## Verification State
 
-Re-ran on 2026-10-14 after merging `origin/main`, in this order:
+Re-ran on 2026-10-14 after the `new Response` mock fix, in this order:
 
 ```bash
-npm run lint -> ok (0 errors; 856 warnings)
+npm run lint -> ok (0 errors; 854 warnings)
 npx tsc --noEmit -> ok
 npm test -> fail (2 failed | 9315 passed | 51 skipped)
 npm run build -> ok
 ```
 
-The two `npm test` failures are outside this diff.  `test/egress-guard.test.ts` rejects the discord.com lookup in this sandbox.  `test/data-catalog-completeness.test.ts` sees peRatio fillRate 1 because the local `data/app.db` cascade report has one filled symbol, and the scorer falls back to that report when the named universe has no durable row.  Hosted `verify` passed on `d73d35e0` before this merge and is the merge gate.  Targeted `npx vitest run` of sec-facts, sec-xbrl, companyfacts sweep, market, data-providers, enrichment-coverage, trading-liveness, and batched-halt-cause passed (257 passed, 9 skipped).
+The two `npm test` failures are outside this diff.  `test/egress-guard.test.ts` rejects the discord.com lookup in this sandbox.  `test/data-catalog-completeness.test.ts` sees peRatio completeness 1 because the local `data/app.db` cascade report has one filled symbol, and the scorer falls back to that report when the named universe has no durable row.  Hosted `verify` passed on `f921cc43` before this mock fix and is the merge gate.  `npx vitest run test/sec-facts.test.ts` passed (7).
 
 ## Next Steps & Blockers
 
-- Push this branch and wait for hosted `verify` on the merge commit.  Do not merge the PR from this lane.  Production picks up the sweep after merge to `main`.
-- `.github/workflows/autofix.yml` still fails at startup.  The pinned coordinator workflow uses `secrets` in a step `if`.  The same failure happens on main.  Not changed here.
+- Push this branch, reply on the open Kody thread without resolving it, and comment `@kody start-review`.  Do not merge the PR from this lane.  Production picks up the sweep after merge to `main`.
+- `.github/workflows/autofix.yml` still fails at startup on this branch and on main.  `pr-autofix-reusable.yml` at pin `2e671004` and on coordinator main `7508b399` both use `secrets` in a step `if`.  A pin bump does not remove that expression.  Not changed here.
 
 ## Zero-Code Findings
 
