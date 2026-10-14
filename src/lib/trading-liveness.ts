@@ -1,3 +1,4 @@
+import { describeAutonomyHaltCause } from "./autonomy-halt-cause";
 import { getDb, getInternalSetting, listConnectedAccounts, listUsers, peekPolicy } from "./db";
 import { isMarketOpen } from "./market-calendar";
 import type { SystemState } from "./types";
@@ -27,7 +28,10 @@ import type { SystemState } from "./types";
 // `tradingLiveness: { degraded: 0, degradedReasons: [] }` on /api/health throughout.
 // So: count accounts ELIGIBLE to trade (autopilot authority, connected with an account number, not
 // parked, not draining) separately from accounts that are actually ACTIVE, and report
-// `autonomy_fully_dark` when the first set is non-empty and the second is empty.  It is NOT gated on
+// `autonomy_fully_dark` when the first set is non-empty and the second is empty.  An owner stop,
+// exit-only, or liquidating fleet stays quiet.  A halt the app wrote (boot interlock, run-failure
+// watchdog, drawdown breaker, broker auto-pause) is not an owner stop: when nothing else is
+// `active`, including ask-first, that fleet is fully dark and still pages.  It is NOT gated on
 // market hours: accounts stay `active` overnight and across weekends, and only a HALT removes one
 // from the active set, so a dark fleet is worth paging about at any hour.  It still never maps to a
 // 503 — the Coolify-restart trap above still applies — so this is a `degradedReasons` entry for a
@@ -225,15 +229,42 @@ export interface AutonomyDarkness {
   darkAccountLabels: string[];
   /** Connected accounts with `systemState === "active"` (any strategy authority). */
   fleetActiveAccounts: number;
-  /** Eligible autopilot accounts in halted / close_only / liquidating — deliberate idle. */
+  /** Eligible autopilot accounts the owner left idle (exit-only, liquidating, or a halt with no app receipt). */
   eligibleDeliberatelyIdle: number;
   /** True only when autopilot-eligible accounts expect runs but none are active fleet-wide. */
   fullyDark: boolean;
 }
 
-/** Owner-intended non-trading states — not counted as "the fleet should be running". */
+/** State-only idle check.  `close_only` and `liquidating` are always owner-controlled.
+ *  `halted` is both the owner stop and what the boot interlock and the watchdogs write, so
+ *  `computeAutonomyDarkness` does not trust this helper for `halted`.  It asks
+ *  `describeAutonomyHaltCause` and treats only kind `stopped` (no app receipt) as deliberate. */
 export function isDeliberateAutonomyIdleState(state: SystemState): boolean {
   return state === "halted" || state === "close_only" || state === "liquidating";
+}
+
+/** True when this eligible account is quiet on purpose.  App-caused `halted` returns false. */
+function eligibleAccountIsDeliberatelyIdle(
+  userId: string,
+  account: { id: string; accountNumber?: string | null },
+  systemState: SystemState
+): boolean {
+  if (systemState === "close_only" || systemState === "liquidating") return true;
+  if (systemState !== "halted") return false;
+  try {
+    const cause = describeAutonomyHaltCause({
+      userId,
+      connectedAccountId: account.id,
+      accountNumber: account.accountNumber || undefined,
+      systemState
+    });
+    // Missing cause and kind `stopped` are the no-receipt bucket (owner stop, or no app record).
+    // Every other kind is an app halt and must still be able to page.
+    return !cause || cause.kind === "stopped";
+  } catch {
+    // A lookup failure must not turn a health poll into a fleet-dark page.
+    return true;
+  }
 }
 
 export interface TradingLivenessSummary {
@@ -494,7 +525,7 @@ function computeAutonomyDarkness(now: number = Date.now()): AutonomyDarkness {
         if (account.parked) continue; // parked on purpose (review rank 8)
         if (!account.accountNumber) continue; // never synced; nothing to trade
         eligibleAccounts += 1;
-        if (isDeliberateAutonomyIdleState(policy.systemState)) {
+        if (eligibleAccountIsDeliberatelyIdle(userId, account, policy.systemState)) {
           eligibleDeliberatelyIdle += 1;
         }
         if (policy.systemState === "active") {
@@ -515,10 +546,9 @@ function computeAutonomyDarkness(now: number = Date.now()): AutonomyDarkness {
     darkAccountLabels,
     fleetActiveAccounts,
     eligibleDeliberatelyIdle,
-    // Autopilot-eligible but none armed active — only page when NO account is `active`
-    // fleet-wide (ask-first still running must not read as "fully dark").  When every
-    // eligible autopilot account is owner-halted/close-only/liquidating, honor that intent
-    // and stay quiet (no autonomy_fully_dark); per-account stale/failure signals still apply.
+    // Page only when NO account is `active` fleet-wide (ask-first still running must not
+    // read as "fully dark") AND at least one eligible autopilot account is not owner-idle.
+    // Owner halt / exit-only / liquidating stays quiet.  An app halt does not.
     fullyDark:
       eligibleAccounts > 0 &&
       activeAccounts === 0 &&

@@ -131,6 +131,33 @@ describe("trading-liveness", () => {
     expect(liveness.isDeliberateAutonomyIdleState("close_only")).toBe(true);
   });
 
+  it("pages autonomy_fully_dark when the app halted an autopilot account and nothing else is active", async () => {
+    const { db, liveness } = await load();
+    const { recordBootHaltReceipt } = await import("../src/lib/autonomy-halt-cause");
+    const { userId, accountId } = await makeAccount(db, "Boot Halted Autopilot", "halted");
+    db.setPolicy(
+      { ...db.getPolicy(userId, accountId), strategyAuthority: "decide", systemState: "halted" },
+      userId,
+      accountId
+    );
+    recordBootHaltReceipt(userId, accountId, {
+      at: "2026-10-14T18:00:00.000Z",
+      from: "active"
+    });
+
+    const summary = liveness.getTradingLivenessSummary();
+    expect(summary).not.toBeNull();
+    expect(summary!.darkness?.fullyDark).toBe(true);
+    expect(summary!.darkness?.fleetActiveAccounts).toBe(0);
+    expect(summary!.darkness?.activeAccounts).toBe(0);
+    expect(summary!.darkness?.eligibleAccounts).toBeGreaterThan(summary!.darkness?.eligibleDeliberatelyIdle ?? 0);
+    expect(summary!.degraded).toBe(true);
+    const publicAgg = liveness.toPublicTradingLiveness(summary);
+    expect(publicAgg.autonomyFullyDark).toBe(true);
+    expect(publicAgg.activeAccounts).toBe(0);
+    expect(publicAgg.degradedReasons).toContain("autonomy_fully_dark");
+  });
+
   it("does not mark the fleet fully dark when ask-first is active but every autopilot account is halted", async () => {
     const { db, liveness } = await load();
     const halted = await makeAccount(db, "Halted Autopilot", "halted");
@@ -161,6 +188,43 @@ describe("trading-liveness", () => {
     expect(summary!.darkness?.fleetActiveAccounts).toBe(1);
     const publicAgg = liveness.toPublicTradingLiveness(summary);
     expect(publicAgg.activeAccounts).toBe(1);
+    expect(publicAgg.autonomyFullyDark).toBe(false);
+    expect(publicAgg.degradedReasons).not.toContain("autonomy_fully_dark");
+  });
+
+  it("does not mark the fleet fully dark when ask-first is active even if the app halted autopilot", async () => {
+    const { db, liveness } = await load();
+    const { recordBootHaltReceipt } = await import("../src/lib/autonomy-halt-cause");
+    const halted = await makeAccount(db, "App Halted Autopilot", "halted");
+    db.setPolicy(
+      {
+        ...db.getPolicy(halted.userId, halted.accountId),
+        strategyAuthority: "decide",
+        systemState: "halted"
+      },
+      halted.userId,
+      halted.accountId
+    );
+    recordBootHaltReceipt(halted.userId, halted.accountId, {
+      at: "2026-10-14T18:05:00.000Z",
+      from: "active"
+    });
+    const running = await makeAccount(db, "Ask First Still Active", "active");
+    db.setPolicy(
+      {
+        ...db.getPolicy(running.userId, running.accountId),
+        strategyAuthority: "propose",
+        systemState: "active"
+      },
+      running.userId,
+      running.accountId
+    );
+
+    const summary = liveness.getTradingLivenessSummary();
+    expect(summary).not.toBeNull();
+    expect(summary!.darkness?.fullyDark).toBe(false);
+    expect(summary!.darkness?.fleetActiveAccounts).toBeGreaterThan(0);
+    const publicAgg = liveness.toPublicTradingLiveness(summary);
     expect(publicAgg.autonomyFullyDark).toBe(false);
     expect(publicAgg.degradedReasons).not.toContain("autonomy_fully_dark");
   });
