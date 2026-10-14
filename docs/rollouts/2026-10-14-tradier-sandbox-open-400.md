@@ -75,12 +75,15 @@ Two Kody threads on this branch.  Both were clear enough to fix rather than esca
 ### Verification State
 
 ```bash
-git merge origin/main          # clean; package-lock.json only, no package.json change
+git merge origin/main          # twice; clean both times, package-lock.json only
 npx tsc --noEmit               # exit 0
-npx vitest run test/tradier.test.ts test/placement-outcome.test.ts   # 96 passed
+npm run lint                   # exit 0 — 0 errors, 866 grandfathered warnings
+npx vitest run test/tradier.test.ts test/placement-outcome.test.ts test/broker-health-auto-pause.test.ts
 npm test
-npm run build
+npm run build                  # exit 0 (only pre-existing "no Sentry auth token" warnings)
 ```
+
+Targeted vitest was 96 passed, then 111 after the `origin/main` merges.  Full `npm test` reported 13 failures in `test/chat-llm.test.ts`, `test/framework-review.test.ts`, `test/llm-provider.test.ts`, and `test/openrouter-credits.test.ts`.  Those four files are unrelated to this diff and reproduce **identically on unmodified `origin/main`** (checked in a throwaway worktree at `f7a06863`): this sandbox has an `OPENROUTER_API_KEY` in the environment, and those tests assert the no-key-configured branch.  CI has no such key, so they pass there.
 
 ### Next Steps & Blockers
 

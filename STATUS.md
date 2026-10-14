@@ -6,7 +6,7 @@
 
 **Review triage.**  The `src/lib/placement-outcome.ts` HIGH-severity thread is Sentry's bug-prediction bot, not one of the three review bots this fixer answers, and its subject (reconciling placement before booking a retryable `not_placed` on the final attempt) is a placement-semantics design decision, so it was left open for the maintainer rather than guessed at.
 
-**Verification.**  `npx tsc --noEmit` ok.  Targeted vitest (tradier + placement-outcome) 96 passed.  Full `npm test` and `npm run build` re-run after merging `origin/main`.
+**Verification.**  `npx tsc --noEmit` ok.  `npm run lint` ok (0 errors, 866 grandfathered warnings).  `npm run build` ok.  Targeted vitest 111 passed after merging `origin/main` (twice).  Full `npm test` reported 13 failures in four LLM-credential test files that reproduce identically on unmodified `origin/main` — this sandbox has an `OPENROUTER_API_KEY` set and those tests assert the no-key branch; CI has no such key.
 
 **Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`.
 
