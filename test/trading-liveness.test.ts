@@ -104,7 +104,7 @@ describe("trading-liveness", () => {
     expect(typeof publicAgg.marketOpen).toBe("boolean");
   });
 
-  it("returns a non-null summary marking autonomy_fully_dark when an autopilot-eligible account is halted", async () => {
+  it("omits autonomy_fully_dark when every autopilot-eligible account is deliberately halted", async () => {
     const { db, liveness } = await load();
     const { userId, accountId } = await makeAccount(db, "Dark Account", "halted");
     db.setPolicy(
@@ -114,11 +114,55 @@ describe("trading-liveness", () => {
     );
 
     const summary = liveness.getTradingLivenessSummary();
+    expect(summary).toBeNull();
+    const publicAgg = liveness.toPublicTradingLiveness(summary);
+    expect(publicAgg.autonomyFullyDark).toBe(false);
+  });
+
+  it("treats close_only as deliberate idle for autonomy_fully_dark", async () => {
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Exit Only", "halted");
+    db.setPolicy(
+      { ...db.getPolicy(userId, accountId), strategyAuthority: "decide", systemState: "close_only" },
+      userId,
+      accountId
+    );
+    expect(liveness.getTradingLivenessSummary()).toBeNull();
+    expect(liveness.isDeliberateAutonomyIdleState("close_only")).toBe(true);
+  });
+
+  it("does not mark the fleet fully dark when ask-first is active but every autopilot account is halted", async () => {
+    const { db, liveness } = await load();
+    const halted = await makeAccount(db, "Halted Autopilot", "halted");
+    db.setPolicy(
+      {
+        ...db.getPolicy(halted.userId, halted.accountId),
+        strategyAuthority: "decide",
+        systemState: "halted"
+      },
+      halted.userId,
+      halted.accountId
+    );
+    const running = await makeAccount(db, "Ask First Active", "active");
+    db.setPolicy(
+      {
+        ...db.getPolicy(running.userId, running.accountId),
+        strategyAuthority: "propose",
+        systemState: "active"
+      },
+      running.userId,
+      running.accountId
+    );
+
+    const summary = liveness.getTradingLivenessSummary();
     expect(summary).not.toBeNull();
-    expect(summary!.darkness?.fullyDark).toBe(true);
-    expect(summary!.darkness?.eligibleAccounts).toBeGreaterThan(0);
-    expect(summary!.accounts.length).toBe(0);
-    expect(summary!.degraded).toBe(true);
+    expect(summary!.accounts.length).toBe(1);
+    expect(summary!.darkness?.fullyDark).toBe(false);
+    expect(summary!.darkness?.fleetActiveAccounts).toBe(1);
+    const publicAgg = liveness.toPublicTradingLiveness(summary);
+    expect(publicAgg.activeAccounts).toBe(1);
+    expect(publicAgg.autonomyFullyDark).toBe(false);
+    expect(publicAgg.degradedReasons).not.toContain("autonomy_fully_dark");
   });
 
   it("maps a fully-dark fleet to degraded > 0 with the fleet-level reason (no account rows to count)", async () => {
@@ -132,7 +176,14 @@ describe("trading-liveness", () => {
       marketOpen: true,
       accounts: [],
       degraded: true,
-      darkness: { eligibleAccounts: 2, activeAccounts: 0, darkAccountLabels: [], fullyDark: true }
+      darkness: {
+        eligibleAccounts: 2,
+        activeAccounts: 0,
+        darkAccountLabels: [],
+        fleetActiveAccounts: 0,
+        eligibleDeliberatelyIdle: 0,
+        fullyDark: true
+      }
     });
     expect(publicAgg.degraded).toBeGreaterThan(0);
     expect(publicAgg.autonomyFullyDark).toBe(true);

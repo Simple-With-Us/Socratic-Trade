@@ -1,5 +1,6 @@
 import { getDb, getInternalSetting, listConnectedAccounts, listUsers, peekPolicy } from "./db";
 import { isMarketOpen } from "./market-calendar";
+import type { SystemState } from "./types";
 
 // Handoff 6b.7: the scheduler heartbeat (/api/health's schedulerAgeSeconds) only proves the tick
 // FUNCTION is running — it goes green the instant a DB write succeeds, even if every strategy run
@@ -222,8 +223,17 @@ export interface AutonomyDarkness {
   activeAccounts: number;
   /** Labels of the eligible-but-not-active accounts, capped, for a human to act on. */
   darkAccountLabels: string[];
-  /** True when eligibleAccounts > 0 and activeAccounts === 0 — the whole fleet is dark. */
+  /** Connected accounts with `systemState === "active"` (any strategy authority). */
+  fleetActiveAccounts: number;
+  /** Eligible autopilot accounts in halted / close_only / liquidating — deliberate idle. */
+  eligibleDeliberatelyIdle: number;
+  /** True only when autopilot-eligible accounts expect runs but none are active fleet-wide. */
   fullyDark: boolean;
+}
+
+/** Owner-intended non-trading states — not counted as "the fleet should be running". */
+export function isDeliberateAutonomyIdleState(state: SystemState): boolean {
+  return state === "halted" || state === "close_only" || state === "liquidating";
 }
 
 export interface TradingLivenessSummary {
@@ -470,15 +480,23 @@ function computeAutonomyDarkness(now: number = Date.now()): AutonomyDarkness {
   const darkAccountLabels: string[] = [];
   let eligibleAccounts = 0;
   let activeAccounts = 0;
+  let fleetActiveAccounts = 0;
+  let eligibleDeliberatelyIdle = 0;
   for (const userId of listUsers()) {
     for (const account of listConnectedAccounts(userId)) {
       try {
         const policy = peekPolicy(userId, account.id);
+        if (policy.systemState === "active") {
+          fleetActiveAccounts += 1;
+        }
         if (policy.strategyAuthority !== "decide") continue; // ask-first/Running is not Autopilot
         if (account.isDraining) continue; // being disconnected — quiet on purpose
         if (account.parked) continue; // parked on purpose (review rank 8)
         if (!account.accountNumber) continue; // never synced; nothing to trade
         eligibleAccounts += 1;
+        if (isDeliberateAutonomyIdleState(policy.systemState)) {
+          eligibleDeliberatelyIdle += 1;
+        }
         if (policy.systemState === "active") {
           activeAccounts += 1;
         } else if (darkAccountLabels.length < MAX_DARK_LABELS) {
@@ -489,12 +507,23 @@ function computeAutonomyDarkness(now: number = Date.now()): AutonomyDarkness {
       }
     }
   }
+  const allEligibleDeliberatelyIdle =
+    eligibleAccounts > 0 && eligibleDeliberatelyIdle === eligibleAccounts;
   return {
     eligibleAccounts,
     activeAccounts,
     darkAccountLabels,
-    // The whole fleet is dark only when there was someone to trade and nobody is.
-    fullyDark: eligibleAccounts > 0 && activeAccounts === 0
+    fleetActiveAccounts,
+    eligibleDeliberatelyIdle,
+    // Autopilot-eligible but none armed active — only page when NO account is `active`
+    // fleet-wide (ask-first still running must not read as "fully dark").  When every
+    // eligible autopilot account is owner-halted/close-only/liquidating, honor that intent
+    // and stay quiet (no autonomy_fully_dark); per-account stale/failure signals still apply.
+    fullyDark:
+      eligibleAccounts > 0 &&
+      activeAccounts === 0 &&
+      fleetActiveAccounts === 0 &&
+      !allEligibleDeliberatelyIdle
   };
 }
 

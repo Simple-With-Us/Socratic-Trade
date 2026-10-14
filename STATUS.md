@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 Cursor — fleet fully dark detector (SOCRATIC-TRADE-2S)
+
+**What.**  `autonomy_fully_dark` no longer fires when any account is `systemState === "active"` (fixes ask-first + halted autopilot false pages).  Deliberately halted / close_only / liquidating autopilot fleets are honored (no fleet-dark signal).  Health route double-checks counts before emitting "fleet is fully dark" copy.
+
+**Verification.**  `npm run lint` ok.  `npx tsc --noEmit` ok.  `npm test -- test/trading-liveness.test.ts` 16 passed.  `npm run build` ok.
+
+**Docs.**  `docs/rollouts/2026-10-14-fleet-fully-dark-detector.md`, `STATUS.md`.
+
+**Next.**  Land PR; after deploy watch SOCRATIC-TRADE-2S for new events.
+
 ## 2026-10-14 GROK — PR #4609 verification order
 
 **What.**  Merged origin/main (`b7775658`, mobile snapshot partial timeout).  The freshness handoff verification block now lists `npm run lint`, `npx tsc --noEmit`, `npm test`, then `npm run build`.  No product behavior change.
