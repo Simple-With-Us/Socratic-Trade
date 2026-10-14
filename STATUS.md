@@ -627,6 +627,15 @@ all pre-existing (reproduced identically with these changes stashed; this sandbo
 **Docs.**  `docs/rollouts/2026-10-14-fleet-fully-dark-detector.md`, `STATUS.md`.
 
 **Next.**  Land PR; after deploy watch SOCRATIC-TRADE-2S for new events.
+## 2026-10-14 GROK — Free data gaps (history, Form 4, Senate eFD)
+
+**What.**  Requests longer than 730 days skip Massive and try Yahoo chart `range=max` (paced), then Tradier, then Twelve Data.  `history_cache_eod` stays a permanent upsert; a fresh series is served offline only when it covers the requested start.  Nightly insider refresh loads the SEC quarterly Form 4 ZIP plus the atom delta, scores dollar-weighted open-market buys and sells over 90 days, and no longer caps the atom feed at 60 or the watchlist at 20.  When Congress.Trade fails or returns no trades, the congress source falls back to Senate eFD.  Quiver is not called.
+
+**Verification.**  Targeted `npx vitest run test/history.test.ts test/web-sources-sec.test.ts test/web-sources.test.ts` passed (63 tests).  Full `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build` are the landing gate and are recorded in the rollout after they run.
+
+**Docs.**  `docs/rollouts/2026-10-14-free-data-gaps.md`, `docs/phase-4-market-data-scoring.md`, `docs/phase-9-web-sources.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Ready for review.  Do not merge from this lane.  Linear team ST was not updated if fleet credentials are missing on this cloud seat; that blocker is in the rollout.
 
 ## 2026-10-14 GROK — PR #4609 verification order
 

@@ -653,16 +653,48 @@ async function refreshCongressUnlocked(
   const sources: string[] = [];
   const warnings: string[] = [];
 
-  // When App A (congress.trade) is the configured source of truth, pull from it and skip the
-  // local scrapers entirely (it IS the authority on congressional disclosures). Otherwise run
-  // App B's own adapter cascade.
+  // Quiver's direct API is retired, so it cannot fill senateTrades.
+  // When Congress.Trade is the source and it returns trades, do not also scrape
+  // Senate eFD. A throw, or an empty result that is not a successful incremental
+  // poll, falls back to the free eFD PTR scrape (agreement cookie + HTML).
+  // Otherwise run App B's own adapter cascade, which already starts at eFD.
   const adapters = congressAsCongressSourceEnabled()
-    ? [{ id: "congress-trade", run: () => fetchAppACongressTrades(now) }]
+    ? []
     : [
         { id: "senate-efd", run: () => scrapeSenateEfd(now) },
         { id: "apify-congress", run: () => fetchApifyCongress(now) },
         { id: "capitol-trades", run: fetchCapitolTrades }
       ];
+
+  if (congressAsCongressSourceEnabled()) {
+    let appATrades: CongressTrade[] = [];
+    try {
+      throwIfOperationLeaseCancelled(operationLeaseSignal);
+      appATrades = await fetchAppACongressTrades(now);
+      throwIfOperationLeaseCancelled(operationLeaseSignal);
+    } catch (error) {
+      throwIfOperationLeaseCancelled(operationLeaseSignal);
+      warnings.push(`congress-trade: ${error instanceof Error ? error.message : "failed"}`);
+    }
+    if (appATrades.length > 0) {
+      collected.push(...appATrades);
+      sources.push("congress-trade");
+    } else if (!(appAPollReachedServer && appAPollCursor > 0)) {
+      if (warnings.length === 0) warnings.push("congress-trade: empty");
+      try {
+        throwIfOperationLeaseCancelled(operationLeaseSignal);
+        const efd = await scrapeSenateEfd(now);
+        throwIfOperationLeaseCancelled(operationLeaseSignal);
+        if (efd.length > 0) {
+          collected.push(...efd);
+          sources.push("senate-efd");
+        }
+      } catch (error) {
+        throwIfOperationLeaseCancelled(operationLeaseSignal);
+        warnings.push(`senate-efd: ${error instanceof Error ? error.message : "failed"}`);
+      }
+    }
+  }
 
   for (const adapter of adapters) {
     throwIfOperationLeaseCancelled(operationLeaseSignal);

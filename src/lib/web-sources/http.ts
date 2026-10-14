@@ -15,11 +15,11 @@ export const BROWSER_UA =
  * SEC requires a descriptive User-Agent with contact info (fair-access policy).
  * Overridable via SEC_EDGAR_USER_AGENT for users who want to use their own contact.
  */
+/** Contact email is required. EDGAR 403s a User-Agent that has no address. */
+export const SEC_EDGAR_FALLBACK_UA = "Socratic Trade research jay@socratic.trade";
+
 export function secUserAgent(): string {
-  return (
-    resolveApiKey("sec_edgar_user_agent", "local") ??
-    "Socratic Trade (personal research; set SEC_EDGAR_USER_AGENT for real contact)"
-  );
+  return resolveApiKey("sec_edgar_user_agent", "local") ?? SEC_EDGAR_FALLBACK_UA;
 }
 
 export function sleep(ms: number): Promise<void> {

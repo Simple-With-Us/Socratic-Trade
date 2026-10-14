@@ -1,5 +1,9 @@
 # Phase 4 - Market Data And Multi-Factor Scoring
 
+## Daily history beyond two years (2026-10-14)
+
+`fetchDailyOHLC` (`src/lib/history.ts`) defaults to about five years.  Massive free aggregates stop near two years, and Stooq stays out of the cascade (bot wall).  A lookback longer than 730 days skips Massive and tries Yahoo chart `range=max` (paced), then Tradier history, then Twelve Data, then the remaining broker and keyed tiers.  A shorter lookback keeps Massive and uses Yahoo `range=1y`.  SQLite `history_cache_eod` rows are permanent.  A fresh series is served with no network only when its oldest bar reaches the requested start, so a two-year cache cannot block `range=max`.
+
 ## Goals
 
 - Introduce a provider abstraction without removing the current delayed Nasdaq fallback.

@@ -2,6 +2,11 @@ import { getDb } from "./db";
 import type { OHLCBar } from "./indicators";
 import { normalizeSymbol } from "./money";
 
+/**
+ * Upsert daily bars keyed by (ticker, date). Rows are permanent: nothing here
+ * deletes by age. A later read can serve a multi-year series without refetching
+ * the prefix. Callers still decide whether a fresh series is long enough.
+ */
 export function upsertHistoryCacheEod(rawSymbol: string, bars: OHLCBar[]): void {
   const symbol = normalizeSymbol(rawSymbol);
   if (!symbol || !bars || bars.length === 0) return;
