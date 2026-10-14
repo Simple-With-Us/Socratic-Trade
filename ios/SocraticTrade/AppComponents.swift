@@ -945,6 +945,9 @@ private struct PartialDataBanner: View {
         if dropCounts.pendingProposals > 0 {
             parts.append("\(dropCounts.pendingProposals) pending proposal\(dropCounts.pendingProposals == 1 ? "" : "s")")
         }
+        if parts.isEmpty, let reason = store.snapshot?.partialReason, !reason.isEmpty {
+            return "\(reason)\u{00A0} Owner Approve is paused until a complete refresh lands."
+        }
         let which = parts.isEmpty ? "snapshot items" : parts.joined(separator: ", ")
         return "\(which) were dropped during decode. Owner Approve is paused until a clean refresh lands — a pending proposal might not be visible right now."
     }
