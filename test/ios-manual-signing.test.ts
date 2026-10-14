@@ -95,6 +95,18 @@ describe("Socratic Trade manual Release signing: config agreement", () => {
     expect(workflow).not.toMatch(/https:\/\/[a-z0-9]+@o\d+\.ingest/);
   });
 
+  it("Sentry.xcconfig substitutes SENTRY_DSN and project.yml does not pin it empty", () => {
+    const xcconfig = readFileSync(resolve(repo, "ios/Config/Sentry.xcconfig"), "utf8");
+    const project = readFileSync(resolve(repo, "ios/project.yml"), "utf8");
+    expect(xcconfig).toContain("SENTRY_DSN = $(SENTRY_DSN)");
+    expect(xcconfig).not.toMatch(/https:\/\//);
+    expect(project).toContain("Config/Sentry.xcconfig");
+    expect(project).not.toMatch(/SENTRY_DSN:\s*""/);
+    expect(project).not.toMatch(/https:\/\/[a-z0-9]+@/);
+    expect(workflow).toContain('ver="2.46.0"');
+    expect(workflow).toContain("yonaskolb/XcodeGen/releases/download/${ver}/xcodegen.zip");
+  });
+
   it("the installer reads the same map and fails closed on the wrong profile", () => {
     expect(installer).toContain("ios/appstore-profiles.json");
     expect(installer).toContain("get-task-allow");

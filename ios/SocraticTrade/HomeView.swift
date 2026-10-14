@@ -197,7 +197,7 @@ private struct ReadyHomeHero: View {
 
     /// Console-shared run-state word — market-aware, so this pill can never claim
     /// "Running" while the console says "Paused · market closed".
-    private var runState: RunStateWord { deriveRunStateWord(snapshot: snapshot) }
+    private var runState: RunStateWord { store.deriveRunState(for: snapshot) }
 
     var body: some View {
         AppCard {
@@ -319,10 +319,11 @@ private enum HomeSheet: String, Identifiable {
 }
 
 private struct AgentOverviewCard: View {
+    @EnvironmentObject private var store: MobileStore
     let snapshot: MobileSnapshot
     var showInlineReadiness: Bool = true
 
-    private var runState: RunStateWord { deriveRunStateWord(snapshot: snapshot) }
+    private var runState: RunStateWord { store.deriveRunState(for: snapshot) }
 
     var body: some View {
         AppCard {
@@ -378,7 +379,7 @@ private struct AgentOverviewCard: View {
     @ViewBuilder
     private var statusLabels: some View {
         Label(AppFormat.strategyAuthorityLabel(snapshot.readiness.strategyAuthority), systemImage: "person.badge.shield.checkmark")
-        Label(AppFormat.marketSessionBannerLabel(snapshot.marketSession), systemImage: "chart.line.uptrend.xyaxis")
+        Label(AppFormat.marketSessionBannerLabel(store.displayMarketSession(for: snapshot)), systemImage: "chart.line.uptrend.xyaxis")
     }
 }
 
@@ -399,7 +400,7 @@ private struct StrategyControlsCard: View {
     private var plan: AgentControlPlan {
         AgentControlPlan.from(
             systemState: snapshot.readiness.systemState,
-            runState: deriveRunStateWord(snapshot: snapshot),
+            runState: store.deriveRunState(for: snapshot),
             authority: snapshot.readiness.strategyAuthority,
             snapshotStale: store.isSnapshotStale(),
             ready: snapshot.readiness.hasAccount && snapshot.readiness.hasUniverse
