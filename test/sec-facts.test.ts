@@ -286,6 +286,78 @@ describe("SEC Facts and Insider Transactions Ingestion (P4)", () => {
     expect(card).not.toContain(SEC_COMPANYFACTS_CACHE_CONCEPT);
   });
 
+  it("keeps sibling concepts when one unit value is not an array", async () => {
+    const db = getDb();
+    const mockFacts = {
+      cik: 141414,
+      entityName: "Malformed Units Inc.",
+      facts: {
+        "us-gaap": {
+          Assets: {
+            units: {
+              USD: [
+                {
+                  val: 42,
+                  accn: "0000141414-26-000001",
+                  fy: 2025,
+                  fp: "FY",
+                  form: "10-K",
+                  filed: "2026-02-01",
+                  end: "2025-12-31",
+                  frame: "CY2025"
+                }
+              ],
+              // Non-array unit value.  Must not reject Assets or the rest of the document.
+              shares: { val: 1 }
+            }
+          },
+          BrokenConcept: {
+            units: "not-a-record"
+          },
+          NetIncomeLoss: {
+            units: {
+              USD: [
+                {
+                  val: 7,
+                  accn: "0000141414-26-000001",
+                  fy: 2025,
+                  fp: "FY",
+                  form: "10-K",
+                  filed: "2026-02-01",
+                  end: "2025-12-31",
+                  frame: "CY2025"
+                }
+              ]
+            }
+          }
+        }
+      }
+    };
+
+    vi.mocked(politeFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => mockFacts
+    } as any);
+
+    await ingestCompanyFacts("0000141414");
+    const rows = db
+      .prepare("SELECT concept, value FROM sec_facts WHERE cik = '0000141414' AND concept != ? ORDER BY concept ASC")
+      .all(SEC_COMPANYFACTS_CACHE_CONCEPT) as Array<{ concept: string; value: number }>;
+    expect(rows).toEqual([
+      { concept: "Assets", value: 42 },
+      { concept: "NetIncomeLoss", value: 7 }
+    ]);
+
+    // A `facts` value that is not an object still propagates (worker retry).  It is not a silent skip.
+    vi.mocked(politeFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ facts: 1 })
+    } as any);
+    await expect(ingestCompanyFacts("0000141414")).rejects.toThrow();
+  });
+
   it("round-trips companyfacts JSON through the SQLite cache helpers", () => {
     const payload = JSON.stringify({ facts: { "us-gaap": { Assets: { units: { USD: [] } } } } });
     const fetchedAt = "2026-10-14T12:00:00.000Z";

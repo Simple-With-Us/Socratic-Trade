@@ -29,17 +29,40 @@ const CompanyFactEntrySchema = z.object({
 }).passthrough();
 
 const CompanyConceptSchema = z.object({
-  units: z.record(z.string(), z.array(z.unknown())).optional()
+  // Unit values are arrays of fact entries on a well-formed filing.  A non-array
+  // value must not fail this concept: the walk below skips those keys.  A concept
+  // whose `units` is not a record fails this object and is dropped by
+  // conceptsFromTaxonomy, so one bad concept cannot reject the rest of the CIK.
+  units: z.record(z.string(), z.unknown()).optional()
 }).passthrough();
 
 export const CompanyFactsSchema = z.object({
+  // Taxonomy maps are unknown here on purpose.  z.record(CompanyConceptSchema)
+  // fails the entire document when any one concept is off-shape, and the nightly
+  // sweep then advances past that CIK with no structured facts.  conceptsFromTaxonomy
+  // keeps the concepts that match and skips the rest.  The envelope still refuses
+  // a non-object body and a `facts` value that is not an object, and that failure
+  // still propagates so the worker retries.
   facts: z.object({
-    "us-gaap": z.record(z.string(), CompanyConceptSchema).optional(),
-    "ifrs-full": z.record(z.string(), CompanyConceptSchema).optional()
+    "us-gaap": z.unknown().optional(),
+    "ifrs-full": z.unknown().optional()
   }).passthrough().optional()
 }).passthrough();
 
 export type CompanyFactsDocument = z.infer<typeof CompanyFactsSchema>;
+type CompanyConcept = z.infer<typeof CompanyConceptSchema>;
+
+/** Keep concepts that match the known shape.  One malformed concept is skipped. */
+function conceptsFromTaxonomy(value: unknown): Record<string, CompanyConcept> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, CompanyConcept> = {};
+  for (const [name, concept] of Object.entries(value as Record<string, unknown>)) {
+    const parsed = CompanyConceptSchema.safeParse(concept);
+    if (!parsed.success) continue;
+    out[name] = parsed.data;
+  }
+  return out;
+}
 
 // High-yield GAAP concepts for scanning
 const targetConcepts = new Set([
@@ -106,9 +129,11 @@ export async function ingestCompanyFacts(cik: string): Promise<void> {
     // 20-F/40-F issuers reporting under IFRS expose concepts under `facts.ifrs-full` rather than
     // `facts.us-gaap` — both taxonomies are supported inputs (the periodic-form allowlist below
     // admits 20-F/40-F), so a missing US-GAAP namespace alone is not "no data".
-    const taxonomies: Array<{ name: string; facts: Record<string, z.infer<typeof CompanyConceptSchema>>; targets: Set<string> }> = [];
-    if (data.facts?.["us-gaap"]) taxonomies.push({ name: "us-gaap", facts: data.facts["us-gaap"], targets: targetConcepts });
-    if (data.facts?.["ifrs-full"]) taxonomies.push({ name: "ifrs-full", facts: data.facts["ifrs-full"], targets: ifrsTargetConcepts });
+    const taxonomies: Array<{ name: string; facts: Record<string, CompanyConcept>; targets: Set<string> }> = [];
+    const usGaap = conceptsFromTaxonomy(data.facts?.["us-gaap"]);
+    const ifrsFull = conceptsFromTaxonomy(data.facts?.["ifrs-full"]);
+    if (Object.keys(usGaap).length > 0) taxonomies.push({ name: "us-gaap", facts: usGaap, targets: targetConcepts });
+    if (Object.keys(ifrsFull).length > 0) taxonomies.push({ name: "ifrs-full", facts: ifrsFull, targets: ifrsTargetConcepts });
     if (taxonomies.length === 0) {
       return; // genuinely no supported taxonomy — expected no-data case
     }

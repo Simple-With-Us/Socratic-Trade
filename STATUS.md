@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 Grok — PR #4665 companyfacts unit shape
+
+**What.**  `origin/main` was already contained in this branch (`79df823d`); `git merge origin/main` was a no-op.  A non-array companyfacts unit value no longer fails `CompanyFactsSchema` for the whole CIK.  `conceptsFromTaxonomy` skips that concept and still inserts its siblings.  A `facts` value that is not an object still throws so the sweep retry path stays intact.  The rollout Verification State lists lint, tsc, `npm test`, and build in that order.
+
+**Verification.**  `npm run lint` ok (0 errors, 856 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9308 passed, 51 skipped, and 1 failed: untouched `test/egress-guard.test.ts` because this sandbox rejects the discord.com lookup.  Targeted sec-facts, sec-xbrl, and companyfacts-sweep tests passed (48).
+
+**Docs.**  `docs/rollouts/2026-10-14-sec-xbrl-cached-fundamentals.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Push the branch.  Reply on the open threads.  Do not resolve them.  Do not merge the PR.  Comment `@kody start-review`.
+
 ## 2026-10-14 Grok — PR #4665 review follow-up
 
 **What.**  Merged `origin/main` (`f7a06863`, `@types/node` 24.19.2).  Three unresolved Sentry threads were real.  `applyEnrichment` keeps a positive Nasdaq market cap instead of letting SEC shares × price replace it.  The companyfacts sweep cursor moves past a symbol whose fetch throws.  Evidence cards omit the `__companyfacts_json__` cache row.  Companyfacts JSON is validated with a passthrough Zod schema instead of `as any`.
