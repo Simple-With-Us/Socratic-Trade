@@ -1,5 +1,20 @@
 # Current Status
 
+## 2026-10-14 Codex Autofix — PR #4663 review triage (no code change)
+
+**What.**  Triaged the two open review threads on the fleet fully-dark detector branch.  Both were already resolved in the branch by the time this pass ran, so no code changed and nothing was pushed.
+
+- **Sentry's `autonomy_fully_dark` "can never be true" finding — confirmed real, already fixed upstream by `c05390ce`.**  The claim checks out: `SystemState` (`src/lib/types.ts:24`) is a closed four-value union and `isDeliberateAutonomyIdleState` claimed all three non-active values, so the active / deliberately-idle buckets were exhaustive and disjoint.  `fullyDark` requires `activeAccounts === 0`, which forces `eligibleDeliberatelyIdle === eligibleAccounts`, which forces `allEligibleDeliberatelyIdle === true` and makes the `!allEligibleDeliberatelyIdle` term constant-false.  Verified by EXECUTION rather than reading alone: a probe driving the real `getTradingLivenessSummary()` with one eligible autopilot account in each of `halted` / `close_only` / `liquidating` returned `fullyDark=undefined` (summary `null`) for all three.  Re-running that probe against the current head confirms the fix — owner stops stay quiet and `fullyDark` is reachable again through an app halt; `test/trading-liveness.test.ts` is 18 passed.
+- **Kody's verification-block finding — already addressed by `59376259`** (per-command outcome for all four gates, including an honest `npm run build` OOM note).
+
+**Left open, no fix.**  Kody's N+1 finding on the new `eligibleAccountIsDeliberatelyIdle` halt-cause lookup is factually accurate but was deliberately not fixed: `describeAutonomyHaltCause` has four callers, and its two `audit_events` SELECTs are correlated (the second keys off `halt.id` / `halt.created_at` from the first, with an `id <>` exclusion), so the suggested batch is a rewrite of that query, not a merge — and a subtle mistake there silently reclassifies an app halt as an owner stop and flips a page.  Asked the maintainer two questions (is the per-poll cost material; scope the batch to `trading-liveness` or restructure the shared module) rather than guessing.  Thread left unresolved by design.
+
+**Verification.**  `npx tsc --noEmit` ok on the current head.  `test/trading-liveness.test.ts` 18 passed.  All 8 PR checks green; `verify` had not yet run on the head commit at the time of writing, and the PR sits `mergeable_state: blocked` on unresolved conversations, not on CI.
+
+**Docs.**  This entry only; a PR comment records the triage and the two open questions.  No source file was modified.
+
+**Next.**  Maintainer to answer the batching questions above; then re-run this pass to act on the answer.
+
 ## 2026-10-14 Cursor — fleet fully dark detector (SOCRATIC-TRADE-2S)
 
 **What.**  `autonomy_fully_dark` no longer fires when any account is `systemState === "active"` (fixes ask-first + halted autopilot false pages).  Owner halt / close_only / liquidating stays quiet.  An app halt (boot, watchdog, breaker, broker auto-pause) with nothing else active still pages, so the signal is not dead.  Health route double-checks counts before emitting "fleet is fully dark" copy.  Claude autofix starts only for Codex, Kody, and Cursor reviews, so a Seer review does not fail that job.
