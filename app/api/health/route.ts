@@ -218,7 +218,11 @@ async function assembleHealth(): Promise<HealthPayload> {
     if (checks.tradingLivenessDegraded) {
       // A fully-dark fleet has no active accounts to count, so the generic message would page
       // "1 active account(s)" while zero are active — say what is actually wrong instead.
-      const livenessMessage = publicLiveness.autonomyFullyDark
+      const fleetFullyDark =
+        publicLiveness.autonomyFullyDark &&
+        publicLiveness.autonomyActiveAccounts === 0 &&
+        publicLiveness.activeAccounts === 0;
+      const livenessMessage = fleetFullyDark
         ? `Trading liveness is degraded: fleet is fully dark — ${publicLiveness.autonomyEligibleAccounts} account(s) eligible to trade, none active.`
         : `Trading liveness is degraded: ${publicLiveness.degraded} active account(s) have stalled or failed repeatedly.`;
       void alertLivenessWarning("trading_liveness_degraded", livenessMessage);
