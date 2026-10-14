@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-13 Muse-Assist — PR #4619 review threads (proxy-use log)
+
+**What.**  Review fixes on `Muse-Assist/proxy-use-logging`.  The proxy-use ring now lives on `globalThis` (`__socraticProxyUseRing`) so `dataSourceFetch` and `GET /api/proxy-use` share one buffer when Next bundles them as separate module copies.  `proxyProbePort` in `src/lib/proxy-fetch.ts` takes 443 for an https URL whose port is empty (omitted or the scheme default, which `URL` elides) and 80 otherwise.  It is not exported from the route module.  The rollout note no longer names private proxy addresses or mesh routing.
+
+**Tests.**  `test/proxy-use-log.test.ts` asserts a recorded entry is the `globalThis` ring.  `test/proxy-use-route.test.ts` covers explicit, http, and https probe ports, including elided defaults.  Targeted run: 88 passed across the proxy-use, data-source-fetch, proxy-fetch, and middleware-auth files.
+
+**Verification.**  `npm run lint` -> ok (0 errors; 866 warnings).  `npx tsc --noEmit` -> ok.  `npm test` -> 1 failed | 9267 passed | 51 skipped.  The failure is `test/egress-guard.test.ts` real-DNS (`discord.com` -> `198.18.0.1` in this environment); that file is unchanged versus `origin/main`.  `npm run build` -> ok.
+
+**Docs.**  `docs/rollouts/2026-10-13-proxy-use-logging.md`.
+
+**Next.**  Threads stay open until a reviewer resolves them.  Merge only when `verify` is green.
+
 ## 2026-10-13 Muse-Assist — per-request proxy-use logging + public `GET /api/proxy-use` (branch `Muse-Assist/proxy-use-logging`)
 
 **What.**  Per-request logging of residential-proxy use decisions for market-data/provider traffic. `src/lib/proxy-use-log.ts` (new) holds a 100-entry in-memory ring fed by `dataSourceFetch` at every exit path (excluded service / internal target / no proxy / proxied attempt / fail_soft fallback recorded as a second `fallback:true` entry). New public no-auth `GET /api/proxy-use` returns the aggregate snapshot plus a Mango TCP reachability probe (3s timeout, 60s cache, never throws); added to middleware `PUBLIC_PREFIXES` so the anonymous 2-minute watchdog can poll it. No request behavior changed — additive telemetry only. 6 new unit tests; 82 tests pass across the touched areas; tsc shows only pre-existing unrelated errors (identical on pristine main).

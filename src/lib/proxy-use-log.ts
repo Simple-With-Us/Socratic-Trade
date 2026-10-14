@@ -10,6 +10,10 @@
  *
  * Dependency-free and server-only. Entries carry host:port of the proxy only —
  * never credentials, never request URLs or bodies.
+ *
+ * The ring is pinned on globalThis. Next.js can bundle dataSourceFetch and
+ * GET /api/proxy-use as separate module instances in one process; a module
+ * local array would let the endpoint read an empty buffer.
  */
 
 import "server-only";
@@ -40,7 +44,12 @@ export interface ProxyUseSnapshot {
 const RING_CAPACITY = 100;
 const HOUR_MS = 3_600_000;
 
-const ring: ProxyUseEntry[] = [];
+type ProxyUseRingHost = typeof globalThis & {
+  __socraticProxyUseRing?: ProxyUseEntry[];
+};
+
+const ringHost = globalThis as ProxyUseRingHost;
+const ring: ProxyUseEntry[] = (ringHost.__socraticProxyUseRing ??= []);
 
 /** Record one proxy-use decision. Never throws (logging must not break a fetch). */
 export function recordProxyUse(entry: Omit<ProxyUseEntry, "ts"> & { ts?: number }): void {

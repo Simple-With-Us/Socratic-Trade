@@ -77,4 +77,11 @@ describe("proxy-use-log", () => {
     expect(() => recordProxyUse({ usedProxy: false, source: "none", host: null, fallback: false })).not.toThrow();
     expect(getProxyUseSnapshot().total).toBe(1);
   });
+
+  it("pins the ring on globalThis so bundled copies share one buffer", () => {
+    const host = globalThis as { __socraticProxyUseRing?: ProxyUseEntry[] };
+    recordProxyUse(entry({ ts: 42_000, service: "polygon" }));
+    expect(host.__socraticProxyUseRing?.some((row) => row.ts === 42_000 && row.service === "polygon")).toBe(true);
+    expect(getProxyUseSnapshot(43_000).total).toBe(host.__socraticProxyUseRing?.length);
+  });
 });

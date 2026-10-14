@@ -15,7 +15,7 @@
 import "server-only";
 import { Socket } from "node:net";
 import { getProxyUseSnapshot } from "@/lib/proxy-use-log";
-import { resolveResidentialProxyUrl, safeProxyHostForLog } from "@/lib/proxy-fetch";
+import { proxyProbePort, resolveResidentialProxyUrl, safeProxyHostForLog } from "@/lib/proxy-fetch";
 
 export const dynamic = "force-dynamic";
 
@@ -59,7 +59,7 @@ async function checkProxyReachability(now: number): Promise<MangoProbe> {
     const proxyUrl = resolveResidentialProxyUrl() ?? "";
     const host = safeProxyHostForLog(proxyUrl);
     const url = new URL(proxyUrl);
-    const port = url.port ? Number(url.port) : 80;
+    const port = proxyProbePort(url);
     const latencyMs = Number.isFinite(port)
       ? await probeTcpConnect(url.hostname, port, PROBE_TIMEOUT_MS)
       : null;
