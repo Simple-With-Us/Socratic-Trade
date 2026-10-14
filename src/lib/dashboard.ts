@@ -68,7 +68,8 @@ import { deriveMacroMetrics } from "./macro-metrics";
 import { computeMarketInternals } from "./market-internals";
 import { getMarketSignals, type MarketSignals } from "./market-signals";
 import { fetchMassiveNews } from "./market-signals/massive";
-import { weeklyMarketDigestForScan } from "./weekly-market-digest";
+import { emptyWeeklyMarketDigest, weeklyMarketDigestForScan } from "./weekly-market-digest";
+import { DEFAULT_POLICY } from "./defaults";
 import { fetchMacroHistory } from "./macro-history";
 import { attachOrderRoles } from "./order-role-context";
 import type { BrokerageAccount, BrokerQuote, ConnectedAccount, EquityOrder, EquityPosition, OptionPosition, FillEvent, MarketQuote, MarketScan, NotificationEvent, NotificationEventType, Portfolio, TradeProposal, TradingPolicy } from "./types";
@@ -161,16 +162,33 @@ function withDeadline<T>(
  *  whole snapshot stops waiting at 20s so a slow broker cannot consume the phone's budget. */
 export const SNAPSHOT_OVERALL_BUDGET_MS = 20_000;
 export const SNAPSHOT_BROKER_TIMEOUT_MS = 12_000;
+/** Fills, P&L, scorecards, and the feed run after the last awaited section.  Section waits stop
+ *  this early so that work finishes before `outcomeOrTimeout` discards a nearly complete compute. */
+export const SNAPSHOT_POST_PROCESS_RESERVE_MS = 3_000;
 
-/** Wait for one snapshot dependency: the per-call cap, or whatever overall budget is left. */
+/** Broker book sections.  A timeout here means accounts, positions, or orders did not load, so
+ *  Owner Approve pauses.  News, macro, signals, quotes, and the SPY benchmark do not. */
+export const SNAPSHOT_APPROVE_BLOCKING_SECTIONS = [
+  "gateway.getAccounts",
+  "gateway.getOptionPositions",
+  "portfolio/positions/orders"
+] as const;
+
+/** Wait for one snapshot dependency: the per-call cap, or whatever section budget is left. */
 export function snapshotSectionWaitMs(
   startedAt: number,
   capMs = SNAPSHOT_BROKER_TIMEOUT_MS,
   now = Date.now()
 ): number {
-  const remaining = SNAPSHOT_OVERALL_BUDGET_MS - (now - startedAt);
+  const sectionBudgetMs = SNAPSHOT_OVERALL_BUDGET_MS - SNAPSHOT_POST_PROCESS_RESERVE_MS;
+  const remaining = sectionBudgetMs - (now - startedAt);
   if (remaining <= 0) return 0;
   return Math.min(capMs, remaining);
+}
+
+function approveBlockingTimeouts(timedOutSections: readonly string[]): string[] {
+  const blocking = new Set<string>(SNAPSHOT_APPROVE_BLOCKING_SECTIONS);
+  return timedOutSections.filter((section) => blocking.has(section));
 }
 
 /** Advisory-audit rate limiter: the dashboard snapshot recomputes on every console load, so an
@@ -377,8 +395,35 @@ function dashboardHaltCause(
  * hard correctness rule — never key by userId alone. Writes that change
  * snapshot material call `invalidateDashboardSnapshotCache`.
  */
-function markSnapshotPartial<T>(value: T, reason: string): T & { partialData: true; partialReason: string } {
-  return { ...(value as object), partialData: true, partialReason: reason } as T & { partialData: true; partialReason: string };
+function readOrFallback<T>(label: string, read: () => T, fallback: T): T {
+  try {
+    return read();
+  } catch (error) {
+    console.warn(`[dashboard] degraded snapshot ${label} failed:`, error);
+    return fallback;
+  }
+}
+
+const defaultDegradedReads = {
+  getPolicy,
+  listConnectedAccounts,
+  getActiveConnectedAccount,
+  isAdminEmail,
+  accountReadinessForSnapshot,
+  weeklyMarketDigestForScan
+};
+
+let degradedReads = { ...defaultDegradedReads };
+
+/** Test-only.  Pass null to restore the real readers.  Production never calls this. */
+export function setDegradedSnapshotReadsForTests(overrides: Partial<typeof defaultDegradedReads> | null): void {
+  degradedReads = overrides ? { ...defaultDegradedReads, ...overrides } : { ...defaultDegradedReads };
+}
+
+function markSnapshotPartial<T extends object>(value: T, reason: string): T & { partialData: true; partialReason: string } {
+  const existing = (value as { partialReason?: unknown }).partialReason;
+  const partialReason = typeof existing === "string" && existing.trim().length > 0 ? existing : reason;
+  return { ...value, partialData: true, partialReason };
 }
 
 /** DB-only snapshot used when a cold compute is still running past the phone budget.  No broker
@@ -390,8 +435,13 @@ function degradedDashboardSnapshot(
 ) {
   const currentUserDisplay: CurrentUserDisplay =
     typeof currentUser === "string" ? { email: currentUser } : currentUser ?? {};
-  const policy = getPolicy(userId);
-  const connectedAccounts = listConnectedAccounts(userId);
+  const policy = readOrFallback(
+    "getPolicy",
+    () => degradedReads.getPolicy(userId),
+    { ...DEFAULT_POLICY, systemState: "halted" as const }
+  );
+  const connectedAccounts = readOrFallback("listConnectedAccounts", () => degradedReads.listConnectedAccounts(userId), []);
+  const activeAccount = readOrFallback("getActiveConnectedAccount", () => degradedReads.getActiveConnectedAccount(userId), undefined);
   let derived: ReturnType<typeof deriveMacroMetrics>;
   try {
     derived = deriveMacroMetrics(BLANK_MACRO_FALLBACK, {});
@@ -404,6 +454,14 @@ function degradedDashboardSnapshot(
   } catch {
     regime = "unknown";
   }
+  const readinessFallback: AccountReadiness = {
+    ok: false,
+    reason: "Broker data did not arrive before the snapshot budget.",
+    detail: reason,
+    accountNumber: policy.accountNumber,
+    connectedAccountId: policy.connectedAccountId,
+    broker: policy.activeBroker
+  };
   return {
     partialData: true as const,
     partialReason: reason,
@@ -413,7 +471,7 @@ function degradedDashboardSnapshot(
       ...(currentUserDisplay.name ? { name: currentUserDisplay.name } : {}),
       ...(currentUserDisplay.imageUrl ? { imageUrl: currentUserDisplay.imageUrl } : {}),
       ...(currentUserDisplay.loginProvider ? { loginProvider: currentUserDisplay.loginProvider } : {}),
-      isAdmin: isAdminEmail(currentUserDisplay.email)
+      isAdmin: readOrFallback("isAdminEmail", () => degradedReads.isAdminEmail(currentUserDisplay.email), false)
     },
     llmConfigured: false,
     policy,
@@ -425,11 +483,21 @@ function degradedDashboardSnapshot(
       }
     })(),
     accounts: [] as BrokerageAccount[],
-    accountReadiness: accountReadinessForSnapshot({
-      policy,
-      liveAccounts: [],
-      brokerAccountReadError: reason
-    }),
+    accountReadiness: readOrFallback(
+      "accountReadinessForSnapshot",
+      () => {
+        // A missing active row here means the DB read failed or the pointer is empty while the
+        // broker call is the thing that timed out.  Do not report the account as "not found".
+        if (policy.connectedAccountId && !activeAccount) return readinessFallback;
+        return degradedReads.accountReadinessForSnapshot({
+          policy,
+          activeAccount,
+          liveAccounts: [],
+          brokerAccountReadError: reason
+        });
+      },
+      readinessFallback
+    ),
     connectedAccounts,
     connectedAccountPolicies: {},
     connectedAccountPendingCounts: {},
@@ -480,7 +548,7 @@ function degradedDashboardSnapshot(
     haltCause: dashboardHaltCause(userId, policy),
     socratic: { decisions: [], frameworkProposals: [] },
     smartMoney: { congress: [], insider: [], thirteenF: [], ark: [], congressScoreVerdict: null },
-    marketSession: currentMarketSession(),
+    marketSession: readOrFallback("currentMarketSession", () => currentMarketSession(), "closed"),
     macroBoard: {
       macro: BLANK_MACRO_FALLBACK,
       derived,
@@ -489,7 +557,11 @@ function degradedDashboardSnapshot(
       history: {},
       news: []
     },
-    weeklyMarketDigest: weeklyMarketDigestForScan(userId, undefined)
+    weeklyMarketDigest: readOrFallback(
+      "weeklyMarketDigestForScan",
+      () => degradedReads.weeklyMarketDigestForScan(userId, undefined),
+      emptyWeeklyMarketDigest(new Date().toISOString(), [reason])
+    )
   };
 }
 
@@ -1437,12 +1509,13 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     );
   }
 
-  const partialReason = timedOutSections.length > 0
-    ? `Snapshot section timed out (${timedOutSections.join(", ")}).  Partial data is shown so the request stays inside the phone's 30s limit.`
+  const blockingTimeouts = approveBlockingTimeouts(timedOutSections);
+  const partialReason = blockingTimeouts.length > 0
+    ? `Snapshot section timed out (${blockingTimeouts.join(", ")}).  Partial data is shown so the request stays inside the phone's 30s limit.`
     : undefined;
 
   return {
-    partialData: timedOutSections.length > 0,
+    partialData: blockingTimeouts.length > 0,
     partialReason,
     currentUser: {
       userId,

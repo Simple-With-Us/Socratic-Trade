@@ -2,9 +2,9 @@
 
 ## 2026-10-13 GROK — Mobile snapshot partial timeout
 
-**What.**  `/api/mobile/snapshot` and `getDashboardSnapshot` stop waiting at 20s.  Each broker or dependency section waits at most 12s.  A timeout returns the last cached snapshot, or a DB-only shell when nothing is cached, with `partialData` and `partialReason`.  iOS pauses Owner Approve on that server flag.
+**What.**  `/api/mobile/snapshot` and `getDashboardSnapshot` stop waiting at 20s.  Each broker or dependency section waits at most 12s, and section waits leave 3s for post-processing.  A timeout returns the last cached snapshot, keeping a specific `partialReason` when one is already set, or a DB-only shell when nothing is cached.  That shell guards policy, accounts, admin, readiness, and the weekly digest, and it reports a timeout instead of a missing account.  iOS pauses Owner Approve only when accounts, option positions, or the portfolio bundle timed out.  News, macro, quotes, and the SPY benchmark do not pause it.
 
-**Verification.**  `npx tsc --noEmit` clean.  Targeted vitest passed for the snapshot budget, the snapshot cache, halt-cause, order roles, and inflight-deadline.  Swift was not compiled in this checkout.
+**Verification.**  `npm run lint` ok (0 errors).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9263 passed, 51 skipped, and 1 failed: untouched `test/egress-guard.test.ts` because this sandbox resolves discord.com to `198.18.0.1`.  Snapshot budget tests passed.  Swift was not compiled in this checkout.
 
 **Docs.**  `docs/rollouts/2026-10-13-snapshot-partial-timeout.md`.
 
