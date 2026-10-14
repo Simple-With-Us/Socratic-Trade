@@ -347,6 +347,10 @@ describe("SEC insider bulk datasets", () => {
     });
     const files = unzipNamedFiles(zip);
     const filings = parseInsiderBulkTables(files, now, 90);
+    expect(filings.length).toBeGreaterThan(0);
+    for (const filing of filings) {
+      expect(BulkInsiderFilingSchema.safeParse(filing).success).toBe(true);
+    }
     const nvda = filings.find((filing) => filing.symbol === "NVDA");
     const aapl = filings.find((filing) => filing.symbol === "AAPL");
     expect(nvda).toMatchObject({ owner: "Jensen Huang", buyTx: 1, buyShares: 10, buyValue: 200, sellTx: 0 });
@@ -369,6 +373,41 @@ describe("SEC insider bulk datasets", () => {
       extra: true
     });
     expect(parsed.success).toBe(false);
+  });
+
+  it("drops a filing when the strict schema rejects an undeclared key", () => {
+    const now = Date.parse("2026-06-16T00:00:00Z");
+    const rejected = BulkInsiderFilingSchema.safeParse({
+      symbol: "NVDA",
+      owner: "Jensen Huang",
+      buyTx: 1,
+      sellTx: 0,
+      buyShares: 10,
+      sellShares: 0,
+      buyValue: 200,
+      sellValue: 0,
+      filedAt: "2026-06-01",
+      accession: "0001234567-26-000010",
+      extra: true
+    });
+    expect(rejected.success).toBe(false);
+    const files = new Map<string, string>([
+      ["SUBMISSION.tsv", ["ACCESSION_NUMBER\tISSUERTRADINGSYMBOL", "0001234567-26-000010\tNVDA"].join("\n")],
+      [
+        "NONDERIV_TRANS.tsv",
+        [
+          "ACCESSION_NUMBER\tTRANS_DATE\tTRANS_CODE\tTRANS_SHARES\tTRANS_PRICEPERSHARE",
+          "0001234567-26-000010\t01-JUN-2026\tP\t10\t20"
+        ].join("\n")
+      ]
+    ]);
+    const spy = vi.spyOn(BulkInsiderFilingSchema, "safeParse").mockReturnValue(rejected);
+    try {
+      expect(parseInsiderBulkTables(files, now, 90)).toEqual([]);
+      expect(spy).toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("keeps the XML delta when the quarterly ZIP 404s and ingests bulk rows when the feed is empty", async () => {

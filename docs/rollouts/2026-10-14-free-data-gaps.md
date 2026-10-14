@@ -72,28 +72,39 @@ Review follow-up (`origin/main` was already merged, no merge commit):
 ```bash
 npm run lint
 npx tsc --noEmit
-npx vitest run test/history.test.ts test/web-sources-sec.test.ts test/web-sources.test.ts
 npm test
+npm run build
 ```
 
-`npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted history and web-source tests: 67 passed.  Full `npm test`: 1 failed, 9310 passed, 51 skipped, 826 files.  The failure is `test/egress-guard.test.ts` resolving `https://discord.com` with real DNS.  This shell cannot resolve that host.  The file is not in this diff.
+`npm run lint` pass (0 errors, 866 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 1 failed, 9310 passed, 51 skipped, 826 files.  The failure is `test/egress-guard.test.ts` resolving `https://discord.com` with real DNS.  This shell cannot resolve that host.  The file is not in this diff.  Targeted history and web-source tests, run in addition to `npm test`: 67 passed.  `npm run build` was not part of that pass.
 
 Schema colocation after merging `origin/main` (`79df823d`):
 
 ```bash
 npm run lint
 npx tsc --noEmit
-npx vitest run test/history.test.ts test/web-sources-sec.test.ts test/web-sources.test.ts
 npm test
+npm run build
 ```
 
-`npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted history and web-source tests: 68 passed.  Full `npm test`: 1 failed, 9311 passed, 51 skipped, 826 files.  The same discord.com DNS failure remains.  That file is not in this diff.
+`npm run lint` pass (0 errors, 866 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 1 failed, 9311 passed, 51 skipped, 826 files.  The same discord.com DNS failure remains.  That file is not in this diff.  Targeted history and web-source tests, run in addition to `npm test`: 68 passed.  `npm run build` compiled with warnings in 82s, then the process was killed (exit 137) during Next.js "Running TypeScript".  Standalone `tsc --noEmit` had already passed.  Hosted `verify` runs the real build.
 
-Follow-up `npm run build` compiled with warnings in 82s, then the process was killed (exit 137) during Next.js "Running TypeScript".  Standalone `tsc --noEmit` had already passed.  Hosted `verify` runs the real build.
+Merged `origin/main` at `82162336` (PR #4663) with no conflicts, then answered the two open Kody threads:
+
+```bash
+npm run lint
+npx tsc --noEmit
+npm test
+npm run build
+```
+
+`npm run lint` pass (0 errors, 866 warnings on the full tree before the test edit; `npx eslint test/web-sources-sec.test.ts` pass after it).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9318 passed, 51 skipped, 827 files.  `test/egress-guard.test.ts` cannot resolve discord.com.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from this workspace's stored coverage report.  Neither file is in this diff.  Hosted `verify` passed on `9b61310b`.  Targeted `npx vitest run test/web-sources-sec.test.ts test/history.test.ts test/web-sources.test.ts test/trading-liveness.test.ts test/batched-halt-cause.test.ts`: 91 passed.  `npm run build` pass.  It compiled with the existing Edge warnings, finished TypeScript, and generated 43/43 static pages.
+
+`parseInsiderBulkTables` only accepts TSV tables, so the negative case injects the strict-schema rejection (an undeclared `extra` key) at the `safeParse` call the parser already makes.  The returned list is empty.  Removing that call would leave the NVDA filing in the result.
 
 ## Next Steps & Blockers
 
-Ask Kody to re-review.  Do not merge from this lane.  Do not deploy.  Do not resolve review threads from this lane.
+Ask Kody to re-review.  Do not merge from this lane.  Do not deploy.  Do not resolve review threads from this lane.  PR Autofix remains red on every review event because `AI-Fleet-Coordinator` `pr-autofix-reusable.yml` at `2e671004` uses `secrets` in a step `if`.  That is not fixed by a caller edit on this branch.
 
 Board row `b53cc5f8970c469e8f561767c35fc334` is claimed in progress by GROK.  Fleet Linear team ST was not moved.  `AGENT_SEAT` is unset on this cloud seat, and the board file used `--by GROK` because that is the seat writing the PR.  Do not mark the row completed until the PR merges.
 

@@ -27,6 +27,17 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 # Current Status
 
 ## 2026-10-15 Cursor Cloud — ST-3988 congress-share dependency DB health
+## 2026-10-14 GROK — PR #4661 merge #4663 and review follow-up
+
+**What.**  Merged `origin/main` (`82162336`, PR #4663 halt-cause batch) into `cursor/free-data-gaps-55d1` with no conflicts.  No migration renumber.  The two open Kody threads are real.  Rollout verification blocks now list `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build` in that order, each with a pass or fail.  `parseInsiderBulkTables` tests assert every returned filing passes `BulkInsiderFilingSchema`, and a rejected strict parse (undeclared key) is dropped.  Earlier review threads were already resolved.  This pass did not resolve any thread.  PR Autofix still fails before any job.  The pinned reusable workflow uses `secrets` inside a step `if` (`pr-autofix-reusable.yml` line 163 at `2e671004`).  Later coordinator commits keep that line.  The caller matches `origin/main`, and review events read it from the default branch, so a pin change on this branch does not clear those runs.
+
+**Verification.**  `npm run lint` pass (0 errors, 866 warnings, before the test edit).  `npx eslint test/web-sources-sec.test.ts` pass.  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9318 passed, 51 skipped, 827 files.  Failures are `test/egress-guard.test.ts` (discord.com DNS) and `test/data-catalog-completeness.test.ts` (`peRatio` completeness 1).  Neither file is in this diff.  Hosted `verify` passed on `9b61310b`.  Targeted history, web-source, liveness, and halt-cause tests: 91 passed.  `npm run build` pass (compiled with the existing Edge warnings, TypeScript finished, 43/43 static pages).
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Reply on the two open threads and do not resolve them.  Ask Kody to re-review.  Do not merge from this lane.
+
+## 2026-10-14 GROK — PR #4661 main merge and Form 4 schema
 
 **What.**  Congress.Trade D1 `SQLITE_BUSY` import rejections no longer page as `congress-share connection failed`.  `alertConnectionFailure` routes them to `dependency-db-contention` (warning Sentry, no `provider_degraded` push).  Ops-token `/api/health` exposes `lastFailure` + `failureClass` on dependencies.
 
