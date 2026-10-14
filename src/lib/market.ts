@@ -1723,6 +1723,7 @@ export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): Ma
     sector: extra.sector ?? quote.sector,
     industry: extra.industry ?? quote.industry,
     volume: extra.volume && extra.volume > 0 ? extra.volume : quote.volume,
+    marketCap: extra.marketCap && extra.marketCap > 0 ? extra.marketCap : quote.marketCap,
     dividendYield: extra.dividendYield ?? quote.dividendYield,
     eps: extra.eps ?? quote.eps,
     sharesOutstanding: extra.sharesOutstanding ?? quote.sharesOutstanding,

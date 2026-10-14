@@ -40,6 +40,7 @@ export const COVERAGE_TRACKED_FIELDS = [
   "industry",
   "volume",
   "marketCap",
+  "sharesOutstanding",
   "dividendYield",
   "eps",
   "companyName",

@@ -63,6 +63,7 @@ import { resolveSourceBool, resolveSourceNumber } from "./source-settings";
 import { getStreamedHeadlines } from "./streams/news-store";
 import { BROWSER_UA, politeFetchText, runRateLimited, secUserAgent } from "./web-sources/http";
 import { loadTickerCikMap } from "./web-sources/sec8k";
+import { readCompanyFactsCache } from "./web-sources/sec-facts";
 import { padCik } from "./web-sources/sec-filings";
 import { withProviderLimit, admitProviderRequests, refundProviderRequests, resetProviderQuotaState, resolveProviderQuota, scrubProviderErrorText, scrubProviderErrorTextForPool, appendErrorCause } from "./provider-rate-limit";
 import { AlphaVantageKeyPool, getPoolForKeys, isAlphaVantageDailyCapMessage, millisUntilNextAlphaVantageDailyReset, tryReserveAlphaVantageCalls, refundAlphaVantageCalls, alphaVantageDailyCallBudget } from "./alpha-vantage-key-pool";
@@ -186,6 +187,8 @@ export interface SymbolEnrichment {
   sector?: string;
   industry?: string;
   volume?: number;
+  /** Implied cap (e.g. SEC shares × live quote). */
+  marketCap?: number;
   dividendYield?: number; // annual dividend yield %
   eps?: number;           // earnings per share (TTM)
   sharesOutstanding?: number;
@@ -271,6 +274,7 @@ export type EnrichmentSourcedField =
   | "sector"
   | "industry"
   | "volume"
+  | "marketCap"
   | "dividendYield"
   | "eps"
   | "companyName"
@@ -1732,6 +1736,7 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
         takeScalar("sector", name, r.sector);
         takeScalar("industry", name, r.industry);
         takeScalar("volume", name, r.volume);
+        takeScalar("marketCap", name, r.marketCap);
         takeScalar("dividendYield", name, r.dividendYield);
         takeScalar("eps", name, r.eps);
         takeScalar("companyName", name, r.companyName);
@@ -1913,6 +1918,27 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
       // The carrier never leaves the cascade — it exists only to compute the flag above.
       delete base.shortPercentOfFloatSecondary;
 
+      // SEC XBRL shares × live quote when Yahoo (or others) did not supply marketCap.
+      if (
+        (base.marketCap === undefined || base.marketCap <= 0) &&
+        typeof base.price === "number" &&
+        base.price > 0 &&
+        typeof base.sharesOutstanding === "number" &&
+        base.sharesOutstanding > 0 &&
+        sources.sharesOutstanding === "sec-xbrl"
+      ) {
+        base.marketCap = Math.round(base.sharesOutstanding * base.price);
+        sources.marketCap = "sec-xbrl";
+        fieldObservations.marketCap = {
+          value: base.marketCap,
+          source: "sec-xbrl",
+          upstreamFamily: "sec-xbrl",
+          fetchedAt: cascadeFetchedAt,
+          status: "ok"
+        };
+        this.contributingNames.add("sec-xbrl");
+      }
+
       base.sources = sources;
       base.fieldObservations = fieldObservations;
       if (Object.keys(providerFailures).length > 0) base.providerFailures = providerFailures;
@@ -2013,6 +2039,7 @@ const EMPTY_SOURCED: Record<EnrichmentSourcedField, true> = {
   sector: true,
   industry: true,
   volume: true,
+  marketCap: true,
   dividendYield: true,
   eps: true,
   companyName: true,
@@ -6206,26 +6233,17 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
 }
 
 // ── SEC EDGAR XBRL company-facts provider (keyless, DEFAULT ON) ──────────────
-// Fills debtToEquity from authoritative SEC 10-K filings via the public
-// companyfacts API (https://data.sec.gov/api/xbrl/companyfacts/CIK##########.json).
-// Polite 300 ms inter-symbol delay per SEC fair-access guidance.
-// Disable with: SEC_XBRL_ENRICHMENT_ENABLED=0
+// Fills fundamentals from authoritative SEC filings via companyfacts JSON cached in
+// `sec_facts` by the nightly sweep (`sec-companyfacts-sweep.ts`). Scan-path enrich()
+// never hits EDGAR — it reads the SQLite cache only. Disable with SEC_XBRL_ENRICHMENT_ENABLED=0.
 
-const SEC_XBRL_TTL_MS = 24 * 60 * 60_000; // 24h — filings move slowly
-const SEC_XBRL_DELAY_MS = 300; // polite inter-request delay
-const SEC_XBRL_FETCH_TIMEOUT_MS = 6_000; // per-symbol fetch cap (kept short — SEC is on the scan path)
-const SEC_XBRL_BUDGET_MS = 8_000; // overall wall-clock budget for the SEC pass during a scan
+const SEC_XBRL_TTL_MS = 24 * 60 * 60_000; // 24h — parsed enrichment snapshot
 
 // Only audited PERIODIC reports carry the balance-sheet facts we want. companyfacts also includes
 // facts from non-periodic filings (earnings-release 8-K, S-1, pro-forma); a newer 8-K equity fact with
 // no aligned debt fact would otherwise win the latest-period reducer and either null out enrichment or
 // publish non-periodic leverage. Restrict to 10-K/10-Q and their amendments.
 const SEC_XBRL_PERIODIC_FORMS = new Set(["10-K", "10-K/A", "10-Q", "10-Q/A"]);
-
-// Symbols whose companyfacts fetch is in progress, shared across concurrent enrich() calls. The SEC pass
-// keeps warming the cache in the background past the per-scan budget; without this guard a second scan
-// that starts before the first's warm finishes would re-fetch the same companyfacts URLs concurrently.
-const secXbrlInFlight = new Set<string>();
 
 /** Parse a SEC EDGAR companyfacts JSON blob into debtToEquity (from debt-specific concepts).
  *  EPS is intentionally NOT returned — see the note below (annual SEC EPS ≠ TTM). `revisions`
@@ -6236,6 +6254,10 @@ const secXbrlInFlight = new Set<string>();
 export function parseCompanyFacts(json: unknown): {
   debtToEquity?: number;
   revenueGrowth?: number;
+  returnOnEquity?: number;
+  returnOnAssets?: number;
+  grossProfitMargin?: number;
+  sharesOutstanding?: number;
   revisions?: import("./db-fundamentals").FundamentalRevisionFact[];
 } {
   try {
@@ -6246,6 +6268,9 @@ export function parseCompanyFacts(json: unknown): {
     const gaap = (facts as Record<string, unknown>)["us-gaap"];
     if (!gaap || typeof gaap !== "object") return {};
     const concepts = gaap as Record<string, unknown>;
+    const deiRoot = (facts as Record<string, unknown>)["dei"];
+    const deiConcepts =
+      deiRoot && typeof deiRoot === "object" ? (deiRoot as Record<string, unknown>) : undefined;
 
     type Fact = { start?: string; end: string; val: number; form?: string; filed?: string };
 
@@ -6409,6 +6434,35 @@ export function parseCompanyFacts(json: unknown): {
         return Number.isFinite(days) && days >= 350 && days <= 380;
       });
     }
+
+    function shareEntries(namespace: Record<string, unknown> | undefined, concept: string): Fact[] {
+      if (!namespace) return [];
+      const c = namespace[concept];
+      if (!c || typeof c !== "object") return [];
+      const units = (c as Record<string, unknown>).units;
+      if (!units || typeof units !== "object") return [];
+      const out: Fact[] = [];
+      for (const arr of Object.values(units as Record<string, unknown>)) {
+        if (!Array.isArray(arr)) continue;
+        for (const e of arr) {
+          if (e === null || typeof e !== "object") continue;
+          const r = e as Record<string, unknown>;
+          if (typeof r.end !== "string" || typeof r.val !== "number" || !Number.isFinite(r.val)) continue;
+          const form = typeof r.form === "string" ? r.form : undefined;
+          if (!form || !SEC_XBRL_PERIODIC_FORMS.has(form)) continue;
+          out.push({
+            start: typeof r.start === "string" ? r.start : undefined,
+            end: r.end,
+            val: r.val,
+            form,
+            filed: typeof r.filed === "string" ? r.filed : undefined
+          });
+        }
+      }
+      return out;
+    }
+
+    const roundPct = (n: number) => Math.round(n * 100) / 100;
     let revenueGrowth: number | undefined;
     // Hoisted so the revisions block below can reuse the SAME prior-year denominator.
     let prior: Fact | undefined;
@@ -6430,6 +6484,62 @@ export function parseCompanyFacts(json: unknown): {
       if (prior !== undefined && prior.val > 0) {
         revenueGrowth = Math.round(((latestRevenue.val - prior.val) / prior.val) * 100 * 100) / 100;
       }
+    }
+
+    // ── returnOnEquity / returnOnAssets / grossProfitMargin / sharesOutstanding ─────────────────
+    let returnOnEquity: number | undefined;
+    let returnOnAssets: number | undefined;
+    let grossProfitMargin: number | undefined;
+    let sharesOutstanding: number | undefined;
+
+    const latestTtmNi = latestEntry(annualEntries("NetIncomeLoss"));
+    if (latestTtmNi !== undefined) {
+      const equityAtNiEnd =
+        valueAtEnd(equityPure, latestTtmNi.end) ?? valueAtEnd(equityIncl, latestTtmNi.end);
+      const priorEquityCandidates = [...equityPure, ...equityIncl].filter((e) => {
+        if (e.end >= latestTtmNi.end) return false;
+        const gapDays = (Date.parse(latestTtmNi.end) - Date.parse(e.end)) / 86_400_000;
+        return Number.isFinite(gapDays) && gapDays >= 340 && gapDays <= 390;
+      });
+      const priorEquity = latestEntry(priorEquityCandidates);
+      if (equityAtNiEnd !== undefined && priorEquity !== undefined && priorEquity.val > 0) {
+        const avgEquity = (equityAtNiEnd + priorEquity.val) / 2;
+        if (avgEquity > 0) {
+          returnOnEquity = roundPct((latestTtmNi.val / avgEquity) * 100);
+        }
+      }
+      const assetsAtNi = valueAtEnd(getEntries("Assets", "USD"), latestTtmNi.end);
+      if (assetsAtNi !== undefined && assetsAtNi > 0) {
+        returnOnAssets = roundPct((latestTtmNi.val / assetsAtNi) * 100);
+      }
+    }
+
+    const revenueForMargin = (() => {
+      const primary = annualEntries("Revenues");
+      return primary.length > 0 ? primary : annualEntries("RevenueFromContractWithCustomerExcludingAssessedTax");
+    })();
+    const latestRevMargin = latestEntry(revenueForMargin);
+    if (latestRevMargin !== undefined && latestRevMargin.val > 0) {
+      const gpDirect = valueAtEnd(getEntries("GrossProfit", "USD"), latestRevMargin.end);
+      const gpDerived =
+        gpDirect === undefined
+          ? (() => {
+              const cor = valueAtEnd(getEntries("CostOfRevenue", "USD"), latestRevMargin.end);
+              if (cor === undefined) return undefined;
+              return latestRevMargin.val - cor;
+            })()
+          : undefined;
+      const grossProfit = gpDirect ?? gpDerived;
+      if (grossProfit !== undefined) {
+        grossProfitMargin = roundPct((grossProfit / latestRevMargin.val) * 100);
+      }
+    }
+
+    const shareAnchor =
+      latestEntry(shareEntries(deiConcepts, "EntityCommonStockSharesOutstanding")) ??
+      latestEntry(shareEntries(concepts, "CommonStockSharesOutstanding"));
+    if (shareAnchor !== undefined && shareAnchor.val > 0) {
+      sharesOutstanding = shareAnchor.val;
     }
 
     // ── Point-in-time revision facts (PIT chain — fix-1792 continuation) ────────────────────────
@@ -6498,10 +6608,18 @@ export function parseCompanyFacts(json: unknown): {
     const out: {
       debtToEquity?: number;
       revenueGrowth?: number;
+      returnOnEquity?: number;
+      returnOnAssets?: number;
+      grossProfitMargin?: number;
+      sharesOutstanding?: number;
       revisions?: import("./db-fundamentals").FundamentalRevisionFact[];
     } = {};
     if (debtToEquity !== undefined) out.debtToEquity = debtToEquity;
     if (revenueGrowth !== undefined) out.revenueGrowth = revenueGrowth;
+    if (returnOnEquity !== undefined) out.returnOnEquity = returnOnEquity;
+    if (returnOnAssets !== undefined) out.returnOnAssets = returnOnAssets;
+    if (grossProfitMargin !== undefined) out.grossProfitMargin = grossProfitMargin;
+    if (sharesOutstanding !== undefined) out.sharesOutstanding = sharesOutstanding;
     if (revisions.length > 0) out.revisions = revisions;
     return out;
   } catch {
@@ -6513,6 +6631,14 @@ export class SecXbrlEnrichmentProvider implements MarketEnrichmentProvider {
   readonly name = "sec-xbrl";
   readonly costTier = "free" as const;
   readonly configured = true;
+  readonly suppliesFields = [
+    "debtToEquity",
+    "revenueGrowth",
+    "returnOnEquity",
+    "returnOnAssets",
+    "grossProfitMargin",
+    "sharesOutstanding"
+  ] as const;
 
   async enrich(symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
     const normalized = Array.from(new Set(symbols.map(normalizeSymbol))).filter(Boolean).slice(0, maxSymbols());
@@ -6532,79 +6658,30 @@ export class SecXbrlEnrichmentProvider implements MarketEnrichmentProvider {
     }
     if (misses.length === 0) return result;
 
-    const deadline = now + SEC_XBRL_BUDGET_MS;
-
-    // Ticker→CIK map (weekly-cached; preserves dual-class tickers that share a CIK). Bound the load by
-    // the SAME budget so a cold/expired map fetch (its own 9s timeout + retry) can't block the cascade
-    // before the scan budget even starts. On timeout/error, skip SEC this pass and fall through to
-    // FMP/Yahoo; the load keeps running in the background to warm its cache for the next scan.
     let tickerToCik: Record<string, string>;
     try {
-      const mapPromise = loadTickerCikMap(now);
-      mapPromise.catch(() => {});
-      const loaded = await Promise.race([
-        mapPromise,
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), Math.max(0, deadline - Date.now())))
-      ]);
-      if (!loaded) return result;
-      tickerToCik = loaded;
+      tickerToCik = await loadTickerCikMap(now);
     } catch {
       return result;
     }
 
-    const ua = secUserAgent();
-
-    // Bound the SEC pass on the interactive market-scan critical path: the rate-limited loop keeps
-    // running in the BACKGROUND to warm the cache, but enrich() returns within the budget with whatever
-    // SEC data completed. Symbols not yet fetched fall through to FMP/Yahoo this pass and resolve from
-    // the warmed cache on the next scan — a slow/timing-out SEC endpoint can't hang a scan.
-    //
-    // The budget is enforced SOLELY by the outer Promise.race below — the per-symbol loop deliberately
-    // has NO `Date.now() > deadline` short-circuit. A deadline check here would make every symbol after
-    // the first slow miss return without fetching, so the cache would never warm past that leading miss
-    // and repeated scans would keep retrying it instead of converging. Letting the continuation run to
-    // completion (rate-limited + in-flight-deduped, so it never double-hits SEC) warms the full 24h
-    // cache; the awaited race still caps interactive latency regardless of how long the loop runs.
-    const work = runRateLimited(misses, SEC_XBRL_DELAY_MS, async (symbol) => {
+    for (const symbol of misses) {
       const cik = tickerToCik[symbol];
-      if (!cik) return;
-      const cacheKey = `sec-xbrl:${symbol}`;
-      // A concurrent scan may have warmed this symbol since we snapshotted misses — use it, don't refetch.
-      const fresh = cache.get(cacheKey);
-      if (fresh && fresh.expiresAt > Date.now()) { result[symbol] = fresh.data; return; }
-      // Dedup concurrent background warms: if another enrich() is already fetching this symbol, skip it
-      // (it falls through to Yahoo this pass and resolves from the warmed cache next scan).
-      if (secXbrlInFlight.has(symbol)) return;
-      secXbrlInFlight.add(symbol);
+      if (!cik) continue;
+      const payload = readCompanyFactsCache(padCik(cik));
+      if (!payload) continue;
       try {
-        const paddedCik = padCik(cik);
-        const url = `https://data.sec.gov/api/xbrl/companyfacts/CIK${paddedCik}.json`;
-        const text = await politeFetchText(url, { headers: { "user-agent": ua }, timeoutMs: SEC_XBRL_FETCH_TIMEOUT_MS });
-        const json = JSON.parse(text) as unknown;
+        const json = JSON.parse(payload.json) as unknown;
         const data = parseCompanyFacts(json);
-        cache.set(cacheKey, { expiresAt: now + SEC_XBRL_TTL_MS, data });
+        cache.set(`sec-xbrl:${symbol}`, { expiresAt: now + SEC_XBRL_TTL_MS, data });
         result[symbol] = data;
-        // Usage-only telemetry (never cost — SEC EDGAR is free/keyless): recorded once per
-        // successful companyfacts fetch, mirroring the other keyless providers in this file.
-        recordProviderCall(this.name, { service: "companyfacts", ok: true });
+        recordProviderCall(this.name, { service: "companyfacts-cache", ok: true });
       } catch {
-        // best-effort — this symbol falls through to the next provider
-        recordProviderCall(this.name, { service: "companyfacts", ok: false });
-      } finally {
-        secXbrlInFlight.delete(symbol);
+        recordProviderCall(this.name, { service: "companyfacts-cache", ok: false });
       }
-    });
-    work.catch(() => {}); // the background continuation must never surface as an unhandled rejection
-    // Use the REMAINING budget (the CIK-map race already consumed part of it) so the whole SEC pass —
-    // map load + companyfacts fetches — shares one SEC_XBRL_BUDGET_MS, not two.
-    await Promise.race([work, new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, deadline - Date.now())))]);
+    }
 
-    // Return a SNAPSHOT of what completed within the budget. The background continuation keeps warming
-    // the cache (and may still write into `result` for symbols fetched after the race), but it must not
-    // retroactively change what THIS pass returns: a late SEC write into the already-returned object
-    // could flip a symbol's winning source after enrich() resolved, making the cascade merge order
-    // timing-dependent. The spread decouples the returned value from those post-race mutations.
-    return { ...result };
+    return result;
   }
 }
 

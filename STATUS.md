@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 Cursor Cloud — SEC XBRL cached fundamentals
+
+**What.**  SEC companyfacts JSON is cached in `sec_facts` and parsed into ROE, ROA, gross profit margin, shares outstanding, and cascade-implied market cap.  EDGAR fetches run on a nightly scheduler sweep (`sec-companyfacts-sweep.ts`); scan-path enrichment reads SQLite only.  `SEC_XBRL_ENRICHMENT_ENABLED` default ON (catalog + code aligned).
+
+**Verification.**  Run full gate: `npm run lint`, `npx tsc --noEmit`, `npm test`, `npm run build`.
+
+**Docs.**  `docs/rollouts/2026-10-14-sec-xbrl-cached-fundamentals.md`, `docs/market-data-provider-pricing.md`, `docs/source-capability-matrix.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Open PR from `cursor/sec-xbrl-fundamentals-cache-6783`; wait for `verify` CI.
+
 ## 2026-10-14 GROK — PR #4609 verification order
 
 **What.**  Merged origin/main (`b7775658`, mobile snapshot partial timeout).  The freshness handoff verification block now lists `npm run lint`, `npx tsc --noEmit`, `npm test`, then `npm run build`.  No product behavior change.

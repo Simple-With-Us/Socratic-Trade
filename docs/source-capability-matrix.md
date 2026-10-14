@@ -129,11 +129,12 @@ Legend for notes: **Q** = quota conservation · **D** = delay/staleness · **L**
 | **dividendYield** | Yahoo, Finnhub, ROIC, Tiingo meta, FilingAPI, ~~FMP~~ | Annualized %; confirm trailing vs forward when both exist. |
 | **beta** | Yahoo, Twelve, SteadyAPI, RapidAPI | Model-dependent across vendors. |
 | **debtToEquity** | Yahoo, ROIC, Twelve, SEC XBRL, ~~FMP~~ | **Qly**: SEC when making capital-structure decisions. |
-| **returnOnEquity / returnOnAssets** | ROIC, FilingAPI, Yahoo (sometimes), ~~FMP ratios~~, Twelve | Prefer provider-reported ROE over crude NI/equity rebuild (`derived-metrics.ts`). |
+| **returnOnEquity / returnOnAssets** | ROIC, FilingAPI, Yahoo (sometimes), SEC XBRL (TTM NI / average equity or assets), ~~FMP ratios~~, Twelve | SEC derives from ~365-day `NetIncomeLoss` spans; prefer ROIC when both exist. |
 | **revenueGrowth** | Yahoo, Twelve, SEC, ROIC | Filing cadence. |
 | **fcfYield / freeCashFlowYield** | Yahoo (derived), ROIC, ~~FMP~~ | Naming: both fields exist historically — treat as same economic idea when merging. |
-| **grossProfitMargin** | ROIC, Twelve, ~~FMP~~, SEC | Often paid-path. |
-| **sharesOutstanding** | Yahoo, SEC XBRL, Finnhub | Float vs diluted confusion — document which. |
+| **grossProfitMargin** | ROIC, Twelve, SEC XBRL, ~~FMP~~ | SEC: `GrossProfit` / `Revenues` or `(Revenues - CostOfRevenue)` on annual spans. |
+| **sharesOutstanding** | Yahoo, SEC XBRL (`dei:EntityCommonStockSharesOutstanding`, fallback `CommonStockSharesOutstanding`), Finnhub | Float vs diluted confusion — document which. |
+| **marketCap** (implied) | Yahoo, Nasdaq screener, SEC XBRL (shares × live quote when cap missing) | SEC only fills when shares came from `sec-xbrl` and price is already on the quote. |
 
 ### 3.4 Range & risk
 

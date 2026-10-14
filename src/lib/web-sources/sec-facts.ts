@@ -7,6 +7,9 @@ import crypto from "crypto";
 
 const SEC_DATA_BASE = "https://data.sec.gov";
 
+/** Single-row cache of the raw companyfacts JSON blob per CIK (segment column). */
+export const SEC_COMPANYFACTS_CACHE_CONCEPT = "__companyfacts_json__";
+
 // High-yield GAAP concepts for scanning
 const targetConcepts = new Set([
   "Assets",
@@ -58,7 +61,17 @@ export async function ingestCompanyFacts(cik: string): Promise<void> {
       throw new Error(`Failed to fetch company facts: ${res.statusText}`);
     }
 
-    const data = await res.json() as any;
+    let jsonText: string;
+    if (typeof res.text === "function") {
+      jsonText = await res.text();
+    } else if (typeof res.json === "function") {
+      const parsed = await res.json();
+      jsonText = JSON.stringify(parsed);
+    } else {
+      throw new Error("Failed to read company facts response body");
+    }
+    upsertCompanyFactsCache(paddedCik, jsonText, new Date().toISOString());
+    const data = JSON.parse(jsonText) as any;
     // 20-F/40-F issuers reporting under IFRS expose concepts under `facts.ifrs-full` rather than
     // `facts.us-gaap` — both taxonomies are supported inputs (the periodic-form allowlist below
     // admits 20-F/40-F), so a missing US-GAAP namespace alone is not "no data".
@@ -240,6 +253,40 @@ export function parseAndSaveForm4(
   })();
 
   return count;
+}
+
+/** Persist the full companyfacts JSON for scan-path reads (nightly sweep + ingest worker). */
+export function upsertCompanyFactsCache(cik: string, jsonText: string, fetchedAt: string): void {
+  const paddedCik = padCik(cik);
+  const id = crypto.createHash("sha256").update(`companyfacts-cache:${paddedCik}`).digest("hex");
+  const endDate = fetchedAt.slice(0, 10);
+  getDb()
+    .prepare(
+      `INSERT OR REPLACE INTO sec_facts (
+        id, cik, accession, concept, value, unit, period, start_date, end_date, accepted_at, segment
+      ) VALUES (?, ?, 'cache', ?, 1, 'json', 'cache', NULL, ?, ?, ?)`
+    )
+    .run(id, paddedCik, SEC_COMPANYFACTS_CACHE_CONCEPT, endDate, fetchedAt, jsonText);
+}
+
+/** Read cached companyfacts JSON for a CIK (written by ingest / nightly sweep). */
+export function readCompanyFactsCache(cik: string): { json: string; fetchedAt: string } | undefined {
+  const paddedCik = padCik(cik);
+  const row = getDb()
+    .prepare(
+      `SELECT segment, accepted_at FROM sec_facts WHERE cik = ? AND concept = ? LIMIT 1`
+    )
+    .get(paddedCik, SEC_COMPANYFACTS_CACHE_CONCEPT) as { segment: string | null; accepted_at: string } | undefined;
+  if (!row?.segment) return undefined;
+  return { json: row.segment, fetchedAt: row.accepted_at };
+}
+
+/**
+ * Fetch companyfacts from EDGAR, cache the JSON in `sec_facts`, and ingest structured rows.
+ * Used by the nightly sweep; scan-path enrichment reads the cache only.
+ */
+export async function fetchAndCacheCompanyFacts(cik: string): Promise<void> {
+  await ingestCompanyFacts(cik);
 }
 
 /**

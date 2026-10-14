@@ -1,6 +1,13 @@
 import { describe, it, expect, beforeAll, vi } from "vitest";
 import { getDb, applyVersionedMigrations } from "../src/lib/db";
-import { parseAndSaveForm4, formatCompanyFactsEvidenceCard, ingestCompanyFacts } from "../src/lib/web-sources/sec-facts";
+import {
+  parseAndSaveForm4,
+  formatCompanyFactsEvidenceCard,
+  ingestCompanyFacts,
+  readCompanyFactsCache,
+  SEC_COMPANYFACTS_CACHE_CONCEPT,
+  upsertCompanyFactsCache
+} from "../src/lib/web-sources/sec-facts";
 import { politeFetch } from "../src/lib/web-sources/http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -176,7 +183,9 @@ describe("SEC Facts and Insider Transactions Ingestion (P4)", () => {
     } as any);
 
     await ingestCompanyFacts("0000999999");
-    const rows = db.prepare("SELECT * FROM sec_facts WHERE cik = '0000999999'").all() as any[];
+    const rows = db
+      .prepare("SELECT * FROM sec_facts WHERE cik = '0000999999' AND concept != ?")
+      .all(SEC_COMPANYFACTS_CACHE_CONCEPT) as any[];
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ concept: "Revenue", value: 5000000000 });
 
@@ -247,7 +256,12 @@ describe("SEC Facts and Insider Transactions Ingestion (P4)", () => {
 
     await ingestCompanyFacts("0000320193");
 
-    const rows = db.prepare("SELECT * FROM sec_facts WHERE cik = '0000320193' ORDER BY concept ASC").all() as any[];
+    const cached = readCompanyFactsCache("0000320193");
+    expect(cached?.json).toContain('"Assets"');
+
+    const rows = db
+      .prepare("SELECT * FROM sec_facts WHERE cik = '0000320193' AND concept != ? ORDER BY concept ASC")
+      .all(SEC_COMPANYFACTS_CACHE_CONCEPT) as any[];
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({
       concept: "Assets",
@@ -263,5 +277,12 @@ describe("SEC Facts and Insider Transactions Ingestion (P4)", () => {
     const card = formatCompanyFactsEvidenceCard("0000320193");
     expect(card).toContain("Assets: 350,000,000,000 USD");
     expect(card).toContain("NetIncomeLoss: 100,000,000,000 USD");
+  });
+
+  it("round-trips companyfacts JSON through the SQLite cache helpers", () => {
+    const payload = JSON.stringify({ facts: { "us-gaap": { Assets: { units: { USD: [] } } } } });
+    const fetchedAt = "2026-10-14T12:00:00.000Z";
+    upsertCompanyFactsCache("320193", payload, fetchedAt);
+    expect(readCompanyFactsCache("320193")).toEqual({ json: payload, fetchedAt });
   });
 });
