@@ -45,6 +45,13 @@ import { expiresAtRespectingMarketClose } from "./market-hours";
 import { recordProviderCall } from "./usage-monitor-push";
 import { robinhoodMcpDataEnabled } from "./robinhood";
 import { RobinhoodOptionsEnrichmentProvider } from "./robinhood-options";
+import {
+  AlpacaOptionsEnrichmentProvider,
+  CboeOptionsEnrichmentProvider,
+  TradierOptionsEnrichmentProvider,
+  keylessOptionsEnrichmentEnabled,
+  resolveTradierOptionsCredential
+} from "./keyless-options-enrichment";
 import { resolveQuiverApiKey } from "./quiver-provider";
 import { isDirectVendorAccessAllowed } from "./retired-direct-vendors";
 import {
@@ -1216,6 +1223,33 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   if (wisesheetsKey) providers.push(withHealthLane(new WisesheetsEnrichmentProvider(wisesheetsKey), "env"));
   const simFinKey = resolveSimFinApiKey();
   if (simFinKey) providers.push(withHealthLane(new SimFinEnrichmentProvider(simFinKey), "env"));
+  // Keyless / shared options metrics (Cboe delayed JSON primary; Alpaca indicative + Tradier chains
+  // when credentials exist). Fills nearTheMoneyIv + putCallRatio for background scans without RH opt-in.
+  if (keylessOptionsEnrichmentEnabled()) {
+    providers.push(new CboeOptionsEnrichmentProvider());
+    if (alpacaData.apiKey && alpacaData.secretKey) {
+      providers.push(
+        withHealthLane(
+          new AlpacaOptionsEnrichmentProvider(alpacaData.apiKey, alpacaData.secretKey, alpacaData.source, userId),
+          alpacaData.source
+        )
+      );
+    }
+    const tradierOptions = resolveTradierOptionsCredential(userId);
+    if (tradierOptions.key) {
+      providers.push(
+        withHealthLane(
+          new TradierOptionsEnrichmentProvider(
+            tradierOptions.key,
+            tradierOptions.baseUrl,
+            tradierOptions.source,
+            userId
+          ),
+          tradierOptions.source
+        )
+      );
+    }
+  }
   // Opt-in Robinhood option-chain tier (near-the-money IV + put/call ratio). Default OFF and inert
   // unless Robinhood MCP is connected — a long-TTL, low-frequency source with its own cache. Seated
   // late so it only fills the options-specific fields nothing else supplies.
