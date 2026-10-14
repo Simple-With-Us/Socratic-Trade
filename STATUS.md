@@ -1,5 +1,54 @@
 # Current Status
 
+## 2026-10-14 Codex Autofix — PR #4663 review sweep (docs only)
+
+**What.**  Swept the review threads after the maintainer re-ran Kody.  Nothing new to fix.
+
+- **All three threads are now resolved** — no thread to resolve this round.  The maintainer resolved Sentry's `fullyDark` finding (`PRRT_kwDOS7mOVM6sgOxJ`, already fixed in `c05390ce`).  Both Kody threads were already resolved and outdated: the verification-block finding (`PRRT_kwDOS7mOVM6shJMJ`) was fixed in `59376259`, and the N+1 halt-cause finding (`PRRT_kwDOS7mOVM6shgi0`) was fixed in `5b7ce62b`, which Kody then confirmed.
+- **One stale STATUS.md paragraph corrected.**  The top entry still read "The thread is not resolved.  Do not resolve the thread.  Do not merge."  That was true when written but is now wrong on both counts — the fix landed and the thread is resolved.  It now points at `5b7ce62b` and records the thread as confirmed, so the next reader is not told to leave a thread open that is already closed.
+- **No source file was modified.**  The diff is `STATUS.md` only.
+
+**Verification.**  `npx tsc --noEmit` ok.  `npm run lint` ok (0 errors, 866 warnings).  `npm test` — 9292 passed, 51 skipped, 13 failed.  All 13 failures are in `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/openrouter-credits.test.ts`, and `test/framework-review.test.ts`, which the PR diff does not touch.  **Confirmed pre-existing**: a clean `origin/main` worktree produces the identical 13 failures, so they are environmental, not a regression.  Cause is an ambient OpenRouter credential in the runner's environment — the provider-routing tests resolve a real key instead of their fake one, so assertions like "no OpenRouter key configured" fail.  Worth flagging separately: the assertion diffs print that credential's value into the log.  `test/trading-liveness.test.ts`, `test/batched-halt-cause.test.ts`, `test/autonomy-halt-cause.test.ts`, `test/scheduler-halt-cause-tick.test.ts`, and `test/egress-guard.test.ts` all pass (71 passed).
+
+**Docs.**  This entry and the stale paragraph above it.  No rollout note update needed — no behavior change.
+
+**Next.**  Land PR.  The ambient-credential test failures and the credential echoed into test output are a separate, out-of-scope issue for the maintainer.
+
+## 2026-10-14 Cursor — health poll batches halt-cause reads (PR #4663)
+
+**What.**  Kody thread `PRRT_kwDOS7mOVM6shgi0` is real.  `/api/health` was classifying each halted autopilot account with up to five queries.  `batchedHaltCauseKinds` now does one `settings` read for the three markers and one indexed `audit_events` read for the breaker and a lost auto-pause.  Kinds still match `describeAutonomyHaltCause`.  The batch is only on the health poll.  Dashboard and ops still call `describeAutonomyHaltCause` for one account.  The handover check still uses the latest halt's id and time, including a same-millisecond row.  Fixed in `5b7ce62b`; Kody confirmed the thread in `PRRT_kwDOS7mOVM6shgi0`.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `test/batched-halt-cause.test.ts`, `test/trading-liveness.test.ts`, `test/autonomy-halt-cause.test.ts`, and `test/scheduler-halt-cause-tick.test.ts` passed.
+
+**Docs.**  `docs/rollouts/2026-10-14-fleet-fully-dark-detector.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Land PR; the N+1 thread is resolved and the batching questions asked in the earlier triage entry are answered by `5b7ce62b`.
+
+## 2026-10-14 Codex Autofix — PR #4663 review triage (no code change)
+
+**What.**  Triaged the two open review threads on the fleet fully-dark detector branch.  Both were already resolved in the branch by the time this pass ran, so no code changed and nothing was pushed.
+
+- **Sentry's `autonomy_fully_dark` "can never be true" finding — confirmed real, already fixed upstream by `c05390ce`.**  The claim checks out: `SystemState` (`src/lib/types.ts:24`) is a closed four-value union and `isDeliberateAutonomyIdleState` claimed all three non-active values, so the active / deliberately-idle buckets were exhaustive and disjoint.  `fullyDark` requires `activeAccounts === 0`, which forces `eligibleDeliberatelyIdle === eligibleAccounts`, which forces `allEligibleDeliberatelyIdle === true` and makes the `!allEligibleDeliberatelyIdle` term constant-false.  Verified by EXECUTION rather than reading alone: a probe driving the real `getTradingLivenessSummary()` with one eligible autopilot account in each of `halted` / `close_only` / `liquidating` returned `fullyDark=undefined` (summary `null`) for all three.  Re-running that probe against the current head confirms the fix — owner stops stay quiet and `fullyDark` is reachable again through an app halt; `test/trading-liveness.test.ts` is 18 passed.
+- **Kody's verification-block finding — already addressed by `59376259`** (per-command outcome for all four gates, including an honest `npm run build` OOM note).
+
+**Left open, no fix.**  Kody's N+1 finding on the new `eligibleAccountIsDeliberatelyIdle` halt-cause lookup is factually accurate but was deliberately not fixed: `describeAutonomyHaltCause` has four callers, and its two `audit_events` SELECTs are correlated (the second keys off `halt.id` / `halt.created_at` from the first, with an `id <>` exclusion), so the suggested batch is a rewrite of that query, not a merge — and a subtle mistake there silently reclassifies an app halt as an owner stop and flips a page.  Asked the maintainer two questions (is the per-poll cost material; scope the batch to `trading-liveness` or restructure the shared module) rather than guessing.  Thread left unresolved by design.
+
+**Verification.**  `npx tsc --noEmit` ok on the current head.  `test/trading-liveness.test.ts` 18 passed.  All 8 PR checks green; `verify` had not yet run on the head commit at the time of writing, and the PR sits `mergeable_state: blocked` on unresolved conversations, not on CI.
+
+**Docs.**  This entry only; a PR comment records the triage and the two open questions.  No source file was modified.
+
+**Next.**  Maintainer to answer the batching questions above; then re-run this pass to act on the answer.
+
+## 2026-10-14 Cursor — fleet fully dark detector (SOCRATIC-TRADE-2S)
+
+**What.**  `autonomy_fully_dark` no longer fires when any account is `systemState === "active"` (fixes ask-first + halted autopilot false pages).  Owner halt / close_only / liquidating stays quiet.  An app halt (boot, watchdog, breaker, broker auto-pause) with nothing else active still pages, so the signal is not dead.  Health route double-checks counts before emitting "fleet is fully dark" copy.  Claude autofix starts only for Codex, Kody, and Cursor reviews, so a Seer review does not fail that job.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test -- test/trading-liveness.test.ts` 18 passed.  Full `npm test`: 9300 passed, 51 skipped, 1 failed outside this diff (`test/egress-guard.test.ts` live DNS to discord.com in this sandbox).  `npm run build` was killed (exit 137) during trace collection after 43/43 static pages; this box ran out of memory.  Hosted `verify` is the build gate.
+
+**Docs.**  `docs/rollouts/2026-10-14-fleet-fully-dark-detector.md`, `STATUS.md`.
+
+**Next.**  Land PR; after deploy watch SOCRATIC-TRADE-2S for new events.
+
 ## 2026-10-14 GROK — PR #4609 verification order
 
 **What.**  Merged origin/main (`b7775658`, mobile snapshot partial timeout).  The freshness handoff verification block now lists `npm run lint`, `npx tsc --noEmit`, `npm test`, then `npm run build`.  No product behavior change.
