@@ -29,14 +29,10 @@ Sentry issue SOCRATIC-TRADE-2S (`trading_liveness_degraded` with copy "fleet is 
 
 ## Verification State
 
-```bash
-npm run lint
-npx tsc --noEmit
-npm test -- test/trading-liveness.test.ts
-npm run build
-```
-
-`test/trading-liveness.test.ts`: 18 passed.  Full-suite `npm test`: 9300 passed, 51 skipped, 1 failed outside this diff (`test/egress-guard.test.ts` live DNS to discord.com in the cloud sandbox).  `npm run lint`: 0 errors, 866 warnings.  `npx tsc --noEmit` ok.
+- `npm run lint` -> ok (0 errors, 866 warnings)
+- `npx tsc --noEmit` -> ok
+- `npm test` -> 9300 passed, 51 skipped, 1 failed outside this diff.  `test/egress-guard.test.ts` calls real DNS for discord.com and this sandbox rejected it.  `test/trading-liveness.test.ts` 18 passed, including the app-halt and ask-first cases.
+- `npm run build` -> killed (exit 137) while collecting traces, after compile, typecheck, and 43/43 static pages.  This box ran out of memory.  Hosted `verify` is the build gate.
 
 ## Next Steps & Blockers
 

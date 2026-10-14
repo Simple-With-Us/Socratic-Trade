@@ -4,7 +4,7 @@
 
 **What.**  `autonomy_fully_dark` no longer fires when any account is `systemState === "active"` (fixes ask-first + halted autopilot false pages).  Owner halt / close_only / liquidating stays quiet.  An app halt (boot, watchdog, breaker, broker auto-pause) with nothing else active still pages, so the signal is not dead.  Health route double-checks counts before emitting "fleet is fully dark" copy.  Claude autofix starts only for Codex, Kody, and Cursor reviews, so a Seer review does not fail that job.
 
-**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test -- test/trading-liveness.test.ts` 18 passed.  Full `npm test`: 9300 passed, 51 skipped, 1 failed outside this diff (`test/egress-guard.test.ts` live DNS to discord.com in this sandbox).  `npm run build` not re-run locally; CI `verify` includes it.
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test -- test/trading-liveness.test.ts` 18 passed.  Full `npm test`: 9300 passed, 51 skipped, 1 failed outside this diff (`test/egress-guard.test.ts` live DNS to discord.com in this sandbox).  `npm run build` was killed (exit 137) during trace collection after 43/43 static pages; this box ran out of memory.  Hosted `verify` is the build gate.
 
 **Docs.**  `docs/rollouts/2026-10-14-fleet-fully-dark-detector.md`, `STATUS.md`.
 
