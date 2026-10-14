@@ -1,14 +1,28 @@
 # Current Status
 
+## 2026-10-14 Codex Autofix — PR #4663 review sweep (docs only)
+
+**What.**  Swept the review threads after the maintainer re-ran Kody.  Nothing new to fix.
+
+- **All three threads are now resolved** — no thread to resolve this round.  The maintainer resolved Sentry's `fullyDark` finding (`PRRT_kwDOS7mOVM6sgOxJ`, already fixed in `c05390ce`).  Both Kody threads were already resolved and outdated: the verification-block finding (`PRRT_kwDOS7mOVM6shJMJ`) was fixed in `59376259`, and the N+1 halt-cause finding (`PRRT_kwDOS7mOVM6shgi0`) was fixed in `5b7ce62b`, which Kody then confirmed.
+- **One stale STATUS.md paragraph corrected.**  The top entry still read "The thread is not resolved.  Do not resolve the thread.  Do not merge."  That was true when written but is now wrong on both counts — the fix landed and the thread is resolved.  It now points at `5b7ce62b` and records the thread as confirmed, so the next reader is not told to leave a thread open that is already closed.
+- **No source file was modified.**  The diff is `STATUS.md` only.
+
+**Verification.**  `npx tsc --noEmit` ok.  `npm run lint` ok (0 errors, 866 warnings).  `npm test` — 9292 passed, 51 skipped, 13 failed.  All 13 failures are in `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/openrouter-credits.test.ts`, and `test/framework-review.test.ts`, which the PR diff does not touch.  **Confirmed pre-existing**: a clean `origin/main` worktree produces the identical 13 failures, so they are environmental, not a regression.  Cause is an ambient OpenRouter credential in the runner's environment — the provider-routing tests resolve a real key instead of their fake one, so assertions like "no OpenRouter key configured" fail.  Worth flagging separately: the assertion diffs print that credential's value into the log.  `test/trading-liveness.test.ts`, `test/batched-halt-cause.test.ts`, `test/autonomy-halt-cause.test.ts`, `test/scheduler-halt-cause-tick.test.ts`, and `test/egress-guard.test.ts` all pass (71 passed).
+
+**Docs.**  This entry and the stale paragraph above it.  No rollout note update needed — no behavior change.
+
+**Next.**  Land PR.  The ambient-credential test failures and the credential echoed into test output are a separate, out-of-scope issue for the maintainer.
+
 ## 2026-10-14 Cursor — health poll batches halt-cause reads (PR #4663)
 
-**What.**  Kody thread `PRRT_kwDOS7mOVM6shgi0` is real.  `/api/health` was classifying each halted autopilot account with up to five queries.  `batchedHaltCauseKinds` now does one `settings` read for the three markers and one indexed `audit_events` read for the breaker and a lost auto-pause.  Kinds still match `describeAutonomyHaltCause`.  The batch is only on the health poll.  Dashboard and ops still call `describeAutonomyHaltCause` for one account.  The handover check still uses the latest halt's id and time, including a same-millisecond row.  The thread is not resolved.
+**What.**  Kody thread `PRRT_kwDOS7mOVM6shgi0` is real.  `/api/health` was classifying each halted autopilot account with up to five queries.  `batchedHaltCauseKinds` now does one `settings` read for the three markers and one indexed `audit_events` read for the breaker and a lost auto-pause.  Kinds still match `describeAutonomyHaltCause`.  The batch is only on the health poll.  Dashboard and ops still call `describeAutonomyHaltCause` for one account.  The handover check still uses the latest halt's id and time, including a same-millisecond row.  Fixed in `5b7ce62b`; Kody confirmed the thread in `PRRT_kwDOS7mOVM6shgi0`.
 
 **Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `test/batched-halt-cause.test.ts`, `test/trading-liveness.test.ts`, `test/autonomy-halt-cause.test.ts`, and `test/scheduler-halt-cause-tick.test.ts` passed.
 
 **Docs.**  `docs/rollouts/2026-10-14-fleet-fully-dark-detector.md`, `STATUS.md`, `PLAN.md`.
 
-**Next.**  Do not resolve the thread.  Do not merge.
+**Next.**  Land PR; the N+1 thread is resolved and the batching questions asked in the earlier triage entry are answered by `5b7ce62b`.
 
 ## 2026-10-14 Codex Autofix — PR #4663 review triage (no code change)
 
