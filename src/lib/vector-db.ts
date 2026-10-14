@@ -1,7 +1,7 @@
 import { Pinecone, type PineconeRecord, type RecordMetadata } from "@pinecone-database/pinecone";
 import crypto from "crypto";
 import { siliconflowBaseUrl } from "./siliconflow-base";
-import { combineAbortSignals, createRagQueryAbort, raceWithAbort } from "./rag-retrieval-deadline";
+import { combineAbortSignals, createRagQueryAbort, raceWithAbort, RAG_QUERY_IO_DEADLINE_MS } from "./rag-retrieval-deadline";
 import * as dbModule from "./db";
 import { audit, getInternalSetting, resolveApiKey, setInternalSetting, type ApiKeySource } from "./db";
 import { filterNewDocumentChunks, insertDocumentChunks } from "./db";
@@ -9,7 +9,7 @@ import { deleteStagedEmbeddings, getStagedEmbeddings, stageEmbeddedVectors } fro
 import { isProviderDispatchLeaseLostError } from "./db-provider-dispatch";
 import { getLaneHealth, logApiHealth, transientEscalationWindowMs } from "./db-health";
 import { isLocalDbFaultError, localDbFaultReason, noteLocalDbFault } from "./local-db-fault";
-import { describeNetworkError, isTransientNetworkError, isTransientNetworkErrorText } from "./network-errors";
+import { describeNetworkError, isAbortOrTimeoutError, isTransientNetworkError, isTransientNetworkErrorText } from "./network-errors";
 import {
   auditPineconeWuGateSkip,
   isPineconeWuExhaustedError,
@@ -48,7 +48,7 @@ import {
   noteEmbedProviderSuccess,
   setCachedContentEmbedding
 } from "./rag/embed-resilience";
-import { parseProviderEmbeddingResponse } from "./rag/embedding-response-schema";
+import { parseProviderEmbeddingResponse, SiliconFlowEmbedSchema } from "./rag/embedding-response-schema";
 import { recordRagOperation, shouldDegradeForBudget } from "./rag/run-budget";
 import { auditRagIngestPointsGateSkip, estimateRagDispatchCost, getRagUsageSummary, hasRagIngestPointsBudget, hashQuery, meterEmbed, meterPineconeQuery, meterPineconeUpsert, meterRerank, ragIngestPointsBudgetDeferUntil, ragIngestTextBudgetDeferUntil, ragMaxDailyIngestPoints, recordRetrievalQuality, retrievalTelemetryEnabled, usedRagUpsertPointsLast24h, type RagEmbedRerankProvider } from "./rag-metering";
 import {
@@ -2813,6 +2813,9 @@ async function embedWithRetry(
             headers["X-Title"] = "Socratic-Trade";
             applyOpenRouterClassifierEnrichment(body, { userId, service: "rag", feature: "embed" });
           }
+          // Per-attempt abort from main (#4606).  The caller signal still wins, the timer is
+          // unref'd, and cancel() in the finally below drops it when the fetch settles so a
+          // finished call cannot pin a test worker.  Abort/timeout is not retried (see catch).
           const attemptAbort = createEmbedAttemptAbort(boundSignal);
           try {
             const response = await withGenAiSpan(
@@ -2852,8 +2855,11 @@ async function embedWithRetry(
           { estimatedCostUsd: estimateRagDispatchCost(texts, "embed", modelName, provider) }
         );
       } catch (error) {
-        if (boundSignal?.aborted) {
-          throw boundSignal.reason instanceof Error ? boundSignal.reason : error;
+        // Never retry on abort or timeout.  The caller's signal fired or the per-attempt
+        // embed abort expired.  Retrying would only queue more requests against a slow
+        // provider and stall the scheduler for a multiple of the deadline.
+        if (boundSignal?.aborted || isAbortOrTimeoutError(error)) {
+          throw boundSignal?.reason instanceof Error ? boundSignal.reason : error;
         }
         const isRate = isRateLimitError(error);
         const isTransient = isTransientNetworkError(error);
@@ -2920,6 +2926,83 @@ async function embedWithRetry(
   } catch (error) {
     if (!useMockClient) settleEmbedProviderAttempt(httpProvider, error);
     throw error;
+  }
+}
+
+const SILICONFLOW_QUERY_EMBED_MODEL = "BAAI/bge-m3";
+
+/**
+ * One-shot SiliconFlow embedding call — used only as a query-embed fallback when the
+ * primary OpenRouter provider times out or errors. No retries, no health-lane tracking,
+ * no dispatch ledger: this is a narrow rescue path so that a slow OpenRouter response
+ * does not silently degrade every operator RAG retrieval to an empty result.
+ *
+ * Both OpenRouter and SiliconFlow serve BAAI/bge-m3 at 1024 dimensions, so fallback
+ * query embeddings are fully compatible with vectors stored via either provider.
+ */
+async function callSiliconFlowEmbedOnce(
+  texts: string[],
+  model: string,
+  apiKey: string,
+  signal?: AbortSignal
+): Promise<number[] | null> {
+  try {
+    const url = `${siliconflowBaseUrl()}/v1/embeddings`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({ model, input: texts }),
+      signal
+    });
+    if (!response.ok) return null;
+    const parsed = SiliconFlowEmbedSchema.safeParse(await response.json());
+    if (!parsed.success) {
+      logWarn("embed.fallback_schema_error", {
+        fallbackProvider: "siliconflow",
+        error: parsed.error.message
+      });
+      return null;
+    }
+    const embedding = parsed.data.data?.[0]?.embedding;
+    return Array.isArray(embedding) ? embedding : null;
+  } catch (err) {
+    // Network error or bad JSON — log and return null so the caller proceeds
+    // to the embed.failed / lookup_failed degradation path.
+    logWarn("embed.fallback_error", {
+      fallbackProvider: "siliconflow",
+      error: err instanceof Error ? err.message : String(err)
+    });
+    return null;
+  }
+}
+
+/**
+ * OpenRouter query-embed rescue.  Returns a validated vector, or null when no usable
+ * SiliconFlow key exists or the call fails.  The per-call timer is cancelled when the
+ * fetch settles so it cannot pin the process.
+ */
+async function rescueOpenRouterQueryEmbedding(
+  text: string,
+  userId: string,
+  signal: AbortSignal | undefined
+): Promise<number[] | null> {
+  if (signal?.aborted) return null;
+  const fallbackKey = resolveApiKey("siliconflow", userId);
+  if (!fallbackKey || !embeddingCredentialIsUsable(fallbackKey)) return null;
+  const fallbackAbort = createEmbedAttemptAbort(signal, RAG_QUERY_IO_DEADLINE_MS);
+  try {
+    const embedding = await callSiliconFlowEmbedOnce(
+      [text],
+      SILICONFLOW_QUERY_EMBED_MODEL,
+      fallbackKey,
+      fallbackAbort.signal
+    );
+    return embedding != null && isValidEmbedding(embedding) ? embedding : null;
+  } finally {
+    fallbackAbort.cancel();
   }
 }
 
@@ -7863,7 +7946,10 @@ export async function retrieveContextDetailed(
       endCacheLookup?.({ cacheHit: embedding != null });
       if (embedding == null) {
         // Provider-generic health/alert lane (2026-07-19) + stage telemetry from #1892.
-        const embedProvider = activeEmbeddingProvider(userId);
+        // `let` so the fallback path can reassign to the provider that actually served
+        // the embedding, keeping meterEmbed cost attribution accurate.
+        let embedProvider = activeEmbeddingProvider(userId);
+        let meterModel = activeModel;
         const endEmbed = stageTrace?.start("query_embed_api", {
           provider: embedProvider,
           model: activeModel,
@@ -7883,24 +7969,42 @@ export async function retrieveContextDetailed(
           );
           endEmbed?.({ candidatesOut: response.data?.[0]?.embedding ? 1 : 0 });
         } catch (error) {
-          endEmbed?.({ error });
-          // Open circuit: the provider was already declared down.  One warning was logged
-          // on the trip.  Do not log or count this skip as a fresh embed failure.
-          if (isEmbedCircuitOpenError(error)) {
-            quietEmbedDegrade = true;
+          const circuitOpen = isEmbedCircuitOpenError(error);
+          const primaryProvider = activeEmbeddingProvider(userId);
+          // OpenRouter down (timeout, error, or an already-open circuit) gets one SiliconFlow
+          // rescue.  Both serve BAAI/bge-m3 at the same dimension.  The stage closer records
+          // only its first call, so a success close has to be the only close.
+          if (primaryProvider === "openrouter") {
+            const fallbackEmbedding = await rescueOpenRouterQueryEmbedding(q, userId, querySignal);
+            if (fallbackEmbedding) {
+              logWarn("embed.provider_fallback", {
+                primaryProvider: "openrouter",
+                fallbackProvider: "siliconflow",
+                userId
+              });
+              response = { data: [{ embedding: fallbackEmbedding }] };
+              embedProvider = "siliconflow";
+              meterModel = SILICONFLOW_QUERY_EMBED_MODEL;
+              endEmbed?.({ candidatesOut: 1, provider: "siliconflow" });
+            }
+          }
+          if (!response?.data?.[0]?.embedding) {
+            endEmbed?.({ error });
+            // Open circuit and no rescue: the trip already warned once.  Do not log or count
+            // this skip as a fresh embed failure.
+            if (circuitOpen) {
+              quietEmbedDegrade = true;
+              return null;
+            }
+            // Soft-degrade this query only.  Multi-query already isolates per variant; the
+            // single-query caller treats null as lookup_failed and Green/Red skip RAG.
+            recordEmbedFailure(primaryProvider, "query-embed-failed");
+            logWarn("embed.failed", { provider: primaryProvider, error_type: "query-embed-failed" });
             return null;
           }
-          // Soft-degrade this query only. Multi-query already isolates per variant; the
-          // single-query caller treats null as lookup_failed and Green/Red skip RAG.
-          recordEmbedFailure(activeEmbeddingProvider(userId), "query-embed-failed");
-          logWarn("embed.failed", {
-            provider: activeEmbeddingProvider(userId),
-            error_type: "query-embed-failed"
-          });
-          return null;
         }
         if (!response?.servedFromContentCache) {
-          meterEmbed([q], activeModel, userId, embedProvider); // count only on a cache MISS; book under the requesting userId
+          meterEmbed([q], meterModel, userId, embedProvider); // count only on a cache MISS; book under the requesting userId
           recordRagOperation(Date.now(), userId); // R16: count this embed call against the per-run budget (no-op unless enabled).
         }
         embedding = response.data?.[0]?.embedding;
