@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
-import { audit, getPolicy, latestAuditByKind, resetDbForTesting, setPolicy, upsertConnectedAccount } from "../src/lib/db";
+import { audit, getDb, getPolicy, latestAuditByKind, resetDbForTesting, setPolicy, upsertConnectedAccount } from "../src/lib/db";
+import { userIdForEmail } from "../src/lib/auth/identity";
+import { AUTHENTICATED_IDENTITY_SOURCE_HEADER, AUTHENTICATED_IDENTITY_SOURCES } from "../src/lib/auth/strip-identity";
+import { markAccountIdentityDeleted } from "../src/lib/user-write-fence";
 import { isUnusableEmptyMarketScan } from "../src/lib/scan-singleflight";
 import {
   clearMarketCache,
@@ -582,6 +585,77 @@ describe("GET /api/scan empty-screener contract", () => {
     expect(body.generatedAt).toBe(generatedAt);
     expect(body.topCandidates?.[0]?.symbol).toBe("AAPL");
     expect(latestAuditByKind("market_scan_failed", userId)).toBeTruthy();
+  });
+
+  it("returns 401 instead of user local's last-good scan when identity resolution fails", async () => {
+    const generatedAt = "2026-10-12T06:29:00.000Z";
+    audit("market_scan", {
+      scan: {
+        source: "nasdaq-delayed-screener",
+        generatedAt,
+        scannedSymbols: 1,
+        returnedQuotes: 1,
+        topCandidates: [{ symbol: "LOCALONLY", price: 10, score: 1 }],
+        sectorBySymbol: { LOCALONLY: "Technology" },
+        quotesBySymbol: { LOCALONLY: { symbol: "LOCALONLY", price: 10, score: 1 } },
+        warnings: []
+      }
+    }, "local");
+    const email = "scan-fenced@example.com";
+    const fencedUserId = userIdForEmail(email);
+    markAccountIdentityDeleted(getDb(), fencedUserId, fencedUserId, "2026-10-01T00:00:00.000Z");
+
+    const res = await scanGet(
+      new Request("https://trading.example.com/api/scan", {
+        headers: {
+          [AUTHENTICATED_EMAIL_HEADER]: email,
+          [AUTHENTICATED_IDENTITY_SOURCE_HEADER]: AUTHENTICATED_IDENTITY_SOURCES.authJsSession
+        }
+      })
+    );
+    expect(res.status).toBe(401);
+    const body = await res.json() as { error?: string; stale?: boolean; topCandidates?: Array<{ symbol?: string }> };
+    expect(body.error).toMatch(/sign-in|sign in|session/i);
+    expect(body.stale).toBeUndefined();
+    expect(body.topCandidates).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("LOCALONLY");
+  });
+
+  it("does not cache a Nasdaq body that fails schema validation", async () => {
+    let nasdaqCalls = 0;
+    vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
+      const url = String(request);
+      if (url.includes("api.nasdaq.com")) {
+        nasdaqCalls += 1;
+        const body = nasdaqCalls === 1
+          ? { unexpected: true }
+          : {
+              data: {
+                asof: "2026-08-18",
+                table: {
+                  rows: [{
+                    symbol: "AAPL",
+                    name: "Apple",
+                    lastsale: "$210",
+                    pctchange: "1%",
+                    volume: "1000000",
+                    marketCap: "3000000000000",
+                    sector: "Technology",
+                    industry: "Consumer Electronics"
+                  }]
+                }
+              }
+            };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    await expect(scanMarket(["AAPL"], [], undefined, undefined, [], { enrichmentMode: "skip" })).rejects.toBeInstanceOf(ScanQuotesUnavailableError);
+    const scan = await scanMarket(["AAPL"], [], undefined, undefined, [], { enrichmentMode: "skip" });
+    expect(nasdaqCalls).toBe(2);
+    expect(scan.topCandidates.map((quote) => quote.symbol)).toEqual(["AAPL"]);
+    expect(scan.quotesBySymbol.AAPL?.price).toBe(210);
   });
 });
 

@@ -140,12 +140,82 @@ export function resetFreshnessGateForTests(): void {
   lastUsableAuditRowId.clear();
 }
 
-function recordScanFailure(userId: string, connectedAccountId: string | undefined, message: string): void {
+/** Test-only.  The success path must prime this so the next tick can skip the payload read. */
+export function freshnessFastGateRowIdForTests(userId: string): string | undefined {
+  return lastUsableAuditRowId.get(userId);
+}
+
+/** How many users may refresh at once.  A hung singleflight must not stall the rest of the lane,
+ *  and an unbounded fan-out would stampede the shared screener on a cold cache. */
+const FRESHNESS_USER_CONCURRENCY = 4;
+
+function failureAuditMessage(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const record = payload as { message?: unknown; source?: unknown };
+  if (record.source !== "market_scan_freshness") return undefined;
+  return typeof record.message === "string" ? record.message : undefined;
+}
+
+/** True when this user already has a freshness failure for the same message inside the current
+ *  outage.  A newer successful `market_scan` ends the outage.  `maxAgeMs` caps how long one row
+ *  stands in for a failure that never recovers. */
+function recentFailureForUser(
+  userId: string,
+  connectedAccountId: string | undefined,
+  message: string,
+  maxAgeMs: number,
+  now = Date.now()
+): boolean {
+  const failed = connectedAccountId
+    ? latestAuditByKind("market_scan_failed", userId, connectedAccountId)
+    : latestAuditByKind("market_scan_failed", userId);
+  if (!failed || failureAuditMessage(failed.payload) !== message) return false;
+  const failedAt = Date.parse(failed.createdAt);
+  if (!Number.isFinite(failedAt) || now - failedAt >= maxAgeMs || failedAt > now) return false;
+  const success = connectedAccountId
+    ? latestAuditStampByKind("market_scan", userId, connectedAccountId)
+    : latestAuditStampByKind("market_scan", userId);
+  if (success && Date.parse(success.createdAt) >= failedAt) return false;
+  return true;
+}
+
+function recordScanFailure(
+  userId: string,
+  connectedAccountId: string | undefined,
+  message: string,
+  maxAgeMs: number,
+  now = Date.now()
+): void {
+  if (recentFailureForUser(userId, connectedAccountId, message, maxAgeMs, now)) return;
   try {
     audit("market_scan_failed", { message, source: "market_scan_freshness" }, userId, connectedAccountId);
   } catch {
     /* audit is diagnostic only */
   }
+}
+
+async function mapWithConcurrency<T>(
+  items: readonly string[],
+  limit: number,
+  fn: (item: string) => Promise<T>
+): Promise<Array<PromiseSettledResult<T>>> {
+  const results: Array<PromiseSettledResult<T>> = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      const item = items[index];
+      if (item === undefined) continue;
+      try {
+        results[index] = { status: "fulfilled", value: await fn(item) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 /** One user.  Not market-hours gated: weekends still refresh in skip-enrichment mode.
@@ -190,8 +260,11 @@ async function refreshUserMarketScanIfDue(userId: string, now: number, maxAgeMs:
   try {
     // withScanDeadline rejects even if a body read ignores the signal, so one hung
     // Nasdaq response cannot pin this user's singleflight for the life of the process.
-    scan = await runScanSingleFlight(key, () =>
-      withScanDeadline(FRESHNESS_SCAN_DEADLINE_MS, (signal) =>
+    // The enrichment budget starts when this scan starts.  The tick's `now` is only
+    // the staleness clock; an earlier user must not spend this user's deadline.
+    scan = await runScanSingleFlight(key, () => {
+      const deadlineAt = Date.now() + FRESHNESS_SCAN_DEADLINE_MS;
+      return withScanDeadline(FRESHNESS_SCAN_DEADLINE_MS, (signal) =>
         scanMarket(symbols, [], policy.scoringWeights, userId, dynamicUniverses, {
           candidateLimit: policy.marketScanCandidateLimit,
           outlierReserve: policy.marketScanOutlierReserve,
@@ -199,29 +272,36 @@ async function refreshUserMarketScanIfDue(userId: string, now: number, maxAgeMs:
           enrichmentMode: tradingDay ? undefined : "skip",
           seedEnrichment,
           signal,
-          deadlineAt: now + FRESHNESS_SCAN_DEADLINE_MS
+          deadlineAt
         }),
         "Market scan freshness deadline exceeded."
-      )
-    );
+      );
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[market-scan-freshness] ${userId}:`, message);
-    recordScanFailure(userId, policy.connectedAccountId, message);
+    recordScanFailure(userId, policy.connectedAccountId, message, maxAgeMs);
     return "failed";
   }
 
   if (isUnusableEmptyMarketScan(scan)) {
-    recordScanFailure(userId, policy.connectedAccountId, "Scan finished with zero quotes.");
+    recordScanFailure(userId, policy.connectedAccountId, "Scan finished with zero quotes.", maxAgeMs);
     return "failed";
   }
 
   try {
     audit("market_scan", { scan }, userId, policy.connectedAccountId);
   } catch (err) {
-    recordScanFailure(userId, policy.connectedAccountId, err instanceof Error ? err.message : String(err));
+    recordScanFailure(
+      userId,
+      policy.connectedAccountId,
+      err instanceof Error ? err.message : String(err),
+      maxAgeMs
+    );
     return "failed";
   }
+  const confirmed = newestPersistedMarketScan(userId, policy.connectedAccountId);
+  if (confirmed) lastUsableAuditRowId.set(userId, confirmed.entry.id);
   return "refreshed";
 }
 
@@ -236,17 +316,22 @@ export async function runMarketScanFreshnessIfDue(now: number = Date.now(), upti
     // row stuck (prod: last interactive/scheduled scan 2026-10-12 06:29Z) while the
     // scheduler tick itself stayed healthy.  The lane is not gated on market hours.
     const users = listUsers();
+    // Overlap users so one hung singleflight cannot block the rest of the lane.
+    // Same-user duplicates still coalesce inside runScanSingleFlight.
+    const settled = await mapWithConcurrency(users, FRESHNESS_USER_CONCURRENCY, async (userId) => {
+      try {
+        return await refreshUserMarketScanIfDue(userId, now, maxAgeMs);
+      } catch (err) {
+        console.error("[market-scan-freshness] error:", err instanceof Error ? err.message : err);
+        return "failed" as const;
+      }
+    });
     let refreshed = 0;
     let failed = 0;
-    for (const userId of users) {
-      try {
-        const outcome = await refreshUserMarketScanIfDue(userId, now, maxAgeMs);
-        if (outcome === "refreshed") refreshed += 1;
-        if (outcome === "failed") failed += 1;
-      } catch (err) {
-        failed += 1;
-        console.error("[market-scan-freshness] error:", err instanceof Error ? err.message : err);
-      }
+    for (const result of settled) {
+      if (result.status === "fulfilled" && result.value === "refreshed") refreshed += 1;
+      if (result.status === "fulfilled" && result.value === "failed") failed += 1;
+      if (result.status === "rejected") failed += 1;
     }
     if (refreshed > 0 || failed > 0) {
       console.info(`[market-scan-freshness] users=${users.length} refreshed=${refreshed} failed=${failed}`);

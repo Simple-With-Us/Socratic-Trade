@@ -32,16 +32,28 @@ function lastGoodScanResponse(userId: string, connectedAccountId: string | undef
   );
 }
 
+/** Identity failures must not fall through to user `local`'s last-good scan. */
+function identityErrorResponse(error: unknown): NextResponse {
+  const message = error instanceof Error ? error.message : "unauthorized";
+  const status = (error as { status?: unknown } | null)?.status;
+  const httpStatus = status === 401 || status === 403 || status === 409 ? status : 401;
+  return NextResponse.json({ error: message }, { status: httpStatus });
+}
+
 // Fresh, standalone market scan for the Market Scan tab. It returns current screener,
 // broker, and persisted web-signal data instead of waiting for the next strategy run.
 // Slow fundamentals are reused from that run while prices refresh; deep provider work
 // stays on the scheduled strategy and on-demand ticker paths. Cheap on repeat calls:
 // scanMarket caches the screener (~5 min). Read-only; places nothing.
 export async function GET(request: Request) {
-  let userId = "local";
-  let connectedAccountId: string | undefined;
+  let userId: string;
   try {
     userId = resolveRequestUserId(request);
+  } catch (error) {
+    return identityErrorResponse(error);
+  }
+  let connectedAccountId: string | undefined;
+  try {
     // Per-user rate limit: read-only, but each scan fans out to several data providers, so a
     // tight refresh loop can hammer upstreams. Returns 429 with Retry-After; fails open on limiter error.
     const limited = enforceRateLimit(userId, "scan", RATE_LIMITS.scan);

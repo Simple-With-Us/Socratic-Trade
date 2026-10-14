@@ -40,6 +40,7 @@ import {
   NASDAQ_SCREENER_TIMEOUT_MS,
   readNasdaqScreenerJson
 } from "./nasdaq-screener-fetch";
+import { parseNasdaqScreenerPayload, type NasdaqScreenerRow } from "./nasdaq-screener-schema";
 
 export { NASDAQ_SCREENER_TIMEOUT_MESSAGE, NASDAQ_SCREENER_TIMEOUT_MS };
 
@@ -116,12 +117,12 @@ const DEFAULT_ENRICHMENT_POOL_CAP = 500;
 const MAX_ENRICHMENT_POOL_MULTIPLIER = 10;
 const MAX_ENRICHMENT_POOL_CAP = 1_000;
 
-type RawNasdaqRow = Record<string, unknown>;
 type NasdaqExchange = "nasdaq" | "nyse";
 
 // Nasdaq screener is a public, unauthenticated endpoint — no user API key is
 // consumed, so this single shared cache is safe to serve to all users.
-let screenerCache = new Map<string, { expiresAt: number; rows: RawNasdaqRow[]; asOf?: string }>();
+// Rows are the parsed schema, not the raw JSON, so a drifted envelope is not cached.
+let screenerCache = new Map<string, { expiresAt: number; rows: NasdaqScreenerRow[]; asOf?: string }>();
 
 /**
  * True if a quote clears the universe floor. Each bound applies only when set (`> 0`); market-cap and
@@ -1461,7 +1462,7 @@ async function fetchNasdaqScreener(
   ttlMs: number,
   exchange?: NasdaqExchange,
   signal?: AbortSignal
-): Promise<{ rows: RawNasdaqRow[]; asOf?: string; cached: boolean }> {
+): Promise<{ rows: NasdaqScreenerRow[]; asOf?: string; cached: boolean }> {
   const now = Date.now();
   const cacheKey = exchange ?? "all";
   const cached = screenerCache.get(cacheKey);
@@ -1480,14 +1481,15 @@ async function fetchNasdaqScreener(
     signal
   });
   if (!response.ok) throw new Error(`Market data request failed with ${response.status}.`);
-  const payload = await readNasdaqScreenerJson(response, signal) as { data?: { table?: { rows?: unknown }; asof?: unknown } } | null;
-  const rows = Array.isArray(payload?.data?.table?.rows) ? (payload.data.table.rows as RawNasdaqRow[]) : [];
-  const asOf = typeof payload?.data?.asof === "string" ? payload.data.asof : undefined;
+  // Parse before cache or return.  A drifted envelope throws and is not stored.
+  const payload = parseNasdaqScreenerPayload(await readNasdaqScreenerJson(response, signal));
+  const rows = payload.data.table.rows;
+  const asOf = payload.data.asof ?? undefined;
   screenerCache.set(cacheKey, { rows, asOf, expiresAt: expiresAtRespectingMarketClose(new Date(now), ttlMs) });
   return { rows, asOf, cached: false };
 }
 
-function toMarketQuote(row: RawNasdaqRow, positions: EquityPosition[], provider: string, asOf?: string): MarketQuote[] {
+function toMarketQuote(row: NasdaqScreenerRow, positions: EquityPosition[], provider: string, asOf?: string): MarketQuote[] {
   const symbol = normalizeMarketDataSymbol(String(row.symbol ?? ""));
   const price = number(row.lastsale);
   const intradayChangePct = percent(row.pctchange);
