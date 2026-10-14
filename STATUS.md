@@ -19,6 +19,7 @@
 **Next.**  PR opened against main; left for the standing auto-merge rule (merge when CI is green). Point the watchdog VM at `https://<app-host>/api/proxy-use`. Live Mango reachability from the Coolify host is unverified until the first watchdog poll post-deploy.
 
 **Docs.**  `docs/rollouts/2026-10-13-proxy-use-logging.md`.
+
 ## 2026-10-12 CODEX — Claude Autofix 120-Turn Cap (OPS-935)
 
 **What.**  Pin Claude Code Autofix to shared `main` revision `99d372dcd7f600611c7b2b83a6f8eb2d31d6ecad` (squash merge of shared PR #368).  That revision raises the default from 60 to 120 turns and adds schema-2 operation category counters with conservative fallback for ambiguous forms.  Raw commands remain excluded; artifacts retain the existing seven-day, 500-event, 256-KiB bounds.  The 30-minute timeout and model route remain unchanged.
