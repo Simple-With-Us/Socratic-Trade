@@ -50,7 +50,7 @@ Follow-up after review (stale-success epoch, multi-text context-length split, em
 npx vitest run test/embed-request-pack.test.ts test/retrieval-pressure.test.ts test/vector-db-chunk-cap.test.ts test/vector-db-embedding-integrity.test.ts
 ```
 
-The first run failed the singleton shrink assertion because the default 2400 character cap already sat under the half-budget byte cap, so the retry text was the same length.  The test now uses an `is_table` string between the half-budget and full byte caps.  Re-run of the packer and pressure files: 18 passed.  The chunk-cap and integrity files passed in the same first run (the singleton failure was the only failure).  Follow-up `npm run lint` ok (0 errors, 866 warnings).  Follow-up `npx tsc --noEmit` ok.
+The first run failed the singleton shrink assertion because the default 2400 character cap already sat under the half-budget byte cap, so the retry text was the same length.  The test now uses an `is_table` string between the half-budget and full byte caps.  Re-run of the packer and pressure files: 18 passed.  The chunk-cap and integrity files passed in the same first run (the singleton failure was the only failure).  Follow-up `npm run lint` ok (0 errors, 866 warnings).  Follow-up `npx tsc --noEmit` ok.  Follow-up `npm test` was 9282 passed, 51 skipped, 25 failed (the same sandbox-key and local-script failures; embed, retrieval-pressure, chunk-cap, and embedding-integrity are not in that list).  Follow-up `npm run build` ok.
 
 ## Next Steps & Blockers
 
