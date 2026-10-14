@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 CURSOR — Keyless options enrichment (`cursor/keyless-options-enrichment-8872`)
+
+**What.**  Background and shared market scans now fill `nearTheMoneyIv` and `putCallRatio` from keyless Cboe delayed options JSON (primary), with Alpaca indicative snapshots and Tradier chains as fallbacks when credentials exist.  Same `deriveOptionMetrics` path as Robinhood options.
+
+**Verification.**  `npm run lint` ok.  `npx tsc --noEmit` ok.  `npm test -- test/keyless-options-enrichment.test.ts test/source-capability-matrix.test.ts` ok.  `npm run build` ok.
+
+**Docs.**  `docs/rollouts/2026-10-14-keyless-options-enrichment.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Open PR for review; merge queues runtime deploy via `main`.
+
 ## 2026-10-14 GROK — PR #4609 verification order
 
 **What.**  Merged origin/main (`b7775658`, mobile snapshot partial timeout).  The freshness handoff verification block now lists `npm run lint`, `npx tsc --noEmit`, `npm test`, then `npm run build`.  No product behavior change.
