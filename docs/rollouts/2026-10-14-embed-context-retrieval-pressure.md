@@ -25,6 +25,16 @@ Embed input is fit to a token-aware budget before the POST.  Queries are truncat
 
 The token estimate is the max of UTF-8 bytes/4 and a mixed floor (digits, `$`, and `|` at one token; other characters at 3.5 per token).  The byte cap stays 18750 so an ASCII piece cannot sneak past the provider even when the character floor is optimistic.  Mean-pooling keeps one Pinecone record per original text.  The 15s retrieval deadline and the 20000/day ingest cap are unchanged on purpose.  Concurrency defaults to 4 so a four-query fan-out is one wave.  Backoff does not run during the default vitest process, matching the embed circuit breaker, so one timed-out case cannot black-hole later tests.  SiliconFlow query rescue is unchanged.  This does not close Sentry 2G or 2E until a live deploy shows the burst and the context-length 400 are gone.
 
+### Codex autofix pass (ingest-budget memoization)
+
+`embedBudgetUnits` is a char-walk plus a binary-search truncation, and the ingest path paid it twice for the same strings: once in the `budgetInputs` reduce and again inside `prefixCountWithinEmbedUnits` on the over-budget path.  `budgetInputs` also holds one entry per document, so repeated texts were re-walked per copy.  The reduce now memoizes per exact text in a `Map` and hands that map to the prefix walk as an optional `precomputedUnits` argument.  The parameter is additive with a compute-on-miss fallback, so the existing two-argument callers and tests are unaffected.
+
+`src/lib/rag/embed-request-pack.ts`, `src/lib/vector-db.ts`, `test/embed-request-pack.test.ts`.
+
+Autofix-pass gates: `npm run lint` ok (0 errors, 866 warnings, unchanged).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npx vitest run test/embed-request-pack.test.ts` 13 passed.  Full `npm test` fails 13 tests across `llm-provider`, `chat-llm`, `openrouter-credits`, and `framework-review` — the sandbox-credential class above, reproduced identically with this diff stashed, so it is not from this change.
+
+The other open Kody thread (acquiring the retrieval slot before the embed-circuit check) is deliberately not changed.  A breaker pre-check in front of `acquireRetrievalSlot` would suppress the OpenRouter to SiliconFlow query rescue that currently runs while the OpenRouter circuit is open, and it would also stop serving embeddings that `getCachedQueryEmbedding` already has.  Reordering the slot and the circuit check is a behavior change that needs a maintainer decision, not a mechanical fix.
+
 ## Verification State
 
 ```bash
@@ -58,7 +68,7 @@ Review the PR.  Do not merge from this lane.  After merge and the evening deploy
 
 Fleet board claim could not be filed from this seat.  `board whoami` and a Linear write were not run: this cloud VM has no fleet client credentials (`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, or a seat `ZULIP_*`), and `scripts/install-fleet-coordination.sh` does not invent them.  The claim that would have been filed is Linear team ST, title "Fit embed input to the bge-m3 token budget and back off retrieval bursts", state In Progress, and Completed only after merge to `main`.  No Linear issue id was minted here.  `docs/EFFORT-LOG.md` is archived and was not edited.
 
-Kody threads that this follow-up fixes (stale success clearing backoff, multi-text context-length resend, empty-string and non-string estimates, and the board-claim citation) can be resolved after the replies land.  Threads left open on purpose: process-global backoff dropping later symbols in the same wave, queue wait counting toward the outer strategy deadline, taking a retrieval slot before the embed-circuit check, recomputing `embedBudgetUnits` on the ingest slice, and the scope mismatch against GitHub #4660 / PRs #4658 and #4659.  Those last items are not this PR.
+Kody threads that this follow-up fixes (stale success clearing backoff, multi-text context-length resend, empty-string and non-string estimates, and the board-claim citation) can be resolved after the replies land.  The recomputing `embedBudgetUnits` on the ingest slice thread is fixed by the Codex autofix pass above and resolved with it.  Threads left open on purpose: process-global backoff dropping later symbols in the same wave, queue wait counting toward the outer strategy deadline, taking a retrieval slot before the embed-circuit check (an ordering change that would disable the SiliconFlow rescue and the cached-embedding path), and the scope mismatch against GitHub #4660 / PRs #4658 and #4659.  Those last items are not this PR.
 
 ## Zero-Code Findings
 

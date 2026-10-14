@@ -172,17 +172,23 @@ export function prepareEmbedInputPieces(
 /**
  * How many leading texts fit in `allowedUnits` windows.  A text that itself needs more
  * windows than remain stops the prefix (same shape as the old text-count slice).
+ *
+ * `precomputedUnits` lets a caller that already summed `embedBudgetUnits` over the same
+ * texts (the ingest-budget reduce) hand the results back instead of paying a second
+ * char-walk + binary-search truncation per text.  It is keyed by the exact text and must
+ * only carry values computed with the same `tokenBudget`; anything absent is computed here.
  */
 export function prefixCountWithinEmbedUnits(
   texts: readonly string[],
   allowedUnits: number,
-  tokenBudget: number = EMBED_REQUEST_TOKEN_BUDGET
+  tokenBudget: number = EMBED_REQUEST_TOKEN_BUDGET,
+  precomputedUnits?: ReadonlyMap<string, number>
 ): number {
   if (allowedUnits <= 0) return 0;
   let used = 0;
   let count = 0;
   for (const text of texts) {
-    const cost = embedBudgetUnits(text, tokenBudget);
+    const cost = precomputedUnits?.get(text) ?? embedBudgetUnits(text, tokenBudget);
     if (used + cost > allowedUnits) break;
     used += cost;
     count += 1;

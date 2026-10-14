@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 Codex Autofix — PR #4662 ingest-budget memoization
+
+**What.**  Review pass on the embed-context branch.  `embedBudgetUnits` (a char-walk plus binary-search truncation) was computed twice for the same strings on the ingest over-budget path — once in the `budgetInputs` reduce and again inside `prefixCountWithinEmbedUnits` — and once per copy when `budgetInputs` repeats a text.  The reduce now memoizes units per exact text and passes that map to the prefix walk through a new optional `precomputedUnits` argument, which falls back to computing on a miss.  Additive, so existing callers and tests are unaffected.  `test/embed-request-pack.test.ts` gained a case asserting the precomputed and un-precomputed walks agree, including a partial map.
+
+**Not fixed on purpose.**  The open Kody thread proposing an embed-circuit pre-check before `acquireRetrievalSlot` is a behavior change, not a mechanical fix: that ordering would suppress the OpenRouter to SiliconFlow query rescue which runs while the OpenRouter circuit is open, and would stop serving embeddings `getCachedQueryEmbedding` already holds.  Left open for a maintainer decision.
+
+**Review triage.**  Five of the eight threads on the PR were already resolved and outdated from earlier passes on this branch.  Two Sentry threads remain open; Sentry's bug-prediction bot is not one of the three review bots this fixer answers, so they were neither fixed nor resolved here.
+
+**Docs.**  `docs/rollouts/2026-10-14-embed-context-retrieval-pressure.md`, `STATUS.md`.
+
 ## 2026-10-14 CURSOR — embed context budget and retrieval pressure
 
 **What.**  OpenRouter `baai/bge-m3` embed POSTs are truncated or chunked to a token-aware 7500 budget (digits, `$`, and `|` count as one token each) and mean-pooled back to one vector per document.  A context-length 400 on a multi-text group splits that group.  A singleton truncates once.  Strategy retrieval concurrency defaults to 4, and a timeout opens a backoff that fails later calls closed without another "RAG retrieval failed" page.  A success does not clear a backoff that a sibling opened after the call took its slot.  The 15s deadline is unchanged.  Ingest budget units are windows of that same 7500, not a raised daily cap.

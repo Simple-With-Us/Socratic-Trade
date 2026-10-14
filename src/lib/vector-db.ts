@@ -3774,11 +3774,27 @@ async function storeContextsImpl(
   const budgetInputs = reuseExactEmbeddings
     ? uniqueMissingEmbeddingInputs
     : documentsToStore.map((document) => documentEmbeddingInput(document));
-  const requestedEmbeddingTexts = budgetInputs.reduce((sum, text) => sum + embedBudgetUnits(text), 0);
+  // Memoized per exact text: embedBudgetUnits is a char-walk plus binary-search truncation,
+  // and the over-budget prefix walk below re-reads the same strings.  budgetInputs can repeat a
+  // text (one entry per document), so keying by content collapses that work too.
+  const budgetUnitsByText = new Map<string, number>();
+  const budgetUnitsFor = (text: string): number => {
+    const known = budgetUnitsByText.get(text);
+    if (known !== undefined) return known;
+    const units = embedBudgetUnits(text);
+    budgetUnitsByText.set(text, units);
+    return units;
+  };
+  const requestedEmbeddingTexts = budgetInputs.reduce((sum, text) => sum + budgetUnitsFor(text), 0);
   const budget = remainingIngestTexts(userId, requestedEmbeddingTexts);
   if (budget.allowed < requestedEmbeddingTexts) {
     const providerTextsSkipped = requestedEmbeddingTexts - budget.allowed;
-    const allowedPrefix = prefixCountWithinEmbedUnits(budgetInputs, budget.allowed);
+    const allowedPrefix = prefixCountWithinEmbedUnits(
+      budgetInputs,
+      budget.allowed,
+      undefined,
+      budgetUnitsByText
+    );
     const beforeBudgetDocuments = documentsToStore;
     const beforeBudgetHashes = dedupHashes;
     if (reuseExactEmbeddings) {
