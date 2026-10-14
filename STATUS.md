@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 CURSOR — embed context budget and retrieval pressure
+
+**What.**  OpenRouter `baai/bge-m3` embed POSTs are truncated or chunked to a token-aware 7500 budget (digits, `$`, and `|` count as one token each) and mean-pooled back to one vector per document.  Strategy retrieval concurrency defaults to 4, and a timeout opens a backoff that fails later calls closed without another "RAG retrieval failed" page.  The 15s deadline is unchanged.  Ingest budget units are windows of that same 7500, not a raised daily cap.
+
+**Verification.**  Targeted: `npx vitest run test/embed-request-pack.test.ts test/retrieval-pressure.test.ts test/rag-multi-query-retrieval.test.ts test/embed-resilience.test.ts test/usage-compliance-classifier.test.ts` — 50 passed.  Full `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build` follow on this branch.
+
+**Docs.**  `docs/rollouts/2026-10-14-embed-context-retrieval-pressure.md`, `docs/phase-7-strategy.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Ready for review.  Do not merge from this lane.  Sentry 2G and 2E stay open until production shows the burst and the context-length 400 are gone.  Fleet `board` / Linear claim was not available on this cloud seat.
+
 ## 2026-10-14 GROK — PR #4609 verification order
 
 **What.**  Merged origin/main (`b7775658`, mobile snapshot partial timeout).  The freshness handoff verification block now lists `npm run lint`, `npx tsc --noEmit`, `npm test`, then `npm run build`.  No product behavior change.

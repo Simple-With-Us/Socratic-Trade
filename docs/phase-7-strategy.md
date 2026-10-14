@@ -2,6 +2,10 @@
 
 This document defines the comprehensive architecture for the AI Trading Strategy, including how the LLM evaluates the market, scores individual equities, and continuously learns from its own outcomes.
 
+## 2026-10-14 Embed token budget, ingest windows, retrieval pressure
+
+OpenRouter `baai/bge-m3` still sums every string in one embed `input[]` against 8192 tokens.  Bytes/4 under-counted digit and pipe runs, and a single over-budget string was posted whole, so the provider returned `maximum context length`.  Each string is now estimated with a denser floor, truncated (queries) or chunked (documents) to 7500 tokens and 18750 bytes, then packed.  Document chunks are mean-pooled back to one vector.  Pinecone cardinality is unchanged.  The daily ingest cap stays 20000 and now counts windows of that 7500, so a text that needs two windows costs two.  Strategy symbol waves use the retrieval concurrency cap (default 4).  A timeout opens a short backoff; callers that arrive during it degrade without another retrieval-failed page.  Do not raise `RAG_QUERY_IO_DEADLINE_MS`.  Do not raise `RAG_INGEST_MAX_TEXTS_PER_DAY` as the fix.  Rollout: `docs/rollouts/2026-10-14-embed-context-retrieval-pressure.md`.
+
 ## 2026-09-04 Gather internal time budget (do not raise the 8-minute cap)
 
 Board `06df80cf` leftover after #3013/#3018 abort + last-good.  `gatherStrategyMarket` still has an 8-minute wall.  The walk now plans remaining time after a 50s quote-refresh reserve: skip live enrich under 20s usable, skip keyed Finnhub Wave B under 90s, skip scarce RapidAPI Wave C under 20s, and shrink the enrichment pool to the ranked cut under 3 minutes.  A trimmed live tape is preferred over racing timeout then last-good.  Scheduler `broker-health-gate` auto-halt of an active account (including equity 0) now writes one `skipped_broker_unhealthy` `strategy_runs` row.  Skip rows are not liveness completions.  Rollout: `docs/rollouts/2026-09-04-gather-internal-budget.md`.

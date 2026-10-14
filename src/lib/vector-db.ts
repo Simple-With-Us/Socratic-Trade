@@ -52,10 +52,22 @@ import { parseProviderEmbeddingResponse, SiliconFlowEmbedSchema } from "./rag/em
 import { recordRagOperation, shouldDegradeForBudget } from "./rag/run-budget";
 import { auditRagIngestPointsGateSkip, estimateRagDispatchCost, getRagUsageSummary, hasRagIngestPointsBudget, hashQuery, meterEmbed, meterPineconeQuery, meterPineconeUpsert, meterRerank, ragIngestPointsBudgetDeferUntil, ragIngestTextBudgetDeferUntil, ragMaxDailyIngestPoints, recordRetrievalQuality, retrievalTelemetryEnabled, usedRagUpsertPointsLast24h, type RagEmbedRerankProvider } from "./rag-metering";
 import {
+  EMBED_REQUEST_BYTE_BUDGET,
   EMBED_REQUEST_TOKEN_BUDGET,
+  embedBudgetUnits,
   embedRequestFits,
-  packInWindowTexts
+  isEmbedContextLengthError,
+  packInWindowTexts,
+  prefixCountWithinEmbedUnits,
+  prepareEmbedInputPieces,
+  truncateEmbedText
 } from "./rag/embed-request-pack";
+import {
+  acquireRetrievalSlot,
+  countsTowardRetrievalBackoff,
+  noteRetrievalPressureFailure,
+  noteRetrievalPressureSuccess
+} from "./rag/retrieval-pressure";
 import { pineconeMonthToDateWriteUnits } from "./pinecone-monthly-pace";
 import { selectItemsWithinWriteBudget } from "./pinecone-write-budget";
 import { pineconeTrialState } from "./pinecone-trial-window";
@@ -2780,7 +2792,7 @@ async function embedWithRetry(
     }
   }
 
-  const embedOnce = async (texts: string[]): Promise<any> => {
+  const embedOnce = async (texts: string[], alreadyShrunk = false): Promise<any> => {
     for (let attempt = 0; ; attempt++) {
       if (boundSignal?.aborted) {
         throw boundSignal.reason instanceof Error ? boundSignal.reason : new Error("RAG embed aborted");
@@ -2855,6 +2867,15 @@ async function embedWithRetry(
           { estimatedCostUsd: estimateRagDispatchCost(texts, "embed", modelName, provider) }
         );
       } catch (error) {
+        // One shrink if the provider still reports context length.  Not a rate-limit attempt.
+        if (!alreadyShrunk && isEmbedContextLengthError(error)) {
+          const tighterTokens = Math.max(1, Math.floor(EMBED_REQUEST_TOKEN_BUDGET / 2));
+          const tighterBytes = Math.max(1, Math.floor(EMBED_REQUEST_BYTE_BUDGET / 2));
+          return embedOnce(
+            texts.map((text) => truncateEmbedText(text, tighterTokens, tighterBytes)),
+            true
+          );
+        }
         // Never retry on abort or timeout.  The caller's signal fired or the per-attempt
         // embed abort expired.  Retrying would only queue more requests against a slow
         // provider and stall the scheduler for a multiple of the deadline.
@@ -2883,27 +2904,17 @@ async function embedWithRetry(
     }
   };
 
-  // DeepInfra sums the whole `input[]` against 8192.  Count-only batches (prod
-  // VECTOR_EMBED_BATCH_SIZE=32) 400 at 8193.  Pack under ~7500.  A single
-  // over-budget text is isolated as its own POST — never re-chunked into extra
-  // Pinecone records or extra ContextDocuments.
+  // DeepInfra sums the whole `input[]` against 8192.  Queries are truncated to one
+  // piece.  Documents are chunked, embedded, then mean-pooled back to one vector per
+  // original string so Pinecone cardinality and content hashes stay unchanged.
   try {
-    const packed = packInWindowTexts(
-      input.map((text, sourceIndex) => ({ text, sourceIndex })),
-      { maxCount: embedBatchSize() }
-    );
-    if (packed.length <= 1) {
-      const response = await embedOnce(input);
-      rememberEmbeddings(response);
-      if (!useMockClient) noteEmbedProviderSuccess(httpProvider);
-      return response;
-    }
-
-    const embeddings = new Array<number[]>(input.length);
+    const pieces = prepareEmbedInputPieces(input, inputType);
+    const packed = packInWindowTexts(pieces, { maxCount: embedBatchSize() });
+    const pieceVectors = new Map<number, number[][]>();
     let sent = false;
     for (const group of packed) {
       const texts = group.map((item) => item.text);
-      if (texts.length > 1 && !embedRequestFits(texts)) {
+      if (!embedRequestFits(texts)) {
         throw new Error(`embed packer produced an over-budget request (${texts.length} texts, budget ${EMBED_REQUEST_TOKEN_BUDGET})`);
       }
       if (sent) await sleep(embedBatchDelayMs(), boundSignal);
@@ -2914,9 +2925,19 @@ async function embedWithRetry(
         throw new Error(`Embedding response rejected after window pack (${validated.reason ?? "unknown"})`);
       }
       for (let i = 0; i < group.length; i++) {
-        embeddings[group[i]!.sourceIndex] = validated.embeddings[i]!;
+        const sourceIndex = group[i]!.sourceIndex;
+        const bucket = pieceVectors.get(sourceIndex) ?? [];
+        bucket.push(validated.embeddings[i]!);
+        pieceVectors.set(sourceIndex, bucket);
       }
     }
+    const embeddings = input.map((_, index) => {
+      const vectors = pieceVectors.get(index);
+      if (!vectors || vectors.length === 0) {
+        throw new Error("embed packer dropped an input");
+      }
+      return vectors.length === 1 ? vectors[0]! : meanPoolEmbeddings(vectors);
+    });
     const response = {
       data: embeddings.map((embedding, index) => ({ embedding, index }))
     };
@@ -2927,6 +2948,20 @@ async function embedWithRetry(
     if (!useMockClient) settleEmbedProviderAttempt(httpProvider, error);
     throw error;
   }
+}
+
+function meanPoolEmbeddings(vectors: number[][]): number[] {
+  const first = vectors[0];
+  if (!first || vectors.some((vector) => vector.length !== first.length)) {
+    throw new Error("embed chunk vectors disagree on dimension");
+  }
+  const pooled = new Array<number>(first.length).fill(0);
+  for (const vector of vectors) {
+    for (let i = 0; i < first.length; i++) pooled[i] += vector[i] ?? 0;
+  }
+  const scale = vectors.length;
+  for (let i = 0; i < pooled.length; i++) pooled[i] = (pooled[i] ?? 0) / scale;
+  return pooled;
 }
 
 const SILICONFLOW_QUERY_EMBED_MODEL = "BAAI/bge-m3";
@@ -3326,7 +3361,8 @@ async function embedDocumentsLaneOrSkip(
     );
     assertVectorStoreLease(leaseGuard);
     if (!response?.servedFromContentCache) {
-      meterEmbed(inputs, activeEmbeddingModel(userId), userId, embedProvider);
+      const units = inputs.reduce((sum, text) => sum + embedBudgetUnits(text), 0);
+      meterEmbed(inputs, activeEmbeddingModel(userId), userId, embedProvider, undefined, units);
     }
     return { response, rejected: 0 };
   } catch (error) {
@@ -3352,9 +3388,9 @@ async function embedDocumentsLaneOrSkip(
 
 /**
  * Token-pack already-condensed embed texts, then embed each in-window group on its own lane.
- * A singleton that still 400s skips only that group — companions in the count-32 batch still
- * upsert.  Integrity stays atomic per POST (`validateDocumentEmbeddingBatch`).  Does not mint
- * extra ContextDocuments or split table text.
+ * A text past the embed budget is chunked inside embedWithRetry and mean-pooled back to one
+ * vector.  Companions in the count-32 batch still upsert.  Integrity stays atomic per POST
+ * (`validateDocumentEmbeddingBatch`).  Does not mint extra ContextDocuments.
  */
 async function embedPackedInputGroups(
   voyage: unknown,
@@ -3708,16 +3744,18 @@ async function storeContextsImpl(
 
   let budgetSkipped = 0;
   assertVectorStoreLease(options?.leaseGuard);
-  const requestedEmbeddingTexts = reuseExactEmbeddings
-    ? uniqueMissingEmbeddingInputs.length
-    : documentsToStore.length;
+  const budgetInputs = reuseExactEmbeddings
+    ? uniqueMissingEmbeddingInputs
+    : documentsToStore.map((document) => documentEmbeddingInput(document));
+  const requestedEmbeddingTexts = budgetInputs.reduce((sum, text) => sum + embedBudgetUnits(text), 0);
   const budget = remainingIngestTexts(userId, requestedEmbeddingTexts);
   if (budget.allowed < requestedEmbeddingTexts) {
     const providerTextsSkipped = requestedEmbeddingTexts - budget.allowed;
+    const allowedPrefix = prefixCountWithinEmbedUnits(budgetInputs, budget.allowed);
     const beforeBudgetDocuments = documentsToStore;
     const beforeBudgetHashes = dedupHashes;
     if (reuseExactEmbeddings) {
-      const allowedMissingInputs = new Set(uniqueMissingEmbeddingInputs.slice(0, budget.allowed));
+      const allowedMissingInputs = new Set(uniqueMissingEmbeddingInputs.slice(0, allowedPrefix));
       const keptIndexes: number[] = [];
       for (let index = 0; index < beforeBudgetDocuments.length; index++) {
         const document = beforeBudgetDocuments[index]!;
@@ -3729,9 +3767,9 @@ async function storeContextsImpl(
       if (beforeBudgetHashes) dedupHashes = keptIndexes.map((index) => beforeBudgetHashes[index]!);
       budgetSkipped = beforeBudgetDocuments.length - documentsToStore.length;
     } else {
-      budgetSkipped = beforeBudgetDocuments.length - budget.allowed;
-      documentsToStore = beforeBudgetDocuments.slice(0, budget.allowed);
-      if (beforeBudgetHashes) dedupHashes = beforeBudgetHashes.slice(0, budget.allowed);
+      budgetSkipped = beforeBudgetDocuments.length - allowedPrefix;
+      documentsToStore = beforeBudgetDocuments.slice(0, allowedPrefix);
+      if (beforeBudgetHashes) dedupHashes = beforeBudgetHashes.slice(0, allowedPrefix);
     }
     const budgetPayload = {
       requested: requestedEmbeddingTexts,
@@ -3739,7 +3777,8 @@ async function storeContextsImpl(
       skipped: providerTextsSkipped,
       skippedOccurrences: budgetSkipped,
       usedLast24h: budget.used,
-      limitPer24h: budget.limit
+      limitPer24h: budget.limit,
+      tokenBudgetPerText: EMBED_REQUEST_TOKEN_BUDGET
     };
     audit("vector_ingest_budget", budgetPayload, userId);
     await settleRagSideEffect(alertUsageLimitHit({
@@ -3780,7 +3819,8 @@ async function storeContextsImpl(
         skipped: providerTextsSkipped,
         skippedOccurrences: budgetSkipped,
         usedLast24h: budget.used,
-        limitPer24h: budget.limit
+        limitPer24h: budget.limit,
+        tokenBudgetPerText: EMBED_REQUEST_TOKEN_BUDGET
       }, options?.leaseGuard), options?.leaseGuard);
     }
     if (documentsToStore.length === 0) {
@@ -7934,8 +7974,17 @@ export async function retrieveContextDetailed(
     // Factored out of the single-query path unchanged so `queries?.length` absent/empty is
     // byte-for-byte identical to pre-multi-query behavior (one embed, one match round-trip).
     const embedAndMatchOneQuery = async (q: string): Promise<any[] | null> => {
+      // Queue for a slot before the inner deadline starts, so wait time does not burn the
+      // 15s embed/query budget.  A null slot is backoff or an already-aborted caller:
+      // degrade without another "RAG retrieval failed" page.
+      const slot = await acquireRetrievalSlot(options?.signal);
+      if (!slot) {
+        quietEmbedDegrade = true;
+        return null;
+      }
       const ragAbort = createRagQueryAbort(options?.signal);
       const querySignal = ragAbort.signal;
+      let pressure: "success" | "failure" | "skip" = "success";
       try {
       const activeModel = activeEmbeddingModel(userId);
       const endCacheLookup = stageTrace?.start("query_embed_cache", {
@@ -7994,8 +8043,10 @@ export async function retrieveContextDetailed(
             // this skip as a fresh embed failure.
             if (circuitOpen) {
               quietEmbedDegrade = true;
+              pressure = "skip";
               return null;
             }
+            if (countsTowardRetrievalBackoff(error)) pressure = "failure";
             // Soft-degrade this query only.  Multi-query already isolates per variant; the
             // single-query caller treats null as lookup_failed and Green/Red skip RAG.
             recordEmbedFailure(primaryProvider, "query-embed-failed");
@@ -8147,6 +8198,7 @@ export async function retrieveContextDetailed(
         });
       } catch (error) {
         endDenseQuery?.({ error });
+        if (countsTowardRetrievalBackoff(error)) pressure = "failure";
         throw error;
       }
       const [userResults, privateResults, localResults, managedUserResults, managedLocalResults, fmpResults] = denseResults;
@@ -8229,8 +8281,14 @@ export async function retrieveContextDetailed(
         tierByCandidateIdentity
       });
       return eligiblePool;
+      } catch (error) {
+        if (pressure === "success" && countsTowardRetrievalBackoff(error)) pressure = "failure";
+        throw error;
       } finally {
         ragAbort.cancel();
+        if (pressure === "failure") noteRetrievalPressureFailure();
+        else if (pressure === "success") noteRetrievalPressureSuccess();
+        slot.release();
       }
     };
 
@@ -8250,20 +8308,22 @@ export async function retrieveContextDetailed(
       : [];
     let matches: any[];
     if (fanOutQueries.length > 0) {
-      const perQueryResults = await Promise.all(
-        fanOutQueries.map(async (q) => {
-          try {
-            return await embedAndMatchOneQuery(q);
-          } catch (err) {
-            if (isEmbedCircuitOpenError(err)) {
-              quietEmbedDegrade = true;
-              return null;
-            }
-            console.warn(`[vector-db] multi-query variant failed, dropping it from the fan-out:`, err instanceof Error ? err.message : String(err));
+      const runFanOutQuery = async (q: string) => {
+        try {
+          return await embedAndMatchOneQuery(q);
+        } catch (err) {
+          if (isEmbedCircuitOpenError(err)) {
+            quietEmbedDegrade = true;
             return null;
           }
-        })
-      );
+          console.warn(`[vector-db] multi-query variant failed, dropping it from the fan-out:`, err instanceof Error ? err.message : String(err));
+          return null;
+        }
+      };
+      // Primary query takes a slot before the variants fan out, so it is not stuck behind them.
+      const primaryResult = await runFanOutQuery(fanOutQueries[0]!);
+      const variantResults = await Promise.all(fanOutQueries.slice(1).map((q) => runFanOutQuery(q)));
+      const perQueryResults = [primaryResult, ...variantResults];
       const validResults = perQueryResults.filter((r): r is any[] => r != null && r.length > 0);
       if (validResults.length === 0) {
         // Every variant (including the original query, always included above) failed or matched

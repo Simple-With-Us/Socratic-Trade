@@ -7,9 +7,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   EMBED_MODEL_CONTEXT_TOKENS,
   EMBED_REQUEST_TOKEN_BUDGET,
+  chunkEmbedText,
+  embedBudgetUnits,
   embedRequestFits,
   embedTextTokenEstimate,
-  packInWindowTexts
+  packInWindowTexts,
+  prefixCountWithinEmbedUnits
 } from "../src/lib/rag/embed-request-pack";
 import { approxTokens } from "../src/lib/rag-metering";
 
@@ -91,10 +94,26 @@ beforeEach(() => {
 });
 
 describe("embed request packer (pure)", () => {
-  it("uses the rag-metering approxTokens estimator", () => {
+  it("estimates prose above bytes/4 and digits at one token each", () => {
     const sample = textOfTokens(256);
-    expect(embedTextTokenEstimate(sample)).toBe(256);
     expect(approxTokens([sample])).toBe(256);
+    expect(embedTextTokenEstimate(sample)).toBe(293);
+    const digits = "9".repeat(20_000);
+    expect(approxTokens([digits])).toBe(5_000);
+    expect(embedTextTokenEstimate(digits)).toBe(20_000);
+  });
+
+  it("chunks a digit run that bytes/4 would send whole", () => {
+    const digits = "9".repeat(20_000);
+    const parts = chunkEmbedText(digits);
+    expect(parts.length).toBeGreaterThan(1);
+    expect(embedBudgetUnits(digits)).toBe(parts.length);
+    for (const part of parts) {
+      expect(embedRequestFits([part])).toBe(true);
+      expect(part.includes("[truncated]")).toBe(false);
+    }
+    expect(prefixCountWithinEmbedUnits([digits, "short filing"], 1)).toBe(0);
+    expect(prefixCountWithinEmbedUnits(["short filing", "another"], 1)).toBe(1);
   });
 
   it("packs a 32-text batch that summed to 8192 so no request reaches 8193", () => {
@@ -196,9 +215,10 @@ describe("storeContexts embed window (ingest)", () => {
     const tableInputs = mocks.embed.mock.calls
       .flatMap((call) => call[0].input as string[])
       .filter((text) => text.includes("D".repeat(40)));
-    expect(tableInputs).toHaveLength(1);
-    expect(tableInputs[0]).toContain("[Published: 2026-08-18]");
-    expect(tableInputs[0]?.includes(giant)).toBe(true);
+    expect(tableInputs.length).toBeGreaterThan(0);
+    const posted = mocks.embed.mock.calls.flatMap((call) => call[0].input as string[]);
+    expect(posted.some((text) => text.includes("[Published: 2026-08-18]"))).toBe(true);
+    for (const text of posted) expect(embedRequestFits([text])).toBe(true);
     const thrown400 = mocks.embed.mock.results.some((entry) => (
       entry.type === "throw" && String(entry.value).includes("input_tokens")
     ));
@@ -242,24 +262,23 @@ describe("storeContexts embed window (ingest)", () => {
 
     const result = await storeContexts(documents);
 
-    expect(result.indexed).toBe(31);
-    expect(result.rejectedInvalidEmbeddings).toBe(1);
-    expect(mocks.upsert.mock.calls.reduce((sum, call) => sum + call[0].records.length, 0)).toBe(31);
-    const companionEmbeds = mocks.embed.mock.calls.filter((call) => {
+    expect(result.indexed).toBe(32);
+    expect(result.rejectedInvalidEmbeddings ?? 0).toBe(0);
+    expect(mocks.upsert.mock.calls.reduce((sum, call) => sum + call[0].records.length, 0)).toBe(32);
+    const giantPosts = mocks.embed.mock.calls.filter((call) => {
       const input = call[0].input as string[];
-      return input.every((text) => !text.includes("E".repeat(40)));
+      return input.some((text) => text.includes("E".repeat(40)));
     });
-    expect(companionEmbeds.length).toBeGreaterThan(0);
-    for (const call of companionEmbeds) {
+    expect(giantPosts.length).toBeGreaterThan(0);
+    for (const call of mocks.embed.mock.calls) {
       const input = call[0].input as string[];
-      expect(approxTokens(input)).toBeLessThanOrEqual(EMBED_REQUEST_TOKEN_BUDGET);
       expect(embedRequestFits(input)).toBe(true);
+      expect(approxTokens(input)).toBeLessThan(EMBED_MODEL_CONTEXT_TOKENS);
     }
-    const isolatedGiant = mocks.embed.mock.calls.some((call) => {
-      const input = call[0].input as string[];
-      return input.length === 1 && input[0]?.includes("E".repeat(40));
-    });
-    expect(isolatedGiant).toBe(true);
+    const thrown400 = mocks.embed.mock.results.some((entry) => (
+      entry.type === "throw" && String(entry.value).includes("value=8193")
+    ));
+    expect(thrown400).toBe(false);
   });
 });
 
