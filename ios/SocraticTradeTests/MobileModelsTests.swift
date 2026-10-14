@@ -365,6 +365,27 @@ final class MobileModelsTests: XCTestCase {
     }
 
     @MainActor
+    func testServerPartialFlagBlocksOwnerApprove() throws {
+        let json = #"""
+        {"readiness":{"hasAccount":true,"hasUniverse":true,"systemState":"active","strategyAuthority":"decide","commandBacklog":{"queued":0,"running":0}},
+         "policy":{"systemState":"active","strategyAuthority":"decide"},
+         "partialData":true,
+         "partialReason":"Snapshot section timed out (gateway.getAccounts)."}
+        """#
+        let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(json.utf8))
+        XCTAssertTrue(snapshot.partialData)
+        XCTAssertEqual(snapshot.partialReason, "Snapshot section timed out (gateway.getAccounts).")
+        XCTAssertTrue(snapshot.partialDropCounts.isEmpty)
+        let store = MobileStore(
+            client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!),
+            previewSnapshot: snapshot
+        )
+        XCTAssertTrue(store.partialData)
+        XCTAssertFalse(store.canSubmit("proposal.approve"))
+        XCTAssertTrue(store.canSubmit("order.cancel"))
+    }
+
+    @MainActor
     func testCommandSafetyGatesReadinessAndStalenessButKeepsProtectiveActions() throws {
         let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(minimalSnapshotJSON.utf8))
         let store = MobileStore(
