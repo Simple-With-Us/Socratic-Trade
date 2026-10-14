@@ -6,6 +6,7 @@
 //
 // Metrics are derived with the same `deriveOptionMetrics` helper as the opt-in Robinhood tier.
 
+import { z } from "zod";
 import { getConnectedAccountByBroker, type ApiKeySource } from "./db";
 import type { MarketEnrichmentProvider, SymbolEnrichment } from "./data-providers";
 import { deriveOptionMetrics } from "./robinhood-options";
@@ -16,11 +17,138 @@ import { recordProviderCall } from "./usage-monitor-push";
 
 const CBOE_OPTIONS_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options";
 const ALPACA_OPTIONS_SNAPSHOTS = "https://data.alpaca.markets/v1beta1/options/snapshots";
+const ALPACA_STOCK_SNAPSHOTS = "https://data.alpaca.markets/v2/stocks";
 
 const DEFAULT_TTL_MS = 6 * 60 * 60_000;
 const DEFAULT_MAX_SYMBOLS = 40;
 const DEFAULT_PACE_MS = 250;
 const DEFAULT_TIMEOUT_MS = 12_000;
+/** Empty chains are retried sooner than a filled chain, and never longer than five minutes. */
+const NEGATIVE_CACHE_MAX_MS = 5 * 60_000;
+
+const loose = z.unknown().optional();
+
+/** Cboe delayed-quotes envelope.  Extra keys are stripped; row shape is checked per contract. */
+export const CboeOptionsResponseSchema = z.object({
+  data: z
+    .object({
+      current_price: loose,
+      close: loose,
+      prev_day_close: loose,
+      options: z.array(z.unknown()).optional()
+    })
+    .optional()
+});
+
+const CboeOptionRowSchema = z.object({
+  option: z.string(),
+  iv: loose,
+  implied_volatility: loose,
+  impliedVolatility: loose,
+  open_interest: loose,
+  openInterest: loose,
+  oi: loose,
+  volume: loose,
+  vol: loose
+});
+
+/** Alpaca `GET /v1beta1/options/snapshots/{underlying}`.  IV is root `impliedVolatility`, volume is `dailyBar.v`. */
+export const AlpacaOptionsResponseSchema = z.object({
+  snapshots: z.record(z.string(), z.unknown()).optional(),
+  underlyingAssetPrice: loose,
+  underlying_asset_price: loose,
+  underlying: loose
+});
+
+const AlpacaGreeksSchema = z.object({
+  implied_volatility: loose,
+  iv: loose,
+  mid_iv: loose
+});
+
+const AlpacaSnapshotSchema = z.object({
+  impliedVolatility: loose,
+  implied_volatility: loose,
+  iv: loose,
+  greeks: AlpacaGreeksSchema.optional().nullable(),
+  open_interest: loose,
+  openInterest: loose,
+  volume: loose,
+  vol: loose,
+  daily_volume: loose,
+  dailyBar: z.object({ v: loose }).optional().nullable(),
+  daily_bar: z.object({ v: loose }).optional().nullable()
+});
+
+/** IEX stock snapshot used only when the options payload has no underlying price. */
+export const AlpacaStockSnapshotSchema = z.object({
+  latestTrade: z.object({ p: loose }).optional().nullable(),
+  dailyBar: z.object({ c: loose }).optional().nullable(),
+  prevDailyBar: z.object({ c: loose }).optional().nullable()
+});
+
+export const TradierExpirationsSchema = z.object({
+  expirations: z
+    .object({
+      date: z.union([z.string(), z.array(z.string())]).optional().nullable()
+    })
+    .optional()
+    .nullable()
+});
+
+/** Tradier chain envelope.  `underlying` is often the ticker string, not a price. */
+export const TradierChainSchema = z.object({
+  options: z
+    .object({
+      option: z.unknown().optional().nullable()
+    })
+    .optional()
+    .nullable(),
+  underlying: loose,
+  underlying_price: loose
+});
+
+const TradierOptionRowSchema = z.object({
+  strike: loose,
+  strike_price: loose,
+  option_type: loose,
+  type: loose,
+  open_interest: loose,
+  openInterest: loose,
+  volume: loose,
+  vol: loose,
+  implied_volatility: loose,
+  iv: loose,
+  greeks: loose
+});
+
+const TradierGreeksSchema = z.object({
+  mid_iv: loose,
+  smv_vol: loose,
+  bid_iv: loose,
+  ask_iv: loose
+});
+
+export const TradierQuotesSchema = z.object({
+  quotes: z
+    .object({
+      quote: z.unknown().optional().nullable()
+    })
+    .optional()
+    .nullable()
+});
+
+const TradierQuoteSchema = z.object({
+  last: loose,
+  close: loose,
+  bid: loose,
+  ask: loose
+});
+
+const UnderlyingObjectSchema = z.object({
+  price: loose,
+  underlyingPrice: loose
+});
 
 const optionsCache = new Map<string, { expiresAt: number; data: SymbolEnrichment; source: string }>();
 
@@ -52,59 +180,82 @@ function keylessOptionsPaceMs(): number {
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_PACE_MS;
 }
 
-function firstPositiveNum(row: Record<string, unknown>, keys: string[]): number | undefined {
-  for (const key of keys) {
-    const value = row[key];
-    if (value === null || value === undefined || value === "") continue;
-    const parsed = typeof value === "number" ? value : Number(String(value).replace(/[$,%\s]/g, ""));
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  }
+function readPositive(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === "") return undefined;
+  const parsed = typeof value === "number" ? value : Number(String(value).replace(/[$,%\s]/g, ""));
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
   return undefined;
+}
+
+function withUnderlying(underlyingPrice: number | undefined, chains: unknown): { underlyingPrice?: number; chains: unknown } {
+  return underlyingPrice !== undefined ? { underlyingPrice, chains } : { chains };
+}
+
+const ChainResultsSchema = z.object({ results: z.array(z.unknown()).optional() });
+
+function chainRowCount(chains: unknown): number {
+  const parsed = ChainResultsSchema.safeParse(chains);
+  return parsed.success ? (parsed.data.results?.length ?? 0) : 0;
+}
+
+/** A number, or `{ price | underlyingPrice }`.  A ticker string is not a price. */
+function underlyingPriceFromUnknown(value: unknown): number | undefined {
+  const direct = readPositive(value);
+  if (direct !== undefined) return direct;
+  const obj = UnderlyingObjectSchema.safeParse(value);
+  if (!obj.success) return undefined;
+  return readPositive(obj.data.underlyingPrice) ?? readPositive(obj.data.price);
+}
+
+function quotePrice(quote: { last?: unknown; close?: unknown; bid?: unknown; ask?: unknown }): number | undefined {
+  const last = readPositive(quote.last);
+  if (last !== undefined) return last;
+  const close = readPositive(quote.close);
+  if (close !== undefined) return close;
+  const bid = readPositive(quote.bid);
+  const ask = readPositive(quote.ask);
+  if (bid !== undefined && ask !== undefined) return (bid + ask) / 2;
+  return bid ?? ask;
 }
 
 /** Map a Cboe delayed options payload into `deriveOptionMetrics` chain rows. */
 export function parseCboeOptionsPayload(json: unknown): { underlyingPrice?: number; chains: unknown } {
-  const root = json as { data?: Record<string, unknown> };
-  const data = root?.data;
-  if (!data || typeof data !== "object") return { chains: { results: [] } };
-
-  const underlyingRaw = data.current_price ?? data.close ?? data.prev_day_close;
+  const parsed = CboeOptionsResponseSchema.safeParse(json);
+  if (!parsed.success || !parsed.data.data) return { chains: { results: [] } };
+  const data = parsed.data.data;
   const underlyingPrice =
-    typeof underlyingRaw === "number" && Number.isFinite(underlyingRaw) && underlyingRaw > 0
-      ? underlyingRaw
-      : undefined;
+    readPositive(data.current_price) ?? readPositive(data.close) ?? readPositive(data.prev_day_close);
 
-  const rawOptions = data.options;
-  const list = Array.isArray(rawOptions) ? rawOptions : [];
   const results: Record<string, unknown>[] = [];
-
-  for (const entry of list) {
-    if (!entry || typeof entry !== "object") continue;
-    const row = entry as Record<string, unknown>;
-    const occ = typeof row.option === "string" ? row.option : undefined;
+  for (const entry of data.options ?? []) {
+    const rowParsed = CboeOptionRowSchema.safeParse(entry);
+    if (!rowParsed.success) continue;
+    const row = rowParsed.data;
+    const occ = parseOccSymbol(row.option);
     if (!occ) continue;
-    const parsed = parseOccSymbol(occ);
-    if (!parsed) continue;
-    const iv = firstPositiveNum(row, ["iv", "implied_volatility", "impliedVolatility"]);
-    const oi = firstPositiveNum(row, ["open_interest", "openInterest", "oi"]);
-    const vol = firstPositiveNum(row, ["volume", "vol"]);
+    const iv = readPositive(row.iv) ?? readPositive(row.implied_volatility) ?? readPositive(row.impliedVolatility);
+    const oi = readPositive(row.open_interest) ?? readPositive(row.openInterest) ?? readPositive(row.oi);
+    const vol = readPositive(row.volume) ?? readPositive(row.vol);
     results.push({
-      strike_price: parsed.strikePrice,
-      type: parsed.optionType,
+      strike_price: occ.strikePrice,
+      type: occ.optionType,
       ...(iv !== undefined ? { implied_volatility: iv } : {}),
       ...(oi !== undefined ? { open_interest: oi } : {}),
       ...(vol !== undefined ? { volume: vol } : {})
     });
   }
 
-  return { underlyingPrice, chains: { results } };
+  return withUnderlying(underlyingPrice, { results });
 }
 
-function tradierOptionRows(optionNode: unknown): Record<string, unknown>[] {
-  if (!optionNode) return [];
-  if (Array.isArray(optionNode)) return optionNode.filter((r) => r && typeof r === "object") as Record<string, unknown>[];
-  if (typeof optionNode === "object") return [optionNode as Record<string, unknown>];
-  return [];
+function tradierOptionRows(optionNode: unknown): z.infer<typeof TradierOptionRowSchema>[] {
+  const list = Array.isArray(optionNode) ? optionNode : optionNode ? [optionNode] : [];
+  const rows: z.infer<typeof TradierOptionRowSchema>[] = [];
+  for (const entry of list) {
+    const parsed = TradierOptionRowSchema.safeParse(entry);
+    if (parsed.success) rows.push(parsed.data);
+  }
+  return rows;
 }
 
 /** Map Tradier option chain rows into `deriveOptionMetrics` chain rows. */
@@ -112,20 +263,32 @@ export function parseTradierOptionsChains(
   chainsJson: unknown,
   underlyingPrice?: number
 ): { underlyingPrice?: number; chains: unknown } {
-  const options = (chainsJson as { options?: { option?: unknown } })?.options?.option;
-  const rows = tradierOptionRows(options);
+  const parsed = TradierChainSchema.safeParse(chainsJson);
+  if (!parsed.success) return withUnderlying(underlyingPrice, { results: [] });
+  const rows = tradierOptionRows(parsed.data.options?.option);
+  const price =
+    underlyingPrice ??
+    readPositive(parsed.data.underlying_price) ??
+    underlyingPriceFromUnknown(parsed.data.underlying);
   const results: Record<string, unknown>[] = [];
   for (const row of rows) {
-    const strike = firstPositiveNum(row, ["strike", "strike_price"]);
+    const strike = readPositive(row.strike) ?? readPositive(row.strike_price);
     const typeRaw = String(row.option_type ?? row.type ?? "").toLowerCase();
     const type = typeRaw.includes("put") ? "put" : typeRaw.includes("call") ? "call" : undefined;
     if (!strike || !type) continue;
-    const greeks = row.greeks && typeof row.greeks === "object" ? (row.greeks as Record<string, unknown>) : {};
+    const greeksParsed = TradierGreeksSchema.safeParse(row.greeks);
+    const greeks = greeksParsed.success ? greeksParsed.data : undefined;
     const iv =
-      firstPositiveNum(greeks, ["mid_iv", "smv_vol", "bid_iv", "ask_iv"]) ??
-      firstPositiveNum(row, ["implied_volatility", "iv"]);
-    const oi = firstPositiveNum(row, ["open_interest", "openInterest"]);
-    const vol = firstPositiveNum(row, ["volume", "vol"]);
+      (greeks
+        ? readPositive(greeks.mid_iv) ??
+          readPositive(greeks.smv_vol) ??
+          readPositive(greeks.bid_iv) ??
+          readPositive(greeks.ask_iv)
+        : undefined) ??
+      readPositive(row.implied_volatility) ??
+      readPositive(row.iv);
+    const oi = readPositive(row.open_interest) ?? readPositive(row.openInterest);
+    const vol = readPositive(row.volume) ?? readPositive(row.vol);
     results.push({
       strike_price: strike,
       type,
@@ -134,7 +297,7 @@ export function parseTradierOptionsChains(
       ...(vol !== undefined ? { volume: vol } : {})
     });
   }
-  return { underlyingPrice, chains: { results } };
+  return withUnderlying(price, { results });
 }
 
 /** Map Alpaca indicative option snapshots into `deriveOptionMetrics` chain rows. */
@@ -142,30 +305,44 @@ export function parseAlpacaOptionsSnapshots(
   json: unknown,
   underlyingPrice?: number
 ): { underlyingPrice?: number; chains: unknown } {
-  const snapshots = (json as { snapshots?: Record<string, unknown> })?.snapshots;
-  if (!snapshots || typeof snapshots !== "object") return { underlyingPrice, chains: { results: [] } };
-
+  const parsed = AlpacaOptionsResponseSchema.safeParse(json);
+  if (!parsed.success) return withUnderlying(underlyingPrice, { results: [] });
+  const fromPayload =
+    readPositive(parsed.data.underlyingAssetPrice) ??
+    readPositive(parsed.data.underlying_asset_price) ??
+    underlyingPriceFromUnknown(parsed.data.underlying);
+  const price = underlyingPrice ?? fromPayload;
   const results: Record<string, unknown>[] = [];
-  for (const [occ, snap] of Object.entries(snapshots)) {
-    if (!snap || typeof snap !== "object") continue;
-    const row = snap as Record<string, unknown>;
-    const parsed = parseOccSymbol(occ);
-    if (!parsed) continue;
-    const greeks = row.greeks && typeof row.greeks === "object" ? (row.greeks as Record<string, unknown>) : {};
+  for (const [occ, snap] of Object.entries(parsed.data.snapshots ?? {})) {
+    const rowParsed = AlpacaSnapshotSchema.safeParse(snap);
+    if (!rowParsed.success) continue;
+    const contract = parseOccSymbol(occ);
+    if (!contract) continue;
+    const row = rowParsed.data;
+    const greeks = row.greeks ?? undefined;
     const iv =
-      firstPositiveNum(greeks, ["implied_volatility", "iv", "mid_iv"]) ??
-      firstPositiveNum(row, ["implied_volatility", "iv"]);
-    const oi = firstPositiveNum(row, ["open_interest", "openInterest"]);
-    const vol = firstPositiveNum(row, ["volume", "vol", "daily_volume"]);
+      readPositive(row.impliedVolatility) ??
+      readPositive(greeks?.implied_volatility) ??
+      readPositive(greeks?.iv) ??
+      readPositive(greeks?.mid_iv) ??
+      readPositive(row.implied_volatility) ??
+      readPositive(row.iv);
+    const oi = readPositive(row.open_interest) ?? readPositive(row.openInterest);
+    const vol =
+      readPositive(row.volume) ??
+      readPositive(row.vol) ??
+      readPositive(row.daily_volume) ??
+      readPositive(row.dailyBar?.v) ??
+      readPositive(row.daily_bar?.v);
     results.push({
-      strike_price: parsed.strikePrice,
-      type: parsed.optionType,
+      strike_price: contract.strikePrice,
+      type: contract.optionType,
       ...(iv !== undefined ? { implied_volatility: iv } : {}),
       ...(oi !== undefined ? { open_interest: oi } : {}),
       ...(vol !== undefined ? { volume: vol } : {})
     });
   }
-  return { underlyingPrice, chains: { results } };
+  return withUnderlying(price, { results });
 }
 
 export function metricsFromChainPayload(payload: { underlyingPrice?: number; chains: unknown }): SymbolEnrichment {
@@ -184,10 +361,14 @@ async function fetchCboeOptionsPayload(symbol: string): Promise<{ underlyingPric
       recordProviderCall("cboe-options", { service: "options-chain", ok: false });
       return null;
     }
-    const json = (await res.json()) as unknown;
+    const parsedJson = CboeOptionsResponseSchema.safeParse(await res.json());
+    if (!parsedJson.success) {
+      recordProviderCall("cboe-options", { service: "options-chain", ok: false });
+      return null;
+    }
     recordProviderCall("cboe-options", { service: "options-chain", ok: true });
-    const parsed = parseCboeOptionsPayload(json);
-    if (!Array.isArray((parsed.chains as { results?: unknown[] })?.results) || (parsed.chains as { results: unknown[] }).results.length === 0) {
+    const parsed = parseCboeOptionsPayload(parsedJson.data);
+    if (chainRowCount(parsed.chains) === 0) {
       return null;
     }
     return parsed;
@@ -219,14 +400,58 @@ async function fetchAlpacaOptionsPayload(
       recordProviderCall("alpaca-options", { service: "options-snapshots", ok: false, userId });
       return null;
     }
-    const json = (await res.json()) as unknown;
+    const parsedJson = AlpacaOptionsResponseSchema.safeParse(await res.json());
+    if (!parsedJson.success) {
+      recordProviderCall("alpaca-options", { service: "options-snapshots", ok: false, userId });
+      return null;
+    }
     recordProviderCall("alpaca-options", { service: "options-snapshots", ok: true, userId });
-    const parsed = parseAlpacaOptionsSnapshots(json);
-    const count = (parsed.chains as { results?: unknown[] })?.results?.length ?? 0;
-    return count > 0 ? parsed : null;
+    const parsed = parseAlpacaOptionsSnapshots(parsedJson.data);
+    const count = chainRowCount(parsed.chains);
+    if (count === 0) return null;
+    if (parsed.underlyingPrice === undefined) {
+      const quote = await fetchAlpacaUnderlyingPrice(symbol, apiKey, apiSecret, userId);
+      if (quote !== undefined) parsed.underlyingPrice = quote;
+    }
+    return parsed;
   } catch {
     recordProviderCall("alpaca-options", { service: "options-snapshots", ok: false, userId });
     return null;
+  }
+}
+
+async function fetchAlpacaUnderlyingPrice(
+  symbol: string,
+  apiKey: string,
+  apiSecret: string,
+  userId?: string
+): Promise<number | undefined> {
+  const url = `${ALPACA_STOCK_SNAPSHOTS}/${encodeURIComponent(symbol)}/snapshot?feed=iex`;
+  try {
+    const res = await politeFetch(url, {
+      headers: {
+        accept: "application/json",
+        "APCA-API-KEY-ID": apiKey,
+        "APCA-API-SECRET-KEY": apiSecret
+      },
+      timeoutMs: DEFAULT_TIMEOUT_MS,
+      retries: 0
+    });
+    if (!res.ok) {
+      recordProviderCall("alpaca-options", { service: "underlying-snapshot", ok: false, userId });
+      return undefined;
+    }
+    const parsed = AlpacaStockSnapshotSchema.safeParse(await res.json());
+    if (!parsed.success) {
+      recordProviderCall("alpaca-options", { service: "underlying-snapshot", ok: false, userId });
+      return undefined;
+    }
+    recordProviderCall("alpaca-options", { service: "underlying-snapshot", ok: true, userId });
+    const snap = parsed.data;
+    return readPositive(snap.latestTrade?.p) ?? readPositive(snap.dailyBar?.c) ?? readPositive(snap.prevDailyBar?.c);
+  } catch {
+    recordProviderCall("alpaca-options", { service: "underlying-snapshot", ok: false, userId });
+    return undefined;
   }
 }
 
@@ -246,6 +471,7 @@ async function fetchTradierNearestChain(
   userId?: string
 ): Promise<{ underlyingPrice?: number; chains: unknown } | null> {
   const headers = { Authorization: `Bearer ${token}`, Accept: "application/json" };
+  let service: "options-expirations" | "options-chains" = "options-expirations";
   try {
     const expUrl = `${baseUrl}/v1/markets/options/expirations?symbol=${encodeURIComponent(symbol)}`;
     const expRes = await politeFetch(expUrl, { headers, timeoutMs: DEFAULT_TIMEOUT_MS, retries: 1 });
@@ -253,14 +479,19 @@ async function fetchTradierNearestChain(
       recordProviderCall("tradier-options", { service: "options-expirations", ok: false, userId });
       return null;
     }
-    const expJson = (await expRes.json()) as { expirations?: { date?: string | string[] } };
-    const datesRaw = expJson?.expirations?.date;
+    const expParsed = TradierExpirationsSchema.safeParse(await expRes.json());
+    if (!expParsed.success) {
+      recordProviderCall("tradier-options", { service: "options-expirations", ok: false, userId });
+      return null;
+    }
+    const datesRaw = expParsed.data.expirations?.date;
     const dates = Array.isArray(datesRaw) ? datesRaw : datesRaw ? [datesRaw] : [];
     const today = new Date().toISOString().slice(0, 10);
     const future = dates.filter((d) => typeof d === "string" && d >= today).sort();
     const expiration = future[0] ?? dates.sort()[0];
     if (!expiration) return null;
 
+    service = "options-chains";
     const chainUrl =
       `${baseUrl}/v1/markets/options/chains?symbol=${encodeURIComponent(symbol)}` +
       `&expiration=${encodeURIComponent(expiration)}&greeks=true`;
@@ -269,21 +500,68 @@ async function fetchTradierNearestChain(
       recordProviderCall("tradier-options", { service: "options-chains", ok: false, userId });
       return null;
     }
-    const chainJson = (await chainRes.json()) as unknown;
+    const chainParsed = TradierChainSchema.safeParse(await chainRes.json());
+    if (!chainParsed.success) {
+      recordProviderCall("tradier-options", { service: "options-chains", ok: false, userId });
+      return null;
+    }
     recordProviderCall("tradier-options", { service: "options-chains", ok: true, userId });
-    const parsed = parseTradierOptionsChains(chainJson);
-    const count = (parsed.chains as { results?: unknown[] })?.results?.length ?? 0;
-    return count > 0 ? parsed : null;
+    const parsed = parseTradierOptionsChains(chainParsed.data);
+    const count = chainRowCount(parsed.chains);
+    if (count === 0) return null;
+    if (parsed.underlyingPrice === undefined) {
+      const quote = await fetchTradierUnderlyingPrice(symbol, token, baseUrl, userId);
+      if (quote !== undefined) parsed.underlyingPrice = quote;
+    }
+    return parsed;
   } catch {
-    recordProviderCall("tradier-options", { service: "options-expirations", ok: false, userId });
+    recordProviderCall("tradier-options", { service, ok: false, userId });
     return null;
+  }
+}
+
+async function fetchTradierUnderlyingPrice(
+  symbol: string,
+  token: string,
+  baseUrl: string,
+  userId?: string
+): Promise<number | undefined> {
+  const url = `${baseUrl}/v1/markets/quotes?symbols=${encodeURIComponent(symbol)}`;
+  try {
+    const res = await politeFetch(url, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      timeoutMs: DEFAULT_TIMEOUT_MS,
+      retries: 0
+    });
+    if (!res.ok) {
+      recordProviderCall("tradier-options", { service: "quotes", ok: false, userId });
+      return undefined;
+    }
+    const parsed = TradierQuotesSchema.safeParse(await res.json());
+    if (!parsed.success) {
+      recordProviderCall("tradier-options", { service: "quotes", ok: false, userId });
+      return undefined;
+    }
+    const quoteNode = parsed.data.quotes?.quote;
+    const first = Array.isArray(quoteNode) ? quoteNode[0] : quoteNode;
+    const quote = TradierQuoteSchema.safeParse(first);
+    if (!quote.success) {
+      recordProviderCall("tradier-options", { service: "quotes", ok: false, userId });
+      return undefined;
+    }
+    recordProviderCall("tradier-options", { service: "quotes", ok: true, userId });
+    return quotePrice(quote.data);
+  } catch {
+    recordProviderCall("tradier-options", { service: "quotes", ok: false, userId });
+    return undefined;
   }
 }
 
 abstract class OptionsMetricsEnrichmentProvider implements MarketEnrichmentProvider {
   abstract readonly name: string;
   readonly configured = true;
-  readonly costTier = "free" as const;
+  /** Cboe stays free (Wave A).  Keyed subclasses override this to "paid" so they gap-fill in Wave B. */
+  readonly costTier: "free" | "paid" = "free";
   readonly suppliesFields: readonly (keyof SymbolEnrichment)[] = ["nearTheMoneyIv", "putCallRatio"];
 
   protected abstract fetchPayload(symbol: string): Promise<{ underlyingPrice?: number; chains: unknown } | null>;
@@ -309,13 +587,12 @@ abstract class OptionsMetricsEnrichmentProvider implements MarketEnrichmentProvi
       try {
         const payload = await this.fetchPayload(symbol);
         const data = payload ? metricsFromChainPayload(payload) : {};
-        if (Object.keys(data).length > 0) {
-          optionsCache.set(`${this.name}::${symbol}`, {
-            expiresAt: now + keylessOptionsTtlMs(),
-            data,
-            source: this.name
-          });
-        }
+        const hasData = Object.keys(data).length > 0;
+        optionsCache.set(`${this.name}::${symbol}`, {
+          expiresAt: now + (hasData ? keylessOptionsTtlMs() : Math.min(keylessOptionsTtlMs(), NEGATIVE_CACHE_MAX_MS)),
+          data,
+          source: this.name
+        });
         result[symbol] = data;
       } catch {
         result[symbol] = {};
@@ -336,6 +613,7 @@ export class CboeOptionsEnrichmentProvider extends OptionsMetricsEnrichmentProvi
 
 export class AlpacaOptionsEnrichmentProvider extends OptionsMetricsEnrichmentProvider {
   readonly name = "alpaca-options";
+  override readonly costTier = "paid" as const;
   readonly healthKeySource: ApiKeySource | null;
 
   constructor(
@@ -355,6 +633,7 @@ export class AlpacaOptionsEnrichmentProvider extends OptionsMetricsEnrichmentPro
 
 export class TradierOptionsEnrichmentProvider extends OptionsMetricsEnrichmentProvider {
   readonly name = "tradier-options";
+  override readonly costTier = "paid" as const;
   readonly healthKeySource: ApiKeySource | null;
 
   constructor(

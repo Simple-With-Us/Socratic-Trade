@@ -2,9 +2,9 @@
 
 ## 2026-10-14 CURSOR — Keyless options enrichment (`cursor/keyless-options-enrichment-8872`)
 
-**What.**  Background and shared market scans now fill `nearTheMoneyIv` and `putCallRatio` from keyless Cboe delayed options JSON (primary), with Alpaca indicative snapshots and Tradier chains as fallbacks when credentials exist.  Same `deriveOptionMetrics` path as Robinhood options.
+**What.**  Background and shared market scans now fill `nearTheMoneyIv` and `putCallRatio` from keyless Cboe delayed options JSON (primary).  Alpaca indicative snapshots and Tradier chains are keyed Wave B fallbacks when credentials exist.  Same `deriveOptionMetrics` path as Robinhood options.  Review follow-up: Alpaca reads `impliedVolatility` and `dailyBar.v`, underlying price is threaded into ATM metrics, vendor JSON is Zod-parsed, Tradier errors are labeled by endpoint, and empty chains are negative-cached for at most five minutes.
 
-**Verification.**  `npm run lint` ok.  `npx tsc --noEmit` ok.  `npm test -- test/keyless-options-enrichment.test.ts test/source-capability-matrix.test.ts` ok.  `npm run build` ok.
+**Verification.**  `npm run lint` ok (0 errors).  `npx tsc --noEmit` ok.  `npm test` was 9315 passed, 51 skipped, and 2 failed outside this diff: sandbox DNS for discord.com in `test/egress-guard.test.ts`, and `pruneTaskJournal` at 238ms against a 100ms budget in `test/event-loop-stall-hot-path.test.ts`.  Targeted options and coverage tests (43) passed.  `npm run build` ok.
 
 **Docs.**  `docs/rollouts/2026-10-14-keyless-options-enrichment.md`, `STATUS.md`, `PLAN.md`.
 
