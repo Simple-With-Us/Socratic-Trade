@@ -87,10 +87,11 @@ The two open Sentry threads on `GET /api/scan` are Sentry's bug-prediction bot r
 ## Verification (follow-up 3)
 
 - npx tsc --noEmit -> ok
-- npx vitest run test/market-scan-freshness.test.ts -> ok (36 tests)
+- npx vitest run test/market-scan-freshness.test.ts test/nasdaq-screener-schema.test.ts test/scan-empty-screener.test.ts test/scan-singleflight.test.ts -> ok (69 tests)
 - npm run lint -> ok (0 errors; 866 grandfathered warnings)
 - npm run build -> ok
-- CI `verify-hosted` -> pass on the pre-change head
+- origin/main merged (RAG embed fallback, `src/lib/rag/**`, `src/lib/vector-db.ts`), re-ran every gate green on the merge, 71 targeted tests including the newly merged `test/siliconflow-query-embed-fallback.test.ts`.
+- Full `npm test` in this sandbox: the LLM-provider/chat key tests fail (9 in `test/llm-provider.test.ts`, plus `test/chat-llm.test.ts`, `test/framework-review.test.ts`, `test/openrouter-credits.test.ts`).  These are **not** in this diff's files and reproduce identically on unmodified `origin/main` — they expect no provider key configured while this runner has one in scope.  Sandbox-only, unchanged by this pass.
 
 ## Next
 

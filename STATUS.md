@@ -6,7 +6,7 @@
 
 **Review triage.**  The two Kody threads that were still open (`runScanSingleFlight` audit-row amplification, and the unprimed `lastUsableAuditRowId` fast gate) were already fixed by `a5dcb806` in this branch and carry direct passing regression tests ("writes one market_scan_failed row per user while the same outage continues", "primes the per-user fast gate with the audit row the refresh just wrote"); both were resolved without a code change.  The two open Sentry threads on `GET /api/scan` are Sentry's bug-prediction bot, not one of the three review bots this fixer answers, and their subject (identity resolution moving ahead of the stale-scan fallback) was likewise already fixed by `a5dcb806`.
 
-**Verification.**  `npm run lint` ok (0 errors, 866 grandfathered warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npx vitest run test/market-scan-freshness.test.ts` 36 passed.  CI `verify-hosted` green on the pre-change head.
+**Verification.**  `npm run lint` ok (0 errors, 866 grandfathered warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  Targeted scan tests 69 passed, then 71 after merging `origin/main` (RAG embed fallback) and re-running every gate.  The LLM-provider/chat key tests fail in this sandbox, but they reproduce identically on unmodified `origin/main` (they expect no provider key configured) and are outside this diff.
 
 **Docs.**  `docs/rollouts/2026-10-13-market-scan-deadline-freshness.md`.
 
