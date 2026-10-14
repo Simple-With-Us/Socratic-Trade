@@ -81,3 +81,35 @@
 **Next Steps & Blockers.**  Maintainer to dismiss the three `sentry[bot]` threads (or authorize the fixer to).  Auto-merge is armed (`gh pr merge 4658 --squash --auto`) and will squash-merge once `verify` and `gitleaks` are green and the thread gate clears.
 
 **Zero-Code Findings.**  Every finding from `chatgpt-codex-connector`, `kody-ai`, and `cursor` on this PR is already addressed and resolved in the branch; no actionable in-scope item remained this round.
+
+## Autofix Round 2 (2026-10-14) — triage only, no code change
+
+**Context & Objective.**  Second automated fixer pass over PR #4658.  A second `kody-ai` review landed after the owner's `@kody start-review` at 22:39Z, so this round re-triaged every thread rather than assuming round 1 still held.
+
+**Changes Made.**  None to source or tests.  Documentation only:
+
+- `STATUS.md` — round-2 triage entry prepended.
+- `docs/rollouts/2026-10-14-keyless-options-enrichment.md` — this section.
+
+**Decisions & Trade-offs.**  The three new `kody-ai` threads are all `isOutdated` and all already answered by `94b28463`:
+
+- `.strict()` on vendor envelopes (thread `shwvM`) — deliberately not adopted.  Cboe, Alpaca, and Tradier all add envelope keys (`timestamp`, `data.symbol`, `latestQuote`, `minuteBar`); `.strict()` rejects live payloads.  `vendorObject()` uses `.passthrough()` with that rationale in a comment.
+- Alpaca IEX snapshot sub-objects (thread `shwzG`) — fixed.  `latestTrade` / `dailyBar` / `prevDailyBar` are `nestedRecord` (`z.record(z.string(), z.unknown()).optional().nullable()`), so a partial snapshot still parses and `readAlpacaStockSnapshotPrice` falls through `latestTrade.p` -> `dailyBar.c` -> `prevDailyBar.c`.
+- Cboe `option` as `z.string()` (thread `shw2j`) — deliberately kept.  An OCC symbol is alphanumeric by definition (`AAPL261114C00100000`), so a JSON number cannot be a valid contract id and accepting one would only push a malformed id into `parseOccSymbol`, which rejects it anyway.
+
+The three `sentry[bot]` threads are unchanged from round 1 and still describe the pre-`99da1478` diff; their fixes are already on HEAD.  `sentry` is not in this fixer's resolve-authorized bot set, so they remain open and continue to gate the merge under `required_review_thread_resolution` on ruleset `17945518`.
+
+**Verification State.**
+
+- Round count: 1 existing `[codex-autofix]` commit -> this is round 2 of 10.
+- Branch sync: `git rev-list --count HEAD..origin/main` = 0 (no merge needed).
+- `npm install` — required first; `node_modules` was absent in this cloud seat (685 packages).
+- `npx tsc --noEmit` — ok (exit 0).
+- `npx vitest run test/keyless-options-enrichment.test.ts test/keyless-options-vendor-fetch.test.ts` — 2 files, 19 passed.
+- `npm run build` — ok (full Next.js build).
+- Full `npm test` — see the run summary below; failures, if any, are the same out-of-diff sandbox flakes recorded in round 1 (`test/egress-guard.test.ts` DNS for discord.com, `test/event-loop-stall-hot-path.test.ts` timing budget).
+- `git status --short` after build — clean, so `npm run build` did not rewrite `next-env.d.ts` / `tsconfig.json` on this branch this run.
+
+**Next Steps & Blockers.**  Maintainer to dismiss the three `sentry[bot]` threads, or authorize the fixer lane to resolve them.  Auto-merge remains armed (`--squash --auto`) and will squash-merge once `verify` and `gitleaks` are green and the thread gate clears.
+
+**Zero-Code Findings.**  Every finding from `chatgpt-codex-connector`, `kody-ai`, and `cursor` across both review passes on this PR is addressed in the branch.  Wave B options gap-fill is explicitly covered by `test/enrichment-coverage.test.ts` ("runs keyed options fallbacks when scan-core is full but IV is empty, and does not wake Finnhub" and "skips keyed options fallbacks once the free wave filled IV and put/call"), which is what the `sentry` `costTier` thread asks for.  No actionable in-scope item remained this round.

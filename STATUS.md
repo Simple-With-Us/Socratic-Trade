@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 AUTOFIX round 2 — PR #4658 (no code change)
+
+**What.**  Second fixer pass.  Re-triaged all 12 review threads on the branch.  Nothing new: the second `kody-ai` review (triggered by `@kody start-review` at 22:39Z) raised only three threads, all `isOutdated` and all already answered by `94b28463` — `.strict()` vs `.passthrough()` on vendor envelopes, the Alpaca IEX snapshot sub-objects, and the Cboe `option` field type.  The three `sentry[bot]` threads are unchanged from round 1 and still describe the pre-`99da1478` diff.  No source or test change was warranted.
+
+**Verification.**  `npx tsc --noEmit` ok.  `npx vitest run test/keyless-options-enrichment.test.ts test/keyless-options-vendor-fetch.test.ts` 19 passed.  Full `npm test` and `npm run build` run on this branch; results in the rollout note.
+
+**Docs.**  `docs/rollouts/2026-10-14-keyless-options-enrichment.md`, `STATUS.md`.
+
+**Next.**  Still blocked only on the three `sentry[bot]` threads, which this fixer lane is not scoped to resolve.  Maintainer action needed.  Auto-merge stays armed.
+
 ## 2026-10-14 GROK — PR #4658 review threads (vendor Zod passthrough)
 
 **What.**  Merged `origin/main` (already up to date).  Vendor option envelopes now use explicit Zod `.passthrough()` instead of implicit strip, so extra Cboe/Alpaca/Tradier keys cannot fail a later `.strict()` pass.  Alpaca IEX underlying price reads `latestTrade.p`, else `dailyBar.c`, else `prevDailyBar.c` from nested records, so a partial snapshot still yields ATM IV.  The three Sentry threads were already fixed in `99da1478`.  Cboe `option` stays a string: OCC symbols contain letters, so a JSON number cannot be a valid contract id.
