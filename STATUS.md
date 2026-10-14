@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 GROK — SQLite storage hygiene
+
+**What.**  Production SQLite is about 16.5 GB with a 415 MB WAL.  Background checks were stalling 76-79s and the scheduler lagged 120s.  This lane adds a storage-hygiene job: table-size report, retention deletes for caches/logs/finished runs, batched deletes that yield, a PASSIVE WAL checkpoint with TRUNCATE only when Litestream looks safe, and incremental free-page reclaim.  It never runs a full file rewrite and never deletes orders, fills, positions, approvals, transfers, or HWM inputs.
+
+**Verification.**  `npx vitest run test/sqlite-storage-hygiene.test.ts` — 12 passed.  Full lint, tsc, test, and build follow in this lane before the PR is treated as verified.
+
+**Docs.**  `docs/rollouts/2026-10-14-sqlite-storage-hygiene.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Label `do-not-automerge`.  Jay squashes.  Do not merge from this lane.  Linear team ST was not updated: this cloud seat has no Fleet Linear or Zulip credentials.
+
 ## 2026-10-14 GROK — PR #4609 verification order
 
 **What.**  Merged origin/main (`b7775658`, mobile snapshot partial timeout).  The freshness handoff verification block now lists `npm run lint`, `npx tsc --noEmit`, `npm test`, then `npm run build`.  No product behavior change.

@@ -26,14 +26,15 @@
 // docs/rollouts/2026-09-18-stats-veto-retention.md. AUDIT_PRUNE_NEVER_PRUNED_KINDS
 // below exempts them permanently; do not fold them back into the default bucket.
 //
-// NOTE: deletes free pages into SQLite's freelist but the FILE (and thus
-// litestream snapshots) only shrinks after a VACUUM — that is a deliberate
-// operator action (full rewrite = one large WAL burst), not automated here.
+// NOTE: deletes free pages into SQLite's freelist.  Shrinking the file is
+// src/lib/sqlite-storage-hygiene.ts (incremental free-page reclaim when the
+// database is already in that mode).  This lane never rewrites the file.
 
 import { getDb } from "./db";
 import { sweepEmbedStage } from "./db-embed-stage";
 import { sweepPortfolioSnapshots } from "./db-fills";
 import { getInternalSetting, setInternalSetting } from "./db-settings";
+import { yieldEventLoop } from "./slow-sync-guard";
 
 /** Kinds whose volume is observability noise (deduped now, but history is heavy). */
 export const AUDIT_PRUNE_OBSERVABILITY_KINDS: readonly string[] = [
@@ -74,6 +75,8 @@ export const AUDIT_PRUNE_OBSERVABILITY_DAYS = 14;
 export const AUDIT_PRUNE_DEFAULT_DAYS = 90;
 export const AUDIT_PRUNE_PROVIDER_DAYS = 14;
 export const AUDIT_PRUNE_BATCH_LIMIT = 50_000; // rows per run across all classes
+/** Rows per statement on the scheduler path.  The lane awaits a yield between steps. */
+export const AUDIT_PRUNE_YIELD_STEP = 500;
 
 const LAST_RUN_KEY = "auditprune:lastRunAt";
 const INTERVAL_MS = 24 * 3600_000;
@@ -92,15 +95,8 @@ export interface AuditPruneResult {
   portfolioSnapshotsPruned: number;
 }
 
-export function pruneAuditEvents(now: Date = new Date(), batchLimit: number = AUDIT_PRUNE_BATCH_LIMIT): AuditPruneResult {
-  const db = getDb();
-  const obsCutoff = new Date(now.getTime() - AUDIT_PRUNE_OBSERVABILITY_DAYS * 24 * 3600_000).toISOString();
-  const defCutoff = new Date(now.getTime() - AUDIT_PRUNE_DEFAULT_DAYS * 24 * 3600_000).toISOString();
-  const provCutoff = new Date(now.getTime() - AUDIT_PRUNE_PROVIDER_DAYS * 24 * 3600_000).toISOString();
-  const placeholders = AUDIT_PRUNE_OBSERVABILITY_KINDS.map(() => "?").join(", ");
-  const neverPrunedPlaceholders = AUDIT_PRUNE_NEVER_PRUNED_KINDS.map(() => "?").join(", ");
-  let remaining = batchLimit;
-  const result: AuditPruneResult = {
+function emptyAuditPruneResult(): AuditPruneResult {
+  return {
     auditObservability: 0,
     auditDefault: 0,
     providerDispatch: 0,
@@ -109,6 +105,27 @@ export function pruneAuditEvents(now: Date = new Date(), batchLimit: number = AU
     embedStageCapPruned: 0,
     portfolioSnapshotsPruned: 0
   };
+}
+
+function addAuditRowCounts(into: AuditPruneResult, chunk: AuditPruneResult): number {
+  into.auditObservability += chunk.auditObservability;
+  into.auditDefault += chunk.auditDefault;
+  into.providerDispatch += chunk.providerDispatch;
+  into.providerOutbox += chunk.providerOutbox;
+  return chunk.auditObservability + chunk.auditDefault + chunk.providerDispatch + chunk.providerOutbox;
+}
+
+/** One bounded pass over audit_events and the provider observability tables.  Does not
+ *  touch embed_stage or portfolio_snapshots. */
+function pruneAuditAndProviderRows(now: Date, batchLimit: number): AuditPruneResult {
+  const db = getDb();
+  const obsCutoff = new Date(now.getTime() - AUDIT_PRUNE_OBSERVABILITY_DAYS * 24 * 3600_000).toISOString();
+  const defCutoff = new Date(now.getTime() - AUDIT_PRUNE_DEFAULT_DAYS * 24 * 3600_000).toISOString();
+  const provCutoff = new Date(now.getTime() - AUDIT_PRUNE_PROVIDER_DAYS * 24 * 3600_000).toISOString();
+  const placeholders = AUDIT_PRUNE_OBSERVABILITY_KINDS.map(() => "?").join(", ");
+  const neverPrunedPlaceholders = AUDIT_PRUNE_NEVER_PRUNED_KINDS.map(() => "?").join(", ");
+  let remaining = batchLimit;
+  const result = emptyAuditPruneResult();
 
   result.auditObservability = db
     .prepare(
@@ -143,7 +160,10 @@ export function pruneAuditEvents(now: Date = new Date(), batchLimit: number = AU
       .prepare(`DELETE FROM provider_usage_outbox WHERE id IN (SELECT id FROM provider_usage_outbox WHERE created_at < ? LIMIT ?)`)
       .run(provCutoff, remaining).changes;
   }
+  return result;
+}
 
+function finishAuditHousekeeping(now: Date, result: AuditPruneResult, remaining: number, snapshotBatch: number): void {
   // embed_stage retention + defensive size cap (db-embed-stage.ts). Steady state deletes
   // nothing — rows normally live only between a paid embed and its successful Pinecone
   // delivery; this lane only reaps orphans (superseded documents) and a runaway table.
@@ -155,11 +175,50 @@ export function pruneAuditEvents(now: Date = new Date(), batchLimit: number = AU
   // first-ever backlog (hundreds of thousands of multi-kB JSON rows) drains across multiple
   // daily passes instead of holding the SQLite write lock. Pass the remaining budget so this
   // lane can't blow past the audit_events cap on a quiet day when only snapshots needed
-  // pruning.
+  // pruning.  Snapshots are position and equity history; this existing 90-day window is the
+  // only deleter.  The storage-hygiene lane refuses the table outright.
   if (remaining > 0) {
-    result.portfolioSnapshotsPruned = sweepPortfolioSnapshots(now, 90, Math.min(remaining, 5_000));
+    result.portfolioSnapshotsPruned = sweepPortfolioSnapshots(now, 90, Math.min(remaining, snapshotBatch));
   }
+}
 
+export function pruneAuditEvents(now: Date = new Date(), batchLimit: number = AUDIT_PRUNE_BATCH_LIMIT): AuditPruneResult {
+  const result = pruneAuditAndProviderRows(now, batchLimit);
+  const deleted = result.auditObservability + result.auditDefault + result.providerDispatch + result.providerOutbox;
+  finishAuditHousekeeping(now, result, batchLimit - deleted, 5_000);
+  return result;
+}
+
+/** Scheduler path.  Same retention as `pruneAuditEvents`, in 500-row steps with a yield
+ *  between steps so a backlog cannot pin the serving thread for the whole budget. */
+export async function pruneAuditEventsYielding(
+  now: Date = new Date(),
+  batchLimit: number = AUDIT_PRUNE_BATCH_LIMIT,
+  yieldFn: () => Promise<void> = yieldEventLoop
+): Promise<AuditPruneResult> {
+  const result = emptyAuditPruneResult();
+  let remaining = batchLimit;
+  while (remaining > 0) {
+    const chunk = pruneAuditAndProviderRows(now, Math.min(AUDIT_PRUNE_YIELD_STEP, remaining));
+    const deleted = addAuditRowCounts(result, chunk);
+    if (deleted === 0) break;
+    remaining -= deleted;
+    if (deleted < AUDIT_PRUNE_YIELD_STEP) break;
+    await yieldFn();
+  }
+  let snapshotsLeft = Math.min(remaining, 5_000);
+  while (snapshotsLeft > 0) {
+    const step = Math.min(AUDIT_PRUNE_YIELD_STEP, snapshotsLeft);
+    const deleted = sweepPortfolioSnapshots(now, 90, step);
+    result.portfolioSnapshotsPruned += deleted;
+    if (deleted === 0) break;
+    snapshotsLeft -= deleted;
+    if (deleted < step) break;
+    await yieldFn();
+  }
+  const stageSweep = sweepEmbedStage(now);
+  result.embedStageExpired = stageSweep.expired;
+  result.embedStageCapPruned = stageSweep.capPruned;
   return result;
 }
 
@@ -177,6 +236,18 @@ export function runAuditPruneIfDue(now: number = Date.now()): AuditPruneResult |
     if (!isAuditPruneDue(now)) return null;
     setInternalSetting(LAST_RUN_KEY, new Date(now).toISOString());
     return pruneAuditEvents(new Date(now));
+  } catch (err) {
+    console.error("[audit-prune] prune error:", err);
+    return null;
+  }
+}
+
+/** Same watermark as `runAuditPruneIfDue`, but the deletes yield the event loop. */
+export async function runAuditPruneYieldingIfDue(now: number = Date.now()): Promise<AuditPruneResult | null> {
+  try {
+    if (!isAuditPruneDue(now)) return null;
+    setInternalSetting(LAST_RUN_KEY, new Date(now).toISOString());
+    return await pruneAuditEventsYielding(new Date(now));
   } catch (err) {
     console.error("[audit-prune] prune error:", err);
     return null;
