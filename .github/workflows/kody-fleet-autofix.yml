@@ -1,6 +1,6 @@
 # Enabled fleet wide by the owner on 2026-10-11 (boards 04b963b7 and 99e559ea).
-# Meta Muse Spark via Vercel AI Gateway, paid; at most 5 attempts per UTC day in this repository.
-name: Kody Muse Spark Fix Proposals
+# MiniMax M3 via its direct OpenAI-compatible endpoint, paid; at most 5 attempts per UTC day in this repository.
+name: Kody MiniMax M3 Fix Proposals
 
 # Generated offline.  Missing SWU_KODY_AUTOFIX_ENABLED means disabled.
 # MODEL_API_KEY is forwarded explicitly; secrets are never inherited.
@@ -33,14 +33,14 @@ jobs:
       pull-requests: write
       checks: read
       actions: read
-    uses: Simple-With-Us/congress-trading-shared/.github/workflows/kody-autofix-reusable.yml@e28fefcd12d4747e3ed66cb5c5b3f3dd7ea2db88
+    uses: Simple-With-Us/congress-trading-shared/.github/workflows/kody-autofix-reusable.yml@fea7cd120407b157c3d1f5edc5b08ff15d3f0e73
     with:
       repository_id: '1270451796'
       profile: 'web'
       source_prefixes: '["src/","app/"]'
       daily_attempt_limit: 5
       budget_policy_id: 'approved-owner-2026-10-11'
-      model: 'meta/muse-spark-1.3-contributor'
-      model_base_url: 'https://ai-gateway.vercel.sh/v1'
+      model: 'MiniMax-M3'
+      model_base_url: 'https://api.minimax.io/v1'
     secrets:
-      MODEL_API_KEY: ${{ secrets.VERCEL_AI_GATEWAY_API_KEY }}
+      MODEL_API_KEY: ${{ secrets.MINIMAX_API_KEY }}

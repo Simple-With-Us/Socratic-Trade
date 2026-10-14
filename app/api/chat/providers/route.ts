@@ -23,6 +23,10 @@ export async function GET(request: Request) {
   const userId = resolveRequestUserId(request);
   const services = ["openai", "anthropic", "xai", "gemini", "mistral", "deepseek", "meta", "moonshot", "minimax", "openrouter"] as const;
   const providers: Record<string, boolean> = {};
-  for (const service of services) providers[service] = Boolean(resolveLlmCredential(service === "meta" ? "openrouter" : service, userId).key);
+  for (const service of services) {
+    providers[service] = Boolean(resolveLlmCredential(service, userId).key);
+    // Llama and Glimmer are OpenRouter-only, so an OpenRouter key also makes "meta" available.
+    if (service === "meta" && !providers[service]) providers[service] = Boolean(resolveLlmCredential("openrouter", userId).key);
+  }
   return NextResponse.json({ providers });
 }

@@ -32,7 +32,7 @@ struct GuardrailsView: View {
 
     @ViewBuilder
     private func authorityCard(_ snapshot: MobileSnapshot) -> some View {
-        let runState = deriveRunStateWord(snapshot: snapshot)
+        let runState = store.deriveRunState(for: snapshot)
         AppCard {
             VStack(alignment: .leading, spacing: 10) {
                 SectionHeading("Authority vs Run State")

@@ -35,9 +35,10 @@ settings:
     CURRENT_PROJECT_VERSION: "202608132022"
     INFOPLIST_KEY_CFBundleDisplayName: "Socratic Trade"
     INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.finance"
-    # Native Sentry. Empty unless xcodebuild/CI passes SENTRY_DSN=...
-    # SentryTelemetry.swift skips init when this expands to empty or $(SENTRY_DSN).
-    SENTRY_DSN: ""
+    # SENTRY_DSN is not set here. An explicit empty string in the project file
+    # overrides Config/Sentry.xcconfig and bakes a blank DSN into Info.plist.
+    # CI passes SENTRY_DSN=... on the xcodebuild command line. Unset stays empty
+    # and SentryTelemetry skips init. Never put a DSN literal in this file.
 
 packages:
   Sentry:
@@ -99,6 +100,9 @@ targets:
           CODE_SIGN_STYLE: Manual
           CODE_SIGN_IDENTITY: "Apple Distribution"
           PROVISIONING_PROFILE_SPECIFIER: "Socratic Trade App Store (API)"
+    configFiles:
+      Debug: Config/Sentry.xcconfig
+      Release: Config/Sentry.xcconfig
     info:
       path: SocraticTrade/Info.plist
       properties:

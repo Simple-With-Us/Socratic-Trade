@@ -10,6 +10,10 @@ vi.mock("@/lib/db", () => ({
   resolveLlmCredential: mocks.resolveLlmCredential,
   getPolicy: () => ({})
 }));
+vi.mock("@/lib/llm-route", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/llm-route")>()),
+  llmRouteFor: () => "openrouter" as const
+}));
 vi.mock("@/lib/rate-limit", () => ({
   enforceRateLimit: () => null,
   RATE_LIMITS: { chat: { limit: 10, windowMs: 60_000 } }

@@ -110,19 +110,53 @@ describe("resolveLlmEndpoint", () => {
     expect(endpoint.model).toBe("openai/gpt-6-astra-pro");
   });
 
-  it("requires OpenRouter for Meta and never sends a Meta key to OpenAI", async () => {
+  it("routes Muse Spark and MiniMax to the native API only when the user picks direct, OpenRouter otherwise", async () => {
     const { modelCredentialService } = await import("../src/lib/llm-provider");
     setApiKey("meta-native-only", "meta", "meta-placeholder");
-    for (const model of ["muse-spark-1.3", "muse-glimmer-30b", "llama-4-maverick"]) {
+    // OpenRouter is the default route: a stored Meta key alone changes nothing until "direct" is chosen.
+    const { setUserSetting } = await import("../src/lib/db");
+    expect(resolveLlmEndpoint({ llmModel: "muse-spark-1.3" }, "meta-native-only").provider).toBe("openrouter");
+    setUserSetting("meta-native-only", "llm_route_meta", "native");
+    // Glimmer is open-weight and Llama is not hosted on api.meta.ai, so they stay OpenRouter-only
+    // and a Meta key is never sent to OpenAI or to OpenRouter.
+    for (const model of ["muse-glimmer-30b", "llama-4-maverick"]) {
       const endpoint = resolveLlmEndpoint({ llmModel: model }, "meta-native-only");
       expect(endpoint.provider).toBe("openrouter");
       expect(endpoint.key).toBeUndefined();
       expect(modelCredentialService(model, "meta-native-only")).toBe("openrouter");
     }
+    for (const [model, wire] of [["muse-spark-1.3", "muse-spark-1.3"], ["muse-spark-1.3-contributor", "muse-spark-1.3-contributor"]]) {
+      const endpoint = resolveLlmEndpoint({ llmModel: model }, "meta-native-only");
+      expect(endpoint.provider).toBe("meta");
+      expect(endpoint.url).toBe("https://api.meta.ai/v1/chat/completions");
+      expect(endpoint.model).toBe(wire);
+      expect(endpoint.key).toBe("meta-placeholder");
+      expect(endpoint.keySource).toBe("user");
+      expect(modelCredentialService(model, "meta-native-only")).toBe("meta");
+    }
+    // An OpenRouter key does not pull Muse Spark off the native route while a Meta key exists.
     setApiKey("meta-native-only", "openrouter", "openrouter-placeholder");
-    const endpoint = resolveLlmEndpoint({ llmModel: "muse-spark-1.3" }, "meta-native-only");
-    expect(endpoint.model).toBe("meta/muse-spark-1.3");
-    expect(endpoint.key).toBe("openrouter-placeholder");
+    const native = resolveLlmEndpoint({ llmModel: "muse-spark-1.3" }, "meta-native-only");
+    expect(native.provider).toBe("meta");
+    expect(native.key).toBe("meta-placeholder");
+    // MiniMax follows the same toggle: OpenRouter by default, direct once chosen.
+    setApiKey("minimax-direct", "minimax", "minimax-placeholder");
+    setApiKey("minimax-direct", "openrouter", "openrouter-placeholder");
+    expect(resolveLlmEndpoint({ llmModel: "minimax-m3" }, "minimax-direct").provider).toBe("openrouter");
+    expect(modelCredentialService("minimax-m3", "minimax-direct")).toBe("openrouter");
+    setUserSetting("minimax-direct", "llm_route_minimax", "native");
+    expect(modelCredentialService("minimax-m3", "minimax-direct")).toBe("minimax");
+    const minimax = resolveLlmEndpoint({ llmModel: "minimax-m3" }, "minimax-direct");
+    expect(minimax.provider).toBe("minimax");
+    expect(minimax.key).toBe("minimax-placeholder");
+    // OpenRouter-only users still get the OpenRouter wire id.
+    setApiKey("openrouter-only", "openrouter", "openrouter-placeholder");
+    for (const [model, wire] of [["muse-spark-1.3", "meta/muse-spark-1.3"], ["muse-spark-1.3-contributor", "meta/muse-spark-1.3-contributor"]]) {
+      const endpoint = resolveLlmEndpoint({ llmModel: model }, "openrouter-only");
+      expect(endpoint.provider).toBe("openrouter");
+      expect(endpoint.model).toBe(wire);
+      expect(endpoint.key).toBe("openrouter-placeholder");
+    }
   });
 
   it("fails closed (key undefined) when user has no keys at all", () => {

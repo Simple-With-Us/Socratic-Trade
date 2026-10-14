@@ -1,6 +1,89 @@
 # Current Status
 
 ## 2026-10-12 CODEX — Claude Autofix 120-Turn Cap (OPS-935)
+## 2026-10-13 CODEX-AUTOFIX — PR #4606 embed breaker `consecutive` reset
+
+**What.**  One genuinely new Kody thread on `fix/embed-fail-fast-congress-share-backoff`: when a
+half-open probe settles on a non-counted 4xx, `settleEmbedProviderAttempt` cleared `probeInFlight`
+and `openUntil` but left `consecutive` at its trip value.  The next single counted failure therefore
+re-opened the breaker and re-logged `embed circuit open`.  Confirmed real with a standalone repro
+(warn fired twice where the test expected once) before changing anything, then fixed by also
+clearing `state.consecutive` in the `hadProbe` branch, mirroring `noteEmbedProviderSuccess`.
+
+**Tests.**  New `fully resets the breaker after a 4xx half-open probe settles` case in
+`test/embed-resilience.test.ts`: `EMBED_BREAKER_FAILURES - 1` further counted failures must not
+re-trip the breaker, the Nth does, and no second `console.warn` fires early.  No existing test was
+weakened; the file's other 9 cases are unchanged.
+
+**Docs.**  `docs/rollouts/2026-10-13-pr-4606-review-thread-fixes.md` (Round 2 section).
+
+**Next.**  Merge #4606 after hosted `verify` green.
+
+## 2026-10-13 CLAUDE — PR #4606 review-bot pass 3 (doc/format only)
+
+**What.**  Round 3 on `fix/embed-fail-fast-congress-share-backoff`.  All four still-open Kody threads
+(`settleEmbedProviderAttempt` wedge, `passthrough()` -> strict, vector-db `response.json()` Zod guard,
+rollout verification block) were already fixed in `4351c0c3`; the code needed no change.  This pass
+made the rollout verification block use the literal four-command fast-to-slow `-> ok` format Kody's
+rule asks for, removed an orphaned duplicate doc comment left above `settleEmbedProviderAttempt`, and
+recorded *why* the embed response schema uses `.strip()` rather than the `.strict()` Kody suggested.
+
+**Decisions.**  Kept `.strip()` on the provider embed schema.  `.strict()` would reject live traffic —
+OpenRouter returns a per-item `id` and SiliconFlow a per-item `object`, so failing closed on unknown
+per-item keys turns every real embed response into a `ZodError`.  `test/embedding-response-schema.test.ts`
+already pins that a per-item `object` is stripped, not rejected.  This divergence is documented in the
+rollout note and the schema file.
+
+**Verification.**  `npm run lint` -> ok (0 errors, warnings only); `npx tsc --noEmit` -> ok;
+`npm test` and `npm run build` run on the pushed head.
+
+**Docs.**  `docs/rollouts/2026-10-13-pr-4606-review-thread-fixes.md`.
+
+**Next.**  Merge #4606 after hosted `verify` green.
+
+## 2026-10-13 CURSOR — PR #4606 embed/congress review fixes
+
+**What.**  Closed eight Sentry/Kody threads on `fix/embed-fail-fast-congress-share-backoff`: breaker counts only 5xx/network/timeout, embed abort covers body reads, content-cache hits skip metering, congress upstream half-open probe expiry/release, single breaker warnings, embed cache validity, search-fusion Zod embed parse.
+
+**Verification.**  `test/embed-resilience.test.ts`, targeted congress-share + usage-compliance tests, `npm run lint`, `npx tsc --noEmit`.
+
+**Docs.**  `docs/rollouts/2026-10-13-pr-4606-review-thread-fixes.md`.
+
+**Next.**  Push branch; hosted `verify` on PR #4606.
+## 2026-10-13 CURSOR — iOS stale cache + error copy (branch `cursor/ios-stale-cache-fix-78c7`)
+
+**What.**  iOS stops trusting stale `marketSession`, retries `/api/mobile/snapshot` with backoff while keeping cache visible, maps URLError copy, and treats `/api/scan` `stale: true` as last-good data (PR #4609).
+
+**Verification.**  `npm run lint`, `npx tsc --noEmit` clean.  Swift: hosted `ios-build` on PR.
+
+**Docs.**  `docs/rollouts/2026-10-13-ios-stale-cache-errors.md`.
+
+**Next.**  Land PR after `ios-build` + `verify` green.
+## 2026-10-13 CURSOR — iOS Sentry DSN + TestFlight cron (branch `cursor/ios-sentry-testflight-cron-5438`)
+
+**What.**  TestFlight has not archived since 2026-10-08.  `latest-build-seq` exits 2 and the ship script discards that stderr, then refuses to pick a build number (`local=107`, `asc=UNVERIFIED`).  The phone is still on the 2026-10-08 binary, which logged `SENTRY_DSN unset`.  Run 38181542543 already loaded a 95-character `SENTRY_DSN` from Infisical prod and then died in the same ASC check, so the DSN never reached an archive.  Sentry monitor `ci-socratic-trade-ios-testflight-ship` (FLEET-INFRA-DA) is the other failure: over the last 200 workflow runs GitHub delivered about 22% of the `*/30` ticks (p90 gap 368 min).  A 15-minute check-in margin marks those gaps missed.
+
+**Next.**  Land the PR.  The next real ship log will print the App Store Connect HTTP status.  A 401 or 403 there means the existing Infisical prod ASC key cannot read `com.socratictrade.ios`; do not mint a new key.  `xcodegen generate` on the macOS ship drops the checked-in `SENTRY_DSN = ""` project settings.
+
+**Docs.**  `docs/rollouts/2026-10-13-ios-sentry-dsn-testflight-cron.md`, `PLAN.md`.
+
+## 2026-10-11 CODEX — Kody MiniMax (CTS-330)
+
+**What.**  Kody autofix selects `MiniMax-M3` through MiniMax’s direct OpenAI-compatible endpoint.  Its Sentry observer follows the new workflow name.
+
+**Verification.**  Scoped `actionlint`, `git diff --check`, and all three Sentry workflow coverage tests passed.  The shared helper passed a synthetic live edit canary against `https://api.minimax.io/v1/chat/completions`; hosted checks and current-head Codex review remain the merge gates.
+
+**Docs.**  `docs/rollouts/2026-10-11-kody-minimax.md`.  Linear CTS-330 tracks the fleet rollout; effort logs are archived.
+
+**Next.**  Land #4523 after the current-head review and hosted `verify` pass; the scoped do-not-automerge hold remains until then.
+
+**Review follow-up (CODEX).**  The archived effort-log push gate now remains as a no-op compatibility hook, cloud bootstrap scripts no longer install the retired Slack hook, and the rollout canary recipe uses an environment-provided shared lane plus Python-only secret handoff.  Current-head Codex review and hosted checks are still required; auto-merge remains off.
+
+**Cloud review follow-up (2026-10-12 CODEX).**  The pinned bootstrap now includes the fleet registry and protocol documents, checks Python 3.11 and both CLI imports, and reports failed installation as a fleet-work blocker.  Reused cloud settings lose only retired Slack SessionStart entries; mixed unrelated hooks and settings are preserved.  Five isolated bootstrap tests, shell syntax, and a real pinned-source offline CLI/registry smoke test passed.  No live credentials or Mac settings were changed.
+**Cache review follow-up (2026-10-12 CODEX).**  Preserve both bot fixes, merge current main, retire Slack hooks before the Mac skip, and stage/validate a clean same-filesystem cache before replacement.  Nine isolated bootstrap regressions and shell/diff checks pass.  Full product checks and fresh Codex review remain hosted merge gates; auto-merge stays off.
+**Current-head review follow-up (2026-10-13 CODEX).**  Merged current `origin/main` into #4523 and generalized operational paths in the retired-Slack guide after a Kody review flagged repository topology in public docs.  Hosted `verify` and a fresh Codex review are required on the new head; the do-not-automerge hold remains.
+
+## 2026-10-12 CODEX — Claude Autofix Diagnostics (OPS-935, PR #4532)
 
 **What.**  Pin Claude Code Autofix to shared revision `825f8ee008d6ce104107f2a7267c14d370e6013e`, raising the default from 60 to 120 turns and adding schema-2 operation category counters with conservative fallback for ambiguous forms.  Raw commands remain excluded; artifacts retain the existing seven-day, 500-event, 256-KiB bounds.  The 30-minute timeout and model route remain unchanged.
 
