@@ -6,6 +6,7 @@ import {
   aggregateInsiderSignals,
   insiderSentimentScore,
   insiderXmlFilingCap,
+  mergeInsiderByAccession,
   mergeInsiderFilings,
   parseCurrentForm4Feed,
   parseForm4Xml,
@@ -13,7 +14,7 @@ import {
   refreshInsider,
   type InsiderFiling
 } from "../src/lib/web-sources/sec";
-import { parseInsiderBulkTables, unzipNamedFiles } from "../src/lib/web-sources/insider-bulk";
+import { insiderBulkQuarterKeys, parseInsiderBulkTables, unzipNamedFiles } from "../src/lib/web-sources/insider-bulk";
 import { SEC_EDGAR_FALLBACK_UA } from "../src/lib/web-sources/http";
 import { ingestCompanyFacts } from "../src/lib/web-sources/sec-facts";
 import { getSymbolWebSignals } from "../src/lib/web-sources";
@@ -153,6 +154,42 @@ describe("aggregateInsiderSignals + merge", () => {
     const merged = mergeInsiderFilings(filings, fresh, now, 30);
     expect(merged.find((f) => f.accession === "1")?.buyTx).toBe(9); // replaced
     expect(merged.find((f) => f.accession === "9")).toBeUndefined(); // pruned
+  });
+
+  it("keeps bulk dollars when the XML delta for the same accession has no price", () => {
+    const bulk: InsiderFiling = {
+      symbol: "NVDA",
+      owner: "Bulk Owner",
+      buyTx: 1,
+      sellTx: 1,
+      buyShares: 10,
+      sellShares: 4,
+      buyValue: 200,
+      sellValue: 80,
+      filedAt: "2026-06-01",
+      accession: "acc-priced"
+    };
+    const xml: InsiderFiling = {
+      ...bulk,
+      owner: "XML Owner",
+      buyTx: 1,
+      sellTx: 0,
+      buyShares: 10,
+      sellShares: 0,
+      buyValue: 0,
+      sellValue: 0
+    };
+    const [merged] = mergeInsiderByAccession([bulk], [xml]);
+    expect(merged).toMatchObject({
+      owner: "XML Owner",
+      buyValue: 200,
+      sellValue: 80,
+      buyShares: 10,
+      sellShares: 4,
+      buyTx: 1,
+      sellTx: 1
+    });
+    expect(insiderSentimentScore([merged])).toBe(71);
   });
 });
 
@@ -328,6 +365,59 @@ describe("SEC insider bulk datasets", () => {
     expect(result.recordCount).toBe(1);
     const overlay = getSymbolWebSignals(["MSFT"], now);
     expect(overlay.MSFT?.insiderSentiment).toBe(100);
+  });
+
+  it("still scrapes the watchlist when only the previous quarter ZIP loads", async () => {
+    const now = Date.parse("2026-05-15T00:00:00Z");
+    const keys = insiderBulkQuarterKeys(now);
+    const current = keys[0];
+    const prior = keys.find((key) => key !== current);
+    expect(prior).toBeTruthy();
+    const submission = ["ACCESSION_NUMBER\tISSUERTRADINGSYMBOL", "0001234567-26-000010\tAAPL"].join("\n");
+    const trans = [
+      "ACCESSION_NUMBER\tTRANS_DATE\tTRANS_CODE\tTRANS_SHARES\tTRANS_PRICEPERSHARE",
+      "0001234567-26-000010\t01-MAR-2026\tP\t5\t10"
+    ].join("\n");
+    const zip = zipStored({ "SUBMISSION.tsv": submission, "NONDERIV_TRANS.tsv": trans });
+    const msftXml = FORM4_BUY_XML
+      .replace("NVDA", "MSFT")
+      .replace(TODAY_ISO, "2026-05-01");
+    const { addWatchlistSymbol, removeWatchlistSymbol, setInternalSetting, deleteInternalSetting } = await import("../src/lib/db");
+    setInternalSetting("webSource:sec:tickerCikMap", {
+      map: { MSFT: "789019" },
+      fetchedAt: new Date(now).toISOString()
+    });
+    addWatchlistSymbol("local", "MSFT");
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      const u = String(url);
+      urls.push(u);
+      if (u.includes("form345.zip") && prior && u.includes(prior)) return new Response(new Uint8Array(zip), { status: 200 });
+      if (u.includes("form345.zip")) return new Response("missing", { status: 404 });
+      if (u.includes("action=getcurrent")) return new Response("<feed></feed>", { status: 200 });
+      if (u.includes("action=getcompany") && u.includes("789019")) {
+        return new Response(
+          `<feed><entry><link href="https://www.sec.gov/Archives/edgar/data/789019/000078901926000099/0000789019-26-000099-index.htm"/></entry></feed>`,
+          { status: 200 }
+        );
+      }
+      if (u.endsWith("/index.json")) {
+        return new Response(JSON.stringify({ directory: { item: [{ name: "ownership.xml" }] } }), { status: 200 });
+      }
+      if (u.endsWith("ownership.xml")) return new Response(msftXml, { status: 200 });
+      return new Response("nope", { status: 404 });
+    });
+    try {
+      const result = await refreshInsider(now, true);
+      expect(result.ok).toBe(true);
+      expect(urls.some((url) => url.includes("action=getcompany") && url.includes("789019"))).toBe(true);
+      const overlay = getSymbolWebSignals(["MSFT", "AAPL"], now);
+      expect(overlay.AAPL?.insiderSentiment).toBe(100);
+      expect(overlay.MSFT?.insiderSentiment).toBe(100);
+    } finally {
+      removeWatchlistSymbol("local", "MSFT");
+      deleteInternalSetting("webSource:sec:tickerCikMap");
+    }
   });
 });
 

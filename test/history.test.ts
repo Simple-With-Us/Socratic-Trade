@@ -6,7 +6,7 @@ import { clearHistoryCache, fetchDailyOHLC, parseRoicStockPrices, parseStooqCsv,
 import { upsertHistoryCacheEod } from "../src/lib/history-cache";
 import { latestCompletedTradingSessionEtKey } from "../src/lib/market-hours";
 import { clearMassiveRestBudgetForTests } from "../src/lib/market-signals/massive";
-import { clearMarketDataDemandsForTests, deleteUserApiKey, getDb, setDataPoolConsent, upsertConnectedAccount, upsertUserApiKey } from "../src/lib/db";
+import { clearMarketDataDemandsForTests, deleteInternalSetting, deleteUserApiKey, getDb, setDataPoolConsent, upsertConnectedAccount, upsertUserApiKey } from "../src/lib/db";
 import { subscribeDashboardEvents, type DashboardEvent } from "../src/lib/events";
 import { admitProviderRequests, resetProviderQuotaState } from "../src/lib/provider-rate-limit";
 import { apiKeyFingerprint } from "../src/lib/data-providers";
@@ -685,6 +685,81 @@ describe("fetchDailyOHLC", () => {
       db.prepare("DELETE FROM history_cache_eod WHERE ticker IN ('LONGHIST', 'SHORTHIST')").run();
       delete process.env.MASSIVE_LOCAL_HISTORY_ENABLED;
     }
+  });
+
+  it("does not refetch Yahoo range=max every TTL when the listing starts inside the window", async () => {
+    process.env.MASSIVE_LOCAL_HISTORY_ENABLED = "on";
+    const now = Date.UTC(2026, 5, 18, 21, 0, 0);
+    const latest = latestCompletedTradingSessionEtKey(now);
+    const symbol = "IPONEW";
+    const body = JSON.stringify({
+      chart: {
+        result: [{
+          timestamp: [
+            Math.floor(Date.parse("2024-01-02T00:00:00Z") / 1000),
+            Math.floor(Date.parse(`${latest}T00:00:00Z`) / 1000)
+          ],
+          indicators: {
+            quote: [{ open: [10, 12], high: [11, 13], low: [9, 11], close: [10.5, 12.5], volume: [100, 200] }]
+          }
+        }]
+      }
+    });
+    const fetchMock = vi.fn(async (url: string) =>
+      String(url).includes("query1.finance.yahoo.com")
+        ? new Response(body, { status: 200 })
+        : new Response("nope", { status: 500 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const first = await fetchDailyOHLC(symbol, now);
+      expect(first).not.toBeNull();
+      expect(toBusinessDay(first![0].time)).toBe("2024-01-02");
+      expect(fetchMock.mock.calls.some(([url]) => String(url).includes("range=max"))).toBe(true);
+      const callsAfterFirst = fetchMock.mock.calls.length;
+      clearHistoryCache();
+      const second = await fetchDailyOHLC(symbol, now + 31 * 60_000);
+      expect(second).not.toBeNull();
+      expect(toBusinessDay(second![0].time)).toBe("2024-01-02");
+      expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
+    } finally {
+      getDb().prepare("DELETE FROM history_cache_eod WHERE ticker = ?").run(symbol);
+      deleteInternalSetting(`history:listing-start:${symbol}`);
+      delete process.env.MASSIVE_LOCAL_HISTORY_ENABLED;
+    }
+  });
+
+  it("rejects a Twelve Data body that is not a time series and accepts numeric closes", async () => {
+    upsertUserApiKey("local", "twelvedata", "twelve-history-test-key");
+    const now = Date.UTC(2026, 5, 18);
+    const malformed = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("api.twelvedata.com/time_series")) {
+        return new Response(JSON.stringify({ status: "ok", values: { datetime: "2021-06-16" } }), { status: 200 });
+      }
+      return new Response("nope", { status: 500 });
+    });
+    vi.stubGlobal("fetch", malformed);
+    await expect(fetchDailyOHLC("AAPL", now)).resolves.toBeNull();
+    expect(malformed.mock.calls.some(([url]) => String(url).includes("api.twelvedata.com"))).toBe(true);
+
+    const numeric = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("api.twelvedata.com/time_series")) {
+        return new Response(JSON.stringify({
+          status: "ok",
+          values: [
+            { datetime: "2021-06-16", close: 10.5, volume: 1000 },
+            { datetime: "2026-06-17", close: 11.8, volume: 2000 }
+          ]
+        }), { status: 200 });
+      }
+      return new Response("nope", { status: 500 });
+    });
+    vi.stubGlobal("fetch", numeric);
+    const bars = await fetchDailyOHLC("AAPL", now);
+    expect(bars).not.toBeNull();
+    expect(bars![0]).toMatchObject({ time: "2021-06-16", close: 10.5 });
   });
 
   it("serves local SQLite OHLC history directly without network requests", async () => {

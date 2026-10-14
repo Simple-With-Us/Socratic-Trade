@@ -31,11 +31,12 @@
 import fs from "fs";
 import path from "path";
 import zlib from "zlib";
+import { z } from "zod";
 import type { OHLCBar } from "./indicators";
 export type { OHLCBar };
 import { dataSourceFetch } from "./data-source-fetch";
 import { normalizeSymbol, toAlpacaSymbol } from "./money";
-import { audit, fulfillMarketDataDemand, getConnectedAccountByBroker, getImportedPriceCloses, getImportedSpxCloses, hasDataPoolConsent, recordMarketDataDemand, resolveApiKeyWithSource, upsertImportedPrices, type ApiKeySource } from "./db";
+import { audit, deleteInternalSetting, fulfillMarketDataDemand, getConnectedAccountByBroker, getImportedPriceCloses, getImportedSpxCloses, getInternalSetting, hasDataPoolConsent, recordMarketDataDemand, resolveApiKeyWithSource, setInternalSetting, upsertImportedPrices, type ApiKeySource } from "./db";
 import { emitDashboardEvent } from "./events";
 import { expiresAtRespectingMarketClose, latestCompletedTradingSessionEtKey } from "./market-hours";
 import { recordProviderCall } from "./usage-monitor-push";
@@ -89,6 +90,44 @@ function seriesCoversStart(bars: OHLCBar[], startDate: string): boolean {
   return Boolean(oldest && oldest <= startDate);
 }
 
+const LISTING_START_PREFIX = "history:listing-start:";
+
+function listingStartKey(symbol: string): string {
+  return `${LISTING_START_PREFIX}${symbol}`;
+}
+
+/** Oldest session Yahoo `range=max` actually returned.  A young listing never reaches a 5y start. */
+function readListingStart(symbol: string): string | undefined {
+  try {
+    const raw = getInternalSetting<unknown>(listingStartKey(symbol));
+    return typeof raw === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeListingStart(symbol: string, iso: string | null): void {
+  try {
+    if (!iso) {
+      deleteInternalSetting(listingStartKey(symbol));
+      return;
+    }
+    setInternalSetting(listingStartKey(symbol), iso);
+  } catch {
+    // A settings miss must not drop bars the cascade already fetched.
+  }
+}
+
+function localSeriesCovers(symbol: string, bars: OHLCBar[] | null, startDate: string, deepHistory: boolean): boolean {
+  if (!bars || !deepHistory) return true;
+  if (seriesCoversStart(bars, startDate)) return true;
+  const oldest = toBusinessDay(bars[0]?.time);
+  const listedAt = readListingStart(symbol);
+  // The marker is the first bar of a completed range=max fetch.  Cached bars
+  // that still start on or before that date are the full listing, not a stub.
+  return Boolean(oldest && listedAt && oldest <= listedAt);
+}
+
 // ── Yahoo v8/finance/chart HTTP 429 hardening ────────────────────────────────
 // Live-verified 2026-08-02: this endpoint does NOT require the crumb+cookie session handshake that
 // v7/finance/quote and v10/finance/quoteSummary now enforce (401 "Invalid Crumb" without one) — a
@@ -114,27 +153,32 @@ async function fetchYahooChartJson<T>(
 ): Promise<T> {
   const maxAttempts = opts?.maxAttempts ?? YAHOO_CHART_MAX_ATTEMPTS;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), YAHOO_CHART_TIMEOUT_MS);
-    try {
-      const res = await withProviderLimit("yahoo-finance", () =>
-        dataSourceFetch(url, {
+    // The abort timer starts after the yahoo-finance slot is acquired.  Time
+    // spent in the pacer queue must not count against YAHOO_CHART_TIMEOUT_MS.
+    // range=1y and range=max share this helper and the same chart host, so both
+    // take the 400ms / concurrency-2 pacer.  That spacing is intentional on the
+    // short path: a cache-miss fan-out was already drawing HTTP 429s here.
+    const res = await withProviderLimit("yahoo-finance", async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), YAHOO_CHART_TIMEOUT_MS);
+      try {
+        return await dataSourceFetch(url, {
           headers: { "user-agent": BROWSER_UA, accept: "application/json" },
           cache: "no-store",
           signal: controller.signal
-        })
-      );
-      if (res.status === 429 && attempt < maxAttempts - 1) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, Math.min(4000, YAHOO_CHART_BASE_BACKOFF_MS * 2 ** attempt))
-        );
-        continue;
+        });
+      } finally {
+        clearTimeout(timeout);
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-      return (await res.json()) as T;
-    } finally {
-      clearTimeout(timeout);
+    });
+    if (res.status === 429 && attempt < maxAttempts - 1) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(4000, YAHOO_CHART_BASE_BACKOFF_MS * 2 ** attempt))
+      );
+      continue;
     }
+    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+    return (await res.json()) as T;
   }
   throw new Error(`HTTP 429 for ${url} (exhausted retries)`);
 }
@@ -230,8 +274,9 @@ function persistEodBarsToCache(symbol: string, bars: OHLCBar[]): void {
  * Yahoo `range=max` (paced), Tradier, then Twelve Data before the remaining tiers.
  * Shorter lookbacks keep Massive in the broker-first cascade and Yahoo at `range=1y`.
  * SQLite `history_cache_eod` rows are permanent (no row TTL). A fresh series is
- * served with no network only when it also reaches `startDate`, so a 2y cache
- * cannot block a deep Yahoo fetch. Returns the first source that yields ≥2 bars,
+ * served with no network only when it reaches `startDate`, or when a prior Yahoo
+ * `range=max` response confirmed the listing starts later.  A 2y cache with no
+ * such marker cannot block a deep Yahoo fetch. Returns the first source that yields ≥2 bars,
  * or null (never fabricated).
  * ROIC is operator-key only (ROIC_API_KEY); CT (App A) never holds a ROIC key — it
  * pulls via ST market-read peer routes after ST has cached the series.
@@ -273,10 +318,11 @@ export async function fetchDailyOHLC(
   const startDate = new Date(now - lookbackDays * 24 * 60 * 60_000).toISOString().slice(0, 10);
 
   // 1. Evaluate local SQLite history cache. Rows are permanent. A fresh series
-  //    short-circuits the network only when it covers the requested start, so a
-  //    2-year cache cannot hide Yahoo range=max on a deep request.
+  //    short-circuits the network only when it covers the requested start, or when
+  //    Yahoo range=max already confirmed this symbol lists later than that start.
+  //    A 2-year cache with no marker cannot hide Yahoo range=max on a deep request.
   const localBars = await fetchHistoryCacheEod(symbol);
-  const localCovers = !localBars || !deepHistory || seriesCoversStart(localBars, startDate);
+  const localCovers = localSeriesCovers(symbol, localBars, startDate, deepHistory);
   if (localBars && localBars.length >= 2 && isBarSeriesFresh(localBars, now) && localCovers) {
     const stampedLocal = stampOhlcBarProvenance(localBars, "history-cache-eod", new Date(now).toISOString());
     cache.set(sharedCacheKey, { expiresAt: expiresAtRespectingMarketClose(new Date(now), historyTtlMs()), bars: stampedLocal });
@@ -361,6 +407,7 @@ export async function fetchDailyOHLC(
   const yahooSource = (range: "max" | "1y") => ({
     scope: "shared" as const,
     sourceId: "yahoo-finance",
+    confirmsListingStart: range === "max",
     fetch: () => fetchYahoo(symbol, { range, maxAttempts: yahooAttempts })
   });
   const marketstackSource = {
@@ -374,6 +421,7 @@ export async function fetchDailyOHLC(
   const sources: Array<{
     scope: CacheScope;
     sourceId: string;
+    confirmsListingStart?: boolean;
     fetch: () => Promise<OHLCBar[] | null>;
   }> = deepHistory
     ? [
@@ -409,6 +457,10 @@ export async function fetchDailyOHLC(
       const finalBars = staleFallbackBars
         ? stampOhlcBarProvenance(mergeOHLCBars(staleFallbackBars, stampedLive), source.sourceId, fetchedAt)
         : stampedLive;
+      if (source.confirmsListingStart) {
+        const oldest = toBusinessDay(finalBars[0]?.time);
+        writeListingStart(symbol, oldest && oldest > startDate ? oldest : null);
+      }
       persistEodBarsToCache(symbol, finalBars);
 
       const cacheKey = source.scope === "private" ? privateCacheKey : source.scope === "pool" ? poolCacheKey : sharedCacheKey;
@@ -782,18 +834,28 @@ async function fetchTradier(symbol: string, startDate: string, key: string | und
   }
 }
 
-interface TwelveDataBar {
-  datetime?: string;
-  open?: string;
-  high?: string;
-  low?: string;
-  close?: string;
-  volume?: string;
-}
-interface TwelveDataTimeSeries {
-  status?: string;
-  values?: TwelveDataBar[];
-}
+const twelveDataNumber = z.union([z.string(), z.number()]);
+
+export const TwelveDataBarSchema = z
+  .object({
+    datetime: z.string().min(1),
+    open: twelveDataNumber.optional(),
+    high: twelveDataNumber.optional(),
+    low: twelveDataNumber.optional(),
+    close: twelveDataNumber,
+    volume: twelveDataNumber.optional()
+  })
+  .passthrough();
+
+export const TwelveDataTimeSeriesSchema = z
+  .object({
+    status: z.string().optional(),
+    values: z.array(TwelveDataBarSchema).optional()
+  })
+  .passthrough();
+
+export type TwelveDataBar = z.infer<typeof TwelveDataBarSchema>;
+export type TwelveDataTimeSeries = z.infer<typeof TwelveDataTimeSeriesSchema>;
 
 /**
  * Twelve Data daily time series. Free tier is credit-capped (same `twelvedata`
@@ -807,13 +869,15 @@ async function fetchTwelveData(symbol: string, startDate: string, key?: string, 
     const url =
       `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}` +
       `&interval=1day&start_date=${startDate}&order=ASC&outputsize=5000&apikey=${encodeURIComponent(key)}`;
-    const json = await politeFetchJson<TwelveDataTimeSeries>(url, { headers: { Accept: "application/json" } });
-    if (json?.status === "error" || !Array.isArray(json?.values)) {
+    const parsed = TwelveDataTimeSeriesSchema.safeParse(
+      await politeFetchJson<unknown>(url, { headers: { Accept: "application/json" } })
+    );
+    if (!parsed.success || parsed.data.status === "error" || !Array.isArray(parsed.data.values)) {
       recordProviderCall("twelvedata", { service: "market-data", ok: false, label: usageLabel });
       return null;
     }
     const bars: OHLCBar[] = [];
-    for (const row of json.values) {
+    for (const row of parsed.data.values) {
       const close = Number(row.close);
       if (!row.datetime || !Number.isFinite(close)) continue;
       bars.push({

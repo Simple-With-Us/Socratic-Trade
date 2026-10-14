@@ -627,6 +627,16 @@ all pre-existing (reproduced identically with these changes stashed; this sandbo
 **Docs.**  `docs/rollouts/2026-10-14-fleet-fully-dark-detector.md`, `STATUS.md`.
 
 **Next.**  Land PR; after deploy watch SOCRATIC-TRADE-2S for new events.
+## 2026-10-14 GROK — PR #4661 review follow-up
+
+**What.**  Merged `origin/main` (already contained; branch was not behind).  The current-quarter Form 4 ZIP is the only bulk coverage flag, so a previous quarter no longer skips the watchlist.  The same accession keeps the larger bulk or XML dollar, share, and transaction totals.  Yahoo chart timeouts start after the pacer slot is acquired.  A fresh series whose listing starts inside the five-year window is not refetched every memory-cache TTL.  Twelve Data and the Form 345 rows are Zod-checked before they are stored.  The 1825-day default stays.  It was already the start date on main, and shortening it would let Massive's two-year series win again.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted history and web-source tests: 67 passed.  Full `npm test`: 1 failed, 9310 passed, 51 skipped.  The failure is `test/egress-guard.test.ts` resolving discord.com.  This shell has no DNS for that host, and the file is not in this diff.  Follow-up `npm run build` compiled with warnings in 82s, then the process was killed (exit 137) during Next.js "Running TypeScript".  Standalone `tsc --noEmit` had already passed.  Hosted `verify` runs the real build.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334` (claimed, in progress).  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Ask Kody to re-review.  Do not merge from this lane.  Do not resolve review threads from this lane.
+
 ## 2026-10-14 GROK — Free data gaps (history, Form 4, Senate eFD)
 
 **What.**  Requests longer than 730 days skip Massive and try Yahoo chart `range=max` (paced), then Tradier, then Twelve Data.  `history_cache_eod` stays a permanent upsert; a fresh series is served offline only when it covers the requested start.  Nightly insider refresh loads the SEC quarterly Form 4 ZIP plus the atom delta, scores dollar-weighted open-market buys and sells over 90 days, and no longer caps the atom feed at 60 or the watchlist at 20.  When Congress.Trade fails or returns no trades, the congress source falls back to Senate eFD.  Quiver is not called.

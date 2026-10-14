@@ -7,6 +7,7 @@
 // the .sec.gov limiter inside politeFetch.
 
 import zlib from "zlib";
+import { z } from "zod";
 import { normalizeSymbol } from "../money";
 import { politeFetch, secUserAgent } from "./http";
 
@@ -150,6 +151,52 @@ function finiteNumber(raw: string | undefined): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+const optionalCell = z.string().min(1).optional();
+
+const BulkSubmissionRowSchema = z
+  .object({
+    ACCESSION_NUMBER: z.string().min(1),
+    ISSUERTRADINGSYMBOL: z.string().min(1)
+  })
+  .passthrough();
+
+const BulkOwnerRowSchema = z
+  .object({
+    ACCESSION_NUMBER: z.string().min(1),
+    RPTOWNERNAME: optionalCell,
+    RPT_OWNER_NAME: optionalCell
+  })
+  .passthrough();
+
+const BulkTransRowSchema = z
+  .object({
+    ACCESSION_NUMBER: z.string().min(1),
+    TRANS_CODE: z.enum(["P", "S"]),
+    TRANS_DATE: optionalCell,
+    PERIOD_OF_REPORT: optionalCell,
+    TRANS_SHARES: optionalCell,
+    TRANS_PRICEPERSHARE: optionalCell
+  })
+  .passthrough();
+
+const BulkInsiderFilingSchema = z.object({
+  symbol: z.string().regex(/^[A-Z][A-Z.\-]{0,5}$/),
+  owner: z.string().min(1),
+  buyTx: z.number().int().nonnegative(),
+  sellTx: z.number().int().nonnegative(),
+  buyShares: z.number().nonnegative(),
+  sellShares: z.number().nonnegative(),
+  buyValue: z.number().nonnegative(),
+  sellValue: z.number().nonnegative(),
+  filedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  accession: z.string().min(1)
+});
+
+function cell(raw: string | undefined): string | undefined {
+  const trimmed = raw?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 /**
  * Collapse SUBMISSION + NONDERIV_TRANS (+ optional REPORTINGOWNER) into one
  * filing per accession. Only open-market P and S inside the window count.
@@ -167,29 +214,46 @@ export function parseInsiderBulkTables(
 
   const symbolByAccession = new Map<string, string>();
   for (const row of submission) {
-    const accession = row.ACCESSION_NUMBER;
-    const symbol = normalizeSymbol(row.ISSUERTRADINGSYMBOL ?? "");
-    if (!accession || !/^[A-Z][A-Z.\-]{0,5}$/.test(symbol)) continue;
+    const parsed = BulkSubmissionRowSchema.safeParse(row);
+    if (!parsed.success) continue;
+    const accession = parsed.data.ACCESSION_NUMBER;
+    const symbol = normalizeSymbol(parsed.data.ISSUERTRADINGSYMBOL);
+    if (!/^[A-Z][A-Z.\-]{0,5}$/.test(symbol)) continue;
     symbolByAccession.set(accession, symbol);
   }
   const ownerByAccession = new Map<string, string>();
   for (const row of owners) {
-    const accession = row.ACCESSION_NUMBER;
-    const name = (row.RPTOWNERNAME || row.RPT_OWNER_NAME || "").replace(/\s+/g, " ").trim();
-    if (accession && name && !ownerByAccession.has(accession)) ownerByAccession.set(accession, name);
+    const parsed = BulkOwnerRowSchema.safeParse({
+      ACCESSION_NUMBER: cell(row.ACCESSION_NUMBER),
+      RPTOWNERNAME: cell(row.RPTOWNERNAME),
+      RPT_OWNER_NAME: cell(row.RPT_OWNER_NAME)
+    });
+    if (!parsed.success) continue;
+    const name = (parsed.data.RPTOWNERNAME || parsed.data.RPT_OWNER_NAME || "").replace(/\s+/g, " ").trim();
+    if (name && !ownerByAccession.has(parsed.data.ACCESSION_NUMBER)) {
+      ownerByAccession.set(parsed.data.ACCESSION_NUMBER, name);
+    }
   }
 
   const byAccession = new Map<string, BulkInsiderFiling>();
   for (const row of trans) {
-    const accession = row.ACCESSION_NUMBER;
-    const symbol = accession ? symbolByAccession.get(accession) : undefined;
-    if (!accession || !symbol) continue;
-    const code = (row.TRANS_CODE || "").trim().toUpperCase();
-    if (code !== "P" && code !== "S") continue;
-    const when = normalizeSecDate(row.TRANS_DATE) ?? normalizeSecDate(row.PERIOD_OF_REPORT);
+    const parsedRow = BulkTransRowSchema.safeParse({
+      ACCESSION_NUMBER: cell(row.ACCESSION_NUMBER),
+      TRANS_CODE: cell(row.TRANS_CODE)?.toUpperCase(),
+      TRANS_DATE: cell(row.TRANS_DATE),
+      PERIOD_OF_REPORT: cell(row.PERIOD_OF_REPORT),
+      TRANS_SHARES: cell(row.TRANS_SHARES),
+      TRANS_PRICEPERSHARE: cell(row.TRANS_PRICEPERSHARE)
+    });
+    if (!parsedRow.success) continue;
+    const accession = parsedRow.data.ACCESSION_NUMBER;
+    const symbol = symbolByAccession.get(accession);
+    if (!symbol) continue;
+    const code = parsedRow.data.TRANS_CODE;
+    const when = normalizeSecDate(parsedRow.data.TRANS_DATE) ?? normalizeSecDate(parsedRow.data.PERIOD_OF_REPORT);
     if (!when || !inWindow(when, now, windowDays)) continue;
-    const shares = finiteNumber(row.TRANS_SHARES);
-    const price = finiteNumber(row.TRANS_PRICEPERSHARE);
+    const shares = finiteNumber(parsedRow.data.TRANS_SHARES);
+    const price = finiteNumber(parsedRow.data.TRANS_PRICEPERSHARE);
     const value = shares > 0 && price > 0 ? shares * price : 0;
     const filing = byAccession.get(accession) ?? {
       symbol,
@@ -215,7 +279,12 @@ export function parseInsiderBulkTables(
     }
     byAccession.set(accession, filing);
   }
-  return [...byAccession.values()];
+  const filings: BulkInsiderFiling[] = [];
+  for (const filing of byAccession.values()) {
+    const parsed = BulkInsiderFilingSchema.safeParse(filing);
+    if (parsed.success) filings.push(parsed.data);
+  }
+  return filings;
 }
 
 async function downloadQuarter(quarterKey: string): Promise<Map<string, string> | null> {
@@ -237,15 +306,25 @@ async function downloadQuarter(quarterKey: string): Promise<Map<string, string> 
   return null;
 }
 
-/** Download the quarters that cover the score window. Failures return []. */
-export async function fetchInsiderBulkFilings(now: number = Date.now(), windowDays = 90): Promise<BulkInsiderFiling[]> {
+export interface InsiderBulkLoad {
+  filings: BulkInsiderFiling[];
+  /** True only when the quarter that contains `now` downloaded.  A prior quarter is not coverage. */
+  currentQuarterLoaded: boolean;
+}
+
+/** Download the quarters that cover the score window.  A missing ZIP leaves that quarter unloaded. */
+export async function fetchInsiderBulkFilings(now: number = Date.now(), windowDays = 90): Promise<InsiderBulkLoad> {
   const merged = new Map<string, BulkInsiderFiling>();
-  for (const key of insiderBulkQuarterKeys(now)) {
+  const keys = insiderBulkQuarterKeys(now);
+  const currentKey = keys[0];
+  let currentQuarterLoaded = false;
+  for (const key of keys) {
     const files = await downloadQuarter(key);
     if (!files) continue;
+    if (key === currentKey) currentQuarterLoaded = true;
     for (const filing of parseInsiderBulkTables(files, now, windowDays)) {
       merged.set(filing.accession, filing);
     }
   }
-  return [...merged.values()];
+  return { filings: [...merged.values()], currentQuarterLoaded };
 }

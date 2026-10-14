@@ -6,9 +6,9 @@ Three free-tier holes were still leaving dashboard fields thin.  Massive free ag
 
 ## Changes Made
 
-Deep daily OHLC (`lookbackDays` above 730, including the 1825-day default) skips Massive.  The live order is imported EOD, App A, Yahoo chart `range=max` under `withProviderLimit("yahoo-finance")`, Tradier history, Twelve Data, then Alpaca, Robinhood, ROIC, Tiingo, and Marketstack.  Lookbacks of 730 days or less keep the previous broker-first order, including Massive and Yahoo `range=1y`.  SQLite `history_cache_eod` remains a permanent upsert with no age delete.  On a deep request a fresh local series returns with no network only when its oldest bar is on or before the requested start.
+Deep daily OHLC (`lookbackDays` above 730, including the 1825-day default) skips Massive.  The live order is imported EOD, App A, Yahoo chart `range=max` under `withProviderLimit("yahoo-finance")`, Tradier history, Twelve Data, then Alpaca, Robinhood, ROIC, Tiingo, and Marketstack.  Lookbacks of 730 days or less keep the previous broker-first order, including Massive and Yahoo `range=1y`.  Both Yahoo ranges use that pacer because they share the chart host.  The abort timer starts after the slot is acquired.  Twelve Data responses pass `TwelveDataTimeSeriesSchema` before bars are built.  SQLite `history_cache_eod` remains a permanent upsert with no age delete.  On a deep request a fresh local series returns with no network when its oldest bar is on or before the requested start, or when a prior `range=max` fetch stored `history:listing-start:<symbol>` and the cached series still starts on or before that date.
 
-Insider refresh still runs from the existing `web-source-refresh` lane (default 24h TTL).  It downloads the current SEC insider-transactions ZIP and the quarter that covers the prior 90 days, parses open-market `P` and `S` rows, and merges the Form 4 atom feed as a delta on the same accession.  The score is `round(100 * buyValue / (buyValue + sellValue))` over that window, which is `50 + 50 * (net purchases / total value)`.  Unpriced rows fall back to shares, then to transaction counts.  Signals are stored on the dataset.  `WEB_SOURCE_INSIDER_MAX_FILINGS` now defaults to 0, and 0 means the atom feed is uncapped.  The watchlist XML pass runs only when the ZIP returned no filings, and it is no longer sliced to 20.  SEC requests still go through the existing limiter, and the User-Agent fallback is `Socratic Trade research jay@socratic.trade` (an explicit `SEC_EDGAR_USER_AGENT` still wins).
+Insider refresh still runs from the existing `web-source-refresh` lane (default 24h TTL).  It downloads the current SEC insider-transactions ZIP and the quarter that covers the prior 90 days, parses open-market `P` and `S` rows, and merges the Form 4 atom feed as a delta on the same accession.  The score is `round(100 * buyValue / (buyValue + sellValue))` over that window, which is `50 + 50 * (net purchases / total value)`.  Unpriced rows fall back to shares, then to transaction counts.  Signals are stored on the dataset.  `WEB_SOURCE_INSIDER_MAX_FILINGS` now defaults to 0, and 0 means the atom feed is uncapped.  The watchlist XML pass runs unless the current quarter ZIP downloaded.  A previous-quarter ZIP does not count as coverage, and the pass is not sliced to 20.  When bulk and XML share an accession, dollar, share, and transaction totals keep the larger side.  SEC requests still go through the existing limiter, and the User-Agent fallback is `Socratic Trade research jay@socratic.trade` (an explicit `SEC_EDGAR_USER_AGENT` still wins).
 
 When `CONGRESS_TRADE_AS_CONGRESS_SOURCE` is on, a Congress.Trade error or an empty non-incremental result falls back to `scrapeSenateEfd` (agreement cookie, CSRF, PTR HTML).  A successful empty incremental poll keeps the prior dataset and does not scrape eFD.  Quiver is not called.
 
@@ -38,7 +38,9 @@ Cached insider signals are reused when `windowDays` matches and are not recomput
 
 The SEC XBRL 8s budget in the enrichment cascade and the scheduler RTH cap of 3 filing bodies are 10-K/10-Q company-facts and RAG ingest.  They are not the Form 4 sentiment path and were left unchanged.
 
-Bulk ZIP parsing keeps only in-window `P`/`S` filings.  A 404 on the ZIP does not wipe the atom path.
+Bulk ZIP parsing keeps only in-window `P`/`S` filings, and each submission, owner, and transaction row is checked with a Zod schema before it is aggregated.  A 404 on the ZIP does not wipe the atom path.  The 1825-day default is unchanged from main's hardcoded start.  Callers that want the short cascade pass `lookbackDays` of 730 or less.
+
+Review follow-up for PR #4661 (board `b53cc5f8970c469e8f561767c35fc334`).  `origin/main` was already an ancestor, so the merge did not create a commit.
 
 Senate HTML uses the browser User-Agent already on `scrapeSenateEfd`, not the SEC research User-Agent.  PTR detail fetches stay paced at 350ms.
 
@@ -63,13 +65,26 @@ Six of those failures were this diff and are fixed:
 
 The other 23 failures are this cloud shell, not this diff: OpenRouter and native LLM routing tests see a configured key (`chat-llm`, `llm-provider`, `framework-review`, `red-team`, `openrouter-credits`); Pushover and email tests see injected notify credentials; `cpuprofile-summary` cannot load a `.ts` module under Node 22; `server-metrics` does not treat this VM as the local host; Alpha Vantage mid-chunk fast-stop counted 3 fetches instead of 2.  None of those files are in this diff.
 
-`npm run build` ok.  It compiled with the existing warning backlog and collected page data.
+`npm run build` ok on the first pass of this branch.  It compiled with the existing warning backlog and collected page data.
+
+Review follow-up (`origin/main` was already merged, no merge commit):
+
+```bash
+npm run lint
+npx tsc --noEmit
+npx vitest run test/history.test.ts test/web-sources-sec.test.ts test/web-sources.test.ts
+npm test
+```
+
+`npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted history and web-source tests: 67 passed.  Full `npm test`: 1 failed, 9310 passed, 51 skipped, 826 files.  The failure is `test/egress-guard.test.ts` resolving `https://discord.com` with real DNS.  This shell cannot resolve that host.  The file is not in this diff.
+
+Follow-up `npm run build` compiled with warnings in 82s, then the process was killed (exit 137) during Next.js "Running TypeScript".  Standalone `tsc --noEmit` had already passed.  Hosted `verify` runs the real build.
 
 ## Next Steps & Blockers
 
-The PR is ready for review.  Do not merge from this lane.  Do not deploy.
+Ask Kody to re-review.  Do not merge from this lane.  Do not deploy.  Do not resolve review threads from this lane.
 
-Fleet Linear (team ST) was not claimed.  `board` is installed, and `board whoami` stops because `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` are unset (`AGENT_SEAT` is unset too).  `agent-sync whoami` has no seat.  Agent-Sync MCP needs authentication.  Seat-specific `LINEAR_CURSOR_*` values are present and were not aliased into the Fleet client id.  That does not block the code.  The next seat with fleet credentials should open or move the ST issue and link it.
+Board row `b53cc5f8970c469e8f561767c35fc334` is claimed in progress by GROK.  Fleet Linear team ST was not moved.  `AGENT_SEAT` is unset on this cloud seat, and the board file used `--by GROK` because that is the seat writing the PR.  Do not mark the row completed until the PR merges.
 
 ## Zero-Code Findings
 

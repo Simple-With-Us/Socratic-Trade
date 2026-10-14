@@ -97,8 +97,11 @@ index is a PK leading with `content_hash`.
   back to shares, then to transaction counts.  Signals are cached by symbol on the
   dataset.  The atom feed is uncapped unless `WEB_SOURCE_INSIDER_MAX_FILINGS` is
   set above 0.  The old default cap of 60 filings and the 20-symbol watchlist
-  slice are gone.  The watchlist XML pass runs only when the ZIP did not load,
-  still under the SEC limiter.  Codes `M`/`A`/`F`/`G` are ignored.
+  slice are gone.  The watchlist XML pass runs unless the current quarter's ZIP
+  downloaded.  A previous quarter alone is not coverage.  Bulk and XML rows for
+  one accession keep the larger dollar, share, and transaction totals, so an
+  unpriced XML body cannot erase ZIP prices.  Requests still use the SEC limiter.
+  Codes `M`/`A`/`F`/`G` are ignored.
 - **`fmp-transcripts.ts`** — default-off FMP earnings-call transcript discovery and body ingest.
   It requires both endpoint enablement and explicit storage/display-rights confirmation, uses the
   stable dates/body endpoints with header authentication, preserves first-content-observed time for
@@ -238,7 +241,7 @@ records completion under the active embed revision; scoped runs deliberately do 
 | `WEB_SOURCE_INSIDER_TTL_MS` | 24h | refresh cadence |
 | `WEB_SOURCE_INSIDER_WINDOW_DAYS` | 90 | dollar-weighted rolling window |
 | `WEB_SOURCE_INSIDER_MAX_FILINGS` | 0 | atom XML cap; 0 means uncapped. Bulk rows are never capped |
-| `WEB_SOURCE_INSIDER_WATCHLIST` | `on` | Form 4s for watchlist tickers when the quarterly ZIP did not load |
+| `WEB_SOURCE_INSIDER_WATCHLIST` | `on` | Form 4s for watchlist tickers when the current quarter ZIP did not load |
 | `WEB_SOURCE_13F` | `on` | official 13F-HR books for curated superinvestors |
 | `WEB_SOURCE_13F_TTL_MS` | 7d | 13F refresh cadence (incomplete `okFilers` stay due after 1h backoff) |
 | `WEB_SOURCE_ARK` | `on` | official ARK daily holdings CSVs |

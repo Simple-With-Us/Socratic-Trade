@@ -414,8 +414,9 @@ async function scrapeForm4XmlDelta(now: number, bulkCovered: boolean): Promise<I
   if (cap != null) current = current.slice(0, cap);
   const out = await fetchForm4FromDirs(current, ua);
 
-  // Bulk already covers the issuer universe. The watchlist pass exists only
-  // when the quarterly ZIP did not load, and it is not sliced to 20 symbols.
+  // The watchlist pass fills the active quarter when that quarter's ZIP did
+  // not download.  A previous-quarter ZIP is not coverage.  The pass is not
+  // sliced to 20 symbols.
   if (bulkCovered || !resolveSourceBool("WEB_SOURCE_INSIDER_WATCHLIST")) return out;
 
   let tickerCik: Record<string, string> = {};
@@ -451,24 +452,51 @@ async function scrapeForm4XmlDelta(now: number, bulkCovered: boolean): Promise<I
   return [...out, ...more];
 }
 
+/**
+ * One row per accession.  XML wins identity fields.  Dollar, share, and
+ * transaction totals keep the larger side so an unpriced Form 4 XML body
+ * cannot erase `TRANS_PRICEPERSHARE * TRANS_SHARES` from the quarterly ZIP.
+ */
+export function mergeInsiderByAccession(bulk: InsiderFiling[], xml: InsiderFiling[]): InsiderFiling[] {
+  const byAccession = new Map<string, InsiderFiling>();
+  for (const filing of bulk) byAccession.set(filing.accession, filing);
+  for (const filing of xml) {
+    const prior = byAccession.get(filing.accession);
+    if (!prior) {
+      byAccession.set(filing.accession, filing);
+      continue;
+    }
+    byAccession.set(filing.accession, {
+      ...filing,
+      buyValue: Math.max(prior.buyValue ?? 0, filing.buyValue ?? 0),
+      sellValue: Math.max(prior.sellValue ?? 0, filing.sellValue ?? 0),
+      buyShares: Math.max(prior.buyShares, filing.buyShares),
+      sellShares: Math.max(prior.sellShares, filing.sellShares),
+      buyTx: Math.max(prior.buyTx, filing.buyTx),
+      sellTx: Math.max(prior.sellTx, filing.sellTx)
+    });
+  }
+  return [...byAccession.values()];
+}
+
 async function scrapeRecentForm4s(now: number): Promise<InsiderFiling[]> {
   const window = windowDays();
   let bulk: InsiderFiling[] = [];
+  let currentQuarterLoaded = false;
   try {
-    bulk = (await fetchInsiderBulkFilings(now, window)).map(bulkToFiling);
+    const loaded = await fetchInsiderBulkFilings(now, window);
+    bulk = loaded.filings.map(bulkToFiling);
+    currentQuarterLoaded = loaded.currentQuarterLoaded;
   } catch {
     bulk = [];
   }
   let xml: InsiderFiling[] = [];
   try {
-    xml = await scrapeForm4XmlDelta(now, bulk.length > 0);
+    xml = await scrapeForm4XmlDelta(now, currentQuarterLoaded);
   } catch (error) {
     if (bulk.length === 0) throw error;
   }
-  const byAccession = new Map<string, InsiderFiling>();
-  for (const filing of bulk) byAccession.set(filing.accession, filing);
-  for (const filing of xml) byAccession.set(filing.accession, filing);
-  return [...byAccession.values()];
+  return mergeInsiderByAccession(bulk, xml);
 }
 
 /** Merge fresh filings into the rolling window, deduped by accession, pruned to window. */
