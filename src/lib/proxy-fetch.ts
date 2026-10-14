@@ -391,6 +391,21 @@ export function safeProxyHostForLog(proxyUrl: string): string {
   }
 }
 
+/**
+ * TCP port for a proxy reachability probe.
+ *
+ * `URL.port` is empty when the URL omits a port and when the port is the
+ * scheme default (`:443` on https, `:80` on http). Defaulting every empty
+ * port to 80 makes an https proxy look unreachable.
+ */
+export function proxyProbePort(url: URL): number {
+  if (url.port) {
+    const parsed = Number(url.port);
+    return Number.isFinite(parsed) ? parsed : Number.NaN;
+  }
+  return url.protocol === "https:" ? 443 : 80;
+}
+
 /** Test hook: drop cached agents + warn timestamps. */
 export function __resetProxyFetchForTests(): void {
   agentCache.clear();

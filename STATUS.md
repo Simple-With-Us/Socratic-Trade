@@ -1,5 +1,37 @@
 # Current Status
 
+## 2026-10-14 CODEX-AUTOFIX — PR #4619 merge conflict + thread state (proxy-use log)
+
+**What.**  Second autofix round on `Muse-Assist/proxy-use-logging`.  No genuinely new review items: all five threads (sentry `globalThis` ring, kody probe-port, kody x2 docs leak, kody Verification State) were already fixed in `783f59b8` and are RESOLVED, with kody explicitly verifying each fix on the current head ("Nothing further to change from my side").  The only real blocker was the branch being CONFLICTING with `main`; merged `origin/main` (`57477ebe`) cleanly with no conflicts and no manual `STATUS.md` reconciliation needed.
+
+**Verification.**  `npm run lint` -> ok (0 errors; 866 warnings).  `npx tsc --noEmit` -> ok.  `npm test` -> 14 failed | 9254 passed | 51 skipped (9319).  All 14 failures are pre-existing and environment-caused, NOT from this PR: 13 are OpenRouter/LLM-routing tests (`llm-provider`, `openrouter-credits`, `chat-llm`, `framework-review`) that assert "no key configured" while this runner has a real `OPENROUTER_API_KEY` in its environment, and they reproduce identically on pristine `origin/main` (13 failed | 47 passed in a detached main worktree).  The 14th, `test/event-loop-stall-hot-path.test.ts` ("expected 115 to be less than 100"), is a timing-sensitive perf flake.  None of those five files are touched by this PR.  The PR's own tests: `npx vitest run test/proxy-use-log.test.ts test/proxy-use-route.test.ts test/proxy-fetch.test.ts test/data-source-fetch.test.ts` -> 45 passed (4 files).  `npm run build` -> ok.
+
+**Note on `npm test` exit code.**  `npm test` reported exit 0 despite the 14 assertion failures, because `vitest run` emits GH Actions `::error` annotations while the wrapper swallows the non-zero status.  Treat the printed `Tests ... failed` line as authoritative, not the exit code.
+
+**Docs.**  `docs/rollouts/2026-10-13-proxy-use-logging.md` (Verification State refreshed).
+
+**Next.**  Auto-merge re-armed; lands when the hosted `verify` job is green.
+
+## 2026-10-13 Muse-Assist — PR #4619 review threads (proxy-use log)
+
+**What.**  Review fixes on `Muse-Assist/proxy-use-logging`.  The proxy-use ring now lives on `globalThis` (`__socraticProxyUseRing`) so `dataSourceFetch` and `GET /api/proxy-use` share one buffer when Next bundles them as separate module copies.  `proxyProbePort` in `src/lib/proxy-fetch.ts` takes 443 for an https URL whose port is empty (omitted or the scheme default, which `URL` elides) and 80 otherwise.  It is not exported from the route module.  The rollout note no longer names private proxy addresses or mesh routing.
+
+**Tests.**  `test/proxy-use-log.test.ts` asserts a recorded entry is the `globalThis` ring.  `test/proxy-use-route.test.ts` covers explicit, http, and https probe ports, including elided defaults.  Targeted run: 88 passed across the proxy-use, data-source-fetch, proxy-fetch, and middleware-auth files.
+
+**Verification.**  `npm run lint` -> ok (0 errors; 866 warnings).  `npx tsc --noEmit` -> ok.  `npm test` -> 1 failed | 9267 passed | 51 skipped.  The failure is `test/egress-guard.test.ts` real-DNS (`discord.com` -> `198.18.0.1` in this environment); that file is unchanged versus `origin/main`.  `npm run build` -> ok.
+
+**Docs.**  `docs/rollouts/2026-10-13-proxy-use-logging.md`.
+
+**Next.**  Threads stay open until a reviewer resolves them.  Merge only when `verify` is green.
+
+## 2026-10-13 Muse-Assist — per-request proxy-use logging + public `GET /api/proxy-use` (branch `Muse-Assist/proxy-use-logging`)
+
+**What.**  Per-request logging of residential-proxy use decisions for market-data/provider traffic. `src/lib/proxy-use-log.ts` (new) holds a 100-entry in-memory ring fed by `dataSourceFetch` at every exit path (excluded service / internal target / no proxy / proxied attempt / fail_soft fallback recorded as a second `fallback:true` entry). New public no-auth `GET /api/proxy-use` returns the aggregate snapshot plus a Mango TCP reachability probe (3s timeout, 60s cache, never throws); added to middleware `PUBLIC_PREFIXES` so the anonymous 2-minute watchdog can poll it. No request behavior changed — additive telemetry only. 6 new unit tests; 82 tests pass across the touched areas; tsc shows only pre-existing unrelated errors (identical on pristine main).
+
+**Next.**  PR opened against main; left for the standing auto-merge rule (merge when CI is green). Point the watchdog VM at `https://<app-host>/api/proxy-use`. Live Mango reachability from the Coolify host is unverified until the first watchdog poll post-deploy.
+
+**Docs.**  `docs/rollouts/2026-10-13-proxy-use-logging.md`.
+
 ## 2026-10-13 GROK — Mobile snapshot partial timeout
 
 **What.**  `/api/mobile/snapshot` and `getDashboardSnapshot` stop waiting at 20s.  Each broker or dependency section waits at most 12s, and section waits leave 3s for post-processing.  A timeout returns the last cached snapshot, keeping a specific `partialReason` when one is already set, or a DB-only shell when nothing is cached.  That shell guards policy, accounts, admin, readiness, and the weekly digest, and it reports a timeout instead of a missing account.  iOS pauses Owner Approve only when accounts, option positions, or the portfolio bundle timed out.  News, macro, quotes, and the SPY benchmark do not pause it.
@@ -9,6 +41,7 @@
 **Docs.**  `docs/rollouts/2026-10-13-snapshot-partial-timeout.md`.
 
 **Next.**  Ready for review.  `do-not-automerge` because the snapshot reads broker accounts, positions, and orders.  Do not merge from this lane.
+
 ## 2026-10-12 CODEX — Claude Autofix 120-Turn Cap (OPS-935)
 
 **What.**  Pin Claude Code Autofix to shared `main` revision `99d372dcd7f600611c7b2b83a6f8eb2d31d6ecad` (squash merge of shared PR #368).  That revision raises the default from 60 to 120 turns and adds schema-2 operation category counters with conservative fallback for ambiguous forms.  Raw commands remain excluded; artifacts retain the existing seven-day, 500-event, 256-KiB bounds.  The 30-minute timeout and model route remain unchanged.

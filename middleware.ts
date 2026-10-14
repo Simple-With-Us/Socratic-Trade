@@ -56,6 +56,10 @@ const ALLOWED = (process.env.ALLOWED_EMAILS || "")
 const PUBLIC_PREFIXES = [
   "/api/health",
   "/api/live",
+  // Aggregate proxy-use stats for the external proxy watchdog (no secrets —
+  // only host:port + counts). Must stay anonymous so the watchdog polls
+  // without a credential.
+  "/api/proxy-use",
   "/api/ops",
   "/api/webhooks",
   "/api/csp-report",
