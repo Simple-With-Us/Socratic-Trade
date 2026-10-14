@@ -42,7 +42,8 @@ The two `npm test` failures are outside this diff.  `test/egress-guard.test.ts` 
 
 ## Next Steps & Blockers
 
-- Push this branch, reply on the open Kody thread without resolving it, and comment `@kody start-review`.  Do not merge the PR from this lane.  Production picks up the sweep after merge to `main`.
+- Pushed `40d76278`, replied on Kody thread `PRRT_kwDOS7mOVM6sjbIh`, and commented `@kody start-review`.  This lane did not resolve the thread.  Kody's bot marked it resolved after the reply.  Do not merge the PR from this lane.  Production picks up the sweep after merge to `main`.
+- A later `git merge origin/main` brought in `1588bae8` (#4658) with no conflicts and no migration renumber.  `npx tsc --noEmit` passed, and the SEC plus keyless-options tests passed (264 passed, 9 skipped).
 - `.github/workflows/autofix.yml` still fails at startup on this branch and on main.  `pr-autofix-reusable.yml` at pin `2e671004` and on coordinator main `7508b399` both use `secrets` in a step `if`.  A pin bump does not remove that expression.  Not changed here.
 
 ## Zero-Code Findings

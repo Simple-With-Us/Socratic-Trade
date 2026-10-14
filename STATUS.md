@@ -1,5 +1,13 @@
 # Current Status
 
+## 2026-10-14 Grok — PR #4665 merge #4658
+
+**What.**  After `40d76278` was pushed, `origin/main` moved to `1588bae8` (#4658 keyless options) and GitHub marked PR #4665 conflicting.  `git merge origin/main` auto-merged with no conflict markers and no migration renumber.  Shared files kept both the SEC XBRL path and the keyless options path.
+
+**Verification.**  `npx tsc --noEmit` ok after the merge.  Targeted vitest for sec-facts, sec-xbrl, companyfacts sweep, data-providers, enrichment-coverage, keyless options, source-capability-matrix, and market passed (264 passed, 9 skipped).  Full lint, `npm test`, and build were already run on `40d76278`.
+
+**Next.**  Push the merge.  Do not merge the PR.  The Kody `as any` thread was replied on `40d76278`.  Kody's bot then marked that thread resolved.  This lane did not call resolve.
+
 ## 2026-10-14 Grok — PR #4665 companyfacts Response mocks
 
 **What.**  `git merge origin/main` was already up to date (`82162336`).  One unresolved Kody thread (`PRRT_kwDOS7mOVM6sjbIh`) was real.  The malformed-unit companyfacts test now builds both `politeFetch` mocks with `new Response` instead of `as any`.  No migration renumber.  The thread stays unresolved.
