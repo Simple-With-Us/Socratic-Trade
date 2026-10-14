@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-14 GROK — PR #4659 review follow-up (`cursor/ops-snapshot-perf-b622`)
+
+**What.**  Merged `origin/main` twice with no conflicts: `f7a06863` (`@types/node` 24.19.2) and `79df823d` (`motion` 14.1.0), both lockfile-only.  `opsMarketScanRecordSummary` now reads `$.marketScan.omitted`, so a bounded `strategy_run` is not a fresh scan.  Cache returns copy `users` and `accounts` before `attachOpsOrderSummaries` can stamp orders.  Persistence expectations follow migration v95.  The non-trade fallback pin includes `WH`.  Per-user snapshot queries stay behind the 45s cache.
+
+**Reservation.**  No new Linear issue or board id.  `AGENT_SEAT` is unset and `LINEAR_BOARD_WRITES` is unset, so this seat did not invent a reservation.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test` 9303 passed, 51 skipped, 1 failed: `test/egress-guard.test.ts` real DNS for discord.com in this sandbox.  Touched tests 50 passed.  `npm run build` ok.
+
+**Docs.**  `docs/rollouts/2026-10-14-ops-snapshot-perf.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Push, reply on the open review threads, and comment `@kody start-review`.  Do not merge from this lane.  Do not resolve threads.
+
 ## 2026-10-14 CURSOR — Ops snapshot perf + account-activity brokers (`cursor/ops-snapshot-perf-b622`)
 
 **What.**  Async `buildOpsSnapshot` with 45s single-flight cache, per-section `timingsMs`, per-user `marketScan` summary (`generatedAt`, `stale`), strategy-runs index + query split, lighter enrichment coverage and task-journal paths, and Tradier/non-Alpaca **422** on `/api/ops/account-activity` instead of Alpaca-only 400.

@@ -179,6 +179,61 @@ describe("ops diagnostic snapshot", () => {
     delete process.env.OPS_DIAGNOSTIC_TOKEN;
   });
 
+  it("does not leak ?orders=1 summaries into the next cached snapshot", async () => {
+    process.env.OPS_DIAGNOSTIC_TOKEN = "test-ops-token-cache-orders";
+    const db = await import("../src/lib/db");
+    const userId = `ops-cache-orders-${randomUUID()}`;
+    const accountId = `acct-${randomUUID()}`;
+    db.upsertConnectedAccount({
+      id: accountId,
+      userId,
+      broker: "alpaca",
+      environment: "paper",
+      accountNumber: `CACHE-${randomUUID()}`,
+      label: "Cache Orders",
+      isActive: true
+    });
+    brokerMocks.getEquityOrders.mockResolvedValue([
+      {
+        id: "1",
+        symbol: "AAPL",
+        side: "buy",
+        type: "limit",
+        state: "new",
+        quantity: 1,
+        filledQuantity: 0,
+        createdAt: "2026-10-14T12:00:00.000Z"
+      }
+    ]);
+
+    const { resetOpsSnapshotCacheForTests } = await import("../src/lib/ops-snapshot");
+    resetOpsSnapshotCacheForTests();
+    const { GET } = await import("../app/api/ops/snapshot/route");
+    const withOrders = await GET(
+      new Request("http://localhost/api/ops/snapshot?runs=3&audit=3&orders=1", {
+        headers: { "x-ops-token": "test-ops-token-cache-orders" }
+      })
+    );
+    const withBody = await withOrders.json();
+    const attached = withBody.users
+      .find((u: { userId: string }) => u.userId === userId)
+      .accounts.find((a: { connectedAccountId: string }) => a.connectedAccountId === accountId);
+    expect(attached.orders.listedCount).toBe(1);
+
+    const plain = await GET(
+      new Request("http://localhost/api/ops/snapshot?runs=3&audit=3", {
+        headers: { "x-ops-token": "test-ops-token-cache-orders" }
+      })
+    );
+    const plainBody = await plain.json();
+    expect(plainBody.buildMeta.cacheHit).toBe(true);
+    const cached = plainBody.users
+      .find((u: { userId: string }) => u.userId === userId)
+      .accounts.find((a: { connectedAccountId: string }) => a.connectedAccountId === accountId);
+    expect(cached.orders).toBeUndefined();
+    delete process.env.OPS_DIAGNOSTIC_TOKEN;
+  });
+
   // Root-cause: today's prod broker-rejection triage was blocked because this kind wasn't in
   // the ops-snapshot audit allowlist — the raw rejection body (audit()'s `reason` field, the
   // actual broker error text) never reached remote diagnostics. See OPS_AUDIT_KINDS in

@@ -110,6 +110,7 @@ function readMarketScanMetaFromAudit(kind: "market_scan" | "strategy_run", userI
         ) AS generated_at,
         COALESCE(
           json_extract(payload, '$.scan.omitted'),
+          json_extract(payload, '$.marketScan.omitted'),
           json_extract(payload, '$.result.marketScan.omitted')
         ) AS omitted
        FROM audit_events

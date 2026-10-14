@@ -28,22 +28,28 @@ Production `GET /api/ops/snapshot` took **~84.7s** (2026-10-14 ~2:59pm CT) on a 
 - `src/lib/alpaca-account-insights.ts`
 - `app/api/ops/snapshot/route.ts`
 - `app/api/ops/account-activity/route.ts`
-- `test/ops-snapshot.test.ts`, `test/ops-account-activity.test.ts`, `test/ops-market-scan-summary.test.ts`, `test/ops-snapshot-strategy-runs.test.ts`, `test/event-loop-stall-hot-path.test.ts`, `test/autonomy-halt-cause.test.ts`
+- `test/ops-snapshot.test.ts`, `test/ops-account-activity.test.ts`, `test/ops-market-scan-summary.test.ts`, `test/ops-snapshot-strategy-runs.test.ts`, `test/event-loop-stall-hot-path.test.ts`, `test/autonomy-halt-cause.test.ts`, `test/persistence-hardening.test.ts`, `test/alpaca-activity-ledger.test.ts`
 
 ## Decisions & Trade-offs
 
 - **5s target** on prod-scale DB is aspirational; cache + query fixes help but **16.5 GB + large WAL** may still need further audit/run pagination or DBA-style maintenance.  Cache makes repeated polls cheap within 45s.
 - Tradier (and other non-Alpaca) accounts get an explicit unsupported response rather than implementing Tradier ledger parity in this PR.
-- Orders attachment on snapshot (`?orders=1`) remains on the uncached path after base snapshot build.
+- Orders attachment on snapshot (`?orders=1`) stays outside the cached build.  Each cache return copies `users` and `accounts` first, so `attachOpsOrderSummaries` cannot write `account.orders` onto the cached object.
+- Cold `buildOpsSnapshot` still does several queries per user.  This PR keeps that shape and relies on the 45s single-flight cache plus `yieldEventLoop()`.  A cross-user `GROUP BY` over `audit_events` json extracts on the 16.5 GB database is a follow-up, not this change.
+- `opsMarketScanRecordSummary` reads `$.marketScan.omitted` as well as `$.scan.omitted`.  Bounded `strategy_run` rows store `marketScan` at the payload root.
 
 ## Verification State
 
 ```bash
 npm run lint          # 0 errors, 866 warnings (grandfathered)
 npx tsc --noEmit      # ok
-npx vitest run test/ops-snapshot.test.ts test/ops-account-activity.test.ts test/ops-market-scan-summary.test.ts test/ops-snapshot-strategy-runs.test.ts test/event-loop-stall-hot-path.test.ts test/autonomy-halt-cause.test.ts  # 38 passed
+npm test              # 9303 passed, 51 skipped, 1 failed
 npm run build         # ok
 ```
+
+`npm test` failure: `test/egress-guard.test.ts` "uses real DNS by default" expects `https://discord.com/...` to validate.  This sandbox does not resolve that host as a public webhook target.  The same case was already called out on earlier lanes as sandbox DNS, and it is outside this diff.  Hosted CI has public DNS.
+
+Review follow-up also re-ran the touched files: `test/ops-market-scan-summary.test.ts`, `test/ops-snapshot.test.ts`, `test/alpaca-activity-ledger.test.ts`, `test/persistence-hardening.test.ts` — 50 passed.  Schema expectations moved 94 → 95 with migration v95.  Migration numbers were not renumbered.
 
 **Timings (before / after)**
 

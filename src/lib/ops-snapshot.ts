@@ -704,36 +704,50 @@ function opsSnapshotCacheKey(input: BuildOpsSnapshotInput): string {
   return `${input.runsPerUser ?? 20}\0${input.auditPerUser ?? 40}`;
 }
 
+/** Caller-owned snapshot.  `attachOpsOrderSummaries` assigns `account.orders` on the
+ *  object it receives.  A shallow copy of the cache entry still shares `users[]`, so
+ *  each return copies users and accounts before anyone can mutate them. */
+function opsSnapshotForCaller(snapshot: OpsSnapshot, buildMeta: OpsSnapshotBuildMeta): OpsSnapshot {
+  return {
+    ...snapshot,
+    buildMeta: { ...buildMeta },
+    users: snapshot.users.map((user) => ({
+      ...user,
+      accounts: user.accounts.map((account) => ({ ...account }))
+    }))
+  };
+}
+
 /** Cached wrapper — 45s TTL, single-flight per (runs, audit) limits prod hammering. */
 export async function getOrBuildOpsSnapshot(input: BuildOpsSnapshotInput = {}): Promise<OpsSnapshot> {
   const key = opsSnapshotCacheKey(input);
   const now = Date.now();
+  const ttlSeconds = Math.round(OPS_SNAPSHOT_CACHE_TTL_MS / 1_000);
   const hit = opsSnapshotCache.get(key);
   if (hit && hit.expiresAt > now) {
-    return {
-      ...hit.value,
-      buildMeta: { cacheHit: true, cacheTtlSeconds: Math.round(OPS_SNAPSHOT_CACHE_TTL_MS / 1_000) }
-    };
+    return opsSnapshotForCaller(hit.value, { cacheHit: true, cacheTtlSeconds: ttlSeconds });
   }
 
-  const pending = opsSnapshotInFlight.get(key);
-  if (pending) return pending;
+  let pending = opsSnapshotInFlight.get(key);
+  if (!pending) {
+    pending = (async () => {
+      try {
+        const value = await buildOpsSnapshot(input);
+        const withMeta: OpsSnapshot = {
+          ...value,
+          buildMeta: { cacheHit: false, cacheTtlSeconds: ttlSeconds }
+        };
+        opsSnapshotCache.set(key, { expiresAt: Date.now() + OPS_SNAPSHOT_CACHE_TTL_MS, value: withMeta });
+        return withMeta;
+      } finally {
+        opsSnapshotInFlight.delete(key);
+      }
+    })();
+    opsSnapshotInFlight.set(key, pending);
+  }
 
-  const promise = (async () => {
-    try {
-      const value = await buildOpsSnapshot(input);
-      const withMeta: OpsSnapshot = {
-        ...value,
-        buildMeta: { cacheHit: false, cacheTtlSeconds: Math.round(OPS_SNAPSHOT_CACHE_TTL_MS / 1_000) }
-      };
-      opsSnapshotCache.set(key, { expiresAt: Date.now() + OPS_SNAPSHOT_CACHE_TTL_MS, value: withMeta });
-      return withMeta;
-    } finally {
-      opsSnapshotInFlight.delete(key);
-    }
-  })();
-  opsSnapshotInFlight.set(key, promise);
-  return promise;
+  const built = await pending;
+  return opsSnapshotForCaller(built, built.buildMeta ?? { cacheHit: false, cacheTtlSeconds: ttlSeconds });
 }
 
 export function resetOpsSnapshotCacheForTests(): void {
