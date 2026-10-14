@@ -21,6 +21,8 @@ interface PressureState {
   inFlight: number;
   consecutiveFailures: number;
   backoffUntil: number;
+  /** Bumps on every backoff open.  A success only clears backoff for the epoch it observed. */
+  epoch: number;
   waiters: Waiter[];
 }
 
@@ -34,6 +36,7 @@ const state: PressureState = {
   inFlight: 0,
   consecutiveFailures: 0,
   backoffUntil: 0,
+  epoch: 0,
   waiters: []
 };
 
@@ -137,13 +140,26 @@ export function acquireRetrievalSlot(signal?: AbortSignal, now = Date.now()): Pr
   });
 }
 
-export function noteRetrievalPressureSuccess(): void {
+/** Epoch observed when a retrieval slot was taken.  Pass it back to `noteRetrievalPressureSuccess`. */
+export function retrievalPressureEpoch(): number {
+  return state.epoch;
+}
+
+/**
+ * Clear backoff after a retrieval that finished cleanly.
+ * `seenEpoch` is the epoch from when that call took its slot.  A failure that
+ * opened backoff after the call started bumps the epoch, and this success
+ * leaves that newer backoff in place.  Omitting `seenEpoch` clears unconditionally.
+ */
+export function noteRetrievalPressureSuccess(seenEpoch?: number): void {
+  if (seenEpoch !== undefined && seenEpoch !== state.epoch) return;
   state.consecutiveFailures = 0;
   state.backoffUntil = 0;
 }
 
 export function noteRetrievalPressureFailure(now = Date.now()): void {
   if (!retrievalBackoffEnabled()) return;
+  state.epoch += 1;
   state.consecutiveFailures += 1;
   const delay = Math.min(
     backoffMaxMs(),
@@ -158,6 +174,7 @@ export function resetRetrievalPressureForTests(): void {
   state.inFlight = 0;
   state.consecutiveFailures = 0;
   state.backoffUntil = 0;
+  state.epoch = 0;
   const queued = state.waiters.splice(0);
   for (const waiter of queued) settle(waiter, null);
 }

@@ -33,6 +33,9 @@ export interface EmbedTextRef {
 }
 
 export function embedTextByteLength(text: string): number {
+  if (typeof text !== "string") {
+    throw new TypeError("embed text must be a string");
+  }
   return Buffer.byteLength(text, "utf8");
 }
 
@@ -46,6 +49,9 @@ function isDenseEmbedChar(code: number): boolean {
  * so a table the byte estimator calls "safe" is still split before the POST.
  */
 export function embedTokenEstimate(text: string): number {
+  if (typeof text !== "string") {
+    throw new TypeError("embed text must be a string");
+  }
   if (!text) return 1;
   const byteTokens = Math.max(1, Math.ceil(Buffer.byteLength(text, "utf8") / 4));
   let dense = 0;

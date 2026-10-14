@@ -12,7 +12,8 @@ import {
   embedRequestFits,
   embedTextTokenEstimate,
   packInWindowTexts,
-  prefixCountWithinEmbedUnits
+  prefixCountWithinEmbedUnits,
+  truncateEmbedText
 } from "../src/lib/rag/embed-request-pack";
 import { approxTokens } from "../src/lib/rag-metering";
 
@@ -101,6 +102,14 @@ describe("embed request packer (pure)", () => {
     const digits = "9".repeat(20_000);
     expect(approxTokens([digits])).toBe(5_000);
     expect(embedTextTokenEstimate(digits)).toBe(20_000);
+  });
+
+  it("keeps an empty string as one piece and rejects a non-string", () => {
+    expect(chunkEmbedText("")).toEqual([""]);
+    expect(truncateEmbedText("")).toBe("");
+    expect(embedBudgetUnits("")).toBe(1);
+    expect(embedTextTokenEstimate("")).toBe(1);
+    expect(() => embedTextTokenEstimate(undefined as unknown as string)).toThrow(TypeError);
   });
 
   it("chunks a digit run that bytes/4 would send whole", () => {
@@ -279,6 +288,72 @@ describe("storeContexts embed window (ingest)", () => {
       entry.type === "throw" && String(entry.value).includes("value=8193")
     ));
     expect(thrown400).toBe(false);
+  });
+});
+
+describe("context-length shrink", () => {
+  it("splits a multi-text group that 400s instead of posting the same batch again", async () => {
+    const multiThrows: string[][] = [];
+    mocks.embed.mockImplementation(async ({ input }: { input: string[] }) => {
+      if (input.length > 1) {
+        multiThrows.push(input);
+        throw new Error(LIVE_400_BODY);
+      }
+      return { data: input.map(() => ({ embedding: [0.11, 0.22, 0.33] })) };
+    });
+
+    const { storeContexts } = await import("../src/lib/vector-db");
+    const result = await storeContexts([
+      {
+        text: "first short filing paragraph",
+        metadata: { symbol: "AAPL", source: "sec-8k", timestamp: "2026-08-18", accession: "split-a" }
+      },
+      {
+        text: "second short filing paragraph",
+        metadata: { symbol: "AAPL", source: "sec-8k", timestamp: "2026-08-18", accession: "split-b" }
+      }
+    ]);
+
+    expect(result.indexed).toBe(2);
+    expect(result.rejectedInvalidEmbeddings ?? 0).toBe(0);
+    expect(multiThrows).toHaveLength(1);
+    expect(multiThrows[0]).toHaveLength(2);
+    const singletonPosts = mocks.embed.mock.calls.filter((call) => (call[0].input as string[]).length === 1);
+    expect(singletonPosts.length).toBe(2);
+    expect(mocks.upsert.mock.calls.reduce((sum, call) => sum + call[0].records.length, 0)).toBe(2);
+  });
+
+  it("truncates a singleton once when the provider still reports context length", async () => {
+    const posted: string[][] = [];
+    mocks.embed.mockImplementation(async ({ input }: { input: string[] }) => {
+      posted.push(input);
+      if (posted.length === 1) throw new Error(LIVE_400_BODY);
+      return { data: input.map(() => ({ embedding: [0.11, 0.22, 0.33] })) };
+    });
+
+    process.env.VECTOR_CONTEXT_MAX_CHARS = "16000";
+    const { storeContexts } = await import("../src/lib/vector-db");
+    // Over the half-budget byte cap (9375) and under the full cap (18750), so the
+    // singleton retry has to shorten the string.  The default 2400 char cap would
+    // already sit under that half budget and make the retry a no-op.
+    const original = textOfTokens(2500, "G");
+    const result = await storeContexts([
+      {
+        text: original,
+        metadata: {
+          symbol: "AAPL",
+          source: "sec-8k",
+          timestamp: "2026-08-18",
+          accession: "shrink-one",
+          is_table: true
+        }
+      }
+    ]);
+
+    expect(result.indexed).toBe(1);
+    expect(posted).toHaveLength(2);
+    expect(posted[1]![0]!.length).toBeLessThan(posted[0]![0]!.length);
+    expect(embedRequestFits(posted[1]!)).toBe(true);
   });
 });
 

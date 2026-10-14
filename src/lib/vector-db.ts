@@ -66,7 +66,8 @@ import {
   acquireRetrievalSlot,
   countsTowardRetrievalBackoff,
   noteRetrievalPressureFailure,
-  noteRetrievalPressureSuccess
+  noteRetrievalPressureSuccess,
+  retrievalPressureEpoch
 } from "./rag/retrieval-pressure";
 import { pineconeMonthToDateWriteUnits } from "./pinecone-monthly-pace";
 import { selectItemsWithinWriteBudget } from "./pinecone-write-budget";
@@ -2867,14 +2868,32 @@ async function embedWithRetry(
           { estimatedCostUsd: estimateRagDispatchCost(texts, "embed", modelName, provider) }
         );
       } catch (error) {
-        // One shrink if the provider still reports context length.  Not a rate-limit attempt.
-        if (!alreadyShrunk && isEmbedContextLengthError(error)) {
-          const tighterTokens = Math.max(1, Math.floor(EMBED_REQUEST_TOKEN_BUDGET / 2));
-          const tighterBytes = Math.max(1, Math.floor(EMBED_REQUEST_BYTE_BUDGET / 2));
-          return embedOnce(
-            texts.map((text) => truncateEmbedText(text, tighterTokens, tighterBytes)),
-            true
-          );
+        // Provider still reported context length after our packer.  A multi-text group
+        // whose pieces each sit under half the budget must be split: truncating each
+        // string is a no-op and would POST the same payload again.  A singleton
+        // truncates once.  Neither path counts as a rate-limit attempt.
+        if (isEmbedContextLengthError(error)) {
+          if (texts.length > 1) {
+            const mid = Math.ceil(texts.length / 2);
+            const left = await embedOnce(texts.slice(0, mid), false);
+            const right = await embedOnce(texts.slice(mid), false);
+            const leftRows = Array.isArray(left?.data) ? left.data as unknown[] : [];
+            const rightRows = Array.isArray(right?.data) ? right.data as unknown[] : [];
+            return {
+              ...(left && typeof left === "object" ? left : {}),
+              data: [...leftRows, ...rightRows].map((row, index) => (
+                row && typeof row === "object" ? { ...row, index } : { embedding: row, index }
+              ))
+            };
+          }
+          if (!alreadyShrunk) {
+            const tighterTokens = Math.max(1, Math.floor(EMBED_REQUEST_TOKEN_BUDGET / 2));
+            const tighterBytes = Math.max(1, Math.floor(EMBED_REQUEST_BYTE_BUDGET / 2));
+            return embedOnce(
+              texts.map((text) => truncateEmbedText(text, tighterTokens, tighterBytes)),
+              true
+            );
+          }
         }
         // Never retry on abort or timeout.  The caller's signal fired or the per-attempt
         // embed abort expired.  Retrying would only queue more requests against a slow
@@ -7990,6 +8009,7 @@ export async function retrieveContextDetailed(
         quietEmbedDegrade = true;
         return null;
       }
+      const pressureEpoch = retrievalPressureEpoch();
       const ragAbort = createRagQueryAbort(options?.signal);
       const querySignal = ragAbort.signal;
       let pressure: "success" | "failure" | "skip" = "success";
@@ -8295,7 +8315,7 @@ export async function retrieveContextDetailed(
       } finally {
         ragAbort.cancel();
         if (pressure === "failure") noteRetrievalPressureFailure();
-        else if (pressure === "success") noteRetrievalPressureSuccess();
+        else if (pressure === "success") noteRetrievalPressureSuccess(pressureEpoch);
         slot.release();
       }
     };

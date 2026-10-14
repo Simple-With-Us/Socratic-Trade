@@ -5,7 +5,8 @@ import {
   noteRetrievalPressureFailure,
   noteRetrievalPressureSuccess,
   resetRetrievalPressureForTests,
-  retrievalBackoffRemainingMs
+  retrievalBackoffRemainingMs,
+  retrievalPressureEpoch
 } from "../src/lib/rag/retrieval-pressure";
 
 const PRIOR_BACKOFF = process.env.RAG_RETRIEVAL_BACKOFF;
@@ -74,6 +75,17 @@ describe("retrieval pressure", () => {
     expect(await queued).toBeNull();
     held!.release();
     expect(await acquireRetrievalSlot(undefined, 5_000)).toBeNull();
+  });
+
+  it("does not let a stale success clear a backoff opened after the slot was taken", () => {
+    process.env.RAG_RETRIEVAL_BACKOFF = "1";
+    const seen = retrievalPressureEpoch();
+    noteRetrievalPressureFailure(1_000);
+    expect(retrievalPressureEpoch()).toBe(seen + 1);
+    noteRetrievalPressureSuccess(seen);
+    expect(retrievalBackoffRemainingMs(1_500)).toBeGreaterThan(0);
+    noteRetrievalPressureSuccess(retrievalPressureEpoch());
+    expect(retrievalBackoffRemainingMs(1_500)).toBe(0);
   });
 
   it("treats the strategy retrieval deadline as backoff pressure", () => {
