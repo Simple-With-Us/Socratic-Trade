@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 GROK — PR #4609 verification order
+
+**What.**  Merged origin/main (`b7775658`, mobile snapshot partial timeout).  The freshness handoff verification block now lists `npm run lint`, `npx tsc --noEmit`, `npm test`, then `npm run build`.  No product behavior change.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9283 passed, 51 skipped, and 2 failed outside this diff: sandbox DNS for discord.com, and `test/data-catalog-completeness.test.ts` against the local default database (passes on an empty database).
+
+**Docs.**  `docs/rollouts/2026-10-13-market-scan-deadline-freshness.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  `do-not-automerge` stays on PR #4609.  Do not merge from this lane.
+
 ## 2026-10-14 Codex Autofix — PR #4609 failure payload schema export
 
 **What.**  Third review pass on the market-scan freshness branch.  `MarketScanFailurePayloadSchema` is now exported with a derived `MarketScanFailurePayload = z.infer<...>` type, matching the `export const <Schema>` + `export type <T> = z.infer<...>` convention every other Zod boundary schema in `src/lib` already follows.  No behavior change: `failureAuditMessage` and `recordScanFailure` read the same parsed shape as before.

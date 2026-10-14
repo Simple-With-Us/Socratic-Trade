@@ -86,12 +86,19 @@ The two open Sentry threads on `GET /api/scan` are Sentry's bug-prediction bot r
 
 ## Verification (follow-up 3)
 
-- npx tsc --noEmit -> ok
-- npx vitest run test/market-scan-freshness.test.ts test/nasdaq-screener-schema.test.ts test/scan-empty-screener.test.ts test/scan-singleflight.test.ts -> ok (69 tests)
 - npm run lint -> ok (0 errors; 866 grandfathered warnings)
+- npx tsc --noEmit -> ok
+- npm test -> fail (2 outside this diff; see notes)
 - npm run build -> ok
-- origin/main merged (RAG embed fallback, `src/lib/rag/**`, `src/lib/vector-db.ts`), re-ran every gate green on the merge, 71 targeted tests including the newly merged `test/siliconflow-query-embed-fallback.test.ts`.
-- Full `npm test` in this sandbox: the LLM-provider/chat key tests fail (9 in `test/llm-provider.test.ts`, plus `test/chat-llm.test.ts`, `test/framework-review.test.ts`, `test/openrouter-credits.test.ts`).  These are **not** in this diff's files and reproduce identically on unmodified `origin/main` — they expect no provider key configured while this runner has one in scope.  Sandbox-only, unchanged by this pass.
+
+Re-run on 2026-10-14 after merging origin/main `b7775658` (mobile snapshot partial timeout).  `Test Files 2 failed | 821 passed | 1 skipped (824)`.  `Tests 2 failed | 9283 passed | 51 skipped (9336)`.
+
+- `test/egress-guard.test.ts` calls real DNS for discord.com.  This sandbox resolved it to an address the SSRF guard rejects, so `result.ok` was false.  The same file fails the same way in isolation.  This diff does not touch the guard.
+- `test/data-catalog-completeness.test.ts` scores `peRatio` from the default SQLite file.  A persisted enrichment-coverage row makes completeness 1.  The same test passes (4 tests) when `DATABASE_URL` points at an empty database.  The source matches `origin/main`.
+
+An earlier targeted run on this branch, `npx vitest run test/market-scan-freshness.test.ts test/nasdaq-screener-schema.test.ts test/scan-empty-screener.test.ts test/scan-singleflight.test.ts`, passed (69 tests).  It is not a substitute for the `npm test` line above.
+
+The prior autofix note on this section recorded LLM-provider key failures in a different sandbox.  This run did not reproduce those failures.
 
 ## Next
 
