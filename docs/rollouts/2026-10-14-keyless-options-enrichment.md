@@ -37,6 +37,32 @@
 
 - Live Cboe options JSON for `AAPL` includes `data.current_price` and per-contract `iv` / `open_interest` / OCC `option` symbols; many deep ITM rows carry `iv: 0`, so ATM filtering in `deriveOptionMetrics` remains important.
 
+## Review round (2026-10-14 GROK) — vendor passthrough + partial IEX snapshot
+
+**Context & Objective.**  Unresolved Kody threads on PR #4658 asked for `.strict()` vendor schemas and a looser Alpaca IEX snapshot parse.  Sentry threads on underlying price, Alpaca IV/volume keys, and Wave B `costTier` were already fixed in `99da1478`.
+
+**Changes Made.**
+
+- `src/lib/keyless-options-enrichment.ts` — every vendor `z.object` is `.passthrough()` via `vendorObject`.  Alpaca IEX and option `dailyBar` fields are nested records.  `readAlpacaStockSnapshotPrice` reads `latestTrade.p`, else `dailyBar.c`, else `prevDailyBar.c`.
+- `test/keyless-options-enrichment.test.ts` — extra Cboe keys still parse; partial IEX snapshot still yields a price.
+- `test/keyless-options-vendor-fetch.test.ts` — ATM IV from `dailyBar.c` when `latestTrade` is omitted.
+- `STATUS.md`, `PLAN.md`, this note.
+
+**Decisions & Trade-offs.**  `.strict()` is the wrong close for live Cboe/Alpaca/Tradier envelopes; extra keys are kept.  Cboe `option` stays `z.string()` because an OCC symbol contains letters and a JSON number cannot be a valid contract id.  Threads are replied to and left unresolved.
+
+**Verification State.**
+
+- `git merge origin/main` — already up to date
+- `npm run lint` — 0 errors, 866 grandfathered warnings
+- `npx tsc --noEmit` — ok
+- `npx vitest run test/keyless-options-enrichment.test.ts test/keyless-options-vendor-fetch.test.ts test/enrichment-coverage.test.ts` — 39 passed
+- `npm test` — 9319 passed, 51 skipped, 1 failed outside this diff (`test/egress-guard.test.ts` sandbox DNS for discord.com)
+- `npm run build` — ok
+
+**Next Steps & Blockers.**  Comment `@kody start-review`.  Do not resolve threads.  Do not merge from this lane.
+
+**Zero-Code Findings.**  The three Sentry threads remain valid descriptions of the pre-`99da1478` diff and are already fixed on HEAD.
+
 ## Autofix Round 1 (2026-10-14) — triage only, no code change
 
 **Context & Objective.**  Automated fixer pass over PR #4658 to address review-bot feedback.

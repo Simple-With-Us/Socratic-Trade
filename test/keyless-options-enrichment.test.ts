@@ -1,14 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AlpacaOptionsEnrichmentProvider,
+  AlpacaStockSnapshotSchema,
   CboeOptionsEnrichmentProvider,
+  CboeOptionsResponseSchema,
   TradierOptionsEnrichmentProvider,
   clearKeylessOptionsCache,
   keylessOptionsEnrichmentEnabled,
   metricsFromChainPayload,
   parseAlpacaOptionsSnapshots,
   parseCboeOptionsPayload,
-  parseTradierOptionsChains
+  parseTradierOptionsChains,
+  readAlpacaStockSnapshotPrice
 } from "../src/lib/keyless-options-enrichment";
 
 describe("keyless options parsers", () => {
@@ -113,6 +116,33 @@ describe("keyless options parsers", () => {
     expect(parseTradierOptionsChains({ ...chain, underlying_price: 100 }).underlyingPrice).toBe(100);
     const atm = metricsFromChainPayload(parseTradierOptionsChains({ ...chain, underlying_price: 100 }));
     expect(atm.nearTheMoneyIv).toBe(20);
+  });
+
+  it("keeps extra Cboe envelope keys and still reads current_price", () => {
+    const json = {
+      timestamp: "2026-10-14",
+      data: {
+        symbol: "AAPL",
+        current_price: 100,
+        options: [{ option: "AAPL261114C00100000", iv: 0.22, extra: 1 }]
+      }
+    };
+    expect(CboeOptionsResponseSchema.safeParse(json).success).toBe(true);
+    const payload = parseCboeOptionsPayload(json);
+    expect(payload.underlyingPrice).toBe(100);
+    expect(metricsFromChainPayload(payload).nearTheMoneyIv).toBe(22);
+  });
+
+  it("reads Alpaca IEX price from a partial snapshot with extra keys", () => {
+    const json = {
+      latestQuote: { ap: 101, bp: 99 },
+      minuteBar: { c: 100.5 },
+      dailyBar: { t: "2026-10-14", o: 99, h: 102, l: 98, c: 100, v: 1_000 }
+    };
+    expect(AlpacaStockSnapshotSchema.safeParse(json).success).toBe(true);
+    expect(readAlpacaStockSnapshotPrice(json)).toBe(100);
+    expect(readAlpacaStockSnapshotPrice({ latestTrade: { p: 101, s: 10 } })).toBe(101);
+    expect(readAlpacaStockSnapshotPrice({ prevDailyBar: { c: 99 } })).toBe(99);
   });
 });
 

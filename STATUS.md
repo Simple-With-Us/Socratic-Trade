@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 GROK — PR #4658 review threads (vendor Zod passthrough)
+
+**What.**  Merged `origin/main` (already up to date).  Vendor option envelopes now use explicit Zod `.passthrough()` instead of implicit strip, so extra Cboe/Alpaca/Tradier keys cannot fail a later `.strict()` pass.  Alpaca IEX underlying price reads `latestTrade.p`, else `dailyBar.c`, else `prevDailyBar.c` from nested records, so a partial snapshot still yields ATM IV.  The three Sentry threads were already fixed in `99da1478`.  Cboe `option` stays a string: OCC symbols contain letters, so a JSON number cannot be a valid contract id.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 grandfathered warnings).  `npx tsc --noEmit` ok.  Targeted options tests 39 passed.  `npm test` was 9319 passed, 51 skipped, and 1 failed outside this diff: sandbox DNS for discord.com in `test/egress-guard.test.ts`.  `npm run build` ok.
+
+**Docs.**  `docs/rollouts/2026-10-14-keyless-options-enrichment.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Reply on unresolved threads without resolving them.  Comment `@kody start-review`.  Do not merge from this lane.
+
 ## 2026-10-14 CURSOR — Keyless options enrichment (`cursor/keyless-options-enrichment-8872`)
 
 **What.**  Background and shared market scans now fill `nearTheMoneyIv` and `putCallRatio` from keyless Cboe delayed options JSON (primary).  Alpaca indicative snapshots and Tradier chains are keyed Wave B fallbacks when credentials exist.  Same `deriveOptionMetrics` path as Robinhood options.  Review follow-up: Alpaca reads `impliedVolatility` and `dailyBar.v`, underlying price is threaded into ATM metrics, vendor JSON is Zod-parsed, Tradier errors are labeled by endpoint, and empty chains are negative-cached for at most five minutes.

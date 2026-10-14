@@ -97,4 +97,25 @@ describe("keyed options vendor fetches", () => {
     expect(fetchMock.mock.calls[1]?.[0]).toContain("/v2/stocks/AAPL/snapshot");
     expect(fetchMock.mock.calls[1]?.[0]).toContain("feed=iex");
   });
+
+  it("uses Alpaca dailyBar close when latestTrade is omitted", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          snapshots: {
+            AAPL261114C00100000: { impliedVolatility: 0.22, dailyBar: { v: 100 } },
+            AAPL261114P00100000: { impliedVolatility: 0.24, dailyBar: { v: 40 } }
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          latestQuote: { ap: 101 },
+          dailyBar: { c: 100, v: 12_000, o: 99 }
+        })
+      );
+    const out = await new AlpacaOptionsEnrichmentProvider("key", "secret").enrich(["AAPL"]);
+    expect(out.AAPL?.nearTheMoneyIv).toBe(22);
+    expect(out.AAPL?.putCallRatio).toBe(0.4);
+  });
 });

@@ -27,20 +27,27 @@ const DEFAULT_TIMEOUT_MS = 12_000;
 const NEGATIVE_CACHE_MAX_MS = 5 * 60_000;
 
 const loose = z.unknown().optional();
+const nestedRecord = z.record(z.string(), z.unknown()).optional().nullable();
 
-/** Cboe delayed-quotes envelope.  Extra keys are stripped; row shape is checked per contract. */
-export const CboeOptionsResponseSchema = z.object({
-  data: z
-    .object({
-      current_price: loose,
-      close: loose,
-      prev_day_close: loose,
-      options: z.array(z.unknown()).optional()
-    })
-    .optional()
+/**
+ * Vendor JSON at the HTTP boundary.  Extra keys are kept on purpose: Cboe, Alpaca, and
+ * Tradier add envelope fields.  `.strict()` would reject those live payloads.
+ */
+function vendorObject<Shape extends z.ZodRawShape>(shape: Shape) {
+  return z.object(shape).passthrough();
+}
+
+/** Cboe delayed-quotes envelope.  Extra keys are kept; row shape is checked per contract. */
+export const CboeOptionsResponseSchema = vendorObject({
+  data: vendorObject({
+    current_price: loose,
+    close: loose,
+    prev_day_close: loose,
+    options: z.array(z.unknown()).optional()
+  }).optional()
 });
 
-const CboeOptionRowSchema = z.object({
+const CboeOptionRowSchema = vendorObject({
   option: z.string(),
   iv: loose,
   implied_volatility: loose,
@@ -53,20 +60,20 @@ const CboeOptionRowSchema = z.object({
 });
 
 /** Alpaca `GET /v1beta1/options/snapshots/{underlying}`.  IV is root `impliedVolatility`, volume is `dailyBar.v`. */
-export const AlpacaOptionsResponseSchema = z.object({
+export const AlpacaOptionsResponseSchema = vendorObject({
   snapshots: z.record(z.string(), z.unknown()).optional(),
   underlyingAssetPrice: loose,
   underlying_asset_price: loose,
   underlying: loose
 });
 
-const AlpacaGreeksSchema = z.object({
+const AlpacaGreeksSchema = vendorObject({
   implied_volatility: loose,
   iv: loose,
   mid_iv: loose
 });
 
-const AlpacaSnapshotSchema = z.object({
+const AlpacaSnapshotSchema = vendorObject({
   impliedVolatility: loose,
   implied_volatility: loose,
   iv: loose,
@@ -76,39 +83,37 @@ const AlpacaSnapshotSchema = z.object({
   volume: loose,
   vol: loose,
   daily_volume: loose,
-  dailyBar: z.object({ v: loose }).optional().nullable(),
-  daily_bar: z.object({ v: loose }).optional().nullable()
+  dailyBar: nestedRecord,
+  daily_bar: nestedRecord
 });
 
 /** IEX stock snapshot used only when the options payload has no underlying price. */
-export const AlpacaStockSnapshotSchema = z.object({
-  latestTrade: z.object({ p: loose }).optional().nullable(),
-  dailyBar: z.object({ c: loose }).optional().nullable(),
-  prevDailyBar: z.object({ c: loose }).optional().nullable()
+export const AlpacaStockSnapshotSchema = vendorObject({
+  latestTrade: nestedRecord,
+  dailyBar: nestedRecord,
+  prevDailyBar: nestedRecord
 });
 
-export const TradierExpirationsSchema = z.object({
-  expirations: z
-    .object({
-      date: z.union([z.string(), z.array(z.string())]).optional().nullable()
-    })
+export const TradierExpirationsSchema = vendorObject({
+  expirations: vendorObject({
+    date: z.union([z.string(), z.array(z.string())]).optional().nullable()
+  })
     .optional()
     .nullable()
 });
 
 /** Tradier chain envelope.  `underlying` is often the ticker string, not a price. */
-export const TradierChainSchema = z.object({
-  options: z
-    .object({
-      option: z.unknown().optional().nullable()
-    })
+export const TradierChainSchema = vendorObject({
+  options: vendorObject({
+    option: z.unknown().optional().nullable()
+  })
     .optional()
     .nullable(),
   underlying: loose,
   underlying_price: loose
 });
 
-const TradierOptionRowSchema = z.object({
+const TradierOptionRowSchema = vendorObject({
   strike: loose,
   strike_price: loose,
   option_type: loose,
@@ -122,30 +127,29 @@ const TradierOptionRowSchema = z.object({
   greeks: loose
 });
 
-const TradierGreeksSchema = z.object({
+const TradierGreeksSchema = vendorObject({
   mid_iv: loose,
   smv_vol: loose,
   bid_iv: loose,
   ask_iv: loose
 });
 
-export const TradierQuotesSchema = z.object({
-  quotes: z
-    .object({
-      quote: z.unknown().optional().nullable()
-    })
+export const TradierQuotesSchema = vendorObject({
+  quotes: vendorObject({
+    quote: z.unknown().optional().nullable()
+  })
     .optional()
     .nullable()
 });
 
-const TradierQuoteSchema = z.object({
+const TradierQuoteSchema = vendorObject({
   last: loose,
   close: loose,
   bid: loose,
   ask: loose
 });
 
-const UnderlyingObjectSchema = z.object({
+const UnderlyingObjectSchema = vendorObject({
   price: loose,
   underlyingPrice: loose
 });
@@ -187,11 +191,23 @@ function readPositive(value: unknown): number | undefined {
   return undefined;
 }
 
+function nestedPositive(record: Record<string, unknown> | null | undefined, key: string): number | undefined {
+  return record ? readPositive(record[key]) : undefined;
+}
+
+/** Latest trade, else daily close, else previous close.  Extra snapshot keys are ignored. */
+export function readAlpacaStockSnapshotPrice(json: unknown): number | undefined {
+  const parsed = AlpacaStockSnapshotSchema.safeParse(json);
+  if (!parsed.success) return undefined;
+  const snap = parsed.data;
+  return nestedPositive(snap.latestTrade, "p") ?? nestedPositive(snap.dailyBar, "c") ?? nestedPositive(snap.prevDailyBar, "c");
+}
+
 function withUnderlying(underlyingPrice: number | undefined, chains: unknown): { underlyingPrice?: number; chains: unknown } {
   return underlyingPrice !== undefined ? { underlyingPrice, chains } : { chains };
 }
 
-const ChainResultsSchema = z.object({ results: z.array(z.unknown()).optional() });
+const ChainResultsSchema = vendorObject({ results: z.array(z.unknown()).optional() });
 
 function chainRowCount(chains: unknown): number {
   const parsed = ChainResultsSchema.safeParse(chains);
@@ -332,8 +348,8 @@ export function parseAlpacaOptionsSnapshots(
       readPositive(row.volume) ??
       readPositive(row.vol) ??
       readPositive(row.daily_volume) ??
-      readPositive(row.dailyBar?.v) ??
-      readPositive(row.daily_bar?.v);
+      nestedPositive(row.dailyBar, "v") ??
+      nestedPositive(row.daily_bar, "v");
     results.push({
       strike_price: contract.strikePrice,
       type: contract.optionType,
@@ -441,14 +457,13 @@ async function fetchAlpacaUnderlyingPrice(
       recordProviderCall("alpaca-options", { service: "underlying-snapshot", ok: false, userId });
       return undefined;
     }
-    const parsed = AlpacaStockSnapshotSchema.safeParse(await res.json());
-    if (!parsed.success) {
+    const json: unknown = await res.json();
+    if (!AlpacaStockSnapshotSchema.safeParse(json).success) {
       recordProviderCall("alpaca-options", { service: "underlying-snapshot", ok: false, userId });
       return undefined;
     }
     recordProviderCall("alpaca-options", { service: "underlying-snapshot", ok: true, userId });
-    const snap = parsed.data;
-    return readPositive(snap.latestTrade?.p) ?? readPositive(snap.dailyBar?.c) ?? readPositive(snap.prevDailyBar?.c);
+    return readAlpacaStockSnapshotPrice(json);
   } catch {
     recordProviderCall("alpaca-options", { service: "underlying-snapshot", ok: false, userId });
     return undefined;
