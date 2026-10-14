@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-12 CODEX — Claude Autofix 120-Turn Cap (OPS-935)
+
+**What.**  Pin Claude Code Autofix to shared `main` revision `99d372dcd7f600611c7b2b83a6f8eb2d31d6ecad` (squash merge of shared PR #368).  That revision raises the default from 60 to 120 turns and adds schema-2 operation category counters with conservative fallback for ambiguous forms.  Raw commands remain excluded; artifacts retain the existing seven-day, 500-event, 256-KiB bounds.  The 30-minute timeout and model route remain unchanged.
+
+**Dependency.**  Shared PR [#368](https://github.com/Simple-With-Us/congress-trading-shared/pull/368) merged as `99d372dcd7f600611c7b2b83a6f8eb2d31d6ecad`.  The earlier caller pin `825f8ee008d6ce104107f2a7267c14d370e6013e` is not an ancestor of shared `main`.
+
+**Verification.**  Hosted run 38337104537 passed lint, typecheck, tests, and build in order on the caller head that still pinned `825f8ee008d6ce104107f2a7267c14d370e6013e`.  Shared PR #368 recorded a successful 120-turn-cap run and verified its fix push; the observed run used 37 turns and 36 calls with no errors.  Recheck CI and Codex review on this head before merge.
+
+**Docs.**  `docs/rollouts/2026-10-12-claude-autofix-diagnostics.md` and `PLAN.md`.  Linear OPS-935 is the live tracker; effort logs are archived.
+
 ## 2026-10-13 CODEX-AUTOFIX — PR #4606 embed breaker `consecutive` reset
 
 **What.**  One genuinely new Kody thread on `fix/embed-fail-fast-congress-share-backoff`: when a
