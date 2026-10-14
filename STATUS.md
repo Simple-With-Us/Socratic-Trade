@@ -32,6 +32,15 @@
 
 **Docs.**  `docs/rollouts/2026-10-13-proxy-use-logging.md`.
 
+## 2026-10-13 GROK — Mobile snapshot partial timeout
+
+**What.**  `/api/mobile/snapshot` and `getDashboardSnapshot` stop waiting at 20s.  Each broker or dependency section waits at most 12s, and section waits leave 3s for post-processing.  A timeout returns the last cached snapshot, keeping a specific `partialReason` when one is already set, or a DB-only shell when nothing is cached.  That shell guards policy, accounts, admin, readiness, and the weekly digest, and it reports a timeout instead of a missing account.  iOS pauses Owner Approve only when accounts, option positions, or the portfolio bundle timed out.  News, macro, quotes, and the SPY benchmark do not pause it.
+
+**Verification.**  `npm run lint` ok (0 errors).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9263 passed, 51 skipped, and 1 failed: untouched `test/egress-guard.test.ts` because this sandbox resolves discord.com to `198.18.0.1`.  Snapshot budget tests passed.  Swift was not compiled in this checkout.
+
+**Docs.**  `docs/rollouts/2026-10-13-snapshot-partial-timeout.md`.
+
+**Next.**  Ready for review.  `do-not-automerge` because the snapshot reads broker accounts, positions, and orders.  Do not merge from this lane.
 ## 2026-10-12 CODEX — Claude Autofix 120-Turn Cap (OPS-935)
 
 **What.**  Pin Claude Code Autofix to shared `main` revision `99d372dcd7f600611c7b2b83a6f8eb2d31d6ecad` (squash merge of shared PR #368).  That revision raises the default from 60 to 120 turns and adds schema-2 operation category counters with conservative fallback for ambiguous forms.  Raw commands remain excluded; artifacts retain the existing seven-day, 500-event, 256-KiB bounds.  The 30-minute timeout and model route remain unchanged.

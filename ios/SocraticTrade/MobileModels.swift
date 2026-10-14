@@ -62,7 +62,9 @@ struct MobileSnapshot: Decodable {
     /// caller can decide whether to surface partial-data UI without silently hiding live trading
     /// state.  Per the issue guidance: a single drop on these three collections always counts as
     /// partial data — the snapshot is never presented as "all good".
+    /// A server `partialData` flag (broker/dependency timeout) ORs in as well, with `partialReason`.
     let partialData: Bool
+    let partialReason: String?
     let partialDropCounts: PartialDropCounts
 
     struct PartialDropCounts: Equatable {
@@ -95,6 +97,8 @@ struct MobileSnapshot: Decodable {
         case recentCommands
         case latestScan
         case weeklyMarketDigest
+        case partialDataFlag = "partialData"
+        case partialReason
     }
 
     init(from decoder: Decoder) throws {
@@ -159,8 +163,10 @@ struct MobileSnapshot: Decodable {
             pendingProposals: decodedPendingProposals.dropped
         )
         partialDropCounts = counts
-        partialData = !counts.isEmpty
-        if partialData {
+        let serverPartial = (try? values.decodeIfPresent(Bool.self, forKey: .partialDataFlag)) ?? false
+        partialReason = (try? values.decodeIfPresent(String.self, forKey: .partialReason)) ?? nil
+        partialData = !counts.isEmpty || serverPartial
+        if !counts.isEmpty {
             Self.reportPartialDecodeDrops(counts: counts)
         }
     }
