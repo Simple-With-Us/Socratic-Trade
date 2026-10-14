@@ -31,7 +31,7 @@ The token estimate is the max of UTF-8 bytes/4 and a mixed floor (digits, `$`, a
 
 `src/lib/rag/embed-request-pack.ts`, `src/lib/vector-db.ts`, `test/embed-request-pack.test.ts`.
 
-Autofix-pass gates: `npm run lint` ok (0 errors, 866 warnings, unchanged).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npx vitest run test/embed-request-pack.test.ts` 13 passed.  Full `npm test` fails 13 tests across `llm-provider`, `chat-llm`, `openrouter-credits`, and `framework-review` — the sandbox-credential class above, reproduced identically with this diff stashed, so it is not from this change.
+Autofix-pass gates: `npm run lint` ok (0 errors, 866 warnings, unchanged).  `npx tsc --noEmit` ok.  `npx vitest run test/embed-request-pack.test.ts` 13 passed.  Full `npm test` fails 13 tests across `llm-provider`, `chat-llm`, `openrouter-credits`, and `framework-review` — the sandbox-credential class above, reproduced identically with this diff stashed, so it is not from this change.  `npm run build` ok.
 
 The other open Kody thread (acquiring the retrieval slot before the embed-circuit check) is deliberately not changed.  A breaker pre-check in front of `acquireRetrievalSlot` would suppress the OpenRouter to SiliconFlow query rescue that currently runs while the OpenRouter circuit is open, and it would also stop serving embeddings that `getCachedQueryEmbedding` already has.  Reordering the slot and the circuit check is a behavior change that needs a maintainer decision, not a mechanical fix.
 
@@ -44,7 +44,7 @@ npm test
 npm run build
 ```
 
-`npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9278 passed, 51 skipped, 25 failed.  The failures are outside this diff: the sandbox has provider keys configured, so suites that expect no OpenRouter or Anthropic key fail, along with the local data-catalog database and `scripts/ops/summarize-cpuprofile.mjs`.  The first full run also failed four vector tests (table windowing and NaN batch counts).  Those are fixed.  A second full run no longer fails `test/vector-db-chunk-cap.test.ts`, `test/vector-db-embedding-integrity.test.ts`, or `test/embed-request-pack.test.ts`.
+`npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test` was 9278 passed, 51 skipped, 25 failed.  `npm run build` ok.  The failures are outside this diff: the sandbox has provider keys configured, so suites that expect no OpenRouter or Anthropic key fail, along with the local data-catalog database and `scripts/ops/summarize-cpuprofile.mjs`.  The first full run also failed four vector tests (table windowing and NaN batch counts).  Those are fixed.  A second full run no longer fails `test/vector-db-chunk-cap.test.ts`, `test/vector-db-embedding-integrity.test.ts`, or `test/embed-request-pack.test.ts`.
 
 Targeted before the gate:
 
