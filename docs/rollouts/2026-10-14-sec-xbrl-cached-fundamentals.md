@@ -23,22 +23,27 @@ Fill missing fundamentals (ROE, ROA, gross profit margin, shares outstanding, im
 - **Evidence cards** exclude the `__companyfacts_json__` cache sentinel so it does not occupy a prompt slot.
 - **Companyfacts JSON** is parsed with `CompanyFactsSchema` (passthrough, not strict).  Live filings include `cik`, `entityName`, and taxonomies other than `us-gaap` / `ifrs-full`.  A strict object would reject them.  Taxonomy maps are not `z.record(CompanyConceptSchema)`: one off-shape concept used to fail the whole document, the sweep advanced past that CIK, and every structured fact was lost.  `conceptsFromTaxonomy` keeps concepts that match and skips the rest.  A `facts` value that is not an object still throws so the worker retries.  Parse failures are not treated as a silent success.
 
+## Main merge
+
+`git merge origin/main` brought in `82162336` (#4663, fleet-fully-dark detector) with no conflicts.  No migration files were renumbered.  All seven review threads on PR #4665 were already resolved.  Nothing new to reply to or to change in the SEC path.
+
 ## Verification State
 
-Re-ran on 2026-10-14 after the companyfacts unit-shape fix, in this order:
+Re-ran on 2026-10-14 after merging `origin/main`, in this order:
 
 ```bash
 npm run lint -> ok (0 errors; 856 warnings)
 npx tsc --noEmit -> ok
-npm test -> fail (1 failed | 9308 passed | 51 skipped)
+npm test -> fail (2 failed | 9315 passed | 51 skipped)
 npm run build -> ok
 ```
 
-The one `npm test` failure is `test/egress-guard.test.ts` (`https://discord.com/api/webhooks/...` resolves in a way this sandbox rejects).  That file is outside this diff.  Hosted `verify` is the merge gate.  Targeted `npx vitest run test/sec-facts.test.ts test/sec-xbrl.test.ts test/sec-companyfacts-sweep.test.ts` passed (48 tests), including the sibling-concept case.
+The two `npm test` failures are outside this diff.  `test/egress-guard.test.ts` rejects the discord.com lookup in this sandbox.  `test/data-catalog-completeness.test.ts` sees peRatio fillRate 1 because the local `data/app.db` cascade report has one filled symbol, and the scorer falls back to that report when the named universe has no durable row.  Hosted `verify` passed on `d73d35e0` before this merge and is the merge gate.  Targeted `npx vitest run` of sec-facts, sec-xbrl, companyfacts sweep, market, data-providers, enrichment-coverage, trading-liveness, and batched-halt-cause passed (257 passed, 9 skipped).
 
 ## Next Steps & Blockers
 
-- None for merge; production picks up sweep on next deploy after merge to `main`.
+- Push this branch and wait for hosted `verify` on the merge commit.  Do not merge the PR from this lane.  Production picks up the sweep after merge to `main`.
+- `.github/workflows/autofix.yml` still fails at startup.  The pinned coordinator workflow uses `secrets` in a step `if`.  The same failure happens on main.  Not changed here.
 
 ## Zero-Code Findings
 

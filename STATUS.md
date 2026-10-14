@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-14 Grok — PR #4665 merge main after #4663
+
+**What.**  Merged `origin/main` (`82162336`, #4663 fleet-fully-dark detector) into `cursor/sec-xbrl-fundamentals-cache-6783`.  The merge was clean.  No migration renumber.  GraphQL review threads: 7 total, 0 unresolved.  Prior Sentry and Kody findings stay fixed on this branch (`b075ccf0`, `d73d35e0`).  No new product code in this pass.
+
+**Verification.**  `npm run lint` ok (0 errors, 856 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9315 passed, 51 skipped, and 2 failed, both outside this diff.  `test/egress-guard.test.ts` fails because this sandbox rejects the discord.com lookup.  `test/data-catalog-completeness.test.ts` reads peRatio fillRate 1 from the local `data/app.db` cascade report when the named universe has no durable row.  Hosted `verify` passed on `d73d35e0` before this merge.  Targeted vitest for sec-facts, sec-xbrl, companyfacts sweep, market, data-providers, enrichment-coverage, trading-liveness, and batched-halt-cause passed (257 passed, 9 skipped).
+
+**Docs.**  `docs/rollouts/2026-10-14-sec-xbrl-cached-fundamentals.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Push, then wait for hosted `verify` on the merge commit.  Do not resolve threads.  Do not merge the PR.  Comment `@kody start-review`.
+
+**CI note.**  `.github/workflows/autofix.yml` fails at startup on this branch and on main.  The pinned reusable workflow `pr-autofix-reusable.yml@2e671004` uses `secrets` inside a step `if`, which Actions rejects.  That file is in AI-Fleet-Coordinator, and later coordinator commits still have the same expression.  This PR does not change the caller.
+
 ## 2026-10-14 Grok — PR #4665 companyfacts unit shape
 
 **What.**  `origin/main` was already contained in this branch (`79df823d`); `git merge origin/main` was a no-op.  A non-array companyfacts unit value no longer fails `CompanyFactsSchema` for the whole CIK.  `conceptsFromTaxonomy` skips that concept and still inserts its siblings.  A `facts` value that is not an object still throws so the sweep retry path stays intact.  The rollout Verification State lists lint, tsc, `npm test`, and build in that order.
