@@ -685,8 +685,10 @@ export const DATA_POINT_CATALOG: readonly DataPointSpec[] = [
     category: "options",
     description: "Approx NTM implied vol %.",
     sources: [
-      opt("robinhood-options", 1, "primary", "low", ["Opt-in RH chain enrichment."]),
+      opt("cboe-options", 1, "primary", "low", ["Keyless delayed chain JSON on cdn.cboe.com."]),
       opt("alpaca-options", 2, "secondary", "low", ["Indicative free feed; greeks not always present."]),
+      opt("tradier-options", 3, "secondary", "low", ["Connected Tradier chains + ORATS greeks when keyed."]),
+      opt("robinhood-options", 4, "secondary", "low", ["Opt-in RH chain enrichment."]),
     ],
   },
   {
@@ -695,8 +697,10 @@ export const DATA_POINT_CATALOG: readonly DataPointSpec[] = [
     category: "options",
     description: "Near-money put/call open interest ratio.",
     sources: [
-      opt("robinhood-options", 1, "primary", "low", ["Opt-in."]),
+      opt("cboe-options", 1, "primary", "low", ["Keyless delayed OI on Cboe CDN."]),
       opt("alpaca-options", 2, "secondary", "low", ["Indicative."]),
+      opt("tradier-options", 3, "secondary", "low", ["Tradier open interest when keyed."]),
+      opt("robinhood-options", 4, "secondary", "low", ["Opt-in."]),
     ],
   },
   {

@@ -356,4 +356,36 @@ describe("free-first cascade planner", () => {
     expect(finnhub.calls).toEqual([]);
     expect(roic.calls).toEqual([["AAPL"]]);
   });
+
+  it("runs keyed options fallbacks when scan-core is full but IV is empty, and does not wake Finnhub", async () => {
+    const yahoo = freeStub("yahoo-finance", { AAPL: coreComplete(), MSFT: coreComplete() });
+    const finnhub = paidStub("finnhub", {}, ["peRatio", "price", "eps"]);
+    const alpaca = paidStub(
+      "alpaca-options",
+      { AAPL: { nearTheMoneyIv: 28, putCallRatio: 0.8 }, MSFT: { nearTheMoneyIv: 30, putCallRatio: 1.1 } },
+      ["nearTheMoneyIv", "putCallRatio"]
+    );
+    const result = await new CascadingEnrichmentProvider([yahoo, finnhub, alpaca]).enrich(["AAPL", "MSFT"]);
+    expect(finnhub.calls).toEqual([]);
+    expect(alpaca.calls).toEqual([["AAPL", "MSFT"]]);
+    expect(result.AAPL?.nearTheMoneyIv).toBe(28);
+    expect(result.MSFT?.putCallRatio).toBe(1.1);
+  });
+
+  it("skips keyed options fallbacks once the free wave filled IV and put/call", async () => {
+    const cboe = freeStub("cboe-options", {
+      AAPL: { nearTheMoneyIv: 32, putCallRatio: 1.2 }
+    });
+    const alpaca = paidStub("alpaca-options", { AAPL: { nearTheMoneyIv: 99 } }, ["nearTheMoneyIv", "putCallRatio"]);
+    const result = await new CascadingEnrichmentProvider([cboe, alpaca]).enrich(["AAPL"]);
+    expect(alpaca.calls).toEqual([]);
+    expect(result.AAPL?.nearTheMoneyIv).toBe(32);
+  });
+
+  it("does not treat a non-options specialty field as a Wave B dispatch", async () => {
+    const yahoo = freeStub("yahoo-finance", { AAPL: coreComplete() });
+    const insider = paidStub("some-insider", { AAPL: { insiderSentiment: 10 } }, ["insiderSentiment"]);
+    await new CascadingEnrichmentProvider([yahoo, insider]).enrich(["AAPL"]);
+    expect(insider.calls).toEqual([]);
+  });
 });

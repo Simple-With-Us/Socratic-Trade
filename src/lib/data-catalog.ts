@@ -84,6 +84,9 @@ export const CATALOG_SOURCES: CatalogSource[] = [
   { id: "quiverquant", label: "QuiverQuant", status: "retired", notes: "Direct ST access retired; congress via Congress.Trade." },
   { id: "unusual-whales", label: "Unusual Whales", status: "retired", notes: "Direct ST access retired." },
   { id: "robinhood-fundamentals", label: "Robinhood MCP fundamentals", status: "opt_in", notes: "ROBINHOOD_ENRICHMENT_ENABLED." },
+  { id: "cboe-options", label: "Cboe delayed options", status: "keyless", notes: "NTM IV / put-call via cdn.cboe.com; default ON." },
+  { id: "alpaca-options", label: "Alpaca indicative options", status: "opt_in", notes: "Snapshots feed=indicative when Alpaca market-data keys exist." },
+  { id: "tradier-options", label: "Tradier options chains", status: "opt_in", notes: "ORATS greeks when Tradier account connected." },
   { id: "robinhood-options", label: "Robinhood options chain", status: "opt_in", notes: "IV / put-call; default OFF." },
   { id: "webull-unofficial", label: "Webull unofficial", status: "opt_in", notes: "Flag-gated." },
   { id: "symbol_field_latest", label: "Durable field store (SQLite)", status: "active", notes: "Latest value per symbol×field with as_of + fetched_at; shared; seed for interactive scan." },
@@ -395,7 +398,13 @@ export const CATALOG_FIELDS: CatalogField[] = [
     description: "Option IV; sparse.",
     provenanceRequired: true,
     llmKey: "iv",
-    sources: [src("robinhood-options", "Opt-in MCP"), src("unusual-whales", "RETIRED")]
+    sources: [
+      src("cboe-options", "Keyless delayed", true),
+      src("alpaca-options", "Indicative snapshots"),
+      src("tradier-options", "Connected Tradier"),
+      src("robinhood-options", "Opt-in MCP"),
+      src("unusual-whales", "RETIRED")
+    ]
   },
   // RAG corpus (non-numerical completeness)
   {
