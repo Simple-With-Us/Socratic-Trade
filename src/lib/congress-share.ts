@@ -121,8 +121,8 @@ const TOKEN_PROBE_INTERVAL_MS = 6 * 60 * 60_000; // 6h
  * This breaker is keyed ONE way for the whole module — every caller funnels through
  * `shareWithCongressTrade`, so tripping it here stops the scan-hook, the in-flight nightly-batch
  * loop's REMAINING chunks, and the next nightly run alike, without touching any of their own
- * separate gating. A non-auth failure (5xx/timeout/network) does NOT trip it — those stay on the
- * existing per-caller backoff, since they may well be transient.
+ * separate gating. A non-auth failure (5xx/timeout/network) does NOT trip it.  Repeated HTTP 500
+ * and network failures are held by the separate in-memory upstream breaker below.
  */
 const AUTH_BREAKER_KEY = "congress-share:authBreaker";
 
@@ -235,6 +235,98 @@ export function resetCongressAuthBreakerForTests(): void {
 }
 
 /**
+ * Upstream circuit for App A HTTP 500 / network failures.  Separate from the auth breaker:
+ * a 401 still means a bad token, and a 5xx must not open that durable 6h gate.  This one is
+ * in-memory.  Threshold counts exhausted operations (a retried POST is one failure), default 3,
+ * then a 10 minute cooldown.  While cooling, import POSTs and the token probe skip the network
+ * with no health replay.  The nightly run returns before OHLC.  Price-needs 500s do not count.
+ */
+const DEFAULT_UPSTREAM_BREAKER_FAILURES = 3;
+const DEFAULT_UPSTREAM_BREAKER_COOLDOWN_MS = 10 * 60_000;
+
+interface CongressUpstreamBreakerState {
+  consecutive: number;
+  open: boolean;
+  openUntil: number;
+  probeInFlight: boolean;
+  probeClaimedUntilMs?: number;
+}
+
+let congressUpstreamBreaker: CongressUpstreamBreakerState = {
+  consecutive: 0,
+  open: false,
+  openUntil: 0,
+  probeInFlight: false
+};
+
+function upstreamProbeClaimWindowMs(): number {
+  return Number(process.env.CONGRESS_SHARE_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
+}
+
+function upstreamBreakerFailures(): number {
+  const v = Number(process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES ?? DEFAULT_UPSTREAM_BREAKER_FAILURES);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : DEFAULT_UPSTREAM_BREAKER_FAILURES;
+}
+
+function upstreamBreakerCooldownMs(): number {
+  const v = Number(process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_COOLDOWN_MS ?? DEFAULT_UPSTREAM_BREAKER_COOLDOWN_MS);
+  return Number.isFinite(v) && v > 0 ? v : DEFAULT_UPSTREAM_BREAKER_COOLDOWN_MS;
+}
+
+/** True only while the upstream breaker is cooling.  Half-open is not tripped. */
+export function isCongressUpstreamBreakerTripped(now: number = Date.now()): boolean {
+  return congressUpstreamBreaker.open && now < congressUpstreamBreaker.openUntil;
+}
+
+export function resetCongressUpstreamBreakerForTests(): void {
+  congressUpstreamBreaker = { consecutive: 0, open: false, openUntil: 0, probeInFlight: false, probeClaimedUntilMs: undefined };
+}
+
+/**
+ * True when this caller must not hit App A.  After the cooldown, exactly one caller is the
+ * half-open probe.  Price-needs must not call this — a read must not steal that probe.
+ */
+function congressUpstreamShouldSkip(now: number = Date.now()): boolean {
+  const state = congressUpstreamBreaker;
+  if (!state.open) return false;
+  if (now < state.openUntil) return true;
+  if (state.probeInFlight) {
+    if (state.probeClaimedUntilMs !== undefined && now >= state.probeClaimedUntilMs) {
+      state.probeInFlight = false;
+      state.probeClaimedUntilMs = undefined;
+    } else {
+      return true;
+    }
+  }
+  state.probeInFlight = true;
+  state.probeClaimedUntilMs = now + upstreamProbeClaimWindowMs();
+  return false;
+}
+
+/** `ok` means App A answered with HTTP < 500 (including 401).  The auth breaker is separate. */
+function noteCongressUpstream(ok: boolean, now: number = Date.now()): void {
+  const state = congressUpstreamBreaker;
+  state.probeInFlight = false;
+  state.probeClaimedUntilMs = undefined;
+  if (ok) {
+    state.consecutive = 0;
+    state.open = false;
+    state.openUntil = 0;
+    return;
+  }
+  state.consecutive += 1;
+  if (state.consecutive < upstreamBreakerFailures()) return;
+  const wasAlreadyOpen = state.open && state.openUntil > 0;
+  state.open = true;
+  state.openUntil = now + upstreamBreakerCooldownMs();
+  if (!wasAlreadyOpen) {
+    console.warn(
+      `[congress-share] upstream circuit open after ${state.consecutive} consecutive HTTP 500/network failures; cooling down ${upstreamBreakerCooldownMs()}ms.  Further calls are skipped until the cooldown elapses.`
+    );
+  }
+}
+
+/**
  * Module-level single-flight for the nightly batch (P2.4 / activity-feed audit §1.4).
  * Without this, a long run can still be re-entered from the 60s scheduler tick even when the
  * failure backoff has not yet stamped (or while the prior promise is still posting).
@@ -317,6 +409,13 @@ function priceNeedsLimit(): number {
 
 /** App A export path for tickers still lacking history for congressional performance. */
 const PRICE_NEEDS_PATH = "/api/export/price-needs";
+/**
+ * Auth probe path.  `GET /api/export/price-needs?limit=0` is not cheap: App A rewrites a
+ * non-positive limit to 500 and always runs unbounded summary SQL.  An uncaught D1/CPU error
+ * from that handler is HTTP 500, which is what painted congress-share down.  Capabilities is
+ * the same INGEST_TOKEN check and does not scan D1.
+ */
+const CAPABILITIES_PATH = "/api/export/capabilities";
 
 export interface CongressPriceNeedTicker {
   ticker: string;
@@ -346,6 +445,9 @@ export async function fetchCongressPriceNeeds(
   const empty: CongressPriceNeedsResponse = { tickers: [] };
   const token = congressTradeToken();
   if (!token) return empty;
+  // Do not count this read toward the upstream breaker, and do not take the half-open probe.
+  // A price-needs 500 must not block imports that might still succeed.  Skip only while cooling.
+  if (isCongressUpstreamBreakerTripped()) return empty;
   const url = `${congressTradeBaseUrl()}${PRICE_NEEDS_PATH}?limit=${encodeURIComponent(String(limit))}`;
   const timeoutMs = Number(process.env.CONGRESS_SHARE_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
@@ -387,18 +489,20 @@ export async function fetchCongressPriceNeeds(
 }
 
 /**
- * Lightweight congress-share auth probe. Makes a cheap GET to PRICE_NEEDS_PATH?limit=0 using
- * the configured CONGRESS_TRADE_TOKEN. On 401/403, logs via logApiHealth with an explicit
- * operator remediation hint and trips the auth circuit breaker so subsequent batch runs are
- * gated immediately. On success, clears the breaker and logs ok. Never throws — always
- * fire-and-forget safe.
+ * Lightweight congress-share auth probe. GET CAPABILITIES_PATH with the configured
+ * CONGRESS_TRADE_TOKEN.  On 401/403, logs via logApiHealth with an explicit operator
+ * remediation hint and trips the auth circuit breaker so subsequent batch runs are gated
+ * immediately.  On success, clears the auth breaker and logs ok.  A 404 means an older App A
+ * has no capabilities route: the server answered, so it is not an upstream failure and it
+ * does not write a health row.  Never throws — always fire-and-forget safe.
  */
 export async function probeCongressShareToken(
   fetchImpl: typeof fetch = fetch
 ): Promise<void> {
   const token = congressTradeToken();
   if (!token) return; // no token configured — nothing to probe
-  const url = `${congressTradeBaseUrl()}${PRICE_NEEDS_PATH}?limit=0`;
+  if (congressUpstreamShouldSkip()) return;
+  const url = `${congressTradeBaseUrl()}${CAPABILITIES_PATH}`;
   const timeoutMs = Number(process.env.CONGRESS_SHARE_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -410,6 +514,7 @@ export async function probeCongressShareToken(
       cache: "no-store"
     });
     if (res.status === 401 || res.status === 403) {
+      noteCongressUpstream(true);
       const text = await res.text().catch(() => "");
       const base = `HTTP ${res.status} ${text.slice(0, 200)}`.trim();
       const errorText =
@@ -420,17 +525,27 @@ export async function probeCongressShareToken(
       logApiHealth({ service: "congress-share", ok: false, errorText, keySource: "env" });
       return;
     }
+    if (res.status === 404) {
+      noteCongressUpstream(true);
+      console.warn(
+        "[congress-share] token probe: /api/export/capabilities returned 404.  Older App A has no capabilities route.  Auth was not rejected."
+      );
+      return;
+    }
     if (!res.ok) {
-      // Non-auth failure (5xx, network, etc.): log as transient; do not trip the auth breaker.
+      // Non-auth failure (5xx, etc.): log as transient; do not trip the auth breaker.
+      noteCongressUpstream(false);
       const text = await res.text().catch(() => "");
       const errorText = `${HEALTH_TRANSIENT_FAILURE_PREFIX}HTTP ${res.status} ${text.slice(0, 200)}`.trim();
       console.warn(`[congress-share] token probe non-auth failure: ${errorText}`);
       logApiHealth({ service: "congress-share", ok: false, errorText, keySource: "env" });
       return;
     }
+    noteCongressUpstream(true);
     clearCongressAuthBreaker();
     logApiHealth({ service: "congress-share", ok: true, keySource: "env" });
   } catch (err) {
+    noteCongressUpstream(false);
     const error = err instanceof Error ? err.message : String(err);
     const isTransient = isTransientNetworkError(err);
     const errorText = isTransient ? `${HEALTH_TRANSIENT_FAILURE_PREFIX}${error}` : error;
@@ -1168,10 +1283,18 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
     }
   }
 
+  if (congressUpstreamShouldSkip(now)) {
+    return { ...dropMeta, ok: false, skipped: false, reason: "upstream-breaker", sent };
+  }
+
   const url = `${congressTradeBaseUrl()}${API_PATHS.ADMIN_SECURITIES_IMPORT}`;
   const timeoutMs = Number(process.env.CONGRESS_SHARE_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
   const maxAttempts = 3;
+  // One POST, including its retries, is one upstream operation.  `undefined` until the call
+  // is finished so a retry `continue` does not count.
+  let upstreamOutcome: boolean | undefined;
 
+  try {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -1198,6 +1321,7 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
             `to match INGEST_TOKEN / ADMIN_TOKEN in CT Infisical prod`
           : baseError;
         if (isAuthFailure) {
+          upstreamOutcome = true;
           console.error(`[congress-share] import failed: ${errorText}`);
           tripCongressAuthBreaker(now, errorText, token);
           logApiHealth({ service: "congress-share", ok: false, errorText, keySource: "env" });
@@ -1210,12 +1334,14 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
           if (delay > 0) await new Promise((r) => setTimeout(r, delay));
           continue;
         }
+        upstreamOutcome = res.status < 500;
         console.error(`[congress-share] import failed: ${errorText}`);
         // Surface failure to health store: prefix 5xx as transient to allow escalation window.
         const formattedError = res.status >= 500 ? `${HEALTH_TRANSIENT_FAILURE_PREFIX}${errorText}` : errorText;
         logApiHealth({ service: "congress-share", ok: false, errorText: formattedError, keySource: "env" });
         return { ...dropMeta, ok: false, status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}`, sent };
       }
+      upstreamOutcome = true;
       const responseRaw = await res.json().catch(() => undefined);
       clearCongressAuthBreaker(); // a successful call proves the token is good again
       if (responseRaw === undefined) {
@@ -1265,6 +1391,7 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
         if (delay > 0) await new Promise((r) => setTimeout(r, delay));
         continue;
       }
+      upstreamOutcome = false;
       // Include payload sizes so a timeout/abort points at which dataset was too big.
       console.error(
         `[congress-share] import error: ${error} ` +
@@ -1279,7 +1406,16 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
       clearTimeout(timer);
     }
   }
+  upstreamOutcome = false;
   return { ...dropMeta, ok: false, error: "max-attempts-exceeded", sent };
+  } finally {
+    if (upstreamOutcome !== undefined) {
+      noteCongressUpstream(upstreamOutcome);
+    } else if (congressUpstreamBreaker.probeInFlight) {
+      congressUpstreamBreaker.probeInFlight = false;
+      congressUpstreamBreaker.probeClaimedUntilMs = undefined;
+    }
+  }
 }
 
 // ── Chunking ────────────────────────────────────────────────────────────────────
@@ -1637,6 +1773,11 @@ async function runCongressDailyShareUnlocked(
       keySource: "env"
     });
     return { ok: false, skipped: false, reason: "auth-breaker-tripped", ...empty };
+  }
+  // Same gate for a dead App A.  Do not spend the OHLC collection, and do not write a health
+  // row on every hourly skip — the call that opened the breaker already logged.
+  if (isCongressUpstreamBreakerTripped(now)) {
+    return { ok: false, skipped: false, reason: "upstream-breaker", ...empty };
   }
 
   // Congressional price-needs from App A: always consulted on scheduled runs so performance

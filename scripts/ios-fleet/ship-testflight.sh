@@ -357,7 +357,9 @@ project_marketing_seq() {
 }
 
 # Highest N already uploaded to App Store Connect for the <prefix>.N train.
-# Returns 1 (and prints nothing) when ASC cannot be consulted — the caller must
+# Returns 1 when ASC cannot be consulted.  stderr lines from asc-api.mjs that
+# start with latest-build-seq: are copied to the ship log (HTTP status and
+# Apple's error code only; the client never prints the key).  The caller must
 # distinguish "no builds yet" (0) from "unknown" (failure).
 asc_latest_seq() {
   local prefix="$1" plat="${2:-}" out rc
@@ -370,9 +372,19 @@ asc_latest_seq() {
     return 1
   fi
   set +e
-  out=$(node "${FLEET_DIR}/asc-api.mjs" latest-build-seq "$BUNDLE_ID" "$prefix" "$plat" 2>/dev/null)
+  local errf
+  errf="$(mktemp)"
+  out=$(node "${FLEET_DIR}/asc-api.mjs" latest-build-seq "$BUNDLE_ID" "$prefix" "$plat" 2>"$errf")
   rc=$?
   set -e
+  if [[ -s "$errf" ]]; then
+    while IFS= read -r line; do
+      case "$line" in
+        latest-build-seq:*) logerr "asc-seq: ${line}" ;;
+      esac
+    done <"$errf"
+  fi
+  rm -f "$errf"
   if [[ $rc -ne 0 || ! "$out" =~ ^[0-9]+$ ]]; then
     logerr "asc-seq: query failed (rc=${rc}); cannot verify against App Store Connect"
     return 1
@@ -410,18 +422,18 @@ resolve_seq_floor() {
     # Treat "ASC unverified" as fatal on its own.
     if [[ "$ALLOW_UNVERIFIED_SEQ" -eq 0 ]]; then
       die "cannot determine the next build number.
-  App Store Connect could not be reached AND there is no local sequence
-  (${STATE_DIR}/build-seq-${APP_KEY}.txt) and no ${prefix}.N in project.pbxproj.
+  App Store Connect could not be verified.  seq sources: local=${l} project=${p} asc=UNVERIFIED.
+  Cache file: ${STATE_DIR}/build-seq-${APP_KEY}.txt.  project.pbxproj ${prefix}.N is project=${p}.
   Shipping now would very likely reuse a build number and be rejected as a duplicate.
-  Fix one of these, then re-run:
+  The asc-seq lines above include the HTTP status.  Fix one of these, then re-run:
     1) restore ASC access: check ${SECRETS_ENV} and that 'node' is on PATH, then
        run: node ${FLEET_DIR}/asc-api.mjs latest-build-seq ${BUNDLE_ID} ${prefix}
-     2) or pass the number explicitly:  --version ${prefix}.<N>   (NOT --build <N>:
-        --version picks the marketing version and lets CFBundleVersion stay an
-        auto UTC timestamp, which is always higher than every build already
-        uploaded. A bare --build leaves MARKETING at ${DEFAULT_MARKETING}, which
-        re-enters an old train where Apple requires a strictly greater build than
-        everything in it -- rejected after the full archive+upload.)
+    2) or pass the number explicitly:  --version ${prefix}.<N>   (NOT --build <N>:
+       --version picks the marketing version and lets CFBundleVersion stay an
+       auto UTC timestamp, which is always higher than every build already
+       uploaded. A bare --build leaves MARKETING at ${DEFAULT_MARKETING}, which
+       re-enters an old train where Apple requires a strictly greater build than
+       everything in it -- rejected after the full archive+upload.)
     3) or, only if you are certain this train is empty, re-run with --allow-unverified-seq"
     fi
     if [[ "$ALLOW_UNVERIFIED_SEQ" -eq 1 ]]; then
@@ -1133,6 +1145,16 @@ else
 fi
 set -e
 [[ $ARCHIVE_RC -eq 0 ]] || die "archive failed (rc=$ARCHIVE_RC); see ${LOG_DIR}/archive.log"
+if [[ -n "${SENTRY_DSN:-}" ]]; then
+  _archived_plist="$(ls -d "${ARCHIVE_PATH}/Products/Applications/"*.app/Info.plist 2>/dev/null | head -1 || true)"
+  if [[ -n "${_archived_plist}" ]]; then
+    _dsn_in_plist="$(/usr/libexec/PlistBuddy -c 'Print :SENTRY_DSN' "${_archived_plist}" 2>/dev/null || true)"
+    if [[ -z "${_dsn_in_plist}" || "${_dsn_in_plist}" == '$(SENTRY_DSN)' ]]; then
+      die "archived Info.plist SENTRY_DSN is empty; Cocoa will not start Sentry"
+    fi
+    log "archived Info.plist SENTRY_DSN length ${#_dsn_in_plist}"
+  fi
+fi
 if [[ "$MANUAL_SIGN" -eq 1 ]]; then
   # Receipt only (non-fatal): which identity actually signed the archived app.
   _archived_app="$(ls -d "${ARCHIVE_PATH}/Products/Applications/"*.app 2>/dev/null | head -1 || true)"

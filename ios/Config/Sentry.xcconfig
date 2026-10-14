@@ -1,0 +1,6 @@
+// SENTRY_DSN is supplied by the environment or by `xcodebuild SENTRY_DSN=...`.
+// This file must never contain a DSN literal.  An unset value expands empty,
+// Info.plist keeps $(SENTRY_DSN), and SentryTelemetry skips init.
+// Do not also set SENTRY_DSN in the Xcode project: an explicit empty string
+// overrides this xcconfig.
+SENTRY_DSN = $(SENTRY_DSN)

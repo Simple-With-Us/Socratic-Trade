@@ -46,6 +46,11 @@ describe("iOS SentryTelemetry DSN source", () => {
     expect(swift).toMatch(/configureProfiling = \{[^}]*sessionSampleRate = 0\.1/);
     expect(swift).toMatch(/lifecycle = \.trace/);
     expect(swift).toMatch(/attachScreenshot = false/);
+    expect(swift).toMatch(/func captureAPIFailure/);
+    expect(swift).toMatch(/url_error_code/);
+    expect(swift).toMatch(/sanitizedEndpoint/);
+    const client = readFileSync(join(repoRoot, "ios/SocraticTrade/MobileAPIClient.swift"), "utf8");
+    expect(client).toMatch(/captureAPIFailure\(error:/);
     const plist = readFileSync(join(repoRoot, "ios/SocraticTrade/Info.plist"), "utf8");
     expect(plist).toMatch(/<key>SENTRY_DSN<\/key>/);
   });

@@ -33,6 +33,7 @@ import {
   chunkPrices,
   dropInvalidShareRows,
   isCongressAuthBreakerTripped,
+  isCongressUpstreamBreakerTripped,
   isCongressDailyShareDue,
   isCongressShareAutoEnabled,
   marketQuoteToAnalyst,
@@ -43,9 +44,11 @@ import {
   fetchCongressPriceNeeds,
   mergeShareUniverse,
   resetCongressAuthBreakerForTests,
+  resetCongressUpstreamBreakerForTests,
   resetCongressRefThrottle,
   runCongressDailyShare,
   runCongressDailyShareIfDue,
+  probeCongressShareToken,
   probeCongressShareTokenIfDue,
   probeCongressShareTokenOnStartup,
   shareScanRefs,
@@ -125,8 +128,11 @@ beforeEach(() => {
   delete process.env.CONGRESS_SHARE_MAX_CLOSES_PER_TICKER;
   delete process.env.CONGRESS_TRADE_BASE_URL;
   delete process.env.CONGRESS_SHARE_AUTH_BREAKER_COOLDOWN_MS;
+  delete process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES;
+  delete process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_COOLDOWN_MS;
   resetCongressRefThrottle();
   resetCongressAuthBreakerForTests();
+  resetCongressUpstreamBreakerForTests();
   mockedFetchDailyOHLC.mockReset();
 });
 
@@ -766,6 +772,48 @@ describe("shareWithCongressTrade", () => {
     await shareWithCongressTrade({ refs: [{ ticker: "MSFT" }] });
     expect(isCongressAuthBreakerTripped()).toBe(false);
     expect(fetchSpy).toHaveBeenCalledTimes(6); // 2 calls * 3 retry attempts on 5xx
+    expect(isCongressUpstreamBreakerTripped()).toBe(false);
+  });
+
+  it("opens the upstream breaker after exhausted HTTP 500 calls and skips the next POST quietly", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES = "1";
+    const fetchSpy = vi.fn(async () => new Response("boom", { status: 500 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const first = await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] });
+    expect(first.ok).toBe(false);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(isCongressAuthBreakerTripped()).toBe(false);
+    expect(isCongressUpstreamBreakerTripped()).toBe(true);
+    const errorsAfterTrip = errorSpy.mock.calls.length;
+
+    const second = await shareWithCongressTrade({ refs: [{ ticker: "MSFT" }] });
+    expect(second).toMatchObject({ ok: false, skipped: false, reason: "upstream-breaker" });
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(errorSpy.mock.calls.length).toBe(errorsAfterTrip);
+    expect(isCongressAuthBreakerTripped()).toBe(false);
+    errorSpy.mockRestore();
+  });
+
+  it("logs upstream circuit open only once across repeated half-open failures", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES = "1";
+    process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_COOLDOWN_MS = "20";
+    const upstreamWarns = () =>
+      vi.mocked(console.warn).mock.calls.filter((call) => String(call[0]).includes("upstream circuit open")).length;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+
+    await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] });
+    expect(upstreamWarns()).toBe(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await shareWithCongressTrade({ refs: [{ ticker: "MSFT" }] });
+    expect(upstreamWarns()).toBe(1);
+
+    warnSpy.mockRestore();
   });
 
   it("does NOT trip the breaker on a transport error", async () => {
@@ -997,6 +1045,23 @@ describe("runCongressDailyShare", () => {
 
     expect(res).toMatchObject({ ok: false, skipped: false, reason: "auth-breaker-tripped" });
     expect(mockedFetchDailyOHLC).not.toHaveBeenCalled(); // collection phase never started
+  });
+
+  it("skips OHLC when the upstream breaker is cooling", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES = "1";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+    await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] });
+    expect(isCongressUpstreamBreakerTripped()).toBe(true);
+    expect(isCongressAuthBreakerTripped()).toBe(false);
+
+    mockedFetchDailyOHLC.mockClear();
+    const now = Date.UTC(2026, 5, 22, 13, 0, 0);
+    setInternalSetting("congress-share:lastDailyRunDate", "2026-06-20");
+    const res = await runCongressDailyShare({ now, force: true, symbols: ["AAPL", "MSFT"] });
+
+    expect(res).toMatchObject({ ok: false, skipped: false, reason: "upstream-breaker" });
+    expect(mockedFetchDailyOHLC).not.toHaveBeenCalled();
   });
 
   it("shares custom symbols + SPX as separate bounded POSTs and does not advance the daily marker", async () => {
@@ -1361,6 +1426,38 @@ describe("runCongressDailyShare — fromAppANeeds + deep history for needs", () 
     expect(pricePost?.prices[0].ticker).toBe("NEED");
     // full history despite MAX_CLOSES=2
     expect(pricePost?.prices[0].closes.length).toBe(5);
+  });
+});
+
+describe("congress-share token probe target", () => {
+  it("probes /api/export/capabilities and does not call price-needs?limit=0", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "test-token";
+    const fetchSpy = vi.fn(async (url: unknown) => {
+      void url;
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    await probeCongressShareToken();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const url = String(fetchSpy.mock.calls[0]?.[0] ?? "");
+    expect(url).toContain("/api/export/capabilities");
+    expect(url).not.toContain("price-needs");
+    expect(url).not.toContain("limit=0");
+  });
+
+  it("treats a capabilities 404 as reachable and does not open the upstream breaker", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "test-token";
+    process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES = "1";
+    const fetchSpy = vi.fn(async () => new Response("missing", { status: 404 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await probeCongressShareToken();
+    await probeCongressShareToken();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(isCongressUpstreamBreakerTripped()).toBe(false);
+    expect(getServiceHealthLog("congress-share", 5).some((row) => String(row.error_text ?? "").includes("404"))).toBe(false);
+    expect(warn.mock.calls.some((call) => String(call[0]).includes("capabilities returned 404"))).toBe(true);
+    warn.mockRestore();
   });
 });
 

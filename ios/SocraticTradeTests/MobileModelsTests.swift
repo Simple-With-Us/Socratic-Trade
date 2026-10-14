@@ -876,6 +876,40 @@ final class MobileModelsTests: XCTestCase {
         XCTAssertEqual(command.result?.reasons?.first, "A strategy run is in progress.")
     }
 
+    @MainActor
+    func testLoadClearsErrorWhenCachedSnapshotKeepsShowingAfterFailure() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MobileTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            MobileTestURLProtocol.handler = nil
+            session.invalidateAndCancel()
+        }
+        MobileTestURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 500,
+                httpVersion: nil,
+                headerFields: ["content-type": "application/json"]
+            )!
+            XCTAssertEqual(request.url?.path, "/api/mobile/snapshot")
+            return (response, Data(#"{"error":"temporary"}"#.utf8))
+        }
+        let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(minimalSnapshotJSON.utf8))
+        let store = MobileStore(
+            client: MobileAPIClient(
+                baseURL: URL(string: "https://socratictrade.com")!,
+                session: session
+            ),
+            previewSnapshot: snapshot
+        )
+        store.error = "Server is slow, still trying"
+        await store.load()
+        XCTAssertNotNil(store.snapshot)
+        XCTAssertTrue(store.snapshotLoadFailed)
+        XCTAssertNil(store.error)
+    }
+
     private let minimalSnapshotJSON = #"""
     {
       "readiness": {

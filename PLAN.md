@@ -1,4 +1,5 @@
 > **2026-10-13 GROK — Mobile snapshot partial timeout (`cursor/snapshot-partial-timeout`).**  No roadmap scope change.  The phone snapshot stops waiting at 20s, with about 12s per broker section, and returns cached or partial data with `partialData` so Owner Approve pauses.  Global broker probe timeouts stay put.  Extra-ship no.  Do not merge from this lane.  Rollout: `docs/rollouts/2026-10-13-snapshot-partial-timeout.md`.
+> **2026-10-13 CURSOR — iOS Sentry DSN + TestFlight cron.**  No roadmap scope change.  Substitute `SENTRY_DSN` from CI into the Release archive, record URLError code and API path on mobile network failures, and widen the TestFlight ship Sentry cron margin to match measured GitHub schedule gaps.  Extra-ship no.  Rollout: `docs/rollouts/2026-10-13-ios-sentry-dsn-testflight-cron.md`.
 
 > **2026-10-12 CODEX — CTS-330 cache review follow-up.**  Validate a fresh cache before replacing the old pin and retire Mac Slack hooks before skipping installation.  Product roadmap remains unchanged; hosted checks and current-head review gate landing.
 
