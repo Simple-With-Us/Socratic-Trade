@@ -14,7 +14,12 @@ import {
   refreshInsider,
   type InsiderFiling
 } from "../src/lib/web-sources/sec";
-import { insiderBulkQuarterKeys, parseInsiderBulkTables, unzipNamedFiles } from "../src/lib/web-sources/insider-bulk";
+import {
+  BulkInsiderFilingSchema,
+  insiderBulkQuarterKeys,
+  parseInsiderBulkTables,
+  unzipNamedFiles
+} from "../src/lib/web-sources/insider-bulk";
 import { SEC_EDGAR_FALLBACK_UA } from "../src/lib/web-sources/http";
 import { ingestCompanyFacts } from "../src/lib/web-sources/sec-facts";
 import { getSymbolWebSignals } from "../src/lib/web-sources";
@@ -347,6 +352,23 @@ describe("SEC insider bulk datasets", () => {
     expect(nvda).toMatchObject({ owner: "Jensen Huang", buyTx: 1, buyShares: 10, buyValue: 200, sellTx: 0 });
     expect(aapl).toMatchObject({ sellTx: 1, sellShares: 4, sellValue: 100 });
     expect(filings.find((filing) => filing.accession === "0001234567-26-000099")).toBeUndefined();
+  });
+
+  it("rejects a bulk filing that carries an undeclared key", () => {
+    const parsed = BulkInsiderFilingSchema.safeParse({
+      symbol: "NVDA",
+      owner: "Jensen Huang",
+      buyTx: 1,
+      sellTx: 0,
+      buyShares: 10,
+      sellShares: 0,
+      buyValue: 200,
+      sellValue: 0,
+      filedAt: "2026-06-01",
+      accession: "0001234567-26-000010",
+      extra: true
+    });
+    expect(parsed.success).toBe(false);
   });
 
   it("keeps the XML delta when the quarterly ZIP 404s and ingests bulk rows when the feed is empty", async () => {

@@ -11,18 +11,22 @@ import { z } from "zod";
 import { normalizeSymbol } from "../money";
 import { politeFetch, secUserAgent } from "./http";
 
-export interface BulkInsiderFiling {
-  symbol: string;
-  owner: string;
-  buyTx: number;
-  sellTx: number;
-  buyShares: number;
-  sellShares: number;
-  buyValue: number;
-  sellValue: number;
-  filedAt: string;
-  accession: string;
-}
+/** One open-market Form 4 collapsed from a quarterly ZIP.  Built here, then parsed before return. */
+export const BulkInsiderFilingSchema = z
+  .object({
+    symbol: z.string().regex(/^[A-Z][A-Z.\-]{0,5}$/),
+    owner: z.string().min(1),
+    buyTx: z.number().int().nonnegative(),
+    sellTx: z.number().int().nonnegative(),
+    buyShares: z.number().nonnegative(),
+    sellShares: z.number().nonnegative(),
+    buyValue: z.number().nonnegative(),
+    sellValue: z.number().nonnegative(),
+    filedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    accession: z.string().min(1)
+  })
+  .strict();
+export type BulkInsiderFiling = z.infer<typeof BulkInsiderFilingSchema>;
 
 const MONTHS: Record<string, string> = {
   JAN: "01",
@@ -178,19 +182,6 @@ const BulkTransRowSchema = z
     TRANS_PRICEPERSHARE: optionalCell
   })
   .passthrough();
-
-const BulkInsiderFilingSchema = z.object({
-  symbol: z.string().regex(/^[A-Z][A-Z.\-]{0,5}$/),
-  owner: z.string().min(1),
-  buyTx: z.number().int().nonnegative(),
-  sellTx: z.number().int().nonnegative(),
-  buyShares: z.number().nonnegative(),
-  sellShares: z.number().nonnegative(),
-  buyValue: z.number().nonnegative(),
-  sellValue: z.number().nonnegative(),
-  filedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  accession: z.string().min(1)
-});
 
 function cell(raw: string | undefined): string | undefined {
   const trimmed = raw?.trim();

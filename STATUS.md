@@ -627,6 +627,16 @@ all pre-existing (reproduced identically with these changes stashed; this sandbo
 **Docs.**  `docs/rollouts/2026-10-14-fleet-fully-dark-detector.md`, `STATUS.md`.
 
 **Next.**  Land PR; after deploy watch SOCRATIC-TRADE-2S for new events.
+## 2026-10-14 GROK — PR #4661 main merge and Form 4 schema
+
+**What.**  Merged `origin/main` (`79df823d`, motion lockfile only) with no conflicts.  `BulkInsiderFiling` is now `z.infer` of the exported strict `BulkInsiderFilingSchema`, and the handwritten interface is gone.  An extra key fails the parse.  The earlier review fixes stay: the current-quarter ZIP is the only bulk coverage flag, Yahoo's abort timer starts after the pacer slot, a confirmed listing start stops the 30-minute refetch, and the 1825-day default stays.  PR Autofix runs still fail before any job.  The pinned reusable workflow uses `secrets` inside a step `if` (`pr-autofix-reusable.yml` line 163).  That caller file matches `origin/main`, and review events read it from the default branch, so a pin change on this branch does not clear those runs.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted history and web-source tests: 68 passed.  Full `npm test`: 1 failed, 9311 passed, 51 skipped, 826 files.  The failure is `test/egress-guard.test.ts` resolving discord.com.  This shell has no DNS for that host, and the file is not in this diff.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Reply on the open threads and do not resolve them.  Ask Kody to re-review.  Do not merge from this lane.
+
 ## 2026-10-14 GROK — PR #4661 review follow-up
 
 **What.**  Merged `origin/main` (already contained; branch was not behind).  The current-quarter Form 4 ZIP is the only bulk coverage flag, so a previous quarter no longer skips the watchlist.  The same accession keeps the larger bulk or XML dollar, share, and transaction totals.  Yahoo chart timeouts start after the pacer slot is acquired.  A fresh series whose listing starts inside the five-year window is not refetched every memory-cache TTL.  Twelve Data and the Form 345 rows are Zod-checked before they are stored.  The 1825-day default stays.  It was already the start date on main, and shortening it would let Massive's two-year series win again.

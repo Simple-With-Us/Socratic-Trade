@@ -38,9 +38,9 @@ Cached insider signals are reused when `windowDays` matches and are not recomput
 
 The SEC XBRL 8s budget in the enrichment cascade and the scheduler RTH cap of 3 filing bodies are 10-K/10-Q company-facts and RAG ingest.  They are not the Form 4 sentiment path and were left unchanged.
 
-Bulk ZIP parsing keeps only in-window `P`/`S` filings, and each submission, owner, and transaction row is checked with a Zod schema before it is aggregated.  A 404 on the ZIP does not wipe the atom path.  The 1825-day default is unchanged from main's hardcoded start.  Callers that want the short cascade pass `lookbackDays` of 730 or less.
+Bulk ZIP parsing keeps only in-window `P`/`S` filings, and each submission, owner, and transaction row is checked with a Zod schema before it is aggregated.  The collapsed filing is checked again with the exported strict `BulkInsiderFilingSchema`.  `BulkInsiderFiling` is `z.infer` of that schema.  An undeclared key fails the parse.  A 404 on the ZIP does not wipe the atom path.  The 1825-day default is unchanged from main's hardcoded start.  Callers that want the short cascade pass `lookbackDays` of 730 or less.
 
-Review follow-up for PR #4661 (board `b53cc5f8970c469e8f561767c35fc334`).  `origin/main` was already an ancestor, so the merge did not create a commit.
+Review follow-up for PR #4661 (board `b53cc5f8970c469e8f561767c35fc334`).  A later pass merged `origin/main` at `79df823d` (motion lockfile only).  No source conflicts.
 
 Senate HTML uses the browser User-Agent already on `scrapeSenateEfd`, not the SEC research User-Agent.  PTR detail fetches stay paced at 350ms.
 
@@ -77,6 +77,17 @@ npm test
 ```
 
 `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted history and web-source tests: 67 passed.  Full `npm test`: 1 failed, 9310 passed, 51 skipped, 826 files.  The failure is `test/egress-guard.test.ts` resolving `https://discord.com` with real DNS.  This shell cannot resolve that host.  The file is not in this diff.
+
+Schema colocation after merging `origin/main` (`79df823d`):
+
+```bash
+npm run lint
+npx tsc --noEmit
+npx vitest run test/history.test.ts test/web-sources-sec.test.ts test/web-sources.test.ts
+npm test
+```
+
+`npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted history and web-source tests: 68 passed.  Full `npm test`: 1 failed, 9311 passed, 51 skipped, 826 files.  The same discord.com DNS failure remains.  That file is not in this diff.
 
 Follow-up `npm run build` compiled with warnings in 82s, then the process was killed (exit 137) during Next.js "Running TypeScript".  Standalone `tsc --noEmit` had already passed.  Hosted `verify` runs the real build.
 
