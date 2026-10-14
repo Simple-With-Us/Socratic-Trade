@@ -2,11 +2,11 @@
 
 ## 2026-10-14 Cursor Cloud — data cascade reliability
 
-**What.**  RapidAPI + Nasdaq screener pacing, `Retry-After` on 429 with circuit cooldown, per-symbol field TTL cache, VIX cascade (Cboe `VIX_History.csv` → FRED `VIXCLS` → Cboe JSON → Yahoo), Nasdaq screener stale-while-revalidate + SEC/Nasdaq Trader fallback, freshness scan deadline 6m.
+**What.**  RapidAPI + Nasdaq screener pacing, `Retry-After` on 429 (lane hold only after retries, and only when the header is present), per-symbol field TTL cache, VIX cascade (Cboe `VIX_History.csv` → FRED `VIXCLS` → Cboe JSON → Yahoo), Nasdaq screener stale-while-revalidate + SEC/Nasdaq Trader fallback, freshness scan deadline 6m.
 
 **Branch.**  `cursor/data-cascade-reliability-eb70`
 
-**Verification.**  `npm run lint`, `npx tsc --noEmit`, targeted vitest for new/changed tests, `npm run build` (run at handoff).
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted vitest for the rollout files plus the new regressions ok (153 passed).  `npm run build` ok.  Full `npm test` was 9313 passed, 51 skipped, and 1 failed: sandbox DNS for discord.com in `test/egress-guard.test.ts` (outside this diff).
 
 **Docs.**  `docs/rollouts/2026-10-14-data-cascade-reliability.md`, `STATUS.md`, `PLAN.md`.
 

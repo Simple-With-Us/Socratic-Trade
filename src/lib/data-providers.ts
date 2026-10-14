@@ -771,20 +771,26 @@ export async function fetchWithRetry(
         // Do NOT write a health row for intermediate 429 retries — each retry would otherwise
         // look like a hard failure and five rapid 429s painted the lane red STOPPED even when
         // the eventual attempt (or the next symbol) succeeded. Final 429 is logged below as soft.
+        // Do NOT open the lane breaker on this branch.  The condition is `attempt < retries`,
+        // so `attempt === retries - 1` is still a retry.  Default one-retry lanes (Finnhub,
+        // Nasdaq quote) were opening a 60s hold before that retry, which skipped sibling
+        // endpoints already waiting on the same pacer.
         const retryAfterMs = retryAfterDelayMs(response);
         const waitMs = Math.max(
           jitteredBackoffMs(backoffMs, attempt),
           retryAfterMs ?? 0
         );
-        if (healthService && attempt === retries - 1) {
-          tripApiCircuitBreakerLane(
-            healthService,
-            options.keySource ?? null,
-            Math.max(waitMs, Number(process.env.API_CIRCUIT_BREAKER_BACKOFF_MS ?? 60_000))
-          );
-        }
         await guardedFetchBackoff(waitMs, options.guard);
         continue;
+      }
+      if (response.status === 429 && healthService) {
+        const retryAfterMs = retryAfterDelayMs(response);
+        // Retries are exhausted.  A positive Retry-After is the lane hold.  A 429 with no
+        // Retry-After already waited the in-call backoff; flooring the hold at 60s skipped
+        // the rest of a multi-endpoint provider and the immediate cache-bypass refetch.
+        if (retryAfterMs != null && retryAfterMs > 0) {
+          tripApiCircuitBreakerLane(healthService, options.keySource ?? null, retryAfterMs);
+        }
       }
       // When deferSuccessLog is set, skip the auto-success row so the caller can log
       // after validating the response body (e.g. providers that embed errors in HTTP 200).

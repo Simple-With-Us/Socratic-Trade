@@ -17,6 +17,7 @@ import {
   type SymbolEnrichment
 } from "../src/lib/data-providers";
 import { __resetRapidApiQuotaForTests } from "../src/lib/rapidapi-quota";
+import { clearProviderFieldCacheForTests } from "../src/lib/provider-field-cache";
 
 // Isolated temp SQLite DB per this test file (repo convention — see beforeAll in
 // test/data-providers.test.ts) so persisted budget/exhaustion state never leaks between files.
@@ -29,6 +30,7 @@ beforeAll(() => {
 beforeEach(() => {
   __resetRapidApiQuotaForTests();
   clearEnrichmentCache();
+  clearProviderFieldCacheForTests();
 });
 
 afterEach(() => {

@@ -116,6 +116,22 @@ export function resolveProviderLimiterKey(service: string, requestUrl?: string):
   return service;
 }
 
+/**
+ * Config for one paced call.  A service with its own hard default or env override keeps
+ * that config even when the pacer bucket is `rapidapi-host:<hostname>`.  The host default
+ * (1.1s, concurrency 1) applies only when the service itself has no limit.  Otherwise
+ * `alpha-vantage-rapidapi` (5/min) would be widened to the generic host pace.
+ */
+export function resolveProviderLimiterConfigForCall(
+  service: string,
+  limiterKey = service
+): ProviderLimiterConfig | undefined {
+  const serviceConfig = resolveProviderLimiterConfig(service);
+  if (serviceConfig) return serviceConfig;
+  if (limiterKey !== service) return resolveProviderLimiterConfig(limiterKey);
+  return undefined;
+}
+
 export function resolveProviderLimiterConfig(provider: string): ProviderLimiterConfig | undefined {
   const rapidHostPrefix = "rapidapi-host:";
   const hard =
@@ -178,7 +194,7 @@ export class ProviderRateLimiter {
    *  no bookkeeping. */
   async withLimit<T>(provider: string, fn: () => Promise<T>, requestUrl?: string): Promise<T> {
     const limiterKey = resolveProviderLimiterKey(provider, requestUrl);
-    const config = resolveProviderLimiterConfig(limiterKey);
+    const config = resolveProviderLimiterConfigForCall(provider, limiterKey);
     if (!config) return fn();
 
     const state = this.stateFor(limiterKey, config);

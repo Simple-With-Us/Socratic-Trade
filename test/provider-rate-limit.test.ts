@@ -12,6 +12,7 @@ import {
   refundProviderRequests,
   resetProviderQuotaState,
   resolveProviderLimiterConfig,
+  resolveProviderLimiterConfigForCall,
   resolveProviderLimiterKey,
   resolveProviderQuota,
   scrubProviderErrorText,
@@ -87,6 +88,24 @@ describe("resolveProviderLimiterKey", () => {
   it("applies rapidapi-host pacing defaults to derived host keys", () => {
     const config = resolveProviderLimiterConfig("rapidapi-host:example.p.rapidapi.com");
     expect(config).toEqual({ minIntervalMs: 1100, concurrency: 1 });
+  });
+
+  it("keeps alpha-vantage-rapidapi's 5/min cap on a RapidAPI host bucket", () => {
+    const limiterKey = resolveProviderLimiterKey(
+      "alpha-vantage-rapidapi",
+      "https://alpha-vantage.p.rapidapi.com/query"
+    );
+    expect(limiterKey).toBe("rapidapi-host:alpha-vantage.p.rapidapi.com");
+    expect(resolveProviderLimiterConfigForCall("alpha-vantage-rapidapi", limiterKey)).toEqual({
+      minIntervalMs: Math.ceil(60_000 / 5),
+      concurrency: 1
+    });
+  });
+
+  it("uses the rapidapi-host default only when the service has no own cap", () => {
+    expect(
+      resolveProviderLimiterConfigForCall("unknown-rapidapi", "rapidapi-host:example.p.rapidapi.com")
+    ).toEqual({ minIntervalMs: 1100, concurrency: 1 });
   });
 });
 

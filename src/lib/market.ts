@@ -1527,13 +1527,27 @@ async function fetchNasdaqScreener(
     await refreshNasdaqScreenerLive(cacheKey, ttlMs, exchange, signal);
     const fresh = screenerCache.get(cacheKey)!;
     return { rows: fresh.rows, asOf: fresh.asOf, cached: false };
-  } catch {
-    const fallbackRows = await fetchFallbackUniverseRows(signal);
-    if (fallbackRows.length > 0) {
-      storeScreenerRows(cacheKey, fallbackRows, ttlMs, now);
-      return { rows: fallbackRows, cached: false, fallback: true };
+  } catch (error) {
+    // Directory fallback runs only when last-good is empty, so there is no prior
+    // price to hydrate onto a symbol/name row.  Price-less rows must not be stored:
+    // toMarketQuote drops them, and a cache hit would skip Nasdaq until the close.
+    let fallbackRows: NasdaqScreenerRow[] = [];
+    let fallbackError: unknown;
+    try {
+      fallbackRows = await fetchFallbackUniverseRows(signal);
+    } catch (err) {
+      fallbackError = err;
     }
-    throw new Error("Nasdaq screener and keyless universe fallback both failed.");
+    const priced = fallbackRows.filter((row) => number(row.lastsale) > 0);
+    if (priced.length > 0) {
+      storeScreenerRows(cacheKey, priced, ttlMs, now);
+      return { rows: priced, cached: false, fallback: true };
+    }
+    const original = error instanceof Error ? error.message : "Nasdaq screener failed.";
+    const fallbackDetail = fallbackError instanceof Error
+      ? fallbackError.message
+      : "keyless universe fallback failed: no priced rows.";
+    throw new Error(`${original} ${fallbackDetail}`);
   }
 }
 

@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { dataSourceFetch } from "./data-source-fetch";
 import { resolveApiKeyWithSource, type ApiKeySource } from "./db";
 import { apiCircuitBreakerShouldSkip } from "./api-circuit-breaker";
@@ -523,8 +524,15 @@ async function fetchVixFromFredVixcls(): Promise<number | null> {
   if (!apiKey) return null;
   const url = `https://api.stlouisfed.org/fred/series/observations?series_id=VIXCLS&limit=1&sort_order=desc&api_key=${apiKey}&file_type=json`;
   return fetchVixLane("vix-fred", url, "application/json", async (res) => {
-    const payload = (await res.json()) as { observations?: Array<{ value?: string }> };
-    const value = payload?.observations?.[0]?.value;
+    // FRED adds realtime_start / units / count.  Strip those.  Do not `.strict()`
+    // or a documented extra key would drop the VIXCLS print.
+    const payload = z
+      .object({
+        observations: z.array(z.object({ value: z.string().optional() }).strip()).optional()
+      })
+      .strip()
+      .parse(await res.json());
+    const value = payload.observations?.[0]?.value;
     if (!value || value === ".") return null;
     const vix = Number.parseFloat(value);
     return Number.isFinite(vix) && vix > 0 ? Math.round(vix * 100) / 100 : null;

@@ -42,4 +42,50 @@ describe("fetchFallbackUniverseRows", () => {
     expect(aapl?.name).toBe("Apple Inc.");
     expect(rows.some((r) => r.symbol === "ZZZZ")).toBe(true);
   });
+
+  it("keeps Nasdaq Trader rows when the SEC file fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === SEC_COMPANY_TICKERS_EXCHANGE_URL) {
+          return { ok: false, status: 429, text: async (): Promise<string> => "" };
+        }
+        if (url === NASDAQ_LISTED_URL) {
+          return {
+            ok: true,
+            text: async (): Promise<string> =>
+              "Symbol|Security Name|Market Category|Test Issue|Financial Status\nAAPL|Apple Inc.|Q|N|N\n"
+          };
+        }
+        return { ok: false, status: 404, text: async (): Promise<string> => "" };
+      })
+    );
+    const rows = await fetchFallbackUniverseRows();
+    expect(rows.find((row) => row.symbol === "AAPL")?.name).toBe("Apple Inc.");
+  });
+
+  it("reads the published SEC name column", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === SEC_COMPANY_TICKERS_EXCHANGE_URL) {
+          return {
+            ok: true,
+            text: async (): Promise<string> =>
+              JSON.stringify({ fields: ["cik", "name", "ticker", "exchange"], data: [[320193, "Apple Inc.", "AAPL", "Nasdaq"]] })
+          };
+        }
+        if (url === NASDAQ_LISTED_URL) {
+          return {
+            ok: true,
+            text: async (): Promise<string> =>
+              "Symbol|Security Name|Market Category|Test Issue|Financial Status\nAAPL|APPLE INC|Q|N|N\n"
+          };
+        }
+        return { ok: true, text: async (): Promise<string> => "Symbol|Security Name|Exchange|Test Issue|Round Lot Size\n" };
+      })
+    );
+    const rows = await fetchFallbackUniverseRows();
+    expect(rows.find((row) => row.symbol === "AAPL")?.name).toBe("Apple Inc.");
+  });
 });
