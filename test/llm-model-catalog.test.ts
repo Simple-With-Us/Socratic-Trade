@@ -4,13 +4,14 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 process.env.DATABASE_URL = `file:${path.join(os.tmpdir(), `llm-catalog-test-${Date.now()}.db`)}`;
 
-// 21 rows as of the 2026-09-18 model-catalog cleanup (down from 32) — see
+// 22 rows as of 2026-10-12 (21 after the 2026-09-18 model-catalog cleanup, down from 32)  See
 // docs/rollouts/2026-09-18-model-catalog-cleanup.md for the removed rows and why.
 const OWNER_ROWS: Array<[string, string, string]> = [
   ["gpt-6-astra-pro", "openai/gpt-6-astra-pro", "gpt-6-astra-pro"],
   ["gpt-6-astra", "openai/gpt-6-astra", "gpt-6-astra"],
   ["minimax-m3", "minimax/minimax-m3", "MiniMax-M3"],
   ["muse-spark-1.3", "meta/muse-spark-1.3", "muse-spark-1.3"],
+  ["muse-spark-1.3-contributor", "meta/muse-spark-1.3-contributor", "muse-spark-1.3-contributor"],
   ["muse-glimmer-30b", "meta/muse-glimmer-30b", "muse-glimmer-30b"],
   ["gpt-5.6-sol", "openai/gpt-5.6-sol", "gpt-5.6-sol"],
   ["gpt-5.6-luna", "openai/gpt-5.6-luna", "gpt-5.6-luna"],

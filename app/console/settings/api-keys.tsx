@@ -22,6 +22,7 @@ import {
   listApiKeys,
   saveApiKey,
   saveApiKeyPlanTier,
+  saveApiKeyRoute,
   type ApiKeyEntry
 } from "./lib";
 
@@ -91,6 +92,24 @@ export function ApiKeysCard() {
       toast.push("pos", `${entry.label} ${credName} removed`, "Features it unlocked fall back to the server key if one exists, otherwise turn off.");
     } catch (error) {
       toast.push("neg", `Could not remove ${credName}`, error instanceof ConsoleApiError ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onRouteChange = async (entry: ApiKeyEntry, route: "openrouter" | "native") => {
+    const previous = entry.route;
+    setBusy(entry.service);
+    setSaveStatus("saving");
+    setEntries((cur) => (cur ?? []).map((row) => (row.service === entry.service ? { ...row, route } : row)));
+    try {
+      await saveApiKeyRoute(entry.service, route);
+      await load();
+      setSaveStatus("saved");
+    } catch (error) {
+      setEntries((cur) => (cur ?? []).map((row) => (row.service === entry.service ? { ...row, route: previous } : row)));
+      setSaveStatus("error");
+      toast.push("neg", "Could not save route", error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
       setBusy(null);
     }
@@ -201,6 +220,26 @@ export function ApiKeysCard() {
                           >
                             saved <Ago iso={entry.updatedAt} />
                           </span>
+                        )}
+                        {entry.routeToggle && (
+                          <label
+                            className="flex items-center gap-1.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]"
+                            title="OpenRouter is the default.  Pick Direct to send this provider's models straight to its own API with your key above."
+                          >
+                            <span className="whitespace-nowrap">Route</span>
+                            <Select
+                              className="min-w-[8.5rem] py-0.5 text-[length:var(--con-fs-xs)]"
+                              value={entry.route ?? "openrouter"}
+                              disabled={busy !== null || retired || entry.source === "none"}
+                              title={entry.source === "none" ? "Add a key first.  Direct only works once this provider has a key." : undefined}
+                              aria-busy={busy === entry.service}
+                              onChange={(e) => void onRouteChange(entry, e.target.value === "native" ? "native" : "openrouter")}
+                              aria-label={`${entry.label} route`}
+                            >
+                              <option value="openrouter">OpenRouter (default)</option>
+                              <option value="native">Direct (own key)</option>
+                            </Select>
+                          </label>
                         )}
                         {showTier && (
                           <label

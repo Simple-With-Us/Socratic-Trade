@@ -15,7 +15,7 @@ import { llmFetch, LLM_TIMEOUT_MS, reasoningCapabilityForModel, withLlmRequestBo
 // Reuse the SAME model-family + OpenRouter-wire-id helpers the strategy engine's
 // resolveLlmEndpoint uses (llm-provider.ts), so the Coach's provider precedence and model-id
 // normalization can never drift from the engine's.  See llmForModel / chatProviderForModel below.
-import { llmModelFamily, normalizeOpenRouterModelId, nativeSlugFor, modelRequiresOpenRouter } from "../llm-provider";
+import { llmModelFamily, normalizeOpenRouterModelId, nativeSlugFor, modelRequiresOpenRouter, resolveMetaNative, minimaxDirectRoute, META_MODEL_API_URL } from "../llm-provider";
 import type { LlmReasoningEffort } from "../types";
 import { DISCLAIMER, SYSTEM_PROMPT } from "./prompt";
 import type { ChatLLM, Citation, LlmResult, LlmRunArgs, ToolCall } from "./types";
@@ -783,6 +783,7 @@ function openAiCompatChatUrl(provider: OpenAiCompatProvider): string {  if (prov
   if (provider === "deepseek") return process.env.DEEPSEEK_API_URL?.trim() || "https://api.deepseek.com/v1/chat/completions";
   if (provider === "moonshot") return process.env.MOONSHOT_API_URL?.trim() || "https://api.moonshot.cn/v1/chat/completions";
   if (provider === "minimax") return process.env.MINIMAX_API_URL?.trim() || "https://api.minimax.io/v1/chat/completions";
+  if (provider === "meta") return process.env.META_API_URL?.trim() || META_MODEL_API_URL;
   return process.env.OPENAI_CHAT_URL?.trim() || "https://api.openai.com/v1/chat/completions";
 }
 
@@ -828,11 +829,20 @@ export function llmForModel(
   const trimmed = model?.trim();
   if (!trimmed || trimmed.toLowerCase() === "mock") return new MockLLM();
 
+  // 0. Native Meta: when the user chose "direct" for Meta and has a Meta key, a Muse Spark model
+  //    goes straight to api.meta.ai.  Otherwise it falls through to the OpenRouter path below.
+  const metaNative = resolveMetaNative(trimmed, userId);
+  if (metaNative) {
+    const usage: LlmUsageOpts = { userId, keySource: metaNative.keySource, keyRef: metaNative.keyRef, context: "chat" };
+    const transport = opts.openAITransport ?? makeOpenAITransport(openAiCompatChatUrl("meta"), "meta");
+    return new OpenAILLM(metaNative.key, metaNative.model, transport, usage, "meta", opts.reasoningEffort);
+  }
+
   // 1. Primary path: an OpenRouter key (user or operator failover) serves ANY model. The wire
   //    model id is normalized with the exact helper the engine uses (normalizeOpenRouterModelId)
   //    so an availability probe and the actual call can never disagree about a model's id.
   const openRouterCred = resolveLlmCredential("openrouter", userId);
-  if (openRouterCred.key) {
+  if (openRouterCred.key && !minimaxDirectRoute(trimmed, userId)) {
     const usage: LlmUsageOpts = {
       userId,
       keySource: openRouterCred.source === "operator" ? "operator" : "user",
@@ -847,7 +857,7 @@ export function llmForModel(
   // 2. Native-provider fallback (unchanged): no OpenRouter key resolved, so try the model's own
   //    family key directly.
   const provider = chatProviderForModel(trimmed);
-  if (modelRequiresOpenRouter(trimmed)) return new MockLLM();
+  if (modelRequiresOpenRouter(trimmed) && !minimaxDirectRoute(trimmed, userId)) return new MockLLM();
   const { key, source, keyRef } = resolveLlmCredential(provider, userId);
   if (!key) return new MockLLM();
   const usage: LlmUsageOpts = { userId, keySource: source === "operator" ? "operator" : "user", keyRef, context: "chat" };

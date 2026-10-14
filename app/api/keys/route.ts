@@ -8,8 +8,10 @@ import {
   upsertUserApiKey,
   deleteUserApiKey,
   setUserApiKeyPlanTier,
+  setUserSetting,
   resolveApiKeyWithSource
 } from "@/lib/db";
+import { isNativeRouteService, llmRouteFor, llmRouteSettingKey } from "@/lib/llm-route";
 import { checkAdmin } from "@/lib/auth/admin";
 import { resolveRequestUserId } from "@/lib/request-user";
 import { queueStPrimaryBridgeWriterSync } from "@/lib/st-primary-bridge-writer";
@@ -85,6 +87,14 @@ const API_KEY_CATALOG = [
     required: false,
     unlocks: "DeepSeek V4 models (deepseek-v4-flash / deepseek-v4-pro) for the Assistant and strategy. Note: requests are processed on DeepSeek's servers (China).",
     docsUrl: "https://platform.deepseek.com/api_keys"
+  },
+  {
+    service: "meta",
+    label: "Meta Model API",
+    category: "LLM",
+    required: false,
+    unlocks: "Muse Spark models (muse-spark-1.3, muse-spark-1.3-contributor) billed directly by Meta instead of through OpenRouter.  The contributor tier is much cheaper because Meta trains on your prompts and completions.",
+    docsUrl: "https://dev.meta.ai/docs/overview"
   },
   {
     service: "moonshot",
@@ -333,6 +343,7 @@ export async function GET(request: NextRequest) {
         updatedAt: stored?.updatedAt,
         savedLabel: stored?.label,
         ...tiers,
+        ...(isNativeRouteService(entry.service) ? { routeToggle: true, route: llmRouteFor(entry.service, userId) } : {}),
         retired: retired || isRetiredMarketDataService(entry.service),
         retiredNote: "retiredNote" in entry ? entry.retiredNote : undefined
       };
@@ -348,8 +359,9 @@ export async function POST(request: NextRequest) {
       apiKey?: string;
       label?: string;
       planTier?: string | null;
+      route?: string;
     };
-    const { service, apiKey, label, planTier } = body;
+    const { service, apiKey, label, planTier, route } = body;
     const userId = resolveRequestUserId(request, body);
 
     const canonical = service ? normalizeApiKeyService(service) : "";
@@ -367,6 +379,20 @@ export async function POST(request: NextRequest) {
         },
         { status: 400 }
       );
+    }
+
+    // Route toggle (Meta / MiniMax): OpenRouter by default, or direct with the user's own key.
+    if (route !== undefined) {
+      if (!isNativeRouteService(canonical)) {
+        return NextResponse.json({ error: "route is only supported for meta and minimax" }, { status: 400 });
+      }
+      if (route !== "openrouter" && route !== "native") {
+        return NextResponse.json({ error: 'route must be "openrouter" or "native"' }, { status: 400 });
+      }
+      setUserSetting(userId, llmRouteSettingKey(canonical), route);
+      if (!(typeof apiKey === "string" && apiKey.trim().length > 0) && planTier === undefined) {
+        return NextResponse.json({ success: true, route });
+      }
     }
 
     if (planTier !== undefined && planTier !== null && planTier !== "") {

@@ -1,3 +1,5 @@
+> **2026-10-13 CURSOR — iOS Sentry DSN + TestFlight cron.**  No roadmap scope change.  Substitute `SENTRY_DSN` from CI into the Release archive, record URLError code and API path on mobile network failures, and widen the TestFlight ship Sentry cron margin to match measured GitHub schedule gaps.  Extra-ship no.  Rollout: `docs/rollouts/2026-10-13-ios-sentry-dsn-testflight-cron.md`.
+
 > **2026-10-12 CODEX — CTS-330 cache review follow-up.**  Validate a fresh cache before replacing the old pin and retire Mac Slack hooks before skipping installation.  Product roadmap remains unchanged; hosted checks and current-head review gate landing.
 
 > **2026-10-12 CODEX — CTS-330 cloud review follow-up.**  Complete the Linear/Zulip setup prerequisite with a pinned protocol/registry bundle and idempotent retirement of persisted Slack hooks.  Product roadmap and runtime behavior are unchanged.  Rollout: `docs/rollouts/2026-10-11-kody-minimax.md`.
