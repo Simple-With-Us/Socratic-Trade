@@ -1573,6 +1573,83 @@ describe("Tradier adapter — HTTP 400 Unexpected server error on the order path
     expect(posts).toBe(1);
   });
 
+  // The tag hit proves the POST landed; a hardcoded `{ status: "pending" }` stub dropped the fill
+  // fields, so an order that FILLED inside the lookup window was booked unfilled at the proposal
+  // price.  The lookup-hit path must carry the broker's real state through.
+  it("carries the broker's real fill state through the tag-hit path", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        return json(400, { errors: { error: "Unexpected server error" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders/999`)) {
+        return json(200, { order: { id: 999, status: "filled", exec_quantity: "1", avg_fill_price: "10.25" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        return json(200, { orders: { order: { id: 999, tag: "r-fill", status: "pending" } } });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder({ ...equity, refId: "r-fill" });
+    expect(posts).toBe(1);
+    expect(placed).toMatchObject({ orderId: "999", state: "filled", filledQuantity: 1, averagePrice: 10.25 });
+  });
+
+  // A failed re-read must NOT rethrow: the order is known to be live, so surfacing a retryable
+  // placement failure here would risk a duplicate POST of an order already on the book.
+  it("keeps the id and does not re-POST when the tag-hit re-read fails", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        return json(400, { errors: { error: "Unexpected server error" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders/999`)) {
+        return json(500, { errors: { error: "reread down" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        return json(200, { orders: { order: { id: 999, tag: "r-reread", status: "pending" } } });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder({ ...equity, refId: "r-reread" });
+    expect(placed.orderId).toBe("999");
+    expect(posts).toBe(1);
+  });
+
+  // A garbled envelope at the trust boundary is a clean MISS (so the retry path still runs),
+  // never a throw — throwing here would abort the placement we are surviving.
+  it("treats a drifted order-listing envelope as a tag miss, not a throw", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        if (posts === 1) return json(400, { errors: { error: "Unexpected server error" } });
+        return json(200, { order: { id: 42, status: "ok" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        return json(200, { orders: 12345 });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder({ ...equity, refId: "r-drift" });
+    expect(placed.orderId).toBe("42");
+    expect(posts).toBe(2);
+  });
+
   it("does not POST again when the tag lookup itself fails", async () => {
     await seedTradier({ environment: "paper" });
     let posts = 0;

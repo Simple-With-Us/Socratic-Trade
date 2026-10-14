@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { z } from "zod";
 import type {
   AccountCapabilities,
   BrokerageAccount,
@@ -95,6 +96,19 @@ function tradierProbeTtlMs(streak: number): number {
   const doublings = Math.max(0, Math.min(streak, 5)); // 2m * 2^5 = 64m, already above the 60m cap
   return Math.min(TRADIER_PROBE_BASE_TTL_MS * 2 ** doublings, TRADIER_PROBE_MAX_TTL_MS);
 }
+
+/**
+ * Tradier GET /accounts/:account/orders envelope, validated at the HTTP boundary before anything
+ * is read off it.  Only `orders` is constrained; the response carries other top-level keys and the
+ * object is NOT `.strict()`, so an added envelope field cannot fail the parse.  Rows pass through
+ * untouched because callers read a wide, evolving set of order fields off them.
+ *
+ * An empty listing is `orders: null` (or the string "null"), which is why `nullish` is required
+ * rather than `optional`.
+ */
+const TradierOrdersPageSchema = z.object({
+  orders: z.union([z.object({ order: z.unknown() }), z.string(), z.null()]).nullish()
+});
 
 // Tradier envelopes wrap collections as { orders: { order: [...] } }, collapse a lone element to a
 // bare object { orders: { order: {...} } }, and report empty as null or the string "null". Normalize
@@ -933,7 +947,14 @@ class TradierBrokerGateway implements BrokerGateway {
             throw error;
           }
           if (existing) {
-            return { order: { id: existing, status: "pending" } } as unknown as T;
+            // The tag hit proves the POST landed, but the hardcoded `{ status: "pending" }`
+            // stub dropped exec_quantity / avg_fill_price, so an order that FILLED inside the
+            // lookup+backoff window was booked as unfilled at the proposal price — exactly the
+            // P&L corruption the equity path warns about below.  Re-read the order for the
+            // broker's real state.  A failed re-read must NOT rethrow: that would surface as a
+            // retryable placement failure and risk a duplicate POST of an order we already know
+            // is live, so fall back to the id-only stub instead.
+            return await this.fetchPlacedOrderBody<T>(accountNumber, existing);
           }
           await sleepMs(tradierTransientBackoffMs(attempt));
         }
@@ -942,12 +963,47 @@ class TradierBrokerGateway implements BrokerGateway {
     });
   }
 
-  /** One page of the current listing.  A just-accepted order is on page 1. */
+  /**
+   * Broker truth for an order id we already know exists.  Returns the real order body so the
+   * caller's `status` / `exec_quantity` / `avg_fill_price` mapping sees the broker's state, not a
+   * stub.  A 404 or any transport failure falls back to the minimal `{ id, status: "pending" }`
+   * shape rather than throwing — the order IS on the book (that is why we are here), so failing
+   * the placement would be strictly worse than reporting a conservative pending state.
+   */
+  private async fetchPlacedOrderBody<T>(accountNumber: string, orderId: string): Promise<T> {
+    const stub = { order: { id: orderId, status: "pending" } } as unknown as T;
+    if (!/^[A-Za-z0-9_-]+$/.test(orderId)) return stub;
+    try {
+      const body = await this.request<T>("GET", `/accounts/${accountNumber}/orders/${encodeURIComponent(orderId)}`, {
+        query: { includeTags: "true" }
+      });
+      // A 200 with no usable order object is not proof of anything — keep the stub.
+      const row = (body as { order?: unknown } | undefined)?.order;
+      if (!row || typeof row !== "object" || Array.isArray(row)) return stub;
+      return { ...(body as object), order: { ...(row as Record<string, unknown>), id: (row as Record<string, unknown>).id ?? orderId } } as T;
+    } catch {
+      return stub;
+    }
+  }
+
+  /**
+   * One page of the current listing.  A just-accepted order is on page 1.
+   *
+   * The envelope is an EXTERNAL boundary, so it is parsed before anything is read off it.  A
+   * drifted/garbled response is a clean MISS (no tag match) rather than a throw: throwing here
+   * would abort placement on the transient-error path we are specifically trying to survive.
+   * Only the envelope shape is constrained — the `order` rows stay `unknown` and are narrowed by
+   * the existing per-field readers (`String(row.tag)`, `String(row.id)`), since callers read a
+   * wide, evolving set of order fields off them.
+   */
   private async findOrderIdByTag(accountNumber: string, tag: string): Promise<string | undefined> {
-    const body = await this.request<{ orders?: { order?: unknown } | string }>("GET", `/accounts/${accountNumber}/orders`, {
+    const raw: unknown = await this.request<unknown>("GET", `/accounts/${accountNumber}/orders`, {
       query: { includeTags: "true", page: 1 }
     });
-    const ordersField = typeof body.orders === "object" && body.orders ? (body.orders as Record<string, unknown>).order : undefined;
+    const parsed = TradierOrdersPageSchema.safeParse(raw);
+    if (!parsed.success) return undefined;
+    const ordersField =
+      parsed.data.orders && typeof parsed.data.orders === "object" ? parsed.data.orders.order : undefined;
     for (const row of arr<Record<string, unknown>>(ordersField)) {
       if (String(row.tag ?? "") === tag && row.id != null && String(row.id) !== "") return String(row.id);
     }

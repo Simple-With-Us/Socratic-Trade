@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-14 Codex Autofix — PR #4668 tag-hit fill state and listing validation
+
+**What.**  Two Kody review findings on the Tradier transient-400 branch.  The tag-hit path in `postOrderToleratingTransientServerError` returned a hardcoded `{ id, status: "pending" }` stub, dropping `exec_quantity` / `avg_fill_price`, so an order that filled inside the lookup+backoff window was booked unfilled at the proposal price — the exact P&L corruption the equity path's own comment warns about.  It now re-reads the order for the broker's real state, falling back to the stub (never a rethrow) if that read fails, since the order is already known live.  `findOrderIdByTag` now validates the `GET /orders` envelope through `TradierOrdersPageSchema` at the HTTP trust boundary; a drifted shape is a clean tag miss, never a throw.  Three regression tests added.
+
+**Review triage.**  The `src/lib/placement-outcome.ts` HIGH-severity thread is Sentry's bug-prediction bot, not one of the three review bots this fixer answers, and its subject (reconciling placement before booking a retryable `not_placed` on the final attempt) is a placement-semantics design decision, so it was left open for the maintainer rather than guessed at.
+
+**Verification.**  `npx tsc --noEmit` ok.  Targeted vitest (tradier + placement-outcome) 96 passed.  Full `npm test` and `npm run build` re-run after merging `origin/main`.
+
+**Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`.
+
+**Next.**  `do-not-automerge` stays on PR #4668 — this fixer does not remove the hold label or arm auto-merge.
+
 ## 2026-10-14 GROK — Tradier sandbox open HTTP 400
 
 **What.**  Sandbox HTTP 400 "Unexpected server error" on the order path retries with backoff and does not auto-halt.  A second POST happens only after the tag is missing.  Sandbox equity and option posts wait 15 minutes after the regular open.  Live Tradier still places.  Buying power, plain HTTP 400, HTTP 403, and HTTP 5xx still fail on the first attempt and can still halt.
