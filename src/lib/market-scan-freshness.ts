@@ -17,6 +17,7 @@
 // refreshing). On a non-trading day, run in `enrichmentMode: "skip"` seeded from the newest
 // persisted scan's quotesBySymbol — a keyless price/breadth refresh that burns no keyed
 // provider quota, mirroring the interactive /api/scan path.
+import { z } from "zod";
 import { audit, getPolicy, latestAuditByKind, listUsers, newerAuditEntry, type AuditEventRow, latestAuditStampByKind } from "./db";
 import { dynamicIndexUniversesForPolicy } from "./index-universes";
 import { isTradingDay } from "./market-calendar";
@@ -149,11 +150,17 @@ export function freshnessFastGateRowIdForTests(userId: string): string | undefin
  *  and an unbounded fan-out would stampede the shared screener on a cold cache. */
 const FRESHNESS_USER_CONCURRENCY = 4;
 
+/** Shape this lane writes on `market_scan_failed`.  A drifted row is not the open outage. */
+const MarketScanFailurePayloadSchema = z
+  .object({
+    message: z.string(),
+    source: z.literal("market_scan_freshness")
+  })
+  .strict();
+
 function failureAuditMessage(payload: unknown): string | undefined {
-  if (!payload || typeof payload !== "object") return undefined;
-  const record = payload as { message?: unknown; source?: unknown };
-  if (record.source !== "market_scan_freshness") return undefined;
-  return typeof record.message === "string" ? record.message : undefined;
+  const parsed = MarketScanFailurePayloadSchema.safeParse(payload);
+  return parsed.success ? parsed.data.message : undefined;
 }
 
 /** True when this user already has a freshness failure for the same message inside the current

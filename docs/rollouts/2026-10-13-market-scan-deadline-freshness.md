@@ -37,7 +37,7 @@ Open Sentry and Kody threads on this branch:
 - Users refresh with a concurrency cap of 4.  One hung singleflight cannot block the rest of the lane.  `runScanSingleFlight` still coalesces same-user duplicates.
 - `recordScanFailure` skips a row when the same freshness message is already the open outage inside the freshness window.  A newer `market_scan` ends the outage, so the next failure is recorded again.
 - A successful `market_scan` primes `lastUsableAuditRowId` from `newestPersistedMarketScan` so the next tick can hit the fast gate.
-- The Nasdaq screener body is parsed with `NasdaqScreenerPayloadSchema` before it is indexed, cached, or returned.  Unknown provider keys are stripped.  A drifted envelope throws and is not cached.
+- The Nasdaq screener body is parsed with `NasdaqScreenerPayloadSchema` before it is indexed, cached, or returned.  The first pass stripped unknown provider keys.  Follow-up 2 replaces that with `.strict()` so an undeclared key fails the parse instead.
 
 ## Verification
 
@@ -54,6 +54,20 @@ Full `npm test`: `Test Files 2 failed | 819 passed | 1 skipped (822)`, `Tests 2 
 - `test/event-loop-stall-hot-path.test.ts` timing case failed under the full-suite load (`fastMs * 4` was 300, slow path 121).  It passed when re-run alone.
 
 Files: `app/api/scan/route.ts`, `src/lib/market-scan-freshness.ts`, `src/lib/market.ts`, `src/lib/nasdaq-screener-schema.ts`, `test/market-scan-freshness.test.ts`, `test/scan-empty-screener.test.ts`, `test/nasdaq-screener-schema.test.ts`, `STATUS.md`, `PLAN.md`, this note.
+
+## Review follow-up 2
+
+Kody's next pass on `a5dcb806` asked for a Zod parse of the freshness failure payload and for the screener schema to stop using `.strip()`.
+
+- `failureAuditMessage` uses `MarketScanFailurePayloadSchema` (`.strict()`, `safeParse`).  A row whose payload is not `{ message, source: "market_scan_freshness" }` does not count as the open outage, so the next tick writes a new `market_scan_failed` row.
+- `NasdaqScreenerPayloadSchema` is `.strict()` on the envelope, the table, the status object, and each row.  Keys observed on live `api.nasdaq.com` screener JSON are declared (`url`, `message`, `status`, `filters`, `totalrecords`, table `asOf` and `headers`, plus optional `volume`, `sector`, `industry`, `country`, and `ipoyear`).  An undeclared key throws before the cache write.  Both a `tableonly=true` body and a `tableonly=false` body from this machine parsed.
+
+## Verification (follow-up 2)
+
+- npm run lint -> ok (0 errors; 866 grandfathered warnings)
+- npx tsc --noEmit -> ok
+- npm test -> not re-run in full.  Targeted `npx vitest run test/nasdaq-screener-schema.test.ts test/market-scan-freshness.test.ts test/scan-empty-screener.test.ts test/market-dynamic-universe.test.ts test/market-preselection.test.ts` -> ok (76 tests).  The earlier full `npm test` on this branch failed two sandbox-only cases recorded above.
+- npm run build -> ok
 
 ## Next
 

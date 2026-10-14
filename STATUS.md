@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 GROK — PR #4609 strict screener and failure payload
+
+**What.**  Second review pass.  Freshness failure dedupe reads `market_scan_failed` through a strict Zod schema.  The Nasdaq screener schema is strict too: declared live keys still parse, and an unknown key is not cached.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  Targeted screener and freshness tests 76 passed.  Full `npm test` was not re-run; the earlier sandbox DNS and stall-timing failures are unchanged.
+
+**Docs.**  `docs/rollouts/2026-10-13-market-scan-deadline-freshness.md`.
+
+**Next.**  `do-not-automerge` stays.  Do not merge from this lane.
+
 ## 2026-10-13 GROK — PR #4609 review threads
 
 **What.**  Review follow-up on the market-scan freshness branch.  Identity failures on `GET /api/scan` no longer fall back to user `local`.  Freshness users overlap (cap 4) with a per-scan deadline, one `market_scan_failed` row per open outage, and the fast gate primed after a successful write.  The Nasdaq screener JSON is Zod-parsed before cache.

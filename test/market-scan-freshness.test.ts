@@ -262,6 +262,19 @@ describe("runMarketScanFreshnessIfDue", () => {
     expect(JSON.parse(rows[0]?.payload ?? "{}").message).toBe("provider down");
   });
 
+  it("writes a new failure when the latest market_scan_failed row is not the freshness payload", async () => {
+    audit("market_scan_failed", { message: "provider down", source: "market_scan_freshness", extra: true }, "local");
+    scanMarketMock.mockRejectedValue(new Error("provider down"));
+    await runMarketScanFreshnessIfDue(MONDAY);
+    const rows = getDb().prepare(
+      "SELECT payload FROM audit_events WHERE kind = 'market_scan_failed' AND user_id = 'local'"
+    ).all() as Array<{ payload: string }>;
+    expect(rows).toHaveLength(2);
+    const parsed = rows.map((row) => JSON.parse(row.payload) as { extra?: boolean; source?: string });
+    expect(parsed.some((payload) => payload.extra === true)).toBe(true);
+    expect(parsed.some((payload) => payload.extra === undefined && payload.source === "market_scan_freshness")).toBe(true);
+  });
+
   it("records a new failure after a successful scan ends the previous outage", async () => {
     scanMarketMock.mockRejectedValueOnce(new Error("provider down"));
     await runMarketScanFreshnessIfDue(MONDAY);
