@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 GROK — PR #4658 verification order
+
+**What.**  `origin/main` (`82162336`) is already merged (`e74332cd`).  The one open Kody thread (`PRRT_kwDOS7mOVM6sjYXO`) is the round 2 handoff: it omitted `npm run lint` and listed build before `npm test`.  That block is now lint, tsc, test, build.  The thread is not resolved.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test` was 1 failed, 9327 passed, 51 skipped.  The failure is sandbox DNS for discord.com in `test/egress-guard.test.ts`, outside this diff.  Hosted `verify` on `94b28463` passed lint, tsc, `npm test`, and `npm run build`.
+
+**Docs.**  `docs/rollouts/2026-10-14-keyless-options-enrichment.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Reply on the open thread without resolving it.  Comment `@kody start-review`.  Do not merge from this lane.
+
 ## 2026-10-14 AUTOFIX round 2 — PR #4658 (no code change)
 
 **What.**  Second fixer pass.  Re-triaged all 12 review threads on the branch.  Nothing new: the second `kody-ai` review (triggered by `@kody start-review` at 22:39Z) raised only three threads, all `isOutdated` and all already answered by `94b28463` — `.strict()` vs `.passthrough()` on vendor envelopes, the Alpaca IEX snapshot sub-objects, and the Cboe `option` field type.  The three `sentry[bot]` threads are unchanged from round 1 and still describe the pre-`99da1478` diff.  No source or test change was warranted.

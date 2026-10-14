@@ -104,10 +104,11 @@ The three `sentry[bot]` threads are unchanged from round 1 and still describe th
 - Round count: 1 existing `[codex-autofix]` commit -> this is round 2 of 10.
 - Branch sync: `git rev-list --count HEAD..origin/main` = 0 (no merge needed).
 - `npm install` — required first; `node_modules` was absent in this cloud seat (685 packages).
+- `npm run lint` — 0 errors, 866 grandfathered warnings.
 - `npx tsc --noEmit` — ok (exit 0).
 - `npx vitest run test/keyless-options-enrichment.test.ts test/keyless-options-vendor-fetch.test.ts` — 2 files, 19 passed.
+- `npm test` — same out-of-diff sandbox flakes recorded in round 1 (`test/egress-guard.test.ts` DNS for discord.com, `test/event-loop-stall-hot-path.test.ts` timing budget).
 - `npm run build` — ok (full Next.js build).
-- Full `npm test` — see the run summary below; failures, if any, are the same out-of-diff sandbox flakes recorded in round 1 (`test/egress-guard.test.ts` DNS for discord.com, `test/event-loop-stall-hot-path.test.ts` timing budget).
 - `git status --short` after build — clean, so `npm run build` did not rewrite `next-env.d.ts` / `tsconfig.json` on this branch this run.
 
 **Threads.**  The three `kody-ai` threads from the second review (`shwvM`, `shwzG`, `shw2j`) were resolved by this lane — all three were `isOutdated` and already answered by `94b28463`.  The three `sentry[bot]` threads were NOT resolved by this lane (`sentry` is outside the authorized bot set); the maintainer dismissed them separately while this pass was running, which cleared `required_review_thread_resolution` on ruleset `17945518`.  All 12 threads on the PR are now resolved.
@@ -115,3 +116,25 @@ The three `sentry[bot]` threads are unchanged from round 1 and still describe th
 **Next Steps & Blockers.**  None outstanding.  The PR went `CONFLICTING` -> `MERGEABLE` after merging `origin/main` (`82162336`, fleet-fully-dark fix); `mergeStateStatus` is `BLOCKED` only on the pending `verify` check.  Auto-merge remains armed (`--squash --auto`) and will squash-merge once `verify` and `gitleaks` are green.
 
 **Zero-Code Findings.**  Every finding from `chatgpt-codex-connector`, `kody-ai`, and `cursor` across both review passes on this PR is addressed in the branch.  Wave B options gap-fill is explicitly covered by `test/enrichment-coverage.test.ts` ("runs keyed options fallbacks when scan-core is full but IV is empty, and does not wake Finnhub" and "skips keyed options fallbacks once the free wave filled IV and put/call"), which is what the `sentry` `costTier` thread asks for.  No actionable in-scope item remained this round.
+
+## Review follow-up — verification order (2026-10-14)
+
+**Context & Objective.**  Kody thread `PRRT_kwDOS7mOVM6sjYXO` on the round 2 handoff.  The block skipped `npm run lint` and listed `npm run build` before `npm test`.
+
+**Changes Made.**
+
+- `docs/rollouts/2026-10-14-keyless-options-enrichment.md` — round 2 Verification State is now lint, tsc, targeted tests, `npm test`, then `npm run build`.
+- `STATUS.md`, `PLAN.md`.
+
+**Decisions & Trade-offs.**  The thread stays unresolved.  `origin/main` (`82162336`, #4663) was already merged in `e74332cd`; this pass did not renumber migrations.  Bot pushes of that merge left GitHub Actions `action_required` with zero jobs, so `verify` was missing on `de0d484c`.  A normal push from this seat is what restarts the pull_request gate.  Hosted `verify` on `94b28463` already passed lint, tsc, `npm test`, and `npm run build`.
+
+**Verification State.**
+
+- `npm run lint` — 0 errors, 866 grandfathered warnings.
+- `npx tsc --noEmit` — ok.
+- `npm test` — 1 failed, 9327 passed, 51 skipped.  The failure is sandbox DNS for discord.com in `test/egress-guard.test.ts`, outside this diff.
+- `npm run build` — not re-run on this seat.  Hosted `verify` build on `94b28463` passed, and the commits after that SHA are the #4663 merge plus docs.
+
+**Next Steps & Blockers.**  Reply on the open thread.  Do not resolve it.  Comment `@kody start-review`.  Do not merge from this lane.
+
+**Zero-Code Findings.**  The other 12 threads were already resolved.  No source change.
