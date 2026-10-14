@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-14 CODEX-AUTOFIX — PR #4619 merge conflict + thread state (proxy-use log)
+
+**What.**  Second autofix round on `Muse-Assist/proxy-use-logging`.  No genuinely new review items: all five threads (sentry `globalThis` ring, kody probe-port, kody x2 docs leak, kody Verification State) were already fixed in `783f59b8` and are RESOLVED, with kody explicitly verifying each fix on the current head ("Nothing further to change from my side").  The only real blocker was the branch being CONFLICTING with `main`; merged `origin/main` (`57477ebe`) cleanly with no conflicts and no manual `STATUS.md` reconciliation needed.
+
+**Verification.**  `npm run lint` -> ok (0 errors; 866 warnings).  `npx tsc --noEmit` -> ok.  `npm test` -> 14 failed | 9254 passed | 51 skipped (9319).  All 14 failures are pre-existing and environment-caused, NOT from this PR: 13 are OpenRouter/LLM-routing tests (`llm-provider`, `openrouter-credits`, `chat-llm`, `framework-review`) that assert "no key configured" while this runner has a real `OPENROUTER_API_KEY` in its environment, and they reproduce identically on pristine `origin/main` (13 failed | 47 passed in a detached main worktree).  The 14th, `test/event-loop-stall-hot-path.test.ts` ("expected 115 to be less than 100"), is a timing-sensitive perf flake.  None of those five files are touched by this PR.  The PR's own tests: `npx vitest run test/proxy-use-log.test.ts test/proxy-use-route.test.ts test/proxy-fetch.test.ts test/data-source-fetch.test.ts` -> 45 passed (4 files).  `npm run build` -> ok.
+
+**Note on `npm test` exit code.**  `npm test` reported exit 0 despite the 14 assertion failures, because `vitest run` emits GH Actions `::error` annotations while the wrapper swallows the non-zero status.  Treat the printed `Tests ... failed` line as authoritative, not the exit code.
+
+**Docs.**  `docs/rollouts/2026-10-13-proxy-use-logging.md` (Verification State refreshed).
+
+**Next.**  Auto-merge re-armed; lands when the hosted `verify` job is green.
+
 ## 2026-10-13 Muse-Assist — PR #4619 review threads (proxy-use log)
 
 **What.**  Review fixes on `Muse-Assist/proxy-use-logging`.  The proxy-use ring now lives on `globalThis` (`__socraticProxyUseRing`) so `dataSourceFetch` and `GET /api/proxy-use` share one buffer when Next bundles them as separate module copies.  `proxyProbePort` in `src/lib/proxy-fetch.ts` takes 443 for an https URL whose port is empty (omitted or the scheme default, which `URL` elides) and 80 otherwise.  It is not exported from the route module.  The rollout note no longer names private proxy addresses or mesh routing.

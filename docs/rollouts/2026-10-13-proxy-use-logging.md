@@ -61,20 +61,42 @@ changed:
 
 ## Verification State
 
+Re-verified 2026-10-14 on the post-merge head, after resolving the branch's
+merge conflict with `main`:
+
 ```bash
 npm run lint -> ok (0 errors; 866 warnings)
 npx tsc --noEmit -> ok
-npm test -> 1 failed | 9267 passed | 51 skipped (9319)
+npm test -> 14 failed | 9254 passed | 51 skipped (9319)
 npm run build -> ok
 ```
 
 Fast-to-slow order, one status per command.  Targeted runs:
 
 ```bash
-npx vitest run test/proxy-use-log.test.ts test/proxy-use-route.test.ts test/data-source-fetch.test.ts test/proxy-fetch.test.ts test/middleware-auth.test.ts -> ok (5 files, 88 tests)
+npx vitest run test/proxy-use-log.test.ts test/proxy-use-route.test.ts test/proxy-fetch.test.ts test/data-source-fetch.test.ts -> ok (4 files, 45 tests)
 ```
 
-The one full-suite failure is `test/egress-guard.test.ts` "uses real DNS by default when no resolver is injected".  In this environment `discord.com` resolves to `198.18.0.1` (RFC 2544 benchmark range), which `isPrivateOrReservedIp` correctly rejects.  `src/lib/egress-guard.ts` and that test are unchanged versus `origin/main`.  Touched proxy-use tests passed.
+All 14 full-suite failures are pre-existing and environment-caused, not from
+this PR:
+
+- 13 are OpenRouter / LLM-routing tests (`test/llm-provider.test.ts`,
+  `test/openrouter-credits.test.ts`, `test/chat-llm.test.ts`,
+  `test/framework-review.test.ts`).  They assert "no key configured" while this
+  runner environment has a real OpenRouter credential present, so resolution
+  lands on `openrouter` where the test expects a native provider.  Reproduced
+  identically on a pristine detached `origin/main` worktree (13 failed | 47
+  passed), and none of these files are touched by this PR.
+- `test/event-loop-stall-hot-path.test.ts` ("pruneTaskJournal stays under 100ms")
+  is a timing-sensitive perf assertion that measured 115ms on a loaded runner.
+
+Caveat for whoever reads CI output: `npm test` exited **0** despite these 14
+failures, because the `::error` annotation reporter swallows the non-zero
+status.  Read the printed `Tests ... failed` line, not the exit code.
+
+A prior round of this note also recorded a single `test/egress-guard.test.ts`
+real-DNS failure; that file is unchanged versus `origin/main` and did not fail
+in this run.
 
 - Live proxy reachability from the application host: NOT verified from here.
   The endpoint's probe path is code-reviewed only.  The watchdog's first poll
@@ -82,8 +104,9 @@ The one full-suite failure is `test/egress-guard.test.ts` "uses real DNS by defa
 
 ## Next Steps & Blockers
 
-- PR opened against main (branch `Muse-Assist/proxy-use-logging`); left open
-  for the standing auto-merge rule — merge only when CI is green.
+- PR #4619 (branch `Muse-Assist/proxy-use-logging`): all five review threads are
+  resolved and bot-verified, and the branch conflict with `main` is merged
+  clean.  Auto-merge is armed; it lands when the hosted `verify` job is green.
 - Watchdog VM needs its 2-minute poll pointed at
   `https://<app-host>/api/proxy-use` (sample shape below).
 
