@@ -1506,7 +1506,7 @@ async function fetchNasdaqScreener(
   ttlMs: number,
   exchange?: NasdaqExchange,
   signal?: AbortSignal
-): Promise<{ rows: NasdaqScreenerRow[]; asOf?: string; cached: boolean; stale?: boolean; fallback?: boolean }> {
+): Promise<{ rows: NasdaqScreenerRow[]; asOf?: string; cached: boolean; stale?: boolean }> {
   const now = Date.now();
   const cacheKey = exchange ?? "all";
   const cached = screenerCache.get(cacheKey);
@@ -1528,25 +1528,21 @@ async function fetchNasdaqScreener(
     const fresh = screenerCache.get(cacheKey)!;
     return { rows: fresh.rows, asOf: fresh.asOf, cached: false };
   } catch (error) {
-    // Directory fallback runs only when last-good is empty, so there is no prior
-    // price to hydrate onto a symbol/name row.  Price-less rows must not be stored:
-    // toMarketQuote drops them, and a cache hit would skip Nasdaq until the close.
-    let fallbackRows: NasdaqScreenerRow[] = [];
-    let fallbackError: unknown;
-    try {
-      fallbackRows = await fetchFallbackUniverseRows(signal);
-    } catch (err) {
-      fallbackError = err;
-    }
-    const priced = fallbackRows.filter((row) => number(row.lastsale) > 0);
-    if (priced.length > 0) {
-      storeScreenerRows(cacheKey, priced, ttlMs, now);
-      return { rows: priced, cached: false, fallback: true };
-    }
+    // This catch runs only when last-good is empty, so there is no prior price to
+    // copy onto a symbol/name row.  The directory never carries lastsale.
+    // toMarketQuote would drop every row, and storing them would skip Nasdaq until
+    // the close.  Report the listing or the directory's own error, and leave both
+    // caches untouched.  Explicit symbols still recover from the last scan, then Yahoo.
     const original = error instanceof Error ? error.message : "Nasdaq screener failed.";
-    const fallbackDetail = fallbackError instanceof Error
-      ? fallbackError.message
-      : "keyless universe fallback failed: no priced rows.";
+    let fallbackDetail: string;
+    try {
+      const listed = (await fetchFallbackUniverseRows(signal)).length;
+      fallbackDetail = listed === 1
+        ? "Keyless directory listed 1 symbol without a price; that row was not cached."
+        : `Keyless directory listed ${listed} symbols without prices; those rows were not cached.`;
+    } catch (err) {
+      fallbackDetail = err instanceof Error ? err.message : "keyless universe fallback failed";
+    }
     throw new Error(`${original} ${fallbackDetail}`);
   }
 }

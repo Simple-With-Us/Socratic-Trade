@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 Cursor Cloud — PR #4664 review follow-up
+
+**What.**  Merged `origin/main` (`82162336`, fleet fully-dark detector).  Kody's priced-directory suggestion does not apply: the directory runs only when `screenerLastGood` is empty, so there is no price to copy.  The unreachable cache-and-return of priced directory rows is gone.  A directory that lists symbols now says they were not cached, instead of calling that a fallback failure.  A directory failure still keeps the original screener error.  Price-less rows stay out of `screenerCache` and `screenerLastGood`.  Sentry's 429 hold and RapidAPI service-limit threads stay as fixed in `4fc19a96`.  Threads were not resolved.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted vitest 110 passed.  Full `npm test`: 9320 passed, 51 skipped, 2 failed outside this diff (`test/egress-guard.test.ts` sandbox DNS, `test/data-catalog-completeness.test.ts` against the local database).
+
+**Next.**  Push and ask Kody to re-review.  Do not merge from this lane.
+
 ## 2026-10-14 Cursor Cloud — data cascade reliability
 
 **What.**  RapidAPI + Nasdaq screener pacing, `Retry-After` on 429 (lane hold only after retries, and only when the header is present), per-symbol field TTL cache, VIX cascade (Cboe `VIX_History.csv` → FRED `VIXCLS` → Cboe JSON → Yahoo), Nasdaq screener stale-while-revalidate + SEC/Nasdaq Trader fallback, freshness scan deadline 6m.

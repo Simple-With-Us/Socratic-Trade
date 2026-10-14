@@ -77,6 +77,11 @@ describe("nasdaq screener universe fallback", () => {
     expect(second.returnedQuotes).toBe(1);
     expect(afterFirst).toBeGreaterThanOrEqual(1);
     expect(nasdaqHits).toBeGreaterThan(afterFirst);
+    const warningText = first.warnings.join(" ");
+    expect(warningText).toContain("503");
+    expect(warningText).toMatch(/listed 1 symbol without a price/i);
+    expect(warningText).toMatch(/not cached/i);
+    expect(warningText).not.toMatch(/fallback failed/i);
   });
 
   it("keeps the original screener status when the universe fallback throws", async () => {
