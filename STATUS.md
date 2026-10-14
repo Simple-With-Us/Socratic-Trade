@@ -1,5 +1,54 @@
 # Current Status
 
+## 2026-10-13 CODEX-AUTOFIX — PR #4606 embed breaker `consecutive` reset
+
+**What.**  One genuinely new Kody thread on `fix/embed-fail-fast-congress-share-backoff`: when a
+half-open probe settles on a non-counted 4xx, `settleEmbedProviderAttempt` cleared `probeInFlight`
+and `openUntil` but left `consecutive` at its trip value.  The next single counted failure therefore
+re-opened the breaker and re-logged `embed circuit open`.  Confirmed real with a standalone repro
+(warn fired twice where the test expected once) before changing anything, then fixed by also
+clearing `state.consecutive` in the `hadProbe` branch, mirroring `noteEmbedProviderSuccess`.
+
+**Tests.**  New `fully resets the breaker after a 4xx half-open probe settles` case in
+`test/embed-resilience.test.ts`: `EMBED_BREAKER_FAILURES - 1` further counted failures must not
+re-trip the breaker, the Nth does, and no second `console.warn` fires early.  No existing test was
+weakened; the file's other 9 cases are unchanged.
+
+**Docs.**  `docs/rollouts/2026-10-13-pr-4606-review-thread-fixes.md` (Round 2 section).
+
+**Next.**  Merge #4606 after hosted `verify` green.
+
+## 2026-10-13 CLAUDE — PR #4606 review-bot pass 3 (doc/format only)
+
+**What.**  Round 3 on `fix/embed-fail-fast-congress-share-backoff`.  All four still-open Kody threads
+(`settleEmbedProviderAttempt` wedge, `passthrough()` -> strict, vector-db `response.json()` Zod guard,
+rollout verification block) were already fixed in `4351c0c3`; the code needed no change.  This pass
+made the rollout verification block use the literal four-command fast-to-slow `-> ok` format Kody's
+rule asks for, removed an orphaned duplicate doc comment left above `settleEmbedProviderAttempt`, and
+recorded *why* the embed response schema uses `.strip()` rather than the `.strict()` Kody suggested.
+
+**Decisions.**  Kept `.strip()` on the provider embed schema.  `.strict()` would reject live traffic —
+OpenRouter returns a per-item `id` and SiliconFlow a per-item `object`, so failing closed on unknown
+per-item keys turns every real embed response into a `ZodError`.  `test/embedding-response-schema.test.ts`
+already pins that a per-item `object` is stripped, not rejected.  This divergence is documented in the
+rollout note and the schema file.
+
+**Verification.**  `npm run lint` -> ok (0 errors, warnings only); `npx tsc --noEmit` -> ok;
+`npm test` and `npm run build` run on the pushed head.
+
+**Docs.**  `docs/rollouts/2026-10-13-pr-4606-review-thread-fixes.md`.
+
+**Next.**  Merge #4606 after hosted `verify` green.
+
+## 2026-10-13 CURSOR — PR #4606 embed/congress review fixes
+
+**What.**  Closed eight Sentry/Kody threads on `fix/embed-fail-fast-congress-share-backoff`: breaker counts only 5xx/network/timeout, embed abort covers body reads, content-cache hits skip metering, congress upstream half-open probe expiry/release, single breaker warnings, embed cache validity, search-fusion Zod embed parse.
+
+**Verification.**  `test/embed-resilience.test.ts`, targeted congress-share + usage-compliance tests, `npm run lint`, `npx tsc --noEmit`.
+
+**Docs.**  `docs/rollouts/2026-10-13-pr-4606-review-thread-fixes.md`.
+
+**Next.**  Push branch; hosted `verify` on PR #4606.
 ## 2026-10-13 CURSOR — iOS stale cache + error copy (branch `cursor/ios-stale-cache-fix-78c7`)
 
 **What.**  iOS stops trusting stale `marketSession`, retries `/api/mobile/snapshot` with backoff while keeping cache visible, maps URLError copy, and treats `/api/scan` `stale: true` as last-good data (PR #4609).

@@ -132,7 +132,15 @@ applied** — App A's tables don't exist until then, and pushing those rows earl
   wait out the rest of the cooldown. Once the cooldown elapses, exactly one caller's real probe is
   allowed through (an atomic durable claim serializes overlapping callers); success clears the
   breaker, a repeat 401/403 re-trips it for another full cooldown. A non-auth failure (5xx/
-  timeout/network) never trips it — those stay on the existing per-caller backoff.
+  timeout/network) never trips the auth breaker.  A separate in-memory upstream breaker
+  (`CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES`, default 3 exhausted calls,
+  `CONGRESS_SHARE_UPSTREAM_BREAKER_COOLDOWN_MS`, default 10 minutes) holds repeated HTTP 500
+  and network failures.  While it is cooling, import POSTs and the token probe skip the network
+  with no health replay, and the nightly run returns before price-needs and OHLC.  Price-needs
+  500s do not count toward it.  The token probe is `GET /api/export/capabilities` (same bearer,
+  no D1 scan).  `GET /api/export/price-needs?limit=0` is not a cheap probe: App A rewrites a
+  non-positive limit to 500 and always runs unbounded summary SQL, and an uncaught D1/CPU error
+  from that handler is HTTP 500.
 
 ## Congressional price-needs (performance vs S&P)
 
