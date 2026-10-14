@@ -97,7 +97,7 @@
 - Alpaca IEX snapshot sub-objects (thread `shwzG`) — fixed.  `latestTrade` / `dailyBar` / `prevDailyBar` are `nestedRecord` (`z.record(z.string(), z.unknown()).optional().nullable()`), so a partial snapshot still parses and `readAlpacaStockSnapshotPrice` falls through `latestTrade.p` -> `dailyBar.c` -> `prevDailyBar.c`.
 - Cboe `option` as `z.string()` (thread `shw2j`) — deliberately kept.  An OCC symbol is alphanumeric by definition (`AAPL261114C00100000`), so a JSON number cannot be a valid contract id and accepting one would only push a malformed id into `parseOccSymbol`, which rejects it anyway.
 
-The three `sentry[bot]` threads are unchanged from round 1 and still describe the pre-`99da1478` diff; their fixes are already on HEAD.  `sentry` is not in this fixer's resolve-authorized bot set, so they remain open and continue to gate the merge under `required_review_thread_resolution` on ruleset `17945518`.
+The three `sentry[bot]` threads are unchanged from round 1 and still describe the pre-`99da1478` diff; their fixes are already on HEAD.  `sentry` is not in this fixer's resolve-authorized bot set, so this lane left them untouched; the maintainer dismissed them.
 
 **Verification State.**
 
@@ -110,6 +110,8 @@ The three `sentry[bot]` threads are unchanged from round 1 and still describe th
 - Full `npm test` — see the run summary below; failures, if any, are the same out-of-diff sandbox flakes recorded in round 1 (`test/egress-guard.test.ts` DNS for discord.com, `test/event-loop-stall-hot-path.test.ts` timing budget).
 - `git status --short` after build — clean, so `npm run build` did not rewrite `next-env.d.ts` / `tsconfig.json` on this branch this run.
 
-**Next Steps & Blockers.**  Maintainer to dismiss the three `sentry[bot]` threads, or authorize the fixer lane to resolve them.  Auto-merge remains armed (`--squash --auto`) and will squash-merge once `verify` and `gitleaks` are green and the thread gate clears.
+**Threads.**  The three `kody-ai` threads from the second review (`shwvM`, `shwzG`, `shw2j`) were resolved by this lane — all three were `isOutdated` and already answered by `94b28463`.  The three `sentry[bot]` threads were NOT resolved by this lane (`sentry` is outside the authorized bot set); the maintainer dismissed them separately while this pass was running, which cleared `required_review_thread_resolution` on ruleset `17945518`.  All 12 threads on the PR are now resolved.
+
+**Next Steps & Blockers.**  None outstanding.  The PR went `CONFLICTING` -> `MERGEABLE` after merging `origin/main` (`82162336`, fleet-fully-dark fix); `mergeStateStatus` is `BLOCKED` only on the pending `verify` check.  Auto-merge remains armed (`--squash --auto`) and will squash-merge once `verify` and `gitleaks` are green.
 
 **Zero-Code Findings.**  Every finding from `chatgpt-codex-connector`, `kody-ai`, and `cursor` across both review passes on this PR is addressed in the branch.  Wave B options gap-fill is explicitly covered by `test/enrichment-coverage.test.ts` ("runs keyed options fallbacks when scan-core is full but IV is empty, and does not wake Finnhub" and "skips keyed options fallbacks once the free wave filled IV and put/call"), which is what the `sentry` `costTier` thread asks for.  No actionable in-scope item remained this round.

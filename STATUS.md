@@ -8,7 +8,7 @@
 
 **Docs.**  `docs/rollouts/2026-10-14-keyless-options-enrichment.md`, `STATUS.md`.
 
-**Next.**  Still blocked only on the three `sentry[bot]` threads, which this fixer lane is not scoped to resolve.  Maintainer action needed.  Auto-merge stays armed.
+**Next.**  None outstanding.  The three stale `kody-ai` threads were resolved by this lane; the maintainer separately dismissed the three `sentry[bot]` threads, so all 12 threads on the PR are resolved and `required_review_thread_resolution` is cleared.  Merged `origin/main` (`82162336`) to clear a `CONFLICTING` state.  Auto-merge stays armed and will land once `verify` is green.
 
 ## 2026-10-14 GROK — PR #4658 review threads (vendor Zod passthrough)
 
