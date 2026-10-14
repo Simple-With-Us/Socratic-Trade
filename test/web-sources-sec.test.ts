@@ -319,7 +319,7 @@ describe("SEC insider bulk datasets", () => {
     const zip = zipStored({ "SUBMISSION.tsv": submission, "NONDERIV_TRANS.tsv": trans });
     vi.stubGlobal("fetch", async (url: string) => {
       const u = String(url);
-      if (u.includes("form345.zip")) return new Response(zip, { status: 200 });
+      if (u.includes("form345.zip")) return new Response(new Uint8Array(zip), { status: 200 });
       if (u.includes("action=getcurrent")) return new Response("<feed></feed>", { status: 200 });
       return new Response("nope", { status: 404 });
     });
