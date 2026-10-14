@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-14 Codex Autofix — PR #4609 failure payload schema export
+
+**What.**  Third review pass on the market-scan freshness branch.  `MarketScanFailurePayloadSchema` is now exported with a derived `MarketScanFailurePayload = z.infer<...>` type, matching the `export const <Schema>` + `export type <T> = z.infer<...>` convention every other Zod boundary schema in `src/lib` already follows.  No behavior change: `failureAuditMessage` and `recordScanFailure` read the same parsed shape as before.
+
+**Review triage.**  The two Kody threads that were still open (`runScanSingleFlight` audit-row amplification, and the unprimed `lastUsableAuditRowId` fast gate) were already fixed by `a5dcb806` in this branch and carry direct passing regression tests ("writes one market_scan_failed row per user while the same outage continues", "primes the per-user fast gate with the audit row the refresh just wrote"); both were resolved without a code change.  The two open Sentry threads on `GET /api/scan` are Sentry's bug-prediction bot, not one of the three review bots this fixer answers, and their subject (identity resolution moving ahead of the stale-scan fallback) was likewise already fixed by `a5dcb806`.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 grandfathered warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npx vitest run test/market-scan-freshness.test.ts` 36 passed.  CI `verify-hosted` green on the pre-change head.
+
+**Docs.**  `docs/rollouts/2026-10-13-market-scan-deadline-freshness.md`.
+
+**Next.**  `do-not-automerge` stays on PR #4609 — this fixer does not remove the hold label or arm auto-merge.
+
 ## 2026-10-14 GROK — PR #4609 strict screener and failure payload
 
 **What.**  Second review pass.  Freshness failure dedupe reads `market_scan_failed` through a strict Zod schema.  The Nasdaq screener schema is strict too: declared live keys still parse, and an unknown key is not cached.

@@ -151,12 +151,13 @@ export function freshnessFastGateRowIdForTests(userId: string): string | undefin
 const FRESHNESS_USER_CONCURRENCY = 4;
 
 /** Shape this lane writes on `market_scan_failed`.  A drifted row is not the open outage. */
-const MarketScanFailurePayloadSchema = z
+export const MarketScanFailurePayloadSchema = z
   .object({
     message: z.string(),
     source: z.literal("market_scan_freshness")
   })
   .strict();
+export type MarketScanFailurePayload = z.infer<typeof MarketScanFailurePayloadSchema>;
 
 function failureAuditMessage(payload: unknown): string | undefined {
   const parsed = MarketScanFailurePayloadSchema.safeParse(payload);

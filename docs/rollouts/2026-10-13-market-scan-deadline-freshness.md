@@ -69,6 +69,29 @@ Kody's next pass on `a5dcb806` asked for a Zod parse of the freshness failure pa
 - npm test -> not re-run in full.  Targeted `npx vitest run test/nasdaq-screener-schema.test.ts test/market-scan-freshness.test.ts test/scan-empty-screener.test.ts test/market-dynamic-universe.test.ts test/market-preselection.test.ts` -> ok (76 tests).  The earlier full `npm test` on this branch failed two sandbox-only cases recorded above.
 - npm run build -> ok
 
+## Review follow-up 3 (autofixer)
+
+Third pass.  Only one finding was genuinely new; the rest were already satisfied on the branch.
+
+- `MarketScanFailurePayloadSchema` is now `export const` with a derived `export type MarketScanFailurePayload = z.infer<typeof MarketScanFailurePayloadSchema>`.  This matches the `export const <Schema>` + `export type <T> = z.infer<...>` pair every other Zod boundary schema in `src/lib` already uses (`congress-share.ts`, `nasdaq-screener-schema.ts`, `rate-limit.ts`, `schema-version.ts`, `securities-import-schema.ts`).  No behavior change — `failureAuditMessage` and `recordScanFailure` parse the identical shape as before.
+
+### Review triage
+
+Two Kody threads were still open but their subject was already fixed by `a5dcb806` on this branch, with direct regression tests that pass:
+
+- "audit row amplification in `runScanSingleFlight`" — `recordScanFailure` gates on `recentFailureForUser`, covered by "writes one market_scan_failed row per user while the same outage continues" and "does not write a second failure when a later tick joins an in-flight scan that rejects".  The `existing` join path in `runScanSingleFlight` does re-enter the catch, but the dedupe collapses it to one row.
+- "cache invariant violation ... never primes `lastUsableAuditRowId`" — the success path calls `newestPersistedMarketScan` and seeds the gate, covered by "primes the per-user fast gate with the audit row the refresh just wrote".
+
+The two open Sentry threads on `GET /api/scan` are Sentry's bug-prediction bot rather than one of the three review bots this fixer answers; they were left open and untouched.  Their subject (identity resolution ahead of the stale-scan fallback) was also already fixed by `a5dcb806`.
+
+## Verification (follow-up 3)
+
+- npx tsc --noEmit -> ok
+- npx vitest run test/market-scan-freshness.test.ts -> ok (36 tests)
+- npm run lint -> ok (0 errors; 866 grandfathered warnings)
+- npm run build -> ok
+- CI `verify-hosted` -> pass on the pre-change head
+
 ## Next
 
 Ready for review.  Label `do-not-automerge` because `/api/scan` reads broker positions and quotes.  Do not merge from this lane.  Congress-share HTTP 500, RAG retrieval, and OpenRouter embed failures from the same production pass are not this change.
