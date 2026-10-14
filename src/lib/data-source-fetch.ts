@@ -47,6 +47,7 @@ import {
   type ResidentialProxyEnv
 } from "./proxy-fetch";
 import { resolveUserProxy } from "./user-proxy-settings";
+import { recordProxyUse } from "./proxy-use-log";
 
 /** Services that always use direct egress (no proxy, no fallback). Two reasons qualify:
  *   - "usage-monitor" → our own infra, not a third-party data source
@@ -138,14 +139,18 @@ export async function dataSourceFetch(
   const directFetch = deps.directFetch ?? globalThis.fetch;
 
   if (opts?.service && PROXY_EXCLUDED_SERVICES.has(opts.service)) {
+    // Additive telemetry only — fetch behavior unchanged.
+    recordProxyUse({ usedProxy: false, source: "none", host: null, fallback: false, service: opts.service });
     return directFetch(url, init);
   }
   if (isInternalFetchTarget(url)) {
+    recordProxyUse({ usedProxy: false, source: "none", host: null, fallback: false, service: opts?.service });
     return directFetch(url, init);
   }
 
   const resolution = resolveDataSourceProxy(opts?.userId, deps);
   if (!resolution.proxyUrl) {
+    recordProxyUse({ usedProxy: false, source: resolution.source, host: null, fallback: false, service: opts?.service });
     return directFetch(url, init);
   }
 
@@ -154,6 +159,14 @@ export async function dataSourceFetch(
   // duplicates the request on direct egress, which anti-bot sources reject.
   // The cap remains only when nothing else bounds the leg.
   const perLegTimeoutMs = init?.signal ? undefined : PROXY_LEG_TIMEOUT_MS;
+  const proxyHost = safeProxyHostForLog(resolution.proxyUrl); // host:port only, never credentials
+  recordProxyUse({
+    usedProxy: true,
+    source: resolution.source,
+    host: proxyHost,
+    fallback: false,
+    service: opts?.service
+  });
   const proxiedFetch = (deps.proxiedFetchFactory ?? ((proxyUrl: string) =>
     createProxiedFetch(proxyUrl, undefined, { proxyTimeoutMs: perLegTimeoutMs })))(
     resolution.proxyUrl
@@ -175,6 +188,14 @@ export async function dataSourceFetch(
       );
     }
     warnProxyFallback(resolution.proxyUrl, error);
+    // Visible fail_soft fallback: a second entry, not a silent one.
+    recordProxyUse({
+      usedProxy: false,
+      source: resolution.source,
+      host: proxyHost,
+      fallback: true,
+      service: opts?.service
+    });
     return directFetch(url, init);
   }
 }
