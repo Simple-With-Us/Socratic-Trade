@@ -39,8 +39,8 @@ import {
   type ApiKeySource
 } from "./db";
 import { logApiHealth, getServiceHealthSummaries, HEALTH_REASON_CONSECUTIVE_FAILURES } from "./db-health";
-import { isAbortOrTimeoutError, isCallerSignalAborted, isIdempotentRequest, isTransientNetworkError, jitteredBackoffMs } from "./network-errors";
-import { apiCircuitBreakerShouldSkip, CircuitOpenError } from "./api-circuit-breaker";
+import { apiCircuitBreakerShouldSkip, CircuitOpenError, tripApiCircuitBreakerLane } from "./api-circuit-breaker";
+import { isAbortOrTimeoutError, isCallerSignalAborted, isIdempotentRequest, isTransientNetworkError, jitteredBackoffMs, retryAfterDelayMs } from "./network-errors";
 import { expiresAtRespectingMarketClose } from "./market-hours";
 import { recordProviderCall } from "./usage-monitor-push";
 import { robinhoodMcpDataEnabled } from "./robinhood";
@@ -64,6 +64,7 @@ import { getStreamedHeadlines } from "./streams/news-store";
 import { BROWSER_UA, politeFetchText, runRateLimited, secUserAgent } from "./web-sources/http";
 import { loadTickerCikMap } from "./web-sources/sec8k";
 import { padCik } from "./web-sources/sec-filings";
+import { readProviderFieldCacheForSymbol, writeProviderFieldCache } from "./provider-field-cache";
 import { withProviderLimit, admitProviderRequests, refundProviderRequests, resetProviderQuotaState, resolveProviderQuota, scrubProviderErrorText, scrubProviderErrorTextForPool, appendErrorCause } from "./provider-rate-limit";
 import { AlphaVantageKeyPool, getPoolForKeys, isAlphaVantageDailyCapMessage, millisUntilNextAlphaVantageDailyReset, tryReserveAlphaVantageCalls, refundAlphaVantageCalls, alphaVantageDailyCallBudget } from "./alpha-vantage-key-pool";
 import { tryReserveRapidApiCalls, refundRapidApiCalls, type RapidApiProviderKey } from "./rapidapi-quota";
@@ -770,7 +771,19 @@ export async function fetchWithRetry(
         // Do NOT write a health row for intermediate 429 retries — each retry would otherwise
         // look like a hard failure and five rapid 429s painted the lane red STOPPED even when
         // the eventual attempt (or the next symbol) succeeded. Final 429 is logged below as soft.
-        await guardedFetchBackoff(jitteredBackoffMs(backoffMs, attempt), options.guard);
+        const retryAfterMs = retryAfterDelayMs(response);
+        const waitMs = Math.max(
+          jitteredBackoffMs(backoffMs, attempt),
+          retryAfterMs ?? 0
+        );
+        if (healthService && attempt === retries - 1) {
+          tripApiCircuitBreakerLane(
+            healthService,
+            options.keySource ?? null,
+            Math.max(waitMs, Number(process.env.API_CIRCUIT_BREAKER_BACKOFF_MS ?? 60_000))
+          );
+        }
+        await guardedFetchBackoff(waitMs, options.guard);
         continue;
       }
       // When deferSuccessLog is set, skip the auto-success row so the caller can log
@@ -1705,6 +1718,7 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
         if (base[field] === undefined && usableValue) {
           base[field] = value;
           sources[field] = sourceName;
+          writeProviderFieldCache(sourceName, symbol, field, value);
         }
       };
 
@@ -1799,6 +1813,20 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
           sources[field] = selected.providerName;
           fieldObservations[field] = selected.observation;
           this.contributingNames.add(selected.providerName);
+          continue;
+        }
+        const cachedField = readProviderFieldCacheForSymbol(symbol, field);
+        if (cachedField) {
+          (base as Record<string, unknown>)[field] = cachedField.value;
+          sources[field] = cachedField.provider;
+          fieldObservations[field] = {
+            value: cachedField.value,
+            source: cachedField.provider,
+            upstreamFamily: cachedField.provider,
+            fetchedAt: cascadeFetchedAt,
+            status: "stale"
+          };
+          this.contributingNames.add(cachedField.provider);
           continue;
         }
         const unavailable = candidates.find((candidate) => candidate.observation.status !== "ok" && candidate.observation.status !== "stale");
@@ -5048,12 +5076,13 @@ async function rapidApiGetJson(
   // is armed INSIDE the pacer callback, same as YahooFinanceEnrichmentProvider/
   // AlphaVantageEnrichmentProvider above, so the timeout starts counting at actual dispatch time,
   // not when this call joins the (potentially long, strictly-serial) pacer queue.
+  const requestUrl = `https://${host}${path}`;
   const response = await withProviderLimit(options.service, async () => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 8000);
     try {
       return await fetchWithRetry(
-        `https://${host}${path}`,
+        requestUrl,
         {
           cache: "no-store",
           signal: controller.signal,
@@ -5084,7 +5113,7 @@ async function rapidApiGetJson(
     } finally {
       clearTimeout(timeout);
     }
-  });
+  }, requestUrl);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return await response.json();
 }

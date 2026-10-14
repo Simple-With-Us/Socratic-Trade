@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-14 Cursor Cloud — data cascade reliability
+
+**What.**  RapidAPI + Nasdaq screener pacing, `Retry-After` on 429 with circuit cooldown, per-symbol field TTL cache, VIX cascade (Cboe `VIX_History.csv` → FRED `VIXCLS` → Cboe JSON → Yahoo), Nasdaq screener stale-while-revalidate + SEC/Nasdaq Trader fallback, freshness scan deadline 6m.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint`, `npx tsc --noEmit`, targeted vitest for new/changed tests, `npm run build` (run at handoff).
+
+**Docs.**  `docs/rollouts/2026-10-14-data-cascade-reliability.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Open PR ready for review; watch prod freshness scan duration after deploy.
+
 ## 2026-10-14 GROK — PR #4609 verification order
 
 **What.**  Merged origin/main (`b7775658`, mobile snapshot partial timeout).  The freshness handoff verification block now lists `npm run lint`, `npx tsc --noEmit`, `npm test`, then `npm run build`.  No product behavior change.

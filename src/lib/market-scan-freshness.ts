@@ -129,8 +129,10 @@ function freshnessScanKey(userId: string, policy: ReturnType<typeof getPolicy>, 
  *  site (which passes process.uptime()); unit callers omit the arg and are exempt. */
 export const FRESHNESS_BOOT_GRACE_SECONDS = 300;
 /** Hard ceiling on one freshness scan — a scan that cannot finish inside this is exactly the
- *  wedge shape this lane must never re-create. */
-export const FRESHNESS_SCAN_DEADLINE_MS = 10 * 60_000;
+ *  wedge shape this lane must never re-create.  Prod freshness runs were landing near ~8 min
+ *  (full enrichment on trading days); 6 min bounds wall time while gather-budget still trims
+ *  per-symbol enrichment inside `deadlineAt`. */
+export const FRESHNESS_SCAN_DEADLINE_MS = 6 * 60_000;
 
 /** Per-user last audit row id proven to carry a usable scan.  A single global id skipped every
  *  other user once `local` was fresh, which is why signed-in scans stopped moving. */

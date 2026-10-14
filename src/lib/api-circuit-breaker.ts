@@ -78,3 +78,14 @@ export function apiCircuitBreakerShouldSkip(
 export function resetApiCircuitBreaker(): void {
   trippedUntil.clear();
 }
+
+/** Hold a lane open for an explicit cool-down (e.g. HTTP 429 with Retry-After). */
+export function tripApiCircuitBreakerLane(
+  service: string,
+  keySource: string | null,
+  holdMs: number,
+  now = Date.now()
+): void {
+  if (breakerDisabled() || holdMs <= 0) return;
+  trippedUntil.set(laneKey(service, keySource), now + holdMs);
+}

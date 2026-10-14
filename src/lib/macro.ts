@@ -311,7 +311,8 @@ export async function fetchMacroData(userId?: string): Promise<MacroData> {
 
 /**
  * Fallback for "no usable FRED data" (no key, or a configured key whose every series fetch failed).
- * Tries to at least fetch a live ^VIX from the keyless cascade (Yahoo -> Cboe) AND the keyless
+ * Tries to at least fetch a live ^VIX from the keyless cascade (Cboe history CSV -> FRED VIXCLS
+ * when keyed -> Cboe delayed JSON -> Yahoo) AND the keyless
  * Treasury.gov par-yield curve (3-month/2-year/10-year), so the regime classifier and the rates board
  * get real readings instead of staying blank/"Unknown". Every FRED-only field (Fed funds, inflation,
  * GDP, etc.) still blanks to "" (the partial-fetch convention — em dash on the console, dropped from
@@ -402,9 +403,10 @@ export function clearMacroCacheForTests(): void {
 // enrichment cascade), and a suspended paid key must not be hammered on every scheduler tick anyway.
 //
 // Lane order (first success wins):
-//   1. Cboe _VIX delayed — the authoritative VIX publisher's own keyless delayed-quote CDN (same
-//      host family already trusted for _SKEW/_VVIX in market-signals/cboe.ts).
-//   2. Yahoo ^VIX chart  — secondary fallback (intermittently rate-limited/blocked from datacenter IPs).
+//   1. Cboe VIX_History.csv — daily close history on cdn-api.cboe.com (DC-friendly; primary).
+//   2. FRED VIXCLS — when a FRED API key is configured (env/db); same series as the macro suite.
+//   3. Cboe _VIX delayed JSON — publisher delayed quote CDN.
+//   4. Yahoo ^VIX chart — last resort (intermittently rate-limited/blocked from datacenter IPs).
 //
 // This is deliberately a TWO-lane cascade. The third-tier candidates were live-probed and rejected
 // (2026-07-29 verifier review): Stooq's quote endpoint (stooq.com/q/l/) 404s endpoint-level and its
@@ -488,6 +490,47 @@ async function fetchVixLane(
   }
 }
 
+export const VIX_HISTORY_CSV_URL =
+  "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv";
+
+/** Latest daily VIX close from Cboe's public history CSV. Returns null on any failure. */
+async function fetchVixFromCboeHistoryCsv(): Promise<number | null> {
+  return fetchVixLane(
+    "vix-cboe-history",
+    VIX_HISTORY_CSV_URL,
+    "text/csv,text/plain,*/*",
+    async (res) => {
+      const text = await res.text();
+      const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
+      if (lines.length < 2) return null;
+      const header = lines[0].split(",").map((h) => h.trim().toUpperCase());
+      const closeIdx = header.findIndex((h) => h === "CLOSE" || h === "VIX CLOSE");
+      if (closeIdx < 0) return null;
+      for (let i = lines.length - 1; i >= 1; i--) {
+        const parts = lines[i].split(",");
+        const raw = parts[closeIdx]?.trim();
+        const close = raw ? Number.parseFloat(raw) : NaN;
+        if (Number.isFinite(close) && close > 0) return Math.round(close * 100) / 100;
+      }
+      return null;
+    }
+  );
+}
+
+/** FRED VIXCLS when an API key is available; skipped when unkeyed. */
+async function fetchVixFromFredVixcls(): Promise<number | null> {
+  const apiKey = resolveApiKeyWithSource("fred").key;
+  if (!apiKey) return null;
+  const url = `https://api.stlouisfed.org/fred/series/observations?series_id=VIXCLS&limit=1&sort_order=desc&api_key=${apiKey}&file_type=json`;
+  return fetchVixLane("vix-fred", url, "application/json", async (res) => {
+    const payload = (await res.json()) as { observations?: Array<{ value?: string }> };
+    const value = payload?.observations?.[0]?.value;
+    if (!value || value === ".") return null;
+    const vix = Number.parseFloat(value);
+    return Number.isFinite(vix) && vix > 0 ? Math.round(vix * 100) / 100 : null;
+  });
+}
+
 /** Fetch the latest ^VIX close from Yahoo Finance (no API key required). Returns null on any failure. */
 async function fetchVixFromYahoo(): Promise<number | null> {
   return fetchVixLane(
@@ -523,11 +566,13 @@ async function fetchVixFromCboe(): Promise<number | null> {
 
 /** First successful keyless VIX reading across the cascade; null when every source is down. */
 async function fetchKeylessVix(): Promise<number | null> {
-  for (const source of [fetchVixFromCboe, fetchVixFromYahoo]) {
-    const vix = await source();
-    if (vix !== null) return vix;
-  }
-  return null;
+  const fromHistory = await fetchVixFromCboeHistoryCsv();
+  if (fromHistory !== null) return fromHistory;
+  const fromFred = await fetchVixFromFredVixcls();
+  if (fromFred !== null) return fromFred;
+  const fromCboe = await fetchVixFromCboe();
+  if (fromCboe !== null) return fromCboe;
+  return fetchVixFromYahoo();
 }
 
 // ── Live ^VIX overlay (short TTL, independent of the 24h macro cache) ────────────────────────
@@ -535,7 +580,7 @@ async function fetchKeylessVix(): Promise<number | null> {
 // GDP), but VIX can move double digits intraday, so pinning it to the same day-old snapshot means
 // the volatility panic brake and the regime-flip detector could be up to a day blind on a crash
 // day (composite review D/high/S). This is a SEPARATE cache entry with a short TTL, keyed off the
-// same keyless ^VIX cascade (`fetchKeylessVix`: Yahoo -> Cboe) the no-FRED fallback path
+// same keyless ^VIX cascade (`fetchKeylessVix`: Cboe CSV -> FRED VIXCLS -> Cboe JSON -> Yahoo)
 // already uses — so no new upstream dependency, just a much shorter TTL and its own cache slot. Callers that
 // need the freshest possible volatility read (the vol brake, regime-flip detection) should use
 // `fetchLiveVix`/`fetchMacroDataWithLiveVix` instead of trusting the 24h `fetchMacroData` snapshot.

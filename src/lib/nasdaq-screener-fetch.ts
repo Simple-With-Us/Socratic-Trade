@@ -1,4 +1,5 @@
 import { fetchWithRetry } from "./data-providers";
+import { withProviderLimit } from "./provider-rate-limit";
 import { BROWSER_UA } from "./web-sources/http";
 
 /**
@@ -77,14 +78,17 @@ export async function fetchNasdaqScreenerResponse(
       // fetch() resolves when headers arrive.  Clear the timer here so the
       // 8000-row JSON body cannot be aborted by the 15s header budget.  The
       // caller deadline (parent signal) still covers the body read.
-      const response = await fetchWithRetry(
-        url,
-        {
-          cache: "no-store",
-          signal: controller.signal,
-          headers: { ...NASDAQ_SCREENER_HEADERS }
-        },
-        { service, retries: 1 }
+      const response = await withProviderLimit(service, () =>
+        fetchWithRetry(
+          url,
+          {
+            cache: "no-store",
+            signal: controller.signal,
+            headers: { ...NASDAQ_SCREENER_HEADERS }
+          },
+          { service, retries: 1 }
+        ),
+        url
       );
       clearTimeout(timeout);
       unlink();

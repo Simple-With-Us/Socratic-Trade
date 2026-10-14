@@ -22,6 +22,7 @@ vi.mock("../src/lib/market", async (importOriginal) => {
 import { audit, getDb, latestAuditByKind } from "../src/lib/db";
 import {
   FRESHNESS_BOOT_GRACE_SECONDS,
+  FRESHNESS_SCAN_DEADLINE_MS,
   freshnessFastGateRowIdForTests,
   marketScanFreshnessMaxAgeHours,
   newestPersistedMarketScan,
@@ -81,6 +82,10 @@ afterEach(() => {
 });
 
 describe("marketScanFreshnessMaxAgeHours", () => {
+  it("bounds one freshness scan at six minutes", () => {
+    expect(FRESHNESS_SCAN_DEADLINE_MS).toBe(6 * 60_000);
+  });
+
   it("defaults to 20 hours", () => {
     expect(marketScanFreshnessMaxAgeHours()).toBe(20);
   });
@@ -226,7 +231,7 @@ describe("runMarketScanFreshnessIfDue", () => {
   it("rejects a hung scan at the freshness deadline so the next tick can run", async () => {
     scanMarketMock.mockImplementationOnce(() => new Promise(() => {}));
     const pending = runMarketScanFreshnessIfDue(MONDAY);
-    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    await vi.advanceTimersByTimeAsync(FRESHNESS_SCAN_DEADLINE_MS);
     await pending;
     expect(latestAuditByKind("market_scan_failed", "local")).toBeDefined();
     scanMarketMock.mockResolvedValue(makeScan(new Date(MONDAY).toISOString()));
@@ -238,7 +243,7 @@ describe("runMarketScanFreshnessIfDue", () => {
     vi.setSystemTime(MONDAY + 5 * 60_000);
     await runMarketScanFreshnessIfDue(MONDAY);
     const options = scanMarketMock.mock.calls[0]?.[5] as { deadlineAt?: number };
-    expect(options.deadlineAt).toBe(MONDAY + 15 * 60_000);
+    expect(options.deadlineAt).toBe(MONDAY + 5 * 60_000 + FRESHNESS_SCAN_DEADLINE_MS);
   });
 
   it("primes the per-user fast gate with the audit row the refresh just wrote", async () => {
@@ -334,7 +339,7 @@ describe("runMarketScanFreshnessIfDue", () => {
       expect(scanMarketMock.mock.calls.map((call) => call[3])).toEqual(expect.arrayContaining(["local", slow, fast]));
       expect(latestAuditByKind("market_scan", fast)?.kind).toBe("market_scan");
       expect(latestAuditByKind("market_scan", slow)).toBeUndefined();
-      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await vi.advanceTimersByTimeAsync(FRESHNESS_SCAN_DEADLINE_MS);
       await pending;
       expect(latestAuditByKind("market_scan_failed", slow)).toBeDefined();
       expect(latestAuditByKind("market_scan", fast)?.kind).toBe("market_scan");

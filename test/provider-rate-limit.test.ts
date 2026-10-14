@@ -12,6 +12,7 @@ import {
   refundProviderRequests,
   resetProviderQuotaState,
   resolveProviderLimiterConfig,
+  resolveProviderLimiterKey,
   resolveProviderQuota,
   scrubProviderErrorText,
   simulateProviderQuotaRestartForTests,
@@ -74,6 +75,20 @@ const ENV_KEYS = [
 function clearEnv() {
   for (const key of ENV_KEYS) delete process.env[key];
 }
+
+describe("resolveProviderLimiterKey", () => {
+  it("maps RapidAPI hostnames to per-host limiter buckets", () => {
+    expect(
+      resolveProviderLimiterKey("mboum-finance", "https://mboum-finance.p.rapidapi.com/v1/market/quotes")
+    ).toBe("rapidapi-host:mboum-finance.p.rapidapi.com");
+    expect(resolveProviderLimiterKey("finnhub", "https://finnhub.io/api/v1/quote")).toBe("finnhub");
+  });
+
+  it("applies rapidapi-host pacing defaults to derived host keys", () => {
+    const config = resolveProviderLimiterConfig("rapidapi-host:example.p.rapidapi.com");
+    expect(config).toEqual({ minIntervalMs: 1100, concurrency: 1 });
+  });
+});
 
 describe("resolveProviderLimiterConfig", () => {
   beforeEach(clearEnv);
