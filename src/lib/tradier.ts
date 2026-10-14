@@ -29,6 +29,15 @@ import { fillMissingQuotesWithClose, estimateReviewNotional } from "./alpaca";
 import { mergeAccountCapabilities } from "./venue-contract";
 import { normalizeVenueOrder } from "./venue-normalization";
 import { TRADIER_BROKER_IO_DEADLINE_MS, equityOrdersDefaultSinceIso, withDeadline } from "./inflight-deadline";
+import {
+  TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE,
+  TRADIER_TRANSIENT_ATTEMPTS,
+  isTradierSandboxOpenDeferral,
+  isTradierTransientServerError,
+  sleepMs,
+  tradierNow,
+  tradierTransientBackoffMs
+} from "./tradier-transient";
 
 /**
  * Tradier broker gateway. Hand-rolled REST (single Bearer token, no SDK), mirroring the Alpaca
@@ -422,7 +431,9 @@ class TradierBrokerGateway implements BrokerGateway {
   // POST / cancelEquityOrder never do: a dead keep-alive socket after Tradier already accepted the
   // write would make a retry a genuine second order attempt, or a cancel-of-already-cancelled 400
   // that the caller would misread as failure (same class of risk Alpaca's trackHealth documents for
-  // createOrder).
+  // createOrder). HTTP 400 "Unexpected server error" is a separate, sentence-only retry inside
+  // postOrderToleratingTransientServerError: it looks up the tag before any second POST and does
+  // not use this flag.
   private async trackHealth<T>(
     fn: () => Promise<T>,
     opts?: { deadlineMs?: number; retryTransient?: boolean }
@@ -881,7 +892,70 @@ class TradierBrokerGateway implements BrokerGateway {
     return { estimatedNotional, alerts, raw: { tradier: true } };
   }
 
+  /**
+   * Sandbox OMS is unreliable for the first 15 minutes after the regular open.
+   * Refuse the POST locally so a 400 cannot land and cannot halt the account.
+   * Live Tradier is not deferred.
+   */
+  private assertSandboxOrderWindowOpen(): void {
+    if (isTradierSandboxOpenDeferral(this.environment, tradierNow())) {
+      throw new Error(TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE);
+    }
+  }
+
+  /**
+   * POST an order.  On HTTP 400 "Unexpected server error", look up our tag
+   * before any second POST.  A hit means the first request landed despite the
+   * error body, so we return that id.  A clean miss backs off and retries.
+   * A failed lookup does not send another POST.  Any other error, including a
+   * real 400, fails on the first attempt.
+   * The whole sequence is one trackHealth call so a recovered blip is not a
+   * tradier-broker hard failure.
+   */
+  private async postOrderToleratingTransientServerError<T extends { order?: Record<string, unknown> }>(
+    accountNumber: string,
+    tag: string,
+    form: Record<string, string | number | undefined>
+  ): Promise<T> {
+    return this.trackHealth(async () => {
+      let last: unknown;
+      for (let attempt = 0; attempt < TRADIER_TRANSIENT_ATTEMPTS; attempt++) {
+        try {
+          return await this.request<T>("POST", `/accounts/${accountNumber}/orders`, { form });
+        } catch (error) {
+          last = error;
+          const msg = error instanceof Error ? error.message : String(error);
+          if (!isTradierTransientServerError(msg) || attempt + 1 >= TRADIER_TRANSIENT_ATTEMPTS) throw error;
+          let existing: string | undefined;
+          try {
+            existing = await this.findOrderIdByTag(accountNumber, tag);
+          } catch {
+            throw error;
+          }
+          if (existing) {
+            return { order: { id: existing, status: "pending" } } as unknown as T;
+          }
+          await sleepMs(tradierTransientBackoffMs(attempt));
+        }
+      }
+      throw last;
+    });
+  }
+
+  /** One page of the current listing.  A just-accepted order is on page 1. */
+  private async findOrderIdByTag(accountNumber: string, tag: string): Promise<string | undefined> {
+    const body = await this.request<{ orders?: { order?: unknown } | string }>("GET", `/accounts/${accountNumber}/orders`, {
+      query: { includeTags: "true", page: 1 }
+    });
+    const ordersField = typeof body.orders === "object" && body.orders ? (body.orders as Record<string, unknown>).order : undefined;
+    for (const row of arr<Record<string, unknown>>(ordersField)) {
+      if (String(row.tag ?? "") === tag && row.id != null && String(row.id) !== "") return String(row.id);
+    }
+    return undefined;
+  }
+
   async placeEquityOrder(rawInput: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+    this.assertSandboxOrderWindowOpen();
     const input = normalizeVenueOrder(rawInput, "tradier", this.userId) as typeof rawInput;
     // WHOLE-SHARE resolution: Tradier has no notional field AND no broker-side notional cap, so WE
     // size a dollar order into shares at an anchor price and must not overspend the budget. Never
@@ -959,8 +1033,10 @@ class TradierBrokerGateway implements BrokerGateway {
 
       let bracketBody: { order?: Record<string, unknown> };
       try {
-        bracketBody = await this.trackHealth(() =>
-          this.request<{ order?: Record<string, unknown> }>("POST", `/accounts/${input.accountNumber}/orders`, { form: bracketForm })
+        bracketBody = await this.postOrderToleratingTransientServerError(
+          input.accountNumber,
+          sanitizeTag(input.refId),
+          bracketForm
         );
       } catch (error) {
         throw new Error(`Tradier bracket order failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -999,9 +1075,7 @@ class TradierBrokerGateway implements BrokerGateway {
 
     let body: { order?: Record<string, unknown> };
     try {
-      body = await this.trackHealth(() =>
-        this.request<{ order?: Record<string, unknown> }>("POST", `/accounts/${input.accountNumber}/orders`, { form })
-      );
+      body = await this.postOrderToleratingTransientServerError(input.accountNumber, sanitizeTag(input.refId), form);
     } catch (error) {
       throw new Error(`Tradier order failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1065,19 +1139,32 @@ class TradierBrokerGateway implements BrokerGateway {
     };
     try {
       await this.trackHealth(
-        () =>
-          this.request<{ order?: Record<string, unknown> }>("POST", `/accounts/${accountNumber}/orders`, {
-            form: {
-              class: "equity",
-              symbol: "AAPL",
-              side: "buy",
-              quantity: "1",
-              type: "limit",
-              duration: "day",
-              price: "1.00",
-              preview: "true"
+        async () => {
+          let last: unknown;
+          for (let attempt = 0; attempt < TRADIER_TRANSIENT_ATTEMPTS; attempt++) {
+            try {
+              await this.request<{ order?: Record<string, unknown> }>("POST", `/accounts/${accountNumber}/orders`, {
+                form: {
+                  class: "equity",
+                  symbol: "AAPL",
+                  side: "buy",
+                  quantity: "1",
+                  type: "limit",
+                  duration: "day",
+                  price: "1.00",
+                  preview: "true"
+                }
+              });
+              return;
+            } catch (error) {
+              last = error;
+              const msg = error instanceof Error ? error.message : String(error);
+              if (!isTradierTransientServerError(msg) || attempt + 1 >= TRADIER_TRANSIENT_ATTEMPTS) throw error;
+              await sleepMs(tradierTransientBackoffMs(attempt));
             }
-          }),
+          }
+          throw last;
+        },
         { retryTransient: true }
       );
       // Preview accepted with result — OMS up.
@@ -1148,6 +1235,7 @@ class TradierBrokerGateway implements BrokerGateway {
     timeInForce?: import("./types").TimeInForce;
     refId: string;
   }): Promise<ExecutedOrder> {
+    this.assertSandboxOrderWindowOpen();
     const { parseOccSymbol } = await import("./option-orders");
     const parsed = parseOccSymbol(input.occSymbol);
     const underlying = parsed?.underlyingSymbol ?? input.occSymbol.slice(0, 4);
@@ -1166,8 +1254,10 @@ class TradierBrokerGateway implements BrokerGateway {
       form.price = input.limitPrice.toFixed(2);
     }
 
-    const body = await this.trackHealth(() =>
-      this.request<{ order?: Record<string, unknown> }>("POST", `/accounts/${input.accountNumber}/orders`, { form })
+    const body = await this.postOrderToleratingTransientServerError<{ order?: Record<string, unknown> }>(
+      input.accountNumber,
+      input.refId,
+      form
     );
 
     const id = body.order?.id ?? body.order?.order_id ?? input.refId;

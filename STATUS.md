@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 GROK — Tradier sandbox open HTTP 400
+
+**What.**  Sandbox HTTP 400 "Unexpected server error" on the order path retries with backoff and does not auto-halt.  A second POST happens only after the tag is missing.  Sandbox equity and option posts wait 15 minutes after the regular open.  Live Tradier still places.  Buying power, plain HTTP 400, HTTP 403, and HTTP 5xx still fail on the first attempt and can still halt.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok after the tag-hit return cast.  `npm run build` ok.  Targeted vitest 108 passed.  Full `npm test` was 9289 passed, 51 skipped, and 23 failed outside this diff (sandbox LLM keys, host metadata, and a Node ESM `.ts` loader).
+
+**Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`, `PLAN.md`, `docs/phase-7-strategy.md`.
+
+**Next.**  `do-not-automerge`.  Jay squash-merges.  Do not merge from this lane.  Linear team `ST` was not updated: this seat has no Fleet Linear credentials.
+
 ## 2026-10-14 GROK — PR #4609 verification order
 
 **What.**  Merged origin/main (`b7775658`, mobile snapshot partial timeout).  The freshness handoff verification block now lists `npm run lint`, `npx tsc --noEmit`, `npm test`, then `npm run build`.  No product behavior change.
