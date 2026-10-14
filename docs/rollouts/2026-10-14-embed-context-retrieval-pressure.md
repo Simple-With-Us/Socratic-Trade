@@ -26,15 +26,22 @@ The token estimate is the max of UTF-8 bytes/4 and a mixed floor (digits, `$`, a
 
 ## Verification State
 
-Targeted, before the full gate:
+```bash
+npm run lint
+npx tsc --noEmit
+npm test
+npm run build
+```
+
+`npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9278 passed, 51 skipped, 25 failed.  The failures are outside this diff: the sandbox has provider keys configured, so suites that expect no OpenRouter or Anthropic key fail, along with the local data-catalog database and `scripts/ops/summarize-cpuprofile.mjs`.  The first full run also failed four vector tests (table windowing and NaN batch counts).  Those are fixed.  A second full run no longer fails `test/vector-db-chunk-cap.test.ts`, `test/vector-db-embedding-integrity.test.ts`, or `test/embed-request-pack.test.ts`.
+
+Targeted before the gate:
 
 ```bash
 npx vitest run test/embed-request-pack.test.ts test/retrieval-pressure.test.ts test/rag-multi-query-retrieval.test.ts test/embed-resilience.test.ts test/usage-compliance-classifier.test.ts
 ```
 
 50 passed.
-
-Full gate (`npm run lint`, `npx tsc --noEmit`, `npm test`, `npm run build`) is recorded in the follow-up commit on this branch once those commands finish.
 
 ## Next Steps & Blockers
 

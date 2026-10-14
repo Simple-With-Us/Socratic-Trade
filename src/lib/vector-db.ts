@@ -2921,13 +2921,19 @@ async function embedWithRetry(
       sent = true;
       const response = await embedOnce(texts);
       const validated = validateDocumentEmbeddingBatch(response?.data, texts.length);
-      if (!validated.embeddings) {
+      const rawRows = Array.isArray(response?.data) ? response.data as Array<{ embedding?: unknown }> : [];
+      // A NaN or short payload must reach the caller.  Throwing here counted every text in the
+      // group as rejected and skipped the query-embedding integrity audit.
+      if (!validated.embeddings && (validated.reason !== "invalid-embedding" || rawRows.length !== texts.length)) {
         throw new Error(`Embedding response rejected after window pack (${validated.reason ?? "unknown"})`);
       }
       for (let i = 0; i < group.length; i++) {
         const sourceIndex = group[i]!.sourceIndex;
+        const vector = validated.embeddings
+          ? validated.embeddings[i]!
+          : rawRows[i]?.embedding;
         const bucket = pieceVectors.get(sourceIndex) ?? [];
-        bucket.push(validated.embeddings[i]!);
+        bucket.push(Array.isArray(vector) ? vector as number[] : [Number.NaN]);
         pieceVectors.set(sourceIndex, bucket);
       }
     }
@@ -2936,6 +2942,8 @@ async function embedWithRetry(
       if (!vectors || vectors.length === 0) {
         throw new Error("embed packer dropped an input");
       }
+      const invalid = vectors.find((vector) => !isValidEmbedding(vector));
+      if (invalid) return invalid;
       return vectors.length === 1 ? vectors[0]! : meanPoolEmbeddings(vectors);
     });
     const response = {
