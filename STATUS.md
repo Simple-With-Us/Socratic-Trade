@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-14 GROK — PR #4662 merge main and review triage
+
+**What.**  Merged `origin/main` (`82162336`, #4663 fleet fully-dark detector) into `cursor/embed-context-retrieval-pressure-3d40`.  Git reported no conflicts.  The two unresolved Sentry threads were re-read at this head and left unchanged.
+
+**Not fixed on purpose.**  `noteRetrievalPressureFailure` still opens a process-global backoff and drops queued retrieval slots.  That is the SOCRATIC-TRADE-2G burst behavior, covered by `test/retrieval-pressure.test.ts`.  `acquireRetrievalSlot` still runs before `createRagQueryAbort`, and the outer `withStrategyRagRetrievalDeadline` still includes queue wait so a queued caller cannot stall the trading loop.  `RAG_QUERY_IO_DEADLINE_MS` is unchanged.  Threads were not resolved.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted vitest (embed pack, retrieval pressure, chunk cap, embedding integrity, trading liveness, batched halt cause, retrieval deadline, multi-query) 86 passed.  Full `npm test` was 9313 passed, 51 skipped, 3 failed outside this diff: `test/data-catalog-completeness.test.ts` against the local database, `test/egress-guard.test.ts` live DNS to discord.com, and a timing assertion in `test/event-loop-stall-hot-path.test.ts`.  Hosted `verify` on `cb81627e` (the parent of this merge) was green, including `npm test` and `npm run build`.
+
+**Docs.**  This entry, `PLAN.md`, `docs/rollouts/2026-10-14-embed-context-retrieval-pressure.md`.
+
+**Next.**  Hosted `verify` re-runs on the push that carries this merge.  Do not merge the PR from this lane.  Do not resolve the two Sentry threads.
+
 ## 2026-10-14 Codex Autofix — PR #4662 ingest-budget memoization
 
 **What.**  Review pass on the embed-context branch.  `embedBudgetUnits` (a char-walk plus binary-search truncation) was computed twice for the same strings on the ingest over-budget path — once in the `budgetInputs` reduce and again inside `prefixCountWithinEmbedUnits` — and once per copy when `budgetInputs` repeats a text.  The reduce now memoizes units per exact text and passes that map to the prefix walk through a new optional `precomputedUnits` argument, which falls back to computing on a miss.  Additive, so existing callers and tests are unaffected.  `test/embed-request-pack.test.ts` gained a case asserting the precomputed and un-precomputed walks agree, including a partial map.

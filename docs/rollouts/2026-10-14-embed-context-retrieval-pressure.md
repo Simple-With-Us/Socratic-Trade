@@ -62,6 +62,23 @@ npx vitest run test/embed-request-pack.test.ts test/retrieval-pressure.test.ts t
 
 The first run failed the singleton shrink assertion because the default 2400 character cap already sat under the half-budget byte cap, so the retry text was the same length.  The test now uses an `is_table` string between the half-budget and full byte caps.  Re-run of the packer and pressure files: 18 passed.  The chunk-cap and integrity files passed in the same first run (the singleton failure was the only failure).  Follow-up `npm run lint` ok (0 errors, 866 warnings).  Follow-up `npx tsc --noEmit` ok.  Follow-up `npm test` was 9282 passed, 51 skipped, 25 failed (the same sandbox-key and local-script failures; embed, retrieval-pressure, chunk-cap, and embedding-integrity are not in that list).  Follow-up `npm run build` ok.
 
+### Merge main after #4663
+
+`origin/main` at `82162336` merged cleanly.  No migration renumber.  The two open Sentry threads stay open: process-global backoff, and queue wait inside the outer strategy deadline.  Both match the tests and the comments in `retrieval-pressure.ts` and `embedAndMatchOneQuery`.
+
+Verification on this head:
+
+```bash
+npm run lint
+npx tsc --noEmit
+npx vitest run test/embed-request-pack.test.ts test/retrieval-pressure.test.ts test/vector-db-chunk-cap.test.ts test/vector-db-embedding-integrity.test.ts test/trading-liveness.test.ts test/batched-halt-cause.test.ts test/rag-retrieval-deadline.test.ts test/rag-multi-query-retrieval.test.ts
+npm test
+```
+
+`npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted vitest 86 passed.  `npm test` was 9313 passed, 51 skipped, 3 failed (local catalog database, discord.com DNS, prune-vs-scan timing).  Those three are not in this diff.  Hosted `verify` on `cb81627e` succeeded before this merge was pushed.
+
+`.github/workflows/autofix.yml` runs that fail with zero jobs also fail that way on `main` for `issue_comment` events.  They are not a required check.  Required checks are `verify` and `gitleaks`.
+
 ## Next Steps & Blockers
 
 Review the PR.  Do not merge from this lane.  After merge and the evening deploy, check Sentry 2G (retrieval-failed count at the open) and 2E (requested units vs 7500 windows).
