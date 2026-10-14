@@ -34,6 +34,9 @@ export async function GET(request: Request) {
 
   const outcome = await buildOpsAccountActivityReport({ connectedAccountId, days });
   if (!outcome.ok) {
+    if ("supported" in outcome && outcome.supported === false) {
+      return NextResponse.json(outcome, { status: outcome.status });
+    }
     return NextResponse.json({ ok: false, error: outcome.error }, { status: outcome.status });
   }
   return NextResponse.json(outcome.report, { status: outcome.status });

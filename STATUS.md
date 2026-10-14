@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 CURSOR — Ops snapshot perf + account-activity brokers (`cursor/ops-snapshot-perf-b622`)
+
+**What.**  Async `buildOpsSnapshot` with 45s single-flight cache, per-section `timingsMs`, per-user `marketScan` summary (`generatedAt`, `stale`), strategy-runs index + query split, lighter enrichment coverage and task-journal paths, and Tradier/non-Alpaca **422** on `/api/ops/account-activity` instead of Alpaca-only 400.
+
+**Verification.**  `npm run lint` ok (0 errors).  `npx tsc --noEmit` ok.  `npm run build` ok.  Targeted vitest 38 passed (ops snapshot, account-activity, market-scan summary, strategy-runs, event-loop stall, autonomy halt).
+
+**Docs.**  `docs/rollouts/2026-10-14-ops-snapshot-perf.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Open PR ready for review; post-deploy re-run `scripts/fetch-prod-ops-snapshot.sh` and compare `timingsMs` to prod baseline ~84.7s.
+
 ## 2026-10-14 GROK — PR #4609 verification order
 
 **What.**  Merged origin/main (`b7775658`, mobile snapshot partial timeout).  The freshness handoff verification block now lists `npm run lint`, `npx tsc --noEmit`, `npm test`, then `npm run build`.  No product behavior change.
