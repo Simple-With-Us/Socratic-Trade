@@ -16,6 +16,7 @@ Embed input is fit to a token-aware budget before the POST.  Queries are truncat
 - `src/lib/strategy.ts`
 - `test/embed-request-pack.test.ts`
 - `test/retrieval-pressure.test.ts`
+- `test/vector-db-chunk-cap.test.ts`
 - `docs/phase-7-strategy.md`
 - `STATUS.md`
 - `PLAN.md`
