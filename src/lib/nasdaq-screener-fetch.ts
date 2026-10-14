@@ -38,20 +38,45 @@ function isScreenerTimeout(error: unknown, reason: unknown): boolean {
   return named || abort;
 }
 
+function errorFromSignal(signal: AbortSignal, fallback: string): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error(fallback);
+}
+
+/** Parent deadline aborts the in-flight headers.  It does not retry: the scan budget is gone. */
+function bindParentSignal(controller: AbortController, signal: AbortSignal | undefined): () => void {
+  if (!signal) return () => {};
+  if (signal.aborted) {
+    controller.abort(signal.reason);
+    return () => {};
+  }
+  const onAbort = () => controller.abort(signal.reason);
+  signal.addEventListener("abort", onAbort);
+  return () => signal.removeEventListener("abort", onAbort);
+}
+
 export async function fetchNasdaqScreenerResponse(
   service: "nasdaq-delayed-screener" | "congress-nasdaq-screener",
-  options?: { url?: string }
+  options?: { url?: string; signal?: AbortSignal }
 ): Promise<Response> {
   const url = options?.url ?? NASDAQ_SCREENER_URL;
+  const parent = options?.signal;
+  if (parent?.aborted) {
+    throw errorFromSignal(parent, "Nasdaq screener aborted before the request started.");
+  }
   let lastError: unknown;
   for (let attempt = 0; attempt < NASDAQ_SCREENER_ATTEMPTS; attempt++) {
+    if (parent?.aborted) {
+      throw errorFromSignal(parent, "Nasdaq screener aborted.");
+    }
     const controller = new AbortController();
+    const unlink = bindParentSignal(controller, parent);
     const timeout = setTimeout(() => {
       controller.abort(new Error(NASDAQ_SCREENER_TIMEOUT_MESSAGE));
     }, NASDAQ_SCREENER_TIMEOUT_MS);
     try {
       // fetch() resolves when headers arrive.  Clear the timer here so the
-      // 8000-row JSON body cannot be aborted by the same 8s-style race.
+      // 8000-row JSON body cannot be aborted by the 15s header budget.  The
+      // caller deadline (parent signal) still covers the body read.
       const response = await fetchWithRetry(
         url,
         {
@@ -62,16 +87,46 @@ export async function fetchNasdaqScreenerResponse(
         { service, retries: 1 }
       );
       clearTimeout(timeout);
+      unlink();
       return response;
     } catch (error) {
       const reason = controller.signal.reason;
       lastError = reason instanceof Error ? reason : error;
+      if (parent?.aborted) {
+        throw errorFromSignal(parent, "Nasdaq screener aborted.");
+      }
       if (!isScreenerTimeout(error, reason) || attempt === NASDAQ_SCREENER_ATTEMPTS - 1) {
         throw lastError;
       }
     } finally {
       clearTimeout(timeout);
+      unlink();
     }
   }
   throw lastError instanceof Error ? lastError : new Error(NASDAQ_SCREENER_TIMEOUT_MESSAGE);
+}
+
+/** Read the screener JSON.  A caller deadline aborts the wait; it does not become an empty table. */
+export async function readNasdaqScreenerJson(response: Response, signal?: AbortSignal): Promise<unknown> {
+  const body = response.json();
+  // If the deadline wins the race, the body promise can still reject later.
+  void body.catch(() => {});
+  if (!signal) return body;
+  if (signal.aborted) throw errorFromSignal(signal, "Nasdaq screener body aborted.");
+  return await new Promise((resolve, reject) => {
+    const onAbort = () => {
+      reject(errorFromSignal(signal, "Nasdaq screener body aborted."));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    body.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
 }

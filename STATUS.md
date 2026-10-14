@@ -1,5 +1,56 @@
 # Current Status
 
+## 2026-10-14 GROK — PR #4609 verification order
+
+**What.**  Merged origin/main (`b7775658`, mobile snapshot partial timeout).  The freshness handoff verification block now lists `npm run lint`, `npx tsc --noEmit`, `npm test`, then `npm run build`.  No product behavior change.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9283 passed, 51 skipped, and 2 failed outside this diff: sandbox DNS for discord.com, and `test/data-catalog-completeness.test.ts` against the local default database (passes on an empty database).
+
+**Docs.**  `docs/rollouts/2026-10-13-market-scan-deadline-freshness.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  `do-not-automerge` stays on PR #4609.  Do not merge from this lane.
+
+## 2026-10-14 Codex Autofix — PR #4609 failure payload schema export
+
+**What.**  Third review pass on the market-scan freshness branch.  `MarketScanFailurePayloadSchema` is now exported with a derived `MarketScanFailurePayload = z.infer<...>` type, matching the `export const <Schema>` + `export type <T> = z.infer<...>` convention every other Zod boundary schema in `src/lib` already follows.  No behavior change: `failureAuditMessage` and `recordScanFailure` read the same parsed shape as before.
+
+**Review triage.**  The two Kody threads that were still open (`runScanSingleFlight` audit-row amplification, and the unprimed `lastUsableAuditRowId` fast gate) were already fixed by `a5dcb806` in this branch and carry direct passing regression tests ("writes one market_scan_failed row per user while the same outage continues", "primes the per-user fast gate with the audit row the refresh just wrote"); both were resolved without a code change.  The two open Sentry threads on `GET /api/scan` are Sentry's bug-prediction bot, not one of the three review bots this fixer answers, and their subject (identity resolution moving ahead of the stale-scan fallback) was likewise already fixed by `a5dcb806`.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 grandfathered warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  Targeted scan tests 69 passed, then 71 after merging `origin/main` (RAG embed fallback) and re-running every gate.  The LLM-provider/chat key tests fail in this sandbox, but they reproduce identically on unmodified `origin/main` (they expect no provider key configured) and are outside this diff.
+
+**Docs.**  `docs/rollouts/2026-10-13-market-scan-deadline-freshness.md`.
+
+**Next.**  `do-not-automerge` stays on PR #4609 — this fixer does not remove the hold label or arm auto-merge.
+
+## 2026-10-14 GROK — PR #4609 strict screener and failure payload
+
+**What.**  Second review pass.  Freshness failure dedupe reads `market_scan_failed` through a strict Zod schema.  The Nasdaq screener schema is strict too: declared live keys still parse, and an unknown key is not cached.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  Targeted screener and freshness tests 76 passed.  Full `npm test` was not re-run; the earlier sandbox DNS and stall-timing failures are unchanged.
+
+**Docs.**  `docs/rollouts/2026-10-13-market-scan-deadline-freshness.md`.
+
+**Next.**  `do-not-automerge` stays.  Do not merge from this lane.
+
+## 2026-10-13 GROK — PR #4609 review threads
+
+**What.**  Review follow-up on the market-scan freshness branch.  Identity failures on `GET /api/scan` no longer fall back to user `local`.  Freshness users overlap (cap 4) with a per-scan deadline, one `market_scan_failed` row per open outage, and the fast gate primed after a successful write.  The Nasdaq screener JSON is Zod-parsed before cache.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  Targeted scan tests 67 passed.  Full `npm test` had 2 failures outside this diff: sandbox DNS sinkhole for `discord.com` (`198.18.0.1`) and a stall-timing case that passed alone.
+
+**Docs.**  `docs/rollouts/2026-10-13-market-scan-deadline-freshness.md`.
+
+**Next.**  Push the review fixes.  `do-not-automerge` stays.  Do not merge from this lane.
+
+## 2026-10-13 GROK — Market scan deadline and freshness
+
+**What.**  No interactive or scheduled `market_scan` had refreshed since 2026-10-12 06:29Z.  The freshness lane only audited user `local`, and a Nasdaq body that ignored the abort signal could pin the singleflight without writing `market_scan_failed`.  The lane now refreshes every `listUsers()` id under a 10 minute deadline and records failures.  `GET /api/scan` returns the last good scan with `stale: true` when a refresh fails and one exists.  The 503 shape stays only when no last-good exists.  A rolling daily-close store for the weekly digest was skipped.
+
+**Verification.**  `npx tsc --noEmit` clean.  `npx vitest run test/scan-empty-screener.test.ts test/market-scan-freshness.test.ts test/scan-singleflight.test.ts` passed.
+
+**Docs.**  `docs/rollouts/2026-10-13-market-scan-deadline-freshness.md`.
+
+**Next.**  Ready for review.  `do-not-automerge` because `/api/scan` reads broker positions and quotes.  Do not merge from this lane.
 ## 2026-10-14 CODEX-AUTOFIX — PR #4619 merge conflict + thread state (proxy-use log)
 
 **What.**  Second autofix round on `Muse-Assist/proxy-use-logging`.  No genuinely new review items: all five threads (sentry `globalThis` ring, kody probe-port, kody x2 docs leak, kody Verification State) were already fixed in `783f59b8` and are RESOLVED, with kody explicitly verifying each fix on the current head ("Nothing further to change from my side").  The only real blocker was the branch being CONFLICTING with `main`; merged `origin/main` (`57477ebe`) cleanly with no conflicts and no manual `STATUS.md` reconciliation needed.

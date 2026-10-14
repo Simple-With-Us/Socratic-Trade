@@ -22,6 +22,7 @@ vi.mock("../src/lib/market", async (importOriginal) => {
 import { audit, getDb, latestAuditByKind } from "../src/lib/db";
 import {
   FRESHNESS_BOOT_GRACE_SECONDS,
+  freshnessFastGateRowIdForTests,
   marketScanFreshnessMaxAgeHours,
   newestPersistedMarketScan,
   resetFreshnessGateForTests,
@@ -61,9 +62,9 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  // The lane always reads/writes user "local" (sole-user app; see market-scan-freshness.ts),
-  // so every test shares that scope — start each test from a clean audit table rather than
-  // relying on userId isolation.
+  // Most cases still use user "local".  The lane now walks listUsers(), so a test that
+  // inserts another user must delete that user's rows before the next case.  Start from a
+  // clean audit table rather than relying on userId isolation.
   getDb().prepare("DELETE FROM audit_events").run();
   scanMarketMock.mockReset();
   scanMarketMock.mockResolvedValue(makeScan(new Date(MONDAY).toISOString()));
@@ -192,6 +193,159 @@ describe("runMarketScanFreshnessIfDue", () => {
     auditAt("market_scan", { scan: makeScan(new Date(MONDAY - 21 * 60 * 60_000).toISOString()) }, "local", MONDAY - 21 * 60 * 60_000);
     scanMarketMock.mockRejectedValueOnce(new Error("provider down"));
     await expect(runMarketScanFreshnessIfDue(MONDAY)).resolves.toBeUndefined();
+    expect(latestAuditByKind("market_scan_failed", "local")).toBeDefined();
+  });
+
+  it("refreshes a signed-in user and does not treat local as the only user", async () => {
+    const { upsertConnectedAccount, getDb } = await import("../src/lib/db");
+    const userId = "owner-scan";
+    upsertConnectedAccount({
+      id: "owner-scan-acct",
+      userId,
+      broker: "test",
+      environment: "paper",
+      accountNumber: "OWNER",
+      label: "Owner",
+      isActive: true
+    });
+    try {
+      auditAt("market_scan", { scan: makeScan(new Date(MONDAY - 25 * 60 * 60_000).toISOString()) }, userId, MONDAY - 25 * 60 * 60_000);
+      vi.setSystemTime(MONDAY);
+      await runMarketScanFreshnessIfDue(MONDAY);
+      const userIds = scanMarketMock.mock.calls.map((call) => call[3]);
+      expect(userIds).toContain(userId);
+      expect(latestAuditByKind("market_scan", userId)?.createdAt).toBe(new Date(MONDAY).toISOString());
+    } finally {
+      const db = getDb();
+      db.prepare("DELETE FROM connected_accounts WHERE user_id = ?").run(userId);
+      db.prepare("DELETE FROM user_settings WHERE user_id = ?").run(userId);
+      db.prepare("DELETE FROM account_strategy_state WHERE user_id = ?").run(userId);
+    }
+  });
+
+  it("rejects a hung scan at the freshness deadline so the next tick can run", async () => {
+    scanMarketMock.mockImplementationOnce(() => new Promise(() => {}));
+    const pending = runMarketScanFreshnessIfDue(MONDAY);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    await pending;
+    expect(latestAuditByKind("market_scan_failed", "local")).toBeDefined();
+    scanMarketMock.mockResolvedValue(makeScan(new Date(MONDAY).toISOString()));
+    await runMarketScanFreshnessIfDue(MONDAY);
+    expect(scanMarketMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("budgets each scan's enrichment deadline from scan start, not the tick timestamp", async () => {
+    vi.setSystemTime(MONDAY + 5 * 60_000);
+    await runMarketScanFreshnessIfDue(MONDAY);
+    const options = scanMarketMock.mock.calls[0]?.[5] as { deadlineAt?: number };
+    expect(options.deadlineAt).toBe(MONDAY + 15 * 60_000);
+  });
+
+  it("primes the per-user fast gate with the audit row the refresh just wrote", async () => {
+    await runMarketScanFreshnessIfDue(MONDAY);
+    const row = latestAuditByKind("market_scan", "local");
+    expect(row?.id).toBeTruthy();
+    expect(freshnessFastGateRowIdForTests("local")).toBe(row?.id);
+  });
+
+  it("writes one market_scan_failed row per user while the same outage continues", async () => {
+    scanMarketMock.mockRejectedValue(new Error("provider down"));
+    await runMarketScanFreshnessIfDue(MONDAY);
+    vi.setSystemTime(MONDAY + 18_000);
+    await runMarketScanFreshnessIfDue(MONDAY + 18_000);
+    vi.setSystemTime(MONDAY + 36_000);
+    await runMarketScanFreshnessIfDue(MONDAY + 36_000);
+    const rows = getDb().prepare(
+      "SELECT payload FROM audit_events WHERE kind = 'market_scan_failed' AND user_id = 'local'"
+    ).all() as Array<{ payload: string }>;
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0]?.payload ?? "{}").message).toBe("provider down");
+  });
+
+  it("writes a new failure when the latest market_scan_failed row is not the freshness payload", async () => {
+    audit("market_scan_failed", { message: "provider down", source: "market_scan_freshness", extra: true }, "local");
+    scanMarketMock.mockRejectedValue(new Error("provider down"));
+    await runMarketScanFreshnessIfDue(MONDAY);
+    const rows = getDb().prepare(
+      "SELECT payload FROM audit_events WHERE kind = 'market_scan_failed' AND user_id = 'local'"
+    ).all() as Array<{ payload: string }>;
+    expect(rows).toHaveLength(2);
+    const parsed = rows.map((row) => JSON.parse(row.payload) as { extra?: boolean; source?: string });
+    expect(parsed.some((payload) => payload.extra === true)).toBe(true);
+    expect(parsed.some((payload) => payload.extra === undefined && payload.source === "market_scan_freshness")).toBe(true);
+  });
+
+  it("records a new failure after a successful scan ends the previous outage", async () => {
+    scanMarketMock.mockRejectedValueOnce(new Error("provider down"));
+    await runMarketScanFreshnessIfDue(MONDAY);
+    scanMarketMock.mockResolvedValue(makeScan(new Date(MONDAY + 60_000).toISOString()));
+    vi.setSystemTime(MONDAY + 60_000);
+    await runMarketScanFreshnessIfDue(MONDAY + 60_000);
+    scanMarketMock.mockRejectedValue(new Error("provider down"));
+    const later = MONDAY + 21 * 60 * 60_000;
+    vi.setSystemTime(later);
+    await runMarketScanFreshnessIfDue(later);
+    const rows = getDb().prepare(
+      "SELECT id FROM audit_events WHERE kind = 'market_scan_failed' AND user_id = 'local'"
+    ).all();
+    expect(rows).toHaveLength(2);
+  });
+
+  it("does not write a second failure when a later tick joins an in-flight scan that rejects", async () => {
+    let rejectScan: (error: Error) => void = () => {};
+    scanMarketMock.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      rejectScan = reject;
+    }));
+    const first = runMarketScanFreshnessIfDue(MONDAY);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(scanMarketMock).toHaveBeenCalledTimes(1);
+    const second = runMarketScanFreshnessIfDue(MONDAY + 18_000);
+    rejectScan(new Error("provider down"));
+    await Promise.all([first, second]);
+    const rows = getDb().prepare(
+      "SELECT id FROM audit_events WHERE kind = 'market_scan_failed' AND user_id = 'local'"
+    ).all();
+    expect(rows).toHaveLength(1);
+    expect(scanMarketMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes a later user while an earlier user's scan is still inside the deadline", async () => {
+    const { upsertConnectedAccount } = await import("../src/lib/db");
+    const slow = "slow-scan-user";
+    const fast = "fast-scan-user";
+    for (const userId of [slow, fast]) {
+      upsertConnectedAccount({
+        id: `${userId}-acct`,
+        userId,
+        broker: "test",
+        environment: "paper",
+        accountNumber: userId.toUpperCase(),
+        label: userId,
+        isActive: true
+      });
+    }
+    try {
+      scanMarketMock.mockImplementation((...args: unknown[]) => {
+        if (args[3] === slow) return new Promise(() => {});
+        return Promise.resolve(makeScan(new Date(MONDAY).toISOString()));
+      });
+      const pending = runMarketScanFreshnessIfDue(MONDAY);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scanMarketMock.mock.calls.map((call) => call[3])).toEqual(expect.arrayContaining(["local", slow, fast]));
+      expect(latestAuditByKind("market_scan", fast)?.kind).toBe("market_scan");
+      expect(latestAuditByKind("market_scan", slow)).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await pending;
+      expect(latestAuditByKind("market_scan_failed", slow)).toBeDefined();
+      expect(latestAuditByKind("market_scan", fast)?.kind).toBe("market_scan");
+    } finally {
+      const db = getDb();
+      for (const userId of [slow, fast]) {
+        db.prepare("DELETE FROM connected_accounts WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM user_settings WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM account_strategy_state WHERE user_id = ?").run(userId);
+      }
+    }
   });
 });
 

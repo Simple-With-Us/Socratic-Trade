@@ -1,6 +1,6 @@
 import { shareScanRefs } from "./congress-share";
 import { congressLongScore, scoreCongressSignal } from "./congress-score";
-import { fetchWithRetry, getEnrichmentProvider, type SymbolEnrichment } from "./data-providers";
+import { getEnrichmentProvider, type SymbolEnrichment } from "./data-providers";
 import type { GroupedDailyBar } from "./market-signals/massive";
 import { getSymbolWebSignals, setTechnicalWatchlist } from "./web-sources";
 import type { SymbolWebSignal } from "./web-sources";
@@ -33,13 +33,14 @@ import type {
   UniverseFloor
 } from "./types";
 import { stampFieldObservation } from "./evidence-facts";
-import { BROWSER_UA } from "./web-sources/http";
 import {
+  fetchNasdaqScreenerResponse,
   nasdaqScreenerUrl,
-  NASDAQ_SCREENER_ATTEMPTS,
   NASDAQ_SCREENER_TIMEOUT_MESSAGE,
-  NASDAQ_SCREENER_TIMEOUT_MS
+  NASDAQ_SCREENER_TIMEOUT_MS,
+  readNasdaqScreenerJson
 } from "./nasdaq-screener-fetch";
+import { parseNasdaqScreenerPayload, type NasdaqScreenerRow } from "./nasdaq-screener-schema";
 
 export { NASDAQ_SCREENER_TIMEOUT_MESSAGE, NASDAQ_SCREENER_TIMEOUT_MS };
 
@@ -116,12 +117,12 @@ const DEFAULT_ENRICHMENT_POOL_CAP = 500;
 const MAX_ENRICHMENT_POOL_MULTIPLIER = 10;
 const MAX_ENRICHMENT_POOL_CAP = 1_000;
 
-type RawNasdaqRow = Record<string, unknown>;
 type NasdaqExchange = "nasdaq" | "nyse";
 
 // Nasdaq screener is a public, unauthenticated endpoint — no user API key is
 // consumed, so this single shared cache is safe to serve to all users.
-let screenerCache = new Map<string, { expiresAt: number; rows: RawNasdaqRow[]; asOf?: string }>();
+// Rows are the parsed schema, not the raw JSON, so a drifted envelope is not cached.
+let screenerCache = new Map<string, { expiresAt: number; rows: NasdaqScreenerRow[]; asOf?: string }>();
 
 /**
  * True if a quote clears the universe floor. Each bound applies only when set (`> 0`); market-cap and
@@ -332,10 +333,10 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     const universeSources = new Set<string>();
 
     try {
-      // Own 15s timeout + abort retry.  Do not attach the interactive
-      // withScanDeadline signal — that 20s race is how an 8s stub-UA abort
-      // became a silent empty table before the deadline message could fire.
-      const result = await fetchNasdaqScreener(options?.ttlMs ?? marketCacheTtlMs());
+      // 15s header budget + one transport retry live in the helper.  The scan
+      // deadline signal aborts that wait and the JSON body.  A deadline abort
+      // throws; it must not become a silent empty table.
+      const result = await fetchNasdaqScreener(options?.ttlMs ?? marketCacheTtlMs(), undefined, options?.signal);
       cached = result.cached;
       const allQuotes = result.rows.flatMap((row) => toMarketQuote(row, positions, this.name, result.asOf));
       quotes = allQuotes.filter((quote) => allowed.has(quote.symbol));
@@ -1459,63 +1460,36 @@ export function clearMarketCache(): void {
 
 async function fetchNasdaqScreener(
   ttlMs: number,
-  exchange?: NasdaqExchange
-): Promise<{ rows: RawNasdaqRow[]; asOf?: string; cached: boolean }> {
+  exchange?: NasdaqExchange,
+  signal?: AbortSignal
+): Promise<{ rows: NasdaqScreenerRow[]; asOf?: string; cached: boolean }> {
   const now = Date.now();
   const cacheKey = exchange ?? "all";
   const cached = screenerCache.get(cacheKey);
   if (cached && cached.expiresAt > now) {
     return { rows: cached.rows, asOf: cached.asOf, cached: true };
   }
-
-  // Same contract as nasdaq-quote / nasdaq-calendar (2026-08-05): BROWSER_UA +
-  // Origin/Referer + fetchWithRetry. Stub "Mozilla/5.0" + 8s abort() is why
-  // every scan since 2026-08-13T22:30Z returned 0 quotes.
-  let lastError: unknown;
-  for (let attempt = 0; attempt < NASDAQ_SCREENER_ATTEMPTS; attempt++) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => {
-      controller.abort(new Error(NASDAQ_SCREENER_TIMEOUT_MESSAGE));
-    }, NASDAQ_SCREENER_TIMEOUT_MS);
-    try {
-      const response = await fetchWithRetry(
-        nasdaqScreenerUrl(exchange),
-        {
-          cache: "no-store",
-          signal: controller.signal,
-          headers: {
-            Accept: "application/json,text/plain,*/*",
-            "User-Agent": BROWSER_UA,
-            Origin: "https://www.nasdaq.com",
-            Referer: "https://www.nasdaq.com/"
-          }
-        },
-        { service: "nasdaq-delayed-screener", retries: 1 }
-      );
-      clearTimeout(timeout);
-      if (!response.ok) throw new Error(`Market data request failed with ${response.status}.`);
-      const payload = await response.json();
-      const rows = Array.isArray(payload?.data?.table?.rows) ? (payload.data.table.rows as RawNasdaqRow[]) : [];
-      const asOf = typeof payload?.data?.asof === "string" ? payload.data.asof : undefined;
-      screenerCache.set(cacheKey, { rows, asOf, expiresAt: expiresAtRespectingMarketClose(new Date(now), ttlMs) });
-      return { rows, asOf, cached: false };
-    } catch (error) {
-      const reason = controller.signal.reason;
-      lastError = reason instanceof Error ? reason : error;
-      const timedOut =
-        (reason instanceof Error && reason.message === NASDAQ_SCREENER_TIMEOUT_MESSAGE) ||
-        (error instanceof Error && (error.name === "AbortError" || error.message === NASDAQ_SCREENER_TIMEOUT_MESSAGE));
-      if (!timedOut || attempt === NASDAQ_SCREENER_ATTEMPTS - 1) {
-        throw lastError;
-      }
-    } finally {
-      clearTimeout(timeout);
-    }
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error("Nasdaq screener aborted.");
   }
-  throw lastError instanceof Error ? lastError : new Error(NASDAQ_SCREENER_TIMEOUT_MESSAGE);
+
+  // Headers: shared helper (BROWSER_UA, 15s budget, one abort retry).  Body: the
+  // same caller signal, so a 35s interactive deadline or a 10min freshness
+  // deadline cannot leave response.json() running with nobody awaiting it.
+  const response = await fetchNasdaqScreenerResponse("nasdaq-delayed-screener", {
+    url: nasdaqScreenerUrl(exchange),
+    signal
+  });
+  if (!response.ok) throw new Error(`Market data request failed with ${response.status}.`);
+  // Parse before cache or return.  A drifted envelope throws and is not stored.
+  const payload = parseNasdaqScreenerPayload(await readNasdaqScreenerJson(response, signal));
+  const rows = payload.data.table.rows;
+  const asOf = payload.data.asof ?? undefined;
+  screenerCache.set(cacheKey, { rows, asOf, expiresAt: expiresAtRespectingMarketClose(new Date(now), ttlMs) });
+  return { rows, asOf, cached: false };
 }
 
-function toMarketQuote(row: RawNasdaqRow, positions: EquityPosition[], provider: string, asOf?: string): MarketQuote[] {
+function toMarketQuote(row: NasdaqScreenerRow, positions: EquityPosition[], provider: string, asOf?: string): MarketQuote[] {
   const symbol = normalizeMarketDataSymbol(String(row.symbol ?? ""));
   const price = number(row.lastsale);
   const intradayChangePct = percent(row.pctchange);
@@ -1573,7 +1547,7 @@ async function loadDynamicUniverseQuotes(input: {
       const exchange = config.exchange;
       if (!exchange) continue;
       try {
-        const result = await fetchNasdaqScreener(input.ttlMs, exchange);
+        const result = await fetchNasdaqScreener(input.ttlMs, exchange, input.signal);
         cached = cached || result.cached;
         quotes.push(...result.rows.flatMap((row) => toMarketQuote(row, input.positions, input.providerName, result.asOf)));
         sources.push(`${universe}-universe`);
