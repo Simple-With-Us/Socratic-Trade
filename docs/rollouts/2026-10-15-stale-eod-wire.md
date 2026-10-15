@@ -6,11 +6,13 @@ Congress.Trade treats a pushed close, and `closes[0]` on the pull, as the curren
 
 ## 2. Changes Made
 
-A series is fresh only when its newest close date is on or after `latestCompletedTradingSessionEtKey`.  Otherwise the nightly share omits that ticker and the S&P series, audits `congress_share_stale_price_withheld`, and counts `congress_share.stale_price_withheld`.  The pull routes return the existing empty envelope (null current price, no closes) so Congress.Trade falls back.  A stale flat-file tail still tries the live cascade before it is withheld.
+A series is fresh only when its newest close date is on or after `latestCompletedTradingSessionEtKey`.  Otherwise the nightly share omits that ticker and the S&P series, audits `congress_share_stale_price_withheld`, and counts `congress_share.stale_price_withheld`.  The pull routes return HTTP 502 `{ ok: false, error: "stale" }` for that tail.  A confirmed empty series stays HTTP 200.  A stale flat-file tail still tries the live cascade before it is withheld.
 
 - `src/lib/congress-share.ts`
 - `src/lib/market-read.ts`
 - `src/lib/sentry-metrics.ts`
+- `app/api/market/prices/[symbol]/route.ts`
+- `app/api/market/spx/route.ts`
 - `test/congress-share.test.ts`
 - `test/market-read-routes.test.ts`
 - `docs/congress-trade-share.md`
@@ -21,6 +23,8 @@ A series is fresh only when its newest close date is on or after `latestComplete
 
 Dropping the series, rather than adding a provenance field, is the ST-only fix.  Congress.Trade's strict row schema would strip or reject an extra field, and `currentPriceDate` is already set but not validated downstream.  Historical closes inside a stale tail are withheld with it.  Replaying them would refresh Congress.Trade's receive-time watchdog.  A flat-file miss that the live cascade can refresh is still sent.
 
+The first pull cut returned an empty 200 for a stale tail.  That matches a confirmed empty series, and Congress.Trade only falls back on non-200 (same contract as `GET /api/market/intraday`, which uses 502 for provider unavailable).  Sentry review on PR #4725 flagged it.  Stale pulls are now 502.  404 stays the missing-profile signal.  The push still omits the ticker rather than POSTing a failure.
+
 ## 4. Verification State
 
 ```bash
@@ -30,6 +34,22 @@ npx vitest run test/congress-share.test.ts test/market-read-routes.test.ts
 ```
 
 eslint on the touched files: 0 errors (existing unused-schema warnings only).  `npm run lint`: 0 errors, 856 grandfathered warnings.  `tsc --noEmit` clean.  Targeted vitest: 2 files, 132 tests passed.  Full `npm test`: 23 failed, 9368 passed, 51 skipped.  The 23 failures are in LLM-key, notify, alpha-vantage, and server-metrics suites, not the share or market-read tests.  `npm run build`: exit 0.
+
+Sentry follow-up (stale pull is 502, confirmed empty stays 200):
+
+```bash
+npx eslint src/lib/market-read.ts 'app/api/market/prices/[symbol]/route.ts' app/api/market/spx/route.ts test/market-read-routes.test.ts
+npx tsc --noEmit
+npx vitest run test/market-read-routes.test.ts
+npm run lint
+```
+
+Those commands passed, and `npm run build` on this follow-up exited 0.
+
+- `npm run lint` -> pass (0 errors, 856 grandfathered warnings)
+- `npx tsc --noEmit` -> pass
+- `npm test` -> 23 failed, 9368 passed, 51 skipped on the prior commit.  Failures are LLM-key, notify, alpha-vantage, and server-metrics suites, outside this diff.  This follow-up re-ran `test/market-read-routes.test.ts`: 37 passed.
+- `npm run build` -> pass (exit 0)
 
 ## 5. Next Steps & Blockers
 

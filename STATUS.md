@@ -2,7 +2,7 @@
 
 ## 2026-10-15 Cursor Cloud — withhold stale EOD on the Congress.Trade wire (ST-3845)
 
-**What.**  A price series or the S&P series whose newest close is behind `latestCompletedTradingSessionEtKey` is no longer pushed to Congress.Trade, and `GET /api/market/prices` / `GET /api/market/spx` return the empty envelope so the caller falls back.  The push writes `congress_share_stale_price_withheld`.  PR #4009 still only stops a stale import from beating a live source.
+**What.**  A price series or the S&P series whose newest close is behind `latestCompletedTradingSessionEtKey` is no longer pushed to Congress.Trade.  `GET /api/market/prices` and `GET /api/market/spx` return 502 `{ ok: false, error: "stale" }` for that tail so Congress.Trade falls back.  A confirmed empty series stays HTTP 200.  The push writes `congress_share_stale_price_withheld`.  PR #4009 still only stops a stale import from beating a live source.
 
 **Branch.**  `cursor/stale-eod-wire-ed52`.  Linear ST-3845.  Claim moved from GROK (2026-09-30, no implementation) under the sweep rule.
 
