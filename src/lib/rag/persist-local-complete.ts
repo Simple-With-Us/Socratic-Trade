@@ -2,7 +2,6 @@
 // Artifact + full FTS (bare SEC accession) + ledger persist without storeDocument(full body).
 
 import { getDb } from "../db";
-import { decodeTextPayload } from "../text-payload-codec";
 import { insertIngestedAccession } from "../db-learning";
 import {
   bareSecAccession,
@@ -116,22 +115,20 @@ export function hasLocalFilingCopy(accession: string): boolean {
     // artifacts table may be absent
   }
   try {
-    const calls = db.prepare(`
-      SELECT content FROM earningscalls_transcripts
+    const call = db.prepare(`
+      SELECT 1 FROM earningscalls_transcripts
       WHERE content IS NOT NULL
+        AND (
+          plaintext_length > 80
+          OR (plaintext_length IS NULL AND length(content) > 80)
+        )
         AND (
           lower(symbol) = lower(?)
           OR source_meta LIKE ?
         )
-      LIMIT 8
-    `).all(bare, `%${bare}%`) as Array<{ content: string }>;
-    if (calls.some((row) => {
-      try {
-        return decodeTextPayload(row.content).trim().length > 80;
-      } catch {
-        return false;
-      }
-    })) return true;
+      LIMIT 1
+    `).get(bare, `%${bare}%`);
+    if (call) return true;
   } catch {
     // transcript cache may be absent
   }

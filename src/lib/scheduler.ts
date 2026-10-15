@@ -1013,7 +1013,8 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   }).catch((err) => console.error("[scheduler] storage hygiene error:", err));
 
   // In-place gzip of transcript bodies and companyfacts JSON cache. Leader only.
-  // Updates the text column. Does not delete rows and does not touch FTS.
+  // The lane probes text_codec / segment_codec (indexed), then reads one body
+  // at a time and yields. It does not scan blob columns and does not delete rows.
   void journalLane("text-payload-backfill", {}, async () => {
     const result = await backfillCompressedTextPayloadsIfDue();
     if (!result) return { status: "skipped" as const, summary: "not due" };

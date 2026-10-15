@@ -16,7 +16,7 @@
 import "server-only";
 import { getDb } from "./db";
 import { normalizeSymbol } from "./money";
-import { decodeTextPayload, encodeTextPayload } from "./text-payload-codec";
+import { decodeTextPayload, encodeTextPayload, textPayloadCodecTag } from "./text-payload-codec";
 
 export interface EarningsCallsTranscriptRow {
   symbol: string;
@@ -82,11 +82,14 @@ export function getEarningsCallsTranscript(
  * actually changed from empty to real (fresh content resets it so the ingest step runs).
  */
 export function upsertEarningsCallsTranscript(row: Omit<EarningsCallsTranscriptRow, "ingestedAt">): void {
+  const trimmed = row.content?.trim() ?? "";
+  const encodedContent = trimmed ? encodeTextPayload(row.content as string) : null;
+  const plainLength = trimmed ? trimmed.length : null;
   getDb()
     .prepare(
       `INSERT INTO earningscalls_transcripts
-         (symbol, fiscal_year, fiscal_quarter, event_id, event_date, content, fetched_at, source_meta, ingested_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+         (symbol, fiscal_year, fiscal_quarter, event_id, event_date, content, fetched_at, source_meta, ingested_at, text_codec, plaintext_length)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
        ON CONFLICT(symbol, fiscal_year, fiscal_quarter) DO UPDATE SET
          event_id = COALESCE(excluded.event_id, earningscalls_transcripts.event_id),
          event_date = COALESCE(excluded.event_date, earningscalls_transcripts.event_date),
@@ -96,6 +99,14 @@ export function upsertEarningsCallsTranscript(row: Omit<EarningsCallsTranscriptR
          ingested_at = CASE
            WHEN earningscalls_transcripts.content IS NULL AND excluded.content IS NOT NULL THEN NULL
            ELSE earningscalls_transcripts.ingested_at
+         END,
+         text_codec = CASE
+           WHEN earningscalls_transcripts.content IS NULL AND excluded.content IS NOT NULL THEN excluded.text_codec
+           ELSE earningscalls_transcripts.text_codec
+         END,
+         plaintext_length = CASE
+           WHEN earningscalls_transcripts.content IS NULL AND excluded.content IS NOT NULL THEN excluded.plaintext_length
+           ELSE earningscalls_transcripts.plaintext_length
          END`
     )
     .run(
@@ -104,9 +115,11 @@ export function upsertEarningsCallsTranscript(row: Omit<EarningsCallsTranscriptR
       row.fiscalQuarter,
       row.eventId ?? null,
       row.eventDate ?? null,
-      row.content && row.content.trim() ? encodeTextPayload(row.content) : null,
+      encodedContent,
       row.fetchedAt,
-      row.sourceMeta ?? null
+      row.sourceMeta ?? null,
+      encodedContent ? textPayloadCodecTag(encodedContent) : null,
+      plainLength
     );
 }
 

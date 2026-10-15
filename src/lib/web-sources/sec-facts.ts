@@ -5,7 +5,7 @@ import { politeFetch } from "./http";
 import { padCik } from "./sec-filings";
 import { timeSync } from "../slow-sync-guard";
 import crypto from "crypto";
-import { decodeTextPayload, encodeTextPayload } from "../text-payload-codec";
+import { decodeTextPayload, encodeTextPayload, textPayloadCodecTag } from "../text-payload-codec";
 
 const SEC_DATA_BASE = "https://data.sec.gov";
 
@@ -316,13 +316,22 @@ export function upsertCompanyFactsCache(cik: string, jsonText: string, fetchedAt
   const paddedCik = padCik(cik);
   const id = crypto.createHash("sha256").update(`companyfacts-cache:${paddedCik}`).digest("hex");
   const endDate = fetchedAt.slice(0, 10);
+  const encoded = encodeTextPayload(jsonText);
   getDb()
     .prepare(
       `INSERT OR REPLACE INTO sec_facts (
-        id, cik, accession, concept, value, unit, period, start_date, end_date, accepted_at, segment
-      ) VALUES (?, ?, 'cache', ?, 1, 'json', 'cache', NULL, ?, ?, ?)`
+        id, cik, accession, concept, value, unit, period, start_date, end_date, accepted_at, segment, segment_codec
+      ) VALUES (?, ?, 'cache', ?, 1, 'json', 'cache', NULL, ?, ?, ?, ?)`
     )
-    .run(id, paddedCik, SEC_COMPANYFACTS_CACHE_CONCEPT, endDate, fetchedAt, encodeTextPayload(jsonText));
+    .run(
+      id,
+      paddedCik,
+      SEC_COMPANYFACTS_CACHE_CONCEPT,
+      endDate,
+      fetchedAt,
+      encoded,
+      textPayloadCodecTag(encoded)
+    );
 }
 
 /** Read cached companyfacts JSON for a CIK (written by ingest / nightly sweep). */

@@ -38,6 +38,7 @@ Files:
 - Embedding model, dimensions, and `VECTOR_EMBED_CLEAN_TEXT` are unchanged.  Path inventory after the first draft corrected the review: live embed is BAAI bge-m3 at 1024 (`activeEmbeddingModel`), and `voyage-finance-2` is test-only.  Corpus-wide FTS stays `sec-edgar` / `sec-8k` because licensed transcript sources lack rights metadata on the FTS row.  Do not add them to that filter in this pass.
 - `embed_stage` and `chunk_occurrences` are not rewritten.  The review treats 1.9 GB of staged vectors as a delivery-delete question, and 2.2 GB of occurrences as the point-in-time ledger working as designed.
 - No age deletes.  No outside price backfill.
+- Review follow-up on PR #4720.  `text_codec` / `segment_codec` and `plaintext_length` (migration 95) let the backfill probe an index and let `hasLocalFilingCopy` stop at `LIMIT 1` without gunzip.  The 10-minute watermark is written after a pass returns.  `raw1:` carries a length frame so a plaintext that starts with `gz1:` or `raw1:` round-trips.  A transcript that fails to decode is kept on `decodeRetries` and the re-embed watermark still advances.  #4722 was still open at merge time, so this branch does not include that retention rewrite.
 
 Space, using the given production sizes and a conservative English gzip-plus-base64 ratio of about 55% for transcripts.  Companyfacts JSON is much more repetitive.  A local sample of that shape saved about 96% after base64.  Numeric fact rows are not compressed, so the `sec_facts` save depends on how much of the 1.67 GB is the cache blob.
 
@@ -48,22 +49,19 @@ Space, using the given production sizes and a conservative English gzip-plus-bas
 
 ## Verification State
 
+Order is lint, types, the full vitest run, then the production build.  Targeted codec and transcript suites are part of `npm test`, not a step ahead of lint.
+
 ```bash
-npx vitest run test/text-payload-codec.test.ts test/audit-hygiene.test.ts test/sec-facts.test.ts
-# 22 passed
-npx vitest run test/earningscalls-transcripts.test.ts test/corpus-reembed.test.ts test/hydrate-accession.test.ts test/persist-local-complete.test.ts test/memory-decay.test.ts
-# 75 passed
+npm run lint
+# eslint on the touched files: 0 errors. Pre-existing warnings in db.ts, scheduler.ts, sec-facts.ts.
 npx tsc --noEmit
 # clean
-npx eslint <touched files>
-# 0 errors, 3 pre-existing warnings in scheduler.ts and sec-facts.ts
 npm test
-# 9379 passed, 51 skipped, 25 failed.  Failures are outside this diff:
-# alpha-vantage-key-pool, chat-llm, cpuprofile-summary, data-providers,
-# framework-review, llm-provider, notify-body-tiers, notify-user-creds,
-# openrouter-credits, persistence-notification, red-team, server-metrics.
-# The llm/openrouter cluster matches the sandbox OPENROUTER_API_KEY fixture
-# already noted on 2026-10-15 in STATUS.md.
+# 9355 passed, 51 skipped, 36 failed on the first full run.
+# 12 of those were persistence-hardening asserting schema version 94. Updated to 95.
+# Re-run: test/persistence-hardening.test.ts and test/text-payload-codec.test.ts, 31 passed.
+# Remaining failures are outside this diff: llm keys, notify, server-metrics,
+# alpha-vantage, data-providers, cpuprofile, and data-catalog pe completeness.
 npm run build
 # exit 0
 ```

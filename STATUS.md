@@ -290,6 +290,7 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 **Verification.**  Targeted vitest 64/64.  `npm run lint` 0 errors, 854 warnings.  `npx tsc --noEmit` ok.  `npm test` 9385 passed, 51 skipped, 24 failed, all outside this diff (sandbox LLM keys and host checks).  `npm run build` ok.  Detail: `docs/rollouts/2026-10-15-honest-approve-retryable.md`.
 
 **Next.**  Ready PR with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.
+**Next.**  PR #4720 ready for review.  Merged `origin/main` at `df7e6d10`.  #4722 had not landed, so its retention rewrite is not in this branch.  Review follow-up: codec columns so the backfill does not scan blobs, watermark after a successful pass, framed `raw1:` lengths, re-embed keeps a decode retry list, and `hasLocalFilingCopy` is one indexed length check.
 ## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
 
 **What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.

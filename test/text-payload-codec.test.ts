@@ -39,9 +39,18 @@ describe("text payload codec", () => {
 
   it("marks incompressible short text raw1 so a backfill can finish", () => {
     const encoded = encodeTextPayload("hi");
-    expect(encoded.startsWith(TEXT_PAYLOAD_RAW_PREFIX)).toBe(true);
+    expect(encoded).toBe(`${TEXT_PAYLOAD_RAW_PREFIX}2:hi`);
     expect(decodeTextPayload(encoded)).toBe("hi");
     expect(encodeTextPayload(encoded)).toBe(encoded);
+  });
+
+  it("round-trips plaintext that starts with a codec marker", () => {
+    for (const plain of ["raw1:hello", "gz1:not-gzip", `${TEXT_PAYLOAD_RAW_PREFIX}2:hi but not a frame`]) {
+      const encoded = encodeTextPayload(plain);
+      expect(decodeTextPayload(encoded)).toBe(plain);
+      expect(encodeTextPayload(encoded)).toBe(encoded);
+    }
+    expect(decodeTextPayload(`${TEXT_PAYLOAD_RAW_PREFIX}hi`)).toBe("hi");
   });
 
   it("refuses to treat a broken gz1 payload as text", () => {
@@ -59,7 +68,10 @@ describe("shared readers", () => {
     const { upsertCompanyFactsCache, readCompanyFactsCache, SEC_COMPANYFACTS_CACHE_CONCEPT } = await import(
       "../src/lib/web-sources/sec-facts"
     );
-    const { backfillCompressedTextPayloads } = await import("../src/lib/text-payload-backfill");
+    const { backfillCompressedTextPayloads, backfillCompressedTextPayloadsIfDue } = await import(
+      "../src/lib/text-payload-backfill"
+    );
+    const { hasLocalFilingCopy } = await import("../src/lib/rag/persist-local-complete");
 
     const transcript = `Operator remarks. The prepared remarks follow. ${"Revenue grew in the cloud segment. ".repeat(80)}`;
     upsertEarningsCallsTranscript({
@@ -124,5 +136,33 @@ describe("shared readers", () => {
       .prepare("SELECT content FROM earningscalls_transcripts WHERE symbol = 'LEGACY'")
       .get() as { content: string };
     expect(legacyStored.content.startsWith(TEXT_PAYLOAD_GZIP_PREFIX)).toBe(true);
+    const stamped = getDb()
+      .prepare("SELECT text_codec, plaintext_length FROM earningscalls_transcripts WHERE symbol = 'LEGACY'")
+      .get() as { text_codec: string; plaintext_length: number };
+    expect(stamped.text_codec).toBe("gz1");
+    expect(stamped.plaintext_length).toBeGreaterThan(80);
+
+    expect(hasLocalFilingCopy("LEGACY")).toBe(true);
+    for (let quarter = 1; quarter <= 9; quarter += 1) {
+      upsertEarningsCallsTranscript({
+        symbol: "SHORT",
+        fiscalYear: 2020,
+        fiscalQuarter: quarter,
+        content: "hi",
+        fetchedAt: "2026-10-15T00:00:00.000Z"
+      });
+    }
+    upsertEarningsCallsTranscript({
+      symbol: "SHORT",
+      fiscalYear: 2010,
+      fiscalQuarter: 1,
+      content: transcript,
+      fetchedAt: "2026-10-15T00:00:00.000Z"
+    });
+    expect(hasLocalFilingCopy("SHORT")).toBe(true);
+
+    const first = await backfillCompressedTextPayloadsIfDue(1_000);
+    expect(first).not.toBeNull();
+    expect(await backfillCompressedTextPayloadsIfDue(1_000 + 60_000)).toBeNull();
   });
 });
