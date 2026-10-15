@@ -197,7 +197,8 @@ export async function runSyntheticStopMonitor(
   now = new Date(),
   /** §7 slice 3 mutation-lease fence (AccountMutationContext.assertOwned) — checked before the
    *  risk-CREATING exit placement. Cancels within the pass run unfenced (risk-reducing). */
-  fence?: () => void
+  fence?: () => void,
+  options?: { signal?: AbortSignal; onBrokerWrite?: () => void }
 ): Promise<MonitorResult> {
   const result: MonitorResult = { evaluated: 0, triggered: 0, exited: 0, purged: 0 };
   const callerAccountNumber = policy.accountNumber;
@@ -997,6 +998,8 @@ export async function runSyntheticStopMonitor(
       // Mutation-lease fence: fail closed before the risk-CREATING exit placement if the
       // window's lease was lost (another sequence may already be mutating this account).
       fence?.();
+      if (options?.signal?.aborted) return result;
+      options?.onBrokerWrite?.();
       const exec = await gateway.placeEquityOrder({
         accountNumber,
         symbol: stop.symbol,

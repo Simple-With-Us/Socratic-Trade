@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — broker call bounds (ST-2570)
+
+**What.**  Broker reads and writes carry a deadline and an abort signal.  Order listings stop at 50 pages and 500 rows.  Quote and eligibility batches stop at 25 symbols.  Stops, stale exits, and fill reconcile launch for every eligible account before any health probe is awaited, so one hung probe cannot delay the next account's protection.  A hung read releases the stop and exit guards.  A write that has started keeps its guard.  A strategy run whose health probe or snapshot never returns finishes `failed`.
+
+**Branch.**  `cursor/broker-call-bounds-7ec5`
+
+**Verification.**  `npm run lint` exited 0 (0 errors, 848 warnings).  `npx tsc --noEmit` exited 0.  Focused vitest (`protective-lane-isolation`, `scheduler-stale-exit-inflight-guard`, `broker-io-deadlines`, `scheduler-pending-fill-inflight-guard`, `scheduler-halt-cause-tick`) was 16 passed.  `test/robinhood-orders-error-throws.test.ts` was 4 passed after the since-window fixture fix.  Full `npm test` was 9374 passed, 51 skipped, and 26 failed.  One failure was the Robinhood populated-list fixture (a July fill, dropped by the 24h terminal window) and is fixed.  The other 25 are outside this diff (LLM key routing, notify credentials, server-metrics host detection, cpuprofile summary, data-provider cache).  `npm run build` exited 0.
+
+**Next.**  Ready PR with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.  Post the PR link on ST-2570.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.
