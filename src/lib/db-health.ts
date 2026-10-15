@@ -2,6 +2,7 @@ import "server-only";
 import { createHash, randomUUID } from "crypto";
 import { getDb } from "./db";
 import { isLocalDbFaultMessage, noteLocalDbFault } from "./local-db-fault";
+import { isPeerUpstreamDbFaultMessage, notePeerUpstreamDbFault, HEALTH_PEER_DB_CONTENTION_PREFIX } from "./peer-db-fault";
 import { intentionalOffHealthReason, isIntentionalOffHealthService } from "./retired-direct-vendors";
 import { isFilingApiAuthErrorText } from "./filingapi-auth-classify";
 import { isTransientNetworkErrorText } from "./network-errors";
@@ -28,6 +29,7 @@ export const HEALTH_SOFT_FAILURE_PREFIX = "[expected-limit] ";
  */
 export function isSoftHealthFailure(errorText: string | null | undefined): boolean {
   if (!errorText) return false;
+  if (errorText.startsWith(HEALTH_PEER_DB_CONTENTION_PREFIX)) return true;
   if (errorText.startsWith(HEALTH_SOFT_FAILURE_PREFIX)) return true;
   // Legacy / free-text shapes that should never hard-STOP a lane on their own.
   return (
@@ -1068,10 +1070,41 @@ export async function alertConnectionFailure(
   try {
     const targetUserId = userId || "local";
     const actualKeySource = keySource || "none";
+    const isGlobal = actualKeySource !== "user";
+    // App A / Congress.Trade D1 write contention relayed through congress-share (or peer reads)
+    // is not a broken ST connection and must not page as "<service> connection failed".
+    if (isPeerUpstreamDbFaultMessage(errorText, service)) {
+      await notePeerUpstreamDbFault({
+        lane: service,
+        operation: "connection health",
+        message: errorText,
+        userId: targetUserId
+      });
+      if (!opts?.skipSentry && !shouldSuppressConnectionAlertForStartup(process.uptime())) {
+        const baseKey =
+          actualKeySource === "user"
+            ? `${HEALTH_ALERT_COOLDOWN_PREFIX}:${service}:${actualKeySource}:${targetUserId}:peer-db`
+            : `${HEALTH_ALERT_COOLDOWN_PREFIX}:${service}:${actualKeySource}:peer-db`;
+        const { getInternalSetting, setInternalSetting } = await import("./db");
+        const now = Date.now();
+        const last = getInternalSetting<string>(baseKey);
+        if (!last || !Number.isFinite(Date.parse(last)) || now >= Date.parse(last)) {
+          setInternalSetting(baseKey, new Date(now + HEALTH_ALERT_COOLDOWN_MS).toISOString());
+          await captureHealthSentryMessage("warning", `${service} peer write contention (App A D1)`, {
+            service,
+            keySource: actualKeySource,
+            userSpecific: !isGlobal,
+            failureClass: "peer-db-contention",
+            reason: errorText
+          });
+        }
+      }
+      return;
+    }
     // Local SQLite contention/misconfiguration incidental to a provider call is OUR fault, not the
     // vendor's. Never let it mint a "<service> connection failed" push; record it under its real
     // cause instead (audit row + threshold-gated "local database contention" advisory).
-    if (isLocalDbFaultMessage(errorText)) {
+    if (isLocalDbFaultMessage(errorText, service)) {
       await noteLocalDbFault({ lane: service, operation: "connection health", message: errorText, userId: targetUserId });
       return;
     }
@@ -1117,7 +1150,6 @@ export async function alertConnectionFailure(
         : now + HEALTH_ALERT_COOLDOWN_MS;
     setInternalSetting(key, new Date(cooldownUntilMs).toISOString());
 
-    const isGlobal = actualKeySource !== "user";
     const title = `${service} connection failed`;
     const body = `Connection to ${service} (${actualKeySource} lane) failed: ${errorText}`;
 

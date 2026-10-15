@@ -23,6 +23,7 @@
 // dynamic import so db-health.ts can statically import the classifier without a module cycle.
 
 import { audit, getInternalSetting, setInternalSetting } from "./db";
+import { isPeerUpstreamDbFaultMessage, PEER_UPSTREAM_DB_LANES } from "./peer-db-fault";
 
 /**
  * Message shapes that ONLY our local SQLite file can produce. Deliberately narrow: every entry is
@@ -45,8 +46,17 @@ const LOCAL_DB_FAULT_MESSAGE_PATTERNS: RegExp[] = [
 const LOCAL_DB_FAULT_CODE_PREFIXES = ["SQLITE_BUSY", "SQLITE_LOCKED"];
 
 /** True when a raw error MESSAGE is one of our own local-SQLite fault shapes. */
-export function isLocalDbFaultMessage(message: string | null | undefined): boolean {
+export function isLocalDbFaultMessage(
+  message: string | null | undefined,
+  service?: string
+): boolean {
   if (!message) return false;
+  if (service && isPeerUpstreamDbFaultMessage(message, service)) return false;
+  if (!service) {
+    for (const lane of PEER_UPSTREAM_DB_LANES) {
+      if (isPeerUpstreamDbFaultMessage(message, lane)) return false;
+    }
+  }
   return LOCAL_DB_FAULT_MESSAGE_PATTERNS.some((pattern) => pattern.test(message));
 }
 

@@ -57,6 +57,7 @@ import {
   setInternalSetting
 } from "./db";
 import { HEALTH_TRANSIENT_FAILURE_PREFIX, logApiHealth } from "./db-health";
+import { formatPeerDbHealthErrorText, isPeerUpstreamDbFaultMessage } from "./peer-db-fault";
 import { isTransientNetworkError } from "./network-errors";
 import { createDurableMap } from "./durable-state";
 import { fetchDailyOHLC, toBusinessDay } from "./history";
@@ -68,6 +69,12 @@ import { serverKnobBool } from "./server-knobs";
 import type { MarketQuote, MarketScan } from "./types";
 import { getFinraDataset, getInsiderDataset, getInsiderSignals, getShortVolumeSignals } from "./web-sources";
 import { fetchNasdaqScreenerResponse } from "./nasdaq-screener-fetch";
+
+function congressShareHealthErrorText(errorText: string): string {
+  return isPeerUpstreamDbFaultMessage(errorText, "congress-share")
+    ? formatPeerDbHealthErrorText(errorText)
+    : errorText;
+}
 import { logWarn } from "./sentry-metrics";
 import { readOptionalSchemaVersionField } from "./schema-version";
 import { z, type ZodType } from "zod";
@@ -522,7 +529,7 @@ export async function probeCongressShareToken(
         `to match INGEST_TOKEN / ADMIN_TOKEN in CT Infisical prod`;
       console.error(`[congress-share] token probe auth failure: ${errorText}`);
       tripCongressAuthBreaker(Date.now(), errorText, token);
-      logApiHealth({ service: "congress-share", ok: false, errorText, keySource: "env" });
+      logApiHealth({ service: "congress-share", ok: false, errorText: congressShareHealthErrorText(errorText), keySource: "env" });
       return;
     }
     if (res.status === 404) {
@@ -538,7 +545,7 @@ export async function probeCongressShareToken(
       const text = await res.text().catch(() => "");
       const errorText = `${HEALTH_TRANSIENT_FAILURE_PREFIX}HTTP ${res.status} ${text.slice(0, 200)}`.trim();
       console.warn(`[congress-share] token probe non-auth failure: ${errorText}`);
-      logApiHealth({ service: "congress-share", ok: false, errorText, keySource: "env" });
+      logApiHealth({ service: "congress-share", ok: false, errorText: congressShareHealthErrorText(errorText), keySource: "env" });
       return;
     }
     noteCongressUpstream(true);
@@ -550,7 +557,7 @@ export async function probeCongressShareToken(
     const isTransient = isTransientNetworkError(err);
     const errorText = isTransient ? `${HEALTH_TRANSIENT_FAILURE_PREFIX}${error}` : error;
     console.warn(`[congress-share] token probe error: ${error}`);
-    logApiHealth({ service: "congress-share", ok: false, errorText, keySource: "env" });
+    logApiHealth({ service: "congress-share", ok: false, errorText: congressShareHealthErrorText(errorText), keySource: "env" });
   } finally {
     clearTimeout(timer);
   }
@@ -1324,7 +1331,7 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
           upstreamOutcome = true;
           console.error(`[congress-share] import failed: ${errorText}`);
           tripCongressAuthBreaker(now, errorText, token);
-          logApiHealth({ service: "congress-share", ok: false, errorText, keySource: "env" });
+          logApiHealth({ service: "congress-share", ok: false, errorText: congressShareHealthErrorText(errorText), keySource: "env" });
           return { ...dropMeta, ok: false, status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}`, sent };
         }
         // Downstream 5xx errors (e.g. transient D1 overload): retry with backoff before hard failure.
@@ -1338,7 +1345,12 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
         console.error(`[congress-share] import failed: ${errorText}`);
         // Surface failure to health store: prefix 5xx as transient to allow escalation window.
         const formattedError = res.status >= 500 ? `${HEALTH_TRANSIENT_FAILURE_PREFIX}${errorText}` : errorText;
-        logApiHealth({ service: "congress-share", ok: false, errorText: formattedError, keySource: "env" });
+        logApiHealth({
+          service: "congress-share",
+          ok: false,
+          errorText: congressShareHealthErrorText(formattedError),
+          keySource: "env"
+        });
         return { ...dropMeta, ok: false, status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}`, sent };
       }
       upstreamOutcome = true;
@@ -1369,7 +1381,12 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
       const bodyErrorText = congressImportBodyError(response);
       if (bodyErrorText) {
         console.error(`[congress-share] import rejected rows despite HTTP ${res.status}: ${bodyErrorText}`);
-        logApiHealth({ service: "congress-share", ok: false, errorText: bodyErrorText, keySource: "env" });
+        logApiHealth({
+          service: "congress-share",
+          ok: false,
+          errorText: congressShareHealthErrorText(bodyErrorText),
+          keySource: "env"
+        });
         // `ok:false` (NOT `skipped`) so the daily run counts this in failedPosts and retries rather
         // than advancing the marker over an import App A only partly accepted.
         return { ...dropMeta, ok: false, status: res.status, error: bodyErrorText, sent };
@@ -1378,7 +1395,12 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
       if (receiptErrorText) {
         console.error(`[congress-share] import consumption shortfall despite HTTP ${res.status}: ${receiptErrorText}`);
         audit("congress_share_import_receipt_shortfall", { sent, receiptErrorText, response });
-        logApiHealth({ service: "congress-share", ok: false, errorText: receiptErrorText, keySource: "env" });
+        logApiHealth({
+          service: "congress-share",
+          ok: false,
+          errorText: congressShareHealthErrorText(receiptErrorText),
+          keySource: "env"
+        });
         return { ...dropMeta, ok: false, status: res.status, error: receiptErrorText, sent };
       }
       logApiHealth({ service: "congress-share", ok: true, keySource: "env" });
@@ -1400,7 +1422,12 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
       );
       const isTransient = isTransientNetworkError(err);
       const formattedError = isTransient ? `${HEALTH_TRANSIENT_FAILURE_PREFIX}${error}` : error;
-      logApiHealth({ service: "congress-share", ok: false, errorText: formattedError, keySource: "env" });
+      logApiHealth({
+        service: "congress-share",
+        ok: false,
+        errorText: congressShareHealthErrorText(formattedError),
+        keySource: "env"
+      });
       return { ...dropMeta, ok: false, error, sent };
     } finally {
       clearTimeout(timer);

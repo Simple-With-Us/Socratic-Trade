@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — ST-3988 peer D1 api-health
+
+**What.**  Congress.Trade D1 `SQLITE_BUSY` import rejections no longer page as `congress-share connection failed` or mislabel as local `data/app.db` contention.  New `peer-db-fault` lane stamps `[peer-db-contention]` rows, Sentry `health.failure_class=peer-db-contention`, warning title `peer write contention (App A D1)`.
+
+**Branch.**  `cursor/st-3988-api-health-peer-d1-89ad`
+
+**Verification.**  `npx vitest run test/peer-db-fault-health.test.ts test/local-db-fault-classification.test.ts`; `npx tsc --noEmit`.
+
+**Next.**  PR ready for review; Refs ST-3988.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.
