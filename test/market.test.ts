@@ -185,6 +185,61 @@ describe("applyEnrichment", () => {
     expect(enriched.sources?.nearTheMoneyIv).toBe("robinhood-options");
   });
 
+  it("keeps a positive screener market cap when SEC XBRL only derived one", () => {
+    const extra: SymbolEnrichment = {
+      marketCap: 50_000_000,
+      sharesOutstanding: 1_000_000,
+      price: 50,
+      sources: { marketCap: "sec-xbrl", sharesOutstanding: "sec-xbrl", price: "yahoo-finance" },
+      fieldObservations: {
+        marketCap: {
+          value: 50_000_000,
+          source: "sec-xbrl",
+          upstreamFamily: "sec-xbrl",
+          fetchedAt: "2026-10-14T00:00:00.000Z",
+          status: "ok"
+        }
+      }
+    };
+    const enriched = applyEnrichment(
+      quote({ symbol: "AAPL", marketCap: 3_000_000_000_000, sources: { marketCap: "nasdaq-delayed-screener" } }),
+      extra
+    );
+    expect(enriched.marketCap).toBe(3_000_000_000_000);
+    expect(enriched.sources?.marketCap).toBe("nasdaq-delayed-screener");
+    expect(enriched.fieldObservations?.marketCap).toBeUndefined();
+    expect(enriched.sharesOutstanding).toBe(1_000_000);
+  });
+
+  it("adopts SEC-derived market cap only when the screener cap is missing", () => {
+    const extra: SymbolEnrichment = {
+      marketCap: 200_000_000,
+      sources: { marketCap: "sec-xbrl" },
+      fieldObservations: {
+        marketCap: {
+          value: 200_000_000,
+          source: "sec-xbrl",
+          upstreamFamily: "sec-xbrl",
+          fetchedAt: "2026-10-14T00:00:00.000Z",
+          status: "ok"
+        }
+      }
+    };
+    const enriched = applyEnrichment(quote({ symbol: "AAPL" }), extra);
+    expect(enriched.marketCap).toBe(200_000_000);
+    expect(enriched.sources?.marketCap).toBe("sec-xbrl");
+    expect(enriched.fieldObservations?.marketCap?.source).toBe("sec-xbrl");
+  });
+
+  it("still lets a non-SEC enrichment market cap override the screener", () => {
+    const enriched = applyEnrichment(
+      quote({ symbol: "AAPL", marketCap: 1_000 }),
+      { marketCap: 2_000_000_000, sources: { marketCap: "yahoo-finance" } }
+    );
+    expect(enriched.marketCap).toBe(2_000_000_000);
+    expect(enriched.sources?.marketCap).toBe("yahoo-finance");
+  });
+
   it("preserves cascade fieldObservations and providerFailures on the quote", () => {
     const extra: SymbolEnrichment = {
       peRatio: 22,

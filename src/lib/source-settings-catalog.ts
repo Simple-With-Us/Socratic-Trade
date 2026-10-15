@@ -213,7 +213,8 @@ export const SOURCE_SETTINGS_CATALOG: readonly SourceSettingSpec[] = [
     id: "SEC_XBRL_ENRICHMENT_ENABLED",
     group: "enrichment",
     label: "SEC XBRL fundamentals enrichment",
-    description: "Pull companyfacts XBRL into the fundamentals cascade.",
+    description:
+      "Parse companyfacts XBRL from the nightly SQLite cache (sec_facts) into the fundamentals cascade. EDGAR fetches run off the scan path.",
     type: "boolean",
     defaultValue: true
   },

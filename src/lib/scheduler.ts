@@ -7,6 +7,8 @@
 import { LANE_WAITS, withAccountMutation } from "./account-mutation";
 import { checkAllUserPriceAlerts } from "./alerts";
 import { probeCongressShareTokenIfDue, runCongressDailyShareIfDue } from "./congress-share";
+import { secXbrlEnrichmentEnabled } from "./data-providers";
+import { runSecCompanyFactsSweepIfDue } from "./web-sources/sec-companyfacts-sweep";
 import { runMarketScanFreshnessIfDue } from "./market-scan-freshness";
 import { runWeeklyMarketDigestRefreshIfDue } from "./weekly-market-digest";
 import { runHealthLaneReprobeIfDue } from "./health-lane-reprobe";
@@ -24,7 +26,8 @@ import { runR2UsageCheckIfDue, runR2UsageDailyDigestIfDue } from "./r2-usage";
 import { maybeAdvisePineconeTrialRollback } from "./pinecone-trial-window";
 import { pineconeWuExhaustedUntil } from "./pinecone-wu-breaker";
 import { runWatchlistDigestIfDue } from "./watchlist-digest";
-import { runAuditPruneIfDue } from "./audit-prune";
+import { runAuditPruneYieldingIfDue } from "./audit-prune";
+import { runStorageHygieneIfDue } from "./sqlite-storage-hygiene";
 import {
   applyBrokerOrderPlacementPause,
   brokerPauseAccountScope,
@@ -66,7 +69,6 @@ import { rankDemandFirstSymbols } from "./rag/demand-first-symbols";
 import { acquireOrRenewLeadership, releaseLease, LEASE_OWNER } from "./scheduler-lease";
 import { reconcilePendingFills } from "./strategy-execution";
 import { safeErrorMessage } from "./telemetry-sanitize";
-import { runStPrimaryBridgeWriterIfDue } from "./st-primary-bridge-writer";
 import { journalLane } from "./task-journal";
 import { pruneTaskJournal } from "./db-task-journal";
 import { withDeadline, withLaneDeadline, isLaneDeadlineExpiry, LANE_STALL_ATTRIBUTION_RATIO, SCHEDULER_BROKER_TIMEOUT_MS } from "./safety-maintenance";
@@ -941,11 +943,12 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // observability kinds 14d, everything else 90d, bounded batches. First-ever
   // run drains a large backlog over several daily passes. Also sweeps the
   // embed_stage table (35d orphan retention + defensive size cap, db-embed-stage.ts).
-  void journalLane("audit-prune", {}, () => {
-    const result = runAuditPruneIfDue();
+  void journalLane("audit-prune", {}, async () => {
+    const result = await runAuditPruneYieldingIfDue();
     if (!result) return { status: "skipped" as const, summary: "not due" };
     const total = result.auditObservability + result.auditDefault + result.providerDispatch +
-      result.providerOutbox + result.embedStageExpired + result.embedStageCapPruned;
+      result.providerOutbox + result.embedStageExpired + result.embedStageCapPruned +
+      result.portfolioSnapshotsPruned;
     return { status: "ok" as const, summary: `deleted=${total}` };
   }).catch((err) => console.error("[scheduler] audit prune error:", err));
 
@@ -957,6 +960,18 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   if (singleLeaderEnabled() && !acquireOrRenewLeadership(new Date())) {
     return; // not the leader this tick — no side effects
   }
+
+  // Table sizes, retention for non-money caches and logs, WAL checkpoint, and
+  // incremental free-page reclaim.  Leader only: every replica checkpointing
+  // the same WAL fights TRUNCATE.  Dry-run when SQLITE_STORAGE_HYGIENE_DRY_RUN=1.
+  void journalLane("storage-hygiene", {}, async () => {
+    const result = await runStorageHygieneIfDue();
+    if (!result) return { status: "skipped" as const, summary: "not due" };
+    return {
+      status: "ok" as const,
+      summary: `dryRun=${result.dryRun} eligibleBytes=${result.expectedReclaimBytes} deleted=${result.deletedRows}`
+    };
+  }).catch((err) => console.error("[scheduler] storage hygiene error:", err));
 
   // Open an honest Sentry Crons job after the leader gate: only the process running the tick
   // body reports, so idle followers cannot mask a dead leader. `ok` is sent in `finally` once
@@ -991,18 +1006,6 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     if (run === null) return { status: "skipped" as const, summary: "not due" };
     return { status: "ok" as const, summary: `status=${run.status}` };
   }).catch((err) => console.error("[scheduler] managed-vector reconcile journal error:", err));
-
-  // Default-off, cadence-gated export of only the primary local user's Gemini
-  // and DeepSeek credentials to the isolated Usage Monitor bridge path. The
-  // writer is self-guarded and returns sanitized status codes without throwing
-  // into trading work.
-  void journalLane("st-primary-bridge-writer", {}, () => runStPrimaryBridgeWriterIfDue()).then((result) => {
-    if (result.status === "error") {
-      console.error(
-        `[scheduler] ST primary credential bridge failed (${result.errorCode ?? "unknown"})`
-      );
-    }
-  }).catch((err) => console.error("[scheduler] ST primary bridge journal error:", err));
 
   // Refresh backend web sources (congressional trades, etc.) independently of the
   // trading loop — these are low-frequency (cadence-gated, ~daily) data reads that
@@ -1149,6 +1152,12 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   void journalLane("congress-daily-share", {}, () => runCongressDailyShareIfDue(Date.now())).catch((err) =>
     console.error("[scheduler] congress-share daily batch error:", err)
   );
+
+  if (secXbrlEnrichmentEnabled()) {
+    void journalLane("sec-companyfacts-sweep", {}, () => runSecCompanyFactsSweepIfDue(Date.now())).catch((err) =>
+      console.error("[scheduler] sec-companyfacts sweep error:", err)
+    );
+  }
 
   // Weekend/off-hours Market Scan freshness guarantee: scanMarket otherwise has no scheduled
   // caller, so a Friday-evening scan would sit stale until a user visits the app Monday.

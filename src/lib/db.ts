@@ -92,6 +92,10 @@ export function getDb(): Database.Database {
   db = new Database(path);
   db.function("account_subject_token", { deterministic: true }, (value: unknown) => accountSubjectToken(String(value ?? "")));
   db.function("account_setting_matches_subject", { deterministic: true }, accountSettingMatchesSubject);
+  // Before journal_mode.  The WAL switch writes the file header, and auto_vacuum
+  // can only be armed while that header is still unset.  Existing files already
+  // have tables, so this returns without requesting a rewrite.
+  armIncrementalAutoVacuumIfEmpty(db);
   db.pragma("journal_mode = WAL");
   // Short pin, not a 60s sleep. better-sqlite3 waits for SQLITE_BUSY ON THE EVENT LOOP,
   // so a 60s busy_timeout (raised 5s → 30s → 60s to hide "database is locked") froze
@@ -113,6 +117,15 @@ export function getDb(): Database.Database {
   installAccountWriteFenceTriggers(db);
   assertEncryptionKeyAvailable(db);
   return db;
+}
+
+/** INCREMENTAL sticks only when it is set before the first user table. */
+function armIncrementalAutoVacuumIfEmpty(database: Database.Database): void {
+  const existing = database
+    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1")
+    .get();
+  if (existing) return;
+  database.pragma("auto_vacuum = INCREMENTAL");
 }
 
 export function resetDbForTesting(): void {
@@ -4480,6 +4493,20 @@ function migrate(database: Database.Database): void {
       PRIMARY KEY (ticker, date)
     );
     CREATE INDEX IF NOT EXISTS idx_imported_price_eod_ticker ON imported_price_eod (ticker, date);
+    -- Idempotent receipt for one Congress.Trade -> Socratic-Trade push.  Keyed by the
+    -- caller's push id.  An ok receipt is what a retry returns, and that retry does
+    -- not write the cache again.  A non-ok receipt is replaced on the next attempt.
+    -- A push with no id is stored under missing:<received_at> so the ops snapshot
+    -- can still show health.
+    CREATE TABLE IF NOT EXISTS peer_push_receipts (
+      push_id TEXT PRIMARY KEY,
+      received_at TEXT NOT NULL,
+      health TEXT NOT NULL,
+      delivered_at TEXT,
+      consumed_at TEXT,
+      body_json TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_peer_push_receipts_received_at ON peer_push_receipts (received_at);
     CREATE TABLE IF NOT EXISTS imported_spx_eod (
       date TEXT PRIMARY KEY,
       close REAL NOT NULL,
