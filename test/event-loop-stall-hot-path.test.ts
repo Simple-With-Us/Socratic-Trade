@@ -62,7 +62,7 @@ describe("serving-thread sqlite stalls mapped from 2026-10-05 profiles", () => {
     expect(ticks).toBeGreaterThan(0);
   });
 
-  it("pruneTaskJournal stays under 100ms when a full scan of the same rows does not", async () => {
+  it("pruneTaskJournal no-op stays under 100ms when a full scan of the same rows does not", async () => {
     const { getDb, pruneTaskJournal } = await import("../src/lib/db");
     const db = getDb();
     const insert = db.prepare(
@@ -87,7 +87,7 @@ describe("serving-thread sqlite stalls mapped from 2026-10-05 profiles", () => {
     // Fixed row count, one scan.  Stopping at the first sample over 100ms made
     // a 4x ratio fail (116ms scan, 66ms prune).  Chasing 400ms then exceeded
     // the 60s test timeout.  Two million recent rows keep the unindexed scan
-    // slow and the indexed prune on the three old rows fast.
+    // slow.  pruneTaskJournal is a forever-retention no-op and must stay fast.
     const targetRows = 2_000_000;
     while (n < targetRows) {
       add(50_000, recent);
@@ -100,7 +100,7 @@ describe("serving-thread sqlite stalls mapped from 2026-10-05 profiles", () => {
     const pruneMs = elapsed(() => {
       pruned.n = pruneTaskJournal();
     });
-    expect(pruned.n).toBe(3);
+    expect(pruned.n).toBe(0);
     expect(pruneMs).toBeLessThan(100);
     expect(pruneMs * 2).toBeLessThan(scanMs);
   }, 180_000);

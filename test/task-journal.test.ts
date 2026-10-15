@@ -115,24 +115,18 @@ describe("task brain / cron journal", () => {
     expect(lane!.lastStatus).toBe("error");
   });
 
-  it("pruneTaskJournal ages out skipped rows in 24h but keeps ok rows for 30d", async () => {
+  it("pruneTaskJournal keeps all rows (forever retention)", async () => {
     const { recordTaskStart, recordTaskEnd, listTaskJournal, pruneTaskJournal } = await import("../src/lib/db");
     const taskName = `lane_${randomUUID()}`;
-    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1_000);
     const thirtyOneDaysAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1_000);
 
     const skippedOld = recordTaskStart({ taskName, now: thirtyOneDaysAgo.toISOString() });
     recordTaskEnd(skippedOld, { status: "skipped" }, thirtyOneDaysAgo);
-    const okTwoDays = recordTaskStart({ taskName, now: twoDaysAgo.toISOString() });
-    recordTaskEnd(okTwoDays, { status: "ok" }, twoDaysAgo);
     const okOld = recordTaskStart({ taskName, now: thirtyOneDaysAgo.toISOString() });
     recordTaskEnd(okOld, { status: "ok" }, thirtyOneDaysAgo);
 
-    const pruned = pruneTaskJournal();
-    expect(pruned).toBeGreaterThanOrEqual(2); // old skipped + old ok
-    const remaining = listTaskJournal({ taskName });
-    expect(remaining).toHaveLength(1);
-    expect(remaining[0].id).toBe(okTwoDays);
+    expect(pruneTaskJournal()).toBe(0);
+    expect(listTaskJournal({ taskName })).toHaveLength(2);
   });
 
   it("journaling never throws: null id and unknown id are silent no-ops", async () => {

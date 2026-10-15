@@ -7,7 +7,7 @@ PR #4666 (merge a3d21b73, live on production) added storage hygiene that deletes
 ## Changes Made
 
 - `history_cache_eod` is no longer a hygiene retention target: the `history-cache-eod` entry, the `HISTORY_CACHE_RETENTION_DAYS` constant, and the now-unused `dayCutoff` helper are removed from the hygiene module.  The table stays categorized for size reporting with retain reason "durable price history (no age deletion)", and `assertPruneTableAllowed` refuses it as unlisted — the same guard that protects money-path tables.
-- Disposable cleanup is unchanged: symbol-field cache (180d), embed stage, API health log, SEC ingest attempts, terminal runs/requests, task journal, and coverage pruning all keep their windows.
+- **Superseded 2026-10-15 (Jay 03:13 CT):** all age-based row deletes were removed from `sqlite-storage-hygiene.ts` in a follow-up change.  Strategy runs, logs, task journal, embed stage, coverage runs, and related tables are kept forever.  See `docs/rollouts/2026-10-15-storage-hygiene-forever-retention.md`.
 - I updated `docs/rollouts/2026-10-14-sqlite-storage-hygiene.md` (struck the 400-day EOD line) rather than replacing it, so the correction has a paper trail.
 - Regression tests in `test/sqlite-storage-hygiene.test.ts`: old EOD rows (500d, 6y+) now survive the "deletes stale caches" pass; a new dedicated test proves 401d/1825d/2300d rows survive two consecutive live passes with no history estimate in the report; the allowlist test asserts no retention target touches the table and pruning it throws.
 
@@ -49,7 +49,7 @@ npm run build
 ## Next Steps & Blockers
 
 - Land this PR and verify: live sha moves past a3d21b73, and the next `storageHygiene` report carries no `history-cache-eod` estimate with `deletedRows` for history at 0.  Next full pass after the 02:56Z report lands ~08:56Z — merging before then stops a second 5,000-row pass.
-- Backfill proposal (after the exemption is live): identify the ~5,000 missing (ticker, date) pairs older than 2025-09-10 by diffing cache coverage against the approved deep-path sources (Yahoo `range=max` paced at 400ms/concurrency 2, then Tradier history, then Twelve Data within its 8/min + 800/day quota), refill via the existing `upsertHistoryCacheEod` (COALESCE semantics preserve existing rows), and never issue full-universe refetches — targeted gaps only, paced through the existing provider limiters.  Owner approval needed before running it, since it spends provider quota.
+- Any gap backfill for missing EOD bars must use **Socratic Trade's own price pipeline only** (the same paths that populate `history_cache_eod` today).  Do not propose refilling from Yahoo, Tradier, or Twelve Data — ST price data comes only from ST.  Owner approval still required before a backfill job runs.
 - Notify #4661 (cursor/free-data-gaps-55d1) that the permanent-upsert promise now holds on main, so its rollout note stays accurate on merge.
 - Linear ST-4532 moves to Completed on merge and Deployed after the live-sha + hygiene-report verification above.
 

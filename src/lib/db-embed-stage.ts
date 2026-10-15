@@ -29,7 +29,7 @@
 // import, no "node:" import specifiers in this module.
 
 import "server-only";
-import { audit, getDb } from "./db";
+import { getDb } from "./db";
 import { timeSync } from "./slow-sync-guard";
 
 /** Retention for orphaned rows (their source document was superseded before any retry ran). */
@@ -217,34 +217,11 @@ export interface EmbedStageSweepResult {
  * steady state deletes nothing (rows normally live seconds-to-days). The size cap emits ONE
  * audit row per over-cap event, not one per pruned row.
  */
+/** No age or cap deletes (2026-10-15).  Rows clear only via `deleteStagedEmbeddings` after delivery. */
 export function sweepEmbedStage(
-  now: Date = new Date(),
-  maxBytes: number = EMBED_STAGE_MAX_BYTES
+  _now: Date = new Date(),
+  _maxBytes: number = EMBED_STAGE_MAX_BYTES
 ): EmbedStageSweepResult {
-  const db = getDb();
-  const cutoff = new Date(now.getTime() - EMBED_STAGE_RETENTION_DAYS * 24 * 3600_000).toISOString();
-  const expired = db.prepare("DELETE FROM embed_stage WHERE created_at < ?").run(cutoff).changes;
-
-  let capPruned = 0;
-  let stats = embedStageStats();
-  if (stats.bytes > maxBytes) {
-    const bytesBefore = stats.bytes;
-    while (stats.bytes > maxBytes) {
-      const pruned = db
-        .prepare(
-          `DELETE FROM embed_stage WHERE rowid IN (
-             SELECT rowid FROM embed_stage ORDER BY created_at ASC, rowid ASC LIMIT ?)`
-        )
-        .run(EMBED_STAGE_CAP_PRUNE_BATCH).changes;
-      if (pruned === 0) break;
-      capPruned += pruned;
-      stats = embedStageStats();
-    }
-    audit(
-      "embed_stage_cap_prune",
-      { deleted: capPruned, bytesBefore, bytesAfter: stats.bytes, maxBytes },
-      "local"
-    );
-  }
-  return { expired, capPruned, bytesAfter: stats.bytes };
+  const stats = embedStageStats();
+  return { expired: 0, capPruned: 0, bytesAfter: stats.bytes };
 }

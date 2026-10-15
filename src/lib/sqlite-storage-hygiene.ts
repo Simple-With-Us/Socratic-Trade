@@ -1,12 +1,11 @@
-// sqlite-storage-hygiene.ts — retention, WAL checkpoint, and free-page reclaim for
-// the production SQLite file.
+// sqlite-storage-hygiene.ts — WAL checkpoint, SQLite maintenance pragmas, and
+// incremental free-page reclaim for the production SQLite file.
 //
 // The file is large (multi-gigabyte) and Litestream is replicating the WAL.
-// This lane deletes only caches, logs, and finished operational rows, in small
-// batches that yield the event loop.  Orders, fills, positions, approvals,
-// transfers, high-water-mark inputs, and market-data history (prices, fundamentals,
-// filings, transcripts, SEC facts, document chunks) are refused by name before any
-// DELETE is prepared.
+// This lane does NOT delete rows by age (Jay policy, 2026-10-15): strategy runs,
+// run requests, task journal, logs, embed stage, coverage runs, and market-data
+// history are kept forever.  Orders, fills, positions, approvals, transfers, and
+// settings remain protected by name if a future maintainer reintroduces deletes.
 //
 // Free pages go back to the OS only when auto_vacuum is already INCREMENTAL,
 // via a capped incremental_vacuum.  A full file rewrite is never issued: on a
@@ -16,15 +15,7 @@
 
 import { statSync, readdirSync } from "fs";
 import { join } from "path";
-import {
-  AUDIT_PRUNE_DEFAULT_DAYS,
-  AUDIT_PRUNE_NEVER_PRUNED_KINDS,
-  AUDIT_PRUNE_OBSERVABILITY_DAYS,
-  AUDIT_PRUNE_OBSERVABILITY_KINDS,
-  AUDIT_PRUNE_PROVIDER_DAYS
-} from "./audit-prune";
 import { databasePath, getDb } from "./db";
-import { EMBED_STAGE_RETENTION_DAYS } from "./db-embed-stage";
 import { yieldEventLoop } from "./slow-sync-guard";
 
 /** Tables this module must never delete.  Orders, fills, positions, approvals,
@@ -81,18 +72,9 @@ export function isMarketDataHistoryTable(table: string): boolean {
   return table.startsWith("document_chunks_fts");
 }
 
-export const STRATEGY_RUN_RETENTION_DAYS = 120;
-export const STRATEGY_RUN_REQUEST_RETENTION_DAYS = 30;
-export const TASK_JOURNAL_SKIPPED_RETENTION_DAYS = 1;
-export const TASK_JOURNAL_RETENTION_DAYS = 30;
-export const API_HEALTH_LOG_RETENTION_DAYS = 14;
-export const INGEST_ATTEMPT_RETENTION_DAYS = 21;
-export const COVERAGE_MAX_AGE_DAYS = 90;
-export const COVERAGE_MIN_KEEP = 30;
-export const COVERAGE_MAX_RUNS = 120;
+/** @deprecated Retention deletes were removed 2026-10-15; kept empty for compatibility. */
+export const RETENTION_TARGETS: readonly never[] = [];
 
-export const HYGIENE_BATCH_SIZE = 200;
-export const HYGIENE_MAX_BATCHES = 25;
 export const HYGIENE_FULL_INTERVAL_MS = 6 * 60 * 60 * 1000;
 export const HYGIENE_CHECKPOINT_INTERVAL_MS = 10 * 60 * 1000;
 export const WAL_TRUNCATE_MIN_BYTES = 8 * 1024 * 1024;
@@ -103,9 +85,31 @@ const REPORT_KEY = "storage-hygiene:lastReport";
 const FULL_AT_KEY = "storage-hygiene:lastFullAt";
 const CHECKPOINT_AT_KEY = "storage-hygiene:lastCheckpointAt";
 
+/** Pages analyzed per `ANALYZE` pass — avoids an unbounded full scan on large DBs (see `runMaintenancePragmas`). */
+export const STORAGE_HYGIENE_ANALYZE_PAGE_LIMIT = 400;
+
+/**
+ * Human-readable retention notes for `/api/ops/snapshot` size estimates.  Reflects Jay policy
+ * (2026-10-15): no scheduled TTL/cap deletes on these tables; `pruneTaskJournal`, embed sweeps,
+ * and `api_health_log` lane trims are disabled.  `embed_stage` still drops rows after successful
+ * Pinecone delivery (`deleteStagedEmbeddings`) — that is not storage-hygiene deletion.
+ */
 const RETAIN_REASON: Record<string, string> = {
   history_cache_eod: "durable price history (no age deletion)",
   llm_usage: "lifetime LLM usage retention",
+  strategy_runs: "lifetime strategy run retention",
+  strategy_run_requests: "lifetime run request retention",
+  task_journal: "no scheduled deletes (lifetime retention)",
+  embed_stage: "no hygiene TTL/cap; cleared after embed delivery only",
+  api_health_log: "no scheduled deletes (lifetime retention)",
+  api_health_error_patterns: "lifetime API health log retention",
+  sec_ingest_task_attempts: "lifetime SEC ingest attempt retention",
+  enrichment_coverage_runs: "lifetime enrichment coverage retention",
+  enrichment_coverage_fields: "lifetime enrichment coverage retention",
+  audit_events: "lifetime audit retention",
+  provider_dispatch_attempts: "lifetime provider dispatch retention",
+  provider_usage_outbox: "lifetime provider usage outbox retention",
+  portfolio_snapshots: "lifetime portfolio snapshot retention",
   ...Object.fromEntries(MARKET_DATA_HISTORY_TABLES.map((table) => [table, "market-data history retention"])),
   document_chunks_fts: "market-data history retention",
   document_chunks_fts_data: "market-data history retention",
@@ -149,111 +153,7 @@ const CATEGORY_BY_TABLE: Record<string, StorageCategory> = {
   lookahead_audit_findings: "logs"
 };
 
-export interface RetentionTarget {
-  id: string;
-  category: StorageCategory;
-  table: string;
-  retentionDays: number;
-  whereSql: string;
-  payloadColumn: string;
-  cutoff: (now: Date) => string;
-}
-
-const UNREFERENCED_RUN = `status != 'running'
-  AND COALESCE(finished_at, started_at) < ?
-  AND id NOT IN (SELECT run_id FROM fill_events WHERE run_id IS NOT NULL)
-  AND id NOT IN (SELECT run_id FROM trade_proposals WHERE run_id IS NOT NULL)`;
-
-const INACTIVE_ATTEMPT = `started_at < ?
-  AND task_id NOT IN (
-    SELECT id FROM sec_ingest_tasks WHERE status IN ('pending', 'leased', 'retry_wait')
-  )`;
-
-function isoCutoff(now: Date, days: number): string {
-  return new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
-}
-
-export const RETENTION_TARGETS: readonly RetentionTarget[] = [
-  {
-    id: "strategy-runs-terminal",
-    category: "runs",
-    table: "strategy_runs",
-    retentionDays: STRATEGY_RUN_RETENTION_DAYS,
-    whereSql: UNREFERENCED_RUN,
-    payloadColumn: "summary",
-    cutoff: (now) => isoCutoff(now, STRATEGY_RUN_RETENTION_DAYS)
-  },
-  {
-    id: "strategy-run-requests-terminal",
-    category: "runs",
-    table: "strategy_run_requests",
-    retentionDays: STRATEGY_RUN_REQUEST_RETENTION_DAYS,
-    whereSql: "status IN ('completed', 'failed') AND COALESCE(finished_at, created_at) < ?",
-    payloadColumn: "result",
-    cutoff: (now) => isoCutoff(now, STRATEGY_RUN_REQUEST_RETENTION_DAYS)
-  },
-  {
-    id: "task-journal-skipped",
-    category: "task_journal",
-    table: "task_journal",
-    retentionDays: TASK_JOURNAL_SKIPPED_RETENTION_DAYS,
-    whereSql: "status = 'skipped' AND started_at < ?",
-    payloadColumn: "summary",
-    cutoff: (now) => isoCutoff(now, TASK_JOURNAL_SKIPPED_RETENTION_DAYS)
-  },
-  {
-    id: "task-journal-history",
-    category: "task_journal",
-    table: "task_journal",
-    retentionDays: TASK_JOURNAL_RETENTION_DAYS,
-    whereSql: "status NOT IN ('skipped', 'running') AND started_at < ?",
-    payloadColumn: "summary",
-    cutoff: (now) => isoCutoff(now, TASK_JOURNAL_RETENTION_DAYS)
-  },
-  {
-    id: "embed-stage",
-    category: "embeddings",
-    table: "embed_stage",
-    retentionDays: EMBED_STAGE_RETENTION_DAYS,
-    whereSql: "created_at < ?",
-    payloadColumn: "vector",
-    cutoff: (now) => isoCutoff(now, EMBED_STAGE_RETENTION_DAYS)
-  },
-  {
-    id: "api-health-log",
-    category: "logs",
-    table: "api_health_log",
-    retentionDays: API_HEALTH_LOG_RETENTION_DAYS,
-    whereSql: "ts < ?",
-    payloadColumn: "error_text",
-    cutoff: (now) => isoCutoff(now, API_HEALTH_LOG_RETENTION_DAYS)
-  },
-  {
-    id: "sec-ingest-task-attempts",
-    category: "logs",
-    table: "sec_ingest_task_attempts",
-    retentionDays: INGEST_ATTEMPT_RETENTION_DAYS,
-    whereSql: INACTIVE_ATTEMPT,
-    payloadColumn: "receipt_json",
-    cutoff: (now) => isoCutoff(now, INGEST_ATTEMPT_RETENTION_DAYS)
-  }
-];
-
-const PRUNABLE_TABLES = new Set<string>([
-  ...RETENTION_TARGETS.map((target) => target.table),
-  "enrichment_coverage_runs",
-  "enrichment_coverage_fields"
-]);
-
-for (const target of RETENTION_TARGETS) {
-  if (MONEY_PATH_SET.has(target.table)) {
-    throw new Error(`retention target ${target.table} is a money-path table`);
-  }
-  if (isMarketDataHistoryTable(target.table)) {
-    throw new Error(`retention target ${target.table} is market-data history`);
-  }
-}
-
+/** Storage hygiene does not delete rows.  Call sites that still invoke this throw. */
 export function assertPruneTableAllowed(table: string): void {
   if (MONEY_PATH_SET.has(table)) {
     throw new Error(`Refusing to delete money-path table ${table}`);
@@ -261,16 +161,7 @@ export function assertPruneTableAllowed(table: string): void {
   if (isMarketDataHistoryTable(table)) {
     throw new Error(`Refusing to delete market-data history table ${table}`);
   }
-  if (!PRUNABLE_TABLES.has(table)) {
-    throw new Error(`Refusing to delete unlisted table ${table}`);
-  }
-}
-
-function sqlIdent(name: string): string {
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
-    throw new Error(`Refusing unsafe SQL identifier ${name}`);
-  }
-  return `"${name}"`;
+  throw new Error(`Storage hygiene does not delete rows (${table})`);
 }
 
 export type LitestreamObservation = "absent" | "fresh" | "stale" | "uncertain";
@@ -373,6 +264,7 @@ export interface StorageObjectSize {
   retainReason: string | null;
 }
 
+/** @deprecated Row retention estimates were removed 2026-10-15. */
 export interface StoragePruneEstimate {
   id: string;
   table: string;
@@ -418,8 +310,6 @@ export interface StorageHygieneReport {
 export interface StorageHygieneOptions {
   now?: Date;
   dryRun?: boolean;
-  batchSize?: number;
-  maxBatches?: number;
   yieldFn?: () => Promise<void>;
   litestreamAgeSeconds?: number | null;
   litestreamUncertain?: boolean;
@@ -550,13 +440,6 @@ export function readCachedStorageHygieneReport(): StorageHygieneReport | null {
   return parsed;
 }
 
-function tableExists(table: string): boolean {
-  const row = getDb()
-    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?")
-    .get(table) as { ok: number } | undefined;
-  return Boolean(row);
-}
-
 let dbstatAvailable: boolean | null = null;
 
 function objectBytes(name: string): { bytes: number; pages: number } | null {
@@ -576,9 +459,6 @@ function objectBytes(name: string): { bytes: number; pages: number } | null {
 function categoryFor(name: string, tableName: string, kind: "table" | "index"): StorageCategory {
   const table = kind === "index" ? tableName : name;
   if (MONEY_PATH_SET.has(table)) return "money_path";
-  // An explicit CATEGORY_BY_TABLE entry wins over the broad market-data-history
-  // fallback, so price caches stay "quote_bar_cache" and the retrieval-corpus
-  // tables stay "embeddings" instead of being flattened into one bucket.
   const explicit = CATEGORY_BY_TABLE[table] ?? CATEGORY_BY_TABLE[name];
   if (explicit) return explicit;
   if (isMarketDataHistoryTable(table) || isMarketDataHistoryTable(name)) return "market_data_history";
@@ -613,18 +493,23 @@ async function listObjectSizes(yieldFn: () => Promise<void>, skip: boolean): Pro
       category: categoryFor(row.name, row.tblName, kind),
       bytes: stat?.bytes ?? 0,
       pages: stat?.pages ?? 0,
-      prunable: kind === "table" && PRUNABLE_TABLES.has(row.name),
+      prunable: false,
       retainReason: retainReasonFor(row.name, row.tblName, kind)
     });
     await yieldFn();
   }
   sizes.sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name));
   const pinned = new Set<string>([
-    ...PRUNABLE_TABLES,
     ...MONEY_PATH_TABLES,
     ...MARKET_DATA_HISTORY_TABLES,
     "audit_events",
-    "llm_usage"
+    "llm_usage",
+    "strategy_runs",
+    "strategy_run_requests",
+    "task_journal",
+    "api_health_log",
+    "embed_stage",
+    "enrichment_coverage_runs"
   ]);
   const picked: StorageObjectSize[] = [];
   const seen = new Set<string>();
@@ -637,171 +522,22 @@ async function listObjectSizes(yieldFn: () => Promise<void>, skip: boolean): Pro
   return picked.filter((row) => seen.has(row.name)).sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name));
 }
 
-function estimateWhere(table: string, whereSql: string, params: unknown[], payloadColumn: string): { rows: number; bytes: number } {
-  const ident = sqlIdent(table);
-  const payload = sqlIdent(payloadColumn);
-  const eligible = getDb().prepare(`SELECT COUNT(*) AS n FROM ${ident} WHERE ${whereSql}`).get(...params) as { n: number };
-  const rows = Number(eligible.n) || 0;
-  if (rows === 0) return { rows: 0, bytes: 0 };
-  const total = getDb().prepare(`SELECT COUNT(*) AS n FROM ${ident}`).get() as { n: number };
-  const stat = objectBytes(table);
-  if (stat && total.n > 0) {
-    return { rows, bytes: Math.max(0, Math.round((stat.bytes * rows) / total.n)) };
-  }
-  const sample = getDb()
-    .prepare(`SELECT AVG(LENGTH(${payload})) AS avgLen FROM (SELECT ${payload} FROM ${ident} WHERE ${whereSql} LIMIT 40)`)
-    .get(...params) as { avgLen: number | null };
-  const avg = sample.avgLen && Number.isFinite(sample.avgLen) ? sample.avgLen : 256;
-  return { rows, bytes: Math.round(rows * avg) };
-}
-
-async function deleteWhere(
-  table: string,
-  whereSql: string,
-  params: unknown[],
-  batchSize: number,
-  maxBatches: number,
-  dryRun: boolean,
-  yieldFn: () => Promise<void>
-): Promise<number> {
-  assertPruneTableAllowed(table);
-  if (dryRun) return 0;
-  const ident = sqlIdent(table);
-  let deleted = 0;
-  for (let batch = 0; batch < maxBatches; batch += 1) {
-    const changes = getDb()
-      .prepare(`DELETE FROM ${ident} WHERE rowid IN (SELECT rowid FROM ${ident} WHERE ${whereSql} LIMIT ?)`)
-      .run(...params, batchSize).changes;
-    deleted += changes;
-    if (changes < batchSize) break;
-    await yieldFn();
-  }
-  return deleted;
-}
-
-function coverageWhere(cutoffIso: string): { sql: string; params: unknown[] } {
-  return {
-    sql: `as_of IN (
-      SELECT as_of FROM (
-        SELECT as_of, created_at, ROW_NUMBER() OVER (ORDER BY created_at DESC) AS rn
-        FROM enrichment_coverage_runs
-      )
-      WHERE rn > ? AND (created_at < ? OR rn > ?)
-    )`,
-    params: [COVERAGE_MIN_KEEP, cutoffIso, COVERAGE_MAX_RUNS]
-  };
-}
-
-async function pruneCoverage(
-  now: Date,
-  batchSize: number,
-  maxBatches: number,
-  dryRun: boolean,
-  yieldFn: () => Promise<void>
-): Promise<StoragePruneEstimate> {
-  assertPruneTableAllowed("enrichment_coverage_runs");
-  assertPruneTableAllowed("enrichment_coverage_fields");
-  const cutoff = isoCutoff(now, COVERAGE_MAX_AGE_DAYS);
-  const where = coverageWhere(cutoff);
-  let estimate = { rows: 0, bytes: 0 };
-  if (tableExists("enrichment_coverage_runs")) {
-    estimate = estimateWhere("enrichment_coverage_runs", where.sql, where.params, "report_json");
-    const fieldStat = objectBytes("enrichment_coverage_fields");
-    const totalRuns = getDb().prepare("SELECT COUNT(*) AS n FROM enrichment_coverage_runs").get() as { n: number };
-    // Field pages scale with the eligible run fraction.  Using the eligible
-    // count as both numerator and denominator would bill the whole field table.
-    if (fieldStat && estimate.rows > 0 && totalRuns.n > 0) {
-      estimate = {
-        rows: estimate.rows,
-        bytes: estimate.bytes + Math.round((fieldStat.bytes * estimate.rows) / totalRuns.n)
-      };
-    }
-  }
-  let deleted = 0;
-  if (!dryRun && tableExists("enrichment_coverage_runs")) {
-    const deleteBatch = getDb().transaction((ids: string[]) => {
-      const placeholders = ids.map(() => "?").join(", ");
-      getDb().prepare(`DELETE FROM enrichment_coverage_fields WHERE as_of IN (${placeholders})`).run(...ids);
-      return getDb().prepare(`DELETE FROM enrichment_coverage_runs WHERE as_of IN (${placeholders})`).run(...ids).changes;
-    });
-    for (let batch = 0; batch < maxBatches; batch += 1) {
-      const stale = getDb()
-        .prepare(
-          `SELECT as_of AS asOf FROM (
-             SELECT as_of, created_at, ROW_NUMBER() OVER (ORDER BY created_at DESC) AS rn
-             FROM enrichment_coverage_runs
-           )
-           WHERE rn > ? AND (created_at < ? OR rn > ?)
-           LIMIT ?`
-        )
-        .all(COVERAGE_MIN_KEEP, cutoff, COVERAGE_MAX_RUNS, batchSize) as Array<{ asOf: string }>;
-      if (stale.length === 0) break;
-      deleted += deleteBatch(stale.map((row) => row.asOf));
-      if (stale.length < batchSize) break;
-      await yieldFn();
-    }
-  }
-  return {
-    id: "enrichment-coverage",
-    table: "enrichment_coverage_runs",
-    category: "coverage",
-    retentionDays: COVERAGE_MAX_AGE_DAYS,
-    eligibleRows: estimate.rows,
-    estimatedReclaimBytes: estimate.bytes,
-    deletedRows: deleted
-  };
-}
-
-function countPayload(whereSql: string, params: unknown[]): { rows: number; bytes: number } {
-  if (!tableExists("audit_events")) return { rows: 0, bytes: 0 };
-  const row = getDb()
-    .prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(payload)), 0) AS bytes FROM audit_events WHERE ${whereSql}`)
-    .get(...params) as { n: number; bytes: number };
-  return { rows: Number(row.n) || 0, bytes: Number(row.bytes) || 0 };
-}
-
-function estimateAuditPrune(now: Date): StorageHygieneReport["auditPrune"] {
-  const obsCutoff = isoCutoff(now, AUDIT_PRUNE_OBSERVABILITY_DAYS);
-  const defCutoff = isoCutoff(now, AUDIT_PRUNE_DEFAULT_DAYS);
-  const provCutoff = isoCutoff(now, AUDIT_PRUNE_PROVIDER_DAYS);
-  const obsPlaceholders = AUDIT_PRUNE_OBSERVABILITY_KINDS.map(() => "?").join(", ");
-  const neverPlaceholders = AUDIT_PRUNE_NEVER_PRUNED_KINDS.map(() => "?").join(", ");
-  const observability = countPayload(`kind IN (${obsPlaceholders}) AND created_at < ?`, [
-    ...AUDIT_PRUNE_OBSERVABILITY_KINDS,
-    obsCutoff
-  ]);
-  const defaults = countPayload(
-    `kind NOT IN (${obsPlaceholders}) AND kind NOT IN (${neverPlaceholders}) AND created_at < ?`,
-    [...AUDIT_PRUNE_OBSERVABILITY_KINDS, ...AUDIT_PRUNE_NEVER_PRUNED_KINDS, defCutoff]
-  );
-  let providerRows = 0;
-  let providerBytes = 0;
-  for (const table of ["provider_dispatch_attempts", "provider_usage_outbox"] as const) {
-    if (!tableExists(table)) continue;
-    const row = getDb()
-      .prepare(`SELECT COUNT(*) AS n FROM ${sqlIdent(table)} WHERE created_at < ?`)
-      .get(provCutoff) as { n: number };
-    const rows = Number(row.n) || 0;
-    providerRows += rows;
-    const stat = objectBytes(table);
-    const total = getDb().prepare(`SELECT COUNT(*) AS n FROM ${sqlIdent(table)}`).get() as { n: number };
-    if (stat && total.n > 0) providerBytes += Math.round((stat.bytes * rows) / total.n);
-  }
-  return {
-    eligibleRows: observability.rows + defaults.rows + providerRows,
-    estimatedReclaimBytes: observability.bytes + defaults.bytes + providerBytes,
-    note: "Counted only.  The daily audit-prune lane deletes these rows.  Never-pruned kinds stay."
-  };
+function runMaintenancePragmas(dryRun: boolean): void {
+  if (dryRun) return;
+  const db = getDb();
+  db.pragma(`analysis_limit=${STORAGE_HYGIENE_ANALYZE_PAGE_LIMIT}`);
+  db.exec("ANALYZE");
+  db.pragma("optimize");
 }
 
 function fileShrinkNote(dryRun: boolean, autoVacuum: StorageHygieneReport["autoVacuum"], pages: number): string {
   if (dryRun) {
-    return "Dry-run deleted nothing.  expectedReclaimBytes estimates eligible row pages.  This pass does not shrink the file.";
+    return "Dry-run: no maintenance pragmas, checkpoint, or free-page reclaim ran.";
   }
   if (autoVacuum !== "incremental") {
-    return "Deletes return pages to the freelist for reuse.  auto_vacuum is not INCREMENTAL, so this job will not rewrite the file to shrink it.";
+    return "auto_vacuum is not INCREMENTAL, so this job will not rewrite the database file to shrink it.";
   }
-  if (pages <= 0) return "auto_vacuum is INCREMENTAL and there were no free pages to return.";
+  if (pages <= 0) return "auto_vacuum is INCREMENTAL and there were no free pages to return this pass.";
   return `This pass asked SQLite to return ${pages} free pages.  A larger freelist waits for later passes.`;
 }
 
@@ -868,63 +604,17 @@ async function runCheckpoint(options: StorageHygieneOptions, dryRun: boolean, wa
 export async function runStorageHygiene(options: StorageHygieneOptions = {}): Promise<StorageHygieneReport> {
   const now = options.now ?? new Date();
   const dryRun = resolveDryRun(options.dryRun);
-  const batchSize = options.batchSize ?? HYGIENE_BATCH_SIZE;
-  const maxBatches = options.maxBatches ?? HYGIENE_MAX_BATCHES;
   const yieldFn = options.yieldFn ?? yieldEventLoop;
   const errors: string[] = [];
-  const estimates: StoragePruneEstimate[] = [];
 
   const tables = await listObjectSizes(yieldFn, Boolean(options.skipSizeWalk));
-  let auditPrune: StorageHygieneReport["auditPrune"] = {
-    eligibleRows: 0,
-    estimatedReclaimBytes: 0,
-    note: "audit estimate failed"
-  };
-  try {
-    auditPrune = estimateAuditPrune(now);
-  } catch (error) {
-    errors.push(`audit estimate: ${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  for (const target of RETENTION_TARGETS) {
-    try {
-      if (!tableExists(target.table)) {
-        estimates.push({
-          id: target.id,
-          table: target.table,
-          category: target.category,
-          retentionDays: target.retentionDays,
-          eligibleRows: 0,
-          estimatedReclaimBytes: 0,
-          deletedRows: 0
-        });
-        continue;
-      }
-      const cutoff = target.cutoff(now);
-      const estimate = estimateWhere(target.table, target.whereSql, [cutoff], target.payloadColumn);
-      const deletedRows = await deleteWhere(target.table, target.whereSql, [cutoff], batchSize, maxBatches, dryRun, yieldFn);
-      estimates.push({
-        id: target.id,
-        table: target.table,
-        category: target.category,
-        retentionDays: target.retentionDays,
-        eligibleRows: estimate.rows,
-        estimatedReclaimBytes: estimate.bytes,
-        deletedRows
-      });
-    } catch (error) {
-      errors.push(`${target.id}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
 
   try {
-    estimates.push(await pruneCoverage(now, Math.min(batchSize, 20), maxBatches, dryRun, yieldFn));
+    runMaintenancePragmas(dryRun);
   } catch (error) {
-    errors.push(`enrichment-coverage: ${error instanceof Error ? error.message : String(error)}`);
+    errors.push(`maintenance pragmas: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  const expectedReclaimBytes = estimates.reduce((sum, row) => sum + row.estimatedReclaimBytes, 0);
-  const deletedRows = estimates.reduce((sum, row) => sum + row.deletedRows, 0);
   const beforeVacuum = readCoreStats();
   const vacuumDecision = decideIncrementalVacuum({
     dryRun,
@@ -951,16 +641,20 @@ export async function runStorageHygiene(options: StorageHygieneOptions = {}): Pr
     walSizeBytes: after.walSizeBytes,
     autoVacuum,
     dbstatAvailable: dbstatAvailable !== false,
-    expectedReclaimBytes,
+    expectedReclaimBytes: 0,
     expectedFileShrinkBytes: pagesReturned * after.pageSize,
     fileShrinkNote: fileShrinkNote(dryRun, autoVacuum, vacuumDecision.run ? vacuumDecision.pages : 0),
-    deletedRows,
+    deletedRows: 0,
     errors,
     checkpoint,
     incrementalVacuum: vacuumDecision,
-    auditPrune,
+    auditPrune: {
+      eligibleRows: 0,
+      estimatedReclaimBytes: 0,
+      note: "Storage hygiene does not delete audit rows.  The daily audit-prune lane owns age-based audit cleanup."
+    },
     tables,
-    estimates,
+    estimates: [],
     moneyPathProtected: [...MONEY_PATH_TABLES]
   };
   writeJsonSetting(REPORT_KEY, report, report.generatedAt);
@@ -984,12 +678,16 @@ async function runCheckpointOnly(options: StorageHygieneOptions, now: Date): Pro
     dbstatAvailable: dbstatAvailable !== false,
     expectedReclaimBytes: 0,
     expectedFileShrinkBytes: 0,
-    fileShrinkNote: "Checkpoint only.  Row retention has not run yet.",
+    fileShrinkNote: "Checkpoint only.  Full maintenance pass has not run yet.",
     deletedRows: 0,
     errors: [],
     checkpoint,
     incrementalVacuum: { run: false, pages: 0, reason: "checkpoint-only pass" },
-    auditPrune: { eligibleRows: 0, estimatedReclaimBytes: 0, note: "not estimated on a checkpoint-only pass" },
+    auditPrune: {
+      eligibleRows: 0,
+      estimatedReclaimBytes: 0,
+      note: "not estimated on a checkpoint-only pass"
+    },
     tables: [],
     estimates: [],
     moneyPathProtected: [...MONEY_PATH_TABLES]
@@ -1045,7 +743,7 @@ function claimJsonString(key: string, observed: string | null, nowIso: string): 
 
 /** Cadence: a full pass every 6 hours, and a WAL checkpoint every 10 minutes.
  *  SQLITE_STORAGE_HYGIENE_DISABLED=1 turns the lane off.
- *  SQLITE_STORAGE_HYGIENE_DRY_RUN=1 writes the estimate and deletes nothing.
+ *  SQLITE_STORAGE_HYGIENE_DRY_RUN=1 skips maintenance pragmas, checkpoint, and vacuum.
  *  The watermark is claimed before the await.  A thrown pass keeps that claim
  *  so the next tick does not start another full walk; the interval retries. */
 export async function runStorageHygieneIfDue(nowMs: number = Date.now()): Promise<StorageHygieneReport | null> {
