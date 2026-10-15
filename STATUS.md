@@ -9,6 +9,64 @@
 **Verification.**  See `docs/rollouts/2026-10-15-ops-performance-parked-flag.md`.
 
 **Next.**  Ready PR for ST-3875.  Jay still decides park / re-arm / investigate for the four dormant accounts.  `/api/ops/snapshot` still omits the flag.
+## 2026-10-15 CURSOR — Board 512444e3 iOS / Playwright / deploy-freshness CI
+
+**What.**  Triage for GB-Monitor board `512444e3`: `ios-ship` last failed 2026-10-13 (ASC HTTP 401); last successful archive 2026-10-14; `verify-ios` green on 2026-10-15 main pushes; Playwright and deploy-freshness cron green; Sentry BN/BR/BS/BP unresolved count zero.  Follow-up PR hardens `asc-api.mjs` to prefer `ASC_*` from process env (hosted Actions) over the on-disk secrets file.
+
+**Branch.**  `cursor/ios-ci-hygiene-512444e3-56e3`
+
+**Verification.**  See `docs/rollouts/2026-10-15-ios-ci-hygiene-512444e3.md`.  `npm run lint`,
+`npx tsc --noEmit`, and `npm run build` clean; the new node test 8/8.  `npm test` reports 12
+assertion failures across 4 LLM-routing suites, reproduced identically on a clean
+`git stash` baseline — caused by provider keys present in this sandbox's env, not by this PR.
+
+**Review follow-up.**  Kody threads are addressed.  Credential tests cover per-variable
+fallback, blank env, a missing file, an unreadable path, and `t.after` temp cleanup.
+Rule 33: `resolveAscCredentials` has no implicit `~/.secrets` default.  A file is read
+only via `envPath` or `ASC_SECRETS_ENV`.  `ship-testflight.sh` exports that variable
+after sourcing the handoff file.  The profile installer does the same for a standalone
+local run when the file exists and the variable is unset.  Kody confirmed the rule 33
+fix on the review thread.
+
+**Linear.**  **ST-2916** (`512444e3-f147-4bca-9c03-a51e53b109cd`) — claimed **CURSOR**, status **addressed**, PR #4716 linked in issue comment (Agent-Sync).
+
+**Next.**  PR #4716: rule-33 fix (no implicit ~/.secrets in resolveAscCredentials; ASC_SECRETS_ENV).  The profile installer exports ASC_SECRETS_ENV for standalone local runs.  GB-Deployer squash-merge when `verify` green; ST-2916 **completed** on merge.
+
+## 2026-10-15 codex-autofix — PR #4716 unblock (merge `main`, thread state)
+
+**What.**  No new review findings: all four Kody threads were already addressed in `d7f2e54d`
+and Kody's own 2026-10-15 11:02Z pass confirmed each fix landed.  The actual blocker on the PR
+was `mergeable: CONFLICTING` — the branch sat 1 commit behind `origin/main` (`3f4ef5e5`,
+"Approve succeeds only when the broker order is placed", ST-2582).  Merged `origin/main` into
+`cursor/ios-ci-hygiene-512444e3-56e3`; **no conflicts** — the overlap was limited to
+`STATUS.md`, and both entries were kept per the repo handoff rule.  No production source was
+touched by this round; the merge is the whole change.
+
+**Branch.**  `cursor/ios-ci-hygiene-512444e3-56e3`
+
+**Thread state corrected.**  The rule-33 thread (drop `~/.secrets/appstore-connect.env` as a
+credential source) had been flipped to resolved by an earlier shepherd round, but that finding
+is an accepted defer with a maintainer question still outstanding, so per the round protocol it
+must stay **open**.  Un-resolved it; Kody's closing note on the thread says the same ("this
+thread stays open").  The three fixed threads stay resolved.  Expect the repo's
+all-conversations-resolved gate to remain unsatisfied until the maintainer answers the
+rule-33 question — that is intentional, not a stuck PR.
+
+**Verification.**  See `docs/rollouts/2026-10-15-ios-ci-hygiene-512444e3.md`.  `npm run lint`
+0 errors, `npx tsc --noEmit` ok, `npm run build` ok.  The `npm test` failures remain confined
+to the same 4 LLM-routing suites; re-confirmed this round by running those 4 files in a clean
+`origin/main` worktree, which reproduces all 12 identically.  Cause is `ANTHROPIC_API_KEY` in
+this sandbox's ambient env, not this PR.  `node --test scripts/ios-fleet/asc-api.credentials.test.mjs`
+6/6 and `bash scripts/ios-fleet-pin.sh --check` ok after the merge (the merge did not touch any
+`ios-fleet` pinned file, so the pin still matches).
+
+**Linear.**  **ST-2916** (`512444e3-f147-4bca-9c03-a51e53b109cd`) — claimed **CURSOR**, status **addressed**.
+
+**Next.**  Maintainer: answer the rule-33 question — is retiring
+`~/.secrets/appstore-connect.env` from the ship path a wanted fleet-wide change?  If yes it
+belongs in its own PR spanning `ship-testflight.sh`, `appstore-connect.env.example`,
+`check-drift.sh`, the `ios-fleet.sha256` pin, and `test-ship-seq.sh` (tracked as OPS-13).
+GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on merge.
 ## 2026-10-15 Cursor Cloud — ST-4531 retire Slack callers
 
 **What.**  Remaining ST Slack posts (deploy-freshness notify, provider-knob sync, `slack-sync.sh post`, Codex coordination helper) now use Zulip via `agent-sync-fleet-post.sh` / `agent-sync`.  Deploy-freshness workflow drops `SLACK_BOT_TOKEN` and loads the ST ops Zulip triple from Infisical prod at runtime (`github-actions-infisical-zulip-ops.sh` via `infisical-secrets-safe.sh get`).  Kody blockers: Rule 49 safe Infisical path, Rule 26 rollout verify outcomes, plist template cleanup.
