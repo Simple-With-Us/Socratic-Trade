@@ -156,6 +156,20 @@ describe("symbol_field_latest", () => {
     expect(summaries.AAPL.fieldObservations?.peRatio?.fetchedAt).toBe("2026-08-05T15:01:00.000Z");
     expect(summaries.JNJ.sector).toBe("Healthcare");
     expect(summaries.JNJ.fieldObservations?.sector?.asOf).toBe("2026-07-01T00:00:00.000Z");
+
+    const withAnalyst = recordsFromEnrichmentMap(
+      {
+        AAPL: {
+          analystRating: "Buy",
+          analystBySource: {
+            fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } },
+          },
+          sources: { analystRating: "fmp" },
+        },
+      },
+      "2026-08-05T16:00:00.000Z"
+    );
+    expect(withAnalyst.some((r) => r.field === "analystBySource")).toBe(true);
   });
 
   it("mergeQuoteSeedsFieldLevel prefers filled newer per-field values", async () => {
