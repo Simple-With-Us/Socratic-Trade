@@ -274,6 +274,8 @@ describe("runFailureWatchdogTick", () => {
     const d = await db();
     await w.runFailureWatchdogTick();
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("halted");
+    const haltMarker = w.getRunFailureHaltMarker(USER, ACCT);
+    expect(haltMarker?.since).toBeTruthy();
 
     const inflightId = randomUUID();
     d.getDb()
@@ -290,11 +292,24 @@ describe("runFailureWatchdogTick", () => {
       .getDb()
       .prepare(
         `SELECT created_at FROM audit_events
-         WHERE user_id = ? AND connected_account_id = ? AND kind = 'policy_change'
-         ORDER BY created_at DESC LIMIT 1`
+         WHERE user_id = ? AND connected_account_id = ? AND created_at >= ?
+           AND (
+             (kind = 'policy_change'
+               AND json_valid(payload)
+               AND json_extract(payload, '$.value.systemState') = 'active')
+             OR (kind = 'ops_account_control'
+               AND json_valid(payload)
+               AND json_extract(payload, '$.action') = 'set_system_state'
+               AND CAST(json_extract(payload, '$.dryRun') AS INTEGER) = 0
+               AND CAST(json_extract(payload, '$.ok') AS INTEGER) = 1
+               AND json_extract(payload, '$.to') = 'active')
+           )
+         ORDER BY created_at ASC
+         LIMIT 1`
       )
-      .get(USER, ACCT) as { created_at: string };
+      .get(USER, ACCT, haltMarker!.since) as { created_at: string };
     const saved = d.getInternalSetting<{ rearmedAt?: string }>(`runFailureWatch:${USER}:${ACCT}`);
+    // Same receipt the watchdog reads (audit time, not tick `Date.now()`).
     expect(saved?.rearmedAt).toBe(rearmAudit.created_at);
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
     expect(w.getRunFailureHaltMarker(USER, ACCT)).toBeNull();
