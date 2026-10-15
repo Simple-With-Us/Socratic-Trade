@@ -78,6 +78,27 @@ export function installSlowSqliteTiming(database: object, options: SlowSqliteOpt
     }
   };
 
+  // Time each lazy step.  Each next() is one contiguous hold of the loop, so it is reported on
+  // its own (kind "iterate.next") rather than summed across awaits between steps, which would
+  // overstate a hold.  The iterator object is kept; only next/return/throw are shadowed, so every
+  // other property and the iteration protocol are unchanged.
+  const timeIteratorSteps = (iterator: unknown, key: string): unknown => {
+    if (!iterator || typeof iterator !== "object") return iterator;
+    const it = iterator as Record<string, unknown>;
+    for (const step of ["next", "return", "throw"] as const) {
+      const original = it[step];
+      if (typeof original !== "function") continue;
+      try {
+        it[step] = function (this: unknown, ...stepArgs: unknown[]) {
+          return timed(`iterate.${step}`, key, () => (original as AnyFn).apply(this, stepArgs));
+        };
+      } catch {
+        // non-writable iterator: leave it untimed
+      }
+    }
+    return iterator;
+  };
+
   const originalPrepare = target.prepare;
   target.prepare = function (this: unknown, ...args: unknown[]) {
     const statement = originalPrepare.apply(this, args) as Record<string, unknown> | undefined;
@@ -88,7 +109,9 @@ export function installSlowSqliteTiming(database: object, options: SlowSqliteOpt
       if (typeof original !== "function") continue;
       try {
         statement[method] = function (this: unknown, ...callArgs: unknown[]) {
-          return timed(method, key, () => (original as AnyFn).apply(this, callArgs));
+          const result = timed(method, key, () => (original as AnyFn).apply(this, callArgs));
+          // iterate() only builds the iterator; the SQLite work runs inside each next().
+          return method === "iterate" ? timeIteratorSteps(result, key) : result;
         };
       } catch {
         // frozen or non-writable statement: leave it untimed

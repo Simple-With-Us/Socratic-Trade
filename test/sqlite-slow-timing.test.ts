@@ -80,6 +80,20 @@ describe("installSlowSqliteTiming (ST-4542)", () => {
     expect(tx[1]).toContain("INSERT INTO b");
   });
 
+  it("times the lazy next() steps of iterate(), and keeps iteration intact (ST-4542)", () => {
+    const { db, lines } = open({ thresholdMs: 1000 });
+    db.exec("CREATE TABLE t (v INTEGER); INSERT INTO t VALUES (1),(2),(3)");
+    const seen: number[] = [];
+    // slow() runs while SQLite steps the row, i.e. inside next(), not inside iterate().
+    for (const row of db.prepare("SELECT v, slow(1500) AS s FROM t").iterate() as Iterable<{ v: number }>) {
+      seen.push(row.v);
+    }
+    expect(seen).toEqual([1, 2, 3]);
+    expect(lines.some((l) => /iterate\.next held the event loop \d{4,}ms/.test(l))).toBe(true);
+    expect(lines.some((l) => l.includes("SELECT v, slow(1500) AS s FROM t"))).toBe(true);
+    expect(lines.some((l) => l.startsWith("[slow-sqlite] iterate held"))).toBe(false);
+  });
+
   it("rate-limits repeats of the same statement", () => {
     const { db, lines, tick } = open({ thresholdMs: 1000 });
     const stmt = db.prepare("SELECT slow(?) AS s");
