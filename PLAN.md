@@ -738,6 +738,13 @@ Added OpenRouter models to `app/ui/llm-model-catalog.ts` so they can be selected
 > local wiring. Full gate green; landing via PR next. Rollout:
 > `docs/rollouts/2026-07-10-durable-state-restart-survival.md`.
 
+> **2026-10-15 - Primary-account Usage Monitor credential bridge writer removed
+> (ST-4318).** Owner requested permanent code removal on 2026-10-06. Deleted
+> `st-primary-bridge-writer`, scheduler lane, `/api/keys` triggers, env/docs
+> backlog entries, and tests. Encrypted per-user API keys and tombstone behavior
+> in `db-api-keys` are unchanged. No remote Infisical secret deletion. Paired UM
+> reader cleanup is tracked separately in Usage Monitor.
+
 > **2026-07-15 - Primary-account Usage Monitor credential bridge writer
 > (CODEX).** Implement the default-off writer half of API Usage Monitor PR
 > #286: read only the fixed primary `local` user's Gemini and DeepSeek rows;
