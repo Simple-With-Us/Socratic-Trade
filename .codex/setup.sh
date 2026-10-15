@@ -15,7 +15,7 @@ else
   echo "GitHub API: GH_TOKEN is not a runtime environment variable"
 fi
 if [ -x scripts/codex-coordination.sh ]; then
-  scripts/codex-coordination.sh test || echo "Slack/GitHub coordination check incomplete; verify runtime variables"
+  scripts/codex-coordination.sh test || echo "Zulip/GitHub coordination check incomplete; verify runtime variables"
 else
   echo "scripts/codex-coordination.sh: MISSING" >&2
   exit 1

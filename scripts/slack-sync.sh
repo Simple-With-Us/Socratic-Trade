@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# slack-sync.sh - MCP-independent Slack coordination sync for two Claude Code
+# slack-sync.sh - RETIRED for operational posts (use scripts/fleet-ops-notify.sh + agent-sync).
+# MCP-independent Slack coordination sync for two Claude Code
 # instances (Monet = Claude Code on the web / ephemeral cloud container;
 # Claude = local Mac CLI) working the same repo. Replaces the flaky Slack MCP
 # connector with a plain bot token + curl so coordination never depends on a

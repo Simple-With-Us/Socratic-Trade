@@ -6,7 +6,7 @@
 # post a deploy claim. It compares public /api/health .checks.release.sha to
 # origin/main. A stale verdict (oldest undeployed commit >= 1h) fails the job
 # so Sentry fleet-infra pages (sentry-ci-report.yml) and optionally posts
-# #agent-sync when SLACK_BOT_TOKEN is set.
+# Zulip #alerts when Zulip ST bot credentials are set.
 #
 # Unreachable health is treated as OK here: UptimeRobot already pages site-down.
 # This cron exists for the silent-green-on-old-sha class.
@@ -37,7 +37,7 @@ jobs:
           fetch-depth: 0
           fetch-tags: false
 
-      - name: Previous freshness conclusion (Slack de-dupe)
+      - name: Previous freshness conclusion (Zulip de-dupe)
         id: prev
         env:
           GH_TOKEN: ${{ github.token }}
@@ -63,9 +63,10 @@ jobs:
           DEPLOY_FRESHNESS_NOTIFY: "1"
           DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION: ${{ steps.prev.outputs.conclusion }}
           DEPLOY_FRESHNESS_TREAT_UNREACHABLE: "1"
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_AGENT_NAME: ST
-          SLACK_TOPIC: Socratic-Trade
+          AGENT_SEAT: ST
+          ZULIP_EMAIL: ${{ secrets.ZULIP_ST_EMAIL }}
+          ZULIP_API_KEY: ${{ secrets.ZULIP_ST_API_KEY }}
+          ZULIP_SITE: ${{ secrets.ZULIP_SITE }}
         shell: bash
         run: |
           set -euo pipefail

@@ -1,65 +1,59 @@
 #!/usr/bin/env bash
-# Codex Cloud coordination helper.
-# Runtime variables (not setup-only secrets): SLACK_BOT_TOKEN, GH_TOKEN
-# Optional: SLACK_CHANNEL_ID, SLACK_PROJECT, SLACK_AGENT_NAME, AGENT_SYNC_TOKEN
+# Codex Cloud coordination helper (Zulip via agent-sync).
+# Runtime variables (not setup-only secrets): ZULIP_EMAIL, ZULIP_API_KEY, ZULIP_SITE
+#   or ZULIP_RC, plus GH_TOKEN for GitHub checks.
+# Optional: AGENT_SEAT, AGENT_SYNC_CHANNEL, AGENT_SYNC_TOPIC, AGENT_SYNC_REPO
 set -u
 
-CHANNEL_ID="${SLACK_CHANNEL_ID:-C0BEZDJDNKV}"
-PROJECT="${SLACK_PROJECT:-${SLACK_TOPIC:-}}"
-AGENT="${SLACK_AGENT_NAME:-${AGENT_NAME:-CODEX}}"
-SELF="${PROJECT:-repo}"
-AUTH_CONFIG=""
+AGENT="${AGENT_SEAT:-${AGENT_NAME:-CODEX}}"
+CHANNEL="${AGENT_SYNC_CHANNEL:-agent-sync}"
+TOPIC="${AGENT_SYNC_TOPIC:-fleet}"
+REPO="${AGENT_SYNC_REPO:-Socratic-Trade}"
 
-cleanup() {
-  [ -n "${AUTH_CONFIG:-}" ] && rm -f "$AUTH_CONFIG" 2>/dev/null
-}
-trap cleanup EXIT INT TERM
-
-slack_call() {
-  if [ -z "${SLACK_BOT_TOKEN:-}" ]; then
-    echo "Slack unavailable: SLACK_BOT_TOKEN is not a runtime environment variable." >&2
-    return 2
+resolve_agent_sync() {
+  if command -v agent-sync >/dev/null 2>&1; then
+    command -v agent-sync
+    return 0
   fi
-  AUTH_CONFIG="$(mktemp "${TMPDIR:-/tmp}/codex-slack-auth.XXXXXX")"
-  chmod 600 "$AUTH_CONFIG"
-  printf 'header = "Authorization: Bearer %s"\n' "$SLACK_BOT_TOKEN" >"$AUTH_CONFIG"
-  endpoint="$1"
-  shift
-  curl -fsS --config "$AUTH_CONFIG" "$@" "https://slack.com/api/$endpoint"
+  if [ -x "${HOME}/.local/bin/agent-sync" ]; then
+    printf '%s\n' "${HOME}/.local/bin/agent-sync"
+    return 0
+  fi
+  return 1
 }
 
 case "${1:-help}" in
   test)
-    slack_call auth.test >/dev/null && echo "Slack: OK" || { echo "Slack: FAILED" >&2; exit 1; }
+    cli="$(resolve_agent_sync)" || { echo "agent-sync: MISSING" >&2; exit 1; }
+    AGENT_SEAT="$AGENT" "$cli" --as "$AGENT" whoami >/dev/null \
+      && echo "Zulip: OK" || { echo "Zulip: FAILED" >&2; exit 1; }
     if [ -n "${GH_TOKEN:-}" ]; then
-      gh api user --jq .login >/dev/null 2>&1 && echo "GitHub: OK" || { echo "GitHub: FAILED" >&2; exit 1; }
+      gh api user --jq .login >/dev/null 2>&1 && echo "GitHub: OK" \
+        || { echo "GitHub: FAILED" >&2; exit 1; }
     else
       echo "GitHub: GH_TOKEN is not a runtime environment variable." >&2
       exit 2
     fi
     ;;
   read)
-    limit="${2:-20}"
-    slack_call "conversations.history?channel=${CHANNEL_ID}&limit=${limit}"
+    limit="${3:-20}"
+    topic="${2:-$TOPIC}"
+    cli="$(resolve_agent_sync)" || { echo "agent-sync: MISSING" >&2; exit 1; }
+    AGENT_SEAT="$AGENT" "$cli" --as "$AGENT" read --channel "$CHANNEL" --topic "$topic" --limit "$limit"
     ;;
   post)
     shift
     text="$*"
     [ -n "$text" ] || { echo "usage: $0 post MESSAGE" >&2; exit 2; }
-    prefix="repo: $SELF | [$AGENT->FLEET]"
-    [ -n "${PROJECT:-}" ] && prefix="repo: $PROJECT | [$AGENT->FLEET]"
-    payload="$(python3 - "$CHANNEL_ID" "$prefix $text" <<'PY'
-import json, sys
-print(json.dumps({"channel": sys.argv[1], "text": sys.argv[2]}))
-PY
-)"
-    slack_call chat.postMessage --data "$payload" >/dev/null
-    echo "Slack post: OK"
+    cli="$(resolve_agent_sync)" || { echo "agent-sync: MISSING" >&2; exit 1; }
+    prefix="repo: ${REPO}  |  [${AGENT}->FLEET]"
+    AGENT_SEAT="$AGENT" "$cli" --as "$AGENT" post --channel "$CHANNEL" --topic "$TOPIC" "${prefix} ${text}"
+    echo "Zulip post: OK"
     ;;
   github)
     gh api user --jq .login
     ;;
   help|*)
-    echo "usage: $0 {test|read [N]|post MESSAGE|github}"
+    echo "usage: $0 {test|read [topic] [N]|post MESSAGE|github}"
     ;;
 esac

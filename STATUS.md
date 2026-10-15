@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — ST-4531 retire Slack operational callers
+
+**What.**  Deploy-freshness optional notices, provider-knob apply posts, and Codex coordination now use `agent-sync` / Zulip via `scripts/fleet-ops-notify.sh`.  GitHub `deploy-freshness` workflow drops `SLACK_BOT_TOKEN` for `ZULIP_ST_*` + `ZULIP_SITE`.
+
+**Branch.**  `cursor/retire-slack-ops-callers-889f`
+
+**Verification.**  `fleet-ops-notify.selftest.sh` 5/5, `alert-deploy-freshness.selftest.sh` 9/9; full `npm run lint`, `tsc`, `test`, `build` pending this commit.
+
+**Next.**  Open PR (ready), owner adds Zulip GitHub secrets if Zulip pages are wanted from CI.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.
