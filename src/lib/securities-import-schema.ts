@@ -35,6 +35,7 @@ export const SecuritiesImportResponseSchema = z.object({
   acceptedNotPersisted: z.record(z.string(), z.number()).optional(),
   note: z.string().optional(),
   pushId: z.string().nullable().optional(),
+  payloadHash: z.string().optional(),
   health: z.enum(PEER_PUSH_HEALTH).optional(),
   replayed: z.boolean().optional(),
   acks: z

@@ -1,3 +1,5 @@
+import { createHash } from "crypto";
+
 // Idempotent receipt for a Congress.Trade -> Socratic-Trade share push.
 // Congress.Trade sends `x-push-id` (and the same id in the JSON body).  This
 // app answers with that id, a delivered ack, and a consumed ack.  `health` is
@@ -36,6 +38,21 @@ export function resolvePeerPushId(headerValue: string | null | undefined, bodyVa
   if (PUSH_ID_RE.test(header)) return header;
   if (PUSH_ID_RE.test(body)) return body;
   return null;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/** Stable hash of the parsed import body.  Same payload, same hash. */
+export function peerPushPayloadHash(body: unknown): string {
+  return createHash("sha256").update(canonicalJson(body)).digest("hex");
 }
 
 export function isPeerPushHealth(value: string): value is PeerPushHealth {

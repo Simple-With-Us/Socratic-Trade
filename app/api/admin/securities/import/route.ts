@@ -24,6 +24,7 @@ import { SecuritiesImportPayloadSchema } from "@/lib/securities-import-schema";
 import {
   PEER_PUSH_ID_HEADER,
   peerPushHealth,
+  peerPushPayloadHash,
   resolvePeerPushId,
   type PeerPushAck,
   type PeerPushHealth
@@ -42,8 +43,9 @@ export const dynamic = "force-dynamic";
 // (so a round-trip of our own outbound push is a no-op).
 //
 // Receipt: the caller sends `x-push-id`.  A first delivery persists the cache and stores
-// delivered + consumed acks under that id.  A retry of an ok receipt returns that body
-// and does not write again.  A non-ok receipt is not sticky: the same id is processed
+// delivered + consumed acks under that id.  A retry of an ok receipt with the same
+// payload returns that body and does not write again.  The same ok id with a different
+// payload is 409.  A non-ok receipt is not sticky: the same id is processed
 // again and can replace it.  `health` is `ok` only when the id and both acks are
 // present.  A missing id or ack is audited, written to the congress-inbound-push
 // health lane, and paged immediately (the lane's 5-streak alerter is not the page).
@@ -104,12 +106,22 @@ export async function POST(req: Request) {
   const body = parsed.data;
   const pushId = resolvePeerPushId(req.headers.get(PEER_PUSH_ID_HEADER), body.pushId);
 
+  const payloadHash = peerPushPayloadHash(body);
   if (pushId) {
     const prior = getPeerPushReceipt(pushId);
     // Only a complete receipt is idempotent.  A missing ack or a stored 500 must
-    // be processed again so a transient miss can become ok.  The push id is the
-    // idempotency key: a different body under an ok id returns the first receipt.
+    // be processed again so a transient miss can become ok.  The same ok id with
+    // the same payload replays.  A different payload does not pretend the new
+    // rows were stored.
     if (prior?.health === "ok") {
+      const storedHash = typeof prior.body.payloadHash === "string" ? prior.body.payloadHash : null;
+      if (storedHash && storedHash !== payloadHash) {
+        audit("securities_import_rejected", { reason: "payload_mismatch", pushId });
+        return NextResponse.json(
+          { ok: false, error: "push id already used for a different payload", pushId },
+          { status: 409 }
+        );
+      }
       return NextResponse.json({ ...prior.body, replayed: true });
     }
   }
@@ -129,6 +141,7 @@ export async function POST(req: Request) {
     return finishPeerPush({
       pushId,
       at,
+      payloadHash,
       delivered,
       consumed: { at, ok: true, reason: "own-origin" },
       status: 200,
@@ -171,6 +184,7 @@ export async function POST(req: Request) {
     return finishPeerPush({
       pushId,
       at,
+      payloadHash,
       delivered,
       consumed,
       status: 200,
@@ -194,6 +208,7 @@ export async function POST(req: Request) {
     return finishPeerPush({
       pushId,
       at,
+      payloadHash,
       delivered: null,
       consumed: null,
       status: 500,
@@ -208,6 +223,7 @@ export async function POST(req: Request) {
 async function finishPeerPush(input: {
   pushId: string | null;
   at: string;
+  payloadHash: string;
   delivered: PeerPushAck | null;
   consumed: PeerPushAck | null;
   status: number;
@@ -223,6 +239,7 @@ async function finishPeerPush(input: {
     ...input.body,
     pushId: input.pushId,
     health,
+    payloadHash: input.payloadHash,
     acks: { delivered: input.delivered, consumed: input.consumed },
   };
   if (input.store) {

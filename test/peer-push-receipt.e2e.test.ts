@@ -15,7 +15,7 @@ import {
 } from "../src/lib/db-securities-import";
 import { deleteInternalSetting, getInternalSetting } from "../src/lib/db";
 import { buildOpsSnapshot } from "../src/lib/ops-snapshot";
-import { peerPushHealth, resolvePeerPushId } from "../src/lib/peer-push-receipt";
+import { peerPushHealth, peerPushPayloadHash, resolvePeerPushId } from "../src/lib/peer-push-receipt";
 import { resetRateLimiter } from "../src/lib/rate-limit";
 import { SecuritiesImportResponseSchema } from "../src/lib/securities-import-schema";
 
@@ -85,6 +85,9 @@ describe("peer push receipt health", () => {
     ).toBe("missing-push-id");
     expect(resolvePeerPushId("  short  ", "push-from-body")).toBe("push-from-body");
     expect(resolvePeerPushId("header-id-1", "body-id-not-used")).toBe("header-id-1");
+    const payload = { origin: "app-a", prices: [{ ticker: "AAPL" }] };
+    expect(peerPushPayloadHash(payload)).toBe(peerPushPayloadHash({ prices: [{ ticker: "AAPL" }], origin: "app-a" }));
+    expect(peerPushPayloadHash(payload)).not.toBe(peerPushPayloadHash({ origin: "app-a", prices: [{ ticker: "MSFT" }] }));
   });
 });
 
@@ -120,15 +123,13 @@ describe("Congress.Trade push receipt end to end", () => {
     expect(created.acks?.delivered?.at).toEqual(created.acks?.consumed?.at);
     expect(getImportedPriceCloses("AAPL")).toHaveLength(3);
 
-    const replay = await importRoute(
-      postPush(
-        {
-          origin: "app-a",
-          prices: [{ ticker: "MSFT", closes: seqCloses(2, 400) }],
-        },
-        pushId
-      )
-    );
+    const sameBody = {
+      origin: "app-a",
+      refs: [{ ticker: "AAPL", companyName: "Apple" }],
+      prices: [{ ticker: "AAPL", closes: seqCloses(3) }],
+      spx: seqCloses(1, 5000),
+    };
+    const replay = await importRoute(postPush(sameBody, pushId));
     expect(replay.status).toBe(200);
     const again = SecuritiesImportResponseSchema.parse(await replay.json());
     expect(again).toMatchObject({
@@ -139,6 +140,24 @@ describe("Congress.Trade push receipt end to end", () => {
       refs: 1,
       pricedTickers: 1,
       priceRows: 3,
+    });
+    expect(getImportedPriceCloses("AAPL")).toHaveLength(3);
+
+    const changed = await importRoute(
+      postPush(
+        {
+          origin: "app-a",
+          prices: [{ ticker: "MSFT", closes: seqCloses(2, 400) }],
+        },
+        pushId
+      )
+    );
+    expect(changed.status).toBe(409);
+    const conflict = SecuritiesImportResponseSchema.parse(await changed.json());
+    expect(conflict).toMatchObject({
+      ok: false,
+      pushId,
+      error: "push id already used for a different payload",
     });
     expect(getImportedPriceCloses("AAPL")).toHaveLength(3);
     expect(getImportedPriceCloses("MSFT")).toHaveLength(0);
@@ -235,7 +254,7 @@ describe("Congress.Trade push receipt end to end", () => {
       postPush(
         {
           origin: "app-a",
-          prices: [{ ticker: "NVDA", closes: seqCloses(4, 50) }],
+          prices: [{ ticker: "NVDA", closes: seqCloses(1) }],
         },
         pushId
       )

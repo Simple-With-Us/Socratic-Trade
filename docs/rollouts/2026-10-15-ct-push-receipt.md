@@ -31,7 +31,7 @@ Congress.Trade `shareWithPeer` sends the push id, reads the receipt, and alerts 
 
 - The push id travels in `x-push-id` and in the JSON body.  The header wins.  The shared `SharePayloadSchema` still strips unknown keys, so Congress.Trade adds `pushId` after that parse and Socratic-Trade's local schema keeps it.
 - Delivered means the request was accepted.  Consumed means every persistable row (refs, prices, spx) reads back from the import cache, or the push had nothing this cache stores (empty, own-origin, or acknowledged-not-persisted datasets).  A failed read-back leaves `consumed` null.
-- A 500 is stored so the ops snapshot shows the failure.  It is not an `ok` receipt, so the same push id is processed again.  Only `health: ok` is replayed.  The push id stays the idempotency key: a different body under an ok id does not write a second time.
+- A 500 is stored so the ops snapshot shows the failure.  It is not an `ok` receipt, so the same push id is processed again.  Only `health: ok` with the same payload hash is replayed.  The same ok id with a different payload returns 409 and leaves the stored rows in place.
 - Consumed read-back uses the same ticker and date normalization as the writer.  A padded `YYYY-MM-DD` matches the stored date.  A date the writer skips is not a missing consumed ack.
 - Own-origin skips still get both acks (`reason: own-origin`) so the no-echo path does not page.
 - Datasets this cache does not store (insider, short volume, fundamentals, analyst, trades) stay in `acceptedNotPersisted`.  They do not by themselves clear the consumed ack.
