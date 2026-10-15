@@ -63,6 +63,7 @@ import { fetchDailyOHLC, toBusinessDay } from "./history";
 import { INDEX_UNIVERSES, symbolsForPolicyUniverse } from "./index-universes";
 import type { OHLCBar } from "./indicators";
 import { fetchGroupedDailyBarsRange } from "./market-signals/massive-s3";
+import { marketQuoteSummariesFromFieldStore } from "./db-fundamentals";
 import { normalizeSymbol } from "./money";
 import { serverKnobBool } from "./server-knobs";
 import type { MarketQuote, MarketScan } from "./types";
@@ -927,6 +928,30 @@ export function buildShortVolumeImport(): CongressShortVol[] {
   return out.slice(0, maxDailyTickers());
 }
 
+/**
+ * Build fundamentals + analyst rows for App A from the durable `symbol_field_latest` store.
+ * Used by the scheduled nightly batch so CT's fundamentals_eod / analyst_consensus streams stay
+ * fresh even when the after-scan hook only forwards a throttled subset of scan candidates.
+ */
+export function buildFundamentalsAndAnalystImport(
+  symbols: string[],
+  date: string
+): { fundamentals: CongressFundamental[]; analyst: CongressAnalyst[] } {
+  if (!congressFundamentalsShareEnabled() || symbols.length === 0) {
+    return { fundamentals: [], analyst: [] };
+  }
+  const summaries = marketQuoteSummariesFromFieldStore(symbols);
+  const fundamentals: CongressFundamental[] = [];
+  const analyst: CongressAnalyst[] = [];
+  for (const quote of Object.values(summaries)) {
+    const f = marketQuoteToFundamentals(quote as unknown as MarketQuote, date);
+    if (f) fundamentals.push(f);
+    const a = marketQuoteToAnalyst(quote as unknown as MarketQuote, date);
+    if (a) analyst.push(a);
+  }
+  return { fundamentals, analyst };
+}
+
 // ── Low-level POST ─────────────────────────────────────────────────────────────
 
 function countCloses(payload: CongressSharePayload): number {
@@ -1635,7 +1660,17 @@ export interface CongressDailyShareSummary {
   shortVolRows: number;
   posts: number;
   failedPosts: number;
-  sent: { spx: number; prices: number; closes: number; insider: number; shortVolume: number };
+  sent: {
+    spx: number;
+    prices: number;
+    closes: number;
+    insider: number;
+    shortVolume: number;
+    fundamentals: number;
+    analyst: number;
+  };
+  fundamentalsRows?: number;
+  analystRows?: number;
   /** Aggregated schema-invalid row drops across all POSTs in this run. */
   rowsDropped?: Record<string, number>;
   rowsDroppedReasons?: Record<string, Record<string, number>>;
@@ -1662,7 +1697,8 @@ export async function runCongressDailyShare(
     const now = options.now ?? Date.now();
     const empty = {
       tickers: 0, priced: 0, spxRows: 0, insiderRows: 0, shortVolRows: 0,
-      posts: 0, failedPosts: 0, sent: { spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0 }
+      posts: 0, failedPosts: 0,
+      sent: { spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0, fundamentals: 0, analyst: 0 }
     };
     if (!congressTradeToken()) return { ok: false, skipped: true, reason: "no-token", ...empty };
 
@@ -1747,7 +1783,8 @@ async function runCongressDailyShareUnlocked(
   const now = options.now ?? Date.now();
   const empty = {
     tickers: 0, priced: 0, spxRows: 0, insiderRows: 0, shortVolRows: 0,
-    posts: 0, failedPosts: 0, sent: { spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0 }
+    posts: 0, failedPosts: 0,
+    sent: { spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0, fundamentals: 0, analyst: 0 }
   };
   if (!congressTradeToken()) return { ok: false, skipped: true, reason: "no-token", ...empty };
   const customUniverse = Array.isArray(options.symbols) && options.symbols.length > 0;
@@ -1888,7 +1925,13 @@ async function runCongressDailyShareUnlocked(
   // Skip on targeted custom/needs-only runs so a performance backfill stays price-focused.
   const insider = advancesDailyMarker ? buildInsiderImport() : [];
   const shortVolume = advancesDailyMarker ? buildShortVolumeImport() : [];
-  
+  const shareDate = utcDate(now);
+  const pushFundamentalsAnalyst =
+    advancesDailyMarker || (customUniverse && options.fromAppANeeds !== true);
+  const { fundamentals: fundamentalsImport, analyst: analystImport } = pushFundamentalsAnalyst
+    ? buildFundamentalsAndAnalystImport(universe, shareDate)
+    : { fundamentals: [], analyst: [] };
+
   // Push company refs for the full public screener
   const refs = await fetchNasdaqScreenerRefs();
 
@@ -1900,12 +1943,14 @@ async function runCongressDailyShareUnlocked(
   for (const rows of rowChunks(refs, MAX_REFS_PER_POST)) payloads.push({ refs: rows });
   for (const rows of rowChunks(insider)) payloads.push({ insider: rows });
   for (const rows of rowChunks(shortVolume)) payloads.push({ shortVolume: rows });
+  for (const rows of rowChunks(fundamentalsImport)) payloads.push({ fundamentals: rows });
+  for (const rows of rowChunks(analystImport)) payloads.push({ analyst: rows });
   for (const prices of chunkPrices(priceEntries)) payloads.push({ prices });
 
   const responses: unknown[] = [];
   let posts = 0;
   let failedPosts = 0;
-  const sent = { refs: 0, spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0 };
+  const sent = { refs: 0, spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0, fundamentals: 0, analyst: 0 };
   const rowsDropped: Record<string, number> = {};
   const rowsDroppedReasons: Record<string, Record<string, number>> = {};
   let rowsDroppedTotal = 0;
@@ -1935,6 +1980,8 @@ async function runCongressDailyShareUnlocked(
       sent.closes += result.sent.closes;
       sent.insider += result.sent.insider;
       sent.shortVolume += result.sent.shortVolume;
+      sent.fundamentals += result.sent.fundamentals;
+      sent.analyst += result.sent.analyst;
     } else if (!result.skipped) {
       failedPosts++;
     }
@@ -1964,6 +2011,8 @@ async function runCongressDailyShareUnlocked(
     spxRows: spx.length,
     insiderRows: insider.length,
     shortVolRows: shortVolume.length,
+    fundamentalsRows: fundamentalsImport.length,
+    analystRows: analystImport.length,
     posts,
     failedPosts,
     sent,
@@ -1982,6 +2031,8 @@ async function runCongressDailyShareUnlocked(
       spxRows: summary.spxRows,
       insiderRows: summary.insiderRows,
       shortVolRows: summary.shortVolRows,
+      fundamentalsRows: summary.fundamentalsRows,
+      analystRows: summary.analystRows,
       posts,
       failedPosts,
       sent,

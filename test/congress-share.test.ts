@@ -26,6 +26,7 @@ vi.mock("../src/lib/history", () => {
 
 import { fetchDailyOHLC } from "../src/lib/history";
 import {
+  buildFundamentalsAndAnalystImport,
   buildInsiderImport,
   buildShortVolumeImport,
   canonicalMarketDataSymbol,
@@ -1171,6 +1172,47 @@ describe("insider / short-volume import builders", () => {
   });
 });
 
+describe("buildFundamentalsAndAnalystImport", () => {
+  it("maps symbol_field_latest rows into fundamentals + analyst import rows", async () => {
+    const { upsertSymbolFieldLatest } = await import("../src/lib/db-fundamentals");
+    const now = new Date().toISOString();
+    upsertSymbolFieldLatest([
+      {
+        symbol: "AAPL",
+        field: "peRatio",
+        valueJson: "25",
+        source: "yahoo-finance",
+        asOf: now,
+        fetchedAt: now,
+      },
+      {
+        symbol: "AAPL",
+        field: "analystRating",
+        valueJson: JSON.stringify("Buy"),
+        source: "fmp",
+        asOf: now,
+        fetchedAt: now,
+      },
+      {
+        symbol: "AAPL",
+        field: "analystBySource",
+        valueJson: JSON.stringify({
+          fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } },
+        }),
+        source: "fmp",
+        asOf: now,
+        fetchedAt: now,
+      },
+    ]);
+    process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "on";
+    const { fundamentals, analyst } = buildFundamentalsAndAnalystImport(["AAPL"], "2026-10-15");
+    expect(fundamentals).toHaveLength(1);
+    expect(fundamentals[0]).toMatchObject({ ticker: "AAPL", peRatio: 25 });
+    expect(analyst).toHaveLength(1);
+    expect(analyst[0]).toMatchObject({ ticker: "AAPL", rating: "Buy", strongBuy: 2 });
+  });
+});
+
 describe("runCongressDailyShare — insider + short-volume on the nightly batch", () => {
   it("sends cached insider + short-volume rows as their own bounded POSTs", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
@@ -1195,6 +1237,43 @@ describe("runCongressDailyShare — insider + short-volume on the nightly batch"
     expect(bodies.some((b) => Array.isArray(b.shortVolume) && b.shortVolume.length >= 1)).toBe(true);
     // No single POST bundles everything — each dataset rides its own bounded request.
     expect(bodies.every((b) => !(b.insider && b.prices))).toBe(true);
+  });
+
+  it("sends fundamentals + analyst from symbol_field_latest on scheduled nightly runs", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "on";
+    const { upsertSymbolFieldLatest } = await import("../src/lib/db-fundamentals");
+    const ts = new Date().toISOString();
+    upsertSymbolFieldLatest([
+      {
+        symbol: "AAPL",
+        field: "peRatio",
+        valueJson: "30",
+        source: "yahoo-finance",
+        asOf: ts,
+        fetchedAt: ts,
+      },
+      {
+        symbol: "AAPL",
+        field: "analystRating",
+        valueJson: JSON.stringify("Hold"),
+        source: "fmp",
+        asOf: ts,
+        fetchedAt: ts,
+      },
+    ]);
+    mockedFetchDailyOHLC.mockResolvedValue([{ time: recentDate(1), close: 2 }]);
+    const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await runCongressDailyShare({ now: Date.now(), force: true, symbols: ["AAPL"] });
+    expect(res.fundamentalsRows).toBeGreaterThanOrEqual(1);
+    expect(res.analystRows).toBeGreaterThanOrEqual(1);
+    const bodies = fetchSpy.mock.calls
+      .filter((c) => (c[1] as RequestInit | undefined)?.body != null)
+      .map((c) => JSON.parse((c[1] as RequestInit).body as string));
+    expect(bodies.some((b) => Array.isArray(b.fundamentals) && b.fundamentals.length >= 1)).toBe(true);
+    expect(bodies.some((b) => Array.isArray(b.analyst) && b.analyst.length >= 1)).toBe(true);
   });
 
   it("caps each symbol's closes to CONGRESS_SHARE_MAX_CLOSES_PER_TICKER (most-recent N)", async () => {

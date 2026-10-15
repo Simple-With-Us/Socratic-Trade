@@ -83,10 +83,14 @@ hook and **(b)** a nightly daily-close/SPX batch.
    most once per UTC day): collects the **union of every user's watchlist symbols
    + policy-universe symbols** (the same set the filing-ingest job uses), fetches
    each ticker's daily closes (reusing the history cache) plus the `^GSPC` series,
-   and POSTs them as `prices` + `spx` in capped chunks.
+   and POSTs them as `prices` + `spx` in capped chunks.  On scheduled runs it also
+   POSTs `fundamentals[]` + `analyst[]` for that universe from the durable
+   `symbol_field_latest` store (`buildFundamentalsAndAnalystImport`), so App A's
+   fundamentals/analyst streams stay fresh even when the scan hook is throttled or
+   scan candidates lack slow enrichment on a given run.
 
-`refs` come from the scan hook; the nightly batch sends `prices` + `spx`. This
-matches the "scan refs + nightly prices" split chosen for this work.
+`refs` come from the scan hook; the nightly batch sends `prices` + `spx` plus
+insider/short-volume and (when enabled) fundamentals/analyst from the field store.
 
 **Round-2 additions (2026-06-22):** the nightly batch also forwards App B's two highest-fit datasets,
 sourced from its cached web-sources and built by `buildInsiderImport()` / `buildShortVolumeImport()`:
