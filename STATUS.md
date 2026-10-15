@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — merge shepherd ST-2874 + AFC fleet-health ST-9
+
+**What.**  ST-2874: `scripts/merge-shepherd.sh` defers `update-branch` while CI is in flight on the current head (fixes verify-hosted starvation).  ST-9: fix lands in **AI-Fleet-Coordinator** (`fleet-health-recover.sh` UUID/label container lookup), not Socratic-Trade.
+
+**Branches.**  `cursor/merge-shepherd-skip-inflight-b952` (ST), `cursor/fleet-health-coolify-lookup-b952` (AFC).
+
+**Verification.**  `bash scripts/merge-shepherd-ci-inflight.selftest.sh`; `bash -n scripts/merge-shepherd.sh`; AFC `bash scripts/host/test-fleet-health-body.sh`.
+
+**Next.**  Open PRs (ready); owner refresh Mac shepherd copy + redeploy AFC host script for ST-9.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.
