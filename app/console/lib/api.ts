@@ -359,10 +359,45 @@ export interface LiveApprovalConfirmationBody {
 
 export interface ApproveResult {
   status: string;
+  outcome?: string;
   orderId?: string;
   brokerState?: string;
   fillStatus?: string;
   reasons?: string[];
+}
+
+/** A 409 whose body is a placement outcome is not an HTTP success, and it is
+ *  still the structured result the toast needs.  Live confirmation stays a throw. */
+function placementResultFromConflict(error: unknown): ApproveResult | undefined {
+  if (!(error instanceof ConsoleApiError) || error.status !== 409) return undefined;
+  if (!error.payload || typeof error.payload !== "object") return undefined;
+  const payload = error.payload as {
+    error?: string;
+    status?: string;
+    outcome?: string;
+    reasons?: string[];
+    expectedText?: string;
+    orderId?: string;
+    brokerState?: string;
+    fillStatus?: string;
+  };
+  if (payload.error === "LIVE_CONFIRMATION_REQUIRED" && typeof payload.expectedText === "string") {
+    throw new LiveConfirmationRequiredError(
+      Array.isArray(payload.reasons) ? payload.reasons : [],
+      payload.expectedText
+    );
+  }
+  if (typeof payload.status === "string" && typeof payload.outcome === "string") {
+    return {
+      status: payload.status,
+      outcome: payload.outcome,
+      orderId: payload.orderId,
+      brokerState: payload.brokerState,
+      fillStatus: payload.fillStatus,
+      reasons: payload.reasons
+    };
+  }
+  return undefined;
 }
 
 // Approval intentionally shares the per-account strategy lock. A long LLM run can therefore
@@ -396,12 +431,8 @@ export async function approveProposal(
         body: JSON.stringify(liveConfirmation ? { liveConfirmation } : {})
       });
     } catch (error) {
-      if (error instanceof ConsoleApiError && error.status === 409 && error.payload && typeof error.payload === "object") {
-        const p = error.payload as { error?: string; reasons?: string[]; expectedText?: string; message?: string };
-        if (p.error === "LIVE_CONFIRMATION_REQUIRED" && typeof p.expectedText === "string") {
-          throw new LiveConfirmationRequiredError(Array.isArray(p.reasons) ? p.reasons : [], p.expectedText);
-        }
-      }
+      const placement = placementResultFromConflict(error);
+      if (placement) return placement;
       throw error;
     }
   };
