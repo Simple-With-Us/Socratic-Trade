@@ -6,9 +6,9 @@
 
 **Branch.**  `cursor/st-3988-congress-share-health-classifier-4a0e`
 
-**Verification.**  Merged `origin/main` (2026-10-15).  Seer thread: D1 batch errors require lock/busy
-patterns.  ST-3092 `live-route` Dockerfile pins from #4709.  Full `npm run lint`, `npx tsc --noEmit`,
-`npm test`, `npm run build` before push.
+**Verification.**  Merged `origin/main` again (CT push-receipt lane).  Seer thread: fix in
+`aff5cf20`, thread left open pending reviewer ack.  ST-3092 `live-route` pins.  Lint/tsc + targeted
+vitest green before push; CI `verify` gate pending.
 
 **Next.**  PR #4706 ready for review; Deployer merges.
 ## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
