@@ -5,6 +5,7 @@ import { ExecutionAccount, HealthSignals } from "./execution-mode";
 import { accountEquity } from "./risk-breaker";
 import { sendNotification } from "./notifications";
 import { isAbortOrTimeoutError, isTransientNetworkError } from "./network-errors";
+import { isTradierSandboxOpenDeferralMessage, isTradierTransientServerError } from "./tradier-transient";
 import { isDeadlineTimeoutError } from "./inflight-deadline";
 import { startEventLoopLagSampler, stalledMsSince } from "./event-loop-lag";
 import { safeErrorMessage } from "./telemetry-sanitize";
@@ -90,13 +91,20 @@ export function healthSignalsFromProbeFailure(err: unknown): HealthSignals {
 export function brokerHealthRunSkip(health: HealthSignals): {
   status: "skipped" | "skipped_broker_unhealthy";
   summary: string;
-  auditKind: "run_skipped_process_stalled" | "run_skipped_broker_unhealthy";
+  auditKind: "run_skipped_process_stalled" | "run_skipped_broker_transient" | "run_skipped_broker_unhealthy";
 } {
   if (health.processStall) {
     return {
       status: "skipped",
       summary: `${health.reason ?? processStallReason(health.processStall.stalledMs, health.processStall.elapsedMs)}. Skipping this strategy run; the next one retries.`,
       auditKind: "run_skipped_process_stalled"
+    };
+  }
+  if (health.transientBrokerError) {
+    return {
+      status: "skipped",
+      summary: `${health.reason ?? "Tradier order path returned a transient server error"}. Skipping this strategy run; the next one retries. Autonomous trading stays armed.`,
+      auditKind: "run_skipped_broker_transient"
     };
   }
   return {
@@ -196,9 +204,20 @@ export async function checkBrokerHealth(
     if (typeof brokerGateway.probeOrderCapability === "function" && account.accountNumber) {
       const probe = await brokerGateway.probeOrderCapability(account.accountNumber);
       if (!probe.ok) {
+        const reason = probe.reason ?? "Broker reports orders cannot be placed";
+        // This sentence is a wedged sandbox OMS, not "the account cannot trade".
+        // Leave the account active.  The caller skips this tick and retries.
+        if (isTradierTransientServerError(reason)) {
+          return {
+            isHealthy: false,
+            reason,
+            category: "connectivity",
+            transientBrokerError: true
+          };
+        }
         return {
           isHealthy: false,
-          reason: probe.reason ?? "Broker reports orders cannot be placed",
+          reason,
           category: "order_capability"
         };
       }
@@ -448,6 +467,16 @@ export async function applyBrokerOrderPlacementPause(input: {
     return { action: "none" };
   }
 
+  // Tradier HTTP 400 "Unexpected server error" is a broker-side blip.  One hit,
+  // or a run of them through the open, must not flip systemState.  A later
+  // healthy probe then has nothing to auto-resume, which is the halt/resume
+  // churn from 2026-10-13 and 2026-10-14.  Do not touch the connectivity streak:
+  // this answer is not evidence the socket is dead, and it is not evidence the
+  // socket recovered.
+  if (health.transientBrokerError || isTradierTransientServerError(reason)) {
+    return { action: "none" };
+  }
+
   // Transient connectivity (dead keep-alive, one `fetch failed`) or a probe that got no answer in
   // time is not an order-path outage.  Skip this tick via isHealthy=false; only halt after a
   // short consecutive streak so Autopilot survives a single blip.  The timeout flag is structural
@@ -571,6 +600,11 @@ export function releaseBrokerPlacementPauseToOwner(input: {
 export function isOrderPlacementInfrastructureFailure(message: string): boolean {
   const m = String(message ?? "");
   if (!m.trim()) return false;
+  // The sandbox 400 "Unexpected server error" and the open-window deferral are
+  // retryable.  Counting them here would halt after two audits in 30 minutes,
+  // which is the churn this classifier exists to avoid.  HTTP 5xx still matches
+  // below.
+  if (isTradierTransientServerError(m) || isTradierSandboxOpenDeferralMessage(m)) return false;
   // Explicit non-infra rejects first (avoid false positives on "HTTP 403 insufficient buying power")
   if (
     /buying power|insufficient|notional|wash.?sale|pdt|day.?trad|fractional|qty|quantity|validation|OrderValidation|not tradable|halted|universe|margin.?call/i.test(

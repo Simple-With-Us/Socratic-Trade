@@ -20,14 +20,19 @@ interface FetchRecord {
   body: string | null;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.resetModules();
   vi.unstubAllGlobals();
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-tradier-${randomUUID()}.db`)}`;
+  // Wednesday 15:00 ET, outside the 15-minute sandbox deferral window, so existing
+  // place tests do not flake when CI runs during 09:30-09:45 ET.
+  const { setTradierNowForTests } = await import("../src/lib/tradier-transient");
+  setTradierNowForTests(() => new Date("2026-10-14T19:00:00.000Z"));
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 // Seed an active Tradier connected account for `userId`.
@@ -1236,7 +1241,7 @@ describe("Tradier adapter — option positions", () => {
 describe("Tradier adapter — probeOrderCapability classification", () => {
   it("classifies 'HTTP 400: Unexpected server error' as a transient server error, not the generic fallback", async () => {
     await seedTradier({ environment: "paper" });
-    installFetchMock([
+    const { records } = installFetchMock([
       {
         match: (u, m) => m === "POST" && u.includes(`/accounts/${ACCT}/orders`),
         status: 400,
@@ -1247,11 +1252,14 @@ describe("Tradier adapter — probeOrderCapability classification", () => {
     const result = await getTradierGateway("local").probeOrderCapability!(ACCT);
     expect(result.ok).toBe(false);
     expect(result.reason).toMatch(/Tradier order path unavailable/);
+    expect(result.reason).toMatch(/Unexpected server error/);
+    const posts = records.filter((r) => r.method === "POST" && r.url.includes(`/accounts/${ACCT}/orders`));
+    expect(posts).toHaveLength(3);
   });
 
   it("still treats a structured OMS validation rejection (buying power) as healthy order capability", async () => {
     await seedTradier({ environment: "paper" });
-    installFetchMock([
+    const { records } = installFetchMock([
       {
         match: (u, m) => m === "POST" && u.includes(`/accounts/${ACCT}/orders`),
         status: 400,
@@ -1261,11 +1269,12 @@ describe("Tradier adapter — probeOrderCapability classification", () => {
     const { getTradierGateway } = await import("../src/lib/tradier");
     const result = await getTradierGateway("local").probeOrderCapability!(ACCT);
     expect(result).toEqual({ ok: true });
+    expect(records.filter((r) => r.method === "POST")).toHaveLength(1);
   });
 
   it("classifies a genuinely unrecognized failure as its own category rather than 'connectivity'", async () => {
     await seedTradier({ environment: "paper" });
-    installFetchMock([
+    const { records } = installFetchMock([
       {
         match: (u, m) => m === "POST" && u.includes(`/accounts/${ACCT}/orders`),
         status: 401,
@@ -1276,6 +1285,41 @@ describe("Tradier adapter — probeOrderCapability classification", () => {
     const result = await getTradierGateway("local").probeOrderCapability!(ACCT);
     expect(result.ok).toBe(false);
     expect(result.reason).toMatch(/Tradier order capability probe failed:/);
+    expect(records.filter((r) => r.method === "POST")).toHaveLength(1);
+  });
+
+  it("treats the preview as healthy when the sentence clears inside the retry budget", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    installFetchMock([
+      {
+        match: (u, m) => m === "POST" && u.includes(`/accounts/${ACCT}/orders`),
+        status: 400,
+        body: { errors: { error: "Unexpected server error" } }
+      }
+    ]);
+    const fetchImpl = globalThis.fetch;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "POST" && String(url).includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        if (posts < 3) {
+          return new Response(JSON.stringify({ errors: { error: "Unexpected server error" } }), {
+            status: 400,
+            headers: { "content-type": "application/json" }
+          });
+        }
+        return new Response(JSON.stringify({ order: { id: "1", status: "ok" } }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return fetchImpl(url, init);
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const result = await getTradierGateway("local").probeOrderCapability!(ACCT);
+    expect(result).toEqual({ ok: true });
+    expect(posts).toBe(3);
   });
 });
 
@@ -1285,7 +1329,9 @@ describe("Tradier adapter — probeOrderCapability exponential backoff", () => {
   });
 
   it("backs off exponentially on a sustained identical failure instead of re-probing every call", async () => {
-    vi.useFakeTimers();
+    // Date only.  The sentence retry sleeps on a real setTimeout; faking that timer
+    // deadlocks the probe before the cache assertions run.
+    vi.useFakeTimers({ toFake: ["Date"] });
     await seedTradier({ environment: "paper" });
     const { records } = installFetchMock([
       {
@@ -1302,31 +1348,32 @@ describe("Tradier adapter — probeOrderCapability exponential backoff", () => {
     const start = Date.now();
     vi.setSystemTime(start);
     await gateway.probeOrderCapability!(ACCT);
-    expect(probeCalls()).toBe(1);
+    // One probe retries the sentence three times, then caches the failure.
+    expect(probeCalls()).toBe(3);
 
     // Immediately again — served from the cache, no new network call.
     await gateway.probeOrderCapability!(ACCT);
-    expect(probeCalls()).toBe(1);
+    expect(probeCalls()).toBe(3);
 
     // Past the base 2-minute TTL — first backoff step (streak 0 -> 1), re-probes.
     vi.setSystemTime(start + 2 * 60_000 + 1);
     await gateway.probeOrderCapability!(ACCT);
-    expect(probeCalls()).toBe(2);
+    expect(probeCalls()).toBe(6);
 
     // Only 2 more minutes (would have expired the OLD fixed 2-minute TTL) — the streak is now 1,
     // doubling the effective TTL to 4 minutes, so this must still be served from cache.
     vi.setSystemTime(start + 2 * 60_000 + 1 + 2 * 60_000);
     await gateway.probeOrderCapability!(ACCT);
-    expect(probeCalls()).toBe(2);
+    expect(probeCalls()).toBe(6);
 
     // Past the doubled 4-minute window — re-probes again.
     vi.setSystemTime(start + 2 * 60_000 + 1 + 4 * 60_000 + 1);
     await gateway.probeOrderCapability!(ACCT);
-    expect(probeCalls()).toBe(3);
+    expect(probeCalls()).toBe(9);
   });
 
   it("resets the backoff streak once the probe recovers, instead of continuing to back off", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     await seedTradier({ environment: "paper" });
     let failing = true;
     const calls: string[] = [];
@@ -1457,6 +1504,432 @@ describe("Tradier adapter — read-path retry on a transient network failure", (
     // Exactly one attempt — a retried write after Tradier may have already accepted the POST
     // risks a genuine duplicate order, so writes never opt into trackHealth's retryTransient.
     expect(attempt).toBe(1);
+  });
+});
+
+describe("Tradier adapter — HTTP 400 Unexpected server error on the order path", () => {
+  const equity = {
+    accountNumber: ACCT,
+    symbol: "AAPL",
+    side: "buy" as const,
+    quantity: 1,
+    type: "limit" as const,
+    limitPrice: 10,
+    timeInForce: "gfd" as const,
+    marketHours: "regular_hours" as const,
+    refId: "r-retry"
+  };
+
+  function json(status: number, body: unknown): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" }
+    });
+  }
+
+  it("retries the sentence after a tag miss and returns the later order id", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    let gets = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        if (posts === 1) return json(400, { errors: { error: "Unexpected server error" } });
+        return json(200, { order: { id: 42, status: "ok" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        gets += 1;
+        return json(200, { orders: null });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder(equity);
+    expect(placed.orderId).toBe("42");
+    expect(posts).toBe(2);
+    expect(gets).toBe(1);
+  });
+
+  it("does not POST again when the tag is already on the book", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    let listAt = 0;
+    const started = Date.now();
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        return json(400, { errors: { error: "Unexpected server error" } });
+      }
+      if (method === "GET" && /\/orders\/999(?:\?|$)/.test(u)) {
+        return json(200, { order: { id: 999, status: "pending" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        listAt = Date.now() - started;
+        return json(200, { orders: { order: { id: 999, tag: "r-hit", status: "pending" } } });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder({ ...equity, refId: "r-hit" });
+    expect(placed.orderId).toBe("999");
+    expect(posts).toBe(1);
+    // The lookup waits out the 400ms backoff so a just-accepted tag is visible
+    // before any second POST.
+    expect(listAt).toBeGreaterThanOrEqual(350);
+  });
+
+  // The tag hit proves the POST landed; a hardcoded `{ status: "pending" }` stub dropped the fill
+  // fields, so an order that FILLED inside the lookup window was booked unfilled at the proposal
+  // price.  The lookup-hit path must carry the broker's real state through.
+  it("carries the broker's real fill state through the tag-hit path", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        return json(400, { errors: { error: "Unexpected server error" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders/999`)) {
+        return json(200, { order: { id: 999, status: "filled", exec_quantity: "1", avg_fill_price: "10.25" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        return json(200, { orders: { order: { id: 999, tag: "r-fill", status: "pending" } } });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder({ ...equity, refId: "r-fill" });
+    expect(posts).toBe(1);
+    expect(placed).toMatchObject({ orderId: "999", state: "filled", filledQuantity: 1, averagePrice: 10.25 });
+  });
+
+  // A failed re-read must NOT rethrow: the order is known to be live, so surfacing a retryable
+  // placement failure here would risk a duplicate POST of an order already on the book.
+  it("keeps the id and does not re-POST when the tag-hit re-read fails", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        return json(400, { errors: { error: "Unexpected server error" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders/999`)) {
+        return json(500, { errors: { error: "reread down" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        return json(200, { orders: { order: { id: 999, tag: "r-reread", status: "pending" } } });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder({ ...equity, refId: "r-reread" });
+    expect(placed.orderId).toBe("999");
+    expect(posts).toBe(1);
+  });
+
+  // A garbled envelope at the trust boundary is a clean MISS (so the retry path still runs),
+  // never a throw — throwing here would abort the placement we are surviving.
+  it("finds the tag in a multi-order array and does not POST again", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        return json(400, { errors: { error: "Unexpected server error" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders/999`)) {
+        return json(200, {
+          order: { id: 999, status: "filled", exec_quantity: 1, avg_fill_price: 10.5 },
+          commission: "0.00"
+        });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        return json(200, {
+          orders: {
+            order: [null, { id: 1, status: "open" }, { id: 999, tag: "r-page", status: "pending", extra: true }],
+            unmatched_symbols: "none"
+          }
+        });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder({ ...equity, refId: "r-page" });
+    expect(posts).toBe(1);
+    expect(placed).toMatchObject({ orderId: "999", state: "filled", filledQuantity: 1, averagePrice: 10.5 });
+  });
+
+  it("keeps the known id when the tag-hit re-read body is not an order object", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        return json(400, { errors: { error: "Unexpected server error" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders/999`)) {
+        return json(200, { order: "null" });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        return json(200, { orders: { order: { id: 999, tag: "r-badbody", status: "pending" } } });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder({ ...equity, refId: "r-badbody" });
+    expect(placed.orderId).toBe("999");
+    expect(placed.state).toBe("pending");
+    expect(posts).toBe(1);
+  });
+
+  it("treats a drifted order-listing envelope as a tag miss, not a throw", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        if (posts === 1) return json(400, { errors: { error: "Unexpected server error" } });
+        return json(200, { order: { id: 42, status: "ok" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        return json(200, { orders: 12345 });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder({ ...equity, refId: "r-drift" });
+    expect(placed.orderId).toBe("42");
+    expect(posts).toBe(2);
+  });
+
+  it("does not POST again when the tag lookup itself fails", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        return json(400, { errors: { error: "Unexpected server error" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        return json(500, { errors: { error: "lookup down" } });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    await expect(getTradierGateway("local").placeEquityOrder(equity)).rejects.toThrow(/tag lookup failed/);
+    expect(posts).toBe(1);
+  });
+
+  it("fails a buying-power 400 on the first POST", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "POST" && String(url).includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        return json(400, { errors: { error: "Not enough buying power" } });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    await expect(getTradierGateway("local").placeEquityOrder(equity)).rejects.toThrow(/buying power/i);
+    expect(posts).toBe(1);
+  });
+
+  it("fails an HTTP 500 with the same sentence on the first POST", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "POST" && String(url).includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        return json(500, { errors: { error: "Unexpected server error" } });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    await expect(getTradierGateway("local").placeEquityOrder(equity)).rejects.toThrow(/HTTP 500/);
+    expect(posts).toBe(1);
+  });
+
+  it("returns the order when the tag appears on the lookup after the final refusal", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    let listGets = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        return json(400, { errors: { error: "Unexpected server error" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders/77`)) {
+        return json(200, { order: { id: 77, status: "filled", exec_quantity: "1", avg_fill_price: "10.10" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        listGets += 1;
+        if (listGets < 3) return json(200, { orders: null });
+        return json(200, { orders: { order: { id: 77, tag: "r-final", status: "pending" } } });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder({ ...equity, refId: "r-final" });
+    expect(posts).toBe(3);
+    expect(listGets).toBe(3);
+    expect(placed).toMatchObject({ orderId: "77", state: "filled", filledQuantity: 1, averagePrice: 10.1 });
+  });
+
+  it("throws the sentence after three POSTs and three empty lookups", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    let gets = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        return json(400, { errors: { error: "Unexpected server error" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        gets += 1;
+        return json(200, { orders: null });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    await expect(getTradierGateway("local").placeEquityOrder(equity)).rejects.toThrow(/Unexpected server error/);
+    expect(posts).toBe(3);
+    expect(gets).toBe(3);
+  });
+
+  it("retries an option order the same way", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        if (posts === 1) return json(400, { errors: { error: "Unexpected server error" } });
+        return json(200, { order: { id: 77, status: "ok" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        return json(200, { orders: null });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const gateway = getTradierGateway("local");
+    if (!gateway.placeOptionOrder) throw new Error("Tradier gateway is missing placeOptionOrder");
+    const placed = await gateway.placeOptionOrder({
+      accountNumber: ACCT,
+      occSymbol: "DELL260717C00150000",
+      intent: "buy_to_open",
+      quantity: 1,
+      type: "limit",
+      limitPrice: 1.5,
+      refId: "opt-1"
+    });
+    expect(placed.orderId).toBe("77");
+    expect(posts).toBe(2);
+  });
+
+  it("defers sandbox equity and option posts for the first 15 minutes after the open", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async () => {
+      posts += 1;
+      return json(200, { order: { id: 1, status: "ok" } });
+    });
+    const { setTradierNowForTests } = await import("../src/lib/tradier-transient");
+    setTradierNowForTests(() => new Date("2026-10-14T13:35:00.000Z"));
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const gateway = getTradierGateway("local");
+    await expect(gateway.placeEquityOrder(equity)).rejects.toThrow(/deferred until 15 minutes after the open/);
+    if (!gateway.placeOptionOrder) throw new Error("Tradier gateway is missing placeOptionOrder");
+    await expect(
+      gateway.placeOptionOrder({
+        accountNumber: ACCT,
+        occSymbol: "DELL260717C00150000",
+        intent: "buy_to_open",
+        quantity: 1,
+        type: "market",
+        refId: "opt-defer"
+      })
+    ).rejects.toThrow(/deferred until 15 minutes after the open/);
+    expect(posts).toBe(0);
+  });
+
+  it("places a sandbox order once the window has passed", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() === "POST") {
+        posts += 1;
+        return json(200, { order: { id: 8, status: "ok" } });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { setTradierNowForTests } = await import("../src/lib/tradier-transient");
+    setTradierNowForTests(() => new Date("2026-10-14T14:00:00.000Z"));
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder(equity);
+    expect(placed.orderId).toBe("8");
+    expect(posts).toBe(1);
+  });
+
+  it("places a live order during the sandbox deferral window", async () => {
+    await seedTradier({ environment: "live" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() === "POST") {
+        posts += 1;
+        return json(200, { order: { id: 9, status: "ok" } });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { setTradierNowForTests } = await import("../src/lib/tradier-transient");
+    setTradierNowForTests(() => new Date("2026-10-14T13:35:00.000Z"));
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder(equity);
+    expect(placed.orderId).toBe("9");
+    expect(posts).toBe(1);
+  });
+
+  it("places a sandbox order in premarket, before the regular open", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() === "POST") {
+        posts += 1;
+        return json(200, { order: { id: 10, status: "ok" } });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { setTradierNowForTests } = await import("../src/lib/tradier-transient");
+    // 09:00 ET.  5:41am CT is the same class of premarket and must not defer.
+    setTradierNowForTests(() => new Date("2026-10-14T13:00:00.000Z"));
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder(equity);
+    expect(placed.orderId).toBe("10");
+    expect(posts).toBe(1);
   });
 });
 

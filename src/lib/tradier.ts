@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { z } from "zod";
 import type {
   AccountCapabilities,
   BrokerageAccount,
@@ -29,6 +30,16 @@ import { fillMissingQuotesWithClose, estimateReviewNotional } from "./alpaca";
 import { mergeAccountCapabilities } from "./venue-contract";
 import { normalizeVenueOrder } from "./venue-normalization";
 import { TRADIER_BROKER_IO_DEADLINE_MS, equityOrdersDefaultSinceIso, withDeadline } from "./inflight-deadline";
+import {
+  TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE,
+  TRADIER_TAG_LOOKUP_UNVERIFIED_MESSAGE,
+  TRADIER_TRANSIENT_ATTEMPTS,
+  isTradierSandboxOpenDeferral,
+  isTradierTransientServerError,
+  sleepMs,
+  tradierNow,
+  tradierTransientBackoffMs
+} from "./tradier-transient";
 
 /**
  * Tradier broker gateway. Hand-rolled REST (single Bearer token, no SDK), mirroring the Alpaca
@@ -86,6 +97,49 @@ function tradierProbeTtlMs(streak: number): number {
   const doublings = Math.max(0, Math.min(streak, 5)); // 2m * 2^5 = 64m, already above the 60m cap
   return Math.min(TRADIER_PROBE_BASE_TTL_MS * 2 ** doublings, TRADIER_PROBE_MAX_TTL_MS);
 }
+
+/**
+ * One order row.  A record, not `z.unknown()`: `findOrderIdByTag` reads `tag` and `id`.
+ * Values stay unknown because Tradier mixes strings and numbers on the same keys.
+ * The row is not a required-field object.  A page of other orders often has no `tag`,
+ * and rejecting that page would hide our own row and allow another POST.
+ */
+const TradierOrderRowSchema = z.record(z.string(), z.unknown());
+
+/**
+ * Listing `order` is an array, one object, the string "null", or null.
+ * A bare `z.record` rejects the array.  That would turn a live multi-order page into a
+ * tag miss and the caller would POST again.
+ */
+const TradierOrderCollectionSchema = z.union([
+  z.array(z.union([TradierOrderRowSchema, z.null()])),
+  TradierOrderRowSchema,
+  z.string(),
+  z.null()
+]);
+
+/**
+ * Tradier GET /accounts/:account/orders envelope, validated at the HTTP boundary before anything
+ * is read off it.  Only `orders` is constrained.  The inner object uses `.passthrough()` so an
+ * added envelope field cannot fail the parse.  An empty listing is `orders: null` (or the string
+ * "null"), which is why `nullish` is required rather than `optional`.
+ */
+const TradierOrdersPageSchema = z.object({
+  orders: z
+    .union([
+      z.object({ order: TradierOrderCollectionSchema.optional() }).passthrough(),
+      z.string(),
+      z.null()
+    ])
+    .nullish()
+});
+
+/** GET /accounts/:account/orders/:id.  Extra envelope keys stay.  A bad shape is a stub, not a throw. */
+const TradierPlacedOrderSchema = z
+  .object({
+    order: z.union([TradierOrderRowSchema, z.array(TradierOrderRowSchema), z.string(), z.null()]).nullish()
+  })
+  .passthrough();
 
 // Tradier envelopes wrap collections as { orders: { order: [...] } }, collapse a lone element to a
 // bare object { orders: { order: {...} } }, and report empty as null or the string "null". Normalize
@@ -422,7 +476,9 @@ class TradierBrokerGateway implements BrokerGateway {
   // POST / cancelEquityOrder never do: a dead keep-alive socket after Tradier already accepted the
   // write would make a retry a genuine second order attempt, or a cancel-of-already-cancelled 400
   // that the caller would misread as failure (same class of risk Alpaca's trackHealth documents for
-  // createOrder).
+  // createOrder). HTTP 400 "Unexpected server error" is a separate, sentence-only retry inside
+  // postOrderToleratingTransientServerError: it looks up the tag before any second POST and again
+  // before giving up, and does not use this flag.
   private async trackHealth<T>(
     fn: () => Promise<T>,
     opts?: { deadlineMs?: number; retryTransient?: boolean }
@@ -881,7 +937,132 @@ class TradierBrokerGateway implements BrokerGateway {
     return { estimatedNotional, alerts, raw: { tradier: true } };
   }
 
+  /**
+   * Sandbox OMS is unreliable for the first 15 minutes after the regular open.
+   * Refuse the POST locally so a 400 cannot land and cannot halt the account.
+   * Live Tradier is not deferred.
+   */
+  private assertSandboxOrderWindowOpen(): void {
+    if (isTradierSandboxOpenDeferral(this.environment, tradierNow())) {
+      throw new Error(TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE);
+    }
+  }
+
+  /**
+   * POST an order.  On HTTP 400 "Unexpected server error", wait out the
+   * backoff, then look up our tag before any second POST.  The last refusal
+   * looks up immediately, with no further POST.  A hit means that request
+   * landed despite the error body, so we return that id.  A clean miss
+   * retries until the budget is spent.  A failed lookup does not send
+   * another POST and does not claim the order was absent.  Any other error,
+   * including a real 400, fails on the first attempt.
+   * The whole sequence is one trackHealth call so a recovered blip is not a
+   * tradier-broker hard failure.
+   */
+  private async postOrderToleratingTransientServerError<T extends { order?: Record<string, unknown> }>(
+    accountNumber: string,
+    tag: string,
+    form: Record<string, string | number | undefined>
+  ): Promise<T> {
+    return this.trackHealth(async () => {
+      let last: unknown;
+      for (let attempt = 0; attempt < TRADIER_TRANSIENT_ATTEMPTS; attempt++) {
+        try {
+          return await this.request<T>("POST", `/accounts/${accountNumber}/orders`, { form });
+        } catch (error) {
+          last = error;
+          const msg = error instanceof Error ? error.message : String(error);
+          if (!isTradierTransientServerError(msg)) throw error;
+          // The listing can lag the accept.  Sleep before the lookup that
+          // gates the next POST, so a just-landed tag is visible before we
+          // send another order.  The final attempt does not sleep again.
+          if (attempt + 1 < TRADIER_TRANSIENT_ATTEMPTS) {
+            await sleepMs(tradierTransientBackoffMs(attempt));
+          }
+          const landed = await this.orderBodyForLandedTag<T>(accountNumber, tag);
+          if (landed) return landed;
+          if (attempt + 1 >= TRADIER_TRANSIENT_ATTEMPTS) throw error;
+        }
+      }
+      throw last;
+    });
+  }
+
+  /**
+   * After a transient refusal, ask whether our tag is already on the book.
+   * A hit returns the live order body.  A clean miss returns undefined so the
+   * caller may POST again.  A lookup that throws must not be retried as a
+   * fresh order and must not be classified as a safe `not_placed`.
+   */
+  private async orderBodyForLandedTag<T>(accountNumber: string, tag: string): Promise<T | undefined> {
+    let existing: string | undefined;
+    try {
+      existing = await this.findOrderIdByTag(accountNumber, tag);
+    } catch {
+      throw new Error(TRADIER_TAG_LOOKUP_UNVERIFIED_MESSAGE);
+    }
+    if (!existing) return undefined;
+    // The tag hit proves the POST landed, but the hardcoded `{ status: "pending" }`
+    // stub dropped exec_quantity / avg_fill_price, so an order that FILLED inside the
+    // lookup+backoff window was booked as unfilled at the proposal price — exactly the
+    // P&L corruption the equity path warns about below.  Re-read the order for the
+    // broker's real state.  A failed re-read must NOT rethrow: that would surface as a
+    // retryable placement failure and risk a duplicate POST of an order we already know
+    // is live, so fall back to the id-only stub instead.
+    return this.fetchPlacedOrderBody<T>(accountNumber, existing);
+  }
+
+  /**
+   * Broker truth for an order id we already know exists.  Returns the real order body so the
+   * caller's `status` / `exec_quantity` / `avg_fill_price` mapping sees the broker's state, not a
+   * stub.  A 404 or any transport failure falls back to the minimal `{ id, status: "pending" }`
+   * shape rather than throwing — the order IS on the book (that is why we are here), so failing
+   * the placement would be strictly worse than reporting a conservative pending state.
+   */
+  private async fetchPlacedOrderBody<T>(accountNumber: string, orderId: string): Promise<T> {
+    const stub = { order: { id: orderId, status: "pending" } } as unknown as T;
+    if (!/^[A-Za-z0-9_-]+$/.test(orderId)) return stub;
+    try {
+      const body = await this.request<unknown>("GET", `/accounts/${accountNumber}/orders/${encodeURIComponent(orderId)}`, {
+        query: { includeTags: "true" }
+      });
+      const parsed = TradierPlacedOrderSchema.safeParse(body);
+      // A 200 with no usable order object is not proof of anything — keep the stub.
+      if (!parsed.success) return stub;
+      const row = parsed.data.order;
+      if (!row || typeof row !== "object" || Array.isArray(row)) return stub;
+      return { ...parsed.data, order: { ...row, id: row.id ?? orderId } } as T;
+    } catch {
+      return stub;
+    }
+  }
+
+  /**
+   * One page of the current listing.  A just-accepted order is on page 1.
+   *
+   * The envelope is an EXTERNAL boundary, so it is parsed before anything is read off it.  A
+   * drifted/garbled response is a clean MISS (no tag match) rather than a throw: throwing here
+   * would abort placement on the transient-error path we are specifically trying to survive.
+   * Each row is a string-keyed record.  A null sibling is skipped so it cannot throw and abort
+   * a page that still contains our tag.
+   */
+  private async findOrderIdByTag(accountNumber: string, tag: string): Promise<string | undefined> {
+    const raw: unknown = await this.request<unknown>("GET", `/accounts/${accountNumber}/orders`, {
+      query: { includeTags: "true", page: 1 }
+    });
+    const parsed = TradierOrdersPageSchema.safeParse(raw);
+    if (!parsed.success) return undefined;
+    const ordersField =
+      parsed.data.orders && typeof parsed.data.orders === "object" ? parsed.data.orders.order : undefined;
+    for (const row of arr<Record<string, unknown>>(ordersField)) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+      if (String(row.tag ?? "") === tag && row.id != null && String(row.id) !== "") return String(row.id);
+    }
+    return undefined;
+  }
+
   async placeEquityOrder(rawInput: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+    this.assertSandboxOrderWindowOpen();
     const input = normalizeVenueOrder(rawInput, "tradier", this.userId) as typeof rawInput;
     // WHOLE-SHARE resolution: Tradier has no notional field AND no broker-side notional cap, so WE
     // size a dollar order into shares at an anchor price and must not overspend the budget. Never
@@ -959,8 +1140,10 @@ class TradierBrokerGateway implements BrokerGateway {
 
       let bracketBody: { order?: Record<string, unknown> };
       try {
-        bracketBody = await this.trackHealth(() =>
-          this.request<{ order?: Record<string, unknown> }>("POST", `/accounts/${input.accountNumber}/orders`, { form: bracketForm })
+        bracketBody = await this.postOrderToleratingTransientServerError(
+          input.accountNumber,
+          sanitizeTag(input.refId),
+          bracketForm
         );
       } catch (error) {
         throw new Error(`Tradier bracket order failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -999,9 +1182,7 @@ class TradierBrokerGateway implements BrokerGateway {
 
     let body: { order?: Record<string, unknown> };
     try {
-      body = await this.trackHealth(() =>
-        this.request<{ order?: Record<string, unknown> }>("POST", `/accounts/${input.accountNumber}/orders`, { form })
-      );
+      body = await this.postOrderToleratingTransientServerError(input.accountNumber, sanitizeTag(input.refId), form);
     } catch (error) {
       throw new Error(`Tradier order failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1065,19 +1246,32 @@ class TradierBrokerGateway implements BrokerGateway {
     };
     try {
       await this.trackHealth(
-        () =>
-          this.request<{ order?: Record<string, unknown> }>("POST", `/accounts/${accountNumber}/orders`, {
-            form: {
-              class: "equity",
-              symbol: "AAPL",
-              side: "buy",
-              quantity: "1",
-              type: "limit",
-              duration: "day",
-              price: "1.00",
-              preview: "true"
+        async () => {
+          let last: unknown;
+          for (let attempt = 0; attempt < TRADIER_TRANSIENT_ATTEMPTS; attempt++) {
+            try {
+              await this.request<{ order?: Record<string, unknown> }>("POST", `/accounts/${accountNumber}/orders`, {
+                form: {
+                  class: "equity",
+                  symbol: "AAPL",
+                  side: "buy",
+                  quantity: "1",
+                  type: "limit",
+                  duration: "day",
+                  price: "1.00",
+                  preview: "true"
+                }
+              });
+              return;
+            } catch (error) {
+              last = error;
+              const msg = error instanceof Error ? error.message : String(error);
+              if (!isTradierTransientServerError(msg) || attempt + 1 >= TRADIER_TRANSIENT_ATTEMPTS) throw error;
+              await sleepMs(tradierTransientBackoffMs(attempt));
             }
-          }),
+          }
+          throw last;
+        },
         { retryTransient: true }
       );
       // Preview accepted with result — OMS up.
@@ -1148,6 +1342,7 @@ class TradierBrokerGateway implements BrokerGateway {
     timeInForce?: import("./types").TimeInForce;
     refId: string;
   }): Promise<ExecutedOrder> {
+    this.assertSandboxOrderWindowOpen();
     const { parseOccSymbol } = await import("./option-orders");
     const parsed = parseOccSymbol(input.occSymbol);
     const underlying = parsed?.underlyingSymbol ?? input.occSymbol.slice(0, 4);
@@ -1166,8 +1361,10 @@ class TradierBrokerGateway implements BrokerGateway {
       form.price = input.limitPrice.toFixed(2);
     }
 
-    const body = await this.trackHealth(() =>
-      this.request<{ order?: Record<string, unknown> }>("POST", `/accounts/${input.accountNumber}/orders`, { form })
+    const body = await this.postOrderToleratingTransientServerError<{ order?: Record<string, unknown> }>(
+      input.accountNumber,
+      input.refId,
+      form
     );
 
     const id = body.order?.id ?? body.order?.order_id ?? input.refId;

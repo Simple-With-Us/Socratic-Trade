@@ -238,7 +238,7 @@ import { STOP_PLAN_FALLBACK_STOP_PCT, STOP_PLAN_STYLES } from "./types";
 import { computeRationaleDiversity } from "./rationale-diversity";
 import { isMarketOpen } from "./market-calendar";
 import { isTradingDay } from "./market-calendar";
-import { classifyPlaceOrderError } from "./placement-outcome";
+import { classifyPlaceOrderError, mustReconcileRetryablePlaceError } from "./placement-outcome";
 import { reconcilePendingFills, flagStalePlacingIntents, reconcilePlacementError, LiveApprovalConfirmation, LiveApprovalConfirmationError, coerceProtectiveExitToMarket } from "./strategy-execution";
 import { runSafetyMaintenance, withDeadline } from "./safety-maintenance";
 import { STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE, withStrategyRagRetrievalDeadline } from "./rag-retrieval-deadline";
@@ -4416,6 +4416,8 @@ export async function runStrategyOnce(
             // HTTP 429 is a rate limit — book not_placed, never rejected_by_broker.
             // HTTP 408 is a timeout: the order may already be live, and the next attempt
             // mints a new refId, so it falls through to refId reconcile instead.
+            // Tradier's "Unexpected server error" is the same class once it escapes
+            // the adapter (the final POST may have landed).  A tag hit never throws it.
             // HTTP 409, and a duplicate client_order_id on another status (Alpaca 422
             // "must be unique"), mean the key already exists and must be reconciled
             // rather than marked rejected. OrderValidationError means the adapter
@@ -4462,8 +4464,9 @@ export async function runStrategyOnce(
             // OrderValidationError is checked first so a validation message that happens
             // to mention HTTP 429 stays blocked, not retryable.
             const placeClass = placeError instanceof OrderValidationError ? null : classifyPlaceOrderError(message);
-            // 408 stays classified retryable but must not book not_placed before reconcile.
-            if (placeClass === "retryable" && !/\bHTTP 408\b/i.test(message)) {
+            // 408 and Tradier's transient sentence stay classified retryable but must
+            // not book not_placed before reconcile.
+            if (placeClass === "retryable" && !mustReconcileRetryablePlaceError(message)) {
               const note = `Broker rate-limited or timed out (${message}). Safe to retry.`;
               updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, note);
               audit(

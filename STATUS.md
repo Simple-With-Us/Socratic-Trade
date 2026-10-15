@@ -1,5 +1,50 @@
 # Current Status
 
+## 2026-10-14 GROK — PR #4668 merge #4666 and order-row schema
+
+**What.**  Merged `origin/main` (`a3d21b73`, #4666 SQLite storage hygiene) with no conflicts and no migration renumber.  Three unresolved Kody threads.  The rollout verification block now lists `npm run lint` before `npx tsc --noEmit`.  Listing rows are `z.record(z.string(), z.unknown())`, and the page still accepts an array or one object so a multi-order listing is not a tag miss.  `fetchPlacedOrderBody` `safeParse`s the GET body and keeps the id stub when the shape is wrong.  A null sibling row is skipped.
+
+**Review triage.**  Threads `PRRT_kwDOS7mOVM6slYh3`, `PRRT_kwDOS7mOVM6slYuB`, and `PRRT_kwDOS7mOVM6slY2R` stay unresolved.  Replies go out after the push.  The earlier three threads were already resolved before this pass.  This lane did not call resolve.
+
+**Verification.**  `npm run lint` ok on the merge (0 errors, 854 warnings).  `npx tsc --noEmit` ok on the merge and again after the schema edit.  Targeted vitest: 134 passed in `test/tradier.test.ts`, `test/placement-outcome.test.ts`, `test/placement-reconcile.test.ts`, and `test/broker-health-auto-pause.test.ts`.  Full `npm test`: 9374 passed, 51 skipped, 2 failed.  Both failures are outside this diff.  `test/egress-guard.test.ts` rejects the discord.com lookup in this sandbox.  `test/data-catalog-completeness.test.ts` reads peRatio completeness 1 from the local cascade report when the named universe has no durable row.
+
+**Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  `do-not-automerge` stays.  Do not merge from this lane.  Comment `@kody start-review`.  `.github/workflows/autofix.yml` still fails at startup on main because the pinned reusable workflow uses `secrets` in a step `if`.  This PR does not change that caller.
+
+## 2026-10-14 GROK — PR #4668 final tag lookup before not_placed
+
+**What.**  Merged `origin/main` twice with no conflicts and no migration renumber: `1588bae8` (keyless options enrichment and the fleet-fully-dark detector), then `e80386d7` (SEC XBRL companyfacts, #4665).  The open Sentry thread on `placement-outcome.ts` was real: the last Tradier "Unexpected server error" POST skipped the tag lookup, and both lanes booked retryable `not_placed` before `reconcilePlacementError`.  A landed final POST could be retried under a new refId.  The adapter now looks up the tag after every transient refusal, including the last.  A hit returns the broker order.  A lookup that throws is `TRADIER_TAG_LOOKUP_UNVERIFIED_MESSAGE` (not the retryable sentence, not an HTTP 4xx).  HTTP 408 and that sentence go through reconcile before `not_placed`.  HTTP 429 and the sandbox open deferral still short-circuit.
+
+**Review triage.**  One unresolved thread, `PRRT_kwDOS7mOVM6sgtKQ` (sentry).  The reply is posted after this push and cites the commit.  The thread stays unresolved.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 grandfathered warnings).  `npx tsc --noEmit` ok, including again after the `e80386d7` merge.  Targeted vitest after the post-backoff lookup: 132 passed in `test/tradier.test.ts`, `test/placement-outcome.test.ts`, `test/placement-reconcile.test.ts`, and `test/broker-health-auto-pause.test.ts`.  Full `npm test`: 9349 passed, 51 skipped, 1 failed.  The failure is `test/egress-guard.test.ts` because this sandbox rejects the discord.com lookup, outside this diff.  `npm run build` ok.
+
+**Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`, `PLAN.md`, `docs/phase-7-strategy.md`.
+
+**Next.**  `do-not-automerge` stays.  Do not merge from this lane.  Jay squash-merges.  CI `verify` on the previous head was `action_required` with zero jobs (workflow approval), not a test failure.  Push this head so `verify` can run.
+
+## 2026-10-14 Codex Autofix — PR #4668 tag-hit fill state and listing validation
+
+**What.**  Two Kody review findings on the Tradier transient-400 branch.  The tag-hit path in `postOrderToleratingTransientServerError` returned a hardcoded `{ id, status: "pending" }` stub, dropping `exec_quantity` / `avg_fill_price`, so an order that filled inside the lookup+backoff window was booked unfilled at the proposal price — the exact P&L corruption the equity path's own comment warns about.  It now re-reads the order for the broker's real state, falling back to the stub (never a rethrow) if that read fails, since the order is already known live.  `findOrderIdByTag` now validates the `GET /orders` envelope through `TradierOrdersPageSchema` at the HTTP trust boundary; a drifted shape is a clean tag miss, never a throw.  Three regression tests added.
+
+**Review triage.**  The `src/lib/placement-outcome.ts` HIGH-severity thread is Sentry's bug-prediction bot, not one of the three review bots this fixer answers, and its subject (reconciling placement before booking a retryable `not_placed` on the final attempt) is a placement-semantics design decision, so it was left open for the maintainer rather than guessed at.
+
+**Verification.**  `npx tsc --noEmit` ok.  `npm run lint` ok (0 errors, 866 grandfathered warnings).  `npm run build` ok.  Targeted vitest 111 passed after merging `origin/main` (twice).  Full `npm test` reported 13 failures in four LLM-credential test files that reproduce identically on unmodified `origin/main` — this sandbox has an `OPENROUTER_API_KEY` set and those tests assert the no-key branch; CI has no such key.
+
+**Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`.
+
+**Next.**  `do-not-automerge` stays on PR #4668 — this fixer does not remove the hold label or arm auto-merge.
+
+## 2026-10-14 GROK — Tradier sandbox open HTTP 400
+
+**What.**  Sandbox HTTP 400 "Unexpected server error" on the order path retries with backoff and does not auto-halt.  A second POST happens only after the tag is missing.  Sandbox equity and option posts wait 15 minutes after the regular open.  Live Tradier still places.  Buying power, plain HTTP 400, HTTP 403, and HTTP 5xx still fail on the first attempt and can still halt.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok after the tag-hit return cast.  `npm run build` ok.  Targeted vitest 108 passed.  Full `npm test` was 9289 passed, 51 skipped, and 23 failed outside this diff (sandbox LLM keys, host metadata, and a Node ESM `.ts` loader).
+
+**Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`, `PLAN.md`, `docs/phase-7-strategy.md`.
+
+**Next.**  `do-not-automerge`.  Jay squash-merges.  Do not merge from this lane.  Linear team `ST` was not updated: this seat has no Fleet Linear credentials.
 ## 2026-10-14 GROK — SQLite storage hygiene
 
 **What.**  Production SQLite is about 16.5 GB with a 415 MB WAL.  Background checks were stalling 76-79s and the scheduler lagged 120s.  PR #4666 adds a storage-hygiene job: table-size report, retention deletes for caches/logs/finished runs, batched deletes that yield, a PASSIVE WAL checkpoint with TRUNCATE only when Litestream looks safe, and incremental free-page reclaim.  It never runs a full file rewrite and never deletes orders, fills, positions, approvals, transfers, or HWM inputs.  Review fixes: the lane runs only on the scheduler leader, the cadence watermark is claimed before the pass, a wide Litestream directory is aged from its highest-named files, and each coverage delete pair is one transaction.
