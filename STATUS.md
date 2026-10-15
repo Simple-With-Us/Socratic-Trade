@@ -21,6 +21,67 @@
 **Docs.**  `docs/rollouts/2026-10-14-data-cascade-reliability.md`, `STATUS.md`, `PLAN.md`.
 
 **Next.**  Open PR ready for review; watch prod freshness scan duration after deploy.
+## 2026-10-14 Grok — PR #4665 merge #4658
+
+**What.**  After `40d76278` was pushed, `origin/main` moved to `1588bae8` (#4658 keyless options) and GitHub marked PR #4665 conflicting.  `git merge origin/main` auto-merged with no conflict markers and no migration renumber.  Shared files kept both the SEC XBRL path and the keyless options path.
+
+**Verification.**  `npx tsc --noEmit` ok after the merge.  Targeted vitest for sec-facts, sec-xbrl, companyfacts sweep, data-providers, enrichment-coverage, keyless options, source-capability-matrix, and market passed (264 passed, 9 skipped).  Full lint, `npm test`, and build were already run on `40d76278`.
+
+**Next.**  Push the merge.  Do not merge the PR.  The Kody `as any` thread was replied on `40d76278`.  Kody's bot then marked that thread resolved.  This lane did not call resolve.
+
+## 2026-10-14 Grok — PR #4665 companyfacts Response mocks
+
+**What.**  `git merge origin/main` was already up to date (`82162336`).  One unresolved Kody thread (`PRRT_kwDOS7mOVM6sjbIh`) was real.  The malformed-unit companyfacts test now builds both `politeFetch` mocks with `new Response` instead of `as any`.  No migration renumber.  The thread stays unresolved.
+
+**Verification.**  `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9315 passed, 51 skipped, and 2 failed, both outside this diff.  `test/egress-guard.test.ts` fails because this sandbox rejects the discord.com lookup.  `test/data-catalog-completeness.test.ts` reads peRatio completeness 1 from the local `data/app.db` cascade report.  Hosted `verify` passed on `f921cc43` before this commit.  `test/sec-facts.test.ts` passed (7).
+
+**Docs.**  `docs/rollouts/2026-10-14-sec-xbrl-cached-fundamentals.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Push.  Reply on the open thread.  Do not resolve it.  Do not merge the PR.  Comment `@kody start-review`.
+
+**CI note.**  `.github/workflows/autofix.yml` still fails at startup on this branch and on main.  The pinned reusable workflow uses `secrets` inside a step `if`, and coordinator main (`7508b399`) still has that expression.  A pin bump does not remove it.  This PR does not change the caller.
+
+## 2026-10-14 Grok — PR #4665 merge main after #4663
+
+**What.**  Merged `origin/main` (`82162336`, #4663 fleet-fully-dark detector) into `cursor/sec-xbrl-fundamentals-cache-6783`.  The merge was clean.  No migration renumber.  GraphQL review threads: 7 total, 0 unresolved.  Prior Sentry and Kody findings stay fixed on this branch (`b075ccf0`, `d73d35e0`).  No new product code in this pass.
+
+**Verification.**  `npm run lint` ok (0 errors, 856 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9315 passed, 51 skipped, and 2 failed, both outside this diff.  `test/egress-guard.test.ts` fails because this sandbox rejects the discord.com lookup.  `test/data-catalog-completeness.test.ts` reads peRatio fillRate 1 from the local `data/app.db` cascade report when the named universe has no durable row.  Hosted `verify` passed on `d73d35e0` before this merge.  Targeted vitest for sec-facts, sec-xbrl, companyfacts sweep, market, data-providers, enrichment-coverage, trading-liveness, and batched-halt-cause passed (257 passed, 9 skipped).
+
+**Docs.**  `docs/rollouts/2026-10-14-sec-xbrl-cached-fundamentals.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Push, then wait for hosted `verify` on the merge commit.  Do not resolve threads.  Do not merge the PR.  Comment `@kody start-review`.
+
+**CI note.**  `.github/workflows/autofix.yml` fails at startup on this branch and on main.  The pinned reusable workflow `pr-autofix-reusable.yml@2e671004` uses `secrets` inside a step `if`, which Actions rejects.  That file is in AI-Fleet-Coordinator, and later coordinator commits still have the same expression.  This PR does not change the caller.
+
+## 2026-10-14 Grok — PR #4665 companyfacts unit shape
+
+**What.**  `origin/main` was already contained in this branch (`79df823d`); `git merge origin/main` was a no-op.  A non-array companyfacts unit value no longer fails `CompanyFactsSchema` for the whole CIK.  `conceptsFromTaxonomy` skips that concept and still inserts its siblings.  A `facts` value that is not an object still throws so the sweep retry path stays intact.  The rollout Verification State lists lint, tsc, `npm test`, and build in that order.
+
+**Verification.**  `npm run lint` ok (0 errors, 856 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9308 passed, 51 skipped, and 1 failed: untouched `test/egress-guard.test.ts` because this sandbox rejects the discord.com lookup.  Targeted sec-facts, sec-xbrl, and companyfacts-sweep tests passed (48).
+
+**Docs.**  `docs/rollouts/2026-10-14-sec-xbrl-cached-fundamentals.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Push the branch.  Reply on the open threads.  Do not resolve them.  Do not merge the PR.  Comment `@kody start-review`.
+
+## 2026-10-14 Grok — PR #4665 review follow-up
+
+**What.**  Merged `origin/main` (`f7a06863`, `@types/node` 24.19.2).  Three unresolved Sentry threads were real.  `applyEnrichment` keeps a positive Nasdaq market cap instead of letting SEC shares × price replace it.  The companyfacts sweep cursor moves past a symbol whose fetch throws.  Evidence cards omit the `__companyfacts_json__` cache row.  Companyfacts JSON is validated with a passthrough Zod schema instead of `as any`.
+
+**Verification.**  `npm run lint` exit 0 (warnings only).  `npx tsc --noEmit` exit 0.  Targeted vitest for market, data-providers, companyfacts sweep, sec-facts, and sec-xbrl passed.  Full `npm test` hit the sandbox DNS failure in `test/egress-guard.test.ts` (discord.com), outside this diff.
+
+**Docs.**  `docs/rollouts/2026-10-14-sec-xbrl-cached-fundamentals.md`, `docs/source-capability-matrix.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Push the branch.  Reply on the open threads.  Do not resolve them.  Do not merge the PR.
+
+## 2026-10-14 Cursor Cloud — SEC XBRL cached fundamentals
+
+**What.**  SEC companyfacts JSON is cached in `sec_facts` and parsed into ROE, ROA, gross profit margin, shares outstanding, and cascade-implied market cap.  EDGAR fetches run on a nightly scheduler sweep (`sec-companyfacts-sweep.ts`); scan-path enrichment reads SQLite only.  `SEC_XBRL_ENRICHMENT_ENABLED` default ON (catalog + code aligned).
+
+**Verification.**  Run full gate: `npm run lint`, `npx tsc --noEmit`, `npm test`, `npm run build`.
+
+**Docs.**  `docs/rollouts/2026-10-14-sec-xbrl-cached-fundamentals.md`, `docs/market-data-provider-pricing.md`, `docs/source-capability-matrix.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Open PR from `cursor/sec-xbrl-fundamentals-cache-6783`; wait for `verify` CI.
 ## 2026-10-14 GROK — PR #4658 verification order
 
 **What.**  `origin/main` (`82162336`) is already merged (`e74332cd`).  The one open Kody thread (`PRRT_kwDOS7mOVM6sjYXO`) is the round 2 handoff: it omitted `npm run lint` and listed build before `npm test`.  That block is now lint, tsc, test, build.  The thread is not resolved.

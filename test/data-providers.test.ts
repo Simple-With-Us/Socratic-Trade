@@ -2925,6 +2925,17 @@ describe("CascadingEnrichmentProvider evidence receipts and arbitration", () => 
     expect(failedResult.AAPL.fieldObservations?.peRatio?.status).toBe("failed");
   });
 
+  it("derives marketCap from SEC XBRL shares times live price when cap is missing", async () => {
+    const cascade = new CascadingEnrichmentProvider([
+      stub("yahoo-finance", { AAPL: { price: 200 } }),
+      stub("sec-xbrl", { AAPL: { sharesOutstanding: 1_000_000 } })
+    ]);
+    const result = await cascade.enrich(["AAPL"]);
+    expect(result.AAPL.marketCap).toBe(200_000_000);
+    expect(result.AAPL.sources?.marketCap).toBe("sec-xbrl");
+    expect(result.AAPL.sources?.sharesOutstanding).toBe("sec-xbrl");
+  });
+
   it("preserves explicit field timestamps and upstream source metadata", async () => {
     const cascade = new CascadingEnrichmentProvider([
       stub("redistributor", {

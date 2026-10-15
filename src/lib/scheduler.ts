@@ -7,6 +7,8 @@
 import { LANE_WAITS, withAccountMutation } from "./account-mutation";
 import { checkAllUserPriceAlerts } from "./alerts";
 import { probeCongressShareTokenIfDue, runCongressDailyShareIfDue } from "./congress-share";
+import { secXbrlEnrichmentEnabled } from "./data-providers";
+import { runSecCompanyFactsSweepIfDue } from "./web-sources/sec-companyfacts-sweep";
 import { runMarketScanFreshnessIfDue } from "./market-scan-freshness";
 import { runWeeklyMarketDigestRefreshIfDue } from "./weekly-market-digest";
 import { runHealthLaneReprobeIfDue } from "./health-lane-reprobe";
@@ -1149,6 +1151,12 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   void journalLane("congress-daily-share", {}, () => runCongressDailyShareIfDue(Date.now())).catch((err) =>
     console.error("[scheduler] congress-share daily batch error:", err)
   );
+
+  if (secXbrlEnrichmentEnabled()) {
+    void journalLane("sec-companyfacts-sweep", {}, () => runSecCompanyFactsSweepIfDue(Date.now())).catch((err) =>
+      console.error("[scheduler] sec-companyfacts sweep error:", err)
+    );
+  }
 
   // Weekend/off-hours Market Scan freshness guarantee: scanMarket otherwise has no scheduled
   // caller, so a Friday-evening scan would sit stale until a user visits the app Monday.

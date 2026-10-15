@@ -56,8 +56,9 @@ function coreComplete(overrides: SymbolEnrichment = {}): SymbolEnrichment {
 }
 
 describe("buildEnrichmentCoverageReport", () => {
-  it("tracks marketCap in coverage field inventory", () => {
+  it("tracks marketCap and sharesOutstanding in coverage field inventory", () => {
     expect(COVERAGE_TRACKED_FIELDS).toContain("marketCap");
+    expect(COVERAGE_TRACKED_FIELDS).toContain("sharesOutstanding");
     const report = buildEnrichmentCoverageReport(
       { AAPL: { marketCap: 3e12, sources: { marketCap: "nasdaq-delayed-screener" } } } as Record<
         string,
