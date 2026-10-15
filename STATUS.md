@@ -3,6 +3,7 @@
 ## 2026-10-15 CURSOR — Ops snapshot perf PR #4659 (`cursor/ops-snapshot-perf-b622`)
 
 **What.**  Async `buildOpsSnapshot` with 45s single-flight cache, per-section `timingsMs`, per-user `marketScan` (`generatedAt`, `stale`), strategy-runs index v95, Tradier/non-Alpaca **422** on `/api/ops/account-activity`.  Review follow-up: `$.marketScan.omitted` in `readMarketScanMetaFromAudit`, `opsSnapshotForCaller` copy before `attachOpsOrderSummaries`, `WH` non-trade fallback.  Merged `origin/main` three times 2026-10-15 (honest approve, check-pin, ST-4531 slack retirement, then #4716 iOS CI hygiene / ST-2916) — all clean merges.  Per-user cold queries remain; 45s cache is the prod mitigation.
+**What.**  Async `buildOpsSnapshot` with 45s single-flight cache, per-section `timingsMs`, per-user `marketScan` (`generatedAt`, `stale`), strategy-runs index v95, Tradier/non-Alpaca **422** on `/api/ops/account-activity`.  Review follow-up: `$.marketScan.omitted` in `readMarketScanMetaFromAudit`, `opsSnapshotForCaller` copy before `attachOpsOrderSummaries`, `WH` non-trade fallback.  Merged `origin/main` 2026-10-15 again (`e3ba1507` iOS ASC #4716) — **not obsolete**; ops diff still absent from `main`.  Per-user cold queries remain; 45s cache is the prod mitigation.
 
 **Reservation.**  Linear **CURSOR** app (`linear_whoami` ok).  No dedicated ST issue for this branch slug after search; did not fabricate a board id.  PR **#4659** is the tracker for this lane.
 
