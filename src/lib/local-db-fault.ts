@@ -51,6 +51,24 @@ export function isLocalDbFaultMessage(message: string | null | undefined): boole
 }
 
 /**
+ * SQLite/D1 write contention on a **dependency** (e.g. Congress.Trade D1 rejecting import rows),
+ * not on this app's own `app.db`.  Shapes like `App A reported ok=false … D1 batch error:
+ * SQLITE_BUSY` must not mint a "<service> connection failed" page — the HTTP connection succeeded.
+ */
+export function isDependencyDbContentionMessage(message: string | null | undefined): boolean {
+  if (!message) return false;
+  if (/D1 batch error/i.test(message)) return true;
+  if (/App A reported ok=/i.test(message)) {
+    return (
+      /\bSQLITE_(?:BUSY|LOCKED)\b/i.test(message) ||
+      /database is locked/i.test(message) ||
+      /database table is locked/i.test(message)
+    );
+  }
+  return false;
+}
+
+/**
  * How many `cause` links to follow. Bounded so a self-referential or absurdly deep chain can never
  * spin here — three is already more nesting than any call site in this repo produces.
  */

@@ -1,5 +1,18 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — ST-3988 / ST-3092 api-health + HEALTHCHECK
+
+**What.**  api-health classifies Congress.Trade D1 `SQLITE_BUSY` import rejections as
+`degraded: db contention` (Sentry warning, `health.failure_class=db-contention`) instead of paging
+`congress-share connection failed`.  Docker HEALTHCHECK zombie fix (tini + `curl --max-time 14`)
+pinned in `test/live-route.test.ts` (already in `Dockerfile` / `coolify-prod-start.sh`).
+
+**Branch.**  `cursor/api-health-db-contention-healthcheck-31cf`
+
+**Verification.**  See `docs/rollouts/2026-10-15-api-health-db-contention.md`.
+
+**Next.**  PR ready for review; Linear ST-3988 claimed; ST-3092 verification closeout.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.

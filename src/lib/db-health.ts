@@ -1,7 +1,11 @@
 import "server-only";
 import { createHash, randomUUID } from "crypto";
 import { getDb } from "./db";
-import { isLocalDbFaultMessage, noteLocalDbFault } from "./local-db-fault";
+import {
+  isDependencyDbContentionMessage,
+  isLocalDbFaultMessage,
+  noteLocalDbFault
+} from "./local-db-fault";
 import { intentionalOffHealthReason, isIntentionalOffHealthService } from "./retired-direct-vendors";
 import { isFilingApiAuthErrorText } from "./filingapi-auth-classify";
 import { isTransientNetworkErrorText } from "./network-errors";
@@ -69,6 +73,12 @@ export function isSoftHealthFailure(errorText: string | null | undefined): boole
 export const HEALTH_TRANSIENT_FAILURE_PREFIX = "[transient-network] ";
 
 /**
+ * Prefix for dependency or local DB write-lock contention surfaced through api-health.  These rows
+ * must not hard-STOP a lane or page as "<service> connection failed" (ST-3988 / PD #313).
+ */
+export const HEALTH_DB_CONTENTION_PREFIX = "[db-contention] ";
+
+/**
  * True when an api_health_log failure row is a transport blip (see the prefix above).  An
  * expected-limit row is never also transient — soft classification wins, so a 429 keeps its
  * existing "does not count at all" treatment rather than being promoted into the streak.
@@ -78,6 +88,19 @@ export function isTransientHealthFailure(errorText: string | null | undefined): 
   if (errorText.startsWith(HEALTH_TRANSIENT_FAILURE_PREFIX)) return true;
   if (isSoftHealthFailure(errorText)) return false;
   return isTransientNetworkErrorText(errorText);
+}
+
+/** True when a failure row is DB write contention (local SQLite or upstream D1), not a provider outage. */
+export function isDbContentionHealthFailure(errorText: string | null | undefined): boolean {
+  if (!errorText) return false;
+  if (errorText.startsWith(HEALTH_DB_CONTENTION_PREFIX)) return true;
+  if (isDependencyDbContentionMessage(errorText)) return true;
+  if (isLocalDbFaultMessage(errorText) && !isDependencyDbContentionMessage(errorText)) return true;
+  return false;
+}
+
+function countsTowardHardHealthStreak(errorText: string | null | undefined): boolean {
+  return !isSoftHealthFailure(errorText) && !isDbContentionHealthFailure(errorText);
 }
 
 /**
@@ -297,7 +320,7 @@ export function getLaneHealth(
     // last-5 sample cannot be erased by later socket errors (Codex P2 on #3195).
     let runEntirelyTransient = false;
     const tipIsHardFailure =
-      last5.length > 0 && last5[0].ok === 0 && !isSoftHealthFailure(last5[0].error_text);
+      last5.length > 0 && last5[0].ok === 0 && countsTowardHardHealthStreak(last5[0].error_text);
     if (tipIsHardFailure) {
       // Walk the capped lane history newest-first; the last hard row before a success/soft break
       // is the start of this consecutive run (may be far older than last5 on a busy lane, or
@@ -316,7 +339,7 @@ export function getLaneHealth(
       let entirelyTransient = true;
       let sawHard = false;
       for (const row of history) {
-        if (row.ok === 1 || isSoftHealthFailure(row.error_text)) break;
+        if (row.ok === 1 || !countsTowardHardHealthStreak(row.error_text)) break;
         sawHard = true;
         runStart = row.ts;
         if (!isTransientHealthFailure(row.error_text)) entirelyTransient = false;
@@ -351,7 +374,7 @@ export function getLaneHealth(
     // Still requires length >= 5 even though streakStartedTs is set for shorter hard runs above.
     if (
       last5.length >= 5 &&
-      last5.every((r) => r.ok === 0 && !isSoftHealthFailure(r.error_text))
+      last5.every((r) => r.ok === 0 && countsTowardHardHealthStreak(r.error_text))
     ) {
       stoppedWorking = true;
       reason = HEALTH_REASON_CONSECUTIVE_FAILURES;
@@ -466,6 +489,10 @@ function healthErrorTextForLog(opts: ApiHealthLogOpts): string | null {
   if (!opts.ok && errorText && (opts.soft || filingApiAuthSoft || isSoftHealthFailure(errorText))) {
     if (!errorText.startsWith(HEALTH_SOFT_FAILURE_PREFIX)) {
       errorText = `${HEALTH_SOFT_FAILURE_PREFIX}${errorText}`;
+    }
+  } else if (!opts.ok && errorText && isDbContentionHealthFailure(errorText)) {
+    if (!errorText.startsWith(HEALTH_DB_CONTENTION_PREFIX)) {
+      errorText = `${HEALTH_DB_CONTENTION_PREFIX}${errorText}`;
     }
   } else if (!opts.ok && errorText && isTransientHealthFailure(errorText)) {
     if (!errorText.startsWith(HEALTH_TRANSIENT_FAILURE_PREFIX)) {
@@ -603,7 +630,7 @@ export function flushApiHealthBuffer(): void {
     // Post-transaction operations
     for (const p of processed) {
       const streakKey = hardStreakStartSettingKey(p.service, p.keySource, p.userId);
-      if (p.ok || p.isSoft) {
+      if (p.ok || p.isSoft || isDbContentionHealthFailure(p.errorText)) {
         clearHardStreakStart(streakKey);
       }
 
@@ -613,7 +640,11 @@ export function flushApiHealthBuffer(): void {
         !RAG_SERVICES_WITH_OWN_ALERTING.has(p.service) &&
         !isIntentionalOffHealthService(p.service)
       ) {
-        if (p.isSoft && !p.quotaResetAt) {
+        if (isDependencyDbContentionMessage(p.errorText)) {
+          void alertConnectionFailure(p.service, p.keySource, p.userId, p.errorText, {
+            skipSentry: p.isSoft
+          });
+        } else if (p.isSoft && !p.quotaResetAt) {
           // pure expected-limit with no known reset: no automatic alert
         } else {
           const lane = getLaneHealth(p.service, p.keySource, p.userId);
@@ -744,7 +775,7 @@ export function getServiceHealthSummaries(): ServiceHealthSummary[] {
 
       if (
         last5.length >= 5 &&
-        last5.every((r) => r.ok === 0 && !isSoftHealthFailure(r.error_text))
+        last5.every((r) => r.ok === 0 && countsTowardHardHealthStreak(r.error_text))
       ) {
         stoppedWorking = true;
         stoppedReason = HEALTH_REASON_CONSECUTIVE_FAILURES;
@@ -1068,6 +1099,33 @@ export async function alertConnectionFailure(
   try {
     const targetUserId = userId || "local";
     const actualKeySource = keySource || "none";
+    const isGlobal = actualKeySource !== "user";
+    // Upstream D1/SQLite contention on a dependency (e.g. Congress.Trade rejecting import rows).
+    // The HTTP connection succeeded; paging "<service> connection failed" is wrong (ST-3988 / PD #313).
+    if (isDependencyDbContentionMessage(errorText)) {
+      const key = `${HEALTH_ALERT_COOLDOWN_PREFIX}:${service}:${actualKeySource}:db-contention`;
+      const { getInternalSetting, setInternalSetting, audit } = await import("./db");
+      const now = Date.now();
+      const last = getInternalSetting<string>(key);
+      if (!last || now >= Date.parse(last)) {
+        setInternalSetting(key, new Date(now + HEALTH_ALERT_COOLDOWN_MS).toISOString());
+        audit(
+          "dependency_db_contention",
+          { service, keySource: actualKeySource, userId: targetUserId, errorText },
+          targetUserId
+        );
+        if (!opts?.skipSentry) {
+          await captureHealthSentryMessage("warning", "degraded: db contention", {
+            service,
+            keySource: actualKeySource,
+            userSpecific: !isGlobal,
+            failureClass: "db-contention",
+            reason: errorText
+          });
+        }
+      }
+      return;
+    }
     // Local SQLite contention/misconfiguration incidental to a provider call is OUR fault, not the
     // vendor's. Never let it mint a "<service> connection failed" push; record it under its real
     // cause instead (audit row + threshold-gated "local database contention" advisory).
@@ -1117,7 +1175,6 @@ export async function alertConnectionFailure(
         : now + HEALTH_ALERT_COOLDOWN_MS;
     setInternalSetting(key, new Date(cooldownUntilMs).toISOString());
 
-    const isGlobal = actualKeySource !== "user";
     const title = `${service} connection failed`;
     const body = `Connection to ${service} (${actualKeySource} lane) failed: ${errorText}`;
 
