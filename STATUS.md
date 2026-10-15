@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-15 Codex Autofix — PR #4662 merge main at 3f4ef5e5, no review finding open
+
+**What.**  `origin/main` advanced to `3f4ef5e5` (ST-2582 "Approve succeeds only when the broker order is placed", #4698) while PR #4662 was open, and GitHub moved it from BLOCKED to `CONFLICTING`.  Merged main in.  One content conflict in `docs/phase-7-strategy.md` — main added the 2026-10-15 approve entry directly above this PR's 2026-10-14 embed entry — resolved by keeping both, newest first.  `PLAN.md` and `STATUS.md` auto-merged with both entries intact.
+
+**No code change on this pass.**  All ten review threads were already resolved when this run started, and every comment in the triggering `cursor[bot]` review was an explicit no-change disposition.  Re-read each against the head code rather than trusting the resolved checkbox: the global backoff and the slot-queue/outer-deadline ordering are the SOCRATIC-TRADE-2G fix and the #2961 stall guard; the `embedBudgetUnits` memoization Kody asked for is already in the head (Kody retracted it itself after re-reading); and the "unhandled rejection" label on the multi-text split was wrong, since the two awaits are sequential and returning the left half alone would desync piece indexes against `validateDocumentEmbeddingBatch`.  Kody re-reviewed from scratch at 11:02Z and returned no new findings.
+
+**Verification.**  `npx tsc --noEmit` ok.  `npm test` was 9395 passed, 51 skipped, 13 failed across `llm-provider`, `chat-llm`, `openrouter-credits`, and `framework-review` — all sandbox-credential failures that reproduce identically on a clean `origin/main` worktree at `3f4ef5e5` (same four files, 13 failed / 47 passed).  Not from this diff.  `npm run build` ok.
+
+**Docs.**  This entry, `docs/rollouts/2026-10-14-embed-context-retrieval-pressure.md`, `docs/phase-7-strategy.md`.
+
+**Next.**  Hosted `verify` re-runs on the push that carries this merge.  Auto-merge stays armed; do not merge the PR from this lane.
+
 ## 2026-10-14 GROK — PR #4662 merge main and review triage
 
 **What.**  Merged `origin/main` (`82162336`, #4663 fleet fully-dark detector) into `cursor/embed-context-retrieval-pressure-3d40`.  Git reported no conflicts.  The two unresolved Sentry threads were re-read at this head and left unchanged.
@@ -31,6 +43,23 @@
 **Docs.**  `docs/rollouts/2026-10-14-embed-context-retrieval-pressure.md`, `docs/phase-7-strategy.md`, `STATUS.md`, `PLAN.md`.
 
 **Next.**  Ready for review.  Do not merge from this lane.  Sentry 2G and 2E stay open until production shows the burst and the context-length 400 are gone.  Fleet `board whoami` could not run on this seat (no Linear or Zulip credentials).  The unfiled claim is team ST, In Progress, title "Fit embed input to the bge-m3 token budget and back off retrieval bursts", Completed only after merge.
+## 2026-10-15 Cursor Cloud — check-pin token order (ST-2582 PR #4698)
+
+**What.**  Merged `origin/main` (`df7e6d10`) with a merge commit.  `check-pin` was failing because it read public Congress.Trade with `GH_PACKAGES_TOKEN` first.  That secret is one user's PAT, so a burst of pull requests shares one rate limit and the job reports a missing token.  The script now tries the Actions installation token first and keeps the PAT as a fallback.  A rate-limit failure is no longer labeled as a missing token.
+
+**Branch.**  `cursor/honest-approve-retryable-11d4`
+
+**Next.**  Stay ready with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.
+
+## 2026-10-15 Cursor Cloud — honest approve and retryable broker errors (ST-2582)
+
+**What.**  Approve reports HTTP 200 only when the broker order was placed.  Timeouts, HTTP 5xx, and Tradier's HTTP 400 "Unexpected server error" classify as retryable.  Those that may already be live reconcile by refId before `not_placed`.  The #4668 5xx halt path and the #4685 16-minute sandbox wait stay in place.  Price and market-data history is untouched.
+
+**Branch.**  `cursor/honest-approve-retryable-11d4`
+
+**Verification.**  Targeted vitest 64/64.  `npm run lint` 0 errors, 854 warnings.  `npx tsc --noEmit` ok.  `npm test` 9385 passed, 51 skipped, 24 failed, all outside this diff (sandbox LLM keys and host checks).  `npm run build` ok.  Detail: `docs/rollouts/2026-10-15-honest-approve-retryable.md`.
+
+**Next.**  Ready PR with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.
 ## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
 
 **What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.

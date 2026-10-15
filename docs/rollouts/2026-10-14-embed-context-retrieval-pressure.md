@@ -79,6 +79,28 @@ npm test
 
 `.github/workflows/autofix.yml` runs that fail with zero jobs also fail that way on `main` for `issue_comment` events.  They are not a required check.  Required checks are `verify` and `gitleaks`.
 
+### Merge main at `3f4ef5e5` (2026-10-15, codex-autofix pass)
+
+`origin/main` advanced to `3f4ef5e5` ("Approve succeeds only when the broker order is placed", ST-2582, #4698) while this PR sat open, and GitHub moved the PR from BLOCKED to `CONFLICTING`.  One content conflict, in `docs/phase-7-strategy.md`, where main added the 2026-10-15 approve entry directly above this PR's 2026-10-14 embed entry.  Resolved by keeping both, newest first.  `PLAN.md` and `STATUS.md` auto-merged and both PR entries survive in each.
+
+No review-bot finding needed a code change on this pass.  All ten review threads on the PR were already resolved before this run, and every comment from the triggering `cursor[bot]` review was an explicit no-change disposition:
+
+- Global backoff after one retrieval timeout, and slot-queue wait inside the outer strategy deadline — both are the SOCRATIC-TRADE-2G fix and the #2961 stall guard.  Jay's replies are the product decision.
+- `embedBudgetUnits` memoization — Kody retracted its own suggestion after re-reading the head: `budgetUnitsByText` plus the `precomputedUnits` argument already remove the double walk.  The remaining reduce at `vector-db.ts:3391` is the provider meter over a different list, not a repeat.
+- "Unhandled rejection" in the multi-text split — label was wrong.  The two awaits are sequential, so there is no orphaned promise, and returning the left half alone would desync piece indexes against `validateDocumentEmbeddingBatch`, which fails closed on cardinality.
+
+Kody re-reviewed from scratch at 11:02Z and returned no new findings.
+
+Verification on the merged head (`3f4ef5e5` + this branch):
+
+```bash
+npx tsc --noEmit
+npm test
+npm run build
+```
+
+`npx tsc --noEmit` ok.  `npm test` was 9395 passed, 51 skipped, 13 failed across `llm-provider`, `chat-llm`, `openrouter-credits`, and `framework-review`.  Those 13 reproduce identically on a clean `origin/main` worktree at `3f4ef5e5` (13 failed / 47 passed for the same four files), so they are the sandbox-credential class above, not this diff.  `npm run build` ok.
+
 ## Next Steps & Blockers
 
 2026-10-15 shepherd: merged latest `origin/main` into this branch (phase-7 doc conflict kept both 2026-10-14 sections).  Sentry threads on global backoff and outer-deadline queue wait resolved with no code change per Jay.
