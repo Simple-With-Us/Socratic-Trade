@@ -477,6 +477,7 @@ export async function fetchAlpacaAccountActivitiesDetailed(
 const NON_TRADE_FALLBACK_ACTIVITY_TYPES = [
   "CSD",
   "CSW",
+  "WH",
   "ACATC",
   "ACATS",
   "JNLC",

@@ -241,7 +241,8 @@ import { isMarketOpen } from "./market-calendar";
 import { isTradingDay } from "./market-calendar";
 import { classifyPlaceOrderError, mustReconcileRetryablePlaceError } from "./placement-outcome";
 import { reconcilePendingFills, flagStalePlacingIntents, reconcilePlacementError, LiveApprovalConfirmation, LiveApprovalConfirmationError, coerceProtectiveExitToMarket } from "./strategy-execution";
-import { runSafetyMaintenance, withDeadline } from "./safety-maintenance";
+import { runSafetyMaintenance, withDeadline, withLaneDeadline, SCHEDULER_BROKER_TIMEOUT_MS } from "./safety-maintenance";
+import { STRATEGY_BROKER_SNAPSHOT_DEADLINE_MS } from "./inflight-deadline";
 import { STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE, withStrategyRagRetrievalDeadline } from "./rag-retrieval-deadline";
 import { shouldSkipNegativeExpectancy, applyDeterministicSizing, isRiskAddingOpening, applyRedTeamHalfSize, applyEarningsBlackoutTag, applyCorrelationClusterGate, applyRiskReceipts, shouldEscalateDecision, allowedProposalSides, deterministicBearFilter, mapWithConcurrency } from "./strategy-risk";
 import { deriveVenueContract } from "./venue-contract";
@@ -665,7 +666,15 @@ export async function runStrategyOnce(
     // Check broker health before making LLM calls. When the account cannot place orders
     // (OMS down, trading blocked, elevated place failures, …), auto-halt autonomous trading
     // so future cadence ticks do not burn LLM budget on unplaceable proposals.
-    const healthSignals = activeAccount ? await checkBrokerHealth(userId, activeAccount, gateway) : undefined;
+    const healthSignals = activeAccount
+      ? await withLaneDeadline(
+          checkBrokerHealth(userId, activeAccount, gateway),
+          SCHEDULER_BROKER_TIMEOUT_MS,
+          "checkBrokerHealth timeout",
+          "strategy-broker-health",
+          { wraps: "call" }
+        )
+      : undefined;
     lockGuard.assertOwned();
     if (healthSignals) {
       const accountScope = connectedAccountId ?? `${policy.accountNumber}:${activeAccount?.broker ?? "unknown"}`;
@@ -708,7 +717,7 @@ export async function runStrategyOnce(
         gateway.getEquityPositions(policy.accountNumber),
         gateway.getEquityOrders(policy.accountNumber)
       ]),
-      45_000,
+      STRATEGY_BROKER_SNAPSHOT_DEADLINE_MS,
       "strategy broker snapshot timeout"
     );
     lockGuard.assertOwned();
