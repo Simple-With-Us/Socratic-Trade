@@ -160,22 +160,15 @@ jobs:
           echo "Using simulator ID: $sim_id"
           xcrun simctl boot "$sim_id" 2>/dev/null || true
           log="$RUNNER_TEMP/xcodebuild-test.log"
-          result_bundle="$RUNNER_TEMP/SocraticTrade.xcresult"
           set +e
           xcodebuild test \
             -project 'ios/Socratic Trade.xcodeproj' \
             -scheme SocraticTrade \
             -destination "platform=iOS Simulator,id=$sim_id" \
-            -resultBundlePath "$result_bundle" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             > "$log" 2>&1 < /dev/null
           status=$?
           set -e
           tail -300 "$log"
-          if [ "$status" -ne 0 ] && [ -d "$result_bundle" ]; then
-            echo "## XCTest failure details"
-            xcrun xcresulttool get test-results tests --path "$result_bundle" --format json
-            xcrun xcresulttool get test-results summary --path "$result_bundle" --format json
-          fi
           exit $status

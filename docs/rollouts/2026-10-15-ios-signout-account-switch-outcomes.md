@@ -50,7 +50,9 @@ npx vitest run test/shared-package-pin-check.test.ts  # 6 passed
 
 The 23 vitest failures are in LLM key routing, notify credentials, and server-metrics.  They expect an empty provider-key environment and this seat has provider keys set.  None of them import the iOS tree.
 
-Swift compile and XCTest are not run on this Linux seat.  Hosted `.github/workflows/ios-build.yml` is authoritative.  Run `38798340547` built successfully and completed the iOS test step normally; 272/273 tests passed.  The remaining failure was `testSignOutClearsEveryAccountCacheAndStore`, `XCTAssertNil` at line 86, where the test queried a response in `URLCache.shared`.  The account-switch case passed on this run.  The previous run failed both cache assertions.  Foundation documents an unavoidable race when reading and writing the same request through `URLCache`; these tests shared the singleton and request across cases.  The tests now use each ephemeral session's private URL cache and cookie storage.  Sign-out removes cookies from the storage used by its client session.  Temporary failure-only `xcresulttool` output stays until the isolated tests pass, then the workflow instrumentation will be removed; final PR diff must remain limited to the ten iOS/handoff paths.  New cases:
+CODEX takeover local gates after merging main: `npm run lint` passed with 0 errors and 866 existing warnings; `npx tsc --noEmit` passed; `npm run build` passed.  The changed implementation and regression cases are Swift-only, so there is no focused Vitest file for this change.
+
+Swift compile and XCTest are not run on this Linux seat.  Hosted `.github/workflows/ios-build.yml` is authoritative.  Run `38798340547` built successfully and reported an assertion failure against `URLCache.shared`; the account-switch case passed on that rerun.  Foundation documents an unavoidable race when reading and writing the same request through `URLCache`; the regression tests used a singleton and the same request across cases.  They now use each ephemeral session's private URL cache and cookie storage, and sign-out removes cookies from the storage used by its client session.  Fixed-head run `38800275016` is green: 273/273 XCTest cases, full `verify-hosted` lint/typecheck/test/build, and aggregate `verify`.  The temporary failure-only `xcresulttool` workflow diagnostics were reverted after the isolated tests passed.  The final unique diff is the ten iOS/handoff paths.  New cases:
 
 - `AccountScopeAndMoneyActionTests.testSignOutClearsEveryAccountCacheAndStore`
 - `AccountScopeAndMoneyActionTests.testAccountSwitchClearsCachesAndKeepsTheSession`
@@ -61,7 +63,7 @@ Swift compile and XCTest are not run on this Linux seat.  Hosted `.github/workfl
 
 ## Next Steps & Blockers
 
-- CODEX takeover 2026-10-15: merged `origin/main` at `e81fd0da` with a merge commit and no textual conflicts.  The unique diff still contains the same ten iOS/handoff paths.  Isolate shared XCTest cache state, rerun hosted iOS tests, remove temporary workflow diagnostics, then verify the ten-path diff before merge.
+- CODEX takeover 2026-10-15: merged `origin/main` at `e81fd0da` with a merge commit and no textual conflicts.  Fixed-head `989eaac0` passed required CI run `38800275016`.  No review threads remain unresolved.  Reverted temporary workflow diagnostics and confirmed fresh `origin/main` remains `e81fd0da`; the final unique diff is exactly the ten iOS/handoff paths.  Remove `do-not-automerge` and arm auto-merge only after final-head required checks pass, as Jay directed.
 - Mark ST-2578 completed only after merge, and deployed only after the live binary includes this commit.
 
 ## Zero-Code Findings

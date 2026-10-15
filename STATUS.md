@@ -2,7 +2,7 @@
 
 ## 2026-10-15 CODEX — iOS sign-out caches and money-action results (ST-2578)
 
-PR #4713 is merged with `origin/main` through `e81fd0da`.  Hosted iOS compilation passes; the current failure is an XCTest assertion against shared URL-cache state.  The regression tests now use per-session ephemeral cache and cookie storage, and sign-out clears the cookie storage actually used by its client.  Final diff must return to the ten iOS/handoff paths after temporary CI diagnostics are removed.
+PR #4713 is merged with `origin/main` through `e81fd0da`.  Hosted iOS compilation passes; the current failure is an XCTest assertion against shared URL-cache state.  The regression tests now use per-session ephemeral cache and cookie storage, and sign-out clears the cookie storage actually used by its client.  Jay directed auto-merge after required checks pass.  Final diff must return to the ten iOS/handoff paths after temporary CI diagnostics are removed.
 
 ## 2026-10-15 Cursor Cloud — broker call bounds (ST-2570)
 
