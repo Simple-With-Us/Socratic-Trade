@@ -1,5 +1,13 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — withhold stale EOD on the Congress.Trade wire (ST-3845)
+
+**What.**  A price series or the S&P series whose newest close is behind `latestCompletedTradingSessionEtKey` is no longer pushed to Congress.Trade, and `GET /api/market/prices` / `GET /api/market/spx` return the empty envelope so the caller falls back.  The push writes `congress_share_stale_price_withheld`.  PR #4009 still only stops a stale import from beating a live source.
+
+**Branch.**  `cursor/stale-eod-wire-ed52`.  Linear ST-3845.  Claim moved from GROK (2026-09-30, no implementation) under the sweep rule.
+
+**Next.**  Ready for review.  Deployer ships.  Do not mark completed until merge.
+
 ## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
 
 **What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.
