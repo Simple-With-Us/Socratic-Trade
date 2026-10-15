@@ -169,7 +169,6 @@ import {
 import { earningsCallsTranscriptsEnabled } from "./earningscalls-gate";
 import { roicTranscriptsEnabled } from "./roic-transcripts-gate";
 import { deterministicFilingsRetrievalQuery, strategyInformationRouting } from "./rag/information-routing";
-import { retrievalConcurrencyLimit } from "./rag/retrieval-pressure";
 // (STRATEGY_PROMPT_VERSION comes with the prompt builders from ./strategy-prompts above —
 // ./strategy-prompt-version is a thin re-export kept for red-team.ts's cycle-free import.)
 import type { BrokerGateway } from "./types";
@@ -1501,7 +1500,7 @@ export async function runStrategyOnce(
         const allSymbols = uniqueSymbols([...scoutSymbols, ...deepSymbols]);
 
         const contexts: Array<{ sym: string; query: string; chunks: any[]; factsCard: string; insiderCard: string }> = [];
-        const batchSize = retrievalConcurrencyLimit();
+        const batchSize = 5;
         for (let i = 0; i < allSymbols.length; i += batchSize) {
           const chunk = allSymbols.slice(i, i + batchSize);
           const chunkResults = await Promise.all(
