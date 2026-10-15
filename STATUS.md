@@ -1,5 +1,30 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — ops performance parked flag (ST-3875)
+
+**What.**  `GET /api/ops/performance` account rows now include `parked`, `parkedReason`, and `parkedAt`.  The flag is read from the connected account and reported on the priced book, the never-synced branch, and the per-account error branch.  No account is parked or re-armed.
+
+**Branch.**  `cursor/ops-performance-parked-flag-9767`
+
+**Verification.**  See `docs/rollouts/2026-10-15-ops-performance-parked-flag.md`.
+
+**Next.**  Ready PR for ST-3875.  Jay still decides park / re-arm / investigate for the four dormant accounts.  `/api/ops/snapshot` still omits the flag.
+## 2026-10-15 Cursor Cloud — storage hygiene forever retention (no age deletes)
+
+**What.**  Jay decision 03:13 CT: remove **all** age-based row deletes — `sqlite-storage-hygiene`, `audit-prune`, `pruneTaskJournal`, portfolio snapshot sweep, embed_stage TTL/cap sweep, economic calendar, `headline_first_seen`, and `api_health_log` per-lane count trim.  Maintenance-only hygiene lane; transient `embed_stage` delivery deletes remain.  `HEALTH_LOG_LANE_CAP` is read-bound only for streak heuristics.
+
+**Branch.**  `cursor/forever-retention-no-age-deletes-504b`
+
+**Verification.**  Merged `origin/main` 2026-10-15; `npx vitest run test/sqlite-storage-hygiene.test.ts test/forever-retention-no-age-delete.test.ts test/health-lane-cap.test.ts` (post-merge).
+
+**Next.**  PR #4722 ready; merge after verify green.
+## 2026-10-15 Cursor Cloud — CT fundamentals/analyst nightly push (ST-4537)
+
+**What.**  Congress.Trade `st_inbound_market_data` fundamentals + analyst stale since 2026-10-06; scan-hook-only path.  Nightly `runCongressDailyShare` now POSTs fundamentals/analyst from `symbol_field_latest` for the monitored universe.
+
+**Branch.**  `cursor/ct-fundamentals-nightly-push-bb23`
+
+**Next.**  Verify gate, open ready PR, deploy; confirm CT stream freshness after nightly run.
 ## 2026-10-15 CURSOR — Congress push delivery/consumption receipt (ST-3846)
 
 **What.**  App B webhook responses now emit `receiptVersion: 1` with explicit `delivered` + `consumed` fields; batch failures return `422` instead of silent `200`.  Congress.Trade PR parses the receipt before marking `deliveries` rows delivered.
