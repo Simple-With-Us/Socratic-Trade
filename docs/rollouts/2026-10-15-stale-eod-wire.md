@@ -66,7 +66,7 @@ npx vitest run test/market-read-routes.test.ts test/congress-share.test.ts test/
 
 Hosted `verify` on `970b4909` failed in `test/event-loop-stall-hot-path.test.ts`: the unindexed scan stopped at 116ms and the indexed prune took 66ms, so `pruneMs * 4 < scanMs` was 264 < 116.  Growing the scan to 400ms then timed out the 60s test on `ab407fa4`.  The table is now a fixed 2,000,000 recent rows, scanned once.  The indexed prune must stay under 100ms and at least twice as fast as that scan.  The test timeout is 180s.  Locally the file passed in 27s.
 
-`origin/main` moved again to `2075c857` (ST-4531) and GitHub marked the PR conflicting.  The second merge auto-merged `STATUS.md`.  The blank line before the ST-4531 heading was restored.  Main then moved to `e3ba1507` (hosted TestFlight ASC credentials).  That merge also auto-merged `STATUS.md` and `PLAN.md`.
+`origin/main` moved again to `2075c857` (ST-4531) and GitHub marked the PR conflicting.  The second merge auto-merged `STATUS.md`.  The blank line before the ST-4531 heading was restored.  Main then moved to `e3ba1507` (hosted TestFlight ASC credentials).  That merge also auto-merged `STATUS.md` and `PLAN.md`.  After `verify` went green, main moved to `12702bd9` (ST-4537 nightly fundamentals/analyst push).  The only conflict was `CongressDailyShareSummary` in `src/lib/congress-share.ts`.  The resolved type keeps the stale-withhold fields and the fundamentals/analyst sent counts.
 
 ## 6. Zero-Code Findings
 
