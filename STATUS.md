@@ -307,6 +307,15 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 **Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  Scheduler startup tests 21/21.  `npm run build` ok.  Full `npm test`: 24 failures pre-existing in this sandbox (unchanged vs unrelated suites).
 
 **Next.**  Open ready PR, `@kody start-review`.
+## 2026-10-15 Cursor Cloud — ESLint 10 verify unblock (board d428460a)
+
+**What.**  Renovate `eslint` v10 failed `verify` when the lockfile left `eslint-config-next@16.3.8` (PR #4325).  Rebased lock with `eslint-config-next@16.4.0` passes lint; grouped `eslint` + `eslint-config-next` in Renovate to avoid stale-preset repeats.
+
+**Branch.**  `cursor/block-eslint-10-renovate-5081` (ready PR; supersedes #4691)
+
+**Verification.**  `npm run lint` 0 errors.  Full `tsc` / `vitest` / `build` before push.
+
+**Next.**  GB-Deployer squash-merge; close #4691.  Board handoff comment blocked (no Zulip key for CURSOR seat).
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
