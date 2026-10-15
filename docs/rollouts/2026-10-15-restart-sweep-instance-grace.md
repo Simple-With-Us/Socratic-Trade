@@ -34,16 +34,17 @@ Drain adoption is detected by a `running` `strategy_run_requests` row with `retr
 
 ## Verification State
 
-Commands are recorded after they run.  See the commit that follows this note if this section still says pending.
+Run on this branch after the sweep change.
 
-- Pending: `npm run lint`
-- Pending: `npx tsc --noEmit`
-- Pending: `npx vitest run` on the sweep tests, then `npm test`
-- Pending: `npm run build`
+- `npm run lint` — exit 0.  854 problems (0 errors, 854 warnings), the existing warning baseline.
+- `npx tsc --noEmit` — exit 0.
+- Targeted vitest (`test/restart-sweep-instance-scope.test.ts`, `test/stale-running-runs-adoption-grace.test.ts`, `test/stale-running-runs.test.ts`, `test/strategy-run-restart-retry.test.ts`, `test/scheduler-leader-heartbeat.test.ts`, `test/persistence-hardening.test.ts`) — pass.
+- `npm test` — 9380 passed, 51 skipped, 25 failed.  The 25 are outside this diff: LLM and notify tests that see a sandbox `OPENROUTER` / Pushover credential, Twelve Data and Alpha Vantage provider fixtures, `cpuprofile-summary` failing on Node's `.ts` loader, and `server-metrics` `usesLocalHost`.  None are in the sweep files.
+- `npm run build` — exit 0.  Compiled with the existing warnings, 43 static pages.
 
 ## Next Steps & Blockers
 
-Open the PR ready for review.  Add `do-not-automerge`.  Do not enable auto-merge.  Post the PR link on Linear ST-8.  Jay squash-merges.
+PR #4701 is ready for review with `do-not-automerge`.  Auto-merge is not enabled.  Jay squash-merges.  No Kody review threads were open at handoff.  The PR link is on Linear ST-8.
 
 ## Zero-Code Findings
 
