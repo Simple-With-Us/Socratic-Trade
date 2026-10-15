@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   apiKeyEnvVarForService,
   listUserApiKeys,
-  LOCAL_USER,
   maskApiKeyPreview,
   normalizeApiKeyService,
   upsertUserApiKey,
@@ -14,7 +13,6 @@ import {
 import { isNativeRouteService, llmRouteFor, llmRouteSettingKey } from "@/lib/llm-route";
 import { checkAdmin } from "@/lib/auth/admin";
 import { resolveRequestUserId } from "@/lib/request-user";
-import { queueStPrimaryBridgeWriterSync } from "@/lib/st-primary-bridge-writer";
 import {
   defaultPlanTierForService,
   isRetiredMarketDataService,
@@ -265,14 +263,7 @@ const API_KEY_CATALOG = [
 ] as const;
 
 const VALID_SERVICES: ReadonlySet<string> = new Set(API_KEY_CATALOG.map((item) => item.service));
-const ST_PRIMARY_BRIDGE_SERVICES: ReadonlySet<string> = new Set(["gemini", "deepseek"]);
 const PLAN_TIER_SERVICES = servicesWithPlanTierUi();
-
-function queuePrimaryBridgeAfterTrackedMutation(userId: string, service: string): void {
-  if (userId === LOCAL_USER && ST_PRIMARY_BRIDGE_SERVICES.has(service)) {
-    queueStPrimaryBridgeWriterSync();
-  }
-}
 
 function planTierFields(service: string, storedPlanTier?: string | null) {
   if (!PLAN_TIER_SERVICES.has(service)) {
@@ -425,7 +416,6 @@ export async function POST(request: NextRequest) {
           { status: 400 }
         );
       }
-      queuePrimaryBridgeAfterTrackedMutation(userId, canonical);
       return NextResponse.json({
         success: true,
         key: {
@@ -450,7 +440,6 @@ export async function POST(request: NextRequest) {
       label,
       planTier === undefined ? undefined : planTier === "" ? null : planTier
     );
-    queuePrimaryBridgeAfterTrackedMutation(userId, canonical);
     return NextResponse.json({
       success: true,
       key: {
@@ -482,6 +471,5 @@ export async function DELETE(request: NextRequest) {
   }
 
   const deleted = deleteUserApiKey(userId, canonical);
-  queuePrimaryBridgeAfterTrackedMutation(userId, canonical);
   return NextResponse.json({ success: true, deleted });
 }

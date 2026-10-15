@@ -9,6 +9,23 @@
 **Verification.**  `npm run lint` exit 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exit 0.  `npm test` 9378 passed, 51 skipped, 25 failed in 12 files, none of them the auto-merge tests (sandbox LLM keys, notify creds, server-metrics host, cpuprofile, Twelve Data, Alpha Vantage).  `npm run build` exit 0.  Targeted vitest after the disable-token retry: 22/22.  Live workflow on this PR skipped `auto-merge` and skipped `disable-on-protected` (globs ran; this diff is not a money path).  `disable-auto` returned 401 on the elevated token and the job treated that as already-off.  The follow-up retries with the Actions token and fails the job if that is rejected too.
 
 **Next.**  PR #4697 is ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
+## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
+
+**What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.
+
+**Branch.**  `cursor/ct-push-receipt-2155` in Socratic-Trade and Congress.Trade.  Linear ST-3846.
+
+**Next.**  Both pull requests ready for review.  Do not mark the issue completed until both are merged.
+
+## 2026-10-15 Cursor Cloud — remove ST primary Infisical bridge (ST-4318)
+
+**What.**  Permanent removal of the default-off Usage Monitor credential bridge writer: module, tests, scheduler lane, `/api/keys` triggers, and active env/backlog/docs setup.  Per-user encrypted API keys and tombstone behavior unchanged.
+
+**Branch.**  `cursor/remove-st-primary-bridge-927d`
+
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  Scheduler startup tests 21/21.  `npm run build` ok.  Full `npm test`: 24 failures pre-existing in this sandbox (unchanged vs unrelated suites).
+
+**Next.**  Open ready PR, `@kody start-review`.
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
