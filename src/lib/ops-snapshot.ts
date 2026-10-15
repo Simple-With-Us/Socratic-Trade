@@ -1,7 +1,8 @@
 import { autonomyAuthorityWord, autonomyStatusLabel } from "./autonomy-labels";
 import { getInternalSetting } from "./db-settings";
 import { describeAutonomyHaltCause, effectiveAutoResumeOnBoot, type AutonomyHaltCause } from "./autonomy-halt-cause";
-import { getDb, getLastStrategyRunStartedAt, listConnectedAccounts, listUsers, peekPolicy, getServiceHealthSummaries, databasePath } from "./db";
+import { getDb, getLastStrategyRunStartedAt, latestPeerPushReceipt, listConnectedAccounts, listUsers, peekPolicy, getServiceHealthSummaries, databasePath } from "./db";
+import { isPeerPushHealth, type PeerPushHealth } from "./peer-push-receipt";
 import { isHardStoppedHealthSummary } from "./db-health";
 import { isIntentionalOffHealthService } from "./retired-direct-vendors";
 import { getTaskJournalSummary } from "./db-task-journal";
@@ -191,6 +192,14 @@ export interface OpsSnapshot {
   } | null;
   /** Task brain: per-lane aggregates from the unified task_journal cron ledger (24h lookback). */
   taskJournal?: import("./db-task-journal").TaskJournalLaneSummary[];
+  /** Latest Congress.Trade -> Socratic-Trade push receipt.  Null until the first inbound push. */
+  congressInboundPush?: {
+    pushId: string | null;
+    health: PeerPushHealth;
+    deliveredAt: string | null;
+    consumedAt: string | null;
+    receivedAt: string;
+  } | null;
   /** App-recorded Pinecone write fuse + trial window.  Not Pinecone's bill. */
   pineconeIngest?: {
     monthToDateWriteUnits: number;
@@ -588,8 +597,25 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
     roicArchive = null;
   }
 
+  let congressInboundPush: OpsSnapshot["congressInboundPush"] = null;
+  try {
+    const latest = latestPeerPushReceipt();
+    if (latest && isPeerPushHealth(latest.health)) {
+      congressInboundPush = {
+        pushId: latest.pushId.startsWith("missing:") ? null : latest.pushId,
+        health: latest.health,
+        deliveredAt: latest.deliveredAt,
+        consumedAt: latest.consumedAt,
+        receivedAt: latest.receivedAt,
+      };
+    }
+  } catch {
+    congressInboundPush = null;
+  }
+
   return {
     asOf: new Date().toISOString(),
+    congressInboundPush,
     schedulerLastTick: lastTick ?? null,
     schedulerAgeSeconds: Number.isFinite(tickMs) ? Math.round((Date.now() - tickMs) / 1000) : null,
     dependencies,
