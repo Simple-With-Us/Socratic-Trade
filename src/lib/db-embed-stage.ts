@@ -32,8 +32,8 @@
 // durably delivered is the single most expensive row in this database, so the ONLY sanctioned way
 // to remove one is deleteStagedEmbeddings() with a verified delivery receipt. Everything that used
 // to throw rows away without checking delivery is now non-destructive:
-//   * the 35-day age sweep reclaims DELIVERED rows only (delivered_at IS NOT NULL);
-//   * the 2 GiB size cap no longer deletes ANYTHING — it emits a loud audit + Sentry warning;
+//   * the 35-day age sweep deletes nothing at all — it only counts and reports;
+//   * the 2 GiB size cap deletes nothing — it emits a loud audit + Sentry warning;
 //   * an undecodable row is QUARANTINED (marked, kept) for re-embed from source, never deleted.
 // Undelivered rows therefore survive restarts, quota exhaustion, deploys and every sweep.
 
@@ -54,8 +54,6 @@ export const EMBED_STAGE_MAX_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
 const EMBED_STAGE_ROW_OVERHEAD_BYTES = 160;
 /** SQL `IN (...)` chunking bound (well under SQLite's bound-parameter limit). */
 const EMBED_STAGE_LOOKUP_CHUNK = 400;
-/** Rows the delivered-only retention sweep reclaims per daily pass, to bound the write lock. */
-const EMBED_STAGE_SWEEP_BATCH = 500;
 
 /** Vector-store backends whose acknowledged upsert counts as durable delivery. */
 export type EmbedStageStore = "pinecone" | "qdrant";
@@ -343,14 +341,17 @@ export function embedStageStats(): EmbedStageStats {
 }
 
 export interface EmbedStageSweepResult {
-  /** DELIVERED rows removed by the 35-day window (their vectors are already durable). */
+  /**
+   * Always 0. The age window no longer deletes anything (ST-4540 + the 2026-10-15 forever-retention
+   * policy); the field is kept so audit-prune/scheduler accounting stays stable.
+   */
   expired: number;
   /**
    * Always 0. Retained for the audit-prune/scheduler accounting shape; ST-4540 removed the
    * over-cap deletion outright, so no row is ever pruned for size.
    */
   capPruned: 0;
-  /** Undelivered rows kept despite being past the age window (never deleted). */
+  /** Undelivered rows still owed to the vector store — reported, never deleted. */
   undeliveredRetained: number;
   /** True when the table is over EMBED_STAGE_MAX_BYTES — an alarm, NOT a prune trigger. */
   overCap: boolean;
@@ -359,15 +360,17 @@ export interface EmbedStageSweepResult {
 }
 
 /**
- * Delivered-only retention sweep + over-cap ALARM, invoked from the daily audit-prune housekeeping
- * lane. Expected steady state deletes nothing (rows normally live seconds-to-days).
+ * Read-only embed_stage observer, invoked from the daily audit-prune housekeeping lane.
  *
- * ST-4540 — this function is deliberately unable to lose a paid vector:
- *   * the age window reclaims rows that carry a delivery receipt only. Undelivered rows are
- *     counted, kept, and reported, because an undelivered vector is money already spent;
- *   * the size cap deletes NOTHING. It emits one audit row + one Sentry warning so a stuck
- *     delivery backlog pages a human instead of silently destroying paid embeddings;
- *   * quarantined rows are never swept either — they are re-embedded from source.
+ * ST-4540 — this function is deliberately unable to lose a paid vector. It issues NO delete at
+ * all (no age window, no size cap), which also keeps `test/forever-retention-no-age-delete.test.ts`
+ * green: the only remover in this module is `deleteStagedEmbeddings`, by key, after a delivery
+ * receipt. What remains is the loud part of the old behaviour:
+ *   * undelivered rows past the retention window are counted and reported, because an undelivered
+ *     vector is money already spent and must not be mistaken for garbage;
+ *   * an over-cap table raises ONE audit row + ONE Sentry warning. Over-cap means delivery is
+ *     stuck and a human should look — the old code instead deleted oldest-first paid vectors;
+ *   * quarantined rows are simply counted — they await a re-embed from source, not disposal.
  */
 export function sweepEmbedStage(
   now: Date = new Date(),
@@ -375,19 +378,7 @@ export function sweepEmbedStage(
 ): EmbedStageSweepResult {
   const db = getDb();
   const cutoff = new Date(now.getTime() - EMBED_STAGE_RETENTION_DAYS * 24 * 3600_000).toISOString();
-  // Delivered-only: a bounded batch, so a large delivered backlog drains over several daily
-  // passes instead of holding the SQLite write lock. Undelivered rows are never in scope, and a
-  // quarantined row is excluded too — it is awaiting a re-embed from source, not disposal (a
-  // corrupt row that DID reach the store is still worth the evidence until the re-embed lands).
-  const expired = db
-    .prepare(
-      `DELETE FROM embed_stage WHERE rowid IN (
-         SELECT rowid FROM embed_stage
-         WHERE created_at < ? AND delivered_at IS NOT NULL AND quarantined_at IS NULL
-         LIMIT ${EMBED_STAGE_SWEEP_BATCH})`
-    )
-    .run(cutoff).changes;
-
+  // Observation only: nothing below this line mutates embed_stage.
   const pastWindowUndelivered = (
     db
       .prepare("SELECT COUNT(*) AS n FROM embed_stage WHERE created_at < ? AND delivered_at IS NULL")
@@ -438,6 +429,6 @@ export function sweepEmbedStage(
   const undeliveredRetained = (
     db.prepare("SELECT COUNT(*) AS n FROM embed_stage WHERE delivered_at IS NULL").get() as { n: number }
   ).n;
-  const bytesAfter = embedStageStats().bytes;
-  return { expired, capPruned: 0, undeliveredRetained, overCap, bytesAfter };
+  // The observer mutates nothing, so "after" equals the current size.
+  return { expired: 0, capPruned: 0, undeliveredRetained, overCap, bytesAfter: stats.bytes };
 }

@@ -8,9 +8,9 @@
 // breaker gate still blocks everything (no embed AND no stage-consume) until it lifts; and the
 // Float32Array BLOB roundtrip is exact.
 //
-// ST-4540 (no data loss): the retention sweep and the size cap must NEVER delete an undelivered
-// paid vector, and an undecodable row must be quarantined (kept) rather than deleted. Those suites
-// are below, alongside the delivery-receipt gate on deleteStagedEmbeddings.
+// ST-4540 (no data loss): removal of a staged vector requires a verified durable delivery
+// receipt, the age window and size cap delete nothing (they only alarm), and an undecodable row
+// is quarantined and kept for re-embed from source. Those suites are below.
 //
 // Scaffolding: real module graph + real temp SQLite DB (like pinecone-wu-breaker.test.ts) with
 // mocked Pinecone/Voyage SDK clients (like vector-db-embedding-integrity.test.ts). VOYAGE_API_KEY
@@ -286,62 +286,79 @@ describe("WU-breaker gate ordering", () => {
   });
 });
 
-describe("retention sweep and size cap never lose undelivered paid vectors (ST-4540)", () => {
-  it("RETAINS rows older than 35 days when they were never delivered, and audits the backlog", async () => {
+describe("retention sweep (disabled — forever policy)", () => {
+  it("sweepEmbedStage does not delete staged rows by age or cap", async () => {
     const { stageEmbeddedVectors, sweepEmbedStage, EMBED_STAGE_RETENTION_DAYS } = await import(
       "../src/lib/db-embed-stage"
     );
     const { getDb } = await db();
     stageEmbeddedVectors([
       { contentHash: "old-1", model: "m", revision: "1", vector: [0.1, 0.2] },
+      { contentHash: "fresh", model: "m", revision: "1", vector: [0.5, 0.6] }
+    ]);
+    const backdated = new Date(Date.now() - (EMBED_STAGE_RETENTION_DAYS + 1) * 24 * 3600_000).toISOString();
+    getDb().prepare("UPDATE embed_stage SET created_at = ? WHERE content_hash = 'old-1'").run(backdated);
+
+    const result = sweepEmbedStage();
+    expect(result.expired).toBe(0);
+    expect(result.capPruned).toBe(0);
+    expect(await stageRowCount()).toBe(2);
+  });
+
+  it("audit-prune lane does not sweep embed_stage", async () => {
+    const { stageEmbeddedVectors } = await import("../src/lib/db-embed-stage");
+    const { pruneAuditEvents } = await import("../src/lib/audit-prune");
+    stageEmbeddedVectors([{ contentHash: "lane-old", model: "m", revision: "1", vector: [0.1] }]);
+    const result = pruneAuditEvents(new Date());
+    expect(result.embedStageExpired).toBe(0);
+    expect(result.embedStageCapPruned).toBe(0);
+    expect(await stageRowCount()).toBe(1);
+  });
+});
+
+// ─── ST-4540: staged data is never lost ───────────────────────────────────────
+// Deletion requires a verified durable delivery receipt; the age window and the size cap delete
+// nothing (they only alarm); an undecodable row is quarantined and kept for re-embed from source.
+
+describe("sweep alarms without deleting (ST-4540)", () => {
+  it("keeps every aged row — delivered or not — and audits the undelivered backlog", async () => {
+    const { stageEmbeddedVectors, sweepEmbedStage, EMBED_STAGE_RETENTION_DAYS, deleteStagedEmbeddings } =
+      await import("../src/lib/db-embed-stage");
+    const { getDb } = await db();
+    stageEmbeddedVectors([
+      { contentHash: "old-1", model: "m", revision: "1", vector: [0.1, 0.2] },
       { contentHash: "old-2", model: "m", revision: "1", vector: [0.3, 0.4] },
       { contentHash: "fresh", model: "m", revision: "1", vector: [0.5, 0.6] }
     ]);
+    // A stranded DELIVERED row (receipt written, the by-key delete never ran).
+    getDb()
+      .prepare("UPDATE embed_stage SET delivered_at = ?, delivered_store = 'pinecone' WHERE content_hash = 'old-1'")
+      .run(new Date().toISOString());
     const backdated = new Date(Date.now() - (EMBED_STAGE_RETENTION_DAYS + 1) * 24 * 3600_000).toISOString();
     getDb().prepare("UPDATE embed_stage SET created_at = ? WHERE content_hash LIKE 'old-%'").run(backdated);
 
     const result = sweepEmbedStage();
-    // Nothing was delivered, so nothing is reclaimed — the old behavior deleted 2 paid vectors here.
+    // The old sweep deleted old-1 AND old-2 here; neither is removable without a receipt+key.
     expect(result.expired).toBe(0);
     expect(result.capPruned).toBe(0);
-    expect(result.undeliveredRetained).toBe(3);
+    expect(result.undeliveredRetained).toBe(2);
     expect(await stageRowCount()).toBe(3);
     const remaining = getDb().prepare("SELECT content_hash FROM embed_stage ORDER BY content_hash").all() as Array<{
       content_hash: string;
     }>;
     expect(remaining.map((row) => row.content_hash)).toEqual(["fresh", "old-1", "old-2"]);
-    // Loud, one audit row per sweep (not per row).
+
+    // Loud: exactly one backlog audit row for the sweep (not one per row).
     const backlog = await auditRows("embed_stage_undelivered_backlog");
     expect(backlog).toHaveLength(1);
-    expect(JSON.parse(backlog[0]!.payload)).toMatchObject({ undeliveredPastRetention: 2 });
+    expect(JSON.parse(backlog[0]!.payload)).toMatchObject({ undeliveredPastRetention: 1 });
+
+    // The sanctioned removal path still works, by key, with a receipt.
+    expect(deleteStagedEmbeddings(["old-2", "fresh"], "m", "1", { store: "pinecone" })).toBe(2);
+    expect(await stageRowCount()).toBe(1);
   });
 
-  it("reclaims ONLY delivered rows past the age window", async () => {
-    const { stageEmbeddedVectors, sweepEmbedStage, EMBED_STAGE_RETENTION_DAYS, deleteStagedEmbeddings } =
-      await import("../src/lib/db-embed-stage");
-    const { getDb } = await db();
-    stageEmbeddedVectors([
-      { contentHash: "delivered-old", model: "m", revision: "1", vector: [0.1, 0.2] },
-      { contentHash: "undelivered-old", model: "m", revision: "1", vector: [0.3, 0.4] }
-    ]);
-    // Receipt written but the row stranded (e.g. the post-upsert delete failed): reclaimed by age.
-    getDb()
-      .prepare("UPDATE embed_stage SET delivered_at = ?, delivered_store = 'pinecone' WHERE content_hash = 'delivered-old'")
-      .run(new Date().toISOString());
-    const backdated = new Date(Date.now() - (EMBED_STAGE_RETENTION_DAYS + 1) * 24 * 3600_000).toISOString();
-    getDb().prepare("UPDATE embed_stage SET created_at = ?").run(backdated);
-
-    const result = sweepEmbedStage();
-    expect(result.expired).toBe(1);
-    expect(result.undeliveredRetained).toBe(1);
-    const remaining = getDb().prepare("SELECT content_hash FROM embed_stage").all() as Array<{ content_hash: string }>;
-    expect(remaining.map((row) => row.content_hash)).toEqual(["undelivered-old"]);
-    // And a proper receipt-based delete still works (the sanctioned path).
-    expect(deleteStagedEmbeddings(["undelivered-old"], "m", "1", { store: "pinecone" })).toBe(1);
-    expect(await stageRowCount()).toBe(0);
-  });
-
-  it("NEVER deletes past the size cap — it raises an alarm and keeps every row", async () => {
+  it("raises exactly one over-cap alarm and deletes NOTHING", async () => {
     const { stageEmbeddedVectors, sweepEmbedStage } = await import("../src/lib/db-embed-stage");
     const { getDb } = await db();
     const vector = Array.from({ length: 256 }, (_unused, i) => i / 256); // 1 KiB per row
@@ -350,28 +367,27 @@ describe("retention sweep and size cap never lose undelivered paid vectors (ST-4
       getDb().prepare("UPDATE embed_stage SET created_at = ? WHERE content_hash = ?")
         .run(new Date(Date.UTC(2026, 7, 1, 0, i)).toISOString(), `cap-${i}`);
     }
-    const bytesBefore = (getDb().prepare("SELECT COALESCE(SUM(LENGTH(vector)), 0) AS b FROM embed_stage").get() as {
-      b: number;
-    }).b;
+    const bytesBefore = (getDb()
+      .prepare("SELECT COALESCE(SUM(LENGTH(vector)), 0) AS b FROM embed_stage").get() as { b: number }).b;
 
-    // Cap low enough that the OLD code would have deleted ~4 rows oldest-first.
+    // A cap low enough that the OLD code deleted ~4 rows oldest-first.
     const result = sweepEmbedStage(new Date(Date.UTC(2026, 7, 2)), 3_000);
     expect(result.overCap).toBe(true);
-    expect(result.capPruned).toBe(0); // the cap no longer prunes anything, ever
-    expect(result.expired).toBe(0); // rows are undelivered
+    expect(result.capPruned).toBe(0);
+    expect(result.expired).toBe(0);
     expect(await stageRowCount()).toBe(6); // ALL rows kept
-    const bytesAfter = (getDb().prepare("SELECT COALESCE(SUM(LENGTH(vector)), 0) AS b FROM embed_stage").get() as {
-      b: number;
-    }).b;
+    const bytesAfter = (getDb()
+      .prepare("SELECT COALESCE(SUM(LENGTH(vector)), 0) AS b FROM embed_stage").get() as { b: number }).b;
     expect(bytesAfter).toBe(bytesBefore);
-    // Exactly ONE audit row, and it is an alarm (not the old embed_stage_cap_prune).
-    expect(await auditRows("embed_stage_over_cap")).toHaveLength(1);
+
+    // One alarm audit row, and the old prune audit kind is gone for good.
+    const alarm = await auditRows("embed_stage_over_cap");
+    expect(alarm).toHaveLength(1);
+    expect(JSON.parse(alarm[0]!.payload)).toMatchObject({ rows: 6, undelivered: 6 });
     expect(await auditRows("embed_stage_cap_prune")).toHaveLength(0);
-    const alarm = JSON.parse((await auditRows("embed_stage_over_cap"))[0]!.payload);
-    expect(alarm).toMatchObject({ rows: 6, undelivered: 6 });
   });
 
-  it("does not alarm when the table is under the cap", async () => {
+  it("stays quiet under the cap", async () => {
     const { stageEmbeddedVectors, sweepEmbedStage } = await import("../src/lib/db-embed-stage");
     stageEmbeddedVectors([{ contentHash: "small", model: "m", revision: "1", vector: [0.1, 0.2] }]);
     const result = sweepEmbedStage();
@@ -380,32 +396,21 @@ describe("retention sweep and size cap never lose undelivered paid vectors (ST-4
     expect(await auditRows("embed_stage_over_cap")).toHaveLength(0);
   });
 
-  it("is wired into the audit-prune housekeeping lane and keeps undelivered rows there too", async () => {
+  it("the audit-prune lane reports the backlog without deleting", async () => {
     const { stageEmbeddedVectors, EMBED_STAGE_RETENTION_DAYS } = await import("../src/lib/db-embed-stage");
-    const { pruneAuditEvents } = await import("../src/lib/audit-prune");
+    const { pruneAuditEvents, pruneAuditEventsYielding } = await import("../src/lib/audit-prune");
     const { getDb } = await db();
     stageEmbeddedVectors([{ contentHash: "lane-old", model: "m", revision: "1", vector: [0.1] }]);
     getDb().prepare("UPDATE embed_stage SET created_at = ?")
       .run(new Date(Date.now() - (EMBED_STAGE_RETENTION_DAYS + 2) * 24 * 3600_000).toISOString());
 
-    const result = pruneAuditEvents(new Date());
-    // The lane still runs the sweep, but it reclaims delivered rows only.
-    expect(result.embedStageExpired).toBe(0);
-    expect(result.embedStageCapPruned).toBe(0);
-    expect(result.embedStageUndeliveredRetained).toBe(1);
-    expect(await stageRowCount()).toBe(1);
-  });
+    const sync = pruneAuditEvents(new Date());
+    expect(sync.embedStageExpired).toBe(0);
+    expect(sync.embedStageCapPruned).toBe(0);
+    expect(sync.embedStageUndeliveredRetained).toBe(1);
 
-  it("the yielding audit-prune lane also reports undelivered rows without deleting them", async () => {
-    const { stageEmbeddedVectors, EMBED_STAGE_RETENTION_DAYS } = await import("../src/lib/db-embed-stage");
-    const { pruneAuditEventsYielding } = await import("../src/lib/audit-prune");
-    const { getDb } = await db();
-    stageEmbeddedVectors([{ contentHash: "yield-old", model: "m", revision: "1", vector: [0.1] }]);
-    getDb().prepare("UPDATE embed_stage SET created_at = ?")
-      .run(new Date(Date.now() - (EMBED_STAGE_RETENTION_DAYS + 2) * 24 * 3600_000).toISOString());
-
-    const result = await pruneAuditEventsYielding(new Date(), 5_000, async () => {});
-    expect(result.embedStageUndeliveredRetained).toBe(1);
+    const yielding = await pruneAuditEventsYielding(new Date(), 5_000, async () => {});
+    expect(yielding.embedStageUndeliveredRetained).toBe(1);
     expect(await stageRowCount()).toBe(1);
   });
 });
@@ -425,38 +430,32 @@ describe("deleteStagedEmbeddings is gated on a delivery receipt (ST-4540)", () =
     const { stageEmbeddedVectors, deleteStagedEmbeddings, getStagedEmbeddings } = await import(
       "../src/lib/db-embed-stage"
     );
-    const { getDb } = await db();
     stageEmbeddedVectors([
       { contentHash: "a", model: "m", revision: "1", vector: [0.1] },
       { contentHash: "b", model: "m", revision: "1", vector: [0.2] }
     ]);
     expect(deleteStagedEmbeddings(["a"], "m", "1", { store: "qdrant" })).toBe(1);
     expect(await stageRowCount()).toBe(1);
-    expect(getStagedEmbeddings(["a", "b"], "m", "1").has("b")).toBe(true);
+    expect(getStagedEmbeddings(["b"], "m", "1").has("b")).toBe(true);
     expect(getStagedEmbeddings(["a"], "m", "1").has("a")).toBe(false);
-    const receipt = getDb()
-      .prepare("SELECT delivered_at, delivered_store FROM embed_stage WHERE content_hash = 'a'")
-      .get();
-    expect(receipt).toBeUndefined(); // the delivered row is gone, receipt and all
-    const other = getDb()
-      .prepare("SELECT delivered_store FROM embed_stage WHERE content_hash = 'b'")
-      .get() as { delivered_store: string | null };
-    expect(other.delivered_store).toBeNull(); // never staged as delivered
   });
 
   it("a re-stage after delivery clears the receipt (the row is undelivered again)", async () => {
-    const { stageEmbeddedVectors, deleteStagedEmbeddings } = await import("../src/lib/db-embed-stage");
+    const { stageEmbeddedVectors, deleteStagedEmbeddings, embedStageStats } = await import(
+      "../src/lib/db-embed-stage"
+    );
     const { getDb } = await db();
     stageEmbeddedVectors([{ contentHash: "restage", model: "m", revision: "1", vector: [0.1] }]);
     getDb().prepare("UPDATE embed_stage SET delivered_at = ?, delivered_store = 'pinecone'").run(new Date().toISOString());
     // A fresh paid embed for the same key supersedes the receipt.
     stageEmbeddedVectors([{ contentHash: "restage", model: "m", revision: "1", vector: [0.9] }]);
-    const row = getDb().prepare("SELECT delivered_at, delivered_store FROM embed_stage WHERE content_hash = 'restage'").get() as {
+    const row = getDb().prepare("SELECT delivered_at, delivered_store FROM embed_stage").get() as {
       delivered_at: string | null;
       delivered_store: string | null;
     };
     expect(row.delivered_at).toBeNull();
     expect(row.delivered_store).toBeNull();
+    expect(embedStageStats().undelivered).toBe(1);
     expect(deleteStagedEmbeddings(["restage"], "m", "1", { store: "pinecone" })).toBe(1);
   });
 });
@@ -475,9 +474,9 @@ describe("undecodable staged rows are quarantined, never deleted (ST-4540)", () 
     getDb().prepare("UPDATE embed_stage SET vector = ? WHERE content_hash = 'corrupt'").run(Buffer.from([1, 2, 3]));
 
     const found = getStagedEmbeddings(["corrupt", "good"], "m", "1");
-    expect(found.has("corrupt")).toBe(false); // reported as a miss -> caller re-embeds from source
+    expect(found.has("corrupt")).toBe(false); // a miss -> caller re-embeds from source
     expect(found.get("good")).toEqual([Math.fround(0.4), Math.fround(0.5), Math.fround(0.6)]);
-    // The old code DELETED it here, which lost the evidence of a paid embed and forced a re-embed.
+    // The OLD code DELETED it here, losing the evidence of a paid embed.
     expect(await stageRowCount()).toBe(2);
     const row = getDb()
       .prepare("SELECT quarantined_at, quarantine_reason FROM embed_stage WHERE content_hash = 'corrupt'")
@@ -487,8 +486,7 @@ describe("undecodable staged rows are quarantined, never deleted (ST-4540)", () 
     // ONE audit row for the lookup, not one per corrupt row.
     expect(await auditRows("embed_stage_quarantine")).toHaveLength(1);
 
-    // Healing: a re-embed from source replaces the row and clears the marker, with no extra embed
-    // charged to the quarantine itself.
+    // Healing: the re-embed from source replaces the row and clears the marker.
     stageEmbeddedVectors([{ contentHash: "corrupt", model: "m", revision: "1", vector: [0.7, 0.8, 0.9] }]);
     const healed = getDb()
       .prepare("SELECT quarantined_at, quarantine_reason FROM embed_stage WHERE content_hash = 'corrupt'")
@@ -503,71 +501,24 @@ describe("undecodable staged rows are quarantined, never deleted (ST-4540)", () 
     expect(deleteStagedEmbeddings(["corrupt", "good"], "m", "1", { store: "pinecone" })).toBe(2);
     expect(await stageRowCount()).toBe(0);
   });
-
-  it("quarantined rows survive the retention sweep (they await re-embed, not deletion)", async () => {
-    const { stageEmbeddedVectors, getStagedEmbeddings, sweepEmbedStage, EMBED_STAGE_RETENTION_DAYS } =
-      await import("../src/lib/db-embed-stage");
-    const { getDb } = await db();
-    stageEmbeddedVectors([{ contentHash: "corrupt-old", model: "m", revision: "1", vector: [0.1, 0.2, 0.3] }]);
-    getDb().prepare("UPDATE embed_stage SET vector = ? WHERE content_hash = 'corrupt-old'").run(Buffer.from([9, 9]));
-    getDb().prepare("UPDATE embed_stage SET created_at = ?")
-      .run(new Date(Date.now() - (EMBED_STAGE_RETENTION_DAYS + 10) * 24 * 3600_000).toISOString());
-
-    getStagedEmbeddings(["corrupt-old"], "m", "1");
-    const result = sweepEmbedStage();
-    expect(result.expired).toBe(0);
-    expect(await stageRowCount()).toBe(1);
-  });
-
-  it("a quarantined row is kept even when it also carries a delivery receipt", async () => {
-    const { stageEmbeddedVectors, getStagedEmbeddings, sweepEmbedStage, EMBED_STAGE_RETENTION_DAYS } =
-      await import("../src/lib/db-embed-stage");
-    const { getDb } = await db();
-    stageEmbeddedVectors([{ contentHash: "corrupt-delivered", model: "m", revision: "1", vector: [0.1, 0.2, 0.3] }]);
-    const database = getDb();
-    // Delivered to the store, then the blob went bad and a retry re-read it.
-    database.prepare("UPDATE embed_stage SET delivered_at = ?, delivered_store = 'pinecone' WHERE content_hash = 'corrupt-delivered'")
-      .run(new Date().toISOString());
-    database.prepare("UPDATE embed_stage SET vector = ? WHERE content_hash = 'corrupt-delivered'").run(Buffer.from([7]));
-    database.prepare("UPDATE embed_stage SET created_at = ?")
-      .run(new Date(Date.now() - (EMBED_STAGE_RETENTION_DAYS + 10) * 24 * 3600_000).toISOString());
-
-    getStagedEmbeddings(["corrupt-delivered"], "m", "1");
-    // A normal delivered+aged row would be reclaimed here; the quarantine marker holds it instead.
-    const result = sweepEmbedStage();
-    expect(result.expired).toBe(0);
-    expect(await stageRowCount()).toBe(1);
-
-    // The re-embed from source clears the marker, and only then is the row reclaimable.
-    stageEmbeddedVectors([{ contentHash: "corrupt-delivered", model: "m", revision: "1", vector: [0.5, 0.6] }]);
-    database.prepare("UPDATE embed_stage SET delivered_at = ?, delivered_store = 'pinecone' WHERE content_hash = 'corrupt-delivered'")
-      .run(new Date().toISOString());
-    // The re-stage reset created_at to now; age it back out past the window.
-    database.prepare("UPDATE embed_stage SET created_at = ?")
-      .run(new Date(Date.now() - (EMBED_STAGE_RETENTION_DAYS + 10) * 24 * 3600_000).toISOString());
-    expect(sweepEmbedStage().expired).toBe(1);
-    expect(await stageRowCount()).toBe(0);
-  });
 });
 
 describe("embedStageStats reports the delivery backlog", () => {
   it("separates delivered, undelivered and quarantined rows", async () => {
-    const { stageEmbeddedVectors, deleteStagedEmbeddings, embedStageStats } = await import(
+    const { stageEmbeddedVectors, getStagedEmbeddings, embedStageStats } = await import(
       "../src/lib/db-embed-stage"
     );
     const { getDb } = await db();
     stageEmbeddedVectors([
       { contentHash: "keep-1", model: "m", revision: "1", vector: [0.1] },
-      { contentHash: "drop-1", model: "m", revision: "1", vector: [0.2] }
+      { contentHash: "keep-2", model: "m", revision: "1", vector: [0.2] }
     ]);
-    deleteStagedEmbeddings(["drop-1"], "m", "1", { store: "pinecone" });
-    getDb().prepare("UPDATE embed_stage SET quarantined_at = ? WHERE content_hash = 'keep-1'").run(
-      new Date().toISOString()
-    );
+    getDb().prepare("UPDATE embed_stage SET vector = ? WHERE content_hash = 'keep-1'").run(Buffer.from([4]));
+    getStagedEmbeddings(["keep-1"], "m", "1");
 
     const stats = embedStageStats();
-    expect(stats.rows).toBe(1);
-    expect(stats.undelivered).toBe(1);
+    expect(stats.rows).toBe(2);
+    expect(stats.undelivered).toBe(2); // nothing here is proven delivered
     expect(stats.quarantined).toBe(1);
     expect(stats.oldestUndeliveredCreatedAt).not.toBeNull();
     expect(stats.bytes).toBeGreaterThan(0);

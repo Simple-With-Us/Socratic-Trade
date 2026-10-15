@@ -20,6 +20,11 @@ vector had been delivered:
 
 `sqlite-storage-hygiene.ts` had a second age delete over the same table (`created_at < ?`).
 
+While this was in review, #4722 ("keep strategy runs and logs forever") landed on main and made the
+age window and size cap no-ops outright. This branch is rebased on that decision rather than
+reversing it: the sweep keeps no deletes at all, and keeps the part #4722 did not do — the
+delivery receipt gate, quarantine instead of delete, and the loud alarms.
+
 ## Change
 
 ST data is kept forever. Deletion of a staged vector now requires proof of durable delivery.
@@ -30,21 +35,23 @@ ST data is kept forever. Deletion of a staged vector now requires proof of durab
   a key concurrently re-staged (receipt cleared) can never be removed by an older delivery. No
   overload deletes without naming the store — losing a paid vector is unrepresentable.
   The stamp and the delete are **separate transactions**: a crash between them leaves a
-  "delivered but stranded" row that the retention sweep reclaims, instead of rolling the evidence of
+  "delivered but stranded" row that carries a durable receipt, instead of rolling the evidence of
   delivery back.
-- **Age sweep reclaims delivered rows only** (`delivered_at IS NOT NULL AND quarantined_at IS NULL`),
-  in bounded 500-row batches. Undelivered rows past the window are counted, kept, and reported via a
-  new `embed_stage_undelivered_backlog` audit row + Sentry warning.
+- **`sweepEmbedStage` is a read-only observer — it issues no DELETE at all.** Rows clear only
+  through `deleteStagedEmbeddings`, by key, after a receipt. This also keeps
+  `test/forever-retention-no-age-delete.test.ts` (added by #4722 on 2026-10-15) green. Undelivered
+  rows past the 35-day window are counted and reported via a new `embed_stage_undelivered_backlog`
+  audit row + Sentry warning.
 - **The size cap deletes nothing.** It emits one `embed_stage_over_cap` audit row + Sentry warning
   with rows/undelivered/oldest-undelivered and sets `overCap: true`. An over-cap table means
   delivery is stuck and a human should look, not that bytes should be thrown away.
 - **Undecodable rows are quarantined, not deleted** — marked `quarantined_at`/`quarantine_reason`
   (`undecodable_vector:dims=…:bytes=…`), reported as a miss so the caller re-embeds from source, and
   healed by that re-embed (`INSERT OR REPLACE` clears the marker). One `embed_stage_quarantine`
-  audit row per lookup, never one per corrupt row. A quarantined row is exempt from both age
-  deleters, since it is awaiting a re-embed that replaces it in place.
-- **`sqlite-storage-hygiene.ts`** targets
-  `delivered_at IS NOT NULL AND quarantined_at IS NULL AND created_at < ?`.
+  audit row per lookup, never one per corrupt row. A quarantined row is kept until that re-embed
+  lands.
+- **`sqlite-storage-hygiene.ts`** no longer carries an `embed_stage` retention target at all
+  (per #4722), so no hygiene statement can touch a staged vector.
 
 ### Schema (additive)
 
@@ -57,20 +64,21 @@ safe to delete.
 ### Callers
 
 `vector-db.ts` (both delete sites — plain per-batch, and managed two-phase after
-`markCommitted`), `audit-prune.ts` (`AuditPruneResult` gains `embedStageUndeliveredRetained`;
-`embedStageCapPruned` is retained as an always-0 field for accounting shape), `scheduler.ts`
-(lane summary reports `undelivered=`), `sqlite-storage-hygiene.ts`.
+`markCommitted`, each passing the backend that acknowledged the upsert), `audit-prune.ts`
+(the lane's only remaining work is the read-only observer; `AuditPruneResult` gains
+`embedStageUndeliveredRetained`, and `expired`/`capPruned` are now structurally zero),
+`scheduler.ts` (lane summary reports `embed_stage_undelivered=`), `sqlite-storage-hygiene.ts`
+(checked — no `embed_stage` deleter remains after #4722).
 
 ## Tests
 
-`test/embed-stage.test.ts` — rewritten retention/cap suite plus new suites: undelivered rows survive
-the 35-day window, delivered rows are reclaimed, the over-cap path deletes zero rows and raises one
-alarm audit, the audit-prune lanes report without deleting, the receipt is required (the old 3-arg
-shape throws and keeps the row), re-staging clears a receipt, quarantine keeps + marks + heals
-(including a delivered *and* quarantined row, which is held until the re-embed lands), and
-`embedStageStats` reports the backlog. `test/sqlite-storage-hygiene.test.ts` — an undelivered
-50-day-old row now survives the hygiene lane while a delivered one is reclaimed; a delivered,
-quarantined row survives too.
+`test/embed-stage.test.ts` — the sweep suites plus new ones: every aged row survives whether
+delivered or not, the backlog audit fires once per sweep, the over-cap path deletes zero rows and
+raises exactly one alarm, the audit-prune lanes report without deleting, the receipt is required
+(the old 3-arg shape throws and keeps the row), re-staging clears a receipt, quarantine keeps +
+marks + heals on re-embed, and `embedStageStats` reports the backlog.
+`test/sqlite-storage-hygiene.test.ts` — a delivered 50-day-old staged row survives the hygiene lane.
+`test/audit-hygiene.test.ts` — updated for the new result field.
 
 Verified locally on Node 22: `npx tsc --noEmit` clean, `eslint` 0 errors on every touched file (only
 pre-existing `any` warnings in `db.ts`/`vector-db.ts`), and the embed-stage, storage-hygiene,

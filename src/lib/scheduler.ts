@@ -935,25 +935,21 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     console.error("[scheduler] stale mobile-command sweep error:", err);
   }
 
-  // Task-journal retention: 'skipped' heartbeat rows age out in 24h, ok/error in 30d
-  // (db-task-journal.ts). One cheap indexed DELETE per tick; never throws.
+  // Task-journal hook (db-task-journal.ts) — forever retention; no-op delete.
   pruneTaskJournal();
 
-  // Daily audit_events + provider-observability retention (audit-prune.ts):
-  // observability kinds 14d, everything else 90d, bounded batches. First-ever
-  // run drains a large backlog over several daily passes. Also sweeps the
-  // embed_stage table (DELIVERED-only 35d retention; undelivered paid vectors
-  // are never deleted and the size cap is an alarm, db-embed-stage.ts ST-4540).
+  // Daily audit-prune watermark (audit-prune.ts) — forever retention; no row deletes.
+  // The lane's only remaining work is the read-only embed_stage observer (db-embed-stage.ts,
+  // ST-4540): it counts undelivered paid vectors and raises the backlog / over-cap alarms.
   void journalLane("audit-prune", {}, async () => {
     const result = await runAuditPruneYieldingIfDue();
     if (!result) return { status: "skipped" as const, summary: "not due" };
-    const total = result.auditObservability + result.auditDefault + result.providerDispatch +
-      result.providerOutbox + result.embedStageExpired + result.embedStageCapPruned +
-      result.portfolioSnapshotsPruned;
+    // Forever retention: the delete counts are structurally zero, so the lane summary reports
+    // the signal that still matters — undelivered embed_stage rows awaiting delivery (ST-4540).
     const stageSummary = result.embedStageUndeliveredRetained > 0
-      ? ` undelivered=${result.embedStageUndeliveredRetained}`
-      : "";
-    return { status: "ok" as const, summary: `deleted=${total}${stageSummary}` };
+      ? ` embed_stage_undelivered=${result.embedStageUndeliveredRetained}`
+      : " embed_stage_undelivered=0";
+    return { status: "ok" as const, summary: `deleted=0${stageSummary}` };
   }).catch((err) => console.error("[scheduler] audit prune error:", err));
 
   signal?.throwIfAborted();
@@ -965,15 +961,15 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     return; // not the leader this tick — no side effects
   }
 
-  // Table sizes, retention for non-money caches and logs, WAL checkpoint, and
-  // incremental free-page reclaim.  Leader only: every replica checkpointing
+  // Table sizes, WAL checkpoint, ANALYZE/optimize, and incremental free-page
+  // reclaim (no row deletes).  Leader only: every replica checkpointing
   // the same WAL fights TRUNCATE.  Dry-run when SQLITE_STORAGE_HYGIENE_DRY_RUN=1.
   void journalLane("storage-hygiene", {}, async () => {
     const result = await runStorageHygieneIfDue();
     if (!result) return { status: "skipped" as const, summary: "not due" };
     return {
       status: "ok" as const,
-      summary: `dryRun=${result.dryRun} eligibleBytes=${result.expectedReclaimBytes} deleted=${result.deletedRows}`
+      summary: `dryRun=${result.dryRun} shrinkBytes=${result.expectedFileShrinkBytes} deleted=${result.deletedRows}`
     };
   }).catch((err) => console.error("[scheduler] storage hygiene error:", err));
 
