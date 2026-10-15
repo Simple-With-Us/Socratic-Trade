@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 OPENCODE — History retention exemption (Linear ST-4532)
+
+**What.**  Reconciles the #4666/#4661 retention conflict: production runs the #4666 merge (live sha a3d21b73, verified via public `/api/health`), and the 02:56Z hygiene report (dryRun=false) shows `history-cache-eod` eligible=3,427,386 / deleted=5,000 — deletion was real, not inferred.  `history_cache_eod` is removed from hygiene age targets (constant, target, and `dayCutoff` helper gone); the table reports as retained durable history and `assertPruneTableAllowed` refuses it.  Disposable-cache cleanup is unchanged.  Regression tests prove 401d/1825d/2300d rows survive consecutive live passes.
+
+**Verification.**  Gates + `verify` CI green before merge (see rollout note).  Post-merge: live sha past a3d21b73 and next `storageHygiene` report with no `history-cache-eod` estimate.
+
+**Docs.**  `docs/rollouts/2026-10-15-history-retention-exemption.md`, `docs/rollouts/2026-10-14-sqlite-storage-hygiene.md` (400-day EOD line struck), `STATUS.md`, `PLAN.md`.
+
+**Next.**  Land, verify deploy, close ST-4532, post closeout in `ST history retention review`.  Backfill of the ~5,000 lost scattered bars is proposed (paced, post-deploy) and needs owner approval for provider quota.
+
 ## 2026-10-15 Grok — PR #4664 merge main and handoff order
 
 **What.**  Merged `origin/main` (`2656320f`, Tradier sandbox HTTP 400, including `a3d21b73` SQLite storage hygiene) into `cursor/data-cascade-reliability-eb70`.  The merge was clean.  No migration renumber.  The one unresolved review thread (Kody rule [33] on the cascade rollout) asked for `npm test` before `npm run build` in the Round 10 paragraph.  That sentence and the Round 11 gate sentence now use the canonical order.  No product code change.  The thread was not resolved.

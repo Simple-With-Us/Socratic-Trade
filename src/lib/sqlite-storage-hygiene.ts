@@ -2,10 +2,15 @@
 // the production SQLite file.
 //
 // The file is large (multi-gigabyte) and Litestream is replicating the WAL.
-// This lane deletes only caches, logs, and finished operational rows, in small
-// batches that yield the event loop.  Orders, fills, positions, approvals,
-// transfers, and high-water-mark inputs are refused by name before any DELETE
-// is prepared.
+// This lane deletes only disposable caches, logs, and finished operational
+// rows, in small batches that yield the event loop.  Orders, fills,
+// positions, approvals, transfers, and high-water-mark inputs are refused by
+// name before any DELETE is prepared.
+//
+// history_cache_eod (durable EOD price history) is intentionally NOT an age
+// target: bars are permanent upserts with no age-based deletion, backing the
+// ~5y deep-history lookback.  Only this module can DELETE, and the table is
+// unlisted, so assertPruneTableAllowed refuses it by name.
 //
 // Free pages go back to the OS only when auto_vacuum is already INCREMENTAL,
 // via a capped incremental_vacuum.  A full file rewrite is never issued: on a
@@ -50,7 +55,6 @@ export const MONEY_PATH_TABLES = [
 
 const MONEY_PATH_SET = new Set<string>(MONEY_PATH_TABLES);
 
-export const HISTORY_CACHE_RETENTION_DAYS = 400;
 export const SYMBOL_FIELD_CACHE_RETENTION_DAYS = 180;
 export const STRATEGY_RUN_RETENTION_DAYS = 120;
 export const STRATEGY_RUN_REQUEST_RETENTION_DAYS = 30;
@@ -75,6 +79,7 @@ const FULL_AT_KEY = "storage-hygiene:lastFullAt";
 const CHECKPOINT_AT_KEY = "storage-hygiene:lastCheckpointAt";
 
 const RETAIN_REASON: Record<string, string> = {
+  history_cache_eod: "durable price history (no age deletion)",
   llm_usage: "lifetime LLM usage retention",
   document_chunks: "retrieval corpus",
   document_chunks_fts: "retrieval corpus",
@@ -143,10 +148,6 @@ function isoCutoff(now: Date, days: number): string {
   return new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
-function dayCutoff(now: Date, days: number): string {
-  return isoCutoff(now, days).slice(0, 10);
-}
-
 export const RETENTION_TARGETS: readonly RetentionTarget[] = [
   {
     id: "strategy-runs-terminal",
@@ -183,15 +184,6 @@ export const RETENTION_TARGETS: readonly RetentionTarget[] = [
     whereSql: "status NOT IN ('skipped', 'running') AND started_at < ?",
     payloadColumn: "summary",
     cutoff: (now) => isoCutoff(now, TASK_JOURNAL_RETENTION_DAYS)
-  },
-  {
-    id: "history-cache-eod",
-    category: "quote_bar_cache",
-    table: "history_cache_eod",
-    retentionDays: HISTORY_CACHE_RETENTION_DAYS,
-    whereSql: "date < ?",
-    payloadColumn: "date",
-    cutoff: (now) => dayCutoff(now, HISTORY_CACHE_RETENTION_DAYS)
   },
   {
     id: "symbol-field-latest",

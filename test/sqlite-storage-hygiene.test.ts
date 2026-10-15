@@ -70,6 +70,8 @@ describe("storage hygiene decisions", () => {
     expect(() => hygiene.assertPruneTableAllowed("fill_events")).toThrow(/money-path/);
     expect(() => hygiene.assertPruneTableAllowed("settings")).toThrow(/money-path/);
     expect(() => hygiene.assertPruneTableAllowed("portfolio_snapshots")).toThrow(/money-path/);
+    expect(() => hygiene.assertPruneTableAllowed("history_cache_eod")).toThrow(/unlisted/);
+    expect(hygiene.RETENTION_TARGETS.some((target) => target.table === "history_cache_eod")).toBe(false);
     expect(() => hygiene.assertPruneTableAllowed("llm_usage")).toThrow(/unlisted/);
     expect(() => hygiene.assertPruneTableAllowed("not_a_table")).toThrow(/unlisted/);
   });
@@ -308,12 +310,18 @@ describe("storage hygiene against a database", () => {
       midIso
     );
 
+    // Durable EOD price history: permanent upserts, no age deletion.  Rows
+    // older than the retired 400-day window — including rows older than five
+    // years — must survive every hygiene pass.
     db.prepare(
       "INSERT INTO history_cache_eod (ticker, date, close, source, updated_at) VALUES ('AAPL', ?, 1, 'test', ?)"
     ).run(dayBefore(500), oldIso);
     db.prepare(
       "INSERT INTO history_cache_eod (ticker, date, close, source, updated_at) VALUES ('AAPL', ?, 2, 'test', ?)"
     ).run(dayBefore(3), newIso);
+    db.prepare(
+      "INSERT INTO history_cache_eod (ticker, date, close, source, updated_at) VALUES ('AAPL', ?, 3, 'test', ?)"
+    ).run(dayBefore(2200), oldIso);
     db.prepare(
       `INSERT INTO symbol_field_latest (symbol, field, value_json, source, as_of, fetched_at)
        VALUES ('AAPL', 'pe', '1', 'test', ?, ?)`
@@ -414,8 +422,11 @@ describe("storage hygiene against a database", () => {
     const journal = (db.prepare("SELECT id FROM task_journal ORDER BY id").all() as Array<{ id: string }>).map((row) => row.id);
     expect(journal).toEqual(["j-run", "j-skip-new"]);
     expect(
-      (db.prepare("SELECT date FROM history_cache_eod").all() as Array<{ date: string }>).map((row) => row.date)
-    ).toEqual([dayBefore(3)]);
+      (db.prepare("SELECT date FROM history_cache_eod ORDER BY date").all() as Array<{ date: string }>).map(
+        (row) => row.date
+      )
+    ).toEqual([dayBefore(2200), dayBefore(500), dayBefore(3)]);
+    expect(report.estimates.some((row) => row.table === "history_cache_eod")).toBe(false);
     expect(
       (db.prepare("SELECT symbol FROM symbol_field_latest").all() as Array<{ symbol: string }>).map((row) => row.symbol)
     ).toEqual(["MSFT"]);
@@ -440,6 +451,63 @@ describe("storage hygiene against a database", () => {
       (db.prepare("SELECT as_of FROM enrichment_coverage_fields").get() as { as_of: string }).as_of
     ).toBe("cov-31");
     expect(db.prepare("SELECT 1 AS ok FROM enrichment_coverage_runs WHERE as_of = 'cov-0'").get()).toBeUndefined();
+  });
+
+  it("preserves durable EOD history older than five years across hygiene passes", async () => {
+    const { db, hygiene } = await open();
+    clearHygieneRows(db);
+    // Regression for the #4666/#4661 retention conflict: hygiene once deleted
+    // history_cache_eod rows older than 400 days while the deep-history design
+    // promises permanent upserts and a ~5y (1825d) lookback.  Every age below —
+    // including 6y+ — must survive, and the report must carry no history estimate.
+    const ancient = dayBefore(2300);
+    const fiveYears = dayBefore(1825);
+    const justOld = dayBefore(401);
+    const fresh = dayBefore(3);
+    const stamp = isoDaysBefore(10);
+    for (const [ticker, date, close] of [
+      ["AAPL", ancient, 1],
+      ["AAPL", fiveYears, 2],
+      ["AAPL", justOld, 3],
+      ["AAPL", fresh, 4],
+      ["MSFT", ancient, 5]
+    ] as Array<[string, string, number]>) {
+      db.prepare(
+        "INSERT INTO history_cache_eod (ticker, date, close, source, updated_at) VALUES (?, ?, ?, 'test', ?)"
+      ).run(ticker, date, close, stamp);
+    }
+    const report = await hygiene.runStorageHygiene({
+      now: NOW,
+      dryRun: false,
+      skipSizeWalk: true,
+      litestreamAgeSeconds: null,
+      checkpoint: () => ({ busy: 0, log: 0, checkpointed: 0 })
+    });
+    expect(report.errors).toEqual([]);
+    expect(report.estimates.some((row) => row.table === "history_cache_eod")).toBe(false);
+    expect(
+      (
+        db
+          .prepare("SELECT ticker, date FROM history_cache_eod ORDER BY ticker, date")
+          .all() as Array<{ ticker: string; date: string }>
+      ).map((row) => `${row.ticker}:${row.date}`)
+    ).toEqual([
+      `AAPL:${ancient}`,
+      `AAPL:${fiveYears}`,
+      `AAPL:${justOld}`,
+      `AAPL:${fresh}`,
+      `MSFT:${ancient}`
+    ]);
+    // A second consecutive live pass must not narrow it either.
+    const second = await hygiene.runStorageHygiene({
+      now: NOW,
+      dryRun: false,
+      skipSizeWalk: true,
+      litestreamAgeSeconds: null,
+      checkpoint: () => ({ busy: 0, log: 0, checkpointed: 0 })
+    });
+    expect(second.errors).toEqual([]);
+    expect(count(db, "history_cache_eod")).toBe(5);
   });
 
   it("yields between full delete batches", async () => {
