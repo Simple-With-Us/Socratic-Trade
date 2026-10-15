@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — run-failure watchdog re-arm flake (ST-4521)
+
+**What.**  Halt marker `since` used the watchdog tick entry `now`, which could precede the halt `policy_change` audit.  `resolveRearmTimestamp` then picked an older active `policy_change` as `rearmedAt`, disagreeing with the real re-arm receipt by a few ms (flaky CI on `test/run-failure-watchdog.test.ts:298`).
+
+**Branch.**  `cursor/flaky-run-failure-watchdog-rearm-58b5`
+
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  `npx vitest run test/run-failure-watchdog.test.ts` 23/23.  Targeted re-arm test 30/30.  `npm run build` pending this handoff.
+
+**Next.**  Open PR ready for review; merge via Deployer when `verify` is green.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.

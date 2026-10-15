@@ -291,10 +291,13 @@ describe("runFailureWatchdogTick", () => {
       .prepare(
         `SELECT created_at FROM audit_events
          WHERE user_id = ? AND connected_account_id = ? AND kind = 'policy_change'
+           AND json_valid(payload)
+           AND json_extract(payload, '$.value.systemState') = 'active'
          ORDER BY created_at DESC LIMIT 1`
       )
       .get(USER, ACCT) as { created_at: string };
     const saved = d.getInternalSetting<{ rearmedAt?: string }>(`runFailureWatch:${USER}:${ACCT}`);
+    // Same receipt the watchdog reads (audit time, not tick `Date.now()`).
     expect(saved?.rearmedAt).toBe(rearmAudit.created_at);
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
     expect(w.getRunFailureHaltMarker(USER, ACCT)).toBeNull();
