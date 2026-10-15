@@ -92,6 +92,7 @@ struct ContentView: View {
 
             if store.isAuthenticated {
                 MobileControlView(pendingDeepLink: $pendingDeepLink)
+                    .id(store.sessionEpoch)
                     .transition(.opacity)
                     .storeTransientAlerts()
                     .fullScreenCover(isPresented: Binding(

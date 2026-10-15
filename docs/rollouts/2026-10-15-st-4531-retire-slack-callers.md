@@ -46,4 +46,4 @@ The authoritative `verify` CI job is the gate for that.
 
 ## Next Steps & Blockers
 
-- Merge after `verify` CI green.  Refs ST-4531.
+- Landed on `main` via PR #4696 (2026-10-15).  Follow-up PR clears merge-conflict markers that were committed in this rollout file on `main` and adds regression tests for rule 49 + `agent-sync post` flags.
