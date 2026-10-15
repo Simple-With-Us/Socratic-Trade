@@ -8,7 +8,7 @@
 
 **Verification.**  `npx vitest run test/peer-db-fault-health.test.ts test/local-db-fault-classification.test.ts`; `npx tsc --noEmit`.
 
-**Next.**  PR ready for review; Refs ST-3988.
+**Next.**  PR #4694 — Kody flush-path fix landed (peer soft rows call `alertConnectionFailure`); awaiting `verify`.  Refs ST-3988.
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
