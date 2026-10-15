@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 Grok — PR #4664 merge main and handoff order
+
+**What.**  Merged `origin/main` (`2656320f`, Tradier sandbox HTTP 400, including `a3d21b73` SQLite storage hygiene) into `cursor/data-cascade-reliability-eb70`.  The merge was clean.  No migration renumber.  The one unresolved review thread (Kody rule [33] on the cascade rollout) asked for `npm test` before `npm run build` in the Round 10 paragraph.  That sentence and the Round 11 gate sentence now use the canonical order.  No product code change.  The thread was not resolved.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm test` was 9393 passed, 51 skipped, and 2 failed, both outside this diff.  `test/egress-guard.test.ts` fails because this sandbox resolves discord.com to `198.18.0.1`.  `test/data-catalog-completeness.test.ts` reads peRatio completeness 1 from the local `data/app.db` and passes 4/4 against an empty database.  `npm run build` ok.  Hosted `verify` on `2a48ac8f` was green before this merge.
+
+**Next.**  Push and comment `@kody start-review`.  Do not merge from this lane.  Do not resolve threads.
+
 ## 2026-10-15 Claude — PR #4664 autofix round 11
 
 **What.**  Triaged all 15 review threads.  Four were still unresolved: three Sentry ones (`data-providers.ts` 429 lane hold, `market.ts` screener fallback cache, `provider-rate-limit.ts` RapidAPI service limits) and one Kody rule-[6] thread on the inherited PLAN.md row for PR #4663.  All three Sentry findings were already fixed in `4fc19a96` — `fetchWithRetry` still skips the lane hold while a retry remains and opens it only for a positive `Retry-After`; `resolveProviderLimiterConfigForCall` still keeps `alpha-vantage-rapidapi` at 5/min when the pacer bucket is a RapidAPI host, with a regression test; price-less directory rows still stay out of `screenerCache` and `screenerLastGood`.  The one actionable item was Kody's: the PLAN.md row for the merged PR #4663 carried only a GitHub PR reference.  PR #4663 is board item `SOCRATIC-TRADE-2S`, so the row header now carries both references, satisfying rule [6]'s two-part requirement.  No code change.  The branch was already current with `origin/main` (0 commits behind), so no merge was needed.
