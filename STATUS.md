@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 CURSOR — Board 512444e3 iOS / Playwright / deploy-freshness CI
+
+**What.**  Triage for GB-Monitor board `512444e3`: `ios-ship` last failed 2026-10-13 (ASC HTTP 401); last successful archive 2026-10-14; `verify-ios` green on 2026-10-15 main pushes; Playwright and deploy-freshness cron green; Sentry BN/BR/BS/BP unresolved count zero.  Follow-up PR hardens `asc-api.mjs` to prefer `ASC_*` from process env (hosted Actions) over the on-disk secrets file.
+
+**Branch.**  `cursor/ios-ci-hygiene-512444e3-56e3`
+
+**Verification.**  See `docs/rollouts/2026-10-15-ios-ci-hygiene-512444e3.md`.
+
+**Next.**  Ready PR for GB-Deployer; board comment blocked (CURSOR Linear/Zulip keys not installed in cloud).
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.
