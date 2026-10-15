@@ -23,7 +23,11 @@ Armed PRs starved when something called `gh pr update-branch` every ~15–19 min
 bash -n scripts/merge-shepherd.sh
 bash scripts/merge-shepherd-ci-inflight.selftest.sh
 SHEPHERD_DRY_RUN=1 bash scripts/merge-shepherd.sh
+npm run lint
+npx tsc --noEmit
 ```
+
+GB-MONITOR pickup (2026-10-15): merged `origin/main` into PR branch (`7a779aeb`); `verify` on #4705 was green before merge-forward; re-run expected after push.
 
 ## Next Steps & Blockers
 
