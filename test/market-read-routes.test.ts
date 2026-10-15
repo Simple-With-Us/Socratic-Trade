@@ -113,54 +113,70 @@ describe("fetchPriceSeries", () => {
   const range = { from: "2026-07-01", to: "2026-07-31" };
 
   it("returns closes DESCENDING with volume, ticker uppercased", async () => {
-    const series = await fetchPriceSeries("aapl", range, async () => [
+    const read = await fetchPriceSeries("aapl", range, async () => [
       bar("2026-07-28", 230.1, 40_000_000),
       bar("2026-07-29", 231.0, 41_000_000),
       bar("2026-07-30", 233.4, 41_230_000)
     ], JULY_30_AFTER_CLOSE);
-    expect(series.ticker).toBe("AAPL");
-    expect(series.closes).toEqual([
-      { date: "2026-07-30", close: 233.4, volume: 41_230_000 },
-      { date: "2026-07-29", close: 231.0, volume: 41_000_000 },
-      { date: "2026-07-28", close: 230.1, volume: 40_000_000 }
-    ]);
-    expect(series.currentPrice).toBe(233.4);
-    expect(series.currentPriceDate).toBe("2026-07-30");
+    expect(read).toEqual({
+      kind: "ok",
+      series: {
+        ticker: "AAPL",
+        closes: [
+          { date: "2026-07-30", close: 233.4, volume: 41_230_000 },
+          { date: "2026-07-29", close: 231.0, volume: 41_000_000 },
+          { date: "2026-07-28", close: 230.1, volume: 40_000_000 }
+        ],
+        currentPrice: 233.4,
+        currentPriceDate: "2026-07-30"
+      }
+    });
   });
 
   it("filters closes to [from, to] but keeps currentPrice from the full series", async () => {
-    const series = await fetchPriceSeries("AAPL", { from: "2026-07-01", to: "2026-07-28" }, async () => [
+    const read = await fetchPriceSeries("AAPL", { from: "2026-07-01", to: "2026-07-28" }, async () => [
       bar("2026-07-27", 228),
       bar("2026-07-28", 230.1),
       bar("2026-07-30", 233.4)
     ], JULY_30_AFTER_CLOSE);
-    expect(series.closes).toEqual([
-      { date: "2026-07-28", close: 230.1 },
-      { date: "2026-07-27", close: 228 }
-    ]);
-    // Range-independent: the true latest close even though it falls outside the requested window.
-    expect(series.currentPrice).toBe(233.4);
-    expect(series.currentPriceDate).toBe("2026-07-30");
+    expect(read).toEqual({
+      kind: "ok",
+      series: {
+        ticker: "AAPL",
+        closes: [
+          { date: "2026-07-28", close: 230.1 },
+          { date: "2026-07-27", close: 228 }
+        ],
+        currentPrice: 233.4,
+        currentPriceDate: "2026-07-30"
+      }
+    });
   });
 
-  it("unknown symbol / no bars → 200-shaped empty series (closes: [], null currentPrice)", async () => {
-    const series = await fetchPriceSeries("NOTREAL", range, async () => null);
-    expect(series).toEqual({ ticker: "NOTREAL", closes: [], currentPrice: null, currentPriceDate: null });
+  it("unknown symbol / no bars → ok empty series (closes: [], null currentPrice)", async () => {
+    const read = await fetchPriceSeries("NOTREAL", range, async () => null);
+    expect(read).toEqual({
+      kind: "ok",
+      series: { ticker: "NOTREAL", closes: [], currentPrice: null, currentPriceDate: null }
+    });
   });
 
   it("empty symbol never calls the fetcher", async () => {
     const fetcher = vi.fn(async () => [bar("2026-07-30", 1)]);
-    const series = await fetchPriceSeries("   ", range, fetcher, JULY_30_AFTER_CLOSE);
+    const read = await fetchPriceSeries("   ", range, fetcher, JULY_30_AFTER_CLOSE);
     expect(fetcher).not.toHaveBeenCalled();
-    expect(series.closes).toEqual([]);
+    expect(read).toEqual({
+      kind: "ok",
+      series: { ticker: "", closes: [], currentPrice: null, currentPriceDate: null }
+    });
   });
 
-  it("withholds a stale tail as an empty series so the caller falls back", async () => {
-    const series = await fetchPriceSeries("AAPL", range, async () => [
+  it("marks a stale tail so the route can return 502 instead of an empty 200", async () => {
+    const read = await fetchPriceSeries("AAPL", range, async () => [
       bar("2026-07-29", 231),
       bar("2026-07-30", 233.4)
     ], Date.UTC(2026, 9, 15, 14, 0, 0));
-    expect(series).toEqual({ ticker: "AAPL", closes: [], currentPrice: null, currentPriceDate: null });
+    expect(read).toEqual({ kind: "stale" });
   });
 });
 
@@ -169,25 +185,31 @@ describe("fetchPriceSeries", () => {
 describe("fetchSpxCloses", () => {
   it("pulls SPY bars and returns them DESCENDING within the range", async () => {
     const fetcher = vi.fn(async () => [bar("2026-07-29", 635.1), bar("2026-07-30", 636.2)]);
-    const closes = await fetchSpxCloses({ from: "2026-07-01", to: "2026-07-31" }, fetcher, JULY_30_AFTER_CLOSE);
+    const read = await fetchSpxCloses({ from: "2026-07-01", to: "2026-07-31" }, fetcher, JULY_30_AFTER_CLOSE);
     expect(fetcher).toHaveBeenCalledWith("SPY");
-    expect(closes).toEqual([
-      { date: "2026-07-30", close: 636.2 },
-      { date: "2026-07-29", close: 635.1 }
-    ]);
+    expect(read).toEqual({
+      kind: "ok",
+      closes: [
+        { date: "2026-07-30", close: 636.2 },
+        { date: "2026-07-29", close: 635.1 }
+      ]
+    });
   });
 
   it("returns an empty array when no SPY bars are available", async () => {
-    expect(await fetchSpxCloses({ from: "2026-07-01", to: "2026-07-31" }, async () => null)).toEqual([]);
+    expect(await fetchSpxCloses({ from: "2026-07-01", to: "2026-07-31" }, async () => null)).toEqual({
+      kind: "ok",
+      closes: []
+    });
   });
 
-  it("withholds SPY bars that end before the latest completed session", async () => {
-    const closes = await fetchSpxCloses(
+  it("marks SPY bars that end before the latest completed session as stale", async () => {
+    const read = await fetchSpxCloses(
       { from: "2026-07-01", to: "2026-07-31" },
       async () => [bar("2026-07-29", 635.1), bar("2026-07-30", 636.2)],
       Date.UTC(2026, 9, 15, 14, 0, 0)
     );
-    expect(closes).toEqual([]);
+    expect(read).toEqual({ kind: "stale" });
   });
 });
 
@@ -238,16 +260,11 @@ describe("GET /api/market/prices/[symbol]", () => {
     });
   });
 
-  it("200 with an empty series when the newest close is behind the latest session", async () => {
+  it("502 when the newest close is behind the latest session", async () => {
     mockFetchDailyOHLC.mockResolvedValue([bar("2020-01-02", 10), bar("2020-01-03", 11)]);
     const res = await pricesRoute(authedRequest(url, TEST_TOKEN), ctx);
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
-      ticker: "AAPL",
-      closes: [],
-      currentPrice: null,
-      currentPriceDate: null
-    });
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ ok: false, error: "stale" });
   });
 
   it("200 with empty closes for an unknown symbol (not an error status)", async () => {
@@ -291,11 +308,11 @@ describe("GET /api/market/spx", () => {
     });
   });
 
-  it("200 with { closes: [] } when SPY ends before the latest session", async () => {
+  it("502 when SPY ends before the latest session", async () => {
     mockFetchDailyOHLC.mockResolvedValue([bar("2020-01-02", 1), bar("2020-01-03", 2)]);
     const res = await spxRoute(authedRequest(url, TEST_TOKEN));
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ closes: [] });
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ ok: false, error: "stale" });
   });
 
   it("200 with { closes: [] } when no SPY bars exist in range", async () => {
