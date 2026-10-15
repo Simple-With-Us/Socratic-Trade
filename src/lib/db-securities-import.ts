@@ -259,6 +259,47 @@ export interface ImportedCacheCounts {
   spxRows: number;
 }
 
+/**
+ * True when every row this push would actually write is readable back from the cache.
+ * Blank tickers, non-finite closes, and dates that are not YYYY-MM-DD are skipped on
+ * write (`normTicker` / `normDate`), so they are not a missing consumed ack.  A padded
+ * `YYYY-MM-DD` is compared after the same trim the writer uses.  An empty persistable
+ * payload is readable: there is nothing the cache should hold.
+ */
+export function importedPushIsReadable(input: {
+  refs?: Array<{ ticker: string }>;
+  prices?: Array<{ ticker: string; closes: Array<{ date: string; close?: number }> }>;
+  spx?: Array<{ date: string; close?: number }>;
+}): boolean {
+  for (const ref of input.refs ?? []) {
+    const ticker = normTicker(ref.ticker);
+    if (!ticker) continue;
+    if (!getImportedRef(ticker)) return false;
+  }
+  for (const price of input.prices ?? []) {
+    const ticker = normTicker(price.ticker);
+    if (!ticker) continue;
+    const have = new Set(getImportedPriceCloses(ticker).map((close) => close.date));
+    for (const close of price.closes) {
+      if (close.close !== undefined && !isFiniteNumber(close.close)) continue;
+      const date = normDate(close.date);
+      if (!date) continue;
+      if (!have.has(date)) return false;
+    }
+  }
+  const spx = input.spx ?? [];
+  if (spx.length > 0) {
+    const have = new Set(getImportedSpxCloses().map((close) => close.date));
+    for (const close of spx) {
+      if (close.close !== undefined && !isFiniteNumber(close.close)) continue;
+      const date = normDate(close.date);
+      if (!date) continue;
+      if (!have.has(date)) return false;
+    }
+  }
+  return true;
+}
+
 /** Row counts across the imported cache (for the admin route response + observability). */
 export function getImportedCacheCounts(): ImportedCacheCounts {
   const db = getDb();
@@ -269,10 +310,121 @@ export function getImportedCacheCounts(): ImportedCacheCounts {
   return { refs, pricedTickers, priceRows, spxRows };
 }
 
-/** Test seam: wipe the imported cache. */
+/** Test seam: wipe the imported cache and stored push receipts. */
 export function clearImportedSecuritiesForTests(): void {
   const db = getDb();
   db.prepare("DELETE FROM imported_price_eod").run();
   db.prepare("DELETE FROM imported_spx_eod").run();
   db.prepare("DELETE FROM imported_securities_ref").run();
+  db.prepare("DELETE FROM peer_push_receipts").run();
+}
+
+export interface StoredPeerPushReceipt {
+  pushId: string;
+  receivedAt: string;
+  health: string;
+  deliveredAt: string | null;
+  consumedAt: string | null;
+  body: Record<string, unknown>;
+}
+
+function readStoredPeerPushReceipt(row: {
+  push_id: string;
+  received_at: string;
+  health: string;
+  delivered_at: string | null;
+  consumed_at: string | null;
+  body_json: string;
+}): StoredPeerPushReceipt | null {
+  try {
+    const body = JSON.parse(row.body_json) as unknown;
+    if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+    return {
+      pushId: row.push_id,
+      receivedAt: row.received_at,
+      health: row.health,
+      deliveredAt: row.delivered_at,
+      consumedAt: row.consumed_at,
+      body: body as Record<string, unknown>,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** First receipt for this push id, if we already answered it. */
+export function getPeerPushReceipt(pushId: string): StoredPeerPushReceipt | null {
+  const row = getDb()
+    .prepare(
+      `SELECT push_id, received_at, health, delivered_at, consumed_at, body_json
+       FROM peer_push_receipts WHERE push_id = ?`
+    )
+    .get(pushId) as
+    | {
+        push_id: string;
+        received_at: string;
+        health: string;
+        delivered_at: string | null;
+        consumed_at: string | null;
+        body_json: string;
+      }
+    | undefined;
+  if (!row) return null;
+  return readStoredPeerPushReceipt(row);
+}
+
+/**
+ * Persist the answer for a push.  An `ok` receipt is kept: a later insert for that
+ * id does not replace it.  A non-ok receipt is replaced, so a retry can recover
+ * after a transient consumed miss or a 500.
+ */
+export function savePeerPushReceipt(input: {
+  pushId: string;
+  receivedAt: string;
+  health: string;
+  deliveredAt: string | null;
+  consumedAt: string | null;
+  body: Record<string, unknown>;
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO peer_push_receipts (push_id, received_at, health, delivered_at, consumed_at, body_json)
+       VALUES (@pushId, @receivedAt, @health, @deliveredAt, @consumedAt, @bodyJson)
+       ON CONFLICT(push_id) DO UPDATE SET
+         received_at = excluded.received_at,
+         health = excluded.health,
+         delivered_at = excluded.delivered_at,
+         consumed_at = excluded.consumed_at,
+         body_json = excluded.body_json
+       WHERE peer_push_receipts.health != 'ok'`
+    )
+    .run({
+      pushId: input.pushId,
+      receivedAt: input.receivedAt,
+      health: input.health,
+      deliveredAt: input.deliveredAt,
+      consumedAt: input.consumedAt,
+      bodyJson: JSON.stringify(input.body),
+    });
+}
+
+/** Newest stored receipt, for the ops snapshot health field. */
+export function latestPeerPushReceipt(): StoredPeerPushReceipt | null {
+  const row = getDb()
+    .prepare(
+      `SELECT push_id, received_at, health, delivered_at, consumed_at, body_json
+       FROM peer_push_receipts ORDER BY received_at DESC LIMIT 1`
+    )
+    .get() as
+    | {
+        push_id: string;
+        received_at: string;
+        health: string;
+        delivered_at: string | null;
+        consumed_at: string | null;
+        body_json: string;
+      }
+    | undefined;
+  if (!row) return null;
+  return readStoredPeerPushReceipt(row);
 }
