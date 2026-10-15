@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 // @ts-expect-error - plain ESM operator helper, intentionally dependency-free (single-line so the directive covers the specifier)
-import { comparePins, ctHasNpmDep, gitRef, lockResolvedSha, normVersion, packageSpec, parseProvenance, PKG } from "../scripts/check-shared-package-pin.mjs";
+import { comparePins, ctHasNpmDep, ctReadTokens, gitRef, isGithubRateLimit, lockResolvedSha, normVersion, packageSpec, parseProvenance, PKG } from "../scripts/check-shared-package-pin.mjs";
 
 describe("shared-package pin check (vendor-era triangle)", () => {
   it("normalizes git tag specs and lock SHAs", () => {
@@ -25,6 +25,29 @@ describe("shared-package pin check (vendor-era triangle)", () => {
     expect(parsed.release).toBe("v2.5.2");
     expect(parsed.commit).toBe("b2847eb9b7839ad1241ee455a688ef0eec4ccdd6");
     expect(parseProvenance("- Immutable release: `v2.5.2`\n").commit).toBe("");
+  });
+
+  it("reads Congress.Trade with the Actions token before the user PAT", () => {
+    expect(
+      ctReadTokens({
+        GITHUB_TOKEN: "installation",
+        GH_TOKEN: "installation",
+        GH_PACKAGES_TOKEN: "user-pat",
+      })
+    ).toEqual(["installation", "user-pat"]);
+    expect(ctReadTokens({ GH_PACKAGES_TOKEN: "user-pat" })).toEqual(["user-pat"]);
+    expect(isGithubRateLimit("API rate limit exceeded for user ID 12656028 (HTTP 403)")).toBe(true);
+    expect(isGithubRateLimit("HTTP 401 Bad credentials")).toBe(false);
+  });
+
+  it("does not call a rate limit a missing token", () => {
+    const { problems } = comparePins({
+      stSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
+      umSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
+      ctRateLimited: true,
+    });
+    expect(problems.some((p: string) => /rate limited/i.test(p))).toBe(true);
+    expect(problems.some((p: string) => p.includes("GH_PACKAGES_TOKEN"))).toBe(false);
   });
 
   it("fails when CT is unreadable or reintroduces an npm dep", () => {
