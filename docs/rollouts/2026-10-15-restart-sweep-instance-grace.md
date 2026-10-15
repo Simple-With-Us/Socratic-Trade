@@ -23,6 +23,9 @@ The restart arm stays quiet for `RESTART_SWEEP_BOOT_GRACE_MS` (two minutes).  `i
 - `PLAN.md`
 - `docs/phase-7-strategy.md`
 - `docs/rollouts/2026-10-15-restart-sweep-instance-grace.md`
+- `scripts/check-shared-package-pin.mjs`
+- `.github/workflows/shared-package-pin-check.yml`
+- `test/shared-package-pin-check.test.ts`
 
 ## Decisions & Trade-offs
 
@@ -42,9 +45,15 @@ Run on this branch after the sweep change.
 - `npm test` — 9380 passed, 51 skipped, 25 failed.  The 25 are outside this diff: LLM and notify tests that see a sandbox `OPENROUTER` / Pushover credential, Twelve Data and Alpha Vantage provider fixtures, `cpuprofile-summary` failing on Node's `.ts` loader, and `server-metrics` `usesLocalHost`.  None are in the sweep files.
 - `npm run build` — exit 0.  Compiled with the existing warnings, 43 static pages.
 
+## Check-pin (shared failure on every PR in the burst)
+
+`check-pin` on this PR, and on the other open PRs between 07:32Z and 07:55Z, failed the same way: `API rate limit exceeded for user ID 12656028` while reading `jaywedgeworth22/Congress.Trade` `VENDOR-PROVENANCE.md`, then `::error::cannot read private Congress.Trade vendor provenance; set GH_PACKAGES_TOKEN`.  ST and UM were already both `v2.7.1` at lock SHA `5084afb3ffb269e7e28e0c30c880cab7d93409e7`, which matches the public provenance file.  Congress.Trade is public.  The script preferred `GH_PACKAGES_TOKEN`, a shared user PAT, over the Actions `GITHUB_TOKEN`.  That PAT is user 12656028.  When the fleet burns its hourly budget, every PR that runs this check goes red, including money-path PRs that do not touch the pin.  The three same-token retries do not clear a primary rate limit.  The script now tries `GITHUB_TOKEN`, then `GH_TOKEN` if it differs, then the PAT.  A rate-limit response switches credentials immediately and is reported as a rate limit.
+
+`origin/main` (`df7e6d10`, #4703 / #4708 / #4702) is merged with a merge commit.  Migration 95 stayed the only new migration.  No review threads were open.
+
 ## Next Steps & Blockers
 
-PR #4701 is ready for review with `do-not-automerge`.  Auto-merge is not enabled.  Jay squash-merges.  No Kody review threads were open at handoff.  The PR link is on Linear ST-8.
+PR #4701 stays ready for review with `do-not-automerge`.  Auto-merge stays off.  Jay squash-merges.  Resolve ST-8 only after the fix has shipped.
 
 ## Zero-Code Findings
 

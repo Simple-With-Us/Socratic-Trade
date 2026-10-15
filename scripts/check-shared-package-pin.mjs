@@ -11,10 +11,16 @@
  * This script fails (exit 1) when:
  *   - this repo has no pin
  *   - Usage-Monitor has no pin or a different tag/version
- *   - Congress.Trade cannot be read (private; needs GH_PACKAGES_TOKEN)
+ *   - Congress.Trade cannot be read
  *   - CT provenance / vendor version disagrees
  *   - CT app/package.json reintroduces the npm dependency
  *   - provenance lists a commit that does not match a consumer lock SHA
+ *
+ * Congress.Trade is public.  Read it with the Actions GITHUB_TOKEN first.
+ * GH_PACKAGES_TOKEN is a shared user PAT (user 12656028).  Preferring it
+ * exhausts that user's rate limit and fails every PR that runs this check,
+ * including money-path PRs that did not touch the pin.  A 403 rate limit is
+ * not a missing token.
  *
  * Intentionally NOT a required merge check yet -- coordinated three-repo
  * bumps still need a red flag without hard-blocking the first PR of the pair.
@@ -72,26 +78,73 @@ function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
-function ghRaw(repo, filePath, token) {
+export function isGitHubRateLimit(message) {
+  const text = String(message || "");
+  return /rate limit/i.test(text) || /\bHTTP 429\b/.test(text);
+}
+
+// Actions GITHUB_TOKEN has its own per-repo budget.  GH_TOKEN is the same
+// credential when the workflow sets both.  The user PAT is last, and only
+// when it is a different value, so a rate-limited PAT is not the first try.
+export function readTokenCandidates(env = process.env) {
+  const ordered = [];
+  const actions = String(env.GITHUB_TOKEN || "").trim();
+  const gh = String(env.GH_TOKEN || "").trim();
+  const packages = String(env.GH_PACKAGES_TOKEN || "").trim();
+  for (const token of [actions, gh, packages]) {
+    if (token && !ordered.includes(token)) ordered.push(token);
+  }
+  return ordered;
+}
+
+export const CT_UNREADABLE =
+  "cannot read private Congress.Trade vendor provenance; set GH_PACKAGES_TOKEN (repo secret, read access to jaywedgeworth22/Congress.Trade)";
+
+export const CT_RATE_LIMITED =
+  "Congress.Trade fetch was rate-limited. Read the public repo with the Actions GITHUB_TOKEN before the shared user PAT (GH_PACKAGES_TOKEN).";
+
+export function ctFetchProblem(message) {
+  if (isGitHubRateLimit(message)) return CT_RATE_LIMITED;
+  return CT_UNREADABLE;
+}
+
+function ghRawOnce(repo, filePath, token) {
   const env = { ...process.env };
   if (token) env.GH_TOKEN = token;
-  const maxAttempts = 3;
-  let lastErr = "";
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const result = spawnSync(
-      "gh",
-      ["api", `repos/${repo}/contents/${filePath}`, "-H", "Accept: application/vnd.github.raw"],
-      { encoding: "utf8", env }
-    );
-    if (result.status === 0) {
-      return result.stdout;
-    }
-    lastErr = (result.stderr || result.stdout || "gh api failed").trim();
-    if (attempt < maxAttempts) {
-      spawnSync(process.execPath, ["-e", `setTimeout(() => {}, ${1000 * attempt})`]);
+  else delete env.GH_TOKEN;
+  const result = spawnSync(
+    "gh",
+    ["api", `repos/${repo}/contents/${filePath}`, "-H", "Accept: application/vnd.github.raw"],
+    { encoding: "utf8", env }
+  );
+  if (result.status === 0) return result.stdout;
+  const lastErr = (result.stderr || result.stdout || "gh api failed").trim();
+  throw new Error(`${repo}/${filePath}: ${lastErr}`);
+}
+
+function ghRaw(repo, filePath, tokens) {
+  const list = (Array.isArray(tokens) ? tokens : [tokens]).filter(Boolean);
+  const attempts = list.length ? list : [""];
+  let lastErr = null;
+  for (const token of attempts) {
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return ghRawOnce(repo, filePath, token);
+      } catch (err) {
+        lastErr = err;
+        const message = err instanceof Error ? err.message : String(err);
+        // A primary rate limit does not clear in two seconds.  Retrying the
+        // same token only spends more of the exhausted budget.  The next
+        // candidate is a different credential.
+        if (isGitHubRateLimit(message)) break;
+        if (attempt < maxAttempts) {
+          spawnSync(process.execPath, ["-e", `setTimeout(() => {}, ${1000 * attempt})`]);
+        }
+      }
     }
   }
-  throw new Error(`${repo}/${filePath}: ${lastErr}`);
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr || "gh api failed"));
 }
 
 function fail(msg) {
@@ -111,9 +164,7 @@ export function comparePins(input) {
     problems.push(`ST pin ${stSpec} (${stV}) != UM pin ${umSpec} (${umV})`);
   }
   if (input.ctUnreadable) {
-    problems.push(
-      "cannot read private Congress.Trade vendor provenance; set GH_PACKAGES_TOKEN (repo secret, read access to jaywedgeworth22/Congress.Trade)"
-    );
+    problems.push(input.ctUnreadableDetail || CT_UNREADABLE);
     return { problems, stV, umV, ctV: "" };
   }
   if (input.ctHasNpmDep) {
@@ -147,13 +198,13 @@ function main() {
   console.log(`Local spec (${localPkgPath}): ${stSpec || "(missing)"}`);
   if (stLockSha) console.log(`Local lock SHA: ${stLockSha}`);
 
-  const umToken = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "";
+  const tokens = readTokenCandidates();
   let umSpec = "";
   let umLockSha = "";
   try {
-    const umPkg = JSON.parse(ghRaw("jaywedgeworth22/Usage-Monitor", "package.json", umToken));
+    const umPkg = JSON.parse(ghRaw("jaywedgeworth22/Usage-Monitor", "package.json", tokens));
     umSpec = packageSpec(umPkg);
-    const umLock = JSON.parse(ghRaw("jaywedgeworth22/Usage-Monitor", "package-lock.json", umToken));
+    const umLock = JSON.parse(ghRaw("jaywedgeworth22/Usage-Monitor", "package-lock.json", tokens));
     umLockSha = lockResolvedSha(umLock);
     console.log(`UM spec: ${umSpec || "(missing)"}`);
     if (umLockSha) console.log(`UM lock SHA: ${umLockSha}`);
@@ -161,8 +212,8 @@ function main() {
     fail(`could not read public Usage-Monitor pin: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  const ctToken = process.env.GH_PACKAGES_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "";
   let ctUnreadable = false;
+  let ctUnreadableDetail = "";
   let ctRelease = "";
   let ctCommit = "";
   let ctVendorVersion = "";
@@ -171,19 +222,19 @@ function main() {
     const provenance = ghRaw(
       "jaywedgeworth22/Congress.Trade",
       "app/vendor/congress-trading-shared/VENDOR-PROVENANCE.md",
-      ctToken
+      tokens
     );
     const parsed = parseProvenance(provenance);
     ctRelease = parsed.release;
     ctCommit = parsed.commit;
     const vendorPkg = JSON.parse(
-      ghRaw("jaywedgeworth22/Congress.Trade", "app/vendor/congress-trading-shared/package.json", ctToken)
+      ghRaw("jaywedgeworth22/Congress.Trade", "app/vendor/congress-trading-shared/package.json", tokens)
     );
     ctVendorVersion = String(vendorPkg.version || "");
-    const appPkg = JSON.parse(ghRaw("jaywedgeworth22/Congress.Trade", "app/package.json", ctToken));
+    const appPkg = JSON.parse(ghRaw("jaywedgeworth22/Congress.Trade", "app/package.json", tokens));
     let rootPkg = null;
     try {
-      rootPkg = JSON.parse(ghRaw("jaywedgeworth22/Congress.Trade", "package.json", ctToken));
+      rootPkg = JSON.parse(ghRaw("jaywedgeworth22/Congress.Trade", "package.json", tokens));
     } catch {
       rootPkg = null;
     }
@@ -191,8 +242,10 @@ function main() {
     console.log(`CT provenance release: ${ctRelease || "(missing)"} commit: ${ctCommit || "(none)"}`);
     console.log(`CT vendor package.json version: ${ctVendorVersion || "(missing)"}`);
   } catch (err) {
-    console.error(`CT fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`CT fetch failed: ${message}`);
     ctUnreadable = true;
+    ctUnreadableDetail = ctFetchProblem(message);
   }
 
   const { problems, stV, umV, ctV } = comparePins({
@@ -201,6 +254,7 @@ function main() {
     stLockSha,
     umLockSha,
     ctUnreadable,
+    ctUnreadableDetail,
     ctRelease,
     ctCommit,
     ctVendorVersion,

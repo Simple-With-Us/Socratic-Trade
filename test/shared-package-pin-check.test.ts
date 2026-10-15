@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 // @ts-expect-error - plain ESM operator helper, intentionally dependency-free (single-line so the directive covers the specifier)
-import { comparePins, ctHasNpmDep, gitRef, lockResolvedSha, normVersion, packageSpec, parseProvenance, PKG } from "../scripts/check-shared-package-pin.mjs";
+import { comparePins, ctFetchProblem, ctHasNpmDep, gitRef, isGitHubRateLimit, lockResolvedSha, normVersion, packageSpec, parseProvenance, PKG, readTokenCandidates } from "../scripts/check-shared-package-pin.mjs";
 
 describe("shared-package pin check (vendor-era triangle)", () => {
   it("normalizes git tag specs and lock SHAs", () => {
@@ -25,6 +25,28 @@ describe("shared-package pin check (vendor-era triangle)", () => {
     expect(parsed.release).toBe("v2.5.2");
     expect(parsed.commit).toBe("b2847eb9b7839ad1241ee455a688ef0eec4ccdd6");
     expect(parseProvenance("- Immutable release: `v2.5.2`\n").commit).toBe("");
+  });
+
+  it("reads the public repo with the Actions token before the shared user PAT", () => {
+    expect(readTokenCandidates({
+      GITHUB_TOKEN: "actions",
+      GH_TOKEN: "actions",
+      GH_PACKAGES_TOKEN: "pat",
+    })).toEqual(["actions", "pat"]);
+    expect(readTokenCandidates({ GH_PACKAGES_TOKEN: "pat" })).toEqual(["pat"]);
+    const rateLimit = "API rate limit exceeded for user ID 12656028. (HTTP 403)";
+    expect(isGitHubRateLimit(rateLimit)).toBe(true);
+    expect(isGitHubRateLimit("HTTP 404 Not Found")).toBe(false);
+    const problem = ctFetchProblem(rateLimit);
+    expect(problem).toContain("GITHUB_TOKEN");
+    expect(problem.includes("set GH_PACKAGES_TOKEN")).toBe(false);
+    expect(ctFetchProblem("Not Found (HTTP 404)")).toContain("GH_PACKAGES_TOKEN");
+    expect(comparePins({
+      stSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
+      umSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
+      ctUnreadable: true,
+      ctUnreadableDetail: problem,
+    }).problems).toEqual([problem]);
   });
 
   it("fails when CT is unreadable or reintroduces an npm dep", () => {
