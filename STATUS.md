@@ -6,7 +6,7 @@
 
 **Branch.**  `cursor/remove-st-primary-bridge-927d`
 
-**Verification.**  Pending full gate after commit.
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  Scheduler startup tests 21/21.  `npm run build` ok.  Full `npm test`: 24 failures pre-existing in this sandbox (unchanged vs unrelated suites).
 
 **Next.**  Open ready PR, `@kody start-review`.
 

@@ -34,10 +34,11 @@ Owner requested permanent removal on 2026-10-06 after repeatedly disabling the d
 ## Verification State
 
 ```bash
-npm run lint
-npx tsc --noEmit
-npm test
-npm run build
+npm run lint          # 0 errors (854 warnings, baseline)
+npx tsc --noEmit      # ok
+npx vitest run test/scheduler-managed-vector-reconcile.test.ts test/background-worker-startup.test.ts  # 21/21
+npm test              # 9356 passed; 24 failed pre-existing (llm-provider/openrouter/server-metrics in cloud sandbox)
+npm run build         # ok
 ```
 
 ## Next Steps & Blockers
