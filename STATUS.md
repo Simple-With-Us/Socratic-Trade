@@ -4,7 +4,7 @@
 
 **What.**  `auto-merge-prs.yml` was fail-closing every PR because `gh api --jq -r` is two arguments, so CODEOWNERS money-path globs never ran.  The fetch is one `--jq` expression.  Money-path diffs and `do-not-automerge` are not armed.  Disable retries a rejected PAT with the Actions token.  If that mutation is forbidden (`Resource not accessible by integration`) the job still succeeds when `autoMergeRequest` is already null, and fails when the PR is still armed.  Disable jobs grant `contents: write` so the Actions token can call the disable mutation.  The arm job stays read-only.
 
-**Branch.**  `cursor/automerge-money-path-gate-c050`.  Continues PR #4697, whose `verify` failed on `NODE_ENV` in `test/disable-pr-automerge.test.ts` and whose disable jobs exited 1 while auto-merge was already off.
+**Branch.**  `cursor/automerge-money-path-gate-c050` (PR #4727).  Parallel to PR #4697; this lane keeps per-job `contents: write` on disable jobs and the `confirm_disarmed_or_fail` read path in `scripts/disable-pr-automerge.sh`.  Merged `origin/main` at `3f4ef5e5` (2026-10-15 conflict sweep).
 
 **Verification.**  Targeted vitest 25/25 (`disable-pr-automerge`, dry run, branch-protection gate, CODEOWNERS classifier).  Dry run: `src/lib/broker.ts` and `do-not-automerge` print `arm=false` `disarm=true`; `README.md` prints `arm=true`.  `npx tsc --noEmit` exit 0.
 
