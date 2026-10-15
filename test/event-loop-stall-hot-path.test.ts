@@ -86,16 +86,18 @@ describe("serving-thread sqlite stalls mapped from 2026-10-05 profiles", () => {
     );
     let scanMs = 0;
     let batch = 50_000;
-    // Hosted CI can report 99ms on the last growth step; keep adding until the
-    // unindexed scan clearly crosses the 100ms stall threshold or we hit a row cap.
-    while (scanMs < 100 && n < 4_000_000) {
+    // The prune must stay under 100ms and at least 4x faster than this scan.
+    // Stopping at the first sample over 100ms fails that ratio on hosted CI:
+    // a 116ms scan with a 66ms prune is 264 < 116, which is false.
+    // Grow until the scan clears 4x the 100ms prune budget.
+    while (scanMs < 400 && n < 4_000_000) {
       add(batch, recent);
       scanMs = elapsed(() => {
         scan.get(cutoff);
       });
       batch = Math.min(batch * 2, 400_000);
     }
-    if (scanMs < 100 && n < 4_000_000) {
+    if (scanMs < 400 && n < 4_000_000) {
       add(200_000, recent);
       scanMs = elapsed(() => {
         scan.get(cutoff);

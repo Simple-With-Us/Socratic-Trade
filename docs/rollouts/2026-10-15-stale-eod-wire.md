@@ -64,6 +64,8 @@ npx vitest run test/market-read-routes.test.ts test/congress-share.test.ts test/
 
 `tsc --noEmit` clean.  Those seven files: 186 passed.  `npm run build` exit 0.
 
+Hosted `verify` on `970b4909` failed in `test/event-loop-stall-hot-path.test.ts`: the unindexed scan stopped at 116ms and the indexed prune took 66ms, so `pruneMs * 4 < scanMs` was 264 < 116.  The scan now grows until it clears 400ms, four times the 100ms prune budget.
+
 ## 6. Zero-Code Findings
 
 GROK's claim dated 2026-09-30.  `linear_claim` has no force flag.  Setting the issue to Todo removed `claimed:GROK` (`removed_labels: 1`).  CURSOR then claimed it.  Sentry org `simple-with-us` had no grouped issue for this path in 90 days.
