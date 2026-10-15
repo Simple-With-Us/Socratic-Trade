@@ -22,6 +22,20 @@ the BEHIND state — `package-lock.json` only, no conflict with PR files.  Re-ve
 test/congress-trade-events.test.ts` 41/41, `npm run build` clean.  Pre-existing local
 `llm-provider` / `openrouter-credits` failures reproduce on `origin/main` (runner has a live
 `OPENROUTER_API_KEY`); not caused by this PR and left untouched.  Auto-merge enabled.
+
+**2026-10-15 [codex-autofix] — PR #4695 review pass (round 9).**  One new review-bot item:
+Kody rule 26 wanted the `npm test` line in the ST-3846 rollout note to end in a pass/fail
+token rather than a coverage description.  Fixed — the line is now `# ok`, and the
+`congress-push-receipt` / `congress-trade-events` coverage detail moved to a sub-bullet.
+Docs-only diff (`docs/rollouts/2026-10-15-congress-push-receipt-st-3846.md`).  Branch was
+already level with `origin/main`, so no merge was needed.  Re-verified: `npx tsc --noEmit`
+clean, `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-events.test.ts`
+42/42, `npm run build` clean.  The 4 failing files in the full suite (`llm-provider`,
+`openrouter-credits`, `chat-llm`, `framework-review`) reproduce identically on a fresh
+`origin/main` worktree — this runner has a live `OPENROUTER_API_KEY` that those tests assume
+is absent.  Pre-existing, outside this diff, left untouched.  Both remaining open threads
+resolved (Sentry's index-alignment finding verified fixed in `93da2abb`).
+
 ## 2026-10-15 Cursor Cloud — check-pin token order (ST-2582 PR #4698)
 
 **What.**  Merged `origin/main` (`df7e6d10`) with a merge commit.  `check-pin` was failing because it read public Congress.Trade with `GH_PACKAGES_TOKEN` first.  That secret is one user's PAT, so a burst of pull requests shares one rate limit and the job reports a missing token.  The script now tries the Actions installation token first and keeps the PAT as a fallback.  A rate-limit failure is no longer labeled as a missing token.

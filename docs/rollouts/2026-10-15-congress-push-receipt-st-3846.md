@@ -32,9 +32,11 @@ This PR is the **webhook consumption receipt** Congress.Trade `delivery/webhook.
 ```bash
 npm run lint   # 0 errors (warnings only)
 npx tsc --noEmit  # clean
-npm test  # full vitest suite; congress-push-receipt + congress-trade-events paths covered
+npm test  # ok
 npm run build  # clean
 ```
+
+- Full vitest suite; `congress-push-receipt` + `congress-trade-events` paths covered.
 
 Congress.Trade delivery tests (separate worktree):
 
@@ -46,3 +48,13 @@ npm test -- src/delivery/__tests__/pushReceipt.test.ts src/delivery/__tests__/qu
 
 - Merge App B PR, then Congress.Trade PR; deploy both before relying on receipts in prod dashboards.
 - Land `congress-trading-shared@2.8.0` and repoint both apps to the shared export (local duplicates today).
+
+## Review rounds (2026-10-15)
+
+- **Round 9** — one new review-bot item: Kody rule 26 wanted the `npm test` verification line
+  above to end in a pass/fail token rather than a coverage description.  Fixed docs-only: the
+  line is now `# ok` and the coverage detail moved to a sub-bullet.  Sentry's index-alignment
+  thread was re-verified against the head (`resolveCongressEventIds` maps to a parallel
+  `(string | undefined)[]`, so positions are preserved) and resolved.  `npx tsc --noEmit`
+  clean, `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-events.test.ts`
+  42/42, `npm run build` clean.
