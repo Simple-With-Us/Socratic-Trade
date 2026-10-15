@@ -6,9 +6,9 @@
 
 **Branch.**  `cursor/retire-slack-ops-callers-889f`
 
-**Verification.**  `fleet-ops-notify.selftest.sh` 5/5, `alert-deploy-freshness.selftest.sh` 9/9; full `npm run lint`, `tsc`, `test`, `build` pending this commit.
+**Verification.**  `fleet-ops-notify.selftest.sh` 5/5, `alert-deploy-freshness.selftest.sh` 9/9; `npm run lint` 0 errors; `npx tsc --noEmit` ok; `npm run build` ok; `npm test` 9374 passed (25 unrelated failures on this VM).
 
-**Next.**  Open PR (ready), owner adds Zulip GitHub secrets if Zulip pages are wanted from CI.
+**Next.**  PR #4714 ready for merge; owner adds Zulip GitHub secrets if Zulip pages are wanted from CI.
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
