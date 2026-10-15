@@ -26,13 +26,11 @@ Congress.Trade watchdog `st_inbound_market_data` reported fundamentals and analy
 ## Verification State
 
 ```bash
-npm run lint
-npx tsc --noEmit
-npm test -- test/congress-share.test.ts
-npm run build
+npm run lint          # 0 errors, 856 warnings (grandfathered)
+npx tsc --noEmit      # ok
+npm test -- test/congress-share.test.ts   # 95 passed
+npm run build         # ok
 ```
-
-(Paste results in commit/PR.)
 
 ## Next Steps & Blockers
 
