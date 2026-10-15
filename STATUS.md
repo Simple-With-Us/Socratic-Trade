@@ -10,6 +10,15 @@
 
 **Next.**  PR #4697 stays ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.  #4727's disable permissions and jq reader are on this branch.  Jay can close #4727.  Leave ST-3326 In Progress until the fix has shipped.
 
+## 2026-10-15 Cursor Cloud — storage hygiene forever retention (no age deletes)
+
+**What.**  Jay decision 03:13 CT: remove **all** age-based row deletes — `sqlite-storage-hygiene`, `audit-prune`, `pruneTaskJournal`, portfolio snapshot sweep, embed_stage TTL/cap sweep, economic calendar, `headline_first_seen`, and `api_health_log` per-lane count trim.  Maintenance-only hygiene lane; transient `embed_stage` delivery deletes remain.  `HEALTH_LOG_LANE_CAP` is read-bound only for streak heuristics.
+
+**Branch.**  `cursor/forever-retention-no-age-deletes-504b`
+
+**Verification.**  Merged `origin/main` 2026-10-15; `npx vitest run test/sqlite-storage-hygiene.test.ts test/forever-retention-no-age-delete.test.ts test/health-lane-cap.test.ts` (post-merge).
+
+**Next.**  PR #4722 ready; merge after verify green.
 ## 2026-10-15 Cursor Cloud — CT fundamentals/analyst nightly push (ST-4537)
 
 **What.**  Congress.Trade `st_inbound_market_data` fundamentals + analyst stale since 2026-10-06; scan-hook-only path.  Nightly `runCongressDailyShare` now POSTs fundamentals/analyst from `symbol_field_latest` for the monitored universe.
