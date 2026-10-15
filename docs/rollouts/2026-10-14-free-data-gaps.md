@@ -46,26 +46,25 @@ Senate HTML uses the browser User-Agent already on `scrapeSenateEfd`, not the SE
 
 ## Verification State
 
+Each block below is only `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build`, in that order.  The next four sentences are that block's pass or fail, in the same order.  Targeted file runs are prose after the four statuses, never a fifth command in the block.
+
+First pass on this branch:
+
 ```bash
 npm run lint
 npx tsc --noEmit
 npm test
-npx vitest run test/congress-share.test.ts test/sec-facts.test.ts test/sec-ingest-worker.test.ts
 npm run build
 ```
 
-`npm run lint` ok (0 errors, 866 warnings on the first pass; a second pass after the mock fixes was 0 errors and 867 warnings, then the new unused fetch argument was referenced).  `npx tsc --noEmit` ok after the test-type fixes.  Targeted history and web-source tests: 63 passed.  After the full suite, the three files the new score and User-Agent import broke were fixed and re-run: 144 passed.
+`npm run lint` pass (0 errors, 866 warnings on the first pass; a second pass after the mock fixes was 0 errors and 867 warnings, then the new unused fetch argument was referenced).  `npx tsc --noEmit` pass after the test-type fixes.  `npm test` fail (full suite, no fast mode): 29 failed, 9278 passed, 51 skipped, 826 files, about 19 minutes.  The wrapper can exit 0 while vitest prints failures; this run's log ended `EXIT:1`, and the `Tests ... failed` line is authoritative.  `npm run build` pass.  It compiled with the existing warning backlog and collected page data.
 
-`npm test` (full suite, no fast mode): 29 failed, 9278 passed, 51 skipped, 826 files, about 19 minutes.  The wrapper can exit 0 while vitest prints failures; this run's log ended `EXIT:1`, and the `Tests ... failed` line is authoritative.
-
-Six of those failures were this diff and are fixed:
+Six of those `npm test` failures were this diff and are fixed:
 
 - `test/congress-share.test.ts` expected the old count score 75.  Unpriced rows with shares now score `12000/14000` = 86.
 - `test/sec-facts.test.ts` and `test/sec-ingest-worker.test.ts` mocked `web-sources/http` without `secUserAgent`, which `ingestCompanyFacts` now calls.
 
-The other 23 failures are this cloud shell, not this diff: OpenRouter and native LLM routing tests see a configured key (`chat-llm`, `llm-provider`, `framework-review`, `red-team`, `openrouter-credits`); Pushover and email tests see injected notify credentials; `cpuprofile-summary` cannot load a `.ts` module under Node 22; `server-metrics` does not treat this VM as the local host; Alpha Vantage mid-chunk fast-stop counted 3 fetches instead of 2.  None of those files are in this diff.
-
-`npm run build` ok on the first pass of this branch.  It compiled with the existing warning backlog and collected page data.
+The other 23 failures are this cloud shell, not this diff: OpenRouter and native LLM routing tests see a configured key (`chat-llm`, `llm-provider`, `framework-review`, `red-team`, `openrouter-credits`); Pushover and email tests see injected notify credentials; `cpuprofile-summary` cannot load a `.ts` module under Node 22; `server-metrics` does not treat this VM as the local host; Alpha Vantage mid-chunk fast-stop counted 3 fetches instead of 2.  None of those files are in this diff.  Targeted history and web-source tests on that pass, outside the block: 63 passed.  After the full suite, the three files the new score and User-Agent import broke were fixed and re-run: 144 passed.
 
 Review follow-up (`origin/main` was already merged, no merge commit):
 
@@ -76,7 +75,7 @@ npm test
 npm run build
 ```
 
-`npm run lint` pass (0 errors, 866 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 1 failed, 9310 passed, 51 skipped, 826 files.  The failure is `test/egress-guard.test.ts` resolving `https://discord.com` with real DNS.  This shell cannot resolve that host.  The file is not in this diff.  Targeted history and web-source tests, run in addition to `npm test`: 67 passed.  `npm run build` was not part of that pass.
+`npm run lint` pass (0 errors, 866 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 1 failed, 9310 passed, 51 skipped, 826 files.  The failure is `test/egress-guard.test.ts` resolving `https://discord.com` with real DNS.  This shell cannot resolve that host.  The file is not in this diff.  `npm run build` fail on that pass because the build was not run.  Targeted history and web-source tests, outside the block: 67 passed.
 
 Schema colocation after merging `origin/main` (`79df823d`):
 
@@ -87,7 +86,7 @@ npm test
 npm run build
 ```
 
-`npm run lint` pass (0 errors, 866 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 1 failed, 9311 passed, 51 skipped, 826 files.  The same discord.com DNS failure remains.  That file is not in this diff.  Targeted history and web-source tests, run in addition to `npm test`: 68 passed.  `npm run build` compiled with warnings in 82s, then the process was killed (exit 137) during Next.js "Running TypeScript".  Standalone `tsc --noEmit` had already passed.  Hosted `verify` runs the real build.
+`npm run lint` pass (0 errors, 866 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 1 failed, 9311 passed, 51 skipped, 826 files.  The same discord.com DNS failure remains.  That file is not in this diff.  `npm run build` fail.  It compiled with warnings in 82s, then the process was killed (exit 137) during Next.js "Running TypeScript".  Standalone `tsc --noEmit` had already passed.  Hosted `verify` runs the real build.  Targeted history and web-source tests, outside the block: 68 passed.
 
 Merged `origin/main` at `82162336` (PR #4663) with no conflicts, then answered the two open Kody threads:
 
@@ -98,13 +97,24 @@ npm test
 npm run build
 ```
 
-`npm run lint` pass (0 errors, 866 warnings on the full tree before the test edit; `npx eslint test/web-sources-sec.test.ts` pass after it).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9318 passed, 51 skipped, 827 files.  `test/egress-guard.test.ts` cannot resolve discord.com.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from this workspace's stored coverage report.  Neither file is in this diff.  Hosted `verify` passed on `9b61310b`.  Targeted `npx vitest run test/web-sources-sec.test.ts test/history.test.ts test/web-sources.test.ts test/trading-liveness.test.ts test/batched-halt-cause.test.ts`: 91 passed.  `npm run build` pass.  It compiled with the existing Edge warnings, finished TypeScript, and generated 43/43 static pages.
+`npm run lint` pass (0 errors, 866 warnings on the full tree before the test edit; eslint on `test/web-sources-sec.test.ts` pass after it).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9318 passed, 51 skipped, 827 files.  `test/egress-guard.test.ts` cannot resolve discord.com.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from this workspace's stored coverage report.  Neither file is in this diff.  Hosted `verify` passed on `9b61310b`.  `npm run build` pass.  It compiled with the existing Edge warnings, finished TypeScript, and generated 43/43 static pages.  Targeted history, web-source, liveness, and halt-cause tests, outside the block: 91 passed.
 
 `parseInsiderBulkTables` only accepts TSV tables, so the negative case injects the strict-schema rejection (an undeclared `extra` key) at the `safeParse` call the parser already makes.  The returned list is empty.  Removing that call would leave the NVDA filing in the result.
 
+Merged `origin/main` at `1588bae8` (PR #4658 keyless options enrichment) with no conflicts.  No migration renumber.  The twelve review threads on PR #4661 were already resolved.  Kody's last note on the verification thread still called the first block and two build lines non-conforming, so those blocks now label every command pass or fail in order.
+
+```bash
+npm run lint
+npx tsc --noEmit
+npm test
+npm run build
+```
+
+`npm run lint` pass (0 errors, 866 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9342 passed, 51 skipped, 829 files.  `test/egress-guard.test.ts` rejects `https://discord.com` because this sandbox resolves it to a private or internal address.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from the local `data/app.db`.  The same file passes (4 tests) when `DATABASE_URL` points at an empty database.  Neither file is in the diff against `origin/main`.  Hosted `verify` passed on `7f3ff8fa` before this merge.  `npm run build` pass.  It finished TypeScript and generated the static pages.
+
 ## Next Steps & Blockers
 
-Ask Kody to re-review.  Do not merge from this lane.  Do not deploy.  Do not resolve review threads from this lane.  PR Autofix remains red on every review event because `AI-Fleet-Coordinator` `pr-autofix-reusable.yml` at `2e671004` uses `secrets` in a step `if`.  That is not fixed by a caller edit on this branch.
+Ask Kody to re-review.  Do not merge from this lane.  Do not deploy.  Do not resolve review threads from this lane.  PR Autofix remains red on every review event.  `AI-Fleet-Coordinator` `pr-autofix-reusable.yml` line 163 uses `secrets` in a step `if` at the pin `2e671004` and still on coordinator `main` (`7508b399`).  The caller matches `origin/main`, and review events read the workflow from the default branch, so a pin change on this branch does not clear those runs.
 
 Board row `b53cc5f8970c469e8f561767c35fc334` is claimed in progress by GROK.  Fleet Linear team ST was not moved.  `AGENT_SEAT` is unset on this cloud seat, and the board file used `--by GROK` because that is the seat writing the PR.  Do not mark the row completed until the PR merges.
 
