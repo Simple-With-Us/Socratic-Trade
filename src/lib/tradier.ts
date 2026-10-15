@@ -29,7 +29,7 @@ import { isAbortOrTimeoutError, isTransientNetworkError } from "./network-errors
 import { fillMissingQuotesWithClose, estimateReviewNotional } from "./alpaca";
 import { mergeAccountCapabilities } from "./venue-contract";
 import { normalizeVenueOrder } from "./venue-normalization";
-import { TRADIER_BROKER_IO_DEADLINE_MS, equityOrdersDefaultSinceIso, withDeadline } from "./inflight-deadline";
+import { BROKER_ORDER_PAGE_CAP, TRADIER_BROKER_IO_DEADLINE_MS, brokerAbortSignal, equityOrdersDefaultSinceIso, withDeadline } from "./inflight-deadline";
 import {
   TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE,
   TRADIER_TAG_LOOKUP_UNVERIFIED_MESSAGE,
@@ -444,7 +444,7 @@ class TradierBrokerGateway implements BrokerGateway {
       }
       body = form.toString();
     }
-    const response = await fetch(url, { method, headers, body, signal: AbortSignal.timeout(TRADIER_BROKER_IO_DEADLINE_MS) });
+    const response = await fetch(url, { method, headers, body, signal: brokerAbortSignal(undefined, TRADIER_BROKER_IO_DEADLINE_MS) });
     let parsed: unknown = undefined;
     const text = await response.text();
     if (text) {
@@ -771,7 +771,7 @@ class TradierBrokerGateway implements BrokerGateway {
   // still working).  A filled or canceled order from an earlier session is not in it — use
   // getEquityOrder for broker truth on a known id.
   private async fetchRawOrderRows(accountNumber: string): Promise<Record<string, unknown>[]> {
-    const maxPages = 50;
+    const maxPages = BROKER_ORDER_PAGE_CAP;
     const rows: Record<string, unknown>[] = [];
     const seen = new Set<string>();
     for (let page = 1; page <= maxPages; page++) {
