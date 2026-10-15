@@ -63,6 +63,7 @@ Re-verify on production after deploy: `bash scripts/fetch-prod-ops-snapshot.sh` 
 
 ## Next Steps & Blockers
 
+- 2026-10-15: third `origin/main` merge (#4716 iOS CI hygiene / ST-2916) — no conflicts; PR branch mergeable again.
 - Post-deploy: compare `timingsMs.users` vs other sections on prod; if `users` still dominates, add audit/run indexes or tighter default `auditPerUser` / `runsPerUser` caps for the diagnostic token.
 - Optional: WAL checkpoint / maintenance runbook for 400MB+ pending WAL (ops, not app code).
 - Linear team ST: track deploy note when merged.
