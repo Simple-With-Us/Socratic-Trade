@@ -1,5 +1,9 @@
 # Current Status
 
+## 2026-10-15 CODEX — iOS sign-out caches and money-action results (ST-2578)
+
+PR #4713 is merged with `origin/main` through `3b8e3e4b`.  The shared URL-cache XCTest race is fixed with per-session ephemeral cache/cookie stores, and sign-out clears the cookie store used by its client.  CI on the pre-#4737 final content passed, including 273 iOS tests and full `verify-hosted`.  Local lint, TypeScript, and build pass after merging #4737.  Jay directed auto-merge after required checks pass; the unique diff remains the ten iOS/handoff paths.
+
 ## 2026-10-15 Cursor Cloud — broker call bounds (ST-2570)
 
 **What.**  Broker reads and writes carry a deadline and an abort signal.  Order listings stop at 50 pages and 500 rows.  Quote and eligibility batches stop at 25 symbols.  Stops, stale exits, and fill reconcile launch for every eligible account before any health probe is awaited, so one hung probe cannot delay the next account's protection.  A hung read releases the stop and exit guards.  A write that has started keeps its guard.  A strategy run whose health probe or snapshot never returns finishes `failed`.  An abort after a synthetic stop is claimed, and before the exit order is sent, reverts the claim and keeps the attempt id.  eToro rates and eligibility responses are parsed with Zod before a row is read.
@@ -94,15 +98,13 @@ is absent.  Pre-existing, outside this diff, left untouched.  Both remaining ope
 resolved (Sentry's index-alignment finding verified fixed in `93da2abb`).
 ## 2026-10-15 CURSOR — Board 512444e3 iOS / Playwright / deploy-freshness CI
 
-**What.**  Triage for GB-Monitor board `512444e3`: `ios-ship` last failed 2026-10-13 (ASC HTTP 401); last successful archive 2026-10-14; `verify-ios` green on 2026-10-15 main pushes; Playwright and deploy-freshness cron green; Sentry BN/BR/BS/BP unresolved count zero.  Follow-up PR hardens `asc-api.mjs` to prefer `ASC_*` from process env (hosted Actions) over the on-disk secrets file.
+**What.**  Sign-out and account switch drop the snapshot UserDefaults row, the shared URL cache, and in-memory account stores.  Device preferences stay.  Approve, reject, and cancel each report success, failed, or retryable.  The shell rebuilds on `sessionEpoch` so Coach, scan, and the other view stores do not keep the previous account.
 
-**Branch.**  `cursor/ios-ci-hygiene-512444e3-56e3`
+**Branch.**  `cursor/ios-signout-money-outcomes-43db`
 
-**Verification.**  See `docs/rollouts/2026-10-15-ios-ci-hygiene-512444e3.md`.  `npm run lint`,
-`npx tsc --noEmit`, and `npm run build` clean; the new node test 8/8.  `npm test` reports 12
-assertion failures across 4 LLM-routing suites, reproduced identically on a clean
-`git stash` baseline — caused by provider keys present in this sandbox's env, not by this PR.
+**Verification.**  Swift compile and XCTest run on hosted `ios-build`.  This seat does not run `xcodebuild`.  `npx vitest run test/shared-package-pin-check.test.ts` covers the check-pin token order.
 
+**Next.**  PR #4713 stays ready with `do-not-automerge`.  Do not arm auto-merge.  Jay squash-merges after `verify` + `verify-ios` green.  Shepherd 2026-10-15 ~15:30 UTC: merged `origin/main` at `16285744` (was DIRTY); diff still 10 files (iOS + handoff).  All six review threads resolved (2 Sentry fixes, 4 Kody defer/out-of-scope).  Prior head `6ff75cfc` had `verify-hosted` + `check-pin` green; `verify-ios` stuck queued on macos-latest ~2h — new CI run expected on push.
 **Review follow-up.**  Kody threads are addressed.  Credential tests cover per-variable
 fallback, blank env, a missing file, an unreadable path, and `t.after` temp cleanup.
 Rule 33: `resolveAscCredentials` has no implicit `~/.secrets` default.  A file is read
