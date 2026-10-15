@@ -46,6 +46,15 @@
 **Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  Scheduler startup tests 21/21.  `npm run build` ok.  Full `npm test`: 24 failures pre-existing in this sandbox (unchanged vs unrelated suites).
 
 **Next.**  Open ready PR, `@kody start-review`.
+## 2026-10-15 CURSOR — ST-3854 Quiver coverage board (sanitize legacy reports)
+
+**What.**  #4217 already excluded five retired Quiver lanes from `COVERAGE_TRACKED_FIELDS`.  Follow-up: `sanitizeEnrichmentCoverageReport` on `resolveEnrichmentCoverageReport` so durable pre-merge rows no longer show 0% Quiver fields; `retiredLaneFields` on reports + admin footnote.
+
+**Branch.**  `cursor/st-quiver-coverage-sanitize-8696`
+
+**Verification.**  Rebased on `main`; Playwright visual baseline for retired-lanes footnote; `verify` CI green after push.
+
+**Next.**  Deployer merges #4707; then CURSOR marks ST-3854 Done via Agent-Sync (not before merge).
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 

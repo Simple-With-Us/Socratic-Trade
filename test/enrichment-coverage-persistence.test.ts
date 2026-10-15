@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   __resetEnrichmentCoverageForTests,
   buildEnrichmentCoverageReport,
+  COVERAGE_RETIRED_LANE_FIELDS,
   getLastEnrichmentCoverageReport,
   type EnrichmentCoverageRecord
 } from "../src/lib/enrichment-coverage";

@@ -7,6 +7,7 @@ import {
   COVERAGE_RETIRED_LANE_FIELDS,
   COVERAGE_TRACKED_FIELDS,
   getLastEnrichmentCoverageReport,
+  sanitizeEnrichmentCoverageReport,
   paidProviderHasUsefulWaveBGap,
   scarceProviderHasUsefulGap,
   symbolHasCoverageGap,
@@ -79,10 +80,41 @@ describe("buildEnrichmentCoverageReport", () => {
       AAPL: { peRatio: 1, sources: { peRatio: "yahoo-finance" } }
     };
     const report = buildEnrichmentCoverageReport(merged, ["yahoo-finance"]);
+    expect(report.retiredLaneFields).toEqual([...COVERAGE_RETIRED_LANE_FIELDS]);
     for (const field of COVERAGE_RETIRED_LANE_FIELDS) {
       expect(report.fields.some((f) => f.field === field)).toBe(false);
       expect(report.missingFields).not.toContain(field);
     }
+  });
+
+  it("sanitizeEnrichmentCoverageReport strips legacy persisted Quiver rows", () => {
+    const legacy = buildEnrichmentCoverageReport(
+      {
+        AAPL: { peRatio: 1, sources: { peRatio: "yahoo-finance" } } as EnrichmentCoverageRecord
+      },
+      ["yahoo-finance"]
+    );
+    const polluted: typeof legacy = {
+      ...legacy,
+      fields: [
+        ...legacy.fields,
+        {
+          field: "congressTradesQuiver",
+          filledCount: 0,
+          totalSymbols: 1,
+          fillRate: 0,
+          winningSources: {},
+          mostFrequentSource: null,
+          missingSymbols: ["AAPL"]
+        }
+      ],
+      missingFields: [...legacy.missingFields, "congressTradesQuiver", "patentsQuiver"]
+    };
+    const clean = sanitizeEnrichmentCoverageReport(polluted);
+    expect(clean.fields.some((f) => f.field === "congressTradesQuiver")).toBe(false);
+    expect(clean.missingFields).not.toContain("congressTradesQuiver");
+    expect(clean.missingFields).not.toContain("patentsQuiver");
+    expect(clean.retiredLaneFields).toEqual([...COVERAGE_RETIRED_LANE_FIELDS]);
   });
 
   it("reports fill rates, most-frequent source, missing fields, and failures", () => {
