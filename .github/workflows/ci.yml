@@ -367,6 +367,8 @@ jobs:
           bash -n scripts/verify-deploy-sha.selftest.sh
           bash -n scripts/alert-deploy-freshness.sh
           bash -n scripts/alert-deploy-freshness.selftest.sh
+          bash -n scripts/github-actions-infisical-zulip-ops.sh
+          bash -n scripts/agent-sync-fleet-post.sh
           bash -n scripts/isolate-shared-box-batch.sh
           bash -n scripts/isolate-shared-box-batch.selftest.sh
           bash scripts/verify-deploy-sha.selftest.sh
