@@ -69,6 +69,23 @@ describe("peer upstream DB fault classification (ST-3988)", () => {
     expect(HEALTH_PEER_DB_CONTENTION_PREFIX.length).toBeGreaterThan(0);
   });
 
+  it("runs peer contention alerting through logApiHealth flush (soft row, not skipped)", async () => {
+    const { logApiHealth, flushApiHealthBuffer } = await import("../src/lib/db-health");
+    const { formatPeerDbHealthErrorText } = await import("../src/lib/peer-db-fault");
+    logApiHealth({
+      service: "congress-share",
+      ok: false,
+      errorText: formatPeerDbHealthErrorText(PROD_BODY_ERROR),
+      keySource: "env"
+    });
+    flushApiHealthBuffer();
+    await new Promise((r) => setTimeout(r, 200));
+    expect(sentry.captureMessage).toHaveBeenCalled();
+    const title = String(sentry.captureMessage.mock.calls[0]?.[0] ?? "");
+    expect(title).toContain("peer write contention");
+    expect(title).not.toContain("connection failed");
+  });
+
   it("alerts at Sentry warning with peer-db-contention, not connection failed", async () => {
     const { alertConnectionFailure, flushApiHealthBuffer } = await import("../src/lib/db-health");
     const { getDb } = await import("../src/lib/db");

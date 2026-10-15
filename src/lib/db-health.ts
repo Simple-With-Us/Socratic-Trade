@@ -465,7 +465,13 @@ function healthErrorTextForLog(opts: ApiHealthLogOpts): string | null {
   let errorText = opts.errorText ?? null;
   const filingApiAuthSoft =
     opts.service === "filingapi" && !opts.ok && isFilingApiAuthErrorText(errorText);
-  if (!opts.ok && errorText && (opts.soft || filingApiAuthSoft || isSoftHealthFailure(errorText))) {
+  if (
+    !opts.ok &&
+    errorText &&
+    (opts.soft || filingApiAuthSoft || isSoftHealthFailure(errorText)) &&
+    !errorText.startsWith(HEALTH_PEER_DB_CONTENTION_PREFIX) &&
+    !isPeerUpstreamDbFaultMessage(errorText, opts.service)
+  ) {
     if (!errorText.startsWith(HEALTH_SOFT_FAILURE_PREFIX)) {
       errorText = `${HEALTH_SOFT_FAILURE_PREFIX}${errorText}`;
     }
@@ -616,7 +622,14 @@ export function flushApiHealthBuffer(): void {
         !isIntentionalOffHealthService(p.service)
       ) {
         if (p.isSoft && !p.quotaResetAt) {
-          // pure expected-limit with no known reset: no automatic alert
+          // Pure expected-limit with no known reset: no automatic alert. Peer App A D1
+          // contention is soft for lane STOPPED heuristics but still needs the dedicated
+          // warning path in alertConnectionFailure (ST-3988).
+          if (isPeerUpstreamDbFaultMessage(p.errorText, p.service)) {
+            void alertConnectionFailure(p.service, p.keySource, p.userId, p.errorText, {
+              skipSentry: false
+            });
+          }
         } else {
           const lane = getLaneHealth(p.service, p.keySource, p.userId);
           if (p.quotaResetAt || lane.reason === HEALTH_REASON_CONSECUTIVE_FAILURES) {

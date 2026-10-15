@@ -8,7 +8,7 @@ PagerDuty #313 paged `[P0 production] congress-share connection failed` while bo
 
 - `src/lib/peer-db-fault.ts` — classifier, `[peer-db-contention]` health prefix, audit + advisory lane for App A write contention.
 - `src/lib/local-db-fault.ts` — exclude peer-originated SQLite strings from local classification.
-- `src/lib/db-health.ts` — peer path in `alertConnectionFailure` (Sentry `warning`, `health.failure_class=peer-db-contention`, title `peer write contention (App A D1)`); soft streak exclusion.
+- `src/lib/db-health.ts` — peer path in `alertConnectionFailure` (Sentry `warning`, `health.failure_class=peer-db-contention`, title `peer write contention (App A D1)`); soft streak exclusion; flush loop still calls that path for peer soft rows; peer errors are not double-stamped `[expected-limit]`.
 - `src/lib/congress-share.ts` — stamp peer-db errors at `logApiHealth` time.
 - `test/peer-db-fault-health.test.ts` — regression for classifier + alert path.
 
