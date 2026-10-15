@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — ST-3988 congress-share dependency DB health
+
+**What.**  Congress.Trade D1 `SQLITE_BUSY` import rejections no longer page as `congress-share connection failed`.  `alertConnectionFailure` routes them to `dependency-db-contention` (warning Sentry, no `provider_degraded` push).  Ops-token `/api/health` exposes `lastFailure` + `failureClass` on dependencies.
+
+**Branch.**  `cursor/st-3988-congress-share-health-classifier-4a0e`
+
+**Verification.**  `npx vitest run test/congress-share-dependency-db-health.test.ts test/local-db-fault-classification.test.ts test/connection-health-routing.test.ts test/health-transient-network-classification.test.ts` green.  `npx tsc --noEmit`, `npm run lint` 0 errors.
+
+**Next.**  PR ready for review; merge/deploy per owner.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.
