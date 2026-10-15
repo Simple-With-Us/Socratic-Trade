@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — ST-4531 retire Slack callers
+
+**What.**  Remaining ST Slack posts (deploy-freshness notify, provider-knob sync, `slack-sync.sh post`, Codex coordination helper) now use Zulip via `agent-sync-fleet-post.sh` / `agent-sync`.  Deploy-freshness workflow drops `SLACK_BOT_TOKEN`.
+
+**Branch.**  `cursor/st-4531-retire-slack-callers-89ad`
+
+**Verification.**  `bash -n` on touched scripts; `bash scripts/alert-deploy-freshness.selftest.sh`; `python3 scripts/test-cloud-coordination-bootstrap.py`.
+
+**Next.**  PR ready for review; Refs ST-4531.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.
