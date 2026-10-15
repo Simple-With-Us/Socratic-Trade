@@ -31,11 +31,11 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 
 **What.**  `origin/main` at `df7e6d10` is already merged.  Pushed local merge commits `1dc39c4e` and `5ee168ce`.  Fixed Kody Rule 35 on `docs/rollouts/2026-10-14-free-data-gaps.md` (verification block now records `npm run build` pass).  Replied on open review threads and resolved them after written explanations for merged-main `PLAN.md` rows without inventing board hashes.
 
-**Verification.**  `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  `npm run build` pass (43/43 static pages).  Hosted `verify` pending then green on pushed HEAD.
+**Verification.**  `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  `npm run build` pass (43/43 static pages).  Hosted `verify` green on `4c54d236` (run `38724409519`, job `verify-hosted` + required `verify`).
 
 **Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
 
-**Next.**  Deployer or Jay merges when satisfied.  Do not merge from this lane.
+**Next.**  GraphQL shows 0 unresolved review threads on the PR.  Deployer or Jay merges when satisfied.  Do not merge from this lane.
 
 ## 2026-10-14 GROK — PR #4661 review follow-up
 
