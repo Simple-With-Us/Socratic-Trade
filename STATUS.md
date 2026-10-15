@@ -6,9 +6,10 @@
 
 **Branch.**  `cursor/forever-retention-no-age-deletes-504b`
 
-**Verification.**  `npx vitest run test/sqlite-storage-hygiene.test.ts` (pending).  Full verify trio before push.
+**Verification.**  Merged `origin/main` 2026-10-15; `npx vitest run test/sqlite-storage-hygiene.test.ts test/forever-retention-no-age-delete.test.ts test/health-lane-cap.test.ts` (post-merge).
 
-**Next.**  Open PR ready for review; Linear claim when write budget resets.
+**Next.**  PR #4722 ready; merge after verify green.
+
 ## 2026-10-15 Cursor Cloud — remove ST primary Infisical bridge (ST-4318)
 
 **What.**  Permanent removal of the default-off Usage Monitor credential bridge writer: module, tests, scheduler lane, `/api/keys` triggers, and active env/backlog/docs setup.  Per-user encrypted API keys and tombstone behavior unchanged.

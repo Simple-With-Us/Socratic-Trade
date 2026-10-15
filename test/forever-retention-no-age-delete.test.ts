@@ -48,7 +48,7 @@ describe("forever retention — no age-based DELETE in policy modules", () => {
       const deletes = deleteStatements(source);
       for (const stmt of deletes) {
         if (rel.endsWith("db-embed-stage.ts") && isAllowedEmbedStageDelete(stmt)) continue;
-      if (rel.endsWith("db-health.ts") && stmt.includes("settings")) continue;
+        if (rel.endsWith("db-health.ts") && stmt.includes("settings")) continue;
         for (const pattern of AGE_PREDICATES) {
           expect(stmt).not.toMatch(pattern);
         }
