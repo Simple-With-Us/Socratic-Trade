@@ -1,5 +1,14 @@
 # Current Status
 
+## 2026-10-14 GROK — SQLite storage hygiene
+
+**What.**  Production SQLite is about 16.5 GB with a 415 MB WAL.  Background checks were stalling 76-79s and the scheduler lagged 120s.  PR #4666 adds a storage-hygiene job: table-size report, retention deletes for caches/logs/finished runs, batched deletes that yield, a PASSIVE WAL checkpoint with TRUNCATE only when Litestream looks safe, and incremental free-page reclaim.  It never runs a full file rewrite and never deletes orders, fills, positions, approvals, transfers, or HWM inputs.  Review fixes: the lane runs only on the scheduler leader, the cadence watermark is claimed before the pass, a wide Litestream directory is aged from its highest-named files, and each coverage delete pair is one transaction.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test` was 1 failed, 9341 passed, 51 skipped.  The failure is sandbox DNS for discord.com in `test/egress-guard.test.ts`, outside this diff.  Targeted `test/sqlite-storage-hygiene.test.ts` was 14 passed.  `npm run build` ok.
+
+**Docs.**  `docs/rollouts/2026-10-14-sqlite-storage-hygiene.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Label `do-not-automerge`.  Jay squashes.  Do not merge from this lane.  Linear team ST was not updated: this cloud seat has no Fleet Linear or Zulip credentials.
 ## 2026-10-14 Grok — PR #4665 merge #4658
 
 **What.**  After `40d76278` was pushed, `origin/main` moved to `1588bae8` (#4658 keyless options) and GitHub marked PR #4665 conflicting.  `git merge origin/main` auto-merged with no conflict markers and no migration renumber.  Shared files kept both the SEC XBRL path and the keyless options path.
