@@ -10,6 +10,15 @@
 
 **Next.**  Open ready PRs on Socratic-Trade and Congress.Trade; publish `congress-trading-shared@2.8.0` when permitted.
 
+**2026-10-15 [codex-autofix] — PR #4695 review pass.**  No new review-bot findings; the
+sole thread (Sentry, index misalignment in `resolveCongressEventIds`) was already fixed in
+`93da2abb` and is outdated.  Merged `origin/main` (lucide-react 1.55.0 dep bump) to clear
+the BEHIND state — `package-lock.json` only, no conflict with PR files.  Re-verified:
+`npx tsc --noEmit` clean, `npx vitest run test/congress-push-receipt.test.ts
+test/congress-trade-events.test.ts` 41/41, `npm run build` clean.  Pre-existing local
+`llm-provider` / `openrouter-credits` failures reproduce on `origin/main` (runner has a live
+`OPENROUTER_API_KEY`); not caused by this PR and left untouched.  Auto-merge enabled.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.
