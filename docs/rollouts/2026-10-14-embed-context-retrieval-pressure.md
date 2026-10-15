@@ -81,6 +81,8 @@ npm test
 
 ## Next Steps & Blockers
 
+2026-10-15 shepherd: merged latest `origin/main` into this branch (phase-7 doc conflict kept both 2026-10-14 sections).  Sentry threads on global backoff and outer-deadline queue wait resolved with no code change per Jay.
+
 Review the PR.  Do not merge from this lane.  After merge and the evening deploy, check Sentry 2G (retrieval-failed count at the open) and 2E (requested units vs 7500 windows).
 
 Fleet board claim could not be filed from this seat.  `board whoami` and a Linear write were not run: this cloud VM has no fleet client credentials (`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, or a seat `ZULIP_*`), and `scripts/install-fleet-coordination.sh` does not invent them.  The claim that would have been filed is Linear team ST, title "Fit embed input to the bge-m3 token budget and back off retrieval bursts", state In Progress, and Completed only after merge to `main`.  No Linear issue id was minted here.  `docs/EFFORT-LOG.md` is archived and was not edited.
