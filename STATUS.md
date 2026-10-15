@@ -31,7 +31,7 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 
 **What.**  GitHub `CONFLICTING` / `DIRTY`: `main` advanced to `49a76da4` (#4695 Congress push receipt ST-3846) while PR base was `e3ba1507`.  Merged `origin/main` clean (auto-merge `STATUS.md` only).  Zero unresolved review threads.  `needs-human-merge` — Jay merges.
 
-**Verification.**  Hosted `verify` pending on push.
+**Verification.**  Head `dc81c55a`.  Hosted `verify` green.  `mergeable: MERGEABLE`.
 
 **Traceability.**  PR #4661.  Linear ST-4538.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
 
