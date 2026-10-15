@@ -16,10 +16,15 @@ describe("broker-health auto-pause when orders cannot be placed", () => {
   beforeEach(async () => {
     const { getDb } = await import("../src/lib/db");
     getDb().exec("DELETE FROM settings; DELETE FROM audit_events; DELETE FROM strategy_runs;");
+    // Outside the 16-minute sandbox window so Tradier paper probes are not skipped.
+    const { setTradierNowForTests } = await import("../src/lib/tradier-transient");
+    setTradierNowForTests(() => new Date("2026-10-14T19:00:00.000Z"));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
+    const { setTradierNowForTests } = await import("../src/lib/tradier-transient");
+    setTradierNowForTests(null);
   });
 
   it("classifies infrastructure place failures vs ordinary rejects", async () => {
@@ -34,6 +39,11 @@ describe("broker-health auto-pause when orders cannot be placed", () => {
     expect(isOrderPlacementInfrastructureFailure("Tradier HTTP 400: Unexpected server error")).toBe(false);
     expect(isOrderPlacementInfrastructureFailure("Tradier order failed: Tradier HTTP 400: Unexpected server error")).toBe(false);
     expect(isOrderPlacementInfrastructureFailure("Tradier HTTP 422: Unexpected server error")).toBe(false);
+    expect(
+      isOrderPlacementInfrastructureFailure(
+        "Tradier sandbox quotes are 15 minutes delayed, so strategy runs and order placement wait until 16 minutes after the open (9:46am ET).  Safe to retry."
+      )
+    ).toBe(false);
     expect(
       isOrderPlacementInfrastructureFailure(
         "Tradier sandbox order placement is deferred until 15 minutes after the open. Safe to retry."
@@ -606,5 +616,138 @@ describe("broker-health auto-pause when orders cannot be placed", () => {
     expect(kinds).toContain("broker_placement_auto_halted");
     expect(kinds).toContain("broker_placement_auto_resumed");
     clearBrokerPlacementPauseMarker(userId, accountScope);
+  });
+
+  it("skips a Tradier sandbox strategy run until 9:46am ET and does not halt", async () => {
+    const { getPolicy, setPolicy, listAudit, getInternalSetting } = await import("../src/lib/db");
+    const {
+      applyBrokerOrderPlacementPause,
+      brokerConnectivityStreakKey,
+      brokerHealthRunSkip,
+      checkBrokerHealth,
+      getBrokerPlacementPauseMarker,
+      shouldPersistBrokerHealthSkip
+    } = await import("../src/lib/broker-health");
+    const { setTradierNowForTests, TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE } = await import("../src/lib/tradier-transient");
+    const notificationsMod = await import("../src/lib/notifications");
+    const sendNotificationSpy = vi.spyOn(notificationsMod, "sendNotification").mockImplementation(() => {
+      throw new Error("sendNotification should not be called for a sandbox open deferral");
+    });
+
+    const userId = "local";
+    const accountScope = "acct-sandbox-open";
+    const policy = getPolicy(userId);
+    policy.systemState = "active";
+    setPolicy(policy, userId);
+
+    setTradierNowForTests(() => new Date("2026-10-14T13:45:00.000Z"));
+    const gateway = {
+      getAccounts: async () => {
+        throw new Error("sandbox open window must not probe the broker");
+      },
+      getPortfolio: async () => {
+        throw new Error("sandbox open window must not probe the broker");
+      },
+      probeOrderCapability: async () => {
+        throw new Error("sandbox open window must not probe the broker");
+      }
+    };
+    const sandboxAccount = {
+      id: "conn-sandbox-open",
+      broker: "tradier" as const,
+      environment: "paper" as const,
+      accountNumber: "VA1",
+      label: "Sandbox",
+      capabilities: undefined
+    };
+    const health = await checkBrokerHealth(userId, sandboxAccount, gateway as never);
+    expect(health.isHealthy).toBe(false);
+    expect(health.sandboxOpenDeferral).toBe(true);
+    expect(health.reason).toBe(TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE);
+    const pause = await applyBrokerOrderPlacementPause({ userId, accountScope, health, policy });
+    expect(pause.action).toBe("none");
+    expect(getPolicy(userId).systemState).toBe("active");
+    expect(getBrokerPlacementPauseMarker(userId, accountScope)).toBeUndefined();
+    expect(getInternalSetting(brokerConnectivityStreakKey(userId, accountScope))).toBeUndefined();
+    const skip = brokerHealthRunSkip(health);
+    expect(skip.status).toBe("skipped");
+    expect(skip.auditKind).toBe("run_skipped_sandbox_open_deferral");
+    expect(skip.summary).toMatch(/9:46am ET/);
+    expect(skip.summary).not.toMatch(/skipped_broker_unhealthy/);
+    expect(
+      shouldPersistBrokerHealthSkip({
+        wasActive: true,
+        pauseAction: pause.action,
+        health,
+        skipEpisodeStarted: true
+      })
+    ).toBe(false);
+    expect(listAudit(50, userId).map((a) => a.kind)).not.toContain("broker_placement_auto_halted");
+
+    setTradierNowForTests(() => new Date("2026-10-14T13:46:00.000Z"));
+    let probed = false;
+    const open = await checkBrokerHealth(
+      userId,
+      sandboxAccount,
+      {
+        getAccounts: async () => [{ accountNumber: "VA1", label: "Sandbox", agenticAllowed: true }],
+        getPortfolio: async () => ({
+          accountNumber: "VA1",
+          totalMarketValue: 100_000,
+          buyingPower: 100_000,
+          equityMarketValue: 0,
+          optionMarketValue: 0,
+          cash: 100_000
+        }),
+        probeOrderCapability: async () => {
+          probed = true;
+          return { ok: true };
+        }
+      } as never
+    );
+    expect(probed).toBe(true);
+    expect(open.isHealthy).toBe(true);
+    expect(open.sandboxOpenDeferral).toBeUndefined();
+
+    setTradierNowForTests(() => new Date("2026-10-14T13:35:00.000Z"));
+    const live = await checkBrokerHealth(
+      userId,
+      { ...sandboxAccount, environment: "live", label: "Tradier Brokerage" },
+      {
+        getAccounts: async () => [{ accountNumber: "VA1", label: "Live", agenticAllowed: true }],
+        getPortfolio: async () => ({
+          accountNumber: "VA1",
+          totalMarketValue: 100_000,
+          buyingPower: 100_000,
+          equityMarketValue: 0,
+          optionMarketValue: 0,
+          cash: 100_000
+        }),
+        probeOrderCapability: async () => ({ ok: true })
+      } as never
+    );
+    expect(live.isHealthy).toBe(true);
+    expect(live.sandboxOpenDeferral).toBeUndefined();
+
+    const alpaca = await checkBrokerHealth(
+      userId,
+      { ...sandboxAccount, broker: "alpaca", accountNumber: "PA1", label: "Alpaca Paper" },
+      {
+        getAccounts: async () => [{ accountNumber: "PA1", label: "Paper", agenticAllowed: true }],
+        getPortfolio: async () => ({
+          accountNumber: "PA1",
+          totalMarketValue: 100_000,
+          buyingPower: 100_000,
+          equityMarketValue: 0,
+          optionMarketValue: 0,
+          cash: 100_000
+        }),
+        probeOrderCapability: async () => ({ ok: true })
+      } as never
+    );
+    expect(alpaca.isHealthy).toBe(true);
+    expect(alpaca.sandboxOpenDeferral).toBeUndefined();
+    expect(sendNotificationSpy).not.toHaveBeenCalled();
+    sendNotificationSpy.mockRestore();
   });
 });

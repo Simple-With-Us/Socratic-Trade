@@ -12,7 +12,7 @@ The preview probe retries the sentence three times (400ms, then 1200ms) inside o
 
 `checkBrokerHealth` maps the sentence to `transientBrokerError` with category `connectivity`.  `applyBrokerOrderPlacementPause` returns `none` without touching the connectivity streak and without halting.  An account that is already auto-halted stays `still_paused` until a healthy probe resumes it.  The in-run skip is status `skipped` with audit `run_skipped_broker_transient`.  The scheduler gate does not persist `skipped_broker_unhealthy` for that skip.
 
-Sandbox (`environment === "paper"`) equity and option placement throws before any POST during the first 15 minutes of the regular session (09:30 ET inclusive, 09:45 ET exclusive).  Live Tradier is not deferred.  Premarket, including the 5:41am CT hit, is not deferred.  The deferral message classifies as retryable and is not an infrastructure failure.
+Sandbox (`environment === "paper"`) strategy runs are skipped for the first 16 minutes of the regular session (09:30 ET inclusive, 09:46 ET exclusive).  Sandbox quotes are 15 minutes delayed, and Tradier orders use those quotes, so the first tradable minute is 9:46am ET.  `checkBrokerHealth` returns `sandboxOpenDeferral` before any broker read.  The scheduler does not launch the run.  A run that is already inside the health gate finishes as `skipped` with audit `run_skipped_sandbox_open_deferral`.  Equity, bracket, and option POSTs throw the same deferral before any request.  Live Tradier is not deferred.  Premarket, including the 5:41am CT hit, is not deferred.  The deferral message classifies as retryable and is not an infrastructure failure.
 
 - `src/lib/tradier-transient.ts`
 - `src/lib/tradier.ts`
@@ -31,7 +31,7 @@ Sandbox (`environment === "paper"`) equity and option placement throws before an
 
 Retry budget is three attempts including the first try, inside the 30s health-probe deadline.  The tag lookup is page 1 with `includeTags`.  A just-accepted order is on that page.  One `trackHealth` wraps the whole sequence so a recovered blip is not five tradier-broker hard-failure rows.
 
-The 15-minute deferral is sandbox only and only while `currentMarketSession` is `regular`.  It does not cover the 5:41am CT premarket failure.  That case is the retry and the no-halt classifier.
+The open deferral is 16 minutes, sandbox only, and only while `currentMarketSession` is `regular`.  It does not cover the 5:41am CT premarket failure.  That case is the retry and the no-halt classifier.  Alpaca paper is not deferred.
 
 `docs/EFFORT-LOG.md` was not edited.  It is archived.  This seat has no Fleet Linear credentials (`board whoami` failed: `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` are unset, and `/home/ubuntu/.secrets/Linear/Fleet.env` is missing).  No Linear issue was created.
 
@@ -46,6 +46,8 @@ npx vitest run test/tradier.test.ts test/placement-outcome.test.ts test/broker-h
 ```
 
 `npm run lint` exited 0 (0 errors, 866 grandfathered warnings).  The first `npx tsc --noEmit` failed on the tag-hit return cast and on optional `placeOptionOrder`.  Both were fixed (`as unknown as T`, and a missing-method throw in the two option tests).  A second `npx tsc --noEmit` exited 0.  `npm run build` exited 0.  The targeted vitest run was 108 passed.  Full `npm test` was 9289 passed, 51 skipped, and 23 failed.  The failures are outside this diff: sandbox OpenRouter and notify credentials, host metadata, an Alpha Vantage pool count, and `scripts/ops/summarize-cpuprofile.mjs` under Node's ESM `.ts` loader.  None are in `test/tradier.test.ts`, `test/broker-health-auto-pause.test.ts`, or `test/placement-outcome.test.ts`.
+
+2026-10-15 follow-up (16-minute window): `npm run lint` exited 0 (0 errors, 866 warnings).  `npx tsc --noEmit` exited 0.  `npm run build` exited 0.  Targeted vitest on the same three files was 110 passed.  Full `npm test` was 9289 passed, 51 skipped, and 25 failed.  None of the failures are in the Tradier or broker-health files.  The two new names versus the earlier full run are `test/data-catalog-completeness.test.ts` and a TwelveData shared-quota case in `test/data-providers.test.ts`.
 
 ## Next Steps & Blockers
 

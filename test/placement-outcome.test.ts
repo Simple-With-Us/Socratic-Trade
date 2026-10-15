@@ -72,7 +72,8 @@ describe("placement outcome resolver", () => {
     const buyingPower = "Tradier order failed: Tradier HTTP 400: Not enough buying power";
     const plain400 = "HTTP 400 Bad Request";
     const http500 = "Tradier HTTP 500: Unexpected server error";
-    const deferral = "Tradier sandbox order placement is deferred until 15 minutes after the open. Safe to retry.";
+    const deferral =
+      "Tradier sandbox quotes are 15 minutes delayed, so strategy runs and order placement wait until 16 minutes after the open (9:46am ET).  Safe to retry.";
     expect(isRetryableBrokerHttpError(sentence)).toBe(true);
     expect(isTerminalBrokerHttpError(sentence)).toBe(false);
     expect(classifyPlaceOrderError(sentence)).toBe("retryable");
@@ -86,6 +87,9 @@ describe("placement outcome resolver", () => {
     expect(classifyPlaceOrderError("An unexpected error occurred. Please try again.")).toBe("other");
     expect(classifyPlaceOrderError(deferral)).toBe("retryable");
     expect(isTerminalBrokerHttpError(deferral)).toBe(false);
+    expect(
+      classifyPlaceOrderError("Tradier sandbox order placement is deferred until 15 minutes after the open. Safe to retry.")
+    ).toBe("retryable");
     expect(classifyPlaceOrderError("HTTP 403 Forbidden")).toBe("rejected_terminal");
   });
 

@@ -33,14 +33,19 @@ export function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Sandbox only.  Live Tradier places on the normal path. */
-export const TRADIER_SANDBOX_OPEN_DEFER_MINUTES = 15;
+/**
+ * Sandbox quotes are 15 minutes delayed, and Tradier orders price off those
+ * quotes.  Wait until 16 minutes after the regular open (9:46am ET) so the
+ * first tradable print is from after the open.  Live Tradier is not deferred.
+ */
+export const TRADIER_SANDBOX_OPEN_DEFER_MINUTES = 16;
 
 export const TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE =
-  "Tradier sandbox order placement is deferred until 15 minutes after the open. Safe to retry.";
+  "Tradier sandbox quotes are 15 minutes delayed, so strategy runs and order placement wait until 16 minutes after the open (9:46am ET).  Safe to retry.";
 
 export function isTradierSandboxOpenDeferralMessage(message: string): boolean {
-  return /deferred until 15 minutes after the open/i.test(String(message ?? ""));
+  const text = String(message ?? "");
+  return /deferred until \d+ minutes after the open/i.test(text) || /wait(?:s)? until \d+ minutes after the open/i.test(text);
 }
 
 let nowOverride: (() => Date) | undefined;

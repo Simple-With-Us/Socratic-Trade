@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 GROK — Tradier sandbox waits until 9:46am ET
+
+**What.**  Sandbox quotes are 15 minutes delayed, and Tradier orders use those quotes.  Sandbox strategy runs and equity, bracket, and option posts now wait until 16 minutes after the regular open (9:46am ET).  The health gate skips the run.  It does not fail it and it does not auto-halt.  Live Tradier is unchanged.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  Targeted vitest 110 passed.  Full `npm test` was 9289 passed, 51 skipped, and 25 failed outside this diff.
+
+**Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`, `PLAN.md`, `docs/phase-7-strategy.md`.
+
+**Next.**  `do-not-automerge` stays on PR #4668.  Jay squash-merges.  Do not merge from this lane.
+
 ## 2026-10-14 GROK — Tradier sandbox open HTTP 400
 
 **What.**  Sandbox HTTP 400 "Unexpected server error" on the order path retries with backoff and does not auto-halt.  A second POST happens only after the tag is missing.  Sandbox equity and option posts wait 15 minutes after the regular open.  Live Tradier still places.  Buying power, plain HTTP 400, HTTP 403, and HTTP 5xx still fail on the first attempt and can still halt.
