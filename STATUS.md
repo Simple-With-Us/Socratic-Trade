@@ -354,6 +354,7 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 
 **Next.**  PR #4696 — Kody CHANGES_REQUESTED cleared on branch; Deployer merge when `verify` green; Refs ST-4531.
 
+**Next.**  Ready for review.  Do not merge from this lane.  Linear team ST was not updated if fleet credentials are missing on this cloud seat; that blocker is in the rollout.
 ## 2026-10-15 Cursor Cloud — check-pin token order (ST-2582 PR #4698)
 
 **What.**  Merged `origin/main` (`df7e6d10`) with a merge commit.  `check-pin` was failing because it read public Congress.Trade with `GH_PACKAGES_TOKEN` first.  That secret is one user's PAT, so a burst of pull requests shares one rate limit and the job reports a missing token.  The script now tries the Actions installation token first and keeps the PAT as a fallback.  A rate-limit failure is no longer labeled as a missing token.
