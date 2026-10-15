@@ -2,13 +2,28 @@
 
 ## 2026-10-15 Cursor Cloud — auto-merge CODEOWNERS globs (ST-3326)
 
-**What.**  `auto-merge-prs.yml` was fail-closing every PR because `gh api --jq -r` is two arguments (`accepts 1 arg(s), received 2`).  The CODEOWNERS money-path globs never ran.  The fetch is now one `--jq` expression.  A documented glob list is locked to CODEOWNERS.  The dry run disarms money-path diffs and `do-not-automerge`, and still arms a docs diff.  Merged `origin/main` (`df7e6d10`, then `3f4ef5e5` / #4698) with merge commits.  `check-pin` was failing because it preferred `GH_PACKAGES_TOKEN` (user 12656028) over the Actions token, then reported that user's HTTP 403 rate limit as a missing token.  #4698 landed that token order on main.  This merge keeps main's copy.  `disable-on-*` treats "Resource not accessible by integration" as success when `autoMergeRequest` is null, and fails when a merge is still armed.  The disable test sets `NODE_ENV` so `tsc` accepts the env object.
+**What.**  `auto-merge-prs.yml` was fail-closing every PR because `gh api --jq -r` is two arguments (`accepts 1 arg(s), received 2`).  The CODEOWNERS money-path globs never ran.  The fetch is now one `--jq` expression.  A documented glob list is locked to CODEOWNERS.  The dry run disarms money-path diffs and `do-not-automerge`, and still arms a docs diff.  Merged `origin/main` (`df7e6d10`, then `3f4ef5e5` / #4698, then `2075c857` / #4696) with merge commits.  `check-pin` was failing because it preferred `GH_PACKAGES_TOKEN` (user 12656028) over the Actions token, then reported that user's HTTP 403 rate limit as a missing token.  #4698 landed that token order on main.  This merge keeps main's copy.  `disable-on-*` treats "Resource not accessible by integration" as success when `autoMergeRequest` is null, and fails when a merge is still armed.  The disable test sets `NODE_ENV` so `tsc` accepts the env object.
 
 **Branch.**  `cursor/automerge-money-path-globs-2a65`
 
 **Verification.**  Earlier full gate: `npm run lint` exit 0 (0 errors, 854 warnings).  `npm test` 9378 passed, 51 skipped, 25 failed in 12 unrelated files.  `npm run build` exit 0.  After the CI follow-up: `npx tsc --noEmit` exit 0.  `npx vitest run test/disable-pr-automerge.test.ts test/shared-package-pin-check.test.ts test/automerge-gate-dry-run.test.ts test/branch-protection-gate.test.ts test/pr-touches-codeowners-paths.test.ts` 32 passed.  `npx eslint` on the touched JS and tests: 0 errors.
 
 **Next.**  PR #4697 stays ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.  Leave ST-3326 In Progress until the fix has shipped.
+## 2026-10-15 Cursor Cloud — ST-4531 retire Slack callers
+
+**What.**  Remaining ST Slack posts (deploy-freshness notify, provider-knob sync, `slack-sync.sh post`, Codex coordination helper) now use Zulip via `agent-sync-fleet-post.sh` / `agent-sync`.  Deploy-freshness workflow drops `SLACK_BOT_TOKEN` and loads the ST ops Zulip triple from Infisical prod at runtime (`github-actions-infisical-zulip-ops.sh` via `infisical-secrets-safe.sh get`).  Kody blockers: Rule 49 safe Infisical path, Rule 26 rollout verify outcomes, plist template cleanup.
+
+**Branch.**  `cursor/st-4531-retire-slack-callers-89ad` (merged `origin/main` 2026-10-15).
+
+**Verification.**  Kody fixes: `infisical-secrets-safe.sh get` (Actions-only) for Zulip triple; rollout verification `-> ok` lines; fleet-post stderr surfacing.  Re-run `verify` CI after push.
+
+**Next.**  PR #4696 ready for Deployer merge after CI green; Refs ST-4531.
+**Next.**  PR #4696 ready for Deployer merge; Refs ST-4531.
+
+**Autofix round 9.**  All kody/cursor review threads are resolved and their fixes verified present in HEAD (the `resolve_bin` trailing-brace typo, the plist Zulip email example, and the rollout Decisions section).  Two new kody findings handled: the rollout `Verification State` block now annotates each command with a real `-> ok` / `-> fail` result.  `npm test` fails 10 tests in `test/llm-provider.test.ts` and `test/openrouter-credits.test.ts`, but both are pre-existing — they reproduce identically on a clean `origin/main` worktree in this runner and neither file is touched by this PR (an OpenRouter credential in the runner env that the tests assume absent).  `lint` 0 errors, `tsc` ok, `build` ok.  One kody critical finding is deliberately NOT fixed and is open for the maintainer: it asks that bare `infisical secrets get` in `scripts/github-actions-infisical-zulip-ops.sh` be routed through `scripts/infisical-secrets-safe.sh`, but that wrapper has no `get` subcommand — its own instruction says to raise that as a follow-up rather than call bare `infisical secrets`.  Adding a secret-printing `get` path to a wrapper whose contract is "never dumps values" is a security-policy change, not a mechanical fix.  Also note: the uncommitted `.claude/skills/*` edits present in the checkout were reverted Zulip→Slack (undoing this PR's purpose) and were discarded, not committed; patch kept at `/tmp/reverted-slack-edits.patch`.
+**Verification.**  `bash -n` on touched scripts; `alert-deploy-freshness.selftest.sh` 9/9; `vitest run test/infisical-secrets-safe.test.ts` 47/47; `npm run lint` 0 errors; `tsc`; `npm run build`; awaiting fresh `verify` CI on new head.
+
+**Next.**  PR #4696 — Kody CHANGES_REQUESTED cleared on branch; Deployer merge when `verify` green; Refs ST-4531.
 
 ## 2026-10-15 Cursor Cloud — check-pin token order (ST-2582 PR #4698)
 
