@@ -2,13 +2,13 @@
 
 ## 2026-10-15 Cursor Cloud — ST-4531 retire Slack callers
 
-**What.**  Remaining ST Slack posts (deploy-freshness notify, provider-knob sync, `slack-sync.sh post`, Codex coordination helper) now use Zulip via `agent-sync-fleet-post.sh` / `agent-sync`.  Deploy-freshness workflow drops `SLACK_BOT_TOKEN`.
+**What.**  Remaining ST Slack posts (deploy-freshness notify, provider-knob sync, `slack-sync.sh post`, Codex coordination helper) now use Zulip via `agent-sync-fleet-post.sh` / `agent-sync`.  Deploy-freshness workflow drops `SLACK_BOT_TOKEN` and loads the ST ops Zulip triple from Infisical prod at runtime (`github-actions-infisical-zulip-ops.sh`).  Review fixes: `agent-sync` path typo, plist Zulip email example, rollout decisions section.
 
-**Branch.**  `cursor/st-4531-retire-slack-callers-89ad`
+**Branch.**  `cursor/st-4531-retire-slack-callers-89ad` (merged `origin/main` 2026-10-15).
 
-**Verification.**  `bash -n` on touched scripts; `bash scripts/alert-deploy-freshness.selftest.sh`; `python3 scripts/test-cloud-coordination-bootstrap.py`.
+**Verification.**  `bash -n` on touched scripts; `bash scripts/alert-deploy-freshness.selftest.sh`; `python3 scripts/test-cloud-coordination-bootstrap.py`; full verify trio pending this push.
 
-**Next.**  PR ready for review; Refs ST-4531.
+**Next.**  PR #4696 ready for review after CI green; Refs ST-4531.
 ## 2026-10-15 Cursor Cloud — remove ST primary Infisical bridge (ST-4318)
 
 **What.**  Permanent removal of the default-off Usage Monitor credential bridge writer: module, tests, scheduler lane, `/api/keys` triggers, and active env/backlog/docs setup.  Per-user encrypted API keys and tombstone behavior unchanged.
