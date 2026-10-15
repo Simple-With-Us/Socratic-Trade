@@ -24,8 +24,8 @@ beforeEach(async () => {
   vi.resetModules();
   vi.unstubAllGlobals();
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-tradier-${randomUUID()}.db`)}`;
-  // Wednesday 15:00 ET, outside the 15-minute sandbox deferral window, so existing
-  // place tests do not flake when CI runs during 09:30-09:45 ET.
+  // Wednesday 15:00 ET, outside the 16-minute sandbox deferral window, so existing
+  // place tests do not flake when CI runs during 09:30-09:46 ET.
   const { setTradierNowForTests } = await import("../src/lib/tradier-transient");
   setTradierNowForTests(() => new Date("2026-10-14T19:00:00.000Z"));
 });
@@ -1851,30 +1851,53 @@ describe("Tradier adapter — HTTP 400 Unexpected server error on the order path
     expect(posts).toBe(2);
   });
 
-  it("defers sandbox equity and option posts for the first 15 minutes after the open", async () => {
+  it("defers sandbox equity, bracket, and option posts until 16 minutes after the open", async () => {
+    const { TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE, setTradierNowForTests } = await import("../src/lib/tradier-transient");
+    for (const iso of ["2026-10-14T13:35:00.000Z", "2026-10-14T13:45:00.000Z"]) {
+      await seedTradier({ environment: "paper" });
+      let posts = 0;
+      vi.stubGlobal("fetch", async () => {
+        posts += 1;
+        return json(200, { order: { id: 1, status: "ok" } });
+      });
+      setTradierNowForTests(() => new Date(iso));
+      const { getTradierGateway } = await import("../src/lib/tradier");
+      const gateway = getTradierGateway("local");
+      await expect(gateway.placeEquityOrder(equity)).rejects.toThrow(TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE);
+      await expect(
+        gateway.placeEquityOrder({ ...equity, refId: "r-bracket", bracketTakeProfit: 12, bracketStopLoss: 8 })
+      ).rejects.toThrow(TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE);
+      if (!gateway.placeOptionOrder) throw new Error("Tradier gateway is missing placeOptionOrder");
+      await expect(
+        gateway.placeOptionOrder({
+          accountNumber: ACCT,
+          occSymbol: "DELL260717C00150000",
+          intent: "buy_to_open",
+          quantity: 1,
+          type: "market",
+          refId: "opt-defer"
+        })
+      ).rejects.toThrow(TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE);
+      expect(posts).toBe(0);
+    }
+  });
+
+  it("places a sandbox order at 9:46am ET", async () => {
     await seedTradier({ environment: "paper" });
     let posts = 0;
-    vi.stubGlobal("fetch", async () => {
-      posts += 1;
-      return json(200, { order: { id: 1, status: "ok" } });
+    vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? "GET").toUpperCase() === "POST") {
+        posts += 1;
+        return json(200, { order: { id: 16, status: "ok" } });
+      }
+      return new Response("", { status: 404 });
     });
     const { setTradierNowForTests } = await import("../src/lib/tradier-transient");
-    setTradierNowForTests(() => new Date("2026-10-14T13:35:00.000Z"));
+    setTradierNowForTests(() => new Date("2026-10-14T13:46:00.000Z"));
     const { getTradierGateway } = await import("../src/lib/tradier");
-    const gateway = getTradierGateway("local");
-    await expect(gateway.placeEquityOrder(equity)).rejects.toThrow(/deferred until 15 minutes after the open/);
-    if (!gateway.placeOptionOrder) throw new Error("Tradier gateway is missing placeOptionOrder");
-    await expect(
-      gateway.placeOptionOrder({
-        accountNumber: ACCT,
-        occSymbol: "DELL260717C00150000",
-        intent: "buy_to_open",
-        quantity: 1,
-        type: "market",
-        refId: "opt-defer"
-      })
-    ).rejects.toThrow(/deferred until 15 minutes after the open/);
-    expect(posts).toBe(0);
+    const placed = await getTradierGateway("local").placeEquityOrder(equity);
+    expect(placed.orderId).toBe("16");
+    expect(posts).toBe(1);
   });
 
   it("places a sandbox order once the window has passed", async () => {

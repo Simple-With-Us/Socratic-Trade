@@ -177,3 +177,49 @@ Leave every review thread unresolved.  Reply after the push.  Do not merge from 
 ## Next Steps & Blockers
 
 Label `do-not-automerge`.  Jay squash-merges.  Do not enable auto-merge and do not merge from this lane.  Create or move the Linear team `ST` issue once a seat with Fleet credentials picks this up.  Premarket sandbox 400s still reach the broker.  Only the regular-open window is deferred.
+
+## 2026-10-15 follow-up — wait until 9:46am ET
+
+### Context & Objective
+
+PR #4668 merged with a 15-minute sandbox order deferral.  Sandbox quotes are 15 minutes delayed, and Tradier orders price off those quotes, so a 15-minute wait can still see the open print.  Sandbox strategy runs and order placement now wait until 16 minutes after the regular open (9:46am ET).  Live Tradier is unchanged.
+
+### Changes Made
+
+`TRADIER_SANDBOX_OPEN_DEFER_MINUTES` is 16.  The window is sandbox paper, regular session, and minutes since 09:30 ET in `[0, 16)`.  At 9:46am ET trading is allowed.  9:45am ET still waits.  Premarket is not deferred.  Alpaca paper is not deferred.
+
+`checkBrokerHealth` returns `sandboxOpenDeferral` before any broker read.  The scheduler does not launch the run, and it does not persist `skipped_broker_unhealthy`.  A run already inside the health gate finishes as `skipped` with audit `run_skipped_sandbox_open_deferral`.  Equity, bracket, and option POSTs throw the same message before any request.  The old "deferred until 15 minutes" sentence stays retryable and is not an infrastructure failure.  The HTTP 400 retry path from #4668 is unchanged.
+
+This follow-up is branched from current `main`.  A push during this session recreated `cursor/tradier-sandbox-open-400-cea2` after GitHub deleted it on merge.  That ref does not contain the merged tag-lookup commits and must not be merged.
+
+- `src/lib/tradier-transient.ts`
+- `src/lib/tradier.ts`
+- `src/lib/broker-health.ts`
+- `src/lib/execution-mode.ts`
+- `test/tradier.test.ts`
+- `test/broker-health-auto-pause.test.ts`
+- `test/placement-outcome.test.ts`
+- `STATUS.md`
+- `PLAN.md`
+- `docs/phase-7-strategy.md`
+- `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`
+
+### Decisions & Trade-offs
+
+The skip is the health gate, not a failed place.  An account that is already auto-halted stays `still_paused` through the window.  `docs/EFFORT-LOG.md` was not edited.  This seat still has no Fleet Linear credentials.
+
+### Verification State
+
+```bash
+npm run lint
+npx tsc --noEmit
+npm test
+npm run build
+npx vitest run test/tradier.test.ts test/placement-outcome.test.ts test/broker-health-auto-pause.test.ts
+```
+
+`npm run lint` exited 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exited 0.  Targeted vitest on the three files was 116 passed.  Full `npm test` was 9372 passed, 51 skipped, and 25 failed.  None of the failures are in the Tradier, placement, or broker-health files.  They are sandbox LLM and notify credentials, host metadata, an Alpha Vantage pool count, data-catalog completeness against the local database, a TwelveData shared-quota case, and `scripts/ops/summarize-cpuprofile.mjs` under Node's ESM loader.  `npm run build` exited 0.
+
+### Next Steps & Blockers
+
+Label `do-not-automerge` on the follow-up PR.  Jay squash-merges.  Do not enable auto-merge.  Do not merge the recreated `cursor/tradier-sandbox-open-400-cea2` branch.
