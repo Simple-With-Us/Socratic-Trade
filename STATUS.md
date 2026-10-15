@@ -9,6 +9,13 @@
 **Verification.**  Targeted vitest 25/25 (`disable-pr-automerge`, dry run, branch-protection gate, CODEOWNERS classifier).  Dry run: `src/lib/broker.ts` and `do-not-automerge` print `arm=false` `disarm=true`; `README.md` prints `arm=true`.  `npx tsc --noEmit` exit 0.
 
 **Next.**  Ready PR with `do-not-automerge`.  Do not enable auto-merge.  GB-Deployer merges.  Rotating the rejected `GH_PAT` / `SHEPHERD_TOKEN` stays ST-4393.  Until that token works, non-money-path arming still no-ops with an error, and an already-armed money-path PR fails the disable job instead of landing.
+## 2026-10-15 Cursor Cloud — CT fundamentals/analyst nightly push (ST-4537)
+
+**What.**  Congress.Trade `st_inbound_market_data` fundamentals + analyst stale since 2026-10-06; scan-hook-only path.  Nightly `runCongressDailyShare` now POSTs fundamentals/analyst from `symbol_field_latest` for the monitored universe.
+
+**Branch.**  `cursor/ct-fundamentals-nightly-push-bb23`
+
+**Next.**  Verify gate, open ready PR, deploy; confirm CT stream freshness after nightly run.
 ## 2026-10-15 CURSOR — Congress push delivery/consumption receipt (ST-3846)
 
 **What.**  App B webhook responses now emit `receiptVersion: 1` with explicit `delivered` + `consumed` fields; batch failures return `422` instead of silent `200`.  Congress.Trade PR parses the receipt before marking `deliveries` rows delivered.
