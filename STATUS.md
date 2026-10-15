@@ -31,7 +31,7 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 
 **What.**  Merged `origin/main` (`3f4ef5e5`, then `2075c857` / #4696) into `cursor/free-data-gaps-55d1` with no conflicts.  Integrated remote autofix merge and resolved rollout doc conflict (`559b213c`).  Cleared recurring GitHub `DIRTY` state by keeping branch at latest `main`.  Zero unresolved review threads.  Did not enable auto-merge (`needs-human-merge` for Jay).
 
-**Verification.**  `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  `npm run build` pass.  Local `npm test` environmental failures only.  Pushed `559b213c` (integrated remote autofix merge + rollout conflict fix).  Hosted `verify` pending.
+**Verification.**  `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  `npm run build` pass.  Local `npm test` environmental failures only.  Head `96780798`.  Hosted `verify` green (run `38733904557`).
 
 **Traceability.**  PR #4661.  Linear **ST-4538** (filed this pass).  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
 
