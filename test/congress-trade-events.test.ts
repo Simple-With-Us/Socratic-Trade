@@ -516,7 +516,9 @@ describe("webhook endpoint (POST)", () => {
           body,
         })
       );
-      expect(response.status).toBe(400);
+      expect(response.status).toBe(422);
+      const payload = await response.json();
+      expect(payload).toMatchObject({ receiptVersion: 1, delivered: true, consumed: false });
     }
   });
 
@@ -531,7 +533,7 @@ describe("webhook endpoint (POST)", () => {
         body,
       })
     );
-    expect(accepted.status).toBe(400);
+    expect(accepted.status).toBe(422);
 
     const rejected = await postCongressWebhook(
       new Request("https://b.example/api/webhooks/congress", {
@@ -570,9 +572,42 @@ describe("webhook endpoint (POST)", () => {
       })
     );
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(422);
     const summary = getServiceHealthSummaries().find((item) => item.service === "congress.trade:webhook");
     expect(summary?.lastFailureError).toBe("invalid-event");
     expect(summary?.lastSuccessTs).toBeNull();
+    const payload = await res.json();
+    expect(payload).toMatchObject({ receiptVersion: 1, consumed: false, reason: "invalid-event" });
+  });
+
+  it("returns a consumption receipt on successful ingest", async () => {
+    const secret = useCongressWebhookSecret();
+    const id = `evt-${randomUUID()}`;
+    const body = JSON.stringify({
+      type: "congress.trade",
+      id,
+      data: {
+        trades: [{ symbol: "ZZZ", member: "Jane", chamber: "house", side: "buy", tradedAt: recent(3), disclosedAt: recent(1) }],
+      },
+    });
+    const res = await postCongressWebhook(
+      new Request("https://b.example/api/webhooks/congress", {
+        method: "POST",
+        headers: {
+          "cf-connecting-ip": "203.0.113.40",
+          "x-signature": sign(secret, body),
+          "content-type": "application/json",
+        },
+        body,
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      receiptVersion: 1,
+      delivered: true,
+      consumed: true,
+      eventId: id,
+      applied: 1,
+    });
   });
 });
