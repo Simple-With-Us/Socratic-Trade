@@ -6,9 +6,9 @@
 
 **Branch.**  `cursor/broker-call-bounds-7ec5`
 
-**Verification.**  `npm run lint` exited 0 (0 errors, 848 warnings).  `npx tsc --noEmit` exited 0.  Focused vitest (`protective-lane-isolation`, `scheduler-stale-exit-inflight-guard`, `broker-io-deadlines`, `scheduler-pending-fill-inflight-guard`, `scheduler-halt-cause-tick`) was 16 passed.  `test/robinhood-orders-error-throws.test.ts` was 4 passed after the since-window fixture fix.  Full `npm test` was 9374 passed, 51 skipped, and 26 failed.  One failure was the Robinhood populated-list fixture (a July fill, dropped by the 24h terminal window) and is fixed.  The other 25 are outside this diff (LLM key routing, notify credentials, server-metrics host detection, cpuprofile summary, data-provider cache).  `npm run build` exited 0.
+**Verification.**  After merging `origin/main` through `e3ba1507` (#4716 iOS ASC credential hygiene): `npm run lint` exit 0 (0 errors, 849 warnings).  `npx tsc --noEmit` exit 0.  Focused vitest (`etoro-boundary-schema`, `protective-lane-isolation`, `synthetic-stops`, `scheduler-stale-exit-inflight-guard`) was 83 passed.  Full `npm test` was 9382 passed, 51 skipped, 23 failed (same pre-existing sandbox/env failures as on `origin/main`; not in this diff).  `npm run build` pending on this shepherd push (CI `verify` is authoritative).
 
-**Next.**  `origin/main` through `2075c857` is merged.  Keep the PR ready with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
+**Next.**  `origin/main` through `e3ba1507` is merged on `cursor/broker-call-bounds-7ec5`.  Keep PR #4715 ready with `do-not-automerge`.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
 
 ## 2026-10-15 CURSOR — Board 512444e3 iOS / Playwright / deploy-freshness CI
 
