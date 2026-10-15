@@ -69,7 +69,7 @@ npm run build
 
 ## Merge-main (2026-10-15)
 
-Merged `origin/main` at `e3ba1507` (#4716 iOS ASC credentials) into `cursor/text-payload-compression-3897`.  GitHub had reported `mergeable: CONFLICTING` because main moved past `2075c857`.  Auto-merge on `PLAN.md` and `STATUS.md` only.  Also removed committed `<<<<<<<` markers from `docs/rollouts/2026-10-15-st-4531-retire-slack-callers.md` (they were already on main from a bad union merge).
+Merged `origin/main` through `49a76da4` (#4695 Congress push receipt, #4716 iOS ASC) into `cursor/text-payload-compression-3897`.  GitHub reported `mergeable: CONFLICTING` whenever main moved ahead of the branch merge base.  Auto-merge on `PLAN.md` and `STATUS.md` only.  Removed committed `<<<<<<<` markers from `docs/rollouts/2026-10-15-st-4531-retire-slack-callers.md` (they were already on main from a bad union merge).
 
 ## Next Steps & Blockers
 

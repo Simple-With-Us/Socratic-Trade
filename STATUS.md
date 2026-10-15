@@ -167,6 +167,7 @@ PR #4713 is merged with `origin/main` through `3b8e3e4b`.  The shared URL-cache 
 **Branch.**  `cursor/ct-fundamentals-nightly-push-bb23`
 
 **Next.**  Verify gate, open ready PR, deploy; confirm CT stream freshness after nightly run.
+**Next.**  PR #4720 ready for review.  Merged `origin/main` through `49a76da4` (#4695 Congress push receipt, #4716 iOS ASC).  #4722 had not landed, so its retention rewrite is not in this branch.  Review follow-up is in `a938fd2a` (codec columns, watermark after pass, framed `raw1:`, decode retry list, indexed `hasLocalFilingCopy`).
 ## 2026-10-15 CURSOR — Congress push delivery/consumption receipt (ST-3846)
 
 **What.**  App B webhook responses now emit `receiptVersion: 1` with explicit `delivered` + `consumed` fields; batch failures return `422` instead of silent `200`.  Congress.Trade PR parses the receipt before marking `deliveries` rows delivered.
