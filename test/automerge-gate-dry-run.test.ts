@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -96,6 +97,18 @@ describe("auto-merge money-path globs", () => {
   it("disarms a diff that edits the disable script", () => {
     const got = decision(run("--files", "scripts/disable-pr-automerge.sh"));
     expect(got.gate_edit).toBe("true");
+    expect(got.arm).toBe("false");
+    expect(got.disarm).toBe("true");
+  });
+
+  it("reads CODEOWNERS when launched outside the repo", () => {
+    const stdout = execFileSync("bash", [dryRun, "--files", "src/lib/broker.ts"], {
+      cwd: tmpdir(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const got = decision(stdout);
+    expect(got.touches_protected).toBe("true");
     expect(got.arm).toBe("false");
     expect(got.disarm).toBe("true");
   });

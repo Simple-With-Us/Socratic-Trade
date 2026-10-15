@@ -14,6 +14,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CLASSIFIER="$ROOT/scripts/pr-touches-codeowners-paths.sh"
+# The classifier reads CODEOWNERS from the working directory unless this is set.
+# The dry run is often launched from another directory.
+export CODEOWNERS_FILE="${CODEOWNERS_FILE:-$ROOT/.github/CODEOWNERS}"
 
 if [ "${1:-}" = "--list-globs" ]; then
   [ "$#" -eq 1 ] || {

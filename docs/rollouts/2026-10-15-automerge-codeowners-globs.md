@@ -27,7 +27,7 @@ Touched paths:
 - `disarm=true` means the workflow runs `gh pr merge --disable-auto` on a PR that was already armed.  The dry run does not call GitHub, and this lane does not arm auto-merge.
 - `needs-human-merge` still disarms, same as `do-not-automerge`.
 - A rejected elevated token retries disable once with the Actions `GITHUB_TOKEN`.  That token is not used to arm.  If the retry is also rejected, the disable job fails instead of reporting the merge as disarmed.
-- A PR that edits the workflow, CODEOWNERS, the classifier, the dry run, or the disable script still skips auto-merge.
+- The dry run exports `CODEOWNERS_FILE` to the repo copy so it still classifies when the shell is not at the repo root.
 - Out of scope: a ruleset required review on those paths.  This change only stops the workflow from arming.
 
 ## Money-path globs
