@@ -20,7 +20,8 @@ Files:
 - `app/admin/enrichment-coverage/enrichment-coverage-client.tsx`
 - `test/e2e/admin-enrichment-coverage-visual.spec.ts`
 - `test/e2e/playwright-session.ts`
-- `test/e2e/playwright-admin-auth.ts`
+- `test/e2e/playwright-admin-auth.ts` (CI: `PLAYWRIGHT_AUTH_SECRET`; local: gitignored file)
+- `test/e2e/playwright-throwaway-fixtures.ts` (hash-derived throwaway `ENCRYPTION_KEY`)
 - `playwright.admin.config.ts`
 - `playwright.config.ts` (`testIgnore` for admin spec)
 - `package.json` (`test:e2e:admin`)
