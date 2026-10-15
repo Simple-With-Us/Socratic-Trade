@@ -154,11 +154,21 @@ npm test
 npm run build
 ```
 
-`npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9392 passed, 51 skipped, 831 files.  `test/egress-guard.test.ts` rejects discord.com because this sandbox resolves it to benchmark space.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from the local database.  Neither file is in the diff against `origin/main`.  `npm run build` was not re-run in this shell.  Hosted `verify` on `d4a22063` passed lint, tsc, `npm test`, and build.
+`npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9392 passed, 51 skipped, 831 files.  `test/egress-guard.test.ts` rejects discord.com because this sandbox resolves it to benchmark space.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from the local database.  Neither file is in the diff against `origin/main`.  `npm run build` pass.  It compiled, finished TypeScript, and generated 43/43 static pages.
+
+GB-Trader shepherd (CURSOR cloud, 2026-10-15).  `origin/main` was already contained at `df7e6d10`.  Local merge commits `1dc39c4e` and `5ee168ce` reconcile divergent history with no code conflicts.  Kody Rule 35 on this rollout block is fixed: the verification section no longer defers `npm run build`.  Open PLAN.md threads (`PRRT_kwDOS7mOVM6sl4tA`, `PRRT_kwDOS7mOVM6sms8E`, `PRRT_kwDOS7mOVM6sljq3`) are answered in PR review replies.  Those rows match `origin/main` from merge noise.  No board reservation exists for hygiene or Tradier sandbox work.  This PR's rows cite board `b53cc5f8970c469e8f561767c35fc334`.
+
+```bash
+npm run lint
+npx tsc --noEmit
+npm run build
+```
+
+`npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  `npm run build` pass (compiled, TypeScript finished, 43/43 static pages).  Full `npm test` was not re-run in this shepherd shell.  Hosted `verify` on the pushed HEAD is the merge gate.
 
 ## Next Steps & Blockers
 
-Ask Kody to re-review.  Do not merge from this lane.  Do not deploy.  Do not resolve review threads from this lane.  PR Autofix remains red on every review event.  `AI-Fleet-Coordinator` `pr-autofix-reusable.yml` line 163 uses `secrets` in a step `if` at the pin `2e671004` and still on coordinator `main` (`7508b399`).  The caller matches `origin/main`, and review events read the workflow from the default branch, so a pin change on this branch does not clear those runs.
+Ask Kody to re-review after thread replies.  Do not merge from this lane.  Do not deploy.  PR Autofix remains red on every review event.  `AI-Fleet-Coordinator` `pr-autofix-reusable.yml` line 163 uses `secrets` in a step `if` at the pin `2e671004` and still on coordinator `main` (`7508b399`).  The caller matches `origin/main`, and review events read the workflow from the default branch, so a pin change on this branch does not clear those runs.
 
 Board row `b53cc5f8970c469e8f561767c35fc334` is claimed in progress by GROK.  Fleet Linear team ST was not moved.  `AGENT_SEAT` is unset on this cloud seat, and the board file used `--by GROK` because that is the seat writing the PR.  Do not mark the row completed until the PR merges.
 

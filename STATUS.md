@@ -27,6 +27,16 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 # Current Status
 
 ## 2026-10-15 Cursor Cloud — ST-3988 congress-share dependency DB health
+## 2026-10-15 CURSOR — PR #4661 GB-Trader shepherd
+
+**What.**  `origin/main` at `df7e6d10` is already merged.  Pushed local merge commits `1dc39c4e` and `5ee168ce`.  Fixed Kody Rule 35 on `docs/rollouts/2026-10-14-free-data-gaps.md` (verification block now records `npm run build` pass).  Replied on open review threads and resolved them after written explanations for merged-main `PLAN.md` rows without inventing board hashes.
+
+**Verification.**  `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  `npm run build` pass (43/43 static pages).  Hosted `verify` pending then green on pushed HEAD.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Deployer or Jay merges when satisfied.  Do not merge from this lane.
+
 ## 2026-10-14 GROK — PR #4661 review follow-up
 
 **What.**  `git merge origin/main` was already up to date at `2656320f`.  No conflicts and no migration renumber.  Two unresolved Kody threads remain.  `PRRT_kwDOS7mOVM6sl4tA` asks for a board hash on the SQLite hygiene row (`cursor/sqlite-storage-hygiene-181a`, PR #4666).  `board list --app socratic-trade --search "storage hygiene"` returns nothing, and the hygiene rollout records that the fleet board claim was blocked.  `PRRT_kwDOS7mOVM6sms8E` asks for a board hash and a PR id on the Tradier sandbox rows.  Those rows now cite PR #4668 and state that no board reservation is on file.  Sweep report `f5bdb15c09cf44cb903df6364d56c406` is a later #4668 shepherd note, so it was not used as the feature reservation.  No hash was invented.  Neither thread was resolved.  Hosted `verify` on `d4a22063` passed lint, tsc, `npm test`, and build.  `.github/workflows/autofix.yml` still fails before any job on review events.  `gh run view --log-failed` has no job log.  Review events read that workflow from the default branch.
