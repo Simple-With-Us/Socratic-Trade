@@ -6,7 +6,7 @@
 
 **Branch.**  `cursor/data-cascade-reliability-eb70`
 
-**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted vitest 142 passed.  Full `npm test`: 9343 passed, 51 skipped, 2 failed outside this diff (`test/egress-guard.test.ts` sandbox DNS, `test/data-catalog-completeness.test.ts` against the local database).  `npm run build` was not re-run here.
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted vitest 142 passed.  Full `npm test`: 9343 passed, 51 skipped, 2 failed outside this diff (`test/egress-guard.test.ts` sandbox DNS, `test/data-catalog-completeness.test.ts` against the local database).  `npm run build` -> ok.
 
 **Next.**  Push the merge and ask Kody to re-review.  Do not merge from this lane.
 
