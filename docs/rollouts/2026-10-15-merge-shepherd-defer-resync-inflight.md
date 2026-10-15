@@ -32,6 +32,8 @@ Commands on this branch (per handoff.mdc — **ok** only when run on the commit 
 | `npm test` | N/A (no vitest coverage for bash; not run this session) |
 | `npm run build` | N/A (no app/runtime change; not run this session) |
 
+Merge-forward with `origin/main` at `960637ec` (2026-10-15); no conflict markers in shepherd/STATUS/rollout after merge.
+
 CI `verify` on PR #4705 is the authoritative full gate after push.
 
 ## Next Steps & Blockers

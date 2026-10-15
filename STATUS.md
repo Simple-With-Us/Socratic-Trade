@@ -6,7 +6,7 @@
 
 **Branches.**  `cursor/merge-shepherd-skip-inflight-b952` (ST), `cursor/fleet-health-coolify-lookup-b952` (AFC).
 
-**Verification.**  `bash scripts/merge-shepherd-ci-inflight.selftest.sh`; `bash -n scripts/merge-shepherd.sh` (Kody #4705: `NEUTRAL`/`SKIPPED` terminal in `ci_in_flight`).  PR #4705 ready; `needs-human-merge` — GB-Deployer merges only.
+**Verification.**  `bash scripts/merge-shepherd-ci-inflight.selftest.sh`; `bash -n scripts/merge-shepherd.sh` (Kody #4705: `NEUTRAL`/`SKIPPED` terminal in `ci_in_flight`).  Merged `origin/main` into PR branch (`960637ec`, 2026-10-15).  PR #4705 ready; `needs-human-merge` — GB-Deployer merges only.
 
 **Next.**  Open PRs (ready); owner refresh Mac shepherd copy + redeploy AFC host script for ST-9.
 ## 2026-10-15 Cursor Cloud — check-pin token order (ST-2582 PR #4698)
