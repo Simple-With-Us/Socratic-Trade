@@ -27,3 +27,13 @@ npm run build  # -> ok
 ## Next Steps & Blockers
 
 - Deployer merges follow-up PR; reply on #4696 review threads with evidence (threads stay unresolved per Jay).
+
+## CODEX Landing Verification
+
+- Lane: `codex-land-pr4733`; branch `cursor/st-4531-retire-slack-callers-89ad`; latest remote head before merge: `5a30c3d3`.
+- Merged `origin/main` at `e539ec4c` with a merge commit; no textual conflicts.  The PR diff remains five paths, and the rollout file contains no conflict markers.
+- `npm run lint` — passed with 0 errors and 866 warnings.
+- `npx tsc --noEmit` — passed.
+- `npx vitest run test/github-actions-infisical-zulip-ops.test.ts test/agent-sync-fleet-post.test.ts` — passed, 3 tests.
+- `npm run build` — passed.  Next reported existing Edge-runtime dependency warnings and missing `ENCRYPTION_KEY` notices during static generation.
+- `npm ci` — passed; npm reported 9 audit vulnerabilities and withheld 5 dependency install scripts under npm's install-script policy.
