@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
 // Exposure surface of the PUBLIC /api/health probe (middleware PUBLIC_PREFIXES). The route emits a
 // full operator view only to a caller presenting the ops token; everyone else gets the same payload
@@ -48,6 +49,11 @@ function dependenciesWithoutOpsDetail(
   }
   return stripped;
 }
+
+// `checks.dependencies` arrives from the route via `Response.json()`, so it is untrusted boundary
+// data. Validate it at the boundary instead of casting, so a shape regression fails loudly here
+// rather than as a confusing diff deeper in the comparison below.
+const healthDependenciesSchema = z.record(z.string(), z.unknown()).optional();
 
 /** Stub the OpenRouter /credits fetch so the balance block is populated deterministically. */
 function stubCredits(totalCredits: number, totalUsage: number) {
@@ -227,7 +233,7 @@ describe("/api/health exposure", () => {
     expect(anonBody.ok).toBe(false);
     expect(detailBody.ok).toBe(false);
     expect(anonBody.checks.dependencies).toEqual(
-      dependenciesWithoutOpsDetail(detailBody.checks.dependencies as Record<string, unknown>)
+      dependenciesWithoutOpsDetail(healthDependenciesSchema.parse(detailBody.checks.dependencies))
     );
     expect(detailBody.checks.dependencies.pinecone).toMatchObject({
       ok: false,

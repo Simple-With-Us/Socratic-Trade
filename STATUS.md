@@ -11,6 +11,24 @@
 vitest green before push; CI `verify` gate pending.
 
 **Next.**  PR #4706 ready for review; Deployer merges.
+
+**2026-10-15 [codex-autofix] — PR #4706 review pass (round 8).**  Three open Kody threads, two
+of them duplicates of the same finding: (1) Rule 26 wanted the ST-3988 rollout note's
+Verification State block to carry per-command `-> ok` tokens instead of a bare bash block —
+fixed, it is now a bulleted list in command order; (2)+(3) Rules 19/31 flagged the
+`as Record<string, unknown>` cast on `detailBody.checks.dependencies` in
+`test/health-route-exposure.test.ts` — fixed by validating the route JSON at the trust
+boundary with `healthDependenciesSchema` (`z.record(z.string(), z.unknown()).optional()`) and
+passing the parsed value to `dependenciesWithoutOpsDetail`, dropping the assertion.  No
+production Zod schema exists for the `/api/health` payload, so the test declares a local one
+rather than reusing a production export.  Re-verified on this branch: `npx vitest run
+test/health-route-exposure.test.ts` 6/6, `npm run lint` 0 errors, `npx tsc --noEmit` clean,
+`npm run build` clean.  Full `npm test` exits 0; the 13 `::error` annotations it prints are all
+in `llm-provider` / `chat-llm` / `framework-review` / `openrouter-credits`, none of which this
+PR touches.  Reproduced identically on an unmodified `origin/main` worktree — the runner has live
+LLM provider keys in its env, so the "no key configured" assertions fail there too.  Pre-existing
+environment issue, not this PR; left untouched.  All three threads resolved.  Auto-merge enabled.
+
 ## 2026-10-15 CURSOR — Congress push delivery/consumption receipt (ST-3846)
 
 **What.**  App B webhook responses now emit `receiptVersion: 1` with explicit `delivered` + `consumed` fields; batch failures return `422` instead of silent `200`.  Congress.Trade PR parses the receipt before marking `deliveries` rows delivered.
