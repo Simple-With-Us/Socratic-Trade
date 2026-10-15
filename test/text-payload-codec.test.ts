@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   decodeTextPayload,
+  decodeTextPayloadAsync,
   encodeTextPayload,
+  encodeTextPayloadAsync,
   TEXT_PAYLOAD_GZIP_PREFIX,
   TEXT_PAYLOAD_RAW_PREFIX
 } from "../src/lib/text-payload-codec";
@@ -55,6 +57,15 @@ describe("text payload codec", () => {
 
   it("refuses to treat a broken gz1 payload as text", () => {
     expect(() => decodeTextPayload(`${TEXT_PAYLOAD_GZIP_PREFIX}!!!!`)).toThrow();
+  });
+
+  it("passes the empty string through every encode and decode path", async () => {
+    expect(encodeTextPayload("")).toBe("");
+    expect(decodeTextPayload("")).toBe("");
+    expect(await encodeTextPayloadAsync("")).toBe("");
+    expect(await decodeTextPayloadAsync("")).toBe("");
+    // The async encoder must match the sync one so both forms stay interchangeable.
+    expect(await encodeTextPayloadAsync("")).toBe(encodeTextPayload(""));
   });
 });
 

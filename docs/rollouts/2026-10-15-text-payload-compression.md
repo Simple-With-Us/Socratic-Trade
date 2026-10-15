@@ -39,6 +39,7 @@ Files:
 - `embed_stage` and `chunk_occurrences` are not rewritten.  The review treats 1.9 GB of staged vectors as a delivery-delete question, and 2.2 GB of occurrences as the point-in-time ledger working as designed.
 - No age deletes.  No outside price backfill.
 - Review follow-up on PR #4720.  `text_codec` / `segment_codec` and `plaintext_length` (migration 95) let the backfill probe an index and let `hasLocalFilingCopy` stop at `LIMIT 1` without gunzip.  The 10-minute watermark is written after a pass returns.  `raw1:` carries a length frame so a plaintext that starts with `gz1:` or `raw1:` round-trips.  A transcript that fails to decode is kept on `decodeRetries` and the re-embed watermark still advances.  #4722 was still open at merge time, so this branch does not include that retention rewrite.
+- Review round (autofix), PR #4720.  One open item: the codec suite never exercised the empty-string branch of `if (!plain) return plain` on `encodeTextPayload` / `decodeTextPayload` / `encodeTextPayloadAsync`.  Added a case asserting all four entry points return `""` and that the sync and async encoders agree on it.  The remaining threads were already resolved or outdated.
 
 Space, using the given production sizes and a conservative English gzip-plus-base64 ratio of about 55% for transcripts.  Companyfacts JSON is much more repetitive.  A local sample of that shape saved about 96% after base64.  Numeric fact rows are not compressed, so the `sec_facts` save depends on how much of the 1.67 GB is the cache blob.
 
