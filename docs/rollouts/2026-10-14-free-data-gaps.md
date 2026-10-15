@@ -166,16 +166,19 @@ npm run build
 
 `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  `npm run build` pass (compiled, TypeScript finished, 43/43 static pages).  Full `npm test` was not re-run in this shepherd shell.  Hosted `verify` on the pushed HEAD is the merge gate.
 
-GB-Deployer follow-up (CURSOR cloud, 2026-10-15).  Merged `origin/main` at `3f4ef5e5` (ST-2582 honest approve / check-pin) into `cursor/free-data-gaps-55d1` with no conflicts (`38032744`).  GitHub had reported `mergeStateStatus: DIRTY` until this merge landed.  Review threads: 0 unresolved.  Jay-deferred threads untouched.
+## Codex Autofix pass 2026-10-15 (merge main, no new findings)
+
+No new review items.  All 16 review threads were already resolved before this pass.  The three newest `kody-ai` comments (01:48, 02:53, 03:31) carry no findings, and no `cursor[bot]` or Codex review comments exist on the PR.  Round cap was 7 of 10 `[codex-autofix]` commits, so this pass ran.
+
+The branch was 1 commit behind `origin/main`, and GitHub reported `mergeable: CONFLICTING` / `mergeStateStatus: DIRTY`, which blocks the required `verify` check and therefore auto-merge.  Merged `origin/main` (`3f4ef5e5`, PR #4698 honest approve).  Both `git merge-tree --write-tree` and a trial merge in a scratch worktree returned a clean merge, so the GitHub `CONFLICTING` flag was stale rather than real.  No conflicts, no manual resolution.  Both sides' `STATUS.md` and `PLAN.md` entries survived.  `package.json` did not change, so no `npm install` was needed for the merge.
 
 ```bash
-npm run lint
 npx tsc --noEmit
 npm test
 npm run build
 ```
 
-`npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 25 failed, 9388 passed, 51 skipped, 835 files (cloud env; not in diff vs `origin/main`).  `npm run build` pass (43/43 static pages).  Hosted `verify` on pushed HEAD is the merge gate.  PR carries `needs-human-merge`; Jay merges.
+`npx tsc --noEmit` pass.  `npm test` fail in this shell: 13 failed, 9400 passed, 51 skipped, 835 files, 1249.97s.  All 13 failures are in `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/framework-review.test.ts`, and `test/openrouter-credits.test.ts`.  They assert "no LLM key configured" while this sandbox exports an `OPENROUTER_API_KEY` (`sk-cp-...`), so the resolver returns OpenRouter instead of the expected native endpoint.  Baseline proof: the same 4 files were run against pristine `origin/main` in a separate worktree and reproduced exactly 13 failed / 47 passed, matching the branch run.  None of the 4 files is in the PR diff, so the PR introduces zero test regressions.  Earlier passes recorded a different environmental pair (`test/egress-guard.test.ts`, `test/data-catalog-completeness.test.ts`); those are sandbox-resolution and local-database artifacts and also absent from the diff.  `npm run build` pass (compiled, finished TypeScript, 43/43 static pages).  `npm run lint` was not re-run in this shell; hosted `verify` is the merge gate.
 
 ## Next Steps & Blockers
 
