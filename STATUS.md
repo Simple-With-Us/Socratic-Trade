@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-14 Cursor Cloud — PR #4664 merge main
+
+**What.**  Merged `origin/main` (`e80386d7`, SEC XBRL cached fundamentals) into `cursor/data-cascade-reliability-eb70`.  The merge was clean.  No migration renumber.  Seven unresolved review threads were re-read against this head.  No new code change.  `fetchWithRetry` still skips the lane hold while a 429 retry remains, and opens it only for a positive `Retry-After` (`4fc19a96`).  Price-less directory rows stay out of `screenerCache` and `screenerLastGood`.  `resolveProviderLimiterConfigForCall` still keeps `alpha-vantage-rapidapi` at 5/min when the pacer bucket is a RapidAPI host.  The FRED VIXCLS schema still uses explicit `.strip()` on both objects.  The PLAN.md header for this lane still cites `PR #4664` and does not invent a board id.  The inherited PR #4663 row still has no board reservation to copy.  Threads were not resolved.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm test` was 9355 passed, 51 skipped, and 2 failed, both outside this diff.  `test/egress-guard.test.ts` fails because this sandbox rejects the discord.com lookup.  `test/data-catalog-completeness.test.ts` reads peRatio completeness 1 from the local `data/app.db`.  Hosted `verify` on `b1456fa7` was green before this merge.  `npm run build` -> ok.
+
+**Next.**  Push and comment `@kody start-review`.  Do not merge from this lane.  Do not resolve threads.
+
 ## 2026-10-14 Cursor Cloud — PR #4664 review follow-up
 
 **What.**  Merged `origin/main` again (`1588bae8`, keyless options enrichment).  The merge was clean.  The earlier merge on this branch was `82162336`.  Kody's priced-directory suggestion does not apply: the directory runs only when `screenerLastGood` is empty, so there is no price to copy.  The unreachable cache-and-return of priced directory rows is gone.  A directory that lists symbols now says they were not cached, instead of calling that a fallback failure.  A directory failure still keeps the original screener error.  Price-less rows stay out of `screenerCache` and `screenerLastGood`.  The three directory fetches stay, because that count is the cold-failure annotation.  Sentry's 429 hold and RapidAPI service-limit threads stay as fixed in `4fc19a96`.  The FRED VIXCLS schema keeps explicit `.strip()` on both objects.  The comment says to strip extra FRED keys and not to use `.strict()`, so `.passthrough()` would keep keys the parser does not read.  Threads were not resolved.
