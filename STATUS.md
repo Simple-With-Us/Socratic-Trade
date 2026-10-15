@@ -6,7 +6,7 @@
 
 **Branch.**  `cursor/honest-approve-retryable-11d4`
 
-**Verification.**  Targeted vitest, then `npm run lint`, `npx tsc --noEmit`, `npm test`, `npm run build`.  See the rollout note for the commands actually run.
+**Verification.**  Targeted vitest 64/64.  `npm run lint` 0 errors, 854 warnings.  `npx tsc --noEmit` ok.  `npm test` 9385 passed, 51 skipped, 24 failed, all outside this diff (sandbox LLM keys and host checks).  `npm run build` ok.  Detail: `docs/rollouts/2026-10-15-honest-approve-retryable.md`.
 
 **Next.**  Ready PR with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.
 

@@ -41,7 +41,35 @@ Price and market-data history is not pruned.
 
 ## Verification State
 
-Commands actually run are recorded after the gate.  This note is updated in the same change as the code.
+```
+npx vitest run test/placement-outcome.test.ts test/placement-reconcile.test.ts test/route-proposals-approve.test.ts test/console-api-html-error.test.ts test/broker-health-auto-pause.test.ts test/mobile-placement-command.test.ts
+```
+
+6 files, 64 tests, all passed.
+
+```
+npm run lint
+```
+
+Exit 0.  0 errors, 854 warnings (the existing grandfathered backlog).
+
+```
+npx tsc --noEmit
+```
+
+Exit 0.
+
+```
+npm test
+```
+
+Exit 1.  9385 passed, 51 skipped, 24 failed.  The failures are outside this diff: LLM key resolution (`chat-llm`, `llm-provider`, `framework-review`, `openrouter-credits`, `red-team`) sees a sandbox OpenRouter key, plus `alpha-vantage-key-pool`, `data-providers`, `cpuprofile-summary` (Node 22 loading a `.ts` script), `notify-body-tiers`, `notify-user-creds`, `persistence-notification`, and `server-metrics` (`usesLocalHost`).  None of those files were edited.
+
+```
+npm run build
+```
+
+Exit 0.
 
 ## Next Steps & Blockers
 
