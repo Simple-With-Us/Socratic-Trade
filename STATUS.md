@@ -29,7 +29,7 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 ## 2026-10-15 Cursor Cloud — ST-3988 congress-share dependency DB health
 ## 2026-10-15 CURSOR — PR #4661 GB-Deployer merge main
 
-**What.**  Merged `origin/main` (`3f4ef5e5`) into `cursor/free-data-gaps-55d1` with no conflicts (`38032744`).  Cleared GitHub `DIRTY` / merge-conflict state.  Zero unresolved review threads.  Did not enable auto-merge (`needs-human-merge` for Jay).
+**What.**  Merged `origin/main` (`3f4ef5e5`, then `2075c857` / #4696) into `cursor/free-data-gaps-55d1` with no conflicts.  Integrated remote autofix merge and resolved rollout doc conflict (`559b213c`).  Cleared recurring GitHub `DIRTY` state by keeping branch at latest `main`.  Zero unresolved review threads.  Did not enable auto-merge (`needs-human-merge` for Jay).
 
 **Verification.**  `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  `npm run build` pass.  Local `npm test` environmental failures only.  Pushed `559b213c` (integrated remote autofix merge + rollout conflict fix).  Hosted `verify` pending.
 

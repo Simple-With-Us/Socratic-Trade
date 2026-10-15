@@ -180,6 +180,8 @@ npm run build
 
 `npx tsc --noEmit` pass.  `npm test` fail in this shell: 13 failed, 9400 passed, 51 skipped, 835 files, 1249.97s.  All 13 failures are in `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/framework-review.test.ts`, and `test/openrouter-credits.test.ts`.  They assert "no LLM key configured" while this sandbox exports an `OPENROUTER_API_KEY` (`sk-cp-...`), so the resolver returns OpenRouter instead of the expected native endpoint.  Baseline proof: the same 4 files were run against pristine `origin/main` in a separate worktree and reproduced exactly 13 failed / 47 passed, matching the branch run.  None of the 4 files is in the PR diff, so the PR introduces zero test regressions.  Earlier passes recorded a different environmental pair (`test/egress-guard.test.ts`, `test/data-catalog-completeness.test.ts`); those are sandbox-resolution and local-database artifacts and also absent from the diff.  `npm run build` pass (compiled, finished TypeScript, 43/43 static pages).  `npm run lint` was not re-run in this shell; hosted `verify` is the merge gate.
 
+Follow-up merge `origin/main` at `2075c857` (PR #4696 ST-4531 Slack retirement) with no conflicts.  GitHub had gone `DIRTY` again until this tip was on the branch.
+
 ## Next Steps & Blockers
 
 Ask Kody to re-review after thread replies.  Do not merge from this lane.  Do not deploy.  PR Autofix remains red on every review event.  `AI-Fleet-Coordinator` `pr-autofix-reusable.yml` line 163 uses `secrets` in a step `if` at the pin `2e671004` and still on coordinator `main` (`7508b399`).  The caller matches `origin/main`, and review events read the workflow from the default branch, so a pin change on this branch does not clear those runs.
