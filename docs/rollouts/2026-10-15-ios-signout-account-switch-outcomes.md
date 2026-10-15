@@ -50,7 +50,7 @@ npx vitest run test/shared-package-pin-check.test.ts  # 6 passed
 
 The 23 vitest failures are in LLM key routing, notify credentials, and server-metrics.  They expect an empty provider-key environment and this seat has provider keys set.  None of them import the iOS tree.
 
-CODEX takeover local gates after merging main: `npm run lint` passed with 0 errors and 866 existing warnings; `npx tsc --noEmit` passed; `npm run build` passed.  The changed implementation and regression cases are Swift-only, so there is no focused Vitest file for this change.
+CODEX takeover local gates after merging main through `e81fd0da`: `npm run lint` passed with 0 errors and 866 existing warnings; `npx tsc --noEmit` passed; `npm run build` passed.  After later merging `origin/main` through `3b8e3e4b`, lint (0 errors, 866 warnings), TypeScript, and build passed again.  The unique diff contains no TypeScript or Vitest files, so no focused Vitest file applies.
 
 Swift compile and XCTest are not run on this Linux seat.  Hosted `.github/workflows/ios-build.yml` is authoritative.  Run `38798340547` built successfully and reported an assertion failure against `URLCache.shared`; the account-switch case passed on that rerun.  Foundation documents an unavoidable race when reading and writing the same request through `URLCache`; the regression tests used a singleton and the same request across cases.  They now use each ephemeral session's private URL cache and cookie storage, and sign-out removes cookies from the storage used by its client session.  Fixed-head run `38800275016` is green: 273/273 XCTest cases, full `verify-hosted` lint/typecheck/test/build, and aggregate `verify`.  The temporary failure-only `xcresulttool` workflow diagnostics were reverted after the isolated tests passed.  The final unique diff is the ten iOS/handoff paths.  New cases:
 
@@ -63,7 +63,7 @@ Swift compile and XCTest are not run on this Linux seat.  Hosted `.github/workfl
 
 ## Next Steps & Blockers
 
-- CODEX takeover 2026-10-15: merged `origin/main` at `e81fd0da` with a merge commit and no textual conflicts.  Fixed-head `989eaac0` passed required CI run `38800275016`.  No review threads remain unresolved.  Reverted temporary workflow diagnostics and confirmed fresh `origin/main` remains `e81fd0da`; the final unique diff is exactly the ten iOS/handoff paths.  Remove `do-not-automerge` and arm auto-merge only after final-head required checks pass, as Jay directed.
+- CODEX takeover 2026-10-15: merged `origin/main` at `e81fd0da` and later `3b8e3e4b` with merge commits and no textual conflicts.  Fixed-head `989eaac0` passed required CI run `38800275016` (273 XCTest cases and full `verify-hosted`).  No review threads remain unresolved.  Reverted temporary workflow diagnostics; the unique diff remains exactly the ten iOS/handoff paths.  The #4737 merge commit still needs a fresh push and CI.  Remove `do-not-automerge` and arm auto-merge only after final-head required checks pass, as Jay directed.
 - Mark ST-2578 completed only after merge, and deployed only after the live binary includes this commit.
 
 ## Zero-Code Findings
