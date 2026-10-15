@@ -35,7 +35,13 @@ npx vitest run test/shared-package-pin-check.test.ts
 
 1 file, 7 tests, all passed.
 
-`npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build` are the repo gate.  This pass ran the pin-check file before commit.  The rest of the gate is the hosted `verify` job on the pull request, because this diff does not change the trading path.
+```
+npx tsc --noEmit
+```
+
+Exit 0.
+
+`npm test` and `npm run build` were not re-run for this CI-only diff.  The hosted `verify` job on the pull request is the full gate.  The previous head's hosted `verify` was green before this merge.
 
 ## Next Steps & Blockers
 
