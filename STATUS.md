@@ -11,6 +11,13 @@
 **Next.**  `origin/main` through `e3ba1507` is merged on `cursor/broker-call-bounds-7ec5`.  Keep PR #4715 ready with `do-not-automerge`.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
 **Next.**  `origin/main` through `49a76da4` is merged.  Keep the PR ready with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
 
+## 2026-10-15 Cursor Cloud — CT fundamentals/analyst nightly push (ST-4537)
+
+**What.**  Congress.Trade `st_inbound_market_data` fundamentals + analyst stale since 2026-10-06; scan-hook-only path.  Nightly `runCongressDailyShare` now POSTs fundamentals/analyst from `symbol_field_latest` for the monitored universe.
+
+**Branch.**  `cursor/ct-fundamentals-nightly-push-bb23`
+
+**Next.**  Verify gate, open ready PR, deploy; confirm CT stream freshness after nightly run.
 ## 2026-10-15 CURSOR — Congress push delivery/consumption receipt (ST-3846)
 
 **What.**  App B webhook responses now emit `receiptVersion: 1` with explicit `delivered` + `consumed` fields; batch failures return `422` instead of silent `200`.  Congress.Trade PR parses the receipt before marking `deliveries` rows delivered.
