@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 Claude — PR #4664 autofix round 11
+
+**What.**  Triaged all 15 review threads.  Four were still unresolved: three Sentry ones (`data-providers.ts` 429 lane hold, `market.ts` screener fallback cache, `provider-rate-limit.ts` RapidAPI service limits) and one Kody rule-[6] thread on the inherited PLAN.md row for PR #4663.  All three Sentry findings were already fixed in `4fc19a96` — `fetchWithRetry` still skips the lane hold while a retry remains and opens it only for a positive `Retry-After`; `resolveProviderLimiterConfigForCall` still keeps `alpha-vantage-rapidapi` at 5/min when the pacer bucket is a RapidAPI host, with a regression test; price-less directory rows still stay out of `screenerCache` and `screenerLastGood`.  The one actionable item was Kody's: the PLAN.md row for the merged PR #4663 carried only a GitHub PR reference.  PR #4663 is board item `SOCRATIC-TRADE-2S`, so the row header now carries both references, satisfying rule [6]'s two-part requirement.  No code change.  The branch was already current with `origin/main` (0 commits behind), so no merge was needed.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  Full `npm test`: 9344 passed, 51 skipped, 13 failed — all 13 are the runner exporting `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL`, which the LLM key-resolution tests read as a configured user credential (same as rounds 9 and 10).  Re-running `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/framework-review.test.ts`, and `test/openrouter-credits.test.ts` with those three variables unset gives 60/60 passed.  `node_modules` was empty on checkout, so `npm install` ran first (685 packages; `package.json` unchanged vs `origin/main`).  `next-env.d.ts` and `tsconfig.json` were restored from `origin/main` after the build rewrote them.
+
+**Next.**  Resolve the Kody PLAN.md thread addressed this round.  The three Sentry threads are already fixed in code but their first-comment author is not one of the review bots this lane may resolve.  Do not merge from this lane.
+
 ## 2026-10-14 Cursor Cloud — PR #4664 merge main
 
 **What.**  Merged `origin/main` (`e80386d7`, SEC XBRL cached fundamentals) into `cursor/data-cascade-reliability-eb70`.  The merge was clean.  No migration renumber.  Seven unresolved review threads were re-read against this head.  No new code change.  `fetchWithRetry` still skips the lane hold while a 429 retry remains, and opens it only for a positive `Retry-After` (`4fc19a96`).  Price-less directory rows stay out of `screenerCache` and `screenerLastGood`.  `resolveProviderLimiterConfigForCall` still keeps `alpha-vantage-rapidapi` at 5/min when the pacer bucket is a RapidAPI host.  The FRED VIXCLS schema still uses explicit `.strip()` on both objects.  The PLAN.md header for this lane still cites `PR #4664` and does not invent a board id.  The inherited PR #4663 row still has no board reservation to copy.  Threads were not resolved.
