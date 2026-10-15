@@ -125,19 +125,12 @@ export function transientEscalationWindowMs(env: Record<string, string | undefin
 }
 
 /**
- * FIFO retention for api_health_log: only the newest N rows per (service, key_source) lane survive
- * (enforced on every insert in logApiHealth). Exported because it is NOT just a storage detail — the
- * `callsLastHour`/`callsLast24h` window counts below are computed over this same capped table, so on
- * a busy lane they are a FLOOR, not a total, and any UI that prints them must say so (see
- * ServiceHealthSummary.laneLogCap). Note the equivalence that makes that cheap to detect: a window
- * count can only reach the cap when every retained row falls inside the window, which is exactly the
- * case where older rows may have been evicted out of it -- so `count === cap` is precisely the
- * "saturated" condition, no extra bookkeeping needed. (The residual ambiguity: a lane with exactly
- * `cap` calls and nothing evicted also reads as saturated. "500+" is still true there.)
+ * Max rows read from api_health_log when walking a lane's history for hard-streak heuristics
+ * (getLaneHealth).  Storage retention is forever (Jay 2026-10-15); this is a read bound only.
  */
 export const HEALTH_LOG_LANE_CAP = 500;
 
-/** Durable ISO start of the current unbroken hard-failure run — survives api_health_log FIFO. */
+/** Durable ISO start of the current unbroken hard-failure run — survives unbounded api_health_log history. */
 export const HEALTH_HARD_STREAK_START_PREFIX = "health:hard-streak-start:";
 
 export function hardStreakStartSettingKey(
@@ -399,8 +392,7 @@ export interface ServiceHealthSummary {
   lastSuccessLatencyMs: number | null;
   lastFailureTs: string | null;
   lastFailureError: string | null;
-  /** Calls in the trailing hour / 24h, counted over the CAPPED log (see HEALTH_LOG_LANE_CAP): a
-   *  value equal to `laneLogCap` means "at least this many", not "exactly this many". */
+  /** Calls in the trailing hour / 24h (full table count for the lane). */
   callsLastHour: number;
   callsLast24h: number;
   stoppedWorking: boolean;
@@ -409,9 +401,7 @@ export interface ServiceHealthSummary {
    *  admin connections route can keep synthesizing never-used placeholder lanes as plain object
    *  literals (they have no log and no stop state). */
   stoppedReasonKind?: HealthStoppedReasonKind | null;
-  /** Row-retention cap the two window counts were computed against, so a caller can render the
-   *  saturated case honestly ("500+") without importing this module. Optional for the same
-   *  placeholder-lane reason; a lane with no rows cannot be saturated. */
+  /** @deprecated FIFO lane cap removed 2026-10-15; omitted on live summaries. */
   laneLogCap?: number;
   /**
    * Product-retired vendor lane (FMP / Quiver / UW / FilingAPI). Admin Connections must
@@ -580,20 +570,8 @@ export function flushApiHealthBuffer(): void {
              ON CONFLICT(service, fingerprint, key_source) DO UPDATE SET
                last_seen = excluded.last_seen,
                count = count + 1`);
-      const deleteCap = db.prepare(`DELETE FROM api_health_log
-           WHERE service = ? AND key_source IS ?
-             AND id NOT IN (
-               SELECT id FROM api_health_log
-               WHERE service = ? AND key_source IS ?
-               ORDER BY ts DESC, rowid DESC
-               LIMIT ${HEALTH_LOG_LANE_CAP}
-             )`);
-
-      const lanesToPrune = new Set<string>();
-
       for (const p of processed) {
         insertRow.run(p.id, p.service, p.now, p.ok ? 1 : 0, p.latencyMs ?? null, p.errorText, p.keySource, p.userId);
-        lanesToPrune.add(`${p.service}::${p.keySource ?? ""}`);
 
         if (!p.ok && p.errorText) {
           const normalized = p.errorText.trim().toLowerCase().replace(/\s+/g, " ");
@@ -601,16 +579,6 @@ export function flushApiHealthBuffer(): void {
           const patternId = randomUUID();
           const patternKeySource = p.keySource ?? "";
           updatePattern.run(patternId, p.service, fingerprint, p.errorText, p.now, p.now, patternKeySource);
-        }
-      }
-
-      const countStmt = db.prepare(`SELECT COUNT(*) as cnt FROM api_health_log WHERE service = ? AND key_source IS ?`);
-      for (const lane of lanesToPrune) {
-        const [service, keySourceRaw] = lane.split("::");
-        const keySource = keySourceRaw === "" ? null : keySourceRaw;
-        const row = countStmt.get(service, keySource) as { cnt: number } | undefined;
-        if (row && row.cnt > HEALTH_LOG_LANE_CAP) {
-          deleteCap.run(service, keySource, service, keySource);
         }
       }
     })();
@@ -795,7 +763,6 @@ export function getServiceHealthSummaries(): ServiceHealthSummary[] {
         stoppedWorking: intentionalOff ? false : stoppedWorking,
         stoppedReason: intentionalOff ? intentionalOffHealthReason(service) : stoppedReason,
         stoppedReasonKind: intentionalOff ? null : stoppedReasonKind,
-        laneLogCap: HEALTH_LOG_LANE_CAP,
         intentionalOff: intentionalOff || undefined
       };
     });
