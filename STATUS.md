@@ -23,9 +23,9 @@
 
 **Branch.**  `cursor/st-quiver-coverage-sanitize-8696`
 
-**Verification.**  Targeted vitest for enrichment-coverage + persistence + source-value; full lint/tsc/test/build before PR.
+**Verification.**  Rebased on `main`; Playwright visual baseline for retired-lanes footnote; `verify` CI green after push.
 
-**Next.**  Ready PR; Agent-Sync comment on ST-3854; deployer merges (do not resolve review threads to merge).
+**Next.**  Deployer merges #4707; then CURSOR marks ST-3854 Done via Agent-Sync (not before merge).
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
