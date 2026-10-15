@@ -26,14 +26,21 @@ Fleet coordination moved to Zulip (`agent-sync`) in October 2026.  A few ST shel
 ## Verification State
 
 ```bash
-bash -n scripts/agent-sync-fleet-post.sh scripts/github-actions-infisical-zulip-ops.sh scripts/alert-deploy-freshness.sh scripts/sync-provider-knobs.sh
-bash scripts/alert-deploy-freshness.selftest.sh
-python3 scripts/test-cloud-coordination-bootstrap.py
-npm run lint
-npx tsc --noEmit
-npm test
-npm run build
+bash -n scripts/agent-sync-fleet-post.sh scripts/github-actions-infisical-zulip-ops.sh scripts/alert-deploy-freshness.sh scripts/sync-provider-knobs.sh   # -> ok
+bash scripts/alert-deploy-freshness.selftest.sh   # -> ok
+python3 scripts/test-cloud-coordination-bootstrap.py   # -> ok
+npm run lint   # -> ok (0 errors, 854 pre-existing warnings)
+npx tsc --noEmit   # -> ok
+npm test   # -> fail (10 failures, ALL pre-existing on origin/main — see below)
+npm run build   # -> ok
 ```
+
+The `npm test` failures are **not caused by this PR**.  They are confined to
+`test/llm-provider.test.ts` and `test/openrouter-credits.test.ts`, neither of which
+this branch touches, and they reproduce identically on a clean `origin/main`
+worktree (`df7e6d10`) in the same environment — every failing assertion is an
+OpenRouter credential present in the runner env that the test assumes is absent.
+The authoritative `verify` CI job is the gate for that.
 
 ## Next Steps & Blockers
 
