@@ -44,6 +44,9 @@ export function installSlowSqliteTiming(database: object, options: SlowSqliteOpt
   const warn = options.warn ?? ((line: string) => console.warn(line));
   const now = options.now ?? Date.now;
   const lastLogged = new Map<string, number>();
+  // One frame per running transaction; holds the first SQL it ran so an inline (anonymous)
+  // transaction function still reports something that tells two transactions apart.
+  const txFrames: Array<{ firstSql?: string }> = [];
 
   const report = (kind: string, key: string, ms: number): void => {
     if (ms < thresholdMs) return;
@@ -64,6 +67,10 @@ export function installSlowSqliteTiming(database: object, options: SlowSqliteOpt
 
   const timed = <T>(kind: string, key: string, run: () => T): T => {
     const start = now();
+    if (kind !== "exec" && txFrames.length > 0 && !kind.startsWith("transaction")) {
+      const frame = txFrames[txFrames.length - 1];
+      if (frame.firstSql === undefined) frame.firstSql = key;
+    }
     try {
       return run();
     } finally {
@@ -104,15 +111,29 @@ export function installSlowSqliteTiming(database: object, options: SlowSqliteOpt
     target.transaction = function (this: unknown, ...args: unknown[]) {
       const wrapped = originalTransaction.apply(this, args) as AnyFn & Record<string, AnyFn>;
       if (typeof wrapped !== "function") return wrapped;
-      const label = (args[0] as { name?: string } | undefined)?.name || "anonymous";
+      const fnName = (args[0] as { name?: string } | undefined)?.name || "anonymous";
+      // Label = the function's name plus the first SQL it ran (known once it finishes), so two
+      // unnamed inline transactions neither share a rate-limit key nor lose their identity.
+      const timedTx = <T>(kind: string, run: () => T): T => {
+        const frame: { firstSql?: string } = {};
+        txFrames.push(frame);
+        const start = now();
+        try {
+          return run();
+        } finally {
+          txFrames.pop();
+          const label = frame.firstSql ? `${fnName} first=${frame.firstSql}` : fnName;
+          report(kind, label.slice(0, SQL_PREFIX_CHARS + 40), now() - start);
+        }
+      };
       const run = function (this: unknown, ...callArgs: unknown[]) {
-        return timed("transaction", label, () => wrapped.apply(this, callArgs));
+        return timedTx("transaction", () => wrapped.apply(this, callArgs));
       } as AnyFn & Record<string, AnyFn>;
       for (const variant of ["deferred", "immediate", "exclusive"]) {
         const original = wrapped[variant];
         if (typeof original === "function") {
           run[variant] = function (this: unknown, ...callArgs: unknown[]) {
-            return timed(`transaction.${variant}`, label, () => original.apply(this, callArgs));
+            return timedTx(`transaction.${variant}`, () => original.apply(this, callArgs));
           };
         }
       }

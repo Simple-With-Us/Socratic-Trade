@@ -63,6 +63,23 @@ describe("installSlowSqliteTiming (ST-4542)", () => {
     expect(db.prepare("SELECT count(*) AS n FROM t").get()).toEqual({ n: 2 });
   });
 
+  it("tells two anonymous inline transactions apart by their first SQL", () => {
+    const { db, lines, tick } = open({ thresholdMs: 1000 });
+    db.exec("CREATE TABLE a (v INTEGER); CREATE TABLE b (v INTEGER)");
+    db.transaction(() => {
+      db.prepare("INSERT INTO a VALUES (1)").run();
+      tick(1500);
+    })();
+    db.transaction(() => {
+      db.prepare("INSERT INTO b VALUES (1)").run();
+      tick(1500);
+    })();
+    const tx = lines.filter((l) => l.includes("transaction held"));
+    expect(tx).toHaveLength(2);
+    expect(tx[0]).toContain("INSERT INTO a");
+    expect(tx[1]).toContain("INSERT INTO b");
+  });
+
   it("rate-limits repeats of the same statement", () => {
     const { db, lines, tick } = open({ thresholdMs: 1000 });
     const stmt = db.prepare("SELECT slow(?) AS s");
