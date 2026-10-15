@@ -111,13 +111,17 @@ npx vitest run test/alpaca-sdk-client-timeout.test.ts test/alpaca-nbbo-mid.test.
 
 `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  Those seven files passed, 186 tests.
 
-Alpaca latest trades are Zod-parsed, and a bad trade row is skipped.  The chat-draft assertion no longer casts `reasons`.  Webull `close` was already the current print.  Kalshi authority, Tradier fetch-age, and a missing-asOf live book still fail closed.  Those review threads stay open.
+Alpaca latest trades are Zod-parsed, and a bad trade row is skipped.  The chat-draft assertion no longer casts `reasons`.  Webull `close` was already the current print.  Kalshi authority, Tradier fetch-age, and a missing-asOf live book still fail closed.
 
 Merged `origin/main` again at `df7e6d10` (Congress.Trade push receipt).  `AlpacaLatestTradeSchema` and `AlpacaLatestTradesResponseSchema` are exported with inferred types.  The schema is not strict, because a real trade also carries size and a strict object would drop the print.
 
 Merged `origin/main` again at `3f4ef5e5` (honest approve).  The placement-reconcile stub kept its provider `asOf`.  Auto-merge was disabled.  `do-not-automerge` stays.
 
-Merged `origin/main` again at `2075c857` (ST-4531 Slack callers now post to Zulip).  STATUS.md auto-merged.  No quote-path conflict.  CI on `2a2ed285` was green (classify, verify-hosted, verify).  Four review threads stay open: Tradier cascade clear, Kalshi authority, Tradier realtime-book exclusion, and the missing-asOf fetchedAt fallback.  Webull `close` and the Alpaca schema export are resolved.
+Merged `origin/main` again at `2075c857` (ST-4531 Slack callers now post to Zulip).  STATUS.md auto-merged.  No quote-path conflict.  CI on `2a2ed285` was green (classify, verify-hosted, verify).  Webull `close` and the Alpaca schema export are resolved.
+
+Merged `origin/main` again at `e3ba1507` (ASC env credentials for hosted TestFlight ship).  PLAN.md and STATUS.md auto-merged.  No quote-path conflict.  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  `node --test scripts/ios-fleet/asc-api.credentials.test.mjs` 8/8.
+
+The four remaining review threads are not code changes.  Each suggestion would put a non-venue price or the fetch clock on an opening.  The thread replies state the money path, the risk, and that no follow-up issue is opened to weaken the gate.  The threads are then resolved.
 
 ## Next Steps & Blockers
 
