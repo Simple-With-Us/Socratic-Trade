@@ -92,7 +92,7 @@ npx vitest run test/disable-pr-automerge.test.ts test/automerge-gate-dry-run.tes
 npx tsc --noEmit
 ```
 
-25 passed.  `tsc` exit 0 (2026-10-15).
+25 passed.  `tsc` exit 0 (2026-10-15).  Merged `origin/main` at `3f4ef5e5` into `cursor/automerge-money-path-gate-c050` (PR #4727 conflict sweep); re-ran the same vitest slice and `tsc` clean.
 
 ```bash
 bash scripts/automerge-gate-dry-run.sh --files src/lib/broker.ts
