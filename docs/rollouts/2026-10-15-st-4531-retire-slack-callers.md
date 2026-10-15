@@ -26,6 +26,7 @@ Fleet coordination moved to Zulip (`agent-sync`) in October 2026.  A few ST shel
 ## Verification State
 
 ```bash
+<<<<<<< HEAD
 bash -n scripts/agent-sync-fleet-post.sh scripts/github-actions-infisical-zulip-ops.sh scripts/alert-deploy-freshness.sh scripts/sync-provider-knobs.sh  # -> ok
 bash scripts/alert-deploy-freshness.selftest.sh  # -> ok (9/9)
 python3 scripts/test-cloud-coordination-bootstrap.py  # -> ok
@@ -33,7 +34,23 @@ npx vitest run test/infisical-secrets-safe.test.ts  # -> ok
 npm run lint  # -> ok (0 errors)
 npx tsc --noEmit  # -> ok
 npm run build  # -> ok
+=======
+bash -n scripts/agent-sync-fleet-post.sh scripts/github-actions-infisical-zulip-ops.sh scripts/alert-deploy-freshness.sh scripts/sync-provider-knobs.sh   # -> ok
+bash scripts/alert-deploy-freshness.selftest.sh   # -> ok
+python3 scripts/test-cloud-coordination-bootstrap.py   # -> ok
+npm run lint   # -> ok (0 errors, 854 pre-existing warnings)
+npx tsc --noEmit   # -> ok
+npm test   # -> fail (10 failures, ALL pre-existing on origin/main — see below)
+npm run build   # -> ok
+>>>>>>> a1881d097fe8a7bc3a5c7c696ae439754c779e27
 ```
+
+The `npm test` failures are **not caused by this PR**.  They are confined to
+`test/llm-provider.test.ts` and `test/openrouter-credits.test.ts`, neither of which
+this branch touches, and they reproduce identically on a clean `origin/main`
+worktree (`df7e6d10`) in the same environment — every failing assertion is an
+OpenRouter credential present in the runner env that the test assumes is absent.
+The authoritative `verify` CI job is the gate for that.
 
 ## Next Steps & Blockers
 
