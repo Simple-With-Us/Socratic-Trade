@@ -63,7 +63,7 @@ Re-verify on production after deploy: `bash scripts/fetch-prod-ops-snapshot.sh` 
 
 ## Next Steps & Blockers
 
-- 2026-10-15: third and fourth `origin/main` merges (#4716 iOS CI hygiene / ST-2916, then #4695 Congress push receipt / ST-3846) — no conflicts; re-run `verify` after each push when GitHub queues stall.
+- 2026-10-15: four `origin/main` merges on this branch (through #4716 iOS CI hygiene / ST-2916 and #4695 Congress push receipt / ST-3846) — all no-conflict; re-run `verify` after push when GitHub Actions queues stall.
 - Post-deploy: compare `timingsMs.users` vs other sections on prod; if `users` still dominates, add audit/run indexes or tighter default `auditPerUser` / `runsPerUser` caps for the diagnostic token.
 - Optional: WAL checkpoint / maintenance runbook for 400MB+ pending WAL (ops, not app code).
 - Linear team ST: track deploy note when merged.
@@ -71,3 +71,7 @@ Re-verify on production after deploy: `bash scripts/fetch-prod-ops-snapshot.sh` 
 ## Zero-Code Findings
 
 - Scheduler was **120s** old at the snapshot moment — separate from snapshot build time but worth correlating with autonomy ticks in the same ops pull.
+
+## Review autofix rounds
+
+- 2026-10-15 (`[codex-autofix]` round 1): fixed the kody-ai thread on `STATUS.md:5-6` — the ops entry had drifted into two near-duplicate `**What.**` paragraphs, one saying "three times" with four parenthetical items and the other saying "again".  Folded into a single paragraph reading "four times", folding `e3ba1507` into the parenthetical, and kept the "ops diff still absent from `main`" note the bot's suggested replacement would have dropped.  Rollout bullet at line 66 updated "third" -> "fourth" to match.  Docs-only; no runtime behavior touched.
