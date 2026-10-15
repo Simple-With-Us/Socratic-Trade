@@ -202,6 +202,7 @@ clean, `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-ev
 `origin/main` worktree — this runner has a live `OPENROUTER_API_KEY` that those tests assume
 is absent.  Pre-existing, outside this diff, left untouched.  Both remaining open threads
 resolved (Sentry's index-alignment finding verified fixed in `93da2abb`).
+**Next.**  PR #4720 ready for review.  Merged `origin/main` at `e3ba1507` (#4716 iOS ASC credentials).  #4722 had not landed, so its retention rewrite is not in this branch.  Stripped accidental conflict markers from `docs/rollouts/2026-10-15-st-4531-retire-slack-callers.md` that were already on main.  Review follow-up is in `a938fd2a` (codec columns, watermark after pass, framed `raw1:`, decode retry list, indexed `hasLocalFilingCopy`).
 ## 2026-10-15 CURSOR — Board 512444e3 iOS / Playwright / deploy-freshness CI
 
 **What.**  Sign-out and account switch drop the snapshot UserDefaults row, the shared URL cache, and in-memory account stores.  Device preferences stay.  Approve, reject, and cancel each report success, failed, or retryable.  The shell rebuilds on `sessionEpoch` so Coach, scan, and the other view stores do not keep the previous account.
