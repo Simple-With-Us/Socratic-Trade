@@ -9,7 +9,7 @@
 **Verification.**  After merging `origin/main` through `e3ba1507` (#4716 iOS ASC credential hygiene): `npm run lint` exit 0 (0 errors, 849 warnings).  `npx tsc --noEmit` exit 0.  Focused vitest (`etoro-boundary-schema`, `protective-lane-isolation`, `synthetic-stops`, `scheduler-stale-exit-inflight-guard`) was 83 passed.  Full `npm test` was 9382 passed, 51 skipped, 23 failed (same pre-existing sandbox/env failures as on `origin/main`; not in this diff).  `npm run build` exit 0.
 
 **Next.**  `origin/main` through `e3ba1507` is merged on `cursor/broker-call-bounds-7ec5`.  Keep PR #4715 ready with `do-not-automerge`.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
-**Next.**  `origin/main` through `49a76da4` is merged.  Keep the PR ready with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
+**Next.**  `origin/main` through `12702bd9` is merged.  Keep the PR ready with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
 
 ## 2026-10-15 Cursor Cloud — CT fundamentals/analyst nightly push (ST-4537)
 
