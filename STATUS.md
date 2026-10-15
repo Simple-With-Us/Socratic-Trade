@@ -27,6 +27,16 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 # Current Status
 
 ## 2026-10-15 Cursor Cloud — ST-3988 congress-share dependency DB health
+## 2026-10-15 CURSOR — PR #4661 merge main #4716
+
+**What.**  GitHub showed `mergeable: CONFLICTING` / `DIRTY` because `origin/main` advanced to `e3ba1507` (#4716 iOS ASC credentials) while PR base was `2075c857`.  Merged `origin/main` with no conflicts (auto-merge PLAN/STATUS only).  Zero unresolved review threads.  PR ready; `needs-human-merge` for Jay.
+
+**Verification.**  Hosted `verify` pending on push.  Prior head `96780798` was green (run `38733904557`).
+
+**Traceability.**  PR #4661.  Linear ST-4538 (claimed CURSOR).  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Wait for `verify` on new merge commit.  Jay squash-merges.
+
 ## 2026-10-15 CURSOR — PR #4661 GB-Deployer merge main
 
 **What.**  Merged `origin/main` (`3f4ef5e5`, then `2075c857` / #4696) into `cursor/free-data-gaps-55d1` with no conflicts.  Integrated remote autofix merge and resolved rollout doc conflict (`559b213c`).  Cleared recurring GitHub `DIRTY` state by keeping branch at latest `main`.  Zero unresolved review threads.  Did not enable auto-merge (`needs-human-merge` for Jay).

@@ -182,6 +182,8 @@ npm run build
 
 Follow-up merge `origin/main` at `2075c857` (PR #4696 ST-4531 Slack retirement) with no conflicts.  GitHub had gone `DIRTY` again until this tip was on the branch.
 
+2026-10-15 CURSOR: GitHub `CONFLICTING` / `DIRTY` again when `main` reached `e3ba1507` (#4716 iOS CI hygiene).  `git merge origin/main` clean (PLAN.md, STATUS.md auto-merged).  Not obsolete — branch was one commit behind base.  Fleet recall: stale GitHub mergeability under fast `main` pushes is common; local merge is tiebreaker.
+
 ## Next Steps & Blockers
 
 Ask Kody to re-review after thread replies.  Do not merge from this lane.  Do not deploy.  PR Autofix remains red on every review event.  `AI-Fleet-Coordinator` `pr-autofix-reusable.yml` line 163 uses `secrets` in a step `if` at the pin `2e671004` and still on coordinator `main` (`7508b399`).  The caller matches `origin/main`, and review events read the workflow from the default branch, so a pin change on this branch does not clear those runs.
