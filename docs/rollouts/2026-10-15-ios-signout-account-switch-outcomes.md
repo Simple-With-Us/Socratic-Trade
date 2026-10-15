@@ -50,7 +50,7 @@ npx vitest run test/shared-package-pin-check.test.ts  # 6 passed
 
 The 23 vitest failures are in LLM key routing, notify credentials, and server-metrics.  They expect an empty provider-key environment and this seat has provider keys set.  None of them import the iOS tree.
 
-Swift compile and XCTest are not run on this Linux seat.  Hosted `.github/workflows/ios-build.yml` is the compile.  New cases:
+Swift compile and XCTest are not run on this Linux seat.  Hosted `.github/workflows/ios-build.yml` is authoritative.  On the original PR head, the app build succeeded; XCTest ran 273 cases and failed only `testAccountSwitchClearsCachesAndKeepsTheSession` and `testSignOutClearsEveryAccountCacheAndStore`.  The 9m20s job completed normally, so this is an XCTest failure, not a compiler error or macOS queue timeout.  The failing assertion details were absent from the Actions text log, so a temporary failure-only `xcresulttool` dump was added to the iOS workflow to expose them on the next run.  That workflow instrumentation will be removed after diagnosis; the final PR diff must remain limited to the ten iOS/handoff paths.  New cases:
 
 - `AccountScopeAndMoneyActionTests.testSignOutClearsEveryAccountCacheAndStore`
 - `AccountScopeAndMoneyActionTests.testAccountSwitchClearsCachesAndKeepsTheSession`
@@ -61,7 +61,7 @@ Swift compile and XCTest are not run on this Linux seat.  Hosted `.github/workfl
 
 ## Next Steps & Blockers
 
-- Shepherd 2026-10-15: merged `origin/main` at `16285744` when the PR went DIRTY again; diff vs `main` is still the ten iOS/handoff files only.  Wait for CI `verify` + `verify-ios` on the new head.  Do not arm auto-merge.  The PR carries `do-not-automerge`.
+- CODEX takeover 2026-10-15: merged `origin/main` at `e81fd0da` with a merge commit and no textual conflicts.  The unique diff still contains the same ten iOS/handoff paths.  Fix the two hosted XCTest failures, rerun requested local JavaScript gates, then remove temporary workflow diagnostics and verify the ten-path diff before merge.
 - Mark ST-2578 completed only after merge, and deployed only after the live binary includes this commit.
 
 ## Zero-Code Findings
