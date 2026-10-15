@@ -12,14 +12,15 @@
  *   - this repo has no pin
  *   - Usage-Monitor has no pin or a different tag/version
  *   - Congress.Trade cannot be read
+ *   - every token is rate limited before the vendor tree can be read
  *   - CT provenance / vendor version disagrees
  *   - CT app/package.json reintroduces the npm dependency
  *   - provenance lists a commit that does not match a consumer lock SHA
  *
- * Congress.Trade is public. Read it with the Actions token (GITHUB_TOKEN),
- * which has its own rate limit. GH_PACKAGES_TOKEN is only the fallback: that
- * secret is the owner's user token, and preferring it makes check-pin fail
- * on every PR while that shared budget is spent.
+ * Congress.Trade is public. Read it with the Actions token (GITHUB_TOKEN)
+ * first. GH_PACKAGES_TOKEN is only the fallback: that secret is the owner's
+ * user token, and preferring it makes check-pin fail on every PR while that
+ * shared budget is spent.
  *
  * Intentionally NOT a required merge check yet -- coordinated three-repo
  * bumps still need a red flag without hard-blocking the first PR of the pair.
@@ -63,19 +64,6 @@ export function parseProvenance(text) {
   return { release, commit: commit.toLowerCase() };
 }
 
-export function isGitHubRateLimit(message) {
-  return /rate limit exceeded/i.test(String(message || ""));
-}
-
-/** Actions token first. The owner PAT is the fallback, not the primary. */
-export function tokensForPublicRead(env = process.env) {
-  const actions = env.GITHUB_TOKEN || env.GH_TOKEN || "";
-  const packages = env.GH_PACKAGES_TOKEN || "";
-  const primary = actions || packages;
-  const fallback = packages && packages !== primary ? packages : "";
-  return { primary, fallback };
-}
-
 export function ctHasNpmDep(appPkgJson, rootPkgJson, pkg = PKG) {
   for (const json of [appPkgJson, rootPkgJson]) {
     if (!json) continue;
@@ -88,6 +76,31 @@ export function ctHasNpmDep(appPkgJson, rootPkgJson, pkg = PKG) {
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
+}
+
+/** User-PAT 403s say "rate limit" and are not a missing-token failure. */
+export function isGithubRateLimit(message) {
+  const text = String(message || "");
+  return /rate limit/i.test(text) || /\bHTTP 429\b/.test(text);
+}
+
+/**
+ * Congress.Trade is public.  Read it with the Actions installation token
+ * first.  GH_PACKAGES_TOKEN is one user's PAT, so a burst of pull requests
+ * shares that budget and every check fails together.  The PAT is the fallback
+ * for a private read the installation token cannot do.
+ */
+export function ctReadTokens(env = process.env) {
+  const ordered = [
+    String(env.GITHUB_TOKEN || "").trim(),
+    String(env.GH_TOKEN || "").trim(),
+    String(env.GH_PACKAGES_TOKEN || "").trim(),
+  ];
+  const tokens = [];
+  for (const token of ordered) {
+    if (token && !tokens.includes(token)) tokens.push(token);
+  }
+  return tokens;
 }
 
 function ghRaw(repo, filePath, token) {
@@ -105,6 +118,7 @@ function ghRaw(repo, filePath, token) {
       return result.stdout;
     }
     lastErr = (result.stderr || result.stdout || "gh api failed").trim();
+    if (isGithubRateLimit(lastErr)) break;
     if (attempt < maxAttempts) {
       spawnSync(process.execPath, ["-e", `setTimeout(() => {}, ${1000 * attempt})`]);
     }
@@ -128,16 +142,16 @@ export function comparePins(input) {
   if (stSpec && umSpec && stV !== umV) {
     problems.push(`ST pin ${stSpec} (${stV}) != UM pin ${umSpec} (${umV})`);
   }
+  if (input.ctRateLimited) {
+    problems.push(
+      "Congress.Trade vendor provenance was rate limited on every available token"
+    );
+    return { problems, stV, umV, ctV: "" };
+  }
   if (input.ctUnreadable) {
-    if (input.ctUnreadableReason === "rate-limit") {
-      problems.push(
-        "Congress.Trade pin read was rate-limited on every available token. Re-run check-pin."
-      );
-    } else {
-      problems.push(
-        "cannot read Congress.Trade vendor provenance; set GH_PACKAGES_TOKEN (repo secret, read access to jaywedgeworth22/Congress.Trade)"
-      );
-    }
+    problems.push(
+      "cannot read Congress.Trade vendor provenance; set GH_PACKAGES_TOKEN (repo secret, read access to jaywedgeworth22/Congress.Trade)"
+    );
     return { problems, stV, umV, ctV: "" };
   }
   if (input.ctHasNpmDep) {
@@ -185,59 +199,54 @@ function main() {
     fail(`could not read public Usage-Monitor pin: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  const ctTokens = tokensForPublicRead();
-  let ctToken = ctTokens.primary;
+  const ctTokens = ctReadTokens();
   let ctUnreadable = false;
-  let ctUnreadableReason = "";
+  let ctRateLimited = false;
   let ctRelease = "";
   let ctCommit = "";
   let ctVendorVersion = "";
   let ctNpm = false;
-  function readCt(filePath) {
-    try {
-      return ghRaw("jaywedgeworth22/Congress.Trade", filePath, ctToken);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (ctTokens.fallback && ctToken !== ctTokens.fallback && isGitHubRateLimit(message)) {
-        ctToken = ctTokens.fallback;
-        try {
-          return ghRaw("jaywedgeworth22/Congress.Trade", filePath, ctToken);
-        } catch (fallbackErr) {
-          const fallbackMessage = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
-          fallbackErr.rateLimited = isGitHubRateLimit(fallbackMessage);
-          throw fallbackErr;
-        }
-      }
-      err.rateLimited = isGitHubRateLimit(message);
-      throw err;
-    }
-  }
-  try {
-    const provenance = readCt(
-      "app/vendor/congress-trading-shared/VENDOR-PROVENANCE.md"
-    );
-    const parsed = parseProvenance(provenance);
-    ctRelease = parsed.release;
-    ctCommit = parsed.commit;
-    const vendorPkg = JSON.parse(
-      readCt("app/vendor/congress-trading-shared/package.json")
-    );
-    ctVendorVersion = String(vendorPkg.version || "");
-    const appPkg = JSON.parse(readCt("app/package.json"));
-    let rootPkg = null;
-    try {
-      rootPkg = JSON.parse(readCt("package.json"));
-    } catch (err) {
-      if (err && err.rateLimited) throw err;
-      rootPkg = null;
-    }
-    ctNpm = ctHasNpmDep(appPkg, rootPkg);
-    console.log(`CT provenance release: ${ctRelease || "(missing)"} commit: ${ctCommit || "(none)"}`);
-    console.log(`CT vendor package.json version: ${ctVendorVersion || "(missing)"}`);
-  } catch (err) {
-    console.error(`CT fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+  if (ctTokens.length === 0) {
+    console.error("CT fetch failed: no GitHub token in GITHUB_TOKEN, GH_TOKEN, or GH_PACKAGES_TOKEN");
     ctUnreadable = true;
-    ctUnreadableReason = err && err.rateLimited ? "rate-limit" : "auth";
+  } else {
+    let lastErr = "";
+    let read = false;
+    for (const token of ctTokens) {
+      try {
+        const provenance = ghRaw(
+          "jaywedgeworth22/Congress.Trade",
+          "app/vendor/congress-trading-shared/VENDOR-PROVENANCE.md",
+          token
+        );
+        const parsed = parseProvenance(provenance);
+        ctRelease = parsed.release;
+        ctCommit = parsed.commit;
+        const vendorPkg = JSON.parse(
+          ghRaw("jaywedgeworth22/Congress.Trade", "app/vendor/congress-trading-shared/package.json", token)
+        );
+        ctVendorVersion = String(vendorPkg.version || "");
+        const appPkg = JSON.parse(ghRaw("jaywedgeworth22/Congress.Trade", "app/package.json", token));
+        let rootPkg = null;
+        try {
+          rootPkg = JSON.parse(ghRaw("jaywedgeworth22/Congress.Trade", "package.json", token));
+        } catch {
+          rootPkg = null;
+        }
+        ctNpm = ctHasNpmDep(appPkg, rootPkg);
+        console.log(`CT provenance release: ${ctRelease || "(missing)"} commit: ${ctCommit || "(none)"}`);
+        console.log(`CT vendor package.json version: ${ctVendorVersion || "(missing)"}`);
+        read = true;
+        break;
+      } catch (err) {
+        lastErr = err instanceof Error ? err.message : String(err);
+        console.error(`CT fetch failed: ${lastErr}`);
+      }
+    }
+    if (!read) {
+      if (isGithubRateLimit(lastErr)) ctRateLimited = true;
+      else ctUnreadable = true;
+    }
   }
 
   const { problems, stV, umV, ctV } = comparePins({
@@ -246,7 +255,7 @@ function main() {
     stLockSha,
     umLockSha,
     ctUnreadable,
-    ctUnreadableReason,
+    ctRateLimited,
     ctRelease,
     ctCommit,
     ctVendorVersion,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 // @ts-expect-error - plain ESM operator helper, intentionally dependency-free (single-line so the directive covers the specifier)
-import { comparePins, ctHasNpmDep, gitRef, isGitHubRateLimit, lockResolvedSha, normVersion, packageSpec, parseProvenance, PKG, tokensForPublicRead } from "../scripts/check-shared-package-pin.mjs";
+import { comparePins, ctHasNpmDep, ctReadTokens, gitRef, isGithubRateLimit, lockResolvedSha, normVersion, packageSpec, parseProvenance, PKG } from "../scripts/check-shared-package-pin.mjs";
 
 describe("shared-package pin check (vendor-era triangle)", () => {
   it("normalizes git tag specs and lock SHAs", () => {
@@ -27,6 +27,29 @@ describe("shared-package pin check (vendor-era triangle)", () => {
     expect(parseProvenance("- Immutable release: `v2.5.2`\n").commit).toBe("");
   });
 
+  it("reads Congress.Trade with the Actions token before the user PAT", () => {
+    expect(
+      ctReadTokens({
+        GITHUB_TOKEN: "installation",
+        GH_TOKEN: "installation",
+        GH_PACKAGES_TOKEN: "user-pat",
+      })
+    ).toEqual(["installation", "user-pat"]);
+    expect(ctReadTokens({ GH_PACKAGES_TOKEN: "user-pat" })).toEqual(["user-pat"]);
+    expect(isGithubRateLimit("API rate limit exceeded for user ID 12656028 (HTTP 403)")).toBe(true);
+    expect(isGithubRateLimit("HTTP 401 Bad credentials")).toBe(false);
+  });
+
+  it("does not call a rate limit a missing token", () => {
+    const { problems } = comparePins({
+      stSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
+      umSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
+      ctRateLimited: true,
+    });
+    expect(problems.some((p: string) => /rate limited/i.test(p))).toBe(true);
+    expect(problems.some((p: string) => p.includes("GH_PACKAGES_TOKEN"))).toBe(false);
+  });
+
   it("fails when CT is unreadable or reintroduces an npm dep", () => {
     expect(
       comparePins({
@@ -51,26 +74,6 @@ describe("shared-package pin check (vendor-era triangle)", () => {
       ctHasNpmDep: false,
     });
     expect(problems.some((p: string) => p.includes("ST pin"))).toBe(true);
-  });
-
-  it("reads the public pin with the Actions token before the owner PAT", () => {
-    expect(isGitHubRateLimit("gh: API rate limit exceeded for user ID 12656028. (HTTP 403)")).toBe(true);
-    expect(isGitHubRateLimit("cannot read Congress.Trade vendor provenance")).toBe(false);
-    const tokens = tokensForPublicRead({
-      GITHUB_TOKEN: "actions-token",
-      GH_TOKEN: "actions-token",
-      GH_PACKAGES_TOKEN: "owner-pat",
-    });
-    expect(tokens.primary).toBe("actions-token");
-    expect(tokens.fallback).toBe("owner-pat");
-    expect(
-      comparePins({
-        stSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
-        umSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
-        ctUnreadable: true,
-        ctUnreadableReason: "rate-limit",
-      }).problems.some((p: string) => p.includes("GH_PACKAGES_TOKEN"))
-    ).toBe(false);
   });
 
   it("accepts a matched triangle", () => {
