@@ -215,6 +215,10 @@ the same `APP_B_INGEST_TOKEN` bearer as `/api/admin/securities/import`
   (default ~1y back → today); `currentPrice` is the newest close of the FULL series
   (range-independent). Unknown symbol / empty range → 200 with `{ ticker, closes: [] }` — never an
   error status, so App A only treats genuine non-200s as "try the fallback provider".
+  A series whose newest close is older than the latest completed US equity session is withheld
+  the same way (empty closes, null current price): App A has no provenance field, so a stale tail
+  must not arrive looking like a current price.  The nightly push drops that ticker and the S&P
+  series instead of POSTing them, and writes a `congress_share_stale_price_withheld` audit row.
 - `GET /api/market/spx?from=&to=` → `{ closes: [...] }` DESCENDING, from SPY daily bars (the
   benchmark convention App A already uses).
 

@@ -23,12 +23,14 @@ import { fetchDailyOHLC } from "./history";
 import { normalizeSymbol } from "./money";
 import { fetchNasdaqScreenerResponse } from "./nasdaq-screener-fetch";
 import {
+  closesCoverLatestSession,
   marketQuoteToRef,
   ohlcBarsToCloses,
   type CongressClose,
   type CongressPrice,
   type CongressRef
 } from "./congress-share";
+import { recordCongressStalePriceWithheld } from "./sentry-metrics";
 
 /** Injectable daily-OHLC fetcher; the routes use the app's canonical cascade, tests inject canned bars. */
 export type DailyOHLCFetcher = (symbol: string) => Promise<OHLCBar[] | null>;
@@ -77,17 +79,25 @@ export function closesInRange(closes: CongressClose[], from: string, to: string)
 /**
  * Build the /api/market/prices/{ticker} envelope: closes DESCENDING within [from, to], plus
  * currentPrice/currentPriceDate taken from the newest close of the FULL series (range-independent, so
- * a historical-backfill response still reports the true latest). No bars → `{ ticker, closes: [] }`
+ * a historical-backfill response still reports the true latest).  No bars → `{ ticker, closes: [] }`
  * with null currentPrice — a 200, never an error status (the consumer falls back on non-200 only).
+ * A series whose newest close is behind the latest completed session uses that same empty envelope.
+ * Congress.Trade treats closes[0] as the current price and PriceSeries has no provenance field, so
+ * a stale tail is withheld and the caller falls back.
  */
 export async function fetchPriceSeries(
   rawSymbol: string,
   range: MarketRange,
-  fetcher: DailyOHLCFetcher = peerServingFetcher
+  fetcher: DailyOHLCFetcher = peerServingFetcher,
+  nowMs: number = Date.now()
 ): Promise<CongressPrice> {
   const ticker = normalizeSymbol(rawSymbol);
   const bars = ticker ? await fetcher(ticker) : null;
-  const ascending = ohlcBarsToCloses(bars); // deduped, date-ascending
+  let ascending = ohlcBarsToCloses(bars); // deduped, date-ascending
+  if (ascending.length > 0 && !closesCoverLatestSession(ascending, nowMs)) {
+    recordCongressStalePriceWithheld("pull", 1);
+    ascending = [];
+  }
   const closes = closesInRange(ascending, range.from, range.to).reverse(); // DESC — closes[0] is latest
   const newest = ascending[ascending.length - 1];
   return {
@@ -104,9 +114,14 @@ export async function fetchPriceSeries(
  */
 export async function fetchSpxCloses(
   range: MarketRange,
-  fetcher: DailyOHLCFetcher = peerServingFetcher
+  fetcher: DailyOHLCFetcher = peerServingFetcher,
+  nowMs: number = Date.now()
 ): Promise<CongressClose[]> {
   const ascending = ohlcBarsToCloses(await fetcher("SPY"));
+  if (ascending.length > 0 && !closesCoverLatestSession(ascending, nowMs)) {
+    recordCongressStalePriceWithheld("pull", 1);
+    return [];
+  }
   return closesInRange(ascending, range.from, range.to).reverse();
 }
 
