@@ -257,12 +257,15 @@ describe("required contexts are not renamed out from under the ruleset", () => {
     expect(auto).not.toMatch(/fetch-depth:\s*0/);
     expect(auto).toContain(".github/CODEOWNERS|");
     expect(auto).toContain("scripts/automerge-gate-dry-run\\.sh");
+    expect(auto).toContain("scripts/disable-pr-automerge\\.sh");
     for (const job of ["disable-on-hold", "disable-on-protected", "disable-on-skip-automerge"]) {
-      expect(jobBlock(auto, job)).toContain("gh pr merge --disable-auto");
+      const block = jobBlock(auto, job);
+      expect(block).toContain("bash scripts/disable-pr-automerge.sh");
+      expect(block).toContain("DISABLE_AUTOMERGE_FALLBACK_TOKEN");
     }
     const arm = jobBlock(auto, "auto-merge");
     expect(arm).toContain("!contains(github.event.pull_request.labels.*.name, 'do-not-automerge')");
     expect(arm).toContain("skip_automerge != 'true'");
-    expect(arm).not.toContain("gh pr merge --disable-auto");
+    expect(arm).not.toContain("disable-pr-automerge.sh");
   });
 });

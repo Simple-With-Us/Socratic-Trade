@@ -81,7 +81,7 @@ fi
 gate_edit=false
 for file in "${files[@]}"; do
   case "$file" in
-    .github/CODEOWNERS|.github/workflows/auto-merge-prs.yml|scripts/pr-touches-codeowners-paths.sh|scripts/automerge-gate-dry-run.sh)
+    .github/CODEOWNERS|.github/workflows/auto-merge-prs.yml|scripts/pr-touches-codeowners-paths.sh|scripts/automerge-gate-dry-run.sh|scripts/disable-pr-automerge.sh)
       gate_edit=true
       ;;
   esac

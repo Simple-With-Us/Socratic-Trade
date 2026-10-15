@@ -6,9 +6,9 @@
 
 **Branch.**  `cursor/automerge-money-path-globs-2a65`
 
-**Verification.**  Targeted vitest 18/18.  Live compare of the eslint renovate diff (`package.json` only) now classifies `arm=true`.  Full gate follows in the rollout note.
+**Verification.**  `npm run lint` exit 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exit 0.  `npm test` 9378 passed, 51 skipped, 25 failed in 12 files, none of them the auto-merge tests (sandbox LLM keys, notify creds, server-metrics host, cpuprofile, Twelve Data, Alpha Vantage).  `npm run build` exit 0.  Targeted vitest after the disable-token retry: 22/22.  Live workflow on this PR skipped `auto-merge` and skipped `disable-on-protected` (globs ran; this diff is not a money path).  `disable-auto` returned 401 on the elevated token and the job treated that as already-off.  The follow-up retries with the Actions token and fails the job if that is rejected too.
 
-**Next.**  Open the PR ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
+**Next.**  PR #4697 is ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 

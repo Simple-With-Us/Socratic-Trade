@@ -15,7 +15,9 @@ Touched paths:
 - `.github/workflows/auto-merge-prs.yml`
 - `scripts/pr-touches-codeowners-paths.sh`
 - `scripts/automerge-gate-dry-run.sh`
+- `scripts/disable-pr-automerge.sh`
 - `test/automerge-gate-dry-run.test.ts`
+- `test/disable-pr-automerge.test.ts`
 - `test/branch-protection-gate.test.ts`
 - `STATUS.md`, `PLAN.md`, this rollout note
 
@@ -24,7 +26,8 @@ Touched paths:
 - The glob list stays in CODEOWNERS.  The workflow comment is a mirror, not a second policy.  CI fails if they diverge.
 - `disarm=true` means the workflow runs `gh pr merge --disable-auto` on a PR that was already armed.  The dry run does not call GitHub, and this lane does not arm auto-merge.
 - `needs-human-merge` still disarms, same as `do-not-automerge`.
-- A PR that edits the workflow, CODEOWNERS, the classifier, or the dry run still skips auto-merge.
+- A rejected elevated token retries disable once with the Actions `GITHUB_TOKEN`.  That token is not used to arm.  If the retry is also rejected, the disable job fails instead of reporting the merge as disarmed.
+- A PR that edits the workflow, CODEOWNERS, the classifier, the dry run, or the disable script still skips auto-merge.
 - Out of scope: a ruleset required review on those paths.  This change only stops the workflow from arming.
 
 ## Money-path globs
@@ -76,7 +79,15 @@ bash scripts/automerge-gate-dry-run.sh --files README.md
 
 Money path: `arm=false` `disarm=true`.  `do-not-automerge`: `arm=false` `disarm=true`.  README: `arm=true` `disarm=false`.
 
-Full `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build` are recorded in a follow-up on this note if they were still running at the first commit.
+Full `npm run lint` exit 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exit 0.  `npm test` 9378 passed, 51 skipped, 25 failed across 12 files.  None of the failures are in the auto-merge classifier, dry run, or workflow text tests.  They are the sandbox LLM-key, notify-credential, server-metrics host, cpuprofile, Twelve Data, and Alpha Vantage failures.  `npm run build` exit 0.
+
+Follow-up after that gate: live `disable-auto` on PR #4697 returned `401 Bad credentials` and the job still exited 0.  `scripts/disable-pr-automerge.sh` retries once with `DISABLE_AUTOMERGE_FALLBACK_TOKEN` (the Actions `GITHUB_TOKEN`) and exits 1 if that credential is rejected too.  Already-off stays exit 0.
+
+```bash
+npx vitest run test/disable-pr-automerge.test.ts test/automerge-gate-dry-run.test.ts test/branch-protection-gate.test.ts test/pr-touches-codeowners-paths.test.ts
+```
+
+22 passed.
 
 ## Next Steps & Blockers
 

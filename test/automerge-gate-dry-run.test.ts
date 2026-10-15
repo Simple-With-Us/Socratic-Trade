@@ -92,4 +92,11 @@ describe("auto-merge money-path globs", () => {
     expect(got.arm).toBe("true");
     expect(got.disarm).toBe("false");
   });
+
+  it("disarms a diff that edits the disable script", () => {
+    const got = decision(run("--files", "scripts/disable-pr-automerge.sh"));
+    expect(got.gate_edit).toBe("true");
+    expect(got.arm).toBe("false");
+    expect(got.disarm).toBe("true");
+  });
 });
