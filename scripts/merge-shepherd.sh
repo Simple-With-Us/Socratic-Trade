@@ -83,17 +83,15 @@ refresh_merge_state() {
 # update-branch mid-run cancels verify-hosted (~20m); a 15-19m re-sync cadence then
 # starves PRs forever (board ST-2874 / Monet 2026-08-21).
 #
-# Terminal verify conclusions include GitHub's NEUTRAL and SKIPPED so a finished
-# optional/skipped check is not mistaken for in-flight (default arm).  BEHIND
-# re-sync still runs only under verify=SUCCESS; these terminals matter for
-# ci_in_flight($running, $verify) when $running>0 and for the explicit
-# NEUTRAL|SKIPPED rows below (not mis-labeled "CI still running").
+# BEHIND re-sync callers keep verify=SUCCESS guards; do not relax those.
 ci_in_flight() {
   local running="$1" verify="$2"
   if [ "$running" -gt 0 ]; then
     return 0
   fi
   case "$verify" in
+    # NEUTRAL|SKIPPED: GitHub terminal conclusions; listed for contract +
+    # selftest completeness (assert_idle), not a separate production path here.
     SUCCESS|FAILURE|CANCELLED|TIMED_OUT|ACTION_REQUIRED|STARTUP_FAILURE|STALE|ERROR|NEUTRAL|SKIPPED|NONE)
       return 1
       ;;
