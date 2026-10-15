@@ -104,6 +104,7 @@ const FULL_AT_KEY = "storage-hygiene:lastFullAt";
 const CHECKPOINT_AT_KEY = "storage-hygiene:lastCheckpointAt";
 
 const RETAIN_REASON: Record<string, string> = {
+  history_cache_eod: "durable price history (no age deletion)",
   llm_usage: "lifetime LLM usage retention",
   ...Object.fromEntries(MARKET_DATA_HISTORY_TABLES.map((table) => [table, "market-data history retention"])),
   document_chunks_fts: "market-data history retention",
