@@ -88,10 +88,14 @@ anchor_img_old="                    'image' => \$this->production_image_name,
 "
 
 anchor_img_new="                    'image' => \$this->production_image_name,
-                    // MM-PATCH st-pull-guard: a tag with no registry prefix and no slash
-                    // (no '/') can only ever resolve to docker.io/library/<name>, which
-                    // cannot exist for a locally built image. Never let Compose try.
-                    ...(! str_contains(\$this->production_image_name, '/') ? ['pull_policy' => 'never'] : []),
+                    // MM-PATCH st-pull-guard: only a Dockerfile build pack that was NOT given a
+                    // registry image produces Coolify's local-only {uuid}:{sha} tag, and only
+                    // that tag has no '/'. An official image such as postgres:15-alpine also
+                    // has no '/', so the build_pack + registry-name checks are what keep this
+                    // from freezing a genuine Docker Hub pull in a dockerimage app.
+                    ...(\$this->application->build_pack === 'dockerfile'
+                        && ! data_get(\$this->application, 'docker_registry_image_name')
+                        && ! str_contains(\$this->production_image_name, '/') ? ['pull_policy' => 'never'] : []),
 "
 
 # Writes the patching python to $work. Uses literal anchors supplied as files so no
@@ -182,11 +186,12 @@ cmd_apply() {
 cmd_verify() {
   local rc=0
   local n
-  n="$(docker exec "$CONTAINER" grep -c "$MARKER" "$LIVE" 2>/dev/null || echo 0)"
+  n="$(docker exec "$CONTAINER" grep -c "$MARKER" "$LIVE" 2>/dev/null | head -1)"
+  n="${n:-0}"
   if [ "$n" = "2" ]; then
     echo "guard: PRESENT (2 patch markers)"
   else
-    echo "guard: MISSING (found ${n:-0} markers in $LIVE)"
+    echo "guard: MISSING (found ${n} marker(s) in $LIVE)"
     rc=4
   fi
 
@@ -206,8 +211,9 @@ cmd_verify() {
     "SELECT id, name, build_pack, CASE WHEN build_pack='dockerfile' AND COALESCE(docker_registry_image_name,'')='' THEN 'GUARD FIRES (pull skipped)' ELSE 'pull proceeds (unchanged)' END FROM applications ORDER BY id;" 2>/dev/null \
     | sed 's/^/  /'
 
-  echo "horizon restart recency (guard is dormant until this is recent):"
-  docker exec "$CONTAINER" sh -c 'ps -eo etimes,args | grep "[h]orizon:work" | awk "{print \"  uptime_s=\"\$1}"' 2>/dev/null | head -1
+  echo "worker age (the guard is dormant until the worker is newer than the last apply):"
+  docker exec "$CONTAINER" sh -c 'ps -eo etimes,args | grep "[h]orizon:work" | head -1 | tr -s " " | cut -d" " -f2' 2>/dev/null \
+    | awk '{ if ($1 ~ /^[0-9]+$/) print "  worker uptime_s="$1" (smaller = reloaded more recently)"; else print "  (could not read worker uptime)" }'
   return $rc
 }
 
@@ -215,9 +221,24 @@ cmd_revert() {
   if ! docker exec "$CONTAINER" test -f "$BACKUP"; then
     die "no backup at $BACKUP - nothing to revert" 1
   fi
-  docker cp "$CONTAINER:$BACKUP" "$CONTAINER:$LIVE"
+  # docker cp does NOT support container -> container. Round-trip through the host,
+  # then prove the marker is actually gone instead of reporting a silent success.
+  local tmp="$work/revert.php"
+  docker cp "$CONTAINER:$BACKUP" "$tmp" || die "could not extract $BACKUP" 1
+  docker cp "$tmp" "$CONTAINER:$LIVE" || die "restore failed" 1
   docker exec -u 0 "$CONTAINER" chown www-data:www-data "$LIVE"
   docker exec -u 0 "$CONTAINER" chmod 644 "$LIVE"
+
+  local left
+  left="$(docker exec "$CONTAINER" grep -c "$MARKER" "$LIVE" 2>/dev/null | head -1)"
+  left="${left:-0}"
+  if [ "$left" != "0" ]; then
+    die "revert did not take: $left marker(s) still present in $LIVE" 1
+  fi
+  if ! docker exec "$CONTAINER" php -l "$LIVE" >/dev/null 2>&1; then
+    die "restored file fails php -l" 3
+  fi
+  echo "revert: confirmed 0 markers in $LIVE, php syntax OK"
   docker exec "$CONTAINER" "$SVC" -r /run/service/horizon && info "reverted and horizon restarted"
 }
 
