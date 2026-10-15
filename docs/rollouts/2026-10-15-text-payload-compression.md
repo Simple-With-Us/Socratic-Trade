@@ -31,11 +31,11 @@ Files:
 
 ## Decisions & Trade-offs
 
-- `audit_events.payload` is not compressed.  `verifyAuditChain` hashes the stored JSON, several queries use `json_extract`, and three writers do not go through `audit()`.
+- `audit_events.payload` is not compressed.  `verifyAuditChain` hashes the stored JSON, several queries use `json_extract`, and writers outside `audit()` include provider dispatch, FMP transcript audit, and `scripts/ops/backfill-pruned-latency-audits.ts`.
 - Numeric XBRL `sec_facts.segment` values stay plaintext.  Only `concept = __companyfacts_json__` is encoded.
 - ROIC JSON sidecars and on-disk SEC artifacts are a second copy.  They are outside the quoted SQLite sizes and were not compressed.
 - FTS text stays plaintext.  Ingest and re-embed decode first.
-- Embedding model, dimensions, and `VECTOR_EMBED_CLEAN_TEXT` are unchanged.  The review says not to flip them without a golden set.
+- Embedding model, dimensions, and `VECTOR_EMBED_CLEAN_TEXT` are unchanged.  Path inventory after the first draft corrected the review: live embed is BAAI bge-m3 at 1024 (`activeEmbeddingModel`), and `voyage-finance-2` is test-only.  Corpus-wide FTS stays `sec-edgar` / `sec-8k` because licensed transcript sources lack rights metadata on the FTS row.  Do not add them to that filter in this pass.
 - `embed_stage` and `chunk_occurrences` are not rewritten.  The review treats 1.9 GB of staged vectors as a delivery-delete question, and 2.2 GB of occurrences as the point-in-time ledger working as designed.
 - No age deletes.  No outside price backfill.
 
