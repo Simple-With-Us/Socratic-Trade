@@ -3,6 +3,7 @@
  * US accounts: long real stocks/ETFs at leverage 1.  Shorts/CFDs fail closed.
  */
 import { randomUUID } from "crypto";
+import { z } from "zod";
 import type {
   AccountCapabilities,
   BrokerageAccount,
@@ -24,6 +25,31 @@ import { isLiveOrderState } from "./broker-side";
 import { ETORO_API_BASE, etoroHeaders } from "./etoro-copy";
 import { brokerAbortSignal, chunkBrokerSymbols, scopeBrokerOrders } from "./inflight-deadline";
 import { mergeAccountCapabilities } from "./venue-contract";
+
+const etoroRateRowSchema = z.object({
+  instrumentID: z.unknown().optional(),
+  instrumentId: z.unknown().optional(),
+  lastExecution: z.unknown().optional(),
+  bid: z.unknown().optional(),
+  ask: z.unknown().optional(),
+  date: z.unknown().optional()
+}).passthrough();
+
+const etoroRatesResponseSchema = z.union([
+  z.array(etoroRateRowSchema),
+  z.object({ rates: z.array(etoroRateRowSchema).nullish() }).passthrough()
+]);
+
+const etoroEligibilityRowSchema = z.object({
+  symbol: z.unknown().optional(),
+  allowOpenPosition: z.unknown().optional(),
+  unitsQuantityType: z.unknown().optional()
+}).passthrough();
+
+const etoroEligibilityResponseSchema = z.union([
+  z.array(etoroEligibilityRowSchema),
+  z.object({ items: z.array(etoroEligibilityRowSchema).nullish() }).passthrough()
+]);
 
 function etoroFetch(url: string, init: RequestInit = {}): Promise<Response> {
   const caller = init.signal instanceof AbortSignal ? init.signal : undefined;
@@ -167,7 +193,7 @@ class EToroBrokerGateway implements BrokerGateway {
           { headers: this.headers() }
         );
         if (!res.ok) throw new Error(`eToro rates ${res.status}`);
-        const json = (await res.json()) as { rates?: Record<string, unknown>[] } | Record<string, unknown>[];
+        const json = etoroRatesResponseSchema.parse(await res.json());
         const rows = Array.isArray(json) ? json : json.rates ?? [];
         for (const row of rows) {
           const id = num(row.instrumentID ?? row.instrumentId);
@@ -197,7 +223,7 @@ class EToroBrokerGateway implements BrokerGateway {
           body: JSON.stringify({ symbols: chunk.map(normalizeSymbol) })
         });
         if (!res.ok) throw new Error(`eToro eligibility ${res.status}`);
-        const json = (await res.json()) as { items?: Record<string, unknown>[] } | Record<string, unknown>[];
+        const json = etoroEligibilityResponseSchema.parse(await res.json());
         const rows = Array.isArray(json) ? json : json.items ?? [];
         for (const row of rows) {
           const symbol = normalizeSymbol(String(row.symbol ?? ""));

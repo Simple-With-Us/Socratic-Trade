@@ -2,7 +2,7 @@
 
 ## 2026-10-15 Cursor Cloud — broker call bounds (ST-2570)
 
-**What.**  Broker reads and writes carry a deadline and an abort signal.  Order listings stop at 50 pages and 500 rows.  Quote and eligibility batches stop at 25 symbols.  Stops, stale exits, and fill reconcile launch for every eligible account before any health probe is awaited, so one hung probe cannot delay the next account's protection.  A hung read releases the stop and exit guards.  A write that has started keeps its guard.  A strategy run whose health probe or snapshot never returns finishes `failed`.  An abort after a synthetic stop is claimed, and before the exit order is sent, reverts the claim and keeps the attempt id.
+**What.**  Broker reads and writes carry a deadline and an abort signal.  Order listings stop at 50 pages and 500 rows.  Quote and eligibility batches stop at 25 symbols.  Stops, stale exits, and fill reconcile launch for every eligible account before any health probe is awaited, so one hung probe cannot delay the next account's protection.  A hung read releases the stop and exit guards.  A write that has started keeps its guard.  A strategy run whose health probe or snapshot never returns finishes `failed`.  An abort after a synthetic stop is claimed, and before the exit order is sent, reverts the claim and keeps the attempt id.  eToro rates and eligibility responses are parsed with Zod before a row is read.
 
 **Branch.**  `cursor/broker-call-bounds-7ec5`
 
