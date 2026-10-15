@@ -366,10 +366,14 @@ jobs:
           bash -n scripts/verify-deploy-sha.selftest.sh
           bash -n scripts/alert-deploy-freshness.sh
           bash -n scripts/alert-deploy-freshness.selftest.sh
+          bash -n scripts/agent-sync-ops-notify.sh
+          bash -n scripts/agent-sync-ops-notify.selftest.sh
+          bash -n scripts/codex-coordination.sh
           bash -n scripts/isolate-shared-box-batch.sh
           bash -n scripts/isolate-shared-box-batch.selftest.sh
           bash scripts/verify-deploy-sha.selftest.sh
           bash scripts/alert-deploy-freshness.selftest.sh
+          bash scripts/agent-sync-ops-notify.selftest.sh
           bash scripts/isolate-shared-box-batch.selftest.sh
       # Every StallProfiler vitest test drives a FakeSession/FakeBridge by design (that module
       # must never touch a real V8 profiler under vitest), so createInspectorBindings() -- the

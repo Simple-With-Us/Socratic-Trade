@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-15 CURSOR Cloud — ST-4531 Slack ops to Zulip
+
+**What.**  Migrated remaining operational alert senders (`alert-deploy-freshness`, deploy-freshness
+workflow, `sync-provider-knobs`, `codex-coordination`, provider-knob plist template) from
+`slack-sync.sh` to `scripts/agent-sync-ops-notify.sh` (`agent-sync` -> Zulip `#alerts`).
+
+**Branch.**  `cursor/st-4531-slack-ops-zulip-4d07`
+
+**Verification.**  `bash scripts/agent-sync-ops-notify.selftest.sh`, `bash scripts/alert-deploy-freshness.selftest.sh`, `npx vitest run test/slack-ops-retired.test.ts`, `npm run lint`, `npx tsc --noEmit`.
+
+**Next.**  Open PR ready for review; owner adds `ZULIP_OPS_*` GitHub secrets for live notices.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.
