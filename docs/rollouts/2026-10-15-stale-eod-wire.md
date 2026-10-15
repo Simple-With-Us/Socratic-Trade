@@ -23,7 +23,13 @@ Dropping the series, rather than adding a provenance field, is the ST-only fix. 
 
 ## 4. Verification State
 
-Commands recorded in the PR after they run.  Targeted suites: `test/congress-share.test.ts`, `test/market-read-routes.test.ts`.
+```bash
+npx eslint src/lib/congress-share.ts src/lib/market-read.ts src/lib/sentry-metrics.ts test/congress-share.test.ts test/market-read-routes.test.ts
+npx tsc --noEmit
+npx vitest run test/congress-share.test.ts test/market-read-routes.test.ts
+```
+
+eslint on the touched files: 0 errors (existing unused-schema warnings only).  `npm run lint`: 0 errors, 856 grandfathered warnings.  `tsc --noEmit` clean.  Targeted vitest: 2 files, 132 tests passed.  Full `npm test`: 23 failed, 9368 passed, 51 skipped.  The 23 failures are in LLM-key, notify, alpha-vantage, and server-metrics suites, not the share or market-read tests.  `npm run build`: exit 0.
 
 ## 5. Next Steps & Blockers
 
