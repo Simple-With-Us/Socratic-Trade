@@ -6,7 +6,7 @@
 
 **Branch.**  `cursor/flaky-run-failure-watchdog-rearm-58b5`
 
-**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  `npx vitest run test/run-failure-watchdog.test.ts` 23/23.  Targeted re-arm test 30/30.  `npm run build` pending this handoff.
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  `npx vitest run test/run-failure-watchdog.test.ts` 23/23.  Targeted re-arm test 30/30.  `npm run build` ok.
 
 **Next.**  Open PR ready for review; merge via Deployer when `verify` is green.
 
