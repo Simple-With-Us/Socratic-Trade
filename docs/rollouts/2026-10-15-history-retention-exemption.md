@@ -44,7 +44,7 @@ npm test
 npm run build
 ```
 
-`npm run lint` pass (0 errors, 854 grandfathered warnings).  `./node_modules/.bin/tsc --noEmit` pass.  `npm test` 9,378 passed, 51 skipped, 1 failed: `test/event-loop-stall-hot-path.test.ts` "pruneTaskJournal stays under 100ms" timed out at 60s — pre-existing and unrelated (fails identically on the clean `2656320f5` tree with this diff stashed; the file never touches hygiene or history).  Targeted `test/sqlite-storage-hygiene.test.ts` 15 passed (14 existing + 1 new 5y+ regression); `test/history*.test.ts` + `test/audit-hygiene.test.ts` 39 passed.  `npm run build` pass (compiled successfully, rc=0).
+`npm run lint` pass (0 errors, 854 grandfathered warnings).  `./node_modules/.bin/tsc --noEmit` pass.  Full `npm test` (9,430 tests): 9,378 passed, 51 skipped, 1 failed — `test/event-loop-stall-hot-path.test.ts` "pruneTaskJournal stays under 100ms" timed out at 60s, proven pre-existing and unrelated (fails identically on the clean `2656320f5` tree with this diff stashed; the file never touches hygiene or history).  A second `land.sh` gate run added `test/data-catalog-completeness.test.ts` as a load flake (4/4 pass in isolation; GROK's 2026-10-14 STATUS documents the same file failing in full-suite runs outside any diff).  Targeted `test/sqlite-storage-hygiene.test.ts` 15 passed (14 existing + 1 new 5y+ regression); `test/history*.test.ts` + `test/audit-hygiene.test.ts` 39 passed; post-`origin/main`-merge re-run of hygiene + data-providers 155 passed / 9 skipped.  `npm run build` pass (compiled successfully, rc=0).
 
 ## Next Steps & Blockers
 
