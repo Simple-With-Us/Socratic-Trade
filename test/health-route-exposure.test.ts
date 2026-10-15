@@ -5,9 +5,10 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 
 // Exposure surface of the PUBLIC /api/health probe (middleware PUBLIC_PREFIXES). The route emits a
 // full operator view only to a caller presenting the ops token; everyone else gets the same payload
-// minus three operator-only items (OpenRouter USD figures, host/DB byte counts, the lease owner's
-// pid). These tests pin BOTH halves: that the sensitive values are absent anonymously, and that they
-// are still there behind the token — i.e. that this is a projection, not a deletion.
+// minus operator-only items (OpenRouter USD figures, host/DB byte counts, the lease owner's pid,
+// and per-dependency `lastFailure` / `failureClass` from ST-3988). These tests pin BOTH halves:
+// that the sensitive values are absent anonymously, and that they are still there behind the token
+// — i.e. that this is a projection, not a deletion.
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-health-exposure-${randomUUID()}.db`)}`;
@@ -27,6 +28,25 @@ async function load() {
   const credits = await import("../src/lib/openrouter-credits");
   const healthRoute = await import("../app/api/health/route");
   return { db, lease, credits, healthRoute };
+}
+
+/** Mirrors `projectHealthPayload` dependency stripping for anonymous /api/health. */
+function dependenciesWithoutOpsDetail(
+  dependencies: Record<string, unknown> | undefined
+): Record<string, unknown> {
+  if (!dependencies || typeof dependencies !== "object") return {};
+  const stripped: Record<string, unknown> = {};
+  for (const [name, entry] of Object.entries(dependencies)) {
+    if (!entry || typeof entry !== "object") {
+      stripped[name] = entry;
+      continue;
+    }
+    const copy = { ...(entry as Record<string, unknown>) };
+    delete copy.lastFailure;
+    delete copy.failureClass;
+    stripped[name] = copy;
+  }
+  return stripped;
 }
 
 /** Stub the OpenRouter /credits fetch so the balance block is populated deterministically. */
@@ -206,7 +226,15 @@ describe("/api/health exposure", () => {
     const [anonBody, detailBody] = [await anonymous.json(), await detailed.json()];
     expect(anonBody.ok).toBe(false);
     expect(detailBody.ok).toBe(false);
-    expect(anonBody.checks.dependencies).toEqual(detailBody.checks.dependencies);
+    expect(anonBody.checks.dependencies).toEqual(
+      dependenciesWithoutOpsDetail(detailBody.checks.dependencies as Record<string, unknown>)
+    );
+    expect(detailBody.checks.dependencies.pinecone).toMatchObject({
+      ok: false,
+      lastFailure: "Global Error",
+      failureClass: null
+    });
+    expect(anonBody.checks.dependencies.pinecone).toEqual({ ok: false });
     expect(anonBody.checks.storageDegraded).toEqual(detailBody.checks.storageDegraded);
   });
 });
