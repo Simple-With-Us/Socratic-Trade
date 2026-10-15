@@ -35,6 +35,37 @@ clean, `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-ev
 `origin/main` worktree — this runner has a live `OPENROUTER_API_KEY` that those tests assume
 is absent.  Pre-existing, outside this diff, left untouched.  Both remaining open threads
 resolved (Sentry's index-alignment finding verified fixed in `93da2abb`).
+## 2026-10-15 codex-autofix — PR #4707 (AUTH_SECRET literal finding)
+
+**What.**  Round 1 on `cursor/st-quiver-coverage-sanitize-8696`.  The two Kody visual-coverage threads were
+already handled in a prior round (asked, not guessed).  This round the only new threads were two instances of
+one finding: the literal `playwright-e2e-auth-secret-32chars!!` duplicated as the `PLAYWRIGHT_AUTH_SECRET`
+fallback at `playwright.config.ts:19` and `test/e2e/playwright-session.ts:6`.
+
+**Branch.**  `cursor/st-quiver-coverage-sanitize-8696`
+
+**Fixed by a concurrent agent while this round was in flight.**  I had intended to escalate rather than fix:
+Kody's suggested hard-throw could not be applied from a fixer seat without also setting the secret in
+`e2e.yml` (a `.github/workflows` edit), and unset it would fire on every smoke run including push-to-main.
+Another agent landed a superset fix instead — the literal is gone from the tree entirely.  The admin suite
+reads `PLAYWRIGHT_AUTH_SECRET` from env, **hard-throws under `CI`**, and falls back to a per-worktree
+`0600` random secret file locally (`test/e2e/playwright-admin-auth.ts`); the throwaway `ENCRYPTION_KEY` is
+likewise derived via sha256 instead of a literal (`test/e2e/playwright-throwaway-fixtures.ts`).  That is
+better than the suggestion: it keeps the fail-closed posture Kody wanted without a repo literal at all.
+Note it also edits `e2e.yml` (generates the secret with `openssl rand -hex 32`) — legitimate for that agent,
+out of bounds for this fixer role.
+
+**This round's own change.**  None to production source.  A local merge of `origin/main` turned out redundant
+(`main` was already merged by the concurrent work) and was dropped; the commit carries only these docs.
+
+**Thread state.**  Both AUTH_SECRET threads anchored to code that no longer exists and are outdated;
+resolved this round per protocol.
+
+**Verification.**  `npx tsc --noEmit` clean; `npm run build` clean.  `npm test` exits 1 with 13 failures across
+4 LLM-routing suites (`llm-provider`, `chat-llm`, `framework-review`, `openrouter-credits`) that reproduce
+identically on a clean `origin/main` worktree — this sandbox has provider keys injected, and those suites
+assume none.  The PR's own suites are green (28/28).  Full detail in the rollout note.
+
 ## 2026-10-15 CURSOR — Board 512444e3 iOS / Playwright / deploy-freshness CI
 
 **What.**  Triage for GB-Monitor board `512444e3`: `ios-ship` last failed 2026-10-13 (ASC HTTP 401); last successful archive 2026-10-14; `verify-ios` green on 2026-10-15 main pushes; Playwright and deploy-freshness cron green; Sentry BN/BR/BS/BP unresolved count zero.  Follow-up PR hardens `asc-api.mjs` to prefer `ASC_*` from process env (hosted Actions) over the on-disk secrets file.
