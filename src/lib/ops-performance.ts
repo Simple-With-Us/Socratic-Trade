@@ -233,6 +233,14 @@ export interface OpsPerformanceAccount {
   environment: FillSource;
   systemState: string;
   accountNumber: string | null;
+  /** True when an operator recorded this account as deliberately parked (review rank 8).  Distinct
+   *  from `systemState: "halted"`: a halt can be a symptom, and a park is a decision with a reason.
+   *  This endpoint only reports the flag.  It does not park or un-park. */
+  parked: boolean;
+  /** Why the account was parked, or null when `parked` is false or no reason was stored. */
+  parkedReason: string | null;
+  /** ISO time the park was recorded, or null when `parked` is false or no time was stored. */
+  parkedAt: string | null;
   /** True only when the book HAS open positions and NONE of them could be marked (or marking was
    *  turned off with `marks=off`).  False when there is nothing to price, or at least one open symbol
    *  got a mark - in which case `unrealizedUnpricedSymbols` says which ones are still missing and
@@ -905,6 +913,20 @@ export interface BuildOpsPerformanceInput {
   marks?: OpsMarksMode;
 }
 
+/** The park decision, in the same shape `ops-account-control` already puts on its account summary.
+ *  Absent or false is "never parked", and a missing reason or time stays null rather than a blank
+ *  string, so a report can tell "not parked" from "parked, reason not recorded". */
+function parkedAccountFacts(account: { parked?: boolean; parkedReason?: string; parkedAt?: string }): Pick<
+  OpsPerformanceAccount,
+  "parked" | "parkedReason" | "parkedAt"
+> {
+  return {
+    parked: account.parked === true,
+    parkedReason: account.parkedReason ?? null,
+    parkedAt: account.parkedAt ?? null
+  };
+}
+
 export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInput = {}): Promise<OpsPerformanceSnapshot> {
   const windowDays = clampDays(input.days);
   const sinceIso = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
@@ -927,7 +949,11 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
         label: account.label || account.broker,
         broker: account.broker,
         environment: account.environment,
-        accountNumber: account.accountNumber ?? null
+        accountNumber: account.accountNumber ?? null,
+        // On `base` so the never-synced branch, the priced book, and the per-account error branch
+        // all carry the same park facts.  A quiet account with no broker number is exactly the row
+        // a report used to show as an unexplained zero.
+        ...parkedAccountFacts(account)
       };
 
       if (!account.accountNumber) {
