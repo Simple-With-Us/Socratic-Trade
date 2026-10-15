@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — storage hygiene keep market history
+
+**What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.
+
+**Branch.**  `cursor/keep-price-history-forever-2f58`
+
+**Verification.**  Pending: `test/sqlite-storage-hygiene.test.ts`, lint, tsc.
+
+**Next.**  Open PR (ready, `do-not-automerge`), owner squash merge.
+
 ## 2026-10-15 Grok — PR #4664 merge main and handoff order
 
 **What.**  Merged `origin/main` (`2656320f`, Tradier sandbox HTTP 400, including `a3d21b73` SQLite storage hygiene) into `cursor/data-cascade-reliability-eb70`.  The merge was clean.  No migration renumber.  The one unresolved review thread (Kody rule [33] on the cascade rollout) asked for `npm test` before `npm run build` in the Round 10 paragraph.  That sentence and the Round 11 gate sentence now use the canonical order.  No product code change.  The thread was not resolved.

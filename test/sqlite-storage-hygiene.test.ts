@@ -62,8 +62,10 @@ describe("storage hygiene decisions", () => {
   it("refuses money-path and unlisted tables, and retention targets are disjoint", async () => {
     const hygiene = await import("../src/lib/sqlite-storage-hygiene");
     const money = new Set<string>(hygiene.MONEY_PATH_TABLES);
+    const history = new Set<string>(hygiene.MARKET_DATA_HISTORY_TABLES);
     for (const target of hygiene.RETENTION_TARGETS) {
       expect(money.has(target.table)).toBe(false);
+      expect(history.has(target.table)).toBe(false);
       expect(() => hygiene.assertPruneTableAllowed(target.table)).not.toThrow();
     }
     expect(() => hygiene.assertPruneTableAllowed("enrichment_coverage_runs")).not.toThrow();
@@ -72,6 +74,17 @@ describe("storage hygiene decisions", () => {
     expect(() => hygiene.assertPruneTableAllowed("portfolio_snapshots")).toThrow(/money-path/);
     expect(() => hygiene.assertPruneTableAllowed("llm_usage")).toThrow(/unlisted/);
     expect(() => hygiene.assertPruneTableAllowed("not_a_table")).toThrow(/unlisted/);
+  });
+
+  it("never prunes market-data history tables by age", async () => {
+    const hygiene = await import("../src/lib/sqlite-storage-hygiene");
+    for (const table of hygiene.MARKET_DATA_HISTORY_TABLES) {
+      expect(() => hygiene.assertPruneTableAllowed(table)).toThrow(/market-data history/);
+    }
+    expect(() => hygiene.assertPruneTableAllowed("document_chunks_fts")).toThrow(/market-data history/);
+    expect(() => hygiene.assertPruneTableAllowed("document_chunks_fts_data")).toThrow(/market-data history/);
+    expect(hygiene.isMarketDataHistoryTable("history_cache_eod")).toBe(true);
+    expect(hygiene.isMarketDataHistoryTable("strategy_runs")).toBe(false);
   });
 
   it("does not issue a full file rewrite", () => {
@@ -414,11 +427,15 @@ describe("storage hygiene against a database", () => {
     const journal = (db.prepare("SELECT id FROM task_journal ORDER BY id").all() as Array<{ id: string }>).map((row) => row.id);
     expect(journal).toEqual(["j-run", "j-skip-new"]);
     expect(
-      (db.prepare("SELECT date FROM history_cache_eod").all() as Array<{ date: string }>).map((row) => row.date)
-    ).toEqual([dayBefore(3)]);
+      (db.prepare("SELECT date FROM history_cache_eod ORDER BY date").all() as Array<{ date: string }>).map(
+        (row) => row.date
+      )
+    ).toEqual([dayBefore(500), dayBefore(3)]);
     expect(
-      (db.prepare("SELECT symbol FROM symbol_field_latest").all() as Array<{ symbol: string }>).map((row) => row.symbol)
-    ).toEqual(["MSFT"]);
+      (db.prepare("SELECT symbol FROM symbol_field_latest ORDER BY symbol").all() as Array<{ symbol: string }>).map(
+        (row) => row.symbol
+      )
+    ).toEqual(["AAPL", "MSFT"]);
     expect(
       (db.prepare("SELECT content_hash FROM embed_stage").all() as Array<{ content_hash: string }>).map(
         (row) => row.content_hash
