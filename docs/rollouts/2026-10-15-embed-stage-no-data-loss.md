@@ -79,15 +79,34 @@ raises exactly one alarm, the audit-prune lanes report without deleting, the rec
 marks + heals on re-embed, and `embedStageStats` reports the backlog.
 `test/sqlite-storage-hygiene.test.ts` — a delivered 50-day-old staged row survives the hygiene lane.
 `test/audit-hygiene.test.ts` — updated for the new result field.
+`test/db-migration-old-schema.test.ts` — regression for the baseline-DDL index ordering bug below.
 
-Verified locally on Node 22: `npx tsc --noEmit` clean, `eslint` 0 errors on every touched file (only
-pre-existing `any` warnings in `db.ts`/`vector-db.ts`), and the embed-stage, storage-hygiene,
-`db-migration-old-schema`, `db-migration-busy`, `audit-hygiene`, `pinecone-wu-breaker`,
-`vector-db-lease-fencing`, `corpus-reembed`(-adversarial), `scheduler-managed-vector-reconcile`,
-`scheduler-lane-observability`, `r5-db-modules` and `embedding-space-isolation` suites green
-(37 tests in `embed-stage` + `sqlite-storage-hygiene`). Full-repo CI is the authority.
+## Migration ordering bug caught in review
+
+The first cut of this branch created `idx_embed_stage_delivered` inside the baseline DDL block,
+right after `CREATE TABLE IF NOT EXISTS embed_stage`. On a pre-ST-4540 database that CREATE TABLE
+is a no-op — the table already exists *without* `delivered_at` — so the index statement aborted the
+whole migration with `no such column: delivered_at` on every boot. CI would never have caught it,
+because CI starts from a fresh database where the baseline CREATE TABLE does include the column.
+
+This is the same failure mode `test/db-migration-old-schema.test.ts` already documents for the
+2026-07-02 `chat_turns` boot crash (#333), and the general rule is the reusable part: **an additive
+column added to baseline DDL must not be indexed in that same block** — create the index in the
+guarded `ALTER TABLE` block, after the column is known to exist. A migration regression test needs a
+hand-built pre-migration fixture; a fresh-DB test can never reach that code path.
 
 ## Note for dashboards
 
 `embed_stage_cap_prune` no longer exists (nothing is cap-pruned). Alert on **`embed_stage_over_cap`**
 and **`embed_stage_undelivered_backlog`** instead.
+
+## Recall
+
+```bash
+recall contribute "When a stage table represents work already paid for but not yet durably delivered (e.g., an embed awaiting vector-store acknowledgement), deletion must require a delivery receipt from the backend that acknowledged it — age windows and size caps should observe and alarm rather than delete, and undecodable rows should be quarantined with a marker so a re-run from source heals them instead of destroying the evidence of the paid work." --category lesson --app socratic-trade
+```
+
+Separately, when adding a column to baseline DDL, never index it in that same block: index it in the
+guarded ALTER TABLE migration, and back it with a pre-migration fixture test, because a fresh-DB CI
+run cannot reach the broken path.
+```

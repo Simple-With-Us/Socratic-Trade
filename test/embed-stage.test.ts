@@ -387,6 +387,24 @@ describe("sweep alarms without deleting (ST-4540)", () => {
     expect(await auditRows("embed_stage_cap_prune")).toHaveLength(0);
   });
 
+  it("short-circuits on an empty table (no scan, no alarms)", async () => {
+    const { sweepEmbedStage } = await import("../src/lib/db-embed-stage");
+    const { getDb } = await db();
+    getDb().prepare("DELETE FROM embed_stage").run();
+    expect(await stageRowCount()).toBe(0);
+    // Even with a pathological cap, an empty table cannot be over it.
+    const result = sweepEmbedStage(new Date(), 1);
+    expect(result).toEqual({
+      expired: 0,
+      capPruned: 0,
+      undeliveredRetained: 0,
+      overCap: false,
+      bytesAfter: 0
+    });
+    expect(await auditRows("embed_stage_over_cap")).toHaveLength(0);
+    expect(await auditRows("embed_stage_undelivered_backlog")).toHaveLength(0);
+  });
+
   it("stays quiet under the cap", async () => {
     const { stageEmbeddedVectors, sweepEmbedStage } = await import("../src/lib/db-embed-stage");
     stageEmbeddedVectors([{ contentHash: "small", model: "m", revision: "1", vector: [0.1, 0.2] }]);

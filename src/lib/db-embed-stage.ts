@@ -309,9 +309,19 @@ export interface EmbedStageStats {
   quarantined: number;
   /** Oldest undelivered created_at — the age of the longest-undelivered paid vector. */
   oldestUndeliveredCreatedAt: string | null;
+  /**
+   * Undelivered rows older than the retention cutoff. Only computed when a cutoff is supplied;
+   * 0 otherwise. Used by the observer's backlog alarm.
+   */
+  pastWindowUndelivered: number;
 }
 
-export function embedStageStats(): EmbedStageStats {
+/**
+ * Single-scan table summary. Pass `cutoffIso` to also get the past-window undelivered count in
+ * the SAME pass — the sweep needs both, and `SUM(LENGTH(vector))` reads every BLOB, so scanning
+ * twice on a multi-GiB table is the expensive part, not the counting.
+ */
+export function embedStageStats(cutoffIso?: string): EmbedStageStats {
   const db = getDb();
   const row = db
     .prepare(
@@ -319,16 +329,19 @@ export function embedStageStats(): EmbedStageStats {
               MIN(created_at) AS oldest,
               SUM(CASE WHEN delivered_at IS NULL THEN 1 ELSE 0 END) AS undelivered,
               SUM(CASE WHEN quarantined_at IS NOT NULL THEN 1 ELSE 0 END) AS quarantined,
-              MIN(CASE WHEN delivered_at IS NULL THEN created_at END) AS oldest_undelivered
+              MIN(CASE WHEN delivered_at IS NULL THEN created_at END) AS oldest_undelivered,
+              SUM(CASE WHEN ? IS NOT NULL AND created_at < ? AND delivered_at IS NULL
+                       THEN 1 ELSE 0 END) AS past_window_undelivered
        FROM embed_stage`
     )
-    .get() as {
+    .get(cutoffIso ?? null, cutoffIso ?? null) as {
     rows: number;
     vec_bytes: number;
     oldest: string | null;
     undelivered: number | null;
     quarantined: number | null;
     oldest_undelivered: string | null;
+    past_window_undelivered: number | null;
   };
   return {
     rows: row.rows,
@@ -336,7 +349,8 @@ export function embedStageStats(): EmbedStageStats {
     oldestCreatedAt: row.oldest ?? null,
     undelivered: row.undelivered ?? 0,
     quarantined: row.quarantined ?? 0,
-    oldestUndeliveredCreatedAt: row.oldest_undelivered ?? null
+    oldestUndeliveredCreatedAt: row.oldest_undelivered ?? null,
+    pastWindowUndelivered: row.past_window_undelivered ?? 0
   };
 }
 
@@ -376,14 +390,18 @@ export function sweepEmbedStage(
   now: Date = new Date(),
   maxBytes: number = EMBED_STAGE_MAX_BYTES
 ): EmbedStageSweepResult {
-  const db = getDb();
   const cutoff = new Date(now.getTime() - EMBED_STAGE_RETENTION_DAYS * 24 * 3600_000).toISOString();
   // Observation only: nothing below this line mutates embed_stage.
-  const pastWindowUndelivered = (
-    db
-      .prepare("SELECT COUNT(*) AS n FROM embed_stage WHERE created_at < ? AND delivered_at IS NULL")
-      .get(cutoff) as { n: number }
-  ).n;
+  //
+  // ONE table scan, not three. This table is unbounded by design (undelivered rows are never
+  // deleted) and `SUM(LENGTH(vector))` reads every BLOB, so a stuck-delivery backlog turns each
+  // extra pass into real latency on the daily audit-prune lane. The empty-table early exit keeps
+  // the common case (everything delivered promptly) off the scan entirely.
+  const stats = embedStageStats(cutoff);
+  if (stats.rows === 0) {
+    return { expired: 0, capPruned: 0, undeliveredRetained: 0, overCap: false, bytesAfter: 0 };
+  }
+  const pastWindowUndelivered = stats.pastWindowUndelivered;
   if (pastWindowUndelivered > 0) {
     audit(
       "embed_stage_undelivered_backlog",
@@ -400,7 +418,6 @@ export function sweepEmbedStage(
     });
   }
 
-  const stats = embedStageStats();
   const overCap = stats.bytes > maxBytes;
   if (overCap) {
     // Loud, and non-destructive. Under the old cap this deleted oldest-first, which could destroy
@@ -426,9 +443,7 @@ export function sweepEmbedStage(
     });
   }
 
-  const undeliveredRetained = (
-    db.prepare("SELECT COUNT(*) AS n FROM embed_stage WHERE delivered_at IS NULL").get() as { n: number }
-  ).n;
-  // The observer mutates nothing, so "after" equals the current size.
-  return { expired: 0, capPruned: 0, undeliveredRetained, overCap, bytesAfter: stats.bytes };
+  // The observer mutates nothing, so "after" equals the current size, and the undelivered count
+  // came from the same single scan as everything else.
+  return { expired: 0, capPruned: 0, undeliveredRetained: stats.undelivered, overCap, bytesAfter: stats.bytes };
 }
