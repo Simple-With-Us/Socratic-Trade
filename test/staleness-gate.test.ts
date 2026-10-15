@@ -145,17 +145,16 @@ describe("staleness gate", () => {
     expect(result.reasons.every((r) => !r.includes("staleness_gate"))).toBe(true);
   });
 
-  it("converts to limit order and warns on missing quote timestamp when the gate is ON", () => {
+  it("blocks an opening when the quote has no provider observation time", () => {
     const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60 };
     const proposal = { ...buyProposal };
     const result = evaluateTradeProposal(proposal, ctx(policy, scanWith(undefined, FRESH_GENERATED_AT)));
-    
-    expect(result.approved).toBe(true);
-    expect(proposal.type).toBe("limit");
-    expect(result.quoteStale).toBeDefined();
-    expect(result.quoteStale?.ageSec).toBeUndefined();
-    expect(proposal.rationale).toContain("Stale quote backup");
-    expect(proposal.rationale).toContain("missing/unparseable");
+
+    expect(result.approved).toBe(false);
+    expect(proposal.type).toBe("market");
+    expect(result.quoteStale).toBeUndefined();
+    expect(result.reasons.some((reason) => reason.startsWith("quote_age_unknown:"))).toBe(true);
+    expect(result.reasons.some((reason) => reason.toLowerCase().includes("broker"))).toBe(false);
   });
 
   it("does not warn or mutate on missing quote timestamp when the gate is OFF", () => {
@@ -167,17 +166,15 @@ describe("staleness gate", () => {
     expect(result.quoteStale).toBeUndefined();
   });
 
-  it("converts to limit order and warns on unparseable quote timestamp when the gate is ON", () => {
+  it("blocks an opening when the quote observation time does not parse", () => {
     const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 60 };
     const proposal = { ...buyProposal };
     const result = evaluateTradeProposal(proposal, ctx(policy, scanWith("not-a-date", FRESH_GENERATED_AT)));
-    
-    expect(result.approved).toBe(true);
-    expect(proposal.type).toBe("limit");
-    expect(result.quoteStale).toBeDefined();
-    expect(result.quoteStale?.ageSec).toBeUndefined();
-    expect(proposal.rationale).toContain("Stale quote backup");
-    expect(proposal.rationale).toContain("missing/unparseable");
+
+    expect(result.approved).toBe(false);
+    expect(proposal.type).toBe("market");
+    expect(result.quoteStale).toBeUndefined();
+    expect(result.reasons.some((reason) => reason.startsWith("quote_age_unknown:"))).toBe(true);
   });
 
   it("does NOT block or escalate on stale fundamentals — annotate only (owner: never block on staleness)", () => {

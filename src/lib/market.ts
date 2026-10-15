@@ -932,11 +932,15 @@ function persistScanFieldsToStore(candidates: MarketQuote[], fetchedAt: string):
           const valueJson = mod.encodeFieldValue(value);
           if (!valueJson) continue;
           const obs = observations[field as keyof typeof observations];
-          const asOf =
+          const observationAsOf =
             (obs && typeof obs === "object" && ("asOf" in obs ? (obs as { asOf?: string }).asOf : undefined)) ||
-            (obs && typeof obs === "object" && ("fetchedAt" in obs ? (obs as { fetchedAt?: string }).fetchedAt : undefined)) ||
             (field === "asOf" && typeof value === "string" ? value : undefined) ||
-            quote.asOf ||
+            quote.asOf;
+          const quoteClock = field === "price" || field === "bid" || field === "ask";
+          if (quoteClock && !observationAsOf) continue;
+          const asOf =
+            observationAsOf ||
+            (obs && typeof obs === "object" && ("fetchedAt" in obs ? (obs as { fetchedAt?: string }).fetchedAt : undefined)) ||
             fetchedAt;
           const fieldFetched =
             (obs && typeof obs === "object" && ("fetchedAt" in obs ? (obs as { fetchedAt?: string }).fetchedAt : undefined)) ||

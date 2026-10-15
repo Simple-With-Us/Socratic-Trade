@@ -117,8 +117,27 @@ describe("isQuoteFresh / cascadeFreshMaxAgeMs", () => {
     expect(isUsableBrokerQuote(close, now, cascadeFreshMaxAgeMs(120))).toBe(false);
   });
 
-  it("never treats missing asOf as fresh (unless venue-authoritative)", () => {
-    expect(isQuoteFresh({}, Date.now(), cascadeFreshMaxAgeMs(120))).toBe(false);
+  it("never treats missing asOf as fresh, including a venue-authoritative quote", () => {
+    const now = Date.now();
+    expect(isQuoteFresh({}, now, cascadeFreshMaxAgeMs(120))).toBe(false);
+    expect(
+      isQuoteFresh(
+        { venuePriceAuthoritative: true, fetchedAt: new Date(now).toISOString() },
+        now,
+        cascadeFreshMaxAgeMs(120)
+      )
+    ).toBe(false);
+    expect(
+      isQuoteFresh(
+        {
+          venuePriceAuthoritative: true,
+          asOf: new Date(now - 15 * 60 * 1000).toISOString(),
+          fetchedAt: new Date(now).toISOString()
+        },
+        now,
+        cascadeFreshMaxAgeMs(120)
+      )
+    ).toBe(true);
   });
 
   it("ages delayed tapes by market time — a fresh fetch stamp cannot promote Yahoo delay to live", () => {
@@ -238,6 +257,22 @@ describe("quoteAgeSecForStalenessGate", () => {
     );
     expect(r.ageSec).toBe(180);
   });
+
+  it("treats a quote with no parseable observation time as missing, even with a fresh fetch", () => {
+    const now = Date.now();
+    const r = quoteAgeSecForStalenessGate(
+      {
+        fetchedAt: new Date(now - 5_000).toISOString(),
+        venuePriceAuthoritative: true,
+        bid: 10,
+        ask: 10.1,
+        provider: "tradier"
+      },
+      now
+    );
+    expect(r.missing).toBe(true);
+    expect(r.ageSec).toBeUndefined();
+  });
 });
 
 describe("isTwoSidedLiveNbbo", () => {
@@ -279,7 +314,7 @@ describe("resolveVenueQuoteMode", () => {
     ).toBe("venue_delayed");
   });
 
-  it("returns realtime for Tradier production (live) accounts", () => {
+  it("returns venue_locked for Tradier production (live) accounts", () => {
     mockGetConnectedAccount.mockReturnValue({
       id: "tr-live",
       broker: "tradier",
@@ -287,7 +322,7 @@ describe("resolveVenueQuoteMode", () => {
     });
     expect(
       resolveVenueQuoteMode({ activeBroker: "tradier", connectedAccountId: "tr-live" }, "local")
-    ).toBe("realtime");
+    ).toBe("venue_locked");
   });
 
   it("returns realtime for Alpaca paper (real-time paper simulation)", () => {
@@ -497,6 +532,40 @@ describe("fetchFreshQuotesCascade", () => {
     const age = quoteAgeSecForStalenessGate(result.MSFT, Date.now());
     expect(age.venueDelayed).toBe(true);
     expect(age.ageSec!).toBeLessThan(5);
+  });
+
+  it("on Tradier live, KEEPS the Tradier quote and does not overlay Alpaca or Yahoo", async () => {
+    const now = Date.now();
+    const livePrint = new Date(now - 30 * 1000).toISOString();
+    const fresher = new Date(now - 5 * 1000).toISOString();
+
+    mockGetPolicy.mockReturnValue({
+      activeBroker: "tradier",
+      accountNumber: "6YA00000",
+      connectedAccountId: "tr-live",
+      maxQuoteAgeSec: 120
+    });
+    mockGetConnectedAccount.mockReturnValue({
+      id: "tr-live",
+      broker: "tradier",
+      environment: "live"
+    });
+
+    mockGetEquityQuotes.mockResolvedValue({
+      MSFT: { symbol: "MSFT", price: 300, asOf: livePrint, provider: "tradier" }
+    });
+    mockEnrich.mockResolvedValue({
+      MSFT: { price: 305, asOf: fresher, bid: 304, ask: 306, volume: 1000 }
+    });
+
+    const result = await fetchFreshQuotesCascade(["MSFT"], "local", "6YA00000", "tr-live");
+
+    expect(mockEnrich).not.toHaveBeenCalled();
+    expect(mockFetchYahooFinanceQuotesBatch).not.toHaveBeenCalled();
+    expect(result.MSFT.price).toBe(300);
+    expect(result.MSFT.provider).toBe("tradier");
+    expect(result.MSFT.asOf).toBe(livePrint);
+    expect(result.MSFT.venuePriceAuthoritative).toBeUndefined();
   });
 
   it("falls back to Level 2 (Alpaca Snapshot) if Level 1 returns a quote older than maxQuoteAgeSec (realtime)", async () => {

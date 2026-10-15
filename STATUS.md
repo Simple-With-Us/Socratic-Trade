@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — quote observation and unknown-age gate (ST-2584)
+
+**What.**  Each provider keeps its own quote timestamp.  The price is last, then a two-sided mid.  A size, a one-sided book, and a prior close are not the price.  Unknown age blocks an opening.  Known-old quotes still convert to a limit.  Tradier paper and live both trade off Tradier quotes, with no Alpaca or Yahoo overlay.  Alpaca last prints use Alpaca's own latest-trades call.  No new vendor.
+
+**Branch.**  `cursor/quote-observation-staleness-99f5`
+
+**Verification.**  `npx tsc --noEmit` exit 0.  Touched-file eslint quiet exit 0.  Approval-fixture and quote tests re-run green after scan stubs gained `asOf` (including MSFT on the bulk-approve stub) and chat preview kept the scan-less carve-out.  `npm run build` exit 0.  An earlier full `npm test` still shows the pre-existing OpenRouter-key, notify, server-metrics, and cpuprofile failures.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
+
+**Next.**  PR ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.

@@ -21,6 +21,7 @@ import { normalizeSymbol } from "./money";
 import { getActiveConnectedAccount, getConnectedAccount } from "./db";
 import { logApiHealth } from "./db-health";
 import { estimateReviewNotional } from "./alpaca";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import { mergeAccountCapabilities } from "./venue-contract";
 import { resolveSourceBool } from "./source-settings";
 
@@ -198,18 +199,8 @@ class PublicBrokerGateway implements BrokerGateway {
       const rows = Array.isArray(json) ? json : json.quotes ?? [];
       const out: Record<string, BrokerQuote> = {};
       for (const row of rows) {
-        const inst = (row.instrument ?? {}) as Record<string, unknown>;
-        const symbol = normalizeSymbol(String(inst.symbol ?? row.symbol ?? ""));
-        if (!symbol) continue;
-        out[symbol] = {
-          symbol,
-          price: num(row.last) ?? mid(num(row.bid), num(row.ask)),
-          bid: num(row.bid),
-          ask: num(row.ask),
-          volume: num(row.volume),
-          asOf: typeof row.lastTimestamp === "string" ? row.lastTimestamp : undefined,
-          provider: "public"
-        };
+        const quote = publicQuoteFromRow(row);
+        if (quote) out[quote.symbol] = quote;
       }
       return out;
     });
@@ -320,9 +311,23 @@ function num(value: unknown): number | undefined {
   return undefined;
 }
 
-function mid(bid?: number, ask?: number): number | undefined {
-  if (bid && ask) return (bid + ask) / 2;
-  return bid ?? ask;
+/** Last print, then a two-sided mid.  A one-sided book is not a price. */
+export function publicQuoteFromRow(row: Record<string, unknown>): BrokerQuote | undefined {
+  const inst = (row.instrument ?? {}) as Record<string, unknown>;
+  const symbol = normalizeSymbol(String(inst.symbol ?? row.symbol ?? ""));
+  if (!symbol) return undefined;
+  const selected = selectObservedQuotePrice({ last: row.last, bid: row.bid, ask: row.ask });
+  if (selected.price === undefined) return undefined;
+  const asOf = providerObservationIso(selected.basis === "last" ? row.lastTimestamp : row.quoteTimestamp);
+  return {
+    symbol,
+    price: selected.price,
+    bid: num(row.bid),
+    ask: num(row.ask),
+    volume: num(row.volume),
+    ...(asOf ? { asOf } : {}),
+    provider: "public"
+  };
 }
 
 function mapPublicType(raw: string): EquityOrder["type"] {

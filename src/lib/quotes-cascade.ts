@@ -17,6 +17,7 @@ import {
   isYahooFallbackProvider
 } from "./quote-delayed-fallback";
 import { upsertSymbolFieldLatest, type SymbolFieldLatestRecord } from "./db-fundamentals";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import type { BrokerQuote, ConnectedAccount, QuoteFieldProvenance, TradingPolicy } from "./types";
 
 /**
@@ -282,30 +283,33 @@ export async function fetchFinnhubQuote(
     )
   );
   if (!res.ok) return undefined;
-  const q = (await res.json()) as Record<string, unknown>;
-  const c = firstNumber(q, ["c"]);
-  if (!(typeof c === "number" && c > 0)) return undefined;
+  const parsed = parseFinnhubQuote(symbol, await res.json());
+  return parsed ? { ...parsed, fetchedAt: new Date().toISOString() } : undefined;
+}
+
+/** Finnhub `/quote`: current price is `c`.  Previous close `pc` is not the price. */
+export function parseFinnhubQuote(symbol: string, payload: unknown): BrokerQuote | undefined {
+  const q = (payload ?? {}) as Record<string, unknown>;
+  const selected = selectObservedQuotePrice({ last: firstNumber(q, ["c"]) });
+  if (selected.price === undefined) return undefined;
   const pc = firstNumber(q, ["pc"]);
   const o = firstNumber(q, ["o"]);
   const h = firstNumber(q, ["h"]);
   const l = firstNumber(q, ["l"]);
   const d = firstNumber(q, ["d"]);
   const dp = firstNumber(q, ["dp"]);
-  const t = firstNumber(q, ["t"]);
-  const asOf = typeof t === "number" && t > 0 ? new Date(t * 1000).toISOString() : undefined;
-
+  const asOf = providerObservationIso(firstNumber(q, ["t"]));
   return {
     symbol,
-    price: c,
+    price: selected.price,
     prevClose: typeof pc === "number" && pc > 0 ? pc : undefined,
     open: typeof o === "number" && o > 0 ? o : undefined,
     high: typeof h === "number" && h > 0 ? h : undefined,
     low: typeof l === "number" && l > 0 ? l : undefined,
     change: typeof d === "number" ? d : undefined,
     changePct: typeof dp === "number" ? dp : undefined,
-    asOf,
-    provider: "finnhub",
-    fetchedAt: new Date().toISOString()
+    ...(asOf ? { asOf } : {}),
+    provider: "finnhub"
   };
 }
 
@@ -332,17 +336,27 @@ export async function fetchTiingoQuote(
     { service: "tiingo", keySource, userId, retries: 0 }
   );
   if (!res.ok) return undefined;
-  const payload = await res.json();
+  const parsed = parseTiingoIexQuote(symbol, await res.json());
+  return parsed ? { ...parsed, fetchedAt: new Date().toISOString() } : undefined;
+}
+
+/**
+ * Tiingo IEX row.  Last print, then the two-sided mid.  `prevClose` and
+ * `bidSize` are not the price.  No observation time means no `asOf`.
+ * `fetchedAt` is applied by the fetch wrapper, not here.
+ */
+export function parseTiingoIexQuote(symbol: string, payload: unknown): BrokerQuote | undefined {
   const arr = Array.isArray(payload) ? payload : [payload];
   if (arr.length === 0 || !arr[0] || typeof arr[0] !== "object") return undefined;
   const q = arr[0] as Record<string, unknown>;
-
-  const price = firstNumber(q, ["tngoLast", "lastPrice", "last", "mid"]);
   const bid = firstNumber(q, ["bidPrice"]);
   const ask = firstNumber(q, ["askPrice"]);
-  const resolvedPrice = price ?? (bid && ask ? (bid + ask) / 2 : undefined);
-  if (!(typeof resolvedPrice === "number" && resolvedPrice > 0)) return undefined;
-
+  const selected = selectObservedQuotePrice({
+    last: firstNumber(q, ["tngoLast", "lastPrice", "last"]),
+    bid,
+    ask
+  });
+  if (selected.price === undefined) return undefined;
   const bidSize = firstNumber(q, ["bidSize"]);
   const askSize = firstNumber(q, ["askSize"]);
   const volume = firstNumber(q, ["volume"]);
@@ -350,25 +364,18 @@ export async function fetchTiingoQuote(
   const open = firstNumber(q, ["open"]);
   const high = firstNumber(q, ["high"]);
   const low = firstNumber(q, ["low"]);
-  const timestamp =
-    typeof q.timestamp === "string"
-      ? q.timestamp
-      : typeof q.lastSaleTimestamp === "string"
-        ? q.lastSaleTimestamp
-        : typeof q.quoteTimestamp === "string"
-          ? q.quoteTimestamp
-          : undefined;
-
+  const asOf = providerObservationIso(
+    selected.basis === "last" ? q.lastSaleTimestamp ?? q.timestamp : q.quoteTimestamp ?? q.timestamp
+  );
   let change: number | undefined;
   let changePct: number | undefined;
   if (prevClose && prevClose > 0) {
-    change = Math.round((resolvedPrice - prevClose) * 100) / 100;
-    changePct = Math.round(((resolvedPrice - prevClose) / prevClose) * 10000) / 100;
+    change = Math.round((selected.price - prevClose) * 100) / 100;
+    changePct = Math.round(((selected.price - prevClose) / prevClose) * 10000) / 100;
   }
-
   return {
     symbol,
-    price: resolvedPrice,
+    price: selected.price,
     bid: typeof bid === "number" && bid > 0 ? bid : undefined,
     ask: typeof ask === "number" && ask > 0 ? ask : undefined,
     bidSize: typeof bidSize === "number" && bidSize > 0 ? bidSize : undefined,
@@ -380,9 +387,23 @@ export async function fetchTiingoQuote(
     low: typeof low === "number" && low > 0 ? low : undefined,
     change,
     changePct,
-    asOf: timestamp,
-    provider: "tiingo",
-    fetchedAt: new Date().toISOString()
+    ...(asOf ? { asOf } : {}),
+    provider: "tiingo"
+  };
+}
+
+/** ROIC profile price.  The profile has no observation timestamp. */
+export function roicProfileQuote(symbol: string, profile: unknown): BrokerQuote | undefined {
+  const p = (Array.isArray(profile) ? profile[0] : profile) as Record<string, unknown> | undefined;
+  if (!p || typeof p !== "object") return undefined;
+  const price = firstNumber(p, ["price"]);
+  if (!(typeof price === "number" && price > 0)) return undefined;
+  const companyName = typeof p.companyName === "string" ? p.companyName : undefined;
+  return {
+    symbol,
+    price,
+    ...(companyName ? { companyName } : {}),
+    provider: "roic"
   };
 }
 
@@ -406,12 +427,16 @@ export function syncQuotesToFieldStore(quotes: Record<string, BrokerQuote>): voi
     ): void => {
       if (!valid(value)) return;
       const prov = quote.fieldProvenance?.[field];
+      const observationAsOf = prov?.asOf ?? quote.asOf;
+      // Price, bid, and ask are quote clocks.  A row with no provider
+      // observation is skipped instead of stamped with the fetch time.
+      if ((field === "price" || field === "bid" || field === "ask") && !observationAsOf) return;
       records.push({
         symbol,
         field,
         valueJson: JSON.stringify(normalize ? normalize(value as never) : value),
         source: prov?.provider ?? quote.provider ?? "quote-cascade",
-        asOf: prov?.asOf ?? quote.asOf ?? quote.fetchedAt ?? nowIso,
+        asOf: observationAsOf ?? quote.fetchedAt ?? nowIso,
         fetchedAt: prov?.fetchedAt ?? quote.fetchedAt ?? nowIso
       });
     };
@@ -508,6 +533,9 @@ function isVerifiedRealtimeBook(quote: {
   provider?: string;
 }): boolean {
   if (quote.venueDelayedTape) return false;
+  // Tradier prints age by the provider timestamp.  A fresh fetch must not
+  // promote that tape to a live book.
+  if (quote.provider === "tradier" || quote.provider?.startsWith("tradier")) return false;
   if (isYahooFallbackProvider(quote.provider)) return false;
   return isTwoSidedLiveNbbo(quote);
 }
@@ -528,6 +556,10 @@ export function isQuoteFresh(
   nowMs: number,
   maxAgeMs: number = cascadeFreshMaxAgeMs()
 ): boolean {
+  const asOfMs = quote.asOf ? new Date(quote.asOf).getTime() : Number.NaN;
+  // Unknown age is stale, including a venue-authoritative quote with no
+  // provider observation.  fetchedAt is not a substitute.
+  if (!quote.asOf || Number.isNaN(asOfMs)) return false;
   if (quote.venuePriceAuthoritative) return true;
   // Two-sided broker NBBO fetched just now is live even when last-print `asOf` is old
   // (quiet names / IEX last trade sitting still).  Age the fetch, not the last print.
@@ -540,9 +572,6 @@ export function isQuoteFresh(
       if (fetchAgeMs < 0 || fetchAgeMs <= maxAgeMs) return true;
     }
   }
-  if (!quote.asOf) return false;
-  const asOfMs = new Date(quote.asOf).getTime();
-  if (Number.isNaN(asOfMs)) return false;
   const ageMs = nowMs - asOfMs;
   if (ageMs < 0) return true; // clock skew / future stamp — accept
   return ageMs <= maxAgeMs;
@@ -601,6 +630,11 @@ export function quoteAgeSecForStalenessGate(
   if (!quote) return { missing: true, venueDelayed: false, delayedFallback: false };
   const venueDelayed = quote.venuePriceAuthoritative === true;
   const delayedFallback = isDelayedYahooFallbackQuote(quote, nowMs);
+  const asOfMs = quote.asOf ? new Date(quote.asOf).getTime() : Number.NaN;
+  // No parseable provider observation.  Do not age fetchedAt in its place.
+  if (!quote.asOf || Number.isNaN(asOfMs)) {
+    return { missing: true, venueDelayed, delayedFallback };
+  }
   const liveNbbo = isVerifiedRealtimeBook(quote);
   // Venue-delayed tape and delayed Yahoo fallback: age the FETCH snapshot, not the
   // expected ~15m print.  A just-fetched delayed Yahoo quote is not a broken cascade.
@@ -612,10 +646,10 @@ export function quoteAgeSecForStalenessGate(
     (liveNbbo && typeof quote.fetchedAt === "string" && !Number.isNaN(new Date(quote.fetchedAt).getTime()));
   const stamp = useFetchedAt ? quote.fetchedAt ?? quote.asOf : quote.asOf;
   if (!stamp) return { missing: true, venueDelayed, delayedFallback };
-  const asOfMs = new Date(stamp).getTime();
-  if (Number.isNaN(asOfMs)) return { missing: true, venueDelayed, delayedFallback };
+  const stampMs = new Date(stamp).getTime();
+  if (Number.isNaN(stampMs)) return { missing: true, venueDelayed, delayedFallback };
   return {
-    ageSec: Math.round((nowMs - asOfMs) / 1000),
+    ageSec: Math.round((nowMs - stampMs) / 1000),
     missing: false,
     venueDelayed,
     delayedFallback
@@ -627,9 +661,12 @@ export function quoteAgeSecForStalenessGate(
  *
  * - `venue_delayed`: Tradier paper/sandbox — the paper OMS fills against Tradier's ~15m
  *   delayed tape. Use that price; never overlay fresher Alpaca/Yahoo.
- * - `realtime`: everything else (Alpaca paper/live, Tradier production, Robinhood, …).
+ * - `venue_locked`: Tradier live.  The fill uses the Tradier quote.  Later
+ *   cascade levels do not replace it.  The quote is not stamped
+ *   venue-authoritative, so a real asOf still hits the staleness gate.
+ * - `realtime`: everything else (Alpaca paper/live, Robinhood, …).
  */
-export type VenueQuoteMode = "realtime" | "venue_delayed";
+export type VenueQuoteMode = "realtime" | "venue_delayed" | "venue_locked";
 
 export function resolveVenueQuoteMode(
   policy: Pick<TradingPolicy, "activeBroker" | "connectedAccountId"> | null | undefined,
@@ -640,6 +677,7 @@ export function resolveVenueQuoteMode(
     (policy.connectedAccountId ? getConnectedAccount(policy.connectedAccountId, userId) : undefined) ??
     getActiveConnectedAccount(userId);
   if (acct?.broker === "tradier" && acct.environment === "paper") return "venue_delayed";
+  if (acct?.broker === "tradier") return "venue_locked";
   return "realtime";
 }
 
@@ -795,6 +833,9 @@ export async function fetchFreshQuotesCascade(
   } catch (error) {
     console.warn("[quotes-cascade] Level 1a (active broker) failed:", error instanceof Error ? error.message : error);
   }
+  // Tradier trades price off Tradier.  Paper and live both stop here so
+  // Alpaca, Yahoo, and the other levels cannot overlay the venue tape.
+  if (venueMode !== "realtime") pendingSymbols = [];
 
   // --- LEVEL 1b: ALL other connected brokers for this user (market-data only) ---
   throwIfCascadeAborted(signal);
@@ -1031,25 +1072,11 @@ export async function fetchFreshQuotesCascade(
               );
               if (res.ok) {
                 const profile = await res.json();
-                const p = Array.isArray(profile) ? profile[0] : profile;
-                if (p && typeof p === "object") {
-                  const price = firstNumber(p, ["price"]);
-                  if (typeof price === "number" && price > 0) {
-                    const companyName = typeof p.companyName === "string" ? p.companyName : undefined;
-                    const q: BrokerQuote = {
-                      symbol,
-                      price,
-                      companyName,
-                      // Profile rows have no price timestamp (see parseRoicProfile).
-                      // Leave asOf unset so isQuoteFresh treats the print as stale
-                      // instead of a just-observed quote.
-                      asOf: undefined,
-                      provider: "roic",
-                      fetchedAt: stampIngest()
-                    };
-                    updateBestQuote(symbol, q);
-                    acceptIfComplete(symbol, q);
-                  }
+                const parsed = roicProfileQuote(symbol, profile);
+                if (parsed) {
+                  const q: BrokerQuote = { ...parsed, fetchedAt: stampIngest() };
+                  updateBestQuote(symbol, q);
+                  acceptIfComplete(symbol, q);
                 }
               }
             } catch (err) {

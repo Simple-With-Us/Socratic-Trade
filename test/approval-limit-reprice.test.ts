@@ -75,7 +75,8 @@ vi.mock("../src/lib/approval-quote-scan", async (importOriginal) => {
             price: scan.price,
             bid: scan.bid,
             ask: scan.ask,
-            provider: "test-scan"
+            provider: "test-scan",
+            asOf: new Date().toISOString()
           }
         },
         []

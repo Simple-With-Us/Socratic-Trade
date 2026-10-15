@@ -34,6 +34,7 @@ export type LegacyAlpacaRestClient = {
     until?: string;
   }): Promise<Record<string, unknown>[]>;
   getLatestQuotes(symbols: string[]): Promise<Record<string, Record<string, unknown>>>;
+  getLatestTrades?(symbols: string[]): Promise<Record<string, Record<string, unknown>>>;
   getAsset(symbol: string): Promise<Record<string, unknown>>;
   createOrder(options: Record<string, unknown>): Promise<Record<string, unknown>>;
   cancelOrder(orderId: string): Promise<void>;
@@ -160,6 +161,7 @@ type V5AlpacaSdk = {
   marketData: {
     stocks: {
       stockLatestQuotes: (req: { symbols: string }) => Promise<{ quotes?: Record<string, unknown> }>;
+      stockLatestTrades: (req: { symbols: string }) => Promise<{ trades?: Record<string, unknown> }>;
     };
   };
 };
@@ -210,6 +212,19 @@ export function createLegacyAlpacaRestClient(
         legacy[sym] = {
           ...q,
           t: q.t instanceof Date ? q.t.toISOString() : q.t
+        };
+      }
+      return legacy;
+    },
+    async getLatestTrades(symbols) {
+      if (symbols.length === 0) return {};
+      const resp = await stocks.stockLatestTrades({ symbols: symbols.join(",") });
+      const legacy: Record<string, Record<string, unknown>> = {};
+      for (const [sym, trade] of Object.entries(resp.trades ?? {})) {
+        const row = trade as unknown as Record<string, unknown>;
+        legacy[sym] = {
+          p: row.p,
+          t: row.t instanceof Date ? row.t.toISOString() : row.t
         };
       }
       return legacy;

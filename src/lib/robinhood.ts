@@ -23,6 +23,7 @@ import { mergeAccountCapabilities } from "./venue-contract";
 import { normalizeVenueOrder } from "./venue-normalization";
 import { isShortIntent } from "./broker-side";
 import { getOpenLots, getPerformanceSummary } from "./performance";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import { fetchYahooFinanceQuote, fetchYahooFinanceQuotesBatch } from "./yahoo-finance";
 import { messageFromUnknownError, recordRecoverableIssue } from "./recoverable-issue";
 
@@ -87,14 +88,26 @@ export function parseRobinhoodQuotes(raw: Record<string, unknown> | unknown): Re
       const bidSize = optionalNumber(q.bid_size);
       const askSize = optionalNumber(q.ask_size);
       const volume = optionalNumber(q.volume);
+      const selected = selectObservedQuotePrice({
+        last: q.last_trade_price ?? q.last_non_reg_trade_price ?? q.price ?? q.last_price,
+        bid: q.bid_price ?? q.bid,
+        ask: q.ask_price ?? q.ask
+      });
+      const asOf = providerObservationIso(
+        selected.basis === "last"
+          ? q.venue_last_trade_time ?? q.as_of ?? item.as_of
+          : selected.basis === "mid"
+            ? q.venue_quote_time ?? q.as_of ?? item.as_of
+            : undefined
+      );
       return [
         symbol,
         {
           symbol,
-          price: optionalNumber(q.last_trade_price ?? q.last_non_reg_trade_price ?? q.price ?? q.last_price),
+          ...(selected.price !== undefined ? { price: selected.price } : {}),
           bid: optionalNumber(q.bid_price ?? q.bid),
           ask: optionalNumber(q.ask_price ?? q.ask),
-          asOf: optionalString(q.venue_last_trade_time ?? q.as_of ?? item.as_of),
+          ...(asOf ? { asOf } : {}),
           provider: "robinhood",
           ...(prevClose !== undefined && prevClose > 0 ? { prevClose } : {}),
           ...(bidSize !== undefined && bidSize > 0 ? { bidSize } : {}),
@@ -916,7 +929,7 @@ class TestBrokerGateway implements BrokerGateway {
               bid: yf.bid,
               ask: yf.ask,
               volume: yf.volume > 0 ? yf.volume : undefined,
-              asOf: yf.asOf || new Date().toISOString(),
+              ...(yf.asOf ? { asOf: yf.asOf } : {}),
               provider: "yahoo-finance",
               ...(yf.syntheticBid ? { syntheticBid: true } : {}),
               ...(yf.syntheticAsk ? { syntheticAsk: true } : {}),

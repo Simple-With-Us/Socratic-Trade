@@ -37,7 +37,7 @@ export function buildApprovalQuoteScan(
       ask: quote.ask,
       score: 0,
       provider: quote.provider,
-      asOf: quote.asOf ?? quote.fetchedAt ?? generatedAt,
+      ...(quote.asOf ? { asOf: quote.asOf } : {}),
       venuePriceAuthoritative: quote.venuePriceAuthoritative,
       fetchedAt: quote.fetchedAt,
       delayedFallback: quote.delayedFallback,

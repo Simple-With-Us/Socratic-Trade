@@ -856,7 +856,9 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
             const q = quotes[s];
             return !q || typeof q.price !== "number" || q.price <= 0 || !isQuoteFresh(q, nowMs, maxAgeMs);
           });
-          if (missingPriceSymbols.length > 0) {
+          // Tradier paper and live keep the Tradier quote.  The cascade must
+          // not replace it with Alpaca or Yahoo.
+          if (venueMode === "realtime" && missingPriceSymbols.length > 0) {
             try {
               // skipActiveBroker: direct gateway already attempted. Delayed-venue successes
               // were stamped above and are not in missingPriceSymbols, so this skip cannot
