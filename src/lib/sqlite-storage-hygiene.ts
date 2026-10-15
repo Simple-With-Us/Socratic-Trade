@@ -2,15 +2,11 @@
 // the production SQLite file.
 //
 // The file is large (multi-gigabyte) and Litestream is replicating the WAL.
-// This lane deletes only disposable caches, logs, and finished operational
-// rows, in small batches that yield the event loop.  Orders, fills,
-// positions, approvals, transfers, and high-water-mark inputs are refused by
-// name before any DELETE is prepared.
-//
-// history_cache_eod (durable EOD price history) is intentionally NOT an age
-// target: bars are permanent upserts with no age-based deletion, backing the
-// ~5y deep-history lookback.  Only this module can DELETE, and the table is
-// unlisted, so assertPruneTableAllowed refuses it by name.
+// This lane deletes only caches, logs, and finished operational rows, in small
+// batches that yield the event loop.  Orders, fills, positions, approvals,
+// transfers, high-water-mark inputs, and market-data history (prices, fundamentals,
+// filings, transcripts, SEC facts, document chunks) are refused by name before any
+// DELETE is prepared.
 //
 // Free pages go back to the OS only when auto_vacuum is already INCREMENTAL,
 // via a capped incremental_vacuum.  A full file rewrite is never issued: on a
@@ -53,9 +49,38 @@ export const MONEY_PATH_TABLES = [
   "learned_context_pending"
 ] as const;
 
-const MONEY_PATH_SET = new Set<string>(MONEY_PATH_TABLES);
+/** Price, fundamentals, filings, transcripts, SEC facts, and document-chunk tables.
+ *  Jay policy: never delete market-data history by age from the storage-hygiene lane. */
+export const MARKET_DATA_HISTORY_TABLES = [
+  "history_cache_eod",
+  "imported_price_eod",
+  "symbol_field_latest",
+  "historical_fundamentals",
+  "fundamental_revisions",
+  "sec_facts",
+  "sec_filings",
+  "sec_artifacts",
+  "sec_insider_transactions",
+  "sec_13f_holdings",
+  "document_chunks",
+  "document_chunks_fts_index",
+  "chunk_occurrences",
+  "document_abstracts",
+  "earningscalls_transcripts",
+  "earningscalls_event_index",
+  "earningscalls_symbol_checks",
+  "fmp_transcript_versions",
+  "fmp_transcript_derived_artifacts"
+] as const;
 
-export const SYMBOL_FIELD_CACHE_RETENTION_DAYS = 180;
+const MONEY_PATH_SET = new Set<string>(MONEY_PATH_TABLES);
+const MARKET_DATA_HISTORY_SET = new Set<string>(MARKET_DATA_HISTORY_TABLES);
+
+export function isMarketDataHistoryTable(table: string): boolean {
+  if (MARKET_DATA_HISTORY_SET.has(table)) return true;
+  return table.startsWith("document_chunks_fts");
+}
+
 export const STRATEGY_RUN_RETENTION_DAYS = 120;
 export const STRATEGY_RUN_REQUEST_RETENTION_DAYS = 30;
 export const TASK_JOURNAL_SKIPPED_RETENTION_DAYS = 1;
@@ -81,14 +106,13 @@ const CHECKPOINT_AT_KEY = "storage-hygiene:lastCheckpointAt";
 const RETAIN_REASON: Record<string, string> = {
   history_cache_eod: "durable price history (no age deletion)",
   llm_usage: "lifetime LLM usage retention",
-  document_chunks: "retrieval corpus",
-  document_chunks_fts: "retrieval corpus",
-  document_chunks_fts_data: "retrieval corpus",
-  document_chunks_fts_idx: "retrieval corpus",
-  document_chunks_fts_content: "retrieval corpus",
-  document_chunks_fts_docsize: "retrieval corpus",
-  document_chunks_fts_config: "retrieval corpus",
-  chunk_occurrences: "retrieval corpus"
+  ...Object.fromEntries(MARKET_DATA_HISTORY_TABLES.map((table) => [table, "market-data history retention"])),
+  document_chunks_fts: "market-data history retention",
+  document_chunks_fts_data: "market-data history retention",
+  document_chunks_fts_idx: "market-data history retention",
+  document_chunks_fts_content: "market-data history retention",
+  document_chunks_fts_docsize: "market-data history retention",
+  document_chunks_fts_config: "market-data history retention"
 };
 
 export type StorageCategory =
@@ -100,6 +124,7 @@ export type StorageCategory =
   | "embeddings"
   | "logs"
   | "money_path"
+  | "market_data_history"
   | "other";
 
 const CATEGORY_BY_TABLE: Record<string, StorageCategory> = {
@@ -186,15 +211,6 @@ export const RETENTION_TARGETS: readonly RetentionTarget[] = [
     cutoff: (now) => isoCutoff(now, TASK_JOURNAL_RETENTION_DAYS)
   },
   {
-    id: "symbol-field-latest",
-    category: "quote_bar_cache",
-    table: "symbol_field_latest",
-    retentionDays: SYMBOL_FIELD_CACHE_RETENTION_DAYS,
-    whereSql: "fetched_at < ?",
-    payloadColumn: "value_json",
-    cutoff: (now) => isoCutoff(now, SYMBOL_FIELD_CACHE_RETENTION_DAYS)
-  },
-  {
     id: "embed-stage",
     category: "embeddings",
     table: "embed_stage",
@@ -233,11 +249,17 @@ for (const target of RETENTION_TARGETS) {
   if (MONEY_PATH_SET.has(target.table)) {
     throw new Error(`retention target ${target.table} is a money-path table`);
   }
+  if (isMarketDataHistoryTable(target.table)) {
+    throw new Error(`retention target ${target.table} is market-data history`);
+  }
 }
 
 export function assertPruneTableAllowed(table: string): void {
   if (MONEY_PATH_SET.has(table)) {
     throw new Error(`Refusing to delete money-path table ${table}`);
+  }
+  if (isMarketDataHistoryTable(table)) {
+    throw new Error(`Refusing to delete market-data history table ${table}`);
   }
   if (!PRUNABLE_TABLES.has(table)) {
     throw new Error(`Refusing to delete unlisted table ${table}`);
@@ -554,12 +576,21 @@ function objectBytes(name: string): { bytes: number; pages: number } | null {
 function categoryFor(name: string, tableName: string, kind: "table" | "index"): StorageCategory {
   const table = kind === "index" ? tableName : name;
   if (MONEY_PATH_SET.has(table)) return "money_path";
-  return CATEGORY_BY_TABLE[table] ?? CATEGORY_BY_TABLE[name] ?? "other";
+  // An explicit CATEGORY_BY_TABLE entry wins over the broad market-data-history
+  // fallback, so price caches stay "quote_bar_cache" and the retrieval-corpus
+  // tables stay "embeddings" instead of being flattened into one bucket.
+  const explicit = CATEGORY_BY_TABLE[table] ?? CATEGORY_BY_TABLE[name];
+  if (explicit) return explicit;
+  if (isMarketDataHistoryTable(table) || isMarketDataHistoryTable(name)) return "market_data_history";
+  return "other";
 }
 
 function retainReasonFor(name: string, tableName: string, kind: "table" | "index"): string | null {
   const table = kind === "index" ? tableName : name;
   if (MONEY_PATH_SET.has(table)) return "money-path record";
+  if (isMarketDataHistoryTable(table) || isMarketDataHistoryTable(name)) {
+    return "market-data history retention";
+  }
   return RETAIN_REASON[name] ?? RETAIN_REASON[table] ?? null;
 }
 
@@ -588,7 +619,13 @@ async function listObjectSizes(yieldFn: () => Promise<void>, skip: boolean): Pro
     await yieldFn();
   }
   sizes.sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name));
-  const pinned = new Set<string>([...PRUNABLE_TABLES, ...MONEY_PATH_TABLES, "audit_events", "llm_usage", "document_chunks"]);
+  const pinned = new Set<string>([
+    ...PRUNABLE_TABLES,
+    ...MONEY_PATH_TABLES,
+    ...MARKET_DATA_HISTORY_TABLES,
+    "audit_events",
+    "llm_usage"
+  ]);
   const picked: StorageObjectSize[] = [];
   const seen = new Set<string>();
   for (const row of sizes) {

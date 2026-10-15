@@ -62,18 +62,31 @@ describe("storage hygiene decisions", () => {
   it("refuses money-path and unlisted tables, and retention targets are disjoint", async () => {
     const hygiene = await import("../src/lib/sqlite-storage-hygiene");
     const money = new Set<string>(hygiene.MONEY_PATH_TABLES);
+    const history = new Set<string>(hygiene.MARKET_DATA_HISTORY_TABLES);
     for (const target of hygiene.RETENTION_TARGETS) {
       expect(money.has(target.table)).toBe(false);
+      expect(history.has(target.table)).toBe(false);
       expect(() => hygiene.assertPruneTableAllowed(target.table)).not.toThrow();
     }
     expect(() => hygiene.assertPruneTableAllowed("enrichment_coverage_runs")).not.toThrow();
     expect(() => hygiene.assertPruneTableAllowed("fill_events")).toThrow(/money-path/);
     expect(() => hygiene.assertPruneTableAllowed("settings")).toThrow(/money-path/);
     expect(() => hygiene.assertPruneTableAllowed("portfolio_snapshots")).toThrow(/money-path/);
-    expect(() => hygiene.assertPruneTableAllowed("history_cache_eod")).toThrow(/unlisted/);
+    expect(() => hygiene.assertPruneTableAllowed("history_cache_eod")).toThrow(/market-data history/);
     expect(hygiene.RETENTION_TARGETS.some((target) => target.table === "history_cache_eod")).toBe(false);
     expect(() => hygiene.assertPruneTableAllowed("llm_usage")).toThrow(/unlisted/);
     expect(() => hygiene.assertPruneTableAllowed("not_a_table")).toThrow(/unlisted/);
+  });
+
+  it("never prunes market-data history tables by age", async () => {
+    const hygiene = await import("../src/lib/sqlite-storage-hygiene");
+    for (const table of hygiene.MARKET_DATA_HISTORY_TABLES) {
+      expect(() => hygiene.assertPruneTableAllowed(table)).toThrow(/market-data history/);
+    }
+    expect(() => hygiene.assertPruneTableAllowed("document_chunks_fts")).toThrow(/market-data history/);
+    expect(() => hygiene.assertPruneTableAllowed("document_chunks_fts_data")).toThrow(/market-data history/);
+    expect(hygiene.isMarketDataHistoryTable("history_cache_eod")).toBe(true);
+    expect(hygiene.isMarketDataHistoryTable("strategy_runs")).toBe(false);
   });
 
   it("does not issue a full file rewrite", () => {
@@ -226,6 +239,15 @@ describe("storage hygiene against a database", () => {
     const usage = report.tables.find((row) => row.name === "llm_usage");
     expect(usage?.prunable).toBe(false);
     expect(usage?.retainReason).toContain("lifetime");
+    // Explicit CATEGORY_BY_TABLE entries must survive the market-data-history
+    // fallback, and genuinely market-data tables must not be labeled as caches.
+    const categoryOf = (name: string) => report.tables.find((row) => row.name === name)?.category;
+    expect(categoryOf("document_chunks")).toBe("embeddings");
+    expect(categoryOf("history_cache_eod")).toBe("quote_bar_cache");
+    expect(categoryOf("symbol_field_latest")).toBe("quote_bar_cache");
+    expect(categoryOf("sec_filings")).toBe("market_data_history");
+    expect(categoryOf("sec_facts")).toBe("market_data_history");
+    expect(categoryOf("historical_fundamentals")).toBe("market_data_history");
     const cached = hygiene.readCachedStorageHygieneReport();
     expect(cached?.generatedAt).toBe(report.generatedAt);
     expect(cached?.estimates.find((row) => row.id === "api-health-log")?.eligibleRows).toBe(1);
@@ -428,8 +450,10 @@ describe("storage hygiene against a database", () => {
     ).toEqual([dayBefore(2200), dayBefore(500), dayBefore(3)]);
     expect(report.estimates.some((row) => row.table === "history_cache_eod")).toBe(false);
     expect(
-      (db.prepare("SELECT symbol FROM symbol_field_latest").all() as Array<{ symbol: string }>).map((row) => row.symbol)
-    ).toEqual(["MSFT"]);
+      (db.prepare("SELECT symbol FROM symbol_field_latest ORDER BY symbol").all() as Array<{ symbol: string }>).map(
+        (row) => row.symbol
+      )
+    ).toEqual(["AAPL", "MSFT"]);
     expect(
       (db.prepare("SELECT content_hash FROM embed_stage").all() as Array<{ content_hash: string }>).map(
         (row) => row.content_hash
