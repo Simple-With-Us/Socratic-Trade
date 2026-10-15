@@ -29,20 +29,20 @@ GB-Monitor board item `d428460a` flagged PR #4325 / Renovate `eslint` v10 with r
 
 ## Verification State
 
-Commands run on branch `cursor/block-eslint-10-renovate-5081` after merging `origin/main` (2026-10-15):
+Commands run on branch `cursor/block-eslint-10-renovate-5081` after merging `origin/main` (2026-10-15, through `2075c857`):
 
 ```bash
-git merge origin/main --no-edit
+git merge origin/main -m "Merge origin/main into cursor/block-eslint-10-renovate-5081"
 npm run lint
 npx tsc --noEmit
 npm test
 npm run build
 ```
 
-- `git merge origin/main` — clean (phantom GitHub CONFLICTING cleared).
+- `git merge origin/main` — clean auto-merge (resolved GitHub `mergeable_state: dirty` after `2075c857`).
 - `npm run lint` — 0 errors (baseline warnings).
 - `npx tsc --noEmit` — ok.
-- `npm test` — 9362 passed, 23 failed (11 files; cloud env / no-keys; unrelated to eslint).
+- `npm test` — 9375 passed, 25 failed (12 files; cloud env / no-keys; unrelated to eslint).
 - `npm run build` — ok.
 
 ## Next Steps & Blockers
