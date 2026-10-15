@@ -9,6 +9,8 @@
 **Verification.**  Tip `origin/main` through `16285744` merged on branch head.  `npx tsc --noEmit` exit 0 after final merge.  Focused vitest (`protective-lane-isolation`, `scheduler-stale-exit-inflight-guard`) was 3 passed on shepherd pass.  CI run `38754317405`: `verify` + `verify-hosted` green.
 
 **Next.**  PR #4715 ready, `do-not-automerge`.  Jay squash-merges.  Do not mark ST-2570 completed until on `main`.  Kody check failed on provider model 404 (infra), not new code findings.
+**Next.**  `origin/main` through `e3ba1507` is merged on `cursor/broker-call-bounds-7ec5`.  Keep PR #4715 ready with `do-not-automerge`.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
+**Next.**  `origin/main` through `16285744` is merged.  Keep the PR ready with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
 
 ## 2026-10-15 Cursor Cloud — ops performance parked flag (ST-3875)
 
