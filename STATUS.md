@@ -9,6 +9,15 @@
 **Verification.**  `npx vitest run test/congress-share-dependency-db-health.test.ts test/local-db-fault-classification.test.ts test/connection-health-routing.test.ts test/health-transient-network-classification.test.ts` green.  `npx tsc --noEmit`, `npm run lint` 0 errors.
 
 **Next.**  PR ready for review; merge/deploy per owner.
+## 2026-10-15 Cursor Cloud — remove ST primary Infisical bridge (ST-4318)
+
+**What.**  Permanent removal of the default-off Usage Monitor credential bridge writer: module, tests, scheduler lane, `/api/keys` triggers, and active env/backlog/docs setup.  Per-user encrypted API keys and tombstone behavior unchanged.
+
+**Branch.**  `cursor/remove-st-primary-bridge-927d`
+
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  Scheduler startup tests 21/21.  `npm run build` ok.  Full `npm test`: 24 failures pre-existing in this sandbox (unchanged vs unrelated suites).
+
+**Next.**  Open ready PR, `@kody start-review`.
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
