@@ -772,10 +772,21 @@ function numOrUndef(v: unknown): number | undefined {
  * Returns null when the quote carries no fundamental values (nothing worth sending). App A saves App B's
  * FMP quota by accepting these — App B already fetched them during the scan.
  */
-export function marketQuoteToFundamentals(
-  q: Pick<MarketQuote, "symbol" | "peRatio" | "eps" | "beta" | "dividendYield" | "fiftyTwoWeekHigh" | "fiftyTwoWeekLow" | "fcfYield" | "debtToEquity" | "epsGrowth">,
-  date: string
-): CongressFundamental | null {
+type CongressFundamentalMapperInput = Pick<
+  MarketQuote,
+  | "symbol"
+  | "peRatio"
+  | "eps"
+  | "beta"
+  | "dividendYield"
+  | "fiftyTwoWeekHigh"
+  | "fiftyTwoWeekLow"
+  | "fcfYield"
+  | "debtToEquity"
+  | "epsGrowth"
+>;
+
+export function marketQuoteToFundamentals(q: CongressFundamentalMapperInput, date: string): CongressFundamental | null {
   const ticker = canonicalMarketDataSymbol(q.symbol); // renames only; drops acquired tickers
   if (!ticker) return null;
   const row: CongressFundamental = { ticker, date };
@@ -797,10 +808,21 @@ export function marketQuoteToFundamentals(
  * rating counts App B holds. Numeric price targets are included only when the opt-in FMP price-target
  * provider populated them on the quote (FMP_PRICE_TARGETS_ENABLED); otherwise omitted (App A fills null).
  */
-export function marketQuoteToAnalyst(
-  q: Pick<MarketQuote, "symbol" | "analystRating" | "analystBySource" | "targetMean" | "targetHigh" | "targetLow" | "targetMedian">,
-  date: string
-): CongressAnalyst | null {
+type CongressAnalystMapperInput = Pick<
+  MarketQuote,
+  "symbol" | "analystRating" | "targetMean" | "targetHigh" | "targetLow" | "targetMedian"
+> & {
+  analystBySource?: Record<
+    string,
+    {
+      score?: number;
+      label?: string;
+      counts?: { strongBuy?: number; buy?: number; hold?: number; sell?: number; strongSell?: number };
+    }
+  >;
+};
+
+export function marketQuoteToAnalyst(q: CongressAnalystMapperInput, date: string): CongressAnalyst | null {
   const ticker = canonicalMarketDataSymbol(q.symbol); // renames only; drops acquired tickers
   if (!ticker) return null;
   const counts = { strongBuy: 0, buy: 0, hold: 0, sell: 0, strongSell: 0 };
@@ -928,6 +950,46 @@ export function buildShortVolumeImport(): CongressShortVol[] {
   return out.slice(0, maxDailyTickers());
 }
 
+const CongressShareAnalystCountsSchema = z.object({
+  strongBuy: z.number().finite().optional(),
+  buy: z.number().finite().optional(),
+  hold: z.number().finite().optional(),
+  sell: z.number().finite().optional(),
+  strongSell: z.number().finite().optional(),
+});
+
+const CongressShareAnalystDetailSchema = z
+  .object({
+    score: z.number().finite().optional(),
+    label: z.string().optional(),
+    counts: CongressShareAnalystCountsSchema.optional(),
+  })
+  .passthrough();
+
+/** Narrow Zod gate for symbol_field_latest rows before congress-share mappers (outbound rows still hit Share*RowSchema). */
+export const FieldStoreCongressShareQuoteSchema = z
+  .object({
+    symbol: z.string().min(1),
+    peRatio: z.number().finite().optional(),
+    eps: z.number().finite().optional(),
+    beta: z.number().finite().optional(),
+    dividendYield: z.number().finite().optional(),
+    fiftyTwoWeekHigh: z.number().finite().optional(),
+    fiftyTwoWeekLow: z.number().finite().optional(),
+    fcfYield: z.number().finite().optional(),
+    debtToEquity: z.number().finite().optional(),
+    epsGrowth: z.number().finite().optional(),
+    analystRating: z.string().optional(),
+    analystBySource: z.record(z.string(), CongressShareAnalystDetailSchema).optional(),
+    targetMean: z.number().finite().optional(),
+    targetHigh: z.number().finite().optional(),
+    targetLow: z.number().finite().optional(),
+    targetMedian: z.number().finite().optional(),
+  })
+  .passthrough();
+
+type FieldStoreCongressShareQuote = z.infer<typeof FieldStoreCongressShareQuoteSchema>;
+
 /**
  * Build fundamentals + analyst rows for App A from the durable `symbol_field_latest` store.
  * Used by the scheduled nightly batch so CT's fundamentals_eod / analyst_consensus streams stay
@@ -944,9 +1006,12 @@ export function buildFundamentalsAndAnalystImport(
   const fundamentals: CongressFundamental[] = [];
   const analyst: CongressAnalyst[] = [];
   for (const quote of Object.values(summaries)) {
-    const f = marketQuoteToFundamentals(quote as unknown as MarketQuote, date);
+    const parsed = FieldStoreCongressShareQuoteSchema.safeParse(quote);
+    if (!parsed.success) continue;
+    const q: FieldStoreCongressShareQuote = parsed.data;
+    const f = marketQuoteToFundamentals(q, date);
     if (f) fundamentals.push(f);
-    const a = marketQuoteToAnalyst(quote as unknown as MarketQuote, date);
+    const a = marketQuoteToAnalyst(q, date);
     if (a) analyst.push(a);
   }
   return { fundamentals, analyst };
@@ -1943,9 +2008,11 @@ async function runCongressDailyShareUnlocked(
   for (const rows of rowChunks(refs, MAX_REFS_PER_POST)) payloads.push({ refs: rows });
   for (const rows of rowChunks(insider)) payloads.push({ insider: rows });
   for (const rows of rowChunks(shortVolume)) payloads.push({ shortVolume: rows });
+  // Prices before fundamentals/analyst: the loop shares one upstream breaker; a 5xx streak on
+  // fundamentals/analyst must not skip price chunks or block the daily marker.
+  for (const prices of chunkPrices(priceEntries)) payloads.push({ prices });
   for (const rows of rowChunks(fundamentalsImport)) payloads.push({ fundamentals: rows });
   for (const rows of rowChunks(analystImport)) payloads.push({ analyst: rows });
-  for (const prices of chunkPrices(priceEntries)) payloads.push({ prices });
 
   const responses: unknown[] = [];
   let posts = 0;

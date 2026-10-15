@@ -420,7 +420,7 @@ export function recordsFromEnrichmentMap(
     "fieldObservations",
     "providerFailures",
     "fieldDates",
-    "analystBySource",
+    // analystBySource is persisted as JSON so nightly congress-share can rebuild blended counts.
     "shortPercentOfFloatSecondary",
     "shortInterestDisagreement",
     // Raw PIT revision facts (see fundamental_revisions / recordFundamentalRevision) — persisted

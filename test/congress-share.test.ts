@@ -1211,6 +1211,34 @@ describe("buildFundamentalsAndAnalystImport", () => {
     expect(analyst).toHaveLength(1);
     expect(analyst[0]).toMatchObject({ ticker: "AAPL", rating: "Buy", strongBuy: 2 });
   });
+
+  it("includes blended analyst counts when analystBySource is in the field store", async () => {
+    process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "on";
+    const { upsertSymbolFieldLatest, encodeFieldValue } = await import("../src/lib/db-fundamentals");
+    const ts = new Date().toISOString();
+    upsertSymbolFieldLatest([
+      {
+        symbol: "AAPL",
+        field: "analystBySource",
+        valueJson: encodeFieldValue({
+          fmp: { counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } },
+        })!,
+        source: "fmp",
+        asOf: ts,
+        fetchedAt: ts,
+      },
+      {
+        symbol: "AAPL",
+        field: "analystRating",
+        valueJson: JSON.stringify("Buy"),
+        source: "fmp",
+        asOf: ts,
+        fetchedAt: ts,
+      },
+    ]);
+    const { analyst } = buildFundamentalsAndAnalystImport(["AAPL"], "2026-10-15");
+    expect(analyst[0]).toMatchObject({ ticker: "AAPL", rating: "Buy", strongBuy: 2, buy: 1 });
+  });
 });
 
 describe("runCongressDailyShare — insider + short-volume on the nightly batch", () => {
