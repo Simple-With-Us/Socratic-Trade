@@ -8,7 +8,7 @@
 
 **Linear.**  ST-8 claimed by CURSOR (idle CLUTCH claim since Sep 15).  Agent: https://cursor.com/agents/bc-8c14e8f0-27ae-5255-ab13-ac52f6cfab92
 
-**Verification.**  `npm run lint` exit 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exit 0.  `npm test` 9380 passed, 51 skipped, 25 failed, all outside this diff (sandbox LLM and notify credentials, provider fixtures, cpuprofile Node loader, server-metrics host flag).  `npm run build` exit 0.  Merged `origin/main` (`df7e6d10`) with a merge commit.  check-pin was red on this PR and on every other PR in the 07:32-07:55Z burst because the script preferred `GH_PACKAGES_TOKEN` (user 12656028) for the public Congress.Trade repo and reported the rate limit as a missing token.  The Actions `GITHUB_TOKEN` is now first.
+**Verification.**  After merging `origin/main` (`df7e6d10`) and the check-pin token-order fix: `npm run lint` exit 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exit 0.  `npx vitest run test/shared-package-pin-check.test.ts` 6 passed.  `node scripts/check-shared-package-pin.mjs` with `GH_PACKAGES_TOKEN` unset printed `OK` for `@2.7.1`.  `npm test` 9366 passed, 51 skipped, 26 failed, all outside this diff (sandbox LLM and notify credentials, provider fixtures, cpuprofile Node loader, server-metrics host flag).  `npm run build` exit 0.  check-pin was red on this PR and on every other PR in the 07:32-07:55Z burst because the script preferred `GH_PACKAGES_TOKEN` (user 12656028) for the public Congress.Trade repo and reported the rate limit as a missing token.  The Actions `GITHUB_TOKEN` is now first.
 
 **Next.**  Jay squash-merges.  Do not enable auto-merge.
 

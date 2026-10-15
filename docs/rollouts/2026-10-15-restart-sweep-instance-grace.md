@@ -45,6 +45,15 @@ Run on this branch after the sweep change.
 - `npm test` — 9380 passed, 51 skipped, 25 failed.  The 25 are outside this diff: LLM and notify tests that see a sandbox `OPENROUTER` / Pushover credential, Twelve Data and Alpha Vantage provider fixtures, `cpuprofile-summary` failing on Node's `.ts` loader, and `server-metrics` `usesLocalHost`.  None are in the sweep files.
 - `npm run build` — exit 0.  Compiled with the existing warnings, 43 static pages.
 
+Re-run after the `origin/main` merge (`df7e6d10`) and the check-pin token-order fix.
+
+- `npm run lint` — exit 0.  854 problems (0 errors, 854 warnings).
+- `npx tsc --noEmit` — exit 0.
+- `npx vitest run test/shared-package-pin-check.test.ts` — 6 passed.
+- `env -u GH_PACKAGES_TOKEN node scripts/check-shared-package-pin.mjs` — `OK: ST/UM/CT share @jaywedgeworth22/congress-trading-shared@2.7.1`.
+- `npm test` — 9366 passed, 51 skipped, 26 failed.  The 26 are outside this diff: LLM and notify tests that see a sandbox credential, Twelve Data and Alpha Vantage provider fixtures, `cpuprofile-summary` on Node's `.ts` loader, data-catalog completeness, and `server-metrics` `usesLocalHost`.  None are in the sweep files or `test/shared-package-pin-check.test.ts`.
+- `npm run build` — exit 0.
+
 ## Check-pin (shared failure on every PR in the burst)
 
 `check-pin` on this PR, and on the other open PRs between 07:32Z and 07:55Z, failed the same way: `API rate limit exceeded for user ID 12656028` while reading `jaywedgeworth22/Congress.Trade` `VENDOR-PROVENANCE.md`, then `::error::cannot read private Congress.Trade vendor provenance; set GH_PACKAGES_TOKEN`.  ST and UM were already both `v2.7.1` at lock SHA `5084afb3ffb269e7e28e0c30c880cab7d93409e7`, which matches the public provenance file.  Congress.Trade is public.  The script preferred `GH_PACKAGES_TOKEN`, a shared user PAT, over the Actions `GITHUB_TOKEN`.  That PAT is user 12656028.  When the fleet burns its hourly budget, every PR that runs this check goes red, including money-path PRs that do not touch the pin.  The three same-token retries do not clear a primary rate limit.  The script now tries `GITHUB_TOKEN`, then `GH_TOKEN` if it differs, then the PAT.  A rate-limit response switches credentials immediately and is reported as a rate limit.
