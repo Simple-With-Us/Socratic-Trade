@@ -11,16 +11,11 @@
  * This script fails (exit 1) when:
  *   - this repo has no pin
  *   - Usage-Monitor has no pin or a different tag/version
- *   - Congress.Trade cannot be read
+ *   - Congress.Trade cannot be read (private; needs GH_PACKAGES_TOKEN)
  *   - every token is rate limited before the vendor tree can be read
  *   - CT provenance / vendor version disagrees
  *   - CT app/package.json reintroduces the npm dependency
  *   - provenance lists a commit that does not match a consumer lock SHA
- *
- * Congress.Trade is public. Read it with the Actions token (GITHUB_TOKEN)
- * first. GH_PACKAGES_TOKEN is only the fallback: that secret is the owner's
- * user token, and preferring it makes check-pin fail on every PR while that
- * shared budget is spent.
  *
  * Intentionally NOT a required merge check yet -- coordinated three-repo
  * bumps still need a red flag without hard-blocking the first PR of the pair.
@@ -150,7 +145,7 @@ export function comparePins(input) {
   }
   if (input.ctUnreadable) {
     problems.push(
-      "cannot read Congress.Trade vendor provenance; set GH_PACKAGES_TOKEN (repo secret, read access to jaywedgeworth22/Congress.Trade)"
+      "cannot read private Congress.Trade vendor provenance; set GH_PACKAGES_TOKEN (repo secret, read access to jaywedgeworth22/Congress.Trade)"
     );
     return { problems, stV, umV, ctV: "" };
   }
