@@ -40,8 +40,8 @@ Files:
 
 - The two Kody visual-coverage threads were already answered in a prior round (asked rather than guessed;
   the cited `visual-tests/` directory does not exist in this repo — coverage lives in `test/e2e/visual.spec.ts`).
-- Two new threads, one finding: a hardcoded `PLAYWRIGHT_AUTH_SECRET` fallback string (38 chars, punctuation
-  suffix) duplicated at `playwright.config.ts:19` and `test/e2e/playwright-session.ts:6` — **not** quoted in
+- Two new threads, one finding: a hardcoded `PLAYWRIGHT_AUTH_SECRET` fallback string (value and length
+  deliberately not recorded) duplicated at `playwright.config.ts:19` and `test/e2e/playwright-session.ts:6` — **not** quoted in
   this doc (rule 35); the literal was removed from the tree in `636ef4d0` / follow-ups.
 - Round cap: 0 prior `[codex-autofix]` commits on this branch (the 9 `[codex-autofix]` commits visible in
   `git log` belong to `main`'s history, not this branch).
@@ -98,6 +98,26 @@ in `STATUS.md` for PR #4716.  The PR's own suites are green:
 
 Note: those failure messages print credential-shaped values into test output.  Treat any key seen there as
 compromised and rotate it; do not paste it into a PR or thread.
+
+## Round 2 (2026-10-15) — codex-autofix
+
+All 7 round-1 review threads were already resolved, and a re-read of the tree confirmed each finding is
+actually addressed rather than merely marked done: the `PLAYWRIGHT_AUTH_SECRET` and `ENCRYPTION_KEY`
+literals are gone from the source (`playwright-admin-auth.ts` reads env and hard-throws under `CI`, with a
+per-worktree `0600` file fallback locally; `playwrightThrowawayEncryptionKey()` derives via sha256), and the
+enrichment-coverage footnote has real screenshot coverage in
+`test/e2e/admin-enrichment-coverage-visual.spec.ts` under the separate admin harness.
+
+**The one new item** was a low-severity Kody note that the redacted-fallback description recorded a
+character count for the literal, and that the count disagreed with the string's actual length.  Fixed by
+**removing the count rather than correcting it** — Kody's own primary recommendation.  A wrong length and a
+right length are both metadata about a secret, so publishing an accurate one buys nothing.  Applied to both
+this note and `STATUS.md`.
+
+Also noted, not changed: `playwright.config.ts` carries
+`testIgnore: "**/admin-enrichment-coverage-visual.spec.ts"`.  That is correct, not a coverage gap — the spec
+is matched by `testMatch` under `playwright.admin.config.ts`, which arms the admin session the smoke harness
+deliberately does not.  Removing the `testIgnore` would run the spec unauthenticated and fail.
 
 ## Next Steps & Blockers
 
