@@ -9,6 +9,13 @@
 **Verification.**  `npm run lint` exited 0 (0 errors, 848 warnings).  `npx tsc --noEmit` exited 0.  Focused vitest (`protective-lane-isolation`, `scheduler-stale-exit-inflight-guard`, `broker-io-deadlines`, `scheduler-pending-fill-inflight-guard`, `scheduler-halt-cause-tick`) was 16 passed.  `test/robinhood-orders-error-throws.test.ts` was 4 passed after the since-window fixture fix.  Full `npm test` was 9374 passed, 51 skipped, and 26 failed.  One failure was the Robinhood populated-list fixture (a July fill, dropped by the 24h terminal window) and is fixed.  The other 25 are outside this diff (LLM key routing, notify credentials, server-metrics host detection, cpuprofile summary, data-provider cache).  `npm run build` exited 0.
 
 **Next.**  `origin/main` (`3c74cd81`) merged cleanly.  Keep the PR ready with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
+## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
+
+**What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.
+
+**Branch.**  `cursor/ct-push-receipt-2155` in Socratic-Trade and Congress.Trade.  Linear ST-3846.
+
+**Next.**  Both pull requests ready for review.  Do not mark the issue completed until both are merged.
 
 ## 2026-10-15 Cursor Cloud — remove ST primary Infisical bridge (ST-4318)
 
