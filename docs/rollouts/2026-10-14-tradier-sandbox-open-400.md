@@ -121,11 +121,11 @@ The unverified-lookup message deliberately omits the broker sentence and any HTT
 
 The lookup sits after the backoff, not before it.  A tag that appears during the wait blocks the next POST.  A clean miss, including a schema-invalid listing, still retries.  That miss is the same contract as the earlier rounds: a garbled envelope must not abort the wedge retry.  An HTTP failure on the lookup does not POST again.  Tradier's tag is a label, not a broker idempotency key, so a miss that is actually a late index can still duplicate inside the three-attempt budget.  The final miss goes through reconcile (one more second, full order list) before `not_placed`.
 
-`origin/main` (`1588bae8`) merged clean.  No migration renumber.
+`origin/main` merged clean twice (`1588bae8`, then `e80386d7` / #4665).  No migration renumber.  `npx tsc --noEmit` was ok again after the second merge.
 
 ### Verification State
 
-`npm run lint` ok (0 errors, 866 grandfathered warnings).  `npx tsc --noEmit` ok.  Targeted vitest after the post-backoff lookup: 132 passed in `test/tradier.test.ts`, `test/placement-outcome.test.ts`, `test/placement-reconcile.test.ts`, and `test/broker-health-auto-pause.test.ts`.  Full `npm test`: 9349 passed, 51 skipped, 1 failed.  The failure is `test/egress-guard.test.ts` because this sandbox rejects the discord.com lookup, outside this diff.  `npm run build` ok.
+`npm run lint` ok (0 errors, 866 grandfathered warnings).  `npx tsc --noEmit` ok, including again after the `e80386d7` merge.  Targeted vitest after the post-backoff lookup: 132 passed in `test/tradier.test.ts`, `test/placement-outcome.test.ts`, `test/placement-reconcile.test.ts`, and `test/broker-health-auto-pause.test.ts`.  Full `npm test`: 9349 passed, 51 skipped, 1 failed.  The failure is `test/egress-guard.test.ts` because this sandbox rejects the discord.com lookup, outside this diff.  `npm run build` ok.
 
 ### Next Steps & Blockers
 
