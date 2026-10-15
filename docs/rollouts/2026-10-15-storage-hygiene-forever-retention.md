@@ -31,14 +31,19 @@ Jay decision (2026-10-15 03:13 CT): Socratic Trade keeps strategy runs and every
 ```bash
 npm run lint
 npx tsc --noEmit
-npx vitest run test/sqlite-storage-hygiene.test.ts
 npm test
 npm run build
 ```
 
+**Regression targets (optional focused runs):**
+
+```bash
+npx vitest run test/sqlite-storage-hygiene.test.ts test/forever-retention-no-age-delete.test.ts test/health-lane-cap.test.ts
+```
+
 - `npm run lint` — 0 errors (854 grandfathered warnings)
 - `npx tsc --noEmit` — ok
-- `npx vitest run test/sqlite-storage-hygiene.test.ts` — 17/17 passed
+- `npx vitest run test/sqlite-storage-hygiene.test.ts` — 18/18 passed (focused)
 - `npm test` — 9376 passed, 51 skipped, 24 failed (pre-existing; e.g. `test/server-metrics.test.ts`, unrelated to hygiene)
 - `npm run build` — ok
 
