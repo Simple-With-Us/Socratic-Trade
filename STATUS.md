@@ -7,6 +7,15 @@
 **Branch.**  `cursor/ct-push-receipt-2155` in Socratic-Trade and Congress.Trade.  Linear ST-3846.
 
 **Next.**  Both pull requests ready for review.  Do not mark the issue completed until both are merged.
+## 2026-10-15 Cursor Cloud — remove ST primary Infisical bridge (ST-4318)
+
+**What.**  Permanent removal of the default-off Usage Monitor credential bridge writer: module, tests, scheduler lane, `/api/keys` triggers, and active env/backlog/docs setup.  Per-user encrypted API keys and tombstone behavior unchanged.
+
+**Branch.**  `cursor/remove-st-primary-bridge-927d`
+
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  Scheduler startup tests 21/21.  `npm run build` ok.  Full `npm test`: 24 failures pre-existing in this sandbox (unchanged vs unrelated suites).
+
+**Next.**  Open ready PR, `@kody start-review`.
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
