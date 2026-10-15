@@ -8,6 +8,15 @@ export const PLAYWRIGHT_AUTH_SECRET =
 export const PLAYWRIGHT_AUTH_EMAIL =
   process.env.PLAYWRIGHT_AUTH_EMAIL || "smoke-test@agentic.local";
 
+/** Same origin as playwright.config.ts, including a PLAYWRIGHT_PORT override. */
+export function playwrightBaseURL(
+  baseURL: string | undefined = process.env.PLAYWRIGHT_BASE_URL,
+  port: string | undefined = process.env.PLAYWRIGHT_PORT
+): string {
+  if (baseURL) return baseURL;
+  return `http://127.0.0.1:${Number(port || 4201)}`;
+}
+
 /** Auth.js session so middleware + admin layout see a verified primary operator. */
 export async function installPlaywrightSession(context: BrowserContext): Promise<void> {
   const jwt = await encodeSessionToken({
@@ -16,7 +25,7 @@ export async function installPlaywrightSession(context: BrowserContext): Promise
     salt: "authjs.session-token",
     maxAge: 60 * 60
   });
-  const baseURL = process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:4201";
+  const baseURL = playwrightBaseURL();
   await context.addCookies([
     {
       name: "authjs.session-token",

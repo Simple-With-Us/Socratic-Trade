@@ -60,6 +60,10 @@ Re-run after the `origin/main` merge (`df7e6d10`) and the check-pin token-order 
 
 `origin/main` (`df7e6d10`, #4703 / #4708 / #4702) is merged with a merge commit.  Migration 95 stayed the only new migration.  No review threads were open.
 
+## Review threads on the shepherd merges
+
+A later merge of the Quiver coverage branch added `installPlaywrightSession`.  Its cookie origin was hardcoded to port 4201 while `playwright.config.ts` honors `PLAYWRIGHT_PORT`.  The cookie now uses the same derivation.  Two Kody notes asked for a `visual-tests/` screenshot of the retired-lanes footnote.  That assertion is already in `test/e2e/visual.spec.ts`, which is this repo's Playwright visual suite.  The Auth.js smoke secret fallback stays: the webServer and the test workers have to share one value when `PLAYWRIGHT_AUTH_SECRET` is unset, and a per-process random secret would sign a cookie the server rejects.  Those three threads stay open with a defer reply.
+
 ## Next Steps & Blockers
 
 PR #4701 stays ready for review with `do-not-automerge`.  Auto-merge stays off.  Jay squash-merges.  Resolve ST-8 only after the fix has shipped.
