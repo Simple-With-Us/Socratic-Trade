@@ -66,7 +66,7 @@ npx vitest run test/market-read-routes.test.ts test/congress-share.test.ts test/
 
 Hosted `verify` on `970b4909` failed in `test/event-loop-stall-hot-path.test.ts`: the unindexed scan stopped at 116ms and the indexed prune took 66ms, so `pruneMs * 4 < scanMs` was 264 < 116.  Growing the scan to 400ms then timed out the 60s test on `ab407fa4`.  The scan stops at 100ms again.  The assertion is now that the indexed prune is under 100ms and faster than that scan.
 
-`origin/main` moved again to `2075c857` (ST-4531) and GitHub marked the PR conflicting.  The second merge auto-merged `STATUS.md`.  The blank line before the ST-4531 heading was restored.
+`origin/main` moved again to `2075c857` (ST-4531) and GitHub marked the PR conflicting.  The second merge auto-merged `STATUS.md`.  The blank line before the ST-4531 heading was restored.  Main then moved to `e3ba1507` (hosted TestFlight ASC credentials).  That merge also auto-merged `STATUS.md` and `PLAN.md`.
 
 ## 6. Zero-Code Findings
 
