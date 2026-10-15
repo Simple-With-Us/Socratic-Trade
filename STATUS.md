@@ -6,7 +6,19 @@
 
 **Branch.**  `cursor/ios-ci-hygiene-512444e3-56e3`
 
-**Verification.**  See `docs/rollouts/2026-10-15-ios-ci-hygiene-512444e3.md`.
+**Verification.**  See `docs/rollouts/2026-10-15-ios-ci-hygiene-512444e3.md`.  `npm run lint`,
+`npx tsc --noEmit`, and `npm run build` clean; the new node test 6/6.  `npm test` reports 12
+assertion failures across 4 LLM-routing suites, reproduced identically on a clean
+`git stash` baseline — caused by provider keys present in this sandbox's env, not by this PR.
+
+**Review follow-up (codex-autofix).**  Addressed three Kody review threads: added a
+per-variable fallback regression test (the behavior that matters when Actions exports
+some but not all `ASC_*` vars), added `t.after` temp-dir cleanup so a throwing assertion
+no longer leaks `/tmp/asc-cred-*` on the hosted runner, and paired each command in the
+rollout verification block with its real outcome.  A fourth thread ("Rule 33": drop
+`~/.secrets/appstore-connect.env` as a credential source entirely) was **not** applied —
+that path pre-dates this PR and `ship-testflight.sh` still hard-depends on it; defer
+reply on the review thread (not resolved).  The unread-file branch (EISDIR) is now tested.
 
 **Linear.**  **ST-2916** (`512444e3-f147-4bca-9c03-a51e53b109cd`) — claimed **CURSOR**, status **addressed**, PR #4716 linked in issue comment (Agent-Sync).
 
