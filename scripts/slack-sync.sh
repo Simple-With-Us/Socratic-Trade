@@ -389,22 +389,14 @@ do_thread() {
 do_post() {
   _text="${1:-}"
   if [ -z "$_text" ]; then
-    note "usage: scripts/slack-sync.sh post <text...>"
+    note "usage: scripts/slack-sync.sh post <text...>  (retired: delegates to agent-sync-fleet-post.sh)"
     exit 1
   fi
-  [ -n "$AGENT_NAME" ] && _text="[$AGENT_NAME] $_text"
-  [ -n "$TOPIC" ] && _text="[$TOPIC] $_text"
-  init_auth
-  BODY_FILE="$(mktemp "${TMPDIR:-/tmp}/slack-sync-body.XXXXXX" 2>/dev/null)" \
-    || soft_fail "could not create temp file for message body"
-  build_message_json "$CHANNEL_ID" "$_text" "" > "$BODY_FILE"
-  _resp="$(slack_post_json "chat.postMessage" "$BODY_FILE")" \
-    || { note "network error contacting Slack (chat.postMessage)"; exit 1; }
-  if ! resp_ok "$_resp"; then
-    note "Slack API error (chat.postMessage): $(resp_error "$_resp")"
-    exit 1
-  fi
-  echo "[slack-sync] ok: posted to #$CHANNEL_ID"
+  _dir="$(cd "$(dirname "$0")" && pwd)"
+  AGENT_SYNC_SEAT="${AGENT_SYNC_SEAT:-${SLACK_AGENT_NAME:-CURSOR}}" \
+  AGENT_SYNC_REPO="${AGENT_SYNC_REPO:-${SLACK_TOPIC:-Socratic-Trade}}" \
+  AGENT_SYNC_TOPIC="${AGENT_SYNC_TOPIC:-fleet}" \
+    bash "${_dir}/agent-sync-fleet-post.sh" "$_text"
 }
 
 do_reply() {
@@ -445,13 +437,17 @@ case "$CMD" in
     usage
     exit 0
     ;;
+  post)
+    do_post "$*"
+    exit 0
+    ;;
 esac
 
 # No token -> silent no-op, exit 0 for EVERY subcommand, so this is safe to wire
 # into a SessionStart hook that runs in all sessions and repos. The note goes to
 # stderr so the `hook` path injects NOTHING into session context when unconfigured.
 if [ -z "${SLACK_BOT_TOKEN:-}" ]; then
-  note "SLACK_BOT_TOKEN not set - skipping Slack sync (no-op)."
+  note "SLACK_BOT_TOKEN not set - Slack read/thread retired; use agent-sync (Zulip)."
   exit 0
 fi
 
@@ -460,7 +456,6 @@ case "$CMD" in
   test)   do_test ;;
   read)   do_read "${1:-}" ;;
   thread) do_thread "${1:-}" ;;
-  post)   do_post "$*" ;;
   reply)
     _rts="${1:-}"
     [ "$#" -gt 0 ] && shift || true
