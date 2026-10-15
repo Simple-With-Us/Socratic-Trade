@@ -61,7 +61,7 @@ Swift compile and XCTest are not run on this Linux seat.  Hosted `.github/workfl
 
 ## Next Steps & Blockers
 
-- Wait for `ios-build` on the PR.  Do not arm auto-merge.  The PR carries `do-not-automerge`.
+- Shepherd 2026-10-15: merged `origin/main` at `16285744` when the PR went DIRTY again; diff vs `main` is still the ten iOS/handoff files only.  Wait for CI `verify` + `verify-ios` on the new head.  Do not arm auto-merge.  The PR carries `do-not-automerge`.
 - Mark ST-2578 completed only after merge, and deployed only after the live binary includes this commit.
 
 ## Zero-Code Findings
