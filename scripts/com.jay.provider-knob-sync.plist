@@ -44,12 +44,16 @@
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>SLACK_TOPIC</key>
+    <key>AGENT_SYNC_REPO</key>
     <string>Socratic-Trade</string>
-    <!-- Add Zulip bot credentials (ZULIP_EMAIL, ZULIP_API_KEY, ZULIP_SITE) to enable
-         the #agent-sync post-on-change via agent-sync-fleet-post.sh:
+    <!-- Add Zulip bot credentials to enable the #agent-sync post-on-change via
+         agent-sync-fleet-post.sh (all three required):
     <key>ZULIP_EMAIL</key>
     <string>agent-sync-bot@example.zulipchat.com</string>
+    <key>ZULIP_API_KEY</key>
+    <string>your-bot-api-key</string>
+    <key>ZULIP_SITE</key>
+    <string>https://your-org.zulipchat.com</string>
     -->
   </dict>
 
