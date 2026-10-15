@@ -7,6 +7,7 @@
 **Branch.**  `cursor/stale-eod-wire-ed52`.  Linear ST-3845.  Claim moved from GROK (2026-09-30, no implementation) under the sweep rule.
 
 **Next.**  Ready for review.  Deployer ships.  Do not mark completed until merge.
+
 ## 2026-10-15 Cursor Cloud — ST-4531 retire Slack callers
 
 **What.**  Remaining ST Slack posts (deploy-freshness notify, provider-knob sync, `slack-sync.sh post`, Codex coordination helper) now use Zulip via `agent-sync-fleet-post.sh` / `agent-sync`.  Deploy-freshness workflow drops `SLACK_BOT_TOKEN` and loads the ST ops Zulip triple from Infisical prod at runtime (`github-actions-infisical-zulip-ops.sh` via `infisical-secrets-safe.sh get`).  Kody blockers: Rule 49 safe Infisical path, Rule 26 rollout verify outcomes, plist template cleanup.

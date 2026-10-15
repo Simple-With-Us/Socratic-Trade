@@ -64,7 +64,9 @@ npx vitest run test/market-read-routes.test.ts test/congress-share.test.ts test/
 
 `tsc --noEmit` clean.  Those seven files: 186 passed.  `npm run build` exit 0.
 
-Hosted `verify` on `970b4909` failed in `test/event-loop-stall-hot-path.test.ts`: the unindexed scan stopped at 116ms and the indexed prune took 66ms, so `pruneMs * 4 < scanMs` was 264 < 116.  The scan now grows until it clears 400ms, four times the 100ms prune budget.
+Hosted `verify` on `970b4909` failed in `test/event-loop-stall-hot-path.test.ts`: the unindexed scan stopped at 116ms and the indexed prune took 66ms, so `pruneMs * 4 < scanMs` was 264 < 116.  The scan now grows until it clears 400ms, four times the 100ms prune budget.  That file passed locally, 3 tests in 52s.
+
+`origin/main` moved again to `2075c857` (ST-4531) and GitHub marked the PR conflicting.  The second merge auto-merged `STATUS.md`.  The blank line before the ST-4531 heading was restored.
 
 ## 6. Zero-Code Findings
 
