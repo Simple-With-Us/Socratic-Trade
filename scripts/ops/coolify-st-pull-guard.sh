@@ -8,20 +8,34 @@
 # copy in any registry. Docker resolves a bare name with no slash as
 # `docker.io/library/<uuid>`, which cannot exist.
 #
-# Coolify's ApplicationDeploymentJob::pull_docker_compose_images() runs
-# `docker compose ... pull --ignore-buildable` UNCONDITIONALLY, and it runs BEFORE
-# `stop_running_container(force: true)`. `--ignore-buildable` only skips services that
-# have a `build:` key; the generated ST service has `image:` and NO `build:` key, so
-# Compose tries to pull `docker.io/library/{uuid}` and fails. The stop that follows is
-# not conditional on the pull succeeding, so production was already down by the time the
-# registry said no — a 5.3 minute P0 (Traefik 503 "no available server").
+# WHERE THE PULL ACTUALLY CAME FROM — read this before changing anything:
+#
+#   ST runs deploy_dockerfile_buildpack() (line 950), which does NOT call
+#   pull_docker_compose_images().  That method is called only from
+#   deploy_docker_compose_buildpack() (line 636) — the `dockercompose` pack that
+#   congress-trade uses.  The 2026-09-25 registry pull therefore came from
+#   `docker compose up` ITSELF: its default pull_policy is `missing`, so an absent local
+#   tag sends Compose to a registry, and because Coolify stops the old container first,
+#   production is already down when the registry answers no (Traefik 503 "no available
+#   server").  That is the 5.3 minute P0.
+#
+# So the two halves do different work, and only ONE of them matters for ST:
+#
+#   PATCH 2  generate_compose_file() emits `pull_policy: never` for a local-only tag.
+#            THIS IS THE FIX THAT PROTECTS ST.  Verified live: ST's generated compose
+#            carries `pull_policy: never`, and deploy #4587 completed under it with zero
+#            pull/authorization errors.
+#
+#   PATCH 1  pull_docker_compose_images() returns early for the Dockerfile pack.
+#            Covers the `dockercompose` pack only and is a NO-OP for ST/UM, which never
+#            reach it.  Kept as defence in depth for a future dockercompose app that
+#            references a local-only tag.
 #
 # The guard applies two minimal patches to the vendor file:
 #
 #   PATCH 1  pull_docker_compose_images() returns early for the Dockerfile build pack
 #            when no registry image is configured. Skipping is strictly safe: the pull
-#            it skips either pulls nothing (image already local) or fails. congress-trade
-#            uses the `dockercompose` pack and is NOT affected.
+#            it skips either pulls nothing (image already local) or fails.
 #
 #   PATCH 2  The generated compose gains `pull_policy: never` for any image tag that has
 #            no `/`, so Compose can never attempt a registry call for a local-only tag.
@@ -206,9 +220,9 @@ cmd_verify() {
   docker exec "$CONTAINER" sh -c 'ps -eo args | grep -c "[h]orizon:work"' 2>/dev/null \
     | awk '{print ($1>0 ? "  horizon workers running: "$1 : "  WARNING: no horizon worker") }'
 
-  echo "guard condition per application (from the Coolify DB):"
+  echo "per application (PATCH 2 = pull_policy: never is what protects ST):"
   docker exec "$DB_CONTAINER" psql -U coolify -d coolify -tAF'|' -c \
-    "SELECT id, name, build_pack, CASE WHEN build_pack='dockerfile' AND COALESCE(docker_registry_image_name,'')='' THEN 'GUARD FIRES (pull skipped)' ELSE 'pull proceeds (unchanged)' END FROM applications ORDER BY id;" 2>/dev/null \
+    "SELECT id, name, build_pack, CASE WHEN build_pack='dockerfile' AND COALESCE(docker_registry_image_name,'')='' THEN 'pull_policy:never set (PATCH 2)' ELSE 'unchanged (PATCH 1 guards this pack)' END FROM applications ORDER BY id;" 2>/dev/null \
     | sed 's/^/  /'
 
   echo "worker age (the guard is dormant until the worker is newer than the last apply):"

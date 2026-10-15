@@ -16,9 +16,9 @@ removes it.
 
 ## 2. Changes Made
 
-### Root cause, located to the exact line
+### Root cause, located to the exact mechanism
 
-`ApplicationDeploymentJob::deploy_dockerfile_buildpack()` does, in order:
+`pull_docker_compose_images()` is called at line 811 of `ApplicationDeploymentJob`:
 
 ```php
 $this->save_runtime_environment_variables();
@@ -26,40 +26,54 @@ $this->pull_docker_compose_images();            // <-- unconditional registry pu
 $this->stop_running_container(force: true);      // <-- NOT conditional on the pull
 ```
 
-`pull_docker_compose_images()` runs:
+**Correction made 2026-10-15 after further investigation:** that call sits inside
+`deploy_docker_compose_buildpack()` (line 636).  **ST does not go through that function.**
+ST's build pack is `dockerfile`, so it runs `deploy_dockerfile_buildpack()` (line 950), which
+never calls `pull_docker_compose_images()` at all.  Confirmed three ways: the method has exactly
+one call site; ST deploys in the log show no pull stage whatsoever between "Building docker image
+completed" and "Removing old containers"; and congress-trade (build pack `dockercompose`) is the
+only recent deploy that logs the pull line.
+
+So the 2026-09-25 registry pull did **not** come from that pre-flight step.  It came from
+**`docker compose up` itself**.  Compose's default `pull_policy` is `missing`: when the built tag
+is not present locally, `up` reaches for a registry, resolves the bare `{uuid}:{sha}` as
+`docker.io/library/<uuid>`, and fails — after Coolify has already stopped the old container.
+That is the 5.3-minute P0.
+
+This matters for which half of the patch does the work:
+
+- **PATCH 2 — `pull_policy: never` on bare local-only tags — is the fix that protects ST.**  It is
+  emitted by `generate_compose_file()`, which every build pack uses.
+- **PATCH 1 — skipping `pull_docker_compose_images()` — does not affect ST.**  It only covers the
+  `dockercompose`-pack path and stands down there for local-only tags anyway.  It is harmless and
+  kept as defence in depth for any future `dockercompose` app with a local-only tag.
+
+Evidence that patch 2 is live on the real ST compose:
 
 ```
-docker compose --env-file .env --project-name <uuid> \
-  --project-directory <workdir> -f <workdir>/docker-compose.yaml pull --ignore-buildable
+$ grep -nE "image:|pull_policy" /data/coolify/applications/d83b1aykr03uwr32yhgzaiay/docker-compose.yaml
+3:        image: 'd83b1aykr03uwr32yhgzaiay:df7e6d108965be79dfcb93b42ad37732ef78f560'
+4:        pull_policy: never
 ```
 
-`--ignore-buildable` only skips services that carry a `build:` key.  For the Dockerfile
-build pack the generated service has `image:` and **no** `build:` key, so Compose treats
-`{application_uuid}:{commit}` as a registry image.  That name has no registry prefix and
-no `/`, so Docker resolves it as `docker.io/library/<uuid>`, which does not exist:
+That tag is deploy **#4587**'s commit, and the compose was regenerated at 09:55:14Z — by the
+patched code — one second before #4587 finished at 09:55:15Z.  #4587 completed with **zero**
+`pull access denied` / `insufficient_scope` / `unauthorized` lines in its log.  That is the
+end-to-end proof: a real ST deploy, generated under the guard, with no registry call attempted.
 
-```
-$ docker manifest inspect d83b1aykr03uwr32yhgzaiay:1c730ffff...
-errors:
-denied: requested access to the resource is denied
-unauthorized: authentication required
-```
+Also confirmed unrelated and NOT involved: `use_build_server` is `false` (one server,
+`is_build_server=f`), so the `up --pull always --build -d` branch at line 4243 is dead code here.
+ST takes the `up --build -d` branch, where the default `missing` policy applies.
 
-`RegistryConfig.Mirrors` is `[]`, the tag exists only locally, and no registry holds a
-copy.  The pull then fails, and because the stop is unconditional, production was already
-down before the registry answered.  That is the whole outage.
+### The patch (two changes to the vendor job)
 
-Confirmed unrelated and NOT involved: `use_build_server` is `false` (one server,
-`is_build_server=f`), so the `up --pull always --build -d` branch at line 4243 is dead
-code here.  ST takes the `up --build -d` branch.
-
-### The patch (two minimal changes to the vendor job)
-
-1. `pull_docker_compose_images()` returns early for `build_pack === 'dockerfile'` when no
-   `docker_registry_image_name` is set.  Skipping is strictly safe: the pull it skips
-   either pulls nothing (image already local) or fails.
-2. The generated compose gains `pull_policy: never` for any `production_image_name` with
-   no `/`, so Compose can never reach for a registry on a local-only tag.
+1. `pull_docker_compose_images()` returns early for the Dockerfile build pack when no registry
+   image is configured.  Covers the `dockercompose` pack only; **no effect on ST.**
+2. The generated compose gains `pull_policy: never` for any `production_image_name` with no `/`,
+   gated on `build_pack === 'dockerfile'` and no configured `docker_registry_image_name`.
+   **This is what protects ST.**  The gate matters because an official image such as
+   `postgres:15-alpine` also has no slash, and without it a `dockerimage` app would have had a
+   genuine Docker Hub pull frozen.
 
 Verified guard condition against the live DB:
 
@@ -161,15 +175,17 @@ No production container was stopped, recreated or bounced.  The only restart was
 Coolify `horizon` queue worker, done with nothing in flight in
 `application_deployment_queues`.
 
-**Not yet verified:** an end-to-end deploy that shows the guard's log line
-(`Skipping image pull: ...`) in a real deployment.  Coolify deploys on `main` pushes, and
-the next one will show it; `docker logs coolify` plus the `logs` column of
-`application_deployment_queues` are where to look.
+**Not yet verified:** nothing further.  The end-to-end proof arrived while this note was being
+written — see the deploy #4587 evidence above, which supersedes the earlier "still waiting for a
+natural deploy" note.  A future deploy should still log `Removing old containers` immediately
+after `Building docker image completed` with no pull stage in between, which is the expected
+post-guard shape for ST.
 
 ## 5. Next Steps & Blockers
 
-1. **Watch the next ST deploy** for `Skipping image pull: Dockerfile build pack builds
-   locally and this image has no registry copy.`  That closes the loop end-to-end.
+1. ~~**Watch the next ST deploy** for `Skipping image pull`~~ — superseded.  ST never emits
+   that line, because its deploy path does not call `pull_docker_compose_images()`.  The correct
+   signal is `pull_policy: never` in the generated compose, already verified on deploy #4587.
 2. **Fix the Coolify 4.4.6 upgrade**, then immediately re-run
    `scripts/ops/coolify-st-pull-guard.sh apply`.  The upgrade failure is a containerd
    content-store lease error, a different fault from this one; it was left alone because

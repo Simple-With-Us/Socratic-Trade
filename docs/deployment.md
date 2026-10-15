@@ -46,19 +46,20 @@ exactly one documented exception, the **st-pull-guard** below.
 ST and UM use Coolify's **Dockerfile build pack**, so the image is built on
 the box and tagged `{application_uuid}:{commit}`.  That name has no registry
 prefix and no copy in any registry, and Docker resolves it as
-`docker.io/library/<uuid>`.  Coolify's
-`ApplicationDeploymentJob::pull_docker_compose_images()` runs
-`docker compose ... pull --ignore-buildable` unconditionally, and `--ignore-buildable`
-only skips services with a `build:` key — the generated ST service has `image:`
-and no `build:` key, so Compose tried to pull `docker.io/library/<uuid>` and
-failed.  The `stop_running_container(force: true)` that follows is **not**
-conditional on that pull succeeding, so production was already down when the
-registry said no.  That is the 2026-09-25 5.3-minute P0 (board `2c6a6a53`,
-Linear ST-3707).
+`docker.io/library/<uuid>`.
 
-The guard adds `pull_policy: never` to bare local-only tags and skips the pull
-step for the Dockerfile build pack when no registry image is configured.
-`congress-trade` uses the `dockercompose` pack and is deliberately unaffected.
+The 2026-09-25 P0 came from **`docker compose up` itself**, not from a
+pre-flight pull.  ST goes through `deploy_dockerfile_buildpack()`, which never
+calls `pull_docker_compose_images()`.  Compose's default `pull_policy` is
+`missing`, so when the built tag is not local, `up` reaches for a registry; and
+because Coolify stops the old container first, production is already down when
+the registry answers no.  That is the 2026-09-25 5.3-minute P0 (board
+`2c6a6a53`, Linear ST-3707).
+
+**The guard that protects ST is `pull_policy: never` in the generated
+compose.**  The companion change that skips `pull_docker_compose_images()`
+covers only the `dockercompose`-pack path (congress-trade and any future app
+using that pack) and is a no-op for ST/UM, which never reach it.
 
 ```bash
 # run ON the Hetzner box as root
