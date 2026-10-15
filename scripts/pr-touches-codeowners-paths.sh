@@ -8,9 +8,11 @@
 # Usage:
 #   pr-touches-codeowners-paths.sh <base-sha> <head-sha>
 #   pr-touches-codeowners-paths.sh --files <repo-relative-path>...
+#   pr-touches-codeowners-paths.sh --list-globs
 #
 # Exit 0 when a protected path is touched (or when the diff cannot be computed -- fail closed).
 # Exit 1 when no protected path is touched.
+# --list-globs prints each CODEOWNERS path pattern (owner stripped) and exits 0.
 set -euo pipefail
 
 CODEOWNERS_FILE="${CODEOWNERS_FILE:-.github/CODEOWNERS}"
@@ -18,6 +20,7 @@ CODEOWNERS_FILE="${CODEOWNERS_FILE:-.github/CODEOWNERS}"
 usage() {
   echo "Usage: pr-touches-codeowners-paths.sh <base-sha> <head-sha>" >&2
   echo "   or: pr-touches-codeowners-paths.sh --files <path>..." >&2
+  echo "   or: pr-touches-codeowners-paths.sh --list-globs" >&2
   exit 2
 }
 
@@ -150,6 +153,22 @@ check_files_against_patterns() {
   done
   return 1
 }
+
+if [ "${1:-}" = "--list-globs" ]; then
+  [ "$#" -eq 1 ] || usage
+  if ! patterns="$(load_patterns)"; then
+    exit 1
+  fi
+  while IFS=$'\t' read -r anchored pat || [ -n "$anchored" ]; do
+    [ -z "$anchored" ] && continue
+    if [ "$anchored" = 1 ]; then
+      printf '/%s\n' "$pat"
+    else
+      printf '%s\n' "$pat"
+    fi
+  done <<< "$patterns"
+  exit 0
+fi
 
 if [ "${1:-}" = "--files" ]; then
   shift
