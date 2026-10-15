@@ -74,6 +74,8 @@ describe("placement outcome resolver", () => {
     const plain400 = "HTTP 400 Bad Request";
     const http500 = "Tradier HTTP 500: Unexpected server error";
     const deferral = "Tradier sandbox order placement is deferred until 15 minutes after the open. Safe to retry.";
+    const deferral16 =
+      "Tradier sandbox quotes are 15 minutes delayed, so strategy runs and order placement wait until 16 minutes after the open (9:46am ET).  Safe to retry.";
     expect(isRetryableBrokerHttpError(sentence)).toBe(true);
     expect(isTerminalBrokerHttpError(sentence)).toBe(false);
     expect(classifyPlaceOrderError(sentence)).toBe("retryable");
@@ -87,6 +89,8 @@ describe("placement outcome resolver", () => {
     expect(classifyPlaceOrderError("An unexpected error occurred. Please try again.")).toBe("other");
     expect(classifyPlaceOrderError(deferral)).toBe("retryable");
     expect(isTerminalBrokerHttpError(deferral)).toBe(false);
+    expect(classifyPlaceOrderError(deferral16)).toBe("retryable");
+    expect(isTerminalBrokerHttpError(deferral16)).toBe(false);
     expect(classifyPlaceOrderError("HTTP 403 Forbidden")).toBe("rejected_terminal");
     // The sentence stays retryable, but it must reconcile before not_placed.
     // HTTP 429 and the local open-window deferral never reached a live order.
@@ -95,6 +99,7 @@ describe("placement outcome resolver", () => {
     expect(mustReconcileRetryablePlaceError("Broker HTTP 408 while placing")).toBe(true);
     expect(mustReconcileRetryablePlaceError("Alpaca order failed: HTTP 429 Too Many Requests")).toBe(false);
     expect(mustReconcileRetryablePlaceError(deferral)).toBe(false);
+    expect(mustReconcileRetryablePlaceError(deferral16)).toBe(false);
     expect(mustReconcileRetryablePlaceError(buyingPower)).toBe(false);
     expect(mustReconcileRetryablePlaceError(http500)).toBe(false);
     const unverified = "Tradier order placement unverified: the tag lookup failed. Reconcile before retrying.";

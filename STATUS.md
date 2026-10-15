@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 GROK — Tradier sandbox waits until 9:46am ET
+
+**What.**  PR #4668 merged a 15-minute sandbox order deferral.  Sandbox quotes are 15 minutes delayed, and Tradier orders price off those quotes, so the window is now 16 minutes after the regular open (9:46am ET).  `checkBrokerHealth` skips the strategy run before any broker read.  Equity, bracket, and option posts still throw before any POST.  Live Tradier is unchanged.  This follow-up is branched from current `main` so the merged tag-lookup work stays.
+
+**Branch.**  `cursor/tradier-sandbox-open-16-cea2`
+
+**Verification.**  `npm run lint` exited 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exited 0.  Targeted vitest on `test/tradier.test.ts`, `test/placement-outcome.test.ts`, and `test/broker-health-auto-pause.test.ts` was 116 passed.  Full `npm test` was 9372 passed, 51 skipped, and 25 failed.  None of the failures are in the Tradier, placement, or broker-health files.  `npm run build` exited 0.
+
+**Next.**  Label `do-not-automerge`.  Jay squash-merges.  Do not enable auto-merge.  Linear was not updated: this seat has no Fleet Linear credentials.  Do not merge the recreated `cursor/tradier-sandbox-open-400-cea2` ref.  #4668 already deleted that branch, and the recreated history does not contain the merged tag-lookup commits.
+
 ## 2026-10-15 Grok — PR #4664 merge main and handoff order
 
 **What.**  Merged `origin/main` (`2656320f`, Tradier sandbox HTTP 400, including `a3d21b73` SQLite storage hygiene) into `cursor/data-cascade-reliability-eb70`.  The merge was clean.  No migration renumber.  The one unresolved review thread (Kody rule [33] on the cascade rollout) asked for `npm test` before `npm run build` in the Round 10 paragraph.  That sentence and the Round 11 gate sentence now use the canonical order.  No product code change.  The thread was not resolved.
