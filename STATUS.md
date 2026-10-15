@@ -38,6 +38,7 @@ vitest green before push; CI `verify` gate pending.
 
 **Next.**  PR #4706 ready for review; Deployer merges.
 **Verification.**  Merged `origin/main` (2026-10-15).  `npm run lint` 0 errors; `npx tsc --noEmit` ok; `npm run build` ok.  Cloud `npm test`: 23 fails (env/no-keys; unrelated to eslint).  CI `verify` on push is authoritative.
+**Verification.**  Merged `origin/main` again (2026-10-15, incl. #4698).  `npm run lint` 0 errors; `npx tsc --noEmit` ok.  CI `verify` on push is authoritative.
 
 **Next.**  GB-Deployer squash-merge after green `verify`; close #4691.
 
