@@ -2,7 +2,7 @@
 
 ## 2026-10-15 CURSOR — Ops snapshot perf PR #4659 (`cursor/ops-snapshot-perf-b622`)
 
-**What.**  Async `buildOpsSnapshot` with 45s single-flight cache, per-section `timingsMs`, per-user `marketScan` (`generatedAt`, `stale`), strategy-runs index v95, Tradier/non-Alpaca **422** on `/api/ops/account-activity`.  Review follow-up: `$.marketScan.omitted` in `readMarketScanMetaFromAudit`, `opsSnapshotForCaller` copy before `attachOpsOrderSummaries`, `WH` non-trade fallback.  Branch contains `origin/main` at `49a76da4` (#4695 ST-3846 Congress receipt, #4716 iOS ASC, ST-4531, etc.) via repeated clean merges — ops diff still not on `main`.  Per-user cold queries remain; 45s cache is the prod mitigation.
+**What.**  Async `buildOpsSnapshot` with 45s single-flight cache, per-section `timingsMs`, per-user `marketScan` (`generatedAt`, `stale`), strategy-runs index v95, Tradier/non-Alpaca **422** on `/api/ops/account-activity`.  Review follow-up: `$.marketScan.omitted` in `readMarketScanMetaFromAudit`, `opsSnapshotForCaller` copy before `attachOpsOrderSummaries`, `WH` non-trade fallback.  Branch contains `origin/main` at `12702bd9` (#4730 ST-4537 CT fundamentals nightly push, #4695, #4716, etc.) via repeated clean merges — ops diff still not on `main`.  Per-user cold queries remain; 45s cache is the prod mitigation.
 
 **Reservation.**  Linear **CURSOR** app (`linear_whoami` ok).  No dedicated ST issue for this branch slug after search; did not fabricate a board id.  PR **#4659** is the tracker for this lane.
 
