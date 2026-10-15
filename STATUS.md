@@ -11,6 +11,15 @@
 **Linear.**  **ST-2916** (`512444e3-f147-4bca-9c03-a51e53b109cd`) — claimed **CURSOR**, status **addressed**, PR #4716 linked in issue comment (Agent-Sync).
 
 **Next.**  GB-Deployer squash-merge PR #4716; move ST-2916 to **completed** on merge.
+## 2026-10-15 Cursor Cloud — remove ST primary Infisical bridge (ST-4318)
+
+**What.**  Permanent removal of the default-off Usage Monitor credential bridge writer: module, tests, scheduler lane, `/api/keys` triggers, and active env/backlog/docs setup.  Per-user encrypted API keys and tombstone behavior unchanged.
+
+**Branch.**  `cursor/remove-st-primary-bridge-927d`
+
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  Scheduler startup tests 21/21.  `npm run build` ok.  Full `npm test`: 24 failures pre-existing in this sandbox (unchanged vs unrelated suites).
+
+**Next.**  Open ready PR, `@kody start-review`.
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
