@@ -27,6 +27,16 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 # Current Status
 
 ## 2026-10-15 Cursor Cloud — ST-3988 congress-share dependency DB health
+## 2026-10-15 CURSOR — PR #4661 GB-Deployer merge main
+
+**What.**  Merged `origin/main` (`3f4ef5e5`) into `cursor/free-data-gaps-55d1` with no conflicts (`38032744`).  Cleared GitHub `DIRTY` / merge-conflict state.  Zero unresolved review threads.  Did not enable auto-merge (`needs-human-merge` for Jay).
+
+**Verification.**  `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  `npm run build` pass.  Local `npm test` failed in cloud shell (env); hosted `verify` pending on push.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Push and wait for hosted `verify`.  Jay squash-merges when ready.
+
 ## 2026-10-15 CURSOR — PR #4661 GB-Trader shepherd
 
 **What.**  `origin/main` at `df7e6d10` is already merged.  Pushed local merge commits `1dc39c4e` and `5ee168ce`.  Fixed Kody Rule 35 on `docs/rollouts/2026-10-14-free-data-gaps.md` (verification block now records `npm run build` pass).  Replied on open review threads and resolved them after written explanations for merged-main `PLAN.md` rows without inventing board hashes.

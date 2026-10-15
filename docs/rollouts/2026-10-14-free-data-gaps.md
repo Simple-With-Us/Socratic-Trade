@@ -166,6 +166,17 @@ npm run build
 
 `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  `npm run build` pass (compiled, TypeScript finished, 43/43 static pages).  Full `npm test` was not re-run in this shepherd shell.  Hosted `verify` on the pushed HEAD is the merge gate.
 
+GB-Deployer follow-up (CURSOR cloud, 2026-10-15).  Merged `origin/main` at `3f4ef5e5` (ST-2582 honest approve / check-pin) into `cursor/free-data-gaps-55d1` with no conflicts (`38032744`).  GitHub had reported `mergeStateStatus: DIRTY` until this merge landed.  Review threads: 0 unresolved.  Jay-deferred threads untouched.
+
+```bash
+npm run lint
+npx tsc --noEmit
+npm test
+npm run build
+```
+
+`npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 25 failed, 9388 passed, 51 skipped, 835 files (cloud env; not in diff vs `origin/main`).  `npm run build` pass (43/43 static pages).  Hosted `verify` on pushed HEAD is the merge gate.  PR carries `needs-human-merge`; Jay merges.
+
 ## Next Steps & Blockers
 
 Ask Kody to re-review after thread replies.  Do not merge from this lane.  Do not deploy.  PR Autofix remains red on every review event.  `AI-Fleet-Coordinator` `pr-autofix-reusable.yml` line 163 uses `secrets` in a step `if` at the pin `2e671004` and still on coordinator `main` (`7508b399`).  The caller matches `origin/main`, and review events read the workflow from the default branch, so a pin change on this branch does not clear those runs.
