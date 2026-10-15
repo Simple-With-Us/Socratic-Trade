@@ -57,6 +57,8 @@ npx vitest run src/share/__tests__/outbound.test.ts src/share/__tests__/peerPush
 # 12 passed
 ```
 
+Merged `origin/main` `3c74cd81` (remove the ST primary Infisical bridge, #4708) with a merge commit.  No code conflict.  `STATUS.md` and `PLAN.md` keep this receipt note and the bridge-removal note.
+
 ## Next Steps & Blockers
 
 - Both pull requests need to be live before a production push carries the receipt.  Until Socratic-Trade is deployed, Congress.Trade will alert on the old `{ ok: true }` body.  That alert is throttled to one email per 12 hours.
