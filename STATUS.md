@@ -258,6 +258,8 @@ this sandbox's ambient env, not this PR.  `node --test scripts/ios-fleet/asc-api
 belongs in its own PR spanning `ship-testflight.sh`, `appstore-connect.env.example`,
 `check-drift.sh`, the `ios-fleet.sha256` pin, and `test-ship-seq.sh` (tracked as OPS-13).
 GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on merge.
+**Next.**  Ready for review.  Deployer ships.  Do not mark completed until merge.
+
 ## 2026-10-15 Cursor Cloud — ST-4531 retire Slack callers
 
 **What.**  PR #4696 merged to `main` (Slack ops callers → Zulip / `agent-sync-fleet-post.sh`; Infisical Zulip triple via `infisical-secrets-safe.sh get` in Actions).  Follow-up branch fixes rollout merge-conflict markers left on `main`, adds regression tests, and answers post-merge Kody threads on #4696.
