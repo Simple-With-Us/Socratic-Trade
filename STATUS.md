@@ -23,6 +23,42 @@ reply on the review thread (not resolved).  The unread-file branch (EISDIR) is n
 **Linear.**  **ST-2916** (`512444e3-f147-4bca-9c03-a51e53b109cd`) — claimed **CURSOR**, status **addressed**, PR #4716 linked in issue comment (Agent-Sync).
 
 **Next.**  PR #4716 shepherd: Kody threads (rollout gate outcomes, per-var ASC test, temp cleanup); `verify` after push.  GB-Deployer squash-merge; ST-2916 **completed** on merge.
+
+## 2026-10-15 codex-autofix — PR #4716 unblock (merge `main`, thread state)
+
+**What.**  No new review findings: all four Kody threads were already addressed in `d7f2e54d`
+and Kody's own 2026-10-15 11:02Z pass confirmed each fix landed.  The actual blocker on the PR
+was `mergeable: CONFLICTING` — the branch sat 1 commit behind `origin/main` (`3f4ef5e5`,
+"Approve succeeds only when the broker order is placed", ST-2582).  Merged `origin/main` into
+`cursor/ios-ci-hygiene-512444e3-56e3`; **no conflicts** — the overlap was limited to
+`STATUS.md`, and both entries were kept per the repo handoff rule.  No production source was
+touched by this round; the merge is the whole change.
+
+**Branch.**  `cursor/ios-ci-hygiene-512444e3-56e3`
+
+**Thread state corrected.**  The rule-33 thread (drop `~/.secrets/appstore-connect.env` as a
+credential source) had been flipped to resolved by an earlier shepherd round, but that finding
+is an accepted defer with a maintainer question still outstanding, so per the round protocol it
+must stay **open**.  Un-resolved it; Kody's closing note on the thread says the same ("this
+thread stays open").  The three fixed threads stay resolved.  Expect the repo's
+all-conversations-resolved gate to remain unsatisfied until the maintainer answers the
+rule-33 question — that is intentional, not a stuck PR.
+
+**Verification.**  See `docs/rollouts/2026-10-15-ios-ci-hygiene-512444e3.md`.  `npm run lint`
+0 errors, `npx tsc --noEmit` ok, `npm run build` ok.  The `npm test` failures remain confined
+to the same 4 LLM-routing suites; re-confirmed this round by running those 4 files in a clean
+`origin/main` worktree, which reproduces all 12 identically.  Cause is `ANTHROPIC_API_KEY` in
+this sandbox's ambient env, not this PR.  `node --test scripts/ios-fleet/asc-api.credentials.test.mjs`
+6/6 and `bash scripts/ios-fleet-pin.sh --check` ok after the merge (the merge did not touch any
+`ios-fleet` pinned file, so the pin still matches).
+
+**Linear.**  **ST-2916** (`512444e3-f147-4bca-9c03-a51e53b109cd`) — claimed **CURSOR**, status **addressed**.
+
+**Next.**  Maintainer: answer the rule-33 question — is retiring
+`~/.secrets/appstore-connect.env` from the ship path a wanted fleet-wide change?  If yes it
+belongs in its own PR spanning `ship-testflight.sh`, `appstore-connect.env.example`,
+`check-drift.sh`, the `ios-fleet.sha256` pin, and `test-ship-seq.sh` (tracked as OPS-13).
+GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on merge.
 ## 2026-10-15 Cursor Cloud — check-pin token order (ST-2582 PR #4698)
 
 **What.**  Merged `origin/main` (`df7e6d10`) with a merge commit.  `check-pin` was failing because it read public Congress.Trade with `GH_PACKAGES_TOKEN` first.  That secret is one user's PAT, so a burst of pull requests shares one rate limit and the job reports a missing token.  The script now tries the Actions installation token first and keeps the PAT as a fallback.  A rate-limit failure is no longer labeled as a missing token.
