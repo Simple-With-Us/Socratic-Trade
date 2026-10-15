@@ -37,7 +37,11 @@ function loadEnvFile(path) {
   return env;
 }
 
-/** Prefer process.env over ~/.secrets file (GitHub Actions exports ASC_* after Infisical load). */
+/**
+ * Prefer process.env over the secrets file (GitHub Actions exports ASC_* after Infisical load).
+ * Default envPath matches ship-testflight.sh SECRETS_ENV (~/.secrets/appstore-connect.env);
+ * that handoff file is operator/CI ship tooling, not the app runtime Infisical path (Kody rule 33).
+ */
 export function resolveAscCredentials(envPath = join(homedir(), ".secrets", "appstore-connect.env")) {
   let fileEnv = {};
   if (existsSync(envPath)) {

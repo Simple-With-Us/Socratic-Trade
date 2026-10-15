@@ -19,42 +19,66 @@ afterEach(() => {
   }
 });
 
-test("resolveAscCredentials prefers process.env over the secrets file", () => {
+function withTempSecretsFile(body) {
   const dir = mkdtempSync(join(tmpdir(), "asc-cred-"));
   const envPath = join(dir, "appstore-connect.env");
-  writeFileSync(
-    envPath,
-    "ASC_KEY_ID=FILE_ID\nASC_ISSUER_ID=file-issuer\nASC_KEY_PATH=/file/key.p8\n",
-    "utf8"
-  );
-  process.env.ASC_KEY_ID = "ENV_ID";
-  process.env.ASC_ISSUER_ID = "env-issuer";
-  process.env.ASC_KEY_PATH = "/env/key.p8";
+  try {
+    return body(envPath);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
-  const creds = resolveAscCredentials(envPath);
-  assert.equal(creds.keyId, "ENV_ID");
-  assert.equal(creds.issuerId, "env-issuer");
-  assert.equal(creds.keyPath, "/env/key.p8");
+test("resolveAscCredentials prefers process.env over the secrets file", () => {
+  withTempSecretsFile((envPath) => {
+    writeFileSync(
+      envPath,
+      "ASC_KEY_ID=FILE_ID\nASC_ISSUER_ID=file-issuer\nASC_KEY_PATH=/file/key.p8\n",
+      "utf8"
+    );
+    process.env.ASC_KEY_ID = "ENV_ID";
+    process.env.ASC_ISSUER_ID = "env-issuer";
+    process.env.ASC_KEY_PATH = "/env/key.p8";
 
-  rmSync(dir, { recursive: true, force: true });
+    const creds = resolveAscCredentials(envPath);
+    assert.equal(creds.keyId, "ENV_ID");
+    assert.equal(creds.issuerId, "env-issuer");
+    assert.equal(creds.keyPath, "/env/key.p8");
+  });
 });
 
 test("resolveAscCredentials falls back to the secrets file when env is unset", () => {
-  const dir = mkdtempSync(join(tmpdir(), "asc-cred-"));
-  const envPath = join(dir, "appstore-connect.env");
-  writeFileSync(
-    envPath,
-    "ASC_KEY_ID=FILE_ID\nASC_ISSUER_ID=file-issuer\nASC_KEY_PATH=/file/key.p8\n",
-    "utf8"
-  );
-  delete process.env.ASC_KEY_ID;
-  delete process.env.ASC_ISSUER_ID;
-  delete process.env.ASC_KEY_PATH;
+  withTempSecretsFile((envPath) => {
+    writeFileSync(
+      envPath,
+      "ASC_KEY_ID=FILE_ID\nASC_ISSUER_ID=file-issuer\nASC_KEY_PATH=/file/key.p8\n",
+      "utf8"
+    );
+    delete process.env.ASC_KEY_ID;
+    delete process.env.ASC_ISSUER_ID;
+    delete process.env.ASC_KEY_PATH;
 
-  const creds = resolveAscCredentials(envPath);
-  assert.equal(creds.keyId, "FILE_ID");
-  assert.equal(creds.issuerId, "file-issuer");
-  assert.equal(creds.keyPath, "/file/key.p8");
+    const creds = resolveAscCredentials(envPath);
+    assert.equal(creds.keyId, "FILE_ID");
+    assert.equal(creds.issuerId, "file-issuer");
+    assert.equal(creds.keyPath, "/file/key.p8");
+  });
+});
 
-  rmSync(dir, { recursive: true, force: true });
+test("resolveAscCredentials picks env per variable when only some ASC_* are set", () => {
+  withTempSecretsFile((envPath) => {
+    writeFileSync(
+      envPath,
+      "ASC_KEY_ID=FILE_ID\nASC_ISSUER_ID=file-issuer\nASC_KEY_PATH=/file/key.p8\n",
+      "utf8"
+    );
+    process.env.ASC_KEY_ID = "ENV_ID";
+    delete process.env.ASC_ISSUER_ID;
+    delete process.env.ASC_KEY_PATH;
+
+    const creds = resolveAscCredentials(envPath);
+    assert.equal(creds.keyId, "ENV_ID");
+    assert.equal(creds.issuerId, "file-issuer");
+    assert.equal(creds.keyPath, "/file/key.p8");
+  });
 });
