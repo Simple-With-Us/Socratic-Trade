@@ -9,6 +9,343 @@
 **Docs.**  `docs/rollouts/2026-10-14-embed-context-retrieval-pressure.md`, `docs/phase-7-strategy.md`, `STATUS.md`, `PLAN.md`.
 
 **Next.**  Ready for review.  Do not merge from this lane.  Sentry 2G and 2E stay open until production shows the burst and the context-length 400 are gone.  Fleet `board whoami` could not run on this seat (no Linear or Zulip credentials).  The unfiled claim is team ST, In Progress, title "Fit embed input to the bge-m3 token budget and back off retrieval bursts", Completed only after merge.
+## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
+
+**What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.
+
+**Branch.**  `cursor/ct-push-receipt-2155` in Socratic-Trade and Congress.Trade.  Linear ST-3846.
+
+**Next.**  Both pull requests ready for review.  Do not mark the issue completed until both are merged.
+
+## 2026-10-15 Cursor Cloud — remove ST primary Infisical bridge (ST-4318)
+
+**What.**  Permanent removal of the default-off Usage Monitor credential bridge writer: module, tests, scheduler lane, `/api/keys` triggers, and active env/backlog/docs setup.  Per-user encrypted API keys and tombstone behavior unchanged.
+
+**Branch.**  `cursor/remove-st-primary-bridge-927d`
+
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  Scheduler startup tests 21/21.  `npm run build` ok.  Full `npm test`: 24 failures pre-existing in this sandbox (unchanged vs unrelated suites).
+
+**Next.**  Open ready PR, `@kody start-review`.
+
+## 2026-10-15 Cursor Cloud — storage hygiene keep market history
+
+**What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.
+
+**Branch.**  `cursor/keep-price-history-forever-2f58`  (PR #4683)
+
+**Verification.**  `npx vitest run test/sqlite-storage-hygiene.test.ts` 15/15.  `npx tsc --noEmit` ok.  Full trio per the autofix round below.
+
+**Next.**  Open PR (ready, `do-not-automerge`), owner squash merge.
+
+## 2026-10-15 Claude (autofix round 1, PR #4683) — category mislabeling in `categoryFor`
+
+**What.**  Addressed the one open Kody thread on #4683.  The new market-data-history branch in
+`categoryFor` (`src/lib/sqlite-storage-hygiene.ts`) was hoisted ahead of `CATEGORY_BY_TABLE`, so it
+flattened SEC filings/facts, fundamentals, transcripts, and the `document_chunks*` tables into
+`"quote_bar_cache"`, and silently stripped the retrieval-corpus tables of their existing
+`"embeddings"` label.  Reordered so an explicit `CATEGORY_BY_TABLE` entry wins, and the broad
+fallback now returns a distinct `"market_data_history"` category instead of borrowing the price-cache
+one.  Kody's suggested "drop the branch entirely" was not taken: that would have thrown away the
+market-data distinction rather than correcting the label.  The category is display-only (ops-snapshot
+JSON, no UI label map), so this is a reporting fix with no behavior change.  Regression assertions
+added for `document_chunks`, `history_cache_eod`, `symbol_field_latest`, `sec_filings`, `sec_facts`,
+and `historical_fundamentals`.
+
+**Branch.**  `cursor/keep-price-history-forever-2f58`
+
+**Verification.**  `npx tsc --noEmit` ok.  `npm run lint` 0 errors (854 known warnings).
+`npx vitest run test/sqlite-storage-hygiene.test.ts` 15/15.  `npm test` 9383 passed, 51 skipped,
+13 failed — all 13 in `llm-provider` / `openrouter-credits` / `chat-llm` / `framework-review`, and
+all pre-existing (reproduced identically with these changes stashed; this sandbox resolves an
+`OPENROUTER_API_KEY` into those fixtures).  `npm run build` ok.
+
+**Next.**  Thread resolved; PR left ready for the owner's squash merge.
+## 2026-10-15 GROK — Tradier sandbox waits until 9:46am ET
+
+**What.**  PR #4668 merged a 15-minute sandbox order deferral.  Sandbox quotes are 15 minutes delayed, and Tradier orders price off those quotes, so the window is now 16 minutes after the regular open (9:46am ET).  `checkBrokerHealth` skips the strategy run before any broker read.  Equity, bracket, and option posts still throw before any POST.  Live Tradier is unchanged.  This follow-up is branched from current `main` so the merged tag-lookup work stays.
+
+**Branch.**  `cursor/tradier-sandbox-open-16-cea2`
+
+**Verification.**  `npm run lint` exited 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exited 0.  Targeted vitest on `test/tradier.test.ts`, `test/placement-outcome.test.ts`, and `test/broker-health-auto-pause.test.ts` was 116 passed.  Full `npm test` was 9372 passed, 51 skipped, and 25 failed.  None of the failures are in the Tradier, placement, or broker-health files.  `npm run build` exited 0.
+
+**Next.**  Label `do-not-automerge`.  Jay squash-merges.  Do not enable auto-merge.  Linear was not updated: this seat has no Fleet Linear credentials.  Do not merge the recreated `cursor/tradier-sandbox-open-400-cea2` ref.  #4668 already deleted that branch, and the recreated history does not contain the merged tag-lookup commits.
+## 2026-10-15 OPENCODE — History retention exemption (Linear ST-4532)
+
+**What.**  Reconciles the #4666/#4661 retention conflict: production runs the #4666 merge (live sha a3d21b73, verified via public `/api/health`), and the 02:56Z hygiene report (dryRun=false) shows `history-cache-eod` eligible=3,427,386 / deleted=5,000 — deletion was real, not inferred.  `history_cache_eod` is removed from hygiene age targets (constant, target, and `dayCutoff` helper gone); the table reports as retained durable history and `assertPruneTableAllowed` refuses it.  Disposable-cache cleanup is unchanged.  Regression tests prove 401d/1825d/2300d rows survive consecutive live passes.
+
+**Verification.**  Gates + `verify` CI green before merge (see rollout note).  Post-merge: live sha past a3d21b73 and next `storageHygiene` report with no `history-cache-eod` estimate.
+
+**Docs.**  `docs/rollouts/2026-10-15-history-retention-exemption.md`, `docs/rollouts/2026-10-14-sqlite-storage-hygiene.md` (400-day EOD line struck), `STATUS.md`, `PLAN.md`.
+
+**Next.**  Land, verify deploy, close ST-4532, post closeout in `ST history retention review`.  Backfill of the ~5,000 lost scattered bars is proposed (paced, post-deploy) and needs owner approval for provider quota.
+
+## 2026-10-15 Grok — PR #4664 merge main and handoff order
+
+**What.**  Merged `origin/main` (`2656320f`, Tradier sandbox HTTP 400, including `a3d21b73` SQLite storage hygiene) into `cursor/data-cascade-reliability-eb70`.  The merge was clean.  No migration renumber.  The one unresolved review thread (Kody rule [33] on the cascade rollout) asked for `npm test` before `npm run build` in the Round 10 paragraph.  That sentence and the Round 11 gate sentence now use the canonical order.  No product code change.  The thread was not resolved.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm test` was 9393 passed, 51 skipped, and 2 failed, both outside this diff.  `test/egress-guard.test.ts` fails because this sandbox resolves discord.com to `198.18.0.1`.  `test/data-catalog-completeness.test.ts` reads peRatio completeness 1 from the local `data/app.db` and passes 4/4 against an empty database.  `npm run build` ok.  Hosted `verify` on `2a48ac8f` was green before this merge.
+
+**Next.**  Push and comment `@kody start-review`.  Do not merge from this lane.  Do not resolve threads.
+
+## 2026-10-15 Claude — PR #4664 autofix round 11
+
+**What.**  Triaged all 15 review threads.  Four were still unresolved: three Sentry ones (`data-providers.ts` 429 lane hold, `market.ts` screener fallback cache, `provider-rate-limit.ts` RapidAPI service limits) and one Kody rule-[6] thread on the inherited PLAN.md row for PR #4663.  All three Sentry findings were already fixed in `4fc19a96` — `fetchWithRetry` still skips the lane hold while a retry remains and opens it only for a positive `Retry-After`; `resolveProviderLimiterConfigForCall` still keeps `alpha-vantage-rapidapi` at 5/min when the pacer bucket is a RapidAPI host, with a regression test; price-less directory rows still stay out of `screenerCache` and `screenerLastGood`.  The one actionable item was Kody's: the PLAN.md row for the merged PR #4663 carried only a GitHub PR reference.  PR #4663 is board item `SOCRATIC-TRADE-2S`, so the row header now carries both references, satisfying rule [6]'s two-part requirement.  No code change.  The branch was already current with `origin/main` (0 commits behind), so no merge was needed.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  Full `npm test`: 9344 passed, 51 skipped, 13 failed — all 13 are the runner exporting `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL`, which the LLM key-resolution tests read as a configured user credential (same as rounds 9 and 10).  Re-running `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/framework-review.test.ts`, and `test/openrouter-credits.test.ts` with those three variables unset gives 60/60 passed.  `node_modules` was empty on checkout, so `npm install` ran first (685 packages; `package.json` unchanged vs `origin/main`).  `next-env.d.ts` and `tsconfig.json` were restored from `origin/main` after the build rewrote them.
+
+**Next.**  Resolve the Kody PLAN.md thread addressed this round.  The three Sentry threads are already fixed in code but their first-comment author is not one of the review bots this lane may resolve.  Do not merge from this lane.
+
+## 2026-10-14 Cursor Cloud — PR #4664 merge main
+
+**What.**  Merged `origin/main` (`e80386d7`, SEC XBRL cached fundamentals) into `cursor/data-cascade-reliability-eb70`.  The merge was clean.  No migration renumber.  Seven unresolved review threads were re-read against this head.  No new code change.  `fetchWithRetry` still skips the lane hold while a 429 retry remains, and opens it only for a positive `Retry-After` (`4fc19a96`).  Price-less directory rows stay out of `screenerCache` and `screenerLastGood`.  `resolveProviderLimiterConfigForCall` still keeps `alpha-vantage-rapidapi` at 5/min when the pacer bucket is a RapidAPI host.  The FRED VIXCLS schema still uses explicit `.strip()` on both objects.  The PLAN.md header for this lane still cites `PR #4664` and does not invent a board id.  The inherited PR #4663 row still has no board reservation to copy.  Threads were not resolved.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm test` was 9355 passed, 51 skipped, and 2 failed, both outside this diff.  `test/egress-guard.test.ts` fails because this sandbox rejects the discord.com lookup.  `test/data-catalog-completeness.test.ts` reads peRatio completeness 1 from the local `data/app.db`.  Hosted `verify` on `b1456fa7` was green before this merge.  `npm run build` -> ok.
+
+**Next.**  Push and comment `@kody start-review`.  Do not merge from this lane.  Do not resolve threads.
+
+## 2026-10-15 Claude — PR #4664 autofix round 10
+
+**What.**  Merged `origin/main` `e80386d7` (SEC XBRL cached fundamentals); the merge was clean.  Triage of the 15 review threads found no open code findings: Kody's `nasdaq-universe-fallback.ts` quote-hydration suggestion and the FRED VIXCLS `.passthrough()` rule-[22] suggestion were both already declined on their merits and Kody closed each itself ("nothing further from me on it"), and the Sentry 429-lane-hold, screener-cache, and RapidAPI service-limit threads were fixed in `4fc19a96`.  The one new actionable item was Kody rule [27]: the rollout verification block had dropped the explicit `npm run build` outcome.  Restored `npm run build -> ok` in the verification block and recorded this round's gate.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm test`: 9344 passed, 51 skipped, 13 failed — all 13 are the CI runner exporting `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` into the environment, which the LLM key-resolution tests read as a configured user credential.  Re-running `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/framework-review.test.ts`, and `test/openrouter-credits.test.ts` with those three variables unset gives 60/60 passed.  None of the 13 touch this diff.  `npm run build` ok.  `node_modules` was empty on checkout, so `npm install` ran first (685 packages; `package.json` unchanged vs `origin/main`).
+
+**Docs.**  `docs/rollouts/2026-10-14-data-cascade-reliability.md`, `STATUS.md`.
+
+**Next.**  Resolve the review threads addressed or already fixed.  Do not merge from this lane.
+
+## 2026-10-14 Cursor Cloud — PR #4664 review follow-up
+
+**What.**  Merged `origin/main` again (`1588bae8`, keyless options enrichment).  The merge was clean.  The earlier merge on this branch was `82162336`.  Kody's priced-directory suggestion does not apply: the directory runs only when `screenerLastGood` is empty, so there is no price to copy.  The unreachable cache-and-return of priced directory rows is gone.  A directory that lists symbols now says they were not cached, instead of calling that a fallback failure.  A directory failure still keeps the original screener error.  Price-less rows stay out of `screenerCache` and `screenerLastGood`.  The three directory fetches stay, because that count is the cold-failure annotation.  Sentry's 429 hold and RapidAPI service-limit threads stay as fixed in `4fc19a96`.  The FRED VIXCLS schema keeps explicit `.strip()` on both objects.  The comment says to strip extra FRED keys and not to use `.strict()`, so `.passthrough()` would keep keys the parser does not read.  Threads were not resolved.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted vitest 142 passed.  Full `npm test`: 9343 passed, 51 skipped, 2 failed outside this diff (`test/egress-guard.test.ts` sandbox DNS, `test/data-catalog-completeness.test.ts` against the local database).  `npm run build` -> ok.
+
+**Next.**  Push the merge and ask Kody to re-review.  Do not merge from this lane.
+
+## 2026-10-14 Cursor Cloud — data cascade reliability
+
+**What.**  RapidAPI + Nasdaq screener pacing, `Retry-After` on 429 (lane hold only after retries, and only when the header is present), per-symbol field TTL cache, VIX cascade (Cboe `VIX_History.csv` → FRED `VIXCLS` → Cboe JSON → Yahoo), Nasdaq screener stale-while-revalidate + SEC/Nasdaq Trader fallback, freshness scan deadline 6m.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted vitest for the rollout files plus the new regressions ok (153 passed).  `npm run build` ok.  Full `npm test` was 9313 passed, 51 skipped, and 1 failed: sandbox DNS for discord.com in `test/egress-guard.test.ts` (outside this diff).
+
+**Docs.**  `docs/rollouts/2026-10-14-data-cascade-reliability.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Open PR ready for review; watch prod freshness scan duration after deploy.
+## 2026-10-14 GROK — PR #4668 merge #4666 and order-row schema
+
+**What.**  Merged `origin/main` (`a3d21b73`, #4666 SQLite storage hygiene) with no conflicts and no migration renumber.  Three unresolved Kody threads.  The rollout verification block now lists `npm run lint` before `npx tsc --noEmit`.  Listing rows are `z.record(z.string(), z.unknown())`, and the page still accepts an array or one object so a multi-order listing is not a tag miss.  `fetchPlacedOrderBody` `safeParse`s the GET body and keeps the id stub when the shape is wrong.  A null sibling row is skipped.
+
+**Review triage.**  Threads `PRRT_kwDOS7mOVM6slYh3`, `PRRT_kwDOS7mOVM6slYuB`, and `PRRT_kwDOS7mOVM6slY2R` stay unresolved.  Replies go out after the push.  The earlier three threads were already resolved before this pass.  This lane did not call resolve.
+
+**Verification.**  `npm run lint` ok on the merge (0 errors, 854 warnings).  `npx tsc --noEmit` ok on the merge and again after the schema edit.  Targeted vitest: 134 passed in `test/tradier.test.ts`, `test/placement-outcome.test.ts`, `test/placement-reconcile.test.ts`, and `test/broker-health-auto-pause.test.ts`.  Full `npm test`: 9374 passed, 51 skipped, 2 failed.  Both failures are outside this diff.  `test/egress-guard.test.ts` rejects the discord.com lookup in this sandbox.  `test/data-catalog-completeness.test.ts` reads peRatio completeness 1 from the local cascade report when the named universe has no durable row.
+
+**Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  `do-not-automerge` stays.  Do not merge from this lane.  Comment `@kody start-review`.  `.github/workflows/autofix.yml` still fails at startup on main because the pinned reusable workflow uses `secrets` in a step `if`.  This PR does not change that caller.
+
+## 2026-10-14 GROK — PR #4668 final tag lookup before not_placed
+
+**What.**  Merged `origin/main` twice with no conflicts and no migration renumber: `1588bae8` (keyless options enrichment and the fleet-fully-dark detector), then `e80386d7` (SEC XBRL companyfacts, #4665).  The open Sentry thread on `placement-outcome.ts` was real: the last Tradier "Unexpected server error" POST skipped the tag lookup, and both lanes booked retryable `not_placed` before `reconcilePlacementError`.  A landed final POST could be retried under a new refId.  The adapter now looks up the tag after every transient refusal, including the last.  A hit returns the broker order.  A lookup that throws is `TRADIER_TAG_LOOKUP_UNVERIFIED_MESSAGE` (not the retryable sentence, not an HTTP 4xx).  HTTP 408 and that sentence go through reconcile before `not_placed`.  HTTP 429 and the sandbox open deferral still short-circuit.
+
+**Review triage.**  One unresolved thread, `PRRT_kwDOS7mOVM6sgtKQ` (sentry).  The reply is posted after this push and cites the commit.  The thread stays unresolved.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 grandfathered warnings).  `npx tsc --noEmit` ok, including again after the `e80386d7` merge.  Targeted vitest after the post-backoff lookup: 132 passed in `test/tradier.test.ts`, `test/placement-outcome.test.ts`, `test/placement-reconcile.test.ts`, and `test/broker-health-auto-pause.test.ts`.  Full `npm test`: 9349 passed, 51 skipped, 1 failed.  The failure is `test/egress-guard.test.ts` because this sandbox rejects the discord.com lookup, outside this diff.  `npm run build` ok.
+
+**Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`, `PLAN.md`, `docs/phase-7-strategy.md`.
+
+**Next.**  `do-not-automerge` stays.  Do not merge from this lane.  Jay squash-merges.  CI `verify` on the previous head was `action_required` with zero jobs (workflow approval), not a test failure.  Push this head so `verify` can run.
+
+## 2026-10-14 Codex Autofix — PR #4668 tag-hit fill state and listing validation
+
+**What.**  Two Kody review findings on the Tradier transient-400 branch.  The tag-hit path in `postOrderToleratingTransientServerError` returned a hardcoded `{ id, status: "pending" }` stub, dropping `exec_quantity` / `avg_fill_price`, so an order that filled inside the lookup+backoff window was booked unfilled at the proposal price — the exact P&L corruption the equity path's own comment warns about.  It now re-reads the order for the broker's real state, falling back to the stub (never a rethrow) if that read fails, since the order is already known live.  `findOrderIdByTag` now validates the `GET /orders` envelope through `TradierOrdersPageSchema` at the HTTP trust boundary; a drifted shape is a clean tag miss, never a throw.  Three regression tests added.
+
+**Review triage.**  The `src/lib/placement-outcome.ts` HIGH-severity thread is Sentry's bug-prediction bot, not one of the three review bots this fixer answers, and its subject (reconciling placement before booking a retryable `not_placed` on the final attempt) is a placement-semantics design decision, so it was left open for the maintainer rather than guessed at.
+
+**Verification.**  `npx tsc --noEmit` ok.  `npm run lint` ok (0 errors, 866 grandfathered warnings).  `npm run build` ok.  Targeted vitest 111 passed after merging `origin/main` (twice).  Full `npm test` reported 13 failures in four LLM-credential test files that reproduce identically on unmodified `origin/main` — this sandbox has an `OPENROUTER_API_KEY` set and those tests assert the no-key branch; CI has no such key.
+
+**Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`.
+
+**Next.**  `do-not-automerge` stays on PR #4668 — this fixer does not remove the hold label or arm auto-merge.
+
+## 2026-10-14 GROK — Tradier sandbox open HTTP 400
+
+**What.**  Sandbox HTTP 400 "Unexpected server error" on the order path retries with backoff and does not auto-halt.  A second POST happens only after the tag is missing.  Sandbox equity and option posts wait 15 minutes after the regular open.  Live Tradier still places.  Buying power, plain HTTP 400, HTTP 403, and HTTP 5xx still fail on the first attempt and can still halt.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok after the tag-hit return cast.  `npm run build` ok.  Targeted vitest 108 passed.  Full `npm test` was 9289 passed, 51 skipped, and 23 failed outside this diff (sandbox LLM keys, host metadata, and a Node ESM `.ts` loader).
+
+**Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`, `PLAN.md`, `docs/phase-7-strategy.md`.
+
+**Next.**  `do-not-automerge`.  Jay squash-merges.  Do not merge from this lane.  Linear team `ST` was not updated: this seat has no Fleet Linear credentials.
+## 2026-10-14 GROK — SQLite storage hygiene
+
+**What.**  Production SQLite is about 16.5 GB with a 415 MB WAL.  Background checks were stalling 76-79s and the scheduler lagged 120s.  PR #4666 adds a storage-hygiene job: table-size report, retention deletes for caches/logs/finished runs, batched deletes that yield, a PASSIVE WAL checkpoint with TRUNCATE only when Litestream looks safe, and incremental free-page reclaim.  It never runs a full file rewrite and never deletes orders, fills, positions, approvals, transfers, or HWM inputs.  Review fixes: the lane runs only on the scheduler leader, the cadence watermark is claimed before the pass, a wide Litestream directory is aged from its highest-named files, and each coverage delete pair is one transaction.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test` was 1 failed, 9341 passed, 51 skipped.  The failure is sandbox DNS for discord.com in `test/egress-guard.test.ts`, outside this diff.  Targeted `test/sqlite-storage-hygiene.test.ts` was 14 passed.  `npm run build` ok.
+
+**Docs.**  `docs/rollouts/2026-10-14-sqlite-storage-hygiene.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Label `do-not-automerge`.  Jay squashes.  Do not merge from this lane.  Linear team ST was not updated: this cloud seat has no Fleet Linear or Zulip credentials.
+## 2026-10-14 Grok — PR #4665 merge #4658
+
+**What.**  After `40d76278` was pushed, `origin/main` moved to `1588bae8` (#4658 keyless options) and GitHub marked PR #4665 conflicting.  `git merge origin/main` auto-merged with no conflict markers and no migration renumber.  Shared files kept both the SEC XBRL path and the keyless options path.
+
+**Verification.**  `npx tsc --noEmit` ok after the merge.  Targeted vitest for sec-facts, sec-xbrl, companyfacts sweep, data-providers, enrichment-coverage, keyless options, source-capability-matrix, and market passed (264 passed, 9 skipped).  Full lint, `npm test`, and build were already run on `40d76278`.
+
+**Next.**  Push the merge.  Do not merge the PR.  The Kody `as any` thread was replied on `40d76278`.  Kody's bot then marked that thread resolved.  This lane did not call resolve.
+
+## 2026-10-14 Grok — PR #4665 companyfacts Response mocks
+
+**What.**  `git merge origin/main` was already up to date (`82162336`).  One unresolved Kody thread (`PRRT_kwDOS7mOVM6sjbIh`) was real.  The malformed-unit companyfacts test now builds both `politeFetch` mocks with `new Response` instead of `as any`.  No migration renumber.  The thread stays unresolved.
+
+**Verification.**  `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9315 passed, 51 skipped, and 2 failed, both outside this diff.  `test/egress-guard.test.ts` fails because this sandbox rejects the discord.com lookup.  `test/data-catalog-completeness.test.ts` reads peRatio completeness 1 from the local `data/app.db` cascade report.  Hosted `verify` passed on `f921cc43` before this commit.  `test/sec-facts.test.ts` passed (7).
+
+**Docs.**  `docs/rollouts/2026-10-14-sec-xbrl-cached-fundamentals.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Push.  Reply on the open thread.  Do not resolve it.  Do not merge the PR.  Comment `@kody start-review`.
+
+**CI note.**  `.github/workflows/autofix.yml` still fails at startup on this branch and on main.  The pinned reusable workflow uses `secrets` inside a step `if`, and coordinator main (`7508b399`) still has that expression.  A pin bump does not remove it.  This PR does not change the caller.
+
+## 2026-10-14 Grok — PR #4665 merge main after #4663
+
+**What.**  Merged `origin/main` (`82162336`, #4663 fleet-fully-dark detector) into `cursor/sec-xbrl-fundamentals-cache-6783`.  The merge was clean.  No migration renumber.  GraphQL review threads: 7 total, 0 unresolved.  Prior Sentry and Kody findings stay fixed on this branch (`b075ccf0`, `d73d35e0`).  No new product code in this pass.
+
+**Verification.**  `npm run lint` ok (0 errors, 856 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9315 passed, 51 skipped, and 2 failed, both outside this diff.  `test/egress-guard.test.ts` fails because this sandbox rejects the discord.com lookup.  `test/data-catalog-completeness.test.ts` reads peRatio fillRate 1 from the local `data/app.db` cascade report when the named universe has no durable row.  Hosted `verify` passed on `d73d35e0` before this merge.  Targeted vitest for sec-facts, sec-xbrl, companyfacts sweep, market, data-providers, enrichment-coverage, trading-liveness, and batched-halt-cause passed (257 passed, 9 skipped).
+
+**Docs.**  `docs/rollouts/2026-10-14-sec-xbrl-cached-fundamentals.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Push, then wait for hosted `verify` on the merge commit.  Do not resolve threads.  Do not merge the PR.  Comment `@kody start-review`.
+
+**CI note.**  `.github/workflows/autofix.yml` fails at startup on this branch and on main.  The pinned reusable workflow `pr-autofix-reusable.yml@2e671004` uses `secrets` inside a step `if`, which Actions rejects.  That file is in AI-Fleet-Coordinator, and later coordinator commits still have the same expression.  This PR does not change the caller.
+
+## 2026-10-14 Grok — PR #4665 companyfacts unit shape
+
+**What.**  `origin/main` was already contained in this branch (`79df823d`); `git merge origin/main` was a no-op.  A non-array companyfacts unit value no longer fails `CompanyFactsSchema` for the whole CIK.  `conceptsFromTaxonomy` skips that concept and still inserts its siblings.  A `facts` value that is not an object still throws so the sweep retry path stays intact.  The rollout Verification State lists lint, tsc, `npm test`, and build in that order.
+
+**Verification.**  `npm run lint` ok (0 errors, 856 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9308 passed, 51 skipped, and 1 failed: untouched `test/egress-guard.test.ts` because this sandbox rejects the discord.com lookup.  Targeted sec-facts, sec-xbrl, and companyfacts-sweep tests passed (48).
+
+**Docs.**  `docs/rollouts/2026-10-14-sec-xbrl-cached-fundamentals.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Push the branch.  Reply on the open threads.  Do not resolve them.  Do not merge the PR.  Comment `@kody start-review`.
+
+## 2026-10-14 Grok — PR #4665 review follow-up
+
+**What.**  Merged `origin/main` (`f7a06863`, `@types/node` 24.19.2).  Three unresolved Sentry threads were real.  `applyEnrichment` keeps a positive Nasdaq market cap instead of letting SEC shares × price replace it.  The companyfacts sweep cursor moves past a symbol whose fetch throws.  Evidence cards omit the `__companyfacts_json__` cache row.  Companyfacts JSON is validated with a passthrough Zod schema instead of `as any`.
+
+**Verification.**  `npm run lint` exit 0 (warnings only).  `npx tsc --noEmit` exit 0.  Targeted vitest for market, data-providers, companyfacts sweep, sec-facts, and sec-xbrl passed.  Full `npm test` hit the sandbox DNS failure in `test/egress-guard.test.ts` (discord.com), outside this diff.
+
+**Docs.**  `docs/rollouts/2026-10-14-sec-xbrl-cached-fundamentals.md`, `docs/source-capability-matrix.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Push the branch.  Reply on the open threads.  Do not resolve them.  Do not merge the PR.
+
+## 2026-10-14 Cursor Cloud — SEC XBRL cached fundamentals
+
+**What.**  SEC companyfacts JSON is cached in `sec_facts` and parsed into ROE, ROA, gross profit margin, shares outstanding, and cascade-implied market cap.  EDGAR fetches run on a nightly scheduler sweep (`sec-companyfacts-sweep.ts`); scan-path enrichment reads SQLite only.  `SEC_XBRL_ENRICHMENT_ENABLED` default ON (catalog + code aligned).
+
+**Verification.**  Run full gate: `npm run lint`, `npx tsc --noEmit`, `npm test`, `npm run build`.
+
+**Docs.**  `docs/rollouts/2026-10-14-sec-xbrl-cached-fundamentals.md`, `docs/market-data-provider-pricing.md`, `docs/source-capability-matrix.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Open PR from `cursor/sec-xbrl-fundamentals-cache-6783`; wait for `verify` CI.
+## 2026-10-14 GROK — PR #4658 verification order
+
+**What.**  `origin/main` (`82162336`) is already merged (`e74332cd`).  The one open Kody thread (`PRRT_kwDOS7mOVM6sjYXO`) is the round 2 handoff: it omitted `npm run lint` and listed build before `npm test`.  That block is now lint, tsc, test, build.  The thread is not resolved.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test` was 1 failed, 9327 passed, 51 skipped.  The failure is sandbox DNS for discord.com in `test/egress-guard.test.ts`, outside this diff.  Hosted `verify` on `94b28463` passed lint, tsc, `npm test`, and `npm run build`.
+
+**Docs.**  `docs/rollouts/2026-10-14-keyless-options-enrichment.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Reply on the open thread without resolving it.  Comment `@kody start-review`.  Do not merge from this lane.
+
+## 2026-10-14 AUTOFIX round 2 — PR #4658 (no code change)
+
+**What.**  Second fixer pass.  Re-triaged all 12 review threads on the branch.  Nothing new: the second `kody-ai` review (triggered by `@kody start-review` at 22:39Z) raised only three threads, all `isOutdated` and all already answered by `94b28463` — `.strict()` vs `.passthrough()` on vendor envelopes, the Alpaca IEX snapshot sub-objects, and the Cboe `option` field type.  The three `sentry[bot]` threads are unchanged from round 1 and still describe the pre-`99da1478` diff.  No source or test change was warranted.
+
+**Verification.**  `npx tsc --noEmit` ok.  `npx vitest run test/keyless-options-enrichment.test.ts test/keyless-options-vendor-fetch.test.ts` 19 passed.  Full `npm test` and `npm run build` run on this branch; results in the rollout note.
+
+**Docs.**  `docs/rollouts/2026-10-14-keyless-options-enrichment.md`, `STATUS.md`.
+
+**Next.**  None outstanding.  The three stale `kody-ai` threads were resolved by this lane; the maintainer separately dismissed the three `sentry[bot]` threads, so all 12 threads on the PR are resolved and `required_review_thread_resolution` is cleared.  Merged `origin/main` (`82162336`) to clear a `CONFLICTING` state.  Auto-merge stays armed and will land once `verify` is green.
+
+## 2026-10-14 GROK — PR #4658 review threads (vendor Zod passthrough)
+
+**What.**  Merged `origin/main` (already up to date).  Vendor option envelopes now use explicit Zod `.passthrough()` instead of implicit strip, so extra Cboe/Alpaca/Tradier keys cannot fail a later `.strict()` pass.  Alpaca IEX underlying price reads `latestTrade.p`, else `dailyBar.c`, else `prevDailyBar.c` from nested records, so a partial snapshot still yields ATM IV.  The three Sentry threads were already fixed in `99da1478`.  Cboe `option` stays a string: OCC symbols contain letters, so a JSON number cannot be a valid contract id.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 grandfathered warnings).  `npx tsc --noEmit` ok.  Targeted options tests 39 passed.  `npm test` was 9319 passed, 51 skipped, and 1 failed outside this diff: sandbox DNS for discord.com in `test/egress-guard.test.ts`.  `npm run build` ok.
+
+**Docs.**  `docs/rollouts/2026-10-14-keyless-options-enrichment.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Reply on unresolved threads without resolving them.  Comment `@kody start-review`.  Do not merge from this lane.
+
+## 2026-10-14 CURSOR — Keyless options enrichment (`cursor/keyless-options-enrichment-8872`)
+
+**What.**  Background and shared market scans now fill `nearTheMoneyIv` and `putCallRatio` from keyless Cboe delayed options JSON (primary).  Alpaca indicative snapshots and Tradier chains are keyed Wave B fallbacks when credentials exist.  Same `deriveOptionMetrics` path as Robinhood options.  Review follow-up: Alpaca reads `impliedVolatility` and `dailyBar.v`, underlying price is threaded into ATM metrics, vendor JSON is Zod-parsed, Tradier errors are labeled by endpoint, and empty chains are negative-cached for at most five minutes.
+
+**Verification.**  `npm run lint` ok (0 errors).  `npx tsc --noEmit` ok.  `npm test` was 9315 passed, 51 skipped, and 2 failed outside this diff: sandbox DNS for discord.com in `test/egress-guard.test.ts`, and `pruneTaskJournal` at 238ms against a 100ms budget in `test/event-loop-stall-hot-path.test.ts`.  Targeted options and coverage tests (43) passed.  `npm run build` ok.
+
+**Docs.**  `docs/rollouts/2026-10-14-keyless-options-enrichment.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Open PR for review; merge queues runtime deploy via `main`.
+
+**Autofix round 1 (2026-10-14, no code change).**  All six `kody-ai` threads are resolved and their underlying concerns verified fixed in `99da1478` (Zod schemas replace the `as unknown` casts, `underlyingPrice` threaded into both Alpaca and Tradier parsers, keyed options providers at `costTier = "paid"` gap-filling on the options fields in Wave B, per-endpoint Tradier error labels, negative caching for empty chains).  Zero `[codex-autofix]` commits on the branch.  The three still-open threads are from `sentry[bot]`, outside the bots the fixer resolves; the fixes for them are also already in the branch, but `required_review_thread_resolution` on ruleset `17945518` will block the merge until someone dismisses them.  Asked the maintainer whether to resolve them.  Auto-merge armed (`--squash --auto`).
+## 2026-10-14 Codex Autofix — PR #4663 review sweep (docs only)
+
+**What.**  Swept the review threads after the maintainer re-ran Kody.  Nothing new to fix.
+
+- **All three threads are now resolved** — no thread to resolve this round.  The maintainer resolved Sentry's `fullyDark` finding (`PRRT_kwDOS7mOVM6sgOxJ`, already fixed in `c05390ce`).  Both Kody threads were already resolved and outdated: the verification-block finding (`PRRT_kwDOS7mOVM6shJMJ`) was fixed in `59376259`, and the N+1 halt-cause finding (`PRRT_kwDOS7mOVM6shgi0`) was fixed in `5b7ce62b`, which Kody then confirmed.
+- **One stale STATUS.md paragraph corrected.**  The top entry still read "The thread is not resolved.  Do not resolve the thread.  Do not merge."  That was true when written but is now wrong on both counts — the fix landed and the thread is resolved.  It now points at `5b7ce62b` and records the thread as confirmed, so the next reader is not told to leave a thread open that is already closed.
+- **No source file was modified.**  The diff is `STATUS.md` only.
+
+**Verification.**  `npx tsc --noEmit` ok.  `npm run lint` ok (0 errors, 866 warnings).  `npm test` — 9292 passed, 51 skipped, 13 failed.  All 13 failures are in `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/openrouter-credits.test.ts`, and `test/framework-review.test.ts`, which the PR diff does not touch.  **Confirmed pre-existing**: a clean `origin/main` worktree produces the identical 13 failures, so they are environmental, not a regression.  Cause is an ambient OpenRouter credential in the runner's environment — the provider-routing tests resolve a real key instead of their fake one, so assertions like "no OpenRouter key configured" fail.  Worth flagging separately: the assertion diffs print that credential's value into the log.  `test/trading-liveness.test.ts`, `test/batched-halt-cause.test.ts`, `test/autonomy-halt-cause.test.ts`, `test/scheduler-halt-cause-tick.test.ts`, and `test/egress-guard.test.ts` all pass (71 passed).
+
+**Docs.**  This entry and the stale paragraph above it.  No rollout note update needed — no behavior change.
+
+**Next.**  Land PR.  The ambient-credential test failures and the credential echoed into test output are a separate, out-of-scope issue for the maintainer.
+
+## 2026-10-14 Cursor — health poll batches halt-cause reads (PR #4663)
+
+**What.**  Kody thread `PRRT_kwDOS7mOVM6shgi0` is real.  `/api/health` was classifying each halted autopilot account with up to five queries.  `batchedHaltCauseKinds` now does one `settings` read for the three markers and one indexed `audit_events` read for the breaker and a lost auto-pause.  Kinds still match `describeAutonomyHaltCause`.  The batch is only on the health poll.  Dashboard and ops still call `describeAutonomyHaltCause` for one account.  The handover check still uses the latest halt's id and time, including a same-millisecond row.  Fixed in `5b7ce62b`; Kody confirmed the thread in `PRRT_kwDOS7mOVM6shgi0`.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `test/batched-halt-cause.test.ts`, `test/trading-liveness.test.ts`, `test/autonomy-halt-cause.test.ts`, and `test/scheduler-halt-cause-tick.test.ts` passed.
+
+**Docs.**  `docs/rollouts/2026-10-14-fleet-fully-dark-detector.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Land PR; the N+1 thread is resolved and the batching questions asked in the earlier triage entry are answered by `5b7ce62b`.
+
+## 2026-10-14 Codex Autofix — PR #4663 review triage (no code change)
+
+**What.**  Triaged the two open review threads on the fleet fully-dark detector branch.  Both were already resolved in the branch by the time this pass ran, so no code changed and nothing was pushed.
+
+- **Sentry's `autonomy_fully_dark` "can never be true" finding — confirmed real, already fixed upstream by `c05390ce`.**  The claim checks out: `SystemState` (`src/lib/types.ts:24`) is a closed four-value union and `isDeliberateAutonomyIdleState` claimed all three non-active values, so the active / deliberately-idle buckets were exhaustive and disjoint.  `fullyDark` requires `activeAccounts === 0`, which forces `eligibleDeliberatelyIdle === eligibleAccounts`, which forces `allEligibleDeliberatelyIdle === true` and makes the `!allEligibleDeliberatelyIdle` term constant-false.  Verified by EXECUTION rather than reading alone: a probe driving the real `getTradingLivenessSummary()` with one eligible autopilot account in each of `halted` / `close_only` / `liquidating` returned `fullyDark=undefined` (summary `null`) for all three.  Re-running that probe against the current head confirms the fix — owner stops stay quiet and `fullyDark` is reachable again through an app halt; `test/trading-liveness.test.ts` is 18 passed.
+- **Kody's verification-block finding — already addressed by `59376259`** (per-command outcome for all four gates, including an honest `npm run build` OOM note).
+
+**Left open, no fix.**  Kody's N+1 finding on the new `eligibleAccountIsDeliberatelyIdle` halt-cause lookup is factually accurate but was deliberately not fixed: `describeAutonomyHaltCause` has four callers, and its two `audit_events` SELECTs are correlated (the second keys off `halt.id` / `halt.created_at` from the first, with an `id <>` exclusion), so the suggested batch is a rewrite of that query, not a merge — and a subtle mistake there silently reclassifies an app halt as an owner stop and flips a page.  Asked the maintainer two questions (is the per-poll cost material; scope the batch to `trading-liveness` or restructure the shared module) rather than guessing.  Thread left unresolved by design.
+
+**Verification.**  `npx tsc --noEmit` ok on the current head.  `test/trading-liveness.test.ts` 18 passed.  All 8 PR checks green; `verify` had not yet run on the head commit at the time of writing, and the PR sits `mergeable_state: blocked` on unresolved conversations, not on CI.
+
+**Docs.**  This entry only; a PR comment records the triage and the two open questions.  No source file was modified.
+
+**Next.**  Maintainer to answer the batching questions above; then re-run this pass to act on the answer.
+
+## 2026-10-14 Cursor — fleet fully dark detector (SOCRATIC-TRADE-2S)
+
+**What.**  `autonomy_fully_dark` no longer fires when any account is `systemState === "active"` (fixes ask-first + halted autopilot false pages).  Owner halt / close_only / liquidating stays quiet.  An app halt (boot, watchdog, breaker, broker auto-pause) with nothing else active still pages, so the signal is not dead.  Health route double-checks counts before emitting "fleet is fully dark" copy.  Claude autofix starts only for Codex, Kody, and Cursor reviews, so a Seer review does not fail that job.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test -- test/trading-liveness.test.ts` 18 passed.  Full `npm test`: 9300 passed, 51 skipped, 1 failed outside this diff (`test/egress-guard.test.ts` live DNS to discord.com in this sandbox).  `npm run build` was killed (exit 137) during trace collection after 43/43 static pages; this box ran out of memory.  Hosted `verify` is the build gate.
+
+**Docs.**  `docs/rollouts/2026-10-14-fleet-fully-dark-detector.md`, `STATUS.md`.
+
+**Next.**  Land PR; after deploy watch SOCRATIC-TRADE-2S for new events.
 
 ## 2026-10-14 GROK — PR #4609 verification order
 

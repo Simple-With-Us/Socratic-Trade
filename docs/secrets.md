@@ -109,47 +109,6 @@ fails before either project is fetched. `scripts/cloud-setup.sh` runs a value-fr
 after seeding local defaults; a missing identity remains valid for keyless local UI work, but
 any recognized incomplete pair fails closed before an Infisical CLI call.
 
-### Primary-account Usage Monitor bridge (default off)
-
-The optional writer in `src/lib/st-primary-bridge-writer.ts` is separate from
-the app/bootstrap and shared-overlay identities above. It reads API-key rows
-only for the compile-time primary user `LOCAL_USER` (`local`, the owner's
-`mail@jays.services` account) and only the canonical `gemini` and `deepseek`
-services. No request, manifest, environment variable, or route body can select
-another user or add another provider.
-
-Its destination is also fixed in code: Socratic-Trade project
-`39d93bb7-76f9-498c-8b50-a7def52e072f`, environment `prod`, path
-`/usage-monitor/st-primary/v1`. Enablement requires all three runtime values:
-
-```bash
-INFISICAL_ST_PRIMARY_WRITER_ENABLED=true
-INFISICAL_ST_PRIMARY_WRITER_CLIENT_ID=...
-INFISICAL_ST_PRIMARY_WRITER_CLIENT_SECRET=...
-```
-
-Use a dedicated project-managed identity: project membership role `no-access`,
-then an identity-specific additional privilege scoped to exactly `prod` and
-`/usage-monitor/st-primary/v1` with only secret `read`, `readValue`, `create`,
-and `edit`. Do not grant delete, broader paths, project administration, or
-identity administration. API Usage Monitor needs a separate identity with only
-`read` and `readValue` on that same exact path. The writer identity pair is an
-application feature credential (not a runner bootstrap alias) and may be stored
-as managed production runtime secrets; it is never accepted from a browser or
-from the broad local global-key bootstrap parser.
-
-The writer publishes exactly `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, and a strict
-`BRIDGE_MANIFEST_V1`. Active values are written and read-back-verified before
-the manifest is committed last. The manifest carries only SHA-256
-fingerprints, a monotonic sequence, and active/revoked status; it never carries
-the key values. Revocation is a keyless manifest tombstone, not a remote secret
-delete, matching the writer's intentionally delete-free privilege. Invalid,
-partial, replayed, rolled-back, unexpected-path, or concurrently changed state
-fails closed so the monitor retains its last-known-good complete generation.
-The scheduler reconciles every five minutes while enabled, retries failures
-after one minute, and key changes for the primary Gemini/DeepSeek rows queue an
-immediate best-effort reconciliation.
-
 ## Enforcement (fail-closed boot guard)
 
 `src/lib/secrets-source.ts` exposes `assertSecretsManagerIfRequired()`; it's called from

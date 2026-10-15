@@ -73,6 +73,7 @@ import {
 } from "./strategy-lock-guard";
 import {
   classifyPlaceOrderError,
+  mustReconcileRetryablePlaceError,
   type ExecuteProposalResult
 } from "./placement-outcome";
 import { appendDecisionStep, assertLiveApprovalConfirmation, protectiveExitQuoteFromScan, openingPolicyNotionalCap, autoRevertOnCapBreach, auditWashSaleProceed } from "./strategy";
@@ -1420,6 +1421,9 @@ export async function executeProposal(
           // HTTP 429 → not_placed (retryable). HTTP 408 is a timeout and falls through to
           // reconcilePlacementError with HTTP 409 (duplicate client_order_id): executeProposal
           // mints a new refId per call, so booking 408 as not_placed can duplicate a live order.
+          // Tradier's "Unexpected server error" falls through the same way.  The adapter
+          // already returns a tag hit as success; an escaped sentence means the POST may
+          // still be live.
           // Reserve uncertain for an unreachable broker list / 5xx.
           // The one transient OrderValidationError: the placement-time position read failed and
           // the sell/cover failed closed.  Nothing reached the broker — retryable not_placed.
@@ -1486,8 +1490,9 @@ export async function executeProposal(
             throw new Error([message].join(" "));
           }
           const placeClass = classifyPlaceOrderError(message);
-          // 408 stays classified retryable but must not book not_placed before reconcile.
-          if (placeClass === "retryable" && !/\bHTTP 408\b/i.test(message)) {
+          // 408 and Tradier's transient sentence stay classified retryable but must
+          // not book not_placed before reconcile.
+          if (placeClass === "retryable" && !mustReconcileRetryablePlaceError(message)) {
             const note = `Broker rate-limited or timed out (${message}). Safe to retry.`;
             updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, note);
             audit(

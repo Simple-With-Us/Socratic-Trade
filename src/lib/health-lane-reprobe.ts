@@ -48,7 +48,9 @@ export type HealthReprobeOutcome =
 
 /** Backup health lane → primary that already serves the same reading. */
 export const BACKUP_HEALTH_LANES: Record<string, string> = {
-  "vix-yahoo": "vix-cboe"
+  "vix-yahoo": "vix-cboe-history",
+  "vix-cboe": "vix-cboe-history",
+  "vix-fred": "vix-cboe-history"
 };
 
 /**

@@ -438,6 +438,83 @@ describe("inline placement-error reconciliation via executeProposal", () => {
     expect(getProposal(proposalId, userId)?.status).toBe("not_placed");
   });
 
+  it("Tradier unexpected server error + order PRESENT → placed via reconcile, not not_placed", async () => {
+    const userId = `reco-tradier-400-present-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    let listsAfterPlace = 0;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("Tradier order failed: Tradier HTTP 400: Unexpected server error");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      listsAfterPlace += 1;
+      return [brokerOrder({ clientOrderId: capturedRefId, state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result = await executeProposal(proposalId, userId);
+    expect(listsAfterPlace).toBeGreaterThan(0);
+    expect(result.status).toBe("placed");
+    expect(result.orderId).toBeTruthy();
+    expect(getProposal(proposalId, userId)?.status).toBe("placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("not_placed");
+  });
+
+  it("Tradier unexpected server error + order ABSENT → not_placed only after the broker list", async () => {
+    const userId = `reco-tradier-400-absent-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    let listsAfterPlace = 0;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("Tradier order failed: Tradier HTTP 400: Unexpected server error");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      listsAfterPlace += 1;
+      return [brokerOrder({ clientOrderId: "some-other-key", state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(listsAfterPlace).toBeGreaterThan(0);
+    expect(result.message).toMatch(/safe to retry/i);
+    expect(getProposal(proposalId, userId)?.status).toBe("not_placed");
+  });
+
+  it("Tradier tag-lookup failure reconciles instead of booking not_placed up front", async () => {
+    const userId = `reco-tradier-lookup-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    let listsAfterPlace = 0;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("Tradier order failed: Tradier order placement unverified: the tag lookup failed. Reconcile before retrying.");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      listsAfterPlace += 1;
+      return [brokerOrder({ clientOrderId: capturedRefId, state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result = await executeProposal(proposalId, userId);
+    expect(listsAfterPlace).toBeGreaterThan(0);
+    expect(result.status).toBe("placed");
+    expect(getProposal(proposalId, userId)?.status).toBe("placed");
+  });
+
   it("HTTP 429 → not_placed (safe to retry), not rejected_by_broker", async () => {
     const userId = `reco-429-${randomUUID()}`;
     const proposalId = await seedApprovedProposal(userId);
@@ -454,7 +531,7 @@ describe("inline placement-error reconciliation via executeProposal", () => {
       (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
       (e) => e
     );
-    expect(result.message).toMatch(/safe to retry/i);
+    expect(result.message).toMatch(/rate-limited/);
     expect(getProposal(proposalId, userId)?.status).toBe("not_placed");
     expect(getProposal(proposalId, userId)?.status).not.toBe("rejected_by_broker");
   });

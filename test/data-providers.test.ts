@@ -31,6 +31,7 @@ import { getServiceHealthLog } from "../src/lib/db-health";
 import { arbitrateFieldObservation } from "../src/lib/evidence-facts";
 import { deleteUserApiKey, migrateLocalEnvCredentials, upsertUserApiKey, LOCAL_USER } from "../src/lib/db-api-keys";
 import { __resetAlphaVantageDailyBudgetForTests, __resetKeyPoolRegistryForTests } from "../src/lib/alpha-vantage-key-pool";
+import { clearProviderFieldCacheForTests } from "../src/lib/provider-field-cache";
 
 /** Suppresses a provider's own `/calendar/earnings`-style daysToEarnings fallback fetch (Finnhub,
  *  Alpha Vantage) by marking the field already-covered upstream — keeps pre-existing exact
@@ -54,6 +55,10 @@ beforeAll(() => {
   // without this, Finnhub/Alpha Vantage/Yahoo calls here would inherit real-world spacing (real
   // 400ms-1.2s waits per request) since the pacer is unaware it's under test.
   process.env.PROVIDER_RATE_LIMIT_DISABLED = "1";
+});
+
+beforeEach(() => {
+  clearProviderFieldCacheForTests();
 });
 
 describe("market enrichment provider", () => {
@@ -2918,6 +2923,17 @@ describe("CascadingEnrichmentProvider evidence receipts and arbitration", () => 
     const allFailed = new CascadingEnrichmentProvider([failed]);
     const failedResult = await allFailed.enrich(["AAPL"]);
     expect(failedResult.AAPL.fieldObservations?.peRatio?.status).toBe("failed");
+  });
+
+  it("derives marketCap from SEC XBRL shares times live price when cap is missing", async () => {
+    const cascade = new CascadingEnrichmentProvider([
+      stub("yahoo-finance", { AAPL: { price: 200 } }),
+      stub("sec-xbrl", { AAPL: { sharesOutstanding: 1_000_000 } })
+    ]);
+    const result = await cascade.enrich(["AAPL"]);
+    expect(result.AAPL.marketCap).toBe(200_000_000);
+    expect(result.AAPL.sources?.marketCap).toBe("sec-xbrl");
+    expect(result.AAPL.sources?.sharesOutstanding).toBe("sec-xbrl");
   });
 
   it("preserves explicit field timestamps and upstream source metadata", async () => {

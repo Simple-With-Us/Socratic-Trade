@@ -5,6 +5,7 @@ import {
   isIdempotencyConflictHttpError,
   isRetryableBrokerHttpError,
   isTerminalBrokerHttpError,
+  mustReconcileRetryablePlaceError,
   mobileCommandStatusForPlacement,
   placementCommandErrorMessage,
   resolvePlacementOutcome
@@ -64,6 +65,47 @@ describe("placement outcome resolver", () => {
       "rejected_terminal"
     );
     expect(classifyPlaceOrderError("network timeout during placement")).toBe("other");
+  });
+
+  it("treats Tradier HTTP 400 Unexpected server error as retryable and keeps real rejects terminal", () => {
+    const sentence = "Tradier order failed: Tradier HTTP 400: Unexpected server error";
+    const wrapped422 = "Tradier HTTP 422: Unexpected server error";
+    const buyingPower = "Tradier order failed: Tradier HTTP 400: Not enough buying power";
+    const plain400 = "HTTP 400 Bad Request";
+    const http500 = "Tradier HTTP 500: Unexpected server error";
+    const deferral = "Tradier sandbox order placement is deferred until 15 minutes after the open. Safe to retry.";
+    const deferral16 =
+      "Tradier sandbox quotes are 15 minutes delayed, so strategy runs and order placement wait until 16 minutes after the open (9:46am ET).  Safe to retry.";
+    expect(isRetryableBrokerHttpError(sentence)).toBe(true);
+    expect(isTerminalBrokerHttpError(sentence)).toBe(false);
+    expect(classifyPlaceOrderError(sentence)).toBe("retryable");
+    expect(classifyPlaceOrderError(wrapped422)).toBe("retryable");
+    expect(isTerminalBrokerHttpError(wrapped422)).toBe(false);
+    expect(classifyPlaceOrderError(buyingPower)).toBe("rejected_terminal");
+    expect(isTerminalBrokerHttpError(buyingPower)).toBe(true);
+    expect(classifyPlaceOrderError(plain400)).toBe("rejected_terminal");
+    expect(isRetryableBrokerHttpError(http500)).toBe(false);
+    expect(classifyPlaceOrderError(http500)).toBe("other");
+    expect(classifyPlaceOrderError("An unexpected error occurred. Please try again.")).toBe("other");
+    expect(classifyPlaceOrderError(deferral)).toBe("retryable");
+    expect(isTerminalBrokerHttpError(deferral)).toBe(false);
+    expect(classifyPlaceOrderError(deferral16)).toBe("retryable");
+    expect(isTerminalBrokerHttpError(deferral16)).toBe(false);
+    expect(classifyPlaceOrderError("HTTP 403 Forbidden")).toBe("rejected_terminal");
+    // The sentence stays retryable, but it must reconcile before not_placed.
+    // HTTP 429 and the local open-window deferral never reached a live order.
+    expect(mustReconcileRetryablePlaceError(sentence)).toBe(true);
+    expect(mustReconcileRetryablePlaceError(wrapped422)).toBe(true);
+    expect(mustReconcileRetryablePlaceError("Broker HTTP 408 while placing")).toBe(true);
+    expect(mustReconcileRetryablePlaceError("Alpaca order failed: HTTP 429 Too Many Requests")).toBe(false);
+    expect(mustReconcileRetryablePlaceError(deferral)).toBe(false);
+    expect(mustReconcileRetryablePlaceError(deferral16)).toBe(false);
+    expect(mustReconcileRetryablePlaceError(buyingPower)).toBe(false);
+    expect(mustReconcileRetryablePlaceError(http500)).toBe(false);
+    const unverified = "Tradier order placement unverified: the tag lookup failed. Reconcile before retrying.";
+    expect(classifyPlaceOrderError(unverified)).toBe("other");
+    expect(mustReconcileRetryablePlaceError(unverified)).toBe(false);
+    expect(isTerminalBrokerHttpError(unverified)).toBe(false);
   });
 
   it("resolvePlacementOutcome preserves the executeProposal payload and adds outcome", () => {
