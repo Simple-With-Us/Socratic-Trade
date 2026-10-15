@@ -23,6 +23,8 @@ it awaits that account's health probe, so one hung probe cannot delay the next a
 protection.  A hung read releases the stop and exit in-flight guards.  A broker write that has
 already started keeps its guard so the next tick cannot send it twice.  A strategy run whose
 health probe or pre-decision snapshot never returns is finished `failed` with a timeout summary.
+An abort that lands after the stop is claimed, and before `placeEquityOrder`, reverts that claim
+and keeps the attempt id, so the position is not left `triggered` until the 15-minute re-arm grace.
 
 ## Objective
 
