@@ -9,6 +9,17 @@
 **Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  `npx vitest run test/run-failure-watchdog.test.ts` 23/23.  Targeted re-arm test 30/30.  `npm run build` ok.
 
 **Next.**  Open PR ready for review; merge via Deployer when `verify` is green.
+## 2026-10-15 CURSOR — Ops snapshot perf PR #4659 (`cursor/ops-snapshot-perf-b622`)
+
+**What.**  Async `buildOpsSnapshot` with 45s single-flight cache, per-section `timingsMs`, per-user `marketScan` (`generatedAt`, `stale`), strategy-runs index v95, Tradier/non-Alpaca **422** on `/api/ops/account-activity`.  Review follow-up: `$.marketScan.omitted` in `readMarketScanMetaFromAudit`, `opsSnapshotForCaller` copy before `attachOpsOrderSummaries`, `WH` non-trade fallback.  Branch contains `origin/main` at `12702bd9` (#4730 ST-4537 CT fundamentals nightly push, #4695, #4716, etc.) via repeated clean merges — ops diff still not on `main`.  Per-user cold queries remain; 45s cache is the prod mitigation.
+
+**Reservation.**  Linear **CURSOR** app (`linear_whoami` ok).  No dedicated ST issue for this branch slug after search; did not fabricate a board id.  PR **#4659** is the tracker for this lane.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test` — see rollout (hosted `verify` is authoritative).  Touched ops tests green locally.  `npm run build` ok.  2026-10-15 `[codex-autofix]` round 1 was docs-only (kody-ai merge-count thread); `tsc` re-run clean.
+
+**Docs.**  `docs/rollouts/2026-10-14-ops-snapshot-perf.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  PR ready for review; Deployer/Jay merge.  Post-deploy: `scripts/fetch-prod-ops-snapshot.sh` and compare `timingsMs` to ~84.7s baseline.
 ## 2026-10-15 Cursor Cloud — merge shepherd ST-2874 + AFC fleet-health ST-9
 
 **What.**  ST-2874: `scripts/merge-shepherd.sh` defers `update-branch` while CI is in flight on the current head (fixes verify-hosted starvation).  ST-9: fix lands in **AI-Fleet-Coordinator** (`fleet-health-recover.sh` UUID/label container lookup), not Socratic-Trade.
@@ -145,7 +156,6 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 **Verification.**  Kody fixes: `infisical-secrets-safe.sh get` (Actions-only) for Zulip triple; rollout verification `-> ok` lines; fleet-post stderr surfacing.  Re-run `verify` CI after push.
 
 **Next.**  PR #4696 ready for Deployer merge after CI green; Refs ST-4531.
-**Next.**  PR #4696 ready for Deployer merge; Refs ST-4531.
 
 **Autofix round 9.**  All kody/cursor review threads are resolved and their fixes verified present in HEAD (the `resolve_bin` trailing-brace typo, the plist Zulip email example, and the rollout Decisions section).  Two new kody findings handled: the rollout `Verification State` block now annotates each command with a real `-> ok` / `-> fail` result.  `npm test` fails 10 tests in `test/llm-provider.test.ts` and `test/openrouter-credits.test.ts`, but both are pre-existing — they reproduce identically on a clean `origin/main` worktree in this runner and neither file is touched by this PR (an OpenRouter credential in the runner env that the tests assume absent).  `lint` 0 errors, `tsc` ok, `build` ok.  One kody critical finding is deliberately NOT fixed and is open for the maintainer: it asks that bare `infisical secrets get` in `scripts/github-actions-infisical-zulip-ops.sh` be routed through `scripts/infisical-secrets-safe.sh`, but that wrapper has no `get` subcommand — its own instruction says to raise that as a follow-up rather than call bare `infisical secrets`.  Adding a secret-printing `get` path to a wrapper whose contract is "never dumps values" is a security-policy change, not a mechanical fix.  Also note: the uncommitted `.claude/skills/*` edits present in the checkout were reverted Zulip→Slack (undoing this PR's purpose) and were discarded, not committed; patch kept at `/tmp/reverted-slack-edits.patch`.
 **Verification.**  `bash -n` on touched scripts; `alert-deploy-freshness.selftest.sh` 9/9; `vitest run test/infisical-secrets-safe.test.ts` 47/47; `npm run lint` 0 errors; `tsc`; `npm run build`; awaiting fresh `verify` CI on new head.
