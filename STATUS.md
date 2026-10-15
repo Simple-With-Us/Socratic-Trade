@@ -2,9 +2,9 @@
 
 ## 2026-10-14 GROK — SQLite storage hygiene
 
-**What.**  Production SQLite is about 16.5 GB with a 415 MB WAL.  Background checks were stalling 76-79s and the scheduler lagged 120s.  This lane adds a storage-hygiene job: table-size report, retention deletes for caches/logs/finished runs, batched deletes that yield, a PASSIVE WAL checkpoint with TRUNCATE only when Litestream looks safe, and incremental free-page reclaim.  It never runs a full file rewrite and never deletes orders, fills, positions, approvals, transfers, or HWM inputs.
+**What.**  Production SQLite is about 16.5 GB with a 415 MB WAL.  Background checks were stalling 76-79s and the scheduler lagged 120s.  PR #4666 adds a storage-hygiene job: table-size report, retention deletes for caches/logs/finished runs, batched deletes that yield, a PASSIVE WAL checkpoint with TRUNCATE only when Litestream looks safe, and incremental free-page reclaim.  It never runs a full file rewrite and never deletes orders, fills, positions, approvals, transfers, or HWM inputs.  Review fixes: the lane runs only on the scheduler leader, the cadence watermark is claimed before the pass, a wide Litestream directory is aged from its highest-named files, and each coverage delete pair is one transaction.
 
-**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  `npm test` was 9284 passed, 51 skipped, and 25 failed outside this diff: sandbox provider keys (OpenRouter and notify credentials) make "no key" cases fail, `summarize-cpuprofile.mjs` cannot load a `.ts` file under Node 22, and server-metrics host detection.  Targeted `test/sqlite-storage-hygiene.test.ts` was 12 passed and is not in the failure list.
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test` was 1 failed, 9341 passed, 51 skipped.  The failure is sandbox DNS for discord.com in `test/egress-guard.test.ts`, outside this diff.  Targeted `test/sqlite-storage-hygiene.test.ts` was 14 passed.  `npm run build` ok.
 
 **Docs.**  `docs/rollouts/2026-10-14-sqlite-storage-hygiene.md`, `STATUS.md`, `PLAN.md`.
 

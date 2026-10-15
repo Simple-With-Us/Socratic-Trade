@@ -156,6 +156,30 @@ describe("storage hygiene decisions", () => {
       ageSeconds: null,
       uncertain: false
     });
+
+    const wideRoot = join(tmpdir(), `agentic-lss-wide-${randomUUID()}`);
+    const wideDb = join(wideRoot, "app.db");
+    const level0 = join(wideDb + "-litestream", "ltx", "0");
+    const level1 = join(wideDb + "-litestream", "ltx", "1");
+    mkdirSync(level0, { recursive: true });
+    mkdirSync(level1, { recursive: true });
+    const old = new Date(Date.now() - 86_400_000);
+    for (let i = 0; i < 100; i += 1) {
+      const file = join(level0, `0000000000000000-${i.toString(16).padStart(16, "0")}.ltx`);
+      writeFileSync(file, "x");
+      utimesSync(file, old, old);
+    }
+    const levelRecent = new Date();
+    const recentFile = join(level0, `0000000000000000-${(200).toString(16).padStart(16, "0")}.ltx`);
+    writeFileSync(recentFile, "x");
+    utimesSync(recentFile, levelRecent, levelRecent);
+    const newestStamp = new Date(levelRecent.getTime() + 5_000);
+    const newestFile = join(level1, "0000000000000000-ffffffffffffffff.ltx");
+    writeFileSync(newestFile, "x");
+    utimesSync(newestFile, newestStamp, newestStamp);
+    const wide = readLitestreamReplicaAge(wideDb, newestStamp.getTime() + 1_000);
+    expect(wide.uncertain).toBe(false);
+    expect(wide.ageSeconds).toBeLessThanOrEqual(2);
   });
 });
 
@@ -532,6 +556,66 @@ describe("storage hygiene against a database", () => {
       expect(await hygiene.runStorageHygieneIfDue(t0 + hygiene.HYGIENE_FULL_INTERVAL_MS + 20 * 60_000)).toBeNull();
     } finally {
       delete process.env.SQLITE_STORAGE_HYGIENE_DRY_RUN;
+    }
+  });
+
+  it("claims the watermark before the pass and skips an overlapping tick", async () => {
+    const { db, hygiene } = await open();
+    clearHygieneRows(db);
+    const t0 = NOW.getTime();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    hygiene.storageHygieneTestHooks.beforePass = () => gate;
+    try {
+      const first = hygiene.runStorageHygieneIfDue(t0);
+      await Promise.resolve();
+      const overlapped = await hygiene.runStorageHygieneIfDue(t0 + hygiene.HYGIENE_FULL_INTERVAL_MS + 60_000);
+      expect(overlapped).toBeNull();
+      const claimed = db.prepare("SELECT value FROM settings WHERE key = 'storage-hygiene:lastFullAt'").get() as {
+        value: string;
+      };
+      expect(JSON.parse(claimed.value)).toBe(new Date(t0).toISOString());
+      release();
+      expect(await first).not.toBeNull();
+      const after = db.prepare("SELECT value FROM settings WHERE key = 'storage-hygiene:lastFullAt'").get() as {
+        value: string;
+      };
+      expect(JSON.parse(after.value)).toBe(new Date(t0).toISOString());
+    } finally {
+      release();
+      delete hygiene.storageHygieneTestHooks.beforePass;
+    }
+  });
+
+  it("keeps the watermark when the pass throws so the next tick does not start another walk", async () => {
+    const { db, hygiene } = await open();
+    clearHygieneRows(db);
+    const t0 = NOW.getTime();
+    const nowIso = new Date(t0).toISOString();
+    db.prepare(
+      "INSERT INTO settings (key, value, updated_at) VALUES ('storage-hygiene:lastCheckpointAt', ?, ?)"
+    ).run(JSON.stringify(nowIso), nowIso);
+    hygiene.storageHygieneTestHooks.beforePass = async () => {
+      throw new Error("hygiene boom");
+    };
+    try {
+      let thrown: unknown;
+      try {
+        await hygiene.runStorageHygieneIfDue(t0);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toMatch(/hygiene boom/);
+      expect(await hygiene.runStorageHygieneIfDue(t0 + 60_000)).toBeNull();
+      const claimed = db.prepare("SELECT value FROM settings WHERE key = 'storage-hygiene:lastFullAt'").get() as {
+        value: string;
+      };
+      expect(JSON.parse(claimed.value)).toBe(new Date(t0).toISOString());
+    } finally {
+      delete hygiene.storageHygieneTestHooks.beforePass;
     }
   });
 

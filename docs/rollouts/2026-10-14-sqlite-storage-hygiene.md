@@ -34,20 +34,19 @@ WAL checkpoint is PASSIVE.  TRUNCATE runs only after that copy reports busy 0 an
 - `expectedReclaimBytes` is the logical page-fraction of eligible hygiene rows.  `expectedFileShrinkBytes` is pages actually returned this pass.  On a production file that is still `auto_vacuum=NONE`, deletes free pages for reuse and the file size does not shrink.  Switching that file would require a full rewrite, which this job refuses.
 - No `CREATE INDEX` in `migrate()` for the new deletes.  A boot-time index on a multi-gigabyte table is the stall class from 2026-10-05.  History-cache deletes filter `date` in batches.  Coverage deletes by the existing `as_of` key.
 - Watermarks and the ops report are quiet `settings` writes.  They do not insert `policy_change` audit rows.
+- The storage-hygiene lane runs after the single-leader gate.  A follower does not checkpoint or delete.  `runStorageHygieneIfDue` also refuses a second same-process call while one pass is in flight, and it claims `storage-hygiene:lastFullAt` before the await.  A thrown pass keeps that claim so the next tick does not start another full walk.
+- Litestream age reads the generation directory by directory, not by the first 80 `readdir` entries.  A wide LTX directory contributes its highest-named files (name order is write order).  A walk that stops early stays uncertain and refuses TRUNCATE.
+- Each coverage batch deletes `enrichment_coverage_fields` and `enrichment_coverage_runs` in one transaction.  There is no foreign key between them.
+- Daily audit prune stays watermark-first, matching `runAuditPruneIfDue`.  Moving that write to after the yielding delete would let the next 60s tick start a second delete pass.  Partial deletes stay committed and the next daily pass continues the backlog.
 - Phase docs are unchanged.  This is operational retention, not a phase-design change.  `docs/EFFORT-LOG.md` is archived and was not edited.
 - Linear team ST and Zulip were not updated.  This cloud seat has no Fleet Linear client credentials and no Zulip credentials (`board whoami` and `agent-sync whoami` both refused).
 
 ## Verification State
 
-```bash
-npm run lint
-npx tsc --noEmit
-npm test
-npm run build
-npx vitest run test/sqlite-storage-hygiene.test.ts
-```
-
-`npm run lint` ok (0 errors, 866 grandfathered warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  Targeted hygiene tests 12 passed.  Full `npm test` was 9284 passed, 51 skipped, and 25 failed.  Those 25 are outside this diff: provider-key tests expect no OpenRouter or notify credential in the environment, `scripts/ops/summarize-cpuprofile.mjs` fails to import a `.ts` file under this Node 22, Twelve Data and Alpha Vantage pool cases see a configured key, and server-metrics host detection does not report a local host.  `test/sqlite-storage-hygiene.test.ts` is not in the failure list.
+- npm run lint -> ok (0 errors, 866 grandfathered warnings)
+- npx tsc --noEmit -> ok
+- npm test -> 1 failed, 9341 passed, 51 skipped.  The failure is sandbox DNS for discord.com in `test/egress-guard.test.ts`, outside this diff.  `test/sqlite-storage-hygiene.test.ts` 14 passed.
+- npm run build -> ok
 
 ## Next Steps & Blockers
 

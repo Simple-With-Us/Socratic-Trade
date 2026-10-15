@@ -951,17 +951,6 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     return { status: "ok" as const, summary: `deleted=${total}` };
   }).catch((err) => console.error("[scheduler] audit prune error:", err));
 
-  // Table sizes, retention for non-money caches and logs, WAL checkpoint, and
-  // incremental free-page reclaim.  Dry-run when SQLITE_STORAGE_HYGIENE_DRY_RUN=1.
-  void journalLane("storage-hygiene", {}, async () => {
-    const result = await runStorageHygieneIfDue();
-    if (!result) return { status: "skipped" as const, summary: "not due" };
-    return {
-      status: "ok" as const,
-      summary: `dryRun=${result.dryRun} eligibleBytes=${result.expectedReclaimBytes} deleted=${result.deletedRows}`
-    };
-  }).catch((err) => console.error("[scheduler] storage hygiene error:", err));
-
   signal?.throwIfAborted();
 
   // Single-leader gate (default ON, including unset/empty). Only an explicit false/off/0/no-style
@@ -970,6 +959,18 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   if (singleLeaderEnabled() && !acquireOrRenewLeadership(new Date())) {
     return; // not the leader this tick — no side effects
   }
+
+  // Table sizes, retention for non-money caches and logs, WAL checkpoint, and
+  // incremental free-page reclaim.  Leader only: every replica checkpointing
+  // the same WAL fights TRUNCATE.  Dry-run when SQLITE_STORAGE_HYGIENE_DRY_RUN=1.
+  void journalLane("storage-hygiene", {}, async () => {
+    const result = await runStorageHygieneIfDue();
+    if (!result) return { status: "skipped" as const, summary: "not due" };
+    return {
+      status: "ok" as const,
+      summary: `dryRun=${result.dryRun} eligibleBytes=${result.expectedReclaimBytes} deleted=${result.deletedRows}`
+    };
+  }).catch((err) => console.error("[scheduler] storage hygiene error:", err));
 
   // Open an honest Sentry Crons job after the leader gate: only the process running the tick
   // body reports, so idle followers cannot mask a dead leader. `ok` is sent in `finally` once

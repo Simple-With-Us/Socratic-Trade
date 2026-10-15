@@ -435,8 +435,34 @@ function fileBytes(path: string): number {
   }
 }
 
+/** Directories visited before the walk stops and reports uncertain.  Production
+ *  `ltx/0` holds 1,000+ files, so the cap is directories, not directory entries. */
+const LITESTREAM_WALK_MAX_DIRECTORIES = 80;
+/** Large LTX directories are named `<minTXID>-<maxTXID>.ltx`.  Lexicographic order
+ *  matches write order, so a wide directory stats this many highest names. */
+const LITESTREAM_DIR_STAT_SAMPLE = 8;
+
+function highestNames(names: readonly string[], sample: number): string[] {
+  if (names.length <= sample) return [...names];
+  const top: string[] = [];
+  for (const name of names) {
+    if (top.length < sample) {
+      top.push(name);
+      if (top.length === sample) top.sort();
+      continue;
+    }
+    if (name > top[0]) {
+      top[0] = name;
+      top.sort();
+    }
+  }
+  return top;
+}
+
 /** Best-effort age of the Litestream generation directory next to the database.
- *  A capped walk that cannot see a timestamp is "uncertain", which refuses TRUNCATE. */
+ *  A walk that stops early is "uncertain", which refuses TRUNCATE.  Wide LTX
+ *  directories contribute their highest-named files instead of the first entries
+ *  `readdir` happens to return. */
 export function readLitestreamReplicaAge(dbPath: string, now = Date.now()): { ageSeconds: number | null; uncertain: boolean } {
   const root = `${dbPath}-litestream`;
   let rootStat;
@@ -446,33 +472,41 @@ export function readLitestreamReplicaAge(dbPath: string, now = Date.now()): { ag
     return { ageSeconds: null, uncertain: false };
   }
   if (!rootStat.isDirectory()) return { ageSeconds: null, uncertain: false };
-  const budget = { left: 80 };
   let newest = 0;
-  const walk = (dir: string) => {
-    if (budget.left <= 0) return;
-    let names: string[];
-    try {
-      names = readdirSync(dir);
-    } catch {
-      return;
+  let directories = 0;
+  let truncated = false;
+  const pending = [root];
+  while (pending.length > 0) {
+    if (directories >= LITESTREAM_WALK_MAX_DIRECTORIES) {
+      truncated = true;
+      break;
     }
-    for (const name of names) {
-      if (budget.left <= 0) return;
-      budget.left -= 1;
-      const full = join(dir, name);
-      let stat;
+    const dir = pending.pop();
+    if (!dir) break;
+    let dirents;
+    try {
+      dirents = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      truncated = true;
+      continue;
+    }
+    directories += 1;
+    const fileNames: string[] = [];
+    for (const entry of dirents) {
+      if (entry.isDirectory()) pending.push(join(dir, entry.name));
+      else fileNames.push(entry.name);
+    }
+    for (const name of highestNames(fileNames, LITESTREAM_DIR_STAT_SAMPLE)) {
       try {
-        stat = statSync(full);
+        const stat = statSync(join(dir, name));
+        if (stat.isFile() && stat.mtimeMs > newest) newest = stat.mtimeMs;
       } catch {
         continue;
       }
-      if (stat.isDirectory()) walk(full);
-      else if (stat.mtimeMs > newest) newest = stat.mtimeMs;
     }
-  };
-  walk(root);
-  if (newest === 0) return { ageSeconds: null, uncertain: budget.left <= 0 };
-  return { ageSeconds: Math.round((now - newest) / 1000), uncertain: false };
+  }
+  if (newest === 0) return { ageSeconds: null, uncertain: truncated };
+  return { ageSeconds: Math.max(0, Math.round((now - newest) / 1000)), uncertain: truncated };
 }
 
 function readJsonSetting<T>(key: string): T | null {
@@ -656,6 +690,11 @@ async function pruneCoverage(
   }
   let deleted = 0;
   if (!dryRun && tableExists("enrichment_coverage_runs")) {
+    const deleteBatch = getDb().transaction((ids: string[]) => {
+      const placeholders = ids.map(() => "?").join(", ");
+      getDb().prepare(`DELETE FROM enrichment_coverage_fields WHERE as_of IN (${placeholders})`).run(...ids);
+      return getDb().prepare(`DELETE FROM enrichment_coverage_runs WHERE as_of IN (${placeholders})`).run(...ids).changes;
+    });
     for (let batch = 0; batch < maxBatches; batch += 1) {
       const stale = getDb()
         .prepare(
@@ -668,10 +707,7 @@ async function pruneCoverage(
         )
         .all(COVERAGE_MIN_KEEP, cutoff, COVERAGE_MAX_RUNS, batchSize) as Array<{ asOf: string }>;
       if (stale.length === 0) break;
-      const placeholders = stale.map(() => "?").join(", ");
-      const ids = stale.map((row) => row.asOf);
-      getDb().prepare(`DELETE FROM enrichment_coverage_fields WHERE as_of IN (${placeholders})`).run(...ids);
-      deleted += getDb().prepare(`DELETE FROM enrichment_coverage_runs WHERE as_of IN (${placeholders})`).run(...ids).changes;
+      deleted += deleteBatch(stale.map((row) => row.asOf));
       if (stale.length < batchSize) break;
       await yieldFn();
     }
@@ -944,27 +980,72 @@ async function runCheckpointOnly(options: StorageHygieneOptions, now: Date): Pro
   return report;
 }
 
+/** Same-process guard.  The scheduler fires this lane with `void` and does not
+ *  await it, so the next 60s tick would otherwise start a second pass. */
+let hygieneInFlight = false;
+
+/** Test-only pause after the watermark claim and before the pass. */
+export const storageHygieneTestHooks: { beforePass?: () => Promise<void> } = {};
+
+function readSettingString(key: string): string | null {
+  const row = getDb().prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
+  if (!row?.value) return null;
+  try {
+    const parsed = JSON.parse(row.value) as unknown;
+    return typeof parsed === "string" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Compare-and-set the cadence watermark before the pass starts.  A second
+ *  process that still sees the old value loses and does not start work. */
+function claimJsonString(key: string, observed: string | null, nowIso: string): boolean {
+  const db = getDb();
+  const claim = db.transaction(() => {
+    const current = readSettingString(key);
+    if (current !== observed) return false;
+    db.prepare(
+      `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+    ).run(key, JSON.stringify(nowIso), nowIso);
+    return true;
+  });
+  return claim.immediate();
+}
+
 /** Cadence: a full pass every 6 hours, and a WAL checkpoint every 10 minutes.
  *  SQLITE_STORAGE_HYGIENE_DISABLED=1 turns the lane off.
- *  SQLITE_STORAGE_HYGIENE_DRY_RUN=1 writes the estimate and deletes nothing. */
+ *  SQLITE_STORAGE_HYGIENE_DRY_RUN=1 writes the estimate and deletes nothing.
+ *  The watermark is claimed before the await.  A thrown pass keeps that claim
+ *  so the next tick does not start another full walk; the interval retries. */
 export async function runStorageHygieneIfDue(nowMs: number = Date.now()): Promise<StorageHygieneReport | null> {
   if (process.env.SQLITE_STORAGE_HYGIENE_DISABLED === "1") return null;
-  const now = new Date(nowMs);
-  const fullLast = readJsonSetting<string>(FULL_AT_KEY);
-  const checkpointLast = readJsonSetting<string>(CHECKPOINT_AT_KEY);
-  const fullMs = fullLast ? Date.parse(fullLast) : NaN;
-  const checkpointMs = checkpointLast ? Date.parse(checkpointLast) : NaN;
-  const fullDue = !Number.isFinite(fullMs) || nowMs - fullMs >= HYGIENE_FULL_INTERVAL_MS;
-  const checkpointDue = !Number.isFinite(checkpointMs) || nowMs - checkpointMs >= HYGIENE_CHECKPOINT_INTERVAL_MS;
-  if (!fullDue && !checkpointDue) return null;
-  if (fullDue) {
-    const report = await runStorageHygiene({ now });
-    writeJsonSetting(FULL_AT_KEY, now.toISOString(), now.toISOString());
-    if (!report.dryRun) writeJsonSetting(CHECKPOINT_AT_KEY, now.toISOString(), now.toISOString());
-    return report;
+  if (hygieneInFlight) return null;
+  hygieneInFlight = true;
+  try {
+    const now = new Date(nowMs);
+    const fullLast = readJsonSetting<string>(FULL_AT_KEY);
+    const checkpointLast = readJsonSetting<string>(CHECKPOINT_AT_KEY);
+    const fullMs = fullLast ? Date.parse(fullLast) : NaN;
+    const checkpointMs = checkpointLast ? Date.parse(checkpointLast) : NaN;
+    const fullDue = !Number.isFinite(fullMs) || nowMs - fullMs >= HYGIENE_FULL_INTERVAL_MS;
+    const checkpointDue = !Number.isFinite(checkpointMs) || nowMs - checkpointMs >= HYGIENE_CHECKPOINT_INTERVAL_MS;
+    if (!fullDue && !checkpointDue) return null;
+    if (fullDue) {
+      if (!claimJsonString(FULL_AT_KEY, typeof fullLast === "string" ? fullLast : null, now.toISOString())) return null;
+      if (storageHygieneTestHooks.beforePass) await storageHygieneTestHooks.beforePass();
+      const report = await runStorageHygiene({ now });
+      if (!report.dryRun) writeJsonSetting(CHECKPOINT_AT_KEY, now.toISOString(), now.toISOString());
+      return report;
+    }
+    if (resolveDryRun(undefined)) return null;
+    if (!claimJsonString(CHECKPOINT_AT_KEY, typeof checkpointLast === "string" ? checkpointLast : null, now.toISOString())) {
+      return null;
+    }
+    if (storageHygieneTestHooks.beforePass) await storageHygieneTestHooks.beforePass();
+    return await runCheckpointOnly({}, now);
+  } finally {
+    hygieneInFlight = false;
   }
-  if (resolveDryRun(undefined)) return null;
-  const report = await runCheckpointOnly({}, now);
-  writeJsonSetting(CHECKPOINT_AT_KEY, now.toISOString(), now.toISOString());
-  return report;
 }
