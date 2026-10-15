@@ -4353,7 +4353,10 @@ function migrate(database: Database.Database): void {
       PRIMARY KEY (content_hash, model, revision)
     );
     CREATE INDEX IF NOT EXISTS idx_embed_stage_created ON embed_stage (created_at);
-    CREATE INDEX IF NOT EXISTS idx_embed_stage_delivered ON embed_stage (delivered_at);
+    -- NOTE: idx_embed_stage_delivered is NOT created here. On a pre-ST-4540 database this block is
+    -- a no-op (the table already exists WITHOUT delivered_at), so indexing that column here would
+    -- abort the whole migration with "no such column: delivered_at". It is created in the guarded
+    -- ALTER TABLE block below, once the columns are known to exist.
     CREATE TABLE IF NOT EXISTS learned_context (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
