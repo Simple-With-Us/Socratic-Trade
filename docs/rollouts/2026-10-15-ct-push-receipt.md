@@ -41,7 +41,7 @@ Congress.Trade `shareWithPeer` sends the push id, reads the receipt, and alerts 
 
 ```bash
 npx vitest run test/peer-push-receipt.e2e.test.ts test/securities-import.test.ts
-# 33 passed (5 in the e2e file, 28 in securities-import) after the non-ok retry and date normalization
+# 33 passed (5 in the e2e file, 28 in securities-import) after the payload-mismatch 409
 npx tsc --noEmit
 # exit 0
 npx eslint src/lib/peer-push-receipt.ts src/lib/securities-import-schema.ts src/lib/db-securities-import.ts src/lib/db-health.ts src/lib/ops-snapshot.ts app/api/admin/securities/import/route.ts test/peer-push-receipt.e2e.test.ts
