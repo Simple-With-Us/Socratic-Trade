@@ -103,3 +103,18 @@ test("resolveAscCredentials works with a missing secrets file", (t) => {
   assert.equal(creds.issuerId, "env-issuer");
   assert.equal(creds.keyPath, "/env/key.p8");
 });
+
+// existsSync is true for a directory, and readFileSync throws EISDIR.  The
+// catch must swallow that and still return the process.env credentials.
+test("resolveAscCredentials ignores a secrets path that throws on read", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "asc-cred-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  process.env.ASC_KEY_ID = "ENV_ID";
+  process.env.ASC_ISSUER_ID = "env-issuer";
+  process.env.ASC_KEY_PATH = "/env/key.p8";
+
+  const creds = resolveAscCredentials(dir);
+  assert.equal(creds.keyId, "ENV_ID");
+  assert.equal(creds.issuerId, "env-issuer");
+  assert.equal(creds.keyPath, "/env/key.p8");
+});
