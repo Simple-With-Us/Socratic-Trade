@@ -938,9 +938,9 @@ class TradierBrokerGateway implements BrokerGateway {
   }
 
   /**
-   * Sandbox OMS is unreliable for the first 15 minutes after the regular open.
-   * Refuse the POST locally so a 400 cannot land and cannot halt the account.
-   * Live Tradier is not deferred.
+   * Sandbox quotes are 15 minutes delayed.  Refuse equity, bracket, and option
+   * POSTs until 16 minutes after the regular open (9:46am ET).  Live Tradier
+   * is not deferred.
    */
   private assertSandboxOrderWindowOpen(): void {
     if (isTradierSandboxOpenDeferral(this.environment, tradierNow())) {

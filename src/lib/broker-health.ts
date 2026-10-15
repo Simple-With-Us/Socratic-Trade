@@ -5,7 +5,13 @@ import { ExecutionAccount, HealthSignals } from "./execution-mode";
 import { accountEquity } from "./risk-breaker";
 import { sendNotification } from "./notifications";
 import { isAbortOrTimeoutError, isTransientNetworkError } from "./network-errors";
-import { isTradierSandboxOpenDeferralMessage, isTradierTransientServerError } from "./tradier-transient";
+import {
+  TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE,
+  isTradierSandboxOpenDeferral,
+  isTradierSandboxOpenDeferralMessage,
+  isTradierTransientServerError,
+  tradierNow
+} from "./tradier-transient";
 import { isDeadlineTimeoutError } from "./inflight-deadline";
 import { startEventLoopLagSampler, stalledMsSince } from "./event-loop-lag";
 import { safeErrorMessage } from "./telemetry-sanitize";
@@ -91,7 +97,7 @@ export function healthSignalsFromProbeFailure(err: unknown): HealthSignals {
 export function brokerHealthRunSkip(health: HealthSignals): {
   status: "skipped" | "skipped_broker_unhealthy";
   summary: string;
-  auditKind: "run_skipped_process_stalled" | "run_skipped_broker_transient" | "run_skipped_broker_unhealthy";
+  auditKind: "run_skipped_process_stalled" | "run_skipped_broker_transient" | "run_skipped_sandbox_open_deferral" | "run_skipped_broker_unhealthy";
 } {
   if (health.processStall) {
     return {
@@ -105,6 +111,13 @@ export function brokerHealthRunSkip(health: HealthSignals): {
       status: "skipped",
       summary: `${health.reason ?? "Tradier order path returned a transient server error"}. Skipping this strategy run; the next one retries. Autonomous trading stays armed.`,
       auditKind: "run_skipped_broker_transient"
+    };
+  }
+  if (health.sandboxOpenDeferral || isTradierSandboxOpenDeferralMessage(health.reason ?? "")) {
+    return {
+      status: "skipped",
+      summary: `${health.reason ?? TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE}  Skipping this strategy run; the next one retries after 9:46am ET.  Autonomous trading stays armed.`,
+      auditKind: "run_skipped_sandbox_open_deferral"
     };
   }
   return {
@@ -132,6 +145,16 @@ export async function checkBrokerHealth(
   account: ExecutionAccount,
   brokerGateway?: BrokerGateway
 ): Promise<HealthSignals> {
+  // Sandbox quotes lag 15 minutes.  Skip the strategy run before any broker
+  // read or order probe.  Live Tradier and every other broker fall through.
+  if (account.broker === "tradier" && isTradierSandboxOpenDeferral(account.environment, tradierNow())) {
+    return {
+      isHealthy: false,
+      reason: TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE,
+      sandboxOpenDeferral: true
+    };
+  }
+
   // If no gateway is provided, we can't check broker-side health.
   // This typically happens if the account isn't meant to submit orders (e.g. read-only mode).
   if (!brokerGateway) {
@@ -473,7 +496,12 @@ export async function applyBrokerOrderPlacementPause(input: {
   // churn from 2026-10-13 and 2026-10-14.  Do not touch the connectivity streak:
   // this answer is not evidence the socket is dead, and it is not evidence the
   // socket recovered.
-  if (health.transientBrokerError || isTradierTransientServerError(reason)) {
+  if (
+    health.sandboxOpenDeferral ||
+    health.transientBrokerError ||
+    isTradierTransientServerError(reason) ||
+    isTradierSandboxOpenDeferralMessage(reason)
+  ) {
     return { action: "none" };
   }
 
