@@ -43,6 +43,13 @@
 **Docs.**  `docs/rollouts/2026-10-14-embed-context-retrieval-pressure.md`, `docs/phase-7-strategy.md`, `STATUS.md`, `PLAN.md`.
 
 **Next.**  Ready for review.  Do not merge from this lane.  Sentry 2G and 2E stay open until production shows the burst and the context-length 400 are gone.  Fleet `board whoami` could not run on this seat (no Linear or Zulip credentials).  The unfiled claim is team ST, In Progress, title "Fit embed input to the bge-m3 token budget and back off retrieval bursts", Completed only after merge.
+## 2026-10-15 Cursor Cloud — CT fundamentals/analyst nightly push (ST-4537)
+
+**What.**  Congress.Trade `st_inbound_market_data` fundamentals + analyst stale since 2026-10-06; scan-hook-only path.  Nightly `runCongressDailyShare` now POSTs fundamentals/analyst from `symbol_field_latest` for the monitored universe.
+
+**Branch.**  `cursor/ct-fundamentals-nightly-push-bb23`
+
+**Next.**  Verify gate, open ready PR, deploy; confirm CT stream freshness after nightly run.
 ## 2026-10-15 CURSOR — Congress push delivery/consumption receipt (ST-3846)
 
 **What.**  App B webhook responses now emit `receiptVersion: 1` with explicit `delivered` + `consumed` fields; batch failures return `422` instead of silent `200`.  Congress.Trade PR parses the receipt before marking `deliveries` rows delivered.
