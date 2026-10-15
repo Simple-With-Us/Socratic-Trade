@@ -101,7 +101,7 @@ mid-build (SSH exec stream exit 255) while webhooks returned 200 and
 `/api/health` stayed green on the old sha for ~14h.
 
 `.github/workflows/deploy-freshness.yml` runs `scripts/alert-deploy-freshness.sh`
-every 20 minutes.  It fails (Sentry fleet-infra + optional `#agent-sync`) when
+every 20 minutes.  It fails (Sentry fleet-infra + optional Zulip `#agent-sync`) when
 the oldest commit on `origin/main` that is not live is older than 1 hour.
 Unreachable health is not this class (UptimeRobot pages site-down).  The
 workflow never deploys and never calls Coolify.

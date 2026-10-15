@@ -15,13 +15,13 @@ else
   echo "GitHub API: GH_TOKEN is not a runtime environment variable"
 fi
 if [ -x scripts/codex-coordination.sh ]; then
-  scripts/codex-coordination.sh test || echo "Slack/GitHub coordination check incomplete; verify runtime variables"
+  scripts/codex-coordination.sh test || echo "Zulip/GitHub coordination check incomplete; verify runtime variables"
 else
   echo "scripts/codex-coordination.sh: MISSING" >&2
   exit 1
 fi
-echo "Slack channel: ${SLACK_CHANNEL_ID:-C0BEZDJDNKV}"
-echo "Slack project: ${SLACK_PROJECT:-Socratic-Trade}"
-echo "Agent: ${SLACK_AGENT_NAME:-${AGENT_NAME:-CODEX}}"
+echo "Zulip channel: ${FLEET_NOTIFY_CHANNEL:-agent-sync}"
+echo "Codex project tag: ${CODEX_PROJECT:-Socratic-Trade}"
+echo "Agent seat: ${AGENT_SEAT:-CODEX}"
 echo "Apple Notes: Mac-only; cloud completion docs must include the Notes handoff body."
 echo "Setup complete: Socratic-Trade"

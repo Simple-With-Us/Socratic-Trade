@@ -11,8 +11,9 @@
   INSTALL (owner action; see docs/rollouts/2026-07-10-provider-knob-sync.md):
     1. Edit the paths below if this repo does not live at /Users/jay/Code/Socratic-Trade.
        SSH target is launchd-inherited from the script: Host coolify (Hetzner).
-    2. To enable the #agent-sync post-on-change, add your SLACK_BOT_TOKEN to
-       EnvironmentVariables (otherwise slack-sync.sh is a safe no-op).
+    2. To enable the #agent-sync post-on-change, ensure the CLAUDE seat Zulip
+       credential is available (~/.secrets/Zulip/Claude-zuliprc mode 600, or set
+       ZULIP_RC).  Without credentials fleet-zulip-notify.sh is a safe no-op.
     3. cp scripts/com.jay.provider-knob-sync.plist ~/Library/LaunchAgents/
        launchctl load  -w ~/Library/LaunchAgents/com.jay.provider-knob-sync.plist
     4. Dry-run first WITHOUT the apply flag to confirm the diff before trusting the writer:
@@ -43,12 +44,8 @@
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>SLACK_TOPIC</key>
-    <string>Socratic-Trade</string>
-    <!-- Add SLACK_BOT_TOKEN here to enable the #agent-sync post-on-change:
-    <key>SLACK_BOT_TOKEN</key>
-    <string>xoxb-...</string>
-    -->
+    <key>FLEET_NOTIFY_SEAT</key>
+    <string>CLAUDE</string>
   </dict>
 
   <!-- Every 30 minutes. Does NOT run at load (avoid a surprise write on install). -->

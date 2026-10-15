@@ -36,13 +36,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VERIFY="${SCRIPT_DIR}/verify-deploy-sha.sh"
-SLACK="${SCRIPT_DIR}/slack-sync.sh"
+NOTIFY="${SCRIPT_DIR}/fleet-zulip-notify.sh"
 
 HOST="${DEPLOY_VERIFY_HOST:-https://socratictrade.com}"
 EXPECTED_REF="${1:-${DEPLOY_VERIFY_EXPECTED_SHA:-origin/main}}"
 STALE_SECONDS="${DEPLOY_FRESHNESS_STALE_SECONDS:-3600}"
 NOTIFY="${DEPLOY_FRESHNESS_NOTIFY:-0}"
-# success|failure|none - previous cron tick, used to de-dupe Slack pages.
+# success|failure|none - previous cron tick, used to de-dupe Zulip pages.
 PREVIOUS="${DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION:-none}"
 TREAT_UNREACHABLE_OK="${DEPLOY_FRESHNESS_TREAT_UNREACHABLE:-1}"
 NO_FETCH="${DEPLOY_VERIFY_NO_FETCH:-0}"
@@ -134,13 +134,13 @@ maybe_notify() {
       fi
       ;;
   esac
-  if [ ! -f "$SLACK" ]; then
-    log "notify skipped (slack-sync.sh not present)."
+  if [ ! -x "$NOTIFY" ]; then
+    log "notify skipped (fleet-zulip-notify.sh not present)."
     return 0
   fi
-  SLACK_AGENT_NAME="${SLACK_AGENT_NAME:-ST}" \
-  SLACK_TOPIC="${SLACK_TOPIC:-Socratic-Trade}" \
-    bash "$SLACK" post "$2" || log "warn: slack-sync post failed (token missing or Slack error)."
+  FLEET_NOTIFY_SEAT="${FLEET_NOTIFY_SEAT:-ST}" \
+    bash "$NOTIFY" post --topic "deploy freshness" --no-tag -- "$2" \
+    || log "warn: Zulip notify failed (credentials missing or agent-sync error)."
 }
 
 case "$VERIFY_CODE" in

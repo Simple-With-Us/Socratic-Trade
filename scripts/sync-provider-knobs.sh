@@ -29,11 +29,11 @@
 #
 # USAGE
 #   scripts/sync-provider-knobs.sh            # DRY RUN: print the diff, write nothing, exit 0
-#   scripts/sync-provider-knobs.sh --apply    # write changed keys to Infisical + post to Slack
+#   scripts/sync-provider-knobs.sh --apply    # write changed keys to Infisical + post to Zulip
 #
 # SAFETY
-#   - Monitor unreachable / empty payload -> exit 0, no writes, no Slack (launchd-safe).
-#   - Dry run never writes and never posts to Slack.
+#   - Monitor unreachable / empty payload -> exit 0, no writes, no Zulip (launchd-safe).
+#   - Dry run never writes and never posts to Zulip.
 #   - --apply refuses to write if it could not first read current Infisical state
 #     (never writes blind).
 #
@@ -56,7 +56,7 @@ BOX_ENV="${KNOB_SYNC_BOX_ENV:-/data/coolify/applications/${COOLIFY_APP_UUID}/.en
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HELPER="$SCRIPT_DIR/provider-knob-diff.mjs"
-SLACK="$SCRIPT_DIR/slack-sync.sh"
+NOTIFY="$SCRIPT_DIR/fleet-zulip-notify.sh"
 
 APPLY=0
 for arg in "$@"; do
@@ -255,14 +255,14 @@ else
   log "apply session error: $(tr '\n' ' ' < "$WORK/apply.err" 2>/dev/null)"
 fi
 
-# -- 6) report + Slack one line per applied change -----------------------------
+# -- 6) report + Zulip one line per applied change -----------------------------
 FAILN=0
 while IFS= read -r out; do
   [ -z "$out" ] && continue
   tag="$(printf '%s' "$out" | cut -f1)"
   key="$(printf '%s' "$out" | cut -f2)"
   if [ "$tag" = "OK" ]; then
-    # look up the full change record for this key to build the Slack line
+    # look up the full change record for this key to build the Zulip line
     rec="$(awk -F'\t' -v k="$key" '$1=="CHANGE" && $2==k {print; exit}' "$PLAN")"
     old="$(printf '%s' "$rec" | cut -f3)"
     new="$(printf '%s' "$rec" | cut -f4)"
@@ -270,8 +270,10 @@ while IFS= read -r out; do
     st="$(printf '%s' "$rec" | cut -f6)"
     log "wrote $key: $old -> $new"
     MSG="repo: Socratic-Trade | [CLAUDE->FLEET] knob-sync applied: $key $old->$new (plan $plan $st); rides next deploy"
-    if [ -x "$SLACK" ]; then
-      "$SLACK" post "$MSG" >/dev/null 2>&1 || log "slack post failed for $key (write still succeeded)"
+    if [ -x "$NOTIFY" ]; then
+      FLEET_NOTIFY_SEAT="${FLEET_NOTIFY_SEAT:-CLAUDE}" \
+        "$NOTIFY" post --topic "knob sync" --no-tag -- "$MSG" >/dev/null 2>&1 \
+        || log "Zulip notify failed for $key (write still succeeded)"
     fi
   else
     msg="$(printf '%s' "$out" | cut -f3)"

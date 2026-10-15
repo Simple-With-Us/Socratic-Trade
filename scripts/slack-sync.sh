@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# slack-sync.sh - RETIRED for operational posts (ST-4531).  Use agent-sync or
+# scripts/fleet-zulip-notify.sh for #agent-sync.  This file remains only for
+# historical hook cleanup via setup-slack-sync.sh.
+#
 # slack-sync.sh - MCP-independent Slack coordination sync for two Claude Code
 # instances (Monet = Claude Code on the web / ephemeral cloud container;
 # Claude = local Mac CLI) working the same repo. Replaces the flaky Slack MCP
