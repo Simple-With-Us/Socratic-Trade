@@ -4,18 +4,17 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrokerGateway, BrokerageAccount, EquityOrder, Portfolio } from "../src/lib/types";
 
-// scheduler.ts's stale-limit-scan in-flight guard (staleExitInFlight) must be released by the REAL
-// journalLane work, never by the withDeadline race loser -- a lane still running past
-// SCHEDULER_BROKER_TIMEOUT_MS must not let the next 60s tick launch a SECOND concurrent
-// cancel-replace against the same account (a double-sell / accidental short on the money path).
+// scheduler.ts's stale-limit-scan in-flight guard (staleExitInFlight) must not stay latched
+// when a broker READ never settles.  The deadline aborts that read and releases the guard so
+// the next tick can protect the account again.  A broker WRITE that has already started keeps
+// the guard: releasing it would let the next tick send a second cancel-replace (a double-sell).
 //
 // This exercises the REAL scheduler.ts tick() code path: a real connected account + policy drive
-// the per-account loop into the actual `if (brokerGateway && !staleExitInFlight.has(key))` branch,
-// with only `getBrokerGateway` (src/lib/broker.ts) replaced by a hand-built stub gateway so the
-// test never depends on the real Alpaca/Tradier wire adapters (owned by a concurrently-edited
-// file). The stub's getEquityOrders hangs forever, mirroring a broker call slower than the 15s
-// SCHEDULER_BROKER_TIMEOUT_MS deadline (the repo's own measurements record real Alpaca calls up to
-// 14.4s -- see src/lib/inflight-deadline.ts).
+// the per-account loop into the stale-limit-scan lane, with only `getBrokerGateway`
+// (src/lib/broker.ts) replaced by a hand-built stub gateway so the test never depends on the
+// real Alpaca/Tradier wire adapters.  The stub's getEquityOrders hangs forever, mirroring a
+// broker call slower than SCHEDULER_BROKER_TIMEOUT_MS (live Alpaca reads have reached 14.4s --
+// see src/lib/inflight-deadline.ts).  Remediation never starts, so the guard must drop.
 const brokerMocks = vi.hoisted(() => ({
   getBrokerGateway: vi.fn()
 }));
@@ -90,7 +89,7 @@ afterEach(() => {
 });
 
 describe("scheduler stale-exit lane in-flight guard", () => {
-  it("stays held past the broker deadline while getEquityOrders is still pending, and clears once it resolves", async () => {
+  it("releases the exit lane after the broker deadline when getEquityOrders never settles", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     brokerMocks.getBrokerGateway.mockReturnValue(healthyGateway(hangingGetEquityOrders));
 
@@ -106,12 +105,11 @@ describe("scheduler stale-exit lane in-flight guard", () => {
     expect(host.__staleExitInFlight?.has(key)).toBe(true);
 
     await vi.advanceTimersByTimeAsync(SCHEDULER_BROKER_TIMEOUT_MS + 100);
-    // The 15s broker deadline has fired, but the REAL getEquityOrders call is still pending --
-    // the guard must still be held, or the next 60s tick launches a duplicate cancel-replace.
-    expect(host.__staleExitInFlight?.has(key)).toBe(true);
+    // The read never started remediation, so the deadline must unlatch the lane.
+    expect(host.__staleExitInFlight?.has(key)).toBe(false);
   }, 30_000);
 
-  it("does not launch a second concurrent stale-limit-scan for the same account on the next tick", async () => {
+  it("runs the exit lane again on the next tick after a hung read is released", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     let getEquityOrdersCalls = 0;
     // getBrokerGateway itself is called unconditionally every tick (it's evaluated before the
@@ -136,10 +134,8 @@ describe("scheduler stale-exit lane in-flight guard", () => {
 
     await vi.advanceTimersByTimeAsync(SCHEDULER_BROKER_TIMEOUT_MS + 100);
 
-    // Simulated next 60s tick while the first lane is still in flight: the guard must suppress a
-    // second stale-limit-scan launch for the same account -- getEquityOrders must NOT be called a
-    // second time (that second call would be a duplicate cancel-replace attempt on live orders).
+    // The hung read was aborted before remediation, so the next tick must protect the account again.
     await _runSchedulerTickForTest();
-    expect(getEquityOrdersCalls).toBe(1);
+    expect(getEquityOrdersCalls).toBe(2);
   }, 30_000);
 });
