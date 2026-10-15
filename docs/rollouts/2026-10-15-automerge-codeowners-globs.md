@@ -26,9 +26,11 @@ Touched paths:
 - The glob list stays in CODEOWNERS.  The workflow comment is a mirror, not a second policy.  CI fails if they diverge.
 - `disarm=true` means the workflow runs `gh pr merge --disable-auto` on a PR that was already armed.  The dry run does not call GitHub, and this lane does not arm auto-merge.
 - `needs-human-merge` still disarms, same as `do-not-automerge`.
-- A rejected elevated token retries disable once with the Actions `GITHUB_TOKEN`.  That token is not used to arm.  If the retry is also rejected, the disable job fails instead of reporting the merge as disarmed.
-- The dry run exports `CODEOWNERS_FILE` to the repo copy so it still classifies when the shell is not at the repo root.
-- Out of scope: a ruleset required review on those paths.  This change only stops the workflow from arming.
+- A rejected elevated token retries disable once with the Actions `GITHUB_TOKEN`.  That token is not used to arm.  Disable jobs set `contents: write` and `pull-requests: write` so that token can call `disablePullRequestAutoMerge`.  The arm job stays at the workflow `contents: read` permission.
+- If the disable mutation is still forbidden, the script reads `autoMergeRequest`.  Null is success (`already off`).  A non-null value, or an unreadable PR, exits 1.  PR #4697's disable jobs exited 1 while auto-merge was already null, because `GH_PAT` is 401 and `GITHUB_TOKEN` returned `Resource not accessible by integration`.
+- The dry run exports `CODEOWNERS_FILE` to the repo copy so it still classifies when the shell is not at the repo root.  Sentry's review on #4697 asked for that export.  It is in `scripts/automerge-gate-dry-run.sh`.
+- `test/disable-pr-automerge.test.ts` passes `NODE_ENV: "test"`.  Next's `ProcessEnv` requires that literal, and hosted `tsc` failed the #4697 head without it.
+- Out of scope: a ruleset required review on those paths, and rotating `GH_PAT` / `SHEPHERD_TOKEN` (ST-4393).  This change stops the workflow from arming money-path PRs.  It cannot disarm an already-armed PR while every token is rejected.
 
 ## Money-path globs
 
@@ -81,17 +83,29 @@ Money path: `arm=false` `disarm=true`.  `do-not-automerge`: `arm=false` `disarm=
 
 Full `npm run lint` exit 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exit 0.  `npm test` 9378 passed, 51 skipped, 25 failed across 12 files.  None of the failures are in the auto-merge classifier, dry run, or workflow text tests.  They are the sandbox LLM-key, notify-credential, server-metrics host, cpuprofile, Twelve Data, and Alpha Vantage failures.  `npm run build` exit 0.
 
-Follow-up after that gate: live `disable-auto` on PR #4697 returned `401 Bad credentials` and the job still exited 0.  `scripts/disable-pr-automerge.sh` retries once with `DISABLE_AUTOMERGE_FALLBACK_TOKEN` (the Actions `GITHUB_TOKEN`) and exits 1 if that credential is rejected too.  Already-off stays exit 0.
+Follow-up after that gate: live `disable-auto` on PR #4697 returned `401 Bad credentials` and the job still exited 0.  `scripts/disable-pr-automerge.sh` retries once with `DISABLE_AUTOMERGE_FALLBACK_TOKEN` (the Actions `GITHUB_TOKEN`).  The retry on that PR then returned `Resource not accessible by integration` and exited 1 even though `autoMergeRequest` was null.  Hosted `tsc` also failed because the test env omitted required `NODE_ENV`.
+
+This branch (`cursor/automerge-money-path-gate-c050`) merges current `main` and fixes both.  A forbidden disable is success only after a read shows auto-merge is off.  A still-armed PR fails.
 
 ```bash
 npx vitest run test/disable-pr-automerge.test.ts test/automerge-gate-dry-run.test.ts test/branch-protection-gate.test.ts test/pr-touches-codeowners-paths.test.ts
+npx tsc --noEmit
 ```
 
-22 passed.
+25 passed.  `tsc` exit 0 (2026-10-15).
+
+```bash
+bash scripts/automerge-gate-dry-run.sh --files src/lib/broker.ts
+bash scripts/automerge-gate-dry-run.sh --label do-not-automerge --files README.md
+bash scripts/automerge-gate-dry-run.sh --files README.md
+```
+
+Money path: `arm=false` `disarm=true`.  `do-not-automerge`: `arm=false` `disarm=true`.  README: `arm=true` `disarm=false`.
 
 ## Next Steps & Blockers
 
-- Open the PR ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
+- PR is ready for review with `do-not-automerge`.  Do not enable auto-merge.  GB-Deployer merges.  Do not merge from this lane.
+- ST-4393: `GH_PAT` / `SHEPHERD_TOKEN` still return 401.  Non-money-path arming stays a no-op until that secret is rotated.  An already-armed money-path PR fails the disable job instead of merging.
 - No phase doc covers this workflow.  Nothing under `docs/phase-*.md` was updated.
 
 ## Zero-Code Findings

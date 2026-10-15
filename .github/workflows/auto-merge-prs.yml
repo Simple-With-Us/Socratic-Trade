@@ -168,6 +168,11 @@ jobs:
   # cancel any already-armed auto-merge so production cannot land against intent.
   disable-on-hold:
     runs-on: ubuntu-latest
+    # Disable does not merge.  write is required so the Actions token can call
+    # disablePullRequestAutoMerge after a rejected PAT.  The arm job stays read-only.
+    permissions:
+      contents: write
+      pull-requests: write
     if: >
       contains(github.event.pull_request.labels.*.name, 'do-not-automerge') ||
       contains(github.event.pull_request.labels.*.name, 'needs-human-merge')
@@ -188,6 +193,9 @@ jobs:
   disable-on-skip-automerge:
     runs-on: ubuntu-latest
     needs: classify-protected
+    permissions:
+      contents: write
+      pull-requests: write
     if: >
       needs.classify-protected.outputs.skip_automerge == 'true'
     steps:
@@ -207,6 +215,9 @@ jobs:
   disable-on-protected:
     runs-on: ubuntu-latest
     needs: classify-protected
+    permissions:
+      contents: write
+      pull-requests: write
     if: >
       needs.classify-protected.outputs.touches_protected == 'true'
     steps:

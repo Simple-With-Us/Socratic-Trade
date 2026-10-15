@@ -26,6 +26,8 @@ function run(bin: string, env: Record<string, string>): { status: number; stdout
         PATH: `${bin}:/usr/bin:/bin`,
         GH_TOKEN: env.GH_TOKEN ?? "",
         DISABLE_AUTOMERGE_FALLBACK_TOKEN: env.DISABLE_AUTOMERGE_FALLBACK_TOKEN ?? "",
+        // Next's ProcessEnv requires this literal.  CI tsc rejects the object without it.
+        NODE_ENV: "test",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -68,13 +70,43 @@ exit 1
     expect(recorded).toEqual(["bad-pat"]);
   });
 
-  it("fails when every token is rejected", () => {
+  it("fails when every token is rejected and the arm state cannot be read", () => {
     const { dir } = fakeBin(`#!/bin/bash
 echo "401 Unauthorized Bad credentials" >&2
 exit 1
 `);
     const got = run(dir, { GH_TOKEN: "bad-pat", DISABLE_AUTOMERGE_FALLBACK_TOKEN: "also-bad" });
     expect(got.status).toBe(1);
+    expect(got.stdout).toContain("credentials rejected");
+    expect(got.stdout).not.toContain("already off");
+  });
+
+  it("treats a forbidden disable as success when auto-merge is already off", () => {
+    const { dir } = fakeBin(`#!/bin/bash
+if [ "$2" = "view" ]; then
+  echo "off"
+  exit 0
+fi
+echo "GraphQL: Resource not accessible by integration (disablePullRequestAutoMerge)" >&2
+exit 1
+`);
+    const got = run(dir, { GH_TOKEN: "bad-pat", DISABLE_AUTOMERGE_FALLBACK_TOKEN: "actions" });
+    expect(got.status).toBe(0);
+    expect(got.stdout).toContain("already off");
+  });
+
+  it("fails when disable is rejected and auto-merge is still armed", () => {
+    const { dir } = fakeBin(`#!/bin/bash
+if [ "$2" = "view" ]; then
+  echo "armed"
+  exit 0
+fi
+echo "401 Unauthorized Bad credentials" >&2
+exit 1
+`);
+    const got = run(dir, { GH_TOKEN: "bad-pat", DISABLE_AUTOMERGE_FALLBACK_TOKEN: "actions" });
+    expect(got.status).toBe(1);
+    expect(got.stdout).toContain("still armed");
     expect(got.stdout).toContain("credentials rejected");
   });
 });
