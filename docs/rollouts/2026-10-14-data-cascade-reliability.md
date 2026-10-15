@@ -42,9 +42,12 @@ Harden the market-data cascade against rate limits and slow Nasdaq screener fetc
 npm run lint -> ok (0 errors, 866 warnings)
 npx tsc --noEmit -> ok
 npm test -- test/macro-live-vix.test.ts test/nasdaq-screener-fallback-cache.test.ts test/nasdaq-universe-fallback.test.ts test/scan-empty-screener.test.ts test/provider-rate-limit.test.ts test/transient-network-resilience.test.ts test/keyless-options-enrichment.test.ts test/keyless-options-vendor-fetch.test.ts -> 142 passed
+npm run build -> ok
 ```
 
-Full `npm test` after merging `origin/main` `1588bae8`: 9343 passed, 51 skipped, 2 failed.  Both are outside this diff.  `test/egress-guard.test.ts` cannot resolve discord.com in this sandbox.  `test/data-catalog-completeness.test.ts` scores `peRatio` from the local default database (it expects an empty store).  Hosted `verify` on `4fc19a96` was green and will re-run on the new head.  `npm run build` was not re-run here.
+Full `npm test` after merging `origin/main` `1588bae8`: 9343 passed, 51 skipped, 2 failed.  Both are outside this diff.  `test/egress-guard.test.ts` cannot resolve discord.com in this sandbox.  `test/data-catalog-completeness.test.ts` scores `peRatio` from the local default database (it expects an empty store).  Hosted `verify` on `4fc19a96` was green and will re-run on the new head.
+
+Round 10 re-verified the full gate on this branch after merging `origin/main` `e80386d7` (SEC XBRL cached fundamentals): `npx tsc --noEmit` -> ok, `npm test` -> see below, `npm run build` -> ok.
 
 ## Next Steps & Blockers
 

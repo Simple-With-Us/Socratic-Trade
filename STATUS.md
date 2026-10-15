@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-15 Claude — PR #4664 autofix round 10
+
+**What.**  Merged `origin/main` `e80386d7` (SEC XBRL cached fundamentals); the merge was clean.  Triage of the 15 review threads found no open code findings: Kody's `nasdaq-universe-fallback.ts` quote-hydration suggestion and the FRED VIXCLS `.passthrough()` rule-[22] suggestion were both already declined on their merits and Kody closed each itself ("nothing further from me on it"), and the Sentry 429-lane-hold, screener-cache, and RapidAPI service-limit threads were fixed in `4fc19a96`.  The one new actionable item was Kody rule [27]: the rollout verification block had dropped the explicit `npm run build` outcome.  Restored `npm run build -> ok` in the verification block and recorded this round's gate.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm test`: 9344 passed, 51 skipped, 13 failed — all 13 are the CI runner exporting `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` into the environment, which the LLM key-resolution tests read as a configured user credential.  Re-running `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/framework-review.test.ts`, and `test/openrouter-credits.test.ts` with those three variables unset gives 60/60 passed.  None of the 13 touch this diff.  `npm run build` ok.  `node_modules` was empty on checkout, so `npm install` ran first (685 packages; `package.json` unchanged vs `origin/main`).
+
+**Docs.**  `docs/rollouts/2026-10-14-data-cascade-reliability.md`, `STATUS.md`.
+
+**Next.**  Resolve the review threads addressed or already fixed.  Do not merge from this lane.
+
 ## 2026-10-14 Cursor Cloud — PR #4664 review follow-up
 
 **What.**  Merged `origin/main` again (`1588bae8`, keyless options enrichment).  The merge was clean.  The earlier merge on this branch was `82162336`.  Kody's priced-directory suggestion does not apply: the directory runs only when `screenerLastGood` is empty, so there is no price to copy.  The unreachable cache-and-return of priced directory rows is gone.  A directory that lists symbols now says they were not cached, instead of calling that a fallback failure.  A directory failure still keeps the original screener error.  Price-less rows stay out of `screenerCache` and `screenerLastGood`.  The three directory fetches stay, because that count is the cold-failure annotation.  Sentry's 429 hold and RapidAPI service-limit threads stay as fixed in `4fc19a96`.  The FRED VIXCLS schema keeps explicit `.strip()` on both objects.  The comment says to strip extra FRED keys and not to use `.strict()`, so `.passthrough()` would keep keys the parser does not read.  Threads were not resolved.
