@@ -1,3 +1,9 @@
+## 2026-10-15 CODEX — PR #4727 current-main conflict sweep
+
+Merged fresh `origin/main` at `7bfb84ef193196f1b77c9bfe0573c012e656c8c0` with merge commit `a80b3564a77f428930eea5fd138f0038a9c49cf4`.  The current PR head before this merge was `c116c6738f14b0cb3c8d787b4e6285915e1fd6d1`; no newer Cursor commit was present.  Merge completed without conflicts.  The unique PR diff remains the workflow, two scripts, three tests, and PLAN/STATUS/rollout paths.  The three disable jobs retain `contents: write` and `pull-requests: write`; the arm job remains read-only.
+
+Local verification passed: lint (0 errors, 866 warnings), TypeScript, 21 focused tests, and production build.  The `do-not-automerge` label remains; auto-merge is not armed.  Next: push the merge and docs, wait for final-head required CI, then post that the PR is ready for Jay's review.  Keep the PR open.
+
 ## 2026-10-15 CODEX — PR #4662 takeover
 
 Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `cursor/embed-context-retrieval-pressure-3d40` with merge commit `f433f89057262a1b28428d6d91f549b501371d2c`.  No conflicts; no unresolved review threads.  Lint (0 errors), TypeScript, 34 focused tests, and production build pass locally.  Next: compare the reported full-suite failures with main CI, push the merge, drive required checks green, arm auto-merge, and confirm merge.  Leave Sentry 2G and 2E open until live-open validation.

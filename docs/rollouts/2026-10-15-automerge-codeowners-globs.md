@@ -102,9 +102,25 @@ bash scripts/automerge-gate-dry-run.sh --files README.md
 
 Money path: `arm=false` `disarm=true`.  `do-not-automerge`: `arm=false` `disarm=true`.  README: `arm=true` `disarm=false`.
 
+### 2026-10-15 CODEX landing pass after #4662
+
+Checked PR #4727 head `c116c6738f14b0cb3c8d787b4e6285915e1fd6d1` before editing; no newer Cursor commit was present.  Merged current `origin/main` at `7bfb84ef193196f1b77c9bfe0573c012e656c8c0` with merge commit `a80b3564a77f428930eea5fd138f0038a9c49cf4`; no conflicts.  The unique PR diff remains 10 paths.
+
+Verification on the merged head:
+
+```bash
+npm ci
+npm run lint
+npx tsc --noEmit
+npx vitest run test/automerge-gate-dry-run.test.ts test/branch-protection-gate.test.ts test/disable-pr-automerge.test.ts
+npm run build
+```
+
+Lint passed with 0 errors (866 existing warnings); TypeScript passed; focused Vitest passed (21 tests); production build passed with existing Next.js warnings.  The `do-not-automerge` label is present, and auto-merge remains unarmed.  This work is ready for Jay's review after the final CI run.
+
 ## Next Steps & Blockers
 
-- PR is ready for review with `do-not-automerge`.  Do not enable auto-merge.  GB-Deployer merges.  Do not merge from this lane.
+- PR stays open with `do-not-automerge`.  Do not enable auto-merge or merge.  After final CI is green, post that it is ready for Jay's review in the PR and ST-3326 Zulip topic.
 - ST-4393: `GH_PAT` / `SHEPHERD_TOKEN` still return 401.  Non-money-path arming stays a no-op until that secret is rotated.  An already-armed money-path PR fails the disable job instead of merging.
 - No phase doc covers this workflow.  Nothing under `docs/phase-*.md` was updated.
 
