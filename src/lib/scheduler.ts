@@ -26,7 +26,8 @@ import { runR2UsageCheckIfDue, runR2UsageDailyDigestIfDue } from "./r2-usage";
 import { maybeAdvisePineconeTrialRollback } from "./pinecone-trial-window";
 import { pineconeWuExhaustedUntil } from "./pinecone-wu-breaker";
 import { runWatchlistDigestIfDue } from "./watchlist-digest";
-import { runAuditPruneIfDue } from "./audit-prune";
+import { runAuditPruneYieldingIfDue } from "./audit-prune";
+import { runStorageHygieneIfDue } from "./sqlite-storage-hygiene";
 import {
   applyBrokerOrderPlacementPause,
   brokerPauseAccountScope,
@@ -943,11 +944,12 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // observability kinds 14d, everything else 90d, bounded batches. First-ever
   // run drains a large backlog over several daily passes. Also sweeps the
   // embed_stage table (35d orphan retention + defensive size cap, db-embed-stage.ts).
-  void journalLane("audit-prune", {}, () => {
-    const result = runAuditPruneIfDue();
+  void journalLane("audit-prune", {}, async () => {
+    const result = await runAuditPruneYieldingIfDue();
     if (!result) return { status: "skipped" as const, summary: "not due" };
     const total = result.auditObservability + result.auditDefault + result.providerDispatch +
-      result.providerOutbox + result.embedStageExpired + result.embedStageCapPruned;
+      result.providerOutbox + result.embedStageExpired + result.embedStageCapPruned +
+      result.portfolioSnapshotsPruned;
     return { status: "ok" as const, summary: `deleted=${total}` };
   }).catch((err) => console.error("[scheduler] audit prune error:", err));
 
@@ -959,6 +961,18 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   if (singleLeaderEnabled() && !acquireOrRenewLeadership(new Date())) {
     return; // not the leader this tick — no side effects
   }
+
+  // Table sizes, retention for non-money caches and logs, WAL checkpoint, and
+  // incremental free-page reclaim.  Leader only: every replica checkpointing
+  // the same WAL fights TRUNCATE.  Dry-run when SQLITE_STORAGE_HYGIENE_DRY_RUN=1.
+  void journalLane("storage-hygiene", {}, async () => {
+    const result = await runStorageHygieneIfDue();
+    if (!result) return { status: "skipped" as const, summary: "not due" };
+    return {
+      status: "ok" as const,
+      summary: `dryRun=${result.dryRun} eligibleBytes=${result.expectedReclaimBytes} deleted=${result.deletedRows}`
+    };
+  }).catch((err) => console.error("[scheduler] storage hygiene error:", err));
 
   // Open an honest Sentry Crons job after the leader gate: only the process running the tick
   // body reports, so idle followers cannot mask a dead leader. `ok` is sent in `finally` once
