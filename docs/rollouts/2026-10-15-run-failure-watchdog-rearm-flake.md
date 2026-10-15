@@ -19,10 +19,10 @@ Kept `resolveRearmTimestamp` semantics (earliest active receipt after halt).  Th
 npm run lint
 npx tsc --noEmit
 npx vitest run test/run-failure-watchdog.test.ts
-for i in $(seq 1 30); do npx vitest run test/run-failure-watchdog.test.ts -t "does not halt when a run in flight"; done
+npm run build
 ```
 
-`npm run lint` 0 errors.  `tsc` clean.  Watchdog file 23/23.  Targeted flake test 30/30.
+`npm run lint` 0 errors.  `tsc` clean.  Watchdog file 23/23.  `npm run build` ok.  Supplementary flake replay: `for i in $(seq 1 30); do npx vitest run test/run-failure-watchdog.test.ts -t "does not halt when a run in flight"; done` (30/30).
 
 ## Next Steps & Blockers
 

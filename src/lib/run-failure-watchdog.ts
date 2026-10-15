@@ -304,7 +304,7 @@ async function haltAccountForRunFailures(
   // `now` captured at entry.  A gap let `resolveRearmTimestamp` treat an older
   // still-active policy_change as the re-arm and disagree with the latest receipt
   // (flaky test/run-failure-watchdog.test.ts re-arm assertion; ST-4521).
-  const since = latestPolicyChangeCreatedAt(userId, accountId) ?? new Date(now).toISOString();
+  const since = latestPolicyChangeCreatedAt(userId, accountId) ?? new Date().toISOString();
   const marker: RunFailureHaltMarker = {
     since,
     reason,
