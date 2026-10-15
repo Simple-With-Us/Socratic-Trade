@@ -173,6 +173,7 @@ load_secrets() {
     # shellcheck source=/dev/null
     source "$SECRETS_ENV"
     set +a
+    export ASC_SECRETS_ENV="$SECRETS_ENV"
   fi
   if [[ -n "${ASC_KEY_ID:-}" && -n "${ASC_ISSUER_ID:-}" && -n "${ASC_KEY_PATH:-}" ]]; then
     if [[ -f "$ASC_KEY_PATH" ]]; then
