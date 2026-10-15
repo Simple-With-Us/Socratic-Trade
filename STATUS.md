@@ -9,6 +9,15 @@
 **Verification.**  `bash scripts/merge-shepherd-ci-inflight.selftest.sh`; `bash -n scripts/merge-shepherd.sh` (Kody #4705: `NEUTRAL`/`SKIPPED` terminal in `ci_in_flight`).  Merged `origin/main` into PR branch (`960637ec`, 2026-10-15).  PR #4705 ready; `needs-human-merge` — GB-Deployer merges only.
 
 **Next.**  Open PRs (ready); owner refresh Mac shepherd copy + redeploy AFC host script for ST-9.
+## 2026-10-15 Cursor Cloud — storage hygiene forever retention (no age deletes)
+
+**What.**  Jay decision 03:13 CT: remove **all** age-based row deletes — `sqlite-storage-hygiene`, `audit-prune`, `pruneTaskJournal`, portfolio snapshot sweep, embed_stage TTL/cap sweep, economic calendar, `headline_first_seen`, and `api_health_log` per-lane count trim.  Maintenance-only hygiene lane; transient `embed_stage` delivery deletes remain.  `HEALTH_LOG_LANE_CAP` is read-bound only for streak heuristics.
+
+**Branch.**  `cursor/forever-retention-no-age-deletes-504b`
+
+**Verification.**  Merged `origin/main` 2026-10-15; `npx vitest run test/sqlite-storage-hygiene.test.ts test/forever-retention-no-age-delete.test.ts test/health-lane-cap.test.ts` (post-merge).
+
+**Next.**  PR #4722 ready; merge after verify green.
 ## 2026-10-15 Cursor Cloud — CT fundamentals/analyst nightly push (ST-4537)
 
 **What.**  Congress.Trade `st_inbound_market_data` fundamentals + analyst stale since 2026-10-06; scan-hook-only path.  Nightly `runCongressDailyShare` now POSTs fundamentals/analyst from `symbol_field_latest` for the monitored universe.
