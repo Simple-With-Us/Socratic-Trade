@@ -8,7 +8,7 @@
 
 **Verification.**  `npm run lint` exited 0 (0 errors, 848 warnings).  `npx tsc --noEmit` exited 0.  Focused vitest (`protective-lane-isolation`, `scheduler-stale-exit-inflight-guard`, `broker-io-deadlines`, `scheduler-pending-fill-inflight-guard`, `scheduler-halt-cause-tick`) was 16 passed.  `test/robinhood-orders-error-throws.test.ts` was 4 passed after the since-window fixture fix.  Full `npm test` was 9374 passed, 51 skipped, and 26 failed.  One failure was the Robinhood populated-list fixture (a July fill, dropped by the 24h terminal window) and is fixed.  The other 25 are outside this diff (LLM key routing, notify credentials, server-metrics host detection, cpuprofile summary, data-provider cache).  `npm run build` exited 0.
 
-**Next.**  `origin/main` through `df7e6d10` is merged.  Keep the PR ready with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
+**Next.**  `origin/main` through `3f4ef5e5` is merged.  Keep the PR ready with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
 
 ## 2026-10-15 Cursor Cloud — check-pin token order (ST-2582 PR #4698)
 
