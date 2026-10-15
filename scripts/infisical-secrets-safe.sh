@@ -4,8 +4,12 @@
 # Usage:
 #   bash scripts/infisical-secrets-safe.sh set KEY=VALUE --projectId ID [--env prod]
 #   bash scripts/infisical-secrets-safe.sh has KEY --projectId ID [--env prod]
+#   bash scripts/infisical-secrets-safe.sh get KEY --projectId ID [--path /] [--env prod]
 #   bash scripts/infisical-secrets-safe.sh names --projectId ID [--env prod]
 #   bash scripts/infisical-secrets-safe.sh delete KEY --projectId ID --env prod
+#
+# `get` is GitHub Actions only (GITHUB_ACTIONS=true), allowlists Zulip ops keys for
+# CI GITHUB_ENV injection, and prints the plain value to stdout; use has/names elsewhere.
 #
 # Environment (owner 2026-10-10):  prod is the only Infisical environment;  dev
 # and staging are retired.  The infisical CLI defaults to --env dev, so a call
@@ -77,7 +81,18 @@ normalize_env() {
 }
 
 cmd="${1:-}"; shift || true
-[ -n "$cmd" ] || die "missing command (set|has|names|delete)"
+[ -n "$cmd" ] || die "missing command (set|has|get|names|delete)"
+
+# Keys that GitHub Actions may load via `get` (never LLM runtime keys).
+GITHUB_GET_ALLOWLIST="ZULIP_EMAIL ZULIP_API_KEY ZULIP_SITE"
+
+is_github_get_key() {
+  local key="$1"
+  for k in $GITHUB_GET_ALLOWLIST; do
+    [ "$k" = "$key" ] && return 0
+  done
+  return 1
+}
 
 # Reject known-leaky patterns if someone passes them by mistake
 for a in "$@"; do
@@ -123,6 +138,18 @@ case "$cmd" in
       exit 1
     fi
     info "present key=$key len=${#val}"
+    ;;
+  get)
+    [ "${GITHUB_ACTIONS:-}" = "true" ] || die "get is GitHub Actions only; use has/names in agent sessions"
+    key="${1:-}"; shift || true
+    [ -n "$key" ] || die "usage: get KEY --projectId ID [--path /] [--env prod]"
+    if is_llm_runtime_key "$key"; then
+      die "refusing to get $key — LLM runtime keys must not live in Infisical for Socratic-Trade"
+    fi
+    is_github_get_key "$key" || die "refusing get for $key — allowlist is Zulip ops keys only"
+    normalize_env "$@"
+    val="$(infisical secrets get "$key" --plain --silent --telemetry=false --expand=false "${ENV_ARGS[@]}" 2>/dev/null || true)"
+    printf '%s' "$val"
     ;;
   names)
     normalize_env "$@"

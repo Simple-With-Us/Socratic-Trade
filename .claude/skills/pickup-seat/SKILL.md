@@ -28,8 +28,8 @@ done
 # 4. Recent branches without PRs (seat may have landed work not yet in a PR)
 git for-each-ref --sort=-committerdate refs/remotes/origin | head -15
 
-# 5. Slack history: claims, handoffs, last state
-bash scripts/slack-sync.sh read 20
+# 5. Zulip #agent-sync history: claims, handoffs, last state
+agent-sync read --topic "fleet" --limit 20
 ```
 
 ## CLAIM: Post to #agent-sync before working
@@ -37,7 +37,7 @@ bash scripts/slack-sync.sh read 20
 Post repo-first per `/Users/jay/apps/AGENT-SYNC.md`'s canonical format, naming exactly what you are picking up:
 
 ```bash
-bash scripts/slack-sync.sh post "repo: Socratic-Trade | [CLAUDE->agent/*] picking up MONET: effort#123,124 + PR#1234,1235; do not double-work"
+agent-sync post --topic "fleet" --as CLAUDE "repo: Socratic-Trade | [CLAUDE->agent/*] picking up MONET: effort#123,124 + PR#1234,1235; do not double-work"
 ```
 
 Durability: put the same claim in `docs/EFFORT-LOG.md` (repo mirror), not only the live board
@@ -48,7 +48,7 @@ Durability: put the same claim in `docs/EFFORT-LOG.md` (repo mirror), not only t
 ```bash
 # Check: no commits or Slack posts from this seat since the cap
 git log --oneline --author="<seat-email-or-name>" --since="2 hours ago"
-bash scripts/slack-sync.sh read 20 | grep "\[SEAT"
+agent-sync read --topic "fleet" --limit 20 | grep "\[SEAT"
 
 # Adopt uncommitted work (assume it is intentional): commit with dual authorship.
 # Match the Co-Authored-By convention already in this repo's history (per tool, not per seat) --
@@ -95,7 +95,7 @@ close-out on `#agent-sync`, repo-first, naming what is ready for the returning s
 
 - **AGENTS.md** -- effort-log rules (append-mostly, assignment = live claim)
 - **/Users/jay/apps/EFFORT-LOG-PROTOCOL.md** -- protocol detail for board transitions
-- **/Users/jay/apps/AGENT-SYNC.md** -- Slack message format and handoff discipline (canonical)
+- **/Users/jay/apps/AGENT-SYNC.md** -- Zulip message format and handoff discipline (canonical)
 - **memory `codex-automerge-race-and-board-clobber`** -- why live-board-only claims get lost
 - **scripts/land.sh** -- landing gate (tsc -> test -> build, CI checks, PR open)
-- **scripts/slack-sync.sh** -- read/post agent-sync updates
+- **agent-sync** -- read/post #agent-sync updates (install via `scripts/install-fleet-coordination.sh`)
