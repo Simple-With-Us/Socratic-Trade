@@ -3,6 +3,7 @@ import XCTest
 
 /// Sign-out and account switch must drop every account cache, and approve, reject,
 /// and cancel must each surface success, failure, and a retry.
+@MainActor
 final class AccountScopeAndMoneyActionTests: XCTestCase {
     private let cacheKey = "cached_mobile_snapshot_data"
     private let cacheTimestampKey = "cached_mobile_snapshot_saved_at"
@@ -131,6 +132,52 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
     }
 
     @MainActor
+    func testAccountSwitchReleasesTheBusyFlagAfterTheCacheWipe() throws {
+        let store = makeStore()
+        let operationID = "account.activate:acct-2"
+        let command = try Self.command(type: "account.activate", status: "succeeded", id: "activate-1")
+        store.armBusyOperation(operationID)
+        store.clearAccountScopedCachesForAccountSwitch()
+        XCTAssertTrue(store.isBusy(operationID))
+
+        store.finishAccountSwitch(command, operationID: operationID, payload: ["accountId": "acct-2"])
+
+        XCTAssertFalse(store.isBusy(operationID))
+    }
+
+    @MainActor
+    func testMoneyResultDoesNotRepaintAnotherProposal() throws {
+        let store = makeStore()
+        store.stageProposalNotice(
+            proposalId: "proposal-a",
+            action: .approve,
+            message: "Approve did not place an order."
+        )
+        store.bindProposalCommand(proposalId: "proposal-b", commandId: "cmd-b")
+        store.recordResolvedCommand(try Self.command(
+            type: "proposal.approve",
+            status: "succeeded",
+            resultStatus: "filled",
+            id: "cmd-b"
+        ))
+
+        XCTAssertEqual(
+            store.proposalActionFeedback(proposalId: "proposal-a"),
+            .failed(action: .approve, message: "Approve did not place an order.")
+        )
+
+        store.bindProposalCommand(proposalId: "proposal-a", commandId: "cmd-a")
+        store.recordResolvedCommand(try Self.command(
+            type: "proposal.approve",
+            status: "succeeded",
+            resultStatus: "not_placed",
+            id: "cmd-a"
+        ))
+        let own = try XCTUnwrap(store.proposalActionFeedback(proposalId: "proposal-a"))
+        XCTAssertEqual(own, .retryable(action: .approve, message: "Order not placed — safe to retry."))
+    }
+
+    @MainActor
     func testApproveRejectAndCancelReportSuccessFailedAndRetryable() throws {
         let store = makeStore()
         let cases: [(MobileCommand, MoneyAction, MoneyActionResultKind, String)] = [
@@ -196,7 +243,8 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
         status: String,
         resultStatus: String? = nil,
         reasons: [String]? = nil,
-        error: String? = nil
+        error: String? = nil,
+        id: String = "cmd"
     ) throws -> MobileCommand {
         var result = ""
         if let resultStatus {
@@ -208,7 +256,7 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
         }
         let errorJSON = error.map { ",\"error\":\"\($0.replacingOccurrences(of: "\"", with: "\\\""))\"" } ?? ""
         let json = """
-        {"id":"cmd","commandType":"\(type)","status":"\(status)"\(errorJSON)\(result),"createdAt":"2026-10-15T12:00:00.000Z","updatedAt":"2026-10-15T12:00:01.000Z"}
+        {"id":"\(id)","commandType":"\(type)","status":"\(status)"\(errorJSON)\(result),"createdAt":"2026-10-15T12:00:00.000Z","updatedAt":"2026-10-15T12:00:01.000Z"}
         """
         return try JSONDecoder().decode(MobileCommand.self, from: Data(json.utf8))
     }

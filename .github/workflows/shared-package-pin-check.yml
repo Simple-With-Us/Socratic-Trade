@@ -12,7 +12,8 @@ name: Shared package pin check
 # Required check name: `check-pin` (ruleset main-protection). Both consumers pin a public
 # git dependency, so this job must RUN on fork PRs too -- a skipped required check is
 # treated as satisfied. Peer compare uses GITHUB_TOKEN against the public Congress.Trade
-# repo; GH_PACKAGES_TOKEN remains an optional override.
+# repo. GH_PACKAGES_TOKEN is only the fallback: it is the owner user token, and
+# using it first shares that rate limit and fails the check.
 #
 # Keep this file ASCII-only (AGENTS.md) -- no em dashes / arrows near $VARs.
 

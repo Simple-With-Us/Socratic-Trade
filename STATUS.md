@@ -6,9 +6,10 @@
 
 **Branch.**  `cursor/ios-signout-money-outcomes-43db`
 
-**Verification.**  Swift compile and XCTest run on hosted `ios-build`.  This seat does not run `xcodebuild`.
+**Verification.**  Swift compile and XCTest run on hosted `ios-build`.  This seat does not run `xcodebuild`.  `npx vitest run test/shared-package-pin-check.test.ts` covers the check-pin token order.
 
-**Next.**  PR is ready for review with `do-not-automerge`.  Do not arm auto-merge.  Jay squash-merges.
+**Next.**  PR #4713 stays ready with `do-not-automerge`.  Do not arm auto-merge.  Jay squash-merges.  Account-switch busy release and per-proposal money results are in the follow-up commit.  check-pin reads Congress.Trade with the Actions token first.
+
 ## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
 
 **What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.

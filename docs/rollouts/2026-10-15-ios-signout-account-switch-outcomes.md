@@ -11,6 +11,9 @@ Linear ST-2578.  PR #4214 cleared the in-memory portfolio during sign-out and su
 - Snapshot GETs use `reloadIgnoringLocalCacheData`.
 - Approve, reject, and cancel classify to success, failed, or retryable.  `StoreTransientAlerts` presents that result with its own title.  Proposal cards use the same split, including a retryable state that does not lock the buttons.
 - Explicit sign-out no longer forgets the APNs token locally before `signOutAndForgetToken` reads it.
+- Account switch re-seeds the in-flight `account.activate` attempt after the cache wipe so reconcile can drop its busy flag.
+- A money-action result carries the proposal id.  A success on one proposal does not repaint another proposal's failure.
+- `check-pin` reads public Congress.Trade with `GITHUB_TOKEN` first.  `GH_PACKAGES_TOKEN` is only the rate-limit fallback.  Preferring the owner PAT made the check fail on every PR while that shared budget was spent.
 
 **Files**
 
@@ -21,6 +24,9 @@ Linear ST-2578.  PR #4214 cleared the in-memory portfolio during sign-out and su
 - `ios/SocraticTrade/SocraticTradeApp.swift`
 - `ios/SocraticTradeTests/MobileModelsTests.swift`
 - `ios/SocraticTradeTests/AccountScopeAndMoneyActionTests.swift`
+- `scripts/check-shared-package-pin.mjs`
+- `test/shared-package-pin-check.test.ts`
+- `.github/workflows/shared-package-pin-check.yml`
 - `STATUS.md`
 - `PLAN.md`
 - `docs/rollouts/2026-10-15-ios-signout-account-switch-outcomes.md`
@@ -39,6 +45,7 @@ npm run lint          # exit 0, 0 errors, 854 warnings (grandfathered)
 npx tsc --noEmit      # exit 0
 npm test              # 23 failed, 9376 passed, 51 skipped
 npm run build         # exit 0
+npx vitest run test/shared-package-pin-check.test.ts  # 6 passed
 ```
 
 The 23 vitest failures are in LLM key routing, notify credentials, and server-metrics.  They expect an empty provider-key environment and this seat has provider keys set.  None of them import the iOS tree.
@@ -48,6 +55,8 @@ Swift compile and XCTest are not run on this Linux seat.  Hosted `.github/workfl
 - `AccountScopeAndMoneyActionTests.testSignOutClearsEveryAccountCacheAndStore`
 - `AccountScopeAndMoneyActionTests.testAccountSwitchClearsCachesAndKeepsTheSession`
 - `AccountScopeAndMoneyActionTests.testApproveRejectAndCancelReportSuccessFailedAndRetryable`
+- `AccountScopeAndMoneyActionTests.testAccountSwitchReleasesTheBusyFlagAfterTheCacheWipe`
+- `AccountScopeAndMoneyActionTests.testMoneyResultDoesNotRepaintAnotherProposal`
 - `MobileModelsTests.testProposalActionFeedbackSurfacesBusyPlacementOnSucceededApprove` now expects `.retryable`
 
 ## Next Steps & Blockers

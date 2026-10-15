@@ -198,16 +198,31 @@ struct MoneyActionResult: Equatable, Identifiable {
     let action: MoneyAction
     let kind: MoneyActionResultKind
     let message: String
+    /// Approve and reject results belong to one proposal.  A later result for a
+    /// different proposal must not repaint this card.
+    let proposalId: String?
 
-    var id: String { "\(action.rawValue)|\(kind.rawValue)|\(message)" }
+    init(action: MoneyAction, kind: MoneyActionResultKind, message: String, proposalId: String? = nil) {
+        self.action = action
+        self.kind = kind
+        self.message = message
+        self.proposalId = proposalId
+    }
 
-    func matches(_ action: ProposalActionFeedback.ProposalAction) -> Bool {
+    var id: String { "\(action.rawValue)|\(kind.rawValue)|\(proposalId ?? "")|\(message)" }
+
+    func matches(_ action: ProposalActionFeedback.ProposalAction, proposalId: String) -> Bool {
+        guard self.proposalId == proposalId else { return false }
         switch (self.action, action) {
         case (.approve, .approve), (.reject, .reject):
             return true
         case (.cancel, _), (.approve, .reject), (.reject, .approve):
             return false
         }
+    }
+
+    func scoped(to proposalId: String?) -> MoneyActionResult {
+        MoneyActionResult(action: action, kind: kind, message: message, proposalId: proposalId)
     }
 
     var title: String {
@@ -530,7 +545,7 @@ final class MobileStore: ObservableObject {
             return .sending(action: .reject)
         }
         if let notice = proposalNotices[proposalId] {
-            if let result = moneyActionResult, result.matches(notice.action) {
+            if let result = moneyActionResult, result.matches(notice.action, proposalId: proposalId) {
                 return proposalFeedback(from: result, command: nil)
             }
             return .failed(action: notice.action, message: notice.message)
@@ -608,7 +623,36 @@ final class MobileStore: ObservableObject {
     /// XCTest seam and the reconcile path.  Sets the alert result for approve, reject, and cancel.
     func recordResolvedCommand(_ command: MobileCommand) {
         guard let result = MoneyActionResult.classify(command: command) else { return }
-        moneyActionResult = result
+        let proposalId = proposalCommandIds.first(where: { $0.value == command.id })?.key
+        moneyActionResult = result.scoped(to: proposalId)
+    }
+
+    /// XCTest seam.  Submit writes the same notice when an approve or reject fails.
+    func stageProposalNotice(
+        proposalId: String,
+        action: ProposalActionFeedback.ProposalAction,
+        message: String
+    ) {
+        proposalNotices[proposalId] = (message: message, action: action)
+    }
+
+    /// XCTest seam.  Marks an operation busy the way `submit` does before the broker returns.
+    func armBusyOperation(_ operationID: String) {
+        busyOperations.insert(operationID)
+    }
+
+    /// The account-switch cache wipe drops the attempt tracker, so reconcile can no
+    /// longer see the activate command and its operation id stays busy forever.
+    /// Re-seed that one attempt and let reconcile release it.
+    func finishAccountSwitch(_ command: MobileCommand, operationID: String, payload: [String: Any]) {
+        _ = commandAttemptTracker.idempotencyKey(
+            operationID: operationID,
+            commandType: command.commandType,
+            payload: payload
+        )
+        commandAttemptTracker.track(command, operationID: operationID)
+        busyOperations.insert(operationID)
+        reconcileTrackedCommands([command])
     }
 
     func stagePendingAccountSwitch(_ accountId: String) {
@@ -864,7 +908,7 @@ final class MobileStore: ObservableObject {
                        snapshot?.connectedAccounts.first(where: { $0.id == pending })?.isActive != true {
                         error = "Switched accounts.  Waiting for the new portfolio to load."
                     }
-                    reconcileTrackedCommands([command])
+                    finishAccountSwitch(command, operationID: operationID, payload: payload)
                 }
             } else {
                 if commandType.hasPrefix("proposal.") {
@@ -904,7 +948,7 @@ final class MobileStore: ObservableObject {
                 return false
             }
             if let result = MoneyActionResult.classify(commandType: commandType, transportError: caught) {
-                moneyActionResult = result
+                moneyActionResult = result.scoped(to: proposalId)
                 if let proposalId, let proposalAction {
                     proposalNotices[proposalId] = (message: result.message, action: proposalAction)
                 }
