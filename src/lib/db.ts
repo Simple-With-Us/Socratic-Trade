@@ -4343,6 +4343,42 @@ function migrate(database: Database.Database): void {
       PRIMARY KEY (content_hash, model, revision)
     );
     CREATE INDEX IF NOT EXISTS idx_embed_stage_created ON embed_stage (created_at);
+    -- ST-4541 pre-embed near-duplicate detection. chunk_dedup_signatures holds one MinHash
+    -- signature (~256 B) per chunk we actually paid to embed, so a later ingest can compare
+    -- against recent same-source chunks without re-reading full text. chunk_dedup_links is the
+    -- provenance row written when a chunk's embed was SKIPPED, pointing at the canonical chunk that
+    -- answers for it. Deliberately registered in NEITHER sqlite-storage-hygiene's CATEGORY_BY_TABLE
+    -- nor PRUNABLE_TABLES: stored RAG data is kept forever, so these rows are never pruned or capped.
+    -- Write pattern is INSERT OR IGNORE only — no update, no delete.
+    CREATE TABLE IF NOT EXISTS chunk_dedup_signatures (
+      content_hash TEXT NOT NULL PRIMARY KEY,
+      normalized_hash TEXT NOT NULL DEFAULT '',
+      signature BLOB NOT NULL,
+      num_perm INTEGER NOT NULL DEFAULT 64,
+      symbol TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '',
+      chunk_id TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunk_dedup_signatures_scope
+      ON chunk_dedup_signatures (symbol, source, created_at);
+    CREATE INDEX IF NOT EXISTS idx_chunk_dedup_signatures_normalized
+      ON chunk_dedup_signatures (normalized_hash);
+    CREATE TABLE IF NOT EXISTS chunk_dedup_links (
+      content_hash TEXT NOT NULL,
+      canonical_hash TEXT NOT NULL,
+      canonical_chunk_id TEXT NOT NULL DEFAULT '',
+      canonical_vector_id TEXT NOT NULL DEFAULT '',
+      symbol TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '',
+      match_kind TEXT NOT NULL CHECK(match_kind IN ('exact','near')),
+      similarity REAL NOT NULL DEFAULT 0,
+      threshold REAL NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (content_hash, canonical_hash)
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunk_dedup_links_scope
+      ON chunk_dedup_links (symbol, source, created_at);
     CREATE TABLE IF NOT EXISTS learned_context (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
