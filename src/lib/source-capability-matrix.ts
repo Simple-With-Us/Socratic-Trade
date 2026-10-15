@@ -38,6 +38,7 @@ export type DataPointId =
   | "freeCashFlowYield"
   | "grossProfitMargin"
   | "sharesOutstanding"
+  | "marketCap"
   | "fiftyTwoWeekHigh"
   | "fiftyTwoWeekLow"
   | "shortPercentOfFloat"
@@ -462,6 +463,17 @@ export const DATA_POINT_CATALOG: readonly DataPointSpec[] = [
       opt("yahoo-finance", 1, "primary", "none", ["Confirm diluted vs basic if strategy cares."]),
       opt("sec-xbrl", 2, "primary", "none", [], { delay: "filing" }),
       opt("finnhub", 3, "good", "low", []),
+    ],
+  },
+  {
+    id: "marketCap",
+    label: "Market capitalization",
+    category: "fundamentals",
+    description: "Implied or reported cap.",
+    sources: [
+      opt("yahoo-finance", 1, "primary", "none", []),
+      opt("nasdaq-screener", 2, "good", "none", []),
+      opt("sec-xbrl", 3, "good", "none", ["Shares from SEC × live quote only when the screener cap is missing."], { delay: "filing" }),
     ],
   },
   {
