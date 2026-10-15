@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 // @ts-expect-error - plain ESM operator helper, intentionally dependency-free (single-line so the directive covers the specifier)
-import { comparePins, ctFetchProblem, ctHasNpmDep, gitRef, isGitHubRateLimit, lockResolvedSha, normVersion, packageSpec, parseProvenance, PKG, readTokenCandidates } from "../scripts/check-shared-package-pin.mjs";
+import { comparePins, ctHasNpmDep, ctReadTokens, gitRef, isGithubRateLimit, lockResolvedSha, normVersion, packageSpec, parseProvenance, PKG } from "../scripts/check-shared-package-pin.mjs";
 
 describe("shared-package pin check (vendor-era triangle)", () => {
   it("normalizes git tag specs and lock SHAs", () => {
@@ -27,26 +27,27 @@ describe("shared-package pin check (vendor-era triangle)", () => {
     expect(parseProvenance("- Immutable release: `v2.5.2`\n").commit).toBe("");
   });
 
-  it("reads the public repo with the Actions token before the shared user PAT", () => {
-    expect(readTokenCandidates({
-      GITHUB_TOKEN: "actions",
-      GH_TOKEN: "actions",
-      GH_PACKAGES_TOKEN: "pat",
-    })).toEqual(["actions", "pat"]);
-    expect(readTokenCandidates({ GH_PACKAGES_TOKEN: "pat" })).toEqual(["pat"]);
-    const rateLimit = "API rate limit exceeded for user ID 12656028. (HTTP 403)";
-    expect(isGitHubRateLimit(rateLimit)).toBe(true);
-    expect(isGitHubRateLimit("HTTP 404 Not Found")).toBe(false);
-    const problem = ctFetchProblem(rateLimit);
-    expect(problem).toContain("GITHUB_TOKEN");
-    expect(problem.includes("set GH_PACKAGES_TOKEN")).toBe(false);
-    expect(ctFetchProblem("Not Found (HTTP 404)")).toContain("GH_PACKAGES_TOKEN");
-    expect(comparePins({
+  it("reads Congress.Trade with the Actions token before the user PAT", () => {
+    expect(
+      ctReadTokens({
+        GITHUB_TOKEN: "installation",
+        GH_TOKEN: "installation",
+        GH_PACKAGES_TOKEN: "user-pat",
+      })
+    ).toEqual(["installation", "user-pat"]);
+    expect(ctReadTokens({ GH_PACKAGES_TOKEN: "user-pat" })).toEqual(["user-pat"]);
+    expect(isGithubRateLimit("API rate limit exceeded for user ID 12656028 (HTTP 403)")).toBe(true);
+    expect(isGithubRateLimit("HTTP 401 Bad credentials")).toBe(false);
+  });
+
+  it("does not call a rate limit a missing token", () => {
+    const { problems } = comparePins({
       stSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
       umSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
-      ctUnreadable: true,
-      ctUnreadableDetail: problem,
-    }).problems).toEqual([problem]);
+      ctRateLimited: true,
+    });
+    expect(problems.some((p: string) => /rate limited/i.test(p))).toBe(true);
+    expect(problems.some((p: string) => p.includes("GH_PACKAGES_TOKEN"))).toBe(false);
   });
 
   it("fails when CT is unreadable or reintroduces an npm dep", () => {
