@@ -89,7 +89,7 @@ printf '::add-mask::%s\n' "${TOKEN//'%'/'%25'}"
 fetch_one() {
   local name="$1"
   [ -x "$INFISICAL_SAFE" ] || skip "infisical-secrets-safe.sh missing (Zulip notify disabled)."
-  INFISICAL_TOKEN="$TOKEN" GITHUB_ACTIONS=true "$INFISICAL_SAFE" get "$name" \
+  GITHUB_ACTIONS=true INFISICAL_TOKEN="$TOKEN" "$INFISICAL_SAFE" get "$name" \
     --projectId="$INFISICAL_PROJECT_ID" --env=prod --path=/ \
     2>/dev/null || true
 }

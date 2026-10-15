@@ -12,9 +12,10 @@ Fleet coordination moved to Zulip (`agent-sync`) in October 2026.  A few ST shel
 - `scripts/codex-coordination.sh` — retirement stub pointing at `agent-sync`.
 - `.github/workflows/deploy-freshness.yml` — drop `SLACK_BOT_TOKEN`; optional `AGENT_SYNC_*` env for Zulip.
 - `.claude/skills/pickup-seat/SKILL.md`, `.claude/skills/land-lane/SKILL.md` — Zulip examples.
-- `scripts/com.jay.provider-knob-sync.plist` — comment refresh for Zulip creds.
-- `scripts/github-actions-infisical-zulip-ops.sh` — Actions-only Infisical fetch for the ST ops Zulip triple (`ZULIP_EMAIL`, `ZULIP_API_KEY`, `ZULIP_SITE`).
+- `scripts/github-actions-infisical-zulip-ops.sh` — Actions-only Infisical fetch for the ST ops Zulip triple via `scripts/infisical-secrets-safe.sh get`.
+- `scripts/infisical-secrets-safe.sh` — `get` subcommand (GitHub Actions + Zulip-key allowlist only).
 - `.github/workflows/deploy-freshness.yml` — install `agent-sync`, load Zulip creds from Infisical prod before optional fleet post.
+- `scripts/com.jay.provider-knob-sync.plist` — `AGENT_SYNC_REPO` env; commented Zulip triple template (retired `SLACK_TOPIC`).
 
 ## Decisions & Trade-offs
 
@@ -26,14 +27,14 @@ Fleet coordination moved to Zulip (`agent-sync`) in October 2026.  A few ST shel
 ## Verification State
 
 ```bash
-bash -n scripts/agent-sync-fleet-post.sh scripts/github-actions-infisical-zulip-ops.sh scripts/alert-deploy-freshness.sh scripts/sync-provider-knobs.sh  # -> ok
-bash scripts/alert-deploy-freshness.selftest.sh  # -> ok (9/9)
-python3 scripts/test-cloud-coordination-bootstrap.py  # -> ok
-npx vitest run test/infisical-secrets-safe.test.ts  # -> ok
-npm run lint  # -> ok (0 errors, 854 pre-existing warnings)
-npx tsc --noEmit  # -> ok
-npm test  # -> fail (10 failures, ALL pre-existing on origin/main — see below)
-npm run build  # -> ok
+bash -n scripts/agent-sync-fleet-post.sh scripts/github-actions-infisical-zulip-ops.sh scripts/infisical-secrets-safe.sh scripts/alert-deploy-freshness.sh scripts/sync-provider-knobs.sh -> ok
+bash scripts/alert-deploy-freshness.selftest.sh -> ok (9/9)
+npx vitest run test/infisical-secrets-safe.test.ts -> ok (47 passed)
+python3 scripts/test-cloud-coordination-bootstrap.py -> ok
+npm run lint -> ok (0 errors, 854 pre-existing warnings)
+npx tsc --noEmit -> ok
+npm test -> fail (10 failures, ALL pre-existing on origin/main — see below)
+npm run build -> ok
 ```
 
 The `npm test` failures are **not caused by this PR**.  They are confined to

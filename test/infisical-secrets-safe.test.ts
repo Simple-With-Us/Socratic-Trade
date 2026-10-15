@@ -155,6 +155,7 @@ describe("infisical-secrets-safe.sh is prod-only", () => {
     ["dev then prod", ["--env=dev", "--env", "prod"]]
   ];
   const bases: string[][] = [["has", "SOME_KEY"], ["set", "SOME_KEY=x"], ["names"], ["delete", "SOME_KEY"]];
+  // get is GitHub Actions-only; prod-env refusal is covered via the allowlisted key path.
   for (const [label, flags] of refusals) {
     for (const base of bases) {
       it(`${base[0]}: refuses ${label} and never calls infisical`, () => {
