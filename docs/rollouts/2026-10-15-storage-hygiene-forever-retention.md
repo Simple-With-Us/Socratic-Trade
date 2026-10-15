@@ -6,18 +6,23 @@ Jay decision (2026-10-15 03:13 CT): Socratic Trade keeps strategy runs and every
 
 ## Changes Made
 
-- `src/lib/sqlite-storage-hygiene.ts` — removed `RETENTION_TARGETS`, coverage pruning, and all `DELETE` paths.  The lane now runs `ANALYZE`, `PRAGMA optimize`, capped `incremental_vacuum` (when `auto_vacuum=INCREMENTAL`), and WAL checkpoint/TRUNCATE only.  Ops reports still walk `dbstat` sizes; `deletedRows` and `estimates` stay at zero/empty.
-- `src/lib/scheduler.ts` — scheduler summary uses `shrinkBytes` instead of `eligibleBytes`.
-- `test/sqlite-storage-hygiene.test.ts` — expectations updated for forever retention; regression test fails if `DELETE FROM`, `RETENTION_DAYS`, or `isoCutoff` reappear in the hygiene module.
-- `docs/rollouts/2026-10-15-history-retention-exemption.md` — backfill note no longer proposes Yahoo/Tradier/Twelve Data refills.
-- `docs/rollouts/2026-10-14-sqlite-storage-hygiene.md` — retention windows struck; lane is maintenance-only.
-- `STATUS.md`, `PLAN.md`
+- `src/lib/sqlite-storage-hygiene.ts` — no row deletes; maintenance only (ANALYZE, optimize, incremental_vacuum, WAL checkpoint).
+- `src/lib/audit-prune.ts` — age-based `audit_events` / provider table deletes removed; daily watermark kept, counts always zero.
+- `src/lib/db-task-journal.ts` — `pruneTaskJournal` is a no-op.
+- `src/lib/db-fills.ts` — `sweepPortfolioSnapshots` is a no-op.
+- `src/lib/db-embed-stage.ts` — `sweepEmbedStage` no longer age/cap-deletes; rows clear only via `deleteStagedEmbeddings` after Pinecone delivery.
+- `src/lib/db-economic-events.ts`, `src/lib/headline-first-seen.ts` — age prunes disabled.
+- `test/forever-retention-no-age-delete.test.ts` — regression guard on policy modules.
+- `test/audit-hygiene.test.ts`, portfolio/embed/headline/hygiene tests updated.
+- Docs: rollout notes, `STATUS.md`, `PLAN.md`, scheduler comments.
 
 ## Decisions & Trade-offs
 
-- Audit row age deletes remain on the **daily audit-prune lane** only (`src/lib/audit-prune.ts`).  Storage hygiene no longer estimates eligible audit bytes.
-- `task_journal` may still be pruned by `pruneTaskJournal` in `db-task-journal.ts` if that lane runs separately — out of scope for this change; Jay's directive targeted storage hygiene.
-- Disk growth is accepted; bounding history is an explicit owner decision, not silent hygiene.
+- **Transient queues left alone (not calendar TTL):**
+  - `embed_stage` — `deleteStagedEmbeddings` / corrupt-row delete after successful Pinecone delivery.
+  - `api_health_log` — per-service lane **count** cap (`HEALTH_LOG_LANE_CAP`), not age.
+  - Operational lease/settings keys, vector commit cleanup, account deletion, user-initiated deletes — unchanged.
+- Disk growth is accepted; bounding history requires an explicit owner decision.
 
 ## Verification State
 

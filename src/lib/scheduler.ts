@@ -936,14 +936,10 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     console.error("[scheduler] stale mobile-command sweep error:", err);
   }
 
-  // Task-journal retention: 'skipped' heartbeat rows age out in 24h, ok/error in 30d
-  // (db-task-journal.ts). One cheap indexed DELETE per tick; never throws.
+  // Task-journal hook (db-task-journal.ts) — forever retention; no-op delete.
   pruneTaskJournal();
 
-  // Daily audit_events + provider-observability retention (audit-prune.ts):
-  // observability kinds 14d, everything else 90d, bounded batches. First-ever
-  // run drains a large backlog over several daily passes. Also sweeps the
-  // embed_stage table (35d orphan retention + defensive size cap, db-embed-stage.ts).
+  // Daily audit-prune watermark (audit-prune.ts) — forever retention; no row deletes.
   void journalLane("audit-prune", {}, async () => {
     const result = await runAuditPruneYieldingIfDue();
     if (!result) return { status: "skipped" as const, summary: "not due" };

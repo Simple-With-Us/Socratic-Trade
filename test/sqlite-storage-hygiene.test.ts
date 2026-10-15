@@ -702,24 +702,20 @@ describe("storage hygiene against a database", () => {
     }
   });
 
-  it("yields between audit prune steps and keeps never-pruned kinds", async () => {
+  it("audit prune yielding deletes no rows (forever retention)", async () => {
     const { db } = await open();
     clearHygieneRows(db);
     const insert = db.prepare(
       "INSERT INTO audit_events (id, user_id, connected_account_id, created_at, kind, payload) VALUES (?, 'local', NULL, ?, ?, '{}')"
     );
     const old = isoDaysBefore(120);
-    for (let i = 0; i < 1000; i += 1) insert.run(`aud-${i}`, old, "order_placed");
+    for (let i = 0; i < 10; i += 1) insert.run(`aud-${i}`, old, "order_placed");
     insert.run("aud-keep", isoDaysBefore(400), "llm_call_latency");
     const { pruneAuditEventsYielding } = await import("../src/lib/audit-prune");
-    let yields = 0;
-    const result = await pruneAuditEventsYielding(NOW, 50_000, async () => {
-      yields += 1;
-    });
-    expect(result.auditDefault).toBe(1000);
-    expect(yields).toBeGreaterThanOrEqual(1);
-    const kinds = (db.prepare("SELECT kind FROM audit_events").all() as Array<{ kind: string }>).map((row) => row.kind);
-    expect(kinds).toEqual(["llm_call_latency"]);
+    const result = await pruneAuditEventsYielding(NOW, 50_000, async () => {});
+    expect(result.auditDefault).toBe(0);
+    expect(result.auditObservability).toBe(0);
+    expect(count(db, "audit_events")).toBe(11);
   });
 });
 
