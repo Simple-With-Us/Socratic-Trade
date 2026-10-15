@@ -66,7 +66,7 @@ A later merge of the Quiver coverage branch added `installPlaywrightSession`.  I
 
 ## Next Steps & Blockers
 
-PR #4701 stays ready for review with `do-not-automerge`.  Auto-merge stays off.  Jay squash-merges.  Resolve ST-8 only after the fix has shipped.
+PR #4701 stays ready for review with `do-not-automerge`.  Auto-merge stays off.  Jay squash-merges.  Resolve ST-8 only after the fix has shipped.  Hosted `verify-hosted` passed on workflow_dispatch after `6ca8d224` (cloud-proxy pushes still need `gh workflow run ci.yml --ref cursor/restart-sweep-boot-grace-ab92`).  Kody `@kody start-review` after that commit failed with MiniMax-M3 unavailable; the prior `CHANGES_REQUESTED` on the Playwright secret thread remains until Kody can approve.
 
 ## Zero-Code Findings
 

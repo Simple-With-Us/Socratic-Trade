@@ -27,8 +27,7 @@ Fleet coordination moved to Zulip (`agent-sync`) in October 2026.  A few ST shel
 ## Verification State
 
 ```bash
-<<<<<<< HEAD
-bash -n scripts/agent-sync-fleet-post.sh scripts/github-actions-infisical-zulip-ops.sh scripts/alert-deploy-freshness.sh scripts/sync-provider-knobs.sh  # -> ok
+bash -n scripts/agent-sync-fleet-post.sh scripts/github-actions-infisical-zulip-ops.sh scripts/infisical-secrets-safe.sh scripts/alert-deploy-freshness.sh scripts/sync-provider-knobs.sh  # -> ok
 bash scripts/alert-deploy-freshness.selftest.sh  # -> ok (9/9)
 python3 scripts/test-cloud-coordination-bootstrap.py  # -> ok
 npx vitest run test/infisical-secrets-safe.test.ts  # -> ok (47/47)
@@ -36,16 +35,6 @@ npm run lint  # -> ok (0 errors, 854 pre-existing warnings)
 npx tsc --noEmit  # -> ok
 npm test  # -> fail (pre-existing OpenRouter env on this VM; see below)
 npm run build  # -> ok
-=======
-bash -n scripts/agent-sync-fleet-post.sh scripts/github-actions-infisical-zulip-ops.sh scripts/infisical-secrets-safe.sh scripts/alert-deploy-freshness.sh scripts/sync-provider-knobs.sh -> ok
-bash scripts/alert-deploy-freshness.selftest.sh -> ok (9/9)
-npx vitest run test/infisical-secrets-safe.test.ts -> ok (47 passed)
-python3 scripts/test-cloud-coordination-bootstrap.py -> ok
-npm run lint -> ok (0 errors, 854 pre-existing warnings)
-npx tsc --noEmit -> ok
-npm test -> fail (10 failures, ALL pre-existing on origin/main — see below)
-npm run build -> ok
->>>>>>> 749df83f652b0c47ec48cad9be48445b0188f928
 ```
 
 The `npm test` failures are **not caused by this PR**.  They are confined to

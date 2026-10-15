@@ -10,8 +10,33 @@
 
 **Verification.**  After merging `origin/main` (`df7e6d10`) and the check-pin token-order fix: `npm run lint` exit 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exit 0.  `npx vitest run test/shared-package-pin-check.test.ts` 6 passed.  `node scripts/check-shared-package-pin.mjs` with `GH_PACKAGES_TOKEN` unset printed `OK` for `@2.7.1`.  `npm test` 9366 passed, 51 skipped, 26 failed, all outside this diff (sandbox LLM and notify credentials, provider fixtures, cpuprofile Node loader, server-metrics host flag).  `npm run build` exit 0.  check-pin was red on this PR and on every other PR in the 07:32-07:55Z burst because the script preferred `GH_PACKAGES_TOKEN` (user 12656028) for the public Congress.Trade repo and reported the rate limit as a missing token.  The Actions `GITHUB_TOKEN` is now first.
 
-**Next.**  Jay squash-merges.  Do not enable auto-merge.  Playwright session cookies follow `PLAYWRIGHT_PORT`.  `resolvePlaywrightAuthSecret()` keeps the local fixture but requires workflow `PLAYWRIGHT_AUTH_SECRET` in CI; vitest imports `playwright-base-url.ts` only so `verify` does not throw under `CI=true`.  Two screenshot Kody threads stay open with defer replies only.  Re-request Kody review after the vitest fix lands.
+**Next.**  Jay squash-merges.  Do not enable auto-merge.  Head `6ca8d224` plus merge of `origin/main` (scheduler conflict resolved).  `verify-hosted` green on workflow_dispatch run 38753223398 after the vitest import fix.  Kody re-review failed on provider (MiniMax-M3 HTTP 404) so `reviewDecision` stays `CHANGES_REQUESTED` until Kody can post a new review.  Two screenshot Kody threads stay open with defer replies only.
 
+## 2026-10-15 Cursor Cloud — ops performance parked flag (ST-3875)
+
+**What.**  `GET /api/ops/performance` account rows now include `parked`, `parkedReason`, and `parkedAt`.  The flag is read from the connected account and reported on the priced book, the never-synced branch, and the per-account error branch.  No account is parked or re-armed.
+
+**Branch.**  `cursor/ops-performance-parked-flag-9767`
+
+**Verification.**  See `docs/rollouts/2026-10-15-ops-performance-parked-flag.md`.
+
+**Next.**  Ready PR for ST-3875.  Jay still decides park / re-arm / investigate for the four dormant accounts.  `/api/ops/snapshot` still omits the flag.
+## 2026-10-15 Cursor Cloud — storage hygiene forever retention (no age deletes)
+
+**What.**  Jay decision 03:13 CT: remove **all** age-based row deletes — `sqlite-storage-hygiene`, `audit-prune`, `pruneTaskJournal`, portfolio snapshot sweep, embed_stage TTL/cap sweep, economic calendar, `headline_first_seen`, and `api_health_log` per-lane count trim.  Maintenance-only hygiene lane; transient `embed_stage` delivery deletes remain.  `HEALTH_LOG_LANE_CAP` is read-bound only for streak heuristics.
+
+**Branch.**  `cursor/forever-retention-no-age-deletes-504b`
+
+**Verification.**  Merged `origin/main` 2026-10-15; `npx vitest run test/sqlite-storage-hygiene.test.ts test/forever-retention-no-age-delete.test.ts test/health-lane-cap.test.ts` (post-merge).
+
+**Next.**  PR #4722 ready; merge after verify green.
+## 2026-10-15 Cursor Cloud — CT fundamentals/analyst nightly push (ST-4537)
+
+**What.**  Congress.Trade `st_inbound_market_data` fundamentals + analyst stale since 2026-10-06; scan-hook-only path.  Nightly `runCongressDailyShare` now POSTs fundamentals/analyst from `symbol_field_latest` for the monitored universe.
+
+**Branch.**  `cursor/ct-fundamentals-nightly-push-bb23`
+
+**Next.**  Verify gate, open ready PR, deploy; confirm CT stream freshness after nightly run.
 ## 2026-10-15 CURSOR — Congress push delivery/consumption receipt (ST-3846)
 
 **What.**  App B webhook responses now emit `receiptVersion: 1` with explicit `delivered` + `consumed` fields; batch failures return `422` instead of silent `200`.  Congress.Trade PR parses the receipt before marking `deliveries` rows delivered.
