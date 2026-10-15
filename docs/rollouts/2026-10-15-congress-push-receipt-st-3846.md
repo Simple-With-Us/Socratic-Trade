@@ -24,9 +24,10 @@ Congress.Trade webhook pushes previously treated any HTTP 2xx as success without
 ## Verification State
 
 ```bash
-npx vitest run test/congress-push-receipt.test.ts test/congress-trade-events.test.ts test/congress-webhook-parity.test.ts  # 47 passed
-npm run lint   # 0 errors
+npm run lint   # 0 errors (warnings only)
 npx tsc --noEmit  # clean
+npm test  # full vitest suite; congress-push-receipt + congress-trade-events paths covered
+npm run build  # clean
 ```
 
 Congress.Trade delivery tests (separate worktree):

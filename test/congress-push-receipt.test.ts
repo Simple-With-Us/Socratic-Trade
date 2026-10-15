@@ -24,6 +24,12 @@ describe("congress push receipt", () => {
     expect(receipt.consumed).toBe(false);
   });
 
+  it("omits empty apply reasons so receipt Zod parse cannot 500 the webhook", () => {
+    const receipt = buildCongressPushReceipt({ ok: false, applied: 0, reason: "   " });
+    expect(receipt.consumed).toBe(false);
+    expect(receipt.reason).toBeUndefined();
+  });
+
   it("aggregates batch receipts and fails closed on any bad event", () => {
     const receipt = buildCongressPushBatchReceipt(
       [

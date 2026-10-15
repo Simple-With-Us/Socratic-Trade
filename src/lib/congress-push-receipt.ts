@@ -38,8 +38,27 @@ export const CongressPushReceiptSchema = z
 
 export type CongressPushReceipt = z.infer<typeof CongressPushReceiptSchema>;
 
+/** Minimal envelope fields read for receipt correlation (webhook body is already JSON-parsed). */
+const CongressPushEventEnvelopeSchema = z
+  .object({
+    id: z.string().trim().min(1).optional(),
+    events: z.array(z.unknown()).optional(),
+  })
+  .passthrough();
+
+const CongressPushBatchItemSchema = z
+  .object({
+    id: z.string().trim().min(1).optional(),
+  })
+  .passthrough();
+
 function eventConsumed(result: ApplyResult): boolean {
   return result.ok === true;
+}
+
+function receiptReason(result: ApplyResult): string | undefined {
+  const trimmed = result.reason?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 export function buildCongressPushReceiptEvent(result: ApplyResult, eventId?: string): CongressPushReceiptEvent {
@@ -51,7 +70,7 @@ export function buildCongressPushReceiptEvent(result: ApplyResult, eventId?: str
     eventId,
     applied: result.applied,
     duplicate: result.duplicate,
-    reason: result.reason,
+    reason: receiptReason(result),
   });
 }
 
@@ -90,25 +109,21 @@ export function buildCongressPushBatchReceipt(
 }
 
 export function resolveCongressEventId(body: unknown): string | undefined {
-  if (!body || typeof body !== "object") return undefined;
-  const rec = body as { id?: unknown; events?: unknown };
-  if (typeof rec.id === "string" && rec.id.trim()) return rec.id.trim();
-  if (Array.isArray(rec.events) && rec.events.length > 0) {
-    const first = rec.events[0];
-    if (first && typeof first === "object" && typeof (first as { id?: unknown }).id === "string") {
-      return ((first as { id: string }).id).trim();
-    }
-  }
-  return undefined;
+  const parsed = CongressPushEventEnvelopeSchema.safeParse(body);
+  if (!parsed.success) return undefined;
+  const rec = parsed.data;
+  if (rec.id) return rec.id;
+  const first = rec.events?.[0];
+  const firstParsed = CongressPushBatchItemSchema.safeParse(first);
+  return firstParsed.success ? firstParsed.data.id : undefined;
 }
 
 /** Parallel to `events[]` — preserves index alignment when some envelopes omit `id`. */
 export function resolveCongressEventIds(body: unknown): (string | undefined)[] | undefined {
-  if (!body || typeof body !== "object") return undefined;
-  const rec = body as { events?: unknown };
-  if (!Array.isArray(rec.events)) return undefined;
-  return rec.events.map((event) => {
-    const raw = event && typeof event === "object" ? (event as { id?: unknown }).id : undefined;
-    return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+  const parsed = CongressPushEventEnvelopeSchema.safeParse(body);
+  if (!parsed.success || !parsed.data.events) return undefined;
+  return parsed.data.events.map((event) => {
+    const item = CongressPushBatchItemSchema.safeParse(event);
+    return item.success ? item.data.id : undefined;
   });
 }
