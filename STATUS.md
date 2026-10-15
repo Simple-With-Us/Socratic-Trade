@@ -9,6 +9,15 @@
 **Verification.**  `npx tsc --noEmit` exit 0.  Touched-file eslint quiet exit 0.  Approval-fixture and quote tests re-run green after scan stubs gained `asOf` (including MSFT on the bulk-approve stub) and chat preview kept the scan-less carve-out.  `npm run build` exit 0.  An earlier full `npm test` still shows the pre-existing OpenRouter-key, notify, server-metrics, and cpuprofile failures.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
 
 **Next.**  PR ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
+## 2026-10-15 Cursor Cloud — remove ST primary Infisical bridge (ST-4318)
+
+**What.**  Permanent removal of the default-off Usage Monitor credential bridge writer: module, tests, scheduler lane, `/api/keys` triggers, and active env/backlog/docs setup.  Per-user encrypted API keys and tombstone behavior unchanged.
+
+**Branch.**  `cursor/remove-st-primary-bridge-927d`
+
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  Scheduler startup tests 21/21.  `npm run build` ok.  Full `npm test`: 24 failures pre-existing in this sandbox (unchanged vs unrelated suites).
+
+**Next.**  Open ready PR, `@kody start-review`.
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
