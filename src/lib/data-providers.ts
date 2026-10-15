@@ -45,6 +45,13 @@ import { expiresAtRespectingMarketClose } from "./market-hours";
 import { recordProviderCall } from "./usage-monitor-push";
 import { robinhoodMcpDataEnabled } from "./robinhood";
 import { RobinhoodOptionsEnrichmentProvider } from "./robinhood-options";
+import {
+  AlpacaOptionsEnrichmentProvider,
+  CboeOptionsEnrichmentProvider,
+  TradierOptionsEnrichmentProvider,
+  keylessOptionsEnrichmentEnabled,
+  resolveTradierOptionsCredential
+} from "./keyless-options-enrichment";
 import { resolveQuiverApiKey } from "./quiver-provider";
 import { isDirectVendorAccessAllowed } from "./retired-direct-vendors";
 import {
@@ -77,6 +84,7 @@ import {
 } from "./evidence-facts";
 import {
   AV_RAPIDAPI_OVERVIEW_CORE_FIELDS,
+  COVERAGE_OPTIONS_METRICS_FIELDS,
   WAVE_B_GAP_FIELDS,
   paidProviderHasUsefulWaveBGap,
   scarceProviderHasUsefulGap
@@ -1216,6 +1224,34 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   if (wisesheetsKey) providers.push(withHealthLane(new WisesheetsEnrichmentProvider(wisesheetsKey), "env"));
   const simFinKey = resolveSimFinApiKey();
   if (simFinKey) providers.push(withHealthLane(new SimFinEnrichmentProvider(simFinKey), "env"));
+  // Options metrics.  Cboe delayed JSON is the free-wave primary.  Alpaca indicative and
+  // Tradier chains are keyed fallbacks (costTier paid) and run in Wave B only for symbols
+  // still missing nearTheMoneyIv or putCallRatio.
+  if (keylessOptionsEnrichmentEnabled()) {
+    providers.push(new CboeOptionsEnrichmentProvider());
+    if (alpacaData.apiKey && alpacaData.secretKey) {
+      providers.push(
+        withHealthLane(
+          new AlpacaOptionsEnrichmentProvider(alpacaData.apiKey, alpacaData.secretKey, alpacaData.source, userId),
+          alpacaData.source
+        )
+      );
+    }
+    const tradierOptions = resolveTradierOptionsCredential(userId);
+    if (tradierOptions.key) {
+      providers.push(
+        withHealthLane(
+          new TradierOptionsEnrichmentProvider(
+            tradierOptions.key,
+            tradierOptions.baseUrl,
+            tradierOptions.source,
+            userId
+          ),
+          tradierOptions.source
+        )
+      );
+    }
+  }
   // Opt-in Robinhood option-chain tier (near-the-money IV + put/call ratio). Default OFF and inert
   // unless Robinhood MCP is connected — a long-TTL, low-frequency source with its own cache. Seated
   // late so it only fills the options-specific fields nothing else supplies.
@@ -1521,22 +1557,32 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
       // ── Wave B: keyed non-scarce (costTier paid = has a key), gap-only ──────
       // Skip when remaining gather budget cannot finish Finnhub's paced queue
       // before the 8-minute wall (board 06df80cf leftover).
+      // Options IV / put-call stay out of WAVE_B_GAP_FIELDS so a missing IV does not
+      // wake Finnhub.  Keyed options fallbacks still run here, only for symbols the
+      // free wave left blank on nearTheMoneyIv or putCallRatio.
       throwIfEnrichmentAborted(context?.signal);
       if (
         !enrichmentPlanForDeadline(context?.deadlineAt).skipKeyedWave &&
         paidIndexes.length > 0
       ) {
         const filledAfterFree = buildFilledBySymbol(freeIndexes);
-        const gapSymbols = normalized.filter((symbol) =>
+        const coreGapSymbols = normalized.filter((symbol) =>
           symbolHasCoverageGap(filledAfterFree.get(symbol) ?? new Set(), WAVE_B_GAP_FIELDS)
         );
-        if (gapSymbols.length > 0) {
+        const optionsFieldSet = new Set<string>(COVERAGE_OPTIONS_METRICS_FIELDS);
+        const isOptionsMetricsProvider = (fields: readonly string[] | undefined): boolean =>
+          !!fields && fields.length > 0 && fields.every((field) => optionsFieldSet.has(field));
+        const optionsGapSymbols = normalized.filter((symbol) => {
+          const filled = filledAfterFree.get(symbol) ?? new Set<string>();
+          return COVERAGE_OPTIONS_METRICS_FIELDS.some((field) => !filled.has(field));
+        });
+        if (coreGapSymbols.length > 0 || optionsGapSymbols.length > 0) {
           const coveredFields = coveredFieldsFrom(filledAfterFree);
           // Analyst-source hint from App A when present (same semantics as short-circuit).
           const analystSource: Record<string, string> = {};
           const congressIdx = freeIndexes.find((i) => this.providers[i].name === "congress.trade");
           if (congressIdx !== undefined) {
-            for (const s of gapSymbols) {
+            for (const s of coreGapSymbols) {
               const e = results[congressIdx].data[s];
               const srcKey = e?.analystBySource ? Object.keys(e.analystBySource)[0] : undefined;
               if (srcKey) analystSource[s] = srcKey;
@@ -1552,13 +1598,17 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
             paidIndexes.map((providerIndex) => {
               const provider = this.providers[providerIndex];
               const fields = provider.suppliesFields;
-              const targets =
-                fields && fields.length > 0
-                  ? gapSymbols.filter((symbol) => {
+              const targets = isOptionsMetricsProvider(fields)
+                ? optionsGapSymbols.filter((symbol) => {
+                    const filled = filledAfterFree.get(symbol) ?? new Set<string>();
+                    return (fields ?? []).some((field) => !filled.has(field));
+                  })
+                : fields && fields.length > 0
+                  ? coreGapSymbols.filter((symbol) => {
                       const filled = filledAfterFree.get(symbol) ?? new Set<string>();
                       return paidProviderHasUsefulWaveBGap(fields as readonly string[], filled);
                     })
-                  : gapSymbols;
+                  : coreGapSymbols;
               if (targets.length === 0) {
                 return Promise.resolve({ name: provider.name, data: {} } as ProviderRun);
               }
