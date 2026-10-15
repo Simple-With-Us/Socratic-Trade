@@ -43,6 +43,15 @@
 **Docs.**  `docs/rollouts/2026-10-14-embed-context-retrieval-pressure.md`, `docs/phase-7-strategy.md`, `STATUS.md`, `PLAN.md`.
 
 **Next.**  Ready for review.  Do not merge from this lane.  Sentry 2G and 2E stay open until production shows the burst and the context-length 400 are gone.  Fleet `board whoami` could not run on this seat (no Linear or Zulip credentials).  The unfiled claim is team ST, In Progress, title "Fit embed input to the bge-m3 token budget and back off retrieval bursts", Completed only after merge.
+## 2026-10-15 Cursor Cloud — storage hygiene forever retention (no age deletes)
+
+**What.**  Jay decision 03:13 CT: remove **all** age-based row deletes — `sqlite-storage-hygiene`, `audit-prune`, `pruneTaskJournal`, portfolio snapshot sweep, embed_stage TTL/cap sweep, economic calendar, `headline_first_seen`, and `api_health_log` per-lane count trim.  Maintenance-only hygiene lane; transient `embed_stage` delivery deletes remain.  `HEALTH_LOG_LANE_CAP` is read-bound only for streak heuristics.
+
+**Branch.**  `cursor/forever-retention-no-age-deletes-504b`
+
+**Verification.**  Merged `origin/main` 2026-10-15; `npx vitest run test/sqlite-storage-hygiene.test.ts test/forever-retention-no-age-delete.test.ts test/health-lane-cap.test.ts` (post-merge).
+
+**Next.**  PR #4722 ready; merge after verify green.
 ## 2026-10-15 Cursor Cloud — CT fundamentals/analyst nightly push (ST-4537)
 
 **What.**  Congress.Trade `st_inbound_market_data` fundamentals + analyst stale since 2026-10-06; scan-hook-only path.  Nightly `runCongressDailyShare` now POSTs fundamentals/analyst from `symbol_field_latest` for the monitored universe.

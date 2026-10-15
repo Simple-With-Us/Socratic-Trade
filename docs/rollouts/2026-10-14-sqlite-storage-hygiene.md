@@ -2,11 +2,11 @@
 
 ## Context & Objective
 
-Production SQLite is about 16.5 GB with a 415 MB pending WAL while Litestream is replicating.  Background checks spiked to 76-79s and the scheduler lagged 120s.  The goal is a scheduled cleanup that reclaims cache, log, and finished-run rows without deleting money-path records and without a blocking full file rewrite.
+Production SQLite is about 16.5 GB with a 415 MB pending WAL while Litestream is replicating.  Background checks spiked to 76-79s and the scheduler lagged 120s.  The goal is scheduled SQLite maintenance (checkpoint, ANALYZE/optimize, incremental free-page reclaim) without deleting money-path records and without a blocking full file rewrite.  **Update 2026-10-15:** age-based row deletes were removed entirely; see `docs/rollouts/2026-10-15-storage-hygiene-forever-retention.md`.
 
 ## Changes Made
 
-A new `storage-hygiene` scheduler lane runs a full pass every 6 hours and a WAL checkpoint every 10 minutes.  Deletes are `rowid` batches (default 200, at most 25 batches per target) and the lane awaits `yieldEventLoop` between full batches.  The daily audit prune uses the same retention as before, now in 500-row steps with a yield between steps.  Portfolio snapshots stay on that existing 90-day lane and are refused by the new job.
+A new `storage-hygiene` scheduler lane runs a full pass every 6 hours and a WAL checkpoint every 10 minutes.  **Historical note:** the first version batched age-based deletes; that behavior was retired 2026-10-15.  The daily audit prune lane is separate.  Portfolio snapshots stay on the existing 90-day audit lane and are refused by storage hygiene.
 
 Fresh database files arm `auto_vacuum=INCREMENTAL` before `journal_mode=WAL` writes the header.  Existing files are left on their current mode.  When the mode is already INCREMENTAL, each pass may run `incremental_vacuum` for at most 128 pages.  The job never issues a full rewrite.
 
@@ -29,9 +29,9 @@ WAL checkpoint is PASSIVE.  TRUNCATE runs only after that copy reports busy 0 an
 ## Decisions & Trade-offs
 
 - Money-path denylist: `fill_events`, `order_replacements`, `trade_proposals`, `portfolio_snapshots`, stop and bracket tables, `settings` (HWM and SOD keys live here), connected accounts, account strategy state, and learned context.  An unlisted table throws before any DELETE is prepared.  `llm_usage` stays for the lifetime rule and is reported, not deleted.  Document chunks and FTS stay (retrieval corpus).
-- Retention windows: terminal unreferenced strategy runs 120 days, terminal run requests 30 days, skipped task-journal rows 1 day, other finished journal rows 30 days, symbol-field cache 180 days, embed stage 35 days, API health log 14 days, inactive SEC ingest attempts 21 days.  EOD history cache (`history_cache_eod`) is DURABLE and has no age-based deletion — the 400-day window this note originally listed was removed 2026-10-15 (see `docs/rollouts/2026-10-15-history-retention-exemption.md`) to honor the permanent-upsert / ~5y deep-history design.  Coverage keeps the newest 30 runs always, and deletes past 90 days or past 120 runs.  Runs referenced by a fill or a proposal are kept even when old.  Running rows are kept.
-- Audit row deletes stay on the daily lane.  Hygiene only counts them so the report can show the eligible bytes.  That avoids two lanes deleting the same rows.
-- `expectedReclaimBytes` is the logical page-fraction of eligible hygiene rows.  `expectedFileShrinkBytes` is pages actually returned this pass.  On a production file that is still `auto_vacuum=NONE`, deletes free pages for reuse and the file size does not shrink.  Switching that file would require a full rewrite, which this job refuses.
+- **Retention windows (retired 2026-10-15):** strategy runs, logs, task journal, embed stage, coverage, and EOD history are kept forever from the hygiene lane.  See `docs/rollouts/2026-10-15-storage-hygiene-forever-retention.md`.
+- Audit row deletes stay on the daily audit-prune lane only.
+- `expectedFileShrinkBytes` is pages returned by `incremental_vacuum` this pass.  On a production file that is still `auto_vacuum=NONE`, the file size does not shrink until a separate owner decision.
 - No `CREATE INDEX` in `migrate()` for the new deletes.  A boot-time index on a multi-gigabyte table is the stall class from 2026-10-05.  History-cache deletes filter `date` in batches.  Coverage deletes by the existing `as_of` key.
 - Watermarks and the ops report are quiet `settings` writes.  They do not insert `policy_change` audit rows.
 - The storage-hygiene lane runs after the single-leader gate.  A follower does not checkpoint or delete.  `runStorageHygieneIfDue` also refuses a second same-process call while one pass is in flight, and it claims `storage-hygiene:lastFullAt` before the await.  A thrown pass keeps that claim so the next tick does not start another full walk.
