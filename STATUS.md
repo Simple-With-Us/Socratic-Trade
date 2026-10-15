@@ -1,5 +1,13 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — check-pin token order (ST-2582 PR #4698)
+
+**What.**  Merged `origin/main` (`df7e6d10`) with a merge commit.  `check-pin` was failing because it read public Congress.Trade with `GH_PACKAGES_TOKEN` first.  That secret is one user's PAT, so a burst of pull requests shares one rate limit and the job reports a missing token.  The script now tries the Actions installation token first and keeps the PAT as a fallback.  A rate-limit failure is no longer labeled as a missing token.
+
+**Branch.**  `cursor/honest-approve-retryable-11d4`
+
+**Next.**  Stay ready with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.
+
 ## 2026-10-15 Cursor Cloud — honest approve and retryable broker errors (ST-2582)
 
 **What.**  Approve reports HTTP 200 only when the broker order was placed.  Timeouts, HTTP 5xx, and Tradier's HTTP 400 "Unexpected server error" classify as retryable.  Those that may already be live reconcile by refId before `not_placed`.  The #4668 5xx halt path and the #4685 16-minute sandbox wait stay in place.  Price and market-data history is untouched.
