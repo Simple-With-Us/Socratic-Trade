@@ -69,7 +69,6 @@ import { rankDemandFirstSymbols } from "./rag/demand-first-symbols";
 import { acquireOrRenewLeadership, releaseLease, LEASE_OWNER } from "./scheduler-lease";
 import { reconcilePendingFills } from "./strategy-execution";
 import { safeErrorMessage } from "./telemetry-sanitize";
-import { runStPrimaryBridgeWriterIfDue } from "./st-primary-bridge-writer";
 import { journalLane } from "./task-journal";
 import { pruneTaskJournal } from "./db-task-journal";
 import { withDeadline, withLaneDeadline, isLaneDeadlineExpiry, LANE_STALL_ATTRIBUTION_RATIO, SCHEDULER_BROKER_TIMEOUT_MS } from "./safety-maintenance";
@@ -1007,18 +1006,6 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     if (run === null) return { status: "skipped" as const, summary: "not due" };
     return { status: "ok" as const, summary: `status=${run.status}` };
   }).catch((err) => console.error("[scheduler] managed-vector reconcile journal error:", err));
-
-  // Default-off, cadence-gated export of only the primary local user's Gemini
-  // and DeepSeek credentials to the isolated Usage Monitor bridge path. The
-  // writer is self-guarded and returns sanitized status codes without throwing
-  // into trading work.
-  void journalLane("st-primary-bridge-writer", {}, () => runStPrimaryBridgeWriterIfDue()).then((result) => {
-    if (result.status === "error") {
-      console.error(
-        `[scheduler] ST primary credential bridge failed (${result.errorCode ?? "unknown"})`
-      );
-    }
-  }).catch((err) => console.error("[scheduler] ST primary bridge journal error:", err));
 
   // Refresh backend web sources (congressional trades, etc.) independently of the
   // trading loop — these are low-frequency (cadence-gated, ~daily) data reads that
