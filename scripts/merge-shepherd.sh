@@ -79,8 +79,34 @@ refresh_merge_state() {
   printf '%s' "UNKNOWN"
 }
 
+# True when any required/ancillary check is still running on the current head.
+# update-branch mid-run cancels verify-hosted (~20m); a 15-19m re-sync cadence then
+# starves PRs forever (board ST-2874 / Monet 2026-08-21).
+#
+# BEHIND re-sync callers keep verify=SUCCESS guards; do not relax those.
+ci_in_flight() {
+  local running="$1" verify="$2"
+  if [ "$running" -gt 0 ]; then
+    return 0
+  fi
+  case "$verify" in
+    # NEUTRAL|SKIPPED: GitHub terminal conclusions; listed for contract +
+    # selftest completeness (assert_idle), not a separate production path here.
+    SUCCESS|FAILURE|CANCELLED|TIMED_OUT|ACTION_REQUIRED|STARTUP_FAILURE|STALE|ERROR|NEUTRAL|SKIPPED|NONE)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
 shepherd_sync_behind() {
-  local num="$1" title="$2"
+  local num="$1" title="$2" running="$3" verify="$4"
+  if ci_in_flight "$running" "$verify"; then
+    row WAITING "$num" "$title  (behind main; re-sync deferred -- CI in flight on current head)"
+    return 0
+  fi
   if [ "$HAS_PAT" != "1" ]; then
     row WAITING "$num" "$title  (behind main; re-sync skipped -- no PAT to re-trigger verify)"
   elif gh pr update-branch "$num" -R "$REPO" >/dev/null 2>&1; then
@@ -133,7 +159,12 @@ for num in $nums; do
         case "$merge_state" in
           BLOCKED) row BLOCKED "$num" "$title  (mergeStateStatus=BLOCKED -- unresolved review / rules)" ;;
           UNKNOWN) row WAITING "$num" "$title  (mergeStateStatus=UNKNOWN -- mergeability not settled)" ;;
-          BEHIND)  row WOULD-SYNC "$num" "$title  (behind main -- would re-sync)" ;;
+          BEHIND)
+            if ci_in_flight "$running" "$verify"; then
+              row WAITING "$num" "$title  (behind main; re-sync deferred -- CI in flight)"
+            else
+              row WOULD-SYNC "$num" "$title  (behind main -- would re-sync)"
+            fi ;;
           DIRTY)   row CONFLICT "$num" "$title  (mergeStateStatus=DIRTY -- needs a human)" ;;
           CLEAN|UNSTABLE|HAS_HOOKS) row WOULD-MERGE "$num" "$title" ;;
           *)       row WAITING "$num" "$title  (mergeStateStatus=$merge_state -- not mergeable yet)" ;;
@@ -142,6 +173,8 @@ for num in $nums; do
                row FAILING "$num" "$title  (verify=$verify; reran=$reran)" ;;
       NONE)    if [ "$running" -gt 0 ]; then row WAITING "$num" "$title  (CI running; verify not posted yet)";
                else row WOULD-SYNC "$num" "$title  (no CI at all -- would re-sync to re-trigger it)"; fi ;;
+      NEUTRAL|SKIPPED)
+               row WAITING "$num" "$title  (verify=$verify -- terminal optional check; not re-syncing)" ;;
       *)       row WAITING "$num" "$title  (verify=$verify -- CI running)" ;;
     esac
     continue
@@ -164,7 +197,7 @@ for num in $nums; do
       UNKNOWN)
         row WAITING "$num" "$title  (mergeStateStatus=UNKNOWN -- mergeability not settled; retry next run)" ;;
       BEHIND)
-        shepherd_sync_behind "$num" "$title" ;;
+        shepherd_sync_behind "$num" "$title" "$running" "$verify" ;;
       DIRTY)
         gh pr edit "$num" -R "$REPO" --add-label needs-human-merge >/dev/null 2>&1 || true
         row CONFLICT "$num" "$title  (mergeStateStatus=DIRTY -- needs a human)" ;;
@@ -179,7 +212,7 @@ for num in $nums; do
           elif [ "$merge_state" = "UNKNOWN" ]; then
             row WAITING "$num" "$title  (mergeability UNKNOWN after merge attempt)"
           elif [ "$merge_state" = "BEHIND" ] || printf '%s' "$lc" | grep -Eq 'conflict|not mergeable|not up to date|behind|base branch was modified'; then
-            shepherd_sync_behind "$num" "$title"
+            shepherd_sync_behind "$num" "$title" "$running" "$verify"
           else
             row MERGE-RETRY "$num" "$title  (gh: $(printf '%s' "$out" | head -1 | cut -c1-80))"
           fi
@@ -253,6 +286,9 @@ for num in $nums; do
       # "already up to date" but still no check -> CI genuinely needs a manual nudge
       row WAITING "$num" "$title  (no verify check + branch up-to-date -- CI may need a nudge)"
     fi
+
+  elif [ "$verify" = "NEUTRAL" ] || [ "$verify" = "SKIPPED" ]; then
+    row WAITING "$num" "$title  (verify=$verify -- terminal optional check; not re-syncing)"
 
   else
     row WAITING "$num" "$title  (verify=$verify -- CI still running)"
