@@ -12,7 +12,9 @@ Jay decision (2026-10-15 03:13 CT): Socratic Trade keeps strategy runs and every
 - `src/lib/db-fills.ts` — `sweepPortfolioSnapshots` is a no-op.
 - `src/lib/db-embed-stage.ts` — `sweepEmbedStage` no longer age/cap-deletes; rows clear only via `deleteStagedEmbeddings` after Pinecone delivery.
 - `src/lib/db-economic-events.ts`, `src/lib/headline-first-seen.ts` — age prunes disabled.
-- `test/forever-retention-no-age-delete.test.ts` — regression guard on policy modules.
+- `src/lib/db-health.ts` — removed per-lane FIFO trim on flush; window counts are full-table COUNTs; `laneLogCap` no longer returned from summaries.
+- `test/forever-retention-no-age-delete.test.ts` — regression guard on policy modules + `api_health_log` cap DELETE guard.
+- `test/health-lane-cap.test.ts` — forever retention expectations for api_health_log.
 - `test/audit-hygiene.test.ts`, portfolio/embed/headline/hygiene tests updated.
 - Docs: rollout notes, `STATUS.md`, `PLAN.md`, scheduler comments.
 
@@ -20,7 +22,7 @@ Jay decision (2026-10-15 03:13 CT): Socratic Trade keeps strategy runs and every
 
 - **Transient queues left alone (not calendar TTL):**
   - `embed_stage` — `deleteStagedEmbeddings` / corrupt-row delete after successful Pinecone delivery.
-  - `api_health_log` — per-service lane **count** cap (`HEALTH_LOG_LANE_CAP`), not age.
+  - `api_health_log` — all rows retained; `HEALTH_LOG_LANE_CAP` is a read bound for streak heuristics only.
   - Operational lease/settings keys, vector commit cleanup, account deletion, user-initiated deletes — unchanged.
 - Disk growth is accepted; bounding history requires an explicit owner decision.
 

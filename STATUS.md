@@ -2,7 +2,7 @@
 
 ## 2026-10-15 Cursor Cloud — storage hygiene forever retention (no age deletes)
 
-**What.**  Jay decision 03:13 CT: remove **all** age-based row deletes — `sqlite-storage-hygiene`, `audit-prune`, `pruneTaskJournal`, portfolio snapshot sweep, embed_stage TTL/cap sweep, economic calendar, `headline_first_seen`.  Maintenance-only hygiene lane; transient `embed_stage` delivery deletes and `api_health_log` count caps remain.
+**What.**  Jay decision 03:13 CT: remove **all** age-based row deletes — `sqlite-storage-hygiene`, `audit-prune`, `pruneTaskJournal`, portfolio snapshot sweep, embed_stage TTL/cap sweep, economic calendar, `headline_first_seen`, and `api_health_log` per-lane count trim.  Maintenance-only hygiene lane; transient `embed_stage` delivery deletes remain.  `HEALTH_LOG_LANE_CAP` is read-bound only for streak heuristics.
 
 **Branch.**  `cursor/forever-retention-no-age-deletes-504b`
 

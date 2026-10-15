@@ -11,7 +11,8 @@ const POLICY_MODULES = [
   "src/lib/db-fills.ts",
   "src/lib/db-embed-stage.ts",
   "src/lib/db-economic-events.ts",
-  "src/lib/headline-first-seen.ts"
+  "src/lib/headline-first-seen.ts",
+  "src/lib/db-health.ts"
 ] as const;
 
 const AGE_PREDICATES = [
@@ -47,6 +48,7 @@ describe("forever retention — no age-based DELETE in policy modules", () => {
       const deletes = deleteStatements(source);
       for (const stmt of deletes) {
         if (rel.endsWith("db-embed-stage.ts") && isAllowedEmbedStageDelete(stmt)) continue;
+      if (rel.endsWith("db-health.ts") && stmt.includes("settings")) continue;
         for (const pattern of AGE_PREDICATES) {
           expect(stmt).not.toMatch(pattern);
         }
@@ -57,5 +59,11 @@ describe("forever retention — no age-based DELETE in policy modules", () => {
   it("audit-prune.ts contains no DELETE FROM at all", () => {
     const source = readFileSync(join(ROOT, "src/lib/audit-prune.ts"), "utf8");
     expect(source).not.toMatch(/\bDELETE\s+FROM\b/i);
+  });
+
+  it("db-health.ts never trims api_health_log (no cap DELETE)", () => {
+    const source = readFileSync(join(ROOT, "src/lib/db-health.ts"), "utf8");
+    expect(source).not.toMatch(/\bDELETE\s+FROM\s+api_health_log\b/i);
+    expect(source).not.toMatch(/deleteCap|HEALTH_LOG_LANE_CAP\s*-\s*\d/);
   });
 });
