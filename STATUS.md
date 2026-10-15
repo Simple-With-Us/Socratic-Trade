@@ -6,7 +6,7 @@
 
 **Branches.**  `cursor/merge-shepherd-skip-inflight-b952` (ST), `cursor/fleet-health-coolify-lookup-b952` (AFC).
 
-**Verification.**  `bash scripts/merge-shepherd-ci-inflight.selftest.sh`; `bash -n scripts/merge-shepherd.sh`; `npm run lint`; `npx tsc --noEmit`; AFC `bash scripts/host/test-fleet-health-body.sh`.  PR #4705 merge-forward with `origin/main` pushed 2026-10-15 (GB-MONITOR); hand to GB-Deployer for merge.
+**Verification.**  `bash scripts/merge-shepherd-ci-inflight.selftest.sh`; `bash -n scripts/merge-shepherd.sh` (Kody #4705: `NEUTRAL`/`SKIPPED` terminal in `ci_in_flight`).  PR #4705 ready; `needs-human-merge` — GB-Deployer merges only.
 
 **Next.**  Open PRs (ready); owner refresh Mac shepherd copy + redeploy AFC host script for ST-9.
 ## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
