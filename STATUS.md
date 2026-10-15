@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 CURSOR — Congress push delivery/consumption receipt (ST-3846)
+
+**What.**  App B webhook responses now emit `receiptVersion: 1` with explicit `delivered` + `consumed` fields; batch failures return `422` instead of silent `200`.  Congress.Trade PR parses the receipt before marking `deliveries` rows delivered.
+
+**Branch.**  `cursor/congress-push-receipt-6277`
+
+**Verification.**  `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-events.test.ts test/congress-webhook-parity.test.ts` 47/47; `npx tsc --noEmit` ok; `npm run lint` 0 errors.
+
+**Next.**  Open ready PRs on Socratic-Trade and Congress.Trade; publish `congress-trading-shared@2.8.0` when permitted.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.
