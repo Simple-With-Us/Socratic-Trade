@@ -101,11 +101,27 @@ npm run build
 
 `npx tsc --noEmit` ok.  `npm test` was 9395 passed, 51 skipped, 13 failed across `llm-provider`, `chat-llm`, `openrouter-credits`, and `framework-review`.  Those 13 reproduce identically on a clean `origin/main` worktree at `3f4ef5e5` (13 failed / 47 passed for the same four files), so they are the sandbox-credential class above, not this diff.  `npm run build` ok.
 
+### 2026-10-15 CODEX landing pass after #4713
+
+Checked PR #4662 head `148ce0875f1901a4eb142689fc08122110929e36` before editing.  Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` with a merge commit (`f433f89057262a1b28428d6d91f549b501371d2c`); no content conflicts.  The unique PR diff remains the 13 implementation, test, and rollout paths already listed above.
+
+Verification on the merged head:
+
+```bash
+npm ci
+npm run lint
+npx tsc --noEmit
+npx vitest run test/embed-request-pack.test.ts test/retrieval-pressure.test.ts test/vector-db-chunk-cap.test.ts
+npm run build
+```
+
+`npm ci` completed.  Lint passed with 0 errors (866 existing warnings); TypeScript passed; focused Vitest passed (34 tests); production build passed with existing Next.js warnings.  The three requested empty-string cases and wrong-type rejection are present in `test/embed-request-pack.test.ts`.  No unresolved review threads remain.  Sentry SOCRATIC-TRADE-2G and SOCRATIC-TRADE-2E remain open pending live-open verification.
+
 ## Next Steps & Blockers
 
 2026-10-15 shepherd: merged latest `origin/main` into this branch (phase-7 doc conflict kept both 2026-10-14 sections).  Sentry threads on global backoff and outer-deadline queue wait resolved with no code change per Jay.
 
-Review the PR.  Do not merge from this lane.  After merge and the evening deploy, check Sentry 2G (retrieval-failed count at the open) and 2E (requested units vs 7500 windows).
+After final-head CI is green, arm auto-merge and confirm the PR merges.  Keep Sentry 2G and 2E open until a live open confirms retrieval bursts and the context-length 400 are gone.
 
 Fleet board claim could not be filed from this seat.  `board whoami` and a Linear write were not run: this cloud VM has no fleet client credentials (`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, or a seat `ZULIP_*`), and `scripts/install-fleet-coordination.sh` does not invent them.  The claim that would have been filed is Linear team ST, title "Fit embed input to the bge-m3 token budget and back off retrieval bursts", state In Progress, and Completed only after merge to `main`.  No Linear issue id was minted here.  `docs/EFFORT-LOG.md` is archived and was not edited.
 
