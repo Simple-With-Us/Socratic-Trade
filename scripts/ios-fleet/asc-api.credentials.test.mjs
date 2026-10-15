@@ -19,14 +19,25 @@ afterEach(() => {
   }
 });
 
-test("resolveAscCredentials prefers process.env over the secrets file", () => {
+/**
+ * Write a secrets file into a fresh temp dir and register cleanup with `t.after`
+ * so the dir is removed even when an assertion throws mid-test (otherwise every
+ * failure leaks a /tmp/asc-cred-* dir on the hosted CI runner).
+ */
+function writeSecretsFile(t) {
   const dir = mkdtempSync(join(tmpdir(), "asc-cred-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const envPath = join(dir, "appstore-connect.env");
   writeFileSync(
     envPath,
     "ASC_KEY_ID=FILE_ID\nASC_ISSUER_ID=file-issuer\nASC_KEY_PATH=/file/key.p8\n",
     "utf8"
   );
+  return envPath;
+}
+
+test("resolveAscCredentials prefers process.env over the secrets file", (t) => {
+  const envPath = writeSecretsFile(t);
   process.env.ASC_KEY_ID = "ENV_ID";
   process.env.ASC_ISSUER_ID = "env-issuer";
   process.env.ASC_KEY_PATH = "/env/key.p8";
@@ -35,18 +46,10 @@ test("resolveAscCredentials prefers process.env over the secrets file", () => {
   assert.equal(creds.keyId, "ENV_ID");
   assert.equal(creds.issuerId, "env-issuer");
   assert.equal(creds.keyPath, "/env/key.p8");
-
-  rmSync(dir, { recursive: true, force: true });
 });
 
-test("resolveAscCredentials falls back to the secrets file when env is unset", () => {
-  const dir = mkdtempSync(join(tmpdir(), "asc-cred-"));
-  const envPath = join(dir, "appstore-connect.env");
-  writeFileSync(
-    envPath,
-    "ASC_KEY_ID=FILE_ID\nASC_ISSUER_ID=file-issuer\nASC_KEY_PATH=/file/key.p8\n",
-    "utf8"
-  );
+test("resolveAscCredentials falls back to the secrets file when env is unset", (t) => {
+  const envPath = writeSecretsFile(t);
   delete process.env.ASC_KEY_ID;
   delete process.env.ASC_ISSUER_ID;
   delete process.env.ASC_KEY_PATH;
@@ -55,6 +58,48 @@ test("resolveAscCredentials falls back to the secrets file when env is unset", (
   assert.equal(creds.keyId, "FILE_ID");
   assert.equal(creds.issuerId, "file-issuer");
   assert.equal(creds.keyPath, "/file/key.p8");
+});
 
-  rmSync(dir, { recursive: true, force: true });
+// The per-variable fallback is the behavior that actually matters in production:
+// Actions may export some ASC_* vars but not others, and each one must resolve
+// independently rather than all-or-nothing.
+test("resolveAscCredentials falls back to the secrets file per variable", (t) => {
+  const envPath = writeSecretsFile(t);
+  process.env.ASC_KEY_ID = "ENV_ID";
+  delete process.env.ASC_ISSUER_ID;
+  delete process.env.ASC_KEY_PATH;
+
+  const creds = resolveAscCredentials(envPath);
+  assert.equal(creds.keyId, "ENV_ID");
+  assert.equal(creds.issuerId, "file-issuer");
+  assert.equal(creds.keyPath, "/file/key.p8");
+});
+
+// An empty/whitespace-only env value must not shadow the file value.
+test("resolveAscCredentials ignores blank env values in favour of the file", (t) => {
+  const envPath = writeSecretsFile(t);
+  process.env.ASC_KEY_ID = "   ";
+  process.env.ASC_ISSUER_ID = "env-issuer";
+  process.env.ASC_KEY_PATH = "";
+
+  const creds = resolveAscCredentials(envPath);
+  assert.equal(creds.keyId, "FILE_ID");
+  assert.equal(creds.issuerId, "env-issuer");
+  assert.equal(creds.keyPath, "/file/key.p8");
+});
+
+// A missing secrets file must not throw -- CI provides env vars only, and the
+// existsSync/try-catch guard is what keeps that path working.
+test("resolveAscCredentials works with a missing secrets file", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "asc-cred-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const envPath = join(dir, "does-not-exist.env");
+  process.env.ASC_KEY_ID = "ENV_ID";
+  process.env.ASC_ISSUER_ID = "env-issuer";
+  process.env.ASC_KEY_PATH = "/env/key.p8";
+
+  const creds = resolveAscCredentials(envPath);
+  assert.equal(creds.keyId, "ENV_ID");
+  assert.equal(creds.issuerId, "env-issuer");
+  assert.equal(creds.keyPath, "/env/key.p8");
 });
