@@ -9,6 +9,23 @@
 **Verification.**  `bash scripts/merge-shepherd-ci-inflight.selftest.sh`; `bash -n scripts/merge-shepherd.sh`; AFC `bash scripts/host/test-fleet-health-body.sh`.
 
 **Next.**  Open PRs (ready); owner refresh Mac shepherd copy + redeploy AFC host script for ST-9.
+## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
+
+**What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.
+
+**Branch.**  `cursor/ct-push-receipt-2155` in Socratic-Trade and Congress.Trade.  Linear ST-3846.
+
+**Next.**  Both pull requests ready for review.  Do not mark the issue completed until both are merged.
+
+## 2026-10-15 Cursor Cloud — remove ST primary Infisical bridge (ST-4318)
+
+**What.**  Permanent removal of the default-off Usage Monitor credential bridge writer: module, tests, scheduler lane, `/api/keys` triggers, and active env/backlog/docs setup.  Per-user encrypted API keys and tombstone behavior unchanged.
+
+**Branch.**  `cursor/remove-st-primary-bridge-927d`
+
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  Scheduler startup tests 21/21.  `npm run build` ok.  Full `npm test`: 24 failures pre-existing in this sandbox (unchanged vs unrelated suites).
+
+**Next.**  Open ready PR, `@kody start-review`.
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
