@@ -214,6 +214,9 @@ export type HealthStoppedReasonKind = "consecutive-failures" | "no-success-ever"
 // names withRagApiHealth now uses for actual embed/rerank call failures, so an OpenRouter/
 // SiliconFlow-served operation gets the same dedicated-alerting exclusion Voyage always had.
 const RAG_SERVICES_WITH_OWN_ALERTING = new Set(["pinecone", "voyage", "voyage-rerank", "rag-embed", "rag-rerank"]);
+// congress-inbound-push pages from alertPeerPushReceiptGap on the first missing ack.
+// Leaving it on the generic 5-streak path would either delay that page or send a second one.
+const LANES_WITH_OWN_ALERTING = new Set([...RAG_SERVICES_WITH_OWN_ALERTING, "congress-inbound-push"]);
 
 /**
  * Per-credential-lane health for the API circuit breaker. A "lane" is (service, keySource) — the SAME
@@ -578,7 +581,7 @@ export function flushApiHealthBuffer(): void {
       if (
         !p.ok &&
         p.errorText &&
-        !RAG_SERVICES_WITH_OWN_ALERTING.has(p.service) &&
+        !LANES_WITH_OWN_ALERTING.has(p.service) &&
         !isIntentionalOffHealthService(p.service)
       ) {
         if (p.isSoft && !p.quotaResetAt) {
@@ -1135,6 +1138,47 @@ export async function alertConnectionFailure(
   } catch (err) {
     // Health alerts must never throw
     console.error("Health alert error:", err);
+  }
+}
+
+const PEER_PUSH_ALERT_COOLDOWN_PREFIX = "peerPushAckAlertSent";
+const PEER_PUSH_ALERT_COOLDOWN_MS = 60 * 60_000;
+
+/**
+ * Page on the first inbound Congress.Trade receipt that is not `ok`.  The health
+ * lane still records every attempt.  This alert does not wait for five failures,
+ * and a later success on that lane does not erase it.  Repeats of the same health
+ * value are cooled down for an hour.
+ */
+export async function alertPeerPushReceiptGap(health: string, pushId: string | null): Promise<void> {
+  try {
+    const key = `${PEER_PUSH_ALERT_COOLDOWN_PREFIX}:${health}`;
+    const { getInternalSetting, setInternalSetting } = await import("./db");
+    const last = getInternalSetting<string>(key);
+    if (last && Date.now() - Date.parse(last) < PEER_PUSH_ALERT_COOLDOWN_MS) return;
+    setInternalSetting(key, new Date().toISOString());
+
+    const title = "Congress.Trade push is missing an ack";
+    const body = pushId
+      ? `Inbound Congress.Trade push ${pushId} receipt health is ${health}.  Expected a push id plus delivered and consumed acks.`
+      : `Inbound Congress.Trade push receipt health is ${health}.  Expected a push id plus delivered and consumed acks.`;
+    const payload = { health, pushId, service: "congress-inbound-push" };
+
+    await captureHealthSentryMessage("error", title, {
+      service: "congress-inbound-push",
+      failureClass: "hard",
+      warningType: health,
+      reason: body,
+    });
+    await deliverSystemAlertToAdmins({
+      type: "liveness_warning",
+      title,
+      body,
+      payload,
+      kind: "liveness_warning",
+    });
+  } catch (err) {
+    console.error("Peer push receipt alert error:", err);
   }
 }
 
