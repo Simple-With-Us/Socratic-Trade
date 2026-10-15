@@ -49,6 +49,8 @@ Full `npm test` after merging `origin/main` `1588bae8`: 9343 passed, 51 skipped,
 
 After merging `origin/main` `e80386d7` (clean, no migration renumber): `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm test` was 9355 passed, 51 skipped, 2 failed.  Both are outside this diff (`test/egress-guard.test.ts` sandbox DNS, `test/data-catalog-completeness.test.ts` against the local database).  The seven open review threads were re-checked against this head and needed no code change.  Threads stay unresolved.  Hosted `verify` on `b1456fa7` was green before this merge.  `npm run build` -> ok.
 
+Round 10 re-verified the full gate on this branch after merging `origin/main` `e80386d7` (SEC XBRL cached fundamentals): `npm run lint` ok (0 errors, 854 warnings), `npx tsc --noEmit` ok, `npm run build` ok, and `npm test` 9344 passed / 51 skipped / 13 failed.  All 13 failures are the CI runner exporting `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL`, which the LLM key-resolution tests read as a configured user credential; re-running `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/framework-review.test.ts`, and `test/openrouter-credits.test.ts` with those three variables unset passes 60/60.  None of the 13 touch this diff.
+
 ## Next Steps & Blockers
 
 - Monitor prod freshness scan duration after deploy; tune `FRESHNESS_SCAN_DEADLINE_MS` if 6m is too tight on heavy enrichment days.
