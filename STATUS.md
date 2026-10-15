@@ -9,6 +9,13 @@
 **Verification.**  `bash scripts/merge-shepherd-ci-inflight.selftest.sh`; `bash -n scripts/merge-shepherd.sh` (Kody #4705: `NEUTRAL`/`SKIPPED` terminal in `ci_in_flight`).  Merged `origin/main` into PR branch (`960637ec`, 2026-10-15).  PR #4705 ready; `needs-human-merge` — GB-Deployer merges only.
 
 **Next.**  Open PRs (ready); owner refresh Mac shepherd copy + redeploy AFC host script for ST-9.
+## 2026-10-15 Cursor Cloud — CT fundamentals/analyst nightly push (ST-4537)
+
+**What.**  Congress.Trade `st_inbound_market_data` fundamentals + analyst stale since 2026-10-06; scan-hook-only path.  Nightly `runCongressDailyShare` now POSTs fundamentals/analyst from `symbol_field_latest` for the monitored universe.
+
+**Branch.**  `cursor/ct-fundamentals-nightly-push-bb23`
+
+**Next.**  Verify gate, open ready PR, deploy; confirm CT stream freshness after nightly run.
 ## 2026-10-15 CURSOR — Congress push delivery/consumption receipt (ST-3846)
 
 **What.**  App B webhook responses now emit `receiptVersion: 1` with explicit `delivered` + `consumed` fields; batch failures return `422` instead of silent `200`.  Congress.Trade PR parses the receipt before marking `deliveries` rows delivered.
