@@ -9,6 +9,15 @@
 **Verification.**  `npm run lint` exited 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exited 0.  Targeted vitest on `test/tradier.test.ts`, `test/placement-outcome.test.ts`, and `test/broker-health-auto-pause.test.ts` was 116 passed.  Full `npm test` was 9372 passed, 51 skipped, and 25 failed.  None of the failures are in the Tradier, placement, or broker-health files.  `npm run build` exited 0.
 
 **Next.**  Label `do-not-automerge`.  Jay squash-merges.  Do not enable auto-merge.  Linear was not updated: this seat has no Fleet Linear credentials.  Do not merge the recreated `cursor/tradier-sandbox-open-400-cea2` ref.  #4668 already deleted that branch, and the recreated history does not contain the merged tag-lookup commits.
+## 2026-10-15 OPENCODE — History retention exemption (Linear ST-4532)
+
+**What.**  Reconciles the #4666/#4661 retention conflict: production runs the #4666 merge (live sha a3d21b73, verified via public `/api/health`), and the 02:56Z hygiene report (dryRun=false) shows `history-cache-eod` eligible=3,427,386 / deleted=5,000 — deletion was real, not inferred.  `history_cache_eod` is removed from hygiene age targets (constant, target, and `dayCutoff` helper gone); the table reports as retained durable history and `assertPruneTableAllowed` refuses it.  Disposable-cache cleanup is unchanged.  Regression tests prove 401d/1825d/2300d rows survive consecutive live passes.
+
+**Verification.**  Gates + `verify` CI green before merge (see rollout note).  Post-merge: live sha past a3d21b73 and next `storageHygiene` report with no `history-cache-eod` estimate.
+
+**Docs.**  `docs/rollouts/2026-10-15-history-retention-exemption.md`, `docs/rollouts/2026-10-14-sqlite-storage-hygiene.md` (400-day EOD line struck), `STATUS.md`, `PLAN.md`.
+
+**Next.**  Land, verify deploy, close ST-4532, post closeout in `ST history retention review`.  Backfill of the ~5,000 lost scattered bars is proposed (paced, post-deploy) and needs owner approval for provider quota.
 
 ## 2026-10-15 Grok — PR #4664 merge main and handoff order
 
