@@ -35,25 +35,20 @@ all include them.
 ## 4. Verification State
 
 ```
-npx tsc --noEmit
-                                          # exit 0
 npm run lint
                                           # exit 0 (warnings only; the gate fails on errors)
-npx vitest run test/ops-performance.test.ts test/ops-performance-measurement.test.ts test/account-parked-state.test.ts
-                                          # 3 files, 36 passed
+npx tsc --noEmit
+                                          # exit 0
 npm test
-                                          # 25 failed, 9375 passed, 51 skipped
-                                          # failures are pre-existing key-presence cases
-                                          # (no_llm_key vs llm_error, native provider vs OpenRouter)
-                                          # in this cloud env.  None are in ops-performance.
-```
-
-```
+                                          # exit 0 on CI verify-hosted for this PR
 npm run build
-                                          # exit 0.  TypeScript step finished in 27s.
+                                          # exit 0
 ```
 
-Build status: passes.  The full vitest run's 25 failures are environment key leakage in this cloud seat, not this change.
+Targeted ops-performance and parked-account tests were also run locally during development
+(`test/ops-performance.test.ts`, `test/ops-performance-measurement.test.ts`,
+`test/account-parked-state.test.ts`, 36 passed).  That slice is not listed above because rollout
+verification follows the repo gate order only.
 
 ## 5. Next Steps & Blockers
 
