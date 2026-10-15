@@ -57,6 +57,6 @@ The full-suite Robinhood failure was a populated-list fixture dated 2026-07-10. 
 
 ## Next Steps & Blockers
 
-- `origin/main` (`3c74cd81`, ST primary bridge removal and lucide-react 1.55.0) merged with a merge commit.  No conflicts.  The deleted bridge writer is gone from `src/lib/scheduler.ts`.
+- `origin/main` through `df7e6d10` is merged with merge commits.  No conflicts.  That includes the ST primary bridge removal (`3c74cd81`) and the Congress.Trade push receipt (`df7e6d10`).  The deleted bridge writer is gone from `src/lib/scheduler.ts`.
 - PR #4715 stays ready with `do-not-automerge`.  Do not enable auto-merge.
 - Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
