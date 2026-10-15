@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — honest approve and retryable broker errors (ST-2582)
+
+**What.**  Approve reports HTTP 200 only when the broker order was placed.  Timeouts, HTTP 5xx, and Tradier's HTTP 400 "Unexpected server error" classify as retryable.  Those that may already be live reconcile by refId before `not_placed`.  The #4668 5xx halt path and the #4685 16-minute sandbox wait stay in place.  Price and market-data history is untouched.
+
+**Branch.**  `cursor/honest-approve-retryable-11d4`
+
+**Verification.**  Targeted vitest, then `npm run lint`, `npx tsc --noEmit`, `npm test`, `npm run build`.  See the rollout note for the commands actually run.
+
+**Next.**  Ready PR with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.

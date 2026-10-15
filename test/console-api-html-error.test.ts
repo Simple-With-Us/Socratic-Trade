@@ -100,10 +100,17 @@ describe("console api client — HTML error body mapping (shared response-error 
     vi.useFakeTimers();
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ status: "busy", reasons: ["A strategy run is in progress."] }), {
-          status: 200,
-          headers: { "content-type": "application/json" }
-        })
+        new Response(
+          JSON.stringify({
+            status: "busy",
+            outcome: "busy",
+            reasons: ["A strategy run is in progress."]
+          }),
+          {
+            status: 409,
+            headers: { "content-type": "application/json" }
+          }
+        )
       )
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ status: "placed", orderId: "order-1" }), {
