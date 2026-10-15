@@ -69,7 +69,7 @@ resolved (Sentry's index-alignment finding verified fixed in `93da2abb`).
 
 **Verification.**  Swift compile and XCTest run on hosted `ios-build`.  This seat does not run `xcodebuild`.  `npx vitest run test/shared-package-pin-check.test.ts` covers the check-pin token order.
 
-**Next.**  PR #4713 stays ready with `do-not-automerge`.  Do not arm auto-merge.  Jay squash-merges.  Merged `origin/main` again; check-pin conflict resolved in favor of main's `ctReadTokens` order (same Actions-first fix as ST-2582).
+**Next.**  PR #4713 stays ready with `do-not-automerge`.  Do not arm auto-merge.  Jay squash-merges after `verify` + `verify-ios` green.  Shepherd 2026-10-15 ~15:30 UTC: merged `origin/main` at `16285744` (was DIRTY); diff still 10 files (iOS + handoff).  All six review threads resolved (2 Sentry fixes, 4 Kody defer/out-of-scope).  Prior head `6ff75cfc` had `verify-hosted` + `check-pin` green; `verify-ios` stuck queued on macos-latest ~2h — new CI run expected on push.
 
 ## 2026-10-15 Cursor Cloud — check-pin token order (ST-2582 PR #4698)
 
