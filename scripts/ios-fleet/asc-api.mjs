@@ -3,9 +3,9 @@
  * Minimal App Store Connect API client. No dependencies beyond Node's
  * built-in crypto (ES256 JWT signing) and fetch (Node 18+).
  *
- * Auth: reads ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH from
- * ~/.secrets/appstore-connect.env (never prints values -- see
- * scripts/infisical-secrets-safe.sh pattern used elsewhere in the fleet).
+ * Auth: resolveAscCredentials() reads ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH
+ * from process.env first, then an optional secrets file when the caller passes
+ * envPath or sets ASC_SECRETS_ENV (never prints values).
  *
  * Usage:
  *   node asc-api.mjs GET /v1/apps
@@ -17,11 +17,11 @@
  * echoing anything secret-shaped from the response (ASC responses don't
  * carry credentials, only app metadata, so this is safe to print as-is).
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createSign } from "node:crypto";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 
 function loadEnvFile(path) {
   const text = readFileSync(path, "utf8");
@@ -34,6 +34,39 @@ function loadEnvFile(path) {
     env[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
   }
   return env;
+}
+
+/**
+ * Prefer process.env over an optional secrets file. No implicit ~/.secrets default (Kody rule 33).
+ * File fallback runs only when envPath is passed or ASC_SECRETS_ENV is set (ship-testflight.sh
+ * exports ASC_SECRETS_ENV after sourcing SECRETS_ENV; hosted CI uses process.env ASC_* only).
+ */
+export function resolveAscCredentials(envPath) {
+  const secretsFile =
+    envPath != null && String(envPath).trim() !== ""
+      ? String(envPath).trim()
+      : process.env.ASC_SECRETS_ENV != null && String(process.env.ASC_SECRETS_ENV).trim() !== ""
+        ? String(process.env.ASC_SECRETS_ENV).trim()
+        : undefined;
+  let fileEnv = {};
+  if (secretsFile && existsSync(secretsFile)) {
+    try {
+      fileEnv = loadEnvFile(secretsFile);
+    } catch {
+      fileEnv = {};
+    }
+  }
+  const pick = (name) => {
+    const fromEnv = process.env[name];
+    if (fromEnv != null && String(fromEnv).trim() !== "") return String(fromEnv).trim();
+    const fromFile = fileEnv[name];
+    if (fromFile != null && String(fromFile).trim() !== "") return String(fromFile).trim();
+    return "";
+  };
+  const keyId = pick("ASC_KEY_ID");
+  const issuerId = pick("ASC_ISSUER_ID");
+  const keyPath = pick("ASC_KEY_PATH");
+  return { keyId, issuerId, keyPath, envPath: secretsFile ?? "" };
 }
 
 function base64url(input) {
@@ -375,13 +408,15 @@ async function resolveAppId(api, bundleId) {
 }
 
 async function main() {
-  const envPath = join(homedir(), ".secrets", "appstore-connect.env");
-  const env = loadEnvFile(envPath);
-  const keyId = env.ASC_KEY_ID;
-  const issuerId = env.ASC_ISSUER_ID;
-  const keyPath = env.ASC_KEY_PATH;
+  const { keyId, issuerId, keyPath, envPath } = resolveAscCredentials();
   if (!keyId || !issuerId || !keyPath) {
-    console.error("Missing ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH in ~/.secrets/appstore-connect.env");
+    console.error(
+      "Missing ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH (set in process env or ASC_SECRETS_ENV file)"
+    );
+    process.exit(1);
+  }
+  if (!existsSync(keyPath)) {
+    console.error(`ASC_KEY_PATH is set but the key file is missing (env file ${envPath})`);
     process.exit(1);
   }
   const privateKeyPem = readFileSync(keyPath, "utf8");
@@ -689,7 +724,13 @@ async function main() {
   if (!res.ok) process.exit(2);
 }
 
-main().catch((err) => {
-  console.error(String(err && err.stack ? err.stack : err));
-  process.exit(1);
-});
+const isDirectRun =
+  Boolean(process.argv[1]) &&
+  resolvePath(process.argv[1]) === resolvePath(fileURLToPath(import.meta.url));
+
+if (isDirectRun) {
+  main().catch((err) => {
+    console.error(String(err && err.stack ? err.stack : err));
+    process.exit(1);
+  });
+}

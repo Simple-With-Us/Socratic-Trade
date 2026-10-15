@@ -13,7 +13,7 @@ This directory is the **source of truth** for the fleet-wide TestFlight ship scr
 - `ExportOptions-export-ipa.plist` — export options for `destination=export` (local IPA only).
 - `test-ship-seq.sh` — offline tests for the build-number rules (see **Tests**).  Repo-only; not installed to the runtime location.
 
-Secrets (ASC API key id/issuer/path) are read at runtime from `~/.secrets/appstore-connect.env`; none of the files here contain secret values, only the names of the environment variables they expect.
+Secrets (ASC API key id/issuer/path) come from process env `ASC_*`, or from the file named by `ASC_SECRETS_ENV`.  `ship-testflight.sh` sets `ASC_SECRETS_ENV` to `~/.secrets/appstore-connect.env` when that file exists.  None of the files here contain secret values, only the names of the environment variables they expect.
 
 ## Install (sync repo copy -> runtime location)
 

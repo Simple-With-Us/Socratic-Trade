@@ -113,6 +113,11 @@ describe("Socratic Trade manual Release signing: config agreement", () => {
     expect(installer).toContain('profileState") == "ACTIVE"');
     expect(installer).not.toMatch(/\bprint\([^)]*profileContent/);
   });
+
+  it("points asc-api at the handoff file only when ASC_SECRETS_ENV is unset", () => {
+    expect(installer).toContain('ASC_SECRETS_ENV:-');
+    expect(installer).toContain('export ASC_SECRETS_ENV="${HOME}/.secrets/appstore-connect.env"');
+  });
 });
 
 // ---------------------------------------------------------------------------

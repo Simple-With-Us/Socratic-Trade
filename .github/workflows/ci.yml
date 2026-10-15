@@ -356,6 +356,7 @@ jobs:
           bash scripts/test-ios-scheduled-ship-gate.sh
           bash scripts/test-ios-stage-asc-key.sh
           node --test scripts/ios-fleet/publish-ios-versions.test.mjs
+          node --test scripts/ios-fleet/asc-api.credentials.test.mjs
       # Deploy-freshness watchdog + shared-box OCR isolation are shell, so
       # vitest cannot cover them. Offline selftests (throwaway git + stub
       # /api/health, fake docker ps) catch a silent-pass the same way
