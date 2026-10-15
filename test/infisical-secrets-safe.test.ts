@@ -44,7 +44,7 @@ afterAll(() => {
   rmSync(work, { recursive: true, force: true });
 });
 
-function run(args: string[]) {
+function run(args: string[], extraEnv: Record<string, string> = {}) {
   const log = join(work, `log-${counter++}.txt`);
   const result = spawnSync("/bin/bash", [SCRIPT, ...args], {
     encoding: "utf8",
@@ -52,7 +52,8 @@ function run(args: string[]) {
       PATH: `${stubDir}:/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin`,
       HOME: work,
       STUB_LOG: log,
-      NODE_ENV: "test"
+      NODE_ENV: "test",
+      ...extraEnv
     }
   });
   const calls = existsSync(log)
@@ -102,6 +103,41 @@ describe("infisical-secrets-safe.sh is prod-only", () => {
     expect(r.calls).toEqual([]);
   });
 
+  it("get: refuses outside GitHub Actions", () => {
+    const r = run(["get", "ZULIP_EMAIL", "--projectId", "proj", "--path=/"]);
+    expect(r.status).not.toBe(0);
+    expect(r.calls).toEqual([]);
+    expect(r.stderr).toMatch(/GitHub Actions only/);
+  });
+
+  it("get: returns plain value in Actions with --env prod", () => {
+    const r = run(["get", "ZULIP_EMAIL", "--projectId", "proj", "--path=/"], { GITHUB_ACTIONS: "true" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("stub-value-not-a-secret");
+    expect(r.calls).toEqual([
+      [
+        "secrets",
+        "get",
+        "ZULIP_EMAIL",
+        "--plain",
+        "--silent",
+        "--telemetry=false",
+        "--expand=false",
+        "--projectId",
+        "proj",
+        "--path=/",
+        "--env",
+        "prod"
+      ]
+    ]);
+  });
+
+  it("get: refuses non-allowlisted keys even in Actions", () => {
+    const r = run(["get", "SOME_KEY", "--projectId", "proj"], { GITHUB_ACTIONS: "true" });
+    expect(r.status).not.toBe(0);
+    expect(r.calls).toEqual([]);
+  });
+
   it.skipIf(!HAS_JQ)("names: adds --env prod and prints sorted names only", () => {
     const r = run(["names", "--projectId", "proj"]);
     expect(r.status).toBe(0);
@@ -134,6 +170,7 @@ describe("infisical-secrets-safe.sh is prod-only", () => {
     ["dev then prod", ["--env=dev", "--env", "prod"]]
   ];
   const bases: string[][] = [["has", "SOME_KEY"], ["set", "SOME_KEY=x"], ["names"], ["delete", "SOME_KEY"]];
+  // get is GitHub Actions-only; prod-env refusal is covered via the allowlisted key path.
   for (const [label, flags] of refusals) {
     for (const base of bases) {
       it(`${base[0]}: refuses ${label} and never calls infisical`, () => {
