@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 Cursor — iOS sign-out caches and money-action results (ST-2578)
+
+**What.**  Sign-out and account switch drop the snapshot UserDefaults row, the shared URL cache, and in-memory account stores.  Device preferences stay.  Approve, reject, and cancel each report success, failed, or retryable.  The shell rebuilds on `sessionEpoch` so Coach, scan, and the other view stores do not keep the previous account.
+
+**Branch.**  `cursor/ios-signout-money-outcomes-43db`
+
+**Verification.**  Swift compile and XCTest run on hosted `ios-build`.  This seat does not run `xcodebuild`.
+
+**Next.**  PR is ready for review with `do-not-automerge`.  Do not arm auto-merge.  Jay squash-merges.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.
