@@ -40,5 +40,18 @@ describe("congress push receipt", () => {
   it("resolves event ids from batch bodies", () => {
     expect(resolveCongressEventId({ id: " solo " })).toBe("solo");
     expect(resolveCongressEventIds({ events: [{ id: "x" }, { id: "y" }] })).toEqual(["x", "y"]);
+    expect(resolveCongressEventIds({ events: [{ id: "x" }, { foo: 1 }, { id: "z" }] })).toEqual(["x", undefined, "z"]);
+  });
+
+  it("keeps batch eventId alignment when an envelope omits id", () => {
+    const receipt = buildCongressPushBatchReceipt(
+      [
+        { ok: true, applied: 1, type: "congress.trade" },
+        { ok: true, applied: 0, type: "ref.upsert", reason: "accepted-noop" },
+        { ok: true, applied: 2, type: "congress.trade" },
+      ],
+      ["evt-a", undefined, "evt-c"],
+    );
+    expect(receipt.results?.map((line) => line.eventId)).toEqual(["evt-a", undefined, "evt-c"]);
   });
 });

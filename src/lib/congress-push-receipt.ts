@@ -70,7 +70,10 @@ export function buildCongressPushReceipt(result: ApplyResult, eventId?: string):
   });
 }
 
-export function buildCongressPushBatchReceipt(results: ApplyResult[], eventIds?: string[]): CongressPushReceipt {
+export function buildCongressPushBatchReceipt(
+  results: ApplyResult[],
+  eventIds?: (string | undefined)[],
+): CongressPushReceipt {
   const lines = results.map((result, index) => buildCongressPushReceiptEvent(result, eventIds?.[index]));
   const consumed = lines.every((line) => line.consumed);
   const ok = lines.every((line) => line.ok);
@@ -99,13 +102,13 @@ export function resolveCongressEventId(body: unknown): string | undefined {
   return undefined;
 }
 
-export function resolveCongressEventIds(body: unknown): string[] | undefined {
+/** Parallel to `events[]` — preserves index alignment when some envelopes omit `id`. */
+export function resolveCongressEventIds(body: unknown): (string | undefined)[] | undefined {
   if (!body || typeof body !== "object") return undefined;
   const rec = body as { events?: unknown };
   if (!Array.isArray(rec.events)) return undefined;
-  const ids = rec.events
-    .map((event) => (event && typeof event === "object" ? (event as { id?: unknown }).id : undefined))
-    .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
-    .map((id) => id.trim());
-  return ids.length > 0 ? ids : undefined;
+  return rec.events.map((event) => {
+    const raw = event && typeof event === "object" ? (event as { id?: unknown }).id : undefined;
+    return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+  });
 }
