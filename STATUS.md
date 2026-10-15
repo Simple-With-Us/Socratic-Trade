@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — ops performance parked flag (ST-3875)
+
+**What.**  `GET /api/ops/performance` account rows now include `parked`, `parkedReason`, and `parkedAt`.  The flag is read from the connected account and reported on the priced book, the never-synced branch, and the per-account error branch.  No account is parked or re-armed.
+
+**Branch.**  `cursor/ops-performance-parked-flag-9767`
+
+**Verification.**  See `docs/rollouts/2026-10-15-ops-performance-parked-flag.md`.
+
+**Next.**  Ready PR for ST-3875.  Jay still decides park / re-arm / investigate for the four dormant accounts.  `/api/ops/snapshot` still omits the flag.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.
