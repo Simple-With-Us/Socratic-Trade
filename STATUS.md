@@ -31,7 +31,7 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 
 **What.**  GitHub showed `mergeable: CONFLICTING` / `DIRTY` because `origin/main` advanced to `e3ba1507` (#4716 iOS ASC credentials) while PR base was `2075c857`.  Merged `origin/main` with no conflicts (auto-merge PLAN/STATUS only).  Zero unresolved review threads.  PR ready; `needs-human-merge` for Jay.
 
-**Verification.**  Hosted `verify` pending on push.  Prior head `96780798` was green (run `38733904557`).
+**Verification.**  Head `9423d228`.  Hosted `verify` green (run `38739241980`).  `mergeable: MERGEABLE`.
 
 **Traceability.**  PR #4661.  Linear ST-4538 (claimed CURSOR).  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
 
