@@ -1,5 +1,15 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — restart sweep instance grace (ST-8)
+
+**What.**  The restart arm of `sweepStaleRunningRuns` was closing runs another instance still owned, and it ran before drain could adopt them.  Boot grace is two minutes.  Followers only sweep rows stamped with this process's `owner_instance`.  The leader reaps other instances after the lease, and a running non-retry request is left for drain adoption.  The 30-minute stall arm for this instance's own wedged runs is unchanged.
+
+**Branch.**  `cursor/restart-sweep-boot-grace-ab92`
+
+**Linear.**  ST-8 claimed by CURSOR (idle CLUTCH claim since Sep 15).  Agent: https://cursor.com/agents/bc-8c14e8f0-27ae-5255-ab13-ac52f6cfab92
+
+**Next.**  Ready PR, label `do-not-automerge`, do not enable auto-merge.  Jay squash-merges.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.

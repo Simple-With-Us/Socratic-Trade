@@ -3407,6 +3407,19 @@ const MIGRATIONS: Migration[] = [
           ON enrichment_coverage_fields (field, as_of DESC);
       `);
     }
+  },
+  {
+    // ST-8: which process started the run.  The restart sweep on a follower must not close a
+    // run the leader still owns.  Nullable so rows written before this migration stay unowned
+    // and only a leader, after boot grace, may reap them.
+    version: 95,
+    name: "strategy_runs_owner_instance",
+    up: (database) => {
+      if (!tableExists(database, "strategy_runs")) return;
+      if (!columnExists(database, "strategy_runs", "owner_instance")) {
+        database.exec("ALTER TABLE strategy_runs ADD COLUMN owner_instance TEXT");
+      }
+    }
   }
 ];
 
