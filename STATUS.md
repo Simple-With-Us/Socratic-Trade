@@ -4,11 +4,35 @@
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.
 
-**Branch.**  `cursor/keep-price-history-forever-2f58`
+**Branch.**  `cursor/keep-price-history-forever-2f58`  (PR #4683)
 
-**Verification.**  Pending: `test/sqlite-storage-hygiene.test.ts`, lint, tsc.
+**Verification.**  `npx vitest run test/sqlite-storage-hygiene.test.ts` 15/15.  `npx tsc --noEmit` ok.  Full trio per the autofix round below.
 
 **Next.**  Open PR (ready, `do-not-automerge`), owner squash merge.
+
+## 2026-10-15 Claude (autofix round 1, PR #4683) — category mislabeling in `categoryFor`
+
+**What.**  Addressed the one open Kody thread on #4683.  The new market-data-history branch in
+`categoryFor` (`src/lib/sqlite-storage-hygiene.ts`) was hoisted ahead of `CATEGORY_BY_TABLE`, so it
+flattened SEC filings/facts, fundamentals, transcripts, and the `document_chunks*` tables into
+`"quote_bar_cache"`, and silently stripped the retrieval-corpus tables of their existing
+`"embeddings"` label.  Reordered so an explicit `CATEGORY_BY_TABLE` entry wins, and the broad
+fallback now returns a distinct `"market_data_history"` category instead of borrowing the price-cache
+one.  Kody's suggested "drop the branch entirely" was not taken: that would have thrown away the
+market-data distinction rather than correcting the label.  The category is display-only (ops-snapshot
+JSON, no UI label map), so this is a reporting fix with no behavior change.  Regression assertions
+added for `document_chunks`, `history_cache_eod`, `symbol_field_latest`, `sec_filings`, `sec_facts`,
+and `historical_fundamentals`.
+
+**Branch.**  `cursor/keep-price-history-forever-2f58`
+
+**Verification.**  `npx tsc --noEmit` ok.  `npm run lint` 0 errors (854 known warnings).
+`npx vitest run test/sqlite-storage-hygiene.test.ts` 15/15.  `npm test` 9383 passed, 51 skipped,
+13 failed — all 13 in `llm-provider` / `openrouter-credits` / `chat-llm` / `framework-review`, and
+all pre-existing (reproduced identically with these changes stashed; this sandbox resolves an
+`OPENROUTER_API_KEY` into those fixtures).  `npm run build` ok.
+
+**Next.**  Thread resolved; PR left ready for the owner's squash merge.
 
 ## 2026-10-15 Grok — PR #4664 merge main and handoff order
 

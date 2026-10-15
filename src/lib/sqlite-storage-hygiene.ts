@@ -123,6 +123,7 @@ export type StorageCategory =
   | "embeddings"
   | "logs"
   | "money_path"
+  | "market_data_history"
   | "other";
 
 const CATEGORY_BY_TABLE: Record<string, StorageCategory> = {
@@ -574,8 +575,13 @@ function objectBytes(name: string): { bytes: number; pages: number } | null {
 function categoryFor(name: string, tableName: string, kind: "table" | "index"): StorageCategory {
   const table = kind === "index" ? tableName : name;
   if (MONEY_PATH_SET.has(table)) return "money_path";
-  if (isMarketDataHistoryTable(table) || isMarketDataHistoryTable(name)) return "quote_bar_cache";
-  return CATEGORY_BY_TABLE[table] ?? CATEGORY_BY_TABLE[name] ?? "other";
+  // An explicit CATEGORY_BY_TABLE entry wins over the broad market-data-history
+  // fallback, so price caches stay "quote_bar_cache" and the retrieval-corpus
+  // tables stay "embeddings" instead of being flattened into one bucket.
+  const explicit = CATEGORY_BY_TABLE[table] ?? CATEGORY_BY_TABLE[name];
+  if (explicit) return explicit;
+  if (isMarketDataHistoryTable(table) || isMarketDataHistoryTable(name)) return "market_data_history";
+  return "other";
 }
 
 function retainReasonFor(name: string, tableName: string, kind: "table" | "index"): string | null {

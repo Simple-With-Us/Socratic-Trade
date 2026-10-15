@@ -237,6 +237,15 @@ describe("storage hygiene against a database", () => {
     const usage = report.tables.find((row) => row.name === "llm_usage");
     expect(usage?.prunable).toBe(false);
     expect(usage?.retainReason).toContain("lifetime");
+    // Explicit CATEGORY_BY_TABLE entries must survive the market-data-history
+    // fallback, and genuinely market-data tables must not be labeled as caches.
+    const categoryOf = (name: string) => report.tables.find((row) => row.name === name)?.category;
+    expect(categoryOf("document_chunks")).toBe("embeddings");
+    expect(categoryOf("history_cache_eod")).toBe("quote_bar_cache");
+    expect(categoryOf("symbol_field_latest")).toBe("quote_bar_cache");
+    expect(categoryOf("sec_filings")).toBe("market_data_history");
+    expect(categoryOf("sec_facts")).toBe("market_data_history");
+    expect(categoryOf("historical_fundamentals")).toBe("market_data_history");
     const cached = hygiene.readCachedStorageHygieneReport();
     expect(cached?.generatedAt).toBe(report.generatedAt);
     expect(cached?.estimates.find((row) => row.id === "api-health-log")?.eligibleRows).toBe(1);

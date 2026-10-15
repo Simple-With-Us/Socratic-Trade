@@ -22,13 +22,38 @@ PR #4666 merged a storage-hygiene lane that deleted `history_cache_eod` rows old
 - `embed_stage` and `sec_ingest_task_attempts` stay on retention (operational staging/logs, not corpus content).
 - `enrichment_coverage_*` stays on retention (operational coverage reports, not fundamentals snapshots).
 
+## Autofix round 1 (2026-10-15) — `categoryFor` mislabeling
+
+Kody flagged on #4683 that the market-data-history branch in `categoryFor` was hoisted ahead of
+`CATEGORY_BY_TABLE` and forced `"quote_bar_cache"` on SEC filings/facts, fundamentals, transcripts,
+and `document_chunks*` — stripping the retrieval-corpus tables of their existing `"embeddings"`
+label and filing filings under a price-cache bucket they do not belong to.
+
+Fixed by consulting `CATEGORY_BY_TABLE` first (so `document_chunks` stays `"embeddings"` and
+`history_cache_eod`/`symbol_field_latest` stay `"quote_bar_cache"`), then falling back to a new,
+distinct `"market_data_history"` member of the `StorageCategory` union rather than reusing the
+price-cache label.  Kody's alternative suggestion — deleting the branch outright — was rejected: it
+would have dropped the market-data distinction from the report instead of correcting it.
+
+The category is display-only (it reaches the ops snapshot as JSON and has no UI label map), so this is
+a reporting correction with no effect on what the hygiene lane deletes.  Regression assertions now
+pin all six labels in `test/sqlite-storage-hygiene.test.ts`.
+
 ## Verification State
 
 ```bash
-npx vitest run test/sqlite-storage-hygiene.test.ts
-npm run lint
-npx tsc --noEmit
+npx tsc --noEmit                       # ok
+npm run lint                           # 0 errors, 854 warnings (known backlog)
+npx vitest run test/sqlite-storage-hygiene.test.ts   # 15/15
+npm test                               # 9383 passed, 51 skipped, 13 failed
+npm run build                          # ok
 ```
+
+The 13 failures are in `test/llm-provider.test.ts`, `test/openrouter-credits.test.ts`,
+`test/chat-llm.test.ts`, and `test/framework-review.test.ts`, and are pre-existing and unrelated to
+this diff: they reproduce identically with these changes stashed (verified on a clean tree).  This
+sandbox resolves an `OPENROUTER_API_KEY` into the LLM-provider tests, so the "no OpenRouter key"
+fixtures do not hold.  Hosted CI `verify` is green on the branch.
 
 ## Next Steps & Blockers
 
