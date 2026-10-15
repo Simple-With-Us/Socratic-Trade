@@ -5,16 +5,18 @@ import { ALPACA_BROKER_IO_DEADLINE_MS } from "./inflight-deadline";
 
 type AlpacaInstance = InstanceType<typeof Alpaca>;
 
-const AlpacaLatestTradeSchema = z.object({
+export const AlpacaLatestTradeSchema = z.object({
   p: z.number().optional(),
   t: z.union([z.string(), z.number(), z.date()]).optional()
 });
+export type AlpacaLatestTrade = z.infer<typeof AlpacaLatestTradeSchema>;
 
-const AlpacaLatestTradesResponseSchema = z.object({
+export const AlpacaLatestTradesResponseSchema = z.object({
   trades: z.record(z.string(), z.unknown()).optional()
 });
+export type AlpacaLatestTradesResponse = z.infer<typeof AlpacaLatestTradesResponseSchema>;
 
-function alpacaTradeTimestamp(value: string | number | Date | undefined): string | number | undefined {
+function alpacaTradeTimestamp(value: AlpacaLatestTrade["t"]): string | number | undefined {
   if (value instanceof Date) return value.toISOString();
   return value;
 }
@@ -236,13 +238,15 @@ export function createLegacyAlpacaRestClient(
       const resp = await stocks.stockLatestTrades({ symbols: symbols.join(",") });
       const parsed = AlpacaLatestTradesResponseSchema.safeParse(resp);
       if (!parsed.success) return {};
+      const book: AlpacaLatestTradesResponse = parsed.data;
       const legacy: Record<string, Record<string, unknown>> = {};
-      for (const [sym, raw] of Object.entries(parsed.data.trades ?? {})) {
+      for (const [sym, raw] of Object.entries(book.trades ?? {})) {
         const trade = AlpacaLatestTradeSchema.safeParse(raw);
         if (!trade.success) continue;
+        const row: AlpacaLatestTrade = trade.data;
         legacy[sym] = {
-          p: trade.data.p,
-          t: alpacaTradeTimestamp(trade.data.t)
+          p: row.p,
+          t: alpacaTradeTimestamp(row.t)
         };
       }
       return legacy;

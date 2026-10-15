@@ -113,6 +113,8 @@ npx vitest run test/alpaca-sdk-client-timeout.test.ts test/alpaca-nbbo-mid.test.
 
 Alpaca latest trades are Zod-parsed, and a bad trade row is skipped.  The chat-draft assertion no longer casts `reasons`.  Webull `close` was already the current print.  Kalshi authority, Tradier fetch-age, and a missing-asOf live book still fail closed.  Those review threads stay open.
 
+Merged `origin/main` again at `df7e6d10` (Congress.Trade push receipt).  `AlpacaLatestTradeSchema` and `AlpacaLatestTradesResponseSchema` are exported with inferred types.  The schema is not strict, because a real trade also carries size and a strict object would drop the print.
+
 ## Next Steps & Blockers
 
 Open the PR ready for review.  Add `do-not-automerge`.  Do not enable auto-merge.  Post the PR link on ST-2584.  Leave the issue In Progress until merge.

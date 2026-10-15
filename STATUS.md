@@ -6,9 +6,10 @@
 
 **Branch.**  `cursor/quote-observation-staleness-99f5`
 
-**Verification.**  Merged `origin/main` (`3c74cd81`).  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  Affected vitest (Alpaca SDK trades, NBBO, chat draft, quote observation, staleness, cascade, Tradier) 186/186.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
+**Verification.**  Merged `origin/main` (`df7e6d10`).  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  Alpaca trade schema, NBBO, and quote-observation tests passed.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
 
 **Next.**  PR ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
+
 ## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
 
 **What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.
