@@ -8,7 +8,7 @@
 
 **Verification.**  Swift compile and XCTest run on hosted `ios-build`.  This seat does not run `xcodebuild`.  `npx vitest run test/shared-package-pin-check.test.ts` covers the check-pin token order.
 
-**Next.**  PR #4713 stays ready with `do-not-automerge`.  Do not arm auto-merge.  Jay squash-merges.  Account-switch busy release and per-proposal money results are in the follow-up commit.  check-pin reads Congress.Trade with the Actions token first.
+**Next.**  PR #4713 stays ready with `do-not-automerge`.  Do not arm auto-merge.  Jay squash-merges.  Merged `origin/main` again; check-pin conflict resolved in favor of main's `ctReadTokens` order (same Actions-first fix as ST-2582).
 
 ## 2026-10-15 Cursor Cloud — check-pin token order (ST-2582 PR #4698)
 
