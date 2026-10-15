@@ -1,7 +1,8 @@
 import { autonomyAuthorityWord, autonomyStatusLabel } from "./autonomy-labels";
 import { getInternalSetting } from "./db-settings";
 import { describeAutonomyHaltCause, effectiveAutoResumeOnBoot, type AutonomyHaltCause } from "./autonomy-halt-cause";
-import { getDb, getLastStrategyRunStartedAt, listConnectedAccounts, listUsers, peekPolicy, getServiceHealthSummaries, databasePath } from "./db";
+import { getDb, getLastStrategyRunStartedAt, latestPeerPushReceipt, listConnectedAccounts, listUsers, peekPolicy, getServiceHealthSummaries, databasePath } from "./db";
+import { isPeerPushHealth, type PeerPushHealth } from "./peer-push-receipt";
 import { isHardStoppedHealthSummary } from "./db-health";
 import { isIntentionalOffHealthService } from "./retired-direct-vendors";
 import { getTaskJournalSummary } from "./db-task-journal";
@@ -23,6 +24,7 @@ import { statSync, statfsSync, readdirSync } from "fs";
 import { dirname, join } from "path";
 import { summarizeRoicArchiveCoverage } from "./web-sources/roic-transcripts";
 import { peekRoicArtifactFileCount, refreshRoicArtifactFileCount } from "./roic-archive-artifacts";
+import { readCachedStorageHygieneReport, type StorageHygieneReport } from "./sqlite-storage-hygiene";
 
 const LITESTREAM_AGE_CACHE_MS = 60_000;
 let litestreamAgeCache: { ageSeconds: number | null; expiresAt: number } | undefined;
@@ -213,6 +215,9 @@ export interface OpsSnapshot {
   roicArchive?: OpsRoicArchiveCoverage | null;
   dependencies?: Record<string, { ok: boolean; reason?: string | null; lastFailure?: string | null }>;
   storage?: Record<string, any> | null;
+  /** Last storage-hygiene pass (table sizes, dry-run or live reclaim, checkpoint).  Cached.
+   *  The snapshot route does not walk dbstat. */
+  storageHygiene?: StorageHygieneReport | null;
   /** Last CascadingEnrichmentProvider coverage summary (filled / source / missing), if any scan has run. */
   enrichmentCoverage?: {
     asOf: string;
@@ -225,6 +230,14 @@ export interface OpsSnapshot {
   } | null;
   /** Task brain: per-lane aggregates from the unified task_journal cron ledger (24h lookback). */
   taskJournal?: import("./db-task-journal").TaskJournalLaneSummary[];
+  /** Latest Congress.Trade -> Socratic-Trade push receipt.  Null until the first inbound push. */
+  congressInboundPush?: {
+    pushId: string | null;
+    health: PeerPushHealth;
+    deliveredAt: string | null;
+    consumedAt: string | null;
+    receivedAt: string;
+  } | null;
   /** App-recorded Pinecone write fuse + trial window.  Not Pinecone's bill. */
   pineconeIngest?: {
     monthToDateWriteUnits: number;
@@ -635,6 +648,13 @@ export async function buildOpsSnapshot(input: BuildOpsSnapshotInput = {}): Promi
   } catch {}
   timings.storage = sectionMs(storageStarted);
 
+  let storageHygiene: StorageHygieneReport | null = null;
+  try {
+    storageHygiene = readCachedStorageHygieneReport();
+  } catch {
+    storageHygiene = null;
+  }
+
   const coverageStarted = Date.now();
   let enrichmentCoverage: OpsSnapshot["enrichmentCoverage"] = null;
   try {
@@ -679,13 +699,31 @@ export async function buildOpsSnapshot(input: BuildOpsSnapshotInput = {}): Promi
   timings.taskJournal = sectionMs(taskJournalStarted);
   timings.total = sectionMs(buildStarted);
 
+  let congressInboundPush: OpsSnapshot["congressInboundPush"] = null;
+  try {
+    const latest = latestPeerPushReceipt();
+    if (latest && isPeerPushHealth(latest.health)) {
+      congressInboundPush = {
+        pushId: latest.pushId.startsWith("missing:") ? null : latest.pushId,
+        health: latest.health,
+        deliveredAt: latest.deliveredAt,
+        consumedAt: latest.consumedAt,
+        receivedAt: latest.receivedAt,
+      };
+    }
+  } catch {
+    congressInboundPush = null;
+  }
+
   return {
     asOf: new Date().toISOString(),
     timingsMs: timings,
+    congressInboundPush,
     schedulerLastTick: lastTick ?? null,
     schedulerAgeSeconds: Number.isFinite(tickMs) ? Math.round((Date.now() - tickMs) / 1000) : null,
     dependencies,
     storage,
+    storageHygiene,
     enrichmentCoverage,
     roicArchive,
     taskJournal,

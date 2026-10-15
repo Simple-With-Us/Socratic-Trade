@@ -150,41 +150,97 @@ type AppHaltFromAudit = { kind: "breaker" | "auto_pause_lost"; at: string; reaso
 
 /** Read one JSON field from an audit payload without letting a malformed payload throw
  *  (json_extract raises on invalid JSON; CASE evaluates only the chosen branch). */
-const jsonField = (path: string) => `CASE WHEN json_valid(payload) THEN json_extract(payload, '${path}') END`;
+const jsonField = (path: string, column = "payload") =>
+  `CASE WHEN json_valid(${column}) THEN json_extract(${column}, '${path}') END`;
+
+/** App-initiated halt rows.  Same predicate the old two-step lookup used. */
+const APP_HALT_PREDICATE = `(kind = 'broker_placement_auto_halted'
+  OR (kind = 'policy_violation_drawdown' AND ${jsonField("$.revertedTo")} = 'halted'))`;
+
+function handoverPredicate(kindColumn: string, payloadColumn: string): string {
+  return `(${kindColumn} IN ('broker_placement_auto_resumed', 'broker_placement_pause_owner_override', 'autonomy_halted_on_boot')
+    OR (${kindColumn} = 'ops_account_control' AND ${jsonField("$.action", payloadColumn)} = 'set_system_state' AND ${jsonField("$.dryRun", payloadColumn)} = 0)
+    OR (${kindColumn} = 'policy_change' AND ${jsonField("$.value.systemState", payloadColumn)} <> 'halted'))`;
+}
+
+/** Stay under SQLite's portable 999-variable ceiling.  Settings bind one variable per key. */
+const HALT_SETTINGS_KEY_CHUNK = 900;
+/** Each account is its own indexed LIMIT 1 inside one statement. */
+const HALT_AUDIT_ACCOUNT_CHUNK = 80;
+
+type AuditScope = { userId: string; connectedAccountId: string | null };
+
+type LatestAppHaltRow = {
+  user_id: string;
+  connected_account_id: string | null;
+  kind: string;
+  created_at: string;
+  payload: string;
+  handed_over: number;
+};
+
+function chunkItems<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/**
+ * One indexed `LIMIT 1` per account, unioned into a single statement.
+ * The handover check binds the same user and account again so both reads can
+ * use `(user_id, connected_account_id, kind)` instead of scanning `audit_events`.
+ * A missing account id uses `IS NULL`; a real id uses `=`.  ">=" plus the id
+ * check keeps a row written in the same millisecond as the halt.
+ */
+function latestHaltBranch(account: AuditScope): { sql: string; params: string[] } {
+  const missing = account.connectedAccountId == null;
+  const accountSql = missing ? "connected_account_id IS NULL" : "connected_account_id = ?";
+  const idParams = missing ? [account.userId] : [account.userId, account.connectedAccountId as string];
+  // EXISTS binds come first in the text, then the inner LIMIT 1.  The subquery
+  // returns one row before the handover check runs.
+  const params = [...idParams, ...idParams];
+  const sql = `SELECT h.user_id, h.connected_account_id, h.kind, h.created_at, h.payload,
+    EXISTS (
+      SELECT 1 FROM audit_events e
+      WHERE e.user_id = ? AND e.${accountSql}
+        AND e.created_at >= h.created_at
+        AND e.id <> h.id
+        AND ${handoverPredicate("e.kind", "e.payload")}
+    ) AS handed_over
+  FROM (
+    SELECT id, user_id, connected_account_id, created_at, kind, payload
+    FROM audit_events
+    WHERE user_id = ? AND ${accountSql}
+      AND ${APP_HALT_PREDICATE}
+    ORDER BY created_at DESC
+    LIMIT 1
+  ) h`;
+  return { sql, params };
+}
+
+function latestAppHalts(db: ReturnType<typeof getDb>, accounts: readonly AuditScope[]): LatestAppHaltRow[] {
+  if (accounts.length === 0) return [];
+  const rows: LatestAppHaltRow[] = [];
+  for (const chunk of chunkItems(accounts, HALT_AUDIT_ACCOUNT_CHUNK)) {
+    const branches = chunk.map(latestHaltBranch);
+    const sql = branches.map((branch) => branch.sql).join("\nUNION ALL\n");
+    const params = branches.flatMap((branch) => branch.params);
+    rows.push(...(db.prepare(sql).all(...params) as LatestAppHaltRow[]));
+  }
+  return rows;
+}
 
 /**
  * For a halted account with no live marker and no boot receipt: did the APP halt it, and has it
  * stayed halted since?  Looks at the latest app-initiated halt in the audit trail (the drawdown
  * breaker with hard action "halted", or a broker-health auto-halt), then for anything after it that
  * re-armed the account or handed the halt to someone else.  Any such later row means the app can no
- * longer say who holds the halt, so this returns undefined.  ">=" plus the id check keeps a row
- * written in the same millisecond as the halt from being missed.  Display-only; never throws.
+ * longer say who holds the halt, so this returns undefined.  Display-only; never throws.
  */
 function lastAppHaltFromAudit(userId: string, connectedAccountId: string | undefined): AppHaltFromAudit | undefined {
   try {
-    const db = getDb();
-    const account = connectedAccountId ?? null;
-    const halt = db
-      .prepare(
-        `SELECT id, kind, created_at, payload FROM audit_events
-         WHERE user_id = ? AND connected_account_id IS ?
-           AND (kind = 'broker_placement_auto_halted'
-                OR (kind = 'policy_violation_drawdown' AND ${jsonField("$.revertedTo")} = 'halted'))
-         ORDER BY created_at DESC LIMIT 1`
-      )
-      .get(userId, account) as { id: string; kind: string; created_at: string; payload: string } | undefined;
-    if (!halt) return undefined;
-    const handedOver = db
-      .prepare(
-        `SELECT 1 FROM audit_events
-         WHERE user_id = ? AND connected_account_id IS ? AND created_at >= ? AND id <> ?
-           AND (kind IN ('broker_placement_auto_resumed', 'broker_placement_pause_owner_override', 'autonomy_halted_on_boot')
-                OR (kind = 'ops_account_control' AND ${jsonField("$.action")} = 'set_system_state' AND ${jsonField("$.dryRun")} = 0)
-                OR (kind = 'policy_change' AND ${jsonField("$.value.systemState")} <> 'halted'))
-         LIMIT 1`
-      )
-      .get(userId, account, halt.created_at, halt.id);
-    if (handedOver) return undefined;
+    const halt = latestAppHalts(getDb(), [{ userId, connectedAccountId: connectedAccountId ?? null }])[0];
+    if (!halt || halt.handed_over) return undefined;
     let reason = "";
     try {
       const payload = JSON.parse(halt.payload) as { reason?: unknown };
@@ -343,4 +399,163 @@ export function describeAutonomyHaltCause(input: {
       "No automatic pause is holding this account, and the app did not record who or what stopped it.  " +
       "It stays stopped until someone starts it."
   };
+}
+
+/** One halted account to classify.  `accountId` is the connected-account id. */
+export type HaltCauseAccountRef = {
+  userId: string;
+  accountId: string;
+  accountNumber?: string;
+};
+
+const RUN_FAILURE_HALT_PREFIX = "runFailureHaltMarker";
+const BROKER_PAUSE_PREFIX = "broker:placement-paused";
+
+function settingKeysFor(account: HaltCauseAccountRef): { broker: string; run: string; boot: string } {
+  const scope = brokerPauseAccountScope(account.accountId, account.accountNumber);
+  return {
+    broker: `${BROKER_PAUSE_PREFIX}:${account.userId}:${scope}`,
+    run: `${RUN_FAILURE_HALT_PREFIX}:${account.userId}:${account.accountId}`,
+    boot: receiptKey(account.userId, scope)
+  };
+}
+
+type SettingRead = { state: "missing" } | { state: "bad" } | { state: "value"; value: unknown };
+
+function readSettingValue(raw: string | undefined): SettingRead {
+  if (raw === undefined) return { state: "missing" };
+  try {
+    return { state: "value", value: JSON.parse(raw) };
+  } catch {
+    return { state: "bad" };
+  }
+}
+
+function markerHit(read: SettingRead, accept: (value: unknown) => boolean): "hit" | "miss" | "bad" {
+  if (read.state === "bad") return "bad";
+  if (read.state === "missing") return "miss";
+  return accept(read.value) ? "hit" : "miss";
+}
+
+/** Same shape check as `getBrokerPlacementPauseMarker`. */
+function isBrokerPauseMarker(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const marker = value as { since?: unknown; autoResume?: unknown };
+  return typeof marker.since === "string" && marker.autoResume === true;
+}
+
+/** Same shape check as `getRunFailureHaltMarkerRead`. */
+function isRunFailureMarker(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  return typeof (value as { since?: unknown }).since === "string";
+}
+
+/** Same shape check as `getBootHaltReceipt`. */
+function isBootReceipt(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const receipt = value as { at?: unknown; from?: unknown };
+  return typeof receipt.at === "string" && (receipt.from === "active" || receipt.from === "broker_auto_pause");
+}
+
+function loadSettingValues(db: ReturnType<typeof getDb>, keys: readonly string[]): Map<string, string> {
+  const found = new Map<string, string>();
+  for (const chunk of chunkItems(keys, HALT_SETTINGS_KEY_CHUNK)) {
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(", ");
+    const rows = db
+      .prepare(`SELECT key, value FROM settings WHERE key IN (${placeholders})`)
+      .all(...chunk) as { key: string; value: string }[];
+    for (const row of rows) found.set(row.key, row.value);
+  }
+  return found;
+}
+
+function classifyFromMarkers(
+  db: ReturnType<typeof getDb>,
+  accounts: readonly HaltCauseAccountRef[],
+  out: Map<string, AutonomyHaltCause["kind"]>
+): HaltCauseAccountRef[] {
+  const keyed = accounts.map((account) => ({ account, keys: settingKeysFor(account) }));
+  const values = loadSettingValues(
+    db,
+    keyed.flatMap((entry) => [entry.keys.broker, entry.keys.run, entry.keys.boot])
+  );
+  const unmarked: HaltCauseAccountRef[] = [];
+  for (const { account, keys } of keyed) {
+    const mapKey = `${account.userId}:${account.accountId}`;
+    const broker = markerHit(readSettingValue(values.get(keys.broker)), isBrokerPauseMarker);
+    if (broker === "bad") continue;
+    if (broker === "hit") {
+      out.set(mapKey, "broker_auto_pause");
+      continue;
+    }
+    const run = markerHit(readSettingValue(values.get(keys.run)), isRunFailureMarker);
+    if (run === "bad") continue;
+    if (run === "hit") {
+      out.set(mapKey, "run_failure_halt");
+      continue;
+    }
+    const boot = markerHit(readSettingValue(values.get(keys.boot)), isBootReceipt);
+    if (boot === "bad") continue;
+    if (boot === "hit") {
+      out.set(mapKey, "restart");
+      continue;
+    }
+    unmarked.push(account);
+  }
+  return unmarked;
+}
+
+function classifyFromAudit(
+  db: ReturnType<typeof getDb>,
+  accounts: readonly HaltCauseAccountRef[],
+  out: Map<string, AutonomyHaltCause["kind"]>
+): void {
+  const rows = latestAppHalts(
+    db,
+    accounts.map((account) => ({ userId: account.userId, connectedAccountId: account.accountId }))
+  );
+  const byKey = new Map<string, LatestAppHaltRow>();
+  for (const row of rows) {
+    if (row.connected_account_id == null) continue;
+    byKey.set(`${row.user_id}:${row.connected_account_id}`, row);
+  }
+  for (const account of accounts) {
+    const row = byKey.get(`${account.userId}:${account.accountId}`);
+    if (!row || row.handed_over) continue;
+    out.set(
+      `${account.userId}:${account.accountId}`,
+      row.kind === "policy_violation_drawdown" ? "breaker" : "auto_pause_lost"
+    );
+  }
+}
+
+/**
+ * Halt-cause kind for many halted accounts.  One `settings` read covers the three markers
+ * (`broker:placement-paused`, `runFailureHaltMarker`, `autonomy:boot-halted`) and one
+ * `audit_events` read covers a drawdown breaker or a lost auto-pause.  The kind matches
+ * `describeAutonomyHaltCause` for a halted account.  A bad marker payload or a failed read
+ * stays `stopped`, the same bucket the health poll uses when a per-account lookup throws.
+ */
+export function batchedHaltCauseKinds(
+  accounts: readonly HaltCauseAccountRef[]
+): Map<string, AutonomyHaltCause["kind"]> {
+  const out = new Map<string, AutonomyHaltCause["kind"]>();
+  for (const account of accounts) {
+    out.set(`${account.userId}:${account.accountId}`, "stopped");
+  }
+  if (accounts.length === 0) return out;
+  let unmarked: HaltCauseAccountRef[];
+  try {
+    unmarked = classifyFromMarkers(getDb(), accounts, out);
+  } catch {
+    return out;
+  }
+  if (unmarked.length === 0) return out;
+  try {
+    classifyFromAudit(getDb(), unmarked, out);
+  } catch {
+    // Unmarked accounts stay `stopped`.
+  }
+  return out;
 }

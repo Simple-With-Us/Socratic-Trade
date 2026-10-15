@@ -40,6 +40,7 @@ export const COVERAGE_TRACKED_FIELDS = [
   "industry",
   "volume",
   "marketCap",
+  "sharesOutstanding",
   "dividendYield",
   "eps",
   "companyName",
@@ -69,6 +70,9 @@ export const COVERAGE_TRACKED_FIELDS = [
 ] as const;
 
 export type CoverageTrackedField = (typeof COVERAGE_TRACKED_FIELDS)[number];
+
+/** Near-the-money IV and put/call ratio — specialty options fields (Cboe / Alpaca / Tradier / Robinhood). */
+export const COVERAGE_OPTIONS_METRICS_FIELDS: readonly CoverageTrackedField[] = ["nearTheMoneyIv", "putCallRatio"];
 
 /**
  * Core fields that free/keyless + RapidAPI failover are expected to cover for a useful scan.

@@ -6,13 +6,24 @@ import { parseCompanyFacts, secXbrlEnrichmentEnabled } from "../src/lib/data-pro
 import { parseTickerCikMap } from "../src/lib/web-sources/sec8k";
 
 /** Build a raw companyfacts blob from explicit us-gaap concept arrays (for debt-aggregation edge cases). */
-function rawFacts(usGaap: Record<string, Array<{ start?: string; end: string; val: number; form?: string; filed?: string; unit?: string }>>) {
+function rawFacts(
+  usGaap: Record<string, Array<{ start?: string; end: string; val: number; form?: string; filed?: string; unit?: string }>>,
+  dei?: Record<string, Array<{ start?: string; end: string; val: number; form?: string; filed?: string }>>
+) {
   const gaap: Record<string, unknown> = {};
   for (const [concept, entries] of Object.entries(usGaap)) {
     const unit = concept.startsWith("EarningsPerShare") ? "USD/shares" : "USD";
     gaap[concept] = { units: { [unit]: entries } };
   }
-  return { facts: { "us-gaap": gaap } };
+  const facts: Record<string, unknown> = { "us-gaap": gaap };
+  if (dei) {
+    const deiNs: Record<string, unknown> = {};
+    for (const [concept, entries] of Object.entries(dei)) {
+      deiNs[concept] = { units: { shares: entries } };
+    }
+    facts.dei = deiNs;
+  }
+  return { facts };
 }
 
 // Isolate the DB so this test does not collide with others.
@@ -446,6 +457,62 @@ describe("parseTickerCikMap (dual-class tickers)", () => {
   });
 });
 
+describe("parseCompanyFacts — fundamentals (ROE, ROA, margin, shares)", () => {
+  it("computes ROE and ROA from annual TTM net income", () => {
+    const r = parseCompanyFacts(
+      rawFacts({
+        NetIncomeLoss: [
+          { start: "2022-01-01", end: "2022-12-31", val: 20_000_000, form: "10-K" },
+          { start: "2023-01-01", end: "2023-12-31", val: 30_000_000, form: "10-K" }
+        ],
+        StockholdersEquity: [
+          { end: "2022-12-31", val: 200_000_000, form: "10-K" },
+          { end: "2023-12-31", val: 300_000_000, form: "10-K" }
+        ],
+        Assets: [{ end: "2023-12-31", val: 1_000_000_000, form: "10-K" }]
+      })
+    );
+    expect(r.returnOnEquity).toBe(12);
+    expect(r.returnOnAssets).toBe(3);
+  });
+
+  it("computes grossProfitMargin from GrossProfit or Revenues minus CostOfRevenue", () => {
+    const direct = parseCompanyFacts(
+      rawFacts({
+        Revenues: [{ start: "2023-01-01", end: "2023-12-31", val: 100, form: "10-K" }],
+        GrossProfit: [{ start: "2023-01-01", end: "2023-12-31", val: 40, form: "10-K" }]
+      })
+    );
+    expect(direct.grossProfitMargin).toBe(40);
+
+    const derived = parseCompanyFacts(
+      rawFacts({
+        Revenues: [{ start: "2023-01-01", end: "2023-12-31", val: 200, form: "10-K" }],
+        CostOfRevenue: [{ start: "2023-01-01", end: "2023-12-31", val: 50, form: "10-K" }]
+      })
+    );
+    expect(derived.grossProfitMargin).toBe(75);
+  });
+
+  it("reads shares from dei then us-gaap fallback", () => {
+    const deiOnly = parseCompanyFacts(
+      rawFacts(
+        { StockholdersEquity: [{ end: "2023-12-31", val: 1, form: "10-K" }] },
+        { EntityCommonStockSharesOutstanding: [{ end: "2023-12-31", val: 1_500_000_000, form: "10-K" }] }
+      )
+    );
+    expect(deiOnly.sharesOutstanding).toBe(1_500_000_000);
+
+    const gaapFallback = parseCompanyFacts(
+      rawFacts({
+        StockholdersEquity: [{ end: "2023-12-31", val: 1, form: "10-K" }],
+        CommonStockSharesOutstanding: [{ end: "2023-12-31", val: 900_000_000, form: "10-K" }]
+      })
+    );
+    expect(gaapFallback.sharesOutstanding).toBe(900_000_000);
+  });
+});
+
 describe("parseCompanyFacts — does NOT publish eps (annual 10-K EPS ≠ TTM)", () => {
   it("returns no eps field even when EarningsPerShare concepts are present", () => {
     // The fixture supplies diluted+basic EPS arrays; the provider must ignore them entirely so a
@@ -475,7 +542,7 @@ describe("secXbrlEnrichmentEnabled", () => {
     else process.env.SEC_XBRL_ENRICHMENT_ENABLED = original;
   });
 
-  it("defaults to false and rejects off/empty", () => {
+  it("defaults to on and rejects off/empty", () => {
     // Default ON when unset (owner 2026-07-26).
     delete process.env.SEC_XBRL_ENRICHMENT_ENABLED;
     expect(secXbrlEnrichmentEnabled()).toBe(true);

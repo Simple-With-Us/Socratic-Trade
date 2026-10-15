@@ -16,10 +16,16 @@ describe("broker-health auto-pause when orders cannot be placed", () => {
   beforeEach(async () => {
     const { getDb } = await import("../src/lib/db");
     getDb().exec("DELETE FROM settings; DELETE FROM audit_events; DELETE FROM strategy_runs;");
+    // 15:00 ET, outside the sandbox open window, so Tradier paper probes do not
+    // flake when CI runs during 09:30-09:46 ET.
+    const { setTradierNowForTests } = await import("../src/lib/tradier-transient");
+    setTradierNowForTests(() => new Date("2026-10-14T19:00:00.000Z"));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
+    const { setTradierNowForTests } = await import("../src/lib/tradier-transient");
+    setTradierNowForTests(null);
   });
 
   it("classifies infrastructure place failures vs ordinary rejects", async () => {
@@ -31,6 +37,26 @@ describe("broker-health auto-pause when orders cannot be placed", () => {
     expect(isOrderPlacementInfrastructureFailure("alpaca 403: insufficient buying power")).toBe(false);
     expect(isOrderPlacementInfrastructureFailure("You do not have enough buying power for this trade.")).toBe(false);
     expect(isOrderPlacementInfrastructureFailure("OrderValidationError: qty < 1")).toBe(false);
+    expect(isOrderPlacementInfrastructureFailure("Tradier HTTP 400: Unexpected server error")).toBe(false);
+    expect(isOrderPlacementInfrastructureFailure("Tradier order failed: Tradier HTTP 400: Unexpected server error")).toBe(false);
+    expect(isOrderPlacementInfrastructureFailure("Tradier HTTP 422: Unexpected server error")).toBe(false);
+    expect(
+      isOrderPlacementInfrastructureFailure(
+        "Tradier sandbox order placement is deferred until 15 minutes after the open. Safe to retry."
+      )
+    ).toBe(false);
+    expect(
+      isOrderPlacementInfrastructureFailure(
+        "Tradier sandbox quotes are 15 minutes delayed, so strategy runs and order placement wait until 16 minutes after the open (9:46am ET).  Safe to retry."
+      )
+    ).toBe(false);
+    expect(isOrderPlacementInfrastructureFailure("Tradier HTTP 500: Unexpected server error")).toBe(true);
+    expect(
+      isOrderPlacementInfrastructureFailure(
+        "Tradier order failed: Tradier order placement unverified: the tag lookup failed. Reconcile before retrying."
+      )
+    ).toBe(false);
+    expect(isOrderPlacementInfrastructureFailure("HTTP 403 Forbidden")).toBe(false);
   });
 
   it("halts active policy when health is unhealthy and auto-resumes when healthy", async () => {
@@ -398,5 +424,297 @@ describe("broker-health auto-pause when orders cannot be placed", () => {
     expect(row.summary).toMatch(/equity \(0\)/);
     const kinds = listAudit(50, "local").map((a) => a.kind);
     expect(kinds).toContain("run_skipped_broker_unhealthy");
+  });
+
+  it("does not halt, resume, or write skipped_broker_unhealthy for the sandbox sentence", async () => {
+    const { getPolicy, setPolicy, listAudit, getInternalSetting } = await import("../src/lib/db");
+    const {
+      applyBrokerOrderPlacementPause,
+      brokerConnectivityStreakKey,
+      brokerHealthRunSkip,
+      checkBrokerHealth,
+      getBrokerPlacementPauseMarker,
+      shouldPersistBrokerHealthSkip
+    } = await import("../src/lib/broker-health");
+    const notificationsMod = await import("../src/lib/notifications");
+    const sendNotificationSpy = vi.spyOn(notificationsMod, "sendNotification").mockImplementation(() => {
+      throw new Error("sendNotification should not be called for a transient Tradier sentence");
+    });
+
+    const userId = "local";
+    const accountScope = "acct-tradier-transient";
+    const policy = getPolicy(userId);
+    policy.systemState = "active";
+    setPolicy(policy, userId);
+
+    const reason = "Tradier order path unavailable: Tradier HTTP 400: Unexpected server error";
+    const health = {
+      isHealthy: false,
+      reason,
+      category: "connectivity" as const,
+      transientBrokerError: true
+    };
+    for (let i = 0; i < 3; i++) {
+      const result = await applyBrokerOrderPlacementPause({ userId, accountScope, health, policy });
+      expect(result.action).toBe("none");
+    }
+    expect(getPolicy(userId).systemState).toBe("active");
+    expect(getBrokerPlacementPauseMarker(userId, accountScope)).toBeUndefined();
+    expect(getInternalSetting(brokerConnectivityStreakKey(userId, accountScope))).toBeUndefined();
+    const kinds = listAudit(50, userId).map((a) => a.kind);
+    expect(kinds).not.toContain("broker_placement_auto_halted");
+    expect(kinds).not.toContain("broker_placement_auto_resumed");
+    expect(sendNotificationSpy).not.toHaveBeenCalled();
+
+    const skip = brokerHealthRunSkip(health);
+    expect(skip.status).toBe("skipped");
+    expect(skip.auditKind).toBe("run_skipped_broker_transient");
+    expect(skip.summary).toMatch(/Autonomous trading stays armed/);
+    expect(
+      shouldPersistBrokerHealthSkip({
+        wasActive: true,
+        pauseAction: "none",
+        health,
+        skipEpisodeStarted: true
+      })
+    ).toBe(false);
+
+    const gateway = {
+      getAccounts: async () => [{ accountNumber: "VA1", label: "Sandbox", agenticAllowed: true }],
+      getPortfolio: async () => ({
+        accountNumber: "VA1",
+        totalMarketValue: 100_000,
+        buyingPower: 100_000,
+        equityMarketValue: 0,
+        optionMarketValue: 0,
+        cash: 100_000
+      }),
+      probeOrderCapability: async () => ({ ok: false, reason })
+    };
+    const probed = await checkBrokerHealth(
+      userId,
+      {
+        id: "conn-transient",
+        broker: "tradier",
+        environment: "paper",
+        accountNumber: "VA1",
+        label: "Sandbox",
+        capabilities: undefined
+      },
+      gateway as never
+    );
+    expect(probed.isHealthy).toBe(false);
+    expect(probed.category).toBe("connectivity");
+    expect(probed.transientBrokerError).toBe(true);
+    const fromProbe = await applyBrokerOrderPlacementPause({
+      userId,
+      accountScope,
+      health: probed,
+      policy
+    });
+    expect(fromProbe.action).toBe("none");
+    expect(getPolicy(userId).systemState).toBe("active");
+    sendNotificationSpy.mockRestore();
+  });
+
+  it("skips a Tradier sandbox strategy run until 9:46am ET and does not halt", async () => {
+    const { getPolicy, setPolicy, listAudit, getInternalSetting } = await import("../src/lib/db");
+    const {
+      applyBrokerOrderPlacementPause,
+      brokerConnectivityStreakKey,
+      brokerHealthRunSkip,
+      checkBrokerHealth,
+      getBrokerPlacementPauseMarker,
+      shouldPersistBrokerHealthSkip
+    } = await import("../src/lib/broker-health");
+    const { TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE, setTradierNowForTests } = await import("../src/lib/tradier-transient");
+
+    const userId = "local";
+    const accountScope = "acct-tradier-open-window";
+    const policy = getPolicy(userId);
+    policy.systemState = "active";
+    setPolicy(policy, userId);
+
+    const boom = async () => {
+      throw new Error("broker read must not run during the sandbox open window");
+    };
+    const gateway = {
+      getAccounts: boom,
+      getPortfolio: boom,
+      probeOrderCapability: boom
+    };
+    const account = {
+      id: "conn-open-window",
+      broker: "tradier" as const,
+      environment: "paper" as const,
+      accountNumber: "VA1",
+      label: "Sandbox",
+      capabilities: undefined
+    };
+
+    setTradierNowForTests(() => new Date("2026-10-14T13:45:00.000Z"));
+    const health = await checkBrokerHealth(userId, account, gateway as never);
+    expect(health.isHealthy).toBe(false);
+    expect(health.sandboxOpenDeferral).toBe(true);
+    expect(health.reason).toBe(TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE);
+    const pause = await applyBrokerOrderPlacementPause({ userId, accountScope, health, policy });
+    expect(pause.action).toBe("none");
+    expect(getPolicy(userId).systemState).toBe("active");
+    expect(getBrokerPlacementPauseMarker(userId, accountScope)).toBeUndefined();
+    expect(getInternalSetting(brokerConnectivityStreakKey(userId, accountScope))).toBeUndefined();
+    const skip = brokerHealthRunSkip(health);
+    expect(skip.status).toBe("skipped");
+    expect(skip.auditKind).toBe("run_skipped_sandbox_open_deferral");
+    expect(skip.summary).toMatch(/9:46am ET/);
+    expect(skip.summary).toMatch(/Autonomous trading stays armed/);
+    expect(
+      shouldPersistBrokerHealthSkip({
+        wasActive: true,
+        pauseAction: "none",
+        health,
+        skipEpisodeStarted: true
+      })
+    ).toBe(false);
+    expect(listAudit(50, userId).map((a) => a.kind)).not.toContain("broker_placement_auto_halted");
+
+    const healthyGateway = {
+      getAccounts: async () => [{ accountNumber: "VA1", label: "Sandbox", agenticAllowed: true }],
+      getPortfolio: async () => ({
+        accountNumber: "VA1",
+        totalMarketValue: 100_000,
+        buyingPower: 100_000,
+        equityMarketValue: 0,
+        optionMarketValue: 0,
+        cash: 100_000
+      }),
+      probeOrderCapability: async () => ({ ok: true })
+    };
+    setTradierNowForTests(() => new Date("2026-10-14T13:46:00.000Z"));
+    const open = await checkBrokerHealth(userId, account, healthyGateway as never);
+    expect(open.sandboxOpenDeferral).toBeUndefined();
+    expect(open.isHealthy).toBe(true);
+
+    setTradierNowForTests(() => new Date("2026-10-14T13:35:00.000Z"));
+    const live = await checkBrokerHealth(
+      userId,
+      { ...account, environment: "live", label: "Tradier Brokerage" },
+      healthyGateway as never
+    );
+    expect(live.sandboxOpenDeferral).toBeUndefined();
+    expect(live.isHealthy).toBe(true);
+    const alpaca = await checkBrokerHealth(
+      userId,
+      { ...account, broker: "alpaca", id: "conn-alpaca" },
+      healthyGateway as never
+    );
+    expect(alpaca.sandboxOpenDeferral).toBeUndefined();
+    expect(alpaca.isHealthy).toBe(true);
+  });
+
+  it("still halts a real order-path failure and resumes only on a healthy probe", async () => {
+    const { getPolicy, setPolicy, listAudit } = await import("../src/lib/db");
+    const {
+      applyBrokerOrderPlacementPause,
+      checkBrokerHealth,
+      getBrokerPlacementPauseMarker,
+      clearBrokerPlacementPauseMarker
+    } = await import("../src/lib/broker-health");
+
+    const userId = "local";
+    const accountScope = "acct-tradier-real-reject";
+    const policy = getPolicy(userId);
+    policy.systemState = "active";
+    setPolicy(policy, userId);
+
+    const funded = {
+      getAccounts: async () => [{ accountNumber: "VA1", label: "Sandbox", agenticAllowed: true }],
+      getPortfolio: async () => ({
+        accountNumber: "VA1",
+        totalMarketValue: 100_000,
+        buyingPower: 100_000,
+        equityMarketValue: 0,
+        optionMarketValue: 0,
+        cash: 100_000
+      })
+    };
+    const badRequest = await checkBrokerHealth(
+      userId,
+      {
+        id: "conn-real",
+        broker: "tradier",
+        environment: "paper",
+        accountNumber: "VA1",
+        label: "Sandbox",
+        capabilities: undefined
+      },
+      {
+        ...funded,
+        probeOrderCapability: async () => ({
+          ok: false,
+          reason: "Tradier order capability probe failed: Tradier HTTP 400: Bad Request"
+        })
+      } as never
+    );
+    expect(badRequest.category).toBe("order_capability");
+    expect(badRequest.transientBrokerError).toBeUndefined();
+    const halted = await applyBrokerOrderPlacementPause({
+      userId,
+      accountScope,
+      health: badRequest,
+      policy
+    });
+    expect(halted.action).toBe("halted");
+    expect(getPolicy(userId).systemState).toBe("halted");
+    expect(getBrokerPlacementPauseMarker(userId, accountScope)?.autoResume).toBe(true);
+
+    policy.systemState = "halted";
+    const duringBlip = await applyBrokerOrderPlacementPause({
+      userId,
+      accountScope,
+      health: {
+        isHealthy: false,
+        reason: "Tradier order path unavailable: Tradier HTTP 400: Unexpected server error",
+        category: "connectivity",
+        transientBrokerError: true
+      },
+      policy
+    });
+    expect(duringBlip.action).toBe("still_paused");
+    expect(getPolicy(userId).systemState).toBe("halted");
+
+    const down = await checkBrokerHealth(
+      userId,
+      {
+        id: "conn-real",
+        broker: "tradier",
+        environment: "paper",
+        accountNumber: "VA1",
+        label: "Sandbox",
+        capabilities: undefined
+      },
+      {
+        ...funded,
+        probeOrderCapability: async () => ({
+          ok: false,
+          reason: "Tradier order path unavailable: Tradier HTTP 500: backend"
+        })
+      } as never
+    );
+    expect(down.category).toBe("order_capability");
+    expect(down.transientBrokerError).toBeUndefined();
+
+    const resume = await applyBrokerOrderPlacementPause({
+      userId,
+      accountScope,
+      health: { isHealthy: true },
+      policy
+    });
+    expect(resume.action).toBe("resumed");
+    expect(getPolicy(userId).systemState).toBe("active");
+    expect(getBrokerPlacementPauseMarker(userId, accountScope)).toBeUndefined();
+    const kinds = listAudit(50, userId).map((a) => a.kind);
+    expect(kinds).toContain("broker_placement_auto_halted");
+    expect(kinds).toContain("broker_placement_auto_resumed");
+    clearBrokerPlacementPauseMarker(userId, accountScope);
   });
 });

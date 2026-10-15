@@ -1,4 +1,5 @@
 import * as cheerio from "cheerio";
+import { z } from "zod";
 import { getDb } from "../db";
 import { politeFetch } from "./http";
 import { padCik } from "./sec-filings";
@@ -6,6 +7,62 @@ import { timeSync } from "../slow-sync-guard";
 import crypto from "crypto";
 
 const SEC_DATA_BASE = "https://data.sec.gov";
+
+/** Single-row cache of the raw companyfacts JSON blob per CIK (segment column). */
+export const SEC_COMPANYFACTS_CACHE_CONCEPT = "__companyfacts_json__";
+
+// Live companyfacts documents always carry cik, entityName, and taxonomies besides
+// us-gaap / ifrs-full (dei, srt, and others).  A .strict() envelope would reject
+// every real filing.  Passthrough keeps those keys; the schema still refuses a
+// non-object body and a facts value that is not an object.
+const CompanyFactEntrySchema = z.object({
+  val: z.number().optional(),
+  accn: z.string().optional(),
+  end: z.string().optional(),
+  form: z.string().optional(),
+  filed: z.string().optional(),
+  frame: z.string().optional(),
+  fy: z.union([z.number(), z.string()]).optional(),
+  fp: z.string().optional(),
+  start: z.string().nullable().optional(),
+  segment: z.unknown().optional()
+}).passthrough();
+
+const CompanyConceptSchema = z.object({
+  // Unit values are arrays of fact entries on a well-formed filing.  A non-array
+  // value must not fail this concept: the walk below skips those keys.  A concept
+  // whose `units` is not a record fails this object and is dropped by
+  // conceptsFromTaxonomy, so one bad concept cannot reject the rest of the CIK.
+  units: z.record(z.string(), z.unknown()).optional()
+}).passthrough();
+
+export const CompanyFactsSchema = z.object({
+  // Taxonomy maps are unknown here on purpose.  z.record(CompanyConceptSchema)
+  // fails the entire document when any one concept is off-shape, and the nightly
+  // sweep then advances past that CIK with no structured facts.  conceptsFromTaxonomy
+  // keeps the concepts that match and skips the rest.  The envelope still refuses
+  // a non-object body and a `facts` value that is not an object, and that failure
+  // still propagates so the worker retries.
+  facts: z.object({
+    "us-gaap": z.unknown().optional(),
+    "ifrs-full": z.unknown().optional()
+  }).passthrough().optional()
+}).passthrough();
+
+export type CompanyFactsDocument = z.infer<typeof CompanyFactsSchema>;
+type CompanyConcept = z.infer<typeof CompanyConceptSchema>;
+
+/** Keep concepts that match the known shape.  One malformed concept is skipped. */
+function conceptsFromTaxonomy(value: unknown): Record<string, CompanyConcept> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, CompanyConcept> = {};
+  for (const [name, concept] of Object.entries(value as Record<string, unknown>)) {
+    const parsed = CompanyConceptSchema.safeParse(concept);
+    if (!parsed.success) continue;
+    out[name] = parsed.data;
+  }
+  return out;
+}
 
 // High-yield GAAP concepts for scanning
 const targetConcepts = new Set([
@@ -58,13 +115,25 @@ export async function ingestCompanyFacts(cik: string): Promise<void> {
       throw new Error(`Failed to fetch company facts: ${res.statusText}`);
     }
 
-    const data = await res.json() as any;
+    let jsonText: string;
+    if (typeof res.text === "function") {
+      jsonText = await res.text();
+    } else if (typeof res.json === "function") {
+      const parsed = await res.json();
+      jsonText = JSON.stringify(parsed);
+    } else {
+      throw new Error("Failed to read company facts response body");
+    }
+    upsertCompanyFactsCache(paddedCik, jsonText, new Date().toISOString());
+    const data = CompanyFactsSchema.parse(JSON.parse(jsonText));
     // 20-F/40-F issuers reporting under IFRS expose concepts under `facts.ifrs-full` rather than
     // `facts.us-gaap` — both taxonomies are supported inputs (the periodic-form allowlist below
     // admits 20-F/40-F), so a missing US-GAAP namespace alone is not "no data".
-    const taxonomies: Array<{ name: string; facts: Record<string, unknown>; targets: Set<string> }> = [];
-    if (data?.facts?.["us-gaap"]) taxonomies.push({ name: "us-gaap", facts: data.facts["us-gaap"], targets: targetConcepts });
-    if (data?.facts?.["ifrs-full"]) taxonomies.push({ name: "ifrs-full", facts: data.facts["ifrs-full"], targets: ifrsTargetConcepts });
+    const taxonomies: Array<{ name: string; facts: Record<string, CompanyConcept>; targets: Set<string> }> = [];
+    const usGaap = conceptsFromTaxonomy(data.facts?.["us-gaap"]);
+    const ifrsFull = conceptsFromTaxonomy(data.facts?.["ifrs-full"]);
+    if (Object.keys(usGaap).length > 0) taxonomies.push({ name: "us-gaap", facts: usGaap, targets: targetConcepts });
+    if (Object.keys(ifrsFull).length > 0) taxonomies.push({ name: "ifrs-full", facts: ifrsFull, targets: ifrsTargetConcepts });
     if (taxonomies.length === 0) {
       return; // genuinely no supported taxonomy — expected no-data case
     }
@@ -82,23 +151,22 @@ export async function ingestCompanyFacts(cik: string): Promise<void> {
       for (const { name: taxonomyName, facts: taxonomyFacts, targets } of taxonomies) {
       for (const [concept, conceptData] of Object.entries(taxonomyFacts)) {
         if (!targets.has(concept)) continue;
-        const units = (conceptData as any).units;
-        if (!units || typeof units !== "object") continue;
+        const units = conceptData.units;
+        if (!units) continue;
 
         for (const [unitName, unitEntries] of Object.entries(units)) {
           if (!Array.isArray(unitEntries)) {
             continue;
           }
 
-          for (const entry of unitEntries) {
-            if (!entry || typeof entry !== "object") {
-              continue;
-            }
-            const val = (entry as any).val;
-            const accession = (entry as any).accn;
-            const end = (entry as any).end;
-            const form = (entry as any).form;
-            const filed = (entry as any).filed;
+          for (const rawEntry of unitEntries) {
+            const parsedEntry = CompanyFactEntrySchema.safeParse(rawEntry);
+            if (!parsedEntry.success) continue;
+            const entry = parsedEntry.data;
+            const val = entry.val;
+            const accession = entry.accn;
+            const end = entry.end;
+            const form = entry.form;
 
             // Only care about periodic forms
             if (!form || !["10-K", "10-Q", "20-F", "40-F"].includes(form)) {
@@ -108,11 +176,11 @@ export async function ingestCompanyFacts(cik: string): Promise<void> {
               continue;
             }
 
-            const period = (entry as any).frame || `${(entry as any).fy || ""}-${(entry as any).fp || ""}`;
-            const start = (entry as any).start || null;
-            const accepted = (entry as any).filed;
+            const period = entry.frame || `${entry.fy || ""}-${entry.fp || ""}`;
+            const start = entry.start || null;
+            const accepted = entry.filed;
             if (!accepted) continue;
-            const segment = (entry as any).segment ? JSON.stringify((entry as any).segment) : null;
+            const segment = entry.segment ? JSON.stringify(entry.segment) : null;
 
             // Generate deterministic ID
             const id = crypto.createHash("sha256")
@@ -242,6 +310,40 @@ export function parseAndSaveForm4(
   return count;
 }
 
+/** Persist the full companyfacts JSON for scan-path reads (nightly sweep + ingest worker). */
+export function upsertCompanyFactsCache(cik: string, jsonText: string, fetchedAt: string): void {
+  const paddedCik = padCik(cik);
+  const id = crypto.createHash("sha256").update(`companyfacts-cache:${paddedCik}`).digest("hex");
+  const endDate = fetchedAt.slice(0, 10);
+  getDb()
+    .prepare(
+      `INSERT OR REPLACE INTO sec_facts (
+        id, cik, accession, concept, value, unit, period, start_date, end_date, accepted_at, segment
+      ) VALUES (?, ?, 'cache', ?, 1, 'json', 'cache', NULL, ?, ?, ?)`
+    )
+    .run(id, paddedCik, SEC_COMPANYFACTS_CACHE_CONCEPT, endDate, fetchedAt, jsonText);
+}
+
+/** Read cached companyfacts JSON for a CIK (written by ingest / nightly sweep). */
+export function readCompanyFactsCache(cik: string): { json: string; fetchedAt: string } | undefined {
+  const paddedCik = padCik(cik);
+  const row = getDb()
+    .prepare(
+      `SELECT segment, accepted_at FROM sec_facts WHERE cik = ? AND concept = ? LIMIT 1`
+    )
+    .get(paddedCik, SEC_COMPANYFACTS_CACHE_CONCEPT) as { segment: string | null; accepted_at: string } | undefined;
+  if (!row?.segment) return undefined;
+  return { json: row.segment, fetchedAt: row.accepted_at };
+}
+
+/**
+ * Fetch companyfacts from EDGAR, cache the JSON in `sec_facts`, and ingest structured rows.
+ * Used by the nightly sweep; scan-path enrichment reads the cache only.
+ */
+export async function fetchAndCacheCompanyFacts(cik: string): Promise<void> {
+  await ingestCompanyFacts(cik);
+}
+
 /**
  * Format structured facts for a symbol into a clean narrative Evidence Card for the LLM prompt.
  */
@@ -252,10 +354,10 @@ export function formatCompanyFactsEvidenceCard(cik: string): string {
   const facts = db.prepare(`
     SELECT concept, value, unit, period, end_date, accepted_at
     FROM sec_facts
-    WHERE cik = ?
+    WHERE cik = ? AND concept != ?
     ORDER BY end_date DESC, accepted_at DESC
     LIMIT 50
-  `).all(paddedCik) as Array<{
+  `).all(paddedCik, SEC_COMPANYFACTS_CACHE_CONCEPT) as Array<{
     concept: string;
     value: number;
     unit: string;

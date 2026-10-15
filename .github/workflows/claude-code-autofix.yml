@@ -19,11 +19,13 @@ concurrency:
 
 jobs:
   autofix:
+    # Only the fixer bots.  Any other bot review (Seer/sentry) used to start this job and
+    # fail it: claude-code-action rejects actors outside allowed_bots.  Skip those reviews.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request_review' &&
-       github.event.review.user.type == 'Bot' &&
-       github.event.pull_request.head.repo.full_name == github.repository)
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       contains(fromJSON('["chatgpt-codex-connector[bot]","chatgpt-codex-connector","kody-ai[bot]","kody-ai","cursor[bot]","cursor"]'), github.event.review.user.login))
     uses: Simple-With-Us/congress-trading-shared/.github/workflows/codex-autofix-reusable.yml@99d372dcd7f600611c7b2b83a6f8eb2d31d6ecad
     secrets:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
