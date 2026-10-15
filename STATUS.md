@@ -27,6 +27,16 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 # Current Status
 
 ## 2026-10-15 Cursor Cloud — ST-3988 congress-share dependency DB health
+## 2026-10-15 CURSOR — PR #4661 GB-Trader shepherd (reconcile + #4716)
+
+**What.**  Merged `origin/main` at `e3ba1507` (#4716) locally (`b235b08f`), then merged remote `dc81c55a` (prior shepherd merge of `49a76da4` / #4695) so parallel pushes stay one line.  No source conflicts; GitHub was `DIRTY` until both tips were integrated.  Zero unresolved review threads.  `needs-human-merge` for Jay.
+
+**Verification.**  `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  Six PR-touched vitest files: 215 passed.  Full `npm test` in cloud shell: 25 failed (environmental; not in PR diff vs `origin/main`).  `npm run build` pass (43/43 static pages).  Pushing for hosted `verify`.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Hosted `verify` green on pushed HEAD.  Jay squash-merges when ready.
+
 ## 2026-10-15 CURSOR — PR #4661 merge main #4695
 
 **What.**  GitHub `CONFLICTING` / `DIRTY`: `main` advanced to `49a76da4` (#4695 Congress push receipt ST-3846) while PR base was `e3ba1507`.  Merged `origin/main` clean (auto-merge `STATUS.md` only).  Zero unresolved review threads.  `needs-human-merge` — Jay merges.

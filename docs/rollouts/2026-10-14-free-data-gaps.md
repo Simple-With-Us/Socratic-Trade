@@ -186,6 +186,17 @@ Follow-up merge `origin/main` at `2075c857` (PR #4696 ST-4531 Slack retirement) 
 
 2026-10-15 CURSOR (GB-Deployer): `main` at `49a76da4` (#4695 Congress push receipt).  Clean merge; `STATUS.md` auto-merged only.
 
+GB-Trader shepherd (CURSOR cloud, 2026-10-15): reconciled local merge of `e3ba1507` (#4716) with remote `dc81c55a` (#4695) into one push tip.
+
+```bash
+npm run lint
+npx tsc --noEmit
+npm test
+npm run build
+```
+
+`npm run lint` pass (0 errors, 855 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in cloud shell (25 failed, environmental).  PR file subset: 215 passed in six files.  `npm run build` pass (43/43 static pages).  Hosted `verify` on pushed HEAD is the merge gate.
+
 ## Next Steps & Blockers
 
 Ask Kody to re-review after thread replies.  Do not merge from this lane.  Do not deploy.  PR Autofix remains red on every review event.  `AI-Fleet-Coordinator` `pr-autofix-reusable.yml` line 163 uses `secrets` in a step `if` at the pin `2e671004` and still on coordinator `main` (`7508b399`).  The caller matches `origin/main`, and review events read the workflow from the default branch, so a pin change on this branch does not clear those runs.
