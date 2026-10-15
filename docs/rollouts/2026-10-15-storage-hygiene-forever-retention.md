@@ -29,7 +29,11 @@ npm test
 npm run build
 ```
 
-(Paste results in the PR / merge commit.)
+- `npm run lint` — 0 errors (854 grandfathered warnings)
+- `npx tsc --noEmit` — ok
+- `npx vitest run test/sqlite-storage-hygiene.test.ts` — 17/17 passed
+- `npm test` — 9376 passed, 51 skipped, 24 failed (pre-existing; e.g. `test/server-metrics.test.ts`, unrelated to hygiene)
+- `npm run build` — ok
 
 ## Next Steps & Blockers
 
