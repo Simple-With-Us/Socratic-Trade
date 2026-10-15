@@ -16,6 +16,7 @@
 import "server-only";
 import { getDb } from "./db";
 import { normalizeSymbol } from "./money";
+import { decodeTextPayload, encodeTextPayload } from "./text-payload-codec";
 
 export interface EarningsCallsTranscriptRow {
   symbol: string;
@@ -53,7 +54,7 @@ function toRow(raw: RawRow): EarningsCallsTranscriptRow {
     fiscalQuarter: raw.fiscal_quarter,
     eventId: raw.event_id ?? undefined,
     eventDate: raw.event_date ?? undefined,
-    content: raw.content ?? undefined,
+    content: raw.content == null ? undefined : decodeTextPayload(raw.content),
     fetchedAt: raw.fetched_at,
     sourceMeta: raw.source_meta ?? undefined,
     ingestedAt: raw.ingested_at ?? undefined
@@ -103,7 +104,7 @@ export function upsertEarningsCallsTranscript(row: Omit<EarningsCallsTranscriptR
       row.fiscalQuarter,
       row.eventId ?? null,
       row.eventDate ?? null,
-      row.content && row.content.trim() ? row.content : null,
+      row.content && row.content.trim() ? encodeTextPayload(row.content) : null,
       row.fetchedAt,
       row.sourceMeta ?? null
     );

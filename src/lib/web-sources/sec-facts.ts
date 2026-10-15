@@ -5,6 +5,7 @@ import { politeFetch } from "./http";
 import { padCik } from "./sec-filings";
 import { timeSync } from "../slow-sync-guard";
 import crypto from "crypto";
+import { decodeTextPayload, encodeTextPayload } from "../text-payload-codec";
 
 const SEC_DATA_BASE = "https://data.sec.gov";
 
@@ -321,7 +322,7 @@ export function upsertCompanyFactsCache(cik: string, jsonText: string, fetchedAt
         id, cik, accession, concept, value, unit, period, start_date, end_date, accepted_at, segment
       ) VALUES (?, ?, 'cache', ?, 1, 'json', 'cache', NULL, ?, ?, ?)`
     )
-    .run(id, paddedCik, SEC_COMPANYFACTS_CACHE_CONCEPT, endDate, fetchedAt, jsonText);
+    .run(id, paddedCik, SEC_COMPANYFACTS_CACHE_CONCEPT, endDate, fetchedAt, encodeTextPayload(jsonText));
 }
 
 /** Read cached companyfacts JSON for a CIK (written by ingest / nightly sweep). */
@@ -333,7 +334,7 @@ export function readCompanyFactsCache(cik: string): { json: string; fetchedAt: s
     )
     .get(paddedCik, SEC_COMPANYFACTS_CACHE_CONCEPT) as { segment: string | null; accepted_at: string } | undefined;
   if (!row?.segment) return undefined;
-  return { json: row.segment, fetchedAt: row.accepted_at };
+  return { json: decodeTextPayload(row.segment), fetchedAt: row.accepted_at };
 }
 
 /**

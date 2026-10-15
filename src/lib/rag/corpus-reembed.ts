@@ -72,6 +72,7 @@ import { EXPERIENCE_MEMORY_SOURCE, listClosedLotExperienceDocumentsForAccount } 
 import { loadCikMap } from "../web-sources/sec8k";
 import { padCik } from "../web-sources/sec-filings";
 import { listUsers, listConnectedAccounts } from "../db";
+import { decodeTextPayload } from "../text-payload-codec";
 
 // Mirrors vector-db.ts's private `VOYAGE_MODEL` constant (not exported). Comparing against the
 // literal is safe: it is a stable, documented model id, not an implementation detail that changes
@@ -541,11 +542,25 @@ async function reembedEarningsCallsTranscripts(ctx: RunContext, state: DocTypeRu
         fiscalYear: row.fiscal_year,
         fiscalQuarter: row.fiscal_quarter
       });
+      let plain = row.content;
+      try {
+        plain = decodeTextPayload(row.content);
+      } catch (err) {
+        console.warn(
+          "[corpus-reembed] transcript payload did not decode",
+          row.symbol,
+          err instanceof Error ? err.message : String(err)
+        );
+        after = { symbol: row.symbol, fiscalYear: row.fiscal_year, fiscalQuarter: row.fiscal_quarter };
+        state.watermark = after satisfies EarningsCallsWatermark;
+        ctx.persistDocTypeProgress(state);
+        continue;
+      }
       if (ctx.dryRun) {
         applyOutcome(state, classifyDryRun(ctx, EARNINGSCALLS_TRANSCRIPT_SOURCE, accession));
       } else {
         const doc: ChunkInput & { symbol?: string } = {
-          text: row.content,
+          text: plain,
           doc_id: accession,
           ticker: row.symbol,
           title: `${row.symbol} earnings call ${row.fiscal_year} Q${row.fiscal_quarter}`,

@@ -307,6 +307,15 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 **Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  Scheduler startup tests 21/21.  `npm run build` ok.  Full `npm test`: 24 failures pre-existing in this sandbox (unchanged vs unrelated suites).
 
 **Next.**  Open ready PR, `@kody start-review`.
+## 2026-10-15 Cursor Cloud — transcript and companyfacts gzip, RAG review
+
+**What.**  `earningscalls_transcripts.content` and the companyfacts JSON cache in `sec_facts.segment` now store `gz1:` (base64 gzip) or `raw1:` when gzip does not shrink the text.  Every reader of those bodies decodes first.  FTS still indexes plaintext.  A leader lane backfills in place and does not delete.  `audit_events.payload` stays plaintext because the hash chain and `json_extract` readers are not one path.  `post_mortem_reflection` is no longer age-pruned.  Review: `docs/reviews/2026-10-15-rag-storage-expert-panel.md`.
+
+**Branch.**  `cursor/text-payload-compression-3897`
+
+**Verification.**  `npx vitest run test/text-payload-codec.test.ts test/audit-hygiene.test.ts test/sec-facts.test.ts` 22/22.
+
+**Next.**  Open PR ready for review.  Full lint, tsc, vitest, and build on the PR gate.
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
