@@ -95,7 +95,9 @@ describe("fetchAlpacaNonTradeActivities", () => {
     expect(result.fallbackFrom).toContain("HTTP 422");
     expect(result.activities).toHaveLength(1);
     expect(urls).toHaveLength(2);
-    expect(decodeURIComponent(urls[1])).toContain("activity_types=CSD,CSW,ACATC");
+    expect(decodeURIComponent(urls[1])).toContain(
+      "activity_types=CSD,CSW,WH,ACATC,ACATS,JNLC,JNLS,DIV,DIVNRA,DIVTXEX,INT,FEE,PTC"
+    );
     expect(decodeURIComponent(urls[1])).not.toContain("DIVTX,");
   });
 
