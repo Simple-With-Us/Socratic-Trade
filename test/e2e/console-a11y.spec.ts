@@ -1,8 +1,6 @@
 import { expect, test } from "@playwright/test";
-import { installPlaywrightSession } from "./playwright-session";
 
-test("console has a skip link and main landmark", async ({ page, context }) => {
-  await installPlaywrightSession(context);
+test("console has a skip link and main landmark", async ({ page }) => {
   await page.goto("/console", { waitUntil: "domcontentloaded" });
   await expect(page.getByText("Socratic Trade").first()).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("link", { name: "Skip to content" })).toHaveAttribute("href", "#console-main");

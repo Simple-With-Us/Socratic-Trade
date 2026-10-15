@@ -10,7 +10,7 @@ ST-3854 / PR #4217 already moved the five Quiver carrier fields into `COVERAGE_R
 - `resolveEnrichmentCoverageReport()` always returns a sanitized report.
 - New builds stamp `retiredLaneFields` on `EnrichmentCoverageReport`.
 - Admin enrichment-coverage page shows a one-line retired-lane footnote (not scored).
-- Playwright visual regression for the footnote (`test/e2e/visual.spec.ts`) + Auth.js session helper for e2e admin routes (`test/e2e/playwright-session.ts`, `playwright.config.ts` `AUTH_SECRET`).
+- Playwright visual regression for the footnote (`test/e2e/admin-enrichment-coverage-visual.spec.ts`) with a **separate** admin webServer (`playwright.admin.config.ts` + deterministic test `AUTH_SECRET` via `playwright-admin-auth.ts`). Default smoke harness (`playwright.config.ts`) stays auth-unconfigured (PRIMARY_USER_EMAIL fallback).
 - Regression tests for sanitize and `retiredLaneFields` on build.
 
 Files:
@@ -18,12 +18,14 @@ Files:
 - `src/lib/enrichment-coverage.ts`
 - `src/lib/db-enrichment-coverage.ts`
 - `app/admin/enrichment-coverage/enrichment-coverage-client.tsx`
-- `test/e2e/visual.spec.ts`
+- `test/e2e/admin-enrichment-coverage-visual.spec.ts`
 - `test/e2e/playwright-session.ts`
-- `test/e2e/dashboard-smoke.spec.ts`
-- `test/e2e/console-a11y.spec.ts`
-- `playwright.config.ts`
-- `test/e2e/visual.spec.ts-snapshots/enrichment-coverage-retired-lanes-footnote-chromium-linux.png`
+- `test/e2e/playwright-admin-auth.ts`
+- `playwright.admin.config.ts`
+- `playwright.config.ts` (`testIgnore` for admin spec)
+- `package.json` (`test:e2e:admin`)
+- `.github/workflows/e2e.yml` (runs admin suite after smoke)
+- `test/e2e/admin-enrichment-coverage-visual.spec.ts-snapshots/enrichment-coverage-retired-lanes-footnote-chromium-linux.png`
 - `test/enrichment-coverage.test.ts`
 - `docs/rollouts/2026-10-15-st-3854-quiver-coverage-sanitize.md`
 - `STATUS.md`

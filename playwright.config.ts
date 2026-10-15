@@ -15,11 +15,10 @@ const webServerCommand =
 // middleware's documented dev/local fallback to PRIMARY_USER_EMAIL — the same path local
 // `next start` uses. The smoke email is the server's PRIMARY_USER_EMAIL so it passes the allowlist.
 const authEmail = process.env.PLAYWRIGHT_AUTH_EMAIL || "smoke-test@agentic.local";
-const playwrightAuthSecret =
-  process.env.PLAYWRIGHT_AUTH_SECRET || "playwright-e2e-auth-secret-32chars!!";
 
 export default defineConfig({
   testDir: "./test/e2e",
+  testIgnore: "**/admin-enrichment-coverage-visual.spec.ts",
   timeout: 60_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,
@@ -42,8 +41,6 @@ export default defineConfig({
           // Deliberately NO CF_ACCESS_TRUST_EMAIL_HEADER and no AUTH_SECRET: auth unconfigured
           // engages the middleware's dev/local fallback to PRIMARY_USER_EMAIL (see comment above).
           PRIMARY_USER_EMAIL: authEmail,
-          // Arms Auth.js session verification for Playwright (admin pages + hermetic smoke).
-          AUTH_SECRET: playwrightAuthSecret,
           // The embedded `npm run build` OOMs at V8's default ~2 GB heap on CI runners
           // (Playwright Smoke failed with "Ineffective mark-compacts near heap limit").
           // Set it here, on the spawned server process, so the limit holds regardless of
