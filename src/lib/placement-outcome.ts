@@ -1,3 +1,5 @@
+import { isTradierSandboxOpenDeferralMessage, isTradierTransientServerError } from "./tradier-transient";
+
 /**
  * Single classifier for human approval placement results (`executeProposal` and mobile
  * `proposal.approve`). Consumers must not treat a resolved command as "placed" unless
@@ -18,9 +20,30 @@ export interface PlacementOutcome extends ExecuteProposalResult {
   outcome: PlacementOutcomeKind;
 }
 
-/** HTTP 429 / 408 are transient broker-side limits — not terminal rejections. */
+/**
+ * HTTP 429 / 408 are transient broker-side limits.  Tradier's HTTP 400
+ * "Unexpected server error" is the same class: the sandbox OMS wedged and
+ * refused the request.  A plain HTTP 400 (buying power, bad symbol) is not.
+ */
 export function isRetryableBrokerHttpError(message: string): boolean {
-  return /\bHTTP (429|408)\b/i.test(message);
+  return /\bHTTP (429|408)\b/i.test(message) || isTradierTransientServerError(message);
+}
+
+/** Sandbox open-window deferral is a local skip, safe to retry after the window. */
+export function isRetryablePlaceMessage(message: string): boolean {
+  return isRetryableBrokerHttpError(message) || isTradierSandboxOpenDeferralMessage(message);
+}
+
+/**
+ * Retryable errors that may still have landed at the broker.  Book
+ * `not_placed` only after refId reconcile.  HTTP 408 is a timeout.  Tradier's
+ * "Unexpected server error" is the same class once it escapes the adapter:
+ * the POST may have been accepted, and the next attempt mints a new refId.
+ * A confirmed tag hit never throws this sentence.  HTTP 429 and the sandbox
+ * open deferral never reached a live order and stay on the short-circuit.
+ */
+export function mustReconcileRetryablePlaceError(message: string): boolean {
+  return /\bHTTP 408\b/i.test(message) || isTradierTransientServerError(message);
 }
 
 /**
@@ -44,7 +67,7 @@ export function isIdempotencyConflictHttpError(message: string): boolean {
 export function isTerminalBrokerHttpError(message: string): boolean {
   return (
     /\bHTTP 4\d\d\b/i.test(message) &&
-    !isRetryableBrokerHttpError(message) &&
+    !isRetryablePlaceMessage(message) &&
     !isIdempotencyConflictHttpError(message)
   );
 }
@@ -53,12 +76,13 @@ export type PlaceOrderErrorClass = "retryable" | "idempotency_conflict" | "rejec
 
 /**
  * Shared place-order error class for the approval path and the autonomous run.
- * `retryable` books not_placed (429/408).  `idempotency_conflict` must reconcile
- * (409, or a duplicate client_order_id on another 4xx) — an order may already
- * be live.  `rejected_terminal` is a definitive broker refusal.
+ * `retryable` books not_placed (429/408, Tradier "Unexpected server error",
+ * sandbox open deferral).  `idempotency_conflict` must reconcile (409, or a
+ * duplicate client_order_id on another 4xx) — an order may already be live.
+ * `rejected_terminal` is a definitive broker refusal.
  */
 export function classifyPlaceOrderError(message: string): PlaceOrderErrorClass {
-  if (isRetryableBrokerHttpError(message)) return "retryable";
+  if (isRetryablePlaceMessage(message)) return "retryable";
   if (isIdempotencyConflictHttpError(message)) return "idempotency_conflict";
   if (/\bHTTP 4\d\d\b/i.test(message)) return "rejected_terminal";
   return "other";

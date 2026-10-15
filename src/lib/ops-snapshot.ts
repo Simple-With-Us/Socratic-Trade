@@ -20,6 +20,7 @@ import { statSync, statfsSync, readdirSync } from "fs";
 import { dirname, join } from "path";
 import { summarizeRoicArchiveCoverage } from "./web-sources/roic-transcripts";
 import { peekRoicArtifactFileCount, refreshRoicArtifactFileCount } from "./roic-archive-artifacts";
+import { readCachedStorageHygieneReport, type StorageHygieneReport } from "./sqlite-storage-hygiene";
 
 function getLitestreamLastSyncAge(dbPath: string): number | null {
   const litestreamDir = `${dbPath}-litestream`;
@@ -175,6 +176,9 @@ export interface OpsSnapshot {
   roicArchive?: OpsRoicArchiveCoverage | null;
   dependencies?: Record<string, { ok: boolean; reason?: string | null; lastFailure?: string | null }>;
   storage?: Record<string, any> | null;
+  /** Last storage-hygiene pass (table sizes, dry-run or live reclaim, checkpoint).  Cached.
+   *  The snapshot route does not walk dbstat. */
+  storageHygiene?: StorageHygieneReport | null;
   /** Last CascadingEnrichmentProvider coverage summary (filled / source / missing), if any scan has run. */
   enrichmentCoverage?: {
     asOf: string;
@@ -544,6 +548,13 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
     };
   } catch {}
 
+  let storageHygiene: StorageHygieneReport | null = null;
+  try {
+    storageHygiene = readCachedStorageHygieneReport();
+  } catch {
+    storageHygiene = null;
+  }
+
   let enrichmentCoverage: OpsSnapshot["enrichmentCoverage"] = null;
   try {
     const report = resolveEnrichmentCoverageReport();
@@ -583,6 +594,7 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
     schedulerAgeSeconds: Number.isFinite(tickMs) ? Math.round((Date.now() - tickMs) / 1000) : null,
     dependencies,
     storage,
+    storageHygiene,
     enrichmentCoverage,
     roicArchive,
     taskJournal: getTaskJournalSummary(new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString()),

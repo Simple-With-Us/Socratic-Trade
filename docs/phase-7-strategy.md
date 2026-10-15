@@ -2,6 +2,10 @@
 
 This document defines the comprehensive architecture for the AI Trading Strategy, including how the LLM evaluates the market, scores individual equities, and continuously learns from its own outcomes.
 
+## 2026-10-14 Tradier sandbox open HTTP 400 does not auto-halt
+
+Tradier Sandbox HTTP 400 "Unexpected server error" is a transient broker error.  The order-capability probe and a real equity, bracket, or option POST retry it (three attempts, 400ms then 1200ms).  A write looks up its tag before a second POST and again before giving up.  An escaped "Unexpected server error" reconciles by refId before anyone books `not_placed`.  `applyBrokerOrderPlacementPause` leaves `systemState` active and does not touch the connectivity streak.  The run skip is `skipped` / `run_skipped_broker_transient`, not `skipped_broker_unhealthy`.  Sandbox posts are refused locally for the first 15 minutes of the regular session.  Live Tradier still places.  Buying power, plain HTTP 400, HTTP 403, and HTTP 5xx still fail loudly and can still halt.  Rollout: `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`.
+
 ## 2026-09-04 Gather internal time budget (do not raise the 8-minute cap)
 
 Board `06df80cf` leftover after #3013/#3018 abort + last-good.  `gatherStrategyMarket` still has an 8-minute wall.  The walk now plans remaining time after a 50s quote-refresh reserve: skip live enrich under 20s usable, skip keyed Finnhub Wave B under 90s, skip scarce RapidAPI Wave C under 20s, and shrink the enrichment pool to the ranked cut under 3 minutes.  A trimmed live tape is preferred over racing timeout then last-good.  Scheduler `broker-health-gate` auto-halt of an active account (including equity 0) now writes one `skipped_broker_unhealthy` `strategy_runs` row.  Skip rows are not liveness completions.  Rollout: `docs/rollouts/2026-09-04-gather-internal-budget.md`.

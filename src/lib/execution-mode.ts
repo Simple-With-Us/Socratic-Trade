@@ -49,6 +49,12 @@ export interface HealthSignals {
    * never count it toward the halt streak.
    */
   processStall?: { stalledMs: number; elapsedMs: number };
+  /**
+   * Tradier answered HTTP 400 "Unexpected server error" (or the sandbox open
+   * window is being treated as that blip).  Skip this tick.  Do not auto-halt:
+   * the next healthy probe must not have to auto-resume a pause we never needed.
+   */
+  transientBrokerError?: boolean;
 }
 
 type ExecutionPolicy = Pick<TradingPolicy, "accountNumber" | "connectedAccountId" | "activeBroker">;
