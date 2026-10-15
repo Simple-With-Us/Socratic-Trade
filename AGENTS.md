@@ -290,6 +290,25 @@ or manually trigger deploys.  Rollback to manual: disable auto deploy on the app
 green on the *old* sha.  The standing watchdog is `.github/workflows/deploy-freshness.yml`
 (`scripts/alert-deploy-freshness.sh`) — it pages when the oldest undeployed main commit
 is older than 1h.  Do not treat a green health probe as proof the pipeline is moving.
+
+**Registry-pull trap (2026-09-25 P0, 2026-10-15 guarded):** ST and UM use the Dockerfile
+build pack, so the image is BUILT ON THE BOX and tagged `{application_uuid}:{commit}` —
+no registry prefix, no copy in any registry, and Docker resolves the bare name as
+`docker.io/library/<uuid>`.  Coolify's `pull_docker_compose_images()` runs
+`docker compose ... pull --ignore-buildable` unconditionally, and `--ignore-buildable`
+only skips services that have a `build:` key.  The generated service has `image:` and NO
+`build:` key, so Compose pulled `docker.io/library/<uuid>` and failed — and the
+`stop_running_container(force: true)` that follows is NOT conditional on that pull, so
+prod was already down when the registry said no (5.3min P0, board `2c6a6a53` /
+ST-3707).  **Do not "fix" this by adding a Docker Hub credential or by setting
+`pull_policy` to pull** — there is no `/root/.docker/config.json` by design, an
+authenticated pull of a nonexistent repo returns `pull access denied, insufficient_scope`
+(the exact outage signature), and any pulling policy makes the P0 certain.  The correct
+value on this app is `never`/absent, enforced by the sanctioned
+`scripts/ops/coolify-st-pull-guard.sh` (see `docs/deployment.md`).  It patches a VENDOR
+PHP file inside the `coolify` container, so **re-run `apply` after ANY Coolify version
+change** and confirm with `verify` — the scheduled 4.3.23 → 4.4.6 upgrade FAILED on this
+box (containerd `lease does not exist`) and is still pending, so it will wipe the guard.
 ST/CT/UM still share the Hetzner box; `scripts/isolate-shared-box-batch.sh` dry-runs a
 `docker update` CPU cap on CT OCR/scan workers (never restarts; never touches ST).
 Default cap is **5.0 of 8 vCPUs** (as high as is reasonably advisable: above the

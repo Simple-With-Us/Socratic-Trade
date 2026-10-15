@@ -1,5 +1,21 @@
 # Current Status
 
+## 2026-10-15 MM — Coolify st-pull-guard (board `2c6a6a53` / ST-3707)
+
+**What.**  Fixed the latent cause of the 2026-09-25 5.3-minute P0 on the box.  Coolify's `ApplicationDeploymentJob::pull_docker_compose_images()` ran `docker compose ... pull --ignore-buildable` unconditionally, and `--ignore-buildable` only skips services carrying a `build:` key.  ST/UM use the Dockerfile build pack, so the generated service has `image:` and no `build:` key — Compose resolved `{application_uuid}:{commit}` as `docker.io/library/<uuid>` and failed.  The `stop_running_container(force: true)` that follows is not conditional on that pull, so prod was already down when the registry said no.
+
+**Fix.**  Two minimal edits to the vendor job: skip the pull for the Dockerfile build pack when no registry image is configured, and emit `pull_policy: never` for any tag with no `/`.  `congress-trade` uses the `dockercompose` pack and is deliberately unchanged.  Shipped as `scripts/ops/coolify-st-pull-guard.sh` (idempotent `apply`/`verify`/`revert`) plus `scripts/ops/coolify-st-pull-guard.selftest.sh`.
+
+**Applied live on `fleet-hetzner-nbg1` at 08:17Z.**  Pristine replay produces post-patch sha256 `1226ed9ccd47daa3`, identical to the installed file.  Congress deploy #4584 at 08:18Z exercised the patched path and correctly stood the guard down.  `/api/live` and `/login` both 200 throughout; no prod container was stopped or bounced, only the Coolify `horizon` worker was reloaded.
+
+**⚠ Re-apply after ANY Coolify version change.**  This patches a vendor file inside the container and is wiped by any upgrade/recreate.  The scheduled 4.3.23 → 4.4.6 upgrade FAILED at 2026-10-15T00:00:19Z (containerd `lease does not exist`) and is still pending, so it will wipe this.  Run `scripts/ops/coolify-st-pull-guard.sh verify` after upgrading.
+
+**Do NOT "fix" this by adding a Docker Hub credential or setting `pull_policy` to pull.**  There is no `/root/.docker/config.json` by design; an authenticated pull of a nonexistent repo returns `pull access denied, insufficient_scope`, the exact outage signature, and fixes nothing.
+
+**Open, needs owner action:** (1) fix the Coolify 4.4.6 upgrade, then re-apply the guard; (2) mint a new `COOLIFY_AGENTS` token — it returns `Unauthenticated` on every endpoint, so fleet tooling that drives Coolify by API is dead.
+
+**Branch.**  `minimax/st-pull-guard`  ·  Rollout `docs/rollouts/2026-10-15-coolify-st-pull-guard.md`
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.

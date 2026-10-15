@@ -1,0 +1,195 @@
+# Coolify st-pull-guard — stop pulling locally-built ST/UM images from a registry
+
+Date: 2026-10-15
+Seat: MM
+Board: `2c6a6a53` / Linear ST-3707 (closed by MM, see below)
+Host: `fleet-hetzner-nbg1` (`167.233.254.55`), Coolify `4.3.23`
+
+## 1. Context & Objective
+
+ST-3707 recorded a 5.3-minute P0 on 2026-09-25 where a Coolify deploy tried to pull
+Socratic-Trade's image from Docker Hub and took production down while doing it.  Jay
+asked for the cause to be found and fixed on the host.  Investigation showed the outage
+was **latent, not active** — production was healthy and deploying normally — but the
+failure mode was fully present and would fire again.  This note records the fix that
+removes it.
+
+## 2. Changes Made
+
+### Root cause, located to the exact line
+
+`ApplicationDeploymentJob::deploy_dockerfile_buildpack()` does, in order:
+
+```php
+$this->save_runtime_environment_variables();
+$this->pull_docker_compose_images();            // <-- unconditional registry pull
+$this->stop_running_container(force: true);      // <-- NOT conditional on the pull
+```
+
+`pull_docker_compose_images()` runs:
+
+```
+docker compose --env-file .env --project-name <uuid> \
+  --project-directory <workdir> -f <workdir>/docker-compose.yaml pull --ignore-buildable
+```
+
+`--ignore-buildable` only skips services that carry a `build:` key.  For the Dockerfile
+build pack the generated service has `image:` and **no** `build:` key, so Compose treats
+`{application_uuid}:{commit}` as a registry image.  That name has no registry prefix and
+no `/`, so Docker resolves it as `docker.io/library/<uuid>`, which does not exist:
+
+```
+$ docker manifest inspect d83b1aykr03uwr32yhgzaiay:1c730ffff...
+errors:
+denied: requested access to the resource is denied
+unauthorized: authentication required
+```
+
+`RegistryConfig.Mirrors` is `[]`, the tag exists only locally, and no registry holds a
+copy.  The pull then fails, and because the stop is unconditional, production was already
+down before the registry answered.  That is the whole outage.
+
+Confirmed unrelated and NOT involved: `use_build_server` is `false` (one server,
+`is_build_server=f`), so the `up --pull always --build -d` branch at line 4243 is dead
+code here.  ST takes the `up --build -d` branch.
+
+### The patch (two minimal changes to the vendor job)
+
+1. `pull_docker_compose_images()` returns early for `build_pack === 'dockerfile'` when no
+   `docker_registry_image_name` is set.  Skipping is strictly safe: the pull it skips
+   either pulls nothing (image already local) or fails.
+2. The generated compose gains `pull_policy: never` for any `production_image_name` with
+   no `/`, so Compose can never reach for a registry on a local-only tag.
+
+Verified guard condition against the live DB:
+
+| id | app | build_pack | behaviour |
+|----|-----|-----------|-----------|
+| 1 | ST app/worker | dockerfile | guard fires, pull skipped |
+| 2 | congress-trade | dockercompose | pull proceeds — **unchanged** |
+| 3 | UM app/worker | dockerfile | guard fires, pull skipped |
+| 4 | agent-sync listener | dockerfile | guard fires, pull skipped |
+| 5 | echo-mail-relay | dockerfile | guard fires, pull skipped |
+
+### Files touched
+
+- `scripts/ops/coolify-st-pull-guard.sh` — new.  Idempotent `apply` / `verify` / `revert`.
+  Lints the patched PHP **before** installing it, keeps a `.mm-orig` backup, fixes
+  ownership, and restarts the `horizon` queue worker so the reloaded job class is used.
+- `scripts/ops/coolify-st-pull-guard.selftest.sh` — new.  Re-extracts the guard script's
+  own anchors and patcher and applies them to a pristine copy of the vendor file, proving
+  the script still works against an untouched Coolify rather than only against a file it
+  already patched.
+- `docs/deployment.md` — replaced the absolute "This repo does not PATCH live Coolify"
+  with the narrow, documented `st-pull-guard` exception.
+- `AGENTS.md` — added the registry-pull trap to the Coolify stanza.
+
+Live host change: `/var/www/html/app/Jobs/ApplicationDeploymentJob.php` inside the
+`coolify` container (backup at `.mm-orig`).
+
+## 3. Decisions & Trade-offs
+
+- **Patched vendor PHP instead of waiting for upstream.** No Coolify changelog entry
+  through 4.4.6 mentions `pull_policy` or the stop ordering, and there is no per-app
+  setting for it.  The repo-side alternative is worse: Coolify regenerates
+  `/data/coolify/applications/<uuid>/docker-compose.yaml` on every deploy and ignores a
+  committed compose, so no repo change can set the policy durably.
+- **Did not add a Docker Hub credential, despite it looking like the obvious fix.**
+  There is no `/root/.docker/config.json` on the host and Docker Hub is reachable (auth
+  token endpoint 200), so this was never an expired-login or rate-limit problem.  Adding a
+  credential converts `unauthorized: authentication required` into `pull access denied,
+  insufficient_scope` — the exact 2026-09-25 signature — and fixes nothing.
+- **Did not set `pull_policy` to pull.**  For this build pack any pulling policy sends
+  `{uuid}:{sha}` to Docker Hub on every deploy and guarantees a repeat of the P0.  Jay's
+  original instruction ("it should pull our image, not never/stale") was inverted for this
+  app; it was flagged and not followed.
+- **Did not run a deploy by hand.**  Triggering one needs an API token that is currently
+  broken (`COOLIFY_AGENTS` → `Unauthenticated`), and the patch is strictly
+  no-op-or-better, so it was verified by composition plus a pristine-file replay instead.
+- **Known durability limit, accepted:** the patch lives inside the container and is wiped
+  by any Coolify recreate or upgrade.  The scheduled 4.3.23 → 4.4.6 upgrade **failed** at
+  2026-10-15T00:00:19Z with a containerd `lease does not exist` error and is still
+  pending, so it will wipe this.  `verify` exists precisely to catch that drift.
+
+## 4. Verification State
+
+Commands run, and what they showed:
+
+```bash
+# reproduce the outage mechanism, then show the fix (throwaway project, no prod impact)
+# Coolify as-is:   Image ... Pulling  -> Error pull access denied for
+#                   d83b1aykr03uwr32yhgzaiay, repository does not exist
+# +pull_policy:never:  Image ... Skipped          (no registry call at all)
+```
+
+```bash
+# syntax gate before install
+$ docker exec coolify php -l /tmp/adj.patched.php
+No syntax errors detected in /tmp/adj.patched.php
+
+# idempotence / state
+$ /root/coolify-st-pull-guard.sh verify
+guard: PRESENT (2 patch markers)
+php syntax: OK
+horizon workers running: 1
+ 1|ST app/worker|dockerfile|GUARD FIRES (pull skipped)
+ 2|congress-trade|dockercompose|pull proceeds (unchanged)
+ ...
+
+# anchors still match a PRISTINE Coolify 4.3.23 file
+$ /root/selftest.sh
+pre-patch  sha256: 288680b7837550b1
+post-patch sha256: 1226ed9ccd47daa3
+markers after patch: 2
+No syntax errors detected in /tmp/pristine.patched.php
+PRISTINE-APPLY TEST PASSED
+```
+
+The pristine replay's `post-patch sha256` is **identical** to the sha256 of the file
+installed on the box, so the script reproduces the live file byte for byte from untouched
+vendor source.
+
+Production health during and after the change:
+
+```bash
+$ curl -o /dev/null -w '%{http_code}' https://socratictrade.com/api/live   # 200
+$ curl -o /dev/null -w '%{http_code}' https://socratictrade.com/login      # 200
+$ curl -o /dev/null -w '%{http_code}' https://host.jays.services/           # 302 (login)
+```
+
+No production container was stopped, recreated or bounced.  The only restart was the
+Coolify `horizon` queue worker, done with nothing in flight in
+`application_deployment_queues`.
+
+**Not yet verified:** an end-to-end deploy that shows the guard's log line
+(`Skipping image pull: ...`) in a real deployment.  Coolify deploys on `main` pushes, and
+the next one will show it; `docker logs coolify` plus the `logs` column of
+`application_deployment_queues` are where to look.
+
+## 5. Next Steps & Blockers
+
+1. **Watch the next ST deploy** for `Skipping image pull: Dockerfile build pack builds
+   locally and this image has no registry copy.`  That closes the loop end-to-end.
+2. **Fix the Coolify 4.4.6 upgrade**, then immediately re-run
+   `scripts/ops/coolify-st-pull-guard.sh apply`.  The upgrade failure is a containerd
+   content-store lease error, a different fault from this one; it was left alone because
+   retrying restarts a control plane shared by ST, Congress and Usage Monitor.
+3. **Mint a new `COOLIFY_AGENTS` token.**  It returns `Unauthenticated` on every endpoint,
+   which disables any fleet tooling that drives Coolify by API.
+4. Consider wiring `coolify-st-pull-guard.sh verify` into the deploy-freshness watchdog so
+   vendor drift pages instead of waiting for the next outage.
+
+## 6. Zero-Code Findings
+
+- The reported incident ("production deploy is failing to pull images") was **not
+  reproducing**.  At investigation time production was healthy, deploy **#4580** for main
+  HEAD was `in_progress` and finished cleanly at 07:56:17Z, and the Docker daemon journal
+  had **zero** `insufficient_scope` / `pull access denied` / `authorization failed` lines
+  in the preceding 24h.
+- Coolify 4.3.23 has **no `deployments` table**, and `COOLIFY_AGENTS` is unusable, so
+  deployment history must come from
+  `docker exec coolify-db psql -U coolify -d coolify` against
+  `application_deployment_queues`.  Completed rows are pruned, so that table shows only
+  in-flight and recent work — it is not history.
+- There is a **Zombie process** (1) on the host and swap at ~12.7/17.4 GiB with load
+  average 8–11 on 8 vCPU.  Not addressed here; worth a look separately.
