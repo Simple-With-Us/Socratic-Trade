@@ -315,7 +315,9 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 
 **Verification.**  `npm run lint` 0 errors.  Full `tsc` / `vitest` / `build` before push.
 
-**Next.**  GB-Deployer squash-merge; close #4691.  Board handoff comment blocked (no Zulip key for CURSOR seat).
+**Next.**  GB-Deployer squash-merge; close #4691.
+
+**Linear.**  ST-4535 (claimed CURSOR, **Addressed** / In Review) — board `d428460a`.
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
