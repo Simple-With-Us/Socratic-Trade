@@ -15,6 +15,12 @@ Congress.Trade webhook pushes previously treated any HTTP 2xx as success without
 
 **Shared package follow-up:** identical schema/helpers prepared for `congress-trading-shared` v2.8.0 (`pushReceipt.ts`); publish when the shared repo accepts the tag.
 
+## Overlap check vs main #4703 (2026-10-15)
+
+`#4703` on `main` is the **other** ST-3846 surface: Congress.Trade → `POST /api/admin/securities/import` (`peer-push-receipt.ts`, push id + delivered/consumed ack objects, idempotent cache writes).  It does **not** touch `POST /api/webhooks/congress` or `receiptVersion: 1`.
+
+This PR is the **webhook consumption receipt** Congress.Trade `delivery/webhook.ts` (CT #2752) expects: `receiptVersion: 1`, `consumed`, and HTTP **422** when `consumed=false`.  No duplicate implementation to drop; both paths are required for full ST-3846.
+
 ## Decisions & Trade-offs
 
 - **HTTP 422** on consumption failure (was 400 for single-event failures) so App A can distinguish auth/parse errors from apply failures while still retrying both.

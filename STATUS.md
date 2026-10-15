@@ -8,7 +8,9 @@
 
 **Verification.**  `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-events.test.ts test/congress-webhook-parity.test.ts` 47/47; `npx tsc --noEmit` ok; `npm run lint` 0 errors.
 
-**Next.**  Open ready PRs on Socratic-Trade and Congress.Trade; publish `congress-trading-shared@2.8.0` when permitted.
+**Overlap (#4703).**  `#4703` on `main` covers the securities **import** push receipt only (`peer-push-receipt`).  This branch still owns the **webhook** receipt (`congress-push-receipt`, `receiptVersion: 1`, `422` when `consumed=false`) required by CT #2752 — not redundant.
+
+**Next.**  Merge ready PR #4695 with Congress.Trade #2752; publish `congress-trading-shared@2.8.0` when permitted.
 
 **2026-10-15 [codex-autofix] — PR #4695 review pass.**  No new review-bot findings; the
 sole thread (Sentry, index misalignment in `resolveCongressEventIds`) was already fixed in
