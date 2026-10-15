@@ -24,13 +24,13 @@ Commands on this branch (per handoff.mdc — **ok** only when run on the commit 
 
 | Command | Result |
 |---|---|
-| `bash -n scripts/merge-shepherd.sh` | ok (this session) |
-| `bash scripts/merge-shepherd-ci-inflight.selftest.sh` | ok (this session) |
-| `SHEPHERD_DRY_RUN=1 bash scripts/merge-shepherd.sh` | N/A (needs `gh` + open PRs; not run this session) |
-| `npm run lint` | N/A (shell-only change; not run this session) |
-| `npx tsc --noEmit` | N/A (no TS touched; not run this session) |
-| `npm test` | N/A (no vitest coverage for bash; not run this session) |
-| `npm run build` | N/A (no app/runtime change; not run this session) |
+| `bash -n scripts/merge-shepherd.sh` | -> ok (this session) |
+| `bash scripts/merge-shepherd-ci-inflight.selftest.sh` | -> ok (this session) |
+| `SHEPHERD_DRY_RUN=1 bash scripts/merge-shepherd.sh` | -> N/A (needs `gh` + open PRs; not run this session) |
+| `npm run lint` | -> N/A (shell-only change; authoritative gate is PR `verify`) |
+| `npx tsc --noEmit` | -> N/A (no TS touched; authoritative gate is PR `verify`) |
+| `npm test` | -> N/A (no vitest for bash; authoritative gate is PR `verify`) |
+| `npm run build` | -> N/A (no app/runtime change; authoritative gate is PR `verify`) |
 
 Merge-forward with `origin/main` at `960637ec` (2026-10-15); no conflict markers in shepherd/STATUS/rollout after merge.
 

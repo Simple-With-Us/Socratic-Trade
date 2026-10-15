@@ -82,6 +82,12 @@ refresh_merge_state() {
 # True when any required/ancillary check is still running on the current head.
 # update-branch mid-run cancels verify-hosted (~20m); a 15-19m re-sync cadence then
 # starves PRs forever (board ST-2874 / Monet 2026-08-21).
+#
+# Terminal verify conclusions include GitHub's NEUTRAL and SKIPPED so a finished
+# optional/skipped check is not mistaken for in-flight (default arm).  BEHIND
+# re-sync still runs only under verify=SUCCESS; these terminals matter for
+# ci_in_flight($running, $verify) when $running>0 and for the explicit
+# NEUTRAL|SKIPPED rows below (not mis-labeled "CI still running").
 ci_in_flight() {
   local running="$1" verify="$2"
   if [ "$running" -gt 0 ]; then
@@ -169,6 +175,8 @@ for num in $nums; do
                row FAILING "$num" "$title  (verify=$verify; reran=$reran)" ;;
       NONE)    if [ "$running" -gt 0 ]; then row WAITING "$num" "$title  (CI running; verify not posted yet)";
                else row WOULD-SYNC "$num" "$title  (no CI at all -- would re-sync to re-trigger it)"; fi ;;
+      NEUTRAL|SKIPPED)
+               row WAITING "$num" "$title  (verify=$verify -- terminal optional check; not re-syncing)" ;;
       *)       row WAITING "$num" "$title  (verify=$verify -- CI running)" ;;
     esac
     continue
@@ -280,6 +288,9 @@ for num in $nums; do
       # "already up to date" but still no check -> CI genuinely needs a manual nudge
       row WAITING "$num" "$title  (no verify check + branch up-to-date -- CI may need a nudge)"
     fi
+
+  elif [ "$verify" = "NEUTRAL" ] || [ "$verify" = "SKIPPED" ]; then
+    row WAITING "$num" "$title  (verify=$verify -- terminal optional check; not re-syncing)"
 
   else
     row WAITING "$num" "$title  (verify=$verify -- CI still running)"
