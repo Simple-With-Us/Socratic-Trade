@@ -42,8 +42,8 @@ pin all six labels in `test/sqlite-storage-hygiene.test.ts`.
 ## Verification State
 
 ```bash
-npx tsc --noEmit                       # ok
 npm run lint                           # 0 errors, 854 warnings (known backlog)
+npx tsc --noEmit                       # ok
 npx vitest run test/sqlite-storage-hygiene.test.ts   # 15/15
 npm test                               # 9383 passed, 51 skipped, 13 failed
 npm run build                          # ok
