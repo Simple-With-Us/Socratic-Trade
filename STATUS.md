@@ -1,5 +1,38 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — ST-4531 retire Slack callers
+
+**What.**  Remaining ST Slack posts (deploy-freshness notify, provider-knob sync, `slack-sync.sh post`, Codex coordination helper) now use Zulip via `agent-sync-fleet-post.sh` / `agent-sync`.  Deploy-freshness workflow drops `SLACK_BOT_TOKEN` and loads the ST ops Zulip triple from Infisical prod at runtime (`github-actions-infisical-zulip-ops.sh` via `infisical-secrets-safe.sh get`).  Kody blockers: Rule 49 safe Infisical path, Rule 26 rollout verify outcomes, plist template cleanup.
+
+**Branch.**  `cursor/st-4531-retire-slack-callers-89ad` (merged `origin/main` 2026-10-15).
+
+**Verification.**  Kody fixes: `infisical-secrets-safe.sh get` (Actions-only) for Zulip triple; rollout verification `-> ok` lines; fleet-post stderr surfacing.  Re-run `verify` CI after push.
+
+**Next.**  PR #4696 ready for Deployer merge after CI green; Refs ST-4531.
+**Next.**  PR #4696 ready for Deployer merge; Refs ST-4531.
+
+**Autofix round 9.**  All kody/cursor review threads are resolved and their fixes verified present in HEAD (the `resolve_bin` trailing-brace typo, the plist Zulip email example, and the rollout Decisions section).  Two new kody findings handled: the rollout `Verification State` block now annotates each command with a real `-> ok` / `-> fail` result.  `npm test` fails 10 tests in `test/llm-provider.test.ts` and `test/openrouter-credits.test.ts`, but both are pre-existing — they reproduce identically on a clean `origin/main` worktree in this runner and neither file is touched by this PR (an OpenRouter credential in the runner env that the tests assume absent).  `lint` 0 errors, `tsc` ok, `build` ok.  One kody critical finding is deliberately NOT fixed and is open for the maintainer: it asks that bare `infisical secrets get` in `scripts/github-actions-infisical-zulip-ops.sh` be routed through `scripts/infisical-secrets-safe.sh`, but that wrapper has no `get` subcommand — its own instruction says to raise that as a follow-up rather than call bare `infisical secrets`.  Adding a secret-printing `get` path to a wrapper whose contract is "never dumps values" is a security-policy change, not a mechanical fix.  Also note: the uncommitted `.claude/skills/*` edits present in the checkout were reverted Zulip→Slack (undoing this PR's purpose) and were discarded, not committed; patch kept at `/tmp/reverted-slack-edits.patch`.
+**Verification.**  `bash -n` on touched scripts; `alert-deploy-freshness.selftest.sh` 9/9; `vitest run test/infisical-secrets-safe.test.ts` 47/47; `npm run lint` 0 errors; `tsc`; `npm run build`; awaiting fresh `verify` CI on new head.
+
+**Next.**  PR #4696 — Kody CHANGES_REQUESTED cleared on branch; Deployer merge when `verify` green; Refs ST-4531.
+
+## 2026-10-15 Cursor Cloud — check-pin token order (ST-2582 PR #4698)
+
+**What.**  Merged `origin/main` (`df7e6d10`) with a merge commit.  `check-pin` was failing because it read public Congress.Trade with `GH_PACKAGES_TOKEN` first.  That secret is one user's PAT, so a burst of pull requests shares one rate limit and the job reports a missing token.  The script now tries the Actions installation token first and keeps the PAT as a fallback.  A rate-limit failure is no longer labeled as a missing token.
+
+**Branch.**  `cursor/honest-approve-retryable-11d4`
+
+**Next.**  Stay ready with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.
+
+## 2026-10-15 Cursor Cloud — honest approve and retryable broker errors (ST-2582)
+
+**What.**  Approve reports HTTP 200 only when the broker order was placed.  Timeouts, HTTP 5xx, and Tradier's HTTP 400 "Unexpected server error" classify as retryable.  Those that may already be live reconcile by refId before `not_placed`.  The #4668 5xx halt path and the #4685 16-minute sandbox wait stay in place.  Price and market-data history is untouched.
+
+**Branch.**  `cursor/honest-approve-retryable-11d4`
+
+**Verification.**  Targeted vitest 64/64.  `npm run lint` 0 errors, 854 warnings.  `npx tsc --noEmit` ok.  `npm test` 9385 passed, 51 skipped, 24 failed, all outside this diff (sandbox LLM keys and host checks).  `npm run build` ok.  Detail: `docs/rollouts/2026-10-15-honest-approve-retryable.md`.
+
+**Next.**  Ready PR with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.
 ## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
 
 **What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.
