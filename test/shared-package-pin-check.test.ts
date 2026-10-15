@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 // @ts-expect-error - plain ESM operator helper, intentionally dependency-free (single-line so the directive covers the specifier)
-import { comparePins, ctHasNpmDep, ctReadTokens, gitRef, isRateLimitMessage, lockResolvedSha, normVersion, packageSpec, parseProvenance, PKG } from "../scripts/check-shared-package-pin.mjs";
+import { comparePins, ctHasNpmDep, ctReadTokens, gitRef, isGithubRateLimit, lockResolvedSha, normVersion, packageSpec, parseProvenance, PKG } from "../scripts/check-shared-package-pin.mjs";
 
 describe("shared-package pin check (vendor-era triangle)", () => {
   it("normalizes git tag specs and lock SHAs", () => {
@@ -27,25 +27,26 @@ describe("shared-package pin check (vendor-era triangle)", () => {
     expect(parseProvenance("- Immutable release: `v2.5.2`\n").commit).toBe("");
   });
 
-  it("reads Congress.Trade with the Actions token before the shared user PAT", () => {
-    expect(ctReadTokens({ GITHUB_TOKEN: "actions", GH_TOKEN: "cli", GH_PACKAGES_TOKEN: "pat" })).toEqual([
-      "actions",
-      "pat",
-    ]);
-    expect(ctReadTokens({ GH_PACKAGES_TOKEN: "pat" })).toEqual(["pat"]);
-    expect(ctReadTokens({})).toEqual([]);
+  it("reads Congress.Trade with the Actions token before the user PAT", () => {
+    expect(
+      ctReadTokens({
+        GITHUB_TOKEN: "installation",
+        GH_TOKEN: "installation",
+        GH_PACKAGES_TOKEN: "user-pat",
+      })
+    ).toEqual(["installation", "user-pat"]);
+    expect(ctReadTokens({ GH_PACKAGES_TOKEN: "user-pat" })).toEqual(["user-pat"]);
+    expect(isGithubRateLimit("API rate limit exceeded for user ID 12656028 (HTTP 403)")).toBe(true);
+    expect(isGithubRateLimit("HTTP 401 Bad credentials")).toBe(false);
   });
 
-  it("does not report a rate limit as a missing GH_PACKAGES_TOKEN", () => {
-    const text =
-      "API rate limit exceeded for user ID 12656028. If you reach out to GitHub Support for help, please include the request ID D82C:1BBE27:4381472:DDDC128:6AD08304 and timestamp 2026-10-15 07:38:44 UTC. (HTTP 403)";
-    expect(isRateLimitMessage(text)).toBe(true);
+  it("does not call a rate limit a missing token", () => {
     const { problems } = comparePins({
-      stSpec: "github:jaywedgeworth22/congress-trading-shared#v2.7.1",
-      umSpec: "github:jaywedgeworth22/congress-trading-shared#v2.7.1",
+      stSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
+      umSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
       ctRateLimited: true,
     });
-    expect(problems.some((p: string) => /rate limit/i.test(p))).toBe(true);
+    expect(problems.some((p: string) => /rate limited/i.test(p))).toBe(true);
     expect(problems.some((p: string) => p.includes("GH_PACKAGES_TOKEN"))).toBe(false);
   });
 

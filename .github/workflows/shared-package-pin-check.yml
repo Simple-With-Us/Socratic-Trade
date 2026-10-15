@@ -12,9 +12,8 @@ name: Shared package pin check
 # Required check name: `check-pin` (ruleset main-protection). Both consumers pin a public
 # git dependency, so this job must RUN on fork PRs too -- a skipped required check is
 # treated as satisfied. Congress.Trade is public. The script reads it with the Actions
-# GITHUB_TOKEN first. GH_PACKAGES_TOKEN is one user PAT and is only the fallback:
-# preferring it shares that user's REST budget, and a 403 rate limit then fails every
-# in-flight check (money-path PRs stay open and keep re-running into it).
+# installation token first. GH_PACKAGES_TOKEN is a user PAT fallback only. Preferring
+# that PAT makes a burst of pull requests share one rate limit and fail together.
 #
 # Keep this file ASCII-only (AGENTS.md) -- no em dashes / arrows near $VARs.
 

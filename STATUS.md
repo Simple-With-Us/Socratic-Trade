@@ -2,7 +2,7 @@
 
 ## 2026-10-15 Cursor Cloud — auto-merge CODEOWNERS globs (ST-3326)
 
-**What.**  `auto-merge-prs.yml` was fail-closing every PR because `gh api --jq -r` is two arguments (`accepts 1 arg(s), received 2`).  The CODEOWNERS money-path globs never ran.  The fetch is now one `--jq` expression.  A documented glob list is locked to CODEOWNERS.  The dry run disarms money-path diffs and `do-not-automerge`, and still arms a docs diff.  Merged `origin/main` (`df7e6d10`) with a merge commit.  `check-pin` was failing because it preferred `GH_PACKAGES_TOKEN` (user 12656028) over the Actions token, then reported that user's HTTP 403 rate limit as a missing token.  Congress.Trade is read with the Actions token first.  `disable-on-*` treats "Resource not accessible by integration" as success when `autoMergeRequest` is null, and fails when a merge is still armed.  The disable test sets `NODE_ENV` so `tsc` accepts the env object.
+**What.**  `auto-merge-prs.yml` was fail-closing every PR because `gh api --jq -r` is two arguments (`accepts 1 arg(s), received 2`).  The CODEOWNERS money-path globs never ran.  The fetch is now one `--jq` expression.  A documented glob list is locked to CODEOWNERS.  The dry run disarms money-path diffs and `do-not-automerge`, and still arms a docs diff.  Merged `origin/main` (`df7e6d10`, then `3f4ef5e5` / #4698) with merge commits.  `check-pin` was failing because it preferred `GH_PACKAGES_TOKEN` (user 12656028) over the Actions token, then reported that user's HTTP 403 rate limit as a missing token.  #4698 landed that token order on main.  This merge keeps main's copy.  `disable-on-*` treats "Resource not accessible by integration" as success when `autoMergeRequest` is null, and fails when a merge is still armed.  The disable test sets `NODE_ENV` so `tsc` accepts the env object.
 
 **Branch.**  `cursor/automerge-money-path-globs-2a65`
 
@@ -10,6 +10,23 @@
 
 **Next.**  PR #4697 stays ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.  Leave ST-3326 In Progress until the fix has shipped.
 
+## 2026-10-15 Cursor Cloud — check-pin token order (ST-2582 PR #4698)
+
+**What.**  Merged `origin/main` (`df7e6d10`) with a merge commit.  `check-pin` was failing because it read public Congress.Trade with `GH_PACKAGES_TOKEN` first.  That secret is one user's PAT, so a burst of pull requests shares one rate limit and the job reports a missing token.  The script now tries the Actions installation token first and keeps the PAT as a fallback.  A rate-limit failure is no longer labeled as a missing token.
+
+**Branch.**  `cursor/honest-approve-retryable-11d4`
+
+**Next.**  Stay ready with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.
+
+## 2026-10-15 Cursor Cloud — honest approve and retryable broker errors (ST-2582)
+
+**What.**  Approve reports HTTP 200 only when the broker order was placed.  Timeouts, HTTP 5xx, and Tradier's HTTP 400 "Unexpected server error" classify as retryable.  Those that may already be live reconcile by refId before `not_placed`.  The #4668 5xx halt path and the #4685 16-minute sandbox wait stay in place.  Price and market-data history is untouched.
+
+**Branch.**  `cursor/honest-approve-retryable-11d4`
+
+**Verification.**  Targeted vitest 64/64.  `npm run lint` 0 errors, 854 warnings.  `npx tsc --noEmit` ok.  `npm test` 9385 passed, 51 skipped, 24 failed, all outside this diff (sandbox LLM keys and host checks).  `npm run build` ok.  Detail: `docs/rollouts/2026-10-15-honest-approve-retryable.md`.
+
+**Next.**  Ready PR with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.
 ## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
 
 **What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.
