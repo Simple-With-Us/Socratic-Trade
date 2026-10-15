@@ -53,6 +53,8 @@ npm run build         # exit 0
 
 Focused vitest (`test/protective-lane-isolation.test.ts`, `test/scheduler-stale-exit-inflight-guard.test.ts`, `test/broker-io-deadlines.test.ts`, `test/scheduler-pending-fill-inflight-guard.test.ts`, `test/scheduler-halt-cause-tick.test.ts`) was 16 passed.  After the full suite, `test/robinhood-orders-error-throws.test.ts` was 4 passed.  `npx vitest run test/synthetic-stops.test.ts -t "re-arms a claimed stop"` was 1 passed.
 
+After merging `origin/main` through `df7e6d10`: `npx tsc --noEmit` exited 0, `npm run lint` exited 0 (0 errors, 848 warnings), `npm test` was 9357 passed, 51 skipped, and 25 failed (all outside this diff; the count is after the bridge-writer tests left with `3c74cd81`), `npm run build` exited 0, and `test/peer-push-receipt.e2e.test.ts` plus the abort-before-write case were 8 passed.  The full `npm test` and `npm run build` ran on `e9e154b7`, before the `df7e6d10` merge.  `tsc` and the receipt test ran after that merge.
+
 The full-suite Robinhood failure was a populated-list fixture dated 2026-07-10.  The default order listing now drops terminal rows outside the since-window, so that fill was omitted.  The fixture uses `new Date().toISOString()`.  The other 25 failures are outside this diff: LLM key routing (`chat-llm`, `llm-provider`, `framework-review`, `openrouter-credits`, `red-team`), notify credentials, `server-metrics` host detection, `cpuprofile-summary`, and TwelveData cache tests.
 
 ## Next Steps & Blockers
