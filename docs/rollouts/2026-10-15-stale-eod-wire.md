@@ -55,6 +55,15 @@ Those commands passed, and `npm run build` on this follow-up exited 0.
 
 Deployer ships after merge.  ST-3846 (delivery receipt) and ST-3844 (close plausibility) stay separate.  ST-3866 remains the duplicate mirror.
 
+Merged `origin/main` at `3f4ef5e5` (ST-2582 honest approve, #4698).  Git auto-merged `PLAN.md` and `STATUS.md`.  Both headings stay.  A missing blank line between the approve entry and the ST-3846 entry was restored.  No code conflict.
+
+```bash
+npx tsc --noEmit
+npx vitest run test/market-read-routes.test.ts test/congress-share.test.ts test/placement-outcome.test.ts test/placement-reconcile.test.ts test/route-proposals-approve.test.ts test/shared-package-pin-check.test.ts test/console-api-html-error.test.ts
+```
+
+`tsc --noEmit` clean.  Those seven files: 186 passed.  `npm run build` exit 0.
+
 ## 6. Zero-Code Findings
 
 GROK's claim dated 2026-09-30.  `linear_claim` has no force flag.  Setting the issue to Todo removed `claimed:GROK` (`removed_labels: 1`).  CURSOR then claimed it.  Sentry org `simple-with-us` had no grouped issue for this path in 90 days.
