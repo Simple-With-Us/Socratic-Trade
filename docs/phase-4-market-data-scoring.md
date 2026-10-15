@@ -301,7 +301,7 @@ See `docs/rollouts/2026-08-18-delayed-yahoo-fallback-stamp.md`.
 
 ## Quote observation time (2026-10-15, ST-2584)
 
-The price is the provider's last print, then the mid of a two-sided book.  A size, a one-sided bid or ask, a prior close, and a fabricated 0 are not the price.  `asOf` is the provider's own observation time.  The wall clock is never substituted.  A quote with no parseable observation time is unknown age.  The staleness gate blocks that opening.  A known-old observation still converts to a limit and stays approved.  Exits stay ungated.  `maxQuoteAgeSec` 0 still turns the gate off.
+The price is the provider's last print, then the mid of a two-sided book.  A size, a one-sided bid or ask, a prior close, and a fabricated 0 are not the price.  `asOf` is the provider's own observation time.  The wall clock is never substituted.  A quote with no parseable observation time is unknown age.  The staleness gate blocks that opening.  A known-old observation still converts to a limit and stays approved.  Exits stay ungated.  `maxQuoteAgeSec` 0 still turns the gate off.  A chat draft preview has no scan, so a draft blocked only by `quote_age_unknown` still stages.  Approve time re-runs the gate and blocks the order if the fresh scan is still undated.
 
 Tradier paper stays `venue_delayed` (age the fetch when `asOf` parses, no Alpaca or Yahoo overlay).  Tradier live is `venue_locked`: the Tradier quote is the price, later cascade levels do not replace it, and the real `asOf` still hits the 120s gate.  Alpaca last prints come from Alpaca's own latest-trades call on the existing market-data client.  No new vendor was added.  `fillMissingQuotesWithClose` remains exported and is no longer called from Alpaca or Tradier quote reads.
 
