@@ -4506,6 +4506,20 @@ function migrate(database: Database.Database): void {
       PRIMARY KEY (ticker, date)
     );
     CREATE INDEX IF NOT EXISTS idx_imported_price_eod_ticker ON imported_price_eod (ticker, date);
+    -- Idempotent receipt for one Congress.Trade -> Socratic-Trade push.  Keyed by the
+    -- caller's push id.  An ok receipt is what a retry returns, and that retry does
+    -- not write the cache again.  A non-ok receipt is replaced on the next attempt.
+    -- A push with no id is stored under missing:<received_at> so the ops snapshot
+    -- can still show health.
+    CREATE TABLE IF NOT EXISTS peer_push_receipts (
+      push_id TEXT PRIMARY KEY,
+      received_at TEXT NOT NULL,
+      health TEXT NOT NULL,
+      delivered_at TEXT,
+      consumed_at TEXT,
+      body_json TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_peer_push_receipts_received_at ON peer_push_receipts (received_at);
     CREATE TABLE IF NOT EXISTS imported_spx_eod (
       date TEXT PRIMARY KEY,
       close REAL NOT NULL,
