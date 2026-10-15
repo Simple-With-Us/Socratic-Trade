@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — broker call bounds (ST-2570)
+
+**What.**  Broker reads and writes carry a deadline and an abort signal.  Order listings stop at 50 pages and 500 rows.  Quote and eligibility batches stop at 25 symbols.  Stops, stale exits, and fill reconcile launch for every eligible account before any health probe is awaited, so one hung probe cannot delay the next account's protection.  A hung read releases the stop and exit guards.  A write that has started keeps its guard.  A strategy run whose health probe or snapshot never returns finishes `failed`.  An abort after a synthetic stop is claimed, and before the exit order is sent, reverts the claim and keeps the attempt id.  eToro rates and eligibility responses are parsed with Zod before a row is read.
+
+**Branch.**  `cursor/broker-call-bounds-7ec5`
+
+**Verification.**  Tip `origin/main` through `16285744` merged on branch head.  `npx tsc --noEmit` exit 0 after final merge.  Focused vitest (`protective-lane-isolation`, `scheduler-stale-exit-inflight-guard`) was 3 passed on shepherd pass.  CI run `38754317405`: `verify` + `verify-hosted` green.
+
+**Next.**  PR #4715 ready, `do-not-automerge`.  Jay squash-merges.  Do not mark ST-2570 completed until on `main`.  Kody check failed on provider model 404 (infra), not new code findings.
+**Next.**  `origin/main` through `e3ba1507` is merged on `cursor/broker-call-bounds-7ec5`.  Keep PR #4715 ready with `do-not-automerge`.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
+**Next.**  `origin/main` through `16285744` is merged.  Keep the PR ready with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
+
 ## 2026-10-15 CURSOR — Ops snapshot perf PR #4659 (`cursor/ops-snapshot-perf-b622`)
 
 **What.**  Async `buildOpsSnapshot` with 45s single-flight cache, per-section `timingsMs`, per-user `marketScan` (`generatedAt`, `stale`), strategy-runs index v95, Tradier/non-Alpaca **422** on `/api/ops/account-activity`.  Review follow-up: `$.marketScan.omitted` in `readMarketScanMetaFromAudit`, `opsSnapshotForCaller` copy before `attachOpsOrderSummaries`, `WH` non-trade fallback.  Branch contains `origin/main` at `12702bd9` (#4730 ST-4537 CT fundamentals nightly push, #4695, #4716, etc.) via repeated clean merges — ops diff still not on `main`.  Per-user cold queries remain; 45s cache is the prod mitigation.
