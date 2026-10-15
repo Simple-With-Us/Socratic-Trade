@@ -11,6 +11,15 @@
 **Docs.**  `docs/rollouts/2026-10-14-ops-snapshot-perf.md`, `STATUS.md`, `PLAN.md`.
 
 **Next.**  PR ready for review; Deployer/Jay merge.  Post-deploy: `scripts/fetch-prod-ops-snapshot.sh` and compare `timingsMs` to ~84.7s baseline.
+## 2026-10-15 Cursor Cloud — ops performance parked flag (ST-3875)
+
+**What.**  `GET /api/ops/performance` account rows now include `parked`, `parkedReason`, and `parkedAt`.  The flag is read from the connected account and reported on the priced book, the never-synced branch, and the per-account error branch.  No account is parked or re-armed.
+
+**Branch.**  `cursor/ops-performance-parked-flag-9767`
+
+**Verification.**  See `docs/rollouts/2026-10-15-ops-performance-parked-flag.md`.
+
+**Next.**  Ready PR for ST-3875.  Jay still decides park / re-arm / investigate for the four dormant accounts.  `/api/ops/snapshot` still omits the flag.
 ## 2026-10-15 Cursor Cloud — storage hygiene forever retention (no age deletes)
 
 **What.**  Jay decision 03:13 CT: remove **all** age-based row deletes — `sqlite-storage-hygiene`, `audit-prune`, `pruneTaskJournal`, portfolio snapshot sweep, embed_stage TTL/cap sweep, economic calendar, `headline_first_seen`, and `api_health_log` per-lane count trim.  Maintenance-only hygiene lane; transient `embed_stage` delivery deletes remain.  `HEALTH_LOG_LANE_CAP` is read-bound only for streak heuristics.
