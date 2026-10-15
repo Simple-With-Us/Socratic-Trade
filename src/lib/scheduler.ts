@@ -962,15 +962,15 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     return; // not the leader this tick — no side effects
   }
 
-  // Table sizes, retention for non-money caches and logs, WAL checkpoint, and
-  // incremental free-page reclaim.  Leader only: every replica checkpointing
+  // Table sizes, WAL checkpoint, ANALYZE/optimize, and incremental free-page
+  // reclaim (no row deletes).  Leader only: every replica checkpointing
   // the same WAL fights TRUNCATE.  Dry-run when SQLITE_STORAGE_HYGIENE_DRY_RUN=1.
   void journalLane("storage-hygiene", {}, async () => {
     const result = await runStorageHygieneIfDue();
     if (!result) return { status: "skipped" as const, summary: "not due" };
     return {
       status: "ok" as const,
-      summary: `dryRun=${result.dryRun} eligibleBytes=${result.expectedReclaimBytes} deleted=${result.deletedRows}`
+      summary: `dryRun=${result.dryRun} shrinkBytes=${result.expectedFileShrinkBytes} deleted=${result.deletedRows}`
     };
   }).catch((err) => console.error("[scheduler] storage hygiene error:", err));
 

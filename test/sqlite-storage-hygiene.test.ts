@@ -59,23 +59,24 @@ function clearHygieneRows(db: Db): void {
 }
 
 describe("storage hygiene decisions", () => {
-  it("refuses money-path and unlisted tables, and retention targets are disjoint", async () => {
+  it("refuses row deletes from storage hygiene and has no retention targets", async () => {
     const hygiene = await import("../src/lib/sqlite-storage-hygiene");
-    const money = new Set<string>(hygiene.MONEY_PATH_TABLES);
-    const history = new Set<string>(hygiene.MARKET_DATA_HISTORY_TABLES);
-    for (const target of hygiene.RETENTION_TARGETS) {
-      expect(money.has(target.table)).toBe(false);
-      expect(history.has(target.table)).toBe(false);
-      expect(() => hygiene.assertPruneTableAllowed(target.table)).not.toThrow();
-    }
-    expect(() => hygiene.assertPruneTableAllowed("enrichment_coverage_runs")).not.toThrow();
+    expect(hygiene.RETENTION_TARGETS).toEqual([]);
     expect(() => hygiene.assertPruneTableAllowed("fill_events")).toThrow(/money-path/);
     expect(() => hygiene.assertPruneTableAllowed("settings")).toThrow(/money-path/);
     expect(() => hygiene.assertPruneTableAllowed("portfolio_snapshots")).toThrow(/money-path/);
     expect(() => hygiene.assertPruneTableAllowed("history_cache_eod")).toThrow(/market-data history/);
-    expect(hygiene.RETENTION_TARGETS.some((target) => target.table === "history_cache_eod")).toBe(false);
-    expect(() => hygiene.assertPruneTableAllowed("llm_usage")).toThrow(/unlisted/);
-    expect(() => hygiene.assertPruneTableAllowed("not_a_table")).toThrow(/unlisted/);
+    expect(() => hygiene.assertPruneTableAllowed("enrichment_coverage_runs")).toThrow(/does not delete rows/);
+    expect(() => hygiene.assertPruneTableAllowed("strategy_runs")).toThrow(/does not delete rows/);
+    expect(() => hygiene.assertPruneTableAllowed("llm_usage")).toThrow(/does not delete rows/);
+  });
+
+  it("does not contain age-based DELETE SQL in the hygiene module", () => {
+    const source = readFileSync(join(process.cwd(), "src/lib/sqlite-storage-hygiene.ts"), "utf8");
+    expect(source).not.toMatch(/\bDELETE\s+FROM\b/i);
+    expect(source).not.toMatch(/RETENTION_DAYS\s*=/);
+    expect(source).not.toMatch(/function isoCutoff/);
+    expect(source).not.toMatch(/RETENTION_TARGETS:\s*readonly\s+RetentionTarget/);
   });
 
   it("never prunes market-data history tables by age", async () => {
@@ -206,7 +207,7 @@ describe("storage hygiene against a database", () => {
     return { db, dbMod, hygiene };
   }
 
-  it("dry-run estimates reclaim, deletes nothing, and the ops snapshot reads the cache", async () => {
+  it("dry-run deletes nothing and the ops snapshot reads the cache", async () => {
     const { db, hygiene } = await open();
     clearHygieneRows(db);
     const old = isoDaysBefore(30);
@@ -224,14 +225,12 @@ describe("storage hygiene against a database", () => {
     expect(report.dryRun).toBe(true);
     expect(report.errors).toEqual([]);
     expect(report.deletedRows).toBe(0);
-    expect(report.expectedReclaimBytes).toBeGreaterThan(0);
+    expect(report.expectedReclaimBytes).toBe(0);
     expect(report.expectedFileShrinkBytes).toBe(0);
     expect(report.checkpoint.passive).toBeNull();
     expect(report.checkpoint.truncateRan).toBe(false);
     expect(count(db, "api_health_log")).toBe(before);
-    const health = report.estimates.find((row) => row.id === "api-health-log");
-    expect(health?.eligibleRows).toBe(1);
-    expect(health?.deletedRows).toBe(0);
+    expect(report.estimates).toEqual([]);
     const fills = report.tables.find((row) => row.name === "fill_events");
     expect(fills?.prunable).toBe(false);
     expect(fills?.retainReason).toBe("money-path record");
@@ -250,18 +249,18 @@ describe("storage hygiene against a database", () => {
     expect(categoryOf("historical_fundamentals")).toBe("market_data_history");
     const cached = hygiene.readCachedStorageHygieneReport();
     expect(cached?.generatedAt).toBe(report.generatedAt);
-    expect(cached?.estimates.find((row) => row.id === "api-health-log")?.eligibleRows).toBe(1);
+    expect(cached?.estimates).toEqual([]);
     db.prepare("INSERT INTO api_health_log (id, service, ts, ok, error_text) VALUES ('health-extra', 'yahoo', ?, 0, 'more')").run(
       old
     );
     const { buildOpsSnapshot } = await import("../src/lib/ops-snapshot");
     const snapshot = buildOpsSnapshot();
     expect(snapshot.storageHygiene?.generatedAt).toBe(report.generatedAt);
-    expect(snapshot.storageHygiene?.estimates.find((row) => row.id === "api-health-log")?.eligibleRows).toBe(1);
+    expect(snapshot.storageHygiene?.estimates).toEqual([]);
     expect(count(db, "api_health_log")).toBe(3);
   });
 
-  it("deletes stale caches and keeps money-path rows", async () => {
+  it("keeps strategy runs, logs, and caches across a live hygiene pass", async () => {
     const { db, hygiene } = await open();
     clearHygieneRows(db);
     const oldIso = isoDaysBefore(200);
@@ -423,12 +422,12 @@ describe("storage hygiene against a database", () => {
     });
     expect(report.errors).toEqual([]);
     expect(report.dryRun).toBe(false);
-    expect(report.deletedRows).toBeGreaterThan(0);
-    expect(report.expectedReclaimBytes).toBeGreaterThan(0);
+    expect(report.deletedRows).toBe(0);
+    expect(report.expectedReclaimBytes).toBe(0);
     expect(report.checkpoint.truncateRan).toBe(false);
 
     const runIds = (db.prepare("SELECT id FROM strategy_runs ORDER BY id").all() as Array<{ id: string }>).map((row) => row.id);
-    expect(runIds).toEqual(["run-fill", "run-live", "run-new", "run-proposal"]);
+    expect(runIds).toEqual(["run-fill", "run-live", "run-new", "run-old", "run-proposal"]);
     expect(count(db, "fill_events")).toBe(1);
     expect(count(db, "trade_proposals")).toBe(1);
     expect(count(db, "order_replacements")).toBe(1);
@@ -440,9 +439,9 @@ describe("storage hygiene against a database", () => {
     const requests = (db.prepare("SELECT id FROM strategy_run_requests ORDER BY id").all() as Array<{ id: string }>).map(
       (row) => row.id
     );
-    expect(requests).toEqual(["req-new", "req-queued"]);
+    expect(requests).toEqual(["req-new", "req-old", "req-queued"]);
     const journal = (db.prepare("SELECT id FROM task_journal ORDER BY id").all() as Array<{ id: string }>).map((row) => row.id);
-    expect(journal).toEqual(["j-run", "j-skip-new"]);
+    expect(journal).toEqual(["j-ok", "j-run", "j-skip", "j-skip-new"]);
     expect(
       (db.prepare("SELECT date FROM history_cache_eod ORDER BY date").all() as Array<{ date: string }>).map(
         (row) => row.date
@@ -455,12 +454,13 @@ describe("storage hygiene against a database", () => {
       )
     ).toEqual(["AAPL", "MSFT"]);
     expect(
-      (db.prepare("SELECT content_hash FROM embed_stage").all() as Array<{ content_hash: string }>).map(
+      (db.prepare("SELECT content_hash FROM embed_stage ORDER BY content_hash").all() as Array<{ content_hash: string }>).map(
         (row) => row.content_hash
       )
-    ).toEqual(["new-hash"]);
-    expect((db.prepare("SELECT id FROM api_health_log").all() as Array<{ id: string }>).map((row) => row.id)).toEqual([
-      "h-new"
+    ).toEqual(["new-hash", "old-hash"]);
+    expect((db.prepare("SELECT id FROM api_health_log ORDER BY id").all() as Array<{ id: string }>).map((row) => row.id)).toEqual([
+      "h-new",
+      "h-old"
     ]);
     const attempts = (
       db.prepare("SELECT task_id, attempt_no FROM sec_ingest_task_attempts ORDER BY task_id, attempt_no").all() as Array<{
@@ -468,13 +468,9 @@ describe("storage hygiene against a database", () => {
         attempt_no: number;
       }>
     ).map((row) => `${row.task_id}:${row.attempt_no}`);
-    expect(attempts).toEqual(["task-done:2", "task-pend:1"]);
-    expect(count(db, "enrichment_coverage_runs")).toBe(30);
-    expect(count(db, "enrichment_coverage_fields")).toBe(1);
-    expect(
-      (db.prepare("SELECT as_of FROM enrichment_coverage_fields").get() as { as_of: string }).as_of
-    ).toBe("cov-31");
-    expect(db.prepare("SELECT 1 AS ok FROM enrichment_coverage_runs WHERE as_of = 'cov-0'").get()).toBeUndefined();
+    expect(attempts).toEqual(["task-done:1", "task-done:2", "task-pend:1"]);
+    expect(count(db, "enrichment_coverage_runs")).toBe(32);
+    expect(count(db, "enrichment_coverage_fields")).toBe(2);
   });
 
   it("preserves durable EOD history older than five years across hygiene passes", async () => {
@@ -534,22 +530,17 @@ describe("storage hygiene against a database", () => {
     expect(count(db, "history_cache_eod")).toBe(5);
   });
 
-  it("yields between full delete batches", async () => {
+  it("yields during the dbstat size walk", async () => {
     const { db, hygiene } = await open();
     clearHygieneRows(db);
-    for (let i = 0; i < 3; i += 1) {
-      db.prepare("INSERT INTO api_health_log (id, service, ts, ok, error_text) VALUES (?, 'yahoo', ?, 0, 'old')").run(
-        `yield-${i}`,
-        isoDaysBefore(40)
-      );
-    }
+    db.prepare("INSERT INTO api_health_log (id, service, ts, ok, error_text) VALUES ('h1', 'yahoo', ?, 0, 'old')").run(
+      isoDaysBefore(40)
+    );
     let yields = 0;
     const report = await hygiene.runStorageHygiene({
       now: NOW,
       dryRun: false,
-      skipSizeWalk: true,
-      batchSize: 1,
-      maxBatches: 10,
+      skipSizeWalk: false,
       litestreamAgeSeconds: 10,
       walBytes: 1024,
       checkpoint: () => ({ busy: 0, log: 1, checkpointed: 1 }),
@@ -558,8 +549,8 @@ describe("storage hygiene against a database", () => {
       }
     });
     expect(report.errors).toEqual([]);
-    expect(count(db, "api_health_log")).toBe(0);
-    expect(yields).toBeGreaterThanOrEqual(2);
+    expect(count(db, "api_health_log")).toBe(1);
+    expect(yields).toBeGreaterThanOrEqual(1);
     expect(report.checkpoint.truncateRan).toBe(false);
     expect(report.checkpoint.truncateReason).toMatch(/below truncate floor/);
   });
@@ -767,6 +758,7 @@ describe("auto_vacuum arming", () => {
     const payload = "p".repeat(20_000);
     const insert = fresh.prepare("INSERT INTO api_health_log (id, service, ts, ok, error_text) VALUES (?, 'yahoo', ?, 0, ?)");
     for (let i = 0; i < 80; i += 1) insert.run(`fat-${i}`, isoDaysBefore(40), payload);
+    fresh.prepare("DELETE FROM api_health_log WHERE id LIKE 'fat-%'").run();
     const pagesBefore = Number(fresh.pragma("page_count", { simple: true }));
     const reclaimed = await hygiene.runStorageHygiene({
       now: NOW,
