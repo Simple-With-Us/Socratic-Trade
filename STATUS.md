@@ -6,9 +6,9 @@
 
 **Branch.**  `cursor/quote-observation-staleness-99f5`
 
-**Verification.**  Merged `origin/main` through `e3ba1507`.  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  `node --test scripts/ios-fleet/asc-api.credentials.test.mjs` 8/8.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
+**Verification.**  Merged `origin/main` through `49a76da4`.  The four fail-closed review threads are explained on the PR and resolved.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
 
-**Next.**  PR ready for review with `do-not-automerge`.  Do not enable auto-merge.  The four review threads that asked to overlay Tradier, stamp Kalshi fresh, or age a missing observation by `fetchedAt` get a written explanation and are resolved.  Owner squash-merges.
+**Next.**  PR ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
 
 ## 2026-10-15 CURSOR — Congress push delivery/consumption receipt (ST-3846)
 

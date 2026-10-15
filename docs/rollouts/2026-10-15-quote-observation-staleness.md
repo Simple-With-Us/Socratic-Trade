@@ -123,6 +123,8 @@ Merged `origin/main` again at `e3ba1507` (ASC env credentials for hosted TestFli
 
 The four remaining review threads are not code changes.  Each suggestion would put a non-venue price or the fetch clock on an opening.  The thread replies state the money path, the risk, and that no follow-up issue is opened to weaken the gate.  The threads are then resolved.
 
+Merged `origin/main` again at `49a76da4` (Congress webhook receipt, ST-3846).  STATUS.md auto-merged.  No quote-path conflict.
+
 ## Next Steps & Blockers
 
 Open the PR ready for review.  Add `do-not-automerge`.  Do not enable auto-merge.  Post the PR link on ST-2584.  Leave the issue In Progress until merge.
