@@ -125,6 +125,22 @@ describe("embed request packer (pure)", () => {
     expect(prefixCountWithinEmbedUnits(["short filing", "another"], 1)).toBe(1);
   });
 
+  it("prefix walk honors precomputed units and falls back for texts missing from the map", () => {
+    const big = "9".repeat(20_000);
+    const texts = [big, "short filing", "another"];
+    // Built the way vector-db builds it: one embedBudgetUnits call per distinct text.
+    const precomputed = new Map<string, number>();
+    for (const text of texts) precomputed.set(text, embedBudgetUnits(text));
+    expect(prefixCountWithinEmbedUnits(texts, 1, undefined, precomputed)).toBe(
+      prefixCountWithinEmbedUnits(texts, 1)
+    );
+    // A partial map must still compute the texts it does not carry.
+    const partial = new Map([[big, precomputed.get(big)!]]);
+    expect(prefixCountWithinEmbedUnits(texts, 1, undefined, partial)).toBe(
+      prefixCountWithinEmbedUnits(texts, 1)
+    );
+  });
+
   it("packs a 32-text batch that summed to 8192 so no request reaches 8193", () => {
     const items = Array.from({ length: 32 }, (_, sourceIndex) => ({
       text: textOfTokens(256),
