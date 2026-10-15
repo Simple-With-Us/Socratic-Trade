@@ -115,6 +115,8 @@ Alpaca latest trades are Zod-parsed, and a bad trade row is skipped.  The chat-d
 
 Merged `origin/main` again at `df7e6d10` (Congress.Trade push receipt).  `AlpacaLatestTradeSchema` and `AlpacaLatestTradesResponseSchema` are exported with inferred types.  The schema is not strict, because a real trade also carries size and a strict object would drop the print.
 
+Merged `origin/main` again at `3f4ef5e5` (honest approve).  The placement-reconcile stub kept its provider `asOf`.  Auto-merge was disabled.  `do-not-automerge` stays.
+
 ## Next Steps & Blockers
 
 Open the PR ready for review.  Add `do-not-automerge`.  Do not enable auto-merge.  Post the PR link on ST-2584.  Leave the issue In Progress until merge.

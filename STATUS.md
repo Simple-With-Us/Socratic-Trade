@@ -6,7 +6,7 @@
 
 **Branch.**  `cursor/quote-observation-staleness-99f5`
 
-**Verification.**  Merged `origin/main` (`df7e6d10`).  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  Alpaca trade schema, NBBO, and quote-observation tests passed.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
+**Verification.**  Merged `origin/main` through `3f4ef5e5`.  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  CI on `6b556f3d` was green.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
 
 **Next.**  PR ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
 
