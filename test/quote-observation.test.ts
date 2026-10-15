@@ -115,6 +115,8 @@ describe("provider quote observation", () => {
     expect(mid.price).toBe(11);
     expect(mid.asOf).toBe("2026-08-15T14:00:00Z");
     expect(parseWebullUnofficialQuote({ preClose: 40, volume: 40 }).price).toBeUndefined();
+    const currentClose = parseWebullUnofficialQuote({ close: 205.5, preClose: 203.2 });
+    expect(currentClose.price).toBe(205.5);
   });
 
   it("Public uses last, then mid, and drops a one-sided book", () => {

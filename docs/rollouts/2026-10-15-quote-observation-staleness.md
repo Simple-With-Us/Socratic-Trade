@@ -64,6 +64,7 @@ Files:
 - Tradier live is locked to Tradier quotes and is not stamped venue-authoritative, so a real `asOf` still hits `maxQuoteAgeSec`.  Paper still ages the fetch when `asOf` parses, because the sandbox OMS fills the delayed tape.
 - Alpaca `stockLatestTrades` is the same provider's last print, not a new source.  Polygon, FMP, and other vendors were not added.
 - One-sided books no longer become the price.  Quiet names with a real last print still price off that print.
+- Webull unofficial `close` stays a current-print candidate after the explicit last fields.  `preClose` is still not the price.  Tradier `close` stays off the price.  A Tradier miss does not fall through to Alpaca or Yahoo.
 - Test-broker quotes in `robinhood.ts` still stamp the current time so existing strategy tests stay inside the freshness window.  The real Yahoo path does not.
 - `stampFieldObservation` still falls back to `fetchedAt` for non-quote evidence.  Quote price, bid, and ask rows are skipped when they have no provider observation.
 - Approval-scan test fixtures that mean "this quote is fresh" now carry `asOf`.  The scan no longer copies `generatedAt` onto a quote that has no provider time.

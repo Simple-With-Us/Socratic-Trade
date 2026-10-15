@@ -2260,7 +2260,8 @@ function webullUnofficialTimeoutMs(): number {
 export function parseWebullUnofficialQuote(payload: unknown): SymbolEnrichment {
   if (!payload || typeof payload !== "object" || "_error" in payload) return {};
   const row = payload as Record<string, unknown>;
-  const last = firstNumber(row, ["pPrice", "price", "lastPrice", "latestPrice", "last"]);
+  // Webull unofficial `close` is the current print.  `preClose` is the prior close and is not a price.
+  const last = firstNumber(row, ["pPrice", "price", "lastPrice", "latestPrice", "last", "close"]);
   const bid = firstNumber(row, ["bid", "bidPrice", "bid_price"]);
   const ask = firstNumber(row, ["ask", "askPrice", "ask_price"]);
   const selected = selectObservedQuotePrice({ last, bid, ask });
