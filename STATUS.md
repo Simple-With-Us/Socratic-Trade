@@ -6,11 +6,13 @@
 
 **Branch.**  `cursor/congress-push-receipt-6277`
 
-**Verification.**  `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-events.test.ts test/congress-webhook-parity.test.ts` 47/47; `npx tsc --noEmit` ok; `npm run lint` 0 errors.
+**Verification.**  `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-events.test.ts test/congress-webhook-parity.test.ts` 49/49; `npx tsc --noEmit` ok.
 
-**Overlap (#4703).**  `#4703` on `main` covers the securities **import** push receipt only (`peer-push-receipt`).  This branch still owns the **webhook** receipt (`congress-push-receipt`, `receiptVersion: 1`, `422` when `consumed=false`) required by CT #2752 — not redundant.
+**Merge.**  `origin/main` merged into this branch (`70a74daf`); `STATUS.md` auto-merged only — webhook receipt code unchanged.  Congress.Trade **#2752 merged** to CT `main` (2026-10-15 ~11:10Z); ST **#4695** is the remaining ship piece.
 
-**Next.**  Merge ready PR #4695 with Congress.Trade #2752; publish `congress-trading-shared@2.8.0` when permitted.
+**Overlap (#4703).**  Unchanged: `#4703` = securities import (`peer-push-receipt`); this PR = webhook `receiptVersion: 1` + `422` when `consumed=false`.
+
+**Next.**  Merge **#4695** to `main` and deploy Socratic-Trade so CT webhook pushes get consumption receipts in prod.
 
 **2026-10-15 [codex-autofix] — PR #4695 review pass.**  No new review-bot findings; the
 sole thread (Sentry, index misalignment in `resolveCongressEventIds`) was already fixed in
