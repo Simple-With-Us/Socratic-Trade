@@ -27,6 +27,16 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 # Current Status
 
 ## 2026-10-15 Cursor Cloud — ST-3988 congress-share dependency DB health
+## 2026-10-14 GROK — PR #4661 review follow-up
+
+**What.**  `git merge origin/main` was already up to date at `2656320f`.  No conflicts and no migration renumber.  Two unresolved Kody threads remain.  `PRRT_kwDOS7mOVM6sl4tA` asks for a board hash on the SQLite hygiene row (`cursor/sqlite-storage-hygiene-181a`, PR #4666).  `board list --app socratic-trade --search "storage hygiene"` returns nothing, and the hygiene rollout records that the fleet board claim was blocked.  `PRRT_kwDOS7mOVM6sms8E` asks for a board hash and a PR id on the Tradier sandbox rows.  Those rows now cite PR #4668 and state that no board reservation is on file.  Sweep report `f5bdb15c09cf44cb903df6364d56c406` is a later #4668 shepherd note, so it was not used as the feature reservation.  No hash was invented.  Neither thread was resolved.  Hosted `verify` on `d4a22063` passed lint, tsc, `npm test`, and build.  `.github/workflows/autofix.yml` still fails before any job on review events.  `gh run view --log-failed` has no job log.  Review events read that workflow from the default branch.
+
+**Verification.**  `npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9392 passed, 51 skipped, 831 files.  `test/egress-guard.test.ts` rejects discord.com because this sandbox resolves it to benchmark space.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from the local database.  Neither file is in the diff against `origin/main`.  `npm run build` was not re-run.  Hosted `verify` on `d4a22063` passed lint, tsc, `npm test`, and build.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Reply on both open threads and do not resolve them.  Ask Kody to re-review.  Do not merge from this lane.
+
 ## 2026-10-14 GROK — PR #4661 merge #4668
 
 **What.**  Merged `origin/main` (`2656320f`, PR #4668 Tradier sandbox HTTP 400) into `cursor/free-data-gaps-55d1` with no conflicts and no migration renumber.  One unresolved review thread, `PRRT_kwDOS7mOVM6sl4tA` (kody-ai), on the SQLite storage hygiene `PLAN.md` row.  The same note names the hygiene section in `STATUS.md`.  Those rows already match `origin/main`.  `board list` finds no reservation for that effort.  The hygiene rollout records that the fleet board claim was blocked.  This pass did not invent a hash and did not resolve the thread.  Required checks on `a45a2b60` were green.  `.github/workflows/autofix.yml` matches `origin/main` and still fails before any job on review events.  `gh run view --log-failed` has no job log.  Review events read that workflow from the default branch.
@@ -518,6 +528,8 @@ all pre-existing (reproduced identically with these changes stashed; this sandbo
 
 **Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`, `PLAN.md`, `docs/phase-7-strategy.md`.
 
+**Traceability.**  PR #4668.  No board reservation is on file for this effort.  Sweep report `f5bdb15c09cf44cb903df6364d56c406` is a later shepherd note and is not the feature reservation.
+
 **Next.**  `do-not-automerge`.  Jay squash-merges.  Do not merge from this lane.  Linear team `ST` was not updated: this seat has no Fleet Linear credentials.
 ## 2026-10-14 GROK — SQLite storage hygiene
 
@@ -526,6 +538,8 @@ all pre-existing (reproduced identically with these changes stashed; this sandbo
 **Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test` was 1 failed, 9341 passed, 51 skipped.  The failure is sandbox DNS for discord.com in `test/egress-guard.test.ts`, outside this diff.  Targeted `test/sqlite-storage-hygiene.test.ts` was 14 passed.  `npm run build` ok.
 
 **Docs.**  `docs/rollouts/2026-10-14-sqlite-storage-hygiene.md`, `STATUS.md`, `PLAN.md`.
+
+**Traceability.**  PR #4666.  No board reservation is on file.  The hygiene rollout records that the fleet board claim was blocked.
 
 **Next.**  Label `do-not-automerge`.  Jay squashes.  Do not merge from this lane.  Linear team ST was not updated: this cloud seat has no Fleet Linear or Zulip credentials.
 ## 2026-10-14 Grok — PR #4665 merge #4658

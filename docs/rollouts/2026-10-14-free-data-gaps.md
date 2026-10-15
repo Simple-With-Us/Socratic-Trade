@@ -145,6 +145,17 @@ npm run build
 
 `npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9392 passed, 51 skipped, 831 files.  `test/egress-guard.test.ts` rejects discord.com because this sandbox resolves it to benchmark space.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from the local database.  Neither file is in the diff against `origin/main`.  `npm run build` pass.  It compiled, finished TypeScript, and generated 43/43 static pages.
 
+`origin/main` at `2656320f` was already contained.  No migration renumber.  Two Kody threads stay open.  `PRRT_kwDOS7mOVM6sl4tA` still wants a board hash on the SQLite hygiene row.  `board list` has no reservation for that effort.  `PRRT_kwDOS7mOVM6sms8E` wants a board hash and a PR id on the Tradier sandbox rows.  Those parentheticals now cite PR #4668 and say no board reservation is on file.  Sweep report `f5bdb15c09cf44cb903df6364d56c406` was not attached.  No hash was invented.  Hosted `verify` on `d4a22063` passed.  Review-triggered Autofix still fails before any job, and `gh run view --log-failed` has no log.
+
+```bash
+npm run lint
+npx tsc --noEmit
+npm test
+npm run build
+```
+
+`npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9392 passed, 51 skipped, 831 files.  `test/egress-guard.test.ts` rejects discord.com because this sandbox resolves it to benchmark space.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from the local database.  Neither file is in the diff against `origin/main`.  `npm run build` was not re-run in this shell.  Hosted `verify` on `d4a22063` passed lint, tsc, `npm test`, and build.
+
 ## Next Steps & Blockers
 
 Ask Kody to re-review.  Do not merge from this lane.  Do not deploy.  Do not resolve review threads from this lane.  PR Autofix remains red on every review event.  `AI-Fleet-Coordinator` `pr-autofix-reusable.yml` line 163 uses `secrets` in a step `if` at the pin `2e671004` and still on coordinator `main` (`7508b399`).  The caller matches `origin/main`, and review events read the workflow from the default branch, so a pin change on this branch does not clear those runs.
