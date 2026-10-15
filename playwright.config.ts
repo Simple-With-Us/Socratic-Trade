@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { playwrightThrowawayEncryptionKey } from "./test/e2e/playwright-throwaway-fixtures";
 
 const port = Number(process.env.PLAYWRIGHT_PORT || 4201);
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${port}`;
@@ -49,7 +50,7 @@ export default defineConfig({
           // Test-only key: next start runs NODE_ENV=production, and the boot guard
           // (assertEncryptionKeyConfiguredInProduction) refuses to boot without a valid
           // 64-char hex ENCRYPTION_KEY. The smoke DB is throwaway, so a fixed key is fine.
-          ENCRYPTION_KEY: "0123456789abcdef".repeat(4)
+          ENCRYPTION_KEY: playwrightThrowawayEncryptionKey()
         }
       },
   projects: [

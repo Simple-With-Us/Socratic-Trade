@@ -1,5 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 import { playwrightAdminAuthSecret } from "./test/e2e/playwright-admin-auth";
+import { playwrightThrowawayEncryptionKey } from "./test/e2e/playwright-throwaway-fixtures";
 
 const port = Number(process.env.PLAYWRIGHT_ADMIN_PORT || 4202);
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${port}`;
@@ -37,7 +38,7 @@ export default defineConfig({
           PRIMARY_USER_EMAIL: authEmail,
           AUTH_SECRET: adminAuthSecret,
           NODE_OPTIONS: "--max-old-space-size=3072",
-          ENCRYPTION_KEY: "0123456789abcdef".repeat(4)
+          ENCRYPTION_KEY: playwrightThrowawayEncryptionKey()
         }
       },
   projects: [

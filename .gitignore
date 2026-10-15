@@ -25,6 +25,7 @@ data/
 *.db-wal
 *.tsbuildinfo
 playwright-report/
+test/e2e/.playwright-admin-auth-secret.local
 test-results/
 .env.sentry-build-plugin
 .litestream/
