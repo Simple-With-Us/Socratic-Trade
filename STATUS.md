@@ -2,13 +2,13 @@
 
 ## 2026-10-14 Cursor Cloud — PR #4664 review follow-up
 
-**What.**  Merged `origin/main` (`82162336`, fleet fully-dark detector).  Kody's priced-directory suggestion does not apply: the directory runs only when `screenerLastGood` is empty, so there is no price to copy.  The unreachable cache-and-return of priced directory rows is gone.  A directory that lists symbols now says they were not cached, instead of calling that a fallback failure.  A directory failure still keeps the original screener error.  Price-less rows stay out of `screenerCache` and `screenerLastGood`.  Sentry's 429 hold and RapidAPI service-limit threads stay as fixed in `4fc19a96`.  Threads were not resolved.
+**What.**  Merged `origin/main` again (`1588bae8`, keyless options enrichment).  The merge was clean.  The earlier merge on this branch was `82162336`.  Kody's priced-directory suggestion does not apply: the directory runs only when `screenerLastGood` is empty, so there is no price to copy.  The unreachable cache-and-return of priced directory rows is gone.  A directory that lists symbols now says they were not cached, instead of calling that a fallback failure.  A directory failure still keeps the original screener error.  Price-less rows stay out of `screenerCache` and `screenerLastGood`.  The three directory fetches stay, because that count is the cold-failure annotation.  Sentry's 429 hold and RapidAPI service-limit threads stay as fixed in `4fc19a96`.  The FRED VIXCLS schema keeps explicit `.strip()` on both objects.  The comment says to strip extra FRED keys and not to use `.strict()`, so `.passthrough()` would keep keys the parser does not read.  Threads were not resolved.
 
 **Branch.**  `cursor/data-cascade-reliability-eb70`
 
-**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted vitest 110 passed.  Full `npm test`: 9320 passed, 51 skipped, 2 failed outside this diff (`test/egress-guard.test.ts` sandbox DNS, `test/data-catalog-completeness.test.ts` against the local database).
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted vitest 142 passed.  Full `npm test`: 9343 passed, 51 skipped, 2 failed outside this diff (`test/egress-guard.test.ts` sandbox DNS, `test/data-catalog-completeness.test.ts` against the local database).  `npm run build` was not re-run here.
 
-**Next.**  Push and ask Kody to re-review.  Do not merge from this lane.
+**Next.**  Push the merge and ask Kody to re-review.  Do not merge from this lane.
 
 ## 2026-10-14 Cursor Cloud — data cascade reliability
 
