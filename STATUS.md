@@ -27,6 +27,16 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 # Current Status
 
 ## 2026-10-15 Cursor Cloud — ST-3988 congress-share dependency DB health
+## 2026-10-14 GROK — PR #4661 merge #4665
+
+**What.**  Merged `origin/main` (`e80386d7`, PR #4665 SEC XBRL companyfacts cache) into `cursor/free-data-gaps-55d1` with no conflicts and no migration renumber.  Shared files kept the Form 4 User-Agent and the 90-day insider window together with the companyfacts cache.  GraphQL review threads: 12 total, 0 unresolved.  No thread was replied to or resolved on this pass.  Hosted `verify` on `403e0be7` passed, including lint, tsc, `npm test`, and build.  PR Autofix workflow runs still fail before any job on review events.  The caller matches `origin/main`, and review events read it from the default branch.
+
+**Verification.**  `npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 1 failed, 9355 passed, 51 skipped, 830 files.  The failure is `test/egress-guard.test.ts` resolving discord.com.  That file is not in the diff against `origin/main`.  `npm run build` pass (compiled, TypeScript finished, 43/43 static pages).
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Push the merge.  Ask Kody to re-review.  Do not merge from this lane.  Do not resolve review threads from this lane.
+
 ## 2026-10-14 GROK — PR #4661 merge #4658 and verification order
 
 **What.**  Merged `origin/main` (`1588bae8`, PR #4658 keyless options enrichment) into `cursor/free-data-gaps-55d1` with no conflicts.  No migration renumber.  All 12 review threads were already resolved.  The newest Kody note still flagged the rollout verification block: an extra test command sat between `npm test` and `npm run build`, and two build lines were not labeled pass or fail.  Every block is now lint, tsc, `npm test`, and build, each with pass or fail in that order.  This pass did not resolve any thread.  PR Autofix still fails before any job on review events.  `pr-autofix-reusable.yml` line 163 still uses `secrets` in a step `if` on coordinator `main` (`7508b399`) and on the pin `2e671004`.  The caller matches `origin/main`, and review events read it from the default branch.

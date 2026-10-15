@@ -112,6 +112,17 @@ npm run build
 
 `npm run lint` pass (0 errors, 866 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9342 passed, 51 skipped, 829 files.  `test/egress-guard.test.ts` rejects `https://discord.com` because this sandbox resolves it to a private or internal address.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from the local `data/app.db`.  The same file passes (4 tests) when `DATABASE_URL` points at an empty database.  Neither file is in the diff against `origin/main`.  Hosted `verify` passed on `7f3ff8fa` before this merge.  `npm run build` pass.  It finished TypeScript and generated the static pages.
 
+Merged `origin/main` at `e80386d7` (PR #4665 SEC XBRL companyfacts cache) with no conflicts.  No migration renumber.  The twelve review threads on PR #4661 were already resolved, so this pass did not reply and did not resolve any thread.  Hosted `verify` on `403e0be7` passed before this merge, including lint, tsc, `npm test`, and build.  PR Autofix runs still fail before any job.  The caller matches `origin/main`, and review events read the workflow from the default branch.
+
+```bash
+npm run lint
+npx tsc --noEmit
+npm test
+npm run build
+```
+
+`npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 1 failed, 9355 passed, 51 skipped, 830 files.  The failure is `test/egress-guard.test.ts` resolving discord.com.  That file is not in the diff against `origin/main`.  `npm run build` pass.  It compiled, finished TypeScript, and generated 43/43 static pages.
+
 ## Next Steps & Blockers
 
 Ask Kody to re-review.  Do not merge from this lane.  Do not deploy.  Do not resolve review threads from this lane.  PR Autofix remains red on every review event.  `AI-Fleet-Coordinator` `pr-autofix-reusable.yml` line 163 uses `secrets` in a step `if` at the pin `2e671004` and still on coordinator `main` (`7508b399`).  The caller matches `origin/main`, and review events read the workflow from the default branch, so a pin change on this branch does not clear those runs.
