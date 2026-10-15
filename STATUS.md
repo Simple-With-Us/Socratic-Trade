@@ -1,6 +1,38 @@
 # Current Status
 
 ## 2026-10-15 Cursor — iOS sign-out caches and money-action results (ST-2578)
+## 2026-10-15 Cursor Cloud — broker call bounds (ST-2570)
+
+**What.**  Broker reads and writes carry a deadline and an abort signal.  Order listings stop at 50 pages and 500 rows.  Quote and eligibility batches stop at 25 symbols.  Stops, stale exits, and fill reconcile launch for every eligible account before any health probe is awaited, so one hung probe cannot delay the next account's protection.  A hung read releases the stop and exit guards.  A write that has started keeps its guard.  A strategy run whose health probe or snapshot never returns finishes `failed`.  An abort after a synthetic stop is claimed, and before the exit order is sent, reverts the claim and keeps the attempt id.  eToro rates and eligibility responses are parsed with Zod before a row is read.
+
+**Branch.**  `cursor/broker-call-bounds-7ec5`
+
+**Verification.**  Tip `origin/main` through `16285744` merged on branch head.  `npx tsc --noEmit` exit 0 after final merge.  Focused vitest (`protective-lane-isolation`, `scheduler-stale-exit-inflight-guard`) was 3 passed on shepherd pass.  CI run `38754317405`: `verify` + `verify-hosted` green.
+
+**Next.**  PR #4715 ready, `do-not-automerge`.  Jay squash-merges.  Do not mark ST-2570 completed until on `main`.  Kody check failed on provider model 404 (infra), not new code findings.
+**Next.**  `origin/main` through `e3ba1507` is merged on `cursor/broker-call-bounds-7ec5`.  Keep PR #4715 ready with `do-not-automerge`.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
+**Next.**  `origin/main` through `16285744` is merged.  Keep the PR ready with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
+
+## 2026-10-15 CURSOR — Ops snapshot perf PR #4659 (`cursor/ops-snapshot-perf-b622`)
+
+**What.**  Async `buildOpsSnapshot` with 45s single-flight cache, per-section `timingsMs`, per-user `marketScan` (`generatedAt`, `stale`), strategy-runs index v95, Tradier/non-Alpaca **422** on `/api/ops/account-activity`.  Review follow-up: `$.marketScan.omitted` in `readMarketScanMetaFromAudit`, `opsSnapshotForCaller` copy before `attachOpsOrderSummaries`, `WH` non-trade fallback.  Branch contains `origin/main` at `12702bd9` (#4730 ST-4537 CT fundamentals nightly push, #4695, #4716, etc.) via repeated clean merges — ops diff still not on `main`.  Per-user cold queries remain; 45s cache is the prod mitigation.
+
+**Reservation.**  Linear **CURSOR** app (`linear_whoami` ok).  No dedicated ST issue for this branch slug after search; did not fabricate a board id.  PR **#4659** is the tracker for this lane.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test` — see rollout (hosted `verify` is authoritative).  Touched ops tests green locally.  `npm run build` ok.  2026-10-15 `[codex-autofix]` round 1 was docs-only (kody-ai merge-count thread); `tsc` re-run clean.
+
+**Docs.**  `docs/rollouts/2026-10-14-ops-snapshot-perf.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  PR ready for review; Deployer/Jay merge.  Post-deploy: `scripts/fetch-prod-ops-snapshot.sh` and compare `timingsMs` to ~84.7s baseline.
+## 2026-10-15 Cursor Cloud — merge shepherd ST-2874 + AFC fleet-health ST-9
+
+**What.**  ST-2874: `scripts/merge-shepherd.sh` defers `update-branch` while CI is in flight on the current head (fixes verify-hosted starvation).  ST-9: fix lands in **AI-Fleet-Coordinator** (`fleet-health-recover.sh` UUID/label container lookup), not Socratic-Trade.
+
+**Branches.**  `cursor/merge-shepherd-skip-inflight-b952` (ST), `cursor/fleet-health-coolify-lookup-b952` (AFC).
+
+**Verification.**  `bash scripts/merge-shepherd-ci-inflight.selftest.sh`; `bash -n scripts/merge-shepherd.sh` (Kody #4705: `NEUTRAL`/`SKIPPED` terminal in `ci_in_flight`).  Merged `origin/main` into PR branch (`960637ec`, 2026-10-15).  PR #4705 ready; `needs-human-merge` — GB-Deployer merges only.
+
+**Next.**  Open PRs (ready); owner refresh Mac shepherd copy + redeploy AFC host script for ST-9.
 ## 2026-10-15 Cursor Cloud — ops performance parked flag (ST-3875)
 
 **What.**  `GET /api/ops/performance` account rows now include `parked`, `parkedReason`, and `parkedAt`.  The flag is read from the connected account and reported on the priced book, the never-synced branch, and the per-account error branch.  No account is parked or re-armed.
@@ -70,6 +102,67 @@ resolved (Sentry's index-alignment finding verified fixed in `93da2abb`).
 **Verification.**  Swift compile and XCTest run on hosted `ios-build`.  This seat does not run `xcodebuild`.  `npx vitest run test/shared-package-pin-check.test.ts` covers the check-pin token order.
 
 **Next.**  PR #4713 stays ready with `do-not-automerge`.  Do not arm auto-merge.  Jay squash-merges after `verify` + `verify-ios` green.  Shepherd 2026-10-15 ~15:30 UTC: merged `origin/main` at `16285744` (was DIRTY); diff still 10 files (iOS + handoff).  All six review threads resolved (2 Sentry fixes, 4 Kody defer/out-of-scope).  Prior head `6ff75cfc` had `verify-hosted` + `check-pin` green; `verify-ios` stuck queued on macos-latest ~2h — new CI run expected on push.
+**Review follow-up.**  Kody threads are addressed.  Credential tests cover per-variable
+fallback, blank env, a missing file, an unreadable path, and `t.after` temp cleanup.
+Rule 33: `resolveAscCredentials` has no implicit `~/.secrets` default.  A file is read
+only via `envPath` or `ASC_SECRETS_ENV`.  `ship-testflight.sh` exports that variable
+after sourcing the handoff file.  The profile installer does the same for a standalone
+local run when the file exists and the variable is unset.  Kody confirmed the rule 33
+fix on the review thread.
+
+**Linear.**  **ST-2916** (`512444e3-f147-4bca-9c03-a51e53b109cd`) — claimed **CURSOR**, status **addressed**, PR #4716 linked in issue comment (Agent-Sync).
+
+**Next.**  PR #4716: rule-33 fix (no implicit ~/.secrets in resolveAscCredentials; ASC_SECRETS_ENV).  The profile installer exports ASC_SECRETS_ENV for standalone local runs.  GB-Deployer squash-merge when `verify` green; ST-2916 **completed** on merge.
+
+## 2026-10-15 codex-autofix — PR #4716 unblock (merge `main`, thread state)
+
+**What.**  No new review findings: all four Kody threads were already addressed in `d7f2e54d`
+and Kody's own 2026-10-15 11:02Z pass confirmed each fix landed.  The actual blocker on the PR
+was `mergeable: CONFLICTING` — the branch sat 1 commit behind `origin/main` (`3f4ef5e5`,
+"Approve succeeds only when the broker order is placed", ST-2582).  Merged `origin/main` into
+`cursor/ios-ci-hygiene-512444e3-56e3`; **no conflicts** — the overlap was limited to
+`STATUS.md`, and both entries were kept per the repo handoff rule.  No production source was
+touched by this round; the merge is the whole change.
+
+**Branch.**  `cursor/ios-ci-hygiene-512444e3-56e3`
+
+**Thread state corrected.**  The rule-33 thread (drop `~/.secrets/appstore-connect.env` as a
+credential source) had been flipped to resolved by an earlier shepherd round, but that finding
+is an accepted defer with a maintainer question still outstanding, so per the round protocol it
+must stay **open**.  Un-resolved it; Kody's closing note on the thread says the same ("this
+thread stays open").  The three fixed threads stay resolved.  Expect the repo's
+all-conversations-resolved gate to remain unsatisfied until the maintainer answers the
+rule-33 question — that is intentional, not a stuck PR.
+
+**Verification.**  See `docs/rollouts/2026-10-15-ios-ci-hygiene-512444e3.md`.  `npm run lint`
+0 errors, `npx tsc --noEmit` ok, `npm run build` ok.  The `npm test` failures remain confined
+to the same 4 LLM-routing suites; re-confirmed this round by running those 4 files in a clean
+`origin/main` worktree, which reproduces all 12 identically.  Cause is `ANTHROPIC_API_KEY` in
+this sandbox's ambient env, not this PR.  `node --test scripts/ios-fleet/asc-api.credentials.test.mjs`
+6/6 and `bash scripts/ios-fleet-pin.sh --check` ok after the merge (the merge did not touch any
+`ios-fleet` pinned file, so the pin still matches).
+
+**Linear.**  **ST-2916** (`512444e3-f147-4bca-9c03-a51e53b109cd`) — claimed **CURSOR**, status **addressed**.
+
+**Next.**  Maintainer: answer the rule-33 question — is retiring
+`~/.secrets/appstore-connect.env` from the ship path a wanted fleet-wide change?  If yes it
+belongs in its own PR spanning `ship-testflight.sh`, `appstore-connect.env.example`,
+`check-drift.sh`, the `ios-fleet.sha256` pin, and `test-ship-seq.sh` (tracked as OPS-13).
+GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on merge.
+## 2026-10-15 Cursor Cloud — ST-4531 retire Slack callers
+
+**What.**  PR #4696 merged to `main` (Slack ops callers → Zulip / `agent-sync-fleet-post.sh`; Infisical Zulip triple via `infisical-secrets-safe.sh get` in Actions).  Follow-up branch fixes rollout merge-conflict markers left on `main`, adds regression tests, and answers post-merge Kody threads on #4696.
+
+**Branch.**  `cursor/st-4531-retire-slack-callers-89ad` (post-merge follow-up).
+
+**Verification.**  `vitest run test/github-actions-infisical-zulip-ops.test.ts test/agent-sync-fleet-post.test.ts test/infisical-secrets-safe.test.ts`; `npm run lint`; `npx tsc --noEmit`; `npm run build`.
+
+**Next.**  PR #4733 ready for merge after its required checks are green; Refs ST-4531.
+
+**Autofix round 9.**  All kody/cursor review threads are resolved and their fixes verified present in HEAD (the `resolve_bin` trailing-brace typo, the plist Zulip email example, and the rollout Decisions section).  The follow-up rollout's original `Verification State` block is not evidence of an #4696 result; its `npm test  # -> ok` annotation was inaccurate and is now corrected.  A prior lane report records 10 failures in `test/llm-provider.test.ts` and `test/openrouter-credits.test.ts`, and says they reproduce on a clean `origin/main`; this landing lane did not independently rerun the full suite on main.  Those test files are outside this PR diff.  The separate `CODEX Landing Verification` section records this lane's actual lint, typecheck, focused tests, and build.  `lint` 0 errors, `tsc` ok, focused tests passed, `build` ok.  One kody critical finding is deliberately NOT fixed and is open for the maintainer: it asks that bare `infisical secrets get` in `scripts/github-actions-infisical-zulip-ops.sh` be routed through `scripts/infisical-secrets-safe.sh`, but that wrapper has no `get` subcommand — its own instruction says to raise that as a follow-up rather than call bare `infisical secrets`.  Adding a secret-printing `get` path to a wrapper whose contract is "never dumps values" is a security-policy change, not a mechanical fix.  Also note: the uncommitted `.claude/skills/*` edits present in the checkout were reverted Zulip→Slack (undoing this PR's purpose) and were discarded, not committed; patch kept at `/tmp/reverted-slack-edits.patch`.
+**Verification.**  `bash -n` on touched scripts; `alert-deploy-freshness.selftest.sh` 9/9; `vitest run test/infisical-secrets-safe.test.ts` 47/47; `npm run lint` 0 errors; `tsc`; `npm run build`; awaiting fresh `verify` CI on new head.
+
+**Next.**  PR #4696 — Kody CHANGES_REQUESTED cleared on branch; Deployer merge when `verify` green; Refs ST-4531.
 
 ## 2026-10-15 Cursor Cloud — check-pin token order (ST-2582 PR #4698)
 

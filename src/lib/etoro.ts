@@ -3,6 +3,7 @@
  * US accounts: long real stocks/ETFs at leverage 1.  Shorts/CFDs fail closed.
  */
 import { randomUUID } from "crypto";
+import { z } from "zod";
 import type {
   AccountCapabilities,
   BrokerageAccount,
@@ -20,8 +21,40 @@ import { normalizeSymbol } from "./money";
 import { getActiveConnectedAccount, getConnectedAccount } from "./db";
 import { logApiHealth } from "./db-health";
 import { estimateReviewNotional } from "./alpaca";
+import { isLiveOrderState } from "./broker-side";
 import { ETORO_API_BASE, etoroHeaders } from "./etoro-copy";
+import { brokerAbortSignal, chunkBrokerSymbols, scopeBrokerOrders } from "./inflight-deadline";
 import { mergeAccountCapabilities } from "./venue-contract";
+
+export const EtoroRateRowSchema = z.object({
+  instrumentID: z.unknown().optional(),
+  instrumentId: z.unknown().optional(),
+  lastExecution: z.unknown().optional(),
+  bid: z.unknown().optional(),
+  ask: z.unknown().optional(),
+  date: z.unknown().optional()
+}).passthrough();
+
+export const EtoroRatesResponseSchema = z.union([
+  z.array(EtoroRateRowSchema),
+  z.object({ rates: z.array(EtoroRateRowSchema).nullish() }).passthrough()
+]);
+
+export const EtoroEligibilityRowSchema = z.object({
+  symbol: z.unknown().optional(),
+  allowOpenPosition: z.unknown().optional(),
+  unitsQuantityType: z.unknown().optional()
+}).passthrough();
+
+export const EtoroEligibilityResponseSchema = z.union([
+  z.array(EtoroEligibilityRowSchema),
+  z.object({ items: z.array(EtoroEligibilityRowSchema).nullish() }).passthrough()
+]);
+
+function etoroFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const caller = init.signal instanceof AbortSignal ? init.signal : undefined;
+  return fetch(url, { ...init, signal: brokerAbortSignal(caller) });
+}
 
 export function getEToroGateway(userId: string = "local", connectedAccountId?: string): BrokerGateway {
   return new EToroBrokerGateway(userId, connectedAccountId);
@@ -78,7 +111,7 @@ class EToroBrokerGateway implements BrokerGateway {
 
   async getAccounts(): Promise<BrokerageAccount[]> {
     return this.track(async () => {
-      const res = await fetch(`${ETORO_API_BASE}/api/v1/me`, { headers: this.headers() });
+      const res = await etoroFetch(`${ETORO_API_BASE}/api/v1/me`, { headers: this.headers() });
       if (!res.ok) throw new Error(`eToro /me ${res.status}`);
       const json = (await res.json()) as Record<string, unknown>;
       const accountNumber = String(this.demo ? json.demoCid ?? json.gcid : json.realCid ?? json.gcid ?? json.username ?? "etoro");
@@ -122,10 +155,10 @@ class EToroBrokerGateway implements BrokerGateway {
     });
   }
 
-  async getEquityOrders(_accountNumber: string, _options?: import("./types").GetEquityOrdersOptions): Promise<EquityOrder[]> {
+  async getEquityOrders(_accountNumber: string, options?: import("./types").GetEquityOrdersOptions): Promise<EquityOrder[]> {
     const port = await this.ownPortfolio();
     const orders = Array.isArray(port.orders) ? port.orders : [];
-    return orders.flatMap((item) => {
+    const mapped: EquityOrder[] = orders.flatMap((item) => {
       const row = item as Record<string, unknown>;
       const id = String(row.orderId ?? row.orderID ?? "");
       if (!id) return [];
@@ -139,6 +172,7 @@ class EToroBrokerGateway implements BrokerGateway {
         createdAt: String(row.openTimestamp ?? new Date().toISOString())
       }];
     });
+    return scopeBrokerOrders(mapped, options, (state) => isLiveOrderState(state));
   }
 
   async getEquityQuotes(_accountNumber: string, symbols: string[]): Promise<Record<string, BrokerQuote>> {
@@ -152,26 +186,28 @@ class EToroBrokerGateway implements BrokerGateway {
         idToSymbol.set(id, normalizeSymbol(symbol));
       }
       if (ids.length === 0) return {};
-      const res = await fetch(
-        `${ETORO_API_BASE}/api/v1/market-data/instruments/rates?instrumentIds=${ids.join(",")}`,
-        { headers: this.headers() }
-      );
-      if (!res.ok) throw new Error(`eToro rates ${res.status}`);
-      const json = (await res.json()) as { rates?: Record<string, unknown>[] } | Record<string, unknown>[];
-      const rows = Array.isArray(json) ? json : json.rates ?? [];
       const out: Record<string, BrokerQuote> = {};
-      for (const row of rows) {
-        const id = num(row.instrumentID ?? row.instrumentId);
-        const symbol = id != null ? idToSymbol.get(id) : undefined;
-        if (!symbol) continue;
-        out[symbol] = {
-          symbol,
-          price: num(row.lastExecution) ?? mid(num(row.bid), num(row.ask)),
-          bid: num(row.bid),
-          ask: num(row.ask),
-          asOf: typeof row.date === "string" ? row.date : undefined,
-          provider: "etoro"
-        };
+      for (const chunk of chunkBrokerSymbols(ids.map(String))) {
+        const res = await etoroFetch(
+          `${ETORO_API_BASE}/api/v1/market-data/instruments/rates?instrumentIds=${chunk.join(",")}`,
+          { headers: this.headers() }
+        );
+        if (!res.ok) throw new Error(`eToro rates ${res.status}`);
+        const json = EtoroRatesResponseSchema.parse(await res.json());
+        const rows = Array.isArray(json) ? json : json.rates ?? [];
+        for (const row of rows) {
+          const id = num(row.instrumentID ?? row.instrumentId);
+          const symbol = id != null ? idToSymbol.get(id) : undefined;
+          if (!symbol) continue;
+          out[symbol] = {
+            symbol,
+            price: num(row.lastExecution) ?? mid(num(row.bid), num(row.ask)),
+            bid: num(row.bid),
+            ask: num(row.ask),
+            asOf: typeof row.date === "string" ? row.date : undefined,
+            provider: "etoro"
+          };
+        }
       }
       return out;
     });
@@ -179,24 +215,26 @@ class EToroBrokerGateway implements BrokerGateway {
 
   async getEquityTradability(_accountNumber: string, symbols: string[]): Promise<Record<string, { tradable: boolean; fractional: boolean; reason?: string }>> {
     return this.track(async () => {
-      const res = await fetch(`${ETORO_API_BASE}/api/v2/trading/info/eligibility`, {
-        method: "POST",
-        headers: { ...this.headers(), "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols: symbols.map(normalizeSymbol) })
-      });
-      if (!res.ok) throw new Error(`eToro eligibility ${res.status}`);
-      const json = (await res.json()) as { items?: Record<string, unknown>[] } | Record<string, unknown>[];
-      const rows = Array.isArray(json) ? json : json.items ?? [];
       const out: Record<string, { tradable: boolean; fractional: boolean; reason?: string }> = {};
-      for (const row of rows) {
-        const symbol = normalizeSymbol(String(row.symbol ?? ""));
-        if (!symbol) continue;
-        const tradable = row.allowOpenPosition === true;
-        out[symbol] = {
-          tradable,
-          fractional: row.unitsQuantityType === "fractional",
-          reason: tradable ? undefined : "eToro eligibility denied"
-        };
+      for (const chunk of chunkBrokerSymbols(symbols)) {
+        const res = await etoroFetch(`${ETORO_API_BASE}/api/v2/trading/info/eligibility`, {
+          method: "POST",
+          headers: { ...this.headers(), "Content-Type": "application/json" },
+          body: JSON.stringify({ symbols: chunk.map(normalizeSymbol) })
+        });
+        if (!res.ok) throw new Error(`eToro eligibility ${res.status}`);
+        const json = EtoroEligibilityResponseSchema.parse(await res.json());
+        const rows = Array.isArray(json) ? json : json.items ?? [];
+        for (const row of rows) {
+          const symbol = normalizeSymbol(String(row.symbol ?? ""));
+          if (!symbol) continue;
+          const tradable = row.allowOpenPosition === true;
+          out[symbol] = {
+            tradable,
+            fractional: row.unitsQuantityType === "fractional",
+            reason: tradable ? undefined : "eToro eligibility denied"
+          };
+        }
       }
       for (const symbol of symbols) {
         const key = normalizeSymbol(symbol);
@@ -235,7 +273,7 @@ class EToroBrokerGateway implements BrokerGateway {
       if (input.dollarAmount != null) body.amount = input.dollarAmount;
       else if (input.quantity != null) body.units = input.quantity;
       if (input.type === "limit" && input.limitPrice != null) body.triggerRate = input.limitPrice;
-      const res = await fetch(`${ETORO_API_BASE}${path}`, {
+      const res = await etoroFetch(`${ETORO_API_BASE}${path}`, {
         method: "POST",
         headers: { ...etoroHeaders({ apiKey: this.apiKey, userKey: this.userKey }, requestId), "Content-Type": "application/json" },
         body: JSON.stringify(body)
@@ -253,7 +291,7 @@ class EToroBrokerGateway implements BrokerGateway {
 
   async cancelEquityOrder(_accountNumber: string, orderId: string): Promise<ExecutedOrder> {
     return this.track(async () => {
-      const res = await fetch(`${ETORO_API_BASE}/api/v2/trading/execution/orders/${encodeURIComponent(orderId)}`, {
+      const res = await etoroFetch(`${ETORO_API_BASE}/api/v2/trading/execution/orders/${encodeURIComponent(orderId)}`, {
         method: "DELETE",
         headers: this.headers()
       });
@@ -265,7 +303,7 @@ class EToroBrokerGateway implements BrokerGateway {
   private async ownPortfolio(): Promise<Record<string, unknown>> {
     return this.track(async () => {
       const prefix = this.demo ? "/api/v1/trading/info/demo/portfolio" : "/api/v1/trading/info/portfolio";
-      const res = await fetch(`${ETORO_API_BASE}${prefix}`, { headers: this.headers() });
+      const res = await etoroFetch(`${ETORO_API_BASE}${prefix}`, { headers: this.headers() });
       if (!res.ok) throw new Error(`eToro portfolio ${res.status}`);
       const json = (await res.json()) as Record<string, unknown>;
       return (json.clientPortfolio as Record<string, unknown> | undefined) ?? json;
@@ -277,7 +315,7 @@ class EToroBrokerGateway implements BrokerGateway {
     const cached = this.instrumentCache.get(key);
     if (cached != null) return cached;
     const params = new URLSearchParams({ internalSymbolFull: key, fields: "instrumentId,internalSymbolFull" });
-    const res = await fetch(`${ETORO_API_BASE}/api/v1/market-data/search?${params.toString()}`, { headers: this.headers() });
+    const res = await etoroFetch(`${ETORO_API_BASE}/api/v1/market-data/search?${params.toString()}`, { headers: this.headers() });
     if (!res.ok) return undefined;
     const json = (await res.json()) as { items?: Record<string, unknown>[] };
     const hit = (json.items ?? []).find((row) => normalizeSymbol(String(row.internalSymbolFull ?? "")) === key);
