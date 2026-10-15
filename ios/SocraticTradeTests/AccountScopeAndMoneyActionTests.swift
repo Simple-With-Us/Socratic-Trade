@@ -10,14 +10,26 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
     private let tabPreferenceKey = "mobileTabs.v1"
     private let coachModelKey = "console.assistant.model"
 
-    private func makeStore(preview: MobileSnapshot? = nil) -> MobileStore {
-        MobileStore(
-            client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!),
+    private func makeStore(
+        preview: MobileSnapshot? = nil,
+        session: URLSession = .shared
+    ) -> MobileStore {
+        return MobileStore(
+            client: MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!, session: session),
             previewSnapshot: preview
         )
     }
 
-    private func seedAccountCaches() throws -> (UserDefaults, URLRequest, HTTPCookie) {
+    private func makeIsolatedSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = URLCache(memoryCapacity: 1_000_000, diskCapacity: 0, diskPath: nil)
+        return URLSession(configuration: configuration)
+    }
+
+    private func seedAccountCaches(
+        urlCache: URLCache,
+        cookieStorage: HTTPCookieStorage
+    ) throws -> (UserDefaults, URLRequest, HTTPCookie) {
         let defaults = UserDefaults.standard
         defaults.set(Data("{\"account\":\"A\"}".utf8), forKey: cacheKey)
         defaults.set(1_700_000_000.0, forKey: cacheTimestampKey)
@@ -33,7 +45,7 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
             httpVersion: "HTTP/1.1",
             headerFields: ["Content-Type": "application/json"]
         ))
-        URLCache.shared.storeCachedResponse(
+        urlCache.storeCachedResponse(
             CachedURLResponse(response: response, data: Data("{\"account\":\"A\"}".utf8)),
             for: request
         )
@@ -45,29 +57,37 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
             .value: "account-a",
             .secure: "TRUE"
         ]))
-        HTTPCookieStorage.shared.setCookie(cookie)
+        cookieStorage.setCookie(cookie)
         return (defaults, request, cookie)
     }
 
-    private static func storageContains(_ cookie: HTTPCookie) -> Bool {
-        HTTPCookieStorage.shared.cookies?.contains { $0.name == cookie.name && $0.value == cookie.value } ?? false
+    private static func storageContains(_ cookie: HTTPCookie, in storage: HTTPCookieStorage) -> Bool {
+        storage.cookies?.contains { $0.name == cookie.name && $0.value == cookie.value } ?? false
     }
 
-    private func cleanup(_ defaults: UserDefaults, cookie: HTTPCookie) {
+    private func cleanup(
+        _ defaults: UserDefaults,
+        cookie: HTTPCookie,
+        urlCache: URLCache,
+        cookieStorage: HTTPCookieStorage
+    ) {
         defaults.removeObject(forKey: cacheKey)
         defaults.removeObject(forKey: cacheTimestampKey)
         defaults.removeObject(forKey: tabPreferenceKey)
         defaults.removeObject(forKey: coachModelKey)
-        HTTPCookieStorage.shared.deleteCookie(cookie)
-        URLCache.shared.removeAllCachedResponses()
+        cookieStorage.deleteCookie(cookie)
+        urlCache.removeAllCachedResponses()
     }
 
     @MainActor
     func testSignOutClearsEveryAccountCacheAndStore() throws {
         let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(Self.minimalSnapshotJSON.utf8))
-        let seeded = try seedAccountCaches()
-        defer { cleanup(seeded.0, cookie: seeded.2) }
-        let store = makeStore(preview: snapshot)
+        let session = makeIsolatedSession()
+        let urlCache = try XCTUnwrap(session.configuration.urlCache)
+        let cookieStorage = try XCTUnwrap(session.configuration.httpCookieStorage)
+        let seeded = try seedAccountCaches(urlCache: urlCache, cookieStorage: cookieStorage)
+        defer { cleanup(seeded.0, cookie: seeded.2, urlCache: urlCache, cookieStorage: cookieStorage) }
+        let store = makeStore(preview: snapshot, session: session)
         store.bindProposalCommand(proposalId: "proposal-1", commandId: "cmd-1")
         store.recordResolvedCommand(try Self.command(
             type: "order.cancel",
@@ -76,15 +96,15 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
         ))
         XCTAssertEqual(store.sessionEpoch, 0)
 
-        XCTAssertNotNil(URLCache.shared.cachedResponse(for: seeded.1))
-        XCTAssertTrue(Self.storageContains(seeded.2))
+        XCTAssertNotNil(urlCache.cachedResponse(for: seeded.1))
+        XCTAssertTrue(Self.storageContains(seeded.2, in: cookieStorage))
 
         store.clearLocalSession()
 
         XCTAssertNil(seeded.0.data(forKey: cacheKey))
         XCTAssertEqual(seeded.0.double(forKey: cacheTimestampKey), 0)
-        XCTAssertNil(URLCache.shared.cachedResponse(for: seeded.1))
-        XCTAssertFalse(Self.storageContains(seeded.2))
+        XCTAssertNil(urlCache.cachedResponse(for: seeded.1))
+        XCTAssertFalse(Self.storageContains(seeded.2, in: cookieStorage))
         XCTAssertNil(store.snapshot)
         XCTAssertFalse(store.isAuthenticated)
         XCTAssertNil(store.moneyActionResult)
@@ -93,7 +113,7 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
         XCTAssertEqual(seeded.0.stringArray(forKey: tabPreferenceKey), ["home", "proposals"])
         XCTAssertEqual(seeded.0.string(forKey: coachModelKey), "claude-sonnet-5")
 
-        let relaunched = makeStore()
+        let relaunched = makeStore(session: session)
         XCTAssertNil(relaunched.snapshot)
         XCTAssertFalse(relaunched.isAuthenticated)
     }
@@ -101,22 +121,25 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
     @MainActor
     func testAccountSwitchClearsCachesAndKeepsTheSession() throws {
         let snapshot = try JSONDecoder().decode(MobileSnapshot.self, from: Data(Self.minimalSnapshotJSON.utf8))
-        let seeded = try seedAccountCaches()
-        defer { cleanup(seeded.0, cookie: seeded.2) }
-        let store = makeStore(preview: snapshot)
+        let session = makeIsolatedSession()
+        let urlCache = try XCTUnwrap(session.configuration.urlCache)
+        let cookieStorage = try XCTUnwrap(session.configuration.httpCookieStorage)
+        let seeded = try seedAccountCaches(urlCache: urlCache, cookieStorage: cookieStorage)
+        defer { cleanup(seeded.0, cookie: seeded.2, urlCache: urlCache, cookieStorage: cookieStorage) }
+        let store = makeStore(preview: snapshot, session: session)
         store.stagePendingAccountSwitch("acct-2")
         store.bindProposalCommand(proposalId: "proposal-1", commandId: "cmd-1")
         let epoch = store.sessionEpoch
 
-        XCTAssertNotNil(URLCache.shared.cachedResponse(for: seeded.1))
-        XCTAssertTrue(Self.storageContains(seeded.2))
+        XCTAssertNotNil(urlCache.cachedResponse(for: seeded.1))
+        XCTAssertTrue(Self.storageContains(seeded.2, in: cookieStorage))
 
         store.clearAccountScopedCachesForAccountSwitch()
 
         XCTAssertNil(seeded.0.data(forKey: cacheKey))
         XCTAssertEqual(seeded.0.double(forKey: cacheTimestampKey), 0)
-        XCTAssertNil(URLCache.shared.cachedResponse(for: seeded.1))
-        XCTAssertTrue(Self.storageContains(seeded.2))
+        XCTAssertNil(urlCache.cachedResponse(for: seeded.1))
+        XCTAssertTrue(Self.storageContains(seeded.2, in: cookieStorage))
         XCTAssertNil(store.snapshot)
         XCTAssertTrue(store.isAuthenticated)
         XCTAssertEqual(store.pendingAccountId, "acct-2")
@@ -126,7 +149,7 @@ final class AccountScopeAndMoneyActionTests: XCTestCase {
         XCTAssertEqual(seeded.0.stringArray(forKey: tabPreferenceKey), ["home", "proposals"])
         XCTAssertEqual(seeded.0.string(forKey: coachModelKey), "claude-sonnet-5")
 
-        let relaunched = makeStore()
+        let relaunched = makeStore(session: session)
         XCTAssertNil(relaunched.snapshot)
         XCTAssertFalse(relaunched.isAuthenticated)
     }

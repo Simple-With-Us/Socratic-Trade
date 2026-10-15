@@ -1,6 +1,9 @@
 # Current Status
 
 ## 2026-10-15 CODEX — iOS sign-out caches and money-action results (ST-2578)
+
+PR #4713 is merged with `origin/main` through `e81fd0da`.  Hosted iOS compilation passes; the current failure is an XCTest assertion against shared URL-cache state.  The regression tests now use per-session ephemeral cache and cookie storage, and sign-out clears the cookie storage actually used by its client.  Final diff must return to the ten iOS/handoff paths after temporary CI diagnostics are removed.
+
 ## 2026-10-15 Cursor Cloud — broker call bounds (ST-2570)
 
 **What.**  Broker reads and writes carry a deadline and an abort signal.  Order listings stop at 50 pages and 500 rows.  Quote and eligibility batches stop at 25 symbols.  Stops, stale exits, and fill reconcile launch for every eligible account before any health probe is awaited, so one hung probe cannot delay the next account's protection.  A hung read releases the stop and exit guards.  A write that has started keeps its guard.  A strategy run whose health probe or snapshot never returns finishes `failed`.  An abort after a synthetic stop is claimed, and before the exit order is sent, reverts the claim and keeps the attempt id.  eToro rates and eligibility responses are parsed with Zod before a row is read.

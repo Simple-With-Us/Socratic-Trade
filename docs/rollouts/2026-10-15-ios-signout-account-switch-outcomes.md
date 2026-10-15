@@ -50,7 +50,7 @@ npx vitest run test/shared-package-pin-check.test.ts  # 6 passed
 
 The 23 vitest failures are in LLM key routing, notify credentials, and server-metrics.  They expect an empty provider-key environment and this seat has provider keys set.  None of them import the iOS tree.
 
-Swift compile and XCTest are not run on this Linux seat.  Hosted `.github/workflows/ios-build.yml` is authoritative.  On the original PR head, the app build succeeded; XCTest ran 273 cases and failed only `testAccountSwitchClearsCachesAndKeepsTheSession` and `testSignOutClearsEveryAccountCacheAndStore`.  The 9m20s job completed normally, so this is an XCTest failure, not a compiler error or macOS queue timeout.  The failing assertion details were absent from the Actions text log, so a temporary failure-only `xcresulttool` dump was added to the iOS workflow to expose them on the next run.  That workflow instrumentation will be removed after diagnosis; the final PR diff must remain limited to the ten iOS/handoff paths.  New cases:
+Swift compile and XCTest are not run on this Linux seat.  Hosted `.github/workflows/ios-build.yml` is authoritative.  Run `38798340547` built successfully and completed the iOS test step normally; 272/273 tests passed.  The remaining failure was `testSignOutClearsEveryAccountCacheAndStore`, `XCTAssertNil` at line 86, where the test queried a response in `URLCache.shared`.  The account-switch case passed on this run.  The previous run failed both cache assertions.  Foundation documents an unavoidable race when reading and writing the same request through `URLCache`; these tests shared the singleton and request across cases.  The tests now use each ephemeral session's private URL cache and cookie storage.  Sign-out removes cookies from the storage used by its client session.  Temporary failure-only `xcresulttool` output stays until the isolated tests pass, then the workflow instrumentation will be removed; final PR diff must remain limited to the ten iOS/handoff paths.  New cases:
 
 - `AccountScopeAndMoneyActionTests.testSignOutClearsEveryAccountCacheAndStore`
 - `AccountScopeAndMoneyActionTests.testAccountSwitchClearsCachesAndKeepsTheSession`
@@ -61,7 +61,7 @@ Swift compile and XCTest are not run on this Linux seat.  Hosted `.github/workfl
 
 ## Next Steps & Blockers
 
-- CODEX takeover 2026-10-15: merged `origin/main` at `e81fd0da` with a merge commit and no textual conflicts.  The unique diff still contains the same ten iOS/handoff paths.  Fix the two hosted XCTest failures, rerun requested local JavaScript gates, then remove temporary workflow diagnostics and verify the ten-path diff before merge.
+- CODEX takeover 2026-10-15: merged `origin/main` at `e81fd0da` with a merge commit and no textual conflicts.  The unique diff still contains the same ten iOS/handoff paths.  Isolate shared XCTest cache state, rerun hosted iOS tests, remove temporary workflow diagnostics, then verify the ten-path diff before merge.
 - Mark ST-2578 completed only after merge, and deployed only after the live binary includes this commit.
 
 ## Zero-Code Findings

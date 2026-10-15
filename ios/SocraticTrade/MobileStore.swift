@@ -1212,8 +1212,9 @@ final class MobileStore: ObservableObject {
     }
 
     private func clearSessionCookies() {
-        for cookie in HTTPCookieStorage.shared.cookies ?? [] where client.ownsCookie(cookie) {
-            HTTPCookieStorage.shared.deleteCookie(cookie)
+        let cookieStorage = client.session.configuration.httpCookieStorage ?? HTTPCookieStorage.shared
+        for cookie in cookieStorage.cookies ?? [] where client.ownsCookie(cookie) {
+            cookieStorage.deleteCookie(cookie)
         }
     }
 
