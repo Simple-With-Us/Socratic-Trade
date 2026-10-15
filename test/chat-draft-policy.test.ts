@@ -119,7 +119,11 @@ describe("chat draft policy bridge", () => {
     // Proves the unknown-age gate DID fire on the scan-less preview, and we staged anyway.
     // Approve-time execution re-checks a real scan and blocks the order if that scan still
     // has no provider observation time.
-    expect((body.decision?.reasons as string[] | undefined)?.some((reason) => reason.startsWith("quote_age_unknown:"))).toBe(true);
+    const reasons = body.decision?.reasons;
+    expect(
+      Array.isArray(reasons) &&
+        reasons.some((reason) => typeof reason === "string" && reason.startsWith("quote_age_unknown:"))
+    ).toBe(true);
     expect(listPendingProposals("TEST", DEFAULT_REQUEST_USER_ID)).toHaveLength(1);
     expect(getSocraticDecisionCase(body.proposalId, DEFAULT_REQUEST_USER_ID)).toMatchObject({ status: "proposed", proposalId: body.proposalId });
   });

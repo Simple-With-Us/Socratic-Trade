@@ -6,9 +6,10 @@
 
 **Branch.**  `cursor/quote-observation-staleness-99f5`
 
-**Verification.**  `npx tsc --noEmit` exit 0.  Touched-file eslint quiet exit 0.  Approval-fixture and quote tests re-run green after scan stubs gained `asOf` (including MSFT on the bulk-approve stub) and chat preview kept the scan-less carve-out.  `npm run build` exit 0.  An earlier full `npm test` still shows the pre-existing OpenRouter-key, notify, server-metrics, and cpuprofile failures.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
+**Verification.**  Merged `origin/main` (`3c74cd81`).  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  Affected vitest (Alpaca SDK trades, NBBO, chat draft, quote observation, staleness, cascade, Tradier) 186/186.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
 
 **Next.**  PR ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
+
 ## 2026-10-15 Cursor Cloud — remove ST primary Infisical bridge (ST-4318)
 
 **What.**  Permanent removal of the default-off Usage Monitor credential bridge writer: module, tests, scheduler lane, `/api/keys` triggers, and active env/backlog/docs setup.  Per-user encrypted API keys and tombstone behavior unchanged.

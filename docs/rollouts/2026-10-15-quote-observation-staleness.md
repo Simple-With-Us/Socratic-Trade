@@ -97,6 +97,22 @@ npm run build
 
 Exit 0.
 
+## Merge with main (2026-10-15)
+
+Merged `origin/main` at `3c74cd81` with a merge commit.  PLAN.md and STATUS.md auto-merged.  Both the quote-observation note and the ST primary-bridge removal note remain.
+
+Follow-up on this merge:
+
+```bash
+npm run lint
+npx tsc --noEmit
+npx vitest run test/alpaca-sdk-client-timeout.test.ts test/alpaca-nbbo-mid.test.ts test/chat-draft-policy.test.ts test/quote-observation.test.ts test/staleness-gate.test.ts test/quotes-cascade.test.ts test/tradier.test.ts
+```
+
+`npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  Those seven files passed, 186 tests.
+
+Alpaca latest trades are Zod-parsed, and a bad trade row is skipped.  The chat-draft assertion no longer casts `reasons`.  Webull `close` was already the current print.  Kalshi authority, Tradier fetch-age, and a missing-asOf live book still fail closed.  Those review threads stay open.
+
 ## Next Steps & Blockers
 
 Open the PR ready for review.  Add `do-not-automerge`.  Do not enable auto-merge.  Post the PR link on ST-2584.  Leave the issue In Progress until merge.

@@ -1,8 +1,23 @@
 import { Alpaca } from "@alpacahq/alpaca-trade-api";
 import type { AlpacaClientOptions } from "@alpacahq/alpaca-trade-api";
+import { z } from "zod";
 import { ALPACA_BROKER_IO_DEADLINE_MS } from "./inflight-deadline";
 
 type AlpacaInstance = InstanceType<typeof Alpaca>;
+
+const AlpacaLatestTradeSchema = z.object({
+  p: z.number().optional(),
+  t: z.union([z.string(), z.number(), z.date()]).optional()
+});
+
+const AlpacaLatestTradesResponseSchema = z.object({
+  trades: z.record(z.string(), z.unknown()).optional()
+});
+
+function alpacaTradeTimestamp(value: string | number | Date | undefined): string | number | undefined {
+  if (value instanceof Date) return value.toISOString();
+  return value;
+}
 
 /** v3-style constructor options used by {@link AlpacaBrokerGateway}. */
 export type LegacyAlpacaConstructorOptions = {
@@ -219,12 +234,15 @@ export function createLegacyAlpacaRestClient(
     async getLatestTrades(symbols) {
       if (symbols.length === 0) return {};
       const resp = await stocks.stockLatestTrades({ symbols: symbols.join(",") });
+      const parsed = AlpacaLatestTradesResponseSchema.safeParse(resp);
+      if (!parsed.success) return {};
       const legacy: Record<string, Record<string, unknown>> = {};
-      for (const [sym, trade] of Object.entries(resp.trades ?? {})) {
-        const row = trade as unknown as Record<string, unknown>;
+      for (const [sym, raw] of Object.entries(parsed.data.trades ?? {})) {
+        const trade = AlpacaLatestTradeSchema.safeParse(raw);
+        if (!trade.success) continue;
         legacy[sym] = {
-          p: row.p,
-          t: row.t instanceof Date ? row.t.toISOString() : row.t
+          p: trade.data.p,
+          t: alpacaTradeTimestamp(trade.data.t)
         };
       }
       return legacy;
