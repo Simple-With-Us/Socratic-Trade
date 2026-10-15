@@ -31,28 +31,8 @@ async function load() {
   return { db, lease, credits, healthRoute };
 }
 
-/** Mirrors `projectHealthPayload` dependency stripping for anonymous /api/health. */
-function dependenciesWithoutOpsDetail(
-  dependencies: Record<string, unknown> | undefined
-): Record<string, unknown> {
-  if (!dependencies || typeof dependencies !== "object") return {};
-  const stripped: Record<string, unknown> = {};
-  for (const [name, entry] of Object.entries(dependencies)) {
-    if (!entry || typeof entry !== "object") {
-      stripped[name] = entry;
-      continue;
-    }
-    const copy = { ...(entry as Record<string, unknown>) };
-    delete copy.lastFailure;
-    delete copy.failureClass;
-    stripped[name] = copy;
-  }
-  return stripped;
-}
-
 // `checks.dependencies` arrives from the route via `Response.json()`, so it is untrusted boundary
-// data. Validate it at the boundary instead of casting, so a shape regression fails loudly here
-// rather than as a confusing diff deeper in the comparison below.
+// data. Validate it at the boundary instead of casting (Kody Rules 19 / 31).
 const healthDependencyEntrySchema = z
   .object({
     ok: z.boolean(),
@@ -63,6 +43,28 @@ const healthDependencyEntrySchema = z
   .passthrough();
 
 const healthDependenciesSchema = z.record(z.string(), healthDependencyEntrySchema).optional();
+
+type HealthDependencyEntry = z.infer<typeof healthDependencyEntrySchema>;
+type HealthDependencies = Record<string, HealthDependencyEntry>;
+
+/** Untrusted JSON from `Response.json()` — parse before any dependency comparison. */
+function parseHealthDependenciesFromJson(raw: unknown): HealthDependencies {
+  const parsed = healthDependenciesSchema.parse(raw);
+  return parsed ?? {};
+}
+
+/** Mirrors `projectHealthPayload` dependency stripping for anonymous /api/health. */
+function dependenciesWithoutOpsDetail(dependencies: HealthDependencies | undefined): HealthDependencies {
+  if (!dependencies) return {};
+  const stripped: HealthDependencies = {};
+  for (const [name, entry] of Object.entries(dependencies)) {
+    const copy = { ...entry };
+    delete copy.lastFailure;
+    delete copy.failureClass;
+    stripped[name] = copy;
+  }
+  return stripped;
+}
 
 /** Stub the OpenRouter /credits fetch so the balance block is populated deterministically. */
 function stubCredits(totalCredits: number, totalUsage: number) {
@@ -241,15 +243,15 @@ describe("/api/health exposure", () => {
     const [anonBody, detailBody] = [await anonymous.json(), await detailed.json()];
     expect(anonBody.ok).toBe(false);
     expect(detailBody.ok).toBe(false);
-    expect(anonBody.checks.dependencies).toEqual(
-      dependenciesWithoutOpsDetail(healthDependenciesSchema.parse(detailBody.checks.dependencies))
-    );
-    expect(detailBody.checks.dependencies.pinecone).toMatchObject({
+    const detailDeps = parseHealthDependenciesFromJson(detailBody.checks.dependencies);
+    const anonDeps = parseHealthDependenciesFromJson(anonBody.checks.dependencies);
+    expect(anonDeps).toEqual(dependenciesWithoutOpsDetail(detailDeps));
+    expect(detailDeps.pinecone).toMatchObject({
       ok: false,
       lastFailure: "Global Error",
       failureClass: null
     });
-    expect(anonBody.checks.dependencies.pinecone).toEqual({ ok: false });
+    expect(anonDeps.pinecone).toEqual({ ok: false });
     expect(anonBody.checks.storageDegraded).toEqual(detailBody.checks.storageDegraded);
   });
 });

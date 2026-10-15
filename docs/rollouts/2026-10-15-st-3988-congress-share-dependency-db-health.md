@@ -30,11 +30,18 @@ peer-app write contention, not a broken share connection, and must expose the cl
 
 ## Verification State
 
-- `npx vitest run test/congress-share-dependency-db-health.test.ts test/local-db-fault-classification.test.ts` -> ok
-- `npm run lint` -> ok
-- `npx tsc --noEmit` -> ok
-- `npm test` -> ok
-- `npm run build` -> ok
+```bash
+npx vitest run test/congress-share-dependency-db-health.test.ts test/local-db-fault-classification.test.ts test/health-route-exposure.test.ts
+# -> ok
+npm run lint
+# -> ok
+npx tsc --noEmit
+# -> ok
+npm test
+# -> ok
+npm run build
+# -> ok
+```
 
 ## Next Steps & Blockers
 
@@ -45,16 +52,7 @@ peer-app write contention, not a broken share connection, and must expose the cl
 
 - Rule 26 — the Verification State block above now names each command in order with a per-line
   `-> ok` token, so the note is auditable at closeout instead of a bare bash block.
-- Rules 19 / 31 (flagged twice on the same line) — `test/health-route-exposure.test.ts` cast the
-  route's `checks.dependencies` with `as Record<string, unknown>`. The response body comes from
-  `Response.json()`, so it is untrusted boundary data; it now goes through
-  `healthDependenciesSchema` (`z.record(z.string(), z.unknown()).optional()`) and the parsed value
-  is passed to `dependenciesWithoutOpsDetail`. A future shape regression fails at the parse with a
-  readable zod error rather than as a confusing diff inside the projection comparison.
-
-  There is no production Zod schema for the `/api/health` payload to import here, so the test
-  declares a local permissive record schema rather than reusing an export. That is a deliberate
-  trade-off: the schema validates the trust boundary this test actually depends on (the map shape)
-  without pinning every per-dependency field, which would make the test brittle against unrelated
-  health-payload additions. If the route ever grows its own exported schema, this should switch to
-  importing it.
+- Rules 19 / 31 — `test/health-route-exposure.test.ts` parses `checks.dependencies` from
+  `Response.json()` via `parseHealthDependenciesFromJson` + `healthDependencyEntrySchema` (no `as`
+  casts on boundary JSON). `dependenciesWithoutOpsDetail` accepts the parsed `HealthDependencies`
+  map only.
