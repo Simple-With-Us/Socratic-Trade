@@ -26,7 +26,7 @@ Touched paths:
 - The glob list stays in CODEOWNERS.  The workflow comment is a mirror, not a second policy.  CI fails if they diverge.
 - `disarm=true` means the workflow runs `gh pr merge --disable-auto` on a PR that was already armed.  The dry run does not call GitHub, and this lane does not arm auto-merge.
 - `needs-human-merge` still disarms, same as `do-not-automerge`.
-- A rejected elevated token retries disable once with the Actions `GITHUB_TOKEN`.  That token is not used to arm.  If the retry is also rejected, the disable job fails instead of reporting the merge as disarmed.
+- A rejected elevated token retries disable once with the Actions `GITHUB_TOKEN`.  That token is not used to arm.  If both disables are rejected, the job reads `autoMergeRequest`.  Null is success (the Actions token cannot call `disablePullRequestAutoMerge`).  A still-armed merge fails the job.
 - The dry run exports `CODEOWNERS_FILE` to the repo copy so it still classifies when the shell is not at the repo root.
 - Out of scope: a ruleset required review on those paths.  This change only stops the workflow from arming.
 
@@ -89,11 +89,39 @@ npx vitest run test/disable-pr-automerge.test.ts test/automerge-gate-dry-run.tes
 
 22 passed.
 
+## CI follow-up (same day)
+
+Merged `origin/main` (`df7e6d10`, #4703 / #4708 / #4702) with a merge commit.  No rebase.  No force-push.  `git merge-tree --write-tree` was clean.  `STATUS.md` and `PLAN.md` union-merged.
+
+`check-pin` root cause, shared by every PR in the 2026-10-15 07:32-07:55 UTC window (money-path and otherwise, including `main`): `scripts/check-shared-package-pin.mjs` preferred `GH_PACKAGES_TOKEN` over the Actions `GITHUB_TOKEN`.  That secret is one user PAT for GitHub user 12656028.  Every concurrent pin check shares that user's REST budget.  When it is exhausted, `gh api` returns HTTP 403 `API rate limit exceeded for user ID 12656028` (this PR: request `D82C:1BBE27:4381472:DDDC128`, run `38699553078`).  The script then reported `cannot read private Congress.Trade vendor provenance; set GH_PACKAGES_TOKEN` even though the secret was set, Congress.Trade is public, and the ST and UM pins already matched at `v2.7.1` / `5084afb3`.  Money-path PRs keep re-entering that window because this gate refuses auto-merge, so they stay open and re-run the required check.  The fetch now tries the Actions token first and only then the user PAT.  A rate limit that survives both tokens is a retry message, not a missing-token message.  A real auth failure still names `GH_PACKAGES_TOKEN`.
+
+`verify-hosted` failed `tsc` on `test/disable-pr-automerge.test.ts:25` (`TS2769`).  Next.js makes `NODE_ENV` required on `NodeJS.ProcessEnv`.  The fake `gh` env now sets `NODE_ENV: "test"`.
+
+`disable-on-hold` and `disable-on-skip-automerge` (run `38699553074`) got `401 Bad credentials` on the elevated token, then `GraphQL: Resource not accessible by integration (disablePullRequestAutoMerge)` on the Actions token.  The job now reads `autoMergeRequest` with that token.  Null exits 0.  A non-null value exits 1.
+
+Touched again:
+
+- `scripts/check-shared-package-pin.mjs`
+- `scripts/disable-pr-automerge.sh`
+- `.github/workflows/shared-package-pin-check.yml`
+- `test/shared-package-pin-check.test.ts`
+- `test/disable-pr-automerge.test.ts`
+- `STATUS.md`, `PLAN.md`, this note
+
+```bash
+npx tsc --noEmit
+npx vitest run test/disable-pr-automerge.test.ts test/shared-package-pin-check.test.ts test/automerge-gate-dry-run.test.ts test/branch-protection-gate.test.ts test/pr-touches-codeowners-paths.test.ts
+npx eslint scripts/check-shared-package-pin.mjs test/disable-pr-automerge.test.ts test/shared-package-pin-check.test.ts
+```
+
+`tsc` exit 0.  Vitest 32 passed.  ESLint 0 errors on those files.
+
 ## Next Steps & Blockers
 
-- Open the PR ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
+- PR #4697 stays ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
+- Leave ST-3326 In Progress until this has shipped.
 - No phase doc covers this workflow.  Nothing under `docs/phase-*.md` was updated.
 
 ## Zero-Code Findings
 
-- Agent-Sync `linear_claim` returns `not_configured` for CURSOR (`LINEAR_SEATS` is GROK-WEB only).  The claim was made with the board CLI as the Cursor Linear app.  Zulip post returned `not_authorized` (no CURSOR Zulip key on the MCP host).
+- The first Agent-Sync `linear_claim` returned `not_configured` for CURSOR.  A later session confirmed `linear_whoami` is CURSOR, and the claim plus the progress comment with the PR link are on ST-3326 through Agent-Sync.  Zulip post returned `not_authorized` (no CURSOR Zulip key on the MCP host).

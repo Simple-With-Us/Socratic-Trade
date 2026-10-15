@@ -24,6 +24,7 @@ function run(bin: string, env: Record<string, string>): { status: number; stdout
       encoding: "utf8",
       env: {
         PATH: `${bin}:/usr/bin:/bin`,
+        NODE_ENV: "test",
         GH_TOKEN: env.GH_TOKEN ?? "",
         DISABLE_AUTOMERGE_FALLBACK_TOKEN: env.DISABLE_AUTOMERGE_FALLBACK_TOKEN ?? "",
       },
@@ -76,5 +77,33 @@ exit 1
     const got = run(dir, { GH_TOKEN: "bad-pat", DISABLE_AUTOMERGE_FALLBACK_TOKEN: "also-bad" });
     expect(got.status).toBe(1);
     expect(got.stdout).toContain("credentials rejected");
+  });
+
+  it("treats an integration refusal as success when auto-merge is already off", () => {
+    const { dir } = fakeBin(`#!/bin/bash
+if [[ "$*" == *"--disable-auto"* ]]; then
+  echo "GraphQL: Resource not accessible by integration (disablePullRequestAutoMerge)" >&2
+  exit 1
+fi
+echo '{"autoMergeRequest":null}'
+exit 0
+`);
+    const got = run(dir, { GH_TOKEN: "bad-pat", DISABLE_AUTOMERGE_FALLBACK_TOKEN: "actions" });
+    expect(got.status).toBe(0);
+    expect(got.stdout).toContain("already off");
+  });
+
+  it("fails when disable is rejected and auto-merge is still armed", () => {
+    const { dir } = fakeBin(`#!/bin/bash
+if [[ "$*" == *"--disable-auto"* ]]; then
+  echo "GraphQL: Resource not accessible by integration (disablePullRequestAutoMerge)" >&2
+  exit 1
+fi
+echo '{"autoMergeRequest":{"enabledAt":"2026-10-15T00:00:00Z"}}'
+exit 0
+`);
+    const got = run(dir, { GH_TOKEN: "bad-pat", DISABLE_AUTOMERGE_FALLBACK_TOKEN: "actions" });
+    expect(got.status).toBe(1);
+    expect(got.stdout).toContain("still armed");
   });
 });

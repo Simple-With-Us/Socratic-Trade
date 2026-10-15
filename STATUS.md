@@ -2,13 +2,14 @@
 
 ## 2026-10-15 Cursor Cloud — auto-merge CODEOWNERS globs (ST-3326)
 
-**What.**  `auto-merge-prs.yml` was fail-closing every PR because `gh api --jq -r` is two arguments (`accepts 1 arg(s), received 2`).  The CODEOWNERS money-path globs never ran.  The fetch is now one `--jq` expression.  A documented glob list is locked to CODEOWNERS.  The dry run disarms money-path diffs and `do-not-automerge`, and still arms a docs diff.
+**What.**  `auto-merge-prs.yml` was fail-closing every PR because `gh api --jq -r` is two arguments (`accepts 1 arg(s), received 2`).  The CODEOWNERS money-path globs never ran.  The fetch is now one `--jq` expression.  A documented glob list is locked to CODEOWNERS.  The dry run disarms money-path diffs and `do-not-automerge`, and still arms a docs diff.  Merged `origin/main` (`df7e6d10`) with a merge commit.  `check-pin` was failing because it preferred `GH_PACKAGES_TOKEN` (user 12656028) over the Actions token, then reported that user's HTTP 403 rate limit as a missing token.  Congress.Trade is read with the Actions token first.  `disable-on-*` treats "Resource not accessible by integration" as success when `autoMergeRequest` is null, and fails when a merge is still armed.  The disable test sets `NODE_ENV` so `tsc` accepts the env object.
 
 **Branch.**  `cursor/automerge-money-path-globs-2a65`
 
-**Verification.**  `npm run lint` exit 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exit 0.  `npm test` 9378 passed, 51 skipped, 25 failed in 12 files, none of them the auto-merge tests (sandbox LLM keys, notify creds, server-metrics host, cpuprofile, Twelve Data, Alpha Vantage).  `npm run build` exit 0.  Targeted vitest after the disable-token retry: 22/22.  Live workflow on this PR skipped `auto-merge` and skipped `disable-on-protected` (globs ran; this diff is not a money path).  `disable-auto` returned 401 on the elevated token and the job treated that as already-off.  The follow-up retries with the Actions token and fails the job if that is rejected too.
+**Verification.**  Earlier full gate: `npm run lint` exit 0 (0 errors, 854 warnings).  `npm test` 9378 passed, 51 skipped, 25 failed in 12 unrelated files.  `npm run build` exit 0.  After the CI follow-up: `npx tsc --noEmit` exit 0.  `npx vitest run test/disable-pr-automerge.test.ts test/shared-package-pin-check.test.ts test/automerge-gate-dry-run.test.ts test/branch-protection-gate.test.ts test/pr-touches-codeowners-paths.test.ts` 32 passed.  `npx eslint` on the touched JS and tests: 0 errors.
 
-**Next.**  PR #4697 is ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
+**Next.**  PR #4697 stays ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.  Leave ST-3326 In Progress until the fix has shipped.
+
 ## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
 
 **What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.
