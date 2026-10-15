@@ -8,7 +8,7 @@
 
 **Verification.**  `npx vitest run test/peer-db-fault-health.test.ts test/local-db-fault-classification.test.ts`; `npx tsc --noEmit`.
 
-**Next.**  PR #4694 — Kody flush-path fix landed (peer soft rows call `alertConnectionFailure`); awaiting `verify`.  Refs ST-3988.
+**Next.**  PR #4694 — merged `origin/main` at `761456c2`; Kody thread resolved; `verify` re-run.  Refs ST-3988.
 ## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
 
 **What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.
