@@ -4,7 +4,8 @@
 
 import fs from "fs";
 import path from "path";
-import { getDb } from "../db";
+import { z } from "zod";
+import { databasePath, getDb } from "../db";
 import { readRoicTranscriptArtifact } from "../roic-archive-artifacts";
 import {
   eightKReadPaths,
@@ -14,6 +15,7 @@ import {
   secArtifactReadPaths
 } from "./corpus-layout";
 import { bareSecAccession, parseItemCodeFromSection } from "./pinecone-write-class";
+import { sqliteAllOffLoop } from "./sqlite-all-offloop";
 
 export const HYDRATE_WALL_MS = 150;
 
@@ -217,12 +219,18 @@ function loadEightKSidecar(accession: string): string | null {
   return readFirstExistingSync(eightKReadPaths(accession, "main.txt"));
 }
 
-function hydrateFromFts(
+// ST-4542: the two statements below are unindexed scans (a GLOB over an FTS5 table and a LIKE
+// over earningscalls_transcripts.source_meta).  Run on the serving connection they were 39-51 s
+// native stalls in the 2026-10-15 profiles (hydrate-accession.ts, release 49a76da).  They are
+// read-only, so they go to the readonly worker pool, same SQL and same row handling.
+const FtsHydrateRowSchema = z.object({ content_hash: z.string().nullable(), text: z.string().nullable() });
+const TranscriptContentRowSchema = z.object({ content: z.string().nullable() });
+
+async function hydrateFromFts(
   accession: string,
   input: HydrateAccessionInput
-): HydrateAccessionResult | null {
+): Promise<HydrateAccessionResult | null> {
   try {
-    const db = getDb();
     const hash = String(input.content_hash ?? "").trim();
     const item = wantedItemCode(input.itemCode);
     const params: string[] = [accession, accession, accession];
@@ -247,7 +255,10 @@ function hydrateFromFts(
       sql += " ORDER BY content_hash";
     }
     sql += " LIMIT 8";
-    const rows = db.prepare(sql).all(...params) as Array<{ content_hash?: string; text?: string }>;
+    const rows = (await sqliteAllOffLoop(sql, params, databasePath(), FtsHydrateRowSchema)).map((row) => ({
+      content_hash: row.content_hash ?? undefined,
+      text: row.text ?? undefined
+    }));
     const texts = rows.map((row) => String(row.text ?? "").trim()).filter(Boolean);
     if (texts.length === 0) return null;
     return hit(texts.join("\n\n"), "fts", {
@@ -259,7 +270,7 @@ function hydrateFromFts(
   }
 }
 
-function hydrateTranscript(accession: string, input: HydrateAccessionInput): HydrateAccessionResult | null {
+async function hydrateTranscript(accession: string, input: HydrateAccessionInput): Promise<HydrateAccessionResult | null> {
   const match = TRANSCRIPT_ACC_RE.exec(accession);
   const symbolFromAcc = match?.[1]?.toUpperCase();
   const year = match ? Number(match[2]) : NaN;
@@ -280,15 +291,17 @@ function hydrateTranscript(accession: string, input: HydrateAccessionInput): Hyd
       if (row?.content) return hit(row.content, "transcript");
     }
     const like = `%${accession}%`;
-    const byMeta = db
-      .prepare(
-        `SELECT content FROM earningscalls_transcripts
+    const byMetaRows = await sqliteAllOffLoop(
+      `SELECT content FROM earningscalls_transcripts
          WHERE content IS NOT NULL AND length(content) > 80
            AND (source_meta LIKE ? OR lower(symbol) = lower(?))
          ORDER BY fiscal_year DESC, fiscal_quarter DESC
-         LIMIT 1`
-      )
-      .get(like, symbol || accession) as { content?: string } | undefined;
+         LIMIT 1`,
+      [like, symbol || accession],
+      databasePath(),
+      TranscriptContentRowSchema
+    );
+    const byMeta = byMetaRows[0] ? { content: byMetaRows[0].content ?? undefined } : undefined;
     if (byMeta?.content) return hit(byMeta.content, "transcript");
   } catch {
     // table may be absent
@@ -315,7 +328,7 @@ export async function hydrateAccession(input: HydrateAccessionInput): Promise<Hy
     if (!accession) return miss("invalid_accession");
 
     if (TRANSCRIPT_ACC_RE.test(accession)) {
-      const transcript = hydrateTranscript(accession, input);
+      const transcript = await hydrateTranscript(accession, input);
       if (transcript) return transcript;
       if (timedOut(started, input)) return miss("hydrate_budget");
       return miss("missing_local_copy");
@@ -346,11 +359,11 @@ export async function hydrateAccession(input: HydrateAccessionInput): Promise<Hy
     }
 
     if (timedOut(started, input)) return miss("hydrate_budget");
-    const fts = hydrateFromFts(accession, input);
+    const fts = await hydrateFromFts(accession, input);
     if (fts) return fts;
 
     if (timedOut(started, input)) return miss("hydrate_budget");
-    const transcript = hydrateTranscript(accession, input);
+    const transcript = await hydrateTranscript(accession, input);
     if (transcript) return transcript;
 
     return miss("missing_local_copy");
