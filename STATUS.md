@@ -39,8 +39,9 @@ resolved (Sentry's index-alignment finding verified fixed in `93da2abb`).
 
 **What.**  Round 1 on `cursor/st-quiver-coverage-sanitize-8696`.  The two Kody visual-coverage threads were
 already handled in a prior round (asked, not guessed).  This round the only new threads were two instances of
-one finding: the literal `playwright-e2e-auth-secret-32chars!!` duplicated as the `PLAYWRIGHT_AUTH_SECRET`
-fallback at `playwright.config.ts:19` and `test/e2e/playwright-session.ts:6`.
+one finding: a hardcoded `PLAYWRIGHT_AUTH_SECRET` fallback string (38 chars; not quoted here per rule 35)
+duplicated at `playwright.config.ts:19` and `test/e2e/playwright-session.ts:6` — removed from the tree in
+concurrent-agent follow-ups (`playwright-admin-auth.ts` + CI `openssl rand`).
 
 **Branch.**  `cursor/st-quiver-coverage-sanitize-8696`
 

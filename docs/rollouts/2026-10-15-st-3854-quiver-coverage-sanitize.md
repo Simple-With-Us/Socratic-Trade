@@ -40,8 +40,9 @@ Files:
 
 - The two Kody visual-coverage threads were already answered in a prior round (asked rather than guessed;
   the cited `visual-tests/` directory does not exist in this repo — coverage lives in `test/e2e/visual.spec.ts`).
-- Two new threads, one finding: the literal `playwright-e2e-auth-secret-32chars!!` duplicated as the
-  `PLAYWRIGHT_AUTH_SECRET` fallback at `playwright.config.ts:19` and `test/e2e/playwright-session.ts:6`.
+- Two new threads, one finding: a hardcoded `PLAYWRIGHT_AUTH_SECRET` fallback string (38 chars, punctuation
+  suffix) duplicated at `playwright.config.ts:19` and `test/e2e/playwright-session.ts:6` — **not** quoted in
+  this doc (rule 35); the literal was removed from the tree in `636ef4d0` / follow-ups.
 - Round cap: 0 prior `[codex-autofix]` commits on this branch (the 9 `[codex-autofix]` commits visible in
   `git log` belong to `main`'s history, not this branch).
 
