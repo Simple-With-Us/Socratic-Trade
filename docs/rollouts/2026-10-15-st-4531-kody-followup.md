@@ -20,9 +20,11 @@ PR #4696 merged with Kody `CHANGES_REQUESTED` threads still open and `docs/rollo
 ```bash
 npm run lint  # -> ok
 npx tsc --noEmit  # -> ok
-npm test  # -> ok
+npm test  # -> 10 failures reported in test/llm-provider.test.ts and test/openrouter-credits.test.ts; not run in this landing lane
 npm run build  # -> ok
 ```
+
+The earlier `npm test  # -> ok` annotation was inaccurate and is corrected here.  A prior lane report says those 10 failures also reproduce on `origin/main`; this landing lane did not independently rerun the full suite on main.  The actual checks run for this landing lane are recorded below.
 
 ## Next Steps & Blockers
 
