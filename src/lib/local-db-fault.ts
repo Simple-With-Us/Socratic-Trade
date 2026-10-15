@@ -58,13 +58,14 @@ const DEPENDENCY_DB_CONTENTION_SQLITE_PATTERNS: RegExp[] = [
  */
 export function isDependencyDbContentionMessage(message: string | null | undefined): boolean {
   if (!message) return false;
+  const hasContention = DEPENDENCY_DB_CONTENTION_SQLITE_PATTERNS.some((pattern) => pattern.test(message));
+  if (!hasContention) return false;
   if (/D1 batch error/i.test(message)) return true;
   const fromAppA =
     /App A reported ok=/i.test(message) ||
     /App A accepted fewer rows/i.test(message) ||
     /import rejected rows/i.test(message);
-  if (!fromAppA) return false;
-  return DEPENDENCY_DB_CONTENTION_SQLITE_PATTERNS.some((pattern) => pattern.test(message));
+  return fromAppA;
 }
 
 /** Sentry `health.failure_class` for peer-app DB contention (must not route as `hard`). */

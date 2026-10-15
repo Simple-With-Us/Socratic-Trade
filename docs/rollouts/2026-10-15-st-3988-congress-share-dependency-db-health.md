@@ -17,7 +17,10 @@ peer-app write contention, not a broken share connection, and must expose the cl
 - `connectionHealthFailureClass` helper; detailed `/api/health` (ops token) includes
   `lastFailure` + `failureClass` on `checks.dependencies.*` (stripped from anonymous view).
 - Tests: `test/congress-share-dependency-db-health.test.ts`, assertion in
-  `test/local-db-fault-classification.test.ts`.
+  `test/local-db-fault-classification.test.ts`, ST-3092 Dockerfile/liveness pins in
+  `test/live-route.test.ts` (ported from closed duplicate PR #4709).
+- `isDependencyDbContentionMessage` requires SQLite lock/busy patterns before matching `D1 batch
+  error` (Seer review on #4706).
 
 ## Decisions & Trade-offs
 

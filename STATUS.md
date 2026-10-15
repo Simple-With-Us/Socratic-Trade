@@ -6,9 +6,11 @@
 
 **Branch.**  `cursor/st-3988-congress-share-health-classifier-4a0e`
 
-**Verification.**  `npx vitest run test/congress-share-dependency-db-health.test.ts test/local-db-fault-classification.test.ts test/connection-health-routing.test.ts test/health-transient-network-classification.test.ts` green.  `npx tsc --noEmit`, `npm run lint` 0 errors.
+**Verification.**  Merged `origin/main` (2026-10-15).  Seer thread: D1 batch errors require lock/busy
+patterns.  ST-3092 `live-route` Dockerfile pins from #4709.  Full `npm run lint`, `npx tsc --noEmit`,
+`npm test`, `npm run build` before push.
 
-**Next.**  PR ready for review; merge/deploy per owner.
+**Next.**  PR #4706 ready for review; Deployer merges.
 ## 2026-10-15 Cursor Cloud — remove ST primary Infisical bridge (ST-4318)
 
 **What.**  Permanent removal of the default-off Usage Monitor credential bridge writer: module, tests, scheduler lane, `/api/keys` triggers, and active env/backlog/docs setup.  Per-user encrypted API keys and tombstone behavior unchanged.

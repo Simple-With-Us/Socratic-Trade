@@ -90,4 +90,12 @@ describe("congress-share dependency DB contention (ST-3988)", () => {
     expect(connectionHealthFailureClass(congressD1Error)).toBe("dependency-db-contention");
     expect(connectionHealthFailureClass("HTTP 401 Unauthorized")).toBeNull();
   });
+
+  it("does not treat non-contention D1 batch errors as dependency-db-contention", async () => {
+    const { isDependencyDbContentionMessage } = await import("../src/lib/local-db-fault");
+    const schemaFailure =
+      'App A reported ok=false with 1 error(s); first: "WMT price: D1 batch error: UNIQUE constraint failed"';
+    expect(isDependencyDbContentionMessage(schemaFailure)).toBe(false);
+    expect(isDependencyDbContentionMessage('D1 batch error: table missing: congress_trades')).toBe(false);
+  });
 });
