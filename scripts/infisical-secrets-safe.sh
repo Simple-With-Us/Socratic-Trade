@@ -4,8 +4,12 @@
 # Usage:
 #   bash scripts/infisical-secrets-safe.sh set KEY=VALUE --projectId ID [--env prod]
 #   bash scripts/infisical-secrets-safe.sh has KEY --projectId ID [--env prod]
+#   bash scripts/infisical-secrets-safe.sh get KEY --projectId ID [--env prod] [--path /]
 #   bash scripts/infisical-secrets-safe.sh names --projectId ID [--env prod]
 #   bash scripts/infisical-secrets-safe.sh delete KEY --projectId ID --env prod
+#
+# `get` is GitHub Actions only (GITHUB_ACTIONS=true) and allowlists Zulip ops keys
+# for CI env injection; agents must use has/names in interactive sessions.
 #
 # Environment (owner 2026-10-10):  prod is the only Infisical environment;  dev
 # and staging are retired.  The infisical CLI defaults to --env dev, so a call
@@ -77,7 +81,7 @@ normalize_env() {
 }
 
 cmd="${1:-}"; shift || true
-[ -n "$cmd" ] || die "missing command (set|has|names|delete)"
+[ -n "$cmd" ] || die "missing command (set|has|get|names|delete)"
 
 # Reject known-leaky patterns if someone passes them by mistake
 for a in "$@"; do
@@ -123,6 +127,21 @@ case "$cmd" in
       exit 1
     fi
     info "present key=$key len=${#val}"
+    ;;
+  get)
+    key="${1:-}"; shift || true
+    [ -n "$key" ] || die "usage: get KEY --projectId ID [--env prod] [--path PATH]"
+    if is_llm_runtime_key "$key"; then
+      die "refusing to get $key — LLM runtime keys must not live in Infisical for Socratic-Trade"
+    fi
+    case "$key" in
+      ZULIP_EMAIL|ZULIP_API_KEY|ZULIP_SITE) ;;
+      *) die "refusing get for $key — allowlist is Zulip ops keys only"
+    esac
+    [ "${GITHUB_ACTIONS:-}" = "true" ] || die "get is GitHub Actions only; use has/names in agent sessions"
+    normalize_env "$@"
+    val="$(infisical secrets get "$key" --plain "${ENV_ARGS[@]}" 2>/dev/null || true)"
+    printf '%s' "$val"
     ;;
   names)
     normalize_env "$@"

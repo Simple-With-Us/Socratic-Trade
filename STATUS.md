@@ -6,9 +6,9 @@
 
 **Branch.**  `cursor/st-4531-retire-slack-callers-89ad` (merged `origin/main` 2026-10-15).
 
-**Verification.**  `bash -n` on touched scripts; `alert-deploy-freshness.selftest.sh` 9/9; `npm run lint` 0 errors; `tsc`; `npm run build`; PR #4696 `verify` CI green @ `7899c435`.
+**Verification.**  Kody fixes: `infisical-secrets-safe.sh get` (Actions-only) for Zulip triple; rollout verification `-> ok` lines; fleet-post stderr surfacing.  Re-run `verify` CI after push.
 
-**Next.**  PR #4696 ready for Deployer merge; Refs ST-4531.
+**Next.**  PR #4696 ready for Deployer merge after CI green; Refs ST-4531.
 ## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
 
 **What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.

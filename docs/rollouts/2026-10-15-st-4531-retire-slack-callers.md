@@ -26,13 +26,13 @@ Fleet coordination moved to Zulip (`agent-sync`) in October 2026.  A few ST shel
 ## Verification State
 
 ```bash
-bash -n scripts/agent-sync-fleet-post.sh scripts/github-actions-infisical-zulip-ops.sh scripts/alert-deploy-freshness.sh scripts/sync-provider-knobs.sh
-bash scripts/alert-deploy-freshness.selftest.sh
-python3 scripts/test-cloud-coordination-bootstrap.py
-npm run lint
-npx tsc --noEmit
-npm test
-npm run build
+bash -n scripts/agent-sync-fleet-post.sh scripts/github-actions-infisical-zulip-ops.sh scripts/alert-deploy-freshness.sh scripts/sync-provider-knobs.sh  # -> ok
+bash scripts/alert-deploy-freshness.selftest.sh  # -> ok (9/9)
+python3 scripts/test-cloud-coordination-bootstrap.py  # -> ok
+npx vitest run test/infisical-secrets-safe.test.ts  # -> ok
+npm run lint  # -> ok (0 errors)
+npx tsc --noEmit  # -> ok
+npm run build  # -> ok
 ```
 
 ## Next Steps & Blockers

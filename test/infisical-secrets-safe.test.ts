@@ -44,7 +44,7 @@ afterAll(() => {
   rmSync(work, { recursive: true, force: true });
 });
 
-function run(args: string[]) {
+function run(args: string[], extraEnv: Record<string, string> = {}) {
   const log = join(work, `log-${counter++}.txt`);
   const result = spawnSync("/bin/bash", [SCRIPT, ...args], {
     encoding: "utf8",
@@ -52,7 +52,8 @@ function run(args: string[]) {
       PATH: `${stubDir}:/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin`,
       HOME: work,
       STUB_LOG: log,
-      NODE_ENV: "test"
+      NODE_ENV: "test",
+      ...extraEnv
     }
   });
   const calls = existsSync(log)
@@ -98,6 +99,26 @@ describe("infisical-secrets-safe.sh is prod-only", () => {
 
   it("set: still refuses LLM runtime key names", () => {
     const r = run(["set", "GEMINI_API_KEY=x", "--projectId", "proj", "--env", "prod"]);
+    expect(r.status).not.toBe(0);
+    expect(r.calls).toEqual([]);
+  });
+
+  it("get: refuses outside GitHub Actions", () => {
+    const r = run(["get", "ZULIP_EMAIL", "--projectId", "proj", "--path=/"]);
+    expect(r.status).not.toBe(0);
+    expect(r.calls).toEqual([]);
+    expect(r.stderr).toMatch(/GitHub Actions only/);
+  });
+
+  it("get: returns plain value in Actions with --env prod", () => {
+    const r = run(["get", "ZULIP_EMAIL", "--projectId", "proj", "--path=/"], { GITHUB_ACTIONS: "true" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("stub-value-not-a-secret");
+    expect(r.calls).toEqual([["secrets", "get", "ZULIP_EMAIL", "--plain", "--projectId", "proj", "--path=/", "--env", "prod"]]);
+  });
+
+  it("get: refuses non-allowlisted keys even in Actions", () => {
+    const r = run(["get", "SOME_KEY", "--projectId", "proj"], { GITHUB_ACTIONS: "true" });
     expect(r.status).not.toBe(0);
     expect(r.calls).toEqual([]);
   });

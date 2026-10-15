@@ -10,6 +10,9 @@
 # present.  Keep pure ASCII (AGENTS.md: operator shell scripts).
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INFISICAL_SAFE="${SCRIPT_DIR}/infisical-secrets-safe.sh"
+
 INFISICAL_CLI_VERSION="${INFISICAL_CLI_VERSION:-0.43.98}"
 BIN_DIR="${GITHUB_ACTIONS_INFISICAL_BIN:-${GITHUB_WORKSPACE:-.}/.ci-bin}"
 
@@ -85,8 +88,8 @@ printf '::add-mask::%s\n' "${TOKEN//'%'/'%25'}"
 
 fetch_one() {
   local name="$1"
-  INFISICAL_TOKEN="$TOKEN" infisical secrets get "$name" \
-    --plain --silent --telemetry=false --expand=false \
+  [ -x "$INFISICAL_SAFE" ] || skip "infisical-secrets-safe.sh missing (Zulip notify disabled)."
+  INFISICAL_TOKEN="$TOKEN" GITHUB_ACTIONS=true "$INFISICAL_SAFE" get "$name" \
     --projectId="$INFISICAL_PROJECT_ID" --env=prod --path=/ \
     2>/dev/null || true
 }

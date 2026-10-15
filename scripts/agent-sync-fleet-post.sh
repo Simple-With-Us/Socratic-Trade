@@ -43,7 +43,20 @@ BIN="$(resolve_bin)" || {
 }
 
 PREFixed="repo: ${REPO_NAME} | [${SEAT}->FLEET] ${MSG}"
-if ! "$BIN" post --channel "$CHANNEL" --topic "$TOPIC" --as "$SEAT" --no-tag "$PREFixed" 2>/dev/null; then
+# agent-sync post documents --channel (default agent-sync) and --no-tag; omit default channel.
+post_args=(post --topic "$TOPIC" --as "$SEAT" --no-tag)
+if [ "$CHANNEL" != "agent-sync" ]; then
+  post_args+=(--channel "$CHANNEL")
+fi
+err_file="$(mktemp "${TMPDIR:-/tmp}/agent-sync-fleet-post.XXXXXX")" || err_file="/tmp/agent-sync-fleet-post.err"
+if ! "$BIN" "${post_args[@]}" "$PREFixed" 2>"$err_file"; then
+  if [ -s "$err_file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      printf '[agent-sync-fleet-post] %s\n' "$line" >&2
+    done <"$err_file"
+  fi
+  rm -f "$err_file"
   echo "[agent-sync-fleet-post] post failed (Zulip credentials missing or rejected)" >&2
   exit 0
 fi
+rm -f "$err_file"
