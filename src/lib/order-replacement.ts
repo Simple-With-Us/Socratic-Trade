@@ -10,6 +10,7 @@ import { listStaleLimitOrders } from "./stale-limit-orders";
 import { sqliteYieldRetry } from "./sqlite-event-loop";
 import { autoReplaceProvenanceSkipReason } from "./order-provenance";
 import { normalizeSymbol } from "./money";
+import { isTradierSandboxOpenDeferralMessage } from "./tradier-transient";
 import type { BrokerGateway, ConnectedAccount, EquityOrder, EquityOrderInput, EquityPosition, ExecutionMode, TradingPolicy } from "./types";
 
 // P2.7: a single 750ms wait was too short for Alpaca cancel settlement — cancel accepted but
@@ -535,6 +536,22 @@ async function stepReplacementState(
         input.fence?.();
         execution = await input.gateway.placeEquityOrder({ ...marketOrder, refId: row.replacement_ref_id });
       } catch (error) {
+        // Tradier sandbox open deferral is a definitive pre-POST refusal: nothing
+        // reached the broker.  Release the claim back to cancel_confirmed so the
+        // next tick places the market replacement once the 9:46am ET window opens,
+        // instead of parking it as ambiguous and later failing (unhedged position).
+        const deferralMessage = error instanceof Error ? error.message : String(error);
+        if (isTradierSandboxOpenDeferralMessage(deferralMessage)) {
+          audit(
+            "order_replace_market_deferred_sandbox_open",
+            { orderId: originalOrder.id, symbol, remainingQuantity, cancelResult: row.cancel_result, error: deferralMessage },
+            userId,
+            input.policy.connectedAccountId
+          );
+          db.prepare(`UPDATE order_replacements SET status = 'cancel_confirmed', error = ?, updated_at = ? WHERE id = ? AND status = 'replacement_claiming'`)
+            .run(deferralMessage, new Date().toISOString(), row.id);
+          return;
+        }
         // Transition to replacement_submitted instead of failing — the broker may have
         // accepted the market order before our connection dropped or timed out.
         // The replacement_submitted reconciliation branch looks up the broker
