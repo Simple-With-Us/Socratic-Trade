@@ -40,6 +40,19 @@ jobs:
       - name: Install fleet coordination CLI
         run: bash scripts/install-fleet-coordination.sh
 
+      - name: Load ST ops Zulip credentials from Infisical
+        env:
+          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          set +o xtrace
+          bash -n scripts/github-actions-infisical-zulip-ops.sh
+          bash scripts/github-actions-infisical-zulip-ops.sh
+
       - name: Previous freshness conclusion (Zulip de-dupe)
         id: prev
         env:
@@ -67,9 +80,6 @@ jobs:
           DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION: ${{ steps.prev.outputs.conclusion }}
           DEPLOY_FRESHNESS_TREAT_UNREACHABLE: "1"
           FLEET_NOTIFY_SEAT: ST
-          ZULIP_EMAIL: ${{ secrets.ST_OPS_ZULIP_EMAIL }}
-          ZULIP_API_KEY: ${{ secrets.ST_OPS_ZULIP_API_KEY }}
-          ZULIP_SITE: ${{ secrets.ST_OPS_ZULIP_SITE }}
         shell: bash
         run: |
           set -euo pipefail

@@ -15,9 +15,11 @@ keeping Sentry failure reporting when production is stale.
   helper (Sentry exit codes unchanged).
 - `scripts/sync-provider-knobs.sh` posts knob applies to topic `knob sync`.
 - `scripts/codex-coordination.sh` uses Zulip (`agent-sync`) instead of Slack Web API.
-- `.github/workflows/deploy-freshness.yml` installs fleet coordination and expects
-  GitHub Actions secrets `ST_OPS_ZULIP_EMAIL`, `ST_OPS_ZULIP_API_KEY`,
-  `ST_OPS_ZULIP_SITE` (ST ops bot).  Missing secrets keep notify a no-op; the job
+- `scripts/github-actions-infisical-zulip-ops.sh` — Actions-only Infisical fetch for the ST
+  ops Zulip triple (soft-fail).
+- `.github/workflows/deploy-freshness.yml` installs fleet coordination and loads the
+  ST ops Zulip triple from Infisical `prod` via `github-actions-infisical-zulip-ops.sh`
+  (same machine identity as `ios-ship.yml`).  Missing keys keep notify a no-op; the job
   still fails on stale deploys for Sentry.
 - Updated `scripts/com.jay.provider-knob-sync.plist`, Codex setup, Claude skills,
   and `docs/deployment.md`.  Marked `scripts/slack-sync.sh` retired for ops posts.
@@ -33,7 +35,7 @@ keeping Sentry failure reporting when production is stale.
 ## Verification State
 
 ```bash
-bash -n scripts/fleet-zulip-notify.sh scripts/alert-deploy-freshness.sh scripts/sync-provider-knobs.sh scripts/codex-coordination.sh
+bash -n scripts/fleet-zulip-notify.sh scripts/github-actions-infisical-zulip-ops.sh scripts/alert-deploy-freshness.sh scripts/sync-provider-knobs.sh scripts/codex-coordination.sh
 bash scripts/fleet-zulip-notify.selftest.sh
 bash scripts/alert-deploy-freshness.selftest.sh
 npm run lint
@@ -44,8 +46,10 @@ npm run build
 
 ## Next Steps & Blockers
 
-- **Owner:** add GitHub Actions secrets for the ST ops Zulip bot if deploy-freshness
-  should page `#agent-sync` in addition to Sentry (`ST_OPS_ZULIP_*`).
+- **Owner:** ensure Infisical `prod` (ST app project) holds `ZULIP_EMAIL`,
+  `ZULIP_API_KEY`, and `ZULIP_SITE` for the ST ops bot if deploy-freshness should page
+  `#agent-sync` in addition to Sentry.  No new GitHub repo secrets beyond the existing
+  Infisical machine identity.
 - **Owner:** Mac provider-knob launchd job needs `~/.secrets/Zulip/Claude-zuliprc`
   (or `ZULIP_RC`) for post-on-change notices.
 

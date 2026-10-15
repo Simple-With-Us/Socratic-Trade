@@ -9,10 +9,10 @@ still fails the deploy-freshness workflow on stale production.
 
 **Branch.**  `cursor/retire-slack-operational-callers-0e77`
 
-**Blocker for live Zulip pages from Actions.**  Repo secrets `ST_OPS_ZULIP_EMAIL`,
-`ST_OPS_ZULIP_API_KEY`, `ST_OPS_ZULIP_SITE` (ST ops bot) are not set in this
-environment; add them in GitHub if Jay wants CI stale alerts in Zulip as well as
-Sentry.
+**Zulip from Actions.**  Deploy-freshness loads `ZULIP_EMAIL` / `ZULIP_API_KEY` /
+`ZULIP_SITE` from Infisical `prod` via the existing machine identity (see
+`scripts/github-actions-infisical-zulip-ops.sh`).  Notify is a no-op when those
+Infisical keys or identity are absent; Sentry stale failure is unchanged.
 
 **Verification.**  Shell selftests pass; full `npm run lint`, `npx tsc --noEmit`,
 `npm test`, `npm run build` on branch head.
