@@ -311,7 +311,7 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 
 **What.**  Renovate `eslint` v10 failed `verify` when the lockfile left `eslint-config-next@16.3.8` (PR #4325).  Rebased lock with `eslint-config-next@16.4.0` passes lint; grouped `eslint` + `eslint-config-next` in Renovate to avoid stale-preset repeats.
 
-**Branch.**  `cursor/block-eslint-10-renovate-5081` (ready PR; supersedes #4691)
+**Branch.**  `cursor/block-eslint-10-renovate-5081` — PR #4710 (ready; supersedes #4691)
 
 **Verification.**  `npm run lint` 0 errors.  Full `tsc` / `vitest` / `build` before push.
 
