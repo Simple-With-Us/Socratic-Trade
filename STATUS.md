@@ -1,5 +1,52 @@
+## 2026-10-15 CODEX — PR #4662 takeover
+
+Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `cursor/embed-context-retrieval-pressure-3d40` with merge commit `f433f89057262a1b28428d6d91f549b501371d2c`.  No conflicts; no unresolved review threads.  Lint (0 errors), TypeScript, 34 focused tests, and production build pass locally.  Next: compare the reported full-suite failures with main CI, push the merge, drive required checks green, arm auto-merge, and confirm merge.  Leave Sentry 2G and 2E open until live-open validation.
+
 # Current Status
 
+## 2026-10-15 Codex Autofix — PR #4662 merge main at 3f4ef5e5, no review finding open
+
+**What.**  `origin/main` advanced to `3f4ef5e5` (ST-2582 "Approve succeeds only when the broker order is placed", #4698) while PR #4662 was open, and GitHub moved it from BLOCKED to `CONFLICTING`.  Merged main in.  One content conflict in `docs/phase-7-strategy.md` — main added the 2026-10-15 approve entry directly above this PR's 2026-10-14 embed entry — resolved by keeping both, newest first.  `PLAN.md` and `STATUS.md` auto-merged with both entries intact.
+
+**No code change on this pass.**  All ten review threads were already resolved when this run started, and every comment in the triggering `cursor[bot]` review was an explicit no-change disposition.  Re-read each against the head code rather than trusting the resolved checkbox: the global backoff and the slot-queue/outer-deadline ordering are the SOCRATIC-TRADE-2G fix and the #2961 stall guard; the `embedBudgetUnits` memoization Kody asked for is already in the head (Kody retracted it itself after re-reading); and the "unhandled rejection" label on the multi-text split was wrong, since the two awaits are sequential and returning the left half alone would desync piece indexes against `validateDocumentEmbeddingBatch`.  Kody re-reviewed from scratch at 11:02Z and returned no new findings.
+
+**Verification.**  `npx tsc --noEmit` ok.  `npm test` was 9395 passed, 51 skipped, 13 failed across `llm-provider`, `chat-llm`, `openrouter-credits`, and `framework-review` — all sandbox-credential failures that reproduce identically on a clean `origin/main` worktree at `3f4ef5e5` (same four files, 13 failed / 47 passed).  Not from this diff.  `npm run build` ok.
+
+**Docs.**  This entry, `docs/rollouts/2026-10-14-embed-context-retrieval-pressure.md`, `docs/phase-7-strategy.md`.
+
+**Next.**  Hosted `verify` re-runs on the push that carries this merge.  Auto-merge stays armed; do not merge the PR from this lane.
+
+## 2026-10-14 GROK — PR #4662 merge main and review triage
+
+**What.**  Merged `origin/main` (`82162336`, #4663 fleet fully-dark detector) into `cursor/embed-context-retrieval-pressure-3d40`.  Git reported no conflicts.  The two unresolved Sentry threads were re-read at this head and left unchanged.
+
+**Not fixed on purpose.**  `noteRetrievalPressureFailure` still opens a process-global backoff and drops queued retrieval slots.  That is the SOCRATIC-TRADE-2G burst behavior, covered by `test/retrieval-pressure.test.ts`.  `acquireRetrievalSlot` still runs before `createRagQueryAbort`, and the outer `withStrategyRagRetrievalDeadline` still includes queue wait so a queued caller cannot stall the trading loop.  `RAG_QUERY_IO_DEADLINE_MS` is unchanged.  Threads were not resolved.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted vitest (embed pack, retrieval pressure, chunk cap, embedding integrity, trading liveness, batched halt cause, retrieval deadline, multi-query) 86 passed.  Full `npm test` was 9313 passed, 51 skipped, 3 failed outside this diff: `test/data-catalog-completeness.test.ts` against the local database, `test/egress-guard.test.ts` live DNS to discord.com, and a timing assertion in `test/event-loop-stall-hot-path.test.ts`.  Hosted `verify` on `cb81627e` (the parent of this merge) was green, including `npm test` and `npm run build`.
+
+**Docs.**  This entry, `PLAN.md`, `docs/rollouts/2026-10-14-embed-context-retrieval-pressure.md`.
+
+**Next.**  Hosted `verify` re-runs on the push that carries this merge.  Do not merge the PR from this lane.  Do not resolve the two Sentry threads.
+
+## 2026-10-14 Codex Autofix — PR #4662 ingest-budget memoization
+
+**What.**  Review pass on the embed-context branch.  `embedBudgetUnits` (a char-walk plus binary-search truncation) was computed twice for the same strings on the ingest over-budget path — once in the `budgetInputs` reduce and again inside `prefixCountWithinEmbedUnits` — and once per copy when `budgetInputs` repeats a text.  The reduce now memoizes units per exact text and passes that map to the prefix walk through a new optional `precomputedUnits` argument, which falls back to computing on a miss.  Additive, so existing callers and tests are unaffected.  `test/embed-request-pack.test.ts` gained a case asserting the precomputed and un-precomputed walks agree, including a partial map.
+
+**Not fixed on purpose.**  The open Kody thread proposing an embed-circuit pre-check before `acquireRetrievalSlot` is a behavior change, not a mechanical fix: that ordering would suppress the OpenRouter to SiliconFlow query rescue which runs while the OpenRouter circuit is open, and would stop serving embeddings `getCachedQueryEmbedding` already holds.  Left open for a maintainer decision.
+
+**Review triage.**  Five of the eight threads on the PR were already resolved and outdated from earlier passes on this branch.  Two Sentry threads remain open; Sentry's bug-prediction bot is not one of the three review bots this fixer answers, so they were neither fixed nor resolved here.
+
+**Docs.**  `docs/rollouts/2026-10-14-embed-context-retrieval-pressure.md`, `STATUS.md`.
+
+## 2026-10-14 CURSOR — embed context budget and retrieval pressure
+
+**What.**  OpenRouter `baai/bge-m3` embed POSTs are truncated or chunked to a token-aware 7500 budget (digits, `$`, and `|` count as one token each) and mean-pooled back to one vector per document.  A context-length 400 on a multi-text group splits that group.  A singleton truncates once.  Strategy retrieval concurrency defaults to 4, and a timeout opens a backoff that fails later calls closed without another "RAG retrieval failed" page.  A success does not clear a backoff that a sibling opened after the call took its slot.  The 15s deadline is unchanged.  Ingest budget units are windows of that same 7500, not a raised daily cap.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  Follow-up `npm test` after the split and epoch fix was 9282 passed, 51 skipped, and 25 failed outside this diff: sandbox provider keys are set, so tests that expect no OpenRouter/Anthropic key fail, plus the local data-catalog database and the cpu-profile script.  Embed, retrieval-pressure, chunk-cap, and embedding-integrity tests are not in that fail list.
+
+**Docs.**  `docs/rollouts/2026-10-14-embed-context-retrieval-pressure.md`, `docs/phase-7-strategy.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Ready for review.  Do not merge from this lane.  Sentry 2G and 2E stay open until production shows the burst and the context-length 400 are gone.  Fleet `board whoami` could not run on this seat (no Linear or Zulip credentials).  The unfiled claim is team ST, In Progress, title "Fit embed input to the bge-m3 token budget and back off retrieval bursts", Completed only after merge.
 ## 2026-10-15 CODEX — iOS sign-out caches and money-action results (ST-2578)
 
 PR #4713 is merged with `origin/main` through `3b8e3e4b`.  The shared URL-cache XCTest race is fixed with per-session ephemeral cache/cookie stores, and sign-out clears the cookie store used by its client.  CI on the pre-#4737 final content passed, including 273 iOS tests and full `verify-hosted`.  Local lint, TypeScript, and build pass after merging #4737.  Jay directed auto-merge after required checks pass; the unique diff remains the ten iOS/handoff paths.
