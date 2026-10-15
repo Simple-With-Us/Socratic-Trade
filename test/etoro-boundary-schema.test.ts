@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { upsertConnectedAccount } from "../src/lib/db";
-import { getEToroGateway } from "../src/lib/etoro";
+import { EtoroRatesResponseSchema, getEToroGateway } from "../src/lib/etoro";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-etoro-schema-${randomUUID()}.db`)}`;
@@ -63,5 +63,6 @@ describe("eToro boundary schemas", () => {
 
     const gateway = getEToroGateway("local", "acct-etoro-schema");
     await expect(gateway.getEquityQuotes("ETORO-SCHEMA", ["AAPL"])).rejects.toThrow();
+    expect(() => EtoroRatesResponseSchema.parse({ rates: "nope" })).toThrow();
   });
 });

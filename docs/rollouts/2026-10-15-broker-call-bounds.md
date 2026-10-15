@@ -42,7 +42,7 @@ Linear ST-2570.  A broker call with no deadline could run forever, and the prote
 - A health-probe timeout is still not a first-strike halt.  The existing streak logic is unchanged.  The new behavior is that the probe cannot pin later accounts' stops and exits, and an in-run probe timeout fails that run instead of leaving it `running`.
 - The stale-exit in-flight test used to require the guard to stay held past the deadline.  That contract was for a cancel-replace already in flight.  A read that never reaches remediation now releases the guard.  The test matches that.
 - Sentry review on the abort check: returning after `claimSyntheticStop` without `revertSyntheticStopClaim` left the row `triggered` until `REARM_CONFIRM_GRACE_MS` (15 minutes).  The abort path now reverts the claim and keeps `last_attempt_ref_id`.  It does not continue the loop, so a later symbol is not sold after the lane has aborted.
-- Kody rules [18] and [29] on the eToro rates and eligibility bodies: those two responses now go through Zod (`passthrough`, nullish lists) before a row is read.  A body that is not an array or the documented envelope throws.  Other eToro casts were already on `main` and are not part of this pass.
+- Kody rules [18] and [29] on the eToro rates and eligibility bodies: those two responses now go through Zod (`passthrough`, nullish lists) before a row is read.  A body that is not an array or the documented envelope throws.  The four schemas are exported (`EtoroRateRowSchema`, `EtoroRatesResponseSchema`, `EtoroEligibilityRowSchema`, `EtoroEligibilityResponseSchema`) so a test can parse the envelope directly.  Other eToro casts were already on `main` and are not part of this pass.
 
 ## Verification State
 
