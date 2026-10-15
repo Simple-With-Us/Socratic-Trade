@@ -117,6 +117,8 @@ Merged `origin/main` again at `df7e6d10` (Congress.Trade push receipt).  `Alpaca
 
 Merged `origin/main` again at `3f4ef5e5` (honest approve).  The placement-reconcile stub kept its provider `asOf`.  Auto-merge was disabled.  `do-not-automerge` stays.
 
+Merged `origin/main` again at `2075c857` (ST-4531 Slack callers now post to Zulip).  STATUS.md auto-merged.  No quote-path conflict.  CI on `2a2ed285` was green (classify, verify-hosted, verify).  Four review threads stay open: Tradier cascade clear, Kalshi authority, Tradier realtime-book exclusion, and the missing-asOf fetchedAt fallback.  Webull `close` and the Alpaca schema export are resolved.
+
 ## Next Steps & Blockers
 
 Open the PR ready for review.  Add `do-not-automerge`.  Do not enable auto-merge.  Post the PR link on ST-2584.  Leave the issue In Progress until merge.

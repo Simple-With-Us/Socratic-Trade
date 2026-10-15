@@ -6,9 +6,10 @@
 
 **Branch.**  `cursor/quote-observation-staleness-99f5`
 
-**Verification.**  Merged `origin/main` through `3f4ef5e5`.  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  CI on `6b556f3d` was green.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
+**Verification.**  Merged `origin/main` through `2075c857`.  `npm run lint` exit 0.  `npx tsc --noEmit` exit 0.  CI on `2a2ed285` was green before this merge.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
 
 **Next.**  PR ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
+
 ## 2026-10-15 Cursor Cloud — ST-4531 retire Slack callers
 
 **What.**  Remaining ST Slack posts (deploy-freshness notify, provider-knob sync, `slack-sync.sh post`, Codex coordination helper) now use Zulip via `agent-sync-fleet-post.sh` / `agent-sync`.  Deploy-freshness workflow drops `SLACK_BOT_TOKEN` and loads the ST ops Zulip triple from Infisical prod at runtime (`github-actions-infisical-zulip-ops.sh` via `infisical-secrets-safe.sh get`).  Kody blockers: Rule 49 safe Infisical path, Rule 26 rollout verify outcomes, plist template cleanup.
