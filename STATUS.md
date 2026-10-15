@@ -313,9 +313,9 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 
 **Branch.**  `cursor/text-payload-compression-3897`
 
-**Verification.**  `npx vitest run test/text-payload-codec.test.ts test/audit-hygiene.test.ts test/sec-facts.test.ts` 22/22.
+**Verification.**  Targeted vitest 22/22 plus transcript/reembed/hydrate/local-complete/memory-decay 75/75.  `npx tsc --noEmit` clean.  eslint on touched files 0 errors.  `npm test` 9379 passed, 51 skipped, 25 failed in unrelated suites (llm keys, notify, server-metrics, cpuprofile, alpha-vantage, data-providers).  None import the new codec.
 
-**Next.**  Open PR ready for review.  Full lint, tsc, vitest, and build on the PR gate.
+**Next.**  PR #4720 ready for review.  `npm run build` exited 0.
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 

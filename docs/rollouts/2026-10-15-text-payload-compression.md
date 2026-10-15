@@ -50,9 +50,23 @@ Space, using the given production sizes and a conservative English gzip-plus-bas
 
 ```bash
 npx vitest run test/text-payload-codec.test.ts test/audit-hygiene.test.ts test/sec-facts.test.ts
+# 22 passed
+npx vitest run test/earningscalls-transcripts.test.ts test/corpus-reembed.test.ts test/hydrate-accession.test.ts test/persist-local-complete.test.ts test/memory-decay.test.ts
+# 75 passed
+npx tsc --noEmit
+# clean
+npx eslint <touched files>
+# 0 errors, 3 pre-existing warnings in scheduler.ts and sec-facts.ts
+npm test
+# 9379 passed, 51 skipped, 25 failed.  Failures are outside this diff:
+# alpha-vantage-key-pool, chat-llm, cpuprofile-summary, data-providers,
+# framework-review, llm-provider, notify-body-tiers, notify-user-creds,
+# openrouter-credits, persistence-notification, red-team, server-metrics.
+# The llm/openrouter cluster matches the sandbox OPENROUTER_API_KEY fixture
+# already noted on 2026-10-15 in STATUS.md.
+npm run build
+# exit 0
 ```
-
-22 passed.  Broader gate (lint, tsc, full vitest, build) is recorded in the commit that follows if it was run.
 
 ## Next Steps & Blockers
 
