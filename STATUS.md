@@ -1,5 +1,13 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
+
+**What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of the same id does not write the cache again.  A missing ack is audited and written to the `congress-inbound-push` health lane.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.
+
+**Branch.**  `cursor/ct-push-receipt-2155` in Socratic-Trade and Congress.Trade.  Linear ST-3846.
+
+**Next.**  Both pull requests ready for review.  Do not mark the issue completed until both are merged.
+
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
 **What.**  PR #4666 deleted `history_cache_eod` bars older than 400 days.  Owner policy forbids age-based deletion of price or market-data history.  `MARKET_DATA_HISTORY_TABLES` and `isMarketDataHistoryTable()` now block the storage-hygiene lane from pruning price, fundamentals, filing, transcript, SEC facts, and document-chunk tables.  `history_cache_eod` and `symbol_field_latest` were removed from `RETENTION_TARGETS`.

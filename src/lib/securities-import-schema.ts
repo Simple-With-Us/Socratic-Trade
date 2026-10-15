@@ -1,10 +1,13 @@
 import { SharePayloadSchema } from "@jaywedgeworth22/congress-trading-shared";
 import { z } from "zod";
+import { PEER_PUSH_HEALTH } from "./peer-push-receipt";
 import { OptionalSchemaVersionSchema } from "./schema-version";
 
 /** Strict inbound body for POST /api/admin/securities/import (shared row shapes, strip unknown keys). */
 export const SecuritiesImportPayloadSchema = SharePayloadSchema.extend({
   schemaVersion: OptionalSchemaVersionSchema,
+  /** Idempotency key.  The `x-push-id` header is authoritative when both are set. */
+  pushId: z.string().optional(),
 });
 
 export type SecuritiesImportPayload = z.infer<typeof SecuritiesImportPayloadSchema>;
@@ -31,6 +34,27 @@ export const SecuritiesImportResponseSchema = z.object({
   schemaVersion: OptionalSchemaVersionSchema,
   acceptedNotPersisted: z.record(z.string(), z.number()).optional(),
   note: z.string().optional(),
+  pushId: z.string().nullable().optional(),
+  health: z.enum(PEER_PUSH_HEALTH).optional(),
+  replayed: z.boolean().optional(),
+  acks: z
+    .object({
+      delivered: z
+        .object({
+          at: z.string(),
+          ok: z.boolean(),
+          reason: z.string().optional(),
+        })
+        .nullable(),
+      consumed: z
+        .object({
+          at: z.string(),
+          ok: z.boolean(),
+          reason: z.string().optional(),
+        })
+        .nullable(),
+    })
+    .optional(),
 });
 
 export type SecuritiesImportResponse = z.infer<typeof SecuritiesImportResponseSchema>;

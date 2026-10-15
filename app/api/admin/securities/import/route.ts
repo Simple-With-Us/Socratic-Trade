@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server";
 import type { PriceClose, PriceSeries, SecurityRefInput } from "@jaywedgeworth22/congress-trading-shared";
 import { audit } from "@/lib/db";
+import { logApiHealth } from "@/lib/db-health";
 import {
   getImportedCacheCounts,
+  importedPushIsReadable,
+  getPeerPushReceipt,
   persistSecuritiesImport,
+  savePeerPushReceipt,
   type ImportedCloseInput,
   type ImportedPriceInput,
   type ImportedRefInput
@@ -17,6 +21,13 @@ import {
 } from "@/lib/bounded-body";
 import { enforceRateLimit, RATE_LIMITS, trustedCloudflareClientIp } from "@/lib/rate-limit";
 import { SecuritiesImportPayloadSchema } from "@/lib/securities-import-schema";
+import {
+  PEER_PUSH_ID_HEADER,
+  peerPushHealth,
+  resolvePeerPushId,
+  type PeerPushAck,
+  type PeerPushHealth
+} from "@/lib/peer-push-receipt";
 
 export const dynamic = "force-dynamic";
 
@@ -30,6 +41,11 @@ export const dynamic = "force-dynamic";
 // write is rejected. No-echo guard: a payload tagged with App B's own origin is acked but NOT stored
 // (so a round-trip of our own outbound push is a no-op).
 //
+// Receipt: the caller sends `x-push-id`.  A first delivery persists the cache and stores
+// delivered + consumed acks under that id.  A retry with the same id returns the stored
+// receipt and does not write again.  `health` is `ok` only when the id and both acks are
+// present.  A missing id or ack is audited and written to the congress-inbound-push health lane.
+//
 // DIRECTIONAL ASYMMETRY (why only 3 of the 7 shared SharePayload slots are persisted here — by design;
 // see docs/congress-trade-consume.md §4 and docs/congress-trade-share.md):
 //   - refs / prices / spx  -> PERSISTED (imported_securities_ref / imported_price_eod / imported_spx_eod).
@@ -38,12 +54,12 @@ export const dynamic = "force-dynamic";
 //     pushes them TO App A); App A never echoes better values back, so there is nothing to store here.
 //   - fundamentals / analyst -> App B reads these from App A on demand via the PULL enrichment tier
 //     (CongressTradeEnrichmentProvider, 6h cache), not this import path.
-// Any of the four non-persisted datasets that DO arrive are ACKNOWLEDGED in the response
+//   - trades -> congressional events.  This cache is market data, so trades are acknowledged and not stored.
+// Any of the non-persisted datasets that DO arrive are ACKNOWLEDGED in the response
 // (`acceptedNotPersisted`) rather than silently dropped, so a future contract change surfaces instead
 // of losing data quietly.
 //
-// Body (all optional): { refs?, prices?, spx?, insider?, shortVolume?, fundamentals?, analyst?, origin? }
-// — the same shape as App B's outbound push (only refs/prices/spx are stored inbound).
+// Body (all optional): { pushId?, refs?, prices?, spx?, insider?, shortVolume?, fundamentals?, analyst?, trades?, origin? }
 export async function POST(req: Request) {
   const clientIp = trustedCloudflareClientIp(req);
   if (!clientIp) {
@@ -84,24 +100,44 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "invalid payload" }, { status: 400 });
   }
   const body = parsed.data;
+  const pushId = resolvePeerPushId(req.headers.get(PEER_PUSH_ID_HEADER), body.pushId);
+
+  if (pushId) {
+    const prior = getPeerPushReceipt(pushId);
+    if (prior) {
+      return NextResponse.json({ ...prior.body, replayed: true });
+    }
+  }
 
   const schemaVersion = body.schemaVersion;
   if (schemaVersion !== undefined) {
     console.info(`[securities-import] inbound payload schemaVersion=${String(schemaVersion)}`);
   }
 
-  // No-echo guard: never re-store rows we originated.
+  const at = new Date().toISOString();
+  const delivered: PeerPushAck = { at, ok: true };
+
+  // No-echo guard: never re-store rows we originated.  The skip is a complete
+  // receipt: delivered and consumed, with nothing written.
   const origin = body.origin?.trim() ? body.origin.trim() : "app-a";
   if (origin === APP_B_ORIGIN) {
-    return NextResponse.json({
-      ok: true,
-      skipped: true,
-      reason: "own-origin",
-      refs: 0,
-      pricedTickers: 0,
-      priceRows: 0,
-      spxRows: 0,
-      ...(schemaVersion !== undefined ? { schemaVersion } : {})
+    return finishPeerPush({
+      pushId,
+      at,
+      delivered,
+      consumed: { at, ok: true, reason: "own-origin" },
+      status: 200,
+      store: true,
+      body: {
+        ok: true,
+        skipped: true,
+        reason: "own-origin",
+        refs: 0,
+        pricedTickers: 0,
+        priceRows: 0,
+        spxRows: 0,
+        ...(schemaVersion !== undefined ? { schemaVersion } : {})
+      }
     });
   }
 
@@ -111,30 +147,102 @@ export async function POST(req: Request) {
     const spx = mapCloses(body.spx);
 
     const acceptedNotPersisted: Record<string, number> = {};
-    for (const key of ["insider", "shortVolume", "fundamentals", "analyst"] as const) {
+    for (const key of ["insider", "shortVolume", "fundamentals", "analyst", "trades"] as const) {
       const arr = body[key];
       if (arr && arr.length > 0) acceptedNotPersisted[key] = arr.length;
     }
 
     const result = persistSecuritiesImport({ refs, prices, spx }, origin);
-    audit("securities_import", { origin, ...result, acceptedNotPersisted });
-    return NextResponse.json({
-      ok: true,
-      origin,
-      ...result,
-      totals: getImportedCacheCounts(),
-      ...(schemaVersion !== undefined ? { schemaVersion } : {}),
-      ...(Object.keys(acceptedNotPersisted).length > 0
-        ? {
-            acceptedNotPersisted,
-            note: "insider/shortVolume are App-B-authoritative; fundamentals/analyst are pulled on demand — not persisted on the inbound import path by design",
-          }
-        : {}),
+    const persistableCount = (refs?.length ?? 0) + (prices?.length ?? 0) + (spx?.length ?? 0);
+    const readable = importedPushIsReadable({ refs, prices, spx });
+    let consumedReason: string | undefined;
+    if (persistableCount === 0) {
+      consumedReason = Object.keys(acceptedNotPersisted).length > 0 ? "accepted-not-persisted" : "empty";
+    }
+    const consumed: PeerPushAck | null = readable
+      ? { at, ok: true, ...(consumedReason ? { reason: consumedReason } : {}) }
+      : null;
+    audit("securities_import", { origin, ...result, acceptedNotPersisted, pushId });
+    return finishPeerPush({
+      pushId,
+      at,
+      delivered,
+      consumed,
+      status: 200,
+      store: true,
+      body: {
+        ok: true,
+        origin,
+        ...result,
+        totals: getImportedCacheCounts(),
+        ...(schemaVersion !== undefined ? { schemaVersion } : {}),
+        ...(Object.keys(acceptedNotPersisted).length > 0
+          ? {
+              acceptedNotPersisted,
+              note: "insider/shortVolume are App-B-authoritative; fundamentals/analyst are pulled on demand; trades are not a market-data cache — not persisted on the inbound import path by design",
+            }
+          : {}),
+      }
     });
   } catch (error) {
-    audit("securities_import_error", { error: error instanceof Error ? error.message : "unknown" });
-    return NextResponse.json({ ok: false, error: "ingest failed" }, { status: 500 });
+    audit("securities_import_error", { error: error instanceof Error ? error.message : "unknown", pushId });
+    return finishPeerPush({
+      pushId,
+      at,
+      delivered: null,
+      consumed: null,
+      status: 500,
+      store: false,
+      body: { ok: false, error: "ingest failed" }
+    });
   }
+}
+
+function finishPeerPush(input: {
+  pushId: string | null;
+  at: string;
+  delivered: PeerPushAck | null;
+  consumed: PeerPushAck | null;
+  status: number;
+  store: boolean;
+  body: Record<string, unknown>;
+}): NextResponse {
+  const health: PeerPushHealth = peerPushHealth({
+    pushId: input.pushId,
+    delivered: input.delivered,
+    consumed: input.consumed,
+  });
+  const receipt: Record<string, unknown> = {
+    ...input.body,
+    pushId: input.pushId,
+    health,
+    acks: { delivered: input.delivered, consumed: input.consumed },
+  };
+  if (input.store) {
+    const key = input.pushId ?? `missing:${input.at}`;
+    savePeerPushReceipt({
+      pushId: key,
+      receivedAt: input.at,
+      health,
+      deliveredAt: input.delivered?.at ?? null,
+      consumedAt: input.consumed?.at ?? null,
+      body: receipt,
+    });
+  }
+  notePeerPushHealth(health, input.pushId);
+  return NextResponse.json(receipt, { status: input.status });
+}
+
+function notePeerPushHealth(health: PeerPushHealth, pushId: string | null): void {
+  if (health === "ok") {
+    logApiHealth({ service: "congress-inbound-push", ok: true, keySource: "env" });
+    return;
+  }
+  const errorText = pushId
+    ? `peer push receipt ${health} pushId=${pushId}`
+    : `peer push receipt ${health}`;
+  audit("peer_push_ack_missing", { health, pushId });
+  logApiHealth({ service: "congress-inbound-push", ok: false, errorText, keySource: "env" });
 }
 
 function nullableStr(value: string | null | undefined): string | undefined {
