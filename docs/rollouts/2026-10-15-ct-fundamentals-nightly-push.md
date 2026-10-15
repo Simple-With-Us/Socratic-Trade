@@ -32,6 +32,12 @@ npm test -- test/congress-share.test.ts   # 95 passed
 npm run build         # ok
 ```
 
+## PR #4730 review follow-up (2026-10-15)
+
+- Reordered nightly POST queue: **prices before fundamentals/analyst** (shared upstream breaker).
+- `FieldStoreCongressShareQuoteSchema` Zod gate; removed `MarketQuote` casts.
+- Persist `analystBySource` in `symbol_field_latest` (dropped META skip).
+
 ## Next Steps & Blockers
 
 - Merge + deploy ST; confirm CT `fundamentals_eod` / `analyst_consensus` `MAX(received_at)` advances after first post-deploy nightly run.
