@@ -1637,6 +1637,63 @@ describe("Tradier adapter — HTTP 400 Unexpected server error on the order path
 
   // A garbled envelope at the trust boundary is a clean MISS (so the retry path still runs),
   // never a throw — throwing here would abort the placement we are surviving.
+  it("finds the tag in a multi-order array and does not POST again", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        return json(400, { errors: { error: "Unexpected server error" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders/999`)) {
+        return json(200, {
+          order: { id: 999, status: "filled", exec_quantity: 1, avg_fill_price: 10.5 },
+          commission: "0.00"
+        });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        return json(200, {
+          orders: {
+            order: [null, { id: 1, status: "open" }, { id: 999, tag: "r-page", status: "pending", extra: true }],
+            unmatched_symbols: "none"
+          }
+        });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder({ ...equity, refId: "r-page" });
+    expect(posts).toBe(1);
+    expect(placed).toMatchObject({ orderId: "999", state: "filled", filledQuantity: 1, averagePrice: 10.5 });
+  });
+
+  it("keeps the known id when the tag-hit re-read body is not an order object", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        return json(400, { errors: { error: "Unexpected server error" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders/999`)) {
+        return json(200, { order: "null" });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        return json(200, { orders: { order: { id: 999, tag: "r-badbody", status: "pending" } } });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder({ ...equity, refId: "r-badbody" });
+    expect(placed.orderId).toBe("999");
+    expect(placed.state).toBe("pending");
+    expect(posts).toBe(1);
+  });
+
   it("treats a drifted order-listing envelope as a tag miss, not a throw", async () => {
     await seedTradier({ environment: "paper" });
     let posts = 0;

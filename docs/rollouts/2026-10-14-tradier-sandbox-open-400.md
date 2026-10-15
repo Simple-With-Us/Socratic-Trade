@@ -76,8 +76,8 @@ Two Kody threads on this branch.  Both were clear enough to fix rather than esca
 
 ```bash
 git merge origin/main          # twice; clean both times, package-lock.json only
-npx tsc --noEmit               # exit 0
 npm run lint                   # exit 0 — 0 errors, 866 grandfathered warnings
+npx tsc --noEmit               # exit 0
 npx vitest run test/tradier.test.ts test/placement-outcome.test.ts test/broker-health-auto-pause.test.ts
 npm test
 npm run build                  # exit 0 (only pre-existing "no Sentry auth token" warnings)
@@ -130,6 +130,49 @@ The lookup sits after the backoff, not before it.  A tag that appears during the
 ### Next Steps & Blockers
 
 Label `do-not-automerge`.  Jay squash-merges.  Do not enable auto-merge and do not merge from this lane.  Reply on the Sentry thread and leave it unresolved.  Comment `@kody start-review` after the push.  This seat has no Fleet Linear credentials, so team `ST` was not updated.  Board item `f5bdb15c` tracks the lane.  Premarket sandbox 400s still reach the broker.  Only the regular-open window is deferred.
+
+## 2026-10-14 — merge #4666 and round-3 review
+
+### Context & Objective
+
+`origin/main` moved to `a3d21b73` (#4666 SQLite storage hygiene) and GitHub marked PR #4668 conflicting.  Kody then opened three threads on the tag-lookup lane.
+
+### Changes Made
+
+`git merge origin/main` auto-merged.  No conflict markers.  No migration renumber.  Shared docs kept both the Tradier lane and the hygiene note.
+
+The Codex verification block in this file listed `npx tsc --noEmit` before `npm run lint`.  Those two lines are swapped so the block reads lint, then tsc, then tests, then build.
+
+`TradierOrdersPageSchema` no longer types the listing row as `z.unknown()`.  A row is `z.record(z.string(), z.unknown())`.  The collection is a union of an array of those rows (or null), one row, the string `"null"`, or null.  A lone record would reject Tradier's array page, miss a live tag, and POST again.  A null sibling is skipped so it cannot throw and abort a page that still holds our tag.  `tag` stays optional.  Other orders on the page often have none, and a required tag would hide ours.
+
+`fetchPlacedOrderBody` parses `GET /orders/:id` with `TradierPlacedOrderSchema` (`safeParse`) before reading `status`, `exec_quantity`, or `avg_fill_price`.  A failed parse or a non-object `order` still returns the id stub and does not POST again.
+
+- `src/lib/tradier.ts`
+- `test/tradier.test.ts`
+- `STATUS.md`
+- `PLAN.md`
+- this note
+
+### Decisions & Trade-offs
+
+Kody's snippet used `order: z.record(...)` with no array arm.  That suggestion is not applied as written.  The array arm is the duplicate-order guard.  A broker rename of `tag` does not fail this schema, because a required `tag` would reject a normal page.  The lookup still misses a renamed tag the same way a missing tag misses today.
+
+`.github/workflows/autofix.yml` still fails at startup on this branch and on main.  The pinned reusable workflow uses `secrets` inside a step `if` (`pr-autofix-reusable.yml@2e671004` line 163).  `pull_request_review` runs the workflow from the default branch.  This PR does not change the caller.  Hosted `verify` on `6e0bf814` was green before this merge.
+
+### Verification State
+
+```bash
+npm run lint
+npx tsc --noEmit
+npm test
+npx vitest run test/tradier.test.ts test/placement-outcome.test.ts test/placement-reconcile.test.ts test/broker-health-auto-pause.test.ts
+```
+
+`npm run lint` ok on the merge (0 errors, 854 warnings).  `npx tsc --noEmit` ok on the merge and again after the schema edit.  Targeted vitest after the schema change: 134 passed.  Full `npm test`: 9374 passed, 51 skipped, 2 failed.  `test/egress-guard.test.ts` rejects the discord.com lookup in this sandbox.  `test/data-catalog-completeness.test.ts` reads peRatio completeness 1 from the local cascade report.  Neither file is in this diff.
+
+### Next Steps & Blockers
+
+Leave every review thread unresolved.  Reply after the push.  Do not merge from this lane.  Comment `@kody start-review`.
 
 ## Next Steps & Blockers
 

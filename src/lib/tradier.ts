@@ -99,17 +99,47 @@ function tradierProbeTtlMs(streak: number): number {
 }
 
 /**
+ * One order row.  A record, not `z.unknown()`: `findOrderIdByTag` reads `tag` and `id`.
+ * Values stay unknown because Tradier mixes strings and numbers on the same keys.
+ * The row is not a required-field object.  A page of other orders often has no `tag`,
+ * and rejecting that page would hide our own row and allow another POST.
+ */
+const TradierOrderRowSchema = z.record(z.string(), z.unknown());
+
+/**
+ * Listing `order` is an array, one object, the string "null", or null.
+ * A bare `z.record` rejects the array.  That would turn a live multi-order page into a
+ * tag miss and the caller would POST again.
+ */
+const TradierOrderCollectionSchema = z.union([
+  z.array(z.union([TradierOrderRowSchema, z.null()])),
+  TradierOrderRowSchema,
+  z.string(),
+  z.null()
+]);
+
+/**
  * Tradier GET /accounts/:account/orders envelope, validated at the HTTP boundary before anything
- * is read off it.  Only `orders` is constrained; the response carries other top-level keys and the
- * object is NOT `.strict()`, so an added envelope field cannot fail the parse.  Rows pass through
- * untouched because callers read a wide, evolving set of order fields off them.
- *
- * An empty listing is `orders: null` (or the string "null"), which is why `nullish` is required
- * rather than `optional`.
+ * is read off it.  Only `orders` is constrained.  The inner object uses `.passthrough()` so an
+ * added envelope field cannot fail the parse.  An empty listing is `orders: null` (or the string
+ * "null"), which is why `nullish` is required rather than `optional`.
  */
 const TradierOrdersPageSchema = z.object({
-  orders: z.union([z.object({ order: z.unknown() }), z.string(), z.null()]).nullish()
+  orders: z
+    .union([
+      z.object({ order: TradierOrderCollectionSchema.optional() }).passthrough(),
+      z.string(),
+      z.null()
+    ])
+    .nullish()
 });
+
+/** GET /accounts/:account/orders/:id.  Extra envelope keys stay.  A bad shape is a stub, not a throw. */
+const TradierPlacedOrderSchema = z
+  .object({
+    order: z.union([TradierOrderRowSchema, z.array(TradierOrderRowSchema), z.string(), z.null()]).nullish()
+  })
+  .passthrough();
 
 // Tradier envelopes wrap collections as { orders: { order: [...] } }, collapse a lone element to a
 // bare object { orders: { order: {...} } }, and report empty as null or the string "null". Normalize
@@ -993,13 +1023,15 @@ class TradierBrokerGateway implements BrokerGateway {
     const stub = { order: { id: orderId, status: "pending" } } as unknown as T;
     if (!/^[A-Za-z0-9_-]+$/.test(orderId)) return stub;
     try {
-      const body = await this.request<T>("GET", `/accounts/${accountNumber}/orders/${encodeURIComponent(orderId)}`, {
+      const body = await this.request<unknown>("GET", `/accounts/${accountNumber}/orders/${encodeURIComponent(orderId)}`, {
         query: { includeTags: "true" }
       });
+      const parsed = TradierPlacedOrderSchema.safeParse(body);
       // A 200 with no usable order object is not proof of anything — keep the stub.
-      const row = (body as { order?: unknown } | undefined)?.order;
+      if (!parsed.success) return stub;
+      const row = parsed.data.order;
       if (!row || typeof row !== "object" || Array.isArray(row)) return stub;
-      return { ...(body as object), order: { ...(row as Record<string, unknown>), id: (row as Record<string, unknown>).id ?? orderId } } as T;
+      return { ...parsed.data, order: { ...row, id: row.id ?? orderId } } as T;
     } catch {
       return stub;
     }
@@ -1011,9 +1043,8 @@ class TradierBrokerGateway implements BrokerGateway {
    * The envelope is an EXTERNAL boundary, so it is parsed before anything is read off it.  A
    * drifted/garbled response is a clean MISS (no tag match) rather than a throw: throwing here
    * would abort placement on the transient-error path we are specifically trying to survive.
-   * Only the envelope shape is constrained — the `order` rows stay `unknown` and are narrowed by
-   * the existing per-field readers (`String(row.tag)`, `String(row.id)`), since callers read a
-   * wide, evolving set of order fields off them.
+   * Each row is a string-keyed record.  A null sibling is skipped so it cannot throw and abort
+   * a page that still contains our tag.
    */
   private async findOrderIdByTag(accountNumber: string, tag: string): Promise<string | undefined> {
     const raw: unknown = await this.request<unknown>("GET", `/accounts/${accountNumber}/orders`, {
@@ -1024,6 +1055,7 @@ class TradierBrokerGateway implements BrokerGateway {
     const ordersField =
       parsed.data.orders && typeof parsed.data.orders === "object" ? parsed.data.orders.order : undefined;
     for (const row of arr<Record<string, unknown>>(ordersField)) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) continue;
       if (String(row.tag ?? "") === tag && row.id != null && String(row.id) !== "") return String(row.id);
     }
     return undefined;

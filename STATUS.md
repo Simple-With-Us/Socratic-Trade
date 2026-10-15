@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-14 GROK — PR #4668 merge #4666 and order-row schema
+
+**What.**  Merged `origin/main` (`a3d21b73`, #4666 SQLite storage hygiene) with no conflicts and no migration renumber.  Three unresolved Kody threads.  The rollout verification block now lists `npm run lint` before `npx tsc --noEmit`.  Listing rows are `z.record(z.string(), z.unknown())`, and the page still accepts an array or one object so a multi-order listing is not a tag miss.  `fetchPlacedOrderBody` `safeParse`s the GET body and keeps the id stub when the shape is wrong.  A null sibling row is skipped.
+
+**Review triage.**  Threads `PRRT_kwDOS7mOVM6slYh3`, `PRRT_kwDOS7mOVM6slYuB`, and `PRRT_kwDOS7mOVM6slY2R` stay unresolved.  Replies go out after the push.  The earlier three threads were already resolved before this pass.  This lane did not call resolve.
+
+**Verification.**  `npm run lint` ok on the merge (0 errors, 854 warnings).  `npx tsc --noEmit` ok on the merge and again after the schema edit.  Targeted vitest: 134 passed in `test/tradier.test.ts`, `test/placement-outcome.test.ts`, `test/placement-reconcile.test.ts`, and `test/broker-health-auto-pause.test.ts`.  Full `npm test`: 9374 passed, 51 skipped, 2 failed.  Both failures are outside this diff.  `test/egress-guard.test.ts` rejects the discord.com lookup in this sandbox.  `test/data-catalog-completeness.test.ts` reads peRatio completeness 1 from the local cascade report when the named universe has no durable row.
+
+**Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  `do-not-automerge` stays.  Do not merge from this lane.  Comment `@kody start-review`.  `.github/workflows/autofix.yml` still fails at startup on main because the pinned reusable workflow uses `secrets` in a step `if`.  This PR does not change that caller.
+
 ## 2026-10-14 GROK — PR #4668 final tag lookup before not_placed
 
 **What.**  Merged `origin/main` twice with no conflicts and no migration renumber: `1588bae8` (keyless options enrichment and the fleet-fully-dark detector), then `e80386d7` (SEC XBRL companyfacts, #4665).  The open Sentry thread on `placement-outcome.ts` was real: the last Tradier "Unexpected server error" POST skipped the tag lookup, and both lanes booked retryable `not_placed` before `reconcilePlacementError`.  A landed final POST could be retried under a new refId.  The adapter now looks up the tag after every transient refusal, including the last.  A hit returns the broker order.  A lookup that throws is `TRADIER_TAG_LOOKUP_UNVERIFIED_MESSAGE` (not the retryable sentence, not an HTTP 4xx).  HTTP 408 and that sentence go through reconcile before `not_placed`.  HTTP 429 and the sandbox open deferral still short-circuit.
