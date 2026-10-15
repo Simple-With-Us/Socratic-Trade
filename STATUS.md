@@ -1,5 +1,14 @@
 # Current Status
 
+## 2026-10-15 Cursor Cloud — merge shepherd ST-2874 + AFC fleet-health ST-9
+
+**What.**  ST-2874: `scripts/merge-shepherd.sh` defers `update-branch` while CI is in flight on the current head (fixes verify-hosted starvation).  ST-9: fix lands in **AI-Fleet-Coordinator** (`fleet-health-recover.sh` UUID/label container lookup), not Socratic-Trade.
+
+**Branches.**  `cursor/merge-shepherd-skip-inflight-b952` (ST), `cursor/fleet-health-coolify-lookup-b952` (AFC).
+
+**Verification.**  `bash scripts/merge-shepherd-ci-inflight.selftest.sh`; `bash -n scripts/merge-shepherd.sh` (Kody #4705: `NEUTRAL`/`SKIPPED` terminal in `ci_in_flight`).  Merged `origin/main` into PR branch (`960637ec`, 2026-10-15).  PR #4705 ready; `needs-human-merge` — GB-Deployer merges only.
+
+**Next.**  Open PRs (ready); owner refresh Mac shepherd copy + redeploy AFC host script for ST-9.
 ## 2026-10-15 Cursor Cloud — ops performance parked flag (ST-3875)
 
 **What.**  `GET /api/ops/performance` account rows now include `parked`, `parkedReason`, and `parkedAt`.  The flag is read from the connected account and reported on the priced book, the never-synced branch, and the per-account error branch.  No account is parked or re-armed.
