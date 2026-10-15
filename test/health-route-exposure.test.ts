@@ -53,7 +53,16 @@ function dependenciesWithoutOpsDetail(
 // `checks.dependencies` arrives from the route via `Response.json()`, so it is untrusted boundary
 // data. Validate it at the boundary instead of casting, so a shape regression fails loudly here
 // rather than as a confusing diff deeper in the comparison below.
-const healthDependenciesSchema = z.record(z.string(), z.unknown()).optional();
+const healthDependencyEntrySchema = z
+  .object({
+    ok: z.boolean(),
+    degraded: z.boolean().optional(),
+    lastFailure: z.string().nullable().optional(),
+    failureClass: z.string().nullable().optional()
+  })
+  .passthrough();
+
+const healthDependenciesSchema = z.record(z.string(), healthDependencyEntrySchema).optional();
 
 /** Stub the OpenRouter /credits fetch so the balance block is populated deterministically. */
 function stubCredits(totalCredits: number, totalUsage: number) {
