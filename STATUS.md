@@ -1,5 +1,68 @@
 # Current Status
 
+## 2026-10-15 Grok — PR #4664 merge main and handoff order
+
+**What.**  Merged `origin/main` (`2656320f`, Tradier sandbox HTTP 400, including `a3d21b73` SQLite storage hygiene) into `cursor/data-cascade-reliability-eb70`.  The merge was clean.  No migration renumber.  The one unresolved review thread (Kody rule [33] on the cascade rollout) asked for `npm test` before `npm run build` in the Round 10 paragraph.  That sentence and the Round 11 gate sentence now use the canonical order.  No product code change.  The thread was not resolved.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm test` was 9393 passed, 51 skipped, and 2 failed, both outside this diff.  `test/egress-guard.test.ts` fails because this sandbox resolves discord.com to `198.18.0.1`.  `test/data-catalog-completeness.test.ts` reads peRatio completeness 1 from the local `data/app.db` and passes 4/4 against an empty database.  `npm run build` ok.  Hosted `verify` on `2a48ac8f` was green before this merge.
+
+**Next.**  Push and comment `@kody start-review`.  Do not merge from this lane.  Do not resolve threads.
+
+## 2026-10-15 Claude — PR #4664 autofix round 11
+
+**What.**  Triaged all 15 review threads.  Four were still unresolved: three Sentry ones (`data-providers.ts` 429 lane hold, `market.ts` screener fallback cache, `provider-rate-limit.ts` RapidAPI service limits) and one Kody rule-[6] thread on the inherited PLAN.md row for PR #4663.  All three Sentry findings were already fixed in `4fc19a96` — `fetchWithRetry` still skips the lane hold while a retry remains and opens it only for a positive `Retry-After`; `resolveProviderLimiterConfigForCall` still keeps `alpha-vantage-rapidapi` at 5/min when the pacer bucket is a RapidAPI host, with a regression test; price-less directory rows still stay out of `screenerCache` and `screenerLastGood`.  The one actionable item was Kody's: the PLAN.md row for the merged PR #4663 carried only a GitHub PR reference.  PR #4663 is board item `SOCRATIC-TRADE-2S`, so the row header now carries both references, satisfying rule [6]'s two-part requirement.  No code change.  The branch was already current with `origin/main` (0 commits behind), so no merge was needed.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm run build` ok.  Full `npm test`: 9344 passed, 51 skipped, 13 failed — all 13 are the runner exporting `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL`, which the LLM key-resolution tests read as a configured user credential (same as rounds 9 and 10).  Re-running `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/framework-review.test.ts`, and `test/openrouter-credits.test.ts` with those three variables unset gives 60/60 passed.  `node_modules` was empty on checkout, so `npm install` ran first (685 packages; `package.json` unchanged vs `origin/main`).  `next-env.d.ts` and `tsconfig.json` were restored from `origin/main` after the build rewrote them.
+
+**Next.**  Resolve the Kody PLAN.md thread addressed this round.  The three Sentry threads are already fixed in code but their first-comment author is not one of the review bots this lane may resolve.  Do not merge from this lane.
+
+## 2026-10-14 Cursor Cloud — PR #4664 merge main
+
+**What.**  Merged `origin/main` (`e80386d7`, SEC XBRL cached fundamentals) into `cursor/data-cascade-reliability-eb70`.  The merge was clean.  No migration renumber.  Seven unresolved review threads were re-read against this head.  No new code change.  `fetchWithRetry` still skips the lane hold while a 429 retry remains, and opens it only for a positive `Retry-After` (`4fc19a96`).  Price-less directory rows stay out of `screenerCache` and `screenerLastGood`.  `resolveProviderLimiterConfigForCall` still keeps `alpha-vantage-rapidapi` at 5/min when the pacer bucket is a RapidAPI host.  The FRED VIXCLS schema still uses explicit `.strip()` on both objects.  The PLAN.md header for this lane still cites `PR #4664` and does not invent a board id.  The inherited PR #4663 row still has no board reservation to copy.  Threads were not resolved.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm test` was 9355 passed, 51 skipped, and 2 failed, both outside this diff.  `test/egress-guard.test.ts` fails because this sandbox rejects the discord.com lookup.  `test/data-catalog-completeness.test.ts` reads peRatio completeness 1 from the local `data/app.db`.  Hosted `verify` on `b1456fa7` was green before this merge.  `npm run build` -> ok.
+
+**Next.**  Push and comment `@kody start-review`.  Do not merge from this lane.  Do not resolve threads.
+
+## 2026-10-15 Claude — PR #4664 autofix round 10
+
+**What.**  Merged `origin/main` `e80386d7` (SEC XBRL cached fundamentals); the merge was clean.  Triage of the 15 review threads found no open code findings: Kody's `nasdaq-universe-fallback.ts` quote-hydration suggestion and the FRED VIXCLS `.passthrough()` rule-[22] suggestion were both already declined on their merits and Kody closed each itself ("nothing further from me on it"), and the Sentry 429-lane-hold, screener-cache, and RapidAPI service-limit threads were fixed in `4fc19a96`.  The one new actionable item was Kody rule [27]: the rollout verification block had dropped the explicit `npm run build` outcome.  Restored `npm run build -> ok` in the verification block and recorded this round's gate.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 854 warnings).  `npx tsc --noEmit` ok.  `npm test`: 9344 passed, 51 skipped, 13 failed — all 13 are the CI runner exporting `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` into the environment, which the LLM key-resolution tests read as a configured user credential.  Re-running `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/framework-review.test.ts`, and `test/openrouter-credits.test.ts` with those three variables unset gives 60/60 passed.  None of the 13 touch this diff.  `npm run build` ok.  `node_modules` was empty on checkout, so `npm install` ran first (685 packages; `package.json` unchanged vs `origin/main`).
+
+**Docs.**  `docs/rollouts/2026-10-14-data-cascade-reliability.md`, `STATUS.md`.
+
+**Next.**  Resolve the review threads addressed or already fixed.  Do not merge from this lane.
+
+## 2026-10-14 Cursor Cloud — PR #4664 review follow-up
+
+**What.**  Merged `origin/main` again (`1588bae8`, keyless options enrichment).  The merge was clean.  The earlier merge on this branch was `82162336`.  Kody's priced-directory suggestion does not apply: the directory runs only when `screenerLastGood` is empty, so there is no price to copy.  The unreachable cache-and-return of priced directory rows is gone.  A directory that lists symbols now says they were not cached, instead of calling that a fallback failure.  A directory failure still keeps the original screener error.  Price-less rows stay out of `screenerCache` and `screenerLastGood`.  The three directory fetches stay, because that count is the cold-failure annotation.  Sentry's 429 hold and RapidAPI service-limit threads stay as fixed in `4fc19a96`.  The FRED VIXCLS schema keeps explicit `.strip()` on both objects.  The comment says to strip extra FRED keys and not to use `.strict()`, so `.passthrough()` would keep keys the parser does not read.  Threads were not resolved.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted vitest 142 passed.  Full `npm test`: 9343 passed, 51 skipped, 2 failed outside this diff (`test/egress-guard.test.ts` sandbox DNS, `test/data-catalog-completeness.test.ts` against the local database).  `npm run build` -> ok.
+
+**Next.**  Push the merge and ask Kody to re-review.  Do not merge from this lane.
+
+## 2026-10-14 Cursor Cloud — data cascade reliability
+
+**What.**  RapidAPI + Nasdaq screener pacing, `Retry-After` on 429 (lane hold only after retries, and only when the header is present), per-symbol field TTL cache, VIX cascade (Cboe `VIX_History.csv` → FRED `VIXCLS` → Cboe JSON → Yahoo), Nasdaq screener stale-while-revalidate + SEC/Nasdaq Trader fallback, freshness scan deadline 6m.
+
+**Branch.**  `cursor/data-cascade-reliability-eb70`
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted vitest for the rollout files plus the new regressions ok (153 passed).  `npm run build` ok.  Full `npm test` was 9313 passed, 51 skipped, and 1 failed: sandbox DNS for discord.com in `test/egress-guard.test.ts` (outside this diff).
+
+**Docs.**  `docs/rollouts/2026-10-14-data-cascade-reliability.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Open PR ready for review; watch prod freshness scan duration after deploy.
 ## 2026-10-14 GROK — PR #4668 merge #4666 and order-row schema
 
 **What.**  Merged `origin/main` (`a3d21b73`, #4666 SQLite storage hygiene) with no conflicts and no migration renumber.  Three unresolved Kody threads.  The rollout verification block now lists `npm run lint` before `npx tsc --noEmit`.  Listing rows are `z.record(z.string(), z.unknown())`, and the page still accepts an array or one object so a multi-order listing is not a tag miss.  `fetchPlacedOrderBody` `safeParse`s the GET body and keeps the id stub when the shape is wrong.  A null sibling row is skipped.

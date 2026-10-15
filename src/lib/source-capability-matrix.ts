@@ -785,10 +785,12 @@ export const DATA_POINT_CATALOG: readonly DataPointSpec[] = [
     category: "macro",
     description: "Cboe volatility index for regime.",
     sources: [
-      opt("vix-cboe", 1, "primary", "none", ["CDN; DC-friendly — prefer first."], {
+      opt("vix-cboe-history", 1, "primary", "none", ["Cboe VIX_History.csv on cdn-api.cboe.com."], {
         implHint: "macro.ts",
       }),
-      opt("vix-yahoo", 2, "secondary", "none", ["Falls back when Cboe fails; 429 risk on DC."]),
+      opt("vix-fred", 2, "good", "low", ["VIXCLS when FRED key configured."]),
+      opt("vix-cboe", 3, "secondary", "none", ["Delayed _VIX JSON CDN."]),
+      opt("vix-yahoo", 4, "last_resort", "none", ["429 risk on DC; demoted."]),
     ],
   },
   {

@@ -23,6 +23,7 @@ import {
 } from "../src/lib/nasdaq-screener-fetch";
 import { AUTHENTICATED_EMAIL_HEADER, resolveRequestUserFromEmail } from "../src/lib/request-user";
 import { BROWSER_UA } from "../src/lib/web-sources/http";
+import { resetProviderRateLimiterState } from "../src/lib/provider-rate-limit";
 import { marketScanQuotesFromAudit } from "../src/lib/scan-singleflight";
 import { GET as scanGet } from "../app/api/scan/route";
 
@@ -33,6 +34,9 @@ beforeAll(() => {
 
 beforeEach(() => {
   clearMarketCache();
+  // Fake-timer tests stamp the shared pacer with a clock that is not wall time.
+  // A leftover lastDispatchAt makes the next real scan sleep until its deadline.
+  resetProviderRateLimiterState();
 });
 
 afterEach(() => {
@@ -294,7 +298,7 @@ describe("fetchNasdaqScreener transport", () => {
         caught = error;
       }
     );
-    await vi.advanceTimersByTimeAsync(NASDAQ_SCREENER_TIMEOUT_MS * NASDAQ_SCREENER_ATTEMPTS);
+    await vi.advanceTimersByTimeAsync(NASDAQ_SCREENER_TIMEOUT_MS * NASDAQ_SCREENER_ATTEMPTS + 5_000);
     await pending;
     expect(caught).toBeInstanceOf(ScanQuotesUnavailableError);
     const unavailable = caught as ScanQuotesUnavailableError;
@@ -393,7 +397,7 @@ describe("fetchNasdaqScreener transport", () => {
     });
 
     const pending = scanMarket(["AAPL"], [], undefined, undefined, [], { enrichmentMode: "skip" });
-    await vi.advanceTimersByTimeAsync(NASDAQ_SCREENER_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(NASDAQ_SCREENER_TIMEOUT_MS + 5_000);
     const scan = await pending;
     expect(nasdaqCalls).toBe(2);
     expect(scan.returnedQuotes).toBe(1);
@@ -434,7 +438,7 @@ describe("fetchNasdaqScreener transport", () => {
       return new Response(JSON.stringify({ data: { table: { rows: [] } } }), { status: 200 });
     });
     const pending = fetchNasdaqScreenerResponse("nasdaq-delayed-screener");
-    await vi.advanceTimersByTimeAsync(NASDAQ_SCREENER_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(NASDAQ_SCREENER_TIMEOUT_MS + 5_000);
     const response = await pending;
     expect(response.ok).toBe(true);
     expect(calls).toBe(2);
