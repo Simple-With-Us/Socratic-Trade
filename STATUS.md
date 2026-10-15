@@ -12,6 +12,41 @@
 **Docs.**  `docs/rollouts/2026-10-14-ops-snapshot-perf.md`, `STATUS.md`, `PLAN.md`.
 
 **Next.**  PR ready for review; Deployer/Jay merge.  Post-deploy: `scripts/fetch-prod-ops-snapshot.sh` and compare `timingsMs` to ~84.7s baseline.
+## 2026-10-15 CURSOR — Congress push delivery/consumption receipt (ST-3846)
+
+**What.**  App B webhook responses now emit `receiptVersion: 1` with explicit `delivered` + `consumed` fields; batch failures return `422` instead of silent `200`.  Congress.Trade PR parses the receipt before marking `deliveries` rows delivered.
+
+**Branch.**  `cursor/congress-push-receipt-6277`
+
+**Verification.**  `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-events.test.ts test/congress-webhook-parity.test.ts` 49/49; `npx tsc --noEmit` ok.
+
+**Merge.**  `origin/main` merged into this branch (`70a74daf`); `STATUS.md` auto-merged only — webhook receipt code unchanged.  Congress.Trade **#2752 merged** to CT `main` (2026-10-15 ~11:10Z); ST **#4695** is the remaining ship piece.
+
+**Overlap (#4703).**  Unchanged: `#4703` = securities import (`peer-push-receipt`); this PR = webhook `receiptVersion: 1` + `422` when `consumed=false`.
+
+**Next.**  Merge **#4695** to `main` and deploy Socratic-Trade so CT webhook pushes get consumption receipts in prod.
+
+**2026-10-15 [codex-autofix] — PR #4695 review pass.**  No new review-bot findings; the
+sole thread (Sentry, index misalignment in `resolveCongressEventIds`) was already fixed in
+`93da2abb` and is outdated.  Merged `origin/main` (lucide-react 1.55.0 dep bump) to clear
+the BEHIND state — `package-lock.json` only, no conflict with PR files.  Re-verified:
+`npx tsc --noEmit` clean, `npx vitest run test/congress-push-receipt.test.ts
+test/congress-trade-events.test.ts` 41/41, `npm run build` clean.  Pre-existing local
+`llm-provider` / `openrouter-credits` failures reproduce on `origin/main` (runner has a live
+`OPENROUTER_API_KEY`); not caused by this PR and left untouched.  Auto-merge enabled.
+
+**2026-10-15 [codex-autofix] — PR #4695 review pass (round 9).**  One new review-bot item:
+Kody rule 26 wanted the `npm test` line in the ST-3846 rollout note to end in a pass/fail
+token rather than a coverage description.  Fixed — the line is now `# ok`, and the
+`congress-push-receipt` / `congress-trade-events` coverage detail moved to a sub-bullet.
+Docs-only diff (`docs/rollouts/2026-10-15-congress-push-receipt-st-3846.md`).  Branch was
+already level with `origin/main`, so no merge was needed.  Re-verified: `npx tsc --noEmit`
+clean, `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-events.test.ts`
+42/42, `npm run build` clean.  The 4 failing files in the full suite (`llm-provider`,
+`openrouter-credits`, `chat-llm`, `framework-review`) reproduce identically on a fresh
+`origin/main` worktree — this runner has a live `OPENROUTER_API_KEY` that those tests assume
+is absent.  Pre-existing, outside this diff, left untouched.  Both remaining open threads
+resolved (Sentry's index-alignment finding verified fixed in `93da2abb`).
 ## 2026-10-15 CURSOR — Board 512444e3 iOS / Playwright / deploy-freshness CI
 
 **What.**  Triage for GB-Monitor board `512444e3`: `ios-ship` last failed 2026-10-13 (ASC HTTP 401); last successful archive 2026-10-14; `verify-ios` green on 2026-10-15 main pushes; Playwright and deploy-freshness cron green; Sentry BN/BR/BS/BP unresolved count zero.  Follow-up PR hardens `asc-api.mjs` to prefer `ASC_*` from process env (hosted Actions) over the on-disk secrets file.
