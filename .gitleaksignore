@@ -68,6 +68,10 @@ a632fe0938aeb4de158a3d8dfd7b39bec1aaffd9:docs/handoffs/2026-08-21-mobile-web-han
 # could boot. Current tree no longer has that literal at line 42.
 435d94a4bc02929c23af9ccc5b3a97122d6a4ad3:playwright.config.ts:generic-api-key:42
 #
+# PR #4707 intermediate commit 636ef4d0: admin config briefly used the same throwaway
+# ENCRYPTION_KEY literal as smoke; removed in 938ef2e0 (hash fixture). False positive.
+636ef4d041846ccd65dcd2aa4207bb01a818dcd9:playwright.admin.config.ts:generic-api-key:40
+#
 # Historical fake OPENROUTER_KEY fixture on commit a9b01e00. Same file:line is
 # already ignored for 1ea0caa9 and f4e99900; schedule still flags this older
 # introducing commit. Current tree uses a mock-key-v1-... fixture, not a live key.
