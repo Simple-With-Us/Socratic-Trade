@@ -85,6 +85,58 @@ describe("fetchWithRetry retries a dead socket then succeeds", () => {
     ).rejects.toThrow(/aborted/i);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it("retries a 429 before opening the lane, and only for a positive Retry-After", async () => {
+    // maxWorkers is 1, so an earlier file can leave the breaker disabled for the
+    // rest of the process.  This case has to see the real hold.
+    const previousDisabled = process.env.API_CIRCUIT_BREAKER_DISABLED;
+    delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+    try {
+      const { getDb } = await import("../src/lib/db");
+      getDb();
+      const { fetchWithRetry } = await import("../src/lib/data-providers");
+      const { apiCircuitBreakerShouldSkip, resetApiCircuitBreaker } = await import("../src/lib/api-circuit-breaker");
+      resetApiCircuitBreaker();
+      let calls = 0;
+      let openAtRetry = true;
+      vi.stubGlobal("fetch", async () => {
+        calls += 1;
+        if (calls === 2) {
+          openAtRetry = apiCircuitBreakerShouldSkip("retry-429-lane", null).skip;
+          return new Response("slow", { status: 429, headers: { "Retry-After": "30" } });
+        }
+        return new Response("slow", { status: 429 });
+      });
+
+      const res = await fetchWithRetry("https://example.test/retry-429", { cache: "no-store" }, {
+        service: "retry-429-lane",
+        retries: 1,
+        backoffMs: 1
+      });
+      expect(res.status).toBe(429);
+      expect(calls).toBe(2);
+      expect(openAtRetry).toBe(false);
+      expect(apiCircuitBreakerShouldSkip("retry-429-lane", null).skip).toBe(true);
+
+      resetApiCircuitBreaker();
+      calls = 0;
+      vi.stubGlobal("fetch", async () => {
+        calls += 1;
+        return new Response("slow", { status: 429 });
+      });
+      const plain = await fetchWithRetry("https://example.test/retry-429-plain", { cache: "no-store" }, {
+        service: "retry-429-plain",
+        retries: 1,
+        backoffMs: 1
+      });
+      expect(plain.status).toBe(429);
+      expect(calls).toBe(2);
+      expect(apiCircuitBreakerShouldSkip("retry-429-plain", null).skip).toBe(false);
+    } finally {
+      if (previousDisabled === undefined) delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+      else process.env.API_CIRCUIT_BREAKER_DISABLED = previousDisabled;
+    }
+  });
 });
 
 describe("broker health does not auto-halt on the first socket blip", () => {

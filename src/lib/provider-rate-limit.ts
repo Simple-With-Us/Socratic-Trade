@@ -46,6 +46,8 @@ const HARD_DEFAULTS: Record<string, { perMin?: number; minIntervalMs?: number; c
   "yahoo-finance": { minIntervalMs: 400, concurrency: 2 },
   // Public Nasdaq.com JSON endpoints (no key) — gentle pacing to avoid 429 bursts.
   "nasdaq-quote": { minIntervalMs: 250, concurrency: 2 },
+  "nasdaq-delayed-screener": { minIntervalMs: 250, concurrency: 2 },
+  "congress-nasdaq-screener": { minIntervalMs: 250, concurrency: 2 },
   // Free "Basic" tier is 8 API credits/min and each symbol in a batch /quote costs ONE credit
   // (see docs/data-provider-mcp-evaluation.md). The REAL budget control now lives in the provider
   // (data-providers.ts): it caps a call to `twelveDataCreditsPerMin()` symbols AND gates to one
@@ -70,6 +72,8 @@ const HARD_DEFAULTS: Record<string, { perMin?: number; minIntervalMs?: number; c
   "yh-finance-apidojo": { minIntervalMs: 1100, concurrency: 1 },
   "real-time-finance-data": { minIntervalMs: 500, concurrency: 1 },
   "seeking-alpha-rapidapi": { minIntervalMs: 1100, concurrency: 1 },
+  // Per-host RapidAPI pacing (see resolveProviderLimiterKey) — Basic tier is ~1 req/sec.
+  "rapidapi-host": { minIntervalMs: 1100, concurrency: 1 },
   filingapi: { minIntervalMs: 400, concurrency: 1 },
   // ROIC free = 5 req/min, Individual = 300/min (https://www.roic.ai/pricing, 2026-08-06).
   // Burst pacer only (concurrency 1, short spacing). The free-safe *budget* is RATE_QUOTAS /
@@ -97,9 +101,42 @@ function finiteEnvNumber(name: string): number | undefined {
  * none of env/UM/hard-default applies — meaning unlimited (callers must treat that as a
  * passthrough, not a zero-wait limiter).
  */
+/** Pacer bucket for an outbound request.  RapidAPI hosts get their own lane per hostname. */
+export function resolveProviderLimiterKey(service: string, requestUrl?: string): string {
+  if (requestUrl) {
+    try {
+      const host = new URL(requestUrl).hostname.toLowerCase();
+      if (host.endsWith(".rapidapi.com") || host === "rapidapi.com") {
+        return `rapidapi-host:${host}`;
+      }
+    } catch {
+      /* ignore malformed URLs */
+    }
+  }
+  return service;
+}
+
+/**
+ * Config for one paced call.  A service with its own hard default or env override keeps
+ * that config even when the pacer bucket is `rapidapi-host:<hostname>`.  The host default
+ * (1.1s, concurrency 1) applies only when the service itself has no limit.  Otherwise
+ * `alpha-vantage-rapidapi` (5/min) would be widened to the generic host pace.
+ */
+export function resolveProviderLimiterConfigForCall(
+  service: string,
+  limiterKey = service
+): ProviderLimiterConfig | undefined {
+  const serviceConfig = resolveProviderLimiterConfig(service);
+  if (serviceConfig) return serviceConfig;
+  if (limiterKey !== service) return resolveProviderLimiterConfig(limiterKey);
+  return undefined;
+}
+
 export function resolveProviderLimiterConfig(provider: string): ProviderLimiterConfig | undefined {
-  const hard = HARD_DEFAULTS[provider];
-  const key = envKeyFor(provider);
+  const rapidHostPrefix = "rapidapi-host:";
+  const hard =
+    provider.startsWith(rapidHostPrefix) ? HARD_DEFAULTS["rapidapi-host"] : HARD_DEFAULTS[provider];
+  const key = envKeyFor(provider.startsWith(rapidHostPrefix) ? "rapidapi-host" : provider);
 
   const envPerMin = finiteEnvNumber(`PROVIDER_RATE_LIMIT_${key}_PER_MIN`);
   const envMinInterval = finiteEnvNumber(`PROVIDER_RATE_LIMIT_${key}_MIN_INTERVAL_MS`);
@@ -155,11 +192,12 @@ export class ProviderRateLimiter {
   /** Run `fn` gated by the named provider's limiter. A provider with no configured
    *  limit (see resolveProviderLimiterConfig) passes through immediately — no queueing,
    *  no bookkeeping. */
-  async withLimit<T>(provider: string, fn: () => Promise<T>): Promise<T> {
-    const config = resolveProviderLimiterConfig(provider);
+  async withLimit<T>(provider: string, fn: () => Promise<T>, requestUrl?: string): Promise<T> {
+    const limiterKey = resolveProviderLimiterKey(provider, requestUrl);
+    const config = resolveProviderLimiterConfigForCall(provider, limiterKey);
     if (!config) return fn();
 
-    const state = this.stateFor(provider, config);
+    const state = this.stateFor(limiterKey, config);
     await this.acquire(state);
     try {
       return await fn();
@@ -235,9 +273,13 @@ function providerRateLimitDisabled(): boolean {
 /** Gate `fn` by the named provider's pacer (real clock, module-level singleton shared
  *  across every call site in the process). Providers with no configured limit pass
  *  through immediately, as does every call when PROVIDER_RATE_LIMIT_DISABLED is set. */
-export async function withProviderLimit<T>(provider: string, fn: () => Promise<T>): Promise<T> {
+export async function withProviderLimit<T>(
+  provider: string,
+  fn: () => Promise<T>,
+  requestUrl?: string
+): Promise<T> {
   if (providerRateLimitDisabled()) return fn();
-  return defaultLimiter.withLimit(provider, fn);
+  return defaultLimiter.withLimit(provider, fn, requestUrl);
 }
 
 /** Test-only: clear the default limiter's pacing state. */

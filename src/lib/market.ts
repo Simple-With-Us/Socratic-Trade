@@ -40,6 +40,7 @@ import {
   NASDAQ_SCREENER_TIMEOUT_MS,
   readNasdaqScreenerJson
 } from "./nasdaq-screener-fetch";
+import { fetchFallbackUniverseRows } from "./nasdaq-universe-fallback";
 import { parseNasdaqScreenerPayload, type NasdaqScreenerRow } from "./nasdaq-screener-schema";
 
 export { NASDAQ_SCREENER_TIMEOUT_MESSAGE, NASDAQ_SCREENER_TIMEOUT_MS };
@@ -123,6 +124,9 @@ type NasdaqExchange = "nasdaq" | "nyse";
 // consumed, so this single shared cache is safe to serve to all users.
 // Rows are the parsed schema, not the raw JSON, so a drifted envelope is not cached.
 let screenerCache = new Map<string, { expiresAt: number; rows: NasdaqScreenerRow[]; asOf?: string }>();
+/** Last successful screener parse — served stale while a refresh runs or when live fetch fails. */
+let screenerLastGood = new Map<string, { rows: NasdaqScreenerRow[]; asOf?: string }>();
+const screenerRefreshInFlight = new Map<string, Promise<void>>();
 
 /**
  * True if a quote clears the universe floor. Each bound applies only when set (`> 0`); market-cap and
@@ -1455,17 +1459,58 @@ function envNumber(name: string, fallback: number): number {
 
 export function clearMarketCache(): void {
   screenerCache = new Map();
+  screenerLastGood = new Map();
+  screenerRefreshInFlight.clear();
   clearFundHoldingsCache();
+}
+
+function storeScreenerRows(
+  cacheKey: string,
+  rows: NasdaqScreenerRow[],
+  ttlMs: number,
+  now: number,
+  asOf?: string
+): void {
+  screenerLastGood.set(cacheKey, { rows, asOf });
+  screenerCache.set(cacheKey, { rows, asOf, expiresAt: expiresAtRespectingMarketClose(new Date(now), ttlMs) });
+}
+
+async function refreshNasdaqScreenerLive(
+  cacheKey: string,
+  ttlMs: number,
+  exchange?: NasdaqExchange,
+  signal?: AbortSignal
+): Promise<void> {
+  const response = await fetchNasdaqScreenerResponse("nasdaq-delayed-screener", {
+    url: nasdaqScreenerUrl(exchange),
+    signal
+  });
+  if (!response.ok) throw new Error(`Market data request failed with ${response.status}.`);
+  const payload = parseNasdaqScreenerPayload(await readNasdaqScreenerJson(response, signal));
+  const rows = payload.data.table.rows;
+  const asOf = payload.data.asof ?? undefined;
+  storeScreenerRows(cacheKey, rows, ttlMs, Date.now(), asOf);
+}
+
+function scheduleScreenerBackgroundRefresh(cacheKey: string, ttlMs: number, exchange?: NasdaqExchange): void {
+  if (screenerRefreshInFlight.has(cacheKey)) return;
+  const pending = refreshNasdaqScreenerLive(cacheKey, ttlMs, exchange).catch(() => {
+    /* background refresh is best-effort */
+  }).finally(() => {
+    screenerRefreshInFlight.delete(cacheKey);
+  });
+  screenerRefreshInFlight.set(cacheKey, pending);
 }
 
 async function fetchNasdaqScreener(
   ttlMs: number,
   exchange?: NasdaqExchange,
   signal?: AbortSignal
-): Promise<{ rows: NasdaqScreenerRow[]; asOf?: string; cached: boolean }> {
+): Promise<{ rows: NasdaqScreenerRow[]; asOf?: string; cached: boolean; stale?: boolean }> {
   const now = Date.now();
   const cacheKey = exchange ?? "all";
   const cached = screenerCache.get(cacheKey);
+  const lastGood = screenerLastGood.get(cacheKey);
   if (cached && cached.expiresAt > now) {
     return { rows: cached.rows, asOf: cached.asOf, cached: true };
   }
@@ -1473,20 +1518,33 @@ async function fetchNasdaqScreener(
     throw signal.reason instanceof Error ? signal.reason : new Error("Nasdaq screener aborted.");
   }
 
-  // Headers: shared helper (BROWSER_UA, 15s budget, one abort retry).  Body: the
-  // same caller signal, so a 35s interactive deadline or a 10min freshness
-  // deadline cannot leave response.json() running with nobody awaiting it.
-  const response = await fetchNasdaqScreenerResponse("nasdaq-delayed-screener", {
-    url: nasdaqScreenerUrl(exchange),
-    signal
-  });
-  if (!response.ok) throw new Error(`Market data request failed with ${response.status}.`);
-  // Parse before cache or return.  A drifted envelope throws and is not stored.
-  const payload = parseNasdaqScreenerPayload(await readNasdaqScreenerJson(response, signal));
-  const rows = payload.data.table.rows;
-  const asOf = payload.data.asof ?? undefined;
-  screenerCache.set(cacheKey, { rows, asOf, expiresAt: expiresAtRespectingMarketClose(new Date(now), ttlMs) });
-  return { rows, asOf, cached: false };
+  if (lastGood) {
+    scheduleScreenerBackgroundRefresh(cacheKey, ttlMs, exchange);
+    return { rows: lastGood.rows, asOf: lastGood.asOf, cached: true, stale: true };
+  }
+
+  try {
+    await refreshNasdaqScreenerLive(cacheKey, ttlMs, exchange, signal);
+    const fresh = screenerCache.get(cacheKey)!;
+    return { rows: fresh.rows, asOf: fresh.asOf, cached: false };
+  } catch (error) {
+    // This catch runs only when last-good is empty, so there is no prior price to
+    // copy onto a symbol/name row.  The directory never carries lastsale.
+    // toMarketQuote would drop every row, and storing them would skip Nasdaq until
+    // the close.  Report the listing or the directory's own error, and leave both
+    // caches untouched.  Explicit symbols still recover from the last scan, then Yahoo.
+    const original = error instanceof Error ? error.message : "Nasdaq screener failed.";
+    let fallbackDetail: string;
+    try {
+      const listed = (await fetchFallbackUniverseRows(signal)).length;
+      fallbackDetail = listed === 1
+        ? "Keyless directory listed 1 symbol without a price; that row was not cached."
+        : `Keyless directory listed ${listed} symbols without prices; those rows were not cached.`;
+    } catch (err) {
+      fallbackDetail = err instanceof Error ? err.message : "keyless universe fallback failed";
+    }
+    throw new Error(`${original} ${fallbackDetail}`);
+  }
 }
 
 function toMarketQuote(row: NasdaqScreenerRow, positions: EquityPosition[], provider: string, asOf?: string): MarketQuote[] {
