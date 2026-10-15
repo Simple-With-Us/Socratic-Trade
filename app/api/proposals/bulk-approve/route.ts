@@ -1,5 +1,6 @@
 import { getActiveConnectedAccount, getPolicy, getProposalsByIds } from "@/lib/db";
 import { deriveExecutionState } from "@/lib/execution-mode";
+import { resolvePlacementOutcome } from "@/lib/placement-outcome";
 import {
   liveApprovalText,
   liveBatchApprovalText
@@ -132,16 +133,19 @@ export async function POST(request: Request) {
               : undefined,
           leaseWaitMs: Math.max(0, leaseDeadline - Date.now())
         });
-        results.push({ proposalId: id, symbol: row.proposal.symbol, ...result });
+        const placement = resolvePlacementOutcome(result);
+        results.push({ proposalId: id, symbol: row.proposal.symbol, ...placement });
       } catch (error) {
         if (error instanceof LiveApprovalConfirmationError) {
-          results.push({ proposalId: id, symbol: row.proposal.symbol, status: "error", reasons: error.reasons });
+          const placement = resolvePlacementOutcome({ status: "error", reasons: error.reasons });
+          results.push({ proposalId: id, symbol: row.proposal.symbol, ...placement });
         } else {
+          const reasons = [error instanceof Error ? error.message : "Failed to execute proposal."];
+          const placement = resolvePlacementOutcome({ status: "error", reasons });
           results.push({
             proposalId: id,
             symbol: row.proposal.symbol,
-            status: "error",
-            reasons: [error instanceof Error ? error.message : "Failed to execute proposal."]
+            ...placement
           });
         }
       }

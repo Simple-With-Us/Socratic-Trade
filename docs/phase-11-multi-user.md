@@ -9,7 +9,9 @@ Evidence: `docs/audits/2026-08-17-security-reliability.md` §5.3.
 
 The shared-package pin workflow runs on every pull request so the status cannot disappear for
 unrelated code changes. It installs the pinned Node 24 toolchain before the comparison script,
-which uses Node for GitHub API JSON parsing.
+which uses Node for GitHub API JSON parsing. Congress.Trade is public, so the script reads
+the vendor tree with the Actions installation token first and uses `GH_PACKAGES_TOKEN` only
+as a fallback. Putting the user PAT first made a burst of pull requests share one rate limit.
 
 Goal: let multiple users use the app — logging in at the same or different times —
 each getting analysis and trade proposals tailored to **their own preferences and
