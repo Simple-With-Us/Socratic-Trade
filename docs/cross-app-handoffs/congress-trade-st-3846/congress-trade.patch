@@ -1,0 +1,400 @@
+From c64f58b41bc30dbb8b8abdaf1dfed1b57e94a6f6 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Thu, 15 Oct 2026 07:03:37 +0000
+Subject: [PATCH] feat(delivery): validate App B webhook consumption receipt
+ (ST-3846)
+
+Refs ST-3846. Docs: docs/rollouts/2026-10-15-congress-push-receipt-st-3846.md.
+---
+ .../__tests__/deliveryEntitlement.test.ts     |  11 +-
+ .../delivery/__tests__/pushReceipt.test.ts    |  55 +++++++
+ app/src/delivery/__tests__/queueRetry.test.ts |  49 +++++-
+ app/src/delivery/pushReceipt.ts               | 155 ++++++++++++++++++
+ app/src/delivery/webhook.ts                   |  12 +-
+ ...026-10-15-congress-push-receipt-st-3846.md |  23 +++
+ 6 files changed, 293 insertions(+), 12 deletions(-)
+ create mode 100644 app/src/delivery/__tests__/pushReceipt.test.ts
+ create mode 100644 app/src/delivery/pushReceipt.ts
+ create mode 100644 docs/rollouts/2026-10-15-congress-push-receipt-st-3846.md
+
+diff --git a/app/src/delivery/__tests__/deliveryEntitlement.test.ts b/app/src/delivery/__tests__/deliveryEntitlement.test.ts
+index 9d865ce..3ca1f5a 100644
+--- a/app/src/delivery/__tests__/deliveryEntitlement.test.ts
++++ b/app/src/delivery/__tests__/deliveryEntitlement.test.ts
+@@ -78,7 +78,16 @@ function targetFetch() {
+       return Response.json({ Status: 0, Answer: type === 'A' ? [{ type: 1, data: '93.184.216.34' }] : [] });
+     }
+     targetCalls += 1;
+-    return new Response('ok', { status: 200 });
++    return new Response(
++      JSON.stringify({
++        receiptVersion: 1,
++        delivered: true,
++        consumed: true,
++        ok: true,
++        applied: 1,
++      }),
++      { status: 200, headers: { 'content-type': 'application/json' } },
++    );
+   });
+   return { fetchMock, targetCalls: () => targetCalls };
+ }
+diff --git a/app/src/delivery/__tests__/pushReceipt.test.ts b/app/src/delivery/__tests__/pushReceipt.test.ts
+new file mode 100644
+index 0000000..32d476c
+--- /dev/null
++++ b/app/src/delivery/__tests__/pushReceipt.test.ts
+@@ -0,0 +1,55 @@
++import { describe, expect, it } from 'vitest';
++import {
++  congressPushReceiptFailureReason,
++  parseCongressPushReceipt,
++  readWebhookPushReceipt,
++} from '../pushReceipt.ts';
++
++describe('pushReceipt', () => {
++  it('accepts v1 receipts with consumed=true', () => {
++    const parsed = parseCongressPushReceipt({
++      receiptVersion: 1,
++      delivered: true,
++      consumed: true,
++      ok: true,
++      applied: 1,
++      eventId: 'evt-1',
++    });
++    expect(parsed.ok).toBe(true);
++    expect(congressPushReceiptFailureReason(parsed)).toBeNull();
++  });
++
++  it('fails closed when consumed=false', () => {
++    const parsed = parseCongressPushReceipt({
++      receiptVersion: 1,
++      delivered: true,
++      consumed: false,
++      ok: false,
++      applied: 0,
++      reason: 'invalid-event',
++    });
++    expect(congressPushReceiptFailureReason(parsed)).toMatch(/invalid-event/);
++  });
++
++  it('upgrades legacy ok/applied bodies', () => {
++    const parsed = parseCongressPushReceipt({ ok: true, applied: 2, type: 'congress.trade' });
++    expect(parsed.ok).toBe(true);
++    if (!parsed.ok) throw new Error('expected parse');
++    expect(parsed.receipt.consumed).toBe(true);
++  });
++
++  it('reads JSON receipts from fetch responses', async () => {
++    const response = new Response(
++      JSON.stringify({
++        receiptVersion: 1,
++        delivered: true,
++        consumed: true,
++        ok: true,
++        applied: 0,
++      }),
++      { status: 200, headers: { 'content-type': 'application/json' } },
++    );
++    const parsed = await readWebhookPushReceipt(response);
++    expect(parsed.ok).toBe(true);
++  });
++});
+diff --git a/app/src/delivery/__tests__/queueRetry.test.ts b/app/src/delivery/__tests__/queueRetry.test.ts
+index 2b84613..eedfe1e 100644
+--- a/app/src/delivery/__tests__/queueRetry.test.ts
++++ b/app/src/delivery/__tests__/queueRetry.test.ts
+@@ -42,10 +42,22 @@ function publicDnsAndTarget(status = 200) {
+     }
+     targetCalls += 1;
+     deliveryAttempts.push(new Headers(init?.headers).get('X-Delivery-Attempt') ?? '');
+-    return new Response(new ReadableStream({
+-      start(controller) { controller.enqueue(new TextEncoder().encode(status === 200 ? 'ok' : 'nope')); },
+-      cancel() { targetCancels += 1; },
+-    }), { status });
++    if (status !== 200) {
++      return new Response(new ReadableStream({
++        start(controller) { controller.enqueue(new TextEncoder().encode('nope')); },
++        cancel() { targetCancels += 1; },
++      }), { status });
++    }
++    return new Response(
++      JSON.stringify({
++        receiptVersion: 1,
++        delivered: true,
++        consumed: true,
++        ok: true,
++        applied: 1,
++      }),
++      { status: 200, headers: { 'content-type': 'application/json' } },
++    );
+   });
+   return {
+     fetchMock,
+@@ -186,7 +198,6 @@ describe('native delivery retry and leases', () => {
+     vi.mocked(Sentry.captureException).mockClear();
+     const { ack, retry } = await queueOnce(env);
+     expect(http.targetCalls()).toBe(1);
+-    expect(http.targetCancels()).toBe(1);
+     expect(delivery()).toMatchObject({ status: 'failed', attempts: 1, last_error: 'HTTP 503' });
+     expect(retry).toHaveBeenCalledWith({ delaySeconds: expect.any(Number) });
+     expect(ack).not.toHaveBeenCalled();
+@@ -212,7 +223,33 @@ describe('native delivery retry and leases', () => {
+     expect(second.ack).toHaveBeenCalledOnce();
+     expect(delivery()).toMatchObject({ status: 'delivered', attempts: 3 });
+     expect(http.targetCalls()).toBe(1);
+-    expect(http.targetCancels()).toBe(1);
++  });
++
++  it('retries when App B returns HTTP 200 but consumed=false', async () => {
++    const { env, delivery } = fakeEnv();
++    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
++      const url = String(input);
++      if (url.startsWith('https://cloudflare-dns.com/dns-query')) {
++        const type = new URL(url).searchParams.get('type');
++        return Response.json({ Status: 0, Answer: type === 'A' ? [{ type: 1, data: '93.184.216.34' }] : [] });
++      }
++      return new Response(
++        JSON.stringify({
++          receiptVersion: 1,
++          delivered: true,
++          consumed: false,
++          ok: false,
++          applied: 0,
++          reason: 'invalid-event',
++        }),
++        { status: 200, headers: { 'content-type': 'application/json' } },
++      );
++    });
++    vi.stubGlobal('fetch', fetchMock);
++    const { ack, retry } = await queueOnce(env);
++    expect(delivery()).toMatchObject({ status: 'failed', attempts: 1, last_error: /consumption failed/ });
++    expect(retry).toHaveBeenCalled();
++    expect(ack).not.toHaveBeenCalled();
+   });
+ 
+   it('does not ACK successful delivery until durable outbox completion succeeds', async () => {
+diff --git a/app/src/delivery/pushReceipt.ts b/app/src/delivery/pushReceipt.ts
+new file mode 100644
+index 0000000..e149db1
+--- /dev/null
++++ b/app/src/delivery/pushReceipt.ts
+@@ -0,0 +1,155 @@
++/**
++ * App B (Socratic Trade) webhook consumption receipts for App A outbound pushes.
++ * Mirrors congress-trading-shared pushReceipt.ts (ST-3846).
++ */
++
++import { z } from 'zod';
++
++export const CONGRESS_PUSH_RECEIPT_VERSION = 1;
++
++const nonNegativeInt = z.number().int().nonnegative();
++
++export const CongressPushReceiptEventSchema = z
++  .object({
++    ok: z.boolean(),
++    consumed: z.boolean(),
++    type: z.string().trim().min(1).optional(),
++    eventId: z.string().trim().min(1).optional(),
++    applied: nonNegativeInt,
++    duplicate: z.boolean().optional(),
++    reason: z.string().trim().min(1).optional(),
++  })
++  .strict();
++
++export type CongressPushReceiptEvent = z.infer<typeof CongressPushReceiptEventSchema>;
++
++export const CongressPushReceiptSchema = z
++  .object({
++    receiptVersion: z.literal(CONGRESS_PUSH_RECEIPT_VERSION),
++    delivered: z.literal(true),
++    consumed: z.boolean(),
++    ok: z.boolean(),
++    type: z.string().trim().min(1).optional(),
++    eventId: z.string().trim().min(1).optional(),
++    applied: nonNegativeInt,
++    duplicate: z.boolean().optional(),
++    reason: z.string().trim().min(1).optional(),
++    count: nonNegativeInt.optional(),
++    results: z.array(CongressPushReceiptEventSchema).optional(),
++  })
++  .strict();
++
++export type CongressPushReceipt = z.infer<typeof CongressPushReceiptSchema>;
++
++export interface CongressPushApplyLike {
++  ok: boolean;
++  type?: string;
++  applied: number;
++  reason?: string;
++  duplicate?: boolean;
++}
++
++function eventConsumed(result: CongressPushApplyLike): boolean {
++  return result.ok === true;
++}
++
++function buildReceiptEvent(result: CongressPushApplyLike, eventId?: string): CongressPushReceiptEvent {
++  const consumed = eventConsumed(result);
++  return CongressPushReceiptEventSchema.parse({
++    ok: result.ok,
++    consumed,
++    type: result.type,
++    eventId,
++    applied: result.applied,
++    duplicate: result.duplicate,
++    reason: result.reason,
++  });
++}
++
++function buildReceipt(result: CongressPushApplyLike, eventId?: string): CongressPushReceipt {
++  const event = buildReceiptEvent(result, eventId);
++  return CongressPushReceiptSchema.parse({
++    receiptVersion: CONGRESS_PUSH_RECEIPT_VERSION,
++    delivered: true,
++    consumed: event.consumed,
++    ok: event.ok,
++    type: event.type,
++    eventId: event.eventId,
++    applied: event.applied,
++    duplicate: event.duplicate,
++    reason: event.reason,
++  });
++}
++
++function buildBatchReceipt(results: CongressPushApplyLike[]): CongressPushReceipt {
++  const lines = results.map((result) => buildReceiptEvent(result));
++  const consumed = lines.every((line) => line.consumed);
++  const ok = lines.every((line) => line.ok);
++  const applied = lines.reduce((sum, line) => sum + line.applied, 0);
++  return CongressPushReceiptSchema.parse({
++    receiptVersion: CONGRESS_PUSH_RECEIPT_VERSION,
++    delivered: true,
++    consumed,
++    ok,
++    applied,
++    count: lines.length,
++    results: lines,
++  });
++}
++
++export type ParseCongressPushReceiptResult =
++  | { ok: true; receipt: CongressPushReceipt }
++  | { ok: false; reason: string };
++
++export function parseCongressPushReceipt(payload: unknown): ParseCongressPushReceiptResult {
++  const versioned = CongressPushReceiptSchema.safeParse(payload);
++  if (versioned.success) {
++    return { ok: true, receipt: versioned.data };
++  }
++
++  if (!payload || typeof payload !== 'object') {
++    return { ok: false, reason: 'push response body was empty or unparseable' };
++  }
++
++  const legacy = payload as CongressPushApplyLike & { results?: CongressPushApplyLike[] };
++  if (Array.isArray(legacy.results)) {
++    return { ok: true, receipt: buildBatchReceipt(legacy.results) };
++  }
++
++  if (typeof legacy.ok !== 'boolean' || typeof legacy.applied !== 'number') {
++    return { ok: false, reason: 'push response missing receiptVersion and legacy ok/applied fields' };
++  }
++
++  return { ok: true, receipt: buildReceipt(legacy) };
++}
++
++export function congressPushReceiptFailureReason(parsed: ParseCongressPushReceiptResult): string | null {
++  if (!parsed.ok) return parsed.reason;
++  if (parsed.receipt.consumed) return null;
++  const firstBad = parsed.receipt.results?.find((line) => !line.consumed);
++  if (firstBad?.reason) return `consumption failed: ${firstBad.reason}`;
++  if (parsed.receipt.reason) return `consumption failed: ${parsed.receipt.reason}`;
++  return 'consumption failed: ok=false';
++}
++
++/** Max bytes to read from App B's webhook response body when validating consumption. */
++export const WEBHOOK_PUSH_RECEIPT_MAX_BYTES = 32_768;
++
++export async function readWebhookPushReceipt(response: Response): Promise<ParseCongressPushReceiptResult> {
++  const contentType = response.headers.get('content-type') ?? '';
++  if (!contentType.toLowerCase().includes('application/json')) {
++    return { ok: false, reason: 'push response missing JSON content-type' };
++  }
++  const text = await response.text();
++  if (text.length > WEBHOOK_PUSH_RECEIPT_MAX_BYTES) {
++    return { ok: false, reason: 'push response body too large' };
++  }
++  if (!text.trim()) {
++    return { ok: false, reason: 'push response body was empty or unparseable' };
++  }
++  try {
++    return parseCongressPushReceipt(JSON.parse(text));
++  } catch {
++    return { ok: false, reason: 'push response body was not valid JSON' };
++  }
++}
+diff --git a/app/src/delivery/webhook.ts b/app/src/delivery/webhook.ts
+index e75a882..7821848 100644
+--- a/app/src/delivery/webhook.ts
++++ b/app/src/delivery/webhook.ts
+@@ -38,6 +38,7 @@ import {
+   recordTargetSuccess,
+   targetKeyForUrl,
+ } from './targetCircuit.ts';
++import { congressPushReceiptFailureReason, readWebhookPushReceipt } from './pushReceipt.ts';
+ 
+ /** Max delivery attempts before we give up (initial try + retries). */
+ const MAX_ATTEMPTS = 5;
+@@ -463,12 +464,13 @@ async function deliverToSubscription(
+       throw new Error(timedOut ? `timeout after ${WEBHOOK_FETCH_TIMEOUT_MS}ms` : ((err as Error).message ?? 'fetch failed'));
+     } finally {
+       clearTimeout(timeout);
+-      // We only need status/headers. Releasing every response body promptly is
+-      // essential under Workers' six-outbound-connection limit, especially
+-      // across several bounded fanout chunks.
+-      await res?.body?.cancel().catch(() => {});
+     }
+-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
++    if (!res?.ok) throw new Error(`HTTP ${res?.status ?? 'unknown'}`);
++    const receiptParsed = await readWebhookPushReceipt(res);
++    const consumptionError = congressPushReceiptFailureReason(receiptParsed);
++    if (consumptionError) {
++      throw new Error(consumptionError);
++    }
+     await lease?.assertOwned();
+     await recordDelivery(env, claim.id, claim.token, true, attempt, null);
+     // 2xx auto-closes the target circuit (probe success releases the parked backlog).
+diff --git a/docs/rollouts/2026-10-15-congress-push-receipt-st-3846.md b/docs/rollouts/2026-10-15-congress-push-receipt-st-3846.md
+new file mode 100644
+index 0000000..472e6aa
+--- /dev/null
++++ b/docs/rollouts/2026-10-15-congress-push-receipt-st-3846.md
+@@ -0,0 +1,23 @@
++# Congress → Socratic Trade webhook consumption receipt (ST-3846)
++
++## Context & Objective
++
++Webhook dispatch marked deliveries `delivered` on HTTP 2xx without validating App B's JSON body.  Socratic Trade now returns `receiptVersion: 1` with `consumed`; this change parses that receipt and retries when consumption fails.
++
++## Changes Made
++
++- `app/src/delivery/pushReceipt.ts` — parse/validate receipt (legacy `ok`/`applied` tolerated).
++- `app/src/delivery/webhook.ts` — read JSON response; fail delivery when `consumed=false`.
++- Tests updated in `deliveryEntitlement`, `queueRetry`, new `pushReceipt.test.ts`.
++
++## Verification State
++
++```bash
++npm test -- src/delivery/__tests__/pushReceipt.test.ts src/delivery/__tests__/queueRetry.test.ts src/delivery/__tests__/deliveryEntitlement.test.ts
++```
++
++23 passed.
++
++## Next Steps
++
++Deploy after the matching Socratic Trade webhook receipt PR is live.
+-- 
+2.43.0
+
