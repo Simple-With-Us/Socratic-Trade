@@ -95,7 +95,6 @@ Code and collectors are ready. Flip in Infisical/env when desired; watch receipt
 | Capability | Gate | Notes |
 |------------|------|--------|
 | Usage-budget hard enforce | `USAGE_BUDGET_ENFORCE=off` | Ready — see table above |
-| Infisical primary bridge writer | `INFISICAL_ST_PRIMARY_WRITER_ENABLED=false` | Usage-monitor primary credentials |
 | Landing / welcome / strategy | `LANDING_PAGE_ENABLED` unset → **ON** | Explicit off → 404 |
 | CSP headers | `CSP_ENABLED=on` + `CSP_REPORT_ONLY=on` (2026-08-13) | Live report-only; `/api/csp-report`. Do not enforce-block. |
 | Sentry session replay | `NEXT_PUBLIC_SENTRY_REPLAY_ENABLED=false` | Privacy/cost |

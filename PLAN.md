@@ -1,4 +1,5 @@
 > **2026-10-15 CURSOR — iOS sign-out caches and money-action results (ST-2578, `cursor/ios-signout-money-outcomes-43db`).**  No roadmap scope change.  Sign-out and account switch clear account caches and stores.  Approve, reject, and cancel show success, failed, or retryable.  Extra-ship no.  Do not auto-merge.  Rollout: `docs/rollouts/2026-10-15-ios-signout-account-switch-outcomes.md`.
+> **2026-10-15 CURSOR — Congress.Trade push receipt (ST-3846, `cursor/ct-push-receipt-2155`).**  No roadmap scope change.  Inbound Congress.Trade pushes get an idempotent receipt (push id, delivered ack, consumed ack, `health`).  Only an ok receipt with the same payload is replayed.  A different payload under that id is 409.  A missing ack pages on the first occurrence.  The ops snapshot field is `congressInboundPush`.  The sender change is the Congress.Trade pull on the same branch name.  Extra-ship no.  Do not mark ST-3846 completed until both pulls merge.  Rollout: `docs/rollouts/2026-10-15-ct-push-receipt.md`.
 > **2026-10-15 GROK — Tradier sandbox waits until 9:46am ET (`cursor/tradier-sandbox-open-16-cea2`).**  No roadmap scope change.  Follow-up to merged #4668.  Sandbox quotes are 15 minutes delayed, so sandbox strategy runs and equity, bracket, and option posts wait until 16 minutes after the regular open.  The health gate skips the run.  Live Tradier is unchanged.  Extra-ship no.  Do not merge from this lane.  Jay squash-merges.  Rollout: `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`.
 > **2026-10-15 OPENCODE — History retention exemption (`opencode/opencode-history-retention`, Linear ST-4532).**  No roadmap scope change.  `history_cache_eod` leaves hygiene age targets (permanent upserts, ~5y lookback per #4661); disposable caches keep their windows.  Production evidence pre-fix: live sha a3d21b73, 02:56Z report eligible=3,427,386 / deleted=5,000.  Rollout: `docs/rollouts/2026-10-15-history-retention-exemption.md`.
 > **2026-10-15 GROK — PR #4664 merge main and handoff order (`cursor/data-cascade-reliability-eb70`).**  No roadmap scope change.  Merged `origin/main` (`2656320f`) with no conflicts and no migration renumber.  The open Kody thread's gate list now puts `npm test` before `npm run build`.  The thread stays unresolved.  Extra-ship no.  Do not merge from this lane.  Rollout: `docs/rollouts/2026-10-14-data-cascade-reliability.md`.
@@ -738,6 +739,13 @@ Added OpenRouter models to `app/ui/llm-model-catalog.ts` so they can be selected
 > solved by another agent while this branch was in flight — deferred to those, dropped the redundant
 > local wiring. Full gate green; landing via PR next. Rollout:
 > `docs/rollouts/2026-07-10-durable-state-restart-survival.md`.
+
+> **2026-10-15 - Primary-account Usage Monitor credential bridge writer removed
+> (ST-4318).** Owner requested permanent code removal on 2026-10-06. Deleted
+> `st-primary-bridge-writer`, scheduler lane, `/api/keys` triggers, env/docs
+> backlog entries, and tests. Encrypted per-user API keys and tombstone behavior
+> in `db-api-keys` are unchanged. No remote Infisical secret deletion. Paired UM
+> reader cleanup is tracked separately in Usage Monitor.
 
 > **2026-07-15 - Primary-account Usage Monitor credential bridge writer
 > (CODEX).** Implement the default-off writer half of API Usage Monitor PR
