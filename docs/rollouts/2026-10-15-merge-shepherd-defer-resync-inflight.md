@@ -8,6 +8,7 @@ Armed PRs starved when something called `gh pr update-branch` every ~15–19 min
 
 - Added `ci_in_flight()` (any in-progress check rollup entry, or `verify` not in a terminal state).
 - `shepherd_sync_behind` and dry-run `BEHIND` classification skip `update-branch` until CI finishes on the current head.
+- Terminal `verify` conclusions include `NEUTRAL` and `SKIPPED` (Kody #4705).
 - Contract selftest: `scripts/merge-shepherd-ci-inflight.selftest.sh`.
 
 **Files:** `scripts/merge-shepherd.sh`, `scripts/merge-shepherd-ci-inflight.selftest.sh`, `docs/rollouts/2026-10-15-merge-shepherd-defer-resync-inflight.md`, `STATUS.md`.
@@ -19,15 +20,19 @@ Armed PRs starved when something called `gh pr update-branch` every ~15–19 min
 
 ## Verification State
 
-```bash
-bash -n scripts/merge-shepherd.sh
-bash scripts/merge-shepherd-ci-inflight.selftest.sh
-SHEPHERD_DRY_RUN=1 bash scripts/merge-shepherd.sh
-npm run lint
-npx tsc --noEmit
-```
+Commands on this branch (per handoff.mdc — **ok** only when run on the commit being handed off; **N/A** when out of scope or not run this session):
 
-GB-MONITOR pickup (2026-10-15): merged `origin/main` into PR branch (`7a779aeb`); `verify` on #4705 was green before merge-forward; re-run expected after push.
+| Command | Result |
+|---|---|
+| `bash -n scripts/merge-shepherd.sh` | ok (this session) |
+| `bash scripts/merge-shepherd-ci-inflight.selftest.sh` | ok (this session) |
+| `SHEPHERD_DRY_RUN=1 bash scripts/merge-shepherd.sh` | N/A (needs `gh` + open PRs; not run this session) |
+| `npm run lint` | N/A (shell-only change; not run this session) |
+| `npx tsc --noEmit` | N/A (no TS touched; not run this session) |
+| `npm test` | N/A (no vitest coverage for bash; not run this session) |
+| `npm run build` | N/A (no app/runtime change; not run this session) |
+
+CI `verify` on PR #4705 is the authoritative full gate after push.
 
 ## Next Steps & Blockers
 

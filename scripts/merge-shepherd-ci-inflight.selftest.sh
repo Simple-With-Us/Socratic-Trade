@@ -35,6 +35,8 @@ assert_in_flight 0 QUEUED
 assert_idle 0 SUCCESS
 assert_idle 0 NONE
 assert_idle 0 FAILURE
+assert_idle 0 NEUTRAL
+assert_idle 0 SKIPPED
 
 if [ "$fail" -ne 0 ]; then
   exit 1
