@@ -116,6 +116,15 @@ npx eslint scripts/check-shared-package-pin.mjs test/disable-pr-automerge.test.t
 
 `tsc` exit 0.  Vitest 32 passed.  ESLint 0 errors on those files.
 
+## Port from #4727
+
+#4727 had the same gate plus two pieces this branch lacked.  Those are now here.
+
+- Each disable job sets `contents: write` and `pull-requests: write`.  The arm job stays read-only.  `test/branch-protection-gate.test.ts` locks the block and rejects `contents: write` on `auto-merge`.
+- `scripts/disable-pr-automerge.sh` reads `autoMergeRequest` with `gh pr view --jq` and prints `off`, `armed`, or `unreadable`.  `off` exits 0.  `armed` exits 1.  A failed read is `unreadable` and also exits 1, so a dead token is not reported as disarmed.
+
+Touched: `.github/workflows/auto-merge-prs.yml`, `scripts/disable-pr-automerge.sh`, `test/disable-pr-automerge.test.ts`, `test/branch-protection-gate.test.ts`, `STATUS.md`, `PLAN.md`, this note.
+
 ## Next Steps & Blockers
 
 - PR #4697 stays ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.

@@ -262,10 +262,12 @@ describe("required contexts are not renamed out from under the ruleset", () => {
       const block = jobBlock(auto, job);
       expect(block).toContain("bash scripts/disable-pr-automerge.sh");
       expect(block).toContain("DISABLE_AUTOMERGE_FALLBACK_TOKEN");
+      expect(block).toMatch(/permissions:\n {6}contents: write\n {6}pull-requests: write/);
     }
     const arm = jobBlock(auto, "auto-merge");
     expect(arm).toContain("!contains(github.event.pull_request.labels.*.name, 'do-not-automerge')");
     expect(arm).toContain("skip_automerge != 'true'");
     expect(arm).not.toContain("disable-pr-automerge.sh");
+    expect(arm).not.toMatch(/contents: write/);
   });
 });

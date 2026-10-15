@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Disable an already-armed pull-request auto-merge.
 #
-# GH_TOKEN is tried first.  A rejected credential (401/403) retries once with
+# GH_TOKEN is tried first.  A rejected credential (401/403, or GITHUB_TOKEN
+# "Resource not accessible by integration") retries once with
 # DISABLE_AUTOMERGE_FALLBACK_TOKEN, which the workflow sets to the Actions
 # GITHUB_TOKEN.  Arming must not use that token.  Disabling may.
-# Already-off is success.  The Actions token can read autoMergeRequest when it
-# cannot call disablePullRequestAutoMerge ("Resource not accessible by
-# integration").  A null autoMergeRequest after that refusal is success.  A
-# still-armed merge is a hard error.
+# Already-off is success, including when the disable mutation is forbidden but
+# `autoMergeRequest` reads null.  If the read still shows an armed merge, or
+# the read itself fails, the script exits 1.  A dead token must not be reported
+# as a successful disarm.
 set -euo pipefail
 
 PR_URL="${1:-}"
@@ -23,6 +24,39 @@ is_auth_failure() {
 run_disable() {
   local token="$1"
   GH_TOKEN="$token" gh pr merge --disable-auto "$PR_URL" 2>&1
+}
+
+# Prints off, armed, or unreadable.  Never fails the script by itself.
+read_arm_state() {
+  local token="$1"
+  local status=0
+  local out
+  out="$(GH_TOKEN="$token" gh pr view "$PR_URL" --json autoMergeRequest --jq 'if .autoMergeRequest == null then "off" else "armed" end' 2>&1)" || status=$?
+  if [ "$status" -ne 0 ]; then
+    printf 'unreadable\n'
+    return 0
+  fi
+  printf '%s\n' "$out" | awk 'NF { line = $0 } END { print line }'
+}
+
+confirm_disarmed_or_fail() {
+  local token state
+  for token in "$primary" "$fallback"; do
+    [ -n "$token" ] || continue
+    state="$(read_arm_state "$token")"
+    case "$state" in
+      off)
+        echo "auto-merge already off for $PR_URL"
+        exit 0
+        ;;
+      armed)
+        echo "::error::auto-merge still armed for $PR_URL (credentials rejected)"
+        exit 1
+        ;;
+    esac
+  done
+  echo "::error::could not disable auto-merge for $PR_URL (credentials rejected)"
+  exit 1
 }
 
 primary="${GH_TOKEN:-}"
@@ -53,48 +87,8 @@ if is_auth_failure "$out" && [ -n "$fallback" ] && [ "$fallback" != "$primary" ]
   fi
 fi
 
-view_auto_merge() {
-  local token="$1"
-  local status=0
-  local view
-  view="$(GH_TOKEN="$token" gh pr view "$PR_URL" --json autoMergeRequest 2>&1)" || status=$?
-  printf '%s\n' "$view"
-  if [ "$status" -ne 0 ]; then
-    return 2
-  fi
-  if printf '%s\n' "$view" | grep -q '"autoMergeRequest"[[:space:]]*:[[:space:]]*null'; then
-    return 1
-  fi
-  if printf '%s\n' "$view" | grep -q '"autoMergeRequest"'; then
-    return 0
-  fi
-  return 2
-}
-
 if is_auth_failure "$out"; then
-  echo "Disable was rejected; checking whether auto-merge is already off"
-  checked=""
-  for token in "$fallback" "$primary"; do
-    if [ -z "$token" ]; then
-      continue
-    fi
-    case ",$checked," in
-      *,"$token",*) continue ;;
-    esac
-    checked="${checked},${token}"
-    view_status=0
-    view_auto_merge "$token" || view_status=$?
-    if [ "$view_status" -eq 1 ]; then
-      echo "auto-merge is already off for $PR_URL"
-      exit 0
-    fi
-    if [ "$view_status" -eq 0 ]; then
-      echo "::error::auto-merge is still armed for $PR_URL and disable was rejected"
-      exit 1
-    fi
-  done
-  echo "::error::could not disable auto-merge for $PR_URL (credentials rejected)"
-  exit 1
+  confirm_disarmed_or_fail
 fi
 
 echo "disable-auto returned nonzero (already off or not armed); continuing"

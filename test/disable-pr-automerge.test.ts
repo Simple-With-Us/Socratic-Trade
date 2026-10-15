@@ -77,33 +77,50 @@ exit 1
     const got = run(dir, { GH_TOKEN: "bad-pat", DISABLE_AUTOMERGE_FALLBACK_TOKEN: "also-bad" });
     expect(got.status).toBe(1);
     expect(got.stdout).toContain("credentials rejected");
+    expect(got.stdout).not.toContain("already off");
   });
 
-  it("treats an integration refusal as success when auto-merge is already off", () => {
+  it("treats a forbidden disable as success when the jq read is off", () => {
     const { dir } = fakeBin(`#!/bin/bash
-if [[ "$*" == *"--disable-auto"* ]]; then
-  echo "GraphQL: Resource not accessible by integration (disablePullRequestAutoMerge)" >&2
-  exit 1
+if [ "$2" = "view" ]; then
+  echo "off"
+  exit 0
 fi
-echo '{"autoMergeRequest":null}'
-exit 0
+echo "GraphQL: Resource not accessible by integration (disablePullRequestAutoMerge)" >&2
+exit 1
 `);
     const got = run(dir, { GH_TOKEN: "bad-pat", DISABLE_AUTOMERGE_FALLBACK_TOKEN: "actions" });
     expect(got.status).toBe(0);
     expect(got.stdout).toContain("already off");
   });
 
-  it("fails when disable is rejected and auto-merge is still armed", () => {
+  it("fails when the jq read is armed", () => {
     const { dir } = fakeBin(`#!/bin/bash
-if [[ "$*" == *"--disable-auto"* ]]; then
-  echo "GraphQL: Resource not accessible by integration (disablePullRequestAutoMerge)" >&2
-  exit 1
+if [ "$2" = "view" ]; then
+  echo "armed"
+  exit 0
 fi
-echo '{"autoMergeRequest":{"enabledAt":"2026-10-15T00:00:00Z"}}'
-exit 0
+echo "401 Unauthorized Bad credentials" >&2
+exit 1
 `);
     const got = run(dir, { GH_TOKEN: "bad-pat", DISABLE_AUTOMERGE_FALLBACK_TOKEN: "actions" });
     expect(got.status).toBe(1);
     expect(got.stdout).toContain("still armed");
+    expect(got.stdout).toContain("credentials rejected");
+  });
+
+  it("fails when the jq read is unreadable", () => {
+    const { dir } = fakeBin(`#!/bin/bash
+if [ "$2" = "view" ]; then
+  echo "HTTP 401 Bad credentials" >&2
+  exit 1
+fi
+echo "401 Unauthorized Bad credentials" >&2
+exit 1
+`);
+    const got = run(dir, { GH_TOKEN: "bad-pat", DISABLE_AUTOMERGE_FALLBACK_TOKEN: "actions" });
+    expect(got.status).toBe(1);
+    expect(got.stdout).toContain("credentials rejected");
+    expect(got.stdout).not.toContain("already off");
   });
 });
