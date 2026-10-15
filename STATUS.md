@@ -10,7 +10,7 @@
 
 **Verification.**  After merging `origin/main` (`df7e6d10`) and the check-pin token-order fix: `npm run lint` exit 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exit 0.  `npx vitest run test/shared-package-pin-check.test.ts` 6 passed.  `node scripts/check-shared-package-pin.mjs` with `GH_PACKAGES_TOKEN` unset printed `OK` for `@2.7.1`.  `npm test` 9366 passed, 51 skipped, 26 failed, all outside this diff (sandbox LLM and notify credentials, provider fixtures, cpuprofile Node loader, server-metrics host flag).  `npm run build` exit 0.  check-pin was red on this PR and on every other PR in the 07:32-07:55Z burst because the script preferred `GH_PACKAGES_TOKEN` (user 12656028) for the public Congress.Trade repo and reported the rate limit as a missing token.  The Actions `GITHUB_TOKEN` is now first.
 
-**Next.**  Jay squash-merges.  Do not enable auto-merge.  Playwright session cookies follow `PLAYWRIGHT_PORT`.  Three Kody threads stay open: the retired-lanes screenshot already lives in `test/e2e/visual.spec.ts`, and the smoke Auth.js fallback is a shared fixture, not a provider key.
+**Next.**  Jay squash-merges.  Do not enable auto-merge.  Playwright session cookies follow `PLAYWRIGHT_PORT`.  `resolvePlaywrightAuthSecret()` keeps the local fixture but requires workflow `PLAYWRIGHT_AUTH_SECRET` in CI; vitest imports `playwright-base-url.ts` only so `verify` does not throw under `CI=true`.  Two screenshot Kody threads stay open with defer replies only.  Re-request Kody review after the vitest fix lands.
 
 ## 2026-10-15 CURSOR — Congress push delivery/consumption receipt (ST-3846)
 
