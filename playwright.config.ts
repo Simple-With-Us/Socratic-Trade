@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { resolvePlaywrightAuthSecret } from "./test/e2e/playwright-auth-secret";
 
 const port = Number(process.env.PLAYWRIGHT_PORT || 4201);
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${port}`;
@@ -15,8 +16,7 @@ const webServerCommand =
 // middleware's documented dev/local fallback to PRIMARY_USER_EMAIL — the same path local
 // `next start` uses. The smoke email is the server's PRIMARY_USER_EMAIL so it passes the allowlist.
 const authEmail = process.env.PLAYWRIGHT_AUTH_EMAIL || "smoke-test@agentic.local";
-const playwrightAuthSecret =
-  process.env.PLAYWRIGHT_AUTH_SECRET || "playwright-e2e-auth-secret-32chars!!";
+const playwrightAuthSecret = resolvePlaywrightAuthSecret();
 
 export default defineConfig({
   testDir: "./test/e2e",

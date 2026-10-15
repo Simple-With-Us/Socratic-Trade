@@ -1,9 +1,9 @@
 import type { BrowserContext } from "@playwright/test";
 import { encodeSessionToken } from "../../src/lib/auth/session-token";
+import { resolvePlaywrightAuthSecret } from "./playwright-auth-secret";
 
 /** Must match `webServer.env.AUTH_SECRET` in playwright.config.ts. */
-export const PLAYWRIGHT_AUTH_SECRET =
-  process.env.PLAYWRIGHT_AUTH_SECRET || "playwright-e2e-auth-secret-32chars!!";
+export const PLAYWRIGHT_AUTH_SECRET = resolvePlaywrightAuthSecret();
 
 export const PLAYWRIGHT_AUTH_EMAIL =
   process.env.PLAYWRIGHT_AUTH_EMAIL || "smoke-test@agentic.local";

@@ -62,7 +62,7 @@ Re-run after the `origin/main` merge (`df7e6d10`) and the check-pin token-order 
 
 ## Review threads on the shepherd merges
 
-A later merge of the Quiver coverage branch added `installPlaywrightSession`.  Its cookie origin was hardcoded to port 4201 while `playwright.config.ts` honors `PLAYWRIGHT_PORT`.  The cookie now uses the same derivation.  Two Kody notes asked for a `visual-tests/` screenshot of the retired-lanes footnote.  That assertion is already in `test/e2e/visual.spec.ts`, which is this repo's Playwright visual suite.  The Auth.js smoke secret fallback stays: the webServer and the test workers have to share one value when `PLAYWRIGHT_AUTH_SECRET` is unset, and a per-process random secret would sign a cookie the server rejects.  Those three threads stay open with a defer reply.
+A later merge of the Quiver coverage branch added `installPlaywrightSession`.  Its cookie origin was hardcoded to port 4201 while `playwright.config.ts` honors `PLAYWRIGHT_PORT`.  The cookie now uses the same derivation.  Two Kody notes asked for a `visual-tests/` screenshot of the retired-lanes footnote.  That assertion is already in `test/e2e/visual.spec.ts`, which is this repo's Playwright visual suite.  The Auth.js smoke secret now uses `resolvePlaywrightAuthSecret()` (`test/e2e/playwright-auth-secret.ts`): local runs keep the shared fixture so webServer `AUTH_SECRET` and the test JWT match; CI requires `PLAYWRIGHT_AUTH_SECRET` (set per run in `.github/workflows/e2e.yml`).  Screenshot threads stay open with defer replies only.
 
 ## Next Steps & Blockers
 

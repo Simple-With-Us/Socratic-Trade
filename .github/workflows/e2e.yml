@@ -117,6 +117,8 @@ jobs:
       # Next build workers, and the webServer process; 2560 MiB allowed the
       # webServer to be OOM-killed with exit 137 on the admin PR.
       NODE_OPTIONS: --max-old-space-size=2048
+      # Per-run smoke secret (not committed). webServer AUTH_SECRET and test JWT must match.
+      PLAYWRIGHT_AUTH_SECRET: pw-smoke-run-${{ github.run_id }}-auth-secret-32!!
     steps:
       - name: Fail closed if classify did not succeed
         if: needs.classify.result != 'success'
