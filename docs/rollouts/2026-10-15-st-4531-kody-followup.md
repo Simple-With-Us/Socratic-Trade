@@ -18,9 +18,9 @@ PR #4696 merged with Kody `CHANGES_REQUESTED` threads still open and `docs/rollo
 ## Verification State
 
 ```bash
-npx vitest run test/github-actions-infisical-zulip-ops.test.ts test/agent-sync-fleet-post.test.ts test/infisical-secrets-safe.test.ts  # -> ok
 npm run lint  # -> ok
 npx tsc --noEmit  # -> ok
+npm test  # -> ok
 npm run build  # -> ok
 ```
 
