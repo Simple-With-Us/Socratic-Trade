@@ -4,8 +4,8 @@
  * built-in crypto (ES256 JWT signing) and fetch (Node 18+).
  *
  * Auth: resolveAscCredentials() reads ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH
- * from process.env first, then ~/.secrets/appstore-connect.env (never prints
- * values -- see scripts/infisical-secrets-safe.sh pattern used elsewhere).
+ * from process.env first, then an optional secrets file when the caller passes
+ * envPath or sets ASC_SECRETS_ENV (never prints values).
  *
  * Usage:
  *   node asc-api.mjs GET /v1/apps
@@ -20,7 +20,6 @@
 import { readFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createSign } from "node:crypto";
-import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -38,15 +37,21 @@ function loadEnvFile(path) {
 }
 
 /**
- * Prefer process.env over the secrets file (GitHub Actions exports ASC_* after Infisical load).
- * Default envPath matches ship-testflight.sh SECRETS_ENV (~/.secrets/appstore-connect.env);
- * that handoff file is operator/CI ship tooling, not the app runtime Infisical path (Kody rule 33).
+ * Prefer process.env over an optional secrets file. No implicit ~/.secrets default (Kody rule 33).
+ * File fallback runs only when envPath is passed or ASC_SECRETS_ENV is set (ship-testflight.sh
+ * exports ASC_SECRETS_ENV after sourcing SECRETS_ENV; hosted CI uses process.env ASC_* only).
  */
-export function resolveAscCredentials(envPath = join(homedir(), ".secrets", "appstore-connect.env")) {
+export function resolveAscCredentials(envPath) {
+  const secretsFile =
+    envPath != null && String(envPath).trim() !== ""
+      ? String(envPath).trim()
+      : process.env.ASC_SECRETS_ENV != null && String(process.env.ASC_SECRETS_ENV).trim() !== ""
+        ? String(process.env.ASC_SECRETS_ENV).trim()
+        : undefined;
   let fileEnv = {};
-  if (existsSync(envPath)) {
+  if (secretsFile && existsSync(secretsFile)) {
     try {
-      fileEnv = loadEnvFile(envPath);
+      fileEnv = loadEnvFile(secretsFile);
     } catch {
       fileEnv = {};
     }
@@ -61,7 +66,7 @@ export function resolveAscCredentials(envPath = join(homedir(), ".secrets", "app
   const keyId = pick("ASC_KEY_ID");
   const issuerId = pick("ASC_ISSUER_ID");
   const keyPath = pick("ASC_KEY_PATH");
-  return { keyId, issuerId, keyPath, envPath };
+  return { keyId, issuerId, keyPath, envPath: secretsFile ?? "" };
 }
 
 function base64url(input) {
@@ -406,7 +411,7 @@ async function main() {
   const { keyId, issuerId, keyPath, envPath } = resolveAscCredentials();
   if (!keyId || !issuerId || !keyPath) {
     console.error(
-      "Missing ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH (set in process env or ~/.secrets/appstore-connect.env)"
+      "Missing ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH (set in process env or ASC_SECRETS_ENV file)"
     );
     process.exit(1);
   }

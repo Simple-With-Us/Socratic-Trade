@@ -22,7 +22,7 @@ reply on the review thread (not resolved).  The unread-file branch (EISDIR) is n
 
 **Linear.**  **ST-2916** (`512444e3-f147-4bca-9c03-a51e53b109cd`) — claimed **CURSOR**, status **addressed**, PR #4716 linked in issue comment (Agent-Sync).
 
-**Next.**  PR #4716 shepherd: Kody threads (rollout gate outcomes, per-var ASC test, temp cleanup); `verify` after push.  GB-Deployer squash-merge; ST-2916 **completed** on merge.
+**Next.**  PR #4716: rule-33 fix (no implicit ~/.secrets in resolveAscCredentials; ASC_SECRETS_ENV).  GB-Deployer squash-merge when `verify` green; ST-2916 **completed** on merge.
 
 ## 2026-10-15 codex-autofix — PR #4716 unblock (merge `main`, thread state)
 

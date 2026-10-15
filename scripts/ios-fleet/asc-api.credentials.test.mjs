@@ -10,6 +10,7 @@ const saved = {
   ASC_KEY_ID: process.env.ASC_KEY_ID,
   ASC_ISSUER_ID: process.env.ASC_ISSUER_ID,
   ASC_KEY_PATH: process.env.ASC_KEY_PATH,
+  ASC_SECRETS_ENV: process.env.ASC_SECRETS_ENV,
 };
 
 afterEach(() => {
@@ -95,6 +96,44 @@ test("resolveAscCredentials works with a missing secrets file", (t) => {
   assert.equal(creds.keyId, "ENV_ID");
   assert.equal(creds.issuerId, "env-issuer");
   assert.equal(creds.keyPath, "/env/key.p8");
+});
+
+test("resolveAscCredentials with no path uses only process.env (no implicit secrets file)", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "asc-cred-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const envPath = join(dir, "appstore-connect.env");
+  writeFileSync(
+    envPath,
+    "ASC_KEY_ID=FILE_ID\nASC_ISSUER_ID=file-issuer\nASC_KEY_PATH=/file/key.p8\n",
+    "utf8"
+  );
+  delete process.env.ASC_SECRETS_ENV;
+  process.env.ASC_KEY_ID = "ENV_ID";
+  process.env.ASC_ISSUER_ID = "env-issuer";
+  process.env.ASC_KEY_PATH = "/env/key.p8";
+
+  const creds = resolveAscCredentials();
+  assert.equal(creds.keyId, "ENV_ID");
+  assert.equal(creds.envPath, "");
+});
+
+test("resolveAscCredentials reads ASC_SECRETS_ENV when set", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "asc-cred-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const envPath = join(dir, "appstore-connect.env");
+  writeFileSync(
+    envPath,
+    "ASC_KEY_ID=FILE_ID\nASC_ISSUER_ID=file-issuer\nASC_KEY_PATH=/file/key.p8\n",
+    "utf8"
+  );
+  delete process.env.ASC_KEY_ID;
+  delete process.env.ASC_ISSUER_ID;
+  delete process.env.ASC_KEY_PATH;
+  process.env.ASC_SECRETS_ENV = envPath;
+
+  const creds = resolveAscCredentials();
+  assert.equal(creds.keyId, "FILE_ID");
+  assert.equal(creds.envPath, envPath);
 });
 
 test("resolveAscCredentials ignores a secrets path that throws on read", (t) => {
