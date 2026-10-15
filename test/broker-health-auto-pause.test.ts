@@ -40,6 +40,11 @@ describe("broker-health auto-pause when orders cannot be placed", () => {
       )
     ).toBe(false);
     expect(isOrderPlacementInfrastructureFailure("Tradier HTTP 500: Unexpected server error")).toBe(true);
+    expect(
+      isOrderPlacementInfrastructureFailure(
+        "Tradier order failed: Tradier order placement unverified: the tag lookup failed. Reconcile before retrying."
+      )
+    ).toBe(false);
     expect(isOrderPlacementInfrastructureFailure("HTTP 403 Forbidden")).toBe(false);
   });
 

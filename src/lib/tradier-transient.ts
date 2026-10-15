@@ -33,6 +33,15 @@ export function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Thrown when a transient refusal cannot be followed by a tag read.
+ * Must not contain "Unexpected server error" or an HTTP 4xx status: those
+ * classify as safe-to-retry or as a terminal reject, and either one can
+ * drop a live order.  Callers reconcile instead.
+ */
+export const TRADIER_TAG_LOOKUP_UNVERIFIED_MESSAGE =
+  "Tradier order placement unverified: the tag lookup failed. Reconcile before retrying.";
+
 /** Sandbox only.  Live Tradier places on the normal path. */
 export const TRADIER_SANDBOX_OPEN_DEFER_MINUTES = 15;
 

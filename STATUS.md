@@ -1,5 +1,17 @@
 # Current Status
 
+## 2026-10-14 GROK — PR #4668 final tag lookup before not_placed
+
+**What.**  Merged `origin/main` (`1588bae8`, keyless options enrichment and the fleet-fully-dark detector) with no conflicts.  The open Sentry thread on `placement-outcome.ts` was real: the last Tradier "Unexpected server error" POST skipped the tag lookup, and both lanes booked retryable `not_placed` before `reconcilePlacementError`.  A landed final POST could be retried under a new refId.  The adapter now looks up the tag after every transient refusal, including the last.  A hit returns the broker order.  A lookup that throws is `TRADIER_TAG_LOOKUP_UNVERIFIED_MESSAGE` (not the retryable sentence, not an HTTP 4xx).  HTTP 408 and that sentence go through reconcile before `not_placed`.  HTTP 429 and the sandbox open deferral still short-circuit.
+
+**Review triage.**  One unresolved thread, `PRRT_kwDOS7mOVM6sgtKQ` (sentry).  The reply is posted after this push and cites the commit.  The thread stays unresolved.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 grandfathered warnings).  `npx tsc --noEmit` ok.  Targeted vitest after the post-backoff lookup: 132 passed in `test/tradier.test.ts`, `test/placement-outcome.test.ts`, `test/placement-reconcile.test.ts`, and `test/broker-health-auto-pause.test.ts`.  Full `npm test`: 9349 passed, 51 skipped, 1 failed.  The failure is `test/egress-guard.test.ts` because this sandbox rejects the discord.com lookup, outside this diff.  `npm run build` ok.
+
+**Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`, `PLAN.md`, `docs/phase-7-strategy.md`.
+
+**Next.**  `do-not-automerge` stays.  Do not merge from this lane.  Jay squash-merges.  CI `verify` on the previous head was `action_required` with zero jobs (workflow approval), not a test failure.  Push this head so `verify` can run.
+
 ## 2026-10-14 Codex Autofix — PR #4668 tag-hit fill state and listing validation
 
 **What.**  Two Kody review findings on the Tradier transient-400 branch.  The tag-hit path in `postOrderToleratingTransientServerError` returned a hardcoded `{ id, status: "pending" }` stub, dropping `exec_quantity` / `avg_fill_price`, so an order that filled inside the lookup+backoff window was booked unfilled at the proposal price — the exact P&L corruption the equity path's own comment warns about.  It now re-reads the order for the broker's real state, falling back to the stub (never a rethrow) if that read fails, since the order is already known live.  `findOrderIdByTag` now validates the `GET /orders` envelope through `TradierOrdersPageSchema` at the HTTP trust boundary; a drifted shape is a clean tag miss, never a throw.  Three regression tests added.

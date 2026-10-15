@@ -89,6 +89,48 @@ Targeted vitest was 96 passed, then 111 after the `origin/main` merges.  Full `n
 
 `do-not-automerge` stays.  Jay squash-merges.
 
+## 2026-10-14 — final tag lookup before booking not_placed
+
+### Context & Objective
+
+Sentry thread `PRRT_kwDOS7mOVM6sgtKQ` on `src/lib/placement-outcome.ts`.  A final Tradier "Unexpected server error" skipped the tag lookup, and both placement lanes booked retryable `not_placed` before reconcile.  If that POST had landed, the next run would mint a new refId and could duplicate the order.
+
+### Changes Made
+
+`postOrderToleratingTransientServerError` waits out the backoff, then looks up the tag before any further POST.  The last refusal looks the tag up with no further POST.  A hit still returns `fetchPlacedOrderBody`.  A clean miss still retries until the budget is spent, then throws the original sentence.  A lookup that throws does not POST again and throws `TRADIER_TAG_LOOKUP_UNVERIFIED_MESSAGE`, which is not the retryable sentence and not an HTTP 4xx.
+
+`mustReconcileRetryablePlaceError` is true for HTTP 408 and for `isTradierTransientServerError`.  The approval lane and the autonomous lane both use it, so those errors reach `reconcilePlacementError` before `not_placed`.  HTTP 429 and the sandbox open deferral still short-circuit.  Tradier's order list is authoritative (`ordersListIncludesTerminal`), so a reconcile miss is still `not_placed` after the one-second index wait.
+
+- `src/lib/tradier-transient.ts`
+- `src/lib/tradier.ts`
+- `src/lib/placement-outcome.ts`
+- `src/lib/strategy.ts`
+- `src/lib/strategy-execution.ts`
+- `test/tradier.test.ts`
+- `test/placement-outcome.test.ts`
+- `test/placement-reconcile.test.ts`
+- `test/broker-health-auto-pause.test.ts`
+- `STATUS.md`
+- `PLAN.md`
+- `docs/phase-7-strategy.md`
+- this note
+
+### Decisions & Trade-offs
+
+The unverified-lookup message deliberately omits the broker sentence and any HTTP status.  Embedding either one would classify the failure as safe-to-retry or as `rejected_by_broker`.  A failed re-read after a tag hit still falls back to the id stub.  That order is already known live.
+
+The lookup sits after the backoff, not before it.  A tag that appears during the wait blocks the next POST.  A clean miss, including a schema-invalid listing, still retries.  That miss is the same contract as the earlier rounds: a garbled envelope must not abort the wedge retry.  An HTTP failure on the lookup does not POST again.  Tradier's tag is a label, not a broker idempotency key, so a miss that is actually a late index can still duplicate inside the three-attempt budget.  The final miss goes through reconcile (one more second, full order list) before `not_placed`.
+
+`origin/main` (`1588bae8`) merged clean.  No migration renumber.
+
+### Verification State
+
+`npm run lint` ok (0 errors, 866 grandfathered warnings).  `npx tsc --noEmit` ok.  Targeted vitest after the post-backoff lookup: 132 passed in `test/tradier.test.ts`, `test/placement-outcome.test.ts`, `test/placement-reconcile.test.ts`, and `test/broker-health-auto-pause.test.ts`.  Full `npm test`: 9349 passed, 51 skipped, 1 failed.  The failure is `test/egress-guard.test.ts` because this sandbox rejects the discord.com lookup, outside this diff.  `npm run build` ok.
+
+### Next Steps & Blockers
+
+Label `do-not-automerge`.  Jay squash-merges.  Do not enable auto-merge and do not merge from this lane.  Reply on the Sentry thread and leave it unresolved.  Comment `@kody start-review` after the push.  This seat has no Fleet Linear credentials, so team `ST` was not updated.  Board item `f5bdb15c` tracks the lane.  Premarket sandbox 400s still reach the broker.  Only the regular-open window is deferred.
+
 ## Next Steps & Blockers
 
 Label `do-not-automerge`.  Jay squash-merges.  Do not enable auto-merge and do not merge from this lane.  Create or move the Linear team `ST` issue once a seat with Fleet credentials picks this up.  Premarket sandbox 400s still reach the broker.  Only the regular-open window is deferred.

@@ -1555,6 +1555,8 @@ describe("Tradier adapter — HTTP 400 Unexpected server error on the order path
   it("does not POST again when the tag is already on the book", async () => {
     await seedTradier({ environment: "paper" });
     let posts = 0;
+    let listAt = 0;
+    const started = Date.now();
     vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
       const method = (init?.method ?? "GET").toUpperCase();
       const u = String(url);
@@ -1562,7 +1564,11 @@ describe("Tradier adapter — HTTP 400 Unexpected server error on the order path
         posts += 1;
         return json(400, { errors: { error: "Unexpected server error" } });
       }
+      if (method === "GET" && /\/orders\/999(?:\?|$)/.test(u)) {
+        return json(200, { order: { id: 999, status: "pending" } });
+      }
       if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        listAt = Date.now() - started;
         return json(200, { orders: { order: { id: 999, tag: "r-hit", status: "pending" } } });
       }
       return new Response("", { status: 404 });
@@ -1571,6 +1577,9 @@ describe("Tradier adapter — HTTP 400 Unexpected server error on the order path
     const placed = await getTradierGateway("local").placeEquityOrder({ ...equity, refId: "r-hit" });
     expect(placed.orderId).toBe("999");
     expect(posts).toBe(1);
+    // The lookup waits out the 400ms backoff so a just-accepted tag is visible
+    // before any second POST.
+    expect(listAt).toBeGreaterThanOrEqual(350);
   });
 
   // The tag hit proves the POST landed; a hardcoded `{ status: "pending" }` stub dropped the fill
@@ -1666,7 +1675,7 @@ describe("Tradier adapter — HTTP 400 Unexpected server error on the order path
       return new Response("", { status: 404 });
     });
     const { getTradierGateway } = await import("../src/lib/tradier");
-    await expect(getTradierGateway("local").placeEquityOrder(equity)).rejects.toThrow(/Unexpected server error/);
+    await expect(getTradierGateway("local").placeEquityOrder(equity)).rejects.toThrow(/tag lookup failed/);
     expect(posts).toBe(1);
   });
 
@@ -1702,7 +1711,35 @@ describe("Tradier adapter — HTTP 400 Unexpected server error on the order path
     expect(posts).toBe(1);
   });
 
-  it("throws the sentence after three POSTs and two empty lookups", async () => {
+  it("returns the order when the tag appears on the lookup after the final refusal", async () => {
+    await seedTradier({ environment: "paper" });
+    let posts = 0;
+    let listGets = 0;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const u = String(url);
+      if (method === "POST" && u.includes(`/accounts/${ACCT}/orders`)) {
+        posts += 1;
+        return json(400, { errors: { error: "Unexpected server error" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders/77`)) {
+        return json(200, { order: { id: 77, status: "filled", exec_quantity: "1", avg_fill_price: "10.10" } });
+      }
+      if (method === "GET" && u.includes(`/accounts/${ACCT}/orders`)) {
+        listGets += 1;
+        if (listGets < 3) return json(200, { orders: null });
+        return json(200, { orders: { order: { id: 77, tag: "r-final", status: "pending" } } });
+      }
+      return new Response("", { status: 404 });
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const placed = await getTradierGateway("local").placeEquityOrder({ ...equity, refId: "r-final" });
+    expect(posts).toBe(3);
+    expect(listGets).toBe(3);
+    expect(placed).toMatchObject({ orderId: "77", state: "filled", filledQuantity: 1, averagePrice: 10.1 });
+  });
+
+  it("throws the sentence after three POSTs and three empty lookups", async () => {
     await seedTradier({ environment: "paper" });
     let posts = 0;
     let gets = 0;
@@ -1722,7 +1759,7 @@ describe("Tradier adapter — HTTP 400 Unexpected server error on the order path
     const { getTradierGateway } = await import("../src/lib/tradier");
     await expect(getTradierGateway("local").placeEquityOrder(equity)).rejects.toThrow(/Unexpected server error/);
     expect(posts).toBe(3);
-    expect(gets).toBe(2);
+    expect(gets).toBe(3);
   });
 
   it("retries an option order the same way", async () => {

@@ -5,6 +5,7 @@ import {
   isIdempotencyConflictHttpError,
   isRetryableBrokerHttpError,
   isTerminalBrokerHttpError,
+  mustReconcileRetryablePlaceError,
   mobileCommandStatusForPlacement,
   placementCommandErrorMessage,
   resolvePlacementOutcome
@@ -87,6 +88,19 @@ describe("placement outcome resolver", () => {
     expect(classifyPlaceOrderError(deferral)).toBe("retryable");
     expect(isTerminalBrokerHttpError(deferral)).toBe(false);
     expect(classifyPlaceOrderError("HTTP 403 Forbidden")).toBe("rejected_terminal");
+    // The sentence stays retryable, but it must reconcile before not_placed.
+    // HTTP 429 and the local open-window deferral never reached a live order.
+    expect(mustReconcileRetryablePlaceError(sentence)).toBe(true);
+    expect(mustReconcileRetryablePlaceError(wrapped422)).toBe(true);
+    expect(mustReconcileRetryablePlaceError("Broker HTTP 408 while placing")).toBe(true);
+    expect(mustReconcileRetryablePlaceError("Alpaca order failed: HTTP 429 Too Many Requests")).toBe(false);
+    expect(mustReconcileRetryablePlaceError(deferral)).toBe(false);
+    expect(mustReconcileRetryablePlaceError(buyingPower)).toBe(false);
+    expect(mustReconcileRetryablePlaceError(http500)).toBe(false);
+    const unverified = "Tradier order placement unverified: the tag lookup failed. Reconcile before retrying.";
+    expect(classifyPlaceOrderError(unverified)).toBe("other");
+    expect(mustReconcileRetryablePlaceError(unverified)).toBe(false);
+    expect(isTerminalBrokerHttpError(unverified)).toBe(false);
   });
 
   it("resolvePlacementOutcome preserves the executeProposal payload and adds outcome", () => {

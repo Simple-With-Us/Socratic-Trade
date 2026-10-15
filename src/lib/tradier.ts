@@ -32,6 +32,7 @@ import { normalizeVenueOrder } from "./venue-normalization";
 import { TRADIER_BROKER_IO_DEADLINE_MS, equityOrdersDefaultSinceIso, withDeadline } from "./inflight-deadline";
 import {
   TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE,
+  TRADIER_TAG_LOOKUP_UNVERIFIED_MESSAGE,
   TRADIER_TRANSIENT_ATTEMPTS,
   isTradierSandboxOpenDeferral,
   isTradierTransientServerError,
@@ -446,8 +447,8 @@ class TradierBrokerGateway implements BrokerGateway {
   // write would make a retry a genuine second order attempt, or a cancel-of-already-cancelled 400
   // that the caller would misread as failure (same class of risk Alpaca's trackHealth documents for
   // createOrder). HTTP 400 "Unexpected server error" is a separate, sentence-only retry inside
-  // postOrderToleratingTransientServerError: it looks up the tag before any second POST and does
-  // not use this flag.
+  // postOrderToleratingTransientServerError: it looks up the tag before any second POST and again
+  // before giving up, and does not use this flag.
   private async trackHealth<T>(
     fn: () => Promise<T>,
     opts?: { deadlineMs?: number; retryTransient?: boolean }
@@ -918,11 +919,13 @@ class TradierBrokerGateway implements BrokerGateway {
   }
 
   /**
-   * POST an order.  On HTTP 400 "Unexpected server error", look up our tag
-   * before any second POST.  A hit means the first request landed despite the
-   * error body, so we return that id.  A clean miss backs off and retries.
-   * A failed lookup does not send another POST.  Any other error, including a
-   * real 400, fails on the first attempt.
+   * POST an order.  On HTTP 400 "Unexpected server error", wait out the
+   * backoff, then look up our tag before any second POST.  The last refusal
+   * looks up immediately, with no further POST.  A hit means that request
+   * landed despite the error body, so we return that id.  A clean miss
+   * retries until the budget is spent.  A failed lookup does not send
+   * another POST and does not claim the order was absent.  Any other error,
+   * including a real 400, fails on the first attempt.
    * The whole sequence is one trackHealth call so a recovered blip is not a
    * tradier-broker hard failure.
    */
@@ -939,28 +942,44 @@ class TradierBrokerGateway implements BrokerGateway {
         } catch (error) {
           last = error;
           const msg = error instanceof Error ? error.message : String(error);
-          if (!isTradierTransientServerError(msg) || attempt + 1 >= TRADIER_TRANSIENT_ATTEMPTS) throw error;
-          let existing: string | undefined;
-          try {
-            existing = await this.findOrderIdByTag(accountNumber, tag);
-          } catch {
-            throw error;
+          if (!isTradierTransientServerError(msg)) throw error;
+          // The listing can lag the accept.  Sleep before the lookup that
+          // gates the next POST, so a just-landed tag is visible before we
+          // send another order.  The final attempt does not sleep again.
+          if (attempt + 1 < TRADIER_TRANSIENT_ATTEMPTS) {
+            await sleepMs(tradierTransientBackoffMs(attempt));
           }
-          if (existing) {
-            // The tag hit proves the POST landed, but the hardcoded `{ status: "pending" }`
-            // stub dropped exec_quantity / avg_fill_price, so an order that FILLED inside the
-            // lookup+backoff window was booked as unfilled at the proposal price — exactly the
-            // P&L corruption the equity path warns about below.  Re-read the order for the
-            // broker's real state.  A failed re-read must NOT rethrow: that would surface as a
-            // retryable placement failure and risk a duplicate POST of an order we already know
-            // is live, so fall back to the id-only stub instead.
-            return await this.fetchPlacedOrderBody<T>(accountNumber, existing);
-          }
-          await sleepMs(tradierTransientBackoffMs(attempt));
+          const landed = await this.orderBodyForLandedTag<T>(accountNumber, tag);
+          if (landed) return landed;
+          if (attempt + 1 >= TRADIER_TRANSIENT_ATTEMPTS) throw error;
         }
       }
       throw last;
     });
+  }
+
+  /**
+   * After a transient refusal, ask whether our tag is already on the book.
+   * A hit returns the live order body.  A clean miss returns undefined so the
+   * caller may POST again.  A lookup that throws must not be retried as a
+   * fresh order and must not be classified as a safe `not_placed`.
+   */
+  private async orderBodyForLandedTag<T>(accountNumber: string, tag: string): Promise<T | undefined> {
+    let existing: string | undefined;
+    try {
+      existing = await this.findOrderIdByTag(accountNumber, tag);
+    } catch {
+      throw new Error(TRADIER_TAG_LOOKUP_UNVERIFIED_MESSAGE);
+    }
+    if (!existing) return undefined;
+    // The tag hit proves the POST landed, but the hardcoded `{ status: "pending" }`
+    // stub dropped exec_quantity / avg_fill_price, so an order that FILLED inside the
+    // lookup+backoff window was booked as unfilled at the proposal price — exactly the
+    // P&L corruption the equity path warns about below.  Re-read the order for the
+    // broker's real state.  A failed re-read must NOT rethrow: that would surface as a
+    // retryable placement failure and risk a duplicate POST of an order we already know
+    // is live, so fall back to the id-only stub instead.
+    return this.fetchPlacedOrderBody<T>(accountNumber, existing);
   }
 
   /**

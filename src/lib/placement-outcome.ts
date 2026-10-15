@@ -35,6 +35,18 @@ export function isRetryablePlaceMessage(message: string): boolean {
 }
 
 /**
+ * Retryable errors that may still have landed at the broker.  Book
+ * `not_placed` only after refId reconcile.  HTTP 408 is a timeout.  Tradier's
+ * "Unexpected server error" is the same class once it escapes the adapter:
+ * the POST may have been accepted, and the next attempt mints a new refId.
+ * A confirmed tag hit never throws this sentence.  HTTP 429 and the sandbox
+ * open deferral never reached a live order and stay on the short-circuit.
+ */
+export function mustReconcileRetryablePlaceError(message: string): boolean {
+  return /\bHTTP 408\b/i.test(message) || isTradierTransientServerError(message);
+}
+
+/**
  * Alpaca reports a reused `client_order_id` as HTTP 409, and also as HTTP 422
  * `"client_order_id must be unique"`. Either way the key already exists at the
  * broker — usually because the first createOrder was accepted and the response

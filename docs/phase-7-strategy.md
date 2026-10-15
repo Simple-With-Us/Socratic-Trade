@@ -4,7 +4,7 @@ This document defines the comprehensive architecture for the AI Trading Strategy
 
 ## 2026-10-14 Tradier sandbox open HTTP 400 does not auto-halt
 
-Tradier Sandbox HTTP 400 "Unexpected server error" is a transient broker error.  The order-capability probe and a real equity, bracket, or option POST retry it (three attempts, 400ms then 1200ms).  A write looks up its tag before a second POST.  `applyBrokerOrderPlacementPause` leaves `systemState` active and does not touch the connectivity streak.  The run skip is `skipped` / `run_skipped_broker_transient`, not `skipped_broker_unhealthy`.  Sandbox posts are refused locally for the first 15 minutes of the regular session.  Live Tradier still places.  Buying power, plain HTTP 400, HTTP 403, and HTTP 5xx still fail loudly and can still halt.  Rollout: `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`.
+Tradier Sandbox HTTP 400 "Unexpected server error" is a transient broker error.  The order-capability probe and a real equity, bracket, or option POST retry it (three attempts, 400ms then 1200ms).  A write looks up its tag before a second POST and again before giving up.  An escaped "Unexpected server error" reconciles by refId before anyone books `not_placed`.  `applyBrokerOrderPlacementPause` leaves `systemState` active and does not touch the connectivity streak.  The run skip is `skipped` / `run_skipped_broker_transient`, not `skipped_broker_unhealthy`.  Sandbox posts are refused locally for the first 15 minutes of the regular session.  Live Tradier still places.  Buying power, plain HTTP 400, HTTP 403, and HTTP 5xx still fail loudly and can still halt.  Rollout: `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`.
 
 ## 2026-09-04 Gather internal time budget (do not raise the 8-minute cap)
 
