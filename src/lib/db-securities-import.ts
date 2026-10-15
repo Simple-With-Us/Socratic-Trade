@@ -260,28 +260,41 @@ export interface ImportedCacheCounts {
 }
 
 /**
- * True when every persistable row in this push is readable back from the cache.
- * An empty persistable payload is readable: there is nothing the cache should hold.
+ * True when every row this push would actually write is readable back from the cache.
+ * Blank tickers, non-finite closes, and dates that are not YYYY-MM-DD are skipped on
+ * write (`normTicker` / `normDate`), so they are not a missing consumed ack.  A padded
+ * `YYYY-MM-DD` is compared after the same trim the writer uses.  An empty persistable
+ * payload is readable: there is nothing the cache should hold.
  */
 export function importedPushIsReadable(input: {
   refs?: Array<{ ticker: string }>;
-  prices?: Array<{ ticker: string; closes: Array<{ date: string }> }>;
-  spx?: Array<{ date: string }>;
+  prices?: Array<{ ticker: string; closes: Array<{ date: string; close?: number }> }>;
+  spx?: Array<{ date: string; close?: number }>;
 }): boolean {
   for (const ref of input.refs ?? []) {
-    if (!getImportedRef(ref.ticker)) return false;
+    const ticker = normTicker(ref.ticker);
+    if (!ticker) continue;
+    if (!getImportedRef(ticker)) return false;
   }
   for (const price of input.prices ?? []) {
-    const have = new Set(getImportedPriceCloses(price.ticker).map((close) => close.date));
+    const ticker = normTicker(price.ticker);
+    if (!ticker) continue;
+    const have = new Set(getImportedPriceCloses(ticker).map((close) => close.date));
     for (const close of price.closes) {
-      if (!have.has(close.date)) return false;
+      if (close.close !== undefined && !isFiniteNumber(close.close)) continue;
+      const date = normDate(close.date);
+      if (!date) continue;
+      if (!have.has(date)) return false;
     }
   }
   const spx = input.spx ?? [];
   if (spx.length > 0) {
     const have = new Set(getImportedSpxCloses().map((close) => close.date));
     for (const close of spx) {
-      if (!have.has(close.date)) return false;
+      if (close.close !== undefined && !isFiniteNumber(close.close)) continue;
+      const date = normDate(close.date);
+      if (!date) continue;
+      if (!have.has(date)) return false;
     }
   }
   return true;
@@ -360,7 +373,11 @@ export function getPeerPushReceipt(pushId: string): StoredPeerPushReceipt | null
   return readStoredPeerPushReceipt(row);
 }
 
-/** Persist the first answer for a push.  A second insert for the same id is ignored. */
+/**
+ * Persist the answer for a push.  An `ok` receipt is kept: a later insert for that
+ * id does not replace it.  A non-ok receipt is replaced, so a retry can recover
+ * after a transient consumed miss or a 500.
+ */
 export function savePeerPushReceipt(input: {
   pushId: string;
   receivedAt: string;
@@ -373,7 +390,13 @@ export function savePeerPushReceipt(input: {
     .prepare(
       `INSERT INTO peer_push_receipts (push_id, received_at, health, delivered_at, consumed_at, body_json)
        VALUES (@pushId, @receivedAt, @health, @deliveredAt, @consumedAt, @bodyJson)
-       ON CONFLICT(push_id) DO NOTHING`
+       ON CONFLICT(push_id) DO UPDATE SET
+         received_at = excluded.received_at,
+         health = excluded.health,
+         delivered_at = excluded.delivered_at,
+         consumed_at = excluded.consumed_at,
+         body_json = excluded.body_json
+       WHERE peer_push_receipts.health != 'ok'`
     )
     .run({
       pushId: input.pushId,

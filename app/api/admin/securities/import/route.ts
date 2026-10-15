@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { PriceClose, PriceSeries, SecurityRefInput } from "@jaywedgeworth22/congress-trading-shared";
 import { audit } from "@/lib/db";
-import { logApiHealth } from "@/lib/db-health";
+import { alertPeerPushReceiptGap, logApiHealth } from "@/lib/db-health";
 import {
   getImportedCacheCounts,
   importedPushIsReadable,
@@ -42,9 +42,11 @@ export const dynamic = "force-dynamic";
 // (so a round-trip of our own outbound push is a no-op).
 //
 // Receipt: the caller sends `x-push-id`.  A first delivery persists the cache and stores
-// delivered + consumed acks under that id.  A retry with the same id returns the stored
-// receipt and does not write again.  `health` is `ok` only when the id and both acks are
-// present.  A missing id or ack is audited and written to the congress-inbound-push health lane.
+// delivered + consumed acks under that id.  A retry of an ok receipt returns that body
+// and does not write again.  A non-ok receipt is not sticky: the same id is processed
+// again and can replace it.  `health` is `ok` only when the id and both acks are
+// present.  A missing id or ack is audited, written to the congress-inbound-push
+// health lane, and paged immediately (the lane's 5-streak alerter is not the page).
 //
 // DIRECTIONAL ASYMMETRY (why only 3 of the 7 shared SharePayload slots are persisted here — by design;
 // see docs/congress-trade-consume.md §4 and docs/congress-trade-share.md):
@@ -104,7 +106,10 @@ export async function POST(req: Request) {
 
   if (pushId) {
     const prior = getPeerPushReceipt(pushId);
-    if (prior) {
+    // Only a complete receipt is idempotent.  A missing ack or a stored 500 must
+    // be processed again so a transient miss can become ok.  The push id is the
+    // idempotency key: a different body under an ok id returns the first receipt.
+    if (prior?.health === "ok") {
       return NextResponse.json({ ...prior.body, replayed: true });
     }
   }
@@ -192,13 +197,15 @@ export async function POST(req: Request) {
       delivered: null,
       consumed: null,
       status: 500,
-      store: false,
+      // Store the failure so the ops snapshot shows it, but do not treat it as
+      // an ok receipt.  savePeerPushReceipt replaces a non-ok row on retry.
+      store: true,
       body: { ok: false, error: "ingest failed" }
     });
   }
 }
 
-function finishPeerPush(input: {
+async function finishPeerPush(input: {
   pushId: string | null;
   at: string;
   delivered: PeerPushAck | null;
@@ -206,7 +213,7 @@ function finishPeerPush(input: {
   status: number;
   store: boolean;
   body: Record<string, unknown>;
-}): NextResponse {
+}): Promise<NextResponse> {
   const health: PeerPushHealth = peerPushHealth({
     pushId: input.pushId,
     delivered: input.delivered,
@@ -229,11 +236,11 @@ function finishPeerPush(input: {
       body: receipt,
     });
   }
-  notePeerPushHealth(health, input.pushId);
+  await notePeerPushHealth(health, input.pushId);
   return NextResponse.json(receipt, { status: input.status });
 }
 
-function notePeerPushHealth(health: PeerPushHealth, pushId: string | null): void {
+async function notePeerPushHealth(health: PeerPushHealth, pushId: string | null): Promise<void> {
   if (health === "ok") {
     logApiHealth({ service: "congress-inbound-push", ok: true, keySource: "env" });
     return;
@@ -243,6 +250,7 @@ function notePeerPushHealth(health: PeerPushHealth, pushId: string | null): void
     : `peer push receipt ${health}`;
   audit("peer_push_ack_missing", { health, pushId });
   logApiHealth({ service: "congress-inbound-push", ok: false, errorText, keySource: "env" });
+  await alertPeerPushReceiptGap(health, pushId);
 }
 
 function nullableStr(value: string | null | undefined): string | undefined {

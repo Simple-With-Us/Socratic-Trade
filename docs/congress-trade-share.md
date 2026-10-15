@@ -26,11 +26,12 @@ code retaining only mapping logic and operational gates.
   (`SECURITIES_IMPORT_HISTORY_TIER_ENABLED`, density-guarded by
   `SECURITIES_IMPORT_MIN_BARS`). See the 2026-06-25 rollout note.
   Each push carries `x-push-id`.  The response is an idempotent receipt:
-  that id, a delivered ack, a consumed ack, and `health`.  A retry of the
-  same id returns the first receipt and does not write the cache again.
-  `health` is `ok` only when the id and both acks are present.  A missing
-  ack is audited (`peer_push_ack_missing`) and recorded on the
-  `congress-inbound-push` health lane.  The latest receipt is
+  that id, a delivered ack, a consumed ack, and `health`.  A retry of an
+  `ok` receipt returns that body and does not write the cache again.  A
+  non-ok receipt is replaced on the next attempt with the same id.  `health`
+  is `ok` only when the id and both acks are present.  A missing ack is
+  audited (`peer_push_ack_missing`), recorded on the `congress-inbound-push`
+  health lane, and paged on the first occurrence.  The latest receipt is
   `congressInboundPush` on `GET /api/ops/snapshot`.  See
   `docs/rollouts/2026-10-15-ct-push-receipt.md`.
 

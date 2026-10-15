@@ -8,8 +8,12 @@ import { getDb } from "../src/lib/db";
 import {
   clearImportedSecuritiesForTests,
   getImportedPriceCloses,
+  importedPushIsReadable,
+  persistSecuritiesImport,
+  savePeerPushReceipt,
   type ImportedCloseInput,
 } from "../src/lib/db-securities-import";
+import { deleteInternalSetting, getInternalSetting } from "../src/lib/db";
 import { buildOpsSnapshot } from "../src/lib/ops-snapshot";
 import { peerPushHealth, resolvePeerPushId } from "../src/lib/peer-push-receipt";
 import { resetRateLimiter } from "../src/lib/rate-limit";
@@ -57,6 +61,9 @@ beforeEach(() => {
   clearImportedSecuritiesForTests();
   getDb().prepare("DELETE FROM audit_events WHERE kind = 'peer_push_ack_missing'").run();
   getDb().prepare("DELETE FROM api_health_log WHERE service = 'congress-inbound-push'").run();
+  deleteInternalSetting("peerPushAckAlertSent:missing-push-id");
+  deleteInternalSetting("peerPushAckAlertSent:missing-delivered-ack");
+  deleteInternalSetting("peerPushAckAlertSent:missing-consumed-ack");
 });
 
 describe("peer push receipt health", () => {
@@ -176,5 +183,66 @@ describe("Congress.Trade push receipt end to end", () => {
     const snapshot = buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
     expect(snapshot.congressInboundPush?.health).toBe("missing-push-id");
     expect(snapshot.congressInboundPush?.pushId).toBeNull();
+    expect(getInternalSetting<string>("peerPushAckAlertSent:missing-push-id")).toEqual(expect.any(String));
+  });
+
+  it("read-back uses the same date normalization as the writer", () => {
+    // The HTTP schema rejects a non-ISO date before this check.  persistSecuritiesImport
+    // still trims a padded YYYY-MM-DD, and the consumed ack has to look up that trimmed key.
+    persistSecuritiesImport({
+      prices: [{ ticker: " ibm ", closes: [{ date: " 2024-06-03 ", close: 12.5 }] }],
+    });
+    expect(
+      importedPushIsReadable({
+        prices: [{ ticker: " ibm ", closes: [{ date: " 2024-06-03 ", close: 12.5 }] }],
+      })
+    ).toBe(true);
+    expect(getImportedPriceCloses("IBM")).toEqual([expect.objectContaining({ date: "2024-06-03", close: 12.5 })]);
+  });
+
+  it("processes a push again when the stored receipt is not ok", async () => {
+    const pushId = "ct-push-retry-consumed";
+    savePeerPushReceipt({
+      pushId,
+      receivedAt: "2026-10-15T00:00:00.000Z",
+      health: "missing-consumed-ack",
+      deliveredAt: "2026-10-15T00:00:00.000Z",
+      consumedAt: null,
+      body: {
+        ok: true,
+        pushId,
+        health: "missing-consumed-ack",
+        acks: { delivered: { at: "2026-10-15T00:00:00.000Z", ok: true }, consumed: null },
+      },
+    });
+
+    const res = await importRoute(
+      postPush(
+        {
+          origin: "app-a",
+          prices: [{ ticker: "NVDA", closes: seqCloses(1) }],
+        },
+        pushId
+      )
+    );
+    expect(res.status).toBe(200);
+    const json = SecuritiesImportResponseSchema.parse(await res.json());
+    expect(json).toMatchObject({ ok: true, pushId, health: "ok" });
+    expect(json.replayed).toBeUndefined();
+    expect(getImportedPriceCloses("NVDA")).toHaveLength(1);
+
+    const replay = await importRoute(
+      postPush(
+        {
+          origin: "app-a",
+          prices: [{ ticker: "NVDA", closes: seqCloses(4, 50) }],
+        },
+        pushId
+      )
+    );
+    const again = SecuritiesImportResponseSchema.parse(await replay.json());
+    expect(again.replayed).toBe(true);
+    expect(again.health).toBe("ok");
+    expect(getImportedPriceCloses("NVDA")).toHaveLength(1);
   });
 });
