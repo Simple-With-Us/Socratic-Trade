@@ -6,7 +6,7 @@ Jay decision (2026-10-15 03:13 CT): Socratic Trade keeps strategy runs and every
 
 ## Changes Made
 
-- `src/lib/sqlite-storage-hygiene.ts` — no row deletes; maintenance only (ANALYZE, optimize, incremental_vacuum, WAL checkpoint).
+- `src/lib/sqlite-storage-hygiene.ts` — no row deletes; maintenance only (bounded `ANALYZE` via `analysis_limit`, optimize, incremental_vacuum, WAL checkpoint); ops `RETAIN_REASON` copy aligned with disabled external prunes.
 - `src/lib/audit-prune.ts` — age-based `audit_events` / provider table deletes removed; daily watermark kept, counts always zero.
 - `src/lib/db-task-journal.ts` — `pruneTaskJournal` is a no-op.
 - `src/lib/db-fills.ts` — `sweepPortfolioSnapshots` is a no-op.

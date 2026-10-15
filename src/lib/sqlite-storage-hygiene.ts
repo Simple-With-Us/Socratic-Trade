@@ -85,14 +85,23 @@ const REPORT_KEY = "storage-hygiene:lastReport";
 const FULL_AT_KEY = "storage-hygiene:lastFullAt";
 const CHECKPOINT_AT_KEY = "storage-hygiene:lastCheckpointAt";
 
+/** Pages analyzed per `ANALYZE` pass — avoids an unbounded full scan on large DBs (see `runMaintenancePragmas`). */
+export const STORAGE_HYGIENE_ANALYZE_PAGE_LIMIT = 400;
+
+/**
+ * Human-readable retention notes for `/api/ops/snapshot` size estimates.  Reflects Jay policy
+ * (2026-10-15): no scheduled TTL/cap deletes on these tables; `pruneTaskJournal`, embed sweeps,
+ * and `api_health_log` lane trims are disabled.  `embed_stage` still drops rows after successful
+ * Pinecone delivery (`deleteStagedEmbeddings`) — that is not storage-hygiene deletion.
+ */
 const RETAIN_REASON: Record<string, string> = {
   history_cache_eod: "durable price history (no age deletion)",
   llm_usage: "lifetime LLM usage retention",
   strategy_runs: "lifetime strategy run retention",
   strategy_run_requests: "lifetime run request retention",
-  task_journal: "lifetime task journal retention",
-  embed_stage: "lifetime embed stage retention",
-  api_health_log: "lifetime API health log retention",
+  task_journal: "no scheduled deletes (lifetime retention)",
+  embed_stage: "no hygiene TTL/cap; cleared after embed delivery only",
+  api_health_log: "no scheduled deletes (lifetime retention)",
   api_health_error_patterns: "lifetime API health log retention",
   sec_ingest_task_attempts: "lifetime SEC ingest attempt retention",
   enrichment_coverage_runs: "lifetime enrichment coverage retention",
@@ -516,6 +525,7 @@ async function listObjectSizes(yieldFn: () => Promise<void>, skip: boolean): Pro
 function runMaintenancePragmas(dryRun: boolean): void {
   if (dryRun) return;
   const db = getDb();
+  db.pragma(`analysis_limit=${STORAGE_HYGIENE_ANALYZE_PAGE_LIMIT}`);
   db.exec("ANALYZE");
   db.pragma("optimize");
 }

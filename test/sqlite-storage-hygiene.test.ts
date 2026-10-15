@@ -79,6 +79,14 @@ describe("storage hygiene decisions", () => {
     expect(source).not.toMatch(/RETENTION_TARGETS:\s*readonly\s+RetentionTarget/);
   });
 
+  it("bounds ANALYZE work with analysis_limit before optimize", async () => {
+    const hygiene = await import("../src/lib/sqlite-storage-hygiene");
+    expect(hygiene.STORAGE_HYGIENE_ANALYZE_PAGE_LIMIT).toBeGreaterThan(0);
+    const source = readFileSync(join(process.cwd(), "src/lib/sqlite-storage-hygiene.ts"), "utf8");
+    expect(source).toMatch(/analysis_limit=\$\{STORAGE_HYGIENE_ANALYZE_PAGE_LIMIT\}/);
+    expect(source).toMatch(/db\.exec\("ANALYZE"\)/);
+  });
+
   it("never prunes market-data history tables by age", async () => {
     const hygiene = await import("../src/lib/sqlite-storage-hygiene");
     for (const table of hygiene.MARKET_DATA_HISTORY_TABLES) {
