@@ -958,6 +958,8 @@ const CongressShareAnalystCountsSchema = z.object({
   strongSell: z.number().finite().optional(),
 });
 
+// .passthrough(): per-source analyst rows may carry provider metadata the mapper ignores;
+// stripping unknown keys would drop valid rows that still have usable counts.
 const CongressShareAnalystDetailSchema = z
   .object({
     score: z.number().finite().optional(),
@@ -986,6 +988,7 @@ export const FieldStoreCongressShareQuoteSchema = z
     targetLow: z.number().finite().optional(),
     targetMedian: z.number().finite().optional(),
   })
+  // Keep analystBySource and other field-store keys the mappers read via .passthrough().
   .passthrough();
 
 type FieldStoreCongressShareQuote = z.infer<typeof FieldStoreCongressShareQuoteSchema>;
@@ -998,23 +1001,47 @@ type FieldStoreCongressShareQuote = z.infer<typeof FieldStoreCongressShareQuoteS
 export function buildFundamentalsAndAnalystImport(
   symbols: string[],
   date: string
-): { fundamentals: CongressFundamental[]; analyst: CongressAnalyst[] } {
+): {
+  fundamentals: CongressFundamental[];
+  analyst: CongressAnalyst[];
+  fieldStoreParseDropped: number;
+  fieldStoreParseSampleIssues: string[];
+} {
+  const empty = { fundamentals: [], analyst: [], fieldStoreParseDropped: 0, fieldStoreParseSampleIssues: [] };
   if (!congressFundamentalsShareEnabled() || symbols.length === 0) {
-    return { fundamentals: [], analyst: [] };
+    return empty;
   }
   const summaries = marketQuoteSummariesFromFieldStore(symbols);
   const fundamentals: CongressFundamental[] = [];
   const analyst: CongressAnalyst[] = [];
+  let fieldStoreParseDropped = 0;
+  const fieldStoreParseSampleIssues: string[] = [];
   for (const quote of Object.values(summaries)) {
     const parsed = FieldStoreCongressShareQuoteSchema.safeParse(quote);
-    if (!parsed.success) continue;
+    if (!parsed.success) {
+      fieldStoreParseDropped++;
+      if (fieldStoreParseSampleIssues.length < 3) {
+        const sym = typeof quote.symbol === "string" ? quote.symbol : "?";
+        const issue = parsed.error.issues[0];
+        fieldStoreParseSampleIssues.push(
+          `${sym}: ${issue?.path.join(".") || "(root)"} ${issue?.message ?? "invalid"}`
+        );
+      }
+      continue;
+    }
     const q: FieldStoreCongressShareQuote = parsed.data;
     const f = marketQuoteToFundamentals(q, date);
     if (f) fundamentals.push(f);
     const a = marketQuoteToAnalyst(q, date);
     if (a) analyst.push(a);
   }
-  return { fundamentals, analyst };
+  if (fieldStoreParseDropped > 0) {
+    console.warn(
+      `[congress-share] field-store Zod gate dropped ${fieldStoreParseDropped} symbol(s) before fundamentals/analyst export`,
+      fieldStoreParseSampleIssues.length ? { sampleIssues: fieldStoreParseSampleIssues } : undefined
+    );
+  }
+  return { fundamentals, analyst, fieldStoreParseDropped, fieldStoreParseSampleIssues };
 }
 
 // ── Low-level POST ─────────────────────────────────────────────────────────────
@@ -1736,6 +1763,9 @@ export interface CongressDailyShareSummary {
   };
   fundamentalsRows?: number;
   analystRows?: number;
+  /** Symbols dropped by FieldStoreCongressShareQuoteSchema before fundamentals/analyst POSTs. */
+  fieldStoreParseDropped?: number;
+  fieldStoreParseSampleIssues?: string[];
   /** Aggregated schema-invalid row drops across all POSTs in this run. */
   rowsDropped?: Record<string, number>;
   rowsDroppedReasons?: Record<string, Record<string, number>>;
@@ -1993,9 +2023,17 @@ async function runCongressDailyShareUnlocked(
   const shareDate = utcDate(now);
   const pushFundamentalsAnalyst =
     advancesDailyMarker || (customUniverse && options.fromAppANeeds !== true);
-  const { fundamentals: fundamentalsImport, analyst: analystImport } = pushFundamentalsAnalyst
-    ? buildFundamentalsAndAnalystImport(universe, shareDate)
-    : { fundamentals: [], analyst: [] };
+  let fundamentalsImport: CongressFundamental[] = [];
+  let analystImport: CongressAnalyst[] = [];
+  let fieldStoreParseDropped = 0;
+  let fieldStoreParseSampleIssues: string[] = [];
+  if (pushFundamentalsAnalyst) {
+    const built = buildFundamentalsAndAnalystImport(universe, shareDate);
+    fundamentalsImport = built.fundamentals;
+    analystImport = built.analyst;
+    fieldStoreParseDropped = built.fieldStoreParseDropped;
+    fieldStoreParseSampleIssues = built.fieldStoreParseSampleIssues;
+  }
 
   // Push company refs for the full public screener
   const refs = await fetchNasdaqScreenerRefs();
@@ -2080,6 +2118,9 @@ async function runCongressDailyShareUnlocked(
     shortVolRows: shortVolume.length,
     fundamentalsRows: fundamentalsImport.length,
     analystRows: analystImport.length,
+    ...(fieldStoreParseDropped > 0
+      ? { fieldStoreParseDropped, fieldStoreParseSampleIssues }
+      : {}),
     posts,
     failedPosts,
     sent,
@@ -2100,6 +2141,9 @@ async function runCongressDailyShareUnlocked(
       shortVolRows: summary.shortVolRows,
       fundamentalsRows: summary.fundamentalsRows,
       analystRows: summary.analystRows,
+      ...(fieldStoreParseDropped > 0
+        ? { fieldStoreParseDropped, fieldStoreParseSampleIssues }
+        : {}),
       posts,
       failedPosts,
       sent,
