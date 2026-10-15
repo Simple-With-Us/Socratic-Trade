@@ -49,7 +49,7 @@
     <!-- Add Zulip bot credentials (ZULIP_EMAIL, ZULIP_API_KEY, ZULIP_SITE) to enable
          the #agent-sync post-on-change via agent-sync-fleet-post.sh:
     <key>ZULIP_EMAIL</key>
-    <string>xoxb-...</string>
+    <string>agent-sync-bot@example.zulipchat.com</string>
     -->
   </dict>
 
