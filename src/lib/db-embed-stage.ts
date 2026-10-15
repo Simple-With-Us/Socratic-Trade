@@ -27,21 +27,50 @@
 //
 // WEBPACK TRAP: reachable from scheduler.ts (via vector-db.ts and audit-prune.ts) — no "os"
 // import, no "node:" import specifiers in this module.
+//
+// ST-4540 (embed-stage no-data-loss): ST data is kept FOREVER. A paid vector that has not been
+// durably delivered is the single most expensive row in this database, so the ONLY sanctioned way
+// to remove one is deleteStagedEmbeddings() with a verified delivery receipt. Everything that used
+// to throw rows away without checking delivery is now non-destructive:
+//   * the 35-day age sweep reclaims DELIVERED rows only (delivered_at IS NOT NULL);
+//   * the 2 GiB size cap no longer deletes ANYTHING — it emits a loud audit + Sentry warning;
+//   * an undecodable row is QUARANTINED (marked, kept) for re-embed from source, never deleted.
+// Undelivered rows therefore survive restarts, quota exhaustion, deploys and every sweep.
 
 import "server-only";
 import { audit, getDb } from "./db";
+import { logWarn } from "./sentry-metrics";
 import { timeSync } from "./slow-sync-guard";
 
-/** Retention for orphaned rows (their source document was superseded before any retry ran). */
+/** Retention for DELIVERED-but-stranded rows only. Undelivered rows are never age-deleted. */
 export const EMBED_STAGE_RETENTION_DAYS = 35;
-/** Defensive size cap so a stuck month cannot balloon the DB (1024-dim f32 ~ 4 KB/chunk). */
+/**
+ * Audited size ceiling for the table. ST-4540: this is an ALARM, not a prune trigger — an
+ * over-cap table means delivery is stuck and must be paged on, and deleting undelivered rows to
+ * get back under it would destroy paid vectors. The sweep warns and keeps every row.
+ */
 export const EMBED_STAGE_MAX_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
 /** Estimated fixed per-row overhead (keys, context columns, b-tree) beyond the vector blob. */
 const EMBED_STAGE_ROW_OVERHEAD_BYTES = 160;
 /** SQL `IN (...)` chunking bound (well under SQLite's bound-parameter limit). */
 const EMBED_STAGE_LOOKUP_CHUNK = 400;
-/** Oldest-first delete batch size while draining an over-cap table. */
-const EMBED_STAGE_CAP_PRUNE_BATCH = 500;
+/** Rows the delivered-only retention sweep reclaims per daily pass, to bound the write lock. */
+const EMBED_STAGE_SWEEP_BATCH = 500;
+
+/** Vector-store backends whose acknowledged upsert counts as durable delivery. */
+export type EmbedStageStore = "pinecone" | "qdrant";
+
+/**
+ * Proof-of-delivery argument required by deleteStagedEmbeddings(). It is a required parameter so
+ * every call site must name the backend whose acknowledged upsert made these vectors durable —
+ * there is no code path that can drop a paid vector without saying why.
+ */
+export interface EmbedStageDeliveryReceipt {
+  /** Backend that acknowledged the upsert (plain batch) or the committed re-upsert + finalize. */
+  store: EmbedStageStore;
+  /** Delivery timestamp; defaults to now. */
+  deliveredAt?: string;
+}
 
 export interface EmbedStageRowInput {
   /** hashContent() of the EXACT provider embed-input text (post-clean), NOT of the stored text. */
@@ -95,10 +124,14 @@ export function stageEmbeddedVectors(rows: EmbedStageRowInput[]): number {
 
 function stageEmbeddedVectorsImpl(rows: EmbedStageRowInput[]): number {
   const db = getDb();
+  // delivered_at / delivered_store / quarantined_* are written as NULL: a fresh (re)embed is
+  // by definition NOT yet delivered, and it supersedes any earlier quarantine marker (that is
+  // exactly how a quarantined row is healed — re-embedded from source).
   const insert = db.prepare(`
     INSERT OR REPLACE INTO embed_stage
-      (content_hash, model, revision, dims, vector, symbol, source, chunk_id, user_scope, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (content_hash, model, revision, dims, vector, symbol, source, chunk_id, user_scope, created_at,
+       delivered_at, delivered_store, quarantined_at, quarantine_reason)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
   `);
   const now = new Date().toISOString();
   let staged = 0;
@@ -126,7 +159,12 @@ function stageEmbeddedVectorsImpl(rows: EmbedStageRowInput[]): number {
 
 /**
  * Batch lookup of staged vectors for an exact (content_hash, model, revision) key set.
- * Corrupt/undecodable rows are deleted in place (self-heal) and reported as misses.
+ *
+ * ST-4540: an undecodable row is QUARANTINED and KEPT — never deleted. Deleting it here destroyed
+ * the evidence that a vector had been paid for and was un-recoverable, which silently converted a
+ * recoverable corruption into a guaranteed re-embed. Instead the row is marked
+ * (quarantined_at/quarantine_reason), reported as a miss so the caller re-embeds from source, and
+ * that re-embed replaces the row via stageEmbeddedVectors' INSERT OR REPLACE, clearing the marker.
  */
 export function getStagedEmbeddings(
   contentHashes: string[],
@@ -137,9 +175,12 @@ export function getStagedEmbeddings(
   const unique = [...new Set(contentHashes.filter(Boolean))];
   if (unique.length === 0) return found;
   const db = getDb();
-  const deleteOne = db.prepare(
-    "DELETE FROM embed_stage WHERE content_hash = ? AND model = ? AND revision = ?"
+  const quarantine = db.prepare(
+    `UPDATE embed_stage SET quarantined_at = COALESCE(quarantined_at, ?), quarantine_reason = ?
+     WHERE content_hash = ? AND model = ? AND revision = ?`
   );
+  const quarantinedAt = new Date().toISOString();
+  const quarantinedKeys: string[] = [];
   for (let offset = 0; offset < unique.length; offset += EMBED_STAGE_LOOKUP_CHUNK) {
     const slice = unique.slice(offset, offset + EMBED_STAGE_LOOKUP_CHUNK);
     const placeholders = slice.map(() => "?").join(", ");
@@ -152,30 +193,109 @@ export function getStagedEmbeddings(
     for (const row of rows) {
       const decoded = decodeEmbeddingF32(row.vector, row.dims);
       if (decoded) found.set(row.content_hash, decoded);
-      else deleteOne.run(row.content_hash, model, revision);
+      else {
+        quarantinedKeys.push(row.content_hash);
+        quarantine.run(
+          quarantinedAt,
+          `undecodable_vector:dims=${row.dims}:bytes=${byteLengthOf(row.vector)}`,
+          row.content_hash,
+          model,
+          revision
+        );
+      }
     }
+  }
+  if (quarantinedKeys.length > 0) {
+    // One audit row per lookup, never one per corrupt row: a systematically corrupt table must
+    // not flood audit_events. The keys stay in embed_stage for re-embed from source.
+    audit(
+      "embed_stage_quarantine",
+      {
+        quarantined: quarantinedKeys.length,
+        attempted: unique.length,
+        model,
+        revision,
+        note: "rows kept for re-embed from source; never deleted"
+      },
+      "local"
+    );
+    logWarn("embed_stage: undecodable staged vectors quarantined (kept for re-embed)", {
+      quarantined: quarantinedKeys.length,
+      attempted: unique.length,
+      model,
+      revision
+    });
   }
   return found;
 }
 
-/** Delete delivered rows once their vectors are durably in Pinecone. Returns rows removed. */
+/** Byte length of a stored vector blob, for the quarantine reason. Never throws. */
+function byteLengthOf(blob: unknown): number {
+  return blob instanceof Uint8Array ? blob.byteLength : -1;
+}
+
+/**
+ * The ONLY sanctioned remover of embed_stage rows, and it requires a delivery receipt.
+ *
+ * ST-4540: deletion is gated on durable delivery. Each key is first stamped with the backend that
+ * acknowledged it and a delivery timestamp, then the delete removes only rows carrying that exact
+ * receipt. This makes the ordering auditable and makes an accidental undelivered delete impossible
+ * to express: there is no overload that deletes without naming the store that took the vector.
+ *
+ * The stamp and the delete are SEPARATE transactions on purpose, so the receipt is durable rather
+ * than transient:
+ *   * crash (or a throw) between the two leaves the row stamped delivered, which the retention
+ *     sweep reclaims — correct, because the store already acknowledged the vector;
+ *   * a key re-staged between the two (a fresh embed clears delivered_at to NULL) does not match
+ *     the receipt, so the older delivery can never remove the newer undelivered vector.
+ *
+ * Call this only after the vector store has acknowledged the upsert (plain calls, per upsert batch)
+ * or after the managed two-phase commit's committed re-upsert + markCommitted.
+ *
+ * Returns rows removed.
+ */
 export function deleteStagedEmbeddings(
   contentHashes: string[],
   model: string,
-  revision: string
+  revision: string,
+  receipt: EmbedStageDeliveryReceipt
 ): number {
   const unique = [...new Set(contentHashes.filter(Boolean))];
   if (unique.length === 0) return 0;
+  if (!receipt?.store) {
+    // Fail closed: an unnamed backend is not proof of delivery.
+    throw new Error("embed_stage_delete_requires_delivery_receipt");
+  }
   const db = getDb();
+  const deliveredAt = receipt.deliveredAt ?? new Date().toISOString();
+  const markDelivered = db.prepare(
+    `UPDATE embed_stage SET delivered_at = ?, delivered_store = ?
+     WHERE model = ? AND revision = ? AND content_hash = ?`
+  );
+  // Delete is constrained to the receipt just written, so a key that was concurrently re-staged
+  // (delivered_at cleared to NULL by a fresh embed) can never be removed by an older delivery.
+  const deleteDelivered = db.prepare(
+    `DELETE FROM embed_stage
+     WHERE model = ? AND revision = ? AND content_hash = ?
+       AND delivered_at = ? AND delivered_store = ?`
+  );
   let deleted = 0;
+  // Two transactions, deliberately. The stamp commits first so a crash between the two leaves an
+  // auditable "delivered but stranded" row for the sweep instead of silently rolling the evidence
+  // of delivery back — and so a re-stage landing between them (which clears delivered_at) makes
+  // the constrained delete match nothing.
+  const stampDelivered = db.transaction((keys: string[]) => {
+    for (const key of keys) markDelivered.run(deliveredAt, receipt.store, model, revision, key);
+  });
+  const drain = db.transaction((keys: string[]) => {
+    for (const key of keys) {
+      deleted += deleteDelivered.run(model, revision, key, deliveredAt, receipt.store).changes;
+    }
+  });
   for (let offset = 0; offset < unique.length; offset += EMBED_STAGE_LOOKUP_CHUNK) {
     const slice = unique.slice(offset, offset + EMBED_STAGE_LOOKUP_CHUNK);
-    const placeholders = slice.map(() => "?").join(", ");
-    deleted += db
-      .prepare(
-        `DELETE FROM embed_stage WHERE model = ? AND revision = ? AND content_hash IN (${placeholders})`
-      )
-      .run(model, revision, ...slice).changes;
+    stampDelivered(slice);
+    drain(slice);
   }
   return deleted;
 }
@@ -185,6 +305,12 @@ export interface EmbedStageStats {
   /** Estimated stored bytes (vector blobs + fixed per-row overhead estimate). */
   bytes: number;
   oldestCreatedAt: string | null;
+  /** Rows with NO delivery receipt — paid vectors still owed to the vector store. */
+  undelivered: number;
+  /** Rows quarantined as undecodable, kept for re-embed from source. */
+  quarantined: number;
+  /** Oldest undelivered created_at — the age of the longest-undelivered paid vector. */
+  oldestUndeliveredCreatedAt: string | null;
 }
 
 export function embedStageStats(): EmbedStageStats {
@@ -192,30 +318,56 @@ export function embedStageStats(): EmbedStageStats {
   const row = db
     .prepare(
       `SELECT COUNT(*) AS rows, COALESCE(SUM(LENGTH(vector)), 0) AS vec_bytes,
-              MIN(created_at) AS oldest
+              MIN(created_at) AS oldest,
+              SUM(CASE WHEN delivered_at IS NULL THEN 1 ELSE 0 END) AS undelivered,
+              SUM(CASE WHEN quarantined_at IS NOT NULL THEN 1 ELSE 0 END) AS quarantined,
+              MIN(CASE WHEN delivered_at IS NULL THEN created_at END) AS oldest_undelivered
        FROM embed_stage`
     )
-    .get() as { rows: number; vec_bytes: number; oldest: string | null };
+    .get() as {
+    rows: number;
+    vec_bytes: number;
+    oldest: string | null;
+    undelivered: number | null;
+    quarantined: number | null;
+    oldest_undelivered: string | null;
+  };
   return {
     rows: row.rows,
     bytes: row.vec_bytes + row.rows * EMBED_STAGE_ROW_OVERHEAD_BYTES,
-    oldestCreatedAt: row.oldest ?? null
+    oldestCreatedAt: row.oldest ?? null,
+    undelivered: row.undelivered ?? 0,
+    quarantined: row.quarantined ?? 0,
+    oldestUndeliveredCreatedAt: row.oldest_undelivered ?? null
   };
 }
 
 export interface EmbedStageSweepResult {
-  /** Rows removed by the 35-day retention window (orphans whose document was superseded). */
+  /** DELIVERED rows removed by the 35-day window (their vectors are already durable). */
   expired: number;
-  /** Rows removed oldest-first by the defensive size cap. */
-  capPruned: number;
+  /**
+   * Always 0. Retained for the audit-prune/scheduler accounting shape; ST-4540 removed the
+   * over-cap deletion outright, so no row is ever pruned for size.
+   */
+  capPruned: 0;
+  /** Undelivered rows kept despite being past the age window (never deleted). */
+  undeliveredRetained: number;
+  /** True when the table is over EMBED_STAGE_MAX_BYTES — an alarm, NOT a prune trigger. */
+  overCap: boolean;
   /** Estimated table bytes after the sweep. */
   bytesAfter: number;
 }
 
 /**
- * Retention + size-cap sweep, invoked from the daily audit-prune housekeeping lane. Expected
- * steady state deletes nothing (rows normally live seconds-to-days). The size cap emits ONE
- * audit row per over-cap event, not one per pruned row.
+ * Delivered-only retention sweep + over-cap ALARM, invoked from the daily audit-prune housekeeping
+ * lane. Expected steady state deletes nothing (rows normally live seconds-to-days).
+ *
+ * ST-4540 — this function is deliberately unable to lose a paid vector:
+ *   * the age window reclaims rows that carry a delivery receipt only. Undelivered rows are
+ *     counted, kept, and reported, because an undelivered vector is money already spent;
+ *   * the size cap deletes NOTHING. It emits one audit row + one Sentry warning so a stuck
+ *     delivery backlog pages a human instead of silently destroying paid embeddings;
+ *   * quarantined rows are never swept either — they are re-embedded from source.
  */
 export function sweepEmbedStage(
   now: Date = new Date(),
@@ -223,28 +375,69 @@ export function sweepEmbedStage(
 ): EmbedStageSweepResult {
   const db = getDb();
   const cutoff = new Date(now.getTime() - EMBED_STAGE_RETENTION_DAYS * 24 * 3600_000).toISOString();
-  const expired = db.prepare("DELETE FROM embed_stage WHERE created_at < ?").run(cutoff).changes;
+  // Delivered-only: a bounded batch, so a large delivered backlog drains over several daily
+  // passes instead of holding the SQLite write lock. Undelivered rows are never in scope, and a
+  // quarantined row is excluded too — it is awaiting a re-embed from source, not disposal (a
+  // corrupt row that DID reach the store is still worth the evidence until the re-embed lands).
+  const expired = db
+    .prepare(
+      `DELETE FROM embed_stage WHERE rowid IN (
+         SELECT rowid FROM embed_stage
+         WHERE created_at < ? AND delivered_at IS NOT NULL AND quarantined_at IS NULL
+         LIMIT ${EMBED_STAGE_SWEEP_BATCH})`
+    )
+    .run(cutoff).changes;
 
-  let capPruned = 0;
-  let stats = embedStageStats();
-  if (stats.bytes > maxBytes) {
-    const bytesBefore = stats.bytes;
-    while (stats.bytes > maxBytes) {
-      const pruned = db
-        .prepare(
-          `DELETE FROM embed_stage WHERE rowid IN (
-             SELECT rowid FROM embed_stage ORDER BY created_at ASC, rowid ASC LIMIT ?)`
-        )
-        .run(EMBED_STAGE_CAP_PRUNE_BATCH).changes;
-      if (pruned === 0) break;
-      capPruned += pruned;
-      stats = embedStageStats();
-    }
+  const pastWindowUndelivered = (
+    db
+      .prepare("SELECT COUNT(*) AS n FROM embed_stage WHERE created_at < ? AND delivered_at IS NULL")
+      .get(cutoff) as { n: number }
+  ).n;
+  if (pastWindowUndelivered > 0) {
     audit(
-      "embed_stage_cap_prune",
-      { deleted: capPruned, bytesBefore, bytesAfter: stats.bytes, maxBytes },
+      "embed_stage_undelivered_backlog",
+      {
+        undeliveredPastRetention: pastWindowUndelivered,
+        retentionDays: EMBED_STAGE_RETENTION_DAYS,
+        note: "paid vectors retained until durably delivered; never age-deleted"
+      },
       "local"
     );
+    logWarn("embed_stage: undelivered paid vectors past the retention window are RETAINED", {
+      undeliveredPastRetention: pastWindowUndelivered,
+      retention_days: EMBED_STAGE_RETENTION_DAYS
+    });
   }
-  return { expired, capPruned, bytesAfter: stats.bytes };
+
+  const stats = embedStageStats();
+  const overCap = stats.bytes > maxBytes;
+  if (overCap) {
+    // Loud, and non-destructive. Under the old cap this deleted oldest-first, which could destroy
+    // a day of undelivered paid embeddings to satisfy a byte budget.
+    audit(
+      "embed_stage_over_cap",
+      {
+        bytes: stats.bytes,
+        maxBytes,
+        rows: stats.rows,
+        undelivered: stats.undelivered,
+        oldestUndeliveredCreatedAt: stats.oldestUndeliveredCreatedAt,
+        note: "ALARM ONLY - no rows deleted (ST-4540)"
+      },
+      "local"
+    );
+    logWarn("embed_stage: table is over the size ceiling; NO rows deleted (ST-4540)", {
+      bytes: stats.bytes,
+      max_bytes: maxBytes,
+      rows: stats.rows,
+      undelivered: stats.undelivered,
+      oldest_undelivered_created_at: stats.oldestUndeliveredCreatedAt ?? ""
+    });
+  }
+
+  const undeliveredRetained = (
+    db.prepare("SELECT COUNT(*) AS n FROM embed_stage WHERE delivered_at IS NULL").get() as { n: number }
+  ).n;
+  const bytesAfter = embedStageStats().bytes;
+  return { expired, capPruned: 0, undeliveredRetained, overCap, bytesAfter };
 }

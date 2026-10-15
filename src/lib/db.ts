@@ -4340,9 +4340,20 @@ function migrate(database: Database.Database): void {
       chunk_id TEXT NOT NULL DEFAULT '',
       user_scope TEXT NOT NULL DEFAULT 'local',
       created_at TEXT NOT NULL,
+      -- ST-4540 (embed-stage no-data-loss): durable delivery receipt. delivered_at IS NOT NULL
+      -- means the vector was PROVEN durably in the vector store (upsert acknowledged, or
+      -- managed two-phase commit finalized), so only then may the row be removed. Undelivered
+      -- rows are NEVER age- or size-deleted — a paid vector is kept until it lands.
+      delivered_at TEXT,
+      delivered_store TEXT,
+      -- ST-4540: undecodable (corrupt) vectors are quarantined and KEPT for re-embed from
+      -- source. They are never deleted; a re-embed (INSERT OR REPLACE) clears the marker.
+      quarantined_at TEXT,
+      quarantine_reason TEXT,
       PRIMARY KEY (content_hash, model, revision)
     );
     CREATE INDEX IF NOT EXISTS idx_embed_stage_created ON embed_stage (created_at);
+    CREATE INDEX IF NOT EXISTS idx_embed_stage_delivered ON embed_stage (delivered_at);
     CREATE TABLE IF NOT EXISTS learned_context (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -4588,6 +4599,28 @@ function migrate(database: Database.Database): void {
   const counterfactualWatermarkColumns = database.prepare("PRAGMA table_info(counterfactual_learning_watermarks)").all() as Array<{ name: string }>;
   if (!counterfactualWatermarkColumns.some((column) => column.name === "last_audit_rowid")) {
     database.exec("ALTER TABLE counterfactual_learning_watermarks ADD COLUMN last_audit_rowid INTEGER");
+  }
+
+  // ST-4540 (embed-stage no-data-loss): additive delivery/quarantine columns on embed_stage.
+  // Existing rows carry delivered_at = NULL, i.e. "never proven delivered" — the conservative
+  // default, so a pre-migration row is re-verified on the next retry instead of assumed safe to
+  // delete. Every deleter is gated on delivered_at IS NOT NULL.
+  {
+    const stageCols = database.prepare("PRAGMA table_info(embed_stage)").all() as Array<{ name: string }>;
+    if (stageCols.length > 0) {
+      const stageColumns: Array<[string, string]> = [
+        ["delivered_at", "TEXT"],
+        ["delivered_store", "TEXT"],
+        ["quarantined_at", "TEXT"],
+        ["quarantine_reason", "TEXT"]
+      ];
+      for (const [name, type] of stageColumns) {
+        if (!stageCols.some((column) => column.name === name)) {
+          database.exec(`ALTER TABLE embed_stage ADD COLUMN ${name} ${type}`);
+        }
+      }
+      database.exec("CREATE INDEX IF NOT EXISTS idx_embed_stage_delivered ON embed_stage (delivered_at)");
+    }
   }
 
   const columns = database.prepare("PRAGMA table_info(trade_proposals)").all() as Array<{ name: string }>;

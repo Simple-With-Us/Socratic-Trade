@@ -211,11 +211,16 @@ export const RETENTION_TARGETS: readonly RetentionTarget[] = [
     cutoff: (now) => isoCutoff(now, TASK_JOURNAL_RETENTION_DAYS)
   },
   {
+    // ST-4540: the storage-hygiene lane may only reclaim rows that carry a delivery receipt.
+    // A plain `created_at < ?` here deleted UNDELIVERED paid vectors — the most expensive rows in
+    // the table — on a quiet day when the lane ran. Undelivered rows are exempt from every
+    // deleter; they are reported by the embed_stage sweep's backlog audit instead. Quarantined
+    // rows are exempt too: they await a re-embed from source, which replaces them in place.
     id: "embed-stage",
     category: "embeddings",
     table: "embed_stage",
     retentionDays: EMBED_STAGE_RETENTION_DAYS,
-    whereSql: "created_at < ?",
+    whereSql: "delivered_at IS NOT NULL AND quarantined_at IS NULL AND created_at < ?",
     payloadColumn: "vector",
     cutoff: (now) => isoCutoff(now, EMBED_STAGE_RETENTION_DAYS)
   },

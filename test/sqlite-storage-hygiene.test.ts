@@ -353,6 +353,19 @@ describe("storage hygiene against a database", () => {
        VALUES ('MSFT', 'pe', '2', 'test', ?, ?)`
     ).run(newIso, newIso);
 
+    // ST-4540: 'old-delivered' carries a delivery receipt (vector durably in the store) so the
+    // hygiene lane may reclaim it; 'old-hash' is UNDELIVERED (delivered_at NULL) — a paid vector
+    // still owed to the vector store — and must survive this lane no matter how old it is.
+    // 'old-quarantined' is delivered AND quarantined (corrupt blob awaiting a re-embed from
+    // source), so it is kept too: the re-embed replaces it in place.
+    db.prepare(
+      `INSERT INTO embed_stage (content_hash, model, revision, dims, vector, created_at, delivered_at, delivered_store)
+       VALUES ('old-delivered', 'm', 'r', 1, ?, ?, ?, 'pinecone')`
+    ).run(Buffer.from([1, 2, 3, 4]), isoDaysBefore(50), isoDaysBefore(49));
+    db.prepare(
+      `INSERT INTO embed_stage (content_hash, model, revision, dims, vector, created_at, delivered_at, delivered_store, quarantined_at)
+       VALUES ('old-quarantined', 'm', 'r', 1, ?, ?, ?, 'pinecone', ?)`
+    ).run(Buffer.from([1, 2]), isoDaysBefore(50), isoDaysBefore(49), isoDaysBefore(48));
     db.prepare(
       `INSERT INTO embed_stage (content_hash, model, revision, dims, vector, created_at)
        VALUES ('old-hash', 'm', 'r', 1, ?, ?)`
@@ -455,10 +468,13 @@ describe("storage hygiene against a database", () => {
       )
     ).toEqual(["AAPL", "MSFT"]);
     expect(
-      (db.prepare("SELECT content_hash FROM embed_stage").all() as Array<{ content_hash: string }>).map(
+      (db.prepare("SELECT content_hash FROM embed_stage ORDER BY content_hash").all() as Array<{ content_hash: string }>).map(
         (row) => row.content_hash
       )
-    ).toEqual(["new-hash"]);
+      // 'old-delivered' is reclaimed (delivery receipt present); 'old-hash' is UNDELIVERED and
+      // 'old-quarantined' awaits a re-embed from source — the hygiene lane must never delete a
+      // paid vector awaiting delivery.
+    ).toEqual(["new-hash", "old-hash", "old-quarantined"]);
     expect((db.prepare("SELECT id FROM api_health_log").all() as Array<{ id: string }>).map((row) => row.id)).toEqual([
       "h-new"
     ]);

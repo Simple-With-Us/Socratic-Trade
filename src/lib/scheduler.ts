@@ -942,14 +942,18 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // Daily audit_events + provider-observability retention (audit-prune.ts):
   // observability kinds 14d, everything else 90d, bounded batches. First-ever
   // run drains a large backlog over several daily passes. Also sweeps the
-  // embed_stage table (35d orphan retention + defensive size cap, db-embed-stage.ts).
+  // embed_stage table (DELIVERED-only 35d retention; undelivered paid vectors
+  // are never deleted and the size cap is an alarm, db-embed-stage.ts ST-4540).
   void journalLane("audit-prune", {}, async () => {
     const result = await runAuditPruneYieldingIfDue();
     if (!result) return { status: "skipped" as const, summary: "not due" };
     const total = result.auditObservability + result.auditDefault + result.providerDispatch +
       result.providerOutbox + result.embedStageExpired + result.embedStageCapPruned +
       result.portfolioSnapshotsPruned;
-    return { status: "ok" as const, summary: `deleted=${total}` };
+    const stageSummary = result.embedStageUndeliveredRetained > 0
+      ? ` undelivered=${result.embedStageUndeliveredRetained}`
+      : "";
+    return { status: "ok" as const, summary: `deleted=${total}${stageSummary}` };
   }).catch((err) => console.error("[scheduler] audit prune error:", err));
 
   signal?.throwIfAborted();

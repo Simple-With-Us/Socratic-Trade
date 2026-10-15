@@ -4169,10 +4169,12 @@ async function storeContextsImpl(
         assertVectorStoreLease(options?.leaseGuard);
         indexed += records.length;
         if (options?.managedCommit) managedRecordBatches.push(records);
-        // Delivered: this batch's vectors are now in Pinecone, so their "paid but not yet
-        // delivered" stage rows can go (plain calls delete per batch; managed commits defer
-        // until the committed re-upsert + finalize). Best-effort — a stray row is swept by
-        // the 35-day retention lane, never re-upserted incorrectly.
+        // Delivered: this batch's vectors are now durably in the vector store, so their
+        // "paid but not yet delivered" stage rows can go (plain calls delete per batch; managed
+        // commits defer until the committed re-upsert + finalize). The delivery receipt is
+        // required (ST-4540) — a row can only be removed by naming the backend that took it.
+        // Best-effort: a failure here leaves a delivered row for the retention lane, which
+        // reclaims delivered rows only and never an undelivered one.
         const deliveredStageHashes = batch
           .filter((document) => indexedDocIdentities.has(document))
           .map((document) => stageHashByDocument.get(document))
@@ -4182,10 +4184,12 @@ async function storeContextsImpl(
             stageHashesPendingCommit.push(...deliveredStageHashes);
           } else {
             try {
-              deleteStagedEmbeddings(deliveredStageHashes, stageModel, stageRevision);
+              deleteStagedEmbeddings(deliveredStageHashes, stageModel, stageRevision, {
+                store: writeBackend
+              });
             } catch (err) {
               console.warn(
-                "[vector-db] embed-stage delete failed (non-fatal; retention lane will sweep):",
+                "[vector-db] embed-stage delete failed (non-fatal; retention lane reclaims delivered rows):",
                 err instanceof Error ? err.message : String(err)
               );
             }
@@ -4244,13 +4248,16 @@ async function storeContextsImpl(
         throw new Error("document-local-commit-finalize-failed", { cause: error });
       }
       // The document is fully committed (pending + committed upserts + receipts + finalize) —
-      // only now are the managed call's paid vectors provably delivered.
+      // only now are the managed call's paid vectors provably delivered, so this is the only
+      // place a managed stage row may be removed (ST-4540 delivery receipt).
       if (stageHashesPendingCommit.length > 0) {
         try {
-          deleteStagedEmbeddings(stageHashesPendingCommit, stageModel, stageRevision);
+          deleteStagedEmbeddings(stageHashesPendingCommit, stageModel, stageRevision, {
+            store: writeBackend
+          });
         } catch (err) {
           console.warn(
-            "[vector-db] embed-stage delete failed (non-fatal; retention lane will sweep):",
+            "[vector-db] embed-stage delete failed (non-fatal; retention lane reclaims delivered rows):",
             err instanceof Error ? err.message : String(err)
           );
         }

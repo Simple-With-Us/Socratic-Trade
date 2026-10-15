@@ -86,11 +86,13 @@ export interface AuditPruneResult {
   auditDefault: number;
   providerDispatch: number;
   providerOutbox: number;
-  /** embed_stage rows removed by the 35-day retention window (db-embed-stage.ts — orphans
-   * whose source document was superseded before any retry consumed them). */
+  /** DELIVERED embed_stage rows reclaimed by the 35-day window (db-embed-stage.ts). Undelivered
+   * rows are never age-deleted (ST-4540) — a paid vector is kept until it lands. */
   embedStageExpired: number;
-  /** embed_stage rows removed oldest-first by the defensive 2 GiB size cap (one audit row). */
+  /** Always 0: the over-cap deletion was removed in ST-4540. The cap is an alarm now. */
   embedStageCapPruned: number;
+  /** Undelivered embed_stage rows still waiting on vector-store delivery (kept, not deleted). */
+  embedStageUndeliveredRetained: number;
   /** portfolio_snapshots removed by the retention window (90 days). */
   portfolioSnapshotsPruned: number;
 }
@@ -103,6 +105,7 @@ function emptyAuditPruneResult(): AuditPruneResult {
     providerOutbox: 0,
     embedStageExpired: 0,
     embedStageCapPruned: 0,
+    embedStageUndeliveredRetained: 0,
     portfolioSnapshotsPruned: 0
   };
 }
@@ -164,12 +167,14 @@ function pruneAuditAndProviderRows(now: Date, batchLimit: number): AuditPruneRes
 }
 
 function finishAuditHousekeeping(now: Date, result: AuditPruneResult, remaining: number, snapshotBatch: number): void {
-  // embed_stage retention + defensive size cap (db-embed-stage.ts). Steady state deletes
-  // nothing — rows normally live only between a paid embed and its successful Pinecone
-  // delivery; this lane only reaps orphans (superseded documents) and a runaway table.
+  // embed_stage DELIVERED-only retention (db-embed-stage.ts, ST-4540). Steady state deletes
+  // nothing — rows normally live only between a paid embed and its successful vector-store
+  // delivery. This lane reaps only rows that carry a delivery receipt, and never an undelivered
+  // paid vector: no age delete, no size-cap delete (over-cap raises an alarm instead).
   const stageSweep = sweepEmbedStage(now);
   result.embedStageExpired = stageSweep.expired;
   result.embedStageCapPruned = stageSweep.capPruned;
+  result.embedStageUndeliveredRetained = stageSweep.undeliveredRetained;
 
   // portfolio_snapshots retention — bounded LIMIT batch inside sweepPortfolioSnapshots so a
   // first-ever backlog (hundreds of thousands of multi-kB JSON rows) drains across multiple
@@ -219,6 +224,7 @@ export async function pruneAuditEventsYielding(
   const stageSweep = sweepEmbedStage(now);
   result.embedStageExpired = stageSweep.expired;
   result.embedStageCapPruned = stageSweep.capPruned;
+  result.embedStageUndeliveredRetained = stageSweep.undeliveredRetained;
   return result;
 }
 
