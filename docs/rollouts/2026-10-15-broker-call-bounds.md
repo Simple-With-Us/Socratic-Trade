@@ -61,6 +61,10 @@ The full-suite Robinhood failure was a populated-list fixture dated 2026-07-10. 
 
 ## Next Steps & Blockers
 
+<<<<<<< HEAD
 - `origin/main` through `e3ba1507` is merged with merge commits.  No conflicts on the 2026-10-15 shepherd pass (picked up after #4716 landed on `main`).  That tip includes iOS ASC credential hygiene (`512444e3` / PR #4716) on top of the earlier merges (bridge removal, Congress receipt, honest approve, Slack-to-Zulip retirement).  The deleted bridge writer is gone from `src/lib/scheduler.ts`.  The strategy snapshot deadline is still in place next to the approve placement change.
+=======
+- `origin/main` through `49a76da4` is merged with merge commits.  No conflicts in runtime code.  One inherited conflict marker in `docs/rollouts/2026-10-15-st-4531-retire-slack-callers.md` was cleaned in the verification block.  That merge chain includes the ST primary bridge removal (`3c74cd81`), the Congress.Trade push receipt (`df7e6d10`), the honest approve retry (`3f4ef5e5`), the Slack-to-Zulip caller retirement (`2075c857`), and the iOS ASC env credentials fix (`e3ba1507`).  The deleted bridge writer is gone from `src/lib/scheduler.ts`.  The strategy snapshot deadline is still in place next to the approve placement change.
+>>>>>>> origin/cursor/broker-call-bounds-7ec5
 - PR #4715 stays ready with `do-not-automerge`.  Do not enable auto-merge.
 - Jay squash-merges.  Do not mark ST-2570 completed until it is on `main`.
