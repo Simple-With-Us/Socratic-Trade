@@ -27,6 +27,28 @@ import { getDb } from "./db";
 import { timeSync } from "./slow-sync-guard";
 import { decodeSignature, type NearDupReference, DEFAULT_NEAR_DUP_WINDOW } from "./rag/near-dup-embed";
 
+/**
+ * ISOLATION KEY for every lookup and every write (review 17915833/1).
+ *
+ * A skipped embed is only safe if the canonical vector it inherits is actually RETRIEVABLE for the
+ * skipping caller. That requires two things, so both are part of the signature's identity:
+ *
+ *  * `tenantScope` — `vectorTenantScope(userId, scope)`, i.e. the exact retrieval-isolation key
+ *    ("shared:operator" or "private:<sha256>"). Without it, tenant A's chunk could be judged a
+ *    duplicate of tenant B's signature and skipped, and since the skip means "never write a vector",
+ *    that chunk would never exist in A's isolated namespace — silently unretrievable for A.
+ *  * `embedModel`/`embedRevision` — the vector space that produced the canonical vector. A vector
+ *    embedded in another space is not a valid substitute for the skipping caller's space.
+ *
+ * Every lookup filters on all three. An empty value can therefore never match a scoped lookup, which
+ * makes legacy/unscoped rows fail OPEN (an extra paid embed) instead of causing a wrong skip.
+ */
+export interface DedupScope {
+  tenantScope: string;
+  embedModel: string;
+  embedRevision: string;
+}
+
 export interface ChunkDedupSignatureInput {
   /** Raw-text SHA-256 (128-bit) — joins to `document_chunks.content_hash`. */
   contentHash: string;
@@ -38,6 +60,9 @@ export interface ChunkDedupSignatureInput {
   symbol: string;
   source: string;
   chunkId: string;
+  tenantScope: string;
+  embedModel: string;
+  embedRevision: string;
 }
 
 export interface ChunkDedupLinkInput {
@@ -50,20 +75,24 @@ export interface ChunkDedupLinkInput {
   kind: "exact" | "near";
   similarity: number;
   threshold: number;
+  tenantScope: string;
+  embedModel: string;
+  embedRevision: string;
 }
 
 /**
  * Record the signature of chunks we actually embedded, so future ingests can compare against them.
- * INSERT OR IGNORE: a signature is a pure function of the chunk text, so a repeat write is a no-op
- * and an existing row is never overwritten (no update, no delete).
+ * INSERT OR IGNORE: a signature is a pure function of the chunk text AND its isolation scope, so a
+ * repeat write is a no-op and an existing row is never overwritten (no update, no delete).
  */
 export function insertChunkDedupSignatures(rows: ChunkDedupSignatureInput[]): void {
   if (rows.length === 0) return;
   const db = getDb();
   const stmt = db.prepare(`
     INSERT OR IGNORE INTO chunk_dedup_signatures
-      (content_hash, normalized_hash, signature, num_perm, symbol, source, chunk_id, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      (content_hash, normalized_hash, signature, num_perm, symbol, source, chunk_id,
+       tenant_scope, embed_model, embed_revision, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const now = new Date().toISOString();
   const insertMany = db.transaction((batch: ChunkDedupSignatureInput[]) => {
@@ -76,18 +105,23 @@ export function insertChunkDedupSignatures(rows: ChunkDedupSignatureInput[]): vo
         row.symbol,
         row.source,
         row.chunkId,
+        row.tenantScope,
+        row.embedModel,
+        row.embedRevision,
         now
       );
     }
   });
-  insertMany(rows);
+  timeSyncGuard(() => insertMany(rows));
 }
 
 /**
- * Recent stored chunks for one (symbol, source) scope, newest first, as near-duplicate references.
- * Bounded by `limit` (a comparison budget, not a retention window — nothing is removed by it).
+ * Recent stored chunks for one (tenant, symbol, source, embedding-space) scope, newest first, as
+ * near-duplicate references. Bounded by `limit` (a comparison budget, not a retention window —
+ * nothing is removed by it).
  */
 export function findRecentDedupReferences(
+  scope: DedupScope,
   symbol: string,
   source: string,
   limit: number = DEFAULT_NEAR_DUP_WINDOW
@@ -97,11 +131,11 @@ export function findRecentDedupReferences(
     .prepare(`
       SELECT content_hash, normalized_hash, chunk_id, signature, num_perm
       FROM chunk_dedup_signatures
-      WHERE symbol = ? AND source = ?
+      WHERE tenant_scope = ? AND embed_model = ? AND embed_revision = ? AND symbol = ? AND source = ?
       ORDER BY created_at DESC, rowid DESC
       LIMIT ?
     `)
-    .all(symbol, source, bounded) as Array<{
+    .all(scope.tenantScope, scope.embedModel, scope.embedRevision, symbol, source, bounded) as Array<{
     content_hash: string;
     normalized_hash: string;
     chunk_id: string;
@@ -117,18 +151,23 @@ export function findRecentDedupReferences(
 }
 
 /**
- * Store-level lookup of every chunk sharing a normalized hash, across all scopes. Catches a repeat
- * that arrives under a different symbol/source label (a re-ingest of the same text by a producer
- * that stamps a fresh accession), which the per-scope window above would miss.
+ * Scope-matched lookup of every chunk sharing a normalized hash within the SAME tenant and embedding
+ * space, across that tenant's symbol/source labels. Catches a repeat that arrives under a different
+ * label (a re-ingest of the same text by a producer that stamps a fresh accession), which the
+ * per-label window above would miss. Still filtered to the caller's own isolation scope: a matching
+ * text held by ANOTHER tenant is never a usable canonical for this caller.
  */
-export function findDedupReferencesByNormalizedHash(normalizedHash: string): NearDupReference[] {
+export function findDedupReferencesByNormalizedHash(
+  scope: DedupScope,
+  normalizedHash: string
+): NearDupReference[] {
   const rows = getDb()
     .prepare(`
       SELECT content_hash, normalized_hash, chunk_id, signature, num_perm
       FROM chunk_dedup_signatures
-      WHERE normalized_hash = ?
+      WHERE tenant_scope = ? AND embed_model = ? AND embed_revision = ? AND normalized_hash = ?
     `)
-    .all(normalizedHash) as Array<{
+    .all(scope.tenantScope, scope.embedModel, scope.embedRevision, normalizedHash) as Array<{
     content_hash: string;
     normalized_hash: string;
     chunk_id: string;
@@ -145,7 +184,8 @@ export function findDedupReferencesByNormalizedHash(normalizedHash: string): Nea
 
 /**
  * Record the provenance link for every chunk whose embed we skipped. INSERT OR IGNORE on
- * (content_hash, canonical_hash) — a duplicate is linked to every canonical it matched, forever.
+ * (content_hash, canonical_hash, tenant_scope) — a duplicate is linked to every canonical it
+ * matched, forever, and two tenants linking the same text never collide into one row.
  */
 export function insertChunkDedupLinks(rows: ChunkDedupLinkInput[]): void {
   if (rows.length === 0) return;
@@ -153,8 +193,9 @@ export function insertChunkDedupLinks(rows: ChunkDedupLinkInput[]): void {
   const stmt = db.prepare(`
     INSERT OR IGNORE INTO chunk_dedup_links
       (content_hash, canonical_hash, canonical_chunk_id, canonical_vector_id,
-       symbol, source, match_kind, similarity, threshold, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       symbol, source, match_kind, similarity, threshold,
+       tenant_scope, embed_model, embed_revision, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const now = new Date().toISOString();
   const insertMany = db.transaction((batch: ChunkDedupLinkInput[]) => {
@@ -169,6 +210,9 @@ export function insertChunkDedupLinks(rows: ChunkDedupLinkInput[]): void {
         row.kind,
         row.similarity,
         row.threshold,
+        row.tenantScope,
+        row.embedModel,
+        row.embedRevision,
         now
       );
     }

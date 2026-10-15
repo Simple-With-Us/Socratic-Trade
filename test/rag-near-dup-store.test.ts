@@ -42,6 +42,11 @@ const { shingleSet } = await import("../src/lib/rag/dedupe-similar");
 const TEXT_A =
   "Acme Corporation reported net revenue of 412 million dollars for the third quarter, an increase of 8 percent over the prior year period. Gross margin expanded to 61 percent.";
 
+/** Default isolation scope for this suite: one tenant, one embedding space. */
+const SCOPE = { tenantScope: "shared:operator", embedModel: "voyage-finance-2", embedRevision: "1" };
+/** A different tenant in the same embedding space — must never match SCOPE rows. */
+const OTHER_TENANT = { tenantScope: "private:aaaa", embedModel: "voyage-finance-2", embedRevision: "1" };
+
 function signatureRow(text: string, contentHash: string, symbol: string, source: string, chunkId: string) {
   return {
     contentHash,
@@ -50,7 +55,10 @@ function signatureRow(text: string, contentHash: string, symbol: string, source:
     numPerm: 64,
     symbol,
     source,
-    chunkId
+    chunkId,
+    tenantScope: SCOPE.tenantScope,
+    embedModel: SCOPE.embedModel,
+    embedRevision: SCOPE.embedRevision
   };
 }
 
@@ -80,7 +88,7 @@ describe("ST-4541 near-dup persistence — signatures", () => {
 
   it("round-trips a signature through the BLOB column and returns comparable references", () => {
     insertChunkDedupSignatures([signatureRow(TEXT_A, "ca1", "ACME", "8-k", "chunk-a1")]);
-    const refs = findRecentDedupReferences("ACME", "8-k");
+    const refs = findRecentDedupReferences(SCOPE, "ACME", "8-k");
     const mine = refs.find((r) => r.contentHash === "ca1");
     expect(mine).toBeDefined();
     expect(mine!.chunkId).toBe("chunk-a1");
@@ -97,12 +105,12 @@ describe("ST-4541 near-dup persistence — signatures", () => {
       signatureRow(`${TEXT_A} two`, "sc2", "ZZZ", "10-k", "c2"),
       signatureRow(`${TEXT_A} three`, "sc3", "ZZZ", "10-q", "c3")
     ]);
-    const scoped = findRecentDedupReferences("ZZZ", "10-k");
+    const scoped = findRecentDedupReferences(SCOPE, "ZZZ", "10-k");
     expect(scoped.map((r) => r.contentHash).sort()).toEqual(["sc1", "sc2"]);
     // The window bounds comparison work only — it must never remove stored rows.
-    expect(findRecentDedupReferences("ZZZ", "10-k", 1)).toHaveLength(1);
-    expect(findRecentDedupReferences("ZZZ", "10-q").map((r) => r.contentHash)).toEqual(["sc3"]);
-    expect(findRecentDedupReferences("NOT-A-SYMBOL", "10-k")).toHaveLength(0);
+    expect(findRecentDedupReferences(SCOPE, "ZZZ", "10-k", 1)).toHaveLength(1);
+    expect(findRecentDedupReferences(SCOPE, "ZZZ", "10-q").map((r) => r.contentHash)).toEqual(["sc3"]);
+    expect(findRecentDedupReferences(SCOPE, "NOT-A-SYMBOL", "10-k")).toHaveLength(0);
     const db = getDb();
     expect((db.prepare("SELECT COUNT(*) AS c FROM chunk_dedup_signatures WHERE symbol = 'ZZZ'").get() as { c: number }).c).toBe(3);
   });
@@ -110,15 +118,55 @@ describe("ST-4541 near-dup persistence — signatures", () => {
   it("finds a normalized-hash match across scopes (a repeat re-stamped with a new accession)", () => {
     const row = signatureRow("Some recurring disclosure text that is ingested under many accessions.", "nh1", "AAA", "8-k", "c-nh");
     insertChunkDedupSignatures([row]);
-    const byHash = findDedupReferencesByNormalizedHash(normalizedContentHash("  Some RECURRING   disclosure text that is ingested under many accessions.\n"));
+    const byHash = findDedupReferencesByNormalizedHash(SCOPE, normalizedContentHash("  Some RECURRING   disclosure text that is ingested under many accessions.\n"));
     expect(byHash.map((r) => r.contentHash)).toContain("nh1");
-    expect(findDedupReferencesByNormalizedHash("deadbeef")).toHaveLength(0);
+    expect(findDedupReferencesByNormalizedHash(SCOPE, "deadbeef")).toHaveLength(0);
   });
 
   it("is idempotent: re-recording the same signature never duplicates or overwrites a row", () => {
     const before = countChunkDedupSignatures();
     insertChunkDedupSignatures([signatureRow(TEXT_A, "ca1", "ACME", "8-k", "chunk-a1")]);
     expect(countChunkDedupSignatures()).toBe(before);
+  });
+
+  it("ISOLATION: lookups never return another tenant's or another vector space's signatures", () => {
+    // Own text: TEXT_A is already seeded by earlier tests with an identical normalized hash, and the
+    // hash lookup is scope-wide, so reusing it would leak a second row into these assertions.
+    const isoText = "Isolation probe disclosure text that belongs to exactly one tenant scope only.";
+    insertChunkDedupSignatures([signatureRow(isoText, "iso1", "ISO", "10-k", "iso-chunk")]);
+
+    // Same tenant + space: the row is visible.
+    expect(findRecentDedupReferences(SCOPE, "ISO", "10-k").map((r) => r.contentHash)).toEqual(["iso1"]);
+    expect(findDedupReferencesByNormalizedHash(SCOPE, normalizedContentHash(isoText)).map((r) => r.contentHash)).toEqual(["iso1"]);
+
+    // A different tenant holding byte-identical content must NOT see it: skipping against another
+    // tenant's signature means "never write a vector", which would leave the chunk unretrievable in
+    // the skipping tenant's isolated namespace.
+    expect(findRecentDedupReferences(OTHER_TENANT, "ISO", "10-k")).toHaveLength(0);
+    expect(findDedupReferencesByNormalizedHash(OTHER_TENANT, normalizedContentHash(isoText))).toHaveLength(0);
+
+    // Nor may another EMBEDDING SPACE reuse it — a vector from a different space is not a valid
+    // substitute for this caller's space.
+    const otherSpace = { ...SCOPE, embedRevision: "999" };
+    expect(findRecentDedupReferences(otherSpace, "ISO", "10-k")).toHaveLength(0);
+    expect(findDedupReferencesByNormalizedHash(otherSpace, normalizedContentHash(isoText))).toHaveLength(0);
+  });
+
+  it("ISOLATION: two tenants embedding identical text each keep their own signature row", () => {
+    const twinText = "Two tenants embedding byte identical disclosure text under one content hash.";
+    const otherTenantRow = {
+      ...signatureRow(twinText, "twin1", "TWIN", "10-q", "twin-chunk"),
+      tenantScope: OTHER_TENANT.tenantScope
+    };
+    // Same content_hash + same symbol/source, different tenant. Before the isolation columns were
+    // part of the primary key, the second tenant's INSERT was silently swallowed by OR IGNORE and
+    // that tenant could never dedup at all.
+    insertChunkDedupSignatures([signatureRow(twinText, "twin1", "TWIN", "10-q", "twin-chunk"), otherTenantRow]);
+    const db = getDb();
+    const rows = db
+      .prepare("SELECT tenant_scope FROM chunk_dedup_signatures WHERE content_hash = 'twin1' ORDER BY tenant_scope")
+      .all() as Array<{ tenant_scope: string }>;
+    expect(rows.map((r) => r.tenant_scope)).toEqual([OTHER_TENANT.tenantScope, SCOPE.tenantScope].sort());
   });
 });
 
@@ -135,7 +183,10 @@ describe("ST-4541 near-dup persistence — provenance links (binding: nothing is
         source: "8-k",
         kind: "near",
         similarity: 0.93,
-        threshold: 0.9
+        threshold: 0.9,
+        tenantScope: SCOPE.tenantScope,
+        embedModel: SCOPE.embedModel,
+        embedRevision: SCOPE.embedRevision
       }
     ]);
     expect(countChunkDedupLinks()).toBe(before + 1);
@@ -153,15 +204,15 @@ describe("ST-4541 near-dup persistence — provenance links (binding: nothing is
 
   it("keeps EVERY canonical a duplicate matched, and stays idempotent on re-run", () => {
     insertChunkDedupLinks([
-      { contentHash: "dup2", canonicalHash: "ca1", canonicalChunkId: "c1", symbol: "ACME", source: "8-k", kind: "near", similarity: 0.91, threshold: 0.9 },
-      { contentHash: "dup2", canonicalHash: "ca2", canonicalChunkId: "c2", symbol: "ACME", source: "8-k", kind: "near", similarity: 0.92, threshold: 0.9 }
+      { contentHash: "dup2", canonicalHash: "ca1", canonicalChunkId: "c1", symbol: "ACME", source: "8-k", kind: "near", similarity: 0.91, threshold: 0.9, tenantScope: SCOPE.tenantScope, embedModel: SCOPE.embedModel, embedRevision: SCOPE.embedRevision },
+      { contentHash: "dup2", canonicalHash: "ca2", canonicalChunkId: "c2", symbol: "ACME", source: "8-k", kind: "near", similarity: 0.92, threshold: 0.9, tenantScope: SCOPE.tenantScope, embedModel: SCOPE.embedModel, embedRevision: SCOPE.embedRevision }
     ]);
     const links = getDb().prepare("SELECT canonical_hash FROM chunk_dedup_links WHERE content_hash = 'dup2' ORDER BY canonical_hash").all() as Array<{ canonical_hash: string }>;
     expect(links.map((l) => l.canonical_hash)).toEqual(["ca1", "ca2"]);
 
     const count = countChunkDedupLinks();
     insertChunkDedupLinks([
-      { contentHash: "dup2", canonicalHash: "ca1", canonicalChunkId: "c1", symbol: "ACME", source: "8-k", kind: "near", similarity: 0.91, threshold: 0.9 }
+      { contentHash: "dup2", canonicalHash: "ca1", canonicalChunkId: "c1", symbol: "ACME", source: "8-k", kind: "near", similarity: 0.91, threshold: 0.9, tenantScope: SCOPE.tenantScope, embedModel: SCOPE.embedModel, embedRevision: SCOPE.embedRevision }
     ]);
     expect(countChunkDedupLinks()).toBe(count);
   });

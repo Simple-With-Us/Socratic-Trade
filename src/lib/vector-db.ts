@@ -20,7 +20,8 @@ import {
   findDedupReferencesByNormalizedHash,
   findRecentDedupReferences,
   insertChunkDedupLinks,
-  insertChunkDedupSignatures
+  insertChunkDedupSignatures,
+  type DedupScope
 } from "./db-near-dup";
 import { isProviderDispatchLeaseLostError } from "./db-provider-dispatch";
 import { getLaneHealth, logApiHealth, transientEscalationWindowMs } from "./db-health";
@@ -3679,13 +3680,38 @@ async function storeContextsImpl(
   // ST-4541: pre-embed near-duplicate gate. Runs AFTER the byte-exact content-hash dedup above (which
   // is cheaper and already handles the common case) and BEFORE any embedding API call, so a near
   // duplicate never costs a paid embed. Candidates are compared against recent ALREADY-EMBEDDED chunks
-  // for the same (symbol, source), plus store-wide normalized-hash hits that catch the same text
-  // re-stamped with a fresh accession. Matches are not deleted: they are recorded as `chunk_dedup_links`
-  // provenance rows pointing at the canonical chunk, and their source records ingest normally.
-  const nearDupThreshold =
+  // in the SAME tenant + embedding space, plus that tenant's normalized-hash hits that catch the same
+  // text re-stamped with a fresh accession. Matches are not deleted: they are recorded as
+  // `chunk_dedup_links` provenance rows pointing at the canonical chunk, and their source records
+  // ingest normally.
+  //
+  // MANAGED COMMITS ARE EXEMPT (review 17915833/0). `storeDocumentImpl` promotes a document ONLY when
+  // `documentsToStore.length === expectedRecordCount` AND `indexed === expectedRecordCount`; anything
+  // less skips `persistReceipts()`/`markCommitted()`, and `storeDocumentImpl`'s own
+  // `result.indexed === chunked.length` check then aborts the commit outright. Because the
+  // RAG_NEAR_DUP_SKIP env flag below turns the gate on for EVERY caller, an enabled flag would have
+  // silently made every document commit that contained a near-duplicate chunk fail forever. The gate
+  // stays OFF for managed writes: they are correctness-critical and small, and the money this saves
+  // is on the bulk storeContexts path. Per-call opt-in `nearDuplicateThreshold` is likewise ignored
+  // under a managed commit, so no caller can opt a commit into a skipped record.
+  const managedCommitActive = Boolean(options?.managedCommit);
+  const requestedNearDupThreshold =
     options?.nearDuplicateThreshold ??
     (envFlagOn("RAG_NEAR_DUP_SKIP", false) ? DEFAULT_NEAR_DUP_THRESHOLD : undefined);
+  const nearDupThreshold = managedCommitActive ? undefined : requestedNearDupThreshold;
+  if (managedCommitActive && requestedNearDupThreshold !== undefined) {
+    console.log(
+      "[vector-db] near-duplicate skip disabled for this managed commit: a managed commit requires exact record cardinality."
+    );
+  }
   let nearDupSkipped = 0;
+  /**
+   * True only when EVERY skipped document matched EXACTLY (byte-identical after normalization). An
+   * exact match means the canonical vector provably holds this same content, which is the guarantee
+   * `dedupComplete` promises. A `near` match does NOT: its vector was never written under this
+   * document's own metadata, so callers must not be told "already indexed" (review 17915833/2).
+   */
+  let nearDupAllExact = true;
   /** Candidates that still need an embed; their signatures are persisted once indexing succeeds. */
   let nearDupPendingSignatures: Array<{ candidate: NearDupCandidate; document: ContextDocument }> = [];
   if (
@@ -3695,6 +3721,13 @@ async function storeContextsImpl(
     documentsToStore.length > 0
   ) {
     const window = Math.max(1, Math.floor(options?.nearDuplicateWindow ?? DEFAULT_NEAR_DUP_WINDOW));
+    // Isolation scope for every lookup and write below. A skip is only safe when the canonical
+    // vector it inherits is retrievable for THIS caller: same tenant namespace, same vector space.
+    const nearDupScope: DedupScope = {
+      tenantScope,
+      embedModel: activeEmbeddingModel(userId),
+      embedRevision: String(currentEmbedRev())
+    };
     const candidates: Array<NearDupCandidate & { document: ContextDocument }> = documentsToStore.map(
       (doc, i) => ({
         ...toNearDupCandidate({
@@ -3718,10 +3751,10 @@ async function storeContextsImpl(
         const scopeKey = `${candidate.symbol}\u0000${candidate.source}`;
         if (seenScope.has(scopeKey)) continue;
         seenScope.add(scopeKey);
-        references.push(...findRecentDedupReferences(candidate.symbol, candidate.source, window));
+        references.push(...findRecentDedupReferences(nearDupScope, candidate.symbol, candidate.source, window));
       }
       for (const candidate of candidates) {
-        references.push(...findDedupReferencesByNormalizedHash(candidate.normalizedHash));
+        references.push(...findDedupReferencesByNormalizedHash(nearDupScope, candidate.normalizedHash));
       }
     } catch (err) {
       references = [];
@@ -3733,11 +3766,20 @@ async function storeContextsImpl(
 
     const partitioned = partitionNearDuplicates(candidates, references, { threshold: nearDupThreshold });
     nearDupSkipped = partitioned.skipped.length;
+    // Only an all-EXACT skip may later be reported as `dedupComplete`; see `nearDupAllExact`.
+    nearDupAllExact = partitioned.links.every((link) => link.kind === "exact");
     if (nearDupSkipped > 0) {
       // Provenance FIRST: the skip is a money decision and must be auditable even if the rest of the
       // store fails. INSERT OR IGNORE only — links are never updated or removed.
       try {
-        insertChunkDedupLinks(partitioned.links);
+        insertChunkDedupLinks(
+          partitioned.links.map((link) => ({
+            ...link,
+            tenantScope: nearDupScope.tenantScope,
+            embedModel: nearDupScope.embedModel,
+            embedRevision: nearDupScope.embedRevision
+          }))
+        );
       } catch (err) {
         console.warn(
           "[vector-db] insertChunkDedupLinks failed (non-fatal, storeContexts near-dup path):",
@@ -3774,11 +3816,18 @@ async function storeContextsImpl(
     }
   }
   if (documentsToStore.length === 0) {
+    // `dedupComplete` is the "reusable content already exists" proof that producers act on
+    // (sec8k.ts clears its backlog and marks the batch complete; corpus-reembed.ts records "reused").
+    // Claim it ONLY when every skip was byte-identical to an existing vector. If any chunk was
+    // skipped as a NEAR duplicate, its vector was never written under this document's own metadata
+    // (accession/timestamp/sidecar), so the honest answer is "not indexed here" — callers keep the
+    // record retryable rather than treating it as delivered (review 17915833/2).
+    const dedupComplete = nearDupSkipped === 0 || nearDupAllExact;
     return {
       attempted: validDocuments.length,
       indexed: 0,
       skipped: true,
-      dedupComplete: true,
+      ...(dedupComplete ? { dedupComplete: true } : {}),
       ...(nearDupSkipped > 0 ? { skippedByNearDuplicate: nearDupSkipped } : {})
     };
   }
@@ -4463,7 +4512,10 @@ async function storeContextsImpl(
               numPerm: DEFAULT_NEAR_DUP_NUM_PERM,
               symbol: entry.candidate.symbol,
               source: entry.candidate.source,
-              chunkId: entry.candidate.chunkId
+              chunkId: entry.candidate.chunkId,
+              tenantScope,
+              embedModel: stageModel,
+              embedRevision: stageRevision
             }))
         );
       } catch (err) {
