@@ -2,7 +2,7 @@
 
 ## 2026-10-15 Cursor Cloud — auto-merge CODEOWNERS globs (ST-3326)
 
-**What.**  `auto-merge-prs.yml` was fail-closing every PR because `gh api --jq -r` is two arguments (`accepts 1 arg(s), received 2`).  The CODEOWNERS money-path globs never ran.  The fetch is now one `--jq` expression.  A documented glob list is locked to CODEOWNERS.  The dry run disarms money-path diffs and `do-not-automerge`, and still arms a docs diff.  Merged `origin/main` (`df7e6d10`, then `3f4ef5e5` / #4698, then `2075c857` / #4696, then `e3ba1507` / #4716) with merge commits.  `check-pin` was failing because it preferred `GH_PACKAGES_TOKEN` (user 12656028) over the Actions token, then reported that user's HTTP 403 rate limit as a missing token.  #4698 landed that token order on main.  This merge keeps main's copy.  `disable-on-*` jobs have `contents: write` and `pull-requests: write` (ported from #4727).  After a rejected disable, `gh pr view --jq` reports `off`, `armed`, or `unreadable`.  `off` exits 0.  `armed` or `unreadable` exits 1.  The arm job stays read-only.
+**What.**  `auto-merge-prs.yml` was fail-closing every PR because `gh api --jq -r` is two arguments (`accepts 1 arg(s), received 2`).  The CODEOWNERS money-path globs never ran.  The fetch is now one `--jq` expression.  A documented glob list is locked to CODEOWNERS.  The dry run disarms money-path diffs and `do-not-automerge`, and still arms a docs diff.  Merged `origin/main` (`df7e6d10`, then `3f4ef5e5` / #4698, then `2075c857` / #4696, then `e3ba1507` / #4716, then `49a76da4` / #4695) with merge commits.  `check-pin` was failing because it preferred `GH_PACKAGES_TOKEN` (user 12656028) over the Actions token, then reported that user's HTTP 403 rate limit as a missing token.  #4698 landed that token order on main.  This merge keeps main's copy.  `disable-on-*` jobs have `contents: write` and `pull-requests: write` (ported from #4727).  After a rejected disable, `gh pr view --jq` reports `off`, `armed`, or `unreadable`.  `off` exits 0.  `armed` or `unreadable` exits 1.  The arm job stays read-only.
 
 **Branch.**  `cursor/automerge-money-path-globs-2a65`
 
@@ -10,6 +10,41 @@
 
 **Next.**  PR #4697 stays ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.  #4727's disable permissions and jq reader are on this branch.  Jay can close #4727.  Leave ST-3326 In Progress until the fix has shipped.
 
+## 2026-10-15 CURSOR — Congress push delivery/consumption receipt (ST-3846)
+
+**What.**  App B webhook responses now emit `receiptVersion: 1` with explicit `delivered` + `consumed` fields; batch failures return `422` instead of silent `200`.  Congress.Trade PR parses the receipt before marking `deliveries` rows delivered.
+
+**Branch.**  `cursor/congress-push-receipt-6277`
+
+**Verification.**  `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-events.test.ts test/congress-webhook-parity.test.ts` 49/49; `npx tsc --noEmit` ok.
+
+**Merge.**  `origin/main` merged into this branch (`70a74daf`); `STATUS.md` auto-merged only — webhook receipt code unchanged.  Congress.Trade **#2752 merged** to CT `main` (2026-10-15 ~11:10Z); ST **#4695** is the remaining ship piece.
+
+**Overlap (#4703).**  Unchanged: `#4703` = securities import (`peer-push-receipt`); this PR = webhook `receiptVersion: 1` + `422` when `consumed=false`.
+
+**Next.**  Merge **#4695** to `main` and deploy Socratic-Trade so CT webhook pushes get consumption receipts in prod.
+
+**2026-10-15 [codex-autofix] — PR #4695 review pass.**  No new review-bot findings; the
+sole thread (Sentry, index misalignment in `resolveCongressEventIds`) was already fixed in
+`93da2abb` and is outdated.  Merged `origin/main` (lucide-react 1.55.0 dep bump) to clear
+the BEHIND state — `package-lock.json` only, no conflict with PR files.  Re-verified:
+`npx tsc --noEmit` clean, `npx vitest run test/congress-push-receipt.test.ts
+test/congress-trade-events.test.ts` 41/41, `npm run build` clean.  Pre-existing local
+`llm-provider` / `openrouter-credits` failures reproduce on `origin/main` (runner has a live
+`OPENROUTER_API_KEY`); not caused by this PR and left untouched.  Auto-merge enabled.
+
+**2026-10-15 [codex-autofix] — PR #4695 review pass (round 9).**  One new review-bot item:
+Kody rule 26 wanted the `npm test` line in the ST-3846 rollout note to end in a pass/fail
+token rather than a coverage description.  Fixed — the line is now `# ok`, and the
+`congress-push-receipt` / `congress-trade-events` coverage detail moved to a sub-bullet.
+Docs-only diff (`docs/rollouts/2026-10-15-congress-push-receipt-st-3846.md`).  Branch was
+already level with `origin/main`, so no merge was needed.  Re-verified: `npx tsc --noEmit`
+clean, `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-events.test.ts`
+42/42, `npm run build` clean.  The 4 failing files in the full suite (`llm-provider`,
+`openrouter-credits`, `chat-llm`, `framework-review`) reproduce identically on a fresh
+`origin/main` worktree — this runner has a live `OPENROUTER_API_KEY` that those tests assume
+is absent.  Pre-existing, outside this diff, left untouched.  Both remaining open threads
+resolved (Sentry's index-alignment finding verified fixed in `93da2abb`).
 ## 2026-10-15 CURSOR — Board 512444e3 iOS / Playwright / deploy-freshness CI
 
 **What.**  Triage for GB-Monitor board `512444e3`: `ios-ship` last failed 2026-10-13 (ASC HTTP 401); last successful archive 2026-10-14; `verify-ios` green on 2026-10-15 main pushes; Playwright and deploy-freshness cron green; Sentry BN/BR/BS/BP unresolved count zero.  Follow-up PR hardens `asc-api.mjs` to prefer `ASC_*` from process env (hosted Actions) over the on-disk secrets file.

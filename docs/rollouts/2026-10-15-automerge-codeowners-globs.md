@@ -127,6 +127,7 @@ Touched: `.github/workflows/auto-merge-prs.yml`, `scripts/disable-pr-automerge.s
 
 ## Next Steps & Blockers
 
+- Merged `origin/main` `49a76da4` (#4695, congress webhook receipt) with no conflicts.  Docs-only union on `STATUS.md`.
 - PR #4697 stays ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
 - Leave ST-3326 In Progress until this has shipped.
 - No phase doc covers this workflow.  Nothing under `docs/phase-*.md` was updated.
