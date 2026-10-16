@@ -45,16 +45,16 @@ describe("serving-thread sqlite stalls mapped from 2026-10-05 profiles", () => {
     const { getDb } = await import("../src/lib/db");
     getDb();
     const { buildOpsSnapshot } = await import("../src/lib/ops-snapshot");
-    buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
+    await buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
     resetRoicArtifactFileCountCacheForTests();
     let ticks = 0;
     const timer = setInterval(() => {
       ticks += 1;
     }, 5);
-    const snapMs = elapsed(() => {
-      const snapshot = buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
-      expect(snapshot.roicArchive?.artifactFiles).toBe(0);
-    });
+    const snapStart = Date.now();
+    const snapshot = await buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
+    expect(snapshot.roicArchive?.artifactFiles).toBe(0);
+    const snapMs = Date.now() - snapStart;
     const counted = await refreshRoicArtifactFileCount(dataDir);
     clearInterval(timer);
     expect(snapMs).toBeLessThan(100);

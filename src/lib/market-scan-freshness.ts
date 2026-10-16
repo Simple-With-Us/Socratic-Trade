@@ -18,7 +18,7 @@
 // persisted scan's quotesBySymbol — a keyless price/breadth refresh that burns no keyed
 // provider quota, mirroring the interactive /api/scan path.
 import { z } from "zod";
-import { audit, getPolicy, latestAuditByKind, listUsers, newerAuditEntry, type AuditEventRow, latestAuditStampByKind } from "./db";
+import { audit, getDb, getPolicy, latestAuditByKind, listUsers, newerAuditEntry, type AuditEventRow, latestAuditStampByKind } from "./db";
 import { dynamicIndexUniversesForPolicy } from "./index-universes";
 import { isTradingDay } from "./market-calendar";
 import { scanMarket } from "./market";
@@ -85,6 +85,87 @@ function extractScan(payload: unknown): MarketScan | undefined {
  * must not mask an older-but-still-usable market_scan. Returns undefined only when NEITHER kind
  * has ever produced a usable scan payload.
  */
+/** Stamp-only market-scan row for ops diagnostics (no multi-MB payload parse). */
+export interface OpsMarketScanRecordSummary {
+  generatedAt: string | null;
+  persistedAt: string | null;
+  stale: boolean;
+  sourceKind: "market_scan" | "strategy_run" | null;
+}
+
+type ScanMetaRow = {
+  persisted_at: string;
+  generated_at: string | null;
+  omitted: number | null;
+};
+
+function readMarketScanMetaFromAudit(kind: "market_scan" | "strategy_run", userId: string): ScanMetaRow | undefined {
+  const row = getDb()
+    .prepare(
+      `SELECT created_at AS persisted_at,
+        COALESCE(
+          json_extract(payload, '$.scan.generatedAt'),
+          json_extract(payload, '$.result.marketScan.generatedAt'),
+          json_extract(payload, '$.marketScan.generatedAt')
+        ) AS generated_at,
+        COALESCE(
+          json_extract(payload, '$.scan.omitted'),
+          json_extract(payload, '$.marketScan.omitted'),
+          json_extract(payload, '$.result.marketScan.omitted')
+        ) AS omitted
+       FROM audit_events
+       WHERE kind = ? AND user_id = ?
+       ORDER BY created_at DESC
+       LIMIT 1`
+    )
+    .get(kind, userId) as ScanMetaRow | undefined;
+  if (!row?.persisted_at) return undefined;
+  return row;
+}
+
+function scanMetaIsUsable(row: ScanMetaRow | undefined): boolean {
+  if (!row) return false;
+  if (row.omitted === 1) return false;
+  return typeof row.generated_at === "string" && row.generated_at.length > 0;
+}
+
+/** Latest persisted scan metadata for one user — uses index seeks + json_extract only. */
+export function opsMarketScanRecordSummary(userId: string, nowMs: number = Date.now()): OpsMarketScanRecordSummary {
+  const scanStamp = latestAuditStampByKind("market_scan", userId);
+  const runStamp = latestAuditStampByKind("strategy_run", userId);
+  if (!scanStamp && !runStamp) {
+    return { generatedAt: null, persistedAt: null, stale: true, sourceKind: null };
+  }
+  const preferRun =
+    Boolean(runStamp) &&
+    (!scanStamp || Date.parse(runStamp!.createdAt) > Date.parse(scanStamp.createdAt));
+  const primaryKind: "market_scan" | "strategy_run" = preferRun ? "strategy_run" : "market_scan";
+  const secondaryKind: "market_scan" | "strategy_run" = primaryKind === "market_scan" ? "strategy_run" : "market_scan";
+  let row = readMarketScanMetaFromAudit(primaryKind, userId);
+  let sourceKind: "market_scan" | "strategy_run" | null = primaryKind;
+  if (!scanMetaIsUsable(row)) {
+    const fallback = readMarketScanMetaFromAudit(secondaryKind, userId);
+    if (scanMetaIsUsable(fallback)) {
+      row = fallback;
+      sourceKind = secondaryKind;
+    }
+  }
+  if (!row) {
+    return { generatedAt: null, persistedAt: null, stale: true, sourceKind: null };
+  }
+  const generatedAt =
+    typeof row.generated_at === "string" && row.generated_at.length > 0 ? row.generated_at : null;
+  const persistedAt = row.persisted_at;
+  const maxAgeHours = marketScanFreshnessMaxAgeHours();
+  const referenceMs = generatedAt ? Date.parse(generatedAt) : Date.parse(persistedAt);
+  const ageMs = Number.isFinite(referenceMs) ? nowMs - referenceMs : Number.POSITIVE_INFINITY;
+  const stale =
+    row.omitted === 1 ||
+    !generatedAt ||
+    (maxAgeHours > 0 && Number.isFinite(ageMs) && ageMs > maxAgeHours * 60 * 60 * 1_000);
+  return { generatedAt, persistedAt, stale, sourceKind };
+}
+
 export function newestPersistedMarketScan(
   userId: string,
   connectedAccountId?: string

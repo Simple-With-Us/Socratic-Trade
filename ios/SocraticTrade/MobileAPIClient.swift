@@ -102,6 +102,8 @@ struct MobileAPIClient {
 
     func snapshotData(timeout: TimeInterval = 30) async throws -> (MobileSnapshot, Data) {
         var req = request(path: "/api/mobile/snapshot")
+        // A shared URL cache can replay the previous account after a switch or sign-out.
+        req.cachePolicy = .reloadIgnoringLocalCacheData
         req.timeoutInterval = timeout
         let data = try await successfulResponseData(for: req)
         do {

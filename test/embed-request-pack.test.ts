@@ -7,9 +7,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   EMBED_MODEL_CONTEXT_TOKENS,
   EMBED_REQUEST_TOKEN_BUDGET,
+  chunkEmbedText,
+  embedBudgetUnits,
   embedRequestFits,
   embedTextTokenEstimate,
-  packInWindowTexts
+  packInWindowTexts,
+  prefixCountWithinEmbedUnits,
+  truncateEmbedText
 } from "../src/lib/rag/embed-request-pack";
 import { approxTokens } from "../src/lib/rag-metering";
 
@@ -91,10 +95,50 @@ beforeEach(() => {
 });
 
 describe("embed request packer (pure)", () => {
-  it("uses the rag-metering approxTokens estimator", () => {
+  it("estimates prose above bytes/4 and digits at one token each", () => {
     const sample = textOfTokens(256);
-    expect(embedTextTokenEstimate(sample)).toBe(256);
     expect(approxTokens([sample])).toBe(256);
+    expect(embedTextTokenEstimate(sample)).toBe(293);
+    const digits = "9".repeat(20_000);
+    expect(approxTokens([digits])).toBe(5_000);
+    expect(embedTextTokenEstimate(digits)).toBe(20_000);
+  });
+
+  it("keeps an empty string as one piece and rejects a non-string", () => {
+    expect(chunkEmbedText("")).toEqual([""]);
+    expect(truncateEmbedText("")).toBe("");
+    expect(embedBudgetUnits("")).toBe(1);
+    expect(embedTextTokenEstimate("")).toBe(1);
+    expect(() => embedTextTokenEstimate(undefined as unknown as string)).toThrow(TypeError);
+  });
+
+  it("chunks a digit run that bytes/4 would send whole", () => {
+    const digits = "9".repeat(20_000);
+    const parts = chunkEmbedText(digits);
+    expect(parts.length).toBeGreaterThan(1);
+    expect(embedBudgetUnits(digits)).toBe(parts.length);
+    for (const part of parts) {
+      expect(embedRequestFits([part])).toBe(true);
+      expect(part.includes("[truncated]")).toBe(false);
+    }
+    expect(prefixCountWithinEmbedUnits([digits, "short filing"], 1)).toBe(0);
+    expect(prefixCountWithinEmbedUnits(["short filing", "another"], 1)).toBe(1);
+  });
+
+  it("prefix walk honors precomputed units and falls back for texts missing from the map", () => {
+    const big = "9".repeat(20_000);
+    const texts = [big, "short filing", "another"];
+    // Built the way vector-db builds it: one embedBudgetUnits call per distinct text.
+    const precomputed = new Map<string, number>();
+    for (const text of texts) precomputed.set(text, embedBudgetUnits(text));
+    expect(prefixCountWithinEmbedUnits(texts, 1, undefined, precomputed)).toBe(
+      prefixCountWithinEmbedUnits(texts, 1)
+    );
+    // A partial map must still compute the texts it does not carry.
+    const partial = new Map([[big, precomputed.get(big)!]]);
+    expect(prefixCountWithinEmbedUnits(texts, 1, undefined, partial)).toBe(
+      prefixCountWithinEmbedUnits(texts, 1)
+    );
   });
 
   it("packs a 32-text batch that summed to 8192 so no request reaches 8193", () => {
@@ -196,9 +240,10 @@ describe("storeContexts embed window (ingest)", () => {
     const tableInputs = mocks.embed.mock.calls
       .flatMap((call) => call[0].input as string[])
       .filter((text) => text.includes("D".repeat(40)));
-    expect(tableInputs).toHaveLength(1);
-    expect(tableInputs[0]).toContain("[Published: 2026-08-18]");
-    expect(tableInputs[0]?.includes(giant)).toBe(true);
+    expect(tableInputs.length).toBeGreaterThan(0);
+    const posted = mocks.embed.mock.calls.flatMap((call) => call[0].input as string[]);
+    expect(posted.some((text) => text.includes("[Published: 2026-08-18]"))).toBe(true);
+    for (const text of posted) expect(embedRequestFits([text])).toBe(true);
     const thrown400 = mocks.embed.mock.results.some((entry) => (
       entry.type === "throw" && String(entry.value).includes("input_tokens")
     ));
@@ -242,24 +287,89 @@ describe("storeContexts embed window (ingest)", () => {
 
     const result = await storeContexts(documents);
 
-    expect(result.indexed).toBe(31);
-    expect(result.rejectedInvalidEmbeddings).toBe(1);
-    expect(mocks.upsert.mock.calls.reduce((sum, call) => sum + call[0].records.length, 0)).toBe(31);
-    const companionEmbeds = mocks.embed.mock.calls.filter((call) => {
+    expect(result.indexed).toBe(32);
+    expect(result.rejectedInvalidEmbeddings ?? 0).toBe(0);
+    expect(mocks.upsert.mock.calls.reduce((sum, call) => sum + call[0].records.length, 0)).toBe(32);
+    const giantPosts = mocks.embed.mock.calls.filter((call) => {
       const input = call[0].input as string[];
-      return input.every((text) => !text.includes("E".repeat(40)));
+      return input.some((text) => text.includes("E".repeat(40)));
     });
-    expect(companionEmbeds.length).toBeGreaterThan(0);
-    for (const call of companionEmbeds) {
+    expect(giantPosts.length).toBeGreaterThan(0);
+    for (const call of mocks.embed.mock.calls) {
       const input = call[0].input as string[];
-      expect(approxTokens(input)).toBeLessThanOrEqual(EMBED_REQUEST_TOKEN_BUDGET);
       expect(embedRequestFits(input)).toBe(true);
+      expect(approxTokens(input)).toBeLessThan(EMBED_MODEL_CONTEXT_TOKENS);
     }
-    const isolatedGiant = mocks.embed.mock.calls.some((call) => {
-      const input = call[0].input as string[];
-      return input.length === 1 && input[0]?.includes("E".repeat(40));
+    const thrown400 = mocks.embed.mock.results.some((entry) => (
+      entry.type === "throw" && String(entry.value).includes("value=8193")
+    ));
+    expect(thrown400).toBe(false);
+  });
+});
+
+describe("context-length shrink", () => {
+  it("splits a multi-text group that 400s instead of posting the same batch again", async () => {
+    const multiThrows: string[][] = [];
+    mocks.embed.mockImplementation(async ({ input }: { input: string[] }) => {
+      if (input.length > 1) {
+        multiThrows.push(input);
+        throw new Error(LIVE_400_BODY);
+      }
+      return { data: input.map(() => ({ embedding: [0.11, 0.22, 0.33] })) };
     });
-    expect(isolatedGiant).toBe(true);
+
+    const { storeContexts } = await import("../src/lib/vector-db");
+    const result = await storeContexts([
+      {
+        text: "first short filing paragraph",
+        metadata: { symbol: "AAPL", source: "sec-8k", timestamp: "2026-08-18", accession: "split-a" }
+      },
+      {
+        text: "second short filing paragraph",
+        metadata: { symbol: "AAPL", source: "sec-8k", timestamp: "2026-08-18", accession: "split-b" }
+      }
+    ]);
+
+    expect(result.indexed).toBe(2);
+    expect(result.rejectedInvalidEmbeddings ?? 0).toBe(0);
+    expect(multiThrows).toHaveLength(1);
+    expect(multiThrows[0]).toHaveLength(2);
+    const singletonPosts = mocks.embed.mock.calls.filter((call) => (call[0].input as string[]).length === 1);
+    expect(singletonPosts.length).toBe(2);
+    expect(mocks.upsert.mock.calls.reduce((sum, call) => sum + call[0].records.length, 0)).toBe(2);
+  });
+
+  it("truncates a singleton once when the provider still reports context length", async () => {
+    const posted: string[][] = [];
+    mocks.embed.mockImplementation(async ({ input }: { input: string[] }) => {
+      posted.push(input);
+      if (posted.length === 1) throw new Error(LIVE_400_BODY);
+      return { data: input.map(() => ({ embedding: [0.11, 0.22, 0.33] })) };
+    });
+
+    process.env.VECTOR_CONTEXT_MAX_CHARS = "16000";
+    const { storeContexts } = await import("../src/lib/vector-db");
+    // Over the half-budget byte cap (9375) and under the full cap (18750), so the
+    // singleton retry has to shorten the string.  The default 2400 char cap would
+    // already sit under that half budget and make the retry a no-op.
+    const original = textOfTokens(2500, "G");
+    const result = await storeContexts([
+      {
+        text: original,
+        metadata: {
+          symbol: "AAPL",
+          source: "sec-8k",
+          timestamp: "2026-08-18",
+          accession: "shrink-one",
+          is_table: true
+        }
+      }
+    ]);
+
+    expect(result.indexed).toBe(1);
+    expect(posted).toHaveLength(2);
+    expect(posted[1]![0]!.length).toBeLessThan(posted[0]![0]!.length);
+    expect(embedRequestFits(posted[1]!)).toBe(true);
   });
 });
 

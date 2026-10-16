@@ -98,8 +98,10 @@ import {
   alpacaAccountReadBudgetMs,
   awaitWithFirstCallRetry,
   ALPACA_BROKER_IO_DEADLINE_MS,
+  BROKER_ORDER_PAGE_CAP,
   EQUITY_QUOTES_MS,
   equityOrdersDefaultSinceIso,
+  rejectIfAborted,
   withDeadline
 } from "./inflight-deadline";
 
@@ -373,7 +375,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
     const attempts = opts?.retryTransient === false ? 1 : 2;
     let lastErr: unknown;
     const runOnce = () => {
-      const call = fn();
+      const call = rejectIfAborted(fn(), opts?.signal);
       return opts?.deadlineMs != null
         ? withDeadline(call, opts.deadlineMs, "Alpaca broker call timed out")
         : call;
@@ -771,7 +773,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
     const seen = new Set<string>();
     const PAGE = 500;
     let until: string | undefined = params.until;
-    for (let guard = 0; guard < 50; guard++) {
+    for (let guard = 0; guard < BROKER_ORDER_PAGE_CAP; guard++) {
       const { firstMs, retryMs } = alpacaAccountReadBudgetMs();
       const page = (await awaitWithFirstCallRetry(
         ({ signal }) => this.trackHealth(() => this.alpaca.getOrders({

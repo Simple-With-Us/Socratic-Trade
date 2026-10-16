@@ -694,6 +694,17 @@ struct StoreTransientAlerts: ViewModifier {
             } message: {
                 Text(store.successMessage ?? "")
             }
+            .alert(
+                store.moneyActionResult?.title ?? "Result",
+                isPresented: Binding(
+                    get: { store.moneyActionResult != nil },
+                    set: { if !$0 { store.dismissMoneyActionResult() } }
+                )
+            ) {
+                Button("OK") { store.dismissMoneyActionResult() }
+            } message: {
+                Text(store.moneyActionResult?.message ?? "")
+            }
     }
 }
 

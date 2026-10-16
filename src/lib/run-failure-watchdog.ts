@@ -205,6 +205,23 @@ function streaksStartedAfter(
   }
 }
 
+/** Latest `policy_change` row for an account (halt and re-arm both write this kind). */
+function latestPolicyChangeCreatedAt(userId: string, accountId: string): string | null {
+  try {
+    const row = getDb()
+      .prepare(
+        `SELECT created_at FROM audit_events
+         WHERE user_id = ? AND connected_account_id = ? AND kind = 'policy_change'
+         ORDER BY created_at DESC LIMIT 1`
+      )
+      .get(userId, accountId) as { created_at: string } | undefined;
+    if (!row?.created_at || !Number.isFinite(Date.parse(row.created_at))) return null;
+    return row.created_at;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * When the owner set the account active again.  Prefer the audit receipt (console
  * `policy_change` or ops `set_system_state`) so a run that started in the gap between
@@ -283,8 +300,13 @@ async function haltAccountForRunFailures(
     (label ? ` on ${label}` : "") +
     ` (auto-halted by the run-failure watchdog; re-arm from the console)`;
   setPolicy({ ...policy, systemState: "halted" }, userId, accountId);
+  // Anchor the post-halt window on the halt `policy_change` receipt, not the tick's
+  // `now` captured at entry.  A gap let `resolveRearmTimestamp` treat an older
+  // still-active policy_change as the re-arm and disagree with the latest receipt
+  // (flaky test/run-failure-watchdog.test.ts re-arm assertion; ST-4521).
+  const since = latestPolicyChangeCreatedAt(userId, accountId) ?? new Date().toISOString();
   const marker: RunFailureHaltMarker = {
-    since: new Date(now).toISOString(),
+    since,
     reason,
     consecutiveFailures: streak,
     autoResume: false,

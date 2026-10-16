@@ -135,6 +135,7 @@ enum ProposalActionFeedback: Equatable {
     case sending(action: ProposalAction)
     case pending(action: ProposalAction, status: String)
     case failed(action: ProposalAction, message: String)
+    case retryable(action: ProposalAction, message: String)
     case succeeded(action: ProposalAction)
     case placementSettled(action: ProposalAction, status: String, reasons: [String]?)
 
@@ -145,8 +146,8 @@ enum ProposalActionFeedback: Equatable {
 
     var action: ProposalAction {
         switch self {
-        case .sending(let action), .pending(let action, _), .failed(let action, _), .succeeded(let action),
-             .placementSettled(let action, _, _):
+        case .sending(let action), .pending(let action, _), .failed(let action, _), .retryable(let action, _),
+             .succeeded(let action), .placementSettled(let action, _, _):
             return action
         }
     }
@@ -154,7 +155,7 @@ enum ProposalActionFeedback: Equatable {
     var isInFlight: Bool {
         switch self {
         case .sending, .pending: return true
-        case .failed, .succeeded, .placementSettled: return false
+        case .failed, .retryable, .succeeded, .placementSettled: return false
         }
     }
 
@@ -165,8 +166,261 @@ enum ProposalActionFeedback: Equatable {
         case .placementSettled(let action, let status, _):
             guard action == .approve else { return true }
             return status == "filled" || status == "placed" || status == "paper"
-        default:
+        case .sending, .pending, .failed, .retryable:
             return false
+        }
+    }
+}
+
+/// Approve, reject, and cancel each end as success, a terminal failure, or a retry.
+enum MoneyAction: String, Equatable {
+    case approve
+    case reject
+    case cancel
+
+    init?(commandType: String) {
+        switch commandType {
+        case "proposal.approve": self = .approve
+        case "proposal.reject": self = .reject
+        case "order.cancel": self = .cancel
+        default: return nil
+        }
+    }
+}
+
+enum MoneyActionResultKind: String, Equatable {
+    case success
+    case failed
+    case retryable
+}
+
+struct MoneyActionResult: Equatable, Identifiable {
+    let action: MoneyAction
+    let kind: MoneyActionResultKind
+    let message: String
+    /// Approve and reject results belong to one proposal.  A later result for a
+    /// different proposal must not repaint this card.
+    let proposalId: String?
+
+    init(action: MoneyAction, kind: MoneyActionResultKind, message: String, proposalId: String? = nil) {
+        self.action = action
+        self.kind = kind
+        self.message = message
+        self.proposalId = proposalId
+    }
+
+    var id: String { "\(action.rawValue)|\(kind.rawValue)|\(proposalId ?? "")|\(message)" }
+
+    func matches(_ action: ProposalActionFeedback.ProposalAction, proposalId: String) -> Bool {
+        guard self.proposalId == proposalId else { return false }
+        switch (self.action, action) {
+        case (.approve, .approve), (.reject, .reject):
+            return true
+        case (.cancel, _), (.approve, .reject), (.reject, .approve):
+            return false
+        }
+    }
+
+    func scoped(to proposalId: String?) -> MoneyActionResult {
+        MoneyActionResult(action: action, kind: kind, message: message, proposalId: proposalId)
+    }
+
+    var title: String {
+        switch (action, kind) {
+        case (.approve, .success): return "Approved"
+        case (.reject, .success): return "Rejected"
+        case (.cancel, .success): return "Order Cancelled"
+        case (.approve, .failed): return "Approve Failed"
+        case (.reject, .failed): return "Reject Failed"
+        case (.cancel, .failed): return "Cancel Failed"
+        case (.approve, .retryable): return "Try Approve Again"
+        case (.reject, .retryable): return "Try Reject Again"
+        case (.cancel, .retryable): return "Try Cancel Again"
+        }
+    }
+
+    /// Classifies a finished mobile command.  Approve reads `result` even when the
+    /// row status is `succeeded`, because a busy or not-placed placement can still
+    /// land on a succeeded row.  Reject's `rejected` result is success.
+    static func classify(command: MobileCommand) -> MoneyActionResult? {
+        guard let action = MoneyAction(commandType: command.commandType) else { return nil }
+        let detail = combinedDetail(command)
+        if action == .approve, let status = command.result?.status, !status.isEmpty {
+            return approveResult(
+                status: status,
+                outcome: command.result?.outcome,
+                reasons: command.result?.reasons,
+                detail: detail
+            )
+        }
+        switch command.status {
+        case "succeeded":
+            return MoneyActionResult(action: action, kind: .success, message: successCopy(action))
+        case "failed", "cancelled":
+            return terminalFailure(action: action, command: command, detail: detail)
+        default:
+            return nil
+        }
+    }
+
+    /// A submit that never returned a command row.  Session expiry stays on the
+    /// sign-in path and does not become a money-action result.
+    static func classify(commandType: String, transportError: Error) -> MoneyActionResult? {
+        guard let action = MoneyAction(commandType: commandType) else { return nil }
+        if let apiError = transportError as? MobileAPIError, case .unauthorized = apiError {
+            return nil
+        }
+        let raw = (transportError as? LocalizedError)?.errorDescription ?? transportError.localizedDescription
+        let message = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = message.isEmpty ? retryableCopy(action) : message
+        if isTerminalRefusal(text) {
+            return MoneyActionResult(action: action, kind: .failed, message: text)
+        }
+        if isTransportRetry(transportError) || isRetryableSignal(status: nil, outcome: nil, message: text) {
+            return MoneyActionResult(action: action, kind: .retryable, message: text)
+        }
+        return MoneyActionResult(action: action, kind: .failed, message: text)
+    }
+
+    private static func approveResult(
+        status: String,
+        outcome: String?,
+        reasons: [String]?,
+        detail: String
+    ) -> MoneyActionResult {
+        let message = AppFormat.placementApproveMessage(status: status, reasons: reasons)
+        switch status {
+        case "filled", "placed", "paper":
+            return MoneyActionResult(action: .approve, kind: .success, message: message)
+        case "busy", "not_placed":
+            return MoneyActionResult(action: .approve, kind: .retryable, message: message)
+        default:
+            if isRetryableSignal(status: status, outcome: outcome, message: detail), !isTerminalRefusal(detail) {
+                return MoneyActionResult(action: .approve, kind: .retryable, message: message)
+            }
+            return MoneyActionResult(action: .approve, kind: .failed, message: message)
+        }
+    }
+
+    private static func terminalFailure(
+        action: MoneyAction,
+        command: MobileCommand,
+        detail: String
+    ) -> MoneyActionResult {
+        if isTerminalRefusal(detail) {
+            return MoneyActionResult(action: action, kind: .failed, message: nonempty(detail, failedCopy(action)))
+        }
+        if isRetryableSignal(status: command.result?.status, outcome: command.result?.outcome, message: detail) {
+            return MoneyActionResult(action: action, kind: .retryable, message: nonempty(detail, retryableCopy(action)))
+        }
+        let fallback = command.status == "cancelled" ? "The queued action was cancelled." : failedCopy(action)
+        return MoneyActionResult(action: action, kind: .failed, message: nonempty(detail, fallback))
+    }
+
+    private static func combinedDetail(_ command: MobileCommand) -> String {
+        let reasons = command.result?.reasons?
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let error = command.error?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return [reasons, error].filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    private static func nonempty(_ detail: String, _ fallback: String) -> String {
+        detail.isEmpty ? fallback : detail
+    }
+
+    private static func isTransportRetry(_ error: Error) -> Bool {
+        guard let apiError = error as? MobileAPIError else { return false }
+        switch apiError {
+        case .network, .decoding:
+            return true
+        case .serverError(let statusCode, _):
+            return statusCode == 408 || statusCode == 429 || statusCode >= 500
+        case .scanQuotesUnavailable, .unauthorized:
+            return false
+        }
+    }
+
+    private static func isTerminalRefusal(_ message: String) -> Bool {
+        let text = message.lowercased()
+        let needles = [
+            "different account",
+            "no longer working",
+            "not open",
+            "nothing left to cancel",
+            "not found",
+            "blocked at approval",
+            "buying power"
+        ]
+        return needles.contains { text.contains($0) }
+    }
+
+    private static func isRetryableSignal(status: String?, outcome: String?, message: String) -> Bool {
+        switch status?.lowercased() {
+        case "busy", "not_placed":
+            return true
+        default:
+            break
+        }
+        switch outcome?.lowercased() {
+        case "busy", "retryable":
+            return true
+        default:
+            break
+        }
+        let text = message.lowercased()
+        let needles = [
+            "safe to retry",
+            "try again",
+            "timed out",
+            "timeout",
+            "rate-limited",
+            "rate limited",
+            "http 429",
+            "http 408",
+            "http 502",
+            "http 503",
+            "mutation lease",
+            "uncertain",
+            "never reached the broker",
+            "couldn't reach",
+            "couldn’t reach",
+            "check your connection",
+            "server is slow"
+        ]
+        return needles.contains { text.contains($0) }
+    }
+
+    private static func successCopy(_ action: MoneyAction) -> String {
+        switch action {
+        case .approve:
+            return "Approved.  Waiting for the desk to refresh."
+        case .reject:
+            return "Rejected.  Waiting for the desk to refresh."
+        case .cancel:
+            return "Order cancelled.  Waiting for the desk to refresh."
+        }
+    }
+
+    private static func failedCopy(_ action: MoneyAction) -> String {
+        switch action {
+        case .approve:
+            return "Approve did not place an order."
+        case .reject:
+            return "Reject did not go through."
+        case .cancel:
+            return "That order could not be cancelled."
+        }
+    }
+
+    private static func retryableCopy(_ action: MoneyAction) -> String {
+        switch action {
+        case .approve:
+            return "Approve did not finish.  Try again."
+        case .reject:
+            return "Reject did not finish.  Try again."
+        case .cancel:
+            return "Cancel did not finish.  Try again."
         }
     }
 }
@@ -176,6 +430,10 @@ final class MobileStore: ObservableObject {
     @Published private(set) var snapshot: MobileSnapshot?
     @Published var error: String?
     @Published var successMessage: String?
+    /// Latest approve, reject, or cancel result.  Load does not clear it.
+    @Published private(set) var moneyActionResult: MoneyActionResult?
+    /// Bumps when account-scoped caches are dropped, so SwiftUI view state rebuilds.
+    @Published private(set) var sessionEpoch = 0
     @Published private(set) var isAuthenticated = false
     @Published private(set) var hasInitialized = false
     @Published private(set) var isRefreshing = false
@@ -287,6 +545,9 @@ final class MobileStore: ObservableObject {
             return .sending(action: .reject)
         }
         if let notice = proposalNotices[proposalId] {
+            if let result = moneyActionResult, result.matches(notice.action, proposalId: proposalId) {
+                return proposalFeedback(from: result, command: nil)
+            }
             return .failed(action: notice.action, message: notice.message)
         }
         guard
@@ -301,8 +562,8 @@ final class MobileStore: ObservableObject {
         case "queued", "running":
             return .pending(action: action, status: command.status)
         case "failed":
-            if action == .approve, let result = command.result {
-                return approvePlacementFeedback(action: action, result: result, fallback: command.error)
+            if let result = MoneyActionResult.classify(command: command) {
+                return proposalFeedback(from: result, command: command)
             }
             let detail = command.error?.trimmingCharacters(in: .whitespacesAndNewlines)
             let message = (detail?.isEmpty == false)
@@ -310,8 +571,9 @@ final class MobileStore: ObservableObject {
                 : "Command failed — check Activity for details."
             return .failed(action: action, message: message)
         case "succeeded":
-            if action == .approve, let result = command.result {
-                return approvePlacementFeedback(action: action, result: result, fallback: nil)
+            if action == .approve, command.result != nil,
+               let result = MoneyActionResult.classify(command: command) {
+                return proposalFeedback(from: result, command: command)
             }
             return .succeeded(action: action)
         default:
@@ -336,18 +598,65 @@ final class MobileStore: ObservableObject {
         return folded
     }
 
-    private func approvePlacementFeedback(
-        action: ProposalActionFeedback.ProposalAction,
-        result: MobileCommandResult,
-        fallback: String?
+    private func proposalFeedback(
+        from result: MoneyActionResult,
+        command: MobileCommand?
     ) -> ProposalActionFeedback {
-        let status = result.status ?? "error"
-        let reasons = result.reasons
-        if let fallback = fallback?.trimmingCharacters(in: .whitespacesAndNewlines), !fallback.isEmpty,
-           reasons?.isEmpty != false {
-            return .placementSettled(action: action, status: status, reasons: [fallback])
+        let action: ProposalActionFeedback.ProposalAction = result.action == .reject ? .reject : .approve
+        switch result.kind {
+        case .success:
+            if result.action == .approve, let status = command?.result?.status, !status.isEmpty {
+                return .placementSettled(action: action, status: status, reasons: command?.result?.reasons)
+            }
+            return .succeeded(action: action)
+        case .failed:
+            return .failed(action: action, message: result.message)
+        case .retryable:
+            return .retryable(action: action, message: result.message)
         }
-        return .placementSettled(action: action, status: status, reasons: reasons)
+    }
+
+    func dismissMoneyActionResult() {
+        moneyActionResult = nil
+    }
+
+    /// XCTest seam and the reconcile path.  Sets the alert result for approve, reject, and cancel.
+    func recordResolvedCommand(_ command: MobileCommand) {
+        guard let result = MoneyActionResult.classify(command: command) else { return }
+        let proposalId = proposalCommandIds.first(where: { $0.value == command.id })?.key
+        moneyActionResult = result.scoped(to: proposalId)
+    }
+
+    /// XCTest seam.  Submit writes the same notice when an approve or reject fails.
+    func stageProposalNotice(
+        proposalId: String,
+        action: ProposalActionFeedback.ProposalAction,
+        message: String
+    ) {
+        proposalNotices[proposalId] = (message: message, action: action)
+    }
+
+    /// XCTest seam.  Marks an operation busy the way `submit` does before the broker returns.
+    func armBusyOperation(_ operationID: String) {
+        busyOperations.insert(operationID)
+    }
+
+    /// The account-switch cache wipe drops the attempt tracker, so reconcile can no
+    /// longer see the activate command and its operation id stays busy forever.
+    /// Re-seed that one attempt and let reconcile release it.
+    func finishAccountSwitch(_ command: MobileCommand, operationID: String, payload: [String: Any]) {
+        _ = commandAttemptTracker.idempotencyKey(
+            operationID: operationID,
+            commandType: command.commandType,
+            payload: payload
+        )
+        commandAttemptTracker.track(command, operationID: operationID)
+        busyOperations.insert(operationID)
+        reconcileTrackedCommands([command])
+    }
+
+    func stagePendingAccountSwitch(_ accountId: String) {
+        pendingAccountId = accountId
     }
 
     func isSnapshotStale(at now: Date = Date()) -> Bool {
@@ -559,7 +868,7 @@ final class MobileStore: ObservableObject {
         )
         busyOperations.insert(operationID)
         if commandType == "account.activate", let accountId = payload["accountId"] as? String {
-            pendingAccountId = accountId
+            stagePendingAccountSwitch(accountId)
         }
         let proposalId = payload["proposalId"] as? String
         let proposalAction: ProposalActionFeedback.ProposalAction? = {
@@ -592,13 +901,14 @@ final class MobileStore: ObservableObject {
                     pendingAccountId = nil
                     reconcileTrackedCommands([command])
                 } else {
+                    clearAccountScopedCachesForAccountSwitch()
                     await load()
                     if let pending = pendingAccountId,
                        snapshot?.readiness.activeConnectedAccount?.id != pending,
                        snapshot?.connectedAccounts.first(where: { $0.id == pending })?.isActive != true {
                         error = "Switched accounts.  Waiting for the new portfolio to load."
                     }
-                    reconcileTrackedCommands([command])
+                    finishAccountSwitch(command, operationID: operationID, payload: payload)
                 }
             } else {
                 if commandType.hasPrefix("proposal.") {
@@ -610,7 +920,8 @@ final class MobileStore: ObservableObject {
                 await load()
                 reconcileTrackedCommands([command])
             }
-            if command.didFail, let proposalId, let proposalAction {
+            if command.didFail, let proposalId, let proposalAction,
+               MoneyActionResult.classify(command: command) == nil {
                 let detail = command.error?.trimmingCharacters(in: .whitespacesAndNewlines)
                 proposalNotices[proposalId] = (
                     message: (detail?.isEmpty == false)
@@ -632,6 +943,17 @@ final class MobileStore: ObservableObject {
             // Network/decoding errors keep the idempotency key for an explicit retry, but they do
             // not leave the control visually locked when no command id was confirmed.
             busyOperations.remove(operationID)
+            if let apiError = caught as? MobileAPIError, case .unauthorized = apiError {
+                applyAuthAwareError(caught)
+                return false
+            }
+            if let result = MoneyActionResult.classify(commandType: commandType, transportError: caught) {
+                moneyActionResult = result.scoped(to: proposalId)
+                if let proposalId, let proposalAction {
+                    proposalNotices[proposalId] = (message: result.message, action: proposalAction)
+                }
+                return false
+            }
             if let proposalId, let proposalAction {
                 proposalNotices[proposalId] = (
                     message: caught.localizedDescription,
@@ -819,13 +1141,20 @@ final class MobileStore: ObservableObject {
         await PushNotificationCoordinator.shared.registerIfAlreadyAuthorized()
     }
 
-    /// Explicit sign-out.  Account-scoped UI is cleared immediately so the previous portfolio
-    /// cannot flash while the authenticated push delete is in flight.  Session cookies stay
-    /// until that delete finishes — `clearPersistedSessionCredentials` runs last.
+    /// Explicit sign-out.  The portfolio, snapshot cache, and URL cache drop immediately.
+    /// Session cookies stay until the authenticated push delete finishes.
     func signOut() async {
-        clearAccountScopedUIState()
+        stopEvents()
+        clearPresentedAccountState()
+        busyOperations = []
+        pendingAccountId = nil
+        isRefreshing = false
+        isAuthenticated = false
+        hasInitialized = true
+        removeAccountScopedPersistence()
+        sessionEpoch &+= 1
         await PushNotificationCoordinator.shared.signOutAndForgetToken()
-        clearPersistedSessionCredentials()
+        clearSessionCookies()
     }
 
     func clearLocalSession() {
@@ -838,38 +1167,64 @@ final class MobileStore: ObservableObject {
         proposalCommandIds[proposalId] = commandId
     }
 
+    /// Drops the previous account's caches and in-memory stores without ending the session.
+    /// Cookies, the pending account id, and the in-flight switch spinner stay.
+    func clearAccountScopedCachesForAccountSwitch() {
+        clearPresentedAccountState()
+        isRefreshing = true
+        sessionEpoch &+= 1
+        removeAccountScopedPersistence()
+    }
+
     /// In-memory account state only — leaves cookies and the disk snapshot row intact so an
-    /// authenticated push delete can still run after sign-out begins.
+    /// authenticated push delete can still run after sign-out begins.  A session that merely
+    /// expires also comes through here, and that path cannot send the delete.
     func clearAccountScopedUIState() {
         stopEvents()
-        // Also reached when a session simply expires, where no authenticated delete is
-        // possible — drop the local belief that this device is registered.
         PushNotificationCoordinator.shared.forgetTokenLocally()
+        clearPresentedAccountState()
+        busyOperations = []
+        pendingAccountId = nil
+        isRefreshing = false
+        isAuthenticated = false
+        hasInitialized = true
+    }
+
+    private func clearPresentedAccountState() {
         loadGeneration &+= 1
         snapshot = nil
         lastUpdatedAt = nil
         snapshotLoadFailed = false
         partialData = false
         deletionRequest = nil
-        busyOperations = []
-        pendingAccountId = nil
         proposalCommandIds = [:]
         proposalNotices = [:]
         commandAttemptTracker.removeAll()
-        isRefreshing = false
-        isAuthenticated = false
-        hasInitialized = true
         error = nil
         successMessage = nil
+        moneyActionResult = nil
     }
 
     private func clearPersistedSessionCredentials() {
-        for cookie in HTTPCookieStorage.shared.cookies ?? [] where client.ownsCookie(cookie) {
-            HTTPCookieStorage.shared.deleteCookie(cookie)
+        clearSessionCookies()
+        removeAccountScopedPersistence()
+        sessionEpoch &+= 1
+    }
+
+    private func clearSessionCookies() {
+        let cookieStorage = client.session.configuration.httpCookieStorage ?? HTTPCookieStorage.shared
+        for cookie in cookieStorage.cookies ?? [] where client.ownsCookie(cookie) {
+            cookieStorage.deleteCookie(cookie)
         }
-        // Remove the UserDefaults blob so a cold launch after sign-out does not re-read it
+    }
+
+    /// UserDefaults snapshot plus every URL cache this client can read back.
+    /// Device preferences (tab layout, Coach model) are not account data and stay.
+    private func removeAccountScopedPersistence() {
         UserDefaults.standard.removeObject(forKey: Self.cacheKey)
         UserDefaults.standard.removeObject(forKey: Self.cacheTimestampKey)
+        URLCache.shared.removeAllCachedResponses()
+        client.session.configuration.urlCache?.removeAllCachedResponses()
     }
 
     private func scheduleReload() {
@@ -894,9 +1249,8 @@ final class MobileStore: ObservableObject {
             busyOperations.remove(resolution.operationID)
             if let commandID = resolution.commandID,
                let command = foldedCommand(id: commandID, in: commands),
-               command.commandType == "proposal.approve",
-               let result = command.result {
-                surfacePlacementOutcome(from: result)
+               MoneyActionResult.classify(command: command) != nil {
+                recordResolvedCommand(command)
                 continue
             }
             if resolution.status == "succeeded",
@@ -922,17 +1276,6 @@ final class MobileStore: ObservableObject {
             folded = MobileCommand.foldDuplicate(existing: current, incoming: command)
         }
         return folded
-    }
-
-    private func surfacePlacementOutcome(from result: MobileCommandResult) {
-        let status = result.status ?? "error"
-        let message = AppFormat.placementApproveMessage(status: status, reasons: result.reasons)
-        switch status {
-        case "filled", "placed", "paper":
-            successMessage = message
-        default:
-            error = message
-        }
     }
 
     private func fetchSnapshotWithNetworkRetry(

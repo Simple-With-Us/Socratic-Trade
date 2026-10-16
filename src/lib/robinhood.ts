@@ -21,7 +21,8 @@ import { logApiHealth } from "./db-health";
 import { normalizeSymbol } from "./money";
 import { mergeAccountCapabilities } from "./venue-contract";
 import { normalizeVenueOrder } from "./venue-normalization";
-import { isShortIntent } from "./broker-side";
+import { isLiveOrderState, isShortIntent } from "./broker-side";
+import { brokerAbortSignal, scopeBrokerOrders } from "./inflight-deadline";
 import { getOpenLots, getPerformanceSummary } from "./performance";
 import { fetchYahooFinanceQuote, fetchYahooFinanceQuotesBatch } from "./yahoo-finance";
 import { messageFromUnknownError, recordRecoverableIssue } from "./recoverable-issue";
@@ -429,10 +430,10 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
     }).filter((p) => p.underlyingSymbol && p.expirationDate && p.quantity !== 0);
   }
 
-  async getEquityOrders(accountNumber: string, _options?: import("./types").GetEquityOrdersOptions): Promise<EquityOrder[]> {
+  async getEquityOrders(accountNumber: string, options?: import("./types").GetEquityOrdersOptions): Promise<EquityOrder[]> {
     const raw = await this.callTool("get_equity_orders", { account_number: accountNumber });
     const orders = extractRobinhoodOrderCollection(raw);
-    return orders.map((item: Record<string, unknown>) => ({
+    const mapped = orders.map((item: Record<string, unknown>) => ({
       id: String(item.id ?? item.order_id),
       symbol: normalizeSymbol(String(item.symbol)),
       side: item.side as OrderSide,
@@ -451,6 +452,7 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
       clientOrderId: optionalString(item.ref_id ?? item.client_order_id ?? item.clientOrderId),
       placedAgent: optionalString(item.placed_agent ?? item.placedAgent)
     }));
+    return scopeBrokerOrders(mapped, options, (state) => isLiveOrderState(state));
   }
 
   async getEquityQuotes(accountNumber: string, symbols: string[]): Promise<Record<string, BrokerQuote>> {
@@ -648,7 +650,7 @@ export async function callRobinhoodMcpMethod(userId: string, method: string, par
     method: "POST",
     // Bound every Robinhood MCP call (incl. place_equity_order) so a hung connection can't block
     // the order path / strategy run indefinitely.
-    signal: AbortSignal.timeout(30_000),
+    signal: brokerAbortSignal(),
     headers: {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
