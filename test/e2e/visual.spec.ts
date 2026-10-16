@@ -245,6 +245,45 @@ test.describe("visual regression", () => {
     await assertStableScreenshot(page, "header-account-dropdown.png", liveMasks(page));
   });
 
+  test("console header notifications dropdown", async ({ page }) => {
+    await setupDeterministicPage(page);
+    await page.goto("/console", { waitUntil: "domcontentloaded" });
+    await expect(page.getByText("Socratic Trade").first()).toBeVisible({
+      timeout: 30_000,
+    });
+    await acceptConsentIfShown(page);
+    await expect(page.getByText("Portfolio").first()).toBeVisible();
+    await acceptConsentIfShown(page, 5_000);
+
+    await page.getByRole("button", { name: /^Notifications/ }).click();
+    await expect(
+      page.getByRole("dialog", { name: "Notifications" }),
+    ).toBeVisible();
+
+    await assertStableScreenshot(page, "header-notifications-dropdown.png", [
+      ...liveMasks(page),
+      page.locator(".con-badge"),
+    ]);
+  });
+
+  test("console header profile menu", async ({ page }) => {
+    await setupDeterministicPage(page);
+    await page.goto("/console", { waitUntil: "domcontentloaded" });
+    await expect(page.getByText("Socratic Trade").first()).toBeVisible({
+      timeout: 30_000,
+    });
+    await acceptConsentIfShown(page);
+    await expect(page.getByText("Portfolio").first()).toBeVisible();
+    await acceptConsentIfShown(page, 5_000);
+
+    const trigger = page.locator('button[aria-haspopup="menu"]');
+    test.skip((await trigger.count()) === 0, "no signed-in identity in this environment");
+    await trigger.first().click();
+    await expect(page.locator(".con-menu-drop").last()).toBeVisible();
+
+    await assertStableScreenshot(page, "header-profile-menu.png", liveMasks(page));
+  });
+
   test("login page", async ({ page }) => {
     await setupDeterministicPage(page);
     await page.goto("/login", { waitUntil: "domcontentloaded" });
