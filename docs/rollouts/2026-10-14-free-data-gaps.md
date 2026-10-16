@@ -178,7 +178,7 @@ npm test
 npm run build
 ```
 
-`npx tsc --noEmit` pass.  `npm test` fail in this shell: 13 failed, 9400 passed, 51 skipped, 835 files, 1249.97s.  All 13 failures are in `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/framework-review.test.ts`, and `test/openrouter-credits.test.ts`.  They assert "no LLM key configured" while this sandbox exports an `OPENROUTER_API_KEY` (`sk-cp-...`), so the resolver returns OpenRouter instead of the expected native endpoint.  Baseline proof: the same 4 files were run against pristine `origin/main` in a separate worktree and reproduced exactly 13 failed / 47 passed, matching the branch run.  None of the 4 files is in the PR diff, so the PR introduces zero test regressions.  Earlier passes recorded a different environmental pair (`test/egress-guard.test.ts`, `test/data-catalog-completeness.test.ts`); those are sandbox-resolution and local-database artifacts and also absent from the diff.  `npm run build` pass (compiled, finished TypeScript, 43/43 static pages).  `npm run lint` was not re-run in this shell; hosted `verify` is the merge gate.
+`npx tsc --noEmit` pass.  `npm test` fail in this shell: 13 failed, 9400 passed, 51 skipped, 835 files, 1249.97s.  All 13 failures are in `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/framework-review.test.ts`, and `test/openrouter-credits.test.ts`.  They assert "no LLM key configured" while this sandbox exports an `OPENROUTER_API_KEY` (value redacted), so the resolver returns OpenRouter instead of the expected native endpoint.  Baseline proof: the same 4 files were run against pristine `origin/main` in a separate worktree and reproduced exactly 13 failed / 47 passed, matching the branch run.  None of the 4 files is in the PR diff, so the PR introduces zero test regressions.  Earlier passes recorded a different environmental pair (`test/egress-guard.test.ts`, `test/data-catalog-completeness.test.ts`); those are sandbox-resolution and local-database artifacts and also absent from the diff.  `npm run build` pass (compiled, finished TypeScript, 43/43 static pages).  `npm run lint` was not re-run in this shell; hosted `verify` is the merge gate.
 
 Follow-up merge `origin/main` at `2075c857` (PR #4696 ST-4531 Slack retirement) with no conflicts.  GitHub had gone `DIRTY` again until this tip was on the branch.
 
@@ -236,3 +236,15 @@ branch.  It is PR #4685 (merged as `174cc06eb`), and no board reservation was
 ever filed for it, so both entries now read `PR #4685` plus
 `no board reservation on file` instead of inventing a board id.  `PLAN.md` also
 carried that entry twice; the duplicate was removed.
+
+2026-10-16 CLAUDE (autofix), third round.  Kody's re-review confirmed the two
+open threads as addressed with no further code change — the `.passthrough()`
+rationale (the rule's justified-passthrough limb, not an omission) and the
+`PLAN.md` Tradier entry naming PR #4685.  It surfaced one genuinely new item,
+the same defect class fixed in `STATUS.md` last round: the verification block
+above still printed the literal `OPENROUTER_API_KEY` prefix.  It now reads
+`(value redacted)`, matching `STATUS.md:73` and removing the inconsistency with
+the follow-up section below.  Full-repo search for `sk-cp` returns zero hits.
+This branch is squash-merged per protocol, so the intermediate commits that
+carried the prefix collapse away; under a history-preserving merge the prefix
+would stay reachable and the key should be rotated.
