@@ -1,4 +1,4 @@
-// Flat ESLint config (ESLint 9 + eslint-config-next 16).
+// Flat ESLint config (ESLint 10 + eslint-config-next 16.4+).
 //
 // `eslint-config-next/core-web-vitals` already spreads the base Next config
 // (React, React-Hooks, import, jsx-a11y, @next/next) and adds the

@@ -115,6 +115,20 @@ export function recordEmbedFailure(provider: string, errorType: string): void {
   });
 }
 
+/** Count of EOD series withheld because the newest close is behind the latest completed session. */
+export function recordCongressStalePriceWithheld(stream: "push" | "pull", count: number): void {
+  if (!Number.isFinite(count) || count <= 0) return;
+  void loadSentry().then((Sentry) => {
+    try {
+      Sentry?.metrics.count("congress_share.stale_price_withheld", count, {
+        attributes: { stream }
+      });
+    } catch {
+      // Fail-soft
+    }
+  });
+}
+
 /** Sparse Sentry structured log. No-op when the SDK is absent or uninitialized. */
 export function logWarn(message: string, attributes?: LogAttrs): void {
   void loadSentry().then((Sentry) => {
