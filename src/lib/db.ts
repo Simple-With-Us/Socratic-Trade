@@ -3409,10 +3409,24 @@ const MIGRATIONS: Migration[] = [
     }
   },
   {
+// Ops snapshot: listOpsStrategyRuns orders by started_at per user without scanning the
+    // liveness index (status, connected_account_id in the key). 2026-10-14 prod profile: 84s
+    // snapshot builds with a 16.5 GB DB — this seek keeps recent-run reads off full user scans.
+    version: 95,
+    name: "strategy_runs_user_started_index",
+    up: (database) => {
+      if (!tableExists(database, "strategy_runs")) return;
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_strategy_runs_user_started ON strategy_runs (user_id, started_at DESC)"
+      );
+    }
+  },
+  {
     // ST-8: which process started the run.  The restart sweep on a follower must not close a
     // run the leader still owns.  Nullable so rows written before this migration stay unowned
-    // and only a leader, after boot grace, may reap them.
-    version: 95,
+    // and only a leader, after boot grace, may reap them.  Version 96, not 95: main already
+    // spent 95 on strategy_runs_user_started_index, and two migrations cannot share a version.
+    version: 96,
     name: "strategy_runs_owner_instance",
     up: (database) => {
       if (!tableExists(database, "strategy_runs")) return;

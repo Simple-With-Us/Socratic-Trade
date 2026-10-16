@@ -71,3 +71,44 @@ PR #4701 stays ready for review with `do-not-automerge`.  Auto-merge stays off. 
 ## Zero-Code Findings
 
 Agent-Sync MCP Linear tools are not enabled for the CURSOR seat (`LINEAR_SEATS`).  The claim went through the fleet `board` CLI as CURSOR, which `board whoami` verified against `LINEAR_CURSOR_CLIENT_ID`.  Zulip `agent-sync whoami` has no key on this seat.
+
+## Merge-main (MM takeover, 2026-10-16)
+
+Cursor's agents hit their quota, so MM landed this branch.  The prior two
+paragraphs above are Cursor's own record and are left as written; this section
+is the takeover.
+
+`origin/main` (`a5d45401e`) is merged with a merge commit — no rebase, no force-push.
+
+**Migration renumbered 95 → 96.**  `main` already spent version 95 on
+`strategy_runs_user_started_index` (the ops snapshot seek).  ST-8's
+`strategy_runs_owner_instance` was also numbered 95, so the two migrations
+collided in `src/lib/db.ts`.  Both are kept; ST-8's is now 96, and the twelve
+`getSchemaVersion` / `applyVersionedMigrations` assertions in
+`test/persistence-hardening.test.ts` move to 96.  The earlier note that
+"migration 95 stayed the only new migration" described the pre-`a5d45401e` state.
+
+**`test/e2e/visual.spec.ts`** — both sides are kept.  `main` added three console
+header dropdown specs (`header-account-dropdown`, `header-notifications-dropdown`,
+`header-profile-menu`); this branch added `installPlaywrightSession` to the login
+and admin specs.  All four tests from `main` survive alongside the ST-3854
+retired-lanes footnote spec and the session installs.  The login spec keeps its
+session install: `/login` is in `PUBLIC_PREFIXES` (`middleware.ts:68`) and
+`app/login/page.tsx:43` documents that there is deliberately no
+"already signed in → redirect" branch, so the cookie cannot change that render
+and the committed `login.png` baseline stays valid.
+
+## Screenshot threads (the two unresolved ones)
+
+Both unresolved threads ask for a Playwright screenshot of the new
+`data-testid="enrichment-coverage-retired-lanes"` paragraph.  The coverage
+exists and is committed: `test/e2e/visual.spec.ts` routes
+`**/api/admin/enrichment-coverage**` to a populated `retiredLaneFields`
+response, asserts the footnote is visible and contains a lane name, freezes
+motion, and calls `toHaveScreenshot("enrichment-coverage-retired-lanes-footnote.png")`
+against the committed baseline
+`test/e2e/visual.spec.ts-snapshots/enrichment-coverage-retired-lanes-footnote-chromium-linux.png`.
+Kody asked for a new `visual-tests/enrichment-coverage.spec.ts`; this repo's
+convention is a single `test/e2e/visual.spec.ts` (per `AGENTS.md`), so the spec
+was added there rather than in a second file.  The threads stay open until Kody
+re-reviews the current head.
