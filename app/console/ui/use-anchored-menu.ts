@@ -57,7 +57,14 @@ export function useAnchoredMenu(
   const [measured, setMeasured] = useState<AnchoredMenu>(CLOSED);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      // Drop the last measurement on close, so a reopen cannot paint one
+      // frame at the previous open's stale coordinates if the trigger moved
+      // (or the viewport resized) while closed. CLOSED is module-level, so
+      // React bails out when nothing changed.
+      setMeasured(CLOSED);
+      return;
+    }
     let raf = 0;
     const update = () => {
       const el = triggerRef.current;
