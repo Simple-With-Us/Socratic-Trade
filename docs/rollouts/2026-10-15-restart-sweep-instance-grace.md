@@ -137,6 +137,17 @@ The general lesson for the next agent taking over a long-lived branch: **after
 every merge from `main`, re-check that migration versions are still unique**, and
 do not trust a clean textual merge as evidence that the schema is coherent.
 
-Verified after the renumber: `npx tsc --noEmit` exit 0, focused vitest 11 files
-including `test/persistence-hardening.test.ts` and the new
-`test/text-payload-codec.test.ts` from `main`, `npm run lint` exit 0.
+Verified after the renumber, in the repo-mandated order:
+
+- `npm run lint` — exit 0 (871 warnings, 0 errors).
+- `npx tsc --noEmit` — exit 0.
+- `npm test` — 13 failures, all outside this diff and all reproduced
+  identically on an unmodified `origin/main` checkout, so they are a sandbox
+  credential-environment artifact rather than a regression from the renumber.
+  They are `test/llm-provider.test.ts`, `test/openrouter-credits.test.ts`,
+  `test/framework-review.test.ts` and `test/chat-llm.test.ts` — provider
+  resolution and credit tests that assert a key is *absent* and find one
+  present in this environment.  Every file this branch touches passes,
+  including `test/persistence-hardening.test.ts` (the twelve renumbered
+  version assertions) and `test/text-payload-codec.test.ts` from `main`.
+- `npm run build` — exit 0.
