@@ -85,7 +85,7 @@ export async function GET() {
     // Never throw: a broken snapshot/probe path must still answer reachable:false.
     return Response.json({
       ok: true,
-      snapshot: { latest: null, lastHour: { proxied: 0, direct: 0, fallbacks: 0 }, total: 0 },
+      snapshot: { latest: null, lastHour: { proxied: 0, direct: 0, fallbacks: 0, proxyErrors: 0 }, total: 0 },
       mango: { host: safeProxyHostForLog(""), reachable: false, latencyMs: null, checkedAt: new Date(now).toISOString() }
     });
   }

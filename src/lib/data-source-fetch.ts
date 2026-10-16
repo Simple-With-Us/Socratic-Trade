@@ -127,6 +127,46 @@ export function isInternalFetchTarget(url: string | URL): boolean {
 }
 
 /**
+ * Hostname of the data-source request target. Never the full URL: query
+ * strings can carry credentials or tokens, and bodies are never logged.
+ */
+function safeDestinationHostForLog(input: RequestInfo | URL): string {
+  try {
+    const raw =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : (input as Request).url;
+    const host = new URL(raw).hostname;
+    return host || "(unparseable)";
+  } catch {
+    return "(unparseable)";
+  }
+}
+
+/**
+ * Short error class for the log: the error's `code` (ECONNREFUSED,
+ * UND_ERR_CONNECT_TIMEOUT, ...), walking the cause chain the same way
+ * isProxyLegError does, else its `name` (AbortError, ...). Never the message —
+ * messages can embed request URLs carrying credentials or tokens.
+ */
+function errorClassForLog(error: unknown): string {
+  if (error instanceof Error) {
+    let current: unknown = error;
+    while (current instanceof Error) {
+      const code = (current as { code?: unknown }).code;
+      if (typeof code === "string" && code.length > 0) return code;
+      current = current.cause;
+    }
+    if (error.name && error.name.length > 0) return error.name;
+    return "Error";
+  }
+  if (typeof error === "string" && error.length > 0) return "thrown-string";
+  return "unknown";
+}
+
+/**
  * Fetch a data-source URL with per-user/operator residential-proxy egress
  * applied. Drop-in for `fetch` at data-source call sites.
  */
@@ -160,20 +200,31 @@ export async function dataSourceFetch(
   // The cap remains only when nothing else bounds the leg.
   const perLegTimeoutMs = init?.signal ? undefined : PROXY_LEG_TIMEOUT_MS;
   const proxyHost = safeProxyHostForLog(resolution.proxyUrl); // host:port only, never credentials
-  recordProxyUse({
-    usedProxy: true,
+  const destination = safeDestinationHostForLog(url);
+  // The single log line for this proxied request: timestamp, destination
+  // host, and outcome (HTTP status on response, error class on throw).
+  // Recorded once the outcome is known, so each proxied request has exactly
+  // one entry. Logging stays additive — fetch behavior is unchanged.
+  const proxyUseLine = {
+    usedProxy: true as const,
     source: resolution.source,
     host: proxyHost,
     fallback: false,
-    service: opts?.service
-  });
+    service: opts?.service,
+    destination
+  };
   const proxiedFetch = (deps.proxiedFetchFactory ?? ((proxyUrl: string) =>
     createProxiedFetch(proxyUrl, undefined, { proxyTimeoutMs: perLegTimeoutMs })))(
     resolution.proxyUrl
   );
   try {
-    return await proxiedFetch(url, init);
+    const res = await proxiedFetch(url, init);
+    recordProxyUse({ ...proxyUseLine, statusCode: res.status });
+    return res;
   } catch (error) {
+    // Record the proxied attempt's outcome before any fallback handling, so
+    // a failed proxied request still gets its one log line.
+    recordProxyUse({ ...proxyUseLine, errorClass: errorClassForLog(error) });
     if (!isProxyLegError(error)) throw error;
     // If the caller's own signal aborted, the proxied fetch's AbortError
     // reflects caller intent (cancellation / higher-level timeout), NOT a
@@ -188,13 +239,16 @@ export async function dataSourceFetch(
       );
     }
     warnProxyFallback(resolution.proxyUrl, error);
-    // Visible fail_soft fallback: a second entry, not a silent one.
+    // Visible fail_soft fallback: a second entry, not a silent one. This is
+    // the direct-egress retry — not routed through the proxy — so it keeps
+    // usedProxy:false; it carries the destination for watchdog correlation.
     recordProxyUse({
       usedProxy: false,
       source: resolution.source,
       host: proxyHost,
       fallback: true,
-      service: opts?.service
+      service: opts?.service,
+      destination
     });
     return directFetch(url, init);
   }
