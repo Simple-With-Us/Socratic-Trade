@@ -1,3 +1,15 @@
+## 2026-10-15 MC — header account dropdown never opened (ST-4544)
+
+**What.**  Owner report (Safari): the console header account dropdown did not open.  Root cause: the ChromeBar row is `overflow-x: auto` (320px guard), which computes `overflow-y: auto` and clips every absolutely positioned dropdown panel in the bar to ~46px — menu state opened, panel never showed (reproduced in WebKit + Chromium harnesses; not Safari-specific).  All three header menus fixed: account scope (`ScopeSelector`), profile (`UserMenu`), notifications.  Panels now portal into `.console-root` with fixed anchoring via new `app/console/ui/use-anchored-menu.ts`; the overflow guard itself is unchanged.  Regression coverage: `test/e2e/header-menus.spec.ts` asserts each panel is visible and hit-testable at its center.
+
+**Branch.**  `muse-code/proxy-safari-dropdown` — Fixes ST-4544.
+
+**Verification.**  `npx tsc --noEmit` clean.  `npm run lint` 0 errors (867 warnings, grandfathered backlog; changed files clean).  `npx playwright test test/e2e/header-menus.spec.ts --project=chromium` 3/3 on the built app.  WebKit probe on the same build: all three panels fixed, inside `.console-root`, center-hittable; account panel screenshot opaque and correctly anchored.  Full `npm test` + `npm run build` via the `scripts/land.sh` gate at landing.  Rollout `docs/rollouts/2026-10-15-header-dropdown-clipped.md`.
+
+**Also verified, no code change.**  The pasted 502 (2026-10-15 23:29:43 UTC) was the deploy-restart window of sha `fad904bcd` (live health `processStartedAt` 23:29:54 UTC); prod healthy on live URLs.  The per-user Data Source Proxy feature already exists and is unrelated.
+
+**Next.**  Land, confirm auto-deploy on live health URLs, close ST-4544.
+
 ## 2026-10-15 CODEX — PR #4662 takeover
 
 Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `cursor/embed-context-retrieval-pressure-3d40` with merge commit `f433f89057262a1b28428d6d91f549b501371d2c`.  No conflicts; no unresolved review threads.  Lint (0 errors), TypeScript, 34 focused tests, and production build pass locally.  Next: compare the reported full-suite failures with main CI, push the merge, drive required checks green, arm auto-merge, and confirm merge.  Leave Sentry 2G and 2E open until live-open validation.
