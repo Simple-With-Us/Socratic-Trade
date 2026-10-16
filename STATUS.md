@@ -37,11 +37,6 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 vitest green before push; CI `verify` gate pending.
 
 **Next.**  PR #4706 ready for review; Deployer merges.
-**Verification.**  Merged `origin/main` (2026-10-15).  `npm run lint` 0 errors; `npx tsc --noEmit` ok; `npm run build` ok.  Cloud `npm test`: 23 fails (env/no-keys; unrelated to eslint).  CI `verify` on push is authoritative.
-**Verification.**  Merged `origin/main` again (2026-10-15, incl. #4698).  `npm run lint` 0 errors; `npx tsc --noEmit` ok.  CI `verify` on push is authoritative.
-**Verification.**  Merged `origin/main` again (2026-10-15, `2075c857` ST-4531 #4696).  Head `5a41fbbb`.  `npm run lint` 0 errors; `npx tsc --noEmit` ok; `npm run build` ok.  Cloud `npm test`: 25 failures in 12 files (env/no-keys; same class as prior shepherd).  CI `verify` on push is authoritative.
-
-**Next.**  GB-Deployer squash-merge after green `verify`; close #4691.
 
 **2026-10-15 [codex-autofix] — PR #4706 review pass (round 8).**  Three open Kody threads, two
 of them duplicates of the same finding: (1) Rule 26 wanted the ST-3988 rollout note's
