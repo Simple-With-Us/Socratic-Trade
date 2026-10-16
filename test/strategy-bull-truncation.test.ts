@@ -172,6 +172,9 @@ describe("MiniMax empty reasoning output", () => {
     ]);
     const persisted = db.listAudit(5000).filter((e) => (e.payload as { runId?: string }).runId === result.runId && e.kind === "llm_step");
     expect(persisted.some((e) => (e.payload as { responseAttempts?: unknown[] }).responseAttempts?.length === 2)).toBe(true);
+    const firstTruncated = persisted.find((e) => (e.payload as { finishReason?: string }).finishReason === "length");
+    expect(firstTruncated?.payload).toMatchObject({ status: "failed", model: "MiniMax-M3" });
+    expect(db.listAudit(5000).filter((e) => (e.payload as { runId?: string }).runId === result.runId && e.kind === "strategy_llm_failover")).toHaveLength(0);
   }, 30_000);
 
   it.each(["exhaust", "usage-only"] as const)("fails explicitly after the bounded retry (%s)", async (outcome) => {
@@ -182,6 +185,7 @@ describe("MiniMax empty reasoning output", () => {
     expect(caps).toEqual([8000, 16000]);
     expect(result.status).toBe("failed");
     expect(result.summary).toMatch(/empty content after output truncation at the 16000-token cap/);
+    expect(result.summary).not.toMatch(/Failover chain exhausted/);
     expect(result.llmSteps?.find((s) => s.step === "bull")).toMatchObject({ truncated: true, wireOutputCap: 16000, completionTokens: 16000 });
     expect(result.llmSteps?.find((s) => s.step === "bull")?.responseAttempts).toHaveLength(2);
   }, 30_000);
@@ -196,4 +200,31 @@ describe("MiniMax empty reasoning output", () => {
     expect(result.summary).toContain("Empty response returned from LLM API");
     expect(result.llmSteps?.find((s) => s.step === "bull")).toMatchObject({ finishReason: "stop", truncated: false });
   }, 30_000);
+
+  it("records one per-hop event when the exhausted retry moves to the configured fallback", async () => {
+    const db = await setupMiniMax();
+    db.upsertUserApiKey("local", "openrouter", "test-openrouter-key", "fixture");
+    db.setPolicy({ ...db.getPolicy("local"), llmFallbackModels: ["openrouter/google/gemini-2.5-flash"] });
+    const { resolveLlmEndpoint } = await import("../src/lib/llm-provider");
+    const fallback = resolveLlmEndpoint({ ...db.getPolicy("local"), llmModel: "openrouter/google/gemini-2.5-flash" });
+    const caps = mockMiniMax("exhaust");
+    const miniMaxFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes("openrouter.ai")) {
+        return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: '{"proposals":[]}' } }] }), { headers: { "content-type": "application/json" } });
+      }
+      return miniMaxFetch(url, init);
+    });
+    const { runStrategyOnce } = await import("../src/lib/strategy");
+    const result = await runStrategyOnce();
+    expect(caps).toEqual([8000, 16000]);
+    expect(result.status).toBe("completed");
+    const hops = db.listAudit(5000).filter((e) => (e.payload as { runId?: string }).runId === result.runId && e.kind === "strategy_llm_failover");
+    expect(hops).toHaveLength(1);
+    expect(hops[0].payload).toMatchObject({ fromModel: "MiniMax-M3", fromProvider: "minimax", toModel: fallback.model, toProvider: fallback.provider, reason: "empty_truncated_response", truncated: true, wireOutputCap: 16000 });
+    const step = result.llmSteps?.find((s) => s.step === "bull");
+    expect(step).toMatchObject({ status: "completed", provider: "gemini" });
+    expect(step?.responseAttempts).toHaveLength(3);
+  }, 30_000);
+
 });

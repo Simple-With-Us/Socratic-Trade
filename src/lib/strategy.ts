@@ -6653,7 +6653,7 @@ async function proposeTrades(input: {
           lastBullAttemptModel = attempt.model;
           bullResponseDetails = {};
           try {
-            bullAttemptsStarted += 1;
+            if (!attempt.truncationRetry) bullAttemptsStarted += 1;
             const bullSoftTimeoutMs = strategyLlmTimeoutMs(attempt.model, input.policy.llmReasoningEffort);
             // Reasoning-class-aware SOFT wall-clock: a thinking-enabled model gets the widened bound.
             // The request is NOT severed at the wall — if it's slow the tick moves on, but the eventual
@@ -6787,7 +6787,7 @@ async function proposeTrades(input: {
               const reason = `Green Team returned empty content after output truncation at the ${wireOutputCap}-token cap (finish_reason=${finishReason ?? "unknown"}, completion_tokens=${completionTokens ?? "unknown"}).`;
               recordStep({ ...bullStepBase, provider: attempt.provider, model: attempt.model,
                 transport: attempt.transport, keySource: attempt.keySource,
-                ...bullResponseDetails, status: retry || !isLast ? "fallback" : "failed", reason }, { includeInResult: false });
+                ...bullResponseDetails, status: !retry && !isLast ? "fallback" : "failed", reason }, { includeInResult: false });
               audit("strategy_bull_truncated", { runId: input.runId, ...bullResponseDetails,
                 provider: attempt.provider, model: attempt.model, parsedProposals: 0,
                 retryScheduled: retry, ...(retry ? { retryWireOutputCap: retryCap } : {}) }, input.userId, input.policy.connectedAccountId);
@@ -6799,6 +6799,10 @@ async function proposeTrades(input: {
               if (!isLast) {
                 lastError = new Error(reason);
                 bullLastFailoverReason = "empty truncated response";
+                audit("strategy_llm_failover", { runId: input.runId, step: "bull",
+                  fromModel: attempt.model, fromProvider: attempt.provider,
+                  reason: "empty_truncated_response", ...bullResponseDetails,
+                  toModel: next.model, toProvider: next.provider }, input.userId, input.policy.connectedAccountId);
                 continue;
               }
               throw new Error(reason);
@@ -6908,7 +6912,8 @@ async function proposeTrades(input: {
   } catch (error) {
     let reason = humanizeLlmTransportError(error, { provider: lastBullAttemptProvider, model: lastBullAttemptModel, stepLabel: "Green Team proposal", timeoutMs: strategyLlmTimeoutMs(lastBullAttemptModel, input.policy.llmReasoningEffort) });
     reason = `${reason}${greenFailoverExhaustedSuffix(bullAttemptsStarted)}`;
-    const failedStep: StrategyLlmStep = { ...bullStepBase, provider: lastBullAttemptProvider, model: lastBullAttemptModel, ...bullResponseDetails, responseAttempts: bullResponseAttempts, status: "failed", reason };
+    const failedEndpoint = remapOpenRouterTelemetry(lastBullAttemptProvider, lastBullAttemptModel);
+    const failedStep: StrategyLlmStep = { ...bullStepBase, ...failedEndpoint, ...bullResponseDetails, responseAttempts: bullResponseAttempts, status: "failed", reason };
     recordStep(failedStep);
     throw new StrategyLlmStepFailure(reason, llmSteps, error);
   }
