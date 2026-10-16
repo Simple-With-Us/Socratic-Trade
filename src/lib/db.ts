@@ -3457,9 +3457,12 @@ const MIGRATIONS: Migration[] = [
   {
     // ST-8: which process started the run.  The restart sweep on a follower must not close a
     // run the leader still owns.  Nullable so rows written before this migration stay unowned
-    // and only a leader, after boot grace, may reap them.  Version 96, not 95: main already
-    // spent 95 on strategy_runs_user_started_index, and two migrations cannot share a version.
-    version: 96,
+    // and only a leader, after boot grace, may reap them.  Version 97, not 95 or 96: main spent
+    // 95 on strategy_runs_user_started_index and then 96 on text_payload_codec_columns (#4720),
+    // and two migrations can never share a version.  This one renumbers a second time as main
+    // lands new migrations; the alternative is a duplicate version that silently runs the first
+    // migration only and skips the second.
+    version: 97,
     name: "strategy_runs_owner_instance",
     up: (database) => {
       if (!tableExists(database, "strategy_runs")) return;

@@ -112,3 +112,31 @@ Kody asked for a new `visual-tests/enrichment-coverage.spec.ts`; this repo's
 convention is a single `test/e2e/visual.spec.ts` (per `AGENTS.md`), so the spec
 was added there rather than in a second file.  The threads stay open until Kody
 re-reviews the current head.
+
+## Merge-main round 3 — the silent duplicate migration (MM, 2026-10-16)
+
+PR #4720 merged to `main` as `4eae1fea`, and its squash brought the text-payload
+codec with it.  That codec's schema migration is **also** numbered 96.
+
+Merging `main` into this branch produced **no textual conflict**, which is what makes
+this one worth writing down.  `git merge` reported a clean merge and `src/lib/db.ts`
+happily ended up with two migration objects both declaring `version: 96`:
+`text_payload_codec_columns` and `strategy_runs_owner_instance`.  Nothing in the
+merge output complains, and a reviewer reading the diff would not necessarily
+notice.  The runtime applies migrations in version order and would run the first and
+skip the second, leaving `strategy_runs.owner_instance` unadded while every test
+that asserts a schema version still passes.
+
+ST-8's migration is renumbered to **97**, and the twelve
+`getSchemaVersion` / `applyVersionedMigrations` assertions in
+`test/persistence-hardening.test.ts` move to 97.
+
+So ST-8's migration has now been renumbered twice: 95 collided with
+`strategy_runs_user_started_index`, and 96 collided with #4720's codec columns.
+The general lesson for the next agent taking over a long-lived branch: **after
+every merge from `main`, re-check that migration versions are still unique**, and
+do not trust a clean textual merge as evidence that the schema is coherent.
+
+Verified after the renumber: `npx tsc --noEmit` exit 0, focused vitest 11 files
+including `test/persistence-hardening.test.ts` and the new
+`test/text-payload-codec.test.ts` from `main`, `npm run lint` exit 0.
