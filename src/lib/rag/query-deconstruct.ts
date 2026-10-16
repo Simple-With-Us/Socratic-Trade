@@ -1,3 +1,4 @@
+import { llmFetch } from "../llm-request";
 import { resolveLlmEndpoint } from "../llm-provider";
 import { buildLlmRequestBody, extractLlmText, llmAuthHeaders } from "../llm-call";
 import { extractLlmUsage, providerRequestIdFromPayload, recordLlmUsage } from "../llm-usage";
@@ -45,7 +46,7 @@ export async function deconstructQuery(query: string, userId: string = "local"):
       }
     );
 
-    const response = await fetch(endpoint.url, {
+    const response = await llmFetch(endpoint.url, {
       method: "POST",
       headers: llmAuthHeaders(endpoint),
       body: JSON.stringify(body),

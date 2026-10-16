@@ -353,7 +353,7 @@ export function recordLlmUsage(entry: LlmUsageEntry): void {
       entry.provider === "openrouter" && typeof entry.billedCostUsd === "number" && Number.isFinite(entry.billedCostUsd) && entry.billedCostUsd >= 0
         ? entry.billedCostUsd
         : undefined;
-    const estimatedCostUsd = estimateLlmCostUsd(entry.model ?? canonical.model, entry.promptTokens, entry.completionTokens, entry.cachedPromptTokens, entry.cacheCreationTokens);
+    const estimatedCostUsd = entry.keyRef === "code-cli" ? undefined : estimateLlmCostUsd(entry.model ?? canonical.model, entry.promptTokens, entry.completionTokens, entry.cachedPromptTokens, entry.cacheCreationTokens);
     const cost = billedCostUsd ?? estimatedCostUsd;
     // Provenance travels with the row so the Usage page can label an estimate as an estimate
     // instead of mixing it into a "billed" total.  Null only when there is no cost at all.

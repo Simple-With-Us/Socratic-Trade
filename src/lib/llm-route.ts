@@ -6,7 +6,7 @@ import { getUserSetting } from "./db-settings";
  */
 export const NATIVE_ROUTE_SERVICES = ["meta", "minimax"] as const;
 export type NativeRouteService = (typeof NATIVE_ROUTE_SERVICES)[number];
-export type LlmRoute = "openrouter" | "native";
+export type LlmRoute = "openrouter" | "native" | "code-cli";
 
 export function isNativeRouteService(service: string): service is NativeRouteService {
   return (NATIVE_ROUTE_SERVICES as readonly string[]).includes(service);
@@ -18,5 +18,6 @@ export function llmRouteSettingKey(service: NativeRouteService): string {
 
 /** The user's chosen route for a provider.  OpenRouter unless they explicitly picked native. */
 export function llmRouteFor(service: NativeRouteService, userId: string = "local"): LlmRoute {
-  return getUserSetting<string>(userId, llmRouteSettingKey(service), "openrouter") === "native" ? "native" : "openrouter";
+  const route = getUserSetting<string>(userId, llmRouteSettingKey(service), "openrouter");
+  return route === "native" || route === "code-cli" ? route : "openrouter";
 }

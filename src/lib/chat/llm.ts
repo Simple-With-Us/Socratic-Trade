@@ -1,3 +1,5 @@
+import { llmRouteFor } from "../llm-route";
+import { codeCliUrl } from "../code-cli";
 // Provider-agnostic LLM contract: run({ system, message, tools, executeTool, context }) drives a
 // tool loop and returns { text, toolCalls, citations }. The model can only call the tools it is
 // given (read-only get_quote/kb_search, draft-only draft_order, reversible create_alert/
@@ -829,6 +831,25 @@ export function llmForModel(
   const trimmed = model?.trim();
   if (!trimmed || trimmed.toLowerCase() === "mock") return new MockLLM();
 
+  const cliFamily = llmModelFamily(trimmed);
+  if ((cliFamily === "meta" || cliFamily === "minimax") && llmRouteFor(cliFamily, userId ?? "local") === "code-cli") {
+    const url = codeCliUrl(cliFamily, userId ?? "local");
+    const cliModel = nativeSlugFor(trimmed);
+    // No agent tool loop: only existing plain-text context is sent. Never executeTool.
+    return { modelName: cliModel, async run(args) {
+      const res = await llmFetch(url, { method: "POST", signal: args.abortSignal,
+        body: JSON.stringify({ model: cliModel, max_tokens: 1500, messages: [
+          { role: "system", content: args.system },
+          ...(args.history ?? []).map(turn => ({ role: turn.role, content: turn.text })),
+          { role: "user", content: args.message }
+        ] }) });
+      const result = await res.json();
+      recordChatUsage({ userId, keySource: "user", keyRef: "code-cli", context: "chat" }, cliFamily,
+        cliModel, 0, 0, false);
+      return { text: String(result.choices[0].message.content), toolCalls: [], citations: [] };
+    } };
+  }
+
   // 0. Native Meta: when the user chose "direct" for Meta and has a Meta key, a Muse Spark model
   //    goes straight to api.meta.ai.  Otherwise it falls through to the OpenRouter path below.
   const metaNative = resolveMetaNative(trimmed, userId);
@@ -884,6 +905,12 @@ export function getLLM(userId?: string, opts: { transport?: Transport; openAITra
   // No hardcoded chat model default (owner 2026-07-07): the env-default chat path requires an
   // explicit CHAT_LLM_MODEL. Without it, fall through to MockLLM rather than silently pick a model.
   const chatModel = process.env.CHAT_LLM_MODEL?.trim();
+  if (chatModel) {
+    const family = llmModelFamily(chatModel);
+    if ((family === "meta" || family === "minimax") && llmRouteFor(family, userId ?? "local") === "code-cli") {
+      return llmForModel(chatModel, userId, opts);
+    }
+  }
   if (chatLlm === "anthropic" && chatModel) {
     const { key, source, keyRef } = resolveLlmCredential("anthropic", userId);
     if (key) {

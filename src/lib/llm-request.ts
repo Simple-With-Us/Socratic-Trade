@@ -1,3 +1,4 @@
+import { CODE_CLI_PREFIX, fetchCodeCli } from "./code-cli";
 import { nativeSlugFor } from "./llm-model-catalog";
 import { withGenAiSpan } from "./sentry-gen-ai";
 import { withDatadogLlmObs } from "./datadog-llmobs";
@@ -399,6 +400,7 @@ const geminiRateLimiter = new RateLimiter();
 
 /** Normalize MiniMax's documented HTTP-200 error envelope before tracing, retries, or usage. */
 async function fetchLlmProviderResponse(url: string, init: RequestInit): Promise<Response> {
+  if (url.startsWith(CODE_CLI_PREFIX)) return fetchCodeCli(url, init);
   const response = await fetch(url, init);
   let nativeMiniMax = url === process.env.MINIMAX_API_URL?.trim();
   try { nativeMiniMax ||= new URL(url).hostname.toLowerCase() === "api.minimax.io"; } catch { /* fetch handles invalid URLs */ }

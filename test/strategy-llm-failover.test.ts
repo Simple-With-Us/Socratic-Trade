@@ -345,3 +345,27 @@ describe("cross-provider Bull failover (Chat A item 4)", () => {
     expect(runKinds).not.toContain("strategy_llm_failover");
   }, 30_000);
 });
+
+it("Code CLI primary never advances to a configured paid API fallback", async () => {
+  vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
+  vi.stubEnv("CODE_CLI_ENABLED", "true");vi.stubEnv("CODE_CLI_OWNER_EMAIL","owner@example.com");
+  vi.stubEnv("CODE_CLI_OWNER_USER_ID","local");vi.stubEnv("CODE_CLI_BROKER_URL","https://broker.internal/generate");
+  vi.stubEnv("CODE_CLI_BROKER_TOKEN","test-broker-token");
+  await setup(true);
+  const {getPolicy,setPolicy,setUserSetting}=await import("../src/lib/db");
+  setUserSetting("local","llm_route_minimax","code-cli");
+  setPolicy({...getPolicy(),llmModel:"minimax-m3",llmFallbackModels:["openrouter/google/gemini-2.5-flash"]});
+  const paidCalls: string[]=[];let brokerCalls=0;
+  vi.stubGlobal("fetch",async(url:string|URL|Request)=>{
+    const href=String(url);
+    if(href==="https://broker.internal/generate"){brokerCalls++;return new Response("unavailable",{status:503});}
+    if(href.includes("openrouter.ai") || href.includes("api.openai.com") || href.includes("api.minimax.io")){paidCalls.push(href);return geminiOk();}
+    if(href.includes("nasdaq.com"))return nasdaqRow();
+    return new Response("not found",{status:404});
+  });
+  try {
+    const {runStrategyOnce}=await import("../src/lib/strategy");const result=await runStrategyOnce();
+    expect(brokerCalls).toBeGreaterThan(0);expect(paidCalls).toEqual([]);
+    expect(result.proposals).toHaveLength(0);
+  } finally { setUserSetting("local","llm_route_minimax","openrouter"); }
+},30000);

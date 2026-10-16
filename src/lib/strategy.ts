@@ -6517,7 +6517,7 @@ async function proposeTrades(input: {
       proposalModel: input.policy.llmModel?.trim() || model
     }
   ];
-  const fallbackModelList = Array.isArray(input.policy.llmFallbackModels) ? input.policy.llmFallbackModels : [];
+  const fallbackModelList = !url.startsWith("code-cli://") && Array.isArray(input.policy.llmFallbackModels) ? input.policy.llmFallbackModels : [];
   for (const fallbackModel of fallbackModelList.filter((m): m is string => typeof m === "string").map((m) => m.trim()).filter(Boolean)) {
     const ep = resolveLlmEndpoint({ ...input.policy, llmModel: fallbackModel }, input.userId);
     if (!ep.key) continue; // No credential for this provider's model — skip it rather than fail.
