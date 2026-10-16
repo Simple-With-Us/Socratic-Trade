@@ -3419,6 +3419,39 @@ const MIGRATIONS: Migration[] = [
       database.exec(
         "CREATE INDEX IF NOT EXISTS idx_strategy_runs_user_started ON strategy_runs (user_id, started_at DESC)"
       );
+    },
+  },
+  {
+    // Codec tag and plaintext length so backfill and hasLocalFilingCopy do not
+    // scan blob columns. text_codec NULL means the body has not been stamped yet.
+    version: 96,
+    name: "text_payload_codec_columns",
+    up: (database) => {
+      if (tableExists(database, "earningscalls_transcripts")) {
+        if (!columnExists(database, "earningscalls_transcripts", "text_codec")) {
+          database.exec("ALTER TABLE earningscalls_transcripts ADD COLUMN text_codec TEXT");
+        }
+        if (!columnExists(database, "earningscalls_transcripts", "plaintext_length")) {
+          database.exec("ALTER TABLE earningscalls_transcripts ADD COLUMN plaintext_length INTEGER");
+        }
+        database.exec(`
+          CREATE INDEX IF NOT EXISTS idx_earningscalls_text_codec_pending
+            ON earningscalls_transcripts (symbol, fiscal_year, fiscal_quarter)
+            WHERE text_codec IS NULL AND content IS NOT NULL
+        `);
+      }
+      if (tableExists(database, "sec_facts")) {
+        if (!columnExists(database, "sec_facts", "segment_codec")) {
+          database.exec("ALTER TABLE sec_facts ADD COLUMN segment_codec TEXT");
+        }
+        database.exec(`
+          CREATE INDEX IF NOT EXISTS idx_sec_facts_segment_codec_pending
+            ON sec_facts (id)
+            WHERE segment_codec IS NULL
+              AND concept = '__companyfacts_json__'
+              AND segment IS NOT NULL
+        `);
+      }
     }
   },
   {

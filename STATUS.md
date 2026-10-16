@@ -186,6 +186,8 @@ PR #4713 is merged with `origin/main` through `3b8e3e4b`.  The shared URL-cache 
 **Branch.**  `cursor/ct-fundamentals-nightly-push-bb23`
 
 **Next.**  Verify gate, open ready PR, deploy; confirm CT stream freshness after nightly run.
+**Next.**  PR #4720 ready for review.  Merged `origin/main` through `49a76da4` (#4695 Congress push receipt, #4716 iOS ASC).  #4722 had not landed, so its retention rewrite is not in this branch.  Review follow-up is in `a938fd2a` (codec columns, watermark after pass, framed `raw1:`, decode retry list, indexed `hasLocalFilingCopy`).
+**Next.**  PR #4720 ready for review.  Branch contains `origin/main` at `49a76da4`.  #4722 is still open (`needs-human-merge`); auto-merge stays off until Jay merges it.  Kody PLAN.md thread fixed (ST-2916, PR #4716 on line 2).  Compression review fixes remain in `a938fd2a`.
 ## 2026-10-15 CURSOR — Congress push delivery/consumption receipt (ST-3846)
 
 **What.**  App B webhook responses now emit `receiptVersion: 1` with explicit `delivered` + `consumed` fields; batch failures return `422` instead of silent `200`.  Congress.Trade PR parses the receipt before marking `deliveries` rows delivered.
@@ -221,6 +223,7 @@ clean, `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-ev
 `origin/main` worktree — this runner has a live `OPENROUTER_API_KEY` that those tests assume
 is absent.  Pre-existing, outside this diff, left untouched.  Both remaining open threads
 resolved (Sentry's index-alignment finding verified fixed in `93da2abb`).
+**Next.**  PR #4720 ready for review.  Merged `origin/main` at `e3ba1507` (#4716 iOS ASC credentials).  #4722 had not landed, so its retention rewrite is not in this branch.  Stripped accidental conflict markers from `docs/rollouts/2026-10-15-st-4531-retire-slack-callers.md` that were already on main.  Review follow-up is in `a938fd2a` (codec columns, watermark after pass, framed `raw1:`, decode retry list, indexed `hasLocalFilingCopy`).
 ## 2026-10-15 CURSOR — Board 512444e3 iOS / Playwright / deploy-freshness CI
 
 **What.**  Sign-out and account switch drop the snapshot UserDefaults row, the shared URL cache, and in-memory account stores.  Device preferences stay.  Approve, reject, and cancel each report success, failed, or retryable.  The shell rebuilds on `sessionEpoch` so Coach, scan, and the other view stores do not keep the previous account.
@@ -294,6 +297,9 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 
 **Next.**  PR #4696 — Kody CHANGES_REQUESTED cleared on branch; Deployer merge when `verify` green; Refs ST-4531.
 
+**Next.**  PR #4720 ready for review.  Merged `origin/main` at `df7e6d10`.  #4722 had not landed, so its retention rewrite is not in this branch.  Review follow-up: codec columns so the backfill does not scan blobs, watermark after a successful pass, framed `raw1:` lengths, re-embed keeps a decode retry list, and `hasLocalFilingCopy` is one indexed length check.
+
+**Autofix round.**  Last open review item was the empty-string branch of the codec (`if (!plain) return plain`), which no test covered.  Added a case asserting all four entry points return `""` and that the sync and async encoders agree.  `npx tsc --noEmit` clean.  `npm run build` exit 0.  `npm test` 13 failures, all in the pre-existing LLM-key suites (chat-llm, framework-review, llm-provider, openrouter-credits); none import the codec.
 ## 2026-10-15 Cursor Cloud — check-pin token order (ST-2582 PR #4698)
 
 **What.**  Merged `origin/main` (`df7e6d10`) with a merge commit.  `check-pin` was failing because it read public Congress.Trade with `GH_PACKAGES_TOKEN` first.  That secret is one user's PAT, so a burst of pull requests shares one rate limit and the job reports a missing token.  The script now tries the Actions installation token first and keeps the PAT as a fallback.  A rate-limit failure is no longer labeled as a missing token.
@@ -311,6 +317,7 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 **Verification.**  Targeted vitest 64/64.  `npm run lint` 0 errors, 854 warnings.  `npx tsc --noEmit` ok.  `npm test` 9385 passed, 51 skipped, 24 failed, all outside this diff (sandbox LLM keys and host checks).  `npm run build` ok.  Detail: `docs/rollouts/2026-10-15-honest-approve-retryable.md`.
 
 **Next.**  Ready PR with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.
+**Next.**  PR #4720 ready for review.  Merged `origin/main` at `df7e6d10`.  #4722 had not landed, so its retention rewrite is not in this branch.  Review follow-up: codec columns so the backfill does not scan blobs, watermark after a successful pass, framed `raw1:` lengths, re-embed keeps a decode retry list, and `hasLocalFilingCopy` is one indexed length check.
 ## 2026-10-15 Cursor Cloud — withhold stale EOD on the Congress.Trade wire (ST-3845)
 
 **What.**  A price series or the S&P series whose newest close is behind `latestCompletedTradingSessionEtKey` is no longer pushed to Congress.Trade.  `GET /api/market/prices` and `GET /api/market/spx` return 502 `{ ok: false, error: "stale" }` for that tail so Congress.Trade falls back.  A confirmed empty series stays HTTP 200.  The push writes `congress_share_stale_price_withheld`.  PR #4009 still only stops a stale import from beating a live source.
@@ -345,6 +352,15 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 **Verification.**  Rebased on `main`; Playwright visual baseline for retired-lanes footnote; `verify` CI green after push.
 
 **Next.**  Deployer merges #4707; then CURSOR marks ST-3854 Done via Agent-Sync (not before merge).
+## 2026-10-15 Cursor Cloud — transcript and companyfacts gzip, RAG review
+
+**What.**  `earningscalls_transcripts.content` and the companyfacts JSON cache in `sec_facts.segment` now store `gz1:` (base64 gzip) or `raw1:` when gzip does not shrink the text.  Every reader of those bodies decodes first.  FTS still indexes plaintext.  A leader lane backfills in place and does not delete.  `audit_events.payload` stays plaintext because the hash chain and `json_extract` readers are not one path.  `post_mortem_reflection` is no longer age-pruned.  Review: `docs/reviews/2026-10-15-rag-storage-expert-panel.md`.
+
+**Branch.**  `cursor/text-payload-compression-3897`
+
+**Verification.**  Targeted vitest 22/22 plus transcript/reembed/hydrate/local-complete/memory-decay 75/75.  `npx tsc --noEmit` clean.  eslint on touched files 0 errors.  `npm test` 9379 passed, 51 skipped, 25 failed in unrelated suites (llm keys, notify, server-metrics, cpuprofile, alpha-vantage, data-providers).  None import the new codec.
+
+**Next.**  PR #4720 ready for review.  `npm run build` exited 0.
 ## 2026-10-15 Cursor Cloud — ESLint 10 verify unblock (board d428460a)
 
 **What.**  Renovate `eslint` v10 failed `verify` when the lockfile left `eslint-config-next@16.3.8` (PR #4325).  Rebased lock with `eslint-config-next@16.4.0` passes lint; grouped `eslint` + `eslint-config-next` in Renovate to avoid stale-preset repeats.
