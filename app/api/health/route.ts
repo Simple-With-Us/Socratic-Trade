@@ -1,5 +1,5 @@
 import { databasePath, resolveApiKeyWithSource, alertStorageWarning, alertLivenessWarning, clearLivenessWarning } from "@/lib/db";
-import { isHardStoppedHealthSummary } from "@/lib/db-health";
+import { connectionHealthFailureClass, isHardStoppedHealthSummary } from "@/lib/db-health";
 import { isIntentionalOffHealthService } from "@/lib/retired-direct-vendors";
 import { activeEmbeddingProvider } from "@/lib/vector-db";
 import type { RagEmbedRerankProvider } from "@/lib/rag-metering";
@@ -70,6 +70,21 @@ function projectHealthPayload(payload: HealthPayload, detailed: boolean): Health
       ...(lease as Record<string, unknown>),
       owner: leaseOwnerWithoutPid((lease as { owner: string }).owner)
     };
+  }
+  const dependencies = checks.dependencies;
+  if (dependencies && typeof dependencies === "object") {
+    const stripped: Record<string, unknown> = {};
+    for (const [name, entry] of Object.entries(dependencies as Record<string, unknown>)) {
+      if (!entry || typeof entry !== "object") {
+        stripped[name] = entry;
+        continue;
+      }
+      const copy = { ...(entry as Record<string, unknown>) };
+      delete copy.lastFailure;
+      delete copy.failureClass;
+      stripped[name] = copy;
+    }
+    checks.dependencies = stripped;
   }
   return { ok: payload.ok, checks };
 }
@@ -309,7 +324,10 @@ async function assembleHealth(): Promise<HealthPayload> {
   // failing liveness; the detailed reason text is deliberately omitted here.
   try {
     const summaries = healthProbeDeps.getServiceHealthSummaries();
-    const dependencies: Record<string, { ok: boolean; degraded?: boolean }> = {};
+    const dependencies: Record<
+      string,
+      { ok: boolean; degraded?: boolean; lastFailure?: string | null; failureClass?: string | null }
+    > = {};
     // Critical liveness is Alpaca plus the ACTIVE vector store. After the Qdrant
     // cutover Pinecone is leftover telemetry, not a 503 (PD #116). A hard-stopped
     // rag-embed/rag-rerank lane used to 503 this probe (bge-m3-metering-gate, 2026-07-18),
@@ -363,14 +381,21 @@ async function assembleHealth(): Promise<HealthPayload> {
         (hardStopped && configuredLaneHealthy.has(summary.service)) ||
         (hardStopped && softDegradeServices.has(summary.service)) ||
         undefined;
+      const failureClass = connectionHealthFailureClass(summary.lastFailureError);
+      const laneDetail = {
+        lastFailure: summary.lastFailureError,
+        failureClass
+      };
       if (existing) {
         // Merge lanes for the same service: hard-stopped only wins when no configured lane is healthy.
         dependencies[summary.service] = {
           ok: (existing.ok && nextOk) || configuredLaneHealthy.has(summary.service),
-          degraded: existing.degraded || nextDegraded || undefined
+          degraded: existing.degraded || nextDegraded || undefined,
+          lastFailure: existing.lastFailure ?? laneDetail.lastFailure,
+          failureClass: existing.failureClass ?? laneDetail.failureClass
         };
       } else {
-        dependencies[summary.service] = { ok: nextOk, degraded: nextDegraded || undefined };
+        dependencies[summary.service] = { ok: nextOk, degraded: nextDegraded || undefined, ...laneDetail };
       }
 
       // Hard-liveness deps: only app-unsafe/unusable dependencies 503 the public probe. Paid
