@@ -313,9 +313,9 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 
 **Branch.**  `cursor/block-eslint-10-renovate-5081` — PR #4710 (ready; supersedes #4691)
 
-**Verification.**  `npm run lint` 0 errors.  Full `tsc` / `vitest` / `build` before push.
+**Verification.**  Branch contains `origin/main` at `308cdcec` (2026-10-16 GB-Deployer follow-up).  Head `708ea785`.  `npm run lint` 0 errors; `npx tsc --noEmit` ok.  CI run 38870215394: `verify` + `verify-hosted` + gitleaks + Kody green.
 
-**Next.**  GB-Deployer squash-merge; close #4691.
+**Next.**  Jay human squash-merge (`needs-human-merge`); close #4691.  Auto-merge disarmed.
 
 **Linear.**  ST-4535 (claimed CURSOR, **Addressed** / In Review) — board `d428460a`.
 
