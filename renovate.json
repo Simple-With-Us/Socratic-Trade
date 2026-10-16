@@ -29,6 +29,11 @@
       "enabled": false
     },
     {
+      "description": "ESLint major bumps must refresh eslint-config-next in the same lockfile.  A standalone eslint@10 pin on an older eslint-config-next left verify lint crashing (react/display-name: context.getFilename is not a function; board d428460a / PR #4325).",
+      "matchPackageNames": ["eslint", "eslint-config-next"],
+      "groupName": "eslint-toolchain"
+    },
+    {
       "matchPackagePatterns": ["^next$", "^react$", "^react-dom$"],
       "groupName": "next-react"
     },
