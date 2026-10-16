@@ -534,7 +534,7 @@ function listEarningsCallsCandidates(
 // cannot smuggle additional keys into the persisted record and have them read back as if they
 // were part of the decoded key.  Elements are parsed one at a time on purpose: a single
 // hand-edited or truncated element drops only itself instead of discarding every good retry.
-const EarningsCallsDecodeRetrySchema = z
+export const EarningsCallsDecodeRetrySchema = z
   .object({
     symbol: z.string(),
     fiscalYear: z.number(),

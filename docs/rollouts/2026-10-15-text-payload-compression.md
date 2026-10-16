@@ -107,3 +107,15 @@ would have lost.
 missing its `Linear ST-4534, PR #4720` reference.  That duplication is why the
 inconsistent entry existed at all, so all three were reduced to the single
 canonical entry, which keeps the full dual reference.
+
+**Follow-up: export the retry schema (Rule 21).**  Kody re-reviewed the merge
+and accepted the Zod change, then flagged that `EarningsCallsDecodeRetrySchema`
+was a bare `const`.  Rule 21 wants every Zod schema exported so it stays the
+single source of truth and a future caller does not re-write the shape by hand.
+It is now exported, and `test/corpus-reembed-adversarial.test.ts` covers the
+schema directly: a well-formed key parses, an injected extra field is rejected
+rather than absorbed, a missing field and a string quarter are rejected, and
+`NaN` / `Infinity` are rejected rather than stored as decoded keys.
+
+Re-verified after the export: `npx tsc --noEmit` exit 0, `npm run lint` exit 0,
+focused Vitest 27 passed across the codec, corpus-reembed and adversarial files.
