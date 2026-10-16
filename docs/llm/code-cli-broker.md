@@ -119,3 +119,8 @@ for cross-owner replay, stale sessions, tool requests, prompt-injected terminal
 commands, file reads, MCP setup, redirects, over-limit input/output, queue
 exhaustion, adapter crash, timeout/cancellation and workspace cleanup. Verify
 those controls from the broker's actual sandbox, not a self-reported response.
+
+
+## Review hardening (October16)
+
+The credential-bearing module is marked server-only. Browser reasoning controls use the pure llm-reasoning module, not the HTTP transport. The broker request preserves the caller abort signal; without one it has a150s bound, matching the strategy reasoning allowance rather than truncating at60s. Only the known unavailable broker configuration error is skipped during API-primary fallback planning; other resolution errors propagate. No paid fallback is added to a CLI-primary request.

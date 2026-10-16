@@ -6525,7 +6525,11 @@ async function proposeTrades(input: {
     let ep: ReturnType<typeof resolveLlmEndpoint>;
     try {
       ep = resolveLlmEndpoint({ ...input.policy, llmModel: fallbackModel }, input.userId);
-    } catch {
+    } catch (error) {
+      // Only an unavailable Code CLI fallback is expected here. Do not hide DB/runtime failures.
+      if (!(error instanceof Error) || error.message !== "Code CLI is disabled or not configured for this owner") throw error;
+      console.warn(`[Strategy] skipping unavailable Code CLI fallback ${fallbackModel}`);
+      audit("strategy_llm_failover", { reason: "code_cli_unavailable", model: fallbackModel, action: "skip" }, input.userId, input.policy.connectedAccountId);
       continue;
     }
     if (!ep.key) continue; // No credential for this provider's model — skip it rather than fail.

@@ -61,3 +61,16 @@ it("does not launch an already-cancelled request and bounds broker response byte
   fetcher.mockResolvedValue(new Response("x".repeat(1_000_001)));
   await expect(fetchCodeCli(codeCliUrl("minimax",owner),request())).rejects.toThrow("exceeds text limit");
 });
+
+it("preserves the caller timeout signal and defaults to the reasoning-safe bound", async () => {
+  configured();
+  const fetcher=vi.fn().mockImplementation(async () => Response.json({version:1,text:"answer",finishReason:"stop"}));
+  vi.stubGlobal("fetch",fetcher);
+  const controller=new AbortController();
+  await fetchCodeCli(codeCliUrl("minimax",owner),{...request(),signal:controller.signal});
+  expect(fetcher.mock.calls[0][1].signal).toBe(controller.signal);
+  const timeout=vi.spyOn(AbortSignal,"timeout");
+  await fetchCodeCli(codeCliUrl("minimax",owner),request());
+  expect(timeout).toHaveBeenCalledWith(150_000);
+  timeout.mockRestore();
+});

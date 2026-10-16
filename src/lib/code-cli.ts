@@ -1,3 +1,4 @@
+import "server-only";
 import { randomUUID } from "node:crypto";
 import { isPrimaryEmail, userIdForEmail } from "./auth/identity";
 
@@ -55,7 +56,7 @@ export async function fetchCodeCli(url: string, init: RequestInit): Promise<Resp
   }
   // Explicit reconstruction: no caller headers, API keys, tools, paths or extra body fields cross.
   const response = await fetch(process.env.CODE_CLI_BROKER_URL!, {
-    method: "POST", redirect: "error", signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000),
+    method: "POST", redirect: "error", signal: init.signal ?? AbortSignal.timeout(150_000),
     headers: { "content-type": "application/json", authorization: `Bearer ${process.env.CODE_CLI_BROKER_TOKEN}` },
     body: JSON.stringify({ version: 1, requestId: randomUUID(), ownerUserId: userId, adapter: service === "meta" ? "muse" : "minimax",
       model, messages: messages.map(({ role, content }) => ({ role, content })),
