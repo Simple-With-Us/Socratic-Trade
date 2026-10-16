@@ -1,7 +1,13 @@
 import "server-only";
 import { createHash, randomUUID } from "crypto";
 import { getDb } from "./db";
-import { isLocalDbFaultMessage, noteLocalDbFault } from "./local-db-fault";
+import {
+  HEALTH_FAILURE_CLASS_DEPENDENCY_DB,
+  isDependencyDbContentionMessage,
+  isLocalDbFaultMessage,
+  noteDependencyDbContention,
+  noteLocalDbFault
+} from "./local-db-fault";
 import { intentionalOffHealthReason, isIntentionalOffHealthService } from "./retired-direct-vendors";
 import { isFilingApiAuthErrorText } from "./filingapi-auth-classify";
 import { isTransientNetworkErrorText } from "./network-errors";
@@ -78,6 +84,19 @@ export function isTransientHealthFailure(errorText: string | null | undefined): 
   if (errorText.startsWith(HEALTH_TRANSIENT_FAILURE_PREFIX)) return true;
   if (isSoftHealthFailure(errorText)) return false;
   return isTransientNetworkErrorText(errorText);
+}
+
+/**
+ * Classifies the latest failure text for a dependency lane (ops / detailed health). Returns null when
+ * the text is a normal provider/transport failure.
+ */
+export function connectionHealthFailureClass(errorText: string | null | undefined): string | null {
+  if (!errorText) return null;
+  if (isDependencyDbContentionMessage(errorText)) return HEALTH_FAILURE_CLASS_DEPENDENCY_DB;
+  if (isLocalDbFaultMessage(errorText)) return "local-db-contention";
+  if (isTransientHealthFailure(errorText)) return "transient-network";
+  if (isSoftHealthFailure(errorText)) return "expected-limit";
+  return null;
 }
 
 /**
@@ -1038,6 +1057,47 @@ export async function alertConnectionFailure(
   try {
     const targetUserId = userId || "local";
     const actualKeySource = keySource || "none";
+    // Peer-app DB contention (Congress.Trade D1 SQLITE_BUSY on an HTTP-200 import) is NOT a broken
+    // share connection on ST. Record honestly and capture at warning — never the generic
+    // "<service> connection failed" title/`hard` class that pages P0 production rules (ST-3988).
+    if (isDependencyDbContentionMessage(errorText)) {
+      await noteDependencyDbContention({
+        lane: service,
+        operation: "connection health",
+        message: errorText,
+        userId: targetUserId
+      });
+      if (shouldSuppressConnectionAlertForStartup(process.uptime())) {
+        return;
+      }
+      const baseKey =
+        actualKeySource === "user"
+          ? `${HEALTH_ALERT_COOLDOWN_PREFIX}:${service}:${actualKeySource}:${targetUserId}:dependency-db`
+          : `${HEALTH_ALERT_COOLDOWN_PREFIX}:${service}:${actualKeySource}:dependency-db`;
+      const { getInternalSetting, setInternalSetting, audit } = await import("./db");
+      const now = Date.now();
+      const last = getInternalSetting<string>(baseKey);
+      if (last) {
+        const suppressedUntilMs = Date.parse(last);
+        if (Number.isFinite(suppressedUntilMs) && now < suppressedUntilMs) return;
+      }
+      setInternalSetting(baseKey, new Date(now + HEALTH_ALERT_COOLDOWN_MS).toISOString());
+      audit(
+        "dependency_db_contention_alert",
+        { service, keySource: actualKeySource, userId: targetUserId, errorText },
+        targetUserId
+      );
+      if (!opts?.skipSentry) {
+        await captureHealthSentryMessage("warning", `${service} dependency database contention`, {
+          service,
+          keySource: actualKeySource,
+          userSpecific: actualKeySource === "user",
+          failureClass: HEALTH_FAILURE_CLASS_DEPENDENCY_DB,
+          reason: errorText
+        });
+      }
+      return;
+    }
     // Local SQLite contention/misconfiguration incidental to a provider call is OUR fault, not the
     // vendor's. Never let it mint a "<service> connection failed" push; record it under its real
     // cause instead (audit row + threshold-gated "local database contention" advisory).
