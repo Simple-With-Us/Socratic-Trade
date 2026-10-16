@@ -154,7 +154,9 @@ function safeDestinationHostForLog(input: RequestInfo | URL): string {
 function errorClassForLog(error: unknown): string {
   if (error instanceof Error) {
     let current: unknown = error;
-    while (current instanceof Error) {
+    const visited = new Set<Error>();
+    for (let depth = 0; depth <= 4 && current instanceof Error && !visited.has(current); depth++) {
+      visited.add(current);
       const code = (current as { code?: unknown }).code;
       if (typeof code === "string" && code.length > 0) return code;
       current = current.cause;
@@ -222,15 +224,14 @@ export async function dataSourceFetch(
     recordProxyUse({ ...proxyUseLine, statusCode: res.status });
     return res;
   } catch (error) {
-    // Record the proxied attempt's outcome before any fallback handling, so
-    // a failed proxied request still gets its one log line.
+    // Caller cancellation is an outcome, not evidence of a broken proxy.
+    // Keep its one entry without inflating the watchdog's proxyErrors count.
+    if (init?.signal?.aborted) {
+      recordProxyUse({ ...proxyUseLine, cancelled: true });
+      throw error;
+    }
     recordProxyUse({ ...proxyUseLine, errorClass: errorClassForLog(error) });
     if (!isProxyLegError(error)) throw error;
-    // If the caller's own signal aborted, the proxied fetch's AbortError
-    // reflects caller intent (cancellation / higher-level timeout), NOT a
-    // proxy-leg failure. Honour the cancellation — do not silently mask it by
-    // kicking off a direct fetch the caller no longer wants.
-    if (init?.signal?.aborted) throw error;
     if (resolution.failureMode === "fail_closed") {
       throw new Error(
         `data-source proxy ${safeProxyHostForLog(resolution.proxyUrl)} unreachable and failure mode is fail_closed: ` +

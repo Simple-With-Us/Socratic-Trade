@@ -308,3 +308,43 @@ describe("dataSourceFetch proxy-use outcome logging", () => {
     expect(getProxyUseSnapshot().latest?.destination).toBe("(unparseable)");
   });
 });
+
+
+describe("proxy outcome logging edge cases", () => {
+  beforeEach(() => __resetProxyUseLogForTests());
+
+  it.each(["self", "mutual", "deep"])("bounds %s cause chains without changing the thrown error", async (kind) => {
+    const error = new Error("private-url-must-not-be-logged");
+    if (kind === "self") error.cause = error;
+    else if (kind === "mutual") error.cause = new Error("second", { cause: error });
+    else {
+      let current = error;
+      for (let i = 0; i < 100; i++) { const next = new Error("deep"); current.cause = next; current = next; }
+      Object.assign(current, { code: "TOO_DEEP" });
+    }
+    const { deps, calls } = makeDeps({
+      env: { RESIDENTIAL_PROXY_URL: "http://proxy.test:8888" },
+      proxiedFetchFactory: () => (async () => { throw error; }) as typeof fetch
+    });
+    await expect(dataSourceFetch("https://api.polygon.io/x", undefined, {}, deps)).rejects.toBe(error);
+    expect(getProxyUseSnapshot().latest).toMatchObject({ errorClass: "Error" });
+    expect(JSON.stringify(getProxyUseSnapshot())).not.toContain("private-url");
+    expect(calls.direct).toBe(0);
+  });
+
+  it.each(["AbortError", "TimeoutError", "Error"])("records caller %s cancellation without counting a proxy error or retrying", async (name) => {
+    const controller = new AbortController();
+    const error = Object.assign(new Error("caller stopped"), { name });
+    const { deps, calls } = makeDeps({
+      env: { RESIDENTIAL_PROXY_URL: "http://proxy.test:8888" },
+      proxiedFetchFactory: () => (async () => { controller.abort(); throw error; }) as typeof fetch
+    });
+    await expect(dataSourceFetch("https://api.polygon.io/x", { signal: controller.signal }, {}, deps)).rejects.toBe(error);
+    const snapshot = getProxyUseSnapshot();
+    expect(snapshot.total).toBe(1);
+    expect(snapshot.latest).toMatchObject({ usedProxy: true, cancelled: true, destination: "api.polygon.io" });
+    expect(snapshot.latest?.errorClass).toBeUndefined();
+    expect(snapshot.lastHour.proxyErrors).toBe(0);
+    expect(calls.direct).toBe(0);
+  });
+});

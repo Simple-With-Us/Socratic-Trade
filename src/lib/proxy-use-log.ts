@@ -55,6 +55,8 @@ export interface ProxyUseEntry {
    * `name` (AbortError, ...). Never the error message.
    */
   errorClass?: string;
+  /** Caller signal ended the request; not a proxy failure. */
+  cancelled?: boolean;
 }
 
 export interface ProxyUseSnapshot {
@@ -96,7 +98,7 @@ export function getProxyUseSnapshot(now: number = Date.now()): ProxyUseSnapshot 
     if (entry.ts < cutoff) continue;
     if (entry.usedProxy) {
       proxied += 1;
-      if (entry.errorClass) proxyErrors += 1;
+      if (entry.errorClass && !entry.cancelled) proxyErrors += 1;
     } else {
       direct += 1;
     }
