@@ -2,12 +2,14 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
 // Exposure surface of the PUBLIC /api/health probe (middleware PUBLIC_PREFIXES). The route emits a
 // full operator view only to a caller presenting the ops token; everyone else gets the same payload
-// minus three operator-only items (OpenRouter USD figures, host/DB byte counts, the lease owner's
-// pid). These tests pin BOTH halves: that the sensitive values are absent anonymously, and that they
-// are still there behind the token — i.e. that this is a projection, not a deletion.
+// minus operator-only items (OpenRouter USD figures, host/DB byte counts, the lease owner's pid,
+// and per-dependency `lastFailure` / `failureClass` from ST-3988). These tests pin BOTH halves:
+// that the sensitive values are absent anonymously, and that they are still there behind the token
+// — i.e. that this is a projection, not a deletion.
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-health-exposure-${randomUUID()}.db`)}`;
@@ -27,6 +29,41 @@ async function load() {
   const credits = await import("../src/lib/openrouter-credits");
   const healthRoute = await import("../app/api/health/route");
   return { db, lease, credits, healthRoute };
+}
+
+// `checks.dependencies` arrives from the route via `Response.json()`, so it is untrusted boundary
+// data. Validate it at the boundary instead of casting (Kody Rules 19 / 31).
+const healthDependencyEntrySchema = z
+  .object({
+    ok: z.boolean(),
+    degraded: z.boolean().optional(),
+    lastFailure: z.string().nullable().optional(),
+    failureClass: z.string().nullable().optional()
+  })
+  .passthrough();
+
+const healthDependenciesSchema = z.record(z.string(), healthDependencyEntrySchema).optional();
+
+type HealthDependencyEntry = z.infer<typeof healthDependencyEntrySchema>;
+type HealthDependencies = Record<string, HealthDependencyEntry>;
+
+/** Untrusted JSON from `Response.json()` — parse before any dependency comparison. */
+function parseHealthDependenciesFromJson(raw: unknown): HealthDependencies {
+  const parsed = healthDependenciesSchema.parse(raw);
+  return parsed ?? {};
+}
+
+/** Mirrors `projectHealthPayload` dependency stripping for anonymous /api/health. */
+function dependenciesWithoutOpsDetail(dependencies: HealthDependencies | undefined): HealthDependencies {
+  if (!dependencies) return {};
+  const stripped: HealthDependencies = {};
+  for (const [name, entry] of Object.entries(dependencies)) {
+    const copy = { ...entry };
+    delete copy.lastFailure;
+    delete copy.failureClass;
+    stripped[name] = copy;
+  }
+  return stripped;
 }
 
 /** Stub the OpenRouter /credits fetch so the balance block is populated deterministically. */
@@ -206,7 +243,15 @@ describe("/api/health exposure", () => {
     const [anonBody, detailBody] = [await anonymous.json(), await detailed.json()];
     expect(anonBody.ok).toBe(false);
     expect(detailBody.ok).toBe(false);
-    expect(anonBody.checks.dependencies).toEqual(detailBody.checks.dependencies);
+    const detailDeps = parseHealthDependenciesFromJson(detailBody.checks.dependencies);
+    const anonDeps = parseHealthDependenciesFromJson(anonBody.checks.dependencies);
+    expect(anonDeps).toEqual(dependenciesWithoutOpsDetail(detailDeps));
+    expect(detailDeps.pinecone).toMatchObject({
+      ok: false,
+      lastFailure: "Global Error",
+      failureClass: null
+    });
+    expect(anonDeps.pinecone).toEqual({ ok: false });
     expect(anonBody.checks.storageDegraded).toEqual(detailBody.checks.storageDegraded);
   });
 });
