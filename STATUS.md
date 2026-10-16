@@ -261,6 +261,8 @@ this sandbox's ambient env, not this PR.  `node --test scripts/ios-fleet/asc-api
 belongs in its own PR spanning `ship-testflight.sh`, `appstore-connect.env.example`,
 `check-drift.sh`, the `ios-fleet.sha256` pin, and `test-ship-seq.sh` (tracked as OPS-13).
 GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on merge.
+**Next.**  Ready for review.  Deployer ships.  Do not mark completed until merge.
+
 ## 2026-10-15 Cursor Cloud — ST-4531 retire Slack callers
 
 **What.**  PR #4696 merged to `main` (Slack ops callers → Zulip / `agent-sync-fleet-post.sh`; Infisical Zulip triple via `infisical-secrets-safe.sh get` in Actions).  Follow-up branch fixes rollout merge-conflict markers left on `main`, adds regression tests, and answers post-merge Kody threads on #4696.
@@ -297,6 +299,14 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 
 **Next.**  Ready PR with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.
 **Next.**  PR #4720 ready for review.  Merged `origin/main` at `df7e6d10`.  #4722 had not landed, so its retention rewrite is not in this branch.  Review follow-up: codec columns so the backfill does not scan blobs, watermark after a successful pass, framed `raw1:` lengths, re-embed keeps a decode retry list, and `hasLocalFilingCopy` is one indexed length check.
+## 2026-10-15 Cursor Cloud — withhold stale EOD on the Congress.Trade wire (ST-3845)
+
+**What.**  A price series or the S&P series whose newest close is behind `latestCompletedTradingSessionEtKey` is no longer pushed to Congress.Trade.  `GET /api/market/prices` and `GET /api/market/spx` return 502 `{ ok: false, error: "stale" }` for that tail so Congress.Trade falls back.  A confirmed empty series stays HTTP 200.  The push writes `congress_share_stale_price_withheld`.  PR #4009 still only stops a stale import from beating a live source.
+
+**Branch.**  `cursor/stale-eod-wire-ed52`.  Linear ST-3845.  Claim moved from GROK (2026-09-30, no implementation) under the sweep rule.
+
+**Next.**  Ready for review.  Deployer ships.  Do not mark completed until merge.
+
 ## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
 
 **What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.
@@ -323,6 +333,17 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 **Verification.**  Targeted vitest 22/22 plus transcript/reembed/hydrate/local-complete/memory-decay 75/75.  `npx tsc --noEmit` clean.  eslint on touched files 0 errors.  `npm test` 9379 passed, 51 skipped, 25 failed in unrelated suites (llm keys, notify, server-metrics, cpuprofile, alpha-vantage, data-providers).  None import the new codec.
 
 **Next.**  PR #4720 ready for review.  `npm run build` exited 0.
+## 2026-10-15 Cursor Cloud — ESLint 10 verify unblock (board d428460a)
+
+**What.**  Renovate `eslint` v10 failed `verify` when the lockfile left `eslint-config-next@16.3.8` (PR #4325).  Rebased lock with `eslint-config-next@16.4.0` passes lint; grouped `eslint` + `eslint-config-next` in Renovate to avoid stale-preset repeats.
+
+**Branch.**  `cursor/block-eslint-10-renovate-5081` — PR #4710 (ready; supersedes #4691)
+
+**Verification.**  Branch contains `origin/main` at `308cdcec` (2026-10-16 GB-Deployer follow-up).  Head `708ea785`.  `npm run lint` 0 errors; `npx tsc --noEmit` ok.  CI run 38870215394: `verify` + `verify-hosted` + gitleaks + Kody green.
+
+**Next.**  Jay human squash-merge (`needs-human-merge`); close #4691.  Auto-merge disarmed.
+
+**Linear.**  ST-4535 (claimed CURSOR, **Addressed** / In Review) — board `d428460a`.
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
