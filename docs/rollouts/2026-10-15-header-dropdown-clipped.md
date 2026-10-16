@@ -16,6 +16,8 @@ Root cause: the ChromeBar row in `app/console/components/shell.tsx` is `overflow
 
 The `overflow-x: auto` 320px guard itself is unchanged; the panels escape it instead.
 
+Review round (bot findings, all verified real and fixed): focus now moves into each panel on open via `useMenuInitialFocus` (the portal changed DOM tab order; close already returned focus to the trigger); the first measurement is synchronous in the effect so the click-away backdrop never exists without its panel; scroll/resize re-positioning is rAF-throttled and skips unchanged positions; closing resets the measurement so a reopen cannot flash stale coordinates. `anchoredMenuPosition` is a pure exported function with unit tests (`test/use-anchored-menu.test.ts`). A visual-suite test (`console header account dropdown` in `test/e2e/visual.spec.ts`) screenshots the open menu; its baseline is regenerated in CI with the repo's `update-visual-baselines` dispatch and committed from that artifact (baselines are chromium-linux).
+
 ## Decisions & Trade-offs
 
 Portal-to-`.console-root` + fixed positioning was chosen over removing the overflow guard (which would reintroduce horizontal page overflow at ~320px) and over portaling to `<body>` (loses the scoped theme variables, verified visually).  Panel widths, gaps (4px scope / 2px menus), backdrop, Escape, and focus-return behavior are unchanged.  The native `<select>`s in the proxy settings card are unrelated to this bug and untouched.

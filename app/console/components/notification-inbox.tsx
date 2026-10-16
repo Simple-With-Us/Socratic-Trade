@@ -16,7 +16,7 @@ import { cx } from "../lib/format";
 import { useConsoleData } from "../lib/useConsoleData";
 import { Ago, Btn } from "../ui/primitives";
 import { useToast } from "../ui/toast";
-import { useAnchoredMenu } from "../ui/use-anchored-menu";
+import { useAnchoredMenu, useMenuInitialFocus } from "../ui/use-anchored-menu";
 
 const INBOX_PREVIEW = 8;
 
@@ -27,6 +27,7 @@ export function NotificationInbox({ snapshot }: { snapshot: DashboardSnapshot })
   // Portaled + fixed: the header bar's overflow-x guard would clip an
   // absolutely positioned panel to the bar height (ST-4544).
   const menu = useAnchoredMenu(triggerRef, open, { align: "right", width: 380, gap: 2 });
+  const panelRef = useMenuInitialFocus(open, Boolean(menu.style));
   const { refresh } = useConsoleData();
   const toast = useToast();
   const activeAccountId = activeConnectedAccount(snapshot)?.id;
@@ -94,6 +95,8 @@ export function NotificationInbox({ snapshot }: { snapshot: DashboardSnapshot })
           {menu.style && menu.container &&
             createPortal(
               <div
+                ref={panelRef}
+                tabIndex={-1}
                 role="dialog"
                 aria-label="Notifications"
                 style={menu.style}

@@ -8,6 +8,8 @@
 
 **Also verified, no code change.**  The pasted 502 (2026-10-15 23:29:43 UTC) was the deploy-restart window of sha `fad904bcd` (live health `processStartedAt` 23:29:54 UTC); prod healthy on live URLs.  The per-user Data Source Proxy feature already exists and is unrelated.
 
+**Review round.**  Bot review findings fixed in a second commit: focus moves into each panel on open (portal changed DOM tab order), first measurement is synchronous (no backdrop-without-panel frame), scroll/resize updates are rAF-throttled and skip unchanged positions, close resets the measurement, `anchoredMenuPosition` is extracted pure with `test/use-anchored-menu.test.ts` (5/5), and `test/e2e/visual.spec.ts` gained an open-dropdown screenshot test (baseline regenerated in CI per repo flow).
+
 **Next.**  Land, confirm auto-deploy on live health URLs, close ST-4544.
 
 ## 2026-10-15 CODEX — PR #4662 takeover

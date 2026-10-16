@@ -48,7 +48,7 @@ import { useToast } from "../ui/toast";
 import { BREAKER_FIRED_NOTE } from "@/lib/guardrail-copy";
 import { Btn, Chip, Dot, Meter, TextInput } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
-import { useAnchoredMenu } from "../ui/use-anchored-menu";
+import { useAnchoredMenu, useMenuInitialFocus } from "../ui/use-anchored-menu";
 
 // ── Reality banner ───────────────────────────────────────────────────────────
 
@@ -101,6 +101,7 @@ export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compa
   // Portaled + fixed: the header bar's overflow-x guard would clip an
   // absolutely positioned panel to the bar height (ST-4544).
   const menu = useAnchoredMenu(triggerRef, open, { align: "left", width: 360 });
+  const panelRef = useMenuInitialFocus(open, Boolean(menu.style));
   const active = activeConnectedAccount(snapshot);
   // Active account hoisted first, the rest after — same order the switch list
   // reads top-to-bottom. Mirrors the Broker connections settings card.
@@ -251,6 +252,8 @@ export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compa
           {menu.style && menu.container &&
             createPortal(
               <div
+                ref={panelRef}
+                tabIndex={-1}
                 role="dialog"
                 aria-label="Account scope"
                 style={menu.style}
@@ -888,6 +891,7 @@ export function UserMenu({
   // Portaled + fixed: the header bar's overflow-x guard would clip an
   // absolutely positioned panel to the bar height (ST-4544).
   const menu = useAnchoredMenu(triggerRef, open, { align: "right", width: 340, gap: 2 });
+  const panelRef = useMenuInitialFocus(open, Boolean(menu.style));
   const user = snapshot.currentUser;
 
   const close = () => {
@@ -936,6 +940,8 @@ export function UserMenu({
           {menu.style && menu.container &&
             createPortal(
               <div
+                ref={panelRef}
+                tabIndex={-1}
                 style={menu.style}
                 className="con-menu-drop w-[min(92vw,340px)] rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-4 shadow-xl"
               >

@@ -19,10 +19,13 @@
  *
  *  Returns `{ style, container }`, both empty while closed or before the
  *  first measurement, so callers render the panel only when both exist.
- *  Recomputes on resize and on any scroll while open — the bar is sticky,
- *  but the row itself can scroll horizontally on phones. */
+ *  The first measurement is synchronous in the effect (no frame where the
+ *  backdrop exists without the panel); later updates are rAF-throttled and
+ *  skipped when the computed position is unchanged, so scrolling inside a
+ *  panel's own list does not churn renders. Closing resets the measurement,
+ *  so a reopen never flashes the previous position. */
 
-import { useEffect, useState, type CSSProperties, type RefObject } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 
 export interface AnchoredMenu {
   style: CSSProperties | undefined;
@@ -30,6 +33,20 @@ export interface AnchoredMenu {
 }
 
 const CLOSED: AnchoredMenu = { style: undefined, container: null };
+
+/** Pure geometry: the fixed top/left for a panel of the given width under a
+ *  trigger rect, clamped to an 8px viewport margin on both sides. */
+export function anchoredMenuPosition(
+  rect: { left: number; right: number; bottom: number },
+  viewportWidth: number,
+  opts: { align: "left" | "right"; width: number; gap?: number }
+): { top: number; left: number } {
+  const gap = opts.gap ?? 4;
+  const w = Math.min(opts.width, Math.max(0, viewportWidth - 16));
+  const desired = opts.align === "left" ? rect.left : rect.right - w;
+  const left = Math.max(8, Math.min(desired, Math.max(8, viewportWidth - w - 8)));
+  return { top: Math.round(rect.bottom + gap), left: Math.round(left) };
+}
 
 export function useAnchoredMenu(
   triggerRef: RefObject<HTMLElement | null>,
@@ -41,28 +58,65 @@ export function useAnchoredMenu(
 
   useEffect(() => {
     if (!open) return;
+    let raf = 0;
     const update = () => {
       const el = triggerRef.current;
       if (!el) return;
-      const r = el.getBoundingClientRect();
-      const vw = window.innerWidth;
-      const w = Math.min(width, Math.max(0, vw - 16));
-      const desired = align === "left" ? r.left : r.right - w;
-      const left = Math.max(8, Math.min(desired, Math.max(8, vw - w - 8)));
-      setMeasured({
-        style: { position: "fixed", top: Math.round(r.bottom + gap), left: Math.round(left), zIndex: 50 },
-        container: el.closest(".console-root") ?? document.body
+      const { top, left } = anchoredMenuPosition(el.getBoundingClientRect(), window.innerWidth, {
+        align,
+        width,
+        gap
+      });
+      const container = el.closest(".console-root") ?? document.body;
+      setMeasured((prev) =>
+        prev.container === container &&
+        (prev.style as { top?: number } | undefined)?.top === top &&
+        (prev.style as { left?: number } | undefined)?.left === left
+          ? prev
+          : { style: { position: "fixed", top, left, zIndex: 50 }, container }
+      );
+    };
+    const schedule = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        update();
       });
     };
-    const raf = requestAnimationFrame(update);
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
+    update();
+    window.addEventListener("resize", schedule);
+    window.addEventListener("scroll", schedule, true);
     return () => {
-      cancelAnimationFrame(raf);
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
+      if (raf) cancelAnimationFrame(raf);
+      window.removeEventListener("resize", schedule);
+      window.removeEventListener("scroll", schedule, true);
     };
   }, [open, triggerRef, align, width, gap]);
 
   return open ? measured : CLOSED;
+}
+
+/** Moves keyboard focus into an opened menu panel (first focusable control,
+ *  else the panel itself) once per open. Portaled panels sit at the end of
+ *  `.console-root` in DOM order, so without this, Tab from the trigger would
+ *  traverse the whole page before reaching the menu. The existing close
+ *  paths return focus to the trigger. Returns the ref to attach to the
+ *  panel element (which needs `tabIndex={-1}` as the fallback target). */
+export function useMenuInitialFocus(open: boolean, ready: boolean) {
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const focusedRef = useRef(false);
+
+  useEffect(() => {
+    if (!open) {
+      focusedRef.current = false;
+      return;
+    }
+    if (!ready || focusedRef.current) return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    focusedRef.current = true;
+    (panel.querySelector<HTMLElement>("button:not([disabled]), a[href]") ?? panel).focus();
+  }, [open, ready]);
+
+  return panelRef;
 }
