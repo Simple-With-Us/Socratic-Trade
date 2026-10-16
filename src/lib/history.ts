@@ -836,6 +836,14 @@ async function fetchTradier(symbol: string, startDate: string, key: string | und
 
 const twelveDataNumber = z.union([z.string(), z.number()]);
 
+// `.passthrough()` on both objects is deliberate and the reason is recorded here rather than left
+// implicit.  Twelve Data's `/time_series` payload carries a top-level `meta` block and each bar can
+// carry keys beyond OHLCV.  `.strict()` was rejected on purpose: `fetchTwelveData` treats a
+// `safeParse` failure as a provider outage and returns null, so a single unmodelled upstream key
+// would silently drop every Twelve Data lookback in production instead of surfacing as a type
+// error.  The `meta` block we know about is modelled explicitly below so that known drift stays
+// visible in the type rather than being absorbed invisibly, and nothing downstream reads any of the
+// passthrough keys.
 export const TwelveDataBarSchema = z
   .object({
     datetime: z.string().min(1),
@@ -850,6 +858,18 @@ export const TwelveDataBarSchema = z
 export const TwelveDataTimeSeriesSchema = z
   .object({
     status: z.string().optional(),
+    // Twelve Data documents symbol / interval / currency / exchange / timezone / type.
+    meta: z
+      .object({
+        symbol: z.string().optional(),
+        interval: z.string().optional(),
+        currency: z.string().optional(),
+        exchange: z.string().optional(),
+        timezone: z.string().optional(),
+        type: z.string().optional()
+      })
+      .passthrough()
+      .optional(),
     values: z.array(TwelveDataBarSchema).optional()
   })
   .passthrough();

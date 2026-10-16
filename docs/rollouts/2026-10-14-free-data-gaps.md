@@ -206,3 +206,33 @@ Board row `b53cc5f8970c469e8f561767c35fc334` is claimed in progress by GROK.  Fl
 ## Zero-Code Findings
 
 Stooq was already removed from the cascade; `parseStooqCsv` remains for imported files.  `history_cache_eod` was already a permanent upsert, so "cache historical bars permanently" did not need a new table or a retention delete.  The insider partials were the catalog default of 60 atom filings plus `.slice(0, 20)` on the watchlist, not the XBRL time budget or the RTH filing-body cap.  Direct Quiver access stays retired.
+
+## Merge-main and review follow-up (MM takeover, 2026-10-16)
+
+Cursor's shepherd errored with no handoff, so MM picked this up from the PR diff
+and description and worked the review findings directly.
+
+`origin/main` (`a5d45401e`) is merged with a merge commit — no rebase, no
+force-push.  No conflicts.
+
+**Findings addressed.**
+
+`STATUS.md` printed the literal prefix of the sandbox `OPENROUTER_API_KEY`.  It
+now reads `(value redacted)`, so the line still describes the environment
+without committing any characters of the key.  The 13 failures it describes are
+unaffected: they are environmental and reproduce on pristine `main`.
+
+`src/lib/history.ts` — `TwelveDataBarSchema` and `TwelveDataTimeSeriesSchema`
+used `.passthrough()` without justification.  `.strict()` was rejected on
+purpose rather than applied: `fetchTwelveData` treats a `safeParse` failure as a
+provider outage and returns null, so one unmodelled upstream key would silently
+drop every Twelve Data lookback rather than surface as a type error.  The
+rationale is now recorded above both schemas and the documented top-level `meta`
+block is modelled explicitly, so known upstream drift stays visible in the type
+instead of being absorbed invisibly.
+
+`PLAN.md` and `STATUS.md` — the Tradier sandbox 9:46am entry named only its
+branch.  It is PR #4685 (merged as `174cc06eb`), and no board reservation was
+ever filed for it, so both entries now read `PR #4685` plus
+`no board reservation on file` instead of inventing a board id.  `PLAN.md` also
+carried that entry twice; the duplicate was removed.
