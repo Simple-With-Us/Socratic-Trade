@@ -22,6 +22,22 @@ Portal-to-`.console-root` + fixed positioning was chosen over removing the overf
 
 Separately verified, not part of this change: the owner's pasted 502 (2026-10-15 23:29:43 UTC, Ray a4b29b837f9e3822) was the deploy-restart window of sha `fad904bcd` (live `/api/health` reports `processStartedAt` 23:29:54 UTC on that sha); production was healthy on live URLs when checked (`ok: true`, db ok, scheduler fresh, all static chunks 200).
 
+## 2026-10-16 review round (PR #4761, autofix)
+
+Review bots on the PR raised six threads.  Three were real defects in `use-anchored-menu.ts`, all fixed in the same file:
+
+1. **Dismiss-on-open race** (Kody, high).  On the first render after `open` flips true the hook returned `CLOSED`, because the measurement only ran inside a `requestAnimationFrame`.  The click-away backdrop mounts in the same commit as `open`, so a click landing in that ~16ms window hit the backdrop and closed the menu the user had just opened.  Fix: call `update()` synchronously in the effect body, then schedule the rAF only for later resize/scroll.
+2. **Per-scroll-tick re-render** (Kody, high/perf).  The capture-phase `window` scroll listener dispatched `setMeasured({...})` with a fresh object literal on every event — including scrolls inside the notification panel's own `overflow-auto` list, where the trigger rect has not moved — reconciling the whole portal subtree per tick.  Fix: compare `container` and the computed `position`/`top`/`left` against the previous measurement and return `prev` unchanged when identical, so React bails out of the re-render.
+3. **Unthrottled listener** (Kody, perf).  Same root cause, listener side.  Fix: route `resize` and `scroll` through a `schedule()` that coalesces bursts into at most one `requestAnimationFrame`, replacing the unconditional per-event `update`.
+
+A fourth finding (Sentry, low) — `measured` is not reset on close, so a reopen can paint one frame at the previous open's coordinates — is fixed too: the effect sets `measured` back to the module-level `CLOSED` constant when `open` is false, which React bails out of when nothing changed.
+
+The effect's dependency array is unchanged (`[open, triggerRef, align, width, gap]`); `align`/`width`/`gap` are destructured primitives from an inline `opts` object at all three call sites, so keeping them as deps costs no extra listener churn.
+
+Two Kody threads asking for committed `toHaveScreenshot()` baselines for the three dropdown panels are **not** addressed here, deliberately.  The repo generates visual baselines in CI, not from a code seat: `e2e.yml` exposes a `workflow_dispatch` input `update-visual-baselines` that regenerates the PNGs with the CI browser against the production build and uploads them as an artifact to download and commit.  This seat has no Playwright browsers installed, and a `toHaveScreenshot()` assertion added without its baseline PNG fails the run rather than self-generating, so committing the assertion alone would break CI.  Raised with the maintainer on the PR instead of guessing.
+
+Verification for this round: `npx tsc --noEmit` clean, `npm run build` green, `test/console-a11y.test.ts` 11/11.  The full `npm test` run is red in this seat, but not because of this change: `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/openrouter-credits.test.ts`, and `test/framework-review.test.ts` fail because this cloud seat injects ambient LLM provider env vars (`resolveLlmEndpoint` picks `openrouter` where the test expects `anthropic`/`xai`/`moonshot`/`minimax`, and the credential the test expects to be `undefined` is populated instead).  Confirmed pre-existing by stashing this diff and re-running exactly those four files on the clean branch — byte-identical failures.  Two environment traps worth recording for the next seat: `node_modules` started empty here, and `npx tsc --noEmit` against an empty tree reports several hundred false `TS2591 Cannot find name 'process'` / `TS2307 Cannot find module 'vitest'` errors — run `npm ci` first or the trio's first step is pure noise.  A bare `npx tsc --noEmit` exit code is also not a sufficient signal on its own; read the error text before concluding the branch is broken.
+
 ## Verification State
 
 ```bash
