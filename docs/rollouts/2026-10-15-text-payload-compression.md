@@ -117,5 +117,15 @@ schema directly: a well-formed key parses, an injected extra field is rejected
 rather than absorbed, a missing field and a string quarter are rejected, and
 `NaN` / `Infinity` are rejected rather than stored as decoded keys.
 
-Re-verified after the export: `npx tsc --noEmit` exit 0, `npm run lint` exit 0,
-focused Vitest 27 passed across the codec, corpus-reembed and adversarial files.
+Re-verified after the export, in the required order:
+
+```bash
+npm run lint
+# exit 0
+npx tsc --noEmit
+# exit 0
+npx vitest run test/corpus-reembed-adversarial.test.ts test/corpus-reembed.test.ts test/text-payload-codec.test.ts
+# 3 files, 27 tests passed
+npm run build
+# exit 0
+```
