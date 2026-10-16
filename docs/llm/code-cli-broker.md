@@ -30,6 +30,21 @@ never a command or a trade instruction. ST's existing JSON/schema and risk gates
 still apply after text generation. If an adapter cannot guarantee these
 restrictions, return an error rather than weaken them.
 
+## Existing host session (read-only snapshot, October 16, 2026, 10:50 CT)
+
+Muse Code 1.4.9 was already running as root in the foreground of tmux
+`codex-session`, pane `%0`, in `/root` (PID 2997645, shell PID 40546), with an
+attached client.  No running MiniMax Code process was found in that snapshot,
+which does not invalidate the installed/authenticated CLI state.  Neither CLI
+had a matching running system service.  No pane contents were read and no
+session was attached to or changed.
+
+The live Muse session is the owner's interactive session, not a broker.  Do
+not feed requests into its terminal, attach to it, share its session state or
+move its credentials as part of this app patch.  Establishing a dedicated
+non-root broker identity/authentication path is a separate activation task.
+The existing session is not evidence that a headless isolated adapter works.
+
 ## Activation, separately approved
 
 All five settings are required:
