@@ -4,6 +4,34 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 
 # Current Status
 
+## 2026-10-15 Cursor Cloud — ST-3988 congress-share dependency DB health
+
+**What.**  Congress.Trade D1 `SQLITE_BUSY` import rejections no longer page as `congress-share connection failed`.  `alertConnectionFailure` routes them to `dependency-db-contention` (warning Sentry, no `provider_degraded` push).  Ops-token `/api/health` exposes `lastFailure` + `failureClass` on dependencies.
+
+**Branch.**  `cursor/st-3988-congress-share-health-classifier-4a0e`
+
+**Verification.**  Merged `origin/main` again (CT push-receipt lane).  Seer thread: fix in
+`aff5cf20`, thread left open pending reviewer ack.  ST-3092 `live-route` pins.  Lint/tsc + targeted
+vitest green before push; CI `verify` gate pending.
+
+**Next.**  PR #4706 ready for review; Deployer merges.
+
+**2026-10-15 [codex-autofix] — PR #4706 review pass (round 8).**  Three open Kody threads, two
+of them duplicates of the same finding: (1) Rule 26 wanted the ST-3988 rollout note's
+Verification State block to carry per-command `-> ok` tokens instead of a bare bash block —
+fixed, it is now a bulleted list in command order; (2)+(3) Rules 19/31 flagged the
+`as Record<string, unknown>` cast on `detailBody.checks.dependencies` in
+`test/health-route-exposure.test.ts` — fixed by validating the route JSON at the trust
+boundary with `healthDependenciesSchema` (`z.record(z.string(), z.unknown()).optional()`) and
+passing the parsed value to `dependenciesWithoutOpsDetail`, dropping the assertion.  No
+production Zod schema exists for the `/api/health` payload, so the test declares a local one
+rather than reusing a production export.  Re-verified on this branch: `npx vitest run
+test/health-route-exposure.test.ts` 6/6, `npm run lint` 0 errors, `npx tsc --noEmit` clean,
+`npm run build` clean.  Full `npm test` exits 0; the 13 `::error` annotations it prints are all
+in `llm-provider` / `chat-llm` / `framework-review` / `openrouter-credits`, none of which this
+PR touches.  Reproduced identically on an unmodified `origin/main` worktree — the runner has live
+LLM provider keys in its env, so the "no key configured" assertions fail there too.  Pre-existing
+environment issue, not this PR; left untouched.  All three threads resolved.  Auto-merge enabled.
 ## 2026-10-15 Cursor Cloud — run-failure watchdog re-arm flake (ST-4521)
 
 **What.**  Halt marker `since` used the watchdog tick entry `now`, which could precede the halt `policy_change` audit.  `resolveRearmTimestamp` then picked an older active `policy_change` as `rearmedAt`, disagreeing with the real re-arm receipt by a few ms (flaky CI on `test/run-failure-watchdog.test.ts:298`).
