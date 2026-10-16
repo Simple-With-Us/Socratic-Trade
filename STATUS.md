@@ -32,6 +32,15 @@ in `llm-provider` / `chat-llm` / `framework-review` / `openrouter-credits`, none
 PR touches.  Reproduced identically on an unmodified `origin/main` worktree — the runner has live
 LLM provider keys in its env, so the "no key configured" assertions fail there too.  Pre-existing
 environment issue, not this PR; left untouched.  All three threads resolved.  Auto-merge enabled.
+## 2026-10-15 Cursor Cloud — run-failure watchdog re-arm flake (ST-4521)
+
+**What.**  Halt marker `since` used the watchdog tick entry `now`, which could precede the halt `policy_change` audit.  `resolveRearmTimestamp` then picked an older active `policy_change` as `rearmedAt`, disagreeing with the real re-arm receipt by a few ms (flaky CI on `test/run-failure-watchdog.test.ts:298`).
+
+**Branch.**  `cursor/flaky-run-failure-watchdog-rearm-58b5`
+
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  `npx vitest run test/run-failure-watchdog.test.ts` 23/23.  Targeted re-arm test 30/30.  `npm run build` ok.
+
+**Next.**  Open PR ready for review; merge via Deployer when `verify` is green.
 ## 2026-10-15 Codex Autofix — PR #4662 merge main at 3f4ef5e5, no review finding open
 
 **What.**  `origin/main` advanced to `3f4ef5e5` (ST-2582 "Approve succeeds only when the broker order is placed", #4698) while PR #4662 was open, and GitHub moved it from BLOCKED to `CONFLICTING`.  Merged main in.  One content conflict in `docs/phase-7-strategy.md` — main added the 2026-10-15 approve entry directly above this PR's 2026-10-14 embed entry — resolved by keeping both, newest first.  `PLAN.md` and `STATUS.md` auto-merged with both entries intact.
