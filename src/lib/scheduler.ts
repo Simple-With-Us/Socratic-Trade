@@ -28,6 +28,7 @@ import { pineconeWuExhaustedUntil } from "./pinecone-wu-breaker";
 import { runWatchlistDigestIfDue } from "./watchlist-digest";
 import { runAuditPruneYieldingIfDue } from "./audit-prune";
 import { runStorageHygieneIfDue } from "./sqlite-storage-hygiene";
+import { backfillCompressedTextPayloadsIfDue } from "./text-payload-backfill";
 import {
   applyBrokerOrderPlacementPause,
   brokerPauseAccountScope,
@@ -1010,6 +1011,18 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
       summary: `dryRun=${result.dryRun} shrinkBytes=${result.expectedFileShrinkBytes} deleted=${result.deletedRows}`
     };
   }).catch((err) => console.error("[scheduler] storage hygiene error:", err));
+
+  // In-place gzip of transcript bodies and companyfacts JSON cache. Leader only.
+  // The lane probes text_codec / segment_codec (indexed), then reads one body
+  // at a time and yields. It does not scan blob columns and does not delete rows.
+  void journalLane("text-payload-backfill", {}, async () => {
+    const result = await backfillCompressedTextPayloadsIfDue();
+    if (!result) return { status: "skipped" as const, summary: "not due" };
+    return {
+      status: "ok" as const,
+      summary: `transcripts=${result.transcripts} secFacts=${result.secFacts}`
+    };
+  }).catch((err) => console.error("[scheduler] text payload backfill error:", err));
 
   // Open an honest Sentry Crons job after the leader gate: only the process running the tick
   // body reports, so idle followers cannot mask a dead leader. `ok` is sent in `finally` once
