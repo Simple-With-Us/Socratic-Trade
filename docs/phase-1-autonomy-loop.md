@@ -16,6 +16,16 @@ non-empty Green/Red failover chain never becomes empty when every lane is coolin
 all-billing cooldowns. A manual billing/credit fix can therefore recover on the next run instead
 of waiting out the cooldown TTL.
 
+2026-10-15 broker-call bounds (Linear ST-2570): every broker read and write has a deadline and
+an abort signal, order listings are page-capped and row-capped, and quote batches are chunked.
+The scheduler launches stops, stale exits, and fill reconcile for every eligible account before
+it awaits that account's health probe, so one hung probe cannot delay the next account's
+protection.  A hung read releases the stop and exit in-flight guards.  A broker write that has
+already started keeps its guard so the next tick cannot send it twice.  A strategy run whose
+health probe or pre-decision snapshot never returns is finished `failed` with a timeout summary.
+An abort that lands after the stop is claimed, and before `placeEquityOrder`, reverts that claim
+and keeps the attempt id, so the position is not left `triggered` until the 15-minute re-arm grace.
+
 ## Objective
 
 Make `policy.enabled` actually drive autonomous strategy runs on a schedule, safely:
