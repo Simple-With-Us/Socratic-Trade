@@ -248,3 +248,16 @@ the follow-up section below.  Full-repo search for `sk-cp` returns zero hits.
 This branch is squash-merged per protocol, so the intermediate commits that
 carried the prefix collapse away; under a history-preserving merge the prefix
 would stay reachable and the key should be rotated.
+
+## Autofix round and the heading that reintroduced the prefix (MM, 2026-10-16)
+
+The `claude[bot]` autofix round correctly redacted a second occurrence of the
+key prefix in this file's verification block.  Its own new `STATUS.md` heading
+then named the prefix literally, which put the very string the finding is about
+back into the repository.  The heading now reads "last API-key prefix in the
+rollout note".
+
+No credential material was exposed either way — a provider prefix with nothing
+after it is not a key — but the point of the finding is that credential-shaped
+strings should not be committed at all, and leaving it would simply earn the
+same finding again on the next review.

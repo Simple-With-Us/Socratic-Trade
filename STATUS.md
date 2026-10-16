@@ -1,4 +1,4 @@
-## 2026-10-16 CLAUDE (autofix) — PR #4661 review round, last `sk-cp-` prefix in the rollout note
+## 2026-10-16 CLAUDE (autofix) — PR #4661 review round, last API-key prefix in the rollout note
 
 **What.**  Third autofix round on PR #4661 (`cursor/free-data-gaps-55d1`).  Kody's re-review confirmed the two previously-open threads as addressed with no further code change: the `.passthrough()` justification on `TwelveDataTimeSeriesSchema` (the rule's "justified passthrough" limb is met — rationale recorded above both schemas and the known `meta` block modelled explicitly, so `.strict()` was correctly declined rather than omitted) and the `PLAN.md` Tradier sandbox entry naming PR #4685 plus `no board reservation on file`.
 
