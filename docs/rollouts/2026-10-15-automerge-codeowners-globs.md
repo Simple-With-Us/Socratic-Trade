@@ -127,3 +127,32 @@ Lint passed with 0 errors (866 existing warnings); TypeScript passed; focused Vi
 ## Zero-Code Findings
 
 - Agent-Sync `linear_claim` returns `not_configured` for CURSOR (`LINEAR_SEATS` is GROK-WEB only).  The claim was made with the board CLI as the Cursor Linear app.  Zulip post returned `not_authorized` (no CURSOR Zulip key on the MCP host).
+
+## Merge-main (MM takeover, 2026-10-16)
+
+Cursor's agents hit their quota, so MM is taking this branch to the owner for
+review.  This PR is NOT merged and auto-merge stays unarmed; the `do-not-automerge`
+hold stays on.  The sections above are the original Cursor record and are left as
+written.
+
+`origin/main` (`a5d45401e`) is merged with a merge commit — no rebase, no
+force-push.  No conflicts; the branch touches only the workflow, its scripts,
+its tests and docs, and `main` had moved in none of them.
+
+Gate re-run after the merge:
+
+```bash
+npm run lint
+npx tsc --noEmit
+npx vitest run test/automerge-gate-dry-run.test.ts test/branch-protection-gate.test.ts test/disable-pr-automerge.test.ts
+npm run build
+```
+
+All four exit 0.  Focused Vitest 21 tests passed.
+
+Why the hold stays even though the PR is ready: this diff adds
+`permissions: contents: write` to the three `disable-*` jobs so they can turn
+auto-merge off with an elevated token.  Granting write scope to the job that
+disables merges is the owner's call, and ST-4393 shows `GH_PAT` /
+`SHEPHERD_TOKEN` still return 401, so the elevated-token path this PR depends on
+is not yet working.  It needs Jay's review before it lands.
