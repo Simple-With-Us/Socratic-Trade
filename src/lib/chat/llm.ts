@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { llmRouteFor } from "../llm-route";
 import { codeCliUrl } from "../code-cli";
 // Provider-agnostic LLM contract: run({ system, message, tools, executeTool, context }) drives a
@@ -67,6 +68,11 @@ function recordChatUsage(
 }
 
 const MAX_STEPS = 5;
+
+/** Chat-completions envelope the code-cli broker adapter returns; validated before indexing. */
+const CodeCliChatResponseSchema = z.object({
+  choices: z.array(z.object({ message: z.object({ content: z.string() }) })).min(1)
+});
 
 export interface Intent {
   intent: "alert" | "order" | "watchlist_add" | "kb" | "positions" | "watchlist_view" | "alerts_view" | "advice" | "quote" | "fundamentals" | "market_signals" | "chat";
@@ -843,10 +849,10 @@ export function llmForModel(
           ...(args.history ?? []).map(turn => ({ role: turn.role, content: turn.text })),
           { role: "user", content: args.message }
         ] }) });
-      const result = await res.json();
-      recordChatUsage({ userId, keySource: "user", keyRef: "code-cli", context: "chat" }, cliFamily,
+      const result = CodeCliChatResponseSchema.parse(await res.json());
+      recordChatUsage({ userId: userId ?? "local", keySource: "user", keyRef: "code-cli", context: "chat" }, cliFamily,
         cliModel, 0, 0, false);
-      return { text: String(result.choices[0].message.content), toolCalls: [], citations: [] };
+      return { text: result.choices[0].message.content, toolCalls: [], citations: [] };
     } };
   }
 

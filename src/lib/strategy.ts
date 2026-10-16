@@ -6519,7 +6519,15 @@ async function proposeTrades(input: {
   ];
   const fallbackModelList = !url.startsWith("code-cli://") && Array.isArray(input.policy.llmFallbackModels) ? input.policy.llmFallbackModels : [];
   for (const fallbackModel of fallbackModelList.filter((m): m is string => typeof m === "string").map((m) => m.trim()).filter(Boolean)) {
-    const ep = resolveLlmEndpoint({ ...input.policy, llmModel: fallbackModel }, input.userId);
+    // A fallback model whose provider is misconfigured (e.g. a code-cli route that is not ready)
+    // throws out of resolveLlmEndpoint. Skip it like the no-credential case rather than aborting
+    // the whole proposal phase and leaving the run with zero proposals.
+    let ep: ReturnType<typeof resolveLlmEndpoint>;
+    try {
+      ep = resolveLlmEndpoint({ ...input.policy, llmModel: fallbackModel }, input.userId);
+    } catch {
+      continue;
+    }
     if (!ep.key) continue; // No credential for this provider's model — skip it rather than fail.
     bullAttempts.push({
       url: ep.url,

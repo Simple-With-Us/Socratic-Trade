@@ -37,7 +37,8 @@ export async function fetchCodeCli(url: string, init: RequestInit): Promise<Resp
   }
   if (init.method !== "POST" || typeof init.body !== "string") throw new Error("Code CLI requires a text request");
   if (Buffer.byteLength(init.body, "utf8") > 1_000_000) throw new Error("Code CLI request exceeds text limit");
-  const body = JSON.parse(init.body) as Record<string, unknown>;
+  let body: Record<string, unknown>;
+  try { body = JSON.parse(init.body) as Record<string, unknown>; } catch { throw new Error("Code CLI requires a JSON request body"); }
   const messages = body.messages;
   if (body.stream || body.tools || body.functions || !Array.isArray(messages) || !messages.length || messages.length > 100) {
     throw new Error("Code CLI is text-only: streaming and tools are disabled");
