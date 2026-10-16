@@ -46,6 +46,7 @@
 
 import { audit, getInternalSetting, setInternalSetting, getDb } from "../db";
 import { normalizeSymbol } from "../money";
+import { z } from "zod";
 import {
   storeDocument,
   storeContexts,
@@ -528,20 +529,28 @@ function listEarningsCallsCandidates(
   `).all(...params) as EarningsCallsCandidateRow[];
 }
 
-interface EarningsCallsDecodeRetry {
-  symbol: string;
-  fiscalYear: number;
-  fiscalQuarter: number;
-}
+// Boundary data: `getInternalSetting` hands back `unknown`, so the retry list is validated with a
+// schema rather than cast.  `.strict()` rejects extra and unknown fields, so a future writer
+// cannot smuggle additional keys into the persisted record and have them read back as if they
+// were part of the decoded key.  Elements are parsed one at a time on purpose: a single
+// hand-edited or truncated element drops only itself instead of discarding every good retry.
+const EarningsCallsDecodeRetrySchema = z
+  .object({
+    symbol: z.string(),
+    fiscalYear: z.number(),
+    fiscalQuarter: z.number()
+  })
+  .strict();
+
+type EarningsCallsDecodeRetry = z.infer<typeof EarningsCallsDecodeRetrySchema>;
 
 function readEarningsCallsDecodeRetries(value: unknown): EarningsCallsDecodeRetry[] {
   if (!Array.isArray(value)) return [];
   const keys: EarningsCallsDecodeRetry[] = [];
   for (const item of value) {
-    if (!item || typeof item !== "object") continue;
-    const row = item as EarningsCallsDecodeRetry;
-    if (typeof row.symbol !== "string" || !Number.isFinite(row.fiscalYear) || !Number.isFinite(row.fiscalQuarter)) continue;
-    keys.push({ symbol: row.symbol, fiscalYear: row.fiscalYear, fiscalQuarter: row.fiscalQuarter });
+    const parsed = EarningsCallsDecodeRetrySchema.safeParse(item);
+    if (!parsed.success) continue;
+    keys.push(parsed.data);
   }
   return keys;
 }

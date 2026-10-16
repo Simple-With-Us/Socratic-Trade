@@ -82,3 +82,28 @@ Merged `origin/main` through `49a76da4` (#4695 Congress push receipt, #4716 iOS 
 ## Zero-Code Findings
 
 None.  The review document is the written half.  The codec is the code half.
+
+## Merge-main and review follow-up (MM takeover, 2026-10-16)
+
+Cursor's agents hit their quota, so MM is landing this branch.  The sections
+above are the original Cursor record and are left as written.
+
+`origin/main` (`a5d45401e`) is merged with a merge commit — no rebase, no
+force-push.  No conflict: main's `strategy_runs_user_started_index` landed as
+migration 95 and the codec columns as 96, so the two did not collide and the
+twelve `getSchemaVersion` / `applyVersionedMigrations` assertions stay at 96.
+
+**Review findings addressed.**
+
+`src/lib/rag/corpus-reembed.ts` no longer casts the boundary value.  The
+decode-retry list is now a `.strict()` Zod object inferred into its type, so
+extra and unknown keys in the persisted settings record are rejected instead of
+being read back as if they were part of the decoded key.  Elements are parsed
+one at a time on purpose: a single hand-edited element drops only itself, which
+preserves the original skip-bad-row behaviour that a whole-array `safeParse`
+would have lost.
+
+`PLAN.md` carried three entries for this one workstream, two complete and one
+missing its `Linear ST-4534, PR #4720` reference.  That duplication is why the
+inconsistent entry existed at all, so all three were reduced to the single
+canonical entry, which keeps the full dual reference.
