@@ -17,6 +17,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { EarningsCallsDecodeRetrySchema } from "../src/lib/rag/corpus-reembed";
 
 process.env.DATABASE_URL = `file:${join(tmpdir(), `socratic-corpus-reembed-adv-${randomUUID()}.db`)}`;
 process.env.ENCRYPTION_KEY = "0".repeat(64);
@@ -353,4 +354,31 @@ describe("corpus-reembed adversarial: symbol-scoped runs can never unlock the le
     expect(mocks.deleteMany).not.toHaveBeenCalled();
   }, 120_000);
 
+});
+
+describe("EarningsCallsDecodeRetrySchema", () => {
+  const valid = { symbol: "AAPL", fiscalYear: 2025, fiscalQuarter: 3 };
+
+  it("accepts a well-formed decoded key", () => {
+    expect(EarningsCallsDecodeRetrySchema.safeParse(valid).success).toBe(true);
+  });
+
+  it("rejects unknown fields instead of absorbing them", () => {
+    // The retry record is persisted in the settings table.  An extra key must not ride
+    // along and read back as if it were part of the decoded key on the next run.
+    const parsed = EarningsCallsDecodeRetrySchema.safeParse({ ...valid, injected: "x" });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("rejects a missing field and a non-numeric quarter", () => {
+    expect(EarningsCallsDecodeRetrySchema.safeParse({ symbol: "AAPL", fiscalYear: 2025 }).success).toBe(false);
+    expect(
+      EarningsCallsDecodeRetrySchema.safeParse({ ...valid, fiscalQuarter: "3" }).success
+    ).toBe(false);
+  });
+
+  it("rejects non-finite numbers rather than storing them as decoded keys", () => {
+    expect(EarningsCallsDecodeRetrySchema.safeParse({ ...valid, fiscalYear: NaN }).success).toBe(false);
+    expect(EarningsCallsDecodeRetrySchema.safeParse({ ...valid, fiscalYear: Infinity }).success).toBe(false);
+  });
 });
