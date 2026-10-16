@@ -94,11 +94,12 @@ npm run build      # full Next.js build; also re-checks types
 
 Web UI is verified via Playwright screenshot assertions with committed baselines (`test/e2e/visual.spec.ts`, baselines under `test/e2e/visual.spec.ts-snapshots/`).  Jay never takes manual screenshots or runs local UI preview sessions.  Native Mac UI is verified through code review and CI.
 
-`npm run lint` runs `eslint .` against `eslint.config.mjs` (flat config). It is
-pinned to **ESLint 9**, not 10: `eslint-config-next@16` bundles
-`eslint-plugin-react@7.x`, which calls `context.getFilename()` — an API ESLint 10
-removed, so ESLint 10 throws `getFilename is not a function` at load. Keep
-`eslint` on `^9` until a Next/react-plugin release supports ESLint 10. ESLint
+`npm run lint` runs `eslint .` against `eslint.config.mjs` (flat config). **ESLint
+10** is allowed when `eslint-config-next` is current (>= 16.4.0 in the lockfile):
+a standalone Renovate eslint major on a stale `eslint-config-next` pin left verify
+red with `react/display-name` / `getFilename is not a function` (see
+`docs/rollouts/2026-10-15-eslint-10-verify-unblock.md`). Renovate groups
+`eslint` + `eslint-config-next` under `eslint-toolchain`. ESLint
 exits non-zero only on **errors**, not warnings; a large grandfathered backlog
 (`@typescript-eslint/no-explicit-any`, `react-hooks/set-state-in-effect`, etc.)
 is intentionally pinned to "warn" in `eslint.config.mjs` so the gate is green
@@ -735,8 +736,8 @@ local multi-worktree/PM2 setup and does NOT apply here.
  `npm approve-scripts`/rebuild step is needed.
 - `npm run lint` is now configured (`eslint.config.mjs`, flat config extending
  `eslint-config-next`) and is a REQUIRED step in the `verify` CI gate. It is
- pinned to ESLint 9 (ESLint 10 is incompatible with `eslint-config-next@16`'s
- bundled react plugin — see the "Verify before claiming done" section). It fails
+ on ESLint 10 with `eslint-config-next@16.4+` (stale locks on older Next eslint
+ presets broke lint — see the "Verify before claiming done" section). It fails
  only on errors; an existing backlog is grandfathered to "warn".
 - No secrets or API keys are required to boot the app or browse it. `DATABASE_URL` defaults to
  `file:./data/app.db` (`src/lib/db.ts`) — that database is app infrastructure (settings, proposals,
