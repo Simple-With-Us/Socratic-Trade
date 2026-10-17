@@ -5,12 +5,13 @@
 
 import "server-only";
 import Database from "better-sqlite3";
-import { mkdirSync } from "fs";
+import { mkdirSync, statSync } from "fs";
 import { dirname, resolve } from "path";
 import { resetDrizzleForTesting } from "./db/client";
 import crypto from "crypto";
 import { DEFAULT_POLICY, DEFAULT_SCORING_WEIGHTS, DEFAULT_STRATEGY_PROMPT } from "./defaults";
 import { SQLITE_BUSY_PIN_MS } from "./sqlite-event-loop";
+import { installSlowSqliteTiming } from "./sqlite-slow-timing";
 import type { NotificationEventType, TradingPolicy } from "./types";
 
 let db: Database.Database | undefined;
@@ -90,6 +91,7 @@ export function getDb(): Database.Database {
   const path = databasePath();
   mkdirSync(dirname(path), { recursive: true });
   db = new Database(path);
+  installSlowSqliteTiming(db, { walBytes: () => walSizeBytes(path) });
   db.function("account_subject_token", { deterministic: true }, (value: unknown) => accountSubjectToken(String(value ?? "")));
   db.function("account_setting_matches_subject", { deterministic: true }, accountSettingMatchesSubject);
   // Before journal_mode.  The WAL switch writes the file header, and auto_vacuum
@@ -117,6 +119,15 @@ export function getDb(): Database.Database {
   installAccountWriteFenceTriggers(db);
   assertEncryptionKeyAvailable(db);
   return db;
+}
+
+/** Size of `<db>-wal` for the slow-call log (ST-4542); null when there is no WAL file. */
+function walSizeBytes(dbPath: string): number | null {
+  try {
+    return statSync(`${dbPath}-wal`).size;
+  } catch {
+    return null;
+  }
 }
 
 /** INCREMENTAL sticks only when it is set before the first user table. */

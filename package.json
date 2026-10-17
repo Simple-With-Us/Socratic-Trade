@@ -16,6 +16,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:e2e": "playwright test",
+    "test:e2e:admin": "playwright test -c playwright.admin.config.ts",
     "test:e2e:headed": "playwright test --headed",
     "gitleaks": "gitleaks detect --source . --verbose",
     "litestream:replicate": "bash scripts/run-litestream.sh",

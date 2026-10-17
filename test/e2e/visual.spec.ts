@@ -1,5 +1,4 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { installPlaywrightSession } from "./playwright-session";
 
 /**
  * Visual regression — full-page screenshot assertions with committed baselines
@@ -203,8 +202,7 @@ test.describe("visual regression", () => {
     });
   }
 
-  test("console autonomy desk", async ({ page, context }) => {
-    await installPlaywrightSession(context);
+  test("console autonomy desk", async ({ page }) => {
     await setupDeterministicPage(page);
     await page.goto("/console", { waitUntil: "domcontentloaded" });
 
@@ -286,74 +284,11 @@ test.describe("visual regression", () => {
     await assertStableScreenshot(page, "header-profile-menu.png", liveMasks(page));
   });
 
-  test("login page", async ({ page, context }) => {
-    await installPlaywrightSession(context);
+  test("login page", async ({ page }) => {
     await setupDeterministicPage(page);
     await page.goto("/login", { waitUntil: "domcontentloaded" });
     await expect(page.getByRole("main")).toBeVisible({ timeout: 30_000 });
 
     await assertStableScreenshot(page, "login.png");
-  });
-
-  test("admin enrichment coverage retired lanes footnote", async ({ page, context }) => {
-    await installPlaywrightSession(context);
-    await setupDeterministicPage(page);
-    await page.route("**/api/admin/enrichment-coverage**", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          ok: true,
-          available: true,
-          history: [],
-          report: {
-            asOf: "2026-10-15T12:00:00.000Z",
-            symbolCount: 2,
-            retiredLaneFields: [
-              "congressTradesQuiver",
-              "insiderTradesQuiver",
-              "govContractsQuiver",
-              "lobbyingQuiver",
-              "patentsQuiver"
-            ],
-            fields: [
-              {
-                field: "peRatio",
-                filledCount: 2,
-                totalSymbols: 2,
-                fillRate: 1,
-                winningSources: { "yahoo-finance": 2 },
-                mostFrequentSource: "yahoo-finance",
-                missingSymbols: []
-              }
-            ],
-            missingFields: ["eps"],
-            partialFields: [],
-            sourceWinTotals: { "yahoo-finance": 2 },
-            providerFailures: [],
-            contributingSources: ["yahoo-finance"],
-            headlines: {
-              field: "headlines",
-              filledCount: 1,
-              totalSymbols: 2,
-              fillRate: 0.5,
-              winningSources: { "alpaca-news": 1 },
-              mostFrequentSource: "alpaca-news",
-              missingSymbols: ["MSFT"]
-            }
-          }
-        })
-      });
-    });
-
-    await page.goto("/admin/enrichment-coverage", { waitUntil: "domcontentloaded" });
-    const footnote = page.getByTestId("enrichment-coverage-retired-lanes");
-    await expect(footnote).toBeVisible({ timeout: 30_000 });
-    await expect(footnote).toContainText("congressTradesQuiver");
-    await freezeMotion(page);
-    await expect(footnote).toHaveScreenshot("enrichment-coverage-retired-lanes-footnote.png", {
-      animations: "disabled",
-      maxDiffPixelRatio: 0.01
-    });
   });
 });

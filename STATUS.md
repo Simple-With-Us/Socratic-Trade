@@ -47,6 +47,8 @@ Gate after the merge: `npm run lint` exit 0 (871 warnings, 0 errors).  `npx tsc 
 
 **Gate (2026-10-16, renumber to 97).**  `npm run lint` exit 0 (871 warnings, 0 errors).  `npx tsc --noEmit` exit 0.  `npm test` 13 failures, every one in a file outside this diff and every one reproduced identically on an unmodified `origin/main` checkout (`llm-provider`, `openrouter-credits`, `framework-review`, `chat-llm` — provider tests asserting an absent key that this sandbox supplies).  Not a regression from the renumber; `test/persistence-hardening.test.ts` and `test/text-payload-codec.test.ts` pass.  `npm run build` exit 0.
 
+**Merge-main round 4 (CLAUDE, 2026-10-17).**  `origin/main` (`b39ed8a7d`) merged with a merge commit.  #4707 landed the ST-3854 half of this branch with its final design (separate `playwright.admin.config.ts` admin suite, auth-unconfigured smoke harness).  The three conflicts (`playwright.config.ts`, `test/e2e/playwright-session.ts`, the ST-3854 rollout note) and the rest of this branch's ST-3854 e2e scaffolding take `main`'s version, and the superseded helpers are removed.  The PR diff against `main` is now ST-8 only.  Migration 97 is still unique (`main` tops out at 96).  Detail in `docs/rollouts/2026-10-15-restart-sweep-instance-grace.md`.
+
 **Next.**  MM squash-merges with auto-merge armed at Jay's direction (2026-10-16); the `do-not-automerge` hold Jay applied on 2026-10-15 is being lifted for this PR only, not for #4727.  Note for the owner: this diff does touch two CODEOWNERS live-money paths — `src/lib/db-execution.ts` and `src/lib/scheduler.ts` — which is why it was held.  Kody re-review previously failed on provider (MiniMax-M3 HTTP 404), so `reviewDecision` stays `CHANGES_REQUESTED` until Kody posts a review on the current head.  `dismiss_stale_reviews_on_push` is false on ruleset 21771270, so pushing alone will not clear it; the review must be re-run, not dismissed.  The two screenshot threads are substantively satisfied by the committed spec and baseline and are resolved on that basis.
 
 ## 2026-10-15 Cursor Cloud — ST-3988 congress-share dependency DB health
@@ -227,6 +229,59 @@ clean, `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-ev
 `origin/main` worktree — this runner has a live `OPENROUTER_API_KEY` that those tests assume
 is absent.  Pre-existing, outside this diff, left untouched.  Both remaining open threads
 resolved (Sentry's index-alignment finding verified fixed in `93da2abb`).
+## 2026-10-15 codex-autofix — PR #4707 (AUTH_SECRET literal finding)
+
+**What.**  Round 1 on `cursor/st-quiver-coverage-sanitize-8696`.  The two Kody visual-coverage threads were
+already handled in a prior round (asked, not guessed).  This round the only new threads were two instances of
+one finding: a hardcoded `PLAYWRIGHT_AUTH_SECRET` fallback string (length and value deliberately not
+recorded here per rule 35) duplicated at `playwright.config.ts:19` and `test/e2e/playwright-session.ts:6` — removed from the tree in
+concurrent-agent follow-ups (`playwright-admin-auth.ts` + CI `openssl rand`).
+
+**Branch.**  `cursor/st-quiver-coverage-sanitize-8696`
+
+**Fixed by a concurrent agent while this round was in flight.**  I had intended to escalate rather than fix:
+Kody's suggested hard-throw could not be applied from a fixer seat without also setting the secret in
+`e2e.yml` (a `.github/workflows` edit), and unset it would fire on every smoke run including push-to-main.
+Another agent landed a superset fix instead — the literal is gone from the tree entirely.  The admin suite
+reads `PLAYWRIGHT_AUTH_SECRET` from env, **hard-throws under `CI`**, and falls back to a per-worktree
+`0600` random secret file locally (`test/e2e/playwright-admin-auth.ts`); the throwaway `ENCRYPTION_KEY` is
+likewise derived via sha256 instead of a literal (`test/e2e/playwright-throwaway-fixtures.ts`).  That is
+better than the suggestion: it keeps the fail-closed posture Kody wanted without a repo literal at all.
+Note it also edits `e2e.yml` (generates the secret with `openssl rand -hex 32`) — legitimate for that agent,
+out of bounds for this fixer role.
+
+**This round's own change.**  None to production source.  A local merge of `origin/main` turned out redundant
+(`main` was already merged by the concurrent work) and was dropped; the commit carries only these docs.
+
+**Thread state.**  Both AUTH_SECRET threads anchored to code that no longer exists and are outdated;
+resolved this round per protocol.
+
+**Verification.**  `npx tsc --noEmit` clean; `npm run build` clean.  `npm test` exits 1 with 13 failures across
+4 LLM-routing suites (`llm-provider`, `chat-llm`, `framework-review`, `openrouter-credits`) that reproduce
+identically on a clean `origin/main` worktree — this sandbox has provider keys injected, and those suites
+assume none.  The PR's own suites are green (28/28).  Full detail in the rollout note.
+
+## 2026-10-15 codex-autofix — PR #4707 round 2 (char-count metadata in redacted docs)
+
+**What.**  Round 2 on `cursor/st-quiver-coverage-sanitize-8696`.  All 7 threads from round 1 were
+already resolved, and each finding was confirmed addressed in the tree: the AUTH_SECRET /
+ENCRYPTION_KEY literals are gone (`test/e2e/playwright-admin-auth.ts` env-read with a hard throw
+under `CI`, per-worktree `0600` fallback locally; `playwrightThrowawayEncryptionKey()` sha256-derived),
+and the enrichment-coverage footnote has real Playwright screenshot coverage in
+`test/e2e/admin-enrichment-coverage-visual.spec.ts`.  Kody's review reports success on the head.
+
+**The one new item.**  A low-severity Kody thread flagged that the redacted-fallback description still
+recorded the literal's character count, which it read as 36 rather than the 38 the doc claimed.  Fixed by
+**dropping the count entirely** rather than correcting it — Kody's own primary recommendation, and the
+right call: the length is itself metadata about the secret, so publishing an accurate number is no better
+than publishing a wrong one.  Applied to both `STATUS.md` and the rollout note.
+
+**Verification.**  `npx tsc --noEmit` clean.  `npm test` and `npm run build` carried no source change
+this round (docs only), so CI's `verify-hosted` on the head is the authoritative gate.
+
+**Thread state.**  That single thread resolved this round per protocol; no other review-bot thread was
+left open and none was left unfixed.
+
 **Next.**  PR #4720 ready for review.  Merged `origin/main` at `e3ba1507` (#4716 iOS ASC credentials).  #4722 had not landed, so its retention rewrite is not in this branch.  Stripped accidental conflict markers from `docs/rollouts/2026-10-15-st-4531-retire-slack-callers.md` that were already on main.  Review follow-up is in `a938fd2a` (codec columns, watermark after pass, framed `raw1:`, decode retry list, indexed `hasLocalFilingCopy`).
 ## 2026-10-15 CURSOR — Board 512444e3 iOS / Playwright / deploy-freshness CI
 

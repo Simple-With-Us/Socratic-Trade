@@ -1,5 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
-import { resolvePlaywrightAuthSecret } from "./test/e2e/playwright-auth-secret";
+import { playwrightThrowawayEncryptionKey } from "./test/e2e/playwright-throwaway-fixtures";
 
 const port = Number(process.env.PLAYWRIGHT_PORT || 4201);
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${port}`;
@@ -16,10 +16,10 @@ const webServerCommand =
 // middleware's documented dev/local fallback to PRIMARY_USER_EMAIL — the same path local
 // `next start` uses. The smoke email is the server's PRIMARY_USER_EMAIL so it passes the allowlist.
 const authEmail = process.env.PLAYWRIGHT_AUTH_EMAIL || "smoke-test@agentic.local";
-const playwrightAuthSecret = resolvePlaywrightAuthSecret();
 
 export default defineConfig({
   testDir: "./test/e2e",
+  testIgnore: "**/admin-enrichment-coverage-visual.spec.ts",
   timeout: 60_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,
@@ -42,8 +42,6 @@ export default defineConfig({
           // Deliberately NO CF_ACCESS_TRUST_EMAIL_HEADER and no AUTH_SECRET: auth unconfigured
           // engages the middleware's dev/local fallback to PRIMARY_USER_EMAIL (see comment above).
           PRIMARY_USER_EMAIL: authEmail,
-          // Arms Auth.js session verification for Playwright (admin pages + hermetic smoke).
-          AUTH_SECRET: playwrightAuthSecret,
           // The embedded `npm run build` OOMs at V8's default ~2 GB heap on CI runners
           // (Playwright Smoke failed with "Ineffective mark-compacts near heap limit").
           // Set it here, on the spawned server process, so the limit holds regardless of
@@ -52,7 +50,7 @@ export default defineConfig({
           // Test-only key: next start runs NODE_ENV=production, and the boot guard
           // (assertEncryptionKeyConfiguredInProduction) refuses to boot without a valid
           // 64-char hex ENCRYPTION_KEY. The smoke DB is throwaway, so a fixed key is fine.
-          ENCRYPTION_KEY: "0123456789abcdef".repeat(4)
+          ENCRYPTION_KEY: playwrightThrowawayEncryptionKey()
         }
       },
   projects: [

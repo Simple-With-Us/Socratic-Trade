@@ -1,5 +1,4 @@
 import { expect, test, type Page } from "@playwright/test";
-import { installPlaywrightSession } from "./playwright-session";
 
 async function acceptConsentIfShown(page: Page): Promise<void> {
   const consent = page.getByRole("dialog", { name: "Terms, Privacy, and Shared Data" });
@@ -12,8 +11,7 @@ async function acceptConsentIfShown(page: Page): Promise<void> {
   await expect(consent).toBeHidden({ timeout: 15_000 });
 }
 
-test("dashboard loads the core trading workspace", async ({ page, context }) => {
-  await installPlaywrightSession(context);
+test("dashboard loads the core trading workspace", async ({ page }) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
 
   // First-paint budget 30s, not the 10s expect default: the intro shell renders no text until

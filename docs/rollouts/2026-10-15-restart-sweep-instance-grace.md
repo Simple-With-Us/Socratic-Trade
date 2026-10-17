@@ -151,3 +151,43 @@ Verified after the renumber, in the repo-mandated order:
   including `test/persistence-hardening.test.ts` (the twelve renumbered
   version assertions) and `test/text-payload-codec.test.ts` from `main`.
 - `npm run build` — exit 0.
+
+## Merge-main round 4 — ST-3854 half now comes from `main` (CLAUDE, 2026-10-17)
+
+`origin/main` (`b39ed8a7d`) is merged with a merge commit — no rebase, no force-push.
+It brings #4707 (ST-3854), #4739 (ST-4542), #4784 and #4805.
+
+**#4707 landed the ST-3854 half of this branch with a different final design.**
+This branch had been carrying an earlier iteration of the ST-3854 work (the
+second half of the PR description).  #4707 shipped it with the smoke harness
+deliberately left auth-unconfigured and the admin footnote visual in its own
+suite: `playwright.admin.config.ts`, `test/e2e/admin-enrichment-coverage-visual.spec.ts`,
+`test/e2e/playwright-admin-auth.ts` and a generated per-run CI secret in
+`.github/workflows/e2e.yml`.  The merge conflicted in `playwright.config.ts`,
+`test/e2e/playwright-session.ts` and the ST-3854 rollout note (add/add).
+
+All three conflicts, and the rest of this branch's ST-3854 e2e scaffolding, take
+`main`'s version, because `main` is the landed, final form of the same feature.
+Keeping both sides would have put `AUTH_SECRET` back into the default smoke
+harness that #4707 deliberately removed, and run the footnote visual twice.  It
+would also have left two `PLAYWRIGHT_AUTH_SECRET` sources in `e2e.yml`.
+
+- Taken from `main`: `playwright.config.ts`, `test/e2e/playwright-session.ts`,
+  `docs/rollouts/2026-10-15-st-3854-quiver-coverage-sanitize.md` (main's copy is a
+  superset of this branch's), `test/e2e/visual.spec.ts`,
+  `test/e2e/console-a11y.spec.ts`, `test/e2e/dashboard-smoke.spec.ts`,
+  `.github/workflows/e2e.yml`.
+- Removed as superseded: `test/e2e/playwright-auth-secret.ts`,
+  `test/e2e/playwright-base-url.ts`, `test/playwright-auth-secret.test.ts`,
+  `test/playwright-base-url.test.ts`, and
+  `test/e2e/visual.spec.ts-snapshots/enrichment-coverage-retired-lanes-footnote-chromium-linux.png`
+  (main keeps the same baseline under the admin spec's snapshot folder).
+
+The "Review threads on the shepherd merges" and `visual.spec.ts` paragraphs above
+describe that earlier iteration and are left as written.  After this merge, the
+PR's diff against `main` is ST-8 only.
+
+**Migration check.**  `main`'s highest migration is still 96
+(`text_payload_codec_columns`).  #4739 touched `src/lib/db.ts` (slow-call timing)
+without adding a migration, so ST-8's `strategy_runs_owner_instance` stays **97**
+and is unique.
