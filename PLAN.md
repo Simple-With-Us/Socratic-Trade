@@ -2596,5 +2596,5 @@ Production served a public 503 while healthy: `/api/live` intermittently took 8.
 This is MITIGATION.  The root cause is the non-convergent FTS mirror loop fixed in PR #3202; stalls up to 36,511ms were measured, which a 15s timeout still cannot absorb.  Next action: land PR #3202.
 
 
-## ST-4545 review follow-up, October16
+## ST-4545 review follow-up, October 16
 Separate browser-safe reasoning exports from server transport; keep original llm-request exports compatible. Verify integrated API-key chips with fixture statuses and no live broker. Broker activation remains blocked on final empty tool inventory/cancel/renewal verification. No production changes or workflow approvals.

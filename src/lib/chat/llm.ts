@@ -69,10 +69,14 @@ function recordChatUsage(
 
 const MAX_STEPS = 5;
 
-/** Chat-completions envelope the code-cli broker adapter returns; validated before indexing. */
+/** Chat-completions envelope fetchCodeCli (code-cli.ts) builds from a validated broker reply.
+ *  Strict and exact, so any other shape fails before indexing. */
 const CodeCliChatResponseSchema = z.object({
-  choices: z.array(z.object({ message: z.object({ content: z.string() }) })).min(1)
-});
+  choices: z.array(z.object({
+    message: z.object({ role: z.literal("assistant"), content: z.string() }).strict(),
+    finish_reason: z.enum(["stop", "length"])
+  }).strict()).min(1)
+}).strict();
 
 export interface Intent {
   intent: "alert" | "order" | "watchlist_add" | "kb" | "positions" | "watchlist_view" | "alerts_view" | "advice" | "quote" | "fundamentals" | "market_signals" | "chat";

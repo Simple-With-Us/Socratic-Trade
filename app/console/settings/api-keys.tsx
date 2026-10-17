@@ -181,7 +181,7 @@ export function ApiKeysCard() {
                 const credName = entry.credentialName ?? "key";
                 const source = entry.route === "code-cli"
                   ? { chip: entry.codeCliAvailable ? "server CLI selected" : "server CLI unavailable",
-                      title: "This route uses the server CLI broker, not an API key. Server setup and CLI availability are required.",
+                      title: "This route uses the server CLI broker, not an API key.  Server setup and CLI availability are required.",
                       tone: "muted" as const }
                   : getSourceCopy(entry.source, credName);
                 const isEditing = editing === entry.service;

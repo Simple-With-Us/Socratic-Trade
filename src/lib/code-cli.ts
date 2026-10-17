@@ -1,10 +1,43 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import { isPrimaryEmail, userIdForEmail } from "./auth/identity";
 
 /** Private, text-only broker contract. This module never reads CLI credentials or spawns a process. */
 export const CODE_CLI_PREFIX = "code-cli://";
 export type CodeCliService = "meta" | "minimax";
+
+/** A capability the route never enables: the field must be absent, null or false. */
+const Disabled = z.union([z.undefined(), z.null(), z.literal(false)]).optional();
+
+const CodeCliMessageSchema = z.object({
+  role: z.enum(["system", "user", "assistant"]),
+  content: z.string(),
+  tool_calls: Disabled,
+  function_call: Disabled
+});
+
+/** Inbound OpenAI-style body.  Deliberately not .strict(): ST callers also send sampling fields such
+ *  as temperature (red-team.ts), and the broker payload below is rebuilt from an allowlist, so no
+ *  unknown key ever crosses to the broker. */
+const CodeCliRequestSchema = z.object({
+  model: z.string().optional(),
+  messages: z.array(z.unknown()).min(1).max(100),
+  stream: Disabled,
+  tools: Disabled,
+  functions: Disabled,
+  max_tokens: z.number().nullish(),
+  max_completion_tokens: z.number().nullish(),
+  response_format: z.unknown().optional()
+});
+
+/** Broker response contract v1 (docs/llm/code-cli-broker.md).  Only text and finishReason are
+ *  forwarded into the completion ST builds below, so any other broker field is dropped here. */
+const CodeCliBrokerResponseSchema = z.object({
+  version: z.literal(1),
+  text: z.string().refine((text) => text.trim().length > 0),
+  finishReason: z.enum(["stop", "length"])
+});
 
 export function codeCliOwner(userId: string | undefined): boolean {
   const owner = process.env.CODE_CLI_OWNER_USER_ID?.trim();
@@ -38,19 +71,15 @@ export async function fetchCodeCli(url: string, init: RequestInit): Promise<Resp
   }
   if (init.method !== "POST" || typeof init.body !== "string") throw new Error("Code CLI requires a text request");
   if (Buffer.byteLength(init.body, "utf8") > 1_000_000) throw new Error("Code CLI request exceeds text limit");
-  let body: Record<string, unknown>;
-  try { body = JSON.parse(init.body) as Record<string, unknown>; } catch { throw new Error("Code CLI requires a JSON request body"); }
-  const messages = body.messages;
-  if (body.stream || body.tools || body.functions || !Array.isArray(messages) || !messages.length || messages.length > 100) {
-    throw new Error("Code CLI is text-only: streaming and tools are disabled");
-  }
-  for (const message of messages) {
-    if (!message || typeof message !== "object" || !["system", "user", "assistant"].includes(message.role)
-      || typeof message.content !== "string" || message.tool_calls || message.function_call) {
-      throw new Error("Code CLI accepts only plain text messages");
-    }
-  }
-  const model = typeof body.model === "string" ? body.model : "";
+  let raw: unknown;
+  try { raw = JSON.parse(init.body); } catch { throw new Error("Code CLI requires a JSON request body"); }
+  const parsedBody = CodeCliRequestSchema.safeParse(raw);
+  if (!parsedBody.success) throw new Error("Code CLI is text-only: streaming and tools are disabled");
+  const body = parsedBody.data;
+  const parsedMessages = z.array(CodeCliMessageSchema).safeParse(body.messages);
+  if (!parsedMessages.success) throw new Error("Code CLI accepts only plain text messages");
+  const messages = parsedMessages.data;
+  const model = body.model ?? "";
   if (!(service === "meta" ? /^muse-spark-/i.test(model) : /^minimax-/i.test(model))) {
     throw new Error("Model is not supported by this Code CLI adapter");
   }
@@ -78,9 +107,10 @@ export async function fetchCodeCli(url: string, init: RequestInit): Promise<Resp
     }
   } finally { reader.releaseLock(); }
   const responseText = Buffer.concat(chunks).toString("utf8");
-  let result: { version?: unknown; text?: unknown; finishReason?: unknown };
-  try { result = JSON.parse(responseText); } catch { throw new Error("Invalid Code CLI broker response"); }
-  if (result.version !== 1 || typeof result.text !== "string" || !result.text.trim()
-    || !["stop", "length"].includes(String(result.finishReason))) throw new Error("Invalid Code CLI broker response");
+  let rawResult: unknown;
+  try { rawResult = JSON.parse(responseText); } catch { throw new Error("Invalid Code CLI broker response"); }
+  const parsedResult = CodeCliBrokerResponseSchema.safeParse(rawResult);
+  if (!parsedResult.success) throw new Error("Invalid Code CLI broker response");
+  const result = parsedResult.data;
   return Response.json({ choices: [{ message: { role: "assistant", content: result.text }, finish_reason: result.finishReason }] });
 }

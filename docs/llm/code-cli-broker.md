@@ -87,7 +87,8 @@ Request: authenticated `POST` to the configured endpoint, JSON only. It contains
 ST reconstructs this allowlist instead of forwarding the HTTP body or headers.
 It rejects tool messages, tool declarations, function calls, streaming and
 multimodal contents. Input and response text are limited to 1 MB. Request
-cancellation is forwarded with an independent 60-second cap. The broker must
+cancellation and the caller deadline are forwarded unchanged; a call with no
+signal gets a 150-second bound.  The broker must
 terminate the CLI session and its process group on cancellation or timeout,
 clean up the workspace on every exit, limit request/response bytes while
 streaming, and enforce one in-flight generation per owner across all ST replicas
@@ -121,6 +122,6 @@ exhaustion, adapter crash, timeout/cancellation and workspace cleanup. Verify
 those controls from the broker's actual sandbox, not a self-reported response.
 
 
-## Review hardening (October16)
+## Review hardening (October 16)
 
-The credential-bearing module is marked server-only. Browser reasoning controls use the pure llm-reasoning module, not the HTTP transport. The broker request preserves the caller abort signal; without one it has a150s bound, matching the strategy reasoning allowance rather than truncating at60s. Only the known unavailable broker configuration error is skipped during API-primary fallback planning; other resolution errors propagate. No paid fallback is added to a CLI-primary request.
+The credential-bearing module is marked server-only. Browser reasoning controls use the pure llm-reasoning module, not the HTTP transport. The broker request preserves the caller abort signal; without one it has a 150s bound, matching the strategy reasoning allowance rather than truncating at 60s. Only the known unavailable broker configuration error is skipped during API-primary fallback planning; other resolution errors propagate. No paid fallback is added to a CLI-primary request.
