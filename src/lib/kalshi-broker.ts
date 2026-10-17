@@ -28,6 +28,8 @@ import type {
   ReviewedOrder
 } from "./types";
 import { selectObservedQuotePrice } from "./quote-observation";
+import { isLiveOrderState } from "./broker-side";
+import { BROKER_ORDER_PAGE_CAP, chunkBrokerSymbols, scopeBrokerOrders } from "./inflight-deadline";
 import { knownBrokerLimits, mergeAccountCapabilities } from "./venue-contract-pure";
 import { logError, logWarn, recordBrokerCall } from "./sentry-metrics";
 
@@ -217,29 +219,37 @@ export class KalshiBrokerGateway implements BrokerGateway {
       });
   }
 
-  async getEquityOrders(_accountNumber: string, _options?: GetEquityOrdersOptions): Promise<EquityOrder[]> {
-    const orderData = await this.authenticatedFetch<{
-      orders?: Array<{
-        order_id: string;
-        client_order_id?: string;
-        ticker: string;
-        side: "yes" | "no";
-        action: "buy" | "sell";
-        type: "limit" | "market";
-        yes_price?: number;
-        no_price?: number;
-        yes_price_dollars?: string;
-        no_price_dollars?: string;
-        count: number;
-        status: string;
-        created_time: string;
-        last_update_time?: string;
-      }>;
-    }>("GET", "/portfolio/orders");
+  async getEquityOrders(_accountNumber: string, options?: GetEquityOrdersOptions): Promise<EquityOrder[]> {
+    const collected: Array<{
+      order_id: string;
+      client_order_id?: string;
+      ticker: string;
+      side: "yes" | "no";
+      action: "buy" | "sell";
+      type: "limit" | "market";
+      yes_price?: number;
+      no_price?: number;
+      yes_price_dollars?: string;
+      no_price_dollars?: string;
+      count: number;
+      status: string;
+      created_time: string;
+      last_update_time?: string;
+    }> = [];
+    let cursor = "";
+    for (let page = 0; page < BROKER_ORDER_PAGE_CAP; page++) {
+      const path = `/portfolio/orders?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+      const orderData = await this.authenticatedFetch<{
+        orders?: typeof collected;
+        cursor?: string;
+      }>("GET", path);
+      const batch = orderData?.orders ?? [];
+      collected.push(...batch);
+      cursor = orderData?.cursor ?? "";
+      if (!cursor || batch.length === 0) break;
+    }
 
-    if (!orderData?.orders) return [];
-
-    return orderData.orders.map((o) => {
+    const mapped: EquityOrder[] = collected.map((o) => {
       let limitPrice: number | undefined;
       if (o.side === "yes") {
         limitPrice = o.yes_price_dollars ? parseFloat(o.yes_price_dollars) : o.yes_price ? o.yes_price / 100 : undefined;
@@ -260,13 +270,15 @@ export class KalshiBrokerGateway implements BrokerGateway {
         clientOrderId: o.client_order_id
       };
     });
+    return scopeBrokerOrders(mapped, options, (state) => isLiveOrderState(state));
   }
 
   async getEquityQuotes(_accountNumber: string, symbols: string[]): Promise<Record<string, BrokerQuote>> {
     const out: Record<string, BrokerQuote> = {};
     if (symbols.length === 0) return out;
 
-    const marketsData = await this.authenticatedFetch<{
+    for (const chunk of chunkBrokerSymbols(symbols)) {
+      const marketsData = await this.authenticatedFetch<{
       markets?: Array<{
         ticker: string;
         yes_bid?: number;
@@ -279,12 +291,13 @@ export class KalshiBrokerGateway implements BrokerGateway {
         open_interest_fp?: number;
         status?: string;
       }>;
-    }>("GET", `/markets?tickers=${encodeURIComponent(symbols.join(","))}`);
+      }>("GET", `/markets?tickers=${encodeURIComponent(chunk.join(","))}`);
 
-    if (marketsData?.markets) {
-      for (const m of marketsData.markets) {
-        const quote = kalshiQuoteFromMarket(m);
-        if (quote) out[m.ticker] = { ...quote, fetchedAt: new Date().toISOString() };
+      if (marketsData?.markets) {
+        for (const m of marketsData.markets) {
+          const quote = kalshiQuoteFromMarket(m);
+          if (quote) out[m.ticker] = { ...quote, fetchedAt: new Date().toISOString() };
+        }
       }
     }
 

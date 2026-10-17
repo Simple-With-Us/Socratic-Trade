@@ -22,8 +22,15 @@ import { getActiveConnectedAccount, getConnectedAccount } from "./db";
 import { logApiHealth } from "./db-health";
 import { estimateReviewNotional } from "./alpaca";
 import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
+import { isLiveOrderState } from "./broker-side";
+import { brokerAbortSignal, chunkBrokerSymbols, scopeBrokerOrders } from "./inflight-deadline";
 import { mergeAccountCapabilities } from "./venue-contract";
 import { resolveSourceBool } from "./source-settings";
+
+function publicFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const caller = init.signal instanceof AbortSignal ? init.signal : undefined;
+  return fetch(url, { ...init, signal: brokerAbortSignal(caller) });
+}
 
 function publicExecutionEnabled(): boolean {
   return resolveSourceBool("PUBLIC_EXECUTION_ENABLED");
@@ -43,7 +50,8 @@ export async function mintPublicAccessToken(
   const res = await fetchImpl(`${PUBLIC_API}/userapiauthservice/personal/access-tokens`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ validityInMinutes, secret })
+    body: JSON.stringify({ validityInMinutes, secret }),
+    signal: brokerAbortSignal()
   });
   if (!res.ok) throw new Error(`Public token mint failed (${res.status})`);
   const json = (await res.json()) as { accessToken?: string };
@@ -105,7 +113,7 @@ class PublicBrokerGateway implements BrokerGateway {
   async getAccounts(): Promise<BrokerageAccount[]> {
     return this.track(async () => {
       const headers = await this.authHeader();
-      const res = await fetch(`${PUBLIC_API}/userapigateway/trading/account`, { headers });
+      const res = await publicFetch(`${PUBLIC_API}/userapigateway/trading/account`, { headers });
       if (!res.ok) throw new Error(`Public accounts ${res.status}`);
       const json = (await res.json()) as Record<string, unknown> | Record<string, unknown>[];
       const rows = Array.isArray(json) ? json : [json];
@@ -163,10 +171,10 @@ class PublicBrokerGateway implements BrokerGateway {
     });
   }
 
-  async getEquityOrders(accountNumber: string, _options?: import("./types").GetEquityOrdersOptions): Promise<EquityOrder[]> {
+  async getEquityOrders(accountNumber: string, options?: import("./types").GetEquityOrdersOptions): Promise<EquityOrder[]> {
     const port = await this.portfolio(accountNumber);
     const orders = Array.isArray(port.orders) ? port.orders : [];
-    return orders.flatMap((item) => {
+    const mapped: EquityOrder[] = orders.flatMap((item) => {
       const row = item as Record<string, unknown>;
       const inst = (row.instrument ?? {}) as Record<string, unknown>;
       const id = String(row.orderId ?? row.id ?? "");
@@ -181,26 +189,29 @@ class PublicBrokerGateway implements BrokerGateway {
         createdAt: String(row.createdAt ?? new Date().toISOString())
       }];
     });
+    return scopeBrokerOrders(mapped, options, (state) => isLiveOrderState(state));
   }
 
   async getEquityQuotes(_accountNumber: string, symbols: string[]): Promise<Record<string, BrokerQuote>> {
     return this.track(async () => {
       const headers = { ...(await this.authHeader()), "Content-Type": "application/json" };
       const accountId = this.storedAccountId ?? _accountNumber;
-      const res = await fetch(`${PUBLIC_API}/userapigateway/marketdata/${encodeURIComponent(accountId)}/quotes`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          instruments: symbols.map((symbol) => ({ symbol: normalizeSymbol(symbol), type: "EQUITY" }))
-        })
-      });
-      if (!res.ok) throw new Error(`Public quotes ${res.status}`);
-      const json = (await res.json()) as { quotes?: Record<string, unknown>[] } | Record<string, unknown>[];
-      const rows = Array.isArray(json) ? json : json.quotes ?? [];
       const out: Record<string, BrokerQuote> = {};
-      for (const row of rows) {
-        const quote = publicQuoteFromRow(row);
-        if (quote) out[quote.symbol] = quote;
+      for (const chunk of chunkBrokerSymbols(symbols)) {
+        const res = await publicFetch(`${PUBLIC_API}/userapigateway/marketdata/${encodeURIComponent(accountId)}/quotes`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            instruments: chunk.map((symbol) => ({ symbol: normalizeSymbol(symbol), type: "EQUITY" }))
+          })
+        });
+        if (!res.ok) throw new Error(`Public quotes ${res.status}`);
+        const json = (await res.json()) as { quotes?: Record<string, unknown>[] } | Record<string, unknown>[];
+        const rows = Array.isArray(json) ? json : json.quotes ?? [];
+        for (const row of rows) {
+          const quote = publicQuoteFromRow(row);
+          if (quote) out[quote.symbol] = quote;
+        }
       }
       return out;
     });
@@ -210,7 +221,7 @@ class PublicBrokerGateway implements BrokerGateway {
     const out: Record<string, { tradable: boolean; fractional: boolean; reason?: string }> = {};
     for (const symbol of symbols) {
       const headers = await this.authHeader();
-      const res = await fetch(
+      const res = await publicFetch(
         `${PUBLIC_API}/userapigateway/trading/instruments/${encodeURIComponent(normalizeSymbol(symbol))}/EQUITY`,
         { headers }
       );
@@ -268,7 +279,7 @@ class PublicBrokerGateway implements BrokerGateway {
       if (input.side === "cover") body.openCloseIndicator = "CLOSE";
       if (input.limitPrice != null) body.limitPrice = input.limitPrice;
       if (input.stopPrice != null) body.stopPrice = input.stopPrice;
-      const res = await fetch(`${PUBLIC_API}/userapigateway/trading/${encodeURIComponent(input.accountNumber)}/order`, {
+      const res = await publicFetch(`${PUBLIC_API}/userapigateway/trading/${encodeURIComponent(input.accountNumber)}/order`, {
         method: "POST",
         headers,
         body: JSON.stringify(body)
@@ -281,7 +292,7 @@ class PublicBrokerGateway implements BrokerGateway {
   async cancelEquityOrder(accountNumber: string, orderId: string): Promise<ExecutedOrder> {
     return this.track(async () => {
       const headers = await this.authHeader();
-      const res = await fetch(
+      const res = await publicFetch(
         `${PUBLIC_API}/userapigateway/trading/${encodeURIComponent(accountNumber)}/order/${encodeURIComponent(orderId)}`,
         { method: "DELETE", headers }
       );
@@ -293,7 +304,7 @@ class PublicBrokerGateway implements BrokerGateway {
   private async portfolio(accountNumber: string): Promise<Record<string, unknown>> {
     return this.track(async () => {
       const headers = await this.authHeader();
-      const res = await fetch(`${PUBLIC_API}/userapigateway/trading/${encodeURIComponent(accountNumber)}/portfolio/v2`, {
+      const res = await publicFetch(`${PUBLIC_API}/userapigateway/trading/${encodeURIComponent(accountNumber)}/portfolio/v2`, {
         headers
       });
       if (!res.ok) throw new Error(`Public portfolio ${res.status}`);

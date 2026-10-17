@@ -125,6 +125,10 @@ The four remaining review threads are not code changes.  Each suggestion would p
 
 Merged `origin/main` again at `49a76da4` (Congress webhook receipt, ST-3846).  STATUS.md auto-merged.  No quote-path conflict.
 
+Merged `origin/main` again at `d1053ad6`.  Three quote-path conflicts came from #4715 (bounded broker calls): `src/lib/etoro.ts`, `src/lib/kalshi-broker.ts`, and `src/lib/public-broker.ts`.  In each, `getEquityQuotes` keeps main's `chunkBrokerSymbols` loop, abort-signalled `fetch`, and Zod-parsed eToro body, and builds each row with this lane's `etoroQuoteFromRate`, `kalshiQuoteFromMarket`, and `publicQuoteFromRow`.  Main's inline `price: last ?? mid` and `asOf: typeof date === "string"` lines are dropped, because they would put a placeholder price or an unparsed time back on the quote.  Kalshi stays non-authoritative (no `venuePriceAuthoritative`, no `asOf`), so the gate still blocks a Kalshi opening whose age is unknown.  The `import` lines from both sides were kept.  PLAN.md and STATUS.md auto-merged.
+
+Verification after the `d1053ad6` merge.  `npm run lint` exit 0 (0 errors, 871 grandfathered warnings).  `npx tsc --noEmit` printed no diagnostics.  `npx vitest run` over quote-observation, staleness-gate, quotes-cascade, tradier, alpaca-nbbo-mid, alpaca-sdk-client-timeout, chat-draft-policy, data-providers, keyless-options-enrichment, placement-reconcile, etoro-boundary-schema, inflight-deadline, the kalshi suites, and the two scheduler inflight-guard suites: 19 files, 434 passed, 9 skipped.  #4715's own tests (protective-lane-isolation, robinhood-orders-error-throws, synthetic-stops, etoro-boundary-schema): 4 files, 85 passed.  `src/lib/alpaca.ts`, `robinhood.ts`, and `tradier.ts` auto-merged with only deadline and page-cap changes, and a grep found no restored `fillMissingQuotesWithClose` on a quote read, no `?? 0.5` price, and no Tradier `venuePriceAuthoritative`.
+
 ## Next Steps & Blockers
 
 Open the PR ready for review.  Add `do-not-automerge`.  Do not enable auto-merge.  Post the PR link on ST-2584.  Leave the issue In Progress until merge.
