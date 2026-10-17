@@ -1,3 +1,12 @@
+## 2026-10-17 CLAUDE — PR #4727 main merge (hold)
+
+PR #4727 was BEHIND `main` (four commits, through `b39ed8a7d`, #4805) with no conflicts and no review threads.  Merged `origin/main` with a merge commit (no rebase, no force-push).  Main moved only `.github/workflows/e2e.yml` among workflow files, and none of the ten files this PR owns.  Focused Vitest (`automerge-gate-dry-run`, `branch-protection-gate`, `disable-pr-automerge`) passed 21 tests locally; the repo-wide `tsc` and build gates run in hosted CI, because this lane has no access to the private `@jaywedgeworth22/congress-trading-shared` package.  The `do-not-automerge` label stays on and auto-merge is not armed; Jay merges.
+
+## 2026-10-15 CODEX — PR #4727 current-main conflict sweep
+
+Merged fresh `origin/main` at `7bfb84ef193196f1b77c9bfe0573c012e656c8c0` with merge commit `a80b3564a77f428930eea5fd138f0038a9c49cf4`.  The current PR head before this merge was `c116c6738f14b0cb3c8d787b4e6285915e1fd6d1`; no newer Cursor commit was present.  Merge completed without conflicts.  The unique PR diff remains the workflow, two scripts, three tests, and PLAN/STATUS/rollout paths.  The three disable jobs retain `contents: write` and `pull-requests: write`; the arm job remains read-only.
+
+Local verification passed: lint (0 errors, 866 warnings), TypeScript, 21 focused tests, and production build.  The `do-not-automerge` label remains; auto-merge is not armed.  Next: push the merge and docs, wait for final-head required CI, then post that the PR is ready for Jay's review.  Keep the PR open.
 ## 2026-10-16 CLAUDE (autofix) — ST-4544 review round, use-anchored-menu timing/perf
 
 **What.**  Addressed the review-bot findings on PR #4761 (`muse-code/proxy-safari-dropdown`).  `app/console/ui/use-anchored-menu.ts` had three real timing/perf defects, all fixed: (1) the first render after `open` flips to true returned `CLOSED` (the effect had not run yet), while the click-away backdrop was already mounted — a click in that ~16ms window dismissed the menu the user just opened; the hook now measures synchronously in the effect body before scheduling any rAF, so the panel portals in the same commit as the trigger toggle.  (2) the capture-phase `window` scroll listener dispatched a fresh `setMeasured` object literal on every scroll tick — including scrolls inside the notification panel's own `overflow-auto` list, where the trigger rect is unchanged — re-rendering the whole portal subtree per tick; `setMeasured` now returns the previous object when the anchor and container are unchanged.  (3) resize/scroll listeners are gated through a single `requestAnimationFrame` so burst events coalesce to one measurement per frame.  Also reset `measured` to `CLOSED` when the menu closes, so a reopen cannot paint one frame at the previous open's stale coordinates.  Net effect: same rendered output, no dismiss-on-open race, no per-scroll-tick re-render.
@@ -26,6 +35,15 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 
 # Current Status
 
+## 2026-10-15 Cursor Cloud — auto-merge money-path gate (ST-3326)
+
+**What.**  `auto-merge-prs.yml` was fail-closing every PR because `gh api --jq -r` is two arguments, so CODEOWNERS money-path globs never ran.  The fetch is one `--jq` expression.  Money-path diffs and `do-not-automerge` are not armed.  Disable retries a rejected PAT with the Actions token.  If that mutation is forbidden (`Resource not accessible by integration`) the job still succeeds when `autoMergeRequest` is already null, and fails when the PR is still armed.  Disable jobs grant `contents: write` so the Actions token can call the disable mutation.  The arm job stays read-only.
+
+**Branch.**  `cursor/automerge-money-path-gate-c050` (PR #4727).  Parallel to PR #4697; this lane keeps per-job `contents: write` on disable jobs and the `confirm_disarmed_or_fail` read path in `scripts/disable-pr-automerge.sh`.  Merged `origin/main` at `3f4ef5e5` (2026-10-15 conflict sweep).
+
+**Verification.**  Targeted vitest 25/25 (`disable-pr-automerge`, dry run, branch-protection gate, CODEOWNERS classifier).  Dry run: `src/lib/broker.ts` and `do-not-automerge` print `arm=false` `disarm=true`; `README.md` prints `arm=true`.  `npx tsc --noEmit` exit 0.
+
+**Next.**  Ready PR with `do-not-automerge`.  Do not enable auto-merge.  GB-Deployer merges.  Rotating the rejected `GH_PAT` / `SHEPHERD_TOKEN` stays ST-4393.  Until that token works, non-money-path arming still no-ops with an error, and an already-armed money-path PR fails the disable job instead of landing.
 ## 2026-10-15 Cursor Cloud — ST-3988 congress-share dependency DB health
 
 **What.**  Congress.Trade D1 `SQLITE_BUSY` import rejections no longer page as `congress-share connection failed`.  `alertConnectionFailure` routes them to `dependency-db-contention` (warning Sentry, no `provider_degraded` push).  Ops-token `/api/health` exposes `lastFailure` + `failureClass` on dependencies.

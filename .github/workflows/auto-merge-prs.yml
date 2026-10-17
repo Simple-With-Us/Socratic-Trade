@@ -2,9 +2,43 @@ name: Auto-merge PRs
 
 # Arm GitHub auto-merge on non-draft, same-repo PRs that do NOT touch
 # CODEOWNERS trading-execution paths (.github/CODEOWNERS).  Live-money diffs
-# require a human merge (owner review gate; board bdc2b662 / 318bfe710b794c28).
+# require a human merge (owner review gate; board bdc2b662 / 318bfe710b794c28 / ST-3326).
 # Hold labels: `do-not-automerge` or `needs-human-merge` skip arming and disable
 # any already-armed merge.
+#
+# Money-path globs are the CODEOWNERS path patterns below (owners stripped).
+# `bash scripts/automerge-gate-dry-run.sh --list-globs` prints the same list.
+# A changed file that matches one of them, or a do-not-automerge label, is not
+# armed.  An already-armed auto-merge on that PR is disabled.
+#
+# BEGIN MONEY_PATH_GLOBS
+# /src/lib/broker.ts
+# /src/lib/broker-*.ts
+# /src/lib/public-broker.ts
+# /src/lib/alpaca.ts
+# /src/lib/alpaca-*.ts
+# /src/lib/tradier.ts
+# /src/lib/robinhood.ts
+# /src/lib/etoro.ts
+# /src/lib/etoro-*.ts
+# /src/lib/webull.ts
+# /src/lib/kalshi.ts
+# /src/lib/kalshi-*.ts
+# /src/lib/order-*.ts
+# /src/lib/option-orders.ts
+# /src/lib/stale-limit-orders.ts
+# /src/lib/proposal-*.ts
+# /src/lib/execution*
+# /src/lib/db-execution.ts
+# /src/lib/db-proposals.ts
+# /src/lib/strategy-execution.ts
+# /src/lib/strategy-run-execution-registry.ts
+# /src/lib/trading-liveness.ts
+# /src/lib/tradingview-trigger.ts
+# /src/lib/scheduler.ts
+# /app/api/orders/
+# /app/api/proposals/
+# END MONEY_PATH_GLOBS
 #
 # ---------------------------------------------------------------------------
 # WHY THIS WORKFLOW REFUSES TO ARM WITHOUT AN ELEVATED TOKEN (2026-08-13)
@@ -73,17 +107,28 @@ jobs:
         run: |
           set -euo pipefail
           skip_automerge=false
+          classifier_failed=0
           fail_closed_classifier() {
+            if [ "$classifier_failed" = 1 ]; then
+              exit 0
+            fi
+            classifier_failed=1
             echo "$1" >&2
             echo "touches_protected=true" >> "$GITHUB_OUTPUT"
             echo "skip_automerge=true" >> "$GITHUB_OUTPUT"
             exit 0
           }
+          trap 'fail_closed_classifier "classifier step failed -- fail closed"' ERR
           BASE_CODEOWNERS="$RUNNER_TEMP/codeowners-base"
           co_err="$RUNNER_TEMP/codeowners-api.err"
-          if gh api "repos/$REPO/contents/.github/CODEOWNERS?ref=$BASE" --jq -r '.content // empty' > "$RUNNER_TEMP/codeowners-content.b64" 2>"$co_err"; then
+          # --jq takes one expression.  A second -r argument makes gh exit
+          # "accepts 1 arg(s), received 2" and fail-closes every PR (ST-3326).
+          if gh api "repos/$REPO/contents/.github/CODEOWNERS?ref=$BASE" --jq '.content // empty' > "$RUNNER_TEMP/codeowners-content.b64" 2>"$co_err"; then
             if [ -s "$RUNNER_TEMP/codeowners-content.b64" ]; then
               base64 -d < "$RUNNER_TEMP/codeowners-content.b64" > "$BASE_CODEOWNERS"
+              if [ ! -s "$BASE_CODEOWNERS" ]; then
+                fail_closed_classifier "CODEOWNERS base64 decoded empty -- fail closed"
+              fi
             else
               : > "$BASE_CODEOWNERS"
             fi
@@ -109,7 +154,7 @@ jobs:
           else
             echo "touches_protected=false" >> "$GITHUB_OUTPUT"
           fi
-          if printf '%s\n' "${changed_files[@]}" | grep -qxE '(\.github/CODEOWNERS|\.github/workflows/auto-merge-prs\.yml|scripts/pr-touches-codeowners-paths\.sh)'; then
+          if printf '%s\n' "${changed_files[@]}" | grep -qxE '(\.github/CODEOWNERS|\.github/workflows/auto-merge-prs\.yml|scripts/pr-touches-codeowners-paths\.sh|scripts/automerge-gate-dry-run\.sh|scripts/disable-pr-automerge\.sh)'; then
             skip_automerge=true
             echo "::notice::PR edits the auto-merge gate - auto-merge will not be armed on this PR"
           fi
@@ -123,57 +168,71 @@ jobs:
   # cancel any already-armed auto-merge so production cannot land against intent.
   disable-on-hold:
     runs-on: ubuntu-latest
+    # Disable does not merge.  write is required so the Actions token can call
+    # disablePullRequestAutoMerge after a rejected PAT.  The arm job stays read-only.
+    permissions:
+      contents: write
+      pull-requests: write
     if: >
       contains(github.event.pull_request.labels.*.name, 'do-not-automerge') ||
       contains(github.event.pull_request.labels.*.name, 'needs-human-merge')
     steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
       - name: Disable auto-merge (hold label)
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN || secrets.GITHUB_TOKEN }}
+          DISABLE_AUTOMERGE_FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           set -euo pipefail
           echo "Hold label present; disabling auto-merge for $PR_URL"
-          gh pr merge --disable-auto "$PR_URL" || {
-            echo "disable-auto returned nonzero (already off or not armed); continuing"
-            exit 0
-          }
+          bash scripts/disable-pr-automerge.sh "$PR_URL"
 
   disable-on-skip-automerge:
     runs-on: ubuntu-latest
     needs: classify-protected
+    permissions:
+      contents: write
+      pull-requests: write
     if: >
       needs.classify-protected.outputs.skip_automerge == 'true'
     steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
       - name: Disable auto-merge (ineligible PR)
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN || secrets.GITHUB_TOKEN }}
+          DISABLE_AUTOMERGE_FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           set -euo pipefail
           echo "PR is ineligible for workflow auto-merge; disabling for $PR_URL"
-          gh pr merge --disable-auto "$PR_URL" || {
-            echo "disable-auto returned nonzero (already off or not armed); continuing"
-            exit 0
-          }
+          bash scripts/disable-pr-automerge.sh "$PR_URL"
 
   disable-on-protected:
     runs-on: ubuntu-latest
     needs: classify-protected
+    permissions:
+      contents: write
+      pull-requests: write
     if: >
       needs.classify-protected.outputs.touches_protected == 'true'
     steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
       - name: Disable auto-merge (CODEOWNERS paths)
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN || secrets.GITHUB_TOKEN }}
+          DISABLE_AUTOMERGE_FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           set -euo pipefail
           echo "PR touches CODEOWNERS trading paths; disabling auto-merge for $PR_URL"
-          gh pr merge --disable-auto "$PR_URL" || {
-            echo "disable-auto returned nonzero (already off or not armed); continuing"
-            exit 0
-          }
+          bash scripts/disable-pr-automerge.sh "$PR_URL"
 
   auto-merge:
     runs-on: ubuntu-latest
