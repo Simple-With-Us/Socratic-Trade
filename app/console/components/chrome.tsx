@@ -9,6 +9,7 @@
  *  - data freshness strip */
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
 import { Check, ChevronDown, LogOut, Monitor, Moon, OctagonMinus, Play, ShieldCheck, SlidersHorizontal, Sun, UserRound } from "lucide-react";
 import type { ConnectedAccount } from "@/lib/types";
@@ -47,6 +48,7 @@ import { useToast } from "../ui/toast";
 import { BREAKER_FIRED_NOTE } from "@/lib/guardrail-copy";
 import { Btn, Chip, Dot, Meter, TextInput } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
+import { useAnchoredMenu, useMenuInitialFocus } from "../ui/use-anchored-menu";
 
 // ── Reality banner ───────────────────────────────────────────────────────────
 
@@ -96,6 +98,10 @@ export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compa
   const [open, setOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  // Portaled + fixed: the header bar's overflow-x guard would clip an
+  // absolutely positioned panel to the bar height (ST-4544).
+  const menu = useAnchoredMenu(triggerRef, open, { align: "left", width: 360 });
+  const panelRef = useMenuInitialFocus(open, Boolean(menu.style));
   const active = activeConnectedAccount(snapshot);
   // Active account hoisted first, the rest after — same order the switch list
   // reads top-to-bottom. Mirrors the Broker connections settings card.
@@ -243,11 +249,16 @@ export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compa
             className="fixed inset-0 z-40 h-full w-full cursor-default border-0 bg-transparent opacity-0"
             onClick={close}
           />
-          <div
-            role="dialog"
-            aria-label="Account scope"
-            className="con-menu-drop absolute left-0 top-[calc(100%+4px)] z-50 flex max-h-[min(70vh,480px)] w-[min(calc(100vw-48px),360px)] max-w-[calc(100vw-48px)] sm:w-[360px] sm:max-w-[360px] flex-col gap-2 overflow-y-auto rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-3 shadow-xl"
-          >
+          {menu.style && menu.container &&
+            createPortal(
+              <div
+                ref={panelRef}
+                tabIndex={-1}
+                role="dialog"
+                aria-label="Account scope"
+                style={menu.style}
+                className="con-menu-drop flex max-h-[min(70vh,480px)] w-[min(calc(100vw-48px),360px)] max-w-[calc(100vw-48px)] sm:w-[360px] sm:max-w-[360px] flex-col gap-2 overflow-y-auto rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-3 shadow-xl"
+              >
             <p className="text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
               One account is loaded at a time. Switching rescopes everything — balances, guardrails, approvals, run
               state, and decision history.
@@ -275,7 +286,9 @@ export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compa
               <SlidersHorizontal size={14} className="shrink-0 text-[color:var(--con-faint)]" />
               Configure accounts
             </Link>
-          </div>
+              </div>,
+              menu.container
+            )}
         </>
       )}
     </div>
@@ -875,6 +888,10 @@ export function UserMenu({
 }) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  // Portaled + fixed: the header bar's overflow-x guard would clip an
+  // absolutely positioned panel to the bar height (ST-4544).
+  const menu = useAnchoredMenu(triggerRef, open, { align: "right", width: 340, gap: 2 });
+  const panelRef = useMenuInitialFocus(open, Boolean(menu.style));
   const user = snapshot.currentUser;
 
   const close = () => {
@@ -899,9 +916,9 @@ export function UserMenu({
   const who = user.name ?? user.email ?? user.userId;
 
   return (
-    // Not position:relative — the dropdown anchors to the bar row (the nearest
-    // positioned ancestor, set in shell.tsx) so it hugs the viewport-right edge
-    // instead of overflowing left off small screens.
+    // Not position:relative — the panel portals to <body> and fixed-anchors
+    // to this button (useAnchoredMenu), right-aligned so it cannot overflow
+    // off the left edge of small screens.
     <div className="shrink-0">
       <button
         ref={triggerRef}
@@ -920,7 +937,14 @@ export function UserMenu({
         <>
           {/* invisible click-away backdrop; the panel sits above it */}
           <div className="fixed inset-0 z-40" onClick={close} aria-hidden />
-          <div className="con-menu-drop absolute right-2 top-[calc(100%+2px)] z-50 w-[min(92vw,340px)] rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-4 shadow-xl">
+          {menu.style && menu.container &&
+            createPortal(
+              <div
+                ref={panelRef}
+                tabIndex={-1}
+                style={menu.style}
+                className="con-menu-drop w-[min(92vw,340px)] rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-4 shadow-xl"
+              >
             <div className="flex flex-col gap-3 text-[length:var(--con-fs-sm)]">
               <div className="flex items-center gap-3">
                 <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-[color:var(--con-line)] text-[color:var(--con-muted)]">
@@ -989,8 +1013,10 @@ export function UserMenu({
                   Sign out
                 </a>
               </div>
-            </div>
-          </div>
+              </div>
+              </div>,
+              menu.container
+            )}
         </>
       )}
     </div>

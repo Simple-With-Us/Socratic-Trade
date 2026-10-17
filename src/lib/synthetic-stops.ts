@@ -197,7 +197,8 @@ export async function runSyntheticStopMonitor(
   now = new Date(),
   /** §7 slice 3 mutation-lease fence (AccountMutationContext.assertOwned) — checked before the
    *  risk-CREATING exit placement. Cancels within the pass run unfenced (risk-reducing). */
-  fence?: () => void
+  fence?: () => void,
+  options?: { signal?: AbortSignal; onBrokerWrite?: () => void }
 ): Promise<MonitorResult> {
   const result: MonitorResult = { evaluated: 0, triggered: 0, exited: 0, purged: 0 };
   const callerAccountNumber = policy.accountNumber;
@@ -997,6 +998,16 @@ export async function runSyntheticStopMonitor(
       // Mutation-lease fence: fail closed before the risk-CREATING exit placement if the
       // window's lease was lost (another sequence may already be mutating this account).
       fence?.();
+      if (options?.signal?.aborted) {
+        // The claim already moved the row to triggered, and the attempt id is durable.
+        // No broker write has started.  Returning here used to skip revertSyntheticStopClaim,
+        // so a breached stop stayed triggered with no exit until the 15-minute re-arm grace.
+        await sqliteYieldRetry(() => revertSyntheticStopClaim(stop.id, userId));
+        const reason = options.signal.reason instanceof Error ? options.signal.reason.message : "aborted before broker write";
+        auditSyntheticStopError(stop.id, stop.symbol, reason, userId, policy);
+        return result;
+      }
+      options?.onBrokerWrite?.();
       const exec = await gateway.placeEquityOrder({
         accountNumber,
         symbol: stop.symbol,
