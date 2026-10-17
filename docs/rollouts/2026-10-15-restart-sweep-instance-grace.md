@@ -66,7 +66,7 @@ A later merge of the Quiver coverage branch added `installPlaywrightSession`.  I
 
 ## Next Steps & Blockers
 
-PR #4701 stays ready for review with `do-not-automerge`.  Auto-merge stays off.  Jay squash-merges.  Resolve ST-8 only after the fix has shipped.  Hosted `verify-hosted` passed on workflow_dispatch after `6ca8d224` (cloud-proxy pushes still need `gh workflow run ci.yml --ref cursor/restart-sweep-boot-grace-ab92`).  Kody `@kody start-review` after that commit failed with MiniMax-M3 unavailable; the prior `CHANGES_REQUESTED` on the Playwright secret thread remains until Kody can approve.
+Superseded 2026-10-17 (see § Merge-main round 5): owner ruling, merge unless the owner is needed, so PR #4701 lands by squash merge once `verify` and `gitleaks` pass on the current head.  The `needs-human-merge` label only stops auto-merge.  Resolve ST-8 only after the fix has shipped.  Hosted `verify-hosted` passed on workflow_dispatch after `6ca8d224` (cloud-proxy pushes still need `gh workflow run ci.yml --ref cursor/restart-sweep-boot-grace-ab92`).  Kody `@kody start-review` after that commit failed with MiniMax-M3 unavailable; the prior `CHANGES_REQUESTED` on the Playwright secret thread remains until Kody can approve.
 
 ## Zero-Code Findings
 
@@ -200,3 +200,29 @@ second merge commit keeps both: #4736's migration stays 97, and ST-8's
 `applyVersionedMigrations` assertions in `test/persistence-hardening.test.ts`
 move to 98.  That test file merged with no conflict, because both sides had moved
 the assertions from 96 to 97 the same way; left alone, they would have been wrong.
+
+## Merge-main round 5 (CLAUDE PR sweep, 2026-10-17)
+
+`origin/main` at `838f9764c` (#4794, #4727, #4661, #4718) merged with a merge
+commit, no rebase, no force-push.  No textual conflicts: of this PR's files only
+`PLAN.md` and `STATUS.md` also changed on `main`, and both sides' entries are
+kept.  None of the four `main` commits adds a migration, so ST-8's
+`strategy_runs_owner_instance` stays **98** and every version in `MIGRATIONS` is
+unique (`grep -nE '^\s*version: ' src/lib/db.ts | awk '{print $NF}' | sort | uniq -d`
+prints nothing).
+
+The earlier merge had de-indented `main`'s `// Ops snapshot:` comment above
+migration 95 in `src/lib/db.ts`.  It is restored, so the `db.ts` diff against
+`main` is the ST-8 migration only.
+
+Owner ruling 2026-10-17: deploy unless the owner is really needed.  This PR does
+not change merge-safety controls, does not turn on live trading by default, and
+its only schema change is an additive nullable column, so it lands by squash
+merge.  Kody's `CHANGES_REQUESTED` review is from a bot on a thread that is now
+outdated and resolved; required approvals on `main` is 0, and a Kody re-review
+was requested on the new head.
+
+Touched in this round: `PLAN.md`, `STATUS.md`, `src/lib/db.ts` (comment
+indentation only), this note.
+
+Verification commands for this round are recorded in `STATUS.md`.

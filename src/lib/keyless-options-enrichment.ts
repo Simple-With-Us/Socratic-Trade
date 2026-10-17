@@ -13,6 +13,7 @@ import { deriveOptionMetrics } from "./robinhood-options";
 import { parseOccSymbol } from "./option-orders";
 import { normalizeSymbol } from "./money";
 import { politeFetch, runRateLimited } from "./web-sources/http";
+import { selectObservedQuotePrice } from "./quote-observation";
 import { recordProviderCall } from "./usage-monitor-push";
 
 const CBOE_OPTIONS_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options";
@@ -195,12 +196,19 @@ function nestedPositive(record: Record<string, unknown> | null | undefined, key:
   return record ? readPositive(record[key]) : undefined;
 }
 
-/** Latest trade, else daily close, else previous close.  Extra snapshot keys are ignored. */
+/** Latest trade, else the two-sided mid.  A bar close and a prior close are not the price. */
 export function readAlpacaStockSnapshotPrice(json: unknown): number | undefined {
   const parsed = AlpacaStockSnapshotSchema.safeParse(json);
   if (!parsed.success) return undefined;
-  const snap = parsed.data;
-  return nestedPositive(snap.latestTrade, "p") ?? nestedPositive(snap.dailyBar, "c") ?? nestedPositive(snap.prevDailyBar, "c");
+  const snap = parsed.data as {
+    latestTrade?: Record<string, unknown> | null;
+    latestQuote?: Record<string, unknown> | null;
+  };
+  return selectObservedQuotePrice({
+    last: nestedPositive(snap.latestTrade, "p"),
+    bid: nestedPositive(snap.latestQuote, "bp"),
+    ask: nestedPositive(snap.latestQuote, "ap")
+  }).price;
 }
 
 function withUnderlying(underlyingPrice: number | undefined, chains: unknown): { underlyingPrice?: number; chains: unknown } {
@@ -223,15 +231,8 @@ function underlyingPriceFromUnknown(value: unknown): number | undefined {
   return readPositive(obj.data.underlyingPrice) ?? readPositive(obj.data.price);
 }
 
-function quotePrice(quote: { last?: unknown; close?: unknown; bid?: unknown; ask?: unknown }): number | undefined {
-  const last = readPositive(quote.last);
-  if (last !== undefined) return last;
-  const close = readPositive(quote.close);
-  if (close !== undefined) return close;
-  const bid = readPositive(quote.bid);
-  const ask = readPositive(quote.ask);
-  if (bid !== undefined && ask !== undefined) return (bid + ask) / 2;
-  return bid ?? ask;
+function quotePrice(quote: { last?: unknown; bid?: unknown; ask?: unknown }): number | undefined {
+  return selectObservedQuotePrice({ last: quote.last, bid: quote.bid, ask: quote.ask }).price;
 }
 
 /** Map a Cboe delayed options payload into `deriveOptionMetrics` chain rows. */
@@ -239,8 +240,7 @@ export function parseCboeOptionsPayload(json: unknown): { underlyingPrice?: numb
   const parsed = CboeOptionsResponseSchema.safeParse(json);
   if (!parsed.success || !parsed.data.data) return { chains: { results: [] } };
   const data = parsed.data.data;
-  const underlyingPrice =
-    readPositive(data.current_price) ?? readPositive(data.close) ?? readPositive(data.prev_day_close);
+  const underlyingPrice = readPositive(data.current_price);
 
   const results: Record<string, unknown>[] = [];
   for (const entry of data.options ?? []) {

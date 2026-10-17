@@ -90,7 +90,7 @@ export function resolveAlpacaTimeInForce(input: {
 import { toBrokerSide, isRejectedOrCanceledState } from "./broker-side";
 import { audit, getActiveConnectedAccount, getConnectedAccount, resolveApiKey } from "./db";
 import { logApiHealth } from "./db-health";
-import { fetchDailyOHLC } from "./history";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import { isTransientNetworkError } from "./network-errors";
 import { SESSION_CLOSE_PROVIDER } from "./quote-delayed-fallback";
 import {
@@ -828,11 +828,14 @@ class AlpacaBrokerGateway implements BrokerGateway {
     }
     const normalizedSymbols = Array.from(aliasesByCanonical.keys());
     const quotes: Record<string, BrokerQuote> = {};
+    const wireSymbols = normalizedSymbols.map(toAlpacaSymbol);
+    let quoteResponse: Record<string, Record<string, unknown>> = {};
+    let tradeResponse: Record<string, Record<string, unknown>> = {};
     try {
       const { firstMs, retryMs } = alpacaAccountReadBudgetMs();
-      const response = await awaitWithFirstCallRetry(
+      quoteResponse = await awaitWithFirstCallRetry(
         ({ signal }) => this.trackHealth(
-          () => this.alpaca.getLatestQuotes(normalizedSymbols.map(toAlpacaSymbol)),
+          () => this.alpaca.getLatestQuotes(wireSymbols),
           { deadlineMs: ALPACA_BROKER_IO_DEADLINE_MS, signal }
         ),
         {
@@ -843,39 +846,42 @@ class AlpacaBrokerGateway implements BrokerGateway {
           }
         }
       );
-      for (const [rawSymbol, q] of Object.entries(response)) {
-        const symbol = fromAlpacaSymbol(rawSymbol);
-        const anyQ = q as Record<string, number | string>;
-        const bid = optionalNumber(anyQ.bp);
-        const ask = optionalNumber(anyQ.ap);
-        // Mid when both sides are numbers.  Ask alone biased the displayed
-        // price, alerts, and stops.  One side falls through; neither stays 0
-        // so the session-close fill can still price the symbol.
-        const price =
-          typeof bid === "number" && typeof ask === "number" ? (bid + ask) / 2 : ask ?? bid ?? 0;
-        quotes[symbol] = {
-          symbol,
-          price,
-          bid,
-          ask,
-          asOf: optionalIso(anyQ.t),
-          provider: "alpaca",
-          fetchedAt: new Date().toISOString()
-        };
-      }
     } catch (error) {
-      // Don't fail silently — a swallowed quote error is what makes the review fall through to an
-      // unusable price. Surface it; the keyless fallback below still tries to price the symbols.
       console.warn(`[alpaca] getLatestQuotes failed for ${normalizedSymbols.join(",")}:`, error instanceof Error ? error.message : error);
     }
-    // Keyless market-data fallback for any symbol the broker left unpriced (0/empty bid-ask — common
-    // outside market hours and on the free IEX tier). A recent daily close keeps the chat quote and
-    // the pre-trade notional review usable instead of failing closed to the over-cap sentinel.
-    await fillMissingQuotesWithClose(quotes, normalizedSymbols, async (symbol) => {
-      const bars = await fetchDailyOHLC(symbol, Date.now(), this.userId);
-      const last = bars && bars.length ? bars[bars.length - 1] : undefined;
-      return last && typeof last.close === "number" ? { price: last.close, asOf: last.time != null ? String(last.time) : undefined } : undefined;
-    });
+    const latestTrades = this.alpaca.getLatestTrades;
+    if (typeof latestTrades === "function") {
+      try {
+        tradeResponse = await this.trackHealth(
+          () => latestTrades.call(this.alpaca, wireSymbols),
+          { deadlineMs: ALPACA_BROKER_IO_DEADLINE_MS }
+        );
+      } catch (error) {
+        console.warn(`[alpaca] getLatestTrades failed for ${normalizedSymbols.join(",")}:`, error instanceof Error ? error.message : error);
+      }
+    }
+    const rawSymbols = new Set<string>([...Object.keys(quoteResponse), ...Object.keys(tradeResponse)]);
+    for (const rawSymbol of rawSymbols) {
+      const symbol = fromAlpacaSymbol(rawSymbol);
+      const anyQ = (quoteResponse[rawSymbol] ?? {}) as Record<string, unknown>;
+      const anyT = (tradeResponse[rawSymbol] ?? {}) as Record<string, unknown>;
+      const bid = optionalNumber(anyQ.bp);
+      const ask = optionalNumber(anyQ.ap);
+      // Last print, then the two-sided mid.  Quote size (`as`/`bs`) and trade
+      // size (`s`) are not prices, and a one-sided book is not a mid.
+      const selected = selectObservedQuotePrice({ last: anyT.p, bid, ask });
+      if (selected.price === undefined) continue;
+      const asOf = providerObservationIso(selected.basis === "last" ? anyT.t : anyQ.t);
+      quotes[symbol] = {
+        symbol,
+        price: selected.price,
+        bid,
+        ask,
+        ...(asOf ? { asOf } : {}),
+        provider: "alpaca",
+        fetchedAt: new Date().toISOString()
+      };
+    }
     for (const [canonical, aliases] of aliasesByCanonical) {
       const quote = quotes[canonical];
       if (!quote) continue;

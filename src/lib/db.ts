@@ -3420,7 +3420,7 @@ const MIGRATIONS: Migration[] = [
     }
   },
   {
-// Ops snapshot: listOpsStrategyRuns orders by started_at per user without scanning the
+    // Ops snapshot: listOpsStrategyRuns orders by started_at per user without scanning the
     // liveness index (status, connected_account_id in the key). 2026-10-14 prod profile: 84s
     // snapshot builds with a 16.5 GB DB — this seek keeps recent-run reads off full user scans.
     version: 95,
