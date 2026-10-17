@@ -273,7 +273,14 @@ printed the literal key prefix inside "a full-repo search for ... returns zero
 hits".  That repeated the defect and made the claim false.  Both now say "the
 key prefix", and `git grep` for it over the merged tree returns nothing.
 
-Verification: `git grep` over the merged tree (zero hits) and a conflict-marker
-grep on the touched files (none).  The lane has no `node_modules`, and this is a
-docs-only change on top of a conflict-free merge, so lint, `tsc`, `npm test` and
-`npm run build` run in hosted `verify` on push.
+Verification, on head `e40696cd1` (the merge plus this scrub).  The trio ran in
+hosted CI run 38993685733, job `verify-hosted`, not in the local lane, which has
+no `node_modules`:
+
+- `npm run lint` -> pass
+- `npx tsc --noEmit` -> pass
+- `npm test` -> pass
+- `npm run build` -> pass
+- required `verify` and `gitleaks` -> pass
+- `git grep` for the key prefix over the merged tree -> zero hits
+- conflict-marker grep on the touched files -> none

@@ -2,6 +2,8 @@
 
 **What.**  Merged `origin/main` (`d1053ad69`, #4784 and #4739) into `cursor/free-data-gaps-55d1` with no conflicts; the main side touched only `db.ts`, `strategy.ts` and `sqlite-slow-timing`, none of which this PR changes.  Two prose sentences in this file and in `docs/rollouts/2026-10-14-free-data-gaps.md` still printed the literal key prefix inside "a full-repo search for ... returns zero hits", which repeated the defect and made the claim false.  Both now say "the key prefix", and `git grep` for it over the merged tree returns nothing.  No code change.
 
+**Verification.**  On `e40696cd1`, hosted CI run 38993685733 (`verify-hosted`): `npm run lint` pass, `npx tsc --noEmit` pass, `npm test` pass, `npm run build` pass; required `verify` and `gitleaks` pass.  The local lane has no `node_modules`, so the trio was not run locally.
+
 **Left open.**  Kody's 2026-10-16 `CHANGES_REQUESTED` review stands; Kody has re-reviewed this head as "no issues" but has never submitted an approval on this repo, and `dismiss_stale_reviews_on_push` is false.  Clearing it needs the owner.
 
 ## 2026-10-16 CLAUDE (autofix) — PR #4661 review round, last API-key prefix in the rollout note
