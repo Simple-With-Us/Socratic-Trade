@@ -109,4 +109,19 @@ exit 1
     expect(got.stdout).toContain("still armed");
     expect(got.stdout).toContain("credentials rejected");
   });
+
+  it("fails when the arm state read is unreadable", () => {
+    const { dir } = fakeBin(`#!/bin/bash
+if [ "$2" = "view" ]; then
+  echo "HTTP 401 Bad credentials" >&2
+  exit 1
+fi
+echo "401 Unauthorized Bad credentials" >&2
+exit 1
+`);
+    const got = run(dir, { GH_TOKEN: "bad-pat", DISABLE_AUTOMERGE_FALLBACK_TOKEN: "actions" });
+    expect(got.status).toBe(1);
+    expect(got.stdout).toContain("credentials rejected");
+    expect(got.stdout).not.toContain("already off");
+  });
 });
