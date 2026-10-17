@@ -117,6 +117,9 @@ describe("pruneAuditEvents", () => {
       providerOutbox: 0,
       embedStageExpired: 0,
       embedStageCapPruned: 0,
+      // ST-4540: the lane's only remaining work is the read-only embed_stage observer, so this
+      // count is non-zero when staged paid vectors are still awaiting vector-store delivery.
+      embedStageUndeliveredRetained: 0,
       portfolioSnapshotsPruned: 0
     });
     expect((db.prepare("SELECT count(*) c FROM audit_events").get() as { c: number }).c).toBe(4);
