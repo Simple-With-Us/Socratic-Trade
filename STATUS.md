@@ -61,7 +61,7 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 
 **Branch.**  `cursor/quote-observation-staleness-99f5`
 
-**Verification.**  Merged `origin/main` through `1cbe9f06` (clean, no quote-path conflict; lint 0 errors, `tsc --noEmit` clean, 16 focused vitest files 446 passed and 9 skipped).  Earlier, merged through `d1053ad6`: the three broker-call-bound conflicts (eToro, Kalshi, Public quote reads) kept main's chunked, abort-signalled fetches and this lane's observation helpers.  The four fail-closed review threads are explained on the PR and resolved.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
+**Verification.**  Merged `origin/main` through `2a2fb150` (clean, no quote-path conflict; lint 0 errors, `tsc --noEmit` clean, 16 focused vitest files 446 passed and 9 skipped).  Earlier, merged through `d1053ad6`: the three broker-call-bound conflicts (eToro, Kalshi, Public quote reads) kept main's chunked, abort-signalled fetches and this lane's observation helpers.  The four fail-closed review threads are explained on the PR and resolved.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
 
 **Next.**  Owner ruling 2026-10-17: merge unless the owner is needed.  `do-not-automerge` only stops auto-merge, so the sweep squash-merges directly once CI is green.
 
