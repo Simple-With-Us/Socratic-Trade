@@ -247,11 +247,27 @@ describe("required contexts are not renamed out from under the ruleset", () => {
     expect(auto).toContain("pr-touches-codeowners-paths.sh");
     expect(auto).toMatch(/skip_automerge != 'true'/);
     expect(auto).toMatch(/contents\/\.github\/CODEOWNERS\?ref=\$BASE/);
+    expect(auto).toMatch(/--jq '\.content \/\/ empty'/);
+    expect(auto).not.toMatch(/--jq -r/);
     expect(auto).toMatch(/compare\/\$\{BASE\}\.\.\.\$\{HEAD\}/);
     expect(auto).toContain("--paginate");
     expect(auto).toContain("CODEOWNERS Contents API error -- fail closed");
     expect(auto).toContain("Compare API returned no changed files -- fail closed");
+    expect(auto).toContain("classifier step failed -- fail closed");
     expect(auto).not.toMatch(/fetch-depth:\s*0/);
     expect(auto).toContain(".github/CODEOWNERS|");
+    expect(auto).toContain("scripts/automerge-gate-dry-run\\.sh");
+    expect(auto).toContain("scripts/disable-pr-automerge\\.sh");
+    for (const job of ["disable-on-hold", "disable-on-protected", "disable-on-skip-automerge"]) {
+      const block = jobBlock(auto, job);
+      expect(block).toContain("bash scripts/disable-pr-automerge.sh");
+      expect(block).toContain("DISABLE_AUTOMERGE_FALLBACK_TOKEN");
+      expect(block).toMatch(/permissions:\n {6}contents: write\n {6}pull-requests: write/);
+    }
+    const arm = jobBlock(auto, "auto-merge");
+    expect(arm).toContain("!contains(github.event.pull_request.labels.*.name, 'do-not-automerge')");
+    expect(arm).toContain("skip_automerge != 'true'");
+    expect(arm).not.toContain("disable-pr-automerge.sh");
+    expect(arm).not.toMatch(/contents: write/);
   });
 });
