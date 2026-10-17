@@ -431,6 +431,104 @@ describe("decision-time retrieval (retrieveDecisionExperiences)", () => {
   });
 });
 
+/**
+ * ST-4539 — past-decision case affinity, integrated into the live retrieval pass.
+ *
+ * The unit surface for the weighting itself lives in test/past-decision-cases.test.ts. These two
+ * cases pin the WIRING, which is the part that can silently regress: the re-rank must sit between
+ * the usefulness re-rank and the top-k slice, and it must leave the retrieval call shape itself
+ * (one query, cross-symbol, same deadline) untouched.
+ */
+describe("past-decision case affinity wiring (ST-4539)", () => {
+  const baseChunk = {
+    text: "Experience memory: closed lot with realized outcome",
+    score: 0.8,
+    source: "experience-memory",
+    doc_type: "socratic-decision"
+  };
+
+  it("lifts a same-symbol prior into the prompt ahead of a higher-scoring cross-symbol analog", async () => {
+    // Incoming order is pure vector similarity: MSFT (0.9) then AMD (0.5), with AAPL last (0.45).
+    mocks.retrieveContextDetailed.mockResolvedValue([
+      { ...baseChunk, id: "cross-msft", score: 0.9, metadata: { symbol: "MSFT", return_pct: 3, run_id: "old-1" } },
+      { ...baseChunk, id: "cross-amd", score: 0.5, metadata: { symbol: "AMD", return_pct: 2, run_id: "old-2" } },
+      {
+        ...baseChunk,
+        id: "same-aapl",
+        score: 0.45,
+        metadata: {
+          symbol: "AAPL",
+          return_pct: -5,
+          run_id: "old-3",
+          thesis_tag: "Momentum-Breakout",
+          entry_market_regime: "Risk-On"
+        },
+        text: "Experience memory: closed lot with realized outcome\nticker: AAPL\nrealized_outcome: return_pct=-5; holding_days=4.0; risk_exit=true"
+      }
+    ]);
+
+    const { retrieveDecisionExperiences } = await import("../src/lib/experience-memory");
+    const result = await retrieveDecisionExperiences({
+      userId: "local",
+      runId: "run-current",
+      regime: "Risk-On",
+      candidates: [{ symbol: "AAPL", sector: "Technology", dominantFactor: "momentum" }]
+    });
+
+    const analogIds = result.analogChunks.map((chunk) => chunk.id);
+    // The AAPL case wins the prompt slot despite ranking LAST on similarity — that is the whole
+    // point of the issue: a prior on the ticker being decided is the most relevant thing available.
+    expect(analogIds[0]).toBe("same-aapl");
+    // Still cross-symbol: nothing was excluded, and the outcome rides along for the proposer.
+    expect(analogIds).toEqual(expect.arrayContaining(["cross-msft", "same-aapl"]));
+    expect(result.analogsBlock).toContain("ANALOG AAPL");
+    expect(result.analogsBlock).toContain("return_pct -5");
+    // A same-symbol LOSER is surfaced as dissent, not buried — selection is not endorsement.
+    expect(result.injected.find((ref) => ref.id === "same-aapl")?.counterexample).toBe(true);
+    // The affinity re-rank put the 0.45 case first, but "top-analog similarity" in the header and
+    // the audit record must still report the closest shown analog (MSFT, 0.90), not the first card.
+    expect(result.topAnalogSimilarity).toBeCloseTo(0.9, 5);
+    expect(result.analogsBlock).toContain("top-analog similarity 0.90");
+  });
+
+  it("adds no retrieval call and changes nothing when the off-switch is off", async () => {
+    vi.stubEnv("PAST_DECISION_CASE_AFFINITY", "off");
+    mocks.retrieveContextDetailed.mockResolvedValue([
+      { ...baseChunk, id: "cross-msft", score: 0.9, metadata: { symbol: "MSFT", return_pct: 3, run_id: "old-1" } },
+      { ...baseChunk, id: "same-aapl", score: 0.45, metadata: { symbol: "AAPL", return_pct: 1, run_id: "old-2" } }
+    ]);
+
+    const { retrieveDecisionExperiences } = await import("../src/lib/experience-memory");
+    const result = await retrieveDecisionExperiences({
+      userId: "local",
+      runId: "run-current",
+      regime: "Risk-On",
+      candidates: [{ symbol: "AAPL" }]
+    });
+
+    // Incoming similarity order preserved exactly.
+    expect(result.analogChunks.map((chunk) => chunk.id)).toEqual(["cross-msft", "same-aapl"]);
+    // Exactly ONE retrieval call — the affinity pass is a pure in-memory reorder, so the strategy
+    // run's retrieval deadline and the vector store's query budget are unchanged.
+    expect(mocks.retrieveContextDetailed).toHaveBeenCalledTimes(1);
+  });
+
+  it("still retrieves exactly one query under the default (on) flag", async () => {
+    mocks.retrieveContextDetailed.mockResolvedValue([
+      { ...baseChunk, id: "same-aapl", score: 0.4, metadata: { symbol: "AAPL", return_pct: 1, run_id: "old-1" } },
+      { ...baseChunk, id: "cross-msft", score: 0.9, metadata: { symbol: "MSFT", return_pct: 1, run_id: "old-2" } }
+    ]);
+    const { retrieveDecisionExperiences } = await import("../src/lib/experience-memory");
+    await retrieveDecisionExperiences({
+      userId: "local",
+      runId: "run-current",
+      regime: "Risk-On",
+      candidates: [{ symbol: "AAPL" }]
+    });
+    expect(mocks.retrieveContextDetailed).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("formatAnalogCard", () => {
   it("packs situation + outcome scalars without dumping SocraticDecisionCase JSON", async () => {
     const { formatAnalogCard } = await import("../src/lib/experience-memory");

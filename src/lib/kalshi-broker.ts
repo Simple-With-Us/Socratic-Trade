@@ -27,12 +27,44 @@ import type {
   Portfolio,
   ReviewedOrder
 } from "./types";
+import { selectObservedQuotePrice } from "./quote-observation";
 import { isLiveOrderState } from "./broker-side";
 import { BROKER_ORDER_PAGE_CAP, chunkBrokerSymbols, scopeBrokerOrders } from "./inflight-deadline";
 import { knownBrokerLimits, mergeAccountCapabilities } from "./venue-contract-pure";
 import { logError, logWarn, recordBrokerCall } from "./sentry-metrics";
 
 const REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * Last contract price, then the two-sided mid.  A one-sided book and the
+ * 0.5 placeholder are not prices.  Kalshi market rows here have no
+ * observation time, so asOf stays unset and the quote is not marked
+ * venue-authoritative.
+ */
+export function kalshiQuoteFromMarket(m: {
+  ticker: string;
+  yes_bid?: number;
+  yes_ask?: number;
+  last_price?: number;
+  yes_bid_dollars?: string;
+  yes_ask_dollars?: string;
+  last_price_dollars?: string;
+  volume_24h_fp?: number;
+}): BrokerQuote | undefined {
+  const bid = m.yes_bid_dollars ? parseFloat(m.yes_bid_dollars) : m.yes_bid != null ? m.yes_bid / 100 : undefined;
+  const ask = m.yes_ask_dollars ? parseFloat(m.yes_ask_dollars) : m.yes_ask != null ? m.yes_ask / 100 : undefined;
+  const last = m.last_price_dollars ? parseFloat(m.last_price_dollars) : m.last_price != null ? m.last_price / 100 : undefined;
+  const selected = selectObservedQuotePrice({ last, bid, ask });
+  if (selected.price === undefined) return undefined;
+  return {
+    symbol: m.ticker,
+    price: selected.price,
+    bid,
+    ask,
+    volume: m.volume_24h_fp,
+    provider: "kalshi"
+  };
+}
 
 export class KalshiBrokerGateway implements BrokerGateway {
   readonly ordersListIncludesTerminal = true;
@@ -263,20 +295,8 @@ export class KalshiBrokerGateway implements BrokerGateway {
 
       if (marketsData?.markets) {
         for (const m of marketsData.markets) {
-          const bid = m.yes_bid_dollars ? parseFloat(m.yes_bid_dollars) : m.yes_bid != null ? m.yes_bid / 100 : undefined;
-          const ask = m.yes_ask_dollars ? parseFloat(m.yes_ask_dollars) : m.yes_ask != null ? m.yes_ask / 100 : undefined;
-          const price = m.last_price_dollars ? parseFloat(m.last_price_dollars) : m.last_price != null ? m.last_price / 100 : ask ?? bid ?? 0.5;
-
-          out[m.ticker] = {
-            symbol: m.ticker,
-            price,
-            bid,
-            ask,
-            volume: m.volume_24h_fp,
-            provider: "kalshi",
-            venuePriceAuthoritative: true,
-            fetchedAt: new Date().toISOString()
-          };
+          const quote = kalshiQuoteFromMarket(m);
+          if (quote) out[m.ticker] = { ...quote, fetchedAt: new Date().toISOString() };
         }
       }
     }
