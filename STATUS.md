@@ -1,3 +1,6 @@
+## 2026-10-17 CLAUDE — PR #4697 main merge (hold)
+
+PR #4697 went `CONFLICTING` after #4727 (the same gate fix, reached from a parallel branch) squash-merged to `main` at `1cbe9f06`.  Merged `origin/main` with a merge commit (no rebase, no force-push).  Two add/add conflicts, both resolved by keeping both sides: `docs/rollouts/2026-10-15-automerge-codeowners-globs.md` (main's text, plus this branch's CI-follow-up and port sections) and `test/disable-pr-automerge.test.ts` (main's file, plus this branch's `unreadable` read case).  The workflow, `scripts/disable-pr-automerge.sh`, and the other gate tests already matched `main`, so #4697 now adds only that one test and the history in the note.  `do-not-automerge` stays on and auto-merge is not armed.  Next: Jay squash-merges the small remainder or closes #4697 as superseded by #4727.
 ## 2026-10-16 CLAUDE (PR sweep) — PR #4661 merge-main and the last literal key prefix
 
 **What.**  Merged `origin/main` (`d1053ad69`, #4784 and #4739) into `cursor/free-data-gaps-55d1` with no conflicts; the main side touched only `db.ts`, `strategy.ts` and `sqlite-slow-timing`, none of which this PR changes.  Two prose sentences in this file and in `docs/rollouts/2026-10-14-free-data-gaps.md` still printed the literal key prefix inside "a full-repo search for ... returns zero hits", which repeated the defect and made the claim false.  Both now say "the key prefix", and `git grep` for it over the merged tree returns nothing.  No code change.
@@ -55,6 +58,15 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 
 # Current Status
 
+## 2026-10-15 Cursor Cloud — auto-merge CODEOWNERS globs (ST-3326)
+
+**What.**  `auto-merge-prs.yml` was fail-closing every PR because `gh api --jq -r` is two arguments (`accepts 1 arg(s), received 2`).  The CODEOWNERS money-path globs never ran.  The fetch is now one `--jq` expression.  A documented glob list is locked to CODEOWNERS.  The dry run disarms money-path diffs and `do-not-automerge`, and still arms a docs diff.  Merged `origin/main` (`df7e6d10`, then `3f4ef5e5` / #4698, then `2075c857` / #4696, then `e3ba1507` / #4716, then `49a76da4` / #4695) with merge commits.  `check-pin` was failing because it preferred `GH_PACKAGES_TOKEN` (user 12656028) over the Actions token, then reported that user's HTTP 403 rate limit as a missing token.  #4698 landed that token order on main.  This merge keeps main's copy.  `disable-on-*` jobs have `contents: write` and `pull-requests: write` (ported from #4727).  After a rejected disable, `gh pr view --jq` reports `off`, `armed`, or `unreadable`.  `off` exits 0.  `armed` or `unreadable` exits 1.  The arm job stays read-only.
+
+**Branch.**  `cursor/automerge-money-path-globs-2a65`
+
+**Verification.**  Earlier full gate: `npm run lint` exit 0 (0 errors, 854 warnings).  `npm test` 9378 passed, 51 skipped, 25 failed in 12 unrelated files.  `npm run build` exit 0.  After the CI follow-up: `npx tsc --noEmit` exit 0.  `npx vitest run test/disable-pr-automerge.test.ts test/shared-package-pin-check.test.ts test/automerge-gate-dry-run.test.ts test/branch-protection-gate.test.ts test/pr-touches-codeowners-paths.test.ts` 32 passed.  `npx eslint` on the touched JS and tests: 0 errors.
+
+**Next.**  PR #4697 stays ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.  #4727's disable permissions and jq reader are on this branch.  Jay can close #4727.  Leave ST-3326 In Progress until the fix has shipped.
 ## 2026-10-15 MM — Coolify st-pull-guard (board `2c6a6a53` / ST-3707)
 
 **What.**  Fixed the latent cause of the 2026-09-25 5.3-minute P0 on the box.  ST/UM use the Dockerfile build pack, so the image is built on the box and tagged `{application_uuid}:{commit}`, with no copy in any registry.  Compose's default `pull_policy` is `missing`, so when that tag is not local `docker compose up` itself resolves it as `docker.io/library/<uuid>` and fails.  Coolify stops the old container before that, so prod was already down when the registry said no.  (Corrected 2026-10-15: ST goes through `deploy_dockerfile_buildpack()`, which never calls `pull_docker_compose_images()`, so that pre-flight pull was not the cause.)
