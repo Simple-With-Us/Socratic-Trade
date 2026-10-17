@@ -156,3 +156,17 @@ auto-merge off with an elevated token.  Granting write scope to the job that
 disables merges is the owner's call, and ST-4393 shows `GH_PAT` /
 `SHEPHERD_TOKEN` still return 401, so the elevated-token path this PR depends on
 is not yet working.  It needs Jay's review before it lands.
+
+## Merge-main (CLAUDE sweep, 2026-10-17)
+
+PR #4727 had fallen BEHIND `main` (four commits, through `b39ed8a7d`, #4805).  `origin/main` is merged with a merge commit — no rebase, no force-push.  No conflicts and no conflict markers; `main` changed `.github/workflows/e2e.yml` only among workflow files and moved none of this PR's ten files.  The PR has no review threads.
+
+Local check after the merge:
+
+```bash
+npx vitest run test/automerge-gate-dry-run.test.ts test/branch-protection-gate.test.ts test/disable-pr-automerge.test.ts
+```
+
+21 tests passed.  Repo-wide `tsc` and `next build` were left to hosted CI: this lane cannot install the private `@jaywedgeworth22/congress-trading-shared` package, so a local `tsc` reports unrelated TS2307 errors for it.
+
+The `do-not-automerge` hold stays on and auto-merge is not armed.  Merging stays Jay's decision (see the hold reasons above).

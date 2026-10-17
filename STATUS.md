@@ -1,3 +1,7 @@
+## 2026-10-17 CLAUDE — PR #4727 main merge (hold)
+
+PR #4727 was BEHIND `main` (four commits, through `b39ed8a7d`, #4805) with no conflicts and no review threads.  Merged `origin/main` with a merge commit (no rebase, no force-push).  Main moved only `.github/workflows/e2e.yml` among workflow files, and none of the ten files this PR owns.  Focused Vitest (`automerge-gate-dry-run`, `branch-protection-gate`, `disable-pr-automerge`) passed 21 tests locally; the repo-wide `tsc` and build gates run in hosted CI, because this lane has no access to the private `@jaywedgeworth22/congress-trading-shared` package.  The `do-not-automerge` label stays on and auto-merge is not armed; Jay merges.
+
 ## 2026-10-15 CODEX — PR #4727 current-main conflict sweep
 
 Merged fresh `origin/main` at `7bfb84ef193196f1b77c9bfe0573c012e656c8c0` with merge commit `a80b3564a77f428930eea5fd138f0038a9c49cf4`.  The current PR head before this merge was `c116c6738f14b0cb3c8d787b4e6285915e1fd6d1`; no newer Cursor commit was present.  Merge completed without conflicts.  The unique PR diff remains the workflow, two scripts, three tests, and PLAN/STATUS/rollout paths.  The three disable jobs retain `contents: write` and `pull-requests: write`; the arm job remains read-only.
