@@ -55,6 +55,16 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 
 # Current Status
 
+## 2026-10-15 Cursor Cloud — quote observation and unknown-age gate (ST-2584)
+
+**What.**  Each provider keeps its own quote timestamp.  The price is last, then a two-sided mid.  A size, a one-sided book, and a prior close are not the price.  Unknown age blocks an opening.  Known-old quotes still convert to a limit.  Tradier paper and live both trade off Tradier quotes, with no Alpaca or Yahoo overlay.  Alpaca last prints use Alpaca's own latest-trades call.  No new vendor.
+
+**Branch.**  `cursor/quote-observation-staleness-99f5`
+
+**Verification.**  Merged `origin/main` through `2a2fb150` (clean, no quote-path conflict; lint 0 errors, `tsc --noEmit` clean, 16 focused vitest files 446 passed and 9 skipped).  Earlier, merged through `d1053ad6`: the three broker-call-bound conflicts (eToro, Kalshi, Public quote reads) kept main's chunked, abort-signalled fetches and this lane's observation helpers.  The four fail-closed review threads are explained on the PR and resolved.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
+
+**Next.**  Owner ruling 2026-10-17: merge unless the owner is needed.  `do-not-automerge` only stops auto-merge, so the sweep squash-merges directly once CI is green.
+
 ## 2026-10-15 Cursor Cloud — auto-merge money-path gate (ST-3326)
 
 **What.**  `auto-merge-prs.yml` was fail-closing every PR because `gh api --jq -r` is two arguments, so CODEOWNERS money-path globs never ran.  The fetch is one `--jq` expression.  Money-path diffs and `do-not-automerge` are not armed.  Disable retries a rejected PAT with the Actions token.  If that mutation is forbidden (`Resource not accessible by integration`) the job still succeeds when `autoMergeRequest` is already null, and fails when the PR is still armed.  Disable jobs grant `contents: write` so the Actions token can call the disable mutation.  The arm job stays read-only.
