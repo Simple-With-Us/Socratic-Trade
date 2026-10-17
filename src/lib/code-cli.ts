@@ -18,8 +18,9 @@ const CodeCliMessageSchema = z.object({
 });
 
 /** Inbound OpenAI-style body.  Deliberately not .strict(): ST callers also send sampling fields such
- *  as temperature (red-team.ts), and the broker payload below is rebuilt from an allowlist, so no
- *  unknown key ever crosses to the broker. */
+ *  as temperature (red-team.ts), which must not fail the call.  Also deliberately not .passthrough():
+ *  Zod's default strip drops unknown keys from the parsed data, so caller-controlled fields such as
+ *  cwd, sessionId or api_key are gone before the broker payload is rebuilt from an allowlist below. */
 const CodeCliRequestSchema = z.object({
   model: z.string().optional(),
   messages: z.array(z.unknown()).min(1).max(100),

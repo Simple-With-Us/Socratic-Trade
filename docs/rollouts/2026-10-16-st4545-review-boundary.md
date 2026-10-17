@@ -18,7 +18,7 @@ Sentinel and chat schema unchanged per scope (the chat schema was later made str
 ## Verification
 - npm run lint -> 0 errors, 871 existing warnings (full run, CLAUDE sweep after merging main)
 - npx tsc --noEmit -> ok
-- npx vitest run test/code-cli.test.ts test/code-cli-routing.test.ts test/chat-llm.test.ts test/llm-request.test.ts test/llm-reasoning.test.ts test/strategy-llm-failover.test.ts test/red-team-empty-failover.test.ts test/copy-rules-lint.test.ts -> 143 pass
+- npm test -> pass (full suite, run by CI verify-hosted on 20b5dd54d, run 39000481070; locally the focused code-cli, routing, chat-llm, llm-request, llm-reasoning, failover and copy-rules-lint files -> 143 pass)
 - npm run build -> ok (compiled with existing warnings; CLAUDE sweep after merging main)
 - npx playwright test -c /tmp/st4545-playwright.config.cjs -> 1 pass (ECHO, installed local Chrome, isolated local built app)
 - git diff --check -> ok
