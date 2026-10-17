@@ -187,7 +187,16 @@ The "Review threads on the shepherd merges" and `visual.spec.ts` paragraphs abov
 describe that earlier iteration and are left as written.  After this merge, the
 PR's diff against `main` is ST-8 only.
 
-**Migration check.**  `main`'s highest migration is still 96
+**Migration check.**  At `b39ed8a7d`, `main`'s highest migration was still 96
 (`text_payload_codec_columns`).  #4739 touched `src/lib/db.ts` (slow-call timing)
-without adding a migration, so ST-8's `strategy_runs_owner_instance` stays **97**
-and is unique.
+without adding a migration, so ST-8 stayed at 97 for that merge.
+
+**Migration renumbered a third time, 97 → 98.**  Before the push, `main` moved to
+`1eb6f3bed` (#4736, ST-4541), which spends version **97** on
+`st4541_dedup_isolation_columns`.  This time the collision was a textual conflict
+in `src/lib/db.ts`, because both migrations were appended at the same spot.  A
+second merge commit keeps both: #4736's migration stays 97, and ST-8's
+`strategy_runs_owner_instance` is now **98**.  The twelve `getSchemaVersion` /
+`applyVersionedMigrations` assertions in `test/persistence-hardening.test.ts`
+move to 98.  That test file merged with no conflict, because both sides had moved
+the assertions from 96 to 97 the same way; left alone, they would have been wrong.
