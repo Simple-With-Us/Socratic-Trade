@@ -337,6 +337,11 @@ export interface StrategyLlmStep {
   keySource: "operator" | "user";
   status: "started" | "completed" | "skipped" | "fallback" | "failed";
   proposalCount?: number;
+  finishReason?: string;
+  truncated?: boolean;
+  wireOutputCap?: number;
+  completionTokens?: number;
+  responseAttempts?: Array<{ provider: string; model: string; finishReason?: string; truncated?: boolean; wireOutputCap?: number; completionTokens?: number }>;
   reason?: string;
 }
 
@@ -6568,7 +6573,7 @@ async function proposeTrades(input: {
     runId: input.runId,
     userId: input.userId,
     connectedAccountId: input.policy.connectedAccountId
-  });
+  }).map((attempt) => ({ ...attempt, truncationRetry: false, wireOutputCapOverride: undefined as number | undefined }));
   // Which endpoint actually served the run (starts as the primary; updated on failover). Transport
   // and keySource are tracked too so the served step/audit trail reports the FALLBACK's transport
   // (e.g. anthropic-messages vs the primary's responses), not the primary's — accurate money-path tracing.
@@ -6593,6 +6598,8 @@ async function proposeTrades(input: {
   // Stored Green calls actually issued this run.  The exhausted-chain sentence
   // may only cite this count — planned-but-uncalled seats are a silent lie.
   let bullAttemptsStarted = 0;
+  const bullResponseAttempts: NonNullable<StrategyLlmStep["responseAttempts"]> = [];
+  let bullResponseDetails: Pick<StrategyLlmStep, "finishReason" | "truncated" | "wireOutputCap" | "completionTokens"> = {};
 
   const bullStepBase = {
     step: "bull" as const,
@@ -6656,8 +6663,9 @@ async function proposeTrades(input: {
           const next = plannedBullAttempts[i + 1];
           lastBullAttemptProvider = attempt.provider;
           lastBullAttemptModel = attempt.model;
+          bullResponseDetails = {};
           try {
-            bullAttemptsStarted += 1;
+            if (!attempt.truncationRetry) bullAttemptsStarted += 1;
             const bullSoftTimeoutMs = strategyLlmTimeoutMs(attempt.model, input.policy.llmReasoningEffort);
             // Reasoning-class-aware SOFT wall-clock: a thinking-enabled model gets the widened bound.
             // The request is NOT severed at the wall — if it's slow the tick moves on, but the eventual
@@ -6766,16 +6774,51 @@ async function proposeTrades(input: {
               };
             }
             const text = extractLlmText(payload);
-            const truncated = detectLlmTruncation(payload);
+            const providerTruncated = detectLlmTruncation(payload);
             // The wire cap actually sent for THIS attempt (base cap + provider reasoning headroom —
             // e.g. Gemini/xAI/Mistral/DeepSeek add up to +16000), not the pre-headroom constant.
-            const wireOutputCap = resolveLlmWireOutputCap(attempt.transport, {
+            const wireOutputCap = attempt.wireOutputCapOverride ?? resolveLlmWireOutputCap(attempt.transport, {
               maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal,
               model: attempt.model,
               reasoningEffort: interactiveStrategyReasoningEffort(attempt.model, input.policy.llmReasoningEffort)
             });
             const finishReason = extractBullFinishReason(payload);
+            const completionTokens = extractLlmUsage(payload).completionTokens;
+            const emptyAtCap = !text?.trim() && typeof completionTokens === "number" && completionTokens >= wireOutputCap;
+            const truncated = providerTruncated || emptyAtCap;
+            bullResponseDetails = { finishReason, truncated, wireOutputCap, completionTokens };
+            bullResponseAttempts.push({ provider: attempt.provider, model: attempt.model, ...bullResponseDetails });
 
+            if (!text?.trim() && truncated) {
+              // MiniMax can spend its entire completion allowance on hidden reasoning. Retry
+              // once, on the same endpoint, with a bounded larger allowance. Never loop or
+              // count the empty response as a successful zero-proposal decision.
+              const retryCap = Math.min(wireOutputCap * 2, 16_000);
+              const retry = !attempt.truncationRetry && attempt.transport === "chat-completions" &&
+                /^(?:minimax\/)?minimax-/i.test(attempt.model) && retryCap > wireOutputCap;
+              const reason = `Green Team returned empty content after output truncation at the ${wireOutputCap}-token cap (finish_reason=${finishReason ?? "unknown"}, completion_tokens=${completionTokens ?? "unknown"}).`;
+              recordStep({ ...bullStepBase, provider: attempt.provider, model: attempt.model,
+                transport: attempt.transport, keySource: attempt.keySource,
+                ...bullResponseDetails, status: !retry && !isLast ? "fallback" : "failed", reason }, { includeInResult: false });
+              audit("strategy_bull_truncated", { runId: input.runId, ...bullResponseDetails,
+                provider: attempt.provider, model: attempt.model, parsedProposals: 0,
+                retryScheduled: retry, ...(retry ? { retryWireOutputCap: retryCap } : {}) }, input.userId, input.policy.connectedAccountId);
+              if (retry) {
+                plannedBullAttempts.splice(i + 1, 0, { ...attempt, truncationRetry: true,
+                  wireOutputCapOverride: retryCap, body: { ...attempt.body, max_completion_tokens: retryCap } });
+                continue;
+              }
+              if (!isLast) {
+                lastError = new Error(reason);
+                bullLastFailoverReason = "empty truncated response";
+                audit("strategy_llm_failover", { runId: input.runId, step: "bull",
+                  fromModel: attempt.model, fromProvider: attempt.provider,
+                  reason: "empty_truncated_response", ...bullResponseDetails,
+                  toModel: next.model, toProvider: next.provider }, input.userId, input.policy.connectedAccountId);
+                continue;
+              }
+              throw new Error(reason);
+            }
             if (!text) {
               // An HTTP-200 with EMPTY content is a provider-side glitch (overloaded/deprecated
               // model), not a proposal — isRetryableLlmError deliberately doesn't match it, so
@@ -6881,7 +6924,8 @@ async function proposeTrades(input: {
   } catch (error) {
     let reason = humanizeLlmTransportError(error, { provider: lastBullAttemptProvider, model: lastBullAttemptModel, stepLabel: "Green Team proposal", timeoutMs: strategyLlmTimeoutMs(lastBullAttemptModel, input.policy.llmReasoningEffort) });
     reason = `${reason}${greenFailoverExhaustedSuffix(bullAttemptsStarted)}`;
-    const failedStep: StrategyLlmStep = { ...bullStepBase, status: "failed", reason };
+    const failedEndpoint = remapOpenRouterTelemetry(lastBullAttemptProvider, lastBullAttemptModel);
+    const failedStep: StrategyLlmStep = { ...bullStepBase, ...failedEndpoint, ...bullResponseDetails, responseAttempts: bullResponseAttempts, status: "failed", reason };
     recordStep(failedStep);
     throw new StrategyLlmStepFailure(reason, llmSteps, error);
   }
@@ -7026,6 +7070,8 @@ async function proposeTrades(input: {
     transport: bullServedTransport,
     keySource: bullServedKeySource,
     status: "completed",
+    ...bullResponseDetails,
+    responseAttempts: bullResponseAttempts,
     proposalCount: rawBullProposals.length,
     ...(bullCompletedReason ? { reason: bullCompletedReason } : {})
   });
