@@ -42,7 +42,7 @@ import { audit, getDb } from "./db";
 import { logWarn } from "./sentry-metrics";
 import { timeSync } from "./slow-sync-guard";
 
-/** Retention for DELIVERED-but-stranded rows only. Undelivered rows are never age-deleted. */
+/** Age after which an undelivered row is reported as backlog by the observer. Nothing is age-deleted. */
 export const EMBED_STAGE_RETENTION_DAYS = 35;
 /**
  * Audited size ceiling for the table. ST-4540: this is an ALARM, not a prune trigger — an
@@ -242,8 +242,10 @@ function byteLengthOf(blob: unknown): number {
  *
  * The stamp and the delete are SEPARATE transactions on purpose, so the receipt is durable rather
  * than transient:
- *   * crash (or a throw) between the two leaves the row stamped delivered, which the retention
- *     sweep reclaims — correct, because the store already acknowledged the vector;
+ *   * crash (or a throw) between the two leaves the row stamped delivered and KEPT. No sweep
+ *     removes it (sweepEmbedStage is read-only); only a later by-key call to this function for the
+ *     same content hash can. It is not counted in `undelivered`, so it shows up only as
+ *     `rows - undelivered` and in the byte total behind the over-cap alarm;
  *   * a key re-staged between the two (a fresh embed clears delivered_at to NULL) does not match
  *     the receipt, so the older delivery can never remove the newer undelivered vector.
  *
@@ -279,9 +281,9 @@ export function deleteStagedEmbeddings(
   );
   let deleted = 0;
   // Two transactions, deliberately. The stamp commits first so a crash between the two leaves an
-  // auditable "delivered but stranded" row for the sweep instead of silently rolling the evidence
-  // of delivery back — and so a re-stage landing between them (which clears delivered_at) makes
-  // the constrained delete match nothing.
+  // auditable "delivered but stranded" row (kept; see the note above) instead of silently rolling
+  // the evidence of delivery back — and so a re-stage landing between them (which clears
+  // delivered_at) makes the constrained delete match nothing.
   const stampDelivered = db.transaction((keys: string[]) => {
     for (const key of keys) markDelivered.run(deliveredAt, receipt.store, model, revision, key);
   });

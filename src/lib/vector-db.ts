@@ -4256,8 +4256,8 @@ async function storeContextsImpl(
         // "paid but not yet delivered" stage rows can go (plain calls delete per batch; managed
         // commits defer until the committed re-upsert + finalize). The delivery receipt is
         // required (ST-4540) — a row can only be removed by naming the backend that took it.
-        // Best-effort: a failure here leaves a delivered row for the retention lane, which
-        // reclaims delivered rows only and never an undelivered one.
+        // Best-effort: a failure here leaves a receipt-stamped (delivered) row in place. No sweep
+        // removes it; only a later by-key deleteStagedEmbeddings can.
         const deliveredStageHashes = batch
           .filter((document) => indexedDocIdentities.has(document))
           .map((document) => stageHashByDocument.get(document))
@@ -4272,7 +4272,7 @@ async function storeContextsImpl(
               });
             } catch (err) {
               console.warn(
-                "[vector-db] embed-stage delete failed (non-fatal; retention lane reclaims delivered rows):",
+                "[vector-db] embed-stage delete failed (non-fatal; the delivered row is kept, no sweep removes it):",
                 err instanceof Error ? err.message : String(err)
               );
             }
@@ -4340,7 +4340,7 @@ async function storeContextsImpl(
           });
         } catch (err) {
           console.warn(
-            "[vector-db] embed-stage delete failed (non-fatal; retention lane reclaims delivered rows):",
+            "[vector-db] embed-stage delete failed (non-fatal; the delivered row is kept, no sweep removes it):",
             err instanceof Error ? err.message : String(err)
           );
         }

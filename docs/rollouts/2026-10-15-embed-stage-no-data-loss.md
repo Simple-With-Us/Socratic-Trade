@@ -70,6 +70,26 @@ safe to delete.
 `scheduler.ts` (lane summary reports `embed_stage_undelivered=`), `sqlite-storage-hygiene.ts`
 (checked — no `embed_stage` deleter remains after #4722).
 
+## Decisions & Trade-offs
+
+- **Forever retention wins over reclaiming stranded rows.**  #4722 made ST data keep-forever and added
+  `test/forever-retention-no-age-delete.test.ts`, so the sweep issues no delete at all.  A row can
+  therefore end up "delivered but stranded": the store acknowledged the vector and the receipt was
+  stamped, but the by-key delete threw or the process died between the two transactions.  Such a row
+  is kept, and no sweep removes it.  Only a later by-key `deleteStagedEmbeddings` call for the same
+  content hash can.  The code comments in `vector-db.ts` and `db-embed-stage.ts` said a "retention
+  lane" reclaims these rows; that was stale after #4722 and is corrected here.
+- **Stranded rows are bounded but not separately counted.**  A stranded row carries `delivered_at`,
+  so it is not in `undelivered`.  It is visible only as `rows - undelivered` from `embedStageStats()`
+  and in the byte total behind the `embed_stage_over_cap` alarm.  A dedicated counter or a
+  receipt-scoped cleanup (never a `created_at` predicate) is a separate decision that would also
+  need `test/forever-retention-no-age-delete.test.ts` amended, so it is left as a follow-up.
+- **The observer is one scan.**  `sweepEmbedStage` reads the table once (`embedStageStats(cutoff)`),
+  because `SUM(LENGTH(vector))` reads every blob and the table can no longer shrink on its own.
+- **Held for the owner.**  The diff touches `src/lib/scheduler.ts`, a CODEOWNERS money path (a
+  change to the audit-prune lane summary string only, no scheduling or order logic), so this PR
+  is merged by the owner and not by an agent.
+
 ## Tests
 
 `test/embed-stage.test.ts` — the sweep suites plus new ones: every aged row survives whether
@@ -100,6 +120,33 @@ hand-built pre-migration fixture; a fresh-DB test can never reach that code path
 `embed_stage_cap_prune` no longer exists (nothing is cap-pruned). Alert on **`embed_stage_over_cap`**
 and **`embed_stage_undelivered_backlog`** instead.
 
+## Verification State
+
+Run in `claude-pr4742-sweep` (a Socratic-Trade lane) after merging `origin/main` into the branch, 2026-10-16:
+
+```bash
+npx tsc --noEmit                                  # exit 0
+npx vitest run test/embed-stage.test.ts test/db-migration-old-schema.test.ts \
+  test/sqlite-storage-hygiene.test.ts test/audit-hygiene.test.ts \
+  test/forever-retention-no-age-delete.test.ts    # 5 files, 58 tests, all passed
+npx eslint <touched src/lib files + test/embed-stage + test/db-migration-old-schema>
+                                                  # 0 errors, 81 pre-existing warnings
+```
+
+Not re-run locally in this sweep: the full `npm test` and `npm run build`.  The GitHub `verify`
+check is the authority for those, and it was green on the previous head (`bcbf37846`).  The head
+after this push is re-verified by CI, not by this note.
+
+## Next Steps & Blockers
+
+- **Blocker:** the owner reviews and merges, because the diff touches the CODEOWNERS money path
+  `src/lib/scheduler.ts`.  Auto-merge was disarmed for that reason.
+- Wire `embed_stage_over_cap` and `embed_stage_undelivered_backlog` into the alerting dashboard so
+  the new alarms page a human and do not stay Sentry noise.
+- Decide whether stranded delivered rows need their own counter or a receipt-scoped cleanup (see
+  Decisions); file a Linear issue if so.
+- Watch quarantine healing on the first real `undecodable_vector` event and check the reason format.
+
 ## Recall
 
 ```bash
@@ -109,4 +156,3 @@ recall contribute "When a stage table represents work already paid for but not y
 Separately, when adding a column to baseline DDL, never index it in that same block: index it in the
 guarded ALTER TABLE migration, and back it with a pre-migration fixture test, because a fresh-DB CI
 run cannot reach the broken path.
-```
