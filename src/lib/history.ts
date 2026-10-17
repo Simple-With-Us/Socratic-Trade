@@ -2,14 +2,18 @@
 //
 // Two consumers share this: the technical connector (`web-sources/technical.ts`, which
 // only reads closes) and the symbol-drilldown price chart (`/api/history`, which needs
-// full candles). Sources cascade keyed-first then free floor before last-resort keyed:
-// local flat-files → imported/App A → connected brokers (Tradier / Alpaca / Robinhood)
-// → Massive → ROIC.ai → Tiingo → Yahoo → Marketstack.
-// Broker-owned bars come BEFORE paid third parties so a connected venue lifts Massive/ROIC/Tiingo
-// spend and is usually the same tape the account would fill against.
-// Capability matrix ranks Yahoo `good` and Marketstack `last_resort` for ohlcv_daily — Yahoo
-// is the free floor; Marketstack only runs after Yahoo fails. Keyed Massive/ROIC/Tiingo stay
-// ahead of Yahoo when present. Yahoo chart 429s fail fast when Marketstack can still try.
+// full candles). The default lookback is ~5y. Requests longer than the Massive free
+// aggregate window (2y) skip Massive — that tier truncates — and try Yahoo chart
+// `range=max` (paced), then Tradier history, then Twelve Data. Shorter requests keep
+// the broker-first order: imported/App A → Tradier / Alpaca / Robinhood → Massive →
+// ROIC.ai → Tiingo → Yahoo `range=1y` → Marketstack.
+// Broker-owned bars come BEFORE paid third parties on the short path so a connected
+// venue lifts Massive/ROIC/Tiingo spend and is usually the same tape the account would
+// fill against. On the deep path Yahoo's free max range is the only source that
+// reliably covers more than two years without a paid history tier.
+// Capability matrix ranks Yahoo `good` and Marketstack `last_resort` for ohlcv_daily.
+// Marketstack only runs after Yahoo fails. Yahoo chart 429s fail fast when Marketstack
+// can still try.
 // Server-side only; cached briefly. Never fabricates — no bars → returns null, callers
 // degrade to "—".
 //
@@ -27,11 +31,12 @@
 import fs from "fs";
 import path from "path";
 import zlib from "zlib";
+import { z } from "zod";
 import type { OHLCBar } from "./indicators";
 export type { OHLCBar };
 import { dataSourceFetch } from "./data-source-fetch";
 import { normalizeSymbol, toAlpacaSymbol } from "./money";
-import { audit, fulfillMarketDataDemand, getConnectedAccountByBroker, getImportedPriceCloses, getImportedSpxCloses, hasDataPoolConsent, recordMarketDataDemand, resolveApiKeyWithSource, upsertImportedPrices, type ApiKeySource } from "./db";
+import { audit, deleteInternalSetting, fulfillMarketDataDemand, getConnectedAccountByBroker, getImportedPriceCloses, getImportedSpxCloses, getInternalSetting, hasDataPoolConsent, recordMarketDataDemand, resolveApiKeyWithSource, setInternalSetting, upsertImportedPrices, type ApiKeySource } from "./db";
 import { emitDashboardEvent } from "./events";
 import { expiresAtRespectingMarketClose, latestCompletedTradingSessionEtKey } from "./market-hours";
 import { recordProviderCall } from "./usage-monitor-push";
@@ -39,12 +44,15 @@ import { massiveApiBase, reserveMassiveRestCall } from "./market-signals/massive
 import { fetchRobinhoodHistoricals } from "./robinhood";
 import { appAClosesToBars, congressReadsEnabled, getCongressTradeClient } from "./api-clients/congress";
 import { BROWSER_UA, politeFetchJson } from "./web-sources/http";
-import { admitProviderRequests } from "./provider-rate-limit";
+import { admitProviderRequests, withProviderLimit } from "./provider-rate-limit";
 import { apiKeyFingerprint } from "./data-providers";
 import { fetchHistoryCacheEod, upsertHistoryCacheEod } from "./history-cache";
 const DEFAULT_TTL_MS = 30 * 60_000; // daily bars only move intraday on the last candle
 const cache = new Map<string, { expiresAt: number; bars: OHLCBar[] }>();
-const KEYED_HISTORY_SERVICES = ["massive", "roic", "marketstack", "tiingo"] as const;
+const KEYED_HISTORY_SERVICES = ["massive", "roic", "marketstack", "tiingo", "twelvedata"] as const;
+/** Massive free aggregates stop at about two years. Longer requests skip that tier. */
+const MASSIVE_FREE_LOOKBACK_DAYS = 730;
+const DEFAULT_LOOKBACK_DAYS = 1825;
 type CacheScope = "shared" | "private" | "pool";
 
 interface YahooChartResponse {
@@ -69,6 +77,55 @@ interface YahooChartResponse {
 function historyTtlMs(): number {
   const v = Number(process.env.HISTORY_TTL_MS ?? DEFAULT_TTL_MS);
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_TTL_MS;
+}
+
+function clampLookbackDays(raw: number | undefined): number {
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return Math.floor(raw);
+  return DEFAULT_LOOKBACK_DAYS;
+}
+
+/** True when the oldest bar is on or before the requested start (the series is not a short stub). */
+function seriesCoversStart(bars: OHLCBar[], startDate: string): boolean {
+  const oldest = toBusinessDay(bars[0]?.time);
+  return Boolean(oldest && oldest <= startDate);
+}
+
+const LISTING_START_PREFIX = "history:listing-start:";
+
+function listingStartKey(symbol: string): string {
+  return `${LISTING_START_PREFIX}${symbol}`;
+}
+
+/** Oldest session Yahoo `range=max` actually returned.  A young listing never reaches a 5y start. */
+function readListingStart(symbol: string): string | undefined {
+  try {
+    const raw = getInternalSetting<unknown>(listingStartKey(symbol));
+    return typeof raw === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeListingStart(symbol: string, iso: string | null): void {
+  try {
+    if (!iso) {
+      deleteInternalSetting(listingStartKey(symbol));
+      return;
+    }
+    setInternalSetting(listingStartKey(symbol), iso);
+  } catch {
+    // A settings miss must not drop bars the cascade already fetched.
+  }
+}
+
+function localSeriesCovers(symbol: string, bars: OHLCBar[] | null, startDate: string, deepHistory: boolean): boolean {
+  if (!bars || !deepHistory) return true;
+  if (seriesCoversStart(bars, startDate)) return true;
+  const oldest = toBusinessDay(bars[0]?.time);
+  const listedAt = readListingStart(symbol);
+  // The marker is the first bar of a completed range=max fetch.  Cached bars
+  // that still start on or before that date are the full listing, not a stub.
+  return Boolean(oldest && listedAt && oldest <= listedAt);
 }
 
 // ── Yahoo v8/finance/chart HTTP 429 hardening ────────────────────────────────
@@ -96,25 +153,32 @@ async function fetchYahooChartJson<T>(
 ): Promise<T> {
   const maxAttempts = opts?.maxAttempts ?? YAHOO_CHART_MAX_ATTEMPTS;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), YAHOO_CHART_TIMEOUT_MS);
-    try {
-      const res = await dataSourceFetch(url, {
-        headers: { "user-agent": BROWSER_UA, accept: "application/json" },
-        cache: "no-store",
-        signal: controller.signal
-      });
-      if (res.status === 429 && attempt < maxAttempts - 1) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, Math.min(4000, YAHOO_CHART_BASE_BACKOFF_MS * 2 ** attempt))
-        );
-        continue;
+    // The abort timer starts after the yahoo-finance slot is acquired.  Time
+    // spent in the pacer queue must not count against YAHOO_CHART_TIMEOUT_MS.
+    // range=1y and range=max share this helper and the same chart host, so both
+    // take the 400ms / concurrency-2 pacer.  That spacing is intentional on the
+    // short path: a cache-miss fan-out was already drawing HTTP 429s here.
+    const res = await withProviderLimit("yahoo-finance", async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), YAHOO_CHART_TIMEOUT_MS);
+      try {
+        return await dataSourceFetch(url, {
+          headers: { "user-agent": BROWSER_UA, accept: "application/json" },
+          cache: "no-store",
+          signal: controller.signal
+        });
+      } finally {
+        clearTimeout(timeout);
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-      return (await res.json()) as T;
-    } finally {
-      clearTimeout(timeout);
+    });
+    if (res.status === 429 && attempt < maxAttempts - 1) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(4000, YAHOO_CHART_BASE_BACKOFF_MS * 2 ** attempt))
+      );
+      continue;
     }
+    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+    return (await res.json()) as T;
   }
   throw new Error(`HTTP 429 for ${url} (exhausted retries)`);
 }
@@ -205,10 +269,15 @@ function persistEodBarsToCache(symbol: string, bars: OHLCBar[]): void {
 
 
 /**
- * Fetch ~5y of daily OHLC bars for a symbol, cached briefly. Cascades keyed providers
- * first (reliable, generous limits): Massive → ROIC.ai → Tradier → Tiingo →
- * Marketstack, then free Yahoo. Keyed sources are skipped when no user/env key is
- * available. Returns the first source that yields ≥2 bars, or null (never fabricated).
+ * Fetch daily OHLC bars for a symbol. Default lookback is ~5y (`lookbackDays`).
+ * Lookbacks longer than {@link MASSIVE_FREE_LOOKBACK_DAYS} skip Massive and try
+ * Yahoo `range=max` (paced), Tradier, then Twelve Data before the remaining tiers.
+ * Shorter lookbacks keep Massive in the broker-first cascade and Yahoo at `range=1y`.
+ * SQLite `history_cache_eod` rows are permanent (no row TTL). A fresh series is
+ * served with no network only when it reaches `startDate`, or when a prior Yahoo
+ * `range=max` response confirmed the listing starts later.  A 2y cache with no
+ * such marker cannot block a deep Yahoo fetch. Returns the first source that yields ≥2 bars,
+ * or null (never fabricated).
  * ROIC is operator-key only (ROIC_API_KEY); CT (App A) never holds a ROIC key — it
  * pulls via ST market-read peer routes after ST has cached the series.
  */
@@ -216,7 +285,7 @@ export async function fetchDailyOHLC(
   rawSymbol: string,
   now: number = Date.now(),
   userId?: string,
-  opts?: { skipAppATier?: boolean; usageLabel?: string },
+  opts?: { skipAppATier?: boolean; usageLabel?: string; lookbackDays?: number },
 ): Promise<OHLCBar[] | null> {
   const symbol = normalizeSymbol(rawSymbol);
   if (!symbol) return null;
@@ -225,7 +294,8 @@ export async function fetchDailyOHLC(
     massive: resolveApiKeyWithSource("massive", userId),
     roic: resolveApiKeyWithSource("roic", userId),
     marketstack: resolveApiKeyWithSource("marketstack", userId),
-    tiingo: resolveApiKeyWithSource("tiingo", userId)
+    tiingo: resolveApiKeyWithSource("tiingo", userId),
+    twelvedata: resolveApiKeyWithSource("twelvedata", userId)
   };
   const tradierCredential = resolveTradierHistoryCredential();
   const alpacaHistory = resolveAlpacaHistoryCredential(userId);
@@ -243,9 +313,17 @@ export async function fetchDailyOHLC(
   const sharedHit = cache.get(sharedCacheKey);
   if (sharedHit && sharedHit.expiresAt > now) return sharedHit.bars;
 
-  // 1. Evaluate local SQLite history cache
+  const lookbackDays = clampLookbackDays(opts?.lookbackDays);
+  const deepHistory = lookbackDays > MASSIVE_FREE_LOOKBACK_DAYS;
+  const startDate = new Date(now - lookbackDays * 24 * 60 * 60_000).toISOString().slice(0, 10);
+
+  // 1. Evaluate local SQLite history cache. Rows are permanent. A fresh series
+  //    short-circuits the network only when it covers the requested start, or when
+  //    Yahoo range=max already confirmed this symbol lists later than that start.
+  //    A 2-year cache with no marker cannot hide Yahoo range=max on a deep request.
   const localBars = await fetchHistoryCacheEod(symbol);
-  if (localBars && localBars.length >= 2 && isBarSeriesFresh(localBars, now)) {
+  const localCovers = localSeriesCovers(symbol, localBars, startDate, deepHistory);
+  if (localBars && localBars.length >= 2 && isBarSeriesFresh(localBars, now) && localCovers) {
     const stampedLocal = stampOhlcBarProvenance(localBars, "history-cache-eod", new Date(now).toISOString());
     cache.set(sharedCacheKey, { expiresAt: expiresAtRespectingMarketClose(new Date(now), historyTtlMs()), bars: stampedLocal });
     emitHistoryDemandFilled(symbol, now);
@@ -275,73 +353,101 @@ export async function fetchDailyOHLC(
       ? mergeOHLCBars(staleLocalBars, staleImportedBars)
       : staleLocalBars ?? staleImportedBars;
 
-  const startDate = new Date(now - 1825 * 24 * 60 * 60_000).toISOString().slice(0, 10);
+  const yahooAttempts = keySources.marketstack.key ? YAHOO_CHART_FAST_FAIL_ATTEMPTS : YAHOO_CHART_MAX_ATTEMPTS;
+  const importedSource = {
+    scope: "shared" as const,
+    sourceId: "imported-eod",
+    // A fresh, dense series may displace a re-fetch; a stale one was diverted to
+    // `staleImportedBars` above (#4009). DEFAULT OFF + density-guarded inside
+    // fetchImportedHistory so a sparse gap-fill never short-circuits.
+    fetch: async () => (importedIsFresh ? importedBars : null)
+  };
+  const appASource = opts?.skipAppATier
+    ? []
+    : [{ scope: "shared" as const, sourceId: "congress.trade", fetch: () => fetchAppAHistory(symbol) }];
+  const tradierSource = {
+    scope: "shared" as const,
+    sourceId: "tradier",
+    fetch: () => fetchTradier(symbol, startDate, tradierCredential.key, tradierCredential.baseUrl)
+  };
+  const twelveSource = {
+    scope: cacheScopeForKeySource(keySources.twelvedata.source, userId),
+    sourceId: "twelvedata",
+    fetch: () => fetchTwelveData(symbol, startDate, keySources.twelvedata.key, opts?.usageLabel)
+  };
+  const alpacaSource = {
+    scope: cacheScopeForKeySource(alpacaHistory.source, userId),
+    sourceId: "alpaca",
+    fetch: () => fetchAlpacaDaily(symbol, startDate, alpacaHistory.apiKey, alpacaHistory.secretKey)
+  };
+  const robinhoodSource = userId
+    ? [
+        {
+          scope: cacheScopeForKeySource("user", userId),
+          sourceId: "robinhood",
+          fetch: () => fetchRobinhoodHistoricals(symbol, { interval: "day", span: "5year", userId })
+        }
+      ]
+    : [];
+  const massiveSource = {
+    scope: cacheScopeForKeySource(keySources.massive.source, userId),
+    sourceId: "massive",
+    fetch: () => fetchMassive(symbol, startDate, keySources.massive.key, opts?.usageLabel)
+  };
+  const roicSource = {
+    scope: cacheScopeForKeySource(keySources.roic.source, userId),
+    sourceId: "roic",
+    fetch: () => fetchRoic(symbol, startDate, keySources.roic.key, opts?.usageLabel)
+  };
+  const tiingoSource = {
+    scope: cacheScopeForKeySource(keySources.tiingo.source, userId),
+    sourceId: "tiingo",
+    fetch: () => fetchTiingo(symbol, startDate, keySources.tiingo.key, opts?.usageLabel)
+  };
+  const yahooSource = (range: "max" | "1y") => ({
+    scope: "shared" as const,
+    sourceId: "yahoo-finance",
+    confirmsListingStart: range === "max",
+    fetch: () => fetchYahoo(symbol, { range, maxAttempts: yahooAttempts })
+  });
+  const marketstackSource = {
+    scope: cacheScopeForKeySource(keySources.marketstack.source, userId),
+    sourceId: "marketstack",
+    fetch: () => fetchMarketstack(symbol, keySources.marketstack.key, opts?.usageLabel)
+  };
+  // Deep (>2y): Yahoo range=max, Tradier, Twelve Data. Massive is omitted because
+  // the free tier truncates at ~2y and would win the cascade with a short series.
+  // Short: brokers, then Massive, then Yahoo range=1y before Marketstack.
   const sources: Array<{
     scope: CacheScope;
     sourceId: string;
+    confirmsListingStart?: boolean;
     fetch: () => Promise<OHLCBar[] | null>;
-  }> = [
-    // Local imported-EOD cache tier (congress.trade return-path). A fresh, dense series may displace
-    // a re-fetch; a stale one was diverted to `staleImportedBars` above (#4009) and only serves as a
-    // merge base or the all-sources-failed fallback.  DEFAULT OFF + density-guarded inside
-    // fetchImportedHistory so a sparse gap-fill never short-circuits with an incomplete series.
-    // Close-only bars.
-    { scope: "shared", sourceId: "imported-eod", fetch: async () => (importedIsFresh ? importedBars : null) },
-    ...(opts?.skipAppATier
-      ? []
-      : [{ scope: "shared" as const, sourceId: "congress.trade", fetch: () => fetchAppAHistory(symbol) }]),
-    // Connected-broker tier BEFORE paid third parties: a connected venue is already paid
-    // for by the account, matches the fill tape, and lifts Massive/ROIC/Tiingo spend.
-    {
-      scope: "shared",
-      sourceId: "tradier",
-      fetch: () => fetchTradier(symbol, startDate, tradierCredential.key, tradierCredential.baseUrl)
-    },
-    {
-      scope: cacheScopeForKeySource(alpacaHistory.source, userId),
-      sourceId: "alpaca",
-      fetch: () => fetchAlpacaDaily(symbol, startDate, alpacaHistory.apiKey, alpacaHistory.secretKey)
-    },
-    ...(userId
-      ? [
-          {
-            scope: cacheScopeForKeySource("user", userId),
-            sourceId: "robinhood",
-            fetch: () => fetchRobinhoodHistoricals(symbol, { interval: "day", span: "5year", userId })
-          }
-        ]
-      : []),
-    {
-      scope: cacheScopeForKeySource(keySources.massive.source, userId),
-      sourceId: "massive",
-      fetch: () => fetchMassive(symbol, startDate, keySources.massive.key, opts?.usageLabel)
-    },
-    {
-      scope: cacheScopeForKeySource(keySources.roic.source, userId),
-      sourceId: "roic",
-      fetch: () => fetchRoic(symbol, startDate, keySources.roic.key, opts?.usageLabel)
-    },
-    {
-      scope: cacheScopeForKeySource(keySources.tiingo.source, userId),
-      sourceId: "tiingo",
-      fetch: () => fetchTiingo(symbol, startDate, keySources.tiingo.key, opts?.usageLabel)
-    },
-    // Yahoo free floor before Marketstack last_resort (capability matrix ohlcv_daily).
-    {
-      scope: "shared",
-      sourceId: "yahoo-finance",
-      fetch: () =>
-        fetchYahoo(symbol, {
-          // Fail 429s faster when Marketstack can still satisfy the request.
-          maxAttempts: keySources.marketstack.key ? YAHOO_CHART_FAST_FAIL_ATTEMPTS : YAHOO_CHART_MAX_ATTEMPTS
-        })
-    },
-    {
-      scope: cacheScopeForKeySource(keySources.marketstack.source, userId),
-      sourceId: "marketstack",
-      fetch: () => fetchMarketstack(symbol, keySources.marketstack.key, opts?.usageLabel)
-    }
-  ];
+  }> = deepHistory
+    ? [
+        importedSource,
+        ...appASource,
+        yahooSource("max"),
+        tradierSource,
+        twelveSource,
+        alpacaSource,
+        ...robinhoodSource,
+        roicSource,
+        tiingoSource,
+        marketstackSource
+      ]
+    : [
+        importedSource,
+        ...appASource,
+        tradierSource,
+        alpacaSource,
+        ...robinhoodSource,
+        massiveSource,
+        roicSource,
+        tiingoSource,
+        yahooSource("1y"),
+        marketstackSource
+      ];
 
   for (const source of sources) {
     const liveBars = await source.fetch();
@@ -351,14 +457,18 @@ export async function fetchDailyOHLC(
       const finalBars = staleFallbackBars
         ? stampOhlcBarProvenance(mergeOHLCBars(staleFallbackBars, stampedLive), source.sourceId, fetchedAt)
         : stampedLive;
+      if (source.confirmsListingStart) {
+        const oldest = toBusinessDay(finalBars[0]?.time);
+        writeListingStart(symbol, oldest && oldest > startDate ? oldest : null);
+      }
       persistEodBarsToCache(symbol, finalBars);
 
       const cacheKey = source.scope === "private" ? privateCacheKey : source.scope === "pool" ? poolCacheKey : sharedCacheKey;
       cache.set(cacheKey, { expiresAt: expiresAtRespectingMarketClose(new Date(now), historyTtlMs()), bars: finalBars });
       if (source.scope === "shared") emitHistoryDemandFilled(symbol, now);
       
-      // Persist to the local SQLite cache so future runs can skip the network hop entirely.
-      // This handles all fetched tiers (Tradier, Massive, Tiingo, etc.).
+      // Persist permanently (no row TTL) so a later deep request can serve history
+      // without re-downloading bars that already reach startDate.
       if (source.fetch.name !== "fetchHistoryCacheEod") {
         upsertHistoryCacheEod(symbol, finalBars);
       }
@@ -724,6 +834,89 @@ async function fetchTradier(symbol: string, startDate: string, key: string | und
   }
 }
 
+const twelveDataNumber = z.union([z.string(), z.number()]);
+
+// `.passthrough()` on both objects is deliberate and the reason is recorded here rather than left
+// implicit.  Twelve Data's `/time_series` payload carries a top-level `meta` block and each bar can
+// carry keys beyond OHLCV.  `.strict()` was rejected on purpose: `fetchTwelveData` treats a
+// `safeParse` failure as a provider outage and returns null, so a single unmodelled upstream key
+// would silently drop every Twelve Data lookback in production instead of surfacing as a type
+// error.  The `meta` block we know about is modelled explicitly below so that known drift stays
+// visible in the type rather than being absorbed invisibly, and nothing downstream reads any of the
+// passthrough keys.
+export const TwelveDataBarSchema = z
+  .object({
+    datetime: z.string().min(1),
+    open: twelveDataNumber.optional(),
+    high: twelveDataNumber.optional(),
+    low: twelveDataNumber.optional(),
+    close: twelveDataNumber,
+    volume: twelveDataNumber.optional()
+  })
+  .passthrough();
+
+export const TwelveDataTimeSeriesSchema = z
+  .object({
+    status: z.string().optional(),
+    // Twelve Data documents symbol / interval / currency / exchange / timezone / type.
+    meta: z
+      .object({
+        symbol: z.string().optional(),
+        interval: z.string().optional(),
+        currency: z.string().optional(),
+        exchange: z.string().optional(),
+        timezone: z.string().optional(),
+        type: z.string().optional()
+      })
+      .passthrough()
+      .optional(),
+    values: z.array(TwelveDataBarSchema).optional()
+  })
+  .passthrough();
+
+export type TwelveDataBar = z.infer<typeof TwelveDataBarSchema>;
+export type TwelveDataTimeSeries = z.infer<typeof TwelveDataTimeSeriesSchema>;
+
+/**
+ * Twelve Data daily time series. Free tier is credit-capped (same `twelvedata`
+ * quota as quote enrichment). Used on lookbacks Massive cannot cover.
+ */
+async function fetchTwelveData(symbol: string, startDate: string, key?: string, usageLabel?: string): Promise<OHLCBar[] | null> {
+  if (!key) return null;
+  const credKey = await apiKeyFingerprint(key);
+  if (admitProviderRequests("twelvedata", credKey, 1) < 1) return null;
+  try {
+    const url =
+      `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}` +
+      `&interval=1day&start_date=${startDate}&order=ASC&outputsize=5000&apikey=${encodeURIComponent(key)}`;
+    const parsed = TwelveDataTimeSeriesSchema.safeParse(
+      await politeFetchJson<unknown>(url, { headers: { Accept: "application/json" } })
+    );
+    if (!parsed.success || parsed.data.status === "error" || !Array.isArray(parsed.data.values)) {
+      recordProviderCall("twelvedata", { service: "market-data", ok: false, label: usageLabel });
+      return null;
+    }
+    const bars: OHLCBar[] = [];
+    for (const row of parsed.data.values) {
+      const close = Number(row.close);
+      if (!row.datetime || !Number.isFinite(close)) continue;
+      bars.push({
+        time: row.datetime.slice(0, 10),
+        open: numOrUndef(Number(row.open)),
+        high: numOrUndef(Number(row.high)),
+        low: numOrUndef(Number(row.low)),
+        close,
+        volume: numOrUndef(Number(row.volume))
+      });
+    }
+    recordProviderCall("twelvedata", { service: "market-data", ok: bars.length >= 2, label: usageLabel });
+    return bars.length >= 2 ? bars : null;
+  } catch {
+    recordProviderCall("twelvedata", { service: "market-data", ok: false, label: usageLabel });
+    return null;
+  }
+}
+
 interface TiingoPriceRow {
   date?: string;
   open?: number;
@@ -814,10 +1007,11 @@ async function fetchMarketstack(symbol: string, key?: string, usageLabel?: strin
 
 async function fetchYahoo(
   symbol: string,
-  opts?: { maxAttempts?: number }
+  opts?: { maxAttempts?: number; range?: "max" | "1y" }
 ): Promise<OHLCBar[] | null> {
   try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1y&interval=1d`;
+    const range = opts?.range ?? "1y";
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=1d`;
     const json = await fetchYahooChartJson<YahooChartResponse>(url, opts);
     const result = json?.chart?.result?.[0];
     const ts = result?.timestamp ?? [];

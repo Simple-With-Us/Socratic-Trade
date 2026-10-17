@@ -1,3 +1,23 @@
+## 2026-10-16 CLAUDE (PR sweep) — PR #4661 merge-main and the last literal key prefix
+
+**What.**  Merged `origin/main` (`d1053ad69`, #4784 and #4739) into `cursor/free-data-gaps-55d1` with no conflicts; the main side touched only `db.ts`, `strategy.ts` and `sqlite-slow-timing`, none of which this PR changes.  Two prose sentences in this file and in `docs/rollouts/2026-10-14-free-data-gaps.md` still printed the literal key prefix inside "a full-repo search for ... returns zero hits", which repeated the defect and made the claim false.  Both now say "the key prefix", and `git grep` for it over the merged tree returns nothing.  No code change.
+
+**Verification.**  On `e40696cd1`, hosted CI run 38993685733 (`verify-hosted`): `npm run lint` pass, `npx tsc --noEmit` pass, `npm test` pass, `npm run build` pass; required `verify` and `gitleaks` pass.  The local lane has no `node_modules`, so the trio was not run locally.
+
+**Left open.**  Kody's 2026-10-16 `CHANGES_REQUESTED` review stands; Kody has re-reviewed this head as "no issues" but has never submitted an approval on this repo, and `dismiss_stale_reviews_on_push` is false.  Clearing it needs the owner.
+
+## 2026-10-16 CLAUDE (autofix) — PR #4661 review round, last API-key prefix in the rollout note
+
+**What.**  Third autofix round on PR #4661 (`cursor/free-data-gaps-55d1`).  Kody's re-review confirmed the two previously-open threads as addressed with no further code change: the `.passthrough()` justification on `TwelveDataTimeSeriesSchema` (the rule's "justified passthrough" limb is met — rationale recorded above both schemas and the known `meta` block modelled explicitly, so `.strict()` was correctly declined rather than omitted) and the `PLAN.md` Tradier sandbox entry naming PR #4685 plus `no board reservation on file`.
+
+It surfaced one genuinely new item, and it is the same defect class already fixed in `STATUS.md` last round: the verification block in `docs/rollouts/2026-10-14-free-data-gaps.md:181` still printed the literal prefix of the sandbox `OPENROUTER_API_KEY`.  A prefix is still secret material — it identifies the issuer and credential family and is permanent once merged.  That line now reads `(value redacted)`, matching `STATUS.md:73`, which also removes the internal inconsistency Kody flagged (the rollout note's own follow-up section already claimed `STATUS.md` was redacted).  A full-repo search for the key prefix now returns zero hits.
+
+**Rotation note for the maintainer.**  This branch is squash-merged per repo protocol, so clearing the working tree collapses away the intermediate commits that carried the prefix.  If it is ever merged with history preserved, the prefix stays reachable in branch commits and the key should be treated as exposed and rotated.
+
+**Verification.**  `npx tsc --noEmit` clean.  Environment note for the next seat: `node_modules` started empty in this checkout, and a bare `npx tsc --noEmit` against it reports several hundred false `TS2591`/`TS2307` errors (`Cannot find name 'process'`, `Cannot find module 'vitest'`) — run `npm install` before the trio.  Full `npm test` and `npm run build` via hosted `verify` on push.
+
+**Left open deliberately.**  Nothing.  Both previously-open threads are resolved by Kody's own confirmation; the one new item was a mechanical one-word redaction.
+
 ## 2026-10-17 CLAUDE — PR #4727 main merge (hold)
 
 PR #4727 was BEHIND `main` (four commits, through `b39ed8a7d`, #4805) with no conflicts and no review threads.  Merged `origin/main` with a merge commit (no rebase, no force-push).  Main moved only `.github/workflows/e2e.yml` among workflow files, and none of the ten files this PR owns.  Focused Vitest (`automerge-gate-dry-run`, `branch-protection-gate`, `disable-pr-automerge`) passed 21 tests locally; the repo-wide `tsc` and build gates run in hosted CI, because this lane has no access to the private `@jaywedgeworth22/congress-trading-shared` package.  The `do-not-automerge` label stays on and auto-merge is not armed; Jay merges.
@@ -45,6 +65,126 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 
 **Next.**  Ready PR with `do-not-automerge`.  Do not enable auto-merge.  GB-Deployer merges.  Rotating the rejected `GH_PAT` / `SHEPHERD_TOKEN` stays ST-4393.  Until that token works, non-money-path arming still no-ops with an error, and an already-armed money-path PR fails the disable job instead of landing.
 ## 2026-10-15 Cursor Cloud — ST-3988 congress-share dependency DB health
+## 2026-10-15 CURSOR — PR #4661 GB-Trader shepherd (reconcile + #4716)
+
+**What.**  Merged `origin/main` at `e3ba1507` (#4716) locally (`b235b08f`), then merged remote `dc81c55a` (prior shepherd merge of `49a76da4` / #4695) so parallel pushes stay one line.  No source conflicts; GitHub was `DIRTY` until both tips were integrated.  Zero unresolved review threads.  `needs-human-merge` for Jay.
+
+**Verification.**  `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  Six PR-touched vitest files: 215 passed.  Full `npm test` in cloud shell: 25 failed (environmental; not in PR diff vs `origin/main`).  `npm run build` pass (43/43 static pages).  Pushing for hosted `verify`.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Hosted `verify` green on pushed HEAD.  Jay squash-merges when ready.
+
+## 2026-10-15 CURSOR — PR #4661 merge main #4695
+
+**What.**  GitHub `CONFLICTING` / `DIRTY`: `main` advanced to `49a76da4` (#4695 Congress push receipt ST-3846) while PR base was `e3ba1507`.  Merged `origin/main` clean (auto-merge `STATUS.md` only).  Zero unresolved review threads.  `needs-human-merge` — Jay merges.
+
+**Verification.**  Head `dc81c55a`.  Hosted `verify` green.  `mergeable: MERGEABLE`.
+
+**Traceability.**  PR #4661.  Linear ST-4538.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Wait for `verify` green.
+
+## 2026-10-15 CURSOR — PR #4661 merge main #4716
+
+**What.**  GitHub showed `mergeable: CONFLICTING` / `DIRTY` because `origin/main` advanced to `e3ba1507` (#4716 iOS ASC credentials) while PR base was `2075c857`.  Merged `origin/main` with no conflicts (auto-merge PLAN/STATUS only).  Zero unresolved review threads.  PR ready; `needs-human-merge` for Jay.
+
+**Verification.**  Head `9423d228`.  Hosted `verify` green (run `38739241980`).  `mergeable: MERGEABLE`.
+
+**Traceability.**  PR #4661.  Linear ST-4538 (claimed CURSOR).  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Wait for `verify` on new merge commit.  Jay squash-merges.
+
+## 2026-10-15 CURSOR — PR #4661 GB-Deployer merge main
+
+**What.**  Merged `origin/main` (`3f4ef5e5`, then `2075c857` / #4696) into `cursor/free-data-gaps-55d1` with no conflicts.  Integrated remote autofix merge and resolved rollout doc conflict (`559b213c`).  Cleared recurring GitHub `DIRTY` state by keeping branch at latest `main`.  Zero unresolved review threads.  Did not enable auto-merge (`needs-human-merge` for Jay).
+
+**Verification.**  `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  `npm run build` pass.  Local `npm test` environmental failures only.  Head `96780798`.  Hosted `verify` green (run `38733904557`).
+
+**Traceability.**  PR #4661.  Linear **ST-4538** (filed this pass).  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Wait for hosted `verify` green.  Jay squash-merges when ready (`needs-human-merge`).
+## 2026-10-15 Codex Autofix — PR #4661 merge `origin/main`, no new bot findings
+
+**What.**  No new review items to fix.  All 16 review threads are already resolved.  The three most recent `kody-ai` comments (2026-10-15 01:48, 02:53, 03:31) are empty "review completed" summaries with zero findings, and there are no `cursor[bot]` or Codex review comments at all.  The branch was 1 commit behind `origin/main` and GitHub reported `mergeable: CONFLICTING` / `mergeStateStatus: DIRTY`, which blocked the required `verify` gate and therefore auto-merge.  Merged `origin/main` (`3f4ef5e5`, PR #4698 honest approve) with no conflicts; `git merge-tree` and a trial merge both confirmed the merge is clean, so the GitHub `CONFLICTING` flag was stale.  Both sides' `STATUS.md` and `PLAN.md` entries survived the auto-merge.  No code changes were needed.
+
+**Verification.**  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 13 failed, 9400 passed, 51 skipped, 835 files.  All 13 are in `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/framework-review.test.ts`, and `test/openrouter-credits.test.ts`, which assert "no LLM key configured" but this sandbox exports an `OPENROUTER_API_KEY` (value redacted).  Re-running those same 4 files against pristine `origin/main` in a separate worktree reproduces exactly 13 failed / 47 passed, so the failures are environmental and pre-existing.  None of the 4 files is in the PR diff.  `npm run build` pass (compiled, finished TypeScript, 43/43 static pages).  `npm run lint` not re-run in this shell; hosted `verify` is the merge gate.
+
+**Traceability.**  PR #4661, branch `cursor/free-data-gaps-55d1`.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Auto-merge re-enabled so the PR lands once hosted `verify` is green on the merged HEAD.  Round cap is 7 of 10 `[codex-autofix]` commits.
+
+## 2026-10-15 CURSOR — PR #4661 GB-Trader shepherd
+
+**What.**  `origin/main` at `df7e6d10` is already merged.  Pushed local merge commits `1dc39c4e` and `5ee168ce`.  Fixed Kody Rule 35 on `docs/rollouts/2026-10-14-free-data-gaps.md` (verification block now records `npm run build` pass).  Replied on open review threads and resolved them after written explanations for merged-main `PLAN.md` rows without inventing board hashes.
+
+**Verification.**  `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  `npm run build` pass (43/43 static pages).  Hosted `verify` green on `4c54d236` (run `38724409519`, job `verify-hosted` + required `verify`).
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  GraphQL shows 0 unresolved review threads on the PR.  Deployer or Jay merges when satisfied.  Do not merge from this lane.
+
+## 2026-10-14 GROK — PR #4661 review follow-up
+
+**What.**  `git merge origin/main` was already up to date at `2656320f`.  No conflicts and no migration renumber.  Two unresolved Kody threads remain.  `PRRT_kwDOS7mOVM6sl4tA` asks for a board hash on the SQLite hygiene row (`cursor/sqlite-storage-hygiene-181a`, PR #4666).  `board list --app socratic-trade --search "storage hygiene"` returns nothing, and the hygiene rollout records that the fleet board claim was blocked.  `PRRT_kwDOS7mOVM6sms8E` asks for a board hash and a PR id on the Tradier sandbox rows.  Those rows now cite PR #4668 and state that no board reservation is on file.  Sweep report `f5bdb15c09cf44cb903df6364d56c406` is a later #4668 shepherd note, so it was not used as the feature reservation.  No hash was invented.  Neither thread was resolved.  Hosted `verify` on `d4a22063` passed lint, tsc, `npm test`, and build.  `.github/workflows/autofix.yml` still fails before any job on review events.  `gh run view --log-failed` has no job log.  Review events read that workflow from the default branch.
+
+**Verification.**  `npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9392 passed, 51 skipped, 831 files.  `test/egress-guard.test.ts` rejects discord.com because this sandbox resolves it to benchmark space.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from the local database.  Neither file is in the diff against `origin/main`.  `npm run build` was not re-run.  Hosted `verify` on `d4a22063` passed lint, tsc, `npm test`, and build.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Reply on both open threads and do not resolve them.  Ask Kody to re-review.  Do not merge from this lane.
+
+## 2026-10-14 GROK — PR #4661 merge #4668
+
+**What.**  Merged `origin/main` (`2656320f`, PR #4668 Tradier sandbox HTTP 400) into `cursor/free-data-gaps-55d1` with no conflicts and no migration renumber.  One unresolved review thread, `PRRT_kwDOS7mOVM6sl4tA` (kody-ai), on the SQLite storage hygiene `PLAN.md` row.  The same note names the hygiene section in `STATUS.md`.  Those rows already match `origin/main`.  `board list` finds no reservation for that effort.  The hygiene rollout records that the fleet board claim was blocked.  This pass did not invent a hash and did not resolve the thread.  Required checks on `a45a2b60` were green.  `.github/workflows/autofix.yml` matches `origin/main` and still fails before any job on review events.  `gh run view --log-failed` has no job log.  Review events read that workflow from the default branch.
+
+**Verification.**  `npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9392 passed, 51 skipped, 831 files.  `test/egress-guard.test.ts` rejects discord.com because this sandbox resolves it to benchmark space.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from the local database.  Neither file is in the diff against `origin/main`.  `npm run build` pass.  It compiled, finished TypeScript, and generated 43/43 static pages.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Push the merge.  Reply on the open thread and do not resolve it.  Ask Kody to re-review.  Do not merge from this lane.
+
+## 2026-10-14 GROK — PR #4661 merge #4666
+
+**What.**  Merged `origin/main` (`a3d21b73`, PR #4666 SQLite storage hygiene) into `cursor/free-data-gaps-55d1` with no conflicts and no migration renumber.  GraphQL review threads were 12 resolved, then Kody opened one new thread on `PLAN.md` (`PRRT_kwDOS7mOVM6sljq3`).  That thread asks for a board reservation on the five PR #4665 rows.  Those rows match `origin/main` and this branch did not author them.  STATUS, the XBRL rollout, and the #4665 squash message cite no authorizing reservation.  The only board row for that PR is `cce9cf96`, a review-finding filed during the review, so it was not attached.  This pass did not resolve the thread.  This PR's own PLAN rows now cite board `b53cc5f8970c469e8f561767c35fc334`.  Hosted `verify` on `22d87ce1` finished lint, tsc, `npm test`, and build green and was in post steps when the merge landed.  PR Autofix still fails before any job on review events.  The caller matches `origin/main`.  Review events read the workflow from the default branch.  Coordinator `main` (`6833ed42`) still has `secrets` in the step `if` at `pr-autofix-reusable.yml` line 163.
+
+**Verification.**  `npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9368 passed, 51 skipped, 831 files.  `test/egress-guard.test.ts` rejects discord.com because this sandbox resolves it to `198.18.0.1`, which the guard treats as benchmark space.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from the local database.  Neither file is in the diff against `origin/main`.  `npm run build` pass (compiled, TypeScript finished, 43/43 static pages).
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Push the merge.  Reply on the open thread and do not resolve it.  Ask Kody to re-review.  Do not merge from this lane.
+
+## 2026-10-14 GROK — PR #4661 merge #4665
+
+**What.**  Merged `origin/main` (`e80386d7`, PR #4665 SEC XBRL companyfacts cache) into `cursor/free-data-gaps-55d1` with no conflicts and no migration renumber.  Shared files kept the Form 4 User-Agent and the 90-day insider window together with the companyfacts cache.  GraphQL review threads: 12 total, 0 unresolved.  No thread was replied to or resolved on this pass.  Hosted `verify` on `403e0be7` passed, including lint, tsc, `npm test`, and build.  PR Autofix workflow runs still fail before any job on review events.  The caller matches `origin/main`, and review events read it from the default branch.
+
+**Verification.**  `npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 1 failed, 9355 passed, 51 skipped, 830 files.  The failure is `test/egress-guard.test.ts` resolving discord.com.  That file is not in the diff against `origin/main`.  `npm run build` pass (compiled, TypeScript finished, 43/43 static pages).
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Push the merge.  Ask Kody to re-review.  Do not merge from this lane.  Do not resolve review threads from this lane.
+
+## 2026-10-14 GROK — PR #4661 merge #4658 and verification order
+
+**What.**  Merged `origin/main` (`1588bae8`, PR #4658 keyless options enrichment) into `cursor/free-data-gaps-55d1` with no conflicts.  No migration renumber.  All 12 review threads were already resolved.  The newest Kody note still flagged the rollout verification block: an extra test command sat between `npm test` and `npm run build`, and two build lines were not labeled pass or fail.  Every block is now lint, tsc, `npm test`, and build, each with pass or fail in that order.  This pass did not resolve any thread.  PR Autofix still fails before any job on review events.  `pr-autofix-reusable.yml` line 163 still uses `secrets` in a step `if` on coordinator `main` (`7508b399`) and on the pin `2e671004`.  The caller matches `origin/main`, and review events read it from the default branch.
+
+**Verification.**  `npm run lint` pass (0 errors, 866 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9342 passed, 51 skipped, 829 files.  Failures are `test/egress-guard.test.ts` (this sandbox resolves discord.com to a private or internal address) and `test/data-catalog-completeness.test.ts` (`peRatio` completeness 1 from the local database; 4 passed on an empty database).  Neither file is in the diff against `origin/main`.  Hosted `verify` passed on `7f3ff8fa`.  `npm run build` pass.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Reply on the verification thread and do not resolve it.  Ask Kody to re-review.  Do not merge from this lane.
+
+## 2026-10-14 GROK — PR #4661 merge #4663 and review follow-up
+
+**What.**  Merged `origin/main` (`82162336`, PR #4663 halt-cause batch) into `cursor/free-data-gaps-55d1` with no conflicts.  No migration renumber.  The two open Kody threads are real.  Rollout verification blocks now list `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build` in that order, each with a pass or fail.  `parseInsiderBulkTables` tests assert every returned filing passes `BulkInsiderFilingSchema`, and a rejected strict parse (undeclared key) is dropped.  Earlier review threads were already resolved.  This pass did not resolve any thread.  PR Autofix still fails before any job.  The pinned reusable workflow uses `secrets` inside a step `if` (`pr-autofix-reusable.yml` line 163 at `2e671004`).  Later coordinator commits keep that line.  The caller matches `origin/main`, and review events read it from the default branch, so a pin change on this branch does not clear those runs.
+
+**Verification.**  `npm run lint` pass (0 errors, 866 warnings, before the test edit).  `npx eslint test/web-sources-sec.test.ts` pass.  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9318 passed, 51 skipped, 827 files.  Failures are `test/egress-guard.test.ts` (discord.com DNS) and `test/data-catalog-completeness.test.ts` (`peRatio` completeness 1).  Neither file is in this diff.  Hosted `verify` passed on `9b61310b`.  Targeted history, web-source, liveness, and halt-cause tests: 91 passed.  `npm run build` pass (compiled with the existing Edge warnings, TypeScript finished, 43/43 static pages).
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Reply on the two open threads and do not resolve them.  Ask Kody to re-review.  Do not merge from this lane.
+
+## 2026-10-14 GROK — PR #4661 main merge and Form 4 schema
 
 **What.**  Congress.Trade D1 `SQLITE_BUSY` import rejections no longer page as `congress-share connection failed`.  `alertConnectionFailure` routes them to `dependency-db-contention` (warning Sentry, no `provider_degraded` push).  Ops-token `/api/health` exposes `lastFailure` + `failureClass` on dependencies.
 
@@ -349,6 +489,7 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 
 **Next.**  PR #4696 — Kody CHANGES_REQUESTED cleared on branch; Deployer merge when `verify` green; Refs ST-4531.
 
+**Next.**  Ready for review.  Do not merge from this lane.  Linear team ST was not updated if fleet credentials are missing on this cloud seat; that blocker is in the rollout.
 **Next.**  PR #4720 ready for review.  Merged `origin/main` at `df7e6d10`.  #4722 had not landed, so its retention rewrite is not in this branch.  Review follow-up: codec columns so the backfill does not scan blobs, watermark after a successful pass, framed `raw1:` lengths, re-embed keeps a decode retry list, and `hasLocalFilingCopy` is one indexed length check.
 
 **Autofix round.**  Last open review item was the empty-string branch of the codec (`if (!plain) return plain`), which no test covered.  Added a case asserting all four entry points return `""` and that the sync and async encoders agree.  `npx tsc --noEmit` clean.  `npm run build` exit 0.  `npm test` 13 failures, all in the pre-existing LLM-key suites (chat-llm, framework-review, llm-provider, openrouter-credits); none import the codec.
@@ -462,7 +603,7 @@ all pre-existing (reproduced identically with these changes stashed; this sandbo
 
 **What.**  PR #4668 merged a 15-minute sandbox order deferral.  Sandbox quotes are 15 minutes delayed, and Tradier orders price off those quotes, so the window is now 16 minutes after the regular open (9:46am ET).  `checkBrokerHealth` skips the strategy run before any broker read.  Equity, bracket, and option posts still throw before any POST.  Live Tradier is unchanged.  This follow-up is branched from current `main` so the merged tag-lookup work stays.
 
-**Branch.**  `cursor/tradier-sandbox-open-16-cea2`
+**Branch.**  `cursor/tradier-sandbox-open-16-cea2`  (PR #4685, merged as `174cc06eb`, no board reservation on file)
 
 **Verification.**  `npm run lint` exited 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exited 0.  Targeted vitest on `test/tradier.test.ts`, `test/placement-outcome.test.ts`, and `test/broker-health-auto-pause.test.ts` was 116 passed.  Full `npm test` was 9372 passed, 51 skipped, and 25 failed.  None of the failures are in the Tradier, placement, or broker-health files.  `npm run build` exited 0.
 
@@ -584,6 +725,8 @@ all pre-existing (reproduced identically with these changes stashed; this sandbo
 
 **Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`, `PLAN.md`, `docs/phase-7-strategy.md`.
 
+**Traceability.**  PR #4668.  No board reservation is on file for this effort.  Sweep report `f5bdb15c09cf44cb903df6364d56c406` is a later shepherd note and is not the feature reservation.
+
 **Next.**  `do-not-automerge`.  Jay squash-merges.  Do not merge from this lane.  Linear team `ST` was not updated: this seat has no Fleet Linear credentials.
 ## 2026-10-14 GROK — SQLite storage hygiene
 
@@ -592,6 +735,8 @@ all pre-existing (reproduced identically with these changes stashed; this sandbo
 **Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test` was 1 failed, 9341 passed, 51 skipped.  The failure is sandbox DNS for discord.com in `test/egress-guard.test.ts`, outside this diff.  Targeted `test/sqlite-storage-hygiene.test.ts` was 14 passed.  `npm run build` ok.
 
 **Docs.**  `docs/rollouts/2026-10-14-sqlite-storage-hygiene.md`, `STATUS.md`, `PLAN.md`.
+
+**Traceability.**  PR #4666.  No board reservation is on file.  The hygiene rollout records that the fleet board claim was blocked.
 
 **Next.**  Label `do-not-automerge`.  Jay squashes.  Do not merge from this lane.  Linear team ST was not updated: this cloud seat has no Fleet Linear or Zulip credentials.
 ## 2026-10-14 Grok — PR #4665 merge #4658
@@ -744,6 +889,35 @@ all pre-existing (reproduced identically with these changes stashed; this sandbo
 **Docs.**  `docs/rollouts/2026-10-14-fleet-fully-dark-detector.md`, `STATUS.md`.
 
 **Next.**  Land PR; after deploy watch SOCRATIC-TRADE-2S for new events.
+## 2026-10-14 GROK — PR #4661 main merge and Form 4 schema
+
+**What.**  Merged `origin/main` (`79df823d`, motion lockfile only) with no conflicts.  `BulkInsiderFiling` is now `z.infer` of the exported strict `BulkInsiderFilingSchema`, and the handwritten interface is gone.  An extra key fails the parse.  The earlier review fixes stay: the current-quarter ZIP is the only bulk coverage flag, Yahoo's abort timer starts after the pacer slot, a confirmed listing start stops the 30-minute refetch, and the 1825-day default stays.  PR Autofix runs still fail before any job.  The pinned reusable workflow uses `secrets` inside a step `if` (`pr-autofix-reusable.yml` line 163).  That caller file matches `origin/main`, and review events read it from the default branch, so a pin change on this branch does not clear those runs.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted history and web-source tests: 68 passed.  Full `npm test`: 1 failed, 9311 passed, 51 skipped, 826 files.  The failure is `test/egress-guard.test.ts` resolving discord.com.  This shell has no DNS for that host, and the file is not in this diff.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Reply on the open threads and do not resolve them.  Ask Kody to re-review.  Do not merge from this lane.
+
+## 2026-10-14 GROK — PR #4661 review follow-up
+
+**What.**  Merged `origin/main` (already contained; branch was not behind).  The current-quarter Form 4 ZIP is the only bulk coverage flag, so a previous quarter no longer skips the watchlist.  The same accession keeps the larger bulk or XML dollar, share, and transaction totals.  Yahoo chart timeouts start after the pacer slot is acquired.  A fresh series whose listing starts inside the five-year window is not refetched every memory-cache TTL.  Twelve Data and the Form 345 rows are Zod-checked before they are stored.  The 1825-day default stays.  It was already the start date on main, and shortening it would let Massive's two-year series win again.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted history and web-source tests: 67 passed.  Full `npm test`: 1 failed, 9310 passed, 51 skipped.  The failure is `test/egress-guard.test.ts` resolving discord.com.  This shell has no DNS for that host, and the file is not in this diff.  Follow-up `npm run build` compiled with warnings in 82s, then the process was killed (exit 137) during Next.js "Running TypeScript".  Standalone `tsc --noEmit` had already passed.  Hosted `verify` runs the real build.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334` (claimed, in progress).  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Ask Kody to re-review.  Do not merge from this lane.  Do not resolve review threads from this lane.
+
+## 2026-10-14 GROK — Free data gaps (history, Form 4, Senate eFD)
+
+**What.**  Requests longer than 730 days skip Massive and try Yahoo chart `range=max` (paced), then Tradier, then Twelve Data.  `history_cache_eod` stays a permanent upsert; a fresh series is served offline only when it covers the requested start.  Nightly insider refresh loads the SEC quarterly Form 4 ZIP plus the atom delta, scores dollar-weighted open-market buys and sells over 90 days, and no longer caps the atom feed at 60 or the watchlist at 20.  When Congress.Trade fails or returns no trades, the congress source falls back to Senate eFD.  Quiver is not called.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings on the first pass).  `npx tsc --noEmit` ok.  Full `npm test`: 29 failed, 9278 passed, 51 skipped.  Six failures were this diff (share-weighted insider score, and `secUserAgent` missing from two HTTP mocks) and those three files re-ran at 144 passed.  The other 23 are this shell (OpenRouter key, notify credentials, Node 22 `.ts` load, local-host metrics, Alpha Vantage fetch count).  `npm run build` ok.
+
+**Docs.**  `docs/rollouts/2026-10-14-free-data-gaps.md`, `docs/phase-4-market-data-scoring.md`, `docs/phase-9-web-sources.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Ready for review.  Do not merge from this lane.  Linear team ST was not updated if fleet credentials are missing on this cloud seat; that blocker is in the rollout.
 
 ## 2026-10-14 GROK — PR #4609 verification order
 

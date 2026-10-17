@@ -3,8 +3,10 @@ import { join } from "path";
 import { randomUUID } from "crypto";
 import { tmpdir } from "os";
 import { clearHistoryCache, fetchDailyOHLC, parseRoicStockPrices, parseStooqCsv, toBusinessDay } from "../src/lib/history";
+import { upsertHistoryCacheEod } from "../src/lib/history-cache";
+import { latestCompletedTradingSessionEtKey } from "../src/lib/market-hours";
 import { clearMassiveRestBudgetForTests } from "../src/lib/market-signals/massive";
-import { clearMarketDataDemandsForTests, deleteUserApiKey, getDb, setDataPoolConsent, upsertConnectedAccount, upsertUserApiKey } from "../src/lib/db";
+import { clearMarketDataDemandsForTests, deleteInternalSetting, deleteUserApiKey, getDb, setDataPoolConsent, upsertConnectedAccount, upsertUserApiKey } from "../src/lib/db";
 import { subscribeDashboardEvents, type DashboardEvent } from "../src/lib/events";
 import { admitProviderRequests, resetProviderQuotaState } from "../src/lib/provider-rate-limit";
 import { apiKeyFingerprint } from "../src/lib/data-providers";
@@ -35,9 +37,13 @@ beforeEach(() => {
   delete process.env.CONGRESS_TRADE_READS_ENABLED;
   resetProviderQuotaState("tiingo");
   resetProviderQuotaState("roic");
+  resetProviderQuotaState("twelvedata");
+  delete process.env.MASSIVE_LOCAL_HISTORY_ENABLED;
+  delete process.env.TWELVEDATA_API_KEY;
   // Tiingo is per-user-only tier (db-api-keys.ts) — a prior test's upsertUserApiKey("local", "tiingo", …)
   // would otherwise persist across tests sharing historyTestDb, same concern as the Tradier row below.
   deleteUserApiKey("local", "tiingo");
+  deleteUserApiKey("local", "twelvedata");
   deleteUserApiKey("local", "alpaca_paper_api_key");
   deleteUserApiKey("local", "alpaca_paper_secret_key");
   // Tradier's credential now comes from a connected_accounts row, not an env var — a prior test's
@@ -143,7 +149,7 @@ describe("fetchDailyOHLC", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const bars = await fetchDailyOHLC("AAPL");
+    const bars = await fetchDailyOHLC("AAPL", Date.now(), undefined, { lookbackDays: 365 });
     expect(bars).not.toBeNull();
     expect(bars).toHaveLength(2);
     expect(bars![0]).toMatchObject({ time: "2026-06-16", close: 10.5, volume: 1000 });
@@ -176,7 +182,7 @@ describe("fetchDailyOHLC", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const bars = await fetchDailyOHLC("AAPL");
+    const bars = await fetchDailyOHLC("AAPL", Date.now(), undefined, { lookbackDays: 365 });
     expect(bars).not.toBeNull();
     expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: "Bearer tradier-inactive-key" });
   });
@@ -206,7 +212,7 @@ describe("fetchDailyOHLC", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const bars = await fetchDailyOHLC("AAPL");
+    const bars = await fetchDailyOHLC("AAPL", Date.now(), undefined, { lookbackDays: 365 });
     expect(bars).not.toBeNull();
     expect(bars).toHaveLength(2);
     expect(bars![0]).toMatchObject({ time: "2026-06-16", close: 10.5, volume: 1000 });
@@ -304,12 +310,13 @@ describe("fetchDailyOHLC", () => {
     expect(marketstackIdx).toBeGreaterThan(yahooIdx);
   });
 
-  it("prefers Yahoo free floor over Marketstack last_resort when Tradier fails", async () => {
+  it("prefers Yahoo range=max over Tradier and Marketstack on a >2y request", async () => {
     connectTradier("tradier-test-key");
+    process.env.MASSIVE_API_KEY = "massive-should-not-be-called";
     process.env.MARKETSTACK_API_KEY = "marketstack-test-key";
     const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
-      if (String(url).includes("api.tradier.com")) return new Response("tradier down", { status: 500 });
       if (String(url).includes("query1.finance.yahoo.com")) return new Response(yahooBody(60), { status: 200 });
+      if (String(url).includes("api.tradier.com")) return new Response(tradierBody, { status: 200 });
       if (String(url).includes("api.marketstack.com")) return new Response(marketstackBody, { status: 200 });
       return new Response("unexpected source", { status: 500 });
     });
@@ -319,9 +326,9 @@ describe("fetchDailyOHLC", () => {
     expect(bars).not.toBeNull();
     expect(bars!.length).toBe(60);
     const urls = fetchMock.mock.calls.map((call) => String(call[0]));
-    expect(urls.some((url) => url.includes("api.tradier.com"))).toBe(true);
-    expect(urls.some((url) => url.includes("query1.finance.yahoo.com"))).toBe(true);
-    // Yahoo already satisfied the cascade — Marketstack last_resort must not run.
+    expect(urls.some((url) => url.includes("query1.finance.yahoo.com") && url.includes("range=max"))).toBe(true);
+    expect(urls.some((url) => url.includes("api.tradier.com"))).toBe(false);
+    expect(urls.some((url) => url.includes("massive"))).toBe(false);
     expect(urls.some((url) => url.includes("api.marketstack.com"))).toBe(false);
   });
 
@@ -455,8 +462,8 @@ describe("fetchDailyOHLC", () => {
     vi.stubGlobal("fetch", fetchMock);
     const now = Date.UTC(2026, 5, 18);
 
-    const first = await fetchDailyOHLC("AAPL", now, `user-a-${randomUUID()}`);
-    const second = await fetchDailyOHLC("AAPL", now + 1000, `user-b-${randomUUID()}`);
+    const first = await fetchDailyOHLC("AAPL", now, `user-a-${randomUUID()}`, { lookbackDays: 365 });
+    const second = await fetchDailyOHLC("AAPL", now + 1000, `user-b-${randomUUID()}`, { lookbackDays: 365 });
 
     expect(second).toBe(first);
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -584,6 +591,175 @@ describe("fetchDailyOHLC", () => {
   it("returns null when no source has data (never fabricates)", async () => {
     vi.stubGlobal("fetch", async () => new Response("nope", { status: 404 }));
     expect(await fetchDailyOHLC("ZZZ")).toBeNull();
+  });
+
+  it("uses Twelve Data after Yahoo and Tradier miss on a >2y request, and still skips Massive", async () => {
+    connectTradier("tradier-test-key");
+    process.env.MASSIVE_API_KEY = "massive-should-not-be-called";
+    upsertUserApiKey("local", "twelvedata", "twelve-history-test-key");
+    const twelveBody = JSON.stringify({
+      status: "ok",
+      values: [
+        { datetime: "2021-06-16", open: "10", high: "11", low: "9", close: "10.5", volume: "1000" },
+        { datetime: "2026-06-17", open: "10.5", high: "12", low: "10", close: "11.8", volume: "2000" }
+      ]
+    });
+    const fetchMock = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("api.twelvedata.com/time_series")) return new Response(twelveBody, { status: 200 });
+      return new Response("miss", { status: 500 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bars = await fetchDailyOHLC("AAPL", Date.UTC(2026, 5, 18));
+    expect(bars).not.toBeNull();
+    expect(bars![0]).toMatchObject({ time: "2021-06-16", close: 10.5, volume: 1000 });
+    const urls = fetchMock.mock.calls.map((call) => String(call[0]));
+    const yahooIdx = urls.findIndex((url) => url.includes("query1.finance.yahoo.com") && url.includes("range=max"));
+    const tradierIdx = urls.findIndex((url) => url.includes("api.tradier.com"));
+    const twelveIdx = urls.findIndex((url) => url.includes("api.twelvedata.com/time_series"));
+    expect(yahooIdx).toBeGreaterThanOrEqual(0);
+    expect(tradierIdx).toBeGreaterThan(yahooIdx);
+    expect(twelveIdx).toBeGreaterThan(tradierIdx);
+    expect(urls[twelveIdx]).toContain("start_date=");
+    expect(urls[twelveIdx]).toContain("apikey=twelve-history-test-key");
+    expect(urls.some((url) => url.includes("massive"))).toBe(false);
+  });
+
+  it("keeps Massive ahead of Yahoo when the lookback is within 2 years", async () => {
+    process.env.MASSIVE_API_KEY = "massive-short-key";
+    const massiveBody = JSON.stringify({
+      results: [
+        { t: Date.parse("2026-06-16T00:00:00Z"), o: 10, h: 11, l: 9, c: 10.5, v: 1000 },
+        { t: Date.parse("2026-06-17T00:00:00Z"), o: 10.5, h: 12, l: 10, c: 11.8, v: 2000 }
+      ]
+    });
+    const fetchMock = vi.fn(async (url: string) =>
+      String(url).includes("/v2/aggs/")
+        ? new Response(massiveBody, { status: 200 })
+        : new Response("unexpected", { status: 500 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bars = await fetchDailyOHLC("AAPL", Date.UTC(2026, 5, 18), undefined, { lookbackDays: 365 });
+    expect(bars).not.toBeNull();
+    expect(bars![0]).toMatchObject({ close: 10.5 });
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/v2/aggs/");
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("query1.finance.yahoo.com"))).toBe(false);
+  });
+
+  it("serves a fresh covering SQLite series with no network, and does not let a short series block Yahoo range=max", async () => {
+    process.env.MASSIVE_LOCAL_HISTORY_ENABLED = "on";
+    const now = Date.UTC(2026, 5, 18, 21, 0, 0);
+    const latest = latestCompletedTradingSessionEtKey(now);
+    const db = getDb();
+    upsertHistoryCacheEod("LONGHIST", [
+      { time: "2019-01-02", open: 10, high: 11, low: 9, close: 10, volume: 100 },
+      { time: latest, open: 20, high: 21, low: 19, close: 20, volume: 200 }
+    ]);
+    const fetchMock = vi.fn(async (url: string): Promise<Response> => {
+      throw new Error(`network should not run for ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const covered = await fetchDailyOHLC("LONGHIST", now);
+      expect(covered).not.toBeNull();
+      expect(covered![0]).toMatchObject({ close: 10 });
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      clearHistoryCache();
+      upsertHistoryCacheEod("SHORTHIST", [
+        { time: "2026-06-17", open: 1, high: 2, low: 1, close: 1.5, volume: 10 },
+        { time: latest, open: 2, high: 3, low: 2, close: 2.5, volume: 20 }
+      ]);
+      fetchMock.mockImplementation(async (url: string) =>
+        String(url).includes("query1.finance.yahoo.com")
+          ? new Response(yahooBody(60), { status: 200 })
+          : new Response("nope", { status: 500 })
+      );
+      const short = await fetchDailyOHLC("SHORTHIST", now);
+      expect(short).not.toBeNull();
+      expect(short!.length).toBeGreaterThanOrEqual(2);
+      expect(fetchMock.mock.calls.some(([url]) => String(url).includes("range=max"))).toBe(true);
+    } finally {
+      db.prepare("DELETE FROM history_cache_eod WHERE ticker IN ('LONGHIST', 'SHORTHIST')").run();
+      delete process.env.MASSIVE_LOCAL_HISTORY_ENABLED;
+    }
+  });
+
+  it("does not refetch Yahoo range=max every TTL when the listing starts inside the window", async () => {
+    process.env.MASSIVE_LOCAL_HISTORY_ENABLED = "on";
+    const now = Date.UTC(2026, 5, 18, 21, 0, 0);
+    const latest = latestCompletedTradingSessionEtKey(now);
+    const symbol = "IPONEW";
+    const body = JSON.stringify({
+      chart: {
+        result: [{
+          timestamp: [
+            Math.floor(Date.parse("2024-01-02T00:00:00Z") / 1000),
+            Math.floor(Date.parse(`${latest}T00:00:00Z`) / 1000)
+          ],
+          indicators: {
+            quote: [{ open: [10, 12], high: [11, 13], low: [9, 11], close: [10.5, 12.5], volume: [100, 200] }]
+          }
+        }]
+      }
+    });
+    const fetchMock = vi.fn(async (url: string) =>
+      String(url).includes("query1.finance.yahoo.com")
+        ? new Response(body, { status: 200 })
+        : new Response("nope", { status: 500 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const first = await fetchDailyOHLC(symbol, now);
+      expect(first).not.toBeNull();
+      expect(toBusinessDay(first![0].time)).toBe("2024-01-02");
+      expect(fetchMock.mock.calls.some(([url]) => String(url).includes("range=max"))).toBe(true);
+      const callsAfterFirst = fetchMock.mock.calls.length;
+      clearHistoryCache();
+      const second = await fetchDailyOHLC(symbol, now + 31 * 60_000);
+      expect(second).not.toBeNull();
+      expect(toBusinessDay(second![0].time)).toBe("2024-01-02");
+      expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
+    } finally {
+      getDb().prepare("DELETE FROM history_cache_eod WHERE ticker = ?").run(symbol);
+      deleteInternalSetting(`history:listing-start:${symbol}`);
+      delete process.env.MASSIVE_LOCAL_HISTORY_ENABLED;
+    }
+  });
+
+  it("rejects a Twelve Data body that is not a time series and accepts numeric closes", async () => {
+    upsertUserApiKey("local", "twelvedata", "twelve-history-test-key");
+    const now = Date.UTC(2026, 5, 18);
+    const malformed = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("api.twelvedata.com/time_series")) {
+        return new Response(JSON.stringify({ status: "ok", values: { datetime: "2021-06-16" } }), { status: 200 });
+      }
+      return new Response("nope", { status: 500 });
+    });
+    vi.stubGlobal("fetch", malformed);
+    await expect(fetchDailyOHLC("AAPL", now)).resolves.toBeNull();
+    expect(malformed.mock.calls.some(([url]) => String(url).includes("api.twelvedata.com"))).toBe(true);
+
+    const numeric = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("api.twelvedata.com/time_series")) {
+        return new Response(JSON.stringify({
+          status: "ok",
+          values: [
+            { datetime: "2021-06-16", close: 10.5, volume: 1000 },
+            { datetime: "2026-06-17", close: 11.8, volume: 2000 }
+          ]
+        }), { status: 200 });
+      }
+      return new Response("nope", { status: 500 });
+    });
+    vi.stubGlobal("fetch", numeric);
+    const bars = await fetchDailyOHLC("AAPL", now);
+    expect(bars).not.toBeNull();
+    expect(bars![0]).toMatchObject({ time: "2021-06-16", close: 10.5 });
   });
 
   it("serves local SQLite OHLC history directly without network requests", async () => {
