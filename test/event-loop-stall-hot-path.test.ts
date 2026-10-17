@@ -45,16 +45,16 @@ describe("serving-thread sqlite stalls mapped from 2026-10-05 profiles", () => {
     const { getDb } = await import("../src/lib/db");
     getDb();
     const { buildOpsSnapshot } = await import("../src/lib/ops-snapshot");
-    buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
+    await buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
     resetRoicArtifactFileCountCacheForTests();
     let ticks = 0;
     const timer = setInterval(() => {
       ticks += 1;
     }, 5);
-    const snapMs = elapsed(() => {
-      const snapshot = buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
-      expect(snapshot.roicArchive?.artifactFiles).toBe(0);
-    });
+    const snapStart = Date.now();
+    const snapshot = await buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
+    expect(snapshot.roicArchive?.artifactFiles).toBe(0);
+    const snapMs = Date.now() - snapStart;
     const counted = await refreshRoicArtifactFileCount(dataDir);
     clearInterval(timer);
     expect(snapMs).toBeLessThan(100);
@@ -84,23 +84,17 @@ describe("serving-thread sqlite stalls mapped from 2026-10-05 profiles", () => {
     const scan = db.prepare(
       "SELECT COUNT(*) AS c FROM task_journal NOT INDEXED WHERE status = 'skipped' AND started_at < ?"
     );
-    let scanMs = 0;
-    let batch = 50_000;
-    // Hosted CI can report 99ms on the last growth step; keep adding until the
-    // unindexed scan clearly crosses the 100ms stall threshold or we hit a row cap.
-    while (scanMs < 100 && n < 4_000_000) {
-      add(batch, recent);
-      scanMs = elapsed(() => {
-        scan.get(cutoff);
-      });
-      batch = Math.min(batch * 2, 400_000);
+    // Fixed row count, one scan.  Stopping at the first sample over 100ms made
+    // a 4x ratio fail (116ms scan, 66ms prune).  Chasing 400ms then exceeded
+    // the 60s test timeout.  Two million recent rows keep the unindexed scan
+    // slow and the indexed prune on the three old rows fast.
+    const targetRows = 2_000_000;
+    while (n < targetRows) {
+      add(50_000, recent);
     }
-    if (scanMs < 100 && n < 4_000_000) {
-      add(200_000, recent);
-      scanMs = elapsed(() => {
-        scan.get(cutoff);
-      });
-    }
+    const scanMs = elapsed(() => {
+      scan.get(cutoff);
+    });
     expect(scanMs).toBeGreaterThanOrEqual(100);
     const pruned = { n: 0 };
     const pruneMs = elapsed(() => {

@@ -10,7 +10,8 @@ export const dynamic = "force-dynamic";
 // for congress.trade (App A) cache-aside reads. Served as SPY daily bars (the benchmark convention the
 // consumer already uses). Auth: the same APP_B_INGEST_TOKEN bearer secret as
 // /api/admin/securities/import (middleware passes bearer requests through; verified strictly here).
-// Always 200 once authorized — no bars in range returns { closes: [] }. Closes are DESCENDING by date
+// No SPY bars is 200 { closes: [] }.  A stale SPY tail is 502 { ok: false, error: "stale" },
+// because App A only falls back on non-200.  Closes are DESCENDING by date
 // (closes[0] = latest close). See src/lib/market-read.ts.
 export async function GET(req: Request) {
   if (!verifySecuritiesImportToken(req)) {
@@ -19,6 +20,15 @@ export async function GET(req: Request) {
   }
   const rateLimitResp = enforceRateLimit("peer-app", "peer-read", RATE_LIMITS.peerRead);
   if (rateLimitResp) return rateLimitResp;
-  const closes = await fetchSpxCloses(parseMarketRange(req.url));
-  return NextResponse.json({ closes });
+  const read = await fetchSpxCloses(parseMarketRange(req.url));
+  switch (read.kind) {
+    case "ok":
+      return NextResponse.json({ closes: read.closes });
+    case "stale":
+      return NextResponse.json({ ok: false, error: "stale" }, { status: 502 });
+    default: {
+      const _exhaustive: never = read;
+      return _exhaustive;
+    }
+  }
 }

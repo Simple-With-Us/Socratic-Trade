@@ -5,12 +5,13 @@
 
 import "server-only";
 import Database from "better-sqlite3";
-import { mkdirSync } from "fs";
+import { mkdirSync, statSync } from "fs";
 import { dirname, resolve } from "path";
 import { resetDrizzleForTesting } from "./db/client";
 import crypto from "crypto";
 import { DEFAULT_POLICY, DEFAULT_SCORING_WEIGHTS, DEFAULT_STRATEGY_PROMPT } from "./defaults";
 import { SQLITE_BUSY_PIN_MS } from "./sqlite-event-loop";
+import { installSlowSqliteTiming } from "./sqlite-slow-timing";
 import type { NotificationEventType, TradingPolicy } from "./types";
 
 let db: Database.Database | undefined;
@@ -90,6 +91,7 @@ export function getDb(): Database.Database {
   const path = databasePath();
   mkdirSync(dirname(path), { recursive: true });
   db = new Database(path);
+  installSlowSqliteTiming(db, { walBytes: () => walSizeBytes(path) });
   db.function("account_subject_token", { deterministic: true }, (value: unknown) => accountSubjectToken(String(value ?? "")));
   db.function("account_setting_matches_subject", { deterministic: true }, accountSettingMatchesSubject);
   // Before journal_mode.  The WAL switch writes the file header, and auto_vacuum
@@ -117,6 +119,15 @@ export function getDb(): Database.Database {
   installAccountWriteFenceTriggers(db);
   assertEncryptionKeyAvailable(db);
   return db;
+}
+
+/** Size of `<db>-wal` for the slow-call log (ST-4542); null when there is no WAL file. */
+function walSizeBytes(dbPath: string): number | null {
+  try {
+    return statSync(`${dbPath}-wal`).size;
+  } catch {
+    return null;
+  }
 }
 
 /** INCREMENTAL sticks only when it is set before the first user table. */
@@ -3409,7 +3420,53 @@ const MIGRATIONS: Migration[] = [
     }
   },
   {
+    // Ops snapshot: listOpsStrategyRuns orders by started_at per user without scanning the
+    // liveness index (status, connected_account_id in the key). 2026-10-14 prod profile: 84s
+    // snapshot builds with a 16.5 GB DB — this seek keeps recent-run reads off full user scans.
     version: 95,
+    name: "strategy_runs_user_started_index",
+    up: (database) => {
+      if (!tableExists(database, "strategy_runs")) return;
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_strategy_runs_user_started ON strategy_runs (user_id, started_at DESC)"
+      );
+    },
+  },
+  {
+    // Codec tag and plaintext length so backfill and hasLocalFilingCopy do not
+    // scan blob columns. text_codec NULL means the body has not been stamped yet.
+    version: 96,
+    name: "text_payload_codec_columns",
+    up: (database) => {
+      if (tableExists(database, "earningscalls_transcripts")) {
+        if (!columnExists(database, "earningscalls_transcripts", "text_codec")) {
+          database.exec("ALTER TABLE earningscalls_transcripts ADD COLUMN text_codec TEXT");
+        }
+        if (!columnExists(database, "earningscalls_transcripts", "plaintext_length")) {
+          database.exec("ALTER TABLE earningscalls_transcripts ADD COLUMN plaintext_length INTEGER");
+        }
+        database.exec(`
+          CREATE INDEX IF NOT EXISTS idx_earningscalls_text_codec_pending
+            ON earningscalls_transcripts (symbol, fiscal_year, fiscal_quarter)
+            WHERE text_codec IS NULL AND content IS NOT NULL
+        `);
+      }
+      if (tableExists(database, "sec_facts")) {
+        if (!columnExists(database, "sec_facts", "segment_codec")) {
+          database.exec("ALTER TABLE sec_facts ADD COLUMN segment_codec TEXT");
+        }
+        database.exec(`
+          CREATE INDEX IF NOT EXISTS idx_sec_facts_segment_codec_pending
+            ON sec_facts (id)
+            WHERE segment_codec IS NULL
+              AND concept = '__companyfacts_json__'
+              AND segment IS NOT NULL
+        `);
+      }
+    }
+  },
+  {
+    version: 97,
     name: "st4541_dedup_isolation_columns",
     up: (database) => {
       // ST-4541 (review 17915833/1): the near-duplicate signature/link tables gained tenant_scope,

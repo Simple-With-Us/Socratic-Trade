@@ -190,6 +190,37 @@ describe("GET /api/ops/account-activity", () => {
     expect(JSON.stringify(body)).not.toMatch(/ira-key-id|ira-key-secret/);
   });
 
+  it("returns 422 with broker metadata for non-Alpaca accounts without calling Alpaca", async () => {
+    const id = randomUUID();
+    upsertConnectedAccount({
+      id,
+      userId: "local",
+      broker: "tradier",
+      environment: "paper",
+      accountNumber: "VA123",
+      label: "Tradier Sandbox",
+      apiKey: "tradier-key",
+      apiSecret: "tradier-secret",
+      isActive: false
+    });
+    let fetchCalls = 0;
+    vi.stubGlobal("fetch", async () => {
+      fetchCalls += 1;
+      return new Response("[]");
+    });
+    const started = Date.now();
+    const response = await get(`?connectedAccountId=${id}`);
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeLessThan(2_000);
+    expect(fetchCalls).toBe(0);
+    expect(response.status).toBe(422);
+    const body = await response.json();
+    expect(body.supported).toBe(false);
+    expect(body.broker).toBe("tradier");
+    expect(body.supportedBrokers).toContain("alpaca");
+    expect(body.error).toContain("tradier");
+  });
+
   it("clamps days to the supported range", async () => {
     expect(clampActivityDays(null)).toBe(365);
     expect(clampActivityDays("0")).toBe(365);

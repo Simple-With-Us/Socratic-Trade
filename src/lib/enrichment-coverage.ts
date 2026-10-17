@@ -25,6 +25,8 @@ export const COVERAGE_RETIRED_LANE_FIELDS = [
 
 export type CoverageRetiredLaneField = (typeof COVERAGE_RETIRED_LANE_FIELDS)[number];
 
+const COVERAGE_RETIRED_LANE_FIELD_SET = new Set<string>(COVERAGE_RETIRED_LANE_FIELDS);
+
 /** Scalar fields we track for "did the cascade fill this?" reporting. */
 export const COVERAGE_TRACKED_FIELDS = [
   "price",
@@ -247,6 +249,11 @@ export interface EnrichmentProviderFailureSummary {
 export interface EnrichmentCoverageReport {
   asOf: string;
   symbolCount: number;
+  /**
+   * Carrier fields excluded from fill scoring and the admin table (direct vendor retired;
+   * no registered producer). Documented for API consumers; not shown as 0% gaps.
+   */
+  retiredLaneFields?: readonly CoverageRetiredLaneField[];
   /** Fields with at least one fill opportunity, sorted by fillRate desc then name. */
   fields: EnrichmentFieldCoverage[];
   /** Fields with fillRate === 0 across the whole batch. */
@@ -305,6 +312,34 @@ export function isFilledEnrichmentValue(value: unknown): boolean {
   if (Array.isArray(value)) return value.length > 0;
   if (typeof value === "string") return value.trim().length > 0;
   return true;
+}
+
+/**
+ * Strip retired-lane rows from a coverage report (e.g. durable rows written before ST-3854).
+ * Idempotent for reports already built without those fields.
+ */
+export function sanitizeEnrichmentCoverageReport(
+  report: EnrichmentCoverageReport
+): EnrichmentCoverageReport {
+  const fields = report.fields.filter((f) => !COVERAGE_RETIRED_LANE_FIELD_SET.has(f.field));
+  const missingFields = report.missingFields.filter((f) => !COVERAGE_RETIRED_LANE_FIELD_SET.has(f));
+  const partialFields = report.partialFields.filter((f) => !COVERAGE_RETIRED_LANE_FIELD_SET.has(f));
+  const retiredLaneFields = report.retiredLaneFields ?? [...COVERAGE_RETIRED_LANE_FIELDS];
+  if (
+    fields.length === report.fields.length &&
+    missingFields.length === report.missingFields.length &&
+    partialFields.length === report.partialFields.length &&
+    report.retiredLaneFields
+  ) {
+    return report;
+  }
+  return {
+    ...report,
+    fields,
+    missingFields,
+    partialFields,
+    retiredLaneFields
+  };
 }
 
 function mostFrequent(counts: Record<string, number>): string | null {
@@ -421,6 +456,7 @@ export function buildEnrichmentCoverageReport(
   const report: EnrichmentCoverageReport = {
     asOf,
     symbolCount: totalSymbols,
+    retiredLaneFields: [...COVERAGE_RETIRED_LANE_FIELDS],
     fields,
     missingFields: missingFields.sort(),
     partialFields: partialFields.sort(),

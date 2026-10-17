@@ -15,20 +15,25 @@
 // as SPY daily bars — the benchmark convention the consumer already uses. Contract notes:
 //   - closes are DESCENDING by date (newest first) — App A treats closes[0] as the latest close;
 //   - from/to are optional, inclusive YYYY-MM-DD; an omitted `from` defaults to ~1y back, `to` to today;
-//   - unknown symbols / empty ranges return 200 with empty closes (never an error status) so the
-//     consumer only falls back to another provider on genuine non-200 failures.
+//   - unknown symbols / empty ranges return 200 with empty closes.  Congress.Trade treats that
+//     200 as "this source has nothing" and only falls back on a genuine non-200.
+//   - a series whose newest close is behind the latest completed session is 502
+//     { ok: false, error: "stale" }.  An empty 200 there would suppress that fallback.
+//     404 stays reserved for a missing company profile.
 
 import type { OHLCBar } from "./indicators";
 import { fetchDailyOHLC } from "./history";
 import { normalizeSymbol } from "./money";
 import { fetchNasdaqScreenerResponse } from "./nasdaq-screener-fetch";
 import {
+  closesCoverLatestSession,
   marketQuoteToRef,
   ohlcBarsToCloses,
   type CongressClose,
   type CongressPrice,
   type CongressRef
 } from "./congress-share";
+import { recordCongressStalePriceWithheld } from "./sentry-metrics";
 
 /** Injectable daily-OHLC fetcher; the routes use the app's canonical cascade, tests inject canned bars. */
 export type DailyOHLCFetcher = (symbol: string) => Promise<OHLCBar[] | null>;
@@ -74,40 +79,67 @@ export function closesInRange(closes: CongressClose[], from: string, to: string)
   return closes.filter((c) => c.date >= from && c.date <= to);
 }
 
+/** Confirmed series, or a stale tail the route must answer with HTTP 502. */
+export type PriceSeriesRead =
+  | { kind: "ok"; series: CongressPrice }
+  | { kind: "stale" };
+
+/** Confirmed SPY closes, or a stale tail the route must answer with HTTP 502. */
+export type SpxClosesRead =
+  | { kind: "ok"; closes: CongressClose[] }
+  | { kind: "stale" };
+
 /**
  * Build the /api/market/prices/{ticker} envelope: closes DESCENDING within [from, to], plus
  * currentPrice/currentPriceDate taken from the newest close of the FULL series (range-independent, so
- * a historical-backfill response still reports the true latest). No bars → `{ ticker, closes: [] }`
- * with null currentPrice — a 200, never an error status (the consumer falls back on non-200 only).
+ * a historical-backfill response still reports the true latest).  No bars → `{ kind: "ok" }` with
+ * empty closes and null currentPrice.  The route returns that as HTTP 200.
+ * A series whose newest close is behind the latest completed session is `{ kind: "stale" }`.
+ * The route returns HTTP 502.  Congress.Trade treats closes[0] as the current price, and an
+ * empty 200 means "this source has nothing", so a stale tail must not use that envelope.
  */
 export async function fetchPriceSeries(
   rawSymbol: string,
   range: MarketRange,
-  fetcher: DailyOHLCFetcher = peerServingFetcher
-): Promise<CongressPrice> {
+  fetcher: DailyOHLCFetcher = peerServingFetcher,
+  nowMs: number = Date.now()
+): Promise<PriceSeriesRead> {
   const ticker = normalizeSymbol(rawSymbol);
   const bars = ticker ? await fetcher(ticker) : null;
   const ascending = ohlcBarsToCloses(bars); // deduped, date-ascending
+  if (ascending.length > 0 && !closesCoverLatestSession(ascending, nowMs)) {
+    recordCongressStalePriceWithheld("pull", 1);
+    return { kind: "stale" };
+  }
   const closes = closesInRange(ascending, range.from, range.to).reverse(); // DESC — closes[0] is latest
   const newest = ascending[ascending.length - 1];
   return {
-    ticker,
-    closes,
-    currentPrice: newest?.close ?? null,
-    currentPriceDate: newest?.date ?? null
+    kind: "ok",
+    series: {
+      ticker,
+      closes,
+      currentPrice: newest?.close ?? null,
+      currentPriceDate: newest?.date ?? null
+    }
   };
 }
 
 /**
  * Build the /api/market/spx payload: SPY daily bars (the consumer's S&P 500 benchmark convention),
- * DESCENDING within [from, to]. Empty array when no bars are available.
+ * DESCENDING within [from, to]. `{ kind: "ok", closes: [] }` when no bars are available.
+ * A SPY series behind the latest completed session is `{ kind: "stale" }` (HTTP 502 at the route).
  */
 export async function fetchSpxCloses(
   range: MarketRange,
-  fetcher: DailyOHLCFetcher = peerServingFetcher
-): Promise<CongressClose[]> {
+  fetcher: DailyOHLCFetcher = peerServingFetcher,
+  nowMs: number = Date.now()
+): Promise<SpxClosesRead> {
   const ascending = ohlcBarsToCloses(await fetcher("SPY"));
-  return closesInRange(ascending, range.from, range.to).reverse();
+  if (ascending.length > 0 && !closesCoverLatestSession(ascending, nowMs)) {
+    recordCongressStalePriceWithheld("pull", 1);
+    return { kind: "stale" };
+  }
+  return { kind: "ok", closes: closesInRange(ascending, range.from, range.to).reverse() };
 }
 
 // ── Company profile (peer enrichment for Congress.Trade) ─────────────────────

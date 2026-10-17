@@ -215,15 +215,25 @@ export async function runSafetyMaintenance(
     policy.systemState === "liquidating";
 
   if (protectiveState) {
+    const stopController = new AbortController();
+    let stopWriteStarted = false;
     await withLaneDeadline(
       // §7 slice 3: whole monitor pass under the account mutation lease (see scheduler lane).
       withAccountMutation(
         { userId, accountNumber: policy.accountNumber, connectedAccountId: policy.connectedAccountId, lane: "stop-monitor" },
-        (ctx) => runSyntheticStopMonitor(userId, policy, true, undefined, ctx.assertOwned)
+        (ctx) => runSyntheticStopMonitor(userId, policy, true, undefined, ctx.assertOwned, {
+          signal: stopController.signal,
+          onBrokerWrite: () => {
+            stopWriteStarted = true;
+          }
+        })
       ),
       BROKER_TIMEOUT_MS,
       "runSyntheticStopMonitor timeout",
       "synthetic-stop-monitor"
-    ).catch((err) => console.error("[maintenance] synthetic-stop monitor error:", err));
+    ).catch((err) => {
+      if (!stopWriteStarted) stopController.abort(err instanceof Error ? err : new Error(String(err)));
+      console.error("[maintenance] synthetic-stop monitor error:", err);
+    });
   }
 }

@@ -46,6 +46,7 @@
 
 import { audit, getInternalSetting, setInternalSetting, getDb } from "../db";
 import { normalizeSymbol } from "../money";
+import { z } from "zod";
 import {
   storeDocument,
   storeContexts,
@@ -72,6 +73,7 @@ import { EXPERIENCE_MEMORY_SOURCE, listClosedLotExperienceDocumentsForAccount } 
 import { loadCikMap } from "../web-sources/sec8k";
 import { padCik } from "../web-sources/sec-filings";
 import { listUsers, listConnectedAccounts } from "../db";
+import { decodeTextPayload } from "../text-payload-codec";
 
 // Mirrors vector-db.ts's private `VOYAGE_MODEL` constant (not exported). Comparing against the
 // literal is safe: it is a stable, documented model id, not an implementation detail that changes
@@ -148,6 +150,8 @@ export interface CorpusReembedDocTypeProgress {
    *  CURRENT revision — and cumulative `failed` is zero — for every covered docType. */
   completedForEmbedRevision?: string;
   lastRunAt: string;
+  /** Earnings-call keys whose stored body did not decode. Retried before the watermark scan. */
+  decodeRetries?: unknown;
 }
 
 export interface CorpusReembedProgressState {
@@ -246,6 +250,7 @@ interface DocTypeRunState {
   stoppedForCap: boolean;
   completed: boolean;
   watermark: unknown;
+  decodeRetries?: EarningsCallsDecodeRetry[];
 }
 
 function freshDocTypeRunState(docType: CorpusReembedDocType, initialWatermark: unknown): DocTypeRunState {
@@ -524,7 +529,118 @@ function listEarningsCallsCandidates(
   `).all(...params) as EarningsCallsCandidateRow[];
 }
 
+// Boundary data: `getInternalSetting` hands back `unknown`, so the retry list is validated with a
+// schema rather than cast.  `.strict()` rejects extra and unknown fields, so a future writer
+// cannot smuggle additional keys into the persisted record and have them read back as if they
+// were part of the decoded key.  Elements are parsed one at a time on purpose: a single
+// hand-edited or truncated element drops only itself instead of discarding every good retry.
+export const EarningsCallsDecodeRetrySchema = z
+  .object({
+    symbol: z.string(),
+    fiscalYear: z.number(),
+    fiscalQuarter: z.number()
+  })
+  .strict();
+
+type EarningsCallsDecodeRetry = z.infer<typeof EarningsCallsDecodeRetrySchema>;
+
+function readEarningsCallsDecodeRetries(value: unknown): EarningsCallsDecodeRetry[] {
+  if (!Array.isArray(value)) return [];
+  const keys: EarningsCallsDecodeRetry[] = [];
+  for (const item of value) {
+    const parsed = EarningsCallsDecodeRetrySchema.safeParse(item);
+    if (!parsed.success) continue;
+    keys.push(parsed.data);
+  }
+  return keys;
+}
+
+function rememberEarningsDecodeRetry(state: DocTypeRunState, key: EarningsCallsDecodeRetry): void {
+  const list = state.decodeRetries ?? [];
+  const exists = list.some(
+    (item) => item.symbol === key.symbol && item.fiscalYear === key.fiscalYear && item.fiscalQuarter === key.fiscalQuarter
+  );
+  if (!exists) list.push(key);
+  state.decodeRetries = list;
+}
+
+function loadEarningsCallsCandidate(key: EarningsCallsDecodeRetry): EarningsCallsCandidateRow | undefined {
+  return getDb()
+    .prepare(
+      `SELECT symbol, fiscal_year, fiscal_quarter, event_id, event_date, content, fetched_at
+       FROM earningscalls_transcripts
+       WHERE symbol = ? AND fiscal_year = ? AND fiscal_quarter = ? AND content IS NOT NULL`
+    )
+    .get(key.symbol, key.fiscalYear, key.fiscalQuarter) as EarningsCallsCandidateRow | undefined;
+}
+
+async function embedDecodedEarningsCandidate(
+  ctx: RunContext,
+  state: DocTypeRunState,
+  row: EarningsCallsCandidateRow,
+  plain: string
+): Promise<void> {
+  const accession = earningsCallsAccessionFor({
+    symbol: row.symbol,
+    fiscalYear: row.fiscal_year,
+    fiscalQuarter: row.fiscal_quarter
+  });
+  if (ctx.dryRun) {
+    applyOutcome(state, classifyDryRun(ctx, EARNINGSCALLS_TRANSCRIPT_SOURCE, accession));
+    return;
+  }
+  const doc: ChunkInput & { symbol?: string } = {
+    text: plain,
+    doc_id: accession,
+    ticker: row.symbol,
+    title: `${row.symbol} earnings call ${row.fiscal_year} Q${row.fiscal_quarter}`,
+    doc_type: EARNINGSCALLS_TRANSCRIPT_DOC_TYPE,
+    published_at: row.event_date ?? row.fetched_at,
+    acceptance_datetime: row.fetched_at,
+    source: EARNINGSCALLS_TRANSCRIPT_SOURCE,
+    url: row.event_id
+      ? `${EARNINGSCALLS_BASE}/transcripts/${row.event_id}`
+      : `${EARNINGSCALLS_BASE}/search/by_ticker`
+  };
+  const result = await storeDocument(doc, ctx.userId, {
+    parserRevision: "earningscalls-transcript-v1",
+    documentKey: accession,
+    leaseGuard: ctx.leaseGuard
+  });
+  const outcome = classifyStoreDocumentResult(result);
+  applyOutcome(state, outcome);
+  if (outcome === "budget-exhausted") {
+    state.stoppedForBudget = true;
+    throw new BudgetExhaustedStop();
+  }
+}
+
 async function reembedEarningsCallsTranscripts(ctx: RunContext, state: DocTypeRunState): Promise<void> {
+  const pending = state.decodeRetries ?? [];
+  if (pending.length > 0) {
+    const still: EarningsCallsDecodeRetry[] = [];
+    for (const key of pending) {
+      ctx.throwIfCancelled();
+      ctx.consumeMaxTexts();
+      const row = loadEarningsCallsCandidate(key);
+      if (!row?.content) continue;
+      let plain: string;
+      try {
+        plain = decodeTextPayload(row.content);
+      } catch (err) {
+        console.warn(
+          "[corpus-reembed] transcript payload still did not decode",
+          key.symbol,
+          err instanceof Error ? err.message : String(err)
+        );
+        still.push(key);
+        continue;
+      }
+      await embedDecodedEarningsCandidate(ctx, state, row, plain);
+    }
+    state.decodeRetries = still;
+    ctx.persistDocTypeProgress(state);
+  }
   let after = (state.watermark as EarningsCallsWatermark | null) ?? null;
   for (;;) {
     ctx.throwIfCancelled();
@@ -536,46 +652,26 @@ async function reembedEarningsCallsTranscripts(ctx: RunContext, state: DocTypeRu
     for (const row of rows) {
       ctx.throwIfCancelled();
       ctx.consumeMaxTexts();
-      const accession = earningsCallsAccessionFor({
-        symbol: row.symbol,
-        fiscalYear: row.fiscal_year,
-        fiscalQuarter: row.fiscal_quarter
-      });
-      if (ctx.dryRun) {
-        applyOutcome(state, classifyDryRun(ctx, EARNINGSCALLS_TRANSCRIPT_SOURCE, accession));
-      } else {
-        const doc: ChunkInput & { symbol?: string } = {
-          text: row.content,
-          doc_id: accession,
-          ticker: row.symbol,
-          title: `${row.symbol} earnings call ${row.fiscal_year} Q${row.fiscal_quarter}`,
-          doc_type: EARNINGSCALLS_TRANSCRIPT_DOC_TYPE,
-          published_at: row.event_date ?? row.fetched_at,
-          acceptance_datetime: row.fetched_at,
-          source: EARNINGSCALLS_TRANSCRIPT_SOURCE,
-          // MUST-FIX 2: byte-identical to the live `ingestCachedTranscript` document
-          // (earningscalls-transcripts.ts ~line 526) INCLUDING the url — the url feeds
-          // retrievalMetadataVersion, which feeds the commit id, so matching it makes this
-          // backfill's identity EXACTLY the live path's. A transcript ingested by either path
-          // dedups onto the same commit in the same space; no double-embedding is possible.
-          url: row.event_id
-            ? `${EARNINGSCALLS_BASE}/transcripts/${row.event_id}`
-            : `${EARNINGSCALLS_BASE}/search/by_ticker`
-        };
-        const result = await storeDocument(doc, ctx.userId, {
-          // Same parser revision the live earningscalls-transcripts.ts push uses (line ~529).
-          parserRevision: "earningscalls-transcript-v1",
-          documentKey: accession,
-          leaseGuard: ctx.leaseGuard
-        });
-        const outcome = classifyStoreDocumentResult(result);
-        applyOutcome(state, outcome);
-        if (outcome === "budget-exhausted") {
-          state.stoppedForBudget = true;
-          throw new BudgetExhaustedStop();
-        }
+      const key = { symbol: row.symbol, fiscalYear: row.fiscal_year, fiscalQuarter: row.fiscal_quarter };
+      let plain: string;
+      try {
+        plain = decodeTextPayload(row.content);
+      } catch (err) {
+        console.warn(
+          "[corpus-reembed] transcript payload did not decode",
+          row.symbol,
+          err instanceof Error ? err.message : String(err)
+        );
+        // Keep the key for the next run. Advance the watermark anyway so one
+        // corrupt body cannot stall every later transcript.
+        rememberEarningsDecodeRetry(state, key);
+        after = key;
+        state.watermark = after satisfies EarningsCallsWatermark;
+        ctx.persistDocTypeProgress(state);
+        continue;
       }
-      after = { symbol: row.symbol, fiscalYear: row.fiscal_year, fiscalQuarter: row.fiscal_quarter };
+      await embedDecodedEarningsCandidate(ctx, state, row, plain);
+      after = key;
       state.watermark = after satisfies EarningsCallsWatermark;
       ctx.persistDocTypeProgress(state);
     }
@@ -1032,6 +1128,9 @@ async function runCorpusReembedLocked(
       // discovered candidates) leave purge authorization covering less than the current corpus.
       // (Scoped runs never reach this writer — they return early above.)
       ...(stampCompletion ? { completedForEmbedRevision: embedRevision } : {}),
+      ...(docState.decodeRetries && docState.decodeRetries.length > 0
+        ? { decodeRetries: docState.decodeRetries }
+        : {}),
       lastRunAt: now
     };
     writeProgress({
@@ -1065,6 +1164,7 @@ async function runCorpusReembedLocked(
         }
       : { candidatesSeen: 0, embedded: 0, reusedInSpace: 0, failed: 0 };
     const state = freshDocTypeRunState(docType, initialWatermark);
+    if (priorIsCurrentRevision) state.decodeRetries = readEarningsCallsDecodeRetries(prior?.decodeRetries);
 
     // A completion stamp describes the corpus as it existed at the end of the previous scan. The
     // moment a new full scan starts, invalidate that delete authorization BEFORE its first async

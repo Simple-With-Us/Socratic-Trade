@@ -8,7 +8,15 @@ import { insertDocumentChunkFts, insertSecFiling } from "../src/lib/db-learning"
 import { hashContent } from "../src/lib/rag/chunk";
 import { eightKWritePath, writeCorpusFileSync } from "../src/lib/rag/corpus-layout";
 import { hydrateAccession } from "../src/lib/rag/hydrate-accession";
+import { sqliteAllOffLoop } from "../src/lib/rag/sqlite-all-offloop";
 import { writeLocalArtifact } from "../src/lib/web-sources/sec-filings";
+
+// ST-4542: wrap (not replace) the off-loop reader so a test can see which statements left the
+// serving connection.  Behavior is the real worker pool.
+vi.mock("../src/lib/rag/sqlite-all-offloop", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/rag/sqlite-all-offloop")>();
+  return { ...actual, sqliteAllOffLoop: vi.fn(actual.sqliteAllOffLoop) };
+});
 
 const ACCESSION = "0001045810-26-000123";
 const CIK = "0001045810";
@@ -189,5 +197,33 @@ describe("hydrateAccession", () => {
     const missed = await hydrateAccession({ accession: "0000000000-00-000000", itemCode: "1A" });
     expect(missed.text).toBe("");
     expect(missed.missedReason).toBe("missing_local_copy");
+  });
+
+  it("runs the FTS accession scan off the serving connection (ST-4542)", async () => {
+    const text = "Item 1A. Risk Factors. Only the FTS copy holds this sentence about supplier concentration.";
+    insertDocumentChunkFts(hashContent(text), "NVDA", "sec-edgar", "0001045810-26-000999", text);
+    vi.mocked(sqliteAllOffLoop).mockClear();
+    const hit = await hydrateAccession({ accession: "0001045810-26-000999", itemCode: "1A" });
+    expect(hit.source).toBe("fts");
+    expect(hit.text).toContain("supplier concentration");
+    const sqls = vi.mocked(sqliteAllOffLoop).mock.calls.map((c) => String(c[0]));
+    expect(sqls.some((q) => q.includes("document_chunks_fts") && q.includes("GLOB"))).toBe(true);
+  });
+
+  it("finds a transcript by source_meta or symbol off the serving connection (ST-4542)", async () => {
+    getDb()
+      .prepare(
+        `INSERT OR REPLACE INTO earningscalls_transcripts
+           (symbol, fiscal_year, fiscal_quarter, content, fetched_at, source_meta)
+         VALUES ('NVDA', 2025, 1, ?, '2025-05-01T00:00:00Z', 'meta')`
+      )
+      .run("Operator: welcome to the call. ".repeat(10));
+    vi.mocked(sqliteAllOffLoop).mockClear();
+    // No row for 2099Q4, so the keyed lookup misses and the symbol/source_meta scan answers.
+    const hit = await hydrateAccession({ accession: "earningscalls:NVDA:2099Q4" });
+    expect(hit.source).toBe("transcript");
+    expect(hit.text).toContain("welcome to the call");
+    const sqls = vi.mocked(sqliteAllOffLoop).mock.calls.map((c) => String(c[0]));
+    expect(sqls.some((q) => q.includes("earningscalls_transcripts") && q.includes("source_meta LIKE"))).toBe(true);
   });
 });
