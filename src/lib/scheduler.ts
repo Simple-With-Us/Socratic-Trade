@@ -982,13 +982,17 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   pruneTaskJournal();
 
   // Daily audit-prune watermark (audit-prune.ts) — forever retention; no row deletes.
+  // The lane's only remaining work is the read-only embed_stage observer (db-embed-stage.ts,
+  // ST-4540): it counts undelivered paid vectors and raises the backlog / over-cap alarms.
   void journalLane("audit-prune", {}, async () => {
     const result = await runAuditPruneYieldingIfDue();
     if (!result) return { status: "skipped" as const, summary: "not due" };
-    const total = result.auditObservability + result.auditDefault + result.providerDispatch +
-      result.providerOutbox + result.embedStageExpired + result.embedStageCapPruned +
-      result.portfolioSnapshotsPruned;
-    return { status: "ok" as const, summary: `deleted=${total}` };
+    // Forever retention: the delete counts are structurally zero, so the lane summary reports
+    // the signal that still matters — undelivered embed_stage rows awaiting delivery (ST-4540).
+    const stageSummary = result.embedStageUndeliveredRetained > 0
+      ? ` embed_stage_undelivered=${result.embedStageUndeliveredRetained}`
+      : " embed_stage_undelivered=0";
+    return { status: "ok" as const, summary: `deleted=0${stageSummary}` };
   }).catch((err) => console.error("[scheduler] audit prune error:", err));
 
   signal?.throwIfAborted();
