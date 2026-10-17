@@ -485,6 +485,10 @@ describe("past-decision case affinity wiring (ST-4539)", () => {
     expect(result.analogsBlock).toContain("return_pct -5");
     // A same-symbol LOSER is surfaced as dissent, not buried — selection is not endorsement.
     expect(result.injected.find((ref) => ref.id === "same-aapl")?.counterexample).toBe(true);
+    // The affinity re-rank put the 0.45 case first, but "top-analog similarity" in the header and
+    // the audit record must still report the closest shown analog (MSFT, 0.90), not the first card.
+    expect(result.topAnalogSimilarity).toBeCloseTo(0.9, 5);
+    expect(result.analogsBlock).toContain("top-analog similarity 0.90");
   });
 
   it("adds no retrieval call and changes nothing when the off-switch is off", async () => {

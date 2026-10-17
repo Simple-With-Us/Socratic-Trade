@@ -931,9 +931,21 @@ export async function retrieveDecisionExperiences(
       }))
     ];
 
-    const top = analogChunks[0];
-    const topAnalogSimilarity =
-      typeof top?.relevanceScore === "number" ? top.relevanceScore : typeof top?.score === "number" ? top.score : undefined;
+    // "Top-analog similarity" is the CLOSEST shown analog's similarity, not the first card's: the
+    // usefulness and ST-4539 affinity re-ranks (and the reserved COUNTEREXAMPLE slot) can place a
+    // lower-similarity chunk first, so read the maximum across the analogs actually shown.
+    let topAnalogSimilarity: number | undefined;
+    for (const chunk of analogChunks) {
+      const similarity =
+        typeof chunk.relevanceScore === "number"
+          ? chunk.relevanceScore
+          : typeof chunk.score === "number"
+            ? chunk.score
+            : undefined;
+      if (similarity !== undefined && (topAnalogSimilarity === undefined || similarity > topAnalogSimilarity)) {
+        topAnalogSimilarity = similarity;
+      }
+    }
 
     const analogsBlock = packAnalogsBlock(asOf, topAnalogSimilarity, analogChunks);
 
