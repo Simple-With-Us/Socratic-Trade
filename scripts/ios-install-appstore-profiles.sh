@@ -27,6 +27,8 @@
 #   IOS_APPSTORE_PROFILES_MAP   profile map (default ios/appstore-profiles.json)
 #   IOS_PROFILES_DIR            install dir (default ~/Library/MobileDevice/Provisioning Profiles)
 #   IOS_PROFILE_SKIP_IDENTITY_CHECK=1   skip the keychain certificate match
+#   ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH   process env (wins over a secrets file)
+#   ASC_SECRETS_ENV             optional secrets file for asc-api.mjs
 set +o xtrace
 set -euo pipefail
 umask 077
@@ -42,6 +44,14 @@ trap 'rm -rf "$WORKDIR"' EXIT
 [[ -f "$CLIENT" ]] || { echo "error: App Store Connect client missing: $CLIENT" >&2; exit 1; }
 command -v node >/dev/null 2>&1 || { echo "error: node not on PATH" >&2; exit 1; }
 command -v security >/dev/null 2>&1 || { echo "error: security(1) not found (macOS only)" >&2; exit 1; }
+
+# asc-api.mjs has no implicit ~/.secrets default (rule 33).  A standalone local
+# run still uses the handoff file when it exists and ASC_SECRETS_ENV is unset.
+# ship-testflight.sh load_secrets already exports ASC_SECRETS_ENV before calling
+# this installer, so this only fills the env-less invocation.
+if [[ -z "${ASC_SECRETS_ENV:-}" && -f "${HOME}/.secrets/appstore-connect.env" ]]; then
+  export ASC_SECRETS_ENV="${HOME}/.secrets/appstore-connect.env"
+fi
 
 mkdir -p "$DEST"
 

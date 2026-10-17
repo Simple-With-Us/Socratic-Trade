@@ -283,61 +283,32 @@ describe("WU-breaker gate ordering", () => {
   });
 });
 
-describe("retention sweep and defensive size cap", () => {
-  it("sweeps rows older than 35 days and keeps fresh ones", async () => {
+describe("retention sweep (disabled — forever policy)", () => {
+  it("sweepEmbedStage does not delete staged rows by age or cap", async () => {
     const { stageEmbeddedVectors, sweepEmbedStage, EMBED_STAGE_RETENTION_DAYS } = await import(
       "../src/lib/db-embed-stage"
     );
     const { getDb } = await db();
     stageEmbeddedVectors([
       { contentHash: "old-1", model: "m", revision: "1", vector: [0.1, 0.2] },
-      { contentHash: "old-2", model: "m", revision: "1", vector: [0.3, 0.4] },
       { contentHash: "fresh", model: "m", revision: "1", vector: [0.5, 0.6] }
     ]);
     const backdated = new Date(Date.now() - (EMBED_STAGE_RETENTION_DAYS + 1) * 24 * 3600_000).toISOString();
-    getDb().prepare("UPDATE embed_stage SET created_at = ? WHERE content_hash LIKE 'old-%'").run(backdated);
+    getDb().prepare("UPDATE embed_stage SET created_at = ? WHERE content_hash = 'old-1'").run(backdated);
 
     const result = sweepEmbedStage();
-    expect(result.expired).toBe(2);
+    expect(result.expired).toBe(0);
     expect(result.capPruned).toBe(0);
-    expect(await stageRowCount()).toBe(1);
-    const remaining = getDb().prepare("SELECT content_hash FROM embed_stage").all() as Array<{ content_hash: string }>;
-    expect(remaining).toEqual([{ content_hash: "fresh" }]);
+    expect(await stageRowCount()).toBe(2);
   });
 
-  it("prunes oldest-first past the size cap with exactly ONE audit row", async () => {
-    const { stageEmbeddedVectors, sweepEmbedStage } = await import("../src/lib/db-embed-stage");
-    const { getDb } = await db();
-    const vector = Array.from({ length: 256 }, (_unused, i) => i / 256); // 1 KiB per row
-    for (let i = 0; i < 6; i++) {
-      stageEmbeddedVectors([{ contentHash: `cap-${i}`, model: "m", revision: "1", vector }]);
-      // Distinct, strictly-increasing timestamps so oldest-first is deterministic.
-      getDb().prepare("UPDATE embed_stage SET created_at = ? WHERE content_hash = ?")
-        .run(new Date(Date.UTC(2026, 7, 1, 0, i)).toISOString(), `cap-${i}`);
-    }
-
-    // Cap sized to keep roughly the two newest rows (2 * (1024 + overhead) < max < 6 rows).
-    const result = sweepEmbedStage(new Date(Date.UTC(2026, 7, 2)), 3_000);
-    expect(result.capPruned).toBeGreaterThan(0);
-    expect(result.bytesAfter).toBeLessThanOrEqual(3_000);
-    const remaining = (getDb().prepare("SELECT content_hash FROM embed_stage ORDER BY created_at").all() as Array<{ content_hash: string }>)
-      .map((row) => row.content_hash);
-    // Oldest-first: whatever survived must be the newest suffix of the insert order.
-    expect(remaining).toEqual(["cap-0", "cap-1", "cap-2", "cap-3", "cap-4", "cap-5"].slice(6 - remaining.length));
-    expect(await auditRows("embed_stage_cap_prune")).toHaveLength(1);
-  });
-
-  it("is wired into the audit-prune housekeeping lane", async () => {
-    const { stageEmbeddedVectors, EMBED_STAGE_RETENTION_DAYS } = await import("../src/lib/db-embed-stage");
+  it("audit-prune lane does not sweep embed_stage", async () => {
+    const { stageEmbeddedVectors } = await import("../src/lib/db-embed-stage");
     const { pruneAuditEvents } = await import("../src/lib/audit-prune");
-    const { getDb } = await db();
     stageEmbeddedVectors([{ contentHash: "lane-old", model: "m", revision: "1", vector: [0.1] }]);
-    getDb().prepare("UPDATE embed_stage SET created_at = ?")
-      .run(new Date(Date.now() - (EMBED_STAGE_RETENTION_DAYS + 2) * 24 * 3600_000).toISOString());
-
     const result = pruneAuditEvents(new Date());
-    expect(result.embedStageExpired).toBe(1);
+    expect(result.embedStageExpired).toBe(0);
     expect(result.embedStageCapPruned).toBe(0);
-    expect(await stageRowCount()).toBe(0);
+    expect(await stageRowCount()).toBe(1);
   });
 });

@@ -29,11 +29,11 @@
 #
 # USAGE
 #   scripts/sync-provider-knobs.sh            # DRY RUN: print the diff, write nothing, exit 0
-#   scripts/sync-provider-knobs.sh --apply    # write changed keys to Infisical + post to Slack
+#   scripts/sync-provider-knobs.sh --apply    # write changed keys to Infisical + post to #agent-sync
 #
 # SAFETY
-#   - Monitor unreachable / empty payload -> exit 0, no writes, no Slack (launchd-safe).
-#   - Dry run never writes and never posts to Slack.
+#   - Monitor unreachable / empty payload -> exit 0, no writes, no Zulip post (launchd-safe).
+#   - Dry run never writes and never posts to #agent-sync.
 #   - --apply refuses to write if it could not first read current Infisical state
 #     (never writes blind).
 #
@@ -56,7 +56,7 @@ BOX_ENV="${KNOB_SYNC_BOX_ENV:-/data/coolify/applications/${COOLIFY_APP_UUID}/.en
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HELPER="$SCRIPT_DIR/provider-knob-diff.mjs"
-SLACK="$SCRIPT_DIR/slack-sync.sh"
+FLEET_POST="$SCRIPT_DIR/agent-sync-fleet-post.sh"
 
 APPLY=0
 for arg in "$@"; do
@@ -255,7 +255,7 @@ else
   log "apply session error: $(tr '\n' ' ' < "$WORK/apply.err" 2>/dev/null)"
 fi
 
-# -- 6) report + Slack one line per applied change -----------------------------
+# -- 6) report + Zulip one line per applied change ---------------------------
 FAILN=0
 while IFS= read -r out; do
   [ -z "$out" ] && continue
@@ -270,8 +270,11 @@ while IFS= read -r out; do
     st="$(printf '%s' "$rec" | cut -f6)"
     log "wrote $key: $old -> $new"
     MSG="repo: Socratic-Trade | [CLAUDE->FLEET] knob-sync applied: $key $old->$new (plan $plan $st); rides next deploy"
-    if [ -x "$SLACK" ]; then
-      "$SLACK" post "$MSG" >/dev/null 2>&1 || log "slack post failed for $key (write still succeeded)"
+    if [ -x "$FLEET_POST" ]; then
+      AGENT_SYNC_SEAT="${AGENT_SYNC_SEAT:-CLAUDE}" \
+      AGENT_SYNC_REPO="${AGENT_SYNC_REPO:-Socratic-Trade}" \
+      AGENT_SYNC_TOPIC="${AGENT_SYNC_TOPIC:-fleet}" \
+        bash "$FLEET_POST" "$MSG" >/dev/null 2>&1 || log "agent-sync post failed for $key (write still succeeded)"
     fi
   else
     msg="$(printf '%s' "$out" | cut -f3)"

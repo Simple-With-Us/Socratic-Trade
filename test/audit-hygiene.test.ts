@@ -97,59 +97,43 @@ describe("pruneAuditEvents", () => {
   }
   const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 3600_000).toISOString();
 
-  it("deletes observability kinds past 14d and everything past 90d, keeps the rest", () => {
+  it("does not delete audit or provider rows by age (forever retention)", () => {
     const noise = AUDIT_PRUNE_OBSERVABILITY_KINDS[0];
-    insertAudit(noise, daysAgo(20));       // delete (obs > 14d)
-    insertAudit(noise, daysAgo(3));        // keep
-    insertAudit("order_placed", daysAgo(100)); // delete (default > 90d)
-    insertAudit("order_placed", daysAgo(30));  // keep
-    insertAudit("order_placed", daysAgo(2));   // keep
-    const res = pruneAuditEvents(new Date());
-    expect(res.auditObservability).toBe(1);
-    expect(res.auditDefault).toBe(1);
-    const remaining = getDb().prepare("SELECT kind, count(*) c FROM audit_events GROUP BY kind ORDER BY kind").all();
-    expect(remaining).toEqual([
-      { kind: noise, c: 1 },
-      { kind: "order_placed", c: 2 },
-    ]);
-  });
-
-  it("prunes provider observability tables past 14d", () => {
+    insertAudit(noise, daysAgo(20));
+    insertAudit(noise, daysAgo(3));
+    insertAudit("order_placed", daysAgo(100));
+    insertAudit("order_placed", daysAgo(30));
     const db = getDb();
     db.prepare("INSERT INTO provider_dispatch_attempts (id, authority_id, provider, operation, credential_ref, user_id, units, status, created_at, updated_at) VALUES (?, 'auth', 'p', 'op', 'cred', 'local', 1, 'succeeded', ?, ?)")
       .run(randomUUID(), daysAgo(20), daysAgo(20));
-    db.prepare("INSERT INTO provider_dispatch_attempts (id, authority_id, provider, operation, credential_ref, user_id, units, status, created_at, updated_at) VALUES (?, 'auth', 'p', 'op', 'cred', 'local', 1, 'succeeded', ?, ?)")
-      .run(randomUUID(), daysAgo(1), daysAgo(1));
     db.prepare("INSERT INTO provider_usage_outbox (id, attempt_id, provider, operation, credential_ref, user_id, outcome, requests, occurred_at, created_at) VALUES (?, 'att-old', 'p', 'op', 'cred', 'local', 'succeeded', 1, ?, ?)")
       .run(randomUUID(), daysAgo(20), daysAgo(20));
-    db.prepare("INSERT INTO provider_usage_outbox (id, attempt_id, provider, operation, credential_ref, user_id, outcome, requests, occurred_at, created_at) VALUES (?, 'att-new', 'p', 'op', 'cred', 'local', 'succeeded', 1, ?, ?)")
-      .run(randomUUID(), daysAgo(1), daysAgo(1));
+
     const res = pruneAuditEvents(new Date());
-    expect(res.providerDispatch).toBe(1);
-    expect(res.providerOutbox).toBe(1);
+    expect(res).toEqual({
+      auditObservability: 0,
+      auditDefault: 0,
+      providerDispatch: 0,
+      providerOutbox: 0,
+      embedStageExpired: 0,
+      embedStageCapPruned: 0,
+      portfolioSnapshotsPruned: 0
+    });
+    expect((db.prepare("SELECT count(*) c FROM audit_events").get() as { c: number }).c).toBe(4);
     expect((db.prepare("SELECT count(*) c FROM provider_dispatch_attempts").get() as { c: number }).c).toBe(1);
     expect((db.prepare("SELECT count(*) c FROM provider_usage_outbox").get() as { c: number }).c).toBe(1);
   });
 
-  // 2026-09-18: proposal_rejected_by_red_team and the related override kinds were being
-  // silently hard-deleted by the "everything else" 90-day default bucket (they were never on
-  // the 14-day observability list) even though getRedTeamEfficacy (src/lib/performance.ts)
-  // rebuilds the ENTIRE lifetime Red Team veto scorecard from exactly these rows. Rows already
-  // pruned before this fix are gone for good — see docs/rollouts/2026-09-18-stats-veto-retention.md.
-  it("never prunes Red Team veto/override audit kinds or llm_call_latency, even far past the 90d default", () => {
-    expect(AUDIT_PRUNE_NEVER_PRUNED_KINDS).toContain("llm_call_latency");
+  it("keeps Red Team veto kinds and llm_call_latency regardless of age", () => {
     for (const kind of AUDIT_PRUNE_NEVER_PRUNED_KINDS) {
-      insertAudit(kind, daysAgo(400)); // keep — exempt regardless of age
+      insertAudit(kind, daysAgo(400));
     }
-    insertAudit("order_placed", daysAgo(400)); // sanity control: an ordinary kind still prunes past 90d
-
-    const res = pruneAuditEvents(new Date());
-    expect(res.auditDefault).toBe(1); // only the "order_placed" control row
-
+    insertAudit("order_placed", daysAgo(400));
+    pruneAuditEvents(new Date());
     const remainingKinds = (getDb().prepare("SELECT DISTINCT kind FROM audit_events ORDER BY kind").all() as Array<{ kind: string }>).map(
       (r) => r.kind
     );
-    expect(remainingKinds).toEqual([...AUDIT_PRUNE_NEVER_PRUNED_KINDS].sort());
+    expect(remainingKinds).toEqual([...AUDIT_PRUNE_NEVER_PRUNED_KINDS, "order_placed"].sort());
   });
 
   it("isAuditPruneDue gates on 24h watermark", () => {

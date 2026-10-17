@@ -6,7 +6,8 @@
 # post a deploy claim. It compares public /api/health .checks.release.sha to
 # origin/main. A stale verdict (oldest undeployed commit >= 1h) fails the job
 # so Sentry fleet-infra pages (sentry-ci-report.yml) and optionally posts
-# #agent-sync when SLACK_BOT_TOKEN is set.
+# to Zulip #agent-sync when ST ops Zulip credentials are configured (Infisical prod
+# in Actions, or env on other hosts).
 #
 # Unreachable health is treated as OK here: UptimeRobot already pages site-down.
 # This cron exists for the silent-green-on-old-sha class.
@@ -37,7 +38,23 @@ jobs:
           fetch-depth: 0
           fetch-tags: false
 
-      - name: Previous freshness conclusion (Slack de-dupe)
+      - name: Install fleet coordination CLI
+        run: bash scripts/install-fleet-coordination.sh
+
+      - name: Load ST ops Zulip credentials from Infisical
+        env:
+          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          set +o xtrace
+          bash -n scripts/github-actions-infisical-zulip-ops.sh
+          bash scripts/github-actions-infisical-zulip-ops.sh
+
+      - name: Previous freshness conclusion (notify de-dupe)
         id: prev
         env:
           GH_TOKEN: ${{ github.token }}
@@ -63,9 +80,9 @@ jobs:
           DEPLOY_FRESHNESS_NOTIFY: "1"
           DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION: ${{ steps.prev.outputs.conclusion }}
           DEPLOY_FRESHNESS_TREAT_UNREACHABLE: "1"
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_AGENT_NAME: ST
-          SLACK_TOPIC: Socratic-Trade
+          AGENT_SYNC_SEAT: ST
+          AGENT_SYNC_REPO: Socratic-Trade
+          AGENT_SYNC_TOPIC: fleet
         shell: bash
         run: |
           set -euo pipefail

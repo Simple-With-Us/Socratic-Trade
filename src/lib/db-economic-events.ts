@@ -72,8 +72,7 @@ export function listUpcomingEconomicEvents(fromDate: string, toDateExclusive: st
   }));
 }
 
-/** Drop rows whose event date is strictly before `beforeDate` (keeps the cache tiny). */
-export function pruneEconomicEvents(beforeDate: string): number {
-  const info = getDb().prepare("DELETE FROM economic_events WHERE event_date < ?").run(beforeDate);
-  return info.changes;
+/** Jay policy (2026-10-15): economic calendar rows are kept forever. */
+export function pruneEconomicEvents(_beforeDate: string): number {
+  return 0;
 }

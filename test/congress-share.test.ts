@@ -26,6 +26,7 @@ vi.mock("../src/lib/history", () => {
 
 import { fetchDailyOHLC } from "../src/lib/history";
 import {
+  buildFundamentalsAndAnalystImport,
   buildInsiderImport,
   buildShortVolumeImport,
   canonicalMarketDataSymbol,
@@ -39,6 +40,7 @@ import {
   marketQuoteToAnalyst,
   marketQuoteToFundamentals,
   marketQuoteToRef,
+  closesCoverLatestSession,
   ohlcBarsToCloses,
   ohlcBarsToPriceEntry,
   fetchCongressPriceNeeds,
@@ -60,11 +62,25 @@ import {
   type CongressPrice,
   type CongressRef,
 } from "../src/lib/congress-share";
-import { deleteInternalSetting, getInternalSetting, setInternalSetting } from "../src/lib/db";
+import { deleteInternalSetting, getInternalSetting, listAuditByKind, setInternalSetting } from "../src/lib/db";
+import { latestCompletedTradingSessionEtKey } from "../src/lib/market-hours";
 import { getServiceHealthLog } from "../src/lib/db-health";
 import { flushDurableStateNow, resetDurableStateCacheForTests } from "../src/lib/durable-state";
 
 const recentDate = (daysAgo: number) => new Date(Date.now() - daysAgo * 86_400_000).toISOString().slice(0, 10);
+
+function isoDaysBefore(date: string, days: number): string {
+  return new Date(Date.parse(`${date}T00:00:00Z`) - days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** Ascending bars whose newest close is the latest completed session for `now`. */
+function barsEndingOnSession(now: number, closes: number[]): OHLCBar[] {
+  const latest = latestCompletedTradingSessionEtKey(now);
+  return closes.map((close, index) => ({
+    time: isoDaysBefore(latest, closes.length - 1 - index),
+    close
+  }));
+}
 
 function congressTradeTestToken(): string {
   const token = process.env.CONGRESS_TRADE_TEST_TOKEN;
@@ -585,6 +601,17 @@ describe("ohlcBarsToPriceEntry", () => {
   });
 });
 
+describe("closesCoverLatestSession", () => {
+  const now = Date.UTC(2026, 5, 22, 21, 0, 0);
+
+  it("accepts a newest close on the latest completed session and rejects an older tail", () => {
+    const session = latestCompletedTradingSessionEtKey(now);
+    expect(closesCoverLatestSession([{ date: isoDaysBefore(session, 3) }, { date: session }], now)).toBe(true);
+    expect(closesCoverLatestSession([{ date: "2026-06-15" }, { date: "2026-06-16" }], now)).toBe(false);
+    expect(closesCoverLatestSession([], now)).toBe(false);
+  });
+});
+
 describe("chunkPrices", () => {
   const mk = (ticker: string, n: number): CongressPrice => ({
     ticker,
@@ -1066,17 +1093,14 @@ describe("runCongressDailyShare", () => {
 
   it("shares custom symbols + SPX as separate bounded POSTs and does not advance the daily marker", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
-    const bars: OHLCBar[] = [
-      { time: "2026-06-15", close: 100 },
-      { time: "2026-06-16", close: 101 }
-    ];
+    const now = Date.UTC(2026, 5, 22, 13, 0, 0);
+    const bars = barsEndingOnSession(now, [100, 101]);
     mockedFetchDailyOHLC.mockResolvedValue(bars);
     const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) =>
       new Response(ctImportOkBody(), { status: 200 })
     );
     vi.stubGlobal("fetch", fetchSpy);
 
-    const now = Date.UTC(2026, 5, 22, 13, 0, 0);
     setInternalSetting("congress-share:lastDailyRunDate", "2026-06-20"); // a known past marker
     const res = await runCongressDailyShare({ now, force: true, symbols: ["AAPL", "MSFT"] });
 
@@ -1104,10 +1128,8 @@ describe("runCongressDailyShare", () => {
 
   it("deduplicates concurrent runs via a shared in-flight promise", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
-    const bars: OHLCBar[] = [
-      { time: "2026-06-15", close: 100 }
-    ];
-    mockedFetchDailyOHLC.mockResolvedValue(bars);
+    const now = Date.UTC(2026, 5, 22, 13, 0, 0);
+    mockedFetchDailyOHLC.mockResolvedValue(barsEndingOnSession(now, [100]));
     const fetchSpy = vi.fn(async (url: string, _init?: RequestInit) => {
       await new Promise(r => setTimeout(r, 50));
       if (url.includes("nasdaq.com")) {
@@ -1117,7 +1139,6 @@ describe("runCongressDailyShare", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
 
-    const now = Date.UTC(2026, 5, 22, 13, 0, 0);
     setInternalSetting("congress-share:lastDailyRunDate", "2026-06-20");
 
     const [res1, res2] = await Promise.all([
@@ -1127,6 +1148,37 @@ describe("runCongressDailyShare", () => {
 
     expect(res1).toBe(res2); // Should return the exact same promise/result reference
     expect(fetchSpy.mock.calls.filter((c) => (c[1] as RequestInit)?.body)).toHaveLength(2); // Should only execute one run (which POSTs SPX and prices payload separately)
+  });
+
+  it("withholds a price and SPX series whose newest close is behind the latest session", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    const now = Date.UTC(2026, 5, 22, 21, 0, 0);
+    const session = latestCompletedTradingSessionEtKey(now);
+    mockedFetchDailyOHLC.mockResolvedValue([
+      { time: "2026-06-15", close: 100 },
+      { time: "2026-06-16", close: 101 }
+    ]);
+    const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await runCongressDailyShare({ now, force: true, symbols: ["AAPL", "MSFT"] });
+
+    expect(session > "2026-06-16").toBe(true);
+    expect(res).toMatchObject({
+      priced: 0,
+      spxRows: 0,
+      stalePricesWithheld: 2,
+      staleSpxWithheld: true
+    });
+    const bodies = fetchSpy.mock.calls
+      .filter((c) => c[1]?.body)
+      .map((c) => JSON.parse(String(c[1]?.body)));
+    expect(bodies.some((b) => b.prices || b.spx)).toBe(false);
+    const withheld = listAuditByKind("congress_share_stale_price_withheld", 20);
+    expect(withheld.some((row) => {
+      const payload = row.payload as { session?: string; prices?: number; spx?: boolean };
+      return payload.session === session && payload.prices === 2 && payload.spx === true;
+    })).toBe(true);
   });
 });
 
@@ -1156,7 +1208,8 @@ describe("insider / short-volume import builders", () => {
       recordCount: 1
     });
     const aapl = buildInsiderImport().find((r) => r.ticker === "AAPL");
-    expect(aapl).toMatchObject({ ticker: "AAPL", sentiment: 75, buyFilings: 1, sellFilings: 0, buyShares: 12000, sellShares: 2000 });
+    // No prices on the row, so the score is share-weighted: 12000 / 14000.
+    expect(aapl).toMatchObject({ ticker: "AAPL", sentiment: 86, buyFilings: 1, sellFilings: 0, buyShares: 12000, sellShares: 2000 });
     expect(aapl?.owners).toContain("Jane Director");
   });
 
@@ -1168,6 +1221,75 @@ describe("insider / short-volume import builders", () => {
       recordCount: 1
     });
     expect(buildShortVolumeImport().find((r) => r.ticker === "NVDA")).toMatchObject({ ticker: "NVDA", ratio: 48.3 });
+  });
+});
+
+describe("buildFundamentalsAndAnalystImport", () => {
+  it("maps symbol_field_latest rows into fundamentals + analyst import rows", async () => {
+    const { upsertSymbolFieldLatest } = await import("../src/lib/db-fundamentals");
+    const now = new Date().toISOString();
+    upsertSymbolFieldLatest([
+      {
+        symbol: "AAPL",
+        field: "peRatio",
+        valueJson: "25",
+        source: "yahoo-finance",
+        asOf: now,
+        fetchedAt: now,
+      },
+      {
+        symbol: "AAPL",
+        field: "analystRating",
+        valueJson: JSON.stringify("Buy"),
+        source: "fmp",
+        asOf: now,
+        fetchedAt: now,
+      },
+      {
+        symbol: "AAPL",
+        field: "analystBySource",
+        valueJson: JSON.stringify({
+          fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } },
+        }),
+        source: "fmp",
+        asOf: now,
+        fetchedAt: now,
+      },
+    ]);
+    process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "on";
+    const { fundamentals, analyst } = buildFundamentalsAndAnalystImport(["AAPL"], "2026-10-15");
+    expect(fundamentals).toHaveLength(1);
+    expect(fundamentals[0]).toMatchObject({ ticker: "AAPL", peRatio: 25 });
+    expect(analyst).toHaveLength(1);
+    expect(analyst[0]).toMatchObject({ ticker: "AAPL", rating: "Buy", strongBuy: 2 });
+  });
+
+  it("includes blended analyst counts when analystBySource is in the field store", async () => {
+    process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "on";
+    const { upsertSymbolFieldLatest, encodeFieldValue } = await import("../src/lib/db-fundamentals");
+    const ts = new Date().toISOString();
+    upsertSymbolFieldLatest([
+      {
+        symbol: "AAPL",
+        field: "analystBySource",
+        valueJson: encodeFieldValue({
+          fmp: { counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } },
+        })!,
+        source: "fmp",
+        asOf: ts,
+        fetchedAt: ts,
+      },
+      {
+        symbol: "AAPL",
+        field: "analystRating",
+        valueJson: JSON.stringify("Buy"),
+        source: "fmp",
+        asOf: ts,
+        fetchedAt: ts,
+      },
+    ]);
+    const { analyst } = buildFundamentalsAndAnalystImport(["AAPL"], "2026-10-15");
+    expect(analyst[0]).toMatchObject({ ticker: "AAPL", rating: "Buy", strongBuy: 2, buy: 1 });
   });
 });
 
@@ -1197,42 +1319,70 @@ describe("runCongressDailyShare — insider + short-volume on the nightly batch"
     expect(bodies.every((b) => !(b.insider && b.prices))).toBe(true);
   });
 
+  it("sends fundamentals + analyst from symbol_field_latest on scheduled nightly runs", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "on";
+    const { upsertSymbolFieldLatest } = await import("../src/lib/db-fundamentals");
+    const ts = new Date().toISOString();
+    upsertSymbolFieldLatest([
+      {
+        symbol: "AAPL",
+        field: "peRatio",
+        valueJson: "30",
+        source: "yahoo-finance",
+        asOf: ts,
+        fetchedAt: ts,
+      },
+      {
+        symbol: "AAPL",
+        field: "analystRating",
+        valueJson: JSON.stringify("Hold"),
+        source: "fmp",
+        asOf: ts,
+        fetchedAt: ts,
+      },
+    ]);
+    mockedFetchDailyOHLC.mockResolvedValue([{ time: recentDate(1), close: 2 }]);
+    const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await runCongressDailyShare({ now: Date.now(), force: true, symbols: ["AAPL"] });
+    expect(res.fundamentalsRows).toBeGreaterThanOrEqual(1);
+    expect(res.analystRows).toBeGreaterThanOrEqual(1);
+    const bodies = fetchSpy.mock.calls
+      .filter((c) => (c[1] as RequestInit | undefined)?.body != null)
+      .map((c) => JSON.parse((c[1] as RequestInit).body as string));
+    expect(bodies.some((b) => Array.isArray(b.fundamentals) && b.fundamentals.length >= 1)).toBe(true);
+    expect(bodies.some((b) => Array.isArray(b.analyst) && b.analyst.length >= 1)).toBe(true);
+  });
+
   it("caps each symbol's closes to CONGRESS_SHARE_MAX_CLOSES_PER_TICKER (most-recent N)", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_MAX_CLOSES_PER_TICKER = "2";
-    mockedFetchDailyOHLC.mockResolvedValue([
-      { time: "2026-06-12", close: 1 },
-      { time: "2026-06-13", close: 2 },
-      { time: "2026-06-14", close: 3 },
-      { time: "2026-06-15", close: 4 },
-      { time: "2026-06-16", close: 5 }
-    ]);
+    const now = Date.UTC(2026, 5, 22);
+    const latest = latestCompletedTradingSessionEtKey(now);
+    mockedFetchDailyOHLC.mockResolvedValue(barsEndingOnSession(now, [1, 2, 3, 4, 5]));
     const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
-    const res = await runCongressDailyShare({ now: Date.UTC(2026, 5, 22), force: true, symbols: ["AAPL"] });
+    const res = await runCongressDailyShare({ now, force: true, symbols: ["AAPL"] });
     expect(res.ok).toBe(true);
     const bodies = fetchSpy.mock.calls
       .filter((c) => (c[1] as RequestInit)?.body)
       .map((c) => JSON.parse((c[1] as RequestInit).body as string));
     const entry = bodies.find((b) => b.prices)?.prices.find((p: { ticker: string }) => p.ticker === "AAPL");
     expect(entry.closes).toHaveLength(2); // capped from 5 → most-recent 2
-    expect(entry.closes.map((c: { date: string }) => c.date)).toEqual(["2026-06-15", "2026-06-16"]);
+    expect(entry.closes.map((c: { date: string }) => c.date)).toEqual([isoDaysBefore(latest, 1), latest]);
     expect(entry.currentPrice).toBe(5); // still the latest close
   });
 
   it("fullHistory backfill bypasses the per-symbol close cap (sends the full series)", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_MAX_CLOSES_PER_TICKER = "2"; // would cap nightly, but backfill ignores it
-    mockedFetchDailyOHLC.mockResolvedValue([
-      { time: "2026-06-12", close: 1 },
-      { time: "2026-06-13", close: 2 },
-      { time: "2026-06-14", close: 3 },
-      { time: "2026-06-15", close: 4 },
-      { time: "2026-06-16", close: 5 }
-    ]);
+    const now = Date.UTC(2026, 5, 22);
+    mockedFetchDailyOHLC.mockResolvedValue(barsEndingOnSession(now, [1, 2, 3, 4, 5]));
     const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
-    const res = await runCongressDailyShare({ now: Date.UTC(2026, 5, 22), force: true, symbols: ["AAPL"], fullHistory: true });
+    const res = await runCongressDailyShare({ now, force: true, symbols: ["AAPL"], fullHistory: true });
     expect(res.ok).toBe(true);
     const bodies = fetchSpy.mock.calls
       .filter((c) => (c[1] as RequestInit)?.body)
@@ -1391,11 +1541,8 @@ describe("runCongressDailyShare — fromAppANeeds + deep history for needs", () 
   it("shares App A needs tickers with full history when needsDeepHistory", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_MAX_CLOSES_PER_TICKER = "2";
-    const bars = (n: number): OHLCBar[] =>
-      Array.from({ length: n }, (_, i) => ({
-        time: `2020-01-${String(i + 1).padStart(2, "0")}`,
-        close: 100 + i
-      }));
+    const now = Date.UTC(2026, 5, 22, 21, 0, 0);
+    const bars = (n: number): OHLCBar[] => barsEndingOnSession(now, Array.from({ length: n }, (_, i) => 100 + i));
     mockedFetchDailyOHLC.mockImplementation(async (sym: string) => {
       if (sym === "^GSPC") return bars(5);
       return bars(5);
@@ -1415,7 +1562,7 @@ describe("runCongressDailyShare — fromAppANeeds + deep history for needs", () 
     });
     vi.stubGlobal("fetch", fetchSpy);
 
-    const summary = await runCongressDailyShare({ force: true, fromAppANeeds: true });
+    const summary = await runCongressDailyShare({ force: true, fromAppANeeds: true, now });
     expect(summary.ok).toBe(true);
     expect(summary.tickers).toBe(1);
     // price-needs GET + SPX/prices POSTs

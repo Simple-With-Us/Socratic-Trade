@@ -60,15 +60,17 @@ import { HEALTH_TRANSIENT_FAILURE_PREFIX, logApiHealth } from "./db-health";
 import { isTransientNetworkError } from "./network-errors";
 import { createDurableMap } from "./durable-state";
 import { fetchDailyOHLC, toBusinessDay } from "./history";
+import { latestCompletedTradingSessionEtKey } from "./market-hours";
 import { INDEX_UNIVERSES, symbolsForPolicyUniverse } from "./index-universes";
 import type { OHLCBar } from "./indicators";
 import { fetchGroupedDailyBarsRange } from "./market-signals/massive-s3";
+import { marketQuoteSummariesFromFieldStore } from "./db-fundamentals";
 import { normalizeSymbol } from "./money";
 import { serverKnobBool } from "./server-knobs";
 import type { MarketQuote, MarketScan } from "./types";
 import { getFinraDataset, getInsiderDataset, getInsiderSignals, getShortVolumeSignals } from "./web-sources";
 import { fetchNasdaqScreenerResponse } from "./nasdaq-screener-fetch";
-import { logWarn } from "./sentry-metrics";
+import { logWarn, recordCongressStalePriceWithheld } from "./sentry-metrics";
 import { readOptionalSchemaVersionField } from "./schema-version";
 import { z, type ZodType } from "zod";
 
@@ -771,10 +773,21 @@ function numOrUndef(v: unknown): number | undefined {
  * Returns null when the quote carries no fundamental values (nothing worth sending). App A saves App B's
  * FMP quota by accepting these — App B already fetched them during the scan.
  */
-export function marketQuoteToFundamentals(
-  q: Pick<MarketQuote, "symbol" | "peRatio" | "eps" | "beta" | "dividendYield" | "fiftyTwoWeekHigh" | "fiftyTwoWeekLow" | "fcfYield" | "debtToEquity" | "epsGrowth">,
-  date: string
-): CongressFundamental | null {
+type CongressFundamentalMapperInput = Pick<
+  MarketQuote,
+  | "symbol"
+  | "peRatio"
+  | "eps"
+  | "beta"
+  | "dividendYield"
+  | "fiftyTwoWeekHigh"
+  | "fiftyTwoWeekLow"
+  | "fcfYield"
+  | "debtToEquity"
+  | "epsGrowth"
+>;
+
+export function marketQuoteToFundamentals(q: CongressFundamentalMapperInput, date: string): CongressFundamental | null {
   const ticker = canonicalMarketDataSymbol(q.symbol); // renames only; drops acquired tickers
   if (!ticker) return null;
   const row: CongressFundamental = { ticker, date };
@@ -796,10 +809,21 @@ export function marketQuoteToFundamentals(
  * rating counts App B holds. Numeric price targets are included only when the opt-in FMP price-target
  * provider populated them on the quote (FMP_PRICE_TARGETS_ENABLED); otherwise omitted (App A fills null).
  */
-export function marketQuoteToAnalyst(
-  q: Pick<MarketQuote, "symbol" | "analystRating" | "analystBySource" | "targetMean" | "targetHigh" | "targetLow" | "targetMedian">,
-  date: string
-): CongressAnalyst | null {
+type CongressAnalystMapperInput = Pick<
+  MarketQuote,
+  "symbol" | "analystRating" | "targetMean" | "targetHigh" | "targetLow" | "targetMedian"
+> & {
+  analystBySource?: Record<
+    string,
+    {
+      score?: number;
+      label?: string;
+      counts?: { strongBuy?: number; buy?: number; hold?: number; sell?: number; strongSell?: number };
+    }
+  >;
+};
+
+export function marketQuoteToAnalyst(q: CongressAnalystMapperInput, date: string): CongressAnalyst | null {
   const ticker = canonicalMarketDataSymbol(q.symbol); // renames only; drops acquired tickers
   if (!ticker) return null;
   const counts = { strongBuy: 0, buy: 0, hold: 0, sell: 0, strongSell: 0 };
@@ -869,6 +893,21 @@ export function ohlcBarsToPriceEntry(symbol: string, bars: OHLCBar[] | null | un
   return { ticker, closes, currentPrice: newest.close, currentPriceDate: newest.date };
 }
 
+/**
+ * True when the newest close (last, because callers pass ascending closes) is the latest
+ * completed US equity session or later.  A date behind that session is a stale tail.
+ * Congress.Trade has no provenance field on PriceSeries, so a stale series must not be
+ * sent as if it were current.
+ */
+export function closesCoverLatestSession(
+  closes: readonly { date: string }[],
+  nowMs: number
+): boolean {
+  const newest = closes.length > 0 ? closes[closes.length - 1] : undefined;
+  if (!newest?.date) return false;
+  return newest.date >= latestCompletedTradingSessionEtKey(nowMs);
+}
+
 // ── Insider / short-volume import builders (App B's highest-fit datasets for App A) ──
 
 /** Build App A insider rows from App B's cached SEC Form-4 dataset; shares summed per symbol. */
@@ -925,6 +964,100 @@ export function buildShortVolumeImport(): CongressShortVol[] {
     out.push({ ticker, date, ratio: sig.shortVolumeRatio, elevated: sig.elevated });
   }
   return out.slice(0, maxDailyTickers());
+}
+
+const CongressShareAnalystCountsSchema = z.object({
+  strongBuy: z.number().finite().optional(),
+  buy: z.number().finite().optional(),
+  hold: z.number().finite().optional(),
+  sell: z.number().finite().optional(),
+  strongSell: z.number().finite().optional(),
+});
+
+// .passthrough(): per-source analyst rows may carry provider metadata the mapper ignores;
+// stripping unknown keys would drop valid rows that still have usable counts.
+const CongressShareAnalystDetailSchema = z
+  .object({
+    score: z.number().finite().optional(),
+    label: z.string().optional(),
+    counts: CongressShareAnalystCountsSchema.optional(),
+  })
+  .passthrough();
+
+/** Narrow Zod gate for symbol_field_latest rows before congress-share mappers (outbound rows still hit Share*RowSchema). */
+export const FieldStoreCongressShareQuoteSchema = z
+  .object({
+    symbol: z.string().min(1),
+    peRatio: z.number().finite().optional(),
+    eps: z.number().finite().optional(),
+    beta: z.number().finite().optional(),
+    dividendYield: z.number().finite().optional(),
+    fiftyTwoWeekHigh: z.number().finite().optional(),
+    fiftyTwoWeekLow: z.number().finite().optional(),
+    fcfYield: z.number().finite().optional(),
+    debtToEquity: z.number().finite().optional(),
+    epsGrowth: z.number().finite().optional(),
+    analystRating: z.string().optional(),
+    analystBySource: z.record(z.string(), CongressShareAnalystDetailSchema).optional(),
+    targetMean: z.number().finite().optional(),
+    targetHigh: z.number().finite().optional(),
+    targetLow: z.number().finite().optional(),
+    targetMedian: z.number().finite().optional(),
+  })
+  // Keep analystBySource and other field-store keys the mappers read via .passthrough().
+  .passthrough();
+
+type FieldStoreCongressShareQuote = z.infer<typeof FieldStoreCongressShareQuoteSchema>;
+
+/**
+ * Build fundamentals + analyst rows for App A from the durable `symbol_field_latest` store.
+ * Used by the scheduled nightly batch so CT's fundamentals_eod / analyst_consensus streams stay
+ * fresh even when the after-scan hook only forwards a throttled subset of scan candidates.
+ */
+export function buildFundamentalsAndAnalystImport(
+  symbols: string[],
+  date: string
+): {
+  fundamentals: CongressFundamental[];
+  analyst: CongressAnalyst[];
+  fieldStoreParseDropped: number;
+  fieldStoreParseSampleIssues: string[];
+} {
+  const empty = { fundamentals: [], analyst: [], fieldStoreParseDropped: 0, fieldStoreParseSampleIssues: [] };
+  if (!congressFundamentalsShareEnabled() || symbols.length === 0) {
+    return empty;
+  }
+  const summaries = marketQuoteSummariesFromFieldStore(symbols);
+  const fundamentals: CongressFundamental[] = [];
+  const analyst: CongressAnalyst[] = [];
+  let fieldStoreParseDropped = 0;
+  const fieldStoreParseSampleIssues: string[] = [];
+  for (const quote of Object.values(summaries)) {
+    const parsed = FieldStoreCongressShareQuoteSchema.safeParse(quote);
+    if (!parsed.success) {
+      fieldStoreParseDropped++;
+      if (fieldStoreParseSampleIssues.length < 3) {
+        const sym = typeof quote.symbol === "string" ? quote.symbol : "?";
+        const issue = parsed.error.issues[0];
+        fieldStoreParseSampleIssues.push(
+          `${sym}: ${issue?.path.join(".") || "(root)"} ${issue?.message ?? "invalid"}`
+        );
+      }
+      continue;
+    }
+    const q: FieldStoreCongressShareQuote = parsed.data;
+    const f = marketQuoteToFundamentals(q, date);
+    if (f) fundamentals.push(f);
+    const a = marketQuoteToAnalyst(q, date);
+    if (a) analyst.push(a);
+  }
+  if (fieldStoreParseDropped > 0) {
+    console.warn(
+      `[congress-share] field-store Zod gate dropped ${fieldStoreParseDropped} symbol(s) before fundamentals/analyst export`,
+      fieldStoreParseSampleIssues.length ? { sampleIssues: fieldStoreParseSampleIssues } : undefined
+    );
+  }
+  return { fundamentals, analyst, fieldStoreParseDropped, fieldStoreParseSampleIssues };
 }
 
 // ── Low-level POST ─────────────────────────────────────────────────────────────
@@ -1635,7 +1768,24 @@ export interface CongressDailyShareSummary {
   shortVolRows: number;
   posts: number;
   failedPosts: number;
-  sent: { spx: number; prices: number; closes: number; insider: number; shortVolume: number };
+  sent: {
+    spx: number;
+    prices: number;
+    closes: number;
+    insider: number;
+    shortVolume: number;
+    fundamentals: number;
+    analyst: number;
+  };
+  fundamentalsRows?: number;
+  analystRows?: number;
+  /** Symbols dropped by FieldStoreCongressShareQuoteSchema before fundamentals/analyst POSTs. */
+  fieldStoreParseDropped?: number;
+  fieldStoreParseSampleIssues?: string[];
+  /** Tickers whose newest close was behind the latest completed session and were not pushed. */
+  stalePricesWithheld?: number;
+  /** True when the S&P series was withheld for the same reason. */
+  staleSpxWithheld?: boolean;
   /** Aggregated schema-invalid row drops across all POSTs in this run. */
   rowsDropped?: Record<string, number>;
   rowsDroppedReasons?: Record<string, Record<string, number>>;
@@ -1662,7 +1812,8 @@ export async function runCongressDailyShare(
     const now = options.now ?? Date.now();
     const empty = {
       tickers: 0, priced: 0, spxRows: 0, insiderRows: 0, shortVolRows: 0,
-      posts: 0, failedPosts: 0, sent: { spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0 }
+      posts: 0, failedPosts: 0,
+      sent: { spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0, fundamentals: 0, analyst: 0 }
     };
     if (!congressTradeToken()) return { ok: false, skipped: true, reason: "no-token", ...empty };
 
@@ -1747,7 +1898,8 @@ async function runCongressDailyShareUnlocked(
   const now = options.now ?? Date.now();
   const empty = {
     tickers: 0, priced: 0, spxRows: 0, insiderRows: 0, shortVolRows: 0,
-    posts: 0, failedPosts: 0, sent: { spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0 }
+    posts: 0, failedPosts: 0,
+    sent: { spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0, fundamentals: 0, analyst: 0 }
   };
   if (!congressTradeToken()) return { ok: false, skipped: true, reason: "no-token", ...empty };
   const customUniverse = Array.isArray(options.symbols) && options.symbols.length > 0;
@@ -1820,15 +1972,22 @@ async function runCongressDailyShareUnlocked(
 
   // S&P-500 daily closes (^GSPC) — sent once per day regardless of the ticker universe.
   // Full history when App A reports SPX gaps before oldest congressional trade, or fullHistory flag.
+  // A tail behind the latest completed session is withheld: App A treats a successful import as fresh.
   let spx: CongressClose[] = [];
+  let staleSpxWithheld = false;
   throwIfOperationLeaseCancelled(operationLeaseSignal);
   try {
-    spx = ohlcBarsToCloses(await fetchDailyOHLC("^GSPC", now));
-    const spxCap =
-      options.fullHistory || needsResp.spx?.needsHistoryBefore
-        ? Number.POSITIVE_INFINITY
-        : maxClosesPerTicker();
-    if (spx.length > spxCap) spx = spx.slice(-spxCap);
+    const spxAll = ohlcBarsToCloses(await fetchDailyOHLC("^GSPC", now));
+    if (spxAll.length > 0 && !closesCoverLatestSession(spxAll, now)) {
+      staleSpxWithheld = true;
+    } else {
+      spx = spxAll;
+      const spxCap =
+        options.fullHistory || needsResp.spx?.needsHistoryBefore
+          ? Number.POSITIVE_INFINITY
+          : maxClosesPerTicker();
+      if (spx.length > spxCap) spx = spx.slice(-spxCap);
+    }
   } catch (err) {
     console.error("[congress-share] SPX fetch failed:", err);
   }
@@ -1845,12 +2004,31 @@ async function runCongressDailyShareUnlocked(
     if (entry.closes.length > maxCloses) entry.closes = entry.closes.slice(-maxCloses);
     return entry;
   };
+  const staleTickers: string[] = [];
+  const seenStale = new Set<string>();
+  const noteStale = (ticker: string): void => {
+    if (seenStale.has(ticker)) return;
+    seenStale.add(ticker);
+    staleTickers.push(ticker);
+  };
+  // Flat-file tails that missed the session stay here until the live cascade replaces them.
+  const staleFlatFile = new Map<string, string>();
+  const freshEntry = (symbol: string, bars: OHLCBar[] | null | undefined): CongressPrice | null => {
+    const raw = ohlcBarsToPriceEntry(symbol, bars);
+    if (!raw) return null;
+    if (!closesCoverLatestSession(raw.closes, now)) {
+      noteStale(raw.ticker);
+      return null;
+    }
+    staleFlatFile.delete(symbol);
+    return capCloses(raw);
+  };
   const perTicker = async (symbols: string[]): Promise<CongressPrice[]> =>
     (
       await mapPool(symbols, concurrency, async (symbol) => {
         throwIfOperationLeaseCancelled(operationLeaseSignal);
         try {
-          return capCloses(ohlcBarsToPriceEntry(symbol, await fetchDailyOHLC(symbol, now)));
+          return freshEntry(symbol, await fetchDailyOHLC(symbol, now));
         } catch {
           return null;
         }
@@ -1861,6 +2039,7 @@ async function runCongressDailyShareUnlocked(
   if (options.flatFile) {
     // Bulk path: one pass over the flat files for the whole universe, then per-ticker fallback for misses
     // (or when flat-file download isn't granted, in which case the whole universe falls back).
+    // A stale flat-file tail is a miss: the live cascade may still reach the latest session.
     const years = Number(process.env.MASSIVE_FLATFILE_BACKFILL_YEARS ?? 5) || 5;
     const toISO = toBusinessDay(now) ?? new Date(now).toISOString().slice(0, 10);
     const fromISO = new Date(now - years * 365 * 86_400_000).toISOString().slice(0, 10);
@@ -1875,11 +2054,19 @@ async function runCongressDailyShareUnlocked(
     const missing: string[] = [];
     for (const symbol of universe) {
       const bars = seriesBySymbol.get(symbol);
-      const entry = bars && bars.length ? capCloses(ohlcBarsToPriceEntry(symbol, bars)) : null;
+      const raw = bars && bars.length ? ohlcBarsToPriceEntry(symbol, bars) : null;
+      const entry = raw && closesCoverLatestSession(raw.closes, now) ? capCloses(raw) : null;
       if (entry) entries.push(entry);
-      else missing.push(symbol);
+      else {
+        if (raw) staleFlatFile.set(symbol, raw.ticker);
+        missing.push(symbol);
+      }
     }
     priceEntries = [...entries, ...(await perTicker(missing))];
+    for (const [symbol, ticker] of staleFlatFile) {
+      if (!priceEntries.some((entry) => entry.ticker === ticker)) noteStale(ticker);
+      staleFlatFile.delete(symbol);
+    }
   } else {
     priceEntries = await perTicker(universe);
   }
@@ -1888,9 +2075,40 @@ async function runCongressDailyShareUnlocked(
   // Skip on targeted custom/needs-only runs so a performance backfill stays price-focused.
   const insider = advancesDailyMarker ? buildInsiderImport() : [];
   const shortVolume = advancesDailyMarker ? buildShortVolumeImport() : [];
-  
+  const shareDate = utcDate(now);
+  const pushFundamentalsAnalyst =
+    advancesDailyMarker || (customUniverse && options.fromAppANeeds !== true);
+  let fundamentalsImport: CongressFundamental[] = [];
+  let analystImport: CongressAnalyst[] = [];
+  let fieldStoreParseDropped = 0;
+  let fieldStoreParseSampleIssues: string[] = [];
+  if (pushFundamentalsAnalyst) {
+    const built = buildFundamentalsAndAnalystImport(universe, shareDate);
+    fundamentalsImport = built.fundamentals;
+    analystImport = built.analyst;
+    fieldStoreParseDropped = built.fieldStoreParseDropped;
+    fieldStoreParseSampleIssues = built.fieldStoreParseSampleIssues;
+  }
+
   // Push company refs for the full public screener
   const refs = await fetchNasdaqScreenerRefs();
+
+  const stalePricesWithheld = staleTickers.length;
+  if (stalePricesWithheld > 0 || staleSpxWithheld) {
+    const session = latestCompletedTradingSessionEtKey(now);
+    audit("congress_share_stale_price_withheld", {
+      session,
+      prices: stalePricesWithheld,
+      sample: staleTickers.slice(0, 8),
+      spx: staleSpxWithheld
+    });
+    logWarn("[congress-share] withheld stale EOD series", {
+      session,
+      prices: stalePricesWithheld,
+      spx: staleSpxWithheld
+    });
+    recordCongressStalePriceWithheld("push", stalePricesWithheld + (staleSpxWithheld ? 1 : 0));
+  }
 
   // Send each dataset as its OWN bounded POST(s) rather than one bundled megabatch: App A's per-call
   // work (upserts + per-trade perf recompute) made big combined payloads exceed the timeout, and a
@@ -1900,12 +2118,16 @@ async function runCongressDailyShareUnlocked(
   for (const rows of rowChunks(refs, MAX_REFS_PER_POST)) payloads.push({ refs: rows });
   for (const rows of rowChunks(insider)) payloads.push({ insider: rows });
   for (const rows of rowChunks(shortVolume)) payloads.push({ shortVolume: rows });
+  // Prices before fundamentals/analyst: the loop shares one upstream breaker; a 5xx streak on
+  // fundamentals/analyst must not skip price chunks or block the daily marker.
   for (const prices of chunkPrices(priceEntries)) payloads.push({ prices });
+  for (const rows of rowChunks(fundamentalsImport)) payloads.push({ fundamentals: rows });
+  for (const rows of rowChunks(analystImport)) payloads.push({ analyst: rows });
 
   const responses: unknown[] = [];
   let posts = 0;
   let failedPosts = 0;
-  const sent = { refs: 0, spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0 };
+  const sent = { refs: 0, spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0, fundamentals: 0, analyst: 0 };
   const rowsDropped: Record<string, number> = {};
   const rowsDroppedReasons: Record<string, Record<string, number>> = {};
   let rowsDroppedTotal = 0;
@@ -1935,6 +2157,8 @@ async function runCongressDailyShareUnlocked(
       sent.closes += result.sent.closes;
       sent.insider += result.sent.insider;
       sent.shortVolume += result.sent.shortVolume;
+      sent.fundamentals += result.sent.fundamentals;
+      sent.analyst += result.sent.analyst;
     } else if (!result.skipped) {
       failedPosts++;
     }
@@ -1964,9 +2188,16 @@ async function runCongressDailyShareUnlocked(
     spxRows: spx.length,
     insiderRows: insider.length,
     shortVolRows: shortVolume.length,
+    fundamentalsRows: fundamentalsImport.length,
+    analystRows: analystImport.length,
+    ...(fieldStoreParseDropped > 0
+      ? { fieldStoreParseDropped, fieldStoreParseSampleIssues }
+      : {}),
     posts,
     failedPosts,
     sent,
+    ...(stalePricesWithheld > 0 ? { stalePricesWithheld } : {}),
+    ...(staleSpxWithheld ? { staleSpxWithheld } : {}),
     ...(rowsDroppedTotal > 0
       ? { rowsDropped, rowsDroppedReasons, rowsDroppedTotal }
       : {}),
@@ -1982,9 +2213,16 @@ async function runCongressDailyShareUnlocked(
       spxRows: summary.spxRows,
       insiderRows: summary.insiderRows,
       shortVolRows: summary.shortVolRows,
+      fundamentalsRows: summary.fundamentalsRows,
+      analystRows: summary.analystRows,
+      ...(fieldStoreParseDropped > 0
+        ? { fieldStoreParseDropped, fieldStoreParseSampleIssues }
+        : {}),
       posts,
       failedPosts,
       sent,
+      ...(stalePricesWithheld > 0 ? { stalePricesWithheld } : {}),
+      ...(staleSpxWithheld ? { staleSpxWithheld } : {}),
       ...(rowsDroppedTotal > 0 ? { rowsDropped, rowsDroppedReasons, rowsDroppedTotal } : {}),
       custom: customUniverse,
       fromAppANeeds: options.fromAppANeeds === true,

@@ -36,7 +36,7 @@ vi.mock("../src/lib/approval-quote-scan", async (importOriginal) => {
     ...actual,
     loadApprovalQuoteScan: async () =>
       actual.buildApprovalQuoteScan(
-        { AAPL: { symbol: "AAPL", price: 200, bid: 199, ask: 200, provider: "test-scan" } },
+        { AAPL: { symbol: "AAPL", price: 200, bid: 199, ask: 200, provider: "test-scan", asOf: new Date().toISOString() } },
         []
       )
   };
@@ -513,6 +513,146 @@ describe("inline placement-error reconciliation via executeProposal", () => {
     expect(listsAfterPlace).toBeGreaterThan(0);
     expect(result.status).toBe("placed");
     expect(getProposal(proposalId, userId)?.status).toBe("placed");
+  });
+
+  it("HTTP 500 + order PRESENT → placed via reconcile, not not_placed", async () => {
+    const userId = `reco-500-present-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    let listsAfterPlace = 0;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("Tradier order failed: Tradier HTTP 500: Unexpected server error");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      listsAfterPlace += 1;
+      return [brokerOrder({ clientOrderId: capturedRefId, state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result = await executeProposal(proposalId, userId);
+    expect(placeEquityOrder).toHaveBeenCalledTimes(1);
+    expect(listsAfterPlace).toBeGreaterThan(0);
+    expect(result.status).toBe("placed");
+    expect(result.orderId).toBeTruthy();
+    expect(getProposal(proposalId, userId)?.status).toBe("placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("not_placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("rejected_by_broker");
+  });
+
+  it("HTTP 500 + order ABSENT → not_placed only after the broker list", async () => {
+    const userId = `reco-500-absent-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    let listsAfterPlace = 0;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("Alpaca order failed: HTTP 503 Service Unavailable");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      listsAfterPlace += 1;
+      return [brokerOrder({ clientOrderId: "some-other-key", state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(placeEquityOrder).toHaveBeenCalledTimes(1);
+    expect(listsAfterPlace).toBeGreaterThan(0);
+    expect(result.message).toMatch(/safe to retry/i);
+    expect(getProposal(proposalId, userId)?.status).toBe("not_placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("rejected_by_broker");
+  });
+
+  it("caller timeout + order PRESENT → placed via reconcile, not an immediate retry", async () => {
+    const userId = `reco-timeout-present-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("network timeout during placement");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      return [brokerOrder({ clientOrderId: capturedRefId, state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result = await executeProposal(proposalId, userId);
+    expect(placeEquityOrder).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("placed");
+    expect(getProposal(proposalId, userId)?.status).toBe("placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("not_placed");
+  });
+
+  it("HTTP 403 buying power is terminal rejected_by_broker and does not reconcile", async () => {
+    const userId = `reco-403-terminal-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    let listsAfterPlace = 0;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("Tradier order failed: Tradier HTTP 403: Not enough buying power");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      listsAfterPlace += 1;
+      return [brokerOrder({ clientOrderId: capturedRefId, state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(placeEquityOrder).toHaveBeenCalledTimes(1);
+    expect(listsAfterPlace).toBe(0);
+    expect(result.message).toMatch(/buying power/i);
+    expect(getProposal(proposalId, userId)?.status).toBe("rejected_by_broker");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("not_placed");
+  });
+
+  it("sandbox open deferral books not_placed without a broker list", async () => {
+    const userId = `reco-deferral-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    let listsAfterPlace = 0;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error(
+        "Tradier sandbox quotes are 15 minutes delayed, so strategy runs and order placement wait until 16 minutes after the open (9:46am ET).  Safe to retry."
+      );
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      listsAfterPlace += 1;
+      return [brokerOrder({ clientOrderId: capturedRefId, state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(placeEquityOrder).toHaveBeenCalledTimes(1);
+    expect(listsAfterPlace).toBe(0);
+    expect(result.message).toMatch(/safe to retry/i);
+    expect(getProposal(proposalId, userId)?.status).toBe("not_placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("rejected_by_broker");
   });
 
   it("HTTP 429 → not_placed (safe to retry), not rejected_by_broker", async () => {

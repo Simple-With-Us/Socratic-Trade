@@ -14,6 +14,11 @@ Token-gated (same gate as `/api/ops/snapshot`), read-only, GET only.  For every 
 the ops snapshot covers (or one, via `?account=`):
 
 - `label`, `broker`, `environment`, `systemState`, `accountNumber`
+- `parked`, `parkedReason`, `parkedAt` — the operator park decision from `connected_accounts`
+  (review rank 8).  `parked` is `true` only when that flag is set.  `parkedReason` and `parkedAt`
+  are the stored reason and ISO time, or `null` when absent.  A park is not a halt: `systemState`
+  can still be `active` on a parked account, and this endpoint does not change either one.  The
+  same 60s snapshot cache applies, so a park made moments ago can lag one cache window.
 - `liveRealizedPnl` / `paperRealizedPnl` — from `getPerformanceSummary`; they never touch a live
   quote.
 - `liveUnrealizedPnl` / `paperUnrealizedPnl` — mark-to-market over the `openLots` the account's one

@@ -70,9 +70,10 @@ parser-validation cases, which need no schema.)
 - **The decision itself is still the owner's.**  This adds the vocabulary; it does not make the
   call.  The four accounts in the review still need an explicit park / re-arm / investigate.
 - No console UI for parking.  The ops endpoint is the surface; a Settings control was not built.
-- `ops-performance` / `/api/ops/snapshot` do not yet surface `parked` on their account rows, so a
-  report can still show a parked account without saying why.  That is the natural follow-up and is
-  the last piece of rank 8's "removes the unexplained zeros".
+- `GET /api/ops/performance` now includes `parked`, `parkedReason`, and `parkedAt` on every account
+  row (2026-10-15, `docs/rollouts/2026-10-15-ops-performance-parked-flag.md`).  `/api/ops/snapshot`
+  still does not.  The park / re-arm / investigate call for the four dormant accounts is still the
+  owner's.
 
 ## 6. Zero-Code Findings
 

@@ -3,10 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 
-// api_health_log keeps only the newest HEALTH_LOG_LANE_CAP rows per (service, key_source) lane, and
-// the 1h/24h window counts in ServiceHealthSummary are computed over that capped table — so on a busy
-// lane they saturate and are a floor, not a total. These tests pin both the cap itself and the
-// signal the admin UI needs to render the saturated case as "500+" instead of a wrong exact "500".
+// api_health_log rows are kept forever (2026-10-15). HEALTH_LOG_LANE_CAP is only a read bound for
+// streak heuristics. Window counts in ServiceHealthSummary are exact COUNTs over the full table.
 // Isolated temp SQLite per file (the db singleton must not leak across files).
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-health-cap-${randomUUID()}.db`)}`;
@@ -16,12 +14,13 @@ async function load() {
   return import("../src/lib/db-health");
 }
 
-describe("api_health_log lane retention cap", () => {
-  it("keeps at most HEALTH_LOG_LANE_CAP rows per lane and saturates the window counts", async () => {
+describe("api_health_log forever retention", () => {
+  it("keeps every row per lane and reports exact window counts", async () => {
     const { logApiHealth, getServiceHealthSummaries, HEALTH_LOG_LANE_CAP } = await load();
     const service = `cap-lane-${randomUUID().slice(0, 8)}`;
+    const extra = 20;
 
-    for (let i = 0; i < HEALTH_LOG_LANE_CAP + 20; i++) {
+    for (let i = 0; i < HEALTH_LOG_LANE_CAP + extra; i++) {
       logApiHealth({ service, ok: true, latencyMs: 5, keySource: "env" });
     }
 
@@ -31,16 +30,13 @@ describe("api_health_log lane retention cap", () => {
         .prepare("SELECT COUNT(*) as cnt FROM api_health_log WHERE service = ? AND key_source IS ?")
         .get(service, "env") as { cnt: number }
     ).cnt;
-    expect(retained).toBe(HEALTH_LOG_LANE_CAP);
+    expect(retained).toBe(HEALTH_LOG_LANE_CAP + extra);
 
     const summary = getServiceHealthSummaries().find((s) => s.service === service && s.keySource === "env");
     expect(summary).toBeDefined();
-    // 520 calls happened; the summary can only ever report 500 — this is the dishonest-number case.
-    expect(summary?.callsLast24h).toBe(HEALTH_LOG_LANE_CAP);
-    expect(summary?.callsLastHour).toBe(HEALTH_LOG_LANE_CAP);
-    // The cap travels with the summary so the (client-side, cannot-import-db-health) admin panel can
-    // mark the count as saturated without hardcoding 500.
-    expect(summary?.laneLogCap).toBe(HEALTH_LOG_LANE_CAP);
+    expect(summary?.callsLast24h).toBe(HEALTH_LOG_LANE_CAP + extra);
+    expect(summary?.callsLastHour).toBe(HEALTH_LOG_LANE_CAP + extra);
+    expect(summary?.laneLogCap).toBeUndefined();
   });
 
   it("does not evict, or mark saturated, a lane below the cap", async () => {
@@ -56,18 +52,18 @@ describe("api_health_log lane retention cap", () => {
     expect(summary?.callsLast24h).toBeLessThan(HEALTH_LOG_LANE_CAP);
   });
 
-  it("caps each (service, key_source) lane independently", async () => {
+  it("counts each (service, key_source) lane independently without cross-lane deletes", async () => {
     const { logApiHealth, getServiceHealthSummaries, HEALTH_LOG_LANE_CAP } = await load();
     const service = `two-lane-${randomUUID().slice(0, 8)}`;
+    const envRows = HEALTH_LOG_LANE_CAP + 5;
 
-    for (let i = 0; i < HEALTH_LOG_LANE_CAP + 5; i++) {
+    for (let i = 0; i < envRows; i++) {
       logApiHealth({ service, ok: true, keySource: "env" });
     }
     logApiHealth({ service, ok: true, keySource: "user", userId: "local" });
 
     const summaries = getServiceHealthSummaries().filter((s) => s.service === service);
-    expect(summaries.find((s) => s.keySource === "env")?.callsLast24h).toBe(HEALTH_LOG_LANE_CAP);
-    // The busy env lane's eviction must not touch the sibling user lane's single row.
+    expect(summaries.find((s) => s.keySource === "env")?.callsLast24h).toBe(envRows);
     expect(summaries.find((s) => s.keySource === "user")?.callsLast24h).toBe(1);
   });
 });

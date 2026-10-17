@@ -16,6 +16,7 @@
 import { dataSourceFetch, resolveDataSourceProxy } from "./data-source-fetch";
 import { enrichmentPlanForDeadline } from "./gather-budget";
 import { fromAlpacaSymbol, normalizeSymbol, toAlpacaSymbol } from "./money";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import {
   congressFundamentalsEnabled,
   getCongressTradeClient
@@ -2259,9 +2260,12 @@ function webullUnofficialTimeoutMs(): number {
 export function parseWebullUnofficialQuote(payload: unknown): SymbolEnrichment {
   if (!payload || typeof payload !== "object" || "_error" in payload) return {};
   const row = payload as Record<string, unknown>;
-  const price = firstNumber(row, ["pPrice", "close", "price", "lastPrice", "latestPrice", "last"]);
+  // Webull unofficial `close` is the current print.  `preClose` is the prior close and is not a price.
+  const last = firstNumber(row, ["pPrice", "price", "lastPrice", "latestPrice", "last", "close"]);
   const bid = firstNumber(row, ["bid", "bidPrice", "bid_price"]);
   const ask = firstNumber(row, ["ask", "askPrice", "ask_price"]);
+  const selected = selectObservedQuotePrice({ last, bid, ask });
+  const price = selected.price;
   const prevClose = firstNumber(row, ["preClose", "prevClose", "previousClose", "priorClose"]);
   const rawChangePct = firstNumber(row, ["changeRatio", "changePercent", "pctChange", "changePct"]);
   const volume = firstNumber(row, ["volume", "vol", "tradeVolume"]);
@@ -2272,7 +2276,13 @@ export function parseWebullUnofficialQuote(payload: unknown): SymbolEnrichment {
   const fiftyTwoWeekHigh = firstNumber(row, ["fiftyTwoWkHigh", "high52w", "high52wk", "week52High", "fiftyTwoWeekHigh"]);
   const fiftyTwoWeekLow = firstNumber(row, ["fiftyTwoWkLow", "low52w", "low52wk", "week52Low", "fiftyTwoWeekLow"]);
   const companyName = firstString(row, ["name", "companyName", "disSymbolName"]);
-  const asOf = firstString(row, ["timestamp", "tradeTime", "time", "updateTime"]);
+  const asOf = providerObservationIso(
+    selected.basis === "last"
+      ? firstString(row, ["tradeTime", "timestamp", "time", "updateTime"])
+      : selected.basis === "mid"
+        ? firstString(row, ["quoteTime", "timestamp", "time", "updateTime"])
+        : undefined
+  );
   const dividendYield =
     rawDividendYield !== undefined && rawDividendYield >= 0
       ? Math.round((rawDividendYield <= 1 ? rawDividendYield * 100 : rawDividendYield) * 100) / 100
@@ -2714,12 +2724,15 @@ export function parseAlpacaSnapshot(snap: AlpacaSnapshot | undefined | null): Sy
 
   const tradePrice = typeof snap.latestTrade?.p === "number" && snap.latestTrade.p > 0 ? snap.latestTrade.p : undefined;
   const barClose = typeof snap.dailyBar?.c === "number" && snap.dailyBar.c > 0 ? snap.dailyBar.c : undefined;
-  const price = tradePrice ?? barClose;
 
   const bid = typeof snap.latestQuote?.bp === "number" && snap.latestQuote.bp > 0 ? snap.latestQuote.bp : undefined;
   const ask = typeof snap.latestQuote?.ap === "number" && snap.latestQuote.ap > 0 ? snap.latestQuote.ap : undefined;
   const bidSize = typeof snap.latestQuote?.bs === "number" && snap.latestQuote.bs > 0 ? snap.latestQuote.bs : undefined;
   const askSize = typeof snap.latestQuote?.as === "number" && snap.latestQuote.as > 0 ? snap.latestQuote.as : undefined;
+  // Last print, then the two-sided mid.  Daily-bar close and the previous
+  // close are not the quote, and bid/ask size is not a price.
+  const selected = selectObservedQuotePrice({ last: tradePrice, bid, ask });
+  const price = selected.price;
 
   const volume = typeof snap.dailyBar?.v === "number" && snap.dailyBar.v > 0 ? snap.dailyBar.v : undefined;
 
@@ -2740,18 +2753,11 @@ export function parseAlpacaSnapshot(snap: AlpacaSnapshot | undefined | null): Sy
     netChange = Math.round((refPrice - prevClose) * 100) / 100;
   }
 
-  // Stamp asOf from whichever timestamp backs the winning PRICE field, so the staleness gate
-  // (policy.ts maxQuoteAgeSec) sees the quote's true age instead of inheriting a screener/enrichment
-  // asOf from an unrelated field (or none at all — parseAlpacaSnapshot never set asOf before this).
-  // Preference mirrors the price fallback above: latestTrade.t when latestTrade.p won, else
-  // dailyBar.t when dailyBar.c won, falling back to latestQuote.t when both are absent.
-  const asOfRaw =
-    tradePrice !== undefined
-      ? snap.latestTrade?.t
-      : barClose !== undefined
-        ? snap.dailyBar?.t
-        : snap.latestQuote?.t;
-  const asOf = typeof asOfRaw === "string" && !Number.isNaN(new Date(asOfRaw).getTime()) ? asOfRaw : undefined;
+  // The timestamp belongs to the field that won.  A missing observation stays
+  // undefined so the staleness gate does not read the fetch clock.
+  const asOf = providerObservationIso(
+    selected.basis === "last" ? snap.latestTrade?.t : selected.basis === "mid" ? snap.latestQuote?.t : undefined
+  );
 
   return {
     ...(price !== undefined && { price }),
@@ -5719,6 +5725,15 @@ function massiveFirstResult(value: unknown): Record<string, unknown> | undefined
   return undefined;
 }
 
+/** Twelve Data's current quote is `last`, then `close`.  `previous_close` and volume are not the price. */
+export function twelveDataObservedPrice(q: Record<string, unknown>): number | undefined {
+  const last = firstNumber(q, ["last"]);
+  if (typeof last === "number" && last > 0) return last;
+  const close = firstNumber(q, ["close"]);
+  if (typeof close === "number" && close > 0) return close;
+  return undefined;
+}
+
 function firstNumber(row: Record<string, unknown>, keys: string[]): number | undefined {
   for (const key of keys) {
     const value = row[key];
@@ -6243,7 +6258,7 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
             continue;
           }
 
-          const price = firstNumber(q, ["close", "last"]);
+          const price = twelveDataObservedPrice(q);
           const volume = firstNumber(q, ["volume"]);
           const companyName = firstString(q, ["name"]);
           const sector = firstString(q, ["sector"]);

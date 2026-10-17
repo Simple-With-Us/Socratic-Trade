@@ -1418,13 +1418,15 @@ export async function executeProposal(
           // (strategy.ts) and the protective-state block above: honest terminal "blocked".
           // P2.6 / #1319: pre-flight validation and definitive broker HTTP 4xx are never
           // "uncertain". OrderValidationError → blocked; terminal 4xx → rejected_by_broker;
-          // HTTP 429 → not_placed (retryable). HTTP 408 is a timeout and falls through to
-          // reconcilePlacementError with HTTP 409 (duplicate client_order_id): executeProposal
-          // mints a new refId per call, so booking 408 as not_placed can duplicate a live order.
-          // Tradier's "Unexpected server error" falls through the same way.  The adapter
-          // already returns a tag hit as success; an escaped sentence means the POST may
-          // still be live.
-          // Reserve uncertain for an unreachable broker list / 5xx.
+          // HTTP 429 → not_placed (retryable, the request was refused). HTTP 408,
+          // other timeouts, and HTTP 5xx fall through to reconcilePlacementError
+          // with HTTP 409 (duplicate client_order_id): executeProposal mints a new
+          // refId per call, so booking those as not_placed can duplicate a live order.
+          // Tradier's HTTP 400 "Unexpected server error" falls through the same way.
+          // The adapter already returns a tag hit as success; an escaped sentence
+          // means the POST may still be live.  A 5xx is retryable here and can
+          // still halt: it is not the #4668 sandbox-400 retry.
+          // Reserve uncertain for an unreachable broker list.
           // The one transient OrderValidationError: the placement-time position read failed and
           // the sell/cover failed closed.  Nothing reached the broker — retryable not_placed.
           if (isRetryablePositionInvariantError(placeError)) {
@@ -1490,8 +1492,8 @@ export async function executeProposal(
             throw new Error([message].join(" "));
           }
           const placeClass = classifyPlaceOrderError(message);
-          // 408 and Tradier's transient sentence stay classified retryable but must
-          // not book not_placed before reconcile.
+          // 408, other timeouts, HTTP 5xx, and Tradier's transient sentence stay
+          // classified retryable but must not book not_placed before reconcile.
           if (placeClass === "retryable" && !mustReconcileRetryablePlaceError(message)) {
             const note = `Broker rate-limited or timed out (${message}). Safe to retry.`;
             updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, note);

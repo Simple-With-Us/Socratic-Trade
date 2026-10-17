@@ -198,7 +198,10 @@ export interface TaskJournalLaneSummary {
 }
 
 /** Per-lane aggregate over a lookback window — the ops-snapshot "task brain" view. */
-export function getTaskJournalSummary(sinceIso: string): TaskJournalLaneSummary[] {
+export function getTaskJournalSummary(
+  sinceIso: string,
+  opts: { skipLastStatus?: boolean } = {}
+): TaskJournalLaneSummary[] {
   try {
     const rows = getDb()
       .prepare(
@@ -225,11 +228,14 @@ export function getTaskJournalSummary(sinceIso: string): TaskJournalLaneSummary[
       lastStartedAt: string | null;
     }>;
     return rows.map((row) => {
-      const last = getDb()
-        .prepare(
-          "SELECT status FROM task_journal WHERE task_name = ? AND started_at = ? ORDER BY rowid DESC LIMIT 1"
-        )
-        .get(row.taskName, row.lastStartedAt) as { status: TaskJournalStatus } | undefined;
+      const last =
+        opts.skipLastStatus || !row.lastStartedAt
+          ? undefined
+          : (getDb()
+              .prepare(
+                "SELECT status FROM task_journal WHERE task_name = ? AND started_at = ? ORDER BY rowid DESC LIMIT 1"
+              )
+              .get(row.taskName, row.lastStartedAt) as { status: TaskJournalStatus } | undefined);
       return {
         taskName: row.taskName,
         fires: row.fires,
@@ -262,35 +268,7 @@ export const TASK_JOURNAL_PRUNE_BATCH_LIMIT = 500;
  *  `tickInner` -> this function, with better-sqlite3 `prepare` under it, while `/api/health`
  *  sat on the same loop.  Skipped rows (24h) are drained first, then ok/error rows (30d),
  *  sharing one batch cap so a tick still deletes at most TASK_JOURNAL_PRUNE_BATCH_LIMIT rows. */
-export function pruneTaskJournal(now: Date = new Date()): number {
-  try {
-    const okCutoff = new Date(now.getTime() - TASK_JOURNAL_RETENTION_MS).toISOString();
-    const skippedCutoff = new Date(now.getTime() - TASK_JOURNAL_SKIPPED_RETENTION_MS).toISOString();
-    const db = getDb();
-    const skipped = db
-      .prepare(
-        `DELETE FROM task_journal WHERE rowid IN (
-           SELECT rowid FROM task_journal INDEXED BY idx_task_journal_started
-           WHERE started_at < ? AND status = 'skipped'
-           ORDER BY started_at ASC
-           LIMIT ${TASK_JOURNAL_PRUNE_BATCH_LIMIT}
-         )`
-      )
-      .run(skippedCutoff);
-    const remaining = TASK_JOURNAL_PRUNE_BATCH_LIMIT - skipped.changes;
-    if (remaining <= 0) return skipped.changes;
-    const older = db
-      .prepare(
-        `DELETE FROM task_journal WHERE rowid IN (
-           SELECT rowid FROM task_journal INDEXED BY idx_task_journal_started
-           WHERE started_at < ? AND status != 'skipped'
-           ORDER BY started_at ASC
-           LIMIT ?
-         )`
-      )
-      .run(okCutoff, remaining);
-    return skipped.changes + older.changes;
-  } catch {
-    return 0;
-  }
+/** Jay policy (2026-10-15): task journal rows are kept forever; scheduler still calls this hook. */
+export function pruneTaskJournal(_now: Date = new Date()): number {
+  return 0;
 }

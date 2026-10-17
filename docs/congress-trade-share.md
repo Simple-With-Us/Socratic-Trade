@@ -83,10 +83,14 @@ hook and **(b)** a nightly daily-close/SPX batch.
    most once per UTC day): collects the **union of every user's watchlist symbols
    + policy-universe symbols** (the same set the filing-ingest job uses), fetches
    each ticker's daily closes (reusing the history cache) plus the `^GSPC` series,
-   and POSTs them as `prices` + `spx` in capped chunks.
+   and POSTs them as `prices` + `spx` in capped chunks.  On scheduled runs it also
+   POSTs `fundamentals[]` + `analyst[]` for that universe from the durable
+   `symbol_field_latest` store (`buildFundamentalsAndAnalystImport`), so App A's
+   fundamentals/analyst streams stay fresh even when the scan hook is throttled or
+   scan candidates lack slow enrichment on a given run.
 
-`refs` come from the scan hook; the nightly batch sends `prices` + `spx`. This
-matches the "scan refs + nightly prices" split chosen for this work.
+`refs` come from the scan hook; the nightly batch sends `prices` + `spx` plus
+insider/short-volume and (when enabled) fundamentals/analyst from the field store.
 
 **Round-2 additions (2026-06-22):** the nightly batch also forwards App B's two highest-fit datasets,
 sourced from its cached web-sources and built by `buildInsiderImport()` / `buildShortVolumeImport()`:
@@ -209,10 +213,15 @@ the same `APP_B_INGEST_TOKEN` bearer as `/api/admin/securities/import`
   `PriceSeries` envelope: `{ ticker, closes: [{date, close, volume?}, ...], currentPrice,
   currentPriceDate }`. Closes are DESCENDING (closes[0] = latest); `from`/`to` optional, inclusive
   (default ~1y back → today); `currentPrice` is the newest close of the FULL series
-  (range-independent). Unknown symbol / empty range → 200 with `{ ticker, closes: [] }` — never an
-  error status, so App A only treats genuine non-200s as "try the fallback provider".
+  (range-independent). Unknown symbol / empty range → 200 with `{ ticker, closes: [] }`.
+  App A treats that 200 as "this source has nothing" and only tries the next provider on non-200.
+  A series whose newest close is older than the latest completed US equity session is HTTP 502
+  `{ ok: false, error: "stale" }`.  An empty 200 would suppress that fallback.  The nightly push
+  drops that ticker and the S&P series instead of POSTing them, and writes a
+  `congress_share_stale_price_withheld` audit row.
 - `GET /api/market/spx?from=&to=` → `{ closes: [...] }` DESCENDING, from SPY daily bars (the
-  benchmark convention App A already uses).
+  benchmark convention App A already uses).  No bars is 200 `{ closes: [] }`.  A stale SPY tail
+  is the same 502.
 
 Bars come from the canonical `fetchDailyOHLC` cascade (Massive keyed first, ~30min in-process
 cache) — see `src/lib/market-read.ts` and `docs/rollouts/2026-07-31-market-read-routes.md`.

@@ -21,8 +21,10 @@ import { logApiHealth } from "./db-health";
 import { normalizeSymbol } from "./money";
 import { mergeAccountCapabilities } from "./venue-contract";
 import { normalizeVenueOrder } from "./venue-normalization";
-import { isShortIntent } from "./broker-side";
+import { isLiveOrderState, isShortIntent } from "./broker-side";
+import { brokerAbortSignal, scopeBrokerOrders } from "./inflight-deadline";
 import { getOpenLots, getPerformanceSummary } from "./performance";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import { fetchYahooFinanceQuote, fetchYahooFinanceQuotesBatch } from "./yahoo-finance";
 import { messageFromUnknownError, recordRecoverableIssue } from "./recoverable-issue";
 
@@ -87,14 +89,26 @@ export function parseRobinhoodQuotes(raw: Record<string, unknown> | unknown): Re
       const bidSize = optionalNumber(q.bid_size);
       const askSize = optionalNumber(q.ask_size);
       const volume = optionalNumber(q.volume);
+      const selected = selectObservedQuotePrice({
+        last: q.last_trade_price ?? q.last_non_reg_trade_price ?? q.price ?? q.last_price,
+        bid: q.bid_price ?? q.bid,
+        ask: q.ask_price ?? q.ask
+      });
+      const asOf = providerObservationIso(
+        selected.basis === "last"
+          ? q.venue_last_trade_time ?? q.as_of ?? item.as_of
+          : selected.basis === "mid"
+            ? q.venue_quote_time ?? q.as_of ?? item.as_of
+            : undefined
+      );
       return [
         symbol,
         {
           symbol,
-          price: optionalNumber(q.last_trade_price ?? q.last_non_reg_trade_price ?? q.price ?? q.last_price),
+          ...(selected.price !== undefined ? { price: selected.price } : {}),
           bid: optionalNumber(q.bid_price ?? q.bid),
           ask: optionalNumber(q.ask_price ?? q.ask),
-          asOf: optionalString(q.venue_last_trade_time ?? q.as_of ?? item.as_of),
+          ...(asOf ? { asOf } : {}),
           provider: "robinhood",
           ...(prevClose !== undefined && prevClose > 0 ? { prevClose } : {}),
           ...(bidSize !== undefined && bidSize > 0 ? { bidSize } : {}),
@@ -429,10 +443,10 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
     }).filter((p) => p.underlyingSymbol && p.expirationDate && p.quantity !== 0);
   }
 
-  async getEquityOrders(accountNumber: string, _options?: import("./types").GetEquityOrdersOptions): Promise<EquityOrder[]> {
+  async getEquityOrders(accountNumber: string, options?: import("./types").GetEquityOrdersOptions): Promise<EquityOrder[]> {
     const raw = await this.callTool("get_equity_orders", { account_number: accountNumber });
     const orders = extractRobinhoodOrderCollection(raw);
-    return orders.map((item: Record<string, unknown>) => ({
+    const mapped = orders.map((item: Record<string, unknown>) => ({
       id: String(item.id ?? item.order_id),
       symbol: normalizeSymbol(String(item.symbol)),
       side: item.side as OrderSide,
@@ -451,6 +465,7 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
       clientOrderId: optionalString(item.ref_id ?? item.client_order_id ?? item.clientOrderId),
       placedAgent: optionalString(item.placed_agent ?? item.placedAgent)
     }));
+    return scopeBrokerOrders(mapped, options, (state) => isLiveOrderState(state));
   }
 
   async getEquityQuotes(accountNumber: string, symbols: string[]): Promise<Record<string, BrokerQuote>> {
@@ -648,7 +663,7 @@ export async function callRobinhoodMcpMethod(userId: string, method: string, par
     method: "POST",
     // Bound every Robinhood MCP call (incl. place_equity_order) so a hung connection can't block
     // the order path / strategy run indefinitely.
-    signal: AbortSignal.timeout(30_000),
+    signal: brokerAbortSignal(),
     headers: {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
@@ -916,7 +931,7 @@ class TestBrokerGateway implements BrokerGateway {
               bid: yf.bid,
               ask: yf.ask,
               volume: yf.volume > 0 ? yf.volume : undefined,
-              asOf: yf.asOf || new Date().toISOString(),
+              ...(yf.asOf ? { asOf: yf.asOf } : {}),
               provider: "yahoo-finance",
               ...(yf.syntheticBid ? { syntheticBid: true } : {}),
               ...(yf.syntheticAsk ? { syntheticAsk: true } : {}),

@@ -21,8 +21,13 @@ import { tokenize } from "./hybrid";
 
 const SHINGLE_SIZE = 3;
 
-/** Build a set of word-level n-gram shingles (default trigrams) for Jaccard comparison. */
-function shingleSet(text: string, n: number = SHINGLE_SIZE): Set<string> {
+/**
+ * Build a set of word-level n-gram shingles (default trigrams) for Jaccard comparison.
+ * Exported (ST-4541) so the pre-embed near-duplicate gate (`near-dup-embed.ts`) measures ingest-side
+ * similarity with the SAME shingling retrieval uses, instead of a second, slightly different
+ * implementation that would drift from the retrieval-time threshold semantics.
+ */
+export function shingleSet(text: string, n: number = SHINGLE_SIZE): Set<string> {
   const tokens = tokenize(text);
   if (tokens.length === 0) return new Set();
   if (tokens.length < n) return new Set([tokens.join(" ")]);

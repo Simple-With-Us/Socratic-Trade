@@ -6,6 +6,23 @@ import * as dbModule from "./db";
 import { audit, getInternalSetting, resolveApiKey, setInternalSetting, type ApiKeySource } from "./db";
 import { filterNewDocumentChunks, insertDocumentChunks } from "./db";
 import { deleteStagedEmbeddings, getStagedEmbeddings, stageEmbeddedVectors } from "./db-embed-stage";
+import {
+  DEFAULT_NEAR_DUP_THRESHOLD,
+  DEFAULT_NEAR_DUP_WINDOW,
+  DEFAULT_NEAR_DUP_NUM_PERM,
+  encodeSignature,
+  partitionNearDuplicates,
+  toNearDupCandidate,
+  type NearDupCandidate,
+  type NearDupReference
+} from "./rag/near-dup-embed";
+import {
+  findDedupReferencesByNormalizedHash,
+  findRecentDedupReferences,
+  insertChunkDedupLinks,
+  insertChunkDedupSignatures,
+  type DedupScope
+} from "./db-near-dup";
 import { isProviderDispatchLeaseLostError } from "./db-provider-dispatch";
 import { getLaneHealth, logApiHealth, transientEscalationWindowMs } from "./db-health";
 import { isLocalDbFaultError, localDbFaultReason, noteLocalDbFault } from "./local-db-fault";
@@ -52,10 +69,23 @@ import { parseProviderEmbeddingResponse, SiliconFlowEmbedSchema } from "./rag/em
 import { recordRagOperation, shouldDegradeForBudget } from "./rag/run-budget";
 import { auditRagIngestPointsGateSkip, estimateRagDispatchCost, getRagUsageSummary, hasRagIngestPointsBudget, hashQuery, meterEmbed, meterPineconeQuery, meterPineconeUpsert, meterRerank, ragIngestPointsBudgetDeferUntil, ragIngestTextBudgetDeferUntil, ragMaxDailyIngestPoints, recordRetrievalQuality, retrievalTelemetryEnabled, usedRagUpsertPointsLast24h, type RagEmbedRerankProvider } from "./rag-metering";
 import {
+  EMBED_REQUEST_BYTE_BUDGET,
   EMBED_REQUEST_TOKEN_BUDGET,
+  embedBudgetUnits,
   embedRequestFits,
-  packInWindowTexts
+  isEmbedContextLengthError,
+  packInWindowTexts,
+  prefixCountWithinEmbedUnits,
+  prepareEmbedInputPieces,
+  truncateEmbedText
 } from "./rag/embed-request-pack";
+import {
+  acquireRetrievalSlot,
+  countsTowardRetrievalBackoff,
+  noteRetrievalPressureFailure,
+  noteRetrievalPressureSuccess,
+  retrievalPressureEpoch
+} from "./rag/retrieval-pressure";
 import { pineconeMonthToDateWriteUnits } from "./pinecone-monthly-pace";
 import { selectItemsWithinWriteBudget } from "./pinecone-write-budget";
 import { pineconeTrialState } from "./pinecone-trial-window";
@@ -250,6 +280,11 @@ export interface StoreContextsResult {
    *  a new source occurrence has its own queryable vector; source producers must require
    *  `documentComplete` instead. `storeDocument` never returns this shortcut. */
   dedupComplete?: boolean;
+  /** ST-4541: set by the opt-in pre-embed near-duplicate gate (`nearDuplicateThreshold`) when
+   *  documents were skipped as exact/near duplicates of an already-embedded chunk. Those documents
+   *  were NOT dropped: their source records ingest normally and a `chunk_dedup_links` row records
+   *  the canonical chunk that answers for them. Only the paid embed call was skipped. */
+  skippedByNearDuplicate?: number;
   /** `storeDocument` found this exact deterministic commit and occurrence set already committed.
    * No provider call or budget was consumed; `indexed` is therefore zero while `attempted` is the
    * proven complete source cardinality. Source ledgers may treat this as completed reuse only when
@@ -2573,6 +2608,23 @@ function contextId(document: ContextDocument, fallbackIndex: number): string {
   return sanitizeVectorId(raw);
 }
 
+/**
+ * The record id `contextId` will assign, when it does not depend on the document's batch position.
+ * Undefined for a document with none of vector_id/source/symbol/accession/timestamp, whose id is
+ * positional and so cannot be known before batching (ST-4541: such a link records no vector id
+ * rather than a guessed one).
+ */
+function positionIndependentContextId(document: ContextDocument): string | undefined {
+  const metadata = document.metadata;
+  if (
+    metadata?.vector_id ||
+    [metadata?.source, metadata?.symbol, metadata?.accession, metadata?.timestamp].some(Boolean)
+  ) {
+    return contextId(document, 0);
+  }
+  return undefined;
+}
+
 function estimatePineconeWriteUnitsForDocument(
   document: ContextDocument,
   vectorUserId: string,
@@ -2780,7 +2832,7 @@ async function embedWithRetry(
     }
   }
 
-  const embedOnce = async (texts: string[]): Promise<any> => {
+  const embedOnce = async (texts: string[], alreadyShrunk = false): Promise<any> => {
     for (let attempt = 0; ; attempt++) {
       if (boundSignal?.aborted) {
         throw boundSignal.reason instanceof Error ? boundSignal.reason : new Error("RAG embed aborted");
@@ -2855,6 +2907,33 @@ async function embedWithRetry(
           { estimatedCostUsd: estimateRagDispatchCost(texts, "embed", modelName, provider) }
         );
       } catch (error) {
+        // Provider still reported context length after our packer.  A multi-text group
+        // whose pieces each sit under half the budget must be split: truncating each
+        // string is a no-op and would POST the same payload again.  A singleton
+        // truncates once.  Neither path counts as a rate-limit attempt.
+        if (isEmbedContextLengthError(error)) {
+          if (texts.length > 1) {
+            const mid = Math.ceil(texts.length / 2);
+            const left = await embedOnce(texts.slice(0, mid), false);
+            const right = await embedOnce(texts.slice(mid), false);
+            const leftRows = Array.isArray(left?.data) ? left.data as unknown[] : [];
+            const rightRows = Array.isArray(right?.data) ? right.data as unknown[] : [];
+            return {
+              ...(left && typeof left === "object" ? left : {}),
+              data: [...leftRows, ...rightRows].map((row, index) => (
+                row && typeof row === "object" ? { ...row, index } : { embedding: row, index }
+              ))
+            };
+          }
+          if (!alreadyShrunk) {
+            const tighterTokens = Math.max(1, Math.floor(EMBED_REQUEST_TOKEN_BUDGET / 2));
+            const tighterBytes = Math.max(1, Math.floor(EMBED_REQUEST_BYTE_BUDGET / 2));
+            return embedOnce(
+              texts.map((text) => truncateEmbedText(text, tighterTokens, tighterBytes)),
+              true
+            );
+          }
+        }
         // Never retry on abort or timeout.  The caller's signal fired or the per-attempt
         // embed abort expired.  Retrying would only queue more requests against a slow
         // provider and stall the scheduler for a multiple of the deadline.
@@ -2883,40 +2962,48 @@ async function embedWithRetry(
     }
   };
 
-  // DeepInfra sums the whole `input[]` against 8192.  Count-only batches (prod
-  // VECTOR_EMBED_BATCH_SIZE=32) 400 at 8193.  Pack under ~7500.  A single
-  // over-budget text is isolated as its own POST — never re-chunked into extra
-  // Pinecone records or extra ContextDocuments.
+  // DeepInfra sums the whole `input[]` against 8192.  Queries are truncated to one
+  // piece.  Documents are chunked, embedded, then mean-pooled back to one vector per
+  // original string so Pinecone cardinality and content hashes stay unchanged.
   try {
-    const packed = packInWindowTexts(
-      input.map((text, sourceIndex) => ({ text, sourceIndex })),
-      { maxCount: embedBatchSize() }
-    );
-    if (packed.length <= 1) {
-      const response = await embedOnce(input);
-      rememberEmbeddings(response);
-      if (!useMockClient) noteEmbedProviderSuccess(httpProvider);
-      return response;
-    }
-
-    const embeddings = new Array<number[]>(input.length);
+    const pieces = prepareEmbedInputPieces(input, inputType);
+    const packed = packInWindowTexts(pieces, { maxCount: embedBatchSize() });
+    const pieceVectors = new Map<number, number[][]>();
     let sent = false;
     for (const group of packed) {
       const texts = group.map((item) => item.text);
-      if (texts.length > 1 && !embedRequestFits(texts)) {
+      if (!embedRequestFits(texts)) {
         throw new Error(`embed packer produced an over-budget request (${texts.length} texts, budget ${EMBED_REQUEST_TOKEN_BUDGET})`);
       }
       if (sent) await sleep(embedBatchDelayMs(), boundSignal);
       sent = true;
       const response = await embedOnce(texts);
       const validated = validateDocumentEmbeddingBatch(response?.data, texts.length);
-      if (!validated.embeddings) {
+      const rawRows = Array.isArray(response?.data) ? response.data as Array<{ embedding?: unknown }> : [];
+      // A NaN or short payload must reach the caller.  Throwing here counted every text in the
+      // group as rejected and skipped the query-embedding integrity audit.
+      if (!validated.embeddings && (validated.reason !== "invalid-embedding" || rawRows.length !== texts.length)) {
         throw new Error(`Embedding response rejected after window pack (${validated.reason ?? "unknown"})`);
       }
       for (let i = 0; i < group.length; i++) {
-        embeddings[group[i]!.sourceIndex] = validated.embeddings[i]!;
+        const sourceIndex = group[i]!.sourceIndex;
+        const vector = validated.embeddings
+          ? validated.embeddings[i]!
+          : rawRows[i]?.embedding;
+        const bucket = pieceVectors.get(sourceIndex) ?? [];
+        bucket.push(Array.isArray(vector) ? vector as number[] : [Number.NaN]);
+        pieceVectors.set(sourceIndex, bucket);
       }
     }
+    const embeddings = input.map((_, index) => {
+      const vectors = pieceVectors.get(index);
+      if (!vectors || vectors.length === 0) {
+        throw new Error("embed packer dropped an input");
+      }
+      const invalid = vectors.find((vector) => !isValidEmbedding(vector));
+      if (invalid) return invalid;
+      return vectors.length === 1 ? vectors[0]! : meanPoolEmbeddings(vectors);
+    });
     const response = {
       data: embeddings.map((embedding, index) => ({ embedding, index }))
     };
@@ -2927,6 +3014,20 @@ async function embedWithRetry(
     if (!useMockClient) settleEmbedProviderAttempt(httpProvider, error);
     throw error;
   }
+}
+
+function meanPoolEmbeddings(vectors: number[][]): number[] {
+  const first = vectors[0];
+  if (!first || vectors.some((vector) => vector.length !== first.length)) {
+    throw new Error("embed chunk vectors disagree on dimension");
+  }
+  const pooled = new Array<number>(first.length).fill(0);
+  for (const vector of vectors) {
+    for (let i = 0; i < first.length; i++) pooled[i] += vector[i] ?? 0;
+  }
+  const scale = vectors.length;
+  for (let i = 0; i < pooled.length; i++) pooled[i] = (pooled[i] ?? 0) / scale;
+  return pooled;
 }
 
 const SILICONFLOW_QUERY_EMBED_MODEL = "BAAI/bge-m3";
@@ -3231,6 +3332,28 @@ export interface StoreContextsOptions {
    */
   dedupKeyPrefix?: string;
   /**
+   * ST-4541: pre-embed NEAR-duplicate threshold for this call (shingle-Jaccard / MinHash).
+   *
+   * `dedupKeyPrefix` above only catches BYTE-IDENTICAL repeats. This catches the same text re-ingested
+   * behind a whitespace, casing or boilerplate-header change — which misses the content hash, misses
+   * the embed stage, and would otherwise pay for a fresh embed plus a Pinecone upsert of content the
+   * corpus already answers from. When set, each incoming document is classified against recent
+   * already-embedded chunks for the SAME (symbol, source) BEFORE the embedding API is called;
+   * exact (normalized-hash) and near (Jaccard >= this value) matches skip the paid embed and instead
+   * write a `chunk_dedup_links` provenance row pointing at the canonical chunk.
+   *
+   * NOTHING IS DROPPED: the source record is still ingested and still retrievable; only the embed
+   * call is skipped, and the link row records which canonical chunk answers for it. Both new tables
+   * are unregistered with storage hygiene, so no retention pass can prune them.
+   *
+   * Default omitted/undefined = OFF (always embed, current behavior). The default threshold constant
+   * is deliberately high (0.9) because a false positive suppresses a legitimate chunk's own vector.
+   */
+  nearDuplicateThreshold?: number;
+  /** ST-4541: how many recent stored chunks to compare against per (symbol, source). Comparison
+   *  budget only — it bounds similarity work, never stored data. Defaults to 200. */
+  nearDuplicateWindow?: number;
+  /**
    * Reuse only exact, model/revision-matched document embeddings from a bounded process-local cache.
    * Pinecone records are still upserted once per input document with their own id and metadata; a
    * cache hit skips Voyage only, never the occurrence vector or its query-time filters/citation.
@@ -3326,7 +3449,8 @@ async function embedDocumentsLaneOrSkip(
     );
     assertVectorStoreLease(leaseGuard);
     if (!response?.servedFromContentCache) {
-      meterEmbed(inputs, activeEmbeddingModel(userId), userId, embedProvider);
+      const units = inputs.reduce((sum, text) => sum + embedBudgetUnits(text), 0);
+      meterEmbed(inputs, activeEmbeddingModel(userId), userId, embedProvider, undefined, units);
     }
     return { response, rejected: 0 };
   } catch (error) {
@@ -3352,9 +3476,9 @@ async function embedDocumentsLaneOrSkip(
 
 /**
  * Token-pack already-condensed embed texts, then embed each in-window group on its own lane.
- * A singleton that still 400s skips only that group — companions in the count-32 batch still
- * upsert.  Integrity stays atomic per POST (`validateDocumentEmbeddingBatch`).  Does not mint
- * extra ContextDocuments or split table text.
+ * A text past the embed budget is chunked inside embedWithRetry and mean-pooled back to one
+ * vector.  Companions in the count-32 batch still upsert.  Integrity stays atomic per POST
+ * (`validateDocumentEmbeddingBatch`).  Does not mint extra ContextDocuments.
  */
 async function embedPackedInputGroups(
   voyage: unknown,
@@ -3632,8 +3756,177 @@ async function storeContextsImpl(
       chunk_id: contextId(doc, 0)
     }));
   }
+
+  // ST-4541: pre-embed near-duplicate gate. Runs AFTER the byte-exact content-hash dedup above (which
+  // is cheaper and already handles the common case) and BEFORE any embedding API call, so a near
+  // duplicate never costs a paid embed. Candidates are compared against recent ALREADY-EMBEDDED chunks
+  // in the SAME tenant + embedding space, plus that tenant's normalized-hash hits that catch the same
+  // text re-stamped with a fresh accession. Matches are not deleted: they are recorded as
+  // `chunk_dedup_links` provenance rows pointing at the canonical chunk, and their source records
+  // ingest normally.
+  //
+  // MANAGED COMMITS ARE EXEMPT (review 17915833/0). `storeDocumentImpl` promotes a document ONLY when
+  // `documentsToStore.length === expectedRecordCount` AND `indexed === expectedRecordCount`; anything
+  // less skips `persistReceipts()`/`markCommitted()`, and `storeDocumentImpl`'s own
+  // `result.indexed === chunked.length` check then aborts the commit outright. Because the
+  // RAG_NEAR_DUP_SKIP env flag below turns the gate on for EVERY caller, an enabled flag would have
+  // silently made every document commit that contained a near-duplicate chunk fail forever. The gate
+  // stays OFF for managed writes: they are correctness-critical and small, and the money this saves
+  // is on the bulk storeContexts path. Per-call opt-in `nearDuplicateThreshold` is likewise ignored
+  // under a managed commit, so no caller can opt a commit into a skipped record.
+  const managedCommitActive = Boolean(options?.managedCommit);
+  const requestedNearDupThreshold =
+    options?.nearDuplicateThreshold ??
+    (envFlagOn("RAG_NEAR_DUP_SKIP", false) ? DEFAULT_NEAR_DUP_THRESHOLD : undefined);
+  const nearDupThreshold = managedCommitActive ? undefined : requestedNearDupThreshold;
+  if (managedCommitActive && requestedNearDupThreshold !== undefined) {
+    console.log(
+      "[vector-db] near-duplicate skip disabled for this managed commit: a managed commit requires exact record cardinality."
+    );
+  }
+  let nearDupSkipped = 0;
+  /**
+   * True only when EVERY skipped document matched EXACTLY (byte-identical after normalization). An
+   * exact match means the canonical vector provably holds this same content, which is the guarantee
+   * `dedupComplete` promises. A `near` match does NOT: its vector was never written under this
+   * document's own metadata, so callers must not be told "already indexed" (review 17915833/2).
+   */
+  let nearDupAllExact = true;
+  /** Candidates that still need an embed; their signatures are persisted once indexing succeeds. */
+  let nearDupPendingSignatures: Array<{ candidate: NearDupCandidate; document: ContextDocument }> = [];
+  if (
+    nearDupThreshold !== undefined &&
+    Number.isFinite(nearDupThreshold) &&
+    nearDupThreshold > 0 &&
+    documentsToStore.length > 0
+  ) {
+    const window = Math.max(1, Math.floor(options?.nearDuplicateWindow ?? DEFAULT_NEAR_DUP_WINDOW));
+    // Isolation scope for every lookup and write below. A skip is only safe when the canonical
+    // vector it inherits is retrievable for THIS caller: same tenant namespace, same vector space.
+    const nearDupScope: DedupScope = {
+      tenantScope,
+      embedModel: activeEmbeddingModel(userId),
+      embedRevision: String(currentEmbedRev())
+    };
+    const candidates: Array<NearDupCandidate & { document: ContextDocument }> = documentsToStore.map(
+      (doc, i) => ({
+        ...toNearDupCandidate({
+          text: doc.text,
+          contentHash: hashContent(doc.text),
+          chunkId: contextId(doc, i),
+          symbol: doc.metadata?.symbol ?? "",
+          source: doc.metadata?.source ?? "",
+          // Lets an in-batch duplicate's link name the vector its canonical is about to be written
+          // under (Kody review: canonical_vector_id was always '').
+          vectorId: positionIndependentContextId(doc)
+        }),
+        document: doc
+      })
+    );
+
+    // Fail-open by design: if the reference lookup errors we embed normally. A lookup failure must
+    // never cost us a chunk's vector (and must never delete anything) — it can only cost an extra
+    // embed, which is the safe direction.
+    let references: NearDupReference[] = [];
+    try {
+      const seenScope = new Set<string>();
+      for (const candidate of candidates) {
+        const scopeKey = `${candidate.symbol}\u0000${candidate.source}`;
+        if (seenScope.has(scopeKey)) continue;
+        seenScope.add(scopeKey);
+        references.push(...findRecentDedupReferences(nearDupScope, candidate.symbol, candidate.source, window));
+      }
+      // One lookup per DISTINCT normalized hash (Kody review: a batch of repeats issued one identical
+      // SELECT per candidate).
+      const seenNormalizedHash = new Set<string>();
+      for (const candidate of candidates) {
+        if (seenNormalizedHash.has(candidate.normalizedHash)) continue;
+        seenNormalizedHash.add(candidate.normalizedHash);
+        references.push(...findDedupReferencesByNormalizedHash(nearDupScope, candidate.normalizedHash));
+      }
+      // The window and the hash lookups can return the same stored row; keep the first copy so the
+      // comparison loop does not walk it twice. Within one scope content_hash is the row's identity.
+      const seenReference = new Set<string>();
+      references = references.filter((reference) => {
+        if (seenReference.has(reference.contentHash)) return false;
+        seenReference.add(reference.contentHash);
+        return true;
+      });
+    } catch (err) {
+      references = [];
+      console.warn(
+        "[vector-db] near-duplicate reference lookup failed (non-fatal, embedding normally):",
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+
+    const partitioned = partitionNearDuplicates(candidates, references, { threshold: nearDupThreshold });
+    nearDupSkipped = partitioned.skipped.length;
+    // Only an all-EXACT skip may later be reported as `dedupComplete`; see `nearDupAllExact`.
+    nearDupAllExact = partitioned.links.every((link) => link.kind === "exact");
+    if (nearDupSkipped > 0) {
+      // Provenance FIRST: the skip is a money decision and must be auditable even if the rest of the
+      // store fails. INSERT OR IGNORE only — links are never updated or removed.
+      try {
+        insertChunkDedupLinks(
+          partitioned.links.map((link) => ({
+            ...link,
+            tenantScope: nearDupScope.tenantScope,
+            embedModel: nearDupScope.embedModel,
+            embedRevision: nearDupScope.embedRevision
+          }))
+        );
+      } catch (err) {
+        console.warn(
+          "[vector-db] insertChunkDedupLinks failed (non-fatal, storeContexts near-dup path):",
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+      console.log(
+        `[vector-db] Near-duplicate embed skip (storeContexts): ${nearDupSkipped}/${candidates.length} document(s) matched an existing chunk; paid embed skipped, provenance link recorded.`
+      );
+    }
+    documentsToStore = partitioned.toEmbed.map((entry) => entry.document);
+    nearDupPendingSignatures = partitioned.toEmbed.map((entry) => ({
+      candidate: {
+        contentHash: entry.contentHash,
+        normalizedHash: entry.normalizedHash,
+        chunkId: entry.chunkId,
+        symbol: entry.symbol,
+        source: entry.source,
+        signature: entry.signature,
+        shingles: entry.shingles,
+        vectorId: entry.vectorId
+      },
+      document: entry.document
+    }));
+
+    // Keep `dedupHashes` aligned with the (possibly further-shrunk) `documentsToStore` — the later
+    // insertDocumentChunks call zips these two positionally.
+    if (dedupPrefix && dedupHashes) {
+      dedupHashes = documentsToStore.map((doc) => ({
+        content_hash: hashContent(doc.text),
+        symbol: doc.metadata?.symbol ?? "",
+        source: `${dedupPrefix}:${doc.metadata?.source ?? ""}`,
+        chunk_id: contextId(doc, 0)
+      }));
+    }
+  }
   if (documentsToStore.length === 0) {
-    return { attempted: validDocuments.length, indexed: 0, skipped: true, dedupComplete: true };
+    // `dedupComplete` is the "reusable content already exists" proof that producers act on
+    // (sec8k.ts clears its backlog and marks the batch complete; corpus-reembed.ts records "reused").
+    // Claim it ONLY when every skip was byte-identical to an existing vector. If any chunk was
+    // skipped as a NEAR duplicate, its vector was never written under this document's own metadata
+    // (accession/timestamp/sidecar), so the honest answer is "not indexed here" — callers keep the
+    // record retryable rather than treating it as delivered (review 17915833/2).
+    const dedupComplete = nearDupSkipped === 0 || nearDupAllExact;
+    return {
+      attempted: validDocuments.length,
+      indexed: 0,
+      skipped: true,
+      ...(dedupComplete ? { dedupComplete: true } : {}),
+      ...(nearDupSkipped > 0 ? { skippedByNearDuplicate: nearDupSkipped } : {})
+    };
   }
 
   const reuseExactEmbeddings = options?.reuseExactEmbeddings === true;
@@ -3708,16 +4001,34 @@ async function storeContextsImpl(
 
   let budgetSkipped = 0;
   assertVectorStoreLease(options?.leaseGuard);
-  const requestedEmbeddingTexts = reuseExactEmbeddings
-    ? uniqueMissingEmbeddingInputs.length
-    : documentsToStore.length;
+  const budgetInputs = reuseExactEmbeddings
+    ? uniqueMissingEmbeddingInputs
+    : documentsToStore.map((document) => documentEmbeddingInput(document));
+  // Memoized per exact text: embedBudgetUnits is a char-walk plus binary-search truncation,
+  // and the over-budget prefix walk below re-reads the same strings.  budgetInputs can repeat a
+  // text (one entry per document), so keying by content collapses that work too.
+  const budgetUnitsByText = new Map<string, number>();
+  const budgetUnitsFor = (text: string): number => {
+    const known = budgetUnitsByText.get(text);
+    if (known !== undefined) return known;
+    const units = embedBudgetUnits(text);
+    budgetUnitsByText.set(text, units);
+    return units;
+  };
+  const requestedEmbeddingTexts = budgetInputs.reduce((sum, text) => sum + budgetUnitsFor(text), 0);
   const budget = remainingIngestTexts(userId, requestedEmbeddingTexts);
   if (budget.allowed < requestedEmbeddingTexts) {
     const providerTextsSkipped = requestedEmbeddingTexts - budget.allowed;
+    const allowedPrefix = prefixCountWithinEmbedUnits(
+      budgetInputs,
+      budget.allowed,
+      undefined,
+      budgetUnitsByText
+    );
     const beforeBudgetDocuments = documentsToStore;
     const beforeBudgetHashes = dedupHashes;
     if (reuseExactEmbeddings) {
-      const allowedMissingInputs = new Set(uniqueMissingEmbeddingInputs.slice(0, budget.allowed));
+      const allowedMissingInputs = new Set(uniqueMissingEmbeddingInputs.slice(0, allowedPrefix));
       const keptIndexes: number[] = [];
       for (let index = 0; index < beforeBudgetDocuments.length; index++) {
         const document = beforeBudgetDocuments[index]!;
@@ -3729,9 +4040,9 @@ async function storeContextsImpl(
       if (beforeBudgetHashes) dedupHashes = keptIndexes.map((index) => beforeBudgetHashes[index]!);
       budgetSkipped = beforeBudgetDocuments.length - documentsToStore.length;
     } else {
-      budgetSkipped = beforeBudgetDocuments.length - budget.allowed;
-      documentsToStore = beforeBudgetDocuments.slice(0, budget.allowed);
-      if (beforeBudgetHashes) dedupHashes = beforeBudgetHashes.slice(0, budget.allowed);
+      budgetSkipped = beforeBudgetDocuments.length - allowedPrefix;
+      documentsToStore = beforeBudgetDocuments.slice(0, allowedPrefix);
+      if (beforeBudgetHashes) dedupHashes = beforeBudgetHashes.slice(0, allowedPrefix);
     }
     const budgetPayload = {
       requested: requestedEmbeddingTexts,
@@ -3739,7 +4050,8 @@ async function storeContextsImpl(
       skipped: providerTextsSkipped,
       skippedOccurrences: budgetSkipped,
       usedLast24h: budget.used,
-      limitPer24h: budget.limit
+      limitPer24h: budget.limit,
+      tokenBudgetPerText: EMBED_REQUEST_TOKEN_BUDGET
     };
     audit("vector_ingest_budget", budgetPayload, userId);
     await settleRagSideEffect(alertUsageLimitHit({
@@ -3780,7 +4092,8 @@ async function storeContextsImpl(
         skipped: providerTextsSkipped,
         skippedOccurrences: budgetSkipped,
         usedLast24h: budget.used,
-        limitPer24h: budget.limit
+        limitPer24h: budget.limit,
+        tokenBudgetPerText: EMBED_REQUEST_TOKEN_BUDGET
       }, options?.leaseGuard), options?.leaseGuard);
     }
     if (documentsToStore.length === 0) {
@@ -3894,6 +4207,8 @@ async function storeContextsImpl(
   // guard), keyed by identity against `documentsToStore` — only recorded into document_chunks
   // (via insertDocumentChunks below) when dedup is active for this call.
   const indexedDocIdentities = new Set<ContextDocument>();
+  /** The record id each indexed document was actually upserted under (ST-4541 signature rows). */
+  const vectorIdByDocument = new Map<ContextDocument, string>();
   try {
     assertVectorStoreLease(options?.leaseGuard);
     const namespaceName = options?.managedCommit
@@ -4109,9 +4424,11 @@ async function storeContextsImpl(
         const embedding = resolved[indexInBatch];
         if (!isValidEmbedding(embedding)) continue;
         const document = batch[indexInBatch]!;
+        const recordId = contextId(document, indexInBatch);
         indexedDocIdentities.add(document);
+        vectorIdByDocument.set(document, recordId);
         records.push({
-          id: contextId(document, indexInBatch),
+          id: recordId,
           values: embedding,
           metadata: cleanMetadata(
             document.metadata,
@@ -4299,6 +4616,46 @@ async function storeContextsImpl(
       }
     }
 
+    // ST-4541: persist the MinHash signature of every chunk we actually EMBEDDED this call, so a
+    // later ingest of the same (symbol, source) can skip a near-duplicate embed without re-reading
+    // text. Recorded only for documents that made it to a real Pinecone upsert, and only after that
+    // upsert succeeded — a signature must never exist for a vector that was not written. INSERT OR
+    // IGNORE, non-fatal: losing a signature costs an extra embed later, never data.
+    //
+    // The per-document `indexedDocIdentities` filter IS that invariant, so a batch with some
+    // rejected embeds still records its indexed companions (Kody review: the old
+    // `rejectedInvalidEmbeddings === 0` term dropped them all). A document joins
+    // `indexedDocIdentities` only with a valid embedding, and a failed upsert throws to the catch
+    // below, so this block is never reached for an unwritten vector. Managed commits never get
+    // here with pending signatures: the gate above is off for them, so their pending-state records
+    // are never treated as canonical.
+    if (nearDupPendingSignatures.length > 0 && indexedDocIdentities.size > 0) {
+      try {
+        insertChunkDedupSignatures(
+          nearDupPendingSignatures
+            .filter((entry) => indexedDocIdentities.has(entry.document))
+            .map((entry) => ({
+              contentHash: entry.candidate.contentHash,
+              normalizedHash: entry.candidate.normalizedHash,
+              signature: encodeSignature(entry.candidate.signature),
+              numPerm: DEFAULT_NEAR_DUP_NUM_PERM,
+              symbol: entry.candidate.symbol,
+              source: entry.candidate.source,
+              chunkId: entry.candidate.chunkId,
+              vectorId: vectorIdByDocument.get(entry.document) ?? entry.candidate.vectorId ?? "",
+              tenantScope,
+              embedModel: stageModel,
+              embedRevision: stageRevision
+            }))
+        );
+      } catch (err) {
+        console.warn(
+          "[vector-db] insertChunkDedupSignatures failed (non-fatal, near-dup path):",
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+    }
+
     // Persist the outcome so RAG ingestion health is visible in the audit log / dashboard
     // instead of being swallowed to console (the original cause of the silent empty index).
     const lastIngest = {
@@ -4319,6 +4676,7 @@ async function storeContextsImpl(
       ...(rejectedInvalidEmbeddings > 0 ? { rejectedInvalidEmbeddings } : {}),
       ...(budgetSkipped > 0 ? { budgetSkipped } : {}),
       ...(writeUnitBudgetSkipped > 0 ? { writeUnitBudgetSkipped } : {}),
+      ...(nearDupSkipped > 0 ? { skippedByNearDuplicate: nearDupSkipped } : {}),
       // Surfaces the real embed-api failure (HTTP status/body) even though this call did not
       // throw — a batch-isolated embed failure just drops that batch's records and continues.
       // Deliberately NOT `error` (reserved below for "the whole call threw"; existing callers
@@ -7934,8 +8292,18 @@ export async function retrieveContextDetailed(
     // Factored out of the single-query path unchanged so `queries?.length` absent/empty is
     // byte-for-byte identical to pre-multi-query behavior (one embed, one match round-trip).
     const embedAndMatchOneQuery = async (q: string): Promise<any[] | null> => {
+      // Queue for a slot before the inner deadline starts, so wait time does not burn the
+      // 15s embed/query budget.  A null slot is backoff or an already-aborted caller:
+      // degrade without another "RAG retrieval failed" page.
+      const slot = await acquireRetrievalSlot(options?.signal);
+      if (!slot) {
+        quietEmbedDegrade = true;
+        return null;
+      }
+      const pressureEpoch = retrievalPressureEpoch();
       const ragAbort = createRagQueryAbort(options?.signal);
       const querySignal = ragAbort.signal;
+      let pressure: "success" | "failure" | "skip" = "success";
       try {
       const activeModel = activeEmbeddingModel(userId);
       const endCacheLookup = stageTrace?.start("query_embed_cache", {
@@ -7994,8 +8362,10 @@ export async function retrieveContextDetailed(
             // this skip as a fresh embed failure.
             if (circuitOpen) {
               quietEmbedDegrade = true;
+              pressure = "skip";
               return null;
             }
+            if (countsTowardRetrievalBackoff(error)) pressure = "failure";
             // Soft-degrade this query only.  Multi-query already isolates per variant; the
             // single-query caller treats null as lookup_failed and Green/Red skip RAG.
             recordEmbedFailure(primaryProvider, "query-embed-failed");
@@ -8147,6 +8517,7 @@ export async function retrieveContextDetailed(
         });
       } catch (error) {
         endDenseQuery?.({ error });
+        if (countsTowardRetrievalBackoff(error)) pressure = "failure";
         throw error;
       }
       const [userResults, privateResults, localResults, managedUserResults, managedLocalResults, fmpResults] = denseResults;
@@ -8229,8 +8600,14 @@ export async function retrieveContextDetailed(
         tierByCandidateIdentity
       });
       return eligiblePool;
+      } catch (error) {
+        if (pressure === "success" && countsTowardRetrievalBackoff(error)) pressure = "failure";
+        throw error;
       } finally {
         ragAbort.cancel();
+        if (pressure === "failure") noteRetrievalPressureFailure();
+        else if (pressure === "success") noteRetrievalPressureSuccess(pressureEpoch);
+        slot.release();
       }
     };
 
@@ -8250,20 +8627,22 @@ export async function retrieveContextDetailed(
       : [];
     let matches: any[];
     if (fanOutQueries.length > 0) {
-      const perQueryResults = await Promise.all(
-        fanOutQueries.map(async (q) => {
-          try {
-            return await embedAndMatchOneQuery(q);
-          } catch (err) {
-            if (isEmbedCircuitOpenError(err)) {
-              quietEmbedDegrade = true;
-              return null;
-            }
-            console.warn(`[vector-db] multi-query variant failed, dropping it from the fan-out:`, err instanceof Error ? err.message : String(err));
+      const runFanOutQuery = async (q: string) => {
+        try {
+          return await embedAndMatchOneQuery(q);
+        } catch (err) {
+          if (isEmbedCircuitOpenError(err)) {
+            quietEmbedDegrade = true;
             return null;
           }
-        })
-      );
+          console.warn(`[vector-db] multi-query variant failed, dropping it from the fan-out:`, err instanceof Error ? err.message : String(err));
+          return null;
+        }
+      };
+      // Primary query takes a slot before the variants fan out, so it is not stuck behind them.
+      const primaryResult = await runFanOutQuery(fanOutQueries[0]!);
+      const variantResults = await Promise.all(fanOutQueries.slice(1).map((q) => runFanOutQuery(q)));
+      const perQueryResults = [primaryResult, ...variantResults];
       const validResults = perQueryResults.filter((r): r is any[] => r != null && r.length > 0);
       if (validResults.length === 0) {
         // Every variant (including the original query, always included above) failed or matched

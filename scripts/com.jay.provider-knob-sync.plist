@@ -11,8 +11,9 @@
   INSTALL (owner action; see docs/rollouts/2026-07-10-provider-knob-sync.md):
     1. Edit the paths below if this repo does not live at /Users/jay/Code/Socratic-Trade.
        SSH target is launchd-inherited from the script: Host coolify (Hetzner).
-    2. To enable the #agent-sync post-on-change, add your SLACK_BOT_TOKEN to
-       EnvironmentVariables (otherwise slack-sync.sh is a safe no-op).
+    2. To enable the #agent-sync post-on-change, install agent-sync (see
+       scripts/install-fleet-coordination.sh) and set Zulip credentials in
+       EnvironmentVariables (otherwise agent-sync-fleet-post.sh is a safe no-op).
     3. cp scripts/com.jay.provider-knob-sync.plist ~/Library/LaunchAgents/
        launchctl load  -w ~/Library/LaunchAgents/com.jay.provider-knob-sync.plist
     4. Dry-run first WITHOUT the apply flag to confirm the diff before trusting the writer:
@@ -43,11 +44,16 @@
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>SLACK_TOPIC</key>
+    <key>AGENT_SYNC_REPO</key>
     <string>Socratic-Trade</string>
-    <!-- Add SLACK_BOT_TOKEN here to enable the #agent-sync post-on-change:
-    <key>SLACK_BOT_TOKEN</key>
-    <string>xoxb-...</string>
+    <!-- Add Zulip bot credentials to enable the #agent-sync post-on-change via
+         agent-sync-fleet-post.sh (all three required):
+    <key>ZULIP_EMAIL</key>
+    <string>agent-sync-bot@example.zulipchat.com</string>
+    <key>ZULIP_API_KEY</key>
+    <string>your-bot-api-key</string>
+    <key>ZULIP_SITE</key>
+    <string>https://your-org.zulipchat.com</string>
     -->
   </dict>
 

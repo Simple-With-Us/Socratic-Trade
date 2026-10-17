@@ -162,7 +162,7 @@ describe("Congress.Trade push receipt end to end", () => {
     expect(getImportedPriceCloses("AAPL")).toHaveLength(3);
     expect(getImportedPriceCloses("MSFT")).toHaveLength(0);
 
-    const snapshot = buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
+    const snapshot = await buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
     expect(snapshot.congressInboundPush).toMatchObject({
       pushId,
       health: "ok",
@@ -199,7 +199,7 @@ describe("Congress.Trade push receipt end to end", () => {
     expect(health?.ok).toBe(0);
     expect(health?.error_text).toContain("missing-push-id");
 
-    const snapshot = buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
+    const snapshot = await buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
     expect(snapshot.congressInboundPush?.health).toBe("missing-push-id");
     expect(snapshot.congressInboundPush?.pushId).toBeNull();
     expect(getInternalSetting<string>("peerPushAckAlertSent:missing-push-id")).toEqual(expect.any(String));

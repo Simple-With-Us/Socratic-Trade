@@ -236,7 +236,7 @@ describe("broker auto-pause across restarts (lane h5)", () => {
     const on = await seedAccount({ autoResumeOnBoot: true, systemState: "active" });
     await autoHaltOnProbeTimeouts(on.userId, on.accountId);
 
-    const snapshot = buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
+    const snapshot = await buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
     const offUser = snapshot.users.find((u) => u.userId === off.userId);
     const onUser = snapshot.users.find((u) => u.userId === on.userId);
     expect(offUser?.autoResumeOnBoot).toBe(false);

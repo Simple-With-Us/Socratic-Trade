@@ -2,6 +2,7 @@ import { getPolicy } from "@/lib/db";
 import { invalidateDashboardSnapshotCache } from "@/lib/dashboard-snapshot-cache";
 import { STOPPED_PROPOSAL_ACTION_MESSAGE, isProposalActionStopped } from "@/lib/proposal-actions";
 import { resolveRequestUserId } from "@/lib/request-user";
+import { httpStatusForPlacement, resolvePlacementOutcome } from "@/lib/placement-outcome";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 import { NextResponse } from "next/server";
 import { executeProposal, LiveApprovalConfirmationError, LiveApprovalConfirmation } from "@/lib/strategy-execution";
@@ -25,9 +26,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     }
     const { id } = await params;
     const result = await executeProposal(id, userId, { liveConfirmation: body.liveConfirmation });
+    const placement = resolvePlacementOutcome(result);
     // C1: order/proposal state changed — next dashboard poll must recompute.
     invalidateDashboardSnapshotCache(userId);
-    return NextResponse.json(result);
+    // 200 only when the broker accepted the order.  busy / blocked / not placed
+    // stay structured so the client can tell them apart, and they are not success.
+    return NextResponse.json(placement, { status: httpStatusForPlacement(placement.outcome) });
   } catch (error) {
     if (error instanceof LiveApprovalConfirmationError) {
       return NextResponse.json(

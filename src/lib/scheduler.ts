@@ -28,6 +28,7 @@ import { pineconeWuExhaustedUntil } from "./pinecone-wu-breaker";
 import { runWatchlistDigestIfDue } from "./watchlist-digest";
 import { runAuditPruneYieldingIfDue } from "./audit-prune";
 import { runStorageHygieneIfDue } from "./sqlite-storage-hygiene";
+import { backfillCompressedTextPayloadsIfDue } from "./text-payload-backfill";
 import {
   applyBrokerOrderPlacementPause,
   brokerPauseAccountScope,
@@ -367,6 +368,48 @@ const pendingFillGuardHost = globalThis as unknown as { __pendingFillReconcileIn
 const pendingFillReconcileInFlight: Set<string> =
   pendingFillGuardHost.__pendingFillReconcileInFlight ??
   (pendingFillGuardHost.__pendingFillReconcileInFlight = new Set<string>());
+
+type ProtectiveLaneScope = {
+  signal: AbortSignal;
+  /** Flipped immediately before a broker write. A hung read releases the lane; a write in flight does not. */
+  writeStarted: boolean;
+};
+
+/**
+ * Protective lanes (stops, stale exits, fill reconcile) do not share the strategy run's
+ * broker calls. A read that never settles used to leave the in-flight guard set forever,
+ * so that account's protection stopped. The deadline aborts and releases unless a broker
+ * write has already started — that write finishes alone so the next tick cannot send it twice.
+ */
+function launchIsolatedProtectiveLane(args: {
+  key: string;
+  guard: Set<string>;
+  lane: string;
+  timeoutMessage: string;
+  work: (scope: ProtectiveLaneScope) => Promise<unknown>;
+  onOk?: () => void;
+  onError?: (err: unknown) => void;
+}): void {
+  if (args.guard.has(args.key)) return;
+  args.guard.add(args.key);
+  const controller = new AbortController();
+  const scope: ProtectiveLaneScope = { signal: controller.signal, writeStarted: false };
+  const work = args.work(scope);
+  const release = () => {
+    args.guard.delete(args.key);
+  };
+  void work.catch(() => undefined).finally(release);
+  void withLaneDeadline(work, SCHEDULER_BROKER_TIMEOUT_MS, args.timeoutMessage, args.lane)
+    .then(() => args.onOk?.())
+    .catch((err: unknown) => {
+      if (!scope.writeStarted) {
+        const reason = err instanceof Error ? err : new Error(String(err));
+        controller.abort(reason);
+        release();
+      }
+      args.onError?.(err);
+    });
+}
 
 // ── Observability: de-duplicated health-gate skip log + degraded-lane surfacing ──────────────
 //
@@ -935,14 +978,10 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     console.error("[scheduler] stale mobile-command sweep error:", err);
   }
 
-  // Task-journal retention: 'skipped' heartbeat rows age out in 24h, ok/error in 30d
-  // (db-task-journal.ts). One cheap indexed DELETE per tick; never throws.
+  // Task-journal hook (db-task-journal.ts) — forever retention; no-op delete.
   pruneTaskJournal();
 
-  // Daily audit_events + provider-observability retention (audit-prune.ts):
-  // observability kinds 14d, everything else 90d, bounded batches. First-ever
-  // run drains a large backlog over several daily passes. Also sweeps the
-  // embed_stage table (35d orphan retention + defensive size cap, db-embed-stage.ts).
+  // Daily audit-prune watermark (audit-prune.ts) — forever retention; no row deletes.
   void journalLane("audit-prune", {}, async () => {
     const result = await runAuditPruneYieldingIfDue();
     if (!result) return { status: "skipped" as const, summary: "not due" };
@@ -961,17 +1000,29 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     return; // not the leader this tick — no side effects
   }
 
-  // Table sizes, retention for non-money caches and logs, WAL checkpoint, and
-  // incremental free-page reclaim.  Leader only: every replica checkpointing
+  // Table sizes, WAL checkpoint, ANALYZE/optimize, and incremental free-page
+  // reclaim (no row deletes).  Leader only: every replica checkpointing
   // the same WAL fights TRUNCATE.  Dry-run when SQLITE_STORAGE_HYGIENE_DRY_RUN=1.
   void journalLane("storage-hygiene", {}, async () => {
     const result = await runStorageHygieneIfDue();
     if (!result) return { status: "skipped" as const, summary: "not due" };
     return {
       status: "ok" as const,
-      summary: `dryRun=${result.dryRun} eligibleBytes=${result.expectedReclaimBytes} deleted=${result.deletedRows}`
+      summary: `dryRun=${result.dryRun} shrinkBytes=${result.expectedFileShrinkBytes} deleted=${result.deletedRows}`
     };
   }).catch((err) => console.error("[scheduler] storage hygiene error:", err));
+
+  // In-place gzip of transcript bodies and companyfacts JSON cache. Leader only.
+  // The lane probes text_codec / segment_codec (indexed), then reads one body
+  // at a time and yields. It does not scan blob columns and does not delete rows.
+  void journalLane("text-payload-backfill", {}, async () => {
+    const result = await backfillCompressedTextPayloadsIfDue();
+    if (!result) return { status: "skipped" as const, summary: "not due" };
+    return {
+      status: "ok" as const,
+      summary: `transcripts=${result.transcripts} secFacts=${result.secFacts}`
+    };
+  }).catch((err) => console.error("[scheduler] text payload backfill error:", err));
 
   // Open an honest Sentry Crons job after the leader gate: only the process running the tick
   // body reports, so idle followers cannot mask a dead leader. `ok` is sent in `finally` once
@@ -1342,6 +1393,19 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
       prevNextRunAt: string | null;
     }> = [];
 
+    // Halt/strategy health is awaited per account.  Protective lanes are launched in this
+    // first pass and are not inside that await, so one hung health probe cannot delay the
+    // next account's stops or exits.
+    const healthPass: Array<{
+      userId: string;
+      account: ReturnType<typeof listConnectedAccounts>[number];
+      accountId: string;
+      key: string;
+      policy: TradingPolicy;
+      brokerGateway: ReturnType<typeof getBrokerGateway> | undefined;
+      schedule: { lastRunAt: string | null; nextRunAt: string | null };
+    }> = [];
+
     for (const userId of listUsers()) {
       signal?.throwIfAborted();
       for (const account of listConnectedAccounts(userId)) {
@@ -1443,35 +1507,29 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
           continue;
         }
         
-        if (brokerGateway && !staleExitInFlight.has(key)) {
-          staleExitInFlight.add(key);
+        if (brokerGateway) {
           const gw = brokerGateway;
           const stalePolicy = policy as TradingPolicy & { accountNumber: string }; // accountNumber checked non-null above
-          const staleExitWork = journalLane("stale-limit-scan", { userId, connectedAccountId: accountId }, async () => {
-            const orders = await gw.getEquityOrders(stalePolicy.accountNumber);
-            await notifyStaleLimitOrders({ userId, policy, orders });
-            const outcome = await withAccountMutation(
-              { userId, accountNumber: stalePolicy.accountNumber, connectedAccountId: accountId, lane: "stale-exit-replacement", waitMs: LANE_WAITS.staleExit },
-              (ctx) => autoRemediateStaleExitOrders({ userId, policy: stalePolicy, activeAccount: account, gateway: gw, orders, fence: ctx.assertOwned })
-            );
-            if (!outcome.acquired) return { status: "skipped" as const, summary: "account mutation lease busy" };
-            return undefined;
+          launchIsolatedProtectiveLane({
+            key,
+            guard: staleExitInFlight,
+            lane: "stale-limit-scan",
+            timeoutMessage: "stale-limit-scan broker timeout",
+            onOk: () => recordLaneRecovery("stale-limit-order handling", key),
+            onError: (err) => recordLaneFailure("stale-limit-order handling", key, err),
+            work: (scope) => journalLane("stale-limit-scan", { userId, connectedAccountId: accountId }, async () => {
+              const orders = await gw.getEquityOrders(stalePolicy.accountNumber);
+              if (scope.signal.aborted) return { status: "skipped" as const, summary: "aborted before remediation" };
+              await notifyStaleLimitOrders({ userId, policy, orders });
+              scope.writeStarted = true;
+              const outcome = await withAccountMutation(
+                { userId, accountNumber: stalePolicy.accountNumber, connectedAccountId: accountId, lane: "stale-exit-replacement", waitMs: LANE_WAITS.staleExit },
+                (ctx) => autoRemediateStaleExitOrders({ userId, policy: stalePolicy, activeAccount: account, gateway: gw, orders, fence: ctx.assertOwned })
+              );
+              if (!outcome.acquired) return { status: "skipped" as const, summary: "account mutation lease busy" };
+              return undefined;
+            })
           });
-          // Guard is released by the REAL work, never by the 15s race loser: a lane still running
-          // past the deadline must not get a duplicate launched on the next tick.
-          void staleExitWork.catch(() => undefined).finally(() => staleExitInFlight.delete(key));
-          // Recovery/failure must both key off the SAME deadline-raced promise (2026-09-07 fix):
-          // attaching recordLaneRecovery to the raw staleExitWork promise let a run that timed out
-          // (recordLaneFailure fires) but later fulfilled in the background silently clear the
-          // just-recorded failure streak, so a lane that always times out but eventually succeeds
-          // could never reach lane_degraded. withDeadline's promise only fulfills when the real
-          // work finishes BEFORE the deadline; once it rejects (timeout OR a real error), it is
-          // settled and a later background fulfillment of staleExitWork can no longer reach this
-          // .then — recovery reflects success WITHIN the deadline, not late fulfillment of an
-          // invocation already classified as failed.
-          void withLaneDeadline(staleExitWork, SCHEDULER_BROKER_TIMEOUT_MS, "stale-limit-scan broker timeout", "stale-limit-scan")
-            .then(() => recordLaneRecovery("stale-limit-order handling", key))
-            .catch((err) => recordLaneFailure("stale-limit-order handling", key, err));
         }
 
         const protectiveState =
@@ -1483,53 +1541,69 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
         // R2: synthetic trailing-stop monitor — runs every tick in states where risk-reducing exits
         // are allowed. `close_only` and `liquidating` must not disable the very protection that can
         // reduce exposure after a breaker trips. `halted` remains the only no-order state unless protectWhileHalted is active.
-        if (protectiveState && !stopMonitorInFlight.has(key)) {
-          stopMonitorInFlight.add(key);
-          const stopMonitorWork = journalLane("synthetic-stop-monitor", { userId, connectedAccountId: accountId }, async () => {
-            const outcome = await withAccountMutation(
-              { userId, accountNumber: policy.accountNumber, connectedAccountId: accountId, lane: "stop-monitor" },
-              (ctx) => runSyntheticStopMonitor(userId, policy, true, undefined, ctx.assertOwned)
-            );
-            if (!outcome.acquired) return { status: "skipped" as const, summary: "account mutation lease busy" };
-            const result = outcome.value;
-            return {
-              status: "ok" as const,
-              summary: `evaluated=${result.evaluated} triggered=${result.triggered} exited=${result.exited}`
-            };
+        if (protectiveState) {
+          launchIsolatedProtectiveLane({
+            key,
+            guard: stopMonitorInFlight,
+            lane: "synthetic-stop-monitor",
+            timeoutMessage: "runSyntheticStopMonitor timeout",
+            onOk: () => recordLaneRecovery("synthetic-stop monitor", key),
+            onError: (err) => recordLaneFailure("synthetic-stop monitor", key, err),
+            work: (scope) => journalLane("synthetic-stop-monitor", { userId, connectedAccountId: accountId }, async () => {
+              const outcome = await withAccountMutation(
+                { userId, accountNumber: policy.accountNumber, connectedAccountId: accountId, lane: "stop-monitor" },
+                (ctx) => runSyntheticStopMonitor(userId, policy, true, undefined, ctx.assertOwned, {
+                  signal: scope.signal,
+                  onBrokerWrite: () => {
+                    scope.writeStarted = true;
+                  }
+                })
+              );
+              if (!outcome.acquired) return { status: "skipped" as const, summary: "account mutation lease busy" };
+              const result = outcome.value;
+              return {
+                status: "ok" as const,
+                summary: `evaluated=${result.evaluated} triggered=${result.triggered} exited=${result.exited}`
+              };
+            })
           });
-          // Guard is released by the REAL work, never by the 15s race loser: a lane still running
-          // past the deadline must not get a duplicate launched on the next tick.
-          void stopMonitorWork.catch(() => undefined).finally(() => stopMonitorInFlight.delete(key));
-          // See the matching comment on the stale-limit-order lane above: recovery/failure both
-          // key off the SAME deadline-raced promise so a late background fulfillment (after the
-          // deadline already timed out and recorded a failure) cannot silently clear the streak.
-          void withLaneDeadline(stopMonitorWork, SCHEDULER_BROKER_TIMEOUT_MS, "runSyntheticStopMonitor timeout", "synthetic-stop-monitor")
-            .then(() => recordLaneRecovery("synthetic-stop monitor", key))
-            .catch((err) => recordLaneFailure("synthetic-stop monitor", key, err));
         }
 
         // Reconcile pending broker fills every tick (independent of the strategy cadence) so a broker
         // order that returned non-filled — common on Robinhood and limit orders — doesn't sit
         // pending_reconciliation until the next strategy run. Applies to broker/paper and broker/live;
         // Test/local has no broker order lifecycle.
-        if (brokerGateway && !pendingFillReconcileInFlight.has(key)) {
-          pendingFillReconcileInFlight.add(key);
+        if (brokerGateway) {
           // Captured outside the closure: the !accountNumber `continue` guard above narrows the
           // property here, but property narrowing does not propagate into arrow closures.
           const accountNumber = policy.accountNumber;
-          const pendingFillWork = journalLane(
-            "pending-fill-reconcile",
-            { userId, connectedAccountId: accountId },
-            () => reconcilePendingFills(brokerGateway, accountNumber, userId, policy.connectedAccountId)
-          );
-          void pendingFillWork.catch(() => undefined).finally(() => pendingFillReconcileInFlight.delete(key));
-          void withLaneDeadline(
-            pendingFillWork,
-            SCHEDULER_BROKER_TIMEOUT_MS,
-            "pending-fill-reconcile broker timeout",
-            "pending-fill-reconcile"
-          ).catch((err) => console.error("[scheduler] pending-fill reconcile error:", err));
+          const gw = brokerGateway;
+          launchIsolatedProtectiveLane({
+            key,
+            guard: pendingFillReconcileInFlight,
+            lane: "pending-fill-reconcile",
+            timeoutMessage: "pending-fill-reconcile broker timeout",
+            onError: (err) => console.error("[scheduler] pending-fill reconcile error:", err),
+            work: (scope) => {
+              // Reconcile books fills.  Hold the guard until that work settles so a second
+              // pass cannot double-book the same fill.  Stops and exits release on a hung read.
+              scope.writeStarted = true;
+              return journalLane(
+                "pending-fill-reconcile",
+                { userId, connectedAccountId: accountId },
+                () => reconcilePendingFills(gw, accountNumber, userId, policy.connectedAccountId)
+              );
+            }
+          });
         }
+
+        healthPass.push({ userId, account, accountId, key, policy, brokerGateway, schedule });
+      }
+    }
+
+    for (const healthItem of healthPass) {
+      signal?.throwIfAborted();
+      const { userId, account, accountId, key, policy, brokerGateway, schedule } = healthItem;
 
         // Fast pre-proposal broker health gate.
         // E.g., skips queuing an LLM strategy run if the broker is unreachable, account is suspended,
@@ -1689,7 +1763,6 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
         schedule.lastRunAt = new Date(now).toISOString();
         schedule.nextRunAt = new Date(now + cadenceMs).toISOString();
         dueRuns.push({ userId, accountId, key, prevLastRunAt, prevNextRunAt });
-      }
     }
 
     // Skip LLM strategy runs when the monthly operator spend ceiling is breached.

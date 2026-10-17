@@ -157,27 +157,22 @@ describe("notifyStaleLimitOrders yields between sqlite writes", () => {
   });
 });
 
-describe("pruneTaskJournal batch bound", () => {
-  it("does not delete more than TASK_JOURNAL_PRUNE_BATCH_LIMIT rows in one call", async () => {
-    const {
-      recordTaskStart,
-      recordTaskEnd,
-      pruneTaskJournal,
-      TASK_JOURNAL_PRUNE_BATCH_LIMIT
-    } = await import("../src/lib/db");
+describe("pruneTaskJournal", () => {
+  it("does not delete rows (forever retention)", async () => {
+    const { recordTaskStart, recordTaskEnd, pruneTaskJournal, TASK_JOURNAL_PRUNE_BATCH_LIMIT } = await import(
+      "../src/lib/db"
+    );
     const taskName = `prune_bound_${randomUUID()}`;
     const thirtyOneDaysAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1_000);
-    const extra = 20;
-    for (let i = 0; i < TASK_JOURNAL_PRUNE_BATCH_LIMIT + extra; i++) {
+    for (let i = 0; i < TASK_JOURNAL_PRUNE_BATCH_LIMIT + 5; i++) {
       const id = recordTaskStart({ taskName, now: thirtyOneDaysAgo.toISOString() });
       recordTaskEnd(id, { status: "ok" }, thirtyOneDaysAgo);
     }
-    const pruned = pruneTaskJournal();
-    expect(pruned).toBe(TASK_JOURNAL_PRUNE_BATCH_LIMIT);
+    expect(pruneTaskJournal()).toBe(0);
     const { getDb } = await import("../src/lib/db");
     const leftover = getDb()
       .prepare("SELECT COUNT(*) as c FROM task_journal WHERE task_name = ?")
       .get(taskName) as { c: number };
-    expect(leftover.c).toBe(extra);
+    expect(leftover.c).toBe(TASK_JOURNAL_PRUNE_BATCH_LIMIT + 5);
   });
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyPlaceOrderError,
   classifyPlacementOutcomeKind,
+  httpStatusForPlacement,
   isIdempotencyConflictHttpError,
   isRetryableBrokerHttpError,
   isTerminalBrokerHttpError,
@@ -10,6 +11,7 @@ import {
   placementCommandErrorMessage,
   resolvePlacementOutcome
 } from "../src/lib/placement-outcome";
+import { isTradierTransientServerError } from "../src/lib/tradier-transient";
 
 describe("placement outcome resolver", () => {
   it("classifies placed outcomes", () => {
@@ -64,7 +66,9 @@ describe("placement outcome resolver", () => {
     expect(classifyPlaceOrderError('HTTP 422 — duplicate symbol in basket. client_order_id format invalid')).toBe(
       "rejected_terminal"
     );
-    expect(classifyPlaceOrderError("network timeout during placement")).toBe("other");
+    expect(classifyPlaceOrderError("network timeout during placement")).toBe("retryable");
+    expect(mustReconcileRetryablePlaceError("network timeout during placement")).toBe(true);
+    expect(classifyPlaceOrderError("AbortError: The operation was aborted")).toBe("retryable");
   });
 
   it("treats Tradier HTTP 400 Unexpected server error as retryable and keeps real rejects terminal", () => {
@@ -84,8 +88,12 @@ describe("placement outcome resolver", () => {
     expect(classifyPlaceOrderError(buyingPower)).toBe("rejected_terminal");
     expect(isTerminalBrokerHttpError(buyingPower)).toBe(true);
     expect(classifyPlaceOrderError(plain400)).toBe("rejected_terminal");
-    expect(isRetryableBrokerHttpError(http500)).toBe(false);
-    expect(classifyPlaceOrderError(http500)).toBe("other");
+    expect(isRetryableBrokerHttpError(http500)).toBe(true);
+    expect(classifyPlaceOrderError(http500)).toBe("retryable");
+    expect(isTerminalBrokerHttpError(http500)).toBe(false);
+    // #4668: a 5xx with the same sentence is not the sandbox-400 retry, and it can still halt.
+    expect(isTradierTransientServerError(http500)).toBe(false);
+    expect(mustReconcileRetryablePlaceError(http500)).toBe(true);
     expect(classifyPlaceOrderError("An unexpected error occurred. Please try again.")).toBe("other");
     expect(classifyPlaceOrderError(deferral)).toBe("retryable");
     expect(isTerminalBrokerHttpError(deferral)).toBe(false);
@@ -101,7 +109,7 @@ describe("placement outcome resolver", () => {
     expect(mustReconcileRetryablePlaceError(deferral)).toBe(false);
     expect(mustReconcileRetryablePlaceError(deferral16)).toBe(false);
     expect(mustReconcileRetryablePlaceError(buyingPower)).toBe(false);
-    expect(mustReconcileRetryablePlaceError(http500)).toBe(false);
+    expect(mustReconcileRetryablePlaceError(http500)).toBe(true);
     const unverified = "Tradier order placement unverified: the tag lookup failed. Reconcile before retrying.";
     expect(classifyPlaceOrderError(unverified)).toBe("other");
     expect(mustReconcileRetryablePlaceError(unverified)).toBe(false);
@@ -118,6 +126,33 @@ describe("placement outcome resolver", () => {
       outcome: "busy",
       reasons: ["A strategy run is in progress; try again in a moment."]
     });
+  });
+
+  it("reports HTTP success only for a placed order", () => {
+    expect(httpStatusForPlacement("placed")).toBe(200);
+    expect(httpStatusForPlacement("blocked")).toBe(409);
+    expect(httpStatusForPlacement("busy")).toBe(409);
+    expect(httpStatusForPlacement("retryable")).toBe(409);
+    expect(httpStatusForPlacement("rejected")).toBe(409);
+  });
+
+  it("classifies placed, not placed, retryable, and terminal outcomes", () => {
+    expect(classifyPlacementOutcomeKind("placed")).toBe("placed");
+    expect(classifyPlacementOutcomeKind("filled")).toBe("placed");
+    expect(classifyPlacementOutcomeKind("not_placed")).toBe("retryable");
+    expect(classifyPlaceOrderError("Broker HTTP 503")).toBe("retryable");
+    expect(classifyPlaceOrderError("request timed out")).toBe("retryable");
+    expect(classifyPlaceOrderError("Tradier order failed: Tradier HTTP 400: Unexpected server error")).toBe(
+      "retryable"
+    );
+    expect(
+      classifyPlacementOutcomeKind("error", ["Tradier sandbox quotes wait until 16 minutes after the open. Safe to retry."])
+    ).toBe("retryable");
+    expect(classifyPlaceOrderError("Tradier HTTP 403: Not enough buying power")).toBe("rejected_terminal");
+    expect(classifyPlacementOutcomeKind("error", ["Broker declined the order (state: rejected)."])).toBe("rejected");
+    expect(httpStatusForPlacement("placed")).toBe(200);
+    expect(httpStatusForPlacement("retryable")).toBe(409);
+    expect(httpStatusForPlacement("rejected")).toBe(409);
   });
 
   it("maps placement outcomes to honest mobile command statuses", () => {
