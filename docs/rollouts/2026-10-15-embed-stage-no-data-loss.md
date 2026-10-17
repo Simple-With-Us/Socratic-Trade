@@ -122,20 +122,30 @@ and **`embed_stage_undelivered_backlog`** instead.
 
 ## Verification State
 
-Run in `claude-pr4742-sweep` (a Socratic-Trade lane) after merging `origin/main` into the branch, 2026-10-16:
+Run in `claude-pr4742-sweep` (a Socratic-Trade lane) on the branch tip after merging `origin/main`,
+2026-10-16, in the order AGENTS.md prescribes:
 
 ```bash
-npx tsc --noEmit                                  # exit 0
-npx vitest run test/embed-stage.test.ts test/db-migration-old-schema.test.ts \
-  test/sqlite-storage-hygiene.test.ts test/audit-hygiene.test.ts \
-  test/forever-retention-no-age-delete.test.ts    # 5 files, 58 tests, all passed
-npx eslint <touched src/lib files + test/embed-stage + test/db-migration-old-schema>
-                                                  # 0 errors, 81 pre-existing warnings
+npm run lint       # exit 0 (0 errors; the grandfathered warning backlog is unchanged)
+npx tsc --noEmit   # exit 0
+npm test           # 845 files passed, 2 failed;  9494 tests passed, 2 failed (see below)
+npm run build      # exit 0
 ```
 
-Not re-run locally in this sweep: the full `npm test` and `npm run build`.  The GitHub `verify`
-check is the authority for those, and it was green on the previous head (`bcbf37846`).  The head
-after this push is re-verified by CI, not by this note.
+The two `npm test` failures are wall-clock tests that do not touch `embed_stage` or any file in this PR:
+
+- `test/sqlite-all-offloop.test.ts` ("reclaims a wedged slot after caller abort ...") failed under
+  full-suite load and **passed** when the file was re-run alone.
+- `test/event-loop-stall-hot-path.test.ts` ("pruneTaskJournal no-op stays under 100ms ...") failed
+  here, and failed again when re-run alone, because inserting its 2,000,000 fixture rows takes about
+  250s on this Mac (the lane is on an external volume) and blows its time budget.  The same test
+  failed in GitHub CI on the previous push (run 38997824198) with `expected 99 to be greater than or
+  equal to 100`, a scan-time threshold, after passing on the head before it.
+
+The five suites this PR owns are inside that run and all passed: `test/embed-stage.test.ts`,
+`test/db-migration-old-schema.test.ts`, `test/sqlite-storage-hygiene.test.ts`,
+`test/audit-hygiene.test.ts` and `test/forever-retention-no-age-delete.test.ts` (58 tests).
+GitHub CI on the pushed head is the authority for the gate; this note does not claim its result.
 
 ## Next Steps & Blockers
 
