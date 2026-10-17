@@ -2248,16 +2248,17 @@ describe("parseAlpacaSnapshot", () => {
     expect(negVw).not.toHaveProperty("vwap");
   });
 
-  it("falls back to dailyBar.c for price when latestTrade is absent", () => {
+  it("uses the two-sided mid when latestTrade is absent and ignores the daily bar close", () => {
     const snap = {
       latestQuote: { bp: 100.00, ap: 100.10 },
-      dailyBar: { c: 100.05, v: 500_000 },
+      dailyBar: { c: 90, v: 500_000 },
       prevDailyBar: { c: 98.00 }
     };
     const result = parseAlpacaSnapshot(snap);
     expect(result.price).toBe(100.05);
-    // (100.05 - 98.00) / 98.00 * 100 ≈ 2.09%
-    expect(result.intradayChangePct).toBeCloseTo(2.09, 1);
+    expect(result.price).not.toBe(90);
+    // Change still uses the daily bar close as the session reference: (90 - 98) / 98.
+    expect(result.intradayChangePct).toBeCloseTo(-8.16, 1);
   });
 
   it("omits bid/ask when they are absent or zero", () => {
@@ -2305,13 +2306,22 @@ describe("parseAlpacaSnapshot", () => {
       expect(result.asOf).toBe("2026-07-04T14:30:00Z");
     });
 
-    it("stamps asOf from dailyBar.t when latestTrade is absent and dailyBar.c wins the price", () => {
+    it("stamps asOf from the quote time when the mid wins, not the daily bar time", () => {
       const result = parseAlpacaSnapshot({
-        latestQuote: { bp: 100.00, ap: 100.10 },
-        dailyBar: { c: 100.05, v: 500_000, t: "2026-07-04T20:00:00Z" }
+        latestQuote: { bp: 100.00, ap: 100.10, t: "2026-07-04T14:30:00Z" },
+        dailyBar: { c: 90, v: 500_000, t: "2026-07-04T20:00:00Z" }
       });
       expect(result.price).toBe(100.05);
-      expect(result.asOf).toBe("2026-07-04T20:00:00Z");
+      expect(result.asOf).toBe("2026-07-04T14:30:00Z");
+    });
+
+    it("omits price and asOf when the snapshot only has a daily or previous close", () => {
+      const result = parseAlpacaSnapshot({
+        dailyBar: { c: 100.05, v: 500_000, t: "2026-07-04T20:00:00Z" },
+        prevDailyBar: { c: 98 }
+      });
+      expect(result.price).toBeUndefined();
+      expect(result.asOf).toBeUndefined();
     });
 
     it("omits asOf when no timestamp backs the winning price field (never guesses)", () => {

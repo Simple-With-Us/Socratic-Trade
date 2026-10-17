@@ -22,11 +22,9 @@ import { normalizeSymbol, roundCents } from "./money";
 import { isLiveOrderState, isRejectedOrCanceledState } from "./broker-side";
 import { getActiveConnectedAccount, getConnectedAccount } from "./db";
 import { logApiHealth } from "./db-health";
-import { fetchDailyOHLC } from "./history";
 import { isAbortOrTimeoutError, isTransientNetworkError } from "./network-errors";
-// Reuse Alpaca's keyless-Yahoo quote floor and the shared pre-trade notional semantics verbatim —
-// they are broker-agnostic helpers exported from ./alpaca (no Alpaca SDK behavior involved).
-import { fillMissingQuotesWithClose, estimateReviewNotional } from "./alpaca";
+import { estimateReviewNotional } from "./alpaca";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import { mergeAccountCapabilities } from "./venue-contract";
 import { normalizeVenueOrder } from "./venue-normalization";
 import { BROKER_ORDER_PAGE_CAP, TRADIER_BROKER_IO_DEADLINE_MS, brokerAbortSignal, equityOrdersDefaultSinceIso, withDeadline } from "./inflight-deadline";
@@ -178,22 +176,6 @@ function positiveNumber(value: unknown): number | undefined {
 function optionalString(value: unknown): string | undefined {
   if (value === null || value === undefined || value === "") return undefined;
   return String(value);
-}
-
-function optionalIso(value: unknown): string | undefined {
-  if (value === null || value === undefined || value === "") return undefined;
-  // Tradier quote payloads use millisecond epoch numbers for fields like trade_date and
-  // bid_date; Date.parse(String(1757948508561)) returns NaN, so handle numeric values
-  // as direct epoch milliseconds.
-  let time: number;
-  if (typeof value === "number") {
-    time = value;
-  } else if (typeof value === "string" && /^\d+$/.test(value.trim())) {
-    time = Number(value.trim());
-  } else {
-    time = Date.parse(String(value));
-  }
-  return Number.isFinite(time) ? new Date(time).toISOString() : undefined;
 }
 
 // Tradier's valid extended-hours windows (https://docs.tradier.com/docs/orders):
@@ -874,6 +856,8 @@ class TradierBrokerGateway implements BrokerGateway {
           const close = optionalNumber(q.close);
           const ask = optionalNumber(q.ask);
           const bid = optionalNumber(q.bid);
+          const selected = selectObservedQuotePrice({ last, bid, ask });
+          if (selected.price === undefined) continue;
           const prevClose = optionalNumber(q.prevclose);
           const open = optionalNumber(q.open);
           const high = optionalNumber(q.high);
@@ -883,13 +867,14 @@ class TradierBrokerGateway implements BrokerGateway {
           const bidSize = optionalNumber(q.bidsize);
           const askSize = optionalNumber(q.asksize);
           const companyName = optionalString(q.description);
+          const asOf = providerObservationIso(selected.basis === "last" ? q.trade_date : q.bid_date ?? q.ask_date);
           quotes[symbol] = {
             symbol,
-            price: last ?? close ?? ask ?? bid ?? 0,
+            price: selected.price,
             bid,
             ask,
             volume: optionalNumber(q.volume),
-            asOf: optionalIso(q.trade_date ?? q.bid_date),
+            ...(asOf ? { asOf } : {}),
             provider: "tradier",
             ...(prevClose !== undefined && prevClose > 0 ? { prevClose } : {}),
             ...(open !== undefined && open > 0 ? { open } : {}),
@@ -907,12 +892,6 @@ class TradierBrokerGateway implements BrokerGateway {
         console.warn(`[tradier] getEquityQuotes failed for ${canonicalSymbols.join(",")}:`, error instanceof Error ? error.message : error);
       }
     }
-    // Keyless Yahoo daily-close floor for any symbol Tradier left unpriced — identical to Alpaca.
-    await fillMissingQuotesWithClose(quotes, canonicalSymbols, async (symbol) => {
-      const bars = await fetchDailyOHLC(symbol, Date.now(), this.userId);
-      const lastBar = bars && bars.length ? bars[bars.length - 1] : undefined;
-      return lastBar && typeof lastBar.close === "number" ? { price: lastBar.close, asOf: lastBar.time != null ? String(lastBar.time) : undefined } : undefined;
-    });
     for (const [canonical, aliases] of aliasesByCanonical) {
       const quote = quotes[canonical];
       if (!quote) continue;

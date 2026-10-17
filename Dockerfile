@@ -60,8 +60,19 @@ COPY . .
 # --ignore-scripts on prune: avoid re-extracting glibc-2.38 prebuilds.
 # Then wipe any prebuild/build residue and compile better-sqlite3 from source
 # with a real node-gyp (installed globally so prune cannot remove it).
+# Deploy 3f931acb (2026-10-16): next build printed "Failed to type check."
+# yet exited 0 and skipped emitting .next, and the image shipped without a
+# production build (prod down, build log 4658).  Never trust next build's
+# exit code for type validity again:
+# - `npx tsc --noEmit` is the same gate CI runs (ci.yml) and fails the RUN on
+#   any TS error.  Runs AFTER the rm above so this checks exactly the tree
+#   the image sees.
+# - `test -f .next/BUILD_ID` fails the build if Next ever again completes
+#   without emitting a production build, whatever the cause.
 RUN rm -rf scripts/eval test \
+  && npx tsc --noEmit \
   && npm run build \
+  && test -f .next/BUILD_ID \
   && npm prune --omit=dev --ignore-scripts \
   && npm install -g node-gyp@11 \
   && rm -rf node_modules/better-sqlite3/prebuilds node_modules/better-sqlite3/build \
