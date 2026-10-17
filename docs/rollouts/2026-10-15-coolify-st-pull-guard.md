@@ -4,6 +4,7 @@ Date: 2026-10-15
 Seat: MM
 Board: `2c6a6a53` / Linear ST-3707 (closed by MM, see below)
 Host: `fleet-hetzner-nbg1` (`167.233.254.55`), Coolify `4.3.23`
+Fleet recall: the reusable lesson is already in the `fleet-agents` corpus as `contrib/MM/2026-10-15/ce4843a2` (category `lesson`, app `socratic-trade`: the local-only-tag pull comes from `compose up`, not from `pull_docker_compose_images()`) and `contrib/CURSOR/2026-10-15/fcfa9383` (category `infrastructure`).
 
 ## 1. Context & Objective
 
@@ -79,11 +80,11 @@ Verified guard condition against the live DB:
 
 | id | app | build_pack | behaviour |
 |----|-----|-----------|-----------|
-| 1 | ST app/worker | dockerfile | guard fires, pull skipped |
+| 1 | ST app/worker | dockerfile | `pull_policy: never` emitted (patch 2); patch 1 not reached |
 | 2 | congress-trade | dockercompose | pull proceeds — **unchanged** |
-| 3 | UM app/worker | dockerfile | guard fires, pull skipped |
-| 4 | agent-sync listener | dockerfile | guard fires, pull skipped |
-| 5 | echo-mail-relay | dockerfile | guard fires, pull skipped |
+| 3 | UM app/worker | dockerfile | `pull_policy: never` emitted (patch 2); patch 1 not reached |
+| 4 | agent-sync listener | dockerfile | `pull_policy: never` emitted (patch 2); patch 1 not reached |
+| 5 | echo-mail-relay | dockerfile | `pull_policy: never` emitted (patch 2); patch 1 not reached |
 
 ### Files touched
 

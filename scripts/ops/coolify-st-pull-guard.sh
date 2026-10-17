@@ -4,15 +4,15 @@
 # WHY THIS EXISTS (2026-09-25 P0, board 2c6a6a53 / Linear ST-3707)
 # ---------------------------------------------------------------
 # Socratic-Trade and Usage Monitor use Coolify's Dockerfile build pack, so the image is
-# BUILT ON THIS BOX and tagged `{application_uuid}:{commit}` — no registry prefix and no
+# BUILT ON THIS BOX and tagged `{application_uuid}:{commit}` -- no registry prefix and no
 # copy in any registry. Docker resolves a bare name with no slash as
 # `docker.io/library/<uuid>`, which cannot exist.
 #
-# WHERE THE PULL ACTUALLY CAME FROM — read this before changing anything:
+# WHERE THE PULL ACTUALLY CAME FROM -- read this before changing anything:
 #
 #   ST runs deploy_dockerfile_buildpack() (line 950), which does NOT call
 #   pull_docker_compose_images().  That method is called only from
-#   deploy_docker_compose_buildpack() (line 636) — the `dockercompose` pack that
+#   deploy_docker_compose_buildpack() (line 636) -- the `dockercompose` pack that
 #   congress-trade uses.  The 2026-09-25 registry pull therefore came from
 #   `docker compose up` ITSELF: its default pull_policy is `missing`, so an absent local
 #   tag sends Compose to a registry, and because Coolify stops the old container first,
@@ -37,12 +37,14 @@
 #            when no registry image is configured. Skipping is strictly safe: the pull
 #            it skips either pulls nothing (image already local) or fails.
 #
-#   PATCH 2  The generated compose gains `pull_policy: never` for any image tag that has
-#            no `/`, so Compose can never attempt a registry call for a local-only tag.
+#   PATCH 2  The generated compose gains `pull_policy: never` for a local-only tag: the
+#            Dockerfile build pack, no configured registry image, and no `/` in the tag.
+#            Compose can then never attempt a registry call for it.  Genuine Docker Hub
+#            images (e.g. postgres:15-alpine in a dockerimage app) are left alone.
 #            Verified effect: `docker compose pull` reports "Skipped" instead of
 #            "Pulling ... pull access denied".
 #
-# DURABILITY — READ THIS
+# DURABILITY -- READ THIS
 # ----------------------
 # This edits a VENDOR PHP FILE INSIDE THE `coolify` CONTAINER. It is wiped by any Coolify
 # container recreate or upgrade. The 2026-10-15 scheduled upgrade to 4.4.6 FAILED on this
@@ -260,5 +262,5 @@ case "${1:-}" in
   apply)  cmd_apply ;;
   verify) cmd_verify ;;
   revert) cmd_revert ;;
-  *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 1 ;;
 esac
