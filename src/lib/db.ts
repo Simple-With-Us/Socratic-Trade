@@ -3464,6 +3464,35 @@ const MIGRATIONS: Migration[] = [
         `);
       }
     }
+  },
+  {
+    version: 97,
+    name: "st4541_dedup_isolation_columns",
+    up: (database) => {
+      // ST-4541 (review 17915833/1): the near-duplicate signature/link tables gained tenant_scope,
+      // embed_model and embed_revision so a skip can never inherit a canonical vector from another
+      // tenant or another embedding space. These tables shipped WITH this PR and have never been on
+      // main, so production has no rows to migrate; this only rescues local/staging dev databases
+      // that already created the pre-isolation shape while the branch was in flight. Rows written
+      // before this migration carry tenant_scope='' and therefore simply stop matching any scoped
+      // lookup — the fail-open direction (an extra paid embed), never a wrong skip or a lost record.
+      const addColumnIfMissing = (table: string, column: string) => {
+        if (!tableExists(database, table)) return;
+        if (!columnExists(database, table, column)) {
+          database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT NOT NULL DEFAULT ''`);
+        }
+      };
+
+      for (const table of ["chunk_dedup_signatures", "chunk_dedup_links"]) {
+        addColumnIfMissing(table, "tenant_scope");
+        addColumnIfMissing(table, "embed_model");
+        addColumnIfMissing(table, "embed_revision");
+      }
+      // ST-4541 (Kody review): the signature row also records the upserted vector id, so a skip's
+      // link row can name the canonical vector instead of always writing ''. Pre-existing dev rows
+      // keep '' — a blank audit field, never a wrong skip.
+      addColumnIfMissing("chunk_dedup_signatures", "vector_id");
+    }
   }
 ];
 
@@ -4400,6 +4429,62 @@ function migrate(database: Database.Database): void {
       PRIMARY KEY (content_hash, model, revision)
     );
     CREATE INDEX IF NOT EXISTS idx_embed_stage_created ON embed_stage (created_at);
+    -- ST-4541 pre-embed near-duplicate detection. chunk_dedup_signatures holds one MinHash
+    -- signature (~256 B) per chunk we actually paid to embed, so a later ingest can compare
+    -- against recent same-source chunks without re-reading full text. chunk_dedup_links is the
+    -- provenance row written when a chunk's embed was SKIPPED, pointing at the canonical chunk that
+    -- answers for it. Deliberately registered in NEITHER sqlite-storage-hygiene's CATEGORY_BY_TABLE
+    -- nor PRUNABLE_TABLES: stored RAG data is kept forever, so these rows are never pruned or capped.
+    -- Write pattern is INSERT OR IGNORE only — no update, no delete.
+    --
+    -- ISOLATION (review 17915833/1): a skip is only safe when the canonical vector the duplicate
+    -- inherits is actually RETRIEVABLE for the skipping caller — i.e. same tenant namespace AND the
+    -- same embedding space. The tenant_scope column (vectorTenantScope: "shared:operator" or
+    -- "private:<sha256>") plus embed_model/embed_revision (the vector space that produced the
+    -- canonical vector) are therefore part of the signature's identity, and every lookup filters on
+    -- them. Without that, tenant A's chunk could be skipped against tenant B's signature and would
+    -- never get a vector in A's isolated namespace — silently unretrievable, i.e. a lost record.
+    -- Both keys are in the primary key so two tenants that embed identical text each keep their own
+    -- signature row instead of one silently winning the INSERT OR IGNORE.
+    CREATE TABLE IF NOT EXISTS chunk_dedup_signatures (
+      content_hash TEXT NOT NULL,
+      normalized_hash TEXT NOT NULL DEFAULT '',
+      signature BLOB NOT NULL,
+      num_perm INTEGER NOT NULL DEFAULT 64,
+      symbol TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '',
+      chunk_id TEXT NOT NULL DEFAULT '',
+      -- The record id actually upserted for this chunk, so a later skip's link row can name the
+      -- vector that answers for it (chunk_dedup_links.canonical_vector_id).
+      vector_id TEXT NOT NULL DEFAULT '',
+      tenant_scope TEXT NOT NULL DEFAULT '',
+      embed_model TEXT NOT NULL DEFAULT '',
+      embed_revision TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (content_hash, tenant_scope, embed_model, embed_revision)
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunk_dedup_signatures_scope
+      ON chunk_dedup_signatures (tenant_scope, symbol, source, created_at);
+    CREATE INDEX IF NOT EXISTS idx_chunk_dedup_signatures_normalized
+      ON chunk_dedup_signatures (tenant_scope, embed_model, embed_revision, normalized_hash);
+    CREATE TABLE IF NOT EXISTS chunk_dedup_links (
+      content_hash TEXT NOT NULL,
+      canonical_hash TEXT NOT NULL,
+      canonical_chunk_id TEXT NOT NULL DEFAULT '',
+      canonical_vector_id TEXT NOT NULL DEFAULT '',
+      symbol TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '',
+      match_kind TEXT NOT NULL CHECK(match_kind IN ('exact','near')),
+      similarity REAL NOT NULL DEFAULT 0,
+      threshold REAL NOT NULL DEFAULT 0,
+      tenant_scope TEXT NOT NULL DEFAULT '',
+      embed_model TEXT NOT NULL DEFAULT '',
+      embed_revision TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (content_hash, canonical_hash, tenant_scope)
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunk_dedup_links_scope
+      ON chunk_dedup_links (tenant_scope, symbol, source, created_at);
     CREATE TABLE IF NOT EXISTS learned_context (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
