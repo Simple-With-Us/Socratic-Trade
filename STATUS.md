@@ -204,6 +204,59 @@ clean, `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-ev
 `origin/main` worktree — this runner has a live `OPENROUTER_API_KEY` that those tests assume
 is absent.  Pre-existing, outside this diff, left untouched.  Both remaining open threads
 resolved (Sentry's index-alignment finding verified fixed in `93da2abb`).
+## 2026-10-15 codex-autofix — PR #4707 (AUTH_SECRET literal finding)
+
+**What.**  Round 1 on `cursor/st-quiver-coverage-sanitize-8696`.  The two Kody visual-coverage threads were
+already handled in a prior round (asked, not guessed).  This round the only new threads were two instances of
+one finding: a hardcoded `PLAYWRIGHT_AUTH_SECRET` fallback string (length and value deliberately not
+recorded here per rule 35) duplicated at `playwright.config.ts:19` and `test/e2e/playwright-session.ts:6` — removed from the tree in
+concurrent-agent follow-ups (`playwright-admin-auth.ts` + CI `openssl rand`).
+
+**Branch.**  `cursor/st-quiver-coverage-sanitize-8696`
+
+**Fixed by a concurrent agent while this round was in flight.**  I had intended to escalate rather than fix:
+Kody's suggested hard-throw could not be applied from a fixer seat without also setting the secret in
+`e2e.yml` (a `.github/workflows` edit), and unset it would fire on every smoke run including push-to-main.
+Another agent landed a superset fix instead — the literal is gone from the tree entirely.  The admin suite
+reads `PLAYWRIGHT_AUTH_SECRET` from env, **hard-throws under `CI`**, and falls back to a per-worktree
+`0600` random secret file locally (`test/e2e/playwright-admin-auth.ts`); the throwaway `ENCRYPTION_KEY` is
+likewise derived via sha256 instead of a literal (`test/e2e/playwright-throwaway-fixtures.ts`).  That is
+better than the suggestion: it keeps the fail-closed posture Kody wanted without a repo literal at all.
+Note it also edits `e2e.yml` (generates the secret with `openssl rand -hex 32`) — legitimate for that agent,
+out of bounds for this fixer role.
+
+**This round's own change.**  None to production source.  A local merge of `origin/main` turned out redundant
+(`main` was already merged by the concurrent work) and was dropped; the commit carries only these docs.
+
+**Thread state.**  Both AUTH_SECRET threads anchored to code that no longer exists and are outdated;
+resolved this round per protocol.
+
+**Verification.**  `npx tsc --noEmit` clean; `npm run build` clean.  `npm test` exits 1 with 13 failures across
+4 LLM-routing suites (`llm-provider`, `chat-llm`, `framework-review`, `openrouter-credits`) that reproduce
+identically on a clean `origin/main` worktree — this sandbox has provider keys injected, and those suites
+assume none.  The PR's own suites are green (28/28).  Full detail in the rollout note.
+
+## 2026-10-15 codex-autofix — PR #4707 round 2 (char-count metadata in redacted docs)
+
+**What.**  Round 2 on `cursor/st-quiver-coverage-sanitize-8696`.  All 7 threads from round 1 were
+already resolved, and each finding was confirmed addressed in the tree: the AUTH_SECRET /
+ENCRYPTION_KEY literals are gone (`test/e2e/playwright-admin-auth.ts` env-read with a hard throw
+under `CI`, per-worktree `0600` fallback locally; `playwrightThrowawayEncryptionKey()` sha256-derived),
+and the enrichment-coverage footnote has real Playwright screenshot coverage in
+`test/e2e/admin-enrichment-coverage-visual.spec.ts`.  Kody's review reports success on the head.
+
+**The one new item.**  A low-severity Kody thread flagged that the redacted-fallback description still
+recorded the literal's character count, which it read as 36 rather than the 38 the doc claimed.  Fixed by
+**dropping the count entirely** rather than correcting it — Kody's own primary recommendation, and the
+right call: the length is itself metadata about the secret, so publishing an accurate number is no better
+than publishing a wrong one.  Applied to both `STATUS.md` and the rollout note.
+
+**Verification.**  `npx tsc --noEmit` clean.  `npm test` and `npm run build` carried no source change
+this round (docs only), so CI's `verify-hosted` on the head is the authoritative gate.
+
+**Thread state.**  That single thread resolved this round per protocol; no other review-bot thread was
+left open and none was left unfixed.
+
 **Next.**  PR #4720 ready for review.  Merged `origin/main` at `e3ba1507` (#4716 iOS ASC credentials).  #4722 had not landed, so its retention rewrite is not in this branch.  Stripped accidental conflict markers from `docs/rollouts/2026-10-15-st-4531-retire-slack-callers.md` that were already on main.  Review follow-up is in `a938fd2a` (codec columns, watermark after pass, framed `raw1:`, decode retry list, indexed `hasLocalFilingCopy`).
 ## 2026-10-15 CURSOR — Board 512444e3 iOS / Playwright / deploy-freshness CI
 
@@ -324,6 +377,15 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 **Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  Scheduler startup tests 21/21.  `npm run build` ok.  Full `npm test`: 24 failures pre-existing in this sandbox (unchanged vs unrelated suites).
 
 **Next.**  Open ready PR, `@kody start-review`.
+## 2026-10-15 CURSOR — ST-3854 Quiver coverage board (sanitize legacy reports)
+
+**What.**  #4217 already excluded five retired Quiver lanes from `COVERAGE_TRACKED_FIELDS`.  Follow-up: `sanitizeEnrichmentCoverageReport` on `resolveEnrichmentCoverageReport` so durable pre-merge rows no longer show 0% Quiver fields; `retiredLaneFields` on reports + admin footnote.
+
+**Branch.**  `cursor/st-quiver-coverage-sanitize-8696`
+
+**Verification.**  Rebased on `main`; Playwright visual baseline for retired-lanes footnote; `verify` CI green after push.
+
+**Next.**  Deployer merges #4707; then CURSOR marks ST-3854 Done via Agent-Sync (not before merge).
 ## 2026-10-15 Cursor Cloud — transcript and companyfacts gzip, RAG review
 
 **What.**  `earningscalls_transcripts.content` and the companyfacts JSON cache in `sec_facts.segment` now store `gz1:` (base64 gzip) or `raw1:` when gzip does not shrink the text.  Every reader of those bodies decodes first.  FTS still indexes plaintext.  A leader lane backfills in place and does not delete.  `audit_events.payload` stays plaintext because the hash chain and `json_extract` readers are not one path.  `post_mortem_reflection` is no longer age-pruned.  Review: `docs/reviews/2026-10-15-rag-storage-expert-panel.md`.
