@@ -160,6 +160,11 @@ export interface NearDupCandidate {
   signature: Uint32Array;
   /** Kept for exact in-batch Jaccard, which is strictly more accurate than the estimate. */
   shingles: Set<string>;
+  /**
+   * Record id this chunk will be upserted under, when the caller knows it before embedding. Carried
+   * onto in-batch references so a later duplicate's link names the canonical vector.
+   */
+  vectorId?: string | null;
 }
 
 export interface NearDupReference {
@@ -193,11 +198,21 @@ export interface NearDupVerdict {
  */
 export function classifyNearDuplicate(
   candidate: NearDupCandidate,
-  references: NearDupReference[],
-  options: { threshold: number }
+  references: readonly NearDupReference[],
+  options: { threshold: number },
+  /**
+   * Optional `normalizedHash -> first reference holding it` index over `references`, so the exact
+   * path is a map lookup instead of a scan. Must hold the FIRST reference per hash in list order,
+   * which keeps the result identical to the `find` fallback.
+   */
+  exactIndex?: ReadonlyMap<string, NearDupReference>
 ): NearDupVerdict {
   const threshold = options.threshold;
-  const exact = references.find((ref) => ref.normalizedHash && ref.normalizedHash === candidate.normalizedHash);
+  const exact = exactIndex
+    ? candidate.normalizedHash
+      ? exactIndex.get(candidate.normalizedHash)
+      : undefined
+    : references.find((ref) => ref.normalizedHash && ref.normalizedHash === candidate.normalizedHash);
   if (exact) {
     return {
       kind: "exact",
@@ -280,43 +295,36 @@ export function partitionNearDuplicates<T extends NearDupCandidate>(
   const skipped: T[] = [];
   const links: NearDupLinkDraft[] = [];
   const canonicalByContentHash = new Map<string, { contentHash: string; chunkId: string; vectorId?: string }>();
-  /** Candidates we decided to embed in this batch, so chained lookups can reach their comparators. */
-  const embeddedByContentHash = new Map<string, NearDupCandidate>();
+
+  // ONE running reference list, built once and appended to as documents are embedded — not rebuilt
+  // and re-spread for every document (Kody review: quadratic rebuild). Order is the stored references
+  // first, then this batch's embeds in arrival order, which is the order the per-document rebuild
+  // produced, so exact-match precedence and near-match tie-breaking are unchanged.
+  //
+  // A SKIPPED document never becomes a reference itself, and needs no extra entry: its canonical is
+  // either a stored reference or an earlier in-batch embed, and both are already in this list with
+  // their real comparators. That is what makes a duplicate-of-a-duplicate link to the ORIGINAL.
+  const references: NearDupReference[] = storedReferences.slice();
+  const exactIndex = new Map<string, NearDupReference>();
+  const indexExact = (ref: NearDupReference) => {
+    if (ref.normalizedHash && !exactIndex.has(ref.normalizedHash)) exactIndex.set(ref.normalizedHash, ref);
+  };
+  for (const ref of references) indexExact(ref);
 
   for (const doc of documents) {
-    // References seen so far in this batch, resolved through any existing link so we always point
-    // at the canonical rather than at another duplicate.
-    const inBatch: NearDupReference[] = [];
-    for (const prior of toEmbed) {
-      inBatch.push({
-        contentHash: prior.contentHash,
-        chunkId: prior.chunkId,
-        normalizedHash: prior.normalizedHash,
-        signature: prior.signature,
-        shingles: prior.shingles
-      });
-    }
-    for (const prior of skipped) {
-      const canonical = canonicalByContentHash.get(prior.contentHash);
-      if (!canonical) continue;
-      // Attach the canonical's OWN comparators when it was itself embedded earlier in this batch, so
-      // a duplicate-of-a-duplicate still compares on real text rather than silently degrading to
-      // "no comparator" (which would cost an unnecessary embed, never a wrong skip).
-      const canonicalCandidate = embeddedByContentHash.get(canonical.contentHash);
-      inBatch.push({
-        contentHash: canonical.contentHash,
-        chunkId: canonical.chunkId,
-        normalizedHash: canonicalCandidate?.normalizedHash ?? null,
-        signature: canonicalCandidate?.signature ?? null,
-        shingles: canonicalCandidate?.shingles ?? null,
-        vectorId: canonical.vectorId
-      });
-    }
-
-    const verdict = classifyNearDuplicate(doc, [...storedReferences, ...inBatch], options);
+    const verdict = classifyNearDuplicate(doc, references, options, exactIndex);
     if (verdict.kind === "new") {
       toEmbed.push(doc);
-      embeddedByContentHash.set(doc.contentHash, doc);
+      const ref: NearDupReference = {
+        contentHash: doc.contentHash,
+        chunkId: doc.chunkId,
+        normalizedHash: doc.normalizedHash,
+        signature: doc.signature,
+        shingles: doc.shingles,
+        vectorId: doc.vectorId ?? null
+      };
+      references.push(ref);
+      indexExact(ref);
       continue;
     }
 
@@ -350,6 +358,7 @@ export function toNearDupCandidate(input: {
   symbol: string;
   source: string;
   numPerm?: number;
+  vectorId?: string | null;
 }): NearDupCandidate {
   const shingles = shingleSet(input.text);
   return {
@@ -359,6 +368,7 @@ export function toNearDupCandidate(input: {
     symbol: input.symbol,
     source: input.source,
     signature: minhashSignature(shingles, input.numPerm ?? DEFAULT_NEAR_DUP_NUM_PERM),
-    shingles
+    shingles,
+    vectorId: input.vectorId ?? null
   };
 }

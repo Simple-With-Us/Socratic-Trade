@@ -3488,6 +3488,10 @@ const MIGRATIONS: Migration[] = [
         addColumnIfMissing(table, "embed_model");
         addColumnIfMissing(table, "embed_revision");
       }
+      // ST-4541 (Kody review): the signature row also records the upserted vector id, so a skip's
+      // link row can name the canonical vector instead of always writing ''. Pre-existing dev rows
+      // keep '' — a blank audit field, never a wrong skip.
+      addColumnIfMissing("chunk_dedup_signatures", "vector_id");
     }
   }
 ];
@@ -4450,6 +4454,9 @@ function migrate(database: Database.Database): void {
       symbol TEXT NOT NULL DEFAULT '',
       source TEXT NOT NULL DEFAULT '',
       chunk_id TEXT NOT NULL DEFAULT '',
+      -- The record id actually upserted for this chunk, so a later skip's link row can name the
+      -- vector that answers for it (chunk_dedup_links.canonical_vector_id).
+      vector_id TEXT NOT NULL DEFAULT '',
       tenant_scope TEXT NOT NULL DEFAULT '',
       embed_model TEXT NOT NULL DEFAULT '',
       embed_revision TEXT NOT NULL DEFAULT '',

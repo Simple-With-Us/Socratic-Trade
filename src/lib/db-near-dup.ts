@@ -60,6 +60,8 @@ export interface ChunkDedupSignatureInput {
   symbol: string;
   source: string;
   chunkId: string;
+  /** Record id actually upserted for this chunk; becomes a later link's `canonical_vector_id`. */
+  vectorId?: string;
   tenantScope: string;
   embedModel: string;
   embedRevision: string;
@@ -90,9 +92,9 @@ export function insertChunkDedupSignatures(rows: ChunkDedupSignatureInput[]): vo
   const db = getDb();
   const stmt = db.prepare(`
     INSERT OR IGNORE INTO chunk_dedup_signatures
-      (content_hash, normalized_hash, signature, num_perm, symbol, source, chunk_id,
+      (content_hash, normalized_hash, signature, num_perm, symbol, source, chunk_id, vector_id,
        tenant_scope, embed_model, embed_revision, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const now = new Date().toISOString();
   const insertMany = db.transaction((batch: ChunkDedupSignatureInput[]) => {
@@ -105,6 +107,7 @@ export function insertChunkDedupSignatures(rows: ChunkDedupSignatureInput[]): vo
         row.symbol,
         row.source,
         row.chunkId,
+        row.vectorId ?? "",
         row.tenantScope,
         row.embedModel,
         row.embedRevision,
@@ -129,7 +132,7 @@ export function findRecentDedupReferences(
   const bounded = Math.max(1, Math.floor(limit));
   const rows = getDb()
     .prepare(`
-      SELECT content_hash, normalized_hash, chunk_id, signature, num_perm
+      SELECT content_hash, normalized_hash, chunk_id, vector_id, signature, num_perm
       FROM chunk_dedup_signatures
       WHERE tenant_scope = ? AND embed_model = ? AND embed_revision = ? AND symbol = ? AND source = ?
       ORDER BY created_at DESC, rowid DESC
@@ -139,15 +142,11 @@ export function findRecentDedupReferences(
     content_hash: string;
     normalized_hash: string;
     chunk_id: string;
+    vector_id: string | null;
     signature: Buffer | null;
     num_perm: number;
   }>;
-  return rows.map((row) => ({
-    contentHash: row.content_hash,
-    chunkId: row.chunk_id,
-    normalizedHash: row.normalized_hash,
-    signature: row.signature ? decodeSignature(row.signature, row.num_perm || undefined) : null
-  }));
+  return rows.map(toReference);
 }
 
 /**
@@ -163,7 +162,7 @@ export function findDedupReferencesByNormalizedHash(
 ): NearDupReference[] {
   const rows = getDb()
     .prepare(`
-      SELECT content_hash, normalized_hash, chunk_id, signature, num_perm
+      SELECT content_hash, normalized_hash, chunk_id, vector_id, signature, num_perm
       FROM chunk_dedup_signatures
       WHERE tenant_scope = ? AND embed_model = ? AND embed_revision = ? AND normalized_hash = ?
     `)
@@ -171,15 +170,11 @@ export function findDedupReferencesByNormalizedHash(
     content_hash: string;
     normalized_hash: string;
     chunk_id: string;
+    vector_id: string | null;
     signature: Buffer | null;
     num_perm: number;
   }>;
-  return rows.map((row) => ({
-    contentHash: row.content_hash,
-    chunkId: row.chunk_id,
-    normalizedHash: row.normalized_hash,
-    signature: row.signature ? decodeSignature(row.signature, row.num_perm || undefined) : null
-  }));
+  return rows.map(toReference);
 }
 
 /**
@@ -218,6 +213,25 @@ export function insertChunkDedupLinks(rows: ChunkDedupLinkInput[]): void {
     }
   });
   timeSyncGuard(() => insertMany(rows));
+}
+
+function toReference(row: {
+  content_hash: string;
+  normalized_hash: string;
+  chunk_id: string;
+  vector_id: string | null;
+  signature: Buffer | null;
+  num_perm: number;
+}): NearDupReference {
+  return {
+    contentHash: row.content_hash,
+    chunkId: row.chunk_id,
+    normalizedHash: row.normalized_hash,
+    signature: row.signature ? decodeSignature(row.signature, row.num_perm || undefined) : null,
+    // '' on rows written before the column existed: the link then records a blank vector id, which
+    // is an incomplete audit field, never a wrong skip.
+    vectorId: row.vector_id || null
+  };
 }
 
 function timeSyncGuard<T>(fn: () => T): T {

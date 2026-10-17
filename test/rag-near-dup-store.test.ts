@@ -68,7 +68,17 @@ describe("ST-4541 near-dup persistence — signatures", () => {
     const signatureCols = db.prepare("PRAGMA table_info(chunk_dedup_signatures)").all() as Array<{ name: string }>;
     const linkCols = db.prepare("PRAGMA table_info(chunk_dedup_links)").all() as Array<{ name: string }>;
     expect(signatureCols.map((c) => c.name)).toEqual(
-      expect.arrayContaining(["content_hash", "normalized_hash", "signature", "num_perm", "symbol", "source", "chunk_id", "created_at"])
+      expect.arrayContaining([
+        "content_hash",
+        "normalized_hash",
+        "signature",
+        "num_perm",
+        "symbol",
+        "source",
+        "chunk_id",
+        "vector_id",
+        "created_at"
+      ])
     );
     expect(linkCols.map((c) => c.name)).toEqual(
       expect.arrayContaining([
@@ -97,6 +107,20 @@ describe("ST-4541 near-dup persistence — signatures", () => {
     // The decoded stored signature must still match a freshly-computed one for the same text.
     const fresh = minhashSignature(shingleSet(TEXT_A));
     expect(Array.from(mine!.signature!)).toEqual(Array.from(fresh));
+  });
+
+  it("round-trips the upserted vector id so a later link can name the canonical vector", () => {
+    // Kody review on PR #4736: links always wrote canonical_vector_id = '' because the signature row
+    // never stored the vector id and the lookups never returned one.
+    const vidText = "Vector id probe disclosure text recorded with the id it was upserted under.";
+    insertChunkDedupSignatures([{ ...signatureRow(vidText, "vid1", "VID", "8-k", "vid-chunk"), vectorId: "8-k:VID:0001" }]);
+    expect(findRecentDedupReferences(SCOPE, "VID", "8-k").map((r) => r.vectorId)).toEqual(["8-k:VID:0001"]);
+    expect(findDedupReferencesByNormalizedHash(SCOPE, normalizedContentHash(vidText)).map((r) => r.vectorId)).toEqual([
+      "8-k:VID:0001"
+    ]);
+    // A row written without one reads back as null, never as a fabricated id.
+    insertChunkDedupSignatures([signatureRow(`${vidText} legacy`, "vid2", "VID", "10-q", "vid-chunk-2")]);
+    expect(findRecentDedupReferences(SCOPE, "VID", "10-q").map((r) => r.vectorId)).toEqual([null]);
   });
 
   it("scopes reference lookup to (symbol, source) and bounds it by the window", () => {

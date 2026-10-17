@@ -398,3 +398,87 @@ describe("ST-4541 binding — a skipped embed never removes a stored record", ()
     expect(still).toBeDefined();
   }, 60_000);
 });
+
+describe("ST-4541 Kody review — link rows name the canonical vector", () => {
+  it("records the upserted vector id on the signature and carries it onto a later skip's link", async () => {
+    process.env.RAG_NEAR_DUP_SKIP = "1";
+    const { storeContexts } = await import("../src/lib/vector-db");
+    const { getDb } = await import("../src/lib/db");
+    const c = corpus("Kody review canonical vector id");
+
+    // First ingest embeds and upserts; its signature must remember the id it was written under.
+    const first = await storeContexts(
+      [{ text: c.near, metadata: { symbol: "VECID", source: "8-k", timestamp: PUBLISHED } }],
+      "local",
+      {}
+    );
+    expect(first.indexed).toBe(1);
+    const upsertInput = mocks.upsert.mock.calls.at(-1)?.[0] as { records: Array<{ id: string }> } | undefined;
+    const upsertedId = upsertInput?.records[0]?.id;
+    expect(upsertedId).toBeTruthy();
+    const signature = getDb()
+      .prepare("SELECT vector_id FROM chunk_dedup_signatures WHERE symbol = 'VECID'")
+      .get() as { vector_id: string } | undefined;
+    expect(signature?.vector_id).toBe(upsertedId);
+
+    // A reflowed repeat is skipped, and its provenance row now names that vector instead of ''.
+    const repeat = await storeContexts(
+      [{ text: `  ${c.near.toUpperCase()}\n`, metadata: { symbol: "VECID", source: "8-k", timestamp: PUBLISHED } }],
+      "local",
+      {}
+    );
+    expect(repeat.skippedByNearDuplicate).toBe(1);
+    const link = getDb()
+      .prepare("SELECT canonical_vector_id, match_kind FROM chunk_dedup_links WHERE symbol = 'VECID'")
+      .get() as { canonical_vector_id: string; match_kind: string } | undefined;
+    expect(link?.match_kind).toBe("exact");
+    expect(link?.canonical_vector_id).toBe(upsertedId);
+  }, 60_000);
+});
+
+describe("ST-4541 Kody review — a partly rejected batch still records its indexed companions", () => {
+  it("persists the signature of the chunk that was upserted, and none for the rejected one", async () => {
+    process.env.RAG_NEAR_DUP_SKIP = "1";
+    process.env.VECTOR_EMBED_BATCH_SIZE = "1";
+    const defaultEmbed = mocks.embed.getMockImplementation();
+    // One embed per POST (batch size 1); the POST carrying the marker returns a malformed vector,
+    // which rejects that document alone while its companion still upserts.
+    mocks.embed.mockImplementation(async (args: { input: string[] }) => ({
+      data: args.input.map((text, i) => ({
+        embedding: text.includes("REJECTMARKER") ? [] : [0.1, 0.2],
+        index: i
+      }))
+    }));
+    try {
+      const { storeContexts } = await import("../src/lib/vector-db");
+      const { getDb } = await import("../src/lib/db");
+      const c = corpus("Kody review partial reject companion");
+      const rejectedText =
+        "REJECTMARKER Beta Industries said its logistics segment revenue declined 12 percent in the quarter, which management attributed to the loss of two large regional contracts and a slower freight market.";
+
+      const result = await storeContexts(
+        [
+          { text: c.near, metadata: { symbol: "PART", source: "8-k", timestamp: PUBLISHED } },
+          { text: rejectedText, metadata: { symbol: "PART", source: "10-q", timestamp: PUBLISHED } }
+        ],
+        "local",
+        {}
+      );
+
+      // Control: the batch really was partial — one indexed, one rejected.
+      expect(result.indexed).toBe(1);
+      expect(result.rejectedInvalidEmbeddings ?? 0).toBeGreaterThan(0);
+
+      const rows = getDb()
+        .prepare("SELECT source, vector_id FROM chunk_dedup_signatures WHERE symbol = 'PART' ORDER BY source")
+        .all() as Array<{ source: string; vector_id: string }>;
+      // The fix: the indexed companion is recorded (the old guard dropped it because ANY reject
+      // blocked the whole write), and the rejected chunk — which has no vector — is not.
+      expect(rows.map((row) => row.source)).toEqual(["8-k"]);
+      expect(rows[0]!.vector_id).toBeTruthy();
+    } finally {
+      delete process.env.VECTOR_EMBED_BATCH_SIZE;
+      if (defaultEmbed) mocks.embed.mockImplementation(defaultEmbed);
+    }
+  }, 60_000);
+});

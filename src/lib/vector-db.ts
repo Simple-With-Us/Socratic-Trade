@@ -2608,6 +2608,23 @@ function contextId(document: ContextDocument, fallbackIndex: number): string {
   return sanitizeVectorId(raw);
 }
 
+/**
+ * The record id `contextId` will assign, when it does not depend on the document's batch position.
+ * Undefined for a document with none of vector_id/source/symbol/accession/timestamp, whose id is
+ * positional and so cannot be known before batching (ST-4541: such a link records no vector id
+ * rather than a guessed one).
+ */
+function positionIndependentContextId(document: ContextDocument): string | undefined {
+  const metadata = document.metadata;
+  if (
+    metadata?.vector_id ||
+    [metadata?.source, metadata?.symbol, metadata?.accession, metadata?.timestamp].some(Boolean)
+  ) {
+    return contextId(document, 0);
+  }
+  return undefined;
+}
+
 function estimatePineconeWriteUnitsForDocument(
   document: ContextDocument,
   vectorUserId: string,
@@ -3798,7 +3815,10 @@ async function storeContextsImpl(
           contentHash: hashContent(doc.text),
           chunkId: contextId(doc, i),
           symbol: doc.metadata?.symbol ?? "",
-          source: doc.metadata?.source ?? ""
+          source: doc.metadata?.source ?? "",
+          // Lets an in-batch duplicate's link name the vector its canonical is about to be written
+          // under (Kody review: canonical_vector_id was always '').
+          vectorId: positionIndependentContextId(doc)
         }),
         document: doc
       })
@@ -3816,9 +3836,22 @@ async function storeContextsImpl(
         seenScope.add(scopeKey);
         references.push(...findRecentDedupReferences(nearDupScope, candidate.symbol, candidate.source, window));
       }
+      // One lookup per DISTINCT normalized hash (Kody review: a batch of repeats issued one identical
+      // SELECT per candidate).
+      const seenNormalizedHash = new Set<string>();
       for (const candidate of candidates) {
+        if (seenNormalizedHash.has(candidate.normalizedHash)) continue;
+        seenNormalizedHash.add(candidate.normalizedHash);
         references.push(...findDedupReferencesByNormalizedHash(nearDupScope, candidate.normalizedHash));
       }
+      // The window and the hash lookups can return the same stored row; keep the first copy so the
+      // comparison loop does not walk it twice. Within one scope content_hash is the row's identity.
+      const seenReference = new Set<string>();
+      references = references.filter((reference) => {
+        if (seenReference.has(reference.contentHash)) return false;
+        seenReference.add(reference.contentHash);
+        return true;
+      });
     } catch (err) {
       references = [];
       console.warn(
@@ -3862,7 +3895,8 @@ async function storeContextsImpl(
         symbol: entry.symbol,
         source: entry.source,
         signature: entry.signature,
-        shingles: entry.shingles
+        shingles: entry.shingles,
+        vectorId: entry.vectorId
       },
       document: entry.document
     }));
@@ -4173,6 +4207,8 @@ async function storeContextsImpl(
   // guard), keyed by identity against `documentsToStore` — only recorded into document_chunks
   // (via insertDocumentChunks below) when dedup is active for this call.
   const indexedDocIdentities = new Set<ContextDocument>();
+  /** The record id each indexed document was actually upserted under (ST-4541 signature rows). */
+  const vectorIdByDocument = new Map<ContextDocument, string>();
   try {
     assertVectorStoreLease(options?.leaseGuard);
     const namespaceName = options?.managedCommit
@@ -4388,9 +4424,11 @@ async function storeContextsImpl(
         const embedding = resolved[indexInBatch];
         if (!isValidEmbedding(embedding)) continue;
         const document = batch[indexInBatch]!;
+        const recordId = contextId(document, indexInBatch);
         indexedDocIdentities.add(document);
+        vectorIdByDocument.set(document, recordId);
         records.push({
-          id: contextId(document, indexInBatch),
+          id: recordId,
           values: embedding,
           metadata: cleanMetadata(
             document.metadata,
@@ -4583,7 +4621,15 @@ async function storeContextsImpl(
     // text. Recorded only for documents that made it to a real Pinecone upsert, and only after that
     // upsert succeeded — a signature must never exist for a vector that was not written. INSERT OR
     // IGNORE, non-fatal: losing a signature costs an extra embed later, never data.
-    if (nearDupPendingSignatures.length > 0 && indexedDocIdentities.size > 0 && rejectedInvalidEmbeddings === 0) {
+    //
+    // The per-document `indexedDocIdentities` filter IS that invariant, so a batch with some
+    // rejected embeds still records its indexed companions (Kody review: the old
+    // `rejectedInvalidEmbeddings === 0` term dropped them all). A document joins
+    // `indexedDocIdentities` only with a valid embedding, and a failed upsert throws to the catch
+    // below, so this block is never reached for an unwritten vector. Managed commits never get
+    // here with pending signatures: the gate above is off for them, so their pending-state records
+    // are never treated as canonical.
+    if (nearDupPendingSignatures.length > 0 && indexedDocIdentities.size > 0) {
       try {
         insertChunkDedupSignatures(
           nearDupPendingSignatures
@@ -4596,6 +4642,7 @@ async function storeContextsImpl(
               symbol: entry.candidate.symbol,
               source: entry.candidate.source,
               chunkId: entry.candidate.chunkId,
+              vectorId: vectorIdByDocument.get(entry.document) ?? entry.candidate.vectorId ?? "",
               tenantScope,
               embedModel: stageModel,
               embedRevision: stageRevision

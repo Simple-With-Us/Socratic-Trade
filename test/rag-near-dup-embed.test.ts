@@ -172,4 +172,34 @@ describe("ST-4541 near-duplicate embed skip — batch partition", () => {
     expect(result.toEmbed).toHaveLength(2);
     expect(result.links).toHaveLength(0);
   });
+
+  it("names the canonical VECTOR on every link, for stored and in-batch canonicals alike", () => {
+    // Kody review on PR #4736: canonical_vector_id was always '' because no reference carried one.
+    const stored = { ...candidate(DIFFERENT, "stored"), vectorId: "vec-stored" };
+    const first = { ...candidate(BASE, "first"), vectorId: "vec-first" };
+    const docs = [
+      first,
+      candidate(BASE.toUpperCase(), "dup-of-first"),
+      candidate(`  ${DIFFERENT.toLowerCase()}\n`, "dup-of-stored")
+    ];
+    const result = partitionNearDuplicates(docs, [stored], { threshold: 0.9 });
+    expect(result.toEmbed.map((d) => d.chunkId)).toEqual(["first"]);
+    expect(result.links.map((l) => [l.contentHash, l.canonicalVectorId])).toEqual([
+      ["hash-dup-of-first", "vec-first"],
+      ["hash-dup-of-stored", "vec-stored"]
+    ]);
+  });
+
+  it("matches the per-document rebuild: an exact stored match outranks an earlier in-batch embed", () => {
+    // The partition keeps ONE running reference list (stored first, then in-batch embeds). The exact
+    // index must keep the FIRST holder of a normalized hash, like the `find` it replaces.
+    const storedA = { ...candidate(BASE, "stored-a"), vectorId: "vec-stored-a" };
+    const storedB = { ...candidate(BASE.toUpperCase(), "stored-b"), vectorId: "vec-stored-b" };
+    const result = partitionNearDuplicates([candidate(`${BASE} `, "incoming")], [storedA, storedB], {
+      threshold: 0.9
+    });
+    expect(result.links[0]).toMatchObject({ canonicalChunkId: "stored-a", canonicalVectorId: "vec-stored-a" });
+    expect(classifyNearDuplicate(candidate(`${BASE} `, "incoming"), [storedA, storedB], { threshold: 0.9 }))
+      .toMatchObject({ kind: "exact", canonicalChunkId: "stored-a" });
+  });
 });
