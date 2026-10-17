@@ -225,4 +225,33 @@ was requested on the new head.
 Touched in this round: `PLAN.md`, `STATUS.md`, `src/lib/db.ts` (comment
 indentation only), this note.
 
-Verification commands for this round are recorded in `STATUS.md`.
+A second merge of `main` at `d425910eb` (#4815) followed before landing.  It
+changes only `Dockerfile` (the image build now hard-fails on a type-check
+failure or a missing `.next` emission), so it overlaps nothing in this PR and
+adds no migration.
+
+### Verification (round 5)
+
+Local, on merge commit `f2c3fc071`, in this order:
+
+- `npm run lint`: exit 0 (0 errors, 873 warnings).
+- `npx tsc --noEmit`: exit 0.
+- `npm test`: the full suite was left to hosted CI.  Hosted `verify-hosted`
+  (run 39019696477) on `f2c3fc071` passed `npm run lint`, `npx tsc --noEmit` and
+  `npm test`.  Locally, `npx vitest run test/persistence-hardening.test.ts
+  test/restart-sweep-instance-scope.test.ts test/stale-running-runs.test.ts
+  test/stale-running-runs-adoption-grace.test.ts
+  test/strategy-run-restart-retry.test.ts test/scheduler-leader-heartbeat.test.ts`
+  passed 72/72.
+- `npm run build`: exit 0.
+
+The `d425910eb` merge touches only `Dockerfile`, which none of these commands
+read; hosted `verify` re-runs all four on the new head.
+
+### Next steps and blockers (round 5)
+
+- Land by squash merge once `verify` and `gitleaks` pass on the current head.
+  `needs-human-merge` only stops auto-merge.
+- Kody's 2026-10-15 `CHANGES_REQUESTED` review stays on record until Kody
+  approves.  It is not dismissed.  Required approvals on `main` is 0.
+- After the deploy, move ST-8 to Completed in Linear.
