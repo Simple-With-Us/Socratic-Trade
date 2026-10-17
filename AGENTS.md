@@ -301,8 +301,8 @@ up` itself, whose default `pull_policy` is `missing`: the tag is not local, so C
 for a registry, and because Coolify stops the old container first, prod was already down when
 the registry said no (5.3min P0, board `2c6a6a53` / ST-3707).  **The fix that protects ST is
 `pull_policy: never` in the generated compose.**  The companion change that skips
-`pull_docker_compose_images()` covers only the `dockercompose`-pack path and is a no-op for
-ST/UM.  **Do not "fix" this by adding a Docker Hub credential or by setting
+`pull_docker_compose_images()` is inert: it is reached only from the `dockercompose`
+path, where its `dockerfile` condition cannot be true, and ST/UM never reach it.  **Do not "fix" this by adding a Docker Hub credential or by setting
 `pull_policy` to pull** — there is no `/root/.docker/config.json` by design, an
 authenticated pull of a nonexistent repo returns `pull access denied, insufficient_scope`
 (the exact outage signature), and any pulling policy makes the P0 certain.  Enforced by the

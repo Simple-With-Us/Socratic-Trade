@@ -45,9 +45,11 @@ This matters for which half of the patch does the work:
 
 - **PATCH 2 — `pull_policy: never` on bare local-only tags — is the fix that protects ST.**  It is
   emitted by `generate_compose_file()`, which every build pack uses.
-- **PATCH 1 — skipping `pull_docker_compose_images()` — does not affect ST.**  It only covers the
-  `dockercompose`-pack path and stands down there for local-only tags anyway.  It is harmless and
-  kept as defence in depth for any future `dockercompose` app with a local-only tag.
+- **PATCH 1 — skipping `pull_docker_compose_images()` — is inert.**  That method is reached only
+  from `deploy_docker_compose_buildpack()`, where `build_pack` is `dockercompose`, so PATCH 1's
+  `build_pack === 'dockerfile'` condition cannot be true there (congress-trade's pull proceeds
+  unchanged, as deploy #4584 showed), and ST never reaches the method.  It is harmless and kept
+  only as defence in depth; nothing relies on it.
 
 Evidence that patch 2 is live on the real ST compose:
 
@@ -69,7 +71,7 @@ ST takes the `up --build -d` branch, where the default `missing` policy applies.
 ### The patch (two changes to the vendor job)
 
 1. `pull_docker_compose_images()` returns early for the Dockerfile build pack when no registry
-   image is configured.  Covers the `dockercompose` pack only; **no effect on ST.**
+   image is configured.  **Inert today** (see above): no effect on ST or on congress-trade.
 2. The generated compose gains `pull_policy: never` for any `production_image_name` with no `/`,
    gated on `build_pack === 'dockerfile'` and no configured `docker_registry_image_name`.
    **This is what protects ST.**  The gate matters because an official image such as

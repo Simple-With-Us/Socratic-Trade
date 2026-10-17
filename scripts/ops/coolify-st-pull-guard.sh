@@ -27,9 +27,10 @@
 #            pull/authorization errors.
 #
 #   PATCH 1  pull_docker_compose_images() returns early for the Dockerfile pack.
-#            Covers the `dockercompose` pack only and is a NO-OP for ST/UM, which never
-#            reach it.  Kept as defence in depth for a future dockercompose app that
-#            references a local-only tag.
+#            INERT today: that method is reached only from the dockercompose deploy path,
+#            where build_pack is `dockercompose`, so this `dockerfile` condition cannot be
+#            true there, and ST/UM never reach the method at all.  Kept as harmless
+#            defence in depth; do not rely on it to protect any app.
 #
 # The guard applies two minimal patches to the vendor file:
 #
@@ -224,7 +225,7 @@ cmd_verify() {
 
   echo "per application (PATCH 2 = pull_policy: never is what protects ST):"
   docker exec "$DB_CONTAINER" psql -U coolify -d coolify -tAF'|' -c \
-    "SELECT id, name, build_pack, CASE WHEN build_pack='dockerfile' AND COALESCE(docker_registry_image_name,'')='' THEN 'pull_policy:never set (PATCH 2)' ELSE 'unchanged (PATCH 1 guards this pack)' END FROM applications ORDER BY id;" 2>/dev/null \
+    "SELECT id, name, build_pack, CASE WHEN build_pack='dockerfile' AND COALESCE(docker_registry_image_name,'')='' THEN 'pull_policy:never set (PATCH 2)' ELSE 'pull proceeds (unchanged)' END FROM applications ORDER BY id;" 2>/dev/null \
     | sed 's/^/  /'
 
   echo "worker age (the guard is dormant until the worker is newer than the last apply):"

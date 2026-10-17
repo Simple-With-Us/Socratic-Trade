@@ -58,8 +58,9 @@ the registry answers no.  That is the 2026-09-25 5.3-minute P0 (board
 
 **The guard that protects ST is `pull_policy: never` in the generated
 compose.**  The companion change that skips `pull_docker_compose_images()`
-covers only the `dockercompose`-pack path (congress-trade and any future app
-using that pack) and is a no-op for ST/UM, which never reach it.
+is inert: that method is reached only from the `dockercompose` deploy path
+(congress-trade), where the change's `dockerfile` condition cannot be true, and
+ST/UM never reach it.  Do not count on it to protect any app.
 
 ```bash
 # run ON the Hetzner box as root
