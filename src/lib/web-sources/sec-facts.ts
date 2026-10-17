@@ -1,7 +1,7 @@
 import * as cheerio from "cheerio";
 import { z } from "zod";
 import { getDb } from "../db";
-import { politeFetch } from "./http";
+import { politeFetch, secUserAgent } from "./http";
 import { padCik } from "./sec-filings";
 import { timeSync } from "../slow-sync-guard";
 import crypto from "crypto";
@@ -109,7 +109,7 @@ export async function ingestCompanyFacts(cik: string): Promise<void> {
 
   try {
     const res = await politeFetch(url, {
-      headers: { "User-Agent": "Antigravity/1.0 (jay@socratic.trade)" }
+      headers: { "User-Agent": secUserAgent() }
     });
     if (!res.ok) {
       if (res.status === 404) return; // No facts available for CIK
