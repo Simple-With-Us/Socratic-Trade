@@ -204,7 +204,10 @@ jobs:
             ${{ runner.os }}-nextjs-
       - name: Run smoke tests
         if: needs.classify.outputs.docs-only != 'true' && inputs.update-visual-baselines != true
-        run: npm run test:e2e
+        run: |
+          npm run test:e2e
+          export PLAYWRIGHT_AUTH_SECRET="$(openssl rand -hex 32)"
+          npm run test:e2e:admin
       # Baseline regeneration lives in CI (not on a dev laptop/VM) because the
       # committed PNGs must match the CI browser + production build byte for byte:
       # local runs use a different Chromium build, different system fonts, and
