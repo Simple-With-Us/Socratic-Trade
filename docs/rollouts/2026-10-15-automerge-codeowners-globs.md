@@ -118,14 +118,57 @@ npm run build
 
 Lint passed with 0 errors (866 existing warnings); TypeScript passed; focused Vitest passed (21 tests); production build passed with existing Next.js warnings.  The `do-not-automerge` label is present, and auto-merge remains unarmed.  This work is ready for Jay's review after the final CI run.
 
+## CI follow-up (same day)
+
+Merged `origin/main` (`df7e6d10`, #4703 / #4708 / #4702) with a merge commit, then `3f4ef5e5` (#4698) with a second merge commit.  No rebase.  No force-push.  #4698 already changed the pin check the same way.  The second merge keeps main's `isGithubRateLimit` / `ctReadTokens` copy.  The disable-job and `NODE_ENV` fixes stay on this branch.  `git merge-tree --write-tree` was clean.  `STATUS.md` and `PLAN.md` union-merged.
+
+`check-pin` root cause, shared by every PR in the 2026-10-15 07:32-07:55 UTC window (money-path and otherwise, including `main`): `scripts/check-shared-package-pin.mjs` preferred `GH_PACKAGES_TOKEN` over the Actions `GITHUB_TOKEN`.  That secret is one user PAT for GitHub user 12656028.  Every concurrent pin check shares that user's REST budget.  When it is exhausted, `gh api` returns HTTP 403 `API rate limit exceeded for user ID 12656028` (this PR: request `D82C:1BBE27:4381472:DDDC128`, run `38699553078`).  The script then reported `cannot read private Congress.Trade vendor provenance; set GH_PACKAGES_TOKEN` even though the secret was set, Congress.Trade is public, and the ST and UM pins already matched at `v2.7.1` / `5084afb3`.  Money-path PRs keep re-entering that window because this gate refuses auto-merge, so they stay open and re-run the required check.  The fetch now tries the Actions token first and only then the user PAT.  A rate limit that survives both tokens is a retry message, not a missing-token message.  A real auth failure still names `GH_PACKAGES_TOKEN`.
+
+`verify-hosted` failed `tsc` on `test/disable-pr-automerge.test.ts:25` (`TS2769`).  Next.js makes `NODE_ENV` required on `NodeJS.ProcessEnv`.  The fake `gh` env now sets `NODE_ENV: "test"`.
+
+`disable-on-hold` and `disable-on-skip-automerge` (run `38699553074`) got `401 Bad credentials` on the elevated token, then `GraphQL: Resource not accessible by integration (disablePullRequestAutoMerge)` on the Actions token.  The job now reads `autoMergeRequest` with that token.  Null exits 0.  A non-null value exits 1.
+
+Touched again:
+
+- `scripts/check-shared-package-pin.mjs`
+- `scripts/disable-pr-automerge.sh`
+- `.github/workflows/shared-package-pin-check.yml`
+- `test/shared-package-pin-check.test.ts`
+- `test/disable-pr-automerge.test.ts`
+- `STATUS.md`, `PLAN.md`, this note
+
+```bash
+npx tsc --noEmit
+npx vitest run test/disable-pr-automerge.test.ts test/shared-package-pin-check.test.ts test/automerge-gate-dry-run.test.ts test/branch-protection-gate.test.ts test/pr-touches-codeowners-paths.test.ts
+npx eslint scripts/check-shared-package-pin.mjs test/disable-pr-automerge.test.ts test/shared-package-pin-check.test.ts
+```
+
+`tsc` exit 0.  Vitest 32 passed.  ESLint 0 errors on those files.
+
+## Port from #4727
+
+#4727 had the same gate plus two pieces this branch lacked.  Those are now here.
+
+- Each disable job sets `contents: write` and `pull-requests: write`.  The arm job stays read-only.  `test/branch-protection-gate.test.ts` locks the block and rejects `contents: write` on `auto-merge`.
+- `scripts/disable-pr-automerge.sh` reads `autoMergeRequest` with `gh pr view --jq` and prints `off`, `armed`, or `unreadable`.  `off` exits 0.  `armed` exits 1.  A failed read is `unreadable` and also exits 1, so a dead token is not reported as disarmed.
+
+Touched: `.github/workflows/auto-merge-prs.yml`, `scripts/disable-pr-automerge.sh`, `test/disable-pr-automerge.test.ts`, `test/branch-protection-gate.test.ts`, `STATUS.md`, `PLAN.md`, this note.
+
+Superseded on 2026-10-17: #4727 has since landed on `main`.  The workflow, `scripts/disable-pr-automerge.sh`, and `test/branch-protection-gate.test.ts` on this branch now match `main` byte for byte.  What this branch still adds over `main` is the `unreadable` read test in `test/disable-pr-automerge.test.ts` and this history.
+
 ## Next Steps & Blockers
 
 - PR stays open with `do-not-automerge`.  Do not enable auto-merge or merge.  After final CI is green, post that it is ready for Jay's review in the PR and ST-3326 Zulip topic.
 - ST-4393: `GH_PAT` / `SHEPHERD_TOKEN` still return 401.  Non-money-path arming stays a no-op until that secret is rotated.  An already-armed money-path PR fails the disable job instead of merging.
+- Merged `origin/main` `49a76da4` (#4695, congress webhook receipt) with no conflicts.  Docs-only union on `STATUS.md`.
+- PR #4697 stays ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
+- Leave ST-3326 In Progress until this has shipped.
+- 2026-10-17 CLAUDE sweep: merged `origin/main` (`1cbe9f06`, #4727) into this branch, which conflicted in this note and `test/disable-pr-automerge.test.ts`.  Resolved by keeping both sides.  #4697 is now almost fully covered by #4727 on `main`.  Jay can squash-merge the small remainder or close the PR as superseded.  `do-not-automerge` stays on and auto-merge is not armed.
 - No phase doc covers this workflow.  Nothing under `docs/phase-*.md` was updated.
 
 ## Zero-Code Findings
 
+- The first Agent-Sync `linear_claim` returned `not_configured` for CURSOR.  A later session confirmed `linear_whoami` is CURSOR, and the claim plus the progress comment with the PR link are on ST-3326 through Agent-Sync.  Zulip post returned `not_authorized` (no CURSOR Zulip key on the MCP host).
 - Agent-Sync `linear_claim` returns `not_configured` for CURSOR (`LINEAR_SEATS` is GROK-WEB only).  The claim was made with the board CLI as the Cursor Linear app.  Zulip post returned `not_authorized` (no CURSOR Zulip key on the MCP host).
 
 ## Merge-main (MM takeover, 2026-10-16)
