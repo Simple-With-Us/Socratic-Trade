@@ -1,8 +1,25 @@
 import { Alpaca } from "@alpacahq/alpaca-trade-api";
 import type { AlpacaClientOptions } from "@alpacahq/alpaca-trade-api";
+import { z } from "zod";
 import { ALPACA_BROKER_IO_DEADLINE_MS } from "./inflight-deadline";
 
 type AlpacaInstance = InstanceType<typeof Alpaca>;
+
+export const AlpacaLatestTradeSchema = z.object({
+  p: z.number().optional(),
+  t: z.union([z.string(), z.number(), z.date()]).optional()
+});
+export type AlpacaLatestTrade = z.infer<typeof AlpacaLatestTradeSchema>;
+
+export const AlpacaLatestTradesResponseSchema = z.object({
+  trades: z.record(z.string(), z.unknown()).optional()
+});
+export type AlpacaLatestTradesResponse = z.infer<typeof AlpacaLatestTradesResponseSchema>;
+
+function alpacaTradeTimestamp(value: AlpacaLatestTrade["t"]): string | number | undefined {
+  if (value instanceof Date) return value.toISOString();
+  return value;
+}
 
 /** v3-style constructor options used by {@link AlpacaBrokerGateway}. */
 export type LegacyAlpacaConstructorOptions = {
@@ -34,6 +51,7 @@ export type LegacyAlpacaRestClient = {
     until?: string;
   }): Promise<Record<string, unknown>[]>;
   getLatestQuotes(symbols: string[]): Promise<Record<string, Record<string, unknown>>>;
+  getLatestTrades?(symbols: string[]): Promise<Record<string, Record<string, unknown>>>;
   getAsset(symbol: string): Promise<Record<string, unknown>>;
   createOrder(options: Record<string, unknown>): Promise<Record<string, unknown>>;
   cancelOrder(orderId: string): Promise<void>;
@@ -160,6 +178,7 @@ type V5AlpacaSdk = {
   marketData: {
     stocks: {
       stockLatestQuotes: (req: { symbols: string }) => Promise<{ quotes?: Record<string, unknown> }>;
+      stockLatestTrades: (req: { symbols: string }) => Promise<{ trades?: Record<string, unknown> }>;
     };
   };
 };
@@ -210,6 +229,24 @@ export function createLegacyAlpacaRestClient(
         legacy[sym] = {
           ...q,
           t: q.t instanceof Date ? q.t.toISOString() : q.t
+        };
+      }
+      return legacy;
+    },
+    async getLatestTrades(symbols) {
+      if (symbols.length === 0) return {};
+      const resp = await stocks.stockLatestTrades({ symbols: symbols.join(",") });
+      const parsed = AlpacaLatestTradesResponseSchema.safeParse(resp);
+      if (!parsed.success) return {};
+      const book: AlpacaLatestTradesResponse = parsed.data;
+      const legacy: Record<string, Record<string, unknown>> = {};
+      for (const [sym, raw] of Object.entries(book.trades ?? {})) {
+        const trade = AlpacaLatestTradeSchema.safeParse(raw);
+        if (!trade.success) continue;
+        const row: AlpacaLatestTrade = trade.data;
+        legacy[sym] = {
+          p: row.p,
+          t: alpacaTradeTimestamp(row.t)
         };
       }
       return legacy;

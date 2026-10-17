@@ -407,16 +407,15 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
       }
     }
   }
-  // STALENESS GATE (OPENINGS only) — NEVER blocks and NEVER escalates to a pending card.
+  // STALENESS GATE (OPENINGS only) — never escalates to a pending card.
   // Primary path: the quote cascade must supply a trade-time within maxQuoteAgeSec (default 120s).
   // Venue-authoritative delayed feeds (Tradier sandbox): age the FETCH snapshot (`fetchedAt`), not
   // trade-time `asOf` — the ~15m delay is the venue's fill world, not a broken cascade.
   // Delayed Yahoo fallback (owner 2026-08-18): same rule — age the fetch, stamp
-  // user-facing "Delayed Quote" on the card, KEEP TRADING.  Do not fail-closed
-  // openings.  Do not skip Green/Red.  Do not write coordinator notes into rationale.
-  // Backup if data is still old/missing (should be rare once cascade is healthy): convert the order
-  // to a LIMIT at the proposal's intended entry (referencePrice / existing limit), so the price the
-  // strategy identified as worth buying/shorting is honored instead of chasing a stale market print.
+  // user-facing "Delayed Quote" on the card, KEEP TRADING when the observation time parses.
+  // A quote with no parseable provider observation is unknown age.  That opening is blocked.
+  // A known-old observation still converts to a LIMIT at the proposal's intended entry
+  // (referencePrice / existing limit), so the price the strategy identified is honored.
   // Timestamps are read from the run's MarketScan — never fabricated. Exits (sell/cover) are ungated.
   let quoteStaleMetadata: {
     ageSec?: number;
@@ -442,9 +441,11 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
     }
     if (maxQuoteAgeSec != null && maxQuoteAgeSec > 0) {
       const { ageSec, missing, venueDelayed } = quoteAgeSecForStalenessGate(scanQuote, now);
-      const isStale = missing || (ageSec !== undefined && ageSec > maxQuoteAgeSec);
-
-      if (isStale) {
+      if (missing) {
+        reasons.push(
+          `quote_age_unknown: ${symbol} quote has no provider observation time. The staleness gate is blocking this opening.`
+        );
+      } else if (ageSec !== undefined && ageSec > maxQuoteAgeSec) {
         const originalType = proposal.type;
         const originalLimitPrice = proposal.limitPrice;
 

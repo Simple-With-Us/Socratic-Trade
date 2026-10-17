@@ -38,11 +38,51 @@ rolling / zero-downtime (two Litestream writers).  Docker HEALTHCHECK is
 is `running:unhealthy` and Cloudflare `no available server` (7:22–7:43pm
 CT after #2810 on 2026-08-17).  Do not add the latch to
 `scripts/coolify-prod-start.sh`.  Do not `FORCE_RESTORE`.  Do not bounce
-the live box from an agent.  This repo does not PATCH live Coolify.
+the live box from an agent.  This repo does not PATCH live Coolify — with
+exactly one documented exception, the **st-pull-guard** below.
+
+### The one sanctioned Coolify patch: `st-pull-guard`
+
+ST and UM use Coolify's **Dockerfile build pack**, so the image is built on
+the box and tagged `{application_uuid}:{commit}`.  That name has no registry
+prefix and no copy in any registry, and Docker resolves it as
+`docker.io/library/<uuid>`.
+
+The 2026-09-25 P0 came from **`docker compose up` itself**, not from a
+pre-flight pull.  ST goes through `deploy_dockerfile_buildpack()`, which never
+calls `pull_docker_compose_images()`.  Compose's default `pull_policy` is
+`missing`, so when the built tag is not local, `up` reaches for a registry; and
+because Coolify stops the old container first, production is already down when
+the registry answers no.  That is the 2026-09-25 5.3-minute P0 (board
+`2c6a6a53`, Linear ST-3707).
+
+**The guard that protects ST is `pull_policy: never` in the generated
+compose.**  The companion change that skips `pull_docker_compose_images()`
+is inert: that method is reached only from the `dockercompose` deploy path
+(congress-trade), where the change's `dockerfile` condition cannot be true, and
+ST/UM never reach it.  Do not count on it to protect any app.
+
+```bash
+# run ON the Hetzner box as root
+scripts/ops/coolify-st-pull-guard.sh apply    # idempotent
+scripts/ops/coolify-st-pull-guard.sh verify
+scripts/ops/coolify-st-pull-guard.sh revert
+scripts/ops/coolify-st-pull-guard.selftest.sh # proves anchors still match a pristine file
+```
+
+It edits a **vendor PHP file inside the `coolify` container** and is therefore
+wiped by any Coolify container recreate or upgrade.  Re-run `--apply` after any
+Coolify version change and confirm with `--verify`.  **Do not add a Docker Hub
+credential to this host to "fix" this.**  There is no `/root/.docker/config.json`
+by design: an authenticated pull of a repo that does not exist returns
+`pull access denied, insufficient_scope` (the exact 2026-09-25 signature) while
+fixing nothing, so credential-less is the correct state for a local-only tag.
+Do not set `pull_policy` to anything that pulls on this app.
 
 Canonical detail:
 
 - `docs/rollouts/2026-07-10-auto-deploy-on.md`
+- `docs/rollouts/2026-10-15-coolify-st-pull-guard.md` (the registry-pull guard)
 - `docs/rollouts/2026-08-18-rth-deploy-latch.md` (weekday RTH build latch)
 - `docs/rollouts/2026-08-07-hetzner-fleet-cutover.md` (and ops follow-up notes)
 - `docs/rollouts/2026-08-02-deploy-webhook-secret-repair.md` (webhook signature drift)
