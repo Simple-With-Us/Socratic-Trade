@@ -129,9 +129,11 @@ Merged `origin/main` again at `d1053ad6`.  Three quote-path conflicts came from 
 
 Verification after the `d1053ad6` merge.  `npm run lint` exit 0 (0 errors, 871 grandfathered warnings).  `npx tsc --noEmit` printed no diagnostics.  `npx vitest run` over quote-observation, staleness-gate, quotes-cascade, tradier, alpaca-nbbo-mid, alpaca-sdk-client-timeout, chat-draft-policy, data-providers, keyless-options-enrichment, placement-reconcile, etoro-boundary-schema, inflight-deadline, the kalshi suites, and the two scheduler inflight-guard suites: 19 files, 434 passed, 9 skipped.  #4715's own tests (protective-lane-isolation, robinhood-orders-error-throws, synthetic-stops, etoro-boundary-schema): 4 files, 85 passed.  `src/lib/alpaca.ts`, `robinhood.ts`, and `tradier.ts` auto-merged with only deadline and page-cap changes, and a grep found no restored `fillMissingQuotesWithClose` on a quote read, no `?? 0.5` price, and no Tradier `venuePriceAuthoritative`.
 
+Merged `origin/main` again at `1cbe9f06` (2026-10-17 sweep, PR #4718).  Clean merge: only `PLAN.md` and `STATUS.md` were touched on both sides and both auto-merged.  No quote-path file changed on main since the last merge.  `npx tsc --noEmit` printed no diagnostics.  `npm run lint` exit 0 (0 errors, 873 grandfathered warnings).  `npx vitest run` over quote-observation, staleness-gate, quotes-cascade, tradier, alpaca-nbbo-mid, alpaca-sdk-client-timeout, chat-draft-policy, data-providers, keyless-options-enrichment, keyless-options-vendor-fetch, placement-reconcile, order-confirmation-status, approval-limit-reprice, branch-protection-gate, proxy-use-log, and persistence-hardening: 16 files, 446 passed, 9 skipped.  Kalshi orders use `evaluateKalshiOrderPolicy`, not `evaluateTradeProposal`, so the unknown-age gate does not touch them.  Owner ruling 2026-10-17 is to merge unless the owner is needed.  `do-not-automerge` only stops auto-merge, so the sweep squash-merges directly after green CI.
+
 ## Next Steps & Blockers
 
-Open the PR ready for review.  Add `do-not-automerge`.  Do not enable auto-merge.  Post the PR link on ST-2584.  Leave the issue In Progress until merge.
+Squash-merge PR #4718 once CI is green, then move ST-2584 to Completed with a one-line deploy note.
 
 ## Zero-Code Findings
 
