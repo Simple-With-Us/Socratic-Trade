@@ -5,6 +5,7 @@ import "server-only";
 import { getDb } from "./db";
 import {
   getLastEnrichmentCoverageReport,
+  sanitizeEnrichmentCoverageReport,
   type EnrichmentCoverageReport,
   type EnrichmentFieldCoverage
 } from "./enrichment-coverage";
@@ -107,7 +108,8 @@ function pruneOldRuns(database: ReturnType<typeof getDb>): void {
 
 /** In-memory last report from the current process, else the latest durable row. */
 export function resolveEnrichmentCoverageReport(): EnrichmentCoverageReport | null {
-  return getLastEnrichmentCoverageReport() ?? loadLatestEnrichmentCoverageReport();
+  const raw = getLastEnrichmentCoverageReport() ?? loadLatestEnrichmentCoverageReport();
+  return raw ? sanitizeEnrichmentCoverageReport(raw) : null;
 }
 
 export function loadLatestEnrichmentCoverageReport(): EnrichmentCoverageReport | null {
