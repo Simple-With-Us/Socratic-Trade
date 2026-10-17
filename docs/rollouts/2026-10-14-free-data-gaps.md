@@ -244,7 +244,7 @@ rationale (the rule's justified-passthrough limb, not an omission) and the
 the same defect class fixed in `STATUS.md` last round: the verification block
 above still printed the literal `OPENROUTER_API_KEY` prefix.  It now reads
 `(value redacted)`, matching `STATUS.md:73` and removing the inconsistency with
-the follow-up section below.  Full-repo search for `sk-cp` returns zero hits.
+the follow-up section below.  A full-repo search for the key prefix returns zero hits.
 This branch is squash-merged per protocol, so the intermediate commits that
 carried the prefix collapse away; under a history-preserving merge the prefix
 would stay reachable and the key should be rotated.
@@ -261,3 +261,19 @@ No credential material was exposed either way — a provider prefix with nothing
 after it is not a key — but the point of the finding is that credential-shaped
 strings should not be committed at all, and leaving it would simply earn the
 same finding again on the next review.
+
+## Merge-main and the search sentence that named the prefix (CLAUDE, 2026-10-16)
+
+Merged `origin/main` (`d1053ad69`) with no conflicts.  The main side touched
+`src/lib/db.ts`, `src/lib/strategy.ts` and the new `sqlite-slow-timing` module,
+none of which this PR changes.
+
+Two prose sentences, one above in this note and one in `STATUS.md`, still
+printed the literal key prefix inside "a full-repo search for ... returns zero
+hits".  That repeated the defect and made the claim false.  Both now say "the
+key prefix", and `git grep` for it over the merged tree returns nothing.
+
+Verification: `git grep` over the merged tree (zero hits) and a conflict-marker
+grep on the touched files (none).  The lane has no `node_modules`, and this is a
+docs-only change on top of a conflict-free merge, so lint, `tsc`, `npm test` and
+`npm run build` run in hosted `verify` on push.

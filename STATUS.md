@@ -1,8 +1,14 @@
+## 2026-10-16 CLAUDE (PR sweep) — PR #4661 merge-main and the last literal key prefix
+
+**What.**  Merged `origin/main` (`d1053ad69`, #4784 and #4739) into `cursor/free-data-gaps-55d1` with no conflicts; the main side touched only `db.ts`, `strategy.ts` and `sqlite-slow-timing`, none of which this PR changes.  Two prose sentences in this file and in `docs/rollouts/2026-10-14-free-data-gaps.md` still printed the literal key prefix inside "a full-repo search for ... returns zero hits", which repeated the defect and made the claim false.  Both now say "the key prefix", and `git grep` for it over the merged tree returns nothing.  No code change.
+
+**Left open.**  Kody's 2026-10-16 `CHANGES_REQUESTED` review stands; Kody has re-reviewed this head as "no issues" but has never submitted an approval on this repo, and `dismiss_stale_reviews_on_push` is false.  Clearing it needs the owner.
+
 ## 2026-10-16 CLAUDE (autofix) — PR #4661 review round, last API-key prefix in the rollout note
 
 **What.**  Third autofix round on PR #4661 (`cursor/free-data-gaps-55d1`).  Kody's re-review confirmed the two previously-open threads as addressed with no further code change: the `.passthrough()` justification on `TwelveDataTimeSeriesSchema` (the rule's "justified passthrough" limb is met — rationale recorded above both schemas and the known `meta` block modelled explicitly, so `.strict()` was correctly declined rather than omitted) and the `PLAN.md` Tradier sandbox entry naming PR #4685 plus `no board reservation on file`.
 
-It surfaced one genuinely new item, and it is the same defect class already fixed in `STATUS.md` last round: the verification block in `docs/rollouts/2026-10-14-free-data-gaps.md:181` still printed the literal prefix of the sandbox `OPENROUTER_API_KEY`.  A prefix is still secret material — it identifies the issuer and credential family and is permanent once merged.  That line now reads `(value redacted)`, matching `STATUS.md:73`, which also removes the internal inconsistency Kody flagged (the rollout note's own follow-up section already claimed `STATUS.md` was redacted).  A full-repo search for `sk-cp` now returns zero hits.
+It surfaced one genuinely new item, and it is the same defect class already fixed in `STATUS.md` last round: the verification block in `docs/rollouts/2026-10-14-free-data-gaps.md:181` still printed the literal prefix of the sandbox `OPENROUTER_API_KEY`.  A prefix is still secret material — it identifies the issuer and credential family and is permanent once merged.  That line now reads `(value redacted)`, matching `STATUS.md:73`, which also removes the internal inconsistency Kody flagged (the rollout note's own follow-up section already claimed `STATUS.md` was redacted).  A full-repo search for the key prefix now returns zero hits.
 
 **Rotation note for the maintainer.**  This branch is squash-merged per repo protocol, so clearing the working tree collapses away the intermediate commits that carried the prefix.  If it is ever merged with history preserved, the prefix stays reachable in branch commits and the key should be treated as exposed and rotated.
 
