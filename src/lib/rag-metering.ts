@@ -210,7 +210,8 @@ export function meterEmbed(
   model?: string,
   userId?: string,
   provider: RagEmbedRerankProvider = "openrouter",
-  providerRequestId?: string
+  providerRequestId?: string,
+  batchCount?: number
 ): void {
   const tokens = approxTokens(texts);
   recordRagUsage({
@@ -221,7 +222,7 @@ export function meterEmbed(
       model ||
       (provider === "openrouter" ? "baai/bge-m3" : "BAAI/bge-m3"),
     tokensIn: tokens,
-    batchCount: texts.length,
+    batchCount: batchCount ?? texts.length,
     providerRequestId
   });
 }

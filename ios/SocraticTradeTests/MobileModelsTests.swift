@@ -856,10 +856,9 @@ final class MobileModelsTests: XCTestCase {
         store.bindProposalCommand(proposalId: "proposal-1", commandId: "cmd-busy")
 
         let feedback = store.proposalActionFeedback(proposalId: "proposal-1")
-        XCTAssertEqual(feedback, .placementSettled(
+        XCTAssertEqual(feedback, .retryable(
             action: .approve,
-            status: "busy",
-            reasons: ["A strategy run is in progress."]
+            message: "A strategy run is in progress."
         ))
     }
 

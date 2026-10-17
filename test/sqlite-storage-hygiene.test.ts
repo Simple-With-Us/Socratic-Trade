@@ -262,7 +262,7 @@ describe("storage hygiene against a database", () => {
       old
     );
     const { buildOpsSnapshot } = await import("../src/lib/ops-snapshot");
-    const snapshot = buildOpsSnapshot();
+    const snapshot = await buildOpsSnapshot();
     expect(snapshot.storageHygiene?.generatedAt).toBe(report.generatedAt);
     expect(snapshot.storageHygiene?.estimates).toEqual([]);
     expect(count(db, "api_health_log")).toBe(3);

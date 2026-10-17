@@ -198,7 +198,10 @@ export interface TaskJournalLaneSummary {
 }
 
 /** Per-lane aggregate over a lookback window — the ops-snapshot "task brain" view. */
-export function getTaskJournalSummary(sinceIso: string): TaskJournalLaneSummary[] {
+export function getTaskJournalSummary(
+  sinceIso: string,
+  opts: { skipLastStatus?: boolean } = {}
+): TaskJournalLaneSummary[] {
   try {
     const rows = getDb()
       .prepare(
@@ -225,11 +228,14 @@ export function getTaskJournalSummary(sinceIso: string): TaskJournalLaneSummary[
       lastStartedAt: string | null;
     }>;
     return rows.map((row) => {
-      const last = getDb()
-        .prepare(
-          "SELECT status FROM task_journal WHERE task_name = ? AND started_at = ? ORDER BY rowid DESC LIMIT 1"
-        )
-        .get(row.taskName, row.lastStartedAt) as { status: TaskJournalStatus } | undefined;
+      const last =
+        opts.skipLastStatus || !row.lastStartedAt
+          ? undefined
+          : (getDb()
+              .prepare(
+                "SELECT status FROM task_journal WHERE task_name = ? AND started_at = ? ORDER BY rowid DESC LIMIT 1"
+              )
+              .get(row.taskName, row.lastStartedAt) as { status: TaskJournalStatus } | undefined);
       return {
         taskName: row.taskName,
         fires: row.fires,

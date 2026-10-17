@@ -9,7 +9,10 @@ import { getTaskJournalSummary } from "./db-task-journal";
 import { userHasAnyLlmCredential } from "./db-api-keys";
 import { resolveLlmEndpoint } from "./llm-provider";
 import { computeAccountTradingLiveness } from "./trading-liveness";
-import { resolveEnrichmentCoverageReport } from "./db-enrichment-coverage";
+import { loadLatestEnrichmentCoverageReport } from "./db-enrichment-coverage";
+import { getLastEnrichmentCoverageReport } from "./enrichment-coverage";
+import { opsMarketScanRecordSummary, type OpsMarketScanRecordSummary } from "./market-scan-freshness";
+import { yieldEventLoop } from "./slow-sync-guard";
 import { pineconeMonthToDateWriteUnits } from "./pinecone-monthly-pace";
 import { pineconeTrialState } from "./pinecone-trial-window";
 import { pineconeWuExhaustedUntil } from "./pinecone-wu-breaker";
@@ -23,30 +26,43 @@ import { summarizeRoicArchiveCoverage } from "./web-sources/roic-transcripts";
 import { peekRoicArtifactFileCount, refreshRoicArtifactFileCount } from "./roic-archive-artifacts";
 import { readCachedStorageHygieneReport, type StorageHygieneReport } from "./sqlite-storage-hygiene";
 
+const LITESTREAM_AGE_CACHE_MS = 60_000;
+let litestreamAgeCache: { ageSeconds: number | null; expiresAt: number } | undefined;
+
+/** Bounded walk (max depth 3) with a 60s cache — full-tree readdir was minutes on prod. */
 function getLitestreamLastSyncAge(dbPath: string): number | null {
+  const now = Date.now();
+  if (litestreamAgeCache && litestreamAgeCache.expiresAt > now) {
+    return litestreamAgeCache.ageSeconds;
+  }
   const litestreamDir = `${dbPath}-litestream`;
   try {
     let newestMs = 0;
-    const findNewest = (dir: string) => {
+    const visit = (dir: string, depth: number) => {
+      if (depth > 3) return;
       const files = readdirSync(dir);
       for (const file of files) {
         const fullPath = join(dir, file);
         const stat = statSync(fullPath);
         if (stat.isDirectory()) {
-          findNewest(fullPath);
-        } else {
-          if (stat.mtimeMs > newestMs) {
-            newestMs = stat.mtimeMs;
-          }
+          visit(fullPath, depth + 1);
+        } else if (stat.mtimeMs > newestMs) {
+          newestMs = stat.mtimeMs;
         }
       }
     };
-    findNewest(litestreamDir);
-    if (newestMs === 0) return null;
-    return Math.round((Date.now() - newestMs) / 1000);
+    visit(litestreamDir, 0);
+    const ageSeconds = newestMs === 0 ? null : Math.round((now - newestMs) / 1000);
+    litestreamAgeCache = { ageSeconds, expiresAt: now + LITESTREAM_AGE_CACHE_MS };
+    return ageSeconds;
   } catch {
+    litestreamAgeCache = { ageSeconds: null, expiresAt: now + LITESTREAM_AGE_CACHE_MS };
     return null;
   }
+}
+
+export function resetOpsSnapshotLitestreamAgeCacheForTests(): void {
+  litestreamAgeCache = undefined;
 }
 
 const OPS_AUDIT_KINDS = new Set([
@@ -148,9 +164,28 @@ export interface OpsUserSnapshot {
    *  false, every restart or deploy halts this user's running accounts and ends any broker
    *  auto-pause, and nothing re-arms them by itself (lane h5). */
   autoResumeOnBoot: boolean;
+  /** Latest persisted market scan metadata (no scan payload). */
+  marketScan: OpsMarketScanRecordSummary;
   accounts: OpsAccountSnapshot[];
   recentRuns: OpsStrategyRunRow[];
   recentAudit: OpsAuditRow[];
+}
+
+export interface OpsSnapshotSectionTimingsMs {
+  total: number;
+  scheduler: number;
+  users: number;
+  dependencies: number;
+  enrichmentCoverage: number;
+  roicArchive: number;
+  storage: number;
+  taskJournal: number;
+  pineconeIngest: number;
+}
+
+export interface OpsSnapshotBuildMeta {
+  cacheHit: boolean;
+  cacheTtlSeconds: number;
 }
 
 export interface OpsRoicArchiveCoverage {
@@ -171,6 +206,9 @@ export interface OpsRoicArchiveCoverage {
 
 export interface OpsSnapshot {
   asOf: string;
+  /** Wall-clock section timings for the build that produced this snapshot (diagnostics only). */
+  timingsMs?: OpsSnapshotSectionTimingsMs;
+  buildMeta?: OpsSnapshotBuildMeta;
   schedulerLastTick: string | null;
   schedulerAgeSeconds: number | null;
   /** ROIC Individual local archive (SQLite + artifacts).  No vendor HTTP. */
@@ -288,54 +326,75 @@ function sanitizeAuditDetail(kind: string, payload: unknown): string {
   return ids.length > 0 ? `${semantic} (${ids.join(" ")})` : semantic;
 }
 
-function listOpsStrategyRuns(userId: string, limit: number, labels: Map<string, string>): OpsStrategyRunRow[] {
-  type Raw = {
-    id: string;
-    started_at: string;
-    finished_at: string | null;
-    status: string;
-    summary: string | null;
-    connected_account_id: string | null;
-    placed_count: number;
-    paper_count: number;
-    blocked_count: number;
-    proposed_count: number;
-  };
+type StrategyRunListRow = {
+  id: string;
+  started_at: string;
+  finished_at: string | null;
+  status: string;
+  summary: string | null;
+  connected_account_id: string | null;
+};
+
+type ProposalCountRow = {
+  run_id: string;
+  placed_count: number;
+  paper_count: number;
+  blocked_count: number;
+  proposed_count: number;
+};
+
+function proposalCountsByRunId(runIds: string[]): Map<string, ProposalCountRow> {
+  const map = new Map<string, ProposalCountRow>();
+  if (runIds.length === 0) return map;
+  const placeholders = runIds.map(() => "?").join(", ");
   const rows = getDb()
     .prepare(
-      `SELECT
-        sr.id,
-        sr.started_at,
-        sr.finished_at,
-        sr.status,
-        sr.summary,
-        sr.connected_account_id,
-        COUNT(CASE WHEN tp.status IN ('placed', 'filled') THEN 1 END) AS placed_count,
-        COUNT(CASE WHEN tp.status = 'paper' THEN 1 END) AS paper_count,
-        COUNT(CASE WHEN tp.status = 'blocked' THEN 1 END) AS blocked_count,
-        COUNT(CASE WHEN tp.status = 'proposed' THEN 1 END) AS proposed_count
-       FROM strategy_runs sr
-       LEFT JOIN trade_proposals tp ON tp.run_id = sr.id
-       WHERE sr.user_id = ?
-       GROUP BY sr.id
-       ORDER BY sr.started_at DESC
+      `SELECT run_id,
+        SUM(CASE WHEN status IN ('placed', 'filled') THEN 1 ELSE 0 END) AS placed_count,
+        SUM(CASE WHEN status = 'paper' THEN 1 ELSE 0 END) AS paper_count,
+        SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) AS blocked_count,
+        SUM(CASE WHEN status = 'proposed' THEN 1 ELSE 0 END) AS proposed_count
+       FROM trade_proposals
+       WHERE run_id IN (${placeholders})
+       GROUP BY run_id`
+    )
+    .all(...runIds) as ProposalCountRow[];
+  for (const row of rows) {
+    map.set(row.run_id, row);
+  }
+  return map;
+}
+
+function listOpsStrategyRuns(userId: string, limit: number, labels: Map<string, string>): OpsStrategyRunRow[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT id, started_at, finished_at, status, summary, connected_account_id
+       FROM strategy_runs
+       WHERE user_id = ?
+       ORDER BY started_at DESC
        LIMIT ?`
     )
-    .all(userId, limit) as Raw[];
+    .all(userId, limit) as StrategyRunListRow[];
 
-  return rows.map((row) => ({
-    id: row.id,
-    startedAt: row.started_at,
-    finishedAt: row.finished_at,
-    status: row.status,
-    summary: row.summary,
-    connectedAccountId: row.connected_account_id,
-    accountLabel: row.connected_account_id ? labels.get(row.connected_account_id) ?? null : null,
-    placedCount: row.placed_count,
-    paperCount: row.paper_count,
-    blockedCount: row.blocked_count,
-    proposedCount: row.proposed_count
-  }));
+  const counts = proposalCountsByRunId(rows.map((row) => row.id));
+  const zeroCounts = { placed_count: 0, paper_count: 0, blocked_count: 0, proposed_count: 0 };
+
+  return rows.map((row) => {
+    const c = counts.get(row.id) ?? zeroCounts;
+    return {
+      id: row.id,
+      startedAt: row.started_at,
+      finishedAt: row.finished_at,
+      status: row.status,
+      summary: row.summary,
+      connectedAccountId: row.connected_account_id,
+      accountLabel: row.connected_account_id ? labels.get(row.connected_account_id) ?? null : null,
+      placedCount: c.placed_count,
+      paperCount: c.paper_count,
+      blockedCount: c.blocked_count,
+      proposedCount: c.proposed_count
+    };
+  });
 }
 
 function listOpsAudit(userId: string, limit: number, labels: Map<string, string>): OpsAuditRow[] {
@@ -391,15 +450,38 @@ function safeAutoResumeOnBoot(userId: string): boolean {
   }
 }
 
-export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: number } = {}): OpsSnapshot {
+export type BuildOpsSnapshotInput = { runsPerUser?: number; auditPerUser?: number };
+
+function sectionMs(started: number): number {
+  return Date.now() - started;
+}
+
+export async function buildOpsSnapshot(input: BuildOpsSnapshotInput = {}): Promise<OpsSnapshot> {
   const runsPerUser = input.runsPerUser ?? 20;
   const auditPerUser = input.auditPerUser ?? 40;
+  const buildStarted = Date.now();
+  const timings: OpsSnapshotSectionTimingsMs = {
+    total: 0,
+    scheduler: 0,
+    users: 0,
+    dependencies: 0,
+    enrichmentCoverage: 0,
+    roicArchive: 0,
+    storage: 0,
+    taskJournal: 0,
+    pineconeIngest: 0
+  };
+
+  const schedulerStarted = Date.now();
   const lastTick = getInternalSetting<string>("scheduler:lastTick");
   const tickMs = lastTick ? Date.parse(lastTick) : Number.NaN;
+  timings.scheduler = sectionMs(schedulerStarted);
 
+  const usersStarted = Date.now();
   const users: OpsUserSnapshot[] = [];
   for (const userId of listUsers()) {
     const labels = accountLabelById(userId);
+    const marketScan = opsMarketScanRecordSummary(userId);
     const accounts: OpsAccountSnapshot[] = listConnectedAccounts(userId).map((account) => {
       try {
         const policy = peekPolicy(userId, account.id);
@@ -477,12 +559,16 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
       userId,
       llmAnyProviderConfigured: userHasAnyLlmCredential(userId),
       autoResumeOnBoot: safeAutoResumeOnBoot(userId),
+      marketScan,
       accounts,
       recentRuns: listOpsStrategyRuns(userId, runsPerUser, labels),
       recentAudit: listOpsAudit(userId, auditPerUser, labels)
     });
+    await yieldEventLoop();
   }
+  timings.users = sectionMs(usersStarted);
 
+  const dependenciesStarted = Date.now();
   const dependencies: Record<string, { ok: boolean; reason?: string | null; lastFailure?: string | null }> = {};
   try {
     const summaries = getServiceHealthSummaries();
@@ -498,7 +584,9 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
       };
     }
   } catch {}
+  timings.dependencies = sectionMs(dependenciesStarted);
 
+  const pineconeStarted = Date.now();
   let pineconeIngest: OpsSnapshot["pineconeIngest"];
   try {
     const mtd = pineconeMonthToDateWriteUnits();
@@ -521,7 +609,9 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
   } catch {
     pineconeIngest = undefined;
   }
+  timings.pineconeIngest = sectionMs(pineconeStarted);
 
+  const storageStarted = Date.now();
   let storage: Record<string, unknown> | null = null;
   try {
     const dbPath = databasePath();
@@ -556,6 +646,7 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
       litestreamAgeSeconds
     };
   } catch {}
+  timings.storage = sectionMs(storageStarted);
 
   let storageHygiene: StorageHygieneReport | null = null;
   try {
@@ -564,9 +655,10 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
     storageHygiene = null;
   }
 
+  const coverageStarted = Date.now();
   let enrichmentCoverage: OpsSnapshot["enrichmentCoverage"] = null;
   try {
-    const report = resolveEnrichmentCoverageReport();
+    const report = getLastEnrichmentCoverageReport() ?? loadLatestEnrichmentCoverageReport();
     if (report) {
       enrichmentCoverage = {
         asOf: report.asOf,
@@ -584,7 +676,9 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
   } catch {
     enrichmentCoverage = null;
   }
+  timings.enrichmentCoverage = sectionMs(coverageStarted);
 
+  const roicStarted = Date.now();
   let roicArchive: OpsRoicArchiveCoverage | null = null;
   try {
     // The directory walk yields off this request.  The snapshot reports the last
@@ -596,6 +690,14 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
   } catch {
     roicArchive = null;
   }
+  timings.roicArchive = sectionMs(roicStarted);
+
+  const taskJournalStarted = Date.now();
+  const taskJournal = getTaskJournalSummary(new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString(), {
+    skipLastStatus: true
+  });
+  timings.taskJournal = sectionMs(taskJournalStarted);
+  timings.total = sectionMs(buildStarted);
 
   let congressInboundPush: OpsSnapshot["congressInboundPush"] = null;
   try {
@@ -615,6 +717,7 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
 
   return {
     asOf: new Date().toISOString(),
+    timingsMs: timings,
     congressInboundPush,
     schedulerLastTick: lastTick ?? null,
     schedulerAgeSeconds: Number.isFinite(tickMs) ? Math.round((Date.now() - tickMs) / 1000) : null,
@@ -623,10 +726,72 @@ export function buildOpsSnapshot(input: { runsPerUser?: number; auditPerUser?: n
     storageHygiene,
     enrichmentCoverage,
     roicArchive,
-    taskJournal: getTaskJournalSummary(new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString()),
+    taskJournal,
     pineconeIngest,
     users
   };
+}
+
+const OPS_SNAPSHOT_CACHE_TTL_MS = 45_000;
+
+type OpsSnapshotCacheEntry = { expiresAt: number; value: OpsSnapshot };
+const opsSnapshotCache = new Map<string, OpsSnapshotCacheEntry>();
+const opsSnapshotInFlight = new Map<string, Promise<OpsSnapshot>>();
+
+function opsSnapshotCacheKey(input: BuildOpsSnapshotInput): string {
+  return `${input.runsPerUser ?? 20}\0${input.auditPerUser ?? 40}`;
+}
+
+/** Caller-owned snapshot.  `attachOpsOrderSummaries` assigns `account.orders` on the
+ *  object it receives.  A shallow copy of the cache entry still shares `users[]`, so
+ *  each return copies users and accounts before anyone can mutate them. */
+function opsSnapshotForCaller(snapshot: OpsSnapshot, buildMeta: OpsSnapshotBuildMeta): OpsSnapshot {
+  return {
+    ...snapshot,
+    buildMeta: { ...buildMeta },
+    users: snapshot.users.map((user) => ({
+      ...user,
+      accounts: user.accounts.map((account) => ({ ...account }))
+    }))
+  };
+}
+
+/** Cached wrapper — 45s TTL, single-flight per (runs, audit) limits prod hammering. */
+export async function getOrBuildOpsSnapshot(input: BuildOpsSnapshotInput = {}): Promise<OpsSnapshot> {
+  const key = opsSnapshotCacheKey(input);
+  const now = Date.now();
+  const ttlSeconds = Math.round(OPS_SNAPSHOT_CACHE_TTL_MS / 1_000);
+  const hit = opsSnapshotCache.get(key);
+  if (hit && hit.expiresAt > now) {
+    return opsSnapshotForCaller(hit.value, { cacheHit: true, cacheTtlSeconds: ttlSeconds });
+  }
+
+  let pending = opsSnapshotInFlight.get(key);
+  if (!pending) {
+    pending = (async () => {
+      try {
+        const value = await buildOpsSnapshot(input);
+        const withMeta: OpsSnapshot = {
+          ...value,
+          buildMeta: { cacheHit: false, cacheTtlSeconds: ttlSeconds }
+        };
+        opsSnapshotCache.set(key, { expiresAt: Date.now() + OPS_SNAPSHOT_CACHE_TTL_MS, value: withMeta });
+        return withMeta;
+      } finally {
+        opsSnapshotInFlight.delete(key);
+      }
+    })();
+    opsSnapshotInFlight.set(key, pending);
+  }
+
+  const built = await pending;
+  return opsSnapshotForCaller(built, built.buildMeta ?? { cacheHit: false, cacheTtlSeconds: ttlSeconds });
+}
+
+export function resetOpsSnapshotCacheForTests(): void {
+  opsSnapshotCache.clear();
+  opsSnapshotInFlight.clear();
+  resetOpsSnapshotLitestreamAgeCacheForTests();
 }
 
 const DEFAULT_ORDERS_TIMEOUT_MS = 8_000;

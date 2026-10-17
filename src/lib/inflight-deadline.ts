@@ -35,6 +35,88 @@ export const ALPACA_BROKER_IO_DEADLINE_MS = 30_000;
 export const TRADIER_BROKER_IO_DEADLINE_MS = 30_000;
 /** Default terminal-order lookback for scoped getEquityOrders (open + recent closed). */
 export const EQUITY_ORDERS_TERMINAL_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+/** Hard page cap for any broker order listing, including an explicit full-history walk. */
+export const BROKER_ORDER_PAGE_CAP = 50;
+/** Hard row cap after a scoped (or full-history) order listing is assembled. */
+export const BROKER_ORDER_LIST_CAP = 500;
+/** Symbols per broker quote request.  One unbounded ticker list has been rejected in production. */
+export const BROKER_QUOTE_SYMBOL_CAP = 25;
+/**
+ * Strategy-run broker snapshot ceiling.  Above the 30s lane deadline so a read that is
+ * still inside its own budget can finish, and still short enough that a hung socket
+ * fails the run instead of leaving it `running`.
+ */
+export const STRATEGY_BROKER_SNAPSHOT_DEADLINE_MS = 45_000;
+
+export function brokerAbortSignal(caller?: AbortSignal, ms = ALPACA_BROKER_IO_DEADLINE_MS): AbortSignal {
+  const timeout = AbortSignal.timeout(ms);
+  if (!caller) return timeout;
+  if (caller.aborted) return caller;
+  if (typeof AbortSignal.any === "function") return AbortSignal.any([caller, timeout]);
+  return timeout;
+}
+
+/** Unique symbols, split so one quote request cannot carry the whole universe. */
+export function chunkBrokerSymbols(symbols: readonly string[], cap = BROKER_QUOTE_SYMBOL_CAP): string[][] {
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const symbol of symbols) {
+    const key = symbol.trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(key);
+  }
+  const size = Math.max(1, cap);
+  const chunks: string[][] = [];
+  for (let i = 0; i < unique.length; i += size) chunks.push(unique.slice(i, i + size));
+  return chunks;
+}
+
+/**
+ * Keep every live order, drop terminal orders older than the since-window, and stop at
+ * BROKER_ORDER_LIST_CAP.  `fullHistory` skips the since-window and still hits the row cap.
+ */
+export function scopeBrokerOrders<T extends { state?: string | null; createdAt?: string | null }>(
+  orders: readonly T[],
+  options: { since?: string; fullHistory?: boolean } | undefined,
+  isLive: (state: string) => boolean
+): T[] {
+  const sinceMs = Date.parse(options?.since ?? equityOrdersDefaultSinceIso());
+  const scoped = options?.fullHistory
+    ? orders
+    : orders.filter((order) => {
+        if (isLive(String(order.state ?? ""))) return true;
+        const createdMs = Date.parse(order.createdAt ?? "");
+        return Number.isFinite(sinceMs) && Number.isFinite(createdMs) && createdMs >= sinceMs;
+      });
+  return scoped.slice(0, BROKER_ORDER_LIST_CAP);
+}
+
+/** Reject when `signal` aborts, without waiting for a transport that ignores cancellation. */
+export function rejectIfAborted<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    const reason = signal.reason;
+    return Promise.reject(reason instanceof Error ? reason : new Error("broker call aborted"));
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      const reason = signal.reason;
+      reject(reason instanceof Error ? reason : new Error("broker call aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}
 
 export function equityOrdersDefaultSinceIso(nowMs = Date.now()): string {
   return new Date(nowMs - EQUITY_ORDERS_TERMINAL_LOOKBACK_MS).toISOString();

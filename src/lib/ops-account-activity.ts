@@ -72,8 +72,21 @@ export interface OpsAccountActivityReport {
   };
 }
 
+export const OPS_ACCOUNT_ACTIVITY_SUPPORTED_BROKERS = ["alpaca", "alpaca-mcp"] as const;
+
+export type OpsAccountActivityUnsupported = {
+  ok: false;
+  status: number;
+  error: string;
+  connectedAccountId: string;
+  broker: string;
+  supported: false;
+  supportedBrokers: readonly string[];
+};
+
 export type OpsAccountActivityOutcome =
   | { ok: true; status: number; report: OpsAccountActivityReport }
+  | OpsAccountActivityUnsupported
   | { ok: false; status: number; error: string };
 
 /** Trim, collapse whitespace, and mask long digit runs (account/routing/reference numbers). */
@@ -115,10 +128,19 @@ export async function buildOpsAccountActivityReport(args: {
   const account = findConnectedAccountById(args.connectedAccountId);
   if (!account) return { ok: false, status: 404, error: "connectedAccountId not found" };
   if (account.broker !== "alpaca" && account.broker !== "alpaca-mcp") {
-    return { ok: false, status: 400, error: "connected account is not Alpaca" };
+    return {
+      ok: false,
+      status: 422,
+      error:
+        `Broker "${account.broker}" does not expose Alpaca non-trade account activity.  Connect an Alpaca account or use a different diagnostic.`,
+      connectedAccountId: account.id,
+      broker: account.broker,
+      supported: false,
+      supportedBrokers: OPS_ACCOUNT_ACTIVITY_SUPPORTED_BROKERS
+    };
   }
   if (!account.apiKey) {
-    return { ok: false, status: 400, error: "connected account has no private Alpaca credentials" };
+    return { ok: false, status: 422, error: "connected account has no private Alpaca credentials" };
   }
 
   const environment: "paper" | "live" = account.environment === "live" ? "live" : "paper";

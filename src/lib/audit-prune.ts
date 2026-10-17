@@ -36,7 +36,11 @@ export const AUDIT_PRUNE_NEVER_PRUNED_KINDS: readonly string[] = [
   "red_team_veto_override_requested",
   "red_team_veto_overridden",
   "socratic_override_applied",
-  "llm_call_latency"
+  "llm_call_latency",
+  // Past-decision analysis. The settings key reflection_summary:<account> keeps
+  // only the latest blob. This audit row is the history of what was decided,
+  // why, and the lesson. Do not age-delete it.
+  "post_mortem_reflection"
 ];
 
 /** @deprecated Age-based retention removed 2026-10-15. */
