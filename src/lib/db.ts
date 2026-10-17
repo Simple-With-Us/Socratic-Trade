@@ -4426,9 +4426,23 @@ function migrate(database: Database.Database): void {
       chunk_id TEXT NOT NULL DEFAULT '',
       user_scope TEXT NOT NULL DEFAULT 'local',
       created_at TEXT NOT NULL,
+      -- ST-4540 (embed-stage no-data-loss): durable delivery receipt. delivered_at IS NOT NULL
+      -- means the vector was PROVEN durably in the vector store (upsert acknowledged, or
+      -- managed two-phase commit finalized), so only then may the row be removed. Undelivered
+      -- rows are NEVER age- or size-deleted — a paid vector is kept until it lands.
+      delivered_at TEXT,
+      delivered_store TEXT,
+      -- ST-4540: undecodable (corrupt) vectors are quarantined and KEPT for re-embed from
+      -- source. They are never deleted; a re-embed (INSERT OR REPLACE) clears the marker.
+      quarantined_at TEXT,
+      quarantine_reason TEXT,
       PRIMARY KEY (content_hash, model, revision)
     );
     CREATE INDEX IF NOT EXISTS idx_embed_stage_created ON embed_stage (created_at);
+    -- NOTE: idx_embed_stage_delivered is NOT created here. On a pre-ST-4540 database this block is
+    -- a no-op (the table already exists WITHOUT delivered_at), so indexing that column here would
+    -- abort the whole migration with "no such column: delivered_at". It is created in the guarded
+    -- ALTER TABLE block below, once the columns are known to exist.
     -- ST-4541 pre-embed near-duplicate detection. chunk_dedup_signatures holds one MinHash
     -- signature (~256 B) per chunk we actually paid to embed, so a later ingest can compare
     -- against recent same-source chunks without re-reading full text. chunk_dedup_links is the
@@ -4730,6 +4744,28 @@ function migrate(database: Database.Database): void {
   const counterfactualWatermarkColumns = database.prepare("PRAGMA table_info(counterfactual_learning_watermarks)").all() as Array<{ name: string }>;
   if (!counterfactualWatermarkColumns.some((column) => column.name === "last_audit_rowid")) {
     database.exec("ALTER TABLE counterfactual_learning_watermarks ADD COLUMN last_audit_rowid INTEGER");
+  }
+
+  // ST-4540 (embed-stage no-data-loss): additive delivery/quarantine columns on embed_stage.
+  // Existing rows carry delivered_at = NULL, i.e. "never proven delivered" — the conservative
+  // default, so a pre-migration row is re-verified on the next retry instead of assumed safe to
+  // delete. Every deleter is gated on delivered_at IS NOT NULL.
+  {
+    const stageCols = database.prepare("PRAGMA table_info(embed_stage)").all() as Array<{ name: string }>;
+    if (stageCols.length > 0) {
+      const stageColumns: Array<[string, string]> = [
+        ["delivered_at", "TEXT"],
+        ["delivered_store", "TEXT"],
+        ["quarantined_at", "TEXT"],
+        ["quarantine_reason", "TEXT"]
+      ];
+      for (const [name, type] of stageColumns) {
+        if (!stageCols.some((column) => column.name === name)) {
+          database.exec(`ALTER TABLE embed_stage ADD COLUMN ${name} ${type}`);
+        }
+      }
+      database.exec("CREATE INDEX IF NOT EXISTS idx_embed_stage_delivered ON embed_stage (delivered_at)");
+    }
   }
 
   const columns = database.prepare("PRAGMA table_info(trade_proposals)").all() as Array<{ name: string }>;
