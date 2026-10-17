@@ -6,6 +6,23 @@ import * as dbModule from "./db";
 import { audit, getInternalSetting, resolveApiKey, setInternalSetting, type ApiKeySource } from "./db";
 import { filterNewDocumentChunks, insertDocumentChunks } from "./db";
 import { deleteStagedEmbeddings, getStagedEmbeddings, stageEmbeddedVectors } from "./db-embed-stage";
+import {
+  DEFAULT_NEAR_DUP_THRESHOLD,
+  DEFAULT_NEAR_DUP_WINDOW,
+  DEFAULT_NEAR_DUP_NUM_PERM,
+  encodeSignature,
+  partitionNearDuplicates,
+  toNearDupCandidate,
+  type NearDupCandidate,
+  type NearDupReference
+} from "./rag/near-dup-embed";
+import {
+  findDedupReferencesByNormalizedHash,
+  findRecentDedupReferences,
+  insertChunkDedupLinks,
+  insertChunkDedupSignatures,
+  type DedupScope
+} from "./db-near-dup";
 import { isProviderDispatchLeaseLostError } from "./db-provider-dispatch";
 import { getLaneHealth, logApiHealth, transientEscalationWindowMs } from "./db-health";
 import { isLocalDbFaultError, localDbFaultReason, noteLocalDbFault } from "./local-db-fault";
@@ -263,6 +280,11 @@ export interface StoreContextsResult {
    *  a new source occurrence has its own queryable vector; source producers must require
    *  `documentComplete` instead. `storeDocument` never returns this shortcut. */
   dedupComplete?: boolean;
+  /** ST-4541: set by the opt-in pre-embed near-duplicate gate (`nearDuplicateThreshold`) when
+   *  documents were skipped as exact/near duplicates of an already-embedded chunk. Those documents
+   *  were NOT dropped: their source records ingest normally and a `chunk_dedup_links` row records
+   *  the canonical chunk that answers for them. Only the paid embed call was skipped. */
+  skippedByNearDuplicate?: number;
   /** `storeDocument` found this exact deterministic commit and occurrence set already committed.
    * No provider call or budget was consumed; `indexed` is therefore zero while `attempted` is the
    * proven complete source cardinality. Source ledgers may treat this as completed reuse only when
@@ -2586,6 +2608,23 @@ function contextId(document: ContextDocument, fallbackIndex: number): string {
   return sanitizeVectorId(raw);
 }
 
+/**
+ * The record id `contextId` will assign, when it does not depend on the document's batch position.
+ * Undefined for a document with none of vector_id/source/symbol/accession/timestamp, whose id is
+ * positional and so cannot be known before batching (ST-4541: such a link records no vector id
+ * rather than a guessed one).
+ */
+function positionIndependentContextId(document: ContextDocument): string | undefined {
+  const metadata = document.metadata;
+  if (
+    metadata?.vector_id ||
+    [metadata?.source, metadata?.symbol, metadata?.accession, metadata?.timestamp].some(Boolean)
+  ) {
+    return contextId(document, 0);
+  }
+  return undefined;
+}
+
 function estimatePineconeWriteUnitsForDocument(
   document: ContextDocument,
   vectorUserId: string,
@@ -3293,6 +3332,28 @@ export interface StoreContextsOptions {
    */
   dedupKeyPrefix?: string;
   /**
+   * ST-4541: pre-embed NEAR-duplicate threshold for this call (shingle-Jaccard / MinHash).
+   *
+   * `dedupKeyPrefix` above only catches BYTE-IDENTICAL repeats. This catches the same text re-ingested
+   * behind a whitespace, casing or boilerplate-header change — which misses the content hash, misses
+   * the embed stage, and would otherwise pay for a fresh embed plus a Pinecone upsert of content the
+   * corpus already answers from. When set, each incoming document is classified against recent
+   * already-embedded chunks for the SAME (symbol, source) BEFORE the embedding API is called;
+   * exact (normalized-hash) and near (Jaccard >= this value) matches skip the paid embed and instead
+   * write a `chunk_dedup_links` provenance row pointing at the canonical chunk.
+   *
+   * NOTHING IS DROPPED: the source record is still ingested and still retrievable; only the embed
+   * call is skipped, and the link row records which canonical chunk answers for it. Both new tables
+   * are unregistered with storage hygiene, so no retention pass can prune them.
+   *
+   * Default omitted/undefined = OFF (always embed, current behavior). The default threshold constant
+   * is deliberately high (0.9) because a false positive suppresses a legitimate chunk's own vector.
+   */
+  nearDuplicateThreshold?: number;
+  /** ST-4541: how many recent stored chunks to compare against per (symbol, source). Comparison
+   *  budget only — it bounds similarity work, never stored data. Defaults to 200. */
+  nearDuplicateWindow?: number;
+  /**
    * Reuse only exact, model/revision-matched document embeddings from a bounded process-local cache.
    * Pinecone records are still upserted once per input document with their own id and metadata; a
    * cache hit skips Voyage only, never the occurrence vector or its query-time filters/citation.
@@ -3695,8 +3756,177 @@ async function storeContextsImpl(
       chunk_id: contextId(doc, 0)
     }));
   }
+
+  // ST-4541: pre-embed near-duplicate gate. Runs AFTER the byte-exact content-hash dedup above (which
+  // is cheaper and already handles the common case) and BEFORE any embedding API call, so a near
+  // duplicate never costs a paid embed. Candidates are compared against recent ALREADY-EMBEDDED chunks
+  // in the SAME tenant + embedding space, plus that tenant's normalized-hash hits that catch the same
+  // text re-stamped with a fresh accession. Matches are not deleted: they are recorded as
+  // `chunk_dedup_links` provenance rows pointing at the canonical chunk, and their source records
+  // ingest normally.
+  //
+  // MANAGED COMMITS ARE EXEMPT (review 17915833/0). `storeDocumentImpl` promotes a document ONLY when
+  // `documentsToStore.length === expectedRecordCount` AND `indexed === expectedRecordCount`; anything
+  // less skips `persistReceipts()`/`markCommitted()`, and `storeDocumentImpl`'s own
+  // `result.indexed === chunked.length` check then aborts the commit outright. Because the
+  // RAG_NEAR_DUP_SKIP env flag below turns the gate on for EVERY caller, an enabled flag would have
+  // silently made every document commit that contained a near-duplicate chunk fail forever. The gate
+  // stays OFF for managed writes: they are correctness-critical and small, and the money this saves
+  // is on the bulk storeContexts path. Per-call opt-in `nearDuplicateThreshold` is likewise ignored
+  // under a managed commit, so no caller can opt a commit into a skipped record.
+  const managedCommitActive = Boolean(options?.managedCommit);
+  const requestedNearDupThreshold =
+    options?.nearDuplicateThreshold ??
+    (envFlagOn("RAG_NEAR_DUP_SKIP", false) ? DEFAULT_NEAR_DUP_THRESHOLD : undefined);
+  const nearDupThreshold = managedCommitActive ? undefined : requestedNearDupThreshold;
+  if (managedCommitActive && requestedNearDupThreshold !== undefined) {
+    console.log(
+      "[vector-db] near-duplicate skip disabled for this managed commit: a managed commit requires exact record cardinality."
+    );
+  }
+  let nearDupSkipped = 0;
+  /**
+   * True only when EVERY skipped document matched EXACTLY (byte-identical after normalization). An
+   * exact match means the canonical vector provably holds this same content, which is the guarantee
+   * `dedupComplete` promises. A `near` match does NOT: its vector was never written under this
+   * document's own metadata, so callers must not be told "already indexed" (review 17915833/2).
+   */
+  let nearDupAllExact = true;
+  /** Candidates that still need an embed; their signatures are persisted once indexing succeeds. */
+  let nearDupPendingSignatures: Array<{ candidate: NearDupCandidate; document: ContextDocument }> = [];
+  if (
+    nearDupThreshold !== undefined &&
+    Number.isFinite(nearDupThreshold) &&
+    nearDupThreshold > 0 &&
+    documentsToStore.length > 0
+  ) {
+    const window = Math.max(1, Math.floor(options?.nearDuplicateWindow ?? DEFAULT_NEAR_DUP_WINDOW));
+    // Isolation scope for every lookup and write below. A skip is only safe when the canonical
+    // vector it inherits is retrievable for THIS caller: same tenant namespace, same vector space.
+    const nearDupScope: DedupScope = {
+      tenantScope,
+      embedModel: activeEmbeddingModel(userId),
+      embedRevision: String(currentEmbedRev())
+    };
+    const candidates: Array<NearDupCandidate & { document: ContextDocument }> = documentsToStore.map(
+      (doc, i) => ({
+        ...toNearDupCandidate({
+          text: doc.text,
+          contentHash: hashContent(doc.text),
+          chunkId: contextId(doc, i),
+          symbol: doc.metadata?.symbol ?? "",
+          source: doc.metadata?.source ?? "",
+          // Lets an in-batch duplicate's link name the vector its canonical is about to be written
+          // under (Kody review: canonical_vector_id was always '').
+          vectorId: positionIndependentContextId(doc)
+        }),
+        document: doc
+      })
+    );
+
+    // Fail-open by design: if the reference lookup errors we embed normally. A lookup failure must
+    // never cost us a chunk's vector (and must never delete anything) — it can only cost an extra
+    // embed, which is the safe direction.
+    let references: NearDupReference[] = [];
+    try {
+      const seenScope = new Set<string>();
+      for (const candidate of candidates) {
+        const scopeKey = `${candidate.symbol}\u0000${candidate.source}`;
+        if (seenScope.has(scopeKey)) continue;
+        seenScope.add(scopeKey);
+        references.push(...findRecentDedupReferences(nearDupScope, candidate.symbol, candidate.source, window));
+      }
+      // One lookup per DISTINCT normalized hash (Kody review: a batch of repeats issued one identical
+      // SELECT per candidate).
+      const seenNormalizedHash = new Set<string>();
+      for (const candidate of candidates) {
+        if (seenNormalizedHash.has(candidate.normalizedHash)) continue;
+        seenNormalizedHash.add(candidate.normalizedHash);
+        references.push(...findDedupReferencesByNormalizedHash(nearDupScope, candidate.normalizedHash));
+      }
+      // The window and the hash lookups can return the same stored row; keep the first copy so the
+      // comparison loop does not walk it twice. Within one scope content_hash is the row's identity.
+      const seenReference = new Set<string>();
+      references = references.filter((reference) => {
+        if (seenReference.has(reference.contentHash)) return false;
+        seenReference.add(reference.contentHash);
+        return true;
+      });
+    } catch (err) {
+      references = [];
+      console.warn(
+        "[vector-db] near-duplicate reference lookup failed (non-fatal, embedding normally):",
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+
+    const partitioned = partitionNearDuplicates(candidates, references, { threshold: nearDupThreshold });
+    nearDupSkipped = partitioned.skipped.length;
+    // Only an all-EXACT skip may later be reported as `dedupComplete`; see `nearDupAllExact`.
+    nearDupAllExact = partitioned.links.every((link) => link.kind === "exact");
+    if (nearDupSkipped > 0) {
+      // Provenance FIRST: the skip is a money decision and must be auditable even if the rest of the
+      // store fails. INSERT OR IGNORE only — links are never updated or removed.
+      try {
+        insertChunkDedupLinks(
+          partitioned.links.map((link) => ({
+            ...link,
+            tenantScope: nearDupScope.tenantScope,
+            embedModel: nearDupScope.embedModel,
+            embedRevision: nearDupScope.embedRevision
+          }))
+        );
+      } catch (err) {
+        console.warn(
+          "[vector-db] insertChunkDedupLinks failed (non-fatal, storeContexts near-dup path):",
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+      console.log(
+        `[vector-db] Near-duplicate embed skip (storeContexts): ${nearDupSkipped}/${candidates.length} document(s) matched an existing chunk; paid embed skipped, provenance link recorded.`
+      );
+    }
+    documentsToStore = partitioned.toEmbed.map((entry) => entry.document);
+    nearDupPendingSignatures = partitioned.toEmbed.map((entry) => ({
+      candidate: {
+        contentHash: entry.contentHash,
+        normalizedHash: entry.normalizedHash,
+        chunkId: entry.chunkId,
+        symbol: entry.symbol,
+        source: entry.source,
+        signature: entry.signature,
+        shingles: entry.shingles,
+        vectorId: entry.vectorId
+      },
+      document: entry.document
+    }));
+
+    // Keep `dedupHashes` aligned with the (possibly further-shrunk) `documentsToStore` — the later
+    // insertDocumentChunks call zips these two positionally.
+    if (dedupPrefix && dedupHashes) {
+      dedupHashes = documentsToStore.map((doc) => ({
+        content_hash: hashContent(doc.text),
+        symbol: doc.metadata?.symbol ?? "",
+        source: `${dedupPrefix}:${doc.metadata?.source ?? ""}`,
+        chunk_id: contextId(doc, 0)
+      }));
+    }
+  }
   if (documentsToStore.length === 0) {
-    return { attempted: validDocuments.length, indexed: 0, skipped: true, dedupComplete: true };
+    // `dedupComplete` is the "reusable content already exists" proof that producers act on
+    // (sec8k.ts clears its backlog and marks the batch complete; corpus-reembed.ts records "reused").
+    // Claim it ONLY when every skip was byte-identical to an existing vector. If any chunk was
+    // skipped as a NEAR duplicate, its vector was never written under this document's own metadata
+    // (accession/timestamp/sidecar), so the honest answer is "not indexed here" — callers keep the
+    // record retryable rather than treating it as delivered (review 17915833/2).
+    const dedupComplete = nearDupSkipped === 0 || nearDupAllExact;
+    return {
+      attempted: validDocuments.length,
+      indexed: 0,
+      skipped: true,
+      ...(dedupComplete ? { dedupComplete: true } : {}),
+      ...(nearDupSkipped > 0 ? { skippedByNearDuplicate: nearDupSkipped } : {})
+    };
   }
 
   const reuseExactEmbeddings = options?.reuseExactEmbeddings === true;
@@ -3977,6 +4207,8 @@ async function storeContextsImpl(
   // guard), keyed by identity against `documentsToStore` — only recorded into document_chunks
   // (via insertDocumentChunks below) when dedup is active for this call.
   const indexedDocIdentities = new Set<ContextDocument>();
+  /** The record id each indexed document was actually upserted under (ST-4541 signature rows). */
+  const vectorIdByDocument = new Map<ContextDocument, string>();
   try {
     assertVectorStoreLease(options?.leaseGuard);
     const namespaceName = options?.managedCommit
@@ -4192,9 +4424,11 @@ async function storeContextsImpl(
         const embedding = resolved[indexInBatch];
         if (!isValidEmbedding(embedding)) continue;
         const document = batch[indexInBatch]!;
+        const recordId = contextId(document, indexInBatch);
         indexedDocIdentities.add(document);
+        vectorIdByDocument.set(document, recordId);
         records.push({
-          id: contextId(document, indexInBatch),
+          id: recordId,
           values: embedding,
           metadata: cleanMetadata(
             document.metadata,
@@ -4389,6 +4623,46 @@ async function storeContextsImpl(
       }
     }
 
+    // ST-4541: persist the MinHash signature of every chunk we actually EMBEDDED this call, so a
+    // later ingest of the same (symbol, source) can skip a near-duplicate embed without re-reading
+    // text. Recorded only for documents that made it to a real Pinecone upsert, and only after that
+    // upsert succeeded — a signature must never exist for a vector that was not written. INSERT OR
+    // IGNORE, non-fatal: losing a signature costs an extra embed later, never data.
+    //
+    // The per-document `indexedDocIdentities` filter IS that invariant, so a batch with some
+    // rejected embeds still records its indexed companions (Kody review: the old
+    // `rejectedInvalidEmbeddings === 0` term dropped them all). A document joins
+    // `indexedDocIdentities` only with a valid embedding, and a failed upsert throws to the catch
+    // below, so this block is never reached for an unwritten vector. Managed commits never get
+    // here with pending signatures: the gate above is off for them, so their pending-state records
+    // are never treated as canonical.
+    if (nearDupPendingSignatures.length > 0 && indexedDocIdentities.size > 0) {
+      try {
+        insertChunkDedupSignatures(
+          nearDupPendingSignatures
+            .filter((entry) => indexedDocIdentities.has(entry.document))
+            .map((entry) => ({
+              contentHash: entry.candidate.contentHash,
+              normalizedHash: entry.candidate.normalizedHash,
+              signature: encodeSignature(entry.candidate.signature),
+              numPerm: DEFAULT_NEAR_DUP_NUM_PERM,
+              symbol: entry.candidate.symbol,
+              source: entry.candidate.source,
+              chunkId: entry.candidate.chunkId,
+              vectorId: vectorIdByDocument.get(entry.document) ?? entry.candidate.vectorId ?? "",
+              tenantScope,
+              embedModel: stageModel,
+              embedRevision: stageRevision
+            }))
+        );
+      } catch (err) {
+        console.warn(
+          "[vector-db] insertChunkDedupSignatures failed (non-fatal, near-dup path):",
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+    }
+
     // Persist the outcome so RAG ingestion health is visible in the audit log / dashboard
     // instead of being swallowed to console (the original cause of the silent empty index).
     const lastIngest = {
@@ -4409,6 +4683,7 @@ async function storeContextsImpl(
       ...(rejectedInvalidEmbeddings > 0 ? { rejectedInvalidEmbeddings } : {}),
       ...(budgetSkipped > 0 ? { budgetSkipped } : {}),
       ...(writeUnitBudgetSkipped > 0 ? { writeUnitBudgetSkipped } : {}),
+      ...(nearDupSkipped > 0 ? { skippedByNearDuplicate: nearDupSkipped } : {}),
       // Surfaces the real embed-api failure (HTTP status/body) even though this call did not
       // throw — a batch-isolated embed failure just drops that batch's records and continues.
       // Deliberately NOT `error` (reserved below for "the whole call threw"; existing callers

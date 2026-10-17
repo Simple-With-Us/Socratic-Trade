@@ -147,10 +147,20 @@ The five suites this PR owns are inside that run and all passed: `test/embed-sta
 `test/audit-hygiene.test.ts` and `test/forever-retention-no-age-delete.test.ts` (58 tests).
 GitHub CI on the pushed head is the authority for the gate; this note does not claim its result.
 
+Second merge of `origin/main` (2026-10-17, lane `claude-pr4742-sweep`): one conflict, in the
+`embed_stage` DDL block of `src/lib/db.ts`, where this PR's "idx_embed_stage_delivered is created
+only in the guarded ALTER" note sat next to main's ST-4541 `chunk_dedup_signatures` and
+`chunk_dedup_links` tables.  Both sides were kept.  Re-checked after the merge: `npx tsc --noEmit`
+exit 0, and 26 focused vitest files (346 tests) passed, covering this PR's five suites plus the
+ST-4541 near-dup suites and every `vector-db*` suite.  The full `npm test` and `npm run build` were
+not re-run locally for this merge, so GitHub CI `verify` is their authority.
+
 ## Next Steps & Blockers
 
-- **Blocker:** the owner reviews and merges, because the diff touches the CODEOWNERS money path
-  `src/lib/scheduler.ts`.  Auto-merge was disarmed for that reason.
+- **Merge path:** the diff touches the CODEOWNERS money path `src/lib/scheduler.ts`, so the
+  auto-merge gate skips it.  That is not a decision for the owner (owner ruling 2026-10-17: deploy
+  unless it really needs the owner), so it merges directly once CI is green and every thread is
+  resolved.
 - Wire `embed_stage_over_cap` and `embed_stage_undelivered_backlog` into the alerting dashboard so
   the new alarms page a human and do not stay Sentry noise.
 - Decide whether stranded delivered rows need their own counter or a receipt-scoped cleanup (see

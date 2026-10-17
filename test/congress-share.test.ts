@@ -1208,7 +1208,8 @@ describe("insider / short-volume import builders", () => {
       recordCount: 1
     });
     const aapl = buildInsiderImport().find((r) => r.ticker === "AAPL");
-    expect(aapl).toMatchObject({ ticker: "AAPL", sentiment: 75, buyFilings: 1, sellFilings: 0, buyShares: 12000, sellShares: 2000 });
+    // No prices on the row, so the score is share-weighted: 12000 / 14000.
+    expect(aapl).toMatchObject({ ticker: "AAPL", sentiment: 86, buyFilings: 1, sellFilings: 0, buyShares: 12000, sellShares: 2000 });
     expect(aapl?.owners).toContain("Jane Director");
   });
 
