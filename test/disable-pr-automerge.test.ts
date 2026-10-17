@@ -24,9 +24,10 @@ function run(bin: string, env: Record<string, string>): { status: number; stdout
       encoding: "utf8",
       env: {
         PATH: `${bin}:/usr/bin:/bin`,
-        NODE_ENV: "test",
         GH_TOKEN: env.GH_TOKEN ?? "",
         DISABLE_AUTOMERGE_FALLBACK_TOKEN: env.DISABLE_AUTOMERGE_FALLBACK_TOKEN ?? "",
+        // Next's ProcessEnv requires this literal.  CI tsc rejects the object without it.
+        NODE_ENV: "test",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -69,7 +70,7 @@ exit 1
     expect(recorded).toEqual(["bad-pat"]);
   });
 
-  it("fails when every token is rejected", () => {
+  it("fails when every token is rejected and the arm state cannot be read", () => {
     const { dir } = fakeBin(`#!/bin/bash
 echo "401 Unauthorized Bad credentials" >&2
 exit 1
@@ -80,7 +81,7 @@ exit 1
     expect(got.stdout).not.toContain("already off");
   });
 
-  it("treats a forbidden disable as success when the jq read is off", () => {
+  it("treats a forbidden disable as success when auto-merge is already off", () => {
     const { dir } = fakeBin(`#!/bin/bash
 if [ "$2" = "view" ]; then
   echo "off"
@@ -94,7 +95,7 @@ exit 1
     expect(got.stdout).toContain("already off");
   });
 
-  it("fails when the jq read is armed", () => {
+  it("fails when disable is rejected and auto-merge is still armed", () => {
     const { dir } = fakeBin(`#!/bin/bash
 if [ "$2" = "view" ]; then
   echo "armed"
@@ -109,7 +110,7 @@ exit 1
     expect(got.stdout).toContain("credentials rejected");
   });
 
-  it("fails when the jq read is unreadable", () => {
+  it("fails when the arm state read is unreadable", () => {
     const { dir } = fakeBin(`#!/bin/bash
 if [ "$2" = "view" ]; then
   echo "HTTP 401 Bad credentials" >&2

@@ -26,9 +26,11 @@ Touched paths:
 - The glob list stays in CODEOWNERS.  The workflow comment is a mirror, not a second policy.  CI fails if they diverge.
 - `disarm=true` means the workflow runs `gh pr merge --disable-auto` on a PR that was already armed.  The dry run does not call GitHub, and this lane does not arm auto-merge.
 - `needs-human-merge` still disarms, same as `do-not-automerge`.
-- A rejected elevated token retries disable once with the Actions `GITHUB_TOKEN`.  That token is not used to arm.  If both disables are rejected, the job reads `autoMergeRequest`.  Null is success (the Actions token cannot call `disablePullRequestAutoMerge`).  A still-armed merge fails the job.
-- The dry run exports `CODEOWNERS_FILE` to the repo copy so it still classifies when the shell is not at the repo root.
-- Out of scope: a ruleset required review on those paths.  This change only stops the workflow from arming.
+- A rejected elevated token retries disable once with the Actions `GITHUB_TOKEN`.  That token is not used to arm.  Disable jobs set `contents: write` and `pull-requests: write` so that token can call `disablePullRequestAutoMerge`.  The arm job stays at the workflow `contents: read` permission.
+- If the disable mutation is still forbidden, the script reads `autoMergeRequest`.  Null is success (`already off`).  A non-null value, or an unreadable PR, exits 1.  PR #4697's disable jobs exited 1 while auto-merge was already null, because `GH_PAT` is 401 and `GITHUB_TOKEN` returned `Resource not accessible by integration`.
+- The dry run exports `CODEOWNERS_FILE` to the repo copy so it still classifies when the shell is not at the repo root.  Sentry's review on #4697 asked for that export.  It is in `scripts/automerge-gate-dry-run.sh`.
+- `test/disable-pr-automerge.test.ts` passes `NODE_ENV: "test"`.  Next's `ProcessEnv` requires that literal, and hosted `tsc` failed the #4697 head without it.
+- Out of scope: a ruleset required review on those paths, and rotating `GH_PAT` / `SHEPHERD_TOKEN` (ST-4393).  This change stops the workflow from arming money-path PRs.  It cannot disarm an already-armed PR while every token is rejected.
 
 ## Money-path globs
 
@@ -81,13 +83,40 @@ Money path: `arm=false` `disarm=true`.  `do-not-automerge`: `arm=false` `disarm=
 
 Full `npm run lint` exit 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exit 0.  `npm test` 9378 passed, 51 skipped, 25 failed across 12 files.  None of the failures are in the auto-merge classifier, dry run, or workflow text tests.  They are the sandbox LLM-key, notify-credential, server-metrics host, cpuprofile, Twelve Data, and Alpha Vantage failures.  `npm run build` exit 0.
 
-Follow-up after that gate: live `disable-auto` on PR #4697 returned `401 Bad credentials` and the job still exited 0.  `scripts/disable-pr-automerge.sh` retries once with `DISABLE_AUTOMERGE_FALLBACK_TOKEN` (the Actions `GITHUB_TOKEN`) and exits 1 if that credential is rejected too.  Already-off stays exit 0.
+Follow-up after that gate: live `disable-auto` on PR #4697 returned `401 Bad credentials` and the job still exited 0.  `scripts/disable-pr-automerge.sh` retries once with `DISABLE_AUTOMERGE_FALLBACK_TOKEN` (the Actions `GITHUB_TOKEN`).  The retry on that PR then returned `Resource not accessible by integration` and exited 1 even though `autoMergeRequest` was null.  Hosted `tsc` also failed because the test env omitted required `NODE_ENV`.
+
+This branch (`cursor/automerge-money-path-gate-c050`) merges current `main` and fixes both.  A forbidden disable is success only after a read shows auto-merge is off.  A still-armed PR fails.
 
 ```bash
 npx vitest run test/disable-pr-automerge.test.ts test/automerge-gate-dry-run.test.ts test/branch-protection-gate.test.ts test/pr-touches-codeowners-paths.test.ts
+npx tsc --noEmit
 ```
 
-22 passed.
+25 passed.  `tsc` exit 0 (2026-10-15).  Merged `origin/main` at `3f4ef5e5` into `cursor/automerge-money-path-gate-c050` (PR #4727 conflict sweep); re-ran the same vitest slice and `tsc` clean.
+
+```bash
+bash scripts/automerge-gate-dry-run.sh --files src/lib/broker.ts
+bash scripts/automerge-gate-dry-run.sh --label do-not-automerge --files README.md
+bash scripts/automerge-gate-dry-run.sh --files README.md
+```
+
+Money path: `arm=false` `disarm=true`.  `do-not-automerge`: `arm=false` `disarm=true`.  README: `arm=true` `disarm=false`.
+
+### 2026-10-15 CODEX landing pass after #4662
+
+Checked PR #4727 head `c116c6738f14b0cb3c8d787b4e6285915e1fd6d1` before editing; no newer Cursor commit was present.  Merged current `origin/main` at `7bfb84ef193196f1b77c9bfe0573c012e656c8c0` with merge commit `a80b3564a77f428930eea5fd138f0038a9c49cf4`; no conflicts.  The unique PR diff remains 10 paths.
+
+Verification on the merged head:
+
+```bash
+npm ci
+npm run lint
+npx tsc --noEmit
+npx vitest run test/automerge-gate-dry-run.test.ts test/branch-protection-gate.test.ts test/disable-pr-automerge.test.ts
+npm run build
+```
+
+Lint passed with 0 errors (866 existing warnings); TypeScript passed; focused Vitest passed (21 tests); production build passed with existing Next.js warnings.  The `do-not-automerge` label is present, and auto-merge remains unarmed.  This work is ready for Jay's review after the final CI run.
 
 ## CI follow-up (same day)
 
@@ -125,13 +154,62 @@ npx eslint scripts/check-shared-package-pin.mjs test/disable-pr-automerge.test.t
 
 Touched: `.github/workflows/auto-merge-prs.yml`, `scripts/disable-pr-automerge.sh`, `test/disable-pr-automerge.test.ts`, `test/branch-protection-gate.test.ts`, `STATUS.md`, `PLAN.md`, this note.
 
+Superseded on 2026-10-17: #4727 has since landed on `main`.  The workflow, `scripts/disable-pr-automerge.sh`, and `test/branch-protection-gate.test.ts` on this branch now match `main` byte for byte.  What this branch still adds over `main` is the `unreadable` read test in `test/disable-pr-automerge.test.ts` and this history.
+
 ## Next Steps & Blockers
 
+- PR stays open with `do-not-automerge`.  Do not enable auto-merge or merge.  After final CI is green, post that it is ready for Jay's review in the PR and ST-3326 Zulip topic.
+- ST-4393: `GH_PAT` / `SHEPHERD_TOKEN` still return 401.  Non-money-path arming stays a no-op until that secret is rotated.  An already-armed money-path PR fails the disable job instead of merging.
 - Merged `origin/main` `49a76da4` (#4695, congress webhook receipt) with no conflicts.  Docs-only union on `STATUS.md`.
 - PR #4697 stays ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.
 - Leave ST-3326 In Progress until this has shipped.
+- 2026-10-17 CLAUDE sweep: merged `origin/main` (`1cbe9f06`, #4727) into this branch, which conflicted in this note and `test/disable-pr-automerge.test.ts`.  Resolved by keeping both sides.  #4697 is now almost fully covered by #4727 on `main`.  Jay can squash-merge the small remainder or close the PR as superseded.  `do-not-automerge` stays on and auto-merge is not armed.
 - No phase doc covers this workflow.  Nothing under `docs/phase-*.md` was updated.
 
 ## Zero-Code Findings
 
 - The first Agent-Sync `linear_claim` returned `not_configured` for CURSOR.  A later session confirmed `linear_whoami` is CURSOR, and the claim plus the progress comment with the PR link are on ST-3326 through Agent-Sync.  Zulip post returned `not_authorized` (no CURSOR Zulip key on the MCP host).
+- Agent-Sync `linear_claim` returns `not_configured` for CURSOR (`LINEAR_SEATS` is GROK-WEB only).  The claim was made with the board CLI as the Cursor Linear app.  Zulip post returned `not_authorized` (no CURSOR Zulip key on the MCP host).
+
+## Merge-main (MM takeover, 2026-10-16)
+
+Cursor's agents hit their quota, so MM is taking this branch to the owner for
+review.  This PR is NOT merged and auto-merge stays unarmed; the `do-not-automerge`
+hold stays on.  The sections above are the original Cursor record and are left as
+written.
+
+`origin/main` (`a5d45401e`) is merged with a merge commit — no rebase, no
+force-push.  No conflicts; the branch touches only the workflow, its scripts,
+its tests and docs, and `main` had moved in none of them.
+
+Gate re-run after the merge:
+
+```bash
+npm run lint
+npx tsc --noEmit
+npx vitest run test/automerge-gate-dry-run.test.ts test/branch-protection-gate.test.ts test/disable-pr-automerge.test.ts
+npm run build
+```
+
+All four exit 0.  Focused Vitest 21 tests passed.
+
+Why the hold stays even though the PR is ready: this diff adds
+`permissions: contents: write` to the three `disable-*` jobs so they can turn
+auto-merge off with an elevated token.  Granting write scope to the job that
+disables merges is the owner's call, and ST-4393 shows `GH_PAT` /
+`SHEPHERD_TOKEN` still return 401, so the elevated-token path this PR depends on
+is not yet working.  It needs Jay's review before it lands.
+
+## Merge-main (CLAUDE sweep, 2026-10-17)
+
+PR #4727 had fallen BEHIND `main` (four commits, through `b39ed8a7d`, #4805).  `origin/main` is merged with a merge commit — no rebase, no force-push.  No conflicts and no conflict markers; `main` changed `.github/workflows/e2e.yml` only among workflow files and moved none of this PR's ten files.  The PR has no review threads.
+
+Local check after the merge:
+
+```bash
+npx vitest run test/automerge-gate-dry-run.test.ts test/branch-protection-gate.test.ts test/disable-pr-automerge.test.ts
+```
+
+21 tests passed.  Repo-wide `tsc` and `next build` were left to hosted CI: this lane cannot install the private `@jaywedgeworth22/congress-trading-shared` package, so a local `tsc` reports unrelated TS2307 errors for it.
+
+The `do-not-automerge` hold stays on and auto-merge is not armed.  Merging stays Jay's decision (see the hold reasons above).
