@@ -389,27 +389,34 @@ describe("Tradier adapter — envelope normalization", () => {
 });
 
 describe("Tradier adapter — quotes", () => {
-  it("batches /markets/quotes and follows last->close->ask->bid precedence", async () => {
+  it("batches /markets/quotes and prices last, then the two-sided mid", async () => {
     await seedTradier();
     const { records } = installFetchMock([
       {
         match: (u) => u.includes("/markets/quotes"),
         body: { quotes: { quote: [
-          { symbol: "AAPL", last: 190, close: 188, ask: 191, bid: 189, volume: 1000, trade_date: 1751000000000 },
-          { symbol: "MSFT", close: 400 } // no last -> close
+          { symbol: "AAPL", last: 190, close: 188, ask: 191, bid: 189, volume: 1000, trade_date: 1751000000000, bidsize: 190 },
+          { symbol: "MSFT", close: 400, prevclose: 399, bidsize: 400 },
+          { symbol: "XOM", ask: 110, asksize: 110 },
+          { symbol: "IBM", bid: 10, ask: 12, bid_date: 1751000001000, close: 9 }
         ] } }
       }
     ]);
     const { getTradierGateway } = await import("../src/lib/tradier");
-    const quotes = await getTradierGateway("local").getEquityQuotes(ACCT, ["AAPL", "MSFT"]);
+    const quotes = await getTradierGateway("local").getEquityQuotes(ACCT, ["AAPL", "MSFT", "XOM", "IBM"]);
     expect(quotes.AAPL.price).toBe(190);
-    expect(quotes.MSFT.price).toBe(400);
+    expect(quotes.AAPL.price).not.toBe(188);
+    expect(quotes.AAPL.asOf).toBe(new Date(1751000000000).toISOString());
+    expect(quotes.MSFT).toBeUndefined();
+    expect(quotes.XOM).toBeUndefined();
+    expect(quotes.IBM.price).toBe(11);
+    expect(quotes.IBM.asOf).toBe(new Date(1751000001000).toISOString());
     const call = records.find((r) => r.url.includes("/markets/quotes"))!;
-    expect(call.url).toContain("symbols=AAPL%2CMSFT");
+    expect(call.url).toContain("symbols=AAPL%2CMSFT%2CXOM%2CIBM");
     expect(call.authorization).toBe(`Bearer ${SANDBOX_TOKEN}`);
   });
 
-  it("a quote-fetch error warns and does NOT throw (falls through to Yahoo floor -> no data -> price 0)", async () => {
+  it("a quote-fetch error warns and does NOT throw (no Yahoo close floor)", async () => {
     await seedTradier();
     installFetchMock([
       { match: (u) => u.includes("/markets/quotes"), body: { error: "boom" }, status: 500 }

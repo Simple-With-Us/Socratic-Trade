@@ -21,6 +21,7 @@ import { normalizeSymbol } from "./money";
 import { getActiveConnectedAccount, getConnectedAccount } from "./db";
 import { logApiHealth } from "./db-health";
 import { estimateReviewNotional } from "./alpaca";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import { isLiveOrderState } from "./broker-side";
 import { ETORO_API_BASE, etoroHeaders } from "./etoro-copy";
 import { brokerAbortSignal, chunkBrokerSymbols, scopeBrokerOrders } from "./inflight-deadline";
@@ -199,14 +200,8 @@ class EToroBrokerGateway implements BrokerGateway {
           const id = num(row.instrumentID ?? row.instrumentId);
           const symbol = id != null ? idToSymbol.get(id) : undefined;
           if (!symbol) continue;
-          out[symbol] = {
-            symbol,
-            price: num(row.lastExecution) ?? mid(num(row.bid), num(row.ask)),
-            bid: num(row.bid),
-            ask: num(row.ask),
-            asOf: typeof row.date === "string" ? row.date : undefined,
-            provider: "etoro"
-          };
+          const quote = etoroQuoteFromRate(symbol, row);
+          if (quote) out[symbol] = quote;
         }
       }
       return out;
@@ -329,9 +324,19 @@ function num(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function mid(bid?: number, ask?: number): number | undefined {
-  if (bid && ask) return (bid + ask) / 2;
-  return bid ?? ask;
+/** Last execution, then a two-sided mid.  A one-sided book is not a price. */
+export function etoroQuoteFromRate(symbol: string, row: Record<string, unknown>): BrokerQuote | undefined {
+  const selected = selectObservedQuotePrice({ last: row.lastExecution, bid: row.bid, ask: row.ask });
+  if (selected.price === undefined) return undefined;
+  const asOf = providerObservationIso(row.date);
+  return {
+    symbol,
+    price: selected.price,
+    bid: num(row.bid),
+    ask: num(row.ask),
+    ...(asOf ? { asOf } : {}),
+    provider: "etoro"
+  };
 }
 
 function isUuid(value: string): boolean {

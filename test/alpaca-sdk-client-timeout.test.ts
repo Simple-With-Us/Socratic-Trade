@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ALPACA_BROKER_IO_DEADLINE_MS } from "../src/lib/inflight-deadline";
-import { buildAlpacaV5ClientOptions } from "../src/lib/alpaca-sdk-legacy-client";
+import { buildAlpacaV5ClientOptions, createLegacyAlpacaRestClient } from "../src/lib/alpaca-sdk-legacy-client";
+import type { LegacyAlpacaConstructorOptions } from "../src/lib/alpaca-sdk-legacy-client";
 
 // The v5 Alpaca SDK uses fetch (not axios), so a half-open broker socket can still hang a
 // request indefinitely unless the client is constructed with a timeout.  src/lib/alpaca.ts
@@ -23,5 +24,26 @@ describe("Alpaca SDK client timeout", () => {
       .replace(/\/\/.*$/gm, "");
     expect(code).not.toMatch(/from\s+["'](?:node:)?module["']/);
     expect(code).not.toMatch(/createRequire\s*\(/);
+  });
+
+  it("keeps the last print and its time and drops a trade size", async () => {
+    const fake = {
+      marketData: {
+        stocks: {
+          stockLatestTrades: async () => ({
+            trades: {
+              NVDA: { p: 505, s: 100, t: "2026-08-15T14:00:00.000Z" },
+              BAD: { p: "nope", s: 4 }
+            }
+          })
+        }
+      }
+    };
+    const opts: LegacyAlpacaConstructorOptions = { paper: true };
+    const client = createLegacyAlpacaRestClient(fake as never, opts);
+    const trades = await client.getLatestTrades?.(["NVDA", "BAD"]);
+    expect(trades?.NVDA).toEqual({ p: 505, t: "2026-08-15T14:00:00.000Z" });
+    expect(trades?.NVDA).not.toHaveProperty("s");
+    expect(trades?.BAD).toBeUndefined();
   });
 });
