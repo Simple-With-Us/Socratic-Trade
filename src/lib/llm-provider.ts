@@ -1,3 +1,4 @@
+import { codeCliUrl } from "./code-cli";
 import { resolveLlmCredential } from "./db";
 import { catalogEntryFor, nativeSlugFor, openRouterSlugFor } from "./llm-model-catalog";
 import { resolveOpenAiModel, type LlmTransport } from "./llm-request";
@@ -87,6 +88,8 @@ export function minimaxDirectRoute(model: string | undefined, userId: string = "
 
 /** Credential gate follows the same OpenRouter-first, native-fallback routing as execution. */
 export function modelCredentialService(model: string | undefined, userId: string = "local"): LlmModelFamily {
+  const family = llmModelFamily(model);
+  if ((family === "meta" || family === "minimax") && llmRouteFor(family, userId) === "code-cli") return family;
   if (resolveMetaNative(model, userId)) return "meta";
   if (minimaxDirectRoute(model, userId)) return "minimax";
   return modelRequiresOpenRouter(model) || resolveLlmCredential("openrouter", userId).key
@@ -184,6 +187,13 @@ export function resolveLlmEndpoint(
 ): LlmEndpoint {
   const rawModel = resolveRoleModel(policy, role);
   const family = llmModelFamily(rawModel);
+  if ((family === "meta" || family === "minimax") && llmRouteFor(family, userId) === "code-cli") {
+    const cliModel = family === "meta" ? metaNativeModelSlug(rawModel) : nativeSlugFor(rawModel);
+    if (!cliModel) throw new Error("Model is not supported by Code CLI");
+    return { provider: family, url: codeCliUrl(family, userId), key: "code-cli-no-provider-key",
+      model: cliModel, keySource: "user", keyRef: "code-cli", transport: "chat-completions" };
+  }
+
 
   // 0. Native Meta: when the user chose "direct" for Meta and has a Meta key, a Muse Spark model
   //    goes straight to api.meta.ai.  Otherwise it falls through to OpenRouter below.

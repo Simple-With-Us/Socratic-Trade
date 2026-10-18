@@ -390,7 +390,7 @@ export async function debateProposal(
   // rotation pool degenerates to it by design) — only a silent failover onto the proposer is refused.
   const proposerModel = typeof proposal.proposedByModel === "string" ? proposal.proposedByModel.trim() : "";
   const skippedSelfReviewers: string[] = [];
-  const fallbackModelList = Array.isArray(policy.redTeamFallbackModels) ? policy.redTeamFallbackModels : [];
+  const fallbackModelList = !url.startsWith("code-cli://") && Array.isArray(policy.redTeamFallbackModels) ? policy.redTeamFallbackModels : [];
   for (const fallbackModel of fallbackModelList.filter((m): m is string => typeof m === "string").map((m) => m.trim()).filter(Boolean)) {
     if (proposerModel && isSameModelLine(fallbackModel, proposerModel)) {
       skippedSelfReviewers.push(fallbackModel);

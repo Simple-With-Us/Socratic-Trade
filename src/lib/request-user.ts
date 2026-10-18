@@ -50,6 +50,13 @@ export function resolveRequestUser(request: Request): ResolvedRequestUser {
   const email = request.headers.get(AUTHENTICATED_EMAIL_HEADER);
   const identitySource = request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER);
   assertIdentityAllowedInLiveBootstrap(email, identitySource);
+  // With the server subscription route enabled, no auth-unconfigured request may inherit
+  // the scheduler owner's legacy local id. Verify provenance before account mapping.
+  if (process.env.CODE_CLI_ENABLED === "true" && (!email?.trim().includes("@") ||
+    (identitySource !== AUTHENTICATED_IDENTITY_SOURCES.authJsSession
+    && identitySource !== AUTHENTICATED_IDENTITY_SOURCES.cloudflareAccess))) {
+    throw new Error("Verified identity required while Code CLI is enabled");
+  }
   const resolved = resolveRequestUserFromEmail(email);
   const issuedAt = request.headers.get(AUTHENTICATED_SESSION_ISSUED_AT_HEADER);
   if (

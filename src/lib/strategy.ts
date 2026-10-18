@@ -6522,9 +6522,21 @@ async function proposeTrades(input: {
       proposalModel: input.policy.llmModel?.trim() || model
     }
   ];
-  const fallbackModelList = Array.isArray(input.policy.llmFallbackModels) ? input.policy.llmFallbackModels : [];
+  const fallbackModelList = !url.startsWith("code-cli://") && Array.isArray(input.policy.llmFallbackModels) ? input.policy.llmFallbackModels : [];
   for (const fallbackModel of fallbackModelList.filter((m): m is string => typeof m === "string").map((m) => m.trim()).filter(Boolean)) {
-    const ep = resolveLlmEndpoint({ ...input.policy, llmModel: fallbackModel }, input.userId);
+    // A fallback model whose provider is misconfigured (e.g. a code-cli route that is not ready)
+    // throws out of resolveLlmEndpoint. Skip it like the no-credential case rather than aborting
+    // the whole proposal phase and leaving the run with zero proposals.
+    let ep: ReturnType<typeof resolveLlmEndpoint>;
+    try {
+      ep = resolveLlmEndpoint({ ...input.policy, llmModel: fallbackModel }, input.userId);
+    } catch (error) {
+      // Only an unavailable Code CLI fallback is expected here. Do not hide DB/runtime failures.
+      if (!(error instanceof Error) || error.message !== "Code CLI is disabled or not configured for this owner") throw error;
+      console.warn(`[Strategy] skipping unavailable Code CLI fallback ${fallbackModel}`);
+      audit("strategy_llm_failover", { reason: "code_cli_unavailable", model: fallbackModel, action: "skip" }, input.userId, input.policy.connectedAccountId);
+      continue;
+    }
     if (!ep.key) continue; // No credential for this provider's model — skip it rather than fail.
     bullAttempts.push({
       url: ep.url,

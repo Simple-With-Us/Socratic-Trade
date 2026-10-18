@@ -23,7 +23,7 @@ import type { ChatDraft } from "@/lib/chat/types";
 import type { LlmReasoningEffort } from "@/lib/types";
 import { humanizeLlmError } from "@/lib/llm-errors";
 import { catalogEntryFor } from "@/lib/llm-model-catalog";
-import { ALL_LLM_REASONING_EFFORTS, normalizeReasoningEffortForModel, reasoningCapabilityForModel } from "@/lib/llm-request";
+import { ALL_LLM_REASONING_EFFORTS, normalizeReasoningEffortForModel, reasoningCapabilityForModel } from "@/lib/llm-reasoning";
 import { reasoningAdviceForModel, recommendedReasoningEffortForModel } from "@/lib/model-reasoning-recommendations";
 import { deriveReality } from "../lib/derive";
 import { cx, fmtExact } from "../lib/format";
