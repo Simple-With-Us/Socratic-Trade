@@ -26,9 +26,10 @@ jobs:
       (github.event_name == 'pull_request_review' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
        contains(fromJSON('["chatgpt-codex-connector[bot]","chatgpt-codex-connector","kody-ai[bot]","kody-ai","cursor[bot]","cursor"]'), github.event.review.user.login))
-    uses: Simple-With-Us/congress-trading-shared/.github/workflows/codex-autofix-reusable.yml@99d372dcd7f600611c7b2b83a6f8eb2d31d6ecad
+    uses: Simple-With-Us/congress-trading-shared/.github/workflows/codex-autofix-reusable.yml@31659885f58f08e129b6dc092f3493d7cdb74a11
     secrets:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+      USAGE_INGEST_TOKEN: ${{ secrets.USAGE_INGEST_TOKEN }}
     with:
       prompt: |
         You are the autonomous fixer that responds to the PR review bots (Codex
