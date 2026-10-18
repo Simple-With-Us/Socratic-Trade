@@ -22,7 +22,9 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
-    uses: Simple-With-Us/AI-Fleet-Coordinator/.github/workflows/pr-autofix-reusable.yml@2e671004afff99a69565aa70853d5bd7a276c667
+      actions: read
+    uses: Simple-With-Us/AI-Fleet-Coordinator/.github/workflows/pr-autofix-reusable.yml@b634b5113a3293e3b6f7f534abc3594f92c3c900
     secrets:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
       AUTOFIX_GITHUB_APP_PRIVATE_KEY: ${{ secrets.SWU_AUTOFIX_GITHUB_APP_PRIVATE_KEY }}
+      USAGE_INGEST_TOKEN: ${{ secrets.USAGE_INGEST_TOKEN }}
