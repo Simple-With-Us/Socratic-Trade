@@ -6,7 +6,7 @@ import { businessDaysBetween } from "../src/lib/market-signals/massive-s3";
 import { fetchGroupedBarsRest } from "../src/lib/market-signals/massive";
 
 // Key source: MASSIVE_API_KEY from the environment, else MASSIVE_API_KEY_ALT via `fleet-secrets get`
-// (Infisical Fleet-OPS).  The value is never logged; a missing CLI or nonzero exit means "absent".
+// (Infisical Fleet-OPS).  The value is never logged.  If neither source yields a key, fail fast.
 function loadMassiveKey() {
   if (process.env.MASSIVE_API_KEY) return;
   try {
@@ -16,7 +16,13 @@ function loadMassiveKey() {
     }).trim();
     if (value) process.env.MASSIVE_API_KEY = value;
   } catch {
-    console.error("MASSIVE_API_KEY not set and fleet-secrets get MASSIVE_API_KEY_ALT failed");
+    // fall through to the fail-fast check below
+  }
+  if (!process.env.MASSIVE_API_KEY) {
+    throw new Error(
+      "MASSIVE_API_KEY is not set and `fleet-secrets get MASSIVE_API_KEY_ALT` returned nothing; " +
+        "set MASSIVE_API_KEY or run this script under `fleet-secrets run --`."
+    );
   }
 }
 
