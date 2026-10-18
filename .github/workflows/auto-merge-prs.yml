@@ -14,6 +14,37 @@ name: Auto-merge PRs
 # no CI, no ios-ship on main), and the reusable probes the token before use,
 # so a dead credential fails loud instead of 401ing mid-step (ST-4393).
 
+# Money-path globs the CODEOWNERS gate protects (kept in lockstep with
+# .github/CODEOWNERS by test/automerge-gate-dry-run.test.ts):
+# BEGIN MONEY_PATH_GLOBS
+# /src/lib/broker.ts
+# /src/lib/broker-*.ts
+# /src/lib/public-broker.ts
+# /src/lib/alpaca.ts
+# /src/lib/alpaca-*.ts
+# /src/lib/tradier.ts
+# /src/lib/robinhood.ts
+# /src/lib/etoro.ts
+# /src/lib/etoro-*.ts
+# /src/lib/webull.ts
+# /src/lib/kalshi.ts
+# /src/lib/kalshi-*.ts
+# /src/lib/order-*.ts
+# /src/lib/option-orders.ts
+# /src/lib/stale-limit-orders.ts
+# /src/lib/proposal-*.ts
+# /src/lib/execution*
+# /src/lib/db-execution.ts
+# /src/lib/db-proposals.ts
+# /src/lib/strategy-execution.ts
+# /src/lib/strategy-run-execution-registry.ts
+# /src/lib/trading-liveness.ts
+# /src/lib/tradingview-trigger.ts
+# /src/lib/scheduler.ts
+# /app/api/orders/
+# /app/api/proposals/
+# END MONEY_PATH_GLOBS
+
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, ready_for_review, unlabeled]
