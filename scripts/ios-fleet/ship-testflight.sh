@@ -74,7 +74,7 @@
 # Secrets (never printed):
 #   ~/.secrets/appstore-connect.env  (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_PATH)
 #   or Xcode-signed-in session for destination=upload export
-#   SENTRY_AUTH_TOKEN  (dSYM + Size Analysis upload; env or ~/.secrets/global-api-keys)
+#   SENTRY_AUTH_TOKEN  (dSYM + Size Analysis upload; env or `fleet-secrets get`)
 #   SENTRY_DSN         (injected into xcodebuild so Cocoa plist $(SENTRY_DSN) is set)
 #
 # Sentry after a successful archive (2026-09-01):
@@ -199,17 +199,22 @@ sentry_project_for_app() {
   esac
 }
 
-# Pull SENTRY_AUTH_TOKEN from the handoff file if the environment does not
-# already have it.  Names-only grep trap: extract into a var, never echo.
+# Pull SENTRY_AUTH_TOKEN from `fleet-secrets get` (Infisical Fleet-OPS) if the
+# environment does not already have it and the CLI is installed.  Never echo
+# the value; a missing CLI or a nonzero exit just means "absent".
 load_sentry_auth() {
   if [[ -n "${SENTRY_AUTH_TOKEN:-}" ]]; then
     return 0
   fi
-  local keys="${HOME}/.secrets/global-api-keys"
-  if [[ -f "$keys" ]]; then
-    SENTRY_AUTH_TOKEN="$(grep -m1 '^SENTRY_AUTH_TOKEN=' "$keys" | cut -d= -f2- | tr -d '"' | tr -d '\r')"
-    export SENTRY_AUTH_TOKEN
+  if command -v fleet-secrets >/dev/null 2>&1; then
+    SENTRY_AUTH_TOKEN="$(fleet-secrets get SENTRY_AUTH_TOKEN 2>/dev/null | tr -d '\r')" || SENTRY_AUTH_TOKEN=""
+    if [[ -n "$SENTRY_AUTH_TOKEN" ]]; then
+      export SENTRY_AUTH_TOKEN
+    else
+      unset SENTRY_AUTH_TOKEN
+    fi
   fi
+  return 0
 }
 
 # After a successful archive: upload dSYMs and Size Analysis.  Never fail the

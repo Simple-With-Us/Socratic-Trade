@@ -1,21 +1,22 @@
+import { execFileSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import zlib from "zlib";
 import { businessDaysBetween } from "../src/lib/market-signals/massive-s3";
 import { fetchGroupedBarsRest } from "../src/lib/market-signals/massive";
 
+// Key source: MASSIVE_API_KEY from the environment, else MASSIVE_API_KEY_ALT via `fleet-secrets get`
+// (Infisical Fleet-OPS).  The value is never logged; a missing CLI or nonzero exit means "absent".
 function loadMassiveKey() {
+  if (process.env.MASSIVE_API_KEY) return;
   try {
-    const secretsPath = "/Users/jay/.secrets/global-api-keys.env";
-    if (fs.existsSync(secretsPath)) {
-      const content = fs.readFileSync(secretsPath, "utf-8");
-      const match = content.match(/MASSIVE_API_KEY_ALT=("?[^"\n\r]+)/);
-      if (match && match[1]) {
-        process.env.MASSIVE_API_KEY = match[1].replace(/"/g, '');
-      }
-    }
-  } catch (err) {
-    console.error("Failed to load massive key", err);
+    const value = execFileSync("fleet-secrets", ["get", "MASSIVE_API_KEY_ALT"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    if (value) process.env.MASSIVE_API_KEY = value;
+  } catch {
+    console.error("MASSIVE_API_KEY not set and fleet-secrets get MASSIVE_API_KEY_ALT failed");
   }
 }
 
