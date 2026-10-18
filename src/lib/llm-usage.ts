@@ -35,6 +35,20 @@ export interface LlmUsageEntry {
   cachedPromptTokens?: number;
   /** Anthropic-only: tokens WRITTEN to the cache this call (bill at ~1.25× input). */
   cacheCreationTokens?: number;
+  /** Anthropic/OpenRouter: the share of `cacheCreationTokens` written to the 1-hour cache
+   *  (`usage.cache_creation.ephemeral_1h_input_tokens`).  The remainder is the 5-minute (or
+   *  TTL-unknown) write.  Subset of `cacheCreationTokens`. */
+  cacheCreation1hTokens?: number;
+  /** The reasoning/thinking share of `completionTokens`
+   *  (`usage.completion_tokens_details.reasoning_tokens`).  Informational: already inside
+   *  `completionTokens`, never added again. */
+  reasoningTokens?: number;
+  /** The model the provider says actually served the call (response `model`), when it differs
+   *  from or refines the requested `model` (aliases, OpenRouter routing, `-latest` pins). */
+  servedModel?: string;
+  /** How many provider requests this one ledger row covers.  A chat tool loop records ONE row for
+   *  several model calls; absent means exactly one call. */
+  requestCount?: number;
   /** OpenRouter's per-generation id (response `id`), so the monitor can call GET
    *  /api/v1/generation?id=... to verify reported cost against the provider's own ledger. Only
    *  meaningful when `provider === "openrouter"` — see `providerRequestIdFromPayload`. */
@@ -72,6 +86,14 @@ export interface LlmTokenUsage {
   /** Anthropic-only: usage.cache_creation_input_tokens (cache-write premium tokens).
    *  Subset of promptTokens (which is normalized to the FULL prompt across providers). */
   cacheCreationTokens?: number;
+  /** Subset of `cacheCreationTokens` written to the 1-hour cache
+   *  (Anthropic `usage.cache_creation.ephemeral_1h_input_tokens`). */
+  cacheCreation1hTokens?: number;
+  /** `usage.completion_tokens_details.reasoning_tokens` (or the Responses-API
+   *  `output_tokens_details`).  A subset of `completionTokens`. */
+  reasoningTokens?: number;
+  /** The response's own `model` field: what the provider says served the call. */
+  servedModel?: string;
   /**
    * `usage.cost` — the exact amount the transport charged for this call, in USD.  OpenRouter is
    * the only provider in this app that reports one (credits are 1:1 with USD), and it reports it
@@ -266,7 +288,15 @@ export function extractLlmUsage(responseJson: unknown): LlmTokenUsage {
   const details = (u.prompt_tokens_details ?? {}) as Record<string, unknown>;
   // Cache reads: OpenAI/Gemini-compat nest under prompt_tokens_details; DeepSeek and Anthropic are top-level.
   const cachedPromptTokens = num(details.cached_tokens) ?? num(u.prompt_cache_hit_tokens) ?? num(u.cache_read_input_tokens);
-  const cacheCreationTokens = num(u.cache_creation_input_tokens);
+  // Anthropic reports cache writes top-level; OpenRouter nests them under prompt_tokens_details.
+  const cacheCreationTokens = num(u.cache_creation_input_tokens) ?? num(details.cache_write_tokens);
+  const creationBreakdown = (u.cache_creation ?? {}) as Record<string, unknown>;
+  const cacheCreation1hTokens = num(creationBreakdown.ephemeral_1h_input_tokens);
+  const reasoningTokens =
+    num(((u.completion_tokens_details ?? {}) as Record<string, unknown>).reasoning_tokens) ??
+    num(((u.output_tokens_details ?? {}) as Record<string, unknown>).reasoning_tokens);
+  const rawModel = (responseJson as { model?: unknown }).model;
+  const servedModel = typeof rawModel === "string" && rawModel.trim() ? rawModel.trim().slice(0, 160) : undefined;
   const anthropicIn = num(u.input_tokens);
   const promptTokens =
     num(u.prompt_tokens) ??
@@ -284,6 +314,9 @@ export function extractLlmUsage(responseJson: unknown): LlmTokenUsage {
     totalTokens,
     ...(cachedPromptTokens !== undefined ? { cachedPromptTokens } : {}),
     ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}),
+    ...(cacheCreation1hTokens !== undefined ? { cacheCreation1hTokens } : {}),
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+    ...(servedModel !== undefined ? { servedModel } : {}),
     ...(billedCostUsd !== undefined ? { billedCostUsd } : {})
   };
 }
@@ -326,6 +359,11 @@ export function remapOpenRouterTelemetry(provider: string, model: string | undef
     return { provider, model: family ?? model };
   }
   return { provider, model: family ?? model };
+}
+
+/** A finite, non-negative integer, else null (the column stays NULL). */
+function nonNegativeInt(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
 }
 
 /** Record one LLM call against a user. Never throws — usage accounting must not break an LLM run. */
@@ -390,10 +428,20 @@ export function recordLlmUsage(entry: LlmUsageEntry): void {
     // hands us an unexpected enum value.
     const allowedStatus = new Set(["success", "error", "timeout", "canceled"]);
     const status = entry.status && allowedStatus.has(entry.status) ? entry.status : null;
+    // Detail columns (migration #99).  Sanitised like latency: a non-finite or negative figure is
+    // dropped to NULL rather than persisted, so a malformed provider block can never poison replay.
+    const cachedPromptTokens = nonNegativeInt(entry.cachedPromptTokens);
+    const cacheCreationTokens = nonNegativeInt(entry.cacheCreationTokens);
+    const cacheCreation1hTokens =
+      cacheCreationTokens === null ? null : Math.min(nonNegativeInt(entry.cacheCreation1hTokens) ?? 0, cacheCreationTokens) || null;
+    const reasoningTokens = nonNegativeInt(entry.reasoningTokens);
+    const servedModel = typeof entry.servedModel === "string" && entry.servedModel.trim() ? entry.servedModel.trim().slice(0, 160) : null;
+    const requestCountRaw = nonNegativeInt(entry.requestCount);
+    const requestCount = requestCountRaw !== null && requestCountRaw > 1 ? requestCountRaw : null;
     getDb()
       .prepare(
-        `INSERT INTO llm_usage (id, user_id, provider, model, context, key_source, key_ref, connected_account_id, prompt_tokens, completion_tokens, total_tokens, cost_usd, cost_source, latency_ms, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO llm_usage (id, user_id, provider, model, context, key_source, key_ref, connected_account_id, prompt_tokens, completion_tokens, total_tokens, cost_usd, cost_source, latency_ms, status, cached_prompt_tokens, cache_creation_tokens, cache_creation_1h_tokens, reasoning_tokens, served_model, request_count, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         usageId,
@@ -411,6 +459,12 @@ export function recordLlmUsage(entry: LlmUsageEntry): void {
         costSource,
         latencyMs,
         status,
+        cachedPromptTokens,
+        cacheCreationTokens,
+        cacheCreation1hTokens,
+        reasoningTokens,
+        servedModel,
+        requestCount,
         occurredAt
       );
     setGenAiUsageOnActiveSpan({
@@ -433,7 +487,16 @@ export function recordLlmUsage(entry: LlmUsageEntry): void {
       completionTokens: entry.completionTokens,
       totalTokens: total,
       costUsd: cost,
+      costSource,
       providerRequestId: entry.providerRequestId,
+      cachedPromptTokens: cachedPromptTokens ?? undefined,
+      cacheCreationTokens: cacheCreationTokens ?? undefined,
+      cacheCreation1hTokens: cacheCreation1hTokens ?? undefined,
+      reasoningTokens: reasoningTokens ?? undefined,
+      servedModel: servedModel ?? undefined,
+      latencyMs: latencyMs ?? undefined,
+      status: status ?? undefined,
+      requestCount: requestCount ?? undefined,
     });
   } catch {
     /* ledger is best-effort; never break the caller */

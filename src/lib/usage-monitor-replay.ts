@@ -60,6 +60,15 @@ interface LlmUsageLedgerRow {
   completion_tokens: number | null;
   total_tokens: number | null;
   cost_usd: number | null;
+  cost_source: string | null;
+  latency_ms: number | null;
+  status: string | null;
+  cached_prompt_tokens: number | null;
+  cache_creation_tokens: number | null;
+  cache_creation_1h_tokens: number | null;
+  reasoning_tokens: number | null;
+  served_model: string | null;
+  request_count: number | null;
   created_at: string;
 }
 
@@ -343,7 +352,9 @@ function readLlmRows(
 ): LlmUsageLedgerRow[] {
   const columns =
     "id, user_id, provider, model, context, key_source, key_ref, prompt_tokens, " +
-    "completion_tokens, total_tokens, cost_usd, created_at";
+    "completion_tokens, total_tokens, cost_usd, cost_source, latency_ms, status, " +
+    "cached_prompt_tokens, cache_creation_tokens, cache_creation_1h_tokens, reasoning_tokens, " +
+    "served_model, request_count, created_at";
   const clauses: string[] = [];
   const params: (string | number)[] = [];
   if (cursor) {
@@ -413,6 +424,15 @@ async function llmEvents(rows: LlmUsageLedgerRow[]): Promise<RowEventPair<LlmUsa
         completionTokens: optionalFinite(row.completion_tokens),
         totalTokens: optionalFinite(row.total_tokens),
         costUsd: optionalFinite(row.cost_usd),
+        costSource: row.cost_source,
+        cachedPromptTokens: optionalFinite(row.cached_prompt_tokens),
+        cacheCreationTokens: optionalFinite(row.cache_creation_tokens),
+        cacheCreation1hTokens: optionalFinite(row.cache_creation_1h_tokens),
+        reasoningTokens: optionalFinite(row.reasoning_tokens),
+        servedModel: row.served_model ?? undefined,
+        latencyMs: optionalFinite(row.latency_ms),
+        status: row.status ?? undefined,
+        requestCount: optionalFinite(row.request_count),
       })
     }))
   );

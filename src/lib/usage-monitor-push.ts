@@ -31,11 +31,14 @@ import { getGitSha } from "./git-sha";
 import { PEER_LANE_USAGE_MONITOR, peerAwareDelayMs, recordPeerLaneSample } from "./peer-lane-backoff";
 import { suppressUsageMonitorProvider } from "./usage-monitor-provider-policy";
 import {
+  aiUsageTotalTokens,
+  buildAiUsage,
   createUsageTelemetryClient,
   telemetryEventClassifier,
   UsageTelemetryApiError,
   UsageTelemetryV2EventSchema,
   deriveUsageTelemetryV2IdempotencyKey,
+  type AiUsage,
   type UsageTelemetryV2Event,
   type UsageTelemetryMetricType,
   type UsageTelemetryUnit,
@@ -578,13 +581,85 @@ export interface LlmUsageMonitorEntry {
   completionTokens?: number;
   totalTokens?: number;
   costUsd?: number;
+  /** Where `costUsd` came from: the transport's own `usage.cost` (`billed`) or the price table
+   *  (`estimated`).  Mirrors the ledger's `cost_source` column. */
+  costSource?: string | null;
+  /** Prompt tokens served from the provider's prompt cache (a subset of `promptTokens`). */
+  cachedPromptTokens?: number;
+  /** Prompt tokens written to the provider's prompt cache, any TTL (a subset of `promptTokens`). */
+  cacheCreationTokens?: number;
+  /** The 1-hour-TTL share of `cacheCreationTokens`. */
+  cacheCreation1hTokens?: number;
+  /** The reasoning share of `completionTokens` (informational; already inside it). */
+  reasoningTokens?: number;
+  /** The model the provider says served the call (response `model`). */
+  servedModel?: string;
+  /** Wall-clock latency of the call (or whole chat run), from the ledger `latency_ms` column. */
+  latencyMs?: number;
+  /** Outcome of the call (ledger `status`): success / error / timeout / canceled. */
+  status?: string;
+  /** Provider requests this row covers when more than one (a chat tool loop); absent = one. */
+  requestCount?: number;
   /** OpenRouter's generation id for this call (see `providerRequestIdFromPayload` in llm-usage.ts).
    *  Undefined for every non-OpenRouter provider. */
   providerRequestId?: string;
 }
 
+const LLM_AI_HARNESS = "socratic-trade";
+/** The local CLI broker bills against the operator's subscription, not per token. */
+const SUBSCRIPTION_KEY_REF = "code-cli";
+
+function finiteCount(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
+}
+
+/** The ledger-derived canonical `ai` block, or undefined when it cannot be built.  Pure and
+ *  deterministic in the ledger row: live delivery and `usage-monitor-replay.ts` pass the same
+ *  fields, so the same row always yields the same block (the monitor 409s on a changed replay). */
+function llmAiUsage(entry: LlmUsageMonitorEntry, costSource: "billed" | "estimated" | undefined): AiUsage | undefined {
+  try {
+    const prompt = finiteCount(entry.promptTokens);
+    const completion = finiteCount(entry.completionTokens);
+    // The ledger's prompt figure is the FULL prompt (cache reads and writes included); the canonical
+    // `input` bucket is the uncached remainder.  Clamp like the cost estimator so a malformed
+    // provider block can never make the buckets sum to more than prompt + completion.
+    const cacheRead = prompt === undefined ? undefined : Math.min(finiteCount(entry.cachedPromptTokens) ?? 0, prompt) || undefined;
+    const cacheWriteTotal =
+      prompt === undefined ? undefined : Math.min(finiteCount(entry.cacheCreationTokens) ?? 0, prompt - (cacheRead ?? 0)) || undefined;
+    const cacheWrite1h = cacheWriteTotal === undefined ? undefined : Math.min(finiteCount(entry.cacheCreation1hTokens) ?? 0, cacheWriteTotal) || undefined;
+    const cacheWrite5m = cacheWriteTotal === undefined ? undefined : cacheWriteTotal - (cacheWrite1h ?? 0) || undefined;
+    const tokens = {
+      ...(prompt !== undefined ? { input: prompt - (cacheRead ?? 0) - (cacheWriteTotal ?? 0) } : {}),
+      ...(completion !== undefined ? { output: completion } : {}),
+      ...(cacheRead !== undefined ? { cacheRead } : {}),
+      ...(cacheWrite5m !== undefined ? { cacheWrite5m } : {}),
+      ...(cacheWrite1h !== undefined ? { cacheWrite1h } : {}),
+      ...(finiteCount(entry.reasoningTokens) !== undefined ? { reasoning: Math.min(finiteCount(entry.reasoningTokens)!, completion ?? Number.MAX_SAFE_INTEGER) } : {}),
+    };
+    return buildAiUsage({
+      tokens,
+      requestedModel: entry.model?.slice(0, 160),
+      servedModel: entry.servedModel?.slice(0, 160),
+      harness: LLM_AI_HARNESS,
+      durationMs: finiteCount(entry.latencyMs),
+      billingMode: entry.keyRef === SUBSCRIPTION_KEY_REF ? "subscription" : "payg",
+      costSource,
+    });
+  } catch {
+    // Telemetry never throws, and a replay builder that threw would wedge the watermark.
+    return undefined;
+  }
+}
+
 function llmUsageEvent(entry: LlmUsageMonitorEntry): UsageMonitorDraft {
   const hasCost = typeof entry.costUsd === "number" && Number.isFinite(entry.costUsd);
+  const costSource = entry.costSource === "billed" || entry.costSource === "estimated" ? entry.costSource : undefined;
+  // OpenRouter's `usage.cost` is the provider's own charge, so it is `actual`; a price-table
+  // figure stays `estimated`.  A cost-less row is still an estimate (UM derives its price).
+  const billed = hasCost && costSource === "billed";
+  const ai = llmAiUsage(entry, hasCost ? costSource : undefined);
+  const aiTotal = ai?.tokens ? aiUsageTotalTokens(ai.tokens) : undefined;
+  const requestCount = finiteCount(entry.requestCount);
   return {
     environment: usageMonitorEnv(),
     provider: entry.provider,
@@ -592,13 +667,16 @@ function llmUsageEvent(entry: LlmUsageMonitorEntry): UsageMonitorDraft {
     project: PROJECT,
     label: entry.context,
     producerKeyRef: entry.keyRef,
-    billingMode: "estimated",
+    billingMode: billed ? "actual" : "estimated",
     metricType: hasCost ? "cost" : "usage",
-    quantity: entry.totalTokens,
+    // Doc rule: quantity is the sum of the billed ai buckets, which equals the ledger total.
+    quantity: aiTotal !== undefined && aiTotal > 0 ? aiTotal : entry.totalTokens,
     unit: "token",
     costUsd: hasCost ? entry.costUsd : undefined,
-    requests: 1,
-    confidence: "estimated",
+    // A chat tool loop is one ledger row covering several model calls; saying so keeps the run's
+    // total duration out of the monitor's per-request view (ai-usage-schema.md).
+    requests: requestCount !== undefined && requestCount > 1 ? requestCount : 1,
+    confidence: billed ? "actual" : "estimated",
     occurredAt: entry.occurredAt ?? new Date().toISOString(),
     providerRequestId: entry.providerRequestId,
     metadata: cleanMetadata({
@@ -608,8 +686,20 @@ function llmUsageEvent(entry: LlmUsageMonitorEntry): UsageMonitorDraft {
       keySource: entry.keySource,
       promptTokens: entry.promptTokens ?? null,
       completionTokens: entry.completionTokens ?? null,
+      // Legacy token keys the monitor still maps when `ai` is absent (ai-usage-metadata.ts); kept
+      // alongside the typed block for the migration.  `cacheWriteTokens` is the 5-minute share and
+      // `cacheWriteOneHourTokens` the 1-hour share, matching the monitor's own subtraction.
+      cachedTokens: ai?.tokens?.cacheRead,
+      cacheWriteTokens: ai?.tokens?.cacheWrite5m,
+      cacheWriteOneHourTokens: ai?.tokens?.cacheWrite1h,
+      reasoningTokens: ai?.tokens?.reasoning,
+      latencyMs: finiteCount(entry.latencyMs),
+      status: entry.status,
+      costSource: hasCost ? costSource : undefined,
+      servedModel: entry.servedModel,
       ...classifierTelemetryMetadata({ service: "llm", feature: entry.context, keyRef: entry.keyRef, userId: entry.userId }),
     }),
+    ai,
   };
 }
 
