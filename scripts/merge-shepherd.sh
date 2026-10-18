@@ -26,6 +26,10 @@
 #   GITHUB_REPOSITORY   owner/repo (default: SHEPHERD_REPO or Simple-With-Us/Socratic-Trade)
 #   SHEPHERD_REPO       override when GITHUB_REPOSITORY unset (launchd / Mac driver)
 #   SHEPHERD_DRY_RUN=1  report only; attempt nothing
+#   SHEPHERD_STATUS_ISSUE=1  also keep one open "Merge shepherd status" issue updated with the
+#                          digest.  Off by default (ST-4553):  the digest already goes to stdout
+#                          (the launchd log) and the Actions step summary, and a stale host copy
+#                          opened 866 duplicates of that issue.
 #   GH_TOKEN/GITHUB_TOKEN  auth. A PAT (repo+workflow scope) is preferred so that
 #                          update-branch re-triggers verify; the default Actions
 #                          GITHUB_TOKEN still merges green PRs + reports.
@@ -41,6 +45,7 @@ REPO="${GITHUB_REPOSITORY:-${SHEPHERD_REPO:-$DEFAULT_REPO}}"
 DRY="${SHEPHERD_DRY_RUN:-0}"
 HAS_PAT="${SHEPHERD_HAS_PAT:-1}"
 ISSUE_TITLE="Merge shepherd status"
+STATUS_ISSUE="${SHEPHERD_STATUS_ISSUE:-0}"
 # Who am I? Needed so the reran-marker check below (Codex review, round 3) only
 # trusts a comment we ourselves posted, not one any commenter could spoof. A PAT
 # resolves to its owning user via /user; the default Actions GITHUB_TOKEN is an
@@ -51,6 +56,30 @@ ME=""
 [ "$HAS_PAT" = "1" ] && ME="$(gh api user --jq '.login' 2>/dev/null)"
 ME="${ME:-github-actions[bot]}"
 TMP="$(mktemp)"; trap 'rm -f "$TMP" "$TMP.md"' EXIT
+
+# The open tracking issue's number (the oldest when duplicates exist), or nothing.  Lists open
+# issues over REST rather than the search API:  search answered empty for a renamed repo slug, and
+# every empty answer created another issue (ST-4553).  A failed lookup returns non-zero.
+find_status_issue() {
+  gh api --paginate "repos/$REPO/issues?state=open&per_page=100" \
+    --jq ".[] | select(.pull_request == null and .title == \"$ISSUE_TITLE\") | .number" \
+    | sort -n | awk 'NR == 1'
+}
+
+# Update the tracking issue, or create it when the lookup proved there is none.  Fails closed:
+# a lookup error never creates an issue.
+publish_status_issue() {
+  local body="$1" existing
+  if ! existing="$(find_status_issue)"; then
+    echo "[shepherd] tracking-issue lookup failed;  not creating one" >&2
+    return 0
+  fi
+  if [ -n "$existing" ]; then
+    gh issue edit "$existing" -R "$REPO" --body "$body" >/dev/null && echo "[shepherd] updated tracking issue #$existing"
+  else
+    gh issue create -R "$REPO" --title "$ISSUE_TITLE" --body "$body" >/dev/null && echo "[shepherd] created tracking issue"
+  fi
+}
 
 row() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$TMP"; }   # bucket \t num \t note
 
@@ -335,16 +364,10 @@ now="$(date -u '+%Y-%m-%d %H:%MZ' 2>/dev/null || echo now)"
 cat "$TMP.md"
 [ -n "${GITHUB_STEP_SUMMARY:-}" ] && cat "$TMP.md" >> "$GITHUB_STEP_SUMMARY"
 
-if [ "$DRY" != "1" ]; then
+if [ "$DRY" != "1" ] && [ "$STATUS_ISSUE" = "1" ]; then
   body="$(cat "$TMP.md")
 <sub>Auto-maintained by the merge shepherd (\`scripts/merge-shepherd.sh\`, workflow \`merge-shepherd.yml\`). Overwritten each run.</sub>"
-  existing=$(gh issue list -R "$REPO" --state open --search "\"$ISSUE_TITLE\" in:title" \
-               --json number,title --jq "[.[] | select(.title==\"$ISSUE_TITLE\")][0].number" 2>/dev/null)
-  if [ -n "$existing" ] && [ "$existing" != "null" ]; then
-    gh issue edit "$existing" -R "$REPO" --body "$body" >/dev/null 2>&1 && echo "[shepherd] updated tracking issue #$existing"
-  else
-    gh issue create -R "$REPO" --title "$ISSUE_TITLE" --body "$body" >/dev/null 2>&1 && echo "[shepherd] created tracking issue"
-  fi
+  publish_status_issue "$body"
 fi
 
 echo "[shepherd] done"
