@@ -26,7 +26,7 @@ Expect `HTTP/2 307` (redirect to `/login`) or `200` after the chain resolves.
 The Coolify REST API at `host.jays.services` sits behind a Cloudflare IP allowlist that has historically 403'd everything except GitHub's webhook ranges -- it is normally **unreachable from an agent's own machine** (confirmed: `is_auto_deploy_enabled` had to be flipped via box SSH, not the API, because of this). Try it, but do not treat a 403 here as a production problem:
 
 ```bash
-COOLIFY_TOKEN="<read from ~/.secrets/global-api-keys, key COOLIFY_API_TOKEN>"
+COOLIFY_TOKEN="$(fleet-secrets get COOLIFY_SERVER_STATS)"   # read-only stats token; never echo it
 curl -s -H "Authorization: Bearer $COOLIFY_TOKEN" \
   https://host.jays.services/api/v1/applications \
   | jq '.[] | select(.uuid == "m1os7ijf31bg3fanil152e4b") |
