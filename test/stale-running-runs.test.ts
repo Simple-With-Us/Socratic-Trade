@@ -369,24 +369,42 @@ describe("markStaleRunningRuns", () => {
     expect(JSON.parse(crashedReceipts(db, userId)[0].payload).haltExempt).toBe(true);
   });
 
-  it("immediately sweeps a prior-process run that started only 1 minute before boot without waiting 30 minutes", async () => {
+  it("waits out the boot grace before sweeping a prior-process run that started only 1 minute before boot", async () => {
     const db = await import("../src/lib/db");
+    const { RESTART_SWEEP_BOOT_GRACE_MS, setProcessStartedAtMsForTests } = await import("../src/lib/db-execution");
     const userId = `recent-restart-user-${randomUUID()}`;
     const runId = randomUUID();
-    // Simulate run started 1 minute ago, but process booted 10 seconds ago
-    const startedAt = new Date(Date.now() - 60_000).toISOString();
+    const now = Date.now();
+    // One minute before a boot that is already past the grace window.  Still far inside the
+    // 30-minute stall threshold, so only the restart arm can select it.
+    const bootAfterGrace = now - RESTART_SWEEP_BOOT_GRACE_MS - 5_000;
+    const startedAt = new Date(bootAfterGrace - 60_000).toISOString();
 
     db.insertStrategyRun(runId, userId);
     db.getDb().prepare("UPDATE strategy_runs SET started_at = ? WHERE id = ?").run(startedAt, runId);
 
-    // Running sweep now should immediately catch it as process_restarted_mid_run
-    expect(db.markStaleRunningRuns(Date.now())).toBe(1);
-    const row = db
-      .getDb()
-      .prepare("SELECT status, summary FROM strategy_runs WHERE id = ?")
-      .get(runId) as { status: string; summary: string | null };
-    expect(row.status).toBe("failed");
-    expect(row.summary).toContain("Process restarted mid-run");
+    try {
+      // Same row, but this process just booted: the restart arm stays quiet.
+      setProcessStartedAtMsForTests(now);
+      db.markStaleRunningRuns(now);
+      const duringGrace = db
+        .getDb()
+        .prepare("SELECT status FROM strategy_runs WHERE id = ?")
+        .get(runId) as { status: string };
+      expect(duringGrace.status).toBe("running");
+
+      // Grace elapsed and the run still predates boot by a minute.  Sweep it.
+      setProcessStartedAtMsForTests(bootAfterGrace);
+      db.markStaleRunningRuns(now);
+      const afterGrace = db
+        .getDb()
+        .prepare("SELECT status, summary FROM strategy_runs WHERE id = ?")
+        .get(runId) as { status: string; summary: string | null };
+      expect(afterGrace.status).toBe("failed");
+      expect(afterGrace.summary).toContain("Process restarted mid-run");
+    } finally {
+      setProcessStartedAtMsForTests(null);
+    }
   });
 });
 

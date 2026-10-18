@@ -14,7 +14,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, Lock, Unlock } from "lucide-react";
 import type { ConnectedAccount, LlmReasoningEffort, ScoringWeights, StrategyProfile, StrategyTuningPatch, TradingPolicy } from "@/lib/types";
-import { isDisallowedInteractiveStrategyReasoningConfig, reasoningCapabilityForModel } from "@/lib/llm-request";
+import { isDisallowedInteractiveStrategyReasoningConfig, reasoningCapabilityForModel } from "@/lib/llm-reasoning";
 import { reasoningAdviceForModel, recommendedReasoningEffortForModel } from "@/lib/model-reasoning-recommendations";
 import type { DashboardSnapshot } from "../../dashboard-types";
 import {

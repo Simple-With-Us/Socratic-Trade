@@ -1,3 +1,5 @@
+import { codeCliReady } from "./code-cli";
+import { llmRouteFor } from "./llm-route";
 // db-api-keys.ts — field-level encryption, user API keys, connected accounts,
 // synthetic stops, watchlist, price alerts, notify prefs, chat turns, memory,
 // and the catch-all listUsers helper.
@@ -965,6 +967,12 @@ export function maskApiKeyPreview(key: string | undefined | null): string | unde
  */
 export function resolveLlmCredential(service: "openai" | "anthropic" | "xai" | "gemini" | "mistral" | "deepseek" | "meta" | "moonshot" | "minimax" | "openrouter", userId?: string): { key?: string; source: LlmKeySource; keyRef?: string } {
   const canonical = normalizeApiKeyService(service);
+  if (userId && (canonical === "meta" || canonical === "minimax") && llmRouteFor(canonical, userId) === "code-cli") {
+    // This sentinel is a capability marker, never an API credential. Endpoint + shared fetch
+    // re-check owner/config independently. An unavailable CLI must not become a paid API call.
+    if (!codeCliReady(userId)) return { source: "none" };
+    return { key: "code-cli-no-provider-key", source: "user", keyRef: "code-cli" };
+  }
   if (userId) {
     const userKey = getUserApiKey(userId, canonical);
     if (userKey?.apiKey === DELETED_KEY_TOMBSTONE) return { source: "none" };

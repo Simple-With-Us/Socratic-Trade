@@ -15,7 +15,7 @@
 import { useState } from "react";
 import type { LlmReasoningEffort } from "@/lib/types";
 import { catalogEntryFor } from "@/lib/llm-model-catalog";
-import { normalizeReasoningEffortForModel, reasoningCapabilityForModel } from "@/lib/llm-request";
+import { normalizeReasoningEffortForModel, reasoningCapabilityForModel } from "@/lib/llm-reasoning";
 import { reasoningAdviceForModel, recommendedReasoningEffortForModel } from "@/lib/model-reasoning-recommendations";
 import { savePolicy, ConsoleApiError } from "../lib/api";
 import { resolveLearningReviewNumberCommit } from "../lib/number-commit";

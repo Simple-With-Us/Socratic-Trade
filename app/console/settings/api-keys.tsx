@@ -11,6 +11,7 @@
  *  Optional market-data keys also carry a declared plan tier (free / power / …)
  *  so quotas and endpoint expectations match what you actually pay for. */
 
+import { LlmRouteSelect } from "./llm-route-select";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ConsoleApiError } from "../lib/api";
 import { useToast } from "../ui/toast";
@@ -97,7 +98,7 @@ export function ApiKeysCard() {
     }
   };
 
-  const onRouteChange = async (entry: ApiKeyEntry, route: "openrouter" | "native") => {
+  const onRouteChange = async (entry: ApiKeyEntry, route: "openrouter" | "native" | "code-cli") => {
     const previous = entry.route;
     setBusy(entry.service);
     setSaveStatus("saving");
@@ -178,7 +179,11 @@ export function ApiKeysCard() {
             <div className="flex flex-col divide-y divide-[color:var(--con-line)] rounded-control border border-[color:var(--con-line)]">
               {list.map((entry) => {
                 const credName = entry.credentialName ?? "key";
-                const source = getSourceCopy(entry.source, credName);
+                const source = entry.route === "code-cli"
+                  ? { chip: entry.codeCliAvailable ? "server CLI selected" : "server CLI unavailable",
+                      title: "This route uses the server CLI broker, not an API key.  Server setup and CLI availability are required.",
+                      tone: "muted" as const }
+                  : getSourceCopy(entry.source, credName);
                 const isEditing = editing === entry.service;
                 const isConfirmingDelete = confirmingDelete === entry.service;
                 const showTier = Boolean(entry.planTierOptions && entry.planTierOptions.length > 0);
@@ -222,24 +227,8 @@ export function ApiKeysCard() {
                           </span>
                         )}
                         {entry.routeToggle && (
-                          <label
-                            className="flex items-center gap-1.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]"
-                            title="OpenRouter is the default.  Pick Direct to send this provider's models straight to its own API with your key above."
-                          >
-                            <span className="whitespace-nowrap">Route</span>
-                            <Select
-                              className="min-w-[8.5rem] py-0.5 text-[length:var(--con-fs-xs)]"
-                              value={entry.route ?? "openrouter"}
-                              disabled={busy !== null || retired || entry.source === "none"}
-                              title={entry.source === "none" ? "Add a key first.  Direct only works once this provider has a key." : undefined}
-                              aria-busy={busy === entry.service}
-                              onChange={(e) => void onRouteChange(entry, e.target.value === "native" ? "native" : "openrouter")}
-                              aria-label={`${entry.label} route`}
-                            >
-                              <option value="openrouter">OpenRouter (default)</option>
-                              <option value="native">Direct (own key)</option>
-                            </Select>
-                          </label>
+                          <LlmRouteSelect entry={entry} busy={busy !== null} retired={retired}
+                            onChange={(route) => void onRouteChange(entry, route)} />
                         )}
                         {showTier && (
                           <label

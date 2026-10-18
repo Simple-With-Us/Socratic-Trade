@@ -182,3 +182,20 @@ describe("debateProposal — malformed-content failover (prod 2026-07-28..30 'Re
   });
 });
 
+
+it("Code CLI Red primary does not fall through to a paid reviewer", async () => {
+  vi.stubEnv("PRIMARY_USER_EMAIL","owner@example.com");vi.stubEnv("CODE_CLI_ENABLED","true");
+  vi.stubEnv("CODE_CLI_OWNER_EMAIL","owner@example.com");vi.stubEnv("CODE_CLI_OWNER_USER_ID","local");
+  vi.stubEnv("CODE_CLI_BROKER_URL","https://broker.internal/generate");vi.stubEnv("CODE_CLI_BROKER_TOKEN","test-broker-token");
+  await setupWithFallback("RT_CLI");
+  const {getPolicy,setPolicy,setUserSetting,upsertUserApiKey}=await import("../src/lib/db");
+  upsertUserApiKey("local","openrouter","test-fallback-key","fixture");
+  setUserSetting("local","llm_route_minimax","code-cli");
+  setPolicy({...getPolicy(),redTeamLlmModel:"minimax-m3"});
+  const calls:string[]=[];
+  vi.stubGlobal("fetch",async(url:string|URL|Request)=>{calls.push(String(url));return new Response("unavailable",{status:503});});
+  try {
+    const {debateProposal}=await import("../src/lib/red-team");const result=await debateProposal(buyProposal(),undefined);
+    expect(result.available).toBe(false);expect(calls).toEqual(["https://broker.internal/generate"]);
+  } finally {setUserSetting("local","llm_route_minimax","openrouter");vi.unstubAllEnvs();}
+});

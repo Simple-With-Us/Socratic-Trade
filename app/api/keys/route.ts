@@ -1,3 +1,7 @@
+import { codeCliReady } from "@/lib/code-cli";
+import { isPrimaryEmail } from "@/lib/auth/identity";
+import { isVerifiedIdentitySource, AUTHENTICATED_IDENTITY_SOURCE_HEADER } from "@/lib/auth/strip-identity";
+import { AUTHENTICATED_EMAIL_HEADER } from "@/lib/request-user";
 import { NextRequest, NextResponse } from "next/server";
 import {
   apiKeyEnvVarForService,
@@ -277,6 +281,12 @@ function planTierFields(service: string, storedPlanTier?: string | null) {
   };
 }
 
+function canSelectCodeCli(request: NextRequest, userId: string): boolean {
+  const email = request.headers.get(AUTHENTICATED_EMAIL_HEADER)?.trim().toLowerCase();
+  return !!email && isPrimaryEmail(email) && email === process.env.CODE_CLI_OWNER_EMAIL?.trim().toLowerCase()
+    && isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER)) && codeCliReady(userId);
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const userId = resolveRequestUserId(request);
@@ -334,7 +344,7 @@ export async function GET(request: NextRequest) {
         updatedAt: stored?.updatedAt,
         savedLabel: stored?.label,
         ...tiers,
-        ...(isNativeRouteService(entry.service) ? { routeToggle: true, route: llmRouteFor(entry.service, userId) } : {}),
+        ...(isNativeRouteService(entry.service) ? { routeToggle: true, route: llmRouteFor(entry.service, userId), codeCliAvailable: canSelectCodeCli(request, userId) } : {}),
         retired: retired || isRetiredMarketDataService(entry.service),
         retiredNote: "retiredNote" in entry ? entry.retiredNote : undefined
       };
@@ -353,6 +363,9 @@ export async function POST(request: NextRequest) {
       route?: string;
     };
     const { service, apiKey, label, planTier, route } = body;
+    if (route === "code-cli" && !isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER))) {
+      return NextResponse.json({ error: "Code CLI requires the verified owner" }, { status: 403 });
+    }
     const userId = resolveRequestUserId(request, body);
 
     const canonical = service ? normalizeApiKeyService(service) : "";
@@ -377,8 +390,11 @@ export async function POST(request: NextRequest) {
       if (!isNativeRouteService(canonical)) {
         return NextResponse.json({ error: "route is only supported for meta and minimax" }, { status: 400 });
       }
-      if (route !== "openrouter" && route !== "native") {
-        return NextResponse.json({ error: 'route must be "openrouter" or "native"' }, { status: 400 });
+      if (route !== "openrouter" && route !== "native" && route !== "code-cli") {
+        return NextResponse.json({ error: 'route must be openrouter, native or code-cli' }, { status: 400 });
+      }
+      if (route === "code-cli" && !canSelectCodeCli(request, userId)) {
+        return NextResponse.json({ error: "Code CLI is available only to the verified owner after server setup" }, { status: 403 });
       }
       setUserSetting(userId, llmRouteSettingKey(canonical), route);
       if (!(typeof apiKey === "string" && apiKey.trim().length > 0) && planTier === undefined) {

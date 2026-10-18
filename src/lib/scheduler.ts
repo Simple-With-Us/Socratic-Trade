@@ -938,15 +938,14 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // close its own now-stale check-in a second time, or worse, clobber a newer tick's still-open
   // in-progress check-in (tickGuardHost.__tickSentryCheckInId by then belongs to that newer tick).
   const myTickGeneration = tickGuardHost.__tickGeneration;
-  // Crashed-run sweep: mark strategy_runs left in status='running' after a process crash/kill,
-  // and close the matching strategy_run_requests row so Manual Run once is not left locked.
-  // Must run BEFORE the single-leader gate so stale rows are always repaired (idempotent: the
-  // UPDATE has a `WHERE status = 'running'` guard, so even two concurrent sweeps won't double-count).
+  // Crashed-run sweep for rows THIS instance started.  Runs before the leader gate so a process
+  // that lost leadership can still close its own wedged run.  reapUnowned stays false: a follower
+  // must never close the leader's runs (ST-8).  The leader reaps other instances after the gate.
   try {
     await journalLane("stale-run-sweep", {}, () => {
       // Restart-killed runs that provably placed nothing get ONE queued retry (board 687a5fb4);
       // eligibility + idempotency live in strategy-run-retry.ts.
-      const { repaired, retry } = sweepStaleRunsAndRetry(Date.now());
+      const { repaired, retry } = sweepStaleRunsAndRetry(Date.now(), { reapUnowned: false });
       if (repaired > 0) console.log(`[scheduler] marked ${repaired} stale running run(s) as failed`);
       if (retry.enqueued > 0) console.log(`[scheduler] queued ${retry.enqueued} one-time retry(ies) for restart-killed run(s)`);
       return {
@@ -961,11 +960,11 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // Same repair for the mobile/PWA command queue: claimNextQueuedCommand marks a row 'running' and
   // nothing else in the codebase ever selects that status, so a crash mid-command strands the row
   // forever — which permanently blocks account deletion (activeMobileCommands) and permanently
-  // spins the PWA. Placed here for two reasons: before the single-leader gate (like the run sweep,
-  // so stale rows are repaired even on a follower — its liveness graces are all durable DB
-  // evidence, so a follower cannot misjudge a command the leader is running), and after the run
-  // sweep, so a strategy_runs row that sweep just left alive on this same tick still hands its
-  // grace through to the strategy.run_once command wrapping it. Dynamic import matches the
+  // spins the PWA. Placed here for two reasons: before the single-leader gate (a follower may
+  // repair a command whose liveness graces are all durable DB evidence, so it cannot misjudge a
+  // command the leader is running), and after the own-instance run sweep, so a strategy_runs row
+  // that sweep just left alive on this same tick still hands its grace through to the
+  // strategy.run_once command wrapping it. Dynamic import matches the
   // mobile-command-drain lane below and keeps scheduler -> mobile-api off the static graph.
   try {
     await journalLane("stale-mobile-command-sweep", {}, async () => {
@@ -1002,6 +1001,23 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // — preventing duplicate API scrapes and broker EXIT orders on multi-process deploys.
   if (singleLeaderEnabled() && !acquireOrRenewLeadership(new Date())) {
     return; // not the leader this tick — no side effects
+  }
+
+  // Leader-only reap of runs this process did not start (prior leader, or a legacy NULL owner).
+  // Followers returned above.  Boot grace and the drain-adoption skip live in the sweep, so this
+  // does not close a run the drain later in this tick is about to resume.
+  try {
+    await journalLane("stale-run-sweep-unowned", {}, () => {
+      const { repaired, retry } = sweepStaleRunsAndRetry(Date.now(), { reapUnowned: true });
+      if (repaired > 0) console.log(`[scheduler] marked ${repaired} unowned stale running run(s) as failed`);
+      if (retry.enqueued > 0) console.log(`[scheduler] queued ${retry.enqueued} one-time retry(ies) for unowned restart-killed run(s)`);
+      return {
+        status: repaired > 0 ? ("ok" as const) : ("skipped" as const),
+        summary: `repaired=${repaired} retried=${retry.enqueued} retrySkipped=${retry.skipped}`
+      };
+    });
+  } catch (err) {
+    console.error("[scheduler] unowned stale-run sweep error:", err);
   }
 
   // Table sizes, WAL checkpoint, ANALYZE/optimize, and incremental free-page

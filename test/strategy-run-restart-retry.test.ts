@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Board 687a5fb4 (2026-09-24, lane B `st-run-resilience`).  11 of the last 50 Alpaca Paper runs
 // ended "Process restarted mid-run — marked failed by stale-run sweep" and none was retried.
@@ -28,8 +28,17 @@ beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-restart-retry-${randomUUID()}.db`)}`;
 });
 
-afterEach(() => {
+beforeEach(async () => {
+  // Rows under test are ~20 minutes old and owned by this process.  The restart arm must be
+  // past boot grace or a fresh worker would leave them running and never enqueue the retry.
+  const { RESTART_SWEEP_BOOT_GRACE_MS, setProcessStartedAtMsForTests } = await import("../src/lib/db-execution");
+  setProcessStartedAtMsForTests(Date.now() - RESTART_SWEEP_BOOT_GRACE_MS - 60_000);
+});
+
+afterEach(async () => {
   strategyMocks.runStrategyOnce.mockReset();
+  const { setProcessStartedAtMsForTests } = await import("../src/lib/db-execution");
+  setProcessStartedAtMsForTests(null);
 });
 
 const OPEN = { sessionAllows: () => true };
@@ -199,7 +208,19 @@ describe("restart-killed strategy run: one-time retry", () => {
         "INSERT INTO strategy_run_requests (id, user_id, manual, status, created_at, connected_account_id) VALUES (?, ?, 1, 'running', ?, ?)"
       )
       .run(runId, userId, new Date(Date.now() - 20 * 60_000).toISOString(), accountId);
-    sweepStaleRunsAndRetry(Date.now(), OPEN);
+    const now = Date.now();
+    // Still inside the restart arm (under 30 minutes) with a running non-retry request.
+    // Drain adopts that row.  The sweep must not fail it or queue an autonomous retry.
+    sweepStaleRunsAndRetry(now, OPEN);
+    expect(requestsFor(db, userId).filter((r) => r.retry_of_run_id)).toHaveLength(0);
+    const duringAdoption = db.getDb().prepare("SELECT status FROM strategy_runs WHERE id = ?").get(runId) as {
+      status: string;
+    };
+    expect(duringAdoption.status).toBe("running");
+    expect(requestsFor(db, userId)[0].status).toBe("running");
+
+    // Past the stall threshold the sweep may close it, and it still must not come back autonomous.
+    sweepStaleRunsAndRetry(now + 15 * 60_000, OPEN);
     expect(requestsFor(db, userId).filter((r) => r.retry_of_run_id)).toHaveLength(0);
     expect(auditKinds(db, userId).find((a) => a.kind === "strategy_run_retry_skipped")?.payload.reason).toBe("request_driven_run");
   });
