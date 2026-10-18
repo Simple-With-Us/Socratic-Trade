@@ -2,6 +2,10 @@
 
 This document defines the comprehensive architecture for the AI Trading Strategy, including how the LLM evaluates the market, scores individual equities, and continuously learns from its own outcomes.
 
+## 2026-10-15 Restart sweep stays off other instances' live runs (ST-8)
+
+PR #3138 closed every `strategy_runs` row that started before this process booted, on the first tick, on every process.  That marked a run another node had just adopted as `failed` and freed its request for a duplicate.  The restart arm now stays quiet for two minutes after boot (`RESTART_SWEEP_BOOT_GRACE_MS`).  A sweep with `reapUnowned` false only updates rows whose `owner_instance` is this process, so a follower cannot close the leader's runs.  The leader reaps other instances only after it holds the scheduler lease.  A pre-boot row whose `strategy_run_requests` row is still `running` and is not a restart retry is left for the drain to adopt.  A time-stale run this process owns is still swept at 30 minutes, including while its lock guard keeps renewing.  Rollout: `docs/rollouts/2026-10-15-restart-sweep-instance-grace.md`.
+
 ## 2026-10-15 Approve success is a placed order
 
 `POST /api/proposals/[id]/approve` returns HTTP 200 only when `executeProposal` reports `placed`, `filled`, or `paper`.  Busy, blocked, not placed, retryable, and terminal results return 409 with the same structured body, so a client can still tell them apart.  Timeouts, HTTP 5xx, and Tradier's HTTP 400 "Unexpected server error" classify as retryable.  Timeouts, HTTP 5xx, HTTP 408, and that Tradier sentence reconcile by refId before anyone books `not_placed`, so a lost response cannot mint a second order.  HTTP 429 and the 16-minute sandbox open deferral never reached a live order.  `isTradierTransientServerError` still excludes HTTP 5xx, so the adapter does not retry a 500 as the sandbox 400 and broker-health can still halt.  Plain HTTP 400, HTTP 403, and buying-power rejects stay terminal.  Rollout: `docs/rollouts/2026-10-15-honest-approve-retryable.md`.

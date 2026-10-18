@@ -46,7 +46,12 @@
 
 import { randomUUID } from "crypto";
 import { audit, getDb, getPolicy } from "./db";
-import { hasLiveStrategyRunLease, sweepStaleRunningRuns, type RestartKilledRun } from "./db-execution";
+import {
+  hasLiveStrategyRunLease,
+  sweepStaleRunningRuns,
+  type RestartKilledRun,
+  type StaleRunningSweepOptions
+} from "./db-execution";
 import { isRunAllowedNow } from "./market-hours";
 import { isRestartRetryableOrigin } from "./strategy-run-origin";
 import type { TradingPolicy } from "./types";
@@ -80,6 +85,12 @@ export type RestartRetrySkipReason =
 export type RestartRetryDeps = {
   /** Session gate.  Default: the scheduler's own `isRunAllowedNow(policy.runDuringExtendedHours)`. */
   sessionAllows?: (policy: TradingPolicy, nowMs: number) => boolean;
+  /** Leader ticks only.  Passed through to the sweep.  Followers must leave it false. */
+  reapUnowned?: boolean;
+  /** Pin the sweep's boot instant.  See `StaleRunningSweepOptions`. */
+  processStartedMs?: number;
+  /** Pin the sweep's instance id.  See `StaleRunningSweepOptions`. */
+  instanceId?: string;
 };
 
 type KilledRunRef = Pick<RestartKilledRun, "id" | "userId" | "connectedAccountId" | "startedAt">;
@@ -295,7 +306,12 @@ export type SweepAndRetryResult = {
 
 /** The scheduler's stale-run-sweep lane: sweep, then offer each restart-killed run one retry. */
 export function sweepStaleRunsAndRetry(nowMs: number = Date.now(), deps: RestartRetryDeps = {}): SweepAndRetryResult {
-  const sweep = sweepStaleRunningRuns(nowMs);
+  const sweepOptions: StaleRunningSweepOptions = {
+    reapUnowned: deps.reapUnowned,
+    processStartedMs: deps.processStartedMs,
+    instanceId: deps.instanceId
+  };
+  const sweep = sweepStaleRunningRuns(nowMs, sweepOptions);
   let enqueued = 0;
   let skipped = 0;
   for (const killed of sweep.restartKilled) {

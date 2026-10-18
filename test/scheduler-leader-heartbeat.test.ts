@@ -11,8 +11,8 @@ vi.mock("../src/lib/db", async (importOriginal) => {
   return { ...actual, setInternalSetting: schedulerMocks.setInternalSetting };
 });
 
-// The stale-run sweep (plus the one-time restart retry, board 687a5fb4) must still run on a
-// follower, before the leader gate.
+// Own-instance stale-run sweep still runs on a follower, before the leader gate.  The unowned
+// reap (other instances' runs) must not: a follower never closes the leader's runs.
 vi.mock("../src/lib/strategy-run-retry", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/strategy-run-retry")>();
   return { ...actual, sweepStaleRunsAndRetry: schedulerMocks.sweepStaleRunsAndRetry };
@@ -40,7 +40,28 @@ describe("scheduler leader heartbeat ordering", () => {
     await _runSchedulerTickForTest();
 
     expect(schedulerMocks.sweepStaleRunsAndRetry).toHaveBeenCalledTimes(1);
+    expect(schedulerMocks.sweepStaleRunsAndRetry).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.objectContaining({ reapUnowned: false })
+    );
+    expect(schedulerMocks.sweepStaleRunsAndRetry.mock.invocationCallOrder[0]).toBeLessThan(
+      schedulerMocks.acquireOrRenewLeadership.mock.invocationCallOrder[0]
+    );
     expect(schedulerMocks.acquireOrRenewLeadership).toHaveBeenCalledTimes(1);
     expect(schedulerMocks.setInternalSetting).not.toHaveBeenCalled();
+  });
+
+  it("reaps other instances' runs only after this process wins the leader lease", async () => {
+    vi.stubEnv("SCHEDULER_SINGLE_LEADER", "1");
+    schedulerMocks.acquireOrRenewLeadership.mockReturnValue(true);
+
+    await _runSchedulerTickForTest();
+
+    expect(schedulerMocks.sweepStaleRunsAndRetry).toHaveBeenCalledTimes(2);
+    expect(schedulerMocks.sweepStaleRunsAndRetry.mock.calls[0][1]).toMatchObject({ reapUnowned: false });
+    expect(schedulerMocks.sweepStaleRunsAndRetry.mock.calls[1][1]).toMatchObject({ reapUnowned: true });
+    expect(schedulerMocks.sweepStaleRunsAndRetry.mock.invocationCallOrder[1]).toBeGreaterThan(
+      schedulerMocks.acquireOrRenewLeadership.mock.invocationCallOrder[0]
+    );
   });
 });

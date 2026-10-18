@@ -3493,6 +3493,23 @@ const MIGRATIONS: Migration[] = [
       // keep '' — a blank audit field, never a wrong skip.
       addColumnIfMissing("chunk_dedup_signatures", "vector_id");
     }
+  },
+  {
+    // ST-8: which process started the run.  The restart sweep on a follower must not close a
+    // run the leader still owns.  Nullable so rows written before this migration stay unowned
+    // and only a leader, after boot grace, may reap them.  Version 98, not 95, 96 or 97: main
+    // spent 95 on strategy_runs_user_started_index, 96 on text_payload_codec_columns (#4720) and
+    // 97 on st4541_dedup_isolation_columns (#4736), and two migrations can never share a version.
+    // This one renumbers again as main lands new migrations; the alternative is a duplicate
+    // version that silently runs the first migration only and skips the second.
+    version: 98,
+    name: "strategy_runs_owner_instance",
+    up: (database) => {
+      if (!tableExists(database, "strategy_runs")) return;
+      if (!columnExists(database, "strategy_runs", "owner_instance")) {
+        database.exec("ALTER TABLE strategy_runs ADD COLUMN owner_instance TEXT");
+      }
+    }
   }
 ];
 

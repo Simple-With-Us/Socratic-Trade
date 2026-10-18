@@ -13,8 +13,8 @@
 // Do NOT use setSetting() here — that calls audit("policy_change") which is noisy for lease ops.
 // Use direct getDb() prepared statements, matching the acquireStrategyLock approach.
 
-import { randomUUID } from "crypto";
 import { getDb } from "./db";
+import { PROCESS_INSTANCE_ID } from "./process-instance";
 
 const LEASE_KEY = "scheduler:lease"; // colon-namespaced, mirrors "scheduler:lastTick"
 
@@ -24,12 +24,9 @@ export interface LeaseRecord {
   expiresAt: string;  // ISO
 }
 
-// Stable per-process instance id. Pinned to globalThis so Next.js HMR re-evaluating this module
-// does NOT mint a new id and silently orphan a lease this process holds.
-const ownerHost = globalThis as unknown as { __schedulerLeaseOwner?: string };
-export const LEASE_OWNER: string =
-  ownerHost.__schedulerLeaseOwner ??
-  (ownerHost.__schedulerLeaseOwner = `${process.pid}:${randomUUID()}`);
+// Stable per-process instance id.  Minted in `process-instance.ts` (same globalThis slot) so the
+// strategy-run sweep can stamp `owner_instance` without importing this module back.
+export const LEASE_OWNER: string = PROCESS_INSTANCE_ID;
 
 /** Read the raw lease row. Returns null if absent or JSON-malformed (treat as reclaimable). */
 function readLease(database = getDb()): LeaseRecord | null {
