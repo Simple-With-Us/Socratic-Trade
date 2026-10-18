@@ -36,6 +36,53 @@ export interface LlmUsageOpts {
 /** The chat providers. All but Anthropic are OpenAI-compatible (chat/completions tool loop). */
 export type ChatProvider = "openai" | "anthropic" | "xai" | "gemini" | "mistral" | "deepseek" | "meta" | "moonshot" | "minimax" | "openrouter";
 
+/** Running provider-usage totals for one chat run (a possibly multi-step tool loop). */
+export interface ChatUsageTotals {
+  prompt: number;
+  completion: number;
+  /** True once any step reported prompt or completion tokens (otherwise the row records NULLs). */
+  saw: boolean;
+  cached?: number;
+  cacheCreation?: number;
+  cacheCreation1h?: number;
+  reasoning?: number;
+  /** Sum of OpenRouter `usage.cost` across the loop; only meaningful when `billedComplete`. */
+  billedCostUsd: number;
+  /** Steps that reported usage; every one must also have reported `usage.cost` for the sum to be
+   *  the whole run's charge (a partial sum would understate spend and be labelled "billed"). */
+  usageSteps: number;
+  billedSteps: number;
+  /** Provider requests issued by the run. */
+  requests: number;
+  servedModel?: string;
+}
+
+export function newChatUsageTotals(): ChatUsageTotals {
+  return { prompt: 0, completion: 0, saw: false, billedCostUsd: 0, usageSteps: 0, billedSteps: 0, requests: 0 };
+}
+
+function addOptional(total: number | undefined, add: number | undefined): number | undefined {
+  return add === undefined ? total : (total ?? 0) + add;
+}
+
+/** Fold one provider response's `extractLlmUsage` result into the run totals. */
+export function addChatUsage(totals: ChatUsageTotals, u: ReturnType<typeof extractLlmUsage>): void {
+  if (u.servedModel) totals.servedModel = u.servedModel;
+  if (u.promptTokens === undefined && u.completionTokens === undefined) return;
+  totals.saw = true;
+  totals.prompt += u.promptTokens ?? 0;
+  totals.completion += u.completionTokens ?? 0;
+  totals.cached = addOptional(totals.cached, u.cachedPromptTokens);
+  totals.cacheCreation = addOptional(totals.cacheCreation, u.cacheCreationTokens);
+  totals.cacheCreation1h = addOptional(totals.cacheCreation1h, u.cacheCreation1hTokens);
+  totals.reasoning = addOptional(totals.reasoning, u.reasoningTokens);
+  totals.usageSteps += 1;
+  if (u.billedCostUsd !== undefined) {
+    totals.billedSteps += 1;
+    totals.billedCostUsd += u.billedCostUsd;
+  }
+}
+
 /** Sum usage across the (possibly multi-step) tool loop and record one ledger row.
  *  `providerRequestId` is only meaningful when the loop made exactly ONE provider request
  *  (the ledger row is a per-run aggregate; a single generation id can only verify a single
@@ -44,14 +91,13 @@ function recordChatUsage(
   opts: LlmUsageOpts,
   provider: ChatProvider,
   model: string,
-  prompt: number,
-  completion: number,
-  saw: boolean,
+  totals: ChatUsageTotals,
   providerRequestId?: string,
   latencyMs?: number,
   status?: "success" | "error" | "timeout" | "canceled"
 ): void {
   if (!opts.userId) return;
+  const billedComplete = totals.usageSteps > 0 && totals.billedSteps === totals.usageSteps;
   recordLlmUsage({
     userId: opts.userId,
     provider,
@@ -59,8 +105,15 @@ function recordChatUsage(
     context: opts.context ?? "chat",
     keySource: opts.keySource ?? "user",
     keyRef: opts.keyRef,
-    promptTokens: saw ? prompt : undefined,
-    completionTokens: saw ? completion : undefined,
+    promptTokens: totals.saw ? totals.prompt : undefined,
+    completionTokens: totals.saw ? totals.completion : undefined,
+    cachedPromptTokens: totals.cached,
+    cacheCreationTokens: totals.cacheCreation,
+    cacheCreation1hTokens: totals.cacheCreation1h,
+    reasoningTokens: totals.reasoning,
+    billedCostUsd: billedComplete ? totals.billedCostUsd : undefined,
+    servedModel: totals.servedModel,
+    requestCount: totals.requests > 1 ? totals.requests : undefined,
     providerRequestId,
     latencyMs,
     status
@@ -410,9 +463,7 @@ export class AnthropicLLM implements ChatLLM {
     const startedAt = performance.now();
     let chatStatus: "success" | "error" | "timeout" | "canceled" = "success";
     const messages: any[] = [];
-    let promptTokens = 0;
-    let completionTokens = 0;
-    let sawUsage = false;
+    const usageTotals = newChatUsageTotals();
     // Replay prior turns for multi-turn context. Anthropic requires the first message to be user, so
     // drop any leading assistant turn from the (chronological) history before appending the new message.
     const prior = (history ?? []).slice();
@@ -472,6 +523,7 @@ export class AnthropicLLM implements ChatLLM {
       });
       let resp: any;
       try {
+        usageTotals.requests += 1;
         resp = await this.transport(requestBody, this.apiKey, args.abortSignal);
       } catch (e) {
         // Record the failed run (tokens billed on earlier steps + wall-clock latency) so
@@ -481,21 +533,14 @@ export class AnthropicLLM implements ChatLLM {
           this.usage,
           "anthropic",
           this.model,
-          promptTokens,
-          completionTokens,
-          sawUsage,
+          usageTotals,
           undefined,
           performance.now() - startedAt,
           chatStatus
         );
         throw e;
       }
-      const u = extractLlmUsage(resp);
-      if (u.promptTokens !== undefined || u.completionTokens !== undefined) {
-        sawUsage = true;
-        promptTokens += u.promptTokens ?? 0;
-        completionTokens += u.completionTokens ?? 0;
-      }
+      addChatUsage(usageTotals, extractLlmUsage(resp));
       const content = resp.content || [];
       messages.push({ role: "assistant", content });
       text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
@@ -527,9 +572,7 @@ export class AnthropicLLM implements ChatLLM {
       this.usage,
       "anthropic",
       this.model,
-      promptTokens,
-      completionTokens,
-      sawUsage,
+      usageTotals,
       undefined,
       performance.now() - startedAt,
       chatStatus
@@ -589,9 +632,7 @@ export class OpenAILLM implements ChatLLM {
     let chatStatus: "success" | "error" | "timeout" | "canceled" = "success";
     // Build OpenAI messages array. Prior user/assistant turns first, then the current message.
     const messages: any[] = [];
-    let promptTokens = 0;
-    let completionTokens = 0;
-    let sawUsage = false;
+    const usageTotals = newChatUsageTotals();
     if (system) messages.push({ role: "system", content: system });
     const prior = (history ?? []).slice();
     // OpenAI requires alternating user/assistant; drop a leading assistant turn if present.
@@ -674,6 +715,7 @@ export class OpenAILLM implements ChatLLM {
       if (this.provider === "openrouter") applyOpenRouterProviderRouting(requestBody);
       let resp: any;
       try {
+        usageTotals.requests += 1;
         resp = await this.transport(
           requestBody,
           this.apiKey,
@@ -687,9 +729,7 @@ export class OpenAILLM implements ChatLLM {
           this.usage,
           this.provider,
           this.model,
-          promptTokens,
-          completionTokens,
-          sawUsage,
+          usageTotals,
           generationIds.length === 1 ? generationIds[0] : undefined,
           performance.now() - startedAt,
           chatStatus
@@ -699,12 +739,7 @@ export class OpenAILLM implements ChatLLM {
 
       const genId = providerRequestIdFromPayload(this.provider, resp);
       if (genId) generationIds.push(genId);
-      const u = extractLlmUsage(resp);
-      if (u.promptTokens !== undefined || u.completionTokens !== undefined) {
-        sawUsage = true;
-        promptTokens += u.promptTokens ?? 0;
-        completionTokens += u.completionTokens ?? 0;
-      }
+      addChatUsage(usageTotals, extractLlmUsage(resp));
       const choice = resp.choices?.[0];
       if (!choice) break;
       const assistantMsg = choice.message ?? {};
@@ -753,9 +788,7 @@ export class OpenAILLM implements ChatLLM {
       this.usage,
       this.provider,
       this.model,
-      promptTokens,
-      completionTokens,
-      sawUsage,
+      usageTotals,
       generationIds.length === 1 ? generationIds[0] : undefined,
       performance.now() - startedAt,
       chatStatus
@@ -855,7 +888,7 @@ export function llmForModel(
         ] }) });
       const result = CodeCliChatResponseSchema.parse(await res.json());
       recordChatUsage({ userId: userId ?? "local", keySource: "user", keyRef: "code-cli", context: "chat" }, cliFamily,
-        cliModel, 0, 0, false);
+        cliModel, newChatUsageTotals());
       return { text: result.choices[0].message.content, toolCalls: [], citations: [] };
     } };
   }

@@ -3510,6 +3510,31 @@ const MIGRATIONS: Migration[] = [
         database.exec("ALTER TABLE strategy_runs ADD COLUMN owner_instance TEXT");
       }
     }
+  },
+  {
+    // ST-4543: the Usage Monitor push used to drop everything the provider reported beyond the
+    // prompt/completion totals (cache reads/writes, reasoning tokens, the model that actually
+    // served the call).  The push is rebuilt from this table by usage-monitor-replay.ts, so the
+    // detail must be persisted here or a replayed event would differ from the live one.  All
+    // columns are nullable: legacy rows stay valid and replay as before (no detail available).
+    version: 99,
+    name: "llm_usage_provider_detail",
+    up: (database) => {
+      if (!tableExists(database, "llm_usage")) return;
+      const columns: Array<[string, string]> = [
+        ["cached_prompt_tokens", "INTEGER"],
+        ["cache_creation_tokens", "INTEGER"],
+        ["cache_creation_1h_tokens", "INTEGER"],
+        ["reasoning_tokens", "INTEGER"],
+        ["served_model", "TEXT"],
+        ["request_count", "INTEGER"]
+      ];
+      for (const [name, type] of columns) {
+        if (!columnExists(database, "llm_usage", name)) {
+          database.exec(`ALTER TABLE llm_usage ADD COLUMN ${name} ${type}`);
+        }
+      }
+    }
   }
 ];
 

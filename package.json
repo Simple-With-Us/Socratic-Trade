@@ -39,7 +39,7 @@
   "dependencies": {
     "@alpacahq/alpaca-trade-api": "^5.0.0",
     "@datadog/browser-rum": "^7.13.0",
-    "@jaywedgeworth22/congress-trading-shared": "github:jaywedgeworth22/congress-trading-shared#v2.7.1",
+    "@jaywedgeworth22/congress-trading-shared": "github:jaywedgeworth22/congress-trading-shared#v2.8.1",
     "@langfuse/otel": "^5.11.1",
     "@langfuse/tracing": "^5.11.1",
     "@opentelemetry/instrumentation": "^0.223.0",
