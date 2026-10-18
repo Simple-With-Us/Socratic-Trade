@@ -1,6 +1,6 @@
 # 2026-10-17 — Merge shepherd stops opening duplicate status issues (ST-4553)
 
-## Context & Objective
+## Summary
 
 The repo had 866 open "Merge shepherd status" issues on 2026-10-17, one more every 30 minutes (newest #4848).  The 2026-10-05 slug fix (`docs/rollouts/2026-10-05-merge-shepherd-repo-slug.md`) never reached the Mac:  LaunchAgent `com.jay.merge-shepherd` runs the host-local copy `~/.claude-merge-shepherd/merge-shepherd.sh`, which is refreshed from `main` by hand.  That copy still searched the legacy slug, the search answered empty, and every empty answer created another issue.  The lookup also discarded `gh` errors, so any search failure did the same.
 
@@ -20,9 +20,13 @@ The owner wants every GitHub issue paired one to one with a Linear issue (AFC-33
 - Off by default rather than fixed in place:  nobody noticed 866 duplicates in 12 days, so the issue is not being read, and a permanently open status issue would become a permanent Linear issue under sync.
 - The script does not close duplicates itself:  closing 866 issues in one run would hit GitHub's content-creation limits.  They are closed separately, throttled.
 
-## Verification State
+## Verification
 
 ```bash
+npm run lint
+npx tsc --noEmit
+npm test
+npm run build
 bash -n scripts/merge-shepherd.sh
 bash scripts/merge-shepherd-status-issue.selftest.sh
 bash scripts/merge-shepherd-ci-inflight.selftest.sh
@@ -37,4 +41,4 @@ A mutant that restores the old fail-open lookup fails the new selftest.
 
 ## Zero-Code Findings
 
-- The host-copy model is the root cause of both this and the 2026-10-05 incident:  fixes merged to `main` do not run on the Mac until someone copies them.
+recall contribute "A script copied onto a Mac host outside the repo does not receive fixes when the repo's main is updated; refresh the host copy from main (or version-pin both) so behaviour does not silently diverge from the canonical branch." --category lesson --app fleet
