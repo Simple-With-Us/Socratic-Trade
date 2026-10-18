@@ -2,7 +2,7 @@
 
 ## Context & Objective
 
-Owner ruling (Jay, 2026-10-18): nothing may read `~/.secrets/global-api-keys`.  It explicitly overrides this repo's "Strict Infisical, no `.env` files (owner, 2026-09-18)" rule, which had kept that file as the owner-side bootstrap identity store.  The bootstrap Infisical machine-identity credentials move to the macOS login Keychain ("keychain is good").  Linear OPS-818.  PR #4870 migrated the other readers (`massive-hoard.ts`, `cascade-audit.ts`, `ship-testflight.sh`, the deploy-verify skill);  this note covers the bootstrap resolver and the dev loader.
+Owner ruling (Jay, 2026-10-18): nothing may read `~/.secrets/global-api-keys`.  It explicitly overrides this repo's "Strict Infisical, no `.env` files (owner, 2026-09-18)" rule, which had kept that file as the owner-side bootstrap identity store.  The bootstrap Infisical machine-identity credentials move to the macOS login Keychain ("keychain is good").  Linear OPS-818.  PR #4870 (open at the time of writing) migrates the other readers (`massive-hoard.ts`, `cascade-audit.ts`, `ship-testflight.sh`, the deploy-verify skill).  Until it merges, those four still reference the flat file on `main`;  this PR deliberately does not touch them.  This note covers the bootstrap resolver and the dev loader.  The Keychain deviation from the 2026-09-18 rule is owner-directed ("keychain is good", Jay, 2026-10-18) and is recorded here and in AGENTS.md as the ratification.
 
 ## Changes Made
 
@@ -21,14 +21,18 @@ Owner ruling (Jay, 2026-10-18): nothing may read `~/.secrets/global-api-keys`.  
 
 ## Verification State
 
+Local lane (no access to the private `@jaywedgeworth22/congress-trading-shared` package, so `tsc` and most of `npm test` cannot run here;  CI `verify-hosted` is the gate for those):
+
 ```
-npm ci --ignore-scripts
-npx vitest run test/infisical-bootstrap.test.ts test/no-env-loader-or-dotenv-yaml.test.ts   # 45 passed
+npm run lint                  # pass, 0 errors (warnings pre-existing)
+npx tsc --noEmit              # not clean locally: 36 errors, all from the missing private package or its fallout, none in a changed file
+npx vitest run test/infisical-bootstrap.test.ts test/no-env-loader-or-dotenv-yaml.test.ts   # pass, 45 tests
+npm run build                 # not run locally, left to CI
 ```
 
-Live check on the Mac with `INFISICAL_*` unset: the resolver took the app identity from the Keychain, and `node scripts/infisical-run.mjs -- node -e ...` logged in and exported the app secrets, with zero non-empty bootstrap variables in the child.  Full lint, tsc and test results are in the PR.
+Live check on the Mac with `INFISICAL_*` unset: the resolver took the app identity from the Keychain, and `node scripts/infisical-run.mjs -- node -e ...` logged in and exported the app secrets, with zero non-empty bootstrap variables in the child.
 
 ## Next Steps & Blockers
 
-- Anything else on the Mac that still reads the flat file is outside this repo's bootstrap path: see the PR body for the residual list.
+- Land PR #4870 so the four remaining flat-file references (`scripts/massive-hoard.ts`, `scripts/cascade-audit.ts`, `scripts/ios-fleet/ship-testflight.sh`, `.claude/skills/deploy-verify/SKILL.md`) go away.
 - The owner may delete the flat file once nothing else reads it.
