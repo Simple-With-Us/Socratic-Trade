@@ -12,7 +12,7 @@
 - Audit 2026-10-15 found the push dropped fields the ledger already had and mislabelled billed spend as estimated.
 - `usage-monitor-replay.ts` rebuilds events from ledger rows and the monitor 409s a changed idempotency payload, so the detail must live in the ledger for replay to match the live event.
 
-## Files
+## Files changed
 
 - `src/lib/llm-usage.ts`, `src/lib/chat/llm.ts`, `src/lib/usage-monitor-push.ts`, `src/lib/usage-monitor-replay.ts`, `src/lib/db.ts`
 - `test/usage-monitor-llm-ai-block.test.ts`, `test/chat-llm-usage-detail.test.ts`, `test/persistence-hardening.test.ts`
@@ -20,9 +20,11 @@
 
 ## Verification
 
-- `npx tsc --noEmit`
-- `npx vitest run` on the usage, replay, chat-llm and persistence suites; a test asserts a live event and its replay serialise identically.
-- Migration is additive and idempotent (`columnExists` guards); it runs at process start through `applyVersionedMigrations`, there is no separate admin migrate route in this repo.
+- `npm run lint` (eslint on every changed file) -> ok, no new warnings
+- `npx tsc --noEmit` -> ok
+- `npm test` -> ok in CI (`verify-hosted` green on the PR head); locally the usage, replay, chat-llm and persistence suites pass, including a test that a live event and its replay serialise identically
+- `npm run build` -> not run locally; the change is typechecked TypeScript only
+- Migration is additive and idempotent (`columnExists` guards); it runs at process start through `applyVersionedMigrations`, and there is no separate admin migrate route in this repo.
 - Production: read-only query of `ExternalUsageEvent` for `sourceApp = 'socratic-trade'` after deploy, checking `_aiSource = 'block'`, `_aiTokensCacheRead` and `billingMode`.
 
 ## Follow-ups
