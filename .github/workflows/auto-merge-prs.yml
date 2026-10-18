@@ -1,16 +1,21 @@
 name: Auto-merge PRs
 
-# Arm GitHub auto-merge on non-draft, same-repo PRs that do NOT touch
-# CODEOWNERS trading-execution paths (.github/CODEOWNERS).  Live-money diffs
-# require a human merge (owner review gate; board bdc2b662 / 318bfe710b794c28 / ST-3326).
-# Hold labels: `do-not-automerge` or `needs-human-merge` skip arming and disable
-# any already-armed merge.
+# Thin caller for the fleet's shared auto-merge armer
+# (AI-Fleet-Coordinator/.github/workflows/auto-merge-reusable.yml, docs in
+# AFC docs/AUTO-MERGE.md).  Repo policy lives in the inputs below.
 #
-# Money-path globs are the CODEOWNERS path patterns below (owners stripped).
-# `bash scripts/automerge-gate-dry-run.sh --list-globs` prints the same list.
-# A changed file that matches one of them, or a do-not-automerge label, is not
-# armed.  An already-armed auto-merge on that PR is disabled.
+# ST keeps its money-path gate: PRs touching CODEOWNERS trading-execution
+# paths are not armed - a human merges after review (board bdc2b662 /
+# 318bfe710b794c28 / ST-3326).  Hold labels `do-not-automerge` /
+# `needs-human-merge` block arming and disable any armed merge.
 #
+# The merge token resolves GH_PAT, then SHEPHERD_TOKEN.  Arming never falls
+# back to GITHUB_TOKEN (a bot-attributed merge dispatches no workflow events -
+# no CI, no ios-ship on main), and the reusable probes the token before use,
+# so a dead credential fails loud instead of 401ing mid-step (ST-4393).
+
+# Money-path globs the CODEOWNERS gate protects (kept in lockstep with
+# .github/CODEOWNERS by test/automerge-gate-dry-run.test.ts):
 # BEGIN MONEY_PATH_GLOBS
 # /src/lib/broker.ts
 # /src/lib/broker-*.ts
@@ -39,262 +44,21 @@ name: Auto-merge PRs
 # /app/api/orders/
 # /app/api/proposals/
 # END MONEY_PATH_GLOBS
-#
-# ---------------------------------------------------------------------------
-# WHY THIS WORKFLOW REFUSES TO ARM WITHOUT AN ELEVATED TOKEN (2026-08-13)
-# ---------------------------------------------------------------------------
-# GitHub does not raise workflow events for anything done with the repository's
-# GITHUB_TOKEN (documented recursion guard; only workflow_dispatch and
-# repository_dispatch are exempt). This workflow arms auto-merge, so GitHub
-# attributes the eventual merge to the arming actor. Armed under GITHUB_TOKEN
-# that actor is github-actions[bot], and the resulting push to main dispatches
-# NOTHING -- not CI, not ios-ship, not effort-issues-sync.
-#
-# Receipts (2026-08-13): PR #2675 merged by github-actions[bot], merge sha
-# ca38bb29797d46b68d9dd6a92006cdfb9c9cb20b -> `gh api
-# repos/<r>/actions/runs?head_sha=<sha>` returns 27 runs of which ZERO are
-# `event: push` (all workflow_run/schedule/workflow_dispatch). PRs #2678/#2679/
-# #2680, merged by jaywedgeworth22, get the full push-triggered run set.
-#
-# The comment this replaces already said "prefer GH_PAT / SHEPHERD_TOKEN", but
-# `gh api repos/<r>/actions/secrets` shows NEITHER exists (and the account is a
-# user, not an org, so there is no org secret scope). The `||` fallback chain
-# therefore resolved to GITHUB_TOKEN on every run and the preference was purely
-# decorative. So: when no elevated token is present this workflow now no-ops
-# loudly instead of arming a merge that silently strands main unverified.
-#
-# With arming off, PRs land the way AGENTS.md already mandates -- the landing
-# agent's own `bash scripts/land.sh` ends in `gh pr merge --auto --squash` under
-# the owner's gh credentials, so merged_by is a human identity and every
-# push-triggered workflow fires. Failure mode if an agent forgets: the PR sits
-# open on the PR list (loud, one command to fix), instead of today's silent
-# unverified merge.
-#
-# Re-activation is zero-code: add a GH_PAT or SHEPHERD_TOKEN repo secret
-# (fine-grained PAT or GitHub App installation token, contents + pull_requests
-# write) and this workflow arms again automatically. Minting that credential is
-# an OWNER action -- agents never create tokens.
+
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, ready_for_review, unlabeled]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 jobs:
-  classify-protected:
-    runs-on: ubuntu-latest
-    if: >
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository
-    outputs:
-      touches_protected: ${{ steps.check.outputs.touches_protected }}
-      skip_automerge: ${{ steps.check.outputs.skip_automerge }}
-    steps:
-      # Shallow checkout: only need the classifier script at HEAD.  Base CODEOWNERS and the
-      # merge-base..head file list come from the GitHub API (no full git history clone).
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-      - name: Detect CODEOWNERS trading paths in PR diff
-        id: check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          skip_automerge=false
-          classifier_failed=0
-          fail_closed_classifier() {
-            if [ "$classifier_failed" = 1 ]; then
-              exit 0
-            fi
-            classifier_failed=1
-            echo "$1" >&2
-            echo "touches_protected=true" >> "$GITHUB_OUTPUT"
-            echo "skip_automerge=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          }
-          trap 'fail_closed_classifier "classifier step failed -- fail closed"' ERR
-          BASE_CODEOWNERS="$RUNNER_TEMP/codeowners-base"
-          co_err="$RUNNER_TEMP/codeowners-api.err"
-          # --jq takes one expression.  A second -r argument makes gh exit
-          # "accepts 1 arg(s), received 2" and fail-closes every PR (ST-3326).
-          if gh api "repos/$REPO/contents/.github/CODEOWNERS?ref=$BASE" --jq '.content // empty' > "$RUNNER_TEMP/codeowners-content.b64" 2>"$co_err"; then
-            if [ -s "$RUNNER_TEMP/codeowners-content.b64" ]; then
-              base64 -d < "$RUNNER_TEMP/codeowners-content.b64" > "$BASE_CODEOWNERS"
-              if [ ! -s "$BASE_CODEOWNERS" ]; then
-                fail_closed_classifier "CODEOWNERS base64 decoded empty -- fail closed"
-              fi
-            else
-              : > "$BASE_CODEOWNERS"
-            fi
-          elif grep -qiE '404|Not Found' "$co_err"; then
-            : > "$BASE_CODEOWNERS"
-          else
-            cat "$co_err" >&2
-            fail_closed_classifier "CODEOWNERS Contents API error -- fail closed"
-          fi
-          # GitHub three-dot compare = merge-base(base, head)..head (same scope as the script's git diff).
-          if ! mapfile -t changed_files < <(
-            gh api "repos/$REPO/compare/${BASE}...${HEAD}" --paginate -q '.files[].filename'
-          ); then
-            fail_closed_classifier "Could not list PR changed files via compare API -- fail closed"
-          fi
-          if [ ${#changed_files[@]} -eq 0 ]; then
-            fail_closed_classifier "Compare API returned no changed files -- fail closed"
-          fi
-          if CODEOWNERS_FILE="$BASE_CODEOWNERS" bash scripts/pr-touches-codeowners-paths.sh --files "${changed_files[@]}"; then
-            echo "touches_protected=true" >> "$GITHUB_OUTPUT"
-            skip_automerge=true
-            echo "::notice::PR touches CODEOWNERS trading-execution paths - auto-merge will not be armed (human merge required)"
-          else
-            echo "touches_protected=false" >> "$GITHUB_OUTPUT"
-          fi
-          if printf '%s\n' "${changed_files[@]}" | grep -qxE '(\.github/CODEOWNERS|\.github/workflows/auto-merge-prs\.yml|scripts/pr-touches-codeowners-paths\.sh|scripts/automerge-gate-dry-run\.sh|scripts/disable-pr-automerge\.sh)'; then
-            skip_automerge=true
-            echo "::notice::PR edits the auto-merge gate - auto-merge will not be armed on this PR"
-          fi
-          if [ "$skip_automerge" = true ]; then
-            echo "skip_automerge=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip_automerge=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  # When the hold label is present (including mid-flight labeled events),
-  # cancel any already-armed auto-merge so production cannot land against intent.
-  disable-on-hold:
-    runs-on: ubuntu-latest
-    # Disable does not merge.  write is required so the Actions token can call
-    # disablePullRequestAutoMerge after a rejected PAT.  The arm job stays read-only.
-    permissions:
-      contents: write
-      pull-requests: write
-    if: >
-      contains(github.event.pull_request.labels.*.name, 'do-not-automerge') ||
-      contains(github.event.pull_request.labels.*.name, 'needs-human-merge')
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-      - name: Disable auto-merge (hold label)
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN || secrets.GITHUB_TOKEN }}
-          DISABLE_AUTOMERGE_FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          set -euo pipefail
-          echo "Hold label present; disabling auto-merge for $PR_URL"
-          bash scripts/disable-pr-automerge.sh "$PR_URL"
-
-  disable-on-skip-automerge:
-    runs-on: ubuntu-latest
-    needs: classify-protected
-    permissions:
-      contents: write
-      pull-requests: write
-    if: >
-      needs.classify-protected.outputs.skip_automerge == 'true'
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-      - name: Disable auto-merge (ineligible PR)
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN || secrets.GITHUB_TOKEN }}
-          DISABLE_AUTOMERGE_FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          set -euo pipefail
-          echo "PR is ineligible for workflow auto-merge; disabling for $PR_URL"
-          bash scripts/disable-pr-automerge.sh "$PR_URL"
-
-  disable-on-protected:
-    runs-on: ubuntu-latest
-    needs: classify-protected
-    permissions:
-      contents: write
-      pull-requests: write
-    if: >
-      needs.classify-protected.outputs.touches_protected == 'true'
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-      - name: Disable auto-merge (CODEOWNERS paths)
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN || secrets.GITHUB_TOKEN }}
-          DISABLE_AUTOMERGE_FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          set -euo pipefail
-          echo "PR touches CODEOWNERS trading paths; disabling auto-merge for $PR_URL"
-          bash scripts/disable-pr-automerge.sh "$PR_URL"
-
   auto-merge:
-    runs-on: ubuntu-latest
-    needs: classify-protected
-    if: >
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      !contains(github.event.pull_request.labels.*.name, 'do-not-automerge') &&
-      !contains(github.event.pull_request.labels.*.name, 'needs-human-merge') &&
-      needs.classify-protected.outputs.skip_automerge != 'true'
-    steps:
-      # Fail-safe, not fail-open: without an elevated token this workflow would
-      # arm a merge that GitHub attributes to github-actions[bot], and that
-      # merge commit dispatches no workflow events at all. Stop here instead.
-      - name: Require an elevated token before arming auto-merge
-        id: token-gate
-        env:
-          HAS_PAT: ${{ (secrets.GH_PAT != '' || secrets.SHEPHERD_TOKEN != '') && '1' || '0' }}
-        run: |
-          set -euo pipefail
-          if [ "$HAS_PAT" != "1" ]; then
-            echo "No GH_PAT / SHEPHERD_TOKEN secret is configured."
-            echo "Arming auto-merge with GITHUB_TOKEN would make github-actions[bot] the"
-            echo "merging identity, and GitHub raises no workflow events for GITHUB_TOKEN"
-            echo "actions -- the merge commit on main would run neither CI nor ios-ship."
-            echo "Skipping (no-op). Land this PR with 'gh pr merge <n> --squash --auto'"
-            echo "under your own gh credentials; scripts/land.sh already does exactly that."
-            echo "::notice::auto-merge not armed: no GH_PAT/SHEPHERD_TOKEN secret (see workflow header)"
-            echo "armed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "Elevated token present -- arming auto-merge."
-          echo "armed=true" >> "$GITHUB_OUTPUT"
-
-      - name: Enable auto-merge (squash + delete branch)
-        if: steps.token-gate.outputs.armed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          set -euo pipefail
-          echo "Enabling auto-merge (squash) for $PR_URL"
-          # Squash only -- do not fall back to merge commits (fleet policy + cleaner history).
-          # Treat "already enabled" as success; do not fail the workflow when arming is blocked.
-          out="$(gh pr merge --auto --squash --delete-branch "$PR_URL" 2>&1)" && {
-            echo "$out"
-            exit 0
-          }
-          echo "$out"
-          if echo "$out" | grep -qiE 'already enabled|Pull request is in clean status|Auto merge is already'; then
-            echo "Auto-merge already armed."
-            exit 0
-          fi
-          # Pending checks, merge conflicts, or review-required refusals (non-fatal).
-          if echo "$out" | grep -qiE 'is not mergeable|not mergeable|merge conflict|required status check|Review required'; then
-            if gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest' | grep -vq null; then
-              echo "Auto-merge armed despite pending checks."
-              exit 0
-            fi
-            echo "::notice::Auto-merge not armed ($(echo "$out" | head -1))"
-            exit 0
-          fi
-          echo "::error::Failed to enable squash auto-merge for $PR_URL"
-          echo "$out"
-          exit 1
+    uses: Simple-With-Us/AI-Fleet-Coordinator/.github/workflows/auto-merge-reusable.yml@0a17292d8490f80ac237bd7dc26998ee3776e498
+    with:
+      require_codeowners_gate: true
+      gate_script: scripts/pr-touches-codeowners-paths.sh
+      self_guard_paths: .github/CODEOWNERS,.github/workflows/auto-merge-prs.yml,scripts/pr-touches-codeowners-paths.sh,scripts/automerge-gate-dry-run.sh,scripts/disable-pr-automerge.sh
+    secrets:
+      merge_token: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN }}

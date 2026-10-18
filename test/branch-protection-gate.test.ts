@@ -232,42 +232,38 @@ describe("required contexts are not renamed out from under the ruleset", () => {
   });
 
   it("the do-not-automerge hold still works, so protection does not remove the owner's brake", () => {
-    // `disable-on-hold` is the escape hatch: applying the `do-not-automerge` label turns merging
-    // off. Branch protection is a floor, not a replacement for it.
+    // The hold now lives in the AFC fleet reusable (hold_labels defaults to
+    // "do-not-automerge,needs-human-merge"): applying a hold label turns merging off and
+    // disables any armed merge. What ST must guarantee is that label changes re-evaluate the
+    // caller and that no override drops the brake.
     const auto = workflow("auto-merge-prs.yml");
-    expect(auto).toMatch(/^  disable-on-hold:\s*$/m);
+    const pr = triggerBlock(auto, "pull_request");
+    expect(pr).toMatch(/labeled/);
+    expect(pr).toMatch(/unlabeled/);
+    expect(auto).not.toMatch(/hold_labels:/);
     expect(auto).toContain("do-not-automerge");
   });
 
-  it("auto-merge skips CODEOWNERS trading paths so money-path PRs need a human merge", () => {
+  it("routes arming through the pinned AFC reusable with the CODEOWNERS money-path gate", () => {
+    // The gate itself (classify-protected, fail-closed API handling, disable jobs) moved into
+    // AI-Fleet-Coordinator/.github/workflows/auto-merge-reusable.yml; its behavior is pinned by
+    // full SHA here and covered by AFC's own checks. ST's guard is that the caller keeps
+    // declaring the gate, the self-guard paths, and a real merge token.
     const auto = workflow("auto-merge-prs.yml");
-    expect(auto).toMatch(/^  classify-protected:\s*$/m);
-    expect(auto).toMatch(/^  disable-on-protected:\s*$/m);
-    expect(auto).toMatch(/^  disable-on-skip-automerge:\s*$/m);
-    expect(auto).toContain("pr-touches-codeowners-paths.sh");
-    expect(auto).toMatch(/skip_automerge != 'true'/);
-    expect(auto).toMatch(/contents\/\.github\/CODEOWNERS\?ref=\$BASE/);
-    expect(auto).toMatch(/--jq '\.content \/\/ empty'/);
-    expect(auto).not.toMatch(/--jq -r/);
-    expect(auto).toMatch(/compare\/\$\{BASE\}\.\.\.\$\{HEAD\}/);
-    expect(auto).toContain("--paginate");
-    expect(auto).toContain("CODEOWNERS Contents API error -- fail closed");
-    expect(auto).toContain("Compare API returned no changed files -- fail closed");
-    expect(auto).toContain("classifier step failed -- fail closed");
+    expect(auto).toMatch(
+      /uses: Simple-With-Us\/AI-Fleet-Coordinator\/.github\/workflows\/auto-merge-reusable.yml@[0-9a-f]{40}\b/,
+    );
+    expect(auto).toMatch(/require_codeowners_gate:\s*true/);
+    expect(auto).toContain("gate_script: scripts/pr-touches-codeowners-paths.sh");
+    expect(auto).toContain(".github/CODEOWNERS");
+    expect(auto).toContain(".github/workflows/auto-merge-prs.yml");
+    expect(auto).toContain("scripts/automerge-gate-dry-run.sh");
+    expect(auto).toContain("scripts/disable-pr-automerge.sh");
+    // Arming must never fall back to GITHUB_TOKEN (a bot merge dispatches no workflows);
+    // the token resolves GH_PAT, then SHEPHERD_TOKEN, and the reusable probes it before use.
+    expect(auto).toMatch(/merge_token:\s*\$\{\{\s*secrets\.GH_PAT \|\| secrets\.SHEPHERD_TOKEN\s*\}\}/);
     expect(auto).not.toMatch(/fetch-depth:\s*0/);
-    expect(auto).toContain(".github/CODEOWNERS|");
-    expect(auto).toContain("scripts/automerge-gate-dry-run\\.sh");
-    expect(auto).toContain("scripts/disable-pr-automerge\\.sh");
-    for (const job of ["disable-on-hold", "disable-on-protected", "disable-on-skip-automerge"]) {
-      const block = jobBlock(auto, job);
-      expect(block).toContain("bash scripts/disable-pr-automerge.sh");
-      expect(block).toContain("DISABLE_AUTOMERGE_FALLBACK_TOKEN");
-      expect(block).toMatch(/permissions:\n {6}contents: write\n {6}pull-requests: write/);
-    }
-    const arm = jobBlock(auto, "auto-merge");
-    expect(arm).toContain("!contains(github.event.pull_request.labels.*.name, 'do-not-automerge')");
-    expect(arm).toContain("skip_automerge != 'true'");
-    expect(arm).not.toContain("disable-pr-automerge.sh");
-    expect(arm).not.toMatch(/contents: write/);
+    const gate = readFileSync(join(repoRoot, "scripts", "pr-touches-codeowners-paths.sh"), "utf8");
+    expect(gate).toContain("CODEOWNERS");
   });
 });
