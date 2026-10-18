@@ -1,3 +1,9 @@
+## 2026-10-18 CLAUDE — OPS-818 bootstrap identity moves to the Keychain
+
+**What.**  Per the owner's 2026-10-18 ruling that nothing may read the flat global key file, the Infisical bootstrap resolver (`scripts/infisical-bootstrap-env.mjs`) now reads `process.env`, then `.env.local` runner controls, then the macOS login Keychain (service `socratic-trade-bootstrap`, account = env var name).  The flat-file layer and the `db-api-keys.ts` dev loader are deleted;  `predev-check.mjs` checks Keychain presence;  AGENTS.md's strict-Infisical rule carries the 2026-10-18 update.  The Mac's Keychain was seeded with `INFISICAL_ST_CLIENT_ID` and `INFISICAL_ST_CLIENT_SECRET` (read-back matched).  Rollout `docs/rollouts/2026-10-18-ops-818-bootstrap-keychain.md`.
+
+**Next.**  Merge after CI.  The owner may delete the flat file once no other consumer reads it.
+
 ## 2026-10-16 CLAUDE (PR sweep) — ST-4545 PR #4789 conflicts, CI and review threads
 
 **What.**  Merged origin/main into `instinct/st-4545` (no conflicts).  Fixed the red `verify-hosted` job, which was this PR's own copy: `test/copy-rules-lint.test.ts` flagged three single-space sentence gaps in the new route `title` strings (`app/console/settings/api-keys.tsx`, `app/console/settings/llm-route-select.tsx`); they now use U+00A0 plus a space, as main does.  `src/lib/code-cli.ts` now parses the inbound body and the broker reply with Zod instead of `as` assertions, keeping both rejection messages.  The request schema is deliberately not `.strict()`, because red-team sends `temperature` and the broker payload is rebuilt from an allowlist anyway.  `CodeCliChatResponseSchema` in `src/lib/chat/llm.ts` is now strict and exact (`role: "assistant"`, `finish_reason`), matching what `fetchCodeCli` emits.  The broker doc's stale "independent 60-second cap" line now describes the forwarded caller deadline and the 150-second default.
