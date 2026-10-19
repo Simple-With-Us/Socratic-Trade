@@ -1,3 +1,8 @@
+## 2026-10-18 CLAUDE — OPS-818 bootstrap identity moves to the Keychain
+
+**What.**  Per the owner's 2026-10-18 ruling that nothing may read the flat global key file, the Infisical bootstrap resolver (`scripts/infisical-bootstrap-env.mjs`) now reads `process.env`, then `.env.local` runner controls, then the macOS login Keychain (service `socratic-trade-bootstrap`, account = env var name).  The flat-file layer and the `db-api-keys.ts` dev loader are deleted;  `predev-check.mjs` checks Keychain presence;  AGENTS.md's strict-Infisical rule carries the 2026-10-18 update.  The Mac's Keychain was seeded with `INFISICAL_ST_CLIENT_ID` and `INFISICAL_ST_CLIENT_SECRET` (read-back matched).  Rollout `docs/rollouts/2026-10-18-ops-818-bootstrap-keychain.md`.
+
+**Next.**  Merge after CI.  The owner may delete the flat file once no other consumer reads it.
 ## 2026-10-18 [MM] Previous Trades rows rendered with no card surface
 
 **What.**  Owner reported the autonomy desk's Previous Trades section drawing its rows with no background color.  `ProposalRow` hard-coded `bg-[color:var(--con-surface-2)]` = `#f4f6fa` against a page background of `--con-bg` = `#f1f4f6` (`app/console/console.css:25-27`) — a 3-RGB-step collision, so the rows were invisible against the page.  The value was correct for the row's OTHER caller (inside a white `.con-card`, "Latest Strategy Run") and wrong for a page-level card.  Fixed at the component rather than the token: recoloring `--con-surface-2` would restyle every other consumer as collateral.  `ProposalRow` gained `surface?: "inset" | "raised"`, defaulting to `"inset"` so the in-card caller is untouched; `"raised"` picks `--con-surface` (the token `.con-card` uses) and the focus-ring offset follows the same choice.  No CSS token changed.
