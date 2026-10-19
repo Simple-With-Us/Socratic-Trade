@@ -2639,3 +2639,14 @@ This is MITIGATION.  The root cause is the non-convergent FTS mirror loop fixed 
 
 ## ST-4545 review follow-up, October 16
 Separate browser-safe reasoning exports from server transport; keep original llm-request exports compatible. Verify integrated API-key chips with fixture statuses and no live broker. Broker activation remains blocked on final empty tool inventory/cancel/renewal verification. No production changes or workflow approvals.
+
+## 2026-10-19 — [MM] Green Team reasoning budget + timeout (branch `minimax/green-team-reasoning-budget`)
+
+Not a scope change: a production-defect fix.  Sandbox's 5-run failure streak traced to unbounded
+reasoning length against a fixed 8,000-token completion cap and a fixed 150s wall clock, so the
+`minimax-*` / `muse-*` families now reserve a dedicated env-tunable 16,000-token reasoning headroom
+(was `REASONING_TOKEN_BUDGET.medium` = 4,000) and the thinking-timeout default moves 150s → 300s.
+No model change, no trading-logic change.  Measured `--effort none` was slower and unparseable, so
+the budget was widened rather than bounded.  Separate, code-free: production APNs push was
+root-caused to a stale `APNS_P8` paired against the wrong Key ID, fixed in Infisical and activated by
+a container restart.

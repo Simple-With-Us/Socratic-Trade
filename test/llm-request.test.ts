@@ -164,6 +164,21 @@ describe("llm-request — model resolution", () => {
     expect(strategyLlmTimeoutMs("deepseek-v4-pro", "high")).toBe(200000);
     expect(strategyLlmTimeoutMs("minimax/minimax-m3", undefined)).toBe(200000);
   });
+
+  // 2026-10-19: raised 150s -> 300s. The widened MiniMax/Muse completion cap is 20000 tokens and
+  // these models run ~13ms/token, so a reasoning-heavy call needs ~260s of generation. At 150s the
+  // wall fired while the model was still making progress and the reply was discarded. This is a
+  // safety net wider than the token budget implies — it does not by itself stop a starved answer.
+  it("defaults the thinking bound to 300s, wide enough for the widened MiniMax/Muse token cap", () => {
+    vi.unstubAllEnvs();
+    for (const model of ["minimax-m3", "minimax/minimax-m3", "muse-spark-1.3-contributor", "meta/muse-spark-1.3-contributor"]) {
+      expect(strategyLlmTimeoutMs(model, undefined)).toBe(300_000);
+      expect(strategyLlmTimeoutMs(model, "none")).toBe(300_000);
+    }
+    // Non-thinking models must NOT be dragged up to the reasoning bound.
+    expect(strategyLlmTimeoutMs("openai/gpt-4o-mini", "high")).toBe(LLM_TIMEOUT_MS);
+    expect(strategyLlmTimeoutMs("deepseek-v4-pro", "medium")).toBe(LLM_TIMEOUT_MS);
+  });
 });
 
 describe("llm-request — withLlmRequestBounds", () => {
@@ -188,7 +203,12 @@ describe("llm-request — withLlmRequestBounds", () => {
   it("reserves reasoning headroom for MiniMax and Muse through OpenRouter", () => {
     for (const model of ["minimax/minimax-m3", "meta/muse-spark-1.3", "meta/muse-glimmer-30b"]) {
       const request = withLlmRequestBounds({ model }, "chat-completions", { model, maxOutputTokens: 1500 });
-      expect(request.max_completion_tokens).toBe(5500);
+      // 1500 requested + 16000 reserved reasoning headroom. This was 1500 + 4000 = 5500 until
+      // 2026-10-19: the 4000 came from REASONING_TOKEN_BUDGET.medium, an OpenAI effort-ladder value
+      // applied to a family that has no ladder and reasons unconditionally. Traced green-team runs
+      // burned the whole completion cap on reasoning and returned an empty body, so the reserved
+      // headroom had to grow rather than shrink. The provider still gets no reasoning_effort.
+      expect(request.max_completion_tokens).toBe(1500 + 16_000);
       expect(request).not.toHaveProperty("reasoning_effort");
     }
   });
@@ -366,6 +386,40 @@ describe("llm-request — withLlmRequestBounds", () => {
     // Anthropic messages: floored at ANTHROPIC_MIN_MAX_TOKENS (4096), not raw headroom math.
     expect(resolveLlmWireOutputCap("anthropic-messages", { maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal, model: "anthropic/claude-opus-4-8" }))
       .toBe(4096);
+  });
+
+  // 2026-10-19: the MiniMax/Muse headroom was REASONING_TOKEN_BUDGET.medium (4000), which is an
+  // OpenAI effort-ladder value applied to a family that has no ladder and reasons unconditionally.
+  // Traced green-team runs spent 4339-5961 completion tokens on a 6745-token prompt, so 4000 of
+  // headroom is smaller than the reasoning a single call actually needs — the model burned the cap
+  // and emitted nothing ("Empty response"), or ran past the 150s wall ("timed out after 150s").
+  // Lock the widened default in so a future refactor cannot silently put 4000 back.
+  it("MiniMax/Muse reserve their own (much larger) reasoning headroom, not the OpenAI medium ladder", () => {
+    for (const model of ["minimax-m3", "minimax/minimax-m3", "MiniMax-M3", "muse-spark-1.3-contributor", "meta/muse-spark-1.3-contributor"]) {
+      const bounds = { maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal, model };
+      const wireCap = resolveLlmWireOutputCap("chat-completions", bounds);
+      // Default headroom is 16000 -> the Green proposer sends a 20000-token completion cap.
+      expect(wireCap).toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal + 16_000);
+      // The body on the wire must agree with the audited resolver, for every spelling of the family.
+      const body = withLlmRequestBounds({ model }, "chat-completions", bounds);
+      expect(body.max_completion_tokens).toBe(wireCap);
+      // It is a reserved REASONING budget, so the caller's visible budget is still intact above it.
+      expect(wireCap).toBeGreaterThan(LLM_OUTPUT_TOKEN_CAPS.strategyProposal * 2);
+    }
+  });
+
+  it("MINIMAX_MUSE_REASONING_HEADROOM overrides the default headroom and rejects junk values", () => {
+    vi.stubEnv("MINIMAX_MUSE_REASONING_HEADROOM", "24000");
+    expect(resolveLlmWireOutputCap("chat-completions", { maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal, model: "minimax-m3" }))
+      .toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal + 24_000);
+    // A non-positive or unparseable value must NOT silently produce a zero/absent reasoning budget —
+    // that is the exact starvation this guard exists to prevent.
+    for (const junk of ["0", "-5", "not-a-number"]) {
+      vi.stubEnv("MINIMAX_MUSE_REASONING_HEADROOM", junk);
+      expect(resolveLlmWireOutputCap("chat-completions", { maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal, model: "minimax-m3" }))
+        .toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal + 16_000);
+    }
+    vi.unstubAllEnvs();
   });
 
   // Composite review B/high/S: "Reasoning-token headroom exists only for OpenAI — other providers'
