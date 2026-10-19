@@ -7230,15 +7230,17 @@ and the edge WAF rule.  Linking it from the Welcome page does not require un-gat
 `/welcome` remains the indexable SEO surface.
 
 **Verification.**  In the lane: `npx tsc --noEmit` clean (exit 0); `npx eslint` 0 errors on every
-changed file (1 grandfathered `react-hooks/set-state-in-effect` warning); the six affected vitest
-files green (60 tests).  The **full** suite and the production build were not run locally — the lane
+changed file (1 grandfathered `react-hooks/set-state-in-effect` warning); the affected vitest files
+green (47 tests).  The **full** suite and the production build were not run locally — the lane
 lives on an external volume and the host's load (57–267) made a local full run impractical, so
 neither is claimed.  The hosted `verify-hosted` job is the gate of record.  New
-`test/public-site-routing.test.ts` (18 tests) covers the marketing-host routing, the alt-domain
+`test/public-site-routing.test.ts` (22 tests) covers the marketing-host routing, the alt-domain
 forward and both its exemptions, subdomain isolation, the shared-shell guard, the header-geometry
-invariant, and the `LANDING_PAGE_ENABLED` off-switch.  New `test/public-sentence-gap.test.ts`
+invariant, the `LANDING_PAGE_ENABLED` off-switch, the alt-domain session and security-header
+behavior, and the single shared host module.  New `test/public-sentence-gap.test.ts`
 (4 tests) renders the Welcome page to static markup and proves the sentence gap survives the
-browser's whitespace collapse.
+browser's whitespace collapse.  New `test/framework-hash-target.test.ts` (6 tests) covers the
+deep-link id lookup and pins the viewer's scroll-to-hash behavior.
 
 **Two review findings, both accepted as real and both fixed.**
 
@@ -7255,6 +7257,31 @@ browser's whitespace collapse.
    `SENTENCE_GAP` marker with no space in front of it (a space before the marker survives JSX's
    text-node trimming and becomes an extra space in the rendered gap).  A render-level test now
    proves the gap in the server-rendered markup.
+
+**Six more review threads came back on the second round.**  Five were real and are fixed; the sixth
+had already been fixed by the first round and needed only an explanation.
+
+3. **The alt-domain 308 dropped a live session.**  The redirect from `socratic.trade` to
+   `socratictrade.com` fired before identity resolution.  The Auth.js session cookie is host-only
+   by default (`AUTH_COOKIE_DOMAIN` is unset), and the two domains are unrelated, so no cookie
+   domain can span them and the canonical host never receives the cookie.  An operator following a
+   link to the alt domain landed on the public landing page instead of the console.  The redirect
+   now resolves the session first and forwards **only anonymous traffic**; a verified session keeps
+   the request on the alt host, where its cookie still applies.
+4. **The alt-domain 308 skipped the security headers.**  It was the one redirect in `middleware.ts`
+   that did not go out through `withSecurityHeaders`, so the G4 contract did not hold for it.  It
+   does now, and a test asserts the header set on that response.
+5. **The public host sets were written out twice.**  `MARKETING_HOSTS` was defined in
+   `middleware.ts` and again in `app/page.tsx`; two copies compile and type-check fine, so the only
+   way they fail is by drifting.  The sets now live in one place, `src/lib/marketing-hosts.ts`, and
+   both callers read them from there.
+6. **A framework deep link did not scroll.**  The sections render only after an async content fetch,
+   so the browser's fragment handling at load found no target and the page sat at the top.  The
+   viewer now scrolls to the hash target once the content is ready; the id lookup is a pure
+   function in `app/framework/hash-target.ts` with its own tests.
+7. **This rollout doc named a lane path.**  A lane is per-seat and per-run, so the path was stale
+   the moment another seat picked the work up.  The document names the branch and the base commit
+   instead.
 
 **Next.**  Merge to `main` (auto-deploys; weekday RTH latch applies — this touches runtime paths, so
 the image build is a real deploy).  Swift compilation is CI-only (`ios-build`); the only Swift

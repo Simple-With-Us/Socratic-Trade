@@ -2678,7 +2678,10 @@ its landing box in JavaScript from those same constants.
 
 Routing: the apex `/` sends an anonymous visitor to `/welcome` and a signed-in operator to
 `/console`; `socratic.trade` 308s to `socratictrade.com`, exempting `/api/*` and the Apple
-associated-domain file.  `/framework` keeps its anti-scraping architecture unchanged — server-only
+associated-domain file.  That alt-domain forward is **anonymous traffic only** — a signed-in
+operator stays on the alt host, because the session cookie is host-only and the two domains are
+unrelated, so the canonicalization hop would otherwise drop the session.  `/framework` keeps its
+anti-scraping architecture unchanged — server-only
 content module, UA gate on the page and the content API, `noindex`/`noai`/`TDMRep`, sitemap
 exclusion, edge WAF — because linking it from Welcome does not require un-gating it.  `/welcome`
 remains the indexable SEO surface.
@@ -2692,10 +2695,16 @@ put the per-variant state behind a render-scope local that the effect mutated, w
 Compiler rejects as an error — every write now goes through module-scope functions.
 
 Verified in the lane: `npx tsc --noEmit` clean, `npx eslint` 0 errors on every changed file, and the
-six affected vitest files green (60 tests).  The full suite and the production build are CI's job —
+affected vitest files green (47 tests).  The full suite and the production build are CI's job —
 the lane lives on an external volume and the host's load made a local full run impractical, so
 neither is claimed here.  The first hosted `verify-hosted` run failed on the repo's own copy-rule
 lint: 22 sentence-gap violations in the new public copy, because two literal ASCII spaces collapse
 in the browser.  Fixed with the repo's own NBSP idiom and the sanctioned fixer, and the re-run is
 the gate of record.  Swift compilation is CI-only; the only Swift changes are comments.
+
+A second review round came back with six threads; five were real and are fixed — the alt-domain
+308 dropped a live session and skipped the security headers, the public host sets were written out
+twice, a framework deep link did not scroll, and the rollout doc named a lane path.  The sixth
+concerned the apex redirect that the first round had already fixed.  All six threads are answered
+and resolved.
 Rollout: `docs/rollouts/2026-10-19-public-framework-pages.md`.
