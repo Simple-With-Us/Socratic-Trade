@@ -33,7 +33,7 @@
 #   scripts/sync-provider-knobs.sh --apply    # write changed keys to Infisical + post to #agent-sync
 #
 # SAFETY
-#   - Monitor unreachable / empty payload -> exit 0, no writes, no Zulip post (launchd-safe).
+#   - No token available -> exit 1 (fail loudly).  Monitor unreachable / empty payload -> exit 0, no writes, no Zulip post (launchd-safe).
 #   - Dry run never writes and never posts to #agent-sync.
 #   - --apply refuses to write if it could not first read current Infisical state
 #     (never writes blind).
@@ -98,8 +98,8 @@ if [ -z "$USAGE_TOKEN" ]; then
   USAGE_TOKEN="$(_load_tok USAGE_INGEST_TOKEN)"
 fi
 if [ -z "$USAGE_TOKEN" ]; then
-  log "no USAGE_READ_TOKEN or USAGE_INGEST_TOKEN in env or Infisical /usage-monitor - cannot reach the monitor; nothing to do."
-  exit 0
+  log "missing USAGE_READ_TOKEN / USAGE_INGEST_TOKEN: set it in env or add it to Infisical /usage-monitor (fleet-secrets get USAGE_READ_TOKEN --path /usage-monitor failed)."
+  exit 1
 fi
 
 # -- 2) fetch subscriptions (token via 0600 curl config, kept out of argv/ps) ---
