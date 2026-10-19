@@ -359,10 +359,13 @@ link_private_key() {
 # which is monotonic against every record we have. Taking the max can skip a
 # number (harmless — numbers are free); reusing one is fatal.
 local_seq() {
-  local n
-  n=$(cat "${STATE_DIR}/build-seq-${APP_KEY}.txt" 2>/dev/null || echo 0)
-  [[ "$n" =~ ^[0-9]+$ ]] || n=0
-  printf '%s' "$n"
+  # The build-seq counter is retired under the commit-count scheme:  the
+  # ship script never advances it, so whatever is left in the file is a
+  # leftover from the retired timestamp scheme.  Reading it would inflate
+  # the floor above the commit count, and the strictly-increasing guard
+  # would then ship a number that names no commit.  The counter feeds
+  # neither MARKETING nor BUILD_NUM any more, so it contributes nothing.
+  printf '%s' "0"
 }
 
 # Highest N in MARKETING_VERSION = <prefix>.N across the project's build
@@ -469,10 +472,11 @@ resolve_seq_floor() {
     1) restore ASC access: check ASC_* in env or Infisical /asc (fleet-secrets doctor) and that 'node' is on PATH, then
        run: node ${FLEET_DIR}/asc-api.mjs latest-build-seq ${BUNDLE_ID} ${prefix}
     2) or pass the number explicitly:  --build <N>
-       --build is honoured exactly: CFBundleVersion becomes N and MARKETING
-       moves with it to ${prefix}.N, so the pair always describes one
-       number.  N must be a plain integer above every build already shipped
-       in this train; UTC timestamps are retired.
+       --build is honoured exactly:  CFBundleVersion becomes N, and MARKETING
+       moves with it to the default train's N, so the pair always describes
+       one number.  To ship into a train other than the default, pass
+       --version <prefix>.N as well.  N must be a plain integer above every
+       build already shipped in that train; UTC timestamps are retired.
     3) or, only if you are certain this train is empty, re-run with --allow-unverified-seq"
     fi
     if [[ "$ALLOW_UNVERIFIED_SEQ" -eq 1 ]]; then
@@ -836,7 +840,7 @@ elif [[ -n "$FORCE_BUILD" || -n "$FORCE_VERSION" ]]; then
     # repo commit count, so a checkout with no readable git history cannot be
     # numbered at all.  Fail loudly rather than mint a 12-digit stamp that no
     # commit describes.
-    BUILD_NUM="$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null)"
+    BUILD_NUM="$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || true)"
     [[ "$BUILD_NUM" =~ ^[0-9]+$ ]] || die "could not read the commit count from ${REPO_ROOT}; CFBundleVersion is the commit count and UTC timestamps are retired"
   fi
   # An explicit --build is honoured exactly.  The auto-fill still needs the
@@ -880,8 +884,15 @@ else
   # fresh commit's build number higher than the commit count it names.
   # The build number names a commit, so it has to be the commit count.  The
   # old fallback invented SEQ_FLOOR + 1 here, which decoupled the shipped
-  # number from the commit it claims to be.
-  COMMIT_COUNT="$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null)"
+  # number from the commit it claims to be.  The guard below is the one
+  # deliberate exception:  when the floor is at or above the commit count,
+  # shipping the commit count would repeat a (version, build) pair App Store
+  # Connect already holds, so the pair is bumped together and describes one
+  # number that is not a commit count.  That is the safe direction to be
+  # wrong in.  A floor above the commit count also happens on a shallow
+  # checkout, where `git rev-list --count HEAD` understates the count;  the
+  # committed record is what keeps the build number unique there.
+  COMMIT_COUNT="$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || true)"
   [[ "$COMMIT_COUNT" =~ ^[0-9]+$ ]] || die "could not read the commit count from ${REPO_ROOT}; the build number is the commit count and UTC timestamps are retired"
   MARKETING="${MARKETING_PREFIX}.${COMMIT_COUNT}"
   BUILD_NUM="${COMMIT_COUNT}"
