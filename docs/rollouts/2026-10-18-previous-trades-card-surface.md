@@ -41,7 +41,7 @@ so the ring never paints a mismatched halo.
 Both class names are emitted as **literal strings** in a ternary, not interpolated tokens, so
 Tailwind's scanner sees both variants (an interpolated `bg-[color:var(--x)]` would be purged).
 
-### Files touched
+### Files changed
 
 - `app/console/page.tsx`
   - `ProposalRow` signature: added `surface = "inset"` + the prop's type + its doc comment.
