@@ -96,12 +96,12 @@ FLEET_DIR="$(cd "$(dirname "$0")" && pwd)"
 APPS_JSON="${FLEET_DIR}/apps.json"
 TEAM_ID="CC8UTF7ATG"
 FLEET_SECRETS_BIN="${FLEET_SECRETS:-${HOME}/.local/bin/fleet-secrets}"
-# Temp .p8 (from Infisical /asc) and the altool key link that points at it.
-ASC_TMP_KEY=""
-ASC_LINKED_KEY=""
+# Temp dir holding the .p8 read from Infisical /asc (0700 dir, 0600 file), removed on exit.
+ASC_TMP_DIR=""
 asc_cleanup() {
-  [[ -n "$ASC_LINKED_KEY" ]] && rm -f "$ASC_LINKED_KEY" 2>/dev/null
-  [[ -n "$ASC_TMP_KEY" ]] && rm -f "$ASC_TMP_KEY" 2>/dev/null
+  if [[ -n "$ASC_TMP_DIR" ]]; then
+    rm -rf "$ASC_TMP_DIR" 2>/dev/null || true
+  fi
   return 0
 }
 # 1 hour — owner 2026-08-14: ship unbuilt iOS updates as often as once per hour.
@@ -205,15 +205,15 @@ load_secrets() {
     local _p8
     _p8="$(fleet_secret_get ASC_KEY_P8 /asc || true)"
     if [[ "$_p8" == -----BEGIN* ]]; then
-      local _old_umask
-      _old_umask="$(umask)"
-      umask 077
-      ASC_TMP_KEY="$(mktemp "${TMPDIR:-/tmp}/asc-key.XXXXXX")"
-      umask "$_old_umask"
-      printf '%s\n' "$_p8" >"$ASC_TMP_KEY"
-      chmod 600 "$ASC_TMP_KEY"
+      if [[ -z "$ASC_TMP_DIR" ]]; then
+        ASC_TMP_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/asc-key.XXXXXX")"
+      fi
       trap asc_cleanup EXIT
-      export ASC_KEY_PATH="$ASC_TMP_KEY"
+      ( umask 077; printf '%s\n' "$_p8" >"${ASC_TMP_DIR}/AuthKey_${ASC_KEY_ID}.p8" )
+      chmod 600 "${ASC_TMP_DIR}/AuthKey_${ASC_KEY_ID}.p8"
+      export ASC_KEY_PATH="${ASC_TMP_DIR}/AuthKey_${ASC_KEY_ID}.p8"
+      # altool searches API_PRIVATE_KEYS_DIR first, so no link into ~/.appstoreconnect is needed.
+      export API_PRIVATE_KEYS_DIR="$ASC_TMP_DIR"
       AUTH_MODE="api_key"
       return 0
     fi
@@ -321,14 +321,12 @@ link_private_key() {
   mkdir -p "$dest_dir"
   chmod 700 "$dest_dir"
   local dest="${dest_dir}/AuthKey_${key_id}.p8"
-  if [[ -n "$ASC_TMP_KEY" && "$key_path" == "$ASC_TMP_KEY" ]]; then
-    # The key is a temp file: point the altool link at it (never clobber a real file) and
-    # remove the link on exit so nothing dangles.
-    if [[ -L "$dest" || ! -e "$dest" ]]; then
-      ln -sf "$key_path" "$dest"
-      ASC_LINKED_KEY="$dest"
-    fi
-  elif [[ ! -e "$dest" ]]; then
+  if [[ -n "$ASC_TMP_DIR" && "$key_path" == "${ASC_TMP_DIR}/"* ]]; then
+    # load_secrets wrote a temp key and set API_PRIVATE_KEYS_DIR, which altool
+    # searches first;  a link to a file deleted on exit would dangle.
+    return 0
+  fi
+  if [[ ! -e "$dest" ]]; then
     ln -sf "$key_path" "$dest"
   fi
   chmod 600 "$key_path" 2>/dev/null || true

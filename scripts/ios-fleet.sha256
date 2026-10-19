@@ -1,7 +1,7 @@
 # sha256 pin for the in-repo iOS ship tooling in scripts/ios-fleet.
 # GitHub-hosted macos-latest ships from this copy, not /Users/jay/apps/ios-fleet.
 # Refresh with: bash scripts/ios-fleet-pin.sh --update  (then land it in a PR)
-3d54a0989a591b96d7224009453e6e3e825451c94fba7041826ae694b7e47119  ship-testflight.sh
+fb33dd3322e6783ae0ae147bccc9ce68bce65d1dd498ad32c2f495f7082ba476  ship-testflight.sh
 bbd6942e4725586018ed1086477342d9ec29a3aa813e3ca34f4f0d24f1f44b2f  asc-api.mjs
 087b08cd16e92958d3f28a44bffcf95145b9e35f32c826e429f746071dd08b6e  apps.json
 ce7ed95efdbe98cae61686075dbdf98e840950e1a6917881947cbc127fd4c64a  AppUpdatePrompt.swift
