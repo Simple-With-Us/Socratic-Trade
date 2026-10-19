@@ -227,7 +227,7 @@ current Hetzner host (app env lives in Coolify's DB, not a `/data/coolify` tree)
 
 **Infisical merge order (fleet, 2026-08-20):** the shared Infisical project loads first; the app project shadows it.  Fleet coordination keys (`AGENT_SYNC_*`, Slack bot token, the shared Coolify read-only stats token) belong ONLY in the shared project.  Do not copy them into the ST / CT / UM app projects — a rotate-in-shared then leftover-in-app leaves the old value winning.  LLM runtime keys are not Infisical at all (see Don't).  Use `scripts/infisical-secrets-safe.sh`.
 
-**Handoff-file grep trap (2026-08-14, binding):** `~/.secrets/global-api-keys` is a multi-secret file.  `grep '^[A-Z0-9_]+='` / `grep '^ADMIN'` / `rg TOKEN file` print **values** (the whole matching line).  Names only: `grep -oE '^[A-Z][A-Z0-9_]*' ~/.secrets/global-api-keys`.  Never `cat` or open that file with a Read tool.  One Grok session leaked the whole store this way.
+**Handoff-file grep trap (2026-08-14, binding):**  Never grep a secrets handoff file for `KEY=` lines:  `grep '^[A-Z0-9_]+='` / `grep '^ADMIN'` / `rg TOKEN file` print **values** (the whole matching line).  The flat key file `~/.secrets/global-api-keys` is RETIRED (owner, 2026-10-18, OPS-818) and a FORBIDDEN source:  flag any new read, grep, `cat`, or source of it.  List names with `fleet-secrets names`;  fleet keys come from the environment first, then `fleet-secrets get NAME` (Infisical Fleet-OPS).  The macOS Keychain is an approved store only for machine-identity bootstrap credentials, never for app secrets.  Never `cat` or open any handoff file with a Read tool, and never pass a secret value on argv (visible in `ps`).  One Grok session leaked the whole store this way.
 
 **Strict Infisical, no `.env` files (owner, 2026-09-18, binding):** Infisical is the sole source
 of truth for every secret. No `.env`, `.env.local`, `.env.*`, `.env.yml`, or `.env.yaml` anywhere
@@ -680,7 +680,7 @@ paternalism that keeps creeping back in from every agent (Claude, Codex, others)
   and install prompts are gone.  `/mobile` redirects to `/console`.  Do not add
   `app/manifest.ts`, a service worker, or features under `app/mobile/**`.
 
-- **Don't grep a secrets handoff file for `KEY=` lines.** `grep '^[A-Z0-9_]+=' ~/.secrets/global-api-keys` prints every value into the transcript. Names only: `grep -oE '^[A-Z][A-Z0-9_]*'`. See AGENT-SYNC.md § Handoff-file grep trap.
+- **Don't grep a secrets handoff file for `KEY=` lines.** `grep '^[A-Z0-9_]+='` on a handoff file prints every value into the transcript.  List names with `fleet-secrets names`.  The flat key file `~/.secrets/global-api-keys` is RETIRED and a FORBIDDEN source:  flag any new read, grep, `cat`, or source of it.  Fleet keys come from the environment first, then `fleet-secrets get NAME`.  See AGENT-SYNC.md § Handoff-file grep trap.
 
 - **NEVER create a new provider API key. No agent, on any platform, ever.**
  (Owner ruling, 2026-07-20 — binding for Claude, Codex, Antigravity/Gemini,
