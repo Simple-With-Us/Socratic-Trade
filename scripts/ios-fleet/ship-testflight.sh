@@ -175,9 +175,10 @@ resolve_project() {
 # Read one value from Infisical Fleet-OPS via fleet-secrets.  Prints the value (no
 # trailing newline) or nothing; never prints errors.
 fleet_secret_get() {
-  [[ -x "$FLEET_SECRETS_BIN" ]] || return 1
-  local v
-  v="$("$FLEET_SECRETS_BIN" get "$1" --path "$2" 2>/dev/null)" || return 1
+  local bin="$FLEET_SECRETS_BIN" v
+  [[ -x "$bin" ]] || bin="$(command -v fleet-secrets 2>/dev/null || true)"
+  [[ -n "$bin" && -x "$bin" ]] || return 1
+  v="$("$bin" get "$1" --path "$2" 2>/dev/null </dev/null)" || return 1
   printf '%s' "$v" | tr -d '\r'
 }
 
@@ -204,6 +205,7 @@ load_secrets() {
     [[ -n "$_kp" ]] && log "ASC_KEY_PATH set but file missing; falling back to Infisical /asc ASC_KEY_P8"
     local _p8
     _p8="$(fleet_secret_get ASC_KEY_P8 /asc || true)"
+    _p8="${_p8//\\n/$'\n'}"  # tolerate a PEM stored with literal backslash-n separators
     if [[ "$_p8" == -----BEGIN* ]]; then
       if [[ -z "$ASC_TMP_DIR" ]]; then
         ASC_TMP_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/asc-key.XXXXXX")"
@@ -417,7 +419,7 @@ asc_latest_seq() {
     logerr "asc-seq: node not on PATH; cannot verify against App Store Connect"
     return 1
   fi
-  if [[ -z "${ASC_KEY_ID:-}" && ! -x "$FLEET_SECRETS_BIN" ]]; then
+  if [[ -z "${ASC_KEY_ID:-}" && ! -x "$FLEET_SECRETS_BIN" ]] && ! command -v fleet-secrets >/dev/null 2>&1; then
     logerr "asc-seq: no ASC_* in env and no fleet-secrets; cannot verify against App Store Connect"
     return 1
   fi

@@ -33,18 +33,23 @@ const INFISICAL_ASC_FOLDER = "/asc";
  * the key is absent, or the call fails.  Never logs stdout or stderr.
  */
 function fleetSecret(name, folder = INFISICAL_ASC_FOLDER) {
-  const bin = process.env.FLEET_SECRETS || join(homedir(), ".local", "bin", "fleet-secrets");
-  try {
-    return execFileSync(bin, ["get", name, "--path", folder], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 30000
-    })
-      .replace(/\r?\n$/, "")
-      .trim();
-  } catch {
-    return "";
+  // The explicit/installed binary first, then fleet-secrets on PATH.
+  const candidates = [process.env.FLEET_SECRETS || join(homedir(), ".local", "bin", "fleet-secrets")];
+  if (!process.env.FLEET_SECRETS) candidates.push("fleet-secrets");
+  for (const bin of candidates) {
+    try {
+      return execFileSync(bin, ["get", name, "--path", folder], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 30000
+      })
+        .replace(/\r?\n$/, "")
+        .trim();
+    } catch {
+      // try the next candidate
+    }
   }
+  return "";
 }
 
 /**

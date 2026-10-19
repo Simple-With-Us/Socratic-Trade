@@ -86,8 +86,10 @@ USAGE_TOKEN=""
 _load_tok() {
   _name="$1"
   eval "_val=\"\${$_name:-}\""
-  if [ -z "$_val" ] && [ -x "$FLEET_SECRETS_BIN" ]; then
-    _val="$("$FLEET_SECRETS_BIN" get "$_name" --path /usage-monitor 2>/dev/null || true)"
+  _fs="$FLEET_SECRETS_BIN"
+  [ -x "$_fs" ] || _fs="$(command -v fleet-secrets 2>/dev/null || true)"
+  if [ -z "$_val" ] && [ -n "$_fs" ] && [ -x "$_fs" ]; then
+    _val="$("$_fs" get "$_name" --path /usage-monitor 2>/dev/null </dev/null || true)"
   fi
   printf '%s' "$_val"
 }

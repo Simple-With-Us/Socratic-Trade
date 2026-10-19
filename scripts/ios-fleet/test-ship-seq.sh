@@ -38,8 +38,6 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/ios-fleet-seq-test.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 FAKE_HOME="${WORK}/home"
-# No fleet-secrets in tests:  a missing binary makes ASC credentials absent, never Infisical.
-export FLEET_SECRETS="${WORK}/no-fleet-secrets"
 FAKE_BIN="${WORK}/bin"
 STATE="${WORK}/state"
 REPO="${WORK}/repo"
@@ -58,6 +56,12 @@ echo "FAKE xcodebuild called with: $*" >&2
 exit 99
 FAKE
 chmod +x "${FAKE_BIN}/xcodebuild"
+
+# A stub fleet-secrets that always reports "absent", so ASC credentials stay unset and no test
+# can reach the real Infisical (the script falls back to fleet-secrets on PATH).
+printf '#!/usr/bin/env bash\nexit 3\n' >"${FAKE_BIN}/fleet-secrets"
+chmod +x "${FAKE_BIN}/fleet-secrets"
+export FLEET_SECRETS="${FAKE_BIN}/fleet-secrets"
 
 # A tiny clean git repo so repo_head_sha() has a real, stable SHA.
 git -C "$REPO" init -q 2>/dev/null || git -C "$REPO" init >/dev/null
