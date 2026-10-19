@@ -3,6 +3,9 @@
 **What.**  Per the owner's 2026-10-18 ruling that nothing may read the flat global key file, the Infisical bootstrap resolver (`scripts/infisical-bootstrap-env.mjs`) now reads `process.env`, then `.env.local` runner controls, then the macOS login Keychain (service `socratic-trade-bootstrap`, account = env var name).  The flat-file layer and the `db-api-keys.ts` dev loader are deleted;  `predev-check.mjs` checks Keychain presence;  AGENTS.md's strict-Infisical rule carries the 2026-10-18 update.  The Mac's Keychain was seeded with `INFISICAL_ST_CLIENT_ID` and `INFISICAL_ST_CLIENT_SECRET` (read-back matched).  Rollout `docs/rollouts/2026-10-18-ops-818-bootstrap-keychain.md`.
 
 **Next.**  Merge after CI.  The owner may delete the flat file once no other consumer reads it.
+## 2026-10-18 CLAUDE — OPS-818 stop reading the flat global-api-keys file
+
+**What.**  Non-identity readers (`scripts/ios-fleet/ship-testflight.sh`, `scripts/massive-hoard.ts`, `scripts/cascade-audit.ts` usage, `.claude/skills/deploy-verify/SKILL.md`) now use env first, then `fleet-secrets get`.  The bootstrap-identity readers are unchanged because `AGENTS.md` keeps the handoff path as the documented owner-side identity store;  the owner decides whether to override that rule.  Rollout: `docs/rollouts/2026-10-18-ops-818-no-global-api-keys.md`.
 
 ## 2026-10-16 CLAUDE (PR sweep) — ST-4545 PR #4789 conflicts, CI and review threads
 
