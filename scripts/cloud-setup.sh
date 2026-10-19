@@ -44,7 +44,7 @@ npm ci
 # Resolve the local Infisical machine-identity bootstrap (process env, then the
 # macOS login Keychain, service socratic-trade-bootstrap) without copying or
 # printing credential values. The runner repeats this resolution at launch.
-# The flat ~/.secrets/global-api-keys file is retired and never read (owner,
+# The retired flat key file is never read (owner,
 # 2026-10-18, OPS-818). An inherited legacy GLOBAL_API_KEYS_FILE is ignored.
 # Cloud VMs have no Keychain — missing identities are expected; do not fail
 # setup for a keyless checkout.

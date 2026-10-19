@@ -56,4 +56,4 @@ New views go next to the sibling they belong with. New files created outside Xco
 - Light is the product default. Do not ship dark-first chrome.
 - Two spaces between sentences in user-visible copy.
 - Never hand-edit `.pbxproj`, `.entitlements`, `.xib`, `.storyboard`.
-- Secrets stay in `~/.secrets/` / Infisical. Never print them.
+- Secrets stay in Infisical (`fleet-secrets get`); nothing reads `~/.secrets`. Never print them.

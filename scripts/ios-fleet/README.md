@@ -8,12 +8,11 @@ This directory is the **source of truth** for the fleet-wide TestFlight ship scr
 - `ship-all.sh` — ship all three fleet apps sequentially.
 - `apps.json` — per-app registry (bundle id, scheme, project paths, team id).
 - `asc-api.mjs` — minimal App Store Connect API client (ES256 JWT, no dependencies).  Used by `ship-testflight.sh` for export-compliance (`ensure-tf-ready`) and for build-number verification (`latest-build-seq`).
-- `appstore-connect.env.example` — template for `~/.secrets/appstore-connect.env`; variable **names** only, no values.
 - `ExportOptions-appstore.plist` — export options for `destination=upload`.
 - `ExportOptions-export-ipa.plist` — export options for `destination=export` (local IPA only).
 - `test-ship-seq.sh` — offline tests for the build-number rules (see **Tests**).  Repo-only; not installed to the runtime location.
 
-Secrets (ASC API key id/issuer/path) come from process env `ASC_*`, or from the file named by `ASC_SECRETS_ENV`.  `ship-testflight.sh` sets `ASC_SECRETS_ENV` to `~/.secrets/appstore-connect.env` when that file exists.  None of the files here contain secret values, only the names of the environment variables they expect.
+Secrets (ASC API key id/issuer/path) come from process env `ASC_KEY_ID` / `ASC_ISSUER_ID` / `ASC_KEY_PATH`, else from Infisical Fleet-OPS folder `/asc` through `fleet-secrets get` (`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8`;  the `.p8` is written to a 0600 temp file for the run and removed on exit).  Nothing reads `~/.secrets` (AFC-359).  None of the files here contain secret values.
 
 ## Install (sync repo copy -> runtime location)
 
@@ -22,7 +21,6 @@ install -m 0755 scripts/ios-fleet/ship-testflight.sh /Users/jay/apps/ios-fleet/s
 install -m 0755 scripts/ios-fleet/ship-all.sh /Users/jay/apps/ios-fleet/ship-all.sh
 install -m 0644 scripts/ios-fleet/apps.json /Users/jay/apps/ios-fleet/apps.json
 install -m 0644 scripts/ios-fleet/asc-api.mjs /Users/jay/apps/ios-fleet/asc-api.mjs
-install -m 0644 scripts/ios-fleet/appstore-connect.env.example /Users/jay/apps/ios-fleet/appstore-connect.env.example
 install -m 0644 scripts/ios-fleet/ExportOptions-appstore.plist /Users/jay/apps/ios-fleet/ExportOptions-appstore.plist
 install -m 0644 scripts/ios-fleet/ExportOptions-export-ipa.plist /Users/jay/apps/ios-fleet/ExportOptions-export-ipa.plist
 install -m 0644 scripts/ios-fleet/AppUpdatePrompt.swift /Users/jay/apps/ios-fleet/AppUpdatePrompt.swift
