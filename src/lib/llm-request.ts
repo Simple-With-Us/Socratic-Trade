@@ -49,13 +49,16 @@ function reasoningTokenHeadroom(effort: LlmReasoningEffort | undefined): number 
  * Lowering or removing reasoning does NOT fix it — measured `--effort none` was slower (90.9s) and
  * returned unparseable output. The budget has to go UP, not down.
  *
- * Env-tunable via MINIMAX_MUSE_REASONING_HEADROOM; default 16000, giving the Green proposer a
- * 4000 + 16000 = 20000-token completion cap that comfortably clears observed reasoning lengths
- * while still terminating.
+ * Env-tunable via MINIMAX_MUSE_REASONING_HEADROOM; default 8000, giving the Green proposer a
+ * 4000 + 8000 = 12000-token completion cap — roughly twice the largest completion traced (5961).
+ *
+ * The headroom is deliberately NOT sized so that the bounded truncation retry in strategy.ts is
+ * stranded: that retry escalates to min(cap*2, STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP), so the
+ * base cap must stay BELOW the retry ceiling or the escalation silently stops firing.
  */
 function minimaxMuseReasoningHeadroom(): number {
   const configured = Number(process.env.MINIMAX_MUSE_REASONING_HEADROOM);
-  return Number.isFinite(configured) && configured > 0 ? configured : 16_000;
+  return Number.isFinite(configured) && configured > 0 ? configured : 8_000;
 }
 
 export const LLM_REQUEST_DEFAULTS = {
@@ -152,14 +155,15 @@ export async function llmFetch(url: string, init: RequestInit = {}): Promise<Res
  * applies when the model is in a thinking mode, including MiniMax/Muse families whose reasoning is
  * always enabled by the provider.  A non-reasoning or thinking-off model keeps the base 60s bound.
  *
- * The thinking bound was raised 150s -> 300s on 2026-10-19. Traced through the app's own request
- * path, MiniMax/Muse completions run ~13ms/token; at the widened 20000-token completion cap a
- * reasoning-heavy call needs ~260s of generation, so the old 150s bound cut the connection before
- * the model finished even when it was making progress. This is a safety net that must stay wider
- * than the token budget implies; it is NOT the fix for a starved answer (that is the reasoning
- * headroom above) and it does not stop an empty response on its own.
+ * The thinking bound was raised 150s -> 360s on 2026-10-19. Traced through the app's own request
+ * path, MiniMax/Muse completions run ~13ms/token, so the bounded truncation retry at a 24000-token
+ * cap needs ~312s of generation. At the old 150s bound the wall fired while the model was still
+ * making progress and the reply was discarded. This safety net must stay wider than the LARGEST
+ * cap any single attempt can reach, or it severs exactly the calls it exists to protect. It is NOT
+ * the fix for a starved answer (that is the reasoning headroom above) and it does not stop an empty
+ * response on its own.
  */
-const REASONING_LLM_TIMEOUT_DEFAULT_MS = 300_000;
+const REASONING_LLM_TIMEOUT_DEFAULT_MS = 360_000;
 
 export function strategyLlmTimeoutMs(model: string | undefined, effort: LlmReasoningEffort | undefined): number {
   const base = Number(process.env.STRATEGY_LLM_TIMEOUT_MS) || LLM_TIMEOUT_MS;

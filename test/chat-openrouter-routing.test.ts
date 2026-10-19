@@ -164,7 +164,7 @@ describe("llmForModel — OpenRouter-first routing (review finding llm-12)", () 
       expect(requests).toHaveLength(2);
       expect(requests[0].model).toBe("MiniMax-M3");
       expect(requests[0].reasoning_split).toBe(true);
-      expect(requests[0].max_completion_tokens).toBe(5024);
+      expect(requests[0].max_completion_tokens).toBe(9_024);
       expect(requests[1].messages.find((m: { role: string }) => m.role === "assistant").reasoning_details).toEqual(reasoning);
       expect(result.text).toBe("Visible answer");
     } finally {

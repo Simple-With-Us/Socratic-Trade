@@ -165,15 +165,16 @@ describe("llm-request — model resolution", () => {
     expect(strategyLlmTimeoutMs("minimax/minimax-m3", undefined)).toBe(200000);
   });
 
-  // 2026-10-19: raised 150s -> 300s. The widened MiniMax/Muse completion cap is 20000 tokens and
-  // these models run ~13ms/token, so a reasoning-heavy call needs ~260s of generation. At 150s the
-  // wall fired while the model was still making progress and the reply was discarded. This is a
-  // safety net wider than the token budget implies — it does not by itself stop a starved answer.
-  it("defaults the thinking bound to 300s, wide enough for the widened MiniMax/Muse token cap", () => {
+  // 2026-10-19: raised 150s -> 360s. A single attempt can reach the truncation-retry ceiling of
+  // 24000 tokens, and these models run ~13ms/token, so the worst case needs ~312s of generation.
+  // At 150s the wall fired while the model was still making progress and the reply was discarded.
+  // This safety net must stay wider than the LARGEST cap one attempt can reach — it does not by
+  // itself stop a starved answer, which is what the reasoning headroom is for.
+  it("defaults the thinking bound to 360s, wide enough for the widened MiniMax/Muse token cap", () => {
     vi.unstubAllEnvs();
     for (const model of ["minimax-m3", "minimax/minimax-m3", "muse-spark-1.3-contributor", "meta/muse-spark-1.3-contributor"]) {
-      expect(strategyLlmTimeoutMs(model, undefined)).toBe(300_000);
-      expect(strategyLlmTimeoutMs(model, "none")).toBe(300_000);
+      expect(strategyLlmTimeoutMs(model, undefined)).toBe(360_000);
+      expect(strategyLlmTimeoutMs(model, "none")).toBe(360_000);
     }
     // Non-thinking models must NOT be dragged up to the reasoning bound.
     expect(strategyLlmTimeoutMs("openai/gpt-4o-mini", "high")).toBe(LLM_TIMEOUT_MS);
@@ -203,12 +204,13 @@ describe("llm-request — withLlmRequestBounds", () => {
   it("reserves reasoning headroom for MiniMax and Muse through OpenRouter", () => {
     for (const model of ["minimax/minimax-m3", "meta/muse-spark-1.3", "meta/muse-glimmer-30b"]) {
       const request = withLlmRequestBounds({ model }, "chat-completions", { model, maxOutputTokens: 1500 });
-      // 1500 requested + 16000 reserved reasoning headroom. This was 1500 + 4000 = 5500 until
+      // 1500 requested + 8000 reserved reasoning headroom. This was 1500 + 4000 = 5500 until
       // 2026-10-19: the 4000 came from REASONING_TOKEN_BUDGET.medium, an OpenAI effort-ladder value
       // applied to a family that has no ladder and reasons unconditionally. Traced green-team runs
       // burned the whole completion cap on reasoning and returned an empty body, so the reserved
-      // headroom had to grow rather than shrink. The provider still gets no reasoning_effort.
-      expect(request.max_completion_tokens).toBe(1500 + 16_000);
+      // headroom had to grow rather than shrink. It stays BELOW the truncation-retry ceiling so the
+      // bounded escalation still fires. The provider still gets no reasoning_effort.
+      expect(request.max_completion_tokens).toBe(1500 + 8_000);
       expect(request).not.toHaveProperty("reasoning_effort");
     }
   });
@@ -398,14 +400,32 @@ describe("llm-request — withLlmRequestBounds", () => {
     for (const model of ["minimax-m3", "minimax/minimax-m3", "MiniMax-M3", "muse-spark-1.3-contributor", "meta/muse-spark-1.3-contributor"]) {
       const bounds = { maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal, model };
       const wireCap = resolveLlmWireOutputCap("chat-completions", bounds);
-      // Default headroom is 16000 -> the Green proposer sends a 20000-token completion cap.
-      expect(wireCap).toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal + 16_000);
+      // Default headroom is 8000 -> the Green proposer sends a 12000-token completion cap.
+      expect(wireCap).toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal + 8_000);
       // The body on the wire must agree with the audited resolver, for every spelling of the family.
       const body = withLlmRequestBounds({ model }, "chat-completions", bounds);
       expect(body.max_completion_tokens).toBe(wireCap);
       // It is a reserved REASONING budget, so the caller's visible budget is still intact above it.
       expect(wireCap).toBeGreaterThan(LLM_OUTPUT_TOKEN_CAPS.strategyProposal * 2);
     }
+  });
+
+  // 2026-10-19 regression guard. Raising the reasoning headroom alone STRANDED the bounded
+  // truncation retry in strategy.ts: it escalates to min(cap*2, STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP)
+  // and only fires when that exceeds the current cap, so a base cap at/above the ceiling silently
+  // disabled the safety net — the run suite caught it as a missing retry hop. These two values are
+  // coupled and must be reviewed together.
+  it("keeps the MiniMax/Muse base cap below the truncation-retry ceiling so the escalation can fire", () => {
+    vi.unstubAllEnvs();
+    const baseCap = resolveLlmWireOutputCap("chat-completions", {
+      maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal,
+      model: "minimax-m3"
+    });
+    const retryCeiling = Number(process.env.STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP) || 24_000;
+    // The escalation is min(baseCap * 2, ceiling) and only fires when that is strictly greater.
+    const retryCap = Math.min(baseCap * 2, retryCeiling);
+    expect(retryCap).toBeGreaterThan(baseCap);
+    expect(retryCap).toBeLessThanOrEqual(retryCeiling);
   });
 
   it("MINIMAX_MUSE_REASONING_HEADROOM overrides the default headroom and rejects junk values", () => {
@@ -417,7 +437,7 @@ describe("llm-request — withLlmRequestBounds", () => {
     for (const junk of ["0", "-5", "not-a-number"]) {
       vi.stubEnv("MINIMAX_MUSE_REASONING_HEADROOM", junk);
       expect(resolveLlmWireOutputCap("chat-completions", { maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal, model: "minimax-m3" }))
-        .toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal + 16_000);
+        .toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal + 8_000);
     }
     vi.unstubAllEnvs();
   });

@@ -6793,7 +6793,12 @@ async function proposeTrades(input: {
               // MiniMax can spend its entire completion allowance on hidden reasoning. Retry
               // once, on the same endpoint, with a bounded larger allowance. Never loop or
               // count the empty response as a successful zero-proposal decision.
-              const retryCap = Math.min(wireOutputCap * 2, 16_000);
+              // The ceiling is env-tunable and MUST stay above the base wire cap (see
+              // minimaxMuseReasoningHeadroom): if it does not, `retryCap > wireOutputCap` is
+              // false and this safety net silently stops firing. Sized so a retry at the ceiling
+              // still fits inside the reasoning wall (~13ms/token -> 24000 ~= 312s < 360s).
+              const retryCeiling = Number(process.env.STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP) || 24_000;
+              const retryCap = Math.min(wireOutputCap * 2, retryCeiling);
               const retry = !attempt.truncationRetry && attempt.transport === "chat-completions" &&
                 /^(?:minimax\/)?minimax-/i.test(attempt.model) && retryCap > wireOutputCap;
               const reason = `Green Team returned empty content after output truncation at the ${wireOutputCap}-token cap (finish_reason=${finishReason ?? "unknown"}, completion_tokens=${completionTokens ?? "unknown"}).`;
