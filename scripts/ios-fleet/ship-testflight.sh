@@ -74,7 +74,7 @@
 # Secrets (never printed):
 #   ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH from env, else Infisical /asc via
 #   `fleet-secrets get` (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8; the .p8 is written to a
-#   0600 temp file and removed on exit).  Nothing reads ~/.secrets (AFC-359).
+#   0600 temp file and removed on exit).  No handoff file is read (AFC-359).
 #   or Xcode-signed-in session for destination=upload export
 #   SENTRY_AUTH_TOKEN  (dSYM + Size Analysis upload; env or `fleet-secrets get`)
 #   SENTRY_DSN         (injected into xcodebuild so Cocoa plist $(SENTRY_DSN) is set)

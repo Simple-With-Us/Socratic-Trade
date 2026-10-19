@@ -2,7 +2,7 @@
 # Prepare a GitHub-hosted macos-26 runner to archive for App Store review.
 # Stages the iOS Distribution identity and imports it.  ASC credentials reach the ship
 # script through process env (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_PATH); nothing is
-# written under ~/.secrets (AFC-359).
+# written to disk outside a temp stage (AFC-359).
 # Never prints secret values.  Fail closed on a beta macOS host.
 set +o xtrace
 set -euo pipefail
@@ -23,7 +23,7 @@ fi
 : "${ASC_KEY_ID:?ASC_KEY_ID required}"
 : "${ASC_ISSUER_ID:?ASC_ISSUER_ID required}"
 # CI stages the key file and passes ASC_KEY_PATH.  The old ASC_KEY_P8 local path wrote a
-# key and an env file under ~/.secrets;  it is gone (AFC-359).
+# key and an env file to a persistent folder;  it is gone (AFC-359).
 : "${ASC_KEY_PATH:?ASC_KEY_PATH required (CI stages the key file)}"
 : "${IOS_DIST_P12_BASE64:?IOS_DIST_P12_BASE64 required}"
 : "${IOS_DIST_P12_PASSWORD:?IOS_DIST_P12_PASSWORD required}"

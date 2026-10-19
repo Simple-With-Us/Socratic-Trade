@@ -28,7 +28,7 @@
 #   IOS_PROFILES_DIR            install dir (default ~/Library/MobileDevice/Provisioning Profiles)
 #   IOS_PROFILE_SKIP_IDENTITY_CHECK=1   skip the keychain certificate match
 #   ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH   process env (wins over Infisical /asc,
-#                               which asc-api.mjs reads through fleet-secrets; nothing reads ~/.secrets)
+#                               which asc-api.mjs reads through fleet-secrets; no handoff file is read)
 set +o xtrace
 set -euo pipefail
 umask 077
@@ -46,7 +46,7 @@ command -v node >/dev/null 2>&1 || { echo "error: node not on PATH" >&2; exit 1;
 command -v security >/dev/null 2>&1 || { echo "error: security(1) not found (macOS only)" >&2; exit 1; }
 
 # asc-api.mjs reads ASC_* from process env, then Infisical /asc via fleet-secrets
-# (AFC-359:  nothing reads ~/.secrets).  ship-testflight.sh load_secrets exports
+# (AFC-359:  no handoff file is read).  ship-testflight.sh load_secrets exports
 # ASC_* before calling this installer.
 
 mkdir -p "$DEST"

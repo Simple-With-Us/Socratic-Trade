@@ -81,7 +81,7 @@ trap cleanup EXIT INT TERM
 # -- 1) read the usage-monitor token (never echoed) ----------------------------
 # Prod GET /api/subscriptions wants USAGE_READ_TOKEN. Ingest is write-only
 # there (Wave C) and 401s if used as a read bearer.  Env first, then Infisical
-# /usage-monitor through fleet-secrets (AFC-359:  nothing reads ~/.secrets).
+# /usage-monitor through fleet-secrets (AFC-359:  no handoff file is read).
 USAGE_TOKEN=""
 _load_tok() {
   _name="$1"

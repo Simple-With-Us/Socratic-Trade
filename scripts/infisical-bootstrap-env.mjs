@@ -4,8 +4,8 @@
 // Provider/API secrets remain in Infisical. Resolution order is process
 // environment, then .env.local runner controls, then (macOS only) the login
 // Keychain: generic passwords with service "socratic-trade-bootstrap" and the
-// env var name as the account. The flat ~/.secrets/global-api-keys file is
-// retired and is never read (owner, 2026-10-18, OPS-818). Values are never
+// env var name as the account. The retired flat key file is
+// never read (owner, 2026-10-18, OPS-818). Values are never
 // logged and are not copied into .env.local.
 
 import { spawnSync } from "node:child_process";

@@ -6,7 +6,7 @@
  * Auth: resolveAscCredentials() reads ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH
  * from process.env first, then `fleet-secrets get` (Infisical /asc: ASC_KEY_ID,
  * ASC_ISSUER_ID, ASC_KEY_P8) when env is missing or the key file does not exist.
- * Nothing reads ~/.secrets (AFC-359).  Never prints values.
+ * No handoff file is read (AFC-359).  Never prints values.
  *
  * Usage:
  *   node asc-api.mjs GET /v1/apps
