@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { Card } from "../ui/primitives";
+import { PublicShell, PUBLIC_HEADER_ACTION_CLASS } from "../ui/public/public-shell";
 import { DecisionTraceIllustration } from "./decision-trace-illustration";
 import { landingPageEnabled } from "@/lib/landing-page";
 
@@ -11,7 +12,7 @@ export const revalidate = 3600;
 export const metadata: Metadata = {
   title: { absolute: "Socratic Trade" },
   description:
-    "Socratic Trade brings market research, connected-account controls, and decision records into one workspace.  Not investment advice.",
+    "Socratic Trade brings market research, connected-account controls, and decision records into one workspace.  Not investment advice.",
   alternates: { canonical: "/welcome" },
   openGraph: {
     type: "website",
@@ -19,12 +20,12 @@ export const metadata: Metadata = {
     url: "/welcome",
     title: "Socratic Trade",
     description:
-      "Market research, configured trading workflows, and decision records for review.  Not investment advice."
+      "Market research, configured trading workflows, and decision records for review.  Not investment advice."
   },
   twitter: {
     card: "summary_large_image",
     title: "Socratic Trade",
-    description: "Market research and connected-account workflows with decision records for review.  Not investment advice."
+    description: "Market research and connected-account workflows with decision records for review.  Not investment advice."
   },
   robots:
     process.env.NEXT_PUBLIC_ALLOW_INDEXING === "true"
@@ -38,34 +39,32 @@ const PRIMARY_LINK =
   "inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-accent px-4 text-sm font-medium text-accent-fg shadow-sm transition-colors hover:brightness-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 max-sm:min-h-11";
 const GHOST_LINK =
   "inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-line bg-surface px-4 text-sm font-medium text-fg transition-colors hover:bg-surface-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 max-sm:min-h-11";
-const PRIMARY_LINK_SM =
-  "inline-flex h-8 items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-accent px-3 text-[13px] font-medium text-accent-fg shadow-sm transition-colors hover:brightness-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 max-sm:min-h-11";
 const GHOST_LINK_SM =
   "inline-flex h-8 items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-line bg-surface px-3 text-[13px] font-medium text-fg transition-colors hover:bg-surface-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 max-sm:min-h-11";
 
 const FEATURES: Array<{ title: string; body: string }> = [
   {
-    title: "Market research",
+    title: "Market Research",
     body: "Uses available market data, portfolio context, scan results, and prior records to propose a market thesis."
   },
   {
-    title: "Decision trace",
+    title: "Decision Trace",
     body: "Review recorded proposals and actions, including their rationale, status, supporting evidence, and objections when available."
   },
   {
-    title: "Evidence attribution",
+    title: "Evidence Attribution",
     body: "Decision records can include source references, retrieved context, and market data so you can inspect the inputs."
   },
   {
-    title: "Alternative views",
+    title: "Alternative Views",
     body: "Compare recorded bull and bear cases, policy checks, and objections when those reviews are enabled."
   },
   {
-    title: "Outcome review",
+    title: "Outcome Review",
     body: "Review available outcomes by thesis, market conditions, and model choice to help assess the workflow."
   },
   {
-    title: "Coaching and framework review",
+    title: "Coaching and Framework Review",
     body: "Add feedback and inspect proposed framework changes, review decisions, and their recorded status."
   }
 ];
@@ -73,19 +72,19 @@ const FEATURES: Array<{ title: string; body: string }> = [
 const STEPS: Array<{ n: number; title: string; detail: string }> = [
   {
     n: 1,
-    title: "Observe the market",
+    title: "Observe the Market",
     detail:
       "Review available market signals, account state, candidates, and prior records from configured sources."
   },
   {
     n: 2,
-    title: "Review proposals and authority",
+    title: "Review Proposals and Authority",
     detail:
       "Use Ask-First for proposals that require approval, or configure Autopilot and its controls for a connected account."
   },
   {
     n: 3,
-    title: "Review results",
+    title: "Review Results",
     detail:
       "Inspect recorded evidence, objections, outcomes, and coaching notes when assessing a proposed framework change."
   }
@@ -111,34 +110,36 @@ export default function WelcomePage() {
         }}
       />
 
-      <div className="min-h-screen bg-bg text-fg">
-        {/* ── Header ─────────────────────────────────────────────────────── */}
-        <header className="border-b border-line bg-surface/80 backdrop-blur-sm">
-          <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
-            <span className="text-base font-semibold text-fg">Socratic Trade</span>
-            <a href={ACCESS_HREF} className={PRIMARY_LINK_SM}>
-              Request access
-            </a>
-          </div>
-        </header>
-
-        <main className="mx-auto max-w-5xl px-6 py-16 space-y-20">
+      <PublicShell
+        showIntro
+        headerAction={
+          <a href={ACCESS_HREF} className={PUBLIC_HEADER_ACTION_CLASS}>
+            Request Access
+          </a>
+        }
+        footerExtra={
+          <a href="/console" className="underline underline-offset-2 hover:text-muted">
+            Console
+          </a>
+        }
+      >
+        <div className="space-y-20">
           {/* ── Hero ───────────────────────────────────────────────────────── */}
-          <section className="text-center space-y-6">
+          <section className="space-y-6 text-center">
             <h1 className="text-4xl font-bold tracking-tight text-fg sm:text-5xl">
-              A workspace for market research and trading workflows
+              A Workspace for Market Research and Trading Workflows
             </h1>
-            <p className="mx-auto max-w-2xl text-lg text-muted leading-relaxed">
+            <p className="mx-auto max-w-2xl text-lg leading-relaxed text-muted">
               Socratic Trade brings research, proposals, and connected-account controls together.
-              {"  "}Review the available evidence and decision records, and choose the authority
+              {"  "}Review the available evidence and decision records, and choose the authority
               you give the system.
             </p>
             <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
               <a href={ACCESS_HREF} className={PRIMARY_LINK}>
-                Request access
+                Request Access
               </a>
-              <a href="/how-it-works" className={GHOST_LINK}>
-                Decision framework
+              <a href="/framework" className={GHOST_LINK}>
+                Framework
               </a>
             </div>
             <p className="text-sm text-faint">Private beta · Access by invitation.</p>
@@ -146,33 +147,33 @@ export default function WelcomePage() {
 
           {/* ── Features grid ──────────────────────────────────────────────── */}
           <section className="space-y-6">
-            <h2 className="text-xl font-semibold text-fg">What it does</h2>
+            <h2 className="text-xl font-semibold text-fg">What It Does</h2>
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {FEATURES.map((f) => (
-                <Card key={f.title} className="p-5 space-y-2">
+                <Card key={f.title} className="space-y-2 p-5">
                   <h3 className="text-sm font-semibold text-fg">{f.title}</h3>
-                  <p className="text-sm text-muted leading-relaxed">{f.body}</p>
+                  <p className="text-sm leading-relaxed text-muted">{f.body}</p>
                 </Card>
               ))}
             </div>
-            <p className="text-xs text-faint leading-relaxed">
+            <p className="text-xs leading-relaxed text-faint">
               Data coverage and recorded detail depend on your sources, settings, and completed
-              runs. {"  "}Review the underlying records when evaluating a result.
+              runs. {"  "}Review the underlying records when evaluating a result.
             </p>
           </section>
 
           {/* ── How it works ───────────────────────────────────────────────── */}
           <section className="space-y-6">
-            <h2 className="text-xl font-semibold text-fg">How it works</h2>
+            <h2 className="text-xl font-semibold text-fg">How It Works</h2>
             <ol className="space-y-4">
               {STEPS.map((s) => (
                 <li key={s.n} className="flex gap-4">
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-accent-fg text-sm font-bold">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-sm font-bold text-accent-fg">
                     {s.n}
                   </span>
                   <div className="space-y-1 pt-1">
                     <p className="text-sm font-semibold text-fg">{s.title}</p>
-                    <p className="text-sm text-muted leading-relaxed">{s.detail}</p>
+                    <p className="text-sm leading-relaxed text-muted">{s.detail}</p>
                   </div>
                 </li>
               ))}
@@ -182,99 +183,51 @@ export default function WelcomePage() {
           {/* ── Decision trace illustration ────────────────────────────────── */}
           <section className="space-y-6">
             <div className="space-y-2 text-center">
-              <h2 className="text-xl font-semibold text-fg">What a decision trace looks like</h2>
-              <p className="mx-auto max-w-2xl text-sm text-muted leading-relaxed">
+              <h2 className="text-xl font-semibold text-fg">What a Decision Trace Looks Like</h2>
+              <p className="mx-auto max-w-2xl text-sm leading-relaxed text-muted">
                 An illustrative decision record showing supporting arguments, objections, and a
-                policy check. {"  "}Available detail varies by proposal and configuration.
+                policy check. {"  "}Available detail varies by proposal and configuration.
               </p>
             </div>
             <DecisionTraceIllustration />
           </section>
 
-          {/* ── Strategy overview link ─────────────────────────────────────── */}
+          {/* ── Framework overview link ────────────────────────────────────── */}
           <section className="space-y-3 text-center">
-            <h2 className="text-xl font-semibold text-fg">How the decision framework works</h2>
-            <p className="mx-auto max-w-2xl text-sm text-muted leading-relaxed">
-              The workflow connects research, alternative views, account controls, and outcome
-              review. {"  "}The framework overview explains how these parts fit together.
+            <h2 className="text-xl font-semibold text-fg">Inside the Framework</h2>
+            <p className="mx-auto max-w-2xl text-sm leading-relaxed text-muted">
+              The Framework page explains the whole system behind a decision: how a thesis is
+              formed, how evidence is assembled, how a proposed trade is sized and challenged
+              before it is placed, how the system records what it did, and how outcomes feed
+              back into the next run. {"  "}It also states the limits of the system plainly.
             </p>
-            <a href="/how-it-works" className={GHOST_LINK_SM}>
-              Read the full framework overview
+            <a href="/framework" className={GHOST_LINK_SM}>
+              Read the Framework
             </a>
           </section>
 
           {/* ── Disclosures ────────────────────────────────────────────────── */}
           <section>
-            <Card className="p-6 space-y-4 border-line-strong">
-              <h2 className="text-base font-semibold text-fg">Important disclosures</h2>
-              <p className="text-sm text-muted leading-relaxed">
+            <Card className="space-y-4 border-line-strong p-6">
+              <h2 className="text-base font-semibold text-fg">Important Disclosures</h2>
+              <p className="text-sm leading-relaxed text-muted">
                 Socratic Trade is software for market research, autonomous reasoning, and trade
-                execution when connected to accounts you configure.  It is not investment advice, a
-                broker-dealer, or a registered investment adviser.
+                execution when connected to accounts you configure. {"  "}It is not investment
+                advice, a broker-dealer, or a registered investment adviser.
               </p>
-              <p className="text-sm text-muted leading-relaxed">
-                Trading and investing involve substantial risk of loss.  Simulated or hypothetical
-                performance has inherent limitations and is not a guarantee of future results.
-                Nothing here is a recommendation to buy or sell any security.
+              <p className="text-sm leading-relaxed text-muted">
+                Trading and investing involve substantial risk of loss. {"  "}Simulated or
+                hypothetical performance has inherent limitations and is not a guarantee of future
+                results. {"  "}Nothing here is a recommendation to buy or sell any security.
               </p>
-              <p className="text-sm text-muted leading-relaxed">
-                You are solely responsible for your own investment decisions.  Consult a licensed
-                financial professional before trading.
+              <p className="text-sm leading-relaxed text-muted">
+                You are solely responsible for your own investment decisions. {"  "}Consult a
+                licensed financial professional before trading.
               </p>
             </Card>
           </section>
-        </main>
-
-        {/* ── Footer ─────────────────────────────────────────────────────── */}
-        <footer className="border-t border-line mt-8">
-          <div className="mx-auto max-w-5xl px-6 py-8 flex flex-col items-center gap-2 text-center sm:flex-row sm:justify-between">
-            <p className="text-xs text-faint">
-              Not investment advice.  You set authority.{" "}
-              <a href="/terms-and-conditions" className="underline underline-offset-2 hover:text-muted">
-                Terms
-              </a>
-              {" · "}
-              <a href="/privacy-policy" className="underline underline-offset-2 hover:text-muted">
-                Privacy
-              </a>
-            </p>
-            <p className="text-xs text-faint">
-              &copy; 2026 Socratic Trade &middot;{" "}
-              <a
-                href="mailto:mail@jays.services"
-                className="underline underline-offset-2 hover:text-muted"
-              >
-                mail@jays.services
-              </a>
-              {" · "}
-              <a
-                href="https://simplewithus.com/"
-                aria-label="From Simple With Us"
-                className="inline-flex items-center gap-1.5 align-middle hover:text-muted focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2"
-              >
-                <span>From</span>
-                <span className="block w-[288px] max-w-[calc(100vw-92px)]">
-                  <img
-                    src="/swu-wordmark-light.webp"
-                    alt="Simple With Us by Jay Wedgeworth"
-                    width={288}
-                    height={30}
-                    className="h-auto w-full dark:hidden"
-                  />
-                  <img
-                    src="/swu-wordmark-dark.webp"
-                    alt=""
-                    aria-hidden
-                    width={288}
-                    height={30}
-                    className="hidden h-auto w-full dark:block"
-                  />
-                </span>
-              </a>
-            </p>
-          </div>
-        </footer>
-      </div>
+        </div>
+      </PublicShell>
     </>
   );
 }

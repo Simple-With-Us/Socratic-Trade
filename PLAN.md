@@ -2655,3 +2655,42 @@ No model change, no trading-logic change.  Measured `--effort none` was slower a
 the budget was widened rather than bounded.  Separate, code-free: production APNs push was
 root-caused to a stale `APNS_P8` paired against the wrong Key ID, fixed in Infisical and activated by
 a container restart.
+
+## 2026-10-19 — [MM] Public Framework pages (branch `minimax/public-framework-pages`)
+
+Not a scope change: a public-surface change the owner asked for as one piece.  `/framework` is
+expanded (content 270 → 425 lines, viewer 240 → 369, with the seven decision questions, the
+plain-language Observe/Argue/Decide/Act/Explain/Learn loop, the decision case file, the authority
+list, four outcome-review lenses, and an operational-resilience section from
+`docs/trading-framework.md`).  `/how-it-works` is retired into it — its content is fully superseded
+and the route is now a 308, so inbound links still reach the content — and `/strategy` points
+straight at `/framework` in one hop.  The Welcome page's button reads "Framework" and links there.
+
+The public surface is now one shell rather than four near-copies: `/welcome`, `/framework`, and the
+two legal pages all render through `PublicShell`, which is what actually guarantees the owner's
+"animated app name in the same place regardless of which public page you are on" requirement.  A
+source-level test fails the build if a public page grows its own header.  The console's intro canvas
+moved to `app/ui/brand/intro-canvas.tsx` and was **parameterized, not duplicated** — one animation,
+two variants, each with its own module state and its own `sessionStorage` key, so the public splash
+never consumes the console's one-shot splash.  The public header's geometry comes from shared
+constants in `app/ui/brand/public-geometry.ts`, not Tailwind classes, because the animation computes
+its landing box in JavaScript from those same constants.
+
+Routing: the apex `/` sends an anonymous visitor to `/welcome` and a signed-in operator to
+`/console`; `socratic.trade` 308s to `socratictrade.com`, exempting `/api/*` and the Apple
+associated-domain file.  `/framework` keeps its anti-scraping architecture unchanged — server-only
+content module, UA gate on the page and the content API, `noindex`/`noai`/`TDMRep`, sitemap
+exclusion, edge WAF — because linking it from Welcome does not require un-gating it.  `/welcome`
+remains the indexable SEO surface.
+
+Two traps closed rather than shipped: the header row was a `min-h-8` inside a vertical pad, so a
+page with no header action would have collapsed it and shifted the wordmark 5px off the animation's
+landing target (now pinned to `PUBLIC_ROW_H`, with a test); and the public brand is CSS-sized rather
+than canvas-sized on mount, so the first paint is already correct and the candles land on the
+wordmark instead of beside it.  One gate failure caught and fixed: parameterizing the intro canvas
+put the per-variant state behind a render-scope local that the effect mutated, which the React
+Compiler rejects as an error — every write now goes through module-scope functions.
+
+Verified in the lane: `npx tsc --noEmit` clean, `npm run lint` 0 errors, `npx vitest run` full suite
+green, `npm run build` green.  Swift compilation is CI-only; the only Swift changes are comments.
+Rollout: `docs/rollouts/2026-10-19-public-framework-pages.md`.

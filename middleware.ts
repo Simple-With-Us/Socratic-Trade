@@ -52,6 +52,23 @@ const ALLOWED = (process.env.ALLOWED_EMAILS || "")
   .map((e) => e.trim().toLowerCase())
   .filter(Boolean);
 
+/** The public marketing hosts. A visitor who opens the canonical domain lands on
+ *  the /welcome product page, not on the operator console. 2026-10-19 (owner):
+ *  "The /welcome page should be where viewers of the main domain go to
+ *  initially." */
+const MARKETING_HOSTS = new Set([
+  "socratictrade.com",
+  "www.socratictrade.com",
+  "socratic.trade",
+  "www.socratic.trade"
+]);
+
+/** The alt domain forwards to the canonical one. socratic.trade's DNS already
+ *  CNAMEs to socratictrade.com, so both hosts reach the same Next.js origin and
+ *  the redirect has to happen here in the app. */
+const ALT_DOMAIN_HOSTS = new Set(["socratic.trade", "www.socratic.trade"]);
+const CANONICAL_HOST = "socratictrade.com";
+
 // Paths that never require a user identity.
 const PUBLIC_PREFIXES = [
   "/api/health",
@@ -321,6 +338,24 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   const { pathname } = req.nextUrl;
   const host = (req.headers.get("host") || "").toLowerCase().split(":")[0];
 
+  // Alt domain -> canonical domain. This runs FIRST so socratic.trade/ lands on
+  // https://socratictrade.com/welcome in a single hop instead of bouncing off
+  // the marketing redirect while still on the alt host.
+  // Exempt: /api/* (machine callers — webhooks, uptime probes — must not be
+  // handed a 308 they may not follow) and the Apple associated-domain file
+  // (the applinks + webcredentials entitlements on socratic.trade need it served
+  // on THAT domain, not redirected away).
+  if (
+    ALT_DOMAIN_HOSTS.has(host) &&
+    !pathname.startsWith("/api/") &&
+    pathname !== "/.well-known/apple-app-site-association"
+  ) {
+    const target = new URL(req.url);
+    target.protocol = "https:";
+    target.host = CANONICAL_HOST;
+    return NextResponse.redirect(target, 308);
+  }
+
   // Host-level routing: admin.socratictrade.com / admin.socratic.trade
   if (host === "admin.socratictrade.com" || host === "admin.socratic.trade") {
     if (pathname === "/") {
@@ -483,6 +518,17 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   }
 
   // --- Authorization ---
+
+  // The public marketing hosts: the root is the product landing page for a
+  // visitor, and the console for a signed-in operator. This runs BEFORE the
+  // fail-closed /login redirect below, so an anonymous visitor to the canonical
+  // domain sees the landing page instead of a login wall — while the operator's
+  // own bookmark to the apex domain still opens the console.
+  if (MARKETING_HOSTS.has(host) && pathname === "/") {
+    return withSecurityHeaders(
+      NextResponse.redirect(new URL(trustedEmail ? "/console" : "/welcome", req.url))
+    );
+  }
 
   if (trustedEmail) {
     if (!isEmailAllowed(trustedEmail, fromCf)) {

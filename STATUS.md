@@ -7179,3 +7179,64 @@ bounds batch 169/169. Four new tests, and 2 pre-existing tests that had encoded 
 (`1500 + 4000` headroom, and the literal `timed out after 150s` message) corrected.
 
 Rollout: `docs/rollouts/2026-10-19-minimax-muse-reasoning-budget.md`.
+
+## 2026-10-19 [MM] Public Framework pages: /framework expanded, /how-it-works retired, shared animated shell
+
+**What.**  The owner's four-part ask landed as one change.  (1) `/framework` is expanded: the
+content module grew from 270 to 425 lines with seven decision questions, a plain-language
+Observe/Argue/Decide/Act/Explain/Learn loop mapped to pipeline stages, the decision case file, the
+authority list, four outcome-review lenses, and an operational-resilience section drawn from
+`docs/trading-framework.md`; the viewer grew from 240 to 369 lines and gained an "On This Page"
+table of contents.  (2) `/how-it-works` is retired — its content is fully superseded (loop → `plainLoop`,
+case file → `caseFile`, authority → `authority`, lenses → `outcomeLenses`) and the route is now a
+308 to `/framework` so inbound links still land on the content; `/strategy` points straight at
+`/framework` in one hop.  (3) The Welcome page's button now reads **"Framework"** and links
+`/framework`; the apex `/` sends an anonymous visitor to `/welcome` and a signed-in operator to
+`/console`; `socratic.trade` 308s to `socratictrade.com`, exempting `/api/*` (machine callers must
+not be handed a redirect they may not follow) and the Apple associated-domain file (the `applinks` +
+`webcredentials` entitlements on that domain need the AASA served there).  (4) The animated
+candlestick wordmark and the console's candle-flight splash now live on the public pages.
+
+**How the "same place on every public page" requirement is actually guaranteed.**  Not by
+convention — by construction.  Every public page (`/welcome`, `/framework`, `/terms-and-conditions`,
+`/privacy-policy`) renders through one `PublicShell`, and a source-level test in
+`test/public-site-routing.test.ts` fails the build if a page grows its own header.  The console's
+intro canvas moved to `app/ui/brand/intro-canvas.tsx` and was **parameterized, not duplicated**:
+`variant: "console" | "public"`, each with its own module state and its own `sessionStorage` key, so
+the public splash never consumes the console's one-shot splash.  The header's geometry comes from
+shared constants in `app/ui/brand/public-geometry.ts` rather than Tailwind classes, because the
+loading animation computes its landing box in JavaScript from those same constants — a CSS class and
+a JS number that drift would put the candles beside the wordmark instead of on it.
+
+**Two traps found and closed.**  (1) The header row was a `min-h-8` inside a vertical pad, so a page
+with no header action would collapse the row to the wordmark's 22px and shift the wordmark 5px off
+the position the animation aims at; the row is now pinned to `PUBLIC_ROW_H`, with a test holding
+that invariant.  (2) The public brand is CSS-sized (`width: 100%` + `aspect-ratio`) rather than
+canvas-sized on mount, so the first paint is already correct — the animation measures
+`[data-brand-logo]` every frame, and a canvas that resized on mount would have made the candles land
+beside the wordmark.
+
+**One real gate failure, fixed before landing.**  Parameterizing the intro canvas put the
+per-variant state behind a render-scope `const state = VARIANT_STATE[variant]`, and the effect then
+mutated it — which the React Compiler rejects as an **error** ("Cannot modify local variables after
+render completes"), not a warning.  The console's original module-level `let introDone` / `let
+MODEL` had never been subject to that rule.  Every write now goes through module-scope functions
+(`markIntroDone`, `setIntroModel`, `setIntroStart`, `setIntroCurHeader`), so the effect holds
+read-only access to the per-variant state.
+
+**Deliberately unchanged.**  `/framework` keeps its anti-scraping architecture — server-only content
+module, UA gate on the page and on the content API, `noindex`/`noai`/`TDMRep`, sitemap exclusion,
+and the edge WAF rule.  Linking it from the Welcome page does not require un-gating it, and
+`/welcome` remains the indexable SEO surface.
+
+**Verification.**  In the lane: `npx tsc --noEmit` clean (exit 0); `npm run lint` 0 errors (870
+pre-existing grandfathered warnings); `npx vitest run` full suite green; `npm run build` green.  New
+`test/public-site-routing.test.ts` (13 tests) covers the marketing-host routing, the alt-domain
+forward and both its exemptions, subdomain isolation, the shared-shell guard, and the header-geometry
+invariant.
+
+**Next.**  Merge to `main` (auto-deploys; weekday RTH latch applies — this touches runtime paths, so
+the image build is a real deploy).  Swift compilation is CI-only (`ios-build`); the only Swift
+changes are comments.
+
+Rollout: `docs/rollouts/2026-10-19-public-framework-pages.md`.
