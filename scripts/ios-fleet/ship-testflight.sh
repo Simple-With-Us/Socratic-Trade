@@ -368,9 +368,24 @@ asc_latest_seq() {
     return 1
   fi
   set +e
-  out=$(node "${FLEET_DIR}/asc-api.mjs" latest-build-seq "$BUNDLE_ID" "$prefix" "$plat" 2>/dev/null)
+  # Capture stderr to a temp file rather than sending it to /dev/null: the
+  # latest-build-seq: lines carry Apple's HTTP status and error code, which is
+  # the only thing that explains a failed sequence lookup.  Clean up with the
+  # redirect on every path -- a bare `rm` can be a wrapper that prints to
+  # stdout, and this function's stdout IS the sequence number.
+  local errf rc
+  errf="$(mktemp "${TMPDIR:-/tmp}/asc-seq-err.XXXXXX")"
+  out=$(node "${FLEET_DIR}/asc-api.mjs" latest-build-seq "$BUNDLE_ID" "$prefix" "$plat" 2>"$errf")
   rc=$?
   set -e
+  if [[ -s "$errf" ]]; then
+    while IFS= read -r line; do
+      case "$line" in
+        latest-build-seq:*) logerr "asc-seq: ${line}" ;;
+      esac
+    done <"$errf"
+  fi
+  rm -f "$errf" >/dev/null 2>&1 || true
   if [[ $rc -ne 0 || ! "$out" =~ ^[0-9]+$ ]]; then
     logerr "asc-seq: query failed (rc=${rc}); cannot verify against App Store Connect"
     return 1
