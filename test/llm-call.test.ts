@@ -94,7 +94,7 @@ describe("buildLlmRequestBody", () => {
       { provider: "minimax", transport: "chat-completions" },
       { model: "MiniMax-M2.7", systemPrompt: "Return JSON.", userContent: "{}", maxOutputTokens: 1500, schema: SCHEMA }
     );
-    expect(body.max_completion_tokens).toBe(5500);
+    expect(body.max_completion_tokens).toBe(9_500);
     expect(body.temperature).toBe(1);
     expect(body.reasoning_split).toBe(true);
     expect(body.response_format).toBeUndefined();

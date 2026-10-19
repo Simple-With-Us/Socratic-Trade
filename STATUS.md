@@ -7139,3 +7139,43 @@ reported UI carriers, `history.ts` provider-error text, and `/api/policy` persis
 `rotationPin` as follow-ups outside their file ownership.
 
 Rollout: `docs/rollouts/2026-09-27-review-ranks-4-6-7-9.md`.
+
+## 2026-10-19 — Green Team reasoning budget widened; production APNs push restored
+
+**Two separate problems, both closed in one session.**
+
+**APNs push (production, no code change).** All three device tokens were failing with
+`403 InvalidProviderToken`. The owner observed that "some app is using those credentials, more than 1
+probably", which was the thread to pull: the Apple keys are shared across HogHunter, Clutch,
+Congress.Trade, BotFleet and Socratic-Trade. Matching the stored private key by SHA-256 against the
+local `.p8` files showed `APNS_P8` was Socratic-Trade's **old** key
+(`ST_AuthKey_SYV2VT3PQ6.p8`), which pairs with a different Key ID. `APNS_TEAM_ID` (`CC8UTF7ATG`) was
+already correct. Rewrote `APNS_P8` + `APNS_PRIVATE_KEY_B64` with `AuthKey_A3R6Z489GA.p8`, confirmed
+`APNS_KEY_ID=A3R6Z489GA` and `APNS_BUNDLE_ID=com.socratictrade.ios`, verified against **both** APNs
+endpoints with a fake device token and fake topic (so nothing is ever delivered), and restarted the
+production container. Credential-level auth now succeeds.  A delivered push is not yet confirmed —
+that needs the next natural notification or a test from the app's own UI.
+
+**Green Team LLM (code change).** Sandbox had a 5-run failure streak, all in the Green proposer.
+Owner said trace before changing anything, so the trace ran through the app's own request path via
+`scripts/benchmark-llm-models.ts`. Result: minimax-m3 at 57.2s and 72.0s returning valid proposals
+(4,339 and 5,961 completion tokens), and `--effort none` at 90.9s returning **unparseable** output.
+Bounding reasoning is therefore harmful, not merely insufficient. Both production errors
+(`timed out after 150s`, `Empty response returned from LLM API`) are one mechanism: unbounded
+reasoning length against a fixed 8,000-token cap and a fixed 150s wall. Changed
+`src/lib/llm-request.ts` to reserve a dedicated, env-tunable 8,000-token reasoning headroom for the
+`minimax-*` / `muse-*` families (was `REASONING_TOKEN_BUDGET.medium` = 4,000, giving the Green proposer
+a 12,000-token completion cap) and raised the thinking-timeout default 150s → 360s. Also raised the
+truncation retry ceiling in `src/lib/strategy.ts` from a hardcoded `Math.min(wireOutputCap*2, 16_000)`
+to an env-tunable `STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP` default 24,000 — **the full suite caught an
+intermediate pass that had left this ceiling BELOW the base cap, silently disabling the retry net for the
+calls it protects**. Final shape is one measurement held by an invariant test: base 12,000 < retry
+ceiling 24,000 < wall 360s (24,000 × ~13ms ≈ 312s). Muse measured clean at both caps and was never the
+token problem; its production failure was a Code-CLI broker reachability error.
+
+Verified in the lane: `tsc --noEmit` clean (exit 0), `npm run lint` 0 errors (870 pre-existing
+warnings), `test/llm-request.test.ts` + `test/persistence-notification.test.ts` 55/55, and the 8-file
+bounds batch 169/169. Four new tests, and 2 pre-existing tests that had encoded the old starved values
+(`1500 + 4000` headroom, and the literal `timed out after 150s` message) corrected.
+
+Rollout: `docs/rollouts/2026-10-19-minimax-muse-reasoning-budget.md`.

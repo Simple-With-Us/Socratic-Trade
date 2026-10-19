@@ -14,7 +14,7 @@
 #      lands back in an older marketing train.
 #
 # Everything runs offline against scratch state:
-#   HOME                -> scratch (so ~/.secrets is absent and App Store
+#   HOME                -> scratch (so no real home files exist and App Store
 #                          Connect is never contacted; also makes it impossible
 #                          for a test to touch the real ~/.cache/ios-fleet)
 #   IOS_FLEET_STATE_DIR -> scratch sequence + last-ship files
@@ -56,6 +56,12 @@ echo "FAKE xcodebuild called with: $*" >&2
 exit 99
 FAKE
 chmod +x "${FAKE_BIN}/xcodebuild"
+
+# A stub fleet-secrets that always reports "absent", so ASC credentials stay unset and no test
+# can reach the real Infisical (the script falls back to fleet-secrets on PATH).
+printf '#!/usr/bin/env bash\nexit 3\n' >"${FAKE_BIN}/fleet-secrets"
+chmod +x "${FAKE_BIN}/fleet-secrets"
+export FLEET_SECRETS="${FAKE_BIN}/fleet-secrets"
 
 # A tiny clean git repo so repo_head_sha() has a real, stable SHA.
 git -C "$REPO" init -q 2>/dev/null || git -C "$REPO" init >/dev/null

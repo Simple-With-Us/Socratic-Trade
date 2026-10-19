@@ -697,7 +697,7 @@ paternalism that keeps creeping back in from every agent (Claude, Codex, others)
   - If a key is missing, wrong, exhausted, or rejected: STOP and tell the owner
     what you observed and which key you believe is in play (identify it by its
     masked first-8/last-4 preview — see below — never by pasting a value). The
-    owner supplies keys via the `chmod 600` handoff in `/Users/jay/.secrets/`.
+    owner supplies keys through Infisical Fleet-OPS (read with `fleet-secrets get`;  nothing reads `~/.secrets`, AFC-359).
     Waiting is always cheaper than a second key.
   - To see WHICH key is serving without ever revealing one: the Connections page
     (`/console/connections#api-keys`) shows the masked preview of the key that

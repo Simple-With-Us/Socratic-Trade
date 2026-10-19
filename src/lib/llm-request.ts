@@ -30,6 +30,51 @@ function reasoningTokenHeadroom(effort: LlmReasoningEffort | undefined): number 
   return REASONING_TOKEN_BUDGET[effort];
 }
 
+/**
+ * Hidden-reasoning headroom reserved for the always-reasoning MiniMax/Muse families.
+ *
+ * These providers expose no configurable reasoning capability — they reason on every call and the
+ * caller cannot turn it down — so this is the ONLY budget that protects the visible JSON answer
+ * from being spent on reasoning. It used to be pinned to `REASONING_TOKEN_BUDGET.medium` (4000),
+ * which is the wrong tool twice over: it is an OpenAI effort-ladder value applied to a family with
+ * no ladder, and 4000 is not enough once reasoning scales with a production-sized prompt.
+ *
+ * Traced 2026-10-19 through the app's own request path (scripts/benchmark-llm-models.ts, Green
+ * role, 6745-token prompt): minimax-m3 spent 4339 then 5961 completion tokens and returned valid
+ * schema-valid proposals at 57.2s and 72.0s. Sandboxed runs with richer context pushed completions
+ * past the 4000-token cap: the model burned the cap on reasoning and emitted nothing
+ * ("Empty response returned from LLM API"), or crossed the wall clock first
+ * ("Green Team proposal timed out after 150s"). Both are the same mechanism.
+ *
+ * Lowering or removing reasoning does NOT fix it — measured `--effort none` was slower (90.9s) and
+ * returned unparseable output. The budget has to go UP, not down.
+ *
+ * Env-tunable via MINIMAX_MUSE_REASONING_HEADROOM; default 8000, giving the Green proposer a
+ * 4000 + 8000 = 12000-token completion cap — roughly twice the largest completion traced (5961).
+ *
+ * The headroom is deliberately NOT sized so that the bounded truncation retry in strategy.ts is
+ * stranded: that retry escalates to min(cap*2, STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP), so the
+ * base cap must stay BELOW the retry ceiling or the escalation silently stops firing.
+ */
+/**
+ * Read a positive numeric env override, falling back to `fallback` when the value is unset,
+ * unparseable, zero, negative or non-finite.
+ *
+ * `Number(env) || fallback` is NOT equivalent, and the difference is a silent failure: `Number("-1")`
+ * is `-1`, which is truthy, so a negative override passes straight through instead of falling back.
+ * For the truncation-retry ceiling that drops it below the base cap and disables the safety net
+ * entirely — worse than ignoring the override. Both env knobs that size the Green Team budget use
+ * this, so they can never disagree about how to parse operator input.
+ */
+export function positiveEnvNumber(name: string, fallback: number): number {
+  const configured = Number(process.env[name]);
+  return Number.isFinite(configured) && configured > 0 ? configured : fallback;
+}
+
+function minimaxMuseReasoningHeadroom(): number {
+  return positiveEnvNumber("MINIMAX_MUSE_REASONING_HEADROOM", 8_000);
+}
+
 export const LLM_REQUEST_DEFAULTS = {
   deterministicTemperature: 0,
   maxOutputTokens: 1500,
@@ -123,14 +168,24 @@ export async function llmFetch(url: string, init: RequestInit = {}): Promise<Res
  * Trade-off: a longer bound holds the per-user run lock longer (see LLM_TIMEOUT_MS), so the widening
  * applies when the model is in a thinking mode, including MiniMax/Muse families whose reasoning is
  * always enabled by the provider.  A non-reasoning or thinking-off model keeps the base 60s bound.
+ *
+ * The thinking bound was raised 150s -> 360s on 2026-10-19. Traced through the app's own request
+ * path, MiniMax/Muse completions run ~13ms/token, so the bounded truncation retry at a 24000-token
+ * cap needs ~312s of generation. At the old 150s bound the wall fired while the model was still
+ * making progress and the reply was discarded. This safety net must stay wider than the LARGEST
+ * cap any single attempt can reach, or it severs exactly the calls it exists to protect. It is NOT
+ * the fix for a starved answer (that is the reasoning headroom above) and it does not stop an empty
+ * response on its own.
  */
+const REASONING_LLM_TIMEOUT_DEFAULT_MS = 360_000;
+
 export function strategyLlmTimeoutMs(model: string | undefined, effort: LlmReasoningEffort | undefined): number {
   const base = Number(process.env.STRATEGY_LLM_TIMEOUT_MS) || LLM_TIMEOUT_MS;
   const normalized = normalizeReasoningEffortForModel(model, effort);
   const alwaysReasons = /^(minimax|muse)-/i.test(lowerModel(model));
   const thinking = alwaysReasons || (!!normalized && normalized !== "none");
   if (!thinking) return base;
-  return Math.max(base, Number(process.env.STRATEGY_LLM_REASONING_TIMEOUT_MS) || 150_000);
+  return Math.max(base, Number(process.env.STRATEGY_LLM_REASONING_TIMEOUT_MS) || REASONING_LLM_TIMEOUT_DEFAULT_MS);
 }
 
 /** The eventual result of an LLM call, reported once the request finally settles (fast OR late). */
@@ -353,7 +408,7 @@ const ANTHROPIC_MIN_MAX_TOKENS = 4096;
 export function resolveLlmWireOutputCap(transport: LlmTransport, bounds: RequestBounds): number {
   if (transport === "anthropic-messages") return Math.max(bounds.maxOutputTokens, ANTHROPIC_MIN_MAX_TOKENS);
   if (transport === "chat-completions" && /^(minimax|muse)-/i.test(lowerModel(bounds.model))) {
-    return bounds.maxOutputTokens + REASONING_TOKEN_BUDGET.medium;
+    return bounds.maxOutputTokens + minimaxMuseReasoningHeadroom();
   }
   const capability = reasoningCapabilityForModel(bounds.model);
   const normalizedEffort = normalizeReasoningEffortForModel(bounds.model, bounds.reasoningEffort);

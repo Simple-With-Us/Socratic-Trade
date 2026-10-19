@@ -9,7 +9,8 @@
 #
 # WHAT IT DOES
 #   1. GET https://usage.jays.services/api/subscriptions  (Bearer USAGE_READ_TOKEN
-#      from ~/.secrets/usage-monitor.env, falling back to USAGE_INGEST_TOKEN).
+#      from env, else Infisical /usage-monitor via fleet-secrets, falling back to
+#      USAGE_INGEST_TOKEN).
 #      Prod UM denies ingest-token reads (Wave C). Bare JSON array; each element has
 #      provider{id,name,displayName}, name, status, knobEnv (obj|null),
 #      freeTierKnobEnv (obj|null).
@@ -32,15 +33,16 @@
 #   scripts/sync-provider-knobs.sh --apply    # write changed keys to Infisical + post to #agent-sync
 #
 # SAFETY
-#   - Monitor unreachable / empty payload -> exit 0, no writes, no Zulip post (launchd-safe).
+#   - No token available -> exit 1 (fail loudly).  Monitor unreachable / empty payload -> exit 0, no writes, no Zulip post (launchd-safe).
 #   - Dry run never writes and never posts to #agent-sync.
 #   - --apply refuses to write if it could not first read current Infisical state
 #     (never writes blind).
 #
 # ENV OVERRIDES (defaults in [brackets])
 #   USAGE_API            [https://usage.jays.services/api/subscriptions]
-#   USAGE_MONITOR_ENV    [~/.secrets/usage-monitor.env]   USAGE_READ_TOKEN (preferred)
-#                                                     or USAGE_INGEST_TOKEN (legacy)
+#   FLEET_SECRETS        [~/.local/bin/fleet-secrets]   reads USAGE_READ_TOKEN (preferred)
+#                                                     or USAGE_INGEST_TOKEN (legacy) from
+#                                                     Infisical /usage-monitor; env wins
 #   KNOB_SYNC_SSH_KEY    [~/.ssh/hetzner]
 #   KNOB_SYNC_SSH_HOST   [coolify]   (see private fleet-ops:ATTACK-MAP.md)
 #   KNOB_SYNC_BOX_ENV    [/data/coolify/applications/${COOLIFY_APP_UUID:-socratic-trade}/.env]
@@ -48,7 +50,7 @@
 set -u
 
 USAGE_API="${USAGE_API:-https://usage.jays.services/api/subscriptions}"
-USAGE_MONITOR_ENV="${USAGE_MONITOR_ENV:-$HOME/.secrets/usage-monitor.env}"
+FLEET_SECRETS_BIN="${FLEET_SECRETS:-$HOME/.local/bin/fleet-secrets}"
 SSH_KEY="${KNOB_SYNC_SSH_KEY:-$HOME/.ssh/hetzner}"
 SSH_HOST="${KNOB_SYNC_SSH_HOST:-coolify}"
 COOLIFY_APP_UUID="${COOLIFY_APP_UUID:-socratic-trade}"
@@ -78,27 +80,26 @@ trap cleanup EXIT INT TERM
 
 # -- 1) read the usage-monitor token (never echoed) ----------------------------
 # Prod GET /api/subscriptions wants USAGE_READ_TOKEN. Ingest is write-only
-# there (Wave C) and 401s if used as a read bearer.
+# there (Wave C) and 401s if used as a read bearer.  Env first, then Infisical
+# /usage-monitor through fleet-secrets (AFC-359:  no handoff file is read).
 USAGE_TOKEN=""
 _load_tok() {
   _name="$1"
-  _line="$(grep -E "^(export )?${_name}=" "$USAGE_MONITOR_ENV" 2>/dev/null | tail -1 || true)"
-  _val="${_line#*${_name}=}"
-  case "$_val" in
-    \"*\") _val="${_val#\"}"; _val="${_val%\"}" ;;
-    \'*\') _val="${_val#\'}"; _val="${_val%\'}" ;;
-  esac
+  eval "_val=\"\${$_name:-}\""
+  _fs="$FLEET_SECRETS_BIN"
+  [ -x "$_fs" ] || _fs="$(command -v fleet-secrets 2>/dev/null || true)"
+  if [ -z "$_val" ] && [ -n "$_fs" ] && [ -x "$_fs" ]; then
+    _val="$("$_fs" get "$_name" --path /usage-monitor 2>/dev/null </dev/null || true)"
+  fi
   printf '%s' "$_val"
 }
-if [ -f "$USAGE_MONITOR_ENV" ]; then
-  USAGE_TOKEN="$(_load_tok USAGE_READ_TOKEN)"
-  if [ -z "$USAGE_TOKEN" ]; then
-    USAGE_TOKEN="$(_load_tok USAGE_INGEST_TOKEN)"
-  fi
+USAGE_TOKEN="$(_load_tok USAGE_READ_TOKEN)"
+if [ -z "$USAGE_TOKEN" ]; then
+  USAGE_TOKEN="$(_load_tok USAGE_INGEST_TOKEN)"
 fi
 if [ -z "$USAGE_TOKEN" ]; then
-  log "no USAGE_READ_TOKEN or USAGE_INGEST_TOKEN in $USAGE_MONITOR_ENV - cannot reach the monitor; nothing to do."
-  exit 0
+  log "missing USAGE_READ_TOKEN / USAGE_INGEST_TOKEN: set it in env or add it to Infisical /usage-monitor (fleet-secrets get USAGE_READ_TOKEN --path /usage-monitor failed)."
+  exit 1
 fi
 
 # -- 2) fetch subscriptions (token via 0600 curl config, kept out of argv/ps) ---

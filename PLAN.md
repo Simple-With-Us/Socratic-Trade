@@ -2639,3 +2639,19 @@ This is MITIGATION.  The root cause is the non-convergent FTS mirror loop fixed 
 
 ## ST-4545 review follow-up, October 16
 Separate browser-safe reasoning exports from server transport; keep original llm-request exports compatible. Verify integrated API-key chips with fixture statuses and no live broker. Broker activation remains blocked on final empty tool inventory/cancel/renewal verification. No production changes or workflow approvals.
+
+## 2026-10-19 — [MM] Green Team reasoning budget + timeout (branch `minimax/green-team-reasoning-budget`)
+
+Not a scope change: a production-defect fix.  Sandbox's 5-run failure streak traced to unbounded
+reasoning length against a fixed 8,000-token completion cap and a fixed 150s wall clock, so the
+`minimax-*` / `muse-*` families now reserve a dedicated env-tunable 8,000-token reasoning headroom
+(was `REASONING_TOKEN_BUDGET.medium` = 4,000, giving the Green proposer a 12,000-token cap) and the
+thinking-timeout default moves 150s → 360s.  The truncation retry ceiling in `strategy.ts` also moves
+from a hardcoded `Math.min(wireOutputCap*2, 16_000)` to an env-tunable
+`STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP` = 24,000; the full suite caught an intermediate pass that had
+left that ceiling below the base cap, which silently disabled the retry net.  All three bounds are now
+one measurement with an invariant test: base 12,000 < retry ceiling 24,000 < wall 360s.
+No model change, no trading-logic change.  Measured `--effort none` was slower and unparseable, so
+the budget was widened rather than bounded.  Separate, code-free: production APNs push was
+root-caused to a stale `APNS_P8` paired against the wrong Key ID, fixed in Infisical and activated by
+a container restart.

@@ -32,7 +32,7 @@ import { invalidateDashboardSnapshotCache } from "./dashboard-snapshot-cache";
 // No secrets file is loaded here.  Dev reads `process.env` only;  run `npm run dev:secrets`
 // (the Infisical runner) to get keys, which resolves the bootstrap machine identity from
 // `process.env` or the macOS login Keychain (service `socratic-trade-bootstrap`) in
-// scripts/infisical-bootstrap-env.mjs.  `~/.secrets/global-api-keys` is retired and must not
+// scripts/infisical-bootstrap-env.mjs.  The retired flat key file must not
 // be read (owner, 2026-10-18, OPS-818).
 
 const IS_TEST_ENV = process.env.NODE_ENV === "test" || !!process.env.VITEST;
