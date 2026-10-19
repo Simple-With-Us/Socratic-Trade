@@ -72,6 +72,9 @@ export function FrameworkViewer() {
           cache: "default"
         });
         if (!res.ok) throw new Error(`status ${res.status}`);
+        // The content module already stores each sentence gap as NBSP + space,
+        // the one construct that survives HTML's whitespace collapse, so the
+        // rendered copy needs no conversion here.
         const data = (await res.json()) as { content: FrameworkContent };
         cachedFrameworkContent = data.content;
         if (!cancelled) setState({ phase: "ready", content: data.content });
@@ -97,7 +100,7 @@ export function FrameworkViewer() {
   if (state.phase === "unavailable") {
     return (
       <div className="py-24 text-center text-sm text-muted">
-        This page is available to human readers in a standard web browser.  If you are seeing this
+        This page is available to human readers in a standard web browser.  If you are seeing this
         message in one, please reload the page.
       </div>
     );

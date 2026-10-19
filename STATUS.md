@@ -7229,11 +7229,32 @@ module, UA gate on the page and on the content API, `noindex`/`noai`/`TDMRep`, s
 and the edge WAF rule.  Linking it from the Welcome page does not require un-gating it, and
 `/welcome` remains the indexable SEO surface.
 
-**Verification.**  In the lane: `npx tsc --noEmit` clean (exit 0); `npm run lint` 0 errors (870
-pre-existing grandfathered warnings); `npx vitest run` full suite green; `npm run build` green.  New
-`test/public-site-routing.test.ts` (13 tests) covers the marketing-host routing, the alt-domain
-forward and both its exemptions, subdomain isolation, the shared-shell guard, and the header-geometry
-invariant.
+**Verification.**  In the lane: `npx tsc --noEmit` clean (exit 0); `npx eslint` 0 errors on every
+changed file (1 grandfathered `react-hooks/set-state-in-effect` warning); the six affected vitest
+files green (60 tests).  The **full** suite and the production build were not run locally — the lane
+lives on an external volume and the host's load (57–267) made a local full run impractical, so
+neither is claimed.  The hosted `verify-hosted` job is the gate of record.  New
+`test/public-site-routing.test.ts` (18 tests) covers the marketing-host routing, the alt-domain
+forward and both its exemptions, subdomain isolation, the shared-shell guard, the header-geometry
+invariant, and the `LANDING_PAGE_ENABLED` off-switch.  New `test/public-sentence-gap.test.ts`
+(4 tests) renders the Welcome page to static markup and proves the sentence gap survives the
+browser's whitespace collapse.
+
+**Two review findings, both accepted as real and both fixed.**
+
+1. **The apex redirect 404'd with the marketing pages off.**  The marketing-host root redirect to
+   `/welcome` was unconditional, but `LANDING_PAGE_ENABLED=off` is the documented "private deploy /
+   go-public off-switch" — with it set, `/welcome` 404s, so the apex became a dead end instead of
+   the login page.  The middleware and `app/page.tsx` now consult `landingPageEnabled()` before
+   redirecting, and the off-switch is covered by tests.  `/framework` inherited the same gate,
+   because it absorbed `/how-it-works`, which was gated.
+2. **The public copy's sentence gap collapsed.**  The new public copy used two literal ASCII
+   spaces, which HTML collapses to one — and the repo's own copy-rule lint fails on exactly that
+   construct, so the first hosted `verify-hosted` run failed with 22 violations.  Fixed with the
+   repo's established idiom: the content module stores NBSP + space, and the Welcome page uses a
+   `SENTENCE_GAP` marker with no space in front of it (a space before the marker survives JSX's
+   text-node trimming and becomes an extra space in the rendered gap).  A render-level test now
+   proves the gap in the server-rendered markup.
 
 **Next.**  Merge to `main` (auto-deploys; weekday RTH latch applies — this touches runtime paths, so
 the image build is a real deploy).  Swift compilation is CI-only (`ios-build`); the only Swift

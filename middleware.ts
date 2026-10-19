@@ -38,6 +38,7 @@ import { checkSameOrigin } from "./src/lib/auth/csrf";
 import { isAdminEmail } from "./src/lib/auth/admin-emails";
 import { getSessionIdentity } from "./src/lib/auth/session-edge";
 import { isLiveBootstrap } from "./src/lib/auth-secret-guard";
+import { landingPageEnabled } from "./src/lib/landing-page";
 
 const PRIMARY_EMAIL = (process.env.PRIMARY_USER_EMAIL || "mail@jays.services").trim().toLowerCase();
 // The primary operator's aliases — additional addresses that map to the same primary account. Kept in sync
@@ -524,7 +525,10 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   // fail-closed /login redirect below, so an anonymous visitor to the canonical
   // domain sees the landing page instead of a login wall — while the operator's
   // own bookmark to the apex domain still opens the console.
-  if (MARKETING_HOSTS.has(host) && pathname === "/") {
+  // With the marketing pages switched off (/welcome 404s), an anonymous visitor
+  // must fall through to the fail-closed /login redirect below rather than be
+  // sent to a page that does not exist.
+  if (MARKETING_HOSTS.has(host) && pathname === "/" && (trustedEmail || landingPageEnabled())) {
     return withSecurityHeaders(
       NextResponse.redirect(new URL(trustedEmail ? "/console" : "/welcome", req.url))
     );

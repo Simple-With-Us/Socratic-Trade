@@ -96,14 +96,65 @@ lenses became `outcomeLenses`.
 
 ### Tests
 
-- `test/public-site-routing.test.ts` (new, 13 tests) — marketing-host routing, the alt-domain
+- `test/public-site-routing.test.ts` (new, 18 tests) — marketing-host routing, the alt-domain
   forward and its two exemptions, subdomain isolation, a source-level guard that all four public
   pages render through `PublicShell`, that the Welcome button says "Framework" and links
-  `/framework`, and that the shared header's row height comes from the shared geometry constants.
+  `/framework`, that the shared header's row height comes from the shared geometry constants, and
+  the `LANDING_PAGE_ENABLED` off-switch (see the review findings below).
+- `test/public-sentence-gap.test.ts` (new, 4 tests) — renders the Welcome page to static markup and
+  proves the sentence gap is a real NBSP + space that survives the browser's whitespace collapse,
+  and that the framework content stores its gaps the same way.
 - `test/how-it-works-redirect.test.ts` (updated) — now expects the 308 to `/framework`.
 - `test/candle-ticker-raf-resilience.test.ts` — import repointed to `../app/ui/brand/candle-ticker`.
 - `ios/SocraticTrade/CandleWordmarkView.swift`, `ios/SocraticTradeTests/CandleWordmarkTests.swift` —
   comments repointed at the new ticker path. No Swift behavior change.
+
+## Review Findings Accepted And Fixed
+
+Two findings came back from the automated reviews on PR #4889.  Both were real, and both are fixed.
+
+### 1. The apex redirect 404'd with the marketing pages off
+
+The marketing-host root redirect to `/welcome` was unconditional.  `LANDING_PAGE_ENABLED=off` is the
+documented "private deploy / go-public off-switch" (`src/lib/landing-page.ts`), and with it set
+`/welcome` 404s — so the apex became a dead end instead of the login page the old behavior gave a
+private deploy.
+
+The middleware and `app/page.tsx` now consult `landingPageEnabled()` before redirecting, so the
+off-switch keeps working: anonymous visitor → `/login` (not a 404 page that does not exist),
+signed-in operator → `/console` either way.  `/framework` inherited the same gate, because it
+absorbed `/how-it-works`, which was already gated; without that, `LANDING_PAGE_ENABLED=off` would
+have taken `/welcome` down and left the page that replaced its content wide open.  Production has the
+variable unset, so no live behavior changes.  `docs/FEATURE-ENABLEMENT-BACKLOG.md` now lists
+`/framework` among the gated pages.
+
+### 2. The public copy's sentence gap collapsed
+
+The new public copy separated sentences with two literal ASCII spaces.  HTML collapses runs of plain
+spaces to one, so the rendered gap was a single space — and the repo's own copy-rule lint
+(`test/copy-rules-lint.test.ts`, over `scripts/copy-rules-lint.mjs`) fails on exactly that
+construct.  The first hosted `verify-hosted` run failed with 22 violations: 18 in
+`app/framework/content.ts`, 1 in `app/framework/framework-viewer.tsx`, 3 in `app/welcome/page.tsx`.
+
+The fix uses the repo's established idiom rather than a new one:
+
+- **Content data** stores NBSP + space literally (the content module already did this for 44
+  pre-existing strings), so it needs no conversion at the render boundary.  The sanctioned fixer
+  (`node scripts/copy-rules-lint.mjs --fix --dir <files>`) applied the 22 changes.
+- **JSX text** uses a `SENTENCE_GAP` marker, as the console does.  One subtlety cost a render test to
+  pin down: a space *in front of* the marker survives JSX's text-node trimming and becomes an
+  extra space in the rendered gap, so the marker carries no space before it
+  (`loss.{SENTENCE_GAP}Simulated`, not `loss. {SENTENCE_GAP}Simulated`).
+
+An earlier attempt at this — a `public-copy.ts` module with a runtime `gap()` / `gapDeep()`
+converter — was **rejected and removed**.  It was a no-op on the legal pages (their paragraph strings
+already carried NBSP), it was redundant on the framework content once the source carries the gap,
+and it was a footgun: the repo's lint exists precisely to stop `app/**` from holding two-ASCII-space
+gaps, and a converter invites the next author to write exactly that.
+
+`test/public-sentence-gap.test.ts` now renders the Welcome page to static markup and asserts the
+markup contains a real U+00A0 followed by a space — and that the gap is still there after the
+browser's whitespace collapse.
 
 ## Decisions & Trade-offs
 
@@ -132,29 +183,50 @@ lenses became `outcomeLenses`.
   sentence case.
 - **The alt-domain forward is app-level.** DNS already CNAMEs `socratic.trade` → `socratictrade.com`,
   so both hosts reach the same Next.js origin and the redirect has to happen in the app.
+- **The marketing pages keep the `LANDING_PAGE_ENABLED` off-switch.** The apex redirect and
+  `/framework` both consult `landingPageEnabled()` rather than assuming the pages are public.  A
+  redirect to a page that would 404 is worse than the old behavior, which was `/login` on a private
+  deploy.  The switch stays honest: it takes the public pages down together.
+- **The sentence gap uses the repo's own idiom, not a new one.** NBSP + space in content data, a
+  `SENTENCE_GAP` marker in JSX.  A runtime converter was tried and removed — see Review Findings.
 
 ## Verification State
 
-All four commands run in the lane (`~/apps/lanes/Socratic-Trade/minimax-public-framework-pages`,
-branch `minimax/public-framework-pages`, base `origin/main` @ `92b123dfe`):
+In the lane (`~/apps/lanes/Socratic-Trade/minimax-public-framework-pages`, branch
+`minimax/st-4565-public-framework-pages`, base `origin/main` @ `92b123dfe`):
 
 - `npx tsc --noEmit` — clean, exit 0.
-- `npm run lint` — 0 errors (870 pre-existing warnings, grandfathered by `eslint.config.mjs`).
-- `npx vitest run` — full suite green.
-- `npm run build` — green.
+- `npx eslint <changed files>` — 0 errors (1 grandfathered `react-hooks/set-state-in-effect`
+  warning; the repo pins the whole rule to "warn" in `eslint.config.mjs`).
+- `npx vitest run` over the six affected files — 60 tests green:
+  `public-site-routing` (18), `public-sentence-gap` (4), `copy-rules-lint` (17),
+  `framework-page` (9), `how-it-works-redirect`, `candle-ticker-raf-resilience`.
+- `node scripts/copy-rules-lint.mjs` — repo sweep: 46 sentence-gap violations, all in the
+  peer-locked files (the baseline the lint test caps at), **0** in anything this change touched.
 
-One real defect was caught by the local gate and fixed before landing: parameterizing the intro
-canvas put the per-variant state behind a render-scope `const state = VARIANT_STATE[variant]`, and
-the effect then mutated it — which the React Compiler rejects as an **error** ("Cannot modify local
-variables after render completes"). The console's original module-level `let introDone` / `let
+**The full suite and the production build were not run locally, and are not claimed here.** The
+lane lives on an external volume and the host's load (57–267) made a local full run impractical.
+The hosted `verify-hosted` job is the gate of record.
+
+Its first run **failed**, on the copy-rule lint — 22 sentence-gap violations, described under
+Review Findings above.  Fixed; the re-run is the gate of record.  Every other job on that run was
+green: `classify`, `gitleaks`, `check-pin`, `autofix`, `verify-ios / xcodebuild (unsigned)`,
+Seer Code Review, and Kody Code Review.
+
+One real defect was caught by the local gate and fixed before the first push: parameterizing the
+intro canvas put the per-variant state behind a render-scope `const state = VARIANT_STATE[variant]`,
+and the effect then mutated it — which the React Compiler rejects as an **error** ("Cannot modify
+local variables after render completes").  The console's original module-level `let introDone` / `let
 MODEL` bindings had never been subject to that rule. The fix routes every write through module-scope
 functions (`markIntroDone`, `setIntroModel`, `setIntroStart`, `setIntroCurHeader`) so the effect
 holds read-only access to the per-variant state.
 
 ## Next Steps & Blockers
 
-- Nothing blocking. Merging `main` auto-deploys (weekday RTH latch applies), and this change touches
-  runtime paths (`app/**`, `middleware.ts`), so the image build is a real deploy.
+- Nothing blocking.  The first hosted `verify-hosted` run failed on the copy-rule lint; that is
+  fixed and the re-run on the new head is the gate of record.
+- Merging `main` auto-deploys (weekday RTH latch applies), and this change touches runtime paths
+  (`app/**`, `middleware.ts`), so the image build is a real deploy.
 - Not verified locally, and not verifiable locally: Swift compilation. The only Swift changes are
   comments, and `ios-build` on the PR is the gate of record.
 - The WAF rule set (`2e28de6daa3b41afb03fcbd6b440a902`, blocking scraper/AI UAs on `/framework*` and

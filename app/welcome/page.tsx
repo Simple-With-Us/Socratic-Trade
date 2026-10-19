@@ -12,7 +12,7 @@ export const revalidate = 3600;
 export const metadata: Metadata = {
   title: { absolute: "Socratic Trade" },
   description:
-    "Socratic Trade brings market research, connected-account controls, and decision records into one workspace.  Not investment advice.",
+    "Socratic Trade brings market research, connected-account controls, and decision records into one workspace.  Not investment advice.",
   alternates: { canonical: "/welcome" },
   openGraph: {
     type: "website",
@@ -20,18 +20,24 @@ export const metadata: Metadata = {
     url: "/welcome",
     title: "Socratic Trade",
     description:
-      "Market research, configured trading workflows, and decision records for review.  Not investment advice."
+      "Market research, configured trading workflows, and decision records for review.  Not investment advice."
   },
   twitter: {
     card: "summary_large_image",
     title: "Socratic Trade",
-    description: "Market research and connected-account workflows with decision records for review.  Not investment advice."
+    description: "Market research and connected-account workflows with decision records for review.  Not investment advice."
   },
   robots:
     process.env.NEXT_PUBLIC_ALLOW_INDEXING === "true"
       ? { index: true, follow: true }
       : { index: false, follow: false, nocache: true }
 };
+
+// The rendered sentence gap: a non-breaking space plus a normal space. Two
+// literal ASCII spaces would collapse to one in the browser, so the gap has
+// to be this construct. It is used as a JSX expression, not inline text, so a
+// re-wrap cannot leave a stray space in front of it.
+const SENTENCE_GAP = "\u00A0 ";
 
 const ACCESS_HREF =
   "mailto:mail@jays.services?subject=Socratic%20Trade%20access";
@@ -131,7 +137,7 @@ export default function WelcomePage() {
             </h1>
             <p className="mx-auto max-w-2xl text-lg leading-relaxed text-muted">
               Socratic Trade brings research, proposals, and connected-account controls together.
-              {"  "}Review the available evidence and decision records, and choose the authority
+              {SENTENCE_GAP}Review the available evidence and decision records, and choose the authority
               you give the system.
             </p>
             <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
@@ -158,7 +164,7 @@ export default function WelcomePage() {
             </div>
             <p className="text-xs leading-relaxed text-faint">
               Data coverage and recorded detail depend on your sources, settings, and completed
-              runs. {"  "}Review the underlying records when evaluating a result.
+              runs.{SENTENCE_GAP}Review the underlying records when evaluating a result.
             </p>
           </section>
 
@@ -186,7 +192,7 @@ export default function WelcomePage() {
               <h2 className="text-xl font-semibold text-fg">What a Decision Trace Looks Like</h2>
               <p className="mx-auto max-w-2xl text-sm leading-relaxed text-muted">
                 An illustrative decision record showing supporting arguments, objections, and a
-                policy check. {"  "}Available detail varies by proposal and configuration.
+                policy check.{SENTENCE_GAP}Available detail varies by proposal and configuration.
               </p>
             </div>
             <DecisionTraceIllustration />
@@ -199,7 +205,7 @@ export default function WelcomePage() {
               The Framework page explains the whole system behind a decision: how a thesis is
               formed, how evidence is assembled, how a proposed trade is sized and challenged
               before it is placed, how the system records what it did, and how outcomes feed
-              back into the next run. {"  "}It also states the limits of the system plainly.
+              back into the next run.{SENTENCE_GAP}It also states the limits of the system plainly.
             </p>
             <a href="/framework" className={GHOST_LINK_SM}>
               Read the Framework
@@ -212,16 +218,16 @@ export default function WelcomePage() {
               <h2 className="text-base font-semibold text-fg">Important Disclosures</h2>
               <p className="text-sm leading-relaxed text-muted">
                 Socratic Trade is software for market research, autonomous reasoning, and trade
-                execution when connected to accounts you configure. {"  "}It is not investment
+                execution when connected to accounts you configure.{SENTENCE_GAP}It is not investment
                 advice, a broker-dealer, or a registered investment adviser.
               </p>
               <p className="text-sm leading-relaxed text-muted">
-                Trading and investing involve substantial risk of loss. {"  "}Simulated or
+                Trading and investing involve substantial risk of loss.{SENTENCE_GAP}Simulated or
                 hypothetical performance has inherent limitations and is not a guarantee of future
-                results. {"  "}Nothing here is a recommendation to buy or sell any security.
+                results.{SENTENCE_GAP}Nothing here is a recommendation to buy or sell any security.
               </p>
               <p className="text-sm leading-relaxed text-muted">
-                You are solely responsible for your own investment decisions. {"  "}Consult a
+                You are solely responsible for your own investment decisions.{SENTENCE_GAP}Consult a
                 licensed financial professional before trading.
               </p>
             </Card>

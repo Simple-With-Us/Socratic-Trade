@@ -1,5 +1,6 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { landingPageEnabled } from "@/lib/landing-page";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +20,9 @@ export default async function HomePage() {
   // Inert until ADMIN_HOST is set (e.g. "admin.socratictrade.com"). Auth still applies to /admin.
   const adminHost = process.env.ADMIN_HOST?.trim().toLowerCase();
   if (adminHost && host === adminHost) redirect("/admin");
-  if (MARKETING_HOSTS.has(host)) redirect("/welcome");
+  // Only send visitors to /welcome while the marketing pages are on.  With the
+  // landing page switched off, /welcome 404s, so an unconditional redirect would
+  // turn the apex into a dead end instead of the login page.
+  if (MARKETING_HOSTS.has(host) && landingPageEnabled()) redirect("/welcome");
   redirect("/console");
 }

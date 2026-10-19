@@ -95,6 +95,72 @@ describe("middleware — public marketing host routing", () => {
   });
 });
 
+describe("landing-page off-switch — the marketing pages honor LANDING_PAGE_ENABLED", () => {
+  /** Run `fn` with LANDING_PAGE_ENABLED forced to `value`, restoring the previous value. */
+  async function withLandingPage<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
+    const prev = process.env.LANDING_PAGE_ENABLED;
+    if (value === undefined) delete process.env.LANDING_PAGE_ENABLED;
+    else process.env.LANDING_PAGE_ENABLED = value;
+    try {
+      return await fn();
+    } finally {
+      if (prev === undefined) delete process.env.LANDING_PAGE_ENABLED;
+      else process.env.LANDING_PAGE_ENABLED = prev;
+    }
+  }
+
+  it("sends an anonymous visitor to /login, not to a /welcome that would 404", async () => {
+    // Regression guard: the apex redirect to /welcome used to be unconditional.
+    // With the marketing pages switched off, /welcome 404s, so that redirect
+    // turned the apex into a dead end instead of the login page.
+    await withAuthSecret("test-secret-for-public-routing", async () => {
+      await withLandingPage("off", async () => {
+        const req = createRequest("https://socratictrade.com/", "socratictrade.com");
+        const res = await middleware(req);
+        const location = res.headers.get("location") || "";
+        expect(location).toContain("/login");
+        expect(location).not.toContain("/welcome");
+      });
+    });
+  });
+
+  it("still sends a signed-in operator to /console with the pages switched off", async () => {
+    // The off-switch hides the marketing pages from visitors; it must not log
+    // the operator out of their own console.
+    await withAuthSecret(undefined, async () => {
+      await withLandingPage("off", async () => {
+        const req = createRequest("https://socratictrade.com/", "socratictrade.com");
+        const res = await middleware(req);
+        expect(res.headers.get("location")).toBe("https://socratictrade.com/console");
+      });
+    });
+  });
+
+  it("keeps sending an anonymous visitor to /welcome while the pages are on", async () => {
+    await withAuthSecret("test-secret-for-public-routing", async () => {
+      await withLandingPage(undefined, async () => {
+        const req = createRequest("https://socratictrade.com/", "socratictrade.com");
+        const res = await middleware(req);
+        expect(res.headers.get("location")).toBe("https://socratictrade.com/welcome");
+      });
+    });
+  });
+
+  it("the /framework page inherits the off-switch", async () => {
+    // /framework absorbed the retired /how-it-works page, which was gated. If
+    // the gate stayed behind, LANDING_PAGE_ENABLED=off would take /welcome down
+    // and leave the page that replaced its content wide open.
+    const src = readFileSync(join(REPO_ROOT, "app/framework/page.tsx"), "utf8");
+    expect(src).toContain("landingPageEnabled");
+    expect(src).toContain("notFound()");
+  });
+
+  it("the apex route consults the off-switch before redirecting to /welcome", async () => {
+    const src = readFileSync(join(REPO_ROOT, "app/page.tsx"), "utf8");
+    expect(src).toContain("landingPageEnabled");
+  });
+});
+
 describe("public site chrome — one shared shell for every public page", () => {
   const PUBLIC_PAGES = [
     "app/welcome/page.tsx",

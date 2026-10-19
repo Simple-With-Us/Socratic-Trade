@@ -62,37 +62,37 @@ export const FRAMEWORK_CONTENT: FrameworkContent = {
     {
       question: "What did the system believe?",
       answer:
-        "The thesis: a plain-language claim with an expected edge, a time horizon, a catalyst, and the level that would invalidate it.  The proposing model supplies the claim and its invalidation levels, and the decision record carries them forward from there."
+        "The thesis: a plain-language claim with an expected edge, a time horizon, a catalyst, and the level that would invalidate it.  The proposing model supplies the claim and its invalidation levels, and the decision record carries them forward from there."
     },
     {
       question: "Why did it believe it?",
       answer:
-        "The evidence bundle assembled before the proposal — market data, fundamentals, technicals, filings, alternative-data signals, and prior outcomes — together with the realized statistics the sizing math uses.  Every field records which source supplied it, so the reasoning can be checked against the same inputs the models saw."
+        "The evidence bundle assembled before the proposal — market data, fundamentals, technicals, filings, alternative-data signals, and prior outcomes — together with the realized statistics the sizing math uses.  Every field records which source supplied it, so the reasoning can be checked against the same inputs the models saw."
     },
     {
       question: "What did it remember?",
       answer:
-        "Episodic memory of closed trades, retrieved at decision time as advisory analogs, with opposite-outcome cases labeled as counterexamples rather than filtered out.  The account's own scorecards and the counterfactuals tracked for skipped candidates add to what it can recall."
+        "Episodic memory of closed trades, retrieved at decision time as advisory analogs, with opposite-outcome cases labeled as counterexamples rather than filtered out.  The account's own scorecards and the counterfactuals tracked for skipped candidates add to what it can recall."
     },
     {
       question: "What could prove it wrong?",
       answer:
-        "The invalidation levels attached to the thesis, the counterargument the Red Team puts in front of it, and the policy conditions that would have blocked the trade.  Dissent is down-only: it can shrink or stop a position, never enlarge one."
+        "The invalidation levels attached to the thesis, the counterargument the Red Team puts in front of it, and the policy conditions that would have blocked the trade.  Dissent is down-only: it can shrink or stop a position, never enlarge one."
     },
     {
       question: "What did it do?",
       answer:
-        "The action the pipeline took and the reason it was allowed — proposed, placed, filled, rejected, expired, or blocked — with the authority source and the policy checks that applied.  Under delegated authority the record still names the mandate that permitted the action."
+        "The action the pipeline took and the reason it was allowed — proposed, placed, filled, rejected, expired, or blocked — with the authority source and the policy checks that applied.  Under delegated authority the record still names the mandate that permitted the action."
     },
     {
       question: "What happened?",
       answer:
-        "The outcome, where it can be resolved: fill state, realized or unrealized result, and the gap between expected and actual movement.  Outcomes that cannot be resolved stay in the denominator and are disclosed rather than quietly dropped."
+        "The outcome, where it can be resolved: fill state, realized or unrealized result, and the gap between expected and actual movement.  Outcomes that cannot be resolved stay in the denominator and are disclosed rather than quietly dropped."
     },
     {
       question: "How should the framework improve?",
       answer:
-        "A proposed change to the prompt, retrieval, risk, sizing, universe, or rules, with an accept, reject, or rewrite status.  Changes have to earn their way through statistical gates, and every applied mutation is clamped, ledgered, and revertible."
+        "A proposed change to the prompt, retrieval, risk, sizing, universe, or rules, with an accept, reject, or rewrite status.  Changes have to earn their way through statistical gates, and every applied mutation is clamped, ledgered, and revertible."
     }
   ],
   plainLoop: [
@@ -109,12 +109,12 @@ export const FRAMEWORK_CONTENT: FrameworkContent = {
     {
       verb: "Decide",
       stage: "4 · Code Sizes the Trade / 6 · Policy Gate Decides",
-      body: "Choose buy, sell, hold, wait, resize, exit, or reject.  The decision records the authority source, the policy checks, and the exposure impact."
+      body: "Choose buy, sell, hold, wait, resize, exit, or reject.  The decision records the authority source, the policy checks, and the exposure impact."
     },
     {
       verb: "Act",
-      stage: "7 · Broker executes",
-      body: "When the authority you delegated allows it, the order is placed.  Proposed, placed, filled, rejected, expired, and blocked are recorded as separate states."
+      stage: "7 · Broker Executes",
+      body: "When the authority you delegated allows it, the order is placed.  Proposed, placed, filled, rejected, expired, and blocked are recorded as separate states."
     },
     {
       verb: "Explain",
@@ -163,7 +163,7 @@ export const FRAMEWORK_CONTENT: FrameworkContent = {
       body: "A deterministic policy engine evaluates the sized, reviewed proposal against configured rules: exposure, notional, and concentration caps; order-type, drift, and staleness checks; wash-sale and short-sale handling.  Only physical, broker, regulatory, and accounting impossibilities are hard blocks — everything else is an adjustable preference with a logged override path."
     },
     {
-      title: "7 · Broker executes",
+      title: "7 · Broker Executes",
       body: "Approved orders route through one guarded choke point into a broker-agnostic gateway.  Placement is crash-safe and idempotent: intent is persisted before the broker call, uncertain outcomes reconcile against broker truth, and protective stops rest at the broker so they survive app downtime.  Paper vs. live is purely a property of the connected account — there is no simulation mode."
     },
     {
@@ -251,7 +251,7 @@ export const FRAMEWORK_CONTENT: FrameworkContent = {
     }
   ],
   caseFileIntro:
-    "A decision record can carry the thesis, the available evidence, the account authority, the action status, and the outcome.  The fields below are the ones the interface is designed to show; coverage depends on the source data and on how far the workflow ran.",
+    "A decision record can carry the thesis, the available evidence, the account authority, the action status, and the outcome.  The fields below are the ones the interface is designed to show; coverage depends on the source data and on how far the workflow ran.",
   caseFile: [
     {
       name: "Thesis",
@@ -283,7 +283,7 @@ export const FRAMEWORK_CONTENT: FrameworkContent = {
     }
   ],
   authorityIntro:
-    "The interface separates confidence from permission: a strong thesis is not itself authority, and delegated scope is.  When the framework reads a selloff as a buying opportunity rather than a reason to retreat, the record has to say which mandate allowed it, what evidence justified it, and what condition would have stopped it.",
+    "The interface separates confidence from permission: a strong thesis is not itself authority, and delegated scope is.  When the framework reads a selloff as a buying opportunity rather than a reason to retreat, the record has to say which mandate allowed it, what evidence justified it, and what condition would have stopped it.",
   authority: [...HOW_IT_WORKS_AUTHORITY_ITEMS],
   flywheelNodes: [
     { lines: ["Decisions", "and fills"] },
@@ -319,7 +319,7 @@ export const FRAMEWORK_CONTENT: FrameworkContent = {
     }
   ],
   outcomeIntro:
-    "Outcome review connects recorded theses and actions with the outcomes that can be resolved, and with proposed framework changes.  These records can help you assess a workflow; they do not establish that a change will improve future trading results.  What each lens can show depends on your sources, on how many cycles have closed, and on what the workflow recorded.",
+    "Outcome review connects recorded theses and actions with the outcomes that can be resolved, and with proposed framework changes.  These records can help you assess a workflow; they do not establish that a change will improve future trading results.  What each lens can show depends on your sources, on how many cycles have closed, and on what the workflow recorded.",
   outcomeLenses: [
     {
       title: "Thesis Scorecards",
@@ -359,23 +359,23 @@ export const FRAMEWORK_CONTENT: FrameworkContent = {
     }
   ],
   resilienceIntro:
-    "Operational resilience is the part of the system that keeps a partial failure from turning into a bad trade.  It covers the health of external dependencies, the truthfulness of the alerts you rely on, and the budgets that limit model spend without ever limiting safety work.",
+    "Operational resilience is the part of the system that keeps a partial failure from turning into a bad trade.  It covers the health of external dependencies, the truthfulness of the alerts you rely on, and the budgets that limit model spend without ever limiting safety work.",
   resilience: [
     {
       title: "Per-Credential Circuit Breaking",
-      body: "Health, trips, alerts, and cooldowns are scoped to a service-and-key-source lane, so one dead key never takes down a sibling lane.  A tripped lane is skipped before the request goes out, which keeps a failure from reinforcing its own streak."
+      body: "Health, trips, alerts, and cooldowns are scoped to a service-and-key-source lane, so one dead key never takes down a sibling lane.  A tripped lane is skipped before the request goes out, which keeps a failure from reinforcing its own streak."
     },
     {
       title: "Monitoring Cannot Become The Outage",
-      body: "The observability code swallows its own errors.  Monitoring is never allowed to be the thing that fails while the thing it watches keeps running."
+      body: "The observability code swallows its own errors.  Monitoring is never allowed to be the thing that fails while the thing it watches keeps running."
     },
     {
       title: "Truthful Notifications",
-      body: "Dispatch across push, webhook, email, and SMS records a message as sent only when a channel actually delivered it.  An alert clears only on proof of resolution, and a broker-uncertain alert clears only when the broker's own state confirms what happened."
+      body: "Dispatch across push, webhook, email, and SMS records a message as sent only when a channel actually delivered it.  An alert clears only on proof of resolution, and a broker-uncertain alert clears only when the broker's own state confirms what happened."
     },
     {
       title: "Layered Model Budgeting",
-      body: "Per-user daily ceilings, a compare-and-swap reservation per run that closes concurrent-run races, and an operator monthly ceiling are enforced at a single choke point.  That choke point can only skip model work, never safety maintenance, and every call writes a usage-ledger row with cache-aware cost accounting."
+      body: "Per-user daily ceilings, a compare-and-swap reservation per run that closes concurrent-run races, and an operator monthly ceiling are enforced at a single choke point.  That choke point can only skip model work, never safety maintenance, and every call writes a usage-ledger row with cache-aware cost accounting."
     }
   ],
   invariantsIntro: "Invariants the framework enforces in code:",

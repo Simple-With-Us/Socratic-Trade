@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 import { isBlockedFrameworkClient } from "./ua-gate";
+import { landingPageEnabled } from "@/lib/landing-page";
 import { FrameworkViewer } from "./framework-viewer";
 import { PublicShell, PUBLIC_HEADER_ACTION_CLASS } from "../ui/public/public-shell";
 
@@ -34,6 +35,12 @@ export const metadata: Metadata = {
 const ACCESS_HREF = "mailto:mail@jays.services?subject=Socratic%20Trade%20access";
 
 export default async function FrameworkPage() {
+  // The public off-switch covers every marketing page.  This page absorbed
+  // /how-it-works (which was gated), so it inherits the gate — otherwise
+  // LANDING_PAGE_ENABLED=off would take /welcome down and leave the page that
+  // replaced its content wide open.
+  if (!landingPageEnabled()) notFound();
+
   const h = await headers();
   if (isBlockedFrameworkClient(h.get("user-agent"))) {
     notFound();

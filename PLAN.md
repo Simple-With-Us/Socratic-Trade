@@ -2656,7 +2656,7 @@ the budget was widened rather than bounded.  Separate, code-free: production APN
 root-caused to a stale `APNS_P8` paired against the wrong Key ID, fixed in Infisical and activated by
 a container restart.
 
-## 2026-10-19 — [MM] Public Framework pages (branch `minimax/public-framework-pages`)
+## 2026-10-19 — [MM] Public Framework pages (branch `minimax/st-4565-public-framework-pages`)
 
 Not a scope change: a public-surface change the owner asked for as one piece.  `/framework` is
 expanded (content 270 → 425 lines, viewer 240 → 369, with the seven decision questions, the
@@ -2691,6 +2691,11 @@ wordmark instead of beside it.  One gate failure caught and fixed: parameterizin
 put the per-variant state behind a render-scope local that the effect mutated, which the React
 Compiler rejects as an error — every write now goes through module-scope functions.
 
-Verified in the lane: `npx tsc --noEmit` clean, `npm run lint` 0 errors, `npx vitest run` full suite
-green, `npm run build` green.  Swift compilation is CI-only; the only Swift changes are comments.
+Verified in the lane: `npx tsc --noEmit` clean, `npx eslint` 0 errors on every changed file, and the
+six affected vitest files green (60 tests).  The full suite and the production build are CI's job —
+the lane lives on an external volume and the host's load made a local full run impractical, so
+neither is claimed here.  The first hosted `verify-hosted` run failed on the repo's own copy-rule
+lint: 22 sentence-gap violations in the new public copy, because two literal ASCII spaces collapse
+in the browser.  Fixed with the repo's own NBSP idiom and the sanctioned fixer, and the re-run is
+the gate of record.  Swift compilation is CI-only; the only Swift changes are comments.
 Rollout: `docs/rollouts/2026-10-19-public-framework-pages.md`.
