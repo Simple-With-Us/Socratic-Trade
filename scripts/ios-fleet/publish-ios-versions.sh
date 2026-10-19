@@ -15,7 +15,7 @@
 #
 # Writes:
 #   <this-dir>/ios-app-versions.json  (local cache; may be stale)
-#   https://github.com/jaywedgeworth22/ai-fleet-coordinator  (site/ios-versions.json)
+#   https://github.com/Simple-With-Us/AI-Fleet-Coordinator  (site/ios-versions.json)
 #
 # SAFETY: the vendored ios-app-versions.json in this repo is a stale snapshot
 # (2026-08-21).  Starting from that file and PUTting it would drop net.dealdex
@@ -28,7 +28,7 @@ set -euo pipefail
 
 FLEET_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOCAL_JSON="${FLEET_DIR}/ios-app-versions.json"
-REPO="jaywedgeworth22/ai-fleet-coordinator"
+REPO="Simple-With-Us/AI-Fleet-Coordinator"
 REMOTE_PATH="site/ios-versions.json"
 
 BUNDLE_ID=""
