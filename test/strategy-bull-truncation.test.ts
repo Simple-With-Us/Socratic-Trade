@@ -144,7 +144,7 @@ describe("MiniMax empty reasoning output", () => {
       if (href.includes("api.minimax.io")) {
         const body = JSON.parse(String(init?.body));
         // Post-mortem is not a Green Team generation.
-        if (!(body.max_completion_tokens >= 8000)) {
+        if (!(body.max_completion_tokens >= 12_000)) {
           return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: "{}" } }] }), { headers: { "content-type": "application/json" } });
         }
         caps.push(body.max_completion_tokens);
@@ -158,17 +158,17 @@ describe("MiniMax empty reasoning output", () => {
     return caps;
   }
 
-  it("retries once at 16000 and keeps the original raw length receipt after recovery", async () => {
+  it("retries once at the 24000 retry ceiling and keeps the original raw length receipt after recovery", async () => {
     const db = await setupMiniMax();
     const caps = mockMiniMax("recover");
     const { runStrategyOnce } = await import("../src/lib/strategy");
     const result = await runStrategyOnce();
-    expect(caps).toEqual([8000, 16000]);
+    expect(caps).toEqual([12_000, 24_000]);
     expect(result.status).toBe("completed");
     const bull = result.llmSteps?.find((s) => s.step === "bull");
     expect(bull?.responseAttempts).toEqual([
-      expect.objectContaining({ finishReason: "length", truncated: true, wireOutputCap: 8000, completionTokens: 8000 }),
-      expect.objectContaining({ finishReason: "stop", truncated: false, wireOutputCap: 16000, completionTokens: 100 })
+      expect.objectContaining({ finishReason: "length", truncated: true, wireOutputCap: 12_000, completionTokens: 12_000 }),
+      expect.objectContaining({ finishReason: "stop", truncated: false, wireOutputCap: 24_000, completionTokens: 100 })
     ]);
     const persisted = db.listAudit(5000).filter((e) => (e.payload as { runId?: string }).runId === result.runId && e.kind === "llm_step");
     expect(persisted.some((e) => (e.payload as { responseAttempts?: unknown[] }).responseAttempts?.length === 2)).toBe(true);
@@ -182,11 +182,11 @@ describe("MiniMax empty reasoning output", () => {
     const caps = mockMiniMax(outcome);
     const { runStrategyOnce } = await import("../src/lib/strategy");
     const result = await runStrategyOnce();
-    expect(caps).toEqual([8000, 16000]);
+    expect(caps).toEqual([12_000, 24_000]);
     expect(result.status).toBe("failed");
-    expect(result.summary).toMatch(/empty content after output truncation at the 16000-token cap/);
+    expect(result.summary).toMatch(/empty content after output truncation at the 24000-token cap/);
     expect(result.summary).not.toMatch(/Failover chain exhausted/);
-    expect(result.llmSteps?.find((s) => s.step === "bull")).toMatchObject({ truncated: true, wireOutputCap: 16000, completionTokens: 16000 });
+    expect(result.llmSteps?.find((s) => s.step === "bull")).toMatchObject({ truncated: true, wireOutputCap: 24_000, completionTokens: 24_000 });
     expect(result.llmSteps?.find((s) => s.step === "bull")?.responseAttempts).toHaveLength(2);
   }, 30_000);
 
@@ -195,7 +195,7 @@ describe("MiniMax empty reasoning output", () => {
     const caps = mockMiniMax("empty-not-at-cap");
     const { runStrategyOnce } = await import("../src/lib/strategy");
     const result = await runStrategyOnce();
-    expect(caps).toEqual([8000]);
+    expect(caps).toEqual([12_000]);
     expect(result.status).toBe("failed");
     expect(result.summary).toContain("Empty response returned from LLM API");
     expect(result.llmSteps?.find((s) => s.step === "bull")).toMatchObject({ finishReason: "stop", truncated: false });
@@ -217,11 +217,11 @@ describe("MiniMax empty reasoning output", () => {
     });
     const { runStrategyOnce } = await import("../src/lib/strategy");
     const result = await runStrategyOnce();
-    expect(caps).toEqual([8000, 16000]);
+    expect(caps).toEqual([12_000, 24_000]);
     expect(result.status).toBe("completed");
     const hops = db.listAudit(5000).filter((e) => (e.payload as { runId?: string }).runId === result.runId && e.kind === "strategy_llm_failover");
     expect(hops).toHaveLength(1);
-    expect(hops[0].payload).toMatchObject({ fromModel: "MiniMax-M3", fromProvider: "minimax", toModel: fallback.model, toProvider: fallback.provider, reason: "empty_truncated_response", truncated: true, wireOutputCap: 16000 });
+    expect(hops[0].payload).toMatchObject({ fromModel: "MiniMax-M3", fromProvider: "minimax", toModel: fallback.model, toProvider: fallback.provider, reason: "empty_truncated_response", truncated: true, wireOutputCap: 24_000 });
     const step = result.llmSteps?.find((s) => s.step === "bull");
     expect(step).toMatchObject({ status: "completed", provider: "gemini" });
     expect(step?.responseAttempts).toHaveLength(3);
