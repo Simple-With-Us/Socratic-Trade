@@ -790,9 +790,14 @@ else
   BUILD_NUM="${COMMIT_COUNT}"
   # Strictly-increasing guard for a re-ship of the same commit: ASC rejects a
   # repeated (version, build) pair, so never ship at or below the known floor.
+  #
+  # When the guard fires, MARKETING moves with BUILD_NUM.  The invariant is
+  # that the two always describe the same commit count, so leaving MARKETING
+  # at the raw count would record a version whose build does not match it.
   if [[ "$SEQ_FLOOR" -ge "$BUILD_NUM" ]]; then
     BUILD_NUM="$((SEQ_FLOOR + 1))"
-    log "build: commit count ${COMMIT_COUNT} already shipped; using ${BUILD_NUM} instead"
+    MARKETING="${MARKETING_PREFIX}.${BUILD_NUM}"
+    log "build: commit count ${COMMIT_COUNT} already shipped; shipping ${MARKETING} (${BUILD_NUM}) instead"
   fi
 fi
 
