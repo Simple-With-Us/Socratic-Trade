@@ -39,6 +39,7 @@ import { isAdminEmail } from "./src/lib/auth/admin-emails";
 import { getSessionIdentity } from "./src/lib/auth/session-edge";
 import { isLiveBootstrap } from "./src/lib/auth-secret-guard";
 import { landingPageEnabled } from "./src/lib/landing-page";
+import { CANONICAL_HOST, isAltDomainHost, isMarketingHost } from "./src/lib/marketing-hosts";
 
 const PRIMARY_EMAIL = (process.env.PRIMARY_USER_EMAIL || "mail@jays.services").trim().toLowerCase();
 // The primary operator's aliases — additional addresses that map to the same primary account. Kept in sync
@@ -52,23 +53,6 @@ const ALLOWED = (process.env.ALLOWED_EMAILS || "")
   .split(",")
   .map((e) => e.trim().toLowerCase())
   .filter(Boolean);
-
-/** The public marketing hosts. A visitor who opens the canonical domain lands on
- *  the /welcome product page, not on the operator console. 2026-10-19 (owner):
- *  "The /welcome page should be where viewers of the main domain go to
- *  initially." */
-const MARKETING_HOSTS = new Set([
-  "socratictrade.com",
-  "www.socratictrade.com",
-  "socratic.trade",
-  "www.socratic.trade"
-]);
-
-/** The alt domain forwards to the canonical one. socratic.trade's DNS already
- *  CNAMEs to socratictrade.com, so both hosts reach the same Next.js origin and
- *  the redirect has to happen here in the app. */
-const ALT_DOMAIN_HOSTS = new Set(["socratic.trade", "www.socratic.trade"]);
-const CANONICAL_HOST = "socratictrade.com";
 
 // Paths that never require a user identity.
 const PUBLIC_PREFIXES = [
@@ -341,20 +325,38 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
 
   // Alt domain -> canonical domain. This runs FIRST so socratic.trade/ lands on
   // https://socratictrade.com/welcome in a single hop instead of bouncing off
-  // the marketing redirect while still on the alt host.
+  // the marketing redirect while still on the alt host. Anonymous traffic is
+  // forwarded; a signed-in operator stays on the alt host (see below).
   // Exempt: /api/* (machine callers — webhooks, uptime probes — must not be
   // handed a 308 they may not follow) and the Apple associated-domain file
   // (the applinks + webcredentials entitlements on socratic.trade need it served
   // on THAT domain, not redirected away).
   if (
-    ALT_DOMAIN_HOSTS.has(host) &&
+    isAltDomainHost(host) &&
     !pathname.startsWith("/api/") &&
     pathname !== "/.well-known/apple-app-site-association"
   ) {
-    const target = new URL(req.url);
-    target.protocol = "https:";
-    target.host = CANONICAL_HOST;
-    return NextResponse.redirect(target, 308);
+    // A signed-in operator must not lose their session to the canonicalization
+    // hop. The Auth.js cookie is host-only by default (AUTH_COOKIE_DOMAIN is
+    // unset), and socratic.trade and socratictrade.com are unrelated domains, so
+    // no cookie domain can span them: the canonical host never receives the
+    // session cookie and the operator would land on the public landing page
+    // instead of the console. So a verified session keeps the request on the alt
+    // host, where its cookie still applies. Only anonymous traffic is forwarded
+    // to the canonical domain.
+    const session = await getSessionIdentity(
+      req.headers.get("cookie"),
+      process.env.AUTH_SECRET ?? ""
+    );
+    if (!session) {
+      const target = new URL(req.url);
+      target.protocol = "https:";
+      target.host = CANONICAL_HOST;
+      // Every other redirect in this middleware goes out through
+      // withSecurityHeaders, so the G4 contract (docs/rollouts/2026-07-01-security-hardening.md)
+      // holds for this one too — a redirect is still a response a browser renders.
+      return withSecurityHeaders(NextResponse.redirect(target, 308));
+    }
   }
 
   // Host-level routing: admin.socratictrade.com / admin.socratic.trade
@@ -528,7 +530,7 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   // With the marketing pages switched off (/welcome 404s), an anonymous visitor
   // must fall through to the fail-closed /login redirect below rather than be
   // sent to a page that does not exist.
-  if (MARKETING_HOSTS.has(host) && pathname === "/" && (trustedEmail || landingPageEnabled())) {
+  if (isMarketingHost(host) && pathname === "/" && (trustedEmail || landingPageEnabled())) {
     return withSecurityHeaders(
       NextResponse.redirect(new URL(trustedEmail ? "/console" : "/welcome", req.url))
     );

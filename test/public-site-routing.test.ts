@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { NextRequest } from "next/server";
 import { middleware } from "../middleware";
+import { encodeSessionToken } from "../src/lib/auth/session-token";
 
 const REPO_ROOT = join(__dirname, "..");
 
@@ -65,6 +66,56 @@ describe("middleware — public marketing host routing", () => {
     expect(res.headers.get("location")).toBe("https://socratictrade.com/");
   });
 
+  it("the alt-domain 308 carries the standard security headers", async () => {
+    // G4 (docs/rollouts/2026-07-01-security-hardening.md): every response the
+    // middleware returns goes out through withSecurityHeaders. A redirect is
+    // still a response a browser renders, so the redirect must carry them too.
+    const req = createRequest("https://socratic.trade/welcome", "socratic.trade");
+    const res = await middleware(req);
+    expect(res.status).toBe(308);
+    expect(res.headers.get("X-Frame-Options")).toBe("DENY");
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(res.headers.get("Referrer-Policy")).toBe("strict-origin-when-cross-origin");
+    expect(res.headers.get("Permissions-Policy")).toContain("camera=()");
+  });
+
+  it("keeps a signed-in operator on the alt domain instead of dropping their session", async () => {
+    // The Auth.js cookie is host-only by default, and socratic.trade and
+    // socratictrade.com are unrelated domains, so no cookie domain can span
+    // them. A 308 to the canonical host therefore never carries the session,
+    // and the operator lands on the public landing page instead of the console.
+    // Only anonymous traffic may be forwarded.
+    const secret = "test-secret-for-alt-domain-session";
+    await withAuthSecret(secret, async () => {
+      const token = await encodeSessionToken({
+        token: { email: "operator@example.com" },
+        secret,
+        salt: "authjs.session-token"
+      });
+      const req = new NextRequest("https://socratic.trade/", {
+        headers: {
+          host: "socratic.trade",
+          "user-agent": "test-agent",
+          cookie: `authjs.session-token=${token}`
+        }
+      });
+      const res = await middleware(req);
+      expect(res.status).not.toBe(308);
+      expect(res.headers.get("location")).toBe("https://socratic.trade/console");
+    });
+  });
+
+  it("still forwards anonymous traffic on the alt domain to the canonical host", async () => {
+    // The session guard must not turn the alt domain into a second canonical
+    // host: a visitor with no session is still forwarded.
+    await withAuthSecret("test-secret-for-alt-domain-session", async () => {
+      const req = createRequest("https://socratic.trade/welcome", "socratic.trade");
+      const res = await middleware(req);
+      expect(res.status).toBe(308);
+      expect(res.headers.get("location")).toBe("https://socratictrade.com/welcome");
+    });
+  });
+
   it("keeps the Apple associated-domain file on the alt domain", async () => {
     // applinks + webcredentials on socratic.trade need the AASA served on THAT
     // domain — redirecting it away would break the entitlement.
@@ -92,6 +143,27 @@ describe("middleware — public marketing host routing", () => {
     const adminRes = await middleware(adminReq);
     expect(adminRes.status).toBe(307);
     expect(adminRes.headers.get("location")).toBe("https://admin.socratic.trade/admin");
+  });
+});
+
+describe("the public host map — one shared module", () => {
+  it("the middleware and the apex route both read the host sets from the shared module", () => {
+    // The host sets used to be written out twice. A second copy compiles fine
+    // and type-checks fine, so the only way it fails is by drifting — the
+    // middleware sends a visitor one way and the route sends them another. Pin
+    // the single source of truth.
+    const shared = readFileSync(join(REPO_ROOT, "src/lib/marketing-hosts.ts"), "utf8");
+    expect(shared).toContain("socratictrade.com");
+    expect(shared).toContain("socratic.trade");
+
+    const mw = readFileSync(join(REPO_ROOT, "middleware.ts"), "utf8");
+    expect(mw).toContain('from "./src/lib/marketing-hosts"');
+    expect(mw).not.toMatch(/const MARKETING_HOSTS/);
+    expect(mw).not.toMatch(/const ALT_DOMAIN_HOSTS/);
+
+    const page = readFileSync(join(REPO_ROOT, "app/page.tsx"), "utf8");
+    expect(page).toContain('from "@/lib/marketing-hosts"');
+    expect(page).not.toMatch(/const MARKETING_HOSTS/);
   });
 });
 

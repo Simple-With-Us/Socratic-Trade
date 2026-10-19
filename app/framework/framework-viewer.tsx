@@ -15,6 +15,7 @@
 import { useEffect, useState } from "react";
 import { Card } from "../ui/primitives";
 import type { FrameworkContent } from "./content";
+import { hashTargetId } from "./hash-target";
 import { PipelineLoopDiagram, LayerStackDiagram, FlywheelDiagram } from "./framework-diagrams";
 import { DecisionLoopDiagram } from "./decision-loop-diagram";
 
@@ -88,6 +89,21 @@ export function FrameworkViewer() {
       cancelled = true;
     };
   }, []);
+
+  // Deep links (#questions, #pipeline, ...) have to scroll once the sections
+  // exist. The browser's own fragment handling runs at load, before the async
+  // content fetch has rendered anything, so the target is not in the document
+  // yet and the page sits at the top. Scroll again when the content is ready.
+  useEffect(() => {
+    if (state.phase !== "ready") return;
+    const id = hashTargetId(window.location.hash);
+    if (!id) return;
+    const target = document.getElementById(id);
+    if (!target) return;
+    // "auto" (not "smooth") for a deep link: the reader asked for that section,
+    // so it should be there when the page settles rather than animate to it.
+    target.scrollIntoView({ behavior: "auto", block: "start" });
+  }, [state.phase]);
 
   if (state.phase === "loading") {
     return (

@@ -111,7 +111,8 @@ lenses became `outcomeLenses`.
 
 ## Review Findings Accepted And Fixed
 
-Two findings came back from the automated reviews on PR #4889.  Both were real, and both are fixed.
+Two findings came back from the first round of automated reviews on PR #4889.  Both were real, and
+both are fixed.
 
 ### 1. The apex redirect 404'd with the marketing pages off
 
@@ -156,6 +157,63 @@ gaps, and a converter invites the next author to write exactly that.
 markup contains a real U+00A0 followed by a space — and that the gap is still there after the
 browser's whitespace collapse.
 
+## Review Findings, Second Round
+
+The next review round on PR #4889 came back with six threads.  Five were real and are fixed here; the
+sixth had already been fixed by the first round and needed only an explanation.
+
+### 3. The alt-domain 308 dropped a live session
+
+`middleware.ts` forwarded `socratic.trade` to the canonical `socratictrade.com` before it resolved the
+request's identity.  The Auth.js session cookie is host-only by default (`AUTH_COOKIE_DOMAIN` is
+unset — `src/lib/auth/auth.ts`), and `socratic.trade` and `socratictrade.com` are unrelated domains, so
+no cookie domain can span them: the canonical host never receives the session cookie.  An operator who
+followed a link to the alt domain was therefore anonymous by the time the app saw them, and landed on
+the public landing page instead of the console.
+
+The redirect now resolves the session first and forwards **only anonymous traffic**.  A verified
+session keeps the request on the alt host, where its cookie still applies.  The canonicalization hop
+is exactly what drops the session, so it must not happen to a signed-in request.  `getSessionIdentity`
+returns null when either the cookie or the secret is missing, so the check is safe on a deploy with
+no auth configured.
+
+### 4. The alt-domain 308 skipped the security headers
+
+Every other redirect in `middleware.ts` goes out through `withSecurityHeaders`, which the G4 contract
+(`docs/rollouts/2026-07-01-security-hardening.md`) and `test/security-headers.test.ts` require of
+every response the middleware returns.  The alt-domain 308 was the one redirect that skipped it.  It
+now goes out through the same helper.
+
+### 5. The public host sets were written out twice
+
+`MARKETING_HOSTS` was defined in `middleware.ts` and again in `app/page.tsx`.  Two copies of a host
+list compile and type-check fine, so the only way they fail is by drifting — the middleware sends a
+visitor one way and the route sends them another.  The sets now live in one place,
+`src/lib/marketing-hosts.ts`, and both callers read them from there.  The module exports predicates
+rather than the raw sets, so a caller cannot mutate the shared state.
+
+### 6. A framework deep link did not scroll
+
+`/framework` renders its sections only after an async content fetch, so the browser's fragment
+handling at load found no target in the document and the page sat at the top.  The viewer now scrolls
+to the hash target once the content is ready.  The id lookup lives in `app/framework/hash-target.ts`
+as a pure function with its own tests, because that is the part that can be wrong in a way a reader
+would notice.  The scroll itself uses `behavior: "auto"`, not `"smooth"`: a deep link should land on
+its section when the page settles, not animate to it.
+
+### 7. This document named a lane path
+
+This document named the lane it was written in.  A lane is per-seat and per-run, so the path was stale
+the moment another seat picked the work up.  The branch and the base commit are the durable
+references; the path is not.
+
+### The sixth thread needed no change
+
+The Sentry review also flagged the apex redirect to `/welcome` for not consulting
+`landingPageEnabled()`.  That is finding 1 above: the middleware and `app/page.tsx` both consult the
+off-switch, and `test/public-site-routing.test.ts` pins it.  The thread was raised against the code
+before that fix landed, so it is answered by the existing change rather than a new one.
+
 ## Decisions & Trade-offs
 
 - **The `/framework` hardening stays.** The owner's 2026-07-11 instruction was to harden that page
@@ -192,8 +250,7 @@ browser's whitespace collapse.
 
 ## Verification State
 
-In the lane (`~/apps/lanes/Socratic-Trade/minimax-public-framework-pages`, branch
-`minimax/st-4565-public-framework-pages`, base `origin/main` @ `92b123dfe`):
+On the work branch `minimax/st-4565-public-framework-pages`, based on `origin/main` @ `92b123dfe`:
 
 - `npx tsc --noEmit` — clean, exit 0.
 - `npx eslint <changed files>` — 0 errors (1 grandfathered `react-hooks/set-state-in-effect`
@@ -203,6 +260,18 @@ In the lane (`~/apps/lanes/Socratic-Trade/minimax-public-framework-pages`, branc
   `framework-page` (9), `how-it-works-redirect`, `candle-ticker-raf-resilience`.
 - `node scripts/copy-rules-lint.mjs` — repo sweep: 46 sentence-gap violations, all in the
   peer-locked files (the baseline the lint test caps at), **0** in anything this change touched.
+
+Re-verified after the second review round (findings 3–7 above), on the same branch:
+
+- `npx tsc --noEmit` — clean, exit 0.
+- `npx eslint` over the changed files — 0 errors, and the only warning is the same grandfathered
+  `react-hooks/set-state-in-effect` one (the repo pins the whole rule to "warn" in
+  `eslint.config.mjs`); the new scroll effect sets no state, so it adds no warning.
+- `npx vitest run` over the affected files — 47 tests green:
+  `public-site-routing` (22), `framework-hash-target` (6), `security-headers` (6),
+  `framework-page` (9), `public-sentence-gap` (4).
+- `node scripts/copy-rules-lint.mjs` — repo sweep unchanged at 46 sentence-gap violations, **0** in
+  anything this change touched.
 
 **The full suite and the production build were not run locally, and are not claimed here.** The
 lane lives on an external volume and the host's load (57–267) made a local full run impractical.
