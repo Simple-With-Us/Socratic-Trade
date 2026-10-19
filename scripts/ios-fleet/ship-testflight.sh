@@ -365,13 +365,6 @@ local_seq() {
   printf '%s' "$n"
 }
 
-# Legacy UTC minute stamp.  RETIRED as the primary scheme 2026-10-18: CFBundleVersion
-# is now the repo commit count, which is monotonic by construction and names the
-# exact commit a build came from.  Kept only as a fallback for a non-git checkout.
-utc_build_stamp() {
-  date -u +%Y%m%d%H%M
-}
-
 # Highest N in MARKETING_VERSION = <prefix>.N across the project's build
 # configurations. 0 when the file is unreadable or holds no on-train value.
 project_marketing_seq() {
@@ -475,12 +468,11 @@ resolve_seq_floor() {
   The asc-seq lines above include the HTTP status.  Fix one of these, then re-run:
     1) restore ASC access: check ASC_* in env or Infisical /asc (fleet-secrets doctor) and that 'node' is on PATH, then
        run: node ${FLEET_DIR}/asc-api.mjs latest-build-seq ${BUNDLE_ID} ${prefix}
-    2) or pass the number explicitly:  --version ${prefix}.<N>   (NOT --build <N>:
-       --version picks the marketing version and lets CFBundleVersion stay an
-       auto UTC timestamp, which is always higher than every build already
-       uploaded. A bare --build leaves MARKETING at ${DEFAULT_MARKETING}, which
-       re-enters an old train where Apple requires a strictly greater build than
-       everything in it -- rejected after the full archive+upload.)
+    2) or pass the number explicitly:  --build <N>
+       --build is honoured exactly: CFBundleVersion becomes N and MARKETING
+       moves with it to ${prefix}.N, so the pair always describes one
+       number.  N must be a plain integer above every build already shipped
+       in this train; UTC timestamps are retired.
     3) or, only if you are certain this train is empty, re-run with --allow-unverified-seq"
     fi
     if [[ "$ALLOW_UNVERIFIED_SEQ" -eq 1 ]]; then
@@ -830,7 +822,17 @@ elif [[ -n "$FORCE_BUILD" || -n "$FORCE_VERSION" ]]; then
   # than anything already uploaded — that is the whole point of the scheme, so an
   # operator picking the marketing version does not have to reason about it.
   MARKETING="${FORCE_VERSION:-$DEFAULT_MARKETING}"
-  BUILD_NUM="${FORCE_BUILD:-$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || date -u +%Y%m%d%H%M)}"
+  if [[ -n "$FORCE_BUILD" ]]; then
+    # An explicit --build is honoured exactly.
+    BUILD_NUM="$FORCE_BUILD"
+  else
+    # UTC timestamps are retired (owner 2026-10-18): CFBundleVersion is the
+    # repo commit count, so a checkout with no readable git history cannot be
+    # numbered at all.  Fail loudly rather than mint a 12-digit stamp that no
+    # commit describes.
+    BUILD_NUM="$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null)"
+    [[ "$BUILD_NUM" =~ ^[0-9]+$ ]] || die "could not read the commit count from ${REPO_ROOT}; CFBundleVersion is the commit count and UTC timestamps are retired"
+  fi
   # An explicit --build is honoured exactly.  The auto-fill still needs the
   # floor: --version against an already-shipped HEAD would otherwise ship a
   # build at or below what App Store Connect already holds for that train.
@@ -865,7 +867,11 @@ else
   # commit-count scheme it no longer feeds MARKETING or BUILD_NUM, so writing
   # to it would only drift the floor on every later run and eventually push a
   # fresh commit's build number higher than the commit count it names.
-  COMMIT_COUNT="$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || echo "$((SEQ_FLOOR + 1))")"
+  # The build number names a commit, so it has to be the commit count.  The
+  # old fallback invented SEQ_FLOOR + 1 here, which decoupled the shipped
+  # number from the commit it claims to be.
+  COMMIT_COUNT="$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null)"
+  [[ "$COMMIT_COUNT" =~ ^[0-9]+$ ]] || die "could not read the commit count from ${REPO_ROOT}; the build number is the commit count and UTC timestamps are retired"
   MARKETING="${MARKETING_PREFIX}.${COMMIT_COUNT}"
   BUILD_NUM="${COMMIT_COUNT}"
   # Strictly-increasing guard for a re-ship of the same commit: ASC rejects a
