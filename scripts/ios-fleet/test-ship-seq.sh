@@ -264,6 +264,16 @@ for app in socratic congress usage usage-local; do
   check "${app}: guard moves marketing with the build (got '${mk}')" \
     "$([[ "$mk" == "1.0.${bn}" ]] && echo 0 || echo 1)"
 done
+
+# Regression guard (2026-10-19): the operator-override path must floor against
+# the train the operator named, not against the configured default.  A
+# --version 2.0.5 override has to read the 2.0 floor, or the auto-filled build
+# number can collide with a 2.0.X build App Store Connect already holds and
+# the upload is rejected as a duplicate.
+check "the override path derives its floor from the shipped train" \
+  "$(grep -q 'version_prefix "\$MARKETING"' "$SHIP" && echo 0 || echo 1)"
+check "the override path does not floor against the default train" \
+  "$(grep -q '_of_floor="\$(resolve_seq_floor "\$MARKETING_PREFIX"' "$SHIP" && echo 1 || echo 0)"
 echo
 
 # --- 9. The counter no longer decides the version -------------------------
