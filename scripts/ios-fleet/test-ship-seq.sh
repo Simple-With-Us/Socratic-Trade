@@ -251,7 +251,14 @@ SECTION8_FLOOR=5
 echo "8. version scheme: 1.0.<commit_count> marketing and build, all four apps"
 for app in socratic congress usage usage-local; do
   rm -f "${STATE}/build-seq-${app}.txt" "${STATE}/last-ship-${app}.txt"
-  printf '%s' "$SECTION8_FLOOR" >"${STATE}/build-seq-${app}.txt"
+  # The local build-seq counter is retired, so a floor written to the seq
+  # file is never read back:  local_seq() returns 0.  Drive the floor from
+  # the one input that still feeds resolve_seq_floor() instead, the
+  # committed version record in project.pbxproj, and put it BELOW the
+  # commit count so the guard must not fire and the build lands on the
+  # commit count.  The other side of the rule, a floor at or above the
+  # commit count bumping the pair, is covered by the GUARD_FLOOR loop.
+  write_record "$app" "$SECTION8_FLOOR"
   run_ship "$app" --repo-root "$REPO" --allow-unverified-seq --dry-run
   line="$(printf '%s' "$OUT" | grep -o 'marketing=[^ ]* build=[^ ]*' | head -1)"
   mk="$(printf '%s' "$line" | sed 's/^marketing=//; s/ build=.*$//')"
@@ -263,7 +270,7 @@ for app in socratic congress usage usage-local; do
     "$(printf '%s' "$bn" | grep -Eq '^[1-9][0-9]*$' && echo 0 || echo 1)"
   check "${app}: build is not a copy of marketing (no more '1.0.N (1.0.N)')" \
     "$([[ "$bn" != "$mk" ]] && echo 0 || echo 1)"
-  check "${app}: build strictly exceeds the sequence floor ${SECTION8_FLOOR} (got '${bn}')" \
+  check "${app}: build strictly exceeds the record floor ${SECTION8_FLOOR} (got '${bn}')" \
     "$([[ "${bn:-0}" -gt "$SECTION8_FLOOR" ]] 2>/dev/null && echo 0 || echo 1)"
   check "${app}: build is at least the commit count (got '${bn}' vs ${COMMIT_COUNT})" \
     "$([[ "${bn:-0}" -ge "$COMMIT_COUNT" ]] 2>/dev/null && echo 0 || echo 1)"
