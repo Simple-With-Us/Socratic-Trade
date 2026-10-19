@@ -872,7 +872,7 @@ elif [[ -n "$FORCE_BUILD" || -n "$FORCE_VERSION" ]]; then
   if [[ -z "$FORCE_VERSION" ]]; then
     MARKETING="${MARKETING_PREFIX}.${BUILD_NUM}"
   fi
-  log "version: operator override (--build/--version); sequence not consulted"
+  log "version: operator override (--build/--version); the local build-seq counter is not consulted"
 else
   # resolve_seq_floor runs in a subshell, so its die() cannot exit this script
   # on its own — check explicitly rather than leaning on set -e.
