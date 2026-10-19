@@ -19,20 +19,27 @@ settings:
     SWIFT_VERSION: "5.9"
     # RECORD OF WHAT SHIPPED, not the source of truth for what ships next.
     # The ship script passes MARKETING_VERSION / CURRENT_PROJECT_VERSION on the
-    # xcodebuild command line, so these values never decide a build; App Store
-    # Connect does (max of local counter, ASC, and this file, +1). Keeping them
-    # honest is what lets anyone answer "what version is this repo at?" without
-    # an ASC round trip.
+    # xcodebuild command line, so these values never decide a build.  Under the
+    # unified scheme (owner 2026-10-18) the ship script resolves MARKETING_VERSION
+    # as 1.0.<commit_count> and CURRENT_PROJECT_VERSION as <commit_count>, where
+    # <commit_count> is `git rev-list --count HEAD`, then applies a
+    # strictly-increasing guard: it ships max(commit count, floor + 1), where the
+    # floor is the highest of the local cache, App Store Connect, and
+    # project.pbxproj.  Keeping the two numbers here in step with each other is
+    # what lets anyone answer "what version is this repo at?" without an ASC
+    # round trip.
     #
-    # They had drifted badly: this file still said 1.0.1 / 2 on 2026-08-13 while
-    # ASC had shipped through 1.0.6 (202608131700, uploaded 2026-08-13 10:02 PT).
-    # `--sync-project-version` exists to prevent exactly that and is a silent
-    # no-op for this app: it seds project.pbxproj, and `xcodegen generate` runs
-    # AFTER it and rewrites the pbxproj from THIS file, restoring the stale
-    # value. Until the fleet script also writes project.yml, keep these in sync
-    # by hand whenever you notice drift.
-    MARKETING_VERSION: "1.0.8"
-    CURRENT_PROJECT_VERSION: "202608132022"
+    # The two values below always describe the same commit count: MARKETING is
+    # 1.0.N and the build is N.  They are a snapshot, so they lag the next
+    # commit; `xcodegen generate` rewrites project.pbxproj from THIS file, so
+    # update both by hand whenever you notice drift.  UTC YYYYMMDDHHMM build
+    # stamps are retired and must not come back.
+    # RECORD OF WHAT SHIPPED, not the source of truth for what ships next:
+    # the ship script passes both values on the xcodebuild command line, and
+    # reads this one as the build-number FLOOR, so it must stay below the
+    # commit count of any commit that can ship.
+    MARKETING_VERSION: "1.0.436"
+    CURRENT_PROJECT_VERSION: "436"  # commit count; ship script overrides per build
     INFOPLIST_KEY_CFBundleDisplayName: "Socratic Trade"
     INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.finance"
     # SENTRY_DSN is not set here. An explicit empty string in the project file

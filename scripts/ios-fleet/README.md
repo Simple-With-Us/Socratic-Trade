@@ -32,10 +32,10 @@ Edit the runtime copy only through this repo: change the file here, land the PR,
 
 | Field | Value | Example |
 | --- | --- | --- |
-| `MARKETING_VERSION` (`CFBundleShortVersionString`) | `1.0.<seq>`, +1 on every rebuild | `1.0.8` |
-| `CURRENT_PROJECT_VERSION` (`CFBundleVersion`) | UTC `YYYYMMDDHHMM` | `202608121315` |
+| `MARKETING_VERSION` (`CFBundleShortVersionString`) | `1.0.<commit_count>` | `1.0.148` |
+| `CURRENT_PROJECT_VERSION` (`CFBundleVersion`) | `<commit_count>`, the same number | `148` |
 
-App Store Connect renders these as `<marketing> (<build>)`, so a ship shows **`1.0.8 (202608121315)`** — the parenthetical says *when* the build was cut.
+App Store Connect renders these as `<marketing> (<build>)`, so a ship shows **`1.0.148 (148)`** -- both numbers describe one commit.
 
 An earlier revision set both fields to the same dotted string, which rendered as the uninformative `1.0.7 (1.0.7)`.  That was also a live rejection trap: Apple requires `CFBundleVersion` to be strictly increasing *within a marketing train*, and `trade.congress.ios` has 15 builds numbered `202608070253` … `202608120521` sitting in the `1.0.0` train.  `1.0.7` is numerically far lower than any of them; the dotted scheme only worked because each new marketing version opened a fresh, empty train.  A ship that landed back in an older train would have been rejected *after* a full archive + upload.  The UTC stamp is monotonic by construction, exceeds every existing build, and is demonstrably legal for ASC — those 15 live builds use exactly this format.
 
