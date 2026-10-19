@@ -4,7 +4,7 @@
  *
  * What this guard CATCHES (intentional):
  *   - The dev-only loader in `src/lib/db-api-keys.ts` reading `.env.local` from process.cwd()
- *     (removed in this PR). The `~/.secrets/global-api-keys` handoff file is retired
+ *     (removed in this PR). The flat global-api-keys handoff file is retired
  *     (owner, 2026-10-18, OPS-818): the bootstrap identity lives in the macOS login Keychain
  *     (service `socratic-trade-bootstrap`) and is read only by scripts/infisical-bootstrap-env.mjs.
  *   - A future PR adding `import "dotenv"`, `dotenv-flow`, `dotenv/config`, etc. to a
