@@ -22,12 +22,17 @@ before changing timeouts or models. This note records that trace and the change 
 
 - `src/lib/llm-request.ts`
   - New `minimaxMuseReasoningHeadroom()` — a dedicated, env-tunable reasoning headroom for the
-    `minimax-*` / `muse-*` families, default `16000`. Replaces the hardcoded
+    `minimax-*` / `muse-*` families, default `8000`. Replaces the hardcoded
     `REASONING_TOKEN_BUDGET.medium` (4000) at the single consumption point in
     `resolveLlmWireOutputCap`, which `withLlmRequestBounds` already calls, so the audited resolver
-    and the wire body cannot desync.
-  - New `REASONING_LLM_TIMEOUT_DEFAULT_MS = 300_000`, replacing the inline `150_000` in
+    and the wire body cannot desync. The Green proposer's base (4000) + 8000 gives a 12,000-token
+    completion cap.
+  - New `REASONING_LLM_TIMEOUT_DEFAULT_MS = 360_000`, replacing the inline `150_000` in
     `strategyLlmTimeoutMs`. Env override `STRATEGY_LLM_REASONING_TIMEOUT_MS` still wins.
+- `src/lib/strategy.ts:6796`
+  - The Green Team truncation retry ceiling was a hardcoded `Math.min(wireOutputCap*2, 16_000)`. It is
+    now an env-tunable `STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP`, default **24000**, so the
+    base-cap → retry-ceiling relationship is adjustable without a second edit.
 - `test/llm-request.test.ts`
   - New test locking the widened default across every spelling of both families
     (`minimax-m3`, `minimax/minimax-m3`, `MiniMax-M3`, `muse-spark-1.3-contributor`,
@@ -35,11 +40,12 @@ before changing timeouts or models. This note records that trace and the change 
     budget survives above the reserved reasoning.
   - New test for the env override **and** for junk values (`0`, `-5`, `not-a-number`) falling back
     to the default rather than producing a zero/absent reasoning budget.
-  - New test asserting the 300s default applies to both families and that non-thinking models are
+  - New test asserting the 360s default applies to both families and that non-thinking models are
     NOT dragged up to it.
+  - New invariant test asserting the base cap stays **below** the truncation-retry ceiling — see §3.
   - Updated the pre-existing `reserves reasoning headroom for MiniMax and Muse through OpenRouter`
     test, which asserted the old `1500 + 4000 = 5500`. That assertion encoded the starvation
-    directly; the new expectation is `1500 + 16000` with the reason recorded inline.
+    directly; the new expectation is `1500 + 8000`.
 - `docs/EFFORT-LOG.md`
   - New row for this effort.
   - **Collateral correction:** the 2026-10-18 Previous Trades card row still read
@@ -75,15 +81,25 @@ cap on reasoning before emitting visible JSON (`Empty response returned from LLM
 timeout alone would only move the wall and would not stop the empty response, which is why both
 bounds moved together.
 
-**Why 16,000.** Observed completions were 4,339–5,961 on a 6,745-token prompt. Production prompts
-carry real RAG context and portfolio state, so completions scale up from there. 4,000 (the Green
-proposer's base) + 16,000 gives a 20,000-token cap that clears observed reasoning while still
-terminating rather than running unbounded.
+**Why 8,000 of headroom.** Observed completions were 4,339–5,961 on a 6,745-token prompt. Production
+prompts carry real RAG context and portfolio state, so completions scale up from there. The Green
+proposer's base (4,000) + 8,000 gives a 12,000-token cap that clears observed reasoning while still
+terminating rather than running unbounded. Measured Muse output peaked at 2,703 tokens, so 8,000
+leaves ample room without being unbounded.
 
-**Why 300s.** ~13ms/token × 20,000 ≈ 260s of generation. The wall has to sit wider than the token
-budget implies or it severs calls that are still making progress — the exact failure the original
-widening comment describes for DeepSeek. The documented trade-off is unchanged and real: a longer
-bound holds the per-user run lock longer, starving the scheduler.
+**Why 360s.** ~13ms/token × the largest cap a single attempt can reach. The retry ceiling (24,000)
+is the widest cap any one attempt gets, so the worst case needs ~312s of generation. The wall has to
+sit wider than the token budget implies or it severs calls that are still making progress — the
+exact failure the original widening comment describes for DeepSeek. The documented trade-off is
+unchanged and real: a longer bound holds the per-user run lock longer, starving the scheduler.
+
+**The three bounds are ONE number, and the full suite caught them disagreeing.** An intermediate pass
+set headroom 16,000 (a 20,000 base cap) while the truncation retry in `strategy.ts` was still capped
+at a hardcoded 16,000. That silently disabled the retry safety net for exactly the calls it exists to
+protect — a 20,000-token attempt had nowhere to go. Narrow test runs did not catch it; `land.sh`'s
+full suite did. The shape is now derived from the same measurement and held by an invariant test:
+base cap **12,000** < retry ceiling **24,000** < wall **360s** (24,000 × 13ms ≈ 312s < 360s). Keep all
+three in step when retuning.
 
 **Env-tunable rather than hardcoded.** Both values are operator-adjustable
 (`MINIMAX_MUSE_REASONING_HEADROOM`, `STRATEGY_LLM_REASONING_TIMEOUT_MS`) so this does not need a
@@ -95,19 +111,30 @@ neither was swapped.
 
 ## 4. Verification State
 
-- `npx tsc --noEmit` — **clean, exit 0**, in the lane.
-- `npx vitest run test/llm-request.test.ts` — **35/35 passed**, including the 3 new tests and the
-  corrected existing one.
-- `npm run lint` — NOT yet run in this lane.
-- Full `npm test` / `npm run build` — NOT run locally; the host has been heavily loaded all session.
-  CI `verify` is the gate of record.
+All commands run **in the lane**, with the `cd` inline and `pwd` echoed, per the trap below.
+
+- `npx tsc --noEmit` — **clean, exit 0**.
+- `npm run lint` — **0 errors**, 870 warnings. The `verify` CI step fails on errors only; the warnings
+  are the grandfathered `no-explicit-any` / `react-hooks` backlog, unchanged by this branch.
+- `npx vitest run test/llm-request.test.ts test/persistence-notification.test.ts` — **55/55 passed**.
+- `npx vitest run` over the 8 files touching these bounds — **169/169 passed** after the fix.
+- Full `npm test` + `npm run build` — run by `scripts/land.sh`; see §5.
+
+**Two real defects were caught here, both by the full suite rather than narrow runs:**
+
+1. The retry ceiling sat *below* the base cap (§3). Fixed, plus an invariant test.
+2. `test/persistence-notification.test.ts` asserted the literal old string `timed out after 150s`. It
+   is a behavioral test of the *message*, so it must track the bound; updated to 360s.
 
 **A trap worth recording:** the Bash tool resets the working directory to the primary workspace on
 every call, so `npx tsc --noEmit` without an inline `cd` type-checks `/Users/jay/Code/Socratic-Trade`
 — the human's integration tree — and reports another seat's uncommitted congress-share errors
 (`@Simple-With-Us/congress-trading-shared` scope mismatch) that have nothing to do with this branch.
-Those errors are NOT present on `origin/main` and NOT present in this lane. Always `cd` inline and
-confirm with `pwd`.
+Those errors are NOT present on `origin/main` and NOT present in this lane. The same mistake made a
+test batch report **70 failures across `strategy-tuning`, `persistence-notification`, `post-mortem`
+and `red-team`** (several files collecting 0 tests) — a signature of the missing workspace
+dependency, not of a real break. Re-run in-lane, that same batch was **1 failure**. Always `cd`
+inline and confirm with `pwd`; a confident wrong-directory result is worse than no result.
 
 ## 5. Next Steps & Blockers
 
@@ -154,14 +181,15 @@ three env values plus the owner's settings row.
 **Muse does not approach the cap at all.** Direct calls to `api.meta.ai` with a ~7k-token
 trading-desk-shaped prompt, identical apart from the cap:
 
-| cap | latency | completion tokens | content chars | parsed | proposals |
+| cap tested | latency | completion tokens | content chars | parsed | proposals |
 |---|---|---|---|---|---|
-| 8,000 (old) | 17.0s | 1,900 | 1,032 | yes | 3 |
-| 20,000 (new) | 23.8s | 2,703 | 722 | yes | 2 |
-| 8,000 (old) | 20.0s | 1,752 | 816 | yes | 3 |
-| 20,000 (new) | 22.0s | 2,380 | 955 | yes | 3 |
+| 8,000 (the old headroom) | 17.0s | 1,900 | 1,032 | yes | 3 |
+| 20,000 (an upper probe) | 23.8s | 2,703 | 722 | yes | 2 |
+| 8,000 (the old headroom) | 20.0s | 1,752 | 816 | yes | 3 |
+| 20,000 (an upper probe) | 22.0s | 2,380 | 955 | yes | 3 |
 
-Every run returned valid JSON well under the old 8,000 cap. Meta returned no reasoning content on
+Every run returned valid JSON well under the 8,000 headroom, and the 20,000 probe never came close to
+its own cap either — completion did not track the ceiling. Meta returned no reasoning content on
 this shape and `finish_reason` was always `stop`. **Muse therefore had no token-budget problem**, and
 the headroom change is a pure ceiling raise for it — it cannot regress a model that finishes at
 ~2,000 tokens.
