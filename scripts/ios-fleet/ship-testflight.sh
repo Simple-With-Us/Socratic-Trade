@@ -785,6 +785,17 @@ elif [[ -n "$FORCE_BUILD" || -n "$FORCE_VERSION" ]]; then
   # operator picking the marketing version does not have to reason about it.
   MARKETING="${FORCE_VERSION:-$DEFAULT_MARKETING}"
   BUILD_NUM="${FORCE_BUILD:-$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || date -u +%Y%m%d%H%M)}"
+  # An explicit --build is honoured exactly.  The auto-fill still needs the
+  # floor: --version against an already-shipped HEAD would otherwise ship a
+  # build at or below what App Store Connect already holds for that train.
+  if [[ -z "$FORCE_BUILD" ]]; then
+    _of_floor="$(resolve_seq_floor "$MARKETING_PREFIX" "$PBXPROJ" "$PLATFORM" 2>/dev/null || echo 0)"
+    [[ "$_of_floor" =~ ^[0-9]+$ ]] || _of_floor=0
+    if [[ "$_of_floor" -ge "$BUILD_NUM" ]]; then
+      BUILD_NUM="$((_of_floor + 1))"
+      log "build: override would repeat an already-shipped build; using ${BUILD_NUM} instead"
+    fi
+  fi
   log "version: operator override (--build/--version); sequence not consulted"
 else
   # resolve_seq_floor runs in a subshell, so its die() cannot exit this script
