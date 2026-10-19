@@ -63,7 +63,7 @@ import { derivePromptRagConsumption, type PromptRagCandidate, type PromptRagCons
 import { summarizeSourceCoverage } from "./source-value";
 import { deriveExecutionState, fillSourceForExecutionMode, llmExecutionMode, llmModeClarification, type ExecutionAccount } from "./execution-mode";
 import { applyBrokerOrderPlacementPause, brokerHealthRunSkip, checkBrokerHealth, isOrderPlacementInfrastructureFailure } from "./broker-health";
-import { greenFailoverExhaustedSuffix, interactiveStrategyReasoningEffort, isFailoverLlmStatus, isRetryableLlmError, LLM_OUTPUT_TOKEN_CAPS, LLM_REQUEST_DEFAULTS, LLM_TIMEOUT_MS, llmFetch, llmFetchCapturing, resolveLlmWireOutputCap, strategyLlmTimeoutMs, type LlmCallOutcome } from "./llm-request";
+import { greenFailoverExhaustedSuffix, interactiveStrategyReasoningEffort, isFailoverLlmStatus, isRetryableLlmError, LLM_OUTPUT_TOKEN_CAPS, LLM_REQUEST_DEFAULTS, LLM_TIMEOUT_MS, llmFetch, llmFetchCapturing, positiveEnvNumber, resolveLlmWireOutputCap, strategyLlmTimeoutMs, type LlmCallOutcome } from "./llm-request";
 import {
   assignDeterministicThesisTag,
   buildBullSystem,
@@ -6797,7 +6797,9 @@ async function proposeTrades(input: {
               // minimaxMuseReasoningHeadroom): if it does not, `retryCap > wireOutputCap` is
               // false and this safety net silently stops firing. Sized so a retry at the ceiling
               // still fits inside the reasoning wall (~13ms/token -> 24000 ~= 312s < 360s).
-              const retryCeiling = Number(process.env.STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP) || 24_000;
+              // Parsed with the same positive-value guard as the headroom: `Number(env) || 24_000`
+              // would let a NEGATIVE override through (Number("-1") is truthy) and disable the net.
+              const retryCeiling = positiveEnvNumber("STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP", 24_000);
               const retryCap = Math.min(wireOutputCap * 2, retryCeiling);
               const retry = !attempt.truncationRetry && attempt.transport === "chat-completions" &&
                 /^(?:minimax\/)?minimax-/i.test(attempt.model) && retryCap > wireOutputCap;

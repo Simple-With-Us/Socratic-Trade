@@ -56,9 +56,23 @@ function reasoningTokenHeadroom(effort: LlmReasoningEffort | undefined): number 
  * stranded: that retry escalates to min(cap*2, STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP), so the
  * base cap must stay BELOW the retry ceiling or the escalation silently stops firing.
  */
+/**
+ * Read a positive numeric env override, falling back to `fallback` when the value is unset,
+ * unparseable, zero, negative or non-finite.
+ *
+ * `Number(env) || fallback` is NOT equivalent, and the difference is a silent failure: `Number("-1")`
+ * is `-1`, which is truthy, so a negative override passes straight through instead of falling back.
+ * For the truncation-retry ceiling that drops it below the base cap and disables the safety net
+ * entirely — worse than ignoring the override. Both env knobs that size the Green Team budget use
+ * this, so they can never disagree about how to parse operator input.
+ */
+export function positiveEnvNumber(name: string, fallback: number): number {
+  const configured = Number(process.env[name]);
+  return Number.isFinite(configured) && configured > 0 ? configured : fallback;
+}
+
 function minimaxMuseReasoningHeadroom(): number {
-  const configured = Number(process.env.MINIMAX_MUSE_REASONING_HEADROOM);
-  return Number.isFinite(configured) && configured > 0 ? configured : 8_000;
+  return positiveEnvNumber("MINIMAX_MUSE_REASONING_HEADROOM", 8_000);
 }
 
 export const LLM_REQUEST_DEFAULTS = {

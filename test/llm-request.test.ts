@@ -19,6 +19,7 @@ import {
   LLM_OUTPUT_TOKEN_CAPS,
   LLM_REQUEST_DEFAULTS,
   LLM_TIMEOUT_MS,
+  positiveEnvNumber,
   ROTATION_UI_REASONING_CAPABILITY,
   type LlmCallOutcome
 } from "../src/lib/llm-request";
@@ -421,7 +422,9 @@ describe("llm-request — withLlmRequestBounds", () => {
       maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal,
       model: "minimax-m3"
     });
-    const retryCeiling = Number(process.env.STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP) || 24_000;
+    // Call the PRODUCTION parser, never a local reimplementation. A copy of the parse in the test
+    // is what let `Number(env) || default` (which passes negatives through) survive here.
+    const retryCeiling = positiveEnvNumber("STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP", 24_000);
     // The escalation is min(baseCap * 2, ceiling) and only fires when that is strictly greater.
     const retryCap = Math.min(baseCap * 2, retryCeiling);
     expect(retryCap).toBeGreaterThan(baseCap);
@@ -429,17 +432,42 @@ describe("llm-request — withLlmRequestBounds", () => {
   });
 
   it("MINIMAX_MUSE_REASONING_HEADROOM overrides the default headroom and rejects junk values", () => {
-    vi.stubEnv("MINIMAX_MUSE_REASONING_HEADROOM", "24000");
-    expect(resolveLlmWireOutputCap("chat-completions", { maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal, model: "minimax-m3" }))
-      .toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal + 24_000);
-    // A non-positive or unparseable value must NOT silently produce a zero/absent reasoning budget —
-    // that is the exact starvation this guard exists to prevent.
-    for (const junk of ["0", "-5", "not-a-number"]) {
-      vi.stubEnv("MINIMAX_MUSE_REASONING_HEADROOM", junk);
+    // try/finally, not a trailing unstub: a thrown expect below would otherwise skip the restore
+    // and leak the stubbed value into every later test in this file.
+    try {
+      vi.stubEnv("MINIMAX_MUSE_REASONING_HEADROOM", "24000");
       expect(resolveLlmWireOutputCap("chat-completions", { maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal, model: "minimax-m3" }))
-        .toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal + 8_000);
+        .toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal + 24_000);
+      // A non-positive or unparseable value must NOT silently produce a zero/absent reasoning budget —
+      // that is the exact starvation this guard exists to prevent.
+      for (const junk of ["0", "-5", "not-a-number"]) {
+        vi.stubEnv("MINIMAX_MUSE_REASONING_HEADROOM", junk);
+        expect(resolveLlmWireOutputCap("chat-completions", { maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal, model: "minimax-m3" }))
+          .toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal + 8_000);
+      }
+    } finally {
+      vi.unstubAllEnvs();
     }
-    vi.unstubAllEnvs();
+  });
+
+  // 2026-10-19, from the Kody review on PR #4882. `Number(env) || 24_000` lets a NEGATIVE override
+  // through, because Number("-1") is -1 and -1 is truthy. That drops the ceiling below the base cap,
+  // makes `retryCap > wireOutputCap` false, and silently disables the truncation-retry safety net.
+  it("STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP rejects negatives and junk so the retry net can never be silently disabled", () => {
+    try {
+      vi.stubEnv("STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP", "48000");
+      expect(positiveEnvNumber("STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP", 24_000)).toBe(48_000);
+      for (const junk of ["0", "-5", "-1", "not-a-number"]) {
+        vi.stubEnv("STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP", junk);
+        const ceiling = positiveEnvNumber("STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP", 24_000);
+        expect(ceiling).toBe(24_000);
+        const baseCap = LLM_OUTPUT_TOKEN_CAPS.strategyProposal;
+        // The escalation must still be able to fire for this family.
+        expect(Math.min(baseCap * 2, ceiling)).toBeGreaterThan(baseCap);
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   // Composite review B/high/S: "Reasoning-token headroom exists only for OpenAI — other providers'

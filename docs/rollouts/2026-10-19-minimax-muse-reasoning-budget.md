@@ -3,7 +3,7 @@
 **Date:** 2026-10-19
 **Seat:** MM (MiniMax)
 **Branch:** `minimax/green-team-reasoning-budget`
-**Lane:** `~/apps/lanes/Socratic-Trade/minimax-green-team-reasoning-budget`
+**Lane:** `minimax-green-team-reasoning-budget` (agent lane)
 
 ## 1. Context & Objective
 
@@ -109,7 +109,31 @@ back to the default — silently honoring `0` would recreate the exact starvatio
 **No model change.** `minimax-m3` and `muse-spark-1.3-contributor` both work when given room;
 neither was swapped.
 
-## 4. Verification State
+## 4. Review Findings (PR #4882)
+
+Kody Code Review raised five threads, resolving to three distinct defects.  Two were real bugs in my
+own change, which is worth recording plainly.
+
+**The retry ceiling accepted negative env values.** `Number(env) || 24_000` does not reject
+negatives, because `Number("-1")` is `-1` and `-1` is truthy.  A negative override therefore dropped
+`retryCeiling` below the base cap, made `retryCap > wireOutputCap` false, and **silently disabled
+the truncation-retry safety net** — the exact failure this whole change exists to prevent, reintroduced
+one layer up.  Fixed by extracting `positiveEnvNumber()` in `llm-request.ts` and routing **both** env
+knobs through it, so the headroom and the ceiling can never disagree about how to parse operator input.
+
+This was made worse by my own invariant test, which reimplemented the parse as
+`Number(process.env...) || 24_000` instead of calling the production helper.  A test that copies the
+logic it is meant to police cannot catch a bug in that logic.  It now calls `positiveEnvNumber()`
+directly, and a new test asserts negatives and junk fall back to the documented default.
+
+**Env stub leak.** Two `vi.stubEnv` blocks restored only via a trailing `vi.unstubAllEnvs()`, so a
+thrown assertion would skip the restore and leak the stub into every later test in the file.  Both are
+now wrapped in `try { ... } finally { vi.unstubAllEnvs(); }`.
+
+**Exposed local path.** The Lane header leaked a local workspace path into a committed doc.  Replaced
+with the bare lane name.
+
+## 5. Verification State
 
 All commands run **in the lane**, with the `cd` inline and `pwd` echoed, per the trap below.
 
@@ -119,6 +143,8 @@ All commands run **in the lane**, with the `cd` inline and `pwd` echoed, per the
 - `npx vitest run test/llm-request.test.ts test/persistence-notification.test.ts` — **55/55 passed**.
 - `npx vitest run` over the 8 files touching these bounds — **169/169 passed** after the fix.
 - Full `npm test` + `npm run build` — run by `scripts/land.sh`; see §5.
+- Post-review re-run after the Kody fixes: `tsc --noEmit` exit 0, and the 5 bounds test files
+  **119/119**.
 
 **Two real defects were caught here, both by the full suite rather than narrow runs:**
 
@@ -127,8 +153,8 @@ All commands run **in the lane**, with the `cd` inline and `pwd` echoed, per the
    is a behavioral test of the *message*, so it must track the bound; updated to 360s.
 
 **A trap worth recording:** the Bash tool resets the working directory to the primary workspace on
-every call, so `npx tsc --noEmit` without an inline `cd` type-checks `/Users/jay/Code/Socratic-Trade`
-— the human's integration tree — and reports another seat's uncommitted congress-share errors
+every call, so `npx tsc --noEmit` without an inline `cd` type-checks the human's main integration
+tree — and reports another seat's uncommitted congress-share errors
 (`@Simple-With-Us/congress-trading-shared` scope mismatch) that have nothing to do with this branch.
 Those errors are NOT present on `origin/main` and NOT present in this lane. The same mistake made a
 test batch report **70 failures across `strategy-tuning`, `persistence-notification`, `post-mortem`
@@ -136,7 +162,7 @@ and `red-team`** (several files collecting 0 tests) — a signature of the missi
 dependency, not of a real break. Re-run in-lane, that same batch was **1 failure**. Always `cd`
 inline and confirm with `pwd`; a confident wrong-directory result is worse than no result.
 
-## 5. Next Steps & Blockers
+## 6. Next Steps & Blockers
 
 - Run `npm run lint` and the full test suite, or let CI `verify` be the gate.
 - Land via `scripts/land.sh`, open the PR, arm auto-merge.
@@ -144,7 +170,7 @@ inline and confirm with `pwd`; a confident wrong-directory result is worse than 
   completes on `minimax-m3`.
 - Consider regenerating the Playwright visual baselines from PR #4873 (unrelated follow-up).
 
-## 6. Zero-Code Findings
+## 7. Zero-Code Findings
 
 **APNs push, same session.** Production push was failing with `403 InvalidProviderToken` on all
 three device tokens. Owner observed that "some app is using those credentials, more than 1
@@ -163,7 +189,7 @@ briefly looked like "all keys are dead". That run was invalid.
 
 Also ruled out: the OpenRouter RAG-capability warning is unrelated to the failure streak, and neither
 Sandbox nor Alpaca Paper is in `close_only`/exit-only.
-## 7. Muse Follow-Up — Muse Was Not The Token Problem
+## 8. Muse Follow-Up — Muse Was Not The Token Problem
 
 Owner asked specifically about `muse-spark-1.3-contributor` on the Meta API (authenticated with the
 Muse Code key). Two findings, both of which narrow the change rather than enlarge it.
