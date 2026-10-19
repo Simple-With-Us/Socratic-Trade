@@ -1,3 +1,13 @@
+## 2026-10-18 [MM] Previous Trades rows rendered with no card surface
+
+**What.**  Owner reported the autonomy desk's Previous Trades section drawing its rows with no background color.  `ProposalRow` hard-coded `bg-[color:var(--con-surface-2)]` = `#f4f6fa` against a page background of `--con-bg` = `#f1f4f6` (`app/console/console.css:25-27`) — a 3-RGB-step collision, so the rows were invisible against the page.  The value was correct for the row's OTHER caller (inside a white `.con-card`, "Latest Strategy Run") and wrong for a page-level card.  Fixed at the component rather than the token: recoloring `--con-surface-2` would restyle every other consumer as collateral.  `ProposalRow` gained `surface?: "inset" | "raised"`, defaulting to `"inset"` so the in-card caller is untouched; `"raised"` picks `--con-surface` (the token `.con-card` uses) and the focus-ring offset follows the same choice.  No CSS token changed.
+
+**Follow-up, not blocking.**  `console-autonomy-desk-chromium-linux.png` is a linux-generated Playwright baseline; regeneration is CI-only by the workflow's own instruction and Playwright Smoke is not a required check on this path.  Dispatch `Playwright Smoke` with `update-visual-baselines=true` and commit the artifact.
+
+**Also reported, deliberately not in this change.**  (1) A transient `Snapshot failed (500)` first-load card — self-heals on the console's retry.  (2) `APNs HTTP 403: InvalidProviderToken` on all three iPhone device tokens and a `run_failure_streak` liveness episode at 56h on Sandbox — separate live incidents, investigated separately.
+
+Rollout: `docs/rollouts/2026-10-18-previous-trades-card-surface.md`.
+
 ## 2026-10-18 CLAUDE — OPS-818 stop reading the flat global-api-keys file
 
 **What.**  Non-identity readers (`scripts/ios-fleet/ship-testflight.sh`, `scripts/massive-hoard.ts`, `scripts/cascade-audit.ts` usage, `.claude/skills/deploy-verify/SKILL.md`) now use env first, then `fleet-secrets get`.  The bootstrap-identity readers are unchanged because `AGENTS.md` keeps the handoff path as the documented owner-side identity store;  the owner decides whether to override that rule.  Rollout: `docs/rollouts/2026-10-18-ops-818-no-global-api-keys.md`.
