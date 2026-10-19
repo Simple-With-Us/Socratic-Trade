@@ -7163,13 +7163,19 @@ Owner said trace before changing anything, so the trace ran through the app's ow
 Bounding reasoning is therefore harmful, not merely insufficient. Both production errors
 (`timed out after 150s`, `Empty response returned from LLM API`) are one mechanism: unbounded
 reasoning length against a fixed 8,000-token cap and a fixed 150s wall. Changed
-`src/lib/llm-request.ts` to reserve a dedicated, env-tunable 16,000-token reasoning headroom for the
-`minimax-*` / `muse-*` families (was `REASONING_TOKEN_BUDGET.medium` = 4,000) and raised the thinking
-timeout default 150s → 300s. Muse measured clean at both caps and was never the token problem; its
-production failure was a Code-CLI broker reachability error.
+`src/lib/llm-request.ts` to reserve a dedicated, env-tunable 8,000-token reasoning headroom for the
+`minimax-*` / `muse-*` families (was `REASONING_TOKEN_BUDGET.medium` = 4,000, giving the Green proposer
+a 12,000-token completion cap) and raised the thinking-timeout default 150s → 360s. Also raised the
+truncation retry ceiling in `src/lib/strategy.ts` from a hardcoded `Math.min(wireOutputCap*2, 16_000)`
+to an env-tunable `STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP` default 24,000 — **the full suite caught an
+intermediate pass that had left this ceiling BELOW the base cap, silently disabling the retry net for the
+calls it protects**. Final shape is one measurement held by an invariant test: base 12,000 < retry
+ceiling 24,000 < wall 360s (24,000 × ~13ms ≈ 312s). Muse measured clean at both caps and was never the
+token problem; its production failure was a Code-CLI broker reachability error.
 
-Verified `tsc --noEmit` clean (exit 0) and 35/35 in `test/llm-request.test.ts`, including 3 new
-tests and 1 pre-existing test that had encoded the old starved value (`1500 + 4000`). `npm run
-lint` and the full suite were not run locally (host heavily loaded); CI `verify` is the gate.
+Verified in the lane: `tsc --noEmit` clean (exit 0), `npm run lint` 0 errors (870 pre-existing
+warnings), `test/llm-request.test.ts` + `test/persistence-notification.test.ts` 55/55, and the 8-file
+bounds batch 169/169. Four new tests, and 2 pre-existing tests that had encoded the old starved values
+(`1500 + 4000` headroom, and the literal `timed out after 150s` message) corrected.
 
 Rollout: `docs/rollouts/2026-10-19-minimax-muse-reasoning-budget.md`.
