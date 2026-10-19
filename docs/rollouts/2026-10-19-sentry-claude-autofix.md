@@ -19,7 +19,11 @@ Keep CTS reusable pin `31659885f58f08e129b6dc092f3493d7cdb74a11`; its actor inpu
 - Isolated YAML parsing and before/after contract assertions: passed.
 - Actual caller-expression fixture evaluation: 15 cases passed, including both Sentry spellings, the six existing actors, fork rejection, unknown/impersonator/human rejection, unsupported events and manual dispatch.
 - Pinned CTS reusable and diagnostics action at `58e3d9504e458b259d065789034f0d625e66324b`: fetched successfully; the action receives `inputs.allowed_bots`.
-- Local application lint, TypeScript, full test suite and build: not run in the connector-backed fixture lane.  Current-head hosted CI must establish those gates.
+- `npm run lint`: not run locally in this connector-backed fixture lane; current-head hosted CI is required.
+- `npx tsc --noEmit`: not run locally in this lane; current-head hosted CI is required.
+- `npm test`: not run locally in this lane; current-head hosted CI is required.
+- `npm run build`: not run locally in this lane; current-head hosted CI is required.
+- Hosted gate receipts are available in [PR #4876 checks](https://github.com/Simple-With-Us/Socratic-Trade/pull/4876/checks).  These four application gates are distinct from the isolated workflow checks above.
 - No live paid autofix dispatch was performed; runtime execution remains to be observed after review and merge.
 
 ## Next Steps And Blockers
