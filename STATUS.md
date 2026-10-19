@@ -1,3 +1,7 @@
+## 2026-10-19 JET — ST-4562 Sentry Claude Autofix Admission
+
+Sentry/Seer joins the exact review actor allowlist and fixer prompt in the existing Claude caller.  Same-repository, concurrency, verification, permissions, secrets and money-path review boundaries remain unchanged.  Isolated YAML contracts and 15 caller-expression scenarios passed; full hosted CI and runtime observation remain pending.  No merge, auto-merge or deployment from this lane.  Rollout: `docs/rollouts/2026-10-19-sentry-claude-autofix.md`.
+
 ## 2026-10-18 [MM] Previous Trades rows rendered with no card surface
 
 **What.**  Owner reported the autonomy desk's Previous Trades section drawing its rows with no background color.  `ProposalRow` hard-coded `bg-[color:var(--con-surface-2)]` = `#f4f6fa` against a page background of `--con-bg` = `#f1f4f6` (`app/console/console.css:25-27`) — a 3-RGB-step collision, so the rows were invisible against the page.  The value was correct for the row's OTHER caller (inside a white `.con-card`, "Latest Strategy Run") and wrong for a page-level card.  Fixed at the component rather than the token: recoloring `--con-surface-2` would restyle every other consumer as collateral.  `ProposalRow` gained `surface?: "inset" | "raised"`, defaulting to `"inset"` so the in-card caller is untouched; `"raised"` picks `--con-surface` (the token `.con-card` uses) and the focus-ring offset follows the same choice.  No CSS token changed.
