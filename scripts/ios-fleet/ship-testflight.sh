@@ -24,6 +24,10 @@
 #   CURRENT_PROJECT_VERSION = <commit_count>
 # App Store Connect renders "<marketing> (<build>)", so a ship shows
 # "1.0.148 (148)".  Unified across macOS and iOS; timestamps permanently retired.
+# One exception:  when the floor is at or above the commit count, the guard
+# raises BOTH numbers to <floor + 1>,  so the pair stays consistent but the
+# build number no longer names that commit.  The floor is
+# max(App Store Connect, project.pbxproj).  See the guard below.
 #
 # ---------------------------------------------------------------------------
 # WHAT IS HOLDING BACK AUTOMATIC SHIPPING: THE MIN-INTERVAL RATE LIMIT
@@ -336,6 +340,9 @@ link_private_key() {
 # MARKETING_VERSION (CFBundleShortVersionString) is 1.0.<commit_count>.
 # CURRENT_PROJECT_VERSION (CFBundleVersion) is the same integer commit count.
 # ASC renders "<marketing> (<build>)", so a ship shows "1.0.259 (259)".
+# One exception, the guard below:  when the floor is at or above the commit
+# count, both numbers move up to <floor + 1> together, so the pair still
+# carries one number and that number no longer names a commit.
 #
 # The commit count replaces the UTC YYYYMMDDHHMM stamp for CFBundleVersion:
 #   - it names the EXACT commit a build came from, so a TestFlight or Sparkle
@@ -346,18 +353,16 @@ link_private_key() {
 #   - it is path-gated: neither macOS nor iOS bumps unless that platform.s
 #     native files changed (AGENT-SYNC.md, owner 2026-10-18)
 #
-# Sequence state: ${STATE_DIR}/build-seq-<app>.txt (atomic-mkdir-guarded).
-# NOTE: flock(1) does not exist on macOS — under `set -e` a flock call would
-# kill the subshell and yield an EMPTY sequence ("1.0."), so the mutex is an
-# atomic mkdir instead (portable to Apple bash 3.2, per the header contract).
+# The local build-seq counter is retired under the commit-count scheme, so it
+# is no longer one of the floor's sources:  local_seq() returns 0 and nothing
+# reads or advances the counter file.  The floor is
+#     max(App Store Connect, project.pbxproj)
+# and the number to ship is the commit count, raised past that floor by the
+# guard below.  App Store Connect is the only record that shipping advances.
 #
-# That local file is a CACHE, not the source of truth. It is one unbacked file
-# on one machine: if it is lost, reset, or a ship runs from a second machine,
-# a bare "+1" reuses a build number and App Store Connect rejects the upload as
-# a duplicate. So the next sequence is
-#     max(local cache, App Store Connect, project.pbxproj) + 1
-# which is monotonic against every record we have. Taking the max can skip a
-# number (harmless — numbers are free); reusing one is fatal.
+# The counter file and next_build_seq() are left in place for now, so a
+# vendored script stays close to the fleet original; neither is on the path
+# that decides a build number.
 local_seq() {
   # The build-seq counter is retired under the commit-count scheme:  the
   # ship script never advances it, so whatever is left in the file is a
@@ -777,8 +782,10 @@ fi
 # HEAD), EXPORT_ONLY, FORCE_SHIP, STATE_DIR. Nothing between here and the old
 # call site set up anything it reads, so moving it earlier drops no step. What
 # it now runs BEFORE is: PBXPROJ resolution, resolve_seq_floor (an App Store
-# Connect round trip), next_build_seq (the consuming step), the project-version
-# agreement check, --sync-project-version, load_secrets, and the output dirs.
+# Connect round trip), the project-version agreement check,
+# --sync-project-version, load_secrets, and the output dirs.  The counter
+# step is gone from that list:  the local build-seq counter is retired, so no
+# number is consumed from a cache any more.
 # The dirty-worktree check stays ahead of the gate so a dirty tree still fails
 # loudly rather than being masked by a quiet rate-limit skip.
 #
@@ -828,9 +835,10 @@ if [[ -n "$UPLOAD_ONLY_IPA" ]]; then
   log "version: taken from the existing IPA (--upload-only); sequence neither consulted nor consumed"
 elif [[ -n "$FORCE_BUILD" || -n "$FORCE_VERSION" ]]; then
   # Explicit operator override: honour exactly what was asked.  A bare --version
-  # still gets an auto build number from the repo commit count, which is higher
-  # than anything already uploaded — that is the whole point of the scheme, so an
-  # operator picking the marketing version does not have to reason about it.
+  # still gets an auto build number from the repo commit count, so an operator
+  # picking the marketing version does not have to reason about it.  The commit
+  # count is usually higher than anything already uploaded, but not always:  the
+  # floor below raises the build number when it is not.
   MARKETING="${FORCE_VERSION:-$DEFAULT_MARKETING}"
   if [[ -n "$FORCE_BUILD" ]]; then
     # An explicit --build is honoured exactly.
@@ -900,8 +908,8 @@ else
   # repeated (version, build) pair, so never ship at or below the known floor.
   #
   # When the guard fires, MARKETING moves with BUILD_NUM.  The invariant is
-  # that the two always describe the same commit count, so leaving MARKETING
-  # at the raw count would record a version whose build does not match it.
+  # that the two always carry the same number, so leaving MARKETING at the
+  # raw count would record a version whose build does not match it.
   if [[ "$SEQ_FLOOR" -ge "$BUILD_NUM" ]]; then
     BUILD_NUM="$((SEQ_FLOOR + 1))"
     MARKETING="${MARKETING_PREFIX}.${BUILD_NUM}"
