@@ -825,9 +825,9 @@ if [[ -n "$UPLOAD_ONLY_IPA" ]]; then
   BUILD_NUM="(from IPA)"
   log "version: taken from the existing IPA (--upload-only); sequence neither consulted nor consumed"
 elif [[ -n "$FORCE_BUILD" || -n "$FORCE_VERSION" ]]; then
-  # Explicit operator override: honour exactly what was asked. A bare --version
-  # still gets an auto timestamp build number, which is always higher than
-  # anything already uploaded — that is the whole point of the scheme, so an
+  # Explicit operator override: honour exactly what was asked.  A bare --version
+  # still gets an auto build number from the repo commit count, which is higher
+  # than anything already uploaded — that is the whole point of the scheme, so an
   # operator picking the marketing version does not have to reason about it.
   MARKETING="${FORCE_VERSION:-$DEFAULT_MARKETING}"
   BUILD_NUM="${FORCE_BUILD:-$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || date -u +%Y%m%d%H%M)}"
@@ -835,12 +835,25 @@ elif [[ -n "$FORCE_BUILD" || -n "$FORCE_VERSION" ]]; then
   # floor: --version against an already-shipped HEAD would otherwise ship a
   # build at or below what App Store Connect already holds for that train.
   if [[ -z "$FORCE_BUILD" ]]; then
-    _of_floor="$(resolve_seq_floor "$MARKETING_PREFIX" "$PBXPROJ" "$PLATFORM" 2>/dev/null || echo 0)"
-    [[ "$_of_floor" =~ ^[0-9]+$ ]] || _of_floor=0
+    # Propagate the floor failure.  Coercing it to 0 would let an
+    # unreachable App Store Connect pass as "floor 0", so the build number
+    # would stay at the commit count and could repeat a pair ASC already
+    # holds.  The auto path below already refuses to ship in that case.
+    _of_floor="$(resolve_seq_floor "$MARKETING_PREFIX" "$PBXPROJ" "$PLATFORM")" \
+      || die "override path could not resolve the build floor; refusing to ship"
+    [[ "$_of_floor" =~ ^[0-9]+$ ]] || die "override floor is not a number: ${_of_floor}"
     if [[ "$_of_floor" -ge "$BUILD_NUM" ]]; then
       BUILD_NUM="$((_of_floor + 1))"
       log "build: override would repeat an already-shipped build; using ${BUILD_NUM} instead"
     fi
+  fi
+  # The shipped pair must describe one number.  Unless the operator pinned
+  # a marketing version, MARKETING follows the build, so the ship is
+  # 1.0.N (N) rather than a version and a build that disagree.  An explicit
+  # --version names a train and is honoured exactly; the floor above still
+  # keeps the build unique inside that train.
+  if [[ -z "$FORCE_VERSION" ]]; then
+    MARKETING="${MARKETING_PREFIX}.${BUILD_NUM}"
   fi
   log "version: operator override (--build/--version); sequence not consulted"
 else
