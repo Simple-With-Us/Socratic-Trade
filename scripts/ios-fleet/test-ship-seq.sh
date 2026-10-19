@@ -14,7 +14,7 @@
 #      lands back in an older marketing train.
 #
 # Everything runs offline against scratch state:
-#   HOME                -> scratch (so ~/.secrets is absent and App Store
+#   HOME                -> scratch (so no real home files exist and App Store
 #                          Connect is never contacted; also makes it impossible
 #                          for a test to touch the real ~/.cache/ios-fleet)
 #   IOS_FLEET_STATE_DIR -> scratch sequence + last-ship files
@@ -38,6 +38,8 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/ios-fleet-seq-test.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 FAKE_HOME="${WORK}/home"
+# No fleet-secrets in tests:  a missing binary makes ASC credentials absent, never Infisical.
+export FLEET_SECRETS="${WORK}/no-fleet-secrets"
 FAKE_BIN="${WORK}/bin"
 STATE="${WORK}/state"
 REPO="${WORK}/repo"

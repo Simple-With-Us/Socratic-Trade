@@ -5,7 +5,7 @@ name: iOS TestFlight ship
 # ios-build.yml. Do not run xcodebuild locally. Do not restart the retired
 # self-hosted mac-xcode26-socratic runner or /Users/jay/apps/ios-fleet.
 #
-# Signing: scripts/ios-appstore-gm-prepare.sh writes ~/.secrets from Infisical prod
+# Signing: scripts/ios-appstore-gm-prepare.sh imports the signing identity from Infisical prod
 # (identity stays on GitHub; leftover GH ASC_/IOS_DIST_ for later cleanup) (same names as Congress.Trade: ASC_KEY_ID, ASC_ISSUER_ID,
 # ASC_KEY_P8, IOS_DIST_P12_BASE64, IOS_DIST_P12_PASSWORD). Never mint a new
 # App Store Connect key. The fleet script also declares export compliance

@@ -4,8 +4,9 @@
  * built-in crypto (ES256 JWT signing) and fetch (Node 18+).
  *
  * Auth: resolveAscCredentials() reads ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH
- * from process.env first, then an optional secrets file when the caller passes
- * envPath or sets ASC_SECRETS_ENV (never prints values).
+ * from process.env first, then `fleet-secrets get` (Infisical /asc: ASC_KEY_ID,
+ * ASC_ISSUER_ID, ASC_KEY_P8) when env is missing or the key file does not exist.
+ * Nothing reads ~/.secrets (AFC-359).  Never prints values.
  *
  * Usage:
  *   node asc-api.mjs GET /v1/apps
@@ -20,53 +21,50 @@
 import { readFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createSign } from "node:crypto";
+import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 
-function loadEnvFile(path) {
-  const text = readFileSync(path, "utf8");
-  const env = {};
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq === -1) continue;
-    env[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+const INFISICAL_ASC_FOLDER = "/asc";
+
+/**
+ * Read one value from Infisical Fleet-OPS through `fleet-secrets get`.  FLEET_SECRETS
+ * overrides the binary (tests inject a fake).  Returns "" when the CLI is absent,
+ * the key is absent, or the call fails.  Never logs stdout or stderr.
+ */
+function fleetSecret(name, folder = INFISICAL_ASC_FOLDER) {
+  const bin = process.env.FLEET_SECRETS || join(homedir(), ".local", "bin", "fleet-secrets");
+  try {
+    return execFileSync(bin, ["get", name, "--path", folder], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 30000
+    })
+      .replace(/\r?\n$/, "")
+      .trim();
+  } catch {
+    return "";
   }
-  return env;
 }
 
 /**
- * Prefer process.env over an optional secrets file. No implicit ~/.secrets default (Kody rule 33).
- * File fallback runs only when envPath is passed or ASC_SECRETS_ENV is set (ship-testflight.sh
- * exports ASC_SECRETS_ENV after sourcing SECRETS_ENV; hosted CI uses process.env ASC_* only).
+ * Prefer process.env, then Infisical `/asc` through fleet-secrets.  Hosted CI uses
+ * process.env ASC_* only (no fleet-secrets there).  keyPem is the .p8 contents,
+ * set only when ASC_KEY_PATH is unset or names a missing file.
  */
-export function resolveAscCredentials(envPath) {
-  const secretsFile =
-    envPath != null && String(envPath).trim() !== ""
-      ? String(envPath).trim()
-      : process.env.ASC_SECRETS_ENV != null && String(process.env.ASC_SECRETS_ENV).trim() !== ""
-        ? String(process.env.ASC_SECRETS_ENV).trim()
-        : undefined;
-  let fileEnv = {};
-  if (secretsFile && existsSync(secretsFile)) {
-    try {
-      fileEnv = loadEnvFile(secretsFile);
-    } catch {
-      fileEnv = {};
-    }
-  }
-  const pick = (name) => {
-    const fromEnv = process.env[name];
-    if (fromEnv != null && String(fromEnv).trim() !== "") return String(fromEnv).trim();
-    const fromFile = fileEnv[name];
-    if (fromFile != null && String(fromFile).trim() !== "") return String(fromFile).trim();
-    return "";
+export function resolveAscCredentials() {
+  const fromEnv = (name) => {
+    const v = process.env[name];
+    return v != null && String(v).trim() !== "" ? String(v).trim() : "";
   };
-  const keyId = pick("ASC_KEY_ID");
-  const issuerId = pick("ASC_ISSUER_ID");
-  const keyPath = pick("ASC_KEY_PATH");
-  return { keyId, issuerId, keyPath, envPath: secretsFile ?? "" };
+  const keyId = fromEnv("ASC_KEY_ID") || fleetSecret("ASC_KEY_ID");
+  const issuerId = fromEnv("ASC_ISSUER_ID") || fleetSecret("ASC_ISSUER_ID");
+  const keyPath = fromEnv("ASC_KEY_PATH");
+  let keyPem = "";
+  if (!keyPath || !existsSync(keyPath)) {
+    keyPem = (fromEnv("ASC_KEY_P8") || fleetSecret("ASC_KEY_P8")).replace(/\\n/g, "\n");
+  }
+  return { keyId, issuerId, keyPath, keyPem };
 }
 
 function base64url(input) {
@@ -408,18 +406,18 @@ async function resolveAppId(api, bundleId) {
 }
 
 async function main() {
-  const { keyId, issuerId, keyPath, envPath } = resolveAscCredentials();
-  if (!keyId || !issuerId || !keyPath) {
+  const { keyId, issuerId, keyPath, keyPem } = resolveAscCredentials();
+  if (!keyId || !issuerId || (!keyPath && !keyPem)) {
     console.error(
-      "Missing ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH (set in process env or ASC_SECRETS_ENV file)"
+      "Missing ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH in process env, and Infisical /asc (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8) is unavailable via fleet-secrets"
     );
     process.exit(1);
   }
-  if (!existsSync(keyPath)) {
-    console.error(`ASC_KEY_PATH is set but the key file is missing (env file ${envPath})`);
+  if (!keyPem && !existsSync(keyPath)) {
+    console.error("ASC_KEY_PATH is set but the key file is missing");
     process.exit(1);
   }
-  const privateKeyPem = readFileSync(keyPath, "utf8");
+  const privateKeyPem = keyPem || readFileSync(keyPath, "utf8");
   const token = signJwt({ keyId, issuerId, privateKeyPem });
 
   const [method, path, body, arg4] = process.argv.slice(2);
