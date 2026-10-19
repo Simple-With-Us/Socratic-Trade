@@ -5,7 +5,6 @@ import { llmRouteFor } from "./llm-route";
 // and the catch-all listUsers helper.
 import "server-only";
 import crypto from "crypto";
-import { existsSync, readFileSync } from "fs";
 import { getDb, audit } from "./db";
 import { normalizeSymbol } from "./money";
 import { registerPlanTierLookup } from "./provider-tier-plan";
@@ -30,39 +29,11 @@ import { invalidateDashboardSnapshotCache } from "./dashboard-snapshot-cache";
 
 // ── Field-Level Encryption ──────────────────────────────────────────────────
 
-// Load the bootstrap-identity handoff file (Infisical client credentials + ALIASES only) for
-// local development. Production uses Infisical exclusively — see docs/secrets.md. The chmod-600
-// `~/.secrets/global-api-keys` file is the documented owner-side bootstrap identity store, NOT a
-// `.env` file: a working tree with no local dotenv file is the new contract as of 2026-09-18
-// (PR `cursor/strict-infisical-no-env-files`). For dev/CI/cloud-agent seats, run
-// `npm run dev:secrets` (Infisical runner) instead of `npm run dev` plain.
-if (process.env.NODE_ENV !== "test" && !process.env.VITEST && process.env.NODE_ENV !== "production" && !process.env.COOLIFY_PROD_PHASE2) {
-  const envPaths = [
-    "/Users/jay/.secrets/global-api-keys.env",
-    "/Users/jay/.secrets/global-api-keys"
-  ];
-  for (const envPath of envPaths) {
-    try {
-      if (existsSync(envPath)) {
-        const content = readFileSync(envPath, "utf8");
-        for (const line of content.split("\n")) {
-          const match = line.match(/^\s*([\w.-]+)\s*=\s*(.*)?\s*$/);
-          if (match && match[1]) {
-            const key = match[1];
-            if (!process.env[key]) {
-              let value = match[2] || "";
-              if (value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
-              if (value.startsWith("'") && value.endsWith("'")) value = value.slice(1, -1);
-              process.env[key] = value;
-            }
-          }
-        }
-      }
-    } catch {
-      // Ignore error
-    }
-  }
-}
+// No secrets file is loaded here.  Dev reads `process.env` only;  run `npm run dev:secrets`
+// (the Infisical runner) to get keys, which resolves the bootstrap machine identity from
+// `process.env` or the macOS login Keychain (service `socratic-trade-bootstrap`) in
+// scripts/infisical-bootstrap-env.mjs.  The retired flat key file must not
+// be read (owner, 2026-10-18, OPS-818).
 
 const IS_TEST_ENV = process.env.NODE_ENV === "test" || !!process.env.VITEST;
 

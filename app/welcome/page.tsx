@@ -253,7 +253,23 @@ export default function WelcomePage() {
                 className="inline-flex items-center gap-1.5 align-middle hover:text-muted focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2"
               >
                 <span>From</span>
-                <img src="/swu-logo-wide.webp" alt="Simple With Us by Jay Wedgeworth" width={288} height={30} className="h-auto max-w-[calc(100vw-92px)] rounded-sm bg-white" />
+                <span className="block w-[288px] max-w-[calc(100vw-92px)]">
+                  <img
+                    src="/swu-wordmark-light.webp"
+                    alt="Simple With Us by Jay Wedgeworth"
+                    width={288}
+                    height={30}
+                    className="h-auto w-full dark:hidden"
+                  />
+                  <img
+                    src="/swu-wordmark-dark.webp"
+                    alt=""
+                    aria-hidden
+                    width={288}
+                    height={30}
+                    className="hidden h-auto w-full dark:block"
+                  />
+                </span>
               </a>
             </p>
           </div>

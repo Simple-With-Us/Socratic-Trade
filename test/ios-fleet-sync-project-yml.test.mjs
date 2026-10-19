@@ -100,7 +100,7 @@ settings:
   base:
     SWIFT_VERSION: "5.10"
     MARKETING_VERSION: "1.0.7"
-    CURRENT_PROJECT_VERSION: "202608010000"
+    CURRENT_PROJECT_VERSION: "7"
     INFOPLIST_KEY_CFBundleDisplayName: "Socratic Trade"
 targets:
   SocraticTrade:
@@ -108,21 +108,21 @@ targets:
 `;
 
   it("readPbxprojVersion pulls both keys in one pass", () => {
-    const pbx = `buildSettings = { MARKETING_VERSION = "1.0.8"; CURRENT_PROJECT_VERSION = "202608132022"; };`;
-    expect(readPbxprojVersion(pbx)).toEqual({ marketing: "1.0.8", build: "202608132022" });
+    const pbx = `buildSettings = { MARKETING_VERSION = "1.0.8"; CURRENT_PROJECT_VERSION = "8"; };`;
+    expect(readPbxprojVersion(pbx)).toEqual({ marketing: "1.0.8", build: "8" });
   });
 
   it("readPbxprojVersion tolerates unquoted values", () => {
-    const pbx = `MARKETING_VERSION = 1.0.8; CURRENT_PROJECT_VERSION = 202608132022;`;
-    expect(readPbxprojVersion(pbx)).toEqual({ marketing: "1.0.8", build: "202608132022" });
+    const pbx = `MARKETING_VERSION = 1.0.8; CURRENT_PROJECT_VERSION = 8;`;
+    expect(readPbxprojVersion(pbx)).toEqual({ marketing: "1.0.8", build: "8" });
   });
 
   it("patchProjectYaml updates both fields and preserves indentation + trailing whitespace", () => {
-    const { text, found } = patchProjectYaml(SAMPLE, "1.0.8", "202608132022");
+    const { text, found } = patchProjectYaml(SAMPLE, "1.0.8", "8");
     expect(found.marketing).toBe(true);
     expect(found.build).toBe(true);
     expect(text).toContain('MARKETING_VERSION: "1.0.8"');
-    expect(text).toContain('CURRENT_PROJECT_VERSION: "202608132022"');
+    expect(text).toContain('CURRENT_PROJECT_VERSION: "8"');
     // Indentation + neighbors preserved.
     expect(text).toContain('    SWIFT_VERSION: "5.10"\n');
     expect(text).toContain('    INFOPLIST_KEY_CFBundleDisplayName: "Socratic Trade"');
@@ -139,7 +139,7 @@ targets:
   });
 
   it("patchProjectYaml is a no-op when both fields already match (idempotent)", () => {
-    const { text, found } = patchProjectYaml(SAMPLE, "1.0.7", "202608010000");
+    const { text, found } = patchProjectYaml(SAMPLE, "1.0.7", "7");
     expect(found.marketing).toBe(true);
     expect(found.build).toBe(true);
     expect(text).toBe(SAMPLE);

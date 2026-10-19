@@ -233,9 +233,13 @@ current Hetzner host (app env lives in Coolify's DB, not a `/data/coolify` tree)
 of truth for every secret. No `.env`, `.env.local`, `.env.*`, `.env.yml`, or `.env.yaml` anywhere
 — the only env-shaped file in the repo is the committed `.env.example`, which is bootstrap-only
 (Infisical machine identity + `ENCRYPTION_KEY` + the optional `REQUIRE_SECRETS_MANAGER` arming
-flag). The dev-only `.env.local` loader in `src/lib/db-api-keys.ts:32-60` is gone (kept the
-`~/.secrets/global-api-keys` handoff paths — that's the documented owner-side identity store,
-NOT an `.env` file). `scripts/cloud-setup.sh` no longer seeds `.env.local`. Prod
+flag). The dev-only `.env.local` loader in `src/lib/db-api-keys.ts:32-60` is gone (2026-09-18 kept the
+`~/.secrets/global-api-keys` handoff paths as the owner-side identity store, NOT an `.env` file).
+**Update (owner, 2026-10-18, OPS-818):** the bootstrap machine identity now lives in the macOS
+login Keychain (generic passwords, service `socratic-trade-bootstrap`, account = env var name,
+read only by `scripts/infisical-bootstrap-env.mjs`, process env first). `~/.secrets/global-api-keys`
+is retired and must not be read by any script, loader, hook, or agent; the `db-api-keys.ts` dev
+loader that read it is deleted. Everything else in this rule stands. `scripts/cloud-setup.sh` no longer seeds `.env.local`. Prod
 `scripts/coolify-prod-start.sh` phase-2 explicitly exports `REQUIRE_SECRETS_MANAGER=1` so the
 fail-closed boot guard in `src/lib/secrets-source.ts` (called from `instrumentation.ts:51`)
 fires visibly from the boot script. Local dev: use `npm run dev:secrets`. Plain `npm run dev`
@@ -693,7 +697,7 @@ paternalism that keeps creeping back in from every agent (Claude, Codex, others)
   - If a key is missing, wrong, exhausted, or rejected: STOP and tell the owner
     what you observed and which key you believe is in play (identify it by its
     masked first-8/last-4 preview — see below — never by pasting a value). The
-    owner supplies keys via the `chmod 600` handoff in `/Users/jay/.secrets/`.
+    owner supplies keys through Infisical Fleet-OPS (read with `fleet-secrets get`;  nothing reads `~/.secrets`, AFC-359).
     Waiting is always cheaper than a second key.
   - To see WHICH key is serving without ever revealing one: the Connections page
     (`/console/connections#api-keys`) shows the masked preview of the key that

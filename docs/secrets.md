@@ -13,7 +13,7 @@
 
 | Layer | Provider | What's there | Examples |
 |---|---|---|---|
-| Bootstrap (the box) | `~/.secrets/global-api-keys` (chmod 600) + `process.env` | Infisical machine identity only — Client ID + Client Secret (universal auth) | `INFISICAL_CLIENT_ID`, `INFISICAL_CLIENT_SECRET`, `INFISICAL_TOKEN`, `INFISICAL_PROJECT_ID`, `INFISICAL_ENV`, `ENCRYPTION_KEY` |
+| Bootstrap (the box) | macOS login Keychain (service `socratic-trade-bootstrap`) + `process.env` | Infisical machine identity only — Client ID + Client Secret (universal auth) | `INFISICAL_CLIENT_ID`, `INFISICAL_CLIENT_SECRET`, `INFISICAL_TOKEN`, `INFISICAL_PROJECT_ID`, `INFISICAL_ENV`, `ENCRYPTION_KEY` |
 | Shared fleet | Infisical `shared` project | Coordination keys shared across ST/CT/UM | `AGENT_SYNC_*`, Slack bot token, shared Coolify read-only stats token |
 | App runtime | Infisical `Socratic-Trade` `prod` `/` (via runner) | Broker creds, provider keys, RAG fuses, feature flags, telemetry tokens | `ALPACA_*`, `FINNHUB_*`, `MASSIVE_*`, `SENTRY_DSN`, `RAG_*`, `EARNINGSCALLS_*` |
 | Per-user | User Settings (`user_settings` row + `user_api_keys` table) | User-scoped runtime data | per-account LLM model, per-user LLM key, per-account policy, per-user Data source opt-ins |
@@ -53,23 +53,35 @@ precedence source, a complete Client ID + Secret pair wins over a stale token.
 ### Local machine-identity bootstrap
 
 `scripts/infisical-run.mjs` must authenticate before Next starts, so it resolves its own small
-bootstrap set first. Precedence is explicit process environment, then the owner-local
-`~/.secrets/global-api-keys` file (chmod 600, fixed path, not overridable). The bootstrap handoff
-file is the documented identity store for cloud-agent seats that boot without an Infisical round
-trip; it is NOT a `.env` file and is not blocked by `test/no-env-loader-or-dotenv-yaml.test.ts`.
+bootstrap set first. Precedence is explicit process environment, then `.env.local` runner controls,
+then (macOS only) the owner's login Keychain. The Keychain is the documented identity store for the
+owner's Mac; cloud VMs and CI supply the same names through the process environment and skip the
+Keychain quietly. `~/.secrets/global-api-keys` is retired and is never read (owner, 2026-10-18,
+OPS-818; it overrides the 2026-09-18 rule that kept that file as the bootstrap identity store).
 
-Only recognized Infisical bootstrap assignments are parsed as inert dotenv data; quote state
-prevents key-looking lines inside unrelated multiline values from being reinterpreted; indented /
-unrelated one-line data and provider/API keys are ignored and never copied into `process.env` or
-child processes. The file is an assignment store, not a shell program: multiline shell blocks and
-heredocs fail closed rather than being approximately parsed.
+Keychain layout: one generic password per name, service `socratic-trade-bootstrap`, account = the
+env var name (for example `INFISICAL_ST_CLIENT_ID`). Add or replace an item without putting the
+value on a command line by omitting the value after `-w`; `security` then prompts for it:
+
+```bash
+security add-generic-password -U -s socratic-trade-bootstrap -a INFISICAL_ST_CLIENT_ID -w
+security add-generic-password -U -s socratic-trade-bootstrap -a INFISICAL_ST_CLIENT_SECRET -w
+```
+
+The resolver reads each item with `security find-generic-password -s socratic-trade-bootstrap -a
+NAME -w` through a list-argv call (no shell), captures stdout, discards stderr, and treats a missing
+or unreadable item as absent. `scripts/predev-check.mjs` only checks that the items exist (no `-w`).
+Set `SOCRATIC_BOOTSTRAP_KEYCHAIN=off` to skip the Keychain entirely (the test suite does).
+
+Only the six recognized account names below are ever requested; provider/API keys are never read
+from the Keychain or copied into `process.env` or child processes.
 
 The generic runner names remain `INFISICAL_CLIENT_ID` + `INFISICAL_CLIENT_SECRET` for the app and
 `INFISICAL_SHARED_CLIENT_ID` + `INFISICAL_SHARED_CLIENT_SECRET` for the shared overlay when supplied
-through the process environment. The shared machine file is narrower: it accepts only
+through the process environment. The Keychain is narrower: it accepts only
 `INFIISICAL_ST_*` (the owner-provided extra-I spelling) or corrected `INFISICAL_ST_*` for this app,
 and `INFISICAL_CT_SHARED_*` for the shared project. It does not import generic app/shared names,
-tokens, project IDs, runtime controls, provider keys, or cross-app credentials from that broad file.
+tokens, project IDs, runtime controls, provider keys, or cross-app credentials from the Keychain.
 The resolver normalizes the selected pair in memory only, never prints/copies a value, and refuses a
 higher-precedence half-pair instead of combining fields across files.
 
@@ -92,14 +104,10 @@ restores the manager-winning `NODE_OPTIONS`; watch mode cannot inspect dynamic i
 the CLI spawns its child, so it deliberately discards an Infisical-injected `NODE_OPTIONS` and
 restores only the pre-Infisical host value after masking.
 
-The global path is fixed at `~/.secrets/global-api-keys`; an ambient `GLOBAL_API_KEYS_FILE` override
-is ignored and scrubbed (tests can dependency-inject a temporary path directly into the resolver).
-Before reading, the resolver checks `lstat`, opens with no-follow semantics, and verifies the opened
-descriptor still identifies the same current-user-owned regular file. It rejects live/broken
-symlinks, directories/devices/FIFOs, group/other permission bits, duplicate managed assignments, and
-files over 1 MiB. Managed assignments are parsed with Node's dotenv parser as inert data; quotes,
-command substitutions, backticks, semicolons, and other shell-looking text are never sourced or
-evaluated.
+An ambient `GLOBAL_API_KEYS_FILE` override from the retired flat-file design is ignored and
+scrubbed from the environment. Keychain lookups use `/usr/bin/security` with a fixed argv and a
+10-second timeout; no value is ever interpolated into a shell command, a log line, or an error.
+Errors name the Keychain service and the account to add, never a value.
 
 The Socratic-Trade project defaults to `39d93bb7-76f9-498c-8b50-a7def52e072f`. The shared project
 defaults to `18f563a3-9c88-454c-96eb-28fc9678f3ba` only when shared credentials are actually present
@@ -132,8 +140,8 @@ and throwaway clones. As of 2026-09-18:
 
 1. `npm ci` (deterministic install).
 2. Bootstrap check: `node scripts/infisical-bootstrap-env.mjs` resolves the Infisical machine
-   identity from process env OR `~/.secrets/global-api-keys` (if present). Cloud VMs without the
-   handoff file silently no-op here — keyless local UI work is fine; any LLM/broker provider needs
+   identity from process env OR the macOS login Keychain (macOS only). Cloud VMs have no Keychain
+   and silently no-op here — keyless local UI work is fine; any LLM/broker provider needs
    the identity in place.
 3. Slack coordination `SETUP` (SessionStart hook) — non-fatal skip on hiccup.
 5. Final echo: `npm run dev:secrets   (Infisical runner on :3000)`. Plain `npm run dev` is for
