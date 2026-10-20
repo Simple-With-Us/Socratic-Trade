@@ -15,7 +15,9 @@
  *    captured by exit-guard).  An exit that never wrote one -- SIGKILL, OOM kill, host restart, a
  *    healthcheck kill -- shows up on the NEXT boot as `prevUnclean: true`, which is itself the receipt.
  *  - The pure `assessRestartLoop` counts boots in a trailing window; `reportRestartLoop` raises a
- *    Sentry message and an admin alert when the count crosses the threshold.
+ *    Sentry message and an admin alert when the count crosses the threshold and at least one
+ *    predecessor in the window was not a clean deploy stop (143/SIGTERM after a real uptime).
+ *    A burst of clean redeploys alone never trips the detector.
  *
  * Scope discipline: this is best-effort observability.  Nothing here may ever throw into boot, block
  * boot on I/O other than two tiny synchronous file operations, or change a trading decision.  It is
@@ -33,6 +35,11 @@ export const BOOT_LEDGER_FILENAME = "boot-ledger.jsonl";
 export const DEFAULT_RESTART_LOOP_WINDOW_MINUTES = 45;
 /** Boots inside the window (including this one) at which we call it a loop. */
 export const DEFAULT_RESTART_LOOP_BOOT_THRESHOLD = 3;
+/**
+ * A predecessor that exited 143 (SIGTERM) after at least this many seconds is
+ * a clean deploy stop, not a crash: a redeploy does not count toward a loop.
+ */
+export const CLEAN_DEPLOY_MIN_UPTIME_SEC = 120;
 /** Ledger is trimmed to its newest KEEP lines once it exceeds MAX bytes. */
 export const BOOT_LEDGER_MAX_BYTES = 256 * 1024;
 export const BOOT_LEDGER_KEEP_LINES = 400;
@@ -82,6 +89,8 @@ export interface RestartLoopAssessment {
   bootsInWindow: number;
   /** Of those, boots whose predecessor never wrote an exit receipt. */
   uncleanPredecessorsInWindow: number;
+  /** Of those, boots whose predecessor was not a clean deploy stop. */
+  crashPredecessorsInWindow: number;
   windowMinutes: number;
   threshold: number;
   restartLoop: boolean;
@@ -165,13 +174,24 @@ export function assessRestartLoop(
   const boots = entries.filter((e): e is BootEntry => e.t === "boot");
 
   let uncleanPredecessorsInWindow = 0;
+  let crashPredecessorsInWindow = 0;
   const inWindow: BootEntry[] = [];
   for (let i = 0; i < boots.length; i++) {
     const ts = Date.parse(boots[i].ts);
     if (ts < windowStart) continue;
     inWindow.push(boots[i]);
     const predecessor = i > 0 ? boots[i - 1] : undefined;
-    if (predecessor && !exitByBoot.has(predecessor.bootId)) uncleanPredecessorsInWindow++;
+    if (!predecessor) continue;
+    const predecessorExit = exitByBoot.get(predecessor.bootId);
+    if (!predecessorExit) {
+      uncleanPredecessorsInWindow++;
+      crashPredecessorsInWindow++;
+      continue;
+    }
+    const cleanDeploy =
+      (predecessorExit.code === 143 || predecessorExit.signal === "SIGTERM") &&
+      predecessorExit.uptimeSec >= CLEAN_DEPLOY_MIN_UPTIME_SEC;
+    if (!cleanDeploy) crashPredecessorsInWindow++;
   }
 
   const current = boots[boots.length - 1];
@@ -180,9 +200,10 @@ export function assessRestartLoop(
   return {
     bootsInWindow: inWindow.length,
     uncleanPredecessorsInWindow,
+    crashPredecessorsInWindow,
     windowMinutes,
     threshold,
-    restartLoop: inWindow.length >= threshold,
+    restartLoop: inWindow.length >= threshold && crashPredecessorsInWindow > 0,
     lastExit,
     prevUnclean: predecessor !== undefined && current !== undefined && !exitByBoot.has(predecessor.bootId),
     firstBootInWindowTs: inWindow[0]?.ts ?? null
@@ -346,6 +367,7 @@ export async function reportRestartLoop(
         scope.setContext("restart-loop", {
           bootsInWindow: assessment.bootsInWindow,
           uncleanPredecessorsInWindow: assessment.uncleanPredecessorsInWindow,
+          crashPredecessorsInWindow: assessment.crashPredecessorsInWindow,
           windowMinutes: assessment.windowMinutes,
           threshold: assessment.threshold,
           prevUnclean: assessment.prevUnclean,

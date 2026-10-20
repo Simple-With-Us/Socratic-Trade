@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BOOT_LEDGER_KEEP_LINES,
   BOOT_LEDGER_MAX_BYTES,
+  CLEAN_DEPLOY_MIN_UPTIME_SEC,
   assessRestartLoop,
   bootLedgerActive,
   bootLedgerPath,
@@ -73,6 +74,31 @@ describe("assessRestartLoop (pure)", () => {
     expect(a.lastExit).toBeNull();
     expect(a.restartLoop).toBe(true);
     expect(describeRestartLoop(a)).toMatch(/NO exit receipt/);
+  });
+
+  it("does not call a burst of clean deploy stops a loop (ST-4559)", () => {
+    const entries = [
+      boot("a", T0 - 30 * MIN), exit("a", T0 - 20 * MIN, 143, { signal: "SIGTERM", uptimeSec: 600 }),
+      boot("b", T0 - 20 * MIN), exit("b", T0 - 10 * MIN, 143, { signal: "SIGTERM", uptimeSec: 594 }),
+      boot("c", T0 - 10 * MIN), exit("c", T0 - 1 * MIN, 143, { signal: "SIGTERM", uptimeSec: 540 }),
+      boot("d", T0)
+    ];
+    const a = assessRestartLoop(entries, T0);
+    expect(a.bootsInWindow).toBe(4);
+    expect(a.crashPredecessorsInWindow).toBe(0);
+    expect(a.restartLoop).toBe(false);
+    expect(CLEAN_DEPLOY_MIN_UPTIME_SEC).toBe(120);
+  });
+
+  it("still calls rapid short-lived SIGTERM boots a loop", () => {
+    const entries = [
+      boot("a", T0 - 20 * MIN), exit("a", T0 - 19 * MIN, 143, { signal: "SIGTERM", uptimeSec: 10 }),
+      boot("b", T0 - 10 * MIN), exit("b", T0 - 9 * MIN, 143, { signal: "SIGTERM", uptimeSec: 10 }),
+      boot("c", T0)
+    ];
+    const a = assessRestartLoop(entries, T0);
+    expect(a.crashPredecessorsInWindow).toBe(2);
+    expect(a.restartLoop).toBe(true);
   });
 
   it("honours a custom window and threshold", () => {
