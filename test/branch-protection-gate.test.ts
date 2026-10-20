@@ -274,8 +274,18 @@ describe("required contexts are not renamed out from under the ruleset", () => {
     // and the "Auto-merge PRs" check was red on every PR in this repo - arming never
     // happened for a PR that was not already armed. The queue's own "delete head
     // branches" setting owns that job (ST-4566), so the caller must not ask for it.
+    // Scope to the caller's auto-merge job and anchor to real input keys, so a
+    // prose comment mentioning delete_branch can neither satisfy the positive
+    // assertion nor trip the negative one (Kody review, PR #4893).
     const auto = workflow("auto-merge-prs.yml");
-    expect(auto).toMatch(/delete_branch:\s*false/);
-    expect(auto).not.toMatch(/delete_branch:\s*true/);
+    const job = jobBlock(auto, "auto-merge");
+    expect(job).toMatch(/^\s+delete_branch:\s*false\s*$/m);
+    expect(job).not.toMatch(/^\s+delete_branch:\s*true\s*$/m);
+    // The shared-dependency armer is a shell step, not the reusable: its gh CLI
+    // call must not pass --delete-branch either - the same refusal applies, and
+    // its `|| echo` would swallow the failure and leave the PR never armed.
+    const shared = workflow("auto-merge-shared-dependency.yml");
+    const sharedJob = jobBlock(shared, "auto-merge");
+    expect(sharedJob).not.toMatch(/gh pr merge[^\n]*--delete-branch/);
   });
 });
