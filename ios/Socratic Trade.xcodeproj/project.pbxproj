@@ -25,6 +25,7 @@
 		3D5C036934C466C235DAB70A /* Lato-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 552372DC3315B434227861EE /* Lato-Regular.ttf */; };
 		3F6D25500B614E3C6F0140E0 /* CoachMarkdownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0675693E793B52F16CA3C08 /* CoachMarkdownTests.swift */; };
 		4298F7ACB07D50EE61F0ECB9 /* MobileControlView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FD3EFCF82E664100A11FC33 /* MobileControlView.swift */; };
+		49FE826126D8BD1BB1A240C9 /* AccountScopeAndMoneyActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51634E17A82E7EADFC5FC5D9 /* AccountScopeAndMoneyActionTests.swift */; };
 		51FE4A579117BE3605C107D9 /* PreviewSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37C2568FFF3FB30F96619E8E /* PreviewSupport.swift */; };
 		5601AC0021A8D0D6F3C5E27F /* MobileAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89D3AB0C26BB7394334E998E /* MobileAPIClient.swift */; };
 		57D0CB9616F87E24C6148836 /* OrderCancel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F465E5B4A0E3C941A01A8640 /* OrderCancel.swift */; };
@@ -65,7 +66,9 @@
 		E51F3B135F00DDFD0E7D55A2 /* PushNotificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CD0F6E51E8A29D4714465B2 /* PushNotificationTests.swift */; };
 		E775D82245F3524DC339DCC4 /* AppTypography.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC9F509664B51F30B581932B /* AppTypography.swift */; };
 		EEFE88508B9B9CC94639E02C /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65E9A5E5A0273AC7B97E89D3 /* LoginView.swift */; };
+		F07C1986F69F420F6DF37D5F /* NYSEMarketSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3339FEA98F8D9E145B96D7D1 /* NYSEMarketSessionTests.swift */; };
 		FCF86D15E740C07E907B1F1D /* PolicyTighteningTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 245D98F7C0F747E857CB7226 /* PolicyTighteningTests.swift */; };
+		FE94351BC0D3300B127C9347 /* NYSEMarketSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95D3662EE42189D44702452B /* NYSEMarketSession.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -91,6 +94,7 @@
 		23A34A6694A3A24320E058E4 /* MobileModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileModelsTests.swift; sourceTree = "<group>"; };
 		245D98F7C0F747E857CB7226 /* PolicyTighteningTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PolicyTighteningTests.swift; sourceTree = "<group>"; };
 		31CAA55DF67299F539BE8ECC /* DeepLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepLink.swift; sourceTree = "<group>"; };
+		3339FEA98F8D9E145B96D7D1 /* NYSEMarketSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NYSEMarketSessionTests.swift; sourceTree = "<group>"; };
 		3677A7585B7699DCBD76615E /* CoachView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoachView.swift; sourceTree = "<group>"; };
 		3724E63D5409F8827C215758 /* AppUpdatePrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdatePrompt.swift; sourceTree = "<group>"; };
 		37C2568FFF3FB30F96619E8E /* PreviewSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewSupport.swift; sourceTree = "<group>"; };
@@ -103,6 +107,7 @@
 		50946B1368FEFB6B6B20116D /* SocraticTradeTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SocraticTradeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		5106B1DF419D29BCC1717594 /* ProposalPriceReview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProposalPriceReview.swift; sourceTree = "<group>"; };
 		511D91AD0BC588F44749DC59 /* CandleWordmarkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandleWordmarkTests.swift; sourceTree = "<group>"; };
+		51634E17A82E7EADFC5FC5D9 /* AccountScopeAndMoneyActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountScopeAndMoneyActionTests.swift; sourceTree = "<group>"; };
 		552372DC3315B434227861EE /* Lato-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Lato-Regular.ttf"; sourceTree = "<group>"; };
 		5A60E3A755915BCEE4FB04DB /* SentryTelemetry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SentryTelemetry.swift; sourceTree = "<group>"; };
 		5F94CABB7BE5CB871622BADD /* SocraticTradeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocraticTradeApp.swift; sourceTree = "<group>"; };
@@ -120,6 +125,7 @@
 		8B407C6306CC293CF54036A1 /* MobileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileStore.swift; sourceTree = "<group>"; };
 		8CD0F6E51E8A29D4714465B2 /* PushNotificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotificationTests.swift; sourceTree = "<group>"; };
 		8FD3EFCF82E664100A11FC33 /* MobileControlView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileControlView.swift; sourceTree = "<group>"; };
+		95D3662EE42189D44702452B /* NYSEMarketSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NYSEMarketSession.swift; sourceTree = "<group>"; };
 		9E30F86884C90A0B81A3377F /* PolicyTightening.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PolicyTightening.swift; sourceTree = "<group>"; };
 		A1CC6784F07066C7C065671F /* AgentControlPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentControlPlan.swift; sourceTree = "<group>"; };
 		A2A1EE920003A215DF994CE9 /* AppUpdatePromptTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdatePromptTests.swift; sourceTree = "<group>"; };
@@ -136,6 +142,7 @@
 		E42337424805A621FADCC241 /* LayoutMathTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayoutMathTests.swift; sourceTree = "<group>"; };
 		EC1C49575DCB6DA8E8D65CD7 /* ProposalsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProposalsView.swift; sourceTree = "<group>"; };
 		EF789FDEB98C62C5D8A12A7F /* RunStateDerivationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunStateDerivationTests.swift; sourceTree = "<group>"; };
+		F01C6C86D99E52515B4BC13D /* Sentry.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Sentry.xcconfig; sourceTree = "<group>"; };
 		F19EB749596630BC4A2EF149 /* ScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanView.swift; sourceTree = "<group>"; };
 		F465E5B4A0E3C941A01A8640 /* OrderCancel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrderCancel.swift; sourceTree = "<group>"; };
 		FC9F509664B51F30B581932B /* AppTypography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppTypography.swift; sourceTree = "<group>"; };
@@ -156,6 +163,7 @@
 		008B71438D3CFDB4D27347DF = {
 			isa = PBXGroup;
 			children = (
+				1FE16A818D5603FF31543F5D /* Config */,
 				062CEF8FEA3EFD091CDD619D /* SocraticTrade */,
 				6C5E76B26EEA71F469806853 /* SocraticTradeTests */,
 				20E63D98EDABA6D29C136796 /* Products */,
@@ -188,6 +196,7 @@
 				8FD3EFCF82E664100A11FC33 /* MobileControlView.swift */,
 				46F9B58AE392D9B952212857 /* MobileModels.swift */,
 				8B407C6306CC293CF54036A1 /* MobileStore.swift */,
+				95D3662EE42189D44702452B /* NYSEMarketSession.swift */,
 				F465E5B4A0E3C941A01A8640 /* OrderCancel.swift */,
 				9E30F86884C90A0B81A3377F /* PolicyTightening.swift */,
 				37C2568FFF3FB30F96619E8E /* PreviewSupport.swift */,
@@ -204,6 +213,14 @@
 			path = SocraticTrade;
 			sourceTree = "<group>";
 		};
+		1FE16A818D5603FF31543F5D /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				F01C6C86D99E52515B4BC13D /* Sentry.xcconfig */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
 		20E63D98EDABA6D29C136796 /* Products */ = {
 			isa = PBXGroup;
 			children = (
@@ -218,6 +235,7 @@
 			children = (
 				9320706A10B83DA3F02D6628 /* Fixtures */,
 				1104431D2656738961FF9E2E /* AccountMetricsTests.swift */,
+				51634E17A82E7EADFC5FC5D9 /* AccountScopeAndMoneyActionTests.swift */,
 				005E737FB143D683852FE490 /* AgentControlPlanTests.swift */,
 				40B15024373F200D860968ED /* AppTypographyTests.swift */,
 				A2A1EE920003A215DF994CE9 /* AppUpdatePromptTests.swift */,
@@ -228,6 +246,7 @@
 				1A1EC10518F9629B12DBFA3D /* DeskModelsTests.swift */,
 				E42337424805A621FADCC241 /* LayoutMathTests.swift */,
 				23A34A6694A3A24320E058E4 /* MobileModelsTests.swift */,
+				3339FEA98F8D9E145B96D7D1 /* NYSEMarketSessionTests.swift */,
 				C5557CAA4F581AB7FB8F8234 /* OrderCancelTests.swift */,
 				245D98F7C0F747E857CB7226 /* PolicyTighteningTests.swift */,
 				6EA161FF394BB007D143D5DB /* ProposalPriceReviewTests.swift */,
@@ -373,6 +392,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				85DC43A7311763C033D46DC8 /* AccountMetricsTests.swift in Sources */,
+				49FE826126D8BD1BB1A240C9 /* AccountScopeAndMoneyActionTests.swift in Sources */,
 				DDE2520C7046DA020D8DB9C0 /* AgentControlPlanTests.swift in Sources */,
 				8FC9AE92C498E935EB550AAF /* AppTypographyTests.swift in Sources */,
 				63208ADA82E6CF5D9A88E88E /* AppUpdatePromptTests.swift in Sources */,
@@ -383,6 +403,7 @@
 				8299FA4E767A17105773101F /* DeskModelsTests.swift in Sources */,
 				CE245EECE0DEF2C262394F6B /* LayoutMathTests.swift in Sources */,
 				8C402A017E39D5CF92861A85 /* MobileModelsTests.swift in Sources */,
+				F07C1986F69F420F6DF37D5F /* NYSEMarketSessionTests.swift in Sources */,
 				6B532570C7BE012A3EF3D070 /* OrderCancelTests.swift in Sources */,
 				FCF86D15E740C07E907B1F1D /* PolicyTighteningTests.swift in Sources */,
 				DC9652BB88B557D5B7CED5FE /* ProposalPriceReviewTests.swift in Sources */,
@@ -418,6 +439,7 @@
 				4298F7ACB07D50EE61F0ECB9 /* MobileControlView.swift in Sources */,
 				97E7970C650099475A424225 /* MobileModels.swift in Sources */,
 				CF7E04F6E303A90DA3947D4A /* MobileStore.swift in Sources */,
+				FE94351BC0D3300B127C9347 /* NYSEMarketSession.swift in Sources */,
 				57D0CB9616F87E24C6148836 /* OrderCancel.swift in Sources */,
 				A4213D46A2C04A5211D908CA /* PolicyTightening.swift in Sources */,
 				51FE4A579117BE3605C107D9 /* PreviewSupport.swift in Sources */,
@@ -498,7 +520,6 @@
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
-				SENTRY_DSN = "";
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.9;
@@ -586,7 +607,6 @@
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
-				SENTRY_DSN = "";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.9;
@@ -614,6 +634,7 @@
 		};
 		D6D532F502E99C854D613F23 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = F01C6C86D99E52515B4BC13D /* Sentry.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = SocraticTrade/SocraticTrade.entitlements;
@@ -636,6 +657,7 @@
 		};
 		F98A8722D53DE02D2347A71D /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = F01C6C86D99E52515B4BC13D /* Sentry.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = SocraticTrade/SocraticTrade.entitlements;
@@ -695,7 +717,7 @@
 			repositoryURL = "https://github.com/getsentry/sentry-cocoa.git";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 9.30.0;
+				minimumVersion = 9.30.2;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
