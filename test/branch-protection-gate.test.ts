@@ -266,4 +266,16 @@ describe("required contexts are not renamed out from under the ruleset", () => {
     const gate = readFileSync(join(repoRoot, "scripts", "pr-touches-codeowners-paths.sh"), "utf8");
     expect(gate).toContain("CODEOWNERS");
   });
+
+  it("does not ask the armer to delete the branch while the merge queue is on", () => {
+    // The merge queue is on (repo ruleset 17945518) and GitHub refuses
+    // `--delete-branch` when a queue is enabled: "Cannot use -d or --delete-branch when
+    // merge queue enabled". The armer passed the flag anyway, so its arm step exited 1
+    // and the "Auto-merge PRs" check was red on every PR in this repo - arming never
+    // happened for a PR that was not already armed. The queue's own "delete head
+    // branches" setting owns that job (ST-4566), so the caller must not ask for it.
+    const auto = workflow("auto-merge-prs.yml");
+    expect(auto).toMatch(/delete_branch:\s*false/);
+    expect(auto).not.toMatch(/delete_branch:\s*true/);
+  });
 });
