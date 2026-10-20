@@ -3,7 +3,7 @@
  * Vendor-era shared-package pin check (ST / UM / CT triangle).
  *
  * Socratic-Trade and Usage-Monitor npm-pin
- * github:jaywedgeworth22/congress-trading-shared#vX.Y.Z.
+ * github:Simple-With-Us/congress-trading-shared#vX.Y.Z.
  * Congress.Trade vendors src/ and records the release in
  * app/vendor/congress-trading-shared/VENDOR-PROVENANCE.md. CT must NOT
  * reintroduce an npm dependency on the package.
@@ -145,7 +145,7 @@ export function comparePins(input) {
   }
   if (input.ctUnreadable) {
     problems.push(
-      "cannot read private Congress.Trade vendor provenance; set GH_PACKAGES_TOKEN (repo secret, read access to jaywedgeworth22/Congress.Trade)"
+      "cannot read private Congress.Trade vendor provenance; set GH_PACKAGES_TOKEN (repo secret, read access to Simple-With-Us/Congress.Trade)"
     );
     return { problems, stV, umV, ctV: "" };
   }
@@ -184,9 +184,9 @@ function main() {
   let umSpec = "";
   let umLockSha = "";
   try {
-    const umPkg = JSON.parse(ghRaw("jaywedgeworth22/Usage-Monitor", "package.json", umToken));
+    const umPkg = JSON.parse(ghRaw("Simple-With-Us/Usage-Monitor", "package.json", umToken));
     umSpec = packageSpec(umPkg);
-    const umLock = JSON.parse(ghRaw("jaywedgeworth22/Usage-Monitor", "package-lock.json", umToken));
+    const umLock = JSON.parse(ghRaw("Simple-With-Us/Usage-Monitor", "package-lock.json", umToken));
     umLockSha = lockResolvedSha(umLock);
     console.log(`UM spec: ${umSpec || "(missing)"}`);
     if (umLockSha) console.log(`UM lock SHA: ${umLockSha}`);
@@ -210,7 +210,7 @@ function main() {
     for (const token of ctTokens) {
       try {
         const provenance = ghRaw(
-          "jaywedgeworth22/Congress.Trade",
+          "Simple-With-Us/Congress.Trade",
           "app/vendor/congress-trading-shared/VENDOR-PROVENANCE.md",
           token
         );
@@ -218,13 +218,13 @@ function main() {
         ctRelease = parsed.release;
         ctCommit = parsed.commit;
         const vendorPkg = JSON.parse(
-          ghRaw("jaywedgeworth22/Congress.Trade", "app/vendor/congress-trading-shared/package.json", token)
+          ghRaw("Simple-With-Us/Congress.Trade", "app/vendor/congress-trading-shared/package.json", token)
         );
         ctVendorVersion = String(vendorPkg.version || "");
-        const appPkg = JSON.parse(ghRaw("jaywedgeworth22/Congress.Trade", "app/package.json", token));
+        const appPkg = JSON.parse(ghRaw("Simple-With-Us/Congress.Trade", "app/package.json", token));
         let rootPkg = null;
         try {
-          rootPkg = JSON.parse(ghRaw("jaywedgeworth22/Congress.Trade", "package.json", token));
+          rootPkg = JSON.parse(ghRaw("Simple-With-Us/Congress.Trade", "package.json", token));
         } catch {
           rootPkg = null;
         }

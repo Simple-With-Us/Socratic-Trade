@@ -39,7 +39,7 @@ describe("AppUpdatePrompt fleet pin/copy", () => {
     for (const marker of STALE_APPLE_ID_MARKERS) {
       expect(fleetPrompt, marker).not.toContain(marker);
     }
-    expect(fleetPrompt).toContain("jaywedgeworth22/ai-fleet-coordinator");
+    expect(fleetPrompt).toContain("Simple-With-Us/AI-Fleet-Coordinator");
     expect(fleetPrompt).toContain("versions.json");
     expect(fleetPrompt).toContain("entry?.appleId");
     expect(fleetPrompt).not.toContain("Package.swift");
