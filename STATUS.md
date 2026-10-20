@@ -7234,9 +7234,11 @@ changed file (1 grandfathered `react-hooks/set-state-in-effect` warning); the ni
 files green (80 tests, exit 0):  `public-site-routing` (22), `copy-rules-lint` (17),
 `candle-ticker-raf-resilience` (9), `framework-page` (9), `framework-hash-target` (6),
 `security-headers` (6), `public-sentence-gap` (4), `middleware-auth-secret` (4),
-`how-it-works-redirect` (3).  The **full** suite and the production build were not run locally —
-the lane lives on an external volume and the host's load (57–267) made a local full run
-impractical, so neither is claimed.  The hosted `verify-hosted` job is the gate of record.  New
+`how-it-works-redirect` (3).  The **full** suite was not run locally — the lane lives on an
+external volume and the host's load (57–267) made a local full run impractical, so it is not
+claimed; the hosted `verify-hosted` job is the gate of record.  The **production build** was run
+locally after the fourth review round and succeeded (`npm run build`, `next build --webpack`),
+which is what proves the `server-only` guard in `middleware.ts` compiles.  New
 `test/public-site-routing.test.ts` (22 tests) covers the marketing-host routing, the alt-domain
 forward and both its exemptions, subdomain isolation, the shared-shell guard, the header-geometry
 invariant, the `LANDING_PAGE_ENABLED` off-switch, the alt-domain session and security-header
@@ -7303,12 +7305,28 @@ had already been fixed by the first round and needed only an explanation.
    handed the verifier an empty string and read the answer as "the cookie did not verify" —
    the same answer as a real cookie failure.  That is how a missing secret turns into a silent
    redirect of every operator instead of a surfaced configuration error.  The secret is now read
-   once and used only when it is set;  a blank or whitespace-only value is treated as no secret,
-   which is what it is.  A missing secret in a live boot is surfaced where it belongs, by
+   once and used only when it is set, and an empty string is never handed to the verifier.  A
+   missing secret in a live boot is surfaced where it belongs, by
    `assertAuthSecretConfiguredInLiveBootstrap()` at startup, and a Cloudflare-Access-only
    deployment has no `AUTH_SECRET` by design and is not an error.  New
    `test/middleware-auth-secret.test.ts` (4 tests) proves the verifier is never called with a
    placeholder credential, and it fails against the old code.
+
+**A fourth review round came back with two threads.  Both were real and both are fixed.**
+
+10. **The middleware read a credential without the server-only guard.**  `middleware.ts` reads
+    `AUTH_SECRET` and had no `import "server-only";`, so nothing stopped the module from
+    reaching a client bundle.  The guard is now the first import in the file, the same way the
+    other credential-reading modules in `src/lib` carry it.
+11. **The secret was read two different ways in the same file.**  The alt-domain hop trimmed
+    `AUTH_SECRET` before deciding whether it was set, while `isAuthConfigured()` and the
+    canonical-host path read the raw value.  A whitespace-only secret therefore read as
+    "configured" everywhere except in that one hop, which then forwarded the operator to the
+    canonical host — where the host-only Auth.js cookie does not apply — and dropped the
+    session.  That is the session-loss regression the second round closed, in a narrower form.
+    The raw value is now the single source of truth, matching the rest of the file, so an empty
+    string is still never handed to the verifier and a configured secret is passed through
+    unchanged.
 
 **Next.**  Merge to `main` (auto-deploys; weekday RTH latch applies — this touches runtime paths, so
 the image build is a real deploy).  Swift compilation is CI-only (`ios-build`); the only Swift

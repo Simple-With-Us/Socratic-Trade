@@ -2698,9 +2698,12 @@ Verified in the lane: `npx tsc --noEmit` clean, `npx eslint` 0 errors on every c
 nine affected vitest files green (80 tests, exit 0):  `public-site-routing` (22),
 `copy-rules-lint` (17), `candle-ticker-raf-resilience` (9), `framework-page` (9),
 `framework-hash-target` (6), `security-headers` (6), `public-sentence-gap` (4),
-`middleware-auth-secret` (4), `how-it-works-redirect` (3).  The full suite and the production build are CI's job —
-the lane lives on an external volume and the host's load made a local full run impractical, so
-neither is claimed here.  The first hosted `verify-hosted` run failed on the repo's own copy-rule
+`middleware-auth-secret` (4), `how-it-works-redirect` (3).  The full suite is CI's job —
+the lane lives on an external volume and the host's load made a local full run impractical, so it
+is not claimed here.  The production build was run locally after the fourth review round and
+succeeded, which is what proves the `server-only` guard compiles in the middleware bundle; the
+unit tests cannot, because the repo's vitest config aliases `server-only` to a mock.  The first
+hosted `verify-hosted` run failed on the repo's own copy-rule
 lint: 22 sentence-gap violations in the new public copy, because two literal ASCII spaces collapse
 in the browser.  Fixed with the repo's own NBSP idiom and the sanctioned fixer, and the re-run is
 the gate of record.  Swift compilation is CI-only; the only Swift changes are comments.
@@ -2720,4 +2723,15 @@ missing secret look like a failed cookie; the secret is now read once and used o
 set, and a new test proves the verifier never receives a placeholder credential.  The missing-secret
 case in a live boot is surfaced by the existing startup guard, and a Cloudflare-Access-only
 deployment has no `AUTH_SECRET` by design, so the middleware does not throw for it.
+
+A fourth review round came back with two threads, both real and both fixed.  The middleware read
+`AUTH_SECRET` without the `import "server-only";` guard that keeps a credential out of a client
+bundle; the guard is now the first import in the file, and the production build was run locally and
+succeeded, which is what proves it compiles in the middleware bundle.  And the secret was read two
+different ways in the same file: the alt-domain hop trimmed it while `isAuthConfigured()` and the
+canonical-host path read the raw value, so a whitespace-only secret read as configured everywhere
+except in that one hop, which then forwarded the operator to a host where the host-only cookie does
+not apply and dropped the session.  The raw value is now the single source of truth, so an empty
+string is still never handed to the verifier and a configured secret passes through unchanged.
+
 Rollout: `docs/rollouts/2026-10-19-public-framework-pages.md`.

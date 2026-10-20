@@ -23,6 +23,7 @@
 // Cloudflare Tunnel may still front the app, but Cloudflare Access email headers are
 // not trusted as an app login source.
 
+import "server-only";
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { createRemoteJWKSet } from "jose/jwks/remote";
@@ -354,7 +355,14 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
     // surfaced where it belongs, by assertAuthSecretConfiguredInLiveBootstrap()
     // at startup; a Cloudflare-Access-only deployment has no AUTH_SECRET by
     // design and is not an error.
-    const authSecret = process.env.AUTH_SECRET?.trim() ? process.env.AUTH_SECRET : undefined;
+    //
+    // The raw value is the source of truth, the same one isAuthConfigured() and
+    // the canonical-host path use.  Trimming here would make this one hop
+    // disagree with them, and the disagreement costs the operator their
+    // session: a whitespace-only secret reads as absent here, so the hop
+    // forwards to the canonical host, where the host-only Auth.js cookie does
+    // not apply and the session is gone.  One secret, one reading of it.
+    const authSecret = process.env.AUTH_SECRET ? process.env.AUTH_SECRET : undefined;
     const session = authSecret
       ? await getSessionIdentity(req.headers.get("cookie"), authSecret)
       : null;

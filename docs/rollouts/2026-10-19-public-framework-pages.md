@@ -238,12 +238,35 @@ with no Auth.js secret, the other is an operator whose cookie did not check out.
 one meant a missing secret looked like a cookie problem and turned into a silent redirect of every
 operator, instead of a surfaced configuration error.
 
-The secret is now read once and used only when it is set.  A blank or whitespace-only value is
-treated as no secret, which is what it is.  A missing secret in a live boot is surfaced where it
-belongs, by `assertAuthSecretConfiguredInLiveBootstrap()` at startup;  a Cloudflare-Access-only
-deployment has no `AUTH_SECRET` by design and is not an error, so the middleware must not throw
-for it.  New `test/middleware-auth-secret.test.ts` (4 tests) proves the verifier is never called
-with a placeholder credential, and it fails against the old code.
+The secret is now read once and used only when it is actually set, and an empty string is never
+handed to the verifier.  A missing secret in a live boot is surfaced where it belongs, by
+`assertAuthSecretConfiguredInLiveBootstrap()` at startup;  a Cloudflare-Access-only deployment has
+no `AUTH_SECRET` by design and is not an error, so the middleware must not throw for it.  New
+`test/middleware-auth-secret.test.ts` (4 tests) proves the verifier is never called with a
+placeholder credential, and it fails against the old code.
+
+## Review Findings, Fourth Round
+
+### 10. The middleware read a credential without the server-only guard
+
+`middleware.ts` reads `AUTH_SECRET` and carried no `import "server-only";`, so nothing stopped the
+module from being pulled into a client bundle.  The guard is now the first import in the file, the
+same way the other credential-reading modules in `src/lib` carry it.  The production build was run
+locally after the change and succeeded, which is what proves the guard compiles in the middleware
+bundle rather than only in the unit tests.
+
+### 11. The secret was read two different ways in the same file
+
+The alt-domain hop trimmed `AUTH_SECRET` before deciding whether it was set, while
+`isAuthConfigured()` and the canonical-host path read the raw value.  A whitespace-only secret
+therefore read as "configured" everywhere except in that one hop, which then forwarded the
+operator to the canonical host — where the host-only Auth.js cookie does not apply — and dropped
+the session.  That is the session-loss regression the second round closed, in a narrower form.
+
+The raw value is now the single source of truth, matching the rest of the file:  an empty string
+is still never handed to the verifier, and a configured secret is passed through unchanged.  The
+test file now says so:  it proves the verifier is never called with a placeholder credential, and
+it pins the whitespace-only case to the raw value the canonical host uses.
 
 ## Decisions & Trade-offs
 
@@ -316,9 +339,21 @@ about all of it.  The complete affected set is nine files, re-run together on th
   `public-sentence-gap` (4), `middleware-auth-secret` (4), `how-it-works-redirect` (3).
   Each file was also run on its own; every one exited 0.
 
-**The full suite and the production build were not run locally, and are not claimed here.** The
-lane lives on an external volume and the host's load (57–267) made a local full run impractical.
-The hosted `verify-hosted` job is the gate of record.
+**The full suite was not run locally, and is not claimed here.** The lane lives on an external
+volume and the host's load (57–267) made a local full run impractical.  The hosted
+`verify-hosted` job is the gate of record.
+
+Re-verified after the fourth review round (findings 10 and 11 above), on the same branch:
+
+- `npx tsc --noEmit` — clean, exit 0.
+- `npx eslint middleware.ts test/middleware-auth-secret.test.ts` — 0 errors, 0 warnings.
+- `npx vitest run` over all nine affected files — **80 tests green, exit 0**, the same set and the
+  same count as the third round:  the whitespace-only case changed what the verifier is handed, not
+  how many cases there are.
+- `npm run build` (`next build --webpack`) — **succeeded**, exit 0.  This is the check that matters
+  for finding 10:  it proves the `server-only` guard compiles in the middleware bundle, which the
+  unit tests cannot, since the repo's vitest config aliases `server-only` to a mock.  The build
+  prints the route table, middleware included, and exits clean.
 
 Its first run **failed**, on the copy-rule lint — 22 sentence-gap violations, described under
 Review Findings above.  Fixed; the re-run is the gate of record.  Every other job on that run was

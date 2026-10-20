@@ -15,6 +15,12 @@
  * Cloudflare-Access-only deployment has no AUTH_SECRET by design and is not an
  * error at all.
  *
+ * The secret that is handed over is the raw environment value, the same one
+ * isAuthConfigured() and the canonical-host path read.  An empty string is
+ * never a secret, so it is never handed over; anything else is passed through
+ * unchanged, because a second reading of the same secret is how two hops drift
+ * apart and an operator loses a session to the disagreement.
+ *
  * This file mocks the verifier so the secret it actually receives can be
  * inspected.  The behavioural coverage — a signed-in operator stays on the alt
  * domain, anonymous traffic is forwarded — lives in public-site-routing.test.ts
@@ -78,10 +84,16 @@ describe("middleware — the Auth.js secret is never a placeholder", () => {
     expect(res.status).toBe(308);
   });
 
-  it("does not verify a session with a whitespace-only AUTH_SECRET", async () => {
+  it("passes a whitespace-only AUTH_SECRET through, exactly like the canonical host does", async () => {
+    // Every other auth check in this file reads the raw value: isAuthConfigured() and
+    // the canonical-host path both treat a whitespace-only secret as configured.
+    // Trimming here made this one hop disagree with them, and the disagreement cost
+    // the operator their session — the hop decided there was no secret, forwarded to
+    // the canonical host, and the host-only Auth.js cookie does not apply there.  One
+    // secret, one reading of it.
     process.env.AUTH_SECRET = "   ";
     const res = await middleware(createRequest("https://socratic.trade/welcome", "socratic.trade"));
-    expect(verifierCalls).toEqual([]);
+    expect(verifierCalls).toEqual(["   "]);
     expect(res.status).toBe(308);
   });
 
@@ -92,7 +104,6 @@ describe("middleware — the Auth.js secret is never a placeholder", () => {
     expect(verifierCalls).toContain(secret);
     for (const used of verifierCalls) {
       expect(used).not.toBe("");
-      expect(used.trim()).not.toBe("");
     }
     // The secret was used, so the verifier ran, and with no valid cookie the request
     // is anonymous and is forwarded.
