@@ -106,7 +106,7 @@ targets:
         Release:
           CODE_SIGN_STYLE: Manual
           CODE_SIGN_IDENTITY: "Apple Distribution"
-          PROVISIONING_PROFILE_SPECIFIER: "Socratic Trade App Store (API)"
+          PROVISIONING_PROFILE_SPECIFIER: "Socratic Trade App Store (API) 2"
     configFiles:
       Debug: Config/Sentry.xcconfig
       Release: Config/Sentry.xcconfig
@@ -194,7 +194,7 @@ targets:
         # assign an App Group, and no Swift code reads a shared container (no suiteName:,
         # no containerURL(forSecurityApplicationGroupIdentifier:)).  To bring it back: assign
         # group.com.socratictrade to the App ID in the Developer Portal, regenerate the
-        # "Socratic Trade App Store (API)" profile, then re-add the key here and regenerate.
+        # "Socratic Trade App Store (API) 2" profile, then re-add the key here and regenerate.
 
   SocraticTradeTests:
     type: bundle.unit-test
