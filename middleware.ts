@@ -344,10 +344,20 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
     // instead of the console. So a verified session keeps the request on the alt
     // host, where its cookie still applies. Only anonymous traffic is forwarded
     // to the canonical domain.
-    const session = await getSessionIdentity(
-      req.headers.get("cookie"),
-      process.env.AUTH_SECRET ?? ""
-    );
+    //
+    // The secret is read once and used only when it is actually set. An empty
+    // placeholder is never passed to the verifier: with no AUTH_SECRET there is
+    // no Auth.js session to verify, and handing the verifier an empty string
+    // would make "no secret configured" and "the cookie did not verify" the same
+    // answer, which is how a misconfigured deployment turns into a silent
+    // redirect of every operator. A missing AUTH_SECRET in a live boot is
+    // surfaced where it belongs, by assertAuthSecretConfiguredInLiveBootstrap()
+    // at startup; a Cloudflare-Access-only deployment has no AUTH_SECRET by
+    // design and is not an error.
+    const authSecret = process.env.AUTH_SECRET?.trim() ? process.env.AUTH_SECRET : undefined;
+    const session = authSecret
+      ? await getSessionIdentity(req.headers.get("cookie"), authSecret)
+      : null;
     if (!session) {
       const target = new URL(req.url);
       target.protocol = "https:";

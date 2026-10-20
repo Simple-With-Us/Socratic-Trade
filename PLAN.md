@@ -2695,7 +2695,10 @@ put the per-variant state behind a render-scope local that the effect mutated, w
 Compiler rejects as an error — every write now goes through module-scope functions.
 
 Verified in the lane: `npx tsc --noEmit` clean, `npx eslint` 0 errors on every changed file, and the
-affected vitest files green (47 tests).  The full suite and the production build are CI's job —
+nine affected vitest files green (80 tests, exit 0):  `public-site-routing` (22),
+`copy-rules-lint` (17), `candle-ticker-raf-resilience` (9), `framework-page` (9),
+`framework-hash-target` (6), `security-headers` (6), `public-sentence-gap` (4),
+`middleware-auth-secret` (4), `how-it-works-redirect` (3).  The full suite and the production build are CI's job —
 the lane lives on an external volume and the host's load made a local full run impractical, so
 neither is claimed here.  The first hosted `verify-hosted` run failed on the repo's own copy-rule
 lint: 22 sentence-gap violations in the new public copy, because two literal ASCII spaces collapse
@@ -2707,4 +2710,14 @@ A second review round came back with six threads; five were real and are fixed �
 twice, a framework deep link did not scroll, and the rollout doc named a lane path.  The sixth
 concerned the apex redirect that the first round had already fixed.  All six threads are answered
 and resolved.
+
+A third review round came back with two threads, both real and both fixed.  The two verification
+records contradicted each other — the first round counted six affected files and the second counted
+five, with different file lists, so neither total covered the affected set; the complete set is
+nine files, and it has been re-run together and per file with every file exiting 0.  And the
+middleware handed the session verifier an empty string when `AUTH_SECRET` was unset, which made a
+missing secret look like a failed cookie; the secret is now read once and used only when it is
+set, and a new test proves the verifier never receives a placeholder credential.  The missing-secret
+case in a live boot is surfaced by the existing startup guard, and a Cloudflare-Access-only
+deployment has no `AUTH_SECRET` by design, so the middleware does not throw for it.
 Rollout: `docs/rollouts/2026-10-19-public-framework-pages.md`.

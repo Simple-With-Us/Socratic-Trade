@@ -214,6 +214,37 @@ The Sentry review also flagged the apex redirect to `/welcome` for not consultin
 off-switch, and `test/public-site-routing.test.ts` pins it.  The thread was raised against the code
 before that fix landed, so it is answered by the existing change rather than a new one.
 
+## Review Findings, Third Round
+
+### 8. The two verification records contradicted each other
+
+The first round recorded "the six affected vitest files green (60 tests)" and the second recorded
+"the affected vitest files green (47 tests)", with different file lists.  The first named
+`copy-rules-lint`;  the second dropped `copy-rules-lint`, `candle-ticker-raf-resilience`, and
+`how-it-works-redirect`, and added `framework-hash-target` and `security-headers`.
+
+Neither total covered the whole affected set, so neither was ever a claim about all of it, and read
+together the two rounds made the suite look *smaller* in the second round than in the first.  The
+complete set is nine files;  it has been re-run together and one file at a time, and every file
+exits 0.  The Verification State section above now records the complete set and explains what the
+two earlier rounds were.
+
+### 9. The middleware passed an empty string to the session verifier
+
+The alt-domain canonicalization hop read `process.env.AUTH_SECRET ?? ""`.  With no secret
+configured, the verifier was handed an empty string and answered "no session", which is the same
+answer it gives for a cookie that fails to verify.  The two are different:  one is a deployment
+with no Auth.js secret, the other is an operator whose cookie did not check out.  Reading them as
+one meant a missing secret looked like a cookie problem and turned into a silent redirect of every
+operator, instead of a surfaced configuration error.
+
+The secret is now read once and used only when it is set.  A blank or whitespace-only value is
+treated as no secret, which is what it is.  A missing secret in a live boot is surfaced where it
+belongs, by `assertAuthSecretConfiguredInLiveBootstrap()` at startup;  a Cloudflare-Access-only
+deployment has no `AUTH_SECRET` by design and is not an error, so the middleware must not throw
+for it.  New `test/middleware-auth-secret.test.ts` (4 tests) proves the verifier is never called
+with a placeholder credential, and it fails against the old code.
+
 ## Decisions & Trade-offs
 
 - **The `/framework` hardening stays.** The owner's 2026-07-11 instruction was to harden that page
@@ -255,7 +286,7 @@ On the work branch `minimax/st-4565-public-framework-pages`, based on `origin/ma
 - `npx tsc --noEmit` — clean, exit 0.
 - `npx eslint <changed files>` — 0 errors (1 grandfathered `react-hooks/set-state-in-effect`
   warning; the repo pins the whole rule to "warn" in `eslint.config.mjs`).
-- `npx vitest run` over the six affected files — 60 tests green:
+- `npx vitest run` over the six files named in that round — 60 tests green:
   `public-site-routing` (18), `public-sentence-gap` (4), `copy-rules-lint` (17),
   `framework-page` (9), `how-it-works-redirect`, `candle-ticker-raf-resilience`.
 - `node scripts/copy-rules-lint.mjs` — repo sweep: 46 sentence-gap violations, all in the
@@ -267,11 +298,23 @@ Re-verified after the second review round (findings 3–7 above), on the same br
 - `npx eslint` over the changed files — 0 errors, and the only warning is the same grandfathered
   `react-hooks/set-state-in-effect` one (the repo pins the whole rule to "warn" in
   `eslint.config.mjs`); the new scroll effect sets no state, so it adds no warning.
-- `npx vitest run` over the affected files — 47 tests green:
+- `npx vitest run` over the five files named in that round — 47 tests green:
   `public-site-routing` (22), `framework-hash-target` (6), `security-headers` (6),
   `framework-page` (9), `public-sentence-gap` (4).
 - `node scripts/copy-rules-lint.mjs` — repo sweep unchanged at 46 sentence-gap violations, **0** in
   anything this change touched.
+
+**The two rounds above recorded different subsets of the same affected set, and that is why they
+looked contradictory.**  The first round named `copy-rules-lint` and not the two newest files; the
+second named the two newest files and dropped `copy-rules-lint`, `candle-ticker-raf-resilience`,
+and `how-it-works-redirect`.  Neither total covered the whole set, so neither total was a claim
+about all of it.  The complete affected set is nine files, re-run together on the same branch:
+
+- `npx vitest run` over all nine affected files — **80 tests green, exit 0**:
+  `public-site-routing` (22), `copy-rules-lint` (17), `candle-ticker-raf-resilience` (9),
+  `framework-page` (9), `framework-hash-target` (6), `security-headers` (6),
+  `public-sentence-gap` (4), `middleware-auth-secret` (4), `how-it-works-redirect` (3).
+  Each file was also run on its own; every one exited 0.
 
 **The full suite and the production build were not run locally, and are not claimed here.** The
 lane lives on an external volume and the host's load (57–267) made a local full run impractical.

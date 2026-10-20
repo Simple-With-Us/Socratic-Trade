@@ -7230,17 +7230,22 @@ and the edge WAF rule.  Linking it from the Welcome page does not require un-gat
 `/welcome` remains the indexable SEO surface.
 
 **Verification.**  In the lane: `npx tsc --noEmit` clean (exit 0); `npx eslint` 0 errors on every
-changed file (1 grandfathered `react-hooks/set-state-in-effect` warning); the affected vitest files
-green (47 tests).  The **full** suite and the production build were not run locally — the lane
-lives on an external volume and the host's load (57–267) made a local full run impractical, so
-neither is claimed.  The hosted `verify-hosted` job is the gate of record.  New
+changed file (1 grandfathered `react-hooks/set-state-in-effect` warning); the nine affected vitest
+files green (80 tests, exit 0):  `public-site-routing` (22), `copy-rules-lint` (17),
+`candle-ticker-raf-resilience` (9), `framework-page` (9), `framework-hash-target` (6),
+`security-headers` (6), `public-sentence-gap` (4), `middleware-auth-secret` (4),
+`how-it-works-redirect` (3).  The **full** suite and the production build were not run locally —
+the lane lives on an external volume and the host's load (57–267) made a local full run
+impractical, so neither is claimed.  The hosted `verify-hosted` job is the gate of record.  New
 `test/public-site-routing.test.ts` (22 tests) covers the marketing-host routing, the alt-domain
 forward and both its exemptions, subdomain isolation, the shared-shell guard, the header-geometry
 invariant, the `LANDING_PAGE_ENABLED` off-switch, the alt-domain session and security-header
 behavior, and the single shared host module.  New `test/public-sentence-gap.test.ts`
 (4 tests) renders the Welcome page to static markup and proves the sentence gap survives the
 browser's whitespace collapse.  New `test/framework-hash-target.test.ts` (6 tests) covers the
-deep-link id lookup and pins the viewer's scroll-to-hash behavior.
+deep-link id lookup and pins the viewer's scroll-to-hash behavior.  New
+`test/middleware-auth-secret.test.ts` (4 tests) proves the middleware never hands the session
+verifier a placeholder credential.
 
 **Two review findings, both accepted as real and both fixed.**
 
@@ -7282,6 +7287,28 @@ had already been fixed by the first round and needed only an explanation.
 7. **This rollout doc named a lane path.**  A lane is per-seat and per-run, so the path was stale
    the moment another seat picked the work up.  The document names the branch and the base commit
    instead.
+
+**A third review round came back with two threads.  Both were real and both are fixed.**
+
+8. **The two verification records contradicted each other.**  The first review round recorded "the
+   six affected vitest files green (60 tests)" and the second recorded "the affected vitest files
+   green (47 tests)", with different file lists:  the first included `copy-rules-lint`, and the
+   second dropped `copy-rules-lint`, `candle-ticker-raf-resilience`, and `how-it-works-redirect`
+   while adding `framework-hash-target` and `security-headers`.  Neither total covered the whole
+   affected set, so neither was ever a claim about all of it, and reading the two together made
+   the suite look *smaller* in the second round than in the first.  The complete set is nine
+   files;  it has been re-run together and one file at a time, and every file exits 0.
+9. **The middleware passed an empty string to the session verifier.**  The alt-domain
+   canonicalization hop read `process.env.AUTH_SECRET ?? ""`, so a deployment with no secret
+   handed the verifier an empty string and read the answer as "the cookie did not verify" —
+   the same answer as a real cookie failure.  That is how a missing secret turns into a silent
+   redirect of every operator instead of a surfaced configuration error.  The secret is now read
+   once and used only when it is set;  a blank or whitespace-only value is treated as no secret,
+   which is what it is.  A missing secret in a live boot is surfaced where it belongs, by
+   `assertAuthSecretConfiguredInLiveBootstrap()` at startup, and a Cloudflare-Access-only
+   deployment has no `AUTH_SECRET` by design and is not an error.  New
+   `test/middleware-auth-secret.test.ts` (4 tests) proves the verifier is never called with a
+   placeholder credential, and it fails against the old code.
 
 **Next.**  Merge to `main` (auto-deploys; weekday RTH latch applies — this touches runtime paths, so
 the image build is a real deploy).  Swift compilation is CI-only (`ios-build`); the only Swift
