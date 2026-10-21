@@ -7537,7 +7537,11 @@ of the same class: thirty-five colons, semicolons, commas or dashes followed by 
 sentence end with a single space.  Those are the owner's scope rule, where a colon, a semicolon, a
 comma or a dash takes one ordinary space and the gap belongs after `.`, `!` and `?`.  Of the
 forty-one, the thirty-nine scope sites are now one space and the two sentence ends are now two
-spaces, so the two rules are closed by different edits.
+spaces, so that pass closed those two rules by different edits.  That pass did not close either
+class: the ninth round found twenty-eight more sites in the rollout note and three more in
+`PLAN.md`, all one space, and a third pass found two more, one colon site and one sentence-gap
+site, which take one space and two spaces respectively.
+
 ## 2026-10-21 [MM] ST-4571 — the suite's shared database stays clean, and no test file clears the run's path
 
 **What.**  The residual of ST-4570 is closed.  A full local suite run no longer leaves enrichment
