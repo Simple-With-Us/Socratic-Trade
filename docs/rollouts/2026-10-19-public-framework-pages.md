@@ -230,7 +230,7 @@ two earlier rounds were.
 
 ### 9. The middleware passed an empty string to the session verifier
 
-The alt-domain canonicalization hop read `process.env.AUTH_SECRET ??  ""`.  With no secret
+The alt-domain canonicalization hop read `process.env.AUTH_SECRET ?? ""`.  With no secret
 configured, the verifier was handed an empty string and answered "no session", which is the same
 answer it gives for a cookie that fails to verify.  The two are different: one is a deployment
 with no Auth.js secret, the other is an operator whose cookie did not check out.  Reading them as
