@@ -7235,7 +7235,7 @@ and the edge WAF rule.  Linking it from the Welcome page does not require un-gat
 
 **Verification.**  In the lane: `npx tsc --noEmit` clean (exit 0); `npx eslint` 0 errors on every
 changed file (1 grandfathered `react-hooks/set-state-in-effect` warning); the nine affected vitest
-files green (80 tests, exit 0):  `public-site-routing` (22), `copy-rules-lint` (17),
+files green (80 tests, exit 0): `public-site-routing` (22), `copy-rules-lint` (17),
 `candle-ticker-raf-resilience` (9), `framework-page` (9), `framework-hash-target` (6),
 `security-headers` (6), `public-sentence-gap` (4), `middleware-auth-secret` (4),
 `how-it-works-redirect` (3).  The **full** suite was not run locally — a local full run was
@@ -7298,12 +7298,12 @@ had already been fixed by the first round and needed only an explanation.
 
 8. **The two verification records contradicted each other.**  The first review round recorded "the
    six affected vitest files green (60 tests)" and the second recorded "the affected vitest files
-   green (47 tests)", with different file lists:  the first included `copy-rules-lint`, and the
+   green (47 tests)", with different file lists: the first included `copy-rules-lint`, and the
    second dropped `copy-rules-lint`, `candle-ticker-raf-resilience`, and `how-it-works-redirect`
    while adding `framework-hash-target` and `security-headers`.  Neither total covered the whole
    affected set, so neither was ever a claim about all of it, and reading the two together made
    the suite look *smaller* in the second round than in the first.  The complete set is nine
-   files;  it has been re-run together and one file at a time, and every file exits 0.
+   files; it has been re-run together and one file at a time, and every file exits 0.
 9. **The middleware passed an empty string to the session verifier.**  The alt-domain
    canonicalization hop read `process.env.AUTH_SECRET ?? ""`, so a deployment with no secret
    handed the verifier an empty string and read the answer as "the cookie did not verify" —
@@ -7322,9 +7322,9 @@ had already been fixed by the first round and needed only an explanation.
     `AUTH_SECRET` and had no `import "server-only";`, so nothing stopped the module from
     reaching a client bundle.  The guard was added as the first import in the file, the same way
     the other credential-reading modules in `src/lib` carry it, and a later review round reversed
-    that:  the guard is deliberately taken back out of `middleware.ts`, with the rationale
+    that: the guard is deliberately taken back out of `middleware.ts`, with the rationale
     recorded in the file itself.  Middleware is a server entry point compiled only for the edge
-    runtime, so no Client Component can import it;  the guard stays on the credential-reading
+    runtime, so no Client Component can import it; the guard stays on the credential-reading
     modules under `src/lib` and `app/api/*/route.ts` that a client bundle could genuinely pull
     in.  The build recorded in the rollout note was run against the file with the guard, so it
     describes that state and not the file this change ships.
@@ -7347,7 +7347,7 @@ Rollout: `docs/rollouts/2026-10-19-public-framework-pages.md`.
 
 **The branch was reconciled with another seat's work and with the newest `main`.**  Two commits
 were pushed to `minimax/st-4565-public-framework-pages` by another seat while this effort was in
-flight:  a docs correction to the rollout note (`504af8dc5`) and a merge of `origin/main`
+flight: a docs correction to the rollout note (`504af8dc5`) and a merge of `origin/main`
 (`343a8ff1c`).  Both were adopted rather than rewritten, because the docs correction was right and
 a merge commit is a merge commit.  The seat's own redundant merge was dropped in their favour —
 its content was already contained in the other seat's merge — and `origin/main` was merged again
@@ -7356,13 +7356,13 @@ on top, so the branch carries the current `main` plus the Autofix pin bump.  Hea
 **One finding from this effort was wrong, and it is withdrawn.**  This seat reported that
 `ci.yml`'s `classify` job gates both `verify-hosted` and the `verify` gate behind
 `docs-only != 'true'`, so a docs-only head can never report the required `verify` check, and
-filed that as ST-4568.  Only `verify-hosted` and `verify-ios` carry that gate;  the `verify` gate
+filed that as ST-4568.  Only `verify-hosted` and `verify-ios` carry that gate; the `verify` gate
 itself runs on `if: ${{ !cancelled() }}` and exits 0 on the docs-only path.  The check that settles
-it is empirical, not a reading of the workflow's comment:  PR #4875 changed exactly one file
+it is empirical, not a reading of the workflow's comment: PR #4875 changed exactly one file
 (`AGENTS.md`), and the check-runs on that head report `verify` → success, `verify-hosted` →
 skipped, `verify-ios` → skipped.  ST-4568 is closed as wontfix with that evidence, and the same
 correction is in the rollout note, the Linear comment on ST-4565, the Zulip post, and the Apple
-Note.  The `workflow_dispatch` lever is real, but it covers a different edge:  cloud-proxy pushes
+Note.  The `workflow_dispatch` lever is real, but it covers a different edge: cloud-proxy pushes
 that generate no `pull_request` event at all.
 
 **The fleet-wide PR Autofix failure has landed.**  Every pull request in this repository was
@@ -7373,20 +7373,20 @@ rejects ("When using --print, --output-format=stream-json requires --verbose"). 
 defect, not the CLI.  The good reusable SHA is `c97a2dae96762eb9ffc122c753f0dfb0a7840650`, and
 every consumer pin was checked by reading the reusable at the pinned SHA rather than by trusting
 the pin string.  The Socratic-Trade half landed through the repository's own Autofix path, as PR
-#4905, merged as `308d3f256`;  the coordinator half was reported as AFC-451 and belongs to another
+#4905, merged as `308d3f256`; the coordinator half was reported as AFC-451 and belongs to another
 seat.  Both issues are closed as already-landed.
 
 **Two merge-mechanics facts worth keeping.**  The `auto-merge / arm` workflow passed
-`--delete-branch`, which GitHub rejects under a merge queue;  that was fixed in PR #4893 and the
+`--delete-branch`, which GitHub rejects under a merge queue; that was fixed in PR #4893 and the
 check is green.  And the `org-default-main-protection` ruleset sets
 `require_extra_approval_for_unattributed_changes: true`, so the three commits on this branch that
 GitHub cannot attribute to an account — this seat's own `21d5c58d7` and the two another seat
-contributed — require an approval from someone with write access.  No author was rewritten:  a
+contributed — require an approval from someone with write access.  No author was rewritten: a
 rule that puts a human in front of unattributed code is doing its job.
 
 **Next.**  The only remaining gate is Jay's APPROVED review on PR #4889.  Auto-merge is armed, so
 the merge fires as soon as the approval lands and the required checks are green on the pushed
-head.  After the merge:  verify the deployed SHA against production, close ST-4565 out, and delete
+head.  After the merge: verify the deployed SHA against production, close ST-4565 out, and delete
 the remote branch.
 
 ## 2026-10-21 [MM] The full local gate, and the org-secret fix that unblocked the Autofix job
@@ -7395,7 +7395,7 @@ the remote branch.
 --noEmit` exits 0, `npx eslint app src test middleware.ts` exits 0, `npm test` reports 1 failed /
 9,726 passed / 51 skipped across 865 files and exits 1, and `npm run build` succeeds.  The single
 failure is `test/event-loop-stall-hot-path.test.ts`, a wall-clock assertion that a no-op prune
-stays under 100ms;  it measures 162s in the local execution environment and times out when re-run
+stays under 100ms; it measures 162s in the local execution environment and times out when re-run
 on its own.  Neither that test nor `src/lib/db.ts` is touched by this diff, so it is an
 environment-dependent artifact and not a regression from this change.  It is reported as it
 stands, and the hosted `verify-hosted` job is the gate of record.  A second pass on the merged head
@@ -7408,7 +7408,7 @@ secret `META_MODEL_API_TOKEN` has `selected` visibility and was on only four rep
 every other consumer resolved it to an empty string and the reusable's own guard exited 1 with
 `token_set=no`.  The secret's repository selection was widened to the sixteen consumer
 repositories that consume the reusable — a selection change, with no credential value touched.
-It is confirmed in this repository:  PR Autofix run 39608488565, on PR #4908, concluded
+It is confirmed in this repository: PR Autofix run 39608488565, on PR #4908, concluded
 `success` with `META_TOKEN` populated on the Meta route, and every failing run predates the
 secret's last change.
 
@@ -7418,8 +7418,8 @@ a human comment dispatches a run that concludes `skipped` rather than `failed`, 
 run reads as a pass in the run list.  The levers that work are bot-authored events, and a push to
 the branch is enough, because a review bot re-reviews on every push.
 
-**Next.**  Unchanged:  Jay's APPROVED review on PR #4889 is the one gate that no agent can clear.
-The `verify` check on the head is in flight.  After the merge:  verify the deployed SHA against
+**Next.**  Unchanged: Jay's APPROVED review on PR #4889 is the one gate that no agent can clear.
+The `verify` check on the head is in flight.  After the merge: verify the deployed SHA against
 production, close ST-4565 out, and delete the remote branch.
 
 ## 2026-10-21 [MM] The second full gate found a second failure, and the first account of it was wrong
@@ -7428,7 +7428,7 @@ production, close ST-4565 out, and delete the remote branch.
 `npx eslint app src test middleware.ts` exits 0, `npm test` reports 2 failed / 9,731 passed /
 51 skipped across 865 files and exits 1, and `npm run build` succeeds.  The first failure is the
 same `test/event-loop-stall-hot-path.test.ts` wall-clock assertion as before, measured at 205630 ms
-this time;  the time a wall-clock assertion measures varies with the execution environment.  It is
+this time; the time a wall-clock assertion measures varies with the execution environment.  It is
 reported as it stands, and the hosted `verify-hosted` job is the gate of record.
 
 **The second failure was new, and it is not this diff.**  `test/data-catalog-completeness.test.ts`
@@ -7443,20 +7443,20 @@ that file is never committed and never shared between machines.
 
 **A third gate pass is what corrected the first account of it.**  That account said the residue of
 earlier runs was the trigger, and that a clean checkout could not see the failure at all.  A third
-full pass against a database that did not exist when the suite started falsified it:  the same test
+full pass against a database that did not exist when the suite started falsified it: the same test
 failed again, and the new file had collected seventeen coverage rows by the end of that one run.
 The writer is `test/enrichment-coverage.test.ts`, the repo's vitest config runs with
 `maxWorkers: 1`, so the files run sequentially in one worker process while `process.env.DATABASE_URL`
 leaks from one file to the next inside it, and because the persist is fire-and-forget, whether the
 row lands before the next file starts is a race.  Whether the reader sees a populated universe
-therefore depends on ordering inside the run:  it is a within-run ordering flake, not merely
+therefore depends on ordering inside the run: it is a within-run ordering flake, not merely
 leftover state, and a clean checkout can hit it.  The hosted run has not, but it has not been shown
 to be immune, so "CI is green" is not evidence against this class of failure.  The code itself is
 sound — with a fresh database the file passes 4 of 4 on its own — and
 `git diff --name-only origin/main...HEAD` lists none of the implicated files.  Filed as ST-4570
 with the root cause and a recommended fix, raised from P2 to P1 on the corrected evidence, and
 claimed by this seat.  The fix is deliberately kept out of this diff rather than widening a
-public-pages change into shared test infrastructure:  it is on its own branch off `origin/main` as
+public-pages change into shared test infrastructure: it is on its own branch off `origin/main` as
 [PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911), where it carries no
 unattributed commit and needs no owner approval to land.  Three files could reach the persistence
 path without owning a database, and they are the ones changed there — the reader owns its database
@@ -7469,10 +7469,10 @@ org-secret fix is confirmed in this repository and not only in the two control r
 Claude Code Autofix run 39618102908 concluded `success`.  Kody's re-review on this head reported
 no issues matching its current configuration, and the hosted `verify-hosted` job is green.
 
-**Next.**  Unchanged:  Jay's APPROVED review on PR #4889 is the one gate that no agent can clear.
-Auto-merge is armed, so the merge fires as soon as that lands and the required checks are green.
-After the merge:  verify the deployed SHA against production, close ST-4565 out, and delete the
-remote branch.
+**Next.**  No human action is outstanding.  The ruleset requires 0 approving reviews, and Jay armed
+auto-merge on PR #4889 at 11:17am with a merge commit, so the merge fires as soon as the required
+`verify` and `gitleaks` checks are green on the head.  After the merge: verify the deployed SHA
+against production, close ST-4565 out, and delete the remote branch.
 ## 2026-10-21 [MM] The suite no longer poisons its own database (ST-4570)
 
 **The local vitest suite no longer writes enrichment coverage rows into the checkout's own
@@ -7504,3 +7504,32 @@ Measured:  a three-file probe over the changed files finishes with zero rows in 
 `npx eslint` over the three files exits 0.  No production code changed.
 
 Rollout: `docs/rollouts/2026-10-21-st-4570-suite-db-isolation.md`.
+
+## 2026-10-21 [MM] Kody's eighth round found a bullet that repeated the falsified account (PR #4889)
+
+**Kody's review comment 4339304110 on the rollout note was right, and the finding is taken rather
+than filed as accepted risk.**  The Zero-Code Findings bullet in
+`docs/rollouts/2026-10-19-public-framework-pages.md` still attributed the enrichment-coverage
+failure to residue carried between runs and still asserted that hosted CI never sees the condition
+because a CI checkout has no `data/` directory.  That is the exact account this PR's own
+Verification State section falsifies, so the bullet handed a reader the opposite of the corrected
+root cause while telling them a green hosted run cannot reproduce the failure — the claim that was
+used to treat the hosted `verify-hosted` job as sufficient.
+
+**The bullet now matches the corrected account.**  The fire-and-forget persist in
+`src/lib/enrichment-coverage.ts` poisons the shared database *within a single run*, because the
+persist can resolve after the test that triggered it has finished; the trigger is the order in
+which the files run inside one worker process rather than leftover state; and the hosted run has
+not been shown to be immune, so a green hosted run is not evidence against this class of failure.
+The bullet also names the fix, [PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911).
+
+**A sweep of the same claim across every markdown file in the repository found exactly one site.**
+The bullet was the only one still carrying the falsified account; `STATUS.md` and the rollout note's
+Verification State section already carried the corrected one.
+
+**The house gap rules were repaired on the same pass.**  The rollout note carried five whitespace
+defects of its own and the lines this branch added to `STATUS.md` and `PLAN.md` carried thirty-six
+more of the same class: a colon or a semicolon followed by two spaces, and one sentence end with a
+single space.  Those are the owner's scope rule, where a colon, a semicolon, a comma or a dash
+takes one ordinary space and the gap belongs after `.`, `!` and `?`.  All forty-one are now one
+space, and the rollout note audits clean at 162 sentence boundaries with 162 two-space gaps.

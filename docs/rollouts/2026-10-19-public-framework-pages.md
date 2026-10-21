@@ -284,7 +284,7 @@ not the place for private hosting or capacity detail:  the reader needs one fact
 `STATUS.md`, `PLAN.md` and this rollout note all carried the same wording, and Kody flagged only
 `STATUS.md`.  Fixing the flagged file alone would have bought a round rather than a fix and the same
 finding would have returned on the next push, so all three were changed together.  The rest of the
-diff was then swept for the same class —  IPs, host and lane paths, hostnames, and capacity or
+diff was then swept for the same class — IPs, host and lane paths, hostnames, and capacity or
 workload specifics, across every added line of every file this PR touches.  The remaining matches are
 pre-existing entries already on `main`, outside this diff.
 
@@ -331,7 +331,7 @@ The pin was the defect, not the CLI and not the trigger.
 
 The fix already existed on the coordinator's `main` as `00def854` (PR #632).  The good reusable SHA
 is `c97a2dae96762eb9ffc122c753f0dfb0a7840650`.  Every consumer pin was checked by reading the
-reusable at the pinned SHA rather than by trusting the pin string:  Socratic-Trade, DealDex,
+reusable at the pinned SHA rather than by trusting the pin string: Socratic-Trade, DealDex,
 CodeCaps, ContactLogo, Clutch, BotFleet, Congress.Trade, HogHunter, Simple-With-Us and
 congress-trading-shared are all on `c97a2dae`, the copy vendored inside Congress.Trade is on
 `a652e467` and also carries the fix, and `fleetlink-legacy` has no `autofix.yml` on `main`.
@@ -399,7 +399,7 @@ left alone and the approval was surfaced to the owner as the one action only he 
   page keeps its UA gate, its server-only content module, the gated content API, and its
   noindex/noai/TDMRep headers.  `/welcome` remains the indexable SEO surface and keeps its own "How
   It Works" section.
-- **`/how-it-works` returns a 308, not a 404.** The page's *content* is gone (fully superseded), but
+- **`/how-it-works` returns a 308, not a 404.**  The page's *content* is gone (fully superseded), but
   a permanent redirect keeps inbound links, bookmarks, and search results landing on the content
   instead of a dead end.  A bot hitting it is redirected and then blocked by the existing UA gate and
   the edge WAF rule.
@@ -495,7 +495,7 @@ the first pass did not have.**
 - `npm run build` (`next build --webpack`) — **succeeded**, exit 0.
 
 The first of the two is the same `test/event-loop-stall-hot-path.test.ts` wall-clock assertion as
-before, measured at 205630 ms this time.  The second is new:  `test/data-catalog-completeness.test.ts`
+before, measured at 205630 ms this time.  The second is new: `test/data-catalog-completeness.test.ts`
 → "scores RAG without inflating for multiple 10-Ks on one name", where `expect(pe!.completeness)`
 expected 0 and received 1.
 
@@ -604,6 +604,36 @@ holds read-only access to the per-variant state.
   `/api/framework*`) needs no change — the new redirect target is the same path it already covers.
 - **No follow-up needed on the docs-only fast path:** `verify` already reports a neutral PASS on docs-only diffs (ci.yml:444-446, pinned by `test/branch-protection-gate.test.ts`), so there is no contradiction with the required check to fix.
 
+## Review Findings, Eighth Round
+
+### 16. The Zero-Code Findings bullet repeated the falsified root cause and the falsified CI claim
+
+Kody's review comment 4339304110 on this file was right, and the finding is taken rather than filed
+as accepted risk.  The Zero-Code Findings bullet attributed the failure to residue carried between
+runs and asserted that hosted CI never sees the condition because a CI checkout has no `data/`
+directory.  That is the exact account this document's Verification State section falsifies, so the
+bullet handed a reader the opposite of the corrected root cause and told them a green hosted run
+cannot reproduce the failure — the claim that was used to treat the hosted `verify-hosted` job as
+sufficient.
+
+The bullet now matches the corrected account: the fire-and-forget persist poisons the shared
+database *within a single run*, because the persist can resolve after the test that triggered it
+has finished; the trigger is the order in which the files run inside one worker process rather
+than leftover state; and the hosted run has not been shown to be immune, so a green hosted run is
+not evidence against this class of failure.  The bullet also names the fix,
+[PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911).
+
+**A sweep of the same claim across every markdown file in the repository found exactly one site.**
+The bullet was the only one still carrying the falsified account; `STATUS.md` and the Verification
+State section above already carried the corrected one.
+
+**The house gap rules were repaired on the same pass.**  This document carried five whitespace
+defects of its own — four colons followed by two spaces and one sentence end with a single space —
+and the lines this branch added to `STATUS.md` and `PLAN.md` carried thirty-six more of the same
+class.  Those are the owner's scope rule, where a colon, a semicolon, a comma or a dash takes one
+ordinary space and the gap belongs after `.`, `!` and `?`.  All forty-one are now one space, and
+this document audits clean at 162 sentence boundaries with 162 two-space gaps.
+
 ## Zero-Code Findings
 
 - The lane's `node_modules` had been replaced with a symlink to another lane's `node_modules` (a
@@ -620,7 +650,7 @@ holds read-only access to the per-variant state.
   reusable's own guard (`pr-autofix-reusable.yml` @ `c97a2dae`, line 184) exited 1 with
   `token_set=no`.  The fix was to widen the secret's repository selection to the sixteen consumer
   repositories that consume the reusable — a selection change, with no credential value touched.
-  It is confirmed in this repository:  PR Autofix run 39608488565, on PR #4908, concluded
+  It is confirmed in this repository: PR Autofix run 39608488565, on PR #4908, concluded
   `success` with `META_TOKEN` populated on the Meta route, and every run that failed did so before
   the secret's last change.  CodeCaps, which was not on the list before and is now, is green as
   well, and Clutch, which was on it from the start, passes the same guard.
@@ -632,14 +662,20 @@ holds read-only access to the per-variant state.
   spend a model run — but "re-kick by commenting" is inert against it.  The levers that do work
   are bot-authored events, and a push to the branch is enough, because a review bot re-reviews on
   every push.
-- **The untracked local database is a second, invisible input to the test suite, and it can make
-  the second run fail where the first passed.**  The suite persists enrichment coverage reports
+- **The untracked local database is a second, invisible input to the test suite, and a clean
+  checkout can hit this failure on its own.**  The suite persists enrichment coverage reports
   into `file:./data/app.db` through a fire-and-forget dynamic import in
   `src/lib/enrichment-coverage.ts:296-302`, and `src/lib/data-completeness.ts:231` reads the
   newest persisted report back and uses its `fillRate` as a field's `completeness` when it is
-  present.  Because `data/` is gitignored, that file is never committed and never reset:  the
-  first local run writes rows that the second local run then reads.  The check that separates
+  present.  Because `data/` is gitignored, that file is never committed and never shared between
+  machines, and because the persist is fire-and-forget it can land after the test that triggered
+  it has finished — so the database is poisoned *within a single run*, not by residue carried
+  between runs.  The repo's vitest config runs with `maxWorkers: 1`, so the files execute
+  sequentially in one worker process and `process.env.DATABASE_URL` leaks from one file to the
+  next inside it, which makes the trigger the order in which the files run rather than leftover
+  state.  A full pass against a database that did not exist when the suite started reproduced the
+  failure and left seventeen coverage rows behind from that one run.  The check that separates
   this from a regression is one command — re-run the failing file against a fresh database and
-  see it pass — together with a diff over the implicated paths that comes back empty.  Hosted CI
-  never sees the condition, because a CI checkout has no `data/` directory, so a green CI run is
-  the expected symptom here rather than evidence against it.  Filed as ST-4570.
+  see it pass — together with a diff over the implicated paths that comes back empty.  The hosted
+  run has not been shown to be immune, so a green hosted run is not evidence against this class
+  of failure.  Filed as ST-4570, and the fix is [PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911).

@@ -2696,12 +2696,12 @@ put the per-variant state behind a render-scope local that the effect mutated, w
 Compiler rejects as an error — every write now goes through module-scope functions.
 
 Verified in the lane: `npx tsc --noEmit` clean, `npx eslint` 0 errors on every changed file, and the
-nine affected vitest files green (80 tests, exit 0):  `public-site-routing` (22),
+nine affected vitest files green (80 tests, exit 0): `public-site-routing` (22),
 `copy-rules-lint` (17), `candle-ticker-raf-resilience` (9), `framework-page` (9),
 `framework-hash-target` (6), `security-headers` (6), `public-sentence-gap` (4),
 `middleware-auth-secret` (4), `how-it-works-redirect` (3).  The full suite is CI's job — a
 local full run was impractical in this seat's working environment, so it is not claimed here.  The
-production build was run locally after the fourth review round and succeeded;  the unit tests cannot
+production build was run locally after the fourth review round and succeeded; the unit tests cannot
 show that a bundler export condition holds, because the repo's vitest config aliases `server-only`
 to a mock, which is why the guard was taken back out of `middleware.ts` rather than kept on the
 strength of a green test run.  The first hosted `verify-hosted` run failed on the repo's own
@@ -2742,7 +2742,7 @@ Rollout: `docs/rollouts/2026-10-19-public-framework-pages.md`.
 
 ## 2026-10-21 — [MM] Public Framework pages (branch `minimax/st-4565-public-framework-pages`)
 
-The scope of this effort did not change:  `/framework` expanded, `/how-it-works` retired, one
+The scope of this effort did not change: `/framework` expanded, `/how-it-works` retired, one
 shared public shell, the apex routed to `/welcome`, and the alt domain forwarded to the main
 domain.  Three things about how it lands did change, and they are recorded here because each one
 changes what a reader of this plan should expect.
@@ -2755,13 +2755,13 @@ merged forward onto the current `main`, so it carries the Autofix pin bump that 
 Head is `f6949bea9`.
 
 **One repo finding from this effort was withdrawn.**  The claim that a docs-only head can never
-report the required `verify` check was wrong:  the `verify` gate runs on
+report the required `verify` check was wrong: the `verify` gate runs on
 `if: ${{ !cancelled() }}` and exits 0 on the docs-only path, and only `verify-hosted` and
 `verify-ios` are gated behind `docs-only != 'true'`.  A real docs-only head settles it — PR #4875
 changed one file, and its check-runs report `verify` → success.  ST-4568 is closed as wontfix
 with that evidence, and the rollout note, the Linear comment, the Zulip post, and the Apple Note
 all carry the correction.  The lesson for any future effort in this repo is the method rather than
-the fact:  a required check that "disappears" is a claim about a job's `if` condition, so read the
+the fact: a required check that "disappears" is a claim about a job's `if` condition, so read the
 condition and, better, read a real run.
 
 **Two repo bugs found along the way are now fixed on `main`.**  The fleet-wide PR Autofix failure
@@ -2772,7 +2772,7 @@ under a merge queue was fixed in PR #4893.
 **What is left.**  Jay's APPROVED review on PR #4889, which the
 `require_extra_approval_for_unattributed_changes` ruleset condition requires, because three commits
 on the branch carry an author GitHub cannot attribute to an account.  Auto-merge is armed, so the
-merge fires on the approval.  After it lands:  verify the deployed SHA against production, close
+merge fires on the approval.  After it lands: verify the deployed SHA against production, close
 ST-4565 out, and delete the remote branch.
 
 ## 2026-10-21 [MM] Verification state and the org-secret fix
@@ -2780,7 +2780,7 @@ ST-4565 out, and delete the remote branch.
 **The full local gate ran, end to end, on the pre-`origin/main`-merge tree.**  `tsc` 0, `eslint` 0,
 `npm test` 9,726 passed / 51 skipped / 1 failed across 865 files, `npm run build` succeeded.  The
 single failure is `test/event-loop-stall-hot-path.test.ts`, a wall-clock assertion that a no-op
-prune stays under 100ms and that measures 162s in the local execution environment;  neither it nor
+prune stays under 100ms and that measures 162s in the local execution environment; neither it nor
 `src/lib/db.ts` is touched by this diff, so it is an environment-dependent artifact and not a
 regression from this change.  The hosted `verify-hosted` job is the gate of record, as it always
 was.  A second pass on the merged head is recorded below, in this same file.
@@ -2793,10 +2793,10 @@ secret's selection was widened to the sixteen consumer repositories that consume
 which touches no credential value, and the fix is confirmed in this repository by a green run on
 PR #4908.  The re-check on this pull request comes with the next bot-authored event.
 
-**What is left.**  Unchanged:  Jay's APPROVED review on PR #4889, which the
+**What is left.**  Unchanged: Jay's APPROVED review on PR #4889, which the
 `require_extra_approval_for_unattributed_changes` ruleset condition requires, because three
 commits on the branch carry an author GitHub cannot attribute to an account.  Auto-merge is
-armed, so the merge fires on the approval.  After it lands:  verify the deployed SHA against
+armed, so the merge fires on the approval.  After it lands: verify the deployed SHA against
 production, close ST-4565 out, and delete the remote branch.
 
 ## 2026-10-21 [MM] Second gate pass, the failure it found, and the Autofix re-check
@@ -2805,7 +2805,7 @@ production, close ST-4565 out, and delete the remote branch.
 `eslint` 0, `npm test` 2 failed / 9,731 passed / 51 skipped across 865 files, `npm run build`
 succeeded.  One failure is the known wall-clock assertion in
 `test/event-loop-stall-hot-path.test.ts`, whose measured time varies with the execution
-environment.  The other is new, and it is not this diff:  the shared, untracked `data/app.db` holds
+environment.  The other is new, and it is not this diff: the shared, untracked `data/app.db` holds
 enrichment coverage rows that the suite itself wrote, and `src/lib/data-completeness.ts` reads the
 newest one back and uses its fill rate as a field's completeness.
 
@@ -2819,7 +2819,7 @@ state from an earlier run — and the hosted run has not been shown to be immune
 database the file passes 4 of 4 on its own, and the branch diff touches none of the implicated
 files.  Filed as ST-4570, raised from P2 to P1 on the corrected evidence, and claimed by this
 seat.  It is kept out of this diff on purpose so a public-pages change does not widen into shared
-test infrastructure:  the fix is on its own branch off `origin/main` as
+test infrastructure: the fix is on its own branch off `origin/main` as
 [PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911), where it carries no
 unattributed commit and needs no owner approval to land.
 
@@ -2828,11 +2828,11 @@ unattributed commit and needs no owner approval to land.
 concluded `success`.  Kody's re-review on this head found no issues, and the hosted `verify-hosted`
 job is green.
 
-**What is left.**  Unchanged:  Jay's APPROVED review on PR #4889, which the
+**What is left.**  Unchanged: Jay's APPROVED review on PR #4889, which the
 `require_extra_approval_for_unattributed_changes` ruleset condition requires, because three commits
 on the branch carry an author GitHub cannot attribute to an account.  No author was rewritten and no
 bot was used to satisfy it.  Auto-merge is armed, so the merge fires on the approval.  After it
-lands:  verify the deployed SHA against production, close ST-4565 out, and delete the remote
+lands: verify the deployed SHA against production, close ST-4565 out, and delete the remote
 branch.
 ## 2026-10-21 — [MM] Test-database isolation for the enrichment coverage writers (ST-4570)
 
