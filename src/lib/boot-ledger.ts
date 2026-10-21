@@ -16,8 +16,9 @@
  *    healthcheck kill -- shows up on the NEXT boot as `prevUnclean: true`, which is itself the receipt.
  *  - The pure `assessRestartLoop` counts boots in a trailing window; `reportRestartLoop` raises a
  *    Sentry message and an admin alert when the count crosses the threshold and at least one
- *    predecessor in the window was not a clean deploy stop (143/SIGTERM after a real uptime).
- *    A burst of clean redeploys alone never trips the detector.
+ *    predecessor in the window was not a clean deploy stop (143/SIGTERM after a real uptime,
+ *    followed by a boot of a new release).  A burst of clean redeploys alone never trips the
+ *    detector, while a watchdog/SIGTERM restart of the same image still does.
  *
  * Scope discipline: this is best-effort observability.  Nothing here may ever throw into boot, block
  * boot on I/O other than two tiny synchronous file operations, or change a trading decision.  It is
@@ -158,6 +159,27 @@ export function parseBootLedger(text: string): BootLedgerEntry[] {
 }
 
 /**
+ * A 143/SIGTERM long-uptime exit is a clean deploy stop only when the next
+ * boot runs a NEW release.  The in-container liveness watchdog kills with the
+ * same SIGTERM (scripts/coolify-prod-start.sh liveness_watchdog_loop) and its
+ * boot grace guarantees uptime past the threshold, so the exit receipt alone
+ * cannot tell a watchdog kill from a deploy stop.  The successor boot's
+ * release (recordBoot, from SOURCE_COMMIT) can: a deploy replaces the image,
+ * a watchdog kill restarts the same one.  A missing or identical release
+ * fails LOUD (counts as a crash predecessor): a same-commit redeploy may
+ * over-count once, but a silent loop pages nobody.
+ */
+function isCleanDeployStop(predecessor: BootEntry, successor: BootEntry, exit: ExitEntry): boolean {
+  if (exit.code !== 143 && exit.signal !== "SIGTERM") return false;
+  if (exit.uptimeSec < CLEAN_DEPLOY_MIN_UPTIME_SEC) return false;
+  return (
+    predecessor.release !== undefined &&
+    successor.release !== undefined &&
+    predecessor.release !== successor.release
+  );
+}
+
+/**
  * Pure.  `entries` is the ledger INCLUDING the current boot as its last boot entry.
  */
 export function assessRestartLoop(
@@ -184,18 +206,19 @@ export function assessRestartLoop(
     if (!predecessor) continue;
     // A predecessor that booted before the window is not evidence about the
     // window: a stale crash before an otherwise clean redeploy must not trip
-    // the loop trigger.
-    if (Date.parse(predecessor.ts) < windowStart) continue;
+    // the loop trigger.  The unclean counter is forensic, not a trigger, so
+    // it still counts a pre-window predecessor that left no exit receipt.
+    if (Date.parse(predecessor.ts) < windowStart) {
+      if (!exitByBoot.has(predecessor.bootId)) uncleanPredecessorsInWindow++;
+      continue;
+    }
     const predecessorExit = exitByBoot.get(predecessor.bootId);
     if (!predecessorExit) {
       uncleanPredecessorsInWindow++;
       crashPredecessorsInWindow++;
       continue;
     }
-    const cleanDeploy =
-      (predecessorExit.code === 143 || predecessorExit.signal === "SIGTERM") &&
-      predecessorExit.uptimeSec >= CLEAN_DEPLOY_MIN_UPTIME_SEC;
-    if (!cleanDeploy) crashPredecessorsInWindow++;
+    if (!isCleanDeployStop(predecessor, boots[i], predecessorExit)) crashPredecessorsInWindow++;
   }
 
   const current = boots[boots.length - 1];

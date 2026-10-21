@@ -29,8 +29,8 @@ vi.mock("../src/lib/db-health", () => ({ alertStorageWarning: alertMock.alertSto
 const MIN = 60_000;
 const T0 = Date.parse("2026-08-28T15:00:00.000Z");
 
-function boot(id: string, atMs: number): BootLedgerEntry {
-  return { v: 1, t: "boot", ts: new Date(atMs).toISOString(), bootId: id, pid: 1, node: "v24" };
+function boot(id: string, atMs: number, release?: string): BootLedgerEntry {
+  return { v: 1, t: "boot", ts: new Date(atMs).toISOString(), bootId: id, pid: 1, node: "v24", ...(release ? { release } : {}) };
 }
 function exit(id: string, atMs: number, code: number | null = 143, extra: Partial<BootLedgerEntry> = {}): BootLedgerEntry {
   return { v: 1, t: "exit", ts: new Date(atMs).toISOString(), bootId: id, pid: 1, code, uptimeSec: 10, ...extra } as BootLedgerEntry;
@@ -77,6 +77,38 @@ describe("assessRestartLoop (pure)", () => {
   });
 
   it("does not call a burst of clean deploy stops a loop (ST-4559)", () => {
+    // Each stop is followed by a boot of a NEW release: that is what makes it
+    // a deploy stop rather than a same-image (e.g. watchdog) restart.
+    const entries = [
+      boot("a", T0 - 30 * MIN, "r1"), exit("a", T0 - 20 * MIN, 143, { signal: "SIGTERM", uptimeSec: 600 }),
+      boot("b", T0 - 20 * MIN, "r2"), exit("b", T0 - 10 * MIN, 143, { signal: "SIGTERM", uptimeSec: 594 }),
+      boot("c", T0 - 10 * MIN, "r3"), exit("c", T0 - 1 * MIN, 143, { signal: "SIGTERM", uptimeSec: 540 }),
+      boot("d", T0, "r4")
+    ];
+    const a = assessRestartLoop(entries, T0);
+    expect(a.bootsInWindow).toBe(4);
+    expect(a.crashPredecessorsInWindow).toBe(0);
+    expect(a.restartLoop).toBe(false);
+    expect(CLEAN_DEPLOY_MIN_UPTIME_SEC).toBe(120);
+  });
+
+  it("counts a same-release SIGTERM burst as a loop (watchdog kill, not a deploy)", () => {
+    // The liveness watchdog kills with SIGTERM past the uptime threshold and
+    // restarts the SAME image: without the release check this burst would be
+    // misclassified as clean deploy stops and the detector would stay silent.
+    const entries = [
+      boot("a", T0 - 30 * MIN, "r1"), exit("a", T0 - 20 * MIN, 143, { signal: "SIGTERM", uptimeSec: 600 }),
+      boot("b", T0 - 20 * MIN, "r1"), exit("b", T0 - 10 * MIN, 143, { signal: "SIGTERM", uptimeSec: 594 }),
+      boot("c", T0 - 10 * MIN, "r1"), exit("c", T0 - 1 * MIN, 143, { signal: "SIGTERM", uptimeSec: 540 }),
+      boot("d", T0, "r1")
+    ];
+    const a = assessRestartLoop(entries, T0);
+    expect(a.bootsInWindow).toBe(4);
+    expect(a.crashPredecessorsInWindow).toBe(3);
+    expect(a.restartLoop).toBe(true);
+  });
+
+  it("fails loud when releases are missing: an unattributed SIGTERM stop is not a clean deploy", () => {
     const entries = [
       boot("a", T0 - 30 * MIN), exit("a", T0 - 20 * MIN, 143, { signal: "SIGTERM", uptimeSec: 600 }),
       boot("b", T0 - 20 * MIN), exit("b", T0 - 10 * MIN, 143, { signal: "SIGTERM", uptimeSec: 594 }),
@@ -84,10 +116,8 @@ describe("assessRestartLoop (pure)", () => {
       boot("d", T0)
     ];
     const a = assessRestartLoop(entries, T0);
-    expect(a.bootsInWindow).toBe(4);
-    expect(a.crashPredecessorsInWindow).toBe(0);
-    expect(a.restartLoop).toBe(false);
-    expect(CLEAN_DEPLOY_MIN_UPTIME_SEC).toBe(120);
+    expect(a.crashPredecessorsInWindow).toBe(3);
+    expect(a.restartLoop).toBe(true);
   });
 
   it("still calls rapid short-lived SIGTERM boots a loop", () => {
@@ -108,15 +138,22 @@ describe("assessRestartLoop (pure)", () => {
   });
 
   it("does not count a crash predecessor that booted before the window", () => {
-    // Boot a crashed before the window opened; the two in-window boots alone
-    // must not trip the loop trigger on its stale evidence.
+    // Boot a crashed before the window opened; a burst of clean redeploys
+    // inside the window must not trip the loop trigger on its stale evidence.
+    // Four in-window boots meet the default threshold of 3, so restartLoop
+    // being false proves the trigger (not the count) excludes the stale crash.
     const entries = [
-      boot("a", T0 - 50 * MIN),
-      boot("b", T0 - 10 * MIN), exit("b", T0 - 9 * MIN, 143, { signal: "SIGTERM", uptimeSec: 600 }),
-      boot("c", T0)
+      boot("a", T0 - 50 * MIN, "r0"),
+      boot("b", T0 - 30 * MIN, "r1"), exit("b", T0 - 29 * MIN, 143, { signal: "SIGTERM", uptimeSec: 600 }),
+      boot("c", T0 - 20 * MIN, "r2"), exit("c", T0 - 19 * MIN, 143, { signal: "SIGTERM", uptimeSec: 600 }),
+      boot("d", T0 - 10 * MIN, "r3"), exit("d", T0 - 9 * MIN, 143, { signal: "SIGTERM", uptimeSec: 600 }),
+      boot("e", T0, "r4")
     ];
     const a = assessRestartLoop(entries, T0);
+    expect(a.bootsInWindow).toBe(4);
     expect(a.crashPredecessorsInWindow).toBe(0);
+    // Forensic only: the pre-window crash still shows in the unclean counter.
+    expect(a.uncleanPredecessorsInWindow).toBe(1);
     expect(a.restartLoop).toBe(false);
   });
 
