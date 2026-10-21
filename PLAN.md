@@ -2897,3 +2897,17 @@ differential, and it was run against a copy of the file with the override remove
 was observed rather than assumed.  A control that cannot fail is not a control.
 
 Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 - [MM] The isolation control proves the shared database stayed clean (ST-4572)
+
+Still not a scope change.  The same two follow-ups, taken one step further.  The control assertion
+in the two cascade-reaching files grows a third part that checks the run's shared database
+directly, so the control now covers the whole of the claim rather than one half of it.
+
+The shape that made this possible is a read-only probe with `fileMustExist: true`.  Opening the
+shared path read-write would create it, and creating it is the pollution ST-4571 exists to
+prevent; opening it read-only cannot write, and refusing to open a database that is not already
+there means the probe can never bring the file into existence.  The counter was proved to count
+real rows, and the new assertion was proved to fail when the shared database holds one.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.

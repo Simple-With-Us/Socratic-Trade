@@ -14,6 +14,7 @@ import { stampOhlcBarProvenance } from "../src/lib/history";
 import { mergeGroupedBarData, mergeQuoteData } from "../src/lib/market";
 import type { MarketQuote, MarketScan } from "../src/lib/types";
 import type { MarketEnrichmentProvider, SymbolEnrichment } from "../src/lib/data-providers";
+import { sharedCoverageRowCount } from "./helpers/db-isolation-control";
 
 // The cascade gather in "cascade merge arbitrates the new quote fields" builds and persists an
 // enrichment coverage report.  Without a database of its own this file wrote coverage rows into
@@ -379,7 +380,7 @@ describe("OHLC bar provenance", () => {
 });
 
 describe("database isolation control", () => {
-  it("keeps the cascade coverage write in this file's own database", async () => {
+  it("keeps the cascade coverage write in this file's own database and out of the shared one", async () => {
     // Control assertion for the fixture at the top of this file.  The other tests here pass
     // whether or not the isolation works, so nothing in the file proves that the cascade write
     // stays out of the run's shared database.  This one does.
@@ -396,5 +397,12 @@ describe("database isolation control", () => {
       runs = listEnrichmentCoverageRunHistory(10);
     }
     expect(runs.length).toBeGreaterThan(0);
+
+    // The shared database is the one this file inherited, and the cascade row must not be
+    // in it.  This is the half that fails under the old shared-database setup.  When the
+    // write goes to the shared database this file's own database has no row either, and the
+    // assertion above already fails.  This one additionally rules out the write landing in
+    // both databases.
+    expect(sharedCoverageRowCount(prevDb)).toBe(0);
   });
 });

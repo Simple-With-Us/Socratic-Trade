@@ -7594,3 +7594,29 @@ The copy was deleted and was never committed.
 code changed and no existing assertion was weakened.
 
 Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 [MM] ST-4572 - the control now proves the write stayed out of the shared database
+
+**What.**  The isolation control in the two cascade-reaching files grows a third assertion and a
+new helper module.  The control already proved the file was pointed at its own database and that
+the cascade coverage row landed there.  It now also proves the row did NOT land in the run's
+shared database, which is the one condition the first two assertions cannot see.
+
+**The helper.**  `test/helpers/db-isolation-control.ts` opens the shared database READ-ONLY with
+`fileMustExist: true` and never creates it.  A database that is not there reads as holding no
+rows, and a missing table is the same fact; any other error is rethrown rather than folded into a
+zero, so a broken probe cannot masquerade as a clean one.
+
+**The assertion was proved non-vacuous, in three parts.**  The counter was measured against a
+database holding three real rows and returned three.  A temporary copy of
+`test/provenance-stamps.test.ts` with the override removed was run against a shared database that
+held no rows, and the shared database held one coverage row afterwards - the leak is real and it
+reaches the shared database.  The unmodified file was then run against a shared database seeded
+with one row, and the new assertion failed with `expected 1 to be +0`.  A control that cannot fail
+is not a control, so this one was shown failing.
+
+The temporary files were deleted and were never committed.  `npx tsc --noEmit` exits 0, `npx eslint`
+over the changed files exits 0, and the three files together against a fresh database pass 17 of
+17.  No production code changed and no existing assertion was weakened.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.

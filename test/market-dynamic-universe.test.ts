@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { resetDbForTesting } from "../src/lib/db";
+import { sharedCoverageRowCount } from "./helpers/db-isolation-control";
 
 // scanMarket() runs the live enrichment cascade, and every cascade gather builds and persists an
 // enrichment coverage report.  Without a database of its own this file wrote coverage rows into
@@ -48,14 +49,6 @@ afterEach(() => {
 });
 
 describe("market scan dynamic universes", () => {
-  it("owns an isolated database, so its cascade writes cannot reach the run's shared database", () => {
-    // Control assertion for the fixture above.  Without it the rest of this file's tests pass
-    // whether or not the isolation works, so a regression in the fixture would be invisible.
-    // This one fails if the file is running against the shared database instead of its own.
-    expect(process.env.DATABASE_URL).toBe(dbUrl);
-    expect(process.env.DATABASE_URL).not.toBe(prevDb);
-  });
-
   it("adds Nasdaq exchange-filtered rows for the NYSE Composite universe", async () => {
     vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -159,6 +152,35 @@ describe("market scan dynamic universes", () => {
 
     expect(requestSignal?.aborted).toBe(true);
     expect(scan.warnings.join(" ")).toContain("holdings failed");
+  });
+});
+
+describe("database isolation control", () => {
+  it("keeps the cascade coverage write in this file's own database and out of the shared one", async () => {
+    // Control assertion for the fixture at the top of this file.  The other tests here pass
+    // whether or not the isolation works, so nothing in the file proves that the cascade
+    // write stays out of the run's shared database.  This one does, and it sits after the
+    // cascade tests because the write is the thing under test.
+    expect(process.env.DATABASE_URL).toBe(dbUrl);
+    expect(process.env.DATABASE_URL).not.toBe(prevDb);
+
+    // The persist is a fire-and-forget dynamic import, so the row can arrive after the
+    // cascade test that triggered it has finished.  Poll for it rather than assume it landed.
+    const { listEnrichmentCoverageRunHistory } = await import("../src/lib/db-enrichment-coverage");
+    const deadline = Date.now() + 5_000;
+    let runs = listEnrichmentCoverageRunHistory(10);
+    while (runs.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+      runs = listEnrichmentCoverageRunHistory(10);
+    }
+    expect(runs.length).toBeGreaterThan(0);
+
+    // The shared database is the one this file inherited, and the cascade row must not be
+    // in it.  This is the half that fails under the old shared-database setup.  When the
+    // write goes to the shared database this file's own database has no row either, and the
+    // assertion above already fails.  This one additionally rules out the write landing in
+    // both databases.
+    expect(sharedCoverageRowCount(prevDb)).toBe(0);
   });
 });
 
