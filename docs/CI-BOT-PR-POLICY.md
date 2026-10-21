@@ -20,6 +20,9 @@ The same bot-actor policy is reflected in `.github/workflows/ci.yml`,
 copy `ci-pending/e2e.yml`. Keep those lists in sync when the owner changes
 the approved set.
 
+`github-actions[bot]` covers autofix pushes made by workflow runs, and
+`swu-echo[bot]` is the fleet's Echo GitHub App seat (PR backlog sweeps).
+
 `chatgpt-codex-connector[bot]` is the observed Codex GitHub reviewer account;
 `codex[bot]` remains for compatibility with the earlier requested name.
 GitHub uses the event initiator as `github.actor`, so review authorship by itself

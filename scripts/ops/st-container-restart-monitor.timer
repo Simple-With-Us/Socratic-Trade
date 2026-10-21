@@ -1,6 +1,6 @@
 [Unit]
 Description=Periodic ST Docker restart monitor on the fleet Hetzner host
-Documentation=https://github.com/jaywedgeworth22/Socratic-Trade/blob/main/docs/runbooks/st-container-restart-monitor.md
+Documentation=https://github.com/Simple-With-Us/Socratic-Trade/blob/main/docs/runbooks/st-container-restart-monitor.md
 
 [Timer]
 # Off the :00/:13/:33/:53 deploy-freshness cluster.
