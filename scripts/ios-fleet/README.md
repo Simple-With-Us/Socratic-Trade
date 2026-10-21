@@ -12,7 +12,7 @@ This directory is the **source of truth** for the fleet-wide TestFlight ship scr
 - `ExportOptions-export-ipa.plist` — export options for `destination=export` (local IPA only).
 - `test-ship-seq.sh` — offline tests for the build-number rules (see **Tests**).  Repo-only; not installed to the runtime location.
 
-Secrets (ASC API key id/issuer/path) come from process env `ASC_KEY_ID` / `ASC_ISSUER_ID` / `ASC_KEY_PATH`, else from Infisical Fleet-OPS folder `/asc` through `fleet-secrets get` (`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8`;  the `.p8` is written to a 0600 temp file for the run and removed on exit).  Nothing reads `~/.secrets` (AFC-359).  None of the files here contain secret values.
+Secrets (ASC API key id/issuer/key) come from process env `ASC_KEY_ID` / `ASC_ISSUER_ID` / `ASC_KEY_P8`, else from Infisical Fleet-OPS folder `/asc` through `fleet-secrets get` (`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8`;  the `.p8` is written to a 0600 temp file for the run and removed on exit).  A path in `ASC_KEY_PATH` is not a credential source (AFC-459, revision 2):  it is ignored wherever it appears, and the 0600 temp file is only the materialization `altool` and Xcode read.  Nothing reads `~/.secrets` (AFC-359).  None of the files here contain secret values.
 
 ## Install (sync repo copy -> runtime location)
 
