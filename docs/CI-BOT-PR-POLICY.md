@@ -1,7 +1,8 @@
 # Bot-authored pull requests
 
-Same-repository PRs triggered by `cursor[bot]`, `dependabot[bot]`, `sentry[bot]`,
-`codex[bot]`, and `chatgpt-codex-connector[bot]` may run CI, Playwright Smoke,
+Same-repository PRs triggered by `cursor[bot]`, `dependabot[bot]`, `renovate[bot]`,
+`sentry[bot]`, `codex[bot]`, `chatgpt-codex-connector[bot]`, `github-actions[bot]`,
+and `swu-echo[bot]` may run CI, Playwright Smoke,
 and gitleaks. They remain subject
 to ordinary required checks and reviews; no bot work is automatically trusted
 as correct. The gate reads the event `github.actor`, not a permanent PR-author
