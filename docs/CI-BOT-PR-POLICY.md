@@ -1,7 +1,8 @@
 # Bot-authored pull requests
 
-Same-repository PRs triggered by `cursor[bot]`, `dependabot[bot]`, `sentry[bot]`,
-`codex[bot]`, and `chatgpt-codex-connector[bot]` may run CI, Playwright Smoke,
+Same-repository PRs triggered by `cursor[bot]`, `dependabot[bot]`, `renovate[bot]`,
+`sentry[bot]`, `codex[bot]`, `chatgpt-codex-connector[bot]`, `github-actions[bot]`,
+and `swu-echo[bot]` may run CI, Playwright Smoke,
 and gitleaks. They remain subject
 to ordinary required checks and reviews; no bot work is automatically trusted
 as correct. The gate reads the event `github.actor`, not a permanent PR-author
@@ -18,6 +19,9 @@ The same bot-actor policy is reflected in `.github/workflows/ci.yml`,
 `.github/workflows/e2e.yml`, `.github/workflows/security.yml`, and the parked
 copy `ci-pending/e2e.yml`. Keep those lists in sync when the owner changes
 the approved set.
+
+`github-actions[bot]` covers autofix pushes made by workflow runs, and
+`swu-echo[bot]` is the fleet's Echo GitHub App seat (PR backlog sweeps).
 
 `chatgpt-codex-connector[bot]` is the observed Codex GitHub reviewer account;
 `codex[bot]` remains for compatibility with the earlier requested name.
