@@ -2774,3 +2774,26 @@ under a merge queue was fixed in PR #4893.
 on the branch carry an author GitHub cannot attribute to an account.  Auto-merge is armed, so the
 merge fires on the approval.  After it lands:  verify the deployed SHA against production, close
 ST-4565 out, and delete the remote branch.
+
+## 2026-10-21 [MM] Verification state and the org-secret fix
+
+**The full local gate ran, end to end.**  `tsc` 0, `eslint` 0, `npm test` 9,726 passed / 51
+skipped / 1 failed across 865 files, `npm run build` succeeded.  The single failure is
+`test/event-loop-stall-hot-path.test.ts`, a wall-clock assertion that a no-op prune stays under
+100ms and that measures 162s under this seat's host load;  neither it nor `src/lib/db.ts` is
+touched by this diff, so it is a host-load artifact and not a regression from this change.  The
+hosted `verify-hosted` job is the gate of record, as it always was.
+
+**The Autofix failure had a second cause beyond the stale pin, and it lived in org configuration
+rather than in any repository.**  An org-wide Actions *variable* retargets every repository at
+once, but an org *secret* with `selected` visibility applies only to the repositories on its
+list, so the two scopes disagreed and the job failed everywhere except four repositories.  The
+secret's selection was widened to the sixteen consumer repositories that consume the reusable,
+which touches no credential value, and the fix is confirmed in this repository by a green run on
+PR #4908.  The re-check on this pull request comes with the next bot-authored event.
+
+**What is left.**  Unchanged:  Jay's APPROVED review on PR #4889, which the
+`require_extra_approval_for_unattributed_changes` ruleset condition requires, because three
+commits on the branch carry an author GitHub cannot attribute to an account.  Auto-merge is
+armed, so the merge fires on the approval.  After it lands:  verify the deployed SHA against
+production, close ST-4565 out, and delete the remote branch.

@@ -462,9 +462,30 @@ about all of it.  The complete affected set is nine files, re-run together on th
   `framework-page` (9), `framework-hash-target` (6), `security-headers` (6),
   `public-sentence-gap` (4), `middleware-auth-secret` (4), `how-it-works-redirect` (3).  Each file was also run on its own; every one exited 0.
 
-**The full suite was not run locally, and is not claimed here.** A local full run was
-impractical in this seat's working environment.  The hosted `verify-hosted` job is the gate of
-record.
+**The full local gate was run, end to end, and it is one failure out of 9,777 tests.**  The
+earlier statement that a full run was impractical in this seat's working environment was wrong,
+and it is corrected here.
+
+- `npx tsc --noEmit` — clean, exit 0.
+- `npx eslint app src test middleware.ts` — exit 0.  The gate fails on errors only;  the
+  grandfathered `@typescript-eslint/no-explicit-any` and `react-hooks/set-state-in-effect`
+  backlog is pinned to "warn" in `eslint.config.mjs`.
+- `npx vitest run` — **1 failed, 9,726 passed, 51 skipped across 865 files**, exit 1.  The single
+  failure is `test/event-loop-stall-hot-path.test.ts` → "pruneTaskJournal no-op stays under 100ms
+  when a full scan of the same rows does not", a wall-clock assertion that measured 162s against a
+  100ms bound and that times out against the 60s test timeout when it is re-run on its own.  Host
+  load during the run was 40-172.  Neither `test/event-loop-stall-hot-path.test.ts` nor
+  `src/lib/db.ts` is touched by this diff — `git diff origin/main...HEAD --stat` over those two
+  paths is empty — so this is a host-load artifact and not a regression from this change.  It is
+  reported as it stands;  the hosted `verify-hosted` job is the gate of record.
+- `npm run build` (`next build --webpack`) — **succeeded**, exit 0.
+
+**What that pass covered, stated exactly.**  It ran on the tree carrying this branch's own
+commits, before `origin/main` was merged in.  The merge that followed brought in
+`src/lib/boot-ledger.ts` and `test/boot-ledger.test.ts` from `main` — files this diff does not
+touch, on a commit where `main`'s own CI was green — and it changed no code of this diff.  A
+second full pass on the merged head was started before this note was committed, and its result is
+recorded in the ST-4565 fleet thread.
 
 Re-verified after the fourth review round (findings 10 and 11 above), on the same branch:
 
@@ -495,10 +516,19 @@ holds read-only access to the per-variant state.
 
 ## Next Steps & Blockers
 
-- **One gate is the owner's, and it is an approval.**  `verify` and `gitleaks` pass, all review
-  threads are resolved, and the fifth-round finding is fixed;  what remains is the
-  `require_extra_approval_for_unattributed_changes` approval described under Merge Mechanics.  It is
-  not a code problem and it cannot be cleared by an agent.
+- **One gate is the owner's, and it is an approval.**  `gitleaks` is green on the head, all review
+  threads are resolved, and every finding raised against this diff is either fixed or answered on
+  its thread;  what remains is the `require_extra_approval_for_unattributed_changes` approval
+  described under Merge Mechanics.  It is not a code problem and it cannot be cleared by an agent.
+  The `verify` check on the head is still in flight, because the workflow's concurrency group has
+  `cancel-in-progress: false` and each new head waits for the run before it.
+- **The Autofix check on this pull request failed five times before the org secret's selection was
+  widened, and it is not a required check.**  `autofix` is not in the required status check list on
+  `main` (`verify` and `gitleaks` are), so it never gated this merge.  Every failing run was
+  bot-authored and every one of them predates the secret's last change;  the first bot-authored run
+  after it is green, in this repository and in the two other repositories used as controls.  The
+  re-check on this pull request comes with the next bot-authored event, which is the review bot's
+  re-review after the next push.
 - No re-kick is needed on docs-only heads: `verify` still runs and reports PASS; only `verify-hosted` is skipped by the path filter.  The `workflow_dispatch` lever is reserved for cloud-proxy pushes that generate no `pull_request` event.  See Merge Mechanics above.
 - Merging `main` auto-deploys (weekday RTH latch applies), and this change touches runtime paths
   (`app/**`, `middleware.ts`), so the image build is a real deploy.
@@ -514,3 +544,25 @@ holds read-only access to the per-variant state.
   different lockfile). The symlink was unlinked and `npm ci` restored this branch's locked
   dependency set before any gate was run. `rm node_modules` is blocked by the shell guard;
   `unlink <absolute path>` is the working path for a symlink.
+- **An org-wide Actions variable and an org secret with `selected` visibility do not have the same
+  scope, and the disagreement fails every repository that is not on the secret's list.**  The org
+  variables `SWU_AUTOFIX_MODEL_BASE_URL=https://api.meta.ai` and
+  `SWU_AUTOFIX_MODEL=muse-spark-1.3-contributor` apply to every repository at once, so every
+  consumer of `pr-autofix-reusable.yml` was routed at the Meta host.  The org secret
+  `META_MODEL_API_TOKEN` has `selected` visibility and was visible to only four repositories, so
+  every other consumer resolved `secrets.META_MODEL_API_TOKEN` to an empty string and the
+  reusable's own guard (`pr-autofix-reusable.yml` @ `c97a2dae`, line 184) exited 1 with
+  `token_set=no`.  The fix was to widen the secret's repository selection to the sixteen consumer
+  repositories that consume the reusable — a selection change, with no credential value touched.
+  It is confirmed in this repository:  PR Autofix run 39608488565, on PR #4908, concluded
+  `success` with `META_TOKEN` populated on the Meta route, and every run that failed did so before
+  the secret's last change.  CodeCaps, which was not on the list before and is now, is green as
+  well, and Clutch, which was on it from the start, passes the same guard.
+- **A workflow whose job is gated on the comment author's user type cannot be re-kicked by a human
+  comment.**  `.github/workflows/autofix.yml` gates the job on
+  `contains(fromJSON('["bot", "Bot"]'), github.event.comment.user.type || github.event.review.user.type || '')`,
+  so a human comment dispatches a run that concludes `skipped` rather than `failed`, and a skipped
+  run reads as a pass in `gh run list`.  The guard itself is correct — only a bot actor should
+  spend a model run — but "re-kick by commenting" is inert against it.  The levers that do work
+  are bot-authored events, and a push to the branch is enough, because a review bot re-reviews on
+  every push.

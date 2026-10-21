@@ -7388,3 +7388,35 @@ rule that puts a human in front of unattributed code is doing its job.
 the merge fires as soon as the approval lands and the required checks are green on the pushed
 head.  After the merge:  verify the deployed SHA against production, close ST-4565 out, and delete
 the remote branch.
+
+## 2026-10-21 [MM] The full local gate, and the org-secret fix that unblocked the Autofix job
+
+**The full local gate has been run, end to end.**  `npx tsc --noEmit` exits 0,
+`npx eslint app src test middleware.ts` exits 0, `npm test` reports 1 failed / 9,726 passed /
+51 skipped across 865 files and exits 1, and `npm run build` succeeds.  The single failure is
+`test/event-loop-stall-hot-path.test.ts`, a wall-clock assertion that a no-op prune stays under
+100ms;  it measures 162s under this seat's host load and times out when re-run on its own.
+Neither that test nor `src/lib/db.ts` is touched by this diff, so it is a host-load artifact and
+not a regression from this change.  It is reported as it stands, and the hosted `verify-hosted`
+job is the gate of record.
+
+**The Autofix job's fleet-wide failure had a second, org-configuration cause, and it is fixed.**
+The org variables `SWU_AUTOFIX_MODEL_BASE_URL=https://api.meta.ai` and
+`SWU_AUTOFIX_MODEL=muse-spark-1.3-contributor` apply to every repository at once, but the org
+secret `META_MODEL_API_TOKEN` has `selected` visibility and was on only four repositories, so
+every other consumer resolved it to an empty string and the reusable's own guard exited 1 with
+`token_set=no`.  The secret's repository selection was widened to the sixteen consumer
+repositories that consume the reusable — a selection change, with no credential value touched.
+It is confirmed in this repository:  PR Autofix run 39608488565, on PR #4908, concluded
+`success` with `META_TOKEN` populated on the Meta route, and every failing run predates the
+secret's last change.
+
+**One correction to the record above.**  The Autofix job cannot be re-kicked by a human comment:
+`.github/workflows/autofix.yml` gates it on the comment author's user type being bot or Bot, so
+a human comment dispatches a run that concludes `skipped` rather than `failed`, and a skipped
+run reads as a pass in the run list.  The levers that work are bot-authored events, and a push to
+the branch is enough, because a review bot re-reviews on every push.
+
+**Next.**  Unchanged:  Jay's APPROVED review on PR #4889 is the one gate that no agent can clear.
+The `verify` check on the head is in flight.  After the merge:  verify the deployed SHA against
+production, close ST-4565 out, and delete the remote branch.
