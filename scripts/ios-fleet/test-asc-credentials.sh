@@ -286,8 +286,10 @@ if grep -Fq 'not a private key at all' "${tmp}/invalid-key.err" "$LOG_FILE"; the
 fi
 
 # 2c-preview. A value that carries the PEM envelope is previewed:  the first
-# eight and the last four characters of the body, and nothing else.
-if ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer ASC_KEY_P8="$(printf '%s\n' '-----BEGIN PRIVATE KEY-----' 'SYNTHETICBADBODYHERE' '-----END PRIVATE KEY-----')" bash -c '
+# eight and the last four characters of the body, and nothing else.  The
+# fixture body is obviously fake, and the line carries the scanner marker.
+bad_pem="$(printf '%s\n' '-----BEGIN PRIVATE KEY-----' 'SYNTHETICBADBODYHERE' '-----END PRIVATE KEY-----')" # gitleaks:allow
+if ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer ASC_KEY_P8="$bad_pem" bash -c '
   set -euo pipefail
   source "'"$funcs"'"
   load_secrets required
