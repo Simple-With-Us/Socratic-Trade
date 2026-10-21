@@ -7473,3 +7473,34 @@ no issues matching its current configuration, and the hosted `verify-hosted` job
 Auto-merge is armed, so the merge fires as soon as that lands and the required checks are green.
 After the merge:  verify the deployed SHA against production, close ST-4565 out, and delete the
 remote branch.
+## 2026-10-21 [MM] The suite no longer poisons its own database (ST-4570)
+
+**The local vitest suite no longer writes enrichment coverage rows into the checkout's own
+untracked `data/app.db`,** and `test/data-catalog-completeness.test.ts` now passes whatever order
+the test files run in.  The defect behind it was ST-4570, raised from P2 to P1 while this was in
+flight.
+
+The reader asserts an empty-database universe, but `buildDataCompletenessReport` reads the newest
+persisted enrichment coverage report back and uses its `fillRate` as a field's `completeness`
+whenever one exists, and the suite's own writers create that report.  The first account of the
+failure said the residue of earlier runs was the trigger and that hosted CI could not see it at
+all;  a third full pass against a database that did not exist when the suite started falsified
+both halves of that, because the same test failed again and the new file had collected seventeen
+coverage rows by the end of that one run.  It is a within-run ordering flake, not leftover state.
+
+Three files could reach the persistence path without owning a database, and the repo already has
+the convention that settles it:  `test/reindex-all.test.ts:8` says every test file points
+`DATABASE_URL` at its own temporary SQLite database, and 458 of the 854 do.
+
+- `test/data-catalog-completeness.test.ts` — the reader.  It owns its database now, so its
+  empty-universe premise is true by construction.
+- `test/enrichment-coverage.test.ts` — the writer.  It owns its database, and holds that path for
+  the whole file rather than for each test, because the persist is a fire-and-forget dynamic import
+  that can resolve after the test that triggered it has finished.
+- `test/enrichment-abort.test.ts` — also a writer, because one of its cases completes a gather.
+
+Measured:  a three-file probe over the changed files finishes with zero rows in the shared
+`DATABASE_URL` path, where the same probe wrote twelve before.  `npx tsc --noEmit` exits 0 and
+`npx eslint` over the three files exits 0.  No production code changed.
+
+Rollout: `docs/rollouts/2026-10-21-st-4570-suite-db-isolation.md`.
