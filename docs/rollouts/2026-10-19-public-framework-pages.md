@@ -288,18 +288,11 @@ pre-existing entries already on `main`, outside this diff.
 Two mechanical blockers were diagnosed here that are worth recording, because neither is visible from
 the PR diff and both cost real time.
 
-**A docs-only head can never satisfy the `verify` requirement.**  `ci.yml` skips `verify-hosted` and
-the `verify` gate when `classify` reports `docs-only: true`, and a skipped required check leaves the
-PR waiting for a status that will never be reported.  The escape hatch is already built into the
-workflow:  both the `merge_group` event and `workflow_dispatch` set `docs-only=false`, and the
-comment at `classify` calls `workflow_dispatch` "the manual re-kick lever".  Dispatching it by hand
-(`gh workflow run ci.yml --ref <branch>`) runs the full gate against the PR head and reports
-`verify`.  The `merge_group` comment above it explains the other half:  the `verify` check has to run
-on the queue's temporary merge_group branch, or queued PRs hang forever.
+**Docs-only heads still satisfy the `verify` requirement.**  When `classify` reports `docs-only: true` only `verify-hosted` is skipped (ci.yml:275); the `verify` gate itself always runs (`if: ${{ !cancelled() }}`) and its docs-only branch exits 0, reporting "RESULT: PASS — docs-only diff — gate skipped by path filter" (ci.yml:444-446, pinned by `test/branch-protection-gate.test.ts`).  There is no stranded required check on a docs-only head and no re-kick to remember.  The `workflow_dispatch` manual re-kick lever exists for a different edge: pushes made through the cloud git proxy generate no `pull_request` event at all (ci.yml:40-47), so no run attaches `verify` to the head SHA.  Likewise the `merge_group` docs-only=false applies to the queue's own run on its temporary branch, not to the PR head check.
 
 **Unattributed commits need an owner approval, and that is a gate, not a bug.**  The
 `org-default-main-protection` ruleset sets `require_extra_approval_for_unattributed_changes: true`.  Every commit on this branch resolves to the owner through GitHub except one authored by
-`MiniMax <mm-bot@simplewithus.zulipchat.com>`, for which the API returns `author: null`;  that
+the MiniMax bot, for which the API returns `author: null`;  that
 commit therefore counts as unattributed, and the rule then requires an approval from someone with
 write access.  The other requirements were all satisfied — `verify` and `gitleaks` green, all review
 threads resolved, `required_approving_review_count: 0` — so this was the single unmet condition.  Rewriting the commit's author would have cleared the rule and defeated exactly what it exists for, so
@@ -410,19 +403,14 @@ holds read-only access to the per-variant state.
   threads are resolved, and the fifth-round finding is fixed;  what remains is the
   `require_extra_approval_for_unattributed_changes` approval described under Merge Mechanics.  It is
   not a code problem and it cannot be cleared by an agent.
-- The full gate is dispatched by hand on docs-only heads, because `classify` would otherwise skip
-  `verify` and leave the required check unreported.  See Merge Mechanics above.
+- No re-kick is needed on docs-only heads: `verify` still runs and reports PASS; only `verify-hosted` is skipped by the path filter.  The `workflow_dispatch` lever is reserved for cloud-proxy pushes that generate no `pull_request` event.  See Merge Mechanics above.
 - Merging `main` auto-deploys (weekday RTH latch applies), and this change touches runtime paths
   (`app/**`, `middleware.ts`), so the image build is a real deploy.
 - Not verified locally, and not verifiable locally: Swift compilation. The only Swift changes are
   comments, and `ios-build` on the PR is the gate of record.
 - The WAF rule set (`2e28de6daa3b41afb03fcbd6b440a902`, blocking scraper/AI UAs on `/framework*` and
   `/api/framework*`) needs no change — the new redirect target is the same path it already covers.
-- **Worth a separate PR:** the `docs-only` fast path and the required `verify` check contradict each
-  other, so any docs-only PR sits blocked until someone remembers the re-kick lever.  A follow-up
-  should either have `classify` report a neutral success for `verify` on the docs path, or take
-  `verify` off the required list for docs-only diffs.  Recorded here rather than fixed in this PR
-  because it changes the repo's merge contract for every contributor.
+- **No follow-up needed on the docs-only fast path:** `verify` already reports a neutral PASS on docs-only diffs (ci.yml:444-446, pinned by `test/branch-protection-gate.test.ts`), so there is no contradiction with the required check to fix.
 
 ## Zero-Code Findings
 
