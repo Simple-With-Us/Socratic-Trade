@@ -24,7 +24,7 @@ jobs:
       pull-requests: read
       issues: write
       actions: read
-    uses: Simple-With-Us/AI-Fleet-Coordinator/.github/workflows/pr-autofix-reusable.yml@c97a2dae96762eb9ffc122c753f0dfb0a7840650
+    uses: Simple-With-Us/AI-Fleet-Coordinator/.github/workflows/pr-autofix-reusable.yml@a4c48f013a2108be517ee933dccb1b37e9403920
     secrets:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
       META_MODEL_API_TOKEN: ${{ secrets.META_MODEL_API_TOKEN }}
