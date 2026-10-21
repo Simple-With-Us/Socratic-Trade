@@ -41,11 +41,11 @@ The console's intro canvas moved out of the console tree and was parameterized r
 
 Each variant keeps its own module state and its own `sessionStorage` key (`st.introShown` vs
 `st.publicIntroShown`), so the public splash never consumes the console's one-shot splash and the
-console splash never consumes the public one. Console behavior is unchanged: same backdrop, same
+console splash never consumes the public one.  Console behavior is unchanged: same backdrop, same
 `--con-pos`/`--con-neg` candle colors, same cached header top.
 
 The public brand is **CSS-sized** (`width: 100%` + `aspect-ratio` + `maxWidth`) rather than
-canvas-sized on mount, so the very first paint is already the right size. The animation measures
+canvas-sized on mount, so the very first paint is already the right size.  The animation measures
 `[data-brand-logo]` every frame, and a canvas that resized on mount would have made the candles land
 beside the wordmark.
 
@@ -56,7 +56,7 @@ beside the wordmark.
   pipeline stages), `caseFileIntro` + `caseFile[]` (the seven decision-case-file fields),
   `authorityIntro` + `authority[]` (reusing `HOW_IT_WORKS_AUTHORITY_ITEMS` from `@/lib/guardrail-copy`
   so the guardrail copy has exactly one source), `outcomeIntro` + `outcomeLenses[]`, and
-  `resilienceIntro` + `resilience[]` (drawn from `docs/trading-framework.md`). The content expansion
+  `resilienceIntro` + `resilience[]` (drawn from `docs/trading-framework.md`).  The content expansion
   itself left every pre-existing string byte-identical and the `invariants` block untouched; the one
   later pass over those strings is the Title Case normalization described under Decisions below.
 - `app/framework/framework-viewer.tsx` (240 → 369 lines) — renders the new sections and adds an
@@ -70,12 +70,12 @@ lenses became `outcomeLenses`.
 
 ### Page and routing changes
 
-- `app/welcome/page.tsx` — rewritten on `PublicShell`. The hero button is now **"Framework"** and
-  links `/framework`; a second CTA reads "Read the Framework". Section headings are Title Case
+- `app/welcome/page.tsx` — rewritten on `PublicShell`.  The hero button is now **"Framework"** and
+  links `/framework`; a second CTA reads "Read the Framework".  Section headings are Title Case
   ("What It Does", "How It Works", "What a Decision Trace Looks Like", "Inside the Framework",
-  "Important Disclosures"). The header action is "Request Access" and the footer carries a "Console"
+  "Important Disclosures").  The header action is "Request Access" and the footer carries a "Console"
   link.
-- `app/framework/page.tsx` — now renders through `PublicShell` with the intro splash. The anti-scraping
+- `app/framework/page.tsx` — now renders through `PublicShell` with the intro splash.  The anti-scraping
   architecture is unchanged: `force-dynamic`, the UA gate, `noindex`/`noai`/`TDMRep`, the gated
   content API, and the deliberate sitemap exclusion.
 - `app/how-it-works/page.tsx` — replaced with `permanentRedirect("/framework")` (308).
@@ -86,10 +86,10 @@ lenses became `outcomeLenses`.
 - `app/sitemap.ts` — `/how-it-works` removed; `/framework` stays deliberately excluded.
 - `app/robots.ts` — `/how-it-works` removed from the allow list; `/framework` stays disallowed.
 - `middleware.ts` — `MARKETING_HOSTS` (both apex hosts plus `www.` variants), `ALT_DOMAIN_HOSTS`, and
-  `CANONICAL_HOST`. The alt domain 308s to `https://socratictrade.com` before anything else, exempting
+  `CANONICAL_HOST`.  The alt domain 308s to `https://socratictrade.com` before anything else, exempting
   `/api/*` (machine callers — webhooks, uptime probes — must not be handed a redirect they may not
   follow) and `/.well-known/apple-app-site-association` (the `applinks` + `webcredentials`
-  entitlements on `socratic.trade` need the AASA served on that domain). After identity resolution and
+  entitlements on `socratic.trade` need the AASA served on that domain).  After identity resolution and
   before the fail-closed `/login` redirect, the apex `/` sends an anonymous visitor to `/welcome` and
   a signed-in operator to `/console`.
 
@@ -106,7 +106,7 @@ lenses became `outcomeLenses`.
 - `test/how-it-works-redirect.test.ts` (updated) — now expects the 308 to `/framework`.
 - `test/candle-ticker-raf-resilience.test.ts` — import repointed to `../app/ui/brand/candle-ticker`.
 - `ios/SocraticTrade/CandleWordmarkView.swift`, `ios/SocraticTradeTests/CandleWordmarkTests.swift` —
-  comments repointed at the new ticker path. No Swift behavior change.
+  comments repointed at the new ticker path.  No Swift behavior change.
 
 ## Review Findings Accepted And Fixed
 
@@ -230,7 +230,7 @@ two earlier rounds were.
 
 ### 9. The middleware passed an empty string to the session verifier
 
-The alt-domain canonicalization hop read `process.env.AUTH_SECRET ?? ""`.  With no secret
+The alt-domain canonicalization hop read `process.env.AUTH_SECRET ??  ""`.  With no secret
 configured, the verifier was handed an empty string and answered "no session", which is the same
 answer it gives for a cookie that fails to verify.  The two are different:  one is a deployment
 with no Auth.js secret, the other is an operator whose cookie did not check out.  Reading them as
@@ -394,36 +394,36 @@ left alone and the approval was surfaced to the owner as the one action only he 
 
 ## Decisions & Trade-offs
 
-- **The `/framework` hardening stays.** The owner's 2026-07-11 instruction was to harden that page
-  against AI and bot extraction; linking it from the Welcome page does not require un-gating it. The
+- **The `/framework` hardening stays.**  The owner's 2026-07-11 instruction was to harden that page
+  against AI and bot extraction; linking it from the Welcome page does not require un-gating it.  The
   page keeps its UA gate, its server-only content module, the gated content API, and its
-  noindex/noai/TDMRep headers. `/welcome` remains the indexable SEO surface and keeps its own "How
+  noindex/noai/TDMRep headers.  `/welcome` remains the indexable SEO surface and keeps its own "How
   It Works" section.
 - **`/how-it-works` returns a 308, not a 404.** The page's *content* is gone (fully superseded), but
   a permanent redirect keeps inbound links, bookmarks, and search results landing on the content
-  instead of a dead end. A bot hitting it is redirected and then blocked by the existing UA gate and
+  instead of a dead end.  A bot hitting it is redirected and then blocked by the existing UA gate and
   the edge WAF rule.
-- **Apex root routing is session-aware.** Anonymous visitor → `/welcome` (the stated requirement:
-  "viewers of the main domain"). Signed-in operator → `/console`, so an operator's own bookmark to
-  the apex domain still opens the app. The Welcome footer's "Console" link is the fallback path.
-- **The header row is a FIXED height, not a minimum.** With `min-h-8` and vertical padding, a page
+- **Apex root routing is session-aware.**  Anonymous visitor → `/welcome` (the stated requirement:
+  "viewers of the main domain").  Signed-in operator → `/console`, so an operator's own bookmark to
+  the apex domain still opens the app.  The Welcome footer's "Console" link is the fallback path.
+- **The header row is a FIXED height, not a minimum.**  With `min-h-8` and vertical padding, a page
   with no header action would collapse the row to the wordmark's 22px and move the wordmark 5px off
-  the position the animation aims at. The row is now pinned to `PUBLIC_ROW_H`, and a source-level
+  the position the animation aims at.  The row is now pinned to `PUBLIC_ROW_H`, and a source-level
   test holds that invariant.
-- **Title Case applied to the framework content's pre-existing card titles.** The owner's 2026-10-01
-  ruling is that ALL headings, buttons, and titles are Title Case. 40 strings in `content.ts` plus
+- **Title Case applied to the framework content's pre-existing card titles.**  The owner's 2026-10-01
+  ruling is that ALL headings, buttons, and titles are Title Case.  40 strings in `content.ts` plus
   the diagram's two actor labels ("Green team" → "Green Team", "Red team" → "Red Team") were
-  normalized — this is the one pass over otherwise byte-identical pre-existing strings. Diagram node
+  normalized — this is the one pass over otherwise byte-identical pre-existing strings.  Diagram node
   labels that form one wrapped phrase ("Policy gate" + "decides") stay sentence case, because they
-  are a phrase split across two lines, not two titles. Body prose and lead-in sentences stay
+  are a phrase split across two lines, not two titles.  Body prose and lead-in sentences stay
   sentence case.
-- **The alt-domain forward is app-level.** DNS already CNAMEs `socratic.trade` → `socratictrade.com`,
+- **The alt-domain forward is app-level.**  DNS already CNAMEs `socratic.trade` → `socratictrade.com`,
   so both hosts reach the same Next.js origin and the redirect has to happen in the app.
-- **The marketing pages keep the `LANDING_PAGE_ENABLED` off-switch.** The apex redirect and
+- **The marketing pages keep the `LANDING_PAGE_ENABLED` off-switch.**  The apex redirect and
   `/framework` both consult `landingPageEnabled()` rather than assuming the pages are public.  A
   redirect to a page that would 404 is worse than the old behavior, which was `/login` on a private
   deploy.  The switch stays honest: it takes the public pages down together.
-- **The sentence gap uses the repo's own idiom, not a new one.** NBSP + space in content data, a
+- **The sentence gap uses the repo's own idiom, not a new one.**  NBSP + space in content data, a
   `SENTENCE_GAP` marker in JSX.  A runtime converter was tried and removed — see Review Findings.
 
 ## Verification State
@@ -462,7 +462,7 @@ about all of it.  The complete affected set is nine files, re-run together on th
   `framework-page` (9), `framework-hash-target` (6), `security-headers` (6),
   `public-sentence-gap` (4), `middleware-auth-secret` (4), `how-it-works-redirect` (3).  Each file was also run on its own; every one exited 0.
 
-**The full local gate was run, end to end, and it is one failure out of 9,777 tests.**  The
+**The full local gate was run, end to end, and it is one failure out of 9,778 tests.**  The
 earlier statement that a full run was impractical in this seat's working environment was wrong,
 and it is corrected here.
 
@@ -473,19 +473,84 @@ and it is corrected here.
 - `npx vitest run` — **1 failed, 9,726 passed, 51 skipped across 865 files**, exit 1.  The single
   failure is `test/event-loop-stall-hot-path.test.ts` → "pruneTaskJournal no-op stays under 100ms
   when a full scan of the same rows does not", a wall-clock assertion that measured 162s against a
-  100ms bound and that times out against the 60s test timeout when it is re-run on its own.  Host
-  load during the run was 40-172.  Neither `test/event-loop-stall-hot-path.test.ts` nor
+  100ms bound and that times out against the 60s test timeout when it is re-run on its own.  The
+  time a wall-clock assertion measures may vary with the execution environment.  Neither
+  `test/event-loop-stall-hot-path.test.ts` nor
   `src/lib/db.ts` is touched by this diff — `git diff origin/main...HEAD --stat` over those two
-  paths is empty — so this is a host-load artifact and not a regression from this change.  It is
-  reported as it stands;  the hosted `verify-hosted` job is the gate of record.
+  paths is empty — so this is an environment-dependent artifact and not a regression from this
+  change.  It is reported as it stands;  the hosted `verify-hosted` job is the gate of record.
 - `npm run build` (`next build --webpack`) — **succeeded**, exit 0.
 
 **What that pass covered, stated exactly.**  It ran on the tree carrying this branch's own
 commits, before `origin/main` was merged in.  The merge that followed brought in
 `src/lib/boot-ledger.ts` and `test/boot-ledger.test.ts` from `main` — files this diff does not
-touch, on a commit where `main`'s own CI was green — and it changed no code of this diff.  A
-second full pass on the merged head was started before this note was committed, and its result is
-recorded in the ST-4565 fleet thread.
+touch, on a commit where `main`'s own CI was green — and it changed no code of this diff.
+
+**The second full pass ran on the merged head, `2d63d77e7`, and it produced a second failure that
+the first pass did not have.**
+
+- `npx tsc --noEmit` — clean, exit 0.
+- `npx eslint app src test middleware.ts` — exit 0.
+- `npx vitest run` — **2 failed, 9,731 passed, 51 skipped across 865 files (9,784 tests)**, exit 1.
+- `npm run build` (`next build --webpack`) — **succeeded**, exit 0.
+
+The first of the two is the same `test/event-loop-stall-hot-path.test.ts` wall-clock assertion as
+before, measured at 205630 ms this time.  The second is new:  `test/data-catalog-completeness.test.ts`
+→ "scores RAG without inflating for multiple 10-Ks on one name", where `expect(pe!.completeness)`
+expected 0 and received 1.
+
+**That second failure is not this diff, and the first account of it was wrong.**  The cause is
+the shared, untracked local database, but not in the way the first account said:  the suite poisons
+its own database *within a single run*, so the failure is an ordering flake that a clean checkout
+can hit, not merely residue from an earlier run.
+
+- `src/lib/enrichment-coverage.ts:296-302` persists a coverage report on every call to
+  `setLastEnrichmentCoverageReport`, fire-and-forget through a dynamic import, into
+  `file:./data/app.db` whenever `DATABASE_URL` is not overridden (`src/lib/db.ts:85`).
+- `src/lib/data-completeness.ts:231` reads the newest persisted report back.  When it is non-null,
+  the field loop at `src/lib/data-completeness.ts:293-313` takes the cascade-report branch and uses
+  that row's `fillRate` as the field's `completeness` instead of the empty-universe 0.
+- `data/` is gitignored (`.gitignore:22`) and `data/app.db` is untracked, so it is never committed
+  and never shared between machines.
+
+The first account said the residue of earlier runs was the trigger, and that a CI checkout, having
+no `data/` directory, could not see the failure at all.  A third full pass, run against a database
+that did not exist when the suite started, falsified both halves of that.  The same test failed
+again, and the new file had accumulated seventeen coverage rows by the end of that one run:
+
+```
+DATABASE_URL="file:/tmp/mm-gate3.db" npx vitest run     # 3 failed | 9,730 passed | 51 skipped
+sqlite3 /tmp/mm-gate3.db "SELECT COUNT(*) FROM enrichment_coverage_runs;"   # 17 rows, all from this run
+```
+
+The writer is `test/enrichment-coverage.test.ts`:  a two-file probe over that file and the reader
+wrote twelve rows, the newest carrying `peRatio` at `fillRate: 1`.  The repo's vitest config runs
+with `maxWorkers: 1`, so the files execute sequentially in one worker process, and
+`process.env.DATABASE_URL` leaks from one file to the next inside that process.  Whether the reader
+sees a populated universe therefore depends on which file ran first and, because the persist is
+fire-and-forget, on whether the write landed before the next file began.  A file that runs before
+the writer passes;  the same file running after it fails.
+
+That makes it a within-run ordering flake, and a clean checkout can hit it:  the hosted run has not,
+but it has not been shown to be immune, so "CI is green" is not evidence against this class of
+failure.  The code itself is sound — with a fresh database the file passes 4 of 4 on its own:
+
+```
+DATABASE_URL="file:/tmp/mm-fresh-app.db" npx vitest run test/data-catalog-completeness.test.ts
+```
+
+`git diff --name-only origin/main...HEAD` lists no test or source file among
+`test/data-catalog-completeness.test.ts`, `src/lib/data-completeness.ts`, `src/lib/data-catalog.ts`,
+`src/lib/enrichment-coverage.ts` or `src/lib/db-enrichment-coverage.ts`.
+
+This is filed as ST-4570 with the root cause and a recommended fix.  It is deliberately kept out of
+this diff rather than widening a public-pages change into shared test infrastructure, and it has
+been raised from P2 to P1 on the corrected evidence and claimed:  the fix is on its own branch off
+`origin/main` as [PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911), so it
+carries no unattributed commit and needs no owner approval to land.  Three files could reach the
+persistence path without owning a database, and they are the ones changed there:  the reader owns
+its database per test, and the two writers own theirs for the whole file, because the persist is a
+fire-and-forget dynamic import that can resolve after the test that triggered it has finished.
 
 Re-verified after the fourth review round (findings 10 and 11 above), on the same branch:
 
@@ -510,18 +575,19 @@ One real defect was caught by the local gate and fixed before the first push: pa
 intro canvas put the per-variant state behind a render-scope `const state = VARIANT_STATE[variant]`,
 and the effect then mutated it — which the React Compiler rejects as an **error** ("Cannot modify
 local variables after render completes").  The console's original module-level `let introDone` / `let
-MODEL` bindings had never been subject to that rule. The fix routes every write through module-scope
+MODEL` bindings had never been subject to that rule.  The fix routes every write through module-scope
 functions (`markIntroDone`, `setIntroModel`, `setIntroStart`, `setIntroCurHeader`) so the effect
 holds read-only access to the per-variant state.
 
 ## Next Steps & Blockers
 
-- **One gate is the owner's, and it is an approval.**  `gitleaks` is green on the head, all review
-  threads are resolved, and every finding raised against this diff is either fixed or answered on
-  its thread;  what remains is the `require_extra_approval_for_unattributed_changes` approval
-  described under Merge Mechanics.  It is not a code problem and it cannot be cleared by an agent.
-  The `verify` check on the head is still in flight, because the workflow's concurrency group has
-  `cancel-in-progress: false` and each new head waits for the run before it.
+- **One gate is the owner's, and it is an approval.**  On the head `2d63d77e7` every check is
+  green — `classify`, `verify`, `verify-hosted`, `verify-ios / xcodebuild (unsigned)`, `gitleaks`,
+  `check-pin`, Kody Code Review, both Autofix jobs — and every finding raised against this diff is
+  either fixed or answered on its thread.  What remains is the
+  `require_extra_approval_for_unattributed_changes` approval described under Merge Mechanics.  It is
+  not a code problem and it cannot be cleared by an agent.  Auto-merge is armed, so the merge fires
+  as soon as the approval lands.
 - **The Autofix check on this pull request failed five times before the org secret's selection was
   widened, and it is not a required check.**  `autofix` is not in the required status check list on
   `main` (`verify` and `gitleaks` are), so it never gated this merge.  Every failing run was
@@ -532,7 +598,7 @@ holds read-only access to the per-variant state.
 - No re-kick is needed on docs-only heads: `verify` still runs and reports PASS; only `verify-hosted` is skipped by the path filter.  The `workflow_dispatch` lever is reserved for cloud-proxy pushes that generate no `pull_request` event.  See Merge Mechanics above.
 - Merging `main` auto-deploys (weekday RTH latch applies), and this change touches runtime paths
   (`app/**`, `middleware.ts`), so the image build is a real deploy.
-- Not verified locally, and not verifiable locally: Swift compilation. The only Swift changes are
+- Not verified locally, and not verifiable locally: Swift compilation.  The only Swift changes are
   comments, and `ios-build` on the PR is the gate of record.
 - The WAF rule set (`2e28de6daa3b41afb03fcbd6b440a902`, blocking scraper/AI UAs on `/framework*` and
   `/api/framework*`) needs no change — the new redirect target is the same path it already covers.
@@ -541,8 +607,8 @@ holds read-only access to the per-variant state.
 ## Zero-Code Findings
 
 - The lane's `node_modules` had been replaced with a symlink to another lane's `node_modules` (a
-  different lockfile). The symlink was unlinked and `npm ci` restored this branch's locked
-  dependency set before any gate was run. `rm node_modules` is blocked by the shell guard;
+  different lockfile).  The symlink was unlinked and `npm ci` restored this branch's locked
+  dependency set before any gate was run.  `rm node_modules` is blocked by the shell guard;
   `unlink <absolute path>` is the working path for a symlink.
 - **An org-wide Actions variable and an org secret with `selected` visibility do not have the same
   scope, and the disagreement fails every repository that is not on the secret's list.**  The org
@@ -566,3 +632,14 @@ holds read-only access to the per-variant state.
   spend a model run — but "re-kick by commenting" is inert against it.  The levers that do work
   are bot-authored events, and a push to the branch is enough, because a review bot re-reviews on
   every push.
+- **The untracked local database is a second, invisible input to the test suite, and it can make
+  the second run fail where the first passed.**  The suite persists enrichment coverage reports
+  into `file:./data/app.db` through a fire-and-forget dynamic import in
+  `src/lib/enrichment-coverage.ts:296-302`, and `src/lib/data-completeness.ts:231` reads the
+  newest persisted report back and uses its `fillRate` as a field's `completeness` when it is
+  present.  Because `data/` is gitignored, that file is never committed and never reset:  the
+  first local run writes rows that the second local run then reads.  The check that separates
+  this from a regression is one command — re-run the failing file against a fresh database and
+  see it pass — together with a diff over the implicated paths that comes back empty.  Hosted CI
+  never sees the condition, because a CI checkout has no `data/` directory, so a green CI run is
+  the expected symptom here rather than evidence against it.  Filed as ST-4570.

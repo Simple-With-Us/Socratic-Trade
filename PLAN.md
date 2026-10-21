@@ -2777,12 +2777,13 @@ ST-4565 out, and delete the remote branch.
 
 ## 2026-10-21 [MM] Verification state and the org-secret fix
 
-**The full local gate ran, end to end.**  `tsc` 0, `eslint` 0, `npm test` 9,726 passed / 51
-skipped / 1 failed across 865 files, `npm run build` succeeded.  The single failure is
-`test/event-loop-stall-hot-path.test.ts`, a wall-clock assertion that a no-op prune stays under
-100ms and that measures 162s under this seat's host load;  neither it nor `src/lib/db.ts` is
-touched by this diff, so it is a host-load artifact and not a regression from this change.  The
-hosted `verify-hosted` job is the gate of record, as it always was.
+**The full local gate ran, end to end, on the pre-`origin/main`-merge tree.**  `tsc` 0, `eslint` 0,
+`npm test` 9,726 passed / 51 skipped / 1 failed across 865 files, `npm run build` succeeded.  The
+single failure is `test/event-loop-stall-hot-path.test.ts`, a wall-clock assertion that a no-op
+prune stays under 100ms and that measures 162s in the local execution environment;  neither it nor
+`src/lib/db.ts` is touched by this diff, so it is an environment-dependent artifact and not a
+regression from this change.  The hosted `verify-hosted` job is the gate of record, as it always
+was.  A second pass on the merged head is recorded below, in this same file.
 
 **The Autofix failure had a second cause beyond the stale pin, and it lived in org configuration
 rather than in any repository.**  An org-wide Actions *variable* retargets every repository at
@@ -2797,3 +2798,39 @@ PR #4908.  The re-check on this pull request comes with the next bot-authored ev
 commits on the branch carry an author GitHub cannot attribute to an account.  Auto-merge is
 armed, so the merge fires on the approval.  After it lands:  verify the deployed SHA against
 production, close ST-4565 out, and delete the remote branch.
+
+## 2026-10-21 [MM] Second gate pass, the failure it found, and the Autofix re-check
+
+**The second full local gate ran on the merged head and produced a second failure.**  `tsc` 0,
+`eslint` 0, `npm test` 2 failed / 9,731 passed / 51 skipped across 865 files, `npm run build`
+succeeded.  One failure is the known wall-clock assertion in
+`test/event-loop-stall-hot-path.test.ts`, whose measured time varies with the execution
+environment.  The other is new, and it is not this diff:  the shared, untracked `data/app.db` holds
+enrichment coverage rows that the suite itself wrote, and `src/lib/data-completeness.ts` reads the
+newest one back and uses its fill rate as a field's completeness.
+
+**A third gate pass against a database that did not exist when the suite started falsified the
+first account of that failure.**  The same test failed again, and the new file had collected
+seventeen coverage rows by the end of that one run, so the suite poisons its own database within a
+single run.  The writer is `test/enrichment-coverage.test.ts`, the vitest config runs with
+`maxWorkers: 1`, and `process.env.DATABASE_URL` leaks from one file to the next inside that worker
+process, so it is a within-run ordering flake that a clean checkout can hit, not merely leftover
+state from an earlier run — and the hosted run has not been shown to be immune to it.  With a fresh
+database the file passes 4 of 4 on its own, and the branch diff touches none of the implicated
+files.  Filed as ST-4570, raised from P2 to P1 on the corrected evidence, and claimed by this
+seat.  It is kept out of this diff on purpose so a public-pages change does not widen into shared
+test infrastructure:  the fix is on its own branch off `origin/main` as
+[PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911), where it carries no
+unattributed commit and needs no owner approval to land.
+
+**The Autofix re-check on this pull request is now green.**  PR Autofix run 39617911851 concluded
+`success` on PR #4889 with the Meta token populated, and Claude Code Autofix run 39618102908
+concluded `success`.  Kody's re-review on this head found no issues, and the hosted `verify-hosted`
+job is green.
+
+**What is left.**  Unchanged:  Jay's APPROVED review on PR #4889, which the
+`require_extra_approval_for_unattributed_changes` ruleset condition requires, because three commits
+on the branch carry an author GitHub cannot attribute to an account.  No author was rewritten and no
+bot was used to satisfy it.  Auto-merge is armed, so the merge fires on the approval.  After it
+lands:  verify the deployed SHA against production, close ST-4565 out, and delete the remote
+branch.

@@ -7391,14 +7391,15 @@ the remote branch.
 
 ## 2026-10-21 [MM] The full local gate, and the org-secret fix that unblocked the Autofix job
 
-**The full local gate has been run, end to end.**  `npx tsc --noEmit` exits 0,
-`npx eslint app src test middleware.ts` exits 0, `npm test` reports 1 failed / 9,726 passed /
-51 skipped across 865 files and exits 1, and `npm run build` succeeds.  The single failure is
-`test/event-loop-stall-hot-path.test.ts`, a wall-clock assertion that a no-op prune stays under
-100ms;  it measures 162s under this seat's host load and times out when re-run on its own.
-Neither that test nor `src/lib/db.ts` is touched by this diff, so it is a host-load artifact and
-not a regression from this change.  It is reported as it stands, and the hosted `verify-hosted`
-job is the gate of record.
+**The full local gate has been run, end to end, on the pre-`origin/main`-merge tree.**  `npx tsc
+--noEmit` exits 0, `npx eslint app src test middleware.ts` exits 0, `npm test` reports 1 failed /
+9,726 passed / 51 skipped across 865 files and exits 1, and `npm run build` succeeds.  The single
+failure is `test/event-loop-stall-hot-path.test.ts`, a wall-clock assertion that a no-op prune
+stays under 100ms;  it measures 162s in the local execution environment and times out when re-run
+on its own.  Neither that test nor `src/lib/db.ts` is touched by this diff, so it is an
+environment-dependent artifact and not a regression from this change.  It is reported as it
+stands, and the hosted `verify-hosted` job is the gate of record.  A second pass on the merged head
+is recorded below, in this same file.
 
 **The Autofix job's fleet-wide failure had a second, org-configuration cause, and it is fixed.**
 The org variables `SWU_AUTOFIX_MODEL_BASE_URL=https://api.meta.ai` and
@@ -7420,3 +7421,55 @@ the branch is enough, because a review bot re-reviews on every push.
 **Next.**  Unchanged:  Jay's APPROVED review on PR #4889 is the one gate that no agent can clear.
 The `verify` check on the head is in flight.  After the merge:  verify the deployed SHA against
 production, close ST-4565 out, and delete the remote branch.
+
+## 2026-10-21 [MM] The second full gate found a second failure, and the first account of it was wrong
+
+**The second full local gate ran on the merged head, `2d63d77e7`.**  `npx tsc --noEmit` exits 0,
+`npx eslint app src test middleware.ts` exits 0, `npm test` reports 2 failed / 9,731 passed /
+51 skipped across 865 files and exits 1, and `npm run build` succeeds.  The first failure is the
+same `test/event-loop-stall-hot-path.test.ts` wall-clock assertion as before, measured at 205630 ms
+this time;  the time a wall-clock assertion measures varies with the execution environment.  It is
+reported as it stands, and the hosted `verify-hosted` job is the gate of record.
+
+**The second failure was new, and it is not this diff.**  `test/data-catalog-completeness.test.ts`
+expected `pe!.completeness` to be 0 and received 1.  The cause is the shared, untracked local
+database — but not in the way the first account of it said.  `src/lib/enrichment-coverage.ts:293-303`
+persists an enrichment coverage report on every call to `setLastEnrichmentCoverageReport`,
+fire-and-forget through a dynamic import, into `file:./data/app.db` whenever `DATABASE_URL` is not
+overridden (`src/lib/db.ts:85`), and `src/lib/data-completeness.ts:231` reads the newest persisted
+report back, where the field loop at `src/lib/data-completeness.ts:293-313` uses that row's
+`fillRate` as the field's completeness instead of the empty-universe 0.  `data/` is gitignored, so
+that file is never committed and never shared between machines.
+
+**A third gate pass is what corrected the first account of it.**  That account said the residue of
+earlier runs was the trigger, and that a clean checkout could not see the failure at all.  A third
+full pass against a database that did not exist when the suite started falsified it:  the same test
+failed again, and the new file had collected seventeen coverage rows by the end of that one run.
+The writer is `test/enrichment-coverage.test.ts`, the repo's vitest config runs with
+`maxWorkers: 1`, so the files run sequentially in one worker process while `process.env.DATABASE_URL`
+leaks from one file to the next inside it, and because the persist is fire-and-forget, whether the
+row lands before the next file starts is a race.  Whether the reader sees a populated universe
+therefore depends on ordering inside the run:  it is a within-run ordering flake, not merely
+leftover state, and a clean checkout can hit it.  The hosted run has not, but it has not been shown
+to be immune, so "CI is green" is not evidence against this class of failure.  The code itself is
+sound — with a fresh database the file passes 4 of 4 on its own — and
+`git diff --name-only origin/main...HEAD` lists none of the implicated files.  Filed as ST-4570
+with the root cause and a recommended fix, raised from P2 to P1 on the corrected evidence, and
+claimed by this seat.  The fix is deliberately kept out of this diff rather than widening a
+public-pages change into shared test infrastructure:  it is on its own branch off `origin/main` as
+[PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911), where it carries no
+unattributed commit and needs no owner approval to land.  Three files could reach the persistence
+path without owning a database, and they are the ones changed there — the reader owns its database
+per test, and the two writers own theirs for the whole file, because the persist is a
+fire-and-forget dynamic import that can resolve after the test that triggered it has finished.
+
+**Two of the checks that were outstanding are now green on this head.**  PR Autofix run 39617911851
+concluded `success` on PR #4889 itself, with `META_TOKEN` populated on the Meta route, so the
+org-secret fix is confirmed in this repository and not only in the two control repositories.
+Claude Code Autofix run 39618102908 concluded `success`.  Kody's re-review on this head reported
+no issues matching its current configuration, and the hosted `verify-hosted` job is green.
+
+**Next.**  Unchanged:  Jay's APPROVED review on PR #4889 is the one gate that no agent can clear.
+Auto-merge is armed, so the merge fires as soon as that lands and the required checks are green.
+After the merge:  verify the deployed SHA against production, close ST-4565 out, and delete the
+remote branch.
