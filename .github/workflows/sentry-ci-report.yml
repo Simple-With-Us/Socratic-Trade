@@ -24,7 +24,7 @@ name: Sentry CI Report
 # workflows observed (from `ls .github/workflows/`; see each file's `name:`):
 #   Auto-merge PRs, Auto-merge congress-trading-shared PRs, CI, Cleanup Actions Caches,
 #   Claude Code Autofix, PR Autofix, Effort Issues Sync, iOS build,
-#   iOS TestFlight ship, Kody MiniMax M3 Fix Proposals, merge-shepherd,
+#   iOS TestFlight ship, Kody MiniMax M3.1 Flash Fix Proposals, merge-shepherd,
 #   Shared package pin check, Playwright Smoke, Security, Deploy freshness,
 #   RTH Deploy Latch, Sentry Deploy
 # Reusable-only `_merge-shepherd-impl` executes inside `merge-shepherd` and has no independent
@@ -55,7 +55,7 @@ on:
       - Effort Issues Sync
       - iOS build
       - iOS TestFlight ship
-      - Kody MiniMax M3 Fix Proposals
+      - Kody MiniMax M3.1 Flash Fix Proposals
       - merge-shepherd
       - PR Autofix
       - Shared package pin check
