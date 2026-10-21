@@ -2726,8 +2726,12 @@ deployment has no `AUTH_SECRET` by design, so the middleware does not throw for 
 
 A fourth review round came back with two threads, both real and both fixed.  The middleware read
 `AUTH_SECRET` without the `import "server-only";` guard that keeps a credential out of a client
-bundle; the guard is now the first import in the file, and the production build was run locally and
-succeeded, which is what proves it compiles in the middleware bundle.  And the secret was read two
+bundle; the guard was added as the first import in the file, and a later review round reversed
+that, so the guard is now deliberately out of `middleware.ts` again with the rationale in the file
+itself — middleware is a server entry point compiled only for the edge runtime, so no Client
+Component can import it, and the guard stays on the credential-reading modules under `src/lib`
+and `app/api/*/route.ts`.  The production build recorded below was run against the file with the
+guard, so it describes that state and not the file this change ships.  And the secret was read two
 different ways in the same file: the alt-domain hop trimmed it while `isAuthConfigured()` and the
 canonical-host path read the raw value, so a whitespace-only secret read as configured everywhere
 except in that one hop, which then forwarded the operator to a host where the host-only cookie does
@@ -2735,3 +2739,38 @@ not apply and dropped the session.  The raw value is now the single source of tr
 string is still never handed to the verifier and a configured secret passes through unchanged.
 
 Rollout: `docs/rollouts/2026-10-19-public-framework-pages.md`.
+
+## 2026-10-21 — [MM] Public Framework pages (branch `minimax/st-4565-public-framework-pages`)
+
+The scope of this effort did not change:  `/framework` expanded, `/how-it-works` retired, one
+shared public shell, the apex routed to `/welcome`, and the alt domain forwarded to the main
+domain.  Three things about how it lands did change, and they are recorded here because each one
+changes what a reader of this plan should expect.
+
+**The branch was reconciled rather than force-pushed.**  Another seat pushed two commits to this
+branch while the effort was in flight — a docs correction to the rollout note and a merge of
+`origin/main`.  Both were adopted instead of overwritten, and this seat's own redundant merge was
+dropped in their favour, because its content was already contained in theirs.  The branch was then
+merged forward onto the current `main`, so it carries the Autofix pin bump that landed there.
+Head is `f6949bea9`.
+
+**One repo finding from this effort was withdrawn.**  The claim that a docs-only head can never
+report the required `verify` check was wrong:  the `verify` gate runs on
+`if: ${{ !cancelled() }}` and exits 0 on the docs-only path, and only `verify-hosted` and
+`verify-ios` are gated behind `docs-only != 'true'`.  A real docs-only head settles it — PR #4875
+changed one file, and its check-runs report `verify` → success.  ST-4568 is closed as wontfix
+with that evidence, and the rollout note, the Linear comment, the Zulip post, and the Apple Note
+all carry the correction.  The lesson for any future effort in this repo is the method rather than
+the fact:  a required check that "disappears" is a claim about a job's `if` condition, so read the
+condition and, better, read a real run.
+
+**Two repo bugs found along the way are now fixed on `main`.**  The fleet-wide PR Autofix failure
+was a stale reusable pin (`pr-autofix-reusable.yml` pinned below its own `--verbose` fix), and
+the Socratic-Trade half landed as PR #4905.  The `auto-merge / arm` workflow's `--delete-branch`
+under a merge queue was fixed in PR #4893.
+
+**What is left.**  Jay's APPROVED review on PR #4889, which the
+`require_extra_approval_for_unattributed_changes` ruleset condition requires, because three commits
+on the branch carry an author GitHub cannot attribute to an account.  Auto-merge is armed, so the
+merge fires on the approval.  After it lands:  verify the deployed SHA against production, close
+ST-4565 out, and delete the remote branch.

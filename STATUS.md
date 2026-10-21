@@ -7320,8 +7320,14 @@ had already been fixed by the first round and needed only an explanation.
 
 10. **The middleware read a credential without the server-only guard.**  `middleware.ts` reads
     `AUTH_SECRET` and had no `import "server-only";`, so nothing stopped the module from
-    reaching a client bundle.  The guard is now the first import in the file, the same way the
-    other credential-reading modules in `src/lib` carry it.
+    reaching a client bundle.  The guard was added as the first import in the file, the same way
+    the other credential-reading modules in `src/lib` carry it, and a later review round reversed
+    that:  the guard is deliberately taken back out of `middleware.ts`, with the rationale
+    recorded in the file itself.  Middleware is a server entry point compiled only for the edge
+    runtime, so no Client Component can import it;  the guard stays on the credential-reading
+    modules under `src/lib` and `app/api/*/route.ts` that a client bundle could genuinely pull
+    in.  The build recorded in the rollout note was run against the file with the guard, so it
+    describes that state and not the file this change ships.
 11. **The secret was read two different ways in the same file.**  The alt-domain hop trimmed
     `AUTH_SECRET` before deciding whether it was set, while `isAuthConfigured()` and the
     canonical-host path read the raw value.  A whitespace-only secret therefore read as
@@ -7336,3 +7342,49 @@ the image build is a real deploy).  Swift compilation is CI-only (`ios-build`); 
 changes are comments.
 
 Rollout: `docs/rollouts/2026-10-19-public-framework-pages.md`.
+
+## 2026-10-21 [MM] Public Framework pages: branch reconciled, one finding withdrawn, Autofix sweep landed
+
+**The branch was reconciled with another seat's work and with the newest `main`.**  Two commits
+were pushed to `minimax/st-4565-public-framework-pages` by another seat while this effort was in
+flight:  a docs correction to the rollout note (`504af8dc5`) and a merge of `origin/main`
+(`343a8ff1c`).  Both were adopted rather than rewritten, because the docs correction was right and
+a merge commit is a merge commit.  The seat's own redundant merge was dropped in their favour —
+its content was already contained in the other seat's merge — and `origin/main` was merged again
+on top, so the branch carries the current `main` plus the Autofix pin bump.  Head is `f6949bea9`.
+
+**One finding from this effort was wrong, and it is withdrawn.**  This seat reported that
+`ci.yml`'s `classify` job gates both `verify-hosted` and the `verify` gate behind
+`docs-only != 'true'`, so a docs-only head can never report the required `verify` check, and
+filed that as ST-4568.  Only `verify-hosted` and `verify-ios` carry that gate;  the `verify` gate
+itself runs on `if: ${{ !cancelled() }}` and exits 0 on the docs-only path.  The check that settles
+it is empirical, not a reading of the workflow's comment:  PR #4875 changed exactly one file
+(`AGENTS.md`), and the check-runs on that head report `verify` → success, `verify-hosted` →
+skipped, `verify-ios` → skipped.  ST-4568 is closed as wontfix with that evidence, and the same
+correction is in the rollout note, the Linear comment on ST-4565, the Zulip post, and the Apple
+Note.  The `workflow_dispatch` lever is real, but it covers a different edge:  cloud-proxy pushes
+that generate no `pull_request` event at all.
+
+**The fleet-wide PR Autofix failure has landed.**  Every pull request in this repository was
+carrying a failing `autofix / autofix` check, because `autofix.yml` pinned
+`pr-autofix-reusable.yml@b634b511`, and at that SHA the reusable invokes the Claude CLI as
+`claude --print --dangerously-skip-permissions ... --output-format stream-json`, which the CLI
+rejects ("When using --print, --output-format=stream-json requires --verbose").  The pin was the
+defect, not the CLI.  The good reusable SHA is `c97a2dae96762eb9ffc122c753f0dfb0a7840650`, and
+every consumer pin was checked by reading the reusable at the pinned SHA rather than by trusting
+the pin string.  The Socratic-Trade half landed through the repository's own Autofix path, as PR
+#4905, merged as `308d3f256`;  the coordinator half was reported as AFC-451 and belongs to another
+seat.  Both issues are closed as already-landed.
+
+**Two merge-mechanics facts worth keeping.**  The `auto-merge / arm` workflow passed
+`--delete-branch`, which GitHub rejects under a merge queue;  that was fixed in PR #4893 and the
+check is green.  And the `org-default-main-protection` ruleset sets
+`require_extra_approval_for_unattributed_changes: true`, so the three commits on this branch that
+GitHub cannot attribute to an account — this seat's own `21d5c58d7` and the two another seat
+contributed — require an approval from someone with write access.  No author was rewritten:  a
+rule that puts a human in front of unattributed code is doing its job.
+
+**Next.**  The only remaining gate is Jay's APPROVED review on PR #4889.  Auto-merge is armed, so
+the merge fires as soon as the approval lands and the required checks are green on the pushed
+head.  After the merge:  verify the deployed SHA against production, close ST-4565 out, and delete
+the remote branch.

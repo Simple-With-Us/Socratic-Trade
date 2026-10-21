@@ -249,10 +249,15 @@ placeholder credential, and it fails against the old code.
 ### 10. The middleware read a credential without the server-only guard
 
 `middleware.ts` reads `AUTH_SECRET` and carried no `import "server-only";`, so nothing stopped the
-module from being pulled into a client bundle.  The guard is now the first import in the file, the
-same way the other credential-reading modules in `src/lib` carry it.  The production build was run
-locally after the change and succeeded, which is what proves the guard compiles in the middleware
-bundle rather than only in the unit tests.
+module from being pulled into a client bundle.  The guard was added as the first import in the
+file, the same way the other credential-reading modules in `src/lib` carry it, and the production
+build was run locally after that change and succeeded.
+
+**This entry was later reversed, and the reversal is finding 13.**  The guard was deliberately
+taken back out of `middleware.ts`, with the rationale recorded in the file itself;  the guard
+stays on the credential-reading modules under `src/lib` and `app/api/*/route.ts`.  The build
+recorded here was run against the file *with* the guard, so it is evidence about that state and
+not about the file this diff ships.
 
 ### 11. The secret was read two different ways in the same file
 
@@ -283,6 +288,93 @@ diff was then swept for the same class —  IPs, host and lane paths, hostnames,
 workload specifics, across every added line of every file this PR touches.  The remaining matches are
 pre-existing entries already on `main`, outside this diff.
 
+## Review Findings, Sixth Round
+
+### 13. The `server-only` guard was taken back out of `middleware.ts`
+
+Kody's fourth-round finding 10 asked for `import "server-only";` in `middleware.ts`, and this diff
+takes it back out.  The rationale now lives in the file itself, at the top of the module.  Three
+things are true about the guard.  The package's exports map `react-server` to `./empty.js` and
+`default` to `./index.js`, so plain `node` throws "This module cannot be imported from a Client
+Component module" while `node --conditions=react-server` loads clean — and a production build
+still succeeds in the throwing case, because the failure happens at module-evaluation time, so a
+green CI run proves nothing about the guard in either direction.  The guard was also never earning
+anything where it stood:  middleware is a server entry point compiled only for the edge runtime,
+so no Client Component can import it.  And the repo's vitest config aliases `server-only` to a
+mock, so the unit tests could not have caught a mistake in either direction.  The guard stays on
+the credential-reading modules under `src/lib` and `app/api/*/route.ts` that a client bundle could
+genuinely pull in.
+
+### 14. The records still claimed the guard was in the file, and the recorded build predated its removal
+
+Kody's sixth-round finding caught exactly that, and it was real.  Four places in the records this
+diff ships still asserted that `middleware.ts` carries the guard:  the fourth-round entry in
+`STATUS.md`, the fourth-round entry in this note, the fourth-round paragraph in `PLAN.md`, and
+the recorded build evidence below.  The recorded `npm run build` succeeded against the file
+*with* the guard, so "80 tests green / build succeeded" described a file state that no longer
+exists, and anyone auditing the middleware's client-bundle boundary from these records would have
+got the wrong answer.  All four now say the guard was deliberately taken back out, carry the
+rationale, and label the recorded build as predating the removal.  The general lesson is the one
+this effort has already paid for once:  when a review round reverses an earlier round's fix, the
+records that describe the earlier fix are part of the change, not commentary on it.
+
+## Review Findings, Seventh Round
+
+### 15. Every pull request was failing its Autofix check, fleet-wide
+
+Pull requests in this repository were failing their `autofix` job, on branches that touched
+nothing the autofixer cares about.  The reusable workflow
+`.github/workflows/pr-autofix-reusable.yml` was pinned at a SHA whose body ran
+`claude --print --dangerously-skip-permissions ... --output-format stream-json`, and the CLI
+rejects that combination — "When using --print, --output-format=stream-json requires --verbose".
+The pin was the defect, not the CLI and not the trigger.
+
+The fix already existed on the coordinator's `main` as `00def854` (PR #632).  The good reusable SHA
+is `c97a2dae96762eb9ffc122c753f0dfb0a7840650`.  Every consumer pin was checked by reading the
+reusable at the pinned SHA rather than by trusting the pin string:  Socratic-Trade, DealDex,
+CodeCaps, ContactLogo, Clutch, BotFleet, Congress.Trade, HogHunter, Simple-With-Us and
+congress-trading-shared are all on `c97a2dae`, the copy vendored inside Congress.Trade is on
+`a652e467` and also carries the fix, and `fleetlink-legacy` has no `autofix.yml` on `main`.
+
+The sweep was reported as AFC-451 and the Socratic-Trade half as ST-4569.  Neither was claimed or
+executed by this seat:  the coordinator repo belongs to CLAUDE and the sweep spans seven repos
+across other teams.  The Socratic-Trade half landed through the repository's own autofix path, as
+PR #4905, merged as `308d3f256`, and both issues are closed as already-landed.
+
+### 16. The `auto-merge / arm` workflow passed `--delete-branch` under a merge queue
+
+`auto-merge / arm` passed `--delete-branch`, which GitHub rejects when a merge queue is enabled
+on the branch.  `main` already carried a merge-queue arm for that workflow and the check passes
+there;  the arming path was corrected in PR #4893, which is merged, and the check is green on this
+branch.
+
+## A Finding Of This Effort's Own That Did Not Hold
+
+### 17. The docs-only diagnosis was wrong, and it is corrected here
+
+This note originally claimed that a docs-only head can never report the required `verify` check,
+and that a manual `workflow_dispatch` re-kick had to be dispatched by hand on every docs-only
+head.  That claim was wrong, and it was this seat's error.  The `verify` job is gated on
+`if: ${{ !cancelled() }}` (ci.yml:413-418), not on the `classify` outputs;  only `verify-hosted`
+(ci.yml:275) and `verify-ios` (ci.yml:407) are gated behind `docs-only != 'true'`.  On the
+docs-only path the gate script exits 0 and reports "RESULT: PASS — docs-only diff — gate skipped by
+path filter" (ci.yml:443-446), and `test/branch-protection-gate.test.ts` pins that behaviour.
+
+The empirical check settles it.  PR #4875 changed exactly one file (`AGENTS.md`), so its head is
+docs-only, and the check-runs on that head SHA report `verify` → `success`, `verify-hosted` →
+`skipped`, `verify-ios` → `skipped`.  There is no stranded required check and no re-kick to
+remember.
+
+The wrong claim was also filed as ST-4568, which is closed as a finding that did not hold.  The
+`workflow_dispatch` lever is real, but it exists for a different edge:  pushes made through the
+cloud git proxy generate no `pull_request` event at all (ci.yml:40-47), so no run attaches `verify`
+to the head SHA.
+
+The correction to this section was made by another seat on this branch, in commit `504af8dc5`, and
+was adopted rather than rewritten.  The transferable lesson is narrow:  a required check that
+"disappears" is a claim about the workflow's `if` conditions, and a comment above a lever is not
+an `if` condition.  Reading ci.yml is cheap; the comment was read instead.
+
 ## Merge Mechanics Diagnosed On This PR
 
 Two mechanical blockers were diagnosed here that are worth recording, because neither is visible from
@@ -291,12 +383,14 @@ the PR diff and both cost real time.
 **Docs-only heads still satisfy the `verify` requirement.**  When `classify` reports `docs-only: true` only `verify-hosted` is skipped (ci.yml:275); the `verify` gate itself always runs (`if: ${{ !cancelled() }}`) and its docs-only branch exits 0, reporting "RESULT: PASS — docs-only diff — gate skipped by path filter" (ci.yml:444-446, pinned by `test/branch-protection-gate.test.ts`).  There is no stranded required check on a docs-only head and no re-kick to remember.  The `workflow_dispatch` manual re-kick lever exists for a different edge: pushes made through the cloud git proxy generate no `pull_request` event at all (ci.yml:40-47), so no run attaches `verify` to the head SHA.  Likewise the `merge_group` docs-only=false applies to the queue's own run on its temporary branch, not to the PR head check.
 
 **Unattributed commits need an owner approval, and that is a gate, not a bug.**  The
-`org-default-main-protection` ruleset sets `require_extra_approval_for_unattributed_changes: true`.  Every commit on this branch resolves to the owner through GitHub except one authored by
-the MiniMax bot, for which the API returns `author: null`;  that
-commit therefore counts as unattributed, and the rule then requires an approval from someone with
-write access.  The other requirements were all satisfied — `verify` and `gitleaks` green, all review
-threads resolved, `required_approving_review_count: 0` — so this was the single unmet condition.  Rewriting the commit's author would have cleared the rule and defeated exactly what it exists for, so
-it was left alone and surfaced to the owner as the one action only he can take.
+`org-default-main-protection` ruleset sets `require_extra_approval_for_unattributed_changes: true`.  Most commits on this branch resolve to the owner through GitHub, but three do not:  one authored by
+the MiniMax bot and two contributed by another seat under a local identity, and the API returns
+`author: null` for each of them.  Those commits therefore count as unattributed, and the rule then
+requires an approval from someone with write access.  The other requirements were all satisfied —
+`verify` and `gitleaks` green, all review threads resolved,
+`required_approving_review_count: 0` — so this is the single unmet condition.  Rewriting an
+author would have cleared the rule and defeated exactly what it exists for, so the authors were
+left alone and the approval was surfaced to the owner as the one action only he can take.
 
 ## Decisions & Trade-offs
 
@@ -379,10 +473,12 @@ Re-verified after the fourth review round (findings 10 and 11 above), on the sam
 - `npx vitest run` over all nine affected files — **80 tests green, exit 0**, the same set and the
   same count as the third round:  the whitespace-only case changed what the verifier is handed, not
   how many cases there are.
-- `npm run build` (`next build --webpack`) — **succeeded**, exit 0.  This is the check that matters
-  for finding 10:  it proves the `server-only` guard compiles in the middleware bundle, which the
-  unit tests cannot, since the repo's vitest config aliases `server-only` to a mock.  The build
-  prints the route table, middleware included, and exits clean.
+- `npm run build` (`next build --webpack`) — **succeeded**, exit 0.  This run was against the file
+  *with* the `server-only` guard, so it is evidence about that state and not about the file this
+  diff ships;  the guard was taken back out afterwards (finding 13).  What it did prove is that
+  the guard compiles in the middleware bundle, which the unit tests cannot, since the repo's
+  vitest config aliases `server-only` to a mock.  The build prints the route table, middleware
+  included, and exits clean.
 
 Its first run **failed**, on the copy-rule lint — 22 sentence-gap violations, described under
 Review Findings above.  Fixed; the re-run is the gate of record.  Every other job on that run was
