@@ -1,5 +1,32 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, beforeAll, afterAll } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { CascadingEnrichmentProvider, type MarketEnrichmentProvider } from "../src/lib/data-providers";
+import { resetDbForTesting } from "../src/lib/db";
+
+// Per repo convention every test file points DATABASE_URL at its own temp SQLite DB.
+// A gather that completes builds an enrichment coverage report and persists it, so
+// without this the suite writes rows into the shared, untracked file:./data/app.db.
+const dbDir = mkdtempSync(join(tmpdir(), `enrichment-abort-${randomUUID()}-`));
+const prevDb = process.env.DATABASE_URL;
+process.env.DATABASE_URL = `file:${join(dbDir, "test.db")}`;
+
+beforeAll(() => {
+  resetDbForTesting();
+});
+
+afterAll(() => {
+  resetDbForTesting();
+  if (prevDb === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = prevDb;
+  try {
+    rmSync(dbDir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+});
 
 describe("CascadingEnrichmentProvider gather abort", () => {
   it("forwards the gather signal into the keyed wave and stops when it fires", async () => {

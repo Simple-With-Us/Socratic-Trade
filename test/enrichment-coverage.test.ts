@@ -1,4 +1,8 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   __resetEnrichmentCoverageForTests,
   buildEnrichmentCoverageReport,
@@ -20,6 +24,35 @@ import {
   type MarketEnrichmentProvider,
   type SymbolEnrichment
 } from "../src/lib/data-providers";
+import { resetDbForTesting } from "../src/lib/db";
+
+// Per repo convention every test file points DATABASE_URL at its own temp SQLite DB.
+// buildEnrichmentCoverageReport persists a coverage report on every call, so without
+// this the suite writes rows into the shared, untracked file:./data/app.db;  a later
+// test that expects an empty database then fails on the order the files ran in.
+//
+// The path is held for the whole FILE, not for each test:  the persist is a
+// fire-and-forget dynamic import, so it can resolve after the test that triggered it
+// has finished.  Restoring the path per test would hand that late write back to the
+// shared database.
+const dbDir = mkdtempSync(join(tmpdir(), `enrichment-coverage-${randomUUID()}-`));
+const prevDb = process.env.DATABASE_URL;
+process.env.DATABASE_URL = `file:${join(dbDir, "test.db")}`;
+
+beforeAll(() => {
+  resetDbForTesting();
+});
+
+afterAll(() => {
+  resetDbForTesting();
+  if (prevDb === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = prevDb;
+  try {
+    rmSync(dbDir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+});
 
 beforeEach(() => {
   __resetEnrichmentCoverageForTests();

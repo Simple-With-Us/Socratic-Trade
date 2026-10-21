@@ -2656,3 +2656,20 @@ No model change, no trading-logic change.  Measured `--effort none` was slower a
 the budget was widened rather than bounded.  Separate, code-free: production APNs push was
 root-caused to a stale `APNS_P8` paired against the wrong Key ID, fixed in Infisical and activated by
 a container restart.
+
+## 2026-10-21 — [MM] Test-database isolation for the enrichment coverage writers (ST-4570)
+
+Not a scope change:  a test-isolation defect fix.  The local vitest suite no longer writes
+enrichment coverage rows into the checkout's own untracked `data/app.db`, and
+`test/data-catalog-completeness.test.ts` no longer depends on the order the test files run in.
+Three files that could reach the persistence path without owning a database now own one, which is
+what `test/reindex-all.test.ts:8` already states as the repo convention and what 458 of the 854
+test files already do.  No production code changed and no test assertion was weakened:  the reader's
+empty-universe premise is now true by construction rather than by luck.
+
+The detail that shaped the change:  the persistence is a fire-and-forget dynamic import, so it can
+resolve after the test that triggered it has finished.  Restoring the database path per test is
+therefore the wrong shape for a writer, even though it is the right shape for a reader, and the
+writer files hold their path for the whole file instead.  That was measured, not assumed.
+
+Rollout: `docs/rollouts/2026-10-21-st-4570-suite-db-isolation.md`.
