@@ -7327,8 +7327,7 @@ had already been fixed by the first round and needed only an explanation.
     canonical-host path read the raw value.  A whitespace-only secret therefore read as
     "configured" everywhere except in that one hop, which then forwarded the operator to the
     canonical host — where the host-only Auth.js cookie does not apply — and dropped the
-    session.  That is the session-loss regression the second round closed, in a narrower form.
-    The raw value is now the single source of truth, matching the rest of the file, so an empty
+    session.  That is the session-loss regression the second round closed, in a narrower form.  The raw value is now the single source of truth, matching the rest of the file, so an empty
     string is still never handed to the verifier and a configured secret is passed through
     unchanged.
 

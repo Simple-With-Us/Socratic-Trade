@@ -2700,16 +2700,15 @@ nine affected vitest files green (80 tests, exit 0):  `public-site-routing` (22)
 `copy-rules-lint` (17), `candle-ticker-raf-resilience` (9), `framework-page` (9),
 `framework-hash-target` (6), `security-headers` (6), `public-sentence-gap` (4),
 `middleware-auth-secret` (4), `how-it-works-redirect` (3).  The full suite is CI's job — a
-local full run was impractical in this seat's working environment, so it is not claimed here.
-The production build was run locally after the fourth review round and
-succeeded, which is what proves the `server-only` guard compiles in the middleware bundle; the
-unit tests cannot, because the repo's vitest config aliases `server-only` to a mock.  The first
-hosted `verify-hosted` run failed on the repo's own copy-rule
-lint: 22 sentence-gap violations in the new public copy, because two literal ASCII spaces collapse
-in the browser.  Fixed with the repo's own NBSP idiom and the sanctioned fixer, and the re-run is
-the gate of record.  Swift compilation is CI-only; the only Swift changes are comments.
-
-A second review round came back with six threads; five were real and are fixed — the alt-domain
+local full run was impractical in this seat's working environment, so it is not claimed here.  The
+production build was run locally after the fourth review round and succeeded;  the unit tests cannot
+show that a bundler export condition holds, because the repo's vitest config aliases `server-only`
+to a mock, which is why the guard was taken back out of `middleware.ts` rather than kept on the
+strength of a green test run.  The first hosted `verify-hosted` run failed on the repo's own
+copy-rule lint:  22 sentence-gap violations in the new public copy, because two literal ASCII spaces
+collapse in the browser.  Fixed with the repo's own NBSP idiom and the sanctioned fixer, and the
+re-run is the gate of record.  Swift compilation is CI-only; the only Swift changes are comments.  Rollout:
+`docs/rollouts/2026-10-19-public-framework-pages.md`.  A second review round came back with six threads; five were real and are fixed — the alt-domain
 308 dropped a live session and skipped the security headers, the public host sets were written out
 twice, a framework deep link did not scroll, and the rollout doc named a lane path.  The sixth
 concerned the apex redirect that the first round had already fixed.  All six threads are answered

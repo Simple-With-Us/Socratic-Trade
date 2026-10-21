@@ -27,8 +27,7 @@ Every public page now renders through a single `PublicShell`, which is what actu
   `PUBLIC_SHELL_PAD_X`, `PUBLIC_HEADER_PAD_Y`, `PUBLIC_ROW_H`, `PUBLIC_BRAND_MAX_H`), plus
   `publicBrandLeft()` / `publicBrandTop()`.
 
-The header's geometry is **inline-styled from those constants rather than set with Tailwind classes**.
-The loading animation computes its landing box in JavaScript from the same constants, so a CSS class
+The header's geometry is **inline-styled from those constants rather than set with Tailwind classes**.  The loading animation computes its landing box in JavaScript from the same constants, so a CSS class
 and a JS number could drift and the candles would land beside the wordmark instead of on it.
 
 ### One animation implementation, two variants
@@ -299,13 +298,11 @@ comment at `classify` calls `workflow_dispatch` "the manual re-kick lever".  Dis
 on the queue's temporary merge_group branch, or queued PRs hang forever.
 
 **Unattributed commits need an owner approval, and that is a gate, not a bug.**  The
-`org-default-main-protection` ruleset sets `require_extra_approval_for_unattributed_changes: true`.
-Every commit on this branch resolves to the owner through GitHub except one authored by
+`org-default-main-protection` ruleset sets `require_extra_approval_for_unattributed_changes: true`.  Every commit on this branch resolves to the owner through GitHub except one authored by
 `MiniMax <mm-bot@simplewithus.zulipchat.com>`, for which the API returns `author: null`;  that
 commit therefore counts as unattributed, and the rule then requires an approval from someone with
 write access.  The other requirements were all satisfied — `verify` and `gitleaks` green, all review
-threads resolved, `required_approving_review_count: 0` — so this was the single unmet condition.
-Rewriting the commit's author would have cleared the rule and defeated exactly what it exists for, so
+threads resolved, `required_approving_review_count: 0` — so this was the single unmet condition.  Rewriting the commit's author would have cleared the rule and defeated exactly what it exists for, so
 it was left alone and surfaced to the owner as the one action only he can take.
 
 ## Decisions & Trade-offs
@@ -376,8 +373,7 @@ about all of it.  The complete affected set is nine files, re-run together on th
 - `npx vitest run` over all nine affected files — **80 tests green, exit 0**:
   `public-site-routing` (22), `copy-rules-lint` (17), `candle-ticker-raf-resilience` (9),
   `framework-page` (9), `framework-hash-target` (6), `security-headers` (6),
-  `public-sentence-gap` (4), `middleware-auth-secret` (4), `how-it-works-redirect` (3).
-  Each file was also run on its own; every one exited 0.
+  `public-sentence-gap` (4), `middleware-auth-secret` (4), `how-it-works-redirect` (3).  Each file was also run on its own; every one exited 0.
 
 **The full suite was not run locally, and is not claimed here.** A local full run was
 impractical in this seat's working environment.  The hosted `verify-hosted` job is the gate of

@@ -23,7 +23,23 @@
 // Cloudflare Tunnel may still front the app, but Cloudflare Access email headers are
 // not trusted as an app login source.
 
-import "server-only";
+// NOTE: no `import "server-only"` here, deliberately.
+//
+// That marker package only does one thing: it throws when a module is reached
+// from a Client Component bundle. This file is a server entry point that
+// Next.js compiles exclusively for the edge runtime, so no Client Component can
+// ever import it and the guard can never fire usefully.
+//
+// It is not free, though. `server-only` resolves to a module that throws unless
+// the bundler applied the `react-server` export condition; without it every
+// request would fail at module load with "This module cannot be imported from a
+// Client Component module". A production build still succeeds in that case,
+// because the throw happens at evaluation time and not at bundle time, so CI
+// green does not prove it. The edge layer is not a layer that needs protecting
+// here, so the dependency on that condition is not worth taking.
+//
+// The guard stays where it earns its keep: the credential-reading modules under
+// src/lib that a Client Component could genuinely pull into a client bundle.
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { createRemoteJWKSet } from "jose/jwks/remote";
