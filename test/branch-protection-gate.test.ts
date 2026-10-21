@@ -286,6 +286,9 @@ describe("required contexts are not renamed out from under the ruleset", () => {
     // its `|| echo` would swallow the failure and leave the PR never armed.
     const shared = workflow("auto-merge-shared-dependency.yml");
     const sharedJob = jobBlock(shared, "auto-merge");
+    // Control: the negative assertion is vacuous if the job lookup missed, so
+    // first prove the armer's merge command is actually in the block.
+    expect(sharedJob).toContain("gh pr merge");
     expect(sharedJob).not.toMatch(/gh pr merge[^\n]*--delete-branch/);
   });
 });
