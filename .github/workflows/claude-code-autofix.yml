@@ -13,6 +13,7 @@ permissions:
   contents: write
   pull-requests: write
 
+  issues: write
 concurrency:
   group: pr-autofix-${{ github.repository }}-${{ github.event.pull_request.number || github.event.inputs.pr }}
   cancel-in-progress: false

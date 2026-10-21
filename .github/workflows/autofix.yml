@@ -22,6 +22,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
+      issues: write
       actions: read
     uses: Simple-With-Us/AI-Fleet-Coordinator/.github/workflows/pr-autofix-reusable.yml@e37a3e3055fb616dbc0aaa1c2f127d8b34edbf46
     secrets:
