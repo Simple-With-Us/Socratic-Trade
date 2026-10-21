@@ -650,7 +650,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.socratictrade.ios;
 				PRODUCT_MODULE_NAME = SocraticTrade;
 				PRODUCT_NAME = "Socratic Trade";
-				PROVISIONING_PROFILE_SPECIFIER = "Socratic Trade App Store (API)";
+				PROVISIONING_PROFILE_SPECIFIER = "Socratic Trade App Store (API) 2";
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = YES;
 				TARGETED_DEVICE_FAMILY = "1,2,6";

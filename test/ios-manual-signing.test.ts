@@ -23,7 +23,7 @@ const entitlements = read("ios/SocraticTrade/SocraticTrade.entitlements");
 const profileMap = JSON.parse(read("ios/appstore-profiles.json")) as Record<string, string>;
 const workflow = read(".github/workflows/ios-ship.yml");
 const installer = read("scripts/ios-install-appstore-profiles.sh");
-const PROFILE = "Socratic Trade App Store (API)";
+const PROFILE = "Socratic Trade App Store (API) 2";
 
 /** Build-settings blocks of the app target's XCBuildConfigurations, keyed by name. */
 function appTargetConfigs(): Record<string, string> {
