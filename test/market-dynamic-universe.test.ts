@@ -11,10 +11,18 @@ import { resetDbForTesting } from "../src/lib/db";
 // The path is held for the whole FILE because the persist is a fire-and-forget dynamic import, so
 // it can resolve after the test that triggered it has finished.
 const dbDir = mkdtempSync(join(tmpdir(), `market-dynamic-universe-${randomUUID()}-`));
-const prevDb = process.env.DATABASE_URL;
-process.env.DATABASE_URL = `file:${join(dbDir, "test.db")}`;
+const dbUrl = `file:${join(dbDir, "test.db")}`;
+let prevDb: string | undefined;
 
+// The override is applied in beforeAll rather than at module scope.  A module-scope assignment
+// leaves the worker pointed at this file's database for the whole time the module is being
+// evaluated, so a throw between the assignment and the registration of the afterAll hook would
+// carry the override into the next file in the worker.  Applying it here means the environment is
+// only mutated once this file's tests are about to run, and the mutation is always undone by the
+// afterAll below.
 beforeAll(() => {
+  prevDb = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = dbUrl;
   resetDbForTesting();
 });
 
@@ -40,6 +48,14 @@ afterEach(() => {
 });
 
 describe("market scan dynamic universes", () => {
+  it("owns an isolated database, so its cascade writes cannot reach the run's shared database", () => {
+    // Control assertion for the fixture above.  Without it the rest of this file's tests pass
+    // whether or not the isolation works, so a regression in the fixture would be invisible.
+    // This one fails if the file is running against the shared database instead of its own.
+    expect(process.env.DATABASE_URL).toBe(dbUrl);
+    expect(process.env.DATABASE_URL).not.toBe(prevDb);
+  });
+
   it("adds Nasdaq exchange-filtered rows for the NYSE Composite universe", async () => {
     vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
       const url = String(input);

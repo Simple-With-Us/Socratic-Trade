@@ -7240,3 +7240,31 @@ Both writer files hold their database path for the whole file, the shape ST-4570
 code changed.
 
 Rollout: `docs/rollouts/2026-10-21-st-4571-suite-db-hygiene.md`.
+
+## 2026-10-21 [MM] ST-4572 — the fixture override moves into a hook, and the isolation gets a control assertion
+
+**What.**  The two follow-ups PR #4912 named in its own body are closed.  The `DATABASE_URL`
+override in the three cascade-reaching writer files moves from module scope into `beforeAll`, and
+the isolation is now asserted rather than assumed.
+
+**The structural hole.**  A module-scope assignment leaves the worker pointed at the file's
+database for the whole time the module is being evaluated, so a throw between the assignment and
+the registration of the `afterAll` hook carries the override into the next file in the worker.
+Applying it in `beforeAll` means the environment is only mutated once the file's tests are about to
+run, and the mutation is always undone by the `afterAll` below it.
+
+**The path stays file-scoped.**  The persist is a fire-and-forget dynamic import, so it can resolve
+after the test that triggered it has finished, and a per-test path hands that late write back to
+the shared database.  The measurement is in the ST-4571 rollout note: the three files together
+against a fresh database finish with no `enrichment_coverage_runs` table at all, where a per-test
+version of the same fix wrote twelve rows in a two-file probe.
+
+**The control assertion is proved to fail.**  A temporary copy of `test/provenance-stamps.test.ts`
+with the override removed was run against the same database, and the control test failed with the
+active path reported as the run's shared database.  A control that cannot fail is not a control.
+The copy was deleted and was never committed.
+
+`npx tsc --noEmit` exits 0 and `npx eslint` over the three changed files exits 0.  No production
+code changed and no existing assertion was weakened.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.

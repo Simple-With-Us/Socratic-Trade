@@ -24,10 +24,18 @@ import { resetDbForTesting } from "../src/lib/db";
 // finished.  The run's own database path is saved and restored rather than deleted, because
 // deleting it hands the next file in the worker the checkout's default database.
 const dbDir = mkdtempSync(join(tmpdir(), `enrich-cov-persist-${randomUUID()}-`));
-const prevDb = process.env.DATABASE_URL;
-process.env.DATABASE_URL = `file:${join(dbDir, "app.db")}`;
+const dbUrl = `file:${join(dbDir, "app.db")}`;
+let prevDb: string | undefined;
 
+// The override is applied in beforeAll rather than at module scope.  A module-scope assignment
+// leaves the worker pointed at this file's database for the whole time the module is being
+// evaluated, so a throw between the assignment and the registration of the afterAll hook would
+// carry the override into the next file in the worker.  Applying it here means the environment is
+// only mutated once this file's tests are about to run, and the mutation is always undone by the
+// afterAll below.
 beforeAll(() => {
+  prevDb = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = dbUrl;
   resetDbForTesting();
 });
 

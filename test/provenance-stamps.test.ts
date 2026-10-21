@@ -22,10 +22,18 @@ import type { MarketEnrichmentProvider, SymbolEnrichment } from "../src/lib/data
 // it can resolve after the test that triggered it has finished.  The blocks below that set their
 // own path save and restore this one, so their rows stay with them too.
 const dbDir = mkdtempSync(join(tmpdir(), `provenance-stamps-${randomUUID()}-`));
-const prevDb = process.env.DATABASE_URL;
-process.env.DATABASE_URL = `file:${join(dbDir, "test.db")}`;
+const dbUrl = `file:${join(dbDir, "test.db")}`;
+let prevDb: string | undefined;
 
+// The override is applied in beforeAll rather than at module scope.  A module-scope assignment
+// leaves the worker pointed at this file's database for the whole time the module is being
+// evaluated, so a throw between the assignment and the registration of the afterAll hook would
+// carry the override into the next file in the worker.  Applying it here means the environment is
+// only mutated once this file's tests are about to run, and the mutation is always undone by the
+// afterAll below.
 beforeAll(() => {
+  prevDb = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = dbUrl;
   resetDbForTesting();
 });
 
@@ -367,5 +375,26 @@ describe("OHLC bar provenance", () => {
         /* ignore */
       }
     }
+  });
+});
+
+describe("database isolation control", () => {
+  it("keeps the cascade coverage write in this file's own database", async () => {
+    // Control assertion for the fixture at the top of this file.  The other tests here pass
+    // whether or not the isolation works, so nothing in the file proves that the cascade write
+    // stays out of the run's shared database.  This one does.
+    expect(process.env.DATABASE_URL).toBe(dbUrl);
+    expect(process.env.DATABASE_URL).not.toBe(prevDb);
+
+    // The persist is a fire-and-forget dynamic import, so the row can arrive after the cascade
+    // test that triggered it has finished.  Poll for it rather than assume it has landed.
+    const { listEnrichmentCoverageRunHistory } = await import("../src/lib/db-enrichment-coverage");
+    const deadline = Date.now() + 5_000;
+    let runs = listEnrichmentCoverageRunHistory(10);
+    while (runs.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+      runs = listEnrichmentCoverageRunHistory(10);
+    }
+    expect(runs.length).toBeGreaterThan(0);
   });
 });

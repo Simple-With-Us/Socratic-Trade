@@ -2697,3 +2697,23 @@ ST-4571: asserting after the suite that the database it ran against collected no
 That belongs with the repo's own gate rather than with a test-file change.
 
 Rollout: `docs/rollouts/2026-10-21-st-4571-suite-db-hygiene.md`.
+
+## 2026-10-21 — [MM] The fixture override moves into a hook, and the isolation is asserted (ST-4572)
+
+Not a scope change: the two follow-ups PR #4912 named in its own body.  The `DATABASE_URL`
+override in the three cascade-reaching writer files moves from module scope into `beforeAll`, and
+the isolation gets a control assertion that was proved to fail when the override is removed.  Three
+test files changed and no production code changed.
+
+The detail that shaped the change is the one ST-4570 established and ST-4571 confirmed: a writer
+holds its database path for the whole file, because the persist is a fire-and-forget dynamic import
+that can resolve after the test that triggered it has finished.  So the suggested remedy of moving
+the override into `beforeEach` was not taken; what was taken instead is the same remedy one level
+up, in `beforeAll`, which closes the hole a module-scope assignment leaves open without introducing
+the per-test path.
+
+One thing this change makes checkable that was not checkable before: the control assertion is
+differential, and it was run against a copy of the file with the override removed, so its failure
+was observed rather than assumed.  A control that cannot fail is not a control.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
