@@ -3,7 +3,7 @@
  * provider supplied one (the cascade never fabricates asOf from its own clock).
  * Covers cascade merge (takeScalar), symbol_field_latest writes, quote/bar merges, OHLC stamps.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,31 @@ import { stampOhlcBarProvenance } from "../src/lib/history";
 import { mergeGroupedBarData, mergeQuoteData } from "../src/lib/market";
 import type { MarketQuote, MarketScan } from "../src/lib/types";
 import type { MarketEnrichmentProvider, SymbolEnrichment } from "../src/lib/data-providers";
+
+// The cascade gather in "cascade merge arbitrates the new quote fields" builds and persists an
+// enrichment coverage report.  Without a database of its own this file wrote coverage rows into
+// the run's shared database, where a file that later expected an empty database could see them.
+// The path is held for the whole FILE because the persist is a fire-and-forget dynamic import, so
+// it can resolve after the test that triggered it has finished.  The blocks below that set their
+// own path save and restore this one, so their rows stay with them too.
+const dbDir = mkdtempSync(join(tmpdir(), `provenance-stamps-${randomUUID()}-`));
+const prevDb = process.env.DATABASE_URL;
+process.env.DATABASE_URL = `file:${join(dbDir, "test.db")}`;
+
+beforeAll(() => {
+  resetDbForTesting();
+});
+
+afterAll(() => {
+  resetDbForTesting();
+  if (prevDb === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = prevDb;
+  try {
+    rmSync(dbDir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+});
 
 function quote(partial: Partial<MarketQuote> & { symbol: string }): MarketQuote {
   return {

@@ -2673,3 +2673,27 @@ therefore the wrong shape for a writer, even though it is the right shape for a 
 writer files hold their path for the whole file instead.  That was measured, not assumed.
 
 Rollout: `docs/rollouts/2026-10-21-st-4570-suite-db-isolation.md`.
+
+## 2026-10-21 — [MM] The suite's shared database stays clean (ST-4571)
+
+Not a scope change: the hygiene that ST-4570 left behind, now closed.  A full local suite run
+no longer leaves enrichment coverage rows in the run's shared database, and no test file clears the
+run's database path.  Three test files changed and no production code changed, so the diff cannot
+change what the app does.
+
+The method that settled the attribution is isolation rather than inference.  The first account read
+the row payloads and guessed at provider tests; running each candidate file on its own against a
+fresh database and counting the rows named the two files exactly, and neither was a provider test.
+The lesson is recorded in Fleet Recall as `contrib/MM/2026-10-21/a58ff806`.
+
+The detail that shaped the change is the same one ST-4570 established, plus one more.  A writer
+holds its database path for the whole file, because the persist is a fire-and-forget dynamic import
+that can resolve after the test that triggered it has finished.  And deleting the path is worse
+than never setting it, because an unset variable does not mean "no database" — it means the
+checkout's own `data/app.db`.
+
+One repo-level guard is deliberately not in this change and is recorded as a follow-up on
+ST-4571: asserting after the suite that the database it ran against collected no coverage rows.
+That belongs with the repo's own gate rather than with a test-file change.
+
+Rollout: `docs/rollouts/2026-10-21-st-4571-suite-db-hygiene.md`.
