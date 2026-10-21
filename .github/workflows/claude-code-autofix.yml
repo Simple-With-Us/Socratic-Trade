@@ -29,6 +29,7 @@ jobs:
     uses: Simple-With-Us/congress-trading-shared/.github/workflows/codex-autofix-reusable.yml@31659885f58f08e129b6dc092f3493d7cdb74a11
     secrets:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+      META_MODEL_API_TOKEN: ${{ secrets.META_MODEL_API_TOKEN }}
       USAGE_INGEST_TOKEN: ${{ secrets.USAGE_INGEST_TOKEN }}
     with:
       # Owner ruling 2026-10-20: all fleet MiniMax use goes to MiniMax-M3.1-Flash;
