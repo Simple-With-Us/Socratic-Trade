@@ -107,6 +107,29 @@ describe("assessRestartLoop (pure)", () => {
     expect(assessRestartLoop(entries, T0, { threshold: 2, windowMinutes: 3 }).restartLoop).toBe(false);
   });
 
+  it("does not count a crash predecessor that booted before the window", () => {
+    // Boot a crashed before the window opened; the two in-window boots alone
+    // must not trip the loop trigger on its stale evidence.
+    const entries = [
+      boot("a", T0 - 50 * MIN),
+      boot("b", T0 - 10 * MIN), exit("b", T0 - 9 * MIN, 143, { signal: "SIGTERM", uptimeSec: 600 }),
+      boot("c", T0)
+    ];
+    const a = assessRestartLoop(entries, T0);
+    expect(a.crashPredecessorsInWindow).toBe(0);
+    expect(a.restartLoop).toBe(false);
+  });
+
+  it("names the crash-predecessor count in the alert text", () => {
+    const entries = [
+      boot("a", T0 - 20 * MIN), exit("a", T0 - 19 * MIN, 143, { signal: "SIGTERM", uptimeSec: 10 }),
+      boot("b", T0 - 10 * MIN),
+      boot("c", T0)
+    ];
+    const text = describeRestartLoop(assessRestartLoop(entries, T0));
+    expect(text).toMatch(/2 of those boots follow a crash/);
+  });
+
   it("describes the previous exit code, signal and uptime when a receipt exists", () => {
     const entries = [
       boot("a", T0 - 20 * MIN), exit("a", T0 - 19 * MIN, 143, { signal: "SIGTERM", uptimeSec: 60 }),

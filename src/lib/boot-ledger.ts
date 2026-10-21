@@ -182,6 +182,10 @@ export function assessRestartLoop(
     inWindow.push(boots[i]);
     const predecessor = i > 0 ? boots[i - 1] : undefined;
     if (!predecessor) continue;
+    // A predecessor that booted before the window is not evidence about the
+    // window: a stale crash before an otherwise clean redeploy must not trip
+    // the loop trigger.
+    if (Date.parse(predecessor.ts) < windowStart) continue;
     const predecessorExit = exitByBoot.get(predecessor.bootId);
     if (!predecessorExit) {
       uncleanPredecessorsInWindow++;
@@ -338,7 +342,8 @@ export function describeRestartLoop(a: RestartLoopAssessment): string {
       : "no previous exit receipt is available";
   return (
     `Restart loop: ${a.bootsInWindow} boots in the last ${a.windowMinutes} minutes ` +
-    `(threshold ${a.threshold}); ${previous}. ` +
+    `(threshold ${a.threshold}); ${a.crashPredecessorsInWindow} of those boots follow a crash ` +
+    `(non-clean-deploy predecessor); ${previous}. ` +
     `Full history: ${BOOT_LEDGER_FILENAME} on the data volume (one JSON line per boot/exit, with the ` +
     `process.exit call site).`
   );
