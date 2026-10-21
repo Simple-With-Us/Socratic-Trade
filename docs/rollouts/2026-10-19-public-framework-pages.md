@@ -219,12 +219,12 @@ before that fix landed, so it is answered by the existing change rather than a n
 
 The first round recorded "the six affected vitest files green (60 tests)" and the second recorded
 "the affected vitest files green (47 tests)", with different file lists.  The first named
-`copy-rules-lint`;  the second dropped `copy-rules-lint`, `candle-ticker-raf-resilience`, and
+`copy-rules-lint`; the second dropped `copy-rules-lint`, `candle-ticker-raf-resilience`, and
 `how-it-works-redirect`, and added `framework-hash-target` and `security-headers`.
 
 Neither total covered the whole affected set, so neither was ever a claim about all of it, and read
 together the two rounds made the suite look *smaller* in the second round than in the first.  The
-complete set is nine files;  it has been re-run together and one file at a time, and every file
+complete set is nine files; it has been re-run together and one file at a time, and every file
 exits 0.  The Verification State section above now records the complete set and explains what the
 two earlier rounds were.
 
@@ -232,14 +232,14 @@ two earlier rounds were.
 
 The alt-domain canonicalization hop read `process.env.AUTH_SECRET ??  ""`.  With no secret
 configured, the verifier was handed an empty string and answered "no session", which is the same
-answer it gives for a cookie that fails to verify.  The two are different:  one is a deployment
+answer it gives for a cookie that fails to verify.  The two are different: one is a deployment
 with no Auth.js secret, the other is an operator whose cookie did not check out.  Reading them as
 one meant a missing secret looked like a cookie problem and turned into a silent redirect of every
 operator, instead of a surfaced configuration error.
 
 The secret is now read once and used only when it is actually set, and an empty string is never
 handed to the verifier.  A missing secret in a live boot is surfaced where it belongs, by
-`assertAuthSecretConfiguredInLiveBootstrap()` at startup;  a Cloudflare-Access-only deployment has
+`assertAuthSecretConfiguredInLiveBootstrap()` at startup; a Cloudflare-Access-only deployment has
 no `AUTH_SECRET` by design and is not an error, so the middleware must not throw for it.  New
 `test/middleware-auth-secret.test.ts` (4 tests) proves the verifier is never called with a
 placeholder credential, and it fails against the old code.
@@ -254,7 +254,7 @@ file, the same way the other credential-reading modules in `src/lib` carry it, a
 build was run locally after that change and succeeded.
 
 **This entry was later reversed, and the reversal is finding 13.**  The guard was deliberately
-taken back out of `middleware.ts`, with the rationale recorded in the file itself;  the guard
+taken back out of `middleware.ts`, with the rationale recorded in the file itself; the guard
 stays on the credential-reading modules under `src/lib` and `app/api/*/route.ts`.  The build
 recorded here was run against the file *with* the guard, so it is evidence about that state and
 not about the file this diff ships.
@@ -267,9 +267,9 @@ therefore read as "configured" everywhere except in that one hop, which then for
 operator to the canonical host — where the host-only Auth.js cookie does not apply — and dropped
 the session.  That is the session-loss regression the second round closed, in a narrower form.
 
-The raw value is now the single source of truth, matching the rest of the file:  an empty string
+The raw value is now the single source of truth, matching the rest of the file: an empty string
 is still never handed to the verifier, and a configured secret is passed through unchanged.  The
-test file now says so:  it proves the verifier is never called with a placeholder credential, and
+test file now says so: it proves the verifier is never called with a placeholder credential, and
 it pins the whitespace-only case to the raw value the canonical host uses.
 
 ## Review Findings, Fifth Round
@@ -278,7 +278,7 @@ it pins the whitespace-only case to the raw value the canonical host uses.
 
 Kody's Rule 12 caught a self-inflicted one.  The verification note written earlier in this effort
 recorded the working environment's external-volume setup and its workload range.  A status record is
-not the place for private hosting or capacity detail:  the reader needs one fact, that the hosted
+not the place for private hosting or capacity detail: the reader needs one fact, that the hosted
 `verify-hosted` job is the gate of record, and not what the local machine was doing.
 
 `STATUS.md`, `PLAN.md` and this rollout note all carried the same wording, and Kody flagged only
@@ -299,7 +299,7 @@ things are true about the guard.  The package's exports map `react-server` to `.
 Component module" while `node --conditions=react-server` loads clean — and a production build
 still succeeds in the throwing case, because the failure happens at module-evaluation time, so a
 green CI run proves nothing about the guard in either direction.  The guard was also never earning
-anything where it stood:  middleware is a server entry point compiled only for the edge runtime,
+anything where it stood: middleware is a server entry point compiled only for the edge runtime,
 so no Client Component can import it.  And the repo's vitest config aliases `server-only` to a
 mock, so the unit tests could not have caught a mistake in either direction.  The guard stays on
 the credential-reading modules under `src/lib` and `app/api/*/route.ts` that a client bundle could
@@ -308,14 +308,14 @@ genuinely pull in.
 ### 14. The records still claimed the guard was in the file, and the recorded build predated its removal
 
 Kody's sixth-round finding caught exactly that, and it was real.  Four places in the records this
-diff ships still asserted that `middleware.ts` carries the guard:  the fourth-round entry in
+diff ships still asserted that `middleware.ts` carries the guard: the fourth-round entry in
 `STATUS.md`, the fourth-round entry in this note, the fourth-round paragraph in `PLAN.md`, and
 the recorded build evidence below.  The recorded `npm run build` succeeded against the file
 *with* the guard, so "80 tests green / build succeeded" described a file state that no longer
 exists, and anyone auditing the middleware's client-bundle boundary from these records would have
 got the wrong answer.  All four now say the guard was deliberately taken back out, carry the
 rationale, and label the recorded build as predating the removal.  The general lesson is the one
-this effort has already paid for once:  when a review round reverses an earlier round's fix, the
+this effort has already paid for once: when a review round reverses an earlier round's fix, the
 records that describe the earlier fix are part of the change, not commentary on it.
 
 ## Review Findings, Seventh Round
@@ -337,7 +337,7 @@ congress-trading-shared are all on `c97a2dae`, the copy vendored inside Congress
 `a652e467` and also carries the fix, and `fleetlink-legacy` has no `autofix.yml` on `main`.
 
 The sweep was reported as AFC-451 and the Socratic-Trade half as ST-4569.  Neither was claimed or
-executed by this seat:  the coordinator repo belongs to CLAUDE and the sweep spans seven repos
+executed by this seat: the coordinator repo belongs to CLAUDE and the sweep spans seven repos
 across other teams.  The Socratic-Trade half landed through the repository's own autofix path, as
 PR #4905, merged as `308d3f256`, and both issues are closed as already-landed.
 
@@ -345,7 +345,7 @@ PR #4905, merged as `308d3f256`, and both issues are closed as already-landed.
 
 `auto-merge / arm` passed `--delete-branch`, which GitHub rejects when a merge queue is enabled
 on the branch.  `main` already carried a merge-queue arm for that workflow and the check passes
-there;  the arming path was corrected in PR #4893, which is merged, and the check is green on this
+there; the arming path was corrected in PR #4893, which is merged, and the check is green on this
 branch.
 
 ## A Finding Of This Effort's Own That Did Not Hold
@@ -355,7 +355,7 @@ branch.
 This note originally claimed that a docs-only head can never report the required `verify` check,
 and that a manual `workflow_dispatch` re-kick had to be dispatched by hand on every docs-only
 head.  That claim was wrong, and it was this seat's error.  The `verify` job is gated on
-`if: ${{ !cancelled() }}` (ci.yml:413-418), not on the `classify` outputs;  only `verify-hosted`
+`if: ${{ !cancelled() }}` (ci.yml:413-418), not on the `classify` outputs; only `verify-hosted`
 (ci.yml:275) and `verify-ios` (ci.yml:407) are gated behind `docs-only != 'true'`.  On the
 docs-only path the gate script exits 0 and reports "RESULT: PASS — docs-only diff — gate skipped by
 path filter" (ci.yml:443-446), and `test/branch-protection-gate.test.ts` pins that behaviour.
@@ -366,12 +366,12 @@ docs-only, and the check-runs on that head SHA report `verify` → `success`, `v
 remember.
 
 The wrong claim was also filed as ST-4568, which is closed as a finding that did not hold.  The
-`workflow_dispatch` lever is real, but it exists for a different edge:  pushes made through the
+`workflow_dispatch` lever is real, but it exists for a different edge: pushes made through the
 cloud git proxy generate no `pull_request` event at all (ci.yml:40-47), so no run attaches `verify`
 to the head SHA.
 
 The correction to this section was made by another seat on this branch, in commit `504af8dc5`, and
-was adopted rather than rewritten.  The transferable lesson is narrow:  a required check that
+was adopted rather than rewritten.  The transferable lesson is narrow: a required check that
 "disappears" is a claim about the workflow's `if` conditions, and a comment above a lever is not
 an `if` condition.  Reading ci.yml is cheap; the comment was read instead.
 
@@ -383,7 +383,7 @@ the PR diff and both cost real time.
 **Docs-only heads still satisfy the `verify` requirement.**  When `classify` reports `docs-only: true` only `verify-hosted` is skipped (ci.yml:275); the `verify` gate itself always runs (`if: ${{ !cancelled() }}`) and its docs-only branch exits 0, reporting "RESULT: PASS — docs-only diff — gate skipped by path filter" (ci.yml:444-446, pinned by `test/branch-protection-gate.test.ts`).  There is no stranded required check on a docs-only head and no re-kick to remember.  The `workflow_dispatch` manual re-kick lever exists for a different edge: pushes made through the cloud git proxy generate no `pull_request` event at all (ci.yml:40-47), so no run attaches `verify` to the head SHA.  Likewise the `merge_group` docs-only=false applies to the queue's own run on its temporary branch, not to the PR head check.
 
 **Unattributed commits need an owner approval, and that is a gate, not a bug.**  The
-`org-default-main-protection` ruleset sets `require_extra_approval_for_unattributed_changes: true`.  Most commits on this branch resolve to the owner through GitHub, but three do not:  one authored by
+`org-default-main-protection` ruleset sets `require_extra_approval_for_unattributed_changes: true`.  Most commits on this branch resolve to the owner through GitHub, but three do not: one authored by
 the MiniMax bot and two contributed by another seat under a local identity, and the API returns
 `author: null` for each of them.  Those commits therefore count as unattributed, and the rule then
 requires an approval from someone with write access.  The other requirements were all satisfied —
@@ -467,7 +467,7 @@ earlier statement that a full run was impractical in this seat's working environ
 and it is corrected here.
 
 - `npx tsc --noEmit` — clean, exit 0.
-- `npx eslint app src test middleware.ts` — exit 0.  The gate fails on errors only;  the
+- `npx eslint app src test middleware.ts` — exit 0.  The gate fails on errors only; the
   grandfathered `@typescript-eslint/no-explicit-any` and `react-hooks/set-state-in-effect`
   backlog is pinned to "warn" in `eslint.config.mjs`.
 - `npx vitest run` — **1 failed, 9,726 passed, 51 skipped across 865 files**, exit 1.  The single
@@ -478,7 +478,7 @@ and it is corrected here.
   `test/event-loop-stall-hot-path.test.ts` nor
   `src/lib/db.ts` is touched by this diff — `git diff origin/main...HEAD --stat` over those two
   paths is empty — so this is an environment-dependent artifact and not a regression from this
-  change.  It is reported as it stands;  the hosted `verify-hosted` job is the gate of record.
+  change.  It is reported as it stands; the hosted `verify-hosted` job is the gate of record.
 - `npm run build` (`next build --webpack`) — **succeeded**, exit 0.
 
 **What that pass covered, stated exactly.**  It ran on the tree carrying this branch's own
@@ -500,7 +500,7 @@ before, measured at 205630 ms this time.  The second is new: `test/data-catalog-
 expected 0 and received 1.
 
 **That second failure is not this diff, and the first account of it was wrong.**  The cause is
-the shared, untracked local database, but not in the way the first account said:  the suite poisons
+the shared, untracked local database, but not in the way the first account said: the suite poisons
 its own database *within a single run*, so the failure is an ordering flake that a clean checkout
 can hit, not merely residue from an earlier run.
 
@@ -523,15 +523,15 @@ DATABASE_URL="file:/tmp/mm-gate3.db" npx vitest run     # 3 failed | 9,730 passe
 sqlite3 /tmp/mm-gate3.db "SELECT COUNT(*) FROM enrichment_coverage_runs;"   # 17 rows, all from this run
 ```
 
-The writer is `test/enrichment-coverage.test.ts`:  a two-file probe over that file and the reader
+The writer is `test/enrichment-coverage.test.ts`: a two-file probe over that file and the reader
 wrote twelve rows, the newest carrying `peRatio` at `fillRate: 1`.  The repo's vitest config runs
 with `maxWorkers: 1`, so the files execute sequentially in one worker process, and
 `process.env.DATABASE_URL` leaks from one file to the next inside that process.  Whether the reader
 sees a populated universe therefore depends on which file ran first and, because the persist is
 fire-and-forget, on whether the write landed before the next file began.  A file that runs before
-the writer passes;  the same file running after it fails.
+the writer passes; the same file running after it fails.
 
-That makes it a within-run ordering flake, and a clean checkout can hit it:  the hosted run has not,
+That makes it a within-run ordering flake, and a clean checkout can hit it: the hosted run has not,
 but it has not been shown to be immune, so "CI is green" is not evidence against this class of
 failure.  The code itself is sound — with a fresh database the file passes 4 of 4 on its own:
 
@@ -545,10 +545,10 @@ DATABASE_URL="file:/tmp/mm-fresh-app.db" npx vitest run test/data-catalog-comple
 
 This is filed as ST-4570 with the root cause and a recommended fix.  It is deliberately kept out of
 this diff rather than widening a public-pages change into shared test infrastructure, and it has
-been raised from P2 to P1 on the corrected evidence and claimed:  the fix is on its own branch off
+been raised from P2 to P1 on the corrected evidence and claimed: the fix is on its own branch off
 `origin/main` as [PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911), so it
 carries no unattributed commit and needs no owner approval to land.  Three files could reach the
-persistence path without owning a database, and they are the ones changed there:  the reader owns
+persistence path without owning a database, and they are the ones changed there: the reader owns
 its database per test, and the two writers own theirs for the whole file, because the persist is a
 fire-and-forget dynamic import that can resolve after the test that triggered it has finished.
 
@@ -557,11 +557,11 @@ Re-verified after the fourth review round (findings 10 and 11 above), on the sam
 - `npx tsc --noEmit` — clean, exit 0.
 - `npx eslint middleware.ts test/middleware-auth-secret.test.ts` — 0 errors, 0 warnings.
 - `npx vitest run` over all nine affected files — **80 tests green, exit 0**, the same set and the
-  same count as the third round:  the whitespace-only case changed what the verifier is handed, not
+  same count as the third round: the whitespace-only case changed what the verifier is handed, not
   how many cases there are.
 - `npm run build` (`next build --webpack`) — **succeeded**, exit 0.  This run was against the file
   *with* the `server-only` guard, so it is evidence about that state and not about the file this
-  diff ships;  the guard was taken back out afterwards (finding 13).  What it did prove is that
+  diff ships; the guard was taken back out afterwards (finding 13).  What it did prove is that
   the guard compiles in the middleware bundle, which the unit tests cannot, since the repo's
   vitest config aliases `server-only` to a mock.  The build prints the route table, middleware
   included, and exits clean.
@@ -591,7 +591,7 @@ holds read-only access to the per-variant state.
 - **The Autofix check on this pull request failed five times before the org secret's selection was
   widened, and it is not a required check.**  `autofix` is not in the required status check list on
   `main` (`verify` and `gitleaks` are), so it never gated this merge.  Every failing run was
-  bot-authored and every one of them predates the secret's last change;  the first bot-authored run
+  bot-authored and every one of them predates the secret's last change; the first bot-authored run
   after it is green, in this repository and in the two other repositories used as controls.  The
   re-check on this pull request comes with the next bot-authored event, which is the review bot's
   re-review after the next push.
