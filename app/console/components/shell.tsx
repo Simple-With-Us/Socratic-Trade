@@ -34,10 +34,10 @@ import {
 } from "./chrome";
 import { CommandPalette, CommandPaletteTrigger } from "./command-palette";
 import { ConsentGate } from "./consent-gate";
-import { ConsoleIntro } from "./intro-canvas";
+import { BrandIntro } from "../../ui/brand/intro-canvas";
 import { HeaderLogo } from "../ui/header-logo";
-import { WORDMARK_AR } from "../ui/candle-ticker";
-import { getIntroPhase, subscribeIntroPhase, type IntroPhase } from "../ui/intro-bus";
+import { WORDMARK_AR } from "../../ui/brand/candle-ticker";
+import { getIntroPhase, subscribeIntroPhase, type IntroPhase } from "../../ui/brand/intro-bus";
 import { DesktopRail, MobileTabBar, destinationLabel } from "./nav";
 import { NotificationInbox } from "./notification-inbox";
 import { Btn } from "../ui/primitives";
@@ -165,7 +165,7 @@ function ShellFrame({ children }: { children: ReactNode }) {
             the animation plays on a clean backdrop (owner request). LoadingBrand
             shows a small STATIC candlestick mark only when the intro is skipped
             (returning tab / reduced motion), so those loads aren't a blank flash. */}
-        <ConsoleIntro />
+        <BrandIntro />
         <LoadingBrand />
         {/* The visual load screen is deliberately wordless, which left screen-reader users
             with nothing at all — no heading, no landmark, no announcement, just an empty
@@ -235,7 +235,7 @@ function ShellFrame({ children }: { children: ReactNode }) {
       <a href="#console-main" className="con-skip-link">
         Skip to content
       </a>
-      <ConsoleIntro />
+      <BrandIntro />
       {/* ToastProvider must live INSIDE .console-root: it renders the .con-toasts
           viewport as its last child, and the --con-* design tokens (colors, radii,
           shadows) are scoped to .console-root — a toast mounted outside it would

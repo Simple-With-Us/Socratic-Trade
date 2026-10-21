@@ -2658,17 +2658,197 @@ the budget was widened rather than bounded.  Separate, code-free: production APN
 root-caused to a stale `APNS_P8` paired against the wrong Key ID, fixed in Infisical and activated by
 a container restart.
 
+## 2026-10-19 — [MM] Public Framework pages (branch `minimax/st-4565-public-framework-pages`)
+
+Not a scope change: a public-surface change the owner asked for as one piece.  `/framework` is
+expanded (content 270 → 425 lines, viewer 240 → 369, with the seven decision questions, the
+plain-language Observe/Argue/Decide/Act/Explain/Learn loop, the decision case file, the authority
+list, four outcome-review lenses, and an operational-resilience section from
+`docs/trading-framework.md`).  `/how-it-works` is retired into it — its content is fully superseded
+and the route is now a 308, so inbound links still reach the content — and `/strategy` points
+straight at `/framework` in one hop.  The Welcome page's button reads "Framework" and links there.
+
+The public surface is now one shell rather than four near-copies: `/welcome`, `/framework`, and the
+two legal pages all render through `PublicShell`, which is what actually guarantees the owner's
+"animated app name in the same place regardless of which public page you are on" requirement.  A
+source-level test fails the build if a public page grows its own header.  The console's intro canvas
+moved to `app/ui/brand/intro-canvas.tsx` and was **parameterized, not duplicated** — one animation,
+two variants, each with its own module state and its own `sessionStorage` key, so the public splash
+never consumes the console's one-shot splash.  The public header's geometry comes from shared
+constants in `app/ui/brand/public-geometry.ts`, not Tailwind classes, because the animation computes
+its landing box in JavaScript from those same constants.
+
+Routing: the apex `/` sends an anonymous visitor to `/welcome` and a signed-in operator to
+`/console`; `socratic.trade` 308s to `socratictrade.com`, exempting `/api/*` and the Apple
+associated-domain file.  That alt-domain forward is **anonymous traffic only** — a signed-in
+operator stays on the alt host, because the session cookie is host-only and the two domains are
+unrelated, so the canonicalization hop would otherwise drop the session.  `/framework` keeps its
+anti-scraping architecture unchanged — server-only
+content module, UA gate on the page and the content API, `noindex`/`noai`/`TDMRep`, sitemap
+exclusion, edge WAF — because linking it from Welcome does not require un-gating it.  `/welcome`
+remains the indexable SEO surface.
+
+Two traps closed rather than shipped: the header row was a `min-h-8` inside a vertical pad, so a
+page with no header action would have collapsed it and shifted the wordmark 5px off the animation's
+landing target (now pinned to `PUBLIC_ROW_H`, with a test); and the public brand is CSS-sized rather
+than canvas-sized on mount, so the first paint is already correct and the candles land on the
+wordmark instead of beside it.  One gate failure caught and fixed: parameterizing the intro canvas
+put the per-variant state behind a render-scope local that the effect mutated, which the React
+Compiler rejects as an error — every write now goes through module-scope functions.
+
+Verified in the lane: `npx tsc --noEmit` clean, `npx eslint` 0 errors on every changed file, and the
+nine affected vitest files green (80 tests, exit 0): `public-site-routing` (22),
+`copy-rules-lint` (17), `candle-ticker-raf-resilience` (9), `framework-page` (9),
+`framework-hash-target` (6), `security-headers` (6), `public-sentence-gap` (4),
+`middleware-auth-secret` (4), `how-it-works-redirect` (3).  The full suite is CI's job — a
+local full run was impractical in this seat's working environment, so it is not claimed here.  The
+production build was run locally after the fourth review round and succeeded; the unit tests cannot
+show that a bundler export condition holds, because the repo's vitest config aliases `server-only`
+to a mock, which is why the guard was taken back out of `middleware.ts` rather than kept on the
+strength of a green test run.  The first hosted `verify-hosted` run failed on the repo's own
+copy-rule lint: 22 sentence-gap violations in the new public copy, because two literal ASCII spaces
+collapse in the browser.  Fixed with the repo's own NBSP idiom and the sanctioned fixer, and the
+re-run is the gate of record.  Swift compilation is CI-only; the only Swift changes are comments.  Rollout:
+`docs/rollouts/2026-10-19-public-framework-pages.md`.  A second review round came back with six threads; five were real and are fixed — the alt-domain
+308 dropped a live session and skipped the security headers, the public host sets were written out
+twice, a framework deep link did not scroll, and the rollout doc named a lane path.  The sixth
+concerned the apex redirect that the first round had already fixed.  All six threads are answered
+and resolved.
+
+A third review round came back with two threads, both real and both fixed.  The two verification
+records contradicted each other — the first round counted six affected files and the second counted
+five, with different file lists, so neither total covered the affected set; the complete set is
+nine files, and it has been re-run together and per file with every file exiting 0.  And the
+middleware handed the session verifier an empty string when `AUTH_SECRET` was unset, which made a
+missing secret look like a failed cookie; the secret is now read once and used only when it is
+set, and a new test proves the verifier never receives a placeholder credential.  The missing-secret
+case in a live boot is surfaced by the existing startup guard, and a Cloudflare-Access-only
+deployment has no `AUTH_SECRET` by design, so the middleware does not throw for it.
+
+A fourth review round came back with two threads, both real and both fixed.  The middleware read
+`AUTH_SECRET` without the `import "server-only";` guard that keeps a credential out of a client
+bundle; the guard was added as the first import in the file, and a later review round reversed
+that, so the guard is now deliberately out of `middleware.ts` again with the rationale in the file
+itself — middleware is a server entry point compiled only for the edge runtime, so no Client
+Component can import it, and the guard stays on the credential-reading modules under `src/lib`
+and `app/api/*/route.ts`.  The production build recorded below was run against the file with the
+guard, so it describes that state and not the file this change ships.  And the secret was read two
+different ways in the same file: the alt-domain hop trimmed it while `isAuthConfigured()` and the
+canonical-host path read the raw value, so a whitespace-only secret read as configured everywhere
+except in that one hop, which then forwarded the operator to a host where the host-only cookie does
+not apply and dropped the session.  The raw value is now the single source of truth, so an empty
+string is still never handed to the verifier and a configured secret passes through unchanged.
+
+Rollout: `docs/rollouts/2026-10-19-public-framework-pages.md`.
+
+## 2026-10-21 — [MM] Public Framework pages (branch `minimax/st-4565-public-framework-pages`)
+
+The scope of this effort did not change: `/framework` expanded, `/how-it-works` retired, one
+shared public shell, the apex routed to `/welcome`, and the alt domain forwarded to the main
+domain.  Three things about how it lands did change, and they are recorded here because each one
+changes what a reader of this plan should expect.
+
+**The branch was reconciled rather than force-pushed.**  Another seat pushed two commits to this
+branch while the effort was in flight — a docs correction to the rollout note and a merge of
+`origin/main`.  Both were adopted instead of overwritten, and this seat's own redundant merge was
+dropped in their favour, because its content was already contained in theirs.  The branch was then
+merged forward onto the current `main`, so it carries the Autofix pin bump that landed there.
+Head is `f6949bea9`.
+
+**One repo finding from this effort was withdrawn.**  The claim that a docs-only head can never
+report the required `verify` check was wrong: the `verify` gate runs on
+`if: ${{ !cancelled() }}` and exits 0 on the docs-only path, and only `verify-hosted` and
+`verify-ios` are gated behind `docs-only != 'true'`.  A real docs-only head settles it — PR #4875
+changed one file, and its check-runs report `verify` → success.  ST-4568 is closed as wontfix
+with that evidence, and the rollout note, the Linear comment, the Zulip post, and the Apple Note
+all carry the correction.  The lesson for any future effort in this repo is the method rather than
+the fact: a required check that "disappears" is a claim about a job's `if` condition, so read the
+condition and, better, read a real run.
+
+**Two repo bugs found along the way are now fixed on `main`.**  The fleet-wide PR Autofix failure
+was a stale reusable pin (`pr-autofix-reusable.yml` pinned below its own `--verbose` fix), and
+the Socratic-Trade half landed as PR #4905.  The `auto-merge / arm` workflow's `--delete-branch`
+under a merge queue was fixed in PR #4893.
+
+**What is left.**  Jay's APPROVED review on PR #4889, which the
+`require_extra_approval_for_unattributed_changes` ruleset condition requires, because three commits
+on the branch carry an author GitHub cannot attribute to an account.  Auto-merge is armed, so the
+merge fires on the approval.  After it lands: verify the deployed SHA against production, close
+ST-4565 out, and delete the remote branch.
+
+## 2026-10-21 [MM] Verification state and the org-secret fix
+
+**The full local gate ran, end to end, on the pre-`origin/main`-merge tree.**  `tsc` 0, `eslint` 0,
+`npm test` 9,726 passed / 51 skipped / 1 failed across 865 files, `npm run build` succeeded.  The
+single failure is `test/event-loop-stall-hot-path.test.ts`, a wall-clock assertion that a no-op
+prune stays under 100ms and that measures 162s in the local execution environment; neither it nor
+`src/lib/db.ts` is touched by this diff, so it is an environment-dependent artifact and not a
+regression from this change.  The hosted `verify-hosted` job is the gate of record, as it always
+was.  A second pass on the merged head is recorded below, in this same file.
+
+**The Autofix failure had a second cause beyond the stale pin, and it lived in org configuration
+rather than in any repository.**  An org-wide Actions *variable* retargets every repository at
+once, but an org *secret* with `selected` visibility applies only to the repositories on its
+list, so the two scopes disagreed and the job failed everywhere except four repositories.  The
+secret's selection was widened to the sixteen consumer repositories that consume the reusable,
+which touches no credential value, and the fix is confirmed in this repository by a green run on
+PR #4908.  The re-check on this pull request comes with the next bot-authored event.
+
+**What is left.**  Unchanged: Jay's APPROVED review on PR #4889, which the
+`require_extra_approval_for_unattributed_changes` ruleset condition requires, because three
+commits on the branch carry an author GitHub cannot attribute to an account.  Auto-merge is
+armed, so the merge fires on the approval.  After it lands: verify the deployed SHA against
+production, close ST-4565 out, and delete the remote branch.
+
+## 2026-10-21 [MM] Second gate pass, the failure it found, and the Autofix re-check
+
+**The second full local gate ran on the merged head and produced a second failure.**  `tsc` 0,
+`eslint` 0, `npm test` 2 failed / 9,731 passed / 51 skipped across 865 files, `npm run build`
+succeeded.  One failure is the known wall-clock assertion in
+`test/event-loop-stall-hot-path.test.ts`, whose measured time varies with the execution
+environment.  The other is new, and it is not this diff: the shared, untracked `data/app.db` holds
+enrichment coverage rows that the suite itself wrote, and `src/lib/data-completeness.ts` reads the
+newest one back and uses its fill rate as a field's completeness.
+
+**A third gate pass against a database that did not exist when the suite started falsified the
+first account of that failure.**  The same test failed again, and the new file had collected
+seventeen coverage rows by the end of that one run, so the suite poisons its own database within a
+single run.  The writer is `test/enrichment-coverage.test.ts`, the vitest config runs with
+`maxWorkers: 1`, and `process.env.DATABASE_URL` leaks from one file to the next inside that worker
+process, so it is a within-run ordering flake that a clean checkout can hit, not merely leftover
+state from an earlier run — and the hosted run has not been shown to be immune to it.  With a fresh
+database the file passes 4 of 4 on its own, and the branch diff touches none of the implicated
+files.  Filed as ST-4570, raised from P2 to P1 on the corrected evidence, and claimed by this
+seat.  It is kept out of this diff on purpose so a public-pages change does not widen into shared
+test infrastructure: the fix is on its own branch off `origin/main` as
+[PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911), where it carries no
+unattributed commit and needs no owner approval to land.
+
+**The Autofix re-check on this pull request is now green.**  PR Autofix run 39617911851 concluded
+`success` on PR #4889 with the Meta token populated, and Claude Code Autofix run 39618102908
+concluded `success`.  Kody's re-review on this head found no issues, and the hosted `verify-hosted`
+job is green.
+
+**What is left.**  Unchanged: Jay's APPROVED review on PR #4889, which the
+`require_extra_approval_for_unattributed_changes` ruleset condition requires, because three commits
+on the branch carry an author GitHub cannot attribute to an account.  No author was rewritten and no
+bot was used to satisfy it.  Auto-merge is armed, so the merge fires on the approval.  After it
+lands: verify the deployed SHA against production, close ST-4565 out, and delete the remote
+branch.
 ## 2026-10-21 — [MM] Test-database isolation for the enrichment coverage writers (ST-4570)
 
-Not a scope change:  a test-isolation defect fix.  The local vitest suite no longer writes
+Not a scope change: a test-isolation defect fix.  The local vitest suite no longer writes
 enrichment coverage rows into the checkout's own untracked `data/app.db`, and
 `test/data-catalog-completeness.test.ts` no longer depends on the order the test files run in.
 Three files that could reach the persistence path without owning a database now own one, which is
 what `test/reindex-all.test.ts:8` already states as the repo convention and what 458 of the 854
-test files already do.  No production code changed and no test assertion was weakened:  the reader's
-empty-universe premise is now true by construction rather than by luck.
+test files already do.  No production code changed and no test assertion was weakened: the reader's
+empty-universe premise is now true by construction rather than by luck.  The change itself is not
+in this diff: it is [PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911), merged
+to `main` as `a947fa125` on 2026-10-21, so this entry records the state of `main` after that merge
+rather than anything this branch carries.
 
-The detail that shaped the change:  the persistence is a fire-and-forget dynamic import, so it can
+The detail that shaped the change: the persistence is a fire-and-forget dynamic import, so it can
 resolve after the test that triggered it has finished.  Restoring the database path per test is
 therefore the wrong shape for a writer, even though it is the right shape for a reader, and the
 writer files hold their path for the whole file instead.  That was measured, not assumed.
