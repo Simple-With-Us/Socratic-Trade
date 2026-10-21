@@ -84,6 +84,13 @@ describe("serving-thread sqlite stalls mapped from 2026-10-05 profiles", () => {
     // That is what is asserted here, on a thousand aged rows, in
     // milliseconds.
     //
+    // The counts are scoped to this test's own rows rather than to the whole
+    // task_journal table.  The suite shares one SQLite database, so a global
+    // COUNT(*) can move under an unrelated writer and fail this guard for a
+    // reason that has nothing to do with the hook.  Both counts are also
+    // bracketed by a control assertion on the aged fixture, so a missing
+    // fixture cannot make them match on an empty table.
+    //
     // The rest of the guard lives where it belongs: the source-level
     // no-DELETE check is in test/forever-retention-no-age-delete.test.ts,
     // the keep-all-rows contract is in test/task-journal.test.ts, and the
@@ -102,9 +109,23 @@ describe("serving-thread sqlite stalls mapped from 2026-10-05 profiles", () => {
         n += 1;
       }
     })();
-    const before = db.prepare("SELECT COUNT(*) AS c FROM task_journal").get() as { c: number };
+    const countProbeRows = db.prepare(
+      "SELECT COUNT(*) AS c FROM task_journal WHERE task_name = 'stall-probe'"
+    );
+    const countAgedProbeRows = db.prepare(
+      "SELECT COUNT(*) AS c FROM task_journal WHERE task_name = 'stall-probe' AND started_at = ?"
+    );
+    const before = countProbeRows.get() as { c: number };
+    const agedBefore = countAgedProbeRows.get(aged) as { c: number };
+    // Control: the fixture this guard reads has to be there.  Without it both
+    // counts could sit at zero, match, and let the guard pass on an empty
+    // table without the hook ever being exercised.
+    expect(before.c).toBeGreaterThanOrEqual(1_000);
+    expect(agedBefore.c).toBeGreaterThanOrEqual(1_000);
     expect(pruneTaskJournal()).toBe(0);
-    const after = db.prepare("SELECT COUNT(*) AS c FROM task_journal").get() as { c: number };
+    const after = countProbeRows.get() as { c: number };
+    const agedAfter = countAgedProbeRows.get(aged) as { c: number };
+    expect(agedAfter.c).toBe(agedBefore.c);
     expect(after.c).toBe(before.c);
   });
 
