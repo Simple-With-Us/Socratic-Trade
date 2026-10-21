@@ -7223,3 +7223,27 @@ Rollout: `docs/rollouts/2026-10-21-st-4570-suite-db-isolation.md`.
 **Verification.**  Fails-first proof by mutant:  re-enabling the retired aged-row DELETE inside `pruneTaskJournal` made the new case fail with `AssertionError: expected 1000 to be +0` at the assertion, not by timing out.  The mutant was reverted and `src/lib/db-task-journal.ts` was confirmed byte-identical to `HEAD`.  Local gate on the branch `minimax/st-4550-stall-test-guard`:  `npm run lint` 869 warnings and 0 errors, `npx tsc --noEmit` exit 0, `npm test` 860 test files passed and 1 skipped with 9,696 tests passed and 51 skipped and 0 failed in 2355.68s, `npm run build` exit 0.
 
 **Next.**  Land the pull request once the required `verify` gate is green, then close ST-4564 as a duplicate of ST-4550, because the two rows describe the same file and the same defect.  Rollout: `docs/rollouts/2026-10-21-st-4550-stall-test-guard.md`.
+## 2026-10-21 [MM] ST-4571 — the suite's shared database stays clean, and no test file clears the run's path
+
+**What.**  The residual of ST-4570 is closed.  A full local suite run no longer leaves enrichment
+coverage rows in the run's shared database, and `test/enrichment-coverage-persistence.test.ts`
+saves and restores the run's database path instead of deleting it.
+
+**The two offenders are named, not inferred.**  The first account of the residual read the row
+payloads and concluded that provider tests were responsible.  Running each candidate file on its
+own against a fresh database and counting the rows names them exactly: `test/market-dynamic-universe.test.ts`
+writes three and `test/provenance-stamps.test.ts` writes one, which is the four a full run leaves.
+Neither is a provider test.  The first reaches the cascade through `scanMarket()`, which calls
+`getEnrichmentProvider()` and then `provider.enrich()`; the second constructs a
+`CascadingEnrichmentProvider` directly.
+
+**Why deleting the path is the worse half.**  `databasePath()` falls back to `file:./data/app.db`
+when `DATABASE_URL` is unset, so a cleanup that deletes the variable does not merely fail to own a
+database — it hands the next file in the worker the checkout's own application database, and a
+late fire-and-forget persist lands there.
+
+Both writer files hold their database path for the whole file, the shape ST-4570 established.
+`npx tsc --noEmit` exits 0 and `npx eslint` over the three changed files exits 0.  No production
+code changed.
+
+Rollout: `docs/rollouts/2026-10-21-st-4571-suite-db-hygiene.md`.
