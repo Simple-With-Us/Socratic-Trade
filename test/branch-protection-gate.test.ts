@@ -266,4 +266,33 @@ describe("required contexts are not renamed out from under the ruleset", () => {
     const gate = readFileSync(join(repoRoot, "scripts", "pr-touches-codeowners-paths.sh"), "utf8");
     expect(gate).toContain("CODEOWNERS");
   });
+
+  it("does not ask the armer to delete the branch while the merge queue is on", () => {
+    // The merge queue is on (repo ruleset 17945518) and GitHub refuses
+    // `--delete-branch` when a queue is enabled: "Cannot use -d or --delete-branch when
+    // merge queue enabled". The armer passed the flag anyway, so its arm step exited 1
+    // and the "Auto-merge PRs" check was red on every PR in this repo - arming never
+    // happened for a PR that was not already armed. The queue's own "delete head
+    // branches" setting owns that job (ST-4566), so the caller must not ask for it.
+    // Scope to the caller's auto-merge job and anchor to real input keys, so a
+    // prose comment mentioning delete_branch can neither satisfy the positive
+    // assertion nor trip the negative one (Kody review, PR #4893).
+    const auto = workflow("auto-merge-prs.yml");
+    const job = jobBlock(auto, "auto-merge");
+    expect(job).toMatch(/^\s+delete_branch:\s*false\s*$/m);
+    expect(job).not.toMatch(/^\s+delete_branch:\s*true\s*$/m);
+    // The shared-dependency armer is a shell step, not the reusable: its gh CLI
+    // call must not pass --delete-branch either - the same refusal applies, and
+    // its `|| echo` would swallow the failure and leave the PR never armed.
+    const shared = workflow("auto-merge-shared-dependency.yml");
+    const sharedJob = jobBlock(shared, "auto-merge");
+    // Normalize before asserting: a prose comment must not satisfy the
+    // control, and a shell line continuation must not hide --delete-branch
+    // from the scan (Kody review, PR #4893).
+    const normalized = withoutComments(sharedJob).replace(/\\\n\s*/g, " ");
+    // Control: the negative assertion is vacuous if the job lookup missed, so
+    // first prove the armer's merge command is actually in the block.
+    expect(normalized).toContain("gh pr merge");
+    expect(normalized).not.toMatch(/gh pr merge[^\n]*--delete-branch/);
+  });
 });
