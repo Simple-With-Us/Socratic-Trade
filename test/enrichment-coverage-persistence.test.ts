@@ -1,11 +1,11 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   __resetEnrichmentCoverageForTests,
   buildEnrichmentCoverageReport,
-  COVERAGE_RETIRED_LANE_FIELDS,
   getLastEnrichmentCoverageReport,
   type EnrichmentCoverageRecord
 } from "../src/lib/enrichment-coverage";
@@ -18,23 +18,38 @@ import {
 } from "../src/lib/db-enrichment-coverage";
 import { resetDbForTesting } from "../src/lib/db";
 
-let dbPath: string;
+// Every call to buildEnrichmentCoverageReport persists a coverage report, so this file needs a
+// database of its own.  The path is held for the whole FILE because the persist is a
+// fire-and-forget dynamic import, so it can resolve after the test that triggered it has
+// finished.  The run's own database path is saved and restored rather than deleted, because
+// deleting it hands the next file in the worker the checkout's default database.
+const dbDir = mkdtempSync(join(tmpdir(), `enrich-cov-persist-${randomUUID()}-`));
+const prevDb = process.env.DATABASE_URL;
+process.env.DATABASE_URL = `file:${join(dbDir, "app.db")}`;
+
+beforeAll(() => {
+  resetDbForTesting();
+});
+
+afterAll(() => {
+  resetDbForTesting();
+  if (prevDb === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = prevDb;
+  try {
+    rmSync(dbDir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+});
 
 beforeEach(() => {
   __resetEnrichmentCoverageForTests();
-  resetDbForTesting();
-  dbPath = join(mkdtempSync(join(tmpdir(), "enrich-cov-")), "app.db");
-  process.env.DATABASE_URL = `file:${dbPath}`;
-});
-
-afterEach(() => {
+  // Each test starts from an empty coverage store, so the run counts it asserts are its own runs.
   try {
     __clearEnrichmentCoverageStoreForTests();
   } catch {
-    /* db may already be torn down */
+    /* the store may not exist yet */
   }
-  resetDbForTesting();
-  delete process.env.DATABASE_URL;
 });
 
 describe("enrichment coverage persistence", () => {
