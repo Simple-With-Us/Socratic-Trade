@@ -28,6 +28,7 @@ on:
       - '.github/workflows/ios-ship.yml'
       - 'scripts/ios-ship-testflight.sh'
       - 'scripts/ios-appstore-gm-prepare.sh'
+      - 'scripts/ios-asc-key-env.sh'
       - 'scripts/ios-stage-asc-key.sh'
       - 'scripts/ios-install-appstore-profiles.sh'
       - 'scripts/ios-collect-ship-logs.sh'
@@ -222,8 +223,13 @@ jobs:
               printf '%s=%s\n' "$name" "$val" >> "$GITHUB_ENV"
             fi
           done
-          # Keep multiline PEM out of GITHUB_ENV and every later step environment.
-          # Only its mode-600 file path crosses the step boundary.
+          # The key material is fetched here and never leaves this step:  the
+          # environment file must not hold key material (the staging script
+          # publishes only its path).  The steps that call the client fetch
+          # the key themselves, in their own step, through
+          # scripts/ios-asc-key-env.sh, and hand it to the client in the
+          # environment:  a path on disk is not a credential source
+          # (AFC-459, revision 2).
           key_material="$(
             INFISICAL_TOKEN="$TOKEN" infisical secrets get ASC_KEY_P8 \
               --plain --silent --telemetry=false --expand=false \
@@ -316,13 +322,21 @@ jobs:
           IOS_TF_RELEASE_NOTES: "1"  # Jay 2026-09-08: publish ASC What to Test
           IOS_MANUAL_SIGN: "1"  # 2026-09-30: App Store profile, no Xcode provisioning service
           EXPORT_ONLY_INPUT: ${{ inputs.export_only }}
+          # The client takes the key from the environment, never from a path
+          # (AFC-459, revision 2), and no key material may cross a step
+          # boundary, so this step fetches the key itself.
+          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
         run: |
           args=()
           if [ "${EXPORT_ONLY_INPUT:-false}" = "true" ]; then
             echo "[ios-ship] export_only=true: archive + export the IPA, no upload"
             args+=(--export-only)
           fi
-          bash scripts/ios-ship-testflight.sh ${args[@]+"${args[@]}"}
+          bash scripts/ios-asc-key-env.sh bash scripts/ios-ship-testflight.sh ${args[@]+"${args[@]}"}
 
       # Archive/export/upload logs are tee'd into the job log, but Xcode's
       # .xcdistributionlogs are not.  Collect both on failure, redact the ASC and

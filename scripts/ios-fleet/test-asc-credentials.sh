@@ -274,6 +274,24 @@ ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer ASC_KEY_P8="not a private key at 
   [[ -z "${ASC_KEY_P8:-}" ]]
 ' || fail "an ASC_KEY_P8 that is not a key was adopted"
 
+# 2c-bis. A PEM stored with literal backslash-n separators is a real key, so
+# the separators become newlines before the module sees the value.  Without
+# this, the key is refused and the run fails closed on a key that is fine.
+literal="$(printf '%s' "$(cat "${tmp}/other.p8")" | sed 's/$/\\n/' | tr -d '\n')"
+: > "$FAKE_LOG"
+ASC_KEY_ID=ENVKEYLIT1 ASC_ISSUER_ID=env-issuer ASC_KEY_P8="$literal" bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  load_secrets
+  [[ "$AUTH_MODE" == api_key && "$ASC_KEY_ID" == ENVKEYLIT1 ]]
+  # The staged file holds a real PEM, with real newlines.
+  grep -q -- "-----BEGIN PRIVATE KEY-----" "$ASC_KEY_PATH" || exit 1
+  head -1 "$ASC_KEY_PATH" | grep -q -- "-----BEGIN PRIVATE KEY-----" || exit 1
+  # And the key the client is handed is the same key.
+  same_file_as_file "$ASC_KEY_PATH" "'"$tmp"'/other.p8"
+  asc_cleanup
+' || fail "a PEM stored with literal backslash-n separators was refused"
+
 # 2d. An ambient ASC_KEY_P8 without a key id is ignored:  the key id, the
 # issuer and the key belong together.
 : > "$FAKE_LOG"
@@ -345,6 +363,20 @@ env -u ASC_KEY_P8 ASC_KEY_ID=ABCDE12345 ASC_ISSUER_ID=issuer-synthetic ASC_KEY_P
   asc_cleanup
 ' || fail "a named key file that names nothing broke the run"
 grep -q '^ASC_KEY_P8 /asc$' "$FAKE_LOG" || fail "fleet-secrets was not consulted for the credential"
+
+# 2j. The hosted workflow hands the key to the step that calls the client in
+# the environment, and the environment file never carries key material.  A
+# path in ASC_KEY_PATH is not a credential source, so a workflow that
+# publishes only the path leaves the ship with no credential and the sequence
+# floor unverifiable.
+workflow="${here}/../../.github/workflows/ios-ship.yml"
+if [[ -f "$workflow" ]]; then
+  grep -q 'scripts/ios-asc-key-env.sh' "$workflow" ||
+    fail "the hosted workflow does not hand ASC_KEY_P8 to the step that calls the client"
+  if grep -q 'ASC_KEY_P8<<EOF' "$workflow"; then
+    fail "the hosted workflow puts key material in the environment file"
+  fi
+fi
 
 # 3. The credential never travels in a command argument.  The secret reaches
 # the child through the environment, so its own argv must not carry it.

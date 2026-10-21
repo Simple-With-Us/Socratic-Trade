@@ -226,12 +226,15 @@ load_secrets() {
       unset ASC_KEY_P8
     else
       rc=0
-      node "${FLEET_DIR}/asc-key.mjs" validate >/dev/null 2>&1 <<< "$ASC_KEY_P8" || rc=$?
+      # A PEM stored with literal backslash-n separators is a real key, so the
+      # separators become newlines before the module sees the value.
+      ambient_pem="${ASC_KEY_P8//\\n/$'\n'}"
+      node "${FLEET_DIR}/asc-key.mjs" validate >/dev/null 2>&1 <<< "$ambient_pem" || rc=$?
       if [[ "$rc" -ne 0 ]]; then
         log "ASC_KEY_P8 is set but does not hold a PEM private key; ignoring it"
         unset ASC_KEY_P8
       else
-        key_pem="$ASC_KEY_P8"
+        key_pem="$ambient_pem"
       fi
     fi
   fi
@@ -263,7 +266,9 @@ load_secrets() {
       log "missing the .p8 for key ${kid}: Infisical /asc ASC_KEY_P8 (the /asc key) or /authkey-<id>-p8 AUTHKEY_<id>"
       return 0
     fi
-    key_pem="$p8"
+    # A PEM stored with literal backslash-n separators is a real key, so the
+    # separators become newlines before the module sees the value.
+    key_pem="${p8//\\n/$'\n'}"
     p8=""
   fi
 
