@@ -7538,3 +7538,27 @@ sentence end with a single space.  Those are the owner's scope rule, where a col
 comma or a dash takes one ordinary space and the gap belongs after `.`, `!` and `?`.  Of the
 forty-one, the thirty-nine scope sites are now one space and the two sentence ends are now two
 spaces, so the two rules are closed by different edits.
+## 2026-10-21 [MM] ST-4571 — the suite's shared database stays clean, and no test file clears the run's path
+
+**What.**  The residual of ST-4570 is closed.  A full local suite run no longer leaves enrichment
+coverage rows in the run's shared database, and `test/enrichment-coverage-persistence.test.ts`
+saves and restores the run's database path instead of deleting it.
+
+**The two offenders are named, not inferred.**  The first account of the residual read the row
+payloads and concluded that provider tests were responsible.  Running each candidate file on its
+own against a fresh database and counting the rows names them exactly: `test/market-dynamic-universe.test.ts`
+writes three and `test/provenance-stamps.test.ts` writes one, which is the four a full run leaves.
+Neither is a provider test.  The first reaches the cascade through `scanMarket()`, which calls
+`getEnrichmentProvider()` and then `provider.enrich()`; the second constructs a
+`CascadingEnrichmentProvider` directly.
+
+**Why deleting the path is the worse half.**  `databasePath()` falls back to `file:./data/app.db`
+when `DATABASE_URL` is unset, so a cleanup that deletes the variable does not merely fail to own a
+database — it hands the next file in the worker the checkout's own application database, and a
+late fire-and-forget persist lands there.
+
+Both writer files hold their database path for the whole file, the shape ST-4570 established.
+`npx tsc --noEmit` exits 0 and `npx eslint` over the three changed files exits 0.  No production
+code changed.
+
+Rollout: `docs/rollouts/2026-10-21-st-4571-suite-db-hygiene.md`.
