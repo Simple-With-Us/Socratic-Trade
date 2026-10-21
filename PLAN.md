@@ -2705,7 +2705,7 @@ production build was run locally after the fourth review round and succeeded; th
 show that a bundler export condition holds, because the repo's vitest config aliases `server-only`
 to a mock, which is why the guard was taken back out of `middleware.ts` rather than kept on the
 strength of a green test run.  The first hosted `verify-hosted` run failed on the repo's own
-copy-rule lint:  22 sentence-gap violations in the new public copy, because two literal ASCII spaces
+copy-rule lint: 22 sentence-gap violations in the new public copy, because two literal ASCII spaces
 collapse in the browser.  Fixed with the repo's own NBSP idiom and the sanctioned fixer, and the
 re-run is the gate of record.  Swift compilation is CI-only; the only Swift changes are comments.  Rollout:
 `docs/rollouts/2026-10-19-public-framework-pages.md`.  A second review round came back with six threads; five were real and are fixed — the alt-domain

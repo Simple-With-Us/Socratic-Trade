@@ -632,7 +632,35 @@ defects of its own — four colons followed by two spaces and one sentence end w
 and the lines this branch added to `STATUS.md` and `PLAN.md` carried thirty-six more of the same
 class.  Those are the owner's scope rule, where a colon, a semicolon, a comma or a dash takes one
 ordinary space and the gap belongs after `.`, `!` and `?`.  All forty-one are now one space, and
-this document audits clean at 162 sentence boundaries with 162 two-space gaps.
+this document audits clean at 168 sentence boundaries with 168 two-space gaps.  That pass did not
+close the class, and the ninth round below closes the last two sites on the branch.
+
+## Review Findings, Ninth Round
+
+### 17. The colon and semicolon class was still open on two lines this branch adds
+
+The eighth-round sweep repaired 41 sites and called the class closed.  It was not closed.  A
+second pass over the same class in this document and in `PLAN.md` found twenty-eight more here
+and three there, and those are one space as well.  A third pass found the last two.
+
+- `PLAN.md` line 2708 carried `copy-rule lint:  22 sentence-gap violations in the new public copy`,
+  where the colon took two spaces.  It takes one space now.  The wording is a paraphrase of the
+  lint output rather than a quote of it, so nothing is falsified by the change.
+- `docs/FEATURE-ENABLEMENT-BACKLOG.md` carried `private deploys. Pages:` in the
+  `LANDING_PAGE_ENABLED` row, where the sentence end took a single space.  It takes two now.  The
+  row already existed on main and this branch added `/framework` to it, so the branch owns the
+  line it rewrites.
+
+The sweep that found these two is deliberately stricter than the one that missed them.  It reads
+the branch's added lines out of the diff rather than reading whole files, so other seats'
+historical rows on main are out of scope.  And it skips a boundary that sits inside an inline code
+span or that is one half of a `??` nullish operator, which is exactly where the earlier pass
+produced its false positives.
+
+With these two closed, every line this branch adds carries the house gap rules.  This document
+audits clean at 168 sentence boundaries with 168 two-space gaps, and the added lines in
+`STATUS.md`, `PLAN.md` and `docs/FEATURE-ENABLEMENT-BACKLOG.md` carry no colon, semicolon, comma
+or dash with two spaces, and no sentence end that is followed by more text without its two spaces.
 
 ## Zero-Code Findings
 
