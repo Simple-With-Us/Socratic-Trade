@@ -1,6 +1,6 @@
 /**
- * Inline SVG diagram of the decision loop: Market scan -> Green team proposes ->
- * Red team challenges -> Policy gate decides -> Broker executes -> Outcomes feed
+ * Inline SVG diagram of the decision loop: Market scan -> Green Team proposes ->
+ * Red Team challenges -> Policy gate decides -> Broker executes -> Outcomes feed
  * learning -> back to scan. Colors come from CSS custom properties (see
  * app/globals.css) so the diagram themes with light/dark automatically. Two
  * layouts share the same node data — a horizontal loop for wider viewports and a
@@ -14,8 +14,8 @@ type LoopNode = {
 
 const LOOP_NODES: LoopNode[] = [
   { lines: ["Market", "scan"] },
-  { lines: ["Green team", "proposes"], tone: "pos" },
-  { lines: ["Red team", "challenges"], tone: "neg" },
+  { lines: ["Green Team", "proposes"], tone: "pos" },
+  { lines: ["Red Team", "challenges"], tone: "neg" },
   { lines: ["Policy gate", "decides"] },
   { lines: ["Broker", "executes"] },
   { lines: ["Outcomes feed", "learning"] }

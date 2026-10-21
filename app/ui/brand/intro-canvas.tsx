@@ -7,11 +7,58 @@
  *  large centered SOCRATIC / TRADE wordmark before a second flight to the header —
  *  is preserved behind CENTER_WORDMARK_STEP below. Phase handoff to the header
  *  chrome (hide the real logo until the candles assemble it, mobile brand row
- *  reveal/slide-away) goes through ../ui/intro-bus.ts. */
+ *  reveal/slide-away) goes through ./intro-bus.ts.
+ *
+ *  TWO VARIANTS, ONE ANIMATION:
+ *  - "console" — the operator console. Backdrop and candle colours come from the
+ *    console's --con-* tokens, the landing target is the console's top-bar brand
+ *    logo, and the measured header top is cached in localStorage (the console's
+ *    RealityBanner can shift the bar down, and the splash cannot know that before
+ *    the bar has mounted).
+ *  - "public" — the public marketing site (/welcome, /framework). Backdrop and
+ *    candle colours come from the public --bg/--pos/--neg tokens, the landing
+ *    target is the public shell's top-left brand wordmark, and nothing is written
+ *    to the console's localStorage cache.
+ *
+ *  Each variant keeps its OWN module state and its OWN sessionStorage key, so the
+ *  public splash and the console splash can never suppress one another. */
 
 import { useEffect, useRef, useState } from "react";
-import { sampleCells, buildTickerUnits, tickerUnitAt, TICKER_GREENS, TICKER_REDS, WORDMARK_AR } from "../ui/candle-ticker";
-import { setIntroPhase } from "../ui/intro-bus";
+import { sampleCells, buildTickerUnits, tickerUnitAt, TICKER_GREENS, TICKER_REDS, WORDMARK_AR } from "./candle-ticker";
+import { setIntroPhase } from "./intro-bus";
+import { PUBLIC_BRAND_MAX_H, PUBLIC_BRAND_MAX_W, publicBrandLeft, publicBrandTop } from "./public-geometry";
+
+/** Which surface the splash is playing on. */
+export type IntroVariant = "console" | "public";
+
+/** Per-variant constants. The session key is what keeps the two one-shot splashes
+ *  independent: the public site must not consume the console's splash (or the
+ *  other way round) just because both were visited in the same tab. */
+const VARIANT_CONFIG: Record<
+  IntroVariant,
+  {
+    sessionKey: string;
+    backdrop: string;
+    posVar: string;
+    negVar: string;
+    cacheHeaderTop: boolean;
+  }
+> = {
+  console: {
+    sessionKey: "st.introShown",
+    backdrop: "var(--con-bg)",
+    posVar: "--con-pos",
+    negVar: "--con-neg",
+    cacheHeaderTop: true
+  },
+  public: {
+    sessionKey: "st.publicIntroShown",
+    backdrop: "var(--bg)",
+    posVar: "--pos",
+    negVar: "--neg",
+    cacheHeaderTop: false
+  }
+};
 
 type Cell = { nx: number; ntop: number; nh: number };
 type Geo = { x: number; bt: number; bb: number; wt: number; wb: number; bw: number; col?: string; up?: boolean };
@@ -38,18 +85,64 @@ type Layout = {
 // TypeScript/ESLint don't flag the preserved branch as unreachable.)
 const CENTER_WORDMARK_STEP: boolean = false;
 
-// shared across mounts so the loading->loaded transition doesn't restart it
-let introStart: number | null = null;
-let introDone = false;
-let MODEL: Model | null = null;
+/** Per-variant splash state. Kept separate so the public site's splash and the
+ *  console's splash are two independent one-shot animations in the same tab. */
+type VariantState = {
+  /** shared across mounts so the loading->loaded transition doesn't restart it */
+  introStart: number | null;
+  introDone: boolean;
+  MODEL: Model | null;
+  /** The eased landing box, persisted so a loading->loaded remount (which re-runs
+   *  the effect) does NOT reset it to null and SNAP to the newly mounted real
+   *  logo — it keeps easing smoothly from wherever the candles were. */
+  introCurHeader: { x: number; y: number; w: number; h: number } | null;
+};
 
-// Chart-phase candle colors follow the live console theme (--con-pos/--con-neg),
-// read via getComputedStyle when the animation starts (the canvas API can't
-// resolve CSS var() strings itself). The hex literals are only the last-resort
-// defaults for the moment before the theme can be read. Module-scoped (not baked
-// into the cached MODEL) so candleAt reads the freshly-resolved values.
-let CHART_POS = "#059669";
-let CHART_NEG = "#dc2626";
+const VARIANT_STATE: Record<IntroVariant, VariantState> = {
+  console: { introStart: null, introDone: false, MODEL: null, introCurHeader: null },
+  public: { introStart: null, introDone: false, MODEL: null, introCurHeader: null }
+};
+
+/** Per-variant state writers — module-scope functions ON PURPOSE.
+ *
+ *  The console's original splash kept this state in module-level `let` bindings
+ *  (`introDone`, `MODEL`), and the React Compiler was happy with an effect
+ *  writing them. Holding the same state in an object and aliasing it into the
+ *  component (`const state = VARIANT_STATE[variant]`) turned those writes into
+ *  mutations of a variable captured from RENDER scope, which the compiler
+ *  rejects outright: "Cannot modify local variables after render completes"
+ *  (eslint error, not a warning — it failed the `verify` gate).
+ *
+ *  Routing every write through a module function keeps the per-variant state in
+ *  one place and leaves the effect with read-only access to it, which is the
+ *  shape the compiler accepts.
+ */
+function markIntroDone(variant: IntroVariant): void {
+  VARIANT_STATE[variant].introDone = true;
+}
+function setIntroModel(variant: IntroVariant, model: Model): void {
+  VARIANT_STATE[variant].MODEL = model;
+}
+function setIntroStart(variant: IntroVariant, ts: number): void {
+  VARIANT_STATE[variant].introStart = ts;
+}
+function setIntroCurHeader(
+  variant: IntroVariant,
+  box: { x: number; y: number; w: number; h: number }
+): void {
+  VARIANT_STATE[variant].introCurHeader = box;
+}
+
+/** Chart-phase candle colors follow the live theme (--con-pos/--con-neg on the
+ *  console, --pos/--neg on the public site), read via getComputedStyle when the
+ *  animation starts (the canvas API can't resolve CSS var() strings itself). The
+ *  hex literals are only the last-resort defaults for the moment before the
+ *  theme can be read. Per variant, and NOT baked into the cached MODEL, so
+ *  candleAt reads the freshly-resolved values. */
+const CHART_COLORS: Record<IntroVariant, { pos: string; neg: string }> = {
+  console: { pos: "#059669", neg: "#dc2626" },
+  public: { pos: "#15803d", neg: "#e11d48" }
+};
 
 // Top safe-area inset in CSS px. The page is viewport-fit=cover (app/layout.tsx), so in a
 // home-screen/standalone install the top bar — and therefore the wordmark's landing box — sits
@@ -68,12 +161,13 @@ function readSafeAreaTop() {
     if (Number.isFinite(v) && v >= 0 && v <= 200) SAFE_TOP = v;
   } catch { /* keep 0 */ }
 }
-function readIntroColors(el: HTMLElement) {
+function readIntroColors(el: HTMLElement, variant: IntroVariant) {
   const styles = getComputedStyle(el);
-  const pos = styles.getPropertyValue("--con-pos").trim();
-  const neg = styles.getPropertyValue("--con-neg").trim();
-  if (pos) CHART_POS = pos;
-  if (neg) CHART_NEG = neg;
+  const cfg = VARIANT_CONFIG[variant];
+  const pos = styles.getPropertyValue(cfg.posVar).trim();
+  const neg = styles.getPropertyValue(cfg.negVar).trim();
+  if (pos) CHART_COLORS[variant].pos = pos;
+  if (neg) CHART_COLORS[variant].neg = neg;
 }
 
 // Cross-session cache of the real header logo's measured TOP (viewport px), one
@@ -105,12 +199,11 @@ function writeCachedHeaderTop(bucket: "d" | "m", y: number) {
     localStorage.setItem(HDR_Y_KEY, JSON.stringify(o));
   } catch { /* ignore */ }
 }
-// The eased landing box, persisted at module scope so a loading->loaded remount
-// (which re-runs the effect) does NOT reset it to null and SNAP to the newly
-// mounted real logo — it keeps easing smoothly from wherever the candles were.
-let introCurHeader: { x: number; y: number; w: number; h: number } | null = null;
+// The eased landing box lives in VARIANT_STATE (per variant), so a loading->loaded
+// remount (which re-runs the effect) does NOT reset it to null and SNAP to the
+// newly mounted real logo — it keeps easing smoothly from wherever the candles were.
 
-function buildModel(): Model {
+function buildModel(variant: IntroVariant): Model {
   const mulberry32 = (a: number) => () => {
     a |= 0; a = (a + 0x6d2b79f5) | 0;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
@@ -167,6 +260,9 @@ function buildModel(): Model {
     return Math.max(0.02, Math.min(0.98, trend + wob + wv));
   };
   const G = TICKER_GREENS, RDc = TICKER_REDS;
+  // The live theme colours for THIS variant. Captured by reference (not by value)
+  // so readIntroColors' late resolution is still visible here.
+  const colors = CHART_COLORS[variant];
   const BL: number[] = [], FD: number[] = [], AR: number[] = [], WX2: number[] = [], WY2: number[] = [], P4s: number[] = [], P4e: number[] = [], WX4: number[] = [], WY4: number[] = [], INFRAC: number[] = [], INCOL: string[] = [];
   for (let j = 0; j < M; j++) {
     BL.push(rnd(1.2, 2.6)); FD.push(rnd(2.6, 3.3)); AR.push(BL[j] + FD[j]);
@@ -218,7 +314,18 @@ function buildModel(): Model {
     //    max-w-[1400px] px-4 bar; the ~43px control row centers the 18px logo at
     //    ~20px below the bar top when no banner (py-2 + (43-18)/2).
     let header: Layout["header"];
-    if (vw < 1024) {
+    if (variant === "public") {
+      // The public shell's brand wordmark is ALWAYS the top-left of the header,
+      // at the same place on every public page, so the fallback is a constant
+      // offset from the shell's centered container. The real element is measured
+      // every frame anyway; this only covers the first frame or two.
+      header = {
+        x: publicBrandLeft(vw),
+        y: publicBrandTop(),
+        w: PUBLIC_BRAND_MAX_W,
+        h: PUBLIC_BRAND_MAX_H
+      };
+    } else if (vw < 1024) {
       const lh = Math.max(16, Math.min(34, Math.round((vw * 0.88) / WORDMARK_AR)));
       header = { x: (vw - lh * HEADER_AR) / 2, y: readCachedHeaderTop("m") ?? (SAFE_TOP + 10), w: lh * HEADER_AR, h: lh };
     } else {
@@ -271,7 +378,7 @@ function buildModel(): Model {
     s.bt = s.wt + (wh - bh) * u.off; s.bb = s.bt + bh; s.col = u.col;
   };
   const candleAt = (j: number, t: number, L: Layout): Geo => {
-    if (t < BL[j]) { const g = chartGeom(j, t, L); g.col = g.up ? CHART_POS : CHART_NEG; return g; }
+    if (t < BL[j]) { const g = chartGeom(j, t, L); g.col = g.up ? colors.pos : colors.neg; return g; }
     const header = { ...headerGeom(j, L), col: INCOL[j] };
     if (!CENTER_WORDMARK_STEP) {
       // Direct path: each candle flies chart -> header logo in one leg, then ticks.
@@ -299,20 +406,24 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
   ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
 }
 
-export function ConsoleIntro() {
-  const [hidden, setHidden] = useState(introDone);
+/** The one-shot splash. `variant` selects the surface: the operator console
+ *  (default) or the public marketing site. Both play the same animation and land
+ *  on whichever real brand wordmark is mounted behind the overlay. */
+export function BrandIntro({ variant = "console" }: { variant?: IntroVariant }) {
+  const cfg = VARIANT_CONFIG[variant];
+  const [hidden, setHidden] = useState(VARIANT_STATE[variant].introDone);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const bgRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (introDone) return;
+    if (VARIANT_STATE[variant].introDone) return;
     // deferred so we never call setState synchronously inside the effect body
     // (hide also settles the intro-bus phase: whether the splash finished or
     // never played, the header may now show the brand logo)
-    const hide = () => { introDone = true; setIntroPhase("done"); queueMicrotask(() => setHidden(true)); };
+    const hide = () => { markIntroDone(variant); setIntroPhase("done"); queueMicrotask(() => setHidden(true)); };
     let sessionShown = false;
-    try { sessionShown = sessionStorage.getItem("st.introShown") === "1"; } catch { /* ignore */ }
+    try { sessionShown = sessionStorage.getItem(cfg.sessionKey) === "1"; } catch { /* ignore */ }
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (sessionShown || reduce) { hide(); return; }
 
@@ -320,11 +431,14 @@ export function ConsoleIntro() {
     if (!canvas || !wrap) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) { hide(); return; }
-    if (!MODEL) { try { MODEL = buildModel(); } catch { hide(); return; } }
-    const model = MODEL;
+    let model = VARIANT_STATE[variant].MODEL;
+    if (!model) {
+      try { model = buildModel(variant); setIntroModel(variant, model); } catch { hide(); return; }
+    }
     // Resolve the theme's pos/neg tokens for the chart-phase candles at animation
-    // start (wrap sits inside .console-root, so the --con-* scope is inherited).
-    readIntroColors(wrap);
+    // start (the console's wrap sits inside .console-root, so --con-* is
+    // inherited; the public wrap reads the page-level --pos/--neg).
+    readIntroColors(wrap, variant);
     // Must run BEFORE buildModel()'s layout() is first called below, so the very first frame
     // already places the landing box under the notch instead of correcting for it later.
     readSafeAreaTop();
@@ -388,7 +502,7 @@ export function ConsoleIntro() {
 
     const finish = () => {
       if (done) return; done = true;
-      try { sessionStorage.setItem("st.introShown", "1"); } catch { /* ignore */ }
+      try { sessionStorage.setItem(cfg.sessionKey, "1"); } catch { /* ignore */ }
       hide();
     };
     const skip = () => { if (!fading) startFade(); };
@@ -404,7 +518,7 @@ export function ConsoleIntro() {
     setIntroPhase("playing");
 
     let dissolved = false;
-    // The landing box (introCurHeader, module-scoped) eases toward its target
+    // The landing box (state.introCurHeader) eases toward its target
     // (measured logo, else the layout fallback) instead of snapping, so a header
     // that mounts mid-flight or post-landing (slow first load) glides the
     // wordmark into place — and survives the loading->loaded remount.
@@ -426,8 +540,8 @@ export function ConsoleIntro() {
       // no argument made every derived time NaN, which crashed the ticker's unit
       // lookup (SOCRATIC-TRADE-2H). Fall back to the clock.
       const ts = Number.isFinite(now) ? now : performance.now();
-      if (introStart == null) introStart = ts;
-      const t = (ts - introStart) / 1000;
+      if (VARIANT_STATE[variant].introStart == null) setIntroStart(variant, ts);
+      const t = (ts - (VARIANT_STATE[variant].introStart ?? ts)) / 1000;
       const dt = lastNow == null ? 0.016 : Math.min(0.1, (ts - lastNow) / 1000); lastNow = ts;
       // Solid backdrop holds until the first candle lifts off, then dissolves so the
       // console/page reveals behind the rising candles (the canvas stays opaque).
@@ -442,24 +556,27 @@ export function ConsoleIntro() {
       const target = headerBox ?? L.header; // real logo box, else viewport-matched fallback
       // Persist the real logo's top so the NEXT intro (a fresh tab/session) primes its
       // fallback with it and assembles the wordmark exactly where it ends up — including
-      // any RealityBanner offset the loading screen can't know in advance.
-      if (headerBox) {
+      // any RealityBanner offset the loading screen can't know in advance. Console
+      // only: the public site's header top is a constant, and writing into the
+      // console's cache from the public splash would poison it.
+      if (headerBox && cfg.cacheHeaderTop) {
         const ry = Math.round(headerBox.y);
         if (ry !== cachedWriteY) { cachedWriteY = ry; writeCachedHeaderTop(VW < 1024 ? "m" : "d", ry); }
       }
+      const prev = VARIANT_STATE[variant].introCurHeader;
       let cur: { x: number; y: number; w: number; h: number };
-      if (introCurHeader) {
+      if (prev) {
         const a = 1 - Math.exp(-dt * 10);
         cur = {
-          x: introCurHeader.x + (target.x - introCurHeader.x) * a,
-          y: introCurHeader.y + (target.y - introCurHeader.y) * a,
-          w: introCurHeader.w + (target.w - introCurHeader.w) * a,
-          h: introCurHeader.h + (target.h - introCurHeader.h) * a
+          x: prev.x + (target.x - prev.x) * a,
+          y: prev.y + (target.y - prev.y) * a,
+          w: prev.w + (target.w - prev.w) * a,
+          h: prev.h + (target.h - prev.h) * a
         };
       } else {
         cur = { ...target };
       }
-      introCurHeader = cur;
+      setIntroCurHeader(variant, cur);
       L.header = cur;
       ctx.clearRect(0, 0, VW, VH);
       // Once the backdrop has dissolved the real page shows through beneath the
@@ -482,7 +599,7 @@ export function ConsoleIntro() {
         }
       }
       for (let j = 0; j < model.M; j++) {
-        const c = model.candleAt(j, t, L); const col = c.col || CHART_POS;
+        const c = model.candleAt(j, t, L); const col = c.col || CHART_COLORS[variant].pos;
         ctx.strokeStyle = col; ctx.lineWidth = Math.max(1, c.bw * 0.26); ctx.lineCap = "round";
         ctx.beginPath(); ctx.moveTo(c.x, c.wt); ctx.lineTo(c.x, c.wb); ctx.stroke();
         ctx.fillStyle = col; const bh = Math.max(1.4, c.bb - c.bt); roundRect(ctx, c.x - c.bw / 2, c.bt, c.bw, bh, Math.min(2, c.bw * 0.25)); ctx.fill();
@@ -517,8 +634,8 @@ export function ConsoleIntro() {
       style={{ position: "fixed", inset: 0, zIndex: 200, background: "transparent", transition: "opacity .7s ease", cursor: "pointer" }}
     >
       {/* Solid theme backdrop that covers the page until the candles lift off, then
-          dissolves (opacity → 0) to reveal the console behind the rising candles. */}
-      <div ref={bgRef} style={{ position: "absolute", inset: 0, background: "var(--con-bg)", transition: "opacity .9s ease" }} />
+          dissolves (opacity → 0) to reveal the page behind the rising candles. */}
+      <div ref={bgRef} style={{ position: "absolute", inset: 0, background: cfg.backdrop, transition: "opacity .9s ease" }} />
       <canvas ref={canvasRef} style={{ position: "relative", display: "block", width: "100%", height: "100%" }} />
     </div>
   );
