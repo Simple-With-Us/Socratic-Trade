@@ -56,7 +56,7 @@ export FAKE_OTHER_PEM="${tmp}/other.p8"
 
 extract() {
   awk '
-    /^fleet_secret_get\(\) \{/ || /^load_secrets\(\) \{/ || /^asc_cleanup\(\) \{/ || /^asc_pem_preview\(\) \{/ { grab = 1 }
+    /^fleet_secret_get\(\) \{/ || /^load_secrets\(\) \{/ || /^asc_cleanup\(\) \{/ || /^key_preview\(\) \{/ { grab = 1 }
     grab { print }
     grab && /^\}/ { grab = 0 }
   ' "$script"
@@ -83,13 +83,12 @@ CJS
 
 funcs="${tmp}/funcs.sh"
 {
-  echo 'log() { echo "$*" >> "${LOG_FILE}"; }'
+  echo 'log() { echo "$*" >> "${ASC_TEST_LOG:-/dev/null}"; }'
   echo 'die() { echo "error: $*" >&2; exit 1; }'
   echo 'ASC_TMP_DIR=""'
   echo "FLEET_SECRETS_BIN=\"${tmp}/fleet-secrets\""
   echo "FLEET_DIR=\"${here}\""
   echo "ASC_COMPARE_TOOL=\"${tmp}/compare.cjs\""
-  echo "LOG_FILE=\"${tmp}/log.txt\""
   cat <<'FUNCS'
 same_as_file() {
   VALUE_TO_COMPARE="$1" node "$ASC_COMPARE_TOOL" same "$2"
@@ -106,10 +105,11 @@ different_file_from_file() {
 FUNCS
   extract
 } > "$funcs"
-export LOG_FILE="${tmp}/log.txt"
-: > "$LOG_FILE"
+export ASC_TEST_LOG="${tmp}/log.txt"
+: > "$ASC_TEST_LOG"
 grep -q '^load_secrets()' "$funcs" || fail "load_secrets not found in ship-testflight.sh"
 grep -q '^fleet_secret_get()' "$funcs" || fail "fleet_secret_get not found in ship-testflight.sh"
+grep -q '^key_preview()' "$funcs" || fail "key_preview not found in ship-testflight.sh"
 
 # 1. Nothing in the environment:  credentials come from Infisical, the key is a 0600 temp file.
 out="$(env -u ASC_KEY_ID -u ASC_ISSUER_ID -u ASC_KEY_PATH -u ASC_KEY_P8 bash -c '
@@ -156,7 +156,7 @@ ASC_KEY_ID=ENVKEY0001 ASC_ISSUER_ID=env-issuer \
 # and the credential comes from Infisical.  A file somebody names can never
 # decide which key signs the upload (AFC-459, revision 2).
 : > "$FAKE_LOG"
-: > "$LOG_FILE"
+: > "$ASC_TEST_LOG"
 cp "${tmp}/other.p8" "${tmp}/named-file.p8"
 chmod 600 "${tmp}/named-file.p8"
 env -u ASC_KEY_P8 ASC_KEY_ID=ABCDE12345 ASC_ISSUER_ID=issuer-synthetic ASC_KEY_PATH="${tmp}/named-file.p8" bash -c '
@@ -173,7 +173,7 @@ env -u ASC_KEY_P8 ASC_KEY_ID=ABCDE12345 ASC_ISSUER_ID=issuer-synthetic ASC_KEY_P
   asc_cleanup
 ' || fail "a named key file was used as the credential"
 grep -q '^ASC_KEY_P8 /asc$' "$FAKE_LOG" || fail "fleet-secrets was not consulted for the credential"
-grep -q 'ASC_KEY_PATH is not a credential source' "$LOG_FILE" ||
+grep -q 'ASC_KEY_PATH is not a credential source' "$ASC_TEST_LOG" ||
   fail "the run did not say that it ignored the named ASC_KEY_PATH"
 
 # The scanner that finds a command substitution which runs the key reader.
@@ -264,10 +264,10 @@ for shape in plain plain-with-or split-across-lines nested; do
 done
 
 # 2c. An ambient ASC_KEY_P8 that is not a PEM private key is fatal, and the
-# message carries a masked preview of the PEM body, so the value that failed
-# can be identified without the key material being printed.
+# message carries a masked preview of the value, so the value that failed can
+# be identified without the key material being printed.
 : > "$FAKE_LOG"
-: > "$LOG_FILE"
+: > "$ASC_TEST_LOG"
 if ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer ASC_KEY_P8="not a private key at all" bash -c '
   set -euo pipefail
   source "'"$funcs"'"
@@ -277,18 +277,18 @@ if ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer ASC_KEY_P8="not a private key 
 fi
 grep -q 'does not hold a PEM private key' "${tmp}/invalid-key.err" ||
   fail "the refused ASC_KEY_P8 was not named in the failure"
-grep -q 'body no PEM body' "${tmp}/invalid-key.err" ||
+grep -Fq 'preview: not a pr... all' "${tmp}/invalid-key.err" ||
   fail "the refused ASC_KEY_P8 carried no masked preview"
 
 # 2c-quiet. A refused value never reaches a log line with its body in it.
-if grep -Fq 'not a private key at all' "${tmp}/invalid-key.err" "$LOG_FILE"; then
+if grep -Fq 'not a private key at all' "${tmp}/invalid-key.err" "$ASC_TEST_LOG"; then
   fail "the refused ASC_KEY_P8 was printed"
 fi
 
-# 2c-preview. A value that carries the PEM envelope is previewed:  the first
-# eight and the last four characters of the body, and nothing else.  The
-# fixture body is obviously fake, and the line carries the scanner marker.
-bad_pem="$(printf '%s\n' '-----BEGIN PRIVATE KEY-----' 'SYNTHETICBADBODYHERE' '-----END PRIVATE KEY-----')" # gitleaks:allow
+# 2c-preview. A value that carries the PEM envelope is previewed too:  the
+# first eight and the last four characters of the VALUE, and nothing else.
+# The fixture body is obviously fake, and the line carries the scanner marker.
+bad_pem="$(printf '%s\n%s\n%s' '-----BEGIN PRIVATE KEY-----' 'SYNTHETICBADBODYHERE' '-----END PRIVATE KEY-----')" # gitleaks:allow
 if ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer ASC_KEY_P8="$bad_pem" bash -c '
   set -euo pipefail
   source "'"$funcs"'"
@@ -296,8 +296,8 @@ if ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer ASC_KEY_P8="$bad_pem" bash -c 
 ' 2>"${tmp}/preview.err"; then
   fail "an ASC_KEY_P8 that is not a key was accepted"
 fi
-grep -q 'body SYNTHETI...HERE' "${tmp}/preview.err" ||
-  fail "the masked preview of the PEM body is not the first-eight/last-four form"
+grep -Fq 'preview: -----BEG...----' "${tmp}/preview.err" ||
+  fail "the masked preview of the refused value is not the first-eight/last-four form"
 if grep -Fq 'SYNTHETICBADBODYHERE' "${tmp}/preview.err"; then
   fail "the whole PEM body was printed"
 fi
@@ -401,6 +401,48 @@ env -u ASC_KEY_P8 ASC_KEY_ID=ABCDE12345 ASC_ISSUER_ID=issuer-synthetic ASC_KEY_P
 ' || fail "a named key file that names nothing broke the run"
 grep -q '^ASC_KEY_P8 /asc$' "$FAKE_LOG" || fail "fleet-secrets was not consulted for the credential"
 
+# 2k. The hosted APPLE_API_* trio:  the key id, the issuer and the key belong
+# together, and the p8 body is base64.  The trio wins over every other
+# source, so fleet-secrets is never asked.
+#
+# The encoded value reaches the decoder through a here-string, so the shell
+# never prints it:  a credential belongs in no output stream.
+: > "$FAKE_LOG"
+encoded="$(base64 < "${tmp}/other.p8" | tr -d '\n')"
+APPLE_API_KEY_ID=APPLEKEY01 APPLE_API_ISSUER_ID=apple-issuer \
+  APPLE_API_KEY_P8_BASE64="$encoded" bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  load_secrets
+  [[ "$AUTH_MODE" == api_key && "$ASC_KEY_ID" == APPLEKEY01 ]]
+  [[ "$ASC_ISSUER_ID" == apple-issuer ]]
+  same_file_as_file "$ASC_KEY_PATH" "'"$tmp"'/other.p8"
+  asc_cleanup
+' || fail "the hosted APPLE_API_* trio was not used"
+[[ ! -s "$FAKE_LOG" ]] || fail "fleet-secrets was called although the environment was complete"
+if ! grep -q 'base64 --decode <<<"\$APPLE_API_KEY_P8_BASE64"' "$script"; then
+  fail "the base64 body is not decoded through a here-string"
+fi
+if grep -qE 'base64 --decode[^|]*\|[^|]' "$script"; then
+  fail "the base64 body is decoded through a pipe"
+fi
+
+# 2k-bis. An APPLE_API_KEY_P8_BASE64 that is not a key is refused, and the
+# refusal carries a masked preview of the value, never the value.
+if APPLE_API_KEY_ID=APPLEKEY01 APPLE_API_ISSUER_ID=apple-issuer \
+  APPLE_API_KEY_P8_BASE64="not a private key at all" bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  load_secrets required
+' 2>"${tmp}/invalid-base64.err"; then
+  fail "an APPLE_API_KEY_P8_BASE64 that is not a key was accepted"
+fi
+grep -Fq 'preview: not a pr... all' "${tmp}/invalid-base64.err" ||
+  fail "the refused APPLE_API_KEY_P8_BASE64 carried no masked preview"
+if grep -Fq 'not a private key at all' "${tmp}/invalid-base64.err"; then
+  fail "the refused APPLE_API_KEY_P8_BASE64 was printed"
+fi
+
 # 2j. The hosted workflow hands the key to the step that calls the client in
 # the environment, and the environment file never carries key material.  A
 # path in ASC_KEY_PATH is not a credential source, so a workflow that
@@ -430,13 +472,98 @@ env -u ASC_KEY_PATH -u ASC_KEY_P8 -u ASC_KEY_ID -u ASC_ISSUER_ID bash -c '
 ' || fail "the optional call did not survive a missing credential"
 
 # 3. The credential never travels in a command argument.  The secret reaches
-# the child through the environment, so its own argv must not carry it.
-argv="$(ASC_KEY_ID=ENVKEY0005 ASC_ISSUER_ID=env-issuer ASC_KEY_P8="$(<"${tmp}/other.p8")" bash -c '
-  set -euo pipefail
-  ps -o args= -p $$ 2>/dev/null || true
-')"
-pem="$(<"${tmp}/other.p8")"
-[[ "$argv" != *"$pem"* ]] || fail "the credential reached the child in its command arguments"
+#    the child through the environment, so its own argv must not carry it.
+#
+#    THE PROOF IS THE SIGNED REQUEST (fleet alignment, 2026-10-21):  the
+#    client is handed the key in its environment, and the JWT it sends
+#    verifies against exactly that key.  Nothing here reads another
+#    process's environment:  a process listing is another process's
+#    business, it is not portable, and it says nothing about which key
+#    actually signed anything.
+cat > "${tmp}/signed-request.cjs" <<'CJS'
+const fs = require("fs");
+const { spawn } = require("child_process");
+const { createPublicKey, createVerify } = require("crypto");
+const { createServer } = require("http");
+
+const clientPath = process.argv[2];
+const keyPath = process.argv[3];
+const keyId = process.argv[4];
+
+// The client runs only when the path it was started with is the path its own
+// module reports, and node resolves a symlinked directory to its real path.
+// So the harness starts it by its real path:  the lane lives behind one.
+const clientReal = fs.realpathSync(clientPath);
+
+// The test reads its OWN fixture;  the client never reads a file.
+const pem = fs.readFileSync(keyPath, "utf8");
+const bodyLine = pem.split("\n").find((line) => line.length > 32) || "";
+
+let token = "";
+const server = createServer((req, res) => {
+  token = String(req.headers.authorization || "").replace(/^Bearer /, "");
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ data: [] }));
+});
+
+const refuse = (why) => {
+  console.error(why);
+  server.close();
+  process.exit(1);
+};
+
+server.listen(0, "127.0.0.1", () => {
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const args = [clientReal, "GET", `${base}/v1/apps`];
+  const child = spawn(process.execPath, args, {
+    env: {
+      PATH: "/usr/bin:/bin",
+      HOME: process.env.ASC_SAFE_HOME || "/tmp",
+      ASC_KEY_ID: keyId,
+      ASC_ISSUER_ID: "synthetic-issuer",
+      ASC_KEY_P8: pem
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d) => { stdout += d; });
+  child.stderr.on("data", (d) => { stderr += d; });
+  child.on("close", (code) => {
+    if (code !== 0) refuse("the client refused the key in its environment");
+    if (bodyLine && args.join(" ").includes(bodyLine)) refuse("the key reached the client's arguments");
+    if (bodyLine && (stdout.includes(bodyLine) || stderr.includes(bodyLine))) {
+      refuse("the key reached the client's output");
+    }
+    const parts = token.split(".");
+    if (parts.length !== 3) refuse("the client sent no signed request");
+    const header = JSON.parse(Buffer.from(parts[0], "base64url").toString());
+    if (header.kid !== keyId) refuse("the request was signed with another key id");
+    const verifier = createVerify("SHA256");
+    verifier.update(Buffer.from(`${parts[0]}.${parts[1]}`));
+    verifier.end();
+    let signed = false;
+    try {
+      signed = verifier.verify(
+        { key: createPublicKey(pem), dsaEncoding: "ieee-p1363" },
+        Buffer.from(parts[2], "base64url")
+      );
+    } catch {
+      signed = false;
+    }
+    if (!signed) refuse("the request was not signed with the key in the environment");
+    server.close();
+    process.stdout.write("signed-with-the-environment-key\n");
+  });
+});
+CJS
+
+mkdir -p "${tmp}/client-home"
+out="$(ASC_SAFE_HOME="${tmp}/client-home" node "${tmp}/signed-request.cjs" \
+  "${here}/asc-api.mjs" "${tmp}/other.p8" ENVKEY0005 2>"${tmp}/signed.err")" ||
+  fail "the request was not signed with the key handed over in the environment"
+[[ "$out" == "signed-with-the-environment-key" ]] ||
+  fail "the client did not sign the request with the key in its environment"
 
 # 4. Neither this test nor the ship script passes a credential to `env`, which
 # would put it in the process arguments of every child.

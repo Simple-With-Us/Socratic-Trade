@@ -201,27 +201,35 @@ fleet_secret_get() {
 # altool and Xcode, so it hands the key to the client in the environment,
 # which is where the client looks for it.
 #
-# THE CREDENTIAL IS RESOLVED FROM TWO PLACES (AFC-459, revision 2):
-#   1. ASC_KEY_P8, when it holds a PEM private key and comes with its key id
-#   2. Infisical Fleet-OPS /asc (or /authkey-<id>-p8)
+# THE CREDENTIAL IS RESOLVED FROM THREE PLACES (AFC-459, revision 2):
+#   1. APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_P8_BASE64, the
+#      hosted trio
+#   2. ASC_KEY_P8, when it holds a PEM private key and comes with its key id
+#   3. Infisical Fleet-OPS /asc (or /authkey-<id>-p8)
 # A disk credential is not a source at all:  a named ASC_KEY_PATH is ignored,
 # so a stale or foreign path in an operator's shell can never sign the upload
 # with the wrong key, and App Store Connect would answer 401 without saying
 # which input was wrong.  The key material never enters a command argument and
 # never reaches a log line.
-# A masked preview of a PEM body:  the first eight and the last four
-# characters of the base64 body.  It identifies a refused value in a log
-# without the key material ever being printed.
-asc_pem_preview() {
-  local value="$1" body=""
-  if printf '%s' "$value" | grep -q -- '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----'; then
-    body="$(printf '%s\n' "$value" | sed '1d;$d' | tr -d '\n')"
-  fi
-  if [[ -z "$body" ]]; then
-    printf 'no PEM body'
+#
+# A masked preview of a value:  the first eight and the last four
+# characters, and nothing else.  A value too short to mask safely is
+# withheld whole, so a preview can never become the secret it describes.
+#
+# The shape is the fleet's blessed one (HogHunter #213):  every copy of the
+# App Store Connect shell layer masks a refused value the same way.
+key_preview() {
+  local v="${1:-}" n
+  n=${#v}
+  if [[ "$n" -eq 0 ]]; then
+    printf '%s' "(empty)"
     return 0
   fi
-  printf '%s...%s' "${body:0:8}" "${body: -4}"
+  if [[ "$n" -le 12 ]]; then
+    printf '[%d chars, withheld]' "$n"
+    return 0
+  fi
+  printf '%s...%s' "${v:0:8}" "${v: -4}"
 }
 
 load_secrets() {
@@ -241,15 +249,42 @@ load_secrets() {
   #  so the run can say that it ignored it.
   local named_path="${ASC_KEY_PATH:-}"
 
-  # 1. An ambient ASC_KEY_P8.  It is only usable when it really is a PEM
+  # 1. The hosted APPLE_API_* trio:  the key id, the issuer and the key
+  #    belong together, so all three names have to be there.  The p8 body is
+  #    base64.
+  if [[ -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER_ID:-}" && -n "${APPLE_API_KEY_P8_BASE64:-}" ]]; then
+    case "$APPLE_API_KEY_P8_BASE64" in
+      *BEGIN*) p8="$APPLE_API_KEY_P8_BASE64" ;;
+      #  The encoded value reaches the decoder through a here-string, so the
+      #  shell never prints it:  a credential belongs in no output stream.
+      *) p8="$(base64 --decode <<<"$APPLE_API_KEY_P8_BASE64" 2>/dev/null)" || p8="" ;;
+    esac
+    if [[ -n "$p8" ]]; then
+      rc=0
+      node "${FLEET_DIR}/asc-key.mjs" validate >/dev/null 2>&1 <<< "$p8" || rc=$?
+      if [[ "$rc" -ne 0 ]]; then
+        if [[ "$required" == "required" ]]; then
+          die "APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key; preview: $(key_preview "$APPLE_API_KEY_P8_BASE64")"
+        fi
+        log "APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key; preview: $(key_preview "$APPLE_API_KEY_P8_BASE64")"
+      else
+        kid="${APPLE_API_KEY_ID}"
+        iss="${APPLE_API_ISSUER_ID}"
+        key_pem="$p8"
+      fi
+    fi
+    p8=""
+  fi
+
+  # 2. An ambient ASC_KEY_P8.  It is only usable when it really is a PEM
   #    private key and comes with the key id and issuer it belongs to.  It is
   #    resolved first, so nothing can override it.
   #
-  #    A rejected value is fatal and carries a masked preview of the PEM body,
+  #    A rejected value is fatal and carries a masked preview of the value,
   #    so the value that failed can be identified without the key material
   #    ever being printed.  Silently falling back would sign the upload with
   #    a different key than the one the operator named.
-  if [[ -n "${ASC_KEY_P8:-}" ]]; then
+  if [[ -z "$key_pem" && -n "${ASC_KEY_P8:-}" ]]; then
     if [[ -z "$kid" ]]; then
       ASC_MISSING="ASC_KEY_ID"
       if [[ "$required" == "required" ]]; then
@@ -271,12 +306,12 @@ load_secrets() {
     # module turns the separators into newlines before it parses the value.
     node "${FLEET_DIR}/asc-key.mjs" validate >/dev/null 2>&1 <<< "$ASC_KEY_P8" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
-      die "ASC_KEY_P8 is set but does not hold a PEM private key (body $(asc_pem_preview "$ASC_KEY_P8"))"
+      die "ASC_KEY_P8 is set but does not hold a PEM private key; preview: $(key_preview "$ASC_KEY_P8")"
     fi
     key_pem="$ASC_KEY_P8"
   fi
 
-  # 2. The key id, issuer and private key must belong together:  with nothing
+  # 3. The key id, issuer and private key must belong together:  with nothing
   #    named in the environment all three come from /asc;  an env key id that
   #    is not the /asc one gets its own .p8 from /authkey-<id>-p8, never the
   #    /asc key.

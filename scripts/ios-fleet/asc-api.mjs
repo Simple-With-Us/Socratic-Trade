@@ -63,27 +63,36 @@ function fleetSecret(name, folder = INFISICAL_ASC_FOLDER) {
 
 /**
  * Decode a base64 private key.  Returns "" when the value does not decode.
+ *
+ * The value may already be a PEM:  the shell layer accepts a raw PEM in the
+ * same variable, so both layers have to agree on what a key looks like
+ * (HogHunter #213).
  */
 function decodeP8(base64) {
+  const cleaned = String(base64 || "").trim();
+  if (!cleaned) return "";
+  if (cleaned.includes("-----BEGIN ")) return cleaned.endsWith("\n") ? cleaned : `${cleaned}\n`;
   try {
-    return Buffer.from(String(base64), "base64").toString("utf8");
+    const pem = Buffer.from(cleaned, "base64").toString("utf8");
+    return pem.includes("-----BEGIN ") ? pem : "";
   } catch {
     return "";
   }
 }
 
 /**
- * A masked preview of a PEM body:  the first eight and the last four
- * characters of the base64 body, so a value that was refused can be
- * identified in a log without the key material ever being printed.
+ * A masked preview of a value:  the first eight and the last four
+ * characters, and nothing else.  A value too short to mask safely is
+ * withheld whole, so a preview can never become the secret it describes.
+ *
+ * The shape is the fleet's blessed one (HogHunter #213):  every copy of the
+ * App Store Connect client masks a refused value the same way.
  */
-function pemPreview(value) {
-  const body = String(value || "")
-    .split("\n")
-    .filter((line) => !line.startsWith("-----"))
-    .join("");
-  if (!body) return "no PEM body";
-  return `${body.slice(0, 8)}...${body.slice(-4)}`;
+function maskedPreview(value) {
+  const text = String(value ?? "");
+  if (text.length === 0) return "(empty)";
+  if (text.length <= 12) return `[${text.length} chars, withheld]`;
+  return `${text.slice(0, 8)}...${text.slice(-4)}`;
 }
 
 /**
@@ -114,7 +123,8 @@ export function resolveAscCredentials() {
     const pem = normalizePrivateKey(decoded);
     if (!pem) {
       return {
-        error: `APPLE_API_KEY_P8_BASE64 is set but did not decode to a PEM private key (body ${pemPreview(decoded)})`
+        error: "APPLE_API_KEY_P8_BASE64 is set but did not decode to a PEM private key"
+          + `; preview: ${maskedPreview(appleBase64)}`
       };
     }
     return {
@@ -135,7 +145,8 @@ export function resolveAscCredentials() {
     const pem = normalizePrivateKey(envKeyPem);
     if (!pem) {
       return {
-        error: `ASC_KEY_P8 is set but is not a PEM private key (body ${pemPreview(envKeyPem)})`
+        error: "ASC_KEY_P8 is set but is not a PEM private key"
+          + `; preview: ${maskedPreview(envKeyPem)}`
       };
     }
     return {
@@ -168,14 +179,22 @@ export function resolveAscCredentials() {
     keyPem = fleetSecret(`AUTHKEY_${keyId}`, `/authkey-${keyId.toLowerCase()}-p8`);
   }
   if (!keyPem) {
-    return { keyId, issuerId, error: null };
+    //  The key id and the issuer are there and the key material is not, so
+    //  the failure names the secret that is missing:  a generic "no
+    //  credential found" would leave the operator guessing which of the
+    //  three sources to look in.  The shell layer names it the same way.
+    const where = keyId === infisicalKeyId
+      ? "ASC_KEY_P8 in Infisical /asc"
+      : `AUTHKEY_${keyId} in Infisical /authkey-${keyId.toLowerCase()}-p8`;
+    return { keyId, issuerId, error: `the App Store Connect private key is missing: ${where}` };
   }
   const pem = normalizePrivateKey(keyPem);
   if (!pem) {
     return {
       keyId,
       issuerId,
-      error: `the App Store Connect key in Infisical /asc is not a PEM private key (body ${pemPreview(keyPem)})`
+      error: "the App Store Connect key in Infisical /asc is not a PEM private key"
+        + `; preview: ${maskedPreview(keyPem)}`
     };
   }
   return { keyId, issuerId, privateKeyPem: pem, source: "Infisical /asc" };
@@ -531,7 +550,7 @@ async function main() {
     if (!cred.issuerId) missing.push("ASC_ISSUER_ID");
     const named = missing.length ? ` (${missing.join(" and ")} missing)` : "";
     console.error(
-      `asc-auth: no App Store Connect credential found${named}. Tried, in order:\n` +
+      `asc-auth: no App Store Connect credential found${named}.  Tried, in order:\n` +
       "  1) APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_P8_BASE64 in the environment\n" +
       "  2) ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_P8 in the environment\n" +
       "  3) Fleet-OPS prod /asc through fleet-secrets\n" +

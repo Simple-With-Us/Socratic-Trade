@@ -366,12 +366,11 @@ test("an ASC_KEY_P8 that is not a PEM private key is a credential error", async 
 
 test("with no credential at all the client names the three sources and refuses a path", async () => {
   //  A bare PATH and a throwaway HOME keep the fleet reader out of the way,
-  //  so the client really has no source left.
+  //  so the client really has no source left.  Nothing is named in the
+  //  environment either, so there is no key id to look up.
   const result = await spawnNode([client, "GET", "http://127.0.0.1:1/v1/apps"], {
     PATH: "/usr/bin:/bin",
     HOME: join(root, "home-empty"),
-    ASC_KEY_ID: "ENVKEY0005",
-    ASC_ISSUER_ID: "env-issuer",
     ASC_KEY_PATH: join(root, "named.p8")
   });
   assert.equal(result.code, 1, `expected the refusal exit, got ${result.code}: ${result.stderr}`);
@@ -380,6 +379,21 @@ test("with no credential at all the client names the three sources and refuses a
   assert.match(result.stderr, /ASC_KEY_ID \/ ASC_ISSUER_ID \/ ASC_KEY_P8/);
   assert.match(result.stderr, /Fleet-OPS prod \/asc through fleet-secrets/);
   assert.match(result.stderr, /A path in ASC_KEY_PATH is not a credential source/);
+});
+
+test("a named key id with no key material names the secret that is missing", async () => {
+  //  The key id and the issuer are there and the key is not, so the failure
+  //  has to name the secret:  a generic refusal would leave the operator
+  //  guessing which of the three sources to look in.
+  const result = await spawnNode([client, "GET", "http://127.0.0.1:1/v1/apps"], {
+    PATH: "/usr/bin:/bin",
+    HOME: join(root, "home-nokey"),
+    ASC_KEY_ID: "ENVKEY0007",
+    ASC_ISSUER_ID: "env-issuer"
+  });
+  assert.equal(result.code, 1, `expected the refusal exit, got ${result.code}: ${result.stderr}`);
+  assert.match(result.stderr, /the App Store Connect private key is missing/);
+  assert.match(result.stderr, /AUTHKEY_ENVKEY0007 in Infisical \/authkey-envkey0007-p8/);
 });
 
 test("the key never travels in the command arguments of the client", async () => {

@@ -277,6 +277,56 @@ test("resolveAscCredentials refuses an APPLE_API_KEY_P8_BASE64 that is not a key
   assert.equal(creds.privateKeyPem, undefined);
 });
 
+test("resolveAscCredentials accepts a raw PEM in APPLE_API_KEY_P8_BASE64", (t) => {
+  //  The shell layer accepts a PEM in that variable as well as a base64 body,
+  //  so both layers have to agree on what a key looks like.
+  fakeFleetSecrets(t, { "/asc:ASC_KEY_ID": "INF_ID", "/asc:ASC_ISSUER_ID": "inf-issuer" });
+  clearAsc();
+  process.env.APPLE_API_KEY_ID = "APPLE_ID";
+  process.env.APPLE_API_ISSUER_ID = "apple-issuer";
+  process.env.APPLE_API_KEY_P8_BASE64 = otherPem;
+
+  const creds = resolveAscCredentials();
+  assert.equal(creds.error, undefined);
+  assert.equal(creds.source, "APPLE_API_* environment (base64 p8)");
+  assert.equal(creds.privateKeyPem.trim(), otherPem.trim());
+});
+
+test("a refused value is reported with a masked preview, never with the value", (t) => {
+  fakeFleetSecrets(t, { "/asc:ASC_KEY_ID": "INF_ID", "/asc:ASC_ISSUER_ID": "inf-issuer" });
+  clearAsc();
+  process.env.ASC_KEY_ID = "ENV_ID";
+  process.env.ASC_ISSUER_ID = "env-issuer";
+  process.env.ASC_KEY_P8 = "not a private key at all";
+
+  const creds = resolveAscCredentials();
+  assert.match(creds.error, /preview: not a pr\.\.\. all/);
+  assert.ok(!creds.error.includes("not a private key at all"), "the refused value was printed");
+  assert.equal(creds.privateKeyPem, undefined);
+});
+
+test("resolveAscCredentials names the key material that is missing", (t) => {
+  fakeFleetSecrets(t, { "/asc:ASC_KEY_ID": "INF_ID", "/asc:ASC_ISSUER_ID": "inf-issuer" });
+  clearAsc();
+  process.env.ASC_KEY_ID = "ENV_ID";
+  process.env.ASC_ISSUER_ID = "env-issuer";
+
+  const creds = resolveAscCredentials();
+  assert.match(creds.error, /the App Store Connect private key is missing/);
+  assert.match(creds.error, /AUTHKEY_ENV_ID in Infisical \/authkey-env_id-p8/);
+  assert.equal(creds.privateKeyPem, undefined);
+});
+
+test("resolveAscCredentials names the /asc key material for the /asc key id", (t) => {
+  fakeFleetSecrets(t, { "/asc:ASC_KEY_ID": "INF_ID", "/asc:ASC_ISSUER_ID": "inf-issuer" });
+  clearAsc();
+
+  const creds = resolveAscCredentials();
+  assert.match(creds.error, /the App Store Connect private key is missing/);
+  assert.match(creds.error, /ASC_KEY_P8 in Infisical \/asc/);
+  assert.equal(creds.privateKeyPem, undefined);
+});
+
 test("resolveAscCredentials has no credential when env and fleet-secrets have nothing", (t) => {
   fakeFleetSecrets(t, {});
   clearAsc();
