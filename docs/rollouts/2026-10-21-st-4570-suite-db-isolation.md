@@ -15,7 +15,7 @@
   anything about the code under test.
 - The first account of the failure said the residue of earlier runs was the trigger and that hosted
   CI could not see it at all.  A third full pass, run against a database that did not exist when the
-  suite started, falsified that:  the same test failed again, and the new file had collected
+  suite started, falsified that: the same test failed again, and the new file had collected
   seventeen coverage rows by the end of that one run.  The defect is a within-run ordering flake
   that a clean checkout can hit.
 - The repo already has the convention that settles it.  `test/reindex-all.test.ts:8` states it in
@@ -47,7 +47,7 @@
 
 ## The detail that decides the shape of the fix
 
-The persistence is fire-and-forget:  `setLastEnrichmentCoverageReport` does
+The persistence is fire-and-forget: `setLastEnrichmentCoverageReport` does
 `void import("./db-enrichment-coverage").then((mod) => mod.persistEnrichmentCoverageReport(report))`.
 A dynamic import of a module that is not already in the file's static graph resolves on a macrotask,
 not a microtask, so the write can land **after** the test that triggered it has finished.
@@ -66,7 +66,7 @@ the per-test scope, because the reader never writes.
   guard would have broken a test that is asserting the intended behaviour.  Isolating the database
   per file is also what the repo already does everywhere else.
 - **The reader is fixed even though the writers are the source.**  Making the writer hermetic stops
-  the pollution;  it does not make the reader's premise true.  A reader that asserts an empty
+  the pollution; it does not make the reader's premise true.  A reader that asserts an empty
   universe should own the database it asserts about, so that its result does not depend on what ran
   before it.
 - **No regression guard added here.**  The obvious one — run the suite twice and assert the two runs
@@ -78,7 +78,7 @@ the per-test scope, because the reader never writes.
 
 ## Follow-ups
 
-- Add the repo-level guard:  run the suite twice against one checkout and assert the second run
+- Add the repo-level guard: run the suite twice against one checkout and assert the second run
   matches the first.  That is the property that was broken, and the per-file fix does not assert it.
 - Consider whether the remaining test files that do not set `DATABASE_URL` should also be made
   explicit.  They do not reach the persistence path today, so this change does not touch them, but

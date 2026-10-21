@@ -1,4 +1,33 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { resetDbForTesting } from "../src/lib/db";
+
+// scanMarket() runs the live enrichment cascade, and every cascade gather builds and persists an
+// enrichment coverage report.  Without a database of its own this file wrote coverage rows into
+// the run's shared database, where a file that later expected an empty database could see them.
+// The path is held for the whole FILE because the persist is a fire-and-forget dynamic import, so
+// it can resolve after the test that triggered it has finished.
+const dbDir = mkdtempSync(join(tmpdir(), `market-dynamic-universe-${randomUUID()}-`));
+const prevDb = process.env.DATABASE_URL;
+process.env.DATABASE_URL = `file:${join(dbDir, "test.db")}`;
+
+beforeAll(() => {
+  resetDbForTesting();
+});
+
+afterAll(() => {
+  resetDbForTesting();
+  if (prevDb === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = prevDb;
+  try {
+    rmSync(dbDir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
