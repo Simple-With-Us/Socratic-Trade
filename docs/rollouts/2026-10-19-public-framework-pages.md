@@ -268,6 +268,46 @@ is still never handed to the verifier, and a configured secret is passed through
 test file now says so:  it proves the verifier is never called with a placeholder credential, and
 it pins the whitespace-only case to the raw value the canonical host uses.
 
+## Review Findings, Fifth Round
+
+### 12. The status record exposed private host capacity details
+
+Kody's Rule 12 caught a self-inflicted one.  The verification note written earlier in this effort
+recorded the working environment's external-volume setup and its workload range.  A status record is
+not the place for private hosting or capacity detail:  the reader needs one fact, that the hosted
+`verify-hosted` job is the gate of record, and not what the local machine was doing.
+
+`STATUS.md`, `PLAN.md` and this rollout note all carried the same wording, and Kody flagged only
+`STATUS.md`.  Fixing the flagged file alone would have bought a round rather than a fix and the same
+finding would have returned on the next push, so all three were changed together.  The rest of the
+diff was then swept for the same class —  IPs, host and lane paths, hostnames, and capacity or
+workload specifics, across every added line of every file this PR touches.  The remaining matches are
+pre-existing entries already on `main`, outside this diff.
+
+## Merge Mechanics Diagnosed On This PR
+
+Two mechanical blockers were diagnosed here that are worth recording, because neither is visible from
+the PR diff and both cost real time.
+
+**A docs-only head can never satisfy the `verify` requirement.**  `ci.yml` skips `verify-hosted` and
+the `verify` gate when `classify` reports `docs-only: true`, and a skipped required check leaves the
+PR waiting for a status that will never be reported.  The escape hatch is already built into the
+workflow:  both the `merge_group` event and `workflow_dispatch` set `docs-only=false`, and the
+comment at `classify` calls `workflow_dispatch` "the manual re-kick lever".  Dispatching it by hand
+(`gh workflow run ci.yml --ref <branch>`) runs the full gate against the PR head and reports
+`verify`.  The `merge_group` comment above it explains the other half:  the `verify` check has to run
+on the queue's temporary merge_group branch, or queued PRs hang forever.
+
+**Unattributed commits need an owner approval, and that is a gate, not a bug.**  The
+`org-default-main-protection` ruleset sets `require_extra_approval_for_unattributed_changes: true`.
+Every commit on this branch resolves to the owner through GitHub except one authored by
+`MiniMax <mm-bot@simplewithus.zulipchat.com>`, for which the API returns `author: null`;  that
+commit therefore counts as unattributed, and the rule then requires an approval from someone with
+write access.  The other requirements were all satisfied — `verify` and `gitleaks` green, all review
+threads resolved, `required_approving_review_count: 0` — so this was the single unmet condition.
+Rewriting the commit's author would have cleared the rule and defeated exactly what it exists for, so
+it was left alone and surfaced to the owner as the one action only he can take.
+
 ## Decisions & Trade-offs
 
 - **The `/framework` hardening stays.** The owner's 2026-07-11 instruction was to harden that page
@@ -370,14 +410,23 @@ holds read-only access to the per-variant state.
 
 ## Next Steps & Blockers
 
-- Nothing blocking.  The first hosted `verify-hosted` run failed on the copy-rule lint; that is
-  fixed and the re-run on the new head is the gate of record.
+- **One gate is the owner's, and it is an approval.**  `verify` and `gitleaks` pass, all review
+  threads are resolved, and the fifth-round finding is fixed;  what remains is the
+  `require_extra_approval_for_unattributed_changes` approval described under Merge Mechanics.  It is
+  not a code problem and it cannot be cleared by an agent.
+- The full gate is dispatched by hand on docs-only heads, because `classify` would otherwise skip
+  `verify` and leave the required check unreported.  See Merge Mechanics above.
 - Merging `main` auto-deploys (weekday RTH latch applies), and this change touches runtime paths
   (`app/**`, `middleware.ts`), so the image build is a real deploy.
 - Not verified locally, and not verifiable locally: Swift compilation. The only Swift changes are
   comments, and `ios-build` on the PR is the gate of record.
 - The WAF rule set (`2e28de6daa3b41afb03fcbd6b440a902`, blocking scraper/AI UAs on `/framework*` and
   `/api/framework*`) needs no change — the new redirect target is the same path it already covers.
+- **Worth a separate PR:** the `docs-only` fast path and the required `verify` check contradict each
+  other, so any docs-only PR sits blocked until someone remembers the re-kick lever.  A follow-up
+  should either have `classify` report a neutral success for `verify` on the docs path, or take
+  `verify` off the required list for docs-only diffs.  Recorded here rather than fixed in this PR
+  because it changes the repo's merge contract for every contributor.
 
 ## Zero-Code Findings
 
