@@ -13,6 +13,7 @@ permissions:
   contents: write
   pull-requests: write
 
+  issues: write
 concurrency:
   group: pr-autofix-${{ github.repository }}-${{ github.event.pull_request.number || github.event.inputs.pr }}
   cancel-in-progress: false
@@ -26,9 +27,10 @@ jobs:
       (github.event_name == 'pull_request_review' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
        contains(fromJSON('["chatgpt-codex-connector[bot]","chatgpt-codex-connector","kody-ai[bot]","kody-ai","cursor[bot]","cursor","sentry[bot]","sentry","claude[bot]","claude","swu-ag[bot]","swu-ag","swu-bf-builder[bot]","swu-bf-builder","swu-bf-compiler[bot]","swu-bf-compiler","swu-bf-deployer[bot]","swu-bf-deployer","swu-bf-designer[bot]","swu-bf-designer","swu-bf-director[bot]","swu-bf-director","swu-bf-fixer[bot]","swu-bf-fixer","swu-bf-housekeeper[bot]","swu-bf-housekeeper","swu-bf-monitor[bot]","swu-bf-monitor","swu-bf-oracle[bot]","swu-bf-oracle","swu-bf-plumber[bot]","swu-bf-plumber","swu-bf-publisher[bot]","swu-bf-publisher","swu-claude[bot]","swu-claude","swu-clutch[bot]","swu-clutch","swu-codex[bot]","swu-codex","swu-cursor[bot]","swu-cursor","swu-cursor-cloud[bot]","swu-cursor-cloud","swu-echo[bot]","swu-echo","swu-fx[bot]","swu-fx","swu-gb-compiler[bot]","swu-gb-compiler","swu-gb-deployer[bot]","swu-gb-deployer","swu-gb-designer[bot]","swu-gb-designer","swu-gb-director[bot]","swu-gb-director","swu-gb-engineer[bot]","swu-gb-engineer","swu-gb-fixer[bot]","swu-gb-fixer","swu-gb-housekeeper[bot]","swu-gb-housekeeper","swu-gb-monitor[bot]","swu-gb-monitor","swu-gb-oracle[bot]","swu-gb-oracle","swu-gb-plumber[bot]","swu-gb-plumber","swu-gb-publisher[bot]","swu-gb-publisher","swu-gb-trader[bot]","swu-gb-trader","swu-grok-build[bot]","swu-grok-build","swu-grok-web[bot]","swu-grok-web","swu-jet[bot]","swu-jet","swu-mc[bot]","swu-mc","swu-minimax[bot]","swu-minimax","swu-opencode[bot]","swu-opencode","swu-operator[bot]","swu-operator","swu-rob[bot]","swu-rob","swu-wise[bot]","swu-wise"]'), github.event.review.user.login))
-    uses: Simple-With-Us/congress-trading-shared/.github/workflows/codex-autofix-reusable.yml@31659885f58f08e129b6dc092f3493d7cdb74a11
+    uses: Simple-With-Us/congress-trading-shared/.github/workflows/codex-autofix-reusable.yml@346479236c431451689c9220e5160627d1699a1e
     secrets:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+      META_MODEL_API_TOKEN: ${{ secrets.META_MODEL_API_TOKEN }}
       USAGE_INGEST_TOKEN: ${{ secrets.USAGE_INGEST_TOKEN }}
     with:
       # Owner ruling 2026-10-20: all fleet MiniMax use goes to MiniMax-M3.1-Flash;
