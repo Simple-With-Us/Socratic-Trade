@@ -25,17 +25,21 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request_review' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
-       contains(fromJSON('["chatgpt-codex-connector[bot]","chatgpt-codex-connector","kody-ai[bot]","kody-ai","cursor[bot]","cursor","sentry[bot]","sentry"]'), github.event.review.user.login))
+       contains(fromJSON('["chatgpt-codex-connector[bot]","chatgpt-codex-connector","kody-ai[bot]","kody-ai","cursor[bot]","cursor","sentry[bot]","sentry","claude[bot]","claude","swu-ag[bot]","swu-ag","swu-bf-builder[bot]","swu-bf-builder","swu-bf-compiler[bot]","swu-bf-compiler","swu-bf-deployer[bot]","swu-bf-deployer","swu-bf-designer[bot]","swu-bf-designer","swu-bf-director[bot]","swu-bf-director","swu-bf-fixer[bot]","swu-bf-fixer","swu-bf-housekeeper[bot]","swu-bf-housekeeper","swu-bf-monitor[bot]","swu-bf-monitor","swu-bf-oracle[bot]","swu-bf-oracle","swu-bf-plumber[bot]","swu-bf-plumber","swu-bf-publisher[bot]","swu-bf-publisher","swu-claude[bot]","swu-claude","swu-clutch[bot]","swu-clutch","swu-codex[bot]","swu-codex","swu-cursor[bot]","swu-cursor","swu-cursor-cloud[bot]","swu-cursor-cloud","swu-echo[bot]","swu-echo","swu-fx[bot]","swu-fx","swu-gb-compiler[bot]","swu-gb-compiler","swu-gb-deployer[bot]","swu-gb-deployer","swu-gb-designer[bot]","swu-gb-designer","swu-gb-director[bot]","swu-gb-director","swu-gb-engineer[bot]","swu-gb-engineer","swu-gb-fixer[bot]","swu-gb-fixer","swu-gb-housekeeper[bot]","swu-gb-housekeeper","swu-gb-monitor[bot]","swu-gb-monitor","swu-gb-oracle[bot]","swu-gb-oracle","swu-gb-plumber[bot]","swu-gb-plumber","swu-gb-publisher[bot]","swu-gb-publisher","swu-gb-trader[bot]","swu-gb-trader","swu-grok-build[bot]","swu-grok-build","swu-grok-web[bot]","swu-grok-web","swu-jet[bot]","swu-jet","swu-mc[bot]","swu-mc","swu-minimax[bot]","swu-minimax","swu-opencode[bot]","swu-opencode","swu-operator[bot]","swu-operator","swu-rob[bot]","swu-rob","swu-wise[bot]","swu-wise"]'), github.event.review.user.login))
     uses: Simple-With-Us/congress-trading-shared/.github/workflows/codex-autofix-reusable.yml@31659885f58f08e129b6dc092f3493d7cdb74a11
     secrets:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
       USAGE_INGEST_TOKEN: ${{ secrets.USAGE_INGEST_TOKEN }}
     with:
-      allowed_bots: "chatgpt-codex-connector,chatgpt-codex-connector[bot],kody-ai,kody-ai[bot],cursor,cursor[bot],sentry,sentry[bot]"
+      # Owner ruling 2026-10-20: all fleet MiniMax use goes to MiniMax-M3.1-Flash;
+      # the pinned reusable still defaults to the retired Preview id.
+      model: MiniMax-M3.1-Flash
+      allowed_bots: "chatgpt-codex-connector,chatgpt-codex-connector[bot],kody-ai,kody-ai[bot],cursor,cursor[bot],claude,claude[bot],sentry,sentry[bot],swu-ag,swu-ag[bot],swu-bf-builder,swu-bf-builder[bot],swu-bf-compiler,swu-bf-compiler[bot],swu-bf-deployer,swu-bf-deployer[bot],swu-bf-designer,swu-bf-designer[bot],swu-bf-director,swu-bf-director[bot],swu-bf-fixer,swu-bf-fixer[bot],swu-bf-housekeeper,swu-bf-housekeeper[bot],swu-bf-monitor,swu-bf-monitor[bot],swu-bf-oracle,swu-bf-oracle[bot],swu-bf-plumber,swu-bf-plumber[bot],swu-bf-publisher,swu-bf-publisher[bot],swu-claude,swu-claude[bot],swu-clutch,swu-clutch[bot],swu-codex,swu-codex[bot],swu-cursor,swu-cursor[bot],swu-cursor-cloud,swu-cursor-cloud[bot],swu-echo,swu-echo[bot],swu-fx,swu-fx[bot],swu-gb-compiler,swu-gb-compiler[bot],swu-gb-deployer,swu-gb-deployer[bot],swu-gb-designer,swu-gb-designer[bot],swu-gb-director,swu-gb-director[bot],swu-gb-engineer,swu-gb-engineer[bot],swu-gb-fixer,swu-gb-fixer[bot],swu-gb-housekeeper,swu-gb-housekeeper[bot],swu-gb-monitor,swu-gb-monitor[bot],swu-gb-oracle,swu-gb-oracle[bot],swu-gb-plumber,swu-gb-plumber[bot],swu-gb-publisher,swu-gb-publisher[bot],swu-gb-trader,swu-gb-trader[bot],swu-grok-build,swu-grok-build[bot],swu-grok-web,swu-grok-web[bot],swu-jet,swu-jet[bot],swu-mc,swu-mc[bot],swu-minimax,swu-minimax[bot],swu-opencode,swu-opencode[bot],swu-operator,swu-operator[bot],swu-rob,swu-rob[bot],swu-wise,swu-wise[bot]"
       prompt: |
         You are the autonomous fixer that responds to the PR review bots (Codex
-        chatgpt-codex-connector[bot], Kody kody-ai[bot], Cursor cursor[bot], and
-        Sentry/Seer sentry[bot]) on THIS
+        chatgpt-codex-connector[bot], Kody kody-ai[bot], Cursor cursor[bot],
+        Sentry/Seer sentry[bot], Claude claude[bot], and the swu-* fleet bots
+        listed in allowed_bots) on THIS
         pull request.  You do NOT review the PR yourself.  The bots are the reviewers;
         you only address their feedback.
 

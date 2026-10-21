@@ -1,6 +1,6 @@
 # Enabled fleet wide by the owner on 2026-10-11 (boards 04b963b7 and 99e559ea).
-# MiniMax M3 via its direct OpenAI-compatible endpoint, paid; at most 5 attempts per UTC day in this repository.
-name: Kody MiniMax M3 Fix Proposals
+# MiniMax M3.1 Flash via its direct OpenAI-compatible endpoint, paid; at most 5 attempts per UTC day in this repository.
+name: Kody MiniMax M3.1 Flash Fix Proposals
 
 # Generated offline.  Missing SWU_KODY_AUTOFIX_ENABLED means disabled.
 # MODEL_API_KEY is forwarded explicitly; secrets are never inherited.
@@ -40,7 +40,7 @@ jobs:
       source_prefixes: '["src/","app/"]'
       daily_attempt_limit: 5
       budget_policy_id: 'approved-owner-2026-10-11'
-      model: 'MiniMax-M3'
+      model: 'MiniMax-M3.1-Flash'
       model_base_url: 'https://api.minimax.io/v1'
     secrets:
       MODEL_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
