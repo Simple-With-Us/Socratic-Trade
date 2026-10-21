@@ -7478,7 +7478,10 @@ against production, close ST-4565 out, and delete the remote branch.
 **The local vitest suite no longer writes enrichment coverage rows into the checkout's own
 untracked `data/app.db`,** and `test/data-catalog-completeness.test.ts` now passes whatever order
 the test files run in.  The defect behind it was ST-4570, raised from P2 to P1 while this was in
-flight.
+flight.  The change itself is not in this diff: it is
+[PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911), merged to `main` as
+`a947fa125` on 2026-10-21, so the repository state this entry describes is the state of `main`
+after that merge and not something this branch carries.
 
 The reader asserts an empty-database universe, but `buildDataCompletenessReport` reads the newest
 persisted enrichment coverage report back and uses its `fillRate` as a field's `completeness`
@@ -7528,8 +7531,10 @@ The bullet was the only one still carrying the falsified account; `STATUS.md` an
 Verification State section already carried the corrected one.
 
 **The house gap rules were repaired on the same pass.**  The rollout note carried five whitespace
-defects of its own and the lines this branch added to `STATUS.md` and `PLAN.md` carried thirty-six
-more of the same class: a colon or a semicolon followed by two spaces, and one sentence end with a
-single space.  Those are the owner's scope rule, where a colon, a semicolon, a comma or a dash
-takes one ordinary space and the gap belongs after `.`, `!` and `?`.  All forty-one are now one
-space, and the rollout note audits clean at 162 sentence boundaries with 162 two-space gaps.
+defects of its own — three colons and one dash followed by two spaces, and one sentence end with a
+single space — and the lines this branch added to `STATUS.md` and `PLAN.md` carried thirty-six more
+of the same class: thirty-five colons, semicolons, commas or dashes followed by two spaces, and one
+sentence end with a single space.  Those are the owner's scope rule, where a colon, a semicolon, a
+comma or a dash takes one ordinary space and the gap belongs after `.`, `!` and `?`.  Of the
+forty-one, the thirty-nine scope sites are now one space and the two sentence ends are now two
+spaces, so the two rules are closed by different edits.

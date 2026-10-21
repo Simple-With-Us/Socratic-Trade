@@ -2842,7 +2842,10 @@ enrichment coverage rows into the checkout's own untracked `data/app.db`, and
 Three files that could reach the persistence path without owning a database now own one, which is
 what `test/reindex-all.test.ts:8` already states as the repo convention and what 458 of the 854
 test files already do.  No production code changed and no test assertion was weakened: the reader's
-empty-universe premise is now true by construction rather than by luck.
+empty-universe premise is now true by construction rather than by luck.  The change itself is not
+in this diff: it is [PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911), merged
+to `main` as `a947fa125` on 2026-10-21, so this entry records the state of `main` after that merge
+rather than anything this branch carries.
 
 The detail that shaped the change: the persistence is a fire-and-forget dynamic import, so it can
 resolve after the test that triggered it has finished.  Restoring the database path per test is

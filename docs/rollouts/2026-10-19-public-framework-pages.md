@@ -628,20 +628,24 @@ The bullet was the only one still carrying the falsified account; `STATUS.md` an
 State section above already carried the corrected one.
 
 **The house gap rules were repaired on the same pass.**  This document carried five whitespace
-defects of its own — four colons followed by two spaces and one sentence end with a single space —
-and the lines this branch added to `STATUS.md` and `PLAN.md` carried thirty-six more of the same
-class.  Those are the owner's scope rule, where a colon, a semicolon, a comma or a dash takes one
-ordinary space and the gap belongs after `.`, `!` and `?`.  All forty-one are now one space, and
-this document audits clean at 168 sentence boundaries with 168 two-space gaps.  That pass did not
-close the class, and the ninth round below closes the last two sites on the branch.
+defects of its own — three colons and one dash followed by two spaces, and one sentence end with a
+single space — and the lines this branch added to `STATUS.md` and `PLAN.md` carried thirty-six more
+of the same class.  Those are the owner's scope rule, where a colon, a semicolon, a comma or a dash
+takes one ordinary space and the gap belongs after `.`, `!` and `?`.  Of the forty-one, the
+thirty-nine scope sites are now one space and the two sentence ends are now two spaces, so the two
+rules are closed by different edits.  A sweep of this document, with inline code spans blanked
+first, finds no colon, semicolon, comma or dash taking two spaces and no sentence end left with a
+single space.  That pass did not close either class, and the ninth round below closes the last two
+sites on the branch.
 
 ## Review Findings, Ninth Round
 
-### 17. The colon and semicolon class was still open on two lines this branch adds
+### 17. The whitespace class was still open on two lines this branch touches
 
 The eighth-round sweep repaired 41 sites and called the class closed.  It was not closed.  A
 second pass over the same class in this document and in `PLAN.md` found twenty-eight more here
-and three there, and those are one space as well.  A third pass found the last two.
+and three there, and those are one space as well.  A third pass found the last two, and they are
+one colon site and one sentence-gap site, which are two different rules.
 
 - `PLAN.md` line 2708 carried `copy-rule lint:  22 sentence-gap violations in the new public copy`,
   where the colon took two spaces.  It takes one space now.  The wording is a paraphrase of the
@@ -657,10 +661,10 @@ historical rows on main are out of scope.  And it skips a boundary that sits ins
 span or that is one half of a `??` nullish operator, which is exactly where the earlier pass
 produced its false positives.
 
-With these two closed, every line this branch adds carries the house gap rules.  This document
-audits clean at 168 sentence boundaries with 168 two-space gaps, and the added lines in
-`STATUS.md`, `PLAN.md` and `docs/FEATURE-ENABLEMENT-BACKLOG.md` carry no colon, semicolon, comma
-or dash with two spaces, and no sentence end that is followed by more text without its two spaces.
+With these two closed, every line this branch adds carries the house gap rules.  A sweep of this
+document, with inline code spans blanked first, finds no colon, semicolon, comma or dash taking
+two spaces and no sentence end followed by more text without its two spaces, and the added lines in
+`STATUS.md`, `PLAN.md` and `docs/FEATURE-ENABLEMENT-BACKLOG.md` carry the same.
 
 ## Zero-Code Findings
 
