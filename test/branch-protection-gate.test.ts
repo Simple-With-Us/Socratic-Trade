@@ -286,9 +286,13 @@ describe("required contexts are not renamed out from under the ruleset", () => {
     // its `|| echo` would swallow the failure and leave the PR never armed.
     const shared = workflow("auto-merge-shared-dependency.yml");
     const sharedJob = jobBlock(shared, "auto-merge");
+    // Normalize before asserting: a prose comment must not satisfy the
+    // control, and a shell line continuation must not hide --delete-branch
+    // from the scan (Kody review, PR #4893).
+    const normalized = withoutComments(sharedJob).replace(/\\\n\s*/g, " ");
     // Control: the negative assertion is vacuous if the job lookup missed, so
     // first prove the armer's merge command is actually in the block.
-    expect(sharedJob).toContain("gh pr merge");
-    expect(sharedJob).not.toMatch(/gh pr merge[^\n]*--delete-branch/);
+    expect(normalized).toContain("gh pr merge");
+    expect(normalized).not.toMatch(/gh pr merge[^\n]*--delete-branch/);
   });
 });
