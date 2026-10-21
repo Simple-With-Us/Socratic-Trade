@@ -2673,3 +2673,16 @@ therefore the wrong shape for a writer, even though it is the right shape for a 
 writer files hold their path for the whole file instead.  That was measured, not assumed.
 
 Rollout: `docs/rollouts/2026-10-21-st-4570-suite-db-isolation.md`.
+
+## 2026-10-21 — [MM] The stall test stops timing a no-op (ST-4550)
+
+Not a scope change:  a test-guard defect fix.  The required `verify` gate was reddening on pull
+requests that did not touch the offending file, because one case in
+`test/event-loop-stall-hot-path.test.ts` inserted 2,000,000 rows to time a function that returns a
+constant.  The case now asserts the never-deletes invariant that survives Jay's 2026-10-15
+retention policy, on 1,000 aged rows, in milliseconds, and it can fail.  No production code changed
+and no live assertion was weakened:  the retired one was undecidable, because a function that
+returns a constant reads nothing, so its wall clock was a property of the machine rather than of
+the code.  The other two cases in that file keep their wall-clock assertions on purpose, because
+the ROIC artifact walk and the transcript coverage read are real I/O with real subjects.
+Rollout: `docs/rollouts/2026-10-21-st-4550-stall-test-guard.md`.
