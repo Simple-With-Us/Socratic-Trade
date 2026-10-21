@@ -56,7 +56,7 @@ export FAKE_OTHER_PEM="${tmp}/other.p8"
 
 extract() {
   awk '
-    /^fleet_secret_get\(\) \{/ || /^load_secrets\(\) \{/ || /^asc_cleanup\(\) \{/ { grab = 1 }
+    /^fleet_secret_get\(\) \{/ || /^load_secrets\(\) \{/ || /^asc_cleanup\(\) \{/ || /^asc_pem_preview\(\) \{/ { grab = 1 }
     grab { print }
     grab && /^\}/ { grab = 0 }
   ' "$script"
@@ -84,6 +84,7 @@ CJS
 funcs="${tmp}/funcs.sh"
 {
   echo 'log() { echo "$*" >> "${LOG_FILE}"; }'
+  echo 'die() { echo "error: $*" >&2; exit 1; }'
   echo 'ASC_TMP_DIR=""'
   echo "FLEET_SECRETS_BIN=\"${tmp}/fleet-secrets\""
   echo "FLEET_DIR=\"${here}\""
@@ -262,17 +263,42 @@ for shape in plain plain-with-or split-across-lines nested; do
   fi
 done
 
-# 2c. An ambient ASC_KEY_P8 that is not a PEM private key is ignored, and the
-# run fails closed rather than signing with something that is not a key.
+# 2c. An ambient ASC_KEY_P8 that is not a PEM private key is fatal, and the
+# message carries a masked preview of the PEM body, so the value that failed
+# can be identified without the key material being printed.
 : > "$FAKE_LOG"
 : > "$LOG_FILE"
-ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer ASC_KEY_P8="not a private key at all" bash -c '
+if ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer ASC_KEY_P8="not a private key at all" bash -c '
   set -euo pipefail
   source "'"$funcs"'"
-  load_secrets
-  [[ "$AUTH_MODE" == none && -z "$ASC_TMP_DIR" ]]
-  [[ -z "${ASC_KEY_P8:-}" ]]
-' || fail "an ASC_KEY_P8 that is not a key was adopted"
+  load_secrets required
+' 2>"${tmp}/invalid-key.err"; then
+  fail "an ASC_KEY_P8 that is not a key was accepted"
+fi
+grep -q 'does not hold a PEM private key' "${tmp}/invalid-key.err" ||
+  fail "the refused ASC_KEY_P8 was not named in the failure"
+grep -q 'body no PEM body' "${tmp}/invalid-key.err" ||
+  fail "the refused ASC_KEY_P8 carried no masked preview"
+
+# 2c-quiet. A refused value never reaches a log line with its body in it.
+if grep -Fq 'not a private key at all' "${tmp}/invalid-key.err" "$LOG_FILE"; then
+  fail "the refused ASC_KEY_P8 was printed"
+fi
+
+# 2c-preview. A value that carries the PEM envelope is previewed:  the first
+# eight and the last four characters of the body, and nothing else.
+if ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer ASC_KEY_P8="$(printf '%s\n' '-----BEGIN PRIVATE KEY-----' 'SYNTHETICBADBODYHERE' '-----END PRIVATE KEY-----')" bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  load_secrets required
+' 2>"${tmp}/preview.err"; then
+  fail "an ASC_KEY_P8 that is not a key was accepted"
+fi
+grep -q 'body SYNTHETI...HERE' "${tmp}/preview.err" ||
+  fail "the masked preview of the PEM body is not the first-eight/last-four form"
+if grep -Fq 'SYNTHETICBADBODYHERE' "${tmp}/preview.err"; then
+  fail "the whole PEM body was printed"
+fi
 
 # 2c-bis. A PEM stored with literal backslash-n separators is a real key, so
 # the separators become newlines before the module sees the value.  Without
@@ -292,16 +318,18 @@ ASC_KEY_ID=ENVKEYLIT1 ASC_ISSUER_ID=env-issuer ASC_KEY_P8="$literal" bash -c '
   asc_cleanup
 ' || fail "a PEM stored with literal backslash-n separators was refused"
 
-# 2d. An ambient ASC_KEY_P8 without a key id is ignored:  the key id, the
-# issuer and the key belong together.
+# 2d. An ambient ASC_KEY_P8 without a key id is fatal:  the key id, the
+# issuer and the key belong together, and the failure names what is missing.
 : > "$FAKE_LOG"
-ASC_KEY_ID="" ASC_ISSUER_ID="" ASC_KEY_P8="$(<"${tmp}/other.p8")" bash -c '
+if ASC_KEY_ID="" ASC_ISSUER_ID="" ASC_KEY_P8="$(<"${tmp}/other.p8")" bash -c '
   set -euo pipefail
   source "'"$funcs"'"
-  load_secrets
-  [[ "$AUTH_MODE" == api_key && "$ASC_KEY_ID" == ABCDE12345 ]]
-  same_as_file "$ASC_KEY_P8" "'"$tmp"'/asc.p8"
-' || fail "an ASC_KEY_P8 without a key id was adopted"
+  load_secrets required
+' 2>"${tmp}/no-key-id.err"; then
+  fail "an ASC_KEY_P8 without a key id was accepted"
+fi
+grep -q 'ASC_KEY_ID is missing' "${tmp}/no-key-id.err" ||
+  fail "the missing key id was not named in the failure"
 
 # 2e. An env key id that is NOT the /asc one never gets the /asc key:  its own .p8 comes from
 # /authkey-<id>-p8, and /asc ASC_KEY_P8 is not requested.
@@ -320,14 +348,17 @@ grep -q '^AUTHKEY_OTHERKEY01 /authkey-otherkey01-p8$' "$FAKE_LOG" || fail "did n
 if grep -q '^ASC_KEY_P8 ' "$FAKE_LOG"; then fail "mixed an env key id with the /asc key"; fi
 
 # 2f. An env key id that is not the /asc one with NO env issuer fails closed:  the /asc issuer
-# is never paired with another key's .p8.
+# is never paired with another key's .p8, and the failure names what is missing.
 : > "$FAKE_LOG"
-env -u ASC_KEY_PATH -u ASC_ISSUER_ID -u ASC_KEY_P8 ASC_KEY_ID=OTHERKEY01 bash -c '
+if env -u ASC_KEY_PATH -u ASC_ISSUER_ID -u ASC_KEY_P8 ASC_KEY_ID=OTHERKEY01 bash -c '
   set -euo pipefail
   source "'"$funcs"'"
-  load_secrets
-  [[ "$AUTH_MODE" == none && -z "$ASC_TMP_DIR" ]]
-' || fail "mixed the /asc issuer with another key"
+  load_secrets required
+' 2>"${tmp}/no-issuer.err"; then
+  fail "mixed the /asc issuer with another key"
+fi
+grep -q 'ASC_ISSUER_ID is missing' "${tmp}/no-issuer.err" ||
+  fail "the missing issuer was not named in the failure"
 if grep -q '^ASC_ISSUER_ID ' "$FAKE_LOG"; then fail "asked /asc for an issuer for a different key id"; fi
 
 # 2g. An env key id equal to the /asc one uses the /asc key.
@@ -342,14 +373,18 @@ env -u ASC_KEY_PATH -u ASC_ISSUER_ID -u ASC_KEY_P8 ASC_KEY_ID=ABCDE12345 bash -c
 ' || fail "env key id equal to /asc was not served from /asc"
 grep -q '^ASC_KEY_P8 /asc$' "$FAKE_LOG" || fail "did not ask /asc ASC_KEY_P8"
 
-# 2h. An env key id with no key material anywhere fails closed (no api_key mode).
+# 2h. An env key id with no key material anywhere fails closed, and the
+# failure names the key whose material is missing.
 : > "$FAKE_LOG"
-env -u ASC_KEY_PATH -u ASC_KEY_P8 ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer bash -c '
+if env -u ASC_KEY_PATH -u ASC_KEY_P8 ASC_KEY_ID=NOSUCHKEY0 ASC_ISSUER_ID=any-issuer bash -c '
   set -euo pipefail
   source "'"$funcs"'"
-  load_secrets
-  [[ "$AUTH_MODE" == none && -z "$ASC_TMP_DIR" ]]
-' || fail "missing key material did not fail closed"
+  load_secrets required
+' 2>"${tmp}/no-key-material.err"; then
+  fail "missing key material did not fail closed"
+fi
+grep -q 'the .p8 for key NOSUCHKEY0 is missing' "${tmp}/no-key-material.err" ||
+  fail "the missing key material was not named in the failure"
 
 # 2i. A named ASC_KEY_PATH that names nothing is ignored the same way:  the
 # credential comes from Infisical, and the named path is never read.
@@ -377,6 +412,20 @@ if [[ -f "$workflow" ]]; then
     fail "the hosted workflow puts key material in the environment file"
   fi
 fi
+
+# 2j-bis. The early call leaves the credential optional:  the build phase may
+# never reach App Store Connect, so a missing credential is reported and the
+# run continues.  The call that requires it is the one before the upload.
+: > "$FAKE_LOG"
+env -u ASC_KEY_PATH -u ASC_KEY_P8 -u ASC_KEY_ID -u ASC_ISSUER_ID bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  #  No reader at all, so there is no source left for the credential.
+  FLEET_SECRETS_BIN=/nonexistent/fleet-secrets
+  PATH="$(dirname "$(command -v node)"):/usr/bin:/bin"
+  load_secrets
+  [[ "$AUTH_MODE" == none && -z "$ASC_TMP_DIR" ]]
+' || fail "the optional call did not survive a missing credential"
 
 # 3. The credential never travels in a command argument.  The secret reaches
 # the child through the environment, so its own argv must not carry it.

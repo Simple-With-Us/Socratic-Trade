@@ -73,6 +73,20 @@ function decodeP8(base64) {
 }
 
 /**
+ * A masked preview of a PEM body:  the first eight and the last four
+ * characters of the base64 body, so a value that was refused can be
+ * identified in a log without the key material ever being printed.
+ */
+function pemPreview(value) {
+  const body = String(value || "")
+    .split("\n")
+    .filter((line) => !line.startsWith("-----"))
+    .join("");
+  if (!body) return "no PEM body";
+  return `${body.slice(0, 8)}...${body.slice(-4)}`;
+}
+
+/**
  * Resolve the App Store Connect credential.
  *
  * The order is the rule (AFC-459, revision 2):  the environment beats the
@@ -96,9 +110,12 @@ export function resolveAscCredentials() {
   const appleIssuerId = fromEnv("APPLE_API_ISSUER_ID");
   const appleBase64 = fromEnv("APPLE_API_KEY_P8_BASE64");
   if (appleKeyId && appleIssuerId && appleBase64) {
-    const pem = normalizePrivateKey(decodeP8(appleBase64));
+    const decoded = decodeP8(appleBase64);
+    const pem = normalizePrivateKey(decoded);
     if (!pem) {
-      return { error: "APPLE_API_KEY_P8_BASE64 is set but did not decode to a PEM private key" };
+      return {
+        error: `APPLE_API_KEY_P8_BASE64 is set but did not decode to a PEM private key (body ${pemPreview(decoded)})`
+      };
     }
     return {
       keyId: appleKeyId,
@@ -115,9 +132,11 @@ export function resolveAscCredentials() {
   const envIssuerId = fromEnv("ASC_ISSUER_ID");
   const envKeyPem = fromEnv("ASC_KEY_P8");
   if (envKeyId && envIssuerId && envKeyPem) {
-    const pem = normalizePrivateKey(envKeyPem.replace(/\\n/g, "\n"));
+    const pem = normalizePrivateKey(envKeyPem);
     if (!pem) {
-      return { error: "ASC_KEY_P8 is set but is not a PEM private key" };
+      return {
+        error: `ASC_KEY_P8 is set but is not a PEM private key (body ${pemPreview(envKeyPem)})`
+      };
     }
     return {
       keyId: envKeyId,
@@ -129,13 +148,17 @@ export function resolveAscCredentials() {
 
   // 3. Infisical Fleet-OPS /asc.  The /asc issuer belongs to the /asc key, so
   //    a key id that is not the /asc one never gets the /asc issuer; it gets
-  //    its own key from /authkey-<id>-p8.
+  //    its own key from /authkey-<id>-p8.  An issuer named in the environment
+  //    belongs to the key named with it, so it is only trusted when the
+  //    environment named the key id too:  otherwise a stale issuer would be
+  //    paired with the /asc key.
   const infisicalKeyId = fleetSecret("ASC_KEY_ID");
   const keyId = envKeyId || infisicalKeyId;
-  const issuerId =
-    envIssuerId || (keyId && keyId === infisicalKeyId ? fleetSecret("ASC_ISSUER_ID") : "");
+  const issuerId = envKeyId
+    ? envIssuerId || (keyId === infisicalKeyId ? fleetSecret("ASC_ISSUER_ID") : "")
+    : fleetSecret("ASC_ISSUER_ID");
   if (!keyId || !issuerId) {
-    return { error: null };
+    return { keyId, issuerId, error: null };
   }
   let keyPem = "";
   if (keyId === infisicalKeyId) {
@@ -145,11 +168,15 @@ export function resolveAscCredentials() {
     keyPem = fleetSecret(`AUTHKEY_${keyId}`, `/authkey-${keyId.toLowerCase()}-p8`);
   }
   if (!keyPem) {
-    return { error: null };
+    return { keyId, issuerId, error: null };
   }
-  const pem = normalizePrivateKey(keyPem.replace(/\\n/g, "\n"));
+  const pem = normalizePrivateKey(keyPem);
   if (!pem) {
-    return { error: "the App Store Connect key in Infisical /asc is not a PEM private key" };
+    return {
+      keyId,
+      issuerId,
+      error: `the App Store Connect key in Infisical /asc is not a PEM private key (body ${pemPreview(keyPem)})`
+    };
   }
   return { keyId, issuerId, privateKeyPem: pem, source: "Infisical /asc" };
 }
@@ -499,8 +526,12 @@ async function main() {
     process.exit(1);
   }
   if (!cred.privateKeyPem) {
+    const missing = [];
+    if (!cred.keyId) missing.push("ASC_KEY_ID");
+    if (!cred.issuerId) missing.push("ASC_ISSUER_ID");
+    const named = missing.length ? ` (${missing.join(" and ")} missing)` : "";
     console.error(
-      "asc-auth: no App Store Connect credential found. Tried, in order:\n" +
+      `asc-auth: no App Store Connect credential found${named}. Tried, in order:\n` +
       "  1) APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_P8_BASE64 in the environment\n" +
       "  2) ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_P8 in the environment\n" +
       "  3) Fleet-OPS prod /asc through fleet-secrets\n" +

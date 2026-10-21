@@ -153,6 +153,16 @@ test("a generated key is accepted and comes back with a trailing newline", () =>
   assert.equal(normalized.trim(), keyPem.trim());
 });
 
+test("a PEM stored with literal backslash-n separators is a real key", () => {
+  //  The shell layer, this module and the client all have to agree on what a
+  //  key is, so the separators become newlines in the one place they use.
+  const literal = keyPem.split("\n").join("\\n");
+  const normalized = normalizePrivateKey(literal);
+  assert.ok(normalized, "a key with literal separators was refused");
+  assert.equal(normalized.trim(), keyPem.trim());
+  assert.ok(normalized.includes("\n"), "the separators were not turned into newlines");
+});
+
 test("a malformed PEM is refused, because the envelope is not a key", () => {
   //  A truncated key, an armored block and a mangled export all carry the
   //  envelope and still fail to parse.  Accepting them would hand the signer

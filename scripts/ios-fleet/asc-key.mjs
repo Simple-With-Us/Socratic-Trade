@@ -44,9 +44,17 @@ import { createPrivateKey } from "node:crypto";
 // unparsable key that reaches the signer comes back as a raw stack trace
 // instead of a credential error.  So the key is parsed before it is accepted.
 //
+// A PEM that was stored with literal backslash-n separators is a real key, so
+// the separators become newlines here, in the one place the shell layer, this
+// module and the client all use.  Without that, the shell refuses a
+// credential the client would sign with.
+//
 // Returns the normalized PEM, or null when the value is not a private key.
 export function normalizePrivateKey(value) {
-  const pem = String(value || "").replace(/\r\n/g, "\n").trim();
+  const pem = String(value || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\\n/g, "\n")
+    .trim();
   if (!pem) return null;
   if (!/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/.test(pem)) return null;
   try {

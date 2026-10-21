@@ -209,8 +209,32 @@ fleet_secret_get() {
 # with the wrong key, and App Store Connect would answer 401 without saying
 # which input was wrong.  The key material never enters a command argument and
 # never reaches a log line.
+# A masked preview of a PEM body:  the first eight and the last four
+# characters of the base64 body.  It identifies a refused value in a log
+# without the key material ever being printed.
+asc_pem_preview() {
+  local value="$1" body=""
+  if printf '%s' "$value" | grep -q -- '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----'; then
+    body="$(printf '%s\n' "$value" | sed '1d;$d' | tr -d '\n')"
+  fi
+  if [[ -z "$body" ]]; then
+    printf 'no PEM body'
+    return 0
+  fi
+  printf '%s...%s' "${body:0:8}" "${body: -4}"
+}
+
 load_secrets() {
+  # load_secrets [required]
+  #
+  # "required" makes a missing credential fatal, and the failure names what is
+  # missing.  The early call leaves it optional, because the build phase may
+  # never reach App Store Connect:  a dry run, a manual-sign export and a run
+  # that stops before the upload never sign a request with it.  The upload
+  # call is the one that requires it.
+  local required="${1:-0}"
   AUTH_MODE="none"
+  ASC_MISSING=""
   local kid="${ASC_KEY_ID:-}" iss="${ASC_ISSUER_ID:-}" p8="" fkid="" lower
   local key_pem="" key_path="" rc=0
   #  A named ASC_KEY_PATH is not a credential source.  It is remembered only
@@ -220,23 +244,36 @@ load_secrets() {
   # 1. An ambient ASC_KEY_P8.  It is only usable when it really is a PEM
   #    private key and comes with the key id and issuer it belongs to.  It is
   #    resolved first, so nothing can override it.
+  #
+  #    A rejected value is fatal and carries a masked preview of the PEM body,
+  #    so the value that failed can be identified without the key material
+  #    ever being printed.  Silently falling back would sign the upload with
+  #    a different key than the one the operator named.
   if [[ -n "${ASC_KEY_P8:-}" ]]; then
-    if [[ -z "$kid" || -z "$iss" ]]; then
-      log "ASC_KEY_P8 is set without ASC_KEY_ID and ASC_ISSUER_ID; ignoring it"
-      unset ASC_KEY_P8
-    else
-      rc=0
-      # A PEM stored with literal backslash-n separators is a real key, so the
-      # separators become newlines before the module sees the value.
-      ambient_pem="${ASC_KEY_P8//\\n/$'\n'}"
-      node "${FLEET_DIR}/asc-key.mjs" validate >/dev/null 2>&1 <<< "$ambient_pem" || rc=$?
-      if [[ "$rc" -ne 0 ]]; then
-        log "ASC_KEY_P8 is set but does not hold a PEM private key; ignoring it"
-        unset ASC_KEY_P8
-      else
-        key_pem="$ambient_pem"
+    if [[ -z "$kid" ]]; then
+      ASC_MISSING="ASC_KEY_ID"
+      if [[ "$required" == "required" ]]; then
+        die "ASC_KEY_ID is missing: ASC_KEY_P8 is set, but the key id it belongs to is not.  Set ASC_KEY_ID and ASC_ISSUER_ID in the environment, or add ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 to Infisical /asc"
       fi
+      log "ASC_KEY_ID is missing: ASC_KEY_P8 is set, but the key id it belongs to is not"
+      return 0
     fi
+    if [[ -z "$iss" ]]; then
+      ASC_MISSING="ASC_ISSUER_ID"
+      if [[ "$required" == "required" ]]; then
+        die "ASC_ISSUER_ID is missing: ASC_KEY_P8 is set, but the issuer it belongs to is not.  Set ASC_ISSUER_ID in the environment, or add ASC_ISSUER_ID to Infisical /asc"
+      fi
+      log "ASC_ISSUER_ID is missing: ASC_KEY_P8 is set, but the issuer it belongs to is not"
+      return 0
+    fi
+    rc=0
+    # A PEM stored with literal backslash-n separators is a real key, so the
+    # module turns the separators into newlines before it parses the value.
+    node "${FLEET_DIR}/asc-key.mjs" validate >/dev/null 2>&1 <<< "$ASC_KEY_P8" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+      die "ASC_KEY_P8 is set but does not hold a PEM private key (body $(asc_pem_preview "$ASC_KEY_P8"))"
+    fi
+    key_pem="$ASC_KEY_P8"
   fi
 
   # 2. The key id, issuer and private key must belong together:  with nothing
@@ -252,8 +289,20 @@ load_secrets() {
       # env named the /asc key itself:  its issuer is the /asc one
       iss="$(fleet_secret_get ASC_ISSUER_ID /asc || true)"
     fi
-    if [[ -z "$kid" || -z "$iss" ]]; then
-      log "ASC credentials missing: set ASC_KEY_ID/ASC_ISSUER_ID/ASC_KEY_P8 or add ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 to Infisical /asc"
+    if [[ -z "$kid" ]]; then
+      ASC_MISSING="ASC_KEY_ID"
+      if [[ "$required" == "required" ]]; then
+        die "ASC_KEY_ID is missing: set ASC_KEY_ID in the environment, or add ASC_KEY_ID to Infisical /asc"
+      fi
+      log "ASC_KEY_ID is missing: set ASC_KEY_ID in the environment, or add ASC_KEY_ID to Infisical /asc"
+      return 0
+    fi
+    if [[ -z "$iss" ]]; then
+      ASC_MISSING="ASC_ISSUER_ID"
+      if [[ "$required" == "required" ]]; then
+        die "ASC_ISSUER_ID is missing: set ASC_ISSUER_ID in the environment, or add ASC_ISSUER_ID to Infisical /asc"
+      fi
+      log "ASC_ISSUER_ID is missing: set ASC_ISSUER_ID in the environment, or add ASC_ISSUER_ID to Infisical /asc"
       return 0
     fi
     if [[ "$kid" == "$fkid" ]]; then
@@ -263,12 +312,14 @@ load_secrets() {
       p8="$(fleet_secret_get "AUTHKEY_${kid}" "/authkey-${lower}-p8" || true)"
     fi
     if [[ -z "$p8" ]]; then
-      log "missing the .p8 for key ${kid}: Infisical /asc ASC_KEY_P8 (the /asc key) or /authkey-<id>-p8 AUTHKEY_<id>"
+      ASC_MISSING="the .p8 for key ${kid}"
+      if [[ "$required" == "required" ]]; then
+        die "the .p8 for key ${kid} is missing: Infisical /asc ASC_KEY_P8 (the /asc key) or /authkey-<id>-p8 AUTHKEY_<id>"
+      fi
+      log "the .p8 for key ${kid} is missing: Infisical /asc ASC_KEY_P8 (the /asc key) or /authkey-<id>-p8 AUTHKEY_<id>"
       return 0
     fi
-    # A PEM stored with literal backslash-n separators is a real key, so the
-    # separators become newlines before the module sees the value.
-    key_pem="${p8//\\n/$'\n'}"
+    key_pem="$p8"
     p8=""
   fi
 
@@ -282,8 +333,7 @@ load_secrets() {
   fi
   key_path="${ASC_TMP_DIR}/AuthKey_${kid}.p8"
   if ! node "${FLEET_DIR}/asc-key.mjs" write "$key_path" <<< "$key_pem"; then
-    log "could not write the ASC key file; the credential is not usable"
-    return 0
+    die "the ASC key file could not be written; the credential is not usable"
   fi
   # altool searches API_PRIVATE_KEYS_DIR first, so no symlink into ~/.appstoreconnect is needed.
   export API_PRIVATE_KEYS_DIR="$ASC_TMP_DIR"
@@ -1429,11 +1479,13 @@ PACKAGE="$(ls -1 "$EXPORT_DIR"/*.ipa "$EXPORT_DIR"/*.pkg 2>/dev/null | head -1 |
 [[ -n "$PACKAGE" ]] || die "no IPA or PKG produced in $EXPORT_DIR"
 
 # Re-load secrets before altool: long xcodebuild sessions can leave ASC_*
-# unset under `set -u` even when AUTH_MODE was api_key at plan time.
-load_secrets
+# unset under `set -u` even when AUTH_MODE was api_key at plan time.  This is
+# the call that requires the credential:  the upload signs a request with it,
+# so a missing one is fatal here and the failure names what is missing.
+load_secrets required
 if [[ "$AUTH_MODE" != "api_key" ]]; then
   log "Package ready at: $PACKAGE"
-  log "Upload blocked: no App Store Connect API key."
+  log "Upload blocked: no App Store Connect API key (${ASC_MISSING:-the credential} is missing)."
   log "Owner handoff:"
   log "  1) Create ASC API key (App Manager+) in App Store Connect"
   log "  2) Store it in Infisical Fleet-OPS /asc: ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8 (the .p8 contents)"

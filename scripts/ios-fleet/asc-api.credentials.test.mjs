@@ -189,9 +189,49 @@ test("resolveAscCredentials ignores blank env values in favour of Infisical", (t
   assert.equal(creds.error, undefined);
   assert.equal(creds.keyId, "INF_ID");
   //  A blank key id falls back to Infisical, and an issuer named in the
-  //  environment still belongs to the /asc key it came with.
-  assert.equal(creds.issuerId, "env-issuer");
+  //  environment belongs to the key named with it:  the environment named no
+  //  key id, so the issuer is the /asc one.
+  assert.equal(creds.issuerId, "inf-issuer");
   assert.equal(creds.source, "Infisical /asc");
+});
+
+test("resolveAscCredentials never pairs an environment issuer with the /asc key", (t) => {
+  //  The issuer belongs to a key.  When the environment names an issuer but
+  //  no key id, the key comes from Infisical, so the issuer has to come from
+  //  there too:  a stale issuer would be paired with the /asc key and App
+  //  Store Connect would answer 401 with a mismatched input.
+  fakeFleetSecrets(t, {
+    "/asc:ASC_KEY_ID": "INF_ID",
+    "/asc:ASC_ISSUER_ID": "inf-issuer",
+    "/asc:ASC_KEY_P8": envPem
+  });
+  clearAsc();
+  process.env.ASC_ISSUER_ID = "stale-env-issuer";
+
+  const creds = resolveAscCredentials();
+  assert.equal(creds.error, undefined);
+  assert.equal(creds.keyId, "INF_ID");
+  assert.equal(creds.issuerId, "inf-issuer");
+  assert.equal(creds.source, "Infisical /asc");
+});
+
+test("resolveAscCredentials keeps an environment issuer with the environment key id", (t) => {
+  //  The environment named both, so they belong together.
+  fakeFleetSecrets(t, {
+    "/asc:ASC_KEY_ID": "INF_ID",
+    "/asc:ASC_ISSUER_ID": "inf-issuer",
+    "/asc:ASC_KEY_P8": envPem
+  });
+  clearAsc();
+  process.env.ASC_KEY_ID = "ENVKEYID1";
+  process.env.ASC_ISSUER_ID = "env-issuer";
+  process.env.ASC_KEY_P8 = envPem;
+
+  const creds = resolveAscCredentials();
+  assert.equal(creds.error, undefined);
+  assert.equal(creds.keyId, "ENVKEYID1");
+  assert.equal(creds.issuerId, "env-issuer");
+  assert.equal(creds.source, "ASC_KEY_P8 environment");
 });
 
 test("resolveAscCredentials gives a key id that is not the /asc one its own key", (t) => {
@@ -244,7 +284,8 @@ test("resolveAscCredentials has no credential when env and fleet-secrets have no
   const creds = resolveAscCredentials();
   assert.equal(creds.error, null);
   assert.equal(creds.privateKeyPem, undefined);
-  assert.equal(creds.keyId, undefined);
+  assert.ok(!creds.keyId, "a key id came out of nowhere");
+  assert.ok(!creds.issuerId, "an issuer came out of nowhere");
 });
 
 test("resolveAscCredentials survives a missing fleet-secrets binary", () => {
