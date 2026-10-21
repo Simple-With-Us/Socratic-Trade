@@ -7238,9 +7238,9 @@ changed file (1 grandfathered `react-hooks/set-state-in-effect` warning); the ni
 files green (80 tests, exit 0):  `public-site-routing` (22), `copy-rules-lint` (17),
 `candle-ticker-raf-resilience` (9), `framework-page` (9), `framework-hash-target` (6),
 `security-headers` (6), `public-sentence-gap` (4), `middleware-auth-secret` (4),
-`how-it-works-redirect` (3).  The **full** suite was not run locally — the lane lives on an
-external volume and the host's load (57–267) made a local full run impractical, so it is not
-claimed; the hosted `verify-hosted` job is the gate of record.  The **production build** was run
+`how-it-works-redirect` (3).  The **full** suite was not run locally — a local full run was
+impractical in this seat's working environment, so it is not claimed; the hosted
+`verify-hosted` job is the gate of record.  The **production build** was run
 locally after the fourth review round and succeeded (`npm run build`, `next build --webpack`),
 which is what proves the `server-only` guard in `middleware.ts` compiles.  New
 `test/public-site-routing.test.ts` (22 tests) covers the marketing-host routing, the alt-domain

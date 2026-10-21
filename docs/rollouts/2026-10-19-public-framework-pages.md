@@ -339,9 +339,9 @@ about all of it.  The complete affected set is nine files, re-run together on th
   `public-sentence-gap` (4), `middleware-auth-secret` (4), `how-it-works-redirect` (3).
   Each file was also run on its own; every one exited 0.
 
-**The full suite was not run locally, and is not claimed here.** The lane lives on an external
-volume and the host's load (57–267) made a local full run impractical.  The hosted
-`verify-hosted` job is the gate of record.
+**The full suite was not run locally, and is not claimed here.** A local full run was
+impractical in this seat's working environment.  The hosted `verify-hosted` job is the gate of
+record.
 
 Re-verified after the fourth review round (findings 10 and 11 above), on the same branch:
 
