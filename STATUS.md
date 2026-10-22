@@ -7574,6 +7574,161 @@ code changed.
 
 Rollout: `docs/rollouts/2026-10-21-st-4571-suite-db-hygiene.md`.
 
+## 2026-10-21 [MM] ST-4572 — the fixture override moves into a hook, and the isolation gets a control assertion
+
+**What.**  The two follow-ups PR #4912 named in its own body are closed.  The `DATABASE_URL`
+override in the three cascade-reaching writer files moves from module scope into `beforeAll`, and
+the isolation is now asserted rather than assumed.
+
+**The structural hole.**  A module-scope assignment leaves the worker pointed at the file's
+database for the whole time the module is being evaluated, so a throw between the assignment and
+the registration of the `afterAll` hook carries the override into the next file in the worker.
+Applying it in `beforeAll` means the environment is only mutated once the file's tests are about to
+run, and the mutation is always undone by the `afterAll` below it.
+
+**The path stays file-scoped.**  The persist is a fire-and-forget dynamic import, so it can resolve
+after the test that triggered it has finished, and a per-test path hands that late write back to
+the shared database.  The measurement is in the ST-4571 rollout note: the three files together
+against a fresh database finish with no `enrichment_coverage_runs` table at all, where a per-test
+version of the same fix wrote twelve rows in a two-file probe.
+
+**The control assertion is proved to fail.**  A temporary copy of `test/provenance-stamps.test.ts`
+with the override removed was run against the same database, and the control test failed with the
+active path reported as the run's shared database.  A control that cannot fail is not a control.
+The copy was deleted and was never committed.
+
+`npx tsc --noEmit` exits 0 and `npx eslint` over the three changed files exits 0.  No production
+code changed and no existing assertion was weakened.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 [MM] ST-4572 - the control now proves the write stayed out of the shared database
+
+**What.**  The isolation control in the two cascade-reaching files grows a third assertion and a
+new helper module.  The control already proved the file was pointed at its own database and that
+the cascade coverage row landed there.  It now also proves the row did NOT land in the run's
+shared database, which is the one condition the first two assertions cannot see.
+
+**The helper.**  `test/helpers/db-isolation-control.ts` opens the shared database READ-ONLY with
+`fileMustExist: true` and never creates it.  A database that is not there reads as holding no
+rows, and a missing table is the same fact; any other error is rethrown rather than folded into a
+zero, so a broken probe cannot masquerade as a clean one.
+
+**The assertion was proved non-vacuous, in three parts.**  The counter was measured against a
+database holding three real rows and returned three.  A temporary copy of
+`test/provenance-stamps.test.ts` with the override removed was run against a shared database that
+held no rows, and the shared database held one coverage row afterwards - the leak is real and it
+reaches the shared database.  The unmodified file was then run against a shared database seeded
+with one row, and the new assertion failed with `expected 1 to be +0`.  A control that cannot fail
+is not a control, so this one was shown failing.
+
+The temporary files were deleted and were never committed.  `npx tsc --noEmit` exits 0, `npx eslint`
+over the changed files exits 0, and the three files together against a fresh database pass 17 of
+17.  No production code changed and no existing assertion was weakened.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 [MM] ST-4572 — the teardown stops racing the pending coverage write
+
+**What.**  The three Kody threads on PR #4911 that carried no reply are now answered, and two
+defects behind them are fixed.  The `DATABASE_URL` override in the two files PR #4911 gave a
+database to moves from module scope into `beforeAll`, the same remedy ST-4572 applied to the
+PR #4912 files, and the teardown of every file that restores the path now waits for the pending
+coverage write before it restores anything.
+
+**The race is real.**  The persist is scheduled as a fire-and-forget dynamic import and
+`persistEnrichmentCoverageReport` resolves the database it writes to when the write lands, not
+when it was scheduled.  A probe that scheduled a persist and then ran the production teardown
+ordering watched the write land 5,745 ms later in the shared database, with the file's own
+database deleted and never recreated.
+
+**The window is closed today by something else, and the fix stops it depending on that.**  In each
+of the five files something already waits for the write to land, so the leak was not observed in
+them.  The teardown no longer relies on that.  The wait is for the actual write rather than for a
+duration, because the module load time is exactly what decides the width of the window.
+
+**The new test carries a control assertion.**  `test/coverage-persist-isolation.test.ts` holds the
+ordering down in two halves that differ only in where the wait sits, and the control half restores
+first, which is the order the finding names.
+
+One production module changed, additively.  `src/lib/enrichment-coverage.ts` gains the pending-write
+handle and the `__awaitPendingEnrichmentCoveragePersist()` export, and the persist itself is
+untouched.  `npx tsc --noEmit` exits 0, `npx eslint` over the seven changed files exits 0, the six
+files this diff touches pass 42 of 42 together against a fresh database, and the checkout's
+`data/app.db` was absent afterwards.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 [MM] ST-4572 — the ST-4570 rollout note stops claiming it shipped no regression guard
+
+The ST-4570 note said in its decisions list that no regression guard was added, which was true when
+it was written and is false now that this branch ships one.  The bullet is corrected in place, the
+follow-up list names the guard that exists, and the repo-level double-run guard the note also asks
+for is still recorded as the part that is missing.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 [MM] ST-4572 — the control now tells the old fixture from the new one
+
+A second review round found that the control assertion could not tell the two apart, because it
+only looked at the environment after the fixture had installed it, so the old module-scope
+implementation passed it too.  The two files that carry the control now assert, ahead of the
+override and inside their `beforeAll`, that `process.env.DATABASE_URL` is not this file's own path.
+Under the old implementation that path was already installed when the hook ran, so the assertion
+fails; under the new one the run's shared path is still in place, so it passes.  A copy of
+`test/provenance-stamps.test.ts` with the override moved back to module scope was run to prove it,
+and it failed at that assertion.
+
+The same round found the count row read off an untyped result, so it is now parsed with a zod schema
+at that boundary, and a row that does not match is surfaced as a fault rather than folded into a
+count.  The fourth finding, about collection-time capture, was checked in the source and does not
+hold: the database path is never captured at module scope, and the nested blocks capture this
+file's own path because they run after the file's `beforeAll`.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 — [MM] The guard reaches all five files, and the fault paths are separated (ST-4572)
+
+A third review round confirmed all five findings on PR #4915 and raised no new ones, but two of
+its notes were worth acting on rather than acknowledging.  The first named a real latent defect in
+code this branch had just added: the count row's shape fault was thrown inside the try whose catch
+matched `/no such table/i` on the message, so a real fault and a missing table were separated only
+by a string.  The catch is now narrowed to `err instanceof Database.SqliteError`, and the shape is
+checked outside it, so a fault that merely looks like a missing table is a fault and not a zero.
+The read moved into an exported `readCountRow(handle)` so the narrowing can be covered from both
+sides, and a new case covers it: the driver's own missing-table error reads as no rows, and a
+plain error carrying the same words is surfaced.
+
+The second note asked whether the other three cascade-reaching files carry the same differential
+assertion, and they did not.  It had been added only to the two files that also carry a control
+test, which left the other three able to regress to the module-scope override with no test failing
+anywhere.  All five files that restore `DATABASE_URL` carry the assertion now.
+
+The schema stays non-strict, because the helper wants the count rather than the row, and a widened
+count query would add columns to the row rather than fault the database.
+
+## 2026-10-22 — [MM] The shared path is captured where no hook can skip it (ST-4572)
+
+A fourth review round found a real defect in the fixture this branch had just added.  The
+differential assertion was the first statement of `beforeAll`, ahead of the capture of the run's
+shared path, so an assertion that failed left the capture unset, and the teardown read that unset
+capture as "the run had no `DATABASE_URL`" and deleted the variable instead of restoring it.
+
+The capture is now a module-scope constant in all five files that restore `DATABASE_URL`, where no
+hook can skip it.  A new guard, `test/db-isolation-fixture-shape.test.ts`, pins the shape of those
+five fixtures, and it fails against the pre-fix arrangement.
+
+Two claims were checked and did not hold as stated.  The regression test in
+`test/coverage-persist-isolation.test.ts` does fail against the pre-fix behaviour, measured with
+the await helper turned into the no-op the pre-fix code amounted to.  And the persist is
+synchronous, so the tracked promise cannot settle before the write has landed; the comment in
+`src/lib/enrichment-coverage.ts` now says so.
+
+A comment in the five fixtures claimed that a module-scope override would carry into the next file
+in the worker.  A two-file probe measured the process id of each file and the ids differed, so
+each test file runs in its own process.  The comment is corrected.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
 ## 2026-10-21 [MM] The off-loop follow-up query stops being measured against the host (ST-4573)
 
 **What.**  Two cases in `test/sqlite-all-offloop.test.ts` asserted that a follow-up query finishes inside 200ms and 300ms.  That clock was measuring the host and not the pool: `selectSlot()` starts a fresh slot whenever the live slots are fewer than `SQLITE_OFF_LOOP_POOL_SIZE` and none of them is idle, and `killSlot` removes the retired slot synchronously, so after a retire or a reclaim the pool is empty and the follow-up always starts a brand new worker.  The follow-up therefore cannot queue behind the wedged statement, and all that is left in its elapsed time is the cost of creating a worker, which is a property of this machine.  The two wall-clock assertions are gone, and the state they stood for is now asserted directly: the pool has to dispatch exactly one new query for the follow-up, and the live slot count has to move up by exactly one, which says the wedged worker was retired and the follow-up was served by a fresh one.  The reclaim wait in the first case stopped being a fixed 200ms window and became a poll with a generous ceiling, because the reclaim is driven by a timer and a busy host delays the callback and not the reclaim.  It is a test file, so no production code changed.
@@ -7581,3 +7736,27 @@ Rollout: `docs/rollouts/2026-10-21-st-4571-suite-db-hygiene.md`.
 **Verification.**  Clean on a free machine at 26 of 26 in 15.57s, and 26 of 26 under a synthetic load of 30 spinners at a settled load average of 157 rising to 184, where `main`'s own copy of the file was run back to back and also passed 26 of 26.  The guard still fails when it should: a mutant that makes the execution budget report the timeout without retiring the slot fails 3 cases of 26, and both of the cases this change touches fail by asserting with `AssertionError: expected 1 to be +0`, not by timing out.  The mutant was reverted and the source file is byte-identical to `HEAD`.  The automated review opened two findings on the pull request on 2026-10-22 at 01:40Z and both were taken:  the live slot count assertion was redundant, because the count was already 0 and a query that resolves has to have been served by a live slot, so the case now asserts the dispatch count and the live slot count separately, and a mutant that retires a slot as soon as a query succeeds fails the live slot count assertion with `AssertionError: expected +0 to be 1` while the dispatch assertion on the line above it passes;  and the ST-4550 rollout note still described the abandoned first design, which is fixed there.  `npm run lint` exits 0 with 867 warnings and 0 errors, and `npx tsc --noEmit` exits 0.
 
 **Next.**  Land it on its own pull request, then close ST-4573 with the merge evidence.  Rollout: `docs/rollouts/2026-10-21-st-4573-offloop-wall-clock-budget.md`.
+
+## 2026-10-22 [MM] The shape guard stops matching fixture text outside the hook body (ST-4572)
+
+**What.**  A fifth review round found two real weaknesses in the shape guard the fourth round added, and three errors in this branch's own audit trail.  The guard searched the whole span between the `beforeAll` and the `afterAll`, which also holds any helper declared between them, so a fixture that moved the differential assertion and the override into such a helper satisfied both string checks and the order comparison, and the regression the file exists to catch passed unnoticed; the hook body is now located by brace depth.  The guard also resolved its repo root from the runner's working directory, so a run from anywhere other than the repository root failed every case with an opaque ENOENT; the root now comes from the module's own path, in the same form `test/ci-workflow-queue-safety.test.ts` already uses.  The audit trail said nine files changed and two were new when the diff is thirteen changed and four new, it described five files as restoring `DATABASE_URL` when nine do, and the ST-4570 note pointed the shared-database differential at the miniature reproduction in `test/coverage-persist-isolation.test.ts`, which never reads the run's shared database, rather than at the two files that assert `sharedCoverageRowCount(prevDb)` is zero.  All three are corrected in place.
+
+**Verification.**  Two negative controls, both reverted byte-for-byte.  A fixture mutated so that the assertion and the override moved into a helper between the two hooks passed the old guard 11 of 11 and failed the new one with `AssertionError: expected '\n  installThisFilesDatabase();\n  re…' to contain 'expect(process.env.DATABASE_URL).not.…'`.  The same suite run from `/tmp` with the project root passed to Vitest explicitly failed on the old guard with ENOENT and passed the new one 11 of 11.  The seven files this diff touches pass together at 56 of 56 against a fresh database, with the checkout's `data/app.db` absent afterwards.  `npx tsc --noEmit` exits 0 and `npx eslint` over the changed files exits 0 with the same one pre-existing `any` warning in `test/provenance-stamps.test.ts`.
+
+**Next.**  Land it, then close ST-4572 with the merge and the deploy evidence.  Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 [MM] The audit trail counts the files it claims to count (ST-4572)
+
+**What.**  A sixth review round raised two findings against this branch's own audit trail, and both were taken.  The rollout note claimed that twenty-three test files already resolve their repository root with `fileURLToPath(new URL("..", import.meta.url))`; twenty-three is the number of test files that reference `import.meta.url` at all, which is a weaker claim, and the exact expression is in eight, with this branch's own shape guard as the ninth in the tree.  The note also counted eight files that restore `DATABASE_URL` when nine do: `test/coverage-persist-isolation.test.ts` captures the shared path at module scope on line 30 and restores it in its `afterAll` on lines 45 and 46, which makes it a sixth restorer at file scope.  The tenth candidate was checked and is not one, because `test/sqlite-storage-hygiene.test.ts` installs its own path in a `beforeAll` and the `previous` it captures inside the test is that own path rather than the shared one, so it never puts the shared path back.  Both counts are corrected in the note and in the fifth-round rows above, and the note now carries a sixth-round section with the measurement.
+
+**Verification.**  The counts come from the tree rather than from the note.  `grep -rlE 'fileURLToPath\(\s*new URL\("\.\.",\s*import\.meta\.url\)\s*\)' test/` returns nine files, eight of them pre-existing, and `grep -rl 'import\.meta\.url' test/` returns the twenty-three the note had been counting.  The restorer inventory was read one file at a time: the five guard fixtures capture at module scope and restore in their teardown, the isolation fixture does the same, and the three named files capture inside `beforeEach`.
+
+**Next.**  Land it, then close ST-4572 with the merge and the deploy evidence.  Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 [MM] The bound names every file that restores the shared path (ST-4572)
+
+**What.**  A seventh review round raised two findings against this branch's own audit trail, and both were taken.  The note's bound paragraph said only six files restore the path and that every other file that sets `DATABASE_URL` leaves it installed, but three more files restore the shared path: `test/data-catalog-completeness.test.ts`, `test/health-lane-reprobe.test.ts` and `test/symbol-field-latest.test.ts` each capture it inside `beforeEach` and put it back in their `afterEach`.  The sentence hid three restorers and overstated the set of files whose late write can reach the shared database, because a late write in one of those three lands in the shared database rather than in that file's own.  The bound paragraph now names all nine, separates the six that restore at file scope from the three that restore per test, and scopes the "leaves it installed" clause to the files that genuinely never put the shared path back.  The second finding said the note described `test/sqlite-storage-hygiene.test.ts` as never restoring `DATABASE_URL`, and it does: the `previous` it captures at line 745 is the file's own path and not the shared one, and the restore at line 790 puts its own database back.  Saying it "never restores it" was wrong, and the sixth-round section now says what the file actually does.  The inventory stays at nine either way, because that file never puts the shared path back.
+
+**Verification.**  The counts come from the tree rather than from the note.  The shared-path restorers were read one file at a time: the five guard fixtures and `test/coverage-persist-isolation.test.ts` capture `DATABASE_URL` at module scope and restore it in their teardown, and the three named files capture it inside `beforeEach` and restore it in their `afterEach`.  The six file-scope restorers are also the six that import `__awaitPendingEnrichmentCoveragePersist`, and each of them waits for the pending write before it restores the path.  The pending-write handles live on `globalThis`, so the wait covers every write still in flight in that worker and not only the calling file's.
+
+**Next.**  Land it, then close ST-4572 with the merge and the deploy evidence.  Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
