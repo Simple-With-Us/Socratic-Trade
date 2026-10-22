@@ -426,10 +426,35 @@ APPLE_API_KEY_ID=APPLEKEY01 APPLE_API_ISSUER_ID=apple-issuer \
 #  into an empty one.  What the guard still insists on is the here-string:
 #  the value has to reach the decoder without ever appearing in an argument
 #  list or on a pipe.
-if ! grep -qE 'base64 (-d|-D) <<<"\$APPLE_API_KEY_P8_BASE64"' "$script"; then
+here_string_pattern='base64 (-d|-D) <<<"\$APPLE_API_KEY_P8_BASE64"'
+pipe_pattern='base64 (-d|-D) <<<[^)]*\|'
+#  A detector is only worth anything while it still recognizes the form it is
+#  there for, so the allowed form and the forbidden one are both matched
+#  against the same patterns before either is pointed at the script:  a
+#  pattern that stopped matching would let these guards pass without
+#  detecting anything, which reads as a passing check.
+cat > "${tmp}/probe-allowed-decode.sh" <<'PROBE'
+p8="$(base64 -d <<<"$APPLE_API_KEY_P8_BASE64" 2>/dev/null)" || p8=""
+PROBE
+grep -qE "$here_string_pattern" "${tmp}/probe-allowed-decode.sh" ||
+  fail "the here-string detector no longer recognizes the allowed form"
+cat > "${tmp}/probe-piped-decode.sh" <<'PROBE'
+p8="$(base64 -d <<<"$APPLE_API_KEY_P8_BASE64" | cat)"
+PROBE
+grep -qE "$pipe_pattern" "${tmp}/probe-piped-decode.sh" ||
+  fail "the pipe detector no longer recognizes a piped base64 decode"
+#  The pipe has to sit between the here-string and the end of the command
+#  substitution, because that is where the decode output would leave the
+#  decoder.  A detector loose enough to also match the `||` of the
+#  command chain the decode is part of would fail this script on its own
+#  decode, which is the form the first guard exists to allow.
+if grep -qE "$pipe_pattern" "${tmp}/probe-allowed-decode.sh"; then
+  fail "the pipe detector matches the decoder's own command chain"
+fi
+if ! grep -qE "$here_string_pattern" "$script"; then
   fail "the base64 body is not decoded through a here-string"
 fi
-if grep -qE 'base64 (-d|-D) [^<]*\|' "$script"; then
+if grep -qE "$pipe_pattern" "$script"; then
   fail "the base64 body is decoded through a pipe"
 fi
 
