@@ -81,3 +81,11 @@ a9b01e00bc3f40cde150beec62fcb9c8a470c656:test/api-key-preview.test.ts:generic-ap
 # (docs/rollouts/2026-06-21-logo-dev-toggle.md:17). Documented generic-api-key
 # false positive; not a product-code secret.
 e700b9f17d03d872c4f7d16da683323e246aa5e5:docs/rollouts/2026-06-21-logo-dev-toggle.md:generic-api-key:17
+
+# AFC-459 revision 2: a fake PEM envelope in scripts/ios-fleet/test-asc-credentials.sh
+# on the commits that introduced the masked-preview test. The body is
+# "SYNTHETICBADBODYHERE", which is not a key, and the line carries the inline
+# gitleaks:allow marker from the next commit. The PR squash-merges, so the
+# intermediate commits never reach main.
+5d3cad958d38669a47e421db87211e1718fb4533:scripts/ios-fleet/test-asc-credentials.sh:private-key:290
+d5374aa25268b18ee49f363f4209ff534ca48506:scripts/ios-fleet/test-asc-credentials.sh:private-key:288
