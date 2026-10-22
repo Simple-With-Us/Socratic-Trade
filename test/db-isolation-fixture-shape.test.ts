@@ -61,7 +61,13 @@ const CAPTURE_DECLARATION = "const prevDb = process.env.DATABASE_URL;";
 const DIFFERENTIAL_ASSERTION = "expect(process.env.DATABASE_URL).not.toBe(dbUrl);";
 const OVERRIDE = "process.env.DATABASE_URL = dbUrl;";
 const RESTORE = "process.env.DATABASE_URL = prevDb;";
-const AWAIT_PENDING = "await __awaitPendingEnrichmentCoveragePersist();";
+// A live wait statement, not a mention of one.  The statement has to start a line after optional
+// whitespace, so a commented-out wait carries the same text and cannot satisfy the guard.
+const AWAIT_PENDING_STATEMENT = /^\s*await\s+__awaitPendingEnrichmentCoveragePersist\(\);/m;
+// The helper has to be imported, not merely referenced: the note and the comment both claim the
+// import is what the fixture depends on, so the guard has to check the import itself.
+const IMPORT_OF_HELPER =
+  /^\s*import\s*\{[^}]*\b__awaitPendingEnrichmentCoveragePersist\b[^}]*\}\s*from\s*["'][^"']*enrichment-coverage["']/m;
 
 /**
  * The body of one hook, matched by brace depth.
@@ -154,18 +160,23 @@ describe("the database-isolation fixtures wait for the pending coverage write be
       const source = read(file);
 
       // The file has to import the helper at all, or the wait below is something else.
-      expect(source).toContain(AWAIT_PENDING);
+      expect(source).toMatch(IMPORT_OF_HELPER);
 
       const hook = hookBody(source, "afterAll");
 
       // The wait has to be in the teardown rather than in a test, because a persist can still be
-      // in flight when the last test of the file has finished.
-      expect(hook).toContain(AWAIT_PENDING);
+      // in flight when the last test of the file has finished.  It has to be a live statement: a
+      // commented-out wait carries the same text and must not satisfy the guard.
+      expect(hook).toMatch(AWAIT_PENDING_STATEMENT);
 
       // And it has to come before the restore.  A wait placed after the restore drains into the
       // database the worker is pointing at by then, which is the shared one, so it closes the
       // race only after the race has already been lost.
-      expect(hook.indexOf(AWAIT_PENDING)).toBeLessThan(hook.indexOf(RESTORE));
+      const awaitAt = hook.search(AWAIT_PENDING_STATEMENT);
+      const restoreAt = hook.indexOf(RESTORE);
+      expect(awaitAt).toBeGreaterThan(-1);
+      expect(restoreAt).toBeGreaterThan(-1);
+      expect(awaitAt).toBeLessThan(restoreAt);
     });
   }
 });

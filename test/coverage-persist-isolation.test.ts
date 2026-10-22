@@ -45,16 +45,26 @@ afterAll(async () => {
   // database it writes to when the write lands rather than when it was scheduled.  Wait for it
   // before the shared path is restored, or a write that is still in flight lands in the database
   // the worker is pointing at by then, which is the run's shared one.  This file points the run
-  // at two databases of its own rather than at one for the whole file, so the wait drains into
-  // the temporary database this fixture installed, never into the run's shared path.
-  await __awaitPendingEnrichmentCoveragePersist();
-  resetDbForTesting();
-  if (prevDb === undefined) delete process.env.DATABASE_URL;
-  else process.env.DATABASE_URL = prevDb;
+  // at two databases of its own rather than at one for the whole file, so a wait that did have
+  // something to drain would land in the temporary database this fixture installed, never in the
+  // run's shared path.  In practice both persists this file schedules are already drained by the
+  // awaits in the test bodies, so this wait is defence in depth rather than the mechanism that
+  // closes the race here.
+  //
+  // The wait can reject, and a rejection must not leave the shared path pointing at this
+  // fixture's temporary database for the test files that run after it.  The restore therefore
+  // lives in a finally block rather than after the await.
   try {
-    rmSync(dir, { recursive: true, force: true });
-  } catch {
-    /* ignore */
+    await __awaitPendingEnrichmentCoveragePersist();
+  } finally {
+    resetDbForTesting();
+    if (prevDb === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = prevDb;
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
   }
 });
 
