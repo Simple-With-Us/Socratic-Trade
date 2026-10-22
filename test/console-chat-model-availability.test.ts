@@ -13,28 +13,28 @@ describe("Coach model credential availability", () => {
 
   it("allows MiniMax through OpenRouter before its native fallback", () => {
     const openRouterOnly = { minimax: false, openrouter: true };
-    expect(chatCredentialServiceForModel("minimax-m3", openRouterOnly)).toBe("openrouter");
-    expect(chatModelHasCredential("minimax-m3", openRouterOnly)).toBe(true);
+    expect(chatCredentialServiceForModel("minimax-m3.1-flash", openRouterOnly)).toBe("openrouter");
+    expect(chatModelHasCredential("minimax-m3.1-flash", openRouterOnly)).toBe(true);
 
     const nativeOnly = { minimax: true, openrouter: false };
-    expect(chatCredentialServiceForModel("minimax-m3", nativeOnly)).toBe("minimax");
-    expect(chatModelHasCredential("minimax-m3", nativeOnly)).toBe(true);
+    expect(chatCredentialServiceForModel("minimax-m3.1-flash", nativeOnly)).toBe("minimax");
+    expect(chatModelHasCredential("minimax-m3.1-flash", nativeOnly)).toBe(true);
 
-    expect(chatModelHasCredential("minimax-m3", { minimax: false, openrouter: false })).toBe(false);
+    expect(chatModelHasCredential("minimax-m3.1-flash", { minimax: false, openrouter: false })).toBe(false);
   });
 
   it("does not native-fallback an explicitly OpenRouter-routed MiniMax id", () => {
     const status = { minimax: true, openrouter: false };
-    const model = "openrouter/minimax/minimax-m3";
+    const model = "openrouter/minimax/minimax-m3.1-flash";
 
     expect(chatCredentialServiceForModel(model, status)).toBe("openrouter");
     expect(chatModelHasCredential(model, status)).toBe(false);
-    expect(chatCredentialServiceForModel(" OpenRouter/minimax/minimax-m3 ", status)).toBe("openrouter");
+    expect(chatCredentialServiceForModel(" OpenRouter/minimax/minimax-m3.1-flash ", status)).toBe("openrouter");
   });
 
   it("fails open while provider status is unavailable", () => {
     expect(chatModelHasCredential("gpt-6-astra-pro", {})).toBe(true);
-    expect(chatModelHasCredential("minimax-m3", {})).toBe(true);
-    expect(chatModelHasCredential("minimax-m3", { minimax: false })).toBe(true);
+    expect(chatModelHasCredential("minimax-m3.1-flash", {})).toBe(true);
+    expect(chatModelHasCredential("minimax-m3.1-flash", { minimax: false })).toBe(true);
   });
 });

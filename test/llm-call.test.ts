@@ -251,7 +251,7 @@ describe("buildLlmRequestBody", () => {
   it("includes the MiniMax schema in the prompt even when OpenRouter handles structured output", () => {
     const body = buildLlmRequestBody(
       { provider: "openrouter", transport: "chat-completions" },
-      { model: "minimax/minimax-m3", systemPrompt: "sys", userContent: "{}", schema: SCHEMA, maxOutputTokens: 1500 }
+      { model: "minimax/minimax-m3.1-flash", systemPrompt: "sys", userContent: "{}", schema: SCHEMA, maxOutputTokens: 1500 }
     ) as Record<string, any>;
     expect(body.messages[0].content).toContain(JSON.stringify(SCHEMA.schema));
     expect(body.response_format?.type).toBe("json_schema");

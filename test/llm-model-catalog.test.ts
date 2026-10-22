@@ -9,7 +9,7 @@ process.env.DATABASE_URL = `file:${path.join(os.tmpdir(), `llm-catalog-test-${Da
 const OWNER_ROWS: Array<[string, string, string]> = [
   ["gpt-6-astra-pro", "openai/gpt-6-astra-pro", "gpt-6-astra-pro"],
   ["gpt-6-astra", "openai/gpt-6-astra", "gpt-6-astra"],
-  ["minimax-m3", "minimax/minimax-m3", "MiniMax-M3"],
+  ["minimax-m3.1-flash", "minimax/minimax-m3.1-flash", "MiniMax-M3.1-Flash"],
   ["muse-spark-1.3", "meta/muse-spark-1.3", "muse-spark-1.3"],
   ["muse-spark-1.3-contributor", "meta/muse-spark-1.3-contributor", "muse-spark-1.3-contributor"],
   ["muse-glimmer-30b", "meta/muse-glimmer-30b", "muse-glimmer-30b"],
@@ -44,7 +44,12 @@ const ALIASES: Array<[string, string]> = [
   ["gemini-3.5-flash-lite", "gemini-flash-lite-latest"],
   ["google/gemini-3.7-flash", "gemini-flash-latest"],
   ["mistral-medium-3.5", "mistral-medium-latest"],
-  ["mistral-medium-3-5", "mistral-medium-latest"]
+  ["mistral-medium-3-5", "mistral-medium-latest"],
+  // minimax-m3 was replaced by M3.1 Flash on 2026-10-21; every spelling of M3 must keep resolving.
+  ["minimax-m3", "minimax-m3.1-flash"],
+  ["MiniMax-M3", "minimax-m3.1-flash"],
+  ["minimax/minimax-m3", "minimax-m3.1-flash"],
+  ["openrouter/minimax/minimax-m3", "minimax-m3.1-flash"]
 ];
 
 describe("three-column LLM catalog", () => {
@@ -104,6 +109,13 @@ describe("three-column LLM catalog", () => {
       expect(normalizeOpenRouterModelId(alias), alias).toBe(row[1]);
       expect(nativeSlugFor(alias), alias).toBe(row[2]);
     }
+  });
+
+  it("rolls minimax-m3 and minimax-m2.7 stats forward into minimax-m3.1-flash", async () => {
+    const { getPredecessorModelIds } = await import("../src/lib/llm-model-catalog");
+    expect(getPredecessorModelIds("minimax-m3.1-flash")).toEqual(["minimax-m3", "minimax-m2.7"]);
+    // The old M3 spellings resolve to the same entry, so they inherit the same lineage.
+    expect(getPredecessorModelIds("MiniMax-M3")).toEqual(["minimax-m3", "minimax-m2.7"]);
   });
 
   it("never sends a display slug to OpenRouter when the wire slug differs", () => {
