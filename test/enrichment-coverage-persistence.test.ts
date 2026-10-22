@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  __awaitPendingEnrichmentCoveragePersist,
   __resetEnrichmentCoverageForTests,
   buildEnrichmentCoverageReport,
   getLastEnrichmentCoverageReport,
@@ -39,7 +40,12 @@ beforeAll(() => {
   resetDbForTesting();
 });
 
-afterAll(() => {
+afterAll(async () => {
+  // The coverage persist is scheduled as a fire-and-forget dynamic import, and it resolves the
+  // database it writes to when the write lands rather than when it was scheduled.  Wait for it
+  // while this file's own database is still the target, or a write that is still in flight lands
+  // in the database the worker is pointing at by then, which is the shared one.
+  await __awaitPendingEnrichmentCoveragePersist();
   resetDbForTesting();
   if (prevDb === undefined) delete process.env.DATABASE_URL;
   else process.env.DATABASE_URL = prevDb;

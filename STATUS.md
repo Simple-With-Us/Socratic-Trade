@@ -7627,3 +7627,34 @@ over the changed files exits 0, and the three files together against a fresh dat
 17.  No production code changed and no existing assertion was weakened.
 
 Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 [MM] ST-4572 — the teardown stops racing the pending coverage write
+
+**What.**  The three Kody threads on PR #4911 that carried no reply are now answered, and two
+defects behind them are fixed.  The `DATABASE_URL` override in the two files PR #4911 gave a
+database to moves from module scope into `beforeAll`, the same remedy ST-4572 applied to the
+PR #4912 files, and the teardown of every file that restores the path now waits for the pending
+coverage write before it restores anything.
+
+**The race is real.**  The persist is scheduled as a fire-and-forget dynamic import and
+`persistEnrichmentCoverageReport` resolves the database it writes to when the write lands, not
+when it was scheduled.  A probe that scheduled a persist and then ran the production teardown
+ordering watched the write land 5,745 ms later in the shared database, with the file's own
+database deleted and never recreated.
+
+**The window is closed today by something else, and the fix stops it depending on that.**  In each
+of the five files something already waits for the write to land, so the leak was not observed in
+them.  The teardown no longer relies on that.  The wait is for the actual write rather than for a
+duration, because the module load time is exactly what decides the width of the window.
+
+**The new test carries a control assertion.**  `test/coverage-persist-isolation.test.ts` holds the
+ordering down in two halves that differ only in where the wait sits, and the control half restores
+first, which is the order the finding names.
+
+One production module changed, additively.  `src/lib/enrichment-coverage.ts` gains the pending-write
+handle and the `__awaitPendingEnrichmentCoveragePersist()` export, and the persist itself is
+untouched.  `npx tsc --noEmit` exits 0, `npx eslint` over the seven changed files exits 0, the six
+files this diff touches pass 42 of 42 together against a fresh database, and the checkout's
+`data/app.db` was absent afterwards.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.

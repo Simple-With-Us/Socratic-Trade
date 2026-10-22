@@ -19,7 +19,12 @@ export function sharedDatabasePath(prevDb: string | undefined): string {
 }
 
 export function sharedCoverageRowCount(prevDb: string | undefined): number {
-  const path = sharedDatabasePath(prevDb);
+  return coverageRowCount(sharedDatabasePath(prevDb));
+}
+
+// The number of enrichment coverage rows in the database at an absolute path.  The database is
+// opened read-only and is never created; a database that is not there holds no rows.
+export function coverageRowCount(path: string): number {
   if (!existsSync(path)) return 0;
   const handle = new Database(path, { readonly: true, fileMustExist: true });
   try {

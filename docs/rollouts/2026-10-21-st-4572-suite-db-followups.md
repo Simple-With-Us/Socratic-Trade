@@ -1,19 +1,25 @@
-# Rollout — ST-4572 suite database follow-ups: the fixture override moves into `beforeAll`, and the isolation gets a control assertion
+# Rollout — ST-4572 suite database follow-ups: the fixture override moves into `beforeAll`, the isolation gets a control assertion, and the teardown stops racing the pending coverage write
 
 ## 1. Context & Objective
 
 PR #4912 (ST-4571) merged to `main` as `c0ca9446b` with two follow-ups named in its own "Review Follow-ups" section, and Kody re-raised both as high-severity review threads on the merged pull request at 19:29Z: comment 4341061059 on `test/market-dynamic-universe.test.ts`, "Temporary DATABASE_URL override can leak into later test files", and comment 4341061462 on `test/provenance-stamps.test.ts`, "Database isolation fix lacks a control assertion".  ST-4572 tracks the fix.
 
-The objective is narrow.  Close the structural hole in the fixture, and make the isolation checked rather than assumed, without changing the shape that the fire-and-forget persist requires.
+Three more Kody threads on the merged PR #4911 (ST-4570) were still unanswered: comment 4339304233, "Bug fix lacks a differential regression test", comment 4339304716, "DATABASE_URL remains overridden until afterAll completes", and comment 4339305193, "afterAll restores the shared DATABASE_URL before pending persists can land".  They name the other half of the fixture work, the two files PR #4911 gave a database to, and they describe the teardown race that the ST-4571 files share with them.  Kody's note on PR #4912 at 4341537498 then prescribed the shape of the control that follows it: the landing row has to be checked against both databases, because checking only the positive case would still pass if the write were duplicated into the shared database as well.
+
+The objective is narrow.  Close the structural hole in the fixture, make the isolation checked rather than assumed, and close the teardown race, without changing the shape that the fire-and-forget persist requires.
 
 ## 2. Changes Made
 
-Three test files changed and one helper module added.  No production code changed, and no existing assertion was weakened.
+Seven files changed, two of them new.  One production module gains an additive test helper, and no existing assertion was weakened.
 
-- `test/market-dynamic-universe.test.ts` — the `DATABASE_URL` override moves from module scope into `beforeAll`, and a control assertion is added.
-- `test/provenance-stamps.test.ts` — the same move, and the control assertion checks both the URL and that the cascade coverage row landed in this file's own database.
-- `test/enrichment-coverage-persistence.test.ts` — the same move.
-- `test/helpers/db-isolation-control.ts` — new.  It exports `sharedDatabasePath(prevDb)`, the path the run shared before a file installed its own, and `sharedCoverageRowCount(prevDb)`, the number of `enrichment_coverage_runs` rows in that shared database.  The shared database is opened READ-ONLY with `fileMustExist: true` and is never created; a database that is not there reads as holding no rows, and a missing table is treated as the same fact, while any other error is rethrown rather than folded into a zero.
+- `test/market-dynamic-universe.test.ts` — the `DATABASE_URL` override moves from module scope into `beforeAll`, a control assertion is added, and the teardown waits for the pending coverage write.
+- `test/provenance-stamps.test.ts` — the same move, the control assertion checks the URL, the row in this file's own database and the absence of that row in the shared one, and the teardown waits for the pending coverage write.
+- `test/enrichment-coverage-persistence.test.ts` — the same move, and the teardown waits for the pending coverage write.
+- `test/enrichment-abort.test.ts` — the override moves from module scope into `beforeAll`, and the teardown waits for the pending coverage write.  This is the file PR #4911 gave a database to and the one Kody's comment 4339304716 names.
+- `test/enrichment-coverage.test.ts` — the same move, and the same teardown.  Kody's comment 4339304716 names this file as the second site.
+- `test/helpers/db-isolation-control.ts` — new.  It exports `sharedDatabasePath(prevDb)`, the path the run shared before a file installed its own, `coverageRowCount(path)`, the number of `enrichment_coverage_runs` rows in the database at an absolute path, and `sharedCoverageRowCount(prevDb)`, the same count for the shared database.  The database is opened READ-ONLY with `fileMustExist: true` and is never created; a database that is not there reads as holding no rows, and a missing table is treated as the same fact, while any other error is rethrown rather than folded into a zero.
+- `test/coverage-persist-isolation.test.ts` — new.  A differential test for the teardown race with a control assertion, described below.
+- `src/lib/enrichment-coverage.ts` — one additive export, `__awaitPendingEnrichmentCoveragePersist()`, which waits for every coverage persist that is still in flight.  The scheduler now keeps the handle for the write it started, and the handles live on `globalThis` so that a test file calling `vi.resetModules()` cannot orphan a promise that is still pending.  Nothing else in the module changes, and the production behaviour of the persist is unchanged.
 
 The control assertion in the two cascade-reaching files carries three parts.  The URL equality proves the file is pointed at its own database.  The row in the file's own database proves the cascade write landed there.  The absence of that row in the shared database proves the write did not land there as well, which is the one condition the first two parts cannot see.  A row landing in the file's own database is consistent with the write also landing in the shared one, and only the second database can tell those two apart.  Kody's note on the merged PR #4912 asked for both halves — that the write lands in this file's own database and not in the shared one — and this is that shape.
 
@@ -22,6 +28,10 @@ The move is the whole of the structural fix.  A module-scope assignment leaves t
 The path stays file-scoped.  The persist is a fire-and-forget dynamic import, so it can resolve after the test that triggered it has finished, and a per-test path would hand that late write back to the run's shared database.
 
 Moving the assignment later is safe because it never protected import time in the first place.  ES module imports are evaluated before the importing module's body runs, so the module-scope assignment was already too late to guard an import-time database access.  `src/lib/market.ts` does not import the database module at all, so there is no import-time database access in these files to protect.
+
+The teardown race is the other half.  The persist is scheduled as a fire-and-forget dynamic import, and `persistEnrichmentCoverageReport` resolves the database it writes to when the write lands rather than when it was scheduled, because `getDb()` reads `DATABASE_URL` at that moment.  A teardown that restores `DATABASE_URL` while the write is still in flight therefore has the write land in the database the worker is pointing at by then, which is the shared one.  The teardown of the five files that restore the path now waits for the pending write first, while the file's own database is still the target.
+
+Only those five files restore the path.  The other files that set `DATABASE_URL` leave it installed, so a late write in one of them lands in that file's own database and cannot reach the shared one.  That is what bounds the change, and it is why the teardown fix lands in five files rather than in every file that touches the variable.
 
 ## 3. Decisions & Trade-offs
 
@@ -35,14 +45,30 @@ Moving the assignment later is safe because it never protected import time in th
 
 **The control in the market file sits after the cascade tests, because the cascade write is the thing under test.**  It used to sit at the top of the file's describe block, where it asserted only the URL and so could not fail on a late write.  A control that runs before the write it is meant to check cannot check it, so it moved to the end of the file, where it polls for the cascade row in the file's own database.  The wait is bounded at five seconds, and the file's own database path stays in force for the whole of it, which is the property under test.
 
-**`beforeAll` rather than `beforeEach`.**  The per-test shape is wrong for a writer for the reason given above, and the control assertion is what tells the two apart if the shape ever regresses.
+**`beforeAll` rather than `beforeEach`.**  The per-test shape is wrong for a writer for the reason given above, and the control assertion is what tells the two apart if the shape ever regresses.  The same shape was applied to the two files Kody named on PR #4911, which still carried the module-scope assignment because PR #4911 predates ST-4571.
+
+**The teardown race is real, and it was reproduced.**  Kody's comment 4339305193 says the teardown restores the shared `DATABASE_URL` while a coverage persist is still pending, and that the pending write then lands in the shared database.  The mechanism is exactly as described.  `persistEnrichmentCoverageReport` calls `getDb()`, and `getDb()` reads `DATABASE_URL` at the moment the write lands.  A probe that scheduled a persist, then restored the path and deleted the file's own directory without awaiting anything, watched the write land 5,745 ms later in the shared database, with the file's own database already deleted and never recreated.  The probe used the production code path and the production teardown ordering; only the module load was forced cold, which is what widened the window.
+
+**The fix waits for the pending write rather than racing it.**  A settle delay would be a guess about how long the write takes, and the module load time is exactly the variable that decides it.  The scheduler now keeps the handle for the write it started, so the teardown can wait for the actual write instead of for a duration.  The handles live on `globalThis` because `vi.resetModules()` replaces the module instance, and a promise held only on the instance would be orphaned while it was still pending.  This is the one production change in the diff, and it is additive: a new export, a handle set, and no change to what the persist does or when it runs.
+
+**The window is closed today by other waits, and the fix is what stops it depending on that.**  The honest position on the five files is that the leak was not observed in them.  In each of them something else already waits for the write to land: the two control tests poll for the coverage row before the teardown runs, the persistence test asserts on the rows, and the abort file's gather aborts before any report is built.  The teardown race therefore depended on how long the database module took to load, and with a warm transform cache that is shorter than the time the file spends in its own tests.  The fix removes the dependency instead of relying on it, which is the difference between a property and an accident.
+
+**The new test carries a control assertion, because a differential test without one proves nothing.**  `test/coverage-persist-isolation.test.ts` holds the ordering down in two halves that differ only in where the wait sits.  The first waits for the pending write before restoring, and asserts that the file's own database holds the row and the shared one holds none.  The second restores first, which is the order the finding names, and asserts that the shared database holds the row.  Without the second half the first would pass whether or not the ordering mattered.  The control is labelled as such, and if it ever stops reproducing then the defect is gone and the control has to be rewritten rather than the first test weakened.
 
 ## 4. Verification State
 
 - `npx tsc --noEmit` exits 0.
-- `npx eslint` over the three changed files exits 0.  One pre-existing warning is left in place, an `any` in a body this change does not touch.
+- `npx eslint` over the seven changed files exits 0.  One pre-existing warning is left in place, an `any` in a body this change does not touch.
 - The three changed files, run together against a fresh database: 17 tests passed, up from 15, the two new ones being the control assertions.
 - The negative control described above fails as it must, with the active path reported as the shared database.
+- The six files this diff touches, run together against a fresh database: 42 tests passed across 6 files, and the checkout's `data/app.db` was absent afterwards.
+- `test/coverage-persist-isolation.test.ts`: 2 tests passed, which is the ordering that waits for the pending write and the control that restores first.
+
+### The teardown race, measured
+
+- The race reproduces in isolation.  A probe that scheduled a coverage persist through the production path and then ran the production teardown ordering, a restore of `DATABASE_URL` followed by the removal of the file's own directory with nothing awaited in between, watched the write land 5,745 ms later in the shared database.  The file's own database was deleted and never recreated, and the shared database held one coverage row where it had held none.  The probe was deleted and was never committed.
+- The fix removes the window.  `test/provenance-stamps.test.ts`, `test/market-dynamic-universe.test.ts` and `test/enrichment-coverage.test.ts` were each run against a seeded shared database, once with the wait in the teardown and once with it removed.  Every run left the shared database at zero rows.
+- The window is closed today by something else in each of those files.  The two control tests poll for the coverage row before the teardown runs, and the persistence test asserts on the rows, so the write has already landed by the time the teardown runs.  That is why the leak was not observed in the files themselves, and it is a property of their current shape rather than of the teardown.  The teardown no longer depends on it.
 
 ### The new assertion was proved non-vacuous, in three parts
 
@@ -54,13 +80,13 @@ The assertion `expect(sharedCoverageRowCount(prevDb)).toBe(0)` is worth making o
 
 Together those three are the proof that the assertion is not a tautology.  The first rules out a counter that always reads zero, the second rules out a leak that never happens, and the third shows the assertion firing on the real condition.
 
-The full-suite criterion is the same one ST-4571 set, re-run against the changed fixture: a full `npx vitest run` against a database that did not exist when the suite started must leave zero rows in `enrichment_coverage_runs` and must not leave a `data/app.db` in the checkout.  The run was `DATABASE_URL="file:/tmp/mm-st4572-full.db" npx vitest run` with the checkout's `data/app.db` removed beforehand, and it reported 861 files, 859 passed, 1 failed, 1 skipped; 9749 tests, 9697 passed, 1 failed, 51 skipped; 2,705 s.  The suite exited 1, and the single failure is `test/event-loop-stall-hot-path.test.ts`, the same case that fails on `main` for the same host-load reason and that this diff does not touch.  After the run the shared database held 0 enrichment coverage rows, where the same full run left four rows before the ST-4571 fix, and the checkout's `data/app.db` was absent (good).
+The full-suite criterion is the same one ST-4571 set, re-run against the changed fixture: a full `npx vitest run` against a database that did not exist when the suite started must leave zero rows in `enrichment_coverage_runs` and must not leave a `data/app.db` in the checkout.  The run was `DATABASE_URL="file:/tmp/mm-st4572-full.db" npx vitest run` with the checkout's `data/app.db` removed beforehand, and it reported 861 files, 859 passed, 1 failed, 1 skipped; 9749 tests, 9697 passed, 1 failed, 51 skipped; 2,705 s.  The suite exited 1, and the single failure is `test/event-loop-stall-hot-path.test.ts`, the same case that fails on `main` for the same host-load reason and that this diff does not touch.  After the run the shared database held 0 enrichment coverage rows, where the same full run left four rows before the ST-4571 fix, and the checkout's `data/app.db` was absent (good).  That run measured the fixture as it stood before the teardown change; the hosted `verify-hosted` job is the gate of record for the whole suite on this diff.
 
-No production code changed, so the diff cannot change what the app does.
+One production module changed, additively.  `src/lib/enrichment-coverage.ts` gains the pending-write handle and the `__awaitPendingEnrichmentCoveragePersist()` export, and the persist itself is untouched: it is still scheduled as a fire-and-forget dynamic import, it still writes when it lands, and it still swallows its own failures.  Nothing in the app's behaviour changes, because the only caller of the new export is a test teardown.
 
 ## 5. Next Steps & Blockers
 
-None outstanding for the fix itself.  The two review threads on PR #4912 were answered with the measurement and resolved.  The repository-level guard that ST-4571 deliberately left out — asserting after the suite that the database it ran against collected no coverage rows — is still out of scope for a test-file change and is still recorded as a follow-up on ST-4571.
+None outstanding for the fix itself.  The review threads on PR #4912 were answered with the measurement and resolved, and the three threads on PR #4911 are answered with the reproduction and the fix.  The repository-level guard that ST-4571 deliberately left out — asserting after the suite that the database it ran against collected no coverage rows — is still out of scope for a test-file change and is still recorded as a follow-up on ST-4571.
 
 What this change does add is the file-level half of that guard.  Each cascade-reaching file now asserts that the shared database it inherited holds no coverage row when its own tests finish, which is the same fact the repo-level guard would assert, taken per file rather than once at the end of the run.
 

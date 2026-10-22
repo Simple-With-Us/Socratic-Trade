@@ -2923,3 +2923,20 @@ there means the probe can never bring the file into existence.  The counter was 
 real rows, and the new assertion was proved to fail when the shared database holds one.
 
 Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 — [MM] The teardown waits for the pending coverage write (ST-4572)
+
+Still the same defect class, one level further out.  The isolation work has been about which
+database a file writes to; this is about WHEN a file stops writing at all.  A teardown that
+restores the shared path while a coverage write is still in flight hands that write to the shared
+database, and the fix is to wait for the write rather than for a duration.
+
+The reason the wait is for the write and not for a delay is the measurement.  The probe reproduced
+the leak at 5,745 ms, and that number is the module load time, which moves with the transform
+cache and with machine load.  A delay long enough to cover it would be a guess that is wrong twice
+a day, so the scheduler keeps the handle and the teardown waits on it.
+
+Two files now carry the same `beforeAll` fixture ST-4572 gave the PR #4912 files, so the whole
+family of cascade-reaching writer files has one shape.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.

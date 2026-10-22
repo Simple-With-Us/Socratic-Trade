@@ -15,6 +15,7 @@ import { mergeGroupedBarData, mergeQuoteData } from "../src/lib/market";
 import type { MarketQuote, MarketScan } from "../src/lib/types";
 import type { MarketEnrichmentProvider, SymbolEnrichment } from "../src/lib/data-providers";
 import { sharedCoverageRowCount } from "./helpers/db-isolation-control";
+import { __awaitPendingEnrichmentCoveragePersist } from "../src/lib/enrichment-coverage";
 
 // The cascade gather in "cascade merge arbitrates the new quote fields" builds and persists an
 // enrichment coverage report.  Without a database of its own this file wrote coverage rows into
@@ -38,7 +39,12 @@ beforeAll(() => {
   resetDbForTesting();
 });
 
-afterAll(() => {
+afterAll(async () => {
+  // The coverage persist is scheduled as a fire-and-forget dynamic import, and it resolves the
+  // database it writes to when the write lands rather than when it was scheduled.  Wait for it
+  // while this file's own database is still the target, or a write that is still in flight lands
+  // in the database the worker is pointing at by then, which is the shared one.
+  await __awaitPendingEnrichmentCoveragePersist();
   resetDbForTesting();
   if (prevDb === undefined) delete process.env.DATABASE_URL;
   else process.env.DATABASE_URL = prevDb;
