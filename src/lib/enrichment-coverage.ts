@@ -286,6 +286,27 @@ function recordField(record: EnrichmentCoverageRecord | undefined, field: string
 
 let lastCoverageReport: EnrichmentCoverageReport | null = null;
 
+// The coverage persist is scheduled as a fire-and-forget dynamic import, and
+// persistEnrichmentCoverageReport resolves the database it writes to when the write lands,
+// not when it was scheduled.  A test file that restores DATABASE_URL while that write is still
+// in flight therefore has the write land in the database the worker is pointing at by then,
+// which is the shared one.  These handles let such a file wait for the pending write before it
+// restores anything.
+//
+// The handles live on globalThis because a test file can call vi.resetModules(), which replaces
+// this module's instance and would otherwise orphan a promise that is still pending.
+interface PendingPersistHost {
+  __socraticPendingCoveragePersists?: Set<Promise<void>>;
+}
+
+function pendingPersists(): Set<Promise<void>> {
+  const host = globalThis as unknown as PendingPersistHost;
+  if (!host.__socraticPendingCoveragePersists) {
+    host.__socraticPendingCoveragePersists = new Set<Promise<void>>();
+  }
+  return host.__socraticPendingCoveragePersists;
+}
+
 export function getLastEnrichmentCoverageReport(): EnrichmentCoverageReport | null {
   return lastCoverageReport;
 }
@@ -293,13 +314,41 @@ export function getLastEnrichmentCoverageReport(): EnrichmentCoverageReport | nu
 export function setLastEnrichmentCoverageReport(report: EnrichmentCoverageReport | null): void {
   lastCoverageReport = report;
   if (!report) return;
-  void import("./db-enrichment-coverage")
+  const handles = pendingPersists();
+  const pending: Promise<void> = import("./db-enrichment-coverage")
     .then((mod) => {
+      // persistEnrichmentCoverageReport is synchronous.  It resolves the database, opens the
+      // handle and writes the rows inside a better-sqlite3 transaction, and returns void, so
+      // the write has landed by the time this callback returns and the tracked promise settles
+      // only after it.  The asynchronous part is the dynamic import above, and that is what
+      // makes the tracked promise worth awaiting: the module resolves the database only when
+      // the write lands, which is why a teardown that restores DATABASE_URL before this
+      // promise settles hands the write to the wrong database.
       mod.persistEnrichmentCoverageReport(report);
     })
     .catch(() => {
       // Best-effort durability — never break a cascade run (tests may omit DB).
     });
+  handles.add(pending);
+  void pending.then(() => {
+    handles.delete(pending);
+  });
+}
+
+/** Test helper — waits for every coverage persist that is still in flight.
+ *
+ *  The persist is scheduled as a fire-and-forget dynamic import, so it can still be pending
+ *  when the calling file's teardown runs.  A file that restores DATABASE_URL before the write
+ *  lands would have the write land in the shared database instead of its own.  Call this
+ *  before restoring, while the file's own database is still the target.
+ */
+export async function __awaitPendingEnrichmentCoveragePersist(): Promise<void> {
+  // The loop covers a persist that schedules another one while it settles.
+  while (true) {
+    const handles = [...pendingPersists()];
+    if (handles.length === 0) return;
+    await Promise.all(handles);
+  }
 }
 
 /** Test helper — clears the in-memory last-report slot. */

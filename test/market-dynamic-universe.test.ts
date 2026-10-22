@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { resetDbForTesting } from "../src/lib/db";
+import { sharedCoverageRowCount } from "./helpers/db-isolation-control";
+import { __awaitPendingEnrichmentCoveragePersist } from "../src/lib/enrichment-coverage";
 
 // scanMarket() runs the live enrichment cascade, and every cascade gather builds and persists an
 // enrichment coverage report.  Without a database of its own this file wrote coverage rows into
@@ -11,14 +13,34 @@ import { resetDbForTesting } from "../src/lib/db";
 // The path is held for the whole FILE because the persist is a fire-and-forget dynamic import, so
 // it can resolve after the test that triggered it has finished.
 const dbDir = mkdtempSync(join(tmpdir(), `market-dynamic-universe-${randomUUID()}-`));
+const dbUrl = `file:${join(dbDir, "test.db")}`;
+// The run's shared path is captured here, at module scope, before any hook can throw.  A capture
+// inside beforeAll would be skipped whenever the differential assertion below fails, and the
+// teardown would then read that missing capture as "the run had no DATABASE_URL" and delete the
+// variable instead of restoring it.
 const prevDb = process.env.DATABASE_URL;
-process.env.DATABASE_URL = `file:${join(dbDir, "test.db")}`;
 
+// The override is applied in beforeAll rather than at module scope.  A module-scope assignment
+// opens the window in which the environment points at this file's database at import time,
+// before the afterAll below is registered, so a throw in between leaves the override installed
+// with nothing to undo it.  Applying it here means the window opens only once this file's tests
+// are about to run, and it is always closed by the afterAll below.
 beforeAll(() => {
+  // The differential assertion.  Under the old module-scope override this file's database was
+  // already installed by the time this hook ran, so this fails and the old implementation is
+  // caught here rather than passing silently.  Under the override below, the run's shared path is
+  // still in place, so it passes.
+  expect(process.env.DATABASE_URL).not.toBe(dbUrl);
+  process.env.DATABASE_URL = dbUrl;
   resetDbForTesting();
 });
 
-afterAll(() => {
+afterAll(async () => {
+  // The coverage persist is scheduled as a fire-and-forget dynamic import, and it resolves the
+  // database it writes to when the write lands rather than when it was scheduled.  Wait for it
+  // while this file's own database is still the target, or a write that is still in flight lands
+  // in the database the worker is pointing at by then, which is the shared one.
+  await __awaitPendingEnrichmentCoveragePersist();
   resetDbForTesting();
   if (prevDb === undefined) delete process.env.DATABASE_URL;
   else process.env.DATABASE_URL = prevDb;
@@ -143,6 +165,36 @@ describe("market scan dynamic universes", () => {
 
     expect(requestSignal?.aborted).toBe(true);
     expect(scan.warnings.join(" ")).toContain("holdings failed");
+  });
+});
+
+describe("database isolation control", () => {
+  it("keeps the cascade coverage write in this file's own database and out of the shared one", async () => {
+    // Control assertion for the fixture at the top of this file.  The other tests here pass
+    // whether or not the isolation works, so nothing in the file proves that the cascade
+    // write stays out of the run's shared database.  This one does, and it sits after the
+    // cascade tests because the write is the thing under test.
+    // The differential assertion lives in the beforeAll above, where the old module-scope
+    // override is caught; here the file only has to show that it is pointed at its own database.
+    expect(process.env.DATABASE_URL).toBe(dbUrl);
+
+    // The persist is a fire-and-forget dynamic import, so the row can arrive after the
+    // cascade test that triggered it has finished.  Poll for it rather than assume it landed.
+    const { listEnrichmentCoverageRunHistory } = await import("../src/lib/db-enrichment-coverage");
+    const deadline = Date.now() + 5_000;
+    let runs = listEnrichmentCoverageRunHistory(10);
+    while (runs.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+      runs = listEnrichmentCoverageRunHistory(10);
+    }
+    expect(runs.length).toBeGreaterThan(0);
+
+    // The shared database is the one this file inherited, and the cascade row must not be
+    // in it.  This is the half that fails under the old shared-database setup.  When the
+    // write goes to the shared database this file's own database has no row either, and the
+    // assertion above already fails.  This one additionally rules out the write landing in
+    // both databases.
+    expect(sharedCoverageRowCount(prevDb)).toBe(0);
   });
 });
 

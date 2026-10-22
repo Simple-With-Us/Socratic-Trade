@@ -2891,6 +2891,116 @@ That belongs with the repo's own gate rather than with a test-file change.
 
 Rollout: `docs/rollouts/2026-10-21-st-4571-suite-db-hygiene.md`.
 
+## 2026-10-21 — [MM] The fixture override moves into a hook, and the isolation is asserted (ST-4572)
+
+Not a scope change: the two follow-ups PR #4912 named in its own body.  The `DATABASE_URL`
+override in the three cascade-reaching writer files moves from module scope into `beforeAll`, and
+the isolation gets a control assertion that was proved to fail when the override is removed.  Three
+test files changed and no production code changed.
+
+The detail that shaped the change is the one ST-4570 established and ST-4571 confirmed: a writer
+holds its database path for the whole file, because the persist is a fire-and-forget dynamic import
+that can resolve after the test that triggered it has finished.  So the suggested remedy of moving
+the override into `beforeEach` was not taken; what was taken instead is the same remedy one level
+up, in `beforeAll`, which closes the hole a module-scope assignment leaves open without introducing
+the per-test path.
+
+One thing this change makes checkable that was not checkable before: the control assertion is
+differential, and it was run against a copy of the file with the override removed, so its failure
+was observed rather than assumed.  A control that cannot fail is not a control.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 - [MM] The isolation control proves the shared database stayed clean (ST-4572)
+
+Still not a scope change.  The same two follow-ups, taken one step further.  The control assertion
+in the two cascade-reaching files grows a third part that checks the run's shared database
+directly, so the control now covers the whole of the claim rather than one half of it.
+
+The shape that made this possible is a read-only probe with `fileMustExist: true`.  Opening the
+shared path read-write would create it, and creating it is the pollution ST-4571 exists to
+prevent; opening it read-only cannot write, and refusing to open a database that is not already
+there means the probe can never bring the file into existence.  The counter was proved to count
+real rows, and the new assertion was proved to fail when the shared database holds one.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 — [MM] The teardown waits for the pending coverage write (ST-4572)
+
+Still the same defect class, one level further out.  The isolation work has been about which
+database a file writes to; this is about WHEN a file stops writing at all.  A teardown that
+restores the shared path while a coverage write is still in flight hands that write to the shared
+database, and the fix is to wait for the write rather than for a duration.
+
+The reason the wait is for the write and not for a delay is the measurement.  The probe reproduced
+the leak at 5,745 ms, and that number is the module load time, which moves with the transform
+cache and with machine load.  A delay long enough to cover it would be a guess that is wrong twice
+a day, so the scheduler keeps the handle and the teardown waits on it.
+
+Two files now carry the same `beforeAll` fixture ST-4572 gave the PR #4912 files, so the whole
+family of cascade-reaching writer files has one shape.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 — [MM] The ST-4570 rollout note is corrected in place (ST-4572)
+
+Kody's thread 4339304233 was raised against a line of the ST-4570 rollout note that says no
+regression guard was added.  A guard now ships on this branch, so the note is corrected rather than
+left asserting something untrue, and its follow-up list names the guard that exists and the
+repo-level guard that does not.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 — [MM] The control becomes differential (ST-4572)
+
+A differential test needs to fail under the old implementation, and this one did not: it asserted
+the environment after the fixture had installed it, which is true under both the old module-scope
+override and the new one.  The fix is to assert before the override that the environment is not
+this file's own path, which is true only before the new implementation installs it and false after
+the old one already has.
+
+The row from the shared database is now validated with a schema, because a database file on disk is
+an untrusted input and an unexpected shape should be a visible fault rather than a wrong count.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 — [MM] The fault paths are separated, and the guard covers every file (ST-4572)
+
+Two failure modes were sharing one string match.  A missing table and a malformed count row are
+opposite facts, and the helper reports the first as zero and must report the second as a fault.
+Narrowing the catch to the driver's own error, and moving the shape check outside it, makes that
+distinction structural rather than a matter of what a message happens to say.
+
+The differential assertion now covers all five files that restore `DATABASE_URL`.  It was added to
+the two that carry a control test, and the fixture shape is shared across the five, so a guard that
+covers two of them leaves three able to regress with nothing failing.
+
+## 2026-10-22 — [MM] The capture moves out of the hook, and the shape is pinned (ST-4572)
+
+A fourth review round found that the differential assertion sat ahead of the capture of the run's
+shared path, so a failed assertion left the capture unset and the teardown deleted
+`DATABASE_URL` instead of restoring it.  The capture is a module-scope constant now, in all five
+files, and a new guard pins the shape of those five fixtures.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
 ## 2026-10-21 — [MM] The off-loop follow-up query stops being measured against the host (ST-4573)
 
 Not a scope change: a test-guard defect fix.  Two cases in `test/sqlite-all-offloop.test.ts` judged a follow-up query against a fixed wall clock of 200ms and 300ms, but the pool always starts a fresh slot while another one is busy and the retired slot is removed synchronously, so the follow-up never queues behind the wedged statement and the clock only measured how fast this machine creates a worker.  The wall-clock assertions are replaced by two assertions that have different subjects, the count of queries the pool dispatched for the follow-up and the move in the live slot count, and the fixed reclaim window became a poll.  No production code changed.  Rollout: `docs/rollouts/2026-10-21-st-4573-offloop-wall-clock-budget.md`.
+
+## 2026-10-22 — [MM] The shape guard reads the hook body, and the audit trail is corrected (ST-4572)
+
+A fifth review round found that the shape guard matched fixture text outside the `beforeAll` body, that the guard's repo root came from the runner's working directory, and that three statements in this branch's own audit trail were wrong.  The guard now matches the hook body by brace depth and resolves the repo root from the module's own path, and the file count, the list of files that restore the shared path and the ST-4570 note's pointer to the shared-database differential are corrected in place.  No scope change, no production code changed, and the nine files that restore `DATABASE_URL` are now distinguished: six restore it at file scope — five install a database for the whole file and carry the differential, and the isolation fixture restores it too — and three restore it per test and are out of scope for the file-level guard.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 — [MM] The audit trail counts what it claims to count (ST-4572)
+
+A sixth review round found two counts in this branch's own audit trail that were wrong.  The number of test files that already resolve their repository root with the same expression was overstated as twenty-three, which is the number that merely reference `import.meta.url`; the exact expression is in eight.  The number of files that restore `DATABASE_URL` was understated as eight, because the isolation fixture this branch adds captures the shared path at module scope and restores it in its teardown, which makes it a ninth.  Both counts are corrected in the rollout note and in the rows above, and the note now carries a sixth-round section with the measurement.  No scope change and no production code changed.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 — [MM] The bound names every file that restores the shared path (ST-4572)
+
+A seventh review round found two statements in this branch's own audit trail that were wrong.  The bound paragraph said only six files restore the shared path and that every other file that sets `DATABASE_URL` leaves it installed, but three more files restore it, each capturing it inside `beforeEach` and putting it back in their `afterEach`, so the note hid three restorers and overstated the set of files whose late write can reach the shared database.  It also described `test/sqlite-storage-hygiene.test.ts` as never restoring `DATABASE_URL`, when it does restore it to its own path rather than to the shared one.  Both are corrected: the bound paragraph names all nine restorers, separates the six that restore at file scope from the three that restore per test, and scopes the "leaves it installed" clause to the files that genuinely never put the shared path back, and the sixth-round section says what the hygiene file actually does.  The inventory stays at nine.  No scope change and no production code changed.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
