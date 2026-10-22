@@ -76,7 +76,7 @@ describe("usage-budget: cheaperModel", () => {
     expect(budget.cheaperModel("x-ai/grok-4.6")).toBe("x-ai/grok-build-0.1");
     expect(budget.cheaperModel("muse-spark-1.3")).toBe("muse-glimmer-30b");
     expect(budget.cheaperModel("meta/muse-spark-1.3")).toBe("meta/muse-glimmer-30b");
-    expect(budget.cheaperModel("minimax-m3")).toBeUndefined(); // no cheaper row in the catalog
+    expect(budget.cheaperModel("minimax-m3.1-flash")).toBeUndefined(); // no cheaper row in the catalog
     expect(budget.cheaperModel(undefined)).toBeUndefined();
   });
 });
@@ -185,7 +185,7 @@ describe("usage-budget: evaluateBudgetForRun", () => {
   it("budgets native MiniMax independently from unrelated OpenRouter spend", async () => {
     const userId = "minimax-budget-user";
     upsertUserApiKey(userId, "minimax", "minimax-placeholder");
-    const policy = { llmModel: "minimax-m3" };
+    const policy = { llmModel: "minimax-m3.1-flash" };
     const overRouter = status([{ name: "openrouter", status: "exceeded" }, { name: "minimax", status: "ok" }]);
     try {
       expect(await budget.evaluateBudgetForRun(userId, policy, { status: overRouter })).toEqual({ skip: false, downgraded: false });

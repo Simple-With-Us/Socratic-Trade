@@ -159,10 +159,10 @@ describe("llmForModel — OpenRouter-first routing (review finding llm-12)", () 
         : fakeChatResponse("Visible answer");
     });
     try {
-      const llm = llmForModel("minimax-m3", userId, { openAITransport: transport });
+      const llm = llmForModel("minimax-m3.1-flash", userId, { openAITransport: transport });
       const result = await llm.run({ ...baseArgs, tools: [{ name: "get_quote", description: "Quote", input_schema: { type: "object" } }] });
       expect(requests).toHaveLength(2);
-      expect(requests[0].model).toBe("MiniMax-M3");
+      expect(requests[0].model).toBe("MiniMax-M3.1-Flash");
       expect(requests[0].reasoning_split).toBe(true);
       expect(requests[0].max_completion_tokens).toBe(9_024);
       expect(requests[1].messages.find((m: { role: string }) => m.role === "assistant").reasoning_details).toEqual(reasoning);
@@ -176,7 +176,7 @@ describe("llmForModel — OpenRouter-first routing (review finding llm-12)", () 
     const userId = `u_explicit_or_minimax_${randomUUID()}`;
     upsertUserApiKey(userId, "minimax", "minimax-test-placeholder");
     try {
-      expect(llmForModel("openrouter/minimax/minimax-m3", userId)).toBeInstanceOf(MockLLM);
+      expect(llmForModel("openrouter/minimax/minimax-m3.1-flash", userId)).toBeInstanceOf(MockLLM);
     } finally {
       deleteUserApiKey(userId, "minimax");
     }
@@ -187,14 +187,14 @@ describe("llmForModel — OpenRouter-first routing (review finding llm-12)", () 
     const savedProvider = process.env.CHAT_LLM;
     const savedModel = process.env.CHAT_LLM_MODEL;
     process.env.CHAT_LLM = "openrouter";
-    process.env.CHAT_LLM_MODEL = "minimax-m3";
+    process.env.CHAT_LLM_MODEL = "minimax-m3.1-flash";
     upsertUserApiKey(userId, "openrouter", "openrouter-test-placeholder");
     const transport = vi.fn().mockResolvedValue(fakeChatResponse());
     try {
       const llm = getLLM(userId, { openAITransport: transport });
       expect(llm).toBeInstanceOf(OpenAILLM);
       await llm.run(baseArgs);
-      expect(transport.mock.calls[0][0].model).toBe("minimax/minimax-m3");
+      expect(transport.mock.calls[0][0].model).toBe("minimax/minimax-m3.1-flash");
     } finally {
       deleteUserApiKey(userId, "openrouter");
       if (savedProvider === undefined) delete process.env.CHAT_LLM;
@@ -209,7 +209,7 @@ describe("llmForModel — OpenRouter-first routing (review finding llm-12)", () 
     const savedProvider = process.env.CHAT_LLM;
     const savedModel = process.env.CHAT_LLM_MODEL;
     process.env.CHAT_LLM = "minimax";
-    process.env.CHAT_LLM_MODEL = "minimax-m3";
+    process.env.CHAT_LLM_MODEL = "minimax-m3.1-flash";
     upsertUserApiKey(userId, "minimax", "minimax-test-placeholder");
     const transport = vi.fn().mockResolvedValue(fakeChatResponse());
     try {
@@ -217,7 +217,7 @@ describe("llmForModel — OpenRouter-first routing (review finding llm-12)", () 
       expect(llm).toBeInstanceOf(OpenAILLM);
       await llm.run(baseArgs);
       const body = transport.mock.calls[0][0];
-      expect(body.model).toBe("MiniMax-M3");
+      expect(body.model).toBe("MiniMax-M3.1-Flash");
       expect(body.reasoning_split).toBe(true);
       expect(body.max_completion_tokens).toBeGreaterThan(1024);
       expect(body.max_tokens).toBeUndefined();

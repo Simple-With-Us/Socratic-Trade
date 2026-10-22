@@ -1,3 +1,13 @@
+## 2026-10-21 CLAUDE — ST-4574 in-app MiniMax model moves to MiniMax-M3.1-Flash
+
+**What.**  The catalog row `minimax-m3` is now `minimax-m3.1-flash` (OpenRouter `minimax/minimax-m3.1-flash`, native `MiniMax-M3.1-Flash`, $0.15 in and $0.60 out per 1M).  `minimax-m3` stays an alias, so a stored selection resolves to the new row with no database change.  Production has `llm_route_minimax=native`, so Sandbox Green and Alpaca Paper Red (both stored as `minimax-m3`) reach `api.minimax.io` with exactly `MiniMax-M3.1-Flash` after deploy.
+
+**Verified.**  The native slug returned HTTP 200 live.  OpenRouter lists only the retired `:free` variant and 404s on the paid id until MiniMax publishes it there, so OpenRouter-routed MiniMax calls fail until then.
+
+**Next.**  Merge after CI, confirm the deploy SHA, then watch whether Sandbox's six-run failure streak clears.
+
+Rollout: `docs/rollouts/2026-10-21-minimax-m3-1-flash.md`.
+
 ## 2026-10-18 CLAUDE — OPS-818 bootstrap identity moves to the Keychain
 
 **What.**  Per the owner's 2026-10-18 ruling that nothing may read the flat global key file, the Infisical bootstrap resolver (`scripts/infisical-bootstrap-env.mjs`) now reads `process.env`, then `.env.local` runner controls, then the macOS login Keychain (service `socratic-trade-bootstrap`, account = env var name).  The flat-file layer and the `db-api-keys.ts` dev loader are deleted;  `predev-check.mjs` checks Keychain presence;  AGENTS.md's strict-Infisical rule carries the 2026-10-18 update.  The Mac's Keychain was seeded with `INFISICAL_ST_CLIENT_ID` and `INFISICAL_ST_CLIENT_SECRET` (read-back matched).  Rollout `docs/rollouts/2026-10-18-ops-818-bootstrap-keychain.md`.

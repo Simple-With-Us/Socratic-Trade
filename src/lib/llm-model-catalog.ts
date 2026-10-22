@@ -337,15 +337,19 @@ export const LLM_MODEL_CATALOG: readonly LlmCatalogEntry[] = [
     predecessors: ["deepseek-v4-pro-0813", "deepseek-r1"]
   },
   {
-    displaySlug: "minimax-m3",
-    openRouterSlug: "minimax/minimax-m3",
-    nativeSlug: "MiniMax-M3",
+    // Replaced minimax-m3 on 2026-10-21 (owner: all MiniMax use moves to M3.1 Flash).  minimax-m3
+    // stays an alias so a persisted selection, an OpenRouter id or a native id for M3 still
+    // resolves here instead of falling through to the unknown-model path; see
+    // docs/rollouts/2026-10-21-minimax-m3-1-flash.md.
+    displaySlug: "minimax-m3.1-flash",
+    openRouterSlug: "minimax/minimax-m3.1-flash",
+    nativeSlug: "MiniMax-M3.1-Flash",
     provider: "minimax",
-    label: "minimax-m3 — general-purpose reasoning",
+    label: "minimax-m3.1-flash — fast agentic reasoning",
     tier: "$",
-    aliases: ["minimax/minimax-m3"],
+    aliases: ["minimax-m3", "minimax/minimax-m3"],
     lineage: "minimax",
-    predecessors: ["minimax-m2.7"]
+    predecessors: ["minimax-m3", "minimax-m2.7"]
   },
   {
     displaySlug: "muse-spark-1.3",

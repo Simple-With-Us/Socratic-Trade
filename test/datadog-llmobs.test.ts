@@ -30,7 +30,7 @@ describe("Datadog LLM Observability wrapper", () => {
 
   it.each([
     ["https://openrouter.ai/api/v1/chat/completions", "openrouter", "x"],
-    ["https://api.minimax.io/v1/chat/completions", "minimax", "MiniMax-M3"]
+    ["https://api.minimax.io/v1/chat/completions", "minimax", "MiniMax-M3.1-Flash"]
   ])("wraps %s through dd-trace LLMObs with provider attribution", async (url, provider, model) => {
     vi.stubEnv("DD_API_KEY", "test-key");
     const wrap = vi.fn((_opts: unknown, fn: () => Promise<unknown>) => async () => fn());

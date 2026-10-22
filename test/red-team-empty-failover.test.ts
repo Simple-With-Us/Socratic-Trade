@@ -191,7 +191,7 @@ it("Code CLI Red primary does not fall through to a paid reviewer", async () => 
   const {getPolicy,setPolicy,setUserSetting,upsertUserApiKey}=await import("../src/lib/db");
   upsertUserApiKey("local","openrouter","test-fallback-key","fixture");
   setUserSetting("local","llm_route_minimax","code-cli");
-  setPolicy({...getPolicy(),redTeamLlmModel:"minimax-m3"});
+  setPolicy({...getPolicy(),redTeamLlmModel:"minimax-m3.1-flash"});
   const calls:string[]=[];
   vi.stubGlobal("fetch",async(url:string|URL|Request)=>{calls.push(String(url));return new Response("unavailable",{status:503});});
   try {
