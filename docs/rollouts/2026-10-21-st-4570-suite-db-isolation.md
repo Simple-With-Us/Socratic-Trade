@@ -69,9 +69,12 @@ the per-test scope, because the reader never writes.
   the pollution; it does not make the reader's premise true.  A reader that asserts an empty
   universe should own the database it asserts about, so that its result does not depend on what ran
   before it.
-- **No regression guard added here.**  The obvious one — run the suite twice and assert the two runs
-  agree — is a repo-level check rather than a test-file change, and it belongs with the repo's own
-  gate.  It is recorded as a follow-up on ST-4570.
+- **No regression guard added in this change.**  The obvious one — run the suite twice and assert the
+  two runs agree — is a repo-level check rather than a test-file change, and it belongs with the
+  repo's own gate.  It is recorded as a follow-up on ST-4570, and it is still open.  A per-file
+  differential guard against the shared database does ship, on ST-4572: `test/helpers/db-isolation-control.ts`
+  probes the shared database read-only, and `test/coverage-persist-isolation.test.ts` carries the
+  differential with a control assertion.
 - **Kept off the public-pages branch.**  The fix is on its own branch off `origin/main`, so it does
   not widen the diff of PR #4889 and it carries no unattributed commit, so it needs no owner approval
   to land.
@@ -80,6 +83,9 @@ the per-test scope, because the reader never writes.
 
 - Add the repo-level guard: run the suite twice against one checkout and assert the second run
   matches the first.  That is the property that was broken, and the per-file fix does not assert it.
+- The per-file differential guard now exists, on ST-4572: `test/helpers/db-isolation-control.ts` and
+  `test/coverage-persist-isolation.test.ts`, the second with a control assertion.  The repo-level
+  double-run guard above is the part that is still missing.
 - Consider whether the remaining test files that do not set `DATABASE_URL` should also be made
   explicit.  They do not reach the persistence path today, so this change does not touch them, but
   the convention is only as strong as its exceptions.

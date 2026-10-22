@@ -10,7 +10,7 @@ The objective is narrow.  Close the structural hole in the fixture, make the iso
 
 ## 2. Changes Made
 
-Seven files changed, two of them new.  One production module gains an additive test helper, and no existing assertion was weakened.
+Nine files changed, two of them new.  One production module gains an additive test helper, and no existing assertion was weakened.
 
 - `test/market-dynamic-universe.test.ts` — the `DATABASE_URL` override moves from module scope into `beforeAll`, a control assertion is added, and the teardown waits for the pending coverage write.
 - `test/provenance-stamps.test.ts` — the same move, the control assertion checks the URL, the row in this file's own database and the absence of that row in the shared one, and the teardown waits for the pending coverage write.
@@ -20,6 +20,7 @@ Seven files changed, two of them new.  One production module gains an additive t
 - `test/helpers/db-isolation-control.ts` — new.  It exports `sharedDatabasePath(prevDb)`, the path the run shared before a file installed its own, `coverageRowCount(path)`, the number of `enrichment_coverage_runs` rows in the database at an absolute path, and `sharedCoverageRowCount(prevDb)`, the same count for the shared database.  The database is opened READ-ONLY with `fileMustExist: true` and is never created; a database that is not there reads as holding no rows, and a missing table is treated as the same fact, while any other error is rethrown rather than folded into a zero.
 - `test/coverage-persist-isolation.test.ts` — new.  A differential test for the teardown race with a control assertion, described below.
 - `src/lib/enrichment-coverage.ts` — one additive export, `__awaitPendingEnrichmentCoveragePersist()`, which waits for every coverage persist that is still in flight.  The scheduler now keeps the handle for the write it started, and the handles live on `globalThis` so that a test file calling `vi.resetModules()` cannot orphan a promise that is still pending.  Nothing else in the module changes, and the production behaviour of the persist is unchanged.
+- `docs/rollouts/2026-10-21-st-4570-suite-db-isolation.md` — corrected in place.  Its decision bullet said that no regression guard was added, which was true when it was written and is false now that this change ships one, so the bullet records that the per-file differential guard exists here and that the repo-level double-run guard it also asks for is the part still open.  The follow-up list carries the same pointer.
 
 The control assertion in the two cascade-reaching files carries three parts.  The URL equality proves the file is pointed at its own database.  The row in the file's own database proves the cascade write landed there.  The absence of that row in the shared database proves the write did not land there as well, which is the one condition the first two parts cannot see.  A row landing in the file's own database is consistent with the write also landing in the shared one, and only the second database can tell those two apart.  Kody's note on the merged PR #4912 asked for both halves — that the write lands in this file's own database and not in the shared one — and this is that shape.
 
@@ -86,10 +87,10 @@ One production module changed, additively.  `src/lib/enrichment-coverage.ts` gai
 
 ## 5. Next Steps & Blockers
 
-None outstanding for the fix itself.  The review threads on PR #4912 were answered with the measurement and resolved, and the three threads on PR #4911 are answered with the reproduction and the fix.  The repository-level guard that ST-4571 deliberately left out — asserting after the suite that the database it ran against collected no coverage rows — is still out of scope for a test-file change and is still recorded as a follow-up on ST-4571.
+None outstanding for the fix itself.  The follow-up comment on PR #4912 and the three threads on PR #4911 are answered with the measurement, the reproduction and the fix, and resolved.  The repository-level guard that ST-4571 deliberately left out — asserting after the suite that the database it ran against collected no coverage rows — is still out of scope for a test-file change and is still recorded as a follow-up on ST-4571.
 
 What this change does add is the file-level half of that guard.  Each cascade-reaching file now asserts that the shared database it inherited holds no coverage row when its own tests finish, which is the same fact the repo-level guard would assert, taken per file rather than once at the end of the run.
 
 ## 6. Zero-Code Findings
 
-Not applicable.  This change is test-only, and the code it touches is the test fixture that the previous change introduced.
+None.  The change is confined to the test fixture and to the one production module that fixture already reached into, and that module gains only an additive export for a test teardown to await.  No behaviour outside the test suite is affected.

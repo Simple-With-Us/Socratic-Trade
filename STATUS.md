@@ -7658,3 +7658,12 @@ files this diff touches pass 42 of 42 together against a fresh database, and the
 `data/app.db` was absent afterwards.
 
 Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 [MM] ST-4572 — the ST-4570 rollout note stops claiming it shipped no regression guard
+
+The ST-4570 note said in its decisions list that no regression guard was added, which was true when
+it was written and is false now that this branch ships one.  The bullet is corrected in place, the
+follow-up list names the guard that exists, and the repo-level double-run guard the note also asks
+for is still recorded as the part that is missing.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.

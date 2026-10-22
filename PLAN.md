@@ -2940,3 +2940,12 @@ Two files now carry the same `beforeAll` fixture ST-4572 gave the PR #4912 files
 family of cascade-reaching writer files has one shape.
 
 Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 — [MM] The ST-4570 rollout note is corrected in place (ST-4572)
+
+Kody's thread 4339304233 was raised against a line of the ST-4570 rollout note that says no
+regression guard was added.  A guard now ships on this branch, so the note is corrected rather than
+left asserting something untrue, and its follow-up list names the guard that exists and the
+repo-level guard that does not.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
