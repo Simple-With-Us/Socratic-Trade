@@ -7667,3 +7667,22 @@ follow-up list names the guard that exists, and the repo-level double-run guard 
 for is still recorded as the part that is missing.
 
 Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 [MM] ST-4572 — the control now tells the old fixture from the new one
+
+A second review round found that the control assertion could not tell the two apart, because it
+only looked at the environment after the fixture had installed it, so the old module-scope
+implementation passed it too.  The two files that carry the control now assert, ahead of the
+override and inside their `beforeAll`, that `process.env.DATABASE_URL` is not this file's own path.
+Under the old implementation that path was already installed when the hook ran, so the assertion
+fails; under the new one the run's shared path is still in place, so it passes.  A copy of
+`test/provenance-stamps.test.ts` with the override moved back to module scope was run to prove it,
+and it failed at that assertion.
+
+The same round found the count row read off an untyped result, so it is now parsed with a zod schema
+at that boundary, and a row that does not match is surfaced as a fault rather than folded into a
+count.  The fourth finding, about collection-time capture, was checked in the source and does not
+hold: the database path is never captured at module scope, and the nested blocks capture this
+file's own path because they run after the file's `beforeAll`.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.

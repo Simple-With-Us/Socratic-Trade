@@ -2949,3 +2949,16 @@ left asserting something untrue, and its follow-up list names the guard that exi
 repo-level guard that does not.
 
 Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 — [MM] The control becomes differential (ST-4572)
+
+A differential test needs to fail under the old implementation, and this one did not: it asserted
+the environment after the fixture had installed it, which is true under both the old module-scope
+override and the new one.  The fix is to assert before the override that the environment is not
+this file's own path, which is true only before the new implementation installs it and false after
+the old one already has.
+
+The row from the shared database is now validated with a schema, because a database file on disk is
+an untrusted input and an unexpected shape should be a visible fault rather than a wrong count.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.

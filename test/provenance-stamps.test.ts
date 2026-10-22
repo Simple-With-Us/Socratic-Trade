@@ -34,6 +34,11 @@ let prevDb: string | undefined;
 // only mutated once this file's tests are about to run, and the mutation is always undone by the
 // afterAll below.
 beforeAll(() => {
+  // The differential assertion.  Under the old module-scope override this file's database was
+  // already installed by the time this hook ran, so this fails and the old implementation is
+  // caught here rather than passing silently.  Under the override below, the run's shared path is
+  // still in place, so it passes.
+  expect(process.env.DATABASE_URL).not.toBe(dbUrl);
   prevDb = process.env.DATABASE_URL;
   process.env.DATABASE_URL = dbUrl;
   resetDbForTesting();
@@ -390,8 +395,9 @@ describe("database isolation control", () => {
     // Control assertion for the fixture at the top of this file.  The other tests here pass
     // whether or not the isolation works, so nothing in the file proves that the cascade write
     // stays out of the run's shared database.  This one does.
+    // The differential assertion lives in the beforeAll above, where the old module-scope
+    // override is caught; here the file only has to show that it is pointed at its own database.
     expect(process.env.DATABASE_URL).toBe(dbUrl);
-    expect(process.env.DATABASE_URL).not.toBe(prevDb);
 
     // The persist is a fire-and-forget dynamic import, so the row can arrive after the cascade
     // test that triggered it has finished.  Poll for it rather than assume it has landed.

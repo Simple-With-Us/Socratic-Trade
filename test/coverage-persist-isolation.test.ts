@@ -5,17 +5,18 @@
  * that prevents it, and it pins the failure it prevents with a control assertion.
  */
 import { describe, expect, it, afterAll } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import Database from "better-sqlite3";
 import { resetDbForTesting } from "../src/lib/db";
 import {
   __awaitPendingEnrichmentCoveragePersist,
   setLastEnrichmentCoverageReport,
   type EnrichmentCoverageReport
 } from "../src/lib/enrichment-coverage";
-import { coverageRowCount } from "./helpers/db-isolation-control";
+import { CoverageRowSchema, coverageRowCount } from "./helpers/db-isolation-control";
 
 // Two databases inside this file's own temporary directory.  The first stands in for the
 // database a test file installs for itself, and the second for the database the worker is
@@ -85,5 +86,53 @@ describe("coverage persist isolation", () => {
     await __awaitPendingEnrichmentCoveragePersist();
 
     expect(coverageRowCount(sharedPath)).toBe(1);
+  });
+});
+
+describe("the coverage count row is validated", () => {
+  it("accepts the driver's own row and rejects a malformed one", () => {
+    // The shape the driver really returns for the count query.
+    expect(CoverageRowSchema.safeParse({ n: 3 }).success).toBe(true);
+    expect(CoverageRowSchema.safeParse({ n: 0 }).success).toBe(true);
+    // The shapes that must not be counted as rows.
+    expect(CoverageRowSchema.safeParse({ n: "3" }).success).toBe(false);
+    expect(CoverageRowSchema.safeParse({ n: -1 }).success).toBe(false);
+    expect(CoverageRowSchema.safeParse({ n: 1.5 }).success).toBe(false);
+    expect(CoverageRowSchema.safeParse({ count: 3 }).success).toBe(false);
+    expect(CoverageRowSchema.safeParse(undefined).success).toBe(false);
+    expect(CoverageRowSchema.safeParse(null).success).toBe(false);
+  });
+
+  it("counts the rows in a database that really holds them", () => {
+    // The count comes from the driver's own row, so the validation has to accept what the driver
+    // really returns on this database and not what a type annotation claims it returns.  Three
+    // rows is three, an empty table is zero, and a database that is not there is zero and is not
+    // created.
+    const create = (path: string) => {
+      const handle = new Database(path);
+      handle.exec(
+        "CREATE TABLE enrichment_coverage_runs (as_of TEXT PRIMARY KEY, symbol_count INTEGER, report_json TEXT, created_at TEXT)"
+      );
+      return handle;
+    };
+
+    const countedPath = join(dir, "counted.db");
+    const counted = create(countedPath);
+    const insert = counted.prepare(
+      "INSERT INTO enrichment_coverage_runs (as_of, symbol_count, report_json, created_at) VALUES (?, ?, ?, ?)"
+    );
+    for (const asOf of ["2026-10-21", "2026-10-22", "2026-10-23"]) {
+      insert.run(asOf, 1, "{}", "2026-10-21T00:00:00.000Z");
+    }
+    counted.close();
+    expect(coverageRowCount(countedPath)).toBe(3);
+
+    const emptyPath = join(dir, "empty.db");
+    create(emptyPath).close();
+    expect(coverageRowCount(emptyPath)).toBe(0);
+
+    const absentPath = join(dir, "absent.db");
+    expect(coverageRowCount(absentPath)).toBe(0);
+    expect(existsSync(absentPath)).toBe(false);
   });
 });

@@ -11,6 +11,15 @@
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { z } from "zod";
+
+// The shape of the count row, validated at the trust boundary.  The database is an untrusted
+// input here: it is a file on disk that another process may have written, so the row is parsed
+// rather than assumed, and a row that does not match is surfaced as a fault instead of being
+// folded into a count.
+export const CoverageRowSchema = z.object({
+  n: z.number().int().nonnegative(),
+});
 
 // The path the run shared before a file installed its own.  DATABASE_URL as the run had it,
 // or the checkout default when the run had none.  This mirrors databasePath() in src/lib/db.ts.
@@ -28,10 +37,15 @@ export function coverageRowCount(path: string): number {
   if (!existsSync(path)) return 0;
   const handle = new Database(path, { readonly: true, fileMustExist: true });
   try {
-    const row = handle.prepare("SELECT COUNT(*) AS n FROM enrichment_coverage_runs").get() as
-      | { n: number }
-      | undefined;
-    return row?.n ?? 0;
+    const row: unknown = handle
+      .prepare("SELECT COUNT(*) AS n FROM enrichment_coverage_runs")
+      .get();
+    if (row === undefined) return 0;
+    const parsed = CoverageRowSchema.safeParse(row);
+    if (!parsed.success) {
+      throw new Error(`unexpected coverage count row shape: ${parsed.error.message}`);
+    }
+    return parsed.data.n;
   } catch (err) {
     // The table is absent, which is the same fact as the table holding no rows.  Anything
     // else is a real fault and is surfaced rather than folded into a zero.
