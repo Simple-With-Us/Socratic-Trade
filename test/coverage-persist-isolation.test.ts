@@ -40,7 +40,14 @@ const report: EnrichmentCoverageReport = {
   contributingSources: []
 };
 
-afterAll(() => {
+afterAll(async () => {
+  // The coverage persist is scheduled as a fire-and-forget dynamic import, and it resolves the
+  // database it writes to when the write lands rather than when it was scheduled.  Wait for it
+  // before the shared path is restored, or a write that is still in flight lands in the database
+  // the worker is pointing at by then, which is the run's shared one.  This file points the run
+  // at two databases of its own rather than at one for the whole file, so the wait drains into
+  // the temporary database this fixture installed, never into the run's shared path.
+  await __awaitPendingEnrichmentCoveragePersist();
   resetDbForTesting();
   if (prevDb === undefined) delete process.env.DATABASE_URL;
   else process.env.DATABASE_URL = prevDb;

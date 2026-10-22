@@ -13,6 +13,12 @@
  * the old module-scope override from the new one, because the old arrangement had already
  * installed this file's database by the time the hook ran.
  *
+ * A third property is pinned the same way.  Every file that restores the shared path at file
+ * scope has to wait for the pending coverage write before it restores, because the persist
+ * resolves the database it writes to when the write lands rather than when it was scheduled, so
+ * a teardown that restores the path first hands the write to the shared database.  The wait has
+ * to sit ahead of the restore, and the guard says so rather than trusting the note to.
+ *
  * This is a source-shape guard rather than a behavioural one on purpose: the defect lives in the
  * order of two statements in a fixture, and a behavioural test for it would have to fail a hook
  * on purpose to observe the teardown.
@@ -42,6 +48,11 @@ const FIXTURE_FILES = [
 // than one override.
 const ISOLATION_FILE = "test/coverage-persist-isolation.test.ts" as const;
 
+// Every file that restores the shared path at file scope.  Five install a database of their own
+// for the whole file; the sixth is the ordering fixture, which installs two databases of its own
+// and still restores the shared path at module scope.
+const FILE_SCOPE_RESTORERS = [...FIXTURE_FILES, ISOLATION_FILE] as const;
+
 // A capture taken inside a hook.  The declaration at module scope is `const prevDb = …`, so the
 // statement form below cannot match it.
 const CAPTURE_ASSIGNMENT = /^\s*prevDb\s*=\s*process\.env\.DATABASE_URL;?\s*$/m;
@@ -50,6 +61,7 @@ const CAPTURE_DECLARATION = "const prevDb = process.env.DATABASE_URL;";
 const DIFFERENTIAL_ASSERTION = "expect(process.env.DATABASE_URL).not.toBe(dbUrl);";
 const OVERRIDE = "process.env.DATABASE_URL = dbUrl;";
 const RESTORE = "process.env.DATABASE_URL = prevDb;";
+const AWAIT_PENDING = "await __awaitPendingEnrichmentCoveragePersist();";
 
 /**
  * The body of one hook, matched by brace depth.
@@ -134,4 +146,26 @@ describe("the database-isolation fixtures capture the shared path at module scop
     expect(CAPTURE_ASSIGNMENT.test(source)).toBe(false);
     expect(hookBody(source, "afterAll")).toContain(RESTORE);
   });
+});
+
+describe("the database-isolation fixtures wait for the pending coverage write before they restore", () => {
+  for (const file of FILE_SCOPE_RESTORERS) {
+    it(`${file} awaits the pending write ahead of the restore`, () => {
+      const source = read(file);
+
+      // The file has to import the helper at all, or the wait below is something else.
+      expect(source).toContain(AWAIT_PENDING);
+
+      const hook = hookBody(source, "afterAll");
+
+      // The wait has to be in the teardown rather than in a test, because a persist can still be
+      // in flight when the last test of the file has finished.
+      expect(hook).toContain(AWAIT_PENDING);
+
+      // And it has to come before the restore.  A wait placed after the restore drains into the
+      // database the worker is pointing at by then, which is the shared one, so it closes the
+      // race only after the race has already been lost.
+      expect(hook.indexOf(AWAIT_PENDING)).toBeLessThan(hook.indexOf(RESTORE));
+    });
+  }
 });
