@@ -188,11 +188,66 @@ grep -q 'the hosted trio was used' "$ASC_TEST_LOG" ||
 # refusal line may still name the value, because it names a masked preview of
 # it, so the guard looks for the two shapes that would print the key itself.
 helper="$repo_root/scripts/ios-asc-key-env.sh"
-if grep -nE "printf '%s' \"\\\$(value|decoded)\"|\\\$\(usable_pem" "$helper" >/dev/null; then
+#  The pattern is only worth anything while it still recognizes the forms it
+#  forbids.  A pattern that stopped matching would let this guard pass
+#  without detecting anything at all, which is worse than no guard, because
+#  it reads as a passing check.  So a synthetic fixture carrying the former
+#  stdout-producing form is matched against the same pattern first.
+stdout_pattern="printf '%s' \"\\\$(value|decoded)\"|\\\$\(usable_pem"
+probe_print="$tmp_dir/probe-stdout-print.sh"
+cat > "$probe_print" <<'PROBE'
+usable_pem() {
+  printf '%s' "$decoded"
+}
+PROBE
+if ! grep -qE "$stdout_pattern" "$probe_print"; then
+  echo "the stdout guard no longer recognizes the form it forbids" >&2
+  cat "$probe_print" >&2
+  exit 1
+fi
+probe_capture="$tmp_dir/probe-stdout-capture.sh"
+cat > "$probe_capture" <<'PROBE'
+p8="$(usable_pem "$APPLE_API_KEY_P8_BASE64")"
+PROBE
+if ! grep -qE "$stdout_pattern" "$probe_capture"; then
+  echo "the stdout guard no longer recognizes the command substitution" >&2
+  cat "$probe_capture" >&2
+  exit 1
+fi
+if grep -nE "$stdout_pattern" "$helper" >/dev/null; then
   echo "the helper writes the resolved key to stdout" >&2
-  grep -nE "printf '%s' \"\\\$(value|decoded)\"|\\\$\(usable_pem" "$helper" >&2
+  grep -nE "$stdout_pattern" "$helper" >&2
   exit 1
 fi
 log "the resolved key is handed over in a variable, never on stdout"
+
+# 11. A hosted body that does not decode is a REJECTED credential, not an
+# absent one.  The operator named this key, so the helper must stop instead
+# of falling through to Infisical and handing the child a key nobody asked
+# for:  the run would look successful while the credential the operator
+# named was never the one in use.  The refusal names the variable and
+# carries a masked preview of the value.
+rejected='not base64 at all !!!'
+rejected_preview="$(printf '%s' "$rejected" | cut -c1-8)...$(printf '%s' "$rejected" | tail -c 4)"
+: > "$ASC_TEST_LOG"
+if APPLE_API_KEY_ID=APPLEKEY01 APPLE_API_ISSUER_ID=apple-issuer \
+  APPLE_API_KEY_P8_BASE64="$rejected" \
+  bash "$repo_root/scripts/ios-asc-key-env.sh" bash "$tmp_dir/child.sh" >"$tmp_dir/stdout" 2>"$tmp_dir/stderr"; then
+  echo "a hosted body that does not decode was accepted" >&2
+  exit 1
+fi
+if grep -q 'asked Infisical' "$ASC_TEST_LOG"; then
+  echo "a rejected hosted credential fell through to Infisical" >&2
+  exit 1
+fi
+grep -q 'APPLE_API_KEY_P8_BASE64' "$tmp_dir/stderr" ||
+  { echo "the refusal did not name the rejected variable" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
+grep -Fq "preview: ${rejected_preview}" "$tmp_dir/stderr" ||
+  { echo "the refusal carried no masked preview" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
+if grep -Fq "$rejected" "$tmp_dir/stderr" "$tmp_dir/stdout"; then
+  echo "the rejected value was printed" >&2
+  exit 1
+fi
+log "a hosted body that does not decode was refused instead of falling through"
 
 echo 'synthetic ASC credential handoff passed'

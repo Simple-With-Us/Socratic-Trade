@@ -259,23 +259,52 @@ load_secrets() {
   #    input, so the body is checked after the decode rather than trusted to
   #    fail there.
   if [[ -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER_ID:-}" && -n "${APPLE_API_KEY_P8_BASE64:-}" ]]; then
+    #  Whether this host can decode base64 at all is settled with a known-good
+    #  body, so a refusal on the operator's value is reported as a bad body
+    #  and not as a machine that cannot decode.  The two are different
+    #  problems and only one of them is about the credential.
+    decoder_ok=0
+    if [[ "$(base64 -d <<<'aGVsbG8=' 2>/dev/null)" == "hello" ]] ||
+      [[ "$(base64 -D <<<'aGVsbG8=' 2>/dev/null)" == "hello" ]]; then
+      decoder_ok=1
+    fi
     case "$APPLE_API_KEY_P8_BASE64" in
       *BEGIN*) p8="$APPLE_API_KEY_P8_BASE64" ;;
       #  The encoded value reaches the decoder through a here-string, so the
       #  shell never prints it:  a credential belongs in no output stream.
-      *) p8="$(base64 --decode <<<"$APPLE_API_KEY_P8_BASE64" 2>/dev/null)" || p8="" ;;
+      #
+      #  Both flags are tried, because the two base64 implementations disagree
+      #  about the name of the decode:  GNU takes -d, BSD takes -D, and a host
+      #  whose decoder understands neither would turn a valid hosted key into
+      #  an empty one and refuse the run for no reason at all.
+      *) p8="$(base64 -d <<<"$APPLE_API_KEY_P8_BASE64" 2>/dev/null)" || p8=""
+         if [[ -z "$p8" ]]; then
+           p8="$(base64 -D <<<"$APPLE_API_KEY_P8_BASE64" 2>/dev/null)" || p8=""
+         fi
+         ;;
     esac
     rc=0
     if [[ -n "$p8" ]]; then
       node "${FLEET_DIR}/asc-key.mjs" validate >/dev/null 2>&1 <<< "$p8" || rc=$?
-    else
+    elif [[ "$decoder_ok" -eq 1 ]]; then
+      #  The decoder works, so the body itself is the problem.
       rc=1
+    else
+      #  No decoder could read even a known-good body:  the host cannot
+      #  decode anything, which is not the credential's fault.
+      rc=2
     fi
     if [[ "$rc" -ne 0 ]]; then
-      if [[ "$required" == "required" ]]; then
-        die "APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key; preview: $(key_preview "$APPLE_API_KEY_P8_BASE64")"
+      #  A REJECTED hosted credential stops the run, in the optional call too.
+      #  Only an ABSENT credential is optional:  the operator named this key,
+      #  so falling through to another source would sign with a key nobody
+      #  asked for, and the run would look successful while the credential
+      #  the operator named was never used.  The value is named and masked,
+      #  never printed.
+      if [[ "$rc" -eq 2 ]]; then
+        die "no usable base64 decoder on this host, so APPLE_API_KEY_P8_BASE64 could not be read; preview: $(key_preview "$APPLE_API_KEY_P8_BASE64")"
       fi
-      log "APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key; preview: $(key_preview "$APPLE_API_KEY_P8_BASE64")"
+      die "APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key; preview: $(key_preview "$APPLE_API_KEY_P8_BASE64")"
     else
       kid="${APPLE_API_KEY_ID}"
       iss="${APPLE_API_ISSUER_ID}"

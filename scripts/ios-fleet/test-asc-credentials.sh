@@ -420,10 +420,16 @@ APPLE_API_KEY_ID=APPLEKEY01 APPLE_API_ISSUER_ID=apple-issuer \
   asc_cleanup
 ' || fail "the hosted APPLE_API_* trio was not used"
 [[ ! -s "$FAKE_LOG" ]] || fail "fleet-secrets was called although the environment was complete"
-if ! grep -q 'base64 --decode <<<"\$APPLE_API_KEY_P8_BASE64"' "$script"; then
+#  Both decode flags are accepted, because the two base64 implementations
+#  disagree about the name of the decode:  GNU takes -d and BSD takes -D, and
+#  a host whose decoder understands neither would turn a valid hosted key
+#  into an empty one.  What the guard still insists on is the here-string:
+#  the value has to reach the decoder without ever appearing in an argument
+#  list or on a pipe.
+if ! grep -qE 'base64 (-d|-D) <<<"\$APPLE_API_KEY_P8_BASE64"' "$script"; then
   fail "the base64 body is not decoded through a here-string"
 fi
-if grep -qE 'base64 --decode[^|]*\|[^|]' "$script"; then
+if grep -qE 'base64 (-d|-D) [^<]*\|' "$script"; then
   fail "the base64 body is decoded through a pipe"
 fi
 
@@ -446,6 +452,55 @@ fi
 grep -Fq "preview: ${bad_preview}" "${tmp}/invalid-base64.err" ||
   fail "the refused APPLE_API_KEY_P8_BASE64 carried no masked preview"
 if grep -Fq 'not a private key at all' "${tmp}/invalid-base64.err"; then
+  fail "the refused APPLE_API_KEY_P8_BASE64 was printed"
+fi
+#  The value that lives in the environment is the base64 body, so the guard
+#  has to look for THAT as well:  a regression that printed the environment
+#  value would print the key material in base64, which is trivially
+#  reversible, and the plaintext check would not see it.
+if grep -Fq "$encoded_bad" "${tmp}/invalid-base64.err"; then
+  fail "the refused APPLE_API_KEY_P8_BASE64 was printed"
+fi
+
+# 2k-ter. The rejected hosted credential is fatal in the OPTIONAL call too.
+#
+# Only an ABSENT credential is optional:  the operator named this key, so the
+# run must not fall through to another source and sign with a key nobody
+# asked for.  The optional call is the one that runs before the build phase,
+# and it is where a fall-through would be least visible.
+if APPLE_API_KEY_ID=APPLEKEY01 APPLE_API_ISSUER_ID=apple-issuer \
+  APPLE_API_KEY_P8_BASE64="$encoded_bad" bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  load_secrets
+' 2>"${tmp}/invalid-base64-optional.err"; then
+  fail "a rejected hosted credential was accepted by the optional call"
+fi
+[[ ! -s "$FAKE_LOG" ]] ||
+  fail "a rejected hosted credential fell through to another credential source"
+grep -Fq "preview: ${bad_preview}" "${tmp}/invalid-base64-optional.err" ||
+  fail "the refused APPLE_API_KEY_P8_BASE64 carried no masked preview"
+
+# 2k-quater. A body the DECODER itself refuses is refused the same way.
+#
+# The two base64 implementations disagree about invalid input:  BSD decodes
+# what it can and returns 0, GNU fails on the invalid byte.  So the two
+# outcomes take different branches in load_secrets, and both have to land on
+# the same exit and the same masked preview, or the guard would hold on one
+# platform and not on the other.
+undecodable='not base64 at all !!!'
+undecodable_preview="$(printf '%s' "$undecodable" | cut -c1-8)...$(printf '%s' "$undecodable" | tail -c 4)"
+if APPLE_API_KEY_ID=APPLEKEY01 APPLE_API_ISSUER_ID=apple-issuer \
+  APPLE_API_KEY_P8_BASE64="$undecodable" bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  load_secrets required
+' 2>"${tmp}/undecodable.err"; then
+  fail "an APPLE_API_KEY_P8_BASE64 that does not decode was accepted"
+fi
+grep -Fq "preview: ${undecodable_preview}" "${tmp}/undecodable.err" ||
+  fail "the undecodable APPLE_API_KEY_P8_BASE64 carried no masked preview"
+if grep -Fq "$undecodable" "${tmp}/undecodable.err"; then
   fail "the refused APPLE_API_KEY_P8_BASE64 was printed"
 fi
 

@@ -78,7 +78,10 @@ usable_pem() {
     RESOLVED_PEM="$value"
     return 0
   fi
-  decoded="$(base64 --decode <<<"$value" 2>/dev/null)" || decoded=""
+  decoded="$(base64 -d <<<"$value" 2>/dev/null)" || decoded=""
+  if [[ -z "$decoded" ]]; then
+    decoded="$(base64 -D <<<"$value" 2>/dev/null)" || decoded=""
+  fi
   if [[ -n "$decoded" ]] && node "$module" validate >/dev/null 2>&1 <<< "$decoded"; then
     RESOLVED_PEM="$decoded"
     return 0
@@ -88,17 +91,55 @@ usable_pem() {
 
 key=""
 source_name=""
+hosted_value=""
 
 # 1. The hosted trio.  The key id, the issuer and the key belong together, so
 #    all three names have to be there.
 if [[ -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER_ID:-}" && -n "${APPLE_API_KEY_P8_BASE64:-}" ]]; then
+  hosted_value="$APPLE_API_KEY_P8_BASE64"
+  #  Whether this host can decode base64 at all is settled with a known-good
+  #  body, so a refusal on the operator's value is reported as a bad body and
+  #  not as a machine that cannot decode.  The two are different problems and
+  #  only one of them is about the credential.
+  decoder_ok=0
+  if [[ "$(base64 -d <<<'aGVsbG8=' 2>/dev/null)" == "hello" ]] ||
+    [[ "$(base64 -D <<<'aGVsbG8=' 2>/dev/null)" == "hello" ]]; then
+    decoder_ok=1
+  fi
   case "$APPLE_API_KEY_P8_BASE64" in
     *BEGIN*) key="$APPLE_API_KEY_P8_BASE64" ;;
     #  The encoded value reaches the decoder through a here-string, so the
     #  shell never prints it:  a credential belongs in no output stream.
-    *) key="$(base64 --decode <<<"$APPLE_API_KEY_P8_BASE64" 2>/dev/null)" || key="" ;;
+    #
+    #  Both flags are tried, because the two base64 implementations disagree
+    #  about the name of the decode:  GNU takes -d, BSD takes -D, and a host
+    #  whose decoder understands neither would turn a valid hosted key into
+    #  an empty one and refuse the run for no reason at all.
+    *) key="$(base64 -d <<<"$APPLE_API_KEY_P8_BASE64" 2>/dev/null)" || key=""
+       if [[ -z "$key" ]]; then
+         key="$(base64 -D <<<"$APPLE_API_KEY_P8_BASE64" 2>/dev/null)" || key=""
+       fi
+       ;;
   esac
-  source_name="the environment"
+  #  A hosted body that does not decode to a key is a REJECTED credential,
+  #  not an absent one.  The operator named this key, so the run stops here
+  #  instead of falling through to Infisical and handing the child a key
+  #  nobody asked for:  the run would look successful while the credential
+  #  the operator named was never the one in use.
+  #
+  #  The decode is not trusted to fail on a bad body -- BSD decodes what it
+  #  can and returns 0, GNU fails on the invalid byte -- so the body is
+  #  checked here, where the value the operator set is still in hand and can
+  #  be named in the refusal.  A masked preview, never the value.
+  if [[ -z "$key" ]] || ! node "$module" validate >/dev/null 2>&1 <<< "$key"; then
+    if [[ "$decoder_ok" -eq 0 ]]; then
+      echo "::error::No usable base64 decoder on this host, so APPLE_API_KEY_P8_BASE64 could not be read; preview: $(key_preview "$hosted_value")" >&2
+    else
+      echo "::error::APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key; preview: $(key_preview "$hosted_value")" >&2
+    fi
+    exit 1
+  fi
+  source_name="the environment (APPLE_API_KEY_P8_BASE64)"
 fi
 
 # 2. Infisical prod, when the environment named no trio.
