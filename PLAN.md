@@ -2985,3 +2985,9 @@ Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
 ## 2026-10-21 — [MM] The off-loop follow-up query stops being measured against the host (ST-4573)
 
 Not a scope change: a test-guard defect fix.  Two cases in `test/sqlite-all-offloop.test.ts` judged a follow-up query against a fixed wall clock of 200ms and 300ms, but the pool always starts a fresh slot while another one is busy and the retired slot is removed synchronously, so the follow-up never queues behind the wedged statement and the clock only measured how fast this machine creates a worker.  The wall-clock assertions are replaced by two assertions that have different subjects, the count of queries the pool dispatched for the follow-up and the move in the live slot count, and the fixed reclaim window became a poll.  No production code changed.  Rollout: `docs/rollouts/2026-10-21-st-4573-offloop-wall-clock-budget.md`.
+
+## 2026-10-22 — [MM] The shape guard reads the hook body, and the audit trail is corrected (ST-4572)
+
+A fifth review round found that the shape guard matched fixture text outside the `beforeAll` body, that the guard's repo root came from the runner's working directory, and that three statements in this branch's own audit trail were wrong.  The guard now matches the hook body by brace depth and resolves the repo root from the module's own path, and the file count, the list of files that restore the shared path and the ST-4570 note's pointer to the shared-database differential are corrected in place.  No scope change, no production code changed, and the eight files that restore `DATABASE_URL` are now distinguished: five install a database for the whole file and carry the differential, and three restore it per test and are out of scope for the file-level guard.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.

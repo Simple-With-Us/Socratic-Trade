@@ -73,8 +73,11 @@ the per-test scope, because the reader never writes.
   two runs agree — is a repo-level check rather than a test-file change, and it belongs with the
   repo's own gate.  It is recorded as a follow-up on ST-4570, and it is still open.  A per-file
   differential guard against the shared database does ship, on ST-4572: `test/helpers/db-isolation-control.ts`
-  probes the shared database read-only, and `test/coverage-persist-isolation.test.ts` carries the
-  differential with a control assertion.
+  probes the shared database read-only, and the "database isolation control" blocks in
+  `test/market-dynamic-universe.test.ts` and `test/provenance-stamps.test.ts` carry the differential
+  with a control assertion, asserting that `sharedCoverageRowCount(prevDb)` is zero.
+  `test/coverage-persist-isolation.test.ts` is a separate thing and does not read the run's shared
+  database: it reproduces the teardown race in miniature with two databases of its own.
 - **Kept off the public-pages branch.**  The fix is on its own branch off `origin/main`, so it does
   not widen the diff of PR #4889 and it carries no unattributed commit, so it needs no owner approval
   to land.
@@ -83,9 +86,11 @@ the per-test scope, because the reader never writes.
 
 - Add the repo-level guard: run the suite twice against one checkout and assert the second run
   matches the first.  That is the property that was broken, and the per-file fix does not assert it.
-- The per-file differential guard now exists, on ST-4572: `test/helpers/db-isolation-control.ts` and
-  `test/coverage-persist-isolation.test.ts`, the second with a control assertion.  The repo-level
-  double-run guard above is the part that is still missing.
+- The per-file differential guard now exists, on ST-4572: `test/helpers/db-isolation-control.ts` together with
+  the "database isolation control" blocks in `test/market-dynamic-universe.test.ts` and
+  `test/provenance-stamps.test.ts`, which assert that `sharedCoverageRowCount(prevDb)` is zero.
+  `test/coverage-persist-isolation.test.ts` is the miniature reproduction of the teardown race, with two
+  databases of its own and a control assertion.  The repo-level double-run guard above is the part that is still missing.
 - Consider whether the remaining test files that do not set `DATABASE_URL` should also be made
   explicit.  They do not reach the persistence path today, so this change does not touch them, but
   the convention is only as strong as its exceptions.

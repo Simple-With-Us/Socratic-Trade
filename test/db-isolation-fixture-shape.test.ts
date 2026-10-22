@@ -20,8 +20,13 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const REPO = process.cwd();
+// The repo root is resolved from this file's own location, not from the runner's working
+// directory.  A `vitest --root` invocation from a parent folder, or a CI job that changes
+// directory before the run, must still find the fixtures rather than fail every case with an
+// opaque ENOENT.
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 
 // The files that install a database of their own for the whole file, and therefore have to
 // capture the run's shared path and put it back.
@@ -46,8 +51,43 @@ const DIFFERENTIAL_ASSERTION = "expect(process.env.DATABASE_URL).not.toBe(dbUrl)
 const OVERRIDE = "process.env.DATABASE_URL = dbUrl;";
 const RESTORE = "process.env.DATABASE_URL = prevDb;";
 
+/**
+ * The body of one hook, matched by brace depth.
+ *
+ * The region between the `beforeAll` and the `afterAll` is not the hook body: it also holds any
+ * helper or `describe` code that sits between the two.  A fixture that moved the differential
+ * assertion or the override into such a helper would satisfy a search over that whole region
+ * while the hook itself no longer carried them, and the guard would pass on exactly the
+ * regression it exists to catch.  Matching the braces finds the callback's own body, and a
+ * nested `beforeAll` inside it is caught for free, because the outer body would then be missing
+ * the assertion.
+ */
+function hookBody(source: string, hook: string): string {
+  const at = source.indexOf(`${hook}(`);
+  if (at < 0) throw new Error(`no ${hook} hook found in the fixture source`);
+
+  const open = source.indexOf("{", at);
+  if (open < 0) throw new Error(`the ${hook} hook has no body`);
+
+  let depth = 0;
+  for (let i = open; i < source.length; i += 1) {
+    if (source[i] === "{") depth += 1;
+    else if (source[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(open + 1, i);
+    }
+  }
+
+  throw new Error(`the ${hook} hook is not terminated`);
+}
+
 function read(file: string): string {
-  return readFileSync(join(REPO, file), "utf8");
+  const path = join(REPO, file);
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    throw new Error(`cannot read the fixture source at ${path}: ${(error as Error).message}`);
+  }
 }
 
 describe("the database-isolation fixtures capture the shared path at module scope", () => {
@@ -71,14 +111,12 @@ describe("the database-isolation fixtures capture the shared path at module scop
       expect(afterAllAt).toBeGreaterThan(captureAt);
 
       // The teardown puts the shared path back rather than deleting the variable.
-      expect(source.slice(afterAllAt)).toContain(RESTORE);
+      expect(hookBody(source, "afterAll")).toContain(RESTORE);
     });
 
     it(`${file} keeps the differential assertion in the hook and ahead of the override`, () => {
       const source = read(file);
-      const beforeAllAt = source.indexOf("beforeAll(");
-      const afterAllAt = source.indexOf("afterAll(");
-      const hook = source.slice(beforeAllAt, afterAllAt);
+      const hook = hookBody(source, "beforeAll");
 
       expect(hook).toContain(DIFFERENTIAL_ASSERTION);
       expect(hook).toContain(OVERRIDE);
@@ -94,6 +132,6 @@ describe("the database-isolation fixtures capture the shared path at module scop
     const source = read(ISOLATION_FILE);
     expect(source).toContain(CAPTURE_DECLARATION);
     expect(CAPTURE_ASSIGNMENT.test(source)).toBe(false);
-    expect(source.slice(source.indexOf("afterAll("))).toContain(RESTORE);
+    expect(hookBody(source, "afterAll")).toContain(RESTORE);
   });
 });
