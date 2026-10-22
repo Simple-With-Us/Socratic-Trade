@@ -531,8 +531,12 @@ describe("sqlite off-loop timeout and abort", () => {
     await resetSqliteAllOffLoopForTesting();
     const timeoutMs = 80;
     const iterations = iterationsTakingAtLeast(400);
+    let dispatches = 0;
     const started = new Promise<void>((resolve) => {
-      setSqliteOffLoopStartedHookForTesting(() => resolve());
+      setSqliteOffLoopStartedHookForTesting(() => {
+        dispatches += 1;
+        resolve();
+      });
     });
     const controller = new AbortController();
     const wedge = sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema, {
@@ -545,13 +549,31 @@ describe("sqlite off-loop timeout and abort", () => {
       controller.abort(new Error("lexical reclaim aborted"));
       await wedgeSettled;
       expect(activeSqliteOffLoopSlotCountForTesting()).toBeGreaterThan(0);
-      await new Promise((resolve) => setTimeout(resolve, timeoutMs + 120));
+
+      // The reclaim is driven by the execution timer armed when the query
+      // started, so the state is polled instead of assumed to land inside a
+      // fixed window: a busy host delays the timer callback, not the reclaim.
+      const reclaimDeadline = Date.now() + 5_000;
+      while (activeSqliteOffLoopSlotCountForTesting() !== 0 && Date.now() < reclaimDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
       expect(activeSqliteOffLoopSlotCountForTesting()).toBe(0);
 
-      const startedAt = Date.now();
+      const dispatchesBeforeFollowUp = dispatches;
+      const slotsBeforeFollowUp = activeSqliteOffLoopSlotCountForTesting();
+      expect(slotsBeforeFollowUp).toBe(0);
       const rows = await sqliteAllOffLoop("SELECT 7 AS c", [], dbPath, CountRowSchema, { timeoutMs: 5_000 });
       expect(rows).toEqual([{ c: 7 }]);
-      expect(Date.now() - startedAt).toBeLessThan(200);
+      // The follow-up ran on a worker: the pool dispatched exactly one new query and
+      // the live slot count went up by exactly one.  The two counts have different
+      // subjects, so neither is implied by the other:  a dispatch that never reached
+      // a slot would move the first and not the second, and a slot the pool never
+      // counted would move the second and not the first.  A wall clock here would
+      // have measured how fast this host creates a worker and not what the pool did,
+      // because the pool always starts a fresh slot while another one is busy, so
+      // the follow-up can never queue behind the wedged statement.
+      expect(dispatches - dispatchesBeforeFollowUp).toBe(1);
+      expect(activeSqliteOffLoopSlotCountForTesting()).toBe(slotsBeforeFollowUp + 1);
     } finally {
       setSqliteOffLoopStartedHookForTesting(null);
     }
@@ -561,8 +583,12 @@ describe("sqlite off-loop timeout and abort", () => {
     await resetSqliteAllOffLoopForTesting();
     const minMs = 600;
     const iterations = iterationsTakingAtLeast(minMs);
+    let dispatches = 0;
     const started = new Promise<void>((resolve) => {
-      setSqliteOffLoopStartedHookForTesting(() => resolve());
+      setSqliteOffLoopStartedHookForTesting(() => {
+        dispatches += 1;
+        resolve();
+      });
     });
     const wedge = sqliteAllOffLoop(COUNT_SQL, [iterations], dbPath, CountRowSchema, { timeoutMs: 80 });
     const wedgeSettled = expect(wedge).rejects.toThrow("sqlite off-loop query timed out");
@@ -572,11 +598,21 @@ describe("sqlite off-loop timeout and abort", () => {
       await wedgeSettled;
       expect(activeSqliteOffLoopSlotCountForTesting()).toBe(0);
 
-      const startedAt = Date.now();
+      const dispatchesBeforeFollowUp = dispatches;
+      const slotsBeforeFollowUp = activeSqliteOffLoopSlotCountForTesting();
+      expect(slotsBeforeFollowUp).toBe(0);
       const rows = await sqliteAllOffLoop("SELECT 5 AS c", [], dbPath, CountRowSchema, { timeoutMs: 5_000 });
       expect(rows).toEqual([{ c: 5 }]);
-      // The wedged worker is gone, so this does not wait out the statement.
-      expect(Date.now() - startedAt).toBeLessThan(minMs / 2);
+      // The follow-up ran on a worker: the pool dispatched exactly one new query and
+      // the live slot count went up by exactly one.  The two counts have different
+      // subjects, so neither is implied by the other:  a dispatch that never reached
+      // a slot would move the first and not the second, and a slot the pool never
+      // counted would move the second and not the first.  A wall clock here would
+      // have measured how fast this host creates a worker and not what the pool did,
+      // because the pool always starts a fresh slot while another one is busy, so
+      // the follow-up can never queue behind the wedged statement.
+      expect(dispatches - dispatchesBeforeFollowUp).toBe(1);
+      expect(activeSqliteOffLoopSlotCountForTesting()).toBe(slotsBeforeFollowUp + 1);
     } finally {
       setSqliteOffLoopStartedHookForTesting(null);
     }
