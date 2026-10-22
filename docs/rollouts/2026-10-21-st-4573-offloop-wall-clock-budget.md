@@ -64,7 +64,9 @@ that ran the same recursive count uncached, and a follow-up deadline of
 
 It passed every check it was given, on a loaded machine, and it was wrong.  On a free machine the
 sizing probe cannot reach 1,500ms, because `iterationsTakingAtLeast` doubles from 100,000 and
-stops at 8,000,000 iterations:
+breaks when the measured time reaches the target or the iteration count reaches 8,000,000.  The
+doubling overshoots that cap, because the step below it is 6,400,000 and doubling that gives
+12,800,000, so 12,800,000 is the count the probe reports when it gives up:
 
 ```
 Error: sqlite statement did not reach 1500ms (last 918ms at 12800000)
