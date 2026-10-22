@@ -3,9 +3,10 @@
 ## Summary
 
 Two cases in `test/sqlite-all-offloop.test.ts` asserted a fixed wall clock on a follow-up query.
-Both assertions are gone, and the state they were standing in for is now asserted directly: the
-live slot count has to be 1 after the follow-up, which says the pool retired the wedged worker
-and served the follow-up from a fresh one.
+Both assertions are gone, and the state they were standing in for is now asserted directly:  the
+pool has to dispatch exactly one new query for the follow-up, and the live slot count has to move up
+by exactly one, which says the pool retired the wedged worker and served the follow-up from a fresh
+one.
 
 No production code changed.  The file is a test file.
 
@@ -81,19 +82,28 @@ second design works.
 
 Two changes, both in `test/sqlite-all-offloop.test.ts`.
 
-The wall clock assertions are gone, and in their place the live slot count has to be 1 after the
-follow-up:
+The wall clock assertions are gone, and in their place the follow-up is checked two ways at once:
 
 ```ts
+const dispatchesBeforeFollowUp = dispatches;
+const slotsBeforeFollowUp = activeSqliteOffLoopSlotCountForTesting();
+expect(slotsBeforeFollowUp).toBe(0);
 const rows = await sqliteAllOffLoop("SELECT 7 AS c", [], dbPath, CountRowSchema, { timeoutMs: 5_000 });
 expect(rows).toEqual([{ c: 7 }]);
-expect(activeSqliteOffLoopSlotCountForTesting()).toBe(1);
+expect(dispatches - dispatchesBeforeFollowUp).toBe(1);
+expect(activeSqliteOffLoopSlotCountForTesting()).toBe(slotsBeforeFollowUp + 1);
 ```
 
-That is decidable on any host.  The count is 0 immediately before the follow-up, because the retire
-or the reclaim already emptied the pool, so the count can only become 1 if the follow-up started a
-fresh worker.  It states what the wall clock was reaching for, which is that the wedged worker was
-retired and the follow-up was not served by it.
+The two counts have different subjects, so neither one implies the other.  `dispatches` counts the
+queries the pool handed to a worker, read from the started hook the parent calls when it sees the
+worker's started notice.  The live slot count is the pool's own bookkeeping.  A dispatch that never
+reached a worker would move the first and not the second, and a slot the pool never counted would
+move the second and not the first.  Both are decidable on any host.
+
+The live count is 0 immediately before the follow-up, because the retire or the reclaim already
+emptied the pool, so the count can only move if the follow-up started a fresh worker.  It states
+what the wall clock was reaching for, which is that the wedged worker was retired and the follow-up
+was not served by it.
 
 The reclaim wait in the first case stopped being a fixed window and became a poll:
 
@@ -139,7 +149,54 @@ decidable form of "wait 200ms and hope".
   The third failure is the re-dispatch case, which depends on the same retire.
 - The mutant was reverted and `src/lib/rag/sqlite-all-offloop.ts` was confirmed byte-identical to
   `HEAD`.
+- Mutant, one per assertion, second round.  The first round proved that the retire still happens.
+  This round proves that the follow-up assertions are not implied by the assertions before them.
+  The mutant retires a slot as soon as a query succeeds:
+
+  ```ts
+  if (parsed.data.ok) {
+    waiter.resolve(parsed.data.rows);
+    // MUTANT: the pool retires the slot as soon as a query succeeds.
+    killSlot(slot, () => new Error("sqlite off-loop worker retired"), true);
+    return;
+  }
+  ```
+
+  Under it the follow-up still resolves and the dispatch still happened, so the dispatch assertion
+  passes and the live slot count assertion is the one that fires, by asserting and not by timing
+  out:
+
+  ```
+  FAIL  ... > reclaims a wedged slot after caller abort when the execution budget fires
+  AssertionError: expected +0 to be 1
+  FAIL  ... > retires a wedged slot when the execution budget fires
+  AssertionError: expected +0 to be 1
+  ```
+
+  The two failures are the live slot count assertion in each case, and the dispatch assertion on the
+  line above it passed in both, which is the proof that the two have different subjects.  The
+  mutant also fails the pool-size case and the re-dispatch case, which both expect a live slot
+  after a successful query, and that collateral is the same defect seen from two other places.
+  The source file was restored byte-identical to `HEAD` afterwards.
 - `npm run lint` exits 0 with 867 warnings and 0 errors, `npx tsc --noEmit` exits 0.
+
+## The review round on this change
+
+The automated review opened two findings on the pull request, both on 2026-10-22 at 01:40Z, and both
+were taken rather than filed as accepted risk.
+
+The first said the live slot count assertion was redundant, because the count was already 0
+immediately beforehand and a query that resolves has to have been served by a live slot, so the count
+could only ever be 1.  That is a fair reading of the assertion as it was written, and the answer is
+not to argue but to give the case two assertions with different subjects instead of one that its
+neighbours already imply.  The dispatch count and the live slot count are now asserted separately,
+and the second mutant above is the proof that the slot count assertion can fail on its own.
+
+The second said this note and the ST-4550 note still described the abandoned first design, which
+gave the follow-up a deadline of half the wedge.  That was true of the ST-4550 note and it is fixed
+there.  This note described the shipped design from the start, but the ST-4550 note did not, and
+two notes describing two different designs for one fix is exactly the contradiction the finding is
+about.
 
 Two earlier mutants were tried and are recorded because they did not test what they claimed to.
 Removing only `slot.disposed = true` from `killSlot` left the file green, because `killSlot` also
