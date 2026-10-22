@@ -2,12 +2,12 @@
 
 Owner is deleting `jaywedgeworth22/ios-app-versions`.  Personal-Site does not
 link it.  The public TestFlight/App Store manifest now lives at
-`site/ios-versions.json` in `jaywedgeworth22/ai-fleet-coordinator`.
+`site/ios-versions.json` in `Simple-With-Us/ai-fleet-coordinator`.
 
 `AppUpdatePrompt.swift` (pin + iOS copy) and `publish-ios-versions.sh` now
 use:
 
-https://raw.githubusercontent.com/jaywedgeworth22/ai-fleet-coordinator/main/site/ios-versions.json
+https://raw.githubusercontent.com/Simple-With-Us/ai-fleet-coordinator/main/site/ios-versions.json
 
 Local `scripts/ios-fleet/ios-app-versions.json` stays the vendored cache /
 stale fixture.  Already-shipped builds keep the old URL until the next

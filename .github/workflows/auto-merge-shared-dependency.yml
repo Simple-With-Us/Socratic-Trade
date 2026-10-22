@@ -31,7 +31,7 @@ jobs:
           IS_SHARED=false
           if [[ "$HEAD_REF" =~ (dependabot|congress-trading-shared|shared-package|bump-congress|antigravity/bump) ]]; then
             IS_SHARED=true
-          elif [[ "$TITLE" =~ (congress-trading-shared|shared-package|@jaywedgeworth22/congress-trading-shared) ]]; then
+          elif [[ "$TITLE" =~ (congress-trading-shared|shared-package|@Simple-With-Us/congress-trading-shared) ]]; then
             IS_SHARED=true
           fi
           echo "is_shared=$IS_SHARED" >> "$GITHUB_OUTPUT"

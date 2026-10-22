@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { timingSafeEqual } from "node:crypto";
 import { audit } from "@/lib/db";
 import { applyCongressEvent, applyCongressEvents, type CongressEvent } from "@/lib/congress-trade-events";
-import { verifyCongressWebhookSignature } from "@jaywedgeworth22/congress-trading-shared";
+import { verifyCongressWebhookSignature } from "@Simple-With-Us/congress-trading-shared";
 import { logApiHealth } from "@/lib/db-health";
 import { CONGRESS_WEBHOOK_MAX_BYTES, PayloadTooLargeError, readBodyWithLimit } from "@/lib/bounded-body";
 

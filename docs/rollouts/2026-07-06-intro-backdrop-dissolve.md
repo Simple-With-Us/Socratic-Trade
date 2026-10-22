@@ -43,7 +43,7 @@ revealing behind the rising candles; t≈6.2s big SOCRATIC/TRADE words with the 
 fully visible behind.
 
 Note: a fresh `npm ci` was required locally — the pre-existing `node_modules` was
-stale relative to `main`'s `@jaywedgeworth22/congress-trading-shared#v1.4.1`, which
+stale relative to `main`'s `@Simple-With-Us/congress-trading-shared#v1.4.1`, which
 surfaced as unrelated tsc errors in `congress-*`/`usage-monitor-push` until synced.
 Not caused by this change; CI's fresh install is unaffected.
 

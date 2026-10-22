@@ -127,10 +127,10 @@ protocol.
 
 ```
 NODE_AUTH_TOKEN=$(gh auth token) npm install --package-lock-only   # zero lockfile diff
-gh api repos/jaywedgeworth22/congress-trading-shared/git/ref/tags/v2.5.1
+gh api repos/Simple-With-Us/congress-trading-shared/git/ref/tags/v2.5.1
   -> tag object 2efa58ea... (annotated) -> dereferences to commit b454ccb8e8fa605c1e806edaffb43c7a86f09b2e
 node -e '<compare lock resolved sha vs tag commit>' ->
-  manifest spec : github:jaywedgeworth22/congress-trading-shared#v2.5.1
+  manifest spec : github:Simple-With-Us/congress-trading-shared#v2.5.1
   lock resolved : git+ssh://...#b454ccb8e8fa605c1e806edaffb43c7a86f09b2e
   lock version  : 2.5.0
   OK: lock resolved commit === v2.5.1 tag commit

@@ -5,7 +5,7 @@
 Salvage of the unique kernel from closed PR #1906 onto current main: market-data outbound
 rows (prices / fundamentals / analyst / insider / short-volume) now drop acquisition tickers
 instead of folding them onto the acquirer, while company-identity refs still fold via
-`resolveTickerAlias`. Classification comes from `@jaywedgeworth22/congress-trading-shared@v2`
+`resolveTickerAlias`. Classification comes from `@Simple-With-Us/congress-trading-shared@v2`
 (`classifyTickerAlias` / `resolveContinuousTicker` / curated maps) — no local acquisition set,
 no shared-package downgrade.
 

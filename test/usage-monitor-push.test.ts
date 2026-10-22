@@ -877,7 +877,7 @@ describe("usage-monitor-push", () => {
     });
 
     it("usageMonitorCollisionKeyFromError extracts the monitor-named key from a 409, null otherwise", async () => {
-      const { UsageTelemetryApiError } = await import("@jaywedgeworth22/congress-trading-shared");
+      const { UsageTelemetryApiError } = await import("@Simple-With-Us/congress-trading-shared");
       const conflict = new UsageTelemetryApiError({
         status: 409,
         code: "idempotency_conflict",
@@ -924,7 +924,7 @@ describe("usage-monitor-push", () => {
     });
 
     it("live flush drops the named 409 row, retries the rest, and does not trip the breaker", async () => {
-      const { deriveUsageTelemetryV2IdempotencyKey } = await import("@jaywedgeworth22/congress-trading-shared");
+      const { deriveUsageTelemetryV2IdempotencyKey } = await import("@Simple-With-Us/congress-trading-shared");
       const poisonSource = "live-collision-poison";
       const okSource = "live-collision-sibling";
       const poisonEventId = expectedTelemetryKey("llm", poisonSource);

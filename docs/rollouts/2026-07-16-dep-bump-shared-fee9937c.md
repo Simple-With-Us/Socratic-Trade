@@ -2,7 +2,7 @@
 
 ## Summary
 
-Bumped `@jaywedgeworth22/congress-trading-shared` from `ef17b72` to `fee9937c25db1de75c1a676826801e3399f36106` in both `package.json` and `package-lock.json`, including the npm `allowScripts` entry.
+Bumped `@Simple-With-Us/congress-trading-shared` from `ef17b72` to `fee9937c25db1de75c1a676826801e3399f36106` in both `package.json` and `package-lock.json`, including the npm `allowScripts` entry.
 
 ## Why
 

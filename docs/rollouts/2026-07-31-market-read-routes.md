@@ -6,7 +6,7 @@ congress.trade (App A) wants to pull EOD price history FROM SocraticTrade (App B
 primary price source (cache-aside), symmetric with the reads App B already does against App A
 (`src/lib/api-clients/congress.ts`). This adds the two missing App B read endpoints using the
 exact envelopes the shared `CongressTradeClient` parses
-(`@jaywedgeworth22/congress-trading-shared`: `PriceSeriesSchema`, `ClosesEnvelopeSchema`).
+(`@Simple-With-Us/congress-trading-shared`: `PriceSeriesSchema`, `ClosesEnvelopeSchema`).
 
 ## 2. Changes Made
 

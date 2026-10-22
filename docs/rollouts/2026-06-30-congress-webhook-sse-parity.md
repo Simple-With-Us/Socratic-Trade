@@ -23,7 +23,7 @@ real-time channel was dropping trades end-to-end:
   dropped as `unknown-type` / `no-trades`.
 
 The canonical event type is `congress.trade` per
-`@jaywedgeworth22/congress-trading-shared` (`CONGRESS_EVENT_TYPES`). Rather than
+`@Simple-With-Us/congress-trading-shared` (`CONGRESS_EVENT_TYPES`). Rather than
 depend on App A shipping a matching change first, App B now accepts all shapes
 (Postel's law) so it works across the rollout window in either direction.
 
@@ -102,7 +102,7 @@ rollout note).
 
 ### Verification (this round)
 
-The private `@jaywedgeworth22/congress-trading-shared` git dependency is not
+The private `@Simple-With-Us/congress-trading-shared` git dependency is not
 fetchable in the CI/autofix sandbox (the available GitHub token has no access —
 `git ls-remote`/`gh api` both 404), so a full `npm install` fails and the
 whole-project `tsc`/`build` cannot run here. Verified the change against a local

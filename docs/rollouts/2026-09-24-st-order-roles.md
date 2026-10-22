@@ -8,7 +8,7 @@ were resting GTC protective stops (BAC, BRK-B, KO, PYPL — `broker_protective_s
 so.  This lane adds a pure classifier for WHY a working order is resting, wires it into the ops
 diagnostic snapshot (opt-in) and the console Orders screen, and renders a role badge with a
 one-sentence explanation.  Board item `687a5fb4` (lane E1, slug `st-order-roles`).
-PR: https://github.com/jaywedgeworth22/Socratic-Trade/pull/3755
+PR: https://github.com/Simple-With-Us/Socratic-Trade/pull/3755
 
 ## 2. Changes Made
 
@@ -181,7 +181,7 @@ Commands run from `~/apps/trading-claude-st-order-roles` with
   and the test suite on top of it.
 - This worktree's `node_modules` was left in a broken state by a previous session (`npm ls`
   showed `@pinecone-database/pinecone` and `drizzle-orm` as `invalid`, and
-  `@jaywedgeworth22/congress-trading-shared` had no `dist/`), which made `npx tsc --noEmit` fail
+  `@Simple-With-Us/congress-trading-shared` had no `dist/`), which made `npx tsc --noEmit` fail
   with dozens of unrelated `Cannot find module` errors.  A fresh `NODE_AUTH_TOKEN=$(gh auth
   token) npm ci` repaired it; this is worth flagging to peers reusing an existing worktree per
   the COMMON-BRIEF's "skip `npm ci` if `node_modules/better-sqlite3` exists" shortcut — that

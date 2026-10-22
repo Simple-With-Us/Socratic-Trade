@@ -16,7 +16,7 @@ import type { TechnicalDirection } from "../types";
 
 /** A single normalized congressional (or other "smart money") trade disclosure.
  *  This is App B's internal representation. The shared package's `CongressTransaction`
- *  type (in @jaywedgeworth22/congress-trading-shared) is the cross-app wire format used
+ *  type (in @Simple-With-Us/congress-trading-shared) is the cross-app wire format used
  *  by App A's API. See `coerceCongressTrade()` in congress.ts for the conversion. */
 export interface CongressTrade {
   symbol: string; // normalized ticker (uppercase, no class suffix)
@@ -48,7 +48,7 @@ export interface CongressTrade {
 }
 
 /** Per-symbol aggregate of recent congressional trading (the overlay the scan reads).
- *  This is App B-internal — the shared package (@jaywedgeworth22/congress-trading-shared)
+ *  This is App B-internal — the shared package (@Simple-With-Us/congress-trading-shared)
  *  does not define a signal aggregate; it provides the raw `CongressTransaction` row type
  *  and analytics types (TickerLeader, ConvictionTicker, etc.) consumed by the analytics overlay. */
 export interface CongressSignal {

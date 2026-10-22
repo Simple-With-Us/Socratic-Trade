@@ -3,7 +3,7 @@
 ## Summary
 
 - `congress-trade-client.ts` now imports the shared `MAX_REFS_BATCH` constant
-  from `@jaywedgeworth22/congress-trading-shared` instead of a locally
+  from `@Simple-With-Us/congress-trading-shared` instead of a locally
   hardcoded `MAX_REFS_PER_REQUEST = 500`.
 - Removed the unused `src/lib/congress-shared-aliases.ts`. It re-exported
   `CongressRef = SecurityRef` (the shared package's full, nullable read
@@ -32,7 +32,7 @@
   2026-06-30, distinct from `CONGRESS_TRADING_SHARED_DEPLOY_KEY`, which is
   an SSH deploy key used for `npm ci`/git-URL installs and can't make
   GitHub REST API calls). `GH_PACKAGES_TOKEN` is a PAT with read access to
-  `jaywedgeworth22/congress-trading-shared` for this API-level check.
+  `Simple-With-Us/congress-trading-shared` for this API-level check.
 
 ## Files
 
@@ -57,4 +57,4 @@
   default branch) — verify the weekly run once merged, and confirm
   `GH_PACKAGES_TOKEN` actually has enough scope for the `gh api
   repos/.../commits/main` and `.../compare/...` calls it makes.
-- Congress.Trade PR: https://github.com/jaywedgeworth22/Congress.Trade/pull/124
+- Congress.Trade PR: https://github.com/Simple-With-Us/Congress.Trade/pull/124

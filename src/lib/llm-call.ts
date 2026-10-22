@@ -14,7 +14,7 @@ import type { LlmEndpoint } from "./llm-provider";
 import type { LlmReasoningEffort } from "./types";
 import { getGitSha } from "./git-sha";
 import { jsonrepair } from "jsonrepair";
-import { openrouterRequestEnrichment } from "@jaywedgeworth22/congress-trading-shared";
+import { openrouterRequestEnrichment } from "@Simple-With-Us/congress-trading-shared";
 
 const CLASSIFIER_SOURCE_APP = "socratic-trade";
 

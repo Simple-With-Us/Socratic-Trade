@@ -4,7 +4,7 @@
 
 Completed the three host follow-ups after the disk-full / reboot-storm incident:
 
-1. **Usage-Monitor Litestream retention 7d** — PR [#714](https://github.com/jaywedgeworth22/Usage-Monitor/pull/714) already **merged** (`retention: 168h`).
+1. **Usage-Monitor Litestream retention 7d** — PR [#714](https://github.com/Simple-With-Us/Usage-Monitor/pull/714) already **merged** (`retention: 168h`).
 2. **Safer multi-app fleet watchdog** installed on the Hetzner Coolify host, **enabled on boot**.
 3. **CI runner disk policy** re-applied: all github-runner services `EPHEMERAL=true` (restart stays `always` so the next job gets a fresh container).
 

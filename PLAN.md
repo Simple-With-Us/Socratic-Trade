@@ -2135,7 +2135,7 @@ filling the missing pieces.
 >
 > 2026-06-30 (`fix/page-title` / PR #251): Congress.Trade shared contract package —
 > App A/B wire types, API path constants, and Zod schemas are now imported from
-> `@jaywedgeworth22/congress-trading-shared` instead of being duplicated locally.
+> `@Simple-With-Us/congress-trading-shared` instead of being duplicated locally.
 > The package is pinned to shared commit `220677a`; CI/deploy install steps use a
 > shared install helper plus read-only deploy key for npm's private git dependency.
 > No roadmap change; see
@@ -2376,13 +2376,13 @@ scope, timeline, or approach changed.
   nightly `prices`/`spx` batch + an admin trigger route. Gated on
   `CONGRESS_TRADE_TOKEN` + `CONGRESS_SHARE_ENABLED`; token is server-only. As of
   2026-06-30, the outbound payload types, API path constants, and runtime schema
-  checks come from `@jaywedgeworth22/congress-trading-shared`.
+  checks come from `@Simple-With-Us/congress-trading-shared`.
 - **congress.trade — receive/consume** (2026-06-22, `docs/congress-trade-consume.md`,
   contract `docs/push-to-app-b.md`): default-OFF cache-aside reads of App A's
   `/api/market/*` (history first tier), App A as the congressional source via
   `/api/transactions` (token-gated), and a push receiver (webhook + SSE) feeding the
   scan's web-signal overlay. Shared transaction/event contracts now come from
-  `@jaywedgeworth22/congress-trading-shared`. Inert until App A's read endpoints are live.
+  `@Simple-With-Us/congress-trading-shared`. Inert until App A's read endpoints are live.
   Round 3 (pending App A slots): push `volume`+`insider`+`shortVolume` on the nightly batch.
 - **congress.trade — return-path + analytics ownership reply** (2026-06-24,
   `docs/congress-trade-app-b-reply.md`): accepted App A's analytics ownership split

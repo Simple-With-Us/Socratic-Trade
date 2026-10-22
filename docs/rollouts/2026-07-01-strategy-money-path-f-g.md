@@ -97,7 +97,7 @@ Untouched (verified, no real gap): `src/lib/red-team.ts` (debate logic out of sc
 
 Per the concurrency rules, only OWN targeted tests were run (no project-wide build/test — siblings
 mid-edit). Dependencies were installed with `npm install` (the private
-`@jaywedgeworth22/congress-trading-shared` package is unauthenticated in this env — a local
+`@Simple-With-Us/congress-trading-shared` package is unauthenticated in this env — a local
 `node_modules/` stub was placed so the public tree installs and tests run; see caveat below).
 
 ```
@@ -124,7 +124,7 @@ node_modules/.bin/tsc --noEmit    # (see caveat)
   `{ rejected: boolean; available: boolean; reason: string }` from the kickoff spec. The strategy
   populates all three fields from `RedTeamDebateResult`. Low risk.
 - **congress-shared stub artifact:** the private package could not be fetched (401, no
-  `read:packages` token). A minimal local `node_modules/@jaywedgeworth22/congress-trading-shared`
+  `read:packages` token). A minimal local `node_modules/@Simple-With-Us/congress-trading-shared`
   stub (typed `any`) was placed so the tree installs and my tests run. This causes **one** spurious
   `tsc` error — `src/lib/web-sources/congress-analytics.ts(178,60): error TS7006` (implicit-any on a
   `.map` param whose type comes from the stubbed package). It is a **stub artifact only**: the real

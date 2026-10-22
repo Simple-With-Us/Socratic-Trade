@@ -73,7 +73,7 @@ fields, so it returns `{}`.
 
 ### Environment limitation
 The autofix runner's GitHub token cannot read the private git dependency
-`@jaywedgeworth22/congress-trading-shared` (`gh api` → 404), so a full
+`@Simple-With-Us/congress-trading-shared` (`gh api` → 404), so a full
 `npm install` aborts and `npm test` / `npm run build` cannot run end-to-end here.
 To verify, the dep was temporarily stripped from the manifests to install the
 rest, then `package.json` / `package-lock.json` were restored to match

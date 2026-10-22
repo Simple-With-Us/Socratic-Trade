@@ -45,7 +45,7 @@ an open, CONFLICTING PR (#805) that also carries unrelated work from a different
    carries the unrelated Cursor commit `0ce39474` (see #1). Re-marked In Progress/blocked-on-
    conflict on both boards.
 5. **Shared-dep tokenless git-dependency switch** — superseded: `origin/main` already pins
-   `@jaywedgeworth22/congress-trading-shared` to `git+https://...#v1.2.0` (landed via PR #444) and
+   `@Simple-With-Us/congress-trading-shared` to `git+https://...#v1.2.0` (landed via PR #444) and
    `scripts/npm-ci-with-shared-deps.sh` is deleted from `main`. Closed as superseded on the live
    board (no matching row existed in the mirror to correct).
 6. **`claude/ci-hybrid-runner-verify` (PR #372)** — confirmed `mergeable: UNKNOWN`/observed

@@ -61,7 +61,7 @@ Wave 2 of the cross-repo usage-compliance initiative. Two deliverables:
    - Voyage/SiliconFlow/Pinecone bypass OpenRouter: no request enrichment, but their PUSHED events
      now carry the classifier keys in event `metadata` via `telemetryEventClassifier` (sourced from
      local context in `usage-monitor-push.ts`; fail-open like the request side).
-   - Shared pin bump: `@jaywedgeworth22/congress-trading-shared`
+   - Shared pin bump: `@Simple-With-Us/congress-trading-shared`
      `#fee9937c` (v1.8.3) → `#904ea96ac237b775c54c8e4bb29df0d1a40da125` (v1.10.0). The 1.9.0 delta
      (normalizeCompanyName removal) verified safe: zero references in src/test; tsc clean.
 

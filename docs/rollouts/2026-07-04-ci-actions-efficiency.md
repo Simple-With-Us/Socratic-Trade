@@ -159,10 +159,10 @@ recorded here in order:
 Queried the live ruleset directly rather than trusting the AGENTS.md fallback list:
 
 ```
-$ gh api repos/jaywedgeworth22/agentic-trading/rulesets --jq '.[] | {id, name, target, enforcement}'
+$ gh api repos/Simple-With-Us/agentic-trading/rulesets --jq '.[] | {id, name, target, enforcement}'
 {"enforcement":"active","id":17945518,"name":"main-protection","target":"branch"}
 
-$ gh api repos/jaywedgeworth22/agentic-trading/rulesets/17945518 \
+$ gh api repos/Simple-With-Us/agentic-trading/rulesets/17945518 \
     --jq '.rules[] | select(.type=="required_status_checks") | .parameters.required_status_checks'
 [{"context":"verify"}]
 ```
@@ -269,8 +269,8 @@ Plus workflow-specific checks:
 
 ```
 npx yaml-lint .github/workflows/ci.yml                     # valid (and re-ran across all 7 workflow files)
-gh api repos/jaywedgeworth22/agentic-trading/rulesets --jq '...'                 # confirmed ruleset id/name
-gh api repos/jaywedgeworth22/agentic-trading/rulesets/17945518 --jq '...'        # confirmed required context = ["verify"] only
+gh api repos/Simple-With-Us/agentic-trading/rulesets --jq '...'                 # confirmed ruleset id/name
+gh api repos/Simple-With-Us/agentic-trading/rulesets/17945518 --jq '...'        # confirmed required context = ["verify"] only
 ```
 
 Standalone bash reproduction of the classify job's grep-based path classifier against 10 sample

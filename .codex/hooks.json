@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 '/Users/jay/Code/Socratic.Trade/.codex/hooks/block-xcode-project-writes.py'",
+            "statusMessage": "Blocking Xcode project file writes"
+          }
+        ]
+      }
+    ]
+  }
+}

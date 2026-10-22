@@ -142,8 +142,8 @@ rg -l -i 'stripe|storekit|checkout\.sessions|billingPortal|constructEvent|Produc
   --glob '!docs/**' app src ios test
 rg -n 'STRIPE_|STOREKIT_|IAP_' .env.example
 gh pr list --search "purchase OR stripe OR storekit OR billing OR IAP OR checkout" --state open
-gh search code "stripe" --repo jaywedgeworth22/Socratic-Trade --limit 20
-gh search code "StoreKit" --repo jaywedgeworth22/Socratic-Trade --limit 10
+gh search code "stripe" --repo Simple-With-Us/Socratic-Trade --limit 20
+gh search code "StoreKit" --repo Simple-With-Us/Socratic-Trade --limit 10
 ```
 
 All source greps: no matches.  Open-PR search: FilingAPI / ASC / PWA / other audits only.  StoreKit code search: empty.

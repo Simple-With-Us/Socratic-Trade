@@ -17,7 +17,7 @@
 // All adapters degrade to nothing on failure — we never invent a trade.
 //
 // Note: The `CongressTrade` type used here is App B's internal representation.
-// The shared package's `CongressTransaction` (@jaywedgeworth22/congress-trading-shared)
+// The shared package's `CongressTransaction` (@Simple-With-Us/congress-trading-shared)
 // is App A's wire format; `coerceCongressTrade()` converts between them.
 
 import { audit, getInternalSetting, resolveApiKey, setInternalSetting } from "../db";

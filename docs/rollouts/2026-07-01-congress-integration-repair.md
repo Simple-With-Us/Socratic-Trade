@@ -4,7 +4,7 @@ Implements Workstream **C1** from `docs/reviews/2026-07-01-audit-work-split.md`
 (the cross-app section of `docs/reviews/2026-06-30-improvement-audit.md` §6.8).
 Repairs the drifted Congress.Trade (App A) <-> Agentic Trading (App B) side-channel
 across the App B repo and the shared package pin; the matching App A changes ship in a
-separate PR in `jaywedgeworth22/Congress.Trade` (see Follow-ups).
+separate PR in `Simple-With-Us/Congress.Trade` (see Follow-ups).
 
 ## Summary (what changed — App B)
 
@@ -107,7 +107,7 @@ Note: this worktree had no `node_modules`; verification used a symlink to the pa
 
 ## Follow-ups
 
-- **App A PR (`jaywedgeworth22/Congress.Trade`):** (item 3) exact-pin `app/package.json` +
+- **App A PR (`Simple-With-Us/Congress.Trade`):** (item 3) exact-pin `app/package.json` +
   lockfile to `1.0.0` and mirror the peer divergence check in App A's `shared-package-pin-check.yml`;
   (item 4) retire App A's local `app/src/extraction/tickerNormalize.ts` `TICKER_ALIASES` in favor of
   the shared `TICKER_ALIASES` (they're content-identical today but free to drift). NOTE: App A is

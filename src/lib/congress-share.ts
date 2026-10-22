@@ -37,7 +37,7 @@ import {
   FundamentalRowSchema,
   AnalystRowSchema,
   TradeEventRowSchema,
-} from "@jaywedgeworth22/congress-trading-shared";
+} from "@Simple-With-Us/congress-trading-shared";
 import {
   assertOperationLeaseOwnership,
   OPERATION_LEASE_GROUPS,
@@ -219,7 +219,7 @@ const congressDailyShareInFlightHost = globalThis as unknown as {
  * Origin tag stamped on every outbound payload so the counterpart's receiver can recognize App B's
  * own rows and never echo them back into our store (the no-echo-loop guard). Our OWN inbound receiver
  * (POST /api/admin/securities/import) skips any payload carrying this origin. See docs/congress-trade-app-b-reply.md §1.3.
- * Re-exported from @jaywedgeworth22/congress-trading-shared as APP_B_ORIGIN_TAG.
+ * Re-exported from @Simple-With-Us/congress-trading-shared as APP_B_ORIGIN_TAG.
  */
 export const APP_B_ORIGIN = APP_B_ORIGIN_TAG;
 
@@ -476,7 +476,7 @@ function refTtlMs(): number {
 }
 
 // ── Payload types (mirror App A's import contract; we send subsets we have) ─────
-// Many individual row types now come from @jaywedgeworth22/congress-trading-shared.
+// Many individual row types now come from @Simple-With-Us/congress-trading-shared.
 // CongressRef stays local because it uses optional (?) fields rather than T|null.
 
 export type CongressAssetClass = "equity" | "etf" | "adr" | "fund" | "other";

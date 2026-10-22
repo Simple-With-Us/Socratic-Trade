@@ -41,7 +41,7 @@ deploy.
 1. Read `manual_webhook_secret_github` from the Coolify app via API into a shell variable
    (never printed; all command output piped through inline redaction per the secret-safety
    protocol).
-2. `PATCH /repos/jaywedgeworth22/Socratic-Trade/hooks/658815433` — set `config.secret` to
+2. `PATCH /repos/Simple-With-Us/Socratic-Trade/hooks/658815433` — set `config.secret` to
    that value (url/content_type/insecure_ssl re-sent unchanged).
 3. Deleted duplicate hook `658869484`. Proof it was a pure duplicate: once hook 1 carried
    the corrected config, patching hook 2 to the same config failed GitHub validation as an

@@ -14,7 +14,7 @@ The admin guard acquires the durable group before debiting rate quota, then pass
 the matching core boundary. The core reuses that claim. Direct/background callers acquire at the same
 core boundary and receive a typed benign busy result when another owner is active. Admin routes map
 that typed result through `operationInFlightResponse`, whose body/status builders come from
-`@jaywedgeworth22/congress-trading-shared` v1.5.0.
+`@Simple-With-Us/congress-trading-shared` v1.5.0.
 
 ## Why
 

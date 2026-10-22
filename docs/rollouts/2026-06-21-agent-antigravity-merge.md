@@ -17,5 +17,5 @@ To ensure the `agent/antigravity` branch is fully integrated with `main` and con
 1. Type check: `npx tsc --noEmit` (clean).
 2. Tests: `npm test` (516 tests passed).
 3. Production build: `npm run build` (successful).
-4. Land script: `bash scripts/land.sh` pushed changes and verified clean integration on PR #22: https://github.com/jaywedgeworth22/agentic-trading/pull/22
+4. Land script: `bash scripts/land.sh` pushed changes and verified clean integration on PR #22: https://github.com/Simple-With-Us/agentic-trading/pull/22
 5. PM2 server: Stopped `trading-antigravity` before build, successfully restarted post-build.

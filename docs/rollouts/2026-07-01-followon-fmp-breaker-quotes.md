@@ -75,7 +75,7 @@ Run in the Cloud VM (single `/workspace` checkout):
 
 - `npm run lint` → **0 errors** (277 grandfathered warnings).
 - `npx tsc --noEmit` → **8 errors, all in `src/lib/congress-share.ts`** — the private
-  `@jaywedgeworth22/congress-trading-shared` stub in this environment doesn't export
+  `@Simple-With-Us/congress-trading-shared` stub in this environment doesn't export
   `resolveTickerAlias` (and related members). Environmental, not from this change.
 - `npm test` (vitest) → **2033 passed; 36 failed across 4 `congress-*` files only**
   (`congress-analytics`, `congress-share`, `congress-share-price-targets`,

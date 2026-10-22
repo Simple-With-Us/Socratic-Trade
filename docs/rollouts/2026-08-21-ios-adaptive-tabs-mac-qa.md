@@ -76,7 +76,7 @@ If `git worktree add` refuses because the path exists, use
 
 ## 2. PR #3027 is optional (main already merged)
 
-https://github.com/jaywedgeworth22/Socratic-Trade/pull/3027
+https://github.com/Simple-With-Us/Socratic-Trade/pull/3027
 Branch `cursor/ios-layout-math-tests-rename-3110`.  HEAD as of 2026-08-21
 23:05Z: `bf172407`.  Auto-merge is armed (`--squash --auto`) but
 `mergeStateStatus` was **DIRTY**; resolved 2026-08-21 by merging

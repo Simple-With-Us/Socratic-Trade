@@ -44,10 +44,10 @@ the agent/integration hostnames at the Mac PM2 previews and must be repointed by
 
 ## Why the two parked lanes fail (stale branches — NOT a box problem)
 
-- **agent/monet**: `package.json` pins `@jaywedgeworth22/congress-trading-shared@^1.2.0`
+- **agent/monet**: `package.json` pins `@Simple-With-Us/congress-trading-shared@^1.2.0`
   from the **private GitHub Packages** registry -> `npm ci` fails with `401 Unauthorized`.
   It predates the 2026-07-04 switch (PR #444) to consuming the shared library from a **public
-  git tag** (`github:jaywedgeworth22/congress-trading-shared#v1.4.1`), which `main` and all
+  git tag** (`github:Simple-With-Us/congress-trading-shared#v1.4.1`), which `main` and all
   fresh-from-main lanes use and which needs no auth.
 - **agent/codex**: a much older snapshot (`name: agentic-trading-dashboard`, Next 15, none of
   the current deps/scripts). Even building green it would serve a months-old app.

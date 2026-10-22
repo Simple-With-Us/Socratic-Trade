@@ -2,7 +2,7 @@
 
 ## Summary
 
-Integrated the private `@jaywedgeworth22/congress-trading-shared` package into Agentic Trading's Congress.Trade App A/B integration. The app now imports shared wire types, API path constants, and Zod schemas instead of keeping duplicated local definitions for transaction reads, outbound share payloads, and inbound event envelopes.
+Integrated the private `@Simple-With-Us/congress-trading-shared` package into Agentic Trading's Congress.Trade App A/B integration. The app now imports shared wire types, API path constants, and Zod schemas instead of keeping duplicated local definitions for transaction reads, outbound share payloads, and inbound event envelopes.
 
 ## Why
 
@@ -59,5 +59,5 @@ The two apps were carrying overlapping TypeScript contracts for the same cross-a
 
 ## Follow-ups
 
-- Merge/publish `jaywedgeworth22/congress-trading-shared#1`, then move Agentic Trading from a pinned git commit to a versioned GitHub Packages release if desired.
+- Merge/publish `Simple-With-Us/congress-trading-shared#1`, then move Agentic Trading from a pinned git commit to a versioned GitHub Packages release if desired.
 - Rotate/delete the deploy key if this package moves to GitHub Packages and Agentic Trading no longer needs git-based private dependency access.

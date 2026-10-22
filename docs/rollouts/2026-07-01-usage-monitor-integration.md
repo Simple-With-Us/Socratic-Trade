@@ -65,7 +65,7 @@ of an outage is a `usage-monitor` row on the admin connections-health page (via 
 
 ## Shared-package note (why hand-rolled, not the shared client)
 
-App B pins `@jaywedgeworth22/congress-trading-shared@1.0.0`, whose published dist does **not**
+App B pins `@Simple-With-Us/congress-trading-shared@1.0.0`, whose published dist does **not**
 export `usageTelemetry` (the client lives on the shared repo's unmerged
 `feat/usage-telemetry-idempotency-key` branch, v1.1.0). Publishing to the private GH Packages
 registry + regenerating App B's lockfile isn't possible in this session, so per the spec's

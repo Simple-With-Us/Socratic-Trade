@@ -2,7 +2,7 @@
 
 ## Summary
 
-PR #279 switches `@jaywedgeworth22/congress-trading-shared` from a git/SSH-ref
+PR #279 switches `@Simple-With-Us/congress-trading-shared` from a git/SSH-ref
 install to the private **GitHub Packages** registry (`.npmrc`, `package.json`,
 `package-lock.json`, and the `npm-ci-with-shared-deps.sh` helper). This rollout
 note records the migration plus the follow-up fixes for the three Codex review
@@ -94,7 +94,7 @@ threads on the PR.
 
 ## Follow-ups
 
-- Confirm the `@jaywedgeworth22/congress-trading-shared` package grants `read` to the
+- Confirm the `@Simple-With-Us/congress-trading-shared` package grants `read` to the
   consuming repo so the job `GITHUB_TOKEN` (packages: read) can install it without a PAT.
 - **Tokenless fresh-clone install (acknowledged):** switching the shared dep to a private registry
   means a bare `git clone` with **no** `NODE_AUTH_TOKEN`/`GITHUB_TOKEN` at all now fails `npm ci`
