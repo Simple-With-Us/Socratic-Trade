@@ -72,7 +72,7 @@ Touched:
 ```
 
 Full `tsc` in this worktree still reports pre-existing missing
-`@jaywedgeworth22/congress-trading-shared` unless that private package is
+`@Simple-With-Us/congress-trading-shared` unless that private package is
 linked.  Not introduced by this change.
 
 ## Follow-up (same branch) — venue contract fences LLM tokens

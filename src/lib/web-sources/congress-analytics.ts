@@ -15,7 +15,7 @@ import type {
   ConvictionTicker,
   MemberLeader,
   MemberPerformance
-} from "@jaywedgeworth22/congress-trading-shared";
+} from "@Simple-With-Us/congress-trading-shared";
 import { normalizeSymbol } from "../money";
 import type { CongressAnalytics, WebSourceRefreshResult } from "./types";
 

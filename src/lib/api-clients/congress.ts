@@ -1,4 +1,4 @@
-import { CongressTradeClient } from "@jaywedgeworth22/congress-trading-shared";
+import { CongressTradeClient } from "@Simple-With-Us/congress-trading-shared";
 import { logApiHealth } from "../db-health";
 import {
   PEER_LANE_CONGRESS_TRADE,
@@ -190,7 +190,7 @@ export function resetCongressTradeClientForTests(): void {
   sharedClientInstance = null;
 }
 
-import type { PriceClose } from "@jaywedgeworth22/congress-trading-shared";
+import type { PriceClose } from "@Simple-With-Us/congress-trading-shared";
 import type { OHLCBar } from "../indicators";
 
 export function appAClosesToBars(closes: PriceClose[] | null | undefined): OHLCBar[] {

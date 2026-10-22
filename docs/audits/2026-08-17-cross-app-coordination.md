@@ -107,7 +107,7 @@ owner work.
 
 | Consumer | How CTS is consumed | Claimed version |
 |----------|---------------------|-----------------|
-| Socratic-Trade | `package.json` `github:jaywedgeworth22/congress-trading-shared#v2.5.2` (lock `b2847eb9…`) | 2.5.2 |
+| Socratic-Trade | `package.json` `github:Simple-With-Us/congress-trading-shared#v2.5.2` (lock `b2847eb9…`) | 2.5.2 |
 | Usage-Monitor | same git tag pin | 2.5.2 |
 | Congress.Trade | **not** an npm dependency.  Deno import map → `app/vendor/congress-trading-shared/src/index.ts`.  `VENDOR-PROVENANCE.md`: immutable release `v2.5.2`, imported 2026-08-11 | 2.5.2 |
 | DealDex | no dependency | n/a |
@@ -120,7 +120,7 @@ CT's vendor-era consumption.
 **The ST pin-check is a no-op against current CT.**
 `.github/workflows/shared-package-pin-check.yml` still:
 
-1. Reads CT `app/package.json` `dependencies["@jaywedgeworth22/congress-trading-shared"]`.
+1. Reads CT `app/package.json` `dependencies["@Simple-With-Us/congress-trading-shared"]`.
 2. Treats a missing peer spec as `::warning:: … cannot compare` and **exits 0**.
 3. Skips the entire peer fetch when `GH_PACKAGES_TOKEN` is unset (also exit 0).
 4. Is intentionally **not** a required merge check.

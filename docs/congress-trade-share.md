@@ -6,7 +6,7 @@
 hooks in `src/lib/market.ts` (after-scan) and `src/lib/scheduler.ts` (nightly).
 
 **Shared contract package (2026-06-30):** outbound import payload types, origin tags, API path constants,
-and runtime Zod schemas are imported from `@jaywedgeworth22/congress-trading-shared`, with local App B
+and runtime Zod schemas are imported from `@Simple-With-Us/congress-trading-shared`, with local App B
 code retaining only mapping logic and operational gates.
 
 **2026-06-25 additions (all default-OFF):**

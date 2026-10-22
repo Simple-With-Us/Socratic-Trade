@@ -2,7 +2,7 @@
 
 ## Summary
 
-Socratic-Trade now consumes `@jaywedgeworth22/congress-trading-shared` from the
+Socratic-Trade now consumes `@Simple-With-Us/congress-trading-shared` from the
 immutable `v1.7.1` commit
 `0bc26ab9311a396f3f6b5cba0fb54fa7558a42b4` instead of the former exact
 `v1.6.0` commit `c4fcfb4423a11318bda8486ecf3dd6ab1783e87a`.
@@ -35,7 +35,7 @@ Completed under Node 24:
 - Ran `npm ci` with a second fresh disposable npm cache.
 - Confirmed non-empty `dist/index.js`, `dist/index.mjs`, `dist/index.d.ts`, and
   `dist/index.d.mts` artifacts.
-- Confirmed `require("@jaywedgeworth22/congress-trading-shared")` and dynamic
+- Confirmed `require("@Simple-With-Us/congress-trading-shared")` and dynamic
   ESM import each expose 105 exports, including `CongressTradeClient` and
   `UsageTelemetryEventSchema`.
 - Confirmed `npm ls` resolves package version `1.7.1` at the full immutable SHA.
@@ -76,7 +76,7 @@ entry now use the immutable HTTPS+SHA ref.
 ### Files
 
 - `package.json` — dependency spec and `allowScripts` key changed to
-  `git+https://github.com/jaywedgeworth22/congress-trading-shared.git#...`
+  `git+https://github.com/Simple-With-Us/congress-trading-shared.git#...`
   (resolves as HTTPS instead of SSH in CI environments)
 - `package-lock.json` — `resolved` field updated to `git+https://` URL
 

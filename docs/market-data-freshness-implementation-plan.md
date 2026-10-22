@@ -182,7 +182,7 @@ not a data change; the only thing that makes faster *entry* data valuable. Defer
 This PR changes code (`defaults.ts`, `dashboard-client.tsx`). The full
 `npm run lint` → `npx tsc --noEmit` → `npm test` → `npm run build` trio **could not be
 run in this cloud environment**: `node_modules` is absent and the private
-`@jaywedgeworth22/congress-trading-shared` git dependency 404s here, so `npm install`
+`@Simple-With-Us/congress-trading-shared` git dependency 404s here, so `npm install`
 cannot complete (documented blocker, per prior rollouts). The changes are limited to
 type-safe additive edits: two optional-value settings fields (mirroring existing
 `OptionalNumberField` usage) and three `DEFAULT_POLICY` literals. The repo's `verify`

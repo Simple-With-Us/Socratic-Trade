@@ -10,7 +10,7 @@ import {
   CONGRESS_EVENT_TYPES,
   CongressEventSchema,
   parseSafe,
-} from "@jaywedgeworth22/congress-trading-shared";
+} from "@Simple-With-Us/congress-trading-shared";
 import { coerceCongressTrade, upsertCongressTrades } from "./web-sources/congress";
 import {
   coerceInsiderFiling,

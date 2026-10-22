@@ -54,7 +54,7 @@ npm run build      # exit 0
 ```
 
 `npm ci` was required first: the branch was restarted from the latest `main`, which
-pinned a newer `@jaywedgeworth22/congress-trading-shared` commit (`c4fcfb44`) that
+pinned a newer `@Simple-With-Us/congress-trading-shared` commit (`c4fcfb44`) that
 exports `buildOperationInFlightRejection` / `buildRateLimitedRejection` /
 `getOperationGuardHttpStatus`; the stale `1.4.1` in `node_modules` broke the build
 until reinstalled.

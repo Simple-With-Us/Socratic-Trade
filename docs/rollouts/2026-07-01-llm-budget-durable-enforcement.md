@@ -52,7 +52,7 @@ model/embedding spend site was a fresh bypass. This change makes it **modifiable
 ## Verification
 
 `npx tsc --noEmit` 0 errors · `npm run lint` 0 errors · `npm test` **1738/1738** · `npm run build` ok.
-(Private `@jaywedgeworth22/congress-trading-shared` stubbed locally as before; CI `verify` uses the real
+(Private `@Simple-With-Us/congress-trading-shared` stubbed locally as before; CI `verify` uses the real
 package.)
 
 ## Follow-up Codex review — two fixes (in code, with tests)

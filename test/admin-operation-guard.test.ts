@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { OperationGuardRejectionSchema } from "@jaywedgeworth22/congress-trading-shared";
+import { OperationGuardRejectionSchema } from "@Simple-With-Us/congress-trading-shared";
 import {
   ADMIN_OPERATION_LIMITS,
   adminOperationIdentity,

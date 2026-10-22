@@ -106,7 +106,7 @@ in-repo pin) into its app target and calls `.appUpdatePrompt()` on the root
 view.  Do not fork the file.  Do not make a Swift package.
 
 Apple IDs and marketing versions live in the public fleet manifest
-https://raw.githubusercontent.com/jaywedgeworth22/ai-fleet-coordinator/main/site/ios-versions.json
+https://raw.githubusercontent.com/Simple-With-Us/ai-fleet-coordinator/main/site/ios-versions.json
 (and the local mirror `ios-app-versions.json`).  `apps.json` is the ship
 registry.  Live DealDex is `net.dealdex` appleId `6802474288`.
 `online.dealdex` is not the live bundle.  Do not upload `me.grok.dealdex`.

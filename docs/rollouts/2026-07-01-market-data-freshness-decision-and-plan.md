@@ -100,7 +100,7 @@ Now includes CODE, not just docs:
 
 **Verification blocker (honest):** the full `lint`/`tsc`/`test`/`build` trio could not
 run in this cloud env — `node_modules` is absent and the private
-`@jaywedgeworth22/congress-trading-shared` git dep 404s, so `npm install` fails here
+`@Simple-With-Us/congress-trading-shared` git dep 404s, so `npm install` fails here
 (same blocker noted in prior rollouts). Changes are type-safe additive edits (two
 optional settings fields + three `DEFAULT_POLICY` literals). The `verify` CI gate runs
 the full trio with registry access on the PR and gates merge — that is the

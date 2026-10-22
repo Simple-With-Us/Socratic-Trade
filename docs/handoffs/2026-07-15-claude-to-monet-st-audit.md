@@ -29,7 +29,7 @@
 
 ### Two fixes already LANDED by CLAUDE this session (no action needed from you)
 
-1. **Congress.Trade `Shared package pin check` false-positive → [PR #450](https://github.com/jaywedgeworth22/Congress.Trade/pull/450) MERGED.**
+1. **Congress.Trade `Shared package pin check` false-positive → [PR #450](https://github.com/Simple-With-Us/Congress.Trade/pull/450) MERGED.**
    The check was red on `main` since 2026-07-13 (Sentry FLEET-INFRA-16/-C/-3C) — a false
    positive: both repos pin the same shared commit, but CT's lockfile records it via `git+ssh://`
    and ST's via `git+https://`, and the check compared raw `resolved` strings. Fixed by

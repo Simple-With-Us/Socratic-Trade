@@ -2,7 +2,7 @@
 
 ## Summary
 Hardened `.github/workflows/shared-package-pin-check.yml` so it compares the two consumer
-repos' `@jaywedgeworth22/congress-trading-shared` pins at the **commit** level instead of
+repos' `@Simple-With-Us/congress-trading-shared` pins at the **commit** level instead of
 the raw ref string. When the normalized ref strings differ but both specs are git-style
 (`github:...#ref`, `git+...#ref`), the check now resolves each ref to a commit SHA against
 `congress-trading-shared` (the shared package's own repo, which is public) via the GitHub
@@ -31,7 +31,7 @@ instead of coincidentally-passing on today's specific pin state.
 ## Files
 - `.github/workflows/shared-package-pin-check.yml` — added `is_git_spec`, `git_ref`,
   `parse_ref_json`, and `resolve_ref` shell functions plus the ref-resolution branch in the
-  main comparison block; added `SHARED_REPO` env var (`jaywedgeworth22/congress-trading-shared`,
+  main comparison block; added `SHARED_REPO` env var (`Simple-With-Us/congress-trading-shared`,
   the package's own public repo — distinct from `PEER_REPO`, which only hosts the peer
   consumer's `package.json`); updated the header comment block to describe the new
   resolve-before-compare behavior and the public-repo auth note.
@@ -57,7 +57,7 @@ instead of coincidentally-passing on today's specific pin state.
   - Full output of both replays is in the PR discussion / session transcript; both matched the
     required outcomes exactly.
 - Confirmed `package.json`'s own pin is unchanged
-  (`github:jaywedgeworth22/congress-trading-shared#c4fcfb4423a11318bda8486ecf3dd6ab1783e87a`).
+  (`github:Simple-With-Us/congress-trading-shared#c4fcfb4423a11318bda8486ecf3dd6ab1783e87a`).
   **Correction to an assumption in the task brief:** the brief for this work asserted that the
   required `check-pin` status on `pull_request` events runs from `main`'s workflow definition,
   not the PR's. Verified directly against PR #1507's own `check-pin` run

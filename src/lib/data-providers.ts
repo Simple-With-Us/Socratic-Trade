@@ -20,7 +20,7 @@ import {
   congressFundamentalsEnabled,
   getCongressTradeClient
 } from "./api-clients/congress";
-import type { FundamentalRow, AnalystRow } from "@jaywedgeworth22/congress-trading-shared";
+import type { FundamentalRow, AnalystRow } from "@Simple-With-Us/congress-trading-shared";
 
 export type AppAFundamentalRow = FundamentalRow & { source?: string | null };
 export type AppAAnalystRow = AnalystRow & { source?: string | null };

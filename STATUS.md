@@ -386,7 +386,7 @@ Rollout: `docs/rollouts/2026-09-25-st-rh-min-and-hold-reasons.md`.
 Independent review of merged PR #3786 raised one finding (P2): the report published dollar-level
 realized P&L and balance/drawdown history for the owner's real live accounts (Roth IRA, Agentic,
 Sandbox/Tradier) into `docs/reviews/2026-09-25-trading-performance-report.md`, and this repo
-(`jaywedgeworth22/Socratic-Trade`) is public.  Verified real: `gh repo view` confirms
+(`Simple-With-Us/Socratic-Trade`) is public.  Verified real: `gh repo view` confirms
 `isPrivate: false`, and every dollar figure the finding cited is present verbatim in the merged
 doc.  Declined as a code/content defect — this exact unchanged copy was the lane's own explicit
 instruction, it matches existing published precedent (Roth IRA dollar caps already public in
@@ -752,7 +752,7 @@ ID); APNs register/send accepts + uses per-device topic for both bundle IDs
    Service ID list.
 
 Rollout: `docs/rollouts/2026-09-22-bundle-id-migration.md`. PR:
-https://github.com/jaywedgeworth22/Socratic.Trade/pull/3451
+https://github.com/Simple-With-Us/Socratic.Trade/pull/3451
 
 ## 2026-09-23 INSTINCT — PR #3458 CI fix: email sign-off test assertions
 
@@ -984,7 +984,7 @@ the narrative round label and the cap count are off by one here, and the rollout
 that explicitly.  **5 of 10** against the cap.
 
 Also recorded: Codex cited commit `22efe659` as its fresh evidence for (a).  That SHA resolves
-nowhere (`gh api repos/jaywedgeworth22/Socratic-Trade/commits/22efe659` => HTTP 422 "No commit
+nowhere (`gh api repos/Simple-With-Us/Socratic-Trade/commits/22efe659` => HTTP 422 "No commit
 found for SHA") and is not one of the PR's six commits.  The finding was still correct on its
 merits, verified independently against the repo's squash settings and the PR's commit subjects,
 so it was fixed rather than disputed.  Documentation only — no source, dependency, or lockfile
@@ -1878,7 +1878,7 @@ after 7761 passing tests.  `#3046`'s `onConsoleLog: () => false` still
 forwards logs over RPC.  Fix: `disableConsoleIntercept: true` plus quiet
 log/info/debug in the existing setup file.  Targeted vitest 3/3 in 6.67s,
 eslint on touched files exit 0.  Branch `grok/vitest-teardown-console`,
-worktree `~/apps/trading-grok-verify-flake`.  PR: https://github.com/jaywedgeworth22/Socratic-Trade/pull/3163
+worktree `~/apps/trading-grok-verify-flake`.  PR: https://github.com/Simple-With-Us/Socratic-Trade/pull/3163
 SHA `4fba321ff`.  No Coolify.  No extra-ship.  No merge from this lane.
 Remaining gate: GitHub `verify`.  Rollout:
 `docs/rollouts/2026-09-04-vitest-teardown-console.md`.
@@ -2263,7 +2263,7 @@ Independent re-check of `docs/rollouts/2026-08-21-ios-adaptive-tabs-followups.md
 ## 2026-08-22 CURSOR — PR #3028 merged to `main` (iOS wide layout / Admin tab / gear-bell)
 
 Squash `a851a68d` (`a851a68da16b9c7ec722897a3ab4f378e0117111`) at 2026-08-22 01:14:36Z.
-https://github.com/jaywedgeworth22/Socratic-Trade/pull/3028
+https://github.com/Simple-With-Us/Socratic-Trade/pull/3028
 
 Shipped on `main`: regular-width `.sidebarAdaptable` TabView plus the existing card-column
 scaffold; compact keeps the phone bar; `gearshape` trailing on every tab; bell leading
@@ -4036,7 +4036,7 @@ from #2681).
 
 Branch `monet/real-toggles`, worktree `~/apps/trading-monet-toggles`. Gates (foreground, waited
 on): tsc clean; `npm test` 6573 passed / 51 skipped (568 files); lint 0 errors; build clean. PR
-https://github.com/jaywedgeworth22/Socratic-Trade/pull/2682, opened ready, auto-merge armed
+https://github.com/Simple-With-Us/Socratic-Trade/pull/2682, opened ready, auto-merge armed
 (squash) — merges on green `verify`. Rollout:
 `docs/rollouts/2026-08-13-remove-force-include-notifications.md`.
 ## Current (2026-08-13 ~2:20pm CT CLAUDE — HOTFIX: adaptive FTS-mirror batching)
@@ -4955,7 +4955,7 @@ behavior unchanged; injectable RNG for deterministic tests. Branch `monet/rotati
 ## Current (2026-08-06 MONET full-product review + deploy-freeze repair)
 ## Current (2026-08-07 GROK — iOS login brand parity)
 
-**iOS login restyled to match website** (`app/login/page.tsx`): candlestick "SOCRATIC TRADE" wordmark (`CandleWordmarkView`, port of `candle-ticker.ts`), accent-dot value bullets, plain `--bg` surface, Google/GitHub/Apple button order and styles. PR [#2574](https://github.com/jaywedgeworth22/Socratic-Trade/pull/2574) (branch `grok/ios-login-brand`, auto-merge armed). `xcodebuild` BUILD SUCCEEDED. Rollout: `docs/rollouts/2026-08-07-ios-login-brand.md`.
+**iOS login restyled to match website** (`app/login/page.tsx`): candlestick "SOCRATIC TRADE" wordmark (`CandleWordmarkView`, port of `candle-ticker.ts`), accent-dot value bullets, plain `--bg` surface, Google/GitHub/Apple button order and styles. PR [#2574](https://github.com/Simple-With-Us/Socratic-Trade/pull/2574) (branch `grok/ios-login-brand`, auto-merge armed). `xcodebuild` BUILD SUCCEEDED. Rollout: `docs/rollouts/2026-08-07-ios-login-brand.md`.
 
 ## Prior (2026-08-06 MONET full-product review + deploy-freeze repair)
 
@@ -5339,7 +5339,7 @@ tests, build clean. Rollout: `docs/rollouts/2026-08-02-data-provider-round2.md`.
    Also fixed forward: `allowScripts` git-dep keys in tag form (`#vX.Y.Z`) can never match
    (npm compares against the resolved 40-char SHA), which npm 12 escalates from a warning
    to a hard block on the dep's `prepare` — the key is now committish-free
-   (`"github:jaywedgeworth22/congress-trading-shared": true`, verified: coverage warning
+   (`"github:Simple-With-Us/congress-trading-shared": true`, verified: coverage warning
    gone). #2345's lockfile regen also fixed a real silent bug: the old lockfile pinned the
    v2.3.0 commit while package.json said v2.4.x, so `npm ci` was silently shipping the old
    shared package. Verified 2026-08-02: plain `npm ci` = exit 0, 575 packages, clean shell.

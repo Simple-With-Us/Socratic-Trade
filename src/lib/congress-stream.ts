@@ -24,7 +24,7 @@ import {
   PEER_LANE_CONGRESS_SSE,
   recordPeerLaneSample,
 } from "./peer-lane-backoff";
-import { CongressTradeClient, SseParser, type SseMessage, type Subscription } from "@jaywedgeworth22/congress-trading-shared";
+import { CongressTradeClient, SseParser, type SseMessage, type Subscription } from "@Simple-With-Us/congress-trading-shared";
 
 const DEFAULT_PATH = "/api/stream";
 /** Widened 2026-08-17 (#2550): 60s max + reset-on-HTTP-200 turned flaps into a reconnect storm. */

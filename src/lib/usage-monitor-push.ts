@@ -19,7 +19,7 @@
 //   - Health is reported via `logApiHealth({ service: "usage-monitor" })` so the operator sees the
 //     connection status without the push ever affecting trading.
 //
-// CONTRACT: fresh outbound events use `@jaywedgeworth22/congress-trading-shared`'s strict
+// CONTRACT: fresh outbound events use `@Simple-With-Us/congress-trading-shared`'s strict
 // `UsageTelemetryV2EventSchema`; producer identity lives only on the v2 batch envelope.
 // (`API-usage-monitor/src/lib/usage-telemetry.ts`).
 // MIGRATION COMPLETE (2026-07-06): types and client are now imported from the shared package.
@@ -41,7 +41,7 @@ import {
   type UsageTelemetryUnit,
   type UsageTelemetryBillingMode,
   type UsageTelemetryConfidence,
-} from "@jaywedgeworth22/congress-trading-shared";
+} from "@Simple-With-Us/congress-trading-shared";
 
 // Re-export shared types under the names consumers already use.
 export type UsageMetricType = UsageTelemetryMetricType;

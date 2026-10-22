@@ -89,7 +89,7 @@ CSP/X-Frame-Options/Referrer-Policy existed anywhere.
 
 The full vitest quartet could NOT be run in this cloud worktree: `node_modules`
 was partially corrupted and `npm install` fails on the auth-gated private
-dependency `@jaywedgeworth22/congress-trading-shared` (GitHub Packages 401) — so
+dependency `@Simple-With-Us/congress-trading-shared` (GitHub Packages 401) — so
 `vitest` itself is not resolvable here. The orchestrator runs the final
 tsc/lint/test/build quartet.
 

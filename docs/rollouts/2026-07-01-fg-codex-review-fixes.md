@@ -158,7 +158,7 @@ documented, deferred follow-up.
 ## Verification
 
 `npx tsc --noEmit` 0 errors · `npm run lint` 0 errors · `npm test` **1730/1730** · `npm run build` ok.
-(Private `@jaywedgeworth22/congress-trading-shared` dep stubbed locally as before; CI `verify` uses the
+(Private `@Simple-With-Us/congress-trading-shared` dep stubbed locally as before; CI `verify` uses the
 real package.)
 
 ## Follow-ups

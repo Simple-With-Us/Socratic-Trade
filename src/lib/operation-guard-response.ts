@@ -2,7 +2,7 @@ import {
   buildOperationInFlightRejection,
   buildRateLimitedRejection,
   getOperationGuardHttpStatus
-} from "@jaywedgeworth22/congress-trading-shared";
+} from "@Simple-With-Us/congress-trading-shared";
 import type { OperationLeaseBusy } from "./operation-lease";
 
 function jsonResponse(status: number, body: Record<string, unknown>, headers: Record<string, string> = {}): Response {

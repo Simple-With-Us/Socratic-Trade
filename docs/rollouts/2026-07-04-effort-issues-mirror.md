@@ -85,7 +85,7 @@
   Progress, lines 217 and 301 at time of writing) which would have produced two identical mirrored
   issues on a single run. Added in-run dedup keyed on the same SHA1 identity so duplicate board rows
   reconcile against one issue instead of multiplying.
-- Live dry run: `GITHUB_TOKEN=$(gh auth token) GITHUB_REPOSITORY=jaywedgeworth22/Socratic-Trade python3 scripts/sync-effort-issues.py --dry-run`
+- Live dry run: `GITHUB_TOKEN=$(gh auth token) GITHUB_REPOSITORY=Simple-With-Us/Socratic-Trade python3 scripts/sync-effort-issues.py --dry-run`
   against the real repo (labels listed live, all existing issues listed live, writes simulated).
   Result: 57 items would be created (58 parsed, 1 duplicate skipped), correctly bucketed by state,
   zero unexpected matches against existing issues (none carry the marker yet).

@@ -118,7 +118,7 @@ follow-up.
   `chat-readonly-tools`, `conviction-size-cap`, `proposal-performance` → **all passed** (60 tests).
 - `npx tsc --noEmit`: **0 errors in owned files.** The only 3 repo-wide errors are in
   `congress-share.ts` / `congress-trade-client.ts` / `web-sources/congress-analytics.ts` and are
-  artifacts of the local test STUB standing in for the private `@jaywedgeworth22/congress-trading-shared`
+  artifacts of the local test STUB standing in for the private `@Simple-With-Us/congress-trading-shared`
   package (not installable in this env; see Environment note) — they are not in owned files and resolve
   with the real package in CI.
 - `npx eslint` on owned files: **0 errors** (only pre-existing grandfathered warnings).
@@ -128,7 +128,7 @@ follow-up.
 
 ## Environment note (verification caveat)
 This worktree had **no `node_modules`** on entry (contrary to the task brief) and `npm ci` fails on the
-private `@jaywedgeworth22/congress-trading-shared` GitHub Packages dep (no `read:packages` token here).
+private `@Simple-With-Us/congress-trading-shared` GitHub Packages dep (no `read:packages` token here).
 To run targeted tests I installed public deps with a minimal local **stub** of that private package
 (scratchpad only) so vitest could resolve transitive imports. `package.json` / `package-lock.json` were
 restored to their committed state afterward (confirmed clean — they are NOT in this workstream's

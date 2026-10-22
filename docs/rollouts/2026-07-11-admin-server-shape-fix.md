@@ -62,7 +62,7 @@ them and production crashed with React minified error #31.
 - `git diff --check` — passed.
 
 The initial dependency attempt before the serialized gate was killed with exit 137 and a temporary
-lower-memory install omitted `@jaywedgeworth22/congress-trading-shared`. The clean Node 24 lockfile
+lower-memory install omitted `@Simple-With-Us/congress-trading-shared`. The clean Node 24 lockfile
 install above repaired the isolated worktree, and the complete verification quartet then passed.
 
 Post-PR integration receipt: after `origin/main` advanced through #1397 and #1399, a manual

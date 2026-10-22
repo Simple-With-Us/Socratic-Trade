@@ -15,7 +15,7 @@
 - `npx tsc --noEmit` — 0 type errors.
 - `npm test` — All 5,386 tests across 467 test files passed.
 - `npm run build` — Next.js production build succeeded cleanly.
-- `land.sh` — Successfully pushed to branch `agent/antigravity/mobile-pwa-account-switcher-fix` and created [PR #2265](https://github.com/jaywedgeworth22/Socratic-Trade/pull/2265) with auto-merge enabled.
+- `land.sh` — Successfully pushed to branch `agent/antigravity/mobile-pwa-account-switcher-fix` and created [PR #2265](https://github.com/Simple-With-Us/Socratic-Trade/pull/2265) with auto-merge enabled.
 
 ## 4. Touched Files
 - `app/console/components/chrome.tsx`

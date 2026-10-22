@@ -106,7 +106,7 @@ npx vitest run test/mobile-api.test.ts                      # 5 passed (unchange
 
 All 11 files / 93 tests green. The environment's `node_modules` was initially
 missing entirely and `npm install` failed on the private
-`@jaywedgeworth22/congress-trading-shared` GitHub Packages dependency
+`@Simple-With-Us/congress-trading-shared` GitHub Packages dependency
 (401 Unauthorized — no registry credentials available in this sandbox); worked
 around it with a local install-only stub package (not used by any file in
 this workstream's scope, confirmed via `grep -rl "congress-trading-shared"

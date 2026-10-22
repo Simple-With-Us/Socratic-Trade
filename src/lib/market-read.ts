@@ -4,7 +4,7 @@
 // gap-fills back (app/api/admin/securities/import). These read endpoints complete the loop: they let
 // App A PULL App B's daily EOD bars over HTTP (cache-aside), served in the exact PriceSeries /
 // { closes } envelopes the shared CongressTradeClient parses
-// (@jaywedgeworth22/congress-trading-shared: /api/market/prices/{ticker}, /api/market/spx).
+// (@Simple-With-Us/congress-trading-shared: /api/market/prices/{ticker}, /api/market/spx).
 // Company profiles for App A enrichment: /api/market/profile/{symbol} → { ref } / 404 { ref: null }.
 //
 // Auth lives in the route handlers (verifySecuritiesImportToken — the same APP_B_INGEST_TOKEN bearer

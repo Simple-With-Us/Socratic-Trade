@@ -201,7 +201,7 @@ cost even if App B also pushes some events for them. Budget alerts reuse
 ## Shared client and idempotency contract
 
 `src/lib/usage-monitor-push.ts` uses `createUsageTelemetryClient` from
-`@jaywedgeworth22/congress-trading-shared`. Every strict-v2 event has an explicit `eventId`;
+`@Simple-With-Us/congress-trading-shared`. Every strict-v2 event has an explicit `eventId`;
 the receiver deduplicates on `(producerId,eventId)` and rejects conflicting replays. This producer
 derives IDs from durable source rows or one allocated aggregate-window ID, then hashes them before
 transmission so identity remains stable and below the ingest length cap. Provider credential

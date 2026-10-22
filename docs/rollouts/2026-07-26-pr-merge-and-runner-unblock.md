@@ -11,7 +11,7 @@ failed scheduled Playwright Smoke with `ENOENT package.json`.
 - #2217 re-failed `verify-hosted` on a stale `dashboard-feed` assertion already fixed
   on the #2219 lineage; #2217 had **zero unique commits** vs #2219.
 - #2215 failed `tsc` because it imports `TradeEventRowSchema` / `trades` while the
-  repo still pinned `@jaywedgeworth22/congress-trading-shared` at **v2.0.0** (schema
+  repo still pinned `@Simple-With-Us/congress-trading-shared` at **v2.0.0** (schema
   landed in **v2.3.0**).
 - Scheduled smoke on socratic-ci lost the checkout between `actions/checkout` and
   `npm install` (same class as the earlier verify-hosted / check-pin races).

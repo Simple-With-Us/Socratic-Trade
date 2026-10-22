@@ -42,8 +42,8 @@ correction, with receipts, plus the one forward-looking fix the findings demande
 ## 3. Changes Made
 
 - `package.json`: `allowScripts` key for the shared dep changed from
-  `"github:jaywedgeworth22/congress-trading-shared#v2.4.1"` to committish-free
-  `"github:jaywedgeworth22/congress-trading-shared"` — the only form that actually
+  `"github:Simple-With-Us/congress-trading-shared#v2.4.1"` to committish-free
+  `"github:Simple-With-Us/congress-trading-shared"` — the only form that actually
   matches a git dep, and survives future tag bumps without maintenance.
 - `STATUS.md`: the earlier "stale tag reproduces the failure" explanation replaced with
   the real root cause and the operational check

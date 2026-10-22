@@ -83,7 +83,7 @@ specific real-account P&L/balance **history**, not just a configured limit.
 
 **Verified against the repo:**
 
-- `gh repo view jaywedgeworth22/Socratic-Trade --json isPrivate,visibility` confirms the repo is
+- `gh repo view Simple-With-Us/Socratic-Trade --json isPrivate,visibility` confirms the repo is
   public (`"isPrivate": false`, `"visibility": "PUBLIC"`).
 - Read `docs/reviews/2026-09-25-trading-performance-report.md` on `origin/main` directly: every
   figure the finding cites (`-$0.62`, `$1.68`, `$28.35`, `-$3.46`, `$45.05`, `$50,238.69`) is

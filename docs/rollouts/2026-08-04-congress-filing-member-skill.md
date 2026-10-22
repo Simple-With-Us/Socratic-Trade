@@ -9,11 +9,11 @@ the shared client, restore `memberSkill` weight, and persist raw excess stats.
 
 ## Changes Made
 
-### Shared package (`@jaywedgeworth22/congress-trading-shared` **v2.5.1**)
+### Shared package (`@Simple-With-Us/congress-trading-shared` **v2.5.1**)
 - `MemberDualPerformanceSchema`: `filingDate` + `tradeDate` + legacy `performance`
 - `avgAnnualizedExcess` on performance legs
 - `getMemberPerformance()` returns dual envelope (legacy single-leg still accepted)
-- PR: https://github.com/jaywedgeworth22/congress-trading-shared/pull/258
+- PR: https://github.com/Simple-With-Us/congress-trading-shared/pull/258
 - Tag: `v2.5.1` @ `787b53ba…`
 
 ### Socratic-Trade
