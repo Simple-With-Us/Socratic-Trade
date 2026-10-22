@@ -2974,4 +2974,11 @@ The differential assertion now covers all five files that restore `DATABASE_URL`
 the two that carry a control test, and the fixture shape is shared across the five, so a guard that
 covers two of them leaves three able to regress with nothing failing.
 
+## 2026-10-22 — [MM] The capture moves out of the hook, and the shape is pinned (ST-4572)
+
+A fourth review round found that the differential assertion sat ahead of the capture of the run's
+shared path, so a failed assertion left the capture unset and the teardown deleted
+`DATABASE_URL` instead of restoring it.  The capture is a module-scope constant now, in all five
+files, and a new guard pins the shape of those five fixtures.
+
 Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.

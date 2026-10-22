@@ -122,9 +122,61 @@ A third round raised no new findings against the change, but two of the notes on
 - **The six test files this diff touches pass together.**  45 tests passed across 6 files against a fresh database, and the checkout's `data/app.db` was absent afterwards.
 - `npx tsc --noEmit` exits 0 after the round.  `npx eslint` over the seven files this round touched exits 0, with the same one pre-existing `any` warning in `test/provenance-stamps.test.ts` and nothing new.
 
+### The fourth review round, measured
+
+A fourth round raised three findings against this pull request.  One of them named a real defect in
+code this branch had just added, one of them was answered with a measurement that the regression
+test does bite against the pre-fix code, and one of them was checked against the source and
+answered.
+
+- **The capture of the shared path moved to module scope.**  The differential assertion was the
+  first statement of `beforeAll`, ahead of `prevDb = process.env.DATABASE_URL`, so an assertion
+  that failed left the capture unset.  The teardown then read that unset capture as "the run had
+  no `DATABASE_URL`" and deleted the variable instead of restoring it, which is the opposite of
+  what the teardown is for.  The capture is now a module-scope constant in all five files, where
+  no hook can skip it, and the teardown always restores a value that was really there.
+
+  Measured from both sides with a miniature of the fixture, because the defect lives in the order
+  of two statements.  With a shared path in place and the differential assertion failing, the new
+  shape left the teardown holding the shared path, and the pre-fix shape left it holding nothing,
+  because the variable had been deleted.  The probe was removed and was never committed.
+- **The shape is now pinned.**  `test/db-isolation-fixture-shape.test.ts` is a new guard over the
+  five fixtures: the capture is a module-scope constant, no hook takes a second capture, the
+  differential assertion is in the hook and ahead of the override, and the teardown restores.
+  Against the pre-fix shape the guard fails and reports the capture's absence, so it bites on the
+  thing it is there to catch.
+- **The regression test does fail against the pre-fix code.**  The claim was that
+  `test/coverage-persist-isolation.test.ts` calls the persistence helper directly and so passes
+  against the pre-fix implementation.  `__awaitPendingEnrichmentCoveragePersist` was turned into
+  the no-op the pre-fix code amounted to, and the file's first test failed with `expected +0 to be
+  1`: the row had not landed in the file's own database, because nothing waited for the write.
+  The helper was restored immediately afterwards.  The suggested placement for the differential
+  assertion, before the override is applied, is where it already is, in the `beforeAll` of the
+  five files that apply the override.  This file applies no override; it manages two databases of
+  its own inside its temporary directory, so there is no override for an assertion to precede.
+- **The persist is synchronous, so the tracked promise cannot settle early.**  The finding was
+  that the `.then` callback invokes `persistEnrichmentCoverageReport(report)` without returning
+  it, so the await helper can resolve while the write is still running.
+  `persistEnrichmentCoverageReport` resolves the database, opens the handle and writes the rows
+  inside a better-sqlite3 transaction, and returns `void`, so the write has landed by the time
+  the callback returns and the tracked promise settles only after it.  The asynchronous part is
+  the dynamic import, and that is what makes the tracked promise worth awaiting.  The comment in
+  the module now says so.
+- **A comment in the five fixtures was wrong, and it is corrected.**  It claimed that a
+  module-scope override would carry into the next file in the worker.  A two-file probe measured
+  the process id of each file and the two ids differed, so each test file runs in its own process
+  and a mutation of `process.env` in one file does not reach the next one.  The comment now says
+  what the module-scope arrangement actually does, which is open the window in which the
+  environment points at this file's database before the teardown that closes it is registered.
+- **The seven files this diff touches pass together.**  56 tests passed across 7 files against a
+  fresh database, and the checkout's `data/app.db` was absent afterwards.
+- `npx tsc --noEmit` exits 0 after the round.  `npx eslint` over the seven files this round
+  touched exits 0, with the same one pre-existing `any` warning in `test/provenance-stamps.test.ts`
+  and nothing new.
+
 ## 5. Next Steps & Blockers
 
-None outstanding for the fix itself.  The follow-up comment on PR #4912 and the three threads on PR #4911 are answered with the measurement, the reproduction and the fix, and resolved.  The five review threads on this pull request are answered the same way: three of them changed code and are measured above, and the one about collection-time capture was checked in the source and answered with the evidence.  A third round raised no new findings and confirmed all five; two of its notes were acted on rather than acknowledged, and both are measured in the third round section.  The repository-level guard that ST-4571 deliberately left out — asserting after the suite that the database it ran against collected no coverage rows — is still out of scope for a test-file change and is still recorded as a follow-up on ST-4571.
+None outstanding for the fix itself.  The follow-up comment on PR #4912 and the three threads on PR #4911 are answered with the measurement, the reproduction and the fix, and resolved.  The five review threads on this pull request are answered the same way: three of them changed code and are measured above, and the one about collection-time capture was checked in the source and answered with the evidence.  A third round raised no new findings and confirmed all five; two of its notes were acted on rather than acknowledged, and both are measured in the third round section.  A fourth round raised three more, and all three are answered on their threads: one of them named a real defect in this branch's own fixture, which is fixed and measured in the fourth round section, one was answered with a measurement that the regression test does bite against the pre-fix code, and one was checked against the source and answered.  The repository-level guard that ST-4571 deliberately left out — asserting after the suite that the database it ran against collected no coverage rows — is still out of scope for a test-file change and is still recorded as a follow-up on ST-4571.
 
 What this change does add is the file-level half of that guard.  Each cascade-reaching file now asserts that the shared database it inherited holds no coverage row when its own tests finish, which is the same fact the repo-level guard would assert, taken per file rather than once at the end of the run.
 

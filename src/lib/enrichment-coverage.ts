@@ -317,6 +317,13 @@ export function setLastEnrichmentCoverageReport(report: EnrichmentCoverageReport
   const handles = pendingPersists();
   const pending: Promise<void> = import("./db-enrichment-coverage")
     .then((mod) => {
+      // persistEnrichmentCoverageReport is synchronous.  It resolves the database, opens the
+      // handle and writes the rows inside a better-sqlite3 transaction, and returns void, so
+      // the write has landed by the time this callback returns and the tracked promise settles
+      // only after it.  The asynchronous part is the dynamic import above, and that is what
+      // makes the tracked promise worth awaiting: the module resolves the database only when
+      // the write lands, which is why a teardown that restores DATABASE_URL before this
+      // promise settles hands the write to the wrong database.
       mod.persistEnrichmentCoverageReport(report);
     })
     .catch(() => {

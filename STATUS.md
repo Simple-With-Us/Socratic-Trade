@@ -7707,4 +7707,25 @@ anywhere.  All five files that restore `DATABASE_URL` carry the assertion now.
 The schema stays non-strict, because the helper wants the count rather than the row, and a widened
 count query would add columns to the row rather than fault the database.
 
+## 2026-10-22 — [MM] The shared path is captured where no hook can skip it (ST-4572)
+
+A fourth review round found a real defect in the fixture this branch had just added.  The
+differential assertion was the first statement of `beforeAll`, ahead of the capture of the run's
+shared path, so an assertion that failed left the capture unset, and the teardown read that unset
+capture as "the run had no `DATABASE_URL`" and deleted the variable instead of restoring it.
+
+The capture is now a module-scope constant in all five files that restore `DATABASE_URL`, where no
+hook can skip it.  A new guard, `test/db-isolation-fixture-shape.test.ts`, pins the shape of those
+five fixtures, and it fails against the pre-fix arrangement.
+
+Two claims were checked and did not hold as stated.  The regression test in
+`test/coverage-persist-isolation.test.ts` does fail against the pre-fix behaviour, measured with
+the await helper turned into the no-op the pre-fix code amounted to.  And the persist is
+synchronous, so the tracked promise cannot settle before the write has landed; the comment in
+`src/lib/enrichment-coverage.ts` now says so.
+
+A comment in the five fixtures claimed that a module-scope override would carry into the next file
+in the worker.  A two-file probe measured the process id of each file and the ids differed, so
+each test file runs in its own process.  The comment is corrected.
+
 Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.

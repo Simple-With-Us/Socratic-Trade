@@ -25,21 +25,23 @@ import { __awaitPendingEnrichmentCoveragePersist } from "../src/lib/enrichment-c
 // own path save and restore this one, so their rows stay with them too.
 const dbDir = mkdtempSync(join(tmpdir(), `provenance-stamps-${randomUUID()}-`));
 const dbUrl = `file:${join(dbDir, "test.db")}`;
-let prevDb: string | undefined;
+// The run's shared path is captured here, at module scope, before any hook can throw.  A capture
+// inside beforeAll would be skipped whenever the differential assertion below fails, and the
+// teardown would then read that missing capture as "the run had no DATABASE_URL" and delete the
+// variable instead of restoring it.
+const prevDb = process.env.DATABASE_URL;
 
 // The override is applied in beforeAll rather than at module scope.  A module-scope assignment
-// leaves the worker pointed at this file's database for the whole time the module is being
-// evaluated, so a throw between the assignment and the registration of the afterAll hook would
-// carry the override into the next file in the worker.  Applying it here means the environment is
-// only mutated once this file's tests are about to run, and the mutation is always undone by the
-// afterAll below.
+// opens the window in which the environment points at this file's database at import time,
+// before the afterAll below is registered, so a throw in between leaves the override installed
+// with nothing to undo it.  Applying it here means the window opens only once this file's tests
+// are about to run, and it is always closed by the afterAll below.
 beforeAll(() => {
   // The differential assertion.  Under the old module-scope override this file's database was
   // already installed by the time this hook ran, so this fails and the old implementation is
   // caught here rather than passing silently.  Under the override below, the run's shared path is
   // still in place, so it passes.
   expect(process.env.DATABASE_URL).not.toBe(dbUrl);
-  prevDb = process.env.DATABASE_URL;
   process.env.DATABASE_URL = dbUrl;
   resetDbForTesting();
 });
