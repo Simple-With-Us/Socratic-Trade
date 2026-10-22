@@ -7633,8 +7633,8 @@ Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
 **What.**  The three Kody threads on PR #4911 that carried no reply are now answered, and two
 defects behind them are fixed.  The `DATABASE_URL` override in the two files PR #4911 gave a
 database to moves from module scope into `beforeAll`, the same remedy ST-4572 applied to the
-PR #4912 files, and the teardown of every file that restores the path now waits for the pending
-coverage write before it restores anything.
+PR #4912 files, and the teardown of each of the six files that restore the shared path at file
+scope waits for the pending coverage write before it restores anything.
 
 **The race is real.**  The persist is scheduled as a fire-and-forget dynamic import and
 `persistEnrichmentCoverageReport` resolves the database it writes to when the write lands, not
@@ -7757,6 +7757,45 @@ Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
 
 **What.**  A seventh review round raised two findings against this branch's own audit trail, and both were taken.  The note's bound paragraph said only six files restore the path and that every other file that sets `DATABASE_URL` leaves it installed, but three more files restore the shared path: `test/data-catalog-completeness.test.ts`, `test/health-lane-reprobe.test.ts` and `test/symbol-field-latest.test.ts` each capture it inside `beforeEach` and put it back in their `afterEach`.  The sentence hid three restorers and overstated the set of files whose late write can reach the shared database, because a late write in one of those three lands in the shared database rather than in that file's own.  The bound paragraph now names all nine, separates the six that restore at file scope from the three that restore per test, and scopes the "leaves it installed" clause to the files that genuinely never put the shared path back.  The second finding said the note described `test/sqlite-storage-hygiene.test.ts` as never restoring `DATABASE_URL`, and it does: the `previous` it captures at line 745 is the file's own path and not the shared one, and the restore at line 790 puts its own database back.  Saying it "never restores it" was wrong, and the sixth-round section now says what the file actually does.  The inventory stays at nine either way, because that file never puts the shared path back.
 
-**Verification.**  The counts come from the tree rather than from the note.  The shared-path restorers were read one file at a time: the five guard fixtures and `test/coverage-persist-isolation.test.ts` capture `DATABASE_URL` at module scope and restore it in their teardown, and the three named files capture it inside `beforeEach` and restore it in their `afterEach`.  The six file-scope restorers are also the six that import `__awaitPendingEnrichmentCoveragePersist`, and each of them waits for the pending write before it restores the path.  The pending-write handles live on `globalThis`, so the wait covers every write still in flight in that worker and not only the calling file's.
+**Verification.**  The counts come from the tree rather than from the note.  The shared-path restorers were read one file at a time: the five guard fixtures and `test/coverage-persist-isolation.test.ts` capture `DATABASE_URL` at module scope and restore it in their teardown, and the three named files capture it inside `beforeEach` and restore it in their `afterEach`.  The six file-scope restorers are also the six that import `__awaitPendingEnrichmentCoveragePersist`, and each of them waits for the pending write before it restores the path.  The five guard fixtures wait while their own database is still the target, and `test/coverage-persist-isolation.test.ts` waits with one of the two temporary databases it installed still the target, because it points the run at two temporary databases rather than at a database of its own for the whole file.  The shape guard pins the wait and its order for all six, so this is a property of the tree rather than a claim in the note.  The pending-write handles live on `globalThis`, so the wait covers every write still in flight in that worker and not only the calling file's.
 
 **Next.**  Land it, then close ST-4572 with the merge and the deploy evidence.  Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 [MM] The sixth file waits too (ST-4572)
+
+**What.**  An eighth review round raised one finding against this branch's own audit trail, and it was taken.  The note claimed that the six files which restore the shared path at file scope each wait for the pending write before they restore, and that was true of the five guard fixtures and false of the sixth: `test/coverage-persist-isolation.test.ts` restored the shared path in a synchronous `afterAll` with no wait at all.  Two remedies were taken.  The file's `afterAll` now awaits `__awaitPendingEnrichmentCoveragePersist()` before `resetDbForTesting()` and before the restore, which makes the six-file property uniform and true, and the wording now says where the wait sits, because the two groups are not the same — the five guard fixtures wait while their own database is still the target, and the isolation fixture waits with one of the two temporary databases it installed still the target, because it points the run at two temporary databases rather than at a database of its own for the whole file.  The claim was prose, so it is now pinned: `test/db-isolation-fixture-shape.test.ts` gained a case for each of the six that the file imports the helper, that the wait is inside the `afterAll` body rather than in a test, and that the wait comes before the restore.
+
+**Verification.**  The claims come from the tree rather than from the note.  The await sits ahead of the restore in each of the six `afterAll` bodies, and the shape guard proves that rather than trusting a grep to see it.  Two negative controls were run and both bit: removing the wait from the isolation fixture's `afterAll` failed the guard with `AssertionError: expected '\n  // The coverage persist is schedu…' to contain 'await __awaitPendingEnrichmentCoverag…'`, and moving that wait after the restore failed it with `AssertionError: expected 698 to be less than 661`.  The fixture was restored byte-for-byte after each control, and its checksum after both controls matched the checksum before them.  The two files this round touches pass together: 22 tests passed across 2 files.
+
+**Next.**  Land it, then close ST-4572 with the merge and the deploy evidence.  The pull request carrying the seventh round merged as `bbd6c43cb` while this round was in flight, so this round lands as its own pull request against `main` rather than inside that one, and the claim this round corrects was still true in `main` when it was written.  Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 [MM] ST-4572 — the ninth round: a rejected wait could skip the restore, and the guard passed on a commented-out wait
+
+**What.**  Four more Kody threads on PR #4919, two against the teardown wait the eighth round added
+to the sixth restorer and two against the three shape-guard checks the same round added.  All four
+were checked against the tree and all four were real.
+
+**A rejected await skipped the restore.**  `__awaitPendingEnrichmentCoveragePersist()` ends in
+`await Promise.all(handles)`, so a persist that rejects rejects the teardown, and everything after
+the wait — the reset, the restore of `prevDb`, and the `rmSync` that deletes the fixture's own
+temporary directory — was skipped on that path.  The file owns the run's `DATABASE_URL` from module
+scope onward, so the skipped restore carried a temporary path into the rest of the worker and the
+next statement deleted the file that path points at.  The reset, the restore and the cleanup now sit
+in a `finally`, pinned by a new guard so it cannot go back to the unwrapped shape.
+
+**The guard's own three checks were substring matches.**  A wait disabled by commenting the line out
+carries the same literal as a comment, so it satisfied every check while the race was fully back —
+the eighth round's two documented controls only proved the deleted and misordered variants bite.
+Both patterns are anchored to a line of their own now, the order check asserts both offsets were
+found before comparing them, and the import assertion matches the import statement rather than the
+call it claimed to check.
+
+**Four negative controls, each proved to bite, fixture restored byte-for-byte after each.**  The
+commented-out wait, the wait placed after the restore, the call with the import removed, and the
+`try`/`finally` removed.  The two files this diff touches pass 28 of 28 together, up from 22.
+
+**Left open on purpose.**  The same rejected-await shape is real in the five guard fixtures this
+branch inherited from earlier merged rounds.  They were not fixed here, because this PR's diff is
+the sixth restorer, and the new guard does not forbid them from having the same fix later.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
