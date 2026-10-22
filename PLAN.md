@@ -2988,6 +2988,12 @@ Not a scope change: a test-guard defect fix.  Two cases in `test/sqlite-all-offl
 
 ## 2026-10-22 — [MM] The shape guard reads the hook body, and the audit trail is corrected (ST-4572)
 
-A fifth review round found that the shape guard matched fixture text outside the `beforeAll` body, that the guard's repo root came from the runner's working directory, and that three statements in this branch's own audit trail were wrong.  The guard now matches the hook body by brace depth and resolves the repo root from the module's own path, and the file count, the list of files that restore the shared path and the ST-4570 note's pointer to the shared-database differential are corrected in place.  No scope change, no production code changed, and the eight files that restore `DATABASE_URL` are now distinguished: five install a database for the whole file and carry the differential, and three restore it per test and are out of scope for the file-level guard.
+A fifth review round found that the shape guard matched fixture text outside the `beforeAll` body, that the guard's repo root came from the runner's working directory, and that three statements in this branch's own audit trail were wrong.  The guard now matches the hook body by brace depth and resolves the repo root from the module's own path, and the file count, the list of files that restore the shared path and the ST-4570 note's pointer to the shared-database differential are corrected in place.  No scope change, no production code changed, and the nine files that restore `DATABASE_URL` are now distinguished: six restore it at file scope — five install a database for the whole file and carry the differential, and the isolation fixture restores it too — and three restore it per test and are out of scope for the file-level guard.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 — [MM] The audit trail counts what it claims to count (ST-4572)
+
+A sixth review round found two counts in this branch's own audit trail that were wrong.  The number of test files that already resolve their repository root with the same expression was overstated as twenty-three, which is the number that merely reference `import.meta.url`; the exact expression is in eight.  The number of files that restore `DATABASE_URL` was understated as eight, because the isolation fixture this branch adds captures the shared path at module scope and restores it in its teardown, which makes it a ninth.  Both counts are corrected in the rollout note and in the rows above, and the note now carries a sixth-round section with the measurement.  No scope change and no production code changed.
 
 Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
