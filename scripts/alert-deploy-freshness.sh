@@ -7,16 +7,21 @@
 # polls up to 25 min). This script is the standing watchdog: one probe, then
 # decide whether the lag is still a legitimate in-flight build or a freeze.
 #
-# Predicate: the OLDEST commit on expected that is not an ancestor of live is
-# older than STALE_SECONDS (default 3600). Tip-age alone is wrong - a second
-# merge 10 min ago would hide a first merge that has been stuck for hours.
+# Predicate: the OLDEST commit on expected that is not an ancestor of live AND
+# that can change the running image is older than STALE_SECONDS (default 3600).
+# Tip-age alone is wrong - a second merge 10 min ago would hide a first merge
+# that has been stuck for hours.  Ageing a commit that cannot change the image
+# is just as wrong, and it was the false positive behind ST-4575: this script
+# excluded only `docs`, so a CI-only commit counted as image-affecting and the
+# watchdog paged on four consecutive runs while production was correctly still.
 #
 # It VERIFIES ONLY. It never triggers a deploy, never touches Coolify, and never
 # posts a deploy claim. A stale verdict means investigate the webhook / build
 # queue (see .claude/skills/deploy-verify/SKILL.md), not hand-deploy.
 #
 # Exit codes:
-#   0  fresh enough (live contains expected, OR oldest undeployed is <1h)
+#   0  fresh enough (live contains expected, OR oldest image-affecting
+#      undeployed commit is <1h, OR no commit in the gap can change the image)
 #      Unreachable health is also 0 by default - UptimeRobot already pages
 #      site-down; this watchdog is for the silent-green-on-old-sha class.
 #   1  operational error (bad usage, missing git object, unexpected probe)
@@ -72,12 +77,32 @@ fi
 EXPECTED_SHA="$(resolve_commit "$EXPECTED_REF")"
 [ -n "$EXPECTED_SHA" ] || fail_usage "cannot resolve expected ref '${EXPECTED_REF}' to a commit in this repo."
 
-# watch_paths in Coolify skips docs/**, so a docs-only commit never deploys.
-# Compare against the newest image-affecting commit instead.
-IMAGE_AFFECTING_SHA="$(git log -1 --format="%H" "$EXPECTED_SHA" -- . ":(exclude)docs" 2>/dev/null || true)"
-if [ -n "$IMAGE_AFFECTING_SHA" ]; then
-  EXPECTED_SHA="$IMAGE_AFFECTING_SHA"
-fi
+# Coolify `watch_paths` on socratic-app is an ALLOW list: a push that touches
+# none of these paths never creates a deployment, so no deployment is owed for
+# it and the watchdog must not age it.  This mirrors
+# COOLIFY_WATCH_PATHS_LIVE in src/lib/deploy-image-impact.ts, which records the
+# live value; test/deploy-freshness-watch-paths.test.ts fails if the two drift.
+# Do not PATCH the live list from a PR - it is applied out of band.
+#
+# A git pathspec names a directory and everything under it, so `src` covers
+# `src/**` and `app` covers `app/**`, exactly as the live list pairs them.
+WATCH_PATHS="Dockerfile .dockerignore package.json package-lock.json next.config.mjs postcss.config.mjs tsconfig.json middleware.ts instrumentation.ts instrumentation-client.ts sentry.server.config.ts sentry.edge.config.ts litestream.coolify.yml src app public scripts"
+
+# The gap between live and expected is classified below, once, against this
+# list.  There is deliberately no separate "newest image-affecting commit"
+# narrowing here any more: it used to compare production against a commit
+# that may never deploy, and it excluded only `docs`, so every other
+# non-runtime tree counted as image-affecting and the watchdog paged on CI
+# commits (ST-4575).  One rule, applied to the whole gap: a deployment is owed
+# only if some commit in the gap changed a watched path.
+#
+# `--first-parent` is load-bearing wherever the list is used.  Without it a
+# merge commit is compared against its first parent, which for a PR merge is
+# the PR branch tip, so the merge looks like it changed every path main gained
+# since the branch point and a docs-only PR is classified as image-affecting.
+# On the first-parent chain each commit is a state of main and its own diff is
+# what landed on main, which is exactly what decides whether Coolify owes a
+# build.
 
 # Single-shot reuse of the existing gate. Capture both streams; the gate logs to stderr.
 set +e
@@ -199,9 +224,21 @@ LIVE_FULL="$(resolve_commit "$LIVE_SHA")"
 # has written when head exits, so it fired intermittently in CI and took the whole
 # `verify-hosted` lane -- and therefore the required `verify` gate -- down with it
 # (FLEET-INFRA-BH). Take the first line with parameter expansion; no pipe, no race.
-UNDEPLOYED_LIST="$(git rev-list --reverse "${LIVE_FULL}..${EXPECTED_SHA}")"
+#
+# The pathspec is the point: only a commit that changed a watched path is owed
+# a deployment, so only such a commit may age the verdict.  An old CI-only
+# commit earlier in the gap must not make a fresh runtime commit look stale.
+UNDEPLOYED_LIST="$(git rev-list --first-parent --reverse "${LIVE_FULL}..${EXPECTED_SHA}" -- $WATCH_PATHS 2>/dev/null || true)"
 OLDEST_UNDEPLOYED="${UNDEPLOYED_LIST%%$'\n'*}"
-[ -n "$OLDEST_UNDEPLOYED" ] || fail_usage "live is behind expected but git log ${LIVE_FULL}..${EXPECTED_SHA} is empty."
+if [ -z "$OLDEST_UNDEPLOYED" ]; then
+  # Live is behind, but nothing in the gap can change the image, so Coolify
+  # never owed a deployment for it.  Not the silent-freeze class, and this is
+  # the case ST-4575 was about: a CI-only commit must never age the verdict.
+  VERDICT="image-noop"
+  log "PASS: live is behind ${EXPECTED_SHA}, but no commit in the gap touches a watched path."
+  log "  no deployment was owed for this gap, so there is nothing to wait for."
+  exit 0
+fi
 
 OLDEST_CT="$(git log -1 --format=%ct "$OLDEST_UNDEPLOYED")"
 NOW_EPOCH="$(date +%s)"
@@ -211,22 +248,22 @@ if [ "$OLDEST_AGE" -lt 0 ]; then
 fi
 
 OLDEST_ISO="$(git log -1 --format=%cI "$OLDEST_UNDEPLOYED")"
-log "oldest undeployed ${OLDEST_UNDEPLOYED} (${OLDEST_ISO}) age ${OLDEST_AGE}s (threshold ${STALE_SECONDS}s)"
+log "oldest image-affecting undeployed ${OLDEST_UNDEPLOYED} (${OLDEST_ISO}) age ${OLDEST_AGE}s (threshold ${STALE_SECONDS}s)"
 log "  live ${LIVE_FULL}  expected ${EXPECTED_SHA}"
 
 if [ "$OLDEST_AGE" -lt "$STALE_SECONDS" ]; then
   VERDICT="in-flight"
-  log "PASS: main is ahead but the oldest undeployed commit is still inside the ${STALE_SECONDS}s deploy window."
+  log "PASS: main is ahead but the oldest image-affecting undeployed commit is still inside the ${STALE_SECONDS}s deploy window."
   exit 0
 fi
 
 VERDICT="stale"
 HOURS=$((OLDEST_AGE / 3600))
 MINS=$(((OLDEST_AGE % 3600) / 60))
-log "FAIL: production is STALE - oldest undeployed commit is ${HOURS}h${MINS}m old."
+log "FAIL: production is STALE - oldest image-affecting undeployed commit is ${HOURS}h${MINS}m old."
 log "  this is the silent-freeze class (webhook 200s, health green on an old sha)."
 log "  do NOT hand-trigger a deploy - investigate the webhook and Coolify build queue."
 
-maybe_notify stale "deploy freshness STALE: prod ${LIVE_FULL:0:12} is behind origin/main ${EXPECTED_SHA:0:12}.  Oldest undeployed ${OLDEST_UNDEPLOYED:0:12} (${OLDEST_ISO}) is ${HOURS}h${MINS}m old.  Silent freeze class - webhook 200s, health green on the old sha.  Do not hand-trigger.  Investigate Coolify queue / SSH exec stream.  #2545"
+maybe_notify stale "deploy freshness STALE: prod ${LIVE_FULL:0:12} is behind origin/main ${EXPECTED_SHA:0:12}.  Oldest image-affecting undeployed ${OLDEST_UNDEPLOYED:0:12} (${OLDEST_ISO}) is ${HOURS}h${MINS}m old.  Silent freeze class - webhook 200s, health green on the old sha.  Do not hand-trigger.  Investigate Coolify queue / SSH exec stream.  #2545"
 
 exit 3

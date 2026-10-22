@@ -48,10 +48,17 @@ REPO="${WORK}/repo"
 mkdir -p "$REPO"
 git init -q "$REPO"
 gitc() { git -C "$REPO" -c user.email=selftest@example.invalid -c user.name=selftest "$@"; }
+# $1 message, $2 date (optional), $3 path (optional).
+#
+# The default path is inside Coolify's watch_paths, so a commit to it changed
+# the running image and owes a deployment.  A commit to a path outside the
+# list owes none, and must never age the watchdog's verdict - that is the
+# false positive ST-4575 was about.
 mkcommit() {
-  local msg="$1" date="${2:-}"
-  echo "$msg" > "${REPO}/file.txt"
-  gitc add file.txt
+  local msg="$1" date="${2:-}" path="${3:-src/app.ts}"
+  mkdir -p "${REPO}/$(dirname "$path")"
+  echo "$msg" > "${REPO}/${path}"
+  gitc add "$path"
   if [ -n "$date" ]; then
     GIT_AUTHOR_DATE="$date" GIT_COMMITTER_DATE="$date" gitc commit -q -m "$msg"
   else
@@ -71,12 +78,24 @@ gitc checkout -q -b sidebranch "$C1"
 D="$(mkcommit d)"
 gitc checkout -q "$C3"
 
+# ST-4575 fixtures.  N1 changes only a CI workflow file, so Coolify never owed
+# a deployment for it.  C4 changes a watched path and is minutes old.  N1 lands
+# before C4, so a watchdog that ages the oldest commit in the gap regardless
+# of what it changed reports C4 as hours stale.
+NOOP_DATE="$(python3 -c 'import time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()-28800)))')"
+FRESH_DATE="$(python3 -c 'import time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()-600)))')"
+N1="$(mkcommit n1 "$NOOP_DATE" ".github/workflows/ci.yml")"
+C4="$(mkcommit c4 "$FRESH_DATE")"
+
 PASSES=0
 FAILURES=0
 
 payload() {
   printf '{"ok":true,"checks":{"db":"ok","schedulerAgeSeconds":25,"release":{"sha":%s,"processUptimeSeconds":%s}}}' "$1" "$2"
 }
+
+# Set EXPECT_OUTPUT to a substring the run must print, empty for no check.
+EXPECT_OUTPUT=""
 
 # $1 name, $2 expected exit, $3 expected-ref, $4 stub status, $5 stub body, $6 extra env assignments
 run_case() {
@@ -113,14 +132,20 @@ run_case() {
   kill "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null
 
-  if [ "$code" = "$want" ]; then
-    echo "PASS  ${name} (exit ${code})"
-    PASSES=$((PASSES + 1))
-  else
+  if [ "$code" != "$want" ]; then
     echo "FAIL  ${name} (exit ${code}, wanted ${want})"
     printf '%s\n' "$out" | sed 's/^/      /'
     FAILURES=$((FAILURES + 1))
+    return
   fi
+  if [ -n "$EXPECT_OUTPUT" ] && ! printf '%s\n' "$out" | grep -qF "$EXPECT_OUTPUT"; then
+    echo "FAIL  ${name} (exit ${code}, output missing '${EXPECT_OUTPUT}')"
+    printf '%s\n' "$out" | sed 's/^/      /'
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  echo "PASS  ${name} (exit ${code})"
+  PASSES=$((PASSES + 1))
 }
 
 run_case "live == expected" 0 "$C3" 200 "$(payload "\"${C3}\"" 9000)"
@@ -136,6 +161,25 @@ run_case "release sha null" 2 "$C3" 200 "$(payload null 9000)"
 run_case "unreachable treated as OK" 0 "$C3" 200 '<html>502 Bad Gateway</html>'
 run_case "unreachable fails when opted in" 1 "$C3" 200 '<html>502 Bad Gateway</html>' \
   DEPLOY_FRESHNESS_TREAT_UNREACHABLE=0
+
+# ST-4575: a gap whose commits cannot change the running image is not a deploy
+# gap, so it is fresh.  Before the fix the watchdog aged the CI-only commit
+# and reported stale, which paged on four consecutive scheduled runs while
+# production was correctly still.
+run_case "image-noop gap is fresh, not stale" 0 "$N1" 200 "$(payload "\"${C3}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=3600
+
+# ST-4575: the age comes from the commit that changed a watched path, so an
+# old CI-only commit earlier in the gap cannot make a fresh runtime commit
+# look stale.  Before the fix this aged N1 and exited 3.
+EXPECT_OUTPUT="oldest image-affecting undeployed ${C4}"
+run_case "age comes from the watched commit, not an older noop commit" 0 "$C4" 200 "$(payload "\"${C3}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=3600
+EXPECT_OUTPUT=""
+
+# ST-4575: the guard still pages when a watched path really is missing.
+run_case "still stale when the gap changes a watched path" 3 "$C4" 200 "$(payload "\"${C3}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=60
 
 echo "---- ${PASSES} passed, ${FAILURES} failed ----"
 [ "$FAILURES" = "0" ]
