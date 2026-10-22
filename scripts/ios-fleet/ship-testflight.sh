@@ -252,6 +252,12 @@ load_secrets() {
   # 1. The hosted APPLE_API_* trio:  the key id, the issuer and the key
   #    belong together, so all three names have to be there.  The p8 body is
   #    base64.
+  #
+  #    A body that does not decode to a key is refused, never quietly skipped:
+  #    a trio the operator named has to be the credential, and the client
+  #    refuses it too.  The two base64 implementations disagree about invalid
+  #    input, so the body is checked after the decode rather than trusted to
+  #    fail there.
   if [[ -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER_ID:-}" && -n "${APPLE_API_KEY_P8_BASE64:-}" ]]; then
     case "$APPLE_API_KEY_P8_BASE64" in
       *BEGIN*) p8="$APPLE_API_KEY_P8_BASE64" ;;
@@ -259,19 +265,21 @@ load_secrets() {
       #  shell never prints it:  a credential belongs in no output stream.
       *) p8="$(base64 --decode <<<"$APPLE_API_KEY_P8_BASE64" 2>/dev/null)" || p8="" ;;
     esac
+    rc=0
     if [[ -n "$p8" ]]; then
-      rc=0
       node "${FLEET_DIR}/asc-key.mjs" validate >/dev/null 2>&1 <<< "$p8" || rc=$?
-      if [[ "$rc" -ne 0 ]]; then
-        if [[ "$required" == "required" ]]; then
-          die "APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key; preview: $(key_preview "$APPLE_API_KEY_P8_BASE64")"
-        fi
-        log "APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key; preview: $(key_preview "$APPLE_API_KEY_P8_BASE64")"
-      else
-        kid="${APPLE_API_KEY_ID}"
-        iss="${APPLE_API_ISSUER_ID}"
-        key_pem="$p8"
+    else
+      rc=1
+    fi
+    if [[ "$rc" -ne 0 ]]; then
+      if [[ "$required" == "required" ]]; then
+        die "APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key; preview: $(key_preview "$APPLE_API_KEY_P8_BASE64")"
       fi
+      log "APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key; preview: $(key_preview "$APPLE_API_KEY_P8_BASE64")"
+    else
+      kid="${APPLE_API_KEY_ID}"
+      iss="${APPLE_API_ISSUER_ID}"
+      key_pem="$p8"
     fi
     p8=""
   fi

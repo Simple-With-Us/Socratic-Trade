@@ -429,15 +429,21 @@ fi
 
 # 2k-bis. An APPLE_API_KEY_P8_BASE64 that is not a key is refused, and the
 # refusal carries a masked preview of the value, never the value.
+#
+# The fixture is real base64, so the case does not depend on how the local
+# base64 treats invalid input:  BSD and GNU disagree about that, and the
+# hosted runner is not the local machine.
+encoded_bad="$(printf 'not a private key at all' | base64 | tr -d '\n')"
+bad_preview="$(printf '%s' "$encoded_bad" | cut -c1-8)...$(printf '%s' "$encoded_bad" | tail -c 4)"
 if APPLE_API_KEY_ID=APPLEKEY01 APPLE_API_ISSUER_ID=apple-issuer \
-  APPLE_API_KEY_P8_BASE64="not a private key at all" bash -c '
+  APPLE_API_KEY_P8_BASE64="$encoded_bad" bash -c '
   set -euo pipefail
   source "'"$funcs"'"
   load_secrets required
 ' 2>"${tmp}/invalid-base64.err"; then
   fail "an APPLE_API_KEY_P8_BASE64 that is not a key was accepted"
 fi
-grep -Fq 'preview: not a pr... all' "${tmp}/invalid-base64.err" ||
+grep -Fq "preview: ${bad_preview}" "${tmp}/invalid-base64.err" ||
   fail "the refused APPLE_API_KEY_P8_BASE64 carried no masked preview"
 if grep -Fq 'not a private key at all' "${tmp}/invalid-base64.err"; then
   fail "the refused APPLE_API_KEY_P8_BASE64 was printed"
