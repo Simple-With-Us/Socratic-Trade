@@ -182,4 +182,17 @@ log "the hosted trio was used without asking Infisical"
 grep -q 'the hosted trio was used' "$ASC_TEST_LOG" ||
   { echo "the log stub wrote nothing to the log file" >&2; exit 1; }
 
+# 10. The resolved key never passes through stdout.  A function that prints a
+# credential is a credential in a log, in a transcript and in whatever captures
+# that output next, so the key is handed back in a variable instead.  The
+# refusal line may still name the value, because it names a masked preview of
+# it, so the guard looks for the two shapes that would print the key itself.
+helper="$repo_root/scripts/ios-asc-key-env.sh"
+if grep -nE "printf '%s' \"\\\$(value|decoded)\"|\\\$\(usable_pem" "$helper" >/dev/null; then
+  echo "the helper writes the resolved key to stdout" >&2
+  grep -nE "printf '%s' \"\\\$(value|decoded)\"|\\\$\(usable_pem" "$helper" >&2
+  exit 1
+fi
+log "the resolved key is handed over in a variable, never on stdout"
+
 echo 'synthetic ASC credential handoff passed'

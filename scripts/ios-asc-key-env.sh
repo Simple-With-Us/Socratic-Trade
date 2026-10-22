@@ -66,16 +66,21 @@ refuse_unusable_key() {
 
 # The key has to be a key:  the shell layer and the client have to accept
 # exactly the same values, so the module parses it before it is handed on.
-# A base64 body is accepted too, because the client accepts that form.
+#
+# The resolved key is handed back in a variable, never on stdout:  a
+# credential belongs in no output stream, and a command substitution around
+# this function would put it on one, where a log, a transcript or anything
+# else that captures the output could pick it up.
+RESOLVED_PEM=""
 usable_pem() {
   local value="$1" decoded=""
   if node "$module" validate >/dev/null 2>&1 <<< "$value"; then
-    printf '%s' "$value"
+    RESOLVED_PEM="$value"
     return 0
   fi
   decoded="$(base64 --decode <<<"$value" 2>/dev/null)" || decoded=""
   if [[ -n "$decoded" ]] && node "$module" validate >/dev/null 2>&1 <<< "$decoded"; then
-    printf '%s' "$decoded"
+    RESOLVED_PEM="$decoded"
     return 0
   fi
   return 1
@@ -151,8 +156,9 @@ fi
 
 # The key has to be a key:  the shell layer and the client have to accept
 # exactly the same values, so the module parses it before it is handed on.
-pem="$(usable_pem "$key")" || refuse_unusable_key "$source_name" "$key"
+# The key is handed back in a variable, so it never passes through stdout.
+usable_pem "$key" || refuse_unusable_key "$source_name" "$key"
 
-export ASC_KEY_P8="$pem"
-unset key pem
+export ASC_KEY_P8="$RESOLVED_PEM"
+unset key RESOLVED_PEM
 exec "$@"
