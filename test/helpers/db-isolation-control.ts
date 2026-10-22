@@ -37,21 +37,29 @@ export function coverageRowCount(path: string): number {
   if (!existsSync(path)) return 0;
   const handle = new Database(path, { readonly: true, fileMustExist: true });
   try {
-    const row: unknown = handle
-      .prepare("SELECT COUNT(*) AS n FROM enrichment_coverage_runs")
-      .get();
+    const row = readCountRow(handle);
     if (row === undefined) return 0;
+    // The shape is checked out here, outside the catch that handles the missing table, so that a
+    // shape fault can never be read as a zero.
     const parsed = CoverageRowSchema.safeParse(row);
     if (!parsed.success) {
       throw new Error(`unexpected coverage count row shape: ${parsed.error.message}`);
     }
     return parsed.data.n;
-  } catch (err) {
-    // The table is absent, which is the same fact as the table holding no rows.  Anything
-    // else is a real fault and is surfaced rather than folded into a zero.
-    if (err instanceof Error && /no such table/i.test(err.message)) return 0;
-    throw err;
   } finally {
     handle.close();
+  }
+}
+
+// Reads the count row.  An absent table is the same fact as a table holding no rows, and is
+// reported as no row at all.  The match is narrowed to the driver's own error, so that no other
+// fault -- a shape fault in particular -- can be mistaken for the missing table and silently read
+// as zero.  It is exported so that the narrowing can be covered from both sides.
+export function readCountRow(handle: Database.Database): unknown {
+  try {
+    return handle.prepare("SELECT COUNT(*) AS n FROM enrichment_coverage_runs").get();
+  } catch (err) {
+    if (err instanceof Database.SqliteError && /no such table/i.test(err.message)) return undefined;
+    throw err;
   }
 }

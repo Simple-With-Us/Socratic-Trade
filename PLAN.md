@@ -2962,3 +2962,16 @@ The row from the shared database is now validated with a schema, because a datab
 an untrusted input and an unexpected shape should be a visible fault rather than a wrong count.
 
 Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 — [MM] The fault paths are separated, and the guard covers every file (ST-4572)
+
+Two failure modes were sharing one string match.  A missing table and a malformed count row are
+opposite facts, and the helper reports the first as zero and must report the second as a fault.
+Narrowing the catch to the driver's own error, and moving the shape check outside it, makes that
+distinction structural rather than a matter of what a message happens to say.
+
+The differential assertion now covers all five files that restore `DATABASE_URL`.  It was added to
+the two that carry a control test, and the fixture shape is shared across the five, so a guard that
+covers two of them leaves three able to regress with nothing failing.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.

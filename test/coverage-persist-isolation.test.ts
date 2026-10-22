@@ -16,7 +16,7 @@ import {
   setLastEnrichmentCoverageReport,
   type EnrichmentCoverageReport
 } from "../src/lib/enrichment-coverage";
-import { CoverageRowSchema, coverageRowCount } from "./helpers/db-isolation-control";
+import { CoverageRowSchema, coverageRowCount, readCountRow } from "./helpers/db-isolation-control";
 
 // Two databases inside this file's own temporary directory.  The first stands in for the
 // database a test file installs for itself, and the second for the database the worker is
@@ -134,5 +134,24 @@ describe("the coverage count row is validated", () => {
     const absentPath = join(dir, "absent.db");
     expect(coverageRowCount(absentPath)).toBe(0);
     expect(existsSync(absentPath)).toBe(false);
+  });
+
+  it("reads a missing table as no rows, and anything else as a fault", () => {
+    // The missing table is a driver error, and only a driver error counts as the missing table.
+    // A plain error whose message happens to name a missing table is a real fault, and reading it
+    // as a zero is the failure mode this helper exists to prevent.
+    const driverFault = {
+      prepare: () => {
+        throw new Database.SqliteError("no such table: enrichment_coverage_runs", "SQLITE_ERROR");
+      }
+    } as unknown as Database.Database;
+    expect(readCountRow(driverFault)).toBeUndefined();
+
+    const plainFault = {
+      prepare: () => {
+        throw new Error("no such table: enrichment_coverage_runs");
+      }
+    } as unknown as Database.Database;
+    expect(() => readCountRow(plainFault)).toThrow(/no such table/);
   });
 });

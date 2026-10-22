@@ -7686,3 +7686,25 @@ hold: the database path is never captured at module scope, and the nested blocks
 file's own path because they run after the file's `beforeAll`.
 
 Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 — [MM] The guard reaches all five files, and the fault paths are separated (ST-4572)
+
+A third review round confirmed all five findings on PR #4915 and raised no new ones, but two of
+its notes were worth acting on rather than acknowledging.  The first named a real latent defect in
+code this branch had just added: the count row's shape fault was thrown inside the try whose catch
+matched `/no such table/i` on the message, so a real fault and a missing table were separated only
+by a string.  The catch is now narrowed to `err instanceof Database.SqliteError`, and the shape is
+checked outside it, so a fault that merely looks like a missing table is a fault and not a zero.
+The read moved into an exported `readCountRow(handle)` so the narrowing can be covered from both
+sides, and a new case covers it: the driver's own missing-table error reads as no rows, and a
+plain error carrying the same words is surfaced.
+
+The second note asked whether the other three cascade-reaching files carry the same differential
+assertion, and they did not.  It had been added only to the two files that also carry a control
+test, which left the other three able to regress to the module-scope override with no test failing
+anywhere.  All five files that restore `DATABASE_URL` carry the assertion now.
+
+The schema stays non-strict, because the helper wants the count rather than the row, and a widened
+count query would add columns to the row rather than fault the database.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.

@@ -35,6 +35,11 @@ let prevDb: string | undefined;
 // only mutated once this file's tests are about to run, and the mutation is always undone by the
 // afterAll below.
 beforeAll(() => {
+  // The differential assertion.  Under the old module-scope override this file's database was
+  // already installed by the time this hook ran, so this fails and the old implementation is
+  // caught here rather than passing silently.  Under the override below, the run's shared path is
+  // still in place, so it passes.
+  expect(process.env.DATABASE_URL).not.toBe(dbUrl);
   prevDb = process.env.DATABASE_URL;
   process.env.DATABASE_URL = dbUrl;
   resetDbForTesting();
