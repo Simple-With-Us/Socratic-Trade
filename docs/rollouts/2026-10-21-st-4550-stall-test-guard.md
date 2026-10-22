@@ -118,7 +118,14 @@ Full local gate, in the repo's order, run in the lane at
   failed**, exit 0.  The retired case is not in the failure list.
 - `npm run build` — exit 0.
 
-The gate was re-run in full after the review fix below, on the same branch and the same tree.
+The gate was re-run in full after the review fix below.  The second run was on a different tree, because the branch had merged `origin/main` forward by then, and its test counts differ, so both runs are recorded here rather than the better one:
+
+| Run | Tree | Test files | Tests | Failed |
+| --- | --- | --- | --- | --- |
+| First | branch head, before the review fix | 860 passed, 1 skipped | 9,696 passed, 51 skipped | 0 |
+| Second | branch head after the review fix and the merge-forward of `d91b757f5` | 859 passed, 1 skipped, 1 failed | 9,695 passed, 51 skipped | 2 |
+
+The two failures in the second run are both in `test/sqlite-all-offloop.test.ts`, which is not this pull request's file and is byte-identical to the copy in `main`.  Both assert a fixed wall clock on a follow-up query, and the machine was at a load average of 79 to 91 on 10 cores while that suite ran, so the host decided them.  The file passes in isolation, passes on the hosted runner, and the defect is filed as **ST-4573** with its measurements and its fix.
 
 Cost, measured against the old case on the same schema with the same three indices: 50,000 rows
 insert in 158ms, 200,000 in 680ms, 500,000 in 1,267ms, 2,000,000 in 6,848ms on an idle box, and the
@@ -147,6 +154,9 @@ is the shape that a return-value assertion alone cannot catch.
 - **ST-4564** is the same defect filed a second time, as a P2.  It should be closed as a duplicate
   of **ST-4550** rather than worked separately, so the two rows stop disagreeing about the
   severity of one file.
+- **ST-4573** is the other wall-clock defect that this work's own second gate run found in the suite, and it is the same class this note is about: a wall-clock assertion with no code on the other side of it.  Two cases in `test/sqlite-all-offloop.test.ts` assert a fixed wall clock on a follow-up query, and the pool's slot count is 0 by then, so the query runs on a worker the host has to create on demand and the assertion measures the machine rather than the pool.  It is filed, fixed on its own branch, and the fix replaces the wall clock with two assertions that have different subjects:  the count of queries the pool dispatched for the follow-up, and the move in the live slot count that `activeSqliteOffLoopSlotCountForTesting` reports.  The
+fixed reclaim sleep became a poll with a 5,000ms ceiling instead of a sleep, so the reclaim check
+no longer rides on a wait a loaded host can stretch.  Rollout: `docs/rollouts/2026-10-21-st-4573-offloop-wall-clock-budget.md`.
 - The other two cases in this file still carry wall-clock assertions.  They have real subjects: the
   ROIC artifact walk and the transcript coverage read are both real I/O, and both were rewritten
   when the 2026-10-05 stalls were found.  They were left alone on purpose, because a sweep that
