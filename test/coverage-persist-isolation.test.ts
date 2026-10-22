@@ -42,19 +42,29 @@ const report: EnrichmentCoverageReport = {
 
 afterAll(async () => {
   // The coverage persist is scheduled as a fire-and-forget dynamic import, and it resolves the
-  // database it writes to when the write lands rather than when it was scheduled.  Wait for it
-  // before the shared path is restored, or a write that is still in flight lands in the database
-  // the worker is pointing at by then, which is the run's shared one.  This file points the run
-  // at two databases of its own rather than at one for the whole file, so the wait drains into
-  // the temporary database this fixture installed, never into the run's shared path.
-  await __awaitPendingEnrichmentCoveragePersist();
-  resetDbForTesting();
-  if (prevDb === undefined) delete process.env.DATABASE_URL;
-  else process.env.DATABASE_URL = prevDb;
+  // database it writes to when the write lands rather than when it was scheduled.  A write that
+  // is still in flight when the teardown restores the shared path lands in the database the
+  // worker is pointing at by then, which is the run's shared one.  So the wait has to happen
+  // before the restore, and the restore has to happen even when the wait fails: this file owns
+  // the run's DATABASE_URL from module scope onward, so a skipped restore carries a temporary
+  // path that is deleted at the end of this teardown into every later file in the worker.
+  //
+  // This file points the run at two databases of its own rather than at one for the whole file,
+  // so a wait with something to drain would land in the temporary database this fixture
+  // installed, never into the run's shared path.  In practice both persists this file schedules
+  // are already drained by the awaits in the test bodies, so this wait is defense in depth for
+  // a persist added to this file later rather than the mechanism that closes the race here.
   try {
-    rmSync(dir, { recursive: true, force: true });
-  } catch {
-    /* ignore */
+    await __awaitPendingEnrichmentCoveragePersist();
+  } finally {
+    resetDbForTesting();
+    if (prevDb === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = prevDb;
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
   }
 });
 

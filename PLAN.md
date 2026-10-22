@@ -3009,3 +3009,22 @@ Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
 An eighth review round found one statement in this branch's own audit trail that was wrong, and it was taken.  The note said the six files which restore the shared path at file scope each wait for the pending coverage write before they restore, and that was true of the five guard fixtures and false of the sixth: `test/coverage-persist-isolation.test.ts` restored the shared path in a synchronous `afterAll` with no wait at all, so the sentence described a property the tree did not have.  Both remedies were taken rather than one.  The file's `afterAll` now awaits `__awaitPendingEnrichmentCoveragePersist()` before `resetDbForTesting()` and before the restore, which makes the six-file property uniform and true, and the wording now says where the wait sits, because the two groups are not the same: the five guard fixtures wait while their own database is still the target, and the isolation fixture waits with one of the two temporary databases it installed still the target, because it points the run at two temporary databases rather than at a database of its own for the whole file, so the wait drains into the fixture's own temporary file and never into the run's shared path.  The claim was prose, so it is now pinned: `test/db-isolation-fixture-shape.test.ts` gained a case for each of the six that the file imports the helper, that the wait is inside the `afterAll` body rather than in a test, and that the wait comes before the restore, the last of which is the check that carries the meaning.  Two negative controls were run and both bit, and the fixture was restored byte-for-byte after each.  The scope of the change is one test file's teardown, one guard file's cases and this branch's own audit trail.  No production code changed.
 
 Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 — [MM] The wait itself can fail, and a substring guard cannot see a disabled wait (ST-4572)
+
+The eighth round closed the window by making the teardown wait for the pending write.  The ninth
+round asks the two questions that follow from adding any statement to a teardown that owns the
+run's environment: what happens when that statement throws, and can the guard that pins the new
+statement be satisfied by a file that does not have it.
+
+Both answers were "a gap", and both are closed.  The wait is the only thing in that teardown that
+can reject, and everything that puts `DATABASE_URL` back sat after it, so the restore now runs in a
+`finally` — which matters more here than the wording suggests, because this fixture deletes its own
+temporary directory, so a skipped restore hands the rest of the worker a path that has just been
+removed.  The guard that pins the wait now matches a live statement anchored to a line of its own
+rather than a substring, because a commented-out wait is the easiest way to reintroduce the race
+and the easiest way for the guard to keep reporting green.
+
+The shape here is the same one this branch has used throughout: the claim is prose until something
+fails when the prose and the tree disagree, and four negative controls are what make the guard
+believable rather than decorative.

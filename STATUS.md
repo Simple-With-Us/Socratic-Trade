@@ -7768,3 +7768,34 @@ Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
 **Verification.**  The claims come from the tree rather than from the note.  The await sits ahead of the restore in each of the six `afterAll` bodies, and the shape guard proves that rather than trusting a grep to see it.  Two negative controls were run and both bit: removing the wait from the isolation fixture's `afterAll` failed the guard with `AssertionError: expected '\n  // The coverage persist is schedu…' to contain 'await __awaitPendingEnrichmentCoverag…'`, and moving that wait after the restore failed it with `AssertionError: expected 698 to be less than 661`.  The fixture was restored byte-for-byte after each control, and its checksum after both controls matched the checksum before them.  The two files this round touches pass together: 22 tests passed across 2 files.
 
 **Next.**  Land it, then close ST-4572 with the merge and the deploy evidence.  The pull request carrying the seventh round merged as `bbd6c43cb` while this round was in flight, so this round lands as its own pull request against `main` rather than inside that one, and the claim this round corrects was still true in `main` when it was written.  Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 [MM] ST-4572 — the ninth round: a rejected wait could skip the restore, and the guard passed on a commented-out wait
+
+**What.**  Four more Kody threads on PR #4919, two against the teardown wait the eighth round added
+to the sixth restorer and two against the three shape-guard checks the same round added.  All four
+were checked against the tree and all four were real.
+
+**A rejected await skipped the restore.**  `__awaitPendingEnrichmentCoveragePersist()` ends in
+`await Promise.all(handles)`, so a persist that rejects rejects the teardown, and everything after
+the wait — the reset, the restore of `prevDb`, and the `rmSync` that deletes the fixture's own
+temporary directory — was skipped on that path.  The file owns the run's `DATABASE_URL` from module
+scope onward, so the skipped restore carried a temporary path into the rest of the worker and the
+next statement deleted the file that path points at.  The reset, the restore and the cleanup now sit
+in a `finally`, pinned by a new guard so it cannot go back to the unwrapped shape.
+
+**The guard's own three checks were substring matches.**  A wait disabled by commenting the line out
+carries the same literal as a comment, so it satisfied every check while the race was fully back —
+the eighth round's two documented controls only proved the deleted and misordered variants bite.
+Both patterns are anchored to a line of their own now, the order check asserts both offsets were
+found before comparing them, and the import assertion matches the import statement rather than the
+call it claimed to check.
+
+**Four negative controls, each proved to bite, fixture restored byte-for-byte after each.**  The
+commented-out wait, the wait placed after the restore, the call with the import removed, and the
+`try`/`finally` removed.  The two files this diff touches pass 28 of 28 together, up from 22.
+
+**Left open on purpose.**  The same rejected-await shape is real in the five guard fixtures this
+branch inherited from earlier merged rounds.  They were not fixed here, because this PR's diff is
+the sixth restorer, and the new guard does not forbid them from having the same fix later.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
