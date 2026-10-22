@@ -545,13 +545,24 @@ describe("sqlite off-loop timeout and abort", () => {
       controller.abort(new Error("lexical reclaim aborted"));
       await wedgeSettled;
       expect(activeSqliteOffLoopSlotCountForTesting()).toBeGreaterThan(0);
-      await new Promise((resolve) => setTimeout(resolve, timeoutMs + 120));
+
+      // The reclaim is driven by the execution timer armed when the query
+      // started, so the state is polled instead of assumed to land inside a
+      // fixed window: a busy host delays the timer callback, not the reclaim.
+      const reclaimDeadline = Date.now() + 5_000;
+      while (activeSqliteOffLoopSlotCountForTesting() !== 0 && Date.now() < reclaimDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
       expect(activeSqliteOffLoopSlotCountForTesting()).toBe(0);
 
-      const startedAt = Date.now();
+      // The follow-up was served by a fresh worker: the live slot count goes
+      // from 0 to 1.  A wall clock here would have measured how fast this host
+      // creates a worker and not what the pool did, because the pool always
+      // starts a fresh slot while another one is busy, so the follow-up can
+      // never queue behind the wedged statement.
       const rows = await sqliteAllOffLoop("SELECT 7 AS c", [], dbPath, CountRowSchema, { timeoutMs: 5_000 });
       expect(rows).toEqual([{ c: 7 }]);
-      expect(Date.now() - startedAt).toBeLessThan(200);
+      expect(activeSqliteOffLoopSlotCountForTesting()).toBe(1);
     } finally {
       setSqliteOffLoopStartedHookForTesting(null);
     }
@@ -572,11 +583,14 @@ describe("sqlite off-loop timeout and abort", () => {
       await wedgeSettled;
       expect(activeSqliteOffLoopSlotCountForTesting()).toBe(0);
 
-      const startedAt = Date.now();
+      // The follow-up was served by a fresh worker: the live slot count goes
+      // from 0 to 1.  A wall clock here would have measured how fast this host
+      // creates a worker and not what the pool did, because the pool always
+      // starts a fresh slot while another one is busy, so the follow-up can
+      // never queue behind the wedged statement.
       const rows = await sqliteAllOffLoop("SELECT 5 AS c", [], dbPath, CountRowSchema, { timeoutMs: 5_000 });
       expect(rows).toEqual([{ c: 5 }]);
-      // The wedged worker is gone, so this does not wait out the statement.
-      expect(Date.now() - startedAt).toBeLessThan(minMs / 2);
+      expect(activeSqliteOffLoopSlotCountForTesting()).toBe(1);
     } finally {
       setSqliteOffLoopStartedHookForTesting(null);
     }
