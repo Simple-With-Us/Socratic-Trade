@@ -63,12 +63,12 @@ Same open icon source as ST: `ticker-logos` / app logo proxy.
 - Code identifiers, API enums, log lines, internal “live stream” engineering labels
   (SSE, live snapshot) unless user-facing product chrome.
 
-## Two spaces between sentences (owner rule 2026-08-08, strengthened 2026-08-10 — ALL agents, ALL contexts)
+## Two spaces between sentences: U+00A0 plus a space (owner rule 2026-08-08, strengthened 2026-08-10 — ALL agents, ALL contexts)
 
-Owner (reaffirmed): **two spaces between sentences everywhere.** Not optional.
+Owner (reaffirmed): **two spaces between sentences everywhere (written as a real U+00A0 plus a normal space; commit messages included).** Not optional.
 Not “web only.” Not “UI only.” **Every single agent, every app, every surface.**
 
-**Where it applies (non-exhaustive — if humans read it, use two spaces):**
+**Where it applies (non-exhaustive — if humans read it, use the gap):**
 - In-app UI strings (web, PWA, iOS native, widgets)
 - **App Store Connect** listing fields: description, promotional text, What’s New,
   review notes, support/marketing blurbs — and any other multi-sentence ASC text
@@ -78,13 +78,11 @@ Not “web only.” Not “UI only.” **Every single agent, every app, every su
 
 **How:**
 - Between sentences in a paragraph: a real U+00A0 plus a space after `.` `!` `?` (owner ruling 2026-10-23, every surface).  Never the `&nbsp;` entity, and never two plain ASCII spaces, which collapse.
-- HTML/JSX/SwiftUI source: write the U+00A0 as
-  `{"\u00A0 "}` / `\u00A0 ` or use a shared helper (ST: `SENTENCE_GAP`), never `&nbsp; `
+- HTML/JSX/SwiftUI source, by language:  Swift string literals `"\u{00A0} "`;  JS/TS string literals `"\u00A0 "`;  JSX text `{'\u00A0'}` followed by a space, or `&#160;` inside JSX text;  HTML markup source `&#160;` (markup only, never prose);  or a shared helper (ST: `SENTENCE_GAP`).  Never `&nbsp; ` in prose.
 - Prefer ONE paragraph for short related sentences over stacked one-liners when
   the owner asked for density (see Socratic proposals empty-state, 2026-08-08)
 
-**Does NOT apply:** code identifiers, commit messages (complete sentences OK with
-normal spacing is fine for git), log lines, API enums, pure bullet lists of
+**Does NOT apply:** code identifiers, log lines, API enums, pure bullet lists of
 fragments with no sentence terminator.
 
 **Agent failure mode:** shipping App Store description or UI paragraphs with
