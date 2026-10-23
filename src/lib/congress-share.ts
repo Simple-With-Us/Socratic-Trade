@@ -37,6 +37,7 @@ import {
   FundamentalRowSchema,
   AnalystRowSchema,
   TradeEventRowSchema,
+  SHARE_PAYLOAD_SCHEMA_VERSION,
 } from "@jaywedgeworth22/congress-trading-shared";
 import {
   assertOperationLeaseOwnership,
@@ -1185,8 +1186,16 @@ export function dropInvalidShareRows(payload: CongressSharePayload): ShareRowsDr
   return { payload: clean, dropped, droppedReasons, droppedTotal };
 }
 
-/** Optional wire envelope version on outbound import POST bodies (App A ignores unknown keys). */
-export const CONGRESS_SHARE_PAYLOAD_SCHEMA_VERSION = 1;
+/**
+ * Optional wire envelope version on outbound import POST bodies (App A ignores unknown keys).
+ *
+ * @deprecated Use the shared `SHARE_PAYLOAD_SCHEMA_VERSION` from
+ * `@jaywedgeworth22/congress-trading-shared` (v2.9.0, ST-3853).  This alias is kept only so
+ * existing imports keep compiling; it is a plain re-export of the shared contract value.
+ * App A (congress.trade) resolves the received version with `resolveSharePayloadSchemaVersion`
+ * and warns on unsupported versions without rejecting the payload.
+ */
+export const CONGRESS_SHARE_PAYLOAD_SCHEMA_VERSION = SHARE_PAYLOAD_SCHEMA_VERSION;
 
 /** Per-dataset accepted tallies from App A's `POST /api/admin/securities/import` 2xx body. */
 export interface CongressImportAcceptedCounts {
@@ -1436,7 +1445,7 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
       const body = {
         ...clean,
         origin: clean.origin ?? APP_B_ORIGIN_TAG,
-        schemaVersion: CONGRESS_SHARE_PAYLOAD_SCHEMA_VERSION,
+        schemaVersion: SHARE_PAYLOAD_SCHEMA_VERSION,
       };
       const res = await fetch(url, {
         method: "POST",
