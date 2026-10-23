@@ -77,9 +77,9 @@ Not “web only.” Not “UI only.” **Every single agent, every app, every su
 - Marketing, screenshots captions, TestFlight “What to Test”
 
 **How:**
-- Between sentences in a paragraph: `end.  Start` (two ASCII spaces after `.` `!` `?`)
-- HTML/JSX/SwiftUI that collapses spaces: use NBSP+space
-  (`&nbsp; ` / `{"\u00A0 "}` / `\u00A0 `) or a shared helper (ST: `SENTENCE_GAP`)
+- Between sentences in a paragraph: a real U+00A0 plus a space after `.` `!` `?` (owner ruling 2026-10-23, every surface).  Never the `&nbsp;` entity, and never two plain ASCII spaces, which collapse.
+- HTML/JSX/SwiftUI source: write the U+00A0 as
+  `{"\u00A0 "}` / `\u00A0 ` or use a shared helper (ST: `SENTENCE_GAP`), never `&nbsp; `
 - Prefer ONE paragraph for short related sentences over stacked one-liners when
   the owner asked for density (see Socratic proposals empty-state, 2026-08-08)
 

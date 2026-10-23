@@ -900,13 +900,14 @@ owner**, PR titles/bodies, commit messages, Slack posts to #agent-sync, Apple No
 effort-board rows, rollout notes, review reports, and design docs.  If it's prose a
 human reads, it gets two spaces.
 
-**HOW to emit it so it's actually visible (owner ruling 2026-10-08, every agent on every platform):**  intent is not enough, the gap has to survive the renderer.  Pick by destination.
+**HOW to emit it (owner ruling 2026-10-23, the same on every surface):**  between sentences, write a real U+00A0 (no-break space) followed by a normal space.  This covers chat replies, Zulip, GitHub PR and issue text, Linear, Slack, commit messages, repo docs, UI copy, skills and agent instructions.
 
-- **Chat reply in a Markdown-rendering pane** (the Claude Code desktop app Code tab, owner-verified 2026-10-08; other agent chat panes by the same ruling, not individually verified): type the literal HTML entity text `&nbsp;` right after the period, then a normal space, outside code spans, as in `Sentence one.&nbsp; Sentence two.`  The renderer decodes it into a visibly wider gap.  Two literal spaces collapse, and a raw U+00A0 typed by the model arrives as a plain space.
-- **GitHub PR and issue titles, bodies and comments, review comments, and Zulip posts** (anything a tool writes that a Markdown or HTML renderer then shows): a real U+00A0 plus a space after each sentence.  Never the `&nbsp;` entity there, because GitHub can copy a PR body into a plain-text squash commit, where the entity would show literally.
-- **Plain-text surfaces** (git commit messages, source files and repo docs read as source, terminal output, terminal TUI chat, Slack): two literal ASCII spaces.  Do not write `&nbsp;` or U+00A0 into files.  A terminal TUI chat is unverified, and a terminal would print the entity literally.
-- **HTML, JSX and SwiftUI product copy:** a real U+00A0 plus a space, or a shared `SENTENCE_GAP` constant.
-- The owner must never see the six characters `&nbsp;`.  If a chat surface shows them, stop using the entity there and report the surface in #agent-sync, because that surface then needs a different mechanism, which is unknown until tested.  When a surface is known to collapse two typed spaces, use its working mechanism without asking.
+- Never write the `&nbsp;` entity.  It shows up as literal text in squash-merge commits, plain-text email and many APIs.
+- Two plain ASCII spaces are not enough.  Rendered surfaces (Zulip, GitHub, Linear, HTML, Markdown chat panes) collapse them to one.
+- Generate the U+00A0 in the shell (`printf 'One.\302\240 Two.'`, or the converter in the `sentence-gap` skill) rather than typing it, because a model-typed U+00A0 can be normalized to a plain space.  Check the bytes before you post.
+- HTML, JSX and SwiftUI product copy: `\u00A0 ` in source, or a shared `SENTENCE_GAP` constant.
+- Code, identifiers and machine-readable config never get a U+00A0.  If a surface strips U+00A0, leave the text as it is rather than switching to the entity.
+- This replaces the earlier per-surface rules (the entity in chat panes or on GitHub, and two ASCII spaces in files, commits and terminals).
 
 Also tested live and ruled out: app settings (none exist: `outputStyle` changes tone only, `--output-format`
 is headless `claude -p` only, `axScreenReader` only drops borders); patching the client (compiled binary +
