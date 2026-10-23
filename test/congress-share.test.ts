@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  SHARE_PAYLOAD_SCHEMA_VERSION,
+  isSupportedSharePayloadSchemaVersion,
+} from "@jaywedgeworth22/congress-trading-shared";
 import type { OHLCBar } from "../src/lib/indicators";
 import type { MarketQuote, MarketScan } from "../src/lib/types";
 
@@ -721,6 +725,23 @@ describe("shareWithCongressTrade", () => {
       response: { ok: true, refs: 1, spxRows: 1 },
       sent: { refs: 1, spx: 1 },
     });
+  });
+
+  it("stamps the shared SHARE_PAYLOAD_SCHEMA_VERSION on the POST body", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "secret-token";
+    process.env.CONGRESS_TRADE_BASE_URL = "https://congress.trade/";
+    const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) =>
+      new Response(ctImportOkBody({ refs: 1, spxRows: 1 }), { status: 200 })
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }], spx: [{ date: "2026-06-15", close: 5400 }] });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.schemaVersion).toBe(SHARE_PAYLOAD_SCHEMA_VERSION);
+    expect(isSupportedSharePayloadSchemaVersion(body)).toBe(true);
   });
 
   it("returns ok:false on an HTTP error without throwing", async () => {
