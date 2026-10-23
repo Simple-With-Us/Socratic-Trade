@@ -885,9 +885,9 @@ refresh on every change). Helper auto-injects/refreshes it.
 Folder **Coding**, pin when able. Helper: `/Users/jay/apps/apple-notes-coding.sh`
 (`--update`). Canonical: `/Users/jay/apps/AGENT-SYNC.md` § Apple Notes.
 
-## Two spaces between sentences (owner — ALL contexts)
+## Two spaces between sentences: U+00A0 plus a space (owner — ALL contexts)
 
-Two spaces after sentence terminators in **all** human-readable prose for every
+The sentence gap (a real U+00A0 plus a normal space, as below) after sentence terminators in **all** human-readable prose for every
 agent: web, iOS UI, **every App Store Connect field** (description,
 promotional text, What's New, **App Review notes**, **IAP / subscription
 review notes**, subscription localization descriptions), push/email, help,
@@ -898,15 +898,16 @@ Store listing copy must be accurate (corpus, trial length).
 covers every paragraph an agent writes anywhere, including **chat replies to the
 owner**, PR titles/bodies, commit messages, Slack posts to #agent-sync, Apple Notes,
 effort-board rows, rollout notes, review reports, and design docs.  If it's prose a
-human reads, it gets two spaces.
+human reads, it gets the gap.
 
-**HOW to emit it so it's actually visible (owner ruling 2026-10-08, every agent on every platform):**  intent is not enough, the gap has to survive the renderer.  Pick by destination.
+**HOW to emit it (owner ruling 2026-10-23, the same on every surface):**  between sentences, write a real U+00A0 (no-break space) followed by a normal space.  This covers chat replies, Zulip, GitHub PR and issue text, Linear, Slack, commit messages, repo docs, UI copy, skills and agent instructions.
 
-- **Chat reply in a Markdown-rendering pane** (the Claude Code desktop app Code tab, owner-verified 2026-10-08; other agent chat panes by the same ruling, not individually verified): type the literal HTML entity text `&nbsp;` right after the period, then a normal space, outside code spans, as in `Sentence one.&nbsp; Sentence two.`  The renderer decodes it into a visibly wider gap.  Two literal spaces collapse, and a raw U+00A0 typed by the model arrives as a plain space.
-- **GitHub PR and issue titles, bodies and comments, review comments, and Zulip posts** (anything a tool writes that a Markdown or HTML renderer then shows): a real U+00A0 plus a space after each sentence.  Never the `&nbsp;` entity there, because GitHub can copy a PR body into a plain-text squash commit, where the entity would show literally.
-- **Plain-text surfaces** (git commit messages, source files and repo docs read as source, terminal output, terminal TUI chat, Slack): two literal ASCII spaces.  Do not write `&nbsp;` or U+00A0 into files.  A terminal TUI chat is unverified, and a terminal would print the entity literally.
-- **HTML, JSX and SwiftUI product copy:** a real U+00A0 plus a space, or a shared `SENTENCE_GAP` constant.
-- The owner must never see the six characters `&nbsp;`.  If a chat surface shows them, stop using the entity there and report the surface in #agent-sync, because that surface then needs a different mechanism, which is unknown until tested.  When a surface is known to collapse two typed spaces, use its working mechanism without asking.
+- Never write the `&nbsp;` entity in prose.  It shows up as literal text in squash-merge commits, plain-text email and many APIs.
+- Two plain ASCII spaces are not enough.  Rendered surfaces (Zulip, GitHub, Linear, HTML, Markdown chat panes) collapse them to one.
+- Generate the U+00A0 in the shell (`printf 'One.\302\240 Two.'`, or the converter in the canonical `sentence-gap` skill (`AI-Fleet-Coordinator/docs/fleet-skills/sentence-gap/SKILL.md`, https://github.com/Simple-With-Us/AI-Fleet-Coordinator/blob/main/docs/fleet-skills/sentence-gap/SKILL.md)) rather than typing it, because a model-typed U+00A0 can be normalized to a plain space.  Check the bytes before you post.
+- Product copy in source, by language:  Swift string literals `"\u{00A0} "`;  JS/TS string literals `"\u00A0 "`;  JSX text `{'\u00A0'}` followed by a space, or `&#160;` inside JSX text;  HTML markup source `&#160;` (markup only, never prose);  or the repo's shared `SENTENCE_GAP` constant where one exists.
+- Code, identifiers and machine-readable config never get a U+00A0.  If a surface strips U+00A0, leave the text as it is rather than switching to the entity, and report that surface in #Work-In-Progress (formerly #agent-sync) so it can be given a working mechanism.
+- This replaces the earlier per-surface rules (the entity in chat panes or on GitHub, and two plain ASCII spaces in files, commits and terminals).
 
 Also tested live and ruled out: app settings (none exist: `outputStyle` changes tone only, `--output-format`
 is headless `claude -p` only, `axScreenReader` only drops borders); patching the client (compiled binary +
