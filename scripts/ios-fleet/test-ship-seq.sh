@@ -86,6 +86,8 @@ done
 case "$cmd" in
   asc-api:latest-marketing-patch)
     # No stubbed patch = App Store Connect cannot be consulted.
+    # "auth" = App Store Connect rejected the key (asc-api exits 4).
+    [[ "${FAKE_ASC_PATCH:-}" == "auth" ]] && exit 4
     [[ -n "${FAKE_ASC_PATCH:-}" ]] || exit 2
     printf '%s\n' "$FAKE_ASC_PATCH"
     exit 0
@@ -468,6 +470,19 @@ check "names the marketing version as what could not be determined" \
   "$(contains 'cannot determine the next marketing version' && echo 0 || echo 1)"
 check "names App Store Connect as the cause" \
   "$(contains 'App Store Connect could not be' && echo 0 || echo 1)"
+FAKE_ASC_PATCH=236
+echo
+
+# --- rejected API key -----------------------------------------------------
+# A 401/403 from App Store Connect is not "unreachable":  even
+# --allow-unverified-seq must not plan a version around a key Apple rejects.
+echo "rejected API key: fatal even with --allow-unverified-seq"
+reset_state 2>/dev/null || true
+FAKE_ASC_PATCH=auth
+run_ship congress --repo-root "$REPO" --allow-unverified-seq --dry-run
+check "a rejected key fails the run (rc=${RC})" "$([[ $RC -ne 0 ]] && echo 0 || echo 1)"
+check "says the key was rejected" "$(contains 'rejected the API key' && echo 0 || echo 1)"
+check "plans no version around it" "$(contains 'UNVERIFIED patch' && echo 1 || echo 0)"
 FAKE_ASC_PATCH=236
 echo
 
