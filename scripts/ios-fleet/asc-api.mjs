@@ -843,7 +843,23 @@ async function main() {
       console.error(`latest-marketing-patch: appStoreVersions query failed (HTTP ${storeRes.status})`);
       failExit(storeRes.status);
     }
-    const appStoreVersions = (storeRes.parsed.data || [])
+    // Every page of App Store versions, so the highest patch is never cut off.
+    const storeRows = [...(storeRes.parsed.data || [])];
+    let storeNext = storeRes.parsed.links?.next || "";
+    for (let page = 1; page < 10 && storeNext; page++) {
+      const more = await ascGet(storeNext);
+      if (!more.ok) {
+        console.error(`latest-marketing-patch: appStoreVersions page ${page + 1} failed (HTTP ${more.status})`);
+        failExit(more.status);
+      }
+      storeRows.push(...(more.parsed.data || []));
+      storeNext = more.parsed.links?.next || "";
+    }
+    if (storeNext) {
+      console.error("latest-marketing-patch: more than 10 pages of App Store versions");
+      process.exit(2);
+    }
+    const appStoreVersions = storeRows
       .map((v) => v?.attributes?.versionString);
     const badStore = appStoreVersions.findIndex((v) => !validVersion(v));
     if (badStore !== -1) {

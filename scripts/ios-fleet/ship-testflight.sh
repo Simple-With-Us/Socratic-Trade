@@ -1109,7 +1109,8 @@ else
     BUILD_NUM="$FORCE_BUILD"
     # An explicit --build is honoured exactly, but never as the retired
     # "1.0.N (N)" pair (AFC-517):  refuse rather than silently change it.
-    if [[ -n "$PLAN_TARGET_PATCH" && "$BUILD_NUM" == "$PLAN_TARGET_PATCH" ]]; then
+    # Compared as numbers, so "--build 0236" is caught for 1.0.236 too.
+    if [[ -n "$PLAN_TARGET_PATCH" && "$BUILD_NUM" =~ ^[0-9]+$ ]] && (( 10#$BUILD_NUM == 10#$PLAN_TARGET_PATCH )); then
       die "--build ${BUILD_NUM} equals the patch of ${MARKETING}, which would ship ${MARKETING} (${BUILD_NUM}): the 1.0.N (N) form the owner retired (AFC-517).  Pass a different --build."
     fi
     log "version: operator override (--build/--version); the local build-seq counter is not consulted"
