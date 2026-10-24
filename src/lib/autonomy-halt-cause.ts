@@ -248,6 +248,20 @@ type CachedHaltAuditRow = { row: LatestAppHaltRow | null; at: number };
 export const HALT_AUDIT_CACHE_TTL_MS = 60_000;
 
 /**
+ * How long a FAILED off-loop read keeps the next caller off the read.
+ *
+ * The read is a multi-second scan of a 19 GB table (1.4-5.4 s per call in production).  Retrying
+ * it on every health poll while it keeps failing turns a degraded database into a repeating
+ * multi-second read -- the same shape as the stall this fix exists to remove, only moved off the
+ * serving loop.  The cooldown bounds the retry rate; the failure itself is reported (see
+ * `haltCauseReadStatus`) instead of being retried into the ground.
+ *
+ * 30 s is shorter than the 60 s cache TTL, so a database that recovers is picked up within one
+ * cache cycle and the fleet-dark signal does not stay blind for long.
+ */
+export const HALT_AUDIT_FAILURE_COOLDOWN_MS = 30_000;
+
+/**
  * Execution budget for ONE off-loop audit read -- the whole read, not one chunk of it.  The
  * production batch takes ~5.4 s; the budget leaves room for a slower plan on a bigger database
  * and still retires the worker slot rather than hanging the caller.
@@ -318,6 +332,89 @@ declare global {
   var __socraticHaltAuditRefreshInFlight: Promise<void> | undefined;
 
   var __socraticHaltAuditPendingScopes: Map<string, AuditScope> | undefined;
+
+  /** The last failure of the off-loop read.  Shared like the cache, so two module copies agree
+   *  on whether the read is currently failing and on how often it has failed. */
+  var __socraticHaltAuditReadFailure: HaltAuditReadFailure | undefined;
+
+  /** When each scope's cached row was invalidated.  A read that STARTED before the invalidation
+   *  must not write its now-stale answer over the invalidation. */
+  var __socraticHaltAuditInvalidatedAt: Map<string, number> | undefined;
+
+  /** Set by this module so the audit write path can drop a scope's cached row without importing
+   *  this module: this module imports db.ts, and db.ts is what writes the audit rows. */
+  var __socraticHaltAuditInvalidate:
+    | ((userId: string, connectedAccountId: string | null) => void)
+    | undefined;
+}
+
+/** One failed off-loop read, kept so the failure is visible instead of retried into the ground. */
+type HaltAuditReadFailure = {
+  /** When the last failure happened. */
+  at: number;
+  /** The last failure message. */
+  message: string;
+  /** How many failures this process has seen.  Cumulative: a success does not erase the history. */
+  count: number;
+  /** When the retry cooldown ends.  Cleared by a success. */
+  coolingDownUntil?: number;
+};
+
+const haltAuditInvalidatedAt = (globalThis.__socraticHaltAuditInvalidatedAt ??= new Map<string, number>());
+
+/** How the off-loop read is doing, for the health payload.  Counts only; no account identity. */
+export type HaltCauseReadStatus = {
+  /** Failed off-loop refreshes since the process started. */
+  failures: number;
+  /** ISO time of the last failure, if there was one. */
+  lastFailureAt?: string;
+  /** The last failure message, truncated. */
+  lastFailure?: string;
+  /** True while the read is cooling down after a failure. */
+  coolingDown: boolean;
+};
+
+export function haltCauseReadStatus(now: number = Date.now()): HaltCauseReadStatus {
+  const failure = globalThis.__socraticHaltAuditReadFailure;
+  if (!failure) return { failures: 0, coolingDown: false };
+  return {
+    failures: failure.count,
+    lastFailureAt: new Date(failure.at).toISOString(),
+    lastFailure: failure.message.slice(0, 200),
+    coolingDown: haltAuditReadCoolingDown(now)
+  };
+}
+
+function recordHaltAuditReadFailure(error: unknown): void {
+  const previous = globalThis.__socraticHaltAuditReadFailure;
+  const at = Date.now();
+  globalThis.__socraticHaltAuditReadFailure = {
+    at,
+    message: error instanceof Error ? error.message : String(error),
+    count: (previous?.count ?? 0) + 1,
+    coolingDownUntil: at + HALT_AUDIT_FAILURE_COOLDOWN_MS
+  };
+}
+
+/** A successful read ends the cooldown.  The failure count and the last failure stay. */
+function clearHaltAuditReadFailure(): void {
+  const previous = globalThis.__socraticHaltAuditReadFailure;
+  if (!previous) return;
+  globalThis.__socraticHaltAuditReadFailure = { ...previous, coolingDownUntil: undefined };
+}
+
+/**
+ * True while a failed read is still cooling down.
+ *
+ * The cooldown is the retry backoff: a failing multi-second read is not re-run on every health
+ * poll.  It does not decide whether the fleet-dark page fires -- see
+ * `HALT_CAUSE_UNKNOWN_COUNTS_AS_IDLE` in trading-liveness.ts for that -- it only bounds how
+ * often this read is attempted while it keeps failing.
+ */
+function haltAuditReadCoolingDown(now: number): boolean {
+  const failure = globalThis.__socraticHaltAuditReadFailure;
+  if (!failure || failure.coolingDownUntil === undefined) return false;
+  return now < failure.coolingDownUntil;
 }
 
 const haltAuditCache = (globalThis.__socraticHaltAuditCache ??= new Map<string, CachedHaltAuditRow>());
@@ -330,6 +427,30 @@ function pendingHaltAuditScopes(): Map<string, AuditScope> {
 function haltAuditScopeKey(scope: AuditScope): string {
   return `${scope.userId}\u0000${scope.connectedAccountId ?? ""}`;
 }
+
+/**
+ * Drop one scope's cached audit row.
+ *
+ * The cache holds the answer to "did the APP halt this account, and has it stayed halted?".  A
+ * new app-initiated halt row -- the drawdown breaker or a broker auto-halt -- changes that
+ * answer, and the app writes that row itself, in this process.  So the write path tells the
+ * cache, and the next read re-reads the scope instead of serving the old answer for up to a
+ * cache TTL: without this, a breaker halt that lands just after a read is classified as "no
+ * app-initiated halt" -- an owner stop -- for up to a minute, and an owner stop counts as a
+ * deliberately idle account.
+ *
+ * The invalidation is timestamped, so a read that was already running when the halt was written
+ * cannot write its pre-halt answer back over the invalidation.
+ */
+export function invalidateHaltAuditCache(userId: string, connectedAccountId: string | null): void {
+  const key = haltAuditScopeKey({ userId, connectedAccountId });
+  haltAuditCache.delete(key);
+  haltAuditInvalidatedAt.set(key, Date.now());
+}
+
+// Registered on `globalThis` so the audit write path (db.ts) can call it without importing this
+// module: this module imports db.ts, and db.ts is what writes the audit rows.
+globalThis.__socraticHaltAuditInvalidate = invalidateHaltAuditCache;
 
 /** One account scope the halt-cause sweep reads: a user and the connected account. */
 export type HaltAuditScope = { userId: string; connectedAccountId: string | null };
@@ -364,6 +485,14 @@ type HaltAuditRunner = (
 ) => Promise<HaltAuditRow[]>;
 
 let haltAuditRunner: HaltAuditRunner = sqliteAllOffLoop as unknown as HaltAuditRunner;
+
+/**
+ * Test-only: clear the off-loop read's failure bookkeeping, so a test that makes the read fail
+ * does not leave a cooldown behind for the next one.
+ */
+export function __resetHaltAuditReadFailureForTests(): void {
+  globalThis.__socraticHaltAuditReadFailure = undefined;
+}
 
 /**
  * Test-only: replace the off-loop runner.  Returns the runner that was in place, so the caller
@@ -435,10 +564,19 @@ async function untilDeadline(promise: Promise<void>, deadline: number): Promise<
  * forever, and every entry holds an audit row with its payload.
  */
 function pruneHaltAuditCache(): void {
-  if (haltAuditCache.size <= HALT_AUDIT_CACHE_MAX_ENTRIES) return;
-  const oldest = [...haltAuditCache.entries()].sort((a, b) => a[1].at - b[1].at);
-  for (const [key] of oldest.slice(0, haltAuditCache.size - HALT_AUDIT_CACHE_MAX_ENTRIES)) {
-    haltAuditCache.delete(key);
+  if (haltAuditCache.size > HALT_AUDIT_CACHE_MAX_ENTRIES) {
+    const oldest = [...haltAuditCache.entries()].sort((a, b) => a[1].at - b[1].at);
+    for (const [key] of oldest.slice(0, haltAuditCache.size - HALT_AUDIT_CACHE_MAX_ENTRIES)) {
+      haltAuditCache.delete(key);
+    }
+  }
+  // The invalidation stamps are bounded the same way: an entry whose cache row is gone cannot
+  // race anything.
+  if (haltAuditInvalidatedAt.size > HALT_AUDIT_CACHE_MAX_ENTRIES) {
+    const oldest = [...haltAuditInvalidatedAt.entries()].sort((a, b) => a[1] - b[1]);
+    for (const [key] of oldest.slice(0, haltAuditInvalidatedAt.size - HALT_AUDIT_CACHE_MAX_ENTRIES)) {
+      haltAuditInvalidatedAt.delete(key);
+    }
   }
 }
 
@@ -459,10 +597,14 @@ function startHaltAuditRefresh(budgetMs: number): Promise<void> {
       if (remaining <= 0) break;
       const batch = [...pendingHaltAuditScopes().values()];
       pendingHaltAuditScopes().clear();
+      // When this read STARTED: an invalidation that lands after this point must win over
+      // whatever this read finds, so the read's answer is not written over it.
+      const readStartedAt = Date.now();
       let rows: Map<string, HaltAuditRow>;
       try {
         rows = await readHaltAuditRowsOffLoop(batch, remaining);
-      } catch {
+        clearHaltAuditReadFailure();
+      } catch (error) {
         // Put the scopes back so the next caller retries them, and leave the cache as it was.
         // A stale row is better than a wrong one, and the caller still reads the old cache,
         // exactly as a failed read did.
@@ -470,11 +612,20 @@ function startHaltAuditRefresh(budgetMs: number): Promise<void> {
           const key = haltAuditScopeKey(scope);
           if (!pendingHaltAuditScopes().has(key)) pendingHaltAuditScopes().set(key, scope);
         }
+        // The failure is counted and reported, not retried into the ground: the cooldown keeps
+        // the next caller off this read for a while (see HALT_AUDIT_FAILURE_COOLDOWN_MS).
+        recordHaltAuditReadFailure(error);
         break;
       }
       const at = Date.now();
       for (const scope of batch) {
         const key = haltAuditScopeKey(scope);
+        const invalidatedAt = haltAuditInvalidatedAt.get(key);
+        if (invalidatedAt !== undefined && invalidatedAt > readStartedAt) {
+          // The scope was invalidated while this read was running: this answer predates the
+          // invalidation, so it is not cached.  The next read sees the newer row.
+          continue;
+        }
         haltAuditCache.set(key, { row: rows.get(key) ?? null, at });
       }
       pruneHaltAuditCache();
@@ -504,6 +655,13 @@ async function refreshHaltAuditRows(scopes: readonly AuditScope[]): Promise<void
   for (const scope of scopes) {
     pendingHaltAuditScopes().set(haltAuditScopeKey(scope), scope);
   }
+  // A read that just failed is not re-run on every health poll: it is a multi-second scan of a
+  // 19 GB table, and retrying it while the database is degraded repeats the read this fix exists
+  // to stop happening.  The cooldown bounds the retry rate; the failure is reported instead.
+  if (haltAuditReadCoolingDown(Date.now())) {
+    pendingHaltAuditScopes().clear();
+    return;
+  }
   const running = globalThis.__socraticHaltAuditRefreshInFlight;
   if (running) {
     await untilDeadline(running, deadline);
@@ -517,6 +675,7 @@ async function refreshHaltAuditRows(scopes: readonly AuditScope[]): Promise<void
   if (missing.length === 0) return;
   const remaining = deadline - Date.now();
   if (remaining <= 0) return;
+  if (haltAuditReadCoolingDown(Date.now())) return;
   await startHaltAuditRefresh(remaining);
 }
 
@@ -798,7 +957,8 @@ function classifyFromMarkers(
 
 async function classifyFromAudit(
   accounts: readonly HaltCauseAccountRef[],
-  out: Map<string, AutonomyHaltCause["kind"]>
+  out: Map<string, AutonomyHaltCause["kind"]>,
+  unknown: Set<string>
 ): Promise<void> {
   const scopes = accounts.map((account) => ({ userId: account.userId, connectedAccountId: account.accountId }));
   const now = Date.now();
@@ -810,16 +970,34 @@ async function classifyFromAudit(
   if (stale.length > 0) await refreshHaltAuditRows(stale);
   const byKey = new Map<string, LatestAppHaltRow>();
   for (const scope of scopes) {
-    const hit = haltAuditCache.get(haltAuditScopeKey(scope));
-    if (!hit || !hit.row) continue;
+    const key = haltAuditScopeKey(scope);
+    const mapKey = `${scope.userId}:${scope.connectedAccountId}`;
+    const hit = haltAuditCache.get(key);
+    if (!hit) {
+      // No read has ever confirmed this scope: the cause is UNKNOWN, not "stopped".
+      unknown.add(mapKey);
+      continue;
+    }
+    if (now - hit.at > HALT_AUDIT_CACHE_TTL_MS) {
+      // The cached answer is older than the TTL and the refresh did not replace it, so the cause
+      // is unknown right now.  A stale answer that is still inside its TTL stays usable: it is a
+      // confirmed read, just an old one.
+      unknown.add(mapKey);
+      continue;
+    }
+    // A confirmed read that found no app-initiated halt: the cause IS "stopped", and the account
+    // is deliberately idle.  Only a read that could not happen is unknown.
+    if (!hit.row) continue;
     if (hit.row.connected_account_id == null) continue;
     byKey.set(`${hit.row.user_id}:${hit.row.connected_account_id}`, hit.row);
   }
   for (const account of accounts) {
-    const row = byKey.get(`${account.userId}:${account.accountId}`);
+    const mapKey = `${account.userId}:${account.accountId}`;
+    if (unknown.has(mapKey)) continue;
+    const row = byKey.get(mapKey);
     if (!row || row.handed_over) continue;
     out.set(
-      `${account.userId}:${account.accountId}`,
+      mapKey,
       row.kind === "policy_violation_drawdown" ? "breaker" : "auto_pause_lost"
     );
   }
@@ -837,25 +1015,47 @@ async function classifyFromAudit(
  * statement -- 5.4 s in production on 2026-10-24 -- and the health route runs this, so the
  * health probe could not answer until the read finished.  Async for that reason.
  */
+export type HaltCauseBatch = {
+  /**
+   * The confirmed cause kind per account.
+   *
+   * `"stopped"` here means CONFIRMED: the audit trail was read successfully, inside the cache
+   * TTL, and holds no app-initiated halt for that scope.  A scope whose cause could NOT be
+   * confirmed also reads `"stopped"` in this map, and is listed in `unknown` -- so a caller that
+   * wants the truth about a scope has to read `unknown` first.
+   */
+  kinds: Map<string, AutonomyHaltCause["kind"]>;
+  /**
+   * Scopes whose cause could not be confirmed: the off-loop read failed, timed out, or never
+   * ran.  An unknown cause is NOT evidence of a deliberate owner stop, and it is not the same
+   * fact as "stopped" -- it is the absence of a fact.
+   */
+  unknown: Set<string>;
+};
+
 export async function batchedHaltCauseKinds(
   accounts: readonly HaltCauseAccountRef[]
-): Promise<Map<string, AutonomyHaltCause["kind"]>> {
+): Promise<HaltCauseBatch> {
   const out = new Map<string, AutonomyHaltCause["kind"]>();
+  const unknown = new Set<string>();
   for (const account of accounts) {
     out.set(`${account.userId}:${account.accountId}`, "stopped");
   }
-  if (accounts.length === 0) return out;
+  if (accounts.length === 0) return { kinds: out, unknown };
   let unmarked: HaltCauseAccountRef[];
   try {
     unmarked = classifyFromMarkers(getDb(), accounts, out);
   } catch {
-    return out;
+    // The marker read failed: no cause could be confirmed for anyone.
+    for (const account of accounts) unknown.add(`${account.userId}:${account.accountId}`);
+    return { kinds: out, unknown };
   }
-  if (unmarked.length === 0) return out;
+  if (unmarked.length === 0) return { kinds: out, unknown };
   try {
-    await classifyFromAudit(unmarked, out);
+    await classifyFromAudit(unmarked, out, unknown);
   } catch {
-    // Unmarked accounts stay `stopped`.
+    // The audit read failed outright: those scopes keep their unknown marking.
+    for (const account of unmarked) unknown.add(`${account.userId}:${account.accountId}`);
   }
-  return out;
+  return { kinds: out, unknown };
 }

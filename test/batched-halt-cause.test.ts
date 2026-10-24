@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Statement } from "better-sqlite3";
 
 // /api/health classifies every halted autopilot account.  The kind has to match
@@ -79,6 +79,13 @@ describe("batched halt-cause kinds", () => {
     const { db } = await load();
     db.getDb();
   }, 120_000);
+
+  afterEach(async () => {
+    // The off-loop read's failure bookkeeping and its cooldown are process-wide on purpose, so a
+    // test that makes the read fail must not leave a cooldown behind for the next one.
+    const { causes } = await load();
+    causes.__resetHaltAuditReadFailureForTests();
+  });
 
   it("pages only an app halt, and ask-first activity keeps the fleet from reading as fully dark", async () => {
     const { db, liveness } = await load();
@@ -213,7 +220,7 @@ describe("batched halt-cause kinds", () => {
 
     const accounts = [owner, boot, runFailure, broker, breaker, lost, handed, badJson, invalidShape].map(ref);
     const calls = await capturePrepares(database, async () => {
-      const kinds = await causes.batchedHaltCauseKinds(accounts);
+      const { kinds } = await causes.batchedHaltCauseKinds(accounts);
       expect(kinds.get(`${owner.userId}:${owner.accountId}`)).toBe("stopped");
       expect(kinds.get(`${boot.userId}:${boot.accountId}`)).toBe("restart");
       expect(kinds.get(`${runFailure.userId}:${runFailure.accountId}`)).toBe("run_failure_halt");
@@ -252,7 +259,7 @@ describe("batched halt-cause kinds", () => {
         accountNumber: account.accountNumber,
         systemState: "halted"
       });
-      const batched = await causes.batchedHaltCauseKinds([ref(account)]);
+      const { kinds: batched } = await causes.batchedHaltCauseKinds([ref(account)]);
       expect(described?.kind).toBe(batched.get(`${account.userId}:${account.accountId}`));
     }
     expect(() =>
@@ -278,13 +285,13 @@ describe("batched halt-cause kinds", () => {
     // the first caller's scopes left the second caller with no cache entry, and a missing entry
     // reads as "no app-initiated halt" -- an app halt mislabelled as an owner stop, which counts
     // as a deliberately idle account and suppresses the fleet-fully-dark page.
-    const [firstKinds, secondKinds] = await Promise.all([
+    const [firstBatch, secondBatch] = await Promise.all([
       causes.batchedHaltCauseKinds([ref(first)]),
       causes.batchedHaltCauseKinds([ref(second)])
     ]);
 
-    expect(firstKinds.get(`${first.userId}:${first.accountId}`)).toBe("breaker");
-    expect(secondKinds.get(`${second.userId}:${second.accountId}`)).toBe("breaker");
+    expect(firstBatch.kinds.get(`${first.userId}:${first.accountId}`)).toBe("breaker");
+    expect(secondBatch.kinds.get(`${second.userId}:${second.accountId}`)).toBe("breaker");
   });
 
   it("bounds the off-loop read: the runner gets the signal and the caller gives up when it aborts", async () => {
@@ -317,11 +324,70 @@ describe("batched halt-cause kinds", () => {
     }
   });
 
+  it("treats an unreadable halt cause as unknown, counts the failure, and does not re-run the failing read on the next probe", async () => {
+    const { causes } = await load();
+    const account = await seedHalted("Unreadable");
+    const key = `${account.userId}:${account.accountId}`;
+
+    let invocations = 0;
+    const previous = causes.__setHaltAuditRunnerForTests(async () => {
+      invocations += 1;
+      throw new Error("off-loop read failed");
+    });
+    try {
+      const first = await causes.batchedHaltCauseKinds([ref(account)]);
+      // The cause could not be read.  That is UNKNOWN -- the absence of a fact -- and not a
+      // confirmed "stopped", which is what an owner stop looks like.
+      expect(first.unknown.has(key)).toBe(true);
+      expect(first.kinds.get(key)).toBe("stopped");
+
+      const status = causes.haltCauseReadStatus();
+      expect(status.failures).toBe(1);
+      expect(status.lastFailure).toContain("off-loop read failed");
+      expect(status.coolingDown).toBe(true);
+
+      // The next probe does not re-run the failing multi-second read: the failure has a cooldown,
+      // so a degraded database is not turned into a repeating multi-second read, and the scope
+      // stays UNKNOWN rather than decaying into a confirmed owner stop.
+      const second = await causes.batchedHaltCauseKinds([ref(account)]);
+      expect(second.unknown.has(key)).toBe(true);
+      expect(invocations).toBe(1);
+    } finally {
+      causes.__setHaltAuditRunnerForTests(previous);
+    }
+  });
+
+  it("classifies a fresh app halt on the next poll: the audit write drops the cached answer", async () => {
+    const { db, causes } = await load();
+    const account = await seedHalted("Fresh Breaker");
+    const key = `${account.userId}:${account.accountId}`;
+
+    // First poll: the app has not halted this account, so the read caches "no app-initiated halt".
+    const before = await causes.batchedHaltCauseKinds([ref(account)]);
+    expect(before.kinds.get(key)).toBe("stopped");
+    expect(before.unknown.has(key)).toBe(false);
+
+    // The drawdown breaker halts it, and the app writes that audit row itself.
+    db.audit(
+      "policy_violation_drawdown",
+      { reason: "Trailing drawdown breached the limit.", revertedTo: "halted" },
+      account.userId,
+      account.accountId
+    );
+
+    // The write drops the cached answer for that scope, so the next poll reads the new row
+    // instead of serving the minute-old "no app-initiated halt" -- which reads as an owner stop,
+    // and an owner stop counts as a deliberately idle account.
+    const after = await causes.batchedHaltCauseKinds([ref(account)]);
+    expect(after.kinds.get(key)).toBe("breaker");
+    expect(after.unknown.has(key)).toBe(false);
+  });
+
   it("does not query for an empty fleet and splits the audit read on the chunk boundary", async () => {
     const { db, causes } = await load();
     const database = db.getDb();
     const empty = await capturePrepares(database, async () => {
-      expect((await causes.batchedHaltCauseKinds([])).size).toBe(0);
+      expect((await causes.batchedHaltCauseKinds([])).kinds.size).toBe(0);
     });
     expect(empty).toHaveLength(0);
 
@@ -330,7 +396,7 @@ describe("batched halt-cause kinds", () => {
       accountId: `acct-${randomUUID()}`
     }));
     const calls = await capturePrepares(database, async () => {
-      const kinds = await causes.batchedHaltCauseKinds(many);
+      const { kinds } = await causes.batchedHaltCauseKinds(many);
       expect(kinds.size).toBe(81);
       expect([...kinds.values()].every((kind) => kind === "stopped")).toBe(true);
     });

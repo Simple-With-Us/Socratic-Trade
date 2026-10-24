@@ -246,6 +246,7 @@ describe("trading-liveness", () => {
         darkAccountLabels: [],
         fleetActiveAccounts: 0,
         eligibleDeliberatelyIdle: 0,
+        haltCauseUnknown: 0,
         fullyDark: true
       }
     });
@@ -537,6 +538,8 @@ describe("trading-liveness", () => {
         "autonomyActiveAccounts",
         "autonomyEligibleAccounts",
         "autonomyFullyDark",
+        "autonomyHaltCauseReadFailures",
+        "autonomyHaltCauseUnknown",
         "autopilotAccounts",
         "degraded",
         "degradedReasons",

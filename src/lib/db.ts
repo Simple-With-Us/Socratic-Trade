@@ -3859,6 +3859,19 @@ export function audit(kind: string, payload: unknown, userId: string = "local", 
       "INSERT INTO audit_events (id, user_id, connected_account_id, created_at, kind, payload) VALUES (?, ?, ?, ?, ?, ?)"
     ).run(id, userId, accountId, createdAt, kind, payloadJson);
   }
+
+  // ST-4561: an app-initiated halt row changes the answer to "did the APP halt this account,
+  // and has it stayed halted?".  The halt-cause cache holds that answer for up to a minute, and a
+  // stale answer reads a fresh drawdown breaker as "no app-initiated halt" -- an owner stop, which
+  // counts as a deliberately idle account.  So the write drops the cached row for this scope and
+  // the next read re-reads it.
+  //
+  // The hook is registered by autonomy-halt-cause.ts, which imports this module; calling it
+  // through `globalThis` keeps the import graph acyclic.  It is absent in processes that never
+  // load that module, and then the cache TTL governs as before.
+  if (kind === "policy_violation_drawdown" || kind === "broker_placement_auto_halted") {
+    globalThis.__socraticHaltAuditInvalidate?.(userId, accountId);
+  }
 }
 
 function migrate(database: Database.Database): void {
