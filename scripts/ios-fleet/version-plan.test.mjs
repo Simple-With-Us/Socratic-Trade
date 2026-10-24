@@ -48,6 +48,17 @@ test("parsePatch rejects a version that is not <prefix>.<digits>", () => {
   assert.equal(parsePatch("1.0.236.1", "1.0"), null);
   assert.equal(parsePatch("", "1.0"), null);
   assert.equal(parsePatch("1.0.abc", "1.0"), null);
+  // Non-strings are refused, not coerced (Kody, AFC-517).
+  assert.equal(parsePatch(["1.0.235"], "1.0"), null);
+  assert.equal(parsePatch(235, "1.0"), null);
+  assert.equal(
+    latestMarketingPatch({ prefix: "1.0", appStoreVersions: [{ versionString: ["1.0.235"] }], trains: [] }),
+    0
+  );
+  assert.equal(
+    nextMarketingPatch({ prefix: "1.0", appStoreVersions: [], trains: [{ version: ["1.0.240"], builds: [] }] }),
+    1
+  );
 });
 
 test("parsePatch escapes the prefix", () => {

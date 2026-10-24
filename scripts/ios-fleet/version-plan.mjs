@@ -59,13 +59,16 @@ function escapeRegExp(text) {
  * parsePatch("1.0", "1.0")     -> null   (no patch component)
  * parsePatch("1.01.5", "1.0")  -> null   (not "<prefix>.<digits>")
  * parsePatch("2.0.5", "1.0")   -> null   (a different train)
+ * parsePatch(["1.0.5"], "1.0") -> null   (not a string; never coerced)
  *
  * The prefix is escaped, so a prefix of "1.0" can never match "120.5".
  */
 export function parsePatch(version, prefix) {
-  if (version === null || version === undefined) return null;
+  // Only a real string can name a version.  String(["1.0.235"]) would read
+  // as "1.0.235", so an array or object is refused, never coerced.
+  if (typeof version !== "string") return null;
   if (prefix === null || prefix === undefined) return null;
-  const value = String(version).trim();
+  const value = version.trim();
   const train = String(prefix).trim();
   if (!value || !train) return null;
   const re = new RegExp(`^${escapeRegExp(train)}\\.(\\d+)$`);
