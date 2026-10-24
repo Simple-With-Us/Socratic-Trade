@@ -655,6 +655,12 @@ asc_latest_marketing_patch() {
   if [[ $rc -eq 4 ]]; then
     set -e
     logerr "asc-patch: App Store Connect rejected the credential (HTTP 401/403)"
+    # Forward the client's own lines first:  they carry Apple's status and code.
+    if [[ -s "$errf" ]]; then
+      while IFS= read -r _pl; do
+        case "$_pl" in latest-marketing-patch:*|latest-build-seq:*) logerr "asc-patch: ${_pl}" ;; esac
+      done <"$errf"
+    fi
     rm -f "$errf" >/dev/null 2>&1 || true
     return 4
   fi
