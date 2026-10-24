@@ -250,11 +250,13 @@ export interface AutonomyDarkness {
  * `false`: it counts as dark, and the fleet-fully-dark page can fire on a probe that cannot
  * classify the fleet.
  *
- * This is a named policy because the difference matters and is the owner's call: an unreadable
- * cause is NOT a confirmed owner stop, and the fleet-fully-dark page keys on exactly that
- * distinction.  Either way the counts behind it are in the public payload
- * (`autonomyHaltCauseUnknown`, `autonomyHaltCauseReadFailures`), so the blind spot is
- * measurable while the policy itself is unchanged.
+ * This is a named policy because the difference matters: an unreadable cause is NOT a confirmed
+ * owner stop, and the fleet-fully-dark page keys on exactly that distinction.  The value below
+ * is the behaviour this lane keeps -- it is not a decision on record from anyone, and changing
+ * it would ADD pages, so it is a separate decision that has not been made here.  Either way the
+ * counts behind it are in the public payload (`autonomyHaltCauseUnknown`,
+ * `autonomyHaltCauseReadFailures`), so the blind spot is measurable while the behaviour itself
+ * is unchanged.
  */
 export const HALT_CAUSE_UNKNOWN_COUNTS_AS_IDLE = true;
 

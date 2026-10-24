@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 /**
  * The health route AWAITS the trading-liveness summary.
@@ -17,8 +17,18 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
  * the await from the route fails this test.
  */
 
+// DATABASE_URL is process-wide, so the value this file puts there is restored exactly when the
+// suite ends.  Leaving it pointed at a temp database that the next suite cannot open breaks
+// every later test in the same process.
+const priorDatabaseUrl = process.env.DATABASE_URL;
+
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-health-liveness-await-${randomUUID()}.db`)}`;
+});
+
+afterAll(() => {
+  if (priorDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = priorDatabaseUrl;
 });
 
 const HEALTH_URL = "http://localhost/api/health";

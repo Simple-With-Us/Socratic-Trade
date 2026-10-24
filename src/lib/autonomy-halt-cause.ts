@@ -278,8 +278,35 @@ export const HALT_AUDIT_FAILURE_COOLDOWN_MS = 30_000;
  * queue ceiling of `timeoutMs + SQLITE_OFF_LOOP_TIMEOUT_MS` (8 s + 15 s), so a read that waited
  * for a busy worker could hold its caller for 23 s -- past both probe budgets, which is the
  * outage this fix exists to remove.  One AbortSignal bounds the wait for every chunk instead.
+ *
+ * The read gives back a slice of this budget (`HALT_AUDIT_READ_WIND_DOWN_MS`) so it is aborted
+ * and wound down BEFORE the caller's deadline, so the read itself gets a little under 8 s.
  */
 const HALT_AUDIT_OFF_LOOP_TIMEOUT_MS = 8_000;
+
+/**
+ * How long past its own deadline a refresh may hold the shared pointer before it is released.
+ *
+ * The grace covers the normal path, where the refresh finishes on its deadline.  A refresh that
+ * never settles at all -- a runner that ignores its abort -- is released after the grace, so one
+ * wedged read cannot blind every later halt-cause read in the process.
+ */
+const HALT_AUDIT_REFRESH_RELEASE_GRACE_MS = 250;
+
+/**
+ * How much of the budget is held back so the read winds down BEFORE the caller's deadline.
+ *
+ * The caller gives up at its own deadline, and a read that is still running at that moment leaves
+ * the caller racing it: the caller returns while the read is still in flight, the next caller
+ * reuses the shared refresh that is already dying, and the read's own abort -- the signal that
+ * ends it -- fires after the caller has already answered.  Holding back a slice of the budget
+ * means the read is aborted, the failure is recorded and the shared pointer is released before the
+ * caller's deadline, so the next caller starts a fresh read instead of inheriting a corpse.
+ *
+ * It is a tenth of the budget, capped: small enough that the read keeps almost all of its time,
+ * large enough that the wind-down (a few microtasks) always fits.
+ */
+const HALT_AUDIT_READ_WIND_DOWN_MS = 250;
 
 /**
  * The budget the sweep actually uses.  Production always gets the constant above; a test can
@@ -329,7 +356,11 @@ type HaltAuditRow = z.infer<typeof HaltAuditRowSchema>;
 declare global {
   var __socraticHaltAuditCache: Map<string, CachedHaltAuditRow> | undefined;
 
-  var __socraticHaltAuditRefreshInFlight: Promise<void> | undefined;
+  /** The one shared off-loop refresh.  A refresh that is still running is REUSED, never
+   *  duplicated: two refreshes at once are two reads of the same 19 GB table, and the second one
+   *  used to overwrite this pointer while the first was still running -- so a third caller
+   *  started a third read on top of two running ones. */
+  var __socraticHaltAuditRefresh: HaltAuditRefreshState | undefined;
 
   var __socraticHaltAuditPendingScopes: Map<string, AuditScope> | undefined;
 
@@ -337,9 +368,15 @@ declare global {
    *  on whether the read is currently failing and on how often it has failed. */
   var __socraticHaltAuditReadFailure: HaltAuditReadFailure | undefined;
 
-  /** When each scope's cached row was invalidated.  A read that STARTED before the invalidation
-   *  must not write its now-stale answer over the invalidation. */
+  /** The generation each scope was last invalidated at.  A read that STARTED before the
+   *  invalidation must not write its now-stale answer over the invalidation. */
   var __socraticHaltAuditInvalidatedAt: Map<string, number> | undefined;
+
+  /** The monotonic invalidation counter.  A GENERATION, not a clock: two events in the same
+   *  millisecond share a timestamp, and a timestamp comparison misses that equality -- so a read
+   *  that started in the same millisecond as the invalidation wrote its pre-halt answer back
+   *  over it.  A counter cannot collide. */
+  var __socraticHaltAuditInvalidationGeneration: number | undefined;
 
   /** Set by this module so the audit write path can drop a scope's cached row without importing
    *  this module: this module imports db.ts, and db.ts is what writes the audit rows. */
@@ -347,6 +384,16 @@ declare global {
     | ((userId: string, connectedAccountId: string | null) => void)
     | undefined;
 }
+
+/** The shared refresh's state.  `settled` says whether the refresh has finished, so a finished
+ *  refresh is not reused: a caller that arrives in the microtask window between the refresh
+ *  finishing and its pointer being cleared must start a NEW read, not reuse a dead one. */
+type HaltAuditRefreshState = {
+  /** The refresh's promise.  It never rejects: a failed read is recorded, not thrown at the
+   *  caller. */
+  promise: Promise<void>;
+  settled: boolean;
+};
 
 /** One failed off-loop read, kept so the failure is visible instead of retried into the ground. */
 type HaltAuditReadFailure = {
@@ -368,7 +415,13 @@ export type HaltCauseReadStatus = {
   failures: number;
   /** ISO time of the last failure, if there was one. */
   lastFailureAt?: string;
-  /** The last failure message, truncated. */
+  /**
+   * The last failure message, truncated.
+   *
+   * NOT in the public payload: the public projection carries the COUNT only.  This text is an
+   * arbitrary error message -- it can carry a database path or a fragment of SQL -- so it must
+   * not be added to an external payload without an allowlist of the messages that may go out.
+   */
   lastFailure?: string;
   /** True while the read is cooling down after a failure. */
   coolingDown: boolean;
@@ -429,6 +482,56 @@ function haltAuditScopeKey(scope: AuditScope): string {
 }
 
 /**
+ * How many scopes the pending queue holds before its oldest entries are dropped.
+ *
+ * The pending queue is keyed by (user, connected account), so it grows with the fleet and with
+ * every scope a failed read had to requeue.  The cache has a cap; this queue had none, so a
+ * fleet larger than the cache cap could leave the queue holding more scopes than the cache --
+ * and every one of them is a scope whose cause is still UNKNOWN.
+ */
+const HALT_AUDIT_PENDING_MAX_ENTRIES = 1_000;
+
+/**
+ * Put scopes on the pending queue, keeping it bounded.
+ *
+ * The queue is the work list for the next refresh: a caller asks for its scopes, and a refresh
+ * that is already running picks them up in its next round.
+ */
+function enqueuePendingHaltAuditScopes(scopes: readonly AuditScope[]): void {
+  const pending = pendingHaltAuditScopes();
+  for (const scope of scopes) {
+    const key = haltAuditScopeKey(scope);
+    if (!pending.has(key)) pending.set(key, scope);
+  }
+  prunePendingHaltAuditScopes();
+}
+
+/**
+ * Drop the oldest entries when the pending queue is over its cap.
+ *
+ * A scope whose answer is already cached goes first: its answer is known, so re-reading it is
+ * wasted work, while a scope with no cache entry is the one that needs the read.  A scope
+ * dropped here is not read this round and reads as UNKNOWN, which is the honest answer.
+ */
+function prunePendingHaltAuditScopes(): void {
+  const pending = pendingHaltAuditScopes();
+  if (pending.size <= HALT_AUDIT_PENDING_MAX_ENTRIES) return;
+  const overflow = pending.size - HALT_AUDIT_PENDING_MAX_ENTRIES;
+  const drop = new Set<string>();
+  for (const key of pending.keys()) {
+    if (drop.size >= overflow) break;
+    if (haltAuditCache.has(key)) drop.add(key);
+  }
+  if (drop.size < overflow) {
+    for (const key of pending.keys()) {
+      if (drop.size >= overflow) break;
+      drop.add(key);
+    }
+  }
+  for (const key of drop) pending.delete(key);
+}
+
+/**
  * Drop one scope's cached audit row.
  *
  * The cache holds the answer to "did the APP halt this account, and has it stayed halted?".  A
@@ -439,13 +542,45 @@ function haltAuditScopeKey(scope: AuditScope): string {
  * app-initiated halt" -- an owner stop -- for up to a minute, and an owner stop counts as a
  * deliberately idle account.
  *
- * The invalidation is timestamped, so a read that was already running when the halt was written
- * cannot write its pre-halt answer back over the invalidation.
+ * The invalidation carries a GENERATION, so a read that was already running when the halt was
+ * written cannot write its pre-halt answer back over the invalidation.  A timestamp could not do
+ * that: the halt and the read can land in the same millisecond, and `invalidatedAt >
+ * readStartedAt` is false for two equal timestamps, so the read wrote its pre-halt answer back
+ * over the invalidation and the scope read as "stopped" -- a confirmed owner stop -- until the
+ * cache TTL expired.
  */
 export function invalidateHaltAuditCache(userId: string, connectedAccountId: string | null): void {
   const key = haltAuditScopeKey({ userId, connectedAccountId });
   haltAuditCache.delete(key);
-  haltAuditInvalidatedAt.set(key, Date.now());
+  haltAuditInvalidatedAt.set(key, nextHaltAuditInvalidationGeneration());
+  // The invalidation stamps are bounded here too: they used to be pruned only by a successful
+  // refresh, so a database that kept failing (no successful refresh) let them grow with every
+  // new app-initiated halt.
+  pruneHaltAuditInvalidations();
+}
+
+/** The generation the next invalidation takes.  Monotonic, and shared like the cache. */
+function nextHaltAuditInvalidationGeneration(): number {
+  const next = (globalThis.__socraticHaltAuditInvalidationGeneration ?? 0) + 1;
+  globalThis.__socraticHaltAuditInvalidationGeneration = next;
+  return next;
+}
+
+/** The generation the most recent invalidation took.  A read remembers this when it starts. */
+function currentHaltAuditInvalidationGeneration(): number {
+  return globalThis.__socraticHaltAuditInvalidationGeneration ?? 0;
+}
+
+/**
+ * Keep the invalidation stamps bounded.  The oldest go first, and an entry whose cache row is
+ * gone cannot race anything.
+ */
+function pruneHaltAuditInvalidations(): void {
+  if (haltAuditInvalidatedAt.size <= HALT_AUDIT_CACHE_MAX_ENTRIES) return;
+  const oldest = [...haltAuditInvalidatedAt.entries()].sort((a, b) => a[1] - b[1]);
+  for (const [key] of oldest.slice(0, haltAuditInvalidatedAt.size - HALT_AUDIT_CACHE_MAX_ENTRIES)) {
+    haltAuditInvalidatedAt.delete(key);
+  }
 }
 
 // Registered on `globalThis` so the audit write path (db.ts) can call it without importing this
@@ -455,21 +590,39 @@ globalThis.__socraticHaltAuditInvalidate = invalidateHaltAuditCache;
 /** One account scope the halt-cause sweep reads: a user and the connected account. */
 export type HaltAuditScope = { userId: string; connectedAccountId: string | null };
 
+/** One chunk of the batched sweep: its statement and the scopes it covers. */
+type HaltAuditChunk = {
+  sql: string;
+  params: string[];
+  scopes: AuditScope[];
+};
+
 /**
  * The batched sweep as one statement per chunk of accounts, so a statement stays under SQLite's
  * portable 999-variable ceiling.  Same SQL the serving connection runs.
+ *
+ * Each chunk carries the scopes it covers, so a read knows which scopes a completed chunk
+ * answered and which ones it never reached.
+ */
+function haltAuditChunks(accounts: readonly AuditScope[]): HaltAuditChunk[] {
+  return chunkItems(accounts, HALT_AUDIT_ACCOUNT_CHUNK).map((chunk) => {
+    const branches = chunk.map(latestHaltBranch);
+    return {
+      sql: branches.map((branch) => branch.sql).join("\nUNION ALL\n"),
+      params: branches.flatMap((branch) => branch.params),
+      scopes: chunk
+    };
+  });
+}
+
+/**
+ * The statements the sweep runs, without the scope bookkeeping.
  *
  * Exported so a test can assert the statement's shape and query plan without running it on the
  * serving connection -- which is the point of the off-loop read.
  */
 export function buildHaltAuditStatements(accounts: readonly HaltAuditScope[]): { sql: string; params: string[] }[] {
-  return chunkItems(accounts, HALT_AUDIT_ACCOUNT_CHUNK).map((chunk) => {
-    const branches = chunk.map(latestHaltBranch);
-    return {
-      sql: branches.map((branch) => branch.sql).join("\nUNION ALL\n"),
-      params: branches.flatMap((branch) => branch.params)
-    };
-  });
+  return haltAuditChunks(accounts).map((chunk) => ({ sql: chunk.sql, params: chunk.params }));
 }
 
 /**
@@ -484,7 +637,17 @@ type HaltAuditRunner = (
   options: { timeoutMs: number; signal: AbortSignal }
 ) => Promise<HaltAuditRow[]>;
 
-let haltAuditRunner: HaltAuditRunner = sqliteAllOffLoop as unknown as HaltAuditRunner;
+/**
+ * The production runner, typed against `HaltAuditRunner` without a cast.
+ *
+ * `sqliteAllOffLoop` takes `readonly unknown[]` binds and a `z.ZodType<T>` row schema, which is
+ * exactly this runner's shape, so the wrapper keeps the Zod type instead of throwing it away
+ * behind `as unknown as`.
+ */
+const sqliteAllOffLoopHaltAuditRunner: HaltAuditRunner = (sql, params, dbPath, rowSchema, options) =>
+  sqliteAllOffLoop(sql, params, dbPath, rowSchema, options);
+
+let haltAuditRunner: HaltAuditRunner = sqliteAllOffLoopHaltAuditRunner;
 
 /**
  * Test-only: clear the off-loop read's failure bookkeeping, so a test that makes the read fail
@@ -495,14 +658,66 @@ export function __resetHaltAuditReadFailureForTests(): void {
 }
 
 /**
+ * Test-only: clear the shared read state, so one test's read cannot answer another test's
+ * question.
+ *
+ * The shared refresh, the pending scopes and the cache are process-wide on purpose -- that is
+ * what makes two callers share one read.  In a test suite that sharing leaks between cases: a
+ * test that leaves a refresh running (a runner that never settles) hands the NEXT test a refresh
+ * that is already dying, and the next test then waits on it instead of reading its own rows.
+ * The reset is what keeps the cases independent.
+ */
+export function __resetHaltAuditStateForTests(): void {
+  const refresh = globalThis.__socraticHaltAuditRefresh;
+  if (refresh) {
+    // Mark it settled so no later caller reuses it.  The refresh itself may still be parked on a
+    // runner that never settles; nothing waits on it after this.
+    refresh.settled = true;
+    if (globalThis.__socraticHaltAuditRefresh === refresh) {
+      globalThis.__socraticHaltAuditRefresh = undefined;
+    }
+  }
+  pendingHaltAuditScopes().clear();
+  haltAuditCache.clear();
+  haltAuditInvalidatedAt.clear();
+  globalThis.__socraticHaltAuditInvalidationGeneration = 0;
+}
+
+/**
  * Test-only: replace the off-loop runner.  Returns the runner that was in place, so the caller
  * can put it back.
  */
 export function __setHaltAuditRunnerForTests(runner: HaltAuditRunner | null): HaltAuditRunner {
   const previous = haltAuditRunner;
-  haltAuditRunner = runner ?? (sqliteAllOffLoop as unknown as HaltAuditRunner);
+  haltAuditRunner = runner ?? sqliteAllOffLoopHaltAuditRunner;
   return previous;
 }
+
+/**
+ * Test-only: how many scopes are waiting on the next refresh.
+ *
+ * The queue is bounded, and this is how a test proves it: a failed read requeues the scopes it
+ * did not cover, and a fleet larger than the cap must not leave the queue growing.
+ */
+export function __haltAuditPendingScopeCountForTests(): number {
+  return pendingHaltAuditScopes().size;
+}
+
+/**
+ * What one off-loop read produced.
+ *
+ * `covered` is the set of scope keys whose chunk COMPLETED.  A covered scope with no row is a
+ * CONFIRMED "no app-initiated halt" -- the statement ran and found nothing.  A scope that is not
+ * covered was never read, so its cause is unknown.
+ */
+type HaltAuditReadOutcome = {
+  /** The audit rows the read found, keyed by scope. */
+  rows: Map<string, HaltAuditRow>;
+  /** The scope keys whose chunk completed. */
+  covered: Set<string>;
+  /** The failure that stopped the read early, if any. */
+  error?: unknown;
+};
 
 /**
  * The same statement the serving connection runs, executed on an off-loop worker thread
@@ -512,35 +727,60 @@ export function __setHaltAuditRunnerForTests(runner: HaltAuditRunner | null): Ha
  *
  * `budgetMs` covers the WHOLE read: the queue wait for a worker, the statement, and every chunk
  * of it.
+ *
+ * The chunks are read one at a time and each one that finishes is recorded as covered, so a
+ * failure in a later chunk does not throw away the chunks that already succeeded.  The read used
+ * to discard the completed chunks and requeue the WHOLE batch on any failure, which turned one
+ * bad chunk into a re-read of every chunk.
  */
 async function readHaltAuditRowsOffLoop(
   scopes: readonly AuditScope[],
   budgetMs: number
-): Promise<Map<string, HaltAuditRow>> {
+): Promise<HaltAuditReadOutcome> {
   const rows = new Map<string, HaltAuditRow>();
-  if (scopes.length === 0) return rows;
+  const covered = new Set<string>();
+  const chunks = haltAuditChunks(scopes);
+  if (chunks.length === 0) return { rows, covered };
   const dbPath = databasePath();
   // ONE deadline for the whole read: the queue wait for a worker, the statement, and every chunk
   // of it.  `sqliteAllOffLoop` without a signal arms a queue ceiling of `timeoutMs + 15 s`, so a
   // queued read could hold its caller for 23 s per chunk -- past the 12 s health probe and the
   // 14 s Docker HEALTHCHECK, which is the outage this fix exists to remove.  One AbortSignal
   // bounds the wait for every chunk instead, and the signal suppresses that queue ceiling.
+  //
+  // The controller is armed BEFORE the first chunk is queued, on purpose: the budget is an
+  // end-to-end deadline for the whole read, so the queue wait counts against it.  Arming it
+  // after the worker slot is acquired would let a read that waited 20 s for a slot then run its
+  // statement for another 8 s -- 28 s, past both probe budgets.
+  //
+  // The read is aborted a slice of the budget BEFORE the caller's deadline, so it winds down
+  // inside the caller's budget: the caller answers with the read already finished, and the next
+  // caller does not inherit a refresh that is still dying.
+  const windDownMs = Math.min(HALT_AUDIT_READ_WIND_DOWN_MS, Math.floor(budgetMs * 0.1));
+  const readMs = Math.max(1, budgetMs - windDownMs);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), budgetMs);
+  const timer = setTimeout(() => controller.abort(), readMs);
   try {
-    for (const statement of buildHaltAuditStatements(scopes)) {
-      const chunkRows = await haltAuditRunner(statement.sql, statement.params, dbPath, HaltAuditRowSchema, {
-        timeoutMs: budgetMs,
-        signal: controller.signal
-      });
-      for (const row of chunkRows) {
-        rows.set(haltAuditScopeKey({ userId: row.user_id, connectedAccountId: row.connected_account_id }), row);
+    for (const chunk of chunks) {
+      try {
+        const chunkRows = await haltAuditRunner(chunk.sql, chunk.params, dbPath, HaltAuditRowSchema, {
+          timeoutMs: readMs,
+          signal: controller.signal
+        });
+        for (const row of chunkRows) {
+          rows.set(haltAuditScopeKey({ userId: row.user_id, connectedAccountId: row.connected_account_id }), row);
+        }
+        for (const scope of chunk.scopes) covered.add(haltAuditScopeKey(scope));
+      } catch (error) {
+        // Stop at the first failed chunk.  The chunks that already completed stay covered, and
+        // the scopes of this chunk and the ones after it are requeued by the caller.
+        return { rows, covered, error };
       }
     }
   } finally {
     clearTimeout(timer);
   }
-  return rows;
+  return { rows, covered };
 }
 
 /**
@@ -572,72 +812,112 @@ function pruneHaltAuditCache(): void {
   }
   // The invalidation stamps are bounded the same way: an entry whose cache row is gone cannot
   // race anything.
-  if (haltAuditInvalidatedAt.size > HALT_AUDIT_CACHE_MAX_ENTRIES) {
-    const oldest = [...haltAuditInvalidatedAt.entries()].sort((a, b) => a[1] - b[1]);
-    for (const [key] of oldest.slice(0, haltAuditInvalidatedAt.size - HALT_AUDIT_CACHE_MAX_ENTRIES)) {
-      haltAuditInvalidatedAt.delete(key);
-    }
-  }
+  pruneHaltAuditInvalidations();
 }
 
 /**
- * One off-loop refresh, shared by every caller.
+ * One off-loop refresh.
  *
  * It reads the pending scopes in rounds: a caller that arrives while a round is running adds its
  * scopes to the pending set, and the next round picks them up.  The whole refresh -- every round,
- * every chunk -- is bounded by ONE deadline, so the caller waiting on it waits at most that long.
- * The health route awaits this, and a health probe that misses its deadline restarts the
- * container, which re-runs the boot sweep.
+ * every chunk -- is bounded by ONE deadline.  The health route awaits this, and a health probe
+ * that misses its deadline restarts the container, which re-runs the boot sweep.
  */
-function startHaltAuditRefresh(budgetMs: number): Promise<void> {
+async function runHaltAuditRefresh(budgetMs: number): Promise<void> {
   const deadline = Date.now() + Math.max(0, budgetMs);
-  const pending = (async () => {
+  try {
     while (pendingHaltAuditScopes().size > 0) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
       const batch = [...pendingHaltAuditScopes().values()];
       pendingHaltAuditScopes().clear();
-      // When this read STARTED: an invalidation that lands after this point must win over
-      // whatever this read finds, so the read's answer is not written over it.
-      const readStartedAt = Date.now();
-      let rows: Map<string, HaltAuditRow>;
+      // The generation this read starts at: an invalidation that lands after this point must win
+      // over whatever this read finds, so the read's answer is not written over it.  A
+      // GENERATION, not a clock -- two events in the same millisecond share a timestamp, and a
+      // timestamp comparison misses that equality.
+      const readStartedGeneration = currentHaltAuditInvalidationGeneration();
+      let outcome: HaltAuditReadOutcome;
       try {
-        rows = await readHaltAuditRowsOffLoop(batch, remaining);
-        clearHaltAuditReadFailure();
+        outcome = await readHaltAuditRowsOffLoop(batch, remaining);
       } catch (error) {
-        // Put the scopes back so the next caller retries them, and leave the cache as it was.
-        // A stale row is better than a wrong one, and the caller still reads the old cache,
-        // exactly as a failed read did.
-        for (const scope of batch) {
-          const key = haltAuditScopeKey(scope);
-          if (!pendingHaltAuditScopes().has(key)) pendingHaltAuditScopes().set(key, scope);
-        }
-        // The failure is counted and reported, not retried into the ground: the cooldown keeps
-        // the next caller off this read for a while (see HALT_AUDIT_FAILURE_COOLDOWN_MS).
-        recordHaltAuditReadFailure(error);
-        break;
+        // The read reports its own failures in the outcome; this is the path for an error thrown
+        // around the read itself (a bad database path, for instance).
+        outcome = { rows: new Map(), covered: new Set(), error };
       }
+      if (outcome.error === undefined) clearHaltAuditReadFailure();
       const at = Date.now();
+      // Cache what the read actually covered.  A chunk that completed is a confirmed answer --
+      // including "no app-initiated halt" -- so a later chunk's failure does not throw away the
+      // chunks that already succeeded.
       for (const scope of batch) {
         const key = haltAuditScopeKey(scope);
-        const invalidatedAt = haltAuditInvalidatedAt.get(key);
-        if (invalidatedAt !== undefined && invalidatedAt > readStartedAt) {
+        if (!outcome.covered.has(key)) continue;
+        const invalidatedGeneration = haltAuditInvalidatedAt.get(key);
+        if (invalidatedGeneration !== undefined && invalidatedGeneration > readStartedGeneration) {
           // The scope was invalidated while this read was running: this answer predates the
           // invalidation, so it is not cached.  The next read sees the newer row.
           continue;
         }
-        haltAuditCache.set(key, { row: rows.get(key) ?? null, at });
+        haltAuditCache.set(key, { row: outcome.rows.get(key) ?? null, at });
+      }
+      if (outcome.error !== undefined) {
+        // Put back ONLY the scopes this read did not cover, so the next caller retries them.
+        // Requeuing the whole batch used to throw away the chunks that had already succeeded.
+        const uncovered = batch.filter((scope) => !outcome.covered.has(haltAuditScopeKey(scope)));
+        enqueuePendingHaltAuditScopes(uncovered);
+        // The failure is counted and reported, not retried into the ground: the cooldown keeps
+        // the next caller off this read for a while (see HALT_AUDIT_FAILURE_COOLDOWN_MS).
+        recordHaltAuditReadFailure(outcome.error);
+        break;
       }
       pruneHaltAuditCache();
     }
-  })();
-  globalThis.__socraticHaltAuditRefreshInFlight = pending;
-  void pending.then(() => {
-    if (globalThis.__socraticHaltAuditRefreshInFlight === pending) {
-      globalThis.__socraticHaltAuditRefreshInFlight = undefined;
-    }
+  } finally {
+    pruneHaltAuditCache();
+  }
+}
+
+/**
+ * Start the shared refresh, or reuse the one that is already running.
+ *
+ * The check and the publish happen in the SAME synchronous turn, so two callers can never both
+ * start a refresh: the second one sees the first one's state and reuses it.  Two refreshes at
+ * once are two reads of the same 19 GB table.
+ *
+ * This is what the fallback path needs.  It used to call the starter directly, so two callers
+ * that were both waiting on a first refresh that had just failed each started their OWN
+ * fallback: the second one overwrote the shared pointer while the first was still running, and
+ * the pointer was then cleared while a refresh was still active -- so a third caller started a
+ * third read on top of two running ones.
+ */
+function startHaltAuditRefresh(budgetMs: number): Promise<void> {
+  const existing = globalThis.__socraticHaltAuditRefresh;
+  if (existing && !existing.settled) return existing.promise;
+  let settle: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => {
+    settle = resolve;
   });
-  return pending;
+  const state: HaltAuditRefreshState = { promise, settled: false };
+  // Published BEFORE the refresh starts, so a caller that arrives in the same turn reuses it.
+  globalThis.__socraticHaltAuditRefresh = state;
+  let releaseTimer: ReturnType<typeof setTimeout> | undefined;
+  const finish = () => {
+    state.settled = true;
+    if (releaseTimer) clearTimeout(releaseTimer);
+    if (globalThis.__socraticHaltAuditRefresh === state) {
+      globalThis.__socraticHaltAuditRefresh = undefined;
+    }
+    settle();
+  };
+  // A refresh that never settles -- a runner that ignores its abort -- must not hold the shared
+  // pointer forever: while it held it, every later caller reused a dead refresh and no scope
+  // was ever read again, so the whole fleet's halt causes stayed UNKNOWN.  The pointer is
+  // released at the refresh's own deadline, so the next caller starts a fresh read.
+  releaseTimer = setTimeout(finish, budgetMs + HALT_AUDIT_REFRESH_RELEASE_GRACE_MS);
+  releaseTimer.unref?.();
+  // The refresh never rejects: a failed read is recorded and reported, not thrown at the caller.
+  void runHaltAuditRefresh(budgetMs).then(finish, finish);
+  return promise;
 }
 
 /**
@@ -648,13 +928,15 @@ function startHaltAuditRefresh(budgetMs: number): Promise<void> {
  * different scopes, and a scope with no cache entry reads as "no app-initiated halt", which
  * mislabels a drawdown breaker or a lost auto-pause as an owner stop -- and an owner stop counts
  * as a deliberately idle account, which suppresses the fleet-fully-dark page for that poll.
+ *
+ * The wait is bounded by the caller's deadline even if the read itself ignores the abort: a
+ * runner that never settles must not hold a health probe past its budget, because a probe that
+ * misses its deadline restarts the container, which re-runs the boot sweep.
  */
 async function refreshHaltAuditRows(scopes: readonly AuditScope[]): Promise<void> {
   if (scopes.length === 0) return;
   const deadline = Date.now() + haltAuditBudgetMs();
-  for (const scope of scopes) {
-    pendingHaltAuditScopes().set(haltAuditScopeKey(scope), scope);
-  }
+  enqueuePendingHaltAuditScopes(scopes);
   // A read that just failed is not re-run on every health poll: it is a multi-second scan of a
   // 19 GB table, and retrying it while the database is degraded repeats the read this fix exists
   // to stop happening.  The cooldown bounds the retry rate; the failure is reported instead.
@@ -662,12 +944,7 @@ async function refreshHaltAuditRows(scopes: readonly AuditScope[]): Promise<void
     pendingHaltAuditScopes().clear();
     return;
   }
-  const running = globalThis.__socraticHaltAuditRefreshInFlight;
-  if (running) {
-    await untilDeadline(running, deadline);
-  } else {
-    await startHaltAuditRefresh(deadline - Date.now());
-  }
+  await untilDeadline(startHaltAuditRefresh(deadline - Date.now()), deadline);
   // Whatever of THIS caller's scopes the shared refresh did not cover gets its own read, with
   // whatever budget is left.  Out of budget, the cache stays as it is: a stale halt cause is
   // display-only, and a missed probe is an outage.
@@ -676,7 +953,10 @@ async function refreshHaltAuditRows(scopes: readonly AuditScope[]): Promise<void
   const remaining = deadline - Date.now();
   if (remaining <= 0) return;
   if (haltAuditReadCoolingDown(Date.now())) return;
-  await startHaltAuditRefresh(remaining);
+  // The missing scopes go back on the pending queue first: a refresh whose pending set is empty
+  // has nothing to read, so the fallback used to be a no-op that left the scope unknown.
+  enqueuePendingHaltAuditScopes(missing);
+  await untilDeadline(startHaltAuditRefresh(remaining), deadline);
 }
 
 /**

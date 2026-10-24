@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Database, Statement } from "better-sqlite3";
 
 // /api/health classifies every halted autopilot account.  The kind has to match
@@ -82,9 +82,12 @@ describe("batched halt-cause kinds", () => {
 
   afterEach(async () => {
     // The off-loop read's failure bookkeeping and its cooldown are process-wide on purpose, so a
-    // test that makes the read fail must not leave a cooldown behind for the next one.
+    // test that makes the read fail must not leave a cooldown behind for the next one.  The shared
+    // refresh, the pending scopes and the cache are process-wide too, so they are cleared here as
+    // well: a test that leaves a refresh running hands the next one a refresh that is dying.
     const { causes } = await load();
     causes.__resetHaltAuditReadFailureForTests();
+    causes.__resetHaltAuditStateForTests();
   });
 
   it("pages only an app halt, and ask-first activity keeps the fleet from reading as fully dark", async () => {
@@ -306,6 +309,7 @@ describe("batched halt-cause kinds", () => {
           options.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
         })
     );
+    const priorBudget = process.env.HALT_AUDIT_OFF_LOOP_BUDGET_MS;
     process.env.HALT_AUDIT_OFF_LOOP_BUDGET_MS = "200";
     try {
       const started = Date.now();
@@ -319,7 +323,65 @@ describe("batched halt-cause kinds", () => {
       expect(received).toBeDefined();
       expect(received?.aborted).toBe(true);
     } finally {
-      delete process.env.HALT_AUDIT_OFF_LOOP_BUDGET_MS;
+      // Restore the EXACT prior value.  Deleting the key would erase a value the environment
+      // already carried, and the budget is read from the environment on every call.
+      if (priorBudget === undefined) delete process.env.HALT_AUDIT_OFF_LOOP_BUDGET_MS;
+      else process.env.HALT_AUDIT_OFF_LOOP_BUDGET_MS = priorBudget;
+      causes.__setHaltAuditRunnerForTests(previous);
+    }
+  });
+
+  it("keeps the classification pending until the injected runner resolves, then reflects the row it returned", async () => {
+    const { causes } = await load();
+    const account = await seedHalted("Deferred Runner");
+    const key = `${account.userId}:${account.accountId}`;
+
+    type ProbeRow = {
+      user_id: string;
+      connected_account_id: string | null;
+      kind: string;
+      created_at: string;
+      payload: string;
+      handed_over: number;
+    };
+    let resolveRows: ((rows: ProbeRow[]) => void) | undefined;
+    let markRunnerCalled: () => void = () => undefined;
+    const runnerCalled = new Promise<void>((resolve) => {
+      markRunnerCalled = resolve;
+    });
+    const previous = causes.__setHaltAuditRunnerForTests(() => {
+      markRunnerCalled();
+      return new Promise<ProbeRow[]>((resolve) => {
+        resolveRows = resolve;
+      });
+    });
+    try {
+      const pending = causes.batchedHaltCauseKinds([ref(account)]);
+      let settled = false;
+      void pending.then(() => {
+        settled = true;
+      });
+      // The read reached the injected runner, and the classification is still PENDING: an
+      // unresolved Promise must not be projected as an answer.  Without the await the Promise
+      // would stand in for the row map and the scope would read as a confirmed "stopped" -- an
+      // owner stop -- instead of the app halt the row names.
+      await runnerCalled;
+      expect(settled).toBe(false);
+
+      resolveRows?.([
+        {
+          user_id: account.userId,
+          connected_account_id: account.accountId,
+          kind: "policy_violation_drawdown",
+          created_at: new Date().toISOString(),
+          payload: JSON.stringify({ reason: "deferred breaker", revertedTo: "halted" }),
+          handed_over: 0
+        }
+      ]);
+      const batch = await pending;
+      expect(batch.kinds.get(key)).toBe("breaker");
+      expect(batch.unknown.has(key)).toBe(false);
+    } finally {
       causes.__setHaltAuditRunnerForTests(previous);
     }
   });
@@ -445,5 +507,167 @@ describe("batched halt-cause kinds", () => {
       });
     });
     expect(control.filter((call) => call.sql.includes("FROM audit_events")).length).toBeGreaterThan(0);
+  });
+
+  it("does not write a pre-halt answer back over an invalidation from the same millisecond", async () => {
+    const { db, causes } = await load();
+    const account = await seedHalted("Same Millisecond");
+    const key = `${account.userId}:${account.accountId}`;
+
+    // A frozen clock makes the invalidation and the read share ONE timestamp.  The old code
+    // compared `invalidatedAt > readStartedAt`, and two equal timestamps are not "greater than",
+    // so the read wrote its pre-halt answer back over the invalidation and the scope read as a
+    // confirmed "stopped" -- an owner stop -- instead of unknown.
+    const fixedNow = 1_760_000_000_000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(fixedNow);
+    let calls = 0;
+    const previous = causes.__setHaltAuditRunnerForTests(async () => {
+      calls += 1;
+      if (calls === 1) {
+        // The app writes a fresh drawdown-breaker halt while this read is in flight.
+        db.audit(
+          "policy_violation_drawdown",
+          { reason: "same-millisecond breaker", revertedTo: "halted" },
+          account.userId,
+          account.accountId
+        );
+        // This read's answer: the account had no app-initiated halt when the statement ran.
+        return [];
+      }
+      // The read that follows the invalidation sees the row the app wrote.
+      return [
+        {
+          user_id: account.userId,
+          connected_account_id: account.accountId,
+          kind: "policy_violation_drawdown",
+          created_at: new Date(fixedNow).toISOString(),
+          payload: JSON.stringify({ reason: "same-millisecond breaker", revertedTo: "halted" }),
+          handed_over: 0
+        }
+      ];
+    });
+    try {
+      const during = await causes.batchedHaltCauseKinds([ref(account)]);
+      // The poll ends on the FRESH answer.  With the old timestamp comparison the pre-halt answer
+      // was written back over the invalidation, so the scope read as a confirmed "stopped" -- an
+      // owner stop -- and the breaker the app had just written stayed invisible for a whole TTL.
+      expect(during.kinds.get(key)).toBe("breaker");
+      expect(during.unknown.has(key)).toBe(false);
+      // Control: the invalidation was NOTICED.  The pre-halt answer was discarded, so the scope
+      // had no cache entry and was read again; without the generation the first answer would have
+      // been cached and the second read would never have happened.
+      expect(calls).toBe(2);
+    } finally {
+      clock.mockRestore();
+      causes.__setHaltAuditRunnerForTests(previous);
+    }
+  });
+
+  it("keeps the chunks that succeeded when a later chunk fails", async () => {
+    const { causes } = await load();
+    const scopes = Array.from({ length: 81 }, () => ({
+      userId: `user-${randomUUID()}`,
+      accountId: `acct-${randomUUID()}`
+    }));
+    let calls = 0;
+    const previous = causes.__setHaltAuditRunnerForTests(async () => {
+      calls += 1;
+      if (calls === 1) return [];
+      throw new Error("off-loop read failed");
+    });
+    try {
+      const batch = await causes.batchedHaltCauseKinds(scopes);
+      expect(calls).toBe(2);
+
+      // The first chunk completed, so those scopes have a CONFIRMED answer ("no app-initiated
+      // halt").  The read used to throw the completed chunks away and requeue the whole batch,
+      // so every scope came back unknown.
+      for (const scope of scopes.slice(0, 80)) {
+        expect(batch.unknown.has(`${scope.userId}:${scope.accountId}`)).toBe(false);
+        expect(batch.kinds.get(`${scope.userId}:${scope.accountId}`)).toBe("stopped");
+      }
+      // The scope in the chunk that failed was never read, so its cause is unknown.
+      expect(batch.unknown.has(`${scopes[80].userId}:${scopes[80].accountId}`)).toBe(true);
+    } finally {
+      causes.__setHaltAuditRunnerForTests(previous);
+    }
+  });
+
+  it("runs one refresh at a time when two callers ask for different scopes", async () => {
+    const { causes } = await load();
+    const first = await seedHalted("Refresh First");
+    const second = await seedHalted("Refresh Second");
+
+    let active = 0;
+    let maxActive = 0;
+    const previous = causes.__setHaltAuditRunnerForTests(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      active -= 1;
+      return [];
+    });
+    try {
+      const [a, b] = await Promise.all([
+        causes.batchedHaltCauseKinds([ref(first)]),
+        causes.batchedHaltCauseKinds([ref(second)])
+      ]);
+      // Two refreshes at once are two reads of the same 19 GB table.  The second caller reuses
+      // the running refresh instead of starting its own.
+      expect(maxActive).toBe(1);
+      expect(a.kinds.get(`${first.userId}:${first.accountId}`)).toBe("stopped");
+      expect(b.kinds.get(`${second.userId}:${second.accountId}`)).toBe("stopped");
+    } finally {
+      causes.__setHaltAuditRunnerForTests(previous);
+    }
+  });
+
+  it("gives the caller back at the deadline when the runner never settles", async () => {
+    const { causes } = await load();
+    const account = await seedHalted("Deferred");
+    const key = `${account.userId}:${account.accountId}`;
+
+    const previous = causes.__setHaltAuditRunnerForTests(
+      async () =>
+        new Promise<never>(() => {
+          // A runner that ignores its abort: it never settles and never rejects.
+        })
+    );
+    const priorBudget = process.env.HALT_AUDIT_OFF_LOOP_BUDGET_MS;
+    process.env.HALT_AUDIT_OFF_LOOP_BUDGET_MS = "200";
+    try {
+      const started = Date.now();
+      const batch = await causes.batchedHaltCauseKinds([ref(account)]);
+      const elapsed = Date.now() - started;
+
+      // The caller does not wait for a runner that never settles: a health probe that misses its
+      // deadline restarts the container, which re-runs the boot sweep.
+      expect(elapsed).toBeLessThan(5_000);
+      // The cause was never read, so it is unknown -- not a confirmed owner stop.
+      expect(batch.unknown.has(key)).toBe(true);
+    } finally {
+      if (priorBudget === undefined) delete process.env.HALT_AUDIT_OFF_LOOP_BUDGET_MS;
+      else process.env.HALT_AUDIT_OFF_LOOP_BUDGET_MS = priorBudget;
+      causes.__setHaltAuditRunnerForTests(previous);
+    }
+  });
+
+  it("keeps the pending queue bounded when a failing read requeues more scopes than the cap", async () => {
+    const { causes } = await load();
+    const many = Array.from({ length: 1002 }, () => ({
+      userId: `user-${randomUUID()}`,
+      accountId: `acct-${randomUUID()}`
+    }));
+    const previous = causes.__setHaltAuditRunnerForTests(async () => {
+      throw new Error("off-loop read failed");
+    });
+    try {
+      await causes.batchedHaltCauseKinds(many);
+      // The cache has a cap; the queue that holds the scopes a failed read must retry had none,
+      // so a fleet larger than the cache cap left the queue growing past it.
+      expect(causes.__haltAuditPendingScopeCountForTests()).toBeLessThanOrEqual(1_000);
+    } finally {
+      causes.__setHaltAuditRunnerForTests(previous);
+    }
   });
 });
