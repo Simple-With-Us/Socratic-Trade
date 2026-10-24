@@ -1,30 +1,35 @@
 #!/usr/bin/env bash
-# test-ship-seq.sh - Offline tests for ship-testflight.sh's build-number rules.
+# test-ship-seq.sh - Offline tests for ship-testflight.sh's version rules.
 #
-# Covers the two defects fixed on 2026-08-12:
-#   1. ORDERING: a run rejected by the ship gate must NOT consume a build
-#      sequence number. It used to: the gate was evaluated after the counter had
+# Covers:
+#   1. ORDERING: a run rejected by the ship gate must NOT resolve or consume
+#      a version.  It used to: the gate was evaluated after the counter had
 #      already been advanced, so a rate-limited attempt burned a version that
-#      shipped nowhere (observed live: skipped at 4392s of a 9000s interval, and
-#      the sequence still went 5 -> 6).
-#   2. SCHEME: the build number is the repo commit count, and the marketing
-#      version is 1.0.<commit count> beside it, so the pair always describes
-#      one number. App Store Connect renders "<marketing> (<build>)". The
-#      strictly-increasing guard raises the build to floor + 1 when the floor
-#      is already at or above the commit count, and the marketing version
-#      moves with it. UTC YYYYMMDDHHMM stamps are retired.
-#   3. COUNTER: the local build-seq counter is retired. Under the commit-count
-#      scheme it is never advanced and it no longer feeds the floor, so a
-#      leftover from the retired timestamp scheme cannot push the build number
-#      above the commit count it names. The committed version record is the
-#      floor input instead.
+#      shipped nowhere (observed live: skipped at 4392s of a 9000s interval,
+#      and the sequence still went 5 -> 6).
+#   2. SCHEME (owner directive 2026-10-24, AFC-517): the marketing version is
+#      the NEXT PATCH on the app's train (<prefix>.<P+1>, P from App Store
+#      Connect), and the build number is INDEPENDENT of it:  the repo commit
+#      count, raised above the App Store Connect floor.  The pair never reads
+#      "1.0.N (N)" any more.
+#   3. COUNTER: the local build-seq counter is retired.  Nothing writes it and
+#      nothing reads it, so a leftover from an older scheme cannot push the
+#      build number above the commit count it names.
+#
+# The App Store Connect answers come from a STUB `node` in FAKE_BIN:  it
+# answers `asc-api.mjs latest-marketing-patch` with $FAKE_ASC_PATCH and
+# `asc-api.mjs build-floor` with $FAKE_ASC_FLOOR (default 0), and exits 2 for
+# anything else -- which is exactly what an unreachable App Store Connect
+# looks like to the ship script.  Nothing here reaches the network.
 #
 # Everything runs offline against scratch state:
 #   HOME                -> scratch (so no real home files exist and App Store
 #                          Connect is never contacted; also makes it impossible
 #                          for a test to touch the real ~/.cache/ios-fleet)
-#   IOS_FLEET_STATE_DIR -> scratch sequence + last-ship files
-#   PATH                -> a fake `xcodebuild` that refuses to archive
+#   IOS_FLEET_STATE_DIR -> scratch last-ship file
+#   PATH                -> a fake `xcodebuild` that refuses to archive and a
+#                          fake `node` (passed as IOS_FLEET_NODE) that
+#                          answers the ASC queries
 # No network, no Xcode, no credentials. Runs on macOS and Linux.
 #
 # Usage:
@@ -47,7 +52,7 @@ FAKE_HOME="${WORK}/home"
 FAKE_BIN="${WORK}/bin"
 STATE="${WORK}/state"
 REPO="${WORK}/repo"
-mkdir -p "$FAKE_HOME" "$FAKE_BIN" "$STATE" "$REPO"
+mkdir -p "$FAKE_HOME" "$FAKE_BIN" "$STATE" "$REPO" "${WORK}/tmp"
 
 # A fake xcodebuild: answers -version, and hard-fails on anything else so a test
 # can never start a real archive.
@@ -63,6 +68,37 @@ exit 99
 FAKE
 chmod +x "${FAKE_BIN}/xcodebuild"
 
+# A stub `node`:  answers the two App Store Connect version queries from the
+# environment and exits 2 for everything else.  Exiting 2 is what the ship
+# script sees when App Store Connect cannot be consulted, so a test can drive
+# the unreachable-App-Store-Connect path without a network.
+cat >"${FAKE_BIN}/node" <<'FAKE'
+#!/usr/bin/env bash
+cmd=""
+for a in "$@"; do
+  case "$a" in
+    */asc-api.mjs) cmd="asc-api" ;;
+    latest-marketing-patch|build-floor)
+      if [[ "$cmd" == "asc-api" ]]; then cmd="${cmd}:${a}"; fi
+      ;;
+  esac
+done
+case "$cmd" in
+  asc-api:latest-marketing-patch)
+    # No stubbed patch = App Store Connect cannot be consulted.
+    [[ -n "${FAKE_ASC_PATCH:-}" ]] || exit 2
+    printf '%s\n' "$FAKE_ASC_PATCH"
+    exit 0
+    ;;
+  asc-api:build-floor)
+    printf '%s\n' "${FAKE_ASC_FLOOR:-0}"
+    exit 0
+    ;;
+esac
+exit 2
+FAKE
+chmod +x "${FAKE_BIN}/node"
+
 # A stub fleet-secrets that always reports "absent", so ASC credentials stay unset and no test
 # can reach the real Infisical (the script falls back to fleet-secrets on PATH).
 printf '#!/usr/bin/env bash\nexit 3\n' >"${FAKE_BIN}/fleet-secrets"
@@ -76,9 +112,9 @@ git -C "$REPO" config user.name "seq test"
 echo seed >"${REPO}/README"
 git -C "$REPO" add README
 git -C "$REPO" -c commit.gpgsign=false commit -qm seed
-# Seed enough commits that the repo's commit count sits ABOVE the state floor
-# these tests use (5), so the normal path is exercised: the build number is
-# the commit count and the guard does not fire. With a one-commit fixture the
+# Seed enough commits that the repo's commit count sits ABOVE the floor these
+# tests use, so the normal path is exercised:  the build number is the commit
+# count and the floor guard does not fire.  With a one-commit fixture the
 # floor wins and every version assertion ends up testing the guard instead of
 # the scheme.
 _seed=2
@@ -89,13 +125,17 @@ while [ "$_seed" -le 6 ]; do
   _seed=$((_seed + 1))
 done
 HEAD_SHA="$(git -C "$REPO" rev-parse HEAD)"
-# Owner directive 2026-10-18 (#2801): marketing is 1.0.<commit_count>. Read the
-# count from the fixture instead of hard-coding it, so adding a seed commit to
-# the harness cannot silently stale section 4 a second time.
+# Owner directive 2026-10-24 (AFC-517): the build number starts from the commit
+# count.  Read the count from the fixture instead of hard-coding it, so adding
+# a seed commit to the harness cannot silently stale the assertions.
 COMMIT_COUNT="$(git -C "$REPO" rev-list --count HEAD)"
 
 SEQ_FILE="${STATE}/build-seq-congress.txt"
 SHIP_FILE="${STATE}/last-ship-congress.txt"
+
+# The App Store Connect answers the stub gives.  Unset = unreachable.
+FAKE_ASC_PATCH=""
+FAKE_ASC_FLOOR=""
 
 PASS=0
 FAIL=0
@@ -109,6 +149,11 @@ run_ship() {
     PATH="${FAKE_BIN}:/usr/bin:/bin:/usr/sbin:/sbin" \
     TMPDIR="${WORK}/tmp" \
     IOS_FLEET_STATE_DIR="$STATE" \
+    FLEET_SECRETS="${FAKE_BIN}/fleet-secrets" \
+    ASC_KEY_ID=fake \
+    IOS_FLEET_NODE="${FAKE_BIN}/node" \
+    FAKE_ASC_PATCH="$FAKE_ASC_PATCH" \
+    FAKE_ASC_FLOOR="$FAKE_ASC_FLOOR" \
     bash "$SHIP" "$@" 2>&1)"
   RC=$?
   return 0
@@ -133,15 +178,23 @@ seq_now() { cat "$SEQ_FILE" 2>/dev/null || echo MISSING; }
 # needles contain '.' / '()'.
 contains() { [[ "$OUT" == *"$1"* ]]; }
 
+# The planned pair, read out of the "marketing=<m> build=<b>" log line.
+planned_pair() {
+  local line
+  line="$(printf '%s' "$OUT" | grep -o 'marketing=[^ ]* build=[^ ]*' | head -1)"
+  PLANNED_MARKETING="$(printf '%s' "$line" | sed 's/^marketing=//; s/ build=.*$//')"
+  PLANNED_BUILD="$(printf '%s' "$line" | sed 's/^.* build=//')"
+}
+
 reset_state() {
   rm -f "$SEQ_FILE" "$SHIP_FILE"
   printf '5' >"$SEQ_FILE"
 }
 
-# The committed version record is the floor input the guard tests drive.  Under
-# the commit-count scheme the local build-seq counter is retired, so the record
-# in project.pbxproj is what resolve_seq_floor() reads.  The paths below are
-# the projectRel entries in this repo's scripts/ios-fleet/apps.json.
+# The paths below are the projectRel entries in this repo's
+# scripts/ios-fleet/apps.json.  project.pbxproj is NOT a sequencing input any
+# more (AFC-517):  the fixture exists so the run gets past the "project not
+# found" check and reaches the version resolution.
 project_rel() { # <app key>
   case "$1" in
     socratic)          printf '%s' 'ios/Socratic Trade.xcodeproj' ;;
@@ -163,12 +216,12 @@ write_record() { # <app key> <record N>
   } >"${dir}/project.pbxproj"
 }
 
-echo "ship-testflight.sh build-sequence tests"
+echo "ship-testflight.sh version tests"
 echo "state=${STATE}"
 echo
 
 # --- 1. Rate-limited run must not consume ----------------------------------
-echo "1. ship gate: rate-limited run does not consume a build number"
+echo "1. ship gate: rate-limited run does not resolve a version"
 reset_state
 printf '%s %s\n' "$(date +%s)" "0000000000000000000000000000000000000000" >"$SHIP_FILE"
 run_ship congress --repo-root "$REPO" --allow-unverified-seq
@@ -180,11 +233,11 @@ check "names the override (IOS_TF_MIN_INTERVAL_SEC / --force-ship)" \
 check "names the 3600s default and where it lives" \
   "$(contains '3600s' && contains 'DEFAULT_MIN_INTERVAL_SEC' && echo 0 || echo 1)"
 check "skips the App Store Connect round trip entirely" \
-  "$(contains 'seq sources:' && echo 1 || echo 0)"
+  "$(contains 'version plan:' && echo 1 || echo 0)"
 echo
 
 # --- 2. Same-HEAD run must not consume -------------------------------------
-echo "2. ship gate: already-shipped HEAD does not consume a build number"
+echo "2. ship gate: already-shipped HEAD does not resolve a version"
 reset_state
 printf '%s %s\n' "1" "$HEAD_SHA" >"$SHIP_FILE"
 run_ship congress --repo-root "$REPO" --allow-unverified-seq
@@ -203,17 +256,21 @@ check "stops at the missing project (never archives)" \
 check "the local counter is not advanced (it is not the build number now)" \
   "$([[ "$(seq_now)" == "5" ]] && echo 0 || echo 1)"
 check "the planned build number is the commit count" \
-  "$(contains "marketing=1.0.${COMMIT_COUNT}" && echo 0 || echo 1)"
+  "$(contains "build=${COMMIT_COUNT}" && echo 0 || echo 1)"
+check "an unverified patch plans the first patch of the train" \
+  "$(contains 'marketing=1.0.1 build=' && echo 0 || echo 1)"
+check "says loudly that the patch was unverified" \
+  "$(contains 'UNVERIFIED' && echo 0 || echo 1)"
 echo
 
 # --- 4. --dry-run must not consume -----------------------------------------
-echo "4. --dry-run does not consume a build number"
+echo "4. --dry-run does not ship anything"
 reset_state
 run_ship congress --repo-root "$REPO" --allow-unverified-seq --dry-run
 check "exits 0" "$([[ $RC -eq 0 ]] && echo 0 || echo 1)"
 check "sequence still 5" "$([[ "$(seq_now)" == "5" ]] && echo 0 || echo 1)"
-check "plans the next version 1.0.${COMMIT_COUNT}" \
-  "$(contains "marketing=1.0.${COMMIT_COUNT}" && echo 0 || echo 1)"
+check "plans the build number without shipping it" \
+  "$(contains "build=${COMMIT_COUNT}" && echo 0 || echo 1)"
 echo
 
 # --- 5. --dry-run reports a gated run without consuming --------------------
@@ -227,7 +284,7 @@ check "sequence still 5" "$([[ "$(seq_now)" == "5" ]] && echo 0 || echo 1)"
 echo
 
 # --- 6. --upload-only must not consume -------------------------------------
-echo "6. --upload-only does not consume a build number"
+echo "6. --upload-only does not resolve a version"
 reset_state
 : >"${WORK}/fake.ipa"
 run_ship congress --repo-root "$REPO" --upload-only "${WORK}/fake.ipa"
@@ -246,88 +303,130 @@ check "the local counter is still not advanced" \
   "$([[ "$(seq_now)" == "5" ]] && echo 0 || echo 1)"
 echo
 
-# --- 8. Version scheme: 1.0.<commit_count> marketing and build, all four apps
-SECTION8_FLOOR=5
-echo "8. version scheme: 1.0.<commit_count> marketing and build, all four apps"
+# --- 8. The version scheme (owner directive 2026-10-24, AFC-517) -----------
+echo "8. version scheme: next patch on the train, independent build number"
+FAKE_ASC_PATCH=236
+FAKE_ASC_FLOOR=0
 for app in socratic congress usage usage-local; do
   rm -f "${STATE}/build-seq-${app}.txt" "${STATE}/last-ship-${app}.txt"
-  # The local build-seq counter is retired, so a floor written to the seq
-  # file is never read back:  local_seq() returns 0.  Drive the floor from
-  # the one input that still feeds resolve_seq_floor() instead, the
-  # committed version record in project.pbxproj, and put it BELOW the
-  # commit count so the guard must not fire and the build lands on the
-  # commit count.  The other side of the rule, a floor at or above the
-  # commit count bumping the pair, is covered by the GUARD_FLOOR loop.
-  write_record "$app" "$SECTION8_FLOOR"
-  run_ship "$app" --repo-root "$REPO" --allow-unverified-seq --dry-run
-  line="$(printf '%s' "$OUT" | grep -o 'marketing=[^ ]* build=[^ ]*' | head -1)"
-  mk="$(printf '%s' "$line" | sed 's/^marketing=//; s/ build=.*$//')"
-  bn="$(printf '%s' "$line" | sed 's/^.* build=//')"
+  write_record "$app" 5
+  run_ship "$app" --repo-root "$REPO" --dry-run
+  planned_pair
+  mk="$PLANNED_MARKETING"
+  bn="$PLANNED_BUILD"
 
-  check "${app}: marketing is 1.0.N on the commit-count train (got '${mk}')" \
-    "$(printf '%s' "$mk" | grep -Eq '^1\.0\.[0-9]+$' && echo 0 || echo 1)"
-  check "${app}: build is a positive integer, not a 12-digit stamp (got '${bn}')" \
-    "$(printf '%s' "$bn" | grep -Eq '^[1-9][0-9]*$' && echo 0 || echo 1)"
-  check "${app}: build is not a copy of marketing (no more '1.0.N (1.0.N)')" \
-    "$([[ "$bn" != "$mk" ]] && echo 0 || echo 1)"
-  check "${app}: build strictly exceeds the record floor ${SECTION8_FLOOR} (got '${bn}')" \
-    "$([[ "${bn:-0}" -gt "$SECTION8_FLOOR" ]] 2>/dev/null && echo 0 || echo 1)"
-  check "${app}: build is at least the commit count (got '${bn}' vs ${COMMIT_COUNT})" \
-    "$([[ "${bn:-0}" -ge "$COMMIT_COUNT" ]] 2>/dev/null && echo 0 || echo 1)"
-  check "${app}: marketing and build describe one number (got '${mk}' / '${bn}')" \
-    "$([[ "$mk" == "1.0.${bn}" ]] && echo 0 || echo 1)"
+  check "${app}: the marketing version is the next patch on the train (got '${mk}')" \
+    "$([[ "$mk" == "1.0.237" ]] && echo 0 || echo 1)"
+  check "${app}: the build number is the repo commit count (got '${bn}')" \
+    "$([[ "$bn" == "$COMMIT_COUNT" ]] && echo 0 || echo 1)"
+  check "${app}: the build number is not the patch number (no '1.0.N (N)')" \
+    "$([[ "$bn" != "237" ]] && echo 0 || echo 1)"
+  check "${app}: the marketing version is not 1.0.<build> (got '${mk}' / '${bn}')" \
+    "$([[ "$mk" != "1.0.${bn}" ]] && echo 0 || echo 1)"
   check "${app}: reports the App Store Connect rendering" \
     "$(contains "will show this as: ${mk} (${bn})" && echo 0 || echo 1)"
-done
-
-# The guard: when the floor is already at or above the commit count, the build
-# number is raised to floor + 1 and MARKETING moves with it, so the pair still
-# describes one number. This is the case the one-commit fixture used to cover
-# by accident; it gets its own loop now.
-GUARD_FLOOR=$((COMMIT_COUNT + 3))
-for app in socratic congress usage usage-local; do
-  rm -f "${STATE}/build-seq-${app}.txt" "${STATE}/last-ship-${app}.txt"
-  write_record "$app" "$GUARD_FLOOR"
-  run_ship "$app" --repo-root "$REPO" --allow-unverified-seq --dry-run
-  line="$(printf '%s' "$OUT" | grep -o 'marketing=[^ ]* build=[^ ]*' | head -1)"
-  mk="$(printf '%s' "$line" | sed 's/^marketing=//; s/ build=.*$//')"
-  bn="$(printf '%s' "$line" | sed 's/^.* build=//')"
-
-  check "${app}: guard raises the build to floor + 1 (got '${bn}')" \
-    "$([[ "${bn:-0}" -eq "$((GUARD_FLOOR + 1))" ]] && echo 0 || echo 1)"
-  check "${app}: guard moves marketing with the build (got '${mk}')" \
-    "$([[ "$mk" == "1.0.${bn}" ]] && echo 0 || echo 1)"
-  # Leave the fixture as the earlier sections found it:  the record is the only
-  # floor source left, and the sections after this loop expect the plain
-  # commit-count version.
+  check "${app}: prints the version plan line" \
+    "$(contains 'version plan: asc_patch=236 -> marketing=1.0.237' && echo 0 || echo 1)"
   rm -f "${REPO}/$(project_rel "$app")/project.pbxproj"
   rmdir "${REPO}/$(project_rel "$app")" 2>/dev/null || true
 done
 
-# Regression guard (2026-10-19): the operator-override path must floor against
-# the train the operator named, not against the configured default.  A
-# --version 2.0.5 override has to read the 2.0 floor, or the auto-filled build
-# number can collide with a 2.0.X build App Store Connect already holds and
-# the upload is rejected as a duplicate.
-check "the override path derives its floor from the shipped train" \
-  "$(grep -q 'version_prefix "\$MARKETING"' "$SHIP" && echo 0 || echo 1)"
-check "the override path does not floor against the default train" \
-  "$(grep -q '_of_floor="\$(resolve_seq_floor "\$MARKETING_PREFIX"' "$SHIP" && echo 1 || echo 0)"
+# The floor above the commit count:  the build number moves to floor + 1 and
+# the marketing version stays the next patch.  The two numbers are
+# independent, so the floor never moves the version.
+FLOOR_HIGH=202610180036
+for app in socratic congress usage usage-local; do
+  rm -f "${STATE}/build-seq-${app}.txt" "${STATE}/last-ship-${app}.txt"
+  write_record "$app" 5
+  FAKE_ASC_FLOOR="$FLOOR_HIGH"
+  run_ship "$app" --repo-root "$REPO" --dry-run
+  planned_pair
+  mk="$PLANNED_MARKETING"
+  bn="$PLANNED_BUILD"
+
+  check "${app}: a floor above the commit count raises the build to floor + 1 (got '${bn}')" \
+    "$([[ "$bn" == "$((FLOOR_HIGH + 1))" ]] && echo 0 || echo 1)"
+  check "${app}: the floor does not move the marketing version (got '${mk}')" \
+    "$([[ "$mk" == "1.0.237" ]] && echo 0 || echo 1)"
+  check "${app}: the marketing version is not 1.0.<build> (got '${mk}' / '${bn}')" \
+    "$([[ "$mk" != "1.0.${bn}" ]] && echo 0 || echo 1)"
+  rm -f "${REPO}/$(project_rel "$app")/project.pbxproj"
+  rmdir "${REPO}/$(project_rel "$app")" 2>/dev/null || true
+done
+FAKE_ASC_FLOOR=0
+
+# --version pins the marketing version exactly, and the build number is then
+# floored against THAT train.
+for app in socratic congress usage usage-local; do
+  rm -f "${STATE}/build-seq-${app}.txt" "${STATE}/last-ship-${app}.txt"
+  write_record "$app" 5
+  FAKE_ASC_FLOOR=202610180036
+  run_ship "$app" --repo-root "$REPO" --dry-run --version 1.0.236
+  planned_pair
+  mk="$PLANNED_MARKETING"
+  bn="$PLANNED_BUILD"
+
+  check "${app}: --version is honoured exactly (got '${mk}')" \
+    "$([[ "$mk" == "1.0.236" ]] && echo 0 || echo 1)"
+  check "${app}: the build is floored against the pinned train (got '${bn}')" \
+    "$([[ "$bn" == "202610180037" ]] && echo 0 || echo 1)"
+  check "${app}: the marketing version is not 1.0.<build> (got '${mk}' / '${bn}')" \
+    "$([[ "$mk" != "1.0.${bn}" ]] && echo 0 || echo 1)"
+  rm -f "${REPO}/$(project_rel "$app")/project.pbxproj"
+  rmdir "${REPO}/$(project_rel "$app")" 2>/dev/null || true
+done
+FAKE_ASC_FLOOR=0
+
+# --build pins the build number exactly, and the marketing version is still
+# the automatic next patch.
+for app in socratic congress usage usage-local; do
+  rm -f "${STATE}/build-seq-${app}.txt" "${STATE}/last-ship-${app}.txt"
+  write_record "$app" 5
+  run_ship "$app" --repo-root "$REPO" --dry-run --build 999
+  planned_pair
+  mk="$PLANNED_MARKETING"
+  bn="$PLANNED_BUILD"
+
+  check "${app}: --build is honoured exactly (got '${bn}')" \
+    "$([[ "$bn" == "999" ]] && echo 0 || echo 1)"
+  check "${app}: --build does not move the marketing version (got '${mk}')" \
+    "$([[ "$mk" == "1.0.237" ]] && echo 0 || echo 1)"
+  rm -f "${REPO}/$(project_rel "$app")/project.pbxproj"
+  rmdir "${REPO}/$(project_rel "$app")" 2>/dev/null || true
+done
+
+# Without --allow-unverified-seq, an unreachable App Store Connect is fatal:
+# the marketing version and the build floor both come from it.
+for app in socratic congress usage usage-local; do
+  rm -f "${STATE}/build-seq-${app}.txt" "${STATE}/last-ship-${app}.txt"
+  write_record "$app" 5
+  FAKE_ASC_PATCH=""
+  run_ship "$app" --repo-root "$REPO" --dry-run
+  check "${app}: an unreachable App Store Connect fails the run (rc=${RC})" \
+    "$([[ $RC -ne 0 ]] && echo 0 || echo 1)"
+  check "${app}: says what could not be determined" \
+    "$(contains 'cannot determine the next marketing version' && echo 0 || echo 1)"
+  check "${app}: does not ship a version it could not verify" \
+    "$(contains 'marketing=1.0.' && echo 1 || echo 0)"
+  rm -f "${REPO}/$(project_rel "$app")/project.pbxproj"
+  rmdir "${REPO}/$(project_rel "$app")" 2>/dev/null || true
+done
+FAKE_ASC_PATCH=236
 echo
 
 # --- 9. The counter no longer decides the version -------------------------
-echo "9. the counter stays put; the version comes from the commit count"
+echo "9. the counter stays put; the version comes from App Store Connect"
 rm -f "$SEQ_FILE" "$SHIP_FILE"
 printf '5' >"$SEQ_FILE"
 seen=""
 for i in 1 2 3; do
-  run_ship congress --repo-root "$REPO" --allow-unverified-seq
+  run_ship congress --repo-root "$REPO" --dry-run
   seen="${seen} $(seq_now)"
 done
 check "three allowed runs leave the counter at 5 (got:${seen})" \
   "$([[ "$seen" == " 5 5 5" ]] && echo 0 || echo 1)"
-check "the run planned the commit-count version" \
-  "$(contains "marketing=1.0.${COMMIT_COUNT}" && echo 0 || echo 1)"
+check "the run planned the next patch on the train" \
+  "$(contains 'marketing=1.0.237' && echo 0 || echo 1)"
 echo
 
 # --- 10. Standing 1-hour gate: just-under skips, at-or-over proceeds -------
@@ -356,14 +455,20 @@ echo
 # unverifiable, and that alone is fatal.
 echo "11. unverified ASC die-text names App Store Connect, not the local counter"
 reset_state
+# An empty stubbed patch is exactly what an unreachable App Store Connect
+# looks like to the ship script.
+FAKE_ASC_PATCH=""
 run_ship congress --repo-root "$REPO"
 check "exits 1 without --allow-unverified-seq" "$([[ $RC -eq 1 ]] && echo 0 || echo 1)"
 check "does not claim there is no local sequence" \
   "$(contains 'there is no local sequence' && echo 1 || echo 0)"
 check "the retired local counter does not feed the floor" \
-  "$(contains 'local=0' && echo 0 || echo 1)"
+  "$(contains 'local=0' && echo 1 || echo 0)"
+check "names the marketing version as what could not be determined" \
+  "$(contains 'cannot determine the next marketing version' && echo 0 || echo 1)"
 check "names App Store Connect as the cause" \
   "$(contains 'App Store Connect could not be' && echo 0 || echo 1)"
+FAKE_ASC_PATCH=236
 echo
 
 echo "----------------------------------------"
