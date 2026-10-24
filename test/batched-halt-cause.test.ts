@@ -265,6 +265,58 @@ describe("batched halt-cause kinds", () => {
     ).toThrow();
   });
 
+  it("classifies two scope sets that arrive together: a shared refresh never hides an app halt", async () => {
+    const { db, causes } = await load();
+
+    const first = await seedHalted("First Set");
+    const second = await seedHalted("Second Set");
+    db.audit("policy_violation_drawdown", { reason: "first set", revertedTo: "halted" }, first.userId, first.accountId);
+    db.audit("policy_violation_drawdown", { reason: "second set", revertedTo: "halted" }, second.userId, second.accountId);
+
+    // The health route and the run-failure watchdog compute their scope sets independently, so
+    // two callers with DIFFERENT scopes really do overlap.  A shared refresh that only covered
+    // the first caller's scopes left the second caller with no cache entry, and a missing entry
+    // reads as "no app-initiated halt" -- an app halt mislabelled as an owner stop, which counts
+    // as a deliberately idle account and suppresses the fleet-fully-dark page.
+    const [firstKinds, secondKinds] = await Promise.all([
+      causes.batchedHaltCauseKinds([ref(first)]),
+      causes.batchedHaltCauseKinds([ref(second)])
+    ]);
+
+    expect(firstKinds.get(`${first.userId}:${first.accountId}`)).toBe("breaker");
+    expect(secondKinds.get(`${second.userId}:${second.accountId}`)).toBe("breaker");
+  });
+
+  it("bounds the off-loop read: the runner gets the signal and the caller gives up when it aborts", async () => {
+    const { causes } = await load();
+    const account = await seedHalted("Bounded");
+
+    let received: AbortSignal | undefined;
+    const previous = causes.__setHaltAuditRunnerForTests(
+      async (_sql, _params, _dbPath, _schema, options) =>
+        new Promise<never>((_resolve, reject) => {
+          received = options.signal;
+          options.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        })
+    );
+    process.env.HALT_AUDIT_OFF_LOOP_BUDGET_MS = "200";
+    try {
+      const started = Date.now();
+      await causes.batchedHaltCauseKinds([ref(account)]);
+      const elapsed = Date.now() - started;
+
+      // The read is bounded by the abort, not by the statement: without a shared signal a queued
+      // read could hold its caller for 23 s per chunk -- past the 12 s health probe and the 14 s
+      // Docker HEALTHCHECK, which is the outage this fix exists to remove.
+      expect(elapsed).toBeLessThan(5_000);
+      expect(received).toBeDefined();
+      expect(received?.aborted).toBe(true);
+    } finally {
+      delete process.env.HALT_AUDIT_OFF_LOOP_BUDGET_MS;
+      causes.__setHaltAuditRunnerForTests(previous);
+    }
+  });
+
   it("does not query for an empty fleet and splits the audit read on the chunk boundary", async () => {
     const { db, causes } = await load();
     const database = db.getDb();

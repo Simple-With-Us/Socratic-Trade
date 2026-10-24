@@ -248,9 +248,9 @@ type CachedHaltAuditRow = { row: LatestAppHaltRow | null; at: number };
 export const HALT_AUDIT_CACHE_TTL_MS = 60_000;
 
 /**
- * Execution budget for one off-loop audit read.  The production batch takes ~5.4 s; the budget
- * leaves room for a slower plan on a bigger database and still retires the worker slot rather
- * than hanging the caller.
+ * Execution budget for ONE off-loop audit read -- the whole read, not one chunk of it.  The
+ * production batch takes ~5.4 s; the budget leaves room for a slower plan on a bigger database
+ * and still retires the worker slot rather than hanging the caller.
  *
  * It is deliberately BELOW the fleet-health-recover probe timeout (12 s) and the Docker
  * HEALTHCHECK `--max-time` (14 s).  This read sits behind the health route, and a cold health
@@ -259,8 +259,34 @@ export const HALT_AUDIT_CACHE_TTL_MS = 60_000;
  * the restart would re-run the boot sweep.  At 8 s a contended read gives up, the cache keeps its
  * previous (stale) row, and the probe still answers in time.  A stale halt cause is display-only;
  * a missed probe is an outage.
+ *
+ * It covers the QUEUE WAIT as well as the statement.  `sqliteAllOffLoop` without a signal arms a
+ * queue ceiling of `timeoutMs + SQLITE_OFF_LOOP_TIMEOUT_MS` (8 s + 15 s), so a read that waited
+ * for a busy worker could hold its caller for 23 s -- past both probe budgets, which is the
+ * outage this fix exists to remove.  One AbortSignal bounds the wait for every chunk instead.
  */
 const HALT_AUDIT_OFF_LOOP_TIMEOUT_MS = 8_000;
+
+/**
+ * The budget the sweep actually uses.  Production always gets the constant above; a test can
+ * shorten it so the bound can be proven without waiting eight seconds.
+ */
+function haltAuditBudgetMs(): number {
+  const raw = process.env.HALT_AUDIT_OFF_LOOP_BUDGET_MS;
+  if (raw != null && raw !== "" && process.env.VITEST) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return HALT_AUDIT_OFF_LOOP_TIMEOUT_MS;
+}
+
+/**
+ * How many scopes the cache holds before its oldest entries are dropped.
+ *
+ * The cache is keyed by (user, connected account), so account churn grows it forever, and every
+ * entry holds an audit row with its payload.  Bounded: the oldest entries go first.
+ */
+const HALT_AUDIT_CACHE_MAX_ENTRIES = 1_000;
 
 /** One audit row as the off-loop worker returns it.  `audit_events.payload` is NOT NULL. */
 const HaltAuditRowSchema = z.object({
@@ -274,8 +300,32 @@ const HaltAuditRowSchema = z.object({
 
 type HaltAuditRow = z.infer<typeof HaltAuditRowSchema>;
 
-const haltAuditCache = new Map<string, CachedHaltAuditRow>();
-let haltAuditRefreshInFlight: Promise<void> | null = null;
+/**
+ * The audit cache, the shared in-flight refresh and the pending-scope set live on `globalThis`,
+ * not in module scope.
+ *
+ * Next.js loads this module into more than one bundle (the route bundle and the instrumentation
+ * bundle are separate module graphs).  A module-local Map gives each copy its own cache, its own
+ * in-flight refresh and its own pending set, so two copies disagree about what has been read: a
+ * caller can wait for a refresh another copy is running, get no cache entry for its own scopes,
+ * and read "no app-initiated halt" out of a scope the other copy had already read.  That
+ * mislabels a drawdown breaker or a lost auto-pause as an owner stop -- and an owner stop is a
+ * "deliberately idle" account, which suppresses the fleet-fully-dark page for that poll.
+ */
+declare global {
+  var __socraticHaltAuditCache: Map<string, CachedHaltAuditRow> | undefined;
+
+  var __socraticHaltAuditRefreshInFlight: Promise<void> | undefined;
+
+  var __socraticHaltAuditPendingScopes: Map<string, AuditScope> | undefined;
+}
+
+const haltAuditCache = (globalThis.__socraticHaltAuditCache ??= new Map<string, CachedHaltAuditRow>());
+
+/** Scopes a caller wants read that no refresh has covered yet.  Shared like the cache. */
+function pendingHaltAuditScopes(): Map<string, AuditScope> {
+  return (globalThis.__socraticHaltAuditPendingScopes ??= new Map<string, AuditScope>());
+}
 
 function haltAuditScopeKey(scope: AuditScope): string {
   return `${scope.userId}\u0000${scope.connectedAccountId ?? ""}`;
@@ -302,50 +352,172 @@ export function buildHaltAuditStatements(accounts: readonly HaltAuditScope[]): {
 }
 
 /**
+ * The off-loop runner the sweep uses.  Production runs `sqliteAllOffLoop`; a test replaces it
+ * with a stand-in, which is how the read's bound is proven without a slow database.
+ */
+type HaltAuditRunner = (
+  sql: string,
+  params: readonly unknown[],
+  dbPath: string,
+  rowSchema: z.ZodType<HaltAuditRow>,
+  options: { timeoutMs: number; signal: AbortSignal }
+) => Promise<HaltAuditRow[]>;
+
+let haltAuditRunner: HaltAuditRunner = sqliteAllOffLoop as unknown as HaltAuditRunner;
+
+/**
+ * Test-only: replace the off-loop runner.  Returns the runner that was in place, so the caller
+ * can put it back.
+ */
+export function __setHaltAuditRunnerForTests(runner: HaltAuditRunner | null): HaltAuditRunner {
+  const previous = haltAuditRunner;
+  haltAuditRunner = runner ?? (sqliteAllOffLoop as unknown as HaltAuditRunner);
+  return previous;
+}
+
+/**
  * The same statement the serving connection runs, executed on an off-loop worker thread
  * (`src/lib/rag/sqlite-all-offloop.ts`).  better-sqlite3 is synchronous, so on the serving
  * connection this read pinned the event loop for the whole statement -- and the health route
  * runs it, so the health probe could not answer until the read finished.
+ *
+ * `budgetMs` covers the WHOLE read: the queue wait for a worker, the statement, and every chunk
+ * of it.
  */
-async function readHaltAuditRowsOffLoop(scopes: readonly AuditScope[]): Promise<Map<string, HaltAuditRow>> {
+async function readHaltAuditRowsOffLoop(
+  scopes: readonly AuditScope[],
+  budgetMs: number
+): Promise<Map<string, HaltAuditRow>> {
   const rows = new Map<string, HaltAuditRow>();
+  if (scopes.length === 0) return rows;
   const dbPath = databasePath();
-  for (const statement of buildHaltAuditStatements(scopes)) {
-    const chunkRows = await sqliteAllOffLoop(statement.sql, statement.params, dbPath, HaltAuditRowSchema, {
-      timeoutMs: HALT_AUDIT_OFF_LOOP_TIMEOUT_MS
-    });
-    for (const row of chunkRows) {
-      rows.set(haltAuditScopeKey({ userId: row.user_id, connectedAccountId: row.connected_account_id }), row);
+  // ONE deadline for the whole read: the queue wait for a worker, the statement, and every chunk
+  // of it.  `sqliteAllOffLoop` without a signal arms a queue ceiling of `timeoutMs + 15 s`, so a
+  // queued read could hold its caller for 23 s per chunk -- past the 12 s health probe and the
+  // 14 s Docker HEALTHCHECK, which is the outage this fix exists to remove.  One AbortSignal
+  // bounds the wait for every chunk instead, and the signal suppresses that queue ceiling.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), budgetMs);
+  try {
+    for (const statement of buildHaltAuditStatements(scopes)) {
+      const chunkRows = await haltAuditRunner(statement.sql, statement.params, dbPath, HaltAuditRowSchema, {
+        timeoutMs: budgetMs,
+        signal: controller.signal
+      });
+      for (const row of chunkRows) {
+        rows.set(haltAuditScopeKey({ userId: row.user_id, connectedAccountId: row.connected_account_id }), row);
+      }
     }
+  } finally {
+    clearTimeout(timer);
   }
   return rows;
 }
 
 /**
- * Refresh the cached audit rows for the given scopes.  One refresh runs at a time; a caller that
- * arrives while one is in flight waits for that one instead of starting a second read.
+ * Await `promise`, but give up at `deadline`.  The promise keeps running in the background: it is
+ * an off-loop read with its own budget, and the caller only needs to stop waiting for it.
  */
-function refreshHaltAuditRows(scopes: readonly AuditScope[]): Promise<void> {
-  if (scopes.length === 0) return Promise.resolve();
-  if (haltAuditRefreshInFlight) return haltAuditRefreshInFlight;
+async function untilDeadline(promise: Promise<void>, deadline: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, Math.max(0, deadline - Date.now()));
+  });
+  try {
+    await Promise.race([promise, guard]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Keep the cache bounded.  It is keyed by (user, connected account), so account churn grows it
+ * forever, and every entry holds an audit row with its payload.
+ */
+function pruneHaltAuditCache(): void {
+  if (haltAuditCache.size <= HALT_AUDIT_CACHE_MAX_ENTRIES) return;
+  const oldest = [...haltAuditCache.entries()].sort((a, b) => a[1].at - b[1].at);
+  for (const [key] of oldest.slice(0, haltAuditCache.size - HALT_AUDIT_CACHE_MAX_ENTRIES)) {
+    haltAuditCache.delete(key);
+  }
+}
+
+/**
+ * One off-loop refresh, shared by every caller.
+ *
+ * It reads the pending scopes in rounds: a caller that arrives while a round is running adds its
+ * scopes to the pending set, and the next round picks them up.  The whole refresh -- every round,
+ * every chunk -- is bounded by ONE deadline, so the caller waiting on it waits at most that long.
+ * The health route awaits this, and a health probe that misses its deadline restarts the
+ * container, which re-runs the boot sweep.
+ */
+function startHaltAuditRefresh(budgetMs: number): Promise<void> {
+  const deadline = Date.now() + Math.max(0, budgetMs);
   const pending = (async () => {
-    try {
-      const rows = await readHaltAuditRowsOffLoop(scopes);
+    while (pendingHaltAuditScopes().size > 0) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const batch = [...pendingHaltAuditScopes().values()];
+      pendingHaltAuditScopes().clear();
+      let rows: Map<string, HaltAuditRow>;
+      try {
+        rows = await readHaltAuditRowsOffLoop(batch, remaining);
+      } catch {
+        // Put the scopes back so the next caller retries them, and leave the cache as it was.
+        // A stale row is better than a wrong one, and the caller still reads the old cache,
+        // exactly as a failed read did.
+        for (const scope of batch) {
+          const key = haltAuditScopeKey(scope);
+          if (!pendingHaltAuditScopes().has(key)) pendingHaltAuditScopes().set(key, scope);
+        }
+        break;
+      }
       const at = Date.now();
-      for (const scope of scopes) {
+      for (const scope of batch) {
         const key = haltAuditScopeKey(scope);
         haltAuditCache.set(key, { row: rows.get(key) ?? null, at });
       }
-    } catch {
-      // Leave the cache as it was.  A stale row is better than a wrong one, and the next
-      // refresh retries.  The caller still reads the old cache, exactly as a failed read did.
+      pruneHaltAuditCache();
     }
   })();
-  haltAuditRefreshInFlight = pending;
+  globalThis.__socraticHaltAuditRefreshInFlight = pending;
   void pending.then(() => {
-    if (haltAuditRefreshInFlight === pending) haltAuditRefreshInFlight = null;
+    if (globalThis.__socraticHaltAuditRefreshInFlight === pending) {
+      globalThis.__socraticHaltAuditRefreshInFlight = undefined;
+    }
   });
   return pending;
+}
+
+/**
+ * Refresh the cached audit rows for the given scopes.
+ *
+ * One refresh runs at a time.  A caller that arrives while one is running waits for it and then
+ * refreshes whatever of ITS OWN scopes is still missing: the shared refresh may have covered
+ * different scopes, and a scope with no cache entry reads as "no app-initiated halt", which
+ * mislabels a drawdown breaker or a lost auto-pause as an owner stop -- and an owner stop counts
+ * as a deliberately idle account, which suppresses the fleet-fully-dark page for that poll.
+ */
+async function refreshHaltAuditRows(scopes: readonly AuditScope[]): Promise<void> {
+  if (scopes.length === 0) return;
+  const deadline = Date.now() + haltAuditBudgetMs();
+  for (const scope of scopes) {
+    pendingHaltAuditScopes().set(haltAuditScopeKey(scope), scope);
+  }
+  const running = globalThis.__socraticHaltAuditRefreshInFlight;
+  if (running) {
+    await untilDeadline(running, deadline);
+  } else {
+    await startHaltAuditRefresh(deadline - Date.now());
+  }
+  // Whatever of THIS caller's scopes the shared refresh did not cover gets its own read, with
+  // whatever budget is left.  Out of budget, the cache stays as it is: a stale halt cause is
+  // display-only, and a missed probe is an outage.
+  const missing = scopes.filter((scope) => !haltAuditCache.has(haltAuditScopeKey(scope)));
+  if (missing.length === 0) return;
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return;
+  await startHaltAuditRefresh(remaining);
 }
 
 /**
