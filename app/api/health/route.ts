@@ -223,7 +223,7 @@ async function assembleHealth(): Promise<HealthPayload> {
   // ops-snapshot.ts). Here we fold it down to counts + the oldest age, which is enough for an
   // external uptime probe without leaking account identity.
   try {
-    const liveness = healthProbeDeps.getTradingLivenessSummary();
+    const liveness = await healthProbeDeps.getTradingLivenessSummary();
     const publicLiveness = toPublicTradingLiveness(liveness);
     // Always emit so `tradingLiveness.degraded` exists for JSON-path monitors even when
     // every account is halted.  The boolean sibling is the unique keyword substring.

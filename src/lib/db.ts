@@ -12,6 +12,7 @@ import crypto from "crypto";
 import { DEFAULT_POLICY, DEFAULT_SCORING_WEIGHTS, DEFAULT_STRATEGY_PROMPT } from "./defaults";
 import { SQLITE_BUSY_PIN_MS } from "./sqlite-event-loop";
 import { installSlowSqliteTiming } from "./sqlite-slow-timing";
+import { auditRowChangesHaltCause } from "./halt-audit-invalidation";
 import type { NotificationEventType, TradingPolicy } from "./types";
 
 let db: Database.Database | undefined;
@@ -3858,6 +3859,21 @@ export function audit(kind: string, payload: unknown, userId: string = "local", 
     db.prepare(
       "INSERT INTO audit_events (id, user_id, connected_account_id, created_at, kind, payload) VALUES (?, ?, ?, ?, ?, ?)"
     ).run(id, userId, accountId, createdAt, kind, payloadJson);
+  }
+
+  // ST-4561: the halt-cause cache holds the answer to "did the APP halt this account, and has it
+  // stayed halted?" for up to a minute.  A row that matches the app-halt predicate (a HARD drawdown
+  // breaker, a broker auto-halt) or the handover predicate (an auto-resume, an owner override, a
+  // boot halt, an ops set_system_state, a policy change that leaves `halted`) changes that answer,
+  // so the write marks the cached answer for this scope stale and the next read re-reads it.  A
+  // row that matches neither -- the ADVISORY drawdown row written on every breached strategy run,
+  // for one -- cannot change it and must not force a fresh scan of the 19 GB audit table.
+  //
+  // The hook is registered by autonomy-halt-cause.ts, which imports this module; calling it
+  // through `globalThis` keeps the import graph acyclic.  It is absent in processes that never
+  // load that module, and then the cache TTL governs as before.
+  if (auditRowChangesHaltCause(kind, payloadJson)) {
+    globalThis.__socraticHaltAuditInvalidate?.(userId, accountId);
   }
 }
 

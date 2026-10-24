@@ -8,6 +8,13 @@
 // This wraps statement execution, db.exec and db.transaction so a slow call names itself:
 // SQL text (never bind values), duration, and WAL size at the moment it finished.
 //
+// 2026-10-24: this logger is what named the `audit_events` halt-cause sweep as the statement
+// holding the serving event loop for 4.8-6.8 s, on a path the health route runs.  The log was
+// then hard to read: the SQL prefix was truncated at 160 characters, which is shorter than the
+// sweep's own branch, so the batched and single-account forms of the same statement were
+// indistinguishable -- and, because the rate-limit key was that same truncated prefix, they
+// shared one budget and neither could be counted on its own.
+//
 // Warn-only.  It changes no query, no result and no error: every wrapper calls the original with
 // the same `this` and arguments and rethrows what it throws.  Log lines are rate-limited per SQL
 // key so a slow loop cannot flood stderr.  No node: static imports (instrumentation webpack graph),
@@ -15,7 +22,12 @@
 
 export const SLOW_SQLITE_WARN_MS = 1_000;
 const LOG_EVERY_MS = 10_000;
-const SQL_PREFIX_CHARS = 160;
+/**
+ * How much SQL text a log line carries.  Long enough to hold the `connected_account_id = ?`
+ * versus `IS NULL` branch of the halt-cause sweep, which is where two otherwise identical
+ * statements first differ.
+ */
+const SQL_PREFIX_CHARS = 240;
 
 export interface SlowSqliteOptions {
   thresholdMs?: number;
@@ -28,8 +40,18 @@ export interface SlowSqliteOptions {
 type AnyFn = (...args: unknown[]) => unknown;
 const STATEMENT_METHODS = ["run", "get", "all", "iterate"] as const;
 
+/**
+ * Identity of one SQL shape: the rate-limit key AND the text a log line carries.
+ *
+ * The truncated prefix alone was not enough.  The batched `audit_events` sweep and the
+ * single-account sweep share their first 160 characters, so they shared one rate-limit budget
+ * and the log could not say which one was slow -- production 2026-10-24 could not tell a
+ * 4-account batch from a 1-account read.  The statement length separates them, and the prefix
+ * is long enough to carry the `connected_account_id = ?` versus `IS NULL` branch.
+ */
 function sqlKey(sql: string): string {
-  return sql.replace(/\s+/g, " ").trim().slice(0, SQL_PREFIX_CHARS);
+  const normalized = sql.replace(/\s+/g, " ").trim();
+  return `${normalized.slice(0, SQL_PREFIX_CHARS)} len=${normalized.length}`;
 }
 
 interface Target {

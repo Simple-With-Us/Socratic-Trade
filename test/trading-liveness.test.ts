@@ -96,7 +96,7 @@ describe("trading-liveness", () => {
     // NOR autopilot-eligible-but-halted (a halted non-autopilot account is expected to be quiet).
     await makeAccount(db, "Halted Account", "halted");
 
-    const summary = liveness.getTradingLivenessSummary();
+    const summary = await liveness.getTradingLivenessSummary();
     expect(summary).toBeNull();
     const publicAgg = liveness.toPublicTradingLiveness(summary);
     expect(publicAgg.degraded).toBe(0);
@@ -113,7 +113,7 @@ describe("trading-liveness", () => {
       accountId
     );
 
-    const summary = liveness.getTradingLivenessSummary();
+    const summary = await liveness.getTradingLivenessSummary();
     expect(summary).toBeNull();
     const publicAgg = liveness.toPublicTradingLiveness(summary);
     expect(publicAgg.autonomyFullyDark).toBe(false);
@@ -127,7 +127,7 @@ describe("trading-liveness", () => {
       userId,
       accountId
     );
-    expect(liveness.getTradingLivenessSummary()).toBeNull();
+    expect(await liveness.getTradingLivenessSummary()).toBeNull();
     expect(liveness.isDeliberateAutonomyIdleState("close_only")).toBe(true);
   });
 
@@ -145,7 +145,7 @@ describe("trading-liveness", () => {
       from: "active"
     });
 
-    const summary = liveness.getTradingLivenessSummary();
+    const summary = await liveness.getTradingLivenessSummary();
     expect(summary).not.toBeNull();
     expect(summary!.darkness?.fullyDark).toBe(true);
     expect(summary!.darkness?.fleetActiveAccounts).toBe(0);
@@ -181,7 +181,7 @@ describe("trading-liveness", () => {
       running.accountId
     );
 
-    const summary = liveness.getTradingLivenessSummary();
+    const summary = await liveness.getTradingLivenessSummary();
     expect(summary).not.toBeNull();
     expect(summary!.accounts.length).toBe(1);
     expect(summary!.darkness?.fullyDark).toBe(false);
@@ -220,7 +220,7 @@ describe("trading-liveness", () => {
       running.accountId
     );
 
-    const summary = liveness.getTradingLivenessSummary();
+    const summary = await liveness.getTradingLivenessSummary();
     expect(summary).not.toBeNull();
     expect(summary!.darkness?.fullyDark).toBe(false);
     expect(summary!.darkness?.fleetActiveAccounts).toBeGreaterThan(0);
@@ -246,6 +246,7 @@ describe("trading-liveness", () => {
         darkAccountLabels: [],
         fleetActiveAccounts: 0,
         eligibleDeliberatelyIdle: 0,
+        haltCauseUnknown: 0,
         fullyDark: true
       }
     });
@@ -496,7 +497,7 @@ describe("trading-liveness", () => {
       finishedAt: new Date(now - 60_000).toISOString()
     });
 
-    const summary = liveness.getTradingLivenessSummary(now);
+    const summary = await liveness.getTradingLivenessSummary(now);
     expect(summary).not.toBeNull();
     expect(summary!.degraded).toBe(true);
     const row = summary!.accounts.find((a) => a.connectedAccountId === accountId);
@@ -537,6 +538,8 @@ describe("trading-liveness", () => {
         "autonomyActiveAccounts",
         "autonomyEligibleAccounts",
         "autonomyFullyDark",
+        "autonomyHaltCauseReadFailures",
+        "autonomyHaltCauseUnknown",
         "autopilotAccounts",
         "degraded",
         "degradedReasons",
