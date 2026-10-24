@@ -696,7 +696,7 @@ async function main() {
   // in ./version-plan.mjs (pure, no I/O); this client only reads the App Store
   // Connect state they need.
   //
-  //   latest-marketing-patch  the highest patch already used on a train,
+  //   latest-marketing-patch  one less than the next FREE patch on a train (P, so P + 1 is free);
   //                          drift trains (a <prefix>.N train holding build
   //                          "N") ignored
   //   build-floor             the build number the next ship has to exceed
@@ -708,10 +708,21 @@ async function main() {
   // 5xx or network-failed answer is retried with backoff, because these
   // queries gate every ship and one rate-limit blip must not fail it.
   async function ascGet(url) {
-    let res = await api("GET", url);
+    // A dropped connection or DNS failure makes fetch throw rather than
+    // return a status, so a throw counts as a retryable failure too; the last
+    // one is re-thrown.
+    const once = async (last) => {
+      try {
+        return await api("GET", url);
+      } catch (err) {
+        if (last) throw err;
+        return { ok: false, status: 0, networkError: true, parsed: {} };
+      }
+    };
+    let res = await once(false);
     for (let attempt = 1; attempt <= 3 && !res.ok && (!res.status || res.status === 429 || res.status >= 500); attempt++) {
       await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
-      res = await api("GET", url);
+      res = await once(attempt === 3);
     }
     return res;
   }
@@ -724,7 +735,8 @@ async function main() {
   // that is not dotted integers would misclassify drift trains, so a
   // malformed record fails the query instead of being guessed at.
   const ASC_VERSION_RE = /^\d+(\.\d+)*$/;
-  const validVersion = (v) => typeof v === "string" && ASC_VERSION_RE.test(v);
+  // v === String(v) admits only a primitive string (a number or null fails).
+  const validVersion = (v) => v === String(v) && ASC_VERSION_RE.test(v);
 
   // Every build of one train, page by page.  Used when the train's inline
   // build list is truncated, so a drift train is never mistaken for an
@@ -825,9 +837,7 @@ async function main() {
 
     // 1) The App Store versions.  They are never ignored:  a version that is
     //    on sale counts even when no TestFlight train carries it.
-    const storeRes = await api(
-      "GET",
-      `/v1/apps/${appId}/appStoreVersions?filter[platform]=${encodeURIComponent(platform)}&limit=200`
+    const storeRes = await ascGet(`/v1/apps/${appId}/appStoreVersions?filter[platform]=${encodeURIComponent(platform)}&limit=200`
     );
     if (!storeRes.ok) {
       console.error(`latest-marketing-patch: appStoreVersions query failed (HTTP ${storeRes.status})`);
@@ -835,9 +845,9 @@ async function main() {
     }
     const appStoreVersions = (storeRes.parsed.data || [])
       .map((v) => v?.attributes?.versionString);
-    const badStore = appStoreVersions.find((v) => !validVersion(v));
-    if (badStore !== undefined) {
-      console.error(`latest-marketing-patch: malformed App Store version ${JSON.stringify(badStore)}`);
+    const badStore = appStoreVersions.findIndex((v) => !validVersion(v));
+    if (badStore !== -1) {
+      console.error(`latest-marketing-patch: malformed App Store version ${JSON.stringify(appStoreVersions[badStore] ?? null)}`);
       process.exit(2);
     }
 
@@ -856,7 +866,7 @@ async function main() {
 
     console.error(
       `latest-marketing-patch: ${appStoreVersions.length} App Store version(s) + ${trains.length} train(s) ` +
-      `inspected on ${platform}; highest ${prefix}.N is N=${patch}`
+      `inspected on ${platform}; next free ${prefix}.N is N=${patch + 1} (printed as ${patch}, so the caller's P + 1 lands on it)`
     );
     if (drift.length) {
       const shown = drift.slice(0, 5).join(", ");
