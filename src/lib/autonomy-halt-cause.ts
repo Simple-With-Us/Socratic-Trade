@@ -156,10 +156,10 @@ const jsonField = (path: string, column = "payload") =>
   `CASE WHEN json_valid(${column}) THEN json_extract(${column}, '${path}') END`;
 
 /** App-initiated halt rows.  Same predicate the old two-step lookup used. */
-const APP_HALT_PREDICATE = `(kind = 'broker_placement_auto_halted'
+export const APP_HALT_PREDICATE = `(kind = 'broker_placement_auto_halted'
   OR (kind = 'policy_violation_drawdown' AND ${jsonField("$.revertedTo")} = 'halted'))`;
 
-function handoverPredicate(kindColumn: string, payloadColumn: string): string {
+export function handoverPredicate(kindColumn: string, payloadColumn: string): string {
   return `(${kindColumn} IN ('broker_placement_auto_resumed', 'broker_placement_pause_owner_override', 'autonomy_halted_on_boot')
     OR (${kindColumn} = 'ops_account_control' AND ${jsonField("$.action", payloadColumn)} = 'set_system_state' AND ${jsonField("$.dryRun", payloadColumn)} = 0)
     OR (${kindColumn} = 'policy_change' AND ${jsonField("$.value.systemState", payloadColumn)} <> 'halted'))`;
@@ -232,8 +232,14 @@ function latestAppHalts(db: ReturnType<typeof getDb>, accounts: readonly AuditSc
   return rows;
 }
 
-/** One scope's cached audit row.  `row` is null when the account has no app-initiated halt. */
-type CachedHaltAuditRow = { row: LatestAppHaltRow | null; at: number };
+/**
+ * One scope's cached audit row.  `row` is null when the account has no app-initiated halt.
+ *
+ * `dirty` is set when an audit write may have changed the answer (see invalidateHaltAuditCache):
+ * the row is due for a re-read, but it is still the last CONFIRMED answer, so a re-read that
+ * cannot complete does not erase a confirmed app halt.
+ */
+type CachedHaltAuditRow = { row: LatestAppHaltRow | null; at: number; dirty?: boolean };
 
 /**
  * How long an off-loop audit row stays usable before it is re-read.
@@ -378,6 +384,16 @@ declare global {
    *  over it.  A counter cannot collide. */
   var __socraticHaltAuditInvalidationGeneration: number | undefined;
 
+  /** The highest generation whose per-scope stamp was pruned to keep the stamp map bounded.  A
+   *  read that started before it cannot tell whether ITS scopes were among the pruned ones, so it
+   *  does not cache a scope that has no stamp left. */
+  var __socraticHaltAuditPrunedInvalidationGeneration: number | undefined;
+
+  /** The sequence number of the newest refresh.  A refresh whose shared pointer was released
+   *  (its runner ignored the abort) may still be running; it writes nothing once a newer refresh
+   *  has started. */
+  var __socraticHaltAuditRefreshSequence: number | undefined;
+
   /** Set by this module so the audit write path can drop a scope's cached row without importing
    *  this module: this module imports db.ts, and db.ts is what writes the audit rows. */
   var __socraticHaltAuditInvalidate:
@@ -520,7 +536,7 @@ function prunePendingHaltAuditScopes(): void {
   const drop = new Set<string>();
   for (const key of pending.keys()) {
     if (drop.size >= overflow) break;
-    if (haltAuditCache.has(key)) drop.add(key);
+    if (hasFreshHaltAuditAnswer(key)) drop.add(key);
   }
   if (drop.size < overflow) {
     for (const key of pending.keys()) {
@@ -531,8 +547,14 @@ function prunePendingHaltAuditScopes(): void {
   for (const key of drop) pending.delete(key);
 }
 
+/** True when the scope has a cached answer that no later audit write has made stale. */
+function hasFreshHaltAuditAnswer(key: string): boolean {
+  const hit = haltAuditCache.get(key);
+  return hit !== undefined && !hit.dirty;
+}
+
 /**
- * Drop one scope's cached audit row.
+ * Mark one scope's cached audit row stale.
  *
  * The cache holds the answer to "did the APP halt this account, and has it stayed halted?".  A
  * new app-initiated halt row -- the drawdown breaker or a broker auto-halt -- changes that
@@ -541,6 +563,14 @@ function prunePendingHaltAuditScopes(): void {
  * cache TTL: without this, a breaker halt that lands just after a read is classified as "no
  * app-initiated halt" -- an owner stop -- for up to a minute, and an owner stop counts as a
  * deliberately idle account.
+ *
+ * The row is MARKED stale, not deleted.  It is the last confirmed answer, and a forced re-read can
+ * fail to land (the failure cooldown, the budget, a read error).  Deleting it turned a CONFIRMED
+ * app halt into an unknown cause in that window -- and an unknown cause counts toward idleness
+ * for the fleet-dark page, so a confirmed breaker could stop paging.  The stale row is re-read
+ * on the next poll, and until a re-read lands `classifyFromAudit` keeps reporting a confirmed app
+ * halt from it; a stale "no app-initiated halt" is NOT kept, because the write that made it
+ * stale may be the halt itself, so that scope reads as unknown.
  *
  * The invalidation carries a GENERATION, so a read that was already running when the halt was
  * written cannot write its pre-halt answer back over the invalidation.  A timestamp could not do
@@ -551,7 +581,8 @@ function prunePendingHaltAuditScopes(): void {
  */
 export function invalidateHaltAuditCache(userId: string, connectedAccountId: string | null): void {
   const key = haltAuditScopeKey({ userId, connectedAccountId });
-  haltAuditCache.delete(key);
+  const hit = haltAuditCache.get(key);
+  if (hit) hit.dirty = true;
   haltAuditInvalidatedAt.set(key, nextHaltAuditInvalidationGeneration());
   // The invalidation stamps are bounded here too: they used to be pruned only by a successful
   // refresh, so a database that kept failing (no successful refresh) let them grow with every
@@ -578,9 +609,29 @@ function currentHaltAuditInvalidationGeneration(): number {
 function pruneHaltAuditInvalidations(): void {
   if (haltAuditInvalidatedAt.size <= HALT_AUDIT_CACHE_MAX_ENTRIES) return;
   const oldest = [...haltAuditInvalidatedAt.entries()].sort((a, b) => a[1] - b[1]);
-  for (const [key] of oldest.slice(0, haltAuditInvalidatedAt.size - HALT_AUDIT_CACHE_MAX_ENTRIES)) {
+  let pruned = globalThis.__socraticHaltAuditPrunedInvalidationGeneration ?? 0;
+  for (const [key, generation] of oldest.slice(0, haltAuditInvalidatedAt.size - HALT_AUDIT_CACHE_MAX_ENTRIES)) {
     haltAuditInvalidatedAt.delete(key);
+    pruned = Math.max(pruned, generation);
   }
+  // Remember how far the pruning reached.  A stamp that is gone can no longer stop an in-flight
+  // read from writing its pre-invalidation answer back, so `invalidatedSince` falls back to this.
+  globalThis.__socraticHaltAuditPrunedInvalidationGeneration = pruned;
+}
+
+/**
+ * True when the scope may have been invalidated after a read that started at
+ * `readStartedGeneration`, so that read's answer must not be cached.
+ *
+ * The per-scope stamp answers that exactly while it exists.  Once the stamp map is pruned, a scope
+ * without a stamp may be one whose stamp was dropped, so any pruning past the read's start makes
+ * the answer unsafe to cache.  That is conservative -- a read that overlaps a prune caches nothing
+ * for un-stamped scopes, and the next read caches them -- and it keeps the map bounded.
+ */
+function invalidatedSince(key: string, readStartedGeneration: number): boolean {
+  const stamp = haltAuditInvalidatedAt.get(key);
+  if (stamp !== undefined) return stamp > readStartedGeneration;
+  return (globalThis.__socraticHaltAuditPrunedInvalidationGeneration ?? 0) > readStartedGeneration;
 }
 
 // Registered on `globalThis` so the audit write path (db.ts) can call it without importing this
@@ -681,6 +732,9 @@ export function __resetHaltAuditStateForTests(): void {
   haltAuditCache.clear();
   haltAuditInvalidatedAt.clear();
   globalThis.__socraticHaltAuditInvalidationGeneration = 0;
+  globalThis.__socraticHaltAuditPrunedInvalidationGeneration = 0;
+  // Advance, never reset: a refresh a previous case left running must see itself superseded.
+  globalThis.__socraticHaltAuditRefreshSequence = (globalThis.__socraticHaltAuditRefreshSequence ?? 0) + 1;
 }
 
 /**
@@ -823,10 +877,16 @@ function pruneHaltAuditCache(): void {
  * every chunk -- is bounded by ONE deadline.  The health route awaits this, and a health probe
  * that misses its deadline restarts the container, which re-runs the boot sweep.
  */
-async function runHaltAuditRefresh(budgetMs: number): Promise<void> {
+async function runHaltAuditRefresh(budgetMs: number, sequence: number): Promise<void> {
   const deadline = Date.now() + Math.max(0, budgetMs);
+  // A refresh whose pointer was released at its deadline (its runner ignored the abort) can still
+  // be running when the next caller starts a newer one.  From then on the older one changes no
+  // shared state: it does not take scopes off the pending queue, write the cache, or record a
+  // failure -- otherwise its late, older answer could overwrite the newer refresh's answer and be
+  // served as fresh for a whole TTL.
+  const superseded = () => globalThis.__socraticHaltAuditRefreshSequence !== sequence;
   try {
-    while (pendingHaltAuditScopes().size > 0) {
+    while (!superseded() && pendingHaltAuditScopes().size > 0) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
       const batch = [...pendingHaltAuditScopes().values()];
@@ -844,6 +904,13 @@ async function runHaltAuditRefresh(budgetMs: number): Promise<void> {
         // around the read itself (a bad database path, for instance).
         outcome = { rows: new Map(), covered: new Set(), error };
       }
+      if (superseded()) {
+        // A newer refresh owns the shared state now.  Hand back the scopes this read took that
+        // still have no fresh answer, so the newer refresh or the next caller reads them, and
+        // drop this read's answer.
+        enqueuePendingHaltAuditScopes(batch.filter((scope) => !hasFreshHaltAuditAnswer(haltAuditScopeKey(scope))));
+        return;
+      }
       if (outcome.error === undefined) clearHaltAuditReadFailure();
       const at = Date.now();
       // Cache what the read actually covered.  A chunk that completed is a confirmed answer --
@@ -852,8 +919,7 @@ async function runHaltAuditRefresh(budgetMs: number): Promise<void> {
       for (const scope of batch) {
         const key = haltAuditScopeKey(scope);
         if (!outcome.covered.has(key)) continue;
-        const invalidatedGeneration = haltAuditInvalidatedAt.get(key);
-        if (invalidatedGeneration !== undefined && invalidatedGeneration > readStartedGeneration) {
+        if (invalidatedSince(key, readStartedGeneration)) {
           // The scope was invalidated while this read was running: this answer predates the
           // invalidation, so it is not cached.  The next read sees the newer row.
           continue;
@@ -900,10 +966,13 @@ function startHaltAuditRefresh(budgetMs: number): Promise<void> {
   const state: HaltAuditRefreshState = { promise, settled: false };
   // Published BEFORE the refresh starts, so a caller that arrives in the same turn reuses it.
   globalThis.__socraticHaltAuditRefresh = state;
-  let releaseTimer: ReturnType<typeof setTimeout> | undefined;
+  const sequence = (globalThis.__socraticHaltAuditRefreshSequence ?? 0) + 1;
+  globalThis.__socraticHaltAuditRefreshSequence = sequence;
+  // `finish` runs only after `releaseTimer` below is assigned: from the timer itself, or from the
+  // refresh's promise, which settles no earlier than the next microtask.
   const finish = () => {
     state.settled = true;
-    if (releaseTimer) clearTimeout(releaseTimer);
+    clearTimeout(releaseTimer);
     if (globalThis.__socraticHaltAuditRefresh === state) {
       globalThis.__socraticHaltAuditRefresh = undefined;
     }
@@ -912,11 +981,12 @@ function startHaltAuditRefresh(budgetMs: number): Promise<void> {
   // A refresh that never settles -- a runner that ignores its abort -- must not hold the shared
   // pointer forever: while it held it, every later caller reused a dead refresh and no scope
   // was ever read again, so the whole fleet's halt causes stayed UNKNOWN.  The pointer is
-  // released at the refresh's own deadline, so the next caller starts a fresh read.
-  releaseTimer = setTimeout(finish, budgetMs + HALT_AUDIT_REFRESH_RELEASE_GRACE_MS);
+  // released at the refresh's own deadline, so the next caller starts a fresh read.  The released
+  // refresh may still be running; its sequence number keeps it from writing over the newer one.
+  const releaseTimer = setTimeout(finish, budgetMs + HALT_AUDIT_REFRESH_RELEASE_GRACE_MS);
   releaseTimer.unref?.();
   // The refresh never rejects: a failed read is recorded and reported, not thrown at the caller.
-  void runHaltAuditRefresh(budgetMs).then(finish, finish);
+  void runHaltAuditRefresh(budgetMs, sequence).then(finish, finish);
   return promise;
 }
 
@@ -936,19 +1006,21 @@ function startHaltAuditRefresh(budgetMs: number): Promise<void> {
 async function refreshHaltAuditRows(scopes: readonly AuditScope[]): Promise<void> {
   if (scopes.length === 0) return;
   const deadline = Date.now() + haltAuditBudgetMs();
-  enqueuePendingHaltAuditScopes(scopes);
   // A read that just failed is not re-run on every health poll: it is a multi-second scan of a
   // 19 GB table, and retrying it while the database is degraded repeats the read this fix exists
   // to stop happening.  The cooldown bounds the retry rate; the failure is reported instead.
-  if (haltAuditReadCoolingDown(Date.now())) {
-    pendingHaltAuditScopes().clear();
-    return;
-  }
+  //
+  // Checked BEFORE this caller queues anything, so the cooldown path leaves the shared pending
+  // queue exactly as it found it.  It used to queue and then clear the WHOLE queue -- including
+  // the scopes other callers had queued for a refresh that was already running and the scopes a
+  // failed read had requeued for retry -- so those scopes went unread and read as unknown.
+  if (haltAuditReadCoolingDown(Date.now())) return;
+  enqueuePendingHaltAuditScopes(scopes);
   await untilDeadline(startHaltAuditRefresh(deadline - Date.now()), deadline);
   // Whatever of THIS caller's scopes the shared refresh did not cover gets its own read, with
   // whatever budget is left.  Out of budget, the cache stays as it is: a stale halt cause is
   // display-only, and a missed probe is an outage.
-  const missing = scopes.filter((scope) => !haltAuditCache.has(haltAuditScopeKey(scope)));
+  const missing = scopes.filter((scope) => !hasFreshHaltAuditAnswer(haltAuditScopeKey(scope)));
   if (missing.length === 0) return;
   const remaining = deadline - Date.now();
   if (remaining <= 0) return;
@@ -1244,7 +1316,7 @@ async function classifyFromAudit(
   const now = Date.now();
   const stale = scopes.filter((scope) => {
     const hit = haltAuditCache.get(haltAuditScopeKey(scope));
-    return !hit || now - hit.at > HALT_AUDIT_CACHE_TTL_MS;
+    return !hit || hit.dirty === true || now - hit.at > HALT_AUDIT_CACHE_TTL_MS;
   });
   // Off the event loop: this read held the serving loop for 5.4 s in production.
   if (stale.length > 0) await refreshHaltAuditRows(stale);
@@ -1262,6 +1334,15 @@ async function classifyFromAudit(
       // The cached answer is older than the TTL and the refresh did not replace it, so the cause
       // is unknown right now.  A stale answer that is still inside its TTL stays usable: it is a
       // confirmed read, just an old one.
+      unknown.add(mapKey);
+      continue;
+    }
+    if (hit.dirty && (!hit.row || hit.row.handed_over)) {
+      // An audit write made this answer stale and the re-read has not landed.  The stale answer
+      // says "no app halt" (or "handed over"), and the write that made it stale may be the very
+      // halt it is missing, so the cause is unknown right now.  A stale CONFIRMED app halt falls
+      // through and is still reported: the last confirmed cause stays usable until a re-read
+      // replaces it, so a confirmed breaker never decays into idleness.
       unknown.add(mapKey);
       continue;
     }

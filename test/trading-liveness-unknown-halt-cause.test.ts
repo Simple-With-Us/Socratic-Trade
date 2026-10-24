@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 
 // The fleet-dark decision and the halt-cause read it depends on.
 //
@@ -14,8 +14,22 @@ import { afterEach, describe, expect, it } from "vitest";
 // share would put other accounts' idleness into every number below.
 
 const dir = mkdtempSync(join(tmpdir(), "agentic-liveness-unknown-halt-"));
+// This file's own database and key.  Both are process-wide, so the previous values are put back
+// after the file: a later test in the same worker must not query this file's database.
+const previousDatabaseUrl = process.env.DATABASE_URL;
+const previousEncryptionKey = process.env.ENCRYPTION_KEY;
 process.env.DATABASE_URL = `file:${join(dir, "test.db")}`;
 process.env.ENCRYPTION_KEY = "b".repeat(64);
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+afterAll(() => {
+  restoreEnv("DATABASE_URL", previousDatabaseUrl);
+  restoreEnv("ENCRYPTION_KEY", previousEncryptionKey);
+});
 
 async function seedHaltedAccount(label: string): Promise<{ userId: string; accountId: string }> {
   const db = await import("../src/lib/db");
@@ -42,6 +56,48 @@ describe("a halt cause that could not be read", () => {
     const causes = await import("../src/lib/autonomy-halt-cause");
     causes.__resetHaltAuditReadFailureForTests();
     causes.__resetHaltAuditStateForTests();
+  });
+
+  // Runs first, so the fleet is this one account.  It is retired from the fleet at the end, so
+  // the next case's counts stay exact.
+  it("decides the page by the named unknown-as-idle policy when the unknown cause is the whole fleet", async () => {
+    const liveness = await import("../src/lib/trading-liveness");
+    const causes = await import("../src/lib/autonomy-halt-cause");
+    const db = await import("../src/lib/db");
+    const alone = await seedHaltedAccount("Unreadable Alone");
+    const key = `${alone.userId}:${alone.accountId}`;
+
+    let invocations = 0;
+    const previous = causes.__setHaltAuditRunnerForTests(async () => {
+      invocations += 1;
+      throw new Error("off-loop read failed");
+    });
+    try {
+      const summary = await liveness.getTradingLivenessSummary();
+      // Control: the injected failing read is the one that ran, once.
+      expect(invocations).toBe(1);
+      const batch = await causes.batchedHaltCauseKinds([
+        { userId: alone.userId, accountId: alone.accountId, accountNumber: db.getPolicy(alone.userId, alone.accountId).accountNumber ?? "" }
+      ]);
+      expect(batch.unknown.has(key)).toBe(true);
+      if (liveness.HALT_CAUSE_UNKNOWN_COUNTS_AS_IDLE) {
+        // Unknown counts toward idleness for the page, so an all-unknown fleet does not page --
+        // and the summary is null because nothing else is wrong.
+        expect(summary?.darkness?.fullyDark ?? false).toBe(false);
+      } else {
+        expect(summary?.darkness?.fullyDark).toBe(true);
+      }
+      // Whatever the policy, the unknown cause is never a confirmed owner stop.
+      expect(summary?.darkness?.eligibleDeliberatelyIdle ?? 0).toBe(0);
+    } finally {
+      causes.__setHaltAuditRunnerForTests(previous);
+      // Retire it: ask-first authority is neither eligible nor active.
+      db.setPolicy(
+        { ...db.getPolicy(alone.userId, alone.accountId), strategyAuthority: "propose", systemState: "halted" },
+        alone.userId,
+        alone.accountId
+      );
+    }
   });
 
   it("is not a confirmed owner stop, and it does not suppress the fleet-dark page", async () => {

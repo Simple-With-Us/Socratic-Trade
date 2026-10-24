@@ -12,6 +12,7 @@ import crypto from "crypto";
 import { DEFAULT_POLICY, DEFAULT_SCORING_WEIGHTS, DEFAULT_STRATEGY_PROMPT } from "./defaults";
 import { SQLITE_BUSY_PIN_MS } from "./sqlite-event-loop";
 import { installSlowSqliteTiming } from "./sqlite-slow-timing";
+import { auditRowChangesHaltCause } from "./halt-audit-invalidation";
 import type { NotificationEventType, TradingPolicy } from "./types";
 
 let db: Database.Database | undefined;
@@ -3860,16 +3861,18 @@ export function audit(kind: string, payload: unknown, userId: string = "local", 
     ).run(id, userId, accountId, createdAt, kind, payloadJson);
   }
 
-  // ST-4561: an app-initiated halt row changes the answer to "did the APP halt this account,
-  // and has it stayed halted?".  The halt-cause cache holds that answer for up to a minute, and a
-  // stale answer reads a fresh drawdown breaker as "no app-initiated halt" -- an owner stop, which
-  // counts as a deliberately idle account.  So the write drops the cached row for this scope and
-  // the next read re-reads it.
+  // ST-4561: the halt-cause cache holds the answer to "did the APP halt this account, and has it
+  // stayed halted?" for up to a minute.  A row that matches the app-halt predicate (a HARD drawdown
+  // breaker, a broker auto-halt) or the handover predicate (an auto-resume, an owner override, a
+  // boot halt, an ops set_system_state, a policy change that leaves `halted`) changes that answer,
+  // so the write marks the cached answer for this scope stale and the next read re-reads it.  A
+  // row that matches neither -- the ADVISORY drawdown row written on every breached strategy run,
+  // for one -- cannot change it and must not force a fresh scan of the 19 GB audit table.
   //
   // The hook is registered by autonomy-halt-cause.ts, which imports this module; calling it
   // through `globalThis` keeps the import graph acyclic.  It is absent in processes that never
   // load that module, and then the cache TTL governs as before.
-  if (kind === "policy_violation_drawdown" || kind === "broker_placement_auto_halted") {
+  if (auditRowChangesHaltCause(kind, payloadJson)) {
     globalThis.__socraticHaltAuditInvalidate?.(userId, accountId);
   }
 }
