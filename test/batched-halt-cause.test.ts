@@ -15,7 +15,7 @@ process.env.ENCRYPTION_KEY = "b".repeat(64);
 
 type PrepareCall = { sql: string; args: unknown[] };
 
-function capturePrepares(database: Database, fn: () => void): PrepareCall[] {
+async function capturePrepares(database: Database, fn: () => void | Promise<void>): Promise<PrepareCall[]> {
   const original = database.prepare.bind(database);
   const calls: PrepareCall[] = [];
   const wrap = (sql: string, stmt: Statement, method: "all" | "get" | "run") => {
@@ -33,7 +33,7 @@ function capturePrepares(database: Database, fn: () => void): PrepareCall[] {
     return stmt;
   }) as Database["prepare"];
   try {
-    fn();
+    await fn();
   } finally {
     database.prepare = original as Database["prepare"];
   }
@@ -89,13 +89,13 @@ describe("batched halt-cause kinds", () => {
       exitOnly.userId,
       exitOnly.accountId
     );
-    expect(liveness.getTradingLivenessSummary()).toBeNull();
+    expect(await liveness.getTradingLivenessSummary()).toBeNull();
 
     const { recordBootHaltReceipt } = await import("../src/lib/autonomy-halt-cause");
     const appHalt = await seedHalted("Boot Halt");
     recordBootHaltReceipt(appHalt.userId, appHalt.accountId, { at: "2026-10-14T18:00:00.000Z", from: "active" });
 
-    const dark = liveness.getTradingLivenessSummary();
+    const dark = await liveness.getTradingLivenessSummary();
     expect(dark?.darkness).toMatchObject({
       eligibleAccounts: 3,
       activeAccounts: 0,
@@ -110,7 +110,7 @@ describe("batched halt-cause kinds", () => {
       askFirst.userId,
       askFirst.accountId
     );
-    const quieted = liveness.getTradingLivenessSummary();
+    const quieted = await liveness.getTradingLivenessSummary();
     expect(quieted?.darkness?.fullyDark).toBe(false);
     expect(quieted?.darkness?.fleetActiveAccounts).toBe(1);
     expect(quieted?.accounts).toHaveLength(1);
@@ -212,8 +212,8 @@ describe("batched halt-cause kinds", () => {
     recordBootHaltReceipt(invalidShape.userId, invalidShape.accountId, { at: "2026-10-14T18:07:00.000Z", from: "active" });
 
     const accounts = [owner, boot, runFailure, broker, breaker, lost, handed, badJson, invalidShape].map(ref);
-    const calls = capturePrepares(database, () => {
-      const kinds = causes.batchedHaltCauseKinds(accounts);
+    const calls = await capturePrepares(database, async () => {
+      const kinds = await causes.batchedHaltCauseKinds(accounts);
       expect(kinds.get(`${owner.userId}:${owner.accountId}`)).toBe("stopped");
       expect(kinds.get(`${boot.userId}:${boot.accountId}`)).toBe("restart");
       expect(kinds.get(`${runFailure.userId}:${runFailure.accountId}`)).toBe("run_failure_halt");
@@ -228,10 +228,20 @@ describe("batched halt-cause kinds", () => {
     const settingsReads = calls.filter((call) => call.sql.includes("FROM settings WHERE key IN"));
     const auditReads = calls.filter((call) => call.sql.includes("FROM audit_events"));
     expect(settingsReads).toHaveLength(1);
-    expect(auditReads).toHaveLength(1);
+    // The audit sweep runs OFF the serving connection (ST-4561): it held the serving event loop
+    // for 5.4 s in production, on a path the health route runs.  It must not prepare here.
+    expect(auditReads).toHaveLength(0);
+
     // Four unmarked accounts share one statement: owner, breaker, lost pause, handed over.
-    expect(auditReads[0].sql.match(/UNION ALL/g) ?? []).toHaveLength(3);
-    const plan = planDetails(database, auditReads[0].sql, auditReads[0].args);
+    const auditStatements = causes.buildHaltAuditStatements(
+      [owner, breaker, lost, handed].map((account) => ({
+        userId: account.userId,
+        connectedAccountId: account.accountId
+      }))
+    );
+    expect(auditStatements).toHaveLength(1);
+    expect(auditStatements[0].sql.match(/UNION ALL/g) ?? []).toHaveLength(3);
+    const plan = planDetails(database, auditStatements[0].sql, auditStatements[0].params);
     expect(plan).toMatch(/SEARCH audit_events USING INDEX/);
     expect(plan).not.toMatch(/SCAN audit_events/);
 
@@ -242,7 +252,8 @@ describe("batched halt-cause kinds", () => {
         accountNumber: account.accountNumber,
         systemState: "halted"
       });
-      expect(described?.kind).toBe(causes.batchedHaltCauseKinds([ref(account)]).get(`${account.userId}:${account.accountId}`));
+      const batched = await causes.batchedHaltCauseKinds([ref(account)]);
+      expect(described?.kind).toBe(batched.get(`${account.userId}:${account.accountId}`));
     }
     expect(() =>
       causes.describeAutonomyHaltCause({
@@ -257,8 +268,8 @@ describe("batched halt-cause kinds", () => {
   it("does not query for an empty fleet and splits the audit read on the chunk boundary", async () => {
     const { db, causes } = await load();
     const database = db.getDb();
-    const empty = capturePrepares(database, () => {
-      expect(causes.batchedHaltCauseKinds([]).size).toBe(0);
+    const empty = await capturePrepares(database, async () => {
+      expect((await causes.batchedHaltCauseKinds([])).size).toBe(0);
     });
     expect(empty).toHaveLength(0);
 
@@ -266,26 +277,55 @@ describe("batched halt-cause kinds", () => {
       userId: `user-${randomUUID()}`,
       accountId: `acct-${randomUUID()}`
     }));
-    const calls = capturePrepares(database, () => {
-      const kinds = causes.batchedHaltCauseKinds(many);
+    const calls = await capturePrepares(database, async () => {
+      const kinds = await causes.batchedHaltCauseKinds(many);
       expect(kinds.size).toBe(81);
       expect([...kinds.values()].every((kind) => kind === "stopped")).toBe(true);
     });
     expect(calls.filter((call) => call.sql.includes("FROM settings WHERE key IN"))).toHaveLength(1);
-    expect(calls.filter((call) => call.sql.includes("FROM audit_events"))).toHaveLength(2);
+    // Off the serving connection (ST-4561) -- no audit statement is prepared here.
+    expect(calls.filter((call) => call.sql.includes("FROM audit_events"))).toHaveLength(0);
+    // 81 accounts split at the 80-account chunk boundary into two off-loop statements.
+    expect(
+      causes.buildHaltAuditStatements(
+        many.map((account) => ({ userId: account.userId, connectedAccountId: account.accountId }))
+      )
+    ).toHaveLength(2);
   });
 
-  it("bounds audit reads inside getTradingLivenessSummary when several autopilot accounts are halted", async () => {
-    const { db, liveness } = await load();
+  it("keeps the health poll's audit sweep off the serving connection (ST-4561)", async () => {
+    const { db, causes, liveness } = await load();
     const database = db.getDb();
-    const calls = capturePrepares(database, () => {
-      liveness.getTradingLivenessSummary();
+
+    const halted = await seedHalted("Health Sweep");
+    db.audit(
+      "policy_violation_drawdown",
+      { reason: "Trailing drawdown breached the limit.", revertedTo: "halted" },
+      halted.userId,
+      halted.accountId
+    );
+
+    const calls = await capturePrepares(database, async () => {
+      const summary = await liveness.getTradingLivenessSummary();
+      expect(summary).not.toBeNull();
     });
-    const auditReads = calls.filter((call) => call.sql.includes("audit_events"));
-    expect(auditReads.length).toBeGreaterThan(0);
-    expect(auditReads.length).toBeLessThanOrEqual(2);
-    for (const call of auditReads) {
-      expect(planDetails(database, call.sql, call.args)).not.toMatch(/SCAN audit_events/);
-    }
+
+    // The health path prepares the marker settings read and nothing else: the `audit_events`
+    // sweep is the statement that held the serving event loop for 5.4 s in production.
+    const auditReads = calls.filter((call) => call.sql.includes("FROM audit_events"));
+    expect(auditReads).toHaveLength(0);
+    expect(calls.filter((call) => call.sql.includes("FROM settings WHERE key IN"))).toHaveLength(1);
+
+    // Positive control: the capture really does see `audit_events` statements when one runs on
+    // the serving connection, so the zero above is a property of the fix and not of the capture.
+    const control = await capturePrepares(database, () => {
+      causes.describeAutonomyHaltCause({
+        userId: halted.userId,
+        connectedAccountId: halted.accountId,
+        accountNumber: halted.accountNumber,
+        systemState: "halted"
+      });
+    });
+    expect(control.filter((call) => call.sql.includes("FROM audit_events")).length).toBeGreaterThan(0);
   });
 });

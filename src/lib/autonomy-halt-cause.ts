@@ -1,5 +1,7 @@
-import { deleteInternalSetting, getAutoResumeOnBoot, getDb, getInternalSetting, setInternalSetting } from "./db";
+import { databasePath, deleteInternalSetting, getAutoResumeOnBoot, getDb, getInternalSetting, setInternalSetting } from "./db";
 import { brokerPauseAccountScope, getBrokerPlacementPauseMarker } from "./broker-health";
+import { sqliteAllOffLoop } from "./rag/sqlite-all-offloop";
+import { z } from "zod";
 import type { SystemState } from "./types";
 
 // Why is this account halted, and will it start again by itself?  (Board 687a5fb4, lane h5.)
@@ -168,7 +170,7 @@ const HALT_SETTINGS_KEY_CHUNK = 900;
 /** Each account is its own indexed LIMIT 1 inside one statement. */
 const HALT_AUDIT_ACCOUNT_CHUNK = 80;
 
-type AuditScope = { userId: string; connectedAccountId: string | null };
+type AuditScope = HaltAuditScope;
 
 type LatestAppHaltRow = {
   user_id: string;
@@ -228,6 +230,122 @@ function latestAppHalts(db: ReturnType<typeof getDb>, accounts: readonly AuditSc
     rows.push(...(db.prepare(sql).all(...params) as LatestAppHaltRow[]));
   }
   return rows;
+}
+
+/** One scope's cached audit row.  `row` is null when the account has no app-initiated halt. */
+type CachedHaltAuditRow = { row: LatestAppHaltRow | null; at: number };
+
+/**
+ * How long an off-loop audit row stays usable before it is re-read.
+ *
+ * Production 2026-10-24: one batch over four halted accounts held the serving event loop for
+ * 5.4 s, and the `/api/health` probe that triggered it answered in 5.1 s.  Off the loop that is
+ * no longer an outage, but it is still a multi-second read over a 19 GB database, so it does not
+ * run on every health refresh.  The halt cause is a durable historical fact -- the last
+ * app-initiated halt, and whether anyone took it over -- so a minute of staleness changes no
+ * decision this feed drives.
+ */
+export const HALT_AUDIT_CACHE_TTL_MS = 60_000;
+
+/**
+ * Execution budget for one off-loop audit read.  The production batch takes ~5.4 s; the budget
+ * leaves room for a slower plan on a bigger database and still retires the worker slot rather
+ * than hanging the caller.
+ *
+ * It is deliberately BELOW the fleet-health-recover probe timeout (12 s) and the Docker
+ * HEALTHCHECK `--max-time` (14 s).  This read sits behind the health route, and a cold health
+ * snapshot awaits it: a budget above those timeouts would let the fix reproduce the symptom it
+ * exists to remove -- the health probe would time out, the daemon would restart the container, and
+ * the restart would re-run the boot sweep.  At 8 s a contended read gives up, the cache keeps its
+ * previous (stale) row, and the probe still answers in time.  A stale halt cause is display-only;
+ * a missed probe is an outage.
+ */
+const HALT_AUDIT_OFF_LOOP_TIMEOUT_MS = 8_000;
+
+/** One audit row as the off-loop worker returns it.  `audit_events.payload` is NOT NULL. */
+const HaltAuditRowSchema = z.object({
+  user_id: z.string(),
+  connected_account_id: z.string().nullable(),
+  kind: z.string(),
+  created_at: z.string(),
+  payload: z.string(),
+  handed_over: z.number()
+});
+
+type HaltAuditRow = z.infer<typeof HaltAuditRowSchema>;
+
+const haltAuditCache = new Map<string, CachedHaltAuditRow>();
+let haltAuditRefreshInFlight: Promise<void> | null = null;
+
+function haltAuditScopeKey(scope: AuditScope): string {
+  return `${scope.userId}\u0000${scope.connectedAccountId ?? ""}`;
+}
+
+/** One account scope the halt-cause sweep reads: a user and the connected account. */
+export type HaltAuditScope = { userId: string; connectedAccountId: string | null };
+
+/**
+ * The batched sweep as one statement per chunk of accounts, so a statement stays under SQLite's
+ * portable 999-variable ceiling.  Same SQL the serving connection runs.
+ *
+ * Exported so a test can assert the statement's shape and query plan without running it on the
+ * serving connection -- which is the point of the off-loop read.
+ */
+export function buildHaltAuditStatements(accounts: readonly HaltAuditScope[]): { sql: string; params: string[] }[] {
+  return chunkItems(accounts, HALT_AUDIT_ACCOUNT_CHUNK).map((chunk) => {
+    const branches = chunk.map(latestHaltBranch);
+    return {
+      sql: branches.map((branch) => branch.sql).join("\nUNION ALL\n"),
+      params: branches.flatMap((branch) => branch.params)
+    };
+  });
+}
+
+/**
+ * The same statement the serving connection runs, executed on an off-loop worker thread
+ * (`src/lib/rag/sqlite-all-offloop.ts`).  better-sqlite3 is synchronous, so on the serving
+ * connection this read pinned the event loop for the whole statement -- and the health route
+ * runs it, so the health probe could not answer until the read finished.
+ */
+async function readHaltAuditRowsOffLoop(scopes: readonly AuditScope[]): Promise<Map<string, HaltAuditRow>> {
+  const rows = new Map<string, HaltAuditRow>();
+  const dbPath = databasePath();
+  for (const statement of buildHaltAuditStatements(scopes)) {
+    const chunkRows = await sqliteAllOffLoop(statement.sql, statement.params, dbPath, HaltAuditRowSchema, {
+      timeoutMs: HALT_AUDIT_OFF_LOOP_TIMEOUT_MS
+    });
+    for (const row of chunkRows) {
+      rows.set(haltAuditScopeKey({ userId: row.user_id, connectedAccountId: row.connected_account_id }), row);
+    }
+  }
+  return rows;
+}
+
+/**
+ * Refresh the cached audit rows for the given scopes.  One refresh runs at a time; a caller that
+ * arrives while one is in flight waits for that one instead of starting a second read.
+ */
+function refreshHaltAuditRows(scopes: readonly AuditScope[]): Promise<void> {
+  if (scopes.length === 0) return Promise.resolve();
+  if (haltAuditRefreshInFlight) return haltAuditRefreshInFlight;
+  const pending = (async () => {
+    try {
+      const rows = await readHaltAuditRowsOffLoop(scopes);
+      const at = Date.now();
+      for (const scope of scopes) {
+        const key = haltAuditScopeKey(scope);
+        haltAuditCache.set(key, { row: rows.get(key) ?? null, at });
+      }
+    } catch {
+      // Leave the cache as it was.  A stale row is better than a wrong one, and the next
+      // refresh retries.  The caller still reads the old cache, exactly as a failed read did.
+    }
+  })();
+  haltAuditRefreshInFlight = pending;
+  void pending.then(() => {
+    if (haltAuditRefreshInFlight === pending) haltAuditRefreshInFlight = null;
+  });
+  return pending;
 }
 
 /**
@@ -506,19 +624,24 @@ function classifyFromMarkers(
   return unmarked;
 }
 
-function classifyFromAudit(
-  db: ReturnType<typeof getDb>,
+async function classifyFromAudit(
   accounts: readonly HaltCauseAccountRef[],
   out: Map<string, AutonomyHaltCause["kind"]>
-): void {
-  const rows = latestAppHalts(
-    db,
-    accounts.map((account) => ({ userId: account.userId, connectedAccountId: account.accountId }))
-  );
+): Promise<void> {
+  const scopes = accounts.map((account) => ({ userId: account.userId, connectedAccountId: account.accountId }));
+  const now = Date.now();
+  const stale = scopes.filter((scope) => {
+    const hit = haltAuditCache.get(haltAuditScopeKey(scope));
+    return !hit || now - hit.at > HALT_AUDIT_CACHE_TTL_MS;
+  });
+  // Off the event loop: this read held the serving loop for 5.4 s in production.
+  if (stale.length > 0) await refreshHaltAuditRows(stale);
   const byKey = new Map<string, LatestAppHaltRow>();
-  for (const row of rows) {
-    if (row.connected_account_id == null) continue;
-    byKey.set(`${row.user_id}:${row.connected_account_id}`, row);
+  for (const scope of scopes) {
+    const hit = haltAuditCache.get(haltAuditScopeKey(scope));
+    if (!hit || !hit.row) continue;
+    if (hit.row.connected_account_id == null) continue;
+    byKey.set(`${hit.row.user_id}:${hit.row.connected_account_id}`, hit.row);
   }
   for (const account of accounts) {
     const row = byKey.get(`${account.userId}:${account.accountId}`);
@@ -536,10 +659,15 @@ function classifyFromAudit(
  * `audit_events` read covers a drawdown breaker or a lost auto-pause.  The kind matches
  * `describeAutonomyHaltCause` for a halted account.  A bad marker payload or a failed read
  * stays `stopped`, the same bucket the health poll uses when a per-account lookup throws.
+ *
+ * The `audit_events` read runs OFF the serving event loop (a worker thread) and is cached for
+ * `HALT_AUDIT_CACHE_TTL_MS`.  On the serving connection it pinned the event loop for the whole
+ * statement -- 5.4 s in production on 2026-10-24 -- and the health route runs this, so the
+ * health probe could not answer until the read finished.  Async for that reason.
  */
-export function batchedHaltCauseKinds(
+export async function batchedHaltCauseKinds(
   accounts: readonly HaltCauseAccountRef[]
-): Map<string, AutonomyHaltCause["kind"]> {
+): Promise<Map<string, AutonomyHaltCause["kind"]>> {
   const out = new Map<string, AutonomyHaltCause["kind"]>();
   for (const account of accounts) {
     out.set(`${account.userId}:${account.accountId}`, "stopped");
@@ -553,7 +681,7 @@ export function batchedHaltCauseKinds(
   }
   if (unmarked.length === 0) return out;
   try {
-    classifyFromAudit(getDb(), unmarked, out);
+    await classifyFromAudit(unmarked, out);
   } catch {
     // Unmarked accounts stay `stopped`.
   }

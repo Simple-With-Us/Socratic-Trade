@@ -485,7 +485,7 @@ const MAX_DARK_LABELS = 12;
  * trade. Only an account that is connected, on autopilot authority, not parked and not draining is
  * genuinely expected to be trading — so only those count.
  */
-function computeAutonomyDarkness(now: number = Date.now()): AutonomyDarkness {
+async function computeAutonomyDarkness(now: number = Date.now()): Promise<AutonomyDarkness> {
   const darkAccountLabels: string[] = [];
   let eligibleAccounts = 0;
   let activeAccounts = 0;
@@ -525,7 +525,8 @@ function computeAutonomyDarkness(now: number = Date.now()): AutonomyDarkness {
   }
   let haltKinds = new Map<string, string>();
   try {
-    haltKinds = batchedHaltCauseKinds(haltedEligible);
+    // Off the event loop: the audit sweep behind this read held the serving loop for 5.4 s.
+    haltKinds = await batchedHaltCauseKinds(haltedEligible);
   } catch {
     // A lookup failure must not turn a health poll into a fleet-dark page.
     haltKinds = new Map();
@@ -555,10 +556,10 @@ function computeAutonomyDarkness(now: number = Date.now()): AutonomyDarkness {
   };
 }
 
-export function getTradingLivenessSummary(
+export async function getTradingLivenessSummary(
   now: number = Date.now(),
   finishedRunsOut?: Map<string, FinishedStrategyRunRow[]>
-): TradingLivenessSummary | null {
+): Promise<TradingLivenessSummary | null> {
   try {
     const accounts: AccountTradingLiveness[] = [];
     for (const userId of listUsers()) {
@@ -580,7 +581,7 @@ export function getTradingLivenessSummary(
       }
     }
     // Computed even when `accounts` is empty — that is exactly the case it exists to catch.
-    const darkness = computeAutonomyDarkness(now);
+    const darkness = await computeAutonomyDarkness(now);
     if (accounts.length === 0) {
       // Previously: `return null`, which /api/health renders as tradingLivenessDegraded: false.  A
       // fully dark fleet is not "no data", it is the worst data there is, so return the summary and
