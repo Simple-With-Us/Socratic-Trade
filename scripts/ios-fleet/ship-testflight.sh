@@ -1040,7 +1040,7 @@ else
     # The patch the operator pinned, on its own train ("2.0.5" -> 5).
     _pinned="${FORCE_VERSION##*.}"
     if [[ "$_pinned" =~ ^[0-9]+$ ]]; then
-      PLAN_ASC_PATCH="$_pinned"
+      PLAN_ASC_PATCH="pinned"
       PLAN_TARGET_PATCH="$_pinned"
     fi
   else
@@ -1077,6 +1077,11 @@ else
     # An explicit --build is honoured exactly, and it does NOT move the
     # marketing version:  the two numbers are independent.
     BUILD_NUM="$FORCE_BUILD"
+    # An explicit --build is honoured exactly, but never as the retired
+    # "1.0.N (N)" pair (AFC-517):  refuse rather than silently change it.
+    if [[ -n "$PLAN_TARGET_PATCH" && "$BUILD_NUM" == "$PLAN_TARGET_PATCH" ]]; then
+      die "--build ${BUILD_NUM} equals the patch of ${MARKETING}, which would ship ${MARKETING} (${BUILD_NUM}): the 1.0.N (N) form the owner retired (AFC-517).  Pass a different --build."
+    fi
     log "version: operator override (--build/--version); the local build-seq counter is not consulted"
   else
     [[ "$PLAN_COMMIT_COUNT" =~ ^[0-9]+$ ]] || die "could not read the commit count from ${REPO_ROOT}; CFBundleVersion is the repo commit count and UTC timestamps are retired"

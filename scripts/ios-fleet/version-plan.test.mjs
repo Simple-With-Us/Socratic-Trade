@@ -23,7 +23,8 @@ import {
   latestMarketingPatch,
   ownPatch,
   parsePatch,
-  planVersion
+  planVersion,
+  nextMarketingPatch
 } from "./version-plan.mjs";
 
 const CONGRESS_APP_STORE_VERSIONS = ["1.0.235"];
@@ -128,7 +129,6 @@ test("planVersion picks the next patch on the train (real Congress.Trade data)",
   });
   assert.equal(ascPatch, 236);
 
-  const targetTrain = "1.0.237";
   const floor = buildFloor({
     trainBuilds: [],                       // the new train is empty
     appBuilds: ["2353", "2358", "202610180036"],
@@ -235,4 +235,34 @@ test("planVersion with no App Store Connect state plans 1.0.1", () => {
   const plan = planVersion({ prefix: "1.0", ascPatch: 0, commitCount: 7, floor: 0 });
   assert.equal(plan.marketing, "1.0.1");
   assert.equal(plan.build, "7");
+});
+
+test("nextMarketingPatch skips a patch a drift train already holds (Kody, AFC-517)", () => {
+  const trains = [
+    { version: "1.0.235", builds: ["202610110355"] },
+    { version: "1.0.236", builds: ["236"] },        // drift train on the next patch
+    { version: "1.0.237", builds: ["237", "2400"] } // drift train we already shipped into
+  ];
+  assert.equal(latestMarketingPatch({ prefix: "1.0", appStoreVersions: ["1.0.235"], trains }), 235);
+  assert.equal(nextMarketingPatch({ prefix: "1.0", appStoreVersions: ["1.0.235"], trains }), 238);
+});
+
+test("nextMarketingPatch is latest + 1 when nothing is in the way", () => {
+  assert.equal(
+    nextMarketingPatch({
+      prefix: "1.0",
+      appStoreVersions: ["1.0.235"],
+      trains: [{ version: "1.0.236", builds: ["202610180036"] }, { version: "1.0.2358", builds: ["2358"] }]
+    }),
+    237
+  );
+});
+
+test("planVersion refuses a forced build that recreates 1.0.N (N) (Kody, AFC-517)", () => {
+  assert.throws(() => planVersion({ prefix: "1.0", ascPatch: 236, forcedBuild: "237", commitCount: 10, floor: 0 }));
+  assert.throws(() => planVersion({ prefix: "1.0", forcedVersion: "1.0.236", forcedBuild: "236", commitCount: 10, floor: 0 }));
+  assert.deepEqual(
+    planVersion({ prefix: "1.0", ascPatch: 236, forcedBuild: "999", commitCount: 10, floor: 0 }),
+    { marketing: "1.0.237", build: "999" }
+  );
 });

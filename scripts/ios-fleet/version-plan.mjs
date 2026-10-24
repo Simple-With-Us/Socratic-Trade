@@ -132,6 +132,32 @@ export function latestMarketingPatch({ prefix, appStoreVersions = [], trains = [
   return best;
 }
 
+/**
+ * The next free patch on a train:  one past latestMarketingPatch, skipping
+ * every patch a TestFlight train already holds.  Drift trains are ignored for
+ * the maximum, but their numbers are still taken:  shipping into a drift train
+ * (say 1.0.312 holding build "312") would add a build to it, the train would
+ * stay a drift train, and every later ship would compute the same patch and
+ * freeze there.  Skipping taken numbers keeps the sequence moving.
+ */
+export function nextMarketingPatch({ prefix, appStoreVersions = [], trains = [] } = {}) {
+  const taken = new Set();
+  for (const train of trains || []) {
+    if (!train) continue;
+    const version = typeof train === "string" ? train : train.version;
+    const patch = parsePatch(version, prefix);
+    if (patch !== null) taken.add(patch);
+  }
+  for (const version of appStoreVersions || []) {
+    const value = typeof version === "string" ? version : version?.versionString;
+    const patch = parsePatch(value, prefix);
+    if (patch !== null) taken.add(patch);
+  }
+  let next = latestMarketingPatch({ prefix, appStoreVersions, trains }) + 1;
+  while (taken.has(next)) next += 1;
+  return next;
+}
+
 /** A plain integer build number, or null when the value is not one. */
 function integerBuild(value) {
   if (value === null || value === undefined) return null;
@@ -215,8 +241,13 @@ export function planVersion({
 
   let build;
   if (forcedBuild !== "" && forcedBuild !== null && forcedBuild !== undefined) {
-    // An explicit --build is honoured exactly.
+    // An explicit --build is honoured exactly, except that it may not recreate
+    // the retired "1.0.N (N)" pair:  the ship script refuses that, so the
+    // reference copy of the rules refuses it too.
     build = String(forcedBuild);
+    if (targetPatch !== null && build === String(targetPatch)) {
+      throw new Error(`--build ${build} equals the patch of ${marketing}; that is the retired 1.0.N (N) form`);
+    }
   } else {
     const commits = Number.isFinite(commitCount) ? Math.trunc(commitCount) : 0;
     const known = Number.isFinite(floor) ? Math.trunc(floor) : 0;
