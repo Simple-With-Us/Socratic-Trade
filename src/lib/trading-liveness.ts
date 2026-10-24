@@ -1,4 +1,4 @@
-import { batchedHaltCauseKinds } from "./autonomy-halt-cause";
+import { batchedHaltCauseKinds, haltCauseReadStatus } from "./autonomy-halt-cause";
 import { getDb, getInternalSetting, listConnectedAccounts, listUsers, peekPolicy } from "./db";
 import { isMarketOpen } from "./market-calendar";
 import type { SystemState } from "./types";
@@ -231,11 +231,41 @@ export interface AutonomyDarkness {
   darkAccountLabels: string[];
   /** Connected accounts with `systemState === "active"` (any strategy authority). */
   fleetActiveAccounts: number;
-  /** Eligible autopilot accounts the owner left idle (exit-only, liquidating, or a halt with no app receipt). */
+  /**
+   * Eligible autopilot accounts the owner left idle (exit-only, liquidating, or a halt with no app
+   * receipt).
+   *
+   * CONFIRMED idleness only.  An account whose halt cause could not be read is an UNKNOWN cause,
+   * not a confirmed owner stop, so it is not counted here; it is counted in `haltCauseUnknown`,
+   * and the policy constant decides what it means for the fleet-dark page.
+   */
   eligibleDeliberatelyIdle: number;
+  /** Eligible halted accounts whose halt cause could NOT be confirmed: the off-loop audit read
+   *  failed, timed out, or never ran.  Zero means every cause in this pass was confirmed. */
+  haltCauseUnknown: number;
   /** True only when autopilot-eligible accounts expect runs but none are active fleet-wide. */
   fullyDark: boolean;
 }
+
+/**
+ * Paging policy for an UNCONFIRMED halt cause.
+ *
+ * `true` (the behaviour this lane keeps): an account whose halt cause could not be read counts
+ * as a deliberately idle account, so the fleet-fully-dark page stays quiet while the read is
+ * degraded.  A degraded probe must not page the owner about a fleet it cannot classify.
+ *
+ * `false`: it counts as dark, and the fleet-fully-dark page can fire on a probe that cannot
+ * classify the fleet.
+ *
+ * This is a named policy because the difference matters: an unreadable cause is NOT a confirmed
+ * owner stop, and the fleet-fully-dark page keys on exactly that distinction.  The value below
+ * is the behaviour this lane keeps -- it is not a decision on record from anyone, and changing
+ * it would ADD pages, so it is a separate decision that has not been made here.  Either way the
+ * counts behind it are in the public payload (`autonomyHaltCauseUnknown`,
+ * `autonomyHaltCauseReadFailures`), so the blind spot is measurable while the behaviour itself
+ * is unchanged.
+ */
+export const HALT_CAUSE_UNKNOWN_COUNTS_AS_IDLE = true;
 
 /** State-only idle check.  `close_only` and `liquidating` are always owner-controlled.
  *  `halted` is both the owner stop and what the boot interlock and the watchdogs write, so
@@ -290,6 +320,14 @@ export interface PublicTradingLiveness {
   autonomyEligibleAccounts: number;
   autonomyActiveAccounts: number;
   autonomyFullyDark: boolean;
+  /** Eligible halted accounts whose halt cause could NOT be confirmed on this pass: the
+   *  off-loop audit read failed, timed out, or never ran.  An unknown cause is not a confirmed
+   *  owner stop, so this count says how much of the fleet-dark signal rests on an answer the
+   *  app does not have.  Identity-free. */
+  autonomyHaltCauseUnknown: number;
+  /** Failed off-loop halt-cause reads since the process started.  Non-zero means the read is
+   *  degraded and the halt-cause answers may be stale or missing. */
+  autonomyHaltCauseReadFailures: number;
 }
 
 export function toPublicTradingLiveness(
@@ -310,7 +348,9 @@ export function toPublicTradingLiveness(
       marketOpen: isMarketOpen(new Date(now)),
       autonomyEligibleAccounts: 0,
       autonomyActiveAccounts: 0,
-      autonomyFullyDark: false
+      autonomyFullyDark: false,
+      autonomyHaltCauseUnknown: 0,
+      autonomyHaltCauseReadFailures: haltCauseReadStatus(now).failures
     };
   }
   const degradedCount = summary.accounts.filter((a) => a.degraded).length;
@@ -349,7 +389,9 @@ export function toPublicTradingLiveness(
     marketOpen: summary.marketOpen,
     autonomyEligibleAccounts: summary.darkness?.eligibleAccounts ?? 0,
     autonomyActiveAccounts: summary.darkness?.activeAccounts ?? 0,
-    autonomyFullyDark: summary.darkness?.fullyDark ?? false
+    autonomyFullyDark: summary.darkness?.fullyDark ?? false,
+    autonomyHaltCauseUnknown: summary.darkness?.haltCauseUnknown ?? 0,
+    autonomyHaltCauseReadFailures: haltCauseReadStatus(now).failures
   };
 }
 
@@ -485,12 +527,19 @@ const MAX_DARK_LABELS = 12;
  * trade. Only an account that is connected, on autopilot authority, not parked and not draining is
  * genuinely expected to be trading — so only those count.
  */
-function computeAutonomyDarkness(now: number = Date.now()): AutonomyDarkness {
+async function computeAutonomyDarkness(now: number = Date.now()): Promise<AutonomyDarkness> {
   const darkAccountLabels: string[] = [];
   let eligibleAccounts = 0;
   let activeAccounts = 0;
   let fleetActiveAccounts = 0;
   let eligibleDeliberatelyIdle = 0;
+  // The aggregate the fleet-dark DECISION uses.  It is deliberately not the same number as
+  // `eligibleDeliberatelyIdle`: an UNCONFIRMED halt cause is counted here when the policy says an
+  // unreadable cause counts as idle, so a degraded probe does not page the owner about a fleet it
+  // cannot classify.  The confirmed count keeps its own contract -- confirmed owner idleness --
+  // so nothing downstream can read "the cause could not be read" as "the owner stopped it on
+  // purpose", and the two counts can disagree without either one lying.
+  let eligibleIdleForDarkness = 0;
   const haltedEligible: Array<{ userId: string; accountId: string; accountNumber?: string }> = [];
   for (const userId of listUsers()) {
     for (const account of listConnectedAccounts(userId)) {
@@ -511,6 +560,7 @@ function computeAutonomyDarkness(now: number = Date.now()): AutonomyDarkness {
         }
         if (policy.systemState === "close_only" || policy.systemState === "liquidating") {
           eligibleDeliberatelyIdle += 1;
+          eligibleIdleForDarkness += 1;
         } else if (policy.systemState === "halted") {
           haltedEligible.push({
             userId,
@@ -524,41 +574,64 @@ function computeAutonomyDarkness(now: number = Date.now()): AutonomyDarkness {
     }
   }
   let haltKinds = new Map<string, string>();
+  let unknownHaltKeys = new Set<string>();
   try {
-    haltKinds = batchedHaltCauseKinds(haltedEligible);
+    // Off the event loop: the audit sweep behind this read held the serving loop for 5.4 s.
+    const batch = await batchedHaltCauseKinds(haltedEligible);
+    haltKinds = batch.kinds;
+    unknownHaltKeys = batch.unknown;
   } catch {
     // A lookup failure must not turn a health poll into a fleet-dark page.
     haltKinds = new Map();
+    unknownHaltKeys = new Set(haltedEligible.map((halted) => `${halted.userId}:${halted.accountId}`));
   }
   for (const halted of haltedEligible) {
-    const kind = haltKinds.get(`${halted.userId}:${halted.accountId}`);
+    const key = `${halted.userId}:${halted.accountId}`;
+    const kind = haltKinds.get(key);
     // Missing kind and `stopped` are the no-receipt bucket (owner stop, or no app record).
     // Every other kind is an app halt and must still be able to page.
-    if (kind === undefined || kind === "stopped") eligibleDeliberatelyIdle += 1;
+    //
+    // An UNCONFIRMED cause (the audit read failed, timed out, or never ran) is not a confirmed
+    // owner stop.  It is counted separately, and the policy constant decides what it means for
+    // the fleet-dark page -- see HALT_CAUSE_UNKNOWN_COUNTS_AS_IDLE.
+    //
+    // It goes into the aggregate the page decision uses and NOT into the confirmed count: the
+    // confirmed count is "the owner left this account idle", and an unreadable cause is not that.
+    if (unknownHaltKeys.has(key) || kind === undefined) {
+      if (HALT_CAUSE_UNKNOWN_COUNTS_AS_IDLE) eligibleIdleForDarkness += 1;
+      continue;
+    }
+    if (kind === "stopped") {
+      eligibleDeliberatelyIdle += 1;
+      eligibleIdleForDarkness += 1;
+    }
   }
-  const allEligibleDeliberatelyIdle =
-    eligibleAccounts > 0 && eligibleDeliberatelyIdle === eligibleAccounts;
+  const allEligibleIdleForDarkness =
+    eligibleAccounts > 0 && eligibleIdleForDarkness === eligibleAccounts;
   return {
     eligibleAccounts,
     activeAccounts,
     darkAccountLabels,
     fleetActiveAccounts,
     eligibleDeliberatelyIdle,
+    haltCauseUnknown: unknownHaltKeys.size,
     // Page only when NO account is `active` fleet-wide (ask-first still running must not
     // read as "fully dark") AND at least one eligible autopilot account is not owner-idle.
-    // Owner halt / exit-only / liquidating stays quiet.  An app halt does not.
+    // Owner halt / exit-only / liquidating stays quiet.  An app halt does not.  An account whose
+    // halt cause could not be read is decided by the policy constant above, through the
+    // aggregate -- not through the confirmed count.
     fullyDark:
       eligibleAccounts > 0 &&
       activeAccounts === 0 &&
       fleetActiveAccounts === 0 &&
-      !allEligibleDeliberatelyIdle
+      !allEligibleIdleForDarkness
   };
 }
 
-export function getTradingLivenessSummary(
+export async function getTradingLivenessSummary(
   now: number = Date.now(),
   finishedRunsOut?: Map<string, FinishedStrategyRunRow[]>
-): TradingLivenessSummary | null {
+): Promise<TradingLivenessSummary | null> {
   try {
     const accounts: AccountTradingLiveness[] = [];
     for (const userId of listUsers()) {
@@ -580,7 +653,7 @@ export function getTradingLivenessSummary(
       }
     }
     // Computed even when `accounts` is empty — that is exactly the case it exists to catch.
-    const darkness = computeAutonomyDarkness(now);
+    const darkness = await computeAutonomyDarkness(now);
     if (accounts.length === 0) {
       // Previously: `return null`, which /api/health renders as tradingLivenessDegraded: false.  A
       // fully dark fleet is not "no data", it is the worst data there is, so return the summary and
