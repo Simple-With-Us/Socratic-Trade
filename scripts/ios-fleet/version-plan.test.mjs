@@ -122,11 +122,12 @@ test("buildFloor ignores dotted and non-numeric build values", () => {
 });
 
 test("planVersion picks the next patch on the train (real Congress.Trade data)", () => {
-  const ascPatch = latestMarketingPatch({
+  // ascPatch is what production feeds planVersion:  nextMarketingPatch - 1.
+  const ascPatch = nextMarketingPatch({
     prefix: "1.0",
     appStoreVersions: CONGRESS_APP_STORE_VERSIONS,
     trains: CONGRESS_TRAINS
-  });
+  }) - 1;
   assert.equal(ascPatch, 236);
 
   const floor = buildFloor({
@@ -247,6 +248,23 @@ test("nextMarketingPatch skips a patch a drift train already holds (Kody, AFC-51
   assert.equal(nextMarketingPatch({ prefix: "1.0", appStoreVersions: ["1.0.235"], trains }), 238);
 });
 
+test("planVersion lands on the next free patch past a drift train (Kody, AFC-517)", () => {
+  const trains = [
+    { version: "1.0.235", builds: ["202610110355"] },
+    { version: "1.0.236", builds: ["236"] },        // drift train on the next patch
+    { version: "1.0.237", builds: ["237", "2400"] } // drift train we already shipped into
+  ];
+  // The value production feeds in (what latest-marketing-patch prints).
+  const ascPatch = nextMarketingPatch({ prefix: "1.0", appStoreVersions: ["1.0.235"], trains }) - 1;
+  assert.equal(ascPatch, 237);
+  const plan = planVersion({ prefix: "1.0", ascPatch, commitCount: 2500, floor: 2400 });
+  assert.equal(plan.marketing, "1.0.238");
+  assert.equal(plan.build, "2500");
+  // Feeding latestMarketingPatch instead would plan 1.0.236, the drift train's patch.
+  // That is why the contract is nextMarketingPatch - 1.
+  assert.equal(latestMarketingPatch({ prefix: "1.0", appStoreVersions: ["1.0.235"], trains }), 235);
+});
+
 test("nextMarketingPatch is latest + 1 when nothing is in the way", () => {
   assert.equal(
     nextMarketingPatch({
@@ -261,6 +279,9 @@ test("nextMarketingPatch is latest + 1 when nothing is in the way", () => {
 test("planVersion refuses a forced build that recreates 1.0.N (N) (Kody, AFC-517)", () => {
   assert.throws(() => planVersion({ prefix: "1.0", ascPatch: 236, forcedBuild: "237", commitCount: 10, floor: 0 }));
   assert.throws(() => planVersion({ prefix: "1.0", forcedVersion: "1.0.236", forcedBuild: "236", commitCount: 10, floor: 0 }));
+  // Numeric, like the ship script:  a leading zero does not slip past the guard.
+  assert.throws(() => planVersion({ prefix: "1.0", forcedVersion: "1.0.236", forcedBuild: "0236", commitCount: 10, floor: 0 }));
+  assert.throws(() => planVersion({ prefix: "1.0", ascPatch: 236, forcedBuild: "0237", commitCount: 10, floor: 0 }));
   assert.deepEqual(
     planVersion({ prefix: "1.0", ascPatch: 236, forcedBuild: "999", commitCount: 10, floor: 0 }),
     { marketing: "1.0.237", build: "999" }
