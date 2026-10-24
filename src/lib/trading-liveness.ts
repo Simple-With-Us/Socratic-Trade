@@ -231,7 +231,14 @@ export interface AutonomyDarkness {
   darkAccountLabels: string[];
   /** Connected accounts with `systemState === "active"` (any strategy authority). */
   fleetActiveAccounts: number;
-  /** Eligible autopilot accounts the owner left idle (exit-only, liquidating, or a halt with no app receipt). */
+  /**
+   * Eligible autopilot accounts the owner left idle (exit-only, liquidating, or a halt with no app
+   * receipt).
+   *
+   * CONFIRMED idleness only.  An account whose halt cause could not be read is an UNKNOWN cause,
+   * not a confirmed owner stop, so it is not counted here; it is counted in `haltCauseUnknown`,
+   * and the policy constant decides what it means for the fleet-dark page.
+   */
   eligibleDeliberatelyIdle: number;
   /** Eligible halted accounts whose halt cause could NOT be confirmed: the off-loop audit read
    *  failed, timed out, or never ran.  Zero means every cause in this pass was confirmed. */
@@ -526,6 +533,13 @@ async function computeAutonomyDarkness(now: number = Date.now()): Promise<Autono
   let activeAccounts = 0;
   let fleetActiveAccounts = 0;
   let eligibleDeliberatelyIdle = 0;
+  // The aggregate the fleet-dark DECISION uses.  It is deliberately not the same number as
+  // `eligibleDeliberatelyIdle`: an UNCONFIRMED halt cause is counted here when the policy says an
+  // unreadable cause counts as idle, so a degraded probe does not page the owner about a fleet it
+  // cannot classify.  The confirmed count keeps its own contract -- confirmed owner idleness --
+  // so nothing downstream can read "the cause could not be read" as "the owner stopped it on
+  // purpose", and the two counts can disagree without either one lying.
+  let eligibleIdleForDarkness = 0;
   const haltedEligible: Array<{ userId: string; accountId: string; accountNumber?: string }> = [];
   for (const userId of listUsers()) {
     for (const account of listConnectedAccounts(userId)) {
@@ -546,6 +560,7 @@ async function computeAutonomyDarkness(now: number = Date.now()): Promise<Autono
         }
         if (policy.systemState === "close_only" || policy.systemState === "liquidating") {
           eligibleDeliberatelyIdle += 1;
+          eligibleIdleForDarkness += 1;
         } else if (policy.systemState === "halted") {
           haltedEligible.push({
             userId,
@@ -579,14 +594,20 @@ async function computeAutonomyDarkness(now: number = Date.now()): Promise<Autono
     // An UNCONFIRMED cause (the audit read failed, timed out, or never ran) is not a confirmed
     // owner stop.  It is counted separately, and the policy constant decides what it means for
     // the fleet-dark page -- see HALT_CAUSE_UNKNOWN_COUNTS_AS_IDLE.
+    //
+    // It goes into the aggregate the page decision uses and NOT into the confirmed count: the
+    // confirmed count is "the owner left this account idle", and an unreadable cause is not that.
     if (unknownHaltKeys.has(key) || kind === undefined) {
-      if (HALT_CAUSE_UNKNOWN_COUNTS_AS_IDLE) eligibleDeliberatelyIdle += 1;
+      if (HALT_CAUSE_UNKNOWN_COUNTS_AS_IDLE) eligibleIdleForDarkness += 1;
       continue;
     }
-    if (kind === "stopped") eligibleDeliberatelyIdle += 1;
+    if (kind === "stopped") {
+      eligibleDeliberatelyIdle += 1;
+      eligibleIdleForDarkness += 1;
+    }
   }
-  const allEligibleDeliberatelyIdle =
-    eligibleAccounts > 0 && eligibleDeliberatelyIdle === eligibleAccounts;
+  const allEligibleIdleForDarkness =
+    eligibleAccounts > 0 && eligibleIdleForDarkness === eligibleAccounts;
   return {
     eligibleAccounts,
     activeAccounts,
@@ -596,12 +617,14 @@ async function computeAutonomyDarkness(now: number = Date.now()): Promise<Autono
     haltCauseUnknown: unknownHaltKeys.size,
     // Page only when NO account is `active` fleet-wide (ask-first still running must not
     // read as "fully dark") AND at least one eligible autopilot account is not owner-idle.
-    // Owner halt / exit-only / liquidating stays quiet.  An app halt does not.
+    // Owner halt / exit-only / liquidating stays quiet.  An app halt does not.  An account whose
+    // halt cause could not be read is decided by the policy constant above, through the
+    // aggregate -- not through the confirmed count.
     fullyDark:
       eligibleAccounts > 0 &&
       activeAccounts === 0 &&
       fleetActiveAccounts === 0 &&
-      !allEligibleDeliberatelyIdle
+      !allEligibleIdleForDarkness
   };
 }
 
