@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { ApiErrorBodySchema, ApiKeysListBodySchema } from "./route-response-schemas";
+import { ApiErrorBodySchema, ApiKeysDeleteOkSchema, ApiKeysListBodySchema } from "./route-response-schemas";
 import {
   defaultPlanTierForService,
   isNonPlanTierService,
@@ -315,6 +315,7 @@ describe("GET/POST /api/keys planTier surface", () => {
     expect(legacy?.retired).toBe(true);
     expect(legacy?.configured).toBe(true);
     expect(legacy?.source).toBe("retired");
+    expect(legacy?.label).toBe("Financial Modeling Prep (FMP)");
 
     const post = await POST(
       new NextRequest("http://localhost/api/keys", { method: "POST", headers, body: JSON.stringify({ service: "fmp", apiKey: "new-fmp-key-123456" }) })
@@ -324,7 +325,47 @@ describe("GET/POST /api/keys planTier surface", () => {
 
     const del = await DELETE(new NextRequest("http://localhost/api/keys?service=fmp", { method: "DELETE", headers }));
     expect(del.status).toBe(200);
+    expect(ApiKeysDeleteOkSchema.parse(await del.json()).deleted).toBe(true);
     expect(getUserApiKey(userId, "fmp")).toBeFalsy();
+
+    const after = ApiKeysListBodySchema.parse(await (await GET(new NextRequest("http://localhost/api/keys", { headers }))).json());
+    expect(after.keys.some((k) => k.service === "fmp")).toBe(false);
+
+    const again = await DELETE(new NextRequest("http://localhost/api/keys?service=fmp", { method: "DELETE", headers }));
+    expect(again.status).toBe(200);
+    expect(ApiKeysDeleteOkSchema.parse(await again.json()).deleted).toBe(false);
+  });
+
+  it("deletes a retired key stored under a legacy alias id so it does not reappear", async () => {
+    vi.stubEnv("PRIMARY_USER_EMAIL", "owner4@example.com");
+    const { getDb, upsertUserApiKey, listUserApiKeys } = await import("../src/lib/db");
+    const { userIdForEmail } = await import("../src/lib/auth/identity");
+    const db = getDb();
+    const userId = userIdForEmail("owner4@example.com");
+    upsertUserApiKey(userId, "fmp", "legacy-alias-fmp-key-123456", undefined, undefined);
+    // Simulate a pre-normalization row stored under the legacy alias id.
+    db.prepare("UPDATE user_api_keys SET service = ?, id = ? WHERE user_id = ? AND service = ?").run(
+      "fmp_api_key",
+      `${userId}_fmp_api_key`,
+      userId,
+      "fmp"
+    );
+    expect(listUserApiKeys(userId).some((k) => k.service === "fmp_api_key")).toBe(true);
+    const headers = {
+      "x-authenticated-user-email": "owner4@example.com",
+      "x-authenticated-identity-source": "authjs-session",
+      "content-type": "application/json"
+    };
+    const { NextRequest } = await import("next/server");
+    const { GET, DELETE } = await import("../app/api/keys/route");
+
+    const list = ApiKeysListBodySchema.parse(await (await GET(new NextRequest("http://localhost/api/keys", { headers }))).json());
+    expect(list.keys.find((k) => k.service === "fmp")?.source).toBe("retired");
+
+    const del = await DELETE(new NextRequest("http://localhost/api/keys?service=fmp", { method: "DELETE", headers }));
+    expect(del.status).toBe(200);
+    expect(ApiKeysDeleteOkSchema.parse(await del.json()).deleted).toBe(true);
+    expect(listUserApiKeys(userId).some((k) => k.service === "fmp_api_key" || k.service === "fmp")).toBe(false);
 
     const after = ApiKeysListBodySchema.parse(await (await GET(new NextRequest("http://localhost/api/keys", { headers }))).json());
     expect(after.keys.some((k) => k.service === "fmp")).toBe(false);

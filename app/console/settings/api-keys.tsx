@@ -93,10 +93,16 @@ export function ApiKeysCard() {
     setBusy(entry.service);
     const credName = entry.credentialName ?? "key";
     try {
-      await deleteApiKey(entry.service);
+      const result = await deleteApiKey(entry.service);
       await load();
       setConfirmingDelete(null);
-      toast.push("pos", `${entry.label} ${credName} removed`, "Features it unlocked fall back to the server key if one exists, otherwise turn off.");
+      if (!result.deleted) {
+        toast.push("warn", `No stored ${entry.label} ${credName} was removed`, "Nothing was stored for this service, or the stored row could not be deleted.  Reload to check.");
+      } else if (entry.source === "retired") {
+        toast.push("pos", `${entry.label} ${credName} removed`, "This provider is retired on Socratic-Trade, so the key was never used.");
+      } else {
+        toast.push("pos", `${entry.label} ${credName} removed`, "Features it unlocked fall back to the server key if one exists, otherwise turn off.");
+      }
     } catch (error) {
       toast.push("neg", `Could not remove ${credName}`, error instanceof ConsoleApiError ? error.message : String(error));
     } finally {
@@ -324,7 +330,9 @@ export function ApiKeysCard() {
                     {isConfirmingDelete && (
                       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-control border border-[color:var(--con-neg-border)] bg-[color:var(--con-neg-soft)] p-2.5">
                         <span className="text-[length:var(--con-fs-xs)]">
-                          Remove your {entry.label} {credName}? This can&apos;t be undone — you&apos;d have to paste a new {credName}.
+                          {entry.source === "retired"
+                            ? `Remove your stored ${entry.label} ${credName}?  This can't be undone — ${entry.label} is retired on Socratic-Trade, so a ${credName} for it cannot be added again.`
+                            : `Remove your ${entry.label} ${credName}?  This can't be undone — you'd have to paste a new ${credName}.`}
                         </span>
                         <div className="flex gap-2">
                           <Btn size="sm" variant="ghost" onClick={() => setConfirmingDelete(null)} title={`Keep the ${credName}.`}>

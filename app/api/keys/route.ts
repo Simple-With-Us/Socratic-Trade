@@ -29,6 +29,18 @@ import {
 
 export const dynamic = "force-dynamic";
 
+/** Display names for retired providers, which have no catalog row of their own. */
+const RETIRED_SERVICE_LABELS: Record<string, string> = {
+  fmp: "Financial Modeling Prep (FMP)",
+  quiverquant: "QuiverQuant",
+  quiver: "QuiverQuant",
+  unusual_whales: "Unusual Whales"
+};
+
+function retiredServiceLabel(service: string): string {
+  return RETIRED_SERVICE_LABELS[service] ?? service.toUpperCase();
+}
+
 /**
  * Multi-user API Key Management
  *
@@ -354,7 +366,7 @@ export async function GET(request: NextRequest) {
       const stored = storedByService.get(svc);
       return {
         service: svc,
-        label: svc,
+        label: retiredServiceLabel(svc),
         category: "Market data",
         required: false,
         docsUrl: "",
@@ -531,6 +543,15 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ error: `Invalid service. Must be one of: ${[...VALID_SERVICES].join(", ")}` }, { status: 400 });
   }
 
-  const deleted = deleteUserApiKey(userId, canonical);
+  // A row may be stored under a legacy alias id (e.g. "fmp_api_key" for "fmp").  Delete by each
+  // stored row's RAW service id as well as the canonical id, so alias rows cannot survive and reappear.
+  const matchesCanonical = (k: { service: string }) => normalizeApiKeyService(k.service) === canonical;
+  const storedRows = listUserApiKeys(userId).filter(matchesCanonical);
+  deleteUserApiKey(userId, canonical);
+  for (const row of storedRows) {
+    if (row.service !== canonical) deleteUserApiKey(userId, row.service);
+  }
+  // `deleted` is true only when a stored key existed and none remains, so a no-op is distinguishable.
+  const deleted = storedRows.length > 0 && !listUserApiKeys(userId).some(matchesCanonical);
   return NextResponse.json({ success: true, deleted });
 }

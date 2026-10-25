@@ -8,10 +8,13 @@ export const ApiKeysListBodySchema = z.object({
       service: z.string(),
       retired: z.boolean().optional(),
       configured: z.boolean().optional(),
-      source: z.enum(["user", "env", "none", "retired"]).optional()
+      source: z.enum(["user", "env", "none", "retired"]).optional(),
+      label: z.string().optional()
     })
   )
-});
+}).strict();
+
+export const ApiKeysDeleteOkSchema = z.object({ success: z.literal(true), deleted: z.boolean() }).strict();
 
 export const SourceFeaturesPatchOkSchema = z
   .object({
