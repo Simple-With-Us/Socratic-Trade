@@ -41,34 +41,15 @@ if [[ $# -lt 1 ]]; then
   exit 2
 fi
 
-# A masked preview of a value:  the first eight and the last four
-# characters, and nothing else.  A value too short to mask safely is
-# withheld whole, so a preview can never become the secret it describes.
-#
-# The shape is the fleet's blessed one (HogHunter #213):  every copy of the
-# App Store Connect shell layer masks a refused value the same way.
-key_preview() {
-  local v="${1:-}" n
-  n=${#v}
-  if [[ "$n" -eq 0 ]]; then
-    printf '%s' "(empty)"
-    return 0
-  fi
-  if [[ "$n" -le 12 ]]; then
-    printf '[%d chars, withheld]' "$n"
-    return 0
-  fi
-  printf '%s...%s' "${v:0:8}" "${v: -4}"
-}
-
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 module="${repo_root}/scripts/ios-fleet/asc-key.mjs"
 
-# Refuse a value that is not a usable key, and say so with a masked preview:
-# a refused credential has to be identifiable without ever being printed.
+# Refuse a value that is not a usable key.  The refusal names where the key
+# came from and why it was refused, and nothing derived from the value:  no
+# prefix, suffix or other fragment of a credential belongs in any output.
 refuse_unusable_key() {
-  local where="$1" value="$2"
-  echo "::error::The ASC key from ${where} is not a PEM private key; preview: $(key_preview "$value")" >&2
+  local where="$1"
+  echo "::error::The ASC key from ${where} is not a PEM private key (error: invalid-key-format)." >&2
   exit 1
 }
 
@@ -99,12 +80,10 @@ usable_pem() {
 
 key=""
 source_name=""
-hosted_value=""
 
 # 1. The hosted trio.  The key id, the issuer and the key belong together, so
 #    all three names have to be there.
 if [[ -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER_ID:-}" && -n "${APPLE_API_KEY_P8_BASE64:-}" ]]; then
-  hosted_value="$APPLE_API_KEY_P8_BASE64"
   #  Whether this host can decode base64 at all is settled with a known-good
   #  body, so a refusal on the operator's value is reported as a bad body and
   #  not as a machine that cannot decode.  The two are different problems and
@@ -138,12 +117,13 @@ if [[ -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER_ID:-}" && -n "${APPLE
   #  The decode is not trusted to fail on a bad body -- BSD decodes what it
   #  can and returns 0, GNU fails on the invalid byte -- so the body is
   #  checked here, where the value the operator set is still in hand and can
-  #  be named in the refusal.  A masked preview, never the value.
+  #  be named in the refusal.  The refusal names the variable, the key ID and
+  #  the error class, never any part of the value.
   if [[ -z "$key" ]] || ! node "$module" validate >/dev/null 2>&1 <<< "$key"; then
     if [[ "$decoder_ok" -eq 0 ]]; then
-      echo "::error::No usable base64 decoder on this host, so APPLE_API_KEY_P8_BASE64 could not be read; preview: $(key_preview "$hosted_value")" >&2
+      echo "::error::No usable base64 decoder on this host, so APPLE_API_KEY_P8_BASE64 (key ID ${APPLE_API_KEY_ID:-unset}) could not be read (error: no-base64-decoder)." >&2
     else
-      echo "::error::APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key; preview: $(key_preview "$hosted_value")" >&2
+      echo "::error::APPLE_API_KEY_P8_BASE64 (key ID ${APPLE_API_KEY_ID:-unset}) is set but does not decode to a PEM private key (error: invalid-hosted-key)." >&2
     fi
     exit 1
   fi
@@ -203,7 +183,7 @@ fi
 # The key has to be a key:  the shell layer and the client have to accept
 # exactly the same values, so the module parses it before it is handed on.
 # The key is handed back in a variable, so it never passes through stdout.
-usable_pem "$key" || refuse_unusable_key "$source_name" "$key"
+usable_pem "$key" || refuse_unusable_key "$source_name"
 
 export ASC_KEY_P8="$RESOLVED_PEM"
 unset key RESOLVED_PEM
