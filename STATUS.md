@@ -1,3 +1,7 @@
+## 2026-10-25 [Cursor] ST-4580 Kody review on PR #4932 (publisher/remove-fmp)
+
+**What.**  Closed eight unresolved Kody threads: server-only guard on `/api/keys`, Zod query validation, strict PATCH envelope, retired-key `source`/`docsUrl` contract, console copy + delete for retired rows, test env restore and Zod response parsing.  Rollout `docs/rollouts/2026-10-25-st-4580-kody-pr4932-review.md`.
+
 ## 2026-10-23 [GB-COMPILER] ST-3853 share payload schemaVersion from the shared contract
 
 **What.**  `@jaywedgeworth22/congress-trading-shared` is pinned to v2.9.0 (upstream commit `72febd04`), and the outbound congress.trade share sender now stamps the shared `SHARE_PAYLOAD_SCHEMA_VERSION` on every import POST body (`CONGRESS_SHARE_PAYLOAD_SCHEMA_VERSION` stays as a deprecated alias);  Congress.Trade gets a paired PR that resolves the received version and warns without rejecting, and Usage-Monitor still pins v2.8.1 so the soft three-repo pin check flags until UM bumps.  Rollout `docs/rollouts/2026-10-23-st-3853-share-schema-version.md`.

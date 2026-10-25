@@ -45,10 +45,12 @@ export async function GET(request: NextRequest) {
   });
 }
 
-const PatchBodySchema = z.object({
-  userId: z.string().optional(),
-  settings: z.record(z.string(), z.union([z.boolean(), z.number(), z.string()]).nullable())
-});
+const PatchBodySchema = z
+  .object({
+    userId: z.string().optional(),
+    settings: z.record(z.string(), z.union([z.boolean(), z.number(), z.string()]).nullable())
+  })
+  .strict();
 
 export async function PATCH(request: NextRequest) {
   try {

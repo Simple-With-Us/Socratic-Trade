@@ -29,6 +29,12 @@ import {
 
 const getSourceCopy = (source: ApiKeyEntry["source"], credName: string) => {
   switch (source) {
+    case "retired":
+      return {
+        chip: "stored key (unused)",
+        title: `A ${credName} is still stored for this retired provider.  Product code never uses it — delete it when you are done rotating.`,
+        tone: "muted" as const
+      };
     case "user":
       return {
         chip: `your ${credName}`,
@@ -218,7 +224,7 @@ export function ApiKeysCard() {
                             {entry.preview}
                           </code>
                         )}
-                        {entry.source === "user" && entry.updatedAt && (
+                        {(entry.source === "user" || entry.source === "retired") && entry.updatedAt && (
                           <span
                             className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]"
                             title="When you last saved a key for this service."
@@ -292,7 +298,7 @@ export function ApiKeysCard() {
                             {isEditing ? "Close" : entry.source === "user" ? "Replace" : `Add ${credName}`}
                           </Btn>
                         )}
-                        {entry.source === "user" && !retired && (
+                        {(entry.source === "user" && !retired) || entry.source === "retired" ? (
                           <Btn
                             size="sm"
                             variant="dangerOutline"
@@ -301,11 +307,15 @@ export function ApiKeysCard() {
                               setConfirmingDelete(isConfirmingDelete ? null : entry.service);
                               setEditing(null);
                             }}
-                            title={`Delete your stored ${credName} from the server.  Falls back to the server ${credName} if one exists.`}
+                            title={
+                              entry.source === "retired"
+                                ? `Delete the stored ${credName} for this retired provider.  It is never used by Socratic-Trade.`
+                                : `Delete your stored ${credName} from the server.  Falls back to the server ${credName} if one exists.`
+                            }
                           >
                             Remove
                           </Btn>
-                        )}
+                        ) : null}
                       </div>
                     </div>
                     <p className="mt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]" title={entry.envVar ? `Server-side env var for this service: ${entry.envVar}` : undefined}>

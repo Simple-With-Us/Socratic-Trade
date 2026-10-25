@@ -1,3 +1,5 @@
+import "server-only";
+import { z } from "zod";
 import { codeCliReady } from "@/lib/code-cli";
 import { isPrimaryEmail } from "@/lib/auth/identity";
 import { isVerifiedIdentitySource, AUTHENTICATED_IDENTITY_SOURCE_HEADER } from "@/lib/auth/strip-identity";
@@ -259,6 +261,12 @@ const API_KEY_CATALOG = [
 const VALID_SERVICES: ReadonlySet<string> = new Set(API_KEY_CATALOG.map((item) => item.service));
 const PLAN_TIER_SERVICES = servicesWithPlanTierUi();
 
+const ServiceQueryParamSchema = z.string().min(1);
+
+function isAllowedService(canonical: string): boolean {
+  return VALID_SERVICES.has(canonical) || isRetiredMarketDataService(canonical);
+}
+
 function planTierFields(service: string, storedPlanTier?: string | null) {
   if (!PLAN_TIER_SERVICES.has(service)) {
     return { planTier: undefined as string | undefined, planTierOptions: undefined as undefined };
@@ -280,7 +288,15 @@ function canSelectCodeCli(request: NextRequest, userId: string): boolean {
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const userId = resolveRequestUserId(request);
-  const service = searchParams.get("service");
+  const rawService = searchParams.get("service");
+  let service: string | undefined;
+  if (rawService !== null) {
+    const parsedService = ServiceQueryParamSchema.safeParse(rawService);
+    if (!parsedService.success) {
+      return NextResponse.json({ error: "invalid service query parameter" }, { status: 400 });
+    }
+    service = parsedService.data;
+  }
 
   // A key's masked preview (first 8 + last 4, never a usable value) answers "WHICH key is serving
   // me?" — the question the write-only key store otherwise makes unanswerable when several keys
@@ -295,6 +311,17 @@ export async function GET(request: NextRequest) {
   // If a specific service is requested, resolve the key (user DB → env fallback)
   if (service) {
     const canonical = normalizeApiKeyService(service);
+    if (isRetiredMarketDataService(canonical)) {
+      const keys = listUserApiKeys(userId);
+      const stored = keys.find((k) => normalizeApiKeyService(k.service) === canonical);
+      return NextResponse.json({
+        service: canonical,
+        configured: Boolean(stored),
+        source: stored ? "retired" : "none",
+        retired: true,
+        retiredNote: "Retired on Socratic-Trade.\u00A0 Delete any stored key; product code never uses it."
+      });
+    }
     if (!VALID_SERVICES.has(canonical)) {
       return NextResponse.json({ error: `Invalid service. Must be one of: ${[...VALID_SERVICES].join(", ")}` }, { status: 400 });
     }
@@ -330,9 +357,11 @@ export async function GET(request: NextRequest) {
         label: svc,
         category: "Market data",
         required: false,
+        docsUrl: "",
         unlocks: "Retired on Socratic-Trade.\u00A0 This stored key is never used.",
         configured: true,
-        source: "user" as const,
+        source: "retired" as const,
+        preview: stored?.apiKey ? maskApiKeyPreview(stored.apiKey) : undefined,
         updatedAt: stored?.updatedAt,
         savedLabel: stored?.label,
         retired: true,
@@ -487,15 +516,18 @@ export async function POST(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const userId = resolveRequestUserId(request);
-  const service = searchParams.get("service");
-
-  if (!service) {
-    return NextResponse.json({ error: "service query parameter is required" }, { status: 400 });
+  const parsedService = ServiceQueryParamSchema.safeParse(searchParams.get("service"));
+  if (!parsedService.success) {
+    const missing = searchParams.get("service") === null || searchParams.get("service") === "";
+    return NextResponse.json(
+      { error: missing ? "service query parameter is required" : "invalid service query parameter" },
+      { status: 400 }
+    );
   }
 
-  const canonical = normalizeApiKeyService(service);
+  const canonical = normalizeApiKeyService(parsedService.data);
   // Retired services are not in the catalog, but a key stored before retirement must stay revocable.
-  if (!VALID_SERVICES.has(canonical) && !isRetiredMarketDataService(canonical)) {
+  if (!isAllowedService(canonical)) {
     return NextResponse.json({ error: `Invalid service. Must be one of: ${[...VALID_SERVICES].join(", ")}` }, { status: 400 });
   }
 

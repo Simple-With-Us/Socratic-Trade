@@ -252,8 +252,8 @@ export interface ApiKeyEntry {
   envVar?: string;
   /** True when a key resolves for this user (own key or server env). */
   configured: boolean;
-  /** "user" = your stored key, "env" = the server operator's env var, "none". */
-  source: "user" | "env" | "none";
+  /** "user" = your stored key, "env" = the server operator's env var, "none", "retired" = stored but never used. */
+  source: "user" | "env" | "none" | "retired";
   /** Elided first-8/last-4 form of the key that ACTUALLY resolves ("sk-or-v1-...ab12") — never a
    *  usable value. Absent for a server key when you are not the operator, and for keys too short
    *  to elide safely. */

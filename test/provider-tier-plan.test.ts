@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { ApiErrorBodySchema, ApiKeysListBodySchema } from "./route-response-schemas";
 import {
   defaultPlanTierForService,
   isNonPlanTierService,
@@ -229,6 +230,10 @@ describe("plan_tier persistence on user_api_keys", () => {
 });
 
 describe("GET/POST /api/keys planTier surface", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("returns planTierOptions for market-data and does not list FMP", async () => {
     vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
     const { getDb, upsertUserApiKey } = await import("../src/lib/db");
@@ -305,26 +310,23 @@ describe("GET/POST /api/keys planTier surface", () => {
     const { NextRequest } = await import("next/server");
     const { GET, POST, DELETE } = await import("../app/api/keys/route");
 
-    const list = (await (await GET(new NextRequest("http://localhost/api/keys", { headers }))).json()) as {
-      keys: Array<{ service: string; retired?: boolean; configured?: boolean }>;
-    };
+    const list = ApiKeysListBodySchema.parse(await (await GET(new NextRequest("http://localhost/api/keys", { headers }))).json());
     const legacy = list.keys.find((k) => k.service === "fmp");
     expect(legacy?.retired).toBe(true);
     expect(legacy?.configured).toBe(true);
+    expect(legacy?.source).toBe("retired");
 
     const post = await POST(
       new NextRequest("http://localhost/api/keys", { method: "POST", headers, body: JSON.stringify({ service: "fmp", apiKey: "new-fmp-key-123456" }) })
     );
     expect(post.status).toBe(400);
-    expect(((await post.json()) as { error: string }).error).toContain("retired");
+    expect(ApiErrorBodySchema.parse(await post.json()).error).toContain("retired");
 
     const del = await DELETE(new NextRequest("http://localhost/api/keys?service=fmp", { method: "DELETE", headers }));
     expect(del.status).toBe(200);
     expect(getUserApiKey(userId, "fmp")).toBeFalsy();
 
-    const after = (await (await GET(new NextRequest("http://localhost/api/keys", { headers }))).json()) as {
-      keys: Array<{ service: string }>;
-    };
+    const after = ApiKeysListBodySchema.parse(await (await GET(new NextRequest("http://localhost/api/keys", { headers }))).json());
     expect(after.keys.some((k) => k.service === "fmp")).toBe(false);
   });
 });
