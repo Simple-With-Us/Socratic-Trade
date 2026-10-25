@@ -173,7 +173,7 @@ if [[ -z "$key" ]]; then
       2>/dev/null || true
   )"
   unset token
-  source_name="Infisical prod"
+  source_name="Infisical prod (Fleet-OPS /asc)"
 fi
 
 if [[ -z "$key" ]]; then
