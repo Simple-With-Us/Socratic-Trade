@@ -8,6 +8,23 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+/**
+ * The zod specifiers that ship the MINI build.  zod 4.6.2 exposes three of them — zod/mini,
+ * zod/v4/mini and zod/v4-mini — and every one of them is the mini runtime.  Which entrypoint is
+ * the mini one is a property of zod's exports map, NOT of the spelling, so the set is enumerated
+ * here rather than pattern-matched: a future zod major's mini entrypoint has to be added on
+ * purpose, and a full-runtime entrypoint can never slip past by looking mini-ish.
+ */
+const ZOD_MINI_SPECIFIERS = ["zod/mini", "zod/v4/mini", "zod/v4-mini"];
+
+/**
+ * Flags any import of a zod specifier that is NOT one of the mini entrypoints — zod, zod/v4,
+ * zod/v4/classic, zod/v4/core, zod/v3, ... — because those pull in the full runtime, whether
+ * imported statically, dynamically, or re-exported.
+ */
+const ZOD_FULL_RUNTIME_GUARD =
+  /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+)["']zod(?!(?:\/mini|\/v4\/mini|\/v4-mini)["'])(?:\/[^"']*)?["']/;
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
@@ -62,9 +79,7 @@ describe("ApiKeyDeleteResponseSchema", () => {
   it("validates with zod/mini, never the full zod runtime, in the client-imported settings lib", () => {
     const source = readFileSync("app/console/settings/lib.ts", "utf8");
     expect(source).toMatch(/from\s+["']zod\/mini["']/);
-    // Any zod specifier other than zod/mini (zod, zod/v4, zod/v4/classic, zod/v4/core, ...) pulls
-    // in the full runtime, whether imported statically, dynamically, or re-exported.
-    expect(source).not.toMatch(/(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+)["']zod(?!\/mini["'])(?:\/[^"']*)?["']/);
+    expect(source).not.toMatch(ZOD_FULL_RUNTIME_GUARD);
   });
 });
 
@@ -98,5 +113,34 @@ describe("runRemoveKey", () => {
     expect(title).toBe("Could not confirm FMP API key removal");
     expect(detail).toContain("may or may not have been removed");
     expect(detail).toContain("list was refreshed");
+  });
+});
+
+describe("the zod full-runtime guard", () => {
+  const IMPORT_FORMS = [
+    (specifier: string) => `import { z } from "${specifier}";`,
+    (specifier: string) => `const z = await import("${specifier}");`,
+    (specifier: string) => `const z = require("${specifier}");`,
+    (specifier: string) => `import "${specifier}";`
+  ];
+
+  it.each(ZOD_MINI_SPECIFIERS)("allows the mini entrypoint %s in every import form", (specifier) => {
+    for (const form of IMPORT_FORMS) {
+      expect(form(specifier)).not.toMatch(ZOD_FULL_RUNTIME_GUARD);
+    }
+  });
+
+  it.each(["zod", "zod/v4", "zod/v4/classic", "zod/v4/core", "zod/v3"])(
+    "blocks the full runtime %s in every import form",
+    (specifier) => {
+      for (const form of IMPORT_FORMS) {
+        expect(form(specifier)).toMatch(ZOD_FULL_RUNTIME_GUARD);
+      }
+    }
+  );
+
+  it("does not flag a relative or unrelated specifier", () => {
+    expect(`import { z } from "./zod";`).not.toMatch(ZOD_FULL_RUNTIME_GUARD);
+    expect(`import { z } from "some-other-zod";`).not.toMatch(ZOD_FULL_RUNTIME_GUARD);
   });
 });
