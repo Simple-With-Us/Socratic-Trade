@@ -333,7 +333,7 @@ export async function deleteApiKey(service: string): Promise<ApiKeyDeleteRespons
   });
   const parsed = ApiKeyDeleteResponseSchema.safeParse(payload);
   if (!parsed.success) {
-    throw new ConsoleApiError("Unexpected response from the server while removing the key.  Reload to check whether it was removed.", 200, payload);
+    throw new ConsoleApiError("Unexpected response from the server while removing the key.  Reload to check whether it was removed.", 200, payload);
   }
   return parsed.data;
 }
