@@ -18,6 +18,7 @@ import { useToast } from "../ui/toast";
 import { Ago, Btn, Card, Chip, Field, Select, TextInput } from "../ui/primitives";
 import { SaveStatus } from "../ui/save-status";
 import type { AutoSaveStatus } from "../lib/useAutoSave";
+import { runRemoveKey } from "./remove-key";
 import {
   deleteApiKey,
   listApiKeys,
@@ -91,20 +92,8 @@ export function ApiKeysCard() {
 
   const removeKey = async (entry: ApiKeyEntry) => {
     setBusy(entry.service);
-    const credName = entry.credentialName ?? "key";
     try {
-      const result = await deleteApiKey(entry.service);
-      await load();
-      setConfirmingDelete(null);
-      if (!result.deleted) {
-        toast.push("warn", `No stored ${entry.label} ${credName} was removed`, "Nothing was stored for this service, or the stored row could not be deleted.  Reload to check.");
-      } else if (entry.source === "retired") {
-        toast.push("pos", `${entry.label} ${credName} removed`, "This provider is retired on Socratic-Trade, so the key was never used.");
-      } else {
-        toast.push("pos", `${entry.label} ${credName} removed`, "Features it unlocked fall back to the server key if one exists, otherwise turn off.");
-      }
-    } catch (error) {
-      toast.push("neg", `Could not remove ${credName}`, error instanceof ConsoleApiError ? error.message : String(error));
+      await runRemoveKey(entry, { deleteApiKey, reload: load, push: toast.push, onSettled: () => setConfirmingDelete(null) });
     } finally {
       setBusy(null);
     }

@@ -4,7 +4,6 @@
  *  is reused so every settings error surfaces through the same toast pattern.
  *  Every function talks to REAL existing endpoints — nothing here simulates. */
 
-import { z } from "zod";
 import { ConsoleApiError, redirectToLogin } from "../lib/api";
 import { beginConsoleMutation, endConsoleMutation, isConsoleMutationMethod } from "../lib/mutation-busy";
 
@@ -316,18 +315,31 @@ export function saveApiKeyRoute(service: string, route: "openrouter" | "native" 
 }
 
 /** DELETE /api/keys response, validated at the client trust boundary. */
-export const ApiKeyDeleteResponseSchema = z.object({ success: z.literal(true), deleted: z.boolean() }).strict();
-export type ApiKeyDeleteResponse = z.infer<typeof ApiKeyDeleteResponseSchema>;
+export interface ApiKeyDeleteResponse {
+  success: true;
+  deleted: boolean;
+}
+
+/** Strict guard for the DELETE /api/keys body: exactly `{ success: true, deleted: boolean }`,
+ *  no unknown top-level keys (same contract test/route-response-schemas.ts ApiKeysDeleteOkSchema
+ *  pins server-side).  A local guard instead of zod keeps the schema runtime out of the client
+ *  bundle (this module is imported by "use client" pages). */
+export function isApiKeyDeleteResponse(value: unknown): value is ApiKeyDeleteResponse {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || !keys.includes("success") || !keys.includes("deleted")) return false;
+  const body = value as Record<string, unknown>;
+  return body.success === true && typeof body.deleted === "boolean";
+}
 
 export async function deleteApiKey(service: string): Promise<ApiKeyDeleteResponse> {
   const payload = await request<unknown>(`/api/keys?service=${encodeURIComponent(service)}`, {
     method: "DELETE"
   });
-  const parsed = ApiKeyDeleteResponseSchema.safeParse(payload);
-  if (!parsed.success) {
+  if (!isApiKeyDeleteResponse(payload)) {
     throw new ConsoleApiError("Unexpected response from the server while removing the key.  Reload to check whether it was removed.", 200, payload);
   }
-  return parsed.data;
+  return { success: true, deleted: payload.deleted };
 }
 
 // ── Delivery channels (out-of-app alert delivery) ────────────────────────────
