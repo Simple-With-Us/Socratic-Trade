@@ -38,7 +38,7 @@ describe("deleteApiKey response validation", () => {
   });
 });
 
-describe("isApiKeyDeleteResponse", () => {
+describe("ApiKeyDeleteResponseSchema", () => {
   it.each([
     [{ success: true, deleted: true }, true],
     [{ success: true, deleted: false }, true],
@@ -52,14 +52,15 @@ describe("isApiKeyDeleteResponse", () => {
     [null, false],
     ["ok", false],
     [undefined, false]
-  ])("guards %j -> %s", async (value, expected) => {
-    const { isApiKeyDeleteResponse } = await import("../app/console/settings/lib");
-    expect(isApiKeyDeleteResponse(value)).toBe(expected);
+  ])("parses %j -> %s", async (value, expected) => {
+    const { ApiKeyDeleteResponseSchema } = await import("../app/console/settings/lib");
+    expect(ApiKeyDeleteResponseSchema.safeParse(value).success).toBe(expected);
   });
 
-  it("keeps zod out of the client-imported settings lib", () => {
+  it("validates with zod/mini, never the full zod runtime, in the client-imported settings lib", () => {
     const source = readFileSync("app/console/settings/lib.ts", "utf8");
-    expect(source).not.toMatch(/from\s+["']zod(\/[^"']*)?["']/);
+    expect(source).toMatch(/from\s+["']zod\/mini["']/);
+    expect(source).not.toMatch(/from\s+["']zod["']/);
   });
 });
 

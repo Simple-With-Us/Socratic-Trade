@@ -4,6 +4,7 @@
  *  is reused so every settings error surfaces through the same toast pattern.
  *  Every function talks to REAL existing endpoints — nothing here simulates. */
 
+import * as z from "zod/mini";
 import { ConsoleApiError, redirectToLogin } from "../lib/api";
 import { beginConsoleMutation, endConsoleMutation, isConsoleMutationMethod } from "../lib/mutation-busy";
 
@@ -314,32 +315,27 @@ export function saveApiKeyRoute(service: string, route: "openrouter" | "native" 
   });
 }
 
-/** DELETE /api/keys response, validated at the client trust boundary. */
-export interface ApiKeyDeleteResponse {
-  success: true;
-  deleted: boolean;
-}
+/** DELETE /api/keys response, validated at the client trust boundary with a strict zod schema:
+ *  exactly `{ success: true, deleted: boolean }`, unknown top-level keys rejected (the same contract
+ *  test/route-response-schemas.ts ApiKeysDeleteOkSchema pins server-side).  This module is imported
+ *  by "use client" pages, so it uses the tree-shakable `zod/mini` build to keep runtime validation
+ *  without pulling the full zod runtime into the client bundle. */
+export const ApiKeyDeleteResponseSchema = z.strictObject({
+  success: z.literal(true),
+  deleted: z.boolean()
+});
 
-/** Strict guard for the DELETE /api/keys body: exactly `{ success: true, deleted: boolean }`,
- *  no unknown top-level keys (same contract test/route-response-schemas.ts ApiKeysDeleteOkSchema
- *  pins server-side).  A local guard instead of zod keeps the schema runtime out of the client
- *  bundle (this module is imported by "use client" pages). */
-export function isApiKeyDeleteResponse(value: unknown): value is ApiKeyDeleteResponse {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const keys = Object.keys(value);
-  if (keys.length !== 2 || !keys.includes("success") || !keys.includes("deleted")) return false;
-  const body = value as Record<string, unknown>;
-  return body.success === true && typeof body.deleted === "boolean";
-}
+export type ApiKeyDeleteResponse = z.infer<typeof ApiKeyDeleteResponseSchema>;
 
 export async function deleteApiKey(service: string): Promise<ApiKeyDeleteResponse> {
   const payload = await request<unknown>(`/api/keys?service=${encodeURIComponent(service)}`, {
     method: "DELETE"
   });
-  if (!isApiKeyDeleteResponse(payload)) {
-    throw new ConsoleApiError("Unexpected response from the server while removing the key.  Reload to check whether it was removed.", 200, payload);
+  const parsed = ApiKeyDeleteResponseSchema.safeParse(payload);
+  if (!parsed.success) {
+    throw new ConsoleApiError("Unexpected response from the server while removing the key.  Reload to check whether it was removed.", 200, payload);
   }
-  return { success: true, deleted: payload.deleted };
+  return parsed.data;
 }
 
 // ── Delivery channels (out-of-app alert delivery) ────────────────────────────
