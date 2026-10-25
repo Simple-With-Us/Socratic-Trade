@@ -200,25 +200,58 @@ jobs:
           fi
           printf '::add-mask::%s\n' "${TOKEN//'%'/'%25'}"
 
+          # The App Store Connect trio has exactly one home:  Fleet-OPS /asc
+          # (owner ruling 2026-10-11; any app may use it, ruling 2026-10-17).
+          # This repository's INFISICAL_PROJECT_ID is the application project,
+          # which has no /asc folder, so a read against it returns nothing
+          # (ST-4579).  There is no second source and no override:  Infisical
+          # is the only source of truth, and a missing or unreadable secret
+          # stops the run with a message that names it (owner policy
+          # 2026-10-24, no fallbacks, no overrides).
+          FLEET_ASC_PROJECT_ID="8dae6d03-8f12-48b2-adf3-e5c1b881c8c5"
+          asc_get() {
+            INFISICAL_TOKEN="$TOKEN" infisical secrets get "$1" \
+              --plain --silent --telemetry=false --expand=false \
+              --projectId="$2" --env=prod --path="$3" \
+              2>/dev/null
+          }
+          # read_required <variable> <secret> <project> <path> <label>
+          # A failed read (expired token, revoked grant, outage) and an empty
+          # value are different faults, so they get different messages:  a
+          # failed read never claims the secret is missing.  A blank value
+          # (only whitespace) counts as missing, because every consumer
+          # trims it and would reject it later with a vaguer error.
+          read_required() {
+            local value
+            if ! value="$(asc_get "$2" "$3" "$4")"; then
+              echo "::error::Could not read required secret $2 from Infisical prod ($5):  the read failed, so it is not known whether the secret is missing." >&2
+              exit 1
+            fi
+            if [ -z "${value//[[:space:]]/}" ]; then
+              echo "::error::Missing required secret $2 in Infisical prod ($5)." >&2
+              exit 1
+            fi
+            printf -v "$1" '%s' "$value"
+          }
+          # Read the trio once, together, from the one source, and reuse the
+          # values below:  the three names always come from the same project.
+          read_required asc_key_id ASC_KEY_ID "$FLEET_ASC_PROJECT_ID" /asc "Fleet-OPS /asc"
+          read_required asc_issuer_id ASC_ISSUER_ID "$FLEET_ASC_PROJECT_ID" /asc "Fleet-OPS /asc"
+          read_required key_material ASC_KEY_P8 "$FLEET_ASC_PROJECT_ID" /asc "Fleet-OPS /asc"
+
           for name in ASC_KEY_ID ASC_ISSUER_ID \
                       IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD; do
-            # The ASC trio lives in the /asc folder and the certificate
-            # material lives at the root.  Asking the wrong folder returns
-            # nothing, and an empty value here is a ship with no key id at
-            # all (AFC-459).
+            # The ASC ids were read above from Fleet-OPS /asc and are reused
+            # here; the certificate material comes from this project's root.
             case "$name" in
-              ASC_KEY_ID|ASC_ISSUER_ID) secret_path=/asc ;;
-              *) secret_path=/ ;;
+              ASC_KEY_ID) val="$asc_key_id" ;;
+              ASC_ISSUER_ID) val="$asc_issuer_id" ;;
+              # Every signing field is required:  an unreadable, empty or blank
+              # value stops the step here, naming the secret, instead of
+              # skipping it and failing later in the import (owner policy
+              # 2026-10-24, no fallbacks).
+              *) read_required val "$name" "$INFISICAL_PROJECT_ID" / "application project root" ;;
             esac
-            val="$(
-              INFISICAL_TOKEN="$TOKEN" infisical secrets get "$name" \
-                --plain --silent --telemetry=false --expand=false \
-                --projectId="$INFISICAL_PROJECT_ID" --env=prod --path="$secret_path" \
-                2>/dev/null || true
-            )"
-            if [ -z "$val" ]; then
-              continue
-            fi
             if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
               echo "::error::Signing field $name must be single-line; correct Infisical formatting." >&2
               exit 1
@@ -238,16 +271,6 @@ jobs:
           # scripts/ios-asc-key-env.sh, and hand it to the client in the
           # environment:  a path on disk is not a credential source
           # (AFC-459, revision 2).
-          key_material="$(
-            INFISICAL_TOKEN="$TOKEN" infisical secrets get ASC_KEY_P8 \
-              --plain --silent --telemetry=false --expand=false \
-              --projectId="$INFISICAL_PROJECT_ID" --env=prod --path=/asc \
-              2>/dev/null || true
-          )"
-          if [ -z "$key_material" ]; then
-            echo "::error::Missing ASC key material in Infisical prod."
-            exit 1
-          fi
           printf '%s\n' "$key_material" | bash "$GITHUB_WORKSPACE/scripts/ios-stage-asc-key.sh"
           ASC_KEY_PATH="$(sed -n 's/^ASC_KEY_PATH=//p' "$GITHUB_ENV" | tail -n 1)"
           export ASC_KEY_PATH
