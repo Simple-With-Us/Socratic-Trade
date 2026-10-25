@@ -188,6 +188,8 @@ if bash "$repo_root/scripts/ios-asc-key-env.sh" bash "$tmp_dir/child.sh" >"$tmp_
 fi
 grep -q 'is not a PEM private key' "$tmp_dir/stderr" ||
   { echo "the refusal did not name the reason" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
+grep -Fq 'The ASC key from Infisical prod is not' "$tmp_dir/stderr" ||
+  { echo "the refusal did not name its source" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
 grep -q 'error: invalid-key-format' "$tmp_dir/stderr" ||
   { echo "the refusal did not name the error class" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
 for fragment in 'not a private key at all' 'not a pr' ' all' 'preview'; do
