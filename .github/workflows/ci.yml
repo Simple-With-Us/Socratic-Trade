@@ -354,11 +354,18 @@ jobs:
           bash -n scripts/test-ios-stage-asc-key.sh
           bash -n scripts/ios-fleet/publish-ios-versions.sh
           bash -n scripts/ios-fleet/test-asc-credentials.sh
+          bash -n scripts/ios-fleet/ship-testflight.sh
+          bash -n scripts/ios-fleet/test-ship-seq.sh
           bash -n scripts/ios-asc-key-env.sh
           bash scripts/test-ios-scheduled-ship-gate.sh
           bash scripts/test-ios-stage-asc-key.sh
           bash scripts/test-ios-asc-key-env.sh
           bash scripts/ios-fleet/test-asc-credentials.sh
+          # The version-numbering rules (AFC-517): the pure copy is unit-tested,
+          # and the ship script's use of them is regression-tested offline with
+          # a stubbed App Store Connect.
+          bash scripts/ios-fleet/test-ship-seq.sh
+          node --test scripts/ios-fleet/version-plan.test.mjs
           node --test scripts/ios-fleet/publish-ios-versions.test.mjs
           node --test scripts/ios-fleet/asc-api.credentials.test.mjs
           node --test scripts/ios-fleet/test-asc-key.test.mjs

@@ -14,13 +14,15 @@
 # successful ships per app: DEFAULT_MIN_INTERVAL_SEC=3600 (3600s = 1 hour),
 # defined near the top of scripts/ios-fleet/ship-testflight.sh. Runs inside that
 # window log "ship-gate: skip" and exit 0. It also skips when git HEAD already
-# shipped. Neither kind of skip consumes a build number (fixed 2026-08-12).
+# shipped. Neither kind of skip resolves a version (fixed 2026-08-12).
 # Override one run with IOS_TF_MIN_INTERVAL_SEC=<seconds> or --force-ship;
 # changing the standing limit means editing DEFAULT_MIN_INTERVAL_SEC.
 #
-# VERSION NUMBERS: MARKETING_VERSION is 1.0.<commit_count> and
-# CURRENT_PROJECT_VERSION is the same commit count, so App Store Connect
-# shows "1.0.148 (148)" -- both numbers describe one commit.
+# VERSION NUMBERS (owner directive 2026-10-24, AFC-517): MARKETING_VERSION is
+# the NEXT PATCH on the app's train (<prefix>.<P+1>, P from App Store Connect)
+# and CURRENT_PROJECT_VERSION is the repo commit count, raised above the App
+# Store Connect floor.  The two numbers are independent, so App Store Connect
+# shows e.g. "1.0.237 (2360)" -- not "1.0.N (N)".
 #
 # STABLE XCODE IS MANDATORY (owner, reaffirmed 2026-08-11).
 # Xcode-beta's SDK breaks TestFlight / App Store Connect compatibility: a binary
