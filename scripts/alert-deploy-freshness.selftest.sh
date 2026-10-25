@@ -109,6 +109,18 @@ exec "${REAL_GIT}" "\$@"
 SH
 chmod +x "${WORK}/shim/git"
 
+# The control for the RUN_CWD cases.  A non-interactive bash sources BASH_ENV
+# at startup, so the probe records the directory every child bash actually
+# started in.  Without it the subdirectory case would pass whether or not
+# RUN_CWD was honored, because a run from the repository root produces the
+# same verdict and the case would guard nothing.  The probe APPENDS, and the
+# control reads the FIRST record, because the script under test is the first
+# bash to start and it is the one whose starting directory is under test.
+CWD_PROBE="${WORK}/cwd-probe.txt"
+cat > "${WORK}/cwd-probe.sh" <<'SH'
+pwd >> "${CWD_PROBE_FILE:-/dev/null}" 2>/dev/null || true
+SH
+
 PASSES=0
 FAILURES=0
 
@@ -123,6 +135,10 @@ EXPECT_OUTPUT=""
 # Empty means the repo root.  Set it to prove the watchdog anchors itself to
 # the repository root instead of resolving pathspecs against the caller's cwd.
 RUN_CWD=""
+
+# When set, the run is only valid if the script under test actually STARTED
+# in a directory whose path ends with this suffix.  Empty means no control.
+EXPECT_CWD_SUFFIX=""
 
 # $1 name, $2 expected exit, $3 expected-ref, $4 stub status, $5 stub body, $6 extra env assignments
 run_case() {
@@ -146,6 +162,7 @@ run_case() {
   if [ -n "$RUN_CWD" ]; then
     workdir="${REPO}/${RUN_CWD}"
   fi
+  rm -f "$CWD_PROBE"
 
   local out code
   # Extra KEY=value args cannot be `"$@" bash` prefixes: bash only treats
@@ -155,6 +172,8 @@ run_case() {
     export DEPLOY_VERIFY_NO_FETCH=1
     export DEPLOY_FRESHNESS_NOTIFY=0
     export DEPLOY_FRESHNESS_TREAT_UNREACHABLE=1
+    export BASH_ENV="${WORK}/cwd-probe.sh"
+    export CWD_PROBE_FILE="$CWD_PROBE"
     for assign in "$@"; do
       export "$assign"
     done
@@ -175,6 +194,23 @@ run_case() {
     printf '%s\n' "$out" | sed 's/^/      /'
     FAILURES=$((FAILURES + 1))
     return
+  fi
+  # The control.  The verdict alone cannot tell a run from the subdirectory
+  # apart from a run from the repository root, so the run has to prove where
+  # the script under test started.
+  if [ -n "$EXPECT_CWD_SUFFIX" ]; then
+    local probed=""
+    if [ -f "$CWD_PROBE" ]; then
+      probed="$(head -n 1 "$CWD_PROBE")"
+    fi
+    case "$probed" in
+      *"/${EXPECT_CWD_SUFFIX}") ;;
+      *)
+        echo "FAIL  ${name} (control: the script under test started in '${probed:-unknown}', wanted a path ending in '/${EXPECT_CWD_SUFFIX}')"
+        FAILURES=$((FAILURES + 1))
+        return
+        ;;
+    esac
   fi
   echo "PASS  ${name} (exit ${code})"
   PASSES=$((PASSES + 1))
@@ -218,19 +254,32 @@ run_case "still stale when the gap changes a watched path" 3 "$C4" 200 "$(payloa
 # and the failure becomes a green image-noop pass - a watchdog that claims to
 # have checked while it did not.  The same failure used to abort the script
 # under `set -e`, and it must keep failing loudly.
+#
+# The expected output pins the failure to the rev-list branch.  Several
+# unrelated guards also exit 1, so the exit code alone cannot show that the
+# rev-list error handling is what fired.
+EXPECT_OUTPUT="git rev-list failed"
 run_case "a git failure is an operational error, not a fresh pass" 1 "$C4" 200 "$(payload "\"${C3}\"" 9000)" \
   DEPLOY_FRESHNESS_STALE_SECONDS=60 \
   "PATH=${WORK}/shim:${PATH}"
+EXPECT_OUTPUT=""
 
 # The watchdog must anchor itself to the repository root.  Git resolves a
 # pathspec against the working directory, so a run started from a subdirectory
 # resolves every watched path to <repo>/subdir/<path>, matches nothing, and
 # reports a fresh image-noop pass.  The gap here DOES change a watched path
 # (C4), so the verdict must still be stale.
+#
+# The control is the point of the case.  A run from the repository root gives
+# the same stale verdict, so the verdict alone cannot tell whether the run
+# really started in the subdirectory.  The probe records where the script
+# under test started, and the case fails unless that was the subdirectory.
 RUN_CWD="subdir"
+EXPECT_CWD_SUFFIX="subdir"
 run_case "a run from a subdirectory still ages the watched commit" 3 "$C4" 200 "$(payload "\"${C3}\"" 9000)" \
   DEPLOY_FRESHNESS_STALE_SECONDS=60
 RUN_CWD=""
+EXPECT_CWD_SUFFIX=""
 
 echo "---- ${PASSES} passed, ${FAILURES} failed ----"
 [ "$FAILURES" = "0" ]
