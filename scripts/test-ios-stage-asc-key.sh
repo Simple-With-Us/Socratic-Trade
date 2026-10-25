@@ -96,6 +96,8 @@ case "${1:-}" in
     echo "asked for ${3:-value} at ${secret_path:-/} in ${secret_project:-none}" >> "${ASC_TEST_LOG:-/dev/null}"
     if [[ "${3:-}" == ASC_KEY_P8 ]]; then
       cat "$ASC_TEST_FIXTURE"
+    elif [[ "${3:-}" == ASC_KEY_ID && "${ASC_TEST_MISSING_KEY_ID:-}" == "1" ]]; then
+      :
     elif [[ "${3:-}" == IOS_DIST_P12_BASE64 && "${ASC_TEST_MULTILINE_P12:-}" == 1 ]]; then
       printf '%s\n' SYNTHETIC-P12-FIRST SYNTHETIC-P12-CONTINUATION
     else
@@ -157,5 +159,24 @@ if grep -Fq 'SYNTHETIC-P12-' "$tmp_dir/multiline-env" "$tmp_dir/multiline-stdout
   exit 1
 fi
 grep -q 'must be single-line' "$tmp_dir/multiline-stderr"
+
+# A missing ASC key id must stop the credential step, with a message that
+# names the source it read, instead of failing later in the import step with
+# a message about a missing variable.  The ASC trio is the credential as a
+# whole, and a ship without the key id or the issuer cannot sign.
+: > "$tmp_dir/missing-key-id-env"
+if env -u ASC_KEY_P8 PATH="$tmp_dir/bin:$PATH" \
+  GITHUB_WORKSPACE="$tmp_dir/workspace" GITHUB_ENV="$tmp_dir/missing-key-id-env" \
+  INFISICAL_PROJECT_ID=synthetic-project \
+  INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client \
+  INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=synthetic-secret \
+  ASC_TEST_LOG="$tmp_dir/asc-test-log" \
+  ASC_TEST_FIXTURE="$tmp_dir/fixture" ASC_TEST_MISSING_KEY_ID=1 \
+  bash "$tmp_dir/workflow-load.sh" > "$tmp_dir/missing-key-id-stdout" 2> "$tmp_dir/missing-key-id-stderr"; then
+  echo 'a missing ASC key id was accepted' >&2
+  exit 1
+fi
+grep -q 'Missing ASC_KEY_ID in Infisical prod' "$tmp_dir/missing-key-id-stderr" ||
+  { echo 'the missing key id did not stop the credential step' >&2; cat "$tmp_dir/missing-key-id-stderr" >&2; exit 1; }
 
 echo 'synthetic ASC key-file and workflow handoff passed'

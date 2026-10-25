@@ -247,6 +247,16 @@ jobs:
             esac
             val="$(asc_get "$name" "$secret_project" "$secret_path")"
             if [ -z "$val" ]; then
+              # The ASC trio is the credential as a whole:  a ship without the
+              # key id or the issuer is a ship that cannot sign, so a missing
+              # one stops the run here, where the message names the source
+              # that was read.  The certificate material keeps its skip.
+              case "$name" in
+                ASC_KEY_ID|ASC_ISSUER_ID)
+                  echo "::error::Missing $name in Infisical prod (${ASC_SRC_LABEL})." >&2
+                  exit 1
+                  ;;
+              esac
               continue
             fi
             if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
