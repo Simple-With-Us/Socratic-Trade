@@ -42,7 +42,7 @@
     "@jaywedgeworth22/congress-trading-shared": "github:Simple-With-Us/congress-trading-shared#v2.9.0",
     "@langfuse/otel": "^6.0.0",
     "@langfuse/tracing": "^6.0.0",
-    "@opentelemetry/instrumentation": "^0.223.0",
+    "@opentelemetry/instrumentation": "^0.300.0",
     "@opentelemetry/sdk-trace-node": "^2.11.0",
     "@pinecone-database/pinecone": "^9.0.0",
     "@sentry/nextjs": "^11.0.0",
