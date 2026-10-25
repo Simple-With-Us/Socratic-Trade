@@ -1,11 +1,13 @@
 /**
  * app/console/settings/lib.ts deleteApiKey: the DELETE /api/keys body is strictly validated at the
  * client trust boundary (ST-4580) with the strict, tree-shakable ApiKeyDeleteResponseSchema from
- * zod/mini, so only the zod/mini runtime (never the full zod runtime) reaches the Settings client
- * bundle, a malformed body never reaches the Remove flow as a success, and runRemoveKey always
- * reloads the list.
+ * zod/mini, and no module in app/console/settings (including the "use client" page.tsx and
+ * api-keys.tsx that import ./lib) imports the full zod runtime, so the Settings modules add only the
+ * zod/mini runtime to the client bundle, a malformed body never reaches the Remove flow as a
+ * success, and runRemoveKey always reloads the list.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -20,10 +22,33 @@ const ZOD_MINI_SPECIFIERS = ["zod/mini", "zod/v4/mini", "zod/v4-mini"];
 /**
  * Flags any import of a zod specifier that is NOT one of the mini entrypoints — zod, zod/v4,
  * zod/v4/classic, zod/v4/core, zod/v3, ... — because those pull in the full runtime, whether
- * imported statically, dynamically, or re-exported.
+ * imported statically, dynamically, or re-exported, with any string-literal quote (" ' or `).
+ * Run it on stripTypeOnlyImports(source): a type-only import is erased at compile time and adds
+ * nothing to the bundle, so it must not trip the guard.
  */
 const ZOD_FULL_RUNTIME_GUARD =
-  /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+)["']zod(?!(?:\/mini|\/v4\/mini|\/v4-mini)["'])(?:\/[^"']*)?["']/;
+  /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+)(["'`])zod(?!(?:\/mini|\/v4\/mini|\/v4-mini)\1)(?:\/[^"'`]*)?\1/;
+
+/** Removes `import type ... from "x"` and `export type ... from "x"` statements, which TypeScript
+ *  erases entirely.  Inline `import { type X }` is left alone on purpose: under
+ *  verbatimModuleSyntax it still emits `import {} from "x"`, which loads the module. */
+function stripTypeOnlyImports(source: string): string {
+  return source.replace(/\b(?:import|export)\s+type\s+[^;]*?\bfrom\s*(["'`])[^"'`]*\1\s*;?/g, "");
+}
+
+const SETTINGS_DIR = "app/console/settings";
+const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"];
+
+/** Every source module in the Settings directory: page.tsx and api-keys.tsx are "use client" and
+ *  import ./lib, and the sibling panels ship in the same client bundle, so the guard covers the
+ *  whole directory rather than lib.ts alone.  Shared modules outside it (../lib, @/lib) are owned
+ *  and guarded elsewhere. */
+function settingsClientSurface(): string[] {
+  return readdirSync(SETTINGS_DIR)
+    .filter((name) => SOURCE_EXTENSIONS.some((ext) => name.endsWith(ext)))
+    .map((name) => join(SETTINGS_DIR, name))
+    .sort();
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -79,7 +104,32 @@ describe("ApiKeyDeleteResponseSchema", () => {
   it("validates with zod/mini, never the full zod runtime, in the client-imported settings lib", () => {
     const source = readFileSync("app/console/settings/lib.ts", "utf8");
     expect(source).toMatch(/from\s+["']zod\/mini["']/);
-    expect(source).not.toMatch(ZOD_FULL_RUNTIME_GUARD);
+  });
+
+  it("keeps the full zod runtime out of every Settings module, not just lib.ts", () => {
+    const surface = settingsClientSurface();
+    expect(surface).toEqual(
+      expect.arrayContaining([`${SETTINGS_DIR}/page.tsx`, `${SETTINGS_DIR}/api-keys.tsx`, `${SETTINGS_DIR}/lib.ts`])
+    );
+    const offenders = surface.filter((file) => ZOD_FULL_RUNTIME_GUARD.test(stripTypeOnlyImports(readFileSync(file, "utf8"))));
+    expect(offenders).toEqual([]);
+  });
+
+  it.each([
+    ['import { z } from "zod";', true],
+    ["import { z } from 'zod/v4';", true],
+    ["import { z } from `zod`;", true],
+    ["import * as z from `zod/v4/classic`;", true],
+    ['const z = await import("zod/v4/core");', true],
+    ['export { z } from "zod";', true],
+    ['import "zod";', true],
+    ['import * as z from "zod/mini";', false],
+    ["import * as z from `zod/v4-mini`;", false],
+    ['import type { ZodType } from "zod";', false],
+    ['export type { ZodType } from "zod/v4";', false],
+    ['import type {\n  ZodType,\n  ZodObject\n} from "zod";', false]
+  ])("guard on %j -> %s", (source, flagged) => {
+    expect(ZOD_FULL_RUNTIME_GUARD.test(stripTypeOnlyImports(source))).toBe(flagged);
   });
 });
 
