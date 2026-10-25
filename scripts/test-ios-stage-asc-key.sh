@@ -82,9 +82,48 @@ touch "$ASC_TEST_IMPORT_MARKER"
 IMPORT
 cat > "$tmp_dir/bin/infisical" <<'CLI'
 #!/usr/bin/env bash
+secret_path=""
+secret_project=""
+for arg in "$@"; do
+  case "$arg" in
+    --path=*) secret_path="${arg#--path=}" ;;
+    --projectId=*) secret_project="${arg#--projectId=}" ;;
+  esac
+done
 case "${1:-}" in
   login) printf '%s\n' synthetic-session-token ;;
   secrets)
+    echo "asked for ${3:-value} at ${secret_path:-/} in ${secret_project:-none}" >> "${ASC_TEST_LOG:-/dev/null}"
+    # The ASC trio answers only from Fleet-OPS /asc, unless the test makes
+    # that folder unreadable.  The application project root answers for the
+    # trio too, as the control:  only the "never asked" assertions can tell a
+    # single-source workflow from one that falls back to it.
+    # Fleet-OPS project identifier, not a credential (see .gitleaksignore).
+    fleet_project=8dae6d03-8f12-48b2-adf3-e5c1b881c8c5 # gitleaks:allow
+    fleet_asc=0
+    if [[ "$secret_project" == "$fleet_project" && "$secret_path" == /asc &&
+          "${ASC_TEST_FLEET_READABLE:-1}" == 1 ]]; then
+      fleet_asc=1
+    fi
+    # Per-name knobs, so each required secret's failure branch runs alone:
+    # unreadable (the CLI fails), missing (empty answer) or blank (spaces).
+    if [[ -n "${ASC_TEST_UNREADABLE_SECRET:-}" && "${3:-}" == "$ASC_TEST_UNREADABLE_SECRET" ]]; then
+      exit 4
+    fi
+    if [[ -n "${ASC_TEST_MISSING_SECRET:-}" && "${3:-}" == "$ASC_TEST_MISSING_SECRET" ]]; then
+      exit 0
+    fi
+    if [[ -n "${ASC_TEST_BLANK_SECRET:-}" && "${3:-}" == "$ASC_TEST_BLANK_SECRET" ]]; then
+      printf '   \n'
+      exit 0
+    fi
+    case "${3:-}" in
+      ASC_KEY_ID|ASC_ISSUER_ID|ASC_KEY_P8)
+        if [[ "$fleet_asc" != 1 && "$secret_project" != synthetic-project ]]; then
+          exit 3
+        fi
+        ;;
+    esac
     if [[ "${3:-}" == ASC_KEY_P8 ]]; then
       cat "$ASC_TEST_FIXTURE"
     elif [[ "${3:-}" == IOS_DIST_P12_BASE64 && "${ASC_TEST_MULTILINE_P12:-}" == 1 ]]; then
@@ -98,13 +137,33 @@ esac
 CLI
 chmod 700 "$tmp_dir/bin/infisical"
 : > "$tmp_dir/workflow-env"
-env -u ASC_KEY_P8 PATH="$tmp_dir/bin:$PATH" \
+: > "$tmp_dir/asc-test-log"
+env -u ASC_KEY_P8 -u ASC_INFISICAL_PROJECT_ID PATH="$tmp_dir/bin:$PATH" \
   GITHUB_WORKSPACE="$tmp_dir/workspace" GITHUB_ENV="$tmp_dir/workflow-env" \
   INFISICAL_PROJECT_ID=synthetic-project \
   INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client \
   INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=synthetic-secret \
+  ASC_TEST_LOG="$tmp_dir/asc-test-log" \
   ASC_TEST_FIXTURE="$tmp_dir/fixture" ASC_TEST_IMPORT_MARKER="$tmp_dir/imported" \
   bash "$tmp_dir/workflow-load.sh" > "$tmp_dir/workflow-stdout" 2> "$tmp_dir/workflow-stderr"
+# The /asc folder belongs to the fleet project (owner ruling 2026-10-11; any
+# app may use it, ruling 2026-10-17), so the workflow has to read the key from
+# THAT project.  The application project has no /asc folder, so a read against
+# it returns nothing and the lane stops with "Missing ASC key material"
+# (ST-4579).
+fleet_project=8dae6d03-8f12-48b2-adf3-e5c1b881c8c5 # gitleaks:allow
+grep -q "asked for ASC_KEY_P8 at /asc in $fleet_project" "$tmp_dir/asc-test-log" ||
+  { echo 'the workflow did not read the ASC key from the fleet project' >&2; cat "$tmp_dir/asc-test-log" >&2; exit 1; }
+# The control:  the application project would answer for the trio, so a
+# workflow that asked it (the old lookup, or a fallback) is caught here.
+if grep -Eq 'asked for ASC_(KEY_ID|ISSUER_ID|KEY_P8) at .* in synthetic-project' "$tmp_dir/asc-test-log"; then
+  echo 'the workflow asked the application project for the ASC trio' >&2; cat "$tmp_dir/asc-test-log" >&2; exit 1
+fi
+# Each name of the trio is read once:  the values are reused, not re-fetched.
+for n in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8; do
+  [[ "$(grep -c "asked for $n " "$tmp_dir/asc-test-log")" == 1 ]] ||
+    { echo "the workflow read $n more than once" >&2; cat "$tmp_dir/asc-test-log" >&2; exit 1; }
+done
 if grep -Fq -f "$tmp_dir/fixture" "$tmp_dir/workflow-env" "$tmp_dir/workflow-stdout" "$tmp_dir/workflow-stderr"; then
   echo 'workflow leaked multiline key material' >&2
   exit 1
@@ -122,7 +181,7 @@ fi
 
 # Wrapped P12 text must fail before add-mask can print continuation lines.
 : > "$tmp_dir/multiline-env"
-if env -u ASC_KEY_P8 PATH="$tmp_dir/bin:$PATH" \
+if env -u ASC_KEY_P8 -u ASC_INFISICAL_PROJECT_ID PATH="$tmp_dir/bin:$PATH" \
   GITHUB_WORKSPACE="$tmp_dir/workspace" GITHUB_ENV="$tmp_dir/multiline-env" \
   INFISICAL_PROJECT_ID=synthetic-project \
   INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client \
@@ -139,5 +198,80 @@ if grep -Fq 'SYNTHETIC-P12-' "$tmp_dir/multiline-env" "$tmp_dir/multiline-stdout
   exit 1
 fi
 grep -q 'must be single-line' "$tmp_dir/multiline-stderr"
+
+# An unreadable Fleet-OPS /asc stops the step, names the missing secret, and
+# never reaches for the application project (owner policy 2026-10-24, no
+# fallbacks).  An ambient ASC_INFISICAL_PROJECT_ID is ignored as well.
+: > "$tmp_dir/unreadable-env"
+: > "$tmp_dir/unreadable-log"
+if env -u ASC_KEY_P8 PATH="$tmp_dir/bin:$PATH" \
+  GITHUB_WORKSPACE="$tmp_dir/workspace" GITHUB_ENV="$tmp_dir/unreadable-env" \
+  INFISICAL_PROJECT_ID=synthetic-project \
+  ASC_INFISICAL_PROJECT_ID=synthetic-project \
+  INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client \
+  INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=synthetic-secret \
+  ASC_TEST_LOG="$tmp_dir/unreadable-log" ASC_TEST_FLEET_READABLE=0 \
+  ASC_TEST_FIXTURE="$tmp_dir/fixture" \
+  bash "$tmp_dir/workflow-load.sh" > "$tmp_dir/unreadable-stdout" 2> "$tmp_dir/unreadable-stderr"; then
+  echo 'an unreadable Fleet-OPS /asc was accepted' >&2
+  exit 1
+fi
+grep -Fq 'Could not read required secret ASC_KEY_ID from Infisical prod (Fleet-OPS /asc)' "$tmp_dir/unreadable-stderr" ||
+  { echo 'the unreadable source did not name the secret it could not read' >&2; cat "$tmp_dir/unreadable-stderr" >&2; exit 1; }
+if grep -Eq 'asked for ASC_(KEY_ID|ISSUER_ID|KEY_P8) at .* in synthetic-project' "$tmp_dir/unreadable-log"; then
+  echo 'the workflow fell back to the application project' >&2; cat "$tmp_dir/unreadable-log" >&2; exit 1
+fi
+[[ ! -s "$tmp_dir/unreadable-env" ]] ||
+  { echo 'a failed credential step still wrote the environment file' >&2; exit 1; }
+
+# Every required secret has its own failure branch, and each one runs alone
+# here (Kody 4369787237, 4369786921, 4369787032, 4369830594, 4369830508):
+#   unreadable  the CLI read fails, and the message says the read failed
+#               instead of claiming the secret is missing;
+#   missing     the read succeeds with nothing, and the message names it;
+#   blank       the read returns only whitespace, which counts as missing.
+# In every case the step stops before the import and before staging the key,
+# and the message names the secret and its source.  The happy-path run above
+# is the control that the same fake and lookup path succeed when populated.
+for secret in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8 IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD; do
+  case "$secret" in
+    ASC_*) source_label='Fleet-OPS /asc' ;;
+    *) source_label='application project root' ;;
+  esac
+  for mode in UNREADABLE MISSING BLANK; do
+    : > "$tmp_dir/case-env"
+    : > "$tmp_dir/case-log"
+    rm -f "$tmp_dir/case-import"
+    if env -u ASC_KEY_P8 -u ASC_INFISICAL_PROJECT_ID PATH="$tmp_dir/bin:$PATH" \
+      GITHUB_WORKSPACE="$tmp_dir/workspace" GITHUB_ENV="$tmp_dir/case-env" \
+      INFISICAL_PROJECT_ID=synthetic-project \
+      INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client \
+      INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=synthetic-secret \
+      ASC_TEST_LOG="$tmp_dir/case-log" \
+      ASC_TEST_FIXTURE="$tmp_dir/fixture" ASC_TEST_IMPORT_MARKER="$tmp_dir/case-import" \
+      "ASC_TEST_${mode}_SECRET=$secret" bash "$tmp_dir/workflow-load.sh" \
+      > "$tmp_dir/case-stdout" 2> "$tmp_dir/case-stderr"; then
+      echo "a $mode $secret was accepted" >&2
+      exit 1
+    fi
+    if [[ "$mode" == UNREADABLE ]]; then
+      want="Could not read required secret $secret from Infisical prod ($source_label)"
+      if grep -q 'Missing required secret' "$tmp_dir/case-stderr"; then
+        echo "a failed read of $secret was reported as a missing secret" >&2; cat "$tmp_dir/case-stderr" >&2; exit 1
+      fi
+    else
+      want="Missing required secret $secret in Infisical prod ($source_label)"
+    fi
+    grep -Fq "$want" "$tmp_dir/case-stderr" ||
+      { echo "a $mode $secret did not stop with: $want" >&2; cat "$tmp_dir/case-stderr" >&2; exit 1; }
+    grep -q "asked for $secret " "$tmp_dir/case-log" ||
+      { echo "the $mode $secret case never reached the fake provider" >&2; exit 1; }
+    [[ ! -e "$tmp_dir/case-import" ]] ||
+      { echo "the import ran with a $mode $secret" >&2; exit 1; }
+    if grep -q '^ASC_KEY_PATH=' "$tmp_dir/case-env"; then
+      echo "the key was staged with a $mode $secret" >&2; exit 1
+    fi
+  done
+done
 
 echo 'synthetic ASC key-file and workflow handoff passed'

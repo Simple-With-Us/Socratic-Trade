@@ -27,8 +27,9 @@
 #   IOS_APPSTORE_PROFILES_MAP   profile map (default ios/appstore-profiles.json)
 #   IOS_PROFILES_DIR            install dir (default ~/Library/MobileDevice/Provisioning Profiles)
 #   IOS_PROFILE_SKIP_IDENTITY_CHECK=1   skip the keychain certificate match
-#   ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH   process env (wins over Infisical /asc,
-#                               which asc-api.mjs reads through fleet-secrets; no handoff file is read)
+#   ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_P8   process env (wins over Infisical /asc,
+#                               which asc-api.mjs reads through fleet-secrets; a path in
+#                               ASC_KEY_PATH is not a credential source, AFC-459 rev 2)
 set +o xtrace
 set -euo pipefail
 umask 077

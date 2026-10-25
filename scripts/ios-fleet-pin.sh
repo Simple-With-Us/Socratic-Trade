@@ -28,7 +28,10 @@ FLEET_DIR="${IOS_FLEET_DIR:-${REPO_ROOT}/scripts/ios-fleet}"
 PIN_FILE="${REPO_ROOT}/scripts/ios-fleet.sha256"
 
 # Exactly the runtime files that can change what this repo ships.
-PINNED_FILES="ship-testflight.sh asc-api.mjs apps.json AppUpdatePrompt.swift"
+# version-plan.mjs is here for the same reason as the others:  it holds the
+# version-numbering rules (AFC-517), so an unreviewed edit to it changes the
+# marketing version and the build number that get uploaded.
+PINNED_FILES="ship-testflight.sh asc-api.mjs asc-key.mjs apps.json AppUpdatePrompt.swift version-plan.mjs"
 
 MODE="check"
 case "${1:-}" in

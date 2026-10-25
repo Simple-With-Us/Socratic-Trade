@@ -371,7 +371,7 @@ export async function runFailureWatchdogTick(now: number = Date.now()): Promise<
     // One finished-run lookback per active account.  The summary fills this map
     // from that SELECT.  Re-arm math walks the array with a cutoff.
     const finishedRunsByAccount = new Map<string, FinishedStrategyRunRow[]>();
-    const summary = getTradingLivenessSummary(now, finishedRunsByAccount);
+    const summary = await getTradingLivenessSummary(now, finishedRunsByAccount);
     const activeStreaks = new Map<
       string,
       {

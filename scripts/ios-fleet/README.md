@@ -7,12 +7,13 @@ This directory is the **source of truth** for the fleet-wide TestFlight ship scr
 - `ship-testflight.sh` — archive + export + upload a single app to TestFlight without the Xcode UI.
 - `ship-all.sh` — ship all three fleet apps sequentially.
 - `apps.json` — per-app registry (bundle id, scheme, project paths, team id).
-- `asc-api.mjs` — minimal App Store Connect API client (ES256 JWT, no dependencies).  Used by `ship-testflight.sh` for export-compliance (`ensure-tf-ready`) and for build-number verification (`latest-build-seq`).
+- `asc-api.mjs` — minimal App Store Connect API client (ES256 JWT, no dependencies).  Used by `ship-testflight.sh` for export-compliance (`ensure-tf-ready`), for build-number verification (`latest-build-seq`), and for the version plan (`latest-marketing-patch`, `build-floor`).
+- `version-plan.mjs` — the pure, unit-tested rules behind the version numbering (no I/O, no network).  The ship script implements the same rules; this is the readable reference copy of them.
 - `ExportOptions-appstore.plist` — export options for `destination=upload`.
 - `ExportOptions-export-ipa.plist` — export options for `destination=export` (local IPA only).
-- `test-ship-seq.sh` — offline tests for the build-number rules (see **Tests**).  Repo-only; not installed to the runtime location.
+- `test-ship-seq.sh` — offline tests for the version rules (see **Tests**).  Repo-only; not installed to the runtime location.
 
-Secrets (ASC API key id/issuer/path) come from process env `ASC_KEY_ID` / `ASC_ISSUER_ID` / `ASC_KEY_PATH`, else from Infisical Fleet-OPS folder `/asc` through `fleet-secrets get` (`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8`;  the `.p8` is written to a 0600 temp file for the run and removed on exit).  Nothing reads `~/.secrets` (AFC-359).  None of the files here contain secret values.
+Secrets (ASC API key id/issuer/key) come from process env `APPLE_API_KEY_ID` / `APPLE_API_ISSUER_ID` / `APPLE_API_KEY_P8_BASE64` (the hosted trio, whose base64 body is decoded through a here-string), else from process env `ASC_KEY_ID` / `ASC_ISSUER_ID` / `ASC_KEY_P8`, else from Infisical Fleet-OPS folder `/asc` through `fleet-secrets get` (`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8`;  the `.p8` is written to a 0600 temp file for the run and removed on exit).  A path in `ASC_KEY_PATH` is not a credential source (AFC-459, revision 2):  it is ignored wherever it appears, and the 0600 temp file is only the materialization `altool` and Xcode read.  Nothing reads `~/.secrets` (AFC-359).  None of the files here contain secret values.
 
 ## Install (sync repo copy -> runtime location)
 
@@ -30,36 +31,41 @@ Edit the runtime copy only through this repo: change the file here, land the PR,
 
 ## Versioning contract
 
+Owner directive 2026-10-24 (AFC-517).  This replaces the `1.0.<commit_count>` scheme unified fleet-wide on 2026-10-18, which made App Store Connect show `1.0.2358 (2358)`.
+
 | Field | Value | Example |
 | --- | --- | --- |
-| `MARKETING_VERSION` (`CFBundleShortVersionString`) | `1.0.<commit_count>` | `1.0.148` |
-| `CURRENT_PROJECT_VERSION` (`CFBundleVersion`) | `<commit_count>`, the same number | `148` |
+| `MARKETING_VERSION` (`CFBundleShortVersionString`) | `<prefix>.<P+1>`, the next patch on the app's train | `1.0.237` |
+| `CURRENT_PROJECT_VERSION` (`CFBundleVersion`) | the repo commit count, raised above the App Store Connect floor | `2360` |
 
-App Store Connect renders these as `<marketing> (<build>)`, so a ship shows **`1.0.148 (148)`** -- both numbers describe one commit.
+App Store Connect renders these as `<marketing> (<build>)`, so a ship shows **`1.0.237 (2360)`**.
 
-An earlier revision set both fields to the same dotted string, which rendered as the uninformative `1.0.7 (1.0.7)`.  That was also a live rejection trap: Apple requires `CFBundleVersion` to be strictly increasing *within a marketing train*, and `trade.congress.ios` has 15 builds numbered `202608070253` … `202608120521` sitting in the `1.0.0` train.  `1.0.7` is numerically far lower than any of them; the dotted scheme only worked because each new marketing version opened a fresh, empty train.  A ship that landed back in an older train would have been rejected *after* a full archive + upload.  The UTC stamp is monotonic by construction, exceeds every existing build, and is demonstrably legal for ASC — those 15 live builds use exactly this format.
+The two numbers are **independent**.  The build number never names the marketing version, and the marketing version never names the build number.
 
-`--dry-run` only peeks at the next value and does not consume it, and the sequence file is guarded by an atomic-`mkdir` lock (not `flock(1)`, which does not exist on macOS) so concurrent ships cannot race the counter.
+- `MARKETING_VERSION` is the **next patch** on the train from `marketingVersionDefault` (`1.0`).  `P` is the highest patch App Store Connect already holds on that train, counting **both** the App Store versions (`appStoreVersions.versionString`) **and** the TestFlight trains (`preReleaseVersions.version`) for the app's platform.  A *drift train* — a `<prefix>.N` train holding a build whose `CFBundleVersion` is exactly `N` — is ignored: those are the `1.0.N (N)` uploads the retired scheme produced, and they no longer push the version forward.  App Store versions are never ignored.
+- `CURRENT_PROJECT_VERSION` is the **repo commit count**, raised when needed so it is strictly greater than every build already in the *target* train (the retired 12-digit UTC stamps included: Apple requires build numbers to grow inside one train) and greater than the app's highest plain-integer build below `1000000000` on that platform.  On macOS **every** build counts, because macOS build numbers have to grow across all trains.  The only coupling between the two numbers is a safety rule: a ship must never look like `1.0.N (N)`, so a build that happens to equal the patch number moves one up.
+- `--version X.Y.Z` is an exact marketing override and `--build N` an exact build override.  `--build` no longer moves the marketing version, and `--version` no longer moves the build number.  With `--version` only, the build number is still automatic (the commit count, floored against *that* train); with `--build` only, the marketing version is still the automatic next patch.
 
-### Where the number comes from
+The rules live in `version-plan.mjs` (pure, unit-tested) and are mirrored in `ship-testflight.sh`.
 
-The next sequence is **`max(local cache, App Store Connect, project.pbxproj) + 1`**.
+An earlier revision set both fields to the same dotted string, which rendered as the uninformative `1.0.7 (1.0.7)`.  That was also a live rejection trap: Apple requires `CFBundleVersion` to be strictly increasing *within a marketing train*, and `trade.congress.ios` has 15 builds numbered `202608070253` … `202608120521` sitting in the `1.0.0` train.  `1.0.7` is numerically far lower than any of them; the dotted scheme only worked because each new marketing version opened a fresh, empty train.  A ship that landed back in an older train would have been rejected *after* a full archive + upload.
 
-`~/.cache/ios-fleet/build-seq-<app>.txt` is a *cache*, not the source of truth.  It is a single unbacked file on one machine: if it is lost, reset, or a ship runs from a second machine, a bare "+1" reuses a build number and App Store Connect rejects the upload as a duplicate.  Taking the max of every record we have is monotonic against all of them.  It can skip a number — harmless, numbers are free — but it cannot reuse one, which is fatal.
+`--dry-run` only peeks at the next value and does not ship it.
 
-The three inputs are printed on every run, e.g. `seq sources: local=2 asc=1 project=4 -> floor=4`.
+### Where the numbers come from
 
-- **App Store Connect** is queried with `asc-api.mjs latest-build-seq <bundleId> 1.0`, using the same credentials already passed to `xcodebuild`.  That command reads **`preReleaseVersions[].attributes.version`** (the marketing version), *not* `builds[].attributes.version` (the build number) — the two are different fields, and the sequence tracks the marketing version.  Reading build numbers only ever worked during the window when both fields held the same string, and was already silently wrong for `socratic`, whose newest marketing version is `1.0.1` but whose build numbers are `2` / `1` / `202608120212`: none match `1.0.N`, so ASC contributed `0` and "verification" verified nothing.  Build numbers are still scanned afterwards so the floor can never come back *lower* than the old behaviour reported.
+- **App Store Connect** is queried with `asc-api.mjs latest-marketing-patch <bundleId> 1.0 <platform>` (the highest patch already used on the train) and `asc-api.mjs build-floor <bundleId> <version> <platform>` (the build number the next ship has to exceed), using the same credentials already passed to `xcodebuild`.  Both print their answer on stdout; the details (Apple's HTTP status and error code, and the drift trains that were ignored) go to stderr.
+- **`project.pbxproj`** is **not** a sequencing input any more.  The resolved version is passed on the `xcodebuild` command line and overrides whatever the project file says, so a run whose resolved version differs from the project file prints a `NOTICE` naming both.  `--sync-project-version` writes the resolved version back into the project file (opt-in: it dirties the worktree, and shipping requires a clean one).
+- The **local build-seq counter** (`~/.cache/ios-fleet/build-seq-<app>.txt`) is retired: nothing writes it and nothing reads it.  App Store Connect is the only record that shipping advances, so it is the only record that can answer "which patches does this train hold?" and "which build numbers are taken?".
+- If **ASC cannot be consulted at all**, the script **fails** rather than guessing, and prints the ways to resolve it.  `--allow-unverified-seq` overrides, with a loud warning: the marketing version is then planned from an unverified patch (`P=0`) and the build floor is `0`.
 
 ### Nothing is consumed by a run that will not ship
 
-A build number is committed to the counter only by a run that is actually about to archive.  The ship gate (rate limit / same-HEAD) is evaluated **before** the sequence is touched, `--dry-run` peeks only, and `--upload-only` resolves no sequence at all because the IPA already carries its versions.  Before 2026-08-12 the gate ran *after* the counter had advanced, so every rate-limited attempt burned a version that shipped nowhere — observed live: a run skipped at 4392s of a 9000s interval and the sequence still went 5 → 6, leaving `1.0.6` existing in no place at all and the local counter drifting further from ASC.
+A version is resolved only by a run that is actually about to archive.  The ship gate (rate limit / same-HEAD) is evaluated **before** any version is resolved, `--dry-run` peeks only, and `--upload-only` resolves no version at all because the IPA already carries its versions.  Before 2026-08-12 the gate ran *after* the counter had advanced, so every rate-limited attempt burned a version that shipped nowhere — observed live: a run skipped at 4392s of a 9000s interval and the sequence still went 5 → 6, leaving `1.0.6` existing in no place at all and the local counter drifting further from ASC.
 
 `test-ship-seq.sh` pins all of this down; see **Tests** below.
-- **`project.pbxproj`** participates in the max, so the project file can never be silently disagreed with.  The resolved version is passed on the `xcodebuild` command line and overrides whatever the project file says, so a run whose resolved version differs from the project file prints a `NOTICE` naming both.  `--sync-project-version` writes the resolved version back into the project file (opt-in: it dirties the worktree, and shipping requires a clean one).
-- If **ASC cannot be consulted at all** and there is no local sequence and no on-train version in the project file, the script **fails** rather than guessing, and prints the three ways to resolve it.  `--allow-unverified-seq` overrides, with a warning.
 
-`IOS_FLEET_STATE_DIR` relocates the sequence/rate-limit state, for testing against a scratch directory.
+`IOS_FLEET_STATE_DIR` relocates the ship-gate state, for testing against a scratch directory.
 
 ## Rate limit — what holds back automatic shipping
 
@@ -75,17 +81,23 @@ The skip message names the value, its source, and both overrides, so the limit i
 
 ```bash
 bash scripts/ios-fleet/test-ship-seq.sh
+node --test scripts/ios-fleet/version-plan.test.mjs
 ```
 
-47 assertions, fully offline — no network, no Xcode, no credentials.  It runs `ship-testflight.sh` with `HOME`, `PATH` and `IOS_FLEET_STATE_DIR` pointed at a scratch sandbox (a fake `xcodebuild` refuses to archive), so it cannot touch real ship state or App Store Connect.  It pins:
+`test-ship-seq.sh` is fully offline — no network, no Xcode, no credentials.  It runs `ship-testflight.sh` with `HOME`, `PATH` and `IOS_FLEET_STATE_DIR` pointed at a scratch sandbox (a fake `xcodebuild` refuses to archive, and a fake `node` answers the App Store Connect queries from `FAKE_ASC_PATCH` / `FAKE_ASC_FLOOR`), so it cannot touch real ship state or App Store Connect.  It pins:
 
-- a rate-limited run, and a same-HEAD run, exit 0 **without advancing the counter** (this is the 2026-08-12 regression, and the suite fails against the pre-fix script exactly there);
+- a rate-limited run, and a same-HEAD run, exit 0 **without resolving a version** (this is the 2026-08-12 regression, and the suite fails against the pre-fix script exactly there);
 - a gated run does not even make the ASC round trip;
-- an allowed run advances the counter by **exactly one**, three in a row give 6 → 7 → 8;
-- `--dry-run` and `--upload-only` consume nothing; `--force-ship` still bypasses the gate;
-- for **all four apps**: marketing is `1.0.N`, the build number is a 12-digit UTC stamp, the two differ, and the stamp exceeds `202608120521` (the highest build already live on `trade.congress.ios`, so a ship landing back in the old `1.0.0` train would still be accepted);
+- an allowed run leaves the local counter where it was;
+- `--dry-run` and `--upload-only` resolve nothing; `--force-ship` still bypasses the gate;
+- for **all four apps**: the marketing version is the next patch on the train (`1.0.237` against a stubbed `P=236`), the build number is the repo commit count, the two never read `1.0.N (N)`, and the pair is printed the way App Store Connect renders it;
+- a floor above the commit count raises the build to `floor + 1` **without** moving the marketing version;
+- `--version` is honoured exactly and the build is floored against *that* train; `--build` is honoured exactly and does **not** move the marketing version;
+- an unreachable App Store Connect is fatal without `--allow-unverified-seq`, and loudly warns about the unverified patch with it;
 - the skip message names the 3600s default and both overrides;
-- a last-ship 3000s ago is still gated (sequence untouched); at 3700s the gate proceeds.
+- a last-ship 3000s ago is still gated (counter untouched); at 3700s the gate proceeds.
+
+`version-plan.test.mjs` is the unit-testable copy of the rules themselves: the patch arithmetic, the drift-train rule, the build floor (including the macOS "every build counts" rule), and the "never `1.0.N (N)`" guard.  Both suites run in the `verify` CI gate.
 
 ## Drift check
 

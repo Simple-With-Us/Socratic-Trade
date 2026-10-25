@@ -1,3 +1,4 @@
+> **2026-10-21 MM — AFC-459 App Store Connect credential hardening, revision 2 (PR #4914, `minimax/asc-cred-port`).**  No roadmap scope change.  The App Store Connect private key comes only from the process environment or from Fleet-OPS prod `/asc` through `fleet-secrets`;  a path on disk is not a credential source, so a named `ASC_KEY_PATH` is ignored.  New `scripts/ios-fleet/asc-key.mjs` never reads a file, the client resolves the credential in the order `APPLE_API_*` trio, then `ASC_KEY_ID` / `ASC_ISSUER_ID` / `ASC_KEY_P8`, then Infisical, and `load_secrets` hands the key to the client in the environment.  Two new offline suites and a rewritten `asc-api.credentials.test.mjs` cover it, and the ios-fleet pin carries the new module.  Fleet alignment pass:  the masked preview of a refused credential has the blessed HogHunter #213 shape on both sides, the hosted `APPLE_API_*` trio is the first source in the shell layer with its base64 body decoded through a here-string, the shell test proves the handoff with the signed request instead of reading another process's environment, and the hosted handoff helper and its test carry the same helper shape.  The ASC credential is read from the Infisical `/asc` folder everywhere now, because the root folder holds no `ASC_KEY_ID` and no `ASC_ISSUER_ID`.  Open fleet-wide item: the hosted `ios-ship.yml` publishes only `ASC_KEY_PATH`, so its two client callers need the key in their environment, and that handoff is the CodeCaps PR #271 answer.  Open fleet-wide item:  the client is a silent no-op when it is started through a symlinked path, because node resolves the symlink and the direct-run check compares the two.  Extra-ship no.  Rollout: `docs/rollouts/2026-10-21-afc459-asc-credential-hardening.md`.
 > **2026-10-19 JET — ST-4562 Sentry Claude Autofix Admission.**  Caller-only actor allowance for Sentry/Seer; no product or trading scope change.  Preserve all existing verification and money-path review boundaries.  Isolated gate fixtures pass; current-head CI remains required.  No merge or auto-merge from this lane.  Rollout: `docs/rollouts/2026-10-19-sentry-claude-autofix.md`.
 > **2026-10-15 CURSOR — Restart sweep instance grace (ST-8, `cursor/restart-sweep-boot-grace-ab92`).**  No roadmap scope change.  Boot grace before the restart arm, followers never sweep the leader's runs, and drain adoption is not pre-empted.  Own-instance 30-minute stall sweep stays.  Merged `origin/main` (`df7e6d10`).  check-pin reads public Congress.Trade with the Actions token before the shared user PAT, so a rate limit on user 12656028 is no longer reported as a missing token.  Merged `origin/main` through `838f9764c`; migration 98 is still the only ST-8 migration.  Extra-ship no.  Owner ruling 2026-10-17: merge unless the owner is needed, so this lane lands by squash merge.  Rollout: `docs/rollouts/2026-10-15-restart-sweep-instance-grace.md`.
 > **2026-10-15 CURSOR — Auto-merge CODEOWNERS globs (ST-3326, `cursor/automerge-money-path-globs-2a65`).**  No roadmap scope change.  The auto-merge workflow reads CODEOWNERS money-path globs again (the `--jq -r` fetch was fail-closing every PR).  Money-path diffs and `do-not-automerge` are not armed, and an already-armed merge is disabled.  Merged `origin/main` (`df7e6d10`, then `3f4ef5e5`).  `check-pin` prefers the Actions token so a shared user PAT rate limit is not reported as a missing `GH_PACKAGES_TOKEN`.  The second merge keeps main's #4698 copy of that check.  Disable jobs have write permissions and a jq `off` / `armed` / `unreadable` read, ported from #4727.  Later merge commits brought #4696, #4716, and #4695.  Extra-ship no.  Do not enable auto-merge from this lane.  Jay squash-merges.  Rollout: `docs/rollouts/2026-10-15-automerge-codeowners-globs.md`.
@@ -2890,6 +2891,98 @@ That belongs with the repo's own gate rather than with a test-file change.
 
 Rollout: `docs/rollouts/2026-10-21-st-4571-suite-db-hygiene.md`.
 
+## 2026-10-21 — [MM] The fixture override moves into a hook, and the isolation is asserted (ST-4572)
+
+Not a scope change: the two follow-ups PR #4912 named in its own body.  The `DATABASE_URL`
+override in the three cascade-reaching writer files moves from module scope into `beforeAll`, and
+the isolation gets a control assertion that was proved to fail when the override is removed.  Three
+test files changed and no production code changed.
+
+The detail that shaped the change is the one ST-4570 established and ST-4571 confirmed: a writer
+holds its database path for the whole file, because the persist is a fire-and-forget dynamic import
+that can resolve after the test that triggered it has finished.  So the suggested remedy of moving
+the override into `beforeEach` was not taken; what was taken instead is the same remedy one level
+up, in `beforeAll`, which closes the hole a module-scope assignment leaves open without introducing
+the per-test path.
+
+One thing this change makes checkable that was not checkable before: the control assertion is
+differential, and it was run against a copy of the file with the override removed, so its failure
+was observed rather than assumed.  A control that cannot fail is not a control.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 - [MM] The isolation control proves the shared database stayed clean (ST-4572)
+
+Still not a scope change.  The same two follow-ups, taken one step further.  The control assertion
+in the two cascade-reaching files grows a third part that checks the run's shared database
+directly, so the control now covers the whole of the claim rather than one half of it.
+
+The shape that made this possible is a read-only probe with `fileMustExist: true`.  Opening the
+shared path read-write would create it, and creating it is the pollution ST-4571 exists to
+prevent; opening it read-only cannot write, and refusing to open a database that is not already
+there means the probe can never bring the file into existence.  The counter was proved to count
+real rows, and the new assertion was proved to fail when the shared database holds one.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 — [MM] The teardown waits for the pending coverage write (ST-4572)
+
+Still the same defect class, one level further out.  The isolation work has been about which
+database a file writes to; this is about WHEN a file stops writing at all.  A teardown that
+restores the shared path while a coverage write is still in flight hands that write to the shared
+database, and the fix is to wait for the write rather than for a duration.
+
+The reason the wait is for the write and not for a delay is the measurement.  The probe reproduced
+the leak at 5,745 ms, and that number is the module load time, which moves with the transform
+cache and with machine load.  A delay long enough to cover it would be a guess that is wrong twice
+a day, so the scheduler keeps the handle and the teardown waits on it.
+
+Two files now carry the same `beforeAll` fixture ST-4572 gave the PR #4912 files, so the whole
+family of cascade-reaching writer files has one shape.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 — [MM] The ST-4570 rollout note is corrected in place (ST-4572)
+
+Kody's thread 4339304233 was raised against a line of the ST-4570 rollout note that says no
+regression guard was added.  A guard now ships on this branch, so the note is corrected rather than
+left asserting something untrue, and its follow-up list names the guard that exists and the
+repo-level guard that does not.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 — [MM] The control becomes differential (ST-4572)
+
+A differential test needs to fail under the old implementation, and this one did not: it asserted
+the environment after the fixture had installed it, which is true under both the old module-scope
+override and the new one.  The fix is to assert before the override that the environment is not
+this file's own path, which is true only before the new implementation installs it and false after
+the old one already has.
+
+The row from the shared database is now validated with a schema, because a database file on disk is
+an untrusted input and an unexpected shape should be a visible fault rather than a wrong count.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 — [MM] The fault paths are separated, and the guard covers every file (ST-4572)
+
+Two failure modes were sharing one string match.  A missing table and a malformed count row are
+opposite facts, and the helper reports the first as zero and must report the second as a fault.
+Narrowing the catch to the driver's own error, and moving the shape check outside it, makes that
+distinction structural rather than a matter of what a message happens to say.
+
+The differential assertion now covers all five files that restore `DATABASE_URL`.  It was added to
+the two that carry a control test, and the fixture shape is shared across the five, so a guard that
+covers two of them leaves three able to regress with nothing failing.
+
+## 2026-10-22 — [MM] The capture moves out of the hook, and the shape is pinned (ST-4572)
+
+A fourth review round found that the differential assertion sat ahead of the capture of the run's
+shared path, so a failed assertion left the capture unset and the teardown deleted
+`DATABASE_URL` instead of restoring it.  The capture is a module-scope constant now, in all five
+files, and a new guard pins the shape of those five fixtures.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
 ## 2026-10-21 — [MM] The off-loop follow-up query stops being measured against the host (ST-4573)
 
 Not a scope change: a test-guard defect fix.  Two cases in `test/sqlite-all-offloop.test.ts` judged a follow-up query against a fixed wall clock of 200ms and 300ms, but the pool always starts a fresh slot while another one is busy and the retired slot is removed synchronously, so the follow-up never queues behind the wedged statement and the clock only measured how fast this machine creates a worker.  The wall-clock assertions are replaced by two assertions that have different subjects, the count of queries the pool dispatched for the follow-up and the move in the live slot count, and the fixed reclaim window became a poll.  No production code changed.  Rollout: `docs/rollouts/2026-10-21-st-4573-offloop-wall-clock-budget.md`.
@@ -2897,3 +2990,45 @@ Not a scope change: a test-guard defect fix.  Two cases in `test/sqlite-all-offl
 ## 2026-10-22 — [MM] The watchdog decides image impact with the allow list (ST-4575)
 
 A watchdog defect fix.  The deploy-freshness guard paged on four consecutive scheduled runs while production was correctly still, because it decided image impact with an exclusion list naming only `docs`, so a commit that changed just a CI workflow file was aged like a runtime change.  Coolify's `watch_paths` on `socratic-app` is an allow list, and the repo already carried it in `src/lib/deploy-image-impact.ts` as `COOLIFY_WATCH_PATHS_LIVE`, with `scripts/rth-deploy-drain.sh` already implementing the same rule through a different path.  The fix mirrors the allow list into the shell script and applies one rule to the whole gap: a deployment is owed only if some commit in the gap changed a watched path.  The "newest image-affecting commit" narrowing is removed, because it compared production against a commit that might never deploy, and the expected sha is no longer narrowed at all.  An empty watched-commit list is now the verdict `image-noop` with exit 0 rather than an operational error that would have masked a real usage error.  The classification uses `--first-parent`, because without it a merge commit is compared against its branch tip and a docs-only pull request looks like it changed every path `main` gained since the branch point.  The guard still pages on a real gap, and the selftest keeps that case.  The live `watch_paths` value is recorded rather than written, and the week-8 regular-trading-hours interaction is left alone as an owner policy question.  Rollout: `docs/rollouts/2026-10-22-st-4575-deploy-freshness-watch-paths.md`.
+## 2026-10-22 — [MM] The shape guard reads the hook body, and the audit trail is corrected (ST-4572)
+
+A fifth review round found that the shape guard matched fixture text outside the `beforeAll` body, that the guard's repo root came from the runner's working directory, and that three statements in this branch's own audit trail were wrong.  The guard now matches the hook body by brace depth and resolves the repo root from the module's own path, and the file count, the list of files that restore the shared path and the ST-4570 note's pointer to the shared-database differential are corrected in place.  No scope change, no production code changed, and the nine files that restore `DATABASE_URL` are now distinguished: six restore it at file scope — five install a database for the whole file and carry the differential, and the isolation fixture restores it too — and three restore it per test and are out of scope for the file-level guard.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 — [MM] The audit trail counts what it claims to count (ST-4572)
+
+A sixth review round found two counts in this branch's own audit trail that were wrong.  The number of test files that already resolve their repository root with the same expression was overstated as twenty-three, which is the number that merely reference `import.meta.url`; the exact expression is in eight.  The number of files that restore `DATABASE_URL` was understated as eight, because the isolation fixture this branch adds captures the shared path at module scope and restores it in its teardown, which makes it a ninth.  Both counts are corrected in the rollout note and in the rows above, and the note now carries a sixth-round section with the measurement.  No scope change and no production code changed.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 — [MM] The bound names every file that restores the shared path (ST-4572)
+
+A seventh review round found two statements in this branch's own audit trail that were wrong.  The bound paragraph said only six files restore the shared path and that every other file that sets `DATABASE_URL` leaves it installed, but three more files restore it, each capturing it inside `beforeEach` and putting it back in their `afterEach`, so the note hid three restorers and overstated the set of files whose late write can reach the shared database.  It also described `test/sqlite-storage-hygiene.test.ts` as never restoring `DATABASE_URL`, when it does restore it to its own path rather than to the shared one.  Both are corrected: the bound paragraph names all nine restorers, separates the six that restore at file scope from the three that restore per test, and scopes the "leaves it installed" clause to the files that genuinely never put the shared path back, and the sixth-round section says what the hygiene file actually does.  The inventory stays at nine.  No scope change and no production code changed.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 — [MM] The sixth file waits too, and the wait is pinned (ST-4572)
+
+An eighth review round found one statement in this branch's own audit trail that was wrong, and it was taken.  The note said the six files which restore the shared path at file scope each wait for the pending coverage write before they restore, and that was true of the five guard fixtures and false of the sixth: `test/coverage-persist-isolation.test.ts` restored the shared path in a synchronous `afterAll` with no wait at all, so the sentence described a property the tree did not have.  Both remedies were taken rather than one.  The file's `afterAll` now awaits `__awaitPendingEnrichmentCoveragePersist()` before `resetDbForTesting()` and before the restore, which makes the six-file property uniform and true, and the wording now says where the wait sits, because the two groups are not the same: the five guard fixtures wait while their own database is still the target, and the isolation fixture waits with one of the two temporary databases it installed still the target, because it points the run at two temporary databases rather than at a database of its own for the whole file, so the wait drains into the fixture's own temporary file and never into the run's shared path.  The claim was prose, so it is now pinned: `test/db-isolation-fixture-shape.test.ts` gained a case for each of the six that the file imports the helper, that the wait is inside the `afterAll` body rather than in a test, and that the wait comes before the restore, the last of which is the check that carries the meaning.  Two negative controls were run and both bit, and the fixture was restored byte-for-byte after each.  The scope of the change is one test file's teardown, one guard file's cases and this branch's own audit trail.  No production code changed.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 — [MM] The wait itself can fail, and a substring guard cannot see a disabled wait (ST-4572)
+
+The eighth round closed the window by making the teardown wait for the pending write.  The ninth
+round asks the two questions that follow from adding any statement to a teardown that owns the
+run's environment: what happens when that statement throws, and can the guard that pins the new
+statement be satisfied by a file that does not have it.
+
+Both answers were "a gap", and both are closed.  The wait is the only thing in that teardown that
+can reject, and everything that puts `DATABASE_URL` back sat after it, so the restore now runs in a
+`finally` — which matters more here than the wording suggests, because this fixture deletes its own
+temporary directory, so a skipped restore hands the rest of the worker a path that has just been
+removed.  The guard that pins the wait now matches a live statement anchored to a line of its own
+rather than a substring, because a commented-out wait is the easiest way to reintroduce the race
+and the easiest way for the guard to keep reporting green.
+
+The shape here is the same one this branch has used throughout: the claim is prose until something
+fails when the prose and the tree disagree, and four negative controls are what make the guard
+believable rather than decorative.
