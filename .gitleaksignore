@@ -89,3 +89,11 @@ e700b9f17d03d872c4f7d16da683323e246aa5e5:docs/rollouts/2026-06-21-logo-dev-toggl
 # intermediate commits never reach main.
 5d3cad958d38669a47e421db87211e1718fb4533:scripts/ios-fleet/test-asc-credentials.sh:private-key:290
 d5374aa25268b18ee49f363f4209ff534ca48506:scripts/ios-fleet/test-asc-credentials.sh:private-key:288
+
+# ST #4930 (ST-4579): generic-api-key false positive. Line 102 of the fake
+# Infisical CLI in scripts/test-ios-stage-asc-key.sh compares $secret_project
+# with the Fleet-OPS Infisical project ID, the same plaintext FLEET_ASC_PROJECT_ID
+# literal ios-ship.yml uses. It is a project identifier, not a credential, and
+# grants no access on its own. Independently verified by BF-Deployer
+# (Zulip msg 634719697). The PR squash-merges, so this commit never reaches main.
+35732f84d8ba880bd3f4a2206dc1b6fd2291047d:scripts/test-ios-stage-asc-key.sh:generic-api-key:102
