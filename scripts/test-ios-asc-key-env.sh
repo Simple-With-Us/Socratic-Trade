@@ -265,8 +265,8 @@ log "the resolved key is handed over in a variable, never on stdout"
 # absent one.  The operator named this key, so the helper must stop instead
 # of falling through to Infisical and handing the child a key nobody asked
 # for:  the run would look successful while the credential the operator
-# named was never the one in use.  The refusal names the variable, the key
-# ID and the error class, and no fragment of the value.  Synthetic value only.
+# named was never the one in use.  The refusal names the variable and the
+# error class, and neither the key ID nor any fragment of the value.  Synthetic value only.
 rejected='not base64 at all !!!'
 rejected_first8="$(printf '%s' "$rejected" | cut -c1-8)"
 rejected_last4="$(printf '%s' "$rejected" | tail -c 4)"
@@ -283,11 +283,12 @@ if grep -q 'asked Infisical' "$ASC_TEST_LOG"; then
 fi
 grep -q 'APPLE_API_KEY_P8_BASE64' "$tmp_dir/stderr" ||
   { echo "the refusal did not name the rejected variable" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
-grep -q 'key ID APPLEKEY01' "$tmp_dir/stderr" ||
-  { echo "the refusal did not name the key ID" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
+if grep -Fq 'APPLEKEY01' "$tmp_dir/stderr" "$tmp_dir/stdout"; then
+  echo "the refusal printed the key ID to the log" >&2; exit 1
+fi
 grep -q 'error: invalid-hosted-key' "$tmp_dir/stderr" ||
   { echo "the refusal did not name the error class" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
-for fragment in "$rejected" "$rejected_first8" "$rejected_last4" 'preview'; do
+for fragment in "$rejected" "$rejected_first8" "$rejected_last4" 'preview' 'APPLEKEY01'; do
   if grep -Fq -- "$fragment" "$tmp_dir/stderr" "$tmp_dir/stdout"; then
     echo "the refusal carried a fragment of the rejected value: $fragment" >&2
     exit 1

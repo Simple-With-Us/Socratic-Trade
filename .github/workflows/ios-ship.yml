@@ -213,23 +213,31 @@ jobs:
             INFISICAL_TOKEN="$TOKEN" infisical secrets get "$1" \
               --plain --silent --telemetry=false --expand=false \
               --projectId="$2" --env=prod --path="$3" \
-              2>/dev/null || true
+              2>/dev/null
+          }
+          # read_required <variable> <secret> <project> <path> <label>
+          # A failed read (expired token, revoked grant, outage) and an empty
+          # value are different faults, so they get different messages:  a
+          # failed read never claims the secret is missing.  A blank value
+          # (only whitespace) counts as missing, because every consumer
+          # trims it and would reject it later with a vaguer error.
+          read_required() {
+            local value
+            if ! value="$(asc_get "$2" "$3" "$4")"; then
+              echo "::error::Could not read required secret $2 from Infisical prod ($5):  the read failed, so it is not known whether the secret is missing." >&2
+              exit 1
+            fi
+            if [ -z "${value//[[:space:]]/}" ]; then
+              echo "::error::Missing required secret $2 in Infisical prod ($5)." >&2
+              exit 1
+            fi
+            printf -v "$1" '%s' "$value"
           }
           # Read the trio once, together, from the one source, and reuse the
           # values below:  the three names always come from the same project.
-          asc_key_id="$(asc_get ASC_KEY_ID "$FLEET_ASC_PROJECT_ID" /asc)"
-          asc_issuer_id="$(asc_get ASC_ISSUER_ID "$FLEET_ASC_PROJECT_ID" /asc)"
-          key_material="$(asc_get ASC_KEY_P8 "$FLEET_ASC_PROJECT_ID" /asc)"
-          for pair in "ASC_KEY_ID:$asc_key_id" "ASC_ISSUER_ID:$asc_issuer_id"; do
-            if [ -z "${pair#*:}" ]; then
-              echo "::error::Missing required secret ${pair%%:*} in Infisical prod (Fleet-OPS /asc)." >&2
-              exit 1
-            fi
-          done
-          if [ -z "$key_material" ]; then
-            echo "::error::Missing required secret ASC_KEY_P8 in Infisical prod (Fleet-OPS /asc)." >&2
-            exit 1
-          fi
+          read_required asc_key_id ASC_KEY_ID "$FLEET_ASC_PROJECT_ID" /asc "Fleet-OPS /asc"
+          read_required asc_issuer_id ASC_ISSUER_ID "$FLEET_ASC_PROJECT_ID" /asc "Fleet-OPS /asc"
+          read_required key_material ASC_KEY_P8 "$FLEET_ASC_PROJECT_ID" /asc "Fleet-OPS /asc"
 
           for name in ASC_KEY_ID ASC_ISSUER_ID \
                       IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD; do
@@ -238,16 +246,12 @@ jobs:
             case "$name" in
               ASC_KEY_ID) val="$asc_key_id" ;;
               ASC_ISSUER_ID) val="$asc_issuer_id" ;;
-              *) val="$(asc_get "$name" "$INFISICAL_PROJECT_ID" /)" ;;
+              # Every signing field is required:  an unreadable, empty or blank
+              # value stops the step here, naming the secret, instead of
+              # skipping it and failing later in the import (owner policy
+              # 2026-10-24, no fallbacks).
+              *) read_required val "$name" "$INFISICAL_PROJECT_ID" / "application project root" ;;
             esac
-            # Every signing field is required:  an empty or unreadable value
-            # stops the step here, naming the secret, instead of skipping it
-            # and failing later in the import (owner policy 2026-10-24, no
-            # fallbacks).
-            if [ -z "$val" ]; then
-              echo "::error::Missing required secret $name in Infisical prod (application project root)." >&2
-              exit 1
-            fi
             if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
               echo "::error::Signing field $name must be single-line; correct Infisical formatting." >&2
               exit 1

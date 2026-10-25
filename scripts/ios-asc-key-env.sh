@@ -117,13 +117,14 @@ if [[ -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER_ID:-}" && -n "${APPLE
   #  The decode is not trusted to fail on a bad body -- BSD decodes what it
   #  can and returns 0, GNU fails on the invalid byte -- so the body is
   #  checked here, where the value the operator set is still in hand and can
-  #  be named in the refusal.  The refusal names the variable, the key ID and
-  #  the error class, never any part of the value.
+  #  be named in the refusal.  The refusal names the variable and the error
+  #  class only:  no part of the value and not the key ID, which the workflow
+  #  masks as a credential name (Kody 4369830785).
   if [[ -z "$key" ]] || ! node "$module" validate >/dev/null 2>&1 <<< "$key"; then
     if [[ "$decoder_ok" -eq 0 ]]; then
-      echo "::error::No usable base64 decoder on this host, so APPLE_API_KEY_P8_BASE64 (key ID ${APPLE_API_KEY_ID:-unset}) could not be read (error: no-base64-decoder)." >&2
+      echo "::error::No usable base64 decoder on this host, so APPLE_API_KEY_P8_BASE64 could not be read (error: no-base64-decoder)." >&2
     else
-      echo "::error::APPLE_API_KEY_P8_BASE64 (key ID ${APPLE_API_KEY_ID:-unset}) is set but does not decode to a PEM private key (error: invalid-hosted-key)." >&2
+      echo "::error::APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key (error: invalid-hosted-key)." >&2
     fi
     exit 1
   fi
