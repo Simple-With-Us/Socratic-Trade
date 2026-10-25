@@ -177,11 +177,9 @@ grep -q 'Missing Infisical machine identity' "$tmp_dir/stderr"
 export INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client
 export INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=synthetic-secret
 
-# 7. A value that is not a key is refused with its source, its error class
-# and the fleet's masked preview, so the operator can tell which credential
-# was refused without the value ever being printed.  The preview is the
-# blessed shape:  the first eight and the last four characters, and nothing
-# else.  Synthetic value only.
+# 7. A value that is not a key is refused with its source and error class,
+# and no fragment of the value appears:  not the whole value, not its first
+# eight characters and not its last four.  Synthetic value only.
 export ASC_TEST_FIXTURE="$tmp_dir/bad-fixture"
 printf 'not a private key at all' > "$tmp_dir/bad-fixture"
 if bash "$repo_root/scripts/ios-asc-key-env.sh" bash "$tmp_dir/child.sh" >"$tmp_dir/stdout" 2>"$tmp_dir/stderr"; then
@@ -192,15 +190,13 @@ grep -q 'is not a PEM private key' "$tmp_dir/stderr" ||
   { echo "the refusal did not name the reason" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
 grep -q 'error: invalid-key-format' "$tmp_dir/stderr" ||
   { echo "the refusal did not name the error class" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
-bad_value="$(cat "$tmp_dir/bad-fixture")"
-bad_preview="$(printf '%s' "$bad_value" | cut -c1-8)...$(printf '%s' "$bad_value" | tail -c 4)"
-grep -Fq "preview: $bad_preview" "$tmp_dir/stderr" ||
-  { echo "the refusal did not carry the masked preview" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
-if grep -Fq -- "$bad_value" "$tmp_dir/stderr" "$tmp_dir/stdout"; then
-  echo "the refusal carried the whole refused value" >&2
-  exit 1
-fi
-log "a value that is not a key was refused with a masked preview of it"
+for fragment in 'not a private key at all' 'not a pr' ' all' 'preview'; do
+  if grep -Fq -- "$fragment" "$tmp_dir/stderr" "$tmp_dir/stdout"; then
+    echo "the refusal carried a fragment of the refused value: $fragment" >&2
+    exit 1
+  fi
+done
+log "a value that is not a key was refused without any fragment of it"
 
 # 8. The hosted trio in the environment wins over Infisical, and the base64
 # body is decoded through a here-string:  the environment beats the network,
@@ -269,9 +265,8 @@ log "the resolved key is handed over in a variable, never on stdout"
 # absent one.  The operator named this key, so the helper must stop instead
 # of falling through to Infisical and handing the child a key nobody asked
 # for:  the run would look successful while the credential the operator
-# named was never the one in use.  The refusal names the variable, the error
-# class and the fleet's masked preview;  the key ID is not printed.  Synthetic
-# value only.
+# named was never the one in use.  The refusal names the variable and the
+# error class, and neither the key ID nor any fragment of the value.  Synthetic value only.
 rejected='not base64 at all !!!'
 rejected_first8="$(printf '%s' "$rejected" | cut -c1-8)"
 rejected_last4="$(printf '%s' "$rejected" | tail -c 4)"
@@ -293,12 +288,12 @@ if grep -Fq 'APPLEKEY01' "$tmp_dir/stderr" "$tmp_dir/stdout"; then
 fi
 grep -q 'error: invalid-hosted-key' "$tmp_dir/stderr" ||
   { echo "the refusal did not name the error class" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
-grep -Fq "preview: $rejected_first8...$rejected_last4" "$tmp_dir/stderr" ||
-  { echo "the refusal did not carry the masked preview" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
-if grep -Fq -- "$rejected" "$tmp_dir/stderr" "$tmp_dir/stdout"; then
-  echo "the refusal carried the whole refused value" >&2
-  exit 1
-fi
+for fragment in "$rejected" "$rejected_first8" "$rejected_last4" 'preview' 'APPLEKEY01'; do
+  if grep -Fq -- "$fragment" "$tmp_dir/stderr" "$tmp_dir/stdout"; then
+    echo "the refusal carried a fragment of the rejected value: $fragment" >&2
+    exit 1
+  fi
+done
 log "a hosted body that does not decode was refused instead of falling through"
 
 # 12. When Fleet-OPS /asc cannot be read, the helper stops:  there is no

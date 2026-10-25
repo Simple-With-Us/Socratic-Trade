@@ -44,30 +44,12 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 module="${repo_root}/scripts/ios-fleet/asc-key.mjs"
 
-# The fleet's blessed masked preview (scripts/ios-fleet/asc-api.mjs):  the
-# first eight and the last four characters, and nothing else.  A value too
-# short to mask safely is withheld whole, so a preview can never become the
-# secret it describes.
-#
-# A refused credential is named this way.  The operator has to be able to tell
-# WHICH key was refused without the key ever being printed (owner ruling
-# 2026-07-16), and the shell layer and the client have to name it the same
-# way:  the client prints this exact shape for the same refusal, so the two
-# read alike in a log.
-masked_preview() {
-  local text="$1"
-  if [[ -z "$text" ]]; then printf '(empty)'; return; fi
-  if [[ "${#text}" -le 12 ]]; then printf '[%d chars, withheld]' "${#text}"; return; fi
-  printf '%s...%s' "${text:0:8}" "${text: -4}"
-}
-
 # Refuse a value that is not a usable key.  The refusal names where the key
-# came from, why it was refused, and a masked preview of the value, so the
-# operator can tell which credential was refused.  The value itself is never
-# printed.
+# came from and why it was refused, and nothing derived from the value:  no
+# prefix, suffix or other fragment of a credential belongs in any output.
 refuse_unusable_key() {
-  local where="$1" value="$2"
-  echo "::error::The ASC key from ${where} is not a PEM private key (error: invalid-key-format; preview: $(masked_preview "$value"))." >&2
+  local where="$1"
+  echo "::error::The ASC key from ${where} is not a PEM private key (error: invalid-key-format)." >&2
   exit 1
 }
 
@@ -135,15 +117,14 @@ if [[ -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER_ID:-}" && -n "${APPLE
   #  The decode is not trusted to fail on a bad body -- BSD decodes what it
   #  can and returns 0, GNU fails on the invalid byte -- so the body is
   #  checked here, where the value the operator set is still in hand and can
-  #  be named in the refusal.  The refusal names the variable, the error
-  #  class and a masked preview of the value, which is the shape the client
-  #  prints for the same refusal.  The key ID is not printed:  the workflow
-  #  masks it as a credential name (Kody 4369830785).
+  #  be named in the refusal.  The refusal names the variable and the error
+  #  class only:  no part of the value and not the key ID, which the workflow
+  #  masks as a credential name (Kody 4369830785).
   if [[ -z "$key" ]] || ! node "$module" validate >/dev/null 2>&1 <<< "$key"; then
     if [[ "$decoder_ok" -eq 0 ]]; then
-      echo "::error::No usable base64 decoder on this host, so APPLE_API_KEY_P8_BASE64 could not be read (error: no-base64-decoder; preview: $(masked_preview "$APPLE_API_KEY_P8_BASE64"))." >&2
+      echo "::error::No usable base64 decoder on this host, so APPLE_API_KEY_P8_BASE64 could not be read (error: no-base64-decoder)." >&2
     else
-      echo "::error::APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key (error: invalid-hosted-key; preview: $(masked_preview "$APPLE_API_KEY_P8_BASE64"))." >&2
+      echo "::error::APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key (error: invalid-hosted-key)." >&2
     fi
     exit 1
   fi
@@ -203,7 +184,7 @@ fi
 # The key has to be a key:  the shell layer and the client have to accept
 # exactly the same values, so the module parses it before it is handed on.
 # The key is handed back in a variable, so it never passes through stdout.
-usable_pem "$key" || refuse_unusable_key "$source_name" "$key"
+usable_pem "$key" || refuse_unusable_key "$source_name"
 
 export ASC_KEY_P8="$RESOLVED_PEM"
 unset key RESOLVED_PEM
