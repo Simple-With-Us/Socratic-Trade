@@ -4,6 +4,7 @@
  *  is reused so every settings error surfaces through the same toast pattern.
  *  Every function talks to REAL existing endpoints — nothing here simulates. */
 
+import { z } from "zod";
 import { ConsoleApiError, redirectToLogin } from "../lib/api";
 import { beginConsoleMutation, endConsoleMutation, isConsoleMutationMethod } from "../lib/mutation-busy";
 
@@ -314,10 +315,19 @@ export function saveApiKeyRoute(service: string, route: "openrouter" | "native" 
   });
 }
 
-export function deleteApiKey(service: string): Promise<{ success: boolean; deleted: boolean }> {
-  return request<{ success: boolean; deleted: boolean }>(`/api/keys?service=${encodeURIComponent(service)}`, {
+/** DELETE /api/keys response, validated at the client trust boundary. */
+export const ApiKeyDeleteResponseSchema = z.object({ success: z.literal(true), deleted: z.boolean() }).strict();
+export type ApiKeyDeleteResponse = z.infer<typeof ApiKeyDeleteResponseSchema>;
+
+export async function deleteApiKey(service: string): Promise<ApiKeyDeleteResponse> {
+  const payload = await request<unknown>(`/api/keys?service=${encodeURIComponent(service)}`, {
     method: "DELETE"
   });
+  const parsed = ApiKeyDeleteResponseSchema.safeParse(payload);
+  if (!parsed.success) {
+    throw new ConsoleApiError("Unexpected response from the server while removing the key.  Reload to check whether it was removed.", 200, payload);
+  }
+  return parsed.data;
 }
 
 // ── Delivery channels (out-of-app alert delivery) ────────────────────────────
