@@ -229,7 +229,7 @@ describe("plan_tier persistence on user_api_keys", () => {
 });
 
 describe("GET/POST /api/keys planTier surface", () => {
-  it("returns planTierOptions for market-data and retired flag for fmp", async () => {
+  it("returns planTierOptions for market-data and does not list FMP", async () => {
     vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
     const { getDb, upsertUserApiKey } = await import("../src/lib/db");
     const { userIdForEmail } = await import("../src/lib/auth/identity");
@@ -262,8 +262,7 @@ describe("GET/POST /api/keys planTier surface", () => {
     const openrouter = body.keys.find((k) => k.service === "openrouter")!;
     expect(openrouter.planTierOptions).toBeUndefined();
 
-    const fmp = body.keys.find((k) => k.service === "fmp")!;
-    expect(fmp.retired).toBe(true);
+    expect(body.keys.some((k) => k.service === "fmp")).toBe(false);
   });
 
   it("POST planTier alone updates stored tier", async () => {

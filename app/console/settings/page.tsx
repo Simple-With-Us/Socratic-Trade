@@ -712,7 +712,7 @@ function YouCard() {
 
 // ── All accounts: Data sources + per-user feature knobs ──────────────────────
 
-const GROUP_ORDER = ["fmp", "sec", "web_sources", "transcripts", "rag", "enrichment"] as const;
+const GROUP_ORDER = ["sec", "web_sources", "transcripts", "rag", "enrichment"] as const;
 
 /** Decides what a "Data sources" number row's blur should persist, given the
  *  raw text just typed and the row's last committed value. Returns null when

@@ -147,7 +147,7 @@ export function ApiKeysCard() {
         an LLM key (OpenRouter is the production path) so Green/Red team models can propose and debate.{" "}
         <strong className="font-semibold text-[color:var(--con-muted)]">Optional enrichment:</strong> Finnhub, Tiingo, FRED,
         and similar data providers deepen the scan — without them the app still uses free floors (e.g. Yahoo).{" "}
-        <strong className="font-semibold text-[color:var(--con-muted)]">Direct FMP and QuiverQuant are retired</strong>{" "}
+        <strong className="font-semibold text-[color:var(--con-muted)]">Direct QuiverQuant is retired</strong>{" "}
         here (Congress.Trade owns that class of data). Market data, positions, and guardrails work without optional
         keys; autonomous proposals do not. For <strong className="font-semibold text-[color:var(--con-muted)]">every
         market-data / data-platform key</strong> (Tiingo, Massive, ROIC, Twelve, Finnhub, Marketstack, FilingAPI,

@@ -131,16 +131,6 @@ const API_KEY_CATALOG = [
     docsUrl: "https://finnhub.io/dashboard"
   },
   {
-    service: "fmp",
-    label: "Financial Modeling Prep",
-    category: "Market data",
-    required: false,
-    unlocks: "Retired on Socratic-Trade — CT-only. Do not use for ST product enrichment.",
-    docsUrl: "https://site.financialmodelingprep.com/developer/docs",
-    retired: true,
-    retiredNote: "Retired on Socratic-Trade (Congress.Trade only). Key row kept for archaeology; product code never calls FMP."
-  },
-  {
     service: "alphavantage",
     label: "Alpha Vantage",
     category: "Market data",
@@ -373,13 +363,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: `service is required and must be one of: ${[...VALID_SERVICES].join(", ")}` }, { status: 400 });
     }
 
-    // FMP (and any other catalog row marked retired / retired-market-data) cannot be stored for
+    // A catalog row marked retired (or a retired market-data service) cannot be stored for
     // product use — ST does not call those vendors; Congress.Trade owns that class of data.
     if (isRetiredMarketDataService(canonical) || API_KEY_CATALOG.some((e) => e.service === canonical && "retired" in e && e.retired === true)) {
       return NextResponse.json(
         {
           error:
-            "This provider is retired on Socratic-Trade. Use Congress.Trade for FMP-class latency / congressional alt-data; do not store a key here."
+            "This provider is retired on Socratic-Trade. Use Congress.Trade for congressional / alt-data; do not store a key here."
         },
         { status: 400 }
       );
