@@ -97,14 +97,15 @@ instead of drifting apart one review comment at a time.
   `preview: -----BEG...----` for the PEM-envelope fixture, and both assert that the raw value is
   absent.
 - `scripts/ios-asc-key-env.sh` — the `APPLE_API_*` trio ahead of Infisical, a base64 body
-  decoded through a here-string, and a refusal that names the key's source and error class and
-  carries no fragment of the value:  no preview, prefix or suffix (ST-4579).  The key is parsed
+  decoded through a here-string, and a refusal that names the key's source, the error class and
+  the blessed masked preview (the first eight and the last four characters), never the whole value
+  or the key ID.  Jay decided on 2026-10-25 to keep the preview (ST-4579).  The key is parsed
   by the shared module before it is handed on, so the helper and the client accept exactly the same
   values.  The key is read from the Infisical `/asc` folder, the folder the ASC trio lives in and
   the one every other reader in this repository asks for.
 - `scripts/test-ios-asc-key-env.sh` — the blessed `log()` stub, a real key generated at test time
   (the helper parses the key, so a fake envelope is not enough), and three new cases:  an unusable
-  value is refused with its source and no fragment of it,  the hosted trio is used without asking
+  value is refused with its source and a masked preview and never printed,  the hosted trio is used without asking
   Infisical,  and the log stub really wrote to its file.  The fake Infisical CLI now honors
   `--path` and answers the key only from `/asc`, so a helper that asked the wrong folder fails the
   suite instead of passing it.
