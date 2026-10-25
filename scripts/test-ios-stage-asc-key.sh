@@ -94,6 +94,22 @@ case "${1:-}" in
   login) printf '%s\n' synthetic-session-token ;;
   secrets)
     echo "asked for ${3:-value} at ${secret_path:-/} in ${secret_project:-none}" >> "${ASC_TEST_LOG:-/dev/null}"
+    # The ASC trio answers only from Fleet-OPS /asc, unless the test makes
+    # that folder unreadable.  The application project root answers for the
+    # trio too, as the control:  only the "never asked" assertions can tell a
+    # single-source workflow from one that falls back to it.
+    fleet_asc=0
+    if [[ "$secret_project" == 8dae6d03-8f12-48b2-adf3-e5c1b881c8c5 && "$secret_path" == /asc &&
+          "${ASC_TEST_FLEET_READABLE:-1}" == 1 ]]; then
+      fleet_asc=1
+    fi
+    case "${3:-}" in
+      ASC_KEY_ID|ASC_ISSUER_ID|ASC_KEY_P8)
+        if [[ "$fleet_asc" != 1 && "$secret_project" != synthetic-project ]]; then
+          exit 3
+        fi
+        ;;
+    esac
     if [[ "${3:-}" == ASC_KEY_P8 ]]; then
       cat "$ASC_TEST_FIXTURE"
     elif [[ "${3:-}" == ASC_KEY_ID && "${ASC_TEST_MISSING_KEY_ID:-}" == "1" ]]; then
@@ -110,7 +126,7 @@ CLI
 chmod 700 "$tmp_dir/bin/infisical"
 : > "$tmp_dir/workflow-env"
 : > "$tmp_dir/asc-test-log"
-env -u ASC_KEY_P8 PATH="$tmp_dir/bin:$PATH" \
+env -u ASC_KEY_P8 -u ASC_INFISICAL_PROJECT_ID PATH="$tmp_dir/bin:$PATH" \
   GITHUB_WORKSPACE="$tmp_dir/workspace" GITHUB_ENV="$tmp_dir/workflow-env" \
   INFISICAL_PROJECT_ID=synthetic-project \
   INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client \
@@ -125,6 +141,16 @@ env -u ASC_KEY_P8 PATH="$tmp_dir/bin:$PATH" \
 # (ST-4579).
 grep -q 'asked for ASC_KEY_P8 at /asc in 8dae6d03-8f12-48b2-adf3-e5c1b881c8c5' "$tmp_dir/asc-test-log" ||
   { echo 'the workflow did not read the ASC key from the fleet project' >&2; cat "$tmp_dir/asc-test-log" >&2; exit 1; }
+# The control:  the application project would answer for the trio, so a
+# workflow that asked it (the old lookup, or a fallback) is caught here.
+if grep -Eq 'asked for ASC_(KEY_ID|ISSUER_ID|KEY_P8) at .* in synthetic-project' "$tmp_dir/asc-test-log"; then
+  echo 'the workflow asked the application project for the ASC trio' >&2; cat "$tmp_dir/asc-test-log" >&2; exit 1
+fi
+# Each name of the trio is read once:  the values are reused, not re-fetched.
+for n in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8; do
+  [[ "$(grep -c "asked for $n " "$tmp_dir/asc-test-log")" == 1 ]] ||
+    { echo "the workflow read $n more than once" >&2; cat "$tmp_dir/asc-test-log" >&2; exit 1; }
+done
 if grep -Fq -f "$tmp_dir/fixture" "$tmp_dir/workflow-env" "$tmp_dir/workflow-stdout" "$tmp_dir/workflow-stderr"; then
   echo 'workflow leaked multiline key material' >&2
   exit 1
@@ -142,7 +168,7 @@ fi
 
 # Wrapped P12 text must fail before add-mask can print continuation lines.
 : > "$tmp_dir/multiline-env"
-if env -u ASC_KEY_P8 PATH="$tmp_dir/bin:$PATH" \
+if env -u ASC_KEY_P8 -u ASC_INFISICAL_PROJECT_ID PATH="$tmp_dir/bin:$PATH" \
   GITHUB_WORKSPACE="$tmp_dir/workspace" GITHUB_ENV="$tmp_dir/multiline-env" \
   INFISICAL_PROJECT_ID=synthetic-project \
   INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client \
@@ -165,7 +191,7 @@ grep -q 'must be single-line' "$tmp_dir/multiline-stderr"
 # a message about a missing variable.  The ASC trio is the credential as a
 # whole, and a ship without the key id or the issuer cannot sign.
 : > "$tmp_dir/missing-key-id-env"
-if env -u ASC_KEY_P8 PATH="$tmp_dir/bin:$PATH" \
+if env -u ASC_KEY_P8 -u ASC_INFISICAL_PROJECT_ID PATH="$tmp_dir/bin:$PATH" \
   GITHUB_WORKSPACE="$tmp_dir/workspace" GITHUB_ENV="$tmp_dir/missing-key-id-env" \
   INFISICAL_PROJECT_ID=synthetic-project \
   INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client \
@@ -176,7 +202,32 @@ if env -u ASC_KEY_P8 PATH="$tmp_dir/bin:$PATH" \
   echo 'a missing ASC key id was accepted' >&2
   exit 1
 fi
-grep -q 'Missing ASC_KEY_ID in Infisical prod' "$tmp_dir/missing-key-id-stderr" ||
+grep -q 'Missing required secret ASC_KEY_ID' "$tmp_dir/missing-key-id-stderr" ||
   { echo 'the missing key id did not stop the credential step' >&2; cat "$tmp_dir/missing-key-id-stderr" >&2; exit 1; }
+
+# An unreadable Fleet-OPS /asc stops the step, names the missing secret, and
+# never reaches for the application project (owner policy 2026-10-24, no
+# fallbacks).  An ambient ASC_INFISICAL_PROJECT_ID is ignored as well.
+: > "$tmp_dir/unreadable-env"
+: > "$tmp_dir/unreadable-log"
+if env -u ASC_KEY_P8 PATH="$tmp_dir/bin:$PATH" \
+  GITHUB_WORKSPACE="$tmp_dir/workspace" GITHUB_ENV="$tmp_dir/unreadable-env" \
+  INFISICAL_PROJECT_ID=synthetic-project \
+  ASC_INFISICAL_PROJECT_ID=synthetic-project \
+  INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client \
+  INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=synthetic-secret \
+  ASC_TEST_LOG="$tmp_dir/unreadable-log" ASC_TEST_FLEET_READABLE=0 \
+  ASC_TEST_FIXTURE="$tmp_dir/fixture" \
+  bash "$tmp_dir/workflow-load.sh" > "$tmp_dir/unreadable-stdout" 2> "$tmp_dir/unreadable-stderr"; then
+  echo 'an unreadable Fleet-OPS /asc was accepted' >&2
+  exit 1
+fi
+grep -q 'Missing required secret ASC_KEY_ID' "$tmp_dir/unreadable-stderr" ||
+  { echo 'the unreadable source did not name the missing secret' >&2; cat "$tmp_dir/unreadable-stderr" >&2; exit 1; }
+if grep -Eq 'asked for ASC_(KEY_ID|ISSUER_ID|KEY_P8) at .* in synthetic-project' "$tmp_dir/unreadable-log"; then
+  echo 'the workflow fell back to the application project' >&2; cat "$tmp_dir/unreadable-log" >&2; exit 1
+fi
+[[ ! -s "$tmp_dir/unreadable-env" ]] ||
+  { echo 'a failed credential step still wrote the environment file' >&2; exit 1; }
 
 echo 'synthetic ASC key-file and workflow handoff passed'

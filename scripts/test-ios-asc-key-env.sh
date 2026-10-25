@@ -37,8 +37,10 @@ cat > "$tmp_dir/bin/infisical" <<'CLI'
 # it, ruling 2026-10-17), so a helper that asks the wrong folder or the
 # wrong project gets nothing, and the suite catches it.
 #
-# The application project answers from its root path instead, which is the
-# fallback the ruling allows, with a warning.
+# The application project ALSO answers from its root path.  That is the
+# control:  a helper that fell back to, or was pointed at, the application
+# project would still hand a key on, so only the "never asked" assertions
+# below can tell the single-source helper from one with a fallback.
 secret_path=""
 secret_project=""
 for arg in "$@"; do
@@ -101,9 +103,10 @@ export ASC_TEST_FIXTURE="$tmp_dir/fixture"
 # fleet project is the one that owns the /asc folder, so the two are
 # deliberately different here.
 export INFISICAL_PROJECT_ID=synthetic-app-project
-export ASC_INFISICAL_PROJECT_ID=synthetic-fleet-project
+# The fleet project id is the one constant in the helper:  it is not
+# overridable, so the fake has to answer for that exact id.
 export ASC_TEST_APP_PROJECT=synthetic-app-project
-export ASC_TEST_FLEET_PROJECT=synthetic-fleet-project
+export ASC_TEST_FLEET_PROJECT=8dae6d03-8f12-48b2-adf3-e5c1b881c8c5
 export ASC_TEST_FLEET_READABLE=1
 export INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client
 export INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=synthetic-secret
@@ -126,6 +129,12 @@ grep -q 'asked Infisical for ASC_KEY_P8 at /asc' "$ASC_TEST_LOG" ||
 # (ST-4579).
 grep -q "asked Infisical for ASC_KEY_P8 at /asc in ${ASC_TEST_FLEET_PROJECT}" "$ASC_TEST_LOG" ||
   { echo "the /asc read did not name the fleet project" >&2; cat "$ASC_TEST_LOG" >&2; exit 1; }
+# 1c. The application project is never asked for the key, although the fake
+# would answer from its root:  this is the control that fails for the old
+# application-project lookup and for any fallback to it.
+if grep -q "in ${ASC_TEST_APP_PROJECT}" "$ASC_TEST_LOG"; then
+  echo "the application project was asked for the ASC key" >&2; cat "$ASC_TEST_LOG" >&2; exit 1
+fi
 
 # 2. The key never reaches stdout, stderr or the arguments of the helper.
 if grep -Fq "$key_needle" "$tmp_dir/stderr"; then
@@ -150,7 +159,7 @@ if bash "$repo_root/scripts/ios-asc-key-env.sh" bash "$tmp_dir/child.sh" >"$tmp_
   echo "a missing key was accepted" >&2
   exit 1
 fi
-grep -q 'Missing ASC key material' "$tmp_dir/stderr"
+grep -q 'Missing required secret ASC_KEY_P8' "$tmp_dir/stderr"
 
 # 5. Without a command it is a usage error, and it does not touch Infisical.
 if bash "$repo_root/scripts/ios-asc-key-env.sh" >/dev/null 2>&1; then
@@ -280,24 +289,33 @@ if grep -Fq "$rejected" "$tmp_dir/stderr" "$tmp_dir/stdout"; then
 fi
 log "a hosted body that does not decode was refused instead of falling through"
 
-# 12. When the fleet project cannot be read, the helper falls back to the
-#     application project's root path, says so, and still hands the key on:
-#     a missing grant on the machine identity must not silently stop a ship
-#     (owner ruling 2026-10-17).
+# 12. When Fleet-OPS /asc cannot be read, the helper stops:  there is no
+#     second source (owner policy 2026-10-24, no fallbacks).  The error names
+#     the missing secret, and the application project, which the fake would
+#     answer from, is never asked.
 export ASC_TEST_FLEET_READABLE=0
 : > "$ASC_TEST_LOG"
-out="$(bash "$repo_root/scripts/ios-asc-key-env.sh" bash "$tmp_dir/child.sh" 2>"$tmp_dir/stderr")"
-[[ "$out" == "key-received" ]] ||
-  { echo "the fallback did not hand the key to the child" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
-grep -q 'Fleet-OPS /asc is not readable in full' "$tmp_dir/stderr" ||
-  { echo "the fallback was not announced" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
-grep -q "asked Infisical for ASC_KEY_P8 at / in ${ASC_TEST_APP_PROJECT}" "$ASC_TEST_LOG" ||
-  { echo "the fallback did not read the application root" >&2; cat "$ASC_TEST_LOG" >&2; exit 1; }
-if grep -Fq "$key_needle" "$tmp_dir/stderr"; then
-  echo "key material reached stderr" >&2
-  exit 1
+if bash "$repo_root/scripts/ios-asc-key-env.sh" bash "$tmp_dir/child.sh" >"$tmp_dir/stdout" 2>"$tmp_dir/stderr"; then
+  echo "an unreadable Fleet-OPS /asc was accepted" >&2; exit 1
+fi
+grep -q 'Missing required secret ASC_KEY_P8' "$tmp_dir/stderr" ||
+  { echo "the failure did not name ASC_KEY_P8" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
+if grep -q "in ${ASC_TEST_APP_PROJECT}" "$ASC_TEST_LOG"; then
+  echo "the helper fell back to the application project" >&2; cat "$ASC_TEST_LOG" >&2; exit 1
 fi
 export ASC_TEST_FLEET_READABLE=1
-log "an unreadable Fleet-OPS /asc fell back to the application root, with a warning"
+log "an unreadable Fleet-OPS /asc failed closed and named ASC_KEY_P8"
+
+# 13. An ambient project override is ignored:  the source is not
+#     overridable, so a runner that happens to export one still reads
+#     Fleet-OPS /asc.
+: > "$ASC_TEST_LOG"
+out="$(ASC_INFISICAL_PROJECT_ID=synthetic-other-project \
+  bash "$repo_root/scripts/ios-asc-key-env.sh" bash "$tmp_dir/child.sh" 2>"$tmp_dir/stderr")"
+[[ "$out" == "key-received" ]] ||
+  { echo "an ambient override changed the result" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
+if grep -q 'synthetic-other-project' "$ASC_TEST_LOG"; then
+  echo "an ambient override redirected the /asc read" >&2; cat "$ASC_TEST_LOG" >&2; exit 1
+fi
 
 echo 'synthetic ASC credential handoff passed'

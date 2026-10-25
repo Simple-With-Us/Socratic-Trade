@@ -152,12 +152,6 @@ jobs:
         if: steps.gate.outputs.should_ship == '1'
         env:
           INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
-          # The App Store Connect trio's canonical home is Fleet-OPS /asc (owner
-          # ruling 2026-10-11; any app may use it, ruling 2026-10-17).  The org
-          # secret carries that project id; the constant is the fallback for a
-          # repository the org secret has not reached, and it is the same id the
-          # other fleet ship lanes already read from.
-          ASC_INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_FLEET_OPS_PROJECT_ID || '8dae6d03-8f12-48b2-adf3-e5c1b881c8c5' }}
           INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
           INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
           INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -206,15 +200,14 @@ jobs:
           fi
           printf '::add-mask::%s\n' "${TOKEN//'%'/'%25'}"
 
-          # The App Store Connect trio's canonical home is Fleet-OPS /asc (owner
-          # ruling 2026-10-11; any app may use it, ruling 2026-10-17).  The
-          # /asc folder belongs to Fleet-OPS, so it has to be read from THAT
-          # project:  this repository's INFISICAL_PROJECT_ID is the application
-          # project, and it has no /asc folder at all, so a read against it
-          # returns nothing and the lane stops with "Missing ASC key material"
-          # (ST-4579).  The same three names in the application project's root
-          # are the fallback, with a warning, so a missing grant on the machine
-          # identity cannot silently stop shipping.
+          # The App Store Connect trio has exactly one home:  Fleet-OPS /asc
+          # (owner ruling 2026-10-11; any app may use it, ruling 2026-10-17).
+          # This repository's INFISICAL_PROJECT_ID is the application project,
+          # which has no /asc folder, so a read against it returns nothing
+          # (ST-4579).  There is no second source and no override:  Infisical
+          # is the only source of truth, and a missing or unreadable secret
+          # stops the run with a message that names it (owner policy
+          # 2026-10-24, no fallbacks, no overrides).
           FLEET_ASC_PROJECT_ID="8dae6d03-8f12-48b2-adf3-e5c1b881c8c5"
           asc_get() {
             INFISICAL_TOKEN="$TOKEN" infisical secrets get "$1" \
@@ -222,41 +215,32 @@ jobs:
               --projectId="$2" --env=prod --path="$3" \
               2>/dev/null || true
           }
-          ASC_SRC_PROJECT="${ASC_INFISICAL_PROJECT_ID:-$FLEET_ASC_PROJECT_ID}"
-          ASC_SRC_PATH="/asc"
-          ASC_SRC_LABEL="Fleet-OPS /asc"
-          if [ -z "$(asc_get ASC_KEY_ID "$ASC_SRC_PROJECT" "$ASC_SRC_PATH")" ] ||
-             [ -z "$(asc_get ASC_ISSUER_ID "$ASC_SRC_PROJECT" "$ASC_SRC_PATH")" ] ||
-             [ -z "$(asc_get ASC_KEY_P8 "$ASC_SRC_PROJECT" "$ASC_SRC_PATH")" ]; then
-            echo "::warning::Fleet-OPS /asc is not readable in full; using this project's root path for the ASC credentials.  Grant the machine identity read on Fleet-OPS /asc."
-            ASC_SRC_PROJECT="$INFISICAL_PROJECT_ID"
-            ASC_SRC_PATH="/"
-            ASC_SRC_LABEL="project root"
+          # Read the trio once, together, from the one source, and reuse the
+          # values below:  the three names always come from the same project.
+          asc_key_id="$(asc_get ASC_KEY_ID "$FLEET_ASC_PROJECT_ID" /asc)"
+          asc_issuer_id="$(asc_get ASC_ISSUER_ID "$FLEET_ASC_PROJECT_ID" /asc)"
+          key_material="$(asc_get ASC_KEY_P8 "$FLEET_ASC_PROJECT_ID" /asc)"
+          for pair in "ASC_KEY_ID:$asc_key_id" "ASC_ISSUER_ID:$asc_issuer_id"; do
+            if [ -z "${pair#*:}" ]; then
+              echo "::error::Missing required secret ${pair%%:*} in Infisical prod (Fleet-OPS /asc)." >&2
+              exit 1
+            fi
+          done
+          if [ -z "$key_material" ]; then
+            echo "::error::Missing required secret ASC_KEY_P8 in Infisical prod (Fleet-OPS /asc)." >&2
+            exit 1
           fi
-          echo "ASC credential source: ${ASC_SRC_LABEL}"
 
           for name in ASC_KEY_ID ASC_ISSUER_ID \
                       IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD; do
-            # The ASC trio comes from the resolved ASC source; the certificate
-            # material comes from this project's root.  Asking the wrong folder
-            # returns nothing, and an empty value here is a ship with no key id
-            # at all (AFC-459).
+            # The ASC ids were read above from Fleet-OPS /asc and are reused
+            # here; the certificate material comes from this project's root.
             case "$name" in
-              ASC_KEY_ID|ASC_ISSUER_ID) secret_project="$ASC_SRC_PROJECT"; secret_path="$ASC_SRC_PATH" ;;
-              *) secret_project="$INFISICAL_PROJECT_ID"; secret_path=/ ;;
+              ASC_KEY_ID) val="$asc_key_id" ;;
+              ASC_ISSUER_ID) val="$asc_issuer_id" ;;
+              *) val="$(asc_get "$name" "$INFISICAL_PROJECT_ID" /)" ;;
             esac
-            val="$(asc_get "$name" "$secret_project" "$secret_path")"
             if [ -z "$val" ]; then
-              # The ASC trio is the credential as a whole:  a ship without the
-              # key id or the issuer is a ship that cannot sign, so a missing
-              # one stops the run here, where the message names the source
-              # that was read.  The certificate material keeps its skip.
-              case "$name" in
-                ASC_KEY_ID|ASC_ISSUER_ID)
-                  echo "::error::Missing $name in Infisical prod (${ASC_SRC_LABEL})." >&2
-                  exit 1
-                  ;;
-              esac
               continue
             fi
             if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
@@ -278,11 +262,6 @@ jobs:
           # scripts/ios-asc-key-env.sh, and hand it to the client in the
           # environment:  a path on disk is not a credential source
           # (AFC-459, revision 2).
-          key_material="$(asc_get ASC_KEY_P8 "$ASC_SRC_PROJECT" "$ASC_SRC_PATH")"
-          if [ -z "$key_material" ]; then
-            echo "::error::Missing ASC key material in Infisical prod (${ASC_SRC_LABEL})."
-            exit 1
-          fi
           printf '%s\n' "$key_material" | bash "$GITHUB_WORKSPACE/scripts/ios-stage-asc-key.sh"
           ASC_KEY_PATH="$(sed -n 's/^ASC_KEY_PATH=//p' "$GITHUB_ENV" | tail -n 1)"
           export ASC_KEY_PATH
@@ -369,10 +348,6 @@ jobs:
           # (AFC-459, revision 2), and no key material may cross a step
           # boundary, so this step fetches the key itself.
           INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
-          # The ASC trio lives in Fleet-OPS /asc (owner ruling 2026-10-11; any
-          # app may use it, ruling 2026-10-17), so the step that resolves the
-          # key has to be told which project /asc belongs to.
-          ASC_INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_FLEET_OPS_PROJECT_ID || '8dae6d03-8f12-48b2-adf3-e5c1b881c8c5' }}
           INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
           INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
           INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
