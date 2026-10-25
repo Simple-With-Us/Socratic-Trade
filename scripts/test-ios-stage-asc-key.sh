@@ -114,6 +114,8 @@ case "${1:-}" in
       cat "$ASC_TEST_FIXTURE"
     elif [[ "${3:-}" == ASC_KEY_ID && "${ASC_TEST_MISSING_KEY_ID:-}" == "1" ]]; then
       :
+    elif [[ -n "${ASC_TEST_MISSING_CERT:-}" && "${3:-}" == "$ASC_TEST_MISSING_CERT" ]]; then
+      :
     elif [[ "${3:-}" == IOS_DIST_P12_BASE64 && "${ASC_TEST_MULTILINE_P12:-}" == 1 ]]; then
       printf '%s\n' SYNTHETIC-P12-FIRST SYNTHETIC-P12-CONTINUATION
     else
@@ -229,5 +231,31 @@ if grep -Eq 'asked for ASC_(KEY_ID|ISSUER_ID|KEY_P8) at .* in synthetic-project'
 fi
 [[ ! -s "$tmp_dir/unreadable-env" ]] ||
   { echo 'a failed credential step still wrote the environment file' >&2; exit 1; }
+
+# A missing certificate secret stops the credential step, naming it, before
+# the import runs (Kody 4369786720):  the release never continues without
+# signing material, and the message says which secret to restore.
+for cert in IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD; do
+  : > "$tmp_dir/missing-cert-env"
+  rm -f "$tmp_dir/missing-cert-import"
+  if env -u ASC_KEY_P8 -u ASC_INFISICAL_PROJECT_ID PATH="$tmp_dir/bin:$PATH" \
+    GITHUB_WORKSPACE="$tmp_dir/workspace" GITHUB_ENV="$tmp_dir/missing-cert-env" \
+    INFISICAL_PROJECT_ID=synthetic-project \
+    INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client \
+    INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=synthetic-secret \
+    ASC_TEST_FIXTURE="$tmp_dir/fixture" ASC_TEST_IMPORT_MARKER="$tmp_dir/missing-cert-import" \
+    ASC_TEST_MISSING_CERT="$cert" bash "$tmp_dir/workflow-load.sh" \
+    > "$tmp_dir/missing-cert-stdout" 2> "$tmp_dir/missing-cert-stderr"; then
+    echo "a missing $cert was accepted" >&2
+    exit 1
+  fi
+  grep -q "Missing required secret $cert in Infisical prod" "$tmp_dir/missing-cert-stderr" ||
+    { echo "the missing $cert was not named" >&2; cat "$tmp_dir/missing-cert-stderr" >&2; exit 1; }
+  [[ ! -e "$tmp_dir/missing-cert-import" ]] ||
+    { echo "the import ran without $cert" >&2; exit 1; }
+  if grep -q '^ASC_KEY_PATH=' "$tmp_dir/missing-cert-env"; then
+    echo "the key was staged without $cert" >&2; exit 1
+  fi
+done
 
 echo 'synthetic ASC key-file and workflow handoff passed'

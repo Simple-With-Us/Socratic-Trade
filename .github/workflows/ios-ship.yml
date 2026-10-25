@@ -240,8 +240,13 @@ jobs:
               ASC_ISSUER_ID) val="$asc_issuer_id" ;;
               *) val="$(asc_get "$name" "$INFISICAL_PROJECT_ID" /)" ;;
             esac
+            # Every signing field is required:  an empty or unreadable value
+            # stops the step here, naming the secret, instead of skipping it
+            # and failing later in the import (owner policy 2026-10-24, no
+            # fallbacks).
             if [ -z "$val" ]; then
-              continue
+              echo "::error::Missing required secret $name in Infisical prod (application project root)." >&2
+              exit 1
             fi
             if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
               echo "::error::Signing field $name must be single-line; correct Infisical formatting." >&2
