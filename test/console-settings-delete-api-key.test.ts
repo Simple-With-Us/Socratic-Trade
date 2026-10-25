@@ -1,7 +1,9 @@
 /**
  * app/console/settings/lib.ts deleteApiKey: the DELETE /api/keys body is strictly validated at the
- * client trust boundary (ST-4580) by a local guard (no zod in the client bundle), so a malformed
- * body never reaches the Remove flow as a success, and runRemoveKey always reloads the list.
+ * client trust boundary (ST-4580) with the strict, tree-shakable ApiKeyDeleteResponseSchema from
+ * zod/mini, so only the zod/mini runtime (never the full zod runtime) reaches the Settings client
+ * bundle, a malformed body never reaches the Remove flow as a success, and runRemoveKey always
+ * reloads the list.
  */
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -60,7 +62,9 @@ describe("ApiKeyDeleteResponseSchema", () => {
   it("validates with zod/mini, never the full zod runtime, in the client-imported settings lib", () => {
     const source = readFileSync("app/console/settings/lib.ts", "utf8");
     expect(source).toMatch(/from\s+["']zod\/mini["']/);
-    expect(source).not.toMatch(/from\s+["']zod["']/);
+    // Any zod specifier other than zod/mini (zod, zod/v4, zod/v4/classic, zod/v4/core, ...) pulls
+    // in the full runtime, whether imported statically, dynamically, or re-exported.
+    expect(source).not.toMatch(/(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+)["']zod(?!\/mini["'])(?:\/[^"']*)?["']/);
   });
 });
 
