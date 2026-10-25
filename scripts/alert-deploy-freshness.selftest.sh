@@ -87,6 +87,28 @@ FRESH_DATE="$(python3 -c 'import time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ",
 N1="$(mkcommit n1 "$NOOP_DATE" ".github/workflows/ci.yml")"
 C4="$(mkcommit c4 "$FRESH_DATE")"
 
+# A subdirectory of the fixture repo.  The watchdog resolves a pathspec against
+# its working directory, so a run started here would resolve every watched
+# path to <repo>/subdir/<path>, match nothing, and report a fresh image-noop
+# pass - a permanently silent watchdog.  The directory is untracked on purpose:
+# it is a place to run FROM, not a change to classify.
+mkdir -p "${REPO}/subdir"
+echo "keep" > "${REPO}/subdir/keep.txt"
+
+# A git shim that fails only for rev-list.  It lets the selftest prove that a
+# git failure is an operational error and never a fresh image-noop pass.
+REAL_GIT="$(command -v git)"
+mkdir -p "${WORK}/shim"
+cat > "${WORK}/shim/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "rev-list" ]; then
+  echo "fatal: simulated git rev-list failure" >&2
+  exit 128
+fi
+exec "${REAL_GIT}" "\$@"
+SH
+chmod +x "${WORK}/shim/git"
+
 PASSES=0
 FAILURES=0
 
@@ -96,6 +118,11 @@ payload() {
 
 # Set EXPECT_OUTPUT to a substring the run must print, empty for no check.
 EXPECT_OUTPUT=""
+
+# The directory the script under test runs from, relative to the fixture repo.
+# Empty means the repo root.  Set it to prove the watchdog anchors itself to
+# the repository root instead of resolving pathspecs against the caller's cwd.
+RUN_CWD=""
 
 # $1 name, $2 expected exit, $3 expected-ref, $4 stub status, $5 stub body, $6 extra env assignments
 run_case() {
@@ -115,6 +142,11 @@ run_case() {
   local port
   port="$(cat "$portfile")"
 
+  local workdir="$REPO"
+  if [ -n "$RUN_CWD" ]; then
+    workdir="${REPO}/${RUN_CWD}"
+  fi
+
   local out code
   # Extra KEY=value args cannot be `"$@" bash` prefixes: bash only treats
   # literal (not expanded) words as assignments. Export them instead.
@@ -126,7 +158,7 @@ run_case() {
     for assign in "$@"; do
       export "$assign"
     done
-    cd "$REPO" && bash "$UNDER_TEST" "$expect_ref" 2>&1
+    cd "$workdir" && bash "$UNDER_TEST" "$expect_ref" 2>&1
   )"
   code=$?
   kill "$pid" 2>/dev/null
@@ -180,6 +212,25 @@ EXPECT_OUTPUT=""
 # ST-4575: the guard still pages when a watched path really is missing.
 run_case "still stale when the gap changes a watched path" 3 "$C4" 200 "$(payload "\"${C3}\"" 9000)" \
   DEPLOY_FRESHNESS_STALE_SECONDS=60
+
+# A git failure is an operational error, not a verdict.  If the rev-list exit
+# status is swallowed, an empty list is indistinguishable from a failed git,
+# and the failure becomes a green image-noop pass - a watchdog that claims to
+# have checked while it did not.  The same failure used to abort the script
+# under `set -e`, and it must keep failing loudly.
+run_case "a git failure is an operational error, not a fresh pass" 1 "$C4" 200 "$(payload "\"${C3}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=60 \
+  "PATH=${WORK}/shim:${PATH}"
+
+# The watchdog must anchor itself to the repository root.  Git resolves a
+# pathspec against the working directory, so a run started from a subdirectory
+# resolves every watched path to <repo>/subdir/<path>, matches nothing, and
+# reports a fresh image-noop pass.  The gap here DOES change a watched path
+# (C4), so the verdict must still be stale.
+RUN_CWD="subdir"
+run_case "a run from a subdirectory still ages the watched commit" 3 "$C4" 200 "$(payload "\"${C3}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=60
+RUN_CWD=""
 
 echo "---- ${PASSES} passed, ${FAILURES} failed ----"
 [ "$FAILURES" = "0" ]

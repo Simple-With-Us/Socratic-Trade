@@ -66,6 +66,19 @@ command -v jq >/dev/null 2>&1 || fail_usage "jq is required."
 printf '%s' "$STALE_SECONDS" | grep -Eq '^[0-9]+$' || fail_usage "STALE_SECONDS must be an integer."
 git rev-parse --git-dir >/dev/null 2>&1 || fail_usage "must run inside the Socratic-Trade git repo."
 
+# Anchor to the repository root before any git call that names a path.  Git
+# resolves a command-line pathspec against the current working directory, so a
+# run started from a subdirectory resolves every WATCH_PATHS entry to
+# <cwd>/<entry>, matches nothing, and drives the gap classification into the
+# image-noop branch.  Git exits 0 with an empty list for a pathspec that
+# matches nothing, so that run would report a fresh image-noop pass and the
+# watchdog would be permanently silent - the exact failure class this script
+# exists to detect.  The root is resolved once, here, and every later git call
+# runs from it.
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$REPO_ROOT" ] || fail_usage "cannot resolve the repository root."
+cd "$REPO_ROOT"
+
 resolve_commit() {
   git rev-parse --verify --quiet "${1}^{commit}" 2>/dev/null || true
 }
@@ -87,6 +100,20 @@ EXPECTED_SHA="$(resolve_commit "$EXPECTED_REF")"
 # A git pathspec names a directory and everything under it, so `src` covers
 # `src/**` and `app` covers `app/**`, exactly as the live list pairs them.
 WATCH_PATHS="Dockerfile .dockerignore package.json package-lock.json next.config.mjs postcss.config.mjs tsconfig.json middleware.ts instrumentation.ts instrumentation-client.ts sentry.server.config.ts sentry.edge.config.ts litestream.coolify.yml src app public scripts"
+
+# This is the TRIGGER list, not the image-difference list.  The repo has a
+# second list, isImageNoopPath in src/lib/deploy-image-impact.ts, which answers
+# a different question:  "if a build happens, would the image differ?"  It
+# treats docs/benchmarks as image-relevant, because Next imports those JSON
+# files at build time.  The two lists differ on purpose and
+# test/rth-deploy-latch.test.ts asserts both halves of the difference:
+# docs/** is OMITTED from the trigger, so a push that touches only
+# docs/benchmarks never creates a deployment and none is owed, while the
+# build-time latch still refuses to skip a build that some other watched path
+# triggered, because the benchmark JSON is in that image.  The watchdog asks
+# whether a deployment was OWED, so it must use the trigger list.  Adding
+# docs/benchmarks here would make it wait for a deployment Coolify never
+# creates, which is the false-positive class ST-4575 removes.
 
 # The gap between live and expected is classified below, once, against this
 # list.  There is deliberately no separate "newest image-affecting commit"
@@ -228,15 +255,34 @@ LIVE_FULL="$(resolve_commit "$LIVE_SHA")"
 # The pathspec is the point: only a commit that changed a watched path is owed
 # a deployment, so only such a commit may age the verdict.  An old CI-only
 # commit earlier in the gap must not make a fresh runtime commit look stale.
-UNDEPLOYED_LIST="$(git rev-list --first-parent --reverse "${LIVE_FULL}..${EXPECTED_SHA}" -- $WATCH_PATHS 2>/dev/null || true)"
+#
+# A git failure here is NOT an empty list.  Git exits 0 with empty output for a
+# pathspec that matches nothing, which is the image-noop verdict, and it exits
+# non-zero when it cannot do the job at all:  a missing object, a corrupt repo,
+# a killed git.  Swallowing that exit status would turn an operational failure
+# into a green image-noop pass, so the status is captured and the error is
+# raised.  "git errored" has to stay distinct from "no watched commit".
+set +e
+UNDEPLOYED_LIST="$(git rev-list --first-parent --reverse "${LIVE_FULL}..${EXPECTED_SHA}" -- $WATCH_PATHS 2>&1)"
+REV_RC=$?
+set -e
+[ "$REV_RC" -eq 0 ] || fail_usage "git rev-list failed (exit ${REV_RC}): ${UNDEPLOYED_LIST}"
+
 OLDEST_UNDEPLOYED="${UNDEPLOYED_LIST%%$'\n'*}"
 if [ -z "$OLDEST_UNDEPLOYED" ]; then
   # Live is behind, but nothing in the gap can change the image, so Coolify
   # never owed a deployment for it.  Not the silent-freeze class, and this is
   # the case ST-4575 was about: a CI-only commit must never age the verdict.
+  #
+  # The recovery notification belongs here as well as in the fresh branch.  The
+  # premise of this fix is that the gaps that paged before were CI-only gaps
+  # that now resolve to image-noop, so without this the four outstanding stale
+  # pages would never be closed and any later stale -> image-noop transition
+  # would leave the incident open forever.
   VERDICT="image-noop"
   log "PASS: live is behind ${EXPECTED_SHA}, but no commit in the gap touches a watched path."
   log "  no deployment was owed for this gap, so there is nothing to wait for."
+  maybe_notify recovered "deploy freshness recovered: prod ${LIVE_FULL:0:12} is behind ${EXPECTED_SHA:0:12}, but no commit in the gap touches a watched path, so no deployment was owed.  Silent-freeze watch is clear.  #2545"
   exit 0
 fi
 
