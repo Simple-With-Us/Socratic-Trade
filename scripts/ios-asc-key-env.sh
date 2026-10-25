@@ -15,7 +15,9 @@
 # THE CREDENTIAL IS RESOLVED FROM TWO PLACES (AFC-459, revision 2):
 #   1. APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_P8_BASE64, the
 #      hosted trio, when all three names are in the environment
-#   2. Infisical prod /asc, the folder the ASC trio lives in
+#   2. Infisical prod, the Fleet-OPS project and its /asc folder first, then
+#      this application's root path as a warned fallback (owner ruling
+#      2026-10-11, any app may use Fleet-OPS /asc; ruling 2026-10-17)
 # The environment beats the network, in this helper and in the client, so both
 # sides resolve the credential the same way.
 #
@@ -27,6 +29,12 @@
 set +o xtrace
 set -euo pipefail
 export INFISICAL_DISABLE_UPDATE_CHECK=true
+
+# The App Store Connect credentials live in the Fleet-OPS project, in its
+# /asc folder (owner ruling 2026-10-11; any app may use it, ruling
+# 2026-10-17).  The constant is the id the other fleet ship lanes read from,
+# and the environment may override it with the org secret of the same name.
+FLEET_ASC_PROJECT_ID="8dae6d03-8f12-48b2-adf3-e5c1b881c8c5"
 
 if [[ $# -lt 1 ]]; then
   echo "usage: ios-asc-key-env.sh <command> [args...]" >&2
@@ -175,23 +183,36 @@ if [[ -z "$key" ]]; then
     exit 1
   fi
 
-  #  The ASC trio lives in the /asc folder:  ASC_KEY_ID, ASC_ISSUER_ID and
-  #  ASC_KEY_P8 are all there, and every other reader in this repository asks
-  #  for that folder.  The root copy of ASC_KEY_P8 is the same value, but the
-  #  key id and the issuer are only in /asc, so /asc is the folder that
-  #  carries the credential as a whole.
+  #  The ASC trio's canonical home is Fleet-OPS /asc (owner ruling 2026-10-11;
+  #  any app may use it, ruling 2026-10-17).  The /asc folder belongs to
+  #  Fleet-OPS, so it has to be read from THAT project:  INFISICAL_PROJECT_ID
+  #  here is the application project, and it has no /asc folder, so a read
+  #  against it returns nothing and the lane stops with "Missing ASC key
+  #  material" (ST-4579).  The same names in the application project's root
+  #  are the fallback, with a warning, so a missing grant on the machine
+  #  identity cannot silently stop shipping.
+  fleet_asc_project="${ASC_INFISICAL_PROJECT_ID:-$FLEET_ASC_PROJECT_ID}"
   key="$(
     INFISICAL_TOKEN="$token" infisical secrets get ASC_KEY_P8 \
       --plain --silent --telemetry=false --expand=false \
-      --projectId="$INFISICAL_PROJECT_ID" --env=prod --path=/asc \
+      --projectId="$fleet_asc_project" --env=prod --path=/asc \
       2>/dev/null || true
   )"
+  if [[ -z "$key" ]]; then
+    echo "::warning::Fleet-OPS /asc is not readable in full; using this project's root path for the ASC key.  Grant the machine identity read on Fleet-OPS /asc." >&2
+    key="$(
+      INFISICAL_TOKEN="$token" infisical secrets get ASC_KEY_P8 \
+        --plain --silent --telemetry=false --expand=false \
+        --projectId="$INFISICAL_PROJECT_ID" --env=prod --path=/ \
+        2>/dev/null || true
+    )"
+  fi
   unset token
   source_name="Infisical prod"
 fi
 
 if [[ -z "$key" ]]; then
-  echo "::error::Missing ASC key material in Infisical prod /asc." >&2
+  echo "::error::Missing ASC key material in Infisical prod (Fleet-OPS /asc, then this project's root path)." >&2
   exit 1
 fi
 

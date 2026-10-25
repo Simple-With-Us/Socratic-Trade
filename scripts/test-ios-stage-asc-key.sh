@@ -82,9 +82,18 @@ touch "$ASC_TEST_IMPORT_MARKER"
 IMPORT
 cat > "$tmp_dir/bin/infisical" <<'CLI'
 #!/usr/bin/env bash
+secret_path=""
+secret_project=""
+for arg in "$@"; do
+  case "$arg" in
+    --path=*) secret_path="${arg#--path=}" ;;
+    --projectId=*) secret_project="${arg#--projectId=}" ;;
+  esac
+done
 case "${1:-}" in
   login) printf '%s\n' synthetic-session-token ;;
   secrets)
+    echo "asked for ${3:-value} at ${secret_path:-/} in ${secret_project:-none}" >> "${ASC_TEST_LOG:-/dev/null}"
     if [[ "${3:-}" == ASC_KEY_P8 ]]; then
       cat "$ASC_TEST_FIXTURE"
     elif [[ "${3:-}" == IOS_DIST_P12_BASE64 && "${ASC_TEST_MULTILINE_P12:-}" == 1 ]]; then
@@ -98,13 +107,22 @@ esac
 CLI
 chmod 700 "$tmp_dir/bin/infisical"
 : > "$tmp_dir/workflow-env"
+: > "$tmp_dir/asc-test-log"
 env -u ASC_KEY_P8 PATH="$tmp_dir/bin:$PATH" \
   GITHUB_WORKSPACE="$tmp_dir/workspace" GITHUB_ENV="$tmp_dir/workflow-env" \
   INFISICAL_PROJECT_ID=synthetic-project \
   INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client \
   INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=synthetic-secret \
+  ASC_TEST_LOG="$tmp_dir/asc-test-log" \
   ASC_TEST_FIXTURE="$tmp_dir/fixture" ASC_TEST_IMPORT_MARKER="$tmp_dir/imported" \
   bash "$tmp_dir/workflow-load.sh" > "$tmp_dir/workflow-stdout" 2> "$tmp_dir/workflow-stderr"
+# The /asc folder belongs to the fleet project (owner ruling 2026-10-11; any
+# app may use it, ruling 2026-10-17), so the workflow has to read the key from
+# THAT project.  The application project has no /asc folder, so a read against
+# it returns nothing and the lane stops with "Missing ASC key material"
+# (ST-4579).
+grep -q 'asked for ASC_KEY_P8 at /asc in 8dae6d03-8f12-48b2-adf3-e5c1b881c8c5' "$tmp_dir/asc-test-log" ||
+  { echo 'the workflow did not read the ASC key from the fleet project' >&2; cat "$tmp_dir/asc-test-log" >&2; exit 1; }
 if grep -Fq -f "$tmp_dir/fixture" "$tmp_dir/workflow-env" "$tmp_dir/workflow-stdout" "$tmp_dir/workflow-stderr"; then
   echo 'workflow leaked multiline key material' >&2
   exit 1

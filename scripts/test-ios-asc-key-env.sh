@@ -32,23 +32,38 @@ key_needle="$(sed -n '2p' "$tmp_dir/fixture")"
 cat > "$tmp_dir/bin/infisical" <<'CLI'
 #!/usr/bin/env bash
 # The fake answers the ASC key only from the /asc folder, which is where the
-# ASC trio lives.  A helper that asked the wrong folder gets nothing, and the
-# suite catches it.
+# ASC trio lives, and only from the project that folder belongs to:  the
+# /asc folder is the Fleet-OPS one (owner ruling 2026-10-11; any app may use
+# it, ruling 2026-10-17), so a helper that asks the wrong folder or the
+# wrong project gets nothing, and the suite catches it.
+#
+# The application project answers from its root path instead, which is the
+# fallback the ruling allows, with a warning.
 secret_path=""
+secret_project=""
 for arg in "$@"; do
   case "$arg" in
     --path=*) secret_path="${arg#--path=}" ;;
+    --projectId=*) secret_project="${arg#--projectId=}" ;;
   esac
 done
 case "${1:-}" in
   login) printf '%s\n' synthetic-session-token ;;
   secrets)
-    echo "asked Infisical for ${3:-value} at ${secret_path:-/}" >> "${ASC_TEST_LOG}"
+    echo "asked Infisical for ${3:-value} at ${secret_path:-/} in ${secret_project:-none}" >> "${ASC_TEST_LOG}"
     if [[ "${3:-}" == ASC_KEY_P8 ]]; then
-      if [[ "$secret_path" != /asc ]]; then
-        exit 3
+      if [[ "$secret_project" == "${ASC_TEST_FLEET_PROJECT:-}" ]] &&
+         [[ "$secret_path" == /asc ]] &&
+         [[ "${ASC_TEST_FLEET_READABLE:-1}" == "1" ]]; then
+        cat "$ASC_TEST_FIXTURE"
+        exit 0
       fi
-      cat "$ASC_TEST_FIXTURE"
+      if [[ "$secret_project" == "${ASC_TEST_APP_PROJECT:-}" ]] &&
+         [[ "$secret_path" == / ]]; then
+        cat "$ASC_TEST_FIXTURE"
+        exit 0
+      fi
+      exit 3
     else
       printf 'synthetic-%s\n' "${3:-value}"
     fi
@@ -82,7 +97,14 @@ chmod 700 "$tmp_dir/child.sh"
 
 export PATH="$tmp_dir/bin:$PATH"
 export ASC_TEST_FIXTURE="$tmp_dir/fixture"
-export INFISICAL_PROJECT_ID=synthetic-project
+# The application project is this repository's own Infisical project.  The
+# fleet project is the one that owns the /asc folder, so the two are
+# deliberately different here.
+export INFISICAL_PROJECT_ID=synthetic-app-project
+export ASC_INFISICAL_PROJECT_ID=synthetic-fleet-project
+export ASC_TEST_APP_PROJECT=synthetic-app-project
+export ASC_TEST_FLEET_PROJECT=synthetic-fleet-project
+export ASC_TEST_FLEET_READABLE=1
 export INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=synthetic-client
 export INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=synthetic-secret
 
@@ -96,6 +118,14 @@ log "the child received the key in its environment"
 # folder, and a reader that asks the wrong one gets nothing at all.
 grep -q 'asked Infisical for ASC_KEY_P8 at /asc' "$ASC_TEST_LOG" ||
   { echo "the key was not read from the /asc folder" >&2; cat "$ASC_TEST_LOG" >&2; exit 1; }
+
+# 1b. The /asc folder belongs to the fleet project, so the read that asks for
+# it has to name that project.  This repository's own project id is the
+# application project, and it has no /asc folder at all, so a read against it
+# returns nothing and the ship lane stops with "Missing ASC key material"
+# (ST-4579).
+grep -q "asked Infisical for ASC_KEY_P8 at /asc in ${ASC_TEST_FLEET_PROJECT}" "$ASC_TEST_LOG" ||
+  { echo "the /asc read did not name the fleet project" >&2; cat "$ASC_TEST_LOG" >&2; exit 1; }
 
 # 2. The key never reaches stdout, stderr or the arguments of the helper.
 if grep -Fq "$key_needle" "$tmp_dir/stderr"; then
@@ -249,5 +279,25 @@ if grep -Fq "$rejected" "$tmp_dir/stderr" "$tmp_dir/stdout"; then
   exit 1
 fi
 log "a hosted body that does not decode was refused instead of falling through"
+
+# 12. When the fleet project cannot be read, the helper falls back to the
+#     application project's root path, says so, and still hands the key on:
+#     a missing grant on the machine identity must not silently stop a ship
+#     (owner ruling 2026-10-17).
+export ASC_TEST_FLEET_READABLE=0
+: > "$ASC_TEST_LOG"
+out="$(bash "$repo_root/scripts/ios-asc-key-env.sh" bash "$tmp_dir/child.sh" 2>"$tmp_dir/stderr")"
+[[ "$out" == "key-received" ]] ||
+  { echo "the fallback did not hand the key to the child" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
+grep -q 'Fleet-OPS /asc is not readable in full' "$tmp_dir/stderr" ||
+  { echo "the fallback was not announced" >&2; cat "$tmp_dir/stderr" >&2; exit 1; }
+grep -q "asked Infisical for ASC_KEY_P8 at / in ${ASC_TEST_APP_PROJECT}" "$ASC_TEST_LOG" ||
+  { echo "the fallback did not read the application root" >&2; cat "$ASC_TEST_LOG" >&2; exit 1; }
+if grep -Fq "$key_needle" "$tmp_dir/stderr"; then
+  echo "key material reached stderr" >&2
+  exit 1
+fi
+export ASC_TEST_FLEET_READABLE=1
+log "an unreadable Fleet-OPS /asc fell back to the application root, with a warning"
 
 echo 'synthetic ASC credential handoff passed'
