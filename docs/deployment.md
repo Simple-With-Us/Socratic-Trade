@@ -157,6 +157,13 @@ image-affecting.  See
 `docs/rollouts/2026-10-22-st-4575-deploy-freshness-watch-paths.md` for the
 false-positive class this replaced (ST-4575).
 
+Two edge cases are part of the contract.  A git failure while listing the gap is
+an operational error and exits 1, never a fresh pass:  git exits 0 with an empty
+list for a pathspec that matches nothing, which is the fresh verdict, so the
+exit status is what separates "no watched commit" from "git could not answer".
+And the fresh verdict posts the recovery notification, so the incident the
+watchdog opened is closed when production catches up instead of staying open.
+
 Manual one-shot:
 
 ```bash
