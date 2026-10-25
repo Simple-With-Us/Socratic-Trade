@@ -289,4 +289,42 @@ describe("GET/POST /api/keys planTier surface", () => {
     expect(res.status).toBe(200);
     expect(getUserApiKey(userId, "marketstack")?.planTier).toBe("basic");
   });
+
+  it("keeps a pre-retirement FMP key visible and deletable, and refuses to store a new one", async () => {
+    vi.stubEnv("PRIMARY_USER_EMAIL", "owner3@example.com");
+    const { getDb, upsertUserApiKey, getUserApiKey } = await import("../src/lib/db");
+    const { userIdForEmail } = await import("../src/lib/auth/identity");
+    getDb();
+    const userId = userIdForEmail("owner3@example.com");
+    upsertUserApiKey(userId, "fmp", "legacy-fmp-key-123456", undefined, undefined);
+    const headers = {
+      "x-authenticated-user-email": "owner3@example.com",
+      "x-authenticated-identity-source": "authjs-session",
+      "content-type": "application/json"
+    };
+    const { NextRequest } = await import("next/server");
+    const { GET, POST, DELETE } = await import("../app/api/keys/route");
+
+    const list = (await (await GET(new NextRequest("http://localhost/api/keys", { headers }))).json()) as {
+      keys: Array<{ service: string; retired?: boolean; configured?: boolean }>;
+    };
+    const legacy = list.keys.find((k) => k.service === "fmp");
+    expect(legacy?.retired).toBe(true);
+    expect(legacy?.configured).toBe(true);
+
+    const post = await POST(
+      new NextRequest("http://localhost/api/keys", { method: "POST", headers, body: JSON.stringify({ service: "fmp", apiKey: "new-fmp-key-123456" }) })
+    );
+    expect(post.status).toBe(400);
+    expect(((await post.json()) as { error: string }).error).toContain("retired");
+
+    const del = await DELETE(new NextRequest("http://localhost/api/keys?service=fmp", { method: "DELETE", headers }));
+    expect(del.status).toBe(200);
+    expect(getUserApiKey(userId, "fmp")).toBeFalsy();
+
+    const after = (await (await GET(new NextRequest("http://localhost/api/keys", { headers }))).json()) as {
+      keys: Array<{ service: string }>;
+    };
+    expect(after.keys.some((k) => k.service === "fmp")).toBe(false);
+  });
 });

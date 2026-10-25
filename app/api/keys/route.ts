@@ -318,8 +318,29 @@ export async function GET(request: NextRequest) {
   // List all keys for the user (mask the actual key values)
   const keys = listUserApiKeys(userId);
   const storedByService = new Map(keys.map((key) => [normalizeApiKeyService(key.service), key]));
+  // A key stored for a retired service before retirement is listed (as retired, never resolved)
+  // so the user can still see and delete it.  Retired services have no catalog row.
+  const retiredStored = keys
+    .map((key) => normalizeApiKeyService(key.service))
+    .filter((svc, i, all) => all.indexOf(svc) === i && !VALID_SERVICES.has(svc) && isRetiredMarketDataService(svc))
+    .map((svc) => {
+      const stored = storedByService.get(svc);
+      return {
+        service: svc,
+        label: svc,
+        category: "Market data",
+        required: false,
+        unlocks: "Retired on Socratic-Trade.  This stored key is never used.",
+        configured: true,
+        source: "user" as const,
+        updatedAt: stored?.updatedAt,
+        savedLabel: stored?.label,
+        retired: true,
+        retiredNote: "Retired on Socratic-Trade.  Delete this stored key; product code never uses it."
+      };
+    });
   return NextResponse.json({
-    keys: API_KEY_CATALOG.map((entry) => {
+    keys: [...API_KEY_CATALOG.map((entry) => {
       const stored = storedByService.get(entry.service);
       const resolved = resolveApiKeyWithSource(entry.service, userId);
       const envVar = apiKeyEnvVarForService(entry.service);
@@ -338,7 +359,7 @@ export async function GET(request: NextRequest) {
         retired: retired || isRetiredMarketDataService(entry.service),
         retiredNote: "retiredNote" in entry ? entry.retiredNote : undefined
       };
-    })
+    }), ...retiredStored]
   });
 }
 
@@ -359,13 +380,11 @@ export async function POST(request: NextRequest) {
     const userId = resolveRequestUserId(request, body);
 
     const canonical = service ? normalizeApiKeyService(service) : "";
-    if (!canonical || !VALID_SERVICES.has(canonical)) {
-      return NextResponse.json({ error: `service is required and must be one of: ${[...VALID_SERVICES].join(", ")}` }, { status: 400 });
-    }
 
-    // A catalog row marked retired (or a retired market-data service) cannot be stored for
-    // product use — ST does not call those vendors; Congress.Trade owns that class of data.
-    if (isRetiredMarketDataService(canonical) || API_KEY_CATALOG.some((e) => e.service === canonical && "retired" in e && e.retired === true)) {
+    // A retired market-data service (or a catalog row marked retired) cannot be stored for
+    // product use — ST does not call those vendors.  Checked before the catalog gate so a retired
+    // service gets this guidance, not the generic service list.
+    if (canonical && (isRetiredMarketDataService(canonical) || API_KEY_CATALOG.some((e) => e.service === canonical && "retired" in e && e.retired === true))) {
       return NextResponse.json(
         {
           error:
@@ -373,6 +392,9 @@ export async function POST(request: NextRequest) {
         },
         { status: 400 }
       );
+    }
+    if (!canonical || !VALID_SERVICES.has(canonical)) {
+      return NextResponse.json({ error: `service is required and must be one of: ${[...VALID_SERVICES].join(", ")}` }, { status: 400 });
     }
 
     // Route toggle (Meta / MiniMax): OpenRouter by default, or direct with the user's own key.
@@ -472,7 +494,8 @@ export async function DELETE(request: NextRequest) {
   }
 
   const canonical = normalizeApiKeyService(service);
-  if (!VALID_SERVICES.has(canonical)) {
+  // Retired services are not in the catalog, but a key stored before retirement must stay revocable.
+  if (!VALID_SERVICES.has(canonical) && !isRetiredMarketDataService(canonical)) {
     return NextResponse.json({ error: `Invalid service. Must be one of: ${[...VALID_SERVICES].join(", ")}` }, { status: 400 });
   }
 

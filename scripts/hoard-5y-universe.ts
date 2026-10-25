@@ -120,7 +120,7 @@ async function hoard() {
   }
 
   console.log("=========================================================================");
-  console.log(`ALL 5-YEAR HISTORICAL, FUNDAMENTAL & SHORT INTEREST HOARDING COMPLETE ACROSS ALL ${allSymbols.length} SYMBOLS!`);
+  console.log(`ALL 5-YEAR HISTORICAL & SHORT INTEREST HOARDING COMPLETE ACROSS ALL ${allSymbols.length} SYMBOLS!`);
   console.log("=========================================================================");
 }
 

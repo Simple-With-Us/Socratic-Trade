@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { resolveRequestUserId } from "@/lib/request-user";
 import {
   SOURCE_SETTING_GROUPS,
@@ -44,17 +45,21 @@ export async function GET(request: NextRequest) {
   });
 }
 
+const PatchBodySchema = z.object({
+  userId: z.string().optional(),
+  settings: z.record(z.string(), z.union([z.boolean(), z.number(), z.string()]).nullable())
+});
+
 export async function PATCH(request: NextRequest) {
   try {
-    const body = (await request.json()) as {
-      settings?: Record<string, boolean | number | string | null | undefined>;
-    };
-    const userId = resolveRequestUserId(request, body as { userId?: string });
-    if (!body.settings || typeof body.settings !== "object") {
-      return NextResponse.json({ error: "settings object required" }, { status: 400 });
+    const parsed = PatchBodySchema.safeParse(await request.json());
+    if (!parsed.success) {
+      return NextResponse.json({ error: "settings object required (values: boolean, number, string or null)" }, { status: 400 });
     }
+    const body = parsed.data;
+    const userId = resolveRequestUserId(request, body);
 
-    const sourcePatch: Record<string, boolean | number | string | null | undefined> = {};
+    const sourcePatch: Record<string, boolean | number | string | null> = {};
     for (const [k, v] of Object.entries(body.settings)) {
       const known = SOURCE_SETTINGS_CATALOG.some((s) => s.id === k);
       if (!known) {
