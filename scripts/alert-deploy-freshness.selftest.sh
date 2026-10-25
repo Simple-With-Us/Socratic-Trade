@@ -109,6 +109,20 @@ exec "${REAL_GIT}" "\$@"
 SH
 chmod +x "${WORK}/shim/git"
 
+# A second git shim that writes a WARNING to stderr and still exits 0, the
+# way git does when $HOME is unreadable.  The watchdog captures stdout only,
+# so a warning line can never become the first "commit" of the list and send
+# the next git log off the documented exit-code contract.
+mkdir -p "${WORK}/shim-warn"
+cat > "${WORK}/shim-warn/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "rev-list" ]; then
+  echo "warning: unable to access '/root/.gitconfig': Permission denied" >&2
+fi
+exec "${REAL_GIT}" "\$@"
+SH
+chmod +x "${WORK}/shim-warn/git"
+
 # The control for the RUN_CWD cases.  A non-interactive bash sources BASH_ENV
 # at startup, so the probe records the directory every child bash actually
 # started in.  Without it the subdirectory case would pass whether or not
@@ -280,6 +294,15 @@ run_case "a run from a subdirectory still ages the watched commit" 3 "$C4" 200 "
   DEPLOY_FRESHNESS_STALE_SECONDS=60
 RUN_CWD=""
 EXPECT_CWD_SUFFIX=""
+
+# A git WARNING on stderr with a zero exit must not change the verdict.  If
+# the warning were merged into the captured commit list, it would become the
+# first "commit", the next git log would fail on a non-sha argument, and the
+# script would die with git's own exit 128, which is outside the exit-code
+# contract this script documents.  The verdict here must be a normal stale.
+run_case "a git warning on stderr does not break the verdict" 3 "$C4" 200 "$(payload "\"${C3}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=60 \
+  "PATH=${WORK}/shim-warn:${PATH}"
 
 echo "---- ${PASSES} passed, ${FAILURES} failed ----"
 [ "$FAILURES" = "0" ]

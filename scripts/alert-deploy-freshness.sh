@@ -262,11 +262,19 @@ LIVE_FULL="$(resolve_commit "$LIVE_SHA")"
 # a killed git.  Swallowing that exit status would turn an operational failure
 # into a green image-noop pass, so the status is captured and the error is
 # raised.  "git errored" has to stay distinct from "no watched commit".
+#
+# stderr is dropped rather than merged into the captured value, and that is
+# load-bearing.  Git can write a WARNING to stderr and still exit 0 - an
+# unreadable $HOME is enough - and merging the two streams would make that
+# warning line the first "commit" of the list.  The next git log would then
+# fail on a non-sha argument and kill the script with git's own exit 128,
+# which is outside the exit-code contract documented at the top of this file.
+# stdout stays pure, and the failure is still loud through the exit status.
 set +e
-UNDEPLOYED_LIST="$(git rev-list --first-parent --reverse "${LIVE_FULL}..${EXPECTED_SHA}" -- $WATCH_PATHS 2>&1)"
+UNDEPLOYED_LIST="$(git rev-list --first-parent --reverse "${LIVE_FULL}..${EXPECTED_SHA}" -- $WATCH_PATHS 2>/dev/null)"
 REV_RC=$?
 set -e
-[ "$REV_RC" -eq 0 ] || fail_usage "git rev-list failed (exit ${REV_RC}): ${UNDEPLOYED_LIST}"
+[ "$REV_RC" -eq 0 ] || fail_usage "git rev-list failed (exit ${REV_RC}) on ${LIVE_FULL:0:12}..${EXPECTED_SHA:0:12}; no watched-commit list could be computed."
 
 OLDEST_UNDEPLOYED="${UNDEPLOYED_LIST%%$'\n'*}"
 if [ -z "$OLDEST_UNDEPLOYED" ]; then
