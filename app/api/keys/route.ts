@@ -330,13 +330,13 @@ export async function GET(request: NextRequest) {
         label: svc,
         category: "Market data",
         required: false,
-        unlocks: "Retired on Socratic-Trade.  This stored key is never used.",
+        unlocks: "Retired on Socratic-Trade.\u00A0 This stored key is never used.",
         configured: true,
         source: "user" as const,
         updatedAt: stored?.updatedAt,
         savedLabel: stored?.label,
         retired: true,
-        retiredNote: "Retired on Socratic-Trade.  Delete this stored key; product code never uses it."
+        retiredNote: "Retired on Socratic-Trade.\u00A0 Delete this stored key; product code never uses it."
       };
     });
   return NextResponse.json({
@@ -388,7 +388,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "This provider is retired on Socratic-Trade. Use Congress.Trade for congressional / alt-data; do not store a key here."
+            "This provider is retired on Socratic-Trade.\u00A0 Use Congress.Trade for congressional / alt-data; do not store a key here."
         },
         { status: 400 }
       );
