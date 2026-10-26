@@ -186,11 +186,11 @@ PY
 )"
 
 if [[ "$SKIP_LOCAL_WRITE" -eq 0 ]]; then
-  printf '%s' "$MERGED" >"$LOCAL_JSON"
+  printf '%s\n' "$MERGED" >"$LOCAL_JSON"
   echo "local-manifest-updated ${BUNDLE_ID} ${VERSION}"
 fi
 if [[ -n "$OUT_JSON" ]]; then
-  printf '%s' "$MERGED" >"$OUT_JSON"
+  printf '%s\n' "$MERGED" >"$OUT_JSON"
 fi
 
 if [[ "$SKIP_PUSH" -eq 1 ]]; then
@@ -256,7 +256,7 @@ else
 fi
 
 # 2.  The document lands on that branch, never on the default branch.
-CONTENT_B64="$(printf '%s' "$MERGED" | python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode())')"
+CONTENT_B64="$(printf '%s\n' "$MERGED" | python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode())')"
 FILE_SHA="$(gh api "repos/${REPO}/contents/${REMOTE_PATH}?ref=${PR_BRANCH}" --jq .sha 2>/dev/null || true)"
 PUT_ARGS=(
   --method PUT

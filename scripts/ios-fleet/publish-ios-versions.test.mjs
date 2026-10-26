@@ -202,6 +202,33 @@ test("the publish reads the live remote and refuses an empty apps map", () => {
   assert.doesNotMatch(src, /data = \{"schemaVersion": 1, "apps": \{\}\}/);
 });
 
+test("the published document keeps exactly one trailing newline", () => {
+  const { dir, base, out } = fixture("afc-ios-versions-newline-", FLEET);
+  const res = run([
+    "--bundle-id",
+    "com.socratictrade.ios",
+    "--version",
+    "1.0.69",
+    "--build",
+    "202608250045",
+    "--base-json",
+    base,
+    "--out-json",
+    out,
+    "--skip-push",
+    "--skip-local-write",
+  ]);
+  assert.equal(res.status, 0, res.stderr || res.stdout);
+  // The merge runs inside a command substitution, and a command substitution
+  // strips trailing newlines.  The write has to put one back, or the file
+  // lands in the repository without its final newline and every later commit
+  // shows a spurious "no newline at end of file" line.
+  const raw = readFileSync(out, "utf8");
+  assert.ok(raw.endsWith("\n"), "the manifest must end with a newline");
+  assert.ok(!raw.endsWith("\n\n"), "the manifest must end with exactly one newline");
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("the manifest target is the org repository the apps read", () => {
   const src = readFileSync(SCRIPT, "utf8");
   assert.match(src, /Simple-With-Us\/AI-Fleet-Coordinator/);
