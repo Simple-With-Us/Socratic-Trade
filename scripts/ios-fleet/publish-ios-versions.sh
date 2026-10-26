@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# publish-ios-versions.sh — update the public fleet iOS version manifest.
+# publish-ios-versions.sh — open a pull request that updates the public fleet
+# iOS version manifest.
 #
-# Called by ship-testflight.sh after a successful upload.  Also safe to run
-# by hand.  Never prints secret values.  Failure is non-fatal for ships.
+# Called by ship-testflight.sh after a successful upload.  Also safe to run by
+# hand.  Never prints secret values.  Failure is non-fatal for ships.
 #
 # Usage:
 #   bash scripts/ios-fleet/publish-ios-versions.sh \
@@ -15,21 +16,40 @@
 #
 # Writes:
 #   <this-dir>/ios-app-versions.json  (local cache; may be stale)
-#   https://github.com/Simple-With-Us/AI-Fleet-Coordinator  (site/ios-versions.json)
+#   a pull request against Simple-With-Us/AI-Fleet-Coordinator :
+#     site/ios-versions.json
+#
+# WHY A PULL REQUEST AND NOT A DIRECT WRITE:  AI-Fleet-Coordinator's ruleset
+# requires `test` and `gitleaks` on main, and a ruleset with required status
+# checks refuses a direct write to the protected branch.  A Contents API PUT
+# to the default branch is therefore rejected, the ship treats the publish as
+# best effort, and the only trace anywhere is one warning line in the ship
+# log.  A pull request merge is exempt from that gate, so the manifest is
+# published as a branch plus a pull request.  The script never writes to the
+# default branch.
+#
+# THE TOKEN:  the publish needs a credential with write access to
+# AI-Fleet-Coordinator.  The ship workflow passes the fleet's GH_PAT secret
+# as GH_TOKEN; a hand run uses whatever gh is already logged in as.  The
+# workflow's own GITHUB_TOKEN is read-only by declaration and cannot write to
+# another repository, so it is never used for this and never arms auto-merge.
 #
 # SAFETY: the vendored ios-app-versions.json in this repo is a stale snapshot
-# (2026-08-21).  Starting from that file and PUTting it would drop net.dealdex
-# 1.0.2 and roll Usage Client 1.0.11→1.0.8, Usage Local 1.0.9→1.0.7, and
-# Autorotate 1.0.4→1.0.1.  Always seed from the live remote (or an explicit
-# --base-json).  Refuse to push a single-app / empty-apps document over a
-# multi-app remote.  Same class as DealDex #173.
+# (2026-08-21).  Starting from that file and publishing it would drop
+# net.dealdex 1.0.2 and roll Usage Client 1.0.11→1.0.8, Usage Local
+# 1.0.9→1.0.7, and Autorotate 1.0.4→1.0.1.  Always seed from the live remote
+# (or an explicit --base-json).  Refuse to publish a single-app / empty-apps
+# document over a multi-app remote.  Same class as DealDex #173.
 
 set -euo pipefail
 
 FLEET_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOCAL_JSON="${FLEET_DIR}/ios-app-versions.json"
-REPO="Simple-With-Us/AI-Fleet-Coordinator"
+REPO="${AFC_MANIFEST_REPO:-Simple-With-Us/AI-Fleet-Coordinator}"
 REMOTE_PATH="site/ios-versions.json"
+BASE_BRANCH="${AFC_MANIFEST_BRANCH:-main}"
+PR_BRANCH_PREFIX="${AFC_MANIFEST_BRANCH_PREFIX:-ios-versions-publish}"
+AUTO_MERGE="${AFC_MANIFEST_AUTO_MERGE:-1}"
 
 BUNDLE_ID=""
 VERSION=""
@@ -42,7 +62,7 @@ SKIP_PUSH=0
 SKIP_LOCAL_WRITE=0
 
 usage() {
-  sed -n '1,28p' "$0"
+  sed -n '1,45p' "$0"
   exit 2
 }
 
@@ -64,13 +84,38 @@ done
 
 [[ -n "$BUNDLE_ID" && -n "$VERSION" ]] || { echo "need --bundle-id and --version" >&2; exit 2; }
 
+# The token the publish uses.  GITHUB_TOKEN is the workflow's own token:  it is
+# read-only by declaration and it cannot write to another repository, so it is
+# refused here rather than failing later with an authorization error that reads
+# like a branch rule.
+TOKEN=""
+TOKEN_SOURCE=""
+resolve_token() {
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    TOKEN="$GH_TOKEN"
+    TOKEN_SOURCE="env"
+    return 0
+  fi
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    echo "error: GITHUB_TOKEN cannot write to ${REPO}" >&2
+    echo "error: pass the fleet GH_PAT secret as GH_TOKEN (the ship workflow does)" >&2
+    return 1
+  fi
+  # No token in the environment:  gh uses its own stored credential.
+  if ! gh auth status >/dev/null 2>&1; then
+    echo "error: no gh credential and no GH_TOKEN; cannot publish the manifest" >&2
+    return 1
+  fi
+  TOKEN_SOURCE="gh-auth"
+}
+
 fetch_remote_json() {
   local dest="$1"
   if ! command -v gh >/dev/null 2>&1; then
     return 1
   fi
   local b64
-  b64="$(gh api "repos/${REPO}/contents/${REMOTE_PATH}" --jq .content 2>/dev/null || true)"
+  b64="$(gh api "repos/${REPO}/contents/${REMOTE_PATH}?ref=${BASE_BRANCH}" --jq .content 2>/dev/null || true)"
   [[ -n "$b64" ]] || return 1
   python3 -c 'import base64,sys; sys.stdout.write(base64.b64decode("".join(sys.argv[1].split())).decode())' "$b64" >"$dest"
 }
@@ -88,6 +133,7 @@ if [[ -z "$BASE_JSON" ]]; then
   if fetch_remote_json "$TMP_REMOTE"; then
     BASE_JSON="$TMP_REMOTE"
   elif [[ -f "$LOCAL_JSON" ]]; then
+    echo "warning: could not read the live manifest; seeding from the local snapshot ${LOCAL_JSON}" >&2
     BASE_JSON="$LOCAL_JSON"
   else
     echo "error: no remote ${REPO}/${REMOTE_PATH} and no local ${LOCAL_JSON}" >&2
@@ -128,6 +174,9 @@ lost = sorted(before - after)
 if lost:
     print("error: merge dropped apps: " + ", ".join(lost), file=sys.stderr)
     sys.exit(1)
+if len(apps) < len(before) or (len(before) > 1 and len(apps) < 2):
+    print("error: refusing to publish a one-app document over a multi-app remote", file=sys.stderr)
+    sys.exit(1)
 data["apps"] = apps
 data["schemaVersion"] = 1
 data["updatedAt"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -149,27 +198,106 @@ if [[ "$SKIP_PUSH" -eq 1 ]]; then
   exit 0
 fi
 
-if ! command -v gh >/dev/null 2>&1; then
-  echo "gh not installed; local manifest only" >&2
+# Nothing to publish:  the remote already carries this version.  A pull
+# request for an unchanged manifest is noise, and the fleet's merge queue is
+# small.  The build is part of the comparison when one was passed, because a
+# ship that re-records the same marketing version with a NEW build is a real
+# change:  the version a tester installs is the build, not the label.
+#
+# This check runs BEFORE the credential is resolved.  A ship that has nothing
+# to publish must not need a token, and it must not reach the network at all;
+# a run that only re-records the version already on main leaves no pull
+# request behind and says so.
+read -r REMOTE_VERSION REMOTE_BUILD < <(python3 - "$BASE_JSON" "$BUNDLE_ID" <<'PY'
+import json, sys
+path, bundle = sys.argv[1:3]
+with open(path, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+entry = (data.get("apps") or {}).get(bundle) or {}
+print(entry.get("marketingVersion") or "", entry.get("build") or "")
+PY
+)
+if [[ "$REMOTE_VERSION" == "$VERSION" && ( -z "$BUILD" || "$REMOTE_BUILD" == "$BUILD" ) ]]; then
+  echo "version-manifest: ${BUNDLE_ID} ${VERSION}${BUILD:+ build ${BUILD}} is already recorded"
   exit 0
 fi
 
-CONTENT_B64="$(printf '%s' "$MERGED" | python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode())')"
-SHA="$(gh api "repos/${REPO}/contents/${REMOTE_PATH}" --jq .sha 2>/dev/null || true)"
+# The credential is resolved before any API call, so a run that cannot
+# possibly publish says why, instead of failing later on an authorization
+# error that reads like a branch rule.
+resolve_token
+if [[ -n "$TOKEN" ]]; then
+  export GH_TOKEN="$TOKEN"
+  unset GITHUB_TOKEN || true
+fi
 
-ARGS=(
+if ! command -v gh >/dev/null 2>&1; then
+  echo "gh not installed; local manifest only" >&2
+  exit 1
+fi
+
+PR_BRANCH="${PR_BRANCH_PREFIX}/$(printf '%s' "$BUNDLE_ID" | tr -c 'A-Za-z0-9._-' '-')"
+PR_TITLE="chore: record ${BUNDLE_ID} ${VERSION} in the fleet iOS manifest"
+# The gap between the sentences is a real no-break space plus a normal space,
+# which is what GitHub renders.  The entity would show up literally.
+SENTENCE_GAP=$'\xc2\xa0 '
+PR_BODY="Automated fleet iOS version manifest update for ${BUNDLE_ID} ${VERSION}.${SENTENCE_GAP}Published by scripts/ios-fleet/publish-ios-versions.sh as a pull request, because AI-Fleet-Coordinator's ruleset refuses a direct write to main."
+
+# 1.  The branch starts at the current default branch, so the pull request
+#     never carries a stale manifest forward.
+BASE_SHA="$(gh api "repos/${REPO}/git/ref/heads/${BASE_BRANCH}" --jq .object.sha)" || {
+  echo "error: could not read ${REPO} ${BASE_BRANCH}" >&2
+  exit 1
+}
+if gh api "repos/${REPO}/git/ref/heads/${PR_BRANCH}" >/dev/null 2>&1; then
+  gh api --method PATCH "repos/${REPO}/git/refs/heads/${PR_BRANCH}" -f sha="$BASE_SHA" -F force=true >/dev/null
+else
+  gh api --method POST "repos/${REPO}/git/refs" -f ref="refs/heads/${PR_BRANCH}" -f sha="$BASE_SHA" >/dev/null
+fi
+
+# 2.  The document lands on that branch, never on the default branch.
+CONTENT_B64="$(printf '%s' "$MERGED" | python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode())')"
+FILE_SHA="$(gh api "repos/${REPO}/contents/${REMOTE_PATH}?ref=${PR_BRANCH}" --jq .sha 2>/dev/null || true)"
+PUT_ARGS=(
   --method PUT
   "repos/${REPO}/contents/${REMOTE_PATH}"
   -f message="chore: ${BUNDLE_ID} ${VERSION}"
   -f content="${CONTENT_B64}"
+  -f branch="${PR_BRANCH}"
 )
-if [[ -n "$SHA" ]]; then
-  ARGS+=(-f sha="$SHA")
+if [[ -n "$FILE_SHA" ]]; then
+  PUT_ARGS+=(-f sha="$FILE_SHA")
+fi
+gh api "${PUT_ARGS[@]}" >/dev/null || {
+  echo "error: version-manifest publish failed (branch ${PR_BRANCH})" >&2
+  exit 1
+}
+
+# 3.  The pull request.  An open one for this branch is reused, so a fleet
+#     that ships twice a day leaves one reviewable pull request, not a pile.
+PR_NUMBER="$(gh api "repos/${REPO}/pulls?head=${REPO%%/*}:${PR_BRANCH}&state=open" --jq '.[0].number' 2>/dev/null || true)"
+if [[ -n "$PR_NUMBER" && "$PR_NUMBER" != "null" ]]; then
+  gh api --method PATCH "repos/${REPO}/pulls/${PR_NUMBER}" -f title="$PR_TITLE" -f body="$PR_BODY" >/dev/null
+  PR_URL="https://github.com/${REPO}/pull/${PR_NUMBER}"
+else
+  PR_URL="$(gh api --method POST "repos/${REPO}/pulls" -f title="$PR_TITLE" -f body="$PR_BODY" -f head="$PR_BRANCH" -f base="$BASE_BRANCH" --jq .html_url)" || {
+    echo "error: version-manifest publish failed (could not open the pull request)" >&2
+    exit 1
+  }
 fi
 
-if gh api "${ARGS[@]}" >/dev/null; then
-  echo "remote-manifest-updated ${REPO}/${REMOTE_PATH}"
-else
-  echo "remote-manifest-publish-failed" >&2
-  exit 1
+# 4.  Arm the merge with the same elevated credential.  GitHub raises no
+#     workflow events for a merge made with the repository's own
+#     GITHUB_TOKEN, so the merge is armed here with the fleet token and
+#     lands once `test` and `gitleaks` are green.  The default branch's
+#     ruleset still decides whether the merge is allowed.
+if [[ "$AUTO_MERGE" == "1" && ( "$TOKEN_SOURCE" == "env" || "$TOKEN_SOURCE" == "gh-auth" ) ]]; then
+  PR_NUM="${PR_URL##*/}"
+  if gh pr merge "$PR_NUM" --repo "$REPO" --squash --auto >/dev/null 2>&1; then
+    echo "version-manifest: auto-merge armed on ${PR_URL}"
+  else
+    echo "version-manifest: auto-merge could not be armed on ${PR_URL}" >&2
+  fi
 fi
+
+echo "version-manifest-pr ${PR_URL}"
