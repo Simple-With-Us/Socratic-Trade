@@ -38,8 +38,8 @@ settings:
     # the ship script passes both values on the xcodebuild command line, and
     # reads this one as the build-number FLOOR, so it must stay below the
     # commit count of any commit that can ship.
-    MARKETING_VERSION: "1.0.436"
-    CURRENT_PROJECT_VERSION: "436"  # commit count; ship script overrides per build
+    MARKETING_VERSION: "1.0.679"
+    CURRENT_PROJECT_VERSION: "679"  # commit count; ship script overrides per build
     INFOPLIST_KEY_CFBundleDisplayName: "Socratic Trade"
     INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.finance"
     # SENTRY_DSN is not set here. An explicit empty string in the project file
