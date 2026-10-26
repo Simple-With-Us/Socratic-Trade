@@ -1,0 +1,37 @@
+name: Wise relay read-only canary
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    environment: merge-shepherd
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - name: Install pinned Infisical CLI
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/wise-infisical-cli"
+          mkdir -p "$install_dir"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            https://github.com/Infisical/cli/releases/download/v0.43.141/cli_0.43.141_linux_amd64.tar.gz \
+            --output "$install_dir/cli.tar.gz"
+          printf '%s  %s\n' d93a9b5ae46c6097889926b95c1c09992f44619053793eaa61d66884726c95e5 "$install_dir/cli.tar.gz" | sha256sum --check --status
+          tar -xzf "$install_dir/cli.tar.gz" -C "$install_dir" infisical
+          echo "$install_dir" >> "$GITHUB_PATH"
+      - name: Verify exact principal and non-mutating reads only
+        env:
+          INFISICAL_TOKEN: ${{ secrets.WISE_RELAY_INFISICAL_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 scripts/wise-relay-exec.py -- bash -euo pipefail -c '
+            test "$(gh api graphql -f query="query { viewer { login } }" --jq .data.viewer.login)" = "swu-wise[bot]"
+            gh api repos/Simple-With-Us/Socratic-Trade --jq .full_name
+            gh api repos/Simple-With-Us/Socratic-Trade/commits/main/check-runs --jq .total_count
+            gh api repos/Simple-With-Us/Socratic-Trade/actions/runs?per_page=1 --jq .total_count
+            gh api repos/Simple-With-Us/Socratic-Trade/issues?per_page=1 --jq length
+            echo "Wise ST read-only canary passed; no merge/arm/rerun/write executed."
+          '
