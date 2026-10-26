@@ -1098,7 +1098,12 @@ else
   # --version is an exact override.  Otherwise the version is the next patch
   # on the default train, and P comes from App Store Connect.
   FIXED_MODE=0
-  if [[ -z "$FORCE_VERSION" && -n "$FIXED_MARKETING" ]]; then
+  if [[ -n "$FIXED_MARKETING" && ( -z "$FORCE_VERSION" || "$FORCE_VERSION" == "$FIXED_MARKETING" ) ]]; then
+    [[ "$FIXED_MARKETING" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+      || die "fixedMarketingVersion '${FIXED_MARKETING}' for ${APP_KEY} in apps.json is not M.m.p (three dot-separated integers).  Nothing was shipped."
+    if [[ "$(printf '%s' "${ASC_PLATFORM:-}" | tr a-z A-Z)" == "MAC_OS" ]]; then
+      die "fixedMarketingVersion is not supported on macOS:  Mac builds must grow across every train, so a dotted build under a fixed version cannot be ordered safely.  Nothing was shipped."
+    fi
     FORCE_VERSION="$FIXED_MARKETING"
     FIXED_MODE=1
     log "version: fixed marketing version ${FIXED_MARKETING} from apps.json; it does not count up per ship"
@@ -1159,6 +1164,9 @@ sys.exit(0 if a>b else 1)' "$FIXED_MARKETING" "$_rel"; then
 
   # ---- the build number ---------------------------------------------------
   if [[ -n "$FORCE_BUILD" ]]; then
+    if [[ "$FIXED_MODE" -eq 1 && ! "$FORCE_BUILD" =~ ^${MARKETING%.*}\.[0-9]+$ ]]; then
+      die "--build ${FORCE_BUILD} is not ${MARKETING%.*}.<n>:  in fixed-version mode the train holds only dotted builds of that shape, and a different one would block every later ship.  Pass --build ${MARKETING%.*}.<n> or leave --build off.  Nothing was shipped."
+    fi
     # An explicit --build is honoured exactly, and it does NOT move the
     # marketing version:  the two numbers are independent.
     BUILD_NUM="$FORCE_BUILD"

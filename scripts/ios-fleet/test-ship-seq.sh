@@ -560,6 +560,17 @@ FAKE_RELEASED="fail"
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run
 check "fixed: an unreadable released App Store version stops the run (fail closed)" \
   "$(contains 'cannot read the released App Store version' && echo 0 || echo 1)"
+FAKE_DOTTED="0.1.0"; FAKE_RELEASED=""
+run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build 7
+check "fixed: an integer --build is refused (it would poison the dotted train)" \
+  "$(contains 'is not 1.1.<n>' && echo 0 || echo 1)"
+run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build 1.1.9
+check "fixed: a dotted --build of the fixed shape is honoured" \
+  "$([[ "$OUT" != *'is not 1.1.'* ]] && echo 0 || echo 1)"
+run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --version 1.1.2
+planned_pair
+check "fixed: --version equal to the fixed version stays in fixed mode (got '${PLANNED_BUILD}')" \
+  "$([[ "$PLANNED_BUILD" == "0.1.0" ]] && echo 0 || echo 1)"
 SHIP="$SHIP_REAL"; FAKE_ASC_FLOOR=0; FAKE_RELEASED=""; FAKE_DOTTED=""; FAKE_ASC_PATCH=236
 echo
 

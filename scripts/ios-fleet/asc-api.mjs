@@ -900,7 +900,7 @@ async function main() {
   // or nothing when the app has none.  READ ONLY.
   if (method === "released-store-version") {
     const bundleId = path;
-    const platform = body || "IOS";
+    const platform = String(body || "IOS").toUpperCase();
     if (!bundleId) {
       console.error("Usage: node asc-api.mjs released-store-version <bundleId> [platform=IOS]");
       process.exit(2);
@@ -930,6 +930,10 @@ async function main() {
       "REMOVED_FROM_SALE", "PENDING_DEVELOPER_RELEASE", "PENDING_APPLE_RELEASE",
       "PROCESSING_FOR_DISTRIBUTION", "PROCESSING_FOR_APP_STORE"
     ]);
+    const NOT_RELEASED = new Set([
+      "PREPARE_FOR_SUBMISSION", "READY_FOR_REVIEW", "WAITING_FOR_REVIEW", "IN_REVIEW",
+      "UNRESOLVED_ISSUES", "REJECTED", "METADATA_REJECTED", "DEVELOPER_REJECTED", "INVALID_BINARY"
+    ]);
     const parse = (v) => String(v).split(".").map((n) => parseInt(n, 10) || 0);
     const cmp = (a, b) => {
       const x = parse(a), y = parse(b);
@@ -943,7 +947,14 @@ async function main() {
     for (const v of storeData) {
       const a = v?.attributes || {};
       if (!a.versionString) continue;
-      if (!RELEASED.has(a.appVersionState) && !RELEASED.has(a.appStoreState)) continue;
+      const st = [a.appVersionState, a.appStoreState].filter(Boolean);
+      if (!st.some((x) => RELEASED.has(x))) {
+        if (st.length === 0 || !st.every((x) => NOT_RELEASED.has(x))) {
+          console.error(`released-store-version: version ${a.versionString} has state ${JSON.stringify(st)}, which is not a known released or not-released state; not guessing`);
+          process.exit(3);
+        }
+        continue;
+      }
       if (!best || cmp(a.versionString, best) > 0) best = a.versionString;
     }
     console.error(`released-store-version: ${storeData.length} App Store version(s) inspected on ${platform}; highest released = ${best || "none"}`);
@@ -966,7 +977,7 @@ async function main() {
   if (method === "next-dotted-build") {
     const bundleId = path;
     const version = body;
-    const platform = arg4 || "IOS";
+    const platform = String(arg4 || "IOS").toUpperCase();
     const vm = /^(\d+)\.(\d+)\.(\d+)$/.exec(version || "");
     if (!bundleId || !vm) {
       console.error("Usage: node asc-api.mjs next-dotted-build <bundleId> <M.m.p> [platform=IOS]");
@@ -1006,7 +1017,7 @@ async function main() {
       console.error("next-dotted-build: more than 10 pages of builds in one train; refusing to guess");
       process.exit(2);
     }
-    const next = max < 0 ? parseInt(vm[3], 10) : max + 1;
+    const next = Math.max(max + 1, parseInt(vm[3], 10));
     console.error(`next-dotted-build: ${seen} build(s) in train ${version}; next is ${prefix}${next}`);
     console.log(`${prefix}${next}`);
     process.exit(0);
