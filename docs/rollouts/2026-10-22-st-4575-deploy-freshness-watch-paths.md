@@ -55,6 +55,7 @@ The live run history shows this was not one unlucky run.  Four consecutive sched
 - Negative control for the subdirectory case's own control:  with the `RUN_CWD` handoff broken so the script under test runs from the repository root, the verdict still passes and the control fails with the recorded directory in the message, which is the vacuous pass the control exists to catch.
 - Negative control for the git-failure case's own pin:  against the pre-fix script on `origin/main`, the case fails on the missing `git rev-list failed` message and not on the exit code alone.
 - Negative control for the stderr case:  against the `2>&1` version of this branch, the case fails with exit 128 where 3 was wanted, which is the exit code that finding named.
+- Negative control for the warning case's own control:  with the warning shim off PATH the verdict is still a normal stale, exactly as it is with the shim on PATH, and the case now fails on the control with the recorded warning missing from the message, and with the shim on PATH but emitting nothing the case fails the same way.  The case was green under both conditions before this change, so it guarded nothing.
 - `npx tsc --noEmit` — exit 0.
 - `npx eslint` over the changed files — exit 0.
 - `npm test` — 9737 passed, 51 skipped, 0 failed, across 865 test files passed and 1 skipped.

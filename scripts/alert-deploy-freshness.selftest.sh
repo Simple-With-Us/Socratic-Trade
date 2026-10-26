@@ -113,11 +113,19 @@ chmod +x "${WORK}/shim/git"
 # way git does when $HOME is unreadable.  The watchdog captures stdout only,
 # so a warning line can never become the first "commit" of the list and send
 # the next git log off the documented exit-code contract.
+#
+# The shim also records the warning it emitted.  The watchdog sends git's
+# stderr to /dev/null, so the warning never reaches the selftest's captured
+# output, and the case would pass on its exit code alone even when the shim
+# was never used at all.  The record is what lets the case prove its
+# fixture was live.
+SHIM_WARN_PROBE="${WORK}/shim-warn-probe.txt"
 mkdir -p "${WORK}/shim-warn"
 cat > "${WORK}/shim-warn/git" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = "rev-list" ]; then
   echo "warning: unable to access '/root/.gitconfig': Permission denied" >&2
+  echo "warning: unable to access '/root/.gitconfig': Permission denied" >> "\${SHIM_WARN_PROBE:-/dev/null}"
 fi
 exec "${REAL_GIT}" "\$@"
 SH
@@ -154,6 +162,12 @@ RUN_CWD=""
 # in a directory whose path ends with this suffix.  Empty means no control.
 EXPECT_CWD_SUFFIX=""
 
+# When set, the run is only valid if the git shim really emitted this text.
+# Empty means no control.  The watchdog hides git's stderr, so without this
+# a warning case passes on its exit code even when the shim was never used,
+# and it guards nothing.
+EXPECT_SHIM_WARNING=""
+
 # $1 name, $2 expected exit, $3 expected-ref, $4 stub status, $5 stub body, $6 extra env assignments
 run_case() {
   local name="$1" want="$2" expect_ref="$3" status="$4" body="$5"
@@ -177,6 +191,7 @@ run_case() {
     workdir="${REPO}/${RUN_CWD}"
   fi
   rm -f "$CWD_PROBE"
+  rm -f "$SHIM_WARN_PROBE"
 
   local out code
   # Extra KEY=value args cannot be `"$@" bash` prefixes: bash only treats
@@ -208,6 +223,35 @@ run_case() {
     printf '%s\n' "$out" | sed 's/^/      /'
     FAILURES=$((FAILURES + 1))
     return
+  fi
+  # The control for the shim cases.  The watchdog hides git's stderr, so the
+  # verdict alone cannot tell a run through the warning shim apart from a run
+  # without it.  The shim records what it emitted, so the record has to be
+  # there, and the shim is probed again afterwards so a broken or replaced
+  # shim cannot pass either.
+  if [ -n "$EXPECT_SHIM_WARNING" ]; then
+    local shim_record=""
+    if [ -f "$SHIM_WARN_PROBE" ]; then
+      shim_record="$(head -n 1 "$SHIM_WARN_PROBE")"
+    fi
+    case "$shim_record" in
+      *"$EXPECT_SHIM_WARNING"*) ;;
+      *)
+        echo "FAIL  ${name} (control: the run did not go through the warning shim; it recorded '${shim_record:-nothing}')"
+        FAILURES=$((FAILURES + 1))
+        return
+        ;;
+    esac
+    local shim_live
+    shim_live="$(cd "$REPO" && PATH="${WORK}/shim-warn:${PATH}" git rev-list --max-count=1 HEAD 2>&1 >/dev/null)"
+    case "$shim_live" in
+      *"$EXPECT_SHIM_WARNING"*) ;;
+      *)
+        echo "FAIL  ${name} (control: the warning shim did not emit '${EXPECT_SHIM_WARNING}')"
+        FAILURES=$((FAILURES + 1))
+        return
+        ;;
+    esac
   fi
   # The control.  The verdict alone cannot tell a run from the subdirectory
   # apart from a run from the repository root, so the run has to prove where
@@ -300,9 +344,16 @@ EXPECT_CWD_SUFFIX=""
 # first "commit", the next git log would fail on a non-sha argument, and the
 # script would die with git's own exit 128, which is outside the exit-code
 # contract this script documents.  The verdict here must be a normal stale.
+# The control is the point of the case.  A run with no warning shim on PATH
+# gives the same stale verdict, so the verdict alone cannot tell whether the
+# shim was ever used, and the case would guard nothing.  The shim records the
+# warning it emitted and the case fails unless that record is there.
+EXPECT_SHIM_WARNING="warning: unable to access"
 run_case "a git warning on stderr does not break the verdict" 3 "$C4" 200 "$(payload "\"${C3}\"" 9000)" \
   DEPLOY_FRESHNESS_STALE_SECONDS=60 \
-  "PATH=${WORK}/shim-warn:${PATH}"
+  "PATH=${WORK}/shim-warn:${PATH}" \
+  "SHIM_WARN_PROBE=${SHIM_WARN_PROBE}"
+EXPECT_SHIM_WARNING=""
 
 echo "---- ${PASSES} passed, ${FAILURES} failed ----"
 [ "$FAILURES" = "0" ]
