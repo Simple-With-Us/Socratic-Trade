@@ -6,9 +6,9 @@ import { spawnSync } from "node:child_process";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-for (const file of ["ci.yml", "security.yml", "e2e.yml"]) {
+for (const file of [".github/workflows/ci.yml", ".github/workflows/security.yml", ".github/workflows/e2e.yml", "ci-pending/e2e.yml"]) {
   describe(`${file} same-repo CI actor admission`, () => {
-    const source = readFileSync(join(root, ".github/workflows", file), "utf8");
+    const source = readFileSync(join(root, file), "utf8");
     const clause = source.match(/case "\$actor" in\n([\s\S]*?)esac/)?.[0];
 
     it("allows the exact verified Wise app without widening to unknown bots", () => {
@@ -28,3 +28,8 @@ for (const file of ["ci.yml", "security.yml", "e2e.yml"]) {
     });
   });
 }
+
+it("documents the same Wise admission as active and parked workflows", () => {
+  const policy = readFileSync(join(root, "docs/CI-BOT-PR-POLICY.md"), "utf8");
+  expect(policy).toContain("`swu-wise[bot]`");
+});

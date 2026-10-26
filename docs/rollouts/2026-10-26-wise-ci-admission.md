@@ -15,4 +15,6 @@ No autofix steering, credentials, token permissions, review requirements, deploy
 
 The verified owner decision covers CI execution for fleet swu apps.  This exact Wise admission stays within that scope; autofix remains separately gated.
 
-Targeted admission and queue-safety tests: 14 pass.  Scoped eslint and diff check pass.  Current-head hosted checks and Kody review remain required before merge.  This does not repair the footer by itself or prove a production deployment.
+Targeted admission and queue-safety tests: 17 pass.  Scoped eslint and diff check pass.  Current-head hosted checks and Kody review remain required before merge.  This does not repair the footer by itself or prove a production deployment.
+
+Review follow-up: synchronize the parked `ci-pending/e2e.yml` actor list and `docs/CI-BOT-PR-POLICY.md`, with regression coverage for both.
