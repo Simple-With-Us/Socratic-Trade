@@ -121,6 +121,11 @@ class AdapterTests(unittest.TestCase):
         self.assertNotIn("--projectId", source)
         self.assertNotIn("8dae6d03", source)
 
+    def test_exec_token_is_masked_in_actions(self):
+        source = Path(w.__file__).read_text()
+        self.assertIn('print("::add-mask::" + token, flush=True)', source)
+        self.assertIn('os.environ.get("GITHUB_ACTIONS") == "true"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

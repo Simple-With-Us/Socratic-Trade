@@ -189,6 +189,8 @@ def main():
     except (subprocess.SubprocessError, OSError, ValueError):
         raise Refused("Infisical dedicated-folder fetch failed") from None
     token = mint_verified(config)
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print("::add-mask::" + token, flush=True)
     # Do not pass bearer or Infisical bootstrap to the consumer command.
     env.pop("INFISICAL_TOKEN", None)
     env["GH_TOKEN"] = token
