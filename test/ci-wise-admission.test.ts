@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-for (const file of ["ci.yml", "security.yml"]) {
+for (const file of ["ci.yml", "security.yml", "e2e.yml"]) {
   describe(`${file} same-repo CI actor admission`, () => {
     const source = readFileSync(join(root, ".github/workflows", file), "utf8");
     const clause = source.match(/case "\$actor" in\n([\s\S]*?)esac/)?.[0];
