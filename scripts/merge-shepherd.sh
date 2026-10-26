@@ -46,15 +46,29 @@ DRY="${SHEPHERD_DRY_RUN:-0}"
 HAS_PAT="${SHEPHERD_HAS_PAT:-1}"
 ISSUE_TITLE="Merge shepherd status"
 STATUS_ISSUE="${SHEPHERD_STATUS_ISSUE:-0}"
-# Who am I? Needed so the reran-marker check below (Codex review, round 3) only
-# trusts a comment we ourselves posted, not one any commenter could spoof. A PAT
-# resolves to its owning user via /user; the default Actions GITHUB_TOKEN is an
-# app-installation token that 403s on /user, and always posts comments as the
-# literal login "github-actions[bot]" -- so that's the fallback (and the direct
-# value whenever HAS_PAT=0, skipping a doomed API call).
+# Match the configured bot through the authenticated credential itself. REST
+# /user rejects installation tokens; never substitute an assumed identity.
+# This guard runs before any state read or write. Adoption requires a paired,
+# independently qualified existing bot credential route in each caller.
+verify_shepherd_principal() {
+  local actual expected
+  expected="${SHEPHERD_EXPECTED_ACTOR:-}"
+  case "$expected" in
+    *'[bot]') ;;
+    *) echo "[shepherd] explicit bot principal required; refusing personal-account work" >&2; return 1 ;;
+  esac
+  if ! actual="$(gh api graphql -f query='query { viewer { login } }' --jq '.data.viewer.login' 2>/dev/null)"; then
+    echo "[shepherd] credential principal unverifiable; refusing all work" >&2
+    return 1
+  fi
+  if [ "$actual" != "$expected" ]; then
+    echo "[shepherd] credential does not match configured bot principal; refusing all work" >&2
+    return 1
+  fi
+  ME="$actual"
+}
 ME=""
-[ "$HAS_PAT" = "1" ] && ME="$(gh api user --jq '.login' 2>/dev/null)"
-ME="${ME:-github-actions[bot]}"
+verify_shepherd_principal || exit 1
 TMP="$(mktemp)"; trap 'rm -f "$TMP" "$TMP.md"' EXIT
 
 # The open tracking issue's number (the oldest when duplicates exist), or nothing.  Lists open

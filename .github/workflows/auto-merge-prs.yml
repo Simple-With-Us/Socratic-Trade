@@ -67,11 +67,13 @@ permissions:
 
 jobs:
   auto-merge:
-    uses: Simple-With-Us/AI-Fleet-Coordinator/.github/workflows/auto-merge-reusable.yml@0a17292d8490f80ac237bd7dc26998ee3776e498
+    uses: Simple-With-Us/AI-Fleet-Coordinator/.github/workflows/auto-merge-reusable.yml@3dcf85a81cadd7f8f977827858ded8f5439856a9
     with:
+      use_wise_relay: true
+      expected_merge_actor: swu-wise[bot]
       require_codeowners_gate: true
       gate_script: scripts/pr-touches-codeowners-paths.sh
       self_guard_paths: .github/CODEOWNERS,.github/workflows/auto-merge-prs.yml,scripts/pr-touches-codeowners-paths.sh,scripts/automerge-gate-dry-run.sh,scripts/disable-pr-automerge.sh
       delete_branch: false
     secrets:
-      merge_token: ${{ secrets.GH_PAT || secrets.SHEPHERD_TOKEN }}
+      wise_infisical_token: ${{ secrets.WISE_RELAY_INFISICAL_TOKEN }}
