@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = join(__dirname, "..");
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const footer = readFileSync(join(root, "app/ui/public/public-footer.tsx"), "utf8");
 
 describe("public footer assets", () => {
