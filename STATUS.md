@@ -1,3 +1,7 @@
+## 2026-10-26 WISE: ST-4583 public footer logo
+
+Restore bundled transparent theme-aware wordmarks in the shared public footer.  Component previews pass mobile/desktop inspection; current-head hosted verification and review, then automatic deployment/live pixels, remain pending.  No native release or trading changes.  Rollout: `docs/rollouts/2026-10-26-st-4583-public-footer-logo.md`.
+
 ## 2026-10-23 [GB-COMPILER] ST-3853 share payload schemaVersion from the shared contract
 
 **What.**  `@jaywedgeworth22/congress-trading-shared` is pinned to v2.9.0 (upstream commit `72febd04`), and the outbound congress.trade share sender now stamps the shared `SHARE_PAYLOAD_SCHEMA_VERSION` on every import POST body (`CONGRESS_SHARE_PAYLOAD_SCHEMA_VERSION` stays as a deprecated alias);  Congress.Trade gets a paired PR that resolves the received version and warns without rejecting, and Usage-Monitor still pins v2.8.1 so the soft three-repo pin check flags until UM bumps.  Rollout `docs/rollouts/2026-10-23-st-3853-share-schema-version.md`.
