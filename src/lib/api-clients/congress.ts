@@ -185,6 +185,66 @@ export async function readCongressTransactionsPage(query: {
   return { transactions: page.transactions, cursor };
 }
 
+export interface CongressRetraction {
+  txId: string;
+  docId?: string;
+  retractedAt?: string;
+}
+
+export interface CongressRetractionsPageRaw {
+  retractions: CongressRetraction[];
+  cursor: number;
+}
+
+/**
+ * GET /api/transactions/retractions?since=<cursor> (same base URL and bearer as
+ * /api/transactions).  Rows are `{txId, docId, retractedAt}`.  Returns null on a
+ * 404 (endpoint not deployed yet; it ships in the Congress.Trade follow-up to
+ * #2867) or a body that is not a retractions page.  429 and 5xx still throw.
+ */
+export async function readCongressRetractionsPage(query: {
+  since?: string | number;
+  limit?: number;
+}): Promise<CongressRetractionsPageRaw | null> {
+  const params = new URLSearchParams();
+  if (query.since !== undefined && String(query.since) !== "") params.set("since", String(query.since));
+  if (query.limit) params.set("limit", String(query.limit));
+  const qs = params.toString();
+  const headers: Record<string, string> = { accept: "application/json" };
+  const token = readToken();
+  if (token) headers.authorization = `Bearer ${token}`;
+  const res = await congressTradeFetch(`${baseUrl()}/api/transactions/retractions${qs ? `?${qs}` : ""}`, {
+    method: "GET",
+    headers
+  });
+  if (!res.ok) return null;
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    return null;
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const page = body as { retractions?: unknown; cursor?: unknown };
+  if (!Array.isArray(page.retractions)) return null;
+  let cursor = finiteNumber(page.cursor) ?? 0;
+  const retractions: CongressRetraction[] = [];
+  for (const raw of page.retractions) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw as Record<string, unknown>;
+    const rowCursor = finiteNumber(r.cursor ?? r.cursorSeq);
+    if (rowCursor !== undefined && rowCursor > cursor) cursor = rowCursor;
+    const txId = typeof r.txId === "string" ? r.txId.trim() : "";
+    if (!txId) continue;
+    retractions.push({
+      txId,
+      ...(typeof r.docId === "string" ? { docId: r.docId } : {}),
+      ...(typeof r.retractedAt === "string" ? { retractedAt: r.retractedAt } : {})
+    });
+  }
+  return { retractions, cursor };
+}
+
 /** Test-only: drop the shared client so a later getCongressTradeClient() rebuilds the wrapper. */
 export function resetCongressTradeClientForTests(): void {
   sharedClientInstance = null;

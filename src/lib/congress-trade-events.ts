@@ -11,7 +11,7 @@ import {
   CongressEventSchema,
   parseSafe,
 } from "@jaywedgeworth22/congress-trading-shared";
-import { coerceCongressTrade, upsertCongressTrades } from "./web-sources/congress";
+import { coerceCongressTrade, removeCongressTradesById, upsertCongressTrades } from "./web-sources/congress";
 import {
   coerceInsiderFiling,
   insiderFilingFromSentiment,
@@ -149,6 +149,19 @@ export function applyCongressEvent(event: CongressEvent | null | undefined): App
       return { ok: true, type, applied: added };
     }
 
+    if (type === TRADE_RETRACT_EVENT) {
+      // Congress.Trade retracts a published row (soft-delete / republish) with a
+      // non-alerting `trade.retract` {txId, docId, retractedAt}.  Drop it by
+      // transaction id so it stops feeding scoring.  The event id (raw.id) is NOT a
+      // transaction id.  A later revival arrives as a normal trade under the same id.
+      // The CT emitter ships in the follow-up to Congress.Trade#2867.
+      const txIds = retractedTransactionIds(raw, data);
+      if (id) commitSeen(id);
+      if (txIds.length === 0) return { ok: true, type, applied: 0, reason: "no-ids" };
+      const { removed, total } = removeCongressTradesById(txIds);
+      return { ok: true, type, applied: removed, reason: `dataset=${total}` };
+    }
+
     if (type === "insider.update") {
       let filings: InsiderFiling[] = [];
       if (Array.isArray(data?.filings)) {
@@ -186,8 +199,47 @@ export function applyCongressEvents(events: unknown): ApplyResult[] {
   return events.map((e) => applyCongressEvent(e as CongressEvent));
 }
 
+/** Congress.Trade retraction event: {txId, docId, retractedAt} (CT follow-up to #2867). */
+export const TRADE_RETRACT_EVENT = "trade.retract";
+
+function stringIds(v: unknown): string[] {
+  if (typeof v === "string") return v.trim() ? [v.trim()] : [];
+  if (!Array.isArray(v)) return [];
+  return v.flatMap((x) => (typeof x === "string" && x.trim() ? [x.trim()] : []));
+}
+
+function rowIds(v: unknown): string[] {
+  const rows = Array.isArray(v) ? v : v ? [v] : [];
+  return rows.flatMap((r) => stringIds(asRecord(r)?.id));
+}
+
+/**
+ * Transaction ids named by a retract event.  The contract is `txId`; batch and
+ * row-shaped variants are also accepted: txId / transactionId / ids / transactionIds /
+ * transaction(s).id / trades[].id, under `data` or at the top level (flattened frame).
+ */
+function retractedTransactionIds(raw: Record<string, unknown>, data: Record<string, unknown> | null): string[] {
+  const out = new Set<string>();
+  for (const src of [data, raw]) {
+    if (!src) continue;
+    for (const v of [
+      ...stringIds(src.txId),
+      ...stringIds(src.transactionId),
+      ...stringIds(src.ids),
+      ...stringIds(src.transactionIds)
+    ]) out.add(v);
+    for (const v of [...rowIds(src.transaction), ...rowIds(src.transactions), ...rowIds(src.trades)]) out.add(v);
+  }
+  return Array.from(out);
+}
+
 function isCongressEventType(value: string): boolean {
   // Canonical types come from the shared package; `trade.new` is App A's legacy
   // alias and is remapped to `congress.trade` by applyCongressEvent.
-  return (CONGRESS_EVENT_TYPES as readonly string[]).includes(value) || value === "trade.new";
+  // `trade.retract` is not in the shared package yet (Congress.Trade#2867).
+  return (
+    (CONGRESS_EVENT_TYPES as readonly string[]).includes(value) ||
+    value === "trade.new" ||
+    value === TRADE_RETRACT_EVENT
+  );
 }

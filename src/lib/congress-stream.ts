@@ -241,6 +241,12 @@ export function toCongressEventEnvelope(parsed: unknown, msg: SseMessage): Congr
     const txId = typeof obj.id === "string" ? obj.id : msg.id;
     return { type: "congress.trade", id: txId, data: { transaction: obj } };
   }
+  if (msg.event === "trade.retract" && typeof obj.type !== "string" && typeof obj.event !== "string") {
+    // A bare retract frame: data is {txId, docId, retractedAt} (or a row / id list).
+    // Wrap it so applyCongressEvent never mistakes a transaction id for the event id.
+    const direct = typeof obj.txId === "string" || Array.isArray(obj.ids) || Array.isArray(obj.transactionIds);
+    return { type: "trade.retract", id: msg.id, data: direct ? obj : { transaction: obj } } as unknown as CongressEvent;
+  }
   const env = obj as unknown as CongressEvent;
   if (!env.type && msg.event) env.type = msg.event;
   if (!env.id && msg.id) env.id = msg.id;

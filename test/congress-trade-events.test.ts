@@ -8,7 +8,8 @@ import {
   resetCongressEventDedupe
 } from "../src/lib/congress-trade-events";
 import { getServiceHealthSummaries } from "../src/lib/db-health";
-import { coerceCongressTrade, CONGRESS_CURSOR_SETTING_KEY, fetchAppACongressTrades, getCongressSignals, refreshCongress, upsertCongressTrades } from "../src/lib/web-sources/congress";
+import { coerceCongressTrade, CONGRESS_CURSOR_SETTING_KEY, CONGRESS_RETRACT_CURSOR_SETTING_KEY, fetchAppACongressTrades, getCongressSignals, refreshCongress, upsertCongressTrades } from "../src/lib/web-sources/congress";
+import { applySseMessage } from "../src/lib/congress-stream";
 import { deleteInternalSetting, getInternalSetting, setInternalSetting } from "../src/lib/db";
 import { getCongressDataset, getInsiderSignals, getSymbolWebSignals } from "../src/lib/web-sources";
 import { POST as postCongressWebhook } from "../app/api/webhooks/congress/route";
@@ -308,6 +309,48 @@ describe("applyCongressEvent — dedupe + other types", () => {
   });
 });
 
+describe("upsert latest-wins and trade.retract", () => {
+  beforeEach(() => {
+    deleteInternalSetting("webSource:congress:dataset");
+  });
+
+  it("keeps the latest copy of a re-sent id", () => {
+    upsertCongressTrades([{ id: "lw-1", symbol: "AAPL", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4), amountLow: 1000 }]);
+    upsertCongressTrades([{ id: "lw-1", symbol: "AAPL", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4), amountLow: 1001 }]);
+    const rows = (getCongressDataset()?.trades ?? []).filter((t) => t.id === "lw-1");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].amountLow).toBe(1001);
+  });
+
+  it("removes rows named by a trade.retract event and leaves others", () => {
+    upsertCongressTrades([
+      { id: "rt-1", symbol: "AAPL", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4) },
+      { id: "rt-2", symbol: "MSFT", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4) },
+      { id: "rt-3", symbol: "NVDA", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4) }
+    ]);
+    const res = applyCongressEvent({ type: "trade.retract", id: `evt-${randomUUID()}`, data: { txId: "rt-1", docId: "d1", retractedAt: new Date().toISOString(), transaction: { id: "rt-2" } } } as never);
+    expect(res).toMatchObject({ ok: true, type: "trade.retract", applied: 2 });
+    expect((getCongressDataset()?.trades ?? []).map((t) => t.id)).toEqual(["rt-3"]);
+  });
+
+  it("does not treat the event id as a transaction id", () => {
+    upsertCongressTrades([{ id: "evt-same", symbol: "AAPL", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4) }]);
+    const res = applyCongressEvent({ type: "trade.retract", id: "evt-same", data: {} } as never);
+    expect(res).toMatchObject({ ok: true, applied: 0, reason: "no-ids" });
+    expect(getCongressDataset()?.trades.some((t) => t.id === "evt-same")).toBe(true);
+  });
+
+  it("accepts the legacy event-keyed webhook shape and a bare SSE retract frame", () => {
+    upsertCongressTrades([
+      { id: "lg-1", symbol: "AAPL", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4) },
+      { id: "lg-2", symbol: "MSFT", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4) }
+    ]);
+    expect(applyCongressEvent({ event: "trade.retract", id: `evt-${randomUUID()}`, transaction: { id: "lg-1" } } as never).applied).toBe(1);
+    expect(applySseMessage({ event: "trade.retract", id: `evt-${randomUUID()}`, data: JSON.stringify({ txId: "lg-2", docId: "d1", retractedAt: new Date().toISOString() }) })).toBe(true);
+    expect(getCongressDataset()?.trades ?? []).toHaveLength(0);
+  });
+});
+
 describe("fetchAppACongressTrades — public feed with rolling from= window", () => {
   beforeEach(() => {
     deleteInternalSetting(CONGRESS_CURSOR_SETTING_KEY);
@@ -415,6 +458,98 @@ describe("fetchAppACongressTrades — public feed with rolling from= window", ()
     expect(second.ok).toBe(true);
     expect(getCongressDataset()?.trades.some((t) => t.id === "keep-1")).toBe(true);
     expect(getCongressDataset()?.fetchedAt).not.toBe(fetchedAt);
+  });
+
+  it("merges a non-empty incremental poll into the prior window instead of replacing it", async () => {
+    deleteInternalSetting("webSource:congress:dataset");
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    const base = { ticker: "AAPL", chamber: "house", txType: "P", confidence: 1, isOption: false, owner: "self" };
+    const old1 = { ...base, id: "old-1", memberName: "Jane Doe", txDate: recent(10), cursorSeq: 10 };
+    const old2 = { ...base, id: "old-2", ticker: "MSFT", memberName: "John Roe", txDate: recent(9), cursorSeq: 11 };
+    const fresh = { ...base, id: "new-1", ticker: "NVDA", memberName: "Ann Poe", txDate: recent(2), cursorSeq: 12 };
+    let phase: "backfill" | "incremental" = "backfill";
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const u = String(url);
+      if (phase === "backfill") {
+        if (u.includes("since=")) return new Response(JSON.stringify({ transactions: [], cursor: 11 }), { status: 200 });
+        return new Response(JSON.stringify({ transactions: [old1, old2], cursor: 11 }), { status: 200 });
+      }
+      if (u.includes("since=12")) return new Response(JSON.stringify({ transactions: [], cursor: 12 }), { status: 200 });
+      expect(u).toContain("since=11");
+      return new Response(JSON.stringify({ transactions: [fresh], cursor: 12 }), { status: 200 });
+    }));
+    await refreshCongress(Date.now(), true);
+    expect(getCongressDataset()?.trades.map((t) => t.id).sort()).toEqual(["old-1", "old-2"]);
+    phase = "incremental";
+    const second = await refreshCongress(Date.now() + 1000, true);
+    expect(second.ok).toBe(true);
+    expect(getCongressDataset()?.trades.map((t) => t.id).sort()).toEqual(["new-1", "old-1", "old-2"]);
+    expect(second.recordCount).toBe(3);
+    expect(getInternalSetting<number>(CONGRESS_CURSOR_SETTING_KEY)).toBe(12);
+  });
+
+  it("lets a corrected copy from an incremental poll replace the stale row", async () => {
+    deleteInternalSetting("webSource:congress:dataset");
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    const row = { id: "fix-1", ticker: "AAPL", memberName: "Jane Doe", chamber: "house", txType: "P", txDate: recent(5), confidence: 1, isOption: false, amountMin: 1000, amountMax: 15000 };
+    let phase: "backfill" | "incremental" = "backfill";
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const u = String(url);
+      if (phase === "backfill") {
+        if (u.includes("since=")) return new Response(JSON.stringify({ transactions: [], cursor: 20 }), { status: 200 });
+        return new Response(JSON.stringify({ transactions: [{ ...row, cursorSeq: 20 }], cursor: 20 }), { status: 200 });
+      }
+      if (u.includes("since=21")) return new Response(JSON.stringify({ transactions: [], cursor: 21 }), { status: 200 });
+      return new Response(JSON.stringify({ transactions: [{ ...row, amountMin: 1001, cursorSeq: 21 }], cursor: 21 }), { status: 200 });
+    }));
+    await refreshCongress(Date.now(), true);
+    phase = "incremental";
+    await refreshCongress(Date.now() + 1000, true);
+    const rows = (getCongressDataset()?.trades ?? []).filter((t) => t.id === "fix-1");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].amountLow).toBe(1001);
+  });
+
+  it("drops rows the retractions endpoint names and keeps a same-poll revival", async () => {
+    deleteInternalSetting("webSource:congress:dataset");
+    deleteInternalSetting(CONGRESS_RETRACT_CURSOR_SETTING_KEY);
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    const base = { ticker: "AAPL", memberName: "Jane Doe", chamber: "house", txType: "P", txDate: recent(5), confidence: 1, isOption: false };
+    let phase: "backfill" | "incremental" = "backfill";
+    const retractUrls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/transactions/retractions")) {
+        retractUrls.push(u);
+        if (phase === "backfill") return new Response("not found", { status: 404 });
+        if (u.includes("since=5")) return new Response(JSON.stringify({ retractions: [], cursor: 5 }), { status: 200 });
+        return new Response(JSON.stringify({
+          retractions: [
+            { txId: "gone-1", docId: "d1", retractedAt: new Date().toISOString() },
+            { txId: "back-1", docId: "d1", retractedAt: new Date().toISOString() }
+          ],
+          cursor: 5
+        }), { status: 200 });
+      }
+      if (phase === "backfill") {
+        if (u.includes("since=")) return new Response(JSON.stringify({ transactions: [], cursor: 31 }), { status: 200 });
+        return new Response(JSON.stringify({
+          transactions: [{ ...base, id: "gone-1", cursorSeq: 30 }, { ...base, id: "back-1", ticker: "MSFT", cursorSeq: 31 }],
+          cursor: 31
+        }), { status: 200 });
+      }
+      if (u.includes("since=32")) return new Response(JSON.stringify({ transactions: [], cursor: 32 }), { status: 200 });
+      return new Response(JSON.stringify({ transactions: [{ ...base, id: "back-1", ticker: "MSFT", cursorSeq: 32 }], cursor: 32 }), { status: 200 });
+    }));
+    await refreshCongress(Date.now(), true);
+    expect(getCongressDataset()?.trades.map((t) => t.id).sort()).toEqual(["back-1", "gone-1"]);
+    expect(getInternalSetting(CONGRESS_RETRACT_CURSOR_SETTING_KEY)).toBeUndefined(); // 404: endpoint not deployed yet
+    phase = "incremental";
+    const res = await refreshCongress(Date.now() + 1000, true);
+    expect(res.ok).toBe(true);
+    expect(getCongressDataset()?.trades.map((t) => t.id)).toEqual(["back-1"]);
+    expect(getInternalSetting<number>(CONGRESS_RETRACT_CURSOR_SETTING_KEY)).toBe(5);
+    expect(retractUrls.at(-1)).toContain("since=5");
   });
 
   it("does not store a cursor when the feed errors", async () => {
