@@ -10,7 +10,6 @@ import {
   analystScoreFromCounts,
   analystScoreFromMean,
   apiKeyFingerprint,
-  callsPerSymbol,
   getEnrichmentProvider,
   isLatchingEnrichmentTransportError,
   isTransientError,
@@ -25,8 +24,6 @@ import {
   type EnrichmentContext,
   type SymbolEnrichment
 } from "../src/lib/data-providers";
-import { admitProviderRequests, resetProviderQuotaState } from "../src/lib/provider-rate-limit";
-import { resetApiCircuitBreaker } from "../src/lib/api-circuit-breaker";
 import { getServiceHealthLog } from "../src/lib/db-health";
 import { arbitrateFieldObservation } from "../src/lib/evidence-facts";
 import { deleteUserApiKey, migrateLocalEnvCredentials, upsertUserApiKey, LOCAL_USER } from "../src/lib/db-api-keys";
@@ -869,7 +866,7 @@ describe("enrichment cache consent gate", () => {
   });
 });
 
-describe("Finnhub & FMP Cache Poisoning Protection", () => {
+describe("Finnhub Cache Poisoning Protection", () => {
   it("prevents cache writes on Finnhub when a transient error occurs", async () => {
     const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
     clearEnrichmentCache();
@@ -914,117 +911,6 @@ describe("Finnhub & FMP Cache Poisoning Protection", () => {
     const res2 = await provider.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
     expect(res2.AAPL).toEqual({ companyName: "Apple" });
     expect(fetchCount).toBe(5);
-  });
-
-  it.skip("prevents cache writes on FMP when a transient error occurs [retired: no direct FMP]", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
-
-    let fetchCount = 0;
-    vi.stubGlobal("fetch", async (url: string) => {
-      fetchCount++;
-      if (url.includes("ratios-ttm")) {
-        return new Response("Gateway Timeout", { status: 504 });
-      }
-      return new Response(JSON.stringify([]));
-    });
-
-    const provider = new FmpEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
-    expect(res1.AAPL).toEqual({});
-    // 4 sub-calls: ratios-ttm, grades-consensus, profile, insider-trading/search.
-    expect(fetchCount).toBe(4);
-
-    const res2 = await provider.enrich(["AAPL"]);
-    expect(res2.AAPL).toEqual({});
-    expect(fetchCount).toBe(8);
-  });
-
-  it.skip("logs core FMP failures while suppressing an unentitled optional insider endpoint [retired: no direct FMP]", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    const { getDb } = await import("../src/lib/db");
-    clearEnrichmentCache();
-    getDb().prepare("DELETE FROM api_health_log WHERE service = ?").run("fmp");
-
-    vi.stubGlobal("fetch", async (url: string) => {
-      if (url.includes("profile")) {
-        return new Response("server error", { status: 500 });
-      }
-      if (url.includes("insider-trading")) {
-        return new Response("premium endpoint", { status: 402 });
-      }
-      return new Response(JSON.stringify([]));
-    });
-
-    const provider = new FmpEnrichmentProvider("test-key");
-    await provider.enrich(["AAPL"]);
-
-    const rows = getDb()
-      .prepare("SELECT ok, error_text FROM api_health_log WHERE service = ? ORDER BY ts")
-      .all("fmp") as Array<{ ok: number; error_text: string | null }>;
-    expect(rows.some((row) => row.ok === 0 && row.error_text === "HTTP 500")).toBe(true);
-    expect(rows.some((row) => row.error_text === "HTTP 403")).toBe(false);
-  });
-
-  it.skip("caches normally on FMP when all queries succeed [retired: no direct FMP]", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
-
-    let fetchCount = 0;
-    const requested: Array<{ url: string; init?: RequestInit }> = [];
-    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
-      fetchCount++;
-      requested.push({ url, init });
-      if (url.includes("ratios-ttm")) {
-        return new Response(JSON.stringify([{
-          priceToEarningsRatioTTM: "25.5",
-          priceToBookRatioTTM: "8.2",
-          debtToEquityRatioTTM: "1.4",
-          returnOnEquityTTM: "0.31",
-          returnOnAssetsTTM: "0.12",
-          grossProfitMarginTTM: "0.46",
-          dividendYieldTTM: "0.004"
-        }]));
-      }
-      if (url.includes("/profile")) {
-        return new Response(JSON.stringify([{
-          companyName: "Apple Inc.",
-          sector: "Technology",
-          industry: "Consumer Electronics",
-          beta: 1.2,
-          price: 200,
-          lastDividend: 1,
-          range: "150-250"
-        }]));
-      }
-      return new Response(JSON.stringify([]));
-    });
-
-    const provider = new FmpEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
-    expect(res1.AAPL).toEqual({
-      peRatio: 25.5,
-      pbRatio: 8.2,
-      debtToEquity: 1.4,
-      returnOnEquity: 31,
-      returnOnAssets: 12,
-      grossProfitMargin: 46,
-      companyName: "Apple Inc.",
-      sector: "Technology",
-      industry: "Consumer Electronics",
-      beta: 1.2,
-      dividendYield: 0.5,
-      fiftyTwoWeekHigh: 250,
-      fiftyTwoWeekLow: 150
-    });
-    // 4 sub-calls: ratios-ttm, grades-consensus, profile, insider-trading/search.
-    expect(fetchCount).toBe(4);
-    expect(requested.every(({ url }) => !url.includes("test-key"))).toBe(true);
-    expect(requested.every(({ init }) => new Headers(init?.headers).get("apikey") === "test-key")).toBe(true);
-
-    const res2 = await provider.enrich(["AAPL"]);
-    expect(res2.AAPL).toEqual(res1.AAPL);
-    expect(fetchCount).toBe(4);
   });
 });
 
@@ -1335,162 +1221,6 @@ describe("Finnhub /calendar/earnings — daysToEarnings fallback (2026-08-02)", 
       const res = await provider.enrich(["AAPL"]);
       expect(res.AAPL?.daysToEarnings).toBeUndefined();
     });
-  });
-});
-
-describe.skip("callsPerSymbol('fmp', …) — per-symbol request accounting", () => {
-  it("counts 2 unconditional (profile+insider) + ratios/consensus/targets one-for-one", () => {
-    // Nothing skipped, targets off → profile + insider + ratios-ttm + grades-consensus = 4.
-    expect(callsPerSymbol("fmp", { skipPe: false, skipConsensus: false, wantTargets: false })).toBe(4);
-    expect(callsPerSymbol("fmp")).toBe(4);               // undefined flags are falsy → same as all-false
-    expect(callsPerSymbol("fmp", {})).toBe(4);
-    // + price-target-consensus when wantTargets → 5 (the full worst case).
-    expect(callsPerSymbol("fmp", { skipPe: false, skipConsensus: false, wantTargets: true })).toBe(5);
-    // skipPe drops ratios-ttm.
-    expect(callsPerSymbol("fmp", { skipPe: true, skipConsensus: false, wantTargets: true })).toBe(4);
-    // skipPe + skipConsensus, targets off → only the 2 unconditional calls.
-    expect(callsPerSymbol("fmp", { skipPe: true, skipConsensus: true, wantTargets: false })).toBe(2);
-    // skipPe + skipConsensus, targets on → 2 unconditional + price-target = 3.
-    expect(callsPerSymbol("fmp", { skipPe: true, skipConsensus: true, wantTargets: true })).toBe(3);
-  });
-});
-
-describe.skip("FMP request quota — defer / refund / breaker / cache-hit / per-credential", () => {
-  const QUOTA_ENV = ["PROVIDER_QUOTA_FMP_PER_MIN", "PROVIDER_QUOTA_FMP_PER_DAY", "FMP_PRICE_TARGETS_ENABLED"];
-  beforeEach(() => {
-    for (const k of QUOTA_ENV) delete process.env[k];
-    delete process.env.API_CIRCUIT_BREAKER_BACKOFF_MS;
-    process.env.API_CIRCUIT_BREAKER_DISABLED = "1";
-    resetProviderQuotaState();
-  });
-  afterEach(() => {
-    for (const k of QUOTA_ENV) delete process.env[k];
-    delete process.env.API_CIRCUIT_BREAKER_BACKOFF_MS;
-    process.env.API_CIRCUIT_BREAKER_DISABLED = "1";
-    resetProviderQuotaState();
-    resetApiCircuitBreaker();
-  });
-
-  // ratios-ttm returns a P/E so a fetched symbol yields non-empty, cacheable data; every other
-  // sub-call returns []. Each fetched symbol therefore costs 4 requests (targets off by default).
-  function stubPeFetch(): () => number {
-    let fetchCount = 0;
-    vi.stubGlobal("fetch", async (url: string) => {
-      fetchCount++;
-      if (url.includes("ratios-ttm")) return new Response(JSON.stringify([{ priceToEarningsRatioTTM: "20" }]));
-      return new Response(JSON.stringify([]));
-    });
-    return () => fetchCount;
-  }
-
-  it("fetches only the affordable best-first prefix, defers the tail as {} (uncached), and refunds the sub-symbol remainder", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "9"; // 9 requests; each symbol costs 4 → 2 whole symbols fit, 1 left over
-    const count = stubPeFetch();
-
-    const provider = new FmpEnrichmentProvider("q-key");
-    const res = await provider.enrich(["AAPL", "MSFT", "GOOG"]);
-    // admit min(12, 9) = 9. Greedy: AAPL(4)→rem5, MSFT(4)→rem1, GOOG(4) doesn't fit → deferred.
-    expect(res.AAPL).toEqual({ peRatio: 20 });
-    expect(res.MSFT).toEqual({ peRatio: 20 });
-    expect(res.GOOG).toEqual({}); // deferred this scan, NOT queried
-    expect(count()).toBe(8);      // exactly 2 symbols × 4 sub-calls
-    // The 8 dispatched were recorded; the 1-request remainder was refunded → 1 headroom remains this minute.
-    expect(admitProviderRequests("fmp", await apiKeyFingerprint("q-key"), 100)).toBe(1);
-
-    // GOOG was deferred, never fetched → it must NOT have been cached. A fresh-budget rescan fetches it.
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "290";
-    resetProviderQuotaState();
-    const res2 = await provider.enrich(["GOOG"]);
-    expect(count()).toBe(12);     // +4: GOOG actually fetched (not served from cache)
-    expect(res2.GOOG).toEqual({ peRatio: 20 });
-  });
-
-  it("refunds a breaker-skipped symbol's cost and does not cache it", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    const { getDb } = await import("../src/lib/db");
-    clearEnrichmentCache();
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "4"; // room for exactly one symbol per minute
-    process.env.API_CIRCUIT_BREAKER_DISABLED = "0";
-    process.env.API_CIRCUIT_BREAKER_BACKOFF_MS = "60000";
-    resetApiCircuitBreaker();
-    getDb().prepare("DELETE FROM api_health_log WHERE service = 'fmp'").run();
-    const seedFailure = getDb().prepare(`
-      INSERT INTO api_health_log (id, service, ts, ok, latency_ms, error_text, key_source, user_id)
-      VALUES (?, 'fmp', ?, 0, 1, 'synthetic breaker seed', 'env', 'local')
-    `);
-    for (let index = 0; index < 5; index++) {
-      seedFailure.run(randomUUID(), new Date(Date.now() - index * 1_000).toISOString());
-    }
-    let okCalls = 0;
-    vi.stubGlobal("fetch", async (url: string) => {
-      okCalls++;
-      if (url.includes("ratios-ttm")) return new Response(JSON.stringify([{ priceToEarningsRatioTTM: "20" }]));
-      return new Response(JSON.stringify([]));
-    });
-
-    const provider = new FmpEnrichmentProvider("brk-key");
-    const res = await provider.enrich(["ZZZ"]);
-    expect(res.ZZZ).toEqual({}); // all sub-calls CircuitOpenError → breaker-skipped
-
-    // If the cost were NOT refunded, the 4/min budget would be spent and this rescan would defer ZZZ
-    // as {} with zero fetches; if ZZZ had been cached, the rescan would serve {} from cache. Either
-    // failure mode yields no fetch. Getting real data back proves BOTH the refund and the no-cache.
-    getDb().prepare("DELETE FROM api_health_log WHERE service = 'fmp'").run();
-    resetApiCircuitBreaker();
-    const res2 = await provider.enrich(["ZZZ"]);
-    expect(res2.ZZZ).toEqual({ peRatio: 20 });
-    expect(okCalls).toBe(4);
-    process.env.API_CIRCUIT_BREAKER_DISABLED = "1";
-    delete process.env.API_CIRCUIT_BREAKER_BACKOFF_MS;
-  });
-
-  it("does not spend the quota on a cache hit", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "4";
-    const count = stubPeFetch();
-
-    const provider = new FmpEnrichmentProvider("cache-key");
-    await provider.enrich(["IBM"]); // fetches + caches, spends 4
-    expect(count()).toBe(4);
-
-    resetProviderQuotaState(); // clear the budget so any NEW spend on the rescan is detectable
-    const res2 = await provider.enrich(["IBM"]);
-    expect(count()).toBe(4);    // served from cache — no fetch
-    expect(res2.IBM).toEqual({ peRatio: 20 });
-    // The cache hit reserved nothing, so the whole fresh window is still available.
-    expect(admitProviderRequests("fmp", await apiKeyFingerprint("cache-key"), 4)).toBe(4);
-  });
-
-  it("keeps a separate quota lane per credential (one key's spend never gates another)", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "4"; // each lane funds exactly one symbol/min
-    const count = stubPeFetch();
-
-    const provA = new FmpEnrichmentProvider("iso-A");
-    const provB = new FmpEnrichmentProvider("iso-B");
-    await provA.enrich(["AAPL"]); // spends lane A's whole minute
-    const resB = await provB.enrich(["MSFT"]); // lane B is untouched → still fetches
-    expect(resB.MSFT).toEqual({ peRatio: 20 });
-    expect(count()).toBe(8); // 4 (A) + 4 (B); a shared lane would have deferred B → only 4
-  });
-
-  it("retries:0 — a 429 does not emit a second (uncounted) call on any sub-endpoint", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "290";
-    let ratiosCalls = 0;
-    vi.stubGlobal("fetch", async (url: string) => {
-      if (url.includes("ratios-ttm")) { ratiosCalls++; return new Response("rate limited", { status: 429 }); }
-      return new Response(JSON.stringify([]));
-    });
-
-    const provider = new FmpEnrichmentProvider("retry-key");
-    await provider.enrich(["AAPL"]);
-    expect(ratiosCalls).toBe(1); // exactly one attempt — the built-in 429 retry (default 1) is disabled
   });
 });
 
@@ -3460,15 +3190,6 @@ describe("FMP / Quiver direct access retired (owner 2026-08-04)", () => {
     delete process.env.FMP_API_KEY;
     delete process.env.QUIVER_API_KEY;
     delete process.env.CONGRESS_TRADE_FUNDAMENTALS_ENABLED;
-  });
-
-  it("FmpEnrichmentProvider.enrich is a no-op and never fetches", async () => {
-    const { FmpEnrichmentProvider } = await import("../src/lib/data-providers");
-    const fetchSpy = vi.fn();
-    vi.stubGlobal("fetch", fetchSpy);
-    const provider = new FmpEnrichmentProvider("test-key");
-    await expect(provider.enrich(["AAPL"])).resolves.toEqual({});
-    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

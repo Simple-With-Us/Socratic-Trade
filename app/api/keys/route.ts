@@ -1,3 +1,5 @@
+import "server-only";
+import { z } from "zod";
 import { codeCliReady } from "@/lib/code-cli";
 import { isPrimaryEmail } from "@/lib/auth/identity";
 import { isVerifiedIdentitySource, AUTHENTICATED_IDENTITY_SOURCE_HEADER } from "@/lib/auth/strip-identity";
@@ -26,6 +28,18 @@ import {
 } from "@/lib/provider-tier-plan";
 
 export const dynamic = "force-dynamic";
+
+/** Display names for retired providers, which have no catalog row of their own. */
+const RETIRED_SERVICE_LABELS: Record<string, string> = {
+  fmp: "Financial Modeling Prep (FMP)",
+  quiverquant: "QuiverQuant",
+  quiver: "QuiverQuant",
+  unusual_whales: "Unusual Whales"
+};
+
+function retiredServiceLabel(service: string): string {
+  return RETIRED_SERVICE_LABELS[service] ?? service.toUpperCase();
+}
 
 /**
  * Multi-user API Key Management
@@ -129,16 +143,6 @@ const API_KEY_CATALOG = [
     required: false,
     unlocks: "News sentiment, analyst recommendations, company profile, and financial metrics.",
     docsUrl: "https://finnhub.io/dashboard"
-  },
-  {
-    service: "fmp",
-    label: "Financial Modeling Prep",
-    category: "Market data",
-    required: false,
-    unlocks: "Retired on Socratic-Trade — CT-only. Do not use for ST product enrichment.",
-    docsUrl: "https://site.financialmodelingprep.com/developer/docs",
-    retired: true,
-    retiredNote: "Retired on Socratic-Trade (Congress.Trade only). Key row kept for archaeology; product code never calls FMP."
   },
   {
     service: "alphavantage",
@@ -269,6 +273,12 @@ const API_KEY_CATALOG = [
 const VALID_SERVICES: ReadonlySet<string> = new Set(API_KEY_CATALOG.map((item) => item.service));
 const PLAN_TIER_SERVICES = servicesWithPlanTierUi();
 
+const ServiceQueryParamSchema = z.string().min(1);
+
+function isAllowedService(canonical: string): boolean {
+  return VALID_SERVICES.has(canonical) || isRetiredMarketDataService(canonical);
+}
+
 function planTierFields(service: string, storedPlanTier?: string | null) {
   if (!PLAN_TIER_SERVICES.has(service)) {
     return { planTier: undefined as string | undefined, planTierOptions: undefined as undefined };
@@ -290,7 +300,15 @@ function canSelectCodeCli(request: NextRequest, userId: string): boolean {
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const userId = resolveRequestUserId(request);
-  const service = searchParams.get("service");
+  const rawService = searchParams.get("service");
+  let service: string | undefined;
+  if (rawService !== null) {
+    const parsedService = ServiceQueryParamSchema.safeParse(rawService);
+    if (!parsedService.success) {
+      return NextResponse.json({ error: "invalid service query parameter" }, { status: 400 });
+    }
+    service = parsedService.data;
+  }
 
   // A key's masked preview (first 8 + last 4, never a usable value) answers "WHICH key is serving
   // me?" — the question the write-only key store otherwise makes unanswerable when several keys
@@ -305,6 +323,17 @@ export async function GET(request: NextRequest) {
   // If a specific service is requested, resolve the key (user DB → env fallback)
   if (service) {
     const canonical = normalizeApiKeyService(service);
+    if (isRetiredMarketDataService(canonical)) {
+      const keys = listUserApiKeys(userId);
+      const stored = keys.find((k) => normalizeApiKeyService(k.service) === canonical);
+      return NextResponse.json({
+        service: canonical,
+        configured: Boolean(stored),
+        source: stored ? "retired" : "none",
+        retired: true,
+        retiredNote: "Retired on Socratic-Trade.\u00A0 Delete any stored key; product code never uses it."
+      });
+    }
     if (!VALID_SERVICES.has(canonical)) {
       return NextResponse.json({ error: `Invalid service. Must be one of: ${[...VALID_SERVICES].join(", ")}` }, { status: 400 });
     }
@@ -328,8 +357,31 @@ export async function GET(request: NextRequest) {
   // List all keys for the user (mask the actual key values)
   const keys = listUserApiKeys(userId);
   const storedByService = new Map(keys.map((key) => [normalizeApiKeyService(key.service), key]));
+  // A key stored for a retired service before retirement is listed (as retired, never resolved)
+  // so the user can still see and delete it.  Retired services have no catalog row.
+  const retiredStored = keys
+    .map((key) => normalizeApiKeyService(key.service))
+    .filter((svc, i, all) => all.indexOf(svc) === i && !VALID_SERVICES.has(svc) && isRetiredMarketDataService(svc))
+    .map((svc) => {
+      const stored = storedByService.get(svc);
+      return {
+        service: svc,
+        label: retiredServiceLabel(svc),
+        category: "Market data",
+        required: false,
+        docsUrl: "",
+        unlocks: "Retired on Socratic-Trade.\u00A0 This stored key is never used.",
+        configured: true,
+        source: "retired" as const,
+        preview: stored?.apiKey ? maskApiKeyPreview(stored.apiKey) : undefined,
+        updatedAt: stored?.updatedAt,
+        savedLabel: stored?.label,
+        retired: true,
+        retiredNote: "Retired on Socratic-Trade.\u00A0 Delete this stored key; product code never uses it."
+      };
+    });
   return NextResponse.json({
-    keys: API_KEY_CATALOG.map((entry) => {
+    keys: [...API_KEY_CATALOG.map((entry) => {
       const stored = storedByService.get(entry.service);
       const resolved = resolveApiKeyWithSource(entry.service, userId);
       const envVar = apiKeyEnvVarForService(entry.service);
@@ -348,7 +400,7 @@ export async function GET(request: NextRequest) {
         retired: retired || isRetiredMarketDataService(entry.service),
         retiredNote: "retiredNote" in entry ? entry.retiredNote : undefined
       };
-    })
+    }), ...retiredStored]
   });
 }
 
@@ -369,20 +421,21 @@ export async function POST(request: NextRequest) {
     const userId = resolveRequestUserId(request, body);
 
     const canonical = service ? normalizeApiKeyService(service) : "";
-    if (!canonical || !VALID_SERVICES.has(canonical)) {
-      return NextResponse.json({ error: `service is required and must be one of: ${[...VALID_SERVICES].join(", ")}` }, { status: 400 });
-    }
 
-    // FMP (and any other catalog row marked retired / retired-market-data) cannot be stored for
-    // product use — ST does not call those vendors; Congress.Trade owns that class of data.
-    if (isRetiredMarketDataService(canonical) || API_KEY_CATALOG.some((e) => e.service === canonical && "retired" in e && e.retired === true)) {
+    // A retired market-data service (or a catalog row marked retired) cannot be stored for
+    // product use — ST does not call those vendors.  Checked before the catalog gate so a retired
+    // service gets this guidance, not the generic service list.
+    if (canonical && (isRetiredMarketDataService(canonical) || API_KEY_CATALOG.some((e) => e.service === canonical && "retired" in e && e.retired === true))) {
       return NextResponse.json(
         {
           error:
-            "This provider is retired on Socratic-Trade. Use Congress.Trade for FMP-class latency / congressional alt-data; do not store a key here."
+            "This provider is retired on Socratic-Trade.\u00A0 Use Congress.Trade for congressional / alt-data; do not store a key here."
         },
         { status: 400 }
       );
+    }
+    if (!canonical || !VALID_SERVICES.has(canonical)) {
+      return NextResponse.json({ error: `service is required and must be one of: ${[...VALID_SERVICES].join(", ")}` }, { status: 400 });
     }
 
     // Route toggle (Meta / MiniMax): OpenRouter by default, or direct with the user's own key.
@@ -475,17 +528,30 @@ export async function POST(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const userId = resolveRequestUserId(request);
-  const service = searchParams.get("service");
-
-  if (!service) {
-    return NextResponse.json({ error: "service query parameter is required" }, { status: 400 });
+  const parsedService = ServiceQueryParamSchema.safeParse(searchParams.get("service"));
+  if (!parsedService.success) {
+    const missing = searchParams.get("service") === null || searchParams.get("service") === "";
+    return NextResponse.json(
+      { error: missing ? "service query parameter is required" : "invalid service query parameter" },
+      { status: 400 }
+    );
   }
 
-  const canonical = normalizeApiKeyService(service);
-  if (!VALID_SERVICES.has(canonical)) {
+  const canonical = normalizeApiKeyService(parsedService.data);
+  // Retired services are not in the catalog, but a key stored before retirement must stay revocable.
+  if (!isAllowedService(canonical)) {
     return NextResponse.json({ error: `Invalid service. Must be one of: ${[...VALID_SERVICES].join(", ")}` }, { status: 400 });
   }
 
-  const deleted = deleteUserApiKey(userId, canonical);
+  // A row may be stored under a legacy alias id (e.g. "fmp_api_key" for "fmp").  Delete by each
+  // stored row's RAW service id as well as the canonical id, so alias rows cannot survive and reappear.
+  const matchesCanonical = (k: { service: string }) => normalizeApiKeyService(k.service) === canonical;
+  const storedRows = listUserApiKeys(userId).filter(matchesCanonical);
+  deleteUserApiKey(userId, canonical);
+  for (const row of storedRows) {
+    if (row.service !== canonical) deleteUserApiKey(userId, row.service);
+  }
+  // `deleted` is true only when a stored key existed and none remains, so a no-op is distinguishable.
+  const deleted = storedRows.length > 0 && !listUserApiKeys(userId).some(matchesCanonical);
   return NextResponse.json({ success: true, deleted });
 }
