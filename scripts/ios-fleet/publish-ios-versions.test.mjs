@@ -234,3 +234,113 @@ test("the manifest target is the org repository the apps read", () => {
   assert.match(src, /Simple-With-Us\/AI-Fleet-Coordinator/);
   assert.match(src, /site\/ios-versions\.json/);
 });
+
+test("placeholder (from IPA) versions are refused before any publish", () => {
+  const { dir, base } = fixture("afc-ios-versions-placeholder-", FLEET);
+  const res = run(
+    [
+      "--bundle-id",
+      "com.socratictrade.ios",
+      "--version",
+      "(from IPA)",
+      "--build",
+      "(from IPA)",
+      "--base-json",
+      base,
+      "--skip-local-write",
+      "--skip-push",
+    ],
+    { GH_TOKEN: "", GITHUB_TOKEN: "" },
+  );
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /placeholder/i);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("no-op comparison runs before any write to LOCAL_JSON", () => {
+  // Regression: when the remote fetch fails, BASE_JSON is LOCAL_JSON.  Writing
+  // MERGED before the comparison made every publish look like a no-op.
+  const src = readFileSync(SCRIPT, "utf8");
+  const noopIdx = src.indexOf("NEED_PUBLISH");
+  const writeIdx = src.indexOf('printf \'%s\\n\' "$MERGED" >"$LOCAL_JSON"');
+  assert.ok(noopIdx > 0, "no-op gate must exist");
+  assert.ok(writeIdx > 0, "local write must exist");
+  assert.ok(noopIdx < writeIdx, "no-op gate must run before LOCAL_JSON is overwritten");
+  const doc = JSON.parse(JSON.stringify(FLEET));
+  doc.apps["com.socratictrade.ios"].build = "202608250045";
+  const { dir, base, out } = fixture("afc-ios-versions-localbase-", doc);
+  // Same version+build is a no-op even when we would have written LOCAL_JSON.
+  const res = run(
+    [
+      "--bundle-id",
+      "com.socratictrade.ios",
+      "--version",
+      "1.0.68",
+      "--build",
+      "202608250045",
+      "--base-json",
+      base,
+      "--out-json",
+      out,
+      "--skip-local-write",
+    ],
+    { GH_TOKEN: "", GITHUB_TOKEN: "" },
+  );
+  assert.equal(res.status, 0, res.stderr || res.stdout);
+  assert.match(res.stdout, /already recorded/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("appleId or displayName drift is not a no-op", () => {
+  const doc = JSON.parse(JSON.stringify(FLEET));
+  doc.apps["com.socratictrade.ios"].build = "202608250045";
+  const { dir, base } = fixture("afc-ios-versions-meta-", doc);
+  const res = run(
+    [
+      "--bundle-id",
+      "com.socratictrade.ios",
+      "--version",
+      "1.0.68",
+      "--build",
+      "202608250045",
+      "--apple-id",
+      "9999999999",
+      "--display-name",
+      "Socratic-Trade-Renamed",
+      "--base-json",
+      base,
+      "--skip-local-write",
+    ],
+    { GH_TOKEN: "", GITHUB_TOKEN: "ghs_notarealtoken" },
+  );
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /GITHUB_TOKEN cannot write to/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("publish requires GH_TOKEN and never falls back to stored gh credentials", () => {
+  const src = readFileSync(SCRIPT, "utf8");
+  assert.match(src, /stored gh credentials are not an approved secret source/);
+  assert.doesNotMatch(src, /TOKEN_SOURCE="gh-auth"/);
+  const { dir, base } = fixture("afc-ios-versions-no-token-", FLEET);
+  const res = run(
+    ["--bundle-id", "com.socratictrade.ios", "--version", "1.0.69", "--base-json", base, "--skip-local-write"],
+    { GH_TOKEN: "", GITHUB_TOKEN: "" },
+  );
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /GH_TOKEN is required/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("pull-request publish re-seeds at the branch tip before the contents PUT", () => {
+  // Differential control: the previous direct-write path never re-read the
+  // tip.  The PR path must fetch_remote_json_at BASE_SHA before PUT so a
+  // concurrent manifest update on main is not rolled back.
+  const src = readFileSync(SCRIPT, "utf8");
+  assert.match(src, /fetch_remote_json_at/);
+  assert.match(src, /refusing to publish a pre-branch snapshot/);
+  assert.match(src, /refusing to publish from the local snapshot/);
+  assert.match(src, /--method PUT/);
+  assert.match(src, /-f branch="\$\{PR_BRANCH\}"/);
+  assert.match(src, /gh pr merge/);
+});

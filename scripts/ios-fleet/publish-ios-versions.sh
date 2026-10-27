@@ -84,6 +84,13 @@ done
 
 [[ -n "$BUNDLE_ID" && -n "$VERSION" ]] || { echo "need --bundle-id and --version" >&2; exit 2; }
 
+# Placeholder marketing/build values from --upload-only must never land in the
+# public fleet manifest.  Auto-merge would otherwise publish "(from IPA)".
+if [[ "$VERSION" == *"(from IPA)"* || "$BUILD" == *"(from IPA)"* ]]; then
+  echo "error: refusing to publish placeholder version/build (${VERSION}${BUILD:+ / ${BUILD}})" >&2
+  exit 1
+fi
+
 # The token the publish uses.  GITHUB_TOKEN is the workflow's own token:  it is
 # read-only by declaration and it cannot write to another repository, so it is
 # refused here rather than failing later with an authorization error that reads
@@ -91,6 +98,8 @@ done
 TOKEN=""
 TOKEN_SOURCE=""
 resolve_token() {
+  # Approved sources only: process environment (fleet GH_PAT as GH_TOKEN).
+  # Stored gh CLI credentials are outside the approved secret boundary.
   if [[ -n "${GH_TOKEN:-}" ]]; then
     TOKEN="$GH_TOKEN"
     TOKEN_SOURCE="env"
@@ -101,21 +110,22 @@ resolve_token() {
     echo "error: pass the fleet GH_PAT secret as GH_TOKEN (the ship workflow does)" >&2
     return 1
   fi
-  # No token in the environment:  gh uses its own stored credential.
-  if ! gh auth status >/dev/null 2>&1; then
-    echo "error: no gh credential and no GH_TOKEN; cannot publish the manifest" >&2
-    return 1
-  fi
-  TOKEN_SOURCE="gh-auth"
+  echo "error: GH_TOKEN is required to publish the manifest (stored gh credentials are not an approved secret source)" >&2
+  return 1
 }
 
 fetch_remote_json() {
+  fetch_remote_json_at "$1" "$BASE_BRANCH"
+}
+
+fetch_remote_json_at() {
   local dest="$1"
+  local ref="$2"
   if ! command -v gh >/dev/null 2>&1; then
     return 1
   fi
   local b64
-  b64="$(gh api "repos/${REPO}/contents/${REMOTE_PATH}?ref=${BASE_BRANCH}" --jq .content 2>/dev/null || true)"
+  b64="$(gh api "repos/${REPO}/contents/${REMOTE_PATH}?ref=${ref}" --jq .content 2>/dev/null || true)"
   [[ -n "$b64" ]] || return 1
   python3 -c 'import base64,sys; sys.stdout.write(base64.b64decode("".join(sys.argv[1].split())).decode())' "$b64" >"$dest"
 }
@@ -128,13 +138,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+BASE_SOURCE="explicit"
 if [[ -z "$BASE_JSON" ]]; then
   TMP_REMOTE="$(mktemp)"
   if fetch_remote_json "$TMP_REMOTE"; then
     BASE_JSON="$TMP_REMOTE"
+    BASE_SOURCE="remote"
   elif [[ -f "$LOCAL_JSON" ]]; then
     echo "warning: could not read the live manifest; seeding from the local snapshot ${LOCAL_JSON}" >&2
+    echo "warning: a push from this stale seed is refused; use --skip-push for a local-only refresh" >&2
     BASE_JSON="$LOCAL_JSON"
+    BASE_SOURCE="local"
   else
     echo "error: no remote ${REPO}/${REMOTE_PATH} and no local ${LOCAL_JSON}" >&2
     echo "error: refusing to publish an empty apps map (would wipe the fleet manifest)" >&2
@@ -185,6 +199,41 @@ sys.stdout.write("\n")
 PY
 )"
 
+# No-op check BEFORE any write to LOCAL_JSON.  When the remote fetch fails,
+# BASE_JSON is the local snapshot path; writing MERGED onto that path first
+# would make the comparison always match and silently skip every publish.
+read -r REMOTE_VERSION REMOTE_BUILD REMOTE_APPLE REMOTE_DISPLAY < <(python3 - "$BASE_JSON" "$BUNDLE_ID" <<'PY'
+import json, sys
+path, bundle = sys.argv[1:3]
+with open(path, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+entry = (data.get("apps") or {}).get(bundle) or {}
+apple = entry.get("appleId")
+apple_s = "" if apple is None else str(apple)
+print(
+    entry.get("marketingVersion") or "",
+    entry.get("build") or "",
+    apple_s,
+    entry.get("displayName") or "",
+)
+PY
+)
+NEED_PUBLISH=0
+if [[ "$REMOTE_VERSION" != "$VERSION" ]]; then NEED_PUBLISH=1; fi
+if [[ -n "$BUILD" && "$REMOTE_BUILD" != "$BUILD" ]]; then NEED_PUBLISH=1; fi
+if [[ -n "$APPLE_ID" && "$REMOTE_APPLE" != "$APPLE_ID" ]]; then NEED_PUBLISH=1; fi
+if [[ -n "$DISPLAY_NAME" && "$REMOTE_DISPLAY" != "$DISPLAY_NAME" ]]; then NEED_PUBLISH=1; fi
+if [[ "$NEED_PUBLISH" -eq 0 ]]; then
+  echo "version-manifest: ${BUNDLE_ID} ${VERSION}${BUILD:+ build ${BUILD}} is already recorded"
+  if [[ "$SKIP_LOCAL_WRITE" -eq 0 ]]; then
+    printf '%s\n' "$MERGED" >"$LOCAL_JSON"
+  fi
+  if [[ -n "$OUT_JSON" ]]; then
+    printf '%s\n' "$MERGED" >"$OUT_JSON"
+  fi
+  exit 0
+fi
+
 if [[ "$SKIP_LOCAL_WRITE" -eq 0 ]]; then
   printf '%s\n' "$MERGED" >"$LOCAL_JSON"
   echo "local-manifest-updated ${BUNDLE_ID} ${VERSION}"
@@ -198,34 +247,18 @@ if [[ "$SKIP_PUSH" -eq 1 ]]; then
   exit 0
 fi
 
-# Nothing to publish:  the remote already carries this version.  A pull
-# request for an unchanged manifest is noise, and the fleet's merge queue is
-# small.  The build is part of the comparison when one was passed, because a
-# ship that re-records the same marketing version with a NEW build is a real
-# change:  the version a tester installs is the build, not the label.
-#
-# This check runs BEFORE the credential is resolved.  A ship that has nothing
-# to publish must not need a token, and it must not reach the network at all;
-# a run that only re-records the version already on main leaves no pull
-# request behind and says so.
-read -r REMOTE_VERSION REMOTE_BUILD < <(python3 - "$BASE_JSON" "$BUNDLE_ID" <<'PY'
-import json, sys
-path, bundle = sys.argv[1:3]
-with open(path, "r", encoding="utf-8") as fh:
-    data = json.load(fh)
-entry = (data.get("apps") or {}).get(bundle) or {}
-print(entry.get("marketingVersion") or "", entry.get("build") or "")
-PY
-)
-if [[ "$REMOTE_VERSION" == "$VERSION" && ( -z "$BUILD" || "$REMOTE_BUILD" == "$BUILD" ) ]]; then
-  echo "version-manifest: ${BUNDLE_ID} ${VERSION}${BUILD:+ build ${BUILD}} is already recorded"
-  exit 0
+# A push seeded from the vendored local snapshot can drop fleet apps that the
+# live manifest already carries.  Only --base-json (tests) or a live remote
+# fetch may publish.
+if [[ "$BASE_SOURCE" == "local" ]]; then
+  echo "error: refusing to publish from the local snapshot; re-run when the live ${REPO}/${REMOTE_PATH} is readable" >&2
+  exit 1
 fi
 
 # The credential is resolved before any API call, so a run that cannot
 # possibly publish says why, instead of failing later on an authorization
 # error that reads like a branch rule.
-resolve_token
+resolve_token || exit 1
 if [[ -n "$TOKEN" ]]; then
   export GH_TOKEN="$TOKEN"
   unset GITHUB_TOKEN || true
@@ -243,8 +276,7 @@ PR_TITLE="chore: record ${BUNDLE_ID} ${VERSION} in the fleet iOS manifest"
 SENTENCE_GAP=$'\xc2\xa0 '
 PR_BODY="Automated fleet iOS version manifest update for ${BUNDLE_ID} ${VERSION}.${SENTENCE_GAP}Published by scripts/ios-fleet/publish-ios-versions.sh as a pull request, because AI-Fleet-Coordinator's ruleset refuses a direct write to main."
 
-# 1.  The branch starts at the current default branch, so the pull request
-#     never carries a stale manifest forward.
+# 1.  The branch starts at the current default branch tip.
 BASE_SHA="$(gh api "repos/${REPO}/git/ref/heads/${BASE_BRANCH}" --jq .object.sha)" || {
   echo "error: could not read ${REPO} ${BASE_BRANCH}" >&2
   exit 1
@@ -255,7 +287,53 @@ else
   gh api --method POST "repos/${REPO}/git/refs" -f ref="refs/heads/${PR_BRANCH}" -f sha="$BASE_SHA" >/dev/null
 fi
 
-# 2.  The document lands on that branch, never on the default branch.
+# 2.  Re-seed from the manifest AT that tip and re-merge.  The earlier MERGED
+#     document was built from a fetch that may predate commits that landed on
+#     main between the first read and the branch cut; writing it onto a
+#     branch cut from the newer tip would roll those siblings back.
+TIP_JSON="$(mktemp)"
+trap 'rm -f "${TIP_JSON}"; cleanup' EXIT
+if ! fetch_remote_json_at "$TIP_JSON" "$BASE_SHA"; then
+  echo "error: could not re-read ${REMOTE_PATH} at ${BASE_SHA}; refusing to publish a pre-branch snapshot" >&2
+  exit 1
+fi
+MERGED="$(python3 - "$TIP_JSON" "$BUNDLE_ID" "$VERSION" "$BUILD" "$APPLE_ID" "$DISPLAY_NAME" <<'PY'
+import json, sys, datetime
+path, bundle, version, build, apple_id, display = sys.argv[1:7]
+with open(path, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+if not isinstance(data, dict):
+    print("error: tip json is not an object", file=sys.stderr)
+    sys.exit(1)
+apps = data.get("apps")
+if not isinstance(apps, dict) or not apps:
+    print("error: tip json has no apps; refusing to publish a one-app replacement", file=sys.stderr)
+    sys.exit(1)
+before_count = len(apps)
+entry = dict(apps.get(bundle) or {})
+entry["marketingVersion"] = version
+if build:
+    entry["build"] = build
+if apple_id:
+    entry["appleId"] = int(apple_id)
+if display:
+    entry["displayName"] = display
+apps[bundle] = entry
+if len(apps) < before_count:
+    print("error: merge dropped apps", file=sys.stderr)
+    sys.exit(1)
+if before_count > 1 and len(apps) < 2:
+    print("error: refusing to publish a one-app document over a multi-app remote", file=sys.stderr)
+    sys.exit(1)
+data["apps"] = apps
+data["schemaVersion"] = 1
+data["updatedAt"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+json.dump(data, sys.stdout, indent=2)
+sys.stdout.write("\n")
+PY
+)"
+
+# 3.  The document lands on that branch, never on the default branch.
 CONTENT_B64="$(printf '%s\n' "$MERGED" | python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode())')"
 FILE_SHA="$(gh api "repos/${REPO}/contents/${REMOTE_PATH}?ref=${PR_BRANCH}" --jq .sha 2>/dev/null || true)"
 PUT_ARGS=(
@@ -273,7 +351,7 @@ gh api "${PUT_ARGS[@]}" >/dev/null || {
   exit 1
 }
 
-# 3.  The pull request.  An open one for this branch is reused, so a fleet
+# 4.  The pull request.  An open one for this branch is reused, so a fleet
 #     that ships twice a day leaves one reviewable pull request, not a pile.
 PR_NUMBER="$(gh api "repos/${REPO}/pulls?head=${REPO%%/*}:${PR_BRANCH}&state=open" --jq '.[0].number' 2>/dev/null || true)"
 if [[ -n "$PR_NUMBER" && "$PR_NUMBER" != "null" ]]; then
@@ -286,12 +364,8 @@ else
   }
 fi
 
-# 4.  Arm the merge with the same elevated credential.  GitHub raises no
-#     workflow events for a merge made with the repository's own
-#     GITHUB_TOKEN, so the merge is armed here with the fleet token and
-#     lands once `test` and `gitleaks` are green.  The default branch's
-#     ruleset still decides whether the merge is allowed.
-if [[ "$AUTO_MERGE" == "1" && ( "$TOKEN_SOURCE" == "env" || "$TOKEN_SOURCE" == "gh-auth" ) ]]; then
+# 5.  Arm the merge with the elevated env credential only.
+if [[ "$AUTO_MERGE" == "1" && "$TOKEN_SOURCE" == "env" ]]; then
   PR_NUM="${PR_URL##*/}"
   if gh pr merge "$PR_NUM" --repo "$REPO" --squash --auto >/dev/null 2>&1; then
     echo "version-manifest: auto-merge armed on ${PR_URL}"

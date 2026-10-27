@@ -20,6 +20,22 @@ import test from "node:test";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SCRIPT = join(ROOT, "scripts/ios-fleet/publish-ios-versions.sh");
 
+
+function assertManifestShape(doc) {
+  assert.equal(doc.schemaVersion, 1, "schemaVersion must be 1");
+  assert.equal(typeof doc.updatedAt, "string", "updatedAt must be a string");
+  assert.ok(doc.updatedAt.length > 0, "updatedAt must be non-empty");
+  assert.equal(typeof doc.apps, "object", "apps must be an object");
+  assert.ok(doc.apps && !Array.isArray(doc.apps), "apps must be a plain object");
+  for (const [bundle, entry] of Object.entries(doc.apps)) {
+    assert.equal(typeof bundle, "string");
+    assert.ok(bundle.length > 0);
+    assert.equal(typeof entry, "object");
+    assert.equal(typeof entry.marketingVersion, "string");
+    assert.ok(entry.marketingVersion.length > 0);
+  }
+}
+
 function run(args, env = {}) {
   return spawnSync("bash", [SCRIPT, ...args], { encoding: "utf8", env: { ...process.env, ...env } });
 }
@@ -80,6 +96,7 @@ test("publishing from a stale snapshot omits later fleet apps", () => {
   ]);
   assert.equal(res.status, 0, res.stderr || res.stdout);
   const merged = JSON.parse(readFileSync(out, "utf8"));
+  assertManifestShape(merged);
   assert.ok(!merged.apps["net.dealdex"], "stale base must not invent later fleet keys");
   assert.equal(merged.apps["services.jays.usage.client.monitor"].marketingVersion, "1.0.8");
   assert.equal(merged.apps["services.jays.usage.local.monitor"].marketingVersion, "1.0.7");
@@ -109,6 +126,7 @@ test("the merge keeps every sibling the base already carried", () => {
   ]);
   assert.equal(res.status, 0, res.stderr || res.stdout);
   const merged = JSON.parse(readFileSync(out, "utf8"));
+  assertManifestShape(merged);
   assert.deepEqual(Object.keys(merged.apps).sort(), Object.keys(STALE_SNAPSHOT.apps).sort());
   assert.equal(merged.apps["com.socratictrade.ios"].build, "202608250045");
   rmSync(dir, { recursive: true, force: true });
