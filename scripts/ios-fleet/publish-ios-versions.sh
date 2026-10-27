@@ -49,7 +49,6 @@ REPO="${AFC_MANIFEST_REPO:-Simple-With-Us/AI-Fleet-Coordinator}"
 REMOTE_PATH="site/ios-versions.json"
 BASE_BRANCH="${AFC_MANIFEST_BRANCH:-main}"
 PR_BRANCH_PREFIX="${AFC_MANIFEST_BRANCH_PREFIX:-ios-versions-publish}"
-AUTO_MERGE="${AFC_MANIFEST_AUTO_MERGE:-1}"
 
 BUNDLE_ID=""
 VERSION=""
@@ -369,14 +368,7 @@ else
   }
 fi
 
-# 5.  Arm the merge with the elevated env credential only.
-if [[ "$AUTO_MERGE" == "1" && "$TOKEN_SOURCE" == "env" ]]; then
-  PR_NUM="${PR_URL##*/}"
-  if gh pr merge "$PR_NUM" --repo "$REPO" --squash --auto >/dev/null 2>&1; then
-    echo "version-manifest: auto-merge armed on ${PR_URL}"
-  else
-    echo "version-manifest: auto-merge could not be armed on ${PR_URL}" >&2
-  fi
-fi
+# Publishing a manifest PR does not qualify its contents for merging.
+# Review and merge are owned by the normal current-head qualification lane.
 
 echo "version-manifest-pr ${PR_URL}"

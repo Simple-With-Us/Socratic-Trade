@@ -342,7 +342,7 @@ test("pull-request publish re-seeds at the branch tip before the contents PUT", 
   assert.match(src, /refusing to publish from the local snapshot/);
   assert.match(src, /--method PUT/);
   assert.match(src, /-f branch="\$\{PR_BRANCH\}"/);
-  assert.match(src, /gh pr merge/);
+  assert.doesNotMatch(src, /gh pr merge|AFC_MANIFEST_AUTO_MERGE/);
 });
 
 test("mocked branch-tip race has a stale control and publishes identical final output", () => {
