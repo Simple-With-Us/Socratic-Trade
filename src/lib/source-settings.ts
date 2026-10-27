@@ -7,9 +7,6 @@
  *      currently SEC_FILING_RAG_MAX_PER_RUN; see src/lib/server-knobs.ts)
  *   3. process.env[id] when the id looks like an env var (ALL_CAPS / underscores)
  *   4. catalog defaultValue
- *
- * FMP product module flags also mirror TradingPolicy.fmp* for backward compatibility
- * (policy remains source of truth when both exist — policy wins for those four ids).
  */
 
 import { LOCAL_USER } from "./db-api-keys";
@@ -21,7 +18,6 @@ import {
   sourceSettingById,
   type SourceSettingSpec
 } from "./source-settings-catalog";
-import type { TradingPolicy } from "./types";
 
 export const SOURCE_SETTINGS_USER_KEY = "source_settings";
 
@@ -106,39 +102,10 @@ function envLooksLikeFlag(id: string): boolean {
   return /^[A-Z][A-Z0-9_]*$/.test(id);
 }
 
-/**
- * Resolve a boolean source setting for a user.
- * FMP policy fields (fmp*Enabled) are also read from TradingPolicy when provided.
- */
-export function resolveSourceBool(
-  id: string,
-  userId: string = LOCAL_USER,
-  policy?: Pick<
-    TradingPolicy,
-    | "fmpRealTimeDataEnabled"
-    | "fmpMacroDataEnabled"
-    | "fmpEventsDataEnabled"
-    | "fmpFundamentalsDataEnabled"
-  >
-): boolean {
+/** Resolve a boolean source setting for a user. */
+export function resolveSourceBool(id: string, userId: string = LOCAL_USER): boolean {
   const spec = sourceSettingById(id);
   const default_ = typeof spec?.defaultValue === "boolean" ? spec.defaultValue : false;
-
-  // Policy mirror for the four classic FMP module flags
-  if (policy) {
-    if (id === "fmpRealTimeDataEnabled" && typeof policy.fmpRealTimeDataEnabled === "boolean") {
-      return policy.fmpRealTimeDataEnabled;
-    }
-    if (id === "fmpMacroDataEnabled" && typeof policy.fmpMacroDataEnabled === "boolean") {
-      return policy.fmpMacroDataEnabled;
-    }
-    if (id === "fmpEventsDataEnabled" && typeof policy.fmpEventsDataEnabled === "boolean") {
-      return policy.fmpEventsDataEnabled;
-    }
-    if (id === "fmpFundamentalsDataEnabled" && typeof policy.fmpFundamentalsDataEnabled === "boolean") {
-      return policy.fmpFundamentalsDataEnabled;
-    }
-  }
 
   const map = getUserSourceSettingsMap(userId);
   if (Object.prototype.hasOwnProperty.call(map, id)) {
