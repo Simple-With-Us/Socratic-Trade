@@ -29,14 +29,10 @@ import type { EnrichmentSources } from "./types";
 
 import {
   audit,
-  cancelUndispatchedProviderReservation,
   hasDataPoolConsent,
-  markProviderDispatchStarted,
-  reserveProviderDispatch,
   resolveAlpacaMarketData,
   resolveAlphaVantageKeyPool,
   resolveApiKeyWithSource,
-  settleProviderDispatch,
   type ApiKeySource
 } from "./db";
 import { logApiHealth, getServiceHealthSummaries, HEALTH_REASON_CONSECUTIVE_FAILURES } from "./db-health";
@@ -54,7 +50,6 @@ import {
   resolveTradierOptionsCredential
 } from "./keyless-options-enrichment";
 import { resolveQuiverApiKey } from "./quiver-provider";
-import { isDirectVendorAccessAllowed } from "./retired-direct-vendors";
 import {
   clearFilingApiKeyRejected,
   isFilingApiAuthStatus,
@@ -74,7 +69,7 @@ import { loadTickerCikMap } from "./web-sources/sec8k";
 import { readCompanyFactsCache } from "./web-sources/sec-facts";
 import { padCik } from "./web-sources/sec-filings";
 import { readProviderFieldCacheForSymbol, writeProviderFieldCache } from "./provider-field-cache";
-import { withProviderLimit, admitProviderRequests, refundProviderRequests, resetProviderQuotaState, resolveProviderQuota, scrubProviderErrorText, scrubProviderErrorTextForPool, appendErrorCause } from "./provider-rate-limit";
+import { withProviderLimit, admitProviderRequests, refundProviderRequests, resetProviderQuotaState, scrubProviderErrorText, scrubProviderErrorTextForPool, appendErrorCause } from "./provider-rate-limit";
 import { AlphaVantageKeyPool, getPoolForKeys, isAlphaVantageDailyCapMessage, millisUntilNextAlphaVantageDailyReset, tryReserveAlphaVantageCalls, refundAlphaVantageCalls, alphaVantageDailyCallBudget } from "./alpha-vantage-key-pool";
 import { tryReserveRapidApiCalls, refundRapidApiCalls, type RapidApiProviderKey } from "./rapidapi-quota";
 import {
@@ -232,7 +227,7 @@ export interface SymbolEnrichment {
   nearTheMoneyIv?: number;
   // Put/call open-interest ratio around the money (opt-in Robinhood option-chain tier).
   putCallRatio?: number;
-  // Numeric analyst price targets (FMP price-target-consensus; opt-in FMP_PRICE_TARGETS_ENABLED).
+  // Numeric analyst price targets (from App A or a keyed provider that supplies them).
   targetMean?: number;
   targetHigh?: number;
   targetLow?: number;
@@ -604,22 +599,14 @@ function providerNegativeTtlMs(): number {
 
 // How many outbound requests one enriched symbol costs a quota'd provider — passed to the request
 // quota (which budgets in REQUESTS, not symbols). Only providers in RATE_QUOTAS need this: tiingo
-// fires up to 3 sub-calls/symbol (iex, daily, [news]); twelvedata costs 1 credit/symbol; fmp fires
-// 2 unconditional (profile + insider) plus up to 3 conditional (ratios-ttm, grades-consensus,
-// price-target-consensus). Non-quota'd providers (finnhub, yahoo, alpha-vantage) are paced instead
-// and never consult this.
+// fires up to 3 sub-calls/symbol (iex, daily, [news]); twelvedata costs 1 credit/symbol.
+// Non-quota'd providers (finnhub, yahoo, alpha-vantage) are paced instead and never consult this.
 export function callsPerSymbol(
   provider: string,
-  opts?: { dropExtra?: boolean; skipPe?: boolean; skipConsensus?: boolean; wantTargets?: boolean }
+  opts?: { dropExtra?: boolean }
 ): number {
   switch (provider) {
     case "tiingo": return opts?.dropExtra ? 2 : 3;  // iex, daily, [news]
-    // 2 unconditional (profile + insider) + ratios-ttm (unless skipPe) + grades-consensus (unless
-    // skipConsensus) + price-target-consensus (only when wantTargets). Mirrors the fetch-path
-    // conditions one-for-one; range 2..5. The caller MUST derive skipPe/skipConsensus/wantTargets
-    // from the SAME skipFlagsFor(symbol) + wantTargets formula it dispatches with, so reservation
-    // equals dispatch per symbol.
-    case "fmp": return 2 + (opts?.skipPe ? 0 : 1) + (opts?.skipConsensus ? 0 : 1) + (opts?.wantTargets ? 1 : 0);
     default: return 1;                               // twelvedata (1 credit/symbol)
   }
 }
@@ -1220,8 +1207,6 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   // missing headlines/sentiment after the free wave resolved.
   const marketauxKey = resolveMarketauxApiKey();
   if (marketauxKey) providers.push(withHealthLane(new MarketauxEnrichmentProvider(marketauxKey), "env"));
-  // FMP EnrichmentProvider deliberately NOT registered (owner 2026-08-04). Class remains for
-  // tests / dead-code reference; requestFmp + enrich() are hard-blocked.
   if (roic.key) providers.push(withHealthLane(new RoicAiEnrichmentProvider(roic.key, roic.source, userId), roic.source));
   // Massive REST: REAL second short-interest source (FINRA short interest / free float) for the
   // Yahoo-vs-Massive disagreement cross-check. Supplies ONLY the carrier shortPercentOfFloatSecondary
@@ -1313,7 +1298,6 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
       "env"
     ));
     providers.push(withHealthLane(new AlphaVantageRapidApiEnrichmentProvider(rapidApiKey, "env", userId), "env"));
-    // FmpRapidApiEnrichmentProvider intentionally not registered — same retirement as native FMP.
     providers.push(withHealthLane(new InsidersRapidApiEnrichmentProvider(rapidApiKey, "env", userId), "env"));
     providers.push(withHealthLane(new TwelveDataRapidApiEnrichmentProvider(rapidApiKey, "env", userId), "env"));
     // Additional RapidAPI free-tier failover lanes. Working Pricing page (verified):
@@ -3686,452 +3670,6 @@ export class FinnhubEnrichmentProvider implements MarketEnrichmentProvider {
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return await response.json();
-  }
-}
-
-// ── FMP stable API provider ───────────────────────────────────────────────────
-// Stable FMP company-data lane. Company profile + insider activity are always
-// requested for a cold symbol; ratios/analyst/targets remain coverage-aware.
-
-/** Opt-in: fetch FMP price-target-consensus (an extra call per symbol; not on every key tier). */
-export function fmpPriceTargetsEnabled(): boolean {
-  const v = (process.env.FMP_PRICE_TARGETS_ENABLED ?? "").trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes" || v === "on";
-}
-
-export class FmpEnrichmentProvider implements MarketEnrichmentProvider {
-  readonly name = "fmp";
-  readonly costTier = "paid" as const;
-  readonly configured = true;
-  private readonly base = "https://financialmodelingprep.com/stable";
-  private readonly scope: CacheScope;
-  private readonly keySource: ApiKeySource;
-
-  constructor(
-    private readonly apiKey: string,
-    keySource: ApiKeySource = "env",
-    private readonly userId?: string
-  ) {
-    this.scope = cacheScopeForKeySource(keySource, userId);
-    this.keySource = keySource;
-  }
-
-  async enrich(symbols: string[], context?: EnrichmentContext): Promise<Record<string, SymbolEnrichment>> {
-    // Owner 2026-08-04: never call FMP from this app (even if constructed in tests/scripts).
-    if (!isDirectVendorAccessAllowed("fmp")) return {};
-    const normalized = Array.from(new Set(symbols.map(normalizeSymbol))).filter(Boolean).slice(0, maxSymbols());
-    if (normalized.length === 0) return {};
-
-    const now = Date.now();
-    const consented = hasDataPoolConsent(this.userId ?? "local");
-    const result: Record<string, SymbolEnrichment> = {};
-    const misses: string[] = [];
-    // Per-symbol coverage-hint skip flags (short-circuit only). Shared by the cache-hit
-    // path AND the fetch path so a cached FMP row is trimmed the same way a fresh fetch is.
-    const skipFlagsFor = (symbol: string) => {
-      const covered = context?.coveredFields?.[symbol];
-      // P/E is first-wins (App A registered first wins anyway); analyst consensus is
-      // blended, so skip it only when App A's analyst genuinely came from FMP; targets
-      // are first-wins but skip the call only when App A covers all four.
-      const skipPe = covered?.has("peRatio") ?? false;
-      const skipConsensus = (covered?.has("analystRating") ?? false) && context?.analystSource?.[symbol] === this.name;
-      const skipTargets = ["targetMean", "targetHigh", "targetLow", "targetMedian"].every((k) => covered?.has(k));
-      return { skipPe, skipConsensus, skipTargets };
-    };
-    for (const symbol of normalized) {
-      const cached = readEnrichmentCache("fmp", symbol, this.userId, consented, now);
-      if (cached) {
-        // A cache hit bypasses the fetch-path skip logic, so apply the hint here too:
-        // if App A covers FMP's OWN consensus with a fresher row, drop the cached FMP
-        // analyst (analystBySource merges last-writer-wins, so a stale cached fmp entry
-        // would otherwise overwrite App A's fresher fmp-keyed analyst in the blend).
-        if (skipFlagsFor(symbol).skipConsensus && cached.data.analystBySource) {
-          const { analystBySource, analystRating, analystScore, ...rest } = cached.data;
-          // A leftover field is only USEFUL if App A doesn't ALSO cover it. A cached
-          // { peRatio, analystBySource } leaves { peRatio } after stripping the consensus,
-          // but App A's first-wins peRatio (or covered targets) makes that contribute
-          // nothing — so the entry is effectively empty and FMP's unique fields
-          // (insider/senate, enabled targets) would never be refetched. Treat it as a MISS
-          // unless a NON-covered field survives, so the fetch path runs.
-          const covered = context?.coveredFields?.[symbol];
-          const usefulKeys = Object.keys(rest).filter((k) => !(covered?.has(k) ?? false));
-          if (usefulKeys.length > 0) result[symbol] = rest;
-          else misses.push(symbol);
-        } else {
-          result[symbol] = cached.data;
-        }
-      } else misses.push(symbol);
-    }
-
-    if (misses.length === 0) return result;
-
-    // UNIFORM request quota (provider-rate-limit.ts RATE_QUOTAS): fmp = 290/min account-wide (Starter
-    // is 300/min; 290 leaves headroom). Unlike tiingo/twelvedata, FMP's per-symbol cost is VARIABLE —
-    // 2..5 requests depending on this symbol's skip flags — so we budget per symbol, not scan-uniform.
-    // Build a plan per miss (same skipFlagsFor + wantTargets formula the fetch path uses, so reservation
-    // == dispatch), admit the total, then greedily take a best-first prefix of WHOLE symbols and defer
-    // the rest best-effort (the cascade + shared 6h cache cover them; coverage accretes across scans).
-    const targetsEnabled = fmpPriceTargetsEnabled(); // read once per scan
-    const plans = misses.map((symbol) => {
-      const { skipPe, skipConsensus, skipTargets } = skipFlagsFor(symbol);
-      const wantTargets = targetsEnabled && !skipTargets;
-      const cost = callsPerSymbol("fmp", { skipPe, skipConsensus, wantTargets });
-      return { symbol, skipPe, skipConsensus, wantTargets, cost };
-    });
-    const credKey = await apiKeyFingerprint(this.apiKey);
-    const totalWanted = plans.reduce((n, p) => n + p.cost, 0);
-    const allowed = admitProviderRequests("fmp", credKey, totalWanted);
-    // Greedy best-first prefix walk: misses arrive best-first, so take whole symbols in order until the
-    // next one doesn't fit, then defer it AND everything after it (preserves priority; mirrors tiingo's
-    // slice tail). `remaining` after the walk is the sub-symbol leftover admit() over-reserved.
-    let remaining = allowed;
-    const toQuery: typeof plans = [];
-    for (const p of plans) {
-      if (p.cost <= remaining) { toQuery.push(p); remaining -= p.cost; }
-      else break;
-    }
-    refundProviderRequests("fmp", credKey, remaining); // hand back the sub-symbol remainder
-    for (const p of plans.slice(toQuery.length)) result[p.symbol] = {}; // deferred; not queried/cached this run
-    if (toQuery.length === 0) return result; // no minute budget left — best-effort only
-
-    for (let i = 0; i < toQuery.length; i += CONCURRENCY) {
-      const chunk = toQuery.slice(i, i + CONCURRENCY);
-      await Promise.all(
-        chunk.map(async (plan) => {
-          // Reuse the reserved plan flags (do NOT recompute) so dispatch == reservation exactly.
-          const { symbol, skipPe, skipConsensus, wantTargets } = plan;
-          // Coverage hint (short-circuit only): when a free upstream (App A) already
-          // supplied P/E, analyst consensus, or price targets for this symbol, skip the
-          // matching FMP SUB-call — but always keep fetching FMP profile + insider data.
-          // (Same flags are
-          // applied to cache hits above.) skipTargets is folded into wantTargets already.
-          const skipTargets = !wantTargets;
-          const [peRaw, consensusRaw, profileRaw, insiderRaw, targetRaw] = await Promise.allSettled([
-            skipPe
-              ? Promise.resolve(undefined)
-              : this.getJson(`${this.base}/ratios-ttm?symbol=${encodeURIComponent(symbol)}`),
-            skipConsensus
-              ? Promise.resolve(undefined)
-              : this.getJson(`${this.base}/grades-consensus?symbol=${encodeURIComponent(symbol)}`),
-            this.getJson(`${this.base}/profile?symbol=${encodeURIComponent(symbol)}`),
-            this.getJson(
-              `${this.base}/insider-trading/search?symbol=${encodeURIComponent(symbol)}&page=0&limit=100`,
-              false,
-              [402, 403]
-            ),
-            wantTargets
-              ? this.getJson(
-                  `${this.base}/price-target-consensus?symbol=${encodeURIComponent(symbol)}`,
-                  false,
-                  [402, 403]
-                )
-              : Promise.resolve(undefined)
-            // NOTE: FMP does NOT provide short interest — there is no /short_interest (or equivalent)
-            // endpoint (verified via FMP's API docs + official MCP surface, 2026-07). A second
-            // short-interest source would need a real provider such as Massive or Finnhub.
-          ]);
-
-          let peRatio: number | undefined;
-          let pbRatio: number | undefined;
-          let debtToEquity: number | undefined;
-          let returnOnEquity: number | undefined;
-          let returnOnAssets: number | undefined;
-          let grossProfitMargin: number | undefined;
-          let ratiosDividendYield: number | undefined;
-          let peDate: string | undefined;
-          if (peRaw.status === "fulfilled" && Array.isArray(peRaw.value)) {
-            const row = (peRaw.value as Array<Record<string, unknown>>)[0];
-            const finite = (value: unknown) => {
-              const parsed = Number(value);
-              return Number.isFinite(parsed) ? parsed : undefined;
-            };
-            const percent = (value: unknown) => {
-              const parsed = finite(value);
-              return parsed === undefined ? undefined : Math.round(parsed * 10_000) / 100;
-            };
-            const pe = finite(row?.priceToEarningsRatioTTM);
-            const pb = finite(row?.priceToBookRatioTTM);
-            if (pe !== undefined && pe > 0) peRatio = pe;
-            if (pb !== undefined && pb > 0) pbRatio = pb;
-            debtToEquity = finite(row?.debtToEquityRatioTTM ?? row?.debtEquityRatioTTM);
-            returnOnEquity = percent(row?.returnOnEquityTTM);
-            returnOnAssets = percent(row?.returnOnAssetsTTM);
-            grossProfitMargin = percent(row?.grossProfitMarginTTM);
-            ratiosDividendYield = percent(row?.dividendYieldTTM);
-            if (typeof row?.date === "string") peDate = row.date;
-          }
-
-          // Stable company profile -> identity + durable operating/market facts. This
-          // replaces the duplicate per-symbol Senate call (Congress.Trade is the
-          // congressional system of record) without increasing the baseline call count.
-          let companyName: string | undefined;
-          let sector: string | undefined;
-          let industry: string | undefined;
-          let beta: number | undefined;
-          let dividendYield: number | undefined = ratiosDividendYield;
-          let fiftyTwoWeekHigh: number | undefined;
-          let fiftyTwoWeekLow: number | undefined;
-          if (profileRaw.status === "fulfilled" && Array.isArray(profileRaw.value)) {
-            const row = (profileRaw.value as Array<Record<string, unknown>>)[0];
-            if (row) {
-              const clean = (value: unknown) =>
-                typeof value === "string" && value.trim() ? value.trim() : undefined;
-              const finite = (value: unknown) => {
-                const parsed = Number(value);
-                return Number.isFinite(parsed) ? parsed : undefined;
-              };
-              companyName = clean(row.companyName);
-              sector = clean(row.sector);
-              industry = clean(row.industry);
-              beta = finite(row.beta);
-              const lastDividend = finite(row.lastDividend ?? row.lastDiv);
-              const profilePrice = finite(row.price);
-              if (lastDividend !== undefined && lastDividend >= 0 && profilePrice !== undefined && profilePrice > 0) {
-                dividendYield = Math.round((lastDividend / profilePrice) * 10_000) / 100;
-              }
-              const range = clean(row.range)?.match(/^\s*([\d.]+)\s*-\s*([\d.]+)\s*$/);
-              if (range) {
-                fiftyTwoWeekLow = finite(range[1]);
-                fiftyTwoWeekHigh = finite(range[2]);
-              }
-            }
-          }
-
-          // Analyst grades-consensus → 0–100 score + label + counts (blended by the cascade).
-          // FMP does not provide news, so it contributes no sentiment.
-          let analystBySource: Record<string, AnalystRatingDetail> | undefined;
-          if (consensusRaw.status === "fulfilled" && Array.isArray(consensusRaw.value)) {
-            const row = (consensusRaw.value as Array<Record<string, unknown>>)[0];
-            if (row) {
-              const counts = {
-                strongBuy: num(row.strongBuy),
-                buy: num(row.buy),
-                hold: num(row.hold),
-                sell: num(row.sell),
-                strongSell: num(row.strongSell)
-              };
-              const score = analystScoreFromCounts(counts);
-              if (score !== undefined) {
-                analystBySource = { [this.name]: { score: Math.round(score), label: labelFromAnalystScore(score), counts } };
-              }
-            }
-          }
-
-          let insiderSentiment: number | undefined;
-          if (insiderRaw.status === "fulfilled" && Array.isArray(insiderRaw.value)) {
-            const trades = insiderRaw.value as Array<Record<string, unknown>>;
-            let buys = 0;
-            let sells = 0;
-            for (const trade of trades.slice(0, 100)) {
-              const type = String(trade.transactionType || "").toLowerCase();
-              const acqDisp = String(
-                trade.acquisitionOrDisposition ?? trade.acquistionOrDisposition ?? ""
-              ).toLowerCase();
-              if (type.includes("buy") || type.includes("purchase") || acqDisp === "a") buys++;
-              else if (type.includes("sell") || type.includes("sale") || acqDisp === "d") sells++;
-            }
-            const total = buys + sells;
-            if (total > 0) {
-              insiderSentiment = Math.round((buys / total) * 100);
-            }
-          }
-
-          // Price-target-consensus → numeric targets. FMP stable shape:
-          // [{ symbol, targetHigh, targetLow, targetConsensus, targetMedian }]. Only positive values kept.
-          let targetMean: number | undefined;
-          let targetHigh: number | undefined;
-          let targetLow: number | undefined;
-          let targetMedian: number | undefined;
-          if (wantTargets && targetRaw.status === "fulfilled" && Array.isArray(targetRaw.value)) {
-            const row = (targetRaw.value as Array<Record<string, unknown>>)[0];
-            if (row) {
-              const pos = (v: unknown) => {
-                const n = Number(v);
-                return Number.isFinite(n) && n > 0 ? n : undefined;
-              };
-              targetMean = pos(row.targetConsensus);
-              targetHigh = pos(row.targetHigh);
-              targetLow = pos(row.targetLow);
-              targetMedian = pos(row.targetMedian);
-            }
-          }
-
-          const fieldDates: Partial<Record<keyof EnrichmentSources, string>> = {};
-          if (peDate) {
-            if (peRatio !== undefined) fieldDates.peRatio = peDate;
-            if (pbRatio !== undefined) fieldDates.pbRatio = peDate;
-            if (debtToEquity !== undefined) fieldDates.debtToEquity = peDate;
-            if (returnOnEquity !== undefined) fieldDates.returnOnEquity = peDate;
-            if (returnOnAssets !== undefined) fieldDates.returnOnAssets = peDate;
-            if (grossProfitMargin !== undefined) fieldDates.grossProfitMargin = peDate;
-            if (ratiosDividendYield !== undefined) fieldDates.dividendYield = peDate;
-          }
-
-          const data: SymbolEnrichment = {
-            ...(peRatio !== undefined && { peRatio }),
-            ...(pbRatio !== undefined && { pbRatio }),
-            ...(debtToEquity !== undefined && { debtToEquity }),
-            ...(returnOnEquity !== undefined && { returnOnEquity }),
-            ...(returnOnAssets !== undefined && { returnOnAssets }),
-            ...(grossProfitMargin !== undefined && { grossProfitMargin }),
-            ...(analystBySource !== undefined && { analystBySource }),
-            ...(companyName !== undefined && { companyName }),
-            ...(sector !== undefined && { sector }),
-            ...(industry !== undefined && { industry }),
-            ...(beta !== undefined && { beta }),
-            ...(dividendYield !== undefined && { dividendYield }),
-            ...(fiftyTwoWeekHigh !== undefined && { fiftyTwoWeekHigh }),
-            ...(fiftyTwoWeekLow !== undefined && { fiftyTwoWeekLow }),
-            ...(insiderSentiment !== undefined && { insiderSentiment }),
-            ...(targetMean !== undefined && { targetMean }),
-            ...(targetHigh !== undefined && { targetHigh }),
-            ...(targetLow !== undefined && { targetLow }),
-            ...(targetMedian !== undefined && { targetMedian }),
-            ...(Object.keys(fieldDates).length > 0 && { fieldDates })
-          };
-
-          // Breaker-skip refund: only the sub-calls we ACTUALLY dispatched count (skipped conditional
-          // slots are Promise.resolve(undefined) → "fulfilled", never a real request). When every
-          // dispatched sub-call rejected with CircuitOpenError the breaker threw before any request left
-          // the process — nothing was spent upstream, so hand back this symbol's reservation and don't
-          // cache. The per-service breaker gates all sub-calls of a symbol together, so a partial-symbol
-          // breaker skip can't occur. Mirrors tiingo's `if (breakerSkipped) refund(perSymbol)`.
-          const madeCalls = [
-            ...(skipPe ? [] : [peRaw]),
-            ...(skipConsensus ? [] : [consensusRaw]),
-            profileRaw,
-            insiderRaw,
-            ...(wantTargets ? [targetRaw] : [])
-          ];
-          const breakerSkipped = madeCalls.length > 0 && madeCalls.every(
-            (p) => p.status === "rejected" && p.reason instanceof CircuitOpenError
-          );
-          if (breakerSkipped) {
-            refundProviderRequests("fmp", credKey, plan.cost);
-            result[symbol] = data; // leave a miss to retry once the breaker closes; do NOT cache
-            return;
-          }
-
-          const promises = [peRaw, consensusRaw, profileRaw, insiderRaw];
-          const allRejected = promises.every((p) => p.status === "rejected");
-          const hasTransientError = promises.some((p) => p.status === "rejected" && isTransientError(p.reason));
-          const isEmpty = Object.keys(data).length === 0;
-          // A coverage-trimmed fetch (we skipped ratios-ttm and/or grades-consensus)
-          // yields a PARTIAL row. Don't write it to the normal fmp cache: a later scan
-          // with App A off/stale, or with the short-circuit flag off, would otherwise
-          // treat the partial as a full FMP hit and never refetch P/E/analyst until TTL.
-          // The covered fields come from App A live each scan; FMP refetches its uniques.
-          // A skipped target call only "trims" the result when targets would actually have
-          // been fetched (FMP_PRICE_TARGETS_ENABLED on); otherwise the row is complete and
-          // must still be cached, or FMP's calls would repeat every scan.
-          const trimmed = skipPe || skipConsensus || (skipTargets && fmpPriceTargetsEnabled());
-
-          if (allRejected || hasTransientError || isEmpty || trimmed) {
-            if (!trimmed) {
-              console.warn(
-                `[data-providers] FMP enrichment for ${symbol} skipped caching: ` +
-                `(allRejected=${allRejected}, hasTransientError=${hasTransientError}, isEmpty=${isEmpty})`
-              );
-            }
-          } else {
-            // 14-day TTL to preserve hoarded FMP data and avoid 403s on the free tier.
-            writeEnrichmentCache("fmp", symbol, this.scope, this.userId, data, now + 14 * 24 * 60 * 60 * 1000);
-          }
-          result[symbol] = data;
-        })
-      );
-    }
-    return result;
-  }
-
-  private async getJson(url: string, logHealth = true, suppressStatuses?: number[]): Promise<unknown> {
-    const operation = (() => {
-      try {
-        return new URL(url).pathname.split("/").filter(Boolean).at(-1) ?? "request";
-      } catch {
-        return "request";
-      }
-    })();
-    const reservation = reserveProviderDispatch({
-      provider: "fmp",
-      operation: `enrichment-${operation}`,
-      credentialRef: await apiKeyFingerprint(this.apiKey),
-      userId: this.userId ?? "local",
-      units: 1,
-      estimatedCostUsd: 0,
-      maxEstimatedCostUsdPer24h: 0,
-      windows: (resolveProviderQuota("fmp") ?? []).map((window) => ({
-        maxUnits: window.maxRequests,
-        windowMs: window.windowMs
-      }))
-    });
-    if (!reservation.admitted) throw new Error(`FMP durable ${reservation.reason} reservation denied.`);
-    let dispatched = false;
-    let settled = false;
-    let classificationAttempted = false;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
-    try {
-      const response = await fetchWithRetry(
-        url,
-        {
-          cache: "no-store",
-          signal: controller.signal,
-          // Header authentication keeps the credential out of URLs, thrown
-          // errors, proxy logs, and upstream diagnostics.
-          headers: { apikey: this.apiKey }
-        },
-        {
-          service: this.name,
-          keySource: this.keySource,
-          userId: this.userId,
-          // retries: 0 — each of the up-to-5 endpoints reserves exactly one request in the quota above;
-          // a built-in 429 retry would emit a second UNCOUNTED call and blow past the 290/min reservation
-          // (headroom is only 10). Same rationale as tiingo/twelvedata's getJson.
-          retries: 0,
-          durableAttempt: {
-            onDispatch: () => {
-              markProviderDispatchStarted(reservation.attemptId);
-              dispatched = true;
-            },
-            onResponse: (received) => {
-              if (!received.ok) {
-                classificationAttempted = true;
-                settleProviderDispatch(reservation.attemptId, "failed", {
-                  outcomeCode: `http-${received.status}`
-                });
-                settled = true;
-              }
-            },
-            onTransportError: (error) => {
-              classificationAttempted = true;
-              settleProviderDispatch(reservation.attemptId, "failed", {
-                outcomeCode: error instanceof Error ? error.name : "transport-error"
-              });
-              settled = true;
-            }
-          },
-          // An explicit suppress list wins; otherwise fall back to the old logHealth behavior (403 only).
-          suppressHealthStatuses: suppressStatuses ?? (logHealth ? undefined : [403])
-        }
-      );
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = await response.json();
-      classificationAttempted = true;
-      settleProviderDispatch(reservation.attemptId, "succeeded", {
-        outcomeCode: "validated-json"
-      });
-      settled = true;
-      return payload;
-    } catch (error) {
-      if (!dispatched) cancelUndispatchedProviderReservation(reservation.attemptId, "pre-dispatch-failure");
-      else if (!settled && !classificationAttempted) settleProviderDispatch(reservation.attemptId, "failed", {
-        outcomeCode: error instanceof SyntaxError ? "invalid-json" : "response-failure"
-      });
-      throw error;
-    } finally {
-      clearTimeout(timeout);
-    }
   }
 }
 
@@ -6784,27 +6322,6 @@ export class SecXbrlEnrichmentProvider implements MarketEnrichmentProvider {
     }
 
     return result;
-  }
-}
-
-// ── RapidAPI: Financial Modeling Prep ────────────────────────────────────────
-// RETIRED (owner 2026-08-04): never call FMP (native or RapidAPI-hosted) from
-// Socratic-Trade. Class kept as a no-op so imports/tests that construct it stay stable.
-
-export class FmpRapidApiEnrichmentProvider implements MarketEnrichmentProvider {
-  readonly name = "fmp-rapidapi";
-  readonly costTier = "free" as const;
-  readonly configured = true;
-  readonly quotaScarce = false;
-
-  constructor(
-    _apiKey: string,
-    _keySource: ApiKeySource = "env",
-    _userId?: string
-  ) {}
-
-  async enrich(_symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
-    return {};
   }
 }
 

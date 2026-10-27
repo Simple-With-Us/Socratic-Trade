@@ -284,6 +284,51 @@ test.describe("visual regression", () => {
     await assertStableScreenshot(page, "header-profile-menu.png", liveMasks(page));
   });
 
+  test("api keys retired-provider delete confirmation", async ({ page }) => {
+    await setupDeterministicPage(page);
+    // ST-4580: a key stored for a retired provider stays deletable, and the confirm copy must say
+    // it cannot be re-added.  Status-only fixture data; the label is pinned, so nothing needs a mask.
+    await page.route("**/api/keys", (route) =>
+      route.fulfill({
+        json: {
+          keys: [
+            {
+              service: "fmp",
+              label: "Financial Modeling Prep (FMP)",
+              category: "Market data",
+              required: false,
+              docsUrl: "",
+              unlocks: "Retired on Socratic-Trade.\u00A0 This stored key is never used.",
+              configured: true,
+              source: "retired",
+              retired: true,
+              retiredNote: "Retired on Socratic-Trade.\u00A0 Delete this stored key; product code never uses it."
+            }
+          ]
+        }
+      })
+    );
+    await page.route("**/api/consent", (route) =>
+      route.fulfill({ json: { ok: true, accepted: true, needed: false } })
+    );
+    await page.goto("/console/connections", { waitUntil: "domcontentloaded" });
+    await acceptConsentIfShown(page, 10_000);
+    // Decorative animated candles, not the card.
+    await page.addStyleTag({ content: "canvas { visibility: hidden !important; }" });
+    const card = page
+      .locator("section.con-card")
+      .filter({ has: page.getByRole("heading", { name: "API keys", exact: true }) });
+    await card.getByRole("button", { name: "Remove", exact: true }).click();
+    await expect(card.getByText(/is retired on Socratic-Trade, so a key for it cannot be added again/)).toBeVisible();
+
+    await freezeMotion(page);
+    await expect(card).toHaveScreenshot("api-keys-retired-delete-confirm.png", {
+      animations: "disabled",
+      maxDiffPixelRatio: 0.01,
+      timeout: 30_000,
+    });
+  });
+
   test("login page", async ({ page }) => {
     await setupDeterministicPage(page);
     await page.goto("/login", { waitUntil: "domcontentloaded" });
