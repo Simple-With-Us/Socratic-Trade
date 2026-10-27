@@ -52,4 +52,17 @@ class AdapterTests(unittest.TestCase):
         for kwargs in [{'ttl':1},{'ttl':3601},{'ttl':True},{'slug':'swu-echo'},{'token':'ghp_fake'}]:
             with self.assertRaises(w.Refused):self.run_mint(**kwargs)
 
+    def test_null_or_malformed_graphql_viewer_fails_closed(self):
+        for response in [None, {}, {'data':None}, {'data':{'viewer':None}}, {'data':[]}, {'data':{'viewer':[]} }]:
+            calls=[]
+            def request(*args):
+                calls.append(args)
+                return {'app_slug':'swu-wise','token':'ghs_fake','expires_in_seconds':3590} if len(calls)==1 else response
+            with self.assertRaises(w.Refused):w.mint_verified(self.config(),request)
+    def test_environment_export_mode_is_refused_before_fetch(self):
+        from unittest.mock import patch
+        with patch.object(w.sys,'argv',['wise-relay-exec.py','--github-env']), patch.object(w.subprocess,'run') as run:
+            with self.assertRaises(w.Refused):w.main()
+            run.assert_not_called()
+
 if __name__=='__main__':unittest.main()

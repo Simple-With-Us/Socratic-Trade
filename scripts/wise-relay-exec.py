@@ -90,15 +90,14 @@ def mint_verified(config, request=request_json):
     viewer = request('https://api.github.com/graphql',
                      {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json'},
                      {'query': 'query { viewer { login } }'})
-    if not isinstance(viewer, dict) or viewer.get('errors') or viewer.get('data', {}).get('viewer', {}).get('login') != ACTOR:
+    if not isinstance(viewer, dict) or viewer.get('errors') or not isinstance(viewer.get('data'), dict) or not isinstance(viewer['data'].get('viewer'), dict) or viewer['data']['viewer'].get('login') != ACTOR:
         raise Refused('GitHub principal mismatch')
     return token
 
 
 def main():
-    github_env = sys.argv[1:] == ['--github-env']
-    if not github_env and (len(sys.argv) < 3 or sys.argv[1] != '--'):
-        raise Refused('usage: wise-relay-exec.py -- command [args] | --github-env')
+    if len(sys.argv) < 3 or sys.argv[1] != '--':
+        raise Refused('usage: wise-relay-exec.py -- command [args]')
     env = dict(os.environ)
     if not env.get('INFISICAL_TOKEN', '').startswith('st.'):
         raise Refused('dedicated Infisical service token required')
@@ -119,15 +118,6 @@ def main():
     except (subprocess.SubprocessError, OSError, ValueError):
         raise Refused('Infisical dedicated-folder fetch failed') from None
     token = mint_verified(config)
-    if github_env:
-        # Workflow file is trusted base source; never write to job outputs.
-        destination = os.environ.get('GITHUB_ENV')
-        if not destination:
-            raise Refused('GitHub environment file missing')
-        print('::add-mask::' + token)
-        with open(destination, 'a') as output:
-            output.write('WISE_MERGE_TOKEN=' + token + '\n')
-        return
     # Do not pass bearer or Infisical bootstrap to the consumer command.
     env.pop('INFISICAL_TOKEN', None)
     env['GH_TOKEN'] = token
