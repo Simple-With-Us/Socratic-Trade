@@ -389,3 +389,14 @@ test("no-op with empty middle fields preserves timestamp and exact bytes",()=>{
  assert.equal(readFileSync(out,"utf8"),readFileSync(base,"utf8"));
  rmSync(dir,{recursive:true,force:true});
 });
+
+
+test("legacy numeric string appleId compares equal and invalid CLI id fails clearly",()=>{
+ const doc=structuredClone(FLEET);doc.apps["com.socratictrade.ios"].appleId="6799238379";
+ const {dir,base,out}=fixture("legacy-apple-",doc);
+ const args=["--bundle-id","com.socratictrade.ios","--version","1.0.68","--base-json",base,"--out-json",out,"--skip-local-write","--skip-push"];
+ const ok=run([...args,"--apple-id","6799238379"]);
+ assert.equal(ok.status,0,ok.stderr);assert.match(ok.stdout,/already recorded/);
+ const bad=run([...args,"--apple-id","legacy-name"]);
+ assert.equal(bad.status,2);assert.match(bad.stderr,/must be numeric/);assert.doesNotMatch(bad.stderr,/Traceback/);
+ rmSync(dir,{recursive:true,force:true});

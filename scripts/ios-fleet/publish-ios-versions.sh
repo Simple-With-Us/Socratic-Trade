@@ -84,6 +84,11 @@ done
 
 [[ -n "$BUNDLE_ID" && -n "$VERSION" ]] || { echo "need --bundle-id and --version" >&2; exit 2; }
 
+if [[ -n "$APPLE_ID" && ! "$APPLE_ID" =~ ^[0-9]+$ ]]; then
+  echo "error: --apple-id must be numeric; refusing an invalid App Store identifier" >&2
+  exit 2
+fi
+
 # Placeholder marketing/build values from --upload-only must never land in the
 # public fleet manifest.  Auto-merge would otherwise publish "(from IPA)".
 if [[ "$VERSION" == *"(from IPA)"* || "$BUILD" == *"(from IPA)"* ]]; then
@@ -208,7 +213,12 @@ path, bundle, version, build, apple, display = sys.argv[1:]
 entry = (json.load(open(path, encoding="utf-8")).get("apps") or {}).get(bundle) or {}
 same = entry.get("marketingVersion") == version
 for key, wanted in [("build", build), ("appleId", int(apple) if apple else None), ("displayName", display)]:
-    if wanted is not None and wanted != "": same = same and entry.get(key) == wanted
+    if wanted is not None and wanted != "":
+        actual = entry.get(key)
+        if key == "appleId":
+            try: actual = int(actual)
+            except (TypeError, ValueError): pass
+        same = same and actual == wanted
 print("0" if same else "1")
 PY
 )"
