@@ -5605,7 +5605,7 @@ async function proposeTrades(input: {
   );
 
   // Forward economic-event awareness (handoff 3.5): the next ~5 calendar days of scheduled
-  // HIGH-impact US events (CPI/FOMC/NFP class) from the daily-watermarked FMP calendar ingest.
+  // HIGH-impact US events (CPI/FOMC/NFP class) from the daily-watermarked economic-calendar ingest.
   // Key-gated + fail-open: no key, an ingest failure, or an empty calendar all yield [] and the
   // prompt block below is OMITTED entirely — never fabricated, never an empty scaffold.
   const upcomingEconomicEvents = await getUpcomingEconomicEventsForPrompt(input.userId).catch(() => []);

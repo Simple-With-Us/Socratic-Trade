@@ -34,9 +34,6 @@ import type { EarningsCallsTranscriptRow } from "../src/lib/db-earningscalls";
 const storeDocumentStub = vi.hoisted(() => ({
   impl: undefined as undefined | ((...args: unknown[]) => unknown)
 }));
-const requestFmpStub = vi.hoisted(() => ({
-  impl: undefined as undefined | ((...args: unknown[]) => unknown)
-}));
 const notifyStub = vi.hoisted(() => ({
   impl: undefined as undefined | ((...args: unknown[]) => unknown),
   calls: [] as unknown[][]
@@ -49,16 +46,6 @@ vi.mock("../src/lib/vector-db", async (importOriginal) => {
     managedVectorLedgerAuthority: vi.fn(),
     storeDocument: (...args: Parameters<typeof actual.storeDocument>) =>
       storeDocumentStub.impl ? storeDocumentStub.impl(...args) : actual.storeDocument(...args)
-  };
-});
-
-vi.mock("../src/lib/fmp-common", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/lib/fmp-common")>();
-  return {
-    managedVectorLedgerAuthority: vi.fn(),
-    ...actual,
-    requestFmp: (...args: Parameters<typeof actual.requestFmp>) =>
-      requestFmpStub.impl ? requestFmpStub.impl(...args) : actual.requestFmp(...args)
   };
 });
 
@@ -104,7 +91,6 @@ const ENV_KEYS = [
   "EARNINGSCALLS_PREVIEW_GUARD_MIN_CHARS",
   "EARNINGSCALLS_MAX_REQUESTS_PER_PASS",
   "EARNINGSCALLS_ENTITLEMENT_PROBE_ANCHOR",
-  "FMP_API_KEY",
   "RAG_PINECONE_WRITE_CLASS"
 ] as const;
 const savedEnv = new Map<string, string | undefined>();
@@ -117,7 +103,6 @@ afterEach(() => {
     else process.env[key] = value;
   }
   storeDocumentStub.impl = undefined;
-  requestFmpStub.impl = undefined;
   notifyStub.impl = undefined;
   notifyStub.calls = [];
 });
@@ -1016,26 +1001,23 @@ describe("resolution fallback + lease/ingest semantics (adapted from the pre-red
     }
   });
 
-  it("an UNAVAILABLE FMP calendar (unentitled 402/403 -> null) falls back to probing; a real empty calendar is authoritative (quiet day, 0 requests)", async () => {
+  it("an UNAVAILABLE recency calendar (undefined) falls back to probing; a real empty calendar is authoritative (quiet day, 0 requests)", async () => {
     await primeConfirmedEntitlement();
     const { refreshEarningsCallsTranscriptsIfDue } = await lib();
     process.env.EARNINGSCALLS_API_KEY = "test-key";
-    process.env.FMP_API_KEY = "fmp-test-key";
-    requestFmpStub.impl = () => Promise.resolve(null);
     const log1: HttpLogEntry[] = [];
     const r1 = await refreshEarningsCallsTranscriptsIfDue(NOW, passDeps({
       http: makeHttp((path) => (path.startsWith("/transcripts/recent") ? { ok: true, payload: { data: [] } } : { ok: true, payload: latestCallPayload({ event_date_time: "2025-01-05 21:00:00" }) }), log1),
-      heldSymbolValues: () => new Map([["FMPX", 1000]]),
-      recentlyReported: undefined
+      heldSymbolValues: () => new Map([["CALX", 1000]]),
+      recentlyReported: () => Promise.resolve(undefined)
     }));
     expect(r1.probed).toBe(1);
 
-    requestFmpStub.impl = () => Promise.resolve([]);
     const log2: HttpLogEntry[] = [];
     const r2 = await refreshEarningsCallsTranscriptsIfDue(NOW, passDeps({
       http: makeHttp(() => ({ ok: true, payload: latestCallPayload() }), log2),
-      heldSymbolValues: () => new Map([["FMPY", 1000]]),
-      recentlyReported: undefined
+      heldSymbolValues: () => new Map([["CALY", 1000]]),
+      recentlyReported: () => Promise.resolve(new Set<string>())
     }));
     expect(r2.probed).toBe(0);
     expect(log2).toHaveLength(0); // quiet day: not even the listing call
