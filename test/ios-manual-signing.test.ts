@@ -8,7 +8,7 @@
 // the generated pbxproj, the profile map, and the entitlements to each other,
 // and drive ship-testflight.sh against a stub xcodebuild to prove manual mode
 // never asks Xcode's provisioning service for anything.
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -164,13 +164,55 @@ exit 99
 `,
   );
   chmodSync(join(bin, "xcodebuild"), 0o755);
+  // ASC API stub via IOS_FLEET_NODE only — do not shadow real `node` on PATH.
+  // Bare node must stay real so load_secrets can run asc-key.mjs validate.
+  const ascNode = join(bin, "asc-node-stub");
+  const ascStubLines = [
+    "#!/usr/bin/env bash",
+    'cmd=""',
+    'for a in "$@"; do',
+    '  case "$a" in',
+    '    */asc-api.mjs) cmd="asc-api" ;;',
+    "    latest-marketing-patch|build-floor|released-store-version|next-dotted-build)",
+    '      if [[ "$cmd" == "asc-api" ]]; then cmd="${cmd}:${a}"; fi',
+    "      ;;",
+    "  esac",
+    "done",
+    'case "$cmd" in',
+    '  asc-api:latest-marketing-patch) printf \'%s\\n\' "${FAKE_ASC_PATCH:-0}"; exit 0 ;;',
+    "  asc-api:released-store-version)",
+    '    [[ "${FAKE_RELEASED:-}" == "fail" ]] && exit 2',
+    '    printf \'%s\\n\' "${FAKE_RELEASED:-}"',
+    "    exit 0",
+    "    ;;",
+    "  asc-api:next-dotted-build)",
+    '    [[ -n "${FAKE_DOTTED:-}" ]] || exit 2',
+    '    printf \'%s\\n\' "${FAKE_DOTTED}"',
+    "    exit 0",
+    "    ;;",
+    '  asc-api:build-floor) printf \'%s\\n\' "${FAKE_ASC_FLOOR:-0}"; exit 0 ;;',
+    "esac",
+    "exit 2",
+    "",
+  ];
+  writeFileSync(ascNode, ascStubLines.join("\n"));
+  chmodSync(ascNode, 0o755);
+  writeFileSync(join(bin, "fleet-secrets"), "#!/usr/bin/env bash\nexit 3\n");
+  chmodSync(join(bin, "fleet-secrets"), 0o755);
+  // Ephemeral EC P-256 key so asc-key.mjs validate accepts ASC_KEY_P8.
+  const ascKeyP8 = execFileSync(
+    "openssl",
+    ["genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256"],
+    { encoding: "utf8" },
+  );
   const installerStub = join(root, "install-stub.sh");
   writeFileSync(installerStub, `#!/usr/bin/env bash\nprintf 'INSTALL map=%s\\n' "$IOS_APPSTORE_PROFILES_MAP" >>"${log}"\n`);
   chmodSync(installerStub, 0o755);
-  return { root, bin, home, state, fakeRepo, log, installerStub };
+  return { root, bin, home, state, fakeRepo, log, installerStub, ascNode, ascKeyP8 };
 }
 
 function ship(sb: ReturnType<typeof sandbox>, extraEnv: Record<string, string>) {
+  const nodeDir = resolve(process.execPath, "..");
   const res = spawnSync(
     "bash",
     [
@@ -184,10 +226,20 @@ function ship(sb: ReturnType<typeof sandbox>, extraEnv: Record<string, string>) 
       env: {
         NODE_ENV: "test",
         HOME: sb.home,
-        PATH: `${sb.bin}:/usr/bin:/bin:/usr/sbin:/sbin`,
+        PATH: `${sb.bin}:${nodeDir}:/usr/bin:/bin:/usr/sbin:/sbin`,
         TMPDIR: join(sb.root, "tmp"),
         IOS_FLEET_STATE_DIR: sb.state,
         IOS_INSTALL_PROFILES_SCRIPT: sb.installerStub,
+        IOS_FLEET_NODE: sb.ascNode,
+        FLEET_SECRETS: join(sb.bin, "fleet-secrets"),
+        ASC_KEY_ID: "fakekeyid",
+        ASC_ISSUER_ID: "fakeissuerid",
+        ASC_KEY_P8: sb.ascKeyP8,
+        // Empty released train + dotted build for apps.json fixedMarketingVersion 0.1.0.
+        FAKE_RELEASED: "",
+        FAKE_DOTTED: "0.1.0",
+        FAKE_ASC_PATCH: "0",
+        FAKE_ASC_FLOOR: "0",
         ...extraEnv,
       },
       timeout: 60_000,
