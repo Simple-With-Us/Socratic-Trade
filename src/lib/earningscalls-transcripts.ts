@@ -1089,29 +1089,6 @@ async function ingestCachedTranscript(
   return true;
 }
 
-// ── Recency signal (FMP calendar) ──────────────────────────────────────────────
-
-/** FMP earnings-calendar prefilter (spends FMP quota, not this budget). undefined on any
- *  failure or when FMP is unconfigured/unentitled — callers then fall back to probe mode. */
-async function fmpRecentlyReportedSymbols(nowMs: number): Promise<Set<string> | undefined> {
-  if (!process.env.FMP_API_KEY) return undefined;
-  try {
-    const { requestFmp } = await import("./fmp-common");
-    const to = new Date(nowMs).toISOString().slice(0, 10);
-    const from = new Date(nowMs - earningsCallsRecentDays() * 86_400_000).toISOString().slice(0, 10);
-    const rows = await requestFmp<unknown>("/earnings-calendar", { from, to });
-    if (!Array.isArray(rows)) return undefined;
-    const reported = new Set<string>();
-    for (const row of rows) {
-      const symbol = normalizeSymbol(String((row as { symbol?: unknown } | null)?.symbol ?? ""));
-      if (symbol) reported.add(symbol);
-    }
-    return reported;
-  } catch {
-    return undefined;
-  }
-}
-
 /** UTC-safe event-date parse. A timezone-less date-time string parses as LOCAL time per
  *  ECMA-262, which would skew the recency window and the calendar (year, quarter) cache-key
  *  fallback by the host's UTC offset near boundaries. */
@@ -1156,7 +1133,7 @@ export interface EarningsCallsScoredCandidate {
 export interface EarningsCallsCandidateInputs {
   /** symbol -> summed |position value| across every connected account (tier 1). */
   holdingsValue: Map<string, number>;
-  /** FMP calendar membership within the recency window — boolean recency signal (tier 2). */
+  /** Injected earnings-calendar membership within the recency window — boolean recency signal (tier 2). */
   recentlyReportedSymbols?: Set<string>;
   /** symbol -> most recent known event_date (from the event index / listing engine) — finer
    *  recency ordering within tier 2 when available. */
@@ -1218,7 +1195,7 @@ export function scoreEarningsCallsCandidates(inputs: EarningsCallsCandidateInput
       score: date ? Date.parse(date) : 0,
       rationale: date
         ? `Reported earnings ${date} (within the recency window).`
-        : "Reported earnings within the recency window (FMP calendar)."
+        : "Reported earnings within the recency window (earnings calendar)."
     });
   }
 
@@ -1731,10 +1708,10 @@ async function runEarningsCallsPass(
     const requestCeiling = effectivePassRequestCeiling(targetTranscripts);
     if (targetTranscripts <= 0) return;
 
-    // 3) Recency signal (FMP calendar) — also gates the daily listing call on a confirmed-quiet
+    // 3) Recency signal (injected earnings calendar; none in production, FMP is never used) — also gates the daily listing call on a confirmed-quiet
     //    day (memo: "0 requests" when nothing tracked reported). A burst always proceeds
     //    regardless: it explicitly reaches for a batch NOW, not just what reported today.
-    const reported = await (deps.recentlyReported ?? (() => fmpRecentlyReportedSymbols(nowMs)))();
+    const reported = deps.recentlyReported ? await deps.recentlyReported() : undefined;
     if (!isBurst && reported !== undefined && reported.size === 0) return; // quiet day, 0 requests
 
     // 4) Entitlement /me probe (only while status is genuinely unknown) — a best-effort tier-text
