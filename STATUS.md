@@ -1,3 +1,6 @@
+## 2026-10-25 [Cursor] ST-4580 Kody review on PR #4932 (publisher/remove-fmp)
+
+**What.**  Closed eight unresolved Kody threads: server-only guard on `/api/keys`, Zod query validation, strict PATCH envelope, retired-key `source`/`docsUrl` contract, console copy + delete for retired rows, test env restore and Zod response parsing.  Rollout `docs/rollouts/2026-10-25-st-4580-kody-pr4932-review.md`.
 ## 2026-10-26 WISE: ST-4583 public footer logo
 
 Restore bundled transparent theme-aware wordmarks in the shared public footer.  Component previews pass mobile/desktop inspection; current-head hosted verification and review, then automatic deployment/live pixels, remain pending.  No native release or trading changes.  Rollout: `docs/rollouts/2026-10-26-st-4583-public-footer-logo.md`.

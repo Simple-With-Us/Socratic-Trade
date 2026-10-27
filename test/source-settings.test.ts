@@ -26,12 +26,11 @@ describe("source-settings", () => {
     });
   });
 
-  it("catalog has FMP module flags and SEC knobs", () => {
+  it("catalog has SEC knobs and no FMP settings", () => {
     const ids = SOURCE_SETTINGS_CATALOG.map((s) => s.id);
+    expect(ids.filter((id) => /fmp/i.test(id))).toEqual([]);
     expect(ids).toEqual(
       expect.arrayContaining([
-        "fmpRealTimeDataEnabled",
-        "fmpFundamentalsDataEnabled",
         "WEB_SOURCE_SEC8K_FULL_BODY",
         "SEC_FILING_RAG_MAX_PER_RUN",
         "RAG_EMBED_DISCLOSURES",
