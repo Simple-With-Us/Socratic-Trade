@@ -202,38 +202,24 @@ PY
 # No-op check BEFORE any write to LOCAL_JSON.  When the remote fetch fails,
 # BASE_JSON is the local snapshot path; writing MERGED onto that path first
 # would make the comparison always match and silently skip every publish.
-read -r REMOTE_VERSION REMOTE_BUILD REMOTE_APPLE REMOTE_DISPLAY < <(python3 - "$BASE_JSON" "$BUNDLE_ID" <<'PY'
+NEED_PUBLISH="$(python3 - "$BASE_JSON" "$BUNDLE_ID" "$VERSION" "$BUILD" "$APPLE_ID" "$DISPLAY_NAME" <<'PY'
 import json, sys
-path, bundle = sys.argv[1:3]
-with open(path, "r", encoding="utf-8") as fh:
-    data = json.load(fh)
-entry = (data.get("apps") or {}).get(bundle) or {}
-apple = entry.get("appleId")
-apple_s = "" if apple is None else str(apple)
-print(
-    entry.get("marketingVersion") or "",
-    entry.get("build") or "",
-    apple_s,
-    entry.get("displayName") or "",
-)
+path, bundle, version, build, apple, display = sys.argv[1:]
+entry = (json.load(open(path, encoding="utf-8")).get("apps") or {}).get(bundle) or {}
+same = entry.get("marketingVersion") == version
+for key, wanted in [("build", build), ("appleId", int(apple) if apple else None), ("displayName", display)]:
+    if wanted is not None and wanted != "": same = same and entry.get(key) == wanted
+print("0" if same else "1")
 PY
-)
-NEED_PUBLISH=0
-if [[ "$REMOTE_VERSION" != "$VERSION" ]]; then NEED_PUBLISH=1; fi
-if [[ -n "$BUILD" && "$REMOTE_BUILD" != "$BUILD" ]]; then NEED_PUBLISH=1; fi
-if [[ -n "$APPLE_ID" && "$REMOTE_APPLE" != "$APPLE_ID" ]]; then NEED_PUBLISH=1; fi
-if [[ -n "$DISPLAY_NAME" && "$REMOTE_DISPLAY" != "$DISPLAY_NAME" ]]; then NEED_PUBLISH=1; fi
+)"
 if [[ "$NEED_PUBLISH" -eq 0 ]]; then
   echo "version-manifest: ${BUNDLE_ID} ${VERSION}${BUILD:+ build ${BUILD}} is already recorded"
-  if [[ "$SKIP_LOCAL_WRITE" -eq 0 ]]; then
-    printf '%s\n' "$MERGED" >"$LOCAL_JSON"
-  fi
-  if [[ -n "$OUT_JSON" ]]; then
-    printf '%s\n' "$MERGED" >"$OUT_JSON"
-  fi
+  # Preserve exact existing bytes and timestamp on a no-op.
+  if [[ -n "$OUT_JSON" && "$OUT_JSON" != "$BASE_JSON" ]]; then cp "$BASE_JSON" "$OUT_JSON"; fi
   exit 0
 fi
 
+if [[ "$SKIP_PUSH" -eq 1 ]]; then
 if [[ "$SKIP_LOCAL_WRITE" -eq 0 ]]; then
   printf '%s\n' "$MERGED" >"$LOCAL_JSON"
   echo "local-manifest-updated ${BUNDLE_ID} ${VERSION}"
@@ -242,7 +228,6 @@ if [[ -n "$OUT_JSON" ]]; then
   printf '%s\n' "$MERGED" >"$OUT_JSON"
 fi
 
-if [[ "$SKIP_PUSH" -eq 1 ]]; then
   echo "skip-push ${BUNDLE_ID} ${VERSION} apps=$(python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("apps") or {}))' <<<"$MERGED")"
   exit 0
 fi
@@ -332,6 +317,16 @@ json.dump(data, sys.stdout, indent=2)
 sys.stdout.write("\n")
 PY
 )"
+
+# The local/output artifact must equal the final re-seeded PR document.
+if [[ "$SKIP_LOCAL_WRITE" -eq 0 ]]; then
+  printf '%s\n' "$MERGED" >"$LOCAL_JSON"
+  echo "local-manifest-updated ${BUNDLE_ID} ${VERSION}"
+fi
+if [[ -n "$OUT_JSON" ]]; then
+  printf '%s\n' "$MERGED" >"$OUT_JSON"
+fi
+
 
 # 3.  The document lands on that branch, never on the default branch.
 CONTENT_B64="$(printf '%s\n' "$MERGED" | python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode())')"

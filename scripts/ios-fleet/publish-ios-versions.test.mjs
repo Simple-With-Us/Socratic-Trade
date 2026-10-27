@@ -344,3 +344,48 @@ test("pull-request publish re-seeds at the branch tip before the contents PUT", 
   assert.match(src, /-f branch="\$\{PR_BRANCH\}"/);
   assert.match(src, /gh pr merge/);
 });
+
+test("mocked branch-tip race has a stale control and publishes identical final output", () => {
+  const {dir,base,out}=fixture("tip-race-",FLEET);
+  const tip=structuredClone(FLEET); tip.apps["net.dealdex"].build="new-sibling";
+  const payload=join(dir,"put.json"); const calls=join(dir,"calls");
+  writeFileSync(join(dir,"gh"),`#!/usr/bin/env python3
+import sys,os,json,base64
+args=sys.argv[1:]; text=' '.join(args)
+with open(os.environ['MOCK_CALLS'],'a') as f:f.write(text+'\\n')
+if 'content=' in text:
+ raw=next(a[8:] for a in args if a.startswith('content='))
+ open(os.environ['MOCK_PUT'],'wb').write(base64.b64decode(raw))
+elif '/contents/' in text and '--jq .content' in text:
+ doc=json.loads(os.environ['MOCK_TIP'] if 'ref=tip-sha' in text else os.environ['MOCK_STALE'])
+ print(base64.b64encode(json.dumps(doc).encode()).decode())
+elif '/git/ref/heads/main' in text:print('tip-sha')
+elif '/git/ref/heads/ios-' in text:sys.exit(1)
+elif '/contents/' in text:print('file-sha')
+elif '/pulls?' in text:print('null')
+elif '/pulls' in text and 'POST' in text:print('https://github.com/example/repo/pull/1')
+`,{mode:0o755});
+  const env={PATH:dir+":"+process.env.PATH,GH_TOKEN:"test-only",GITHUB_TOKEN:"",MOCK_CALLS:calls,MOCK_PUT:payload,MOCK_STALE:JSON.stringify(FLEET),MOCK_TIP:JSON.stringify(tip),IOS_VERSIONS_AUTO_MERGE:"0"};
+  // Control proves mock's first fetch is stale and would lose sibling history.
+  const control=spawnSync(join(dir,"gh"),["api","repos/x/contents/site/ios-versions.json?ref=main","--jq",".content"],{env:{...process.env,...env},encoding:"utf8"});
+  assert.equal(JSON.parse(Buffer.from(control.stdout.trim(),"base64")).apps["net.dealdex"].build,FLEET.apps["net.dealdex"].build);
+  const res=run(["--bundle-id","com.socratictrade.ios","--version","1.0.69","--out-json",out,"--skip-local-write"],env);
+  assert.equal(res.status,0,res.stderr);
+  const uploaded=JSON.parse(readFileSync(payload,"utf8"));
+  assert.equal(uploaded.apps["net.dealdex"].build,"new-sibling");
+  assert.deepEqual(JSON.parse(readFileSync(out,"utf8")),uploaded);
+  const oldCount=readFileSync(calls,"utf8").split('\n').length;
+  for(const args of [["--version","(from IPA)"],["--version","1.0.69","--build","(from IPA)"]]) {
+    assert.notEqual(run(["--bundle-id","com.socratictrade.ios",...args],env).status,0);
+    assert.equal(readFileSync(calls,"utf8").split('\n').length,oldCount,"placeholder cannot reach mock network");
+  }
+  rmSync(dir,{recursive:true,force:true});
+});
+
+test("no-op with empty middle fields preserves timestamp and exact bytes",()=>{
+ const doc=structuredClone(FLEET);const {dir,base,out}=fixture("empty-middle-",doc);
+ const res=run(["--bundle-id","com.socratictrade.ios","--version","1.0.68","--display-name","Socratic-Trade","--base-json",base,"--out-json",out,"--skip-push","--skip-local-write"],{GH_TOKEN:"",GITHUB_TOKEN:""});
+ assert.equal(res.status,0,res.stderr);assert.match(res.stdout,/already recorded/);
+ assert.equal(readFileSync(out,"utf8"),readFileSync(base,"utf8"));
+ rmSync(dir,{recursive:true,force:true});
+});
