@@ -142,9 +142,27 @@ mid-build (SSH exec stream exit 255) while webhooks returned 200 and
 
 `.github/workflows/deploy-freshness.yml` runs `scripts/alert-deploy-freshness.sh`
 every 20 minutes.  It fails (Sentry fleet-infra + optional `#agent-sync`) when
-the oldest commit on `origin/main` that is not live is older than 1 hour.
-Unreachable health is not this class (UptimeRobot pages site-down).  The
-workflow never deploys and never calls Coolify.
+the oldest commit on `origin/main` that is not live **and that changed a path
+Coolify watches** is older than 1 hour.  The watched set is Coolify's live
+`watch_paths` allow list, mirrored in `src/lib/deploy-image-impact.ts` as
+`COOLIFY_WATCH_PATHS_LIVE`; a commit outside it never owed a deployment, so it
+must never age the verdict.  A gap where nothing watched changed is fresh and
+exits 0.  Unreachable health is not this class (UptimeRobot pages site-down).
+The workflow never deploys and never calls Coolify.
+
+The classification walks the gap with `--first-parent`, so each commit is a
+state of `main` and its own diff decides what landed.  Without it a merge
+commit is compared against its branch tip and a docs-only pull request looks
+image-affecting.  See
+`docs/rollouts/2026-10-22-st-4575-deploy-freshness-watch-paths.md` for the
+false-positive class this replaced (ST-4575).
+
+Two edge cases are part of the contract.  A git failure while listing the gap is
+an operational error and exits 1, never a fresh pass:  git exits 0 with an empty
+list for a pathspec that matches nothing, which is the fresh verdict, so the
+exit status is what separates "no watched commit" from "git could not answer".
+And the fresh verdict posts the recovery notification, so the incident the
+watchdog opened is closed when production catches up instead of staying open.
 
 Manual one-shot:
 

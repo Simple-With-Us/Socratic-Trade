@@ -54,11 +54,18 @@ export function PublicFooter({ extra }: { extra?: ReactNode }) {
           >
             <span>From</span>
             <img
-              src="/swu-logo-wide.webp"
+              src="/swu-wordmark-light.webp"
               alt="Simple With Us by Jay Wedgeworth"
               width={288}
               height={30}
-              className="h-auto max-w-[calc(100vw-92px)] rounded-sm bg-white"
+              className="block h-auto w-72 max-w-[calc(100vw-92px)] dark:hidden"
+            />
+            <img
+              src="/swu-wordmark-dark.webp"
+              alt="Simple With Us by Jay Wedgeworth"
+              width={288}
+              height={30}
+              className="hidden h-auto w-72 max-w-[calc(100vw-92px)] dark:block"
             />
           </a>
         </p>
