@@ -659,10 +659,22 @@ asc_released_store_version() {
   # secrets temp dir and its EXIT trap die with the subshell and leave the
   # key behind.  asc-api.mjs resolves its own credential.
   asc_credential_available || return 1
+  # Keep the client's stderr: it carries the reason (HTTP status, unknown
+  # state).  Only the labelled lines are logged, never key material, and an
+  # auth failure keeps its own status 4.
+  local errf
+  errf="$(mktemp "${TMPDIR:-/tmp}/asc-released-err.XXXXXX")" || return 1
   set +e
-  out=$(asc_client released-store-version "$BUNDLE_ID" "$plat" 2>/dev/null)
+  out=$(asc_client released-store-version "$BUNDLE_ID" "$plat" 2>"$errf")
   rc=$?
   set -e
+  if [[ -s "$errf" ]]; then
+    while IFS= read -r _pl; do
+      case "$_pl" in asc-auth:*|released-store-version:*) logerr "asc-released: ${_pl}" ;; esac
+    done <"$errf"
+  fi
+  rm -f "$errf" >/dev/null 2>&1 || true
+  [[ $rc -eq 4 ]] && return 4
   [[ $rc -eq 0 ]] || return 1
   printf '%s' "$out"
 }
@@ -1126,7 +1138,7 @@ else
     log "version: fixed marketing version ${FIXED_MARKETING} from apps.json; it does not count up per ship"
     # A released App Store version closes its train:  a fixed version at or
     # below one is refused, never silently bumped.
-    _rel="$(asc_released_store_version "$ASC_PLATFORM" 2>/dev/null)" \
+    _rel="$(asc_released_store_version "$ASC_PLATFORM")" \
       || die "cannot read the released App Store version for ${BUNDLE_ID}, so fixedMarketingVersion ${FIXED_MARKETING} cannot be checked against a closed train.  Nothing was shipped or bumped."
     if [[ -n "$_rel" ]]; then
       if ! python3 -c 'import sys
