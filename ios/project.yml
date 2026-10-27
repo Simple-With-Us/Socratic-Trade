@@ -50,7 +50,7 @@ settings:
 packages:
   Sentry:
     url: https://github.com/getsentry/sentry-cocoa.git
-    from: "9.30.2"
+    from: "9.31.0"
 
 targets:
   SocraticTrade:
