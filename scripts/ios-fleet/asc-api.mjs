@@ -953,7 +953,9 @@ async function main() {
       if (!a.versionString) continue;
       const st = [a.appVersionState, a.appStoreState].filter(Boolean);
       if (!st.some((x) => RELEASED.has(x))) {
-        if (st.length === 0 || !st.every((x) => NOT_RELEASED.has(x))) {
+        // Empty state = not released (nothing to fail closed on). Unknown
+        // non-empty states still fail closed so we never guess a closed train.
+        if (st.length > 0 && !st.every((x) => NOT_RELEASED.has(x))) {
           console.error(`released-store-version: version ${a.versionString} has state ${JSON.stringify(st)}, which is not a known released or not-released state; not guessing`);
           process.exit(3);
         }
