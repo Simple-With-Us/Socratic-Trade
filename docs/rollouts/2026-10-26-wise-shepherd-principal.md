@@ -8,8 +8,10 @@ The adapter reads dedicated Fleet-OPS prod /gr-front/wise-st using a purpose-sco
 
 ## Verification
 
-`python3 scripts/test_wise_relay_exec.py` (9), principal startup selftest (7), existing in-flight/status-issue selftests, YAML parsing and bash syntax checks.
+`python3 scripts/test_wise_relay_exec.py` (11), principal startup selftest (7), existing in-flight/status-issue selftests, YAML parsing and bash syntax checks.
 
 ## Adoption and blockers
 
 No credential is in this change. GitHub merge-shepherd environment must contain WISE_RELAY_INFISICAL_TOKEN scoped read-only to the exact prod folder. Mac wrapper is a reviewed installation candidate, not installed by this PR; it requires an unattended qualified native Keychain purpose item. Preserve old storage/access until replacement is verified, but never resume personal writes as fallback. No native ship, manual deployment, OAuth change, global credential revocation or other-repo caller change.
+
+Review repair: unused --github-env credential export removed entirely; exec-mode only. Null/malformed GraphQL data/viewer fails closed. Existing shared-workflow pin retained pending source compatibility qualification, not silently upgraded to a revision lacking Wise inputs. No rollout acceptance inferred.

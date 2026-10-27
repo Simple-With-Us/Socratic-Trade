@@ -54,6 +54,8 @@ name: Auto-merge PRs
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, ready_for_review, unlabeled]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
 
 # checks/actions/issues reads feed the reusable's in-flight gate (a called
 # workflow's GITHUB_TOKEN is capped by the caller's grants, and a called
