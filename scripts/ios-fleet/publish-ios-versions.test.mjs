@@ -400,3 +400,5 @@ test("legacy numeric string appleId compares equal and invalid CLI id fails clea
  const bad=run([...args,"--apple-id","legacy-name"]);
  assert.equal(bad.status,2);assert.match(bad.stderr,/must be numeric/);assert.doesNotMatch(bad.stderr,/Traceback/);
  rmSync(dir,{recursive:true,force:true});
+
+});
