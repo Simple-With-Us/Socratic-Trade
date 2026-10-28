@@ -3036,3 +3036,23 @@ and the easiest way for the guard to keep reporting green.
 The shape here is the same one this branch has used throughout: the claim is prose until something
 fails when the prose and the tree disagree, and four negative controls are what make the guard
 believable rather than decorative.
+
+## 2026-10-28 — [MM] The credential refusal names a remedy the operator can reach, and the upload handoff can run (ST-4585)
+
+A merged pull request can still hold a defect, and the two that mattered here were both about what
+the operator is told.  One told the operator to add the credential trio to Infisical `/asc`, which
+the code never reads in that state, so the instruction was a dead end that looked like a fix.  The
+other was the owner handoff after a failed upload, and it was unreachable code, so an operator whose
+credential was missing got an error and nothing else: not where the package was, and not what to
+do next.
+
+The fix keeps the two apart deliberately.  A credential that is present and REJECTED is still fatal,
+because a value that is not a key must not be signed with and must not be handed on as if it were.
+Only a credential that is ABSENT is reported, and the handoff ends the run with a nonzero exit, so
+the upload still does not happen and the operator is not misled about it.
+
+The refusal does not quietly swap one key for another either.  The ambient key keeps precedence
+over `/asc`, and the refusal tells the operator how to select `/asc` instead, because choosing a
+different key to sign with is the owner's decision and not a side effect of an error message.
+
+Rollout: `docs/rollouts/2026-10-28-st-4585-asc-credential-handoff-followups.md`.
