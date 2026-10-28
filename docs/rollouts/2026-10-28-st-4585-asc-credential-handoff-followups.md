@@ -39,6 +39,7 @@
   - the upload path reverted — `FAIL: the upload path did not hand off with exit 3 (rc=1): error: ASC_KEY_ID is missing: set ASC_KEY_ID in the environment, or add ASC_KEY_ID to Infisical /asc`
 - `scripts/ios-fleet/test-asc-credentials.sh:333` asserts only the substring `ASC_KEY_ID is missing`, so the remedy-text change breaks no existing assertion, and nothing in the suite asserts on `Upload blocked` or on `Package ready at:`.
 - The lane needed `npm ci` before the suite would run, because `node_modules` was absent in the lane.
+- `origin/main` moved under this branch and touched the same three files, so `scripts/land.sh` refused the landing and required a deliberate merge.  The merge was clean, and every change was re-verified in the merged tree:  the remedy text is at lines 355 to 365, the masked preview on the refused `/asc` `.p8` is at line 438, and the upload path calls `load_secrets` without `required` at line 1758.  The three mutation controls were run again against the merged code and each one still bites, so the suite did not lose its teeth when main's changes landed.  Main also added `load_secrets` call sites of its own to the version helpers, and those are on a different path from the upload path this change touches.
 
 ## Follow-ups
 
