@@ -35,8 +35,6 @@ READONLY_PERMISSIONS = {
     "checks": "read",
     "metadata": "read",
 }
-# Tests and callers that expect the merge-scoped permission map.
-PERMISSIONS = MERGE_PERMISSIONS
 KEYS = {
     "WISE_GIT_RELAY_BEARER",
     "WISE_GIT_RELAY_URL",
@@ -129,6 +127,12 @@ def mint_verified(config, required_permissions, request=request_json):
     )
     if not isinstance(result, dict) or result.get("app_slug") != "swu-wise":
         raise Refused("relay App identity mismatch")
+    granted = result.get("permissions")
+    if required_permissions == READONLY_PERMISSIONS:
+        if granted != required_permissions:
+            raise Refused("relay granted scopes exceed the requested set")
+    elif granted is not None and granted != required_permissions:
+        raise Refused("relay granted scopes exceed the requested set")
     token = result.get("token")
     ttl = result.get("expires_in_seconds")
     if (
@@ -215,7 +219,14 @@ def main():
     env.pop("INFISICAL_TOKEN", None)
     env["GH_TOKEN"] = token
     env["GITHUB_REPOSITORY"] = REPO
-    if not read_only:
+    if read_only:
+        for key in (
+            "SHEPHERD_EXPECTED_ACTOR",
+            "EXPECTED_MERGE_ACTOR",
+            "SHEPHERD_HAS_PAT",
+        ):
+            env.pop(key, None)
+    else:
         env["SHEPHERD_EXPECTED_ACTOR"] = ACTOR
         env["EXPECTED_MERGE_ACTOR"] = ACTOR
         env["SHEPHERD_HAS_PAT"] = "1"  # App writes trigger CI; no personal credential.

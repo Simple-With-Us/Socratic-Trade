@@ -47,13 +47,16 @@ HAS_PAT="${SHEPHERD_HAS_PAT:-1}"
 ISSUE_TITLE="Merge shepherd status"
 STATUS_ISSUE="${SHEPHERD_STATUS_ISSUE:-0}"
 # Who am I? Needed so the reran-marker check below (Codex review, round 3) only
-# trusts a comment we ourselves posted, not one any commenter could spoof. A PAT
-# resolves to its owning user via /user; the default Actions GITHUB_TOKEN is an
-# app-installation token that 403s on /user, and always posts comments as the
-# literal login "github-actions[bot]" -- so that's the fallback (and the direct
-# value whenever HAS_PAT=0, skipping a doomed API call).
-ME=""
-[ "$HAS_PAT" = "1" ] && ME="$(gh api user --jq '.login' 2>/dev/null)"
+# trusts a comment we ourselves posted, not one any commenter could spoof. Prefer
+# the principal the relay adapter verified over a /user probe. A PAT resolves to
+# its owning user via /user; the default Actions GITHUB_TOKEN is an app-installation
+# token that 403s on /user, and always posts comments as the literal login
+# "github-actions[bot]" -- so that's the fallback (and the direct value whenever
+# HAS_PAT=0, skipping a doomed API call).
+ME="${EXPECTED_MERGE_ACTOR:-${SHEPHERD_EXPECTED_ACTOR:-}}"
+if [ -z "$ME" ] && [ "$HAS_PAT" = "1" ]; then
+  ME="$(gh api user --jq '.login' 2>/dev/null)"
+fi
 ME="${ME:-github-actions[bot]}"
 TMP="$(mktemp)"; trap 'rm -f "$TMP" "$TMP.md"' EXIT
 

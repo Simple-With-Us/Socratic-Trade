@@ -393,6 +393,7 @@ jobs:
           bash -n scripts/merge-shepherd.sh
           bash scripts/merge-shepherd-ci-inflight.selftest.sh
           bash scripts/merge-shepherd-status-issue.selftest.sh
+          python3 -m unittest scripts/test_wise_relay_exec.py
       # Every StallProfiler vitest test drives a FakeSession/FakeBridge by design (that module
       # must never touch a real V8 profiler under vitest), so createInspectorBindings() -- the
       # real node:inspector wiring -- was never exercised by the suite (review round, board

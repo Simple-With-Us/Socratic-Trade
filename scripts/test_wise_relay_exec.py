@@ -82,13 +82,29 @@ class AdapterTests(unittest.TestCase):
             with self.assertRaises(w.Refused):
                 w.configuration(c, w.MERGE_PERMISSIONS)
 
-    def run_mint(self, login=w.ACTOR, ttl=3590, slug="swu-wise", token="ghs_fake"):
+    def run_mint(
+        self,
+        login=w.ACTOR,
+        ttl=3590,
+        slug="swu-wise",
+        token="ghs_fake",
+        granted=None,
+    ):
         calls = []
 
         def request(url, headers, body):
             calls.append((url, headers, body))
             if len(calls) == 1:
-                return {"app_slug": slug, "token": token, "expires_in_seconds": ttl}
+                payload = {
+                    "app_slug": slug,
+                    "token": token,
+                    "expires_in_seconds": ttl,
+                }
+                if granted is not None:
+                    payload["permissions"] = granted
+                elif body and body.get("permissions") == w.MERGE_PERMISSIONS:
+                    payload["permissions"] = w.MERGE_PERMISSIONS
+                return payload
             return {"data": {"viewer": {"login": login}}}
 
         return w.mint_verified(self.config(), w.MERGE_PERMISSIONS, request), calls
@@ -127,7 +143,12 @@ class AdapterTests(unittest.TestCase):
             def request(url, headers, body):
                 calls.append(url)
                 if len(calls) == 1:
-                    return {"app_slug": "swu-wise", "token": "ghs_fake", "expires_in_seconds": 3590}
+                    return {
+                        "app_slug": "swu-wise",
+                        "token": "ghs_fake",
+                        "expires_in_seconds": 3590,
+                        "permissions": w.MERGE_PERMISSIONS,
+                    }
                 return response
             with self.assertRaises(w.Refused):
                 w.mint_verified(self.config(), w.MERGE_PERMISSIONS, request)
@@ -149,6 +170,7 @@ class AdapterTests(unittest.TestCase):
                     "app_slug": "swu-wise",
                     "token": "ghs_fake",
                     "expires_in_seconds": 3590,
+                    "permissions": w.READONLY_PERMISSIONS,
                 }
             return {"data": {"viewer": {"login": w.ACTOR}}}
 
@@ -159,8 +181,25 @@ class AdapterTests(unittest.TestCase):
 
     def test_readonly_mode_skips_merge_env_exports(self):
         source = Path(w.__file__).read_text()
-        self.assertIn('if not read_only:', source)
+        self.assertIn("if read_only:", source)
+        self.assertIn('env.pop(key, None)', source)
         self.assertIn('READONLY_FOLDER', source)
+
+    def test_relay_granted_scopes_must_match_readonly(self):
+        def request(url, headers, body):
+            return {
+                "app_slug": "swu-wise",
+                "token": "ghs_fake",
+                "expires_in_seconds": 3590,
+                "permissions": w.MERGE_PERMISSIONS,
+            }
+
+        with self.assertRaises(w.Refused):
+            w.mint_verified(
+                self.config(w.READONLY_PERMISSIONS),
+                w.READONLY_PERMISSIONS,
+                request,
+            )
 
     def test_exec_token_is_masked_in_actions(self):
         source = Path(w.__file__).read_text()
