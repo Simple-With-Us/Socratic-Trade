@@ -367,6 +367,7 @@ jobs:
           bash scripts/ios-fleet/test-ship-seq.sh
           node --test scripts/ios-fleet/version-plan.test.mjs
           node --test scripts/ios-fleet/publish-ios-versions.test.mjs
+          node --test scripts/ios-fleet/publish-ios-versions.stale-snapshot.test.mjs
           node --test scripts/ios-fleet/asc-api.credentials.test.mjs
           node --test scripts/ios-fleet/test-asc-key.test.mjs
       # Deploy-freshness watchdog + shared-box OCR isolation are shell, so
