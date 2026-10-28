@@ -70,6 +70,6 @@ Later rounds on a merged PR are mostly noise.  Triage genuine hazards; surface t
 
 ## Canon
 
-- `/Users/jay/apps/AGENT-SYNC.md` — Merge requirements
+- `/Users/jay/apps/FLEET-PROTOCOL.md` — Merge requirements
 - App `AGENTS.md` Pre-Commit / Handoff
 - Skills: `unstick-pr`, `land-lane`

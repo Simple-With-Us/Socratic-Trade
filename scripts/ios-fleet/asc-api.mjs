@@ -234,7 +234,7 @@ function signJwt({ keyId, issuerId, privateKeyPem }) {
 // Every build of every fleet app shipped with this EMPTY (24 builds checked
 // 2026-08-13; `GET /v1/builds/<id>/betaBuildLocalizations` returns `data: []`,
 // i.e. the en-US row is ABSENT, not blank -- so this must CREATE, not only
-// PATCH). /Users/jay/apps/AGENT-SYNC.md "App Versioning & TestFlight Build
+// PATCH). /Users/jay/apps/FLEET-PROTOCOL.md "App Versioning & TestFlight Build
 // Policy" defines a mandatory template that nothing implemented.
 //
 // PUBLISHING SAFETY. This is the only step in the ship pipeline that writes
@@ -249,7 +249,7 @@ function signJwt({ keyId, issuerId, privateKeyPem }) {
 //
 // A hard deny-list assertion runs on the FULLY RENDERED body: if any internal
 // agent name survives, the upload is skipped entirely rather than publishing a
-// violation (AGENT-SYNC forbids agent names in release notes). Offending
+// violation (FLEET-PROTOCOL forbids agent names in release notes). Offending
 // bullets are dropped whole -- never word-deleted in place, which yields
 // mangled copy like "Fix:  lane".
 const AGENT_NAMES = "grok|claude|monet|codex|antigravity|cursor|kimi|fable|gemini|deepseek|opus|sonnet|haiku";
@@ -261,7 +261,7 @@ const AGENT_NAMES = "grok|claude|monet|codex|antigravity|cursor|kimi|fable|gemin
 // stripped only /^\[[A-Za-z]+\]/ and left "AG" out of the deny-list below on
 // the stated assumption that the strip covered it. It did not: every one of
 // those 48 subjects would have published "[AG]" straight to TestFlight, which
-// AGENT-SYNC's STRICT no-agent-names rule names explicitly.
+// FLEET-PROTOCOL's STRICT no-agent-names rule names explicitly.
 const AGENT_MARKER = new RegExp(`\\[\\s*(?:ag|${AGENT_NAMES})\\s*\\]`, "gi");
 // Bare "AG" stays OUT of the word-boundary deny-list -- as a naked token it
 // fires on ordinary English and on tickers. The bracketed form is unambiguous,
@@ -269,7 +269,7 @@ const AGENT_MARKER = new RegExp(`\\[\\s*(?:ag|${AGENT_NAMES})\\s*\\]`, "gi");
 const AGENT_NAME_DENY = new RegExp(`(?:\\b(?:${AGENT_NAMES})\\b|\\[\\s*ag\\s*\\])`, "i");
 
 function centralTimestamp(now = new Date()) {
-  // AGENT-SYNC renders "Mon, Aug 12, 2026 at 1:15 AM CT". One combined
+  // FLEET-PROTOCOL renders "Mon, Aug 12, 2026 at 1:15 AM CT". One combined
   // Intl call yields "Mon, Aug 12, 2026, 1:15 AM" (comma, not "at"), so build
   // the two halves separately. America/Chicago handles CDT/CST automatically.
   const d = new Intl.DateTimeFormat("en-US", {
@@ -892,6 +892,140 @@ async function main() {
       );
     }
     console.log(String(patch));
+    process.exit(0);
+  }
+
+  // Highest App Store version that has been (or is being) released, i.e. whose
+  // train is closed to a lower or equal version.  Prints the version string,
+  // or nothing when the app has none.  READ ONLY.
+  if (method === "released-store-version") {
+    const bundleId = path;
+    const platform = String(body || "IOS").toUpperCase();
+    if (!bundleId) {
+      console.error("Usage: node asc-api.mjs released-store-version <bundleId> [platform=IOS]");
+      process.exit(2);
+    }
+    const appId = await appIdForBundle(bundleId);
+    if (!appId) {
+      console.error(`released-store-version: app not found for bundle ${bundleId}`);
+      process.exit(2);
+    }
+    const storeData = [];
+    let storeUrl = `/v1/apps/${appId}/appStoreVersions?filter[platform]=${encodeURIComponent(platform)}&limit=200`;
+    for (let page = 0; page < 10 && storeUrl; page += 1) {
+      const storeRes = await ascGet(storeUrl);
+      if (!storeRes.ok) {
+        console.error(`released-store-version: appStoreVersions query failed (HTTP ${storeRes.status})`);
+        failExit(storeRes.status);
+      }
+      storeData.push(...(storeRes.parsed.data || []));
+      storeUrl = storeRes.parsed.links?.next || "";
+    }
+    if (storeUrl) {
+      console.error("released-store-version: more than 10 pages of App Store versions; refusing to guess");
+      process.exit(2);
+    }
+    const RELEASED = new Set([
+      "READY_FOR_SALE", "READY_FOR_DISTRIBUTION", "REPLACED_WITH_NEW_VERSION",
+      "REMOVED_FROM_SALE", "DEVELOPER_REMOVED_FROM_SALE", "PREORDER_READY_FOR_SALE",
+      "PENDING_DEVELOPER_RELEASE", "PENDING_APPLE_RELEASE", "ACCEPTED",
+      // post-review, waiting on contract or export compliance: the version is approved
+      // and holds its train, so it counts as released (fail closed)
+      "PENDING_CONTRACT", "WAITING_FOR_EXPORT_COMPLIANCE",
+      "PROCESSING_FOR_DISTRIBUTION", "PROCESSING_FOR_APP_STORE"
+    ]);
+    const NOT_RELEASED = new Set([
+      "PREPARE_FOR_SUBMISSION", "READY_FOR_REVIEW", "WAITING_FOR_REVIEW", "IN_REVIEW",
+      "UNRESOLVED_ISSUES", "REJECTED", "METADATA_REJECTED", "DEVELOPER_REJECTED", "INVALID_BINARY"
+    ]);
+    const parse = (v) => String(v).split(".").map((n) => parseInt(n, 10) || 0);
+    const cmp = (a, b) => {
+      const x = parse(a), y = parse(b);
+      for (let i = 0; i < Math.max(x.length, y.length); i += 1) {
+        const d = (x[i] || 0) - (y[i] || 0);
+        if (d) return d;
+      }
+      return 0;
+    };
+    let best = "";
+    for (const v of storeData) {
+      const a = v?.attributes || {};
+      if (!a.versionString) continue;
+      const st = [a.appVersionState, a.appStoreState].filter(Boolean);
+      if (!st.some((x) => RELEASED.has(x))) {
+        // Empty state = not released (nothing to fail closed on). Unknown
+        // non-empty states still fail closed so we never guess a closed train.
+        if (st.length > 0 && !st.every((x) => NOT_RELEASED.has(x))) {
+          console.error(`released-store-version: version ${a.versionString} has state ${JSON.stringify(st)}, which is not a known released or not-released state; not guessing`);
+          process.exit(3);
+        }
+        continue;
+      }
+      if (!best || cmp(a.versionString, best) > 0) best = a.versionString;
+    }
+    console.error(`released-store-version: ${storeData.length} App Store version(s) inspected on ${platform}; highest released = ${best || "none"}`);
+    console.log(best);
+    process.exit(0);
+  }
+
+  // Next dotted build for a fixed marketing version M.m.p:  the train's builds
+  // must be M.m.<n>, and the next one is M.m.<max n + 1>; an empty train starts
+  // at M.m.p, so the first build reads like its version (1.1.2 (1.1.2)).  A
+  // train that holds any build of another shape stops the run with the reason,
+  // because the ordering between shapes (239 is 239.0.0, above 1.1.2) is not
+  // something to guess.  READ ONLY.
+  //
+  // Two ships at once would read the same train and pick the same n.  The CI
+  // ship is serialised (ios-ship.yml concurrency group, cancel-in-progress
+  // false), and a duplicate CFBundleVersion is refused by App Store Connect at
+  // upload, so the loser fails loudly and nothing is promoted.  Do not run a
+  // local ship while the workflow is running.
+  if (method === "next-dotted-build") {
+    const bundleId = path;
+    const version = body;
+    const platform = String(arg4 || "IOS").toUpperCase();
+    const vm = /^(\d+)\.(\d+)\.(\d+)$/.exec(version || "");
+    if (!bundleId || !vm) {
+      console.error("Usage: node asc-api.mjs next-dotted-build <bundleId> <M.m.p> [platform=IOS]");
+      process.exit(2);
+    }
+    const appId = await appIdForBundle(bundleId);
+    if (!appId) {
+      console.error(`next-dotted-build: app not found for bundle ${bundleId}`);
+      process.exit(2);
+    }
+    const prefix = `${vm[1]}.${vm[2]}.`;
+    let max = -1;
+    let seen = 0;
+    let nextUrl =
+      `/v1/builds?filter[app]=${appId}` +
+      `&filter[preReleaseVersion.version]=${encodeURIComponent(version)}` +
+      `&filter[preReleaseVersion.platform]=${encodeURIComponent(platform)}&limit=200`;
+    for (let page = 0; page < 10 && nextUrl; page++) {
+      const res = await ascGet(nextUrl);
+      if (!res.ok) {
+        console.error(`next-dotted-build: train builds query failed (HTTP ${res.status})`);
+        failExit(res.status);
+      }
+      for (const b of res.parsed.data || []) {
+        const bv = b?.attributes?.version;
+        const bm = typeof bv === "string" && bv.startsWith(prefix) ? /^\d+$/.exec(bv.slice(prefix.length)) : null;
+        if (!bm) {
+          console.error(`next-dotted-build: train ${version} holds build ${JSON.stringify(bv ?? null)}, which is not ${prefix}<n>; not guessing how it orders against a dotted build`);
+          process.exit(3);
+        }
+        seen += 1;
+        max = Math.max(max, parseInt(bm[0], 10));
+      }
+      nextUrl = res.parsed.links?.next || "";
+    }
+    if (nextUrl) {
+      console.error("next-dotted-build: more than 10 pages of builds in one train; refusing to guess");
+      process.exit(2);
+    }
+    const next = Math.max(max + 1, parseInt(vm[3], 10));
+    console.error(`next-dotted-build: ${seen} build(s) in train ${version}; next is ${prefix}${next}`);
+    console.log(`${prefix}${next}`);
     process.exit(0);
   }
 

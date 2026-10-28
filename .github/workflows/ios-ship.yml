@@ -361,6 +361,14 @@ jobs:
           INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
           INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
           INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          # The fleet iOS version manifest lives in AI-Fleet-Coordinator, and
+          # that repository's ruleset refuses a direct write to its protected
+          # branch, so the publish is a branch plus a pull request.  The
+          # workflow's own GITHUB_TOKEN is read-only by declaration and cannot
+          # write to another repository, so the fleet's elevated token is
+          # passed for that one step.  The publisher refuses GITHUB_TOKEN
+          # outright, and it never arms auto-merge with one.
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           args=()
           if [ "${EXPORT_ONLY_INPUT:-false}" = "true" ]; then
