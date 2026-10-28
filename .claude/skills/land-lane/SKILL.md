@@ -90,7 +90,7 @@ bash scripts/land.sh
 If the box is under load (multiple lanes gating simultaneously), post per the repo-first format in `/Users/jay/apps/FLEET-PROTOCOL.md`, e.g.:
 
 ```bash
-agent-sync post --topic "fleet" --as SEAT "repo: Socratic-Trade | [SEAT->FLEET] gating now"
+simple-chat post --topic "fleet" --fleet --as SEAT "repo: Socratic-Trade | [SEAT->FLEET] gating now"
 ```
 
 After the gate completes, post a one-line follow-up (`gate done`).

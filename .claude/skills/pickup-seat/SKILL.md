@@ -28,16 +28,16 @@ done
 # 4. Recent branches without PRs (seat may have landed work not yet in a PR)
 git for-each-ref --sort=-committerdate refs/remotes/origin | head -15
 
-# 5. Zulip #agent-sync history: claims, handoffs, last state
+# 5. Zulip #Work-In-Progress history: claims, handoffs, last state
 agent-sync read --topic "fleet" --limit 20
 ```
 
-## CLAIM: Post to #agent-sync before working
+## CLAIM: Post to #Work-In-Progress before working
 
 Post repo-first per `/Users/jay/apps/FLEET-PROTOCOL.md`'s canonical format, naming exactly what you are picking up:
 
 ```bash
-agent-sync post --topic "fleet" --as CLAUDE "repo: Socratic-Trade | [CLAUDE->agent/*] picking up MONET: effort#123,124 + PR#1234,1235; do not double-work"
+simple-chat post --topic "fleet" --fleet --as CLAUDE "repo: Socratic-Trade | [CLAUDE->agent/*] picking up MONET: effort#123,124 + PR#1234,1235; do not double-work"
 ```
 
 Durability: put the same claim in `docs/EFFORT-LOG.md` (repo mirror), not only the live board
@@ -73,7 +73,7 @@ For each effort, PR, worktree, or branch:
 - **Committed, not landed** = gate + land via the `land-lane` skill (or `land.sh` directly if clean)
 - **Uncommitted, unfinished** = assess scope; adopt + complete only if owner-directed
 - **Uncommitted, finished** = commit with authorship credit; land or hold
-- **Claimed but not started** = release back to unclaimed; post to #agent-sync
+- **Claimed but not started** = release back to unclaimed; post to #Work-In-Progress
 - **Genuinely blocked** = board note with reason; escalate if P0
 
 ## HAND BACK: Return gracefully when seat returns
@@ -89,7 +89,7 @@ with final dispositions -- correct any premature claims in place, never delete a
 row. Commit the board update, then create `docs/rollouts/YYYY-MM-DD-pickup-[seat]-cap.md`
 covering: efforts adopted, PRs handled (with final state), disposition summary, and the
 verification commands actually run (`git log`, `gh pr list`, the land gate). Announce the
-close-out on `#agent-sync`, repo-first, naming what is ready for the returning seat to resume.
+close-out on `#Work-In-Progress`, repo-first, naming what is ready for the returning seat to resume.
 
 ## Canon (source of truth -- read these if anything conflicts)
 
@@ -98,4 +98,4 @@ close-out on `#agent-sync`, repo-first, naming what is ready for the returning s
 - **/Users/jay/apps/FLEET-PROTOCOL.md** -- Zulip message format and handoff discipline (canonical)
 - **memory `codex-automerge-race-and-board-clobber`** -- why live-board-only claims get lost
 - **scripts/land.sh** -- landing gate (tsc -> test -> build, CI checks, PR open)
-- **agent-sync** -- read/post #agent-sync updates (install via `scripts/install-fleet-coordination.sh`)
+- **agent-sync** -- read/post #Work-In-Progress updates (install via `scripts/install-fleet-coordination.sh`)
