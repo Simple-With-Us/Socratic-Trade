@@ -87,7 +87,7 @@ bash scripts/land.sh
 
 ## Coordination (Multi-Agent)
 
-If the box is under load (multiple lanes gating simultaneously), post per the repo-first format in `/Users/jay/apps/AGENT-SYNC.md`, e.g.:
+If the box is under load (multiple lanes gating simultaneously), post per the repo-first format in `/Users/jay/apps/FLEET-PROTOCOL.md`, e.g.:
 
 ```bash
 agent-sync post --topic "fleet" --as SEAT "repo: Socratic-Trade | [SEAT->FLEET] gating now"
@@ -103,4 +103,4 @@ After the gate completes, post a one-line follow-up (`gate done`).
 - **docs/rollouts/2026-07-10-auto-deploy-on.md** -- auto-deploy verification and rollback
 - **scripts/land.sh** -- the actual implementation and idempotency guarantees
 - **docs/EFFORT-LOG.md** -- shared cross-agent effort ledger format
-- **/Users/jay/apps/AGENT-SYNC.md** -- Slack message format and seat coordination (canonical, read before your first message)
+- **/Users/jay/apps/FLEET-PROTOCOL.md** -- Zulip message format and seat coordination (canonical, read before your first message)

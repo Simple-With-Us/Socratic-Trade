@@ -34,7 +34,7 @@ agent-sync read --topic "fleet" --limit 20
 
 ## CLAIM: Post to #agent-sync before working
 
-Post repo-first per `/Users/jay/apps/AGENT-SYNC.md`'s canonical format, naming exactly what you are picking up:
+Post repo-first per `/Users/jay/apps/FLEET-PROTOCOL.md`'s canonical format, naming exactly what you are picking up:
 
 ```bash
 agent-sync post --topic "fleet" --as CLAUDE "repo: Socratic-Trade | [CLAUDE->agent/*] picking up MONET: effort#123,124 + PR#1234,1235; do not double-work"
@@ -95,7 +95,7 @@ close-out on `#agent-sync`, repo-first, naming what is ready for the returning s
 
 - **AGENTS.md** -- effort-log rules (append-mostly, assignment = live claim)
 - **/Users/jay/apps/EFFORT-LOG-PROTOCOL.md** -- protocol detail for board transitions
-- **/Users/jay/apps/AGENT-SYNC.md** -- Zulip message format and handoff discipline (canonical)
+- **/Users/jay/apps/FLEET-PROTOCOL.md** -- Zulip message format and handoff discipline (canonical)
 - **memory `codex-automerge-race-and-board-clobber`** -- why live-board-only claims get lost
 - **scripts/land.sh** -- landing gate (tsc -> test -> build, CI checks, PR open)
 - **agent-sync** -- read/post #agent-sync updates (install via `scripts/install-fleet-coordination.sh`)
