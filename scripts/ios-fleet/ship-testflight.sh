@@ -82,7 +82,7 @@
 #                              (record_successful_ship must still run or the rate
 #                              gate never advances)
 #
-# It also renders the mandatory AGENT-SYNC "What to Test" release note from the
+# It also renders the mandatory FLEET-PROTOCOL "What to Test" release note from the
 # commit range since the last successful ship. THIS IS OPT-IN, because it writes
 # copy every TestFlight tester reads:
 #   IOS_TF_RELEASE_NOTES=1     publish to App Store Connect
