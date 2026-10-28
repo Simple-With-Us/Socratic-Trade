@@ -9,8 +9,6 @@ jobs:
     environment: merge-shepherd
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: main
       - name: Install pinned Infisical CLI
         run: |
           set -euo pipefail
@@ -27,7 +25,7 @@ jobs:
           INFISICAL_TOKEN: ${{ secrets.WISE_RELAY_INFISICAL_TOKEN }}
         run: |
           set -euo pipefail
-          python3 scripts/wise-relay-exec.py -- bash -euo pipefail -c '
+          python3 scripts/wise-relay-exec.py --read-only -- bash -euo pipefail -c '
             test "$(gh api graphql -f query="query { viewer { login } }" --jq .data.viewer.login)" = "swu-wise[bot]"
             gh api repos/Simple-With-Us/Socratic-Trade --jq .full_name
             gh api repos/Simple-With-Us/Socratic-Trade/commits/main/check-runs --jq .total_count

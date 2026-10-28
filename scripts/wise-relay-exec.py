@@ -16,9 +16,10 @@ import urllib.parse
 import urllib.request
 
 FOLDER = "/gr-front/wise-st"
+READONLY_FOLDER = "/gr-front/wise-st-readonly"
 REPO = "Simple-With-Us/Socratic-Trade"
 ACTOR = "swu-wise[bot]"
-PERMISSIONS = {
+MERGE_PERMISSIONS = {
     "contents": "write",
     "pull_requests": "write",
     "issues": "write",
@@ -26,6 +27,16 @@ PERMISSIONS = {
     "checks": "read",
     "metadata": "read",
 }
+READONLY_PERMISSIONS = {
+    "contents": "read",
+    "pull_requests": "read",
+    "issues": "read",
+    "actions": "read",
+    "checks": "read",
+    "metadata": "read",
+}
+# Tests and callers that expect the merge-scoped permission map.
+PERMISSIONS = MERGE_PERMISSIONS
 KEYS = {
     "WISE_GIT_RELAY_BEARER",
     "WISE_GIT_RELAY_URL",
@@ -39,7 +50,7 @@ class Refused(Exception):
     pass
 
 
-def configuration(export):
+def configuration(export, required_permissions):
     # Infisical CLI versions emit either a name/value map or secret records.
     if isinstance(export, list):
         values = {}
@@ -68,7 +79,7 @@ def configuration(export):
         perms = json.loads(values["WISE_GIT_RELAY_PERMISSIONS"])
     except (ValueError, TypeError):
         raise Refused("invalid permission configuration") from None
-    if perms != PERMISSIONS:
+    if perms != required_permissions:
         raise Refused("unexpected permission configuration")
     url = urllib.parse.urlsplit(values["WISE_GIT_RELAY_URL"])
     if (
@@ -110,11 +121,11 @@ def request_json(url, headers, body=None):
         raise Refused("authenticated service request failed") from None
 
 
-def mint_verified(config, request=request_json):
+def mint_verified(config, required_permissions, request=request_json):
     result = request(
         config["WISE_GIT_RELAY_URL"].rstrip("/") + "/v1/mint_token",
         {"Authorization": "Bearer " + config["WISE_GIT_RELAY_BEARER"]},
-        {"repo": REPO, "permissions": PERMISSIONS},
+        {"repo": REPO, "permissions": required_permissions},
     )
     if not isinstance(result, dict) or result.get("app_slug") != "swu-wise":
         raise Refused("relay App identity mismatch")
@@ -142,8 +153,17 @@ def mint_verified(config, request=request_json):
 
 
 def main():
-    if len(sys.argv) < 3 or sys.argv[1] != "--":
-        raise Refused("usage: wise-relay-exec.py -- command [args]")
+    argv = sys.argv[1:]
+    read_only = False
+    if argv and argv[0] == "--read-only":
+        read_only = True
+        argv = argv[1:]
+    if len(argv) < 2 or argv[0] != "--":
+        raise Refused(
+            "usage: wise-relay-exec.py [--read-only] -- command [args]"
+        )
+    required_permissions = READONLY_PERMISSIONS if read_only else MERGE_PERMISSIONS
+    infisical_path = READONLY_FOLDER if read_only else FOLDER
     env = dict(os.environ)
     if not env.get("INFISICAL_TOKEN", "").startswith("st."):
         raise Refused("dedicated Infisical service token required")
@@ -168,7 +188,7 @@ def main():
                 "--env",
                 "prod",
                 "--path",
-                FOLDER,
+                infisical_path,
                 "--format",
                 "json",
                 "--expand=false",
@@ -185,20 +205,21 @@ def main():
         )
         if len(run.stdout) > 65536:
             raise Refused("configuration too large")
-        config = configuration(json.loads(run.stdout))
+        config = configuration(json.loads(run.stdout), required_permissions)
     except (subprocess.SubprocessError, OSError, ValueError):
         raise Refused("Infisical dedicated-folder fetch failed") from None
-    token = mint_verified(config)
+    token = mint_verified(config, required_permissions)
     if os.environ.get("GITHUB_ACTIONS") == "true":
         print("::add-mask::" + token, flush=True)
     # Do not pass bearer or Infisical bootstrap to the consumer command.
     env.pop("INFISICAL_TOKEN", None)
     env["GH_TOKEN"] = token
-    env["SHEPHERD_EXPECTED_ACTOR"] = ACTOR
-    env["EXPECTED_MERGE_ACTOR"] = ACTOR
     env["GITHUB_REPOSITORY"] = REPO
-    env["SHEPHERD_HAS_PAT"] = "1"  # App writes trigger CI; no personal credential.
-    os.execvpe(sys.argv[2], sys.argv[2:], env)
+    if not read_only:
+        env["SHEPHERD_EXPECTED_ACTOR"] = ACTOR
+        env["EXPECTED_MERGE_ACTOR"] = ACTOR
+        env["SHEPHERD_HAS_PAT"] = "1"  # App writes trigger CI; no personal credential.
+    os.execvpe(argv[1], argv[1:], env)
 
 
 if __name__ == "__main__":

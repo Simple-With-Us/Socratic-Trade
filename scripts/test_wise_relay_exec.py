@@ -11,27 +11,43 @@ spec.loader.exec_module(w)
 
 
 class AdapterTests(unittest.TestCase):
-    def config(self):
+    def config(self, permissions=None):
+        perms = permissions if permissions is not None else w.MERGE_PERMISSIONS
         return {
             "WISE_GIT_RELAY_BEARER": "sbt_fake",
             "WISE_GIT_RELAY_URL": "https://relay.example.test",
             "WISE_GIT_RELAY_REPOSITORY": w.REPO,
             "WISE_GIT_RELAY_EXPECTED_ACTOR": w.ACTOR,
-            "WISE_GIT_RELAY_PERMISSIONS": json.dumps(w.PERMISSIONS),
+            "WISE_GIT_RELAY_PERMISSIONS": json.dumps(perms),
         }
 
     def test_config_map(self):
-        self.assertEqual(w.configuration(self.config()), self.config())
+        self.assertEqual(
+            w.configuration(self.config(), w.MERGE_PERMISSIONS), self.config()
+        )
 
     def test_config_list(self):
         self.assertEqual(
-            w.configuration([{"key": k, "value": v} for k, v in self.config().items()]),
+            w.configuration(
+                [{"key": k, "value": v} for k, v in self.config().items()],
+                w.MERGE_PERMISSIONS,
+            ),
             self.config(),
+        )
+
+    def test_readonly_permissions(self):
+        cfg = self.config(w.READONLY_PERMISSIONS)
+        self.assertEqual(
+            w.configuration(cfg, w.READONLY_PERMISSIONS),
+            cfg,
         )
 
     def test_duplicate(self):
         with self.assertRaises(w.Refused):
-            w.configuration([{"key": "x", "value": "a"}, {"key": "x", "value": "b"}])
+            w.configuration(
+                [{"key": "x", "value": "a"}, {"key": "x", "value": "b"}],
+                w.MERGE_PERMISSIONS,
+            )
 
     def test_config_requires_exact_keys(self):
         for extra in [True, False]:
@@ -41,7 +57,7 @@ class AdapterTests(unittest.TestCase):
             else:
                 c.pop("WISE_GIT_RELAY_BEARER")
             with self.assertRaises(w.Refused):
-                w.configuration(c)
+                w.configuration(c, w.MERGE_PERMISSIONS)
 
     def test_repo_actor_perms(self):
         for k, v in [
@@ -52,7 +68,7 @@ class AdapterTests(unittest.TestCase):
             c = self.config()
             c[k] = v
             with self.assertRaises(w.Refused):
-                w.configuration(c)
+                w.configuration(c, w.MERGE_PERMISSIONS)
 
     def test_relay_origin(self):
         for u in [
@@ -64,7 +80,7 @@ class AdapterTests(unittest.TestCase):
             c = self.config()
             c["WISE_GIT_RELAY_URL"] = u
             with self.assertRaises(w.Refused):
-                w.configuration(c)
+                w.configuration(c, w.MERGE_PERMISSIONS)
 
     def run_mint(self, login=w.ACTOR, ttl=3590, slug="swu-wise", token="ghs_fake"):
         calls = []
@@ -75,13 +91,15 @@ class AdapterTests(unittest.TestCase):
                 return {"app_slug": slug, "token": token, "expires_in_seconds": ttl}
             return {"data": {"viewer": {"login": login}}}
 
-        return w.mint_verified(self.config(), request), calls
+        return w.mint_verified(self.config(), w.MERGE_PERMISSIONS, request), calls
 
     def test_mint_verified(self):
         token, calls = self.run_mint()
         self.assertEqual(token, "ghs_fake")
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0][2], {"repo": w.REPO, "permissions": w.PERMISSIONS})
+        self.assertEqual(
+            calls[0][2], {"repo": w.REPO, "permissions": w.MERGE_PERMISSIONS}
+        )
         self.assertEqual(calls[1][0], "https://api.github.com/graphql")
         self.assertNotIn("sbt_fake", str(calls[1]))
 
@@ -112,7 +130,7 @@ class AdapterTests(unittest.TestCase):
                     return {"app_slug": "swu-wise", "token": "ghs_fake", "expires_in_seconds": 3590}
                 return response
             with self.assertRaises(w.Refused):
-                w.mint_verified(self.config(), request)
+                w.mint_verified(self.config(), w.MERGE_PERMISSIONS, request)
 
     def test_source_keeps_secret_in_memory(self):
         source = Path(w.__file__).read_text()
@@ -120,6 +138,29 @@ class AdapterTests(unittest.TestCase):
         self.assertNotIn("--github-env", source)
         self.assertNotIn("--projectId", source)
         self.assertNotIn("8dae6d03", source)
+
+    def test_readonly_mint_uses_read_scopes(self):
+        calls = []
+
+        def request(url, headers, body):
+            calls.append((url, headers, body))
+            if len(calls) == 1:
+                return {
+                    "app_slug": "swu-wise",
+                    "token": "ghs_fake",
+                    "expires_in_seconds": 3590,
+                }
+            return {"data": {"viewer": {"login": w.ACTOR}}}
+
+        w.mint_verified(self.config(w.READONLY_PERMISSIONS), w.READONLY_PERMISSIONS, request)
+        self.assertEqual(
+            calls[0][2], {"repo": w.REPO, "permissions": w.READONLY_PERMISSIONS}
+        )
+
+    def test_readonly_mode_skips_merge_env_exports(self):
+        source = Path(w.__file__).read_text()
+        self.assertIn('if not read_only:', source)
+        self.assertIn('READONLY_FOLDER', source)
 
     def test_exec_token_is_masked_in_actions(self):
         source = Path(w.__file__).read_text()
