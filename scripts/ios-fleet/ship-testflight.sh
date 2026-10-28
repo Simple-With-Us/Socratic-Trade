@@ -82,7 +82,7 @@
 #                              (record_successful_ship must still run or the rate
 #                              gate never advances)
 #
-# It also renders the mandatory AGENT-SYNC "What to Test" release note from the
+# It also renders the mandatory FLEET-PROTOCOL "What to Test" release note from the
 # commit range since the last successful ship. THIS IS OPT-IN, because it writes
 # copy every TestFlight tester reads:
 #   IOS_TF_RELEASE_NOTES=1     publish to App Store Connect
@@ -899,6 +899,7 @@ record_successful_ship() {
   # a publish miss must never fail a ship that already uploaded.
   if [[ -n "${BUNDLE_ID:-}" && -n "${MARKETING:-}" ]]; then
     local apple_id display
+    local pub_out pr_url
     local -a pub_args
     apple_id="$(json_get "$APP_KEY" appleId || true)"
     display="$(json_get "$APP_KEY" displayName || true)"
@@ -906,10 +907,26 @@ record_successful_ship() {
     [[ -n "${BUILD_NUM:-}" ]] && pub_args+=(--build "$BUILD_NUM")
     [[ -n "${apple_id:-}" ]] && pub_args+=(--apple-id "$apple_id")
     [[ -n "${display:-}" ]] && pub_args+=(--display-name "$display")
-    if bash "${FLEET_DIR}/publish-ios-versions.sh" "${pub_args[@]}" >/dev/null 2>&1; then
-      log "version-manifest: published ${BUNDLE_ID} ${MARKETING}"
+    # The publisher opens a pull request against AI-Fleet-Coordinator, so its
+    # result is a pull request URL, not a silent write.  The URL is logged, so
+    # a ship leaves a reviewable trace instead of one warning line.
+    #
+    # The `|| true` on the grep matters:  this file runs under `set -euo
+    # pipefail`, so a grep that matches nothing would exit 1, and that status
+    # would come back through the assignment and abort a ship whose upload had
+    # already succeeded.  The publisher also exits 0 without a pull request
+    # when the remote already records this version, so "no URL" is a normal
+    # outcome, not a failure.
+    if pub_out="$(bash "${FLEET_DIR}/publish-ios-versions.sh" "${pub_args[@]}" 2>&1)"; then
+      pr_url="$(printf '%s\n' "$pub_out" | grep -Eo 'https://github\.com/[^[:space:]]+/pull/[0-9]+' | head -1 || true)"
+      if [[ -n "$pr_url" ]]; then
+        log "version-manifest: opened ${pr_url}"
+      else
+        log "version-manifest: ${BUNDLE_ID} ${MARKETING} recorded (${pub_out%%$'\n'*})"
+      fi
     else
       log "warning: version-manifest publish failed (non-fatal)"
+      printf '%s\n' "$pub_out" | sed 's/^/  /' >&2
     fi
   fi
 }
