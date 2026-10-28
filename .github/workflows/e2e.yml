@@ -151,7 +151,7 @@ jobs:
       - uses: actions/setup-node@v7
         if: needs.classify.outputs.docs-only != 'true'
         with:
-          node-version: 24
+          node-version: 26
       # Long-lived socratic-ci workspaces have lost the tree between checkout and
       # npm install when a concurrent job's clean step overlapped (ENOENT package.json
       # on the 2026-07-26 scheduled smoke). Same re-checkout boundary as ci.yml

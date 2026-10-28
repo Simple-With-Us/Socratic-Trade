@@ -309,7 +309,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 26
       # Split restore/save (2026-07-04, cache-hygiene): PR/merge_group runs only restore;
       # a new entry is saved only on main pushes and the nightly schedule so cache storage
       # stays a single rolling lineage per OS instead of one throwaway entry per PR push.
