@@ -637,7 +637,7 @@ project_marketing_seq() {
 # every macOS build, every extra floor, 999) + 1, floored at 1000.  Prints the
 # build on stdout.  Returns 1 (and prints nothing) when it cannot be worked out.
 asc_next_shared_build() {
-  local out rc mac_id feed feed_xml max floor
+  local out rc mac_id feed feed_xml max floor errf
   command -v "$ASC_NODE" >/dev/null 2>&1 || return 1
   # Not load_secrets: both helpers run inside command substitutions, where a
   # secrets temp dir and its EXIT trap die with the subshell and leave the
@@ -650,13 +650,25 @@ asc_next_shared_build() {
   floor=""
   if [[ -n "$feed" ]]; then
     command -v curl >/dev/null 2>&1 || return 1
+    errf="$(mktemp)"
     set +e
-    feed_xml="$(curl -fsSL "$feed" 2>/dev/null)"
+    feed_xml="$(curl -fsSL --connect-timeout 10 --max-time 30 "$feed" 2>"$errf")"
     rc=$?
     set -e
-    [[ $rc -eq 0 && -n "$feed_xml" ]] || return 1
+    if [[ $rc -ne 0 || -z "$feed_xml" ]]; then
+      # Name the feed, not App Store Connect, when the appcast is what failed.
+      logerr "pairedBuildFeed ${feed} could not be read (curl exit ${rc}): $(tr '\n' ' ' <"$errf")"
+      rm -f "$errf"
+      return 1
+    fi
+    rm -f "$errf"
     max="$(printf '%s' "$feed_xml" | grep -o -E '<sparkle:version>[0-9]+</sparkle:version>' 2>/dev/null | grep -o -E '[0-9]+' 2>/dev/null | /usr/bin/python3 -c 'import sys; ns=[int(x.strip()) for x in sys.stdin if x.strip().isdigit()]; print(max(ns) if ns else "")' 2>/dev/null || true)"
-    [[ "$max" =~ ^[0-9]+$ ]] || return 1
+    if [[ ! "$max" =~ ^[0-9]+$ ]]; then
+      # Fail closed:  a feed with no integer version hides the Mac builds, so
+      # the counter cannot be shown to sit above them.
+      logerr "pairedBuildFeed ${feed} holds no plain-integer <sparkle:version>; cannot work out the build floor"
+      return 1
+    fi
     floor="$max"
   fi
   set +e
