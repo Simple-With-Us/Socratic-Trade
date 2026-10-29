@@ -360,9 +360,9 @@ load_secrets() {
     if [[ -z "$iss" ]]; then
       ASC_MISSING="ASC_ISSUER_ID"
       if [[ "$required" == "required" ]]; then
-        die "ASC_ISSUER_ID is missing: ASC_KEY_P8 is set, but the issuer it belongs to is not.  Set ASC_ISSUER_ID in the environment, or unset ASC_KEY_P8 so the complete Infisical /asc credential (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8) is used instead"
+        die "ASC_ISSUER_ID is missing: ASC_KEY_P8 is set, but the issuer it belongs to is not.  Set ASC_ISSUER_ID in the environment, or unset ASC_KEY_P8 and ASC_KEY_ID so the complete Infisical /asc credential (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8) is used instead"
       fi
-      log "ASC_ISSUER_ID is missing: ASC_KEY_P8 is set, but the issuer it belongs to is not.  Set ASC_ISSUER_ID in the environment, or unset ASC_KEY_P8 so the complete Infisical /asc credential (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8) is used instead"
+      log "ASC_ISSUER_ID is missing: ASC_KEY_P8 is set, but the issuer it belongs to is not.  Set ASC_ISSUER_ID in the environment, or unset ASC_KEY_P8 and ASC_KEY_ID so the complete Infisical /asc credential (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8) is used instead"
       return 0
     fi
     rc=0

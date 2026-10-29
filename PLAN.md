@@ -3055,4 +3055,18 @@ The refusal does not quietly swap one key for another either.  The ambient key k
 over `/asc`, and the refusal tells the operator how to select `/asc` instead, because choosing a
 different key to sign with is the owner's decision and not a side effect of an error message.
 
+A remedy the operator cannot act on is itself the defect, and a remedy that is only sometimes
+reachable is the same defect in a quieter form.  The first pass fixed the missing-identifier
+refusal, which named an instruction the code never reaches.  The reviewer then found that the
+sibling refusal, the missing-issuer one, named an instruction that reaches the right place only
+when the environment happens to already hold `/asc`'s own key id.  An environment key id still
+wins over the credential in `/asc`, and a key id that is not `/asc`'s never gets `/asc`'s issuer
+either, so the operator could follow the advice exactly and still be stuck.
+
+The fix is the same kind of fix, not a new feature: the remedy names both variables it needs, so
+tier 3 reads the key id, the issuer and the `.p8` from `/asc` whatever `/asc`'s own key id is.  The
+refusal that was already reachable keeps its own wording, because there the key id is empty and
+unsetting the ambient key alone is enough.  A new test case reaches the issuer path, and a
+mutation run reverts only the remedy to prove the case fails for that reason and not another.
+
 Rollout: `docs/rollouts/2026-10-28-st-4585-asc-credential-handoff-followups.md`.

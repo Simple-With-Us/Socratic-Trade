@@ -15,12 +15,13 @@
 ## Files
 
 - `scripts/ios-fleet/ship-testflight.sh` — three changes.
-  - The tier-2 `ASC_KEY_ID` and `ASC_ISSUER_ID` refusals, in both the fatal and the reporting form, now offer the remedy that can work: unset the ambient `ASC_KEY_P8`, which lets the complete Infisical `/asc` credential be selected.  A comment says why the `/asc` remedy cannot work in that state.
+  - The tier-2 `ASC_KEY_ID` and `ASC_ISSUER_ID` refusals, in both the fatal and the reporting form, now offer a remedy that can work.  The `ASC_KEY_ID` refusal names `unset ASC_KEY_P8`, which is enough there: the key id is already empty, so tier 3 reads the whole trio from Infisical `/asc`.  The `ASC_ISSUER_ID` refusal names `unset ASC_KEY_P8` **and** `ASC_KEY_ID`: an environment key id still wins in tier 3, and a key id that is not the `/asc` one never reaches the `/asc` key and never gets the `/asc` issuer, so unsetting only the ambient key leaves the operator in the same dead end this change exists to remove.  A comment says why the `/asc` remedy cannot work in that state.
   - The refused `/asc` `.p8` now carries `; preview: $(key_preview "$key_pem")`, so this refusal carries the same masked identifier as the other two.
   - The upload path calls `load_secrets` instead of `load_secrets required`.  A comment says why: a REJECTED credential is still fatal inside `load_secrets` in both modes, and only an ABSENT one is reported, so the package path, the `Upload blocked` line, the owner handoff steps and the exit 3 are reachable.
-- `scripts/ios-fleet/test-asc-credentials.sh` — three new cases.
+- `scripts/ios-fleet/test-asc-credentials.sh` — four new cases.
   - **2c-quater** — a `.p8` that comes from Infisical `/asc` and is not a PEM is refused with the masked preview and is never printed.
   - **2d-bis** — the refusal names `unset ASC_KEY_P8`, does NOT name the `/asc` remedy it never reads, and the fake Infisical log proves `/asc` was never consulted.
+  - **2d-ter** — the issuer path, which 2d-bis does not reach.  An ambient `ASC_KEY_P8` with an environment key id that is **not** the `/asc` one and no environment issuer is refused for the missing issuer, and the refusal must name `unset ASC_KEY_P8 and ASC_KEY_ID`.  It must not name the `/asc` remedy, because `/asc`'s issuer is never paired with a foreign key id.  The credential is handed over as a shell assignment prefix and never through `env`, so it stays out of the process arguments of every child.
   - **2m** — the upload path is extracted with awk, run with no credential reader at all, and must exit 3 while logging `Package ready at:`, `Upload blocked` and `Owner handoff:`.  The exit code is read as `rc=0; out="$(...)" || rc=$?` so `set -euo pipefail` does not abort the suite.
 
 ## Decisions and trade-offs
@@ -36,6 +37,7 @@
 - Three independent mutation runs against the pre-change script, one per change, and each named its own defect:
   - the masked preview reverted — `FAIL: the refused /asc .p8 carried no masked preview`
   - the remedy reverted — `FAIL: the refusal did not name the reachable remedy (unset ASC_KEY_P8)`
+  - the issuer remedy reverted to name only `ASC_KEY_P8` — `FAIL: the refusal did not name the reachable remedy (unset ASC_KEY_P8 and ASC_KEY_ID)`.  This is the mutation that proves 2d-ter tests the defect instead of passing for another reason.
   - the upload path reverted — `FAIL: the upload path did not hand off with exit 3 (rc=1): error: ASC_KEY_ID is missing: set ASC_KEY_ID in the environment, or add ASC_KEY_ID to Infisical /asc`
 - `scripts/ios-fleet/test-asc-credentials.sh:333` asserts only the substring `ASC_KEY_ID is missing`, so the remedy-text change breaks no existing assertion, and nothing in the suite asserts on `Upload blocked` or on `Package ready at:`.
 - The lane needed `npm ci` before the suite would run, because `node_modules` was absent in the lane.

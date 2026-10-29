@@ -379,6 +379,32 @@ if [ -s "$FAKE_LOG" ]; then
   fail "Infisical /asc was consulted even though the ambient key was refused"
 fi
 
+# 2d-ter. The ASC_ISSUER_ID refusal names a remedy that can actually work.
+# The ambient ASC_KEY_P8 is resolved BEFORE Infisical /asc is read, so the
+# ambient key refuses here for the missing issuer.  Unsetting only ASC_KEY_P8
+# is NOT enough: an env ASC_KEY_ID still wins in tier 3, where a key id that
+# is not the /asc one never reaches the /asc key and the /asc issuer is never
+# paired with it, so the operator would land on the same dead end this change
+# exists to remove.  The remedy must name both variables.
+: > "$FAKE_LOG"
+if ASC_KEY_PATH="" ASC_ISSUER_ID="" ASC_KEY_ID=OTHERKEY01 ASC_KEY_P8="$(<"${tmp}/other.p8")" bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  load_secrets required
+' 2>"${tmp}/no-issuer-bis.err"; then
+  fail "an ambient key with a foreign key id and no issuer was accepted"
+fi
+grep -q 'ASC_ISSUER_ID is missing' "${tmp}/no-issuer-bis.err" ||
+  fail "the missing issuer was not named in the failure"
+grep -q 'unset ASC_KEY_P8 and ASC_KEY_ID' "${tmp}/no-issuer-bis.err" ||
+  fail "the refusal did not name the reachable remedy (unset ASC_KEY_P8 and ASC_KEY_ID)"
+if grep -q 'add ASC_ISSUER_ID to Infisical /asc' "${tmp}/no-issuer-bis.err"; then
+  fail "the refusal still names the /asc remedy, which it never reads for a foreign key id"
+fi
+if [ -s "$FAKE_LOG" ]; then
+  fail "Infisical /asc was consulted even though the ambient key was refused"
+fi
+
 # 2e. An env key id that is NOT the /asc one never gets the /asc key:  its own .p8 comes from
 # /authkey-<id>-p8, and /asc ASC_KEY_P8 is not requested.
 : > "$FAKE_LOG"
