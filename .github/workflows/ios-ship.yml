@@ -77,6 +77,8 @@ jobs:
     if: github.event.repository.fork == false
     runs-on: macos-latest
     timeout-minutes: 90
+    outputs:
+      build: ${{ steps.plan-build.outputs.build }}
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -343,6 +345,40 @@ jobs:
           fi
           echo "$bin" >> "$GITHUB_PATH"
 
+      # ONE release, ONE build number (owner 2026-10-29). The merge-timestamp
+      # build is computed ONCE here and handed to the ship step via --build, so
+      # a release can never number its platforms differently. The stamp S is the
+      # committer date of HEAD in America/Chicago (YYYYMMDDHHMM); the plan is
+      # max(S, M + 1), M the highest build on record. Socratic has no paired
+      # macOS app or Sparkle feed in apps.json, so the plan takes only the
+      # bundle id and the stamp; extend this command with the paired bundle id
+      # and floors if the registry ever gains them. Runs after the gate, so a
+      # tick with nothing to ship never reaches App Store Connect.
+      - name: Plan release build (compute once)
+        id: plan-build
+        if: steps.gate.outputs.should_ship == '1'
+        env:
+          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          stamp="$(TZ=America/Chicago git show -s --format=%cd --date=format-local:%Y%m%d%H%M HEAD)"
+          if ! [[ "$stamp" =~ ^[1-9][0-9]{11}$ ]]; then
+            echo "::error::Could not read the 12-digit merge stamp of HEAD."
+            exit 1
+          fi
+          bundle="$(python3 -c 'import json;print(json.load(open("scripts/ios-fleet/apps.json"))["apps"]["socratic"]["bundleId"])')"
+          build="$(bash scripts/ios-asc-key-env.sh node scripts/ios-fleet/asc-api.mjs plan-release-build "$bundle" --merge-stamp "$stamp")"
+          if ! [[ "$build" =~ ^[1-9][0-9]{11}$ ]]; then
+            echo "::error::plan-release-build did not return a 12-digit build."
+            exit 1
+          fi
+          echo "planned build ${build} for merge stamp ${stamp}"
+          echo "build=${build}" >> "$GITHUB_OUTPUT"
+
       # No IOS_TF_MIN_INTERVAL_SEC here. That variable is a PER-RUN override.
       # Standing gate is DEFAULT_MIN_INTERVAL_SEC=3600 (1 hour) in the fleet
       # script (owner 2026-08-14). The 30-minute cron picks up an unbuilt merge
@@ -375,6 +411,13 @@ jobs:
             echo "[ios-ship] export_only=true: archive + export the IPA, no upload"
             args+=(--export-only)
           fi
+          build="${{ steps.plan-build.outputs.build }}"
+          if ! [[ "$build" =~ ^[1-9][0-9]{11}$ ]]; then
+            echo "::error::No planned 12-digit build from the plan-build step; refusing to ship."
+            exit 1
+          fi
+          echo "[ios-ship] shipping the once-planned build ${build}"
+          args+=(--build "$build")
           bash scripts/ios-asc-key-env.sh bash scripts/ios-ship-testflight.sh ${args[@]+"${args[@]}"}
 
       # Archive/export/upload logs are tee'd into the job log, but Xcode's
