@@ -1,3 +1,9 @@
+## 2026-10-29 [Cursor] PR #4938 OpenTelemetry v3 blocked by Langfuse peers
+
+**What.**  Renovate observability major for `@opentelemetry/core` / `@opentelemetry/resources` v3 fails `npm ci`: `@langfuse/otel@6` peers `@opentelemetry/core@^2.0.1`.  Reverted pins to `^2.10.0`, added Renovate rule to skip those majors until Langfuse ships OTel 3 peers.  Rollout `docs/rollouts/2026-10-29-otel-3-langfuse-peer-block.md`.  PR #4935 instrumentation path unchanged.
+
+**Next.**  Merge when `verify` is green; OTel 3 lands with a Langfuse upgrade, not before.
+
 ## 2026-10-25 [Cursor] ST-4580 Kody review on PR #4932 (publisher/remove-fmp)
 
 **What.**  Closed eight unresolved Kody threads: server-only guard on `/api/keys`, Zod query validation, strict PATCH envelope, retired-key `source`/`docsUrl` contract, console copy + delete for retired rows, test env restore and Zod response parsing.  Rollout `docs/rollouts/2026-10-25-st-4580-kody-pr4932-review.md`.
