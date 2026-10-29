@@ -358,6 +358,10 @@ jobs:
           bash -n scripts/ios-fleet/test-ship-seq.sh
           bash -n scripts/ios-asc-key-env.sh
           bash scripts/test-ios-scheduled-ship-gate.sh
+          # The TestFlight ship checks this pin only after merge (ios-ship.yml), so a PR
+          # that edits scripts/ios-fleet/ without refreshing it lands green and breaks
+          # the next ship (#4947, #4954).  Run the same check here, inside required verify.
+          bash scripts/ios-fleet-pin.sh --check
           bash scripts/test-ios-stage-asc-key.sh
           bash scripts/test-ios-asc-key-env.sh
           bash scripts/ios-fleet/test-asc-credentials.sh
