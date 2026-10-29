@@ -35,13 +35,16 @@ READONLY_PERMISSIONS = {
     "checks": "read",
     "metadata": "read",
 }
-PERMISSION_RANK = {"read": 0, "write": 1}
+PERMISSION_RANK = {"none": -1, "read": 0, "write": 1, "admin": 2}
 
 
 def permission_exceeds(granted_level, required_level):
-    return PERMISSION_RANK.get(granted_level, -1) > PERMISSION_RANK.get(
-        required_level, -1
-    )
+    # An unrecognised granted level cannot be proven narrower, so it counts as
+    # an over-grant (fail closed) rather than a mere scope mismatch.
+    if granted_level not in PERMISSION_RANK:
+        return True
+    return PERMISSION_RANK[granted_level] > PERMISSION_RANK[required_level]
+
 KEYS = {
     "WISE_GIT_RELAY_BEARER",
     "WISE_GIT_RELAY_URL",
@@ -129,6 +132,15 @@ def request_json(url, headers, body=None):
 def argv_for_child(command, expected_actor):
     if not command:
         return command
+    targets_shepherd = os.path.basename(command[0]) == "merge-shepherd.sh" or (
+        len(command) >= 2 and os.path.basename(command[1]) == "merge-shepherd.sh"
+    )
+    if targets_shepherd and any(
+        arg == "--expected-actor" or arg.startswith("--expected-actor=")
+        for arg in command
+    ):
+        # Only the relay-verified principal may name the shepherd actor.
+        raise Refused("caller may not supply --expected-actor; the relay sets it")
     if os.path.basename(command[0]) == "merge-shepherd.sh":
         return [command[0], "--expected-actor", expected_actor, *command[1:]]
     if len(command) >= 2 and os.path.basename(command[1]) == "merge-shepherd.sh":
@@ -261,12 +273,11 @@ def main():
     env.pop("INFISICAL_TOKEN", None)
     env["GH_TOKEN"] = token
     env["GITHUB_REPOSITORY"] = REPO
-    child = list(argv[1:])
+    child = argv_for_child(list(argv[1:]), config["WISE_GIT_RELAY_EXPECTED_ACTOR"])
     if read_only:
         env.pop("SHEPHERD_HAS_PAT", None)
     else:
         env["SHEPHERD_HAS_PAT"] = "1"  # App writes trigger CI; no personal credential.
-        child = argv_for_child(child, config["WISE_GIT_RELAY_EXPECTED_ACTOR"])
     os.execvpe(child[0], child, env)
 
 

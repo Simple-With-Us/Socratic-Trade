@@ -36,7 +36,7 @@ A mutant that restores the old fail-open lookup fails the new selftest.
 
 ## Next Steps & Blockers
 
-- **Owner, on the Mac, after merge:**  refresh the host copy, or the spam continues:  `cd ~/Code/Socratic-Trade && git fetch -q origin && git show origin/main:scripts/merge-shepherd.sh > ~/.claude-merge-shepherd/merge-shepherd.sh`.
+- **Owner, on the Mac, after merge:**  refresh the host copy, or the spam continues:  `cd ~/Code/Socratic-Trade && git fetch -q origin && git show origin/main:scripts/merge-shepherd.sh > ~/.claude-merge-shepherd/merge-shepherd.sh`.  Since PR #4949 the script requires `--expected-actor`, so update the launchd `ProgramArguments` in the same step (recipe in `docs/rollouts/2026-07-09-merge-shepherd.md`, 2026-10-28 update).
 - Then close the duplicate issues (throttled, AFC-336).
 
 ## Zero-Code Findings

@@ -206,6 +206,45 @@ class AdapterTests(unittest.TestCase):
             ["bash", "-c", "echo hi"],
         )
 
+    def test_argv_for_child_refuses_caller_supplied_actor(self):
+        actor = "swu-wise[bot]"
+        for command in (
+            ["bash", "scripts/merge-shepherd.sh", "--expected-actor", "mallory"],
+            ["scripts/merge-shepherd.sh", "--expected-actor=mallory"],
+        ):
+            with self.assertRaisesRegex(w.Refused, "may not supply --expected-actor"):
+                w.argv_for_child(command, actor)
+
+    def test_readonly_and_merge_modes_both_inject_actor(self):
+        source = Path(w.__file__).read_text()
+        main_src = source.split("def main():", 1)[1]
+        inject = main_src.index("argv_for_child(")
+        self.assertLess(inject, main_src.index("if read_only:\n        env.pop"))
+
+    def test_admin_and_unknown_levels_count_as_over_grant(self):
+        self.assertTrue(w.permission_exceeds("admin", "write"))
+        self.assertTrue(w.permission_exceeds("admin", "read"))
+        self.assertTrue(w.permission_exceeds("maintain", "read"))
+        self.assertTrue(w.permission_exceeds(None, "read"))
+        self.assertFalse(w.permission_exceeds("read", "write"))
+        self.assertFalse(w.permission_exceeds("none", "read"))
+        granted = dict(w.READONLY_PERMISSIONS, contents="admin")
+
+        def request(url, headers, body):
+            return {
+                "app_slug": "swu-wise",
+                "token": "ghs_fake",
+                "expires_in_seconds": 3590,
+                "permissions": granted,
+            }
+
+        with self.assertRaisesRegex(w.Refused, "relay granted scopes exceed"):
+            w.mint_verified(
+                self.config(w.READONLY_PERMISSIONS),
+                w.READONLY_PERMISSIONS,
+                request,
+            )
+
     def test_relay_granted_scopes_must_match_readonly(self):
         def request(url, headers, body):
             return {

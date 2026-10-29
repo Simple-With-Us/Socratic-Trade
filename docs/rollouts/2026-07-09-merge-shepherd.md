@@ -89,6 +89,23 @@ documented above under Follow-ups; no code change needed for it):
 - `bash -n scripts/merge-shepherd.sh` — clean.
 - `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/merge-shepherd.yml'))"` — clean.
 
+## 2026-10-28 update — `--expected-actor` is required (PR #4949)
+
+`scripts/merge-shepherd.sh` no longer guesses who it runs as.  Every caller passes `--expected-actor <login>`, and the script exits 1 without it.  Callers in the repo already do:  `_merge-shepherd-impl.yml` passes `github-actions[bot]` or the `SHEPHERD_TOKEN` owner, and `scripts/wise-relay-exec.py` passes the relay-verified App login.
+
+The Mac launchd driver is host-local, so the owner updates it by hand after this merges.  In `~/Library/LaunchAgents/com.jay.merge-shepherd.plist`, `ProgramArguments` runs the copy through a shell that resolves the host PAT's login and fails clearly if it can't:
+
+```xml
+<key>ProgramArguments</key>
+<array>
+  <string>/bin/bash</string>
+  <string>-c</string>
+  <string>set -eu; me="$(gh api user --jq .login)"; test -n "$me"; exec "$HOME/.claude-merge-shepherd/merge-shepherd.sh" --expected-actor "$me"</string>
+</array>
+```
+
+Then reload it:  `launchctl unload ~/Library/LaunchAgents/com.jay.merge-shepherd.plist && launchctl load ~/Library/LaunchAgents/com.jay.merge-shepherd.plist`.  Refresh the script copy and update the plist together, or the scheduled run exits on the missing flag.
+
 ## Follow-ups
 
 - Optional: add a `SHEPHERD_TOKEN` PAT repo secret so the GitHub-Actions dispatch path can also

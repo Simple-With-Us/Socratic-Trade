@@ -24,8 +24,15 @@ jobs:
           SHEPHERD_HAS_PAT: ${{ secrets.SHEPHERD_TOKEN != '' && '1' || '0' }}
         run: |
           set -euo pipefail
+          # GITHUB_TOKEN always posts as github-actions[bot].  A PAT posts as its
+          # owner, so resolve that login once and fail clearly if it cannot be
+          # read: guessing an actor would make the shepherd trust the wrong
+          # rerun markers.  The next scheduled run retries.
           actor=github-actions[bot]
           if [ "${{ secrets.SHEPHERD_TOKEN != '' && '1' || '0' }}" = "1" ]; then
-            actor="$(gh api user --jq .login)"
+            if ! actor="$(gh api user --jq .login)" || [ -z "$actor" ]; then
+              echo "::error::merge-shepherd: could not resolve the SHEPHERD_TOKEN owner via gh api user; refusing to guess the actor" >&2
+              exit 1
+            fi
           fi
           bash scripts/merge-shepherd.sh --expected-actor "$actor"
