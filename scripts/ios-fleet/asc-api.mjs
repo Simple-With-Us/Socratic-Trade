@@ -38,6 +38,7 @@ import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizePrivateKey } from "./asc-key.mjs";
+import { nextSharedBuild } from "./shared-build.mjs";
 import {
   buildFloor,
   isDriftTrain,
@@ -968,64 +969,59 @@ async function main() {
     process.exit(0);
   }
 
-  // Next dotted build for a fixed marketing version M.m.p:  the train's builds
-  // must be M.m.<n>, and the next one is M.m.<max n + 1>; an empty train starts
-  // at M.m.p, so the first build reads like its version (1.1.2 (1.1.2)).  A
-  // train that holds any build of another shape stops the run with the reason,
-  // because the ordering between shapes (239 is 239.0.0, above 1.1.2) is not
-  // something to guess.  READ ONLY.
-  //
-  // Two ships at once would read the same train and pick the same n.  The CI
-  // ship is serialised (ios-ship.yml concurrency group, cancel-in-progress
-  // false), and a duplicate CFBundleVersion is refused by App Store Connect at
-  // upload, so the loser fails loudly and nothing is promoted.  Do not run a
-  // local ship while the workflow is running.
-  if (method === "next-dotted-build") {
-    const bundleId = path;
-    const version = body;
-    const platform = String(arg4 || "IOS").toUpperCase();
-    const vm = /^(\d+)\.(\d+)\.(\d+)$/.exec(version || "");
-    if (!bundleId || !vm) {
-      console.error("Usage: node asc-api.mjs next-dotted-build <bundleId> <M.m.p> [platform=IOS]");
-      process.exit(2);
+  // Read-only, fully paged shared four-digit counter (owner, Oct 28 2026):
+  // next = max(every iOS build on ALL trains, every macOS build on ALL trains,
+  // every extra floor, 999) + 1, floored at 1000.  iOS UTC timestamp builds are
+  // ignored by the planner (those trains are closed); macOS builds all count.
+  if (method === "next-shared-build") {
+    const restArgs = argv.slice(1);
+    const bundleId = restArgs[0] || "";
+    const rest = restArgs.slice(1);
+    if (!bundleId) {
+      console.error("Usage: node asc-api.mjs next-shared-build <bundleId> [macBundleId] [floor...]"); process.exit(2);
+    }
+    // A pure-integer second arg is a floor, not a bundle id (bundle ids are
+    // never bare integers), so a caller with no mac app passes only floors.
+    let macBundleId = "";
+    let floorArgs = [];
+    if (rest.length > 0) {
+      if (/^[0-9]+$/.test(rest[0])) floorArgs = rest;
+      else { macBundleId = rest[0] || ""; floorArgs = rest.slice(1); }
+    }
+    const extraFloors = [];
+    for (const f of floorArgs) {
+      if (!/^[0-9]+$/.test(f) || !Number.isSafeInteger(Number(f))) {
+        console.error(`next-shared-build: floor ${JSON.stringify(f)} is not a non-negative safe integer`); process.exit(2);
+      }
+      extraFloors.push(Number(f));
     }
     const appId = await appIdForBundle(bundleId);
-    if (!appId) {
-      console.error(`next-dotted-build: app not found for bundle ${bundleId}`);
-      process.exit(2);
+    if (!appId) { console.error("next-shared-build: app not found"); process.exit(2); }
+    let macAppId = "";
+    if (macBundleId && macBundleId !== bundleId) {
+      macAppId = await appIdForBundle(macBundleId);
+      if (!macAppId) { console.error("next-shared-build: mac app not found"); process.exit(2); }
     }
-    const prefix = `${vm[1]}.${vm[2]}.`;
-    let max = -1;
-    let seen = 0;
-    let nextUrl =
-      `/v1/builds?filter[app]=${appId}` +
-      `&filter[preReleaseVersion.version]=${encodeURIComponent(version)}` +
-      `&filter[preReleaseVersion.platform]=${encodeURIComponent(platform)}&limit=200`;
-    for (let page = 0; page < 10 && nextUrl; page++) {
-      const res = await ascGet(nextUrl);
-      if (!res.ok) {
-        console.error(`next-dotted-build: train builds query failed (HTTP ${res.status})`);
-        failExit(res.status);
+    async function allBuilds(forAppId, platform) {
+      const out = [];
+      let url = `/v1/builds?filter[app]=${forAppId}&filter[preReleaseVersion.platform]=${platform}&limit=200`;
+      for (let page = 0; page < 100 && url; page++) {
+        const res = await ascGet(url);
+        if (!res.ok || !Array.isArray(res.parsed?.data)) { console.error("next-shared-build: inventory unavailable"); process.exit(2); }
+        for (const b of res.parsed.data) out.push(b?.attributes?.version);
+        url = res.parsed.links?.next || "";
       }
-      for (const b of res.parsed.data || []) {
-        const bv = b?.attributes?.version;
-        const bm = typeof bv === "string" && bv.startsWith(prefix) ? /^\d+$/.exec(bv.slice(prefix.length)) : null;
-        if (!bm) {
-          console.error(`next-dotted-build: train ${version} holds build ${JSON.stringify(bv ?? null)}, which is not ${prefix}<n>; not guessing how it orders against a dotted build`);
-          process.exit(3);
-        }
-        seen += 1;
-        max = Math.max(max, parseInt(bm[0], 10));
-      }
-      nextUrl = res.parsed.links?.next || "";
+      if (url) { console.error("next-shared-build: incomplete pagination"); process.exit(2); }
+      return out;
     }
-    if (nextUrl) {
-      console.error("next-dotted-build: more than 10 pages of builds in one train; refusing to guess");
-      process.exit(2);
-    }
-    const next = Math.max(max + 1, parseInt(vm[3], 10));
-    console.error(`next-dotted-build: ${seen} build(s) in train ${version}; next is ${prefix}${next}`);
-    console.log(`${prefix}${next}`);
+    const iosBuilds = await allBuilds(appId, "IOS");
+    let macBuilds = await allBuilds(appId, "MAC_OS");
+    if (macAppId) macBuilds = macBuilds.concat(await allBuilds(macAppId, "MAC_OS"));
+    try {
+      const planned = nextSharedBuild({iosBuilds, macBuilds, extraFloors, complete: true});
+      console.error(`next-shared-build: ${iosBuilds.length} iOS build(s) + ${macBuilds.length} macOS build(s) inspected; ignored ${planned.ignoredIos} iOS timestamp build(s); next is ${planned.build}`);
+      console.log(planned.build);
+    } catch (error) { console.error(`next-shared-build: ${error.message}`); process.exit(3); }
     process.exit(0);
   }
 
