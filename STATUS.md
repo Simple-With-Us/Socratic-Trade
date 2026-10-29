@@ -1,4 +1,9 @@
-## 2026-10-25 [Cursor] ST-4580 Kody review on PR #4932 (publisher/remove-fmp)
+## 2026-10-29 [Cursor] PR #4953 Node 26 toolchain alignment
+
+**What.**  Renovate bumped CI/Docker to Node 26; required verify failed because `.nvmrc`, `@types/node`, `land.sh`, devcontainer, and `test/toolchain-policy.test.ts` still asserted Node 24.  Aligned those pins to 26 (no runtime workaround).  Rollout `docs/rollouts/2026-10-29-node-26-toolchain-alignment.md`.
+
+**Next.**  Hosted verify on PR head; owner Mac seats use Node 26 for `land.sh`.
+
 
 **What.**  Closed eight unresolved Kody threads: server-only guard on `/api/keys`, Zod query validation, strict PATCH envelope, retired-key `source`/`docsUrl` contract, console copy + delete for retired rows, test env restore and Zod response parsing.  Rollout `docs/rollouts/2026-10-25-st-4580-kody-pr4932-review.md`.
 ## 2026-10-26 WISE: ST-4583 public footer logo
