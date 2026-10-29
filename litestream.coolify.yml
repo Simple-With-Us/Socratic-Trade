@@ -87,7 +87,7 @@ dbs:
     snapshot:
       interval: 24h
       # B2 is paid capacity (not CF free-tier) — keep 7d of LTX for restore headroom.
-      retention: 168h
+      retention: 72h
     replicas:
       - type: s3
         # Litestream 0.5.x can leak sockets at very short sync intervals against some
