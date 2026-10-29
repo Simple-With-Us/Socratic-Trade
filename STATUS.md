@@ -1,3 +1,8 @@
+## 2026-10-29 [Cursor] PR #4938 OpenTelemetry v3 blocked by Langfuse peers
+
+**What.**  Renovate observability major for `@opentelemetry/core` / `@opentelemetry/resources` v3 fails `npm ci`: `@langfuse/otel@6` peers `@opentelemetry/core@^2.0.1`.  Reverted pins to `^2.10.0`, added Renovate rule to skip those majors until Langfuse ships OTel 3 peers.  Rollout `docs/rollouts/2026-10-29-otel-3-langfuse-peer-block.md`.  PR #4935 instrumentation path unchanged.
+
+**Next.**  Merge when `verify` is green; OTel 3 lands with a Langfuse upgrade, not before.
 ## 2026-10-28 [MM] The issuer refusal names both variables it needs, not one (ST-4585)
 
 **What.**  The Kody review on pull request #4960 found a real defect in the remedy this change had just added, and it was HIGH severity.  The tier-2 `ASC_ISSUER_ID` refusal told the operator to unset `ASC_KEY_P8`, but an environment `ASC_KEY_ID` still wins in tier 3, so unsetting the ambient key alone does not reliably select the Infisical `/asc` credential.  With a key id that is not the `/asc` one, tier 3 never reaches the `/asc` key and never pairs the `/asc` issuer with it, so the operator lands on the same dead end the change exists to remove.  The remedy now names `unset ASC_KEY_P8 and ASC_KEY_ID`, which makes tier 3 read the key id, the issuer and the `.p8` from `/asc` whatever `/asc`'s own key id is.  The `ASC_KEY_ID` refusal keeps its own remedy, which was already reachable: there the key id is empty, so unsetting the ambient key alone is enough.
