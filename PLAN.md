@@ -3036,3 +3036,37 @@ and the easiest way for the guard to keep reporting green.
 The shape here is the same one this branch has used throughout: the claim is prose until something
 fails when the prose and the tree disagree, and four negative controls are what make the guard
 believable rather than decorative.
+
+## 2026-10-28 — [MM] The credential refusal names a remedy the operator can reach, and the upload handoff can run (ST-4585)
+
+A merged pull request can still hold a defect, and the two that mattered here were both about what
+the operator is told.  One told the operator to add the credential trio to Infisical `/asc`, which
+the code never reads in that state, so the instruction was a dead end that looked like a fix.  The
+other was the owner handoff after a failed upload, and it was unreachable code, so an operator whose
+credential was missing got an error and nothing else: not where the package was, and not what to
+do next.
+
+The fix keeps the two apart deliberately.  A credential that is present and REJECTED is still fatal,
+because a value that is not a key must not be signed with and must not be handed on as if it were.
+Only a credential that is ABSENT is reported, and the handoff ends the run with a nonzero exit, so
+the upload still does not happen and the operator is not misled about it.
+
+The refusal does not quietly swap one key for another either.  The ambient key keeps precedence
+over `/asc`, and the refusal tells the operator how to select `/asc` instead, because choosing a
+different key to sign with is the owner's decision and not a side effect of an error message.
+
+A remedy the operator cannot act on is itself the defect, and a remedy that is only sometimes
+reachable is the same defect in a quieter form.  The first pass fixed the missing-identifier
+refusal, which named an instruction the code never reaches.  The reviewer then found that the
+sibling refusal, the missing-issuer one, named an instruction that reaches the right place only
+when the environment happens to already hold `/asc`'s own key id.  An environment key id still
+wins over the credential in `/asc`, and a key id that is not `/asc`'s never gets `/asc`'s issuer
+either, so the operator could follow the advice exactly and still be stuck.
+
+The fix is the same kind of fix, not a new feature: the remedy names both variables it needs, so
+tier 3 reads the key id, the issuer and the `.p8` from `/asc` whatever `/asc`'s own key id is.  The
+refusal that was already reachable keeps its own wording, because there the key id is empty and
+unsetting the ambient key alone is enough.  A new test case reaches the issuer path, and a
+mutation run reverts only the remedy to prove the case fails for that reason and not another.
+
+Rollout: `docs/rollouts/2026-10-28-st-4585-asc-credential-handoff-followups.md`.
