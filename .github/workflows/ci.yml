@@ -370,6 +370,7 @@ jobs:
           # a stubbed App Store Connect.
           bash scripts/ios-fleet/test-ship-seq.sh
           node --test scripts/ios-fleet/version-plan.test.mjs
+          node --test scripts/ios-fleet/shared-build.test.mjs
           node --test scripts/ios-fleet/publish-ios-versions.test.mjs
           node --test scripts/ios-fleet/publish-ios-versions.stale-snapshot.test.mjs
           node --test scripts/ios-fleet/asc-api.credentials.test.mjs

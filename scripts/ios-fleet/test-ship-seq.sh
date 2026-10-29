@@ -54,6 +54,8 @@ d = json.load(open(p))
 for a in d["apps"].values():
     a.pop("fixedMarketingVersion", None)
     a.pop("buildCountSeed", None)
+    a.pop("macBundleId", None)
+    a.pop("pairedBuildFeed", None)
 json.dump(d, open(p, "w"), indent=2)
 PY
 SHIP="${LEGACY_DIR}/ship-testflight.sh"
@@ -92,7 +94,7 @@ cmd=""
 for a in "$@"; do
   case "$a" in
     */asc-api.mjs) cmd="asc-api" ;;
-    latest-marketing-patch|build-floor|released-store-version|next-dotted-build)
+    latest-marketing-patch|build-floor|released-store-version|next-shared-build)
       if [[ "$cmd" == "asc-api" ]]; then cmd="${cmd}:${a}"; fi
       ;;
   esac
@@ -111,10 +113,10 @@ case "$cmd" in
     printf '%s\n' "${FAKE_RELEASED:-}"
     exit 0
     ;;
-  asc-api:next-dotted-build)
-    [[ "${FAKE_DOTTED:-}" == "fail" ]] && exit 3
-    [[ -n "${FAKE_DOTTED:-}" ]] || exit 2
-    printf '%s\n' "$FAKE_DOTTED"
+  asc-api:next-shared-build)
+    [[ "${FAKE_SHARED:-}" == "fail" ]] && exit 3
+    [[ -n "${FAKE_SHARED:-}" ]] || exit 2
+    printf '%s\n' "$FAKE_SHARED"
     exit 0
     ;;
   asc-api:build-floor)
@@ -182,7 +184,7 @@ run_ship() {
     FAKE_ASC_PATCH="$FAKE_ASC_PATCH" \
     FAKE_ASC_FLOOR="$FAKE_ASC_FLOOR" \
     FAKE_RELEASED="${FAKE_RELEASED:-}" \
-    FAKE_DOTTED="${FAKE_DOTTED:-}" \
+    FAKE_SHARED="${FAKE_SHARED:-}" \
     bash "$SHIP" "$@" 2>&1)"
   RC=$?
   return 0
@@ -513,7 +515,7 @@ check "plans no version around it" "$(contains 'UNVERIFIED patch' && echo 1 || e
 FAKE_ASC_PATCH=236
 echo
 
-echo "12. fixed marketing version + dotted build (apps.json fixedMarketingVersion)"
+echo "12. fixed marketing version + shared four-digit build (apps.json fixedMarketingVersion)"
 FIXDIR="${WORK}/fleet-fixed"
 rm -rf "$FIXDIR"; cp -R "$SCRIPT_DIR" "$FIXDIR"
 python3 - "$FIXDIR/apps.json" <<'PY'
@@ -524,35 +526,37 @@ a = d["apps"]
 for k in list(a)[:1]:
     a[k]["fixedMarketingVersion"] = "1.1.2"
     a[k].pop("buildCountSeed", None)
+    a[k].pop("macBundleId", None)
+    a[k].pop("pairedBuildFeed", None)
 json.dump(d, open(p, "w"), indent=2)
 PY
 FIXAPP="$(python3 -c 'import json,sys; print(list(json.load(open(sys.argv[1]))["apps"])[0])' "$FIXDIR/apps.json")"
 SHIP_REAL="$SHIP"; SHIP="${FIXDIR}/ship-testflight.sh"
 rm -f "${STATE}/build-seq-${FIXAPP}.txt" "${STATE}/last-ship-${FIXAPP}.txt"
 write_record "$FIXAPP" 5
-FAKE_ASC_PATCH=239; FAKE_ASC_FLOOR=2383; FAKE_RELEASED=""; FAKE_DOTTED="1.1.2"
+FAKE_ASC_PATCH=239; FAKE_ASC_FLOOR=2383; FAKE_RELEASED=""; FAKE_SHARED="1000"
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run
 planned_pair
 check "fixed: marketing stays 1.1.2 even though ASC holds patch 239 (got '${PLANNED_MARKETING}')" \
   "$([[ "$PLANNED_MARKETING" == "1.1.2" ]] && echo 0 || echo 1)"
-check "fixed: an empty train plans the first build as the version (got '${PLANNED_BUILD}')" \
-  "$([[ "$PLANNED_BUILD" == "1.1.2" ]] && echo 0 || echo 1)"
+check "fixed: an empty inventory plans the first shared four-digit build (got '${PLANNED_BUILD}')" \
+  "$([[ "$PLANNED_BUILD" == "1000" ]] && echo 0 || echo 1)"
 check "fixed: the integer floor and commit count play no part" \
-  "$(contains 'dotted build 1.1.2 for fixed version 1.1.2' && echo 0 || echo 1)"
-FAKE_DOTTED="1.1.3"
+  "$(contains 'shared four-digit build 1000 for fixed version 1.1.2' && echo 0 || echo 1)"
+FAKE_SHARED="1001"
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run
 planned_pair
-check "fixed: a train holding 1.1.2 goes to 1.1.3 (got '${PLANNED_BUILD}')" \
-  "$([[ "$PLANNED_BUILD" == "1.1.3" ]] && echo 0 || echo 1)"
-FAKE_DOTTED="fail"
+check "fixed: a counter holding 1000 goes to 1001 (got '${PLANNED_BUILD}')" \
+  "$([[ "$PLANNED_BUILD" == "1001" ]] && echo 0 || echo 1)"
+FAKE_SHARED="fail"
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run
-check "fixed: a train with a build of another shape stops the run, nothing guessed" \
-  "$(contains 'cannot work out the next dotted build' && echo 0 || echo 1)"
-FAKE_DOTTED=""
+check "fixed: an unreadable or exhausted inventory stops the run, nothing guessed" \
+  "$(contains 'cannot work out the next shared four-digit build' && echo 0 || echo 1)"
+FAKE_SHARED=""
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run
-check "fixed: an unreadable train stops the run" \
-  "$(contains 'cannot work out the next dotted build' && echo 0 || echo 1)"
-FAKE_DOTTED="1.1.2"; FAKE_RELEASED="1.1.2"
+check "fixed: an unreadable inventory stops the run" \
+  "$(contains 'cannot work out the next shared four-digit build' && echo 0 || echo 1)"
+FAKE_SHARED="1000"; FAKE_RELEASED="1.1.2"
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run
 check "fixed: a version at the released App Store version is refused, not bumped" \
   "$(contains 'at or below the released App Store version 1.1.2' && echo 0 || echo 1)"
@@ -560,18 +564,52 @@ FAKE_RELEASED="fail"
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run
 check "fixed: an unreadable released App Store version stops the run (fail closed)" \
   "$(contains 'cannot read the released App Store version' && echo 0 || echo 1)"
-FAKE_DOTTED="0.1.0"; FAKE_RELEASED=""
+FAKE_SHARED="1000"; FAKE_RELEASED=""
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build 7
-check "fixed: an integer --build is refused (it would poison the dotted train)" \
-  "$(contains 'is not 1.1.<n>' && echo 0 || echo 1)"
-run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build 1.1.9
-check "fixed: a dotted --build of the fixed shape is honoured" \
-  "$([[ "$OUT" != *'is not 1.1.'* ]] && echo 0 || echo 1)"
+check "fixed: a non-four-digit --build is refused" \
+  "$(contains 'fixed mode requires a four-digit build 1000..9999' && echo 0 || echo 1)"
+run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build 999
+check "fixed: a three-digit --build is refused" \
+  "$(contains 'fixed mode requires a four-digit build 1000..9999' && echo 0 || echo 1)"
+run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build 1000
+planned_pair
+check "fixed: a four-digit --build at the minimum is honoured (got '${PLANNED_BUILD}')" \
+  "$([[ "$PLANNED_BUILD" == "1000" ]] && echo 0 || echo 1)"
+FAKE_SHARED="1001"
+run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build 1000
+check "fixed: a four-digit --build below the minimum is refused" \
+  "$(contains 'requested build is below the planned four-digit minimum 1001' && echo 0 || echo 1)"
+FAKE_SHARED="1000"
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --version 1.1.2
 planned_pair
 check "fixed: --version equal to the fixed version stays in fixed mode (got '${PLANNED_BUILD}')" \
-  "$([[ "$PLANNED_BUILD" == "0.1.0" ]] && echo 0 || echo 1)"
-SHIP="$SHIP_REAL"; FAKE_ASC_FLOOR=0; FAKE_RELEASED=""; FAKE_DOTTED=""; FAKE_ASC_PATCH=236
+  "$([[ "$PLANNED_BUILD" == "1000" ]] && echo 0 || echo 1)"
+python3 - "$FIXDIR/apps.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["apps"]["fixmac"] = {
+  "displayName": "Fixed Mac",
+  "fixedMarketingVersion": "1.1.2",
+  "bundleId": "trade.example.fixmac",
+  "scheme": "FixMac",
+  "projectRel": "mac/FixMac.xcodeproj",
+  "platform": "macOS",
+  "marketingVersionDefault": "1.0.0"
+}
+json.dump(d, open(p, "w"), indent=2)
+PY
+FAKE_SHARED="1000"; FAKE_RELEASED=""
+rm -f "${STATE}/build-seq-fixmac.txt" "${STATE}/last-ship-fixmac.txt"
+run_ship "fixmac" --repo-root "$REPO" --dry-run
+planned_pair
+check "fixed macOS: marketing stays 1.1.2 (got '${PLANNED_MARKETING}')" \
+  "$([[ "$PLANNED_MARKETING" == "1.1.2" ]] && echo 0 || echo 1)"
+check "fixed macOS: plans the shared four-digit build instead of refusing (got '${PLANNED_BUILD}')" \
+  "$([[ "$PLANNED_BUILD" == "1000" ]] && echo 0 || echo 1)"
+check "fixed macOS: logs the shared counter line" \
+  "$(contains 'shared four-digit build 1000 for fixed version 1.1.2' && echo 0 || echo 1)"
+SHIP="$SHIP_REAL"; FAKE_ASC_FLOOR=0; FAKE_RELEASED=""; FAKE_SHARED=""; FAKE_ASC_PATCH=236
 echo
 
 echo "----------------------------------------"

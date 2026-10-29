@@ -31,7 +31,8 @@ PIN_FILE="${REPO_ROOT}/scripts/ios-fleet.sha256"
 # version-plan.mjs is here for the same reason as the others:  it holds the
 # version-numbering rules (AFC-517), so an unreviewed edit to it changes the
 # marketing version and the build number that get uploaded.
-PINNED_FILES="ship-testflight.sh asc-api.mjs asc-key.mjs apps.json AppUpdatePrompt.swift version-plan.mjs"
+# shared-build.mjs likewise:  it picks the CFBundleVersion every fixed-mode ship uploads.
+PINNED_FILES="ship-testflight.sh asc-api.mjs asc-key.mjs apps.json AppUpdatePrompt.swift version-plan.mjs shared-build.mjs"
 
 MODE="check"
 case "${1:-}" in
