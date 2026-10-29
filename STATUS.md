@@ -2,7 +2,7 @@
 
 **What.**  Repaired hosted `verify` failures: `test/branch-protection-gate.test.ts` now guards the Wise relay caller contract (`use_wise_relay`, `wise_infisical_token`) instead of the retired `merge_token` PAT line; `sentry-ci-report.yml` observes the new `Wise relay read-only canary` workflow.  Auto-merge header comments match the relay path.  Rollout `docs/rollouts/2026-10-26-wise-shepherd-principal.md`.
 
-**Next.**  Push head, confirm `verify` + `verify-hosted` green, reply on resolved Kody threads, `@kody start-review`, mark PR ready.
+**Next.**  Required checks green on `74b5e2e1`; PR marked ready for review.  Kody re-run blocked on OpenRouter billing (429).  AFC #983 still gates reusable token-export contract.
 
 ## 2026-10-25 [Cursor] ST-4580 Kody review on PR #4932 (publisher/remove-fmp)
 
