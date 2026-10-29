@@ -10,6 +10,8 @@ The adapter reads dedicated Fleet-OPS prod /gr-front/wise-st using a purpose-sco
 
 `python3 scripts/test_wise_relay_exec.py` (11), principal startup selftest (7), existing in-flight/status-issue selftests, YAML parsing and bash syntax checks.
 
+PR #4948 CI repair (2026-10-29): branch-protection gate test now asserts `use_wise_relay` / `WISE_RELAY_INFISICAL_TOKEN` instead of legacy `merge_token`; Sentry CI reporter observes `Wise relay read-only canary`.  Commands: `npx vitest run test/branch-protection-gate.test.ts test/sentry-ci-report-workflows.test.ts`, full verify gate locally.
+
 ## Adoption and blockers
 
 No credential is in this change. GitHub merge-shepherd environment must contain WISE_RELAY_INFISICAL_TOKEN scoped read-only to the exact prod folder. Mac wrapper is a reviewed installation candidate, not installed by this PR; it requires an unattended qualified native Keychain purpose item. Preserve old storage/access until replacement is verified, but never resume personal writes as fallback. No native ship, manual deployment, OAuth change, global credential revocation or other-repo caller change.

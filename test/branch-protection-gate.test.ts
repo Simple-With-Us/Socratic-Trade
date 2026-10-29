@@ -259,9 +259,15 @@ describe("required contexts are not renamed out from under the ruleset", () => {
     expect(auto).toContain(".github/workflows/auto-merge-prs.yml");
     expect(auto).toContain("scripts/automerge-gate-dry-run.sh");
     expect(auto).toContain("scripts/disable-pr-automerge.sh");
-    // Arming must never fall back to GITHUB_TOKEN (a bot merge dispatches no workflows);
-    // the token resolves GH_PAT, then SHEPHERD_TOKEN, and the reusable probes it before use.
-    expect(auto).toMatch(/merge_token:\s*\$\{\{\s*secrets\.GH_PAT \|\| secrets\.SHEPHERD_TOKEN\s*\}\}/);
+    // Arming must never fall back to GITHUB_TOKEN (a bot merge dispatches no workflows).
+    // ST merge/auto-merge callers mint a short-lived swu-wise[bot] token via the guarded relay
+    // adapter; the reusable probes the mint before arming (no personal PAT fallback).
+    expect(auto).toMatch(/use_wise_relay:\s*true/);
+    expect(auto).toMatch(/expected_merge_actor:\s*swu-wise\[bot\]/);
+    expect(auto).toMatch(
+      /wise_infisical_token:\s*\$\{\{\s*secrets\.WISE_RELAY_INFISICAL_TOKEN\s*\}\}/,
+    );
+    expect(auto).not.toMatch(/merge_token:/);
     expect(auto).not.toMatch(/fetch-depth:\s*0/);
     const gate = readFileSync(join(repoRoot, "scripts", "pr-touches-codeowners-paths.sh"), "utf8");
     expect(gate).toContain("CODEOWNERS");

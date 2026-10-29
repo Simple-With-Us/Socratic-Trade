@@ -1,3 +1,9 @@
+## 2026-10-29 [Cursor] PR #4948 Wise relay caller migration — CI + gate tests
+
+**What.**  Repaired hosted `verify` failures: `test/branch-protection-gate.test.ts` now guards the Wise relay caller contract (`use_wise_relay`, `wise_infisical_token`) instead of the retired `merge_token` PAT line; `sentry-ci-report.yml` observes the new `Wise relay read-only canary` workflow.  Auto-merge header comments match the relay path.  Rollout `docs/rollouts/2026-10-26-wise-shepherd-principal.md`.
+
+**Next.**  Push head, confirm `verify` + `verify-hosted` green, reply on resolved Kody threads, `@kody start-review`, mark PR ready.
+
 ## 2026-10-25 [Cursor] ST-4580 Kody review on PR #4932 (publisher/remove-fmp)
 
 **What.**  Closed eight unresolved Kody threads: server-only guard on `/api/keys`, Zod query validation, strict PATCH envelope, retired-key `source`/`docsUrl` contract, console copy + delete for retired rows, test env restore and Zod response parsing.  Rollout `docs/rollouts/2026-10-25-st-4580-kody-pr4932-review.md`.

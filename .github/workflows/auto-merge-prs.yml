@@ -9,10 +9,11 @@ name: Auto-merge PRs
 # 318bfe710b794c28 / ST-3326).  Hold labels `do-not-automerge` /
 # `needs-human-merge` block arming and disable any armed merge.
 #
-# The merge token resolves GH_PAT, then SHEPHERD_TOKEN.  Arming never falls
-# back to GITHUB_TOKEN (a bot-attributed merge dispatches no workflow events -
-# no CI, no ios-ship on main), and the reusable probes the token before use,
-# so a dead credential fails loud instead of 401ing mid-step (ST-4393).
+# Merge arming uses the guarded Wise relay (use_wise_relay) to mint a short-lived
+# swu-wise[bot] token from WISE_RELAY_INFISICAL_TOKEN.  Arming never falls back to
+# GITHUB_TOKEN (a bot-attributed merge dispatches no workflow events — no CI, no
+# ios-ship on main), and the reusable probes the mint before use, so a dead relay
+# fails loud instead of 401ing mid-step (ST-4393).
 #
 # Branch deletion is off, because the merge queue is on (repo ruleset
 # 17945518).  GitHub refuses `--delete-branch` when a queue is enabled

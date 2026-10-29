@@ -64,6 +64,7 @@ on:
       - Deploy freshness
       - RTH Deploy Latch
       - Sentry Deploy
+      - Wise relay read-only canary
     types: [requested, completed]
 
 permissions:
