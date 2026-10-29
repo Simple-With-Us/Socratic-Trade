@@ -35,6 +35,13 @@ READONLY_PERMISSIONS = {
     "checks": "read",
     "metadata": "read",
 }
+PERMISSION_RANK = {"read": 0, "write": 1}
+
+
+def permission_exceeds(granted_level, required_level):
+    return PERMISSION_RANK.get(granted_level, -1) > PERMISSION_RANK.get(
+        required_level, -1
+    )
 KEYS = {
     "WISE_GIT_RELAY_BEARER",
     "WISE_GIT_RELAY_URL",
@@ -135,6 +142,29 @@ def argv_for_child(command, expected_actor):
     return command
 
 
+def verify_granted_permissions(granted, required_permissions):
+    if required_permissions == READONLY_PERMISSIONS:
+        if granted is None:
+            raise Refused("relay did not report the granted scopes")
+        if not isinstance(granted, dict):
+            raise Refused("relay granted scopes exceed the requested set")
+        extra = set(granted) - set(required_permissions)
+        if extra:
+            raise Refused("relay granted scopes exceed the requested set")
+        missing = set(required_permissions) - set(granted)
+        if missing:
+            raise Refused("relay granted fewer scopes than requested")
+        for key, level in required_permissions.items():
+            granted_level = granted.get(key)
+            if granted_level != level:
+                if permission_exceeds(granted_level, level):
+                    raise Refused("relay granted scopes exceed the requested set")
+                raise Refused("relay granted scopes differ from the requested set")
+        return
+    if granted is not None and granted != required_permissions:
+        raise Refused("relay granted scopes exceed the requested set")
+
+
 def mint_verified(config, required_permissions, request=request_json):
     result = request(
         config["WISE_GIT_RELAY_URL"].rstrip("/") + "/v1/mint_token",
@@ -144,11 +174,7 @@ def mint_verified(config, required_permissions, request=request_json):
     if not isinstance(result, dict) or result.get("app_slug") != "swu-wise":
         raise Refused("relay App identity mismatch")
     granted = result.get("permissions")
-    if required_permissions == READONLY_PERMISSIONS:
-        if granted != required_permissions:
-            raise Refused("relay granted scopes exceed the requested set")
-    elif granted is not None and granted != required_permissions:
-        raise Refused("relay granted scopes exceed the requested set")
+    verify_granted_permissions(granted, required_permissions)
     token = result.get("token")
     ttl = result.get("expires_in_seconds")
     if (

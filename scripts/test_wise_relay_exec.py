@@ -215,7 +215,41 @@ class AdapterTests(unittest.TestCase):
                 "permissions": w.MERGE_PERMISSIONS,
             }
 
-        with self.assertRaises(w.Refused):
+        with self.assertRaisesRegex(w.Refused, "relay granted scopes exceed"):
+            w.mint_verified(
+                self.config(w.READONLY_PERMISSIONS),
+                w.READONLY_PERMISSIONS,
+                request,
+            )
+
+    def test_readonly_mint_requires_granted_scope_echo(self):
+        def request(url, headers, body):
+            return {
+                "app_slug": "swu-wise",
+                "token": "ghs_fake",
+                "expires_in_seconds": 3590,
+            }
+
+        with self.assertRaisesRegex(w.Refused, "did not report the granted scopes"):
+            w.mint_verified(
+                self.config(w.READONLY_PERMISSIONS),
+                w.READONLY_PERMISSIONS,
+                request,
+            )
+
+    def test_readonly_mint_reports_fewer_scopes(self):
+        narrow = dict(w.READONLY_PERMISSIONS)
+        narrow.pop("actions")
+
+        def request(url, headers, body):
+            return {
+                "app_slug": "swu-wise",
+                "token": "ghs_fake",
+                "expires_in_seconds": 3590,
+                "permissions": narrow,
+            }
+
+        with self.assertRaisesRegex(w.Refused, "fewer scopes than requested"):
             w.mint_verified(
                 self.config(w.READONLY_PERMISSIONS),
                 w.READONLY_PERMISSIONS,
