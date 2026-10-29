@@ -38,7 +38,35 @@
 #                          (report-only) instead of attempted with a token that
 #                          can't re-trigger verify. Unset (e.g. the launchd driver,
 #                          which uses a real user PAT) defaults to "1".
+#
+# Args:
+#   --expected-actor LOGIN  required. GitHub login that will author shepherd
+#                           comments and merge actions for this run (must match
+#                           the credential in GH_TOKEN). Callers pass the value
+#                           from Infisical relay config or resolve it before exec.
 set -uo pipefail
+
+ME=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --expected-actor)
+      if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+        echo "[shepherd] --expected-actor requires a GitHub login" >&2
+        exit 1
+      fi
+      ME="$2"
+      shift 2
+      ;;
+    *)
+      echo "[shepherd] unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+if [ -z "$ME" ]; then
+  echo "[shepherd] required: --expected-actor <github-login>" >&2
+  exit 1
+fi
 
 DEFAULT_REPO="Simple-With-Us/Socratic-Trade"
 REPO="${GITHUB_REPOSITORY:-${SHEPHERD_REPO:-$DEFAULT_REPO}}"
@@ -47,17 +75,7 @@ HAS_PAT="${SHEPHERD_HAS_PAT:-1}"
 ISSUE_TITLE="Merge shepherd status"
 STATUS_ISSUE="${SHEPHERD_STATUS_ISSUE:-0}"
 # Who am I? Needed so the reran-marker check below (Codex review, round 3) only
-# trusts a comment we ourselves posted, not one any commenter could spoof. Prefer
-# the principal the relay adapter verified over a /user probe. A PAT resolves to
-# its owning user via /user; the default Actions GITHUB_TOKEN is an app-installation
-# token that 403s on /user, and always posts comments as the literal login
-# "github-actions[bot]" -- so that's the fallback (and the direct value whenever
-# HAS_PAT=0, skipping a doomed API call).
-ME="${EXPECTED_MERGE_ACTOR:-${SHEPHERD_EXPECTED_ACTOR:-}}"
-if [ -z "$ME" ] && [ "$HAS_PAT" = "1" ]; then
-  ME="$(gh api user --jq '.login' 2>/dev/null)"
-fi
-ME="${ME:-github-actions[bot]}"
+# trusts a comment we ourselves posted, not one any commenter could spoof.
 TMP="$(mktemp)"; trap 'rm -f "$TMP" "$TMP.md"' EXIT
 
 # The open tracking issue's number (the oldest when duplicates exist), or nothing.  Lists open

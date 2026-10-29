@@ -119,6 +119,22 @@ def request_json(url, headers, body=None):
         raise Refused("authenticated service request failed") from None
 
 
+def argv_for_child(command, expected_actor):
+    if not command:
+        return command
+    if os.path.basename(command[0]) == "merge-shepherd.sh":
+        return [command[0], "--expected-actor", expected_actor, *command[1:]]
+    if len(command) >= 2 and os.path.basename(command[1]) == "merge-shepherd.sh":
+        return [
+            command[0],
+            command[1],
+            "--expected-actor",
+            expected_actor,
+            *command[2:],
+        ]
+    return command
+
+
 def mint_verified(config, required_permissions, request=request_json):
     result = request(
         config["WISE_GIT_RELAY_URL"].rstrip("/") + "/v1/mint_token",
@@ -219,18 +235,13 @@ def main():
     env.pop("INFISICAL_TOKEN", None)
     env["GH_TOKEN"] = token
     env["GITHUB_REPOSITORY"] = REPO
+    child = list(argv[1:])
     if read_only:
-        for key in (
-            "SHEPHERD_EXPECTED_ACTOR",
-            "EXPECTED_MERGE_ACTOR",
-            "SHEPHERD_HAS_PAT",
-        ):
-            env.pop(key, None)
+        env.pop("SHEPHERD_HAS_PAT", None)
     else:
-        env["SHEPHERD_EXPECTED_ACTOR"] = ACTOR
-        env["EXPECTED_MERGE_ACTOR"] = ACTOR
         env["SHEPHERD_HAS_PAT"] = "1"  # App writes trigger CI; no personal credential.
-    os.execvpe(argv[1], argv[1:], env)
+        child = argv_for_child(child, config["WISE_GIT_RELAY_EXPECTED_ACTOR"])
+    os.execvpe(child[0], child, env)
 
 
 if __name__ == "__main__":

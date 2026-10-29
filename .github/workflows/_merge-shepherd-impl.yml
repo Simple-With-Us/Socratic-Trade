@@ -22,4 +22,10 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           SHEPHERD_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
           SHEPHERD_HAS_PAT: ${{ secrets.SHEPHERD_TOKEN != '' && '1' || '0' }}
-        run: bash scripts/merge-shepherd.sh
+        run: |
+          set -euo pipefail
+          actor=github-actions[bot]
+          if [ "${{ secrets.SHEPHERD_TOKEN != '' && '1' || '0' }}" = "1" ]; then
+            actor="$(gh api user --jq .login)"
+          fi
+          bash scripts/merge-shepherd.sh --expected-actor "$actor"

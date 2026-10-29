@@ -182,8 +182,29 @@ class AdapterTests(unittest.TestCase):
     def test_readonly_mode_skips_merge_env_exports(self):
         source = Path(w.__file__).read_text()
         self.assertIn("if read_only:", source)
-        self.assertIn('env.pop(key, None)', source)
+        self.assertIn('env.pop("SHEPHERD_HAS_PAT", None)', source)
         self.assertIn('READONLY_FOLDER', source)
+        self.assertNotIn("EXPECTED_MERGE_ACTOR", source)
+        self.assertNotIn("SHEPHERD_EXPECTED_ACTOR", source)
+
+    def test_argv_for_child_injects_merge_shepherd_actor(self):
+        actor = "swu-wise[bot]"
+        self.assertEqual(
+            w.argv_for_child(["bash", "scripts/merge-shepherd.sh"], actor),
+            ["bash", "scripts/merge-shepherd.sh", "--expected-actor", actor],
+        )
+        self.assertEqual(
+            w.argv_for_child(["scripts/merge-shepherd.sh"], actor),
+            ["scripts/merge-shepherd.sh", "--expected-actor", actor],
+        )
+        self.assertEqual(
+            w.argv_for_child(["/repo/scripts/merge-shepherd.sh", "--dry"], actor),
+            ["/repo/scripts/merge-shepherd.sh", "--expected-actor", actor, "--dry"],
+        )
+        self.assertEqual(
+            w.argv_for_child(["bash", "-c", "echo hi"], actor),
+            ["bash", "-c", "echo hi"],
+        )
 
     def test_relay_granted_scopes_must_match_readonly(self):
         def request(url, headers, body):
