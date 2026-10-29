@@ -1014,9 +1014,14 @@ async function main() {
       if (url) { console.error("next-shared-build: incomplete pagination"); process.exit(2); }
       return out;
     }
-    const iosBuilds = await allBuilds(appId, "IOS");
+    // The paired app joins the counter with its builds on BOTH platforms, so
+    // the counter is the same whichever of the two apps is the one shipping.
+    let iosBuilds = await allBuilds(appId, "IOS");
     let macBuilds = await allBuilds(appId, "MAC_OS");
-    if (macAppId) macBuilds = macBuilds.concat(await allBuilds(macAppId, "MAC_OS"));
+    if (macAppId) {
+      iosBuilds = iosBuilds.concat(await allBuilds(macAppId, "IOS"));
+      macBuilds = macBuilds.concat(await allBuilds(macAppId, "MAC_OS"));
+    }
     try {
       const planned = nextSharedBuild({iosBuilds, macBuilds, extraFloors, complete: true});
       console.error(`next-shared-build: ${iosBuilds.length} iOS build(s) + ${macBuilds.length} macOS build(s) inspected; ignored ${planned.ignoredIos} iOS timestamp build(s); next is ${planned.build}`);
