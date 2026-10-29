@@ -2,8 +2,8 @@
 """Fetch purpose-scoped Infisical config, relay-mint, verify principal, exec.
 
 No personal token fallback.  Values stay in subprocess memory.  The only
-persistent bootstrap is the consuming platform's Infisical service token.
-The folder's repository config is ST-specific even when relay permits more.
+persistent bootstrap is the consuming platform's Infisical service token.  The
+folder's repository config is ST-specific even when relay permits more.
 """
 
 import json
