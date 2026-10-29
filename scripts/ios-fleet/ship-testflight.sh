@@ -346,18 +346,23 @@ load_secrets() {
   if [[ -z "$key_pem" && -n "${ASC_KEY_P8:-}" ]]; then
     if [[ -z "$kid" ]]; then
       ASC_MISSING="ASC_KEY_ID"
+      #  The ambient key is resolved before Infisical /asc is read, so a
+      #  complete /asc credential is never reached while ASC_KEY_P8 is set:
+      #  telling the operator to add the trio to /asc cannot work, because
+      #  the code that would read it is never reached.  The remedy that does
+      #  work is to unset the ambient key, which lets /asc be selected.
       if [[ "$required" == "required" ]]; then
-        die "ASC_KEY_ID is missing: ASC_KEY_P8 is set, but the key id it belongs to is not.  Set ASC_KEY_ID and ASC_ISSUER_ID in the environment, or add ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 to Infisical /asc"
+        die "ASC_KEY_ID is missing: ASC_KEY_P8 is set, but the key id it belongs to is not.  Set ASC_KEY_ID and ASC_ISSUER_ID in the environment, or unset ASC_KEY_P8 so the complete Infisical /asc credential (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8) is used instead"
       fi
-      log "ASC_KEY_ID is missing: ASC_KEY_P8 is set, but the key id it belongs to is not"
+      log "ASC_KEY_ID is missing: ASC_KEY_P8 is set, but the key id it belongs to is not.  Set ASC_KEY_ID and ASC_ISSUER_ID in the environment, or unset ASC_KEY_P8 so the complete Infisical /asc credential (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8) is used instead"
       return 0
     fi
     if [[ -z "$iss" ]]; then
       ASC_MISSING="ASC_ISSUER_ID"
       if [[ "$required" == "required" ]]; then
-        die "ASC_ISSUER_ID is missing: ASC_KEY_P8 is set, but the issuer it belongs to is not.  Set ASC_ISSUER_ID in the environment, or add ASC_ISSUER_ID to Infisical /asc"
+        die "ASC_ISSUER_ID is missing: ASC_KEY_P8 is set, but the issuer it belongs to is not.  Set ASC_ISSUER_ID in the environment, or unset ASC_KEY_P8 and ASC_KEY_ID so the complete Infisical /asc credential (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8) is used instead"
       fi
-      log "ASC_ISSUER_ID is missing: ASC_KEY_P8 is set, but the issuer it belongs to is not"
+      log "ASC_ISSUER_ID is missing: ASC_KEY_P8 is set, but the issuer it belongs to is not.  Set ASC_ISSUER_ID in the environment, or unset ASC_KEY_P8 and ASC_KEY_ID so the complete Infisical /asc credential (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8) is used instead"
       return 0
     fi
     rc=0
@@ -427,7 +432,10 @@ load_secrets() {
   fi
   key_path="${ASC_TMP_DIR}/AuthKey_${kid}.p8"
   if ! node "${FLEET_DIR}/asc-key.mjs" write "$key_path" <<< "$key_pem"; then
-    die "the ASC key file could not be written; the credential is not usable"
+    #  The refused value is named and masked, never printed:  a credential
+    #  that is not a key has to be identifiable without its body reaching
+    #  an output stream.
+    die "the ASC key file could not be written; the credential is not usable; preview: $(key_preview "$key_pem")"
   fi
   # altool searches API_PRIVATE_KEYS_DIR first, so no symlink into ~/.appstoreconnect is needed.
   export API_PRIVATE_KEYS_DIR="$ASC_TMP_DIR"
@@ -1775,10 +1783,15 @@ PACKAGE="$(ls -1 "$EXPORT_DIR"/*.ipa "$EXPORT_DIR"/*.pkg 2>/dev/null | head -1 |
 [[ -n "$PACKAGE" ]] || die "no IPA or PKG produced in $EXPORT_DIR"
 
 # Re-load secrets before altool: long xcodebuild sessions can leave ASC_*
-# unset under `set -u` even when AUTH_MODE was api_key at plan time.  This is
-# the call that requires the credential:  the upload signs a request with it,
-# so a missing one is fatal here and the failure names what is missing.
-load_secrets required
+# unset under `set -u` even when AUTH_MODE was api_key at plan time.
+#
+# The credential is REPORTED here rather than fatal, because the package has
+# already been built at this point and the operator has to learn where it is
+# and how to provision the key.  A REJECTED credential is still fatal inside
+# load_secrets itself, in both modes:  only an ABSENT credential is handed
+# off.  The upload still does not happen either way, because the handoff ends
+# the run with a nonzero exit.
+load_secrets
 if [[ "$AUTH_MODE" != "api_key" ]]; then
   log "Package ready at: $PACKAGE"
   log "Upload blocked: no App Store Connect API key (${ASC_MISSING:-the credential} is missing)."
