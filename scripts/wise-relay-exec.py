@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fetch purpose-scoped Infisical config, relay-mint, verify principal, exec.
 
-No personal token fallback. Values stay in subprocess memory. The only
+No personal token fallback.  Values stay in subprocess memory.  The only
 persistent bootstrap is the consuming platform's Infisical service token.
 The folder's repository config is ST-specific even when relay permits more.
 """
@@ -41,7 +41,7 @@ PERMISSION_RANK = {"none": -1, "read": 0, "write": 1, "admin": 2}
 def permission_exceeds(granted_level, required_level):
     # An unrecognised granted level cannot be proven narrower, so it counts as
     # an over-grant (fail closed) rather than a mere scope mismatch.
-    if granted_level not in PERMISSION_RANK:
+    if not isinstance(granted_level, str) or granted_level not in PERMISSION_RANK:
         return True
     return PERMISSION_RANK[granted_level] > PERMISSION_RANK[required_level]
 
@@ -168,6 +168,8 @@ def verify_granted_permissions(granted, required_permissions):
             raise Refused("relay granted fewer scopes than requested")
         for key, level in required_permissions.items():
             granted_level = granted.get(key)
+            if not isinstance(granted_level, str):
+                raise Refused("relay granted scopes differ from the requested set")
             if granted_level != level:
                 if permission_exceeds(granted_level, level):
                     raise Refused("relay granted scopes exceed the requested set")

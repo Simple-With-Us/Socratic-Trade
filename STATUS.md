@@ -1,3 +1,7 @@
+## 2026-10-29 [Cursor] PR #4949 Wise relay read-only readiness canary
+
+**What.**  Addressed remaining Kody review on malformed relay scope levels (fail-closed `Refused`, no traceback) and sentence-gap nits in relay/shepherd source comments.  Rollout `docs/rollouts/2026-10-29-wise-relay-readiness-canary-pr4949.md`.
+
 ## 2026-10-25 [Cursor] ST-4580 Kody review on PR #4932 (publisher/remove-fmp)
 
 **What.**  Closed eight unresolved Kody threads: server-only guard on `/api/keys`, Zod query validation, strict PATCH envelope, retired-key `source`/`docsUrl` contract, console copy + delete for retired rows, test env restore and Zod response parsing.  Rollout `docs/rollouts/2026-10-25-st-4580-kody-pr4932-review.md`.

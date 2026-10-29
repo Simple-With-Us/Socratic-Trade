@@ -276,6 +276,24 @@ class AdapterTests(unittest.TestCase):
                 request,
             )
 
+    def test_readonly_mint_rejects_non_string_scope_levels(self):
+        bad = dict(w.READONLY_PERMISSIONS, contents=["read"])
+
+        def request(url, headers, body):
+            return {
+                "app_slug": "swu-wise",
+                "token": "ghs_fake",
+                "expires_in_seconds": 3590,
+                "permissions": bad,
+            }
+
+        with self.assertRaisesRegex(w.Refused, "differ from the requested set"):
+            w.mint_verified(
+                self.config(w.READONLY_PERMISSIONS),
+                w.READONLY_PERMISSIONS,
+                request,
+            )
+
     def test_readonly_mint_reports_fewer_scopes(self):
         narrow = dict(w.READONLY_PERMISSIONS)
         narrow.pop("actions")

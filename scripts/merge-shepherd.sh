@@ -40,9 +40,9 @@
 #                          which uses a real user PAT) defaults to "1".
 #
 # Args:
-#   --expected-actor LOGIN  required. GitHub login that will author shepherd
+#   --expected-actor LOGIN  required.  GitHub login that will author shepherd
 #                           comments and merge actions for this run (must match
-#                           the credential in GH_TOKEN). Callers pass the value
+#                           the credential in GH_TOKEN).  Callers pass the value
 #                           from Infisical relay config or resolve it before exec.
 set -uo pipefail
 
