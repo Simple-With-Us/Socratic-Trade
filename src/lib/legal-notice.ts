@@ -24,7 +24,8 @@ export const BACKUP_RETENTION_DAYS = 3;
  * Weekly R2 cold-archive depth (`R2_COLD_SNAPSHOT_DEFAULT_RETAIN` in r2-cold-snapshot.ts):
  * the newest N Sunday full copies are kept, so a copy lives about N weeks.
  * Weekly copies run alongside the short-term ones from day 1, so N weeks is also the
- * total maximum age of any backup.
+ * total maximum age of any backup.  The prune pass also enforces a hard 14-day cap
+ * (`R2_COLD_SNAPSHOT_MAX_AGE_DAYS`), counted from the day each copy is made.
  */
 export const WEEKLY_BACKUP_RETENTION_WEEKS = 2;
 /** User-facing backup retention sentence shared by the privacy policy and consent gate. */
