@@ -1141,8 +1141,7 @@ repair must combine provider-page ghost cleanup with a local keyset whole-commit
 commit reconciliation in a way that can split one commit across pages, and never rewrite PIT intervals/heads during
 repair. No 1,000-stock provider or corpus write is authorized yet.
 
-Node 24 remains the supported runtime. Node 26 is installed on the host but is not adopted while `.nvmrc`, CI,
-production, and the `better-sqlite3` native ABI are pinned to 24.
+Node 26 is the supported runtime (`.nvmrc`, CI, production Docker image, and `scripts/land.sh` gate).
 
 ## Codex Audit Wave 0: Base Guardrails
 **Status: In Progress**
