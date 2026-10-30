@@ -40,12 +40,14 @@ import {
   R2_COLD_SNAPSHOT_DEFAULT_DEADLINE_MS,
   R2_COLD_SNAPSHOT_DEFAULT_PART_BYTES,
   R2_COLD_SNAPSHOT_DEFAULT_RETAIN,
+  R2_COLD_SNAPSHOT_MAX_AGE_DAYS,
   R2_COLD_SNAPSHOT_HEALTH_STATE_KEY,
   R2_COLD_SNAPSHOT_JOB_TYPE,
   R2_COLD_SNAPSHOT_LAST_FAILURE_KEY,
   R2_COLD_SNAPSHOT_LAST_SUCCESS_KEY,
 } from "../src/lib/r2-cold-snapshot";
 import { enqueueDueJob } from "../src/lib/db-jobs";
+import { WEEKLY_BACKUP_RETENTION_WEEKS } from "../src/lib/legal-notice";
 import { getDb } from "../src/lib/db";
 import { deleteInternalSetting, getInternalSetting, setInternalSetting } from "../src/lib/db-settings";
 
@@ -275,6 +277,8 @@ describe("nextR2ColdSnapshotDueAt", () => {
 });
 
 describe("selectColdSnapshotsToPrune", () => {
+  const AUG_09 = Date.UTC(2026, 7, 9, 3, 17, 0);
+  const AUG_31 = Date.UTC(2026, 7, 31, 3, 17, 0);
   it("keeps the newest N and returns older snapshot keys for deletion", () => {
     const keys = [
       "cold-snapshots/app-2026-07-05.db",
@@ -284,11 +288,14 @@ describe("selectColdSnapshotsToPrune", () => {
       "cold-snapshots/app-2026-08-02.db",
       "cold-snapshots/app-2026-08-09.db",
     ];
-    expect(selectColdSnapshotsToPrune(keys, 4).sort()).toEqual([
+    // retain=4 would keep 07-19..08-09, but 07-19 is 21 days before 08-09 and the
+    // 14-day cap drops it; 07-26 is exactly 14 days and stays.
+    expect(selectColdSnapshotsToPrune(keys, 4, AUG_09).sort()).toEqual([
       "cold-snapshots/app-2026-07-05.db",
       "cold-snapshots/app-2026-07-12.db",
+      "cold-snapshots/app-2026-07-19.db",
     ]);
-    expect(selectColdSnapshotsToPrune(keys, 1).sort()).toEqual([
+    expect(selectColdSnapshotsToPrune(keys, 1, AUG_09).sort()).toEqual([
       "cold-snapshots/app-2026-07-05.db",
       "cold-snapshots/app-2026-07-12.db",
       "cold-snapshots/app-2026-07-19.db",
@@ -304,7 +311,7 @@ describe("selectColdSnapshotsToPrune", () => {
       "cold-snapshots/app-2026-08-30.db",
       "cold-snapshots/app-2026-08-31.db.gz",
     ];
-    expect(selectColdSnapshotsToPrune(keys, 1)).toEqual(["cold-snapshots/app-2026-08-30.db"]);
+    expect(selectColdSnapshotsToPrune(keys, 1, AUG_31)).toEqual(["cold-snapshots/app-2026-08-30.db"]);
   });
 
   it("treats a same-date .db.gz as newer than its .db twin", () => {
@@ -312,7 +319,7 @@ describe("selectColdSnapshotsToPrune", () => {
       "cold-snapshots/app-2026-08-31.db",
       "cold-snapshots/app-2026-08-31.db.gz",
     ];
-    expect(selectColdSnapshotsToPrune(keys, 1)).toEqual(["cold-snapshots/app-2026-08-31.db"]);
+    expect(selectColdSnapshotsToPrune(keys, 1, AUG_31)).toEqual(["cold-snapshots/app-2026-08-31.db"]);
   });
 
   it("never touches keys outside the snapshot pattern (historic litestream data)", () => {
@@ -323,11 +330,55 @@ describe("selectColdSnapshotsToPrune", () => {
       "cold-snapshots/app-2026-08-02.db.gz.bak",
       "cold-snapshots/other-thing.txt",
     ];
-    expect(selectColdSnapshotsToPrune(keys, 1)).toEqual([]);
+    expect(selectColdSnapshotsToPrune(keys, 1, AUG_09)).toEqual([]);
+  });
+
+  describe("14-day max age (R2_COLD_SNAPSHOT_MAX_AGE_DAYS)", () => {
+    const weeklies = [
+      "cold-snapshots/app-2026-10-11.db.gz",
+      "cold-snapshots/app-2026-10-18.db.gz",
+      "cold-snapshots/app-2026-10-25.db.gz",
+      "cold-snapshots/app-2026-11-01.db.gz",
+    ];
+
+    it("is 14 days, matching the 'at most 2 weeks' copy", () => {
+      expect(R2_COLD_SNAPSHOT_MAX_AGE_DAYS).toBe(14);
+      expect(R2_COLD_SNAPSHOT_MAX_AGE_DAYS).toBe(WEEKLY_BACKUP_RETENTION_WEEKS * 7);
+    });
+
+    it("default retain on the Sunday slot keeps this week (0d) and last week (7d)", () => {
+      const sunday = Date.UTC(2026, 10, 1, 3, 17, 0);
+      expect(selectColdSnapshotsToPrune(weeklies, R2_COLD_SNAPSHOT_DEFAULT_RETAIN, sunday).sort()).toEqual([
+        "cold-snapshots/app-2026-10-11.db.gz",
+        "cold-snapshots/app-2026-10-18.db.gz",
+      ]);
+    });
+
+    it("a raised retain still drops anything older than 14 days", () => {
+      const sunday = Date.UTC(2026, 10, 1, 3, 17, 0);
+      // retain=12 would keep all four; 10-11 (21d) and nothing else is past the cap,
+      // 10-18 is exactly 14d and stays.
+      expect(selectColdSnapshotsToPrune(weeklies, 12, sunday)).toEqual(["cold-snapshots/app-2026-10-11.db.gz"]);
+    });
+
+    it("a late run (missed Sunday) does not keep a copy older than 14 days", () => {
+      // Snapshot for 11-01 landed, but the run is evaluated on 11-02: 10-18 is now 15d old.
+      const monday = Date.UTC(2026, 10, 2, 9, 0, 0);
+      expect(selectColdSnapshotsToPrune(weeklies, 12, monday).sort()).toEqual([
+        "cold-snapshots/app-2026-10-11.db.gz",
+        "cold-snapshots/app-2026-10-18.db.gz",
+      ]);
+    });
+
+    it("never age-prunes the newest snapshot, even if it is itself older than 14 days", () => {
+      const keys = ["cold-snapshots/app-2026-09-06.db.gz", "cold-snapshots/app-2026-09-13.db.gz"];
+      const muchLater = Date.UTC(2026, 10, 1, 3, 17, 0);
+      expect(selectColdSnapshotsToPrune(keys, 2, muchLater)).toEqual(["cold-snapshots/app-2026-09-06.db.gz"]);
+    });
   });
 
   it("returns empty when at or under the retention count", () => {
-    expect(selectColdSnapshotsToPrune(["cold-snapshots/app-2026-08-09.db.gz"], 4)).toEqual([]);
+    expect(selectColdSnapshotsToPrune(["cold-snapshots/app-2026-08-09.db.gz"], 4, AUG_09)).toEqual([]);
   });
 });
 
