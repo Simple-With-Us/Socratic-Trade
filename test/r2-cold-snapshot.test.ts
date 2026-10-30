@@ -288,12 +288,13 @@ describe("selectColdSnapshotsToPrune", () => {
       "cold-snapshots/app-2026-08-02.db",
       "cold-snapshots/app-2026-08-09.db",
     ];
-    // retain=4 would keep 07-19..08-09, but 07-19 is 21 days before 08-09 and the
-    // 14-day cap drops it; 07-26 is exactly 14 days and stays.
+    // retain=4 would keep 07-19..08-09, but the 14-day cap is measured at the next
+    // run (08-16): 07-26 and 07-19 would be 21+ days old by then, 08-02 exactly 14.
     expect(selectColdSnapshotsToPrune(keys, 4, AUG_09).sort()).toEqual([
       "cold-snapshots/app-2026-07-05.db",
       "cold-snapshots/app-2026-07-12.db",
       "cold-snapshots/app-2026-07-19.db",
+      "cold-snapshots/app-2026-07-26.db",
     ]);
     expect(selectColdSnapshotsToPrune(keys, 1, AUG_09).sort()).toEqual([
       "cold-snapshots/app-2026-07-05.db",
@@ -354,15 +355,19 @@ describe("selectColdSnapshotsToPrune", () => {
       ]);
     });
 
-    it("a raised retain still drops anything older than 14 days", () => {
+    it("a raised retain still drops anything that would pass 14 days before the next run", () => {
       const sunday = Date.UTC(2026, 10, 1, 3, 17, 0);
-      // retain=12 would keep all four; 10-11 (21d) and nothing else is past the cap,
-      // 10-18 is exactly 14d and stays.
-      expect(selectColdSnapshotsToPrune(weeklies, 12, sunday)).toEqual(["cold-snapshots/app-2026-10-11.db.gz"]);
+      // retain=12 would keep all four.  Prune runs weekly, so a copy kept today lives
+      // until 11-08: 10-25 is then exactly 14d (stays), 10-18 would be 21d (pruned now).
+      expect(selectColdSnapshotsToPrune(weeklies, 12, sunday).sort()).toEqual([
+        "cold-snapshots/app-2026-10-11.db.gz",
+        "cold-snapshots/app-2026-10-18.db.gz",
+      ]);
     });
 
     it("a late run (missed Sunday) does not keep a copy older than 14 days", () => {
-      // Snapshot for 11-01 landed, but the run is evaluated on 11-02: 10-18 is now 15d old.
+      // Snapshot for 11-01 landed, but the run is evaluated on 11-02.  Next run 11-08:
+      // 10-25 is then 14d (stays), 10-18 would be 21d (pruned).
       const monday = Date.UTC(2026, 10, 2, 9, 0, 0);
       expect(selectColdSnapshotsToPrune(weeklies, 12, monday).sort()).toEqual([
         "cold-snapshots/app-2026-10-11.db.gz",

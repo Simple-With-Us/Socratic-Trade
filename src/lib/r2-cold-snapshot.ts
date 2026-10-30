@@ -413,17 +413,22 @@ export function nextR2ColdSnapshotDueAt(nowMs: number): { dueAtISO: string; dedu
  * keys embed the ISO date, so lexical sort == chronological sort (a same-date `.db.gz`
  * sorts after its `.db` twin, i.e. the gzipped upload is treated as newer). This is what
  * prunes the last legacy raw `.db` object after the first successful `.gz` upload.  Also
- * applies the `R2_COLD_SNAPSHOT_MAX_AGE_DAYS` (14) cap relative to `nowMs`. Pure.
+ * applies the `R2_COLD_SNAPSHOT_MAX_AGE_DAYS` (14) cap, measured at the next scheduled
+ * run after `nowMs` (the next time prune can act). Pure.
  */
 export function selectColdSnapshotsToPrune(keys: readonly string[], retain: number, nowMs: number): string[] {
   const snapshots = keys.filter((k) => KEY_PATTERN.test(k)).sort().reverse();
   const keepCount = Math.max(1, retain);
-  // 14-day cap (R2_COLD_SNAPSHOT_MAX_AGE_DAYS): a kept snapshot whose key date is more
-  // than 14 UTC calendar days before `nowMs` is pruned too.  The newest snapshot (the one
-  // this run just uploaded) is never age-pruned, so the archive never drops to zero.
-  const now = new Date(nowMs);
-  const todayMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  const cutoffMs = todayMs - R2_COLD_SNAPSHOT_MAX_AGE_DAYS * 86_400_000;
+  // 14-day cap (R2_COLD_SNAPSHOT_MAX_AGE_DAYS).  This pass only runs weekly, so a
+  // snapshot kept now survives until the NEXT scheduled run; prune any kept snapshot
+  // that would be more than 14 days old (by UTC key date) by then.  Sunday run:
+  // keeps this week + last week (14d at next run), drops two weeks ago (21d).  The
+  // newest snapshot (the one this run just uploaded) is never age-pruned, so the
+  // archive never drops to zero.
+  const nextDueMs = Date.parse(nextR2ColdSnapshotDueAt(nowMs).dueAtISO);
+  const nextDue = new Date(nextDueMs);
+  const nextDueDayMs = Date.UTC(nextDue.getUTCFullYear(), nextDue.getUTCMonth(), nextDue.getUTCDate());
+  const cutoffMs = nextDueDayMs - R2_COLD_SNAPSHOT_MAX_AGE_DAYS * 86_400_000;
   return snapshots.filter((k, i) => {
     if (i >= keepCount) return true;
     if (i === 0) return false;
