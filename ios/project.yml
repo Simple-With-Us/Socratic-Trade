@@ -20,26 +20,13 @@ settings:
     # RECORD OF WHAT SHIPPED, not the source of truth for what ships next.
     # The ship script passes MARKETING_VERSION / CURRENT_PROJECT_VERSION on the
     # xcodebuild command line, so these values never decide a build.  Under the
-    # unified scheme (owner 2026-10-18) the ship script resolves MARKETING_VERSION
-    # as 1.0.<commit_count> and CURRENT_PROJECT_VERSION as <commit_count>, where
-    # <commit_count> is `git rev-list --count HEAD`, then applies a
-    # strictly-increasing guard: it ships max(commit count, floor + 1), where the
-    # floor is the highest of the local cache, App Store Connect, and
-    # project.pbxproj.  Keeping the two numbers here in step with each other is
-    # what lets anyone answer "what version is this repo at?" without an ASC
-    # round trip.
-    #
-    # The two values below always describe the same commit count: MARKETING is
-    # 1.0.N and the build is N.  They are a snapshot, so they lag the next
-    # commit; `xcodegen generate` rewrites project.pbxproj from THIS file, so
-    # update both by hand whenever you notice drift.  UTC YYYYMMDDHHMM build
-    # stamps are retired and must not come back.
-    # RECORD OF WHAT SHIPPED, not the source of truth for what ships next:
-    # the ship script passes both values on the xcodebuild command line, and
-    # reads this one as the build-number FLOOR, so it must stay below the
-    # commit count of any commit that can ship.
-    MARKETING_VERSION: "1.0.436"
-    CURRENT_PROJECT_VERSION: "436"  # commit count; ship script overrides per build
+    # fixed-version scheme (owner 2026-10-29) the marketing version stays 0.1.0
+    # and the build is the once-planned merge-timestamp number max(S, M + 1).
+    # `xcodegen generate` rewrites project.pbxproj from THIS file, so update
+    # both by hand whenever you notice drift; the build below is a placeholder
+    # the ship overrides.
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "202610290000"  # placeholder; ship script overrides per build
     INFOPLIST_KEY_CFBundleDisplayName: "Socratic Trade"
     INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.finance"
     # SENTRY_DSN is not set here. An explicit empty string in the project file

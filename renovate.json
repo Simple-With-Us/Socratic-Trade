@@ -42,6 +42,12 @@
       "groupName": "observability"
     },
     {
+      "description": "@langfuse/otel@6 peers @opentelemetry/core and sdk-trace-base at ^2.0.1. OTel core/resources v3 majors fail npm ci (peer + @opentelemetry/api skew) until Langfuse publishes OTel 3 peers. Remove this rule in the same PR that bumps @langfuse/otel's peer range.",
+      "matchPackageNames": ["@opentelemetry/core", "@opentelemetry/resources"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    },
+    {
       "matchPackagePatterns": ["^vitest$", "^@playwright/.*$"],
       "groupName": "testing"
     }
