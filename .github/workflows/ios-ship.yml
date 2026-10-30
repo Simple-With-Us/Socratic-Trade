@@ -108,12 +108,26 @@ jobs:
       # red on an unrelated environment problem. The logic lives in a script,
       # not inline YAML, so CI can unit-test it on every PR -- otherwise it
       # would only ever execute on the one Mac that can ship.
-      - name: Scheduled ship gate (skip unless iOS code changed)
+      - name: Scheduled ship gate (skip unless a ship path changed)
         id: gate
         run: |
+          # These flags must mirror on.push.paths above entry-for-entry: the
+          # cron carries no paths filter, so the gate replays it. A missed
+          # push (disabled workflow, dropped event, bot merge) still ships
+          # iff a push path changed since the last ship.
           bash "$GITHUB_WORKSPACE/scripts/ios-scheduled-ship-gate.sh" \
             --event "${{ github.event_name }}" \
-            --path-prefix 'ios/' \
+            --path-prefix 'ios/**' \
+            --path-prefix '.github/workflows/ios-ship.yml' \
+            --path-prefix 'scripts/ios-ship-testflight.sh' \
+            --path-prefix 'scripts/ios-appstore-gm-prepare.sh' \
+            --path-prefix 'scripts/ios-asc-key-env.sh' \
+            --path-prefix 'scripts/ios-stage-asc-key.sh' \
+            --path-prefix 'scripts/ios-install-appstore-profiles.sh' \
+            --path-prefix 'scripts/ios-collect-ship-logs.sh' \
+            --path-prefix 'scripts/ios-fleet/**' \
+            --path-prefix 'scripts/ios-fleet-pin.sh' \
+            --path-prefix 'scripts/ios-fleet.sha256' \
             --repo-root "$GITHUB_WORKSPACE" \
             socratic
 
