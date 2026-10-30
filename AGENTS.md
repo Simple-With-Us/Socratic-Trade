@@ -740,11 +740,10 @@ local multi-worktree/PM2 setup and does NOT apply here.
 - Standard verification commands live in `README.md`/the "Verify before claiming
  done" section: `npm run lint`, `npx tsc --noEmit`, `npm test` (vitest), `npm run
  build`. All pass clean in this environment.
-- Node version: `.nvmrc` pins Node **24**, but the cloud VM's default `node`
- (`/exec-daemon/node`, which wins on `PATH`) is **v22.x**, and the startup update
- script (`npm install`) runs under it. The app installs, tests, and builds clean on
- Node 22 — do not burn time forcing Node 24 via nvm (its bin is later on `PATH` and
- does not persist into the update-script context).
+- Node version: `.nvmrc`, CI, production Docker, and `scripts/land.sh` pin Node **26**. The cloud VM's default `node`
+ (`/exec-daemon/node`, which wins on `PATH`) may still be **v22.x** during the startup update script; CI and
+ production run Node 26. Prefer matching `.nvmrc` locally when running the full gate; do not spend time fighting
+ nvm PATH ordering unless verify is failing for runtime reasons.
 - `npm install` alone is sufficient. npm 11 prints an `allow-scripts` warning that
  install scripts for `better-sqlite3`/`sharp`/`esbuild` were "not covered" — this is
  harmless here: those native deps load from prebuilt binaries (verified
