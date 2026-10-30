@@ -51,7 +51,7 @@ deadline that fails loudly.  See §7.
 |---|---|---|---|---|---|---|---|
 | 1 | **Continuous replication** | Litestream 0.5.12, LTX | **Backblaze B2** `jays-socratic-trade-eu` / `trading-live/app.db` | `sync-interval: 300s` | `snapshot.interval 24h`, `snapshot.retention 72h` (**3 days**) | **≤ 5 min** | ~5–10 min |
 | 2 | **Host-local dump** | `sqlite3 .backup` from the docker volume | `/data/backups/socratic/` on the box, then **B2** `jays-socratic-trade-eu/hetzner/` | every 6 h (`15 */6`) | local `KEEP_COUNT=2` / `KEEP_DAYS=2`; B2 `B2_KEEP_SETS=2` | ≤ 6 h | minutes (local) |
-| 3 | **Weekly cold archive** | `VACUUM INTO` in a child process, gzip-streamed multipart upload | **Cloudflare R2** `socratic-trade-bucket` / `cold-snapshots/app-<date>.db.gz` | Sunday 03:17 UTC | **3 snapshots** (~3 weeks) — 1 → 4 on 2026-09-09, 4 → 3 on 2026-10-29 | ≤ 7 days | ~20–30 min |
+| 3 | **Weekly cold archive** | `VACUUM INTO` in a child process, gzip-streamed multipart upload | **Cloudflare R2** `socratic-trade-bucket` / `cold-snapshots/app-<date>.db.gz` | Sunday 03:17 UTC | **2 snapshots** (≤ 2 weeks) — 1 → 4 on 2026-09-09, 4 → 2 on 2026-10-29 | ≤ 7 days | ~20–30 min |
 | 4 | **Host snapshot** | Hetzner server backups | Hetzner | daily, 14:00–18:00 UTC window | Hetzner default | ~24 h | hours |
 
 Tier 1 code: `litestream.coolify.yml`, launched by `scripts/coolify-prod-start.sh`.
@@ -87,7 +87,7 @@ provider would remove protection that is not visible in a diagram.
    account suspension, or a provider-side incident takes out everything reachable with that
    one set of keys.  Two providers means two independent sets of keys, bills, and control
    planes.
-3. **It is cheap.**  Three gzipped weeklies at ~3 GB are roughly 9 GB of paid R2.
+3. **It is cheap.**  Two gzipped weeklies at ~3 GB are roughly 6 GB of paid R2.
 
 `src/lib/r2-cold-snapshot.ts` says the same thing in its header, deliberately, so that the
 next person to notice "we are paying for two object stores" finds the reason before the
@@ -363,7 +363,7 @@ improvise it during an incident from this page.
 
 | Date | Change |
 |---|---|
-| 2026-10-29 | Jay: tier-1 Litestream `snapshot.retention` 168h → 72h (3 days); tier-3 cold retain 4 → 3 (3 weeks).  Privacy policy and consent copy now say short-term backups are kept 3 days and weekly backups 3 weeks (no legal-version bump; retention only got shorter). |
+| 2026-10-29 | Jay: tier-1 Litestream `snapshot.retention` 168h → 72h (3 days); tier-3 cold retain 4 → 2 (at most 2 weeks; weeklies run alongside tier 1 from day 1).  Privacy policy and consent copy now say backups are kept at most 2 weeks: short-term 3 days, weekly 2 weeks (no legal-version bump; retention only got shorter). |
 | 2026-09-09 | **Cold-archive restore PROVEN** — `cold-snapshots/app-2026-08-30.db` restored from R2, `integrity_check` ok, key tables populated (receipt in `docs/rollouts/2026-09-09-backup-methodology.md`).  This policy written.  Cold retention 1 → 4; `R2_COLD_SNAPSHOT_RETAIN` can now raise retention rather than only lower it; whole-attempt deadline with S3 request abort; bounded per-request retries; `fetch failed` cause unwrapping; pre-upload artifact verification; `scripts/ops/verify-cold-snapshot-restore.mjs`; `scripts/litestream-restore-drill.sh` repointed at B2 and the real production paths. |
 | 2026-09-08 | #3192 — cold snapshot moved from better-sqlite3 `backup()` to `VACUUM INTO` in a child process; snapshot-step deadline; Sentry freshness watchdog. |
 | 2026-08-31 | #3135 — cold snapshot gzip-streamed.  `B2_KEEP_SETS` prune added to the host tier. |

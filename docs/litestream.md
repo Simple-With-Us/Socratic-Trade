@@ -29,8 +29,8 @@ after 1 day**.  B2 applies these to litestream's LTX objects like any other file
 so point-in-time restore depth from B2 is hard-capped at **~15 days** regardless
 of what litestream's own retention settings claim.  Do not plan a restore deeper
 than that from B2.  The weekly R2 cold snapshot is SECOND-PROVIDER disaster
-recovery, not deeper history: retain=3 (2026-10-29) keeps the newest three Sunday
-copies, so the oldest is about 3 weeks old.  Litestream itself keeps 72h of snapshots.
+recovery, not deeper history: retain=2 (2026-10-29) keeps the newest two Sunday
+copies, so the oldest is at most about 2 weeks old.  Litestream itself keeps 72h of snapshots.
 
 ## Weekly R2 cold snapshot is gzipped (2026-08-31)
 
