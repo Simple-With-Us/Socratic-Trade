@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Card } from "../ui/primitives";
+import { BACKUP_RETENTION_SENTENCE } from "@/lib/legal-notice";
 import { PublicShell, PUBLIC_HEADER_ACTION_CLASS } from "../ui/public/public-shell";
 
 // The CDN-cached prerender (`s-maxage=31536000`) was leaving a deployed docs edit stale
@@ -71,7 +72,7 @@ const SECTIONS: Array<{ title: string; body: string[] }> = [
     title: "6. Data retention",
     body: [
       "We retain account, connection, and audit data for as long as your account is active and as needed to comply with legal obligations, resolve disputes, and enforce agreements.",
-      "Database backups are kept for 7 days, then deleted.  Deleting your account removes this account's app data; leftover backup copies expire at the end of that window.",
+      `${BACKUP_RETENTION_SENTENCE}  Deleting your account removes this account's app data; leftover backup copies expire at the end of those windows.`,
       "You can delete your account yourself in Settings → Danger using the typed confirmation.  That permanently removes this account's app data and stored secrets.  Open positions at your broker and sign-in connections with other services are not closed or revoked by this app."
     ]
   },

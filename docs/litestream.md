@@ -29,8 +29,8 @@ after 1 day**.  B2 applies these to litestream's LTX objects like any other file
 so point-in-time restore depth from B2 is hard-capped at **~15 days** regardless
 of what litestream's own retention settings claim.  Do not plan a restore deeper
 than that from B2.  The weekly R2 cold snapshot is SECOND-PROVIDER disaster
-recovery, not deeper history: retain=1 means it is a single point at most ~7
-days old.  No provider holds a recovery point older than ~15 days.
+recovery, not deeper history: retain=2 (2026-10-29) keeps the newest two Sunday
+copies, so the oldest is at most about 2 weeks old.  Litestream itself keeps 72h of snapshots.
 
 ## Weekly R2 cold snapshot is gzipped (2026-08-31)
 
@@ -484,7 +484,7 @@ transactions inside the span the snapshot already subsumes.
 
 **As of 2026-09-01 this is a first-class scheduled unit**, not a forgotten one-shot.  L2/L3
 are off, so L1 is the only compaction level that can grow; the nightly trim is what keeps
-it bounded.  Snapshot retention (168h) stays the restore-depth policy.  The trim only
+it bounded.  Snapshot retention (72h) stays the restore-depth policy.  The trim only
 hides L1 already contained in the newest L9 snapshot.
 
 Repo source of truth (install on `fleet-hetzner-nbg1`, do not bounce Coolify):
