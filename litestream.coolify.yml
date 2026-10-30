@@ -86,7 +86,8 @@ dbs:
     # DB-level `snapshot:` settings.
     snapshot:
       interval: 24h
-      # B2 is paid capacity (not CF free-tier) — keep 7d of LTX for restore headroom.
+      # Jay 2026-10-29: keep 3d (72h) of LTX snapshot history.  Must match
+      # BACKUP_RETENTION_HOURS in src/lib/legal-notice.ts (privacy-policy copy).
       retention: 72h
     replicas:
       - type: s3
