@@ -39,8 +39,8 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   exit 0
 fi
 
-# 1. Node toolchain -- match .nvmrc (24) when nvm is installed on the image.
-NODE_REQUIRED="24"
+# 1. Node toolchain -- match .nvmrc (26) when nvm is installed on the image.
+NODE_REQUIRED="26"
 NODE_CURRENT="$(node -v 2>/dev/null || echo "none")"
 if [[ "$NODE_CURRENT" == "none" || "$NODE_CURRENT" != v${NODE_REQUIRED}.* ]]; then
   if load_nvm && type nvm >/dev/null 2>&1; then
