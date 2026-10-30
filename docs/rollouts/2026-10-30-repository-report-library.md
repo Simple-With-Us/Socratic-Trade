@@ -18,7 +18,7 @@ Index links are checked against the source Git tree.  This change contains Mark
 
 ## Next Steps And Blockers
 
-Publish and review the report index, then refresh the central collection from the merged source revision.  The server lane guard currently rejects writes under `Code/Docs`; final placement requires an approved narrow exception.  No deployment control or guard setting is changed by this PR.
+Publish and review the report index, then refresh the central collection from the merged source revision.  The owner-approved Docs-only guard exception is installed, and the initial central collection is populated; Git integration checkouts remain protected.  The security scan still needs an authorized workflow publisher to admit the approved exact CODEX actor.  This Markdown change does not alter deployment controls or workflow settings.
 
 ## Zero-Code Findings
 

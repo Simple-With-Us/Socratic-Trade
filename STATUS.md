@@ -1,6 +1,6 @@
 ## 2026-10-30 CODEX — Repository Report Library (AFC-580)
 
-Adds `docs/reports/README.md` as the report and research entry point while preserving all existing historical paths.  New public-safe reports belong in `docs/reports/`; private operational evidence belongs in private Fleet-OPS.  The shared collector builds the separate `Code/Docs/Socratic-Trade/` collection from published Git revisions.  Central placement is tracked in AFC-580 and remains subject to the server lane guard.
+Adds `docs/reports/README.md` as the report and research entry point while preserving all existing historical paths.  New public-safe reports belong in `docs/reports/`; private operational evidence belongs in private Fleet-OPS.  The shared collector builds the separate `Code/Docs/Socratic-Trade/` collection from published Git revisions.  The approved Docs-only exception is installed; Git integration checkouts remain protected.  Final source publication is tracked in AFC-580.
 
 Rollout: `docs/rollouts/2026-10-30-repository-report-library.md`.
 
