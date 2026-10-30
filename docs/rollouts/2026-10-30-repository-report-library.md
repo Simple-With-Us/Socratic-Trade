@@ -18,7 +18,15 @@ Index links are checked against the source Git tree.  This change contains Mark
 
 ## Next Steps And Blockers
 
-Publish and review the report index, then refresh the central collection from the merged source revision.  The owner-approved Docs-only guard exception is installed, and the initial central collection is populated; Git integration checkouts remain protected.  The security scan still needs an authorized workflow publisher to admit the approved exact CODEX actor.  This Markdown change does not alter deployment controls or workflow settings.
+The initial, pre-approval placement caveat was:
+
+> The server lane guard currently rejects writes under `Code/Docs`; final placement requires an approved narrow exception.
+
+## Placement Update — October 30, 2026
+
+The owner-approved Docs-only exception is installed; Git integration checkouts remain protected.  Verification against the installed guard passed eight dedicated Docs cases and ten existing baseline cases.  The [private installation receipt](https://github.com/Simple-With-Us/Fleet-OPS/blob/402192b40ec45d719cea70f915461f8788ab2b79/docs/reports/evidence/2026-10-30-docs-guard-installation.jsonl) records before/after hashes and unchanged configuration/registration digests.  The initial collection covers 16 repositories, and its subsequent collector check returned `validated 0 planned operation(s)`.  Source refresh follows final repository delivery.
+
+The security scan still needs an authorized workflow publisher to admit the approved exact CODEX actor.  This Markdown change does not alter deployment controls or workflow settings.
 
 ## Zero-Code Findings
 
