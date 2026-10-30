@@ -1,3 +1,7 @@
+## 2026-10-30 CODEX — Repository Report Library (AFC-580)
+
+Provide one indexed report entry point and a separate generated collection under `Code/Docs/Socratic-Trade/`, preserving historical document paths.  This documentation change does not alter the application roadmap, trading behavior, runtime or deployment controls.  Central placement is pending the lane-guard decision recorded in AFC-580.
+
 ## 2026-10-26 WISE: ST-4583 public footer logo
 
 > **2026-10-29 CURSOR — PR #4938 OpenTelemetry v3 (`renovate/major-observability`).**  No product scope change.  OTel core/resources v3 is blocked by `@langfuse/otel@6` peer `@opentelemetry/core@^2.0.1`; revert pins to 2.x and disable Renovate majors for those two packages until Langfuse ships OTel 3 peers.  PR #4935 instrumentation bump stays compatible.  Rollout: `docs/rollouts/2026-10-29-otel-3-langfuse-peer-block.md`.
