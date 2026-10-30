@@ -1643,3 +1643,4 @@ Private evidence stays in private Fleet-OPS and is excluded from public indexes.
 - [2026-10-29-node-26-toolchain-alignment](../rollouts/2026-10-29-node-26-toolchain-alignment.md)
 - [2026-10-29-otel-3-langfuse-peer-block](../rollouts/2026-10-29-otel-3-langfuse-peer-block.md)
 - [_template](../rollouts/_template.md)
+- [Repository Report Library — October 30, 2026](../rollouts/2026-10-30-repository-report-library.md)
