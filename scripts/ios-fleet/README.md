@@ -52,6 +52,33 @@ An earlier revision set both fields to the same dotted string, which rendered as
 
 `--dry-run` only peeks at the next value and does not ship it.
 
+### Fixed marketing versions (merge-timestamp builds)
+
+Owner directive 2026-10-29.  An app with `fixedMarketingVersion` in `apps.json`
+(Socratic-Trade: `0.1.0`) does not count its marketing version up per ship.
+Its build is ONE shared merge-timestamp number per release across iOS and
+macOS: `max(S, M + 1)`, a plain integer, where `S` is the merge stamp (the
+committer date of the commit being built, in America/Chicago as `YYYYMMDDHHMM`)
+and `M` is the highest build on record for the app and its paired app -- every
+iOS build on ALL trains (expired included, old timestamp-style builds
+included), every macOS build, plus every extra floor (the `pairedBuildFeed`
+Sparkle max).  No floor and no cap: a rebuild of the same commit still goes
+up, because the first upload already holds `S`.
+
+The release computes the value ONCE, in the `plan-build` step
+(`asc-api.mjs plan-release-build <bundleId> [pairedBundleId] [floor...]
+--merge-stamp <S>`, read-only), and hands it to every platform ship job via
+the existing `--build N`.  In fixed mode `--build N` must be a 12-digit stamp
+`^[1-9][0-9]{11}$` strictly above every existing build of THIS app
+record/platform only (so the paired platform may reuse the same value);
+without `--build` the ship script plans the value itself through the same
+command, for operators running locally.  The schedule gate and the ship-gate
+(rate limit / same-HEAD) are unchanged: when a gate skips, nothing is planned
+into an upload and nothing is uploaded.
+
+The rules live in `shared-build.mjs` (pure, unit-tested) and are mirrored in
+`ship-testflight.sh`.
+
 ### Where the numbers come from
 
 - **App Store Connect** is queried with `asc-api.mjs latest-marketing-patch <bundleId> 1.0 <platform>` (the highest patch already used on the train) and `asc-api.mjs build-floor <bundleId> <version> <platform>` (the build number the next ship has to exceed), using the same credentials already passed to `xcodebuild`.  Both print their answer on stdout; the details (Apple's HTTP status and error code, and the drift trains that were ignored) go to stderr.
@@ -82,6 +109,7 @@ The skip message names the value, its source, and both overrides, so the limit i
 ```bash
 bash scripts/ios-fleet/test-ship-seq.sh
 node --test scripts/ios-fleet/version-plan.test.mjs
+node --test scripts/ios-fleet/shared-build.test.mjs
 ```
 
 `test-ship-seq.sh` is fully offline — no network, no Xcode, no credentials.  It runs `ship-testflight.sh` with `HOME`, `PATH` and `IOS_FLEET_STATE_DIR` pointed at a scratch sandbox (a fake `xcodebuild` refuses to archive, and a fake `node` answers the App Store Connect queries from `FAKE_ASC_PATCH` / `FAKE_ASC_FLOOR`), so it cannot touch real ship state or App Store Connect.  It pins:
@@ -97,7 +125,7 @@ node --test scripts/ios-fleet/version-plan.test.mjs
 - the skip message names the 3600s default and both overrides;
 - a last-ship 3000s ago is still gated (counter untouched); at 3700s the gate proceeds.
 
-`version-plan.test.mjs` is the unit-testable copy of the rules themselves: the patch arithmetic, the drift-train rule, the build floor (including the macOS "every build counts" rule), and the "never `1.0.N (N)`" guard.  Both suites run in the `verify` CI gate.
+`version-plan.test.mjs` is the unit-testable copy of the rules themselves: the patch arithmetic, the drift-train rule, the build floor (including the macOS "every build counts" rule), and the "never `1.0.N (N)`" guard.  `shared-build.test.mjs` pins the fixed-version planner: fresh app plans the stamp, builds below the stamp lose to it, builds at or above it plan one higher, iOS timestamp builds count, and malformed inventory or a bad stamp throws.  All three suites run in the `verify` CI gate.
 
 ## Drift check
 

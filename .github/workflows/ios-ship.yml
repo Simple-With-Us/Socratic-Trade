@@ -77,6 +77,8 @@ jobs:
     if: github.event.repository.fork == false
     runs-on: macos-latest
     timeout-minutes: 90
+    outputs:
+      build: ${{ steps.plan-build.outputs.build }}
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -343,6 +345,69 @@ jobs:
           fi
           echo "$bin" >> "$GITHUB_PATH"
 
+      # ONE release, ONE build number (owner 2026-10-29). The merge-timestamp
+      # build is computed ONCE here and handed to the ship step via --build, so
+      # a release can never number its platforms differently. The stamp S is the
+      # committer date of HEAD in America/Chicago (YYYYMMDDHHMM); the plan is
+      # max(S, M + 1), M the highest build on record for the app AND its paired
+      # app plus every extra floor. This step reads the same inputs as
+      # ship-testflight.sh asc_next_shared_build (pairedBundleId with legacy
+      # macBundleId fallback, pairedBuildFeed Sparkle max), so CI plans exactly
+      # what a local run plans even after the registry gains paired keys. Runs
+      # after the gate, so a tick with nothing to ship never reaches App Store
+      # Connect.
+      - name: Plan release build (compute once)
+        id: plan-build
+        if: steps.gate.outputs.should_ship == '1'
+        env:
+          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          stamp="$(TZ=America/Chicago git show -s --format=%cd --date=format-local:%Y%m%d%H%M HEAD)"
+          if ! [[ "$stamp" =~ ^[1-9][0-9]{11}$ ]]; then
+            echo "::error::Could not read the 12-digit merge stamp of HEAD."
+            exit 1
+          fi
+          registry="scripts/ios-fleet/apps.json"
+          bundle="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["apps"]["socratic"]["bundleId"])' "$registry")"
+          paired="$(python3 -c 'import json,sys;a=json.load(open(sys.argv[1]))["apps"]["socratic"];print(a.get("pairedBundleId") or a.get("macBundleId") or "")' "$registry")"
+          feed="$(python3 -c 'import json,sys;a=json.load(open(sys.argv[1]))["apps"]["socratic"];print(a.get("pairedBuildFeed") or "")' "$registry")"
+          plan_args=("$bundle")
+          if [[ -n "$paired" ]]; then
+            plan_args+=("$paired")
+          fi
+          if [[ -n "$feed" ]]; then
+            case "$feed" in
+              https://*) ;;
+              *) echo "::error::pairedBuildFeed ${feed} is not https; cannot work out the build floor."; exit 1 ;;
+            esac
+            feed_xml="$(curl -fsSL --connect-timeout 10 --max-time 30 "$feed")" || {
+              echo "::error::pairedBuildFeed ${feed} could not be read; cannot work out the build floor."
+              exit 1
+            }
+            if [[ -z "$feed_xml" ]]; then
+              echo "::error::pairedBuildFeed ${feed} returned empty; cannot work out the build floor."
+              exit 1
+            fi
+            floor="$(printf '%s' "$feed_xml" | grep -o -E '<sparkle:version>[0-9]+</sparkle:version>' 2>/dev/null | grep -o -E '[0-9]+' 2>/dev/null | python3 -c 'import sys; ns=[int(x.strip()) for x in sys.stdin if x.strip().isdigit()]; print(max(ns) if ns else "")' 2>/dev/null || true)"
+            if [[ ! "$floor" =~ ^[0-9]{1,18}$ || ! "$floor" =~ [1-9] ]]; then
+              echo "::error::pairedBuildFeed ${feed} holds no usable plain-integer <sparkle:version>; cannot work out the build floor."
+              exit 1
+            fi
+            plan_args+=("$floor")
+          fi
+          build="$(bash scripts/ios-asc-key-env.sh node scripts/ios-fleet/asc-api.mjs plan-release-build "${plan_args[@]}" --merge-stamp "$stamp")"
+          if ! [[ "$build" =~ ^[1-9][0-9]{11}$ ]]; then
+            echo "::error::plan-release-build did not return a 12-digit build."
+            exit 1
+          fi
+          echo "planned build ${build} for merge stamp ${stamp}"
+          echo "build=${build}" >> "$GITHUB_OUTPUT"
+
       # No IOS_TF_MIN_INTERVAL_SEC here. That variable is a PER-RUN override.
       # Standing gate is DEFAULT_MIN_INTERVAL_SEC=3600 (1 hour) in the fleet
       # script (owner 2026-08-14). The 30-minute cron picks up an unbuilt merge
@@ -375,6 +440,13 @@ jobs:
             echo "[ios-ship] export_only=true: archive + export the IPA, no upload"
             args+=(--export-only)
           fi
+          build="${{ steps.plan-build.outputs.build }}"
+          if ! [[ "$build" =~ ^[1-9][0-9]{11}$ ]]; then
+            echo "::error::No planned 12-digit build from the plan-build step; refusing to ship."
+            exit 1
+          fi
+          echo "[ios-ship] shipping the once-planned build ${build}"
+          args+=(--build "$build")
           bash scripts/ios-asc-key-env.sh bash scripts/ios-ship-testflight.sh ${args[@]+"${args[@]}"}
 
       # Archive/export/upload logs are tee'd into the job log, but Xcode's

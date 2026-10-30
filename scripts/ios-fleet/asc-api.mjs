@@ -24,6 +24,8 @@
  *   node asc-api.mjs latest-build-seq <bundleId> <prefix>   # e.g. ... trade.congress.ios 1.0
  *   node asc-api.mjs latest-marketing-patch <bundleId> <prefix> [platform=IOS]
  *   node asc-api.mjs build-floor <bundleId> <version> [platform=IOS]
+ *   node asc-api.mjs plan-release-build <bundleId> [pairedBundleId] [floor...] --merge-stamp <S>
+ *   node asc-api.mjs platform-build-max <bundleId> [platform=IOS]
  *
  * The version-numbering rules live in ./version-plan.mjs (pure, no I/O); this
  * client only fetches the App Store Connect state they need.
@@ -969,64 +971,116 @@ async function main() {
     process.exit(0);
   }
 
-  // Read-only, fully paged shared four-digit counter (owner, Oct 28 2026):
-  // next = max(every iOS build on ALL trains, every macOS build on ALL trains,
-  // every extra floor, 999) + 1, floored at 1000.  iOS UTC timestamp builds are
-  // ignored by the planner (those trains are closed); macOS builds all count.
-  if (method === "next-shared-build") {
-    const restArgs = argv.slice(1);
+  // Every build of one app on one platform, fully paged.  Used by the
+  // release-build planner and by the this-platform floor check; both fail
+  // closed on an incomplete inventory.
+  async function allBuilds(forAppId, platform, label) {
+    const out = [];
+    let url = `/v1/builds?filter[app]=${forAppId}&filter[preReleaseVersion.platform]=${platform}&limit=200`;
+    for (let page = 0; page < 100 && url; page++) {
+      const res = await ascGet(url);
+      if (!res.ok || !Array.isArray(res.parsed?.data)) { console.error(`${label}: inventory unavailable`); process.exit(2); }
+      for (const b of res.parsed.data) out.push(b?.attributes?.version);
+      url = res.parsed.links?.next || "";
+    }
+    if (url) { console.error(`${label}: incomplete pagination`); process.exit(2); }
+    return out;
+  }
+
+  // Read-only, fully paged shared merge-timestamp build (owner, Oct 29 2026):
+  // build = max(S, M + 1), where S is the merge stamp (the committer date of
+  // the commit being built, America/Chicago YYYYMMDDHHMM) and M is the highest
+  // build on record for the app and its paired app:  every iOS build on ALL
+  // trains (expired included, old timestamp-style builds included), every
+  // macOS build, and every extra floor.  Computed ONCE per release by the
+  // plan-build step and handed to every platform ship job via --build; the
+  // ship script calls this same command for operators running locally.
+  // next-shared-build is the previous name of this command and behaves
+  // identically; both spellings require --merge-stamp.
+  if (method === "plan-release-build" || method === "next-shared-build") {
+    const stampAt = argv.indexOf("--merge-stamp");
+    const mergeStamp = stampAt === -1 ? "" : (argv[stampAt + 1] || "");
+    if (!/^[1-9][0-9]{11}$/.test(mergeStamp)) {
+      console.error(`Usage: node asc-api.mjs ${method} <bundleId> [pairedBundleId] [floor...] --merge-stamp <S>`);
+      console.error(`${method}: --merge-stamp must be the 12-digit merge stamp YYYYMMDDHHMM`);
+      process.exit(2);
+    }
+    const restArgs = argv.slice(1).filter((a, i) => i + 1 !== stampAt && i + 1 !== stampAt + 1);
     const bundleId = restArgs[0] || "";
     const rest = restArgs.slice(1);
     if (!bundleId) {
-      console.error("Usage: node asc-api.mjs next-shared-build <bundleId> [macBundleId] [floor...]"); process.exit(2);
+      console.error(`Usage: node asc-api.mjs ${method} <bundleId> [pairedBundleId] [floor...] --merge-stamp <S>`); process.exit(2);
     }
     // A pure-integer second arg is a floor, not a bundle id (bundle ids are
-    // never bare integers), so a caller with no mac app passes only floors.
-    let macBundleId = "";
+    // never bare integers), so a caller with no paired app passes only floors.
+    let pairedBundleId = "";
     let floorArgs = [];
     if (rest.length > 0) {
       if (/^[0-9]+$/.test(rest[0])) floorArgs = rest;
-      else { macBundleId = rest[0] || ""; floorArgs = rest.slice(1); }
+      else { pairedBundleId = rest[0] || ""; floorArgs = rest.slice(1); }
     }
     const extraFloors = [];
     for (const f of floorArgs) {
-      if (!/^[0-9]+$/.test(f) || !Number.isSafeInteger(Number(f))) {
-        console.error(`next-shared-build: floor ${JSON.stringify(f)} is not a non-negative safe integer`); process.exit(2);
+      // Floors stay strings:  a Sparkle feed max can exceed the safe integer
+      // range, and the planner compares them exactly.
+      if (!/^[0-9]+$/.test(f)) {
+        console.error(`${method}: floor ${JSON.stringify(f)} is not a non-negative integer`); process.exit(2);
       }
-      extraFloors.push(Number(f));
+      extraFloors.push(f);
     }
     const appId = await appIdForBundle(bundleId);
-    if (!appId) { console.error("next-shared-build: app not found"); process.exit(2); }
-    let macAppId = "";
-    if (macBundleId && macBundleId !== bundleId) {
-      macAppId = await appIdForBundle(macBundleId);
-      if (!macAppId) { console.error("next-shared-build: mac app not found"); process.exit(2); }
+    if (!appId) { console.error(`${method}: app not found`); process.exit(2); }
+    let pairedAppId = "";
+    if (pairedBundleId && pairedBundleId !== bundleId) {
+      pairedAppId = await appIdForBundle(pairedBundleId);
+      if (!pairedAppId) { console.error(`${method}: paired app not found`); process.exit(2); }
     }
-    async function allBuilds(forAppId, platform) {
-      const out = [];
-      let url = `/v1/builds?filter[app]=${forAppId}&filter[preReleaseVersion.platform]=${platform}&limit=200`;
-      for (let page = 0; page < 100 && url; page++) {
-        const res = await ascGet(url);
-        if (!res.ok || !Array.isArray(res.parsed?.data)) { console.error("next-shared-build: inventory unavailable"); process.exit(2); }
-        for (const b of res.parsed.data) out.push(b?.attributes?.version);
-        url = res.parsed.links?.next || "";
-      }
-      if (url) { console.error("next-shared-build: incomplete pagination"); process.exit(2); }
-      return out;
-    }
-    // The paired app joins the counter with its builds on BOTH platforms, so
-    // the counter is the same whichever of the two apps is the one shipping.
-    let iosBuilds = await allBuilds(appId, "IOS");
-    let macBuilds = await allBuilds(appId, "MAC_OS");
-    if (macAppId) {
-      iosBuilds = iosBuilds.concat(await allBuilds(macAppId, "IOS"));
-      macBuilds = macBuilds.concat(await allBuilds(macAppId, "MAC_OS"));
+    // The paired app joins the plan with its builds on BOTH platforms, so the
+    // plan is the same whichever of the two apps is the one shipping.
+    let iosBuilds = await allBuilds(appId, "IOS", method);
+    let macBuilds = await allBuilds(appId, "MAC_OS", method);
+    if (pairedAppId) {
+      iosBuilds = iosBuilds.concat(await allBuilds(pairedAppId, "IOS", method));
+      macBuilds = macBuilds.concat(await allBuilds(pairedAppId, "MAC_OS", method));
     }
     try {
-      const planned = nextSharedBuild({iosBuilds, macBuilds, extraFloors, complete: true});
-      console.error(`next-shared-build: ${iosBuilds.length} iOS build(s) + ${macBuilds.length} macOS build(s) inspected; ignored ${planned.ignoredIos} iOS timestamp build(s); next is ${planned.build}`);
+      const planned = nextSharedBuild({iosBuilds, macBuilds, extraFloors, complete: true, mergeStamp});
+      console.error(`${method}: ${iosBuilds.length} iOS build(s) + ${macBuilds.length} macOS build(s) inspected; merge stamp ${mergeStamp}; next is ${planned.build}`);
       console.log(planned.build);
-    } catch (error) { console.error(`next-shared-build: ${error.message}`); process.exit(3); }
+    } catch (error) { console.error(`${method}: ${error.message}`); process.exit(3); }
+    process.exit(0);
+  }
+
+  // Read-only:  the highest build this app record already holds on ONE
+  // platform (first numeric component; 0 when the platform has no builds).
+  // Fixed-mode --build validation compares against this, so the paired
+  // platform may reuse the same planned value.  Prints the integer; fails
+  // closed on an incomplete or malformed inventory.
+  if (method === "platform-build-max") {
+    const bundleId = path;
+    const platform = String(body || "IOS").toUpperCase();
+    if (!bundleId) {
+      console.error("Usage: node asc-api.mjs platform-build-max <bundleId> [platform=IOS]");
+      process.exit(2);
+    }
+    if (platform !== "IOS" && platform !== "MAC_OS") {
+      console.error(`platform-build-max: platform must be IOS or MAC_OS, not ${JSON.stringify(platform)}`);
+      process.exit(2);
+    }
+    const appId = await appIdForBundle(bundleId);
+    if (!appId) { console.error("platform-build-max: app not found"); process.exit(2); }
+    const builds = await allBuilds(appId, platform, method);
+    let highest = 0n;
+    for (const value of builds) {
+      if (typeof value !== "string" || !/^[0-9]+(\.[0-9]+){0,2}$/.test(value)) {
+        console.error("platform-build-max: malformed build inventory");
+        process.exit(3);
+      }
+      const first = BigInt(value.split(".")[0]);
+      if (first > highest) highest = first;
+    }
+    console.error(`platform-build-max: ${builds.length} build(s) inspected on ${platform}; highest is ${highest}`);
+    console.log(String(highest));
     process.exit(0);
   }
 
