@@ -55,6 +55,7 @@ for a in d["apps"].values():
     a.pop("fixedMarketingVersion", None)
     a.pop("buildCountSeed", None)
     a.pop("macBundleId", None)
+    a.pop("pairedBundleId", None)
     a.pop("pairedBuildFeed", None)
 json.dump(d, open(p, "w"), indent=2)
 PY
@@ -84,7 +85,7 @@ exit 99
 FAKE
 chmod +x "${FAKE_BIN}/xcodebuild"
 
-# A stub `node`:  answers the two App Store Connect version queries from the
+# A stub `node`:  answers the App Store Connect version queries from the
 # environment and exits 2 for everything else.  Exiting 2 is what the ship
 # script sees when App Store Connect cannot be consulted, so a test can drive
 # the unreachable-App-Store-Connect path without a network.
@@ -94,7 +95,7 @@ cmd=""
 for a in "$@"; do
   case "$a" in
     */asc-api.mjs) cmd="asc-api" ;;
-    latest-marketing-patch|build-floor|released-store-version|next-shared-build)
+    latest-marketing-patch|build-floor|released-store-version|next-shared-build|plan-release-build|platform-build-max)
       if [[ "$cmd" == "asc-api" ]]; then cmd="${cmd}:${a}"; fi
       ;;
   esac
@@ -113,10 +114,16 @@ case "$cmd" in
     printf '%s\n' "${FAKE_RELEASED:-}"
     exit 0
     ;;
-  asc-api:next-shared-build)
+  asc-api:next-shared-build|asc-api:plan-release-build)
+    [[ -n "${FAKE_ARGV_LOG:-}" ]] && printf '%s\n' "$*" >>"$FAKE_ARGV_LOG"
     [[ "${FAKE_SHARED:-}" == "fail" ]] && exit 3
     [[ -n "${FAKE_SHARED:-}" ]] || exit 2
     printf '%s\n' "$FAKE_SHARED"
+    exit 0
+    ;;
+  asc-api:platform-build-max)
+    [[ "${FAKE_PLATFORM_MAX:-}" == "fail" ]] && exit 2
+    printf '%s\n' "${FAKE_PLATFORM_MAX:-0}"
     exit 0
     ;;
   asc-api:build-floor)
@@ -185,6 +192,8 @@ run_ship() {
     FAKE_ASC_FLOOR="$FAKE_ASC_FLOOR" \
     FAKE_RELEASED="${FAKE_RELEASED:-}" \
     FAKE_SHARED="${FAKE_SHARED:-}" \
+    FAKE_PLATFORM_MAX="${FAKE_PLATFORM_MAX:-}" \
+    FAKE_ARGV_LOG="${FAKE_ARGV_LOG:-}" \
     bash "$SHIP" "$@" 2>&1)"
   RC=$?
   return 0
@@ -515,7 +524,7 @@ check "plans no version around it" "$(contains 'UNVERIFIED patch' && echo 1 || e
 FAKE_ASC_PATCH=236
 echo
 
-echo "12. fixed marketing version + shared four-digit build (apps.json fixedMarketingVersion)"
+echo "12. fixed marketing version + shared merge-timestamp build (apps.json fixedMarketingVersion)"
 FIXDIR="${WORK}/fleet-fixed"
 rm -rf "$FIXDIR"; cp -R "$SCRIPT_DIR" "$FIXDIR"
 python3 - "$FIXDIR/apps.json" <<'PY'
@@ -527,6 +536,7 @@ for k in list(a)[:1]:
     a[k]["fixedMarketingVersion"] = "1.1.2"
     a[k].pop("buildCountSeed", None)
     a[k].pop("macBundleId", None)
+    a[k].pop("pairedBundleId", None)
     a[k].pop("pairedBuildFeed", None)
 json.dump(d, open(p, "w"), indent=2)
 PY
@@ -534,29 +544,38 @@ FIXAPP="$(python3 -c 'import json,sys; print(list(json.load(open(sys.argv[1]))["
 SHIP_REAL="$SHIP"; SHIP="${FIXDIR}/ship-testflight.sh"
 rm -f "${STATE}/build-seq-${FIXAPP}.txt" "${STATE}/last-ship-${FIXAPP}.txt"
 write_record "$FIXAPP" 5
-FAKE_ASC_PATCH=239; FAKE_ASC_FLOOR=2383; FAKE_RELEASED=""; FAKE_SHARED="1000"
+FAKE_ARGV_LOG="${WORK}/plan-argv.log"
+SHARED_A="202610290000"; SHARED_B="202610290001"
+FAKE_ASC_PATCH=239; FAKE_ASC_FLOOR=2383; FAKE_RELEASED=""; FAKE_SHARED="$SHARED_A"; FAKE_PLATFORM_MAX="202610280000"
+: >"$FAKE_ARGV_LOG"
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run
 planned_pair
 check "fixed: marketing stays 1.1.2 even though ASC holds patch 239 (got '${PLANNED_MARKETING}')" \
   "$([[ "$PLANNED_MARKETING" == "1.1.2" ]] && echo 0 || echo 1)"
-check "fixed: an empty inventory plans the first shared four-digit build (got '${PLANNED_BUILD}')" \
-  "$([[ "$PLANNED_BUILD" == "1000" ]] && echo 0 || echo 1)"
+check "fixed: the planned build is the shared merge-timestamp plan (got '${PLANNED_BUILD}')" \
+  "$([[ "$PLANNED_BUILD" == "$SHARED_A" ]] && echo 0 || echo 1)"
 check "fixed: the integer floor and commit count play no part" \
-  "$(contains 'shared four-digit build 1000 for fixed version 1.1.2' && echo 0 || echo 1)"
-FAKE_SHARED="1001"
+  "$(contains "shared merge-timestamp build ${SHARED_A} for fixed version 1.1.2" && echo 0 || echo 1)"
+# The ship script hands the HEAD merge stamp to the planner; the stub logged
+# the argv it received.  The stamp is the committer date of HEAD, so it cannot
+# drift between the run and this assertion the way a clock reading could.
+EXPECTED_STAMP="$(TZ=America/Chicago git -C "$REPO" show -s --format=%cd --date=format-local:%Y%m%d%H%M HEAD)"
+check "fixed: the planner receives the HEAD merge stamp (${EXPECTED_STAMP})" \
+  "$(grep -Fq -- "--merge-stamp ${EXPECTED_STAMP}" "$FAKE_ARGV_LOG" && echo 0 || echo 1)"
+FAKE_SHARED="$SHARED_B"
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run
 planned_pair
-check "fixed: a counter holding 1000 goes to 1001 (got '${PLANNED_BUILD}')" \
-  "$([[ "$PLANNED_BUILD" == "1001" ]] && echo 0 || echo 1)"
+check "fixed: a rebuild of the same commit plans above the first upload (got '${PLANNED_BUILD}')" \
+  "$([[ "$PLANNED_BUILD" == "$SHARED_B" ]] && echo 0 || echo 1)"
 FAKE_SHARED="fail"
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run
-check "fixed: an unreadable or exhausted inventory stops the run, nothing guessed" \
-  "$(contains 'cannot work out the next shared four-digit build' && echo 0 || echo 1)"
+check "fixed: an unreadable inventory stops the run, nothing guessed" \
+  "$(contains 'cannot work out the next shared merge-timestamp build' && echo 0 || echo 1)"
 FAKE_SHARED=""
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run
 check "fixed: an unreadable inventory stops the run" \
-  "$(contains 'cannot work out the next shared four-digit build' && echo 0 || echo 1)"
-FAKE_SHARED="1000"; FAKE_RELEASED="1.1.2"
+  "$(contains 'cannot work out the next shared merge-timestamp build' && echo 0 || echo 1)"
+FAKE_SHARED="$SHARED_A"; FAKE_RELEASED="1.1.2"
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run
 check "fixed: a version at the released App Store version is refused, not bumped" \
   "$(contains 'at or below the released App Store version 1.1.2' && echo 0 || echo 1)"
@@ -564,26 +583,45 @@ FAKE_RELEASED="fail"
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run
 check "fixed: an unreadable released App Store version stops the run (fail closed)" \
   "$(contains 'cannot read the released App Store version' && echo 0 || echo 1)"
-FAKE_SHARED="1000"; FAKE_RELEASED=""
+FAKE_SHARED="$SHARED_A"; FAKE_RELEASED=""
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build 7
-check "fixed: a non-four-digit --build is refused" \
-  "$(contains 'fixed mode requires a four-digit build 1000..9999' && echo 0 || echo 1)"
-run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build 999
-check "fixed: a three-digit --build is refused" \
-  "$(contains 'fixed mode requires a four-digit build 1000..9999' && echo 0 || echo 1)"
+check "fixed: a non-12-digit --build is refused" \
+  "$(contains 'fixed mode requires a 12-digit merge-timestamp build' && echo 0 || echo 1)"
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build 1000
+check "fixed: a four-digit --build is refused" \
+  "$(contains 'fixed mode requires a 12-digit merge-timestamp build' && echo 0 || echo 1)"
+FAKE_PLATFORM_MAX="202610280000"
+run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build "$SHARED_A"
 planned_pair
-check "fixed: a four-digit --build at the minimum is honoured (got '${PLANNED_BUILD}')" \
-  "$([[ "$PLANNED_BUILD" == "1000" ]] && echo 0 || echo 1)"
-FAKE_SHARED="1001"
-run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build 1000
-check "fixed: a four-digit --build below the minimum is refused" \
-  "$(contains 'requested build is below the planned four-digit minimum 1001' && echo 0 || echo 1)"
-FAKE_SHARED="1000"
+check "fixed: a 12-digit --build above this platform's max is honoured (got '${PLANNED_BUILD}')" \
+  "$([[ "$PLANNED_BUILD" == "$SHARED_A" ]] && echo 0 || echo 1)"
+# The discriminating case:  the shared plan sits above --build because the
+# PAIRED platform holds a higher build, but --build compares against THIS
+# platform's max only, so it is still accepted.
+FAKE_SHARED="202610290005"
+: >"$FAKE_ARGV_LOG"
+run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build "$SHARED_A"
+planned_pair
+check "fixed: --build equal to the paired platform's build is accepted when above this platform's max (got '${PLANNED_BUILD}')" \
+  "$([[ "$PLANNED_BUILD" == "$SHARED_A" ]] && echo 0 || echo 1)"
+check "fixed: a --build run never consults the shared plan" \
+  "$(grep -Eq 'plan-release-build|next-shared-build' "$FAKE_ARGV_LOG" && echo 1 || echo 0)"
+FAKE_PLATFORM_MAX="$SHARED_A"
+run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build "$SHARED_A"
+check "fixed: a --build at this platform's max is refused" \
+  "$(contains "is at or below the highest existing build ${SHARED_A}" && echo 0 || echo 1)"
+run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build 202610280000
+check "fixed: a --build below this platform's max is refused" \
+  "$(contains 'is at or below the highest existing build' && echo 0 || echo 1)"
+FAKE_PLATFORM_MAX="fail"
+run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --build "$SHARED_B"
+check "fixed: an unreadable this-platform floor stops a --build run (fail closed)" \
+  "$(contains 'cannot verify this-platform build floor' && echo 0 || echo 1)"
+FAKE_SHARED="$SHARED_A"; FAKE_PLATFORM_MAX="202610280000"
 run_ship "$FIXAPP" --repo-root "$REPO" --dry-run --version 1.1.2
 planned_pair
 check "fixed: --version equal to the fixed version stays in fixed mode (got '${PLANNED_BUILD}')" \
-  "$([[ "$PLANNED_BUILD" == "1000" ]] && echo 0 || echo 1)"
+  "$([[ "$PLANNED_BUILD" == "$SHARED_A" ]] && echo 0 || echo 1)"
 python3 - "$FIXDIR/apps.json" <<'PY'
 import json, sys
 p = sys.argv[1]
@@ -599,17 +637,31 @@ d["apps"]["fixmac"] = {
 }
 json.dump(d, open(p, "w"), indent=2)
 PY
-FAKE_SHARED="1000"; FAKE_RELEASED=""
+FAKE_SHARED="$SHARED_A"; FAKE_RELEASED=""
 rm -f "${STATE}/build-seq-fixmac.txt" "${STATE}/last-ship-fixmac.txt"
 run_ship "fixmac" --repo-root "$REPO" --dry-run
 planned_pair
 check "fixed macOS: marketing stays 1.1.2 (got '${PLANNED_MARKETING}')" \
   "$([[ "$PLANNED_MARKETING" == "1.1.2" ]] && echo 0 || echo 1)"
-check "fixed macOS: plans the shared four-digit build instead of refusing (got '${PLANNED_BUILD}')" \
-  "$([[ "$PLANNED_BUILD" == "1000" ]] && echo 0 || echo 1)"
-check "fixed macOS: logs the shared counter line" \
-  "$(contains 'shared four-digit build 1000 for fixed version 1.1.2' && echo 0 || echo 1)"
-SHIP="$SHIP_REAL"; FAKE_ASC_FLOOR=0; FAKE_RELEASED=""; FAKE_SHARED=""; FAKE_ASC_PATCH=236
+check "fixed macOS: plans the shared merge-timestamp build instead of refusing (got '${PLANNED_BUILD}')" \
+  "$([[ "$PLANNED_BUILD" == "$SHARED_A" ]] && echo 0 || echo 1)"
+check "fixed macOS: logs the shared plan line" \
+  "$(contains "shared merge-timestamp build ${SHARED_A} for fixed version 1.1.2" && echo 0 || echo 1)"
+SHIP="$SHIP_REAL"; FAKE_ASC_FLOOR=0; FAKE_RELEASED=""; FAKE_SHARED=""; FAKE_PLATFORM_MAX=""; FAKE_ASC_PATCH=236
+echo
+
+echo "13. merge stamp: the exact git command on a fixed-date repo"
+STAMP_REPO="${WORK}/stamp-repo"
+rm -rf "$STAMP_REPO"; mkdir -p "$STAMP_REPO"
+git -C "$STAMP_REPO" init -q
+git -C "$STAMP_REPO" config user.email test@example.invalid
+git -C "$STAMP_REPO" config user.name "stamp test"
+echo stamp >"${STAMP_REPO}/README"
+git -C "$STAMP_REPO" add README
+GIT_COMMITTER_DATE="2026-10-29T09:30:00-05:00" git -C "$STAMP_REPO" -c commit.gpgsign=false commit -qm stamp
+GOT_STAMP="$(TZ=America/Chicago git -C "$STAMP_REPO" show -s --format=%cd --date=format-local:%Y%m%d%H%M HEAD)"
+check "the owner-specified git command yields the 12-digit Chicago stamp (got '${GOT_STAMP}')" \
+  "$([[ "$GOT_STAMP" == "202610290930" ]] && echo 0 || echo 1)"
 echo
 
 echo "----------------------------------------"
