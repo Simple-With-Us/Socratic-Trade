@@ -18,7 +18,7 @@
 // (see docs/litestream.md).
 //
 // Skip-prune (opt-in only): `R2_COLD_SNAPSHOT_SKIP_PRUNE=1` bypasses the entire
-// retention pass — leave it UNSET for normal Sunday jobs.  Default retain is 4
+// retention pass — leave it UNSET for normal Sunday jobs.  Default retain is 2
 // (`R2_COLD_SNAPSHOT_DEFAULT_RETAIN`); the prune pass then keeps the newest N
 // across `.db` + `.db.gz`.  Agents must never DeleteObject against this bucket
 // outside the automated retention pass without Jay approval.
@@ -26,7 +26,7 @@
 // Budget stance: stays reliably far under the R2 free tier. One weekly run costs roughly
 // 30-45 Class A ops (create + ~25-40 compressed parts at 100 MB + complete + list + up to
 // a couple deletes) ≈ 200/month vs the 1M free-tier allowance; storage is
-// retain×compressed-size.  Default retain is 4 (ceiling `R2_COLD_SNAPSHOT_MAX_RETAIN`).
+// retain×compressed-size.  Default retain is 2 (ceiling `R2_COLD_SNAPSHOT_MAX_RETAIN`).
 // The retention pass counts + prunes both `.db` and `.db.gz`.  Host-verified notes
 // from 2026-08-18 (pre-gzip, retain=1) are historical.  `R2_ARCHIVE_KEEP_GENERATIONS`
 // is unused leftover (empty `weekly/` prefix) and must not drive this lane.
@@ -117,10 +117,12 @@ export const R2_COLD_SNAPSHOT_UTC_MINUTE = 17;
  * `objectCount=1`, `payloadSize=9679310848`, sole key `cold-snapshots/app-2026-08-30.db`.
  *
  * The 1 was a FREE-TIER cap and that constraint no longer applies: paid R2 is enabled on
- * the SocraticTrade.com account (`r2_paid`, state `Paid`).  Four gzipped weeklies at
- * ~3 GB each is ~12 GB — about a month of archive history.
+ * the SocraticTrade.com account (`r2_paid`, state `Paid`).  Jay 2026-10-29: keep the
+ * newest two gzipped weeklies (~3 GB each, ~6 GB) — at most two weeks of archive history,
+ * matching the privacy-policy copy (`WEEKLY_BACKUP_RETENTION_WEEKS` in legal-notice.ts).
+ * Two still keeps the archive tier above depth one.
  */
-export const R2_COLD_SNAPSHOT_DEFAULT_RETAIN = 4;
+export const R2_COLD_SNAPSHOT_DEFAULT_RETAIN = 2;
 /**
  * Ceiling on `R2_COLD_SNAPSHOT_RETAIN`.  Before 2026-09-09 the clamp was
  * `min(env, DEFAULT_RETAIN)` — the env var could only ever LOWER retention and any
@@ -306,7 +308,7 @@ export interface R2ColdSnapshotConfig {
  * active replica moved to B2 live as AWS_R2_HISTORIC_* (Infisical + .env.example).
  * Default ON only when the full credential set exists; R2_COLD_SNAPSHOT_ENABLED is the
  * explicit kill switch (off/false/0/no).
- * Weekly retain reads only `R2_COLD_SNAPSHOT_RETAIN` (unset → default 4).
+ * Weekly retain reads only `R2_COLD_SNAPSHOT_RETAIN` (unset → default 2).
  * `R2_ARCHIVE_KEEP_GENERATIONS` is unused leftover and is not consulted.
  * `R2_COLD_SNAPSHOT_SKIP_PRUNE` is opt-in (1/true/on/yes); default is prune.
  */

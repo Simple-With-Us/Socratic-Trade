@@ -213,7 +213,7 @@ describe("loadR2ColdSnapshotConfig", () => {
     expect(cfg.partSizeBytes).toBe(R2_COLD_SNAPSHOT_DEFAULT_PART_BYTES);
     // Regression guard for the free-tier clamp: retain used to be min(env, DEFAULT), so an
     // env asking for MORE archive depth was silently ignored and the tier stayed at depth 1.
-    expect(R2_COLD_SNAPSHOT_DEFAULT_RETAIN).toBe(4);
+    expect(R2_COLD_SNAPSHOT_DEFAULT_RETAIN).toBe(2);
     expect(cfg.retain).toBe(6);
   });
 

@@ -10,7 +10,7 @@ import { Scale } from "lucide-react";
 import { Btn } from "../ui/primitives";
 import { useFocusTrap } from "../ui/focus-trap";
 import { useOverlay } from "../ui/use-overlay";
-import { BACKUP_RETENTION_DAYS, LEGAL_NOTICE_SENTENCE } from "@/lib/legal-notice";
+import { BACKUP_RETENTION_SENTENCE, LEGAL_NOTICE_SENTENCE } from "@/lib/legal-notice";
 
 type GateState = "loading" | "needed" | "done";
 
@@ -121,8 +121,7 @@ export function ConsentGate() {
             stays private.
           </p>
           <p>
-            You can delete your account yourself in Settings.  Database backups are kept for{" "}
-            {BACKUP_RETENTION_DAYS} days.  Fact-level research notes may join a shared research
+            You can delete your account yourself in Settings.  {BACKUP_RETENTION_SENTENCE}  Fact-level research notes may join a shared research
             corpus; risk rules and strategy instructions stay private.
           </p>
         </div>

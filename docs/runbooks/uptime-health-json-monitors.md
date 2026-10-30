@@ -115,12 +115,13 @@ bash scripts/fetch-prod-ops-snapshot.sh
 
 ## R2 weekly retain
 
-Weekly retain is **already verified at 1**.  Code default is
-`R2_COLD_SNAPSHOT_DEFAULT_RETAIN = 1` and `R2_COLD_SNAPSHOT_RETAIN` is unset.
+Weekly retain is **2** (Jay 2026-10-29; it was 1 until 2026-09-09, then 4).  Code default is
+`R2_COLD_SNAPSHOT_DEFAULT_RETAIN = 2` and `R2_COLD_SNAPSHOT_RETAIN` should stay unset.
+The 2026-08-18 notes below are historical.
 The historic bucket's `cold-snapshots/` prefix has exactly one object
 (`app-2026-08-16.db`).  `R2_ARCHIVE_KEEP_GENERATIONS=2` is unused leftover
 (empty `weekly/` prefix) and does not drive weekly retain.  Do not delete
-live R2 objects.  `R2_COLD_SNAPSHOT_RETAIN` values above 1 stay ignored.
+live R2 objects.  `R2_COLD_SNAPSHOT_RETAIN` overrides the default (ceiling `R2_COLD_SNAPSHOT_MAX_RETAIN`).
 
 ## Owner dashboard steps (UptimeRobot)
 
