@@ -1,3 +1,9 @@
+## 2026-10-30 CODEX — Repository Report Library (AFC-580)
+
+Adds `docs/reports/README.md` as the report and research entry point while preserving all existing historical paths.  New public-safe reports belong in `docs/reports/`; private operational evidence belongs in private Fleet-OPS.  The shared collector builds the separate `Code/Docs/Socratic-Trade/` collection from published Git revisions.  The approved Docs-only exception is installed; Git integration checkouts remain protected.  Final source publication is tracked in AFC-580.
+
+Rollout: `docs/rollouts/2026-10-30-repository-report-library.md`.
+
 ## 2026-10-29 [Cursor] PR #4953 Node 26 toolchain alignment
 
 **What.**  Renovate bumped CI/Docker to Node 26; required verify failed because `.nvmrc`, `@types/node`, `land.sh`, devcontainer, and `test/toolchain-policy.test.ts` still asserted Node 24.  Aligned those pins to 26 (no runtime workaround).  Rollout `docs/rollouts/2026-10-29-node-26-toolchain-alignment.md`.
