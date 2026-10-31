@@ -19,6 +19,12 @@ The app computes the comparison itself in `computeSpyBenchmarkDetailed` (`src/li
 - `src/lib/vector-db.ts` — 15-minute per-(message, lane) Sentry cooldown in `captureRagSentryMessage`.  A dead embed/vector provider failed every retrieval and minted an event each time (SOCRATIC-TRADE-2G at 507 events, SOCRATIC-TRADE-1X at 162).  The first failure still reports immediately; repeats are logged locally only.
 - `test/benchmark.test.ts` — regression test: broker-reported daily equity is a real curve, never `insufficient-history`.
 
+### Review follow-up (Kody + Sentry review threads)
+
+- `src/lib/cash-flows.ts` — `inferExternalCashFlows` never invents a transfer next to a `brokerHistory` point.  Those points have no cash/positions split, so the "missing cash" branch would have turned every ≥0.5% market day into a phantom deposit/withdrawal and TWR would have flattened real return toward 0%.  The Alpaca transfer ledger (already fetched for every Alpaca snapshot) stays the flow source.  Tests in `test/cash-flows-deposit-invest.test.ts`.
+- `src/lib/dashboard.ts` — the cold-path day count uses `isoDate` (Central trading day), matching the benchmark's grouping.  Broker equity history is cached per (user, connected account) for 15 minutes on `globalThis`, successful reads only, so a persistently cold account doesn't refetch two years of history on every ~10s snapshot.
+- `src/lib/vector-db.ts` — the RAG Sentry cooldown map lives on `globalThis`; the key is the Sentry issue (`lane ?? provider`, else the message), not the display title; the window is released when nothing was actually sent; and callers that already have a durable 6h cooldown (ingest text budget, Pinecone WU budget) bypass it with `callerThrottled`, which fixes `test/rag-ingest-budget-sentry-rollup.test.ts` (the 15-minute in-process window had been stacking on top of the persisted 6h marker the test rewinds).  Key tests in `test/rag-sentry-cooldown-key.test.ts`.
+
 ## Decisions & Trade-offs
 
 - The broker-history fallback runs only on the cold path (local curve under two days, Alpaca only), so healthy accounts pay no extra broker call.
