@@ -560,6 +560,23 @@ describe("benchmark series staleness gate (#2557 — SPY 0.00% co-bug)", () => {
     expect(assessBenchmarkSeries([{ date: "2026-08-01", close: 0 }], "2026-07-29", "2026-08-06")?.reason).toBe("no-bars");
   });
 
+  it("accepts broker-reported daily equity history (no cash split) as a real curve", async () => {
+    // Alpaca Paper parity: the broker's own EOD equity history has no cash/positions
+    // split, but it is real account equity — it must not be refused as "synthetic"
+    // the way the fabricated $100-base fill curve above is. With SPY unreachable the
+    // honest outcome is a feed verdict, never insufficient-history.
+    const { computeSpyBenchmarkDetailed } = await import("../src/lib/benchmark");
+    const brokerHistory: EquityCurvePoint[] = [
+      { timestamp: "2026-07-01T16:00:00Z", equity: 100_000, source: "paper", brokerHistory: true },
+      { timestamp: "2026-08-05T16:00:00Z", equity: 101_000, source: "paper", brokerHistory: true }
+    ];
+    const result = await computeSpyBenchmarkDetailed(brokerHistory, "local", Date.parse("2026-08-05T16:00:00Z"), []);
+    expect(result.unavailable?.reason).not.toBe("insufficient-history");
+    if (result.comparison) {
+      expect(result.comparison.accountReturnPct).toBeCloseTo(1, 1);
+    }
+  });
+
   it("computeSpyBenchmarkDetailed names insufficient-history for a synthetic curve (no fake 0.00%)", async () => {
     const { computeSpyBenchmarkDetailed } = await import("../src/lib/benchmark");
     const synthetic: EquityCurvePoint[] = [

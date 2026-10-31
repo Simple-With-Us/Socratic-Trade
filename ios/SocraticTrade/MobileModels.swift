@@ -782,7 +782,13 @@ struct PerformanceSummary: Decodable {
     let liveEquityCurve: [EquityCurvePoint]?
     let paperEquityCurve: [EquityCurvePoint]?
     let benchmark: BenchmarkComparison?
+    let benchmarkUnavailable: BenchmarkUnavailability?
     let fills: [FillEvent]?
+}
+
+struct BenchmarkUnavailability: Decodable {
+    let reason: String
+    let detail: String?
 }
 
 struct EquityCurvePoint: Decodable, Identifiable, Equatable {

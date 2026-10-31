@@ -50,7 +50,7 @@ import {
 } from "./performance";
 import { computeSpyBenchmarkDetailed, type SpyBenchmarkResult } from "./benchmark";
 import { brokerFlowOnDay, isBrokerTransferActivity } from "./broker-cash-flows";
-import { fetchAlpacaNonTradeActivities } from "./alpaca-account-insights";
+import { fetchAlpacaDailyEquityHistory, fetchAlpacaNonTradeActivities } from "./alpaca-account-insights";
 import { centralTradingDayKey } from "./trading-day";
 import { getTaxSummary, overlayAccountTaxationType } from "./tax";
 import { getBrokerGateway } from "./broker";
@@ -1071,7 +1071,39 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       cash: snapshot.cash,
       positionsValue: snapshot.positionsValue
     }));
-    const curveForBenchmark = dailyCurve.length >= 2 ? dailyCurve : curve;
+    let curveForBenchmark = dailyCurve.length >= 2 ? dailyCurve : curve;
+    // Broker-history fallback: local snapshots are only written by strategy runs, so an
+    // account whose runs are failing (or that was connected recently) has <2 local days
+    // and the vs-S&P card silently vanished — Alpaca Paper hit exactly this while the
+    // Tradier Sandbox account, with healthy runs, kept its card. Alpaca reports its own
+    // EOD equity history; use it (deadline-guarded, only on this cold path) so the
+    // app-computed comparison has the same input quality for every Alpaca account.
+    const localBenchmarkDays = new Set(curveForBenchmark.map((p) => p.timestamp.slice(0, 10))).size;
+    if (localBenchmarkDays < 2 && activeAccount?.broker === "alpaca" && accountNumber) {
+      const historyWait = snapshotSectionWaitMs(snapshotStartedAt, 4_000);
+      if (historyWait <= 0) {
+        timedOutSections.push("fetchAlpacaDailyEquityHistory");
+      } else {
+        const brokerHistory = await withDeadline(
+          fetchAlpacaDailyEquityHistory(userId, {
+            connectedAccountId: activeAccount.id,
+            start: new Date(Date.now() - 730 * 86_400_000).toISOString()
+          }),
+          historyWait,
+          () => undefined,
+          "fetchAlpacaDailyEquityHistory",
+          timedOutSections
+        );
+        if (brokerHistory && brokerHistory.length >= 2) {
+          curveForBenchmark = brokerHistory.map((point) => ({
+            timestamp: `${point.day}T16:00:00Z`,
+            equity: point.equity,
+            source: scorecardSource,
+            brokerHistory: true
+          }));
+        }
+      }
+    }
     // Tip the curve with the live portfolio so "all time" includes now (snapshots only land on
     // strategy runs; without this tip a quiet cash account can look like stale mid-history alpha).
     const tippedCurve =
@@ -1160,6 +1192,12 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
       const { reason, detail } = benchmarkResult.unavailable;
       // Feed failures get a first-class "benchmark unavailable" state + one advisory audit;
       // young-account insufficiency keeps the quiet "not computable yet" copy (no audit).
+      if (reason === "insufficient-history" || reason === "insufficient-overlap") {
+        // Name it instead of leaving the card silently absent (the Alpaca Paper
+        // symptom: no explanation anywhere). No audit — this is a young/cold
+        // account, not an outage.
+        performance.benchmarkUnavailable = benchmarkResult.unavailable;
+      }
       if (reason === "fetch-failed" || reason === "no-bars" || reason === "stale-series") {
         performance.benchmarkUnavailable = benchmarkResult.unavailable;
         auditAdvisoryRateLimited(

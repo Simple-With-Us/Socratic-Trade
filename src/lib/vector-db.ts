@@ -1896,6 +1896,13 @@ async function alertRagConnectionFailure(
   }
 }
 
+/** Per-(message, lane) Sentry cooldown: a dead embed/vector provider fails every
+ *  retrieval, and each failure used to mint its own Sentry event (500+ events on one
+ *  issue). The first failure still reports immediately; repeats inside the window are
+ *  logged locally but not re-sent. */
+const RAG_SENTRY_COOLDOWN_MS = 15 * 60_000;
+const ragSentryLastSentAt = new Map<string, number>();
+
 async function captureRagSentryMessage(
   level: "warning" | "error",
   message: string,
@@ -1920,6 +1927,10 @@ async function captureRagSentryMessage(
     });
   }
   if (!process.env.SENTRY_DSN) return;
+  const cooldownKey = `${level}:${message}:${String(context.lane ?? context.provider ?? context.operation ?? "")}`;
+  const lastSentAt = ragSentryLastSentAt.get(cooldownKey) ?? 0;
+  if (Date.now() - lastSentAt < RAG_SENTRY_COOLDOWN_MS) return;
+  ragSentryLastSentAt.set(cooldownKey, Date.now());
   try {
     const mod = (await import("@sentry/nextjs")) as typeof import("@sentry/nextjs") & {
       default?: typeof import("@sentry/nextjs");
