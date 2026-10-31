@@ -873,7 +873,8 @@ async function notifyPineconeDailyWriteFuse(input: {
       skipped: input.skipped,
       usedLast24h: input.used,
       limitPer24h: input.limit
-    }, input.leaseGuard), input.leaseGuard);
+      // Already gated by the persisted 6h shouldEmitPineconeWuBudgetSentry window.
+    }, input.leaseGuard, { callerThrottled: true }), input.leaseGuard);
   }
 }
 
@@ -1896,11 +1897,44 @@ async function alertRagConnectionFailure(
   }
 }
 
+/** Per-Sentry-issue cooldown: a dead embed/vector provider fails every retrieval, and
+ *  each failure used to mint its own Sentry event (500+ events on one issue). The first
+ *  failure still reports immediately; repeats inside the window are logged locally but
+ *  not re-sent. Pinned on globalThis so duplicate Next.js bundle copies of this module
+ *  share one map (Kody rule: shared in-process buffers live on globalThis). */
+const RAG_SENTRY_COOLDOWN_MS = 15 * 60_000;
+declare global {
+  // eslint-disable-next-line no-var
+  var __socraticRagSentryLastSentAt: Map<string, number> | undefined;
+}
+const ragSentryLastSentAt: Map<string, number> =
+  globalThis.__socraticRagSentryLastSentAt ?? (globalThis.__socraticRagSentryLastSentAt = new Map<string, number>());
+
+/** Cooldown key = the Sentry issue the event lands in. Events are fingerprinted by the stable
+ *  lane (or provider) below, never by the drifting display title, so keying on the title would
+ *  let one lane re-page under each title variant. Without a lane/provider, Sentry groups by
+ *  message text, so the message is the key. */
+/** @internal exported for test/rag-sentry-cooldown-key.test.ts */
+export function ragSentryCooldownKey(
+  level: "warning" | "error",
+  message: string,
+  context: Record<string, string | number | boolean | null | undefined>
+): string {
+  const groupKey = context.lane ?? context.provider;
+  return groupKey != null && groupKey !== "" ? `${level}:group:${String(groupKey)}` : `${level}:message:${message}`;
+}
+
 async function captureRagSentryMessage(
   level: "warning" | "error",
   message: string,
   context: Record<string, string | number | boolean | null | undefined>,
-  leaseGuard?: VectorStoreLeaseGuard
+  leaseGuard?: VectorStoreLeaseGuard,
+  options?: {
+    /** The caller already gates this event with its own durable cooldown (e.g. the 6h
+     *  persisted ingest-budget / Pinecone WU markers); skip the in-process 15-minute one so
+     *  the two windows never stack and the caller's window stays authoritative. */
+    callerThrottled?: boolean;
+  }
 ): Promise<void> {
   assertVectorStoreLease(leaseGuard);
   const provider = context.provider != null ? String(context.provider) : undefined;
@@ -1920,6 +1954,16 @@ async function captureRagSentryMessage(
     });
   }
   if (!process.env.SENTRY_DSN) return;
+  const cooldownKey = options?.callerThrottled ? undefined : ragSentryCooldownKey(level, message, context);
+  // Claim the window synchronously (before the awaited SDK import) so concurrent failures in
+  // the same tick can't all slip through, then release the claim if nothing was actually sent
+  // so a transient SDK load/capture failure never suppresses the next real report.
+  const previousSentAt = cooldownKey ? ragSentryLastSentAt.get(cooldownKey) : undefined;
+  if (cooldownKey) {
+    if (previousSentAt !== undefined && Date.now() - previousSentAt < RAG_SENTRY_COOLDOWN_MS) return;
+    ragSentryLastSentAt.set(cooldownKey, Date.now());
+  }
+  let sent = false;
   try {
     const mod = (await import("@sentry/nextjs")) as typeof import("@sentry/nextjs") & {
       default?: typeof import("@sentry/nextjs");
@@ -1946,11 +1990,17 @@ async function captureRagSentryMessage(
       if (groupKey) scope.setFingerprint(["rag", String(groupKey)]);
       scope.setContext("rag", context);
       captureMessage(message);
+      sent = true;
     });
     assertVectorStoreLease(leaseGuard);
   } catch (error) {
     if (error instanceof VectorStoreLeaseLostError) throw error;
     // Observability must not affect trading/RAG control flow.
+  } finally {
+    if (cooldownKey && !sent) {
+      if (previousSentAt === undefined) ragSentryLastSentAt.delete(cooldownKey);
+      else ragSentryLastSentAt.set(cooldownKey, previousSentAt);
+    }
   }
 }
 
@@ -4094,7 +4144,8 @@ async function storeContextsImpl(
         usedLast24h: budget.used,
         limitPer24h: budget.limit,
         tokenBudgetPerText: EMBED_REQUEST_TOKEN_BUDGET
-      }, options?.leaseGuard), options?.leaseGuard);
+        // Already gated by the persisted 6h shouldEmitRagIngestBudgetSentry window.
+      }, options?.leaseGuard, { callerThrottled: true }), options?.leaseGuard);
     }
     if (documentsToStore.length === 0) {
       const lastIngest = {

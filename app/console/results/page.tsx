@@ -386,7 +386,10 @@ export default function ResultsPage() {
                 ? "The SPY price series is stale — it ends before your account window, so a comparison would print 0.00% for a dead feed, not a flat market."
                 : perf.benchmarkUnavailable.reason === "no-bars"
                   ? "No SPY price history was returned by any provider."
-                  : "The SPY price fetch failed."}{" "}
+                  : perf.benchmarkUnavailable.reason === "insufficient-history" ||
+                      perf.benchmarkUnavailable.reason === "insufficient-overlap"
+                    ? "Not enough account history yet — the comparison needs at least two days of equity history overlapping SPY."
+                    : "The SPY price fetch failed."}{" "}
               Your account return is not compared against a dead benchmark; nothing here is estimated.
             </p>
             {perf.benchmarkUnavailable.detail && (

@@ -3083,6 +3083,11 @@ export interface EquityCurvePoint {
    *  cash→stock conversion (not a withdrawal) apart from an external transfer when fills are
    *  missing from the ledger. */
   positionsValue?: number;
+  /** True when the point is the broker's own reported end-of-day equity (e.g. Alpaca
+   *  portfolio history) rather than a local portfolio snapshot. Real account equity, but
+   *  with no cash/positions split — flow detection must rely on the broker transfer
+   *  ledger or fills, never on an invented cash balance. */
+  brokerHistory?: boolean;
 }
 
 export interface RunAttribution {
@@ -3198,9 +3203,9 @@ export interface PerformanceSummary {
   paperEquityCurve: EquityCurvePoint[];
   /** SPY-benchmark comparison for the active execution mode's equity curve (absent when insufficient data). */
   benchmark?: BenchmarkComparison;
-  /** Set when `benchmark` is absent because the SPY series was dead/stale/unfetchable (feed
-   *  failure), so the UI can say WHY instead of a generic "not computable" — and never render
-   *  a fake 0.00% comparison. Absent for the ordinary young-account insufficient-history case. */
+  /** Set when `benchmark` is absent, naming why (dead/stale SPY feed, or too little
+   *  account history), so the UI can say WHY instead of silently omitting the card —
+   *  and never render a fake 0.00% comparison. */
   benchmarkUnavailable?: BenchmarkUnavailability;
   /** Broker-authoritative Day P&L hints when Alpaca activities are available. */
   dayPnlHints?: DayPnlHints;
