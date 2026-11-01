@@ -50,6 +50,7 @@ import {
 } from "./performance";
 import { computeSpyBenchmarkDetailed, type SpyBenchmarkResult } from "./benchmark";
 import { brokerFlowOnDay, isBrokerTransferActivity } from "./broker-cash-flows";
+import { isoDate } from "./cash-flows";
 import { fetchAlpacaDailyEquityHistory, fetchAlpacaNonTradeActivities } from "./alpaca-account-insights";
 import { centralTradingDayKey } from "./trading-day";
 import { getTaxSummary, overlayAccountTaxationType } from "./tax";
@@ -94,6 +95,45 @@ export {
   dashboardSnapshotCacheKey,
   invalidateDashboardSnapshotCache
 } from "./dashboard-snapshot-cache";
+
+/** Broker EOD equity history (vs-S&P cold-path fallback) changes at most once per trading
+ *  day, so a persistently cold account must not refetch two years of it on every ~10s
+ *  snapshot. Keyed per (userId, connected account) — never by userId alone — and pinned on
+ *  globalThis so duplicate Next.js bundle copies share one cache. Only successful reads are
+ *  cached; a failed/timed-out read retries on the next snapshot. */
+const BROKER_EQUITY_HISTORY_TTL_MS = 15 * 60_000;
+type BrokerEquityHistoryEntry = { at: number; points: NonNullable<Awaited<ReturnType<typeof fetchAlpacaDailyEquityHistory>>> };
+declare global {
+  // eslint-disable-next-line no-var
+  var __socraticBrokerEquityHistoryCache: Map<string, BrokerEquityHistoryEntry> | undefined;
+}
+const brokerEquityHistoryCache: Map<string, BrokerEquityHistoryEntry> =
+  globalThis.__socraticBrokerEquityHistoryCache ??
+  (globalThis.__socraticBrokerEquityHistoryCache = new Map<string, BrokerEquityHistoryEntry>());
+
+async function readBrokerEquityHistoryCached(userId: string, connectedAccountId: string) {
+  const key = `${userId}:${connectedAccountId}`;
+  const now = Date.now();
+  const hit = brokerEquityHistoryCache.get(key);
+  if (hit && now - hit.at < BROKER_EQUITY_HISTORY_TTL_MS) return hit.points;
+  const points = await fetchAlpacaDailyEquityHistory(userId, {
+    connectedAccountId,
+    start: new Date(now - 730 * 86_400_000).toISOString()
+  });
+  if (points) {
+    // Bounded: drop expired entries before inserting so the map tracks only live accounts.
+    for (const [k, entry] of brokerEquityHistoryCache) {
+      if (now - entry.at >= BROKER_EQUITY_HISTORY_TTL_MS) brokerEquityHistoryCache.delete(k);
+    }
+    brokerEquityHistoryCache.set(key, { at: now, points });
+  }
+  return points;
+}
+
+/** @internal test seam — clears the broker equity-history cache between tests. */
+export function __resetBrokerEquityHistoryCacheForTests(): void {
+  brokerEquityHistoryCache.clear();
+}
 
 const PROPOSAL_PERFORMANCE_MIN_AGE_MS = 15 * 60_000;
 // Shared with getRedTeamEfficacy's own default (src/lib/performance.ts) so the Results-page
@@ -1079,17 +1119,16 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
     // Tradier Sandbox account, with healthy runs, kept its card. Alpaca reports its own
     // EOD equity history; use it (deadline-guarded, only on this cold path) so the
     // app-computed comparison has the same input quality for every Alpaca account.
-    const localBenchmarkDays = new Set(curveForBenchmark.map((p) => p.timestamp.slice(0, 10))).size;
+    // Count days the way the benchmark groups them (Central trading day via isoDate), so two
+    // snapshots on different UTC dates but the same Central day don't skip the fallback.
+    const localBenchmarkDays = new Set(curveForBenchmark.map((p) => isoDate(p.timestamp) ?? p.timestamp.slice(0, 10))).size;
     if (localBenchmarkDays < 2 && activeAccount?.broker === "alpaca" && accountNumber) {
       const historyWait = snapshotSectionWaitMs(snapshotStartedAt, 4_000);
       if (historyWait <= 0) {
         timedOutSections.push("fetchAlpacaDailyEquityHistory");
       } else {
         const brokerHistory = await withDeadline(
-          fetchAlpacaDailyEquityHistory(userId, {
-            connectedAccountId: activeAccount.id,
-            start: new Date(Date.now() - 730 * 86_400_000).toISOString()
-          }),
+          readBrokerEquityHistoryCached(userId, activeAccount.id),
           historyWait,
           () => undefined,
           "fetchAlpacaDailyEquityHistory",
