@@ -37,3 +37,7 @@ The app computes the comparison itself in `computeSpyBenchmarkDetailed` (`src/li
 
 - Watch `ios-build` and `verify` CI on the PR.
 - Prod-side: read the Alpaca Paper failed-run summaries to find why every run fails (SOCRATIC-TRADE-2R).
+
+## Addendum 2026-11-01 — full Sentry sweep (team workflow)
+
+Ranked most to least significant. (1) Alpaca run failures 2S/2R/2T: Alpaca baseUrl host now validated against environment, missing secret fails loudly at gateway construction, credential-fingerprinted caches, and liveness alerts now carry the latest failed run summary. (2) Restart loop 2M and scheduler stale 2Q: boot watchdog decays failures instead of resetting on one success, and the scheduler tick yields between phases. (3) iOS timeouts 2W/39/37/2Y: recovered transient failures no longer mint Sentry events; capture happens once on terminal failure. (4) RAG budget 2E: alert gate is now global and matches the 24h budget window. (5) Stale issues V, 35, 38, 2F, 30, and 31 resolved in Sentry; they reopen on recurrence.  Still open and prod-only: the actual Alpaca Paper failure text, the current stall hot function, and the 41s SIGTERM origin.

@@ -237,9 +237,23 @@ async function assembleHealth(): Promise<HealthPayload> {
         publicLiveness.autonomyFullyDark &&
         publicLiveness.autonomyActiveAccounts === 0 &&
         publicLiveness.activeAccounts === 0;
+      // The alert/Sentry message carries the WHY (label, reasons, newest failed
+      // run summary) from the full summary. This never enters the public payload
+      // above, which stays identity-free.
+      const degradedDetail = (liveness?.accounts ?? [])
+        .filter((a) => a.degraded)
+        .slice(0, 3)
+        .map((a) => {
+          const reasons = a.degradedReasons.join(", ") || "degraded";
+          const latest = a.latestFailedRunSummary
+            ? `; latest failed run${a.latestFailedRunAt ? ` at ${a.latestFailedRunAt}` : ""}: ${a.latestFailedRunSummary}`
+            : "";
+          return `${a.label} (${reasons}${latest})`;
+        })
+        .join("; ");
       const livenessMessage = fleetFullyDark
         ? `Trading liveness is degraded: fleet is fully dark — ${publicLiveness.autonomyEligibleAccounts} account(s) eligible to trade, none active.`
-        : `Trading liveness is degraded: ${publicLiveness.degraded} active account(s) have stalled or failed repeatedly.`;
+        : `Trading liveness is degraded: ${publicLiveness.degraded} active account(s) have stalled or failed repeatedly.${degradedDetail ? ` ${degradedDetail}` : ""}`;
       void alertLivenessWarning("trading_liveness_degraded", livenessMessage);
     } else if (liveness) {
       // Recovery: reset the escalation episode clock.  Only a real healthy

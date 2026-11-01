@@ -160,6 +160,43 @@ const ALPACA_ACCOUNT_TTL_MS = 15_000;
 export function resetAlpacaAccountCacheForTests(): void {
   alpacaAccountCache.clear();
   alpacaAccountInflight.clear();
+  alpacaProbeCache.clear();
+}
+
+/** Expected Alpaca trading host for an environment. */
+export function alpacaExpectedHost(environment: string | undefined): string {
+  return environment === "live" ? "api.alpaca.markets" : "paper-api.alpaca.markets";
+}
+
+/**
+ * Resolve the REST baseUrl for a stored connected account, mirroring Tradier:
+ * `environment` is the venue authority. A stored baseUrl is honored only when
+ * its host matches that environment; a mismatched or unparseable value is
+ * ignored (undefined lets the SDK derive the host from the paper flag) so a
+ * paper key can never be sent to the live host, or vice versa.
+ */
+export function resolveAlpacaRestBaseUrl(input: {
+  environment?: string;
+  storedBaseUrl?: string;
+}): string | undefined {
+  const stored = input.storedBaseUrl?.trim();
+  if (!stored) return undefined;
+  let host: string | undefined;
+  try {
+    host = new URL(stored).host.toLowerCase();
+  } catch {
+    return undefined;
+  }
+  if (host !== alpacaExpectedHost(input.environment)) return undefined;
+  let baseUrl = stored.replace(/\/+$/, "");
+  if (baseUrl.toLowerCase().endsWith("/v2")) baseUrl = baseUrl.slice(0, -3);
+  return baseUrl;
+}
+
+/** Non-reversible credential fingerprint for cache keys. Never the secret itself. */
+export function alpacaCredentialFingerprint(keyId: string, secretKey: string): string {
+  if (!keyId) return "none";
+  return crypto.createHash("sha256").update(`${keyId}:${secretKey}`).digest("hex").slice(0, 16);
 }
 
 // Re-exported for existing callers/tests that import symbol conversion from this module — the
@@ -293,6 +330,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
   private keySource: string;
   /** Stable per-credential cache key.  Never includes the secret. */
   private accountCacheKey: string;
+  private credentialFingerprint: string;
   private hasRestKeys: boolean;
 
   constructor(private userId: string, connectedAccountId?: string) {
@@ -304,7 +342,11 @@ class AlpacaBrokerGateway implements BrokerGateway {
         ? brokerAccount
         : undefined;
     this.keySource = accountKeys ? "user" : "env";
-    this.accountCacheKey = `${userId}|${accountKeys?.id ?? connectedAccountId ?? "env"}|${accountKeys?.environment ?? "paper"}`;
+    this.credentialFingerprint = alpacaCredentialFingerprint(
+      accountKeys?.apiKey?.trim() || "",
+      accountKeys?.apiSecret?.trim() || ""
+    );
+    this.accountCacheKey = `${userId}|${accountKeys?.id ?? connectedAccountId ?? "env"}|${accountKeys?.environment ?? "paper"}|${this.credentialFingerprint}`;
     this.isMcp = brokerAccount?.broker === "alpaca-mcp";
     this.label = accountKeys?.label || (accountKeys?.environment === "live" ? "Alpaca Brokerage" : "Alpaca Paper");
     // A connected-account key (per-user account data) wins. If an Alpaca account is explicitly
@@ -316,6 +358,9 @@ class AlpacaBrokerGateway implements BrokerGateway {
     const keyId = accountKeys?.apiKey?.trim() || (!accountKeys ? resolveApiKey("alpaca_paper_api_key", userId) || "" : "");
     const secretKey = accountKeys?.apiSecret?.trim() || (!accountKeys ? resolveApiKey("alpaca_paper_secret_key", userId) || "" : "");
     this.hasRestKeys = !!keyId;
+    // Recompute with the resolved credentials (covers the operator env fallback).
+    this.credentialFingerprint = alpacaCredentialFingerprint(keyId, secretKey);
+    this.accountCacheKey = `${userId}|${accountKeys?.id ?? connectedAccountId ?? "env"}|${accountKeys?.environment ?? "paper"}|${this.credentialFingerprint}`;
 
     let baseUrl = accountKeys?.baseUrl?.trim();
     if (this.isMcp) {
@@ -332,19 +377,28 @@ class AlpacaBrokerGateway implements BrokerGateway {
         `Alpaca MCP credentials are missing for ${this.label}. Open Connections and re-save the MCP endpoint or API key.`
       );
     }
+    // Alpaca API keys are a key-ID + secret pair. A key ID alone was previously
+    // sent as an OAuth access token, which 401s every run with an opaque auth
+    // failure. Fail at construction with the actionable cause instead. MCP
+    // accounts are exempt: their key may be a genuine OAuth/bearer token.
+    if (!this.isMcp && keyId && !secretKey) {
+      throw new Error(
+        `Alpaca API secret is missing for ${this.label}. Open Connections and re-save both the API key ID and the secret key.`
+      );
+    }
 
-    if (baseUrl && !this.isMcp) {
-      baseUrl = baseUrl.replace(/\/+$/, "");
-      if (baseUrl.toLowerCase().endsWith("/v2")) {
-        baseUrl = baseUrl.slice(0, -3);
-      }
+    if (!this.isMcp) {
+      baseUrl = resolveAlpacaRestBaseUrl({
+        environment: accountKeys?.environment,
+        storedBaseUrl: baseUrl
+      });
     }
 
     const legacyOpts = {
       paper: accountKeys?.environment !== "live",
       keyId: keyId && secretKey ? keyId : undefined,
       secretKey: keyId && secretKey ? secretKey : undefined,
-      oauth: keyId && !secretKey ? keyId : undefined,
+      oauth: this.isMcp && keyId && !secretKey ? keyId : undefined,
       baseUrl: baseUrl && !this.isMcp ? baseUrl : undefined
     };
 
@@ -587,7 +641,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
    * `trading_blocked` / non-ACTIVE status means strategy runs would only mint unplaceable proposals.
    */
   async probeOrderCapability(accountNumber: string): Promise<{ ok: boolean; reason?: string }> {
-    const key = `alpaca|${accountNumber}|${this.keySource}`;
+    const key = `alpaca|${accountNumber}|${this.keySource}|${this.credentialFingerprint}`;
     const cached = alpacaProbeCache.get(key);
     if (cached && Date.now() - cached.at < ALPACA_PROBE_TTL_MS) {
       return { ok: cached.ok, reason: cached.reason };
