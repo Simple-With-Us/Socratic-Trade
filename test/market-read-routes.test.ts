@@ -187,6 +187,13 @@ describe("fetchPriceSeries", () => {
   });
 
   it("returns ok for a terminal (delisted) series ending ~1 year ago", async () => {
+    // Control: at the same clock a one-session lag is still withheld, so the
+    // stale gate is live and the ok below comes from the terminal exemption.
+    const control = await fetchPriceSeries("AAPL", range, async () => [
+      bar("2026-07-28", 231),
+      bar("2026-07-29", 233.4)
+    ], JULY_30_AFTER_CLOSE);
+    expect(control).toEqual({ kind: "stale" });
     const read = await fetchPriceSeries("PXD", { from: "2025-07-01", to: "2026-07-31" }, async () => [
       bar("2025-07-29", 250),
       bar("2025-07-30", 251.5)
@@ -305,6 +312,15 @@ describe("GET /api/market/prices/[symbol]", () => {
     const latest = latestCompletedTradingSessionEtKey(Date.now());
     const last = isoDaysBefore(latest, 365);
     const prior = isoDaysBefore(latest, 366);
+    // Control: a one-session lag at the same clock still 502s, so the stale gate
+    // is live and the 200 below comes from the terminal exemption.
+    const lagNewest = priorIsoDay(latest);
+    mockFetchDailyOHLC.mockResolvedValueOnce([bar(priorIsoDay(lagNewest), 10), bar(lagNewest, 11)]);
+    const controlRes = await pricesRoute(
+      authedRequest(`http://localhost/api/market/prices/AAPL?from=${prior}&to=${latest}`, TEST_TOKEN),
+      ctx
+    );
+    expect(controlRes.status).toBe(502);
     mockFetchDailyOHLC.mockResolvedValue([bar(prior, 10), bar(last, 11)]);
     const res = await pricesRoute(
       authedRequest(`http://localhost/api/market/prices/PXD?from=${prior}&to=${latest}`, TEST_TOKEN),
