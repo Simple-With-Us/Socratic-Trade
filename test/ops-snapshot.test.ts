@@ -458,4 +458,50 @@ describe("GET /api/ops/snapshot — ordersDetail=1", () => {
 
     delete process.env.OPS_DIAGNOSTIC_TOKEN;
   });
+
+  it("surfaces run-failure watchdog state and recent failure streak when autonomy is halted", async () => {
+    process.env.OPS_DIAGNOSTIC_TOKEN = "test-ops-run-fail-fields";
+    const db = await import("../src/lib/db");
+    const { runFailureWatchStateKey } = await import("../src/lib/trading-liveness");
+    const userId = `ops-run-fail-${randomUUID()}`;
+    const accountId = `acct-${randomUUID()}`;
+    db.upsertConnectedAccount({
+      id: accountId,
+      userId,
+      broker: "alpaca",
+      environment: "paper",
+      accountNumber: "PAPER-WD",
+      label: "Autopilot Paper",
+      isActive: true
+    });
+    db.setPolicy({ ...db.getPolicy(userId, accountId), systemState: "halted", strategyAuthority: "decide" }, userId, accountId);
+    for (let i = 0; i < 4; i++) {
+      const runId = randomUUID();
+      db.insertStrategyRun(runId, userId, accountId, "PAPER-WD");
+      db.finishStrategyRun(runId, "failed", `broker timeout ${i}`, userId);
+    }
+    const now = new Date().toISOString();
+    db.setInternalSetting(runFailureWatchStateKey(userId, accountId), {
+      consecutiveFailures: 4,
+      firstSeenAt: now,
+      lastFailureAt: now,
+      lastAlertedStreak: 4,
+      backoffUntil: null,
+      halted: false
+    });
+
+    const { buildOpsSnapshot } = await import("../src/lib/ops-snapshot");
+    const snapshot = await buildOpsSnapshot({ runsPerUser: 10, auditPerUser: 5 });
+    const account = snapshot.users.find((u) => u.userId === userId)?.accounts[0];
+    expect(account?.systemState).toBe("halted");
+    expect(account?.consecutiveFailedRuns).toBeNull();
+    expect(account?.recentConsecutiveFailedRuns).toBe(4);
+    expect(account?.runFailureWatch).toMatchObject({
+      consecutiveFailures: 4,
+      lastAlertedStreak: 4,
+      watchdogHalted: false
+    });
+
+    delete process.env.OPS_DIAGNOSTIC_TOKEN;
+  });
 });
