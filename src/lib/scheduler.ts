@@ -1500,7 +1500,20 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
           continue;
         }
         const executionState = deriveExecutionState(policy, account);
-        const brokerGateway = executionState.submitsBrokerOrders ? getBrokerGateway(policy, userId) : undefined;
+        let brokerGateway: ReturnType<typeof getBrokerGateway> | undefined;
+        try {
+          brokerGateway = executionState.submitsBrokerOrders ? getBrokerGateway(policy, userId) : undefined;
+        } catch (error) {
+          // One account with unusable stored credentials (e.g. a key saved without its
+          // secret) must not abort the tick for every other account's lanes.
+          audit(
+            "scheduler_broker_gateway_unavailable",
+            { connectedAccountId: account.id, error: error instanceof Error ? error.message.slice(0, 300) : "unknown" },
+            userId,
+            account.id
+          );
+          continue;
+        }
         
         if (account.isDraining) {
           if (brokerGateway && policy.accountNumber) {

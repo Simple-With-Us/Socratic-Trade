@@ -23,6 +23,7 @@ import { getLease } from "@/lib/scheduler-lease";
 import { toPublicTradingLiveness } from "@/lib/trading-liveness";
 import { authorizeOpsRequest } from "@/lib/ops-auth";
 import { yieldEventLoop } from "@/lib/slow-sync-guard";
+import { safeErrorMessage } from "@/lib/telemetry-sanitize";
 import {
   healthProbeDeps,
   readWarmHealthSnapshot,
@@ -246,7 +247,7 @@ async function assembleHealth(): Promise<HealthPayload> {
         .map((a) => {
           const reasons = a.degradedReasons.join(", ") || "degraded";
           const latest = a.latestFailedRunSummary
-            ? `; latest failed run${a.latestFailedRunAt ? ` at ${a.latestFailedRunAt}` : ""}: ${a.latestFailedRunSummary}`
+            ? `; latest failed run${a.latestFailedRunAt ? ` at ${a.latestFailedRunAt}` : ""}: ${safeErrorMessage(a.latestFailedRunSummary).slice(0, 200)}`
             : "";
           return `${a.label} (${reasons}${latest})`;
         })

@@ -665,12 +665,12 @@ describe("persistence and notifications", () => {
       label: "Custom Alpaca",
       apiKey: "PK-KEY",
       apiSecret: "SK-SECRET",
-      baseUrl: "https://custom-alpaca-endpoint.com/v2/",
+      baseUrl: "https://paper-api.alpaca.markets/v2/",
       isActive: true
     });
 
     const gateway1 = getAlpacaGateway(userId);
-    expect(((gateway1 as any).alpaca).configuration.baseUrl).toBe("https://custom-alpaca-endpoint.com");
+    expect(((gateway1 as any).alpaca).configuration.baseUrl).toBe("https://paper-api.alpaca.markets");
   });
 
   it("does not fall back to generic Alpaca keys for a selected connected account with missing credentials", async () => {
