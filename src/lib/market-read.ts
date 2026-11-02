@@ -17,9 +17,14 @@
 //   - from/to are optional, inclusive YYYY-MM-DD; an omitted `from` defaults to ~1y back, `to` to today;
 //   - unknown symbols / empty ranges return 200 with empty closes.  Congress.Trade treats that
 //     200 as "this source has nothing" and only falls back on a genuine non-200.
-//   - a series whose newest close is behind the latest completed session is 502
-//     { ok: false, error: "stale" }.  An empty 200 there would suppress that fallback.
-//     404 stays reserved for a missing company profile.
+//   - a series whose newest close is behind the latest completed session by at most
+//     TERMINAL_SERIES_AGE_DAYS (30 calendar days) is 502 { ok: false, error: "stale" }.
+//     An empty 200 there would suppress that fallback.  A series whose newest close is
+//     more than TERMINAL_SERIES_AGE_DAYS behind the latest completed session is terminal
+//     (delisted / acquired / halted): no provider has newer bars, so it is served 200
+//     with the closes in range and currentPrice/currentPriceDate from the newest bar —
+//     Congress.Trade computes staleness itself from the price date.  404 stays reserved
+//     for a missing company profile.
 
 import type { OHLCBar } from "./indicators";
 import { fetchDailyOHLC } from "./history";
@@ -34,6 +39,7 @@ import {
   type CongressRef
 } from "./congress-share";
 import { recordCongressStalePriceWithheld } from "./sentry-metrics";
+import { latestCompletedTradingSessionEtKey } from "./market-hours";
 
 /** Injectable daily-OHLC fetcher; the routes use the app's canonical cascade, tests inject canned bars. */
 export type DailyOHLCFetcher = (symbol: string) => Promise<OHLCBar[] | null>;
@@ -55,6 +61,18 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Default lookback when `from` is omitted — a sensible recent window (~1y of trading days). */
 const DEFAULT_LOOKBACK_DAYS = 366;
+
+/** Calendar days behind the latest completed session past which a series is terminal
+ *  (delisted / acquired / halted) rather than a short feed lag worth a 502 fallback. */
+export const TERMINAL_SERIES_AGE_DAYS = 30;
+
+function calendarDaysBetween(fromIso: string, toIso: string): number {
+  return Math.round((Date.parse(`${toIso}T00:00:00Z`) - Date.parse(`${fromIso}T00:00:00Z`)) / 86_400_000);
+}
+
+function isTerminalSeries(newestDate: string, nowMs: number): boolean {
+  return calendarDaysBetween(newestDate, latestCompletedTradingSessionEtKey(nowMs)) > TERMINAL_SERIES_AGE_DAYS;
+}
 
 function isoDay(d: Date): string {
   return d.toISOString().slice(0, 10);
@@ -94,9 +112,14 @@ export type SpxClosesRead =
  * currentPrice/currentPriceDate taken from the newest close of the FULL series (range-independent, so
  * a historical-backfill response still reports the true latest).  No bars → `{ kind: "ok" }` with
  * empty closes and null currentPrice.  The route returns that as HTTP 200.
- * A series whose newest close is behind the latest completed session is `{ kind: "stale" }`.
- * The route returns HTTP 502.  Congress.Trade treats closes[0] as the current price, and an
- * empty 200 means "this source has nothing", so a stale tail must not use that envelope.
+ * A series whose newest close is behind the latest completed session by at most
+ * TERMINAL_SERIES_AGE_DAYS is `{ kind: "stale" }`.  The route returns HTTP 502.
+ * Congress.Trade treats closes[0] as the current price, and an empty 200 means
+ * "this source has nothing", so a short-lag stale tail must not use that envelope.
+ * A series more than TERMINAL_SERIES_AGE_DAYS behind is terminal (delisted/acquired/halted):
+ * it stays `{ kind: "ok" }` (HTTP 200) with currentPrice/currentPriceDate from the newest
+ * bar — Congress.Trade computes staleness itself from that date, and no next provider has
+ * newer bars, so a 502 there is pure fallback noise.
  */
 export async function fetchPriceSeries(
   rawSymbol: string,
@@ -108,8 +131,12 @@ export async function fetchPriceSeries(
   const bars = ticker ? await fetcher(ticker) : null;
   const ascending = ohlcBarsToCloses(bars); // deduped, date-ascending
   if (ascending.length > 0 && !closesCoverLatestSession(ascending, nowMs)) {
-    recordCongressStalePriceWithheld("pull", 1);
-    return { kind: "stale" };
+    const newestClose = ascending[ascending.length - 1];
+    if (!isTerminalSeries(newestClose.date, nowMs)) {
+      recordCongressStalePriceWithheld("pull", 1);
+      return { kind: "stale" };
+    }
+    // Terminal series: fall through to the ok envelope below (no stale metric).
   }
   const closes = closesInRange(ascending, range.from, range.to).reverse(); // DESC — closes[0] is latest
   const newest = ascending[ascending.length - 1];

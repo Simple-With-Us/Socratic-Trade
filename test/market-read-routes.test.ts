@@ -61,6 +61,10 @@ function priorIsoDay(date: string): string {
   return new Date(Date.parse(`${date}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
 }
 
+function isoDaysBefore(date: string, days: number): string {
+  return new Date(Date.parse(`${date}T00:00:00Z`) - days * 86_400_000).toISOString().slice(0, 10);
+}
+
 function authedRequest(url: string, token?: string): Request {
   // No default: an omitted token must produce a genuinely header-less request (the 401 path).
   return new Request(url, token ? { headers: { authorization: `Bearer ${token}` } } : undefined);
@@ -172,11 +176,40 @@ describe("fetchPriceSeries", () => {
   });
 
   it("marks a stale tail so the route can return 502 instead of an empty 200", async () => {
+    // Now is 2026-07-31 after the close, so the newest close (2026-07-30) is one
+    // session behind the latest completed session — a short lag within the
+    // terminal-series threshold, so it stays stale rather than terminal.
     const read = await fetchPriceSeries("AAPL", range, async () => [
       bar("2026-07-29", 231),
       bar("2026-07-30", 233.4)
-    ], Date.UTC(2026, 9, 15, 14, 0, 0));
+    ], Date.UTC(2026, 6, 31, 21, 0, 0));
     expect(read).toEqual({ kind: "stale" });
+  });
+
+  it("returns ok for a terminal (delisted) series ending ~1 year ago", async () => {
+    // Control: at the same clock a one-session lag is still withheld, so the
+    // stale gate is live and the ok below comes from the terminal exemption.
+    const control = await fetchPriceSeries("AAPL", range, async () => [
+      bar("2026-07-28", 231),
+      bar("2026-07-29", 233.4)
+    ], JULY_30_AFTER_CLOSE);
+    expect(control).toEqual({ kind: "stale" });
+    const read = await fetchPriceSeries("PXD", { from: "2025-07-01", to: "2026-07-31" }, async () => [
+      bar("2025-07-29", 250),
+      bar("2025-07-30", 251.5)
+    ], JULY_30_AFTER_CLOSE);
+    expect(read).toEqual({
+      kind: "ok",
+      series: {
+        ticker: "PXD",
+        closes: [
+          { date: "2025-07-30", close: 251.5 },
+          { date: "2025-07-29", close: 250 }
+        ],
+        currentPrice: 251.5,
+        currentPriceDate: "2025-07-30"
+      }
+    });
   });
 });
 
@@ -261,10 +294,48 @@ describe("GET /api/market/prices/[symbol]", () => {
   });
 
   it("502 when the newest close is behind the latest session", async () => {
-    mockFetchDailyOHLC.mockResolvedValue([bar("2020-01-02", 10), bar("2020-01-03", 11)]);
-    const res = await pricesRoute(authedRequest(url, TEST_TOKEN), ctx);
+    // One session behind the latest completed session — a short lag within the
+    // terminal-series threshold, so it still 502s for provider fallback.
+    const latest = latestCompletedTradingSessionEtKey(Date.now());
+    const newest = priorIsoDay(latest);
+    const prior = priorIsoDay(newest);
+    mockFetchDailyOHLC.mockResolvedValue([bar(prior, 10), bar(newest, 11)]);
+    const res = await pricesRoute(
+      authedRequest(`http://localhost/api/market/prices/AAPL?from=${prior}&to=${latest}`, TEST_TOKEN),
+      ctx
+    );
     expect(res.status).toBe(502);
     expect(await res.json()).toEqual({ ok: false, error: "stale" });
+  });
+
+  it("200 for a terminal (delisted) series ending ~1 year ago", async () => {
+    const latest = latestCompletedTradingSessionEtKey(Date.now());
+    const last = isoDaysBefore(latest, 365);
+    const prior = isoDaysBefore(latest, 366);
+    // Control: a one-session lag at the same clock still 502s, so the stale gate
+    // is live and the 200 below comes from the terminal exemption.
+    const lagNewest = priorIsoDay(latest);
+    mockFetchDailyOHLC.mockResolvedValueOnce([bar(priorIsoDay(lagNewest), 10), bar(lagNewest, 11)]);
+    const controlRes = await pricesRoute(
+      authedRequest(`http://localhost/api/market/prices/AAPL?from=${prior}&to=${latest}`, TEST_TOKEN),
+      ctx
+    );
+    expect(controlRes.status).toBe(502);
+    mockFetchDailyOHLC.mockResolvedValue([bar(prior, 10), bar(last, 11)]);
+    const res = await pricesRoute(
+      authedRequest(`http://localhost/api/market/prices/PXD?from=${prior}&to=${latest}`, TEST_TOKEN),
+      { params: Promise.resolve({ symbol: "PXD" }) }
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ticker: "PXD",
+      closes: [
+        { date: last, close: 11 },
+        { date: prior, close: 10 }
+      ],
+      currentPrice: 11,
+      currentPriceDate: last
+    });
   });
 
   it("200 with empty closes for an unknown symbol (not an error status)", async () => {
