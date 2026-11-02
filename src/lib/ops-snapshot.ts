@@ -8,7 +8,12 @@ import { isIntentionalOffHealthService } from "./retired-direct-vendors";
 import { getTaskJournalSummary } from "./db-task-journal";
 import { userHasAnyLlmCredential } from "./db-api-keys";
 import { resolveLlmEndpoint } from "./llm-provider";
-import { computeAccountTradingLiveness, countLeadingFailedRuns, loadRecentFinishedRuns } from "./trading-liveness";
+import {
+  computeAccountTradingLiveness,
+  countLeadingFailedRuns,
+  loadRecentFinishedRuns,
+  runFailureRearmCutoff
+} from "./trading-liveness";
 import { readRunFailureWatchState } from "./run-failure-watchdog";
 import { loadLatestEnrichmentCoverageReport } from "./db-enrichment-coverage";
 import { getLastEnrichmentCoverageReport } from "./enrichment-coverage";
@@ -147,9 +152,17 @@ export interface OpsRunFailureWatchSnapshot {
   watchdogHalted: boolean;
 }
 
+/**
+ * Post-re-arm failed-run streak for an account liveness skips (not active).  Uses the same
+ *  re-arm cutoff as liveness and `/api/health`, so a re-armed account does not show its
+ *  pre-re-arm failures here.
+ */
 function recentConsecutiveFailedRuns(userId: string, connectedAccountId: string): number | null {
   try {
-    return countLeadingFailedRuns(loadRecentFinishedRuns(userId, connectedAccountId), null);
+    return countLeadingFailedRuns(
+      loadRecentFinishedRuns(userId, connectedAccountId),
+      runFailureRearmCutoff(userId, connectedAccountId)
+    );
   } catch {
     return null;
   }
@@ -159,14 +172,20 @@ function opsRunFailureWatchSnapshot(
   userId: string,
   connectedAccountId: string
 ): OpsRunFailureWatchSnapshot | null {
-  const state = readRunFailureWatchState(userId, connectedAccountId);
-  if (!state) return null;
-  return {
-    consecutiveFailures: state.consecutiveFailures,
-    lastAlertedStreak: state.lastAlertedStreak,
-    backoffUntil: state.backoffUntil,
-    watchdogHalted: state.halted
-  };
+  // Diagnostics must never fail the snapshot: an unreadable watchdog row reads as null instead
+  // of throwing into the per-account catch, which would drop every other health field.
+  try {
+    const state = readRunFailureWatchState(userId, connectedAccountId);
+    if (!state) return null;
+    return {
+      consecutiveFailures: state.consecutiveFailures,
+      lastAlertedStreak: state.lastAlertedStreak,
+      backoffUntil: state.backoffUntil,
+      watchdogHalted: state.halted
+    };
+  } catch {
+    return null;
+  }
 }
 
 export interface OpsStrategyRunRow {
