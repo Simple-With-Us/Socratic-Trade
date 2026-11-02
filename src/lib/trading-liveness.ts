@@ -209,6 +209,12 @@ export interface AccountTradingLiveness {
    *  mid-run are omitted.  Broker and LLM failures are kept.  See
    *  `strategyRunCountsTowardAutoHalt`. */
   consecutiveHaltEligibleFailures: number;
+  /** Summary of the newest run in the current leading failed streak, truncated for
+   *  alert/Sentry context, or null when the newest finished run did not fail. This is
+   *  the WHY behind `consecutive_failures` that the generic liveness alert lacked. */
+  latestFailedRunSummary: string | null;
+  /** started_at of that newest failed run, or null alongside the summary. */
+  latestFailedRunAt: string | null;
   /** decide = Autopilot (app places trades).  propose = Running / ask-first. */
   strategyAuthority?: string;
   /** Whether the US equity market was open (regular session) at evaluation time — see the
@@ -474,6 +480,14 @@ export function computeAccountTradingLiveness(
   lastFinishedRunsForCaller = recentFinished;
   const consecutiveFailedRuns = countLeadingFailedRuns(recentFinished, rearmCutoff);
   const consecutiveHaltEligibleFailures = countLeadingHaltEligibleFailedRuns(recentFinished, rearmCutoff);
+  // The newest failed run in the leading streak is the actionable WHY for alerts.
+  // Only surface it while a streak is live (a completed newest run clears it).
+  const newestFailed =
+    consecutiveFailedRuns > 0 && recentFinished[0]?.status === "failed" ? recentFinished[0] : null;
+  const latestFailedRunSummary = newestFailed?.summary
+    ? newestFailed.summary.replace(/\s+/g, " ").trim().slice(0, 240) || null
+    : null;
+  const latestFailedRunAt = newestFailed ? (newestFailed.started_at ?? null) : null;
 
   const marketOpen = isMarketOpen(new Date(now));
 
@@ -500,6 +514,8 @@ export function computeAccountTradingLiveness(
     lastCompletedRunAgeSeconds,
     consecutiveFailedRuns,
     consecutiveHaltEligibleFailures,
+    latestFailedRunSummary,
+    latestFailedRunAt,
     marketOpen,
     degraded: degradedReasons.length > 0,
     degradedReasons

@@ -909,6 +909,45 @@ final class MobileModelsTests: XCTestCase {
         XCTAssertNil(store.error)
     }
 
+    @MainActor
+    func testLoadRecoversAfterTransientNetworkLossWithoutTerminalFailure() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MobileTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            MobileTestURLProtocol.handler = nil
+            session.invalidateAndCancel()
+        }
+        // First attempt drops the connection (-1005 class); the retry succeeds.
+        // load() must recover and must not surface a terminal failure.
+        nonisolated(unsafe) var attempts = 0
+        MobileTestURLProtocol.handler = { request in
+            attempts += 1
+            XCTAssertEqual(request.url?.path, "/api/mobile/snapshot")
+            if attempts == 1 {
+                throw URLError(.networkConnectionLost)
+            }
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["content-type": "application/json"]
+            )!
+            return (response, Data(self.minimalSnapshotJSON.utf8))
+        }
+        let store = MobileStore(
+            client: MobileAPIClient(
+                baseURL: URL(string: "https://socratictrade.com")!,
+                session: session
+            )
+        )
+        await store.load()
+        XCTAssertEqual(attempts, 2)
+        XCTAssertNotNil(store.snapshot)
+        XCTAssertFalse(store.snapshotLoadFailed)
+        XCTAssertNil(store.error)
+    }
+
     private let minimalSnapshotJSON = #"""
     {
       "readiness": {

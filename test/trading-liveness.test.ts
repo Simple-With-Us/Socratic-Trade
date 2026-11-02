@@ -34,6 +34,7 @@ function insertRunAt(
     status: "completed" | "failed" | "skipped" | "skipped_budget" | "skipped_market_closed" | "skipped_broker_unhealthy";
     startedAt: string;
     finishedAt: string;
+    summary?: string;
   }
 ): void {
   db.getDb()
@@ -41,7 +42,7 @@ function insertRunAt(
       `INSERT INTO strategy_runs (id, user_id, connected_account_id, started_at, finished_at, status, summary)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(randomUUID(), opts.userId, opts.connectedAccountId, opts.startedAt, opts.finishedAt, opts.status, opts.status);
+    .run(randomUUID(), opts.userId, opts.connectedAccountId, opts.startedAt, opts.finishedAt, opts.status, opts.summary ?? opts.status);
 }
 
 async function makeAccount(db: Awaited<ReturnType<typeof load>>["db"], label: string, systemState: "active" | "halted" = "active"): Promise<{ userId: string; accountId: string }> {
@@ -371,6 +372,23 @@ describe("trading-liveness", () => {
     expect(result.consecutiveFailedRuns).toBe(1);
     expect(result.consecutiveHaltEligibleFailures).toBe(1);
     expect(result.degraded).toBe(false); // 1 < default threshold (3) and last completed run is recent
+  });
+
+  it("surfaces the newest failed run summary for alerts and clears it after a completion", async () => {
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Summary Account");
+    const now = Date.parse("2026-07-15T12:00:00.000Z");
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "failed", startedAt: new Date(now - 10 * 60_000).toISOString(), finishedAt: new Date(now - 9 * 60_000).toISOString(), summary: "older broker failure" });
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "failed", startedAt: new Date(now - 2 * 60_000).toISOString(), finishedAt: new Date(now - 1 * 60_000).toISOString(), summary: "Alpaca 401:  secret missing" });
+
+    const failing = liveness.computeAccountTradingLiveness(userId, accountId, "Summary Account", now);
+    expect(failing.latestFailedRunSummary).toBe("Alpaca 401: secret missing");
+    expect(failing.latestFailedRunAt).toBe(new Date(now - 2 * 60_000).toISOString());
+
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "completed", startedAt: new Date(now - 30_000).toISOString(), finishedAt: new Date(now).toISOString() });
+    const recovered = liveness.computeAccountTradingLiveness(userId, accountId, "Summary Account", now);
+    expect(recovered.latestFailedRunSummary).toBeNull();
+    expect(recovered.latestFailedRunAt).toBeNull();
   });
 
   it("keeps app stalls in the failure streak and drops them from the auto-halt streak", async () => {

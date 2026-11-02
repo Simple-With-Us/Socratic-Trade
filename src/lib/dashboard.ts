@@ -198,8 +198,9 @@ function withDeadline<T>(
   return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
 }
 
-/** iOS gives `/api/mobile/snapshot` one 30s attempt.  Per-dependency waits stay near 12s and the
- *  whole snapshot stops waiting at 20s so a slow broker cannot consume the phone's budget. */
+/** iOS gives `/api/mobile/snapshot` up to two 45s attempts (MobileStore.load).  Per-dependency
+ *  waits stay near 12s and the whole snapshot stops waiting at 20s so a slow broker cannot
+ *  consume the phone's budget. */
 export const SNAPSHOT_OVERALL_BUDGET_MS = 20_000;
 export const SNAPSHOT_BROKER_TIMEOUT_MS = 12_000;
 /** Fills, P&L, scorecards, and the feed run after the last awaited section.  Section waits stop
