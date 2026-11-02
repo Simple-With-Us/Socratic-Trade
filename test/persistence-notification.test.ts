@@ -664,6 +664,7 @@ describe("persistence and notifications", () => {
       accountNumber: "PA-URL-TEST",
       label: "Custom Alpaca",
       apiKey: "PK-KEY",
+      apiSecret: "SK-SECRET",
       baseUrl: "https://custom-alpaca-endpoint.com/v2/",
       isActive: true
     });
