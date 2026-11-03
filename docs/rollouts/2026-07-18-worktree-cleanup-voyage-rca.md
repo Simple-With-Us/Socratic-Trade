@@ -95,7 +95,7 @@ session mid-retry. Before detecting it, this session committed that worktree's 3
 docs files verbatim (`1dc1ceb9`) and merged post-#1762 `origin/main` (`36816e59`, add/add
 rollout-note conflict resolved keeping the branch's superset side). The live session's
 uncommitted test-timeout edits were untouched; a `land.sh` attempt refused on them and
-changed nothing. Claim retracted + collision receipt posted on #agent-sync (sync-2); the
+changed nothing. Claim retracted + collision receipt posted on #ag***-s**c (sync-2); the
 landing remains with its original session.
 
 ## Files
