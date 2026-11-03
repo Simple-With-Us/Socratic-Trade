@@ -83,7 +83,7 @@ Targeted suites verified:
 
 - Open PR on GitHub against `main`.
 - Arm auto-merge (`gh pr merge --auto --squash`).
-- Update live effort logs and post completion notice to Slack `#agent-sync`.
+- Update live effort logs and post completion notice to Slack `#ag***-s**c`.
 - Update Apple Notes coding log via `apple-notes-coding.sh`.
 - Auto-deploy will proceed to production upon merge via weekday RTH latch.
 

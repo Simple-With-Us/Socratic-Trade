@@ -85,7 +85,7 @@ Verified guard condition against the live DB:
 | 1 | ST app/worker | dockerfile | `pull_policy: never` emitted (patch 2); patch 1 not reached |
 | 2 | congress-trade | dockercompose | pull proceeds — **unchanged** |
 | 3 | UM app/worker | dockerfile | `pull_policy: never` emitted (patch 2); patch 1 not reached |
-| 4 | agent-sync listener | dockerfile | `pull_policy: never` emitted (patch 2); patch 1 not reached |
+| 4 | ag***-s**c listener | dockerfile | `pull_policy: never` emitted (patch 2); patch 1 not reached |
 | 5 | echo-mail-relay | dockerfile | `pull_policy: never` emitted (patch 2); patch 1 not reached |
 
 ### Files touched

@@ -249,7 +249,7 @@ what appears to be at least one other concurrent process working the same PR, th
 this session, and the local git worktree checkouts used to do this work were deleted out from
 under this session by an unidentified background cleaner at least four times (`~/apps/<name>`
 AND a scratchpad-local path both got swept, despite `.janitor-keep`) — see
-`/Users/jay/apps/AGENT-SYNC.md` if this recurs; it cost real time re-deriving/re-applying the
+`/Users/jay/apps/AG***-S**C.md` if this recurs; it cost real time re-deriving/re-applying the
 same six-file diff repeatedly. Mitigation used here: commit and push immediately after every
 successful file-write batch (never leave the fix uncommitted longer than one shell invocation),
 and a `for`-loop fetch/reset/reapply/commit/push driver script survives a rejected non-fast-forward
