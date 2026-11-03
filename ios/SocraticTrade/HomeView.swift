@@ -754,6 +754,23 @@ private struct PerformanceOverviewCard: View {
                             }
                         }
                     }
+                } else if let unavailable = performance.benchmarkUnavailable {
+                    AppCard {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("vs SPY")
+                                .font(.appCaption)
+                                .foregroundStyle(.secondary)
+                            Text(
+                                unavailable.reason == "insufficient-history" ||
+                                    unavailable.reason == "insufficient-overlap"
+                                    ? "Not enough history yet — this needs two days of equity history.  It fills in on its own."
+                                    : "Benchmark unavailable right now.  Nothing is estimated in the meantime."
+                            )
+                            .font(.appCaption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 }
             } else {
                 EmptyStateCard(

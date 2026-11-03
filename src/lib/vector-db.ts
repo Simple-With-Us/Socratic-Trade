@@ -193,13 +193,14 @@ function shouldEmitPineconeWuBudgetSentry(nowMs: number = Date.now()): boolean {
 }
 const RAG_CONNECTION_ALERT_COOLDOWN_MS = 60 * 60_000;
 const RAG_INGEST_BUDGET_ALERT_PREFIX = "vectorStore:ingestBudgetAlert";
-// 6h matches PINECONE_WU_BUDGET_SENTRY_COOLDOWN_MS above and DEFAULT_ALERT_COOLDOWN_MS in
-// usage-limit-alerts.ts — one cooldown convention for "a budget/quota condition is still true"
-// warnings across the RAG lane. Raised from 30 minutes (SOCRATIC-TRADE-2E, 2026-09-08 follow-up):
-// the 2026-09-07 P2 fix below stopped the per-batch flood, but 30 minutes still pages up to
-// ~48x/day for as long as a backfill keeps the daily text budget pinned at zero — nowhere near
-// "once per window" for a condition whose window (RAG_INGEST_MAX_TEXTS_PER_DAY) is 24h.
-const RAG_INGEST_BUDGET_ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+// One cooldown convention for "a budget/quota condition is still true" warnings across the
+// RAG lane. Raised from 30 minutes (SOCRATIC-TRADE-2E, 2026-09-08 follow-up), then to 6h, and
+// now to 24h to match the condition's own window (RAG_INGEST_MAX_TEXTS_PER_DAY is a rolling
+// 24h budget): a persistent exhaustion pages at most once per budget window. The gate is
+// global (one lane key), not per-user — per-user keying let every distinct userId re-mint an
+// event each window, so the issue kept accumulating (476 events) even with a 6h gate.
+const RAG_INGEST_BUDGET_ALERT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const RAG_INGEST_BUDGET_ALERT_KEY = `${RAG_INGEST_BUDGET_ALERT_PREFIX}:rag-ingest-budget`;
 const inMemoryRagIngestBudgetAlertCooldown = new Map<string, number>();
 /** @internal — exported for the rollup-coverage test in test/rag-ingest-budget-sentry-rollup.test.ts
  *  to rewind the in-memory cooldown alongside the persisted one when simulating the
@@ -222,27 +223,26 @@ function shouldEmitRagIngestBudgetSentry(userId: string, nowMs: number = Date.no
   // (e.g. SQLITE_BUSY under contention). To prevent alert storms (SOCRATIC-TRADE-2E) when SQLite
   // contention causes getInternalSetting to fail repeatedly, check and update an in-memory fallback
   // cooldown map alongside SQLite persistence.
-  const memLastMs = inMemoryRagIngestBudgetAlertCooldown.get(userId);
+  const memLastMs = inMemoryRagIngestBudgetAlertCooldown.get(RAG_INGEST_BUDGET_ALERT_KEY);
   if (memLastMs && nowMs - memLastMs < RAG_INGEST_BUDGET_ALERT_COOLDOWN_MS) {
     return false;
   }
   try {
-    const key = `${RAG_INGEST_BUDGET_ALERT_PREFIX}:${userId}`;
-    const last = getInternalSetting<string>(key);
+    const last = getInternalSetting<string>(RAG_INGEST_BUDGET_ALERT_KEY);
     const lastMs = last ? Date.parse(last) : Number.NaN;
     if (Number.isFinite(lastMs) && nowMs - lastMs < RAG_INGEST_BUDGET_ALERT_COOLDOWN_MS) {
-      inMemoryRagIngestBudgetAlertCooldown.set(userId, lastMs);
+      inMemoryRagIngestBudgetAlertCooldown.set(RAG_INGEST_BUDGET_ALERT_KEY, lastMs);
       return false;
     }
-    setInternalSetting(key, new Date(nowMs).toISOString());
-    inMemoryRagIngestBudgetAlertCooldown.set(userId, nowMs);
+    setInternalSetting(RAG_INGEST_BUDGET_ALERT_KEY, new Date(nowMs).toISOString());
+    inMemoryRagIngestBudgetAlertCooldown.set(RAG_INGEST_BUDGET_ALERT_KEY, nowMs);
     return true;
   } catch (err) {
     logWarn("rag.ingest_budget_cooldown_persist_failed", {
       userId,
       error: err instanceof Error ? err.message : String(err)
     });
-    inMemoryRagIngestBudgetAlertCooldown.set(userId, nowMs);
+    inMemoryRagIngestBudgetAlertCooldown.set(RAG_INGEST_BUDGET_ALERT_KEY, nowMs);
     return true;
   }
 }
@@ -873,7 +873,8 @@ async function notifyPineconeDailyWriteFuse(input: {
       skipped: input.skipped,
       usedLast24h: input.used,
       limitPer24h: input.limit
-    }, input.leaseGuard), input.leaseGuard);
+      // Already gated by the persisted 6h shouldEmitPineconeWuBudgetSentry window.
+    }, input.leaseGuard, { callerThrottled: true }), input.leaseGuard);
   }
 }
 
@@ -1896,11 +1897,47 @@ async function alertRagConnectionFailure(
   }
 }
 
+/** Per-Sentry-issue cooldown: a dead embed/vector provider fails every retrieval, and
+ *  each failure used to mint its own Sentry event (500+ events on one issue). The first
+ *  failure still reports immediately; repeats inside the window are logged locally but
+ *  not re-sent. Pinned on globalThis so duplicate Next.js bundle copies of this module
+ *  share one map (Kody rule: shared in-process buffers live on globalThis). */
+const RAG_SENTRY_COOLDOWN_MS = 15 * 60_000;
+declare global {
+  // eslint-disable-next-line no-var
+  var __socraticRagSentryLastSentAt: Map<string, number> | undefined;
+}
+const ragSentryLastSentAt: Map<string, number> =
+  globalThis.__socraticRagSentryLastSentAt ?? (globalThis.__socraticRagSentryLastSentAt = new Map<string, number>());
+/** @internal — test seam like __ragIngestBudgetAlertCooldownTestHandle__: lets the
+ *  rollup test rewind this volatile layer when simulating the budget window elapsing. */
+export const __ragSentryCooldownTestHandle__ = ragSentryLastSentAt;
+
+/** Cooldown key = the Sentry issue the event lands in. Events are fingerprinted by the stable
+ *  lane (or provider) below, never by the drifting display title, so keying on the title would
+ *  let one lane re-page under each title variant. Without a lane/provider, Sentry groups by
+ *  message text, so the message is the key. */
+/** @internal exported for test/rag-sentry-cooldown-key.test.ts */
+export function ragSentryCooldownKey(
+  level: "warning" | "error",
+  message: string,
+  context: Record<string, string | number | boolean | null | undefined>
+): string {
+  const groupKey = context.lane ?? context.provider;
+  return groupKey != null && groupKey !== "" ? `${level}:group:${String(groupKey)}` : `${level}:message:${message}`;
+}
+
 async function captureRagSentryMessage(
   level: "warning" | "error",
   message: string,
   context: Record<string, string | number | boolean | null | undefined>,
-  leaseGuard?: VectorStoreLeaseGuard
+  leaseGuard?: VectorStoreLeaseGuard,
+  options?: {
+    /** The caller already gates this event with its own durable cooldown (e.g. the 6h
+     *  persisted ingest-budget / Pinecone WU markers); skip the in-process 15-minute one so
+     *  the two windows never stack and the caller's window stays authoritative. */
+    callerThrottled?: boolean;
+  }
 ): Promise<void> {
   assertVectorStoreLease(leaseGuard);
   const provider = context.provider != null ? String(context.provider) : undefined;
@@ -1920,6 +1957,16 @@ async function captureRagSentryMessage(
     });
   }
   if (!process.env.SENTRY_DSN) return;
+  const cooldownKey = options?.callerThrottled ? undefined : ragSentryCooldownKey(level, message, context);
+  // Claim the window synchronously (before the awaited SDK import) so concurrent failures in
+  // the same tick can't all slip through, then release the claim if nothing was actually sent
+  // so a transient SDK load/capture failure never suppresses the next real report.
+  const previousSentAt = cooldownKey ? ragSentryLastSentAt.get(cooldownKey) : undefined;
+  if (cooldownKey) {
+    if (previousSentAt !== undefined && Date.now() - previousSentAt < RAG_SENTRY_COOLDOWN_MS) return;
+    ragSentryLastSentAt.set(cooldownKey, Date.now());
+  }
+  let sent = false;
   try {
     const mod = (await import("@sentry/nextjs")) as typeof import("@sentry/nextjs") & {
       default?: typeof import("@sentry/nextjs");
@@ -1946,11 +1993,17 @@ async function captureRagSentryMessage(
       if (groupKey) scope.setFingerprint(["rag", String(groupKey)]);
       scope.setContext("rag", context);
       captureMessage(message);
+      sent = true;
     });
     assertVectorStoreLease(leaseGuard);
   } catch (error) {
     if (error instanceof VectorStoreLeaseLostError) throw error;
     // Observability must not affect trading/RAG control flow.
+  } finally {
+    if (cooldownKey && !sent) {
+      if (previousSentAt === undefined) ragSentryLastSentAt.delete(cooldownKey);
+      else ragSentryLastSentAt.set(cooldownKey, previousSentAt);
+    }
   }
 }
 
@@ -4094,7 +4147,8 @@ async function storeContextsImpl(
         usedLast24h: budget.used,
         limitPer24h: budget.limit,
         tokenBudgetPerText: EMBED_REQUEST_TOKEN_BUDGET
-      }, options?.leaseGuard), options?.leaseGuard);
+        // Already gated by the persisted 6h shouldEmitRagIngestBudgetSentry window.
+      }, options?.leaseGuard, { callerThrottled: true }), options?.leaseGuard);
     }
     if (documentsToStore.length === 0) {
       const lastIngest = {

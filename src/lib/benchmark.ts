@@ -482,7 +482,7 @@ export async function computeSpyBenchmarkDetailed(
   // TWR — that made $100-base fill curves + $100k tip read as +tens of % "account return" on
   // paper/sandbox accounts. Require ≥2 real snapshot points.
   const realCurve = equityCurve.filter(
-    (p) => typeof p.cash === "number" || typeof p.positionsValue === "number"
+    (p) => typeof p.cash === "number" || typeof p.positionsValue === "number" || p.brokerHistory === true
   );
   if (realCurve.length < 2) {
     return { comparison: null, unavailable: { reason: "insufficient-history" }, status: "unavailable", stale: false };

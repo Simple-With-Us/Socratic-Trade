@@ -149,6 +149,14 @@ function loadState(userId: string, accountId: string): RunFailureWatchState | nu
   }
 }
 
+/** Read-only diagnostics for ops snapshot / remote monitoring (never mutates). */
+export function readRunFailureWatchState(
+  userId: string,
+  accountId: string
+): RunFailureWatchState | null {
+  return loadState(userId, accountId);
+}
+
 function saveState(userId: string, accountId: string, state: RunFailureWatchState): void {
   try {
     setInternalSetting(stateKey(userId, accountId), state);
