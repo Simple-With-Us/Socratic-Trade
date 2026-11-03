@@ -1,3 +1,11 @@
+## 2026-11-03 [Muse-Assist] Mango proxy pacing: concurrency gate + 15s leg timeout
+
+**What.**  Proxied data-source requests now pass through one process-wide concurrency gate in `createProxiedFetch` (`ProxyConcurrencyGate` in `src/lib/proxy-fetch.ts`, default cap 4 via `PROXY_MAX_CONCURRENCY`), so a provider cascade burst can no longer hit the Mango's tinyproxy all at once.  Queue wait never counts against the leg timeout (the timer starts at slot grant) and is logged as `queueWaitMs` on the proxy-use entry.  The leg timeout default rose from 3000ms to 15000ms (`RESIDENTIAL_PROXY_LEG_TIMEOUT_MS` overrides); fail_soft / fail_closed are unchanged.  Rollout: `docs/rollouts/2026-11-03-st-proxy-pacing.md`.
+
+**Verification.**  `npx tsc --noEmit` clean; the 7 proxy-adjacent test files pass 108/108 (15 new tests in `test/proxy-concurrency-gate.test.ts`); full `npm test` is 9,902 passed / 3 failed of 9,947, and all 3 failures are proven environmental against a pristine-main baseline (one real-DNS case that fails on main in this sandbox, two latch-CLI cases that fail only on TMPDIR path-length/disk artifacts of this VM and pass with a short TMPDIR).
+
+**Next.**  Committed on `Muse-Assist/st-proxy-pacing`, not pushed.  MA reviews, pushes via the Mac route, opens the PR, and makes the Linear + #Work-In-Progress claim.  After deploy, watch `/api/proxy-use` for `queueWaitMs` entries replacing fail_soft fallback spikes during scan bursts.
+
 ## 2026-11-03 CODEX — Repair Settings Navigation Spec Links (AFC-599)
 
 Corrected 12 broken Markdown navigation targets across the settings-navigation implementation spec so each link opens the canonical parent design.  The link-only update is recorded in `docs/rollouts/2026-11-03-afc-599-document-navigation-links.md`.
