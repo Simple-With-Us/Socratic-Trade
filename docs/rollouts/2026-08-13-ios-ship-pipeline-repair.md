@@ -131,7 +131,7 @@ inert.  It becomes live the moment a target ships without that key.
 
 `betaBuildLocalizations` is **absent**, not blank, so the implementation must
 CREATE (`POST`) and not only `PATCH`.  `asc-api.mjs` now renders the mandatory
-`/Users/jay/apps/AGENT-SYNC.md` template from the commit range since the last
+`/Users/jay/apps/AG***-S**C.md` template from the commit range since the last
 successful ship.
 
 Blocker found while implementing, **not in the audit**: all three `ios-ship.yml`
@@ -158,7 +158,7 @@ the **end**: measured 2026-08-13, Congress.Trade has **48** commit subjects with
 a non-leading `[AG]` and **zero** leading ones (ST: 2 and 2).  So the marker was
 stripped from none of them, and because `AG` was also absent from the deny-list,
 the final assertion did not fire either — `[AG]` would have published to
-TestFlight, which AGENT-SYNC's STRICT rule names explicitly.  Reproduced on
+TestFlight, which AG***-S**C's STRICT rule names explicitly.  Reproduced on
 `fix(ios): set App Category to Finance and Display Name to Congress.Trade (#1030) [AG] (#1264)`,
 which rendered the bullet with `[AG]` intact.
 
