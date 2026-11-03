@@ -29,4 +29,8 @@ describe("simple-tools-fleet-post.sh", () => {
     expect(src).toContain("FLEET_POST_CHANNEL");
     expect(src).toContain("FLEET_POST_BIN");
   });
+
+  it("guards HOME under set -u so the no-op path cannot crash", () => {
+    expect(src).toContain('[ -n "${HOME:-}" ]');
+  });
 });

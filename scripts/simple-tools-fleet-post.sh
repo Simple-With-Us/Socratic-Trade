@@ -30,7 +30,7 @@ resolve_bin() {
     command -v simple-chat
     return 0
   fi
-  if [ -x "${HOME}/.local/bin/simple-chat" ]; then
+  if [ -n "${HOME:-}" ] && [ -x "${HOME}/.local/bin/simple-chat" ]; then
     printf '%s\n' "${HOME}/.local/bin/simple-chat"
     return 0
   fi

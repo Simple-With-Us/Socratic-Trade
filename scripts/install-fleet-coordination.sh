@@ -162,6 +162,23 @@ install_link() {
   log "$link -> $src"
 }
 
+# Remove legacy links left by the pre-rename installer when they point into
+# this cache: their command names were retired with the old CLI names, and a
+# surviving link would keep a retired name resolving to a removed target.
+# This list is a removal list by design (same class as a deny-list guard).
+for legacy in board agent-sync; do
+  legacy_link="$BIN_DIR/$legacy"
+  if [[ -L "$legacy_link" ]]; then
+    legacy_target="$(readlink "$legacy_link" 2>/dev/null || true)"
+    case "$legacy_target" in
+      "$CACHE_DIR"/*)
+        rm -f -- "$legacy_link"
+        log "removed stale legacy link $legacy_link -> $legacy_target"
+        ;;
+    esac
+  fi
+done
+
 install_link "$CACHE_DIR/scripts/simple-board" "$LINK_SIMPLE_BOARD"
 install_link "$CACHE_DIR/scripts/simple-chat"         "$LINK_SIMPLE_CHAT"
 

@@ -98,6 +98,11 @@ class CloudCoordinationTests(unittest.TestCase):
 
     def test_fresh_install_fetches_protocol_and_registry_and_retires_cached_hooks(self):
         self.prepare_archive()
+        bin_dir = Path(self.env["FLEET_COORD_BIN"])
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir = Path(self.env["FLEET_COORD_CACHE"])
+        for legacy in ["board", "agent-sync"]:
+            (bin_dir / legacy).symlink_to(cache_dir / "scripts" / legacy)
         result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
         cache = Path(self.env["FLEET_COORD_CACHE"])
@@ -105,6 +110,8 @@ class CloudCoordinationTests(unittest.TestCase):
             self.assertTrue((cache / name).is_file())
         for name in ["simple-board", "simple-chat"]:
             self.assertTrue((Path(self.env["FLEET_COORD_BIN"]) / name).is_file())
+        for legacy in ["board", "agent-sync"]:
+            self.assertFalse(os.path.lexists(Path(self.env["FLEET_COORD_BIN"]) / legacy))
         self.legacy.write_text("stale copy after first install")
         self.assertEqual(self.install().returncode, 0)
         self.assertFalse(self.legacy.exists())
