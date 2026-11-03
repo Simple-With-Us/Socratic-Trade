@@ -1,7 +1,7 @@
 # Onboarding, Modes & First-Run — Build Spec
 
 **Scope:** the zero-account first-run flow, the Test → Paper → Live money-reality progression, the Propose → Decide authority arming rituals, autonomy-reset-on-restart, money-reality education copy, progressive destination unlock, and full mobile/PWA parity for account-scope + STOP + arming.
-**Canonical design:** [`docs/settings-navigation-redesign.md`](../docs/settings-navigation-redesign.md) (v2) — this document goes deep on the onboarding/modes/first-run slice and does **not** restate the frame, IA, or settings tree. Read Part I §"Edge cases resolved" → "Zero connected accounts," principles P4/P5/P9/P10/P11, and Open Q6/Q7 first.
+**Canonical design:** [`docs/settings-navigation-redesign.md`](../../settings-navigation-redesign.md) (v2) — this document goes deep on the onboarding/modes/first-run slice and does **not** restate the frame, IA, or settings tree. Read Part I §"Edge cases resolved" → "Zero connected accounts," principles P4/P5/P9/P10/P11, and Open Q6/Q7 first.
 
 All file paths are absolute where a new file is proposed, repo-relative where an existing file is cited.
 

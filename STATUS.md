@@ -1,3 +1,7 @@
+## 2026-11-03 CODEX — Repair Settings Navigation Spec Links (AFC-599)
+
+Corrected 12 broken Markdown navigation targets across the settings-navigation implementation spec so each link opens the canonical parent design.  The link-only update is recorded in `docs/rollouts/2026-11-03-afc-599-document-navigation-links.md`.
+
 ## 2026-10-30 CODEX — Repository Report Library (AFC-580)
 
 Adds `docs/reports/README.md` as the report and research entry point while preserving all existing historical paths.  New public-safe reports belong in `docs/reports/`; private operational evidence belongs in private Fleet-OPS.  The shared collector builds the separate `Code/Docs/Socratic-Trade/` collection from published Git revisions.  The approved Docs-only exception is installed; Git integration checkouts remain protected.  Final source publication is tracked in AFC-580.
