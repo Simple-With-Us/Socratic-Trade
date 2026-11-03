@@ -3,6 +3,9 @@
 **What.**  The retired two-part fleet name is removed from this repository's ops tooling under the owner's fleet-wide directive.  The fleet post helper is now `scripts/simple-tools-fleet-post.sh`, driven by the `FLEET_POST_*` env family and posting through `simple-chat` to Zulip #Work-In-Progress; its callers (the deploy-freshness workflow, the freshness alerter, provider knob sync, the Slack retirement shim, the launchd plist) and the CI syntax check use the new names in the same change.  `scripts/install-fleet-coordination.sh` now installs `simple-chat` and `simple-board` plus `FLEET-PROTOCOL.md` from the current AFC tool-names pin.  Historical prose is masked, including the older entries below.  Two slices stay as documented exceptions: the fail-closed bootstrap stub keeps its path so old setup calls cannot reinstall the Slack engine, and the coordination installer keeps a two-entry legacy-link removal list so pre-rename installs stop resolving the old command names, and the three doc labels for the shared Infisical token pair now carry the fleet's canonical new names (`FLEET_SYNC_TOKEN` / `FLEET_SYNC_POST_TOKEN`) ahead of the centrally sequenced key rename.  No trading logic was touched.  Rollout: `docs/rollouts/2026-11-03-retired-name-sweep.md`.
 
 **Next.**  Land on green verify; the shared token pair's key rename is sequenced centrally after all consumers land, and the AFC pin advances to the tool-names merge commit when that lands.
+## 2026-11-03 CODEX — Repair Settings Navigation Spec Links (AFC-599)
+
+Corrected 12 broken Markdown navigation targets across the settings-navigation implementation spec so each link opens the canonical parent design.  The link-only update is recorded in `docs/rollouts/2026-11-03-afc-599-document-navigation-links.md`.
 
 ## 2026-10-30 CODEX — Repository Report Library (AFC-580)
 

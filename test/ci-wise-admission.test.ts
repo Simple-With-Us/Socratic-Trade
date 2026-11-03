@@ -11,14 +11,16 @@ for (const file of [".github/workflows/ci.yml", ".github/workflows/security.yml"
     const source = readFileSync(join(root, file), "utf8");
     const clause = source.match(/case "\$actor" in\n([\s\S]*?)esac/)?.[0];
 
-    it("allows the exact verified Wise app without widening to unknown bots", () => {
+    it("admits the canonical trusted set: named vendor bots and the swu-* fleet family", () => {
       expect(clause).toBeDefined();
       const run = (actor: string) => spawnSync("bash", ["-c", `actor="$1"; ${clause}`, "test", actor]);
       expect(run("swu-wise[bot]").status).toBe(0);
       expect(run("swu-echo[bot]").status).toBe(0);
-      expect(run("swu-unverified[bot]").status).not.toBe(0);
+      expect(run("kody-ai[bot]").status).toBe(0);
+      expect(run("claude[bot]").status).toBe(0);
+      expect(run("swu-unverified[bot]").status).toBe(0);
       expect(run("untrusted[bot]").status).not.toBe(0);
-      expect(clause).not.toContain("swu-*");
+      expect(clause).toContain("swu-*'[bot]'");
     });
 
     it("preserves the same-repository and fork boundary", () => {
@@ -29,16 +31,16 @@ for (const file of [".github/workflows/ci.yml", ".github/workflows/security.yml"
   });
 }
 
-it("allows the exact CODEX app for security scanning without widening to unknown bots", () => {
+it("admits the canonical trusted set for security scanning", () => {
   const file = ".github/workflows/security.yml";
   const source = readFileSync(join(root, file), "utf8");
   const clause = source.match(/case "\$actor" in\n([\s\S]*?)esac/)?.[0];
   expect(clause).toBeDefined();
   const run = (actor: string) => spawnSync("bash", ["-c", `actor="$1"; ${clause}`, "test", actor]);
   expect(run("swu-codex[bot]").status).toBe(0);
-  expect(run("swu-unverified[bot]").status).not.toBe(0);
+  expect(run("swu-unverified[bot]").status).toBe(0);
   expect(run("untrusted[bot]").status).not.toBe(0);
-  expect(clause).not.toContain("swu-*");
+  expect(clause).toContain("swu-*'[bot]'");
 });
 
 it("documents the same Wise admission as active and parked workflows", () => {
