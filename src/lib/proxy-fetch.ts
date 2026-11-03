@@ -14,6 +14,14 @@
  *   RESIDENTIAL_PROXY_FAILURE_MODE
  *                                "fail_soft" (default) | "fail_closed" — see
  *                                data-source-fetch.ts for exact semantics.
+ *   PROXY_MAX_CONCURRENCY      cap on proxied requests in flight at once
+ *                                across the whole process (default 4) — the
+ *                                Mango pacing gate in createProxiedFetch.
+ *   RESIDENTIAL_PROXY_LEG_TIMEOUT_MS
+ *                                per-leg timeout for proxied requests with no
+ *                                caller AbortSignal (default 15000; 0 disables
+ *                                the cap, leaving the caller signal as the
+ *                                only deadline when there is one).
  *
  * As in CT, when nothing is configured the effective default is the GL.iNet
  * Mango HTTP CONNECT proxy on the WireGuard mesh (http://10.99.0.2:8888), so a
@@ -70,6 +78,8 @@ export function formatProxyUrl(opts: {
 export interface ResidentialProxyEnv {
   RESIDENTIAL_PROXY_URL?: string;
   RESIDENTIAL_PROXY_FAILURE_MODE?: string;
+  PROXY_MAX_CONCURRENCY?: string;
+  RESIDENTIAL_PROXY_LEG_TIMEOUT_MS?: string;
   RESIDENTIAL_PROXY_HOST?: string;
   RESIDENTIAL_PROXY_PORT?: string | number;
   RESIDENTIAL_PROXY_USERNAME?: string;
@@ -151,6 +161,139 @@ export function resolveProxyFailureMode(env?: ProxyEnvSource): ProxyFailureMode 
   return raw === "fail_closed" ? "fail_closed" : "fail_soft";
 }
 
+/** Default cap on proxied requests in flight at once, process-wide. */
+export const DEFAULT_PROXY_MAX_CONCURRENCY = 4;
+
+/**
+ * Resolve the proxy-wide in-flight cap: PROXY_MAX_CONCURRENCY wins when it
+ * parses to an integer >= 1; anything else falls back to the default.  The
+ * cap is deliberately small: every proxied request funnels through the one
+ * tinyproxy on the Mango, and the provider cascade dispatches concurrent
+ * waves (Promise.all across providers in data-providers.ts) that otherwise
+ * arrive at that single-threaded-ish proxy all at once.
+ */
+export function resolveProxyMaxConcurrency(env?: ProxyEnvSource): number {
+  const raw = (env ?? process.env).PROXY_MAX_CONCURRENCY;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_PROXY_MAX_CONCURRENCY;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : DEFAULT_PROXY_MAX_CONCURRENCY;
+}
+
+/** A granted concurrency slot.  `release` returns it; extra calls are no-ops. */
+export interface ProxySlot {
+  /** Milliseconds spent queued before the slot was granted (0 when immediate). */
+  waitMs: number;
+  release(): void;
+}
+
+interface ProxyGateWaiter {
+  enqueuedAt: number;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+  resolve(slot: ProxySlot): void;
+  reject(err: unknown): void;
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("aborted", "AbortError");
+}
+
+/**
+ * FIFO concurrency gate for proxied requests — the proxy-wide counterpart of
+ * the per-provider pacers in provider-rate-limit.ts.  Per-provider pacing
+ * spaces one provider's dispatches, but nothing capped the TOTAL number of
+ * proxied requests in flight when several providers fire at once; this gate
+ * is that cap.  A caller whose signal aborts while it is still queued is
+ * removed from the queue and rejected with the abort reason, so a cascade
+ * lane that already gave up never consumes a slot later.
+ *
+ * Production code uses the module-level shared instance below; tests
+ * construct their own with a fixed cap resolver.
+ */
+export class ProxyConcurrencyGate {
+  private inFlightCount = 0;
+  private readonly queue: ProxyGateWaiter[] = [];
+
+  constructor(private readonly resolveMaxConcurrency: () => number) {}
+
+  /** Proxied requests currently holding a slot. */
+  get inFlight(): number {
+    return this.inFlightCount;
+  }
+
+  /** Callers currently waiting for a slot. */
+  get queued(): number {
+    return this.queue.length;
+  }
+
+  acquire(signal?: AbortSignal): Promise<ProxySlot> {
+    if (signal?.aborted) return Promise.reject(abortReason(signal));
+    return new Promise<ProxySlot>((resolve, reject) => {
+      const waiter: ProxyGateWaiter = { enqueuedAt: Date.now(), signal, resolve, reject };
+      if (signal) {
+        waiter.onAbort = () => {
+          const idx = this.queue.indexOf(waiter);
+          if (idx === -1) return; // already granted; the fetch's own signal handling applies
+          this.queue.splice(idx, 1);
+          reject(abortReason(signal));
+        };
+        signal.addEventListener("abort", waiter.onAbort, { once: true });
+      }
+      this.queue.push(waiter);
+      this.pump();
+    });
+  }
+
+  /** Test hook: reject every queued waiter and forget the in-flight count. */
+  reset(): void {
+    const waiters = this.queue.splice(0);
+    for (const waiter of waiters) {
+      if (waiter.signal && waiter.onAbort) {
+        waiter.signal.removeEventListener("abort", waiter.onAbort);
+      }
+      waiter.reject(new Error("proxy concurrency gate reset"));
+    }
+    this.inFlightCount = 0;
+  }
+
+  private pump(): void {
+    while (this.queue.length > 0 && this.inFlightCount < this.resolveMaxConcurrency()) {
+      const waiter = this.queue.shift();
+      if (!waiter) break;
+      if (waiter.signal && waiter.onAbort) {
+        waiter.signal.removeEventListener("abort", waiter.onAbort);
+      }
+      this.inFlightCount += 1;
+      const enqueuedAt = waiter.enqueuedAt;
+      let released = false;
+      waiter.resolve({
+        waitMs: Math.max(0, Date.now() - enqueuedAt),
+        release: () => {
+          if (released) return;
+          released = true;
+          this.inFlightCount = Math.max(0, this.inFlightCount - 1);
+          this.pump();
+        }
+      });
+    }
+  }
+}
+
+type ProxyGateHost = typeof globalThis & {
+  __socraticProxyConcurrencyGate?: ProxyConcurrencyGate;
+};
+
+const gateHost = globalThis as ProxyGateHost;
+
+/**
+ * The shared gate every createProxiedFetch wrapper funnels through.  Pinned
+ * on globalThis for the same reason as the proxy-use-log ring: Next.js can
+ * bundle this module as separate instances in one process, and per-instance
+ * gates would silently multiply the cap.
+ */
+export const sharedProxyConcurrencyGate: ProxyConcurrencyGate = (gateHost.__socraticProxyConcurrencyGate ??=
+  new ProxyConcurrencyGate(() => resolveProxyMaxConcurrency()));
+
 const agentCache = new Map<string, ProxyAgent>();
 
 /** Cached undici ProxyAgent per proxy URL (mirrors CT's cached Deno clients). */
@@ -165,19 +308,116 @@ export function getProxyAgent(proxyUrl: string): ProxyAgent {
 }
 
 /**
- * Safety cap (ms) for a proxied leg that has no caller AbortSignal.
+ * Default safety cap (ms) for a proxied leg that has no caller AbortSignal.
  * dataSourceFetch applies it only in that case.  A caller-supplied signal is
  * the deadline.  A fixed 3s cap was aborting lanes that need 4-5s to headers
  * through a slow but working residential proxy, then duplicating the request
- * on direct egress, which anti-bot sources reject.  FRED does not use this
- * cap.  It is excluded and goes direct.  0 or undefined disables the per-leg
- * timeout (caller signal only).
+ * on direct egress, which anti-bot sources reject — residential latency runs
+ * ~10s-class, so the default is now 15s (RESIDENTIAL_PROXY_LEG_TIMEOUT_MS
+ * overrides).  FRED does not use this cap.  It is excluded and goes direct.
+ * 0 disables the per-leg timeout (caller signal only).
  */
-export const PROXY_LEG_TIMEOUT_MS = 3000;
+export const PROXY_LEG_TIMEOUT_MS = 15000;
+
+/**
+ * Resolve the effective per-leg timeout: RESIDENTIAL_PROXY_LEG_TIMEOUT_MS
+ * wins when it parses to a finite number >= 0 (0 = no per-leg cap); anything
+ * else falls back to PROXY_LEG_TIMEOUT_MS.
+ */
+export function resolveProxyLegTimeoutMs(env?: ProxyEnvSource): number {
+  const raw = (env ?? process.env).RESIDENTIAL_PROXY_LEG_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === "") return PROXY_LEG_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : PROXY_LEG_TIMEOUT_MS;
+}
+
+/**
+ * Wrap a response body so `onSettle` fires exactly once when the body
+ * finishes, errors, is cancelled by the reader, or the caller's signal
+ * aborts.  fetch() resolves at headers while the body is still an open
+ * stream through the proxy, so anything held for the life of the request
+ * (the leg timer, a concurrency slot) must release here, not at headers —
+ * releasing at headers left res.json() without cancellation and let a
+ * header-then-stall proxy hang past the caller budget, including long-lived
+ * cascade reads.
+ */
+function wrapBodyUntilSettle(
+  res: Response,
+  callerSignal: AbortSignal | undefined,
+  onSettle: () => void
+): Response {
+  if (!res.body) {
+    onSettle();
+    return res;
+  }
+  let settled = false;
+  let onBodyAbort: (() => void) | undefined;
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    if (onBodyAbort && callerSignal) callerSignal.removeEventListener("abort", onBodyAbort);
+    onBodyAbort = undefined;
+    onSettle();
+  };
+  const upstream = res.body.getReader();
+  const wrappedBody = new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (callerSignal?.aborted) {
+        finish();
+        controller.error(new DOMException("aborted", "AbortError"));
+        void upstream.cancel();
+        return;
+      }
+      if (callerSignal) {
+        onBodyAbort = () => {
+          try {
+            controller.error(new DOMException("aborted", "AbortError"));
+          } catch {
+            // already errored
+          }
+          finish();
+          void upstream.cancel();
+        };
+        callerSignal.addEventListener("abort", onBodyAbort, { once: true });
+      }
+    },
+    async pull(controller) {
+      if (callerSignal?.aborted) {
+        finish();
+        controller.error(new DOMException("aborted", "AbortError"));
+        await upstream.cancel();
+        return;
+      }
+      const { done, value } = await upstream.read();
+      if (done) {
+        finish();
+        controller.close();
+        return;
+      }
+      controller.enqueue(value);
+    },
+    async cancel(reason) {
+      finish();
+      await upstream.cancel(reason);
+    }
+  });
+  return new Response(wrappedBody, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers
+  });
+}
 
 /**
  * Wrap a fetch function so requests egress through the given HTTP(S) proxy.
  * Returns baseFetch unchanged when no proxy URL is given (CT parity).
+ *
+ * Every call first takes a slot from the shared proxy concurrency gate
+ * (PROXY_MAX_CONCURRENCY, default 4).  The slot is acquired BEFORE the
+ * proxy-leg timer below is created, so time spent queued for a slot never
+ * counts against the leg timeout.  The slot is held until the response body
+ * settles — the proxy is busy for exactly that long — and released on error.
+ * A caller abort while queued rejects before anything is dispatched.
  *
  * When `options.proxyTimeoutMs` is a positive number, the returned fetch
  * chains a fresh AbortController (the proxy-leg timeout) with the caller's
@@ -185,23 +425,37 @@ export const PROXY_LEG_TIMEOUT_MS = 3000;
  * The timer and the caller listener stay armed until the body settles.
  * fetch() resolves at headers, and releasing them there left res.json()
  * without cancellation.
+ *
+ * `options.onQueueWait` is called once with the milliseconds spent queued
+ * for a slot, when that wait was measurable (> 0), so callers can tell queue
+ * wait apart from leg time in their logs.
  */
 export function createProxiedFetch(
   proxyUrl: string | undefined,
   baseFetch: typeof fetch = undiciFetch as unknown as typeof fetch,
-  options?: { proxyTimeoutMs?: number }
+  options?: { proxyTimeoutMs?: number; onQueueWait?: (waitMs: number) => void }
 ): typeof fetch {
   if (!proxyUrl || !proxyUrl.trim()) return baseFetch;
   const agent = getProxyAgent(proxyUrl);
   const proxyTimeoutMs = options?.proxyTimeoutMs;
   return (async function proxiedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const callerSignal = init?.signal ?? undefined;
+    // Gate first: the leg timer is only created after a slot is granted, so
+    // queue wait never counts against the leg timeout.
+    const slot = await sharedProxyConcurrencyGate.acquire(callerSignal);
+    if (slot.waitMs > 0) options?.onQueueWait?.(slot.waitMs);
     const withDispatcher = { ...(init ?? {}), dispatcher: agent } as RequestInit;
     if (!proxyTimeoutMs || proxyTimeoutMs <= 0) {
-      return baseFetch(input, withDispatcher);
+      try {
+        const res = await baseFetch(input, withDispatcher);
+        return wrapBodyUntilSettle(res, callerSignal, () => slot.release());
+      } catch (err) {
+        slot.release();
+        throw err;
+      }
     }
     const proxyController = new AbortController();
     const timeoutHandle = setTimeout(() => proxyController.abort(), proxyTimeoutMs);
-    const callerSignal = init?.signal;
     let onCallerAbort: (() => void) | undefined;
     if (callerSignal) {
       if (callerSignal.aborted) {
@@ -217,77 +471,18 @@ export function createProxiedFetch(
       settled = true;
       clearTimeout(timeoutHandle);
       if (onCallerAbort && callerSignal) callerSignal.removeEventListener("abort", onCallerAbort);
+      slot.release();
     };
-    // fetch() resolves at headers.  The body is still an open stream, so the
-    // caller's signal and the leg timer stay armed until the body settles.
-    // Releasing them here let a header-then-stall proxy hang past the caller
-    // budget, including long-lived cascade reads.
     try {
       const effectiveSignal =
         callerSignal && typeof AbortSignal !== "undefined" && "any" in AbortSignal
           ? AbortSignal.any([proxyController.signal, callerSignal])
           : proxyController.signal;
       const res = await baseFetch(input, { ...withDispatcher, signal: effectiveSignal });
-      if (!res.body) {
-        cleanup();
-        return res;
-      }
-      let onBodyAbort: (() => void) | undefined;
-      const releaseBodyAbort = () => {
-        if (onBodyAbort && callerSignal) callerSignal.removeEventListener("abort", onBodyAbort);
-        onBodyAbort = undefined;
-      };
-      const finishBody = () => {
-        cleanup();
-        releaseBodyAbort();
-      };
-      const upstream = res.body.getReader();
-      const wrappedBody = new ReadableStream<Uint8Array>({
-        start(controller) {
-          if (callerSignal?.aborted) {
-            finishBody();
-            controller.error(new DOMException("aborted", "AbortError"));
-            void upstream.cancel();
-            return;
-          }
-          if (callerSignal) {
-            onBodyAbort = () => {
-              try {
-                controller.error(new DOMException("aborted", "AbortError"));
-              } catch {
-                // already errored
-              }
-              finishBody();
-              void upstream.cancel();
-            };
-            callerSignal.addEventListener("abort", onBodyAbort, { once: true });
-          }
-        },
-        async pull(controller) {
-          if (callerSignal?.aborted) {
-            finishBody();
-            controller.error(new DOMException("aborted", "AbortError"));
-            await upstream.cancel();
-            return;
-          }
-          const { done, value } = await upstream.read();
-          if (done) {
-            finishBody();
-            controller.close();
-            return;
-          }
-          controller.enqueue(value);
-        },
-        async cancel(reason) {
-          finishBody();
-          await upstream.cancel(reason);
-        }
-      });
-      return new Response(wrappedBody, {
-        status: res.status,
-        statusText: res.statusText,
-        headers: res.headers
-      });
+      // The leg timer and the gate slot stay held until the body settles —
+      // wrapBodyUntilSettle calls cleanup exactly once at that point (and
+      // immediately, via the same path, when there is no body).
+      return wrapBodyUntilSettle(res, callerSignal, cleanup);
     } catch (err) {
       cleanup();
       throw err;
@@ -406,8 +601,9 @@ export function proxyProbePort(url: URL): number {
   return url.protocol === "https:" ? 443 : 80;
 }
 
-/** Test hook: drop cached agents + warn timestamps. */
+/** Test hook: drop cached agents + warn timestamps + gate state. */
 export function __resetProxyFetchForTests(): void {
   agentCache.clear();
   lastProxyWarnAt.clear();
+  sharedProxyConcurrencyGate.reset();
 }

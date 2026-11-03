@@ -38,8 +38,8 @@ import "server-only";
 import {
   createProxiedFetch,
   isProxyLegError,
-  PROXY_LEG_TIMEOUT_MS,
   resolveProxyFailureMode,
+  resolveProxyLegTimeoutMs,
   resolveResidentialProxyUrl,
   safeProxyHostForLog,
   warnProxyFallback,
@@ -196,41 +196,52 @@ export async function dataSourceFetch(
     return directFetch(url, init);
   }
 
-  // A caller signal is the deadline.  A fixed 3s cap truncates lanes that
+  // A caller signal is the deadline.  A fixed 3s cap truncated lanes that
   // need 4-5s to headers through a slow but working residential proxy, then
-  // duplicates the request on direct egress, which anti-bot sources reject.
-  // The cap remains only when nothing else bounds the leg.
-  const perLegTimeoutMs = init?.signal ? undefined : PROXY_LEG_TIMEOUT_MS;
+  // duplicated the request on direct egress, which anti-bot sources reject.
+  // The cap (default 15s, RESIDENTIAL_PROXY_LEG_TIMEOUT_MS) remains only
+  // when nothing else bounds the leg.
+  const perLegTimeoutMs = init?.signal ? undefined : resolveProxyLegTimeoutMs(deps.env);
   const proxyHost = safeProxyHostForLog(resolution.proxyUrl); // host:port only, never credentials
   const destination = safeDestinationHostForLog(url);
+  // Milliseconds this request spends queued for a proxy concurrency slot,
+  // reported by createProxiedFetch once a slot is granted.  Queue wait is not
+  // leg time: the watchdog needs the distinction when the Mango is busy.
+  let queueWaitMs = 0;
   // The single log line for this proxied request: timestamp, destination
   // host, and outcome (HTTP status on response, error class on throw).
   // Recorded once the outcome is known, so each proxied request has exactly
   // one entry. Logging stays additive — fetch behavior is unchanged.
-  const proxyUseLine = {
+  const proxyUseLine = () => ({
     usedProxy: true as const,
     source: resolution.source,
     host: proxyHost,
     fallback: false,
     service: opts?.service,
-    destination
-  };
+    destination,
+    ...(queueWaitMs > 0 ? { queueWaitMs } : {})
+  });
   const proxiedFetch = (deps.proxiedFetchFactory ?? ((proxyUrl: string) =>
-    createProxiedFetch(proxyUrl, undefined, { proxyTimeoutMs: perLegTimeoutMs })))(
+    createProxiedFetch(proxyUrl, undefined, {
+      proxyTimeoutMs: perLegTimeoutMs,
+      onQueueWait: (ms) => {
+        queueWaitMs = ms;
+      }
+    })))(
     resolution.proxyUrl
   );
   try {
     const res = await proxiedFetch(url, init);
-    recordProxyUse({ ...proxyUseLine, statusCode: res.status });
+    recordProxyUse({ ...proxyUseLine(), statusCode: res.status });
     return res;
   } catch (error) {
     // Caller cancellation is an outcome, not evidence of a broken proxy.
     // Keep its one entry without inflating the watchdog's proxyErrors count.
     if (init?.signal?.aborted) {
-      recordProxyUse({ ...proxyUseLine, cancelled: true });
+      recordProxyUse({ ...proxyUseLine(), cancelled: true });
       throw error;
     }
-    recordProxyUse({ ...proxyUseLine, errorClass: errorClassForLog(error) });
+    recordProxyUse({ ...proxyUseLine(), errorClass: errorClassForLog(error) });
     if (!isProxyLegError(error)) throw error;
     if (resolution.failureMode === "fail_closed") {
       throw new Error(
