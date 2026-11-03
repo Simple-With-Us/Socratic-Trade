@@ -141,7 +141,7 @@ mid-build (SSH exec stream exit 255) while webhooks returned 200 and
 `/api/health` stayed green on the old sha for ~14h.
 
 `.github/workflows/deploy-freshness.yml` runs `scripts/alert-deploy-freshness.sh`
-every 20 minutes.  It fails (Sentry fleet-infra + optional `#agent-sync`) when
+every 20 minutes.  It fails (Sentry fleet-infra + optional `#Work-In-Progress`) when
 the oldest commit on `origin/main` that is not live **and that changed a path
 Coolify watches** is older than 1 hour.  The watched set is Coolify's live
 `watch_paths` allow list, mirrored in `src/lib/deploy-image-impact.ts` as

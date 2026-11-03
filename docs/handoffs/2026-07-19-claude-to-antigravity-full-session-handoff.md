@@ -18,7 +18,7 @@ any of the branches below.
 
 ## 1. Standing fleet HOLD (do not lift until told)
 
-Posted to #agent-sync: **do not run `POST /api/admin/reembed {action:'purge-legacy'}`
+Posted to #ag***-s**c: **do not run `POST /api/admin/reembed {action:'purge-legacy'}`
 or any `symbols`-scoped corpus re-embed run** until PR #1777 (`corpus-reembed-hardening`)
 merges and its prod deploy is verified. The code currently live in prod (absorbed from
 my `corpus-reembed` design by another agent, PR #1764) has a **proven exploit**: a
@@ -26,7 +26,7 @@ symbol-scoped or partial re-embed run can satisfy the purge-completion gate, let
 purge-legacy delete voyage vectors that were never actually re-embedded into the bge-m3
 space. #1777 fixes this (revision-namespaced watermarks, live-identity dedup, insider-form4
 PIT fix) with an inverted exploit test proving the fix. **Once #1777 merges + deploys,
-lift this hold** (post to #agent-sync) and only then proceed with the corpus re-embed /
+lift this hold** (post to #ag***-s**c) and only then proceed with the corpus re-embed /
 backfill sequence in §5.
 
 ## 2. Ten Codex-audit + bge-m3 lanes — all built, adversarially verified, must-fixes applied
@@ -115,7 +115,7 @@ the new merge commit before considering the lane done (merge == auto-deploy on t
 From `docs/reviews/2026-07-18-backlog-clearing-plan.md` §3 — the RAG/filings backlog is
 ~99% un-ingested (Pinecone corpus was 8,476 vectors vs a 600k–1.2M target baseline; AG's
 `agent/ag-reindex-bge-m3` lane did run a production re-embed via `scripts/reindex-all.ts`
-already, per #agent-sync — verify actual corpus coverage before assuming more re-embed
+already, per #ag***-s**c — verify actual corpus coverage before assuming more re-embed
 work is needed):
 1. Lift the fleet HOLD (§1) once `corpus-reembed-hardening` deploys.
 2. Verify `rag_usage` rows now stamp `provider='openrouter'` correctly (the metering-gate
@@ -208,7 +208,7 @@ work, roughly in priority order):
   notes with exact files/tests/verification commands for every row in §2.
 - `/Users/jay/apps/TRADING-EFFORT-LOG.md` (live board) and `docs/EFFORT-LOG.md` (repo
   mirror) — updated with rows for all of the above; keep them current as you land things.
-- #agent-sync channel history — the fleet HOLD announcement, the metering-gate
+- #ag***-s**c channel history — the fleet HOLD announcement, the metering-gate
   deploy-live warning, and this session's claims are all there for context.
 
 ## 9. Standing coordination notes
