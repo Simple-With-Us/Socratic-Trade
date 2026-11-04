@@ -23,18 +23,18 @@
 #      else the payload asks for is refused (defense vs a buggy/compromised monitor).
 #   3. Read current values from Infisical prod (proven SSH + universal-auth CLI
 #      path on the Coolify box) and WRITE ONLY DIFFS.
-#   4. On any applied change, post ONE line to #agent-sync.
+#   4. On any applied change, post ONE line to #Work-In-Progress.
 #
 # Knob writes land in Infisical; the trading app reads them at boot, so a change
 # takes effect on the next prod deploy/restart ("rides next deploy").
 #
 # USAGE
 #   scripts/sync-provider-knobs.sh            # DRY RUN: print the diff, write nothing, exit 0
-#   scripts/sync-provider-knobs.sh --apply    # write changed keys to Infisical + post to #agent-sync
+#   scripts/sync-provider-knobs.sh --apply    # write changed keys to Infisical + post to #Work-In-Progress
 #
 # SAFETY
 #   - No token available -> exit 1 (fail loudly).  Monitor unreachable / empty payload -> exit 0, no writes, no Zulip post (launchd-safe).
-#   - Dry run never writes and never posts to #agent-sync.
+#   - Dry run never writes and never posts to #Work-In-Progress.
 #   - --apply refuses to write if it could not first read current Infisical state
 #     (never writes blind).
 #
@@ -58,7 +58,7 @@ BOX_ENV="${KNOB_SYNC_BOX_ENV:-/data/coolify/applications/${COOLIFY_APP_UUID}/.en
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HELPER="$SCRIPT_DIR/provider-knob-diff.mjs"
-FLEET_POST="$SCRIPT_DIR/agent-sync-fleet-post.sh"
+FLEET_POST="$SCRIPT_DIR/simple-tools-fleet-post.sh"
 
 APPLY=0
 for arg in "$@"; do
@@ -192,7 +192,7 @@ if [ "$APPLY" -eq 0 ]; then
     st="$(printf '%s' "$rec" | cut -f6)"
     echo "  $k: $old -> $new (plan $plan $st)"
   done
-  echo "[knob-sync] re-run with --apply to write these and post to #agent-sync."
+  echo "[knob-sync] re-run with --apply to write these and post to #Work-In-Progress."
   exit 0
 fi
 
@@ -272,10 +272,10 @@ while IFS= read -r out; do
     log "wrote $key: $old -> $new"
     MSG="repo: Socratic-Trade | [CLAUDE->FLEET] knob-sync applied: $key $old->$new (plan $plan $st); rides next deploy"
     if [ -x "$FLEET_POST" ]; then
-      AGENT_SYNC_SEAT="${AGENT_SYNC_SEAT:-CLAUDE}" \
-      AGENT_SYNC_REPO="${AGENT_SYNC_REPO:-Socratic-Trade}" \
-      AGENT_SYNC_TOPIC="${AGENT_SYNC_TOPIC:-fleet}" \
-        bash "$FLEET_POST" "$MSG" >/dev/null 2>&1 || log "agent-sync post failed for $key (write still succeeded)"
+      FLEET_POST_SEAT="${FLEET_POST_SEAT:-CLAUDE}" \
+      FLEET_POST_REPO="${FLEET_POST_REPO:-Socratic-Trade}" \
+      FLEET_POST_TOPIC="${FLEET_POST_TOPIC:-fleet}" \
+        bash "$FLEET_POST" "$MSG" >/dev/null 2>&1 || log "fleet post failed for $key (write still succeeded)"
     fi
   else
     msg="$(printf '%s' "$out" | cut -f3)"

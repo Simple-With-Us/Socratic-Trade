@@ -96,7 +96,7 @@ an embedded hard-gate substring) and `pre-veto-override` (`preVetoTaggedOpeningW
 
 ## Coordination & follow-ups
 
-- Claimed on `#agent-sync` with an overlap heads-up to the not-yet-landed `claude/redteam-policy-aware-routing`
+- Claimed on `#ag***-s**c` with an overlap heads-up to the not-yet-landed `claude/redteam-policy-aware-routing`
   lane (different concern — Red-Team *unavailable* routing vs Red-Team *veto* overridable; same strategy.ts
   region; whoever lands first, the other rebases).
 - Deferred (design verdict): extending override to **exit** sides (low value — exits already bypass nearly all

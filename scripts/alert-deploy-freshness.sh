@@ -41,7 +41,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VERIFY="${SCRIPT_DIR}/verify-deploy-sha.sh"
-FLEET_POST="${SCRIPT_DIR}/agent-sync-fleet-post.sh"
+FLEET_POST="${SCRIPT_DIR}/simple-tools-fleet-post.sh"
 
 HOST="${DEPLOY_VERIFY_HOST:-https://socratictrade.com}"
 EXPECTED_REF="${1:-${DEPLOY_VERIFY_EXPECTED_SHA:-origin/main}}"
@@ -187,13 +187,13 @@ maybe_notify() {
       ;;
   esac
   if [ ! -f "$FLEET_POST" ]; then
-    log "notify skipped (agent-sync-fleet-post.sh not present)."
+    log "notify skipped (simple-tools-fleet-post.sh not present)."
     return 0
   fi
-  AGENT_SYNC_SEAT="${AGENT_SYNC_SEAT:-ST}" \
-  AGENT_SYNC_REPO="${AGENT_SYNC_REPO:-Socratic-Trade}" \
-  AGENT_SYNC_TOPIC="${AGENT_SYNC_TOPIC:-fleet}" \
-    bash "$FLEET_POST" "$2" || log "warn: agent-sync fleet post failed (no Zulip creds?)."
+  FLEET_POST_SEAT="${FLEET_POST_SEAT:-ST}" \
+  FLEET_POST_REPO="${FLEET_POST_REPO:-Socratic-Trade}" \
+  FLEET_POST_TOPIC="${FLEET_POST_TOPIC:-fleet}" \
+    bash "$FLEET_POST" "$2" || log "warn: fleet post failed (no Zulip creds?)."
 }
 
 case "$VERIFY_CODE" in
