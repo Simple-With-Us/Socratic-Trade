@@ -71,16 +71,24 @@
 
 import type { MarketEnrichmentProvider, SymbolEnrichment } from "./data-providers";
 import { fetchWithRetry } from "./data-providers";
-import { audit } from "./db";
+import { audit, resolveApiKeyWithSource } from "./db";
 import { normalizeSymbol } from "./money";
 import { resolveSourceBool, resolveSourceNumber } from "./source-settings";
 
 const MARKETAUX_BASE_URL = "https://api.marketaux.com/v1";
 
-/** The sole registration gate: trimmed MARKETAUX_API_KEY, or undefined when unset/blank. */
-export function resolveMarketauxApiKey(): string | undefined {
-  const key = (process.env.MARKETAUX_API_KEY ?? "").trim();
-  return key || undefined;
+/**
+ * Registration gate: per-user stored key (when userId given) → MARKETAUX_API_KEY env →
+ * local-user stored key, via the shared resolver (marketaux is a catalogued per-user
+ * service in db-api-keys). Without userId this preserves the old env-only behavior
+ * plus the resolver's local fallback. Blank/whitespace counts as unset.
+ */
+export function resolveMarketauxApiKey(userId?: string): string | undefined {
+  if (!userId) {
+    const key = (process.env.MARKETAUX_API_KEY ?? "").trim();
+    return key || undefined;
+  }
+  return resolveApiKeyWithSource("marketaux", userId).key;
 }
 
 // Positive cache floor: news moves faster than Quiver's slow-moving filings, but the free plan's

@@ -445,14 +445,18 @@ export function syncQuotesToFieldStore(quotes: Record<string, BrokerQuote>): voi
       pushField(symbol, quote, "price", quote.price, isFiniteNumber);
       pushField(symbol, quote, "bid", quote.bid, isFiniteNumber);
       pushField(symbol, quote, "ask", quote.ask, isFiniteNumber);
+      pushField(symbol, quote, "bidSize", quote.bidSize, isFiniteNumber);
+      pushField(symbol, quote, "askSize", quote.askSize, isFiniteNumber);
       pushField(symbol, quote, "volume", quote.volume, isFiniteNumber);
       pushField(symbol, quote, "prevClose", quote.prevClose, isFiniteNumber);
       pushField(symbol, quote, "vwap", quote.vwap, isFiniteNumber);
       pushField(symbol, quote, "open", quote.open, isFiniteNumber);
       pushField(symbol, quote, "high", quote.high, isFiniteNumber);
       pushField(symbol, quote, "low", quote.low, isFiniteNumber);
+      pushField(symbol, quote, "close", quote.close, isFiniteNumber);
       pushField(symbol, quote, "change", quote.change, isFiniteNumber);
       pushField(symbol, quote, "changePct", quote.changePct, isFiniteNumber);
+      pushField(symbol, quote, "netChange", quote.netChange, isFiniteNumber);
       pushField(
         symbol,
         quote,
@@ -707,9 +711,11 @@ export function policyStubForConnectedAccount(account: ConnectedAccount): Tradin
  * 1a. Active Broker Gateway (account the user is operating)
  * 1b. EVERY other connected broker for this user (market data only — not fill venue)
  * 2. Alpaca Snapshots API (any Alpaca key on the user)
- * 3. Yahoo Finance Batch API
- * 4. Yahoo Finance Single Quote API
- * 5. ROIC.ai Profile API
+ * 3. Finnhub Real-time Quote API
+ * 4. Tiingo IEX Real-time Quote API
+ * 5. Yahoo Finance Batch API
+ * 6. Yahoo Finance Single Quote API
+ * 7. ROIC.ai Profile API (fallback-only; it carries no asOf)
  *
  * Real-time venues: accept when trade-time is within `policy.maxQuoteAgeSec` (default 120s).
  * Venue-delayed (Tradier sandbox paper): accept the *active* broker quote as authoritative
@@ -771,7 +777,9 @@ export async function fetchFreshQuotesCascade(
   // authoritative by owner rule.)
   const acceptIfComplete = (symbol: string, quote: BrokerQuote): void => {
     const merged = bestQuotes[symbol] ?? quote;
-    if (isQuoteFresh(merged, nowMs, maxAgeMs) && isCascadeFieldComplete(merged)) {
+    // Judge freshness at accept time, not cascade start (Cluster B Q4): a
+    // quote fetched after a slow Level-1 wait must not be aged by that wait.
+    if (isQuoteFresh(merged, Date.now(), maxAgeMs) && isCascadeFieldComplete(merged)) {
       result[symbol] = merged;
     }
   };
@@ -835,7 +843,9 @@ export async function fetchFreshQuotesCascade(
   }
   // Tradier trades price off Tradier.  Paper and live both stop here so
   // Alpaca, Yahoo, and the other levels cannot overlay the venue tape.
-  if (venueMode !== "realtime") pendingSymbols = [];
+  // Only venue-PRICED symbols are locked (Cluster B Q5): symbols the venue
+  // could not price at all stay pending for the external levels below.
+  if (venueMode !== "realtime") pendingSymbols = pendingSymbols.filter((s) => !result[s]);
 
   // --- LEVEL 1b: ALL other connected brokers for this user (market-data only) ---
   throwIfCascadeAborted(signal);
@@ -1091,6 +1101,11 @@ export async function fetchFreshQuotesCascade(
     }
   }
 
+  // Persist only accepted (fresh/venue-authoritative) quotes as latest
+  // (Cluster B Q3): stale fallback quotes below are returned to the caller
+  // but must not be written to symbol_field_latest as if they were latest.
+  syncQuotesToFieldStore(result);
+
   // --- FALLBACK ---
   // For any symbols that could not be resolved to a fresh quote (e.g. during market close / weekend),
   // fall back to the freshest quote found across any level (even if older than the freshness bar).
@@ -1112,6 +1127,5 @@ export async function fetchFreshQuotesCascade(
     }
   }
 
-  syncQuotesToFieldStore(result);
   return result;
 }

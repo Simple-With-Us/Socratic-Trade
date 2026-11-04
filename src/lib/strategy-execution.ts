@@ -229,6 +229,10 @@ async function commitRecoveredOpeningStopPlan(input: {
     } catch {
       // The broker fill price remains a valid fallback for a fresh position.
     }
+    // No positive anchor (broker omitted averagePrice, proposal had no referencePrice, and no
+    // live position basis): a stop plan recorded at avg_cost 0 prices every derived stop at $0.
+    // Skip the plan rather than persist a zero-basis plan; the fill receipt itself stays booked.
+    if (!(basis > 0)) return;
     const openingOrderId = (proposal.bracketStopLoss != null || proposal.bracketTakeProfit != null) ? input.orderId : undefined;
     const contract = deriveExitContractFromOpening({
       side: proposal.side === "short" ? "short" : "buy",

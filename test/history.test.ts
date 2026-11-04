@@ -404,6 +404,46 @@ describe("fetchDailyOHLC", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("does not serve a short-lookback in-memory hit for a later deep request (H1)", async () => {
+    connectTradier("tradier-h1-key");
+    const fetchMock = vi.fn(async (url: string) =>
+      String(url).includes("api.tradier.com")
+        ? new Response(tradierBody, { status: 200 })
+        : new Response("unexpected source", { status: 500 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const now = Date.UTC(2026, 5, 18);
+
+    await fetchDailyOHLC("AAPL", now, undefined, { lookbackDays: 365 });
+    await fetchDailyOHLC("AAPL", now + 1000);
+
+    const tradierCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("api.tradier.com"));
+    expect(tradierCalls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("on a deep request, a short Tradier stub does not win over a fuller later tier (H2)", async () => {
+    connectTradier("tradier-h2-key");
+    process.env.MARKETSTACK_API_KEY = "marketstack-h2-key";
+    const marketstackFull = JSON.stringify({
+      data: [
+        { date: "2020-01-02T00:00:00+0000", open: 20, high: 21, low: 19, close: 20.5, volume: 3000 },
+        { date: "2026-06-17T00:00:00+0000", open: 20.5, high: 22, low: 20, close: 21.8, volume: 4000 }
+      ]
+    });
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).includes("api.tradier.com")) return new Response(tradierBody, { status: 200 });
+      if (String(url).includes("api.marketstack.com")) return new Response(marketstackFull, { status: 200 });
+      return new Response("unexpected source", { status: 500 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bars = await fetchDailyOHLC("AAPL", Date.UTC(2026, 5, 18));
+
+    expect(bars).not.toBeNull();
+    expect(bars![0]).toMatchObject({ close: 20.5 });
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("api.marketstack.com"))).toBe(true);
+  });
+
   it("retries a Yahoo HTTP 429 with exponential backoff before succeeding, instead of giving up after one try", async () => {
     let yahooCalls = 0;
     const fetchMock = vi.fn(async (url: string) => {

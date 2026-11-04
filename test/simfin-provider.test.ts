@@ -49,6 +49,15 @@ describe("SimFin enrichment provider", () => {
     expect(resolveSimFinApiKey()).toBeUndefined();
   });
 
+  it("declares quotaScarce + suppliesFields so the cascade wave-gates it to uncovered symbols", async () => {
+    const { SimFinEnrichmentProvider } = await import("../src/lib/simfin-provider");
+    const provider = new SimFinEnrichmentProvider("test-key");
+    expect(provider.quotaScarce).toBe(true);
+    expect(provider.suppliesFields).toEqual(
+      expect.arrayContaining(["grossProfitMargin", "revenueGrowth", "returnOnEquity", "returnOnAssets", "debtToEquity"])
+    );
+  });
+
   // ── Row extraction (realistic "compact" columns/data table shape, live-verified 2026-08-02) ──
 
   it("extractSimFinRows flattens a flat array of {columns, data} tables (one per requested ticker)", async () => {

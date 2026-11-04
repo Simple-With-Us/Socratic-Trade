@@ -108,6 +108,12 @@ describe("Marketaux enrichment provider", () => {
     expect(resolveMarketauxApiKey()).toBeUndefined();
   });
 
+  it("resolveMarketauxApiKey(userId) falls back to the env key when no stored user key exists", async () => {
+    const { resolveMarketauxApiKey } = await import("../src/lib/marketaux-provider");
+    process.env.MARKETAUX_API_KEY = "env-key-123";
+    expect(resolveMarketauxApiKey("user-without-stored-key")).toBe("env-key-123");
+  });
+
   // ── Parsing helpers (fixture payloads matching the live-verified response shape) ────────────
 
   it("extractMarketauxArticles accepts the documented { data: [...] } envelope and tolerates malformed payloads", async () => {

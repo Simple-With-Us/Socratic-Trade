@@ -134,7 +134,7 @@ vi.mock("../src/lib/broker", async (importOriginal) => {
   return { ...actual, getBrokerGateway: () => makeGateway() };
 });
 
-async function seedApprovedProposal(userId: string): Promise<string> {
+async function seedApprovedProposal(userId: string, opts?: { stopPlan?: { style: "fixed"; rationale?: string }; omitReferencePrice?: boolean }): Promise<string> {
   const { upsertConnectedAccount, setPolicy, insertProposal } = await import("../src/lib/db");
   upsertConnectedAccount({
     id: "acc-reconcile-test",
@@ -173,7 +173,8 @@ async function seedApprovedProposal(userId: string): Promise<string> {
       rationale: "reconcile integration test",
       tradeThesisTag: "Momentum-Breakout",
       entryMarketRegime: "Neutral (Normal Volatility)",
-      referencePrice: 200
+      ...(opts?.omitReferencePrice ? {} : { referencePrice: 200 }),
+      ...(opts?.stopPlan ? { stopPlan: opts.stopPlan } : {})
     },
     decision: { approved: true, reasons: [] },
     status: "proposed"
@@ -347,6 +348,45 @@ describe("inline placement-error reconciliation via executeProposal", () => {
     expect(listFillEventsByProposalId(proposalId, userId)).toMatchObject([{ status: "filled", quantity: 1, price: 203, notional: 203 }]);
     expect(getProposal(proposalId, userId)).toMatchObject({ status: "filled", estimatedNotional: 203 });
     expect(getSocraticDecisionCase(proposalId, userId)).toMatchObject({ status: "filled", notional: 203 });
+  });
+
+  it("stale recovery with no positive price anchor books the fill but records no zero-basis stop plan", async () => {
+    const userId = `reco-zero-basis-stop-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId, { stopPlan: { style: "fixed" }, omitReferencePrice: true });
+    const brokerOrderId = `direct-zero-basis-${randomUUID()}`;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      return { orderId: brokerOrderId, refId: input.refId, state: "filled", filledQuantity: 1, averagePrice: 203, raw: {} };
+    });
+
+    const { executeProposal, flagStalePlacingIntents } = await import("../src/lib/strategy");
+    const { getDb, getStopPlans, listFillEventsByProposalId } = await import("../src/lib/db");
+    getDb().exec("CREATE TRIGGER fail_zero_basis_fill BEFORE INSERT ON fill_events BEGIN SELECT RAISE(ABORT, 'forced fill receipt failure'); END;");
+    await executeProposal(proposalId, userId).then(
+      () => { throw new Error("expected receipt failure throw"); },
+      () => {}
+    );
+    getDb().exec("DROP TRIGGER fail_zero_basis_fill");
+    getDb().prepare("UPDATE trade_proposals SET created_at = ? WHERE id = ? AND user_id = ?").run(
+      new Date(Date.now() - 10 * 60_000).toISOString(),
+      proposalId,
+      userId
+    );
+    // Broker now reports the fill WITHOUT an average price and holds no position basis:
+    // price resolves to 0 at both commitRecoveredOpeningStopPlan call sites.
+    await flagStalePlacingIntents(
+      {
+        getEquityOrders: async () => [brokerOrder({ id: brokerOrderId, clientOrderId: capturedRefId, state: "filled", filledQuantity: 1 })],
+        getEquityPositions: async () => []
+      } as never,
+      ACCOUNT,
+      userId,
+      "acc-reconcile-test"
+    );
+
+    expect(listFillEventsByProposalId(proposalId, userId).length).toBeGreaterThan(0);
+    expect(getStopPlans(ACCOUNT, userId)).not.toHaveProperty("AAPL");
   });
 
   it("does not finalize a broker-reported fill until the broker supplies a positive realized price", async () => {
