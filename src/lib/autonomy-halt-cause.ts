@@ -194,7 +194,8 @@ function chunkItems<T>(items: readonly T[], size: number): T[][] {
  * A missing account id uses `IS NULL`; a real id uses `=`.  ">=" plus the id
  * check keeps a row written in the same millisecond as the halt.
  */
-function latestHaltBranch(account: AuditScope): { sql: string; params: string[] } {
+/** Exported for the ST-4561 query-plan test. */
+export function latestHaltBranch(account: AuditScope): { sql: string; params: string[] } {
   const missing = account.connectedAccountId == null;
   const accountSql = missing ? "connected_account_id IS NULL" : "connected_account_id = ?";
   const idParams = missing ? [account.userId] : [account.userId, account.connectedAccountId as string];
