@@ -53,9 +53,10 @@ Not visible in the snapshot: `llmFallbackModels` per account.  If any fallback l
 
 Commands run in the lane, with `cd` inline:
 
-- `npx tsc --noEmit`: see the result in the PR.
-- `npx vitest run` over the 18 touched and related files: see the result in the PR.
-- `npx eslint` over the touched source and test files: 0 errors, 45 warnings, all `no-explicit-any` and unused-variable warnings that were already there.
+- `npx tsc --noEmit`: exit 0, no output (after rebasing onto `c57bcdc9a`).
+- `npx vitest run` over the 16 touched test files plus `test/model-stats.test.ts` and `test/usage-model-merge.test.ts`: 18 files passed, 344 tests passed.
+- `npx eslint` over the touched source and test files: 0 errors, 45 warnings, all `no-explicit-any` and unused-variable warnings that were already there (first run, before the final rebase).
+- The full `npm test` and `npm run build` are left to the CI `verify` gate.
 
 New test cases: every M3 spelling resolves to the new row on the display, OpenRouter and native columns; `getPredecessorModelIds` returns `minimax-m3` and `minimax-m2.7`; the stored `minimax-m3` resolves to `MiniMax-M3.1-Flash` on the native route, the OpenRouter route and the explicit `openrouter/` form; the production-shaped native route for Green and Red; price rows for M3.1 Flash (including a `:free` suffix, which must not fall back to the M3 prefix price) and for historical M3 rows.
 
