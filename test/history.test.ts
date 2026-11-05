@@ -141,7 +141,7 @@ describe("fetchDailyOHLC", () => {
   };
 
   it("uses connected-broker history (Tradier) before paid third parties and free Yahoo", async () => {
-    connectTradier("tradier-test-key");
+    connectTradier("tradier-tkey");
     const fetchMock = vi.fn(async (url: string, _init?: RequestInit) =>
       String(url).includes("api.tradier.com")
         ? new Response(tradierBody, { status: 200 })
@@ -155,7 +155,7 @@ describe("fetchDailyOHLC", () => {
     expect(bars![0]).toMatchObject({ time: "2026-06-16", close: 10.5, volume: 1000 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0][0])).toContain("api.tradier.com");
-    expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: "Bearer tradier-test-key" });
+    expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: "Bearer tradier-tkey" });
   });
 
   it("still uses Tradier for history when it's connected but NOT the active execution broker (Codex review, PR #1673)", async () => {
@@ -174,7 +174,7 @@ describe("fetchDailyOHLC", () => {
       apiSecret: "alpaca-secret",
       isActive: true
     });
-    connectTradier("tradier-inactive-key", "live", false); // connected, but not active
+    connectTradier("tradier-ikey", "live", false); // connected, but not active
     const fetchMock = vi.fn(async (url: string, _init?: RequestInit) =>
       String(url).includes("api.tradier.com")
         ? new Response(tradierBody, { status: 200 })
@@ -184,7 +184,7 @@ describe("fetchDailyOHLC", () => {
 
     const bars = await fetchDailyOHLC("AAPL", Date.now(), undefined, { lookbackDays: 365 });
     expect(bars).not.toBeNull();
-    expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: "Bearer tradier-inactive-key" });
+    expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: "Bearer tradier-ikey" });
   });
 
   it("uses Alpaca daily bars from a connected account before paid third parties", async () => {
@@ -198,7 +198,7 @@ describe("fetchDailyOHLC", () => {
       apiSecret: "alpaca-hist-secret",
       isActive: true
     });
-    process.env.MASSIVE_API_KEY = "massive-should-not-be-called";
+    process.env.MASSIVE_API_KEY = "massive-no-call";
     const alpacaBody = JSON.stringify({
       bars: [
         { t: "2026-06-16T04:00:00Z", o: 10, h: 11, l: 9, c: 10.5, v: 1000 },
@@ -229,7 +229,7 @@ describe("fetchDailyOHLC", () => {
     delete process.env.MASSIVE_API_KEY;
     delete process.env.TIINGO_API_KEY;
     delete process.env.MARKETSTACK_API_KEY;
-    process.env.ROIC_API_KEY = "roic-history-test-key";
+    process.env.ROIC_API_KEY = "roic-test-key";
     process.env.ROIC_HISTORY_ENABLED = "on";
     const roicBody = JSON.stringify({
       data: [
@@ -254,7 +254,7 @@ describe("fetchDailyOHLC", () => {
     const roicCall = fetchMock.mock.calls.find(([url]) => String(url).includes("api.roic.ai"));
     expect(roicCall).toBeTruthy();
     expect(String(roicCall![0])).toContain("adjustment=splits");
-    expect(String(roicCall![0])).toContain("apikey=roic-history-test-key");
+    expect(String(roicCall![0])).toContain("apikey=roic-test-key");
   });
 
   it("uses Tiingo ahead of Marketstack, applying adjClose-scaled O/H/L", async () => {
@@ -263,15 +263,17 @@ describe("fetchDailyOHLC", () => {
     // read (unlike Marketstack/Massive, which ARE shared-operator-infra). Store it the same way the
     // Connections page / that migration would, on the "local" user resolveApiKeyWithSource falls back
     // to when no specific userId is passed (the background/scan-time call shape fetchDailyOHLC uses here).
-    upsertUserApiKey("local", "tiingo", "tiingo-history-test-key");
-    process.env.MARKETSTACK_API_KEY = "marketstack-test-key"; // present but must be skipped — Tiingo wins first
+    upsertUserApiKey("local", "tiingo", "tiingo-hist-key");
+    process.env.MARKETSTACK_API_KEY = "mstack-test-key"; // present but must be skipped — Tiingo wins first
     const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
       if (String(url).includes("api.tiingo.com")) return new Response(tiingoBody, { status: 200 });
       return new Response("unexpected source", { status: 500 });
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const bars = await fetchDailyOHLC("AAPL");
+    // Non-deep lookback: on a deep (default 5y) request a short Tiingo stub is now
+    // held as a candidate while later tiers try for fuller coverage (Cluster B H2).
+    const bars = await fetchDailyOHLC("AAPL", undefined, undefined, { lookbackDays: 365 });
     expect(bars).not.toBeNull();
     expect(bars).toHaveLength(2);
     expect(bars![0]).toMatchObject({ time: "2026-06-16", close: 30, volume: 3000 });
@@ -280,16 +282,16 @@ describe("fetchDailyOHLC", () => {
     const tiingoCall = fetchMock.mock.calls.find(([url]) => String(url).includes("api.tiingo.com"));
     expect(tiingoCall).toBeTruthy();
     expect(String(tiingoCall![0])).toContain("api.tiingo.com/tiingo/daily/aapl/prices");
-    expect(tiingoCall![1]?.headers).toMatchObject({ Authorization: "Token tiingo-history-test-key" });
+    expect(tiingoCall![1]?.headers).toMatchObject({ Authorization: "Token tiingo-hist-key" });
     // Marketstack must never be reached — Tiingo already satisfied the cascade.
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("api.marketstack.com"))).toBe(false);
   });
 
   it("falls through to Marketstack when Tiingo's hourly/daily budget is already exhausted", async () => {
-    upsertUserApiKey("local", "tiingo", "tiingo-history-test-key");
-    process.env.MARKETSTACK_API_KEY = "marketstack-test-key";
+    upsertUserApiKey("local", "tiingo", "tiingo-hist-key");
+    process.env.MARKETSTACK_API_KEY = "mstack-test-key";
     // Drain the SAME "tiingo" quota bucket TiingoEnrichmentProvider would share, from outside this call.
-    const credKey = await apiKeyFingerprint("tiingo-history-test-key");
+    const credKey = await apiKeyFingerprint("tiingo-hist-key");
     admitProviderRequests("tiingo", credKey, 50); // exhausts the 50/hour default
     const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
       // Yahoo free floor is tried before Marketstack last_resort; fail it so Marketstack wins.
@@ -311,9 +313,9 @@ describe("fetchDailyOHLC", () => {
   });
 
   it("prefers Yahoo range=max over Tradier and Marketstack on a >2y request", async () => {
-    connectTradier("tradier-test-key");
-    process.env.MASSIVE_API_KEY = "massive-should-not-be-called";
-    process.env.MARKETSTACK_API_KEY = "marketstack-test-key";
+    connectTradier("tradier-tkey");
+    process.env.MASSIVE_API_KEY = "massive-no-call";
+    process.env.MARKETSTACK_API_KEY = "mstack-test-key";
     const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
       if (String(url).includes("query1.finance.yahoo.com")) return new Response(yahooBody(60), { status: 200 });
       if (String(url).includes("api.tradier.com")) return new Response(tradierBody, { status: 200 });
@@ -333,7 +335,7 @@ describe("fetchDailyOHLC", () => {
   });
 
   it("calls Yahoo before Marketstack when only a Marketstack key is present; Marketstack only if Yahoo fails", async () => {
-    process.env.MARKETSTACK_API_KEY = "marketstack-test-key";
+    process.env.MARKETSTACK_API_KEY = "mstack-test-key";
     const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
       if (String(url).includes("query1.finance.yahoo.com")) return new Response("yahoo down", { status: 500 });
       if (String(url).includes("api.marketstack.com")) return new Response(marketstackBody, { status: 200 });
@@ -352,7 +354,7 @@ describe("fetchDailyOHLC", () => {
   });
 
   it("fails Yahoo 429s faster when Marketstack can still run as last_resort", async () => {
-    process.env.MARKETSTACK_API_KEY = "marketstack-test-key";
+    process.env.MARKETSTACK_API_KEY = "mstack-test-key";
     let yahooCalls = 0;
     const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
       if (String(url).includes("query1.finance.yahoo.com")) {
@@ -373,7 +375,7 @@ describe("fetchDailyOHLC", () => {
   });
 
   it("skips Massive when the local REST budget is exhausted and falls through to free history", async () => {
-    process.env.MASSIVE_API_KEY = "massive-test-key";
+    process.env.MASSIVE_API_KEY = "massive-tkey";
     process.env.MASSIVE_REST_MAX_CALLS_PER_MINUTE = "0";
     const fetchMock = vi.fn(async (url: string) =>
       String(url).includes("query1.finance.yahoo.com") ? new Response(yahooBody(60), { status: 200 }) : new Response("unexpected source", { status: 500 })
@@ -423,7 +425,7 @@ describe("fetchDailyOHLC", () => {
 
   it("on a deep request, a short Tradier stub does not win over a fuller later tier (H2)", async () => {
     connectTradier("tradier-h2-key");
-    process.env.MARKETSTACK_API_KEY = "marketstack-h2-key";
+    process.env.MARKETSTACK_API_KEY = "mstack-h2-key";
     const marketstackFull = JSON.stringify({
       data: [
         { date: "2020-01-02T00:00:00+0000", open: 20, high: 21, low: 19, close: 20.5, volume: 3000 },
@@ -516,8 +518,8 @@ describe("fetchDailyOHLC", () => {
     // Mandatory share is off until accept; explicit decline keeps user-keyed history private.
     setDataPoolConsent(userA, false);
     setDataPoolConsent(userB, false);
-    upsertUserApiKey(userA, "marketstack", "user-a-marketstack-key");
-    upsertUserApiKey(userB, "marketstack", "user-b-marketstack-key");
+    upsertUserApiKey(userA, "marketstack", "user-a-ms-key");
+    upsertUserApiKey(userB, "marketstack", "user-b-ms-key");
     const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
       // Yahoo free floor runs before Marketstack; fail it so the keyed last_resort path is exercised.
       if (String(url).includes("query1.finance.yahoo.com")) return new Response("yahoo down", { status: 500 });
@@ -534,8 +536,8 @@ describe("fetchDailyOHLC", () => {
       .map((call) => String(call[0]))
       .filter((url) => url.includes("api.marketstack.com"));
     expect(marketstackUrls).toEqual([
-      expect.stringContaining("access_key=user-a-marketstack-key"),
-      expect.stringContaining("access_key=user-b-marketstack-key")
+      expect.stringContaining("access_key=user-a-ms-key"),
+      expect.stringContaining("access_key=user-b-ms-key")
     ]);
   });
 
@@ -543,8 +545,8 @@ describe("fetchDailyOHLC", () => {
     process.env.MARKET_DATA_SHARE_USER_KEYED_HISTORY = "on";
     const userA = `history-shared-a-${randomUUID()}`;
     const userB = `history-shared-b-${randomUUID()}`;
-    upsertUserApiKey(userA, "marketstack", "user-a-marketstack-key");
-    upsertUserApiKey(userB, "marketstack", "user-b-marketstack-key");
+    upsertUserApiKey(userA, "marketstack", "user-a-ms-key");
+    upsertUserApiKey(userB, "marketstack", "user-b-ms-key");
     const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
       if (String(url).includes("query1.finance.yahoo.com")) return new Response("yahoo down", { status: 500 });
       if (String(url).includes("api.marketstack.com")) return new Response(marketstackBody, { status: 200 });
@@ -561,7 +563,7 @@ describe("fetchDailyOHLC", () => {
       .map((call) => String(call[0]))
       .filter((url) => url.includes("api.marketstack.com"));
     expect(marketstackUrls).toHaveLength(1);
-    expect(marketstackUrls[0]).toContain("access_key=user-a-marketstack-key");
+    expect(marketstackUrls[0]).toContain("access_key=user-a-ms-key");
   });
 
   it("fulfills old shared history misses when a later shared cache fill succeeds", async () => {
@@ -634,9 +636,9 @@ describe("fetchDailyOHLC", () => {
   });
 
   it("uses Twelve Data after Yahoo and Tradier miss on a >2y request, and still skips Massive", async () => {
-    connectTradier("tradier-test-key");
-    process.env.MASSIVE_API_KEY = "massive-should-not-be-called";
-    upsertUserApiKey("local", "twelvedata", "twelve-history-test-key");
+    connectTradier("tradier-tkey");
+    process.env.MASSIVE_API_KEY = "massive-no-call";
+    upsertUserApiKey("local", "twelvedata", "twelve-hist-key");
     const twelveBody = JSON.stringify({
       status: "ok",
       values: [
@@ -662,12 +664,12 @@ describe("fetchDailyOHLC", () => {
     expect(tradierIdx).toBeGreaterThan(yahooIdx);
     expect(twelveIdx).toBeGreaterThan(tradierIdx);
     expect(urls[twelveIdx]).toContain("start_date=");
-    expect(urls[twelveIdx]).toContain("apikey=twelve-history-test-key");
+    expect(urls[twelveIdx]).toContain("apikey=twelve-hist-key");
     expect(urls.some((url) => url.includes("massive"))).toBe(false);
   });
 
   it("keeps Massive ahead of Yahoo when the lookback is within 2 years", async () => {
-    process.env.MASSIVE_API_KEY = "massive-short-key";
+    process.env.MASSIVE_API_KEY = "massive-skey";
     const massiveBody = JSON.stringify({
       results: [
         { t: Date.parse("2026-06-16T00:00:00Z"), o: 10, h: 11, l: 9, c: 10.5, v: 1000 },
@@ -770,7 +772,7 @@ describe("fetchDailyOHLC", () => {
   });
 
   it("rejects a Twelve Data body that is not a time series and accepts numeric closes", async () => {
-    upsertUserApiKey("local", "twelvedata", "twelve-history-test-key");
+    upsertUserApiKey("local", "twelvedata", "twelve-hist-key");
     const now = Date.UTC(2026, 5, 18);
     const malformed = vi.fn(async (url: string) => {
       const u = String(url);
