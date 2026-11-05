@@ -30,3 +30,16 @@
 - Not pushed and no PR opened from this lane: Muse-Assist (MA) reviews, pushes via the Mac route, and opens the PR.
 - After deploy, watch `/api/proxy-use`: bursts should show a handful of entries with `queueWaitMs` set instead of fail_soft fallback spikes, and the watchdog leg2 alerts should stop tracking ST scan bursts.
 - The Linear claim and #Work-In-Progress posts for this lane are MA's to make under the fleet protocol.
+
+## Review follow-up (2026-11-05)
+
+PR review (Sentry, Kody) found three real slot-leak paths in the body wrapper, all fixed on this branch:
+
+- A rejected `upstream.read()` in `wrapBodyUntilSettle`'s pull (mid-body socket reset, or the leg timer disturbing the body) errored the wrapped stream for the consumer but never called `finish()`, so the gate slot and leg timer leaked for the life of the process.
+- The body wait observed only the caller's signal, so a header-then-stall body that never errors held its slot until the caller budget; the timed path now passes the effective (leg-timeout + caller) signal to the wrapper, so the leg timeout settles the wait.
+- A throwing `onQueueWait` callback after a granted slot skipped `slot.release()`; the callback is now guarded and the slot is released before the error propagates.
+- Every `upstream.cancel()` in the wrapper now goes through a rejection-safe helper: cancelling an already-errored upstream rejects with the stored error, and once the wrapper began settling on the leg-timeout signal that rejection surfaced as an unhandled rejection on every timed-out body (caught in local verification, 2 per run, and fixed before pushing).
+
+One finding was declined with reasoning on the PR: bounding the gate queue wait with a separate timeout and capping body-hold time. The queue wait is already bounded by the caller's own signal (a queued waiter whose signal aborts is removed and rejected), and holding the slot for the body duration is the design intent — the proxy is busy for exactly that long — with the hold now bounded by the leg timeout via the settle-signal fix above.
+
+Verification: `npx vitest run test/proxy-fetch.test.ts test/proxy-concurrency-gate.test.ts` — 38 passed, no unhandled errors; `npx vitest run test/data-source-fetch.test.ts` — 27 passed; `npx tsc --noEmit` — no new errors (the `test/alternative-data.test.ts` mockFetcher mismatch is the documented pre-existing one); `npx eslint src/lib/proxy-fetch.ts test/proxy-fetch.test.ts` — clean.
