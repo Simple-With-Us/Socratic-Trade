@@ -1,3 +1,7 @@
+## 2026-11-04 CLAUDE — Model classes, rotation selection and catalog refresh (ST-4589)
+
+Scope added: per-seat rotation model selection, a model-class concept in the catalog (the `lineage` field), a retired-catalog list, a `codeCliOnly` flag, and explicit reasoning effort for MiniMax M3.1 Flash and Muse.  No change to order placement, sizing or risk gates.  Follow-ups not scheduled: a live Code CLI broker that accepts the Muse Wonder contributor ids, structured outputs on the native Anthropic route, a fresh model benchmark, and the owner's call on migrating stored selections of retired models.  Rollout: `docs/rollouts/2026-11-04-model-classes-rotation-catalog-refresh.md`.
+
 ## 2026-10-30 CODEX — Repository Report Library (AFC-580)
 
 Provide one indexed report entry point and a separate generated collection under `Code/Docs/Socratic-Trade/`, preserving historical document paths.  This documentation change does not alter the application roadmap, trading behavior, runtime or deployment controls.  The approved Docs-only exception is installed, and final publication remains tracked in AFC-580.
