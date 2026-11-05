@@ -7595,8 +7595,13 @@ export interface RetrieveOptions {
    * Restrict account-derived vector memory to the exact connected account. This is deliberately
    * opt-in so public filings/fundamentals remain cross-account; episodic decision memory opts in.
    * Missing connectedAccountId under `exact` fails closed to an impossible sentinel match.
+   * `exact-or-user` also admits this user's deliberately pooled, user-level memory
+   * (`memory_scope: "user"` in the private scope, e.g. post-mortem thesis x regime lessons), which
+   * carries no connected_account_id by design.  User isolation is unchanged: the tier filters
+   * still pin userId / tenant_scope (and the private namespace), so another user's pooled rows
+   * never match.
    */
-  accountScope?: "exact";
+  accountScope?: "exact" | "exact-or-user";
   /** Restrict to these document types (metadata.doc_type), e.g. ["10-k","10-q"]. */
   docType?: string[];
   /**
@@ -7889,6 +7894,16 @@ export function buildExtraFilters(options?: RetrieveOptions): Record<string, unk
   }
   if (options?.accountScope === "exact") {
     extra.connected_account_id = { $eq: options.connectedAccountId ?? "__missing_connected_account__" };
+  } else if (options?.accountScope === "exact-or-user") {
+    // Wrapped in `$and` so this `$or` cannot collide with the tier filters' own top-level `$or`.
+    extra.$and = [
+      {
+        $or: [
+          { connected_account_id: { $eq: options.connectedAccountId ?? "__missing_connected_account__" } },
+          { $and: [{ memory_scope: { $eq: "user" } }, { scope: { $eq: PRIVATE_SCOPE } }] }
+        ]
+      }
+    ];
   }
   return extra;
 }

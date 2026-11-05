@@ -3223,8 +3223,17 @@ export interface PerformanceSummary {
   paperRealizedPnl: number;
   liveUnrealizedPnl: number;
   paperUnrealizedPnl: number;
+  /** Per closed FIFO LOT (a scaled-out position counts once per trim). Kept for existing consumers;
+   *  the console Results card shows the round-trip figure below instead. */
   liveWinRate: number;
   paperWinRate: number;
+  /** Win rate per COMPLETED round trip (one per opening fill; still-open positions excluded).
+   *  Absent — never a fabricated 0 — while no round trip has completed (ST-4589 B10). */
+  liveRoundTripWinRate?: number;
+  paperRoundTripWinRate?: number;
+  /** Completed round trips behind liveRoundTripWinRate / paperRoundTripWinRate. */
+  liveRoundTripCount?: number;
+  paperRoundTripCount?: number;
   liveAverageReturnPct: number;
   paperAverageReturnPct: number;
   /** Count of CLOSED lots feeding liveWinRate/liveAverageReturnPct (0 for an account that has
@@ -3502,6 +3511,10 @@ export interface LearnedContextCandidate {
   intent?: string;
   /** Set only when the producer can vouch for the statement's provenance. See the type doc. */
   provenance?: LearnedContextCandidateProvenance;
+  /** Market regime the evidence came from, when the producer knows it (regime-relevance scoring). */
+  regime?: string | null;
+  /** Trade thesis tag the evidence came from, when the producer knows it (thesis-affinity scoring). */
+  thesisTag?: string | null;
 }
 
 /** Status of a queued risk-tier candidate awaiting explicit human confirmation. */

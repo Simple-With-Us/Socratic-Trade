@@ -126,7 +126,7 @@ import type { ProtectiveExitQuote } from "./protective-exit-routing";
 import { DEFAULT_TAX_SETTINGS } from "./defaults";
 import { atr, atrStopPct, sma, type OHLCBar } from "./indicators";
 import { computePortfolioHeat, positionRiskUsd, realizedVolPct, volTargetScale, type PortfolioHeatResult } from "./vol-targeting";
-import { fetchDailyOHLC } from "./history";
+import { fetchDailyOHLC, isBarSeriesFresh, toBusinessDay } from "./history";
 import { expireStalePendingProposals, revalidatePendingProposals } from "./proposal-revalidation";
 import { getTaxSummary, getUserWashSaleLockProvenance, overlayAccountTaxationType } from "./tax";
 import { getBrokerGateway } from "./broker";
@@ -2000,6 +2000,27 @@ export async function runStrategyOnce(
             runId,
             regime: regimeForSketch,
             candidates: situationCandidates,
+            // ST-4589 B5: the tags the deterministic scorer would assign the top-slice openings
+            // (the same pure scorer that later sets tradeThesisTag), so the past-case affinity
+            // re-rank's thesis boost can fire.  Abstentions (null) are dropped.
+            thesisTags: [
+              ...new Set(
+                topSlice
+                  .map((c) =>
+                    assignDeterministicThesisTag({
+                      factorBreakdown: c.factorBreakdown,
+                      sectorRelStrength: c.sectorRelStrength,
+                      daysToEarnings: c.daysToEarnings,
+                      insiderSentiment: c.insiderSentiment,
+                      senateTrades: c.senateTrades,
+                      congressCompositeSignedScore: c.congressCompositeSignedScore,
+                      shortPercentOfFloat: c.shortPercentOfFloat,
+                      analystScore: c.analystScore
+                    }).tag
+                  )
+                  .filter((tag): tag is string => Boolean(tag))
+              )
+            ],
             connectedAccountId: policy.connectedAccountId,
             asOf: runAsOf,
             signal
@@ -2552,7 +2573,8 @@ export async function runStrategyOnce(
         ? getConfidenceCalibration(policy.accountNumber, learningSource, {}, userId, prefetchedFills)
         : undefined;
 
-    // Volatility-targeting sizing (opt-in, default off): precompute annualized realized vol (%) per
+    // Volatility-targeting sizing (default ON via DEFAULT_POLICY.tuning.volTargeting; a per-account
+    // `volTargeting: false` turns it off): precompute annualized realized vol (%) per
     // OPENING candidate symbol, mirroring the atrStopPctBySymbol precompute pattern above so the sync
     // sizer can use it. Gated on volTargeting-or-atrStops being on so we never add fetch load purely
     // for an advisory note when the feature is fully off; bars are shared with the ATR precompute's
@@ -5393,8 +5415,32 @@ async function proposeTrades(input: {
   const reflection = getReflectionSummary(input.userId, input.policy.accountNumber);
   const executionState = deriveExecutionState(input.policy, input.activeAccount);
   const source = fillSourceForExecutionMode(executionState);
-  const thesisScorecard = input.policy.accountNumber ? getThesisScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched) : [];
-  const regimeScorecard = input.policy.accountNumber ? getRegimeScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched) : [];
+  // ST-4589 B8: SPY closes so closed lots carry alpha (return vs SPY over the same entry->exit
+  // window) and the thesis/regime rows below get avgAlphaPct.  Same cached history cascade the
+  // counterfactual block below reads.  A failed fetch or a frozen (stale) series leaves alpha
+  // unstamped rather than measuring against an old close — never fabricated.  Bounded at 5s so a
+  // cold history cascade can never hold up the proposal pass; on timeout alpha is simply omitted.
+  let spyAlphaTimer: ReturnType<typeof setTimeout> | undefined;
+  const spyBarsForAlpha = input.policy.accountNumber
+    ? await Promise.race([
+        fetchDailyOHLC("SPY")
+          .then((bars) =>
+            bars && bars.length >= 2 && isBarSeriesFresh(bars)
+              ? bars
+                  .map((bar) => ({ date: toBusinessDay(bar.time) ?? "", close: bar.close }))
+                  .filter((bar) => bar.date !== "" && Number.isFinite(bar.close) && bar.close > 0)
+                  .sort((a, b) => a.date.localeCompare(b.date))
+              : undefined
+          )
+          .catch(() => undefined),
+        new Promise<undefined>((resolve) => {
+          spyAlphaTimer = setTimeout(() => resolve(undefined), 5_000);
+        })
+      ]).finally(() => clearTimeout(spyAlphaTimer))
+    : undefined;
+  const alphaOptions = spyBarsForAlpha && spyBarsForAlpha.length >= 2 ? { benchBars: spyBarsForAlpha } : {};
+  const thesisScorecard = input.policy.accountNumber ? getThesisScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched, undefined, alphaOptions) : [];
+  const regimeScorecard = input.policy.accountNumber ? getRegimeScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched, undefined, alphaOptions) : [];
   // Multi-dimensional learning: thesis × regime buckets with >=5 closed lots. Fewer than
   // 5 trades produce a statistic that is dominated by the Bayesian shrinkage prior anyway
   // and adds noise to the agent's reasoning without improving signal quality.
