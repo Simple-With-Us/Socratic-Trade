@@ -21,7 +21,7 @@ Files touched:
 - `app/console/strategy/rotation-models.tsx`
 - `app/api/keys/route.ts`
 - `docs/manager-model-options.md`, `docs/llm/code-cli-broker.md`
-- `test/llm-model-catalog.test.ts`, `test/model-rotation.test.ts`, `test/rotation-models-select-all.test.ts`, `test/rotation-models-stale-ticks.test.tsx` (new), `test/usage-budget.test.ts`, `test/usage-budget-strategy-integration.test.ts`
+- `test/llm-model-catalog.test.ts`, `test/model-rotation.test.ts`, `test/rotation-models-select-all.test.ts`, `test/rotation-models-stale-ticks.test.tsx` (new), `test/usage-budget.test.ts`
 - `STATUS.md`, this note
 
 ## 3. Decisions And Trade-Offs
@@ -30,7 +30,7 @@ Files touched:
 - Retiring instead of deleting keeps any account that already selected one of the four rows running exactly what it selected.
 - A first version of this change pointed the retired Muse rows' budget downgrade at `muse-spark-1.3-contributor`.  Review caught that an over-budget seat would be moved silently onto a train-on-your-prompts tier, so those arrows were removed.
 - The 2026-11-04 rollout note and its `STATUS.md` entry are left as they merged; this note and a new `STATUS.md` entry carry the correction.
-- Of the three Muse rows, only `muse-spark-1.3-contributor` can complete a call today.  The two Wonder contributor ids run only through the Code CLI route, and no running Code CLI broker was found on the server.
+- The owner confirmed on 2026-11-05 that the Muse contributor models are working for them.  The 2026-11-04 note says no running Code CLI broker was found and that the Wonder contributor ids could not complete a call; that came from a search of this server only and was wrong about availability.  Where the broker runs and what its request contract accepts were not verified.
 
 ## 4. Verification State
 
@@ -45,7 +45,7 @@ Targeted suites pass and `npx tsc --noEmit` is clean.  The full `npm test` and 
 ## 5. Next Steps And Blockers
 
 - Until this merges, production offers the four rows this change retires (#4999 is live).
-- Stand up or locate the Code CLI broker before expecting the Wonder contributor models to run.
+- Confirm whether the Code CLI broker accepts the optional `reasoningEffort` field before setting `CODE_CLI_REASONING_EFFORT`; until then Code CLI calls carry no effort setting, as before.
 
 ## 6. Zero-Code Findings
 
