@@ -248,7 +248,27 @@ describe("staleness gate", () => {
     const proposal = { ...buyProposal };
     const result = evaluateTradeProposal(proposal, ctx(policy, scanWithDelayedTape(asOf, fetchedAt)));
     expect(result.approved).toBe(false);
-    expect(result.reasons.some((reason) => reason.includes("quote_feed_excess_delay"))).toBe(true);
+    expect(result.reasons.some((reason) => reason.includes("quote_last_print_beyond_delayed_sla"))).toBe(true);
+    // Honest wording: a print beyond the delayed window during RTH can be an
+    // illiquid last print OR excess tape lag — the tape is not "proven broken".
+    expect(result.reasons.some((reason) => reason.includes("illiquid last print or excess tape lag"))).toBe(true);
+  });
+
+  it("blocks with a CLOSED-SESSION reason (not an excess/broken-feed reason) when the market is shut", () => {
+    // 17:30 ET on a Friday — after the close.  There are no prints while the
+    // market is shut, so an old asOf is EXPECTED, not evidence of a broken
+    // feed.  The opening is still blocked, with its own clear reason.
+    const closedNow = new Date("2026-06-26T21:30:00.000Z");
+    const asOf = new Date(closedNow.getTime() - 4 * 60 * 60_000).toISOString();
+    const fetchedAt = new Date(closedNow.getTime() - 5_000).toISOString();
+    const policy: TradingPolicy = { ...basePolicy, maxQuoteAgeSec: 120 };
+    const proposal = { ...buyProposal };
+    const closedCtx = { ...ctx(policy, scanWithDelayedTape(asOf, fetchedAt)), now: closedNow };
+    const result = evaluateTradeProposal(proposal, closedCtx);
+    expect(result.approved).toBe(false);
+    expect(result.reasons.some((reason) => reason.includes("quote_delayed_tape_session_closed"))).toBe(true);
+    expect(result.reasons.some((reason) => reason.includes("quote_last_print_beyond_delayed_sla"))).toBe(false);
+    expect(result.reasons.some((reason) => reason.includes("quote_feed_excess_delay"))).toBe(false);
   });
 
 describe("staleness gate — DEFAULT 120s (guard enablement 2026-07-28)", () => {

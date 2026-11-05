@@ -67,7 +67,14 @@ export async function checkPriceAlerts(userId: string): Promise<PriceAlert[]> {
   const symbols = [...new Set(armed.map((alert) => alert.symbol))];
   let quotes: Awaited<ReturnType<typeof fetchFreshQuotesCascade>> = {};
   try {
-    quotes = await fetchFreshQuotesCascade(symbols, userId);
+    // Account-scoped: the cascade must run against the OPERATING account's
+    // tape (Alpaca PAPER `delayed_sip`), not a process-global default.
+    quotes = await fetchFreshQuotesCascade(
+      symbols,
+      userId,
+      policy.accountNumber,
+      policy.connectedAccountId
+    );
   } catch (err) {
     console.error(`[alerts] quote cascade failed for ${userId}:`, err);
     audit("alert.check_error", { userId, symbols, error: String(err) }, userId);
@@ -79,13 +86,19 @@ export async function checkPriceAlerts(userId: string): Promise<PriceAlert[]> {
   const triggered: PriceAlert[] = [];
   for (const alert of armed) {
     const quote = quotes[alert.symbol];
-    const { ageSec, missing, excessDelaySec } = quoteAgeSecForStalenessGate(quote, nowMs);
+    const { ageSec, missing, excessDelaySec, marketSessionOpen } = quoteAgeSecForStalenessGate(quote, nowMs);
     // EXCESS delay on a tape with a documented expected delay (Alpaca PAPER
-    // `delayed_sip`) means the feed is broken, not merely delayed: the alert
-    // must not fire off a lagging tape.  The expected ~900s delay itself is
-    // normal and is not excess.
+    // `delayed_sip`) means the observation is beyond the delayed-tape window:
+    // during RTH that can be an illiquid last print OR excess tape lag.  The
+    // alert must not fire off it either way.  The expected ~900s delay itself
+    // is normal and is not excess.
     const excessDelayed = excessDelaySec !== undefined && excessDelaySec > 0;
-    const isStale = missing || excessDelayed || (ageSec !== undefined && ageSec > maxQuoteAgeSec);
+    // A CLOSED session is not "broken feed" — there are simply no new prints
+    // while the market is shut.  The tape is still not a fresh observation, so
+    // the alert stays unfired (same fail-closed outcome as before).
+    const closedSessionTape = marketSessionOpen === false;
+    const isStale =
+      missing || closedSessionTape || excessDelayed || (ageSec !== undefined && ageSec > maxQuoteAgeSec);
     if (isStale) continue;
 
     const currentPrice = quote?.price;

@@ -7,7 +7,9 @@ Jay authorized **account-scoped delayed quote behavior for the connected Alpaca 
 Alpaca's `delayed_sip` feed — a tape with an expected **~900s (15 minute)** publication delay — and
 the app must treat that delay as the venue's behavior rather than as broken/live data.
 
-Measured in prod on 2026-11-05 ~1:58pm CT with the connected paper keys (`(value redacted)`):
+Measured in prod on 2026-11-05 ~1:58pm CT with the connected paper account
+(`(value redacted)` — account identifier redacted for privacy; not an API secret;
+no rotation required):
 
 | feed | asOf age | note |
 | --- | --- | --- |
@@ -61,8 +63,11 @@ market-scan enrichment, and the freshness/staleness gates.
 - `src/lib/market.ts` / `src/lib/strategy-gather.ts` — `scanMarket` / the scan options carry
   `connectedAccountId`, so the market scan enriches on the operating account's tape.
 - `src/lib/policy.ts` — the order-opening staleness gate **fails closed** on excess delay
-  (`quote_feed_excess_delay` reason) instead of converting to a limit.
-- `src/lib/alerts.ts` — price alerts do not fire off an excessively delayed tape.
+  (reason `quote_last_print_beyond_delayed_sla` — renamed from `quote_feed_excess_delay` in the
+  continue pass, see the readiness-gaps note §7) instead of converting to a limit; a CLOSED market
+  session is blocked separately as `quote_delayed_tape_session_closed`.
+- `src/lib/alerts.ts` — price alerts do not fire off an excessively delayed tape, and (continue
+  pass) run against the operating account's tape rather than the process-global path.
 - `src/lib/types.ts` — `BrokerQuote.expectedDelaySec` / `delayToleranceSec`; scan options gain
   `connectedAccountId`.
 

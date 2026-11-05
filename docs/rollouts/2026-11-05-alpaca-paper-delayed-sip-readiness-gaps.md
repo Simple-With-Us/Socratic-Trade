@@ -38,7 +38,8 @@ Files touched:
 - **The staleness gate now fails closed for ANY future stamp, not only the delayed tape.**  The gate is shared with Tradier paper and real-time quotes, so a future provider stamp there now blocks an order opening (`quote_age_unknown`) instead of being treated as age 0.  This is the fail-closed direction the review asked for; the tape-selection paths (live Alpaca feed selection, Tradier paper/live routing) are untouched.
 - **No carve-out for overnight / last-session prints.**  A market-closed print whose `asOf` age is far beyond `expected + tolerance` is reported as excess delay and is unusable.  There is no session-aware exemption — stale session data is never accepted as a healthy delayed tape.
 - **No dependency added, no scope widened.**  Order placement, sizing formulas, risk gates, credentials, learning rows, the global `ALPACA_DATA_FEED` env behavior for non-paper accounts, and the live Alpaca / Tradier tape selection are all unchanged.
-- **No `/api/scan` route-level test.**  The route is exercised only indirectly today; the required regression test covers the freshness lane, and the route fix is the same one-line forwarding.  Flagged below as a remaining gap.
+- **No `/api/scan` route-level test.**  (Resolved in the continue pass — see §7.)  The route is exercised only indirectly today; the required regression test covers the freshness lane, and the route fix is the same one-line forwarding.  Flagged below as a remaining gap.
+- **No secret handling in this change.**  The redacted `PA…` value shown in the sibling note (`2026-11-05-alpaca-paper-delayed-sip.md`) is an Alpaca PAPER ACCOUNT IDENTIFIER, not an API key (`PK…`/`AK…`) or secret key: account identifier redacted for privacy; not an API secret; no rotation required.  It is not echoed anywhere in this repo, and no credential/secret was created, rotated, or inspected by this work.
 
 ## 4. Verification State
 
@@ -73,3 +74,81 @@ A full local `npm test` run was started but did NOT finish inside this session's
 
 - `scanMarket` already accepted `connectedAccountId` and forwarded it into the enrichment provider (`src/lib/market.ts`), and `src/lib/strategy-gather.ts` already passed it.  The bypass was strictly the two callers that omitted it — the freshness lane and the interactive scan route — which is why the fix is two one-line option additions rather than a plumbing change.
 - `isQuoteFresh` for REAL-TIME quotes still accepts a future stamp as clock skew (`src/lib/quotes-cascade.ts`).  That path is outside this branch's scope (it is not the delayed tape) and was deliberately left alone; only the delayed tape (via `delayedTapeStatus`) and the staleness gate now fail closed on future stamps.
+
+## 7. Continue pass — alerts scope, dashboard paper, lag honesty, API scan test
+
+A second review thread raised five more findings on the same branch.  All five are closed here.
+
+### A. Alerts — account-scoped quote path
+
+`src/lib/alerts.ts` `checkPriceAlerts` called `fetchFreshQuotesCascade(symbols, userId)` — the
+process-global path, NOT the operating account's tape.  It now calls
+`fetchFreshQuotesCascade(symbols, userId, policy.accountNumber, policy.connectedAccountId)`, so a
+price alert on the Alpaca PAPER account evaluates against that account's `delayed_sip` tape.
+`test/price-alerts-evaluation.test.ts` asserts both the no-account case and a case where
+`accountNumber` + `connectedAccountId` are set on the policy and must reach the cascade.
+
+### B. Dashboard — the silent paper price fill
+
+`src/lib/dashboard.ts` filled every missing symbol from `position.marketValue / position.quantity`.
+On a VENUE-DELAYED tape that number is a derived COST BASIS, not a quote: when the paper broker
+did not price a symbol, the console was showing a cost basis as if it were the venue's live price.
+The fill now lives in `src/lib/dashboard-price-fallback.ts` (`applyPositionPriceFallback`) and is
+SKIPPED for `venue_delayed`; realtime and venue-locked keep the historical behaviour.  Covered by
+`test/dashboard-price-fallback.test.ts`.
+
+### C. Lag honesty — illiquid last print vs lagging tape, and the closed session
+
+Two distinct things were being reported as one:
+
+- **"The feed is broken."**  The policy reason `quote_feed_excess_delay` claimed the tape was
+  definitively broken.  A print beyond `expected + tolerance` during RTH can equally be an ILLIQUID
+  LAST PRINT (a quiet name simply has not traded) — the number cannot tell them apart.  The reason
+  is now `quote_last_print_beyond_delayed_sla` with honest wording ("illiquid last print or excess
+  tape lag").  The opening is still blocked either way; only the claim changed.
+- **Closed session.**  With the market shut there are no prints at all, so an old `asOf` is
+  EXPECTED, not excess delay.  `delayedTapeStatus` now takes a `marketOpen` argument and reports
+  `marketSessionOpen`; when the session is closed it reports NO excess (`excessDelaySec: undefined`)
+  and stays unusable (fail closed).  `quoteAgeSecForStalenessGate` passes `isMarketOpen(now)` and
+  surfaces `marketSessionOpen`, and the policy blocks a closed-session tape with its own reason,
+  `quote_delayed_tape_session_closed` — never the excess reason.  A price alert on a closed-session
+  tape stays unfired, as before.
+
+### D. Cascade — `pendingSymbols` vs `skipActiveBroker`
+
+`if (venueMode !== "realtime") pendingSymbols = [];` also ran when the caller had passed
+`skipActiveBroker: true` — but then L1a never ran, so clearing the pending list dropped EVERY
+fallback and left the caller with an empty result (the Sentry `pendingSymbols` thread).  The guard
+is now `if (venueMode !== "realtime" && !options?.skipActiveBroker) pendingSymbols = [];`: the
+execution path (L1a attempted) keeps its intentional fail-closed overlay protection, and the
+`skipActiveBroker` path keeps its fallbacks.
+
+### E. API scan account-scope test
+
+`test/scan-route-account-scope.test.ts` (new) drives `GET /api/scan` with a connected account and
+asserts `scanMarket` receives `options.connectedAccountId === policy.connectedAccountId`.
+
+### F. Docs honesty on the redacted identifier
+
+The redacted `PA…` value in `2026-11-05-alpaca-paper-delayed-sip.md` is an Alpaca PAPER ACCOUNT
+IDENTIFIER, not an API key (`PK…`/`AK…`) or secret key: account identifier redacted for privacy;
+not an API secret; no rotation required.  The note no longer calls it a credential, and the value
+is still not echoed anywhere.
+
+Files touched in this pass:
+
+- `src/lib/alerts.ts`
+- `src/lib/dashboard.ts`
+- `src/lib/dashboard-price-fallback.ts` (new)
+- `src/lib/alpaca-paper-quotes.ts`
+- `src/lib/quotes-cascade.ts`
+- `src/lib/policy.ts`
+- `test/price-alerts-evaluation.test.ts`
+- `test/dashboard-price-fallback.test.ts` (new)
+- `test/scan-route-account-scope.test.ts` (new)
+- `test/alpaca-paper-delayed-sip.test.ts`
+- `test/staleness-gate.test.ts`
+- `test/quotes-cascade.test.ts`
+- `docs/rollouts/2026-11-05-alpaca-paper-delayed-sip.md`
+- `docs/rollouts/2026-11-05-alpaca-paper-delayed-sip-readiness-gaps.md`
+- `STATUS.md`, `PLAN.md`

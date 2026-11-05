@@ -199,10 +199,12 @@ describe("delayed tape status (expected ~900s delay)", () => {
     expect(status.usable).toBe(false);
   });
 
-  it("rejects a post-session (market-closed) print instead of accepting stale session data", () => {
+  it("rejects a stale post-session print instead of accepting stale session data", () => {
     // Overnight / last-session prints arrive with a fresh fetch but an asOf age
     // far beyond the documented 900s window.  There is NO carve-out that
-    // accepts stale session data as a healthy delayed tape.
+    // accepts stale session data as a healthy delayed tape.  (With the market
+    // OPEN this is excess delay; with the market CLOSED it is an expected
+    // print that is still not tradable — see the closed-session cases below.)
     const status = delayedTapeStatus(
       delayedPaperQuote({ asOf: iso(NOW - 4 * 60 * 60_000) }),
       NOW,
@@ -210,6 +212,34 @@ describe("delayed tape status (expected ~900s delay)", () => {
     );
     expect(status.retrievalFresh).toBe(true);
     expect(status.excessDelaySec).toBeGreaterThan(0);
+    expect(status.usable).toBe(false);
+  });
+
+  it("OPEN market: a print beyond expected + tolerance is excess delay and is not usable", () => {
+    const status = delayedTapeStatus(
+      delayedPaperQuote({ asOf: iso(NOW - 4 * 60 * 60_000) }),
+      NOW,
+      maxFetchAgeMs,
+      true
+    );
+    expect(status.marketSessionOpen).toBe(true);
+    expect(status.excessDelaySec).toBeGreaterThan(0);
+    expect(status.usable).toBe(false);
+  });
+
+  it("CLOSED market: an old print is NOT excess delay (no prints while the market is shut) and is still not usable", () => {
+    // Honest split: with the market shut there are no prints at all, so the old
+    // asOf is expected — it is NOT evidence of a broken feed.  The tape is still
+    // not tradable, so `usable` stays false and no excess is reported.
+    const status = delayedTapeStatus(
+      delayedPaperQuote({ asOf: iso(NOW - 4 * 60 * 60_000) }),
+      NOW,
+      maxFetchAgeMs,
+      false
+    );
+    expect(status.marketSessionOpen).toBe(false);
+    expect(status.excessDelaySec).toBeUndefined();
+    expect(status.retrievalFresh).toBe(true);
     expect(status.usable).toBe(false);
   });
 });
@@ -296,7 +326,7 @@ describe("quoteAgeSecForStalenessGate on a delayed tape", () => {
     expect(futureObservation.ageSec).toBeUndefined();
   });
 
-  it("flags a post-session (market-closed) print as excess delay", () => {
+  it("flags a stale post-session print as excess delay while the market is open", () => {
     const result = quoteAgeSecForStalenessGate(
       delayedPaperQuote({ asOf: iso(NOW - 4 * 60 * 60_000), fetchedAt: iso(NOW - 5_000) }),
       NOW

@@ -18,6 +18,7 @@ import {
 } from "./quote-delayed-fallback";
 import { upsertSymbolFieldLatest, type SymbolFieldLatestRecord } from "./db-fundamentals";
 import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
+import { isMarketOpen } from "./market-calendar";
 import {
   alpacaPaperFeedForAccount,
   alpacaSnapshotCacheIdentity,
@@ -657,6 +658,12 @@ export function quoteAgeSecForStalenessGate(
   excessDelaySec?: number;
   /** True when the quote belongs to a tape with a documented expected delay. */
   expectedDelayedTape?: boolean;
+  /**
+   * True when the market session was open at evaluation time.  False on a
+   * delayed tape means the market was shut: the old print is expected, NOT
+   * excess lag, but the tape is still not tradable.
+   */
+  marketSessionOpen?: boolean;
 } {
   if (!quote) return { missing: true, venueDelayed: false, delayedFallback: false };
   const venueDelayed = quote.venuePriceAuthoritative === true;
@@ -692,10 +699,16 @@ export function quoteAgeSecForStalenessGate(
   }
   // Excess delay is reported INDEPENDENTLY of the age stamp above: for a
   // tape with a documented expected delay it is how far the asOf lag runs
-  // BEYOND expected + tolerance.  A positive value means the delayed feed
-  // itself is lagging far more than the venue promises and must be flagged —
-  // the fetch-age stamp above must never paper over it.
-  const tapeStatus = delayedTapeStatus(quote, nowMs, cascadeFreshMaxAgeMs());
+  // BEYOND expected + tolerance.  A positive value means the observation is
+  // beyond the delayed-tape window — during RTH that can be an illiquid last
+  // print OR excess tape lag, and either way the fetch-age stamp above must
+  // never paper over it.
+  //
+  // The market session decides how that lag is READ: while the market is
+  // closed there are no prints at all, so an old asOf is expected and is NOT
+  // reported as excess (it is reported as a closed session instead).  The
+  // caller still fails closed on a closed-session tape.
+  const tapeStatus = delayedTapeStatus(quote, nowMs, cascadeFreshMaxAgeMs(), isMarketOpen(new Date(nowMs)));
   return {
     ageSec: Math.round((nowMs - stampMs) / 1000),
     missing: false,
@@ -704,7 +717,8 @@ export function quoteAgeSecForStalenessGate(
     ...(tapeStatus.delayed
       ? {
           excessDelaySec: tapeStatus.excessDelaySec,
-          expectedDelayedTape: true
+          expectedDelayedTape: true,
+          marketSessionOpen: tapeStatus.marketSessionOpen
         }
       : {})
   };
@@ -914,7 +928,13 @@ export async function fetchFreshQuotesCascade(
   }
   // Tradier trades price off Tradier.  Paper and live both stop here so
   // Alpaca, Yahoo, and the other levels cannot overlay the venue tape.
-  if (venueMode !== "realtime") pendingSymbols = [];
+  //
+  // Clear pending symbols ONLY when the venue tape was actually attempted
+  // (L1a ran).  With `skipActiveBroker` the caller already hit the broker
+  // itself and L1a never ran, so blanking the list here would drop every
+  // fallback and leave the caller with an empty result (Sentry thread on
+  // pendingSymbols).
+  if (venueMode !== "realtime" && !options?.skipActiveBroker) pendingSymbols = [];
 
   // --- LEVEL 1b: ALL other connected brokers for this user (market-data only) ---
   throwIfCascadeAborted(signal);

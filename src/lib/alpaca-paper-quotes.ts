@@ -143,6 +143,13 @@ export interface DelayedTapeStatus {
   fetchAgeSec?: number;
   /** True only when the tape is fresh AND not excessively delayed. */
   usable: boolean;
+  /**
+   * True when the market session was OPEN when the tape was evaluated.
+   * False means the equity market was shut: an old `asOf` is then EXPECTED
+   * (no prints happen while the market is closed), so it is NOT evidence of a
+   * broken feed — but the closed-session print is still not tradable.
+   */
+  marketSessionOpen?: boolean;
 }
 
 /**
@@ -155,7 +162,8 @@ export interface DelayedTapeStatus {
 export function delayedTapeStatus(
   quote: DelayedTapeQuote | null | undefined,
   nowMs: number,
-  maxFetchAgeMs: number
+  maxFetchAgeMs: number,
+  marketOpen: boolean = true
 ): DelayedTapeStatus {
   if (!quote || typeof quote.expectedDelaySec !== "number" || !Number.isFinite(quote.expectedDelaySec)) {
     return { delayed: false, retrievalFresh: false, usable: false };
@@ -190,8 +198,23 @@ export function delayedTapeStatus(
   // The expected delay is NORMAL.  Only lag beyond expected + tolerance is
   // excess.  A missing asOf is NOT excess — it is a missing observation, and
   // the caller treats a missing observation as missing data (fail closed).
+  //
+  // HONEST SPLIT — illiquid last print vs lagging tape.  During RTH an asOf
+  // beyond the SLA can mean EITHER an illiquid name whose last print is old OR
+  // a tape that is genuinely lagging behind the venue's promise.  The number
+  // cannot tell them apart, so the numeric excess fail-closes the opening and
+  // the wording never claims "the feed is broken" as the only explanation.
+  //
+  // When the session is CLOSED there are no prints at all, so an old asOf is
+  // expected and is NOT excess.  Report no excess (undefined) and mark the
+  // session closed: the tape is still not tradable, but it is not "broken".
+  const marketSessionOpen = marketOpen !== false;
   const excessDelaySec =
-    asOfAgeSec === undefined ? undefined : Math.max(0, asOfAgeSec - (quote.expectedDelaySec + toleranceSec));
+    asOfAgeSec === undefined
+      ? undefined
+      : marketSessionOpen
+        ? Math.max(0, asOfAgeSec - (quote.expectedDelaySec + toleranceSec))
+        : undefined;
 
   return {
     delayed: true,
@@ -199,6 +222,7 @@ export function delayedTapeStatus(
     excessDelaySec,
     retrievalFresh,
     fetchAgeSec,
-    usable: retrievalFresh && excessDelaySec !== undefined && excessDelaySec === 0
+    usable: retrievalFresh && excessDelaySec !== undefined && excessDelaySec === 0,
+    marketSessionOpen
   };
 }
