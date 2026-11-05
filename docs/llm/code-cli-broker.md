@@ -90,7 +90,7 @@ Request: authenticated `POST` to the configured endpoint, JSON only. It contains
   `-contributor` (Meta: max is "not available" for contributor models); ST clamps
   that to `xhigh` before sending, and the broker must refuse rather than forward
   a `max` for a contributor model if one ever arrives.  The field is absent for a
-  model with no documented effort setting (today MiniMax-M3); the broker then
+  model with no documented effort setting (today the retired MiniMax-M3); the broker then
   sends none.  When enabled, ST always sends it for MiniMax-M3.1-Flash, whose provider
   default is `max`.  **Off by default:** ST sends this field only when the
   app environment sets `CODE_CLI_REASONING_EFFORT=true` (or `1`).  Without it

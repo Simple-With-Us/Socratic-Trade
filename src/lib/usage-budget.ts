@@ -402,9 +402,12 @@ export const CHEAPER_MODEL: Record<string, string> = {
   // catalog 2026-09-18, so an over-budget Grok run skips rather than "downgrading" to a removed id.
   // Meta / Muse (OpenRouter).  The Code CLI-only Wonder contributor ids have no downgrade: their
   // cost is unknown and their route is not the API route a cheaper model would use.
-  // muse-spark-1.3-contributor ($0.10/$0.20) has no entry either: Glimmer ($0.35/$1.50) costs MORE.
-  "muse-wonder-1.0": "muse-spark-1.3",
-  "muse-spark-1.3": "muse-glimmer-30b",
+  // muse-spark-1.3-contributor ($0.10/$0.20) has no entry either: it is the cheapest Muse row.
+  // Retired Muse rows (2026-11-05) downgrade to the only offered API Muse row, the Spark
+  // contributor tier ($0.10/$0.20), which is cheaper than each of them.
+  "muse-wonder-1.0": "muse-spark-1.3-contributor",
+  "muse-spark-1.3": "muse-spark-1.3-contributor",
+  "muse-glimmer-30b": "muse-spark-1.3-contributor",
   // MiniMax
   "minimax-m3": "minimax-m3.1-flash",
   // Gemini

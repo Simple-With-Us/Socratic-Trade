@@ -109,7 +109,7 @@ const API_KEY_CATALOG = [
     label: "Meta Model API",
     category: "LLM",
     required: false,
-    unlocks: "Muse Spark and Muse Wonder models (muse-spark-1.3, muse-spark-1.3-contributor, muse-wonder-1.0) billed directly by Meta instead of through OpenRouter.\u00A0 The contributor tier is much cheaper because Meta trains on your prompts and completions.\u00A0 The Muse Wonder contributor models run only through the Code CLI route.",
+    unlocks: "The Muse Spark contributor model (muse-spark-1.3-contributor) billed directly by Meta instead of through OpenRouter.\u00A0 Contributor models are much cheaper because Meta trains on your prompts and completions.\u00A0 The Muse Wonder contributor models run only through the Code CLI route.",
     docsUrl: "https://dev.meta.ai/docs/overview"
   },
   {
