@@ -152,3 +152,40 @@ Files touched in this pass:
 - `docs/rollouts/2026-11-05-alpaca-paper-delayed-sip.md`
 - `docs/rollouts/2026-11-05-alpaca-paper-delayed-sip-readiness-gaps.md`
 - `STATUS.md`, `PLAN.md`
+
+### Verification (continue pass)
+
+```
+npx vitest run test/scan-route-account-scope.test.ts test/alpaca-paper-delayed-sip.test.ts \
+  test/staleness-gate.test.ts test/quotes-cascade.test.ts test/price-alerts-evaluation.test.ts \
+  test/dashboard-price-fallback.test.ts test/market-scan-freshness.test.ts \
+  test/alpaca-paper-gateway-feed.test.ts test/data-providers.test.ts test/scan-empty-screener.test.ts
+  → Test Files 10 passed (10), Tests 322 passed (322)
+
+npx vitest run test/washsale-modes.test.ts test/strategy-hardening.test.ts \
+  test/run-state-override.test.ts test/quote-delayed-fallback.test.ts test/policy.test.ts \
+  test/p0-safety-fixes.test.ts test/pdt.test.ts test/persistence-hardening.test.ts \
+  test/hard-gate-classification.test.ts test/broker-minimum-bump-execute.test.ts \
+  + the four files above
+  → Test Files 16 passed (16), Tests 455 passed (455)   (every suite that touches
+    evaluateTradeProposal / quoteAgeSecForStalenessGate / checkPriceAlerts)
+
+npx tsc --noEmit
+  → clean (no output)
+
+npx eslint <the twelve touched source/test files>
+  → 0 errors, 13 warnings (pre-existing patterns in the touched files)
+
+npm run build
+  → success (Next.js production build, exit 0)
+```
+
+The FULL local `npm test` suite was not completed inside this session's time box; the
+authoritative full gate is the CI workflow on PR #5005.
+
+### Next steps (continue pass)
+
+- The Linear team-`ST` issue still has to be created/moved by an operator with Linear
+  access (no Linear connector is reachable from this lane).
+- Sentry/Kody thread replies and resolves happen outside this lane — the commit body is
+  the evidence trail for all five findings.
