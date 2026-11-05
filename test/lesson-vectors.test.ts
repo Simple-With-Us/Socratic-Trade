@@ -36,6 +36,9 @@ const storeContextsCalls: Array<{
 // `accession` — used to prove a single bucket's (or a single promoted-lesson's) vector-write
 // failure never blocks siblings and never blocks the durable caller (attach path / reflection pass).
 let failAccession: string | undefined;
+// When set, the mocked storeContexts returns this result (after recording the call) instead of a
+// plain successful index — used to simulate dedup hits and unconfigured/budget skips.
+let storeResultOverride: Record<string, unknown> | undefined;
 
 vi.mock("../src/lib/vector-db", () => ({
   getCurrentVectorProviderAuthority: async () => "provider:test",
@@ -50,6 +53,7 @@ vi.mock("../src/lib/vector-db", () => ({
       throw new Error(`simulated vector write failure for accession ${String(accession)}`);
     }
     storeContextsCalls.push({ userId, documents, options });
+    if (storeResultOverride) return { attempted: documents.length, ...storeResultOverride };
     return { attempted: documents.length, indexed: documents.length };
   }
 }));
@@ -467,5 +471,67 @@ describe("generateReflectionSummary integration", () => {
     await generateReflectionSummary(accountNumber, userId);
     expect(writesFor()).toBe(1);
     expect(getInternalSetting<string>(signatureKey)).toBeTruthy();
+  });
+
+  async function seedNoKeyAccount(prefix: string) {
+    const userId = `post-mortem-${prefix}-${randomUUID()}`;
+    const accountNumber = `APCA-PAPER-${prefix.toUpperCase()}`;
+    const accountId = randomUUID();
+    const { insertFillEvent, setActiveConnectedAccount, setPolicy, upsertConnectedAccount } = await import("../src/lib/db");
+    upsertConnectedAccount({ id: accountId, userId, broker: "alpaca", environment: "paper", accountNumber, label: "Alpaca Paper", isActive: true });
+    setActiveConnectedAccount(accountId, userId);
+    setPolicy({ ...DEFAULT_POLICY, accountNumber, activeBroker: "alpaca", llmModel: "openai/gpt-4.1-mini" }, userId);
+    for (let i = 0; i < 5; i++) {
+      insertFillEvent({
+        userId, accountNumber, source: "paper", executionMode: "broker/paper", symbol: `${prefix}${i}`, side: "buy",
+        quantity: 1, price: 100, notional: 100, status: "filled", filledAt: `2026-04-0${i + 1}T00:00:00.000Z`,
+        raw: { proposal: { tradeThesisTag: "Momentum-Breakout", entryMarketRegime: "Tech-Bull" } }
+      });
+      insertFillEvent({
+        userId, accountNumber, source: "paper", executionMode: "broker/paper", symbol: `${prefix}${i}`, side: "sell",
+        quantity: 1, price: 110, notional: 110, status: "filled", filledAt: `2026-04-0${i + 1}T01:00:00.000Z`
+      });
+    }
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new Error("no network call expected on the no-key path");
+    }));
+    return { userId, accountNumber, signatureKey: `reflection_lesson_signature:${userId}:${accountNumber}` };
+  }
+
+  it("ST-4589: an exact dedup hit (skipped + dedupComplete) counts as written, does not warn, and records the signature", async () => {
+    const { getInternalSetting } = await import("../src/lib/db");
+    const { generateReflectionSummary, writeThesisRegimeLessonVectors } = await import("../src/lib/post-mortem");
+    const { userId, accountNumber, signatureKey } = await seedNoKeyAccount("DD");
+    const warn = vi.spyOn(console, "warn");
+    storeResultOverride = { indexed: 0, skipped: true, dedupComplete: true };
+    try {
+      await expect(writeThesisRegimeLessonVectors([stat("Momentum", "Bull", 6)], userId, [])).resolves.toEqual({
+        attempted: 1, written: 1, skipped: 0, failed: 0
+      });
+      await generateReflectionSummary(accountNumber, userId);
+    } finally {
+      storeResultOverride = undefined;
+    }
+    expect(getInternalSetting<string>(signatureKey)).toBeTruthy();
+    expect(warn.mock.calls.some((call) => String(call[0]).includes("lesson vector write skipped"))).toBe(false);
+    warn.mockRestore();
+  });
+
+  it("ST-4589: a plain skip (no dedupComplete, e.g. unconfigured store) or a budget skip is not recorded", async () => {
+    const { getInternalSetting } = await import("../src/lib/db");
+    const { generateReflectionSummary, writeThesisRegimeLessonVectors } = await import("../src/lib/post-mortem");
+    const { userId, accountNumber, signatureKey } = await seedNoKeyAccount("PS");
+    storeResultOverride = { indexed: 0, skipped: true, unconfigured: true };
+    try {
+      await generateReflectionSummary(accountNumber, userId);
+      expect(getInternalSetting<string>(signatureKey)).toBeFalsy();
+      // A dedupComplete flag does not excuse a budget skip.
+      storeResultOverride = { indexed: 0, skipped: true, dedupComplete: true, budgetSkipped: 1 };
+      await expect(writeThesisRegimeLessonVectors([stat("Momentum", "Bull", 6)], userId, [])).resolves.toEqual({
+        attempted: 1, written: 0, skipped: 1, failed: 0
+      });
+    } finally {
+      storeResultOverride = undefined;
+    }
   });
 });

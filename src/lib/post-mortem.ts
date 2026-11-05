@@ -641,7 +641,13 @@ export async function writeThesisRegimeLessonVectors(
     };
     try {
       const result = await storeContexts([doc], userId, { dedupKeyPrefix: "lesson", scope: "private" });
-      if (result.skipped || (result.budgetSkipped ?? 0) > 0 || (result.writeUnitBudgetSkipped ?? 0) > 0) {
+      const budgetSkipped = (result.budgetSkipped ?? 0) > 0 || (result.writeUnitBudgetSkipped ?? 0) > 0;
+      if (result.skipped && result.dedupComplete === true && !budgetSkipped) {
+        // Exact content already stored (opt-in dedup proved it): the lesson is in place, so this
+        // counts as written and is not a warning. A skip WITHOUT dedupComplete (unconfigured store,
+        // non-exact near-dup) or any budget skip still counts as skipped below.
+        written += 1;
+      } else if (result.skipped || budgetSkipped) {
         skipped += 1;
         console.warn("[post-mortem] thesis x regime lesson vector write skipped:", JSON.stringify({ bucket: subjectKey, userId, result }));
       } else {
