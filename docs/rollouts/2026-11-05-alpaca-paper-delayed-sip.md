@@ -7,7 +7,7 @@ Jay authorized **account-scoped delayed quote behavior for the connected Alpaca 
 Alpaca's `delayed_sip` feed — a tape with an expected **~900s (15 minute)** publication delay — and
 the app must treat that delay as the venue's behavior rather than as broken/live data.
 
-Measured in prod on 2026-11-05 ~1:58pm CT with the connected paper keys (`PA33IDTHMFK9`):
+Measured in prod on 2026-11-05 ~1:58pm CT with the connected paper keys (`(value redacted)`):
 
 | feed | asOf age | note |
 | --- | --- | --- |
@@ -79,6 +79,7 @@ src/lib/policy.ts
 src/lib/quotes-cascade.ts
 src/lib/strategy-gather.ts
 src/lib/types.ts
+src/lib/approval-quote-scan.ts
 test/alpaca-paper-delayed-sip.test.ts  (new)
 test/alpaca-paper-gateway-feed.test.ts  (new)
 test/data-providers.test.ts
