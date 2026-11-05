@@ -99,27 +99,31 @@ function bucketFor(
   winRate?: number;
   avgReturn?: number;
   closedLotCount: number;
+  roundTripCount: number;
   curve: EquityCurvePoint[];
 } {
   if (!performance) {
-    return { realized: undefined, unrealized: undefined, winRate: undefined, avgReturn: undefined, closedLotCount: 0, curve: [] };
+    return { realized: undefined, unrealized: undefined, winRate: undefined, avgReturn: undefined, closedLotCount: 0, roundTripCount: 0, curve: [] };
   }
   const bucket =
     environment === "paper"
       ? {
           realized: performance.paperRealizedPnl,
           unrealized: performance.paperUnrealizedPnl,
-          winRate: performance.paperWinRate,
+          // ST-4589 B10: per completed round trip (absent until one completes -> renders a dash).
+          winRate: performance.paperRoundTripWinRate,
           avgReturn: performance.paperAverageReturnPct,
           closedLotCount: performance.paperClosedLotCount,
+          roundTripCount: performance.paperRoundTripCount ?? 0,
           curve: performance.paperEquityCurve
         }
       : {
           realized: performance.liveRealizedPnl,
           unrealized: performance.liveUnrealizedPnl,
-          winRate: performance.liveWinRate,
+          winRate: performance.liveRoundTripWinRate,
           avgReturn: performance.liveAverageReturnPct,
           closedLotCount: performance.liveClosedLotCount,
+          roundTripCount: performance.liveRoundTripCount ?? 0,
           curve: performance.liveEquityCurve
         };
   return pricesUnavailable ? { ...bucket, unrealized: undefined } : bucket;
@@ -157,9 +161,10 @@ export default function ResultsPage() {
       tone="paper"
       realized={netRealized(perf?.paperRealizedPnl)}
       unrealized={perf?.paperUnrealizedPnl}
-      winRate={perf?.paperWinRate}
+      winRate={perf?.paperRoundTripWinRate}
       avgReturn={perf?.paperAverageReturnPct}
       closedLotCount={perf?.paperClosedLotCount ?? 0}
+      roundTripCount={perf?.paperRoundTripCount ?? 0}
       curve={perf?.paperEquityCurve ?? []}
       netOfTax={subtractFromResults}
       unmatchedClosingFills={perf?.paperUnmatchedClosingFills ?? 0}
@@ -171,9 +176,10 @@ export default function ResultsPage() {
       tone="live"
       realized={netRealized(perf?.liveRealizedPnl)}
       unrealized={perf?.liveUnrealizedPnl}
-      winRate={perf?.liveWinRate}
+      winRate={perf?.liveRoundTripWinRate}
       avgReturn={perf?.liveAverageReturnPct}
       closedLotCount={perf?.liveClosedLotCount ?? 0}
+      roundTripCount={perf?.liveRoundTripCount ?? 0}
       curve={perf?.liveEquityCurve ?? []}
       netOfTax={subtractFromResults}
       unmatchedClosingFills={perf?.liveUnmatchedClosingFills ?? 0}
@@ -284,7 +290,7 @@ export default function ResultsPage() {
                 label={`Same cash in ${perf.benchmark.benchmarkSymbol}`}
                 value={fmtMoney(perf.benchmark.shadowValue)}
                 sub={`${perf.benchmark.startDate} → ${perf.benchmark.endDate}`}
-                title={`Hypothetical ${perf.benchmark.benchmarkSymbol} tracker funded with the same deposits and withdrawals as this account.${SENTENCE_GAP}Each transfer is a breakpoint; that day's invested dollars grow with ${perf.benchmark.benchmarkSymbol} until the next transfer.${SENTENCE_GAP}Same-day additions and withdrawals are treated as landing at the daily cutoff.`}
+                title={`Hypothetical ${perf.benchmark.benchmarkSymbol} tracker funded with the same deposits and withdrawals as this account.${SENTENCE_GAP}Each transfer is a breakpoint; the invested dollars grow with ${perf.benchmark.benchmarkSymbol} until the next transfer.${SENTENCE_GAP}Same-day additions and withdrawals are counted from the start of the day they land.`}
               />
               <div>
                 <div className="con-card-title">You vs that</div>
@@ -1004,6 +1010,7 @@ function BucketCard({
   winRate,
   avgReturn,
   closedLotCount,
+  roundTripCount,
   curve,
   netOfTax = false,
   grossAnnotate = false,
@@ -1015,11 +1022,13 @@ function BucketCard({
   unrealized?: number;
   winRate?: number;
   avgReturn?: number;
-  /** Number of CLOSED lots behind winRate/avgReturn. Zero closed lots must render as "no data
-   *  yet" (EM_DASH), never a fabricated "0%"/"+0.00%" — winRate/avgReturn both compute to 0 (not
-   *  undefined) for an empty lot list, so the value itself can't distinguish "no trades closed"
-   *  from "closed trades that genuinely broke even". Gate on this count, not the value. */
+  /** Number of CLOSED lots behind avgReturn. Zero closed lots must render as "no data yet"
+   *  (EM_DASH), never a fabricated "+0.00%" — avgReturn computes to 0 (not undefined) for an empty
+   *  lot list, so the value itself can't distinguish "no trades closed" from "closed trades that
+   *  genuinely broke even". Gate on this count, not the value. */
   closedLotCount: number;
+  /** Completed round trips behind winRate (ST-4589): the win-rate tile's own empty-state gate. */
+  roundTripCount: number;
   curve: Array<{ timestamp: string; equity: number; source: "live" | "paper" }>;
   netOfTax?: boolean;
   grossAnnotate?: boolean;
@@ -1061,15 +1070,21 @@ function BucketCard({
           </div>
         </div>
         <div>
-          <div className="con-card-title" title="Share of CLOSED lots that were profitable.  Shows — until this bucket has closed at least one lot — a 0% here would otherwise be indistinguishable from “no trades closed yet”.">
+          <div className="con-card-title" title="Share of completed round trips that were profitable: a position trimmed in steps counts once, when it is fully closed.  Shows — until at least one round trip has completed — a 0% here would otherwise be indistinguishable from “no trades closed yet”.">
             Win Rate
           </div>
-          <div className="con-num mt-0.5">{closedLotCount > 0 && typeof winRate === "number" ? fmtPct(winRate, 0) : EM_DASH}</div>
+          <div className="con-num mt-0.5">{roundTripCount > 0 && typeof winRate === "number" ? fmtPct(winRate, 0) : EM_DASH}</div>
+          <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+            per round trip · {roundTripCount} completed
+          </div>
         </div>
         <div>
           <div className="con-card-title" title="Capital-weighted realized return across closed lots (sum of P&amp;L ÷ sum of entry notional).  Not the same as account NAV change — open positions and cash are excluded.  Unweighted trade averages were retired because small round-trips dominated.  The SPY panel below is the account equity time-weighted return.">Avg Return / Closed Capital</div>
           <div className="con-num mt-0.5" title="Raw realized return per closed trade, based on entry and exit prices.  It is not adjusted for SPY or market beta.">
             {closedLotCount > 0 && typeof avgReturn === "number" ? fmtPct(avgReturn, 2, true) : EM_DASH}
+          </div>
+          <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+            all closed lots, incl. partial trims · {closedLotCount} {closedLotCount === 1 ? "lot" : "lots"}
           </div>
         </div>
       </div>
