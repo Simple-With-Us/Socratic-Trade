@@ -64,9 +64,9 @@ export async function generateReflectionSummary(accountNumber: string, userId: s
   if (getInternalSetting<string>(signatureKey) === signature) return;
 
   // No LLM key: the reflection LLM call cannot run, but the deterministic (pure-statistics)
-  // thesis x regime lesson vectors still can (ST-4589 B6).  Same new-fills gate, own signature.
+  // thesis x regime lesson vectors still can (ST-4589 B6), deduped on the user-level pooled signature.
   if (!openaiKey) {
-    await writeDeterministicLessonsIfChanged(accountNumber, userId, signature);
+    await writeDeterministicLessonsIfChanged(userId);
     return;
   }
 
@@ -96,7 +96,7 @@ export async function generateReflectionSummary(accountNumber: string, userId: s
   if (isOverLlmBudget(userId)) {
     // The deterministic lesson vectors are pure statistics + an embedding write (its own RAG
     // budget guard applies inside storeContexts), not LLM spend, so they run here too (ST-4589 B6).
-    await writeDeterministicLessonsIfChanged(accountNumber, userId, signature);
+    await writeDeterministicLessonsIfChanged(userId);
     persistExcursionsBackground(accountNumber, source, userId);
     return;
   }
@@ -255,11 +255,10 @@ Return a single concise paragraph (<= 130 words) that is specific and directive.
     const pooledLotReturns = poolClosedLotReturnsByThesis(allAccounts, userId);
     await writeThesisTrackRecordFacts(pooledThesisStats, userId, allAccounts, pooledLotReturns);
     // Deterministic thesis x regime "conditioned lesson" vectors — one living, overwrite-in-place
-    // doc per well-sampled bucket. Rides this function's existing signature-dedup gate (stats can't
-    // change without new fills).  On the no-key / over-budget early returns above the same vectors
-    // are written by writeDeterministicLessonsIfChanged instead (ST-4589 B6).
-    const pooledRegimeStats = poolThesisRegimeStats(allAccounts, userId);
-    await writeThesisRegimeLessonVectors(pooledRegimeStats, userId, allAccounts);
+    // doc per well-sampled bucket. The content is USER-pooled, so it goes through the same user-level
+    // signature gate as the no-key / over-budget path: a sibling account's reflection pass does not
+    // re-embed identical pooled vectors (Kody review, ST-4589).
+    await writeDeterministicLessonsIfChanged(userId);
   } catch (error) {
     console.error("Failed to generate reflection summary:", error);
   }
@@ -274,16 +273,20 @@ Return a single concise paragraph (<= 130 words) that is specific and directive.
  * Deterministic (no-LLM) lesson pass for runs where the reflection LLM call is skipped (no key, or
  * over the daily LLM budget).  Writes only the pure-statistics thesis x regime lesson vectors; the
  * track-record learned-context facts stay on the LLM path because ingestLearned's semantic gate can
- * itself spend an LLM call.  Deduped per (user, account) on the same new-fills signature under its
- * own key (recorded only when every bucket landed), so it re-runs only on new fills or after a
- * skipped/failed bucket, and never marks the LLM reflection as done.
+ * itself spend an LLM call.  The vectors (content AND vector ids) are USER-pooled, so the dedupe is
+ * user-level too (Kody review): keyed per user on a signature of the pooled input — every connected
+ * account's filled-fill count + newest fill — so a sibling account's pass is a no-op once the current
+ * pooled content is written, while a new fill on ANY of the user's accounts triggers a rewrite.  The
+ * signature is recorded only when every bucket landed, so a skipped/failed bucket retries next run.
+ * Never marks the LLM reflection as done.  Also used by the LLM reflection path for the same vectors.
  * Best-effort: a failure here never throws to the caller.
  */
-async function writeDeterministicLessonsIfChanged(accountNumber: string, userId: string, signature: string): Promise<void> {
-  const lessonSignatureKey = `reflection_lesson_signature:${userId}:${accountNumber}`;
-  if (getInternalSetting<string>(lessonSignatureKey) === signature) return;
+async function writeDeterministicLessonsIfChanged(userId: string): Promise<void> {
   try {
     const allAccounts = listConnectedAccounts(userId);
+    const lessonSignatureKey = `reflection_lesson_signature:${userId}`;
+    const signature = pooledLessonInputSignature(allAccounts, userId);
+    if (getInternalSetting<string>(lessonSignatureKey) === signature) return;
     const result = await writeThesisRegimeLessonVectors(poolThesisRegimeStats(allAccounts, userId), userId, allAccounts);
     // Record the signature only when every attempted bucket actually landed; a skipped (budget) or
     // failed bucket leaves it unset so the next run retries instead of waiting for new fills.
@@ -291,6 +294,28 @@ async function writeDeterministicLessonsIfChanged(accountNumber: string, userId:
   } catch (error) {
     console.error("Failed to write deterministic reflection lessons:", error);
   }
+}
+
+/** Signature of the pooled lesson input: per pooled account (same filter as poolThesisRegimeStats)
+ *  its filled-fill count and newest fill time.  Changes on a new fill in any account, or when an
+ *  account joins/leaves the pool. */
+function pooledLessonInputSignature(
+  accounts: { accountNumber?: string; broker: string }[],
+  userId: string
+): string {
+  const statement = getDb().prepare(
+    `SELECT COUNT(*) AS n, MAX(filled_at) AS latest FROM fill_events
+     WHERE account_number = ? AND user_id = ? AND status = 'filled'`
+  );
+  return accounts
+    .filter((account) => account.accountNumber && account.broker !== "test")
+    .map((account) => account.accountNumber as string)
+    .sort()
+    .map((accountNumber) => {
+      const row = statement.get(accountNumber, userId) as { n: number; latest: string | null };
+      return `${accountNumber}=${row.n}@${row.latest ?? ""}`;
+    })
+    .join("|");
 }
 
 /** user_settings key for one account's reflection summary. */

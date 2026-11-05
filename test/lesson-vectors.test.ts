@@ -433,7 +433,7 @@ describe("generateReflectionSummary integration", () => {
     const userId = `post-mortem-retry-${randomUUID()}`;
     const accountNumber = "APCA-PAPER-RETRY";
     const accountId = randomUUID();
-    const { getInternalSetting, insertFillEvent, setActiveConnectedAccount, setPolicy, upsertConnectedAccount } = await import("../src/lib/db");
+    const { getDb, getInternalSetting, insertFillEvent, setActiveConnectedAccount, setPolicy, upsertConnectedAccount } = await import("../src/lib/db");
     const { generateReflectionSummary } = await import("../src/lib/post-mortem");
 
     upsertConnectedAccount({ id: accountId, userId, broker: "alpaca", environment: "paper", accountNumber, label: "Alpaca Paper", isActive: true });
@@ -455,8 +455,13 @@ describe("generateReflectionSummary integration", () => {
     }));
 
     const accession = `${userId}:Momentum-Breakout:Tech-Bull`;
-    const signatureKey = `reflection_lesson_signature:${userId}:${accountNumber}`;
+    const signatureKey = `reflection_lesson_signature:${userId}`;
     const writesFor = () => storeContextsCalls.filter((c) => c.documents[0]?.metadata?.accession === accession).length;
+
+    const degradedReceipts = () =>
+      (getDb()
+        .prepare("SELECT payload FROM audit_events WHERE kind = 'socratic_vector_write_degraded' AND user_id = ?")
+        .all(userId) as Array<{ payload: string }>).filter((row) => JSON.parse(row.payload).bucket === "Momentum-Breakout @ Tech-Bull").length;
 
     failAccession = accession;
     try {
@@ -464,6 +469,9 @@ describe("generateReflectionSummary integration", () => {
     } finally {
       failAccession = undefined;
     }
+    // Control: the writer really ATTEMPTED this bucket (and failed) — so "nothing written / no
+    // signature" below is the failure handling, not a pass that never ran.
+    expect(degradedReceipts()).toBe(1);
     expect(writesFor()).toBe(0);
     expect(getInternalSetting<string>(signatureKey)).toBeFalsy();
 
@@ -495,7 +503,7 @@ describe("generateReflectionSummary integration", () => {
     vi.stubGlobal("fetch", vi.fn(async () => {
       throw new Error("no network call expected on the no-key path");
     }));
-    return { userId, accountNumber, signatureKey: `reflection_lesson_signature:${userId}:${accountNumber}` };
+    return { userId, accountNumber, signatureKey: `reflection_lesson_signature:${userId}` };
   }
 
   it("ST-4589: an exact dedup hit (skipped + dedupComplete) counts as written, does not warn, and records the signature", async () => {
@@ -533,5 +541,38 @@ describe("generateReflectionSummary integration", () => {
     } finally {
       storeResultOverride = undefined;
     }
+  });
+
+  it("ST-4589 (Kody): pooled lessons are written once per USER, and a new fill on a sibling account rewrites them", async () => {
+    const { insertFillEvent, upsertConnectedAccount } = await import("../src/lib/db");
+    const { generateReflectionSummary } = await import("../src/lib/post-mortem");
+    // Account A carries the 5 well-sampled closed lots; account B is a sibling with one closed lot.
+    const { userId, accountNumber: accountA } = await seedNoKeyAccount("PA");
+    const accountB = "APCA-PAPER-PB";
+    upsertConnectedAccount({ id: randomUUID(), userId, broker: "alpaca", environment: "paper", accountNumber: accountB, label: "Alpaca Paper 2", isActive: false });
+    const fillB = (symbol: string, side: "buy" | "sell", filledAt: string) =>
+      insertFillEvent({
+        userId, accountNumber: accountB, source: "paper", executionMode: "broker/paper", symbol, side,
+        quantity: 1, price: side === "buy" ? 100 : 105, notional: side === "buy" ? 100 : 105, status: "filled", filledAt,
+        ...(side === "buy" ? { raw: { proposal: { tradeThesisTag: "Momentum-Breakout", entryMarketRegime: "Tech-Bull" } } } : {})
+      });
+    fillB("PB0", "buy", "2026-04-10T00:00:00.000Z");
+    fillB("PB0", "sell", "2026-04-10T01:00:00.000Z");
+
+    const accession = `${userId}:Momentum-Breakout:Tech-Bull`;
+    const writesFor = () => storeContextsCalls.filter((c) => c.documents[0]?.metadata?.accession === accession).length;
+
+    await generateReflectionSummary(accountA, userId);
+    expect(writesFor()).toBe(1);
+    // Sibling account's pass sees the same pooled input -> no re-embed / re-upsert.
+    await generateReflectionSummary(accountB, userId);
+    expect(writesFor()).toBe(1);
+
+    // A new closed lot on the SIBLING account changes the pooled input -> rewritten (from either pass).
+    fillB("PB1", "buy", "2026-04-11T00:00:00.000Z");
+    fillB("PB1", "sell", "2026-04-11T01:00:00.000Z");
+    await generateReflectionSummary(accountA, userId);
+    expect(writesFor()).toBe(2);
+    expect(storeContextsCalls.filter((c) => c.documents[0]?.metadata?.accession === accession).at(-1)?.documents[0].text).toContain("sample: 7 closed lots");
   });
 });
