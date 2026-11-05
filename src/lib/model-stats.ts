@@ -41,7 +41,15 @@
 // live/historical/benchmark stats align across the routing cutover. One shared definition in
 // ./model-identity — aliased to `cleanModelId` here so the call sites below stay unchanged.
 import { canonicalModelId as cleanModelId } from "./model-identity";
-import { getPredecessorModelIds } from "./llm-model-catalog";
+import { getPredecessorModelIds, modelClassFor, modelClassLabel } from "./llm-model-catalog";
+
+/** Owner ruling (ST-4589): Llama models are gone; they never appear in the rollup. */
+const DROPPED_MODEL_RE = /llama/i;
+
+/** Own live samples needed before a model's own cost / latency figures stand without an estimate. */
+export const MODEL_STATS_LIVE_MIN_SAMPLES = 3;
+/** Own closed trades / matured vetoes needed before own realized performance stands alone. */
+export const MODEL_STATS_PERF_MIN = 20;
 
 export type ModelRole = "green" | "red" | "strategist";
 
@@ -147,23 +155,45 @@ export interface ModelRoleStats {
   promptTokens: number | null;
   /** Completion / output tokens consumed in the window. */
   completionTokens: number | null;
-  /** Predecessor model display slug if ANY metric was rolled forward (legacy/compat). Prefer the
-   *  per-metric *InheritedFrom fields below so the UI does not mislabel direct cost/latency. */
-  inheritedFrom: string | null;
-  /** True when any metric (cost, latency, perf, or veto) rolled forward from a predecessor. */
-  isInherited: boolean;
-  /** Number of closed trades inherited from predecessor(s). */
-  inheritedClosedTrades?: number;
-  /** Predecessor that supplied cost/token roll-forward; null when cost/tokens are direct. */
-  costInheritedFrom: string | null;
-  /** Predecessor that supplied latency roll-forward; null when latency is direct. */
-  latencyInheritedFrom: string | null;
-  /** Predecessor that supplied realized-performance roll-forward; null when perf is direct. */
-  perfInheritedFrom: string | null;
-  /** Predecessor that supplied reviewer-veto roll-forward; null when veto efficacy is direct. */
-  vetoInheritedFrom: string | null;
   /** Calls in the window that reported token telemetry (denominator for avgTokensPerCall). */
   callsWithTokens: number;
+
+  // ---- Same-class predecessor ESTIMATES (ST-4589) ---------------------------------------------
+  // Every figure above is this model's OWN data, never blended with a predecessor's. When the own
+  // sample is too small, the figures below carry an explicitly separate estimate taken from the
+  // predecessor's OWN numbers (never a chained, already-inherited row, never another model class).
+  /** First predecessor that supplied ANY estimate below (display slug); null when none. */
+  inheritedFrom: string | null;
+  /** True when any estimate below is present. */
+  isInherited: boolean;
+  /** Predecessor behind the cost / token estimate; null when none. */
+  costInheritedFrom: string | null;
+  /** Predecessor behind the latency estimate; null when none. */
+  latencyInheritedFrom: string | null;
+  /** Predecessor behind the realized-performance estimate; null when none. */
+  perfInheritedFrom: string | null;
+  /** Predecessor behind the reviewer-veto estimate; null when none. */
+  vetoInheritedFrom: string | null;
+  /** The predecessor's OWN live call count behind the cost / token estimate (n of the estimate). */
+  inheritedCalls: number;
+  /** Predecessor's avg cost per call (USD). */
+  inheritedCostPerCall: number | null;
+  /** Predecessor's avg tokens per call, and its prompt / completion split per call. */
+  inheritedAvgTokensPerCall: number | null;
+  inheritedPromptTokensPerCall: number | null;
+  inheritedCompletionTokensPerCall: number | null;
+  /** Predecessor's live p50 latency and the samples behind it. */
+  inheritedP50LatencyMs: number | null;
+  inheritedLatencySamples: number;
+  /** Predecessor's own realized performance (green) and its closed-trade count (n of the estimate). */
+  inheritedPerf: ModelPerf | null;
+  inheritedClosedTrades: number;
+  /** Predecessor's own reviewer veto value-add (red). */
+  inheritedReviewerPerf: ReviewerPerf | null;
+  /** Catalog model class (lineage) of this model, e.g. "openai-astra"; null for non-catalog ids. */
+  modelClass: string | null;
+  /** Short human label of the class, e.g. "Astra"; null when modelClass is null. */
+  modelClassLabel: string | null;
 }
 
 /** Map an llm_usage context to a picker role; null = not a strategy-loop context. */
@@ -343,7 +373,9 @@ export function aggregateModelStats(input: AggregateModelStatsInput): ModelRoleS
   }
 
   const out: ModelRoleStats[] = [];
-  const models = Array.from(modelSet).sort();
+  const models = Array.from(modelSet)
+    .filter((m) => m.length > 0 && !DROPPED_MODEL_RE.test(m))
+    .sort();
   for (const model of models) {
     for (const role of ["green", "red", "strategist"] as ModelRole[]) {
       const c = usageData.get(key(model, role));
@@ -383,146 +415,118 @@ export function aggregateModelStats(input: AggregateModelStatsInput): ModelRoleS
           c && c.callsWithTokens > 0 && c.totalTokens > 0 ? Math.round(c.totalTokens / c.callsWithTokens) : null,
         promptTokens: c && c.callsWithTokens > 0 ? c.promptTokens : null,
         completionTokens: c && c.callsWithTokens > 0 ? c.completionTokens : null,
+        callsWithTokens: c?.callsWithTokens ?? 0,
         inheritedFrom: null,
         isInherited: false,
-        inheritedClosedTrades: undefined,
         costInheritedFrom: null,
         latencyInheritedFrom: null,
         perfInheritedFrom: null,
         vetoInheritedFrom: null,
-        callsWithTokens: c?.callsWithTokens ?? 0
+        inheritedCalls: 0,
+        inheritedCostPerCall: null,
+        inheritedAvgTokensPerCall: null,
+        inheritedPromptTokensPerCall: null,
+        inheritedCompletionTokensPerCall: null,
+        inheritedP50LatencyMs: null,
+        inheritedLatencySamples: 0,
+        inheritedPerf: null,
+        inheritedClosedTrades: 0,
+        inheritedReviewerPerf: null,
+        modelClass: modelClassFor(model) ?? null,
+        modelClassLabel: modelClassFor(model) ? modelClassLabel(modelClassFor(model)) : null
       });
     }
   }
 
-  // Predecessor Lineage Roll-Forward:
-  // When models shift up slightly (e.g., GPT-5.6 Sol succeeding Terra, Gemini Flash 3.8 succeeding 3.7),
-  // a new model starts with zero live samples, starving the UI and policy engine of statistical
-  // baselines. If a model lacks sufficient samples (< 3 live calls or < 20 closed trades / vetoes),
-  // roll forward and inherit historical evidence from its catalog-configured predecessors.
-  // CRITICAL: skip predecessors that canonicalize to the current model (aliases / self-ids such as
-  // gpt-luna-latest → gpt-5.6-luna, gemini-3.8-flash → gemini-flash-latest) so metrics are never
-  // double-counted against the model's own direct samples.
-  const outByKey = new Map<string, ModelRoleStats>(out.map((row) => [key(row.model, row.role), row]));
+  // Same-class predecessor ESTIMATES (ST-4589). Rules:
+  //  1. A model's own fields (liveCalls, cost, tokens, latency, closedTrades, perf, reviewerPerf)
+  //     are NEVER touched here, so n always means this model's own calls / trades / vetoes.
+  //  2. Estimates come from an immutable snapshot of each predecessor's OWN numbers taken before
+  //     any estimate is attached: no chaining (astra-pro never sees what astra "inherited").
+  //  3. Predecessors of a different model class are skipped (terra is its own class and never
+  //     feeds sol or astra), as are ids that canonicalize to the model itself (aliases).
+  const ownSnapshot = new Map<string, Readonly<ModelRoleStats>>();
+  for (const row of out) {
+    ownSnapshot.set(key(row.model, row.role), Object.freeze({ ...row }));
+  }
+  const lotStats = (lots: ClosedLotLike[]): ModelPerf => ({
+    closedTrades: lots.length,
+    winRate: Number(((lots.filter((l) => l.returnPct > 0).length / lots.length) * 100).toFixed(1)),
+    avgPnlPct: Number((lots.reduce((s, l) => s + l.returnPct, 0) / lots.length).toFixed(2)),
+    totalPnlUsd: Number(lots.reduce((s, l) => s + l.pnl, 0).toFixed(2))
+  });
   for (const stat of out) {
-    const rawPreds = getPredecessorModelIds(stat.model);
-    if (!rawPreds || rawPreds.length === 0) continue;
     const selfId = cleanModelId(stat.model);
+    const selfClass = modelClassFor(stat.model);
     const preds = [
-      ...new Set(rawPreds.map(cleanModelId).filter((pred) => pred.length > 0 && pred !== selfId))
+      ...new Set(
+        getPredecessorModelIds(stat.model)
+          .map(cleanModelId)
+          .filter((pred) => {
+            if (pred.length === 0 || pred === selfId || DROPPED_MODEL_RE.test(pred)) return false;
+            const predClass = modelClassFor(pred);
+            return !(selfClass && predClass && selfClass !== predClass);
+          })
+      )
     ];
     if (preds.length === 0) continue;
+    const note = (predecessor: string) => {
+      stat.isInherited = true;
+      stat.inheritedFrom = stat.inheritedFrom ?? predecessor;
+    };
 
-    // 1. Cost, latency, and token metrics roll-forward (when liveCalls < 3).
-    // When the successor already has 1–2 direct calls, COMBINE with the predecessor rather than
-    // replacing — Strategist Runs / Total cost promise the actual window totals.
-    if (stat.liveCalls < 3) {
+    // Cost / tokens: estimate while this model's own live sample is thin.
+    if (stat.liveCalls < MODEL_STATS_LIVE_MIN_SAMPLES) {
       for (const pred of preds) {
-        const predStat = outByKey.get(key(pred, stat.role));
-        if (!predStat || predStat.liveCalls <= 0) continue;
-        // Never inherit from a row that is actually the same canonical model (defense in depth).
-        if (cleanModelId(predStat.model) === selfId) continue;
-
-        const directCalls = stat.liveCalls;
-        const directCost = stat.totalCostUsd ?? 0;
-        const directPrompt = stat.promptTokens ?? 0;
-        const directCompletion = stat.completionTokens ?? 0;
-        const directTotalTokens = stat.totalTokens ?? 0;
-        const directTokenCalls = stat.callsWithTokens;
-
-        const predCost = predStat.totalCostUsd ?? 0;
-        const predPrompt = predStat.promptTokens ?? 0;
-        const predCompletion = predStat.completionTokens ?? 0;
-        const predTotalTokens = predStat.totalTokens ?? 0;
-        const predTokenCalls = predStat.callsWithTokens;
-
-        const combinedCalls = directCalls + predStat.liveCalls;
-        const combinedCost = directCost + predCost;
-        const combinedPrompt = directPrompt + predPrompt;
-        const combinedCompletion = directCompletion + predCompletion;
-        const combinedTotalTokens = directTotalTokens + predTotalTokens;
-        const combinedTokenCalls = directTokenCalls + predTokenCalls;
-
-        stat.liveCalls = combinedCalls;
-        stat.totalCostUsd = combinedCalls > 0 ? Number(combinedCost.toFixed(6)) : null;
-        stat.avgCostUsd = combinedCalls > 0 ? Number((combinedCost / combinedCalls).toFixed(6)) : null;
-        stat.callsWithTokens = combinedTokenCalls;
-        if (combinedTokenCalls > 0) {
-          stat.totalTokens = combinedTotalTokens;
-          stat.promptTokens = combinedPrompt;
-          stat.completionTokens = combinedCompletion;
-          stat.avgTokensPerCall =
-            combinedTotalTokens > 0 ? Math.round(combinedTotalTokens / combinedTokenCalls) : null;
-        } else {
-          stat.totalTokens = null;
-          stat.promptTokens = null;
-          stat.completionTokens = null;
-          stat.avgTokensPerCall = null;
-        }
-        stat.costInheritedFrom = predStat.model;
-        stat.isInherited = true;
-        stat.inheritedFrom = stat.inheritedFrom ?? predStat.model;
-
-        if (stat.latencySamples === 0 && predStat.latencySamples > 0) {
-          stat.p50LatencyMs = predStat.p50LatencyMs;
-          stat.latencySamples = predStat.latencySamples;
-          stat.latencyInheritedFrom = predStat.model;
-        }
+        const p = ownSnapshot.get(key(pred, stat.role));
+        if (!p || p.liveCalls <= 0) continue;
+        stat.inheritedCalls = p.liveCalls;
+        stat.inheritedCostPerCall = p.avgCostUsd;
+        stat.inheritedAvgTokensPerCall = p.avgTokensPerCall;
+        stat.inheritedPromptTokensPerCall =
+          p.promptTokens != null && p.callsWithTokens > 0 ? Math.round(p.promptTokens / p.callsWithTokens) : null;
+        stat.inheritedCompletionTokensPerCall =
+          p.completionTokens != null && p.callsWithTokens > 0 ? Math.round(p.completionTokens / p.callsWithTokens) : null;
+        stat.costInheritedFrom = p.model;
+        note(p.model);
         break;
       }
     }
 
-    // 2. Realized performance roll-forward (Green Team, when closedTrades < 20)
-    if (stat.role === "green" && stat.closedTrades < 20) {
+    // Latency: same idea, driven by the model's own latency samples.
+    if (stat.latencySamples < MODEL_STATS_LIVE_MIN_SAMPLES) {
       for (const pred of preds) {
-        if (pred === selfId) continue;
+        const p = ownSnapshot.get(key(pred, stat.role));
+        if (!p || p.latencySamples <= 0 || p.p50LatencyMs === null) continue;
+        stat.inheritedP50LatencyMs = p.p50LatencyMs;
+        stat.inheritedLatencySamples = p.latencySamples;
+        stat.latencyInheritedFrom = p.model;
+        note(p.model);
+        break;
+      }
+    }
+
+    // Realized performance (green): the predecessor's OWN closed lots, shown separately.
+    if (stat.role === "green" && stat.closedTrades < MODEL_STATS_PERF_MIN) {
+      for (const pred of preds) {
         const predLots = proposerLotsByModel.get(pred) ?? [];
         if (predLots.length === 0) continue;
-        const currentLots = proposerLotsByModel.get(stat.model) ?? [];
-        const combinedLots = [...currentLots, ...predLots];
-        const totalClosed = combinedLots.length;
-        if (totalClosed === 0) continue;
-        const wins = combinedLots.filter((l) => l.returnPct > 0).length;
-        stat.perf = {
-          closedTrades: totalClosed,
-          winRate: Number(((wins / totalClosed) * 100).toFixed(1)),
-          avgPnlPct: Number((combinedLots.reduce((s, l) => s + l.returnPct, 0) / totalClosed).toFixed(2)),
-          totalPnlUsd: Number(combinedLots.reduce((s, l) => s + l.pnl, 0).toFixed(2))
-        };
-        stat.closedTrades = totalClosed;
-        stat.perfInheritedFrom = pred;
-        stat.isInherited = true;
-        stat.inheritedFrom = stat.inheritedFrom ?? pred;
+        stat.inheritedPerf = lotStats(predLots);
         stat.inheritedClosedTrades = predLots.length;
+        stat.perfInheritedFrom = pred;
+        note(pred);
         break;
       }
     }
 
-    // 3. Reviewer veto value-add roll-forward (Red Team, when maturedVetoes < 20)
-    if (stat.role === "red" && (!stat.reviewerPerf || stat.reviewerPerf.maturedVetoes < 20)) {
+    // Reviewer veto value-add (red): the predecessor's OWN matured vetoes, shown separately.
+    if (stat.role === "red" && (stat.reviewerPerf?.maturedVetoes ?? 0) < MODEL_STATS_PERF_MIN) {
       for (const pred of preds) {
-        if (pred === selfId) continue;
-        const predStat = outByKey.get(key(pred, "red"));
-        if (!predStat?.reviewerPerf || predStat.reviewerPerf.maturedVetoes <= 0) continue;
-        if (cleanModelId(predStat.model) === selfId) continue;
-        const cur = stat.reviewerPerf;
-        const predPerf = predStat.reviewerPerf;
-        if (!cur || cur.maturedVetoes === 0) {
-          stat.reviewerPerf = { ...predPerf };
-        } else {
-          const n1 = cur.maturedVetoes;
-          const n2 = predPerf.maturedVetoes;
-          const n = n1 + n2;
-          stat.reviewerPerf = {
-            maturedVetoes: n,
-            vetoValueAddRate: Number(((cur.vetoValueAddRate * n1 + predPerf.vetoValueAddRate * n2) / n).toFixed(1)),
-            survivorRiskHitRate: Number(((cur.survivorRiskHitRate * n1 + predPerf.survivorRiskHitRate * n2) / n).toFixed(1)),
-            avgReturnPct: Number(((cur.avgReturnPct * n1 + predPerf.avgReturnPct * n2) / n).toFixed(2))
-          };
-        }
-        stat.vetoInheritedFrom = predStat.model;
-        stat.isInherited = true;
-        stat.inheritedFrom = stat.inheritedFrom ?? predStat.model;
+        const p = ownSnapshot.get(key(pred, "red"));
+        if (!p?.reviewerPerf || p.reviewerPerf.maturedVetoes <= 0) continue;
+        stat.inheritedReviewerPerf = { ...p.reviewerPerf };
+        stat.vetoInheritedFrom = p.model;
+        note(p.model);
         break;
       }
     }

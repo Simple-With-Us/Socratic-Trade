@@ -15,7 +15,7 @@ import {
 import { recordLlmUsage, extractLlmUsage, providerRequestIdFromPayload } from "./llm-usage";
 import { deriveExecutionState, fillSourceForExecutionMode, llmExecutionMode, llmFillSource, llmModeClarification, type ExecutionState } from "./execution-mode";
 import { policyUniverseSymbolCount } from "./index-universes";
-import { LLM_OUTPUT_TOKEN_CAPS, llmFetch, isModelRotationSentinel, resolveReviewerReasoningEffort } from "./llm-request";
+import { LLM_OUTPUT_TOKEN_CAPS, interactiveLlmTimeoutMs, llmFetch, isModelRotationSentinel, resolveReviewerReasoningEffort } from "./llm-request";
 import { buildLlmRequestBody, llmAuthHeaders, extractLlmText, extractJsonPayload } from "./llm-call";
 import { resolveLlmEndpoint } from "./llm-provider";
 import { humanizeLlmError } from "./llm-errors";
@@ -1018,7 +1018,10 @@ async function requestLlmTuning(
       const response = await llmFetch(url, {
         method: "POST",
         headers: llmAuthHeaders({ provider, key: openaiKey }),
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        // A thinking model gets 90s instead of 60s, capped under Cloudflare's ~100s edge budget
+        // because the browser awaits this request (POST /api/strategy/tune).
+        signal: AbortSignal.timeout(interactiveLlmTimeoutMs(model, reasoningEffortOverride ?? policyForResolution.llmReasoningEffort))
       });
 
       if (!response.ok) {

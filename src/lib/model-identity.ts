@@ -49,11 +49,17 @@ export function canonicalModelId(model: string | null | undefined): string {
 
   if (/(kimi|moonshot)/i.test(lower)) return "kimi-latest";
 
-  if (/llama/i.test(lower)) return "llama-3.3-70b-instruct";
+  // Llama models are gone (ST-4589): a historical llama id keeps its own name instead of being
+  // collapsed onto a llama catalog id.
 
-  if (/gpt.*sol/i.test(lower)) return "gpt-5.6-sol";
-  if (/gpt.*terra/i.test(lower)) return "gpt-5.6-terra";
-  if (/gpt.*luna/i.test(lower)) return "gpt-5.6-luna";
+  // OpenAI classes are version-aware: a dated or suffixed id ("openai/gpt-6.1-sol-20261101")
+  // collapses onto ITS OWN generation, never onto an older or newer one, so a retired row's stats
+  // stay separate from its successor's.
+  const gptClass = lower.match(/gpt-(\d+(?:\.\d+)?)-(astra|sol|terra|luna)(-pro)?/);
+  if (gptClass) {
+    const base = `gpt-${gptClass[1]}-${gptClass[2]}${gptClass[3] ?? ""}`;
+    return displaySlugFor(base) || base;
+  }
   if (/gpt-4o-mini/i.test(lower)) return "gpt-4o-mini";
   if (/gpt.*mini/i.test(lower) && !/gpt-4o/i.test(lower)) return "gpt-mini-latest";
   if (/gpt.*nano/i.test(lower)) return "gpt-5.4-nano";
