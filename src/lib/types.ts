@@ -1263,6 +1263,16 @@ export interface TradingPolicy {
    */
   redTeamFallbackModels?: string[];
   /**
+   * Owner-chosen rotation set for the Green Team seat (ST-4589): catalog display slugs the
+   * `__rotate__` option may pick from.  Only read while `llmModel` is the rotation sentinel.
+   * Undefined/empty = rotate over the whole eligible pool (the pre-ST-4589 behaviour).  A ticked
+   * model is honoured even if it is excluded from the default pool for cost.  Normalised by
+   * `normalizeRotationModelSelection` (src/lib/model-rotation-selection.ts) on save.
+   */
+  llmRotationModels?: string[];
+  /** Same as `llmRotationModels`, for the Red Team reviewer seat (`redTeamLlmModel`). */
+  redTeamRotationModels?: string[];
+  /**
    * The Green Team / proposer's provider-specific reasoning/thinking effort, for models that
    * support it (ignored by models without that knob). Per-team split 2026-07-10: this legacy
    * field is the PROPOSER's; the reviewer has its own `redTeamReasoningEffort` below.

@@ -71,7 +71,7 @@ import {
   STRATEGY_PROMPT_VERSION,
   THESIS_PLAYBOOK
 } from "./strategy-prompts";
-import { resolveLlmEndpoint } from "./llm-provider";
+import { CODE_CLI_NOT_CONFIGURED_MESSAGE, isUnavailableModelResolutionError, resolveLlmEndpoint } from "./llm-provider";
 import { isModelRotationSentinel, planRotationImplicitFallbacks, recordOpenRouterModelNotFound, resolveModelRotationForRun } from "./model-rotation";
 import { maybeOpenRouterCreditsExhaustedHint } from "./openrouter-credits";
 import { buildLlmRequestBody, llmAuthHeaders, extractLlmText, extractJsonPayload, detectLlmTruncation, toGeminiJsonSchema } from "./llm-call";
@@ -600,7 +600,7 @@ export async function runStrategyOnce(
     // gate). A run that aborts before that point (account unavailable, over budget, no candidate
     // cleared the threshold) writes nothing, so it never skews the rotation weights with a run that
     // generated no proposal.
-    const { commit: commitRotation, emptyReason, greenRotationPool, redRotationPool, ...rotationOverride } = await resolveModelRotationForRun({ userId, accountId: connectedAccountId, runId, policy });
+    const { commit: commitRotation, emptyReason, greenRotationPool, redRotationPool, greenRotationBackupPool, redRotationBackupPool, ...rotationOverride } = await resolveModelRotationForRun({ userId, accountId: connectedAccountId, runId, policy });
     if (isModelRotationSentinel(policy.llmModel) && !rotationOverride.llmModel) {
       // Do not collapse this into "Choose both team models" — rotation IS the model choice.
       const reason =
@@ -1233,6 +1233,8 @@ export async function runStrategyOnce(
       userId,
       greenRotationPool,
       redRotationPool,
+      greenRotationBackupPool,
+      redRotationBackupPool,
       greenPick: rotationOverride.llmModel,
       redPick: rotationOverride.redTeamLlmModel,
       greenPrimary: runLlmOverride.llmModel ?? rotationOverride.llmModel ?? gatePolicy.llmModel,
@@ -6531,10 +6533,17 @@ async function proposeTrades(input: {
     try {
       ep = resolveLlmEndpoint({ ...input.policy, llmModel: fallbackModel }, input.userId);
     } catch (error) {
-      // Only an unavailable Code CLI fallback is expected here. Do not hide DB/runtime failures.
-      if (!(error instanceof Error) || error.message !== "Code CLI is disabled or not configured for this owner") throw error;
-      console.warn(`[Strategy] skipping unavailable Code CLI fallback ${fallbackModel}`);
-      audit("strategy_llm_failover", { reason: "code_cli_unavailable", model: fallbackModel, action: "skip" }, input.userId, input.policy.connectedAccountId);
+      // Only an unavailable model is expected here: a Code CLI fallback whose route is not ready,
+      // or a Code CLI-only model while this user's Meta route is not Code CLI.  Do not hide
+      // DB/runtime failures.
+      if (!isUnavailableModelResolutionError(error)) throw error;
+      const detail = (error as Error).message;
+      // Accurate reason: "code_cli_unavailable" only when the Code CLI route itself is not ready;
+      // anything else (wrong route for a Code CLI-only model, no Code CLI adapter, a removed Llama
+      // id) is "model_unavailable", with the resolver's message carried for the reader.
+      const reason = detail === CODE_CLI_NOT_CONFIGURED_MESSAGE ? "code_cli_unavailable" : "model_unavailable";
+      console.warn(`[Strategy] skipping unavailable fallback ${fallbackModel}: ${detail}`);
+      audit("strategy_llm_failover", { reason, detail, model: fallbackModel, action: "skip" }, input.userId, input.policy.connectedAccountId);
       continue;
     }
     if (!ep.key) continue; // No credential for this provider's model — skip it rather than fail.
@@ -7480,7 +7489,8 @@ export function bullAttemptUsesJsonObjectTransport(
   if (transport === "anthropic-messages") return false;
   // Native MiniMax receives a schema prompt but no enforced response_format.
   if (provider === "minimax") return true;
-  const isDeepSeek = provider === "deepseek" || /^deepseek\//i.test(model);
+  // `~?`: the Flash row's OpenRouter id is the family alias ~deepseek/deepseek-flash-latest.
+  const isDeepSeek = provider === "deepseek" || /^~?deepseek\//i.test(model);
   if (isDeepSeek) return true;
   const isGemini = provider === "gemini" || /^google\//i.test(model);
   if (isGemini) return toGeminiJsonSchema(proposalSchema).unsupported;

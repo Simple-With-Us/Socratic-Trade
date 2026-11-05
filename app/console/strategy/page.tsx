@@ -27,6 +27,7 @@ import {
 // Pure curated-model DATA (no legacy UI components) — the same catalog the rest
 // of the app offers, so the console review picker stays consistent with it.
 import { CURATED_LLM_MODEL_GROUPS, CURATED_LLM_MODEL_IDS, CUSTOM_MODEL_ID_SEED, ROTATE_ALL_MODELS_ID, ROTATE_ALL_MODELS_LABEL } from "../../ui/llm-model-catalog";
+import { isRetiredCatalogModel } from "@/lib/llm-model-catalog";
 import {
   activateProfile,
   copyProfileToAccount,
@@ -57,6 +58,7 @@ import { Ago, Btn, Card, Chip, Empty, Field, LiveTag, RawNumInput, Select, TextA
 import { SaveStatus } from "../ui/save-status";
 import { Sheet } from "../ui/sheet";
 import { OverlaysPanel } from "./overlays-panel";
+import { RotationModelChecklist } from "./rotation-models";
 import { TuningDryRunPanel } from "./tuning-dry-run";
 
 /** Shipped default weights (src/lib/defaults.ts) — shown as ghost reference. */
@@ -191,9 +193,15 @@ function ModelSelect({
           {ROTATE_ALL_MODELS_LABEL}
         </option>
         {customCurrent && (
-          <option value={customCurrent} title="A model id outside the curated list, kept exactly as stored.">
-            {customCurrent} - custom id
-          </option>
+          isRetiredCatalogModel(customCurrent) ? (
+            <option value={customCurrent} title={"A model that left the curated list.  It keeps running exactly as stored until you pick another."}>
+              {customCurrent} - retired
+            </option>
+          ) : (
+            <option value={customCurrent} title="A model id outside the curated list, kept exactly as stored.">
+              {customCurrent} - custom id
+            </option>
+          )
         )}
         {CURATED_LLM_MODEL_GROUPS.map((group) => (
           <optgroup key={group.provider} label={group.label}>
@@ -438,6 +446,11 @@ function AccountScopedStrategyPage() {
   const [localRedTeamFallbackModels, setLocalRedTeamFallbackModels] = useState<string | null>(null);
   const autoSaveFallback = useAutoSave();
   const autoSaveRedTeamFallback = useAutoSave();
+  // Rotation Models checklists (ST-4589): optimistic local set per seat, saved on every tick.
+  const [localGreenRotationModels, setLocalGreenRotationModels] = useState<string[] | null>(null);
+  const [localRedRotationModels, setLocalRedRotationModels] = useState<string[] | null>(null);
+  const autoSaveGreenRotation = useAutoSave();
+  const autoSaveRedRotation = useAutoSave();
   // Per-team reasoning overlays (per-team split 2026-07-10). Proposer: plain optimistic value —
   // llmReasoningEffort always resolves (it has a "medium" default). Reviewer: "cleared" = an
   // optimistic explicit-unset (the "Same as Green Team" option) awaiting the server round-trip;
@@ -626,6 +639,27 @@ function AccountScopedStrategyPage() {
     });
   };
 
+  // Rotation Models (ST-4589): each tick saves the seat's whole set right away, like the model
+  // selects.  Writes are queued in order by savePolicy, so the last tick wins.
+  const greenRotationModels = localGreenRotationModels ?? policy.llmRotationModels ?? [];
+  const redRotationModels = localRedRotationModels ?? policy.redTeamRotationModels ?? [];
+  const commitGreenRotationModels = (next: string[]) => {
+    const prev = greenRotationModels;
+    setLocalGreenRotationModels(next);
+    autoSaveGreenRotation.save(() => savePolicy({ llmRotationModels: next }, policy.connectedAccountId).then(() => refresh()), {
+      onError: () => setLocalGreenRotationModels(prev),
+      errorTitle: "Green Team rotation models not saved"
+    });
+  };
+  const commitRedRotationModels = (next: string[]) => {
+    const prev = redRotationModels;
+    setLocalRedRotationModels(next);
+    autoSaveRedRotation.save(() => savePolicy({ redTeamRotationModels: next }, policy.connectedAccountId).then(() => refresh()), {
+      onError: () => setLocalRedRotationModels(prev),
+      errorTitle: "Red Team rotation models not saved"
+    });
+  };
+
   // Scoring weights: one factor per blur, skip the write if unchanged, blank, or unparseable.
   const commitWeight = (key: keyof ScoringWeights, saved: number) => {
     const raw = weightsDrafts[key];
@@ -707,6 +741,15 @@ function AccountScopedStrategyPage() {
                 <ModelStatsButton role="proposer" />
               </div>
             </Field>
+            {proposerRotates && (
+              <RotationModelChecklist
+                id="green-rotation-models"
+                seatLabel="Green Team"
+                value={greenRotationModels}
+                onChange={commitGreenRotationModels}
+                status={autoSaveGreenRotation.status}
+              />
+            )}
             {proposerRotates && <RotationEffortNote />}
             {proposerReasoningControl && (
               <SeatEffortSelect
@@ -755,6 +798,15 @@ function AccountScopedStrategyPage() {
                 <ModelStatsButton role="red-team" />
               </div>
             </Field>
+            {reviewerRotates && (
+              <RotationModelChecklist
+                id="red-rotation-models"
+                seatLabel="Red Team"
+                value={redRotationModels}
+                onChange={commitRedRotationModels}
+                status={autoSaveRedRotation.status}
+              />
+            )}
             {reviewerRotates && <RotationEffortNote />}
             {reviewerReasoningControl && (
               <SeatEffortSelect

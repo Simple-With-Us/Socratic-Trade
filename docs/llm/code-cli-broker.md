@@ -82,6 +82,22 @@ Request: authenticated `POST` to the configured endpoint, JSON only. It contains
 - `messages`: at most 100 plain-text `system | user | assistant` messages.
 - `maxOutputTokens`: bounded to 1..16000.
 - Optional `responseFormat` containing the existing structured-output request.
+- Optional `reasoningEffort`: one of `minimal | low | medium | high | xhigh | max`
+  (added 2026-11-04, ST-4589).  The broker must honour it by passing it to the
+  adapter as that CLI's reasoning-effort setting, and must never substitute the
+  CLI's own default when the field is present.  ST never sends `none` (MiniMax
+  and Muse reject it) and never sends `max` for a model id ending in
+  `-contributor` (Meta: max is "not available" for contributor models); ST clamps
+  that to `xhigh` before sending, and the broker must refuse rather than forward
+  a `max` for a contributor model if one ever arrives.  The field is absent for a
+  model with no documented effort setting (today MiniMax-M3); the broker then
+  sends none.  When enabled, ST always sends it for MiniMax-M3.1-Flash, whose provider
+  default is `max`.  **Off by default:** ST sends this field only when the
+  app environment sets `CODE_CLI_REASONING_EFFORT=true` (or `1`).  Without it
+  the request body is byte-identical to the original v1 contract, so a broker
+  that rejects unknown fields keeps working.  Enable it only after the deployed
+  broker is confirmed to accept and honour `reasoningEffort`; until then the
+  CLI runs at its own default effort (MiniMax-M3.1-Flash: `max`).
 - `capabilities: {tools:false, terminal:false, files:false, mcp:false}`.
 
 ST reconstructs this allowlist instead of forwarding the HTTP body or headers.

@@ -101,7 +101,7 @@ const API_KEY_CATALOG = [
     label: "DeepSeek",
     category: "LLM",
     required: false,
-    unlocks: "DeepSeek V4 models (deepseek-v4-flash / deepseek-v4-pro) for the Assistant and strategy. Note: requests are processed on DeepSeek's servers (China).",
+    unlocks: "DeepSeek V4.1 Flash and V4 Pro models (deepseek-flash-latest / deepseek-pro-latest) for the Assistant and strategy.\u00A0 Note: requests are processed on DeepSeek's servers (China).",
     docsUrl: "https://platform.deepseek.com/api_keys"
   },
   {
@@ -109,7 +109,7 @@ const API_KEY_CATALOG = [
     label: "Meta Model API",
     category: "LLM",
     required: false,
-    unlocks: "Muse Spark models (muse-spark-1.3, muse-spark-1.3-contributor) billed directly by Meta instead of through OpenRouter.  The contributor tier is much cheaper because Meta trains on your prompts and completions.",
+    unlocks: "Muse Spark and Muse Wonder models (muse-spark-1.3, muse-spark-1.3-contributor, muse-wonder-1.0) billed directly by Meta instead of through OpenRouter.\u00A0 The contributor tier is much cheaper because Meta trains on your prompts and completions.\u00A0 The Muse Wonder contributor models run only through the Code CLI route.",
     docsUrl: "https://dev.meta.ai/docs/overview"
   },
   {
