@@ -403,11 +403,11 @@ export const CHEAPER_MODEL: Record<string, string> = {
   // Meta / Muse (OpenRouter).  The Code CLI-only Wonder contributor ids have no downgrade: their
   // cost is unknown and their route is not the API route a cheaper model would use.
   // muse-spark-1.3-contributor ($0.10/$0.20) has no entry either: it is the cheapest Muse row.
-  // Retired Muse rows (2026-11-05) downgrade to the only offered API Muse row, the Spark
-  // contributor tier ($0.10/$0.20), which is cheaper than each of them.
-  "muse-wonder-1.0": "muse-spark-1.3-contributor",
-  "muse-spark-1.3": "muse-spark-1.3-contributor",
-  "muse-glimmer-30b": "muse-spark-1.3-contributor",
+  // PRIVACY RULE: an automatic downgrade never lands on a -contributor row (Meta trains on those
+  // prompts and completions) unless the source is itself a contributor row — no owner consent is
+  // asked here.  The retired non-contributor Muse rows (muse-spark-1.3, muse-glimmer-30b,
+  // muse-wonder-1.0) therefore have NO entry: no non-contributor Muse row is offered, so over
+  // budget means skip, as for Grok.  test/usage-budget.test.ts enforces the rule over the map.
   // MiniMax
   "minimax-m3": "minimax-m3.1-flash",
   // Gemini
