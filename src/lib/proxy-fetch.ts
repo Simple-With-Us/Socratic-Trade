@@ -333,17 +333,23 @@ export function resolveProxyLegTimeoutMs(env?: ProxyEnvSource): number {
 
 /**
  * Wrap a response body so `onSettle` fires exactly once when the body
- * finishes, errors, is cancelled by the reader, or the caller's signal
+ * finishes, errors, is cancelled by the reader, or the settle signal
  * aborts.  fetch() resolves at headers while the body is still an open
  * stream through the proxy, so anything held for the life of the request
  * (the leg timer, a concurrency slot) must release here, not at headers —
  * releasing at headers left res.json() without cancellation and let a
  * header-then-stall proxy hang past the caller budget, including long-lived
  * cascade reads.
+ *
+ * `settleSignal` is the signal whose abort settles the body wait even when
+ * the upstream never delivers another chunk and never errors: the caller's
+ * own signal on the untimed path, and the combined leg-timeout + caller
+ * signal on the timed path, so a header-then-stall body cannot hold its
+ * slot past the leg timeout just because the caller has budget left.
  */
 function wrapBodyUntilSettle(
   res: Response,
-  callerSignal: AbortSignal | undefined,
+  settleSignal: AbortSignal | undefined,
   onSettle: () => void
 ): Response {
   if (!res.body) {
@@ -355,20 +361,27 @@ function wrapBodyUntilSettle(
   const finish = () => {
     if (settled) return;
     settled = true;
-    if (onBodyAbort && callerSignal) callerSignal.removeEventListener("abort", onBodyAbort);
+    if (onBodyAbort && settleSignal) settleSignal.removeEventListener("abort", onBodyAbort);
     onBodyAbort = undefined;
     onSettle();
   };
   const upstream = res.body.getReader();
+  // Cancelling an already-errored upstream rejects with the stored error
+  // (spec behavior for reader.cancel), and teardown here has no one able to
+  // act on that rejection — the original error already reaches the consumer
+  // through the wrapped stream.  Route every cancel through this helper so
+  // it can never surface as an unhandled rejection.
+  const cancelUpstream = (reason?: unknown): Promise<void> =>
+    upstream.cancel(reason).catch(() => undefined);
   const wrappedBody = new ReadableStream<Uint8Array>({
     start(controller) {
-      if (callerSignal?.aborted) {
+      if (settleSignal?.aborted) {
         finish();
         controller.error(new DOMException("aborted", "AbortError"));
-        void upstream.cancel();
+        void cancelUpstream();
         return;
       }
-      if (callerSignal) {
+      if (settleSignal) {
         onBodyAbort = () => {
           try {
             controller.error(new DOMException("aborted", "AbortError"));
@@ -376,29 +389,45 @@ function wrapBodyUntilSettle(
             // already errored
           }
           finish();
-          void upstream.cancel();
+          void cancelUpstream();
         };
-        callerSignal.addEventListener("abort", onBodyAbort, { once: true });
+        settleSignal.addEventListener("abort", onBodyAbort, { once: true });
       }
     },
     async pull(controller) {
-      if (callerSignal?.aborted) {
+      if (settleSignal?.aborted) {
         finish();
         controller.error(new DOMException("aborted", "AbortError"));
-        await upstream.cancel();
+        await cancelUpstream();
         return;
       }
-      const { done, value } = await upstream.read();
-      if (done) {
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await upstream.read();
+      } catch (err) {
+        // A rejected read (mid-body socket reset, the leg timer disturbing
+        // the body) errors the wrapped stream for the consumer, but nothing
+        // else settles the body: without finish() here, onSettle never fires
+        // and whatever the body holds — the gate slot, the leg timer —
+        // leaks for the life of the process.
+        finish();
+        try {
+          controller.error(err);
+        } catch {
+          // already errored or cancelled
+        }
+        return;
+      }
+      if (chunk.done) {
         finish();
         controller.close();
         return;
       }
-      controller.enqueue(value);
+      controller.enqueue(chunk.value);
     },
     async cancel(reason) {
       finish();
-      await upstream.cancel(reason);
+      await cancelUpstream(reason);
     }
   });
   return new Response(wrappedBody, {
@@ -443,7 +472,14 @@ export function createProxiedFetch(
     // Gate first: the leg timer is only created after a slot is granted, so
     // queue wait never counts against the leg timeout.
     const slot = await sharedProxyConcurrencyGate.acquire(callerSignal);
-    if (slot.waitMs > 0) options?.onQueueWait?.(slot.waitMs);
+    try {
+      if (slot.waitMs > 0) options?.onQueueWait?.(slot.waitMs);
+    } catch (err) {
+      // A throwing queue-wait observer must not wedge the gate: the slot was
+      // already granted, so release it before the error propagates.
+      slot.release();
+      throw err;
+    }
     const withDispatcher = { ...(init ?? {}), dispatcher: agent } as RequestInit;
     if (!proxyTimeoutMs || proxyTimeoutMs <= 0) {
       try {
@@ -481,8 +517,12 @@ export function createProxiedFetch(
       const res = await baseFetch(input, { ...withDispatcher, signal: effectiveSignal });
       // The leg timer and the gate slot stay held until the body settles —
       // wrapBodyUntilSettle calls cleanup exactly once at that point (and
-      // immediately, via the same path, when there is no body).
-      return wrapBodyUntilSettle(res, callerSignal, cleanup);
+      // immediately, via the same path, when there is no body).  The body
+      // wait settles on the EFFECTIVE signal, not just the caller's: a
+      // header-then-stall body that never errors on its own is still
+      // released when the leg timeout fires, instead of holding its slot
+      // until the (possibly much larger) caller budget runs out.
+      return wrapBodyUntilSettle(res, effectiveSignal, cleanup);
     } catch (err) {
       cleanup();
       throw err;
