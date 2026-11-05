@@ -1,3 +1,9 @@
+## 2026-11-05 CLAUDE — iOS benchmark flow captions (ST-4589)
+
+**What.**  Two iOS caption strings (Results and Home) now say transfers are counted from the start of the day they land, matching the web copy and the benchmark math that merged in #5000.  String literals only.  Rollout: `docs/rollouts/2026-11-05-ios-benchmark-flow-captions.md`.
+
+**Next.**  Lands when the hosted iOS compile finishes inside the merge queue's 60-minute limit.
+
 ## 2026-11-05 CLAUDE — Catalog: MiniMax M3.1 Flash only, Muse contributor models only (ST-4589)
 
 **What.**  Owner correction to the ST-4589 catalog: MiniMax is M3.1 Flash only and Muse is the three contributor ids only (the two Wonder contributors are Code CLI only).  MiniMax M3, Muse Spark 1.3, Glimmer and Wonder 1.0 are retired: a seat's stored model keeps working, and they are out of the picker, rotation and failover.  An automatic budget downgrade never lands on a contributor row unless the source is one.  Rollout: `docs/rollouts/2026-11-05-minimax-flash-muse-contributor-only.md`.
