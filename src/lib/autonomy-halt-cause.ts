@@ -199,9 +199,22 @@ export function latestHaltBranch(account: AuditScope): { sql: string; params: st
   const missing = account.connectedAccountId == null;
   const accountSql = missing ? "connected_account_id IS NULL" : "connected_account_id = ?";
   const idParams = missing ? [account.userId] : [account.userId, account.connectedAccountId as string];
-  // EXISTS binds come first in the text, then the inner LIMIT 1.  The subquery
-  // returns one row before the handover check runs.
-  const params = [...idParams, ...idParams];
+  // APP_HALT_PREDICATE is split per kind so each latest-per-kind lookup is a
+  // (user_id, connected_account_id, kind) equality seek whose index order also
+  // yields the newest row with no sorter.  The previous OR form could not use
+  // idx_audit_events_account_kind_created for ordering, so SQLite planned it
+  // against idx_audit_events_user_created instead and walked the user's whole
+  // audit history newest-first until a halt row matched -- the multi-second
+  // event-loop hold ST-4561 measured.  max() over the two per-kind latest
+  // timestamps turns the outer lookup into a four-column equality seek.
+  const latestOf = (condition: string): string => `IFNULL((
+      SELECT created_at FROM audit_events
+      WHERE user_id = ? AND ${accountSql} AND ${condition}
+      ORDER BY created_at DESC LIMIT 1
+    ), '')`;
+  // EXISTS binds come first in the text, then the outer row, then the two
+  // per-kind latest lookups.
+  const params = [...idParams, ...idParams, ...idParams, ...idParams];
   const sql = `SELECT h.user_id, h.connected_account_id, h.kind, h.created_at, h.payload,
     EXISTS (
       SELECT 1 FROM audit_events e
@@ -210,14 +223,16 @@ export function latestHaltBranch(account: AuditScope): { sql: string; params: st
         AND e.id <> h.id
         AND ${handoverPredicate("e.kind", "e.payload")}
     ) AS handed_over
-  FROM (
-    SELECT id, user_id, connected_account_id, created_at, kind, payload
-    FROM audit_events
-    WHERE user_id = ? AND ${accountSql}
-      AND ${APP_HALT_PREDICATE}
-    ORDER BY created_at DESC
-    LIMIT 1
-  ) h`;
+  FROM audit_events h
+  WHERE h.user_id = ? AND h.${accountSql}
+    AND h.created_at = (
+      SELECT max(
+        ${latestOf("kind = 'broker_placement_auto_halted'")},
+        ${latestOf(`kind = 'policy_violation_drawdown' AND ${jsonField("$.revertedTo")} = 'halted'`)}
+      )
+    )
+    AND ${APP_HALT_PREDICATE}
+  LIMIT 1`;
   return { sql, params };
 }
 
@@ -226,7 +241,7 @@ function latestAppHalts(db: ReturnType<typeof getDb>, accounts: readonly AuditSc
   const rows: LatestAppHaltRow[] = [];
   for (const chunk of chunkItems(accounts, HALT_AUDIT_ACCOUNT_CHUNK)) {
     const branches = chunk.map(latestHaltBranch);
-    const sql = branches.map((branch) => branch.sql).join("\nUNION ALL\n");
+    const sql = branches.map((branch) => `SELECT * FROM (${branch.sql})`).join("\nUNION ALL\n");
     const params = branches.flatMap((branch) => branch.params);
     rows.push(...(db.prepare(sql).all(...params) as LatestAppHaltRow[]));
   }
@@ -660,7 +675,7 @@ function haltAuditChunks(accounts: readonly AuditScope[]): HaltAuditChunk[] {
   return chunkItems(accounts, HALT_AUDIT_ACCOUNT_CHUNK).map((chunk) => {
     const branches = chunk.map(latestHaltBranch);
     return {
-      sql: branches.map((branch) => branch.sql).join("\nUNION ALL\n"),
+      sql: branches.map((branch) => `SELECT * FROM (${branch.sql})`).join("\nUNION ALL\n"),
       params: branches.flatMap((branch) => branch.params),
       scopes: chunk
     };

@@ -56,7 +56,7 @@ describe("ST-4561 audit_events composite index", () => {
     expect(details.join(" | ")).not.toMatch(/TEMP B-TREE FOR ORDER BY/i);
   });
 
-  it("the same statement sorts with a temp b-tree when the index is absent (control)", () => {
+  it("the same statement falls back to the per-kind walk when the index is absent (control)", () => {
     const db = getDb();
     db.exec(`DROP INDEX IF EXISTS ${INDEX}`);
     try {
@@ -65,7 +65,11 @@ describe("ST-4561 audit_events composite index", () => {
       // eslint-disable-next-line no-console
       console.log("PLAN WITHOUT INDEX:", details.join(" | "));
       expect(details.join(" | ")).not.toContain(INDEX);
-      expect(details.join(" | ")).toMatch(/TEMP B-TREE FOR ORDER BY/i);
+      // The pre-v100 fallback: per-kind ordering indexes instead of one
+      // (user, account, kind) seek.  (No sorter appears either way: the older
+      // (user_id, created_at) indexes already satisfy ORDER BY, which is why
+      // the original temp-b-tree control premise did not hold in this schema.)
+      expect(details.join(" | ")).toContain("idx_audit_events_kind_user_created");
     } finally {
       db.exec(
         `CREATE INDEX IF NOT EXISTS ${INDEX} ON audit_events (user_id, connected_account_id, kind, created_at DESC)`

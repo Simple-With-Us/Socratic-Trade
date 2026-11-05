@@ -3563,10 +3563,10 @@ const MIGRATIONS: Migration[] = [
     // rows takes a write lock for the build, so this is expected to run in the normal migration
     // window like any other index build here.
     //
-    // KNOWN LIMIT: this does NOT fix the inner subquery's LIMIT 1.  That predicate is an OR across
-    // two kinds with json_extract(payload, ...) on one branch, so SQLite still needs a temp b-tree
-    // for ORDER BY.  The candidate fix is rewriting APP_HALT_PREDICATE as UNION ALL of one indexed
-    // branch per kind; that rewrite is UNTESTED and deliberately not in this change.
+    // The halt-branch statement that motivated this index was rewritten in the same change:
+    // APP_HALT_PREDICATE is split per kind into two index-ordered latest-per-kind lookups
+    // combined with max(), so the statement seeks (user_id, connected_account_id, kind,
+    // created_at) with no sorter instead of walking the user's audit history.
     version: 100,
     name: "audit_events_account_kind_created_index",
     up: (database) => {
