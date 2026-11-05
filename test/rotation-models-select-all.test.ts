@@ -10,10 +10,13 @@ describe("Rotation Models checklist Select All", () => {
   const optIn = CURATED_LLM_MODEL_IDS.filter((id) => ROTATION_EXCLUDED_DISPLAY_SLUGS.includes(id) || isCodeCliOnlyModel(id));
 
   it("ticks the default pool and never an opt-in-only model", () => {
-    expect(optIn).toEqual(expect.arrayContaining(["claude-opus-latest", "claude-fable-latest", "muse-wonder-1.0", "muse-wonder-1.0-contributor", "muse-wonder-full-1.0-contributor"]));
+    expect(optIn).toEqual(expect.arrayContaining(["claude-opus-latest", "claude-fable-latest", "muse-wonder-1.0-contributor", "muse-wonder-full-1.0-contributor"]));
     const all = selectAllRotationModels([]);
     expect(new Set(all)).toEqual(new Set(CATALOG_ROTATION_POOL));
     for (const model of optIn) expect(all).not.toContain(model);
+    // Owner 2026-11-05: the Spark contributor is the only Muse row Select All ticks.
+    expect(all.filter((id) => id.startsWith("muse-"))).toEqual(["muse-spark-1.3-contributor"]);
+    expect(all.filter((id) => id.startsWith("minimax-"))).toEqual(["minimax-m3.1-flash"]);
   });
 
   it("keeps an already-ticked opt-in model and stored custom ids", () => {

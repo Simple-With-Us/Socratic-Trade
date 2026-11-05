@@ -385,17 +385,7 @@ export const LLM_MODEL_CATALOG: readonly LlmCatalogEntry[] = [
     lineage: "deepseek-pro",
     predecessors: ["deepseek-v4-pro-0813", "deepseek-r1"]
   },
-  {
-    displaySlug: "minimax-m3",
-    openRouterSlug: "minimax/minimax-m3",
-    nativeSlug: "MiniMax-M3",
-    provider: "minimax",
-    label: "minimax-m3 — general-purpose reasoning",
-    tier: "$",
-    aliases: ["minimax/minimax-m3"],
-    lineage: "minimax",
-    predecessors: ["minimax-m2.7"]
-  },
+  // MiniMax: M3.1 Flash is the only offered row (owner 2026-11-05); minimax-m3 is retired below.
   {
     displaySlug: "minimax-m3.1-flash",
     openRouterSlug: "minimax/minimax-m3.1-flash",
@@ -407,28 +397,9 @@ export const LLM_MODEL_CATALOG: readonly LlmCatalogEntry[] = [
     lineage: "minimax-flash",
     predecessors: []
   },
-  {
-    displaySlug: "muse-wonder-1.0",
-    openRouterSlug: "meta/muse-wonder",
-    nativeSlug: "muse-wonder-1.0",
-    provider: "meta",
-    label: "muse-wonder-1.0 — Meta's most capable Muse reasoning",
-    tier: "$$$",
-    aliases: ["meta/muse-wonder", "meta/muse-wonder-1.0"],
-    lineage: "meta-wonder",
-    predecessors: []
-  },
-  {
-    displaySlug: "muse-spark-1.3",
-    openRouterSlug: "meta/muse-spark-1.3",
-    nativeSlug: "muse-spark-1.3",
-    provider: "meta",
-    label: "muse-spark-1.3 — multimodal reasoning and agents",
-    tier: "$$",
-    aliases: ["meta/muse-spark-1.3"],
-    lineage: "meta-spark",
-    predecessors: []
-  },
+  // Meta Muse: exactly the three contributor models are offered (owner 2026-11-05).  Spark 1.3,
+  // Wonder 1.0 and Glimmer 30B are retired below.  A contributor row takes no predecessor from its
+  // retired base model: same class, but not an older generation.
   {
     // Contributor tier: Meta discounts the price in exchange for permission to train on prompts
     // and completions.  Do not use it for anything the user would not want Meta to keep.
@@ -440,17 +411,6 @@ export const LLM_MODEL_CATALOG: readonly LlmCatalogEntry[] = [
     tier: "$",
     aliases: ["meta/muse-spark-1.3-contributor"],
     lineage: "meta-spark",
-    predecessors: []
-  },
-  {
-    displaySlug: "muse-glimmer-30b",
-    openRouterSlug: "meta/muse-glimmer-30b",
-    nativeSlug: "muse-glimmer-30b",
-    provider: "meta",
-    label: "muse-glimmer-30b — efficient agent model",
-    tier: "$",
-    aliases: ["meta/muse-glimmer-30b"],
-    lineage: "meta-glimmer",
     predecessors: []
   },
   // Muse Code contributor ids (owner 2026-11-04).  They exist only behind the Code CLI broker
@@ -529,6 +489,56 @@ export const RETIRED_LLM_MODEL_CATALOG: readonly LlmCatalogEntry[] = [
     aliases: ["openai/gpt-5.6-luna"],
     lineage: "openai-luna",
     predecessors: ["gpt-5.4", "gpt-4o-mini"],
+    retired: true
+  },
+  // Owner 2026-11-05: "no I don't want minimax-m3 and for muse I said only the 3 contributor
+  // models".  Same slugs, price, class and effort handling as when they were offered.
+  {
+    displaySlug: "minimax-m3",
+    openRouterSlug: "minimax/minimax-m3",
+    nativeSlug: "MiniMax-M3",
+    provider: "minimax",
+    label: "minimax-m3 — retired: use minimax-m3.1-flash",
+    tier: "$",
+    aliases: ["minimax/minimax-m3"],
+    lineage: "minimax",
+    predecessors: ["minimax-m2.7"],
+    retired: true
+  },
+  {
+    displaySlug: "muse-wonder-1.0",
+    openRouterSlug: "meta/muse-wonder",
+    nativeSlug: "muse-wonder-1.0",
+    provider: "meta",
+    label: "muse-wonder-1.0 — retired: only the Muse contributor models are offered",
+    tier: "$$$",
+    aliases: ["meta/muse-wonder", "meta/muse-wonder-1.0"],
+    lineage: "meta-wonder",
+    predecessors: [],
+    retired: true
+  },
+  {
+    displaySlug: "muse-spark-1.3",
+    openRouterSlug: "meta/muse-spark-1.3",
+    nativeSlug: "muse-spark-1.3",
+    provider: "meta",
+    label: "muse-spark-1.3 — retired: only the Muse contributor models are offered",
+    tier: "$$",
+    aliases: ["meta/muse-spark-1.3"],
+    lineage: "meta-spark",
+    predecessors: [],
+    retired: true
+  },
+  {
+    displaySlug: "muse-glimmer-30b",
+    openRouterSlug: "meta/muse-glimmer-30b",
+    nativeSlug: "muse-glimmer-30b",
+    provider: "meta",
+    label: "muse-glimmer-30b — retired: only the Muse contributor models are offered",
+    tier: "$",
+    aliases: ["meta/muse-glimmer-30b"],
+    lineage: "meta-glimmer",
+    predecessors: [],
     retired: true
   }
 ];
@@ -613,11 +623,10 @@ export function nativeSlugFor(model: string | null | undefined): string {
 
 // Keep expensive models available for explicit owner selection, but out of automatic rotation
 // so a daily run batch stays within the owner's $4/day OpenRouter key cap.
-// (gpt-6-astra-pro left the catalog 2026-11-04; muse-wonder-1.0 is excluded on cost like Opus.)
+// (gpt-6-astra-pro and muse-wonder-1.0 are retired rows now, so neither needs listing here.)
 export const ROTATION_EXCLUDED_DISPLAY_SLUGS: readonly string[] = [
   "claude-opus-latest",
-  "claude-fable-latest",
-  "muse-wonder-1.0"
+  "claude-fable-latest"
 ];
 
 /**

@@ -79,8 +79,11 @@ describe("usage-budget: cheaperModel", () => {
     expect(budget.cheaperModel("mistral-large-latest")).toBe("mistral-small-latest");
     // The Spark contributor tier is already cheaper than Glimmer.
     expect(budget.cheaperModel("muse-spark-1.3-contributor")).toBeUndefined();
-    expect(budget.cheaperModel("muse-spark-1.3")).toBe("muse-glimmer-30b");
-    expect(budget.cheaperModel("meta/muse-spark-1.3")).toBe("meta/muse-glimmer-30b");
+    // Retired NON-contributor Muse rows never downgrade onto the train-on-your-prompts contributor
+    // tier without consent; no non-contributor Muse row is offered, so over budget means skip.
+    expect(budget.cheaperModel("muse-spark-1.3")).toBeUndefined();
+    expect(budget.cheaperModel("meta/muse-spark-1.3")).toBeUndefined();
+    expect(budget.cheaperModel("muse-glimmer-30b")).toBeUndefined();
     expect(budget.cheaperModel("minimax-m3")).toBe("minimax-m3.1-flash");
     expect(budget.cheaperModel("minimax-m3.1-flash")).toBeUndefined(); // no cheaper MiniMax row
     // ST-4589 (2026-11-04): four OpenAI classes, astra -> sol -> terra -> luna.
@@ -90,21 +93,40 @@ describe("usage-budget: cheaperModel", () => {
     expect(budget.cheaperModel("gpt-6-luna")).toBe("gpt-6-luna");
     expect(budget.cheaperModel("gpt-6-astra-pro")).toBe("gpt-6.1-sol"); // retired, still downgrades
     expect(budget.cheaperModel("gpt-5.6-sol")).toBe("gpt-6.1-terra");
-    expect(budget.cheaperModel("muse-wonder-1.0")).toBe("muse-spark-1.3");
+    expect(budget.cheaperModel("muse-wonder-1.0")).toBeUndefined();
     expect(budget.cheaperModel("muse-wonder-1.0-contributor")).toBeUndefined(); // Code CLI only, cost unknown
     expect(budget.cheaperModel(undefined)).toBeUndefined();
+  });
+});
+
+describe("usage-budget: no automatic downgrade onto a contributor (train-on-prompts) tier (ST-4589 review)", () => {
+  it("only a contributor row may downgrade onto a contributor row, across the whole map", async () => {
+    const { displaySlugFor } = await import("../src/lib/llm-model-catalog");
+    const contributor = (id: string) => /-contributor$/i.test(displaySlugFor(id) || id);
+    for (const [from, to] of Object.entries(budget.CHEAPER_MODEL)) {
+      if (contributor(to)) expect(contributor(from), `${from} -> ${to} would move a run onto a contributor tier`).toBe(true);
+    }
+    // Including through cheaperModel's alias/prefix resolution for every spelling of the retired rows.
+    for (const id of ["muse-spark-1.3", "meta/muse-spark-1.3", "muse-glimmer-30b", "meta/muse-glimmer-30b", "muse-wonder-1.0", "meta/muse-wonder"]) {
+      const target = budget.cheaperModel(id);
+      expect(target === undefined || !contributor(target), `${id} -> ${target}`).toBe(true);
+    }
+    // MiniMax is unaffected.
+    expect(budget.cheaperModel("minimax-m3")).toBe("minimax-m3.1-flash");
   });
 });
 
 describe("usage-budget: every downgrade arrow is strictly cheaper (ST-4589 review)", () => {
   it("lands each CHEAPER_MODEL key on a lower blended list price than the row it is served as", async () => {
     const { estimateLlmCostUsd } = await import("../src/lib/llm-usage");
-    const { displaySlugFor } = await import("../src/lib/llm-model-catalog");
+    const { displaySlugFor, CATALOG_DISPLAY_SLUGS } = await import("../src/lib/llm-model-catalog");
     // Blended 3:1 input:output, priced as the row the id actually resolves to.
     const blended = (id: string) => estimateLlmCostUsd(displaySlugFor(id) || id, 3_000_000, 1_000_000)!;
     for (const [from, to] of Object.entries(budget.CHEAPER_MODEL)) {
       if (from === to) continue; // the terminal row maps to itself (= no cheaper tier; skip)
       expect(displaySlugFor(to), `${from} -> ${to} must be a catalog row`).toBeTruthy();
+      // Every target is an OFFERED row, never a retired one (owner 2026-11-05).
+      expect(CATALOG_DISPLAY_SLUGS, `${from} -> ${to} must be offered`).toContain(to);
       expect(blended(to), `${from} (${blended(from)}) -> ${to} (${blended(to)})`).toBeLessThan(blended(from));
     }
   });
@@ -259,18 +281,16 @@ describe("usage-budget: evaluateBudgetForRun", () => {
     expect(decision.llmModel).toBe("openai/gpt-6-luna");
   });
 
-  it("downgrades OpenRouter Muse Spark to Muse Glimmer when over budget", async () => {
+  it("skips (never silently moves onto the contributor tier) a stored retired Muse Spark when over budget", async () => {
     upsertUserApiKey("local", "openrouter", "openrouter-placeholder");
     const decision = await budget.evaluateBudgetForRun(
       "local",
       { llmModel: "muse-spark-1.3" },
       { status: status([{ name: "openrouter", status: "exceeded" }]) }
     );
-    expect(decision).toMatchObject({
-      skip: false,
-      downgraded: true,
-      llmModel: "muse-glimmer-30b"
-    });
+    expect(decision.skip).toBe(true);
+    expect(decision.downgraded).toBe(false);
+    expect(decision.llmModel).toBeUndefined();
   });
 });
 

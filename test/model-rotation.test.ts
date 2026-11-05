@@ -152,7 +152,7 @@ describe("MODEL_ROTATION_POOL (curated catalog minus exclusions)", () => {
     const { MODEL_ROTATION_POOL } = await import("../src/lib/model-rotation");
     const { CURATED_LLM_MODEL_IDS } = await import("../app/ui/llm-model-catalog");
     // Cost exclusions plus the Code CLI-only rows: all rotate only when explicitly ticked.
-    const excluded = ["claude-opus-latest", "claude-fable-latest", "muse-wonder-1.0", "muse-wonder-1.0-contributor", "muse-wonder-full-1.0-contributor"];
+    const excluded = ["claude-opus-latest", "claude-fable-latest", "muse-wonder-1.0-contributor", "muse-wonder-full-1.0-contributor"];
     for (const model of excluded) {
       expect(MODEL_ROTATION_POOL).not.toContain(model);
       expect(CURATED_LLM_MODEL_IDS).toContain(model);
@@ -343,15 +343,16 @@ describe("eligibleRotationPool (Code CLI-only models, ST-4589)", () => {
     vi.stubEnv("CODE_CLI_BROKER_URL", "https://broker.internal/generate");
     vi.stubEnv("CODE_CLI_BROKER_TOKEN", "test-broker-token");
     setUserSetting("local", "llm_route_meta", "code-cli");
-    const on = await eligibleRotationPool("local", cliOnly);
+    // Glimmer is a RETIRED row now (owner 2026-11-05), so it only reaches rotation as a stored
+    // candidate; it also has no Code CLI adapter.  While Meta is on Code CLI it is refused as
+    // UNAVAILABLE (so a fallback loop skips it) and never enters the pool, a pick, or a failover chain.
+    const on = await eligibleRotationPool("local", [...cliOnly, "muse-glimmer-30b"]);
     for (const model of cliOnly) expect(on.pool).toContain(model);
-    // Glimmer has no Code CLI adapter: while Meta is on Code CLI it is refused as UNAVAILABLE (so a
-    // fallback loop skips it) and never enters the pool, a pick, or an implicit failover chain.
     const { resolveLlmEndpoint, LlmModelUnavailableError } = await import("../src/lib/llm-provider");
     expect(() => resolveLlmEndpoint({ llmModel: "muse-glimmer-30b" }, "local")).toThrow(LlmModelUnavailableError);
     expect(on.pool).not.toContain("muse-glimmer-30b");
     expect(on.skipped).toContain("muse-glimmer-30b");
-    expect(on.pool).toContain("muse-spark-1.3");
+    expect(on.pool).toContain("muse-spark-1.3-contributor");
     const onChain = planRotationImplicitFallbacks({ greenRotationPool: on.pool, greenPick: on.pool[0], greenPrimary: on.pool[0] });
     expect(onChain.green).not.toContain("muse-glimmer-30b");
     // Selected but not ready: excluded again.

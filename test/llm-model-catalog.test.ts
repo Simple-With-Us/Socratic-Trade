@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 process.env.DATABASE_URL = `file:${path.join(os.tmpdir(), `llm-catalog-test-${Date.now()}.db`)}`;
 
-// 26 offered rows as of 2026-11-04 (ST-4589: four OpenAI classes, latest variants, MiniMax M3.1
+// 22 offered rows as of 2026-11-05 (owner: no minimax-m3; Muse = the 3 contributor models); 26 on 2026-11-04 (ST-4589: four OpenAI classes, latest variants, MiniMax M3.1
 // Flash, Muse Wonder and the two Code CLI-only Wonder contributor rows).  See
 // docs/rollouts/2026-09-18-model-catalog-cleanup.md for the earlier removals.
 const OWNER_ROWS: Array<[string, string, string]> = [
@@ -12,12 +12,8 @@ const OWNER_ROWS: Array<[string, string, string]> = [
   ["gpt-6.1-sol", "openai/gpt-6.1-sol", "gpt-6.1-sol"],
   ["gpt-6.1-terra", "openai/gpt-6.1-terra", "gpt-6.1-terra"],
   ["gpt-6-luna", "openai/gpt-6-luna", "gpt-6-luna"],
-  ["minimax-m3", "minimax/minimax-m3", "MiniMax-M3"],
   ["minimax-m3.1-flash", "minimax/minimax-m3.1-flash", "MiniMax-M3.1-Flash"],
-  ["muse-wonder-1.0", "meta/muse-wonder", "muse-wonder-1.0"],
-  ["muse-spark-1.3", "meta/muse-spark-1.3", "muse-spark-1.3"],
   ["muse-spark-1.3-contributor", "meta/muse-spark-1.3-contributor", "muse-spark-1.3-contributor"],
-  ["muse-glimmer-30b", "meta/muse-glimmer-30b", "muse-glimmer-30b"],
   ["claude-sonnet-latest", "~anthropic/claude-sonnet-latest", "claude-sonnet-5"],
   ["claude-haiku-latest", "~anthropic/claude-haiku-latest", "claude-haiku-5-5"],
   ["claude-opus-latest", "~anthropic/claude-opus-latest", "claude-opus-5-5"],
@@ -44,7 +40,13 @@ const CODE_CLI_ONLY_ROWS: Array<[string, string]> = [
 const RETIRED_ROWS: Array<[string, string, string, string]> = [
   ["gpt-6-astra-pro", "openai/gpt-6-astra-pro", "gpt-6-astra-pro", "openai-astra"],
   ["gpt-5.6-sol", "openai/gpt-5.6-sol", "gpt-5.6-sol", "openai-sol"],
-  ["gpt-5.6-luna", "openai/gpt-5.6-luna", "gpt-5.6-luna", "openai-luna"]
+  ["gpt-5.6-luna", "openai/gpt-5.6-luna", "gpt-5.6-luna", "openai-luna"],
+  // Owner 2026-11-05: MiniMax M3 and the non-contributor Muse models left the picker.  Same
+  // OpenRouter slugs as origin/main (meta/muse-wonder was new in this branch).
+  ["minimax-m3", "minimax/minimax-m3", "MiniMax-M3", "minimax"],
+  ["muse-spark-1.3", "meta/muse-spark-1.3", "muse-spark-1.3", "meta-spark"],
+  ["muse-glimmer-30b", "meta/muse-glimmer-30b", "muse-glimmer-30b", "meta-glimmer"],
+  ["muse-wonder-1.0", "meta/muse-wonder", "muse-wonder-1.0", "meta-wonder"]
 ];
 
 const ALIASES: Array<[string, string]> = [
@@ -127,7 +129,22 @@ describe("three-column LLM catalog", () => {
       expect(catalog.modelClassFor(display), display).toBe(modelClass);
       expect(catalog.isRetiredCatalogModel(display), display).toBe(true);
       expect(catalog.CATALOG_ROTATION_POOL, display).not.toContain(display);
+      for (const group of CURATED_LLM_MODEL_GROUPS as ReadonlyArray<{ options: ReadonlyArray<{ value?: string }> }>) {
+        expect(group.options.map((o) => o.value), display).not.toContain(display);
+      }
     }
+    // Owner 2026-11-05: Meta is exactly the three contributor models; MiniMax is only M3.1 Flash.
+    const groupValues = (provider: string) =>
+      ((CURATED_LLM_MODEL_GROUPS as ReadonlyArray<{ provider?: string; options: ReadonlyArray<{ value?: string }> }>)
+        .find((g) => g.provider === provider)?.options ?? []).map((o) => o.value);
+    expect(groupValues("meta")).toEqual(["muse-spark-1.3-contributor", "muse-wonder-1.0-contributor", "muse-wonder-full-1.0-contributor"]);
+    expect(groupValues("minimax")).toEqual(["minimax-m3.1-flash"]);
+    // Stored retired Muse/MiniMax ids keep their request shape (effort capability, headroom).
+    const { reasoningCapabilityForModel } = await import("../src/lib/llm-reasoning");
+    expect(reasoningCapabilityForModel("meta/muse-spark-1.3")?.options.map((o) => o.value)).toContain("max");
+    expect(reasoningCapabilityForModel("minimax/minimax-m3")).toBeUndefined();
+    expect(catalog.catalogEntryFor("muse-spark-1.3-contributor")?.predecessors).toEqual([]);
+    expect(catalog.catalogEntryFor("minimax-m3.1-flash")?.predecessors).toEqual([]);
     // A stored gpt-6-astra-pro is served exactly as before: OpenRouter only, same wire slug.
     expect(catalog.catalogEntryFor("gpt-6-astra-pro")?.openRouterOnly).toBe(true);
     upsertUserApiKey("catalog-retired-user", "openrouter", "sk-or-catalog-retired");
@@ -172,7 +189,7 @@ describe("three-column LLM catalog", () => {
       expect(catalog.isCodeCliOnlyModel(display), display).toBe(true);
     }
     expect(catalog.catalogEntryFor("")).toBeUndefined();
-    expect(catalog.ROTATION_EXCLUDED_DISPLAY_SLUGS).toContain("muse-wonder-1.0");
+    expect(catalog.ROTATION_EXCLUDED_DISPLAY_SLUGS).not.toContain("muse-wonder-1.0"); // retired now
     expect(catalog.ROTATION_EXCLUDED_DISPLAY_SLUGS).not.toContain("gpt-6-astra-pro");
   });
 
