@@ -60,7 +60,7 @@ import {
 import { NasdaqCalendarEnrichmentProvider } from "./nasdaq-calendar-provider";
 import { WisesheetsEnrichmentProvider, resolveWisesheetsApiKey } from "./wisesheets-provider";
 import { SimFinEnrichmentProvider, resolveSimFinApiKey } from "./simfin-provider";
-import { MarketauxEnrichmentProvider, resolveMarketauxApiKey } from "./marketaux-provider";
+import { MarketauxEnrichmentProvider } from "./marketaux-provider";
 import { scoreHeadlineRelevance } from "./news-relevance";
 import { resolveSourceBool, resolveSourceNumber } from "./source-settings";
 import { getStreamedHeadlines } from "./streams/news-store";
@@ -1206,7 +1206,7 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   // + suppliesFields, so the free-first planner's wave gate only spends it on symbols still
   // missing headlines/sentiment after the free wave resolved.
   const marketaux = resolveApiKeyWithSource("marketaux", userId);
-  const marketauxKey = resolveMarketauxApiKey(userId);
+  const marketauxKey = marketaux.key;
   if (marketauxKey) providers.push(withHealthLane(new MarketauxEnrichmentProvider(marketauxKey), marketaux.source === "user" ? "user" : "env"));
   if (roic.key) providers.push(withHealthLane(new RoicAiEnrichmentProvider(roic.key, roic.source, userId), roic.source));
   // Massive REST: REAL second short-interest source (FINRA short interest / free float) for the

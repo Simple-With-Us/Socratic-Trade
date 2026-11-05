@@ -225,7 +225,10 @@ async function commitRecoveredOpeningStopPlan(input: {
     let basis = input.price;
     try {
       const positions = await input.gateway.getEquityPositions(input.accountNumber);
-      basis = positions.find((position) => normalizeSymbol(position.symbol) === normalizeSymbol(proposal.symbol))?.averageCost ?? basis;
+      // Only a positive broker averageCost replaces the fill-price basis: a position
+      // reporting 0 (e.g. just-opened, not yet priced) must not discard a usable basis.
+      const brokerBasis = positions.find((position) => normalizeSymbol(position.symbol) === normalizeSymbol(proposal.symbol))?.averageCost;
+      if (brokerBasis != null && brokerBasis > 0) basis = brokerBasis;
     } catch {
       // The broker fill price remains a valid fallback for a fresh position.
     }

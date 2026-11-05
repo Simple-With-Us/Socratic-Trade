@@ -446,6 +446,33 @@ describe("fetchDailyOHLC", () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("api.marketstack.com"))).toBe(true);
   });
 
+  it("on a deep request, a fuller later short series displaces an earlier shorter candidate (H2 control)", async () => {
+    connectTradier("tradier-h2-control-key");
+    process.env.MARKETSTACK_API_KEY = "mstack-h2-control-key";
+    // Both tiers miss the 5y startDate; Marketstack's 3-bar series is fuller than
+    // Tradier's 2-bar stub, so the Marketstack series must be the one returned.
+    const marketstackShort = JSON.stringify({
+      data: [
+        { date: "2026-06-15T00:00:00+0000", open: 20, high: 21, low: 19, close: 20.5, volume: 3000 },
+        { date: "2026-06-16T00:00:00+0000", open: 20.5, high: 22, low: 20, close: 21.0, volume: 3500 },
+        { date: "2026-06-17T00:00:00+0000", open: 21.0, high: 22, low: 20, close: 21.8, volume: 4000 }
+      ]
+    });
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).includes("api.tradier.com")) return new Response(tradierBody, { status: 200 });
+      if (String(url).includes("api.marketstack.com")) return new Response(marketstackShort, { status: 200 });
+      return new Response("unexpected source", { status: 500 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bars = await fetchDailyOHLC("AAPL", Date.UTC(2026, 5, 18));
+
+    expect(bars).not.toBeNull();
+    expect(bars!.length).toBe(3);
+    expect(bars![0]).toMatchObject({ close: 20.5 });
+    expect(bars![bars!.length - 1]).toMatchObject({ close: 21.8 });
+  });
+
   it("retries a Yahoo HTTP 429 with exponential backoff before succeeding, instead of giving up after one try", async () => {
     let yahooCalls = 0;
     const fetchMock = vi.fn(async (url: string) => {

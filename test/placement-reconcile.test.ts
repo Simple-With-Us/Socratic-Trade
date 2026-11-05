@@ -363,10 +363,13 @@ describe("inline placement-error reconciliation via executeProposal", () => {
     const { executeProposal, flagStalePlacingIntents } = await import("../src/lib/strategy");
     const { getDb, getStopPlans, listFillEventsByProposalId } = await import("../src/lib/db");
     getDb().exec("CREATE TRIGGER fail_zero_basis_fill BEFORE INSERT ON fill_events BEGIN SELECT RAISE(ABORT, 'forced fill receipt failure'); END;");
-    await executeProposal(proposalId, userId).then(
+    const receiptError = await executeProposal(proposalId, userId).then(
       () => { throw new Error("expected receipt failure throw"); },
-      () => {}
+      (error: unknown) => error
     );
+    // Control: the trigger must be what actually failed the fill receipt, otherwise the
+    // stale-recovery path below proves nothing.
+    expect(String((receiptError as Error)?.message ?? receiptError)).toContain("forced fill receipt failure");
     getDb().exec("DROP TRIGGER fail_zero_basis_fill");
     getDb().prepare("UPDATE trade_proposals SET created_at = ? WHERE id = ? AND user_id = ?").run(
       new Date(Date.now() - 10 * 60_000).toISOString(),

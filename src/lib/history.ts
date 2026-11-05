@@ -482,8 +482,10 @@ export async function fetchDailyOHLC(
     let liveBars: OHLCBar[] | null;
     try {
       liveBars = await source.fetch();
-    } catch {
-      // A pre-flight throw in one tier must not abort the whole cascade (H6).
+    } catch (error) {
+      // A pre-flight throw in one tier must not abort the whole cascade (H6), but a
+      // failed provider must be distinguishable from genuinely unavailable history.
+      console.error(`[history] ${source.sourceId} failed for ${symbol}:`, error);
       continue;
     }
     if (liveBars && liveBars.length >= 2) {
@@ -492,7 +494,11 @@ export async function fetchDailyOHLC(
         !source.confirmsListingStart &&
         !localSeriesCovers(symbol, liveBars, startDate, true)
       ) {
-        deepShortCandidate ??= { source, bars: liveBars };
+        // Hold the fullest short series seen so far, not the first: a later tier that
+        // still misses startDate but returns more bars is the better fallback.
+        if (deepShortCandidate === undefined || liveBars.length > deepShortCandidate.bars.length) {
+          deepShortCandidate = { source, bars: liveBars };
+        }
         continue;
       }
       return acceptLiveBars(source, liveBars);
