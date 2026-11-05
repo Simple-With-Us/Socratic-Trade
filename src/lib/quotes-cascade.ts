@@ -845,7 +845,7 @@ export async function fetchFreshQuotesCascade(
   // Alpaca, Yahoo, and the other levels cannot overlay the venue tape.
   // Only venue-PRICED symbols are locked (Cluster B Q5): symbols the venue
   // could not price at all stay pending for the external levels below.
-  if (venueMode !== "realtime") pendingSymbols = pendingSymbols.filter((s) => !result[s]);
+  if (venueMode !== "realtime") pendingSymbols = pendingSymbols.filter((s) => !result[s] && !bestQuotes[s]);
 
   // --- LEVEL 1b: ALL other connected brokers for this user (market-data only) ---
   throwIfCascadeAborted(signal);
