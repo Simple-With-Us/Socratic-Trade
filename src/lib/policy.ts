@@ -439,7 +439,21 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
       // Stamp lives on the approval card.  Do not append coordinator notes to
       // rationale — that text is user-facing on website + iOS.
     }
-    if (maxQuoteAgeSec != null && maxQuoteAgeSec > 0) {
+    // EXCESS delay on a tape with a DOCUMENTED expected delay (Alpaca PAPER
+    // `delayed_sip`, ~900s) means the delayed feed itself is broken, not merely
+    // delayed: the observation is running well beyond expected + tolerance.
+    // Fail CLOSED — do not open at a price from a lagging feed, and do not
+    // "fix" it by aging the fetch stamp.  The expected ~900s delay is NOT
+    // excess and never lands here.  Checked independently of the
+    // maxQuoteAgeSec policy knob so it can never be skipped.
+    const excessDelaySec = quoteAgeSecForStalenessGate(scanQuote, now).excessDelaySec;
+    if (excessDelaySec !== undefined && excessDelaySec > 0) {
+      reasons.push(
+        `quote_feed_excess_delay: ${symbol} quote observation is ${excessDelaySec}s beyond the ` +
+          `expected delayed-feed window. The market-data feed is lagging far more than the venue ` +
+          `promises — the staleness gate is blocking this opening.`
+      );
+    } else if (maxQuoteAgeSec != null && maxQuoteAgeSec > 0) {
       const { ageSec, missing, venueDelayed } = quoteAgeSecForStalenessGate(scanQuote, now);
       if (missing) {
         reasons.push(

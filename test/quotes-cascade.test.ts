@@ -325,7 +325,7 @@ describe("resolveVenueQuoteMode", () => {
     ).toBe("venue_locked");
   });
 
-  it("returns realtime for Alpaca paper (real-time paper simulation)", () => {
+  it("returns venue_delayed for the connected Alpaca paper account (delayed_sip tape)", () => {
     mockGetConnectedAccount.mockReturnValue({
       id: "ap",
       broker: "alpaca",
@@ -333,6 +333,17 @@ describe("resolveVenueQuoteMode", () => {
     });
     expect(
       resolveVenueQuoteMode({ activeBroker: "alpaca", connectedAccountId: "ap" }, "local")
+    ).toBe("venue_delayed");
+  });
+
+  it("keeps Alpaca live on the realtime tape", () => {
+    mockGetConnectedAccount.mockReturnValue({
+      id: "ap-live",
+      broker: "alpaca",
+      environment: "live"
+    });
+    expect(
+      resolveVenueQuoteMode({ activeBroker: "alpaca", connectedAccountId: "ap-live" }, "local")
     ).toBe("realtime");
   });
 });
@@ -349,7 +360,9 @@ describe("fetchFreshQuotesCascade", () => {
   beforeEach(() => {
     vi.resetAllMocks();
 
-    // Default: Alpaca realtime venue
+    // Default: Alpaca LIVE (real-time venue).  The connected Alpaca PAPER
+    // account is a venue-delayed tape (owner authorization 2026-11-05) and has
+    // its own coverage in test/alpaca-paper-delayed-sip.test.ts.
     mockGetPolicy.mockReturnValue({
       activeBroker: "alpaca",
       accountNumber: "ACC123",
@@ -359,7 +372,7 @@ describe("fetchFreshQuotesCascade", () => {
     mockGetConnectedAccount.mockReturnValue({
       id: "alp-1",
       broker: "alpaca",
-      environment: "paper"
+      environment: "live"
     });
     mockGetActiveConnectedAccount.mockReturnValue(undefined);
     mockResolveAlpacaMarketData.mockReturnValue({

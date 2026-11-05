@@ -18,6 +18,12 @@ import {
 } from "./quote-delayed-fallback";
 import { upsertSymbolFieldLatest, type SymbolFieldLatestRecord } from "./db-fundamentals";
 import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
+import {
+  alpacaPaperFeedForAccount,
+  alpacaSnapshotCacheIdentity,
+  delayedTapeStatus,
+  isAlpacaPaperAccount
+} from "./alpaca-paper-quotes";
 import type { BrokerQuote, ConnectedAccount, QuoteFieldProvenance, TradingPolicy } from "./types";
 
 /**
@@ -552,6 +558,8 @@ export function isQuoteFresh(
     syntheticSpread?: boolean;
     syntheticBid?: boolean;
     syntheticAsk?: boolean;
+    expectedDelaySec?: number;
+    delayToleranceSec?: number;
   },
   nowMs: number,
   maxAgeMs: number = cascadeFreshMaxAgeMs()
@@ -560,6 +568,17 @@ export function isQuoteFresh(
   // Unknown age is stale, including a venue-authoritative quote with no
   // provider observation.  fetchedAt is not a substitute.
   if (!quote.asOf || Number.isNaN(asOfMs)) return false;
+  // Delayed tape with a DOCUMENTED expected delay (Alpaca PAPER `delayed_sip`,
+  // ~900s).  The expected delay is the venue, not a broken cascade — but the
+  // tape is only usable when BOTH independent checks pass:
+  //   (a) fresh retrieval (`fetchedAt` recent), and
+  //   (b) the asOf age has not run beyond expected + tolerance (excess lag).
+  // A missing asOf was already rejected above, so "excess" is a real feed
+  // problem, never a way to silently ignore an old timestamp.
+  if (typeof quote.expectedDelaySec === "number" && Number.isFinite(quote.expectedDelaySec)) {
+    const status = delayedTapeStatus(quote, nowMs, maxAgeMs);
+    return status.usable;
+  }
   if (quote.venuePriceAuthoritative) return true;
   // Two-sided broker NBBO fetched just now is live even when last-print `asOf` is old
   // (quiet names / IEX last trade sitting still).  Age the fetch, not the last print.
@@ -623,10 +642,21 @@ export function quoteAgeSecForStalenessGate(
     syntheticSpread?: boolean;
     syntheticBid?: boolean;
     syntheticAsk?: boolean;
+    expectedDelaySec?: number;
+    delayToleranceSec?: number;
   venueDelayedTape?: boolean;
   } | undefined,
   nowMs: number
-): { ageSec?: number; missing: boolean; venueDelayed: boolean; delayedFallback: boolean } {
+): {
+  ageSec?: number;
+  missing: boolean;
+  venueDelayed: boolean;
+  delayedFallback: boolean;
+  /** Seconds the tape lags beyond expected delay + tolerance (>0 = broken feed). */
+  excessDelaySec?: number;
+  /** True when the quote belongs to a tape with a documented expected delay. */
+  expectedDelayedTape?: boolean;
+} {
   if (!quote) return { missing: true, venueDelayed: false, delayedFallback: false };
   const venueDelayed = quote.venuePriceAuthoritative === true;
   const delayedFallback = isDelayedYahooFallbackQuote(quote, nowMs);
@@ -648,23 +678,37 @@ export function quoteAgeSecForStalenessGate(
   if (!stamp) return { missing: true, venueDelayed, delayedFallback };
   const stampMs = new Date(stamp).getTime();
   if (Number.isNaN(stampMs)) return { missing: true, venueDelayed, delayedFallback };
+  // Excess delay is reported INDEPENDENTLY of the age stamp above: for a
+  // tape with a documented expected delay it is how far the asOf lag runs
+  // BEYOND expected + tolerance.  A positive value means the delayed feed
+  // itself is lagging far more than the venue promises and must be flagged —
+  // the fetch-age stamp above must never paper over it.
+  const tapeStatus = delayedTapeStatus(quote, nowMs, cascadeFreshMaxAgeMs());
   return {
     ageSec: Math.round((nowMs - stampMs) / 1000),
     missing: false,
     venueDelayed,
-    delayedFallback
+    delayedFallback,
+    ...(tapeStatus.delayed
+      ? {
+          excessDelaySec: tapeStatus.excessDelaySec,
+          expectedDelayedTape: true
+        }
+      : {})
   };
 }
 
 /**
  * How this connected account should resolve execution prices.
  *
- * - `venue_delayed`: Tradier paper/sandbox — the paper OMS fills against Tradier's ~15m
- *   delayed tape. Use that price; never overlay fresher Alpaca/Yahoo.
+ * - `venue_delayed`: Tradier paper/sandbox AND Alpaca PAPER — the paper OMS
+ *   fills against the venue's own ~15m delayed tape. Use that price; never
+ *   overlay fresher Alpaca/Yahoo. Alpaca PAPER trades on Alpaca's
+ *   `delayed_sip` feed (see `alpaca-paper-quotes.ts`).
  * - `venue_locked`: Tradier live.  The fill uses the Tradier quote.  Later
  *   cascade levels do not replace it.  The quote is not stamped
  *   venue-authoritative, so a real asOf still hits the staleness gate.
- * - `realtime`: everything else (Alpaca paper/live, Robinhood, …).
+ * - `realtime`: everything else (Alpaca LIVE, Robinhood, …).
  */
 export type VenueQuoteMode = "realtime" | "venue_delayed" | "venue_locked";
 
@@ -672,10 +716,20 @@ export function resolveVenueQuoteMode(
   policy: Pick<TradingPolicy, "activeBroker" | "connectedAccountId"> | null | undefined,
   userId: string
 ): VenueQuoteMode {
-  if (policy?.activeBroker !== "tradier") return "realtime";
+  const activeBroker = policy?.activeBroker;
+  // Only Alpaca and Tradier have a venue-delayed tape.  Everything else
+  // (Robinhood, E*Toro, Public, Webull, Kalshi, the test gateway, …) stays
+  // on the real-time cascade — unchanged.
+  if (activeBroker !== "alpaca" && activeBroker !== "tradier") return "realtime";
   const acct =
-    (policy.connectedAccountId ? getConnectedAccount(policy.connectedAccountId, userId) : undefined) ??
+    (policy?.connectedAccountId ? getConnectedAccount(policy.connectedAccountId, userId) : undefined) ??
     getActiveConnectedAccount(userId);
+  // Alpaca PAPER: the connected account trades on Alpaca's `delayed_sip` tape.
+  // ACCOUNT SCOPED — the connected account row decides, never a global env
+  // var, so a live Alpaca account (or any other broker) is unaffected.
+  if (activeBroker === "alpaca") {
+    return isAlpacaPaperAccount(acct) ? "venue_delayed" : "realtime";
+  }
   if (acct?.broker === "tradier" && acct.environment === "paper") return "venue_delayed";
   if (acct?.broker === "tradier") return "venue_locked";
   return "realtime";
@@ -791,9 +845,18 @@ export async function fetchFreshQuotesCascade(
         price: resolvedPrice,
         provider: quote.provider ?? opts.providerTag,
         fetchedAt: quote.fetchedAt ?? ingestAt,
-        // Secondary delayed-tape books (Tradier paper) are kept for fallback but must
-        // never be promoted to real-time by a fresh fetch stamp (Codex P1 review).
-        ...(opts.delayedTape ? { venueDelayedTape: true as const } : {})
+        // Secondary delayed-tape books (Tradier paper, Alpaca PAPER
+        // `delayed_sip`) are kept for fallback but must never be promoted to
+        // real-time by a fresh fetch stamp (Codex P1 review), and must never
+        // masquerade as the ACTIVE execution venue's authoritative tape.
+        ...(opts.delayedTape
+          ? {
+              venueDelayedTape: true as const,
+              venuePriceAuthoritative: false,
+              expectedDelaySec: undefined,
+              delayToleranceSec: undefined
+            }
+          : {})
       };
       if (opts.venueDelayed) {
         normalizedQuote = stampVenueAuthoritative(normalizedQuote, ingestAt);
@@ -813,11 +876,15 @@ export async function fetchFreshQuotesCascade(
   throwIfCascadeAborted(signal);
   let venueMode: VenueQuoteMode = "realtime";
   let activeConnectedId: string | undefined;
+  let activeAccount: ConnectedAccount | undefined;
   try {
     const policy = getPolicy(userId, connectedAccountId);
     maxAgeMs = cascadeFreshMaxAgeMs(policy.maxQuoteAgeSec);
     venueMode = resolveVenueQuoteMode(policy, userId);
     activeConnectedId = policy.connectedAccountId;
+    activeAccount =
+      (activeConnectedId ? getConnectedAccount(activeConnectedId, userId) : undefined) ??
+      getActiveConnectedAccount(userId);
     const activeAccountNum = accountNumber ?? policy.accountNumber;
     // skipActiveBroker: the caller already hit this broker directly (e.g. the dashboard
     // fallback after its own gateway call timed out) — do not issue a duplicate call to
@@ -851,10 +918,13 @@ export async function fetchFreshQuotesCascade(
           const stub = policyStubForConnectedAccount(account);
           const gateway = getBrokerGateway(stub, userId);
           const brokerQuotes = await gateway.getEquityQuotes(account.accountNumber, pendingSymbols, { signal });
-          // A secondary Tradier paper/sandbox book is ~15m delayed tape: keep it for
-          // fallback but never let a fresh fetch stamp promote it to real-time and stop
-          // the cascade ahead of Alpaca/Yahoo (Codex P1 review).
-          const delayedTape = account.broker === "tradier" && account.environment === "paper";
+          // A secondary paper account's book is a ~15m delayed tape (Tradier
+          // sandbox, Alpaca PAPER `delayed_sip`): keep it for fallback but never
+          // let a fresh fetch stamp promote it to real-time and stop the cascade
+          // ahead of Alpaca/Yahoo (Codex P1 review).
+          const delayedTape =
+            (account.broker === "tradier" && account.environment === "paper") ||
+            isAlpacaPaperAccount(account);
           ingestBrokerQuotes(brokerQuotes, {
             venueDelayed: false,
             delayedTape,
@@ -881,7 +951,20 @@ export async function fetchFreshQuotesCascade(
     try {
       const alpacaData = resolveAlpacaMarketData(userId);
       if (alpacaData.apiKey && alpacaData.secretKey) {
-        const provider = new AlpacaSnapshotEnrichmentProvider(alpacaData.apiKey, alpacaData.secretKey, alpacaData.source, userId);
+        // ACCOUNT-SCOPED TAPE: the Alpaca snapshot enrichment must read the
+        // SAME feed the operating account trades on.  For the connected Alpaca
+        // PAPER account that is `delayed_sip` (~900s expected delay); every other
+        // account keeps the global feed.  The cache identity keeps the tapes
+        // from contaminating each other.
+        const cascadeFeed = alpacaPaperFeedForAccount(activeAccount);
+        const cascadeCacheIdentity = alpacaSnapshotCacheIdentity(activeAccount?.id, cascadeFeed);
+        const provider = new AlpacaSnapshotEnrichmentProvider(
+          alpacaData.apiKey,
+          alpacaData.secretKey,
+          alpacaData.source,
+          userId,
+          cascadeFeed ? { feed: cascadeFeed, cacheIdentity: cascadeCacheIdentity } : undefined
+        );
         const enrichment = await provider.enrich(pendingSymbols);
         for (const symbol of pendingSymbols) {
           const data = enrichment[symbol];

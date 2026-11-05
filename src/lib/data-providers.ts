@@ -18,6 +18,11 @@ import { enrichmentPlanForDeadline } from "./gather-budget";
 import { fromAlpacaSymbol, normalizeSymbol, toAlpacaSymbol } from "./money";
 import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import {
+  alpacaPaperFeedForAccount,
+  alpacaSnapshotCacheIdentity,
+  type AlpacaMarketDataFeed
+} from "./alpaca-paper-quotes";
+import {
   congressFundamentalsEnabled,
   getCongressTradeClient
 } from "./api-clients/congress";
@@ -29,6 +34,8 @@ import type { EnrichmentSources } from "./types";
 
 import {
   audit,
+  getActiveConnectedAccount,
+  getConnectedAccount,
   hasDataPoolConsent,
   resolveAlpacaMarketData,
   resolveAlphaVantageKeyPool,
@@ -1122,7 +1129,10 @@ function withHealthLane(provider: MarketEnrichmentProvider, source: ApiKeySource
   return provider;
 }
 
-export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider {
+export function getEnrichmentProvider(
+  userId?: string,
+  options?: { connectedAccountId?: string }
+): MarketEnrichmentProvider {
   const providers: MarketEnrichmentProvider[] = [];
   const finnhub = resolveApiKeyWithSource("finnhub", userId);
   const alphaVantage = resolveAlphaVantageKeyPool(userId);
@@ -1140,6 +1150,17 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   // Alpaca MARKET DATA: own key (individual) → operator's paper key (shared) for background/tenants.
   // Trading is unaffected (alpaca.ts resolves Alpaca strictly per-user).
   const alpacaData = resolveAlpacaMarketData(userId);
+  // ACCOUNT-SCOPED TAPE: when the operating account is the connected Alpaca
+  // PAPER account, the snapshot enrichment must read the SAME `delayed_sip`
+  // tape the broker gateway uses.  The feed is decided by the connected
+  // account row — never by the global `ALPACA_DATA_FEED` env var — and the
+  // cache key folds in the account/feed identity so the delayed tape can
+  // never contaminate another account's snapshot cache.
+  const scanAccount =
+    (options?.connectedAccountId ? getConnectedAccount(options.connectedAccountId, userId ?? "local") : undefined) ??
+    getActiveConnectedAccount(userId ?? "local");
+  const scanFeed = alpacaSnapshotFeedForAccount(scanAccount);
+  const scanCacheIdentity = alpacaSnapshotCacheIdentity(scanAccount?.id, scanFeed);
   // ── Freshness-tier ordering (first-wins cascade) ──────────────────────────
   // The cascade below is first-wins per field (takeScalar keeps the first non-undefined
   // value). So provider ORDER decides which source wins the price-family fields
@@ -1153,7 +1174,7 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   // WITHOUT disturbing fundamentals sourcing (still finnhub/fmp/yahoo below). It
   // self-skips when either Alpaca key is absent — then the delayed sources fill these
   // fields in exactly the same order they would today.
-  if (alpacaData.apiKey && alpacaData.secretKey) providers.push(withHealthLane(new AlpacaSnapshotEnrichmentProvider(alpacaData.apiKey, alpacaData.secretKey, alpacaData.source, userId), alpacaData.source));
+  if (alpacaData.apiKey && alpacaData.secretKey) providers.push(withHealthLane(new AlpacaSnapshotEnrichmentProvider(alpacaData.apiKey, alpacaData.secretKey, alpacaData.source, userId, scanFeed ? { feed: scanFeed, cacheIdentity: scanCacheIdentity } : undefined), alpacaData.source));
   // Tier 1.5 — Congress.Trade fundamentals/analyst cache-aside (opt-in, default OFF).
   // Owner: fundamentals should come from the multi-source cascade (Finnhub/ROIC/SEC/Yahoo/…),
   // not App A. Enable CONGRESS_TRADE_FUNDAMENTALS_ENABLED only as an extra peer tier.
@@ -2607,6 +2628,11 @@ const ALPACA_SNAPSHOT_CHUNK = 100; // Alpaca batch limit per request
 // HTTP 403 ("subscription does not permit querying recent SIP data") unless the
 // account has a paid SIP subscription. Configurable via ALPACA_DATA_FEED; any
 // value outside the allowed set falls back to "iex".
+//
+// `delayed_sip` is deliberately NOT selectable through this global env var:
+// the delayed tape is an ACCOUNT decision (Alpaca PAPER), and a process-wide
+// switch would silently repoint every other account's tape.  Use
+// `alpacaSnapshotFeedForAccount` / the provider's `feed` option instead.
 const ALPACA_ALLOWED_FEEDS = ["iex", "sip", "otc"] as const;
 export function alpacaDataFeed(): (typeof ALPACA_ALLOWED_FEEDS)[number] {
   const raw = String(process.env.ALPACA_DATA_FEED ?? "").trim().toLowerCase();
@@ -2615,21 +2641,51 @@ export function alpacaDataFeed(): (typeof ALPACA_ALLOWED_FEEDS)[number] {
     : "iex";
 }
 
+/**
+ * Account-scoped feed override for the Alpaca snapshot endpoint.
+ *
+ * Returns `delayed_sip` for the connected Alpaca PAPER account and `undefined`
+ * for every other account (which then uses the global `ALPACA_DATA_FEED`).
+ */
+export function alpacaSnapshotFeedForAccount(
+  account: { broker?: string; environment?: string } | null | undefined
+): AlpacaMarketDataFeed | undefined {
+  return alpacaPaperFeedForAccount(account);
+}
+
 export class AlpacaSnapshotEnrichmentProvider implements MarketEnrichmentProvider {
   readonly name = "alpaca-snapshot";
   readonly configured = true;
   private readonly base = "https://data.alpaca.markets/v2/stocks/snapshots";
   private readonly scope: CacheScope;
   private readonly keySource: ApiKeySource;
+  /** Account-scoped feed override (e.g. `delayed_sip` for Alpaca PAPER). */
+  private readonly feed?: AlpacaMarketDataFeed;
+  /**
+   * Cache prefix.  Folded with the account/feed identity when an account-scoped
+   * feed is in play so a `delayed_sip` snapshot can never be served to — or
+   * overwrite — an `iex` snapshot of the same symbol.
+   */
+  private readonly cachePrefix: string;
 
   constructor(
     private readonly apiKey: string,
     private readonly apiSecret: string,
     keySource: ApiKeySource = "env",
-    private readonly userId?: string
+    private readonly userId?: string,
+    options?: { feed?: AlpacaMarketDataFeed; cacheIdentity?: string }
   ) {
     this.scope = cacheScopeForKeySource(keySource, userId);
     this.keySource = keySource;
+    this.feed = options?.feed;
+    this.cachePrefix = options?.cacheIdentity
+      ? `alpaca-snapshot:${options.cacheIdentity}`
+      : "alpaca-snapshot";
+  }
+
+  /** The feed this provider actually requests. */
+  effectiveFeed(): AlpacaMarketDataFeed {
+    return this.feed ?? alpacaDataFeed();
   }
 
   async enrich(symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
@@ -2642,7 +2698,7 @@ export class AlpacaSnapshotEnrichmentProvider implements MarketEnrichmentProvide
     const misses: string[] = [];
 
     for (const symbol of normalized) {
-      const cached = readEnrichmentCache("alpaca-snapshot", symbol, this.userId, consented, now);
+      const cached = readEnrichmentCache(this.cachePrefix, symbol, this.userId, consented, now);
       if (cached) result[symbol] = cached.data;
       else misses.push(symbol);
     }
@@ -2656,7 +2712,7 @@ export class AlpacaSnapshotEnrichmentProvider implements MarketEnrichmentProvide
         // single unconverted hyphenated symbol in the batch gets the whole chunk rejected with
         // HTTP 400 (confirmed in prod: this was silently failing ~97% of snapshot calls whenever
         // the batch included a symbol like BRK-B from the S&P 500 scan universe).
-        const url = `${this.base}?symbols=${encodeURIComponent(chunk.map(toAlpacaSymbol).join(","))}&feed=${alpacaDataFeed()}`;
+        const url = `${this.base}?symbols=${encodeURIComponent(chunk.map(toAlpacaSymbol).join(","))}&feed=${this.effectiveFeed()}`;
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 8000);
         let snapshots: Record<string, AlpacaSnapshot>;
@@ -2683,7 +2739,7 @@ export class AlpacaSnapshotEnrichmentProvider implements MarketEnrichmentProvide
           if (hasData) {
             // Quote-family TTL (~30s default), NOT the blanket 6h fundamentals ttlMs() — see
             // alpacaSnapshotTtlMs() for why real-time price/bid/ask/volume can't share that cadence.
-            writeEnrichmentCache("alpaca-snapshot", symbol, this.scope, this.userId, data, now + alpacaSnapshotTtlMs());
+            writeEnrichmentCache(this.cachePrefix, symbol, this.scope, this.userId, data, now + alpacaSnapshotTtlMs());
           }
           result[symbol] = data;
         }

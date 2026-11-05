@@ -79,8 +79,13 @@ export async function checkPriceAlerts(userId: string): Promise<PriceAlert[]> {
   const triggered: PriceAlert[] = [];
   for (const alert of armed) {
     const quote = quotes[alert.symbol];
-    const { ageSec, missing } = quoteAgeSecForStalenessGate(quote, nowMs);
-    const isStale = missing || (ageSec !== undefined && ageSec > maxQuoteAgeSec);
+    const { ageSec, missing, excessDelaySec } = quoteAgeSecForStalenessGate(quote, nowMs);
+    // EXCESS delay on a tape with a documented expected delay (Alpaca PAPER
+    // `delayed_sip`) means the feed is broken, not merely delayed: the alert
+    // must not fire off a lagging tape.  The expected ~900s delay itself is
+    // normal and is not excess.
+    const excessDelayed = excessDelaySec !== undefined && excessDelaySec > 0;
+    const isStale = missing || excessDelayed || (ageSec !== undefined && ageSec > maxQuoteAgeSec);
     if (isStale) continue;
 
     const currentPrice = quote?.price;

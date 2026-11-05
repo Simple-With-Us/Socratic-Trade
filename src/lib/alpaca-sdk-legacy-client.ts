@@ -2,6 +2,7 @@ import { Alpaca } from "@alpacahq/alpaca-trade-api";
 import type { AlpacaClientOptions } from "@alpacahq/alpaca-trade-api";
 import { z } from "zod";
 import { ALPACA_BROKER_IO_DEADLINE_MS } from "./inflight-deadline";
+import type { AlpacaMarketDataFeed } from "./alpaca-paper-quotes";
 
 type AlpacaInstance = InstanceType<typeof Alpaca>;
 
@@ -50,8 +51,19 @@ export type LegacyAlpacaRestClient = {
     after?: string;
     until?: string;
   }): Promise<Record<string, unknown>[]>;
-  getLatestQuotes(symbols: string[]): Promise<Record<string, Record<string, unknown>>>;
-  getLatestTrades?(symbols: string[]): Promise<Record<string, Record<string, unknown>>>;
+  /**
+   * `feed` selects the market-data tape.  Omitted → the SDK default (iex).
+   * The connected Alpaca PAPER account passes `delayed_sip` (see
+   * `alpaca-paper-quotes.ts`); every other account omits it.
+   */
+  getLatestQuotes(
+    symbols: string[],
+    options?: { feed?: AlpacaMarketDataFeed }
+  ): Promise<Record<string, Record<string, unknown>>>;
+  getLatestTrades?(
+    symbols: string[],
+    options?: { feed?: AlpacaMarketDataFeed }
+  ): Promise<Record<string, Record<string, unknown>>>;
   getAsset(symbol: string): Promise<Record<string, unknown>>;
   createOrder(options: Record<string, unknown>): Promise<Record<string, unknown>>;
   cancelOrder(orderId: string): Promise<void>;
@@ -177,8 +189,14 @@ type V5AlpacaSdk = {
   };
   marketData: {
     stocks: {
-      stockLatestQuotes: (req: { symbols: string }) => Promise<{ quotes?: Record<string, unknown> }>;
-      stockLatestTrades: (req: { symbols: string }) => Promise<{ trades?: Record<string, unknown> }>;
+      stockLatestQuotes: (req: {
+        symbols: string;
+        feed?: AlpacaMarketDataFeed;
+      }) => Promise<{ quotes?: Record<string, unknown> }>;
+      stockLatestTrades: (req: {
+        symbols: string;
+        feed?: AlpacaMarketDataFeed;
+      }) => Promise<{ trades?: Record<string, unknown> }>;
     };
   };
 };
@@ -220,9 +238,12 @@ export function createLegacyAlpacaRestClient(
       });
       return orders.map((o) => toLegacyAlpacaRecord(o));
     },
-    async getLatestQuotes(symbols) {
+    async getLatestQuotes(symbols, options) {
       if (symbols.length === 0) return {};
-      const resp = await stocks.stockLatestQuotes({ symbols: symbols.join(",") });
+      const resp = await stocks.stockLatestQuotes({
+        symbols: symbols.join(","),
+        ...(options?.feed ? { feed: options.feed } : {})
+      });
       const legacy: Record<string, Record<string, unknown>> = {};
       for (const [sym, quote] of Object.entries(resp.quotes ?? {})) {
         const q = quote as unknown as Record<string, unknown>;
@@ -233,9 +254,12 @@ export function createLegacyAlpacaRestClient(
       }
       return legacy;
     },
-    async getLatestTrades(symbols) {
+    async getLatestTrades(symbols, options) {
       if (symbols.length === 0) return {};
-      const resp = await stocks.stockLatestTrades({ symbols: symbols.join(",") });
+      const resp = await stocks.stockLatestTrades({
+        symbols: symbols.join(","),
+        ...(options?.feed ? { feed: options.feed } : {})
+      });
       const parsed = AlpacaLatestTradesResponseSchema.safeParse(resp);
       if (!parsed.success) return {};
       const book: AlpacaLatestTradesResponse = parsed.data;

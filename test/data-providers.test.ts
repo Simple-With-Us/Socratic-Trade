@@ -2179,6 +2179,58 @@ describe("AlpacaSnapshotEnrichmentProvider", () => {
     expect(capturedUrl).toContain("feed=iex");
   });
 
+  it("requests delayed_sip when the provider carries the ACCOUNT-SCOPED paper feed", async () => {
+    // The global env var stays on its default: the delayed tape is an ACCOUNT
+    // decision, never a process-wide flip.
+    delete process.env.ALPACA_DATA_FEED;
+    let capturedUrl = "";
+    vi.stubGlobal("fetch", async (url: string) => {
+      capturedUrl = url;
+      return new Response(
+        JSON.stringify({
+          AAPL: { latestTrade: { p: 195.5 }, latestQuote: { bp: 195.4, ap: 195.6 } }
+        })
+      );
+    });
+
+    const provider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env", "local", {
+      feed: "delayed_sip",
+      cacheIdentity: "ap-paper:delayed_sip"
+    });
+    await provider.enrich(["AAPL"]);
+
+    expect(capturedUrl).toContain("feed=delayed_sip");
+    expect(capturedUrl).not.toContain("feed=iex");
+  });
+
+  it("keeps the delayed tape in its own cache entry (no cross-feed contamination)", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      urls.push(url);
+      return new Response(
+        JSON.stringify({
+          AAPL: { latestTrade: { p: urls.length === 1 ? 195.5 : 201.25 }, latestQuote: { bp: 195.4, ap: 195.6 } }
+        })
+      );
+    });
+
+    // First read: the live/iex tape.
+    const iexProvider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env");
+    const iex = await iexProvider.enrich(["AAPL"]);
+    expect(iex.AAPL?.price).toBe(195.5);
+    expect(urls[0]).toContain("feed=iex");
+
+    // Second read: the Alpaca PAPER delayed tape.  It must NOT be served from
+    // the iex cache entry — its cache identity differs.
+    const delayedProvider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env", "local", {
+      feed: "delayed_sip",
+      cacheIdentity: "ap-paper:delayed_sip"
+    });
+    const delayed = await delayedProvider.enrich(["AAPL"]);
+    expect(delayed.AAPL?.price).toBe(201.25);
+    expect(urls[1]).toContain("feed=delayed_sip");
+  });
+
   it("fetches the snapshots endpoint with correct headers and maps fields", async () => {
     let capturedUrl = "";
     let capturedHeaders: Record<string, string> = {};

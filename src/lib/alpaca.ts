@@ -30,6 +30,12 @@ import {
 import { OrderValidationError } from "./types";
 import { z } from "zod";
 import { fromAlpacaSymbol, normalizeSymbol, roundAlpacaPrice, toAlpacaSymbol } from "./money";
+import {
+  ALPACA_PAPER_DELAY_TOLERANCE_SEC,
+  ALPACA_PAPER_DELAYED_FEED,
+  ALPACA_PAPER_EXPECTED_DELAY_SEC,
+  isAlpacaPaperAccount
+} from "./alpaca-paper-quotes";
 import { mergeAccountCapabilities } from "./venue-contract";
 import { normalizeVenueOrder } from "./venue-normalization";
 
@@ -332,6 +338,14 @@ class AlpacaBrokerGateway implements BrokerGateway {
   private accountCacheKey: string;
   private credentialFingerprint: string;
   private hasRestKeys: boolean;
+  /**
+   * Connected-account identity for the quote tape.  Alpaca PAPER trades on
+   * Alpaca's `delayed_sip` feed (expected ~900s delay); every other account
+   * keeps the broker's default feed.  ACCOUNT SCOPED — the connected account
+   * row decides, never a process-global env var.
+   */
+  private connectedAccountBroker?: string;
+  private connectedAccountEnvironment?: string;
 
   constructor(private userId: string, connectedAccountId?: string) {
     const targeted = connectedAccountId ? getConnectedAccount(connectedAccountId, userId) : undefined;
@@ -342,6 +356,8 @@ class AlpacaBrokerGateway implements BrokerGateway {
         ? brokerAccount
         : undefined;
     this.keySource = accountKeys ? "user" : "env";
+    this.connectedAccountBroker = accountKeys?.broker;
+    this.connectedAccountEnvironment = accountKeys?.environment;
     this.credentialFingerprint = alpacaCredentialFingerprint(
       accountKeys?.apiKey?.trim() || "",
       accountKeys?.apiSecret?.trim() || ""
@@ -883,13 +899,21 @@ class AlpacaBrokerGateway implements BrokerGateway {
     const normalizedSymbols = Array.from(aliasesByCanonical.keys());
     const quotes: Record<string, BrokerQuote> = {};
     const wireSymbols = normalizedSymbols.map(toAlpacaSymbol);
+    // Alpaca PAPER trades on the `delayed_sip` feed (expected ~900s delay).
+    // ACCOUNT SCOPED: only the connected Alpaca paper account switches feed;
+    // live Alpaca and every other account keep the broker default.
+    const delayedPaper = isAlpacaPaperAccount({
+      broker: this.connectedAccountBroker,
+      environment: this.connectedAccountEnvironment
+    });
+    const feed = delayedPaper ? ALPACA_PAPER_DELAYED_FEED : undefined;
     let quoteResponse: Record<string, Record<string, unknown>> = {};
     let tradeResponse: Record<string, Record<string, unknown>> = {};
     try {
       const { firstMs, retryMs } = alpacaAccountReadBudgetMs();
       quoteResponse = await awaitWithFirstCallRetry(
         ({ signal }) => this.trackHealth(
-          () => this.alpaca.getLatestQuotes(wireSymbols),
+          () => this.alpaca.getLatestQuotes(wireSymbols, feed ? { feed } : undefined),
           { deadlineMs: ALPACA_BROKER_IO_DEADLINE_MS, signal }
         ),
         {
@@ -907,7 +931,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
     if (typeof latestTrades === "function") {
       try {
         tradeResponse = await this.trackHealth(
-          () => latestTrades.call(this.alpaca, wireSymbols),
+          () => latestTrades.call(this.alpaca, wireSymbols, feed ? { feed } : undefined),
           { deadlineMs: ALPACA_BROKER_IO_DEADLINE_MS }
         );
       } catch (error) {
@@ -933,7 +957,18 @@ class AlpacaBrokerGateway implements BrokerGateway {
         ask,
         ...(asOf ? { asOf } : {}),
         provider: "alpaca",
-        fetchedAt: new Date().toISOString()
+        fetchedAt: new Date().toISOString(),
+        // Alpaca PAPER `delayed_sip`: the venue tape is authoritative and the
+        // ~900s publication delay is EXPECTED.  Consumers must age the snapshot
+        // by `fetchedAt`, must not overlay a fresher realtime quote, and must
+        // still flag lag beyond expected + tolerance as excess delay.
+        ...(delayedPaper
+          ? {
+              venuePriceAuthoritative: true,
+              expectedDelaySec: ALPACA_PAPER_EXPECTED_DELAY_SEC,
+              delayToleranceSec: ALPACA_PAPER_DELAY_TOLERANCE_SEC
+            }
+          : {})
       };
     }
     for (const [canonical, aliases] of aliasesByCanonical) {
