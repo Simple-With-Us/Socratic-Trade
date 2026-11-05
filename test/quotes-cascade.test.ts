@@ -795,6 +795,9 @@ describe("fetchFreshQuotesCascade", () => {
         bid: 149.9,
         ask: 150.1,
         prevClose: 148,
+        open: 149.8,
+        high: 150.4,
+        low: 149.6,
         vwap: 149.5,
         asOf: freshIso,
         provider: "alpaca"
