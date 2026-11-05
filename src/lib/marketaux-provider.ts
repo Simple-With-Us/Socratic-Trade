@@ -69,6 +69,8 @@
 // health. This provider NEVER throws out of enrich() — every sub-fetch is caught independently and
 // a failed group just leaves its symbols unfilled (short negative-TTL cache so it retries soon).
 
+import "server-only";
+
 import type { MarketEnrichmentProvider, SymbolEnrichment } from "./data-providers";
 import { fetchWithRetry } from "./data-providers";
 import { audit, resolveApiKeyWithSource } from "./db";
