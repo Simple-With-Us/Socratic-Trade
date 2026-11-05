@@ -23,6 +23,10 @@
  * 4. NO REALTIME OVERLAY.  A delayed tape priced by the venue is never
  *    replaced by Yahoo / IEX / any fresher secondary, and missing broker data
  *    fails closed rather than silently substituting another tape.
+ * 5. FUTURE STAMPS ARE BAD DATA, NOT FRESH DATA.  A provider stamp AHEAD of
+ *    the wall clock (beyond a tiny clock-skew slack) never proves freshness:
+ *    the observation is treated as missing and the retrieval as stale, so a
+ *    future `asOf` / `fetchedAt` fails closed instead of clamping to age 0.
  */
 
 import type { ConnectedAccount } from "./types";
@@ -43,6 +47,31 @@ export const ALPACA_PAPER_EXPECTED_DELAY_SEC = 900;
  * episode does not immediately flip every symbol to "excess".
  */
 export const ALPACA_PAPER_DELAY_TOLERANCE_SEC = 120;
+
+/**
+ * Clock-skew slack allowed on provider timestamps.
+ *
+ * A stamp up to 2s AHEAD of the wall clock is ordinary jitter and is tolerated.
+ * Anything further ahead is BAD DATA — a mis-stamped snapshot, a replayed
+ * response, a provider clock that drifted — and must fail closed.
+ */
+export const ALPACA_PAPER_CLOCK_SKEW_SLACK_SEC = 2;
+
+/**
+ * True when a provider stamp is ahead of the wall clock beyond the allowed
+ * clock-skew slack.
+ *
+ * A future stamp is never "fresh": it cannot be aged into a positive age, and
+ * clamping it to age 0 would let bad data pass every freshness check.
+ */
+export function isFutureProviderStamp(
+  stampMs: number,
+  nowMs: number,
+  slackSec: number = ALPACA_PAPER_CLOCK_SKEW_SLACK_SEC
+): boolean {
+  if (!Number.isFinite(stampMs) || !Number.isFinite(nowMs)) return false;
+  return stampMs - nowMs > slackSec * 1000;
+}
 
 /** Every feed Alpaca's market-data REST endpoints accept. */
 export type AlpacaMarketDataFeed = "iex" | "sip" | "otc" | "delayed_sip";
@@ -137,10 +166,21 @@ export function delayedTapeStatus(
       : ALPACA_PAPER_DELAY_TOLERANCE_SEC;
 
   const asOfMs = quote.asOf ? new Date(quote.asOf).getTime() : Number.NaN;
-  const asOfAgeSec = Number.isNaN(asOfMs) ? undefined : Math.max(0, Math.round((nowMs - asOfMs) / 1000));
+  // A FUTURE observation stamp is bad data, not a fresh print.  Treating the
+  // observation as MISSING (age undefined) keeps `excessDelaySec` undefined and
+  // `usable` false — clamping a negative age to 0 would have accepted it.
+  const asOfAgeSec =
+    Number.isNaN(asOfMs) || isFutureProviderStamp(asOfMs, nowMs)
+      ? undefined
+      : Math.max(0, Math.round((nowMs - asOfMs) / 1000));
 
   const fetchedMs = quote.fetchedAt ? new Date(quote.fetchedAt).getTime() : Number.NaN;
-  const fetchAgeSec = Number.isNaN(fetchedMs) ? undefined : Math.max(0, Math.round((nowMs - fetchedMs) / 1000));
+  // A FUTURE retrieval stamp is not a fresh retrieval: leave the age unset so
+  // `retrievalFresh` is false (and `usable` with it).
+  const fetchAgeSec =
+    Number.isNaN(fetchedMs) || isFutureProviderStamp(fetchedMs, nowMs)
+      ? undefined
+      : Math.max(0, Math.round((nowMs - fetchedMs) / 1000));
   // Fresh retrieval is INDEPENDENT of the tape delay: a 900s-old print pulled
   // one second ago is a healthy delayed tape; a 2s-old print pulled 10
   // minutes ago is a broken read, not a fresh quote.

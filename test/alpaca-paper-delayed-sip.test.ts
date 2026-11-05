@@ -175,6 +175,43 @@ describe("delayed tape status (expected ~900s delay)", () => {
     expect(status.asOfAgeSec).toBeUndefined();
     expect(status.usable).toBe(false);
   });
+
+  it("never treats a missing retrieval stamp as usable", () => {
+    const status = delayedTapeStatus(delayedPaperQuote({ fetchedAt: undefined }), NOW, maxFetchAgeMs);
+    expect(status.retrievalFresh).toBe(false);
+    expect(status.fetchAgeSec).toBeUndefined();
+    expect(status.usable).toBe(false);
+  });
+
+  it("fails CLOSED on a FUTURE observation stamp (bad data, not a fresh print)", () => {
+    // A print stamped ahead of the wall clock cannot be aged into a positive
+    // age.  It used to clamp to age 0 and read as a healthy 900s tape.
+    const status = delayedTapeStatus(delayedPaperQuote({ asOf: iso(NOW + 60_000) }), NOW, maxFetchAgeMs);
+    expect(status.asOfAgeSec).toBeUndefined();
+    expect(status.excessDelaySec).toBeUndefined();
+    expect(status.usable).toBe(false);
+  });
+
+  it("fails CLOSED on a FUTURE retrieval stamp (not a fresh retrieval)", () => {
+    const status = delayedTapeStatus(delayedPaperQuote({ fetchedAt: iso(NOW + 60_000) }), NOW, maxFetchAgeMs);
+    expect(status.retrievalFresh).toBe(false);
+    expect(status.fetchAgeSec).toBeUndefined();
+    expect(status.usable).toBe(false);
+  });
+
+  it("rejects a post-session (market-closed) print instead of accepting stale session data", () => {
+    // Overnight / last-session prints arrive with a fresh fetch but an asOf age
+    // far beyond the documented 900s window.  There is NO carve-out that
+    // accepts stale session data as a healthy delayed tape.
+    const status = delayedTapeStatus(
+      delayedPaperQuote({ asOf: iso(NOW - 4 * 60 * 60_000) }),
+      NOW,
+      maxFetchAgeMs
+    );
+    expect(status.retrievalFresh).toBe(true);
+    expect(status.excessDelaySec).toBeGreaterThan(0);
+    expect(status.usable).toBe(false);
+  });
 });
 
 describe("isQuoteFresh on a delayed tape", () => {
@@ -192,6 +229,14 @@ describe("isQuoteFresh on a delayed tape", () => {
   it("rejects a delayed print whose retrieval is stale", () => {
     const quote = delayedPaperQuote({ fetchedAt: iso(NOW - 600_000) });
     expect(isQuoteFresh(quote, NOW, 120_000)).toBe(false);
+  });
+
+  it("rejects a delayed print whose observation stamp is in the future", () => {
+    expect(isQuoteFresh(delayedPaperQuote({ asOf: iso(NOW + 60_000) }), NOW, 120_000)).toBe(false);
+  });
+
+  it("rejects a delayed snapshot whose retrieval stamp is in the future", () => {
+    expect(isQuoteFresh(delayedPaperQuote({ fetchedAt: iso(NOW + 60_000) }), NOW, 120_000)).toBe(false);
   });
 
   it("leaves non-delayed (real-time) quotes on the old behavior", () => {
@@ -233,6 +278,30 @@ describe("quoteAgeSecForStalenessGate on a delayed tape", () => {
     );
     expect(result.expectedDelayedTape).toBeUndefined();
     expect(result.excessDelaySec).toBeUndefined();
+  });
+
+  it("fails CLOSED on a future stamp instead of handing the gate a negative age", () => {
+    const futureFetch = quoteAgeSecForStalenessGate(
+      delayedPaperQuote({ fetchedAt: iso(NOW + 60_000) }),
+      NOW
+    );
+    expect(futureFetch.missing).toBe(true);
+    expect(futureFetch.ageSec).toBeUndefined();
+
+    const futureObservation = quoteAgeSecForStalenessGate(
+      delayedPaperQuote({ asOf: iso(NOW + 60_000) }),
+      NOW
+    );
+    expect(futureObservation.missing).toBe(true);
+    expect(futureObservation.ageSec).toBeUndefined();
+  });
+
+  it("flags a post-session (market-closed) print as excess delay", () => {
+    const result = quoteAgeSecForStalenessGate(
+      delayedPaperQuote({ asOf: iso(NOW - 4 * 60 * 60_000), fetchedAt: iso(NOW - 5_000) }),
+      NOW
+    );
+    expect(result.excessDelaySec).toBeGreaterThan(0);
   });
 });
 

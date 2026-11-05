@@ -22,7 +22,8 @@ import {
   alpacaPaperFeedForAccount,
   alpacaSnapshotCacheIdentity,
   delayedTapeStatus,
-  isAlpacaPaperAccount
+  isAlpacaPaperAccount,
+  isFutureProviderStamp
 } from "./alpaca-paper-quotes";
 import type { BrokerQuote, ConnectedAccount, QuoteFieldProvenance, TradingPolicy } from "./types";
 
@@ -665,6 +666,12 @@ export function quoteAgeSecForStalenessGate(
   if (!quote.asOf || Number.isNaN(asOfMs)) {
     return { missing: true, venueDelayed, delayedFallback };
   }
+  // A provider stamp AHEAD of the wall clock is BAD DATA, not fresh data.
+  // Fail closed (missing) instead of handing the gate a negative age, which
+  // would sail through every "age <= max" comparison.
+  if (isFutureProviderStamp(asOfMs, nowMs)) {
+    return { missing: true, venueDelayed, delayedFallback };
+  }
   const liveNbbo = isVerifiedRealtimeBook(quote);
   // Venue-delayed tape and delayed Yahoo fallback: age the FETCH snapshot, not the
   // expected ~15m print.  A just-fetched delayed Yahoo quote is not a broken cascade.
@@ -678,6 +685,11 @@ export function quoteAgeSecForStalenessGate(
   if (!stamp) return { missing: true, venueDelayed, delayedFallback };
   const stampMs = new Date(stamp).getTime();
   if (Number.isNaN(stampMs)) return { missing: true, venueDelayed, delayedFallback };
+  // Same fail-closed rule for the fetch stamp: a `fetchedAt` ahead of the wall
+  // clock is not a fresh retrieval.
+  if (isFutureProviderStamp(stampMs, nowMs)) {
+    return { missing: true, venueDelayed, delayedFallback };
+  }
   // Excess delay is reported INDEPENDENTLY of the age stamp above: for a
   // tape with a documented expected delay it is how far the asOf lag runs
   // BEYOND expected + tolerance.  A positive value means the delayed feed
