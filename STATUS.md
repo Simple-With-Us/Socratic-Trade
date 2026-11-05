@@ -64,6 +64,15 @@ Restore bundled transparent theme-aware wordmarks in the shared public footer. 
 **Next.**  The hosted `ios-ship.yml` now fetches the key in the step that calls the client, through the new `scripts/ios-asc-key-env.sh`, and hands it over in the environment, so no key material crosses a step boundary and the environment file never holds it.  The other eight fleet copies of this client need the same handoff;  the shape is posted in the AFC-459 topic so one lands across the copies.
 
 **One finding to carry.**  The client only runs when the path it was started with is the path its own module reports, because node resolves a symlinked directory to its real path.  A lane behind a symlink starts the client to a silent no-op:  exit 0, no output, no request.  The test harness starts it by its real path now;  the product behaviour is unchanged and is a fleet-wide item.
+## 2026-10-21 CLAUDE — ST-4574 in-app MiniMax model moves to MiniMax-M3.1-Flash
+
+**What.**  The catalog row `minimax-m3` is now `minimax-m3.1-flash` (OpenRouter `minimax/minimax-m3.1-flash`, native `MiniMax-M3.1-Flash`, $0.15 in and $0.60 out per 1M).  `minimax-m3` stays an alias, so a stored selection resolves to the new row with no database change.  Production has `llm_route_minimax=native`, so Sandbox Green and Alpaca Paper Red (both stored as `minimax-m3`) reach `api.minimax.io` with exactly `MiniMax-M3.1-Flash` after deploy.
+
+**Verified.**  The native slug returned HTTP 200 live.  OpenRouter lists only the retired `:free` variant and 404s on the paid id until MiniMax publishes it there, so OpenRouter-routed MiniMax calls fail until then.
+
+**Next.**  Merge after CI, confirm the deploy SHA, then watch whether Sandbox's six-run failure streak clears.
+
+Rollout: `docs/rollouts/2026-10-21-minimax-m3-1-flash.md`.
 
 ## 2026-10-18 CLAUDE — OPS-818 bootstrap identity moves to the Keychain
 

@@ -69,29 +69,47 @@ describe("resolveLlmEndpoint", () => {
 
   it("falls back to the native MiniMax endpoint with the MiniMax credential", () => {
     setApiKey("test-user-minimax", "minimax", "sk-minimax-test-key");
-    // 2026-09-18 catalog cleanup: minimax-m2.7 was removed in favor of minimax-m3.
-    const endpoint = resolveLlmEndpoint({ llmModel: "minimax-m3" }, "test-user-minimax");
+    // 2026-10-21: minimax-m3 was replaced by minimax-m3.1-flash (see the legacy-id test below).
+    const endpoint = resolveLlmEndpoint({ llmModel: "minimax-m3.1-flash" }, "test-user-minimax");
     expect(endpoint.provider).toBe("minimax");
     expect(endpoint.url).toBe("https://api.minimax.io/v1/chat/completions");
     expect(endpoint.key).toBe("sk-minimax-test-key");
-    expect(endpoint.model).toBe("MiniMax-M3");
+    expect(endpoint.model).toBe("MiniMax-M3.1-Flash");
     expect(endpoint.transport).toBe("chat-completions");
+  });
+
+  it("keeps a persisted minimax-m3 selection working by resolving it to M3.1 Flash on every route", async () => {
+    const { modelCredentialService } = await import("../src/lib/llm-provider");
+    // A policy saved before 2026-10-21 still holds the M3 spelling; none of these may fall through
+    // to the unknown-model path (which would send a lowercase "minimax-m3" to the native API).
+    for (const legacy of ["minimax-m3", "MiniMax-M3", "minimax/minimax-m3", "openrouter/minimax/minimax-m3"]) {
+      setApiKey("minimax-legacy-native", "minimax", "sk-minimax-legacy-test");
+      const native = resolveLlmEndpoint({ llmModel: legacy }, "minimax-legacy-native");
+      const viaOpenRouter = /^openrouter\//i.test(legacy);
+      expect(native.provider, legacy).toBe(viaOpenRouter ? "openrouter" : "minimax");
+      expect(native.model, legacy).toBe(viaOpenRouter ? "minimax/minimax-m3.1-flash" : "MiniMax-M3.1-Flash");
+      expect(modelCredentialService(legacy, "minimax-legacy-native"), legacy).toBe(viaOpenRouter ? "openrouter" : "minimax");
+    }
+    setApiKey("minimax-legacy-or", "openrouter", "openrouter-placeholder");
+    const routed = resolveLlmEndpoint({ llmModel: "minimax-m3" }, "minimax-legacy-or");
+    expect(routed.provider).toBe("openrouter");
+    expect(routed.model).toBe("minimax/minimax-m3.1-flash");
   });
 
   it("uses the same credential service for eligibility and actual MiniMax execution", async () => {
     const { modelCredentialService } = await import("../src/lib/llm-provider");
     setApiKey("minimax-eligibility", "minimax", "minimax-placeholder");
-    expect(modelCredentialService("minimax-m3", "minimax-eligibility")).toBe("minimax");
-    expect(resolveLlmEndpoint({ llmModel: "minimax-m3" }, "minimax-eligibility").provider).toBe("minimax");
+    expect(modelCredentialService("minimax-m3.1-flash", "minimax-eligibility")).toBe("minimax");
+    expect(resolveLlmEndpoint({ llmModel: "minimax-m3.1-flash" }, "minimax-eligibility").provider).toBe("minimax");
     setApiKey("minimax-eligibility", "openrouter", "openrouter-placeholder");
-    expect(modelCredentialService("minimax-m3", "minimax-eligibility")).toBe("openrouter");
-    expect(resolveLlmEndpoint({ llmModel: "minimax-m3" }, "minimax-eligibility").provider).toBe("openrouter");
+    expect(modelCredentialService("minimax-m3.1-flash", "minimax-eligibility")).toBe("openrouter");
+    expect(resolveLlmEndpoint({ llmModel: "minimax-m3.1-flash" }, "minimax-eligibility").provider).toBe("openrouter");
   });
 
   it("keeps an explicit OpenRouter model on OpenRouter even when its native key exists", async () => {
     const { modelCredentialService, modelRequiresOpenRouter } = await import("../src/lib/llm-provider");
     setApiKey("explicit-openrouter-minimax", "minimax", "minimax-placeholder");
-    const model = "openrouter/minimax/minimax-m3";
+    const model = "openrouter/minimax/minimax-m3.1-flash";
 
     expect(modelRequiresOpenRouter(model)).toBe(true);
     expect(modelRequiresOpenRouter(" OpenRouter/~anthropic/claude-sonnet-latest ")).toBe(true);
@@ -99,7 +117,7 @@ describe("resolveLlmEndpoint", () => {
     const endpoint = resolveLlmEndpoint({ llmModel: model }, "explicit-openrouter-minimax");
     expect(endpoint.provider).toBe("openrouter");
     expect(endpoint.key).toBeUndefined();
-    expect(endpoint.model).toBe("minimax/minimax-m3");
+    expect(endpoint.model).toBe("minimax/minimax-m3.1-flash");
   });
 
   it("requires OpenRouter for Astra Pro even with a native OpenAI key", () => {
@@ -142,13 +160,25 @@ describe("resolveLlmEndpoint", () => {
     // MiniMax follows the same toggle: OpenRouter by default, direct once chosen.
     setApiKey("minimax-direct", "minimax", "minimax-placeholder");
     setApiKey("minimax-direct", "openrouter", "openrouter-placeholder");
-    expect(resolveLlmEndpoint({ llmModel: "minimax-m3" }, "minimax-direct").provider).toBe("openrouter");
-    expect(modelCredentialService("minimax-m3", "minimax-direct")).toBe("openrouter");
+    expect(resolveLlmEndpoint({ llmModel: "minimax-m3.1-flash" }, "minimax-direct").provider).toBe("openrouter");
+    expect(modelCredentialService("minimax-m3.1-flash", "minimax-direct")).toBe("openrouter");
     setUserSetting("minimax-direct", "llm_route_minimax", "native");
-    expect(modelCredentialService("minimax-m3", "minimax-direct")).toBe("minimax");
-    const minimax = resolveLlmEndpoint({ llmModel: "minimax-m3" }, "minimax-direct");
+    expect(modelCredentialService("minimax-m3.1-flash", "minimax-direct")).toBe("minimax");
+    const minimax = resolveLlmEndpoint({ llmModel: "minimax-m3.1-flash" }, "minimax-direct");
     expect(minimax.provider).toBe("minimax");
     expect(minimax.key).toBe("minimax-placeholder");
+    expect(minimax.url).toBe("https://api.minimax.io/v1/chat/completions");
+    expect(minimax.model).toBe("MiniMax-M3.1-Flash");
+    // Production shape (llm_route_minimax=native since 2026-10-15, OpenRouter credential also present):
+    // a policy that still stores minimax-m3 for the Green or the Red role must reach api.minimax.io
+    // with exactly MiniMax-M3.1-Flash, not a lowercase or M3 id.
+    for (const role of ["green", "red"] as const) {
+      const legacy = resolveLlmEndpoint({ llmModel: "minimax-m3", redTeamLlmModel: "minimax-m3" }, "minimax-direct", undefined, role);
+      expect(legacy.provider, role).toBe("minimax");
+      expect(legacy.url, role).toBe("https://api.minimax.io/v1/chat/completions");
+      expect(legacy.model, role).toBe("MiniMax-M3.1-Flash");
+      expect(legacy.key, role).toBe("minimax-placeholder");
+    }
     // OpenRouter-only users still get the OpenRouter wire id.
     setApiKey("openrouter-only", "openrouter", "openrouter-placeholder");
     for (const [model, wire] of [["muse-spark-1.3", "meta/muse-spark-1.3"], ["muse-spark-1.3-contributor", "meta/muse-spark-1.3-contributor"]]) {
@@ -215,8 +245,10 @@ describe("resolveLlmEndpoint", () => {
       ["kimi-latest", "~moonshotai/kimi-latest"],
       ["moonshotai/kimi-latest", "~moonshotai/kimi-latest"],
       ["~moonshotai/kimi-latest", "~moonshotai/kimi-latest"],
-      ["minimax-m3", "minimax/minimax-m3"],
-      ["minimax/minimax-m3", "minimax/minimax-m3"],
+      ["minimax-m3.1-flash", "minimax/minimax-m3.1-flash"],
+      ["minimax/minimax-m3.1-flash", "minimax/minimax-m3.1-flash"],
+      ["minimax-m3", "minimax/minimax-m3.1-flash"],
+      ["minimax/minimax-m3", "minimax/minimax-m3.1-flash"],
       // 2026-09-18: deepseek-r1 / deepseek-reasoner removed from the curated catalog. Both
       // go through the vendor-prefix fallback now and yield their literal vendor-prefixed
       // slug — the old alias mapping to 'deepseek/deepseek-r1' no longer applies.

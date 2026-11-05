@@ -186,7 +186,7 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   "deepseek-flash-latest": [0.06, 0.12], // was [0.065, 0.18] — kept in sync with deepseek-v4-flash-0731 above
   "deepseek-v4-pro-0813": [0.57816, 1.73448], // was [0.57948, 1.73844] — exact JSON figures (verified 2026-09-18)
   "deepseek-pro-latest": [0.57816, 1.73448], // was [0.57948, 1.73844] — kept in sync with deepseek-v4-pro-0813 above
-  "minimax-m3": [0.3, 1.2],
+  "minimax-m3.1-flash": [0.15, 0.6], // verified 2026-10-21 on platform.minimax.io pay-as-you-go ($0.15 in / $0.60 out / $0.015 cached)
   "muse-spark-1.3": [1.25, 4.25],
   "muse-spark-1.3-contributor": [0.1, 0.2], // verified 2026-10-12 on OpenRouter and dev.meta.ai pricing
   "muse-glimmer-30b": [0.35, 1.5], // was [0.3, 1.1] — real (live OpenRouter) price is $0.35/$1.50 (verified 2026-09-18)
@@ -206,6 +206,7 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   "gpt-5.6-terra": [2.5, 15],
   "grok-build-0.1": [1, 2],
   "grok-build-latest": [1, 2],
+  "minimax-m3": [0.3, 1.2], // retired 2026-10-21 in favor of minimax-m3.1-flash; <=512k-token tier (doubles above)
   "minimax-m2.7": [0.3, 1.2],
   "deepseek-reasoner": [0.55, 2.19],
   "deepseek-r1": [0.55, 2.19],

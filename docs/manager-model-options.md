@@ -1,3 +1,7 @@
+## 2026-10-21 MiniMax M3 becomes M3.1 Flash
+
+`minimax-m3` is replaced by `minimax-m3.1-flash` (native `MiniMax-M3.1-Flash`, OpenRouter `minimax/minimax-m3.1-flash`), $0.15 input and $0.60 output per 1M tokens against M3's $0.30 and $1.20.  The M3 spellings remain aliases, so existing selections keep working and run the new model.  The tier stays `$`.  OpenRouter has not published the paid endpoint yet, so MiniMax runs on the native route until it does.  Details: `docs/rollouts/2026-10-21-minimax-m3-1-flash.md`.
+
 ## 2026-09-18 Catalog cleanup
 
 The curated catalog (`src/lib/llm-model-catalog.ts`) dropped from 32 rows to 21. Removed, each

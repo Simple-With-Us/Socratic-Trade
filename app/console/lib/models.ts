@@ -135,8 +135,10 @@ const MODEL_DISPLAY_NAME: Record<string, string> = {
   "kimi-latest": "Kimi k3",
   "kimi-k3": "Kimi k3",
   // MiniMax
-  "minimax-m3": "MiniMax M3",
-  "MiniMax-M3": "MiniMax M3",
+  // modelDisplayName canonicalizes first, so minimax-m3 / MiniMax-M3 (retired 2026-10-21 and
+  // aliased onto this row) reach the display slug below and never need their own entry.
+  "minimax-m3.1-flash": "MiniMax M3.1 Flash",
+  "MiniMax-M3.1-Flash": "MiniMax M3.1 Flash",
   // Meta
   "muse-spark-1.3": "Muse Spark 1.3",
   "muse-spark-1.3-contributor": "Muse Spark 1.3 Contributor",
