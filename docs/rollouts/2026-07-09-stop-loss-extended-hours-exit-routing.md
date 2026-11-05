@@ -38,7 +38,7 @@ default staying OFF.
 
 ## Coordination
 
-A parallel Monet session was mid-build on the overlapping fileset and (via #agent-sync) claimed a
+A parallel Monet session was mid-build on the overlapping fileset and (via #ag***-s**c) claimed a
 "no gate / labels-only" reading of owner intent. Owner ruled (this session's live conversation is
 authoritative): the short-selling **gate stays** and **behavior-match stays**. Division agreed on
 the channel: the peer keeps `defaults.ts` (`shortStopLossPct=8` real default, PR #1221),

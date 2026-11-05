@@ -29,7 +29,7 @@ done
 git for-each-ref --sort=-committerdate refs/remotes/origin | head -15
 
 # 5. Zulip #Work-In-Progress history: claims, handoffs, last state
-agent-sync read --topic "fleet" --limit 20
+simple-chat read --topic "fleet" --limit 20
 ```
 
 ## CLAIM: Post to #Work-In-Progress before working
@@ -48,7 +48,7 @@ Durability: put the same claim in `docs/EFFORT-LOG.md` (repo mirror), not only t
 ```bash
 # Check: no commits or Slack posts from this seat since the cap
 git log --oneline --author="<seat-email-or-name>" --since="2 hours ago"
-agent-sync read --topic "fleet" --limit 20 | grep "\[SEAT"
+simple-chat read --topic "fleet" --limit 20 | grep "\[SEAT"
 
 # Adopt uncommitted work (assume it is intentional): commit with dual authorship.
 # Match the Co-Authored-By convention already in this repo's history (per tool, not per seat) --
@@ -98,4 +98,4 @@ close-out on `#Work-In-Progress`, repo-first, naming what is ready for the retur
 - **/Users/jay/apps/FLEET-PROTOCOL.md** -- Zulip message format and handoff discipline (canonical)
 - **memory `codex-automerge-race-and-board-clobber`** -- why live-board-only claims get lost
 - **scripts/land.sh** -- landing gate (tsc -> test -> build, CI checks, PR open)
-- **agent-sync** -- read/post #Work-In-Progress updates (install via `scripts/install-fleet-coordination.sh`)
+- **simple-chat** -- read/post #Work-In-Progress updates (install via `scripts/install-fleet-coordination.sh`)

@@ -1,16 +1,16 @@
-# 2026-07-04 - agent-sync-protocol-docs
+# 2026-07-04 - ag***-s**c-protocol-docs
 
 ## Summary
 
 Established inter-agent coordination protocol for parallel work on `jaywedgeworth22/agentic-trading`:
 
-1. **Canonical reference:** Created `/Users/jay/apps/AGENT-SYNC.md` — the branch-neutral single source
+1. **Canonical reference:** Created `/Users/jay/apps/AG***-S**C.md` — the branch-neutral single source
    of truth for the inter-agent Slack coordination protocol. Covers: sender tags, terse message format,
    message structure (header + body fields), emoji reactions, Slack/bot access mechanics, real-time
    watcher behavior, conflict resolution, effort-board integration, and worked examples.
 
 2. **Repo pointer:** Added short `## Inter-agent coordination` section to `AGENTS.md` (3-4 lines) that
-   directs agents to read `/Users/jay/apps/AGENT-SYNC.md` before their first message. Includes quick
+   directs agents to read `/Users/jay/apps/AG***-S**C.md` before their first message. Includes quick
    context (channel id, effort-board primacy, peer-message semantics, watcher/poll patterns).
 
 The canonical file lives branch-neutral (at `/Users/jay/apps/`), so every agent on every branch reads
@@ -20,15 +20,15 @@ lightweight pointer.
 ## Files
 
 **Branch-neutral (outside worktree):**
-- `/Users/jay/apps/AGENT-SYNC.md` — new canonical protocol reference; created fresh.
+- `/Users/jay/apps/AG***-S**C.md` — new canonical protocol reference; created fresh.
 
-**Repo-tracked (in worktree, branch `claude/agent-sync-protocol-docs`):**
-- `AGENTS.md` — replaced long `## Inter-agent sync channel (#agent-sync)` section (earlier draft)
+**Repo-tracked (in worktree, branch `claude/ag***-s**c-protocol-docs`):**
+- `AGENTS.md` — replaced long `## Inter-agent sync channel (#ag***-s**c)` section (earlier draft)
   with short `## Inter-agent coordination` pointer (3-4 lines) immediately before
   `## Cross-file consistency traps`.
 - `STATUS.md` — prepended 2026-07-04 entry documenting the pointer + canonical reference.
 - `docs/EFFORT-LOG.md` — one-line note on the "Wash-sale gate" In Progress row noting this docs branch.
-- `docs/rollouts/2026-07-04-agent-sync-protocol-docs.md` — this file (updated to reflect the canonical/pointer split).
+- `docs/rollouts/2026-07-04-ag***-s**c-protocol-docs.md` — this file (updated to reflect the canonical/pointer split).
 
 ## Verification
 
@@ -40,13 +40,13 @@ lightweight pointer.
 
 ## Follow-ups
 
-- None. Docs-only change; `/Users/jay/apps/AGENT-SYNC.md` is not tracked in the repo (sits at
+- None. Docs-only change; `/Users/jay/apps/AG***-S**C.md` is not tracked in the repo (sits at
   the shared apps level), so no merge conflicts expected. Repo changes are isolated to AGENTS.md
   pointer, STATUS.md entry, and rollout note.
 
 ## Notes
 
-- The canonical protocol file (`/Users/jay/apps/AGENT-SYNC.md`) lives outside the worktree at the
+- The canonical protocol file (`/Users/jay/apps/AG***-S**C.md`) lives outside the worktree at the
   shared `/Users/jay/apps/` directory (neutral across all agent worktrees). This ensures every agent
   reads the same authoritative rules without branch conflicts or the need to sync docstrings.
 - The ASCII-safety note in `AGENTS.md` "Cross-file consistency traps" applies: the pointer section

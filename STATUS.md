@@ -1,3 +1,12 @@
+## 2026-11-03 Muse-Assist — Retired fleet name removed from ops surfaces
+
+**What.**  The retired two-part fleet name is removed from this repository's ops tooling under the owner's fleet-wide directive.  The fleet post helper is now `scripts/simple-tools-fleet-post.sh`, driven by the `FLEET_POST_*` env family and posting through `simple-chat` to Zulip #Work-In-Progress; its callers (the deploy-freshness workflow, the freshness alerter, provider knob sync, the Slack retirement shim, the launchd plist) and the CI syntax check use the new names in the same change.  `scripts/install-fleet-coordination.sh` now installs `simple-chat` and `simple-board` plus `FLEET-PROTOCOL.md` from the current AFC tool-names pin.  Historical prose is masked, including the older entries below.  Two slices stay as documented exceptions: the fail-closed bootstrap stub keeps its path so old setup calls cannot reinstall the Slack engine, and the coordination installer keeps a two-entry legacy-link removal list so pre-rename installs stop resolving the old command names, and the three doc labels for the shared Infisical token pair now carry the fleet's canonical new names (`FLEET_SYNC_TOKEN` / `FLEET_SYNC_POST_TOKEN`) ahead of the centrally sequenced key rename.  No trading logic was touched.  Rollout: `docs/rollouts/2026-11-03-retired-name-sweep.md`.
+
+**Next.**  Land on green verify; the shared token pair's key rename is sequenced centrally after all consumers land, and the AFC pin advances to the tool-names merge commit when that lands.
+## 2026-11-03 CODEX — Repair Settings Navigation Spec Links (AFC-599)
+
+Corrected 12 broken Markdown navigation targets across the settings-navigation implementation spec so each link opens the canonical parent design.  The link-only update is recorded in `docs/rollouts/2026-11-03-afc-599-document-navigation-links.md`.
+
 ## 2026-10-30 CODEX — Repository Report Library (AFC-580)
 
 Adds `docs/reports/README.md` as the report and research entry point while preserving all existing historical paths.  New public-safe reports belong in `docs/reports/`; private operational evidence belongs in private Fleet-OPS.  The shared collector builds the separate `Code/Docs/Socratic-Trade/` collection from published Git revisions.  The approved Docs-only exception is installed; Git integration checkouts remain protected.  Final source publication is tracked in AFC-580.
@@ -597,7 +606,7 @@ after sourcing the handoff file.  The profile installer does the same for a stan
 local run when the file exists and the variable is unset.  Kody confirmed the rule 33
 fix on the review thread.
 
-**Linear.**  **ST-2916** (`512444e3-f147-4bca-9c03-a51e53b109cd`) — claimed **CURSOR**, status **addressed**, PR #4716 linked in issue comment (Agent-Sync).
+**Linear.**  **ST-2916** (`512444e3-f147-4bca-9c03-a51e53b109cd`) — claimed **CURSOR**, status **addressed**, PR #4716 linked in issue comment (Ag***-S**c).
 
 **Next.**  PR #4716: rule-33 fix (no implicit ~/.secrets in resolveAscCredentials; ASC_SECRETS_ENV).  The profile installer exports ASC_SECRETS_ENV for standalone local runs.  GB-Deployer squash-merge when `verify` green; ST-2916 **completed** on merge.
 
@@ -640,11 +649,11 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 
 ## 2026-10-15 Cursor Cloud — ST-4531 retire Slack callers
 
-**What.**  PR #4696 merged to `main` (Slack ops callers → Zulip / `agent-sync-fleet-post.sh`; Infisical Zulip triple via `infisical-secrets-safe.sh get` in Actions).  Follow-up branch fixes rollout merge-conflict markers left on `main`, adds regression tests, and answers post-merge Kody threads on #4696.
+**What.**  PR #4696 merged to `main` (Slack ops callers → Zulip / `ag***-s**c-fleet-post.sh`; Infisical Zulip triple via `infisical-secrets-safe.sh get` in Actions).  Follow-up branch fixes rollout merge-conflict markers left on `main`, adds regression tests, and answers post-merge Kody threads on #4696.
 
 **Branch.**  `cursor/st-4531-retire-slack-callers-89ad` (post-merge follow-up).
 
-**Verification.**  `vitest run test/github-actions-infisical-zulip-ops.test.ts test/agent-sync-fleet-post.test.ts test/infisical-secrets-safe.test.ts`; `npm run lint`; `npx tsc --noEmit`; `npm run build`.
+**Verification.**  `vitest run test/github-actions-infisical-zulip-ops.test.ts test/ag***-s**c-fleet-post.test.ts test/infisical-secrets-safe.test.ts`; `npm run lint`; `npx tsc --noEmit`; `npm run build`.
 
 **Next.**  PR #4733 ready for merge after its required checks are green; Refs ST-4531.
 
@@ -708,7 +717,7 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 
 **Verification.**  Rebased on `main`; Playwright visual baseline for retired-lanes footnote; `verify` CI green after push.
 
-**Next.**  Deployer merges #4707; then CURSOR marks ST-3854 Done via Agent-Sync (not before merge).
+**Next.**  Deployer merges #4707; then CURSOR marks ST-3854 Done via Ag***-S**c (not before merge).
 ## 2026-10-15 Cursor Cloud — transcript and companyfacts gzip, RAG review
 
 **What.**  `earningscalls_transcripts.content` and the companyfacts JSON cache in `sec_facts.segment` now store `gz1:` (base64 gzip) or `raw1:` when gzip does not shrink the text.  Every reader of those bodies decodes first.  FTS still indexes plaintext.  A leader lane backfills in place and does not delete.  `audit_events.payload` stays plaintext because the hash chain and `json_extract` readers are not one path.  `post_mortem_reflection` is no longer age-pruned.  Review: `docs/reviews/2026-10-15-rag-storage-expert-panel.md`.
@@ -1492,7 +1501,7 @@ rollout note and the schema file.
 
 **Verification.**  Touched files: `npm run lint` 0 errors; `npx tsc --noEmit` clean.  CI `verify` then runs full `npm test` and `npm run build` (no "Attempted import error", no Edge `Module not found` for `@sentry/node`).
 
-**Next.**  Tip `8425497f` (`608ae672` rebase onto `origin/main` with `--force-with-lease`, plus fleet-recall citations).  `verify` + `verify-hosted` green on `608ae672`; CI re-running on `8425497f` (docs-only).  Remaining merge blockers: unresolved Kody defer threads (Mac live ledger mirror, GitHub issue reservation, agent-sync claim) until Jay or a Mac seat clears them.
+**Next.**  Tip `8425497f` (`608ae672` rebase onto `origin/main` with `--force-with-lease`, plus fleet-recall citations).  `verify` + `verify-hosted` green on `608ae672`; CI re-running on `8425497f` (docs-only).  Remaining merge blockers: unresolved Kody defer threads (Mac live ledger mirror, GitHub issue reservation, ag***-s**c claim) until Jay or a Mac seat clears them.
 ## 2026-10-05 CURSOR — EOD close plausibility (board feab5c88, branch `cursor/eod-close-plausibility-4676`)
 
 **What.**  Congress-share export schemas now reject `close <= 0` on `spx` and nested `prices[].closes` before CT import (`CongressSharePriceCloseSchema` / `CongressSharePriceSeriesSchema`).  `ohlcBarsToCloses` already filtered non-positive closes on `main`.
@@ -1539,7 +1548,7 @@ rollout note and the schema file.
 
 **What.**  Board `77590d59` (GROK in_progress), issue #3888 / PR #4212: harden `isTradierOrderNotFound` — `^Tradier HTTP 404`, or `^Tradier HTTP 422:` with body-prefix order not-found / bare `not found`; reject incidental or echoed 422 prose on other statuses (incl. 502 echo fixture); lookup tests + stale `cancelBracketSiblingLegs` comment only.
 
-**Coordination.**  AGENT-SYNC.md applies to new effort claims; this row tracks board/issue scope only (reservation already on live board).  No retroactive `#agent-sync` post is recorded from this cloud follow-up pass.
+**Coordination.**  AG***-S**C.md applies to new effort claims; this row tracks board/issue scope only (reservation already on live board).  No retroactive `#ag***-s**c` post is recorded from this cloud follow-up pass.
 
 **Verification.**  CI `verify` on PR #4212 is the merge gate.
 
@@ -1572,7 +1581,7 @@ rollout note and the schema file.
 
 ## 2026-10-06 CURSOR — PR #4164 Kody tip-fix (branch `grok/lexical-fts-off-event-loop`)
 
-**Claim.**  `repo: Simple-With-Us/Socratic-Trade`  `issue: #4213`  `board: f50c66930a124233b28563e7967b9ac7`  `pr: #4164`.  No Slack #agent-sync post from this cloud VM.
+**Claim.**  `repo: Simple-With-Us/Socratic-Trade`  `issue: #4213`  `board: f50c66930a124233b28563e7967b9ac7`  `pr: #4164`.  No Slack #ag***-s**c post from this cloud VM.
 
 **What.**  Merged `origin/main` (#4218 RTH stall bounds, #4241 effort sync).  Kody: interpolate `WORKER_BIND_UNION_SOURCE` into `WORKER_SOURCE` so worker bind validation cannot drift from `SqliteBindSchema`.  Kody: malformed terminal worker replies call `settleReject` with `terminalWorkerReply` so execution reclaim does not kill an idle worker after 15s.
 
@@ -4372,7 +4381,7 @@ Branch `cursor/deploy-freshness-ocr-isolate-d4cf`.  PR #2796.  Rollout:
 P0 silent-freeze class from 2026-08-06: Coolify SSH exec died mid-build while
 webhooks stayed 200 and `/api/health` stayed green on the old sha.  This branch
 adds a 20-minute freshness cron (oldest undeployed main commit >1h pages
-Sentry / optional `#agent-sync`) and a dry-run-default `docker update` CPU cap
+Sentry / optional `#ag***-s**c`) and a dry-run-default `docker update` CPU cap
 for CT OCR/scan workers that never restarts and never touches ST.  Remaining
 host constraint: durable isolation is Coolify/CT-repo; this repo cannot set
 those or a Coolify retry-on-255.  Did not touch prod.
@@ -5233,7 +5242,7 @@ Fix on `grok/stop-ghost-native-keys`, issue #2728 / PR #2729: never remigrate a 
 Owner: change agent rules so nobody dumps `~/.secrets/global-api-keys` into a
 transcript.  Rotation is already done; do not re-litigate it.
 
-Added the handoff-file grep trap to AGENT-SYNC, TEMPLATE-AGENTS, this
+Added the handoff-file grep trap to AG***-S**C, TEMPLATE-AGENTS, this
 `AGENTS.md`, and the secret-safety skill.  Names only: `grep -oE`.
 Branch `grok/secret-file-grep-ban`.
 
@@ -5665,7 +5674,7 @@ Branch `grok/fleet-alerts-aug13`.  Rollout: `docs/rollouts/2026-08-13-fleet-aler
 Owner: change agent rules so nobody dumps `~/.secrets/global-api-keys` into a
 transcript.  Rotation is already done; do not re-litigate it.
 
-Added the handoff-file grep trap to AGENT-SYNC, TEMPLATE-AGENTS, this
+Added the handoff-file grep trap to AG***-S**C, TEMPLATE-AGENTS, this
 `AGENTS.md`, and the secret-safety skill.  Names only: `grep -oE`.
 Branch `grok/secret-file-grep-ban`.
 

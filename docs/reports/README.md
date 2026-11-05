@@ -522,7 +522,7 @@ Private evidence stays in private Fleet-OPS and is excluded from public indexes.
 - [2026-07-03-universe-index-exclusivity](../rollouts/2026-07-03-universe-index-exclusivity.md)
 - [2026-07-03-washsale-advisory-defaults](../rollouts/2026-07-03-washsale-advisory-defaults.md)
 - [2026-07-04-agent-monet-preview-lane](../rollouts/2026-07-04-agent-monet-preview-lane.md)
-- [2026-07-04-agent-sync-protocol-docs](../rollouts/2026-07-04-agent-sync-protocol-docs.md)
+- [2026-07-04-fleet-protocol-docs](../rollouts/2026-07-04-fleet-protocol-docs.md)
 - [2026-07-04-approvals-alert-center-slice](../rollouts/2026-07-04-approvals-alert-center-slice.md)
 - [2026-07-04-backlog-exhaustiveness-assignments](../rollouts/2026-07-04-backlog-exhaustiveness-assignments.md)
 - [2026-07-04-ci-actions-efficiency](../rollouts/2026-07-04-ci-actions-efficiency.md)

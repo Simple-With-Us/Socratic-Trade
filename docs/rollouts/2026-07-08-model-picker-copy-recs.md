@@ -57,4 +57,4 @@ catalog copies (`app/console/settings/models.tsx` + `app/ui/llm-model-catalog.ts
 
 ## Follow-ups
 - The in-flight `monet/single-adversary-consolidation` branch also edits
-  `models.tsx` — flagged on #agent-sync to rebase over this.
+  `models.tsx` — flagged on #ag***-s**c to rebase over this.

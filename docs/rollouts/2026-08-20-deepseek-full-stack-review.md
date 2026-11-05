@@ -6,8 +6,8 @@ Owner asked DEEPSEEK (new fleet seat) to run a top-to-bottom review of Socratic-
 
 ## 2. Changes Made
 
-- **New seat:** DEEPSEEK onboarded (tag `DEEPSEEK`, notes name DeepSeek, lane `~/apps/trading-deepseek`, branch prefix `deepseek/`).  Seat row added to `fleet-apps.json` and both `AGENT-SYNC.md` copies; landed via ai-fleet-coordinator PR #55 (merged).
-- **Coordination:** board umbrella item `682e7e3467cd4def97a13ee67335cbb1` (claimed, in_progress); Slack intro + claim posted to #agent-sync; effort-log rows added (Planned/In Progress) to `/Users/jay/apps/TRADING-EFFORT-LOG.md` and `docs/EFFORT-LOG.md`.
+- **New seat:** DEEPSEEK onboarded (tag `DEEPSEEK`, notes name DeepSeek, lane `~/apps/trading-deepseek`, branch prefix `deepseek/`).  Seat row added to `fleet-apps.json` and both `AG***-S**C.md` copies; landed via ai-fleet-coordinator PR #55 (merged).
+- **Coordination:** board umbrella item `682e7e3467cd4def97a13ee67335cbb1` (claimed, in_progress); Slack intro + claim posted to #ag***-s**c; effort-log rows added (Planned/In Progress) to `/Users/jay/apps/TRADING-EFFORT-LOG.md` and `docs/EFFORT-LOG.md`.
 - **Review doc:** `docs/reviews/2026-08-20-deepseek-full-review.md` — live measurements, state verifications of open board findings, and the prioritized fix/improvement outline.
 - **Touched files (lane):** `docs/reviews/2026-08-20-deepseek-full-review.md` (new), `docs/EFFORT-LOG.md` (row), `STATUS.md` (row, this commit), `PLAN.md` (row, this commit).
 

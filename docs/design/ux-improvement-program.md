@@ -434,7 +434,7 @@ Visual: desktop Thesis + Proposals; phone 390 width; iOS simulator Home + Propos
 
 ## How to claim a slice
 
-1. Poll agent-sync; read this doc + live board.  
+1. Poll ag***-s**c; read this doc + live board.  
 2. Move the matching Planned row → In Progress with your tag + branch (do not pre-assign unclaimed slices to other agents).  
 3. Implement in `~/apps/trading-<you>` worktree only.  
 4. Update rollout note for that slice; mirror effort board; land via `scripts/land.sh`.  

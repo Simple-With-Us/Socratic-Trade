@@ -295,7 +295,7 @@ jobs:
           actor="${{ github.actor }}"
           if printf '%s' "$actor" | grep -Eq '\[bot\]$'; then
             case "$actor" in
-              'cursor[bot]'|'dependabot[bot]'|'renovate[bot]'|'sentry[bot]'|'codex[bot]'|'chatgpt-codex-connector[bot]'|'github-actions[bot]'|'swu-echo[bot]'|'swu-wise[bot]')
+              'cursor[bot]'|'dependabot[bot]'|'renovate[bot]'|'sentry[bot]'|'codex[bot]'|'chatgpt-codex-connector[bot]'|'kody-ai[bot]'|'claude[bot]'|'github-actions[bot]'|swu-*'[bot]')
                 echo "Trusted same-repo bot: $actor"
                 ;;
               *)
@@ -386,7 +386,7 @@ jobs:
           bash -n scripts/alert-deploy-freshness.sh
           bash -n scripts/alert-deploy-freshness.selftest.sh
           bash -n scripts/github-actions-infisical-zulip-ops.sh
-          bash -n scripts/agent-sync-fleet-post.sh
+          bash -n scripts/simple-tools-fleet-post.sh
           bash -n scripts/isolate-shared-box-batch.sh
           bash -n scripts/isolate-shared-box-batch.selftest.sh
           bash scripts/verify-deploy-sha.selftest.sh

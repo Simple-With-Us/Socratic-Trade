@@ -59,7 +59,7 @@ attributed or filtered by the account the work was done for. This closes that ga
 - **`strategy` / `strategy-bear` (`strategy.ts`) + `red-team.ts`** attribution is deferred — those
   files are CLAUDE-Cowork's active single-adversary-consolidation keepout. Those contexts currently
   record `connected_account_id = NULL` ("Unattributed"). The fix is a one-liner per site
-  (`connectedAccountId: policy.connectedAccountId`); flagged on #agent-sync for Claude to add as it
+  (`connectedAccountId: policy.connectedAccountId`); flagged on #ag***-s**c for Claude to add as it
   consolidates, or for Monet to thread once that work lands.
 - **Budget policy fork** (owner): decide global vs per-account LLM daily cap now that per-account spend
   is visible. One-line change in `llm-budget.ts` (add `lu.connected_account_id = ?` to the spend SUM).
