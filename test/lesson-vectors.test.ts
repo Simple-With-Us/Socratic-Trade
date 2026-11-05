@@ -254,7 +254,13 @@ describe("thesis x regime bucket lesson vectors (writeThesisRegimeLessonVectors)
     const stats = [stat("Momentum", "Bull", 6), stat("Value", "Bear", 7)];
     failAccession = `${userId}:Momentum:Bull`;
     try {
-      await expect(writeThesisRegimeLessonVectors(stats, userId, [{accountNumber: connectedAccountId, environment: "paper"}])).resolves.toBeUndefined();
+      // Resolves (never throws) and reports the partial outcome so a signature-deduping caller can retry.
+      await expect(writeThesisRegimeLessonVectors(stats, userId, [{accountNumber: connectedAccountId, environment: "paper"}])).resolves.toEqual({
+        attempted: 2,
+        written: 1,
+        skipped: 0,
+        failed: 1
+      });
     } finally {
       failAccession = undefined;
     }
@@ -372,5 +378,94 @@ describe("generateReflectionSummary integration", () => {
     expect(summary).toHaveLength(1);
     const summaryPayload = JSON.parse(summary[0].payload);
     expect(summaryPayload.failed).toBe(1);
+  });
+
+  it("ST-4589 B6: with no LLM key the deterministic bucket lessons are still written, once per new-fills signature, with no LLM call", async () => {
+    const userId = `post-mortem-nokey-${randomUUID()}`;
+    const accountNumber = "APCA-PAPER-NOKEY";
+    const accountId = randomUUID();
+    const { getUserSetting, insertFillEvent, setActiveConnectedAccount, setPolicy, upsertConnectedAccount } = await import("../src/lib/db");
+    const { generateReflectionSummary } = await import("../src/lib/post-mortem");
+    const { resolveLlmEndpoint } = await import("../src/lib/llm-provider");
+
+    upsertConnectedAccount({ id: accountId, userId, broker: "alpaca", environment: "paper", accountNumber, label: "Alpaca Paper", isActive: true });
+    setActiveConnectedAccount(accountId, userId);
+    setPolicy({ ...DEFAULT_POLICY, accountNumber, activeBroker: "alpaca", llmModel: "openai/gpt-4.1-mini" }, userId);
+    // Precondition: this harness really has no chat key for the user.
+    expect(resolveLlmEndpoint({ ...DEFAULT_POLICY, llmModel: "openai/gpt-4.1-mini" }, userId, "https://api.openai.com/v1/chat/completions").key).toBeFalsy();
+
+    for (let i = 0; i < 5; i++) {
+      insertFillEvent({
+        userId, accountNumber, source: "paper", executionMode: "broker/paper", symbol: `NK${i}`, side: "buy",
+        quantity: 1, price: 100, notional: 100, status: "filled", filledAt: `2026-02-0${i + 1}T00:00:00.000Z`,
+        raw: { proposal: { tradeThesisTag: "Momentum-Breakout", entryMarketRegime: "Tech-Bull" } }
+      });
+      insertFillEvent({
+        userId, accountNumber, source: "paper", executionMode: "broker/paper", symbol: `NK${i}`, side: "sell",
+        quantity: 1, price: 110, notional: 110, status: "filled", filledAt: `2026-02-0${i + 1}T01:00:00.000Z`
+      });
+    }
+
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("no network call expected on the no-key path");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const accession = `${userId}:Momentum-Breakout:Tech-Bull`;
+    const writesFor = () => storeContextsCalls.filter((c) => c.documents[0]?.metadata?.accession === accession).length;
+
+    await generateReflectionSummary(accountNumber, userId);
+    expect(writesFor()).toBe(1);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // No LLM reflection was produced.
+    expect(getUserSetting(userId, `reflection_summary:${accountNumber}`, "")).toBe("");
+
+    // Same fills -> deduped, no second write.
+    await generateReflectionSummary(accountNumber, userId);
+    expect(writesFor()).toBe(1);
+  });
+
+  it("ST-4589: a failed bucket does not record the deterministic-lesson signature, so the next run retries", async () => {
+    const userId = `post-mortem-retry-${randomUUID()}`;
+    const accountNumber = "APCA-PAPER-RETRY";
+    const accountId = randomUUID();
+    const { getInternalSetting, insertFillEvent, setActiveConnectedAccount, setPolicy, upsertConnectedAccount } = await import("../src/lib/db");
+    const { generateReflectionSummary } = await import("../src/lib/post-mortem");
+
+    upsertConnectedAccount({ id: accountId, userId, broker: "alpaca", environment: "paper", accountNumber, label: "Alpaca Paper", isActive: true });
+    setActiveConnectedAccount(accountId, userId);
+    setPolicy({ ...DEFAULT_POLICY, accountNumber, activeBroker: "alpaca", llmModel: "openai/gpt-4.1-mini" }, userId);
+    for (let i = 0; i < 5; i++) {
+      insertFillEvent({
+        userId, accountNumber, source: "paper", executionMode: "broker/paper", symbol: `RT${i}`, side: "buy",
+        quantity: 1, price: 100, notional: 100, status: "filled", filledAt: `2026-03-0${i + 1}T00:00:00.000Z`,
+        raw: { proposal: { tradeThesisTag: "Momentum-Breakout", entryMarketRegime: "Tech-Bull" } }
+      });
+      insertFillEvent({
+        userId, accountNumber, source: "paper", executionMode: "broker/paper", symbol: `RT${i}`, side: "sell",
+        quantity: 1, price: 110, notional: 110, status: "filled", filledAt: `2026-03-0${i + 1}T01:00:00.000Z`
+      });
+    }
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new Error("no network call expected on the no-key path");
+    }));
+
+    const accession = `${userId}:Momentum-Breakout:Tech-Bull`;
+    const signatureKey = `reflection_lesson_signature:${userId}:${accountNumber}`;
+    const writesFor = () => storeContextsCalls.filter((c) => c.documents[0]?.metadata?.accession === accession).length;
+
+    failAccession = accession;
+    try {
+      await generateReflectionSummary(accountNumber, userId);
+    } finally {
+      failAccession = undefined;
+    }
+    expect(writesFor()).toBe(0);
+    expect(getInternalSetting<string>(signatureKey)).toBeFalsy();
+
+    // Same fills, store healthy again -> retried and now recorded.
+    await generateReflectionSummary(accountNumber, userId);
+    expect(writesFor()).toBe(1);
+    expect(getInternalSetting<string>(signatureKey)).toBeTruthy();
   });
 });

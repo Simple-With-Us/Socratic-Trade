@@ -259,3 +259,49 @@ describe("ownership isolation — user B cannot touch user A's pending row", () 
     expect(getPendingLearnedContext(id, USER_A)?.status).toBe("approved");
   });
 });
+
+describe("ST-4589 — approved risk rows are stored but NOT read into the trading prompt", () => {
+  it("an approved risk row exists in learned_context yet never reaches decision retrieval", async () => {
+    // Approval can come from a human OR the Learning Review LLM ("decide" mode) and the row does not
+    // record which, so the read stays fact-tier only until the owner decides otherwise.
+    const { retrieveLearnedContext } = await import("../src/lib/learned-context/store");
+    const owner = userIdForEmail(`b3-owner-${randomUUID()}@example.com`);
+    const candidate = { kind: "pattern" as const, subject: `max_position_b3_${randomUUID().slice(0, 8)}`, value: "raise to 30%" };
+
+    const r = await ingestLearned(owner, candidate, "ingest");
+    expect(r.pending?.riskTier).toBe("risk");
+    expect(approveAs(r.pendingId!, owner)).toBe(200);
+
+    expect(listLearnedContext(owner).some((row) => row.subject === candidate.subject && row.riskTier === "risk")).toBe(true);
+    expect(retrieveLearnedContext(owner, [], undefined, { includeShared: true }).some((line) => line.includes(candidate.subject))).toBe(false);
+  });
+});
+
+describe("ST-4589 B4 — fact rows carry regime / thesisTag so relevance scoring can fire", () => {
+  it("persists the producer's regime and thesisTag and ranks the in-regime, in-thesis fact first", async () => {
+    const { retrieveLearnedContextDetailed } = await import("../src/lib/learned-context/store");
+    const user = userIdForEmail(`b4-${randomUUID()}@example.com`);
+    const tag = `T${randomUUID().slice(0, 6)}`;
+    const conditioned = await ingestLearned(
+      user,
+      { kind: "decision", subject: `decision_lesson:AAPL:${tag}`, value: "Breakouts in this setup followed through.", symbol: "AAPL", regime: "Tech-Bull", thesisTag: tag },
+      "autonomous"
+    );
+    expect(conditioned.written?.regime).toBe("Tech-Bull");
+    expect(conditioned.written?.thesisTag).toBe(tag);
+    const plain = await ingestLearned(
+      user,
+      { kind: "decision", subject: "decision_lesson:AAPL:untagged", value: "A neutral observation about AAPL.", symbol: "AAPL" },
+      "autonomous"
+    );
+    expect(plain.written?.regime ?? null).toBeNull();
+
+    // Read back from the table (not just the in-memory row).
+    const stored = listLearnedContext(user).find((row) => row.subject === `decision_lesson:AAPL:${tag}`);
+    expect(stored?.regime).toBe("Tech-Bull");
+    expect(stored?.thesisTag).toBe(tag);
+
+    const { rows } = retrieveLearnedContextDetailed(user, ["AAPL"], "Tech-Bull", { includeShared: false, thesisTags: new Set([tag]) });
+    expect(rows[0]?.subject).toBe(`decision_lesson:AAPL:${tag}`);
+  });
+});

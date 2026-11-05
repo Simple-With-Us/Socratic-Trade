@@ -354,7 +354,8 @@ describe("decision-time retrieval (retrieveDecisionExperiences)", () => {
     expect(options.matchAllSymbols).toBe(true);
     expect(options.asOf).toBe(asOf);
     expect(options.connectedAccountId).toBe("account-a");
-    expect(options.accountScope).toBe("exact");
+    // ST-4589 B2: account memory plus this user's pooled user-level lessons.
+    expect(options.accountScope).toBe("exact-or-user");
 
     // Same-run neighbors (entry OR exit side) are excluded — no self-retrieval, no lookahead.
     const injectedIds = result.injected.map((ref) => ref.id);
