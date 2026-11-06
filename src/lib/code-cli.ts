@@ -29,8 +29,28 @@ const CodeCliRequestSchema = z.object({
   functions: Disabled,
   max_tokens: z.number().nullish(),
   max_completion_tokens: z.number().nullish(),
-  response_format: z.unknown().optional()
+  response_format: z.unknown().optional(),
+  /** Set by ST's own request builder (llm-request.ts withLlmRequestBounds).  Anything outside the
+   *  ladder is dropped rather than failing the call. */
+  reasoning_effort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]).nullish().catch(undefined)
 });
+
+/** Opt-in switch for forwarding `reasoningEffort` to the broker (default off). */
+export function codeCliReasoningEffortEnabled(): boolean {
+  const raw = process.env.CODE_CLI_REASONING_EFFORT?.trim().toLowerCase();
+  return raw === "true" || raw === "1";
+}
+
+type BrokerReasoningEffort ="minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/** The effort forwarded to the broker.  MiniMax and Muse cannot turn thinking off ("none" is a
+ *  provider 400), so "none" is never forwarded; contributor models never get "max" (Meta:
+ *  "not available with muse-spark-1.3-contributor"), so it clamps to "xhigh". */
+export function codeCliBrokerReasoningEffort(model: string, effort: string | null | undefined): BrokerReasoningEffort | undefined {
+  if (!effort || effort === "none") return undefined;
+  if (effort === "max" && /-contributor$/i.test(model)) return "xhigh";
+  return effort as BrokerReasoningEffort;
+}
 
 /** Broker response contract v1 (docs/llm/code-cli-broker.md).  Only text and finishReason are
  *  forwarded into the completion ST builds below, so any other broker field is dropped here. */
@@ -81,17 +101,22 @@ export async function fetchCodeCli(url: string, init: RequestInit): Promise<Resp
   if (!parsedMessages.success) throw new Error("Code CLI accepts only plain text messages");
   const messages = parsedMessages.data;
   const model = body.model ?? "";
-  if (!(service === "meta" ? /^muse-spark-/i.test(model) : /^minimax-/i.test(model))) {
+  if (!(service === "meta" ? /^muse-(?:spark|wonder)-/i.test(model) : /^minimax-/i.test(model))) {
     throw new Error("Model is not supported by this Code CLI adapter");
   }
   // Explicit reconstruction: no caller headers, API keys, tools, paths or extra body fields cross.
+  // `reasoningEffort` is a newer, optional contract field.  A broker that rejects unknown fields
+  // would fail every call (and there is no API fallback), so it is sent only once the operator
+  // confirms the broker honours it (CODE_CLI_REASONING_EFFORT=true).  Off: the body is unchanged.
+  const reasoningEffort = codeCliReasoningEffortEnabled() ? codeCliBrokerReasoningEffort(model, body.reasoning_effort) : undefined;
   const response = await fetch(process.env.CODE_CLI_BROKER_URL!, {
     method: "POST", redirect: "error", signal: init.signal ?? AbortSignal.timeout(150_000),
     headers: { "content-type": "application/json", authorization: `Bearer ${process.env.CODE_CLI_BROKER_TOKEN}` },
     body: JSON.stringify({ version: 1, requestId: randomUUID(), ownerUserId: userId, adapter: service === "meta" ? "muse" : "minimax",
       model, messages: messages.map(({ role, content }) => ({ role, content })),
       maxOutputTokens: Math.min(16000, Math.max(1, Number(body.max_tokens ?? body.max_completion_tokens) || 1500)),
-      responseFormat: body.response_format, capabilities: { tools: false, terminal: false, files: false, mcp: false } })
+      responseFormat: body.response_format, ...(reasoningEffort ? { reasoningEffort } : {}),
+      capabilities: { tools: false, terminal: false, files: false, mcp: false } })
   });
   // Never forward broker error bodies or session/credential metadata into model telemetry.
   if (!response.ok) throw new Error(`Code CLI broker failed (${response.status}); no API fallback`);

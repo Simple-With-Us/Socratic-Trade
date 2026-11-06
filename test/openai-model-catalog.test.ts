@@ -15,16 +15,21 @@ describe("curated OpenAI model choices across LLM surfaces", () => {
   // gpt-4o-mini). Only four rows remain: gpt-6-astra-pro (the pro-reasoning-mode alias of astra),
   // gpt-6-astra, gpt-5.6-luna, and gpt-5.6-sol. Green recommendation moved from terra to sol;
   // sol now carries BOTH green and red chips.
-  it("offers the four curated OpenAI rows: Astra (frontier) + Sol (Green/Red) + Luna (cost-sensitive)", () => {
+  // ST-4589 (2026-11-04): four OpenAI CLASSES — Astra, Sol, Terra, Luna — one current row each.
+  // gpt-6-astra-pro (astra in pro reasoning mode) and gpt-5.6-sol / gpt-5.6-luna left the picker
+  // as retired rows; both recommendation chips moved to gpt-6.1-sol.
+  it("offers the four curated OpenAI class rows: Astra + Sol (Green/Red) + Terra + Luna", () => {
     expect(openAi.options.map((option) => option.value)).toEqual([
-      "gpt-6-astra-pro",
       "gpt-6-astra",
-      "gpt-5.6-luna",
-      "gpt-5.6-sol"
+      "gpt-6.1-sol",
+      "gpt-6.1-terra",
+      "gpt-6-luna"
     ]);
-    expect(openAi.options.find((option) => option.value === "gpt-5.6-sol")?.recommendedGreen).toBe(true);
-    expect(openAi.options.find((option) => option.value === "gpt-5.6-sol")?.recommendedRed).toBe(true);
-    expect(openAi.options.some((option) => option.value === "gpt-5.6-terra")).toBe(false);
+    expect(openAi.options.find((option) => option.value === "gpt-6.1-sol")?.recommendedGreen).toBe(true);
+    expect(openAi.options.find((option) => option.value === "gpt-6.1-sol")?.recommendedRed).toBe(true);
+    for (const retired of ["gpt-6-astra-pro", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"]) {
+      expect(openAi.options.some((option) => option.value === retired), retired).toBe(false);
+    }
     expect(openAi.options.some((option) => option.value === "gpt-4o" || option.value === "gpt-4o-mini")).toBe(false);
     expect(openAi.options.some((option) => option.value === "gpt-mini-latest" || option.value === "gpt-5.4-nano")).toBe(false);
   });
@@ -52,5 +57,21 @@ describe("curated OpenAI model choices across LLM surfaces", () => {
     expect(recommendedReasoningEffortForModel("gpt-5.6-sol", "green")).toBe("medium");
     expect(recommendedReasoningEffortForModel("gpt-5.6-sol", "red")).toBe("high");
     expect(recommendedReasoningEffortForModel("gpt-5.6-sol", "review")).toBe("high");
+  });
+
+  it("carries the Sol and Luna guidance to the GPT-6.1 Sol / GPT-6 Luna rows, and gives each class its ladder", () => {
+    expect(recommendedReasoningEffortForModel("gpt-6-luna", "chat")).toBe("low");
+    expect(recommendedReasoningEffortForModel("gpt-6-luna", "green")).toBe("medium");
+    expect(recommendedReasoningEffortForModel("gpt-6.1-sol", "green")).toBe("medium");
+    expect(recommendedReasoningEffortForModel("gpt-6.1-sol", "red")).toBe("high");
+    expect(recommendedReasoningEffortForModel("gpt-6.1-terra", "chat")).toBe("low");
+    const values = (model: string) => reasoningCapabilityForModel(model)?.options.map((o) => o.value);
+    // OpenAI: gpt-6.1-sol "does not support none or minimal"; OpenRouter lists low..max.
+    expect(values("gpt-6.1-sol")).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(values("openai/gpt-6.1-sol")).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(values("gpt-6.1-terra")).toEqual(["none", "low", "medium", "high", "xhigh", "max"]);
+    expect(values("gpt-6-luna")).toEqual(["none", "low", "medium", "high", "xhigh", "max"]);
+    // Astra is unchanged (conservative low/medium/high).
+    expect(values("gpt-6-astra")).toEqual(["low", "medium", "high"]);
   });
 });

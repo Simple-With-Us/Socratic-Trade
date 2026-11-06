@@ -1,8 +1,40 @@
+## 2026-11-05 CLAUDE — iOS benchmark flow captions (ST-4589)
+
+**What.**  Two iOS caption strings (Results and Home) now say transfers are counted from the start of the day they land, matching the web copy and the benchmark math that merged in #5000.  String literals only.  Rollout: `docs/rollouts/2026-11-05-ios-benchmark-flow-captions.md`.
+
+**Next.**  Lands when the hosted iOS compile finishes inside the merge queue's 60-minute limit.
+
+## 2026-11-05 CLAUDE — Catalog: MiniMax M3.1 Flash only, Muse contributor models only (ST-4589)
+
+**What.**  Owner correction to the ST-4589 catalog: MiniMax is M3.1 Flash only and Muse is the three contributor ids only (the two Wonder contributors are Code CLI only).  MiniMax M3, Muse Spark 1.3, Glimmer and Wonder 1.0 are retired: a seat's stored model keeps working, and they are out of the picker, rotation and failover.  An automatic budget downgrade never lands on a contributor row unless the source is one.  Rollout: `docs/rollouts/2026-11-05-minimax-flash-muse-contributor-only.md`.
+
+**Next.**  Until this merges, production offers the four retired rows (#4999 is live).
+
+## 2026-11-04 CLAUDE — Model classes, rotation selection and catalog refresh (ST-4589)
+
+**What.**  Owner review of the Model Stats view.  Each model's stats are now strictly its own: predecessor figures show only as a labelled same-class estimate, never added into the live count and never chained, so gpt-5.6-terra no longer feeds Sol or Astra.  Alias rows show what `-latest` currently resolves to.  Green and Red each get a Rotation Models checklist (`llmRotationModels`, `redTeamRotationModels`).  Catalog: OpenAI is `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-luna`; Astra Pro and the 5.6 models are retired without migrating stored selections; other providers move to current versions; added MiniMax M3.1 Flash, Muse Wonder 1.0 and the two Muse Wonder contributor ids (Code CLI only); Llama removed.  MiniMax M3.1 Flash and Muse now get an explicit effort (default medium, contributors capped at xhigh).  A model the route cannot serve now fails over instead of aborting the run.  Rollout: `docs/rollouts/2026-11-04-model-classes-rotation-catalog-refresh.md`.
+
+**Next.**  No running Code CLI broker was found on the server, so the Wonder contributor models cannot complete a call yet.  Native Anthropic route needs structured outputs before its Sonnet id can move to 5.5.  Benchmarks are from July and cover none of the new ids.
+
 ## 2026-11-03 Muse-Assist — Retired fleet name removed from ops surfaces
 
 **What.**  The retired two-part fleet name is removed from this repository's ops tooling under the owner's fleet-wide directive.  The fleet post helper is now `scripts/simple-tools-fleet-post.sh`, driven by the `FLEET_POST_*` env family and posting through `simple-chat` to Zulip #Work-In-Progress; its callers (the deploy-freshness workflow, the freshness alerter, provider knob sync, the Slack retirement shim, the launchd plist) and the CI syntax check use the new names in the same change.  `scripts/install-fleet-coordination.sh` now installs `simple-chat` and `simple-board` plus `FLEET-PROTOCOL.md` from the current AFC tool-names pin.  Historical prose is masked, including the older entries below.  Two slices stay as documented exceptions: the fail-closed bootstrap stub keeps its path so old setup calls cannot reinstall the Slack engine, and the coordination installer keeps a two-entry legacy-link removal list so pre-rename installs stop resolving the old command names, and the three doc labels for the shared Infisical token pair now carry the fleet's canonical new names (`FLEET_SYNC_TOKEN` / `FLEET_SYNC_POST_TOKEN`) ahead of the centrally sequenced key rename.  No trading logic was touched.  Rollout: `docs/rollouts/2026-11-03-retired-name-sweep.md`.
 
 **Next.**  Land on green verify; the shared token pair's key rename is sequenced centrally after all consumers land, and the AFC pin advances to the tool-names merge commit when that lands.
+
+## 2026-11-04 CLAUDE — Learning-loop wiring fixes and performance evaluation (ST-4589)
+
+**What.**  Owner-requested evaluation of trading performance against the S&P 500 and of the RAG learning loop: `docs/reviews/2026-11-04-performance-and-learning-evaluation.md`.  No demonstrated edge as of the Sep 25 report, and several lesson types were written but never retrieved.  Fixed the small, clearly wrong parts: user-level reflection lessons now reach the decision prompt (approved risk lessons deliberately still do not, pending an owner decision), regime and thesis relevance can score, statistics-only lessons no longer need an LLM key, scorecards stamp excess return against SPY, the benchmark treats cash flows the same on both sides, and the Results card shows a round-trip win rate.  No change to order placement, sizing or risk gates.  Rollout: `docs/rollouts/2026-11-04-learning-loop-wiring-fixes.md`.
+
+**Next.**  Owner decisions in the evaluation (core-satellite, deterministic sizing control, Red Team veto, fixed model arms).  Refresh the Sep 25 numbers from `/api/ops/performance`.
+## 2026-11-03 [Muse-Assist] Mango proxy pacing: concurrency gate + 15s leg timeout
+
+**What.**  Proxied data-source requests now pass through one process-wide concurrency gate in `createProxiedFetch` (`ProxyConcurrencyGate` in `src/lib/proxy-fetch.ts`, default cap 4 via `PROXY_MAX_CONCURRENCY`), so a provider cascade burst can no longer hit the Mango's tinyproxy all at once.  Queue wait never counts against the leg timeout (the timer starts at slot grant) and is logged as `queueWaitMs` on the proxy-use entry.  The leg timeout default rose from 3000ms to 15000ms (`RESIDENTIAL_PROXY_LEG_TIMEOUT_MS` overrides); fail_soft / fail_closed are unchanged.  Rollout: `docs/rollouts/2026-11-03-st-proxy-pacing.md`.
+
+**Verification.**  `npx tsc --noEmit` clean; the 7 proxy-adjacent test files pass 108/108 (15 new tests in `test/proxy-concurrency-gate.test.ts`); full `npm test` is 9,902 passed / 3 failed of 9,947, and all 3 failures are proven environmental against a pristine-main baseline (one real-DNS case that fails on main in this sandbox, two latch-CLI cases that fail only on TMPDIR path-length/disk artifacts of this VM and pass with a short TMPDIR).
+
+**Next.**  Committed on `Muse-Assist/st-proxy-pacing`, not pushed.  MA reviews, pushes via the Mac route, opens the PR, and makes the Linear + #Work-In-Progress claim.  After deploy, watch `/api/proxy-use` for `queueWaitMs` entries replacing fail_soft fallback spikes during scan bursts.
+
 ## 2026-11-03 CODEX — Repair Settings Navigation Spec Links (AFC-599)
 
 Corrected 12 broken Markdown navigation targets across the settings-navigation implementation spec so each link opens the canonical parent design.  The link-only update is recorded in `docs/rollouts/2026-11-03-afc-599-document-navigation-links.md`.
