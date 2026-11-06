@@ -336,6 +336,19 @@ describe("Marketaux enrichment provider", () => {
     expect(empty).toBe(1);
   });
 
+  it("scopes the daily budget per resolved API key so one key cannot exhaust another key's day", async () => {
+    process.env.MARKETAUX_DAILY_REQUEST_BUDGET = "1";
+    process.env.MARKETAUX_SYMBOLS_PER_REQUEST = "1";
+    stubNewsEndpoint((symbols) => ({ data: [fixtureArticle({ title: "news", symbol: symbols[0], sentimentScore: 0.2 })] }));
+    const { MarketauxEnrichmentProvider } = await import("../src/lib/marketaux-provider");
+    const first = new MarketauxEnrichmentProvider("user-a-key");
+    const second = new MarketauxEnrichmentProvider("user-b-key");
+    await first.enrich(["AAPL", "MSFT"]); // spends user-a-key's whole daily budget of 1
+    const out = await second.enrich(["ORCL"]);
+    // Pre-fix the process-wide counter left ORCL unfilled here; per-key counters keep it independent.
+    expect(out.ORCL.headlines).toBeDefined();
+  });
+
   // ── Cascade integration: a produced value actually flows through takeScalar with attribution ──
 
   it("a Marketaux-produced sentiment value flows through CascadingEnrichmentProvider with correct source attribution; headlines is not a sourced field", async () => {

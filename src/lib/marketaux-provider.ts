@@ -63,13 +63,16 @@
 // this cycle purely from that ceiling, not from a bug. That is fine: an unmatched symbol simply
 // gets `{}` (no fabricated headline/sentiment), same fail-open contract as every other field here.
 // A conservative self-contained daily request counter (MARKETAUX_DAILY_REQUEST_BUDGET, default 80,
-// resetting on UTC date rollover) keeps this provider well under the real 100/day ceiling even
+// resetting on UTC date rollover, keyed per resolved API key so one user's per-user key cannot
+// spend another key's allowance) keeps this provider well under the real 100/day ceiling even
 // across many scan cycles in one day; once exhausted, remaining symbols are simply left unfilled
 // for the rest of the day rather than risking a 402/429 that would also count against provider
 // health. This provider NEVER throws out of enrich() — every sub-fetch is caught independently and
 // a failed group just leaves its symbols unfilled (short negative-TTL cache so it retries soon).
 
 import "server-only";
+
+import { createHash } from "node:crypto";
 
 import type { MarketEnrichmentProvider, SymbolEnrichment } from "./data-providers";
 import { fetchWithRetry } from "./data-providers";
@@ -273,11 +276,15 @@ export function clearMarketauxCache(): void {
   marketauxCache.clear();
 }
 
-let dailyBudgetState = { day: "", used: 0 };
+// One counter per resolved API key: per-user keys are multi-tenant, so a single process-wide
+// counter would let one user's scans exhaust every other key's day. The map key is a truncated
+// digest, never the raw credential. Keys not yet known to the caller (legacy call paths) share
+// the empty-id bucket.
+let dailyBudgetByKey = new Map<string, { day: string; used: number }>();
 
-/** Test helper: reset the daily request-budget counter between runs. */
+/** Test helper: reset the daily request-budget counters between runs. */
 export function resetMarketauxDailyBudget(): void {
-  dailyBudgetState = { day: "", used: 0 };
+  dailyBudgetByKey = new Map();
 }
 
 function utcDateKey(now: number): string {
@@ -288,11 +295,20 @@ function utcDateKey(now: number): string {
  *  exhausted for the UTC day. Self-contained — deliberately NOT wired into the shared
  *  provider-rate-limit.ts registry (that file is owned by a separate integration pass); mirrors
  *  quiver-provider.ts's posture of a fully standalone, dormant-until-configured file. */
-export function tryReserveMarketauxDailyRequest(now: number): boolean {
-  const key = utcDateKey(now);
-  if (dailyBudgetState.day !== key) dailyBudgetState = { day: key, used: 0 };
-  if (dailyBudgetState.used >= marketauxDailyBudget()) return false;
-  dailyBudgetState.used += 1;
+export function tryReserveMarketauxDailyRequest(now: number, apiKey = ""): boolean {
+  const day = utcDateKey(now);
+  const id = apiKey ? createHash("sha256").update(apiKey).digest("hex").slice(0, 16) : "";
+  const state = dailyBudgetByKey.get(id) ?? { day: "", used: 0 };
+  if (state.day !== day) {
+    state.day = day;
+    state.used = 0;
+  }
+  if (state.used >= marketauxDailyBudget()) {
+    dailyBudgetByKey.set(id, state);
+    return false;
+  }
+  state.used += 1;
+  dailyBudgetByKey.set(id, state);
   return true;
 }
 
@@ -334,7 +350,7 @@ export class MarketauxEnrichmentProvider implements MarketEnrichmentProvider {
       const chunk = groups.slice(i, i + CONCURRENCY);
       await Promise.all(
         chunk.map(async (group) => {
-          if (!tryReserveMarketauxDailyRequest(now)) {
+          if (!tryReserveMarketauxDailyRequest(now, this.apiKey)) {
             // Daily budget exhausted — leave this group unfilled for the rest of the day rather
             // than risking a 402/429. Not cached (no expiresAt written) so the very next symbol
             // pass (tomorrow, or once other groups' TTLs expire) retries normally.
