@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { latestHaltBranch } from "../src/lib/autonomy-halt-cause";
 import { getDb } from "../src/lib/db";
 
@@ -20,8 +20,20 @@ import { getDb } from "../src/lib/db";
 const ACCOUNT = { userId: "u1", connectedAccountId: "a1" } as const;
 const INDEX = "idx_audit_events_account_kind_created";
 
+const ORIGINAL_DATABASE_URL = process.env.DATABASE_URL;
+
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-st4561-${randomUUID()}.db`)}`;
+});
+
+afterAll(() => {
+  // A reused Vitest worker keeps this module's mutations; restore the prior
+  // value (or absence) so later suites never see the generated database.
+  if (ORIGINAL_DATABASE_URL === undefined) {
+    delete process.env.DATABASE_URL;
+  } else {
+    process.env.DATABASE_URL = ORIGINAL_DATABASE_URL;
+  }
 });
 
 function planDetails(sql: string, params: string[]): string[] {
