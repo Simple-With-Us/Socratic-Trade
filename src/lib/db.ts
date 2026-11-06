@@ -3575,6 +3575,21 @@ const MIGRATIONS: Migration[] = [
         "CREATE INDEX IF NOT EXISTS idx_audit_events_account_kind_created ON audit_events (user_id, connected_account_id, kind, created_at DESC)"
       );
     }
+  },
+  {
+    // ST-4561 follow-up: the correlated handover EXISTS constrains kind with an OR/IN, so
+    // created_at can never be a range bound on the kind-first v100 index (SQLite only ranges
+    // a column when every preceding column is equality-constrained).  This companion orders
+    // created_at directly after the two equality columns, so `e.created_at >= h.created_at`
+    // becomes a real bounded seek instead of a scan of the account group's audit rows.
+    version: 101,
+    name: "audit_events_account_created_index",
+    up: (database) => {
+      if (!tableExists(database, "audit_events")) return;
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_audit_events_account_created ON audit_events (user_id, connected_account_id, created_at DESC)"
+      );
+    }
   }
 ];
 

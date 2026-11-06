@@ -19,6 +19,9 @@ import { getDb } from "../src/lib/db";
 
 const ACCOUNT = { userId: "u1", connectedAccountId: "a1" } as const;
 const INDEX = "idx_audit_events_account_kind_created";
+// v101: the correlated handover EXISTS cannot range created_at on the kind-first
+// index (kind is OR/IN-constrained there), so it seeks this companion instead.
+const EXISTS_INDEX = "idx_audit_events_account_created";
 
 const ORIGINAL_DATABASE_URL = process.env.DATABASE_URL;
 
@@ -66,25 +69,35 @@ describe("ST-4561 audit_events composite index", () => {
     console.log("PLAN WITH INDEX:", details.join(" | "));
     expect(details.join(" | ")).toContain(INDEX);
     expect(details.join(" | ")).not.toMatch(/TEMP B-TREE FOR ORDER BY/i);
+    // The correlated handover EXISTS is the subplan that walked the user's whole
+    // audit history; assert that subplan itself seeks the companion index rather
+    // than only checking the joined plan text.
+    const existsPlan = details.find((detail) => /SEARCH e\b/.test(detail));
+    expect(existsPlan).toBeTruthy();
+    expect(existsPlan).toContain(EXISTS_INDEX);
   });
 
   it("the same statement falls back to the per-kind walk when the index is absent (control)", () => {
     const db = getDb();
     db.exec(`DROP INDEX IF EXISTS ${INDEX}`);
+    db.exec(`DROP INDEX IF EXISTS ${EXISTS_INDEX}`);
     try {
       const { sql, params } = latestHaltBranch(ACCOUNT);
       const details = planDetails(sql, params);
       // eslint-disable-next-line no-console
       console.log("PLAN WITHOUT INDEX:", details.join(" | "));
       expect(details.join(" | ")).not.toContain(INDEX);
-      // The pre-v100 fallback: per-kind ordering indexes instead of one
-      // (user, account, kind) seek.  (No sorter appears either way: the older
-      // (user_id, created_at) indexes already satisfy ORDER BY, which is why
-      // the original temp-b-tree control premise did not hold in this schema.)
-      expect(details.join(" | ")).toContain("idx_audit_events_kind_user_created");
+      expect(details.join(" | ")).not.toContain(EXISTS_INDEX);
+      // The pre-v100 fallback still resolves every table access through some
+      // index seek; pin the shape, not one specific fallback index name, since
+      // several indexes can serve the per-kind lookup equally.
+      expect(details.join(" | ")).toMatch(/SEARCH audit_events USING INDEX/);
     } finally {
       db.exec(
         `CREATE INDEX IF NOT EXISTS ${INDEX} ON audit_events (user_id, connected_account_id, kind, created_at DESC)`
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS ${EXISTS_INDEX} ON audit_events (user_id, connected_account_id, created_at DESC)`
       );
     }
   });
