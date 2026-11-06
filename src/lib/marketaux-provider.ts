@@ -80,13 +80,14 @@ import { resolveSourceBool, resolveSourceNumber } from "./source-settings";
 const MARKETAUX_BASE_URL = "https://api.marketaux.com/v1";
 
 /**
- * Registration gate: per-user stored key (when userId given) → MARKETAUX_API_KEY env →
- * local-user stored key, via the shared resolver (marketaux is catalogued
- * shared-operator-infra in db-api-keys, so env stays a global fallback for everyone and
- * the resolver's local fallback applies to no-userId background callers too).
+ * Registration gate, environment-first per the approved-source rule: MARKETAUX_API_KEY env
+ * is validated before any stored credential, and the shared resolver (per-user stored key
+ * when userId given → local-user stored key) runs only when the env field is empty.
  * Blank/whitespace counts as unset.
  */
 export function resolveMarketauxApiKey(userId?: string): string | undefined {
+  const envKey = process.env.MARKETAUX_API_KEY?.trim();
+  if (envKey) return envKey;
   return resolveApiKeyWithSource("marketaux", userId).key;
 }
 

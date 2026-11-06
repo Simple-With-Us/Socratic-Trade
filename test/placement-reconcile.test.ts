@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
-import type { EquityOrder, ExecutedOrder, MarketQuote, MarketScan, ReviewedOrder } from "../src/lib/types";
+import type { BrokerGateway, EquityOrder, ExecutedOrder, MarketQuote, MarketScan, ReviewedOrder } from "../src/lib/types";
 
 vi.mock("../src/lib/vector-db", () => ({
   managedVectorLedgerAuthority: vi.fn(),
@@ -126,6 +126,24 @@ function makeGateway() {
     reviewEquityOrder: vi.fn(async (i) => echoReview(i)),
     placeEquityOrder,
     cancelEquityOrder: async () => ({ ok: true })
+  };
+}
+
+// Minimal typed gateway for direct flagStalePlacingIntents calls: every member rejects
+// unless the case overrides it, so the mock provably satisfies BrokerGateway without `as never`.
+function stubBrokerGateway(overrides: Partial<BrokerGateway>): BrokerGateway {
+  const missing = (name: string) => async () => Promise.reject(new Error(`stubBrokerGateway: ${name} not implemented`));
+  return {
+    getAccounts: missing("getAccounts"),
+    getPortfolio: missing("getPortfolio"),
+    getEquityPositions: missing("getEquityPositions"),
+    getEquityOrders: missing("getEquityOrders"),
+    getEquityQuotes: missing("getEquityQuotes"),
+    getEquityTradability: missing("getEquityTradability"),
+    reviewEquityOrder: missing("reviewEquityOrder"),
+    placeEquityOrder: missing("placeEquityOrder"),
+    cancelEquityOrder: missing("cancelEquityOrder"),
+    ...overrides
   };
 }
 
@@ -337,9 +355,9 @@ describe("inline placement-error reconciliation via executeProposal", () => {
       userId
     );
     await flagStalePlacingIntents(
-      {
+      stubBrokerGateway({
         getEquityOrders: async () => [brokerOrder({ id: brokerOrderId, clientOrderId: capturedRefId, state: "filled", filledQuantity: 1, averagePrice: 203 })]
-      } as never,
+      }),
       ACCOUNT,
       userId,
       "acc-reconcile-test"
@@ -363,14 +381,20 @@ describe("inline placement-error reconciliation via executeProposal", () => {
     const { executeProposal, flagStalePlacingIntents } = await import("../src/lib/strategy");
     const { getDb, getStopPlans, listFillEventsByProposalId } = await import("../src/lib/db");
     getDb().exec("CREATE TRIGGER fail_zero_basis_fill BEFORE INSERT ON fill_events BEGIN SELECT RAISE(ABORT, 'forced fill receipt failure'); END;");
-    const receiptError = await executeProposal(proposalId, userId).then(
-      () => { throw new Error("expected receipt failure throw"); },
-      (error: unknown) => error
-    );
+    let receiptError: unknown;
+    try {
+      receiptError = await executeProposal(proposalId, userId).then(
+        () => { throw new Error("expected receipt failure throw"); },
+        (error: unknown) => error
+      );
+    } finally {
+      // The temporary trigger must go even when the success callback throws, or it leaks
+      // into later tests sharing this database.
+      getDb().exec("DROP TRIGGER IF EXISTS fail_zero_basis_fill");
+    }
     // Control: the trigger must be what actually failed the fill receipt, otherwise the
     // stale-recovery path below proves nothing.
     expect(String((receiptError as Error)?.message ?? receiptError)).toContain("forced fill receipt failure");
-    getDb().exec("DROP TRIGGER fail_zero_basis_fill");
     getDb().prepare("UPDATE trade_proposals SET created_at = ? WHERE id = ? AND user_id = ?").run(
       new Date(Date.now() - 10 * 60_000).toISOString(),
       proposalId,
@@ -379,10 +403,10 @@ describe("inline placement-error reconciliation via executeProposal", () => {
     // Broker now reports the fill WITHOUT an average price and holds no position basis:
     // price resolves to 0 at both commitRecoveredOpeningStopPlan call sites.
     await flagStalePlacingIntents(
-      {
+      stubBrokerGateway({
         getEquityOrders: async () => [brokerOrder({ id: brokerOrderId, clientOrderId: capturedRefId, state: "filled", filledQuantity: 1 })],
         getEquityPositions: async () => []
-      } as never,
+      }),
       ACCOUNT,
       userId,
       "acc-reconcile-test"
