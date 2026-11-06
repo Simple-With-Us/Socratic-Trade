@@ -30,8 +30,7 @@ export async function generateReflectionSummary(accountNumber: string, userId: s
   const policy = policyOverride ?? getPolicy(userId);
   const connectedAccount = listConnectedAccounts(userId).find((account) => account.accountNumber === accountNumber);
   const { url, key: openaiKey, model: resolvedModel, provider, keySource, keyRef, transport } = resolveLlmEndpoint(policy, userId, "https://api.openai.com/v1/chat/completions");
-  if (!openaiKey) return;
-  
+
   // Fetch latest 50 fill events with their corresponding proposals
   const rows = db.prepare(`
     SELECT
@@ -64,6 +63,13 @@ export async function generateReflectionSummary(accountNumber: string, userId: s
   const signatureKey = `reflection_signature:${userId}:${accountNumber}`;
   if (getInternalSetting<string>(signatureKey) === signature) return;
 
+  // No LLM key: the reflection LLM call cannot run, but the deterministic (pure-statistics)
+  // thesis x regime lesson vectors still can (ST-4589 B6), deduped on the user-level pooled signature.
+  if (!openaiKey) {
+    await writeDeterministicLessonsIfChanged(userId);
+    return;
+  }
+
   const tradeData = rows.map((r) => ({
     symbol: r.symbol,
     side: r.side,
@@ -88,6 +94,9 @@ export async function generateReflectionSummary(accountNumber: string, userId: s
   // cap suppresses LLM spend, not non-LLM maintenance, so returning here (instead of before) keeps
   // excursion data current on over-budget days. Default OFF → this branch never taken (runs normally).
   if (isOverLlmBudget(userId)) {
+    // The deterministic lesson vectors are pure statistics + an embedding write (its own RAG
+    // budget guard applies inside storeContexts), not LLM spend, so they run here too (ST-4589 B6).
+    await writeDeterministicLessonsIfChanged(userId);
     persistExcursionsBackground(accountNumber, source, userId);
     return;
   }
@@ -246,10 +255,10 @@ Return a single concise paragraph (<= 130 words) that is specific and directive.
     const pooledLotReturns = poolClosedLotReturnsByThesis(allAccounts, userId);
     await writeThesisTrackRecordFacts(pooledThesisStats, userId, allAccounts, pooledLotReturns);
     // Deterministic thesis x regime "conditioned lesson" vectors — one living, overwrite-in-place
-    // doc per well-sampled bucket. Rides this function's existing signature-dedup gate (stats can't
-    // change without new fills) and inherits the existing budget/no-key early returns above.
-    const pooledRegimeStats = poolThesisRegimeStats(allAccounts, userId);
-    await writeThesisRegimeLessonVectors(pooledRegimeStats, userId, allAccounts);
+    // doc per well-sampled bucket. The content is USER-pooled, so it goes through the same user-level
+    // signature gate as the no-key / over-budget path: a sibling account's reflection pass does not
+    // re-embed identical pooled vectors (Kody review, ST-4589).
+    await writeDeterministicLessonsIfChanged(userId);
   } catch (error) {
     console.error("Failed to generate reflection summary:", error);
   }
@@ -258,6 +267,55 @@ Return a single concise paragraph (<= 130 words) that is specific and directive.
   // Runs unconditionally (no openaiKey required) in the background — never blocks
   // the reflection LLM call above, never called from any synchronous order path.
   persistExcursionsBackground(accountNumber, source, userId);
+}
+
+/**
+ * Deterministic (no-LLM) lesson pass for runs where the reflection LLM call is skipped (no key, or
+ * over the daily LLM budget).  Writes only the pure-statistics thesis x regime lesson vectors; the
+ * track-record learned-context facts stay on the LLM path because ingestLearned's semantic gate can
+ * itself spend an LLM call.  The vectors (content AND vector ids) are USER-pooled, so the dedupe is
+ * user-level too (Kody review): keyed per user on a signature of the pooled input — every connected
+ * account's filled-fill count + newest fill — so a sibling account's pass is a no-op once the current
+ * pooled content is written, while a new fill on ANY of the user's accounts triggers a rewrite.  The
+ * signature is recorded only when every bucket landed, so a skipped/failed bucket retries next run.
+ * Never marks the LLM reflection as done.  Also used by the LLM reflection path for the same vectors.
+ * Best-effort: a failure here never throws to the caller.
+ */
+async function writeDeterministicLessonsIfChanged(userId: string): Promise<void> {
+  try {
+    const allAccounts = listConnectedAccounts(userId);
+    const lessonSignatureKey = `reflection_lesson_signature:${userId}`;
+    const signature = pooledLessonInputSignature(allAccounts, userId);
+    if (getInternalSetting<string>(lessonSignatureKey) === signature) return;
+    const result = await writeThesisRegimeLessonVectors(poolThesisRegimeStats(allAccounts, userId), userId, allAccounts);
+    // Record the signature only when every attempted bucket actually landed; a skipped (budget) or
+    // failed bucket leaves it unset so the next run retries instead of waiting for new fills.
+    if (result.written === result.attempted) setInternalSetting(lessonSignatureKey, signature);
+  } catch (error) {
+    console.error("Failed to write deterministic reflection lessons:", error);
+  }
+}
+
+/** Signature of the pooled lesson input: per pooled account (same filter as poolThesisRegimeStats)
+ *  its filled-fill count and newest fill time.  Changes on a new fill in any account, or when an
+ *  account joins/leaves the pool. */
+function pooledLessonInputSignature(
+  accounts: { accountNumber?: string; broker: string }[],
+  userId: string
+): string {
+  const statement = getDb().prepare(
+    `SELECT COUNT(*) AS n, MAX(filled_at) AS latest FROM fill_events
+     WHERE account_number = ? AND user_id = ? AND status = 'filled'`
+  );
+  return accounts
+    .filter((account) => account.accountNumber && account.broker !== "test")
+    .map((account) => account.accountNumber as string)
+    .sort()
+    .map((accountNumber) => {
+      const row = statement.get(accountNumber, userId) as { n: number; latest: string | null };
+      return `${accountNumber}=${row.n}@${row.latest ?? ""}`;
+    })
+    .join("|");
 }
 
 /** user_settings key for one account's reflection summary. */
@@ -534,7 +592,9 @@ async function writeThesisTrackRecordFacts(
           subject: `track_record:${stat.thesisTag}`,
           value: `The "${stat.thesisTag}" thesis ${verdict} across pooled closed trades from all accounts (${stat.trades} lots).${sigSentence ? ` ${sigSentence}` : ""} source_accounts: ${sourceAccts} environment_breakdown: ${envBreakdown}`,
           source: "inferred",
-          confidence
+          confidence,
+          // Pooled across regimes, so only the thesis conditioning key applies (ST-4589 B4).
+          thesisTag: stat.thesisTag
         },
         "autonomous",
         { connectedAccountId: undefined, accountEnvironment: dominantEnv }
@@ -562,9 +622,10 @@ export async function writeThesisRegimeLessonVectors(
   stats: PooledThesisRegimeStat[],
   userId: string,
   allAccounts: { accountNumber?: string; environment: string }[]
-): Promise<void> {
+): Promise<{ attempted: number; written: number; skipped: number; failed: number }> {
   let written = 0;
   let skippedThin = 0;
+  let skipped = 0;
   let failed = 0;
   for (const stat of stats) {
     if (!stat.thesisTag || stat.thesisTag === "Untagged" || stat.trades < MIN_LOTS_FOR_LESSON_VECTOR) {
@@ -605,7 +666,14 @@ export async function writeThesisRegimeLessonVectors(
     };
     try {
       const result = await storeContexts([doc], userId, { dedupKeyPrefix: "lesson", scope: "private" });
-      if (result.skipped || (result.budgetSkipped ?? 0) > 0 || (result.writeUnitBudgetSkipped ?? 0) > 0) {
+      const budgetSkipped = (result.budgetSkipped ?? 0) > 0 || (result.writeUnitBudgetSkipped ?? 0) > 0;
+      if (result.skipped && result.dedupComplete === true && !budgetSkipped) {
+        // Exact content already stored (opt-in dedup proved it): the lesson is in place, so this
+        // counts as written and is not a warning. A skip WITHOUT dedupComplete (unconfigured store,
+        // non-exact near-dup) or any budget skip still counts as skipped below.
+        written += 1;
+      } else if (result.skipped || budgetSkipped) {
+        skipped += 1;
         console.warn("[post-mortem] thesis x regime lesson vector write skipped:", JSON.stringify({ bucket: subjectKey, userId, result }));
       } else {
         written += 1;
@@ -621,4 +689,7 @@ export async function writeThesisRegimeLessonVectors(
     }
   }
   audit("reflection_lesson_vectors_written", { buckets: written, skippedThin, failed }, userId);
+  // Well-sampled buckets only (thin/Untagged buckets are never attempted). Callers that dedupe on a
+  // signature use this to tell "everything landed" from "some bucket was skipped or failed".
+  return { attempted: written + skipped + failed, written, skipped, failed };
 }
