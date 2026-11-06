@@ -44,8 +44,8 @@ export const ALIAS_FAMILIES = [
   "mistral-large",
   "mistral-medium",
   "mistral-small",
-  // Meta / moonshot / kimi
-  "llama",
+  // Moonshot / kimi.  (The "llama" family was removed with the Llama models, ST-4589: historical
+  // llama rows now show under their own model id.)
   "kimi"
 ] as const;
 export type AliasFamily = (typeof ALIAS_FAMILIES)[number];
@@ -81,7 +81,6 @@ const ALIAS_PATTERNS: ReadonlyArray<readonly [AliasFamily, RegExp]> = [
   ["mistral-large", /mistral[-_ ]?large/i],
   ["mistral-medium", /mistral[-_ ]?medium/i],
   ["mistral-small", /mistral[-_ ]?small/i],
-  ["llama", /llama/i],
   ["kimi", /kimi|moonshot/i]
 ];
 

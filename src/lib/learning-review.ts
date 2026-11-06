@@ -62,7 +62,7 @@ import { buildLlmRequestBody, extractLlmText, llmAuthHeaders, type LlmJsonSchema
 import { humanizeLlmError } from "./llm-errors";
 import { catalogEntryFor } from "./llm-model-catalog";
 import { resolveLlmEndpoint } from "./llm-provider";
-import { LLM_OUTPUT_TOKEN_CAPS, llmFetch, normalizeReasoningEffortForModel } from "./llm-request";
+import { LLM_OUTPUT_TOKEN_CAPS, llmFetch, normalizeReasoningEffortForModel, strategyLlmTimeoutMs } from "./llm-request";
 import { extractLlmUsage, providerRequestIdFromPayload, recordLlmUsage } from "./llm-usage";
 import { recommendedReasoningEffortForModel } from "./model-reasoning-recommendations";
 import { sendNotification } from "./notifications";
@@ -865,7 +865,12 @@ export async function runDailyLearningReview(
           const response = await llmFetch(endpoint.url, {
             method: "POST",
             headers: llmAuthHeaders({ provider: endpoint.provider, key: endpoint.key }),
-            body: JSON.stringify(body)
+            body: JSON.stringify(body),
+            // Background, once-a-day job (no browser waiting): a thinking model gets the same
+            // widened bound Green/Red use (strategyLlmTimeoutMs, 360s) instead of a fixed 60s.
+            // runDailyLearningReviewIfDue's in-flight guard keeps later 60s scheduler ticks from
+            // starting a duplicate review while this one is still thinking.
+            signal: AbortSignal.timeout(strategyLlmTimeoutMs(endpoint.model, reasoningEffort))
           });
           if (!response.ok) {
             const detail = humanizeLlmError(await response.text().catch(() => ""), { provider: endpoint.provider, status: response.status });
@@ -1018,9 +1023,27 @@ export async function runDailyLearningReview(
  * Scheduler entry point: run at most once per UTC day, only when the user's policy has
  * learningReviewEnabled. Self-guarded; returns null when disabled/not due so ticks stay clean.
  */
+/** Users whose scheduled review is running in THIS process.  The daily marker only advances after
+ *  the LLM call, and the scheduler ticks every 60s, so without this a slow (thinking) review could
+ *  be started again by the next tick. */
+const scheduledReviewsInFlight = new Set<string>();
+
 export async function runDailyLearningReviewIfDue(
   userId: string,
   now: number = Date.now()
+): Promise<LearningReviewRunSummary | null> {
+  if (scheduledReviewsInFlight.has(userId)) return null;
+  scheduledReviewsInFlight.add(userId);
+  try {
+    return await runDailyLearningReviewIfDueUnguarded(userId, now);
+  } finally {
+    scheduledReviewsInFlight.delete(userId);
+  }
+}
+
+async function runDailyLearningReviewIfDueUnguarded(
+  userId: string,
+  now: number
 ): Promise<LearningReviewRunSummary | null> {
   try {
     const policy = getPolicy(userId);

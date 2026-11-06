@@ -71,7 +71,7 @@ import {
   STRATEGY_PROMPT_VERSION,
   THESIS_PLAYBOOK
 } from "./strategy-prompts";
-import { resolveLlmEndpoint } from "./llm-provider";
+import { CODE_CLI_NOT_CONFIGURED_MESSAGE, isUnavailableModelResolutionError, resolveLlmEndpoint } from "./llm-provider";
 import { isModelRotationSentinel, planRotationImplicitFallbacks, recordOpenRouterModelNotFound, resolveModelRotationForRun } from "./model-rotation";
 import { maybeOpenRouterCreditsExhaustedHint } from "./openrouter-credits";
 import { buildLlmRequestBody, llmAuthHeaders, extractLlmText, extractJsonPayload, detectLlmTruncation, toGeminiJsonSchema } from "./llm-call";
@@ -126,7 +126,7 @@ import type { ProtectiveExitQuote } from "./protective-exit-routing";
 import { DEFAULT_TAX_SETTINGS } from "./defaults";
 import { atr, atrStopPct, sma, type OHLCBar } from "./indicators";
 import { computePortfolioHeat, positionRiskUsd, realizedVolPct, volTargetScale, type PortfolioHeatResult } from "./vol-targeting";
-import { fetchDailyOHLC } from "./history";
+import { fetchDailyOHLC, isBarSeriesFresh, toBusinessDay } from "./history";
 import { expireStalePendingProposals, revalidatePendingProposals } from "./proposal-revalidation";
 import { getTaxSummary, getUserWashSaleLockProvenance, overlayAccountTaxationType } from "./tax";
 import { getBrokerGateway } from "./broker";
@@ -600,7 +600,7 @@ export async function runStrategyOnce(
     // gate). A run that aborts before that point (account unavailable, over budget, no candidate
     // cleared the threshold) writes nothing, so it never skews the rotation weights with a run that
     // generated no proposal.
-    const { commit: commitRotation, emptyReason, greenRotationPool, redRotationPool, ...rotationOverride } = await resolveModelRotationForRun({ userId, accountId: connectedAccountId, runId, policy });
+    const { commit: commitRotation, emptyReason, greenRotationPool, redRotationPool, greenRotationBackupPool, redRotationBackupPool, ...rotationOverride } = await resolveModelRotationForRun({ userId, accountId: connectedAccountId, runId, policy });
     if (isModelRotationSentinel(policy.llmModel) && !rotationOverride.llmModel) {
       // Do not collapse this into "Choose both team models" — rotation IS the model choice.
       const reason =
@@ -1233,6 +1233,8 @@ export async function runStrategyOnce(
       userId,
       greenRotationPool,
       redRotationPool,
+      greenRotationBackupPool,
+      redRotationBackupPool,
       greenPick: rotationOverride.llmModel,
       redPick: rotationOverride.redTeamLlmModel,
       greenPrimary: runLlmOverride.llmModel ?? rotationOverride.llmModel ?? gatePolicy.llmModel,
@@ -1998,6 +2000,27 @@ export async function runStrategyOnce(
             runId,
             regime: regimeForSketch,
             candidates: situationCandidates,
+            // ST-4589 B5: the tags the deterministic scorer would assign the top-slice openings
+            // (the same pure scorer that later sets tradeThesisTag), so the past-case affinity
+            // re-rank's thesis boost can fire.  Abstentions (null) are dropped.
+            thesisTags: [
+              ...new Set(
+                topSlice
+                  .map((c) =>
+                    assignDeterministicThesisTag({
+                      factorBreakdown: c.factorBreakdown,
+                      sectorRelStrength: c.sectorRelStrength,
+                      daysToEarnings: c.daysToEarnings,
+                      insiderSentiment: c.insiderSentiment,
+                      senateTrades: c.senateTrades,
+                      congressCompositeSignedScore: c.congressCompositeSignedScore,
+                      shortPercentOfFloat: c.shortPercentOfFloat,
+                      analystScore: c.analystScore
+                    }).tag
+                  )
+                  .filter((tag): tag is string => Boolean(tag))
+              )
+            ],
             connectedAccountId: policy.connectedAccountId,
             asOf: runAsOf,
             signal
@@ -2550,7 +2573,8 @@ export async function runStrategyOnce(
         ? getConfidenceCalibration(policy.accountNumber, learningSource, {}, userId, prefetchedFills)
         : undefined;
 
-    // Volatility-targeting sizing (opt-in, default off): precompute annualized realized vol (%) per
+    // Volatility-targeting sizing (default ON via DEFAULT_POLICY.tuning.volTargeting; a per-account
+    // `volTargeting: false` turns it off): precompute annualized realized vol (%) per
     // OPENING candidate symbol, mirroring the atrStopPctBySymbol precompute pattern above so the sync
     // sizer can use it. Gated on volTargeting-or-atrStops being on so we never add fetch load purely
     // for an advisory note when the feature is fully off; bars are shared with the ATR precompute's
@@ -5391,8 +5415,32 @@ async function proposeTrades(input: {
   const reflection = getReflectionSummary(input.userId, input.policy.accountNumber);
   const executionState = deriveExecutionState(input.policy, input.activeAccount);
   const source = fillSourceForExecutionMode(executionState);
-  const thesisScorecard = input.policy.accountNumber ? getThesisScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched) : [];
-  const regimeScorecard = input.policy.accountNumber ? getRegimeScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched) : [];
+  // ST-4589 B8: SPY closes so closed lots carry alpha (return vs SPY over the same entry->exit
+  // window) and the thesis/regime rows below get avgAlphaPct.  Same cached history cascade the
+  // counterfactual block below reads.  A failed fetch or a frozen (stale) series leaves alpha
+  // unstamped rather than measuring against an old close — never fabricated.  Bounded at 5s so a
+  // cold history cascade can never hold up the proposal pass; on timeout alpha is simply omitted.
+  let spyAlphaTimer: ReturnType<typeof setTimeout> | undefined;
+  const spyBarsForAlpha = input.policy.accountNumber
+    ? await Promise.race([
+        fetchDailyOHLC("SPY")
+          .then((bars) =>
+            bars && bars.length >= 2 && isBarSeriesFresh(bars)
+              ? bars
+                  .map((bar) => ({ date: toBusinessDay(bar.time) ?? "", close: bar.close }))
+                  .filter((bar) => bar.date !== "" && Number.isFinite(bar.close) && bar.close > 0)
+                  .sort((a, b) => a.date.localeCompare(b.date))
+              : undefined
+          )
+          .catch(() => undefined),
+        new Promise<undefined>((resolve) => {
+          spyAlphaTimer = setTimeout(() => resolve(undefined), 5_000);
+        })
+      ]).finally(() => clearTimeout(spyAlphaTimer))
+    : undefined;
+  const alphaOptions = spyBarsForAlpha && spyBarsForAlpha.length >= 2 ? { benchBars: spyBarsForAlpha } : {};
+  const thesisScorecard = input.policy.accountNumber ? getThesisScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched, undefined, alphaOptions) : [];
+  const regimeScorecard = input.policy.accountNumber ? getRegimeScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched, undefined, alphaOptions) : [];
   // Multi-dimensional learning: thesis × regime buckets with >=5 closed lots. Fewer than
   // 5 trades produce a statistic that is dominated by the Bayesian shrinkage prior anyway
   // and adds noise to the agent's reasoning without improving signal quality.
@@ -6531,10 +6579,17 @@ async function proposeTrades(input: {
     try {
       ep = resolveLlmEndpoint({ ...input.policy, llmModel: fallbackModel }, input.userId);
     } catch (error) {
-      // Only an unavailable Code CLI fallback is expected here. Do not hide DB/runtime failures.
-      if (!(error instanceof Error) || error.message !== "Code CLI is disabled or not configured for this owner") throw error;
-      console.warn(`[Strategy] skipping unavailable Code CLI fallback ${fallbackModel}`);
-      audit("strategy_llm_failover", { reason: "code_cli_unavailable", model: fallbackModel, action: "skip" }, input.userId, input.policy.connectedAccountId);
+      // Only an unavailable model is expected here: a Code CLI fallback whose route is not ready,
+      // or a Code CLI-only model while this user's Meta route is not Code CLI.  Do not hide
+      // DB/runtime failures.
+      if (!isUnavailableModelResolutionError(error)) throw error;
+      const detail = (error as Error).message;
+      // Accurate reason: "code_cli_unavailable" only when the Code CLI route itself is not ready;
+      // anything else (wrong route for a Code CLI-only model, no Code CLI adapter, a removed Llama
+      // id) is "model_unavailable", with the resolver's message carried for the reader.
+      const reason = detail === CODE_CLI_NOT_CONFIGURED_MESSAGE ? "code_cli_unavailable" : "model_unavailable";
+      console.warn(`[Strategy] skipping unavailable fallback ${fallbackModel}: ${detail}`);
+      audit("strategy_llm_failover", { reason, detail, model: fallbackModel, action: "skip" }, input.userId, input.policy.connectedAccountId);
       continue;
     }
     if (!ep.key) continue; // No credential for this provider's model — skip it rather than fail.
@@ -7480,7 +7535,8 @@ export function bullAttemptUsesJsonObjectTransport(
   if (transport === "anthropic-messages") return false;
   // Native MiniMax receives a schema prompt but no enforced response_format.
   if (provider === "minimax") return true;
-  const isDeepSeek = provider === "deepseek" || /^deepseek\//i.test(model);
+  // `~?`: the Flash row's OpenRouter id is the family alias ~deepseek/deepseek-flash-latest.
+  const isDeepSeek = provider === "deepseek" || /^~?deepseek\//i.test(model);
   if (isDeepSeek) return true;
   const isGemini = provider === "gemini" || /^google\//i.test(model);
   if (isGemini) return toGeminiJsonSchema(proposalSchema).unsupported;
