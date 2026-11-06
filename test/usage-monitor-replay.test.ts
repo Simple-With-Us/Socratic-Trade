@@ -196,7 +196,7 @@ describe("usage monitor durable replay", () => {
       windowEnd: "2026-07-10T12:10:00.000Z",
       eventId: telemetryKey(
         "rag-rollup",
-        ["2026-07-10T12:00:00.000Z", "voyage", "embed", "local", "voyage-finance-2"].join("\0")
+        ["2026-07-10T12:00:00.000Z", "voyage", "embed", "local", "m:voyage-finance-2"].join("\0")
       ),
     });
     expect(storedWatermark(replay.USAGE_MONITOR_REPLAY_WATERMARK_KEYS.llm)).toEqual({
@@ -323,7 +323,7 @@ describe("usage monitor durable replay", () => {
         // the rows after it, so the already-skipped row is never counted.
         telemetryKey(
           "rag-rollup",
-          ["2026-07-10T13:40:00.000Z", "voyage", "embed", "local", "voyage-finance-2"].join("\0")
+          ["2026-07-10T13:40:00.000Z", "voyage", "embed", "local", "m:voyage-finance-2"].join("\0")
         ),
       ]);
   });
@@ -559,6 +559,61 @@ describe("usage monitor durable replay", () => {
     expect(ragEvents).toHaveLength(1);
     expect(ragEvents[0]).toMatchObject({ requests: 1, windowStart: "2026-07-10T20:00:00.000Z" });
     expect(ragEvents[0]!.costUsd).toBeCloseTo(0.002, 9);
+  });
+
+  it("keeps a NULL model and an empty-string model as separate groups with distinct identities", async () => {
+    getDb().prepare(
+      "INSERT INTO rag_usage (id, user_id, operation, provider, model, tokens_in, tokens_out, batch_count, cost_est_usd, created_at) " +
+      "VALUES ('rag-null-model', 'local', 'embed', 'openrouter', NULL, 10, 0, 1, 0.001, '2026-07-10T21:01:00.000Z')"
+    ).run();
+    getDb().prepare(
+      "INSERT INTO rag_usage (id, user_id, operation, provider, model, tokens_in, tokens_out, batch_count, cost_est_usd, created_at) " +
+      "VALUES ('rag-empty-model', 'local', 'embed', 'openrouter', '', 20, 0, 1, 0.002, '2026-07-10T21:02:00.000Z')"
+    ).run();
+    const captured: CapturedRequest[] = [];
+    push.__setUsageMonitorFetch(fetchStub(captured));
+
+    const result = await replay.runUsageMonitorReplay({ nowMs: Date.parse("2026-07-10T22:00:00.000Z") });
+
+    expect(result.rag).toEqual({ sent: 2, complete: true, failed: false });
+    const events = captured.flatMap((request) => request.body.events);
+    expect(new Set(events.map((event) => event.eventId)).size).toBe(2);
+    expect(events.map((event) => event.quantity).sort()).toEqual([10, 20]);
+  });
+
+  it("records a durable receipt of the rows the rag rollup seed skipped", async () => {
+    getDb().prepare("DELETE FROM settings WHERE key LIKE '%rollup_cutover%'").run();
+    getDb().prepare("DELETE FROM settings WHERE key = ?").run(replay.USAGE_MONITOR_REPLAY_WATERMARK_KEYS.rag);
+    insertRag({ id: "rag-skip-1", createdAt: "2026-07-10T22:01:00.000Z", costUsd: 0.001 });
+    insertRag({ id: "rag-skip-2", createdAt: "2026-07-10T22:02:00.000Z", costUsd: 0.001 });
+    push.__setUsageMonitorFetch(fetchStub([]));
+
+    await replay.runUsageMonitorReplay({ nowMs: Date.parse("2026-07-10T23:00:00.000Z") });
+
+    const receipt = getDb()
+      .prepare("SELECT value FROM settings WHERE key = 'usage_monitor_replay:rag_usage:rollup_cutover:v1:rows_skipped'")
+      .get() as { value: string } | undefined;
+    expect(receipt?.value).toBe("2");
+    const audited = getDb()
+      .prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'usage_monitor_replay_rollup_cutover_skip'")
+      .get() as { n: number };
+    expect(audited.n).toBeGreaterThan(0);
+  });
+
+  it("does not seed a rag lane whose v2 cutover state is invalid", async () => {
+    getDb().prepare("DELETE FROM settings WHERE key LIKE '%rollup_cutover%'").run();
+    const ragWatermark = replay.USAGE_MONITOR_REPLAY_WATERMARK_KEYS.rag;
+    getDb().prepare("DELETE FROM settings WHERE key = ?").run(ragWatermark);
+    getDb().prepare("UPDATE settings SET value = 'v2-actve-typo' WHERE key = ?")
+      .run(replay.USAGE_MONITOR_REPLAY_V2_CUTOVER_KEYS.rag);
+    insertRag({ id: "rag-invalid-lane", createdAt: "2026-07-10T23:01:00.000Z", costUsd: 0.001 });
+    push.__setUsageMonitorFetch(fetchStub([]));
+
+    const result = await replay.runUsageMonitorReplay({ nowMs: Date.parse("2026-07-11T00:00:00.000Z") });
+
+    expect(result.rag).toEqual({ sent: 0, complete: false, failed: true });
+    expect(storedWatermark(ragWatermark)).toBeNull();
+    expect(getDb().prepare("SELECT value FROM settings WHERE key LIKE '%rag_usage:rollup_cutover%'").get()).toBeUndefined();
   });
 
   it("does not seed the provider lane: it never had a live push, so its backlog is delivered", async () => {

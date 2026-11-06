@@ -828,7 +828,14 @@ export async function createRagRollupUsageMonitorEvent(
     ...ragUsageEvent({ ...entry, occurredAt: entry.windowStart }),
     eventId: await telemetryIdempotencyKey(
       "rag-rollup",
-      rollupSourceId(entry.windowStart, [entry.provider, entry.operation, entry.userId, entry.model ?? ""])
+      // A NULL model and an empty-string model are different SQL groups (ragWindowEvents), so they
+      // must not share an identity: the monitor would 409 the second and it would be skipped.
+      rollupSourceId(entry.windowStart, [
+        entry.provider,
+        entry.operation,
+        entry.userId,
+        entry.model === undefined || entry.model === null ? "\u0000null" : `m:${entry.model}`,
+      ])
     ),
   };
 }

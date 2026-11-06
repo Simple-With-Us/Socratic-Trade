@@ -325,6 +325,19 @@ describe("usage-monitor-push", () => {
       )
       .get("telemetry-rag-user") as { id: string; created_at: string } | undefined;
     expect(row).toBeDefined();
+    // Control: the same stub and flush lane do deliver a non-RAG event, so the RAG assertion below
+    // cannot pass because delivery is dead.
+    recordLlmUsage({
+      provider: "openai",
+      model: "openai/gpt-4o-mini",
+      context: "rag-live-push-control",
+      userId: "local",
+      keySource: "operator",
+      promptTokens: 1,
+      completionTokens: 1,
+    });
+    await push.flushUsageMonitor();
+    expect(captured.flatMap((c) => c.body.events).filter((e) => e.service === "llm")).not.toHaveLength(0);
     // Live and replay both sending per-row events was most of the monitor's RAG volume.
     expect(captured.flatMap((c) => c.body.events).filter((e) => e.service === "rag")).toHaveLength(0);
   });

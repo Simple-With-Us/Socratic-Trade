@@ -457,12 +457,26 @@ function prepareRollupCutover(lane: "rag"): void {
     const high = latestCursor(REPLAY_TABLES[lane]);
     const current = readWatermark(watermarkKey);
     if (high && (!current || compareCursors(current, high) < 0)) {
+      // Durable receipt of the bounded loss, like the v2 cutover's pre_v2_rows_skipped, so rows the
+      // old lane never acknowledged are visible and reconcilable rather than silently dropped.
+      const skipped = countRowsAfterCursor(REPLAY_TABLES[lane], current);
       database
         .prepare(
           "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) " +
           "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
         )
         .run(watermarkKey, JSON.stringify(high), now);
+      database
+        .prepare(
+          "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) " +
+          "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
+        )
+        .run(`${markerKey}:rows_skipped`, String(skipped), now);
+      audit(
+        "usage_monitor_replay_rollup_cutover_skip",
+        { watermarkKey, rowsSkipped: skipped, seededTo: high },
+        "local"
+      );
     }
     database
       .prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, 'rollup-active', ?)")
@@ -782,7 +796,9 @@ async function executeUsageMonitorReplay(
     // This synchronous BEGIN IMMEDIATE is deliberately the first DB action in the configured lane.
     // All three identity boundaries exist before reconciliation, event construction, or network I/O.
     cutovers = prepareV2ReplayCutovers();
-    prepareRollupCutover("rag");
+    // An invalid lane halts without state writes (replayRolledLane returns failed); seeding it here
+    // would move its watermark and skip the backlog once the corruption is fixed.
+    if (cutovers.rag !== "invalid") prepareRollupCutover("rag");
   } catch {
     const failed = { sent: 0, complete: false, failed: true };
     return { configured: true, llm: failed, rag: failed, provider: failed, callVolume: failed };
