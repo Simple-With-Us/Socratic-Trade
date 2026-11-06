@@ -362,9 +362,9 @@ export class SimFinEnrichmentProvider implements MarketEnrichmentProvider {
   readonly configured = true;
   // SimFin's FREE tier ($0, no card) is what this provider targets — see the file header.
   readonly costTier = "free" as const;
-  // Wave-gate like Wisesheets: 3 endpoints/symbol/scan is wasteful when Yahoo/Roic already
-  // filled these fields (first-wins would discard most of the computed ratios anyway).
-  readonly quotaScarce = true;
+  // Deliberately NOT quotaScarce (docs/market-data-provider-pricing.md): the wave-B gap
+  // gate keys on profile fields, so gating would let SimFin be skipped before it fills
+  // the five tracked ratios; first-wins by registration order keeps it near Wisesheets.
   readonly suppliesFields = [
     "grossProfitMargin",
     "revenueGrowth",

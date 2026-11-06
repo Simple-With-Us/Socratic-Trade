@@ -49,10 +49,13 @@ describe("SimFin enrichment provider", () => {
     expect(resolveSimFinApiKey()).toBeUndefined();
   });
 
-  it("declares quotaScarce + suppliesFields so the cascade wave-gates it to uncovered symbols", async () => {
+  it("stays ungated (no quotaScarce) with suppliesFields, per the pricing-doc contract", async () => {
+    // docs/market-data-provider-pricing.md: "Not quotaScarce; first-wins by registration
+    // order" — the wave-B gap gate keys on profile fields, so gating would let SimFin be
+    // skipped before it fills the five tracked ratios.
     const { SimFinEnrichmentProvider } = await import("../src/lib/simfin-provider");
     const provider = new SimFinEnrichmentProvider("test-key");
-    expect(provider.quotaScarce).toBe(true);
+    expect(provider.quotaScarce).toBeFalsy();
     expect(provider.suppliesFields).toEqual(
       expect.arrayContaining(["grossProfitMargin", "revenueGrowth", "returnOnEquity", "returnOnAssets", "debtToEquity"])
     );

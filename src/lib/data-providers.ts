@@ -1229,7 +1229,8 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   // mirror QuiverEnrichmentProvider) and both self-contained (no shared provider-rate-limit.ts
   // budget — each paces itself). Wisesheets declares quotaScarce (launched 2026-07-24, no track
   // record yet, 5,000 req/mo) so the free-first planner only spends it on genuine coverage gaps;
-  // SimFin now also declares quotaScarce + suppliesFields, so it is likewise spent only on gaps.
+  // SimFin deliberately stays ungated (docs/market-data-provider-pricing.md) so the wave-B gap
+  // filter cannot skip it before it fills its tracked ratios.
   const wisesheetsKey = resolveWisesheetsApiKey();
   if (wisesheetsKey) providers.push(withHealthLane(new WisesheetsEnrichmentProvider(wisesheetsKey), "env"));
   const simFinKey = resolveSimFinApiKey();
