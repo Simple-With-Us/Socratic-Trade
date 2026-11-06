@@ -1,6 +1,14 @@
+## 2026-11-04 CLAUDE — Model classes, rotation selection and catalog refresh (ST-4589)
+
+Scope added: per-seat rotation model selection, a model-class concept in the catalog (the `lineage` field), a retired-catalog list, a `codeCliOnly` flag, and explicit reasoning effort for MiniMax M3.1 Flash and Muse.  No change to order placement, sizing or risk gates.  Follow-ups not scheduled: a live Code CLI broker that accepts the Muse Wonder contributor ids, structured outputs on the native Anthropic route, a fresh model benchmark, and the owner's call on migrating stored selections of retired models.  Rollout: `docs/rollouts/2026-11-04-model-classes-rotation-catalog-refresh.md`.
+
 ## 2026-10-30 CODEX — Repository Report Library (AFC-580)
 
 Provide one indexed report entry point and a separate generated collection under `Code/Docs/Socratic-Trade/`, preserving historical document paths.  This documentation change does not alter the application roadmap, trading behavior, runtime or deployment controls.  The approved Docs-only exception is installed, and final publication remains tracked in AFC-580.
+
+## 2026-11-04 CLAUDE — Learning-loop wiring fixes and performance evaluation (ST-4589)
+
+No roadmap scope change in the code: read-side and measurement fixes only, no order, sizing or risk-gate change.  The evaluation in `docs/reviews/2026-11-04-performance-and-learning-evaluation.md` proposes roadmap items for the owner to decide: a SPY core with a model-driven satellite sleeve, sizing under deterministic control, a shadow A/B harness with fixed model arms, a memory ablation, and a matched-horizon re-score of the Red Team.  None is scheduled until the owner picks.  Rollout: `docs/rollouts/2026-11-04-learning-loop-wiring-fixes.md`.
 
 ## 2026-10-26 WISE: ST-4583 public footer logo
 

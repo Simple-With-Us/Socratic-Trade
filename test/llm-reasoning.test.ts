@@ -20,13 +20,38 @@ describe("pure reasoning capability selection", () => {
     ["gemini-3.8-flash", "gemini", ["low", "medium", "high"]],
     ["gemini-3-pro", "gemini", ["minimal", "low", "medium", "high"]],
     ["mistral-medium-3-5", "mistral", ["none", "high"]],
-    ["deepseek-v4-pro", "deepseek", ["none", "high", "max"]]
+    ["deepseek-v4-pro", "deepseek", ["none", "high", "max"]],
+    // ST-4589 (2026-11-04)
+    // Native Haiku 5.5 is adaptive like the OpenRouter alias (Anthropic thinking docs).
+    ["claude-haiku-5-5", "anthropic", ["low", "medium", "high", "xhigh", "max"]],
+    ["claude-haiku-latest", "anthropic", ["low", "medium", "high", "xhigh", "max"]],
+    ["grok-4.7", "xai", ["low", "medium", "high", "xhigh"]],
+    ["grok-latest", "xai", ["low", "medium", "high", "xhigh"]],
+    ["mistral-large-latest", "mistral", ["high"]],
+    ["mistralai/mistral-large-4-0", "mistral", ["high"]],
+    // DeepSeek V4.1 Flash and the bare native id keep the thinking controls.
+    ["~deepseek/deepseek-flash-latest", "deepseek", ["none", "high", "max"]],
+    ["deepseek-flash", "deepseek", ["none", "high", "max"]],
+    ["deepseek/deepseek-v4.1-flash-1017", "deepseek", ["none", "high", "max"]],
+    ["minimax-m3.1-flash", "minimax", ["low", "medium", "high", "xhigh", "max"]],
+    ["minimax/minimax-m3.1-flash", "minimax", ["low", "medium", "high", "xhigh", "max"]],
+    ["MiniMax-M3.1-Flash", "minimax", ["low", "medium", "high", "xhigh", "max"]],
+    ["muse-spark-1.3", "meta", ["minimal", "low", "medium", "high", "xhigh", "max"]],
+    ["meta/muse-wonder", "meta", ["minimal", "low", "medium", "high", "xhigh", "max"]],
+    ["muse-wonder-1.0", "meta", ["minimal", "low", "medium", "high", "xhigh", "max"]],
+    ["muse-spark-1.3-contributor", "meta", ["minimal", "low", "medium", "high", "xhigh"]],
+    ["meta/muse-spark-1.3-contributor", "meta", ["minimal", "low", "medium", "high", "xhigh"]],
+    ["muse-wonder-1.0-contributor", "meta", ["minimal", "low", "medium", "high", "xhigh"]],
+    ["muse-wonder-full-1.0-contributor", "meta", ["minimal", "low", "medium", "high", "xhigh"]],
+    ["muse-glimmer-30b", "meta", ["low", "medium", "high", "xhigh"]]
   ])("selects %s without credential imports", (model, provider, efforts) => {
     expect(reasoningCapabilityForModel(model as string)?.provider).toBe(provider);
     expect(values(model as string)).toEqual(efforts);
   });
   it("does not give unsupported models or rotation a wire capability", () => {
-    for (const model of [undefined, "", "gpt-4.1-mini", "mistral-small-latest", LLM_MODEL_ROTATION_SENTINEL]) {
+    // MiniMax-M3 has no documented effort parameter (MiniMax guide and OpenRouter both silent), and
+    // the deprecated Large 3 snapshot never reasoned: no knob for either.
+    for (const model of [undefined, "", "gpt-4.1-mini", "mistral-small-latest", "minimax-m3", "MiniMax-M3", "minimax/minimax-m3", "mistral-large-2512", LLM_MODEL_ROTATION_SENTINEL]) {
       expect(reasoningCapabilityForModel(model)).toBeUndefined();
       expect(normalizeReasoningEffortForModel(model, "high")).toBeUndefined();
     }
@@ -49,6 +74,23 @@ describe("effort clamping without silent expensive opt-in", () => {
   it.each(["high", "xhigh", "max"] as const)("honors explicit %s opt-in", effort => {
     expect(normalizeReasoningEffortForModel("mistral-medium-3-5", effort)).toBe("high");
     expect(normalizeReasoningEffortForModel("deepseek-v4-pro", effort)).toBe(effort === "high" ? "high" : "max");
+  });
+  it("MiniMax and Muse default to medium, never send none, and contributor models never max (ST-4589)", () => {
+    for (const model of ["minimax-m3.1-flash", "muse-spark-1.3", "muse-wonder-1.0", "muse-spark-1.3-contributor", "muse-wonder-1.0-contributor", "muse-glimmer-30b"]) {
+      expect(normalizeReasoningEffortForModel(model, undefined), model).toBe("medium");
+      expect(normalizeReasoningEffortForModel(model, "none"), model).not.toBe("none");
+    }
+    expect(normalizeReasoningEffortForModel("minimax-m3.1-flash", "max")).toBe("max");
+    expect(normalizeReasoningEffortForModel("minimax-m3.1-flash", "none")).toBe("low");
+    expect(normalizeReasoningEffortForModel("muse-spark-1.3", "max")).toBe("max");
+    expect(normalizeReasoningEffortForModel("muse-spark-1.3", "none")).toBe("minimal");
+    expect(normalizeReasoningEffortForModel("muse-spark-1.3-contributor", "max")).toBe("xhigh");
+    expect(normalizeReasoningEffortForModel("meta/muse-spark-1.3-contributor", "max")).toBe("xhigh");
+    expect(normalizeReasoningEffortForModel("muse-wonder-full-1.0-contributor", "max")).toBe("xhigh");
+    // Mistral Large 4 accepts only high (the opt-in none/high rule stays on Medium 3.5 only).
+    expect(normalizeReasoningEffortForModel("mistral-large-latest", undefined)).toBe("high");
+    expect(normalizeReasoningEffortForModel("mistral-large-latest", "none")).toBe("high");
+    expect(normalizeReasoningEffortForModel("mistral-medium-3-5", undefined)).toBe("none");
   });
   it("defaults and clamps generic options with lower-tier tie breaking", () => {
     expect(normalizeReasoningEffortForOptions([], "max")).toBe("medium");

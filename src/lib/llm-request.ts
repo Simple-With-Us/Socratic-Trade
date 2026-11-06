@@ -188,6 +188,21 @@ export function strategyLlmTimeoutMs(model: string | undefined, effort: LlmReaso
   return Math.max(base, Number(process.env.STRATEGY_LLM_REASONING_TIMEOUT_MS) || REASONING_LLM_TIMEOUT_DEFAULT_MS);
 }
 
+/**
+ * Ceiling for an INTERACTIVE reasoning call that a browser request awaits (the AI strategy review,
+ * POST /api/strategy/tune).  Cloudflare's edge gives up on the origin at ~100s (a 524; see
+ * app/console/lib/api.ts edgeErrorMessage), so a thinking model gets 90s instead of the 60s base,
+ * never the 360s background bound.
+ */
+export const INTERACTIVE_REASONING_LLM_TIMEOUT_MS = 90_000;
+
+/** `strategyLlmTimeoutMs`, capped for a call a browser request is waiting on. */
+export function interactiveLlmTimeoutMs(model: string | undefined, effort: LlmReasoningEffort | undefined): number {
+  // Hard ceiling: never past 90s, whatever STRATEGY_LLM_TIMEOUT_MS / _REASONING_TIMEOUT_MS say,
+  // because the edge drops the browser's request at ~100s.
+  return Math.min(strategyLlmTimeoutMs(model, effort), INTERACTIVE_REASONING_LLM_TIMEOUT_MS);
+}
+
 /** The eventual result of an LLM call, reported once the request finally settles (fast OR late). */
 export interface LlmCallOutcome {
   /** Wall-clock ms from request start to settle. */
@@ -387,6 +402,10 @@ type RequestBounds = {
   temperature?: number;
   /** Provider-specific reasoning/thinking effort. Defaults to "medium"; ignored by unsupported models. */
   reasoningEffort?: LlmReasoningEffort;
+  /** The endpoint's provider (`LlmEndpoint.provider`, e.g. "openrouter", "minimax", "meta").  Picks
+   *  the effort field shape for MiniMax/Muse.  When absent, a vendor-prefixed wire id
+   *  ("minimax/…", "meta/…") is taken to mean OpenRouter. */
+  endpointProvider?: string;
 };
 
 /**
@@ -427,12 +446,30 @@ export function withLlmRequestBounds<T extends Record<string, unknown>>(
 ): T & Record<string, unknown> {
   const result = ((): any => {
     // MiniMax and Muse reason by default; reserve room for the visible answer too.
-    // Do not impose an unverified OpenAI effort ladder on these families.
+    // Models with a documented effort ladder (MiniMax-M3.1-Flash, Muse Spark/Wonder/Glimmer — see
+    // llm-reasoning.ts) ALWAYS get an explicit effort (default "medium"), so the provider default
+    // (max, for M3.1 Flash) never applies.  MiniMax-M3 has no documented effort and gets none.
+    // Wire shape per route:
+    //   - OpenRouter: the unified `reasoning: { effort }` object (openrouter.ai reasoning-tokens
+    //     guide; it accepts minimal..max and maps an unsupported level to the nearest supported).
+    //   - Native MiniMax / native Meta: top-level `reasoning_effort` (both providers' docs).
+    //   - Code CLI broker: top-level `reasoning_effort`, which fetchCodeCli forwards to the broker
+    //     as `reasoningEffort` (docs/llm/code-cli-broker.md).
     if (transport === "chat-completions" && /^(minimax|muse)-/i.test(lowerModel(bounds.model))) {
+      const effort = reasoningCapabilityForModel(bounds.model)
+        ? normalizeReasoningEffortForModel(bounds.model, bounds.reasoningEffort)
+        : undefined;
+      const viaOpenRouter = bounds.endpointProvider
+        ? bounds.endpointProvider === "openrouter"
+        : bounds.model.includes("/");
+      const effortField = effort && effort !== "none"
+        ? viaOpenRouter ? { reasoning: { effort } } : { reasoning_effort: effort }
+        : {};
       return {
         ...body,
         max_completion_tokens: resolveLlmWireOutputCap(transport, bounds),
-        temperature: bounds.temperature ?? 1
+        temperature: bounds.temperature ?? 1,
+        ...effortField
       };
     }
     const capability = reasoningCapabilityForModel(bounds.model);

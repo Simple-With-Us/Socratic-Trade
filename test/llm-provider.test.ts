@@ -43,7 +43,7 @@ describe("resolveLlmEndpoint", () => {
     expect(endpoint.provider).toBe("anthropic");
     expect(endpoint.url).toBe("https://api.anthropic.com/v1/messages");
     expect(endpoint.key).toBe("sk-ant-test-key");
-    expect(endpoint.model).toBe("claude-sonnet-5");
+    expect(endpoint.model).toBe("claude-sonnet-5"); // native lags on purpose: Sonnet 5.5 rejects the forced-tool body
     expect(endpoint.transport).toBe("anthropic-messages");
   });
 
@@ -53,7 +53,7 @@ describe("resolveLlmEndpoint", () => {
     expect(endpoint.provider).toBe("xai");
     expect(endpoint.url).toBe("https://api.x.ai/v1/chat/completions");
     expect(endpoint.key).toBe("xai-test-key");
-    expect(endpoint.model).toBe("grok-4.6");
+    expect(endpoint.model).toBe("grok-4.7");
     expect(endpoint.transport).toBe("chat-completions");
   });
 
@@ -63,7 +63,7 @@ describe("resolveLlmEndpoint", () => {
     expect(endpoint.provider).toBe("moonshot");
     expect(endpoint.url).toBe("https://api.moonshot.cn/v1/chat/completions");
     expect(endpoint.key).toBe("sk-moonshot-test-key");
-    expect(endpoint.model).toBe("kimi-latest");
+    expect(endpoint.model).toBe("kimi-k3.1-pro");
     expect(endpoint.transport).toBe("chat-completions");
   });
 
@@ -117,15 +117,15 @@ describe("resolveLlmEndpoint", () => {
     const { setUserSetting } = await import("../src/lib/db");
     expect(resolveLlmEndpoint({ llmModel: "muse-spark-1.3" }, "meta-native-only").provider).toBe("openrouter");
     setUserSetting("meta-native-only", "llm_route_meta", "native");
-    // Glimmer is open-weight and Llama is not hosted on api.meta.ai, so they stay OpenRouter-only
-    // and a Meta key is never sent to OpenAI or to OpenRouter.
-    for (const model of ["muse-glimmer-30b", "llama-4-maverick"]) {
+    // Glimmer is open-weight and not hosted on api.meta.ai, so it stays OpenRouter-only and a Meta
+    // key is never sent to OpenAI or to OpenRouter.
+    for (const model of ["muse-glimmer-30b"]) {
       const endpoint = resolveLlmEndpoint({ llmModel: model }, "meta-native-only");
       expect(endpoint.provider).toBe("openrouter");
       expect(endpoint.key).toBeUndefined();
       expect(modelCredentialService(model, "meta-native-only")).toBe("openrouter");
     }
-    for (const [model, wire] of [["muse-spark-1.3", "muse-spark-1.3"], ["muse-spark-1.3-contributor", "muse-spark-1.3-contributor"]]) {
+    for (const [model, wire] of [["muse-spark-1.3", "muse-spark-1.3"], ["muse-spark-1.3-contributor", "muse-spark-1.3-contributor"], ["muse-wonder-1.0", "muse-wonder-1.0"]]) {
       const endpoint = resolveLlmEndpoint({ llmModel: model }, "meta-native-only");
       expect(endpoint.provider).toBe("meta");
       expect(endpoint.url).toBe("https://api.meta.ai/v1/chat/completions");
@@ -185,6 +185,24 @@ describe("resolveLlmEndpoint", () => {
     expect(normalizeOpenRouterModelId("gpt-5.4-nano")).toBe("openai/gpt-5.4-nano");
   });
 
+  it("refuses a stored Llama id legibly as an unavailable (skippable) model, on every seat (ST-4589)", async () => {
+    const provider = await import("../src/lib/llm-provider");
+    setApiKey("llama-user", "openrouter", "openrouter-placeholder");
+    for (const [policy, role] of [
+      [{ llmModel: "llama-4-scout" }, "green"],
+      [{ llmModel: "meta-llama/llama-3.3-70b-instruct" }, "green"],
+      [{ redTeamLlmModel: "openrouter/meta-llama/llama-4-maverick" }, "red"]
+    ] as const) {
+      let caught: unknown;
+      try { resolveLlmEndpoint(policy, "llama-user", undefined, role); } catch (error) { caught = error; }
+      expect(caught).toBeInstanceOf(provider.LlmModelUnavailableError);
+      expect((caught as Error).message).toBe("Llama models are no longer offered; pick another model");
+      expect(provider.isUnavailableModelResolutionError(caught)).toBe(true);
+    }
+    // A stale llama id still classifies as Meta, so nothing can ever route it to api.openai.com.
+    expect(provider.llmModelFamily("llama-4-scout")).toBe("meta");
+  });
+
   it("emits owner OpenRouter wire slugs for catalog families and aliases", async () => {
     const { normalizeOpenRouterModelId } = await import("../src/lib/llm-provider");
     const cases: Array<[string, string]> = [
@@ -212,9 +230,20 @@ describe("resolveLlmEndpoint", () => {
       ["gpt-6-astra", "openai/gpt-6-astra"],
       ["openai/gpt-6-astra", "openai/gpt-6-astra"],
       ["~openai/gpt-6-astra", "openai/gpt-6-astra"],
-      ["kimi-latest", "~moonshotai/kimi-latest"],
-      ["moonshotai/kimi-latest", "~moonshotai/kimi-latest"],
-      ["~moonshotai/kimi-latest", "~moonshotai/kimi-latest"],
+      // kimi-latest pins moonshotai/kimi-k3.1-pro (2026-11-04): OpenRouter's ~kimi-latest alias still targets K3.
+      ["kimi-latest", "moonshotai/kimi-k3.1-pro"],
+      ["moonshotai/kimi-latest", "moonshotai/kimi-k3.1-pro"],
+      ["~moonshotai/kimi-latest", "moonshotai/kimi-k3.1-pro"],
+      ["gpt-sol-latest", "openai/gpt-6.1-sol"],
+      ["gpt-6.1-terra", "openai/gpt-6.1-terra"],
+      ["gpt-luna-latest", "openai/gpt-6-luna"],
+      ["gpt-5.6-sol", "openai/gpt-5.6-sol"],
+      ["gpt-5.6-luna", "openai/gpt-5.6-luna"],
+      ["gpt-6-astra-pro", "openai/gpt-6-astra-pro"],
+      ["minimax-m3.1-flash", "minimax/minimax-m3.1-flash"],
+      ["muse-wonder-1.0", "meta/muse-wonder"],
+      ["deepseek-flash-latest", "~deepseek/deepseek-flash-latest"],
+      ["mistral-large-latest", "mistralai/mistral-large-4-0"],
       ["minimax-m3", "minimax/minimax-m3"],
       ["minimax/minimax-m3", "minimax/minimax-m3"],
       // 2026-09-18: deepseek-r1 / deepseek-reasoner removed from the curated catalog. Both

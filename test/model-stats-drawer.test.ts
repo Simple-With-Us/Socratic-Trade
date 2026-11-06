@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveRetiredModelIds } from "../app/console/components/model-stats-drawer";
+import { deriveRetiredModelIds, greenPerfSource, vetoPerfSource } from "../app/console/components/model-stats-drawer";
 import { CURATED_LLM_MODEL_IDS } from "../app/ui/llm-model-catalog";
 
 /** 2026-09-18: the Model Stats drawer only ever iterated CURATED_LLM_MODEL_GROUPS (the CURRENT
@@ -31,5 +31,27 @@ describe("deriveRetiredModelIds", () => {
     for (const id of CURATED_LLM_MODEL_IDS) {
       expect(deriveRetiredModelIds([id], CURATED_LLM_MODEL_IDS)).toEqual([]);
     }
+  });
+});
+
+describe("performance cells never hide the model's own results behind an estimate (ST-4589 review)", () => {
+  const perf = (closedTrades: number) => ({ closedTrades, winRate: 50, avgPnlPct: 1, totalPnlUsd: 10 });
+  const veto = (maturedVetoes: number) => ({ maturedVetoes, vetoValueAddRate: 50, survivorRiskHitRate: 50, avgReturnPct: -1 });
+
+  it("green: own figures whenever there is at least one own closed trade, estimate only with none", () => {
+    const estimate = { inheritedPerf: perf(25), perfInheritedFrom: "gpt-5.6-sol" };
+    expect(greenPerfSource({ closedTrades: 1, perf: perf(1), ...estimate })).toBe("own");
+    expect(greenPerfSource({ closedTrades: 19, perf: perf(19), ...estimate })).toBe("own");
+    expect(greenPerfSource({ closedTrades: 0, perf: null, ...estimate })).toBe("estimate");
+    expect(greenPerfSource({ closedTrades: 0, perf: null, inheritedPerf: null, perfInheritedFrom: null })).toBe("none");
+    expect(greenPerfSource(undefined)).toBe("none");
+  });
+
+  it("red: own veto figures whenever there is at least one own matured veto, estimate only with none", () => {
+    const estimate = { inheritedReviewerPerf: veto(35), vetoInheritedFrom: "gpt-5.6-sol" };
+    expect(vetoPerfSource({ reviewerPerf: veto(4), ...estimate })).toBe("own");
+    expect(vetoPerfSource({ reviewerPerf: veto(0), ...estimate })).toBe("estimate");
+    expect(vetoPerfSource({ reviewerPerf: null, ...estimate })).toBe("estimate");
+    expect(vetoPerfSource({ reviewerPerf: null, inheritedReviewerPerf: null, vetoInheritedFrom: null })).toBe("none");
   });
 });
