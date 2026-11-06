@@ -306,7 +306,7 @@ describe("usage-monitor-push", () => {
     expect(event.occurredAt).toBe(row.created_at);
   });
 
-  it("uses one durable RAG ledger identity and timestamp for persistence and delivery", async () => {
+  it("persists RAG usage locally and does not live-push it (rollup replay owns delivery)", async () => {
     const captured: CapturedRequest[] = [];
     push.__setUsageMonitorFetch(makeFetchStub(captured));
     recordRagUsage({
@@ -323,10 +323,10 @@ describe("usage-monitor-push", () => {
       .prepare(
         "SELECT id, created_at FROM rag_usage WHERE user_id = ? ORDER BY created_at DESC LIMIT 1"
       )
-      .get("telemetry-rag-user") as { id: string; created_at: string };
-    const event = captured[0]!.body.events[0]!;
-    expect(event.eventId).toBe(expectedTelemetryKey("rag", row.id));
-    expect(event.occurredAt).toBe(row.created_at);
+      .get("telemetry-rag-user") as { id: string; created_at: string } | undefined;
+    expect(row).toBeDefined();
+    // Live and replay both sending per-row events was most of the monitor's RAG volume.
+    expect(captured.flatMap((c) => c.body.events).filter((e) => e.service === "rag")).toHaveLength(0);
   });
 
   it("replays the same source identity with a stable key and occurredAt", async () => {
