@@ -1930,6 +1930,34 @@ describe("parseRobinhoodFundamentals", () => {
 });
 
 describe("parseAlpacaSnapshot", () => {
+  it("stamps the delayed-tape metadata onto the parsed snapshot", () => {
+    // Kody review on PR #5005: the account-scoped `delayed_sip` tape carries a
+    // documented ~900s delay.  Without this metadata the ~900s-old print is
+    // treated as a realtime-stale observation downstream.
+    const result = parseAlpacaSnapshot(
+      { latestTrade: { p: 195.5, t: "2026-11-05T19:45:00.000Z" } },
+      {
+        expectedDelaySec: 900,
+        delayToleranceSec: 120,
+        venuePriceAuthoritative: true,
+        fetchedAt: "2026-11-05T20:00:00.000Z"
+      }
+    );
+    expect(result.expectedDelaySec).toBe(900);
+    expect(result.delayToleranceSec).toBe(120);
+    expect(result.venuePriceAuthoritative).toBe(true);
+    // The retrieval stamp travels with the tape so it ages by fetch time.
+    expect(result.fetchedAt).toBe("2026-11-05T20:00:00.000Z");
+  });
+
+  it("leaves a realtime snapshot without any tape metadata", () => {
+    const result = parseAlpacaSnapshot({ latestTrade: { p: 195.5 } });
+    expect(result.expectedDelaySec).toBeUndefined();
+    expect(result.delayToleranceSec).toBeUndefined();
+    expect(result.venuePriceAuthoritative).toBeUndefined();
+    expect(result.fetchedAt).toBeUndefined();
+  });
+
   it("maps a full snapshot to the correct SymbolEnrichment fields", () => {
     const snap = {
       latestTrade: { p: 205.75 },
@@ -2182,6 +2210,7 @@ describe("AlpacaSnapshotEnrichmentProvider", () => {
   it("requests delayed_sip when the provider carries the ACCOUNT-SCOPED paper feed", async () => {
     // The global env var stays on its default: the delayed tape is an ACCOUNT
     // decision, never a process-wide flip.
+    const previousFeed = process.env.ALPACA_DATA_FEED;
     delete process.env.ALPACA_DATA_FEED;
     let capturedUrl = "";
     vi.stubGlobal("fetch", async (url: string) => {
@@ -2193,14 +2222,85 @@ describe("AlpacaSnapshotEnrichmentProvider", () => {
       );
     });
 
+    try {
+      const provider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env", "local", {
+        feed: "delayed_sip",
+        cacheIdentity: "ap-paper:delayed_sip"
+      });
+      await provider.enrich(["AAPL"]);
+
+      expect(capturedUrl).toContain("feed=delayed_sip");
+      expect(capturedUrl).not.toContain("feed=iex");
+    } finally {
+      // Restore the mutated env var even when an assertion above throws.
+      if (previousFeed === undefined) delete process.env.ALPACA_DATA_FEED;
+      else process.env.ALPACA_DATA_FEED = previousFeed;
+    }
+  });
+
+  it("stamps the DELAYED-TAPE metadata on a delayed_sip snapshot", async () => {
+    // The scan must be able to age a ~900s-old print with the delayed-tape
+    // rules instead of the realtime-stale bar, so the tape metadata travels
+    // with the observation.
+    vi.stubGlobal("fetch", async () => {
+      return new Response(
+        JSON.stringify({
+          AAPL: { latestTrade: { p: 195.5 }, latestQuote: { bp: 195.4, ap: 195.6 } }
+        })
+      );
+    });
+
     const provider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env", "local", {
       feed: "delayed_sip",
       cacheIdentity: "ap-paper:delayed_sip"
     });
-    await provider.enrich(["AAPL"]);
+    const result = await provider.enrich(["AAPL"]);
 
-    expect(capturedUrl).toContain("feed=delayed_sip");
-    expect(capturedUrl).not.toContain("feed=iex");
+    expect(result.AAPL?.expectedDelaySec).toBe(900);
+    expect(result.AAPL?.delayToleranceSec).toBe(120);
+    expect(result.AAPL?.venuePriceAuthoritative).toBe(true);
+  });
+
+  it("does NOT stamp delayed-tape metadata on a realtime (iex) snapshot", async () => {
+    vi.stubGlobal("fetch", async () => {
+      return new Response(
+        JSON.stringify({
+          AAPL: { latestTrade: { p: 195.5 }, latestQuote: { bp: 195.4, ap: 195.6 } }
+        })
+      );
+    });
+
+    const provider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env");
+    const result = await provider.enrich(["AAPL"]);
+
+    expect(result.AAPL?.price).toBe(195.5);
+    expect(result.AAPL?.expectedDelaySec).toBeUndefined();
+    expect(result.AAPL?.delayToleranceSec).toBeUndefined();
+    expect(result.AAPL?.venuePriceAuthoritative).toBeUndefined();
+  });
+
+  it("stamps the delayed-tape metadata onto the enriched snapshot", async () => {
+    // Kody review on PR #5005: the account-scoped `delayed_sip` provider must
+    // hand the tape metadata (and the retrieval stamp) to the consumer, so a
+    // ~900s-old print is aged by the delayed-tape rules.
+    vi.stubGlobal("fetch", async () =>
+      new Response(
+        JSON.stringify({
+          AAPL: { latestTrade: { p: 195.5, t: "2026-11-05T19:45:00.000Z" } }
+        })
+      )
+    );
+
+    const provider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env", "local", {
+      feed: "delayed_sip",
+      cacheIdentity: "ap-paper:delayed_sip"
+    });
+    const result = await provider.enrich(["AAPL"]);
+
+    expect(result.AAPL?.expectedDelaySec).toBe(900);
+    expect(result.AAPL?.delayToleranceSec).toBe(120);
+    expect(result.AAPL?.venuePriceAuthoritative).toBe(true);
+    expect(typeof result.AAPL?.fetchedAt).toBe("string");
   });
 
   it("keeps the delayed tape in its own cache entry (no cross-feed contamination)", async () => {
@@ -3242,6 +3342,53 @@ describe("FMP / Quiver direct access retired (owner 2026-08-04)", () => {
     delete process.env.FMP_API_KEY;
     delete process.env.QUIVER_API_KEY;
     delete process.env.CONGRESS_TRADE_FUNDAMENTALS_ENABLED;
+  });
+});
+
+// ── Alpaca credential guard (Kody review on PR #5005) ───────────────────────
+// The connected-account lookup that decides the account-scoped tape may only
+// run when the Alpaca snapshot provider is actually registered.  Without the
+// guard, every scan — including one with no Alpaca credentials at all — paid
+// for a connected-account DB read on a path that has no snapshot provider.
+
+describe("getEnrichmentProvider — Alpaca credential guard", () => {
+  it("does NOT read the connected account when the Alpaca snapshot credentials are absent", async () => {
+    const db = await import("../src/lib/db");
+    const resolveSpy = vi
+      .spyOn(db, "resolveAlpacaMarketData")
+      .mockReturnValue({ source: "env" } as never);
+    const connectedSpy = vi.spyOn(db, "getConnectedAccount");
+    const activeSpy = vi.spyOn(db, "getActiveConnectedAccount");
+    try {
+      getEnrichmentProvider("local", { connectedAccountId: "ap-paper" });
+      expect(connectedSpy).not.toHaveBeenCalled();
+      expect(activeSpy).not.toHaveBeenCalled();
+    } finally {
+      resolveSpy.mockRestore();
+      connectedSpy.mockRestore();
+      activeSpy.mockRestore();
+    }
+  });
+
+  it("reads the connected account when the Alpaca snapshot credentials ARE present", async () => {
+    const db = await import("../src/lib/db");
+    const resolveSpy = vi.spyOn(db, "resolveAlpacaMarketData").mockReturnValue({
+      apiKey: "k",
+      secretKey: "s",
+      source: "env"
+    } as never);
+    const connectedSpy = vi
+      .spyOn(db, "getConnectedAccount")
+      .mockReturnValue({ id: "ap-paper", broker: "alpaca", environment: "paper" } as never);
+    const activeSpy = vi.spyOn(db, "getActiveConnectedAccount");
+    try {
+      getEnrichmentProvider("local", { connectedAccountId: "ap-paper" });
+      expect(connectedSpy).toHaveBeenCalledWith("ap-paper", "local");
+    } finally {
+      resolveSpy.mockRestore();
+      connectedSpy.mockRestore();
+      activeSpy.mockRestore();
+    }
   });
 });
 

@@ -17,6 +17,32 @@ export const AlpacaLatestTradesResponseSchema = z.object({
 });
 export type AlpacaLatestTradesResponse = z.infer<typeof AlpacaLatestTradesResponseSchema>;
 
+/**
+ * A single `stockLatestQuotes` row.
+ *
+ * NON-STRICT on purpose: Alpaca's quote payload carries vendor fields we do not
+ * model here (`bp`/`ap`/`bs`/`as`, plus anything the vendor adds later) and the
+ * legacy mapper forwards them verbatim.  Validation must never strip or reject
+ * a row because of a field we do not know about — it only pins the fields we DO
+ * read (the observation timestamp `t`).
+ */
+export const AlpacaLatestQuoteSchema = z
+  .object({
+    t: z.union([z.string(), z.number(), z.date()]).optional()
+  })
+  .passthrough();
+export type AlpacaLatestQuote = z.infer<typeof AlpacaLatestQuoteSchema>;
+
+/**
+ * The `stockLatestQuotes` response envelope.  `quotes` is a symbol → row map;
+ * each row is validated individually so one malformed symbol cannot discard a
+ * whole batch.
+ */
+export const AlpacaLatestQuotesResponseSchema = z.object({
+  quotes: z.record(z.string(), z.unknown()).optional()
+});
+export type AlpacaLatestQuotesResponse = z.infer<typeof AlpacaLatestQuotesResponseSchema>;
+
 function alpacaTradeTimestamp(value: AlpacaLatestTrade["t"]): string | number | undefined {
   if (value instanceof Date) return value.toISOString();
   return value;
@@ -244,9 +270,18 @@ export function createLegacyAlpacaRestClient(
         symbols: symbols.join(","),
         ...(options?.feed ? { feed: options.feed } : {})
       });
+      // VALIDATE BEFORE USE.  The raw SDK response is untrusted vendor data:
+      // `resp.quotes` may be missing, null, or not a map at all.  A malformed
+      // envelope yields NO quotes (fail closed) instead of a TypeError or a
+      // half-parsed book.
+      const parsed = AlpacaLatestQuotesResponseSchema.safeParse(resp);
+      if (!parsed.success) return {};
+      const book: AlpacaLatestQuotesResponse = parsed.data;
       const legacy: Record<string, Record<string, unknown>> = {};
-      for (const [sym, quote] of Object.entries(resp.quotes ?? {})) {
-        const q = quote as unknown as Record<string, unknown>;
+      for (const [sym, raw] of Object.entries(book.quotes ?? {})) {
+        const quote = AlpacaLatestQuoteSchema.safeParse(raw);
+        if (!quote.success) continue;
+        const q = quote.data as Record<string, unknown>;
         legacy[sym] = {
           ...q,
           t: q.t instanceof Date ? q.t.toISOString() : q.t

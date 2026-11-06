@@ -61,7 +61,8 @@ vi.mock("../src/lib/data-providers", () => ({
     }
   },
   fetchWithRetry: (...args: unknown[]) => mockFetchWithRetry(...args),
-  apiKeyFingerprint: async (key: string) => `fp:${key}`
+  // Fixed SYNTHETIC fingerprint — never echo the credential it fingerprints.
+  apiKeyFingerprint: async () => "fp:test"
 }));
 
 const mockUpsertSymbolFieldLatest = vi.fn();
@@ -98,6 +99,21 @@ function delayedPaperQuote(overrides: Partial<BrokerQuote> = {}): BrokerQuote {
     delayToleranceSec: ALPACA_PAPER_DELAY_TOLERANCE_SEC,
     ...overrides
   };
+}
+
+/**
+ * The same tape anchored to the REAL clock.
+ *
+ * The cascade reads `Date.now()` itself, so a quote stamped at a fixed past
+ * instant would look years old to the delayed-tape usability check.
+ */
+function liveDelayedPaperQuote(overrides: Partial<BrokerQuote> = {}): BrokerQuote {
+  const now = Date.now();
+  return delayedPaperQuote({
+    asOf: new Date(now - ALPACA_PAPER_EXPECTED_DELAY_SEC * 1000).toISOString(),
+    fetchedAt: new Date(now).toISOString(),
+    ...overrides
+  });
 }
 
 describe("alpaca paper account scoping", () => {
@@ -388,7 +404,7 @@ describe("fetchFreshQuotesCascade — Alpaca PAPER tape", () => {
       accountNumber: "PA33IDTHMFK9",
       maxQuoteAgeSec: 120
     });
-    mockGetEquityQuotes.mockResolvedValue({ AAPL: delayedPaperQuote() });
+    mockGetEquityQuotes.mockResolvedValue({ AAPL: liveDelayedPaperQuote() });
     mockEnrich.mockResolvedValue({});
     mockFetchYahooFinanceQuotesBatch.mockResolvedValue(new Map());
 
@@ -421,6 +437,41 @@ describe("fetchFreshQuotesCascade — Alpaca PAPER tape", () => {
     expect(quotes.AAPL).toBeUndefined();
     expect(mockEnrich).not.toHaveBeenCalled();
     expect(mockFetchYahooFinanceQuotesBatch).not.toHaveBeenCalled();
+  });
+
+  it("does NOT accept an UNUSABLE delayed tape as the authoritative venue price", async () => {
+    // The print runs beyond expected delay + tolerance while the retrieval is
+    // fresh.  The cascade must refuse to stamp it as the venue-authoritative
+    // price — and it must NOT overlay a realtime source on top of it.
+    mockGetConnectedAccount.mockReturnValue({ id: "ap-paper", broker: "alpaca", environment: "paper" });
+    mockGetPolicy.mockReturnValue({
+      activeBroker: "alpaca",
+      connectedAccountId: "ap-paper",
+      accountNumber: "PA33IDTHMFK9",
+      maxQuoteAgeSec: 120
+    });
+    const now = Date.now();
+    mockGetEquityQuotes.mockResolvedValue({
+      AAPL: liveDelayedPaperQuote({
+        asOf: new Date(
+          now - (ALPACA_PAPER_EXPECTED_DELAY_SEC + ALPACA_PAPER_DELAY_TOLERANCE_SEC + 300) * 1000
+        ).toISOString()
+      })
+    });
+    mockEnrich.mockResolvedValue({ AAPL: { price: 999 } });
+    mockFetchYahooFinanceQuotesBatch.mockResolvedValue(new Map());
+
+    const quotes = await fetchFreshQuotesCascade(["AAPL"], "local", "PA33IDTHMFK9");
+
+    // Not authoritative — the staleness gate owns the honest
+    // `quote_last_print_beyond_delayed_sla` block.
+    expect(quotes.AAPL?.venuePriceAuthoritative).not.toBe(true);
+    // The tape metadata survives so the gate can report the excess delay.
+    expect(quotes.AAPL?.expectedDelaySec).toBe(ALPACA_PAPER_EXPECTED_DELAY_SEC);
+    // No realtime overlay may fill the gap on the execution path.
+    expect(mockEnrich).not.toHaveBeenCalled();
+    expect(mockFetchYahooFinanceQuotesBatch).not.toHaveBeenCalled();
+    expect(mockFetchYahooFinanceQuote).not.toHaveBeenCalled();
   });
 
   it("leaves Alpaca LIVE on the realtime cascade (external backfill still runs)", async () => {

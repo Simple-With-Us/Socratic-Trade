@@ -1,3 +1,10 @@
+// SERVER-ONLY BOUNDARY.  This module resolves connected accounts, reads the
+// trading policy, and calls broker gateways — it carries credential-bearing
+// code and MUST never be pulled into a browser bundle.  `server-only` makes
+// that boundary fail loudly at build time instead of shipping secrets to the
+// client.  Every importer is server-side (src/lib/*, app/api/*); no client
+// component may import this module.
+import "server-only";
 import {
   getPolicy,
   getConnectedAccount,
@@ -885,6 +892,35 @@ export async function fetchFreshQuotesCascade(
           : {})
       };
       if (opts.venueDelayed) {
+        // DELAYED-TAPE USABILITY (Kody review on PR #5005).  A venue-delayed
+        // tape with a DOCUMENTED expected delay (Alpaca PAPER `delayed_sip`,
+        // ~900s) may only become the AUTHORITATIVE venue price when it is
+        // actually usable: a FRESH retrieval AND no lag beyond
+        // `expectedDelaySec + delayToleranceSec` (`isQuoteFresh` → the
+        // delayed-tape rules).
+        //
+        // The expected ~900s print itself stays ACCEPTED — the delay is the
+        // venue, not staleness.  What is refused is a tape running beyond its
+        // SLA (excess delay) or a stale retrieval.  The closed-session nuance
+        // is NOT applied here: the policy staleness gate owns that honest
+        // "session closed" reason (`quote_delayed_tape_session_closed`), while
+        // this path only decides whether the tape may be called authoritative.
+        //
+        // Quotes with NO documented delay (e.g. the Tradier sandbox tape) keep
+        // the owner rule: the active execution venue's price is authoritative.
+        const documentedDelay =
+          typeof normalizedQuote.expectedDelaySec === "number" &&
+          Number.isFinite(normalizedQuote.expectedDelaySec);
+        if (documentedDelay && !isQuoteFresh(normalizedQuote, nowMs, maxAgeMs)) {
+          // UNUSABLE delayed tape: do NOT accept it as the authoritative venue
+          // price.  The observation is kept (the gate/UI can then report WHY
+          // it was refused) but it is explicitly NOT venue-authoritative, and
+          // it is not accepted here.  A symbol the delayed tape could not
+          // price stays missing — no realtime overlay may fill it on the
+          // execution path.
+          updateBestQuote(symbol, { ...normalizedQuote, venuePriceAuthoritative: false });
+          continue;
+        }
         normalizedQuote = stampVenueAuthoritative(normalizedQuote, ingestAt);
         updateBestQuote(symbol, normalizedQuote);
         result[symbol] = normalizedQuote;
@@ -1022,7 +1058,16 @@ export async function fetchFreshQuotesCascade(
                 companyName: data.companyName,
                 asOf: data.asOf,
                 provider: "alpaca-snapshot",
-                fetchedAt: stampIngest()
+                fetchedAt: stampIngest(),
+                // DELAYED-TAPE METADATA: the account-scoped `delayed_sip`
+                // snapshot carries the documented ~900s expected delay, so the
+                // consumer ages it with the delayed-tape rules instead of the
+                // realtime-stale bar.  Absent for every other feed.
+                ...(data.expectedDelaySec !== undefined && {
+                  expectedDelaySec: data.expectedDelaySec,
+                  delayToleranceSec: data.delayToleranceSec,
+                  venuePriceAuthoritative: data.venuePriceAuthoritative
+                })
               };
               updateBestQuote(symbol, q);
               acceptIfComplete(symbol, q);
