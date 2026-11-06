@@ -412,9 +412,43 @@ function priceNeedsLimit(): number {
 
 /** Max pages of App A's price-needs export read per run (each page is `priceNeedsLimit()` tickers). */
 function priceNeedsMaxPages(): number {
-  const v = Number(process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES ?? 4);
-  return Number.isFinite(v) && v >= 1 ? Math.min(Math.floor(v), 10) : 4;
+  const v = Number(process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES ?? 2);
+  return Number.isFinite(v) && v >= 1 ? Math.min(Math.floor(v), 10) : 2;
 }
+
+/**
+ * Cap on App A needs per run.  Needs go first in the share universe, so an unbounded read could
+ * fill the whole 2000-ticker cap and crowd out every monitored symbol, and would multiply the
+ * provider cascade and usage-monitor load per night.  The rotating cursor below spreads a larger
+ * backlog across nights instead.
+ */
+function priceNeedsTotalCap(): number {
+  const v = Number(process.env.CONGRESS_SHARE_PRICE_NEEDS_TOTAL_CAP ?? 1000);
+  return Number.isFinite(v) && v > 0 ? Math.min(Math.floor(v), maxDailyTickers()) : 1000;
+}
+
+/** Where the previous run stopped reading App A's keyset-ordered needs, so the next run resumes there. */
+const PRICE_NEEDS_CURSOR_KEY = "congress-share:priceNeedsCursor";
+
+/** Trust-boundary schema for one page of App A's price-needs export.  Rows are validated one by
+ *  one by the reader below (a bad row is dropped, not the page); only the envelope is strict. */
+const PriceNeedsPageSchema = z
+  .object({
+    tickers: z.array(z.unknown()).default([]),
+    spx: z
+      .object({
+        oldestTradeDate: z.string().nullable().optional(),
+        needsHistoryBefore: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .optional(),
+    summary: z.record(z.string(), z.number()).optional(),
+    pagination: z
+      .object({ nextCursor: z.string().nullable().optional() })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
 
 /** App A export path for tickers still lacking history for congressional performance. */
 const PRICE_NEEDS_PATH = "/api/export/price-needs";
@@ -440,6 +474,8 @@ export interface CongressPriceNeedsResponse {
     needsHistoryBefore?: string | null;
   };
   summary?: Record<string, number>;
+  /** Keyset position after the last page read (null when the listing was exhausted). */
+  nextCursor?: string | null;
 }
 
 /**
@@ -449,7 +485,8 @@ export interface CongressPriceNeedsResponse {
  */
 export async function fetchCongressPriceNeeds(
   limit: number = priceNeedsLimit(),
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  startCursor: string | null = null
 ): Promise<CongressPriceNeedsResponse> {
   const empty: CongressPriceNeedsResponse = { tickers: [] };
   const token = congressTradeToken();
@@ -459,14 +496,20 @@ export async function fetchCongressPriceNeeds(
   if (isCongressUpstreamBreakerTripped()) return empty;
   const timeoutMs = Number(process.env.CONGRESS_SHARE_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
   const maxPages = priceNeedsMaxPages();
+  const cap = priceNeedsTotalCap();
   const tickers: CongressPriceNeedTicker[] = [];
   const seen = new Set<string>();
   let spx: CongressPriceNeedsResponse["spx"];
   let summary: CongressPriceNeedsResponse["summary"];
-  let cursor: string | null = null;
+  const resumeFrom = startCursor && startCursor.trim() ? startCursor.trim().toUpperCase() : null;
+  let cursor: string | null = resumeFrom;
+  let wrapped = false;
+  let nextCursor: string | null = null;
   // App A pages this export by ticker (keyset, alphabetical).  Reading only the first page meant
   // the same first `limit` tickers were requested every night: any that ST could not price (stale
-  // tail, mutual-fund NAV not out yet) stayed at the head and starved everything after them.
+  // tail, mutual-fund NAV not out yet) or that never clear (never-priced names) stayed at the head
+  // and starved everything after them.  Resume where the last run stopped and wrap around once the
+  // listing ends, so a backlog larger than one night's budget is covered over successive nights.
   for (let page = 0; page < maxPages; page += 1) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -484,18 +527,28 @@ export async function fetchCongressPriceNeeds(
         console.error(`[congress-share] price-needs failed: HTTP ${res.status}`);
         break;
       }
-      const body = (await res.json()) as CongressPriceNeedsResponse & {
-        pagination?: { nextCursor?: string | null };
-      };
-      if (page === 0) {
-        spx = body?.spx;
-        summary = body?.summary;
+      const parsed = PriceNeedsPageSchema.safeParse(await res.json());
+      if (!parsed.success) {
+        console.error("[congress-share] price-needs response failed schema validation; ignoring this page");
+        break;
       }
-      const rows = Array.isArray(body?.tickers) ? body.tickers : [];
-      for (const t of rows) {
+      const body = parsed.data;
+      if (page === 0) {
+        spx = body.spx;
+        summary = body.summary;
+      }
+      let reachedStop = false;
+      for (const raw of body.tickers) {
+        const t = raw as Record<string, unknown> | null;
         if (!t || typeof t.ticker !== "string" || !t.ticker.trim()) continue;
         const ticker = normalizeSymbol(t.ticker);
-        if (!ticker || seen.has(ticker)) continue;
+        if (!ticker) continue;
+        // Wrapped around: stop once we are back past where this lap began.
+        if (wrapped && resumeFrom && ticker > resumeFrom) {
+          reachedStop = true;
+          break;
+        }
+        if (seen.has(ticker)) continue;
         seen.add(ticker);
         tickers.push({
           ticker,
@@ -503,10 +556,31 @@ export async function fetchCongressPriceNeeds(
           needsDeepHistory: t.needsDeepHistory === true,
           reasons: Array.isArray(t.reasons) ? t.reasons.map(String) : undefined
         });
+        if (tickers.length >= cap) break;
       }
-      const next = body?.pagination?.nextCursor;
-      cursor = typeof next === "string" && next.trim() && next !== cursor ? next : null;
-      if (!cursor || tickers.length >= maxDailyTickers()) break;
+      const next = body.pagination?.nextCursor;
+      const pageNext = typeof next === "string" && next.trim() && next !== cursor ? next : null;
+      if (reachedStop) {
+        nextCursor = null; // a full lap is done; the next run starts from the head again
+        break;
+      }
+      if (tickers.length >= cap) {
+        // Resume right after the last ticker taken, not at the page end, so none are skipped.
+        nextCursor = tickers[tickers.length - 1]!.ticker;
+        break;
+      }
+      if (!pageNext) {
+        if (resumeFrom && !wrapped) {
+          wrapped = true;
+          cursor = null;
+          nextCursor = null;
+          continue;
+        }
+        nextCursor = null;
+        break;
+      }
+      cursor = pageNext;
+      nextCursor = pageNext;
     } catch (err) {
       console.error("[congress-share] price-needs error:", err instanceof Error ? err.message : err);
       break; // keep the pages already read; a later page failing must not discard them
@@ -514,7 +588,7 @@ export async function fetchCongressPriceNeeds(
       clearTimeout(timer);
     }
   }
-  return { tickers: tickers.slice(0, maxDailyTickers()), spx, summary };
+  return { tickers, spx, summary, nextCursor };
 }
 
 /**
@@ -1792,6 +1866,8 @@ export interface RunCongressDailyShareOptions {
    * screener refs and fundamentals/analyst datasets the nightly run already delivered.
    */
   priceOnly?: boolean;
+  /** Symbols to send with full history even though this run read no App A needs (the catch-up). */
+  deepSymbols?: string[];
   /** Opaque durable claim supplied by the outer admin guard; background callers omit it. */
   operationLeaseClaim?: OperationLeaseClaim;
 }
@@ -1859,7 +1935,9 @@ export async function runCongressDailyShare(
     };
     if (!congressTradeToken()) return { ok: false, skipped: true, reason: "no-token", ...empty };
 
-    const customUniverse = Array.isArray(options.symbols) && options.symbols.length > 0;
+    // A price-only pass is never the scheduled run, even with an empty symbol list (SPX only).
+    const customUniverse =
+      (Array.isArray(options.symbols) && options.symbols.length > 0) || options.priceOnly === true;
     if (!options.force && !customUniverse && !isCongressDailyShareDue(now)) {
       return { ok: false, skipped: true, reason: "not-due", ...empty };
     }
@@ -1944,7 +2022,8 @@ async function runCongressDailyShareUnlocked(
     sent: { spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0, fundamentals: 0, analyst: 0 }
   };
   if (!congressTradeToken()) return { ok: false, skipped: true, reason: "no-token", ...empty };
-  const customUniverse = Array.isArray(options.symbols) && options.symbols.length > 0;
+  const customUniverse =
+    (Array.isArray(options.symbols) && options.symbols.length > 0) || options.priceOnly === true;
   // Recheck after durable acquisition: another process may have completed and advanced the daily
   // marker after this caller's cheap pre-check but before it won the lease.
   if (!options.force && !customUniverse && !isCongressDailyShareDue(now)) {
@@ -1980,18 +2059,31 @@ async function runCongressDailyShareUnlocked(
   let needsResp: CongressPriceNeedsResponse = { tickers: [] };
   if (shouldFetchNeeds) {
     throwIfOperationLeaseCancelled(operationLeaseSignal);
-    needsResp = await fetchCongressPriceNeeds(priceNeedsLimit());
+    // Resume where the previous run stopped reading App A's keyset-ordered needs (wrapping around),
+    // so a backlog bigger than one night's cap, or names that never clear, cannot starve the rest.
+    const resumeCursor = getInternalSetting<string>(PRICE_NEEDS_CURSOR_KEY) ?? null;
+    needsResp = await fetchCongressPriceNeeds(priceNeedsLimit(), fetch, resumeCursor);
+    if (needsResp.tickers.length > 0) {
+      try {
+        if (needsResp.nextCursor) setInternalSetting(PRICE_NEEDS_CURSOR_KEY, needsResp.nextCursor);
+        else deleteInternalSetting(PRICE_NEEDS_CURSOR_KEY);
+      } catch {
+        /* best-effort: worst case the next run starts from the head again */
+      }
+    }
   }
   const needTickers = needsResp.tickers.map((t) => t.ticker).filter(Boolean);
-  // Full history for App A-flagged deep needs (old trades) and when fullHistory is on.
-  const deepNeedSet = new Set(
-    needsResp.tickers.filter((t) => t.needsDeepHistory === true).map((t) => t.ticker)
-  );
+  // Full history for App A-flagged deep needs (old trades) and when fullHistory is on.  A catch-up
+  // pass has no needs read of its own, so it is handed the deep subset it must keep honoring.
+  const deepNeedSet = new Set([
+    ...needsResp.tickers.filter((t) => t.needsDeepHistory === true).map((t) => t.ticker),
+    ...(options.deepSymbols ?? []).map((symbol) => normalizeSymbol(symbol)).filter(Boolean),
+  ]);
 
   let universe: string[];
   if (customUniverse && !options.fromAppANeeds) {
     // Admin targeted symbols only — do not merge App A needs (caller is explicit).
-    universe = Array.from(new Set(options.symbols!.map(normalizeSymbol).filter(Boolean))).slice(
+    universe = Array.from(new Set((options.symbols ?? []).map(normalizeSymbol).filter(Boolean))).slice(
       0,
       maxDailyTickers()
     );
@@ -2019,7 +2111,11 @@ async function runCongressDailyShareUnlocked(
   let staleSpxWithheld = false;
   throwIfOperationLeaseCancelled(operationLeaseSignal);
   try {
-    const spxAll = ohlcBarsToCloses(await fetchDailyOHLC("^GSPC", now));
+    const spxAll = ohlcBarsToCloses(
+      options.priceOnly === true
+        ? await fetchDailyOHLC("^GSPC", now, undefined, { bypassMemoryCache: true })
+        : await fetchDailyOHLC("^GSPC", now)
+    );
     if (spxAll.length > 0 && !closesCoverLatestSession(spxAll, now)) {
       staleSpxWithheld = true;
     } else {
@@ -2070,7 +2166,14 @@ async function runCongressDailyShareUnlocked(
       await mapPool(symbols, concurrency, async (symbol) => {
         throwIfOperationLeaseCancelled(operationLeaseSignal);
         try {
-          return freshEntry(symbol, await fetchDailyOHLC(symbol, now));
+          // The catch-up retries tickers whose stale tail sits in the in-process cache (until the
+          // next open, over a weekend), so it must bypass that cache or it never asks a provider.
+          return freshEntry(
+            symbol,
+            options.priceOnly === true
+              ? await fetchDailyOHLC(symbol, now, undefined, { bypassMemoryCache: true })
+              : await fetchDailyOHLC(symbol, now)
+          );
         } catch {
           return null;
         }
@@ -2251,9 +2354,35 @@ async function runCongressDailyShareUnlocked(
   // continues the existing one.  Only a successful or fully-withheld run changes the state.
   if (ok || posts === 0) {
     if (advancesDailyMarker) {
-      recordStaleCatchup(now, staleTickers, false);
+      recordStaleCatchup(
+        now,
+        {
+          tickers: staleTickers,
+          deep: staleTickers.filter((ticker) => deepNeedSet.has(ticker)),
+          spx: staleSpxWithheld
+        },
+        false
+      );
     } else if (options.priceOnly === true) {
-      recordStaleCatchup(now, staleTickers, true);
+      // Keep every ticker that was NOT actually delivered fresh, not only those re-observed as
+      // stale: a ticker whose refetch threw or came back with no bars is neither sent nor noted
+      // stale, and dropping it here would end its retries after one transient provider error.
+      const delivered = new Set(priceEntries.map((entry) => entry.ticker));
+      const remaining = (options.symbols ?? [])
+        .map((symbol) => normalizeSymbol(symbol))
+        .filter((symbol) => {
+          const canonical = canonicalMarketDataSymbol(symbol);
+          return Boolean(canonical) && !delivered.has(canonical as string);
+        });
+      recordStaleCatchup(
+        now,
+        {
+          tickers: remaining,
+          deep: remaining.filter((ticker) => deepNeedSet.has(ticker)),
+          spx: staleSpxWithheld
+        },
+        true
+      );
     }
   }
   try {
@@ -2295,9 +2424,26 @@ interface StaleCatchupState {
   /** Latest completed ET session the withheld tails were short of. */
   session: string;
   tickers: string[];
+  /** The subset of `tickers` App A flagged needsDeepHistory (retried with full history). */
+  deep: string[];
+  /** The S&P-500 series was withheld stale (it is retried even when no ticker was). */
+  spx: boolean;
   /** Catch-up passes already started for this cycle (counted before the pass runs). */
   attempts: number;
   lastAttemptMs: number;
+}
+
+/** What is still owed to App A; the next catch-up pass sends exactly this. */
+interface StaleCatchupPending {
+  tickers: readonly string[];
+  deep?: readonly string[];
+  spx?: boolean;
+}
+
+/** Bound on one pass: the nightly stale set can be large, and every pass re-walks the provider cascade. */
+function staleCatchupMaxTickers(): number {
+  const v = Number(process.env.CONGRESS_SHARE_CATCHUP_MAX_TICKERS ?? 500);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : 500;
 }
 
 function staleCatchupMaxAttempts(): number {
@@ -2316,13 +2462,14 @@ export function getStaleCatchupState(): StaleCatchupState | null {
     !raw ||
     typeof raw.session !== "string" ||
     !Array.isArray(raw.tickers) ||
-    raw.tickers.length === 0 ||
     !Number.isFinite(raw.attempts) ||
     !Number.isFinite(raw.lastAttemptMs)
   ) {
     return null;
   }
-  return raw;
+  const spx = raw.spx === true;
+  if (raw.tickers.length === 0 && !spx) return null;
+  return { ...raw, spx, deep: Array.isArray(raw.deep) ? raw.deep : [] };
 }
 
 /**
@@ -2332,16 +2479,21 @@ export function getStaleCatchupState(): StaleCatchupState | null {
  * night.  Persist them so `runCongressStaleCatchupIfDue` can retry exactly that set later.
  * `continuing` keeps the attempt count of the cycle in progress; otherwise a fresh cycle starts.
  */
-export function recordStaleCatchup(now: number, tickers: readonly string[], continuing: boolean): void {
+export function recordStaleCatchup(now: number, pending: StaleCatchupPending, continuing: boolean): void {
   try {
-    if (tickers.length === 0) {
+    const spx = pending.spx === true;
+    if (pending.tickers.length === 0 && !spx) {
       deleteInternalSetting(STALE_CATCHUP_KEY);
       return;
     }
     const prior = continuing ? getStaleCatchupState() : null;
+    const tickers = Array.from(new Set(pending.tickers)).slice(0, staleCatchupMaxTickers());
+    const kept = new Set(tickers);
     const state: StaleCatchupState = {
       session: latestCompletedTradingSessionEtKey(now),
-      tickers: Array.from(new Set(tickers)).slice(0, maxDailyTickers()),
+      tickers,
+      deep: Array.from(new Set(pending.deep ?? [])).filter((ticker) => kept.has(ticker)),
+      spx,
       attempts: prior?.attempts ?? 0,
       lastAttemptMs: now
     };
@@ -2378,11 +2530,32 @@ export async function runCongressStaleCatchupIfDue(
     if (!isCongressShareAutoEnabled()) return null;
     if (!isCongressStaleCatchupDue(now)) return null;
     if (staleCatchupInFlight) return staleCatchupInFlight;
+    // runCongressDailyShare coalesces onto any run already in flight and ignores this pass's symbols,
+    // so do not start (or spend an attempt) while the nightly or an admin run is active.
+    if (activeDailySharePromise) return null;
     const state = getStaleCatchupState();
     if (!state) return null;
+    // Count the attempt before the pass so a throwing pass can never retry on every scheduler tick;
+    // refund it below if the pass turns out not to have run (lease busy).
     setInternalSetting(STALE_CATCHUP_KEY, { ...state, attempts: state.attempts + 1, lastAttemptMs: now });
-    const run = runCongressDailyShare({ now, symbols: state.tickers, priceOnly: true })
-      .then((result) => ("skipped" in result && result.skipped ? null : (result as CongressDailyShareSummary)))
+    const run = runCongressDailyShare({
+      now,
+      symbols: state.tickers,
+      deepSymbols: state.deep,
+      priceOnly: true
+    })
+      .then((result) => {
+        if ("skipped" in result && result.skipped) {
+          try {
+            const current = getStaleCatchupState();
+            if (current) setInternalSetting(STALE_CATCHUP_KEY, { ...current, attempts: state.attempts });
+          } catch {
+            /* best-effort refund */
+          }
+          return null;
+        }
+        return result as CongressDailyShareSummary;
+      })
       .catch((err) => {
         console.error("[congress-share] stale catch-up error:", err);
         return null;
