@@ -125,7 +125,6 @@ beforeEach(() => {
   const insertRollup = getDb()
     .prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, 'rollup-active', ?)");
   insertRollup.run("usage_monitor_replay:rag_usage:rollup_cutover:v1", now);
-  insertRollup.run("usage_monitor_replay:provider_usage_outbox:rollup_cutover:v1", now);
 });
 
 afterEach(() => {
@@ -534,6 +533,52 @@ describe("usage monitor durable replay", () => {
     const second = await replay.runUsageMonitorReplay({ nowMs });
     expect(second.rag).toEqual({ sent: 1, complete: true, failed: false });
     expect(captured.flatMap((request) => request.body.events)[0]).toMatchObject({ requests: 1 });
+  });
+
+  it("seeds before the first network await, so rows written during the LLM replay are not swallowed", async () => {
+    getDb().prepare("DELETE FROM settings WHERE key LIKE '%rollup_cutover%'").run();
+    insertLlm({ id: "llm-await", createdAt: "2026-07-10T20:00:00.000Z", costUsd: 0.01 });
+    insertRag({ id: "rag-seeded", createdAt: "2026-07-10T20:01:00.000Z", costUsd: 0.001 });
+    const captured: CapturedRequest[] = [];
+    let inserted = false;
+    push.__setUsageMonitorFetch((async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as CapturedRequest["body"];
+      captured.push({ body, rawBody: String(init?.body ?? "{}") });
+      if (!inserted) {
+        inserted = true;
+        // Lands while the LLM POST awaits its ACK: must still be delivered by the rollup.
+        insertRag({ id: "rag-during", createdAt: "2026-07-10T20:02:00.000Z", costUsd: 0.002 });
+      }
+      return ack(body.events.length);
+    }) as unknown as typeof fetch);
+
+    const result = await replay.runUsageMonitorReplay({ nowMs: Date.parse("2026-07-10T21:00:00.000Z") });
+
+    expect(result.rag).toEqual({ sent: 1, complete: true, failed: false });
+    const ragEvents = captured.flatMap((request) => request.body.events).filter((event) => event.service === "rag");
+    expect(ragEvents).toHaveLength(1);
+    expect(ragEvents[0]).toMatchObject({ requests: 1, windowStart: "2026-07-10T20:00:00.000Z" });
+    expect(ragEvents[0]!.costUsd).toBeCloseTo(0.002, 9);
+  });
+
+  it("does not seed the provider lane: it never had a live push, so its backlog is delivered", async () => {
+    const reserved = reserveProviderDispatch({
+      provider: "fmp",
+      operation: "income-statement",
+      credentialRef: "fmp-key:test",
+      userId: "local",
+      now: "2026-07-10T12:00:00.000Z",
+    });
+    expect(reserved.admitted).toBe(true);
+    if (!reserved.admitted) throw new Error("Expected provider reservation admission.");
+    markProviderDispatchStarted(reserved.attemptId, "2026-07-10T12:00:01.000Z");
+    const captured: CapturedRequest[] = [];
+    push.__setUsageMonitorFetch(fetchStub(captured));
+
+    const result = await replay.runUsageMonitorReplay({ nowMs: Date.now() + 3_600_000 });
+
+    expect(result.provider.sent).toBe(1);
+    expect(captured.flatMap((request) => request.body.events).some((e) => e.service === "provider-dispatch")).toBe(true);
   });
 
   it("advances the provider watermark past an all-retired page without posting", async () => {

@@ -431,16 +431,22 @@ function rollupMs(override: number | undefined, envName: string, fallback: numbe
   return Number.isFinite(fromEnv) && fromEnv > 0 ? Math.floor(fromEnv) : fallback;
 }
 
-function rollupRoleKey(lane: "rag" | "provider"): string {
+function rollupRoleKey(lane: "rag"): string {
   return `usage_monitor_replay:${REPLAY_TABLES[lane]}:rollup_cutover:v1`;
 }
 
 /**
- * First start of the rollup: rows already delivered per-row (live push, or earlier replay) must not
- * be counted again inside a first window, so seed the watermark to the newest existing row.  Same
+ * First start of the RAG rollup: rag rows were live-pushed per-row, so rows already delivered must
+ * not be counted again inside a first window; seed the watermark to the newest existing row.  Same
  * bounded-loss trade the v2 identity cutover made (owner-accepted), preferred to duplicate totals.
+ * Runs synchronously right after the v2 cutover and BEFORE any await, so rows written while the LLM
+ * replay awaits the network are not swallowed by a later seed.  The provider-dispatch lane is NOT
+ * seeded: it never had a live push, so rows past its old watermark were never delivered and the
+ * rollup is their first (and only) copy.  This assumes the old build has stopped (Coolify stops the
+ * old container before starting the new one); an old process still live-pushing rag rows would be
+ * double counted for the overlap.
  */
-function prepareRollupCutover(lane: "rag" | "provider"): void {
+function prepareRollupCutover(lane: "rag"): void {
   const database = getDb();
   const watermarkKey = USAGE_MONITOR_REPLAY_WATERMARK_KEYS[lane];
   const markerKey = rollupRoleKey(lane);
@@ -776,6 +782,7 @@ async function executeUsageMonitorReplay(
     // This synchronous BEGIN IMMEDIATE is deliberately the first DB action in the configured lane.
     // All three identity boundaries exist before reconciliation, event construction, or network I/O.
     cutovers = prepareV2ReplayCutovers();
+    prepareRollupCutover("rag");
   } catch {
     const failed = { sent: 0, complete: false, failed: true };
     return { configured: true, llm: failed, rag: failed, provider: failed, callVolume: failed };
@@ -802,8 +809,6 @@ async function executeUsageMonitorReplay(
   let rag: LedgerReplayResult;
   let provider: LedgerReplayResult;
   try {
-    prepareRollupCutover("rag");
-    prepareRollupCutover("provider");
     rag = await replayRolledLane({
       table: REPLAY_TABLES.rag,
       watermarkKey: USAGE_MONITOR_REPLAY_WATERMARK_KEYS.rag,
